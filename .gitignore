@@ -1,0 +1,11 @@
+# build output
+/bin/
+*.test
+*.out
+
+# local scratch (overlay upper/work, rootfs staging) — never commit
+/scratch/
+/test/rootfs/
+
+# editor / OS
+.DS_Store
