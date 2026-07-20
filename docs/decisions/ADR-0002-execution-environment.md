@@ -55,19 +55,8 @@ the machine can't reach).
 | runsc systrap, no KVM, guest uid=0 | arm64 | guest reports `4.19.0-gvisor` |
 | overlayfs: CoW correct, upper is a plain host dir, re-mount byte-identical | amd64 (ECS) + arm64 | fresh workdir required per (re-)mount; copy-up files root-owned (design detail → rootfs-overlay D5) |
 | pinned runsc flags launch + exec `/bin/sh` | arm64 | all five pins are **global** flags (before the `run` subcommand); config `root.path` = the externally-merged overlay dir |
-| netns/veth host-dials-guest by veth IP; fresh netns → new IP | amd64 (ECS) + arm64 | engine creates netns+veth and assigns the guest IP; `ip netns del` cascades the peer veth |
-| **netstack-terminated transport**: host dials an in-guest listener through the sentry netstack (`--network=sandbox`) | arm64 | proven sentry-terminated (`ss` shows zero kernel listeners while host gets responses); mechanism in §5.A / transport.md D4.1 |
+| network: host dials an in-guest listener through the sentry netstack by veth IP; fresh netns → new IP | amd64 (ECS) + arm64 | sentry-terminated (`ss` shows zero kernel listeners while host gets responses); `ip netns del` cascades the peer veth; mechanism in §5.A |
 | §4.4-A reconcile: enumerate + idempotent teardown of placement resources | arm64 | primitives + reclaim order in open-decisions §4.4-A |
-
-**Network mechanism (the crux for local_runsc).** `--network=sandbox` **adopts a
-pre-existing netns, it does not build one**: the engine creates the netns + veth
-and assigns the guest IP, then passes the netns via OCI
-`linux.namespaces[type=network].path`; the sentry joins it and, at boot,
-**strips the kernel-side L3 address** into its own netstack (post-boot
-`ip netns exec <ns> ip addr` shows no global addr; the veth *link* persists).
-Consequences: the engine **knows the guest IP because it assigned it** — no
-post-boot discovery, and `runsc state` exposes no IP; a *reused* netns needs the
-guest addr re-applied before relaunch (a fresh netns per resume, per §3.3, sidesteps this).
 
 **Privilege.** `--network=sandbox` rejects `--rootless`, so the
 orchestrator/launcher needs root (or CAP_NET_ADMIN+CAP_SYS_ADMIN) to materialize
