@@ -10,9 +10,9 @@
 
 | # | Plan | Capability delivered | Anchors |
 | --- | --- | --- | --- |
-| **M1** | [`M1-sandbox-lifecycle.md`](./M1-sandbox-lifecycle.md) | Single sandbox `create / pause / resume / destroy` end-to-end (walking-skeleton technique); CAS + transition-lock **shape** and cold-start failure **unwind** proven, not deep-tested | §3.3 · §4 · §5.A · §5.B · §5.E |
-| **M2** | [`M2-persistent-store-invariants.md`](./M2-persistent-store-invariants.md) | Persistent store + the three §4.4 invariants in **depth**: atomic commit + outbox, true concurrency stress, startup crash-reconciliation (backend = ADR-0004; periodic reconciliation deferred to M3) | §4.4 |
-| **M3** | *(planned)* | Reaper + health quadrant (two-tier liveness × connection activity) | §4.3 |
+| **M1** ✅ | [`M1-sandbox-lifecycle.md`](./M1-sandbox-lifecycle.md) | Single sandbox `create / pause / resume / destroy` end-to-end (walking-skeleton technique); CAS + transition-lock **shape** and cold-start failure **unwind** proven, not deep-tested | §3.3 · §4 · §5.A · §5.B · §5.E |
+| **M2** ✅ | [`M2-persistent-store-invariants.md`](./M2-persistent-store-invariants.md) | Persistent store + the three §4.4 invariants in **depth**: atomic commit + outbox, true concurrency stress, startup crash-reconciliation (backend = ADR-0004; periodic reconciliation deferred to M3) | §4.4 |
+| **M3** | *(next)* | Reaper + health quadrant (two-tier liveness × connection activity) | §4.3 |
 | **M4** | *(planned)* | Volume: mount table, exclusive lease, direct-write regime | §5.C |
 | **M5** | *(planned)* | Network egress data plane + layered deny-set + credential injection (**security-critical**) | §5.D · §2.4 |
 | **M6** | *(planned)* | Promote + layered Templates + refcount GC | §5.B · §4.3 |

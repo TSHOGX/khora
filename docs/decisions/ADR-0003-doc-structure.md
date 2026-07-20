@@ -22,7 +22,13 @@ Three sibling doc trees under `docs/`, each defined by a different lifecycle:
   Forward-looking, **expires as shipped**. Named for the capability delivered,
   not the technique used.
 - **`docs/decisions/`** — ADRs: one-time tool/environment/process choices.
-  Immutable once accepted.
+  **The decision is immutable** — reversing it is a *new* ADR that supersedes,
+  never an in-place rewrite of the old one. But an ADR's **prose may be corrected
+  for factual accuracy** (a wrong cross-reference, phrasing that named an
+  in-flight milestone as if unshipped, a superseded machine fact) — that keeps the
+  record true to the decision it made, and is not a decision change. The test:
+  does the edit alter *what was decided or why*? If yes → new ADR. If it only
+  fixes a stale fact around an unchanged decision → correct in place.
 
 `CLAUDE.md` lives at the engine root (Claude Code auto-loads it there) and
 encodes the resulting working rules.

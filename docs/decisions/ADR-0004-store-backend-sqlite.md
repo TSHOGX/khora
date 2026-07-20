@@ -47,4 +47,4 @@ The one publish algorithm is written once against the interface; swapping SQLite
 bbolt (or anything else) must never edit that algorithm. And per ADR-0001's caveat, a
 green build proves nothing about the §4.4 invariants — the atomic-commit and
 crash-reconciliation behavior is proven by the M2 fault-injection tests (plan §6
-B1–B6), not by the type system.
+B1–B7), not by the type system.

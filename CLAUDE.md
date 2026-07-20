@@ -23,7 +23,7 @@ implementation to justify anything.
 | `docs/spec/deep-dives/` | Single-topic design rationale hung under a § (the *why* / falsification / rejected options). |
 | `docs/spec/open-decisions.md` | Register of **unsettled** design questions. |
 | `docs/plans/` | One file per milestone, `M<N>-<capability>.md`: forward scope + acceptance + out-of-scope. **Expire as shipped.** Ladder index in `docs/plans/README.md`. |
-| `docs/decisions/` | ADRs: one-time **tool / environment / process** choices (why Go, why OrbStack, validation matrix). Immutable once accepted. |
+| `docs/decisions/` | ADRs: one-time **tool / environment / process** choices (why Go, why OrbStack, validation matrix). The **decision** is immutable — reversing it is a *new* superseding ADR, never an in-place rewrite; but the prose **may be corrected for factual accuracy** (stale cross-ref, milestone named as unshipped, superseded machine fact) so long as the edit doesn't alter *what was decided or why*. |
 | `cmd/` `internal/` `test/` | The code, implementing the spec. |
 
 **Relationship rule.** The spec is the **best current statement of intent**, not

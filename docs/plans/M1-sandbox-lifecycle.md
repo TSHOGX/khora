@@ -1,5 +1,9 @@
 # M1 — 单沙箱生命周期(create / pause / resume / destroy 端到端)
 
+> **✅ SHIPPED — 历史记录,非活动计划。** 本里程碑已交付并过评审门;竖切在真机 runsc 上 A1–A10 全绿。
+> 引擎"现在是什么"以 `docs/spec/` 为准,本文只留作当初怎么切这一刀的前瞻记录(`docs/plans/README.md`
+> 的 expire-as-shipped 纪律)。后续里程碑不改本文。
+
 > **这份文档是什么。** engine 的 **M1 前瞻计划**——只回答四件事:这一刀切到哪(scope)、
 > 开工前要先备好什么(Definition of Ready)、按什么次序开工(risk-first 分解)、怎么算通过
 > (acceptance)。架构规格在 `docs/spec/`(§1–§6),与本文冲突**不就地调和**——按 `CLAUDE.md`
@@ -92,8 +96,9 @@ M1 用两种手法,作用在两个不同层,别混:
 无 §5.D 策略面。这落在 `local_runsc` provider 的 `Launch` 内(placement 的一部分),`SteeringSpec` 恒空。
 「最简 netns 可达」与「egress 强制」是两件事,M1 只做前者,后者整体是 M5 的安全关键工作。
 
-> **`store.Memory` 是脚手架,不是设计**:M2 落 SQLite/bbolt + §4.4-C 原子提交契约时按同一 `store.Store`
-> 接口替换,CAS 形状 M1 已立对(见 §4),上层不改。
+> **`store.Memory` 站位 M2 的持久后端**:M2 落 SQLite(ADR-0004)+ §4.4-C 原子提交契约时按同一
+> `store.Store` 接口替换,CAS 形状 M1 已立对(见 §4),上层不改。(`store.Memory` 本身 M2 保留为该
+> Behavior seam 的第二实现,供 L1 单测,不删——非一次性脚手架。)
 
 ---
 

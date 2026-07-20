@@ -64,6 +64,7 @@ placement. The **sentry itself stays unprivileged** (pillar ② intact); this is
 deployment caveat on §1.1 "runs in CI runner / inside a container" — that
 environment must grant those caps.
 
-**Arch scope.** ECS validations were amd64; `sbx` is arm64, so M1 re-confirms
-overlay + netns on a *second* architecture (a plus). amd64 re-validation before
-production is an environment check (Go cross-compiles cleanly), **out of M1 scope**.
+**Arch scope.** The earlier substrate validations were amd64; `sbx` is arm64, so
+the milestone acceptance suites re-confirm overlay + netns on a *second*
+architecture (a plus). amd64 re-validation before production is an environment
+check (Go cross-compiles cleanly), out of scope for the current milestone work.
