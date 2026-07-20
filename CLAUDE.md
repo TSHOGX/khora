@@ -19,16 +19,42 @@ implementation to justify anything.
 
 | Path | Holds |
 | --- | --- |
-| `docs/spec/` | Converged architecture, §1–§6. Source of truth for *what the engine should be*. Slow-moving. |
+| `docs/spec/` | Converged architecture, §1–§6. The best current statement of *what the engine should be* — authoritative for intent, but revisable (see Relationship rule). Slow-moving. |
 | `docs/spec/deep-dives/` | Single-topic design rationale hung under a § (the *why* / falsification / rejected options). |
 | `docs/spec/open-decisions.md` | Register of **unsettled** design questions. |
 | `docs/plans/` | One file per milestone, `M<N>-<capability>.md`: forward scope + acceptance + out-of-scope. **Expire as shipped.** Ladder index in `docs/plans/README.md`. |
 | `docs/decisions/` | ADRs: one-time **tool / environment / process** choices (why Go, why OrbStack, validation matrix). Immutable once accepted. |
 | `cmd/` `internal/` `test/` | The code, implementing the spec. |
 
-**Relationship rule.** On *intent*, **spec wins over code**. But code is the
-reality check — when implementation proves the spec wrong or underspecified,
-**fix the spec in the same change**. Never let spec and code silently drift.
+**Relationship rule.** The spec is the **best current statement of intent**, not
+scripture. It captures what we mean the engine to be *at this phase*, and it will
+keep changing as we iterate — it can be questioned and corrected. What it must
+**not** be is edited casually as a side effect of a code change.
+
+So: **the spec is not automatically right, and neither is the code. A divergence
+between them is a signal to STOP, not to reconcile in passing.** When code and
+spec disagree (implementation hits a wall, an invariant doesn't hold, the spec
+turns out underspecified or plain wrong):
+
+1. **Stop and analyze** — is the spec expressing the right intent and the code
+   wrong, or did implementation teach us the spec's intent itself is wrong /
+   incomplete?
+2. **Decide which side moves** — fix the code to meet the intent, OR revise the
+   spec as a **deliberate, separate** decision (with its rationale; if it's a
+   real design shift, that's a deep-dive / open-decisions / ADR moment, not a
+   one-liner buried in a feature commit).
+3. **Then adjust promptly** — don't leave them diverged, and don't let code
+   silently bend to a spec you suspect is wrong just because "spec wins."
+
+The anti-patterns, both rejected: **(a) contorting code to satisfy a spec you
+haven't stopped to question**, and **(b) rewriting the spec to rubber-stamp
+whatever the code happened to do.** Both are silent drift. The discipline is the
+conscious stop in between.
+
+(Narrow, easy case: a pure **vocabulary** mismatch — code and spec using
+different names for the same thing — isn't a design divergence; just align the
+name on one side in the same change.)
+
 "Settled + built" and "settled, not yet built" are *both* spec; `plans/` tracks
 which is which.
 
