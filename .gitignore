@@ -6,6 +6,7 @@
 # local scratch (overlay upper/work, rootfs staging) — never commit
 /scratch/
 /test/rootfs/
+/.spike/
 
 # editor / OS
 .DS_Store

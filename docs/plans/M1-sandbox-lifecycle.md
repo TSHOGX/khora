@@ -176,13 +176,14 @@ canonical 链(D5.1)是 ①–⑦,`create` 与 `resume` 共享,只差前缀与失
 
 ### 6.2 真正的开工前置(genuine gates)
 
-baseline 之外,这三件不备好、任务 A 就会在流沙上——踩起来贵、又最容易漏:
+baseline 之外这三件是踩起来最贵、最易漏的前置。**均已由 M1 前的并行 spike 在 arm64 `sbx` 上实测通过**
+(下表「状态」列),spike 产出的复用骨架直接喂给任务 A/B/C——故它们现在是「有活规格的门」,不是「待证的门」:
 
-| # | 前置 | 为什么必须先钉 | 判定 |
-| --- | --- | --- | --- |
-| R1 | **最简 guest rootfs + 一个 Template 目录**(本机还没有——只有 `internal/rootfs` 包,无实际 rootfs) | 竖切的 lower 底座。从本机自身 userland 构建(ADR-0002「No Docker」),**必须复刻 usrmerge**(`/bin`→`usr/bin`、`/lib`→`usr/lib`;本机自身就是这个布局,照抄)——漏了 guest 二进制加载即失败 | 一个 rootfs 目录,runsc 能拿它当 lower 冷启、guest 内能 `exec /bin/sh` |
-| R2 | **可重复的清理脚本(teardown)** | 竖切反复跑会留孤儿 netns/veth/overlay-mount/cgroup/runsc 容器;不能清就没法重复验证,也预演了 §4.4-A 的对账语义 | 一条脚本枚举并拆掉本机由本引擎建的 netns/veth/overlay-mount/runsc 容器,幂等 |
-| R3 | **flag 契约冒烟**(承 §6.1 runsc 已在) | §5.A 钉死整套 flag、不吃默认;默认跨版本漂移,§5.B 可移性不能建在「默认不变」上 | `--platform=systrap` `--network=sandbox` `--overlay2=none --file-access=shared` `--systemd-cgroup=false` 组合能拉起一个最简容器 |
+| # | 前置 | 状态(实测)+ 复用骨架 |
+| --- | --- | --- |
+| R1 | **最简 guest rootfs + Template 目录**(本机原先只有 `internal/rootfs` 包、无实际 rootfs) | ✅ 从本机 userland 构建、**复刻 usrmerge**(`/bin`→`usr/bin`、`/lib`→`usr/lib`)通过。**本机 `/bin/sh`=dash**(非 busybox),只需 `libc.so.6` + `ld-linux-aarch64.so.1`;**无 coreutils**——M1 §9 断言用 host 侧 `fs.write/read` + `sh -c 'echo'`,不依赖 guest `cat`,故够用,但 spike 勿假设 guest 内 coreutils。ELF interpreter 只因 `/lib→usr/lib` 才解析得到——漏 usrmerge 即加载失败(R1 警告实锤) |
+| R2 | **幂等 teardown / §4.4-A 对账原语** | ✅ 脚本存在、幂等、清掉真实泄漏的孤儿。5 类枚举原语 + 反向依赖回收序(runsc→overlay→veth→netns→cgroup)已进 `open-decisions.md` §4.4-A 行。**铁律:overlay 回收按 target 路径 scope,绝不按 `-t overlay` 类型**(否则误碰 OrbStack 系统 overlay);引擎须 pin 一个 canonical runsc `--root`(错 root 静默列空) |
+| R3 | **flag 契约冒烟** | ✅ 五个 pin 全是 **global flag**(在 `run` 子命令之前),guest 报 `4.19.0-gvisor`、uid=0;config `root.path` = 引擎在外拼好的 merged overlay 目录。骨架:`sudo runsc --root=<S> --platform=systrap --network=sandbox --overlay2=none --file-access=shared --systemd-cgroup=false run --bundle=<B> <cid>`。**须 root**(`--network=sandbox` 拒 `--rootless`;本机 passwordless sudo)。**overlay 挂着时 lower(Template)严格不可变**——挂载中改 lower 会毁 merged 视图(任务 B 留意) |
 
 > **DoH DNS pin(本机已在,构建 rootfs 时留意)。** macOS host 的 VPN 劫持全部明文 DNS(ADR-0002),本机靠
 > `/etc/hosts` 里的 `# sbx-doh-pin` 块兜底(已存在)。M1 沙箱内 network=none,**guest 不出网**,故这条主要
@@ -197,6 +198,12 @@ R1–R3 各写成 `test/` 下一个可重跑的 preflight 检查,任务 F 的 e2
 原则:**最不确定的集成先打**。M1 的风险几乎全在 substrate 集成侧(overlay→runsc→guest 拓扑→netns
 transport→Health),而 mediator / store 是低集成风险的编排逻辑。故先用一条**手工 spike(§2)**一次性
 retire 掉 substrate 集成风险,再自底向上把各 seam 落成真实现,最后由 mediator 串起、e2e 封口。
+
+> **§6 的四条 spike 已 retire 掉各段的**单点**集成风险(overlay、runsc flag、netns 可达、teardown),
+> 但**留了一个 spike 没合起来验的接缝——任务 A 的核心正是它**:一个 TCP listener 跑在 **runsc `--network=
+> sandbox` 的 userspace netstack 内**、宿主经 veth IP 拨通。§6 的 netns spike 用的是宿主 listener(只验
+> host↔netns L3/L4),runsc spike 只验 exec 不验 transport——**「sandboxd 在 netstack 内 listen + 宿主 dial
+> 通」这条组合链是任务 A 必须端到端打穿的那一刀**(§5.E「netstack 下实测」在此之前保持 pending)。
 
 | 序 | 任务 | 落点(scaffold) | de-risk 的关节 | done-when |
 | --- | --- | --- | --- | --- |

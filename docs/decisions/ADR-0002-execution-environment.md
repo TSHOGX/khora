@@ -61,6 +61,32 @@ unchanged.
 | engine scratch fs | **btrfs** on `/dev/vdb1` at `/home/hsw/engine` — native, not virtiofs |
 | btrfs reflink | `cp --reflink=always` works → §5.B CoW snapshot/clone is cheap here (M6 uses it; substrate ready now) |
 
+### M1 substrate spike validation (parallel spikes, arm64 `sbx`)
+
+Four independent spikes exercised the M1 joints on real hardware. All passed;
+these calibrate the matrix, not the decision.
+
+| Seam validated | Result | Notes |
+| --- | --- | --- |
+| overlayfs assembly (lower=Template / upper / work), CoW, persist, re-mount byte-identical | PASS | upper is a plain host tree; **fresh workdir required per (re-)mount**; copy-up files are root-owned |
+| pinned runsc flags launch + guest exec | PASS | guest `4.19.0-gvisor`, uid=0; all five pins are **global** flags (before `run`); config `root.path` = externally-merged overlay dir |
+| netns/veth host-dials-guest by IP; new IP per cold start | PASS (host↔netns L3/L4) | IP discovery = `ip netns exec <ns> ip -j addr`; `ip netns del` cascades the peer veth |
+| idempotent teardown / §4.4-A reconcile primitives | PASS | 5 per-class enumerate cmds; **overlay reconcile must be path-scoped, not `-t overlay`** (else hits OrbStack system overlays) |
+
+**Privilege (recorded fact).** Every mount/umount/chroot, all netns/veth/cgroup
+ops, and runsc launch require **root**; `--network=sandbox` explicitly rejects
+`--rootless`. The **sentry itself stays unprivileged** (pillar ②) — but the
+**orchestrator/launcher needs root or CAP_NET_ADMIN+CAP_SYS_ADMIN** to
+materialize placement. Passwordless `sudo` is available on `sbx`, so preflight/
+e2e run unattended. (Nuances §1.1 "runs in CI runner / inside a container": that
+environment must grant those caps.)
+
+**Not yet validated (task-A's job in M1).** No spike exercised the *combined*
+path — a TCP listener **inside runsc's `--network=sandbox` netstack** dialed from
+the host by veth IP. The netns spike used a host listener; the runsc spike tested
+exec, not transport. So §5.E's "netstack 下实测" reachability stays **pending**
+until task A closes it end-to-end.
+
 **Caveat.** `sbx` is arm64; the ECS validations were amd64. M1 running on arm64
 re-confirms the overlay + netns facts on a *second* architecture (a plus, not a
 risk). **Before production, re-validate the substrate facts on amd64.** Go

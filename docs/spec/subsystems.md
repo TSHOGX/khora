@@ -59,7 +59,9 @@
     仍可插拔,别的 provider 可选 KVM,§1.1)。
   - `--network=sandbox`(userspace netstack)—— `host`/hostinet 让 sentry 直用宿主 socket、syscall
     直透宿主内核,**违反 §2 substrate ①**(故否决,非"另一可选模式");且它是 §5.D 引流(per-sandbox
-    netns+nft/TPROXY)与 §5.E transport 契约(netstack 下实测)的前提。
+    netns+nft/TPROXY)与 §5.E transport 契约(netstack 下实测)的前提。**代价:它拒绝 `--rootless`**,故
+    orchestrator/launcher 须 root(或 CAP_NET_ADMIN+CAP_SYS_ADMIN)物化 placement——**sentry 自身仍非特权,
+    支柱② 不破**;这是部署 caveat(§1.1「可跑在 CI/容器内」= 该环境须授予这些 cap),不是隔离退让。
   - `--overlay2=none --file-access=shared` —— §5.B/§5.C 持久层不靠 runsc 自管 overlay、gofer 代理宿主
     目录(已钉)。
   - `--systemd-cgroup=false` —— 承上条 cgroupfs driver。
