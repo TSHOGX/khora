@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 
 	"engine/internal/rootfs"
@@ -63,6 +64,8 @@ type fakeRuntime struct {
 	// launchGate, if non-nil, blocks Launch until closed (to hold the lock).
 	launchGate chan struct{}
 	seq        int
+	// adoptAlive drives fakeRuntime.Adopt per-sandbox (§4.4-A liveness).
+	adoptAlive map[string]bool
 }
 
 func (f *fakeRuntime) log(s string) {
@@ -102,6 +105,26 @@ func (f *fakeRuntime) Stop(_ context.Context, _ *runtime.Placement) error {
 }
 func (f *fakeRuntime) Destroy(_ context.Context, _ *runtime.Placement) error {
 	f.log("Destroy")
+	return nil
+}
+
+// Adopt/ReclaimOrphans back the §4.4-A reconciliation path. The fake is driven
+// by adoptAlive (per-sandbox liveness the test sets up) and records reclaim
+// calls so Task F's reconciliation orchestration can be tested as pure logic.
+func (f *fakeRuntime) Adopt(_ context.Context, sandbox string) (*runtime.Placement, bool, error) {
+	f.log("Adopt:" + sandbox)
+	f.mu.Lock()
+	alive := f.adoptAlive[sandbox]
+	f.seq++
+	ep := fmt.Sprintf("10.9.9.%d:9000", f.seq)
+	f.mu.Unlock()
+	if !alive {
+		return nil, false, nil
+	}
+	return &runtime.Placement{TransportEndpoint: ep}, true, nil
+}
+func (f *fakeRuntime) ReclaimOrphans(_ context.Context, keep []string) error {
+	f.log("ReclaimOrphans:keep=" + strings.Join(append([]string(nil), keep...), "|"))
 	return nil
 }
 
