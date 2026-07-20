@@ -1,0 +1,137 @@
+// Package engine.transport.v1 is the §5.E wire contract: the two stateless RPC
+// services the engine exposes (process / fs) plus a Health probe. This is the
+// schema-first source (Task S); host client stub + guest server stub generate
+// from it. Connect-RPC over h2c (transport D4.2).
+//
+// M1 scope (transport D4, plan §6.1): process.Start (server-stream) /
+// SendInput / SendSignal / List; fs.Read / Write; Health. The full D4 wire
+// (StreamInput client-stream, Connect reconnect, multipart bypass, ring replay,
+// keepalive) grows in later increments and is deliberately absent here.
+//
+// Vocabulary boundary (§1.1): NO agent / session / turn / tag — process is
+// addressed by guest-native pid only (transport D4.6).
+syntax = "proto3";
+
+package engine.transport.v1;
+
+option go_package = "engine/internal/transport/gen/engine/transport/v1;transportv1";
+
+// Health is the unary readiness/liveness probe (§4.3 L2 / transport D4.5). Its
+// first success is the resume readiness gate that flips a sandbox to running
+// (guest-runtime D5.2 要点①) — the engine never trusts a bare TCP accept.
+service HealthService {
+  rpc Check(CheckRequest) returns (CheckResponse) {}
+}
+
+message CheckRequest {}
+message CheckResponse {
+  bool ok = 1;
+}
+
+// ProcessService is the §5.E process primitive: start / input / signal / list.
+// PTY is the pty-field special case of Start (transport D4.3), not a service.
+service ProcessService {
+  // Start launches a process and server-streams its output events
+  // (start / data / end). Addressed by the returned pid thereafter.
+  rpc Start(StartRequest) returns (stream ProcessEvent) {}
+
+  // SendInput writes stdin (or pty-in) once — unary. The streaming StreamInput
+  // (client-stream) is a later increment (transport D4.3).
+  rpc SendInput(SendInputRequest) returns (SendInputResponse) {}
+
+  // SendSignal signals a process; server defaults to the process group
+  // (kill(-pgid)) falling back to kill(pid) (transport D4.3 / §5.E.1).
+  rpc SendSignal(SendSignalRequest) returns (SendSignalResponse) {}
+
+  // List enumerates live processes — no registry, scanned in real time (§5.E).
+  rpc List(ListRequest) returns (ListResponse) {}
+}
+
+message StartRequest {
+  string cmd = 1;
+  repeated string args = 2;
+  repeated string env = 3;
+  string cwd = 4;
+  // guest_user is the per-Start run-as (like `sudo -u`, §6.2) — NOT the sandbox
+  // default identity. Empty = inherit.
+  string guest_user = 5;
+  // pty, when set, allocates a PTY of the given size (transport D4.3).
+  PtySize pty = 6;
+}
+
+message PtySize {
+  uint32 rows = 1;
+  uint32 cols = 2;
+}
+
+// ProcessEvent is one item of the output stream: oneof{start,data,end}
+// (transport D4.3). keepalive is a later increment.
+message ProcessEvent {
+  oneof kind {
+    StartEvent start = 1;
+    DataEvent data = 2;
+    EndEvent end = 3;
+  }
+}
+
+message StartEvent {
+  int32 pid = 1;
+}
+
+message DataEvent {
+  // stream: "stdout" | "stderr" | "pty".
+  string stream = 1;
+  bytes data = 2;
+}
+
+message EndEvent {
+  int32 exit_code = 1;
+}
+
+message SendInputRequest {
+  int32 pid = 1;
+  bytes data = 2;
+  // pty_in selects the pty branch (write to the pty master) vs stdin.
+  bool pty_in = 3;
+}
+message SendInputResponse {}
+
+message SendSignalRequest {
+  int32 pid = 1;
+  int32 signal = 2;
+}
+message SendSignalResponse {}
+
+message ListRequest {}
+message ListResponse {
+  repeated int32 pids = 1;
+}
+
+// FsService is the §5.E fs primitive. M1: Read (offset) / Write. No watch —
+// consumers poll Stat+Read (transport D2 / D4.4). List/Stat/etc grow later.
+service FsService {
+  // Read reads sandbox file bytes at an offset. The engine keeps no read
+  // cursor and no cross-resume offset continuity (transport D4.4).
+  rpc Read(ReadRequest) returns (ReadResponse) {}
+
+  // Write writes sandbox file bytes (whole-file, offset 0 in M1).
+  rpc Write(WriteRequest) returns (WriteResponse) {}
+}
+
+message ReadRequest {
+  string path = 1;
+  int64 offset = 2;
+  // length <= 0 means "to EOF".
+  int64 length = 3;
+}
+message ReadResponse {
+  bytes data = 1;
+}
+
+message WriteRequest {
+  string path = 1;
+  bytes data = 2;
+}
+message WriteResponse {
+  int64 bytes_written = 1;
+}
