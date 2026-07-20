@@ -8,26 +8,49 @@ import (
 	"engine/internal/model"
 )
 
-// Memory is the M1 in-memory Store. It is scaffolding, not a design decision:
-// M2 replaces it with an embedded persistent backend behind the same interface
-// (§4.4-C). The mutex here stands in for what M2 makes a real transactional
-// commit — the CAS shape is already correct so the transition lock lands right.
+// Memory is the in-memory Store. It is NOT scaffolding to be deleted: it is the
+// second implementation of the §1.3 Behavior seam, kept for fast, disk-free L1
+// unit tests. The SQLite backend (ADR-0004) coexists behind the SAME interface;
+// which one the orchestrator assembles is register-an-implementation (§1.3).
+//
+// The single mutex is how Memory DELIVERS the §4.4-C atomic-commit contract:
+// "change the map + append the outbox slice" happen under one Lock, so a
+// transition and its event commit together or not at all — the SAME contract
+// SQLite delivers with BEGIN/COMMIT, expressed with no branch in the caller
+// (§4.4-C 铁律).
 type Memory struct {
-	mu  sync.Mutex
-	rec map[model.SandboxID]model.Sandbox
+	mu     sync.Mutex
+	rec    map[model.SandboxID]model.Sandbox
+	outbox []outboxRow // append-only, ordered — the publisher reads oldest-first
+}
+
+// outboxRow is one persisted Event plus its published flag (§4.4-C outbox).
+type outboxRow struct {
+	ev        Event
+	published bool
 }
 
 func NewMemory() *Memory {
 	return &Memory{rec: make(map[model.SandboxID]model.Sandbox)}
 }
 
-func (m *Memory) CreateSandbox(_ context.Context, s model.Sandbox) error {
+// appendEvent records ev in the outbox. MUST be called with m.mu held so it
+// commits atomically with the state change beside it (§4.4-C).
+func (m *Memory) appendEvent(ev *Event) {
+	if ev == nil {
+		return
+	}
+	m.outbox = append(m.outbox, outboxRow{ev: *ev})
+}
+
+func (m *Memory) CreateSandbox(_ context.Context, s model.Sandbox, ev *Event) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, ok := m.rec[s.ID]; ok {
 		return ErrConflict
 	}
 	m.rec[s.ID] = s
+	m.appendEvent(ev) // same commit as the insert (§4.4-C)
 	return nil
 }
 
@@ -51,7 +74,7 @@ func (m *Memory) ListSandboxes(_ context.Context) ([]model.Sandbox, error) {
 	return out, nil
 }
 
-func (m *Memory) CompareAndSetState(_ context.Context, id model.SandboxID, expected, next model.Lifecycle) error {
+func (m *Memory) CompareAndSetState(_ context.Context, id model.SandboxID, expected, next model.Lifecycle, ev *Event) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	s, ok := m.rec[id]
@@ -64,15 +87,41 @@ func (m *Memory) CompareAndSetState(_ context.Context, id model.SandboxID, expec
 	s.State = next
 	s.UpdatedAt = time.Now()
 	m.rec[id] = s
+	m.appendEvent(ev) // state change + event append, one commit (§4.4-C)
 	return nil
 }
 
-func (m *Memory) DeleteSandbox(_ context.Context, id model.SandboxID) error {
+func (m *Memory) DeleteSandbox(_ context.Context, id model.SandboxID, ev *Event) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, ok := m.rec[id]; !ok {
 		return ErrNotFound
 	}
 	delete(m.rec, id)
+	m.appendEvent(ev) // the outbox row outlives the deleted record (§4.4-C)
 	return nil
+}
+
+func (m *Memory) UnpublishedEvents(_ context.Context) ([]Event, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]Event, 0)
+	for _, r := range m.outbox {
+		if !r.published {
+			out = append(out, r.ev)
+		}
+	}
+	return out, nil
+}
+
+func (m *Memory) MarkPublished(_ context.Context, eventID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := range m.outbox {
+		if m.outbox[i].ev.ID == eventID {
+			m.outbox[i].published = true // idempotent: re-marking is harmless
+			return nil
+		}
+	}
+	return nil // unknown ID → no-op (idempotent)
 }

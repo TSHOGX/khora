@@ -114,28 +114,33 @@ func (m *Mediator) Create(ctx context.Context, spec CreateSpec) (model.SandboxID
 		State: model.Creating, GuestUser: spec.GuestUser,
 		CreatedAt: now, UpdatedAt: now,
 	}
-	if err := m.deps.Store.CreateSandbox(ctx, rec); err != nil {
+	// The transient creating-insert is an internal step of the create verb, not
+	// an externally-visible §4.1 transition — it publishes nothing (nil Event).
+	// The "created" event is emitted only when create COMPLETES → running below.
+	if err := m.deps.Store.CreateSandbox(ctx, rec, nil); err != nil {
 		return "", fmt.Errorf("create: insert record: %w", err)
 	}
 
 	// ① build empty Overlay + run the cold-start chain.
 	ov, err := m.deps.Rootfs.CreateOverlay(ctx, string(oid), string(spec.Template))
 	if err != nil {
-		_ = m.deps.Store.DeleteSandbox(ctx, sid) // nothing built yet
+		_ = m.deps.Store.DeleteSandbox(ctx, sid, nil) // nothing built, never visible
 		return "", fmt.Errorf("create: overlay: %w", err)
 	}
 	if err := m.coldStart(ctx, sid, ov, spec.GuestUser); err != nil {
 		// create has no fallback state: reclaim half-built placement + empty
-		// Overlay, delete the record → destroyed (§4.4-A / D5.2 要点④).
+		// Overlay, delete the record → destroyed (§4.4-A / D5.2 要点④). The
+		// sandbox was never running, so this unwind-delete publishes nothing.
 		m.unwind(ctx, sid, ov, true)
-		_ = m.deps.Store.DeleteSandbox(ctx, sid)
+		_ = m.deps.Store.DeleteSandbox(ctx, sid, nil)
 		return "", fmt.Errorf("create: cold start: %w", err)
 	}
 
-	// ⑦ readiness passed → flip creating→running (CAS).
-	if err := m.deps.Store.CompareAndSetState(ctx, sid, model.Creating, model.Running); err != nil {
+	// ⑦ readiness passed → flip creating→running (CAS) + emit "created" in the
+	// same commit (§4.4-C).
+	if err := m.deps.Store.CompareAndSetState(ctx, sid, model.Creating, model.Running, newEvent(sid, "created", model.Running)); err != nil {
 		m.unwind(ctx, sid, ov, true)
-		_ = m.deps.Store.DeleteSandbox(ctx, sid)
+		_ = m.deps.Store.DeleteSandbox(ctx, sid, nil)
 		return "", fmt.Errorf("create: commit running: %w", err)
 	}
 	return sid, nil
@@ -151,7 +156,7 @@ func (m *Mediator) Pause(ctx context.Context, id model.SandboxID) error {
 	l.Lock()
 	defer l.Unlock()
 
-	if err := m.deps.Store.CompareAndSetState(ctx, id, model.Running, model.Paused); err != nil {
+	if err := m.deps.Store.CompareAndSetState(ctx, id, model.Running, model.Paused, newEvent(id, "paused", model.Paused)); err != nil {
 		return fmt.Errorf("pause: %w", err)
 	}
 	// release placement + unmount overlay; upper persists (§4.2 零捕获).
@@ -200,8 +205,8 @@ func (m *Mediator) Resume(ctx context.Context, id model.SandboxID) error {
 		return fmt.Errorf("resume: cold start: %w", err)
 	}
 
-	// ⑦ readiness passed → flip paused→running (CAS).
-	if err := m.deps.Store.CompareAndSetState(ctx, id, model.Paused, model.Running); err != nil {
+	// ⑦ readiness passed → flip paused→running (CAS) + emit "resumed" (§4.4-C).
+	if err := m.deps.Store.CompareAndSetState(ctx, id, model.Paused, model.Running, newEvent(id, "resumed", model.Running)); err != nil {
 		m.unwind(ctx, id, ov, false)
 		return fmt.Errorf("resume: commit running: %w", err)
 	}
@@ -242,8 +247,9 @@ func (m *Mediator) Destroy(ctx context.Context, id model.SandboxID) error {
 	if err == nil {
 		_ = m.deps.Rootfs.DestroyOverlay(ctx, ov)
 	}
-	// delete the record → destroyed (M1 removes the row; no separate row).
-	if err := m.deps.Store.DeleteSandbox(ctx, id); err != nil {
+	// delete the record → destroyed + emit "destroyed" in the same commit
+	// (§4.4-C). The outbox row outlives the deleted record.
+	if err := m.deps.Store.DeleteSandbox(ctx, id, newEvent(id, "destroyed", model.Destroyed)); err != nil {
 		return fmt.Errorf("destroy: delete record: %w", err)
 	}
 	return nil
@@ -373,6 +379,20 @@ func (m *Mediator) take(id model.SandboxID) *liveState {
 	ls := m.live[id]
 	delete(m.live, id)
 	return ls
+}
+
+// newEvent builds an outbox Event for a §4.1 transition, carrying a
+// transition-unique ID (§4.4-C: subscribers dedup on it; a redelivered event
+// keeps the SAME ID). The mediator constructs it per transition semantics; the
+// store commits it atomically with the state change (§4.4-C).
+func newEvent(id model.SandboxID, kind string, state model.Lifecycle) *store.Event {
+	return &store.Event{
+		ID:         "evt_" + randToken(),
+		Sandbox:    id,
+		Kind:       kind,
+		State:      state,
+		OccurredAt: time.Now(),
+	}
 }
 
 // randToken returns a short opaque hex token for sandbox/overlay IDs. Opaque =
