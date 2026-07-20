@@ -43,6 +43,13 @@ type Provider interface {
 	// D5.1). Returns the Overlay by ID + private host materialization.
 	CreateOverlay(ctx context.Context, overlayID, template string) (*Overlay, error)
 
+	// OpenOverlay reconstructs the handle for an EXISTING Overlay artifact from
+	// its ID + referenced Template (§3.1.1: Overlay is ID-addressed, so the
+	// handle is rebuildable from the store record, not kept in memory). This is
+	// the resume prefix — the artifact was created earlier and persists on the
+	// backend across pause (§4.2 零捕获). It does NOT allocate new bytes.
+	OpenOverlay(ctx context.Context, overlayID, template string) (*Overlay, error)
+
 	// Mount assembles lower(Template)/upper/work into a merged rootfs (① of the
 	// cold-start chain). Called by the §4 mediator at create/resume; the mount
 	// lifecycle belongs to this subsystem (§5.B / rootfs-overlay D4). resume
