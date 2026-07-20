@@ -4,9 +4,9 @@ A persistent, mutable, root-capable agent sandbox engine — no-hypervisor
 (gVisor/runsc systrap), self-hostable, state-transparent.
 
 > **Architecture spec** (the source of truth for *what this should be*) lives
-> separately in `docs/plan/` (§1–§6). **This repo** is the implementation.
+> in `docs/spec/` (§1–§6). Milestone plans in `docs/plans/`, one-time decisions in `docs/decisions/`.
 > The current implementation milestone and its acceptance criteria are in
-> [`docs/WALKING-SKELETON.md`](docs/WALKING-SKELETON.md) — read it first.
+> [`docs/plans/M1-sandbox-lifecycle.md`](docs/plans/M1-sandbox-lifecycle.md) — read it first.
 
 ## Layout (canonical subsystem short-names, §5)
 
@@ -32,6 +32,6 @@ go build ./...
 go test ./...
 ```
 
-Milestone ladder (see `docs/WALKING-SKELETON.md` for M1 detail):
+Milestone ladder (see [`docs/plans/README.md`](docs/plans/README.md)):
 M1 walking skeleton → M2 store+§4.4 → M3 reaper+health → M4 Volume →
 M5 network egress → M6 Promote+GC → M7 credentials.

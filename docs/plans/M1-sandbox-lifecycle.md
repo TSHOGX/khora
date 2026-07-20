@@ -1,18 +1,18 @@
-# Walking Skeleton (M1) — 计划
+# M1 — 单沙箱生命周期(create / pause / resume / destroy 端到端跑通)
 
 > **这份文档是什么。** engine 的**当前落地态计划**——不是架构规格。架构规格是
-> `docs/plan/`(§1–§6,终态,跨文件全局编号)。本文只回答一件事:**M1 这一刀切到哪、
-> 怎么算通过**。凡本文与 `docs/plan/` 冲突,以 `docs/plan/` 为准;本文只做「当前实现到哪一步」的
+> `docs/spec/`(§1–§6,终态,跨文件全局编号)。本文只回答一件事:**M1 这一刀切到哪、
+> 怎么算通过**。凡本文与 `docs/spec/` 冲突,以 `docs/spec/` 为准;本文只做「当前实现到哪一步」的
 > 快照,随里程碑推进而重写。
 >
-> **§ 引用** = `docs/plan/` 的全局 spec 章节(§3.3、§5.E.1…);**D 引用** = 对应 deep-dive 的
+> **§ 引用** = `docs/spec/` 的全局 spec 章节(§3.3、§5.E.1…);**D 引用** = 对应 deep-dive 的
 > 小节(D5、D4.4…)。两套编号不混。
 
 ---
 
 ## 0. M1 的唯一目标:一条竖切打穿最难的五件事
 
-walking skeleton = 一条**最薄的端到端竖切**,单机、无 Volume / Network / Promote / 凭证。它存在的
+M1 采用 **walking-skeleton 技术**(一次性阶段手法,非文档名):一条**最薄的端到端竖切**,单机、无 Volume / Network / Promote / 凭证。它存在的
 意义不是「功能多」,而是**一刀同时触到引擎最难的五个关节**,把它们的接缝在真机上钉死:
 
 ```
@@ -48,7 +48,7 @@ fs.read 读回那个文件 → 字节一致  ✅ 竖切成立
 
 ## 1. M1 显式**不做**什么(边界,防 scope 蔓延)
 
-按 `docs/plan/` 的里程碑阶梯,以下都**不在 M1**——不是遗漏,是刻意后置到已列明的里程碑:
+按 `docs/spec/` 的里程碑阶梯,以下都**不在 M1**——不是遗漏,是刻意后置到已列明的里程碑:
 
 | 不做 | 属于 | 为什么能安全后置 |
 | --- | --- | --- |
@@ -143,7 +143,9 @@ engine/
 │   ├── rootfs/         §5.B:FS provider seam + overlayfs 组装(lower/upper/work → merged)
 │   └── transport/      §5.E:宿主侧 process/fs client + Health;wire(Connect-RPC over h2c)
 ├── docs/
-│   └── WALKING-SKELETON.md   ← 本文
+│   ├── spec/                §1–§6 架构规格 + deep-dives
+│   ├── plans/M1-sandbox-lifecycle.md   ← 本文
+│   └── decisions/           ADR
 └── test/               M1 端到端验收(§4 的 8 条断言)
 ```
 
