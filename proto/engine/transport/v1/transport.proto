@@ -3,10 +3,11 @@
 // schema-first source (Task S); host client stub + guest server stub generate
 // from it. Connect-RPC over h2c (transport D4.2).
 //
-// M1 scope (transport D4, plan §6.1): process.Start (server-stream) /
-// SendInput / SendSignal / List; fs.Read / Write; Health. The full D4 wire
-// (StreamInput client-stream, Connect reconnect, multipart bypass, ring replay,
-// keepalive) grows in later increments and is deliberately absent here.
+// M3 scope (transport D4.3, plan §5): the full process data plane —
+// Start / Connect (server-stream) / StreamInput (client-stream) /
+// SendInput / SendSignal / Update / CloseStdin / List; fs.Read / Write; Health.
+// keepalive is a ProcessEvent variant on long output streams (D4.2). fs breadth
+// (List/Stat/MakeDir/Remove/Move + multipart bypass) is a post-M3 increment.
 //
 // Vocabulary boundary (§1.1): NO agent / session / turn / tag — process is
 // addressed by guest-native pid only (transport D4.6).
@@ -28,20 +29,38 @@ message CheckResponse {
   bool ok = 1;
 }
 
-// ProcessService is the §5.E process primitive: start / input / signal / list.
-// PTY is the pty-field special case of Start (transport D4.3), not a service.
+// ProcessService is the §5.E process primitive: start / connect / input /
+// signal / resize / list. PTY is the pty-field special case of Start (transport
+// D4.3), not a service. Output is fan-out multi-subscribe: many Connect can
+// attach one pid, each gets an independent copy (D4.3 multi-connection).
 service ProcessService {
   // Start launches a process and server-streams its output events
-  // (start / data / end). Addressed by the returned pid thereafter.
+  // (start / data / end / keepalive). Addressed by the returned pid thereafter.
   rpc Start(StartRequest) returns (stream ProcessEvent) {}
 
-  // SendInput writes stdin (or pty-in) once — unary. The streaming StreamInput
-  // (client-stream) is a later increment (transport D4.3).
+  // Connect reattaches to an already-running process, replaying the bounded
+  // output ring buffer first, then joining the live stream (transport D4.3
+  // invariant 2). Multiple Connect can attach one pid (§3.2 multi-connection).
+  rpc Connect(ConnectRequest) returns (stream ProcessEvent) {}
+
+  // StreamInput writes stdin (or pty-in) as an ordered client-stream — the
+  // interactive input path (keystrokes to a pty). Ordering is guaranteed by the
+  // single stream (transport D4.3).
+  rpc StreamInput(stream StreamInputRequest) returns (StreamInputResponse) {}
+
+  // SendInput writes stdin (or pty-in) once — unary, for when no stream is held.
   rpc SendInput(SendInputRequest) returns (SendInputResponse) {}
 
   // SendSignal signals a process; server defaults to the process group
   // (kill(-pgid)) falling back to kill(pid) (transport D4.3 / §5.E.1).
   rpc SendSignal(SendSignalRequest) returns (SendSignalResponse) {}
+
+  // Update resizes a process's PTY (unary; not a separate service, a process
+  // field — transport D4.3).
+  rpc Update(UpdateRequest) returns (UpdateResponse) {}
+
+  // CloseStdin closes a process's stdin (under a pty, equivalent to Ctrl-D).
+  rpc CloseStdin(CloseStdinRequest) returns (CloseStdinResponse) {}
 
   // List enumerates live processes — no registry, scanned in real time (§5.E).
   rpc List(ListRequest) returns (ListResponse) {}
@@ -64,13 +83,16 @@ message PtySize {
   uint32 cols = 2;
 }
 
-// ProcessEvent is one item of the output stream: oneof{start,data,end}
-// (transport D4.3). keepalive is a later increment.
+// ProcessEvent is one item of the output stream: oneof{start,data,end,
+// keepalive} (transport D4.3). keepalive is emitted periodically on long idle
+// streams so intermediaries/clients know the connection is alive and don't
+// reap it on silence (transport D4.2 — no idle read/write deadline).
 message ProcessEvent {
   oneof kind {
     StartEvent start = 1;
     DataEvent data = 2;
     EndEvent end = 3;
+    KeepaliveEvent keepalive = 4;
   }
 }
 
@@ -88,6 +110,23 @@ message EndEvent {
   int32 exit_code = 1;
 }
 
+// KeepaliveEvent carries no payload — its arrival is the liveness signal.
+message KeepaliveEvent {}
+
+message ConnectRequest {
+  int32 pid = 1;
+}
+
+// StreamInputRequest is one frame of the ordered input stream. pid is only read
+// on the first frame of the stream (the stream targets one process).
+message StreamInputRequest {
+  int32 pid = 1;
+  bytes data = 2;
+  // pty_in selects the pty branch (write to the pty master) vs stdin.
+  bool pty_in = 3;
+}
+message StreamInputResponse {}
+
 message SendInputRequest {
   int32 pid = 1;
   bytes data = 2;
@@ -95,6 +134,17 @@ message SendInputRequest {
   bool pty_in = 3;
 }
 message SendInputResponse {}
+
+message UpdateRequest {
+  int32 pid = 1;
+  PtySize pty = 2;
+}
+message UpdateResponse {}
+
+message CloseStdinRequest {
+  int32 pid = 1;
+}
+message CloseStdinResponse {}
 
 message SendSignalRequest {
   int32 pid = 1;

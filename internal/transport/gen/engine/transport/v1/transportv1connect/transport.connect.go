@@ -3,10 +3,11 @@
 // schema-first source (Task S); host client stub + guest server stub generate
 // from it. Connect-RPC over h2c (transport D4.2).
 //
-// M1 scope (transport D4, plan §6.1): process.Start (server-stream) /
-// SendInput / SendSignal / List; fs.Read / Write; Health. The full D4 wire
-// (StreamInput client-stream, Connect reconnect, multipart bypass, ring replay,
-// keepalive) grows in later increments and is deliberately absent here.
+// M3 scope (transport D4.3, plan §5): the full process data plane —
+// Start / Connect (server-stream) / StreamInput (client-stream) /
+// SendInput / SendSignal / Update / CloseStdin / List; fs.Read / Write; Health.
+// keepalive is a ProcessEvent variant on long output streams (D4.2). fs breadth
+// (List/Stat/MakeDir/Remove/Move + multipart bypass) is a post-M3 increment.
 //
 // Vocabulary boundary (§1.1): NO agent / session / turn / tag — process is
 // addressed by guest-native pid only (transport D4.6).
@@ -54,12 +55,22 @@ const (
 	HealthServiceCheckProcedure = "/engine.transport.v1.HealthService/Check"
 	// ProcessServiceStartProcedure is the fully-qualified name of the ProcessService's Start RPC.
 	ProcessServiceStartProcedure = "/engine.transport.v1.ProcessService/Start"
+	// ProcessServiceConnectProcedure is the fully-qualified name of the ProcessService's Connect RPC.
+	ProcessServiceConnectProcedure = "/engine.transport.v1.ProcessService/Connect"
+	// ProcessServiceStreamInputProcedure is the fully-qualified name of the ProcessService's
+	// StreamInput RPC.
+	ProcessServiceStreamInputProcedure = "/engine.transport.v1.ProcessService/StreamInput"
 	// ProcessServiceSendInputProcedure is the fully-qualified name of the ProcessService's SendInput
 	// RPC.
 	ProcessServiceSendInputProcedure = "/engine.transport.v1.ProcessService/SendInput"
 	// ProcessServiceSendSignalProcedure is the fully-qualified name of the ProcessService's SendSignal
 	// RPC.
 	ProcessServiceSendSignalProcedure = "/engine.transport.v1.ProcessService/SendSignal"
+	// ProcessServiceUpdateProcedure is the fully-qualified name of the ProcessService's Update RPC.
+	ProcessServiceUpdateProcedure = "/engine.transport.v1.ProcessService/Update"
+	// ProcessServiceCloseStdinProcedure is the fully-qualified name of the ProcessService's CloseStdin
+	// RPC.
+	ProcessServiceCloseStdinProcedure = "/engine.transport.v1.ProcessService/CloseStdin"
 	// ProcessServiceListProcedure is the fully-qualified name of the ProcessService's List RPC.
 	ProcessServiceListProcedure = "/engine.transport.v1.ProcessService/List"
 	// FsServiceReadProcedure is the fully-qualified name of the FsService's Read RPC.
@@ -70,16 +81,20 @@ const (
 
 // These variables are the protoreflect.Descriptor objects for the RPCs defined in this package.
 var (
-	healthServiceServiceDescriptor           = v1.File_engine_transport_v1_transport_proto.Services().ByName("HealthService")
-	healthServiceCheckMethodDescriptor       = healthServiceServiceDescriptor.Methods().ByName("Check")
-	processServiceServiceDescriptor          = v1.File_engine_transport_v1_transport_proto.Services().ByName("ProcessService")
-	processServiceStartMethodDescriptor      = processServiceServiceDescriptor.Methods().ByName("Start")
-	processServiceSendInputMethodDescriptor  = processServiceServiceDescriptor.Methods().ByName("SendInput")
-	processServiceSendSignalMethodDescriptor = processServiceServiceDescriptor.Methods().ByName("SendSignal")
-	processServiceListMethodDescriptor       = processServiceServiceDescriptor.Methods().ByName("List")
-	fsServiceServiceDescriptor               = v1.File_engine_transport_v1_transport_proto.Services().ByName("FsService")
-	fsServiceReadMethodDescriptor            = fsServiceServiceDescriptor.Methods().ByName("Read")
-	fsServiceWriteMethodDescriptor           = fsServiceServiceDescriptor.Methods().ByName("Write")
+	healthServiceServiceDescriptor            = v1.File_engine_transport_v1_transport_proto.Services().ByName("HealthService")
+	healthServiceCheckMethodDescriptor        = healthServiceServiceDescriptor.Methods().ByName("Check")
+	processServiceServiceDescriptor           = v1.File_engine_transport_v1_transport_proto.Services().ByName("ProcessService")
+	processServiceStartMethodDescriptor       = processServiceServiceDescriptor.Methods().ByName("Start")
+	processServiceConnectMethodDescriptor     = processServiceServiceDescriptor.Methods().ByName("Connect")
+	processServiceStreamInputMethodDescriptor = processServiceServiceDescriptor.Methods().ByName("StreamInput")
+	processServiceSendInputMethodDescriptor   = processServiceServiceDescriptor.Methods().ByName("SendInput")
+	processServiceSendSignalMethodDescriptor  = processServiceServiceDescriptor.Methods().ByName("SendSignal")
+	processServiceUpdateMethodDescriptor      = processServiceServiceDescriptor.Methods().ByName("Update")
+	processServiceCloseStdinMethodDescriptor  = processServiceServiceDescriptor.Methods().ByName("CloseStdin")
+	processServiceListMethodDescriptor        = processServiceServiceDescriptor.Methods().ByName("List")
+	fsServiceServiceDescriptor                = v1.File_engine_transport_v1_transport_proto.Services().ByName("FsService")
+	fsServiceReadMethodDescriptor             = fsServiceServiceDescriptor.Methods().ByName("Read")
+	fsServiceWriteMethodDescriptor            = fsServiceServiceDescriptor.Methods().ByName("Write")
 )
 
 // HealthServiceClient is a client for the engine.transport.v1.HealthService service.
@@ -153,14 +168,26 @@ func (UnimplementedHealthServiceHandler) Check(context.Context, *connect.Request
 // ProcessServiceClient is a client for the engine.transport.v1.ProcessService service.
 type ProcessServiceClient interface {
 	// Start launches a process and server-streams its output events
-	// (start / data / end). Addressed by the returned pid thereafter.
+	// (start / data / end / keepalive). Addressed by the returned pid thereafter.
 	Start(context.Context, *connect.Request[v1.StartRequest]) (*connect.ServerStreamForClient[v1.ProcessEvent], error)
-	// SendInput writes stdin (or pty-in) once — unary. The streaming StreamInput
-	// (client-stream) is a later increment (transport D4.3).
+	// Connect reattaches to an already-running process, replaying the bounded
+	// output ring buffer first, then joining the live stream (transport D4.3
+	// invariant 2). Multiple Connect can attach one pid (§3.2 multi-connection).
+	Connect(context.Context, *connect.Request[v1.ConnectRequest]) (*connect.ServerStreamForClient[v1.ProcessEvent], error)
+	// StreamInput writes stdin (or pty-in) as an ordered client-stream — the
+	// interactive input path (keystrokes to a pty). Ordering is guaranteed by the
+	// single stream (transport D4.3).
+	StreamInput(context.Context) *connect.ClientStreamForClient[v1.StreamInputRequest, v1.StreamInputResponse]
+	// SendInput writes stdin (or pty-in) once — unary, for when no stream is held.
 	SendInput(context.Context, *connect.Request[v1.SendInputRequest]) (*connect.Response[v1.SendInputResponse], error)
 	// SendSignal signals a process; server defaults to the process group
 	// (kill(-pgid)) falling back to kill(pid) (transport D4.3 / §5.E.1).
 	SendSignal(context.Context, *connect.Request[v1.SendSignalRequest]) (*connect.Response[v1.SendSignalResponse], error)
+	// Update resizes a process's PTY (unary; not a separate service, a process
+	// field — transport D4.3).
+	Update(context.Context, *connect.Request[v1.UpdateRequest]) (*connect.Response[v1.UpdateResponse], error)
+	// CloseStdin closes a process's stdin (under a pty, equivalent to Ctrl-D).
+	CloseStdin(context.Context, *connect.Request[v1.CloseStdinRequest]) (*connect.Response[v1.CloseStdinResponse], error)
 	// List enumerates live processes — no registry, scanned in real time (§5.E).
 	List(context.Context, *connect.Request[v1.ListRequest]) (*connect.Response[v1.ListResponse], error)
 }
@@ -181,6 +208,18 @@ func NewProcessServiceClient(httpClient connect.HTTPClient, baseURL string, opts
 			connect.WithSchema(processServiceStartMethodDescriptor),
 			connect.WithClientOptions(opts...),
 		),
+		connect: connect.NewClient[v1.ConnectRequest, v1.ProcessEvent](
+			httpClient,
+			baseURL+ProcessServiceConnectProcedure,
+			connect.WithSchema(processServiceConnectMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
+		streamInput: connect.NewClient[v1.StreamInputRequest, v1.StreamInputResponse](
+			httpClient,
+			baseURL+ProcessServiceStreamInputProcedure,
+			connect.WithSchema(processServiceStreamInputMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
 		sendInput: connect.NewClient[v1.SendInputRequest, v1.SendInputResponse](
 			httpClient,
 			baseURL+ProcessServiceSendInputProcedure,
@@ -191,6 +230,18 @@ func NewProcessServiceClient(httpClient connect.HTTPClient, baseURL string, opts
 			httpClient,
 			baseURL+ProcessServiceSendSignalProcedure,
 			connect.WithSchema(processServiceSendSignalMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
+		update: connect.NewClient[v1.UpdateRequest, v1.UpdateResponse](
+			httpClient,
+			baseURL+ProcessServiceUpdateProcedure,
+			connect.WithSchema(processServiceUpdateMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
+		closeStdin: connect.NewClient[v1.CloseStdinRequest, v1.CloseStdinResponse](
+			httpClient,
+			baseURL+ProcessServiceCloseStdinProcedure,
+			connect.WithSchema(processServiceCloseStdinMethodDescriptor),
 			connect.WithClientOptions(opts...),
 		),
 		list: connect.NewClient[v1.ListRequest, v1.ListResponse](
@@ -204,15 +255,29 @@ func NewProcessServiceClient(httpClient connect.HTTPClient, baseURL string, opts
 
 // processServiceClient implements ProcessServiceClient.
 type processServiceClient struct {
-	start      *connect.Client[v1.StartRequest, v1.ProcessEvent]
-	sendInput  *connect.Client[v1.SendInputRequest, v1.SendInputResponse]
-	sendSignal *connect.Client[v1.SendSignalRequest, v1.SendSignalResponse]
-	list       *connect.Client[v1.ListRequest, v1.ListResponse]
+	start       *connect.Client[v1.StartRequest, v1.ProcessEvent]
+	connect     *connect.Client[v1.ConnectRequest, v1.ProcessEvent]
+	streamInput *connect.Client[v1.StreamInputRequest, v1.StreamInputResponse]
+	sendInput   *connect.Client[v1.SendInputRequest, v1.SendInputResponse]
+	sendSignal  *connect.Client[v1.SendSignalRequest, v1.SendSignalResponse]
+	update      *connect.Client[v1.UpdateRequest, v1.UpdateResponse]
+	closeStdin  *connect.Client[v1.CloseStdinRequest, v1.CloseStdinResponse]
+	list        *connect.Client[v1.ListRequest, v1.ListResponse]
 }
 
 // Start calls engine.transport.v1.ProcessService.Start.
 func (c *processServiceClient) Start(ctx context.Context, req *connect.Request[v1.StartRequest]) (*connect.ServerStreamForClient[v1.ProcessEvent], error) {
 	return c.start.CallServerStream(ctx, req)
+}
+
+// Connect calls engine.transport.v1.ProcessService.Connect.
+func (c *processServiceClient) Connect(ctx context.Context, req *connect.Request[v1.ConnectRequest]) (*connect.ServerStreamForClient[v1.ProcessEvent], error) {
+	return c.connect.CallServerStream(ctx, req)
+}
+
+// StreamInput calls engine.transport.v1.ProcessService.StreamInput.
+func (c *processServiceClient) StreamInput(ctx context.Context) *connect.ClientStreamForClient[v1.StreamInputRequest, v1.StreamInputResponse] {
+	return c.streamInput.CallClientStream(ctx)
 }
 
 // SendInput calls engine.transport.v1.ProcessService.SendInput.
@@ -225,6 +290,16 @@ func (c *processServiceClient) SendSignal(ctx context.Context, req *connect.Requ
 	return c.sendSignal.CallUnary(ctx, req)
 }
 
+// Update calls engine.transport.v1.ProcessService.Update.
+func (c *processServiceClient) Update(ctx context.Context, req *connect.Request[v1.UpdateRequest]) (*connect.Response[v1.UpdateResponse], error) {
+	return c.update.CallUnary(ctx, req)
+}
+
+// CloseStdin calls engine.transport.v1.ProcessService.CloseStdin.
+func (c *processServiceClient) CloseStdin(ctx context.Context, req *connect.Request[v1.CloseStdinRequest]) (*connect.Response[v1.CloseStdinResponse], error) {
+	return c.closeStdin.CallUnary(ctx, req)
+}
+
 // List calls engine.transport.v1.ProcessService.List.
 func (c *processServiceClient) List(ctx context.Context, req *connect.Request[v1.ListRequest]) (*connect.Response[v1.ListResponse], error) {
 	return c.list.CallUnary(ctx, req)
@@ -233,14 +308,26 @@ func (c *processServiceClient) List(ctx context.Context, req *connect.Request[v1
 // ProcessServiceHandler is an implementation of the engine.transport.v1.ProcessService service.
 type ProcessServiceHandler interface {
 	// Start launches a process and server-streams its output events
-	// (start / data / end). Addressed by the returned pid thereafter.
+	// (start / data / end / keepalive). Addressed by the returned pid thereafter.
 	Start(context.Context, *connect.Request[v1.StartRequest], *connect.ServerStream[v1.ProcessEvent]) error
-	// SendInput writes stdin (or pty-in) once — unary. The streaming StreamInput
-	// (client-stream) is a later increment (transport D4.3).
+	// Connect reattaches to an already-running process, replaying the bounded
+	// output ring buffer first, then joining the live stream (transport D4.3
+	// invariant 2). Multiple Connect can attach one pid (§3.2 multi-connection).
+	Connect(context.Context, *connect.Request[v1.ConnectRequest], *connect.ServerStream[v1.ProcessEvent]) error
+	// StreamInput writes stdin (or pty-in) as an ordered client-stream — the
+	// interactive input path (keystrokes to a pty). Ordering is guaranteed by the
+	// single stream (transport D4.3).
+	StreamInput(context.Context, *connect.ClientStream[v1.StreamInputRequest]) (*connect.Response[v1.StreamInputResponse], error)
+	// SendInput writes stdin (or pty-in) once — unary, for when no stream is held.
 	SendInput(context.Context, *connect.Request[v1.SendInputRequest]) (*connect.Response[v1.SendInputResponse], error)
 	// SendSignal signals a process; server defaults to the process group
 	// (kill(-pgid)) falling back to kill(pid) (transport D4.3 / §5.E.1).
 	SendSignal(context.Context, *connect.Request[v1.SendSignalRequest]) (*connect.Response[v1.SendSignalResponse], error)
+	// Update resizes a process's PTY (unary; not a separate service, a process
+	// field — transport D4.3).
+	Update(context.Context, *connect.Request[v1.UpdateRequest]) (*connect.Response[v1.UpdateResponse], error)
+	// CloseStdin closes a process's stdin (under a pty, equivalent to Ctrl-D).
+	CloseStdin(context.Context, *connect.Request[v1.CloseStdinRequest]) (*connect.Response[v1.CloseStdinResponse], error)
 	// List enumerates live processes — no registry, scanned in real time (§5.E).
 	List(context.Context, *connect.Request[v1.ListRequest]) (*connect.Response[v1.ListResponse], error)
 }
@@ -257,6 +344,18 @@ func NewProcessServiceHandler(svc ProcessServiceHandler, opts ...connect.Handler
 		connect.WithSchema(processServiceStartMethodDescriptor),
 		connect.WithHandlerOptions(opts...),
 	)
+	processServiceConnectHandler := connect.NewServerStreamHandler(
+		ProcessServiceConnectProcedure,
+		svc.Connect,
+		connect.WithSchema(processServiceConnectMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
+	processServiceStreamInputHandler := connect.NewClientStreamHandler(
+		ProcessServiceStreamInputProcedure,
+		svc.StreamInput,
+		connect.WithSchema(processServiceStreamInputMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
 	processServiceSendInputHandler := connect.NewUnaryHandler(
 		ProcessServiceSendInputProcedure,
 		svc.SendInput,
@@ -269,6 +368,18 @@ func NewProcessServiceHandler(svc ProcessServiceHandler, opts ...connect.Handler
 		connect.WithSchema(processServiceSendSignalMethodDescriptor),
 		connect.WithHandlerOptions(opts...),
 	)
+	processServiceUpdateHandler := connect.NewUnaryHandler(
+		ProcessServiceUpdateProcedure,
+		svc.Update,
+		connect.WithSchema(processServiceUpdateMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
+	processServiceCloseStdinHandler := connect.NewUnaryHandler(
+		ProcessServiceCloseStdinProcedure,
+		svc.CloseStdin,
+		connect.WithSchema(processServiceCloseStdinMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
 	processServiceListHandler := connect.NewUnaryHandler(
 		ProcessServiceListProcedure,
 		svc.List,
@@ -279,10 +390,18 @@ func NewProcessServiceHandler(svc ProcessServiceHandler, opts ...connect.Handler
 		switch r.URL.Path {
 		case ProcessServiceStartProcedure:
 			processServiceStartHandler.ServeHTTP(w, r)
+		case ProcessServiceConnectProcedure:
+			processServiceConnectHandler.ServeHTTP(w, r)
+		case ProcessServiceStreamInputProcedure:
+			processServiceStreamInputHandler.ServeHTTP(w, r)
 		case ProcessServiceSendInputProcedure:
 			processServiceSendInputHandler.ServeHTTP(w, r)
 		case ProcessServiceSendSignalProcedure:
 			processServiceSendSignalHandler.ServeHTTP(w, r)
+		case ProcessServiceUpdateProcedure:
+			processServiceUpdateHandler.ServeHTTP(w, r)
+		case ProcessServiceCloseStdinProcedure:
+			processServiceCloseStdinHandler.ServeHTTP(w, r)
 		case ProcessServiceListProcedure:
 			processServiceListHandler.ServeHTTP(w, r)
 		default:
@@ -298,12 +417,28 @@ func (UnimplementedProcessServiceHandler) Start(context.Context, *connect.Reques
 	return connect.NewError(connect.CodeUnimplemented, errors.New("engine.transport.v1.ProcessService.Start is not implemented"))
 }
 
+func (UnimplementedProcessServiceHandler) Connect(context.Context, *connect.Request[v1.ConnectRequest], *connect.ServerStream[v1.ProcessEvent]) error {
+	return connect.NewError(connect.CodeUnimplemented, errors.New("engine.transport.v1.ProcessService.Connect is not implemented"))
+}
+
+func (UnimplementedProcessServiceHandler) StreamInput(context.Context, *connect.ClientStream[v1.StreamInputRequest]) (*connect.Response[v1.StreamInputResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("engine.transport.v1.ProcessService.StreamInput is not implemented"))
+}
+
 func (UnimplementedProcessServiceHandler) SendInput(context.Context, *connect.Request[v1.SendInputRequest]) (*connect.Response[v1.SendInputResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("engine.transport.v1.ProcessService.SendInput is not implemented"))
 }
 
 func (UnimplementedProcessServiceHandler) SendSignal(context.Context, *connect.Request[v1.SendSignalRequest]) (*connect.Response[v1.SendSignalResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("engine.transport.v1.ProcessService.SendSignal is not implemented"))
+}
+
+func (UnimplementedProcessServiceHandler) Update(context.Context, *connect.Request[v1.UpdateRequest]) (*connect.Response[v1.UpdateResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("engine.transport.v1.ProcessService.Update is not implemented"))
+}
+
+func (UnimplementedProcessServiceHandler) CloseStdin(context.Context, *connect.Request[v1.CloseStdinRequest]) (*connect.Response[v1.CloseStdinResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("engine.transport.v1.ProcessService.CloseStdin is not implemented"))
 }
 
 func (UnimplementedProcessServiceHandler) List(context.Context, *connect.Request[v1.ListRequest]) (*connect.Response[v1.ListResponse], error) {

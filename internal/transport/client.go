@@ -73,6 +73,28 @@ func (c *connectClient) Start(ctx context.Context, spec StartSpec) (<-chan Proce
 	if err != nil {
 		return nil, err
 	}
+	return drainEvents(stream), nil
+}
+
+func (c *connectClient) Connect(ctx context.Context, pid int) (<-chan ProcessEvent, error) {
+	stream, err := c.process.Connect(ctx, connect.NewRequest(&v1.ConnectRequest{Pid: int32(pid)}))
+	if err != nil {
+		return nil, err
+	}
+	return drainEvents(stream), nil
+}
+
+// eventStream is the shared shape of Start's and Connect's server-streams.
+type eventStream interface {
+	Receive() bool
+	Msg() *v1.ProcessEvent
+	Close() error
+}
+
+// drainEvents translates a proto ProcessEvent server-stream into the domain
+// channel, mapping oneof variants to domain Kind strings (§5.E seam: the
+// mediator never sees generated types).
+func drainEvents(stream eventStream) <-chan ProcessEvent {
 	out := make(chan ProcessEvent, 16)
 	go func() {
 		defer close(out)
@@ -85,11 +107,44 @@ func (c *connectClient) Start(ctx context.Context, spec StartSpec) (<-chan Proce
 				out <- ProcessEvent{Kind: "data", Stream: k.Data.Stream, Data: k.Data.Data}
 			case *v1.ProcessEvent_End:
 				out <- ProcessEvent{Kind: "end", ExitCode: int(k.End.ExitCode)}
+			case *v1.ProcessEvent_Keepalive:
+				out <- ProcessEvent{Kind: "keepalive"}
 			}
 		}
 		_ = stream.Close()
 	}()
-	return out, nil
+	return out
+}
+
+// streamInputWriter adapts a Connect client-stream to the domain InputWriter.
+type streamInputWriter struct {
+	stream *connect.ClientStreamForClient[v1.StreamInputRequest, v1.StreamInputResponse]
+	pid    int
+}
+
+func (w *streamInputWriter) Send(data []byte, ptyIn bool) error {
+	return w.stream.Send(&v1.StreamInputRequest{Pid: int32(w.pid), Data: data, PtyIn: ptyIn})
+}
+
+func (w *streamInputWriter) Close() error {
+	_, err := w.stream.CloseAndReceive()
+	return err
+}
+
+func (c *connectClient) StreamInput(ctx context.Context, pid int) (InputWriter, error) {
+	return &streamInputWriter{stream: c.process.StreamInput(ctx), pid: pid}, nil
+}
+
+func (c *connectClient) Update(ctx context.Context, pid int, size PtySize) error {
+	_, err := c.process.Update(ctx, connect.NewRequest(&v1.UpdateRequest{
+		Pid: int32(pid), Pty: &v1.PtySize{Rows: uint32(size.Rows), Cols: uint32(size.Cols)},
+	}))
+	return err
+}
+
+func (c *connectClient) CloseStdin(ctx context.Context, pid int) error {
+	_, err := c.process.CloseStdin(ctx, connect.NewRequest(&v1.CloseStdinRequest{Pid: int32(pid)}))
+	return err
 }
 
 func (c *connectClient) SendInput(ctx context.Context, pid int, data []byte, ptyIn bool) error {

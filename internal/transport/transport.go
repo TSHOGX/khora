@@ -16,9 +16,11 @@
 // byte streams are explicitly lossy (shell has no persistent SoT); any
 // "don't drop" guarantee is the upper layer's job (session adapter, engine-外).
 //
-// M1 scope: minimal — Start (server-stream) / SendInput / Read / Write / Health.
-// The full D4 wire (StreamInput client-stream, multipart bypass, bounded ring
-// replay on Connect, keepalive) grows in later increments.
+// M3 scope: the full process data plane — Start / Connect (server-stream) /
+// StreamInput (client-stream) / SendInput / SendSignal / Update / CloseStdin /
+// List, plus fs Read / Write and Health. Bounded ring replay on Connect and
+// slow-subscriber non-blocking drop (D4.3's two invariants) live in the guest
+// server (cmd/sandboxd). fs breadth + multipart bypass grow post-M3.
 package transport
 
 // Wire stubs are generated from proto/engine/transport/v1/transport.proto via
@@ -64,6 +66,17 @@ type StartSpec struct {
 
 type PtySize struct{ Rows, Cols uint16 }
 
+// InputWriter is an ordered input stream to one process (stdin / pty-in). It is
+// the domain projection of the StreamInput client-stream (transport D4.3):
+// keystroke ordering is guaranteed by the single stream. Close ends the stream
+// (it does NOT close the process's stdin — use CloseStdin for Ctrl-D).
+type InputWriter interface {
+	// Send writes one ordered frame. ptyIn selects the pty branch vs stdin.
+	Send(data []byte, ptyIn bool) error
+	// Close ends the input stream and returns the RPC's terminal error, if any.
+	Close() error
+}
+
 // Client is the host-side transport client for one sandbox's current endpoint.
 // Stateless: constructed against an endpoint, discarded on resume.
 type Client interface {
@@ -76,13 +89,28 @@ type Client interface {
 	// (server-stream). Addressed by the returned pid thereafter.
 	Start(ctx context.Context, spec StartSpec) (<-chan ProcessEvent, error)
 
-	// SendInput writes stdin/pty-in once (unary; the streaming StreamInput is a
-	// later increment). ptyIn selects the pty branch.
+	// Connect reattaches to a running process: the returned stream replays the
+	// bounded output ring buffer first, then joins live (transport D4.3
+	// invariant 2). Many Connect can attach one pid, each an independent copy.
+	Connect(ctx context.Context, pid int) (<-chan ProcessEvent, error)
+
+	// StreamInput opens an ordered input stream to a process (client-stream).
+	// The interactive input path — keystrokes to a pty, in order.
+	StreamInput(ctx context.Context, pid int) (InputWriter, error)
+
+	// SendInput writes stdin/pty-in once (unary; for when no stream is held).
+	// ptyIn selects the pty branch.
 	SendInput(ctx context.Context, pid int, data []byte, ptyIn bool) error
 
 	// SendSignal signals a process; defaults to the process group, falling back
 	// to the pid (transport D4.3 / §5.E.1 directed signals belong to transport mode).
 	SendSignal(ctx context.Context, pid int, signal int) error
+
+	// Update resizes a process's PTY (unary; transport D4.3).
+	Update(ctx context.Context, pid int, size PtySize) error
+
+	// CloseStdin closes a process's stdin — under a pty, equivalent to Ctrl-D.
+	CloseStdin(ctx context.Context, pid int) error
 
 	// List enumerates processes live (no registry, §5.E).
 	List(ctx context.Context) ([]int, error)

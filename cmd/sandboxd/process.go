@@ -139,6 +139,24 @@ func (s *processServer) Start(ctx context.Context, req *connect.Request[v1.Start
 	})
 }
 
+// --- M3 wire methods (Task A scaffolding; filled in Tasks B/C/D) -------------
+
+func (s *processServer) Connect(_ context.Context, _ *connect.Request[v1.ConnectRequest], _ *connect.ServerStream[v1.ProcessEvent]) error {
+	return connect.NewError(connect.CodeUnimplemented, errString("Connect: pending Task B"))
+}
+
+func (s *processServer) StreamInput(_ context.Context, _ *connect.ClientStream[v1.StreamInputRequest]) (*connect.Response[v1.StreamInputResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errString("StreamInput: pending Task D"))
+}
+
+func (s *processServer) Update(_ context.Context, _ *connect.Request[v1.UpdateRequest]) (*connect.Response[v1.UpdateResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errString("Update: pending Task D"))
+}
+
+func (s *processServer) CloseStdin(_ context.Context, _ *connect.Request[v1.CloseStdinRequest]) (*connect.Response[v1.CloseStdinResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errString("CloseStdin: pending Task D"))
+}
+
 func (s *processServer) SendInput(_ context.Context, req *connect.Request[v1.SendInputRequest]) (*connect.Response[v1.SendInputResponse], error) {
 	m := req.Msg
 	s.mu.Lock()
