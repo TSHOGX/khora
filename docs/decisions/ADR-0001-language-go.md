@@ -6,11 +6,9 @@
 
 ## Context
 
-The engine is a from-scratch rewrite (the prior `main/orchestrator`, ~47k LOC
-Go, is discarded — not a reference). Language is the first load-bearing choice:
-it cascades through every subsystem, the store backend, the provider seams, and
-the wire toolchain. It is a one-time decision, hence an ADR rather than spec
-content.
+Language is the first load-bearing choice: it cascades through every subsystem,
+the store backend, the provider seams, and the wire toolchain. It is a one-time
+decision, hence an ADR rather than spec content.
 
 ## Decision
 
@@ -25,8 +23,7 @@ content.
   store.** `modernc.org/sqlite` (pure-Go SQLite, no cgo) gives "lifecycle-state
   change + outbox append = single atomic commit" cleanly, and fits the §1.1
   "single binary + local store, no heavy external dependency" deployment target.
-- **Team familiarity + the discarded impl was Go** — the rewrite reuses
-  institutional knowledge of the domain without reusing the code.
+- **Team familiarity** — existing domain and toolchain knowledge is in Go.
 
 ## Rejected / deferred
 

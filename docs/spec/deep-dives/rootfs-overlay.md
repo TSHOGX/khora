@@ -5,9 +5,6 @@
 > 结论背后的**证伪过程、参考实现证据、被排除的备选、要守住的 seam,以及仍待细化的议程**(D5)。
 >
 > **验证依据:** ECS 实测(runsc release-20260511.0、kernel 6.8、overlayfs 内核模块)。
-> **参考实现依据:** `ref-repo/sandbox0`（本仓外参考实现/调研,证据留存于外部,不作本仓依赖） 的
-> `ctld/internal/ctld/rootfs/`(overlay diff 提取)与 `tests/e2e/setup-gvisor-rootfs.sh`
-> (runsc overlay 配置)。
 
 ---
 
@@ -26,8 +23,7 @@ content-addressed diff 层是后续演进项(详见 D3)。**
 **已 ECS 端到端实测,三条要求全通过**:CoW 正确(改 lower 只落 upper,lower 字节未污染)、干净停后
 upper 是宿主普通目录树且 tar 出完整 diff 层、容器内 sha256 与停机后宿主直读逐字节一致;冷启重挂
 同一 upper、以及从 tar 出的 diff 解到全新 upper 重建,内容均逐字节一致(后者顺带证明 diff 层可
-提取/搬运/重建,是 D3 演进项的实测底气)。参考实现 `sandbox0`（本仓外参考实现/调研,证据留存于外部,不作本仓依赖） 从代码、
-runsc flag 到用户文档一致地走同一条外层 overlayfs 路径,是独立背书。
+提取/搬运/重建,是 D3 演进项的实测底气)。
 
 ---
 
@@ -53,40 +49,30 @@ runsc flag 到用户文档一致地走同一条外层 overlayfs 路径,是独立
 
 ---
 
-## D2. 参考实现怎么解:外层 overlayfs + content-addressed diff
+## D2. 演进目标:外层 overlayfs + content-addressed diff
 
-`sandbox0` 是 K8s/containerd 原生的 gVisor 沙箱运行时。它的持久化**完全不碰 runsc 的 overlay**,
-证据三处一致:
+留驻 upper 之上有一条成熟的演进路径,值得现在就想清楚,因为它决定了 §3.1.1 的抽象形状。它的持久化
+**完全不碰 runsc 的 overlay**,三步:
 
-**① runsc overlay 关掉**(`tests/e2e/setup-gvisor-rootfs.sh`):
-```toml
-[runsc_config]
-  overlay2 = "none"
-  file-access = "shared"
-```
-runsc 拿到的 rootfs 是**别人已经挂好的宿主内核 overlayfs 的 merged 目录**,经 gofer(`file-access=
-shared`)代理进 guest。
+**① runsc overlay 关掉**(`--overlay2=none --file-access=shared`):runsc 拿到的 rootfs 是**引擎在
+外面已经挂好的宿主内核 overlayfs 的 merged 目录**,经 gofer(`file-access=shared`)代理进 guest。
 
-**② upper 从 overlayfs snapshotter 拿**(`ctld/internal/ctld/rootfs/overlay_diff.go:57-84`):
-`snapshotter.Mounts(snapshotKey)` 返回的 mount options 里 `grep upperdir=` 拿到宿主真实路径——一个
-内核 overlayfs 的**普通 upper 目录树**,`filepath.Walk` 直接遍历得动(`:232` `walkOverlayUpper`)。
-这跟 gVisor 那个 unlink filestore 是两个世界。
+**② upper 是内核 overlayfs 的普通目录树**:merged mount 的 `upperdir=` 就是宿主上一个真实路径,可
+直接 `filepath.Walk` 遍历——与 gVisor 那个启动即 `unlink` 的 filestore 是两个世界(D1)。
 
-**③ 持久单元是 content-addressed diff,不是留驻的 upper**(`containerd_runtime.go`):
-- `CreateDiff`(:156)把 upper 提取成 OCI diff tar + `{MediaType, Digest, Size}` descriptor,
-  `PublishRootFSSnapshot` 推到 object store。
-- `ApplyDiff`(:229)resume/claim 时把 diff apply 回**新容器**的 live rootfs bind mount 上。
-- `CreateDiffFromBaseline`(:203)相对某 baseline 层做**增量** diff——天然分层。
+**③ 持久单元是 content-addressed diff,不是留驻的 upper**:
+- 把 upper 提取成 OCI diff tar + `{MediaType, Digest, Size}` descriptor,推到 object store。
+- resume/claim 时把 diff apply 回**新容器**的 live rootfs bind mount 上。
+- 相对某 baseline 层做**增量** diff——天然分层。
 
-**关键洞察**:参考实现的持久单元不是「一个一直躺在盘上的 upper 目录」,而是「一个内容寻址的
-diff 层」。**这恰恰印证了我们 §3.1.1 的赌注**——把 Overlay 定义成「ID 寻址、与宿主路径解耦的冻结
-层」而非「一直在本地盘的 upper」。它的能力和我们模型逐条对上,也正是我们把 diff 层留作演进项
-(D3 / D4 seam)的原因:
+**关键洞察**:持久单元不必是「一个一直躺在盘上的 upper 目录」,可以是「一个内容寻址的 diff 层」。
+**这正是我们 §3.1.1 的赌注**——把 Overlay 定义成「ID 寻址、与宿主路径解耦的冻结层」而非「一直在
+本地盘的 upper」。这套能力和我们模型逐条对上,也正是我们把 diff 层留作演进项(D3 / D4 seam)的原因:
 
-| 参考实现能力 | 怎么给 | 对应我们的 § |
+| diff 层能力 | 怎么给 | 对应我们的 § |
 | --- | --- | --- |
 | pause / resume | 最新 diff = latest checkpoint,resume 时 apply 回新容器 | §4.2 |
-| Promote → 分层 Template | `CreateDiffFromBaseline` 相对 baseline 做增量,层层叠 | §5.B Promote / 分层 Template |
+| Promote → 分层 Template | 相对 baseline 做增量,层层叠 | §5.B Promote / 分层 Template |
 | 跨 host 可移 | diff 是 object store 里的 OCI blob,不锁本地路径 | §5.B「纯文件层可移」+ §3.1.1 |
 | fork / clone | 从同一 diff/snapshot claim 多个沙箱 | §3.1 fork |
 | snapshot / restore | 命名 diff 记录,可 list/restore/delete | Promote 的超集 |
@@ -131,10 +117,10 @@ reflink 来补分层,那其实又滑回上面的 overlayfs 底层存储附带能
    本地目录」;diff 层 / multi-node(PV / 对象存储)是**注册另一个 FS provider 或换持久单元**,
    不改模型。参考实现把 diff 推 object store 正是这个 seam 的一种实现——按 D3,现在做留驻 upper,
    抽象要能容纳后续的 diff 层演进。
-3. **不引入 containerd**(与 §1.1「单二进制、无重型外部依赖」冲突):参考实现复用 containerd
-   overlayfs snapshotter 是因为它本就跑在 containerd 上。我们**在引擎内薄薄实现**「组装 overlayfs
-   +(演进期)提取 diff」这一层(逻辑可参考 `overlay_diff.go` / `containerd_runtime.go`,但不拉
-   整个 containerd 栈)。这层薄实现本身就是上面 seam 2 的 single-node provider。
+3. **不引入 containerd**(与 §1.1「单二进制、无重型外部依赖」冲突):复用 containerd overlayfs
+   snapshotter 只在已经跑在 containerd 上时才划算。我们**在引擎内薄薄实现**「组装 overlayfs
+   +(演进期)提取 diff」这一层,不拉整个 containerd 栈。这层薄实现本身就是上面 seam 2 的
+   single-node provider。
 
 ---
 
@@ -151,12 +137,11 @@ reflink 来补分层,那其实又滑回上面的 overlayfs 底层存储附带能
 - **pause flush 到一致点的时序**:字节一致性在"干净停(kill+delete)后"已验;仍需锁定的是 pause
   这个动作把 sentry/gofer 的写 flush 到 upper 的**精确一致点**(§4.2 静止点),确保 Promote/
   snapshot 读到的是完整状态而非半写。
-- **excluded paths / portal paths**:提取 Promote/snapshot 时要过滤掉一批路径(参考实现如
-  `/procd`)与 Volume 挂载点占位(§5.B「Promote 捕获只含 Overlay 树、Volume 挂载点是空占位」)。
-  精确清单待定。
+- **excluded paths / portal paths**:提取 Promote/snapshot 时要过滤掉引擎自身注入的运行时路径
+  (如 guest 内 daemon 的工作目录)与 Volume 挂载点占位(§5.B「Promote 捕获只含 Overlay 树、Volume
+  挂载点是空占位」)。精确清单待定。
 - **content-addressed diff 层(演进项,演进条件见 D3)**:落地时要实现 tar 提取 + baseline 增量 +
-  object store 接口(参考实现 `containerd_runtime.go` 的 `CreateDiff`/`ApplyDiff`/
-  `CreateDiffFromBaseline` 可作蓝本)。
+  object store 接口(能力映射见 D2)。
 
 ---
 

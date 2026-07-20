@@ -2,13 +2,11 @@
 
 > **定位:[`§5.E`](../subsystems.md)(spec,导航见 [`SPEC.md`](../SPEC.md))的传输层深挖文档。** spec 只明确 §5.E 的边界
 > (engine 只暴露 process / fs 两个无状态服务,session 语义在 engine 外);本文展开这条边界背后的
-> **选型理由、ACP 会话映射、要守住的 seam**,并给出 **wire 协议(D4,附 E2B envd / sandbox0 procd
-> 一手参照)** 与边界议程(D5)。
+> **选型理由、ACP 会话映射、要守住的 seam**,并给出 **wire 协议(D4)** 与边界议程(D5)。
 >
-> **调研依据:** `research/e2b-interface-research.md`（本仓外参考实现/调研,证据留存于外部,不作本仓依赖）、
-> `research/e2b-sandbox-access.md`（本仓外参考实现/调研,证据留存于外部,不作本仓依赖）、ACP 规范(Zed 的 Agent
-> Client Protocol)。tag / 命名端点为何不进模型的调研依据另见
-> `research/e2b-tag-study.md`（本仓外参考实现/调研,证据留存于外部,不作本仓依赖）。
+> **设计参照:** E2B `envd`(公开的沙箱守护进程,两服务收敛的先例)与 ACP(Zed 的 Agent Client
+> Protocol,coding agent 会话协议)。二者是公开可查的形态参照,不是本仓依赖;下文只取其**设计取向**,
+> 结论在此自洽陈述。
 
 ---
 
@@ -47,8 +45,7 @@ engine 里买任何单**。
 E2B 的 envd 守护进程只暴露两个 service:**Filesystem** 和 **Process**(PTY 并入 Process,
 不单独成 service)。理由是:沙箱里能做的一切,要么动文件系统、要么跑一个进程。把进程原语
 做足(可选 PTY + 双向流 + signal),则 **shell、命令执行、后台服务、jupyter kernel 全是
-"起一个进程"的特例**——不必为每种形态各开接口
-(见 e2b-interface-research §3.2 / §7.3（本仓外参考实现/调研,证据留存于外部,不作本仓依赖）)。
+"起一个进程"的特例**——不必为每种形态各开接口。
 
 据此,两个能力都定为 **Connect-RPC 服务**:
 
@@ -180,12 +177,11 @@ engine 外那层自己管**。
 
 载体已定(spec §5.E,经 ECS 验证):`sandboxd` 在 guest netns 里监听 TCP 端口,宿主经该
 netns 的 veth IP 直连——unary 走 HTTP、双向流走 h2c 流式(server-stream/client-stream)+ 即时 flush,
-不用 vsock;我们的框架是 Connect-RPC over h2c(D4.2),非裸 WebSocket duplex。`sandbox0`
-`procd` 同形态(netns 内 TCP HTTP server、双向流 WebSocket + `Flusher`)是参照实现背书。运维前提:冷启后
-**发现容器当前 netns IP** 再 dial——归 §5.A placement。wire 协议建在这层载体上。
+不用 vsock;我们的框架是 Connect-RPC over h2c(D4.2),非裸 WebSocket duplex。netns 内 TCP HTTP
+server + 双向流 WebSocket/h2c 带即时 flush 是成熟形态。运维前提:冷启后**发现容器当前 netns IP**
+再 dial——归 §5.A placement。wire 协议建在这层载体上。
 
-下面各条凡有一手参照都注明(E2B `envd` proto / `sandbox0` procd),刻意偏离参照的点明理由
-(对比见 plan-vs-reference-runtimes（本仓外参考实现/调研,证据留存于外部,不作本仓依赖） §11)。
+下面各条凡刻意偏离 E2B `envd` 的成熟形态,都点明理由。
 
 **通道信任模型:为什么 transport 不带通道内 auth(明确论证,非遗漏)。** `sandboxd` 在 guest netns 内
 **明文**监听、宿主经 veth IP 直连,通道本身不带 token / mTLS。这是攻击面分析的**结论**,不是漏项。逐一
@@ -216,7 +212,7 @@ provider 补,属 §5.A provider 的网络义务,不改本 wire 协议。
   | **输入**(stdin/pty-in,保序) | **client-stream** | `StreamInput` |
   | **控制**(信号/resize/列举/一次性写) | **unary** | `SendInput` / `SendSignal` / `Update` / `List` / `CloseStdin` |
 
-  E2B `envd`、`sandbox0` procd 两个独立实现都收敛到这个三分——**输出是 fan-out 多订阅(server-stream
+  多个独立实现都收敛到这个三分——**输出是 fan-out 多订阅(server-stream
   天然),输入是保序单写(client-stream 天然),控制是点操作(unary 天然)**。硬塞进一条 duplex 流会
   把三种不同的背压 / 保序 / 扇出语义揉成一根。D3 要守的 seam(流足够通用以承载 ACP JSON-RPC)由
   `Start`/`StreamInput` 这对双向能力满足,不需要 duplex。
@@ -244,8 +240,8 @@ RPC 清单(抄 E2B envd 形态;按 pid 寻址,tag 不进模型见 D4.6):
 单独成服务**:`Start` 带 `pty.size` 即 pty 特例,resize=`Update`,输入走 input 的 pty 分支。
 
 - **多连接扇出:输出广播,输入不仲裁。** §3.2「多路并发挂同一沙箱」落到单进程即"多个 `Connect` 挂
-  同一 pid"。**输出**:每个 attach 者各自拿到一份输出流拷贝(procd `MultiplexedChannel.Fork()` 是
-  现成样本——一个源 fan-out 到 N 个订阅者,退订不影响其余)。**输入**:engine **不**给多写者做仲裁 /
+  同一 pid"。**输出**:每个 attach 者各自拿到一份输出流拷贝(一个源 fan-out 到 N 个订阅者,退订
+  不影响其余)。**输入**:engine **不**给多写者做仲裁 /
   加锁——多个连接同时写一个 pty = 多人 `screen` 同一终端,字节交错是 Unix 本身的语义(§3.2「多人
   ssh 同一台机」);要不要协调是**产品层**的事,engine 只如实转发。这守住「engine 不为连接维护状态」
   (§5.E 无状态)。
@@ -254,10 +250,9 @@ RPC 清单(抄 E2B envd 形态;按 pid 寻址,tag 不进模型见 D4.6):
   扇出还有两条必须显式钉死的规则,否则一个卡住的前端能冻结 guest 里的真实进程:
   1. **慢订阅者非阻塞丢弃,源 `write` 永不阻塞。** 每个 live 订阅者有独立**有界**发送窗口;窗口溢出
      即对**该订阅者**非阻塞丢弃(可直接断开它),**背压绝不回传到源**(PTY/进程)。这把 §D1.3「裸
-     pty lossy」从模糊表述钉成可验收规则:lossy 的是**慢订阅者那一份拷贝**,不是源。procd 慢 WebSocket
-     消费者直接丢弃、绝不阻塞 PTY/主进程,是现成背书。
+     pty lossy」从模糊表述钉成可验收规则:lossy 的是**慢订阅者那一份拷贝**,不是源。
   2. **`Connect` 先回放有界环形缓冲、再接 live。** 每进程维护一个 **per-process、in-guest、按字节上界**
-     的输出环形缓冲(旧字节静默丢弃,procd「最近 N 条环形回放」同源);`Connect{pid}` **先把缓冲内近期
+     的输出环形缓冲(旧字节静默丢弃);`Connect{pid}` **先把缓冲内近期
      字节回放给新订阅者、再切入 live 流**。于是重连 / 刷新页面 / 多端挂载**立刻见最近状态而非空屏**——
      这正是 REPL / 交互式终端体验的刚需。
   - **这不破 §5.E「无状态」**:无状态约束的是**控制面不持久 SoT**(无进程注册表、不跨 resume 续命);
@@ -266,8 +261,8 @@ RPC 清单(抄 E2B envd 形态;按 pid 寻址,tag 不进模型见 D4.6):
   - **边界:engine 只保证 best-effort 字节 tail,不保证屏幕重建。** 裸字节回放可能落在 ANSI 转义序列
     中段;**完整屏幕状态重建(tmux/screen 式 reflow)是 engine 外 client/adapter 的活**,engine 不理解
     流内容(§D3 seam),不替终端发明它本不具备的语义(呼应 §D2「PTY 不落 scrollback 文件」)。
-- **信号默认发进程组,可寻址单进程。** `SendSignal` 默认对**进程目标的进程组**发(procd
-  `process.go:478`「send to the process group, falling back to the PID」),因为 `apt`/build/
+- **信号默认发进程组,可寻址单进程。** `SendSignal` 默认对**进程目标的进程组**发(先 `kill(-pgid)`、
+  fallback `kill(pid)`),因为 `apt`/build/
   dev-server 都 fork 子树,只杀父会留一堆孤儿。这兑现 spec §5.E.1 的分工:**定向信号(单进程/进程
   组)是 transport 模式 `sandboxd` 的活**(它握 pid/pgid 句柄),也是 spec §4.2 协作式静止点「向
   guest 内进程发协作信号」的落点;**容器级信号扇出**(SIGTERM → 全体)不在此 RPC,归 PID1(§5.E.1)。
@@ -289,16 +284,16 @@ RPC 清单:全 unary + 大文件 multipart 旁路,不做 watch(抄 E2B 除 watch
 
 ### D4.5 liveness / readiness:一个 `Health` 探针
 
-`sandboxd` transport 模式暴露一个 unary `Health{}`→`{ok}`(procd 有 `/healthz`/`/readyz`/
-`/sandbox-probes` 先例)。它一处两用,不另造协议:transport 探活探针(spec §4.3 两层探活的
+`sandboxd` transport 模式暴露一个 unary `Health{}`→`{ok}`。它一处两用,不另造协议:transport 探活
+探针(spec §4.3 两层探活的
 transport 层)与 resume readiness 门(guest-runtime D5.2 要点①:首次 `Health` 成功即翻 `running`,不信
 裸 TCP accept)。**用专门的 `Health` 而非 `process.List` 兜底**——`Health` 恒定开销、不列进程,探活
 开销不随进程数偏移。
 
 ### D4.6 三条刻意偏离
 
-- **不引入 tag 寻址**:E2B `ProcessSelector{pid|tag}` 有 tag,我们**只 pid**(guest 原生),tag 不进
-  模型(依据 e2b-tag-study（本仓外参考实现/调研,证据留存于外部,不作本仓依赖）;§1.1)。
+- **不引入 tag 寻址**:E2B `ProcessSelector{pid|tag}` 有 tag,我们**只 pid**(guest 原生)。tag 是
+  引擎之上的命名空间,属产品层数据、不进模型(§1.1;§3.2.1 名字是数据不是引擎原语)。
 - **不引入 session/control payload**:`control`(agent 会话)是 engine 外 session 层的协议,不是 engine 的
   payload(全论证见 D1.2)。
 - **不引入 payload 类型系统**:jupyter/file/cli 都是 process/fs 上拼出来的,engine 侧无 payload

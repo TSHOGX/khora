@@ -113,11 +113,10 @@ reparent 到 `sandboxd` 而非 PID 1——不当 PID 1 也能收割自己关心�
 **落地形态:一个二进制两个模式**(init 模式 PID 1 经 `/proc/self/exe` re-exec 出 transport 模式子进程),
 完整拓扑图见 spec §5.E.1。
 
-### D4.3 从 procd 借什么、拒什么
+### D4.3 transport 模式要落的三样机制,和一个要拒的模型
 
-参考实现 sandbox0 的 procd 只是 runsc/pod 下一个收 `SIGTERM` 优雅退出的 HTTP 子进程——**它不当
-PID 1、也不 reaper**(其 reaper 调用在源码里是注释掉的,shutdown 只做进程 cleanup)。所以**收割
-语义不能抄 procd,只能靠 D4.1 自研 + tini checklist**。可从 procd 借的是三样:
+收割语义无处可抄——它必须靠 D4.1 自研 + tini checklist。但 transport 模式要落的另外三样机制是成熟的
+进程管理套路,现在就锁定形状:
 
 - **每进程监督状态机**:per-process 一个 `cmd.Wait()` 的 monitor goroutine + 状态枚举
   (running/stopped/killed/crashed)+ exit/start handler。
@@ -127,9 +126,10 @@ PID 1、也不 reaper**(其 reaper 调用在源码里是注释掉的,shutdown �
 - **drain-barrier**:pause/resume 前用一道 barrier 挡住 in-flight mutating RPC、等其排空——正是 D4.4
   协作式静止点、D5.2 单飞守卫要的原语。
 
-**拒**的是 procd 的 `epoch` / `runtimeGeneration` identity 模型:引擎不引入独立世代计数,用 spec
-§3.3/§4.3 的 placement/IP-as-epoch 替代(spec §「引擎词汇边界」点名 procd 是 `generation` 最易被带回
-的入口)。禁词表拦得住词、拦不住概念——drain-barrier 的**排空逻辑**要、它挂的 **generation 标签**不要。
+**要拒的是"独立世代计数"identity 模型**(常见于分布式 init/supervisor:给每次运行挂一个
+`epoch`/`generation` 标签辨识陈旧实例)。引擎不引入它,用 spec §3.3/§4.3 的 placement/IP-as-epoch
+替代(spec §「引擎词汇边界」点名 `generation` 是最易被带回的概念)。禁词表拦得住词、拦不住概念
+——drain-barrier 的**排空逻辑**要、任何往它上面挂 **generation 标签**的做法不要。
 
 **信号目标天然分裂**:定向信号(单进程 / 进程组,spec §4.2 协作式静止点、§5.E 信号通道)归
 **transport 模式**(它握 pid/pgid 句柄);容器级信号扇出(runsc 收 `SIGTERM` → 转发子进程)归 **PID 1**。
@@ -192,8 +192,8 @@ tini 的语义权威,前提是**它只有一个子进程、自己永不被重启
   未接手)划分翻转——后代短暂 reparent 到 PID 1、由 PID 1 收(正是 C2 的成因)。这条瞬态契约要显式
   写清,别默认"transport 永远在收自己后代"。
 
-> C1 可照抄 procd 的 pgid 非对称;C2/C3 是 procd 遇不到的(它不当 PID 1、不被监督重启),属本引擎
-> "独立 PID 1 + 监督重启"拓扑的新增议程,参考实现里没有。
+> C1(pgid 非对称)是成熟套路;C2/C3 只在**"独立 PID 1 + 监督重启"**拓扑下才出现(一个不当 PID 1、
+> 不被监督重启的普通 HTTP 子进程遇不到它们),是本引擎这套拓扑的新增议程。
 
 ---
 

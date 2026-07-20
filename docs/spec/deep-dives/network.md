@@ -6,11 +6,6 @@
 > 凭证三层分解);本文展开那个真正查策略、注凭证、按需 MITM 的 **egress 数据面(gateway)如何分层**——
 > 解成三个独立可换点 + 两条薄契约,并给出要守的 invariant 与仍待细化的议程。
 >
-> **参考实现依据:** `ref-repo/sandbox0`（本仓外参考实现/调研,证据留存于外部,不作本仓依赖） 的 `netd/`(egress 代理 + nft/TPROXY
-> 引流)、`pkg/egressauth/`(凭证 resolve/projection)、`manager/pkg/network`、
-> `manager/procd/pkg/trust/netd_mitm.go`(guest 信任注入)。**单向借鉴(只取机制),不取其分布式架构**
-> (netd 的 K8s DaemonSet 形态是其分布式部署的产物,不移植;见 D1)。
->
 > **编号约定:** 本文自己的节用 `D` 前缀(D1、D3.2…);`§` 一律指 spec 的全局章节(§5.D 等),两套不混。
 
 ---
@@ -62,11 +57,11 @@
 单机"就只是第 1 件(引流)的一种取值,不牵动另两件**——同一台 local_runsc 上就能把 builtin 换成 Envoy
 (只动第 2 件),换 provider 也不动数据面逻辑(只动第 1 件)。本文其余部分把这三件的接缝锁定。
 
-> **参考实现的启示与边界(单向借鉴)。** sandbox0 的 `netd` 把这三件焊进一个 per-node K8s DaemonSet
-> ——这是它分布式部署的产物,不是这三件本该在一起。它的分布式形态(DaemonSet / annotation 下发 /
-> informer / applied-hash 握手 / resolve-over-HTTP / PG NOTIFY / operator)**全是 K8s 传输 plumbing,
-> 不移植**;单机换成本地 channel / 进程内事件即可。移植的只有机制内核:TPROXY 引流、classify→decide→
-> 转发核、egress-auth 的 alias/projection/cache/watermark 失效、guest CA 注入。
+> **一个反面教训(为什么现在就分)。** 分布式 egress 实现常把这三件焊进一个 per-node daemon——那是
+> **分布式部署的产物**,不是这三件本该在一起。随之而来的一整套形态(节点级 daemon / annotation 下发 /
+> informer / applied-hash 握手 / resolve-over-HTTP / 数据库 NOTIFY / operator)**全是分布式传输
+> plumbing**,单机不需要,换成本地 channel / 进程内事件即可。真正的机制内核只有四样:TPROXY 引流、
+> classify→decide→转发核、凭证 alias/projection/cache/watermark 失效、guest CA 注入。
 
 ---
 
@@ -81,7 +76,7 @@ D1 第 2 件(数据面)与第 1 件(引流)是两根**正交**的轴,不能合�
 
 两轴正交的证据:**{builtin, Envoy} × {宿主进程, K8s sidecar} 每一格都是可独立注册的配置**——换行为不动
 引流、换引流不动行为。一旦把 gateway 塞进 runtime provider 接口当"物化的一部分",两根轴被焊成一根,
-四格退化成对角线两格(只剩"单机+builtin""K8s+Envoy"),这正是 netd 的病。
+四格退化成对角线两格(只剩"单机+builtin""K8s+Envoy"),这正是把 gateway 焊进 provider 的病。
 
 **但正交是接口层的可分离,不是能力无关**:每一格**能做到的行为上限**受该引流暴露的劫持能力约束
 (见 D0 注、D3.2)。"能独立注册"与"注册进来就什么都能做"是两回事——接口把两轴解开,让它们能各自替换
@@ -303,12 +298,12 @@ gateway seam 的接口有个边界抉择:**协议分类(classify)+ 策略求值(
 但"按语义强制"有**两种模式**,不能退化成一句"数据面只执行"——它们对接口的要求不同:
 
 - **模式 1 · 内联求值(builtin 走这条)**:数据面**逐连接调用引擎的 classify/decide 函数**拿裁决,自己
-  只做转发+注入。策略语义 100% 由引擎那份 reference 实现产生,零偏移。纯逻辑、无宿主/K8s 耦合,可原样从
-  sandbox0 机制内核移植。**接口要求**:引擎把 classify/decide 暴露成数据面可调用的裁决函数。
+  只做转发+注入。策略语义 100% 由引擎那份 reference 实现产生,零偏移。纯逻辑、无宿主/K8s 耦合。
+  **接口要求**:引擎把 classify/decide 暴露成数据面可调用的裁决函数。
 - **模式 2 · 编译下发(Envoy / 商用网关走这条)**:引擎把策略 schema **编译**成实现的原生配置
   (Envoy RBAC/filter、nft 集…),裁决在实现内部用它自己的引擎跑。**语义等价靠"编译器正确"担保,而非
   逐连接回调**。**接口要求**:引擎提供 policy→native-config 的编译产物 + 一个一致性校验点(编译后语义
-  必须等价于 reference,否则拒绝上线——类比 sandbox0 applied-hash 回写握手)。
+  必须等价于 reference,否则拒绝上线——例如编译后回写一个 applied-hash 供控制面校验已生效配置)。
 
 **两种模式策略权威都在 §5.D**:模式 1 靠内联同一份实现,模式 2 靠"编译等价 + 校验"。关键是**编译器是引擎
 的资产、不是各实现自研**——否则策略语义随实现偏移,破 §5.D 权威。接口取向随之定:gateway seam 不是"给你
@@ -338,7 +333,7 @@ gateway seam 的接口有个边界抉择:**协议分类(classify)+ 策略求值(
   (如 body 替换要求已知 Content-Length、非压缩、≤1MiB)待定。
 - **guest 信任注入**(仅当"TLS-terminate 注入"模式被选中才需要):CA **证书**(非私钥)投进 guest、
   私钥留数据面、guest 导出 `SSL_CERT_FILE`/`NODE_EXTRA_CA_CERTS`/`REQUESTS_CA_BUNDLE`/`CURL_CA_BUNDLE`
-  等一串环境变量(sandbox0 的 procd 机制)。这是 placement-local 的 guest-provisioning 叶子,落 §5.B
+  等一串环境变量指向它。这是 placement-local 的 guest-provisioning 叶子,落 §5.B
   模板默认 / §5.E.1 `sandboxd` 启动。
 - **resolve 契约的精确 schema**:directives 的具体形态、目标上下文字段、失效信号的投递(NOTIFY 类
   推送 vs 数据面轮询)。
