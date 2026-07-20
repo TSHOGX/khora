@@ -70,7 +70,9 @@ agent),共享同一 FS 与网络。
 > 够新)。这是 systrap 的固有门槛,凡能跑 gVisor 的平台即满足,本计划当作既定前提,不再赘述。
 
 > **两条底线:no-hypervisor + 可移植性。** 任何"用可移植性换性能"的决定一律**拒绝,或藏到
-> provider 后面做成可插拔**(§5.A)。注意这是两条独立的约束:no-hypervisor 管"不要 KVM/嵌套
+> provider 后面做成可插拔**(§5.A)。platform 即"可插拔"的一例:唯一实现 `local_runsc` 把它 pin 成
+> `--platform=systrap`、不吃 runsc 默认(默认跨版本会漂移,§5.A),别的 provider 可另选。注意这是两条
+> 独立的约束:no-hypervisor 管"不要 KVM/嵌套
 > 虚拟化";**不存内存(§4.2)则是可移植性约束的结果**——内存 checkpoint 会把状态锁死在特定
 > CPU-feature 上(§2.5),持久态便不再能跨 host/CPU 自由搬(§1.5#3)。所以 resume 是冷启秒级而非
 > 亚秒。(gVisor 本身在 systrap 下能做 checkpoint、并不需要 hypervisor;我们不做它,是为可移植性,

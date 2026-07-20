@@ -48,9 +48,22 @@
     端点, 生命周期控制 stop/start)`。**引流要求**是 §5.D 给的 ingress 描述符 + default-deny(把
     egress 全量引导进引擎数据面,§5.D),不是完整网络策略——策略 enforcement 与凭证注入在引擎数据面里,
     不在 provider。
-  今天唯一实现 `local_runsc` 把引流要求物化成 nft+netns、把 §3.4 的资源上限物化成 cgroup。provider 是
-  **引流与资源上限的物化方**,不碰策略权威、不进 resolve 路径(§5.D)。**多 node / 调度 / 跨宿主因此
-  天然位于未来某个 provider 内,核心模型不感知**(§1.1 / §1.3:provider 是 registry 的一种实现)。
+  今天唯一实现 `local_runsc` 把引流要求物化成 nft+netns、把 §3.4 的资源上限物化成 cgroup(cgroupfs
+  driver、引擎自持层级并随 placement 回收——单二进制下无 systemd scope 代管,故孤儿 cgroup 即孤儿
+  placement,§4.4-A 周期对账兜底)。provider 是**引流与资源上限的物化方**,不碰策略权威、不进 resolve
+  路径(§5.D)。**多 node / 调度 / 跨宿主因此天然位于未来某个 provider 内,核心模型不感知**(§1.1 /
+  §1.3:provider 是 registry 的一种实现)。
+- **`local_runsc` 钉死其依赖的整套 runsc flag、不继承默认**——每个键对一条既定保证,`runsc` 的默认值
+  跨版本会漂移,而 §5.B 的**跨 runsc 版本可移性**不能建立在"默认不变"上:
+  - `--platform=systrap` —— §1.1 no-hypervisor(已是 spec 前提,此处只是把它 pin 死;platform 本身
+    仍可插拔,别的 provider 可选 KVM,§1.1)。
+  - `--network=sandbox`(userspace netstack)—— `host`/hostinet 让 sentry 直用宿主 socket、syscall
+    直透宿主内核,**违反 §2 substrate ①**(故否决,非"另一可选模式");且它是 §5.D 引流(per-sandbox
+    netns+nft/TPROXY)与 §5.E transport 契约(netstack 下实测)的前提。
+  - `--overlay2=none --file-access=shared` —— §5.B/§5.C 持久层不靠 runsc 自管 overlay、gofer 代理宿主
+    目录(已钉)。
+  - `--systemd-cgroup=false` —— 承上条 cgroupfs driver。
+  精确 argv 属 provider 实现细节,不进本节;本节只固定"哪些键承重、各对哪条 §保证"。
 - **不含**:FS/rootfs 构成与固化(→ B)、Volume 挂载语义(→ C)、网络策略本身(→ D)、
   宿主↔guest I/O 通道(→ E)。
 
