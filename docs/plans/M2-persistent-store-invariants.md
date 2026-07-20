@@ -85,9 +85,10 @@ M3)。但**不能一律回收**:§4.4-A 说 `running` 沙箱的**活** placement
 - `running` → **探活其隔离单元**:**活** → `Adopt` 重建句柄 + 重发现端点,填回 live-map,**留 `running`**
   (同一 placement、同一 IP,**不是 resume、不换 epoch**);**死** → CAS 降 `paused`(§4.2 非自愿 pause),
   半建 placement 归孤儿回收。
-- 不支撑任一上述记录的 placement = **孤儿** → `ReclaimOrphans` 拆:反向依赖序 runsc kill/delete →
-  overlay umount(mediator 侧,**按 target 路径 scope,绝不按 `-t overlay` 类型**)→ `ip netns del`
-  (级联对端 veth)。持久态(upper 目录)**分毫不动**。
+- 不支撑任一上述记录的 placement = **孤儿** → 拆除:mediator 先力拆(`MNT_DETACH`)孤儿 merged
+  overlay(**按 target 路径 scope,绝不按 `-t overlay` 类型**),再由 `ReclaimOrphans` 做 runsc
+  kill/delete → `ip netns del`(级联对端 veth)。启动对账无进程内句柄,overlay-umount 早于 runsc-kill
+  安全(力拆只摘 mount、内核延迟回收、upper 不碰;详见 §4.4-A「回收次序」)。持久态(upper 目录)**分毫不动**。
 
 接管是正确性、不是优化(理由在 spec §4.4-A「另一半」):不接管则存活 `running` 沙箱**失联**——引擎握不到
 句柄,此后 destroy 漏拆活容器(泄漏)、transport 代理因"无活 placement"失败。

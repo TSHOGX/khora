@@ -440,10 +440,16 @@ func (m *Mediator) Reconcile(ctx context.Context) error {
 	// reclaim every engine placement not backing a kept sandbox: orphans from
 	// crashed create/resume + placements of cleanly-demoted-to-paused sandboxes
 	// (§4.4-A 持久态分毫不动 — only placement, never a kept upper). The mediator has
-	// already unmounted orphan Overlay mounts above (reverse-dep order: runsc →
-	// overlay umount → netns; overlay umount is mediator-side, the provider then
-	// does runsc→netns). Reclaim failure is logged, not fatal — the placement
-	// stays leaked and is retried next boot.
+	// already force-detached (MNT_DETACH) the orphan Overlay mounts in the loop
+	// above; ReclaimOrphans then does runsc kill → veth → netns. At STARTUP
+	// reconcile this overlay-umount-before-runsc-kill order is deliberate and safe
+	// (§4.4-A 回收次序): the mediator has no live placement handle, only a table
+	// scan, and the orphan is being torn down regardless — a lazy detach just
+	// unhooks the mount, the kernel reclaims it when the container's last ref
+	// drops, and the upper is never touched. (The live Destroy path DOES hold the
+	// handle and uses strict reverse-dep order: runsc destroy → overlay umount.)
+	// Reclaim failure is logged, not fatal — the placement stays leaked and is
+	// retried next boot.
 	if err := m.deps.Runtime.ReclaimOrphans(ctx, keep); err != nil {
 		m.deps.Logf("reconcile: reclaim orphans (retried next boot): %v", err)
 	}

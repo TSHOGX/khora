@@ -307,6 +307,13 @@ placement/IP-as-epoch(§4.3)正交,**不重新引入世代计数**。
 D5 的 workdir/upper 孤儿是其一个特例;触发时机(仅启动 vs 周期)、与 §4.4-B 锁的协调、如何枚举本机
 netns/IP/nft/gateway/overlay-mount 及批量策略见 [`open-decisions.md`](./open-decisions.md)。
 
+**回收次序:活路径严格反向依赖序,启动对账力拆在前。** 活着的 `destroy`/`pause` 握着进程内 placement
+句柄,按严格反向依赖序拆(runsc → overlay umount → netns),干净卸载。**启动对账没有进程内句柄**,只有
+一张本地表:它逐条**先力拆(`MNT_DETACH`)孤儿 merged mount**、再由 provider `ReclaimOrphans` 做
+runsc kill → veth → netns。此时 overlay-umount 早于 runsc-kill 是**安全的**——孤儿无论如何都要拆,力拆
+只把 mount 从命名空间摘下、内核在容器最后一个引用释放时才真正回收,**upper 分毫不动**(§4.4-A 持久态
+不碰)。故两条路径的次序刻意不同:活路径求干净,启动对账求"一次扫描拆净、不阻塞在忙 mount 上"。
+
 **A 崩溃变体的另一半 —— 对存活的 `running` placement 重新接管句柄,不是回收。** 上面的反向对账只讲了
 "回收孤儿";但一个 `running` 沙箱的**活** placement **本就不是孤儿**(它支撑一个 store 应持有 placement
 的沙箱),不该被回收。崩溃后真正缺的是:orchestrator 的进程内 placement 句柄(端点、provider 私有 handle)
