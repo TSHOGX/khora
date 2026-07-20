@@ -47,7 +47,22 @@ the machine can't reach).
 | runsc systrap, no KVM, guest uid=0 | OrbStack `sbx` | **arm64** | validated (this ADR) |
 | overlayfs + netns + cgroup v2 present & usable | OrbStack `sbx` | **arm64** | validated |
 
+### Measured baseline on `sbx` (recorded facts, not a decision change)
+
+The above matrix was later pinned to concrete values measured on the machine.
+These calibrate the matrix; the decision (develop/test on `sbx` + systrap) is
+unchanged.
+
+| Fact | Measured value |
+| --- | --- |
+| arch / kernel | arm64 · `7.0.11-orbstack` |
+| runsc | `release-20260714.0` (spec 1.2.1), systrap, no KVM |
+| overlay module / cgroup | overlay present · cgroup **v2** (cgroup2fs) |
+| engine scratch fs | **btrfs** on `/dev/vdb1` at `/home/hsw/engine` — native, not virtiofs |
+| btrfs reflink | `cp --reflink=always` works → §5.B CoW snapshot/clone is cheap here (M6 uses it; substrate ready now) |
+
 **Caveat.** `sbx` is arm64; the ECS validations were amd64. M1 running on arm64
 re-confirms the overlay + netns facts on a *second* architecture (a plus, not a
 risk). **Before production, re-validate the substrate facts on amd64.** Go
-cross-compiles cleanly, so this is an environment check, not a code port.
+cross-compiles cleanly, so this is an environment check, not a code port — and
+therefore **out of M1 scope**, not an M1 acceptance gate.

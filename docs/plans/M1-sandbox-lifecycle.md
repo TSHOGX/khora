@@ -153,14 +153,40 @@ canonical 链(D5.1)是 ①–⑦,`create` 与 `resume` 共享,只差前缀与失
 
 ## 6. Definition of Ready:开工前先备好(preflight)
 
-这些是踩起来最贵、又最容易漏的前置条件。开工任务 A 之前先各跑一遍确认——**它们不通,后面每一步都在流沙上**:
+**开发与验证都在本机跑**——Claude Code 就在 ADR-0002 的 `sbx`(OrbStack Linux machine)里,`sbx` 即本机,
+不是远端目标。build→run→test 的整条环是本地闭合:`go build && go vet && go test` 直接在 `/home/hsw/engine`
+下跑真 runsc。所以下面不写「部署到 sbx」,只写「本机要备好什么」。
+
+### 6.1 已知良好 baseline(实测,非待办)
+
+这些是本机已核实的 substrate 事实(回填进 ADR-0002 验证矩阵),M1 建立在它们之上,**开工不必再验**:
+
+| 事实 | 实测值 | 支撑 § |
+| --- | --- | --- |
+| 架构 / 内核 | **arm64**,kernel 7.0.11(orbstack) | ADR-0002 |
+| runsc | `release-20260714.0`(spec 1.2.1),systrap 可用、无 KVM | §1.1 / §2.5 |
+| overlayfs / cgroup | overlay 内核模块在、cgroup **v2**(cgroup2fs) | §5.A / §5.B |
+| scratch fs | 引擎在 `/home/hsw/engine`,后端 **btrfs**(`/dev/vdb1`),native fs——**非** virtiofs | `CLAUDE.md` 执行约束 / §5.B |
+| btrfs reflink | 可用(`cp --reflink=always` 成功)——§5.B「底层存储 CoW 附带能力」在本机现成,snapshot/clone 廉价(M6 才用,但地基已就位) | §5.B |
+
+> **arm64 单架构说明(纠正:这不是 M1 的门)。** ADR-0002 §Caveat 已定:`sbx` 是 arm64,ECS 的 overlay/
+> transport 事实是 amd64 验的;**M1 在 arm64 上跑 = 在第二个架构上再确认这些事实(是加分,不是风险)**。
+> **amd64 复验是 production 前的环境检查(Go 干净交叉编译,是环境事,非代码移植),整体在 M1 scope 外**——
+> 故不进本 preflight,也不当 M1 验收门。
+
+### 6.2 真正的开工前置(genuine gates)
+
+baseline 之外,这三件不备好、任务 A 就会在流沙上——踩起来贵、又最容易漏:
 
 | # | 前置 | 为什么必须先钉 | 判定 |
 | --- | --- | --- | --- |
-| R1 | **overlay 全链落在 native fs,不在 virtiofs 共享盘** | overlayfs upper/work 在 virtiofs 上不工作(`CLAUDE.md` 执行约束);引擎代码 + 全部 overlay scratch 都要在 `sbx` 的 native fs | 在选定 scratch 目录上真跑一次 overlayfs mount + 写入,成功 |
-| R2 | **runsc 就绪 + flag 契约可兑现** | §5.A 钉死整套 flag、不吃默认;默认跨版本漂移,§5.B 可移性不能建在「默认不变」上 | `runsc --version` 记录版本;`--platform=systrap` `--network=sandbox` `--overlay2=none --file-access=shared` `--systemd-cgroup=false` 能被本机 runsc 接受 |
-| R3 | **可重复的清理脚本(teardown)** | 竖切反复跑会留孤儿 netns/veth/mount/cgroup/runsc 容器;不能清就没法重复验证,也预演了 §4.4-A 的对账语义 | 一条脚本枚举并拆掉本机由本引擎建的 netns/veth/overlay-mount/runsc 容器,幂等 |
-| R4 | **arm64/amd64 复验说明就位** | ADR-0002 要求跨架构复验;M1 是 substrate 竖切,架构相关坑要早暴露 | 按 ADR-0002 记录复验计划,不在此复述 |
+| R1 | **最简 guest rootfs + 一个 Template 目录**(本机还没有——只有 `internal/rootfs` 包,无实际 rootfs) | 竖切的 lower 底座。从本机自身 userland 构建(ADR-0002「No Docker」),**必须复刻 usrmerge**(`/bin`→`usr/bin`、`/lib`→`usr/lib`;本机自身就是这个布局,照抄)——漏了 guest 二进制加载即失败 | 一个 rootfs 目录,runsc 能拿它当 lower 冷启、guest 内能 `exec /bin/sh` |
+| R2 | **可重复的清理脚本(teardown)** | 竖切反复跑会留孤儿 netns/veth/overlay-mount/cgroup/runsc 容器;不能清就没法重复验证,也预演了 §4.4-A 的对账语义 | 一条脚本枚举并拆掉本机由本引擎建的 netns/veth/overlay-mount/runsc 容器,幂等 |
+| R3 | **flag 契约冒烟**(承 §6.1 runsc 已在) | §5.A 钉死整套 flag、不吃默认;默认跨版本漂移,§5.B 可移性不能建在「默认不变」上 | `--platform=systrap` `--network=sandbox` `--overlay2=none --file-access=shared` `--systemd-cgroup=false` 组合能拉起一个最简容器 |
+
+> **DoH DNS pin(本机已在,构建 rootfs 时留意)。** macOS host 的 VPN 劫持全部明文 DNS(ADR-0002),本机靠
+> `/etc/hosts` 里的 `# sbx-doh-pin` 块兜底(已存在)。M1 沙箱内 network=none,**guest 不出网**,故这条主要
+> 只影响**构建 rootfs 时**若要 `apt`/下载——真实 IP 轮换时按 ADR-0002 重新 pin。列此防踩,不是 M1 gate。
 
 R1–R3 各写成 `test/` 下一个可重跑的 preflight 检查,任务 F 的 e2e 复用它们做 setup/teardown。
 
@@ -180,7 +206,7 @@ retire 掉 substrate 集成风险,再自底向上把各 seam 落成真实现,最
 | **C** | **`local_runsc` runtime provider**:`Launch`(建最简 netns/veth + 拉 runsc + ⑥ 发现 IP)/ `Stop` / `Destroy`,契约式不泄漏宿主原语;flag 按 R2 契约钉死 | `internal/runtime` | 1、5(§5.A / §3.3 IP 重绑) | Launch 返回带 `TransportEndpoint` 的 placement;Stop 释放 RAM/CPU、upper 不动;Destroy 拆净 placement-local 资源 |
 | **D** | **transport 两端实现**(填 S 的 stub):`sandboxd` init 模式(PID1 reaper/信号/re-exec/监督)+ transport 模式(netns TCP server 接 `process`/`fs`/`Health`);宿主侧 `transport.Client` | `cmd/sandboxd` + `internal/transport` | 3(§5.E / §5.E.1 / D4) | `Start /bin/sh` 流回 stdout;`Write`+`Read` 往返一致;PID1 能原地重启 transport 子进程 |
 | **E** | **`lifecycle` mediator**:`Create`/`Pause`/`Resume`/`Destroy` 按 ①④⑤⑥⑦ 编排,转换锁全程持有 + CAS 前置校验 + **失败 unwind 回源态**(§5 失败出口) | `internal/lifecycle` | 4(§4 / §4.4-A/B) | 四个动词端到端可驱动;并发 destroy 在 resume 持锁期拿不到锁;拉起失败 resume 退 `paused`、create 删记录 |
-| **F** | **orchestrator 装配 + e2e 验收**:`cmd/orchestrator` 装配 `store.Memory`+两个 provider+mediator、暴露最简 §6.1 API;`test/` 写 §8 断言脚本,在 `sbx` 真跑 runsc,复用 R1–R3 preflight | `cmd/orchestrator` + `test/` | DoD 封口 | §8 断言全绿 |
+| **F** | **orchestrator 装配 + e2e 验收**:`cmd/orchestrator` 装配 `store.Memory`+两个 provider+mediator、暴露最简 §6.1 API;`test/` 写 §8 断言脚本,本机真跑 runsc,复用 R1–R3 preflight | `cmd/orchestrator` + `test/` | DoD 封口 | §8 断言全绿 |
 
 次序说明:A 一次性买断 substrate 集成风险,其产物是活规格;S 定死 wire 契约,让 D 的两端从同一 IDL
 生成、同步开发;B→C→D 自底向上落实现;E 串成动词并真做失败 unwind;F 封口。**A 与 S 无依赖,可并行起步**;
@@ -195,18 +221,18 @@ D 依赖 S(拿 stub)与 A(拿拓扑)。
 
 - **L1 seam 单测(纯逻辑,不碰 substrate)**:`store.Memory` 的 CAS 语义(expected≠current → `ErrConflict`)、
   mediator 的转换锁互斥 + CAS 前置校验、失败 unwind 的清理次序(用 fake provider 注入失败,断言半建资源被拆、
-  态回源)。这层跑得快、不依赖 `sbx`,是关节 4 的主要证据。
-- **L2 子系统集成(在 `sbx`,单子系统)**:rootfs provider 真拼 overlayfs(断言 CoW + 重挂字节一致);
+  态回源)。这层跑得快、不碰 substrate(runsc/overlay),是关节 4 的主要证据。
+- **L2 子系统集成(碰 substrate,单子系统)**:rootfs provider 真拼 overlayfs(断言 CoW + 重挂字节一致);
   local_runsc 真拉 runsc(断言 Launch/Stop/Destroy + IP 发现);transport 两端真跑一次 `Start`/`Write`/`Read`。
-- **L3 e2e 竖切(在 `sbx`,全链)**:§8.1 的 happy-path 八条断言。
-- **L4 故障注入(在 `sbx`,风险接缝)**:§8.2——冷启失败 unwind。这是 M1 唯一强制的故障注入,
+- **L3 e2e 竖切(全链真 runsc)**:§8.1 的 happy-path 八条断言。
+- **L4 故障注入(风险接缝)**:§8.2——冷启失败 unwind。这是 M1 唯一强制的故障注入,
   因为冷启链是 M1 最危险的接缝。
 
 ---
 
 ## 9. 验收(可执行的 DoD)
 
-在 ADR-0002 的 `sbx` 上真跑 runsc,复用 §6 的 R1–R3 preflight 做 setup/teardown。**全绿 = walking
+本机真跑 runsc,复用 §6 的 R1–R3 preflight 做 setup/teardown。**全绿 = walking
 skeleton 成立**。每条标出它证明五关节里的哪一个。
 
 ### 9.1 happy-path 竖切(L3)
@@ -228,13 +254,13 @@ happy path 只证明「顺的时候通」;关节 4 的一半是「不顺的时�
 
 | # | 断言 | 层 | 证明关节 |
 | --- | --- | --- | --- |
-| A9 | **冷启失败原子退回**:注入 ④/⑦ 失败(runsc 拉不起 / Health 永不通并超时)→ 半建 placement(netns/veth/overlay mount)被回收、持久态(upper)完好;**resume** 场景态回到 `paused`,**create** 场景删记录 → `destroyed`;无 `failed` 中间态 | L4(`sbx`)+ L1(fake provider) | 4(§4.4-A / D5.2 要点④) |
+| A9 | **冷启失败原子退回**:注入 ④/⑦ 失败(runsc 拉不起 / Health 永不通并超时)→ 半建 placement(netns/veth/overlay mount)被回收、持久态(upper)完好;**resume** 场景态回到 `paused`,**create** 场景删记录 → `destroyed`;无 `failed` 中间态 | L4(真 runsc)+ L1(fake provider) | 4(§4.4-A / D5.2 要点④) |
 | A10 | **CAS + 锁 shape**:对 `paused` 沙箱并发发 `resume` 与 `destroy`——先拿锁者推进,另一者阻塞等锁、对已变的态重做 CAS 被拒(`ErrConflict`);且 resume 持锁期间 destroy 拿不到锁,不会删正被冷启的 upper | L1(mediator 单测) | 4(§4.4-B) |
 
 > A10 只验**形状**(锁互斥 + CAS 前置校验对);真并发压测、outbox、崩溃重启对账是 M2 配故障注入做,不越界(§3)。
 
 任何一条红都在评审门停下,按 `CLAUDE.md`「失败两次就 root-cause、不打补丁」做系统性分析。
-验证前置(`go build` / `go vet` + `sbx` 上真跑)与 arm64/amd64 复验说明见 ADR-0002 与 §6,不在此复述。
+验证前置(`go build` / `go vet` + 本机真跑 runsc)见 §6;arm64 单架构 / amd64 出 scope 的说明见 §6.1 与 ADR-0002。
 
 ---
 
