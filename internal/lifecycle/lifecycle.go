@@ -320,7 +320,47 @@ func (m *Mediator) unwind(ctx context.Context, id model.SandboxID, ov *rootfs.Ov
 	}
 }
 
-// put/take/peek manage the in-memory liveState map.
+// Client returns a stateless transport client for the sandbox's CURRENT
+// endpoint (§5.E: built per endpoint, discarded on resume). This is how the
+// orchestrator proxies process/fs by sandbox-id WITHOUT exposing placement
+// (§6.2): callers address by SandboxID; the endpoint resolution stays here.
+// Errors if the sandbox has no live placement (not running).
+func (m *Mediator) Client(id model.SandboxID) (transport.Client, error) {
+	ep, err := m.Endpoint(id)
+	if err != nil {
+		return nil, err
+	}
+	return m.deps.Dial(transport.Endpoint(ep)), nil
+}
+
+// Endpoint returns the sandbox's current transport endpoint. INTERNAL — not part
+// of the §6.1 external API (which never exposes placement, §6.2). Used by the
+// orchestrator to proxy transport and by tests to assert IP-as-epoch (§3.3/§4.3).
+func (m *Mediator) Endpoint(id model.SandboxID) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	ls := m.live[id]
+	if ls == nil || ls.placement == nil {
+		return "", fmt.Errorf("sandbox %s has no live placement (not running)", id)
+	}
+	return ls.placement.TransportEndpoint, nil
+}
+
+// State returns the sandbox's current lifecycle state (§6.1 GET).
+func (m *Mediator) State(ctx context.Context, id model.SandboxID) (model.Lifecycle, error) {
+	rec, err := m.deps.Store.GetSandbox(ctx, id)
+	if err != nil {
+		return "", err
+	}
+	return rec.State, nil
+}
+
+// List returns all sandbox records (§6.1 GET /v1/sandboxes).
+func (m *Mediator) List(ctx context.Context) ([]model.Sandbox, error) {
+	return m.deps.Store.ListSandboxes(ctx)
+}
+
+// put/take manage the in-memory liveState map.
 func (m *Mediator) put(id model.SandboxID, ls *liveState) {
 	m.mu.Lock()
 	m.live[id] = ls

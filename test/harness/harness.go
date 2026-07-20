@@ -58,6 +58,34 @@ func BuildTemplate(t *testing.T, repoRoot, templatesDir, name, sandboxdBin strin
 	}
 }
 
+// BuildBrokenTemplate builds a Template whose /sbin/sandboxd exits immediately
+// (Health never comes up) — used to inject a ⑦ cold-start failure on real runsc
+// (A9 L4). The entrypoint is a tiny static binary that just exits 0.
+func BuildBrokenTemplate(t *testing.T, repoRoot, templatesDir, name string) {
+	t.Helper()
+	src := filepath.Join(t.TempDir(), "exiter")
+	if err := os.MkdirAll(src, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	main := "package main\nfunc main() {}\n"
+	if err := os.WriteFile(filepath.Join(src, "main.go"), []byte(main), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(t.TempDir(), "exiter-bin")
+	cmd := exec.Command("go", "build", "-o", bin, filepath.Join(src, "main.go"))
+	cmd.Dir = src
+	// single-file build outside any module (no go.mod in the temp dir).
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GO111MODULE=off")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build exiter: %v: %s", err, out)
+	}
+	dst := filepath.Join(templatesDir, name)
+	build := exec.Command(filepath.Join(repoRoot, "test/preflight/build-rootfs.sh"), dst, bin)
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build-rootfs(broken): %v: %s", err, out)
+	}
+}
+
 // Providers builds the two real providers rooted under base.
 func Providers(t *testing.T, base, templatesDir string) (*rootfs.HostOverlayFS, *runtime.LocalRunsc) {
 	t.Helper()
