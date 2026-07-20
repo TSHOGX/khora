@@ -22,8 +22,11 @@ import (
 // internally via the mediator, so placement never leaves the engine).
 //
 // This is a deliberately small net/http router (no framework) — the §6.1 REST
-// shape; the Connect-RPC↔REST projection is still being aligned (open-decisions
-// §5.E). process.Start streams NDJSON events over a chunked response.
+// shape. Outer-edge protocol split is now settled (transport D6): control plane
+// = REST/JSON (this router); process/fs data plane = Connect-RPC (client stubs
+// generated from transport.proto). The NDJSON data-plane handlers below
+// (handleStart/handleFsRead/Write) are the interim REST facade pending that
+// Connect re-proxy — deliberately not the authoritative wire (transport D6.3).
 func (e *Engine) HTTPHandler() http.Handler {
 	mux := http.NewServeMux()
 

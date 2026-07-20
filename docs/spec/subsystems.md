@@ -294,5 +294,5 @@ PID 1 = sandboxd（init 模式：reaper + 信号转发 + subreaper 兜底 + 监�
   [`deep-dives/guest-runtime.md`](./deep-dives/guest-runtime.md) D5。
 
 > **细节另见 [`deep-dives/transport.md`](./deep-dives/transport.md)**:Connect-RPC 选型、process/fs wire
-> 协议、session 划界与 seam、API 投影;**guest 启动拓扑的完整推理见
+> 协议、session 划界与 seam、外沿投影(控制面 REST + 数据面 Connect,D6);**guest 启动拓扑的完整推理见
 > [`deep-dives/guest-runtime.md`](./deep-dives/guest-runtime.md) D4**。本节只明确边界,不展开细节(渐进式披露)。

@@ -309,5 +309,65 @@ transport 层)与 resume readiness 门(guest-runtime D5.2 要点①:首次 `Heal
   resume 冷启」;给 session 层留的恢复 seam(进程态 vs `--resume` 重放)仍是 open-decision
   ([`open-decisions.md`](../open-decisions.md) §3)。
 - **engine 独立使用形态**:只用 process/fs 的沙箱产品边界;session adapter 将来如何在外面叠。
-- **API / CLI 投影**:spec §6.1 的 process/fs 两组端点按本节 RPC 清单细化(session 不进 engine
-  API);§6.1 的 REST 形态与本文 Connect-RPC 服务的映射待对齐。
+- **API / CLI 投影**:见 D6。spec §6.1 的 process/fs 两组端点按本节 RPC 清单细化(session 不进
+  engine API);外沿协议分工(控制面 REST / 数据面 Connect)在 D6 定死。
+
+---
+
+## D6. 外沿投影:控制面 REST + 数据面 Connect(client↔orchestrator)
+
+D4 定**内沿** wire(host↔`sandboxd`);本节定**外沿** wire(client〔前端/CLI/SDK〕↔`orchestrator`)。
+两沿的协议分工不同,理由如下。
+
+### D6.1 一个不可绕过的前提:client 永远不直连 `sandboxd`
+
+E2B 的 SDK **直连** envd(经路由代理,`E2b-Sandbox-Id/Port` 头寻址)。本项目**不能照抄这条**,
+原因是载体 + 纪律双重决定的:
+
+- **载体(D4.1)**:`sandboxd` 只在 guest netns 内明文监听,只有宿主够得到那个 veth IP;client
+  在引擎外,物理上到不了。
+- **§4 mediator 纪律**:一切沙箱动词经 `orchestrator` 居中(它按 `sandbox_id` 解析当前端点,
+  placement 永不外泄,§6.2)。client 直连 `sandboxd` 会把 placement 泄到引擎外,破 §3.3。
+
+所以外沿数据面**必须终结在 `orchestrator`、再由它 re-proxy 到内沿 `sandboxd`**。E2B「数据面直连」
+那份好处本项目拿不到(载体决定),但**typed-contract + 多语言 codegen 那份好处能拿**——这是 D6.2
+的全部动机。
+
+### D6.2 分工:控制面 REST/OpenAPI,数据面 Connect-RPC
+
+| 面 | 协议 | 端点(§6.1) | 为什么 |
+| --- | --- | --- | --- |
+| **控制面**(沙箱/template/volume/network 生命周期) | **REST + JSON**(OpenAPI 事后描述) | `POST /v1/sandboxes`、`pause`/`resume`、`DELETE`、`GET`、volume/template/publish… | 低频 CRUD,手调 / curl / 文档化友好;无强类型流。E2B 同款分法 |
+| **数据面**(process / fs) | **Connect-RPC over h2c**,proto 契约先行 | `engine.transport.v1.ProcessService` / `FsService`(D4.3/D4.4) | 有 server-stream + 强类型帧;proto 是**唯一契约源**,前端(TS)/ 未来多语言 SDK 全从它 `buf` 生成 client stub |
+
+**关键收益:内沿那份 proto 契约直接投影到外沿。** `orchestrator` 对外**复用同一份**
+`transport.proto`(而非另立外沿 schema),数据面外沿就是**Connect 反代 + 按 `sandbox_id` 解析端点**
+——无翻译层,内外沿只有一份 wire 表示。这兑现 §6「CLI/前端是同一套 API 的平级 client」:两端共用
+proto 生成的同一份 client。
+
+### D6.3 为什么数据面外沿走 Connect,而非 REST facade
+
+数据面外沿的另一条候选是**手写 REST facade + NDJSON chunked 流**(orchestrator 逐帧把内沿 Connect
+stream 翻成 NDJSON)。它被否决,三条理由:
+
+- **凭空造第三种流表示**:内沿 Connect server-stream、外沿 NDJSON、(将来前端可能还要的)另一套——
+  三份并存靠 orchestrator 手工翻译,正是 §1.3「成本判据」要防的加法;Connect 直投只剩一份。
+- **在最需要契约的边界丢类型**:数据面进程/文件帧(`oneof{start,data,end}`、`DataEvent.stream`)正是
+  强类型受益最大处;NDJSON 拍平成无 schema 的 JSON,前端/SDK 得手写解析。Connect 直投让前端 `buf`
+  生成、编译期对齐。
+- **不换来简单**:REST facade 的手写 handler(query-param `?path=`、NDJSON encoder、flush 循环)不比
+  Connect 反代少写代码,反而多一层要维护的映射。
+
+**控制面为什么不一起上 Connect**:控制面是 CRUD,无流、无强类型帧红利,REST/OpenAPI 的手调与文档
+化价值更高;强上 proto 是负收益。分界线落在「有没有 stream / 强类型帧」上——数据面有,控制面没有。
+
+### D6.4 边界与残留
+
+- **鉴权对齐 D4.1 的分层结论**:外沿(client↔orchestrator)是否加 auth 由 `orchestrator` 的部署
+  形态决定(它可能挂公网),**与内沿 `sandboxd` 无通道内 auth 的结论正交**——别把内沿"通道内 auth
+  冗余"错用到外沿。外沿 auth 属 orchestrator 的接入层义务,不在本 wire 协议。
+- **session 仍不进外沿 API**:D1.2 的划界不因投影而变——外沿只投影 process/fs,session adapter 在
+  engine 外自带它的协议面(ACP 形态)。
+- **前端多语言 stub 是纯加法**:外沿复用同一份 `transport.proto`,前端(TS)/ 未来 SDK 从它 `buf`
+  生成 client;新增一门语言的 client = 加一个 `buf` 生成目标,不改本投影形状(§6 契约随 milestone
+  生长)。实现级取值(环形缓冲上界 / 慢订阅者窗口 / `keepalive` 周期)登记在 open-decisions §5.E。

@@ -9,7 +9,15 @@
 后端只暴露 **sandbox-centric** 的 API,**全 ID 寻址**;产品概念(session / mode 等)不进
 后端。**CLI 与前端是同一套 API 的平级 client**,CLI 是一等公民,不是后门。
 
-### 6.1 资源与端点(REST 形态;与 Connect-RPC 服务的投影待对齐,见 open-decisions §5.E 行)
+### 6.1 资源与端点(控制面 REST + 数据面 Connect-RPC,分工见 [`deep-dives/transport.md`](./deep-dives/transport.md) D6)
+
+> **外沿协议分工**:沙箱/template/volume/network **生命周期 = REST + JSON**(控制面块,权威端点,
+> OpenAPI 事后描述);**process / fs 数据面 = Connect-RPC**(`engine.transport.v1` 两服务,权威契约
+> 是 `transport.proto`,client 经 `buf` 生成 stub)。client 一律经 `orchestrator` 居中、不直连
+> `sandboxd`(§4 mediator / D6.1)。数据面块的 REST 行**仅作形状示意**,不是权威端点(D6.2)。
+
+**控制面(REST + JSON,权威端点)** —— 沙箱 / template / volume / network 生命周期,全是低频
+CRUD、无流:
 
 ```text
 # Sandbox 生命周期
@@ -19,19 +27,6 @@ POST   /v1/sandboxes/{id}/pause
 POST   /v1/sandboxes/{id}/resume
 DELETE /v1/sandboxes/{id}                                                          (destroy)
 GET    /v1/sandboxes                                                               (list)
-
-# Process(连接)— 起进程 / 重连 / 输入 / 信号 / 列进程;PTY 是带 pty 字段的特例,pid 寻址
-POST   /v1/sandboxes/{id}/processes  {cmd, args?, pty?, cwd?, env?, guest_user?}   → {pid, stream}
-POST   /v1/sandboxes/{id}/processes/{pid}/connect                                  → {stream}  (重连)
-POST   /v1/sandboxes/{id}/processes/{pid}/signal  {signal}
-GET    /v1/sandboxes/{id}/processes                                                (实时 list,无注册表)
-# stream 走双向通道(Connect-RPC / HTTP-2 stream),承载 stdin/stdout/stderr 与 pty 输入
-
-# FS(读写沙箱文件)— read 可带 offset,无 watch;大文件走旁路
-GET    /v1/sandboxes/{id}/fs?path=&offset=&len=                                    (read / stat)
-PUT    /v1/sandboxes/{id}/fs?path=                                                 (write)
-POST   /v1/sandboxes/{id}/fs/list     {path}
-# agent 会话(session)不在 engine API 内——它是 engine 外 adapter 在 process/fs 上的加法(§5.E)
 
 # Template
 GET    /v1/templates
@@ -51,6 +46,28 @@ GET    /v1/volumes/{id}/export       (直连读出)
 # Network(策略在 create 时绑定,改策略走 resume 边界;publish 是显式入站例外,可热加)
 GET    /v1/sandboxes/{id}/network
 POST   /v1/sandboxes/{id}/publish    {port, auth?}                                 → {url}
+```
+
+**数据面(Connect-RPC,权威 wire 是 proto,非下方 REST 行)** —— process / fs 有 server-stream +
+强类型帧,**权威契约是 `engine.transport.v1` 的 `ProcessService` / `FsService`**(D4.3/D4.4),
+client 从 `transport.proto` 经 `buf` 生成 stub、经 `orchestrator` 反代到 `sandboxd`(D6.1)。下方
+REST 行**仅作形状示意**(说明有哪些操作、如何 pid/path 寻址),**不是可实现的权威端点**——真正的
+wire 看 proto:
+
+```text
+# Process(连接)— 起进程 / 重连 / 输入 / 信号 / 列进程;PTY 是带 pty 字段的特例,pid 寻址
+#   权威:ProcessService.{Start,Connect,StreamInput,SendInput,SendSignal,Update,List,CloseStdin}
+(示意)  processes                     {cmd, args?, pty?, cwd?, env?, guest_user?}   → {pid, stream}
+(示意)  processes/{pid}/connect                                                     → {stream}(重连,先回放有界环形缓冲再接 live,D4.3)
+(示意)  processes/{pid}/signal        {signal}
+(示意)  processes                                                                    (实时 list,无注册表)
+
+# FS(读写沙箱文件)— read 可带 offset,无 watch;大文件走 multipart 旁路
+#   权威:FsService.{Read,Write,List,Stat,MakeDir,Remove,Move}
+(示意)  fs?path=&offset=&len=                                                        (read / stat)
+(示意)  fs?path=                                                                     (write)
+(示意)  fs/list                       {path}
+# agent 会话(session)不进 engine API——engine 外 adapter 在 process/fs 上的加法(§5.E / D1.2)
 ```
 
 ### 6.2 设计约束
