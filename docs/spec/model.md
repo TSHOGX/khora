@@ -318,8 +318,15 @@ placement → 重新接管**(provider 按 SandboxID 重认自己的资源、重�
 单元**已死**,才按 §4.2「崩溃 = 非自愿 pause」CAS 降到 `paused`(其半建 placement 若有,归上一段回收)。
 provider 要能按 SandboxID 重认资源,故 placement-local 资源须携带 SandboxID 标签——这是 §3.3「身份不编码
 placement」的**反向**,不违反它(placement 资源标注它服务哪个 SandboxID,是允许的;被禁的是用 placement
-反推/编码 identity)。provider 的精确接口签名(枚举/接管/回收)、探活判据、与 §4.4-B 锁的协调见
-[`open-decisions.md`](./open-decisions.md)。
+反推/编码 identity)。provider 的枚举/接管/回收机制签名(`Adopt` / `ReclaimOrphans`)与 SandboxID 标注
+落在 §5.A(过 provider 的 ❌ 宿主原语清单)。**判活是两层,与冷启 ⑦ 就绪门对齐**:provider 出 L1(隔离
+单元是否起来)+ 端点,mediator 再补**一次 L2 `Health` 探针**才认作可接管——L1 活但 L2 不应答(如
+`created`-未监听)不是可接管的活,一律降 `paused`(可经下次 resume 冷启恢复),不把死句柄填进 live-map。
+**启动对账的失败处置是 skip-and-log**:某沙箱对账不了(探活报错、句柄重建失败)不阻断其余沙箱的恢复;对
+无法干净判定的 `running` 存活者取**保守**——保护其 placement 不回收(漏拆活容器不可逆,泄漏 placement 下次
+启动再收),对账幂等,跳过项下次重来。接管期的单次就绪探针不是 §4.3 的连续四象限健康分类(启动对账下锁
+已全无,"L1 活、L2 瞬态不通"一律降 `paused` 偏保守);连续健康分类、与 §4.4-B 锁协调的**周期对账**仍
+待细化,见 [`open-decisions.md`](./open-decisions.md)。
 
 **不变量 B —— 每沙箱一把转换锁,动词串行 + CAS 前置校验。** 单机嵌入式 store 下仍有并发:用户
 `pause` 与 `resume` 同时到、用户 `resume` 与 reaper `evict` 竞争、两个 `pause` 叠加。仲裁机制:

@@ -14,9 +14,9 @@
 
 ## 1. 落地前验证(spike,阻塞相关子系统)
 
-> **当前无阻塞 spike。** 两个 substrate 载体已经 ECS 验证定案、结论进 spec:持久层载体(外层内核
-> overlayfs + `--overlay2=none`,§2.5 / §5.B)、transport 载体(netns 内 TCP,§5.E)。两条载体上仍待
-> 设计的机制(非阻塞)分别见 §2 的 §5.B / §5.E 行。
+> **当前无阻塞 spike。** 两个 substrate 载体已定案、结论进 spec:持久层载体(外层内核 overlayfs +
+> `--overlay2=none`,§2.5 / §5.B)、transport 载体(netns 内 TCP,§5.E)。两条载体上仍待设计的机制
+> (非阻塞)分别见 §2 的 §5.B / §5.E 行。
 
 ---
 
@@ -28,9 +28,8 @@
 | **§5.C Volume(契约边界外)** | Volume 四条契约已定(§5.C);待细化的四条边界项(独占卷抢占策略 / shared-rw ENOSPC 复合行为 / 直连变更 vs live-ro reader 准入 / snapshot 一致性标注进 §6) | **详见 [`deep-dives/volume.md`](./deep-dives/volume.md) D5**,本表不复制。多为产品层策略或落 §6 时定 |
 | **§1.4 侧信道** | co-residency 策略(不共核/不共调度)在**多租户接入时**的具体物化 | 随多租户激活才做,落在 placement 层;五支柱不变 |
 | **§4.3 对象回收 sweep** | 引用-回收**原子性不变量**已定(§4.3:引用 +1 与 GC 判定-删除同一次原子 store 操作,复用 §4.4-C 契约;store 权威 refcount,无独立标记清扫器 / 世代屏障)。**待细化**:refcount 物化成计数字段 vs 由"引用行是否存在"查询导出的取舍、sweep 的触发时机与批量策略、destroy 删字节的异步重试与 refcount==0 判定的具体落地 | 不变量已进 spec、不留本表;此处仅登记 sweep **实现**细节。谁消费:§4.3 reaper / §5.C 挂载行 / §5.B Template lineage GC |
-| **§4.4-A 对账 provider 接口 + 探活判据** | 对账两半的不变量已进 spec(§4.4-A 崩溃变体)。**待细化的仅是落地机制**(M2 起动对账):① provider 精确签名——枚举 engine placement / 按 SandboxID 接管 / 回收孤儿——须过 §5.A ❌ 清单(不泄漏 cgroup 路径 / netns fd / 宿主绝对路径);② "活 placement 探活判死"判据(runsc `state` vs 一次 Health 探针);③ placement-local 资源携带 SandboxID 标签的落地(closes `local_runsc` ipSeq 跨重启 TODO) | 谁消费:§4 mediator 启动路径 / §5.A provider |
-| **§4.4-A 周期对账** | 启动对账(M2)之外,运行时 orchestrator 活着时的**周期对账**待细化(M3,与 reaper 同批):与 §4.4-B 转换锁协调(周期跑须跳过持锁沙箱,避免误收进行中 resume 的活 placement)、批量与重试策略、production 上 nft 类的枚举(M1/M2 无 egress 面故不涉及)。 | 启动对账归 M2、周期对账归 M3。谁消费:§4.3 reaper / §5.A provider |
-| **§4.1 / §4.4-C 事件流(对外面)** | 投递算法、store 契约、后端(ADR-0004 SQLite 事务)均已定,M2 落地并验证「单次原子提交」可兑现。**待细化的仅剩对外面**:event schema、可重放窗口大小、subscriber 接入/续位约定 | additive(add a subscriber);引擎不追踪 subscriber、只保证可靠写入一条可重放 stream |
+| **§4.4-A 周期对账 + 连续健康分类** | 启动对账(对偶回收 + 接管)及其落地机制已在 spec 定死:provider `Adopt`/`ReclaimOrphans` 签名 + SandboxID 标注(§5.A)、两层判活(L1 + 一次 L2 `Health` 探针,§4.4-A/§5.A)、skip-and-log + 保守保护(§4.4-A)。**未定**:① orchestrator 活着时的**周期对账**——与 §4.4-B 转换锁协调(周期跑须跳过持锁沙箱,避免误收进行中 resume 的活 placement)、批量与重试策略、egress 面 nft 类资源的枚举;② **连续健康分类**——把接管期的单次就绪探针升级成 §4.3 四象限(healthy/idle/transport-down/dead-recoverable):启动对账因锁已全无,"L1 活、L2 瞬态不通"一律降 `paused` 偏保守;周期对账 + reaper 才需区分 transport-down 瞬态、避免无谓冷启换 IP。 | 谁消费:§4.3 reaper / §5.A provider(与 reaper 同批) |
+| **§4.1 / §4.4-C 事件流(对外面)** | 投递算法、store 原子提交契约、后端(ADR-0004 SQLite)已定。**待细化的是对外面**:event schema、可重放窗口大小、subscriber 接入/续位约定。<br>**两处已知限制(设计使然,非缺陷)**:① outbox **只标记不删行**、随转换单调增长(部分索引 `WHERE published_at IS NULL` 令 unpublished 扫描不退化,at-rest 无界)——修剪策略(保留期 / 归档)随「可重放窗口」一并落地(窗口定 ⇒ 修剪 = 删窗口外已发布行);② `store.DedupSink` 是引擎内**参考实现**,`seen` 进程内 / 无界 / 非持久,重启不记得崩前已投递的 ID(靠 outbox 重发 + 真实 subscriber 侧持久去重兜底,§4.4-C at-least-once)——真实 subscriber 在引擎外自行持久去重,不在引擎内加。 | additive(add a subscriber);引擎不追踪 subscriber、只保证可靠写入一条可重放 stream |
 | **§4.2 pause 静止点(仅剩参数级)** | 协议两层结构已定(§4.2 + deep-dive D4.4:① drain-barrier ② `SIGTSTP`+观测 `/proc` stopped+超时降 `SIGSTOP`,不引入 guest 内 ack 通道)。**残留纯调参**:grace 时长、可 handle 信号的具体选择、是否给模板一个可选"可协作 flush"钩子(默认不需要) | 非架构,落地时定;不改两层结构。见 [`deep-dives/guest-runtime.md`](./deep-dives/guest-runtime.md) D4.4 |
 | **§5.D 凭证存储 seam** | 凭证"留宿主侧"的**后端**(secret-store):怎么存、注册、轮转。此处只留**at-rest 后端**选型;alias→directives 的 **resolve/缓存/失效契约**是另一条 seam,见下行 | 一类可插拔 seam(类比 runtime/FS provider);明文不进控制面/Overlay,只在宿主侧独立后端 |
 | **§5.D egress 数据面 seam + 两条契约** | 引擎自有 egress 数据面(gateway,行为 seam)与两条传输无关薄契约的**精确签名**:① **resolve 契约**(数据面↔resolver:alias+目标上下文 → directives+过期+version 戳 + 失效信号)② **ingress 契约**(数据面↔引流:抽象描述符 + 双向劫持能力协商)。行为的两种强制模式(builtin 内联求值 / 外部编译下发)对接口要求不同 | **详见 [`deep-dives/network.md`](./deep-dives/network.md) D3/D7**,本表不复制。今天只建接口形状 + builtin 单实现(模式 1),registry plumbing 缓(D6);谁消费:§5.D 数据面 + 未来远端 provider |

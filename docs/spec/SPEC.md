@@ -293,9 +293,9 @@ exhaustive)是一条可验收义务**:不写死它,guest 一条直连就绕过�
 | 内存 checkpoint/restore **要求跨宿主 CPU-feature 匹配** | 我们不存内存(§4.2),**此约束直接消失** |
 | 在 guest 内的 iptables/nftables **仅部分支持** | 坐实"egress 用**宿主侧** nft 打在 per-sandbox netns 上"(§5.D),别下沉到 guest 内防火墙 |
 | 挂载在**启动时**从 OCI spec 取,运行中不可热改 | 挂载拓扑变更 = resume 边界操作(§5.C) |
-| runsc `--overlay2` 全族(`memory`/`self`/`dir=`)**均不跨容器生命周期持久**——`dir=` 启动即 `unlink` filestore,干净停 = 数据蒸发(经 ECS 验证) | 持久层**不用 runsc 自管 overlay**;改由 engine 在 runsc 外用宿主内核 overlayfs 组装,runsc 收 `--overlay2=none --file-access=shared`(§5.B) |
+| runsc `--overlay2` 全族(`memory`/`self`/`dir=`)**均不跨容器生命周期持久**——`dir=` 启动即 `unlink` filestore,干净停 = 数据蒸发 | 持久层**不用 runsc 自管 overlay**;改由 engine 在 runsc 外用宿主内核 overlayfs 组装,runsc 收 `--overlay2=none --file-access=shared`(§5.B) |
 
-> **持久层载体(经 ECS 验证)**:engine 在 runsc 外用**宿主内核 overlayfs** 组装可写层,交给
+> **持久层载体**:engine 在 runsc 外用**宿主内核 overlayfs** 组装可写层,交给
 > `--overlay2=none --file-access=shared` 的 runsc,持久态即宿主上的普通目录树(可 `tar`、跨 host 可移、
 > 字节一致)。载体的完整物化、CoW/一致性证据与替代路径归 §5.B,展开见
 > [`deep-dives/rootfs-overlay.md`](./deep-dives/rootfs-overlay.md)。

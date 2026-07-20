@@ -1,10 +1,10 @@
 # Rootfs / Overlay 载体:持久层怎么真正落地
 
 > **定位:[`§5.B`](../subsystems.md)(spec,导航见 [`SPEC.md`](../SPEC.md))与 [`§3.1.1`](../model.md)、
-> [`§4.2`](../model.md) 的持久层深挖文档。** 载体经 ECS 验证定案,结论在 spec §2.5 / §5.B;本文保留
-> 结论背后的**证伪过程、参考实现证据、被排除的备选、要守住的 seam,以及仍待细化的议程**(D5)。
+> [`§4.2`](../model.md) 的持久层深挖文档。** 载体经真实 substrate 实测定案,结论在 spec §2.5 / §5.B;
+> 本文保留结论背后的**证伪过程、实测证据、被排除的备选、要守住的 seam,以及仍待细化的议程**(D5)。
 >
-> **验证依据:** ECS 实测(runsc release-20260511.0、kernel 6.8、overlayfs 内核模块)。
+> **验证依据:** 在真实 runsc + 内核 overlayfs 上端到端实测(下述三条要求逐条对照)。
 
 ---
 
@@ -20,7 +20,7 @@ content-addressed diff 层是后续演进项(详见 D3)。**
 捕获、resume 冷启重挂」原样成立。runsc 的 overlay flag 不提供跨容器生命周期持久的 upper
 (§2.5 事实核查),那个 upper 必须由 engine 在 runsc 外自管。
 
-**已 ECS 端到端实测,三条要求全通过**:CoW 正确(改 lower 只落 upper,lower 字节未污染)、干净停后
+**端到端实测,三条要求全通过**:CoW 正确(改 lower 只落 upper,lower 字节未污染)、干净停后
 upper 是宿主普通目录树且 tar 出完整 diff 层、容器内 sha256 与停机后宿主直读逐字节一致;冷启重挂
 同一 upper、以及从 tar 出的 diff 解到全新 upper 重建,内容均逐字节一致(后者顺带证明 diff 层可
 提取/搬运/重建,是 D3 演进项的实测底气)。

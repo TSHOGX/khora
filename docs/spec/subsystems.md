@@ -60,6 +60,22 @@
     把 netns 交给 runsc;sentry 加入后在 boot 时把内核侧 L3 地址**收进自己的 netstack**(boot 后从内核侧读
     不到该地址,veth 链路仍在)。由此 §3.3/D5.1 冷启链的 ⑥「发现 IP」对 local_runsc 退化成**读回引擎自己的
     分配**——不做 boot 后探测。resume 每次**新建 netns**(§3.3 换新 IP),故无「复用 netns 须重灌地址」问题。
+  - **对账机制(§4.4-A 崩溃变体的 provider 面)**:除 `Launch`/`Stop`/`Destroy` 外,provider 再出两个
+    枚举/接管/回收机制,供 §4 mediator 的启动对账驱动(动词仍归 §4):
+    - `Adopt(SandboxID) → (placement 句柄, alive)`——按 SandboxID **重认**该沙箱自己的 placement-local
+      资源、重建**不透明**句柄、重发现 transport 端点(**同一端点、不换 epoch**,隔离单元从未重启,§3.3);
+      `alive=false` = 已死/不存在。右侧仍是**策略+句柄**,过上面的 ❌ 宿主原语清单。
+    - `ReclaimOrphans(keep []SandboxID)`——拆掉不在 keep 集里的全部 engine placement(反向依赖序 runsc
+      kill/delete → veth → netns;overlay umount 归 mediator 侧,子系统不互调)。keep 由 mediator 读**权威
+      store** 算出喂进来(provider 不反向调 store,§4 开头);持久态(Overlay upper)**绝不碰**(§4.4-A)。
+
+    据此 **placement-local 资源须携带 SandboxID 标签**(`local_runsc`:netns=`sbxns_<id>` 可逆、
+    cid=`sbxc_<id>`、veth=`vh`+SandboxID 的 sha256[:12] 单向派生),provider 才能枚举自己的资源(扫 netns
+    前缀)并按 SandboxID 反查——这是 §3.3「身份不编码 placement」的**反向**(标注 placement 服务哪个
+    SandboxID 允许,用 placement 反推 identity 被禁)。**判活两层**:provider 出 L1(`local_runsc` =
+    `runsc state` ∈ {running,created})+ 端点,mediator 再补一次 L2 `Health` 探针才认作可接管(对齐冷启 ⑦
+    就绪门,§4.3),探不通即降 `paused`。SandboxID 命名也让接管存活者时把其 IP 标进分配器 inUse,重启后的
+    分配器不会把该 IP 再发给新沙箱。
 - **`local_runsc` 钉死其依赖的整套 runsc flag、不继承默认**——每个键对一条既定保证,`runsc` 的默认值
   跨版本会漂移,而 §5.B 的**跨 runsc 版本可移性**不能建立在"默认不变"上:
   - `--platform=systrap` —— §1.1 no-hypervisor(已是 spec 前提,此处只是把它 pin 死;platform 本身
@@ -89,9 +105,9 @@
   - **Promote / 分层 Template**:见下,由 at-rest 可读 enable。
 - **只读 at-rest,不读 live**:**只在 pause / stop**(容器已停、runsc 已 flush)读 Overlay 字节,
   **从不**在 guest 运行中读。因此"运行中经 gofer 缓存读到不一致状态"这类 live 一致性问题不在路径上。
-  **干净停掉后持久 overlay 是宿主普通目录树、能冷启重新挂回且字节一致**(经 ECS 验证,§2.5);持久层
+  **干净停掉后持久 overlay 是宿主普通目录树、能冷启重新挂回且字节一致**(§2.5);持久层
   **不靠 runsc 自管 overlay**(runsc `--overlay2` 全族不跨容器生命周期持久),而靠下面的外层 overlayfs。
-- **载体:外层内核 overlayfs,runsc 不掺和写层**(经 ECS 验证,详见
+- **载体:外层内核 overlayfs,runsc 不掺和写层**(详见
   [`deep-dives/rootfs-overlay.md`](./deep-dives/rootfs-overlay.md)):engine 在 runsc 外用宿主内核
   overlayfs 拼 lower(Template)/upper/work,merged 交给 `--overlay2=none --file-access=shared` 的
   runsc(gofer 代理进 guest)。upper 因此是宿主普通目录树,tar 得动、可 diff、冷启挂得回。
