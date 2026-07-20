@@ -36,10 +36,16 @@ func setupEngine(t *testing.T, healthTimeout time.Duration) (*orchestrator.Engin
 	}
 	eng, err := orchestrator.New(orchestrator.Config{
 		TemplatesDir: tmpl, StateDir: filepath.Join(base, "state"),
+		StorePath:     filepath.Join(base, "store.db"),
 		HealthTimeout: healthTimeout,
 	})
 	if err != nil {
 		t.Fatalf("orchestrator.New: %v", err)
+	}
+	// production parity: reconcile runs at boot. On a fresh store it is a no-op —
+	// asserting the §4.4-A path never disturbs the happy vertical slice.
+	if err := eng.Reconcile(context.Background()); err != nil {
+		t.Fatalf("startup reconcile (empty store): %v", err)
 	}
 	return eng, base
 }
