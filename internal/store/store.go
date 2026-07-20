@@ -1,7 +1,7 @@
 // Package store is the control-plane record seam (§1.1 / §4.4-C). It is a
 // Behavior seam (§1.3): an interface with pluggable implementations. M1 ships
 // an in-memory implementation; M2 swaps in an embedded single-node backend
-// (SQLite / bbolt) WITHOUT changing this interface — that is the whole point of
+// (SQLite, ADR-0004) WITHOUT changing this interface — that is the whole point of
 // a seam (register an implementation, don't reshape the callers).
 //
 // The interface itself must promise the minimal guarantees the algorithms need

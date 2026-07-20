@@ -300,11 +300,26 @@ netns/IP/nft/overlay-mount、store 还停在 `paused`)时 defer 跑不了,留下
 派生自 store 权威态、可弃,orchestrator 启动即枚举本机 placement 资源,凡**不支撑任一按 store 应持有
 placement 的沙箱**(store 非 `running`、且未处于某次进行中 resume——后者靠 §4.4-B 转换锁辨识:in-flight
 resume **全程持有转换锁**,持锁即在建,否则会误收正在建的活 placement)者即孤儿,按本不变量回收。
-(**启动对账**下更简单:进程刚崩、锁全没了,一切进行中 resume 都已死,非 `running` 的半建 placement 一律
-是孤儿;持锁辨识只在 orchestrator 活着的**周期对账**下才需要。)单机权威 store(§1.1)令这次对账退化成**一次
-本地扫描 diff 一张本地表**,无阶段记录、与 placement/IP-as-epoch(§4.3)正交,**不重新引入世代计数**。
+(**启动对账**下更简单:进程刚崩、锁全没了,一切进行中 resume 都已死,故半建 placement 的辨识无需持锁——
+持锁辨识只在 orchestrator 活着的**周期对账**下才需要。存活 `running` 的活 placement 不是孤儿,另半段接管
+见下。)单机权威 store(§1.1)令这次对账退化成**一次本地扫描 diff 一张本地表**,无阶段记录、与
+placement/IP-as-epoch(§4.3)正交,**不重新引入世代计数**。
 D5 的 workdir/upper 孤儿是其一个特例;触发时机(仅启动 vs 周期)、与 §4.4-B 锁的协调、如何枚举本机
 netns/IP/nft/gateway/overlay-mount 及批量策略见 [`open-decisions.md`](./open-decisions.md)。
+
+**A 崩溃变体的另一半 —— 对存活的 `running` placement 重新接管句柄,不是回收。** 上面的反向对账只讲了
+"回收孤儿";但一个 `running` 沙箱的**活** placement **本就不是孤儿**(它支撑一个 store 应持有 placement
+的沙箱),不该被回收。崩溃后真正缺的是:orchestrator 的进程内 placement 句柄(端点、provider 私有 handle)
+随进程蒸发了,而底层隔离单元还活着。**若只做回收、不补接管,后果不是脏态而是失联**:store 记 `running`、
+容器还在跑,但引擎握不到句柄——此后对它的 destroy 会漏拆活容器(泄漏)、transport 代理会因"无活 placement"
+失败。故对账是**对偶**的两半:**非 `running` 的半建 placement → 回收**(上一段);**`running` 的存活
+placement → 重新接管**(provider 按 SandboxID 重认自己的资源、重建句柄、重发现端点)。**接管不是 resume**:
+同一 placement、同一 IP,不换 epoch(§3.3/§4.3),因为隔离单元从未重启。仅当探活判定该 `running` 的隔离
+单元**已死**,才按 §4.2「崩溃 = 非自愿 pause」CAS 降到 `paused`(其半建 placement 若有,归上一段回收)。
+provider 要能按 SandboxID 重认资源,故 placement-local 资源须携带 SandboxID 标签——这是 §3.3「身份不编码
+placement」的**反向**,不违反它(placement 资源标注它服务哪个 SandboxID,是允许的;被禁的是用 placement
+反推/编码 identity)。provider 的精确接口签名(枚举/接管/回收)、探活判据、与 §4.4-B 锁的协调见
+[`open-decisions.md`](./open-decisions.md)。
 
 **不变量 B —— 每沙箱一把转换锁,动词串行 + CAS 前置校验。** 单机嵌入式 store 下仍有并发:用户
 `pause` 与 `resume` 同时到、用户 `resume` 与 reaper `evict` 竞争、两个 `pause` 叠加。仲裁机制:
