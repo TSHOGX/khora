@@ -38,57 +38,38 @@ the machine can't reach).
   Minimal rootfs is built from the machine's own userland (replicate usrmerge:
   `/bin`,`/lib`→`usr/*` symlinks, or guest binary loads fail).
 
+## Machine facts
+
+| Fact | Value |
+| --- | --- |
+| arch / kernel | **arm64** · `7.0.11-orbstack` |
+| runsc | `release-20260714.0` (spec 1.2.1), systrap, no KVM |
+| overlay / cgroup | overlay kernel module present · cgroup **v2** (cgroup2fs) |
+| engine scratch fs | **btrfs** on `/dev/vdb1` at `/home/hsw/engine` — native, not virtiofs; `cp --reflink=always` works (cheap §5.B CoW) |
+| privilege | passwordless `sudo` available; mount/netns/veth/cgroup/runsc all need root |
+
 ## Substrate validation matrix
 
-| Substrate fact | Where validated | Arch | Status |
-| --- | --- | --- | --- |
-| overlayfs persists across container life; upper is a plain host dir (tar/diff/re-mount, byte-identical) | ECS (spec §2.5 / §5.B) | amd64 | validated |
-| netns-internal TCP transport (unary + bidi stream, no vsock) | ECS (spec §5.E) | amd64 | validated |
-| runsc systrap, no KVM, guest uid=0 | OrbStack `sbx` | **arm64** | validated (this ADR) |
-| overlayfs + netns + cgroup v2 present & usable | OrbStack `sbx` | **arm64** | validated |
-
-### Measured baseline on `sbx` (recorded facts, not a decision change)
-
-The above matrix was later pinned to concrete values measured on the machine.
-These calibrate the matrix; the decision (develop/test on `sbx` + systrap) is
-unchanged.
-
-| Fact | Measured value |
-| --- | --- |
-| arch / kernel | arm64 · `7.0.11-orbstack` |
-| runsc | `release-20260714.0` (spec 1.2.1), systrap, no KVM |
-| overlay module / cgroup | overlay present · cgroup **v2** (cgroup2fs) |
-| engine scratch fs | **btrfs** on `/dev/vdb1` at `/home/hsw/engine` — native, not virtiofs |
-| btrfs reflink | `cp --reflink=always` works → §5.B CoW snapshot/clone is cheap here (M6 uses it; substrate ready now) |
-
-### M1 substrate spike validation (parallel spikes, arm64 `sbx`)
-
-Four independent spikes exercised the M1 joints on real hardware. All passed;
-these calibrate the matrix, not the decision.
-
-| Seam validated | Result | Notes |
+| Substrate fact | Arch | Notes |
 | --- | --- | --- |
-| overlayfs assembly (lower=Template / upper / work), CoW, persist, re-mount byte-identical | PASS | upper is a plain host tree; **fresh workdir required per (re-)mount**; copy-up files are root-owned |
-| pinned runsc flags launch + guest exec | PASS | guest `4.19.0-gvisor`, uid=0; all five pins are **global** flags (before `run`); config `root.path` = externally-merged overlay dir |
-| netns/veth host-dials-guest by IP; new IP per cold start | PASS (host↔netns L3/L4) | IP discovery = `ip netns exec <ns> ip -j addr`; `ip netns del` cascades the peer veth |
-| idempotent teardown / §4.4-A reconcile primitives | PASS | 5 per-class enumerate cmds; **overlay reconcile must be path-scoped, not `-t overlay`** (else hits OrbStack system overlays) |
+| runsc systrap, no KVM, guest uid=0 | arm64 | guest reports `4.19.0-gvisor` |
+| overlayfs: CoW correct, upper is a plain host dir, re-mount byte-identical | amd64 (ECS) + arm64 | fresh workdir required per (re-)mount; copy-up files root-owned (design detail → rootfs-overlay D5) |
+| pinned runsc flags launch + exec `/bin/sh` | arm64 | all five pins are **global** flags (before the `run` subcommand); config `root.path` = the externally-merged overlay dir |
+| netns/veth host-dials-guest by veth IP; fresh netns → new IP | amd64 (ECS) + arm64 | host↔netns L3/L4 only; IP discovery = `ip netns exec <ns> ip -j addr`; `ip netns del` cascades the peer veth |
+| §4.4-A reconcile: enumerate + idempotent teardown of placement resources | arm64 | primitives + reclaim order in open-decisions §4.4-A |
 
-**Privilege (recorded fact).** Every mount/umount/chroot, all netns/veth/cgroup
-ops, and runsc launch require **root**; `--network=sandbox` explicitly rejects
-`--rootless`. The **sentry itself stays unprivileged** (pillar ②) — but the
-**orchestrator/launcher needs root or CAP_NET_ADMIN+CAP_SYS_ADMIN** to
-materialize placement. Passwordless `sudo` is available on `sbx`, so preflight/
-e2e run unattended. (Nuances §1.1 "runs in CI runner / inside a container": that
-environment must grant those caps.)
+**One gap, deliberately open — task A closes it.** No check yet exercises the
+*combined* path: a TCP listener **inside runsc's `--network=sandbox` netstack**
+dialed from the host by veth IP (the netns check used a host listener; the runsc
+check tested exec, not transport). Absence from the matrix = not yet validated;
+§5.E "netstack 下实测" is pending until M1 task A.
 
-**Not yet validated (task-A's job in M1).** No spike exercised the *combined*
-path — a TCP listener **inside runsc's `--network=sandbox` netstack** dialed from
-the host by veth IP. The netns spike used a host listener; the runsc spike tested
-exec, not transport. So §5.E's "netstack 下实测" reachability stays **pending**
-until task A closes it end-to-end.
+**Privilege.** `--network=sandbox` rejects `--rootless`, so the
+orchestrator/launcher needs root (or CAP_NET_ADMIN+CAP_SYS_ADMIN) to materialize
+placement. The **sentry itself stays unprivileged** (pillar ② intact); this is a
+deployment caveat on §1.1 "runs in CI runner / inside a container" — that
+environment must grant those caps.
 
-**Caveat.** `sbx` is arm64; the ECS validations were amd64. M1 running on arm64
-re-confirms the overlay + netns facts on a *second* architecture (a plus, not a
-risk). **Before production, re-validate the substrate facts on amd64.** Go
-cross-compiles cleanly, so this is an environment check, not a code port — and
-therefore **out of M1 scope**, not an M1 acceptance gate.
+**Arch scope.** ECS validations were amd64; `sbx` is arm64, so M1 re-confirms
+overlay + netns on a *second* architecture (a plus). amd64 re-validation before
+production is an environment check (Go cross-compiles cleanly), **out of M1 scope**.

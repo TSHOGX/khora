@@ -128,11 +128,15 @@ reflink 来补分层,那其实又滑回上面的 overlayfs 底层存储附带能
 
 > 载体与持久单元(留驻 upper)已定;下面是**在这条载体上仍要设计的机制**。
 
-- **work dir 与 upper 的清理/回收**:overlayfs 需要一个 workdir(**实测约束:与 upper 同一个支持
-  overlayfs 的 FS**)。分两半挂:**destroy 时的清理**挂 §4.3 reaper 的对象回收不变量(upper 是留驻
-  持久单元);**崩溃后的孤儿回收**——overlay mount 是 placement-local 资源,orchestrator 崩在转换中途
-  留下的半建 mount 是 §4.4-A 崩溃变体(重启对账)的一个**特例**,不靠 refcount GC。overlay mount 由
-  engine 在 runsc 外建立/卸载,卸载时序要与 §4.2 pause 对齐。
+- **work dir 与 upper 的清理/回收**:overlayfs 需要一个 workdir(约束:与 upper 同一个支持 overlayfs
+  的 FS)。**resume 重挂用同一 upper,但 workdir 必须新建一个空目录**——不可复用上次的 work(内核会
+  拒/坏)。分两半挂:**destroy 时的清理**挂 §4.3 reaper 的对象回收不变量(upper 是留驻持久单元);
+  **崩溃后的孤儿回收**——overlay mount 是 placement-local 资源,orchestrator 崩在转换中途留下的半建
+  mount 是 §4.4-A 崩溃变体(重启对账)的一个**特例**,不靠 refcount GC。overlay mount 由 engine 在
+  runsc 外建立/卸载,卸载时序要与 §4.2 pause 对齐。
+- **mount 是特权操作**:overlayfs mount/umount 须 root(CAP_SYS_ADMIN),copy-up 落进 upper 的文件因此
+  **root-owned**——destroy 删 upper 也须特权。这正是「宿主路径 + mount 生命周期锁死在 §5.B 子系统内、
+  不外露给调用方」(§3.1.1)的又一条落地理由:特权 mount 是子系统机制,不是 mediator 的活。
 - **容量配额(disk 容量轴,§3.4)**:per-sandbox 的 upper+work 容量帽怎么物化,见 D6。
 - **pause flush 到一致点的时序**:字节一致性在"干净停(kill+delete)后"已验;仍需锁定的是 pause
   这个动作把 sentry/gofer 的写 flush 到 upper 的**精确一致点**(§4.2 静止点),确保 Promote/

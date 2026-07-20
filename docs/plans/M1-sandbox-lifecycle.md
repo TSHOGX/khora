@@ -157,37 +157,28 @@ canonical 链(D5.1)是 ①–⑦,`create` 与 `resume` 共享,只差前缀与失
 不是远端目标。build→run→test 的整条环是本地闭合:`go build && go vet && go test` 直接在 `/home/hsw/engine`
 下跑真 runsc。所以下面不写「部署到 sbx」,只写「本机要备好什么」。
 
-### 6.1 已知良好 baseline(实测,非待办)
+### 6.1 已知良好 baseline
 
-这些是本机已核实的 substrate 事实(回填进 ADR-0002 验证矩阵),M1 建立在它们之上,**开工不必再验**:
+机器 substrate 事实(arch/内核/runsc 版本/overlay/cgroup/btrfs+reflink/特权)与验证矩阵是 **ADR-0002**
+的单一归属,此处不复制。M1 建立在其上,**开工不必再验**;只记两条对 M1 直接相关的取向:
 
-| 事实 | 实测值 | 支撑 § |
-| --- | --- | --- |
-| 架构 / 内核 | **arm64**,kernel 7.0.11(orbstack) | ADR-0002 |
-| runsc | `release-20260714.0`(spec 1.2.1),systrap 可用、无 KVM | §1.1 / §2.5 |
-| overlayfs / cgroup | overlay 内核模块在、cgroup **v2**(cgroup2fs) | §5.A / §5.B |
-| scratch fs | 引擎在 `/home/hsw/engine`,后端 **btrfs**(`/dev/vdb1`),native fs——**非** virtiofs | `CLAUDE.md` 执行约束 / §5.B |
-| btrfs reflink | 可用(`cp --reflink=always` 成功)——§5.B「底层存储 CoW 附带能力」在本机现成,snapshot/clone 廉价(M6 才用,但地基已就位) | §5.B |
-
-> **arm64 单架构说明(纠正:这不是 M1 的门)。** ADR-0002 §Caveat 已定:`sbx` 是 arm64,ECS 的 overlay/
-> transport 事实是 amd64 验的;**M1 在 arm64 上跑 = 在第二个架构上再确认这些事实(是加分,不是风险)**。
-> **amd64 复验是 production 前的环境检查(Go 干净交叉编译,是环境事,非代码移植),整体在 M1 scope 外**——
-> 故不进本 preflight,也不当 M1 验收门。
+- **本机 arm64、native btrfs、passwordless sudo**——overlay scratch 落 `/home/hsw/engine`(非 virtiofs),
+  特权 mount/netns 可无人值守跑。arm64 单架构不是 M1 的门(amd64 复验是 production 前环境检查,出 scope)。
+- **runsc pin 的 flag 与放置已定**(见 R3);cgroup 归属见 §5.A(runsc 自建 leaf、引擎不建父层级)。
 
 ### 6.2 真正的开工前置(genuine gates)
 
-baseline 之外这三件是踩起来最贵、最易漏的前置。**均已由 M1 前的并行 spike 在 arm64 `sbx` 上实测通过**
-(下表「状态」列),spike 产出的复用骨架直接喂给任务 A/B/C——故它们现在是「有活规格的门」,不是「待证的门」:
+三件踩起来最贵、最易漏的前置。**均已验证通过**(ADR-0002 矩阵),下表给出直接喂给任务 A/B/C 的复用骨架:
 
-| # | 前置 | 状态(实测)+ 复用骨架 |
+| # | 前置 | 复用骨架 + 落地要点 |
 | --- | --- | --- |
-| R1 | **最简 guest rootfs + Template 目录**(本机原先只有 `internal/rootfs` 包、无实际 rootfs) | ✅ 从本机 userland 构建、**复刻 usrmerge**(`/bin`→`usr/bin`、`/lib`→`usr/lib`)通过。**本机 `/bin/sh`=dash**(非 busybox),只需 `libc.so.6` + `ld-linux-aarch64.so.1`;**无 coreutils**——M1 §9 断言用 host 侧 `fs.write/read` + `sh -c 'echo'`,不依赖 guest `cat`,故够用,但 spike 勿假设 guest 内 coreutils。ELF interpreter 只因 `/lib→usr/lib` 才解析得到——漏 usrmerge 即加载失败(R1 警告实锤) |
-| R2 | **幂等 teardown / §4.4-A 对账原语** | ✅ 脚本存在、幂等、清掉真实泄漏的孤儿。5 类枚举原语 + 反向依赖回收序(runsc→overlay→veth→netns→cgroup)已进 `open-decisions.md` §4.4-A 行。**铁律:overlay 回收按 target 路径 scope,绝不按 `-t overlay` 类型**(否则误碰 OrbStack 系统 overlay);引擎须 pin 一个 canonical runsc `--root`(错 root 静默列空) |
-| R3 | **flag 契约冒烟** | ✅ 五个 pin 全是 **global flag**(在 `run` 子命令之前),guest 报 `4.19.0-gvisor`、uid=0;config `root.path` = 引擎在外拼好的 merged overlay 目录。骨架:`sudo runsc --root=<S> --platform=systrap --network=sandbox --overlay2=none --file-access=shared --systemd-cgroup=false run --bundle=<B> <cid>`。**须 root**(`--network=sandbox` 拒 `--rootless`;本机 passwordless sudo)。**overlay 挂着时 lower(Template)严格不可变**——挂载中改 lower 会毁 merged 视图(任务 B 留意) |
+| R1 | **最简 guest rootfs + Template 目录**(本机原先只有 `internal/rootfs` 包、无实际 rootfs) | 从本机 userland 构建、**复刻 usrmerge**(`/bin`→`usr/bin`、`/lib`→`usr/lib`)。**本机 `/bin/sh`=dash**(非 busybox),只需 `libc.so.6` + `ld-linux-aarch64.so.1`;**无 coreutils**——M1 §9 断言用 host 侧 `fs.write/read` + `sh -c 'echo'`,不依赖 guest `cat`,故够用,但 spike 勿假设 guest 内 coreutils。漏 usrmerge → ELF interpreter 解析失败、加载即崩 |
+| R2 | **幂等 teardown / §4.4-A 对账原语** | 5 类枚举原语 + 反向依赖回收序(runsc→overlay→veth→netns→cgroup)见 `open-decisions.md` §4.4-A 行。**铁律:overlay 回收按 target 路径 scope,绝不按 `-t overlay` 类型**(否则误碰系统 overlay);引擎须 pin 一个 canonical runsc `--root`(错 root 静默列空) |
+| R3 | **flag 契约** | 五个 pin 全是 **global flag**(在 `run` 子命令之前):`sudo runsc --root=<S> --platform=systrap --network=sandbox --overlay2=none --file-access=shared --systemd-cgroup=false run --bundle=<B> <cid>`;config `root.path` = 引擎在外拼好的 merged overlay 目录。**须 root**(`--network=sandbox` 拒 `--rootless`)。**overlay 挂着时 lower(Template)严格不可变**——挂载中改 lower 会毁 merged 视图(任务 B 留意) |
 
-> **DoH DNS pin(本机已在,构建 rootfs 时留意)。** macOS host 的 VPN 劫持全部明文 DNS(ADR-0002),本机靠
-> `/etc/hosts` 里的 `# sbx-doh-pin` 块兜底(已存在)。M1 沙箱内 network=none,**guest 不出网**,故这条主要
-> 只影响**构建 rootfs 时**若要 `apt`/下载——真实 IP 轮换时按 ADR-0002 重新 pin。列此防踩,不是 M1 gate。
+> **DoH DNS pin(构建 rootfs 时留意)。** macOS host 的 VPN 劫持全部明文 DNS,本机靠 `/etc/hosts` 的
+> `# sbx-doh-pin` 块兜底(细节见 ADR-0002)。M1 沙箱内 network=none、**guest 不出网**,故这条只影响
+> **构建 rootfs 时**若要下载。不是 M1 gate。
 
 R1–R3 各写成 `test/` 下一个可重跑的 preflight 检查,任务 F 的 e2e 复用它们做 setup/teardown。
 
@@ -199,11 +190,10 @@ R1–R3 各写成 `test/` 下一个可重跑的 preflight 检查,任务 F 的 e2
 transport→Health),而 mediator / store 是低集成风险的编排逻辑。故先用一条**手工 spike(§2)**一次性
 retire 掉 substrate 集成风险,再自底向上把各 seam 落成真实现,最后由 mediator 串起、e2e 封口。
 
-> **§6 的四条 spike 已 retire 掉各段的**单点**集成风险(overlay、runsc flag、netns 可达、teardown),
-> 但**留了一个 spike 没合起来验的接缝——任务 A 的核心正是它**:一个 TCP listener 跑在 **runsc `--network=
-> sandbox` 的 userspace netstack 内**、宿主经 veth IP 拨通。§6 的 netns spike 用的是宿主 listener(只验
-> host↔netns L3/L4),runsc spike 只验 exec 不验 transport——**「sandboxd 在 netstack 内 listen + 宿主 dial
-> 通」这条组合链是任务 A 必须端到端打穿的那一刀**(§5.E「netstack 下实测」在此之前保持 pending)。
+> **各段单点集成风险已消(overlay / runsc flag / netns 可达 / teardown,见 §6),但一条组合链尚未打通,
+> 正是任务 A 的核心那一刀**:sandboxd 在 **runsc `--network=sandbox` 的 userspace netstack 内** listen、
+> 宿主经 veth IP 拨通。已验的只是「宿主↔netns 可达」(用宿主 listener)与「runsc 内能 exec」两段,合起来
+> 的 netstack-terminated transport 未验——§5.E「netstack 下实测」在任务 A 打穿前保持 pending。
 
 | 序 | 任务 | 落点(scaffold) | de-risk 的关节 | done-when |
 | --- | --- | --- | --- | --- |
@@ -283,4 +273,4 @@ happy path 只证明「顺的时候通」;关节 4 的一半是「不顺的时�
 3. **落**——已定的回写 spec/deep-dive、未定的登记 `open-decisions.md`,两边不重叠。
 
 M1 预计会喂给 `open-decisions.md` 的候选(撞到再登记,不预先展开):pause flush 精确一致点(D5)、
-IP 发现的确切机制(§5.A)、runsc 版本 pin 与 flag 契约的落地细节(R2)。
+netstack-terminated transport 的实测收口(§5.E,任务 A)、失败 unwind 的确切时序与 §4.4-A 对账的交接。

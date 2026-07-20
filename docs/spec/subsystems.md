@@ -48,9 +48,11 @@
     端点, 生命周期控制 stop/start)`。**引流要求**是 §5.D 给的 ingress 描述符 + default-deny(把
     egress 全量引导进引擎数据面,§5.D),不是完整网络策略——策略 enforcement 与凭证注入在引擎数据面里,
     不在 provider。
-  今天唯一实现 `local_runsc` 把引流要求物化成 nft+netns、把 §3.4 的资源上限物化成 cgroup(cgroupfs
-  driver、引擎自持层级并随 placement 回收——单二进制下无 systemd scope 代管,故孤儿 cgroup 即孤儿
-  placement,§4.4-A 周期对账兜底)。provider 是**引流与资源上限的物化方**,不碰策略权威、不进 resolve
+  今天唯一实现 `local_runsc` 把引流要求物化成 nft+netns、把 §3.4 的资源上限经 **OCI `linux.resources`**
+  下发给 runsc 落成 cgroup(cgroupfs driver)。**cgroup 归属:runsc 从 container-id 自建一个根级 leaf
+  cgroup、`delete` 时回收**;引擎**不**自建父层级(单二进制无 systemd scope、也无 kubelet-式 cgroup
+  driver 代建父目录——自建父 subtree 即反 §1.1 重造那一层)。故一个**孤儿 CID-cgroup 就是孤儿 placement**
+  的可扫信号,§4.4-A 周期对账兜底。provider 是**引流与资源上限的物化方**,不碰策略权威、不进 resolve
   路径(§5.D)。**多 node / 调度 / 跨宿主因此天然位于未来某个 provider 内,核心模型不感知**(§1.1 /
   §1.3:provider 是 registry 的一种实现)。
 - **`local_runsc` 钉死其依赖的整套 runsc flag、不继承默认**——每个键对一条既定保证,`runsc` 的默认值
