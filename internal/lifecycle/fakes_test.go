@@ -70,6 +70,9 @@ type fakeRuntime struct {
 	seq        int
 	// adoptAlive drives fakeRuntime.Adopt per-sandbox (§4.4-A liveness).
 	adoptAlive map[string]bool
+	// adoptErr drives a per-sandbox Adopt PROBE error (uncertain → mediator
+	// protects the placement, skip-and-log; §4.4-A).
+	adoptErr map[string]error
 }
 
 func (f *fakeRuntime) log(s string) {
@@ -119,9 +122,13 @@ func (f *fakeRuntime) Adopt(_ context.Context, sandbox string) (*runtime.Placeme
 	f.log("Adopt:" + sandbox)
 	f.mu.Lock()
 	alive := f.adoptAlive[sandbox]
+	err := f.adoptErr[sandbox]
 	f.seq++
 	ep := fmt.Sprintf("10.9.9.%d:9000", f.seq)
 	f.mu.Unlock()
+	if err != nil {
+		return nil, false, err
+	}
 	if !alive {
 		return nil, false, nil
 	}

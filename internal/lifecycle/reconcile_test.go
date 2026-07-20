@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -125,6 +126,61 @@ func TestReconcileDemoteEmitsEvent(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("no paused event emitted on involuntary demote; got %+v", evs)
+	}
+}
+
+// skip-and-log: a `running` survivor whose Adopt probe ERRORS is unresolved, not
+// dead. Reconcile must NOT abort (other sandboxes still reconcile), must NOT
+// reclaim the uncertain survivor's placement (protect-on-uncertainty: a
+// possibly-live container is never torn down), must leave its record `running`,
+// and must log the skip. A clean paused sandbox alongside it reconciles normally.
+func TestReconcileSkipAndLogOnUncertainSurvivor(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	rt := &fakeRuntime{
+		adoptErr: map[string]error{"run_uncertain": errors.New("runsc state: transient")},
+	}
+	var logs []string
+	m := New(Deps{
+		Store: st, Runtime: rt, Rootfs: &fakeRootfs{},
+		Dial:          func(transport.Endpoint) transport.Client { return &fakeClient{healthy: true} },
+		HealthTimeout: time.Second,
+		Logf:          func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) },
+	})
+
+	seedRec(t, st, "run_uncertain", "ov_u", model.Running)
+	seedRec(t, st, "paused_ok", "ov_p", model.Paused)
+
+	if err := m.Reconcile(ctx); err != nil {
+		t.Fatalf("Reconcile must not abort on an uncertain survivor: %v", err)
+	}
+
+	// uncertain survivor: record still running, placement PROTECTED (in keep set).
+	if rec, _ := st.GetSandbox(ctx, "run_uncertain"); rec.State != model.Running {
+		t.Errorf("uncertain survivor state=%s; want running (not demoted, not deleted)", rec.State)
+	}
+	var reclaimCall string
+	for _, c := range rt.Calls() {
+		if strings.HasPrefix(c, "ReclaimOrphans:") {
+			reclaimCall = c
+		}
+	}
+	if reclaimCall != "ReclaimOrphans:keep=run_uncertain" {
+		t.Errorf("uncertain survivor not protected from reclaim: keep=%q; want run_uncertain", reclaimCall)
+	}
+	// the paused sandbox alongside it still reconciled fine.
+	if rec, _ := st.GetSandbox(ctx, "paused_ok"); rec.State != model.Paused {
+		t.Errorf("paused sandbox disturbed: %s", rec.State)
+	}
+	// the skip was logged.
+	found := false
+	for _, l := range logs {
+		if strings.Contains(l, "run_uncertain") && strings.Contains(l, "protected") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("skip not logged; logs=%v", logs)
 	}
 }
 

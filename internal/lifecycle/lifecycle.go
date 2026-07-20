@@ -17,6 +17,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -40,6 +41,12 @@ type Deps struct {
 
 	// HealthTimeout bounds the ⑦ readiness gate (guest-runtime D5.1).
 	HealthTimeout time.Duration
+
+	// Logf reports per-item reconciliation outcomes that are skipped rather than
+	// fatal (§4.4-A startup reconcile is skip-and-log: one un-adoptable sandbox
+	// must not abort recovery of the rest). Defaults to log.Printf; tests inject a
+	// capturing sink.
+	Logf func(format string, args ...any)
 
 	// FaultAfterColdStart is a TEST-ONLY (R5) injection hook: if non-nil it runs
 	// right after coldStart records the live placement but BEFORE the committing
@@ -77,6 +84,9 @@ type liveState struct {
 func New(deps Deps) *Mediator {
 	if deps.HealthTimeout == 0 {
 		deps.HealthTimeout = 30 * time.Second
+	}
+	if deps.Logf == nil {
+		deps.Logf = log.Printf
 	}
 	return &Mediator{
 		deps:  deps,
@@ -368,15 +378,26 @@ func (m *Mediator) unwind(ctx context.Context, id model.SandboxID, ov *rootfs.Ov
 //
 // Any placement backing none of the kept sandboxes is an orphan → ReclaimOrphans
 // tears it down (reverse-dep order, persistent upper untouched, §4.4-A).
+//
+// Failure policy is SKIP-AND-LOG, not fail-fast: a single un-reconcilable
+// sandbox must not abort recovery of every other one (that would turn one bad
+// overlay handle into a boot outage). Only a failure that makes the whole scan
+// impossible (listing the records) is fatal. The overriding safety rule when a
+// `running` sandbox cannot be cleanly resolved is CONSERVATIVE: protect its
+// placement from reclamation (add it to keep) rather than risk tearing down a
+// container that may still be live — leaking a placement is recoverable on the
+// next boot; killing a live survivor is not. Reconcile is idempotent, so a
+// skipped item is simply retried next start.
 func (m *Mediator) Reconcile(ctx context.Context) error {
 	recs, err := m.deps.Store.ListSandboxes(ctx)
 	if err != nil {
 		return fmt.Errorf("reconcile: list records: %w", err)
 	}
 
-	// keep = SandboxIDs whose placement, if present and live, is legitimate and
-	// must NOT be reclaimed. Only re-adopted `running` sandboxes qualify — a
-	// `paused`/`creating` sandbox holds no legitimate live placement.
+	// keep = SandboxIDs whose placement must NOT be reclaimed: successfully
+	// re-adopted `running` survivors PLUS any `running` sandbox we could not
+	// resolve (protect-on-uncertainty). A `paused`/`creating` sandbox holds no
+	// legitimate live placement, so it never enters keep.
 	keep := make([]string, 0)
 
 	for _, rec := range recs {
@@ -388,7 +409,7 @@ func (m *Mediator) Reconcile(ctx context.Context) error {
 			// (create's terminal is destroyed, §4.1).
 			m.reclaimOrphanOverlay(ctx, rec, true)
 			if err := m.deps.Store.DeleteSandbox(ctx, rec.ID, newEvent(rec.ID, "destroyed", model.Destroyed)); err != nil && err != store.ErrNotFound {
-				return fmt.Errorf("reconcile: delete creating %s: %w", rec.ID, err)
+				m.deps.Logf("reconcile: skip creating %s: delete record: %v", rec.ID, err)
 			}
 		case model.Paused:
 			// keep the record; a half-built placement (crashed mid-resume) is an
@@ -396,31 +417,35 @@ func (m *Mediator) Reconcile(ctx context.Context) error {
 			// (resumable, §4.2). The netns/container fall to ReclaimOrphans.
 			m.reclaimOrphanOverlay(ctx, rec, false)
 		case model.Running:
-			if err := m.adoptOrDemote(ctx, rec); err != nil {
-				return fmt.Errorf("reconcile: adopt %s: %w", rec.ID, err)
-			}
-			// only a SUCCESSFULLY re-adopted running sandbox keeps its placement.
-			m.mu.Lock()
-			_, adopted := m.live[rec.ID]
-			m.mu.Unlock()
-			if adopted {
+			adopted, err := m.adoptOrDemote(ctx, rec)
+			switch {
+			case err != nil:
+				// could not resolve this survivor (probe error, un-rebuildable
+				// handle). Do NOT reclaim it — it may still be live; a torn-down
+				// live container leaks and breaks transport (§4.4-A). Protect the
+				// placement and retry on the next boot (idempotent).
+				m.deps.Logf("reconcile: skip running %s (protected, not reclaimed): %v", rec.ID, err)
 				keep = append(keep, string(rec.ID))
-			} else {
-				// dead → demoted to paused above; unmount its orphan Overlay mount,
-				// keep the upper.
+			case adopted:
+				// alive + ready + handle rebuilt → keep its placement.
+				keep = append(keep, string(rec.ID))
+			default:
+				// cleanly determined dead → demoted to paused inside adoptOrDemote;
+				// unmount its orphan Overlay mount, keep the upper.
 				m.reclaimOrphanOverlay(ctx, rec, false)
 			}
 		}
 	}
 
-	// reclaim every engine placement not backing a kept (re-adopted running)
-	// sandbox: orphans from crashed create/resume + placements of demoted-to-paused
-	// sandboxes (§4.4-A 持久态分毫不动 — only placement, never a kept upper). The
-	// mediator has already unmounted orphan Overlay mounts above (reverse-dep
-	// order: runsc → overlay umount → netns; overlay umount is mediator-side, the
-	// provider then does runsc→netns).
+	// reclaim every engine placement not backing a kept sandbox: orphans from
+	// crashed create/resume + placements of cleanly-demoted-to-paused sandboxes
+	// (§4.4-A 持久态分毫不动 — only placement, never a kept upper). The mediator has
+	// already unmounted orphan Overlay mounts above (reverse-dep order: runsc →
+	// overlay umount → netns; overlay umount is mediator-side, the provider then
+	// does runsc→netns). Reclaim failure is logged, not fatal — the placement
+	// stays leaked and is retried next boot.
 	if err := m.deps.Runtime.ReclaimOrphans(ctx, keep); err != nil {
-		return fmt.Errorf("reconcile: reclaim orphans: %w", err)
+		m.deps.Logf("reconcile: reclaim orphans (retried next boot): %v", err)
 	}
 	return nil
 }
@@ -446,40 +471,77 @@ func (m *Mediator) reclaimOrphanOverlay(ctx context.Context, rec model.Sandbox, 
 	}
 }
 
-// adoptOrDemote handles a `running` record during reconciliation: probe its
-// isolation unit; alive → rebuild the live-map handle (same IP, no epoch bump);
-// dead → CAS-demote to paused (§4.2 involuntary pause) with an event.
-func (m *Mediator) adoptOrDemote(ctx context.Context, rec model.Sandbox) error {
+// adoptOrDemote handles a `running` record during reconciliation. It returns
+// (adopted, err):
+//   - adopted=true, err=nil  → survivor is live AND serving; handle rebuilt,
+//     recorded in the live-map (same IP, no epoch bump, §4.4-A 另一半).
+//   - adopted=false, err=nil → cleanly determined not-adoptable (isolation unit
+//     dead, OR alive-but-not-serving); CAS-demoted to paused (§4.2 involuntary
+//     pause) with an event. Caller reclaims its orphan placement.
+//   - err!=nil               → could not resolve (probe error / un-rebuildable
+//     handle). Caller PROTECTS the placement (does not reclaim) and retries next
+//     boot — never tears down a possibly-live container on uncertainty.
+//
+// Readiness is a two-layer judgement matching cold-start's ⑦ gate, not just the
+// runtime's L1 liveness (§4.3 two-layer probe). Adopt gives L1 (the isolation
+// unit is up) + the endpoint; we then fire ONE Health RPC (L2) before trusting
+// the survivor. This closes the crack where a `created`-but-not-listening
+// container would be optimistically adopted with an un-serving endpoint: if L2
+// does not answer, we demote to paused (recoverable via a fresh cold-start on the
+// next resume) rather than record a dead handle. It is a SINGLE boot-time probe,
+// deliberately NOT M3's continuous four-quadrant health classifier
+// (open-decisions §2 §4.4-A row).
+func (m *Mediator) adoptOrDemote(ctx context.Context, rec model.Sandbox) (bool, error) {
 	l := m.lock(rec.ID)
 	l.Lock()
 	defer l.Unlock()
 
 	pl, alive, err := m.deps.Runtime.Adopt(ctx, string(rec.ID))
 	if err != nil {
-		return fmt.Errorf("adopt probe: %w", err)
+		return false, fmt.Errorf("adopt probe: %w", err) // uncertain → protect
+	}
+	// L2 readiness: an L1-live unit that does not answer Health right now is not
+	// cleanly adoptable — treat as not-serving and demote (aligns adopt with
+	// cold-start ⑦; §4.3 two-layer probe).
+	if alive && !m.probeReady(ctx, pl) {
+		alive = false
 	}
 	if !alive {
-		// isolation unit dead → involuntary pause (§4.2). Its half-built placement,
-		// if any, is reclaimed as an orphan (this sandbox is not added to keep).
+		// dead / not-serving → involuntary pause (§4.2). Its placement, if any, is
+		// reclaimed as an orphan (this sandbox is not added to keep).
 		if err := m.deps.Store.CompareAndSetState(ctx, rec.ID, model.Running, model.Paused, newEvent(rec.ID, "paused", model.Paused)); err != nil && err != store.ErrConflict {
-			return fmt.Errorf("demote to paused: %w", err)
+			return false, fmt.Errorf("demote to paused: %w", err) // uncertain → protect
 		}
-		return nil
+		return false, nil
 	}
 
-	// alive → re-attach the still-mounted overlay + record the live handle so
-	// destroy/transport work again (§4.4-A: without this the survivor is
+	// alive + serving → re-attach the still-mounted overlay + record the live
+	// handle so destroy/transport work again (§4.4-A: without this the survivor is
 	// un-addressable — destroy would leak the live container).
 	ov, err := m.deps.Rootfs.OpenOverlay(ctx, string(rec.Overlay), string(rec.Template))
 	if err != nil {
-		return fmt.Errorf("reopen overlay: %w", err)
+		return false, fmt.Errorf("reopen overlay: %w", err) // uncertain → protect
 	}
 	merged, err := m.deps.Rootfs.AdoptMerged(ctx, ov)
 	if err != nil {
-		return fmt.Errorf("adopt merged: %w", err)
+		return false, fmt.Errorf("adopt merged: %w", err) // uncertain → protect
 	}
 	m.put(rec.ID, &liveState{placement: pl, merged: merged})
-	return nil
+	return true, nil
+}
+
+// probeReady fires a single Health RPC against an adopted placement's endpoint
+// (L2 readiness). Bounded by a short timeout so a booting/hung survivor demotes
+// promptly rather than stalling boot. This is the same readiness signal
+// cold-start's ⑦ gate polls, fired once here (guest-runtime D5.2 要点①).
+func (m *Mediator) probeReady(ctx context.Context, pl *runtime.Placement) bool {
+	if pl == nil {
+		return false
+	}
+	cl := m.deps.Dial(transport.Endpoint(pl.TransportEndpoint))
+	hctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	return cl.Health(hctx) == nil
 }
 
 // Client returns a stateless transport client for the sandbox's CURRENT
