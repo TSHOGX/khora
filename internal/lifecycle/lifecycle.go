@@ -40,6 +40,16 @@ type Deps struct {
 
 	// HealthTimeout bounds the ⑦ readiness gate (guest-runtime D5.1).
 	HealthTimeout time.Duration
+
+	// FaultAfterColdStart is a TEST-ONLY (R5) injection hook: if non-nil it runs
+	// right after coldStart records the live placement but BEFORE the committing
+	// CAS to `running`. A test panics/exits from it to simulate the orchestrator
+	// crashing mid-transition — leaving a fully-built placement while the store
+	// still reads the SOURCE state (`paused` for resume / `creating` for create).
+	// This manufactures the §4.4-A crash scenarios (orphan half-build + surviving
+	// container with lost handle) that Reconcile must clean up. nil in production;
+	// it carries NO production semantics (plan §7 R5).
+	FaultAfterColdStart func(id model.SandboxID)
 }
 
 // Mediator holds per-sandbox transition locks (§4.4-B).
@@ -136,6 +146,12 @@ func (m *Mediator) Create(ctx context.Context, spec CreateSpec) (model.SandboxID
 		return "", fmt.Errorf("create: cold start: %w", err)
 	}
 
+	// R5 fault injection: simulate a crash after the placement is fully built but
+	// before the committing CAS — store still reads `creating` (§4.4-A create var).
+	if m.deps.FaultAfterColdStart != nil {
+		m.deps.FaultAfterColdStart(sid)
+	}
+
 	// ⑦ readiness passed → flip creating→running (CAS) + emit "created" in the
 	// same commit (§4.4-C).
 	if err := m.deps.Store.CompareAndSetState(ctx, sid, model.Creating, model.Running, newEvent(sid, "created", model.Running)); err != nil {
@@ -203,6 +219,12 @@ func (m *Mediator) Resume(ctx context.Context, id model.SandboxID) error {
 		// (persistent Overlay artifact untouched; §4.4-A).
 		m.unwind(ctx, id, ov, false)
 		return fmt.Errorf("resume: cold start: %w", err)
+	}
+
+	// R5 fault injection: simulate a crash after the placement is fully built but
+	// before the committing CAS — store still reads `paused` (§4.4-A resume var).
+	if m.deps.FaultAfterColdStart != nil {
+		m.deps.FaultAfterColdStart(id)
 	}
 
 	// ⑦ readiness passed → flip paused→running (CAS) + emit "resumed" (§4.4-C).
@@ -324,6 +346,140 @@ func (m *Mediator) unwind(ctx context.Context, id model.SandboxID, ov *rootfs.Ov
 	if isCreate && ov != nil {
 		_ = m.deps.Rootfs.DestroyOverlay(ctx, ov)
 	}
+}
+
+// Reconcile is the §4.4-A startup crash-reconciliation: one local scan diffing
+// host placement × store records, run ONCE at orchestrator boot before serving
+// (§4.4-A / plan §4). The process just (re)started, so the live-map is empty and
+// all transition locks are fresh — every in-flight resume that was running is
+// dead, so half-built placements need NO lock to identify (lock-based
+// identification is only for the M3 periodic reconcile against a LIVE
+// orchestrator). It is a dual operation, NOT reclaim-all:
+//
+//   - `creating` record → the create crashed mid-chain, never reached running,
+//     has no at-rest resting state → delete the record (→ destroyed); its
+//     half-built placement is an orphan, reclaimed below.
+//   - `paused` record → keep; any half-built placement (crashed mid-resume) is
+//     an orphan, reclaimed below. The upper is intact and resumable (§4.2).
+//   - `running` record → PROBE liveness via Adopt: alive → rebuild the live-map
+//     handle at the SAME IP (not a resume, no new epoch — the isolation unit
+//     never restarted, §4.4-A 另一半); dead → CAS-demote to `paused` (§4.2
+//     involuntary pause), emitting an event (ties §4.4-A to §4.4-C).
+//
+// Any placement backing none of the kept sandboxes is an orphan → ReclaimOrphans
+// tears it down (reverse-dep order, persistent upper untouched, §4.4-A).
+func (m *Mediator) Reconcile(ctx context.Context) error {
+	recs, err := m.deps.Store.ListSandboxes(ctx)
+	if err != nil {
+		return fmt.Errorf("reconcile: list records: %w", err)
+	}
+
+	// keep = SandboxIDs whose placement, if present and live, is legitimate and
+	// must NOT be reclaimed. Only re-adopted `running` sandboxes qualify — a
+	// `paused`/`creating` sandbox holds no legitimate live placement.
+	keep := make([]string, 0)
+
+	for _, rec := range recs {
+		switch rec.State {
+		case model.Creating:
+			// crashed mid-create: never reached a resting state → destroy record.
+			// Its half-built placement (if any) falls to ReclaimOrphans (not in
+			// keep); its empty Overlay upper never held useful state → reclaim it
+			// (create's terminal is destroyed, §4.1).
+			m.reclaimOrphanOverlay(ctx, rec, true)
+			if err := m.deps.Store.DeleteSandbox(ctx, rec.ID, newEvent(rec.ID, "destroyed", model.Destroyed)); err != nil && err != store.ErrNotFound {
+				return fmt.Errorf("reconcile: delete creating %s: %w", rec.ID, err)
+			}
+		case model.Paused:
+			// keep the record; a half-built placement (crashed mid-resume) is an
+			// orphan → unmount its lingering Overlay mount, but KEEP the upper
+			// (resumable, §4.2). The netns/container fall to ReclaimOrphans.
+			m.reclaimOrphanOverlay(ctx, rec, false)
+		case model.Running:
+			if err := m.adoptOrDemote(ctx, rec); err != nil {
+				return fmt.Errorf("reconcile: adopt %s: %w", rec.ID, err)
+			}
+			// only a SUCCESSFULLY re-adopted running sandbox keeps its placement.
+			m.mu.Lock()
+			_, adopted := m.live[rec.ID]
+			m.mu.Unlock()
+			if adopted {
+				keep = append(keep, string(rec.ID))
+			} else {
+				// dead → demoted to paused above; unmount its orphan Overlay mount,
+				// keep the upper.
+				m.reclaimOrphanOverlay(ctx, rec, false)
+			}
+		}
+	}
+
+	// reclaim every engine placement not backing a kept (re-adopted running)
+	// sandbox: orphans from crashed create/resume + placements of demoted-to-paused
+	// sandboxes (§4.4-A 持久态分毫不动 — only placement, never a kept upper). The
+	// mediator has already unmounted orphan Overlay mounts above (reverse-dep
+	// order: runsc → overlay umount → netns; overlay umount is mediator-side, the
+	// provider then does runsc→netns).
+	if err := m.deps.Runtime.ReclaimOrphans(ctx, keep); err != nil {
+		return fmt.Errorf("reconcile: reclaim orphans: %w", err)
+	}
+	return nil
+}
+
+// reclaimOrphanOverlay unmounts a sandbox's lingering merged Overlay mount left
+// by a crash (§4.4-A reverse-dep order: overlay umount is the mediator-side step
+// between runsc teardown and netns delete). The overlayfs mount is kernel state
+// that survives the orchestrator process; if the record's container is gone the
+// mount is an orphan holding nothing. destroyUpper additionally reclaims the
+// upper bytes (create's empty Overlay → destroyed); for paused/demoted the upper
+// is the persistent SoT and is KEPT (§4.4-A 持久态分毫不动). Best-effort: a
+// not-mounted overlay (nothing to clean) is not an error.
+func (m *Mediator) reclaimOrphanOverlay(ctx context.Context, rec model.Sandbox, destroyUpper bool) {
+	ov, err := m.deps.Rootfs.OpenOverlay(ctx, string(rec.Overlay), string(rec.Template))
+	if err != nil {
+		return // no artifact on disk → nothing to unmount
+	}
+	if merged, err := m.deps.Rootfs.AdoptMerged(ctx, ov); err == nil {
+		_ = m.deps.Rootfs.Unmount(ctx, merged)
+	}
+	if destroyUpper {
+		_ = m.deps.Rootfs.DestroyOverlay(ctx, ov)
+	}
+}
+
+// adoptOrDemote handles a `running` record during reconciliation: probe its
+// isolation unit; alive → rebuild the live-map handle (same IP, no epoch bump);
+// dead → CAS-demote to paused (§4.2 involuntary pause) with an event.
+func (m *Mediator) adoptOrDemote(ctx context.Context, rec model.Sandbox) error {
+	l := m.lock(rec.ID)
+	l.Lock()
+	defer l.Unlock()
+
+	pl, alive, err := m.deps.Runtime.Adopt(ctx, string(rec.ID))
+	if err != nil {
+		return fmt.Errorf("adopt probe: %w", err)
+	}
+	if !alive {
+		// isolation unit dead → involuntary pause (§4.2). Its half-built placement,
+		// if any, is reclaimed as an orphan (this sandbox is not added to keep).
+		if err := m.deps.Store.CompareAndSetState(ctx, rec.ID, model.Running, model.Paused, newEvent(rec.ID, "paused", model.Paused)); err != nil && err != store.ErrConflict {
+			return fmt.Errorf("demote to paused: %w", err)
+		}
+		return nil
+	}
+
+	// alive → re-attach the still-mounted overlay + record the live handle so
+	// destroy/transport work again (§4.4-A: without this the survivor is
+	// un-addressable — destroy would leak the live container).
+	ov, err := m.deps.Rootfs.OpenOverlay(ctx, string(rec.Overlay), string(rec.Template))
+	if err != nil {
+		return fmt.Errorf("reopen overlay: %w", err)
+	}
+	merged, err := m.deps.Rootfs.AdoptMerged(ctx, ov)
+	if err != nil {
+		return fmt.Errorf("adopt merged: %w", err)
+	}
+	m.put(rec.ID, &liveState{placement: pl, merged: merged})
+	return nil
 }
 
 // Client returns a stateless transport client for the sandbox's CURRENT

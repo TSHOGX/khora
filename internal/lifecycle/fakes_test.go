@@ -56,6 +56,10 @@ func (f *fakeRootfs) DestroyOverlay(_ context.Context, o *rootfs.Overlay) error 
 	f.log("DestroyOverlay:" + o.ID)
 	return nil
 }
+func (f *fakeRootfs) AdoptMerged(_ context.Context, o *rootfs.Overlay) (*rootfs.Merged, error) {
+	f.log("AdoptMerged:" + o.ID)
+	return &rootfs.Merged{MergedPath: "/fake/merged/" + o.ID}, nil
+}
 
 type fakeRuntime struct {
 	mu         sync.Mutex

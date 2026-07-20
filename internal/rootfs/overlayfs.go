@@ -149,6 +149,40 @@ func (p *HostOverlayFS) DestroyOverlay(_ context.Context, o *Overlay) error {
 	return nil
 }
 
+// AdoptMerged reconstructs the merged handle for an Overlay still mounted after
+// a crash (§4.4-A). The merged dir is deterministic from the ID; we confirm it
+// is actually an overlay mount (kernel state held by the surviving container)
+// before handing back the handle — a not-mounted merged means the container is
+// not really live, so the caller should not adopt it.
+func (p *HostOverlayFS) AdoptMerged(_ context.Context, o *Overlay) (*Merged, error) {
+	merged := p.mergedPath(o.ID)
+	mounted, err := isMountpoint(merged)
+	if err != nil {
+		return nil, fmt.Errorf("rootfs: adopt merged %s: %w", o.ID, err)
+	}
+	if !mounted {
+		return nil, fmt.Errorf("rootfs: overlay %s not mounted (container not live)", o.ID)
+	}
+	return &Merged{MergedPath: merged}, nil
+}
+
+// isMountpoint reports whether path is a mount point by comparing its device
+// number to its parent's (a mount boundary changes st_dev). Cheap, no /proc
+// parse, correct for overlayfs.
+func isMountpoint(path string) (bool, error) {
+	var st, parent syscall.Stat_t
+	if err := syscall.Stat(path, &st); err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	if err := syscall.Stat(filepath.Dir(path), &parent); err != nil {
+		return false, err
+	}
+	return st.Dev != parent.Dev, nil
+}
+
 // validate keeps IDs to a safe single path segment (no traversal / separators).
 func (p *HostOverlayFS) validate(overlayID, template string) error {
 	for name, v := range map[string]string{"overlayID": overlayID, "template": template} {

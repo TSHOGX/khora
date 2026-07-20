@@ -65,4 +65,13 @@ type Provider interface {
 	// (§4.3). Separate from placement teardown — the mediator invokes each
 	// (§4: subsystems don't call each other).
 	DestroyOverlay(ctx context.Context, o *Overlay) error
+
+	// AdoptMerged reconstructs the merged-mount handle for an Overlay that is
+	// STILL mounted after a control-plane crash (§4.4-A 另一半). The overlayfs
+	// mount is kernel state — it survives the orchestrator process, held by the
+	// still-running container — so on Adopt the mediator recovers the handle
+	// rather than re-mounting. The host path stays private (§3.1.1); the returned
+	// Merged is opaque above this subsystem. It does NOT mount — a NOT-mounted
+	// overlay is a caller error (that sandbox's container is not actually live).
+	AdoptMerged(ctx context.Context, o *Overlay) (*Merged, error)
 }
