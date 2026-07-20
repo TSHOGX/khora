@@ -35,6 +35,11 @@ import "context"
 // at placement time (§5.A ⑥). Never cached across resume (§4.3 要点③).
 type Endpoint string
 
+// Port is the fixed TCP port sandboxd (transport mode) listens on inside the
+// guest netns. It can be constant across sandboxes because each sandbox has its
+// own netns — the veth IP disambiguates, not the port (§5.E netns-internal TCP).
+const Port = 9000
+
 // ProcessEvent is one item of a process output stream: oneof{start,data,end,
 // keepalive} (transport D4.3). M1 carries start(pid) / data(stdout|stderr) /
 // end(exit_code).
