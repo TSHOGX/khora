@@ -260,9 +260,13 @@ func (p *LocalRunsc) Adopt(ctx context.Context, sandbox string) (*Placement, boo
 	// still carries its /30 host address, and our allocation pins guest = host+1.
 	ip, err := p.rediscoverGuestIP(&h)
 	if err != nil {
-		// container is running but we cannot recover its endpoint — treat as not
-		// cleanly adoptable; caller will demote to paused and reclaim.
-		return nil, false, nil
+		// The container is L1-ALIVE but we could not recover its endpoint. This is
+		// UNCERTAINTY, not death — returning alive=false here would make the mediator
+		// CAS-demote and ReclaimOrphans tear down a provably-live container (§4.4-A
+		// 漏拆活容器不可逆). Surface an error instead so the mediator PROTECTS the
+		// placement and retries next boot (§4.4-A protect-on-uncertainty). alive=false
+		// is reserved for a genuinely dead/absent isolation unit (handled above).
+		return nil, false, fmt.Errorf("runtime: Adopt %s: container alive but endpoint unrecoverable: %w", sandbox, err)
 	}
 	h.guestIP = ip
 	p.markInUse(ip) // survivor holds this IP — the allocator must skip it (§4.4-A)

@@ -103,13 +103,21 @@ type Provider interface {
 	// Adopt re-recognizes a SURVIVING sandbox's placement after a control-plane
 	// crash (§4.4-A 另一半 / startup reconciliation). Given the SandboxID it
 	// rebuilds the opaque placement handle from the sandbox's own labeled
-	// resources, probes liveness, and rediscovers the transport endpoint — the
+	// resources, probes L1 liveness, and rediscovers the transport endpoint — the
 	// SAME endpoint, NOT a new epoch, because the isolation unit never restarted
-	// (§3.3). alive=false means the unit is dead/absent; the caller CAS-demotes
-	// the record to paused (§4.2 involuntary pause). Left-hand side is engine
-	// vocabulary (SandboxID); right-hand side is an OPAQUE handle — no host
-	// primitive leaks (§5.A ❌ list). This is why placement-local resources must
-	// carry a SandboxID label — the §3.3 reverse, allowed (§4.4-A).
+	// (§3.3). The return is a THREE-way outcome, not a boolean:
+	//   - (placement, true, nil)  → L1-alive and endpoint recovered; caller runs
+	//     its L2 Health probe, then adopts.
+	//   - (nil, false, nil)       → isolation unit genuinely DEAD/absent; caller
+	//     CAS-demotes the record to paused (§4.2 involuntary pause).
+	//   - (nil, false, err)       → UNCERTAIN: L1-alive but the endpoint could not
+	//     be recovered. This is NOT death — the caller must PROTECT the placement
+	//     (not reclaim it) and retry next boot (§4.4-A protect-on-uncertainty:
+	//     tearing down a maybe-live container is irreversible). A provider MUST NOT
+	//     collapse this case into alive=false.
+	// Left-hand side is engine vocabulary (SandboxID); right-hand side is an OPAQUE
+	// handle — no host primitive leaks (§5.A ❌ list). This is why placement-local
+	// resources must carry a SandboxID label — the §3.3 reverse, allowed (§4.4-A).
 	Adopt(ctx context.Context, sandboxID string) (p *Placement, alive bool, err error)
 
 	// ReclaimOrphans tears down every engine placement whose SandboxID is NOT in
