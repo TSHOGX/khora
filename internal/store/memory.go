@@ -19,9 +19,13 @@ import (
 // SQLite delivers with BEGIN/COMMIT, expressed with no branch in the caller
 // (§4.4-C 铁律).
 type Memory struct {
-	mu     sync.Mutex
-	rec    map[model.SandboxID]model.Sandbox
-	outbox []outboxRow // append-only, ordered — the publisher reads oldest-first
+	mu  sync.Mutex
+	rec map[model.SandboxID]model.Sandbox
+	// outbox is append-only, ordered — the publisher reads oldest-first. Like the
+	// SQLite backend, published rows are marked, never removed (same unbounded-
+	// growth known limitation; open-decisions §2 §4.1/§4.4-C row). Bounded in
+	// practice only by process lifetime since Memory is non-durable.
+	outbox []outboxRow
 }
 
 // outboxRow is one persisted Event plus its published flag (§4.4-C outbox).

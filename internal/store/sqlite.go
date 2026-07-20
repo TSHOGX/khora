@@ -38,6 +38,11 @@ CREATE TABLE IF NOT EXISTS sandboxes (
 	created_at  INTEGER NOT NULL, -- unix nanos
 	updated_at  INTEGER NOT NULL
 );
+-- KNOWN LIMITATION (open-decisions §2 §4.1/§4.4-C row): published rows are
+-- marked (published_at set), NEVER deleted, so this table grows monotonically.
+-- The partial index below keeps the publisher's unpublished-scan from
+-- degrading, but at-rest size is unbounded. Pruning (retention/replay window) is
+-- deferred to the M3+ replay-window decision, not a bug to fix in M2.
 CREATE TABLE IF NOT EXISTS outbox (
 	id           TEXT PRIMARY KEY,       -- transition-unique event ID (§4.4-C)
 	sandbox      TEXT NOT NULL,
@@ -50,19 +55,47 @@ CREATE INDEX IF NOT EXISTS outbox_unpublished ON outbox(occurred_at) WHERE publi
 `
 
 // OpenSQLite opens (creating if absent) the persistent store at path and ensures
-// the schema. path may be a file path or ":memory:" (tests). A single shared
-// connection is used with WAL + busy-timeout so concurrent verb goroutines
-// (§4.4-B stress) serialize at the SQLite level without spurious SQLITE_BUSY.
+// the schema. path may be a file path or ":memory:" (tests).
+//
+// Concurrency model (this is the whole correctness argument, so it is explicit).
+// database/sql hands out a POOL of connections, not one — and two facts make an
+// unbounded pool wrong here:
+//
+//  1. Correctness: every §4.4-C transition is a write. With multiple write
+//     connections, concurrent cross-sandbox transitions contend for SQLite's
+//     single write lock; _txlock=immediate turns that into a fail-fast on the
+//     busy-timeout rather than a mid-transaction deadlock, but it still surfaces
+//     as spurious errors the mediator would have to retry. The §4 mediator
+//     already serializes verbs PER sandbox (§4.4-B transition lock); pinning the
+//     store to ONE connection makes writes globally serialize at the store too,
+//     so a transition either runs or waits — never fails spuriously. For a
+//     single-node control plane (§1.1) whose writes are infrequent lifecycle
+//     events, total serialization is the right trade: determinism over
+//     write-concurrency the workload does not need.
+//  2. :memory: coherence: each modernc.org/sqlite connection to ":memory:" gets
+//     its OWN private database. A pool would therefore split state across
+//     connections — reconcile/publisher reads could miss a just-committed write.
+//     One connection means one in-memory database, shared across every call.
+//
+// So we cap the pool at a single connection. WAL + busy_timeout remain for the
+// file case (crash-safe commits, and a short wait rather than an instant error
+// if an external process ever holds the file lock).
 func OpenSQLite(path string) (*SQLite, error) {
-	// _txlock=immediate: every BEGIN takes a write lock up front, so a
+	// _txlock=immediate: every BEGIN takes its write lock up front, so a
 	// read-modify-write CAS transaction can't deadlock against another writer
-	// mid-transaction (it fails fast on busy-timeout instead). Correct for the
-	// §4.4-C commit path where every transition is a write.
+	// mid-transaction. Correct for the §4.4-C commit path where every transition
+	// is a write.
 	dsn := path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)&_txlock=immediate"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("store/sqlite: open: %w", err)
 	}
+	// Single connection: deterministic write serialization (§4.4-B/C) + a coherent
+	// single in-memory database for ":memory:". Safe from self-deadlock because no
+	// code path holds an open *sql.Tx while trying to acquire a second connection —
+	// each Store method takes the connection once and returns it.
+	db.SetMaxOpenConns(1)
+	db.SetConnMaxLifetime(0) // never expire the pinned connection (keeps :memory: alive)
 	if _, err := db.ExecContext(context.Background(), sqliteSchema); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("store/sqlite: schema: %w", err)

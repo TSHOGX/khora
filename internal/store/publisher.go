@@ -89,6 +89,15 @@ func (p *Publisher) Run(ctx context.Context, interval time.Duration) {
 // Deliver and MarkPublished) is a no-op here, so a billing subscriber never
 // double-counts. It lives in the engine as a REFERENCE — real subscribers live
 // outside the engine and dedup however they like (§1.3 add a subscriber).
+//
+// KNOWN LIMITATION (by design, not a defect — open-decisions §2 §4.1/§4.4-C row):
+// `seen` is in-process, UNBOUNDED, and NON-PERSISTENT. It grows with distinct
+// event IDs and is empty after a restart, so it will NOT absorb a redelivery
+// that straddles a process restart. That is fine precisely because it is a
+// reference: the engine's contract is only "reliably write to a replayable
+// stream", and a real subscriber does its own durable dedup outside the engine.
+// Do not add persistence here — that would pull subscriber state into the engine
+// (§1.1 vocabulary boundary).
 type DedupSink struct {
 	mu      sync.Mutex
 	seen    map[string]bool
