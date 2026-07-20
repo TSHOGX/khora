@@ -55,13 +55,21 @@
   的可扫信号,§4.4-A 周期对账兜底。provider 是**引流与资源上限的物化方**,不碰策略权威、不进 resolve
   路径(§5.D)。**多 node / 调度 / 跨宿主因此天然位于未来某个 provider 内,核心模型不感知**(§1.1 /
   §1.3:provider 是 registry 的一种实现)。
+  - **网络 placement 机制(local_runsc,`--network=sandbox` 实测)**:runsc **只 adopt 一个已存在的
+    netns、不自建**——`local_runsc` 先建 netns + veth、**给 guest 端分配 IP**,再经 OCI
+    `linux.namespaces[type=network].path` 把 netns 交给 runsc;sentry 加入后在 boot 时把内核侧 L3 地址
+    **收进自己的 netstack**(boot 后 `ip netns exec <ns> ip addr` 看不到 global 地址,veth *链路*仍在)。
+    推论:**引擎因是自己分配 IP 故本就知道端点**——§3.3/D5.1 冷启链 ⑥「发现 IP」对 local_runsc 退化成
+    「读回自己的分配」,不做 boot 后探测(`runsc state` 也不给 IP);且 resume 每次**新建 netns**(§3.3
+    换新 IP)天然规避「复用 netns 须重灌 guest 地址」这一实现坑。
 - **`local_runsc` 钉死其依赖的整套 runsc flag、不继承默认**——每个键对一条既定保证,`runsc` 的默认值
   跨版本会漂移,而 §5.B 的**跨 runsc 版本可移性**不能建立在"默认不变"上:
   - `--platform=systrap` —— §1.1 no-hypervisor(已是 spec 前提,此处只是把它 pin 死;platform 本身
     仍可插拔,别的 provider 可选 KVM,§1.1)。
   - `--network=sandbox`(userspace netstack)—— `host`/hostinet 让 sentry 直用宿主 socket、syscall
     直透宿主内核,**违反 §2 substrate ①**(故否决,非"另一可选模式");且它是 §5.D 引流(per-sandbox
-    netns+nft/TPROXY)与 §5.E transport 契约(netstack 下实测)的前提。**代价:它拒绝 `--rootless`**,故
+    netns+nft/TPROXY)与 §5.E transport(netstack-terminated,宿主经 veth IP 拨通已实测)的前提。**代价:
+    它拒绝 `--rootless`**,故
     orchestrator/launcher 须 root(或 CAP_NET_ADMIN+CAP_SYS_ADMIN)物化 placement——**sentry 自身仍非特权,
     支柱② 不破**;这是部署 caveat(§1.1「可跑在 CI/容器内」= 该环境须授予这些 cap),不是隔离退让。
   - `--overlay2=none --file-access=shared` —— §5.B/§5.C 持久层不靠 runsc 自管 overlay、gofer 代理宿主
@@ -218,12 +226,13 @@
      (消费方用 `read`+`stat` 自行轮询拉增量)。
   这个 daemon 是"CLI/TUI/WebUI 都是同一套 API 的平级 client"(§6)成真的具体载体。它**必须保持
   通用**:不内嵌任何 agent/turn/session 语义,那些是 engine 外 adapter 的事(见末条)。
-- **载体:netns 内 TCP,不用 vsock**(经 ECS 验证):`sandboxd` 在 guest netns 里监听一个 TCP
+- **载体:netns 内 TCP,不用 vsock**(经 ECS + 本机实测):`sandboxd` 在 guest netns 里监听一个 TCP
   端口,宿主经该 netns 的 veth IP 直连——unary 走 HTTP、双向流走 WebSocket / h2c(带即时 flush)。
-  gVisor userspace netstack 下:unary 通、双向流保序且亚毫秒即时、1–4 MiB 大 payload 无死锁、
-  冷启换新 netns IP(旧 IP 作废)零改动重连。**这直接兑现 §3.3「载体
-  不编码 placement」**——重连只需拿沙箱当前 netns IP,不依赖任何固定地址。宿主如何发现当前 IP
-  归 placement(§5.A),不进本子系统。细节见 [`deep-dives/transport.md`](./deep-dives/transport.md) D4。
+  gVisor userspace netstack 下:连接由 sentry 终结(实测 host dial 直达 in-guest listener)、unary 通、
+  双向流保序且亚毫秒即时、1–4 MiB 大 payload 无死锁、冷启换新 netns IP(旧 IP 作废)零改动重连。**这直接
+  兑现 §3.3「载体不编码 placement」**——重连只需拿沙箱当前 netns IP,不依赖任何固定地址。**那个 veth IP
+  是引擎(placement,§5.A)分配的、不是 runsc 产物**;宿主如何拿到 IP 归 placement(§5.A:引擎自己分配即
+  知道),不进本子系统。细节见 [`deep-dives/transport.md`](./deep-dives/transport.md) D4。
 - **无状态**:约束的是**控制面持久 SoT**——engine 不为连接维护持久记录,"沙箱上现在跑着什么进程" =
   实时 `process.List`、不落控制面注册表。可重启性不由 engine 承担:裸 pty 字节流明说 lossy(shell 本无
   持久 SoT),任何"不丢"担保由上层自理。transport 进程内瞬时、非权威的输出环形缓冲(供 `Connect` 回放 +

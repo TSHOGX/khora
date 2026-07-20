@@ -175,11 +175,16 @@ engine 外那层自己管**。
 
 ### D4.1 载体:netns 内 TCP(见 spec §5.E)
 
-载体已定(spec §5.E,经 ECS 验证):`sandboxd` 在 guest netns 里监听 TCP 端口,宿主经该
+载体已定(spec §5.E,经 ECS + 本机实测):`sandboxd` 在 guest netns 里监听 TCP 端口,宿主经该
 netns 的 veth IP 直连——unary 走 HTTP、双向流走 h2c 流式(server-stream/client-stream)+ 即时 flush,
 不用 vsock;我们的框架是 Connect-RPC over h2c(D4.2),非裸 WebSocket duplex。netns 内 TCP HTTP
-server + 双向流 WebSocket/h2c 带即时 flush 是成熟形态。运维前提:冷启后**发现容器当前 netns IP**
-再 dial——归 §5.A placement。wire 协议建在这层载体上。
+server + 双向流 WebSocket/h2c 带即时 flush 是成熟形态。
+
+**netstack-terminated 已实测**(arm64,`--network=sandbox`):host dial 直达 in-guest listener、由 sentry
+netstack 终结(`ss` 在 netns 内看不到内核 listener 却仍能收到响应即证)。两条落地机制归 §5.A placement,
+transport 只依赖其结果:① runsc **只 adopt 引擎预建的 netns**(经 OCI network-ns path),veth IP 由**引擎
+分配**;② sentry boot 时把内核侧 L3 地址收进 netstack,故 **boot 后读 netns 拿不到 IP**——宿主要的 IP 来自
+引擎自己的分配(冷启后不做 boot 后探测)。wire 协议建在这层已验证的载体上。
 
 下面各条凡刻意偏离 E2B `envd` 的成熟形态,都点明理由。
 

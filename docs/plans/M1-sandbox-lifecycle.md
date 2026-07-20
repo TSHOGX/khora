@@ -174,7 +174,7 @@ canonical 链(D5.1)是 ①–⑦,`create` 与 `resume` 共享,只差前缀与失
 | --- | --- | --- |
 | R1 | **最简 guest rootfs + Template 目录**(本机原先只有 `internal/rootfs` 包、无实际 rootfs) | 从本机 userland 构建、**复刻 usrmerge**(`/bin`→`usr/bin`、`/lib`→`usr/lib`)。**本机 `/bin/sh`=dash**(非 busybox),只需 `libc.so.6` + `ld-linux-aarch64.so.1`;**无 coreutils**——M1 §9 断言用 host 侧 `fs.write/read` + `sh -c 'echo'`,不依赖 guest `cat`,故够用,但 spike 勿假设 guest 内 coreutils。漏 usrmerge → ELF interpreter 解析失败、加载即崩 |
 | R2 | **幂等 teardown / §4.4-A 对账原语** | 5 类枚举原语 + 反向依赖回收序(runsc→overlay→veth→netns→cgroup)见 `open-decisions.md` §4.4-A 行。**铁律:overlay 回收按 target 路径 scope,绝不按 `-t overlay` 类型**(否则误碰系统 overlay);引擎须 pin 一个 canonical runsc `--root`(错 root 静默列空) |
-| R3 | **flag 契约** | 五个 pin 全是 **global flag**(在 `run` 子命令之前):`sudo runsc --root=<S> --platform=systrap --network=sandbox --overlay2=none --file-access=shared --systemd-cgroup=false run --bundle=<B> <cid>`;config `root.path` = 引擎在外拼好的 merged overlay 目录。**须 root**(`--network=sandbox` 拒 `--rootless`)。**overlay 挂着时 lower(Template)严格不可变**——挂载中改 lower 会毁 merged 视图(任务 B 留意) |
+| R3 | **flag 契约 + 网络 placement** | 五个 pin 全是 **global flag**(在 `run` 子命令之前):`sudo runsc --root=<S> --platform=systrap --network=sandbox --overlay2=none --file-access=shared --systemd-cgroup=false run --bundle=<B> <cid>`;config `root.path` = 引擎在外拼好的 merged overlay 目录、`linux.namespaces[network].path` = 引擎预建的 netns。**须 root**(`--network=sandbox` 拒 `--rootless`)。**runsc 只 adopt netns、不自建**:引擎先建 netns+veth+分配 guest IP,runsc 加入;sentry boot 后收走内核侧地址(boot 后读 netns 无 IP,故 IP 用引擎自己的分配,机制见 §5.A)。**overlay 挂着时 lower(Template)严格不可变**——挂载中改 lower 会毁 merged 视图(任务 B 留意) |
 
 > **DoH DNS pin(构建 rootfs 时留意)。** macOS host 的 VPN 劫持全部明文 DNS,本机靠 `/etc/hosts` 的
 > `# sbx-doh-pin` 块兜底(细节见 ADR-0002)。M1 沙箱内 network=none、**guest 不出网**,故这条只影响
@@ -190,17 +190,17 @@ R1–R3 各写成 `test/` 下一个可重跑的 preflight 检查,任务 F 的 e2
 transport→Health),而 mediator / store 是低集成风险的编排逻辑。故先用一条**手工 spike(§2)**一次性
 retire 掉 substrate 集成风险,再自底向上把各 seam 落成真实现,最后由 mediator 串起、e2e 封口。
 
-> **各段单点集成风险已消(overlay / runsc flag / netns 可达 / teardown,见 §6),但一条组合链尚未打通,
-> 正是任务 A 的核心那一刀**:sandboxd 在 **runsc `--network=sandbox` 的 userspace netstack 内** listen、
-> 宿主经 veth IP 拨通。已验的只是「宿主↔netns 可达」(用宿主 listener)与「runsc 内能 exec」两段,合起来
-> 的 netstack-terminated transport 未验——§5.E「netstack 下实测」在任务 A 打穿前保持 pending。
+> **substrate 集成风险全部消掉(见 §6):** overlay / runsc flag / netns 可达 / teardown 各段单点已验,
+> **且最险的组合链——sandboxd 在 runsc `--network=sandbox` netstack 内 listen、宿主经 veth IP 拨通——也已
+> 端到端实测通过**(§5.A 网络 placement 机制:引擎预建 netns+veth+IP、runsc adopt)。故任务 A 不再是"探路
+> 打穿未知",而是把已证机制串成一条竖切;活规格已在 §6 R1–R3 + §5.A/D4.1 就位。
 
 | 序 | 任务 | 落点(scaffold) | de-risk 的关节 | done-when |
 | --- | --- | --- | --- | --- |
-| **A** | **手工竖切 spike**(§2 一次性买断):手搓 overlay merged 目录 + 最简 netns/veth,以 sandboxd 为 entrypoint 拉起 runsc,transport 模式在 netns TCP listen,宿主 dial veth IP 打通一次 Health RPC | 一次性脚本(`test/` 下,跑通即弃,非长存代码) | 3(guest 拓扑 + netns transport)+ 1、2 的集成 | 宿主对 guest 的 Health RPC 首次成功——substrate 全链贯通,且**确切 runsc argv / netns 拓扑 / IP 发现方式记进 B–E 的活规格** |
+| **A** | **手工竖切 spike**(§2 一次性买断):按 §5.A 已证机制建 netns/veth/IP + 拼 overlay merged,以 sandboxd 为 entrypoint 拉起 runsc(adopt netns),transport 模式在 netstack 内 TCP listen,宿主 dial veth IP 打通一次 Health RPC | 一次性脚本(`test/` 下,跑通即弃,非长存代码) | 3(guest 拓扑 + netstack transport)+ 1、2 的集成 | 宿主对 guest 的 Health RPC 首次成功——substrate 全链贯通,**确切 runsc argv / netns 建法 / IP 分配已在 §6 就位,任务 A 只需串成一条可跑脚本** |
 | **S** | **wire schema 先行**(schema-first):定 Connect-RPC IDL——`process`(`Start`/`SendInput`/`SendSignal`/`List`)、`fs`(`Read`/`Write`)、`Health`;生成 host client stub + guest server stub | `internal/transport`(生成码)+ IDL 源 | 3 的契约面(D4) | IDL 编译过,两端 stub 生成;host `transport.Client` 接口与生成码对齐 |
 | **B** | **`rootfs` overlayfs provider**:`CreateOverlay` / `Mount`(拼 lower/upper/work→merged)/ `Unmount` / `DestroyOverlay`,宿主路径锁死内部 | `internal/rootfs` | 2(§5.B) | merged 里见 Template 内容;停后 upper 是宿主普通目录树、可重挂 |
-| **C** | **`local_runsc` runtime provider**:`Launch`(建最简 netns/veth + 拉 runsc + ⑥ 发现 IP)/ `Stop` / `Destroy`,契约式不泄漏宿主原语;flag 按 R2 契约钉死 | `internal/runtime` | 1、5(§5.A / §3.3 IP 重绑) | Launch 返回带 `TransportEndpoint` 的 placement;Stop 释放 RAM/CPU、upper 不动;Destroy 拆净 placement-local 资源 |
+| **C** | **`local_runsc` runtime provider**:`Launch`(建 netns/veth + 分配 guest IP + 经 OCI ns-path 拉 runsc adopt + ⑥ 端点=自分配 IP)/ `Stop` / `Destroy`,契约式不泄漏宿主原语;flag 按 R3 契约钉死 | `internal/runtime` | 1、5(§5.A / §3.3 IP 重绑) | Launch 返回带 `TransportEndpoint` 的 placement;Stop 释放 RAM/CPU、upper 不动;Destroy 拆净 placement-local 资源 |
 | **D** | **transport 两端实现**(填 S 的 stub):`sandboxd` init 模式(PID1 reaper/信号/re-exec/监督)+ transport 模式(netns TCP server 接 `process`/`fs`/`Health`);宿主侧 `transport.Client` | `cmd/sandboxd` + `internal/transport` | 3(§5.E / §5.E.1 / D4) | `Start /bin/sh` 流回 stdout;`Write`+`Read` 往返一致;PID1 能原地重启 transport 子进程 |
 | **E** | **`lifecycle` mediator**:`Create`/`Pause`/`Resume`/`Destroy` 按 ①④⑤⑥⑦ 编排,转换锁全程持有 + CAS 前置校验 + **失败 unwind 回源态**(§5 失败出口) | `internal/lifecycle` | 4(§4 / §4.4-A/B) | 四个动词端到端可驱动;并发 destroy 在 resume 持锁期拿不到锁;拉起失败 resume 退 `paused`、create 删记录 |
 | **F** | **orchestrator 装配 + e2e 验收**:`cmd/orchestrator` 装配 `store.Memory`+两个 provider+mediator、暴露最简 §6.1 API;`test/` 写 §8 断言脚本,本机真跑 runsc,复用 R1–R3 preflight | `cmd/orchestrator` + `test/` | DoD 封口 | §8 断言全绿 |
@@ -273,4 +273,4 @@ happy path 只证明「顺的时候通」;关节 4 的一半是「不顺的时�
 3. **落**——已定的回写 spec/deep-dive、未定的登记 `open-decisions.md`,两边不重叠。
 
 M1 预计会喂给 `open-decisions.md` 的候选(撞到再登记,不预先展开):pause flush 精确一致点(D5)、
-netstack-terminated transport 的实测收口(§5.E,任务 A)、失败 unwind 的确切时序与 §4.4-A 对账的交接。
+失败 unwind 的确切时序与 §4.4-A 对账的交接、连接重连时序在真 wire 上的细节。
