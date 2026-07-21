@@ -13,7 +13,7 @@ import (
 
 // fakeRootfs / fakeRuntime / fakeClient are L1 fakes (no substrate): they record
 // call order and inject failures so the mediator's lock + CAS + unwind logic can
-// be tested as pure logic (M1 §8 L1). The real providers are covered by L2/L3.
+// be tested as pure logic (L1). The real providers are covered by L2/L3.
 
 type fakeRootfs struct {
 	mu        sync.Mutex

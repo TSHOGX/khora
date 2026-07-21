@@ -1,9 +1,9 @@
 //go:build substrate
 
-// L4 §4.4-A startup crash-reconciliation acceptance (M2 plan §6 B5–B7) against
-// REAL runsc. Each test drives the assembled engine to a crash mid-transition
-// (R5 fault hook), then builds a SECOND engine over the SAME store file + state
-// dir — a faithful process restart — and runs Reconcile. Requires root.
+// L4 §4.4-A startup crash-reconciliation acceptance against REAL runsc. Each
+// test (B5–B7) drives the assembled engine to a crash mid-transition (the fault
+// hook), then builds a SECOND engine over the SAME store file + state dir — a
+// faithful process restart — and runs Reconcile. Requires root.
 //
 //	sudo env PATH=$PATH GOTOOLCHAIN=local GOFLAGS=-mod=mod GOSUMDB=off HOME=$HOME \
 //	  go test -tags substrate -v -count=1 -timeout 300s ./test/ -run Reconcile
@@ -24,7 +24,7 @@ import (
 	"engine/test/harness"
 )
 
-// crashSentinel is what the R5 fault hook panics with; recoverCrash swallows
+// crashSentinel is what the fault hook panics with; recoverCrash swallows
 // exactly it so the test can continue as the "restarted" process.
 type crashSentinel struct{ id model.SandboxID }
 

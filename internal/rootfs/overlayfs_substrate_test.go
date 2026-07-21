@@ -1,6 +1,6 @@
 //go:build substrate
 
-// L2 subsystem integration (M1 §8): real host overlayfs. Requires root (mount
+// L2 subsystem integration: real host overlayfs. Requires root (mount
 // is privileged) and a native overlayfs-capable FS. Excluded from the default
 // `go test ./...`; run explicitly on the machine:
 //

@@ -1,8 +1,9 @@
 //go:build substrate
 
-// L3 end-to-end acceptance (M1 §9): the full walking-skeleton vertical slice
-// through the assembled engine against REAL runsc on this machine. Requires
-// root. Each assertion is tagged with the joint it proves (plan §9.1/§9.2).
+// L3 end-to-end acceptance: the full lifecycle vertical slice (create → process
+// → fs → pause → resume → destroy) through the assembled engine against REAL
+// runsc on this machine. Requires root. Each assertion (A1–A9) states the
+// property it proves inline.
 //
 //	sudo env PATH=$PATH GOTOOLCHAIN=local GOFLAGS=-mod=mod GOSUMDB=off HOME=$HOME \
 //	  go test -tags substrate -v -count=1 -timeout 300s ./test/ -run E2E

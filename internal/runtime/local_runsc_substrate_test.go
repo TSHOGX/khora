@@ -1,6 +1,6 @@
 //go:build substrate
 
-// L2 subsystem integration (M1 §8): local_runsc against REAL runsc. Requires
+// L2 subsystem integration: local_runsc against REAL runsc. Requires
 // root (--network=sandbox rejects --rootless). Excluded from default test run:
 //
 //	sudo env PATH=$PATH GOTOOLCHAIN=local GOFLAGS=-mod=mod \

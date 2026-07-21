@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# build-rootfs.sh — R1 preflight (M1 §6.2): build a minimal guest rootfs Template
-# directory from this machine's own userland.
+# build-rootfs.sh — preflight: build a minimal guest rootfs Template directory
+# from this machine's own userland.
 #
 # It replicates usrmerge (/bin→usr/bin, /lib→usr/lib, /lib64, /sbin) so ELF
 # interpreter resolution works inside the guest; without it, dynamically-linked
 # binaries fail to load (ADR-0002). /bin/sh here is dash + libc.so.6 +
-# ld-linux-aarch64.so.1 — no coreutils. M1 §9 host-side fs.write/read + `sh -c
-# 'echo'` do not need guest coreutils.
+# ld-linux-aarch64.so.1 — no coreutils. The e2e assertions use host-side
+# fs.write/read + `sh -c 'echo'`, which do not need guest coreutils.
 #
 # The static sandboxd binary (CGO off) is copied to /sbin/sandboxd as the
 # container entrypoint (§5.E.1 init mode = PID 1).

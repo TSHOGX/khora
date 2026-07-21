@@ -1,11 +1,11 @@
 //go:build substrate
 
-// M3 transport-depth acceptance (plan §6.2 C1–C5, C7) against the REAL sandboxd
-// under real runsc: PTY interactive loop, multi-connection fan-out, Connect ring
-// replay, signal-to-group, and keepalive on a long idle stream. Requires root.
+// Transport-depth acceptance (C1–C5, C7) against the REAL sandboxd under real
+// runsc: PTY interactive loop, multi-connection fan-out, Connect ring replay,
+// signal-to-group, and keepalive on a long idle stream. Requires root.
 //
 //	sudo env PATH=$PATH GOTOOLCHAIN=local GOFLAGS=-mod=mod GOSUMDB=off HOME=$HOME \
-//	  go test -tags substrate -v -count=1 -timeout 300s ./test/ -run M3
+//	  go test -tags substrate -v -count=1 -timeout 300s ./test/ -run Transport
 package test
 
 import (
@@ -50,7 +50,7 @@ func collectUntilEnd(ch <-chan transport.ProcessEvent) collected {
 // C1: PTY interactive loop — start /bin/sh with a pty, type a command via
 // StreamInput, see the output stream back; resize via Update reflected by
 // `stty size`; CloseStdin ends the shell (Ctrl-D).
-func TestM3PtyInteractiveLoop(t *testing.T) {
+func TestTransportPtyInteractiveLoop(t *testing.T) {
 	// The bare template has no `stty`; inject a tiny static winsize reader that
 	// prints "SIZE <rows> <cols>" from TIOCGWINSZ on its own stdin tty.
 	cl, cleanup := launchWith(t, func(templatesDir, template string) {
@@ -143,7 +143,7 @@ func main() {
 
 // C2: multi-connection fan-out — one pid, two Connect, each an independent full
 // copy; disconnect one, the other and the process keep flowing.
-func TestM3MultiConnectionFanOut(t *testing.T) {
+func TestTransportMultiConnectionFanOut(t *testing.T) {
 	cl, cleanup := launchOne(t)
 	defer cleanup()
 	ctx := context.Background()
@@ -211,7 +211,7 @@ func TestM3MultiConnectionFanOut(t *testing.T) {
 // coreutils (no `sleep`), so we hold the process alive with dash's `read`
 // builtin (blocks on stdin) and drive it with SendInput — deterministic, no
 // timing race.
-func TestM3ConnectReplaysRing(t *testing.T) {
+func TestTransportConnectReplaysRing(t *testing.T) {
 	cl, cleanup := launchOne(t)
 	defer cleanup()
 	ctx := context.Background()
@@ -266,7 +266,7 @@ func TestM3ConnectReplaysRing(t *testing.T) {
 // A shell backgrounds a `blocker` child (blocks forever, dies on default
 // SIGTERM) then waits; SIGTERM to the GROUP must end the whole stream (parent +
 // child), not leave the child running as an orphan.
-func TestM3SignalProcessGroup(t *testing.T) {
+func TestTransportSignalProcessGroup(t *testing.T) {
 	// The bare template has no coreutils, and a backgrounded dash `read` gets
 	// stdin=/dev/null (immediate EOF) so it can't block. Inject a static blocker
 	// that blocks unconditionally and terminates on SIGTERM (Go default action).
@@ -334,7 +334,7 @@ func main() {
 // C7: a long idle output stream is NOT killed by an idle deadline, and
 // keepalive frames arrive periodically. Uses a short keepalive by relying on the
 // server's configured interval; we wait long enough to see at least one.
-func TestM3LongStreamKeepalive(t *testing.T) {
+func TestTransportLongStreamKeepalive(t *testing.T) {
 	if testing.Short() {
 		t.Skip("keepalive timing test skipped in -short")
 	}

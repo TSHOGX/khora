@@ -1,9 +1,9 @@
 //go:build substrate
 
 // Package harness builds the real substrate fixtures shared by the L2/L3
-// substrate tests (Task D transport round-trip, Task F e2e). It compiles the
-// real sandboxd, builds a guest rootfs Template with it (reusing the R1
-// preflight builder), and constructs the two real providers. Requires root.
+// substrate tests (transport round-trip, e2e). It compiles the real sandboxd,
+// builds a guest rootfs Template with it (via the preflight builder), and
+// constructs the two real providers. Requires root.
 package harness
 
 import (
@@ -48,7 +48,7 @@ func BuildSandboxd(t *testing.T, repoRoot string) string {
 }
 
 // BuildTemplate builds a guest rootfs Template dir named `name` under
-// templatesDir, using the R1 builder + the given sandboxd binary.
+// templatesDir, using the preflight builder + the given sandboxd binary.
 func BuildTemplate(t *testing.T, repoRoot, templatesDir, name, sandboxdBin string) {
 	t.Helper()
 	dst := filepath.Join(templatesDir, name)

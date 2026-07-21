@@ -1,11 +1,11 @@
 //go:build substrate
 
-// C6 (plan §6.2): the outer-edge Connect data plane through the orchestrator.
+// C6: the outer-edge Connect data plane through the orchestrator.
 // A Connect client speaks the SAME transport.proto to the orchestrator, using
 // ONLY sandbox_id (a header) — the orchestrator re-proxies to the sandbox's
 // sandboxd (D6). Asserts: Start/Connect/fs work end-to-end; placement (netns IP
-// / container id / host path) never appears at the outer edge; the old NDJSON
-// facade is gone. Requires root (real runsc).
+// / container id / host path) never appears at the outer edge; there is no
+// REST/NDJSON data-plane facade (those routes 404). Requires root (real runsc).
 //
 //	sudo env PATH=$PATH GOTOOLCHAIN=local GOFLAGS=-mod=mod GOSUMDB=off HOME=$HOME \
 //	  go test -tags substrate -v -count=1 -timeout 300s ./test/ -run C6
@@ -132,7 +132,7 @@ func TestC6OuterEdgeConnectProxy(t *testing.T) {
 		t.Errorf("placement IP %s leaked into outer-edge output", ip)
 	}
 
-	// --- NDJSON facade is gone: the old REST data-plane routes 404 now ---
+	// --- no REST data-plane facade: these routes 404 ---
 	assertGone := func(method, path string, body string) {
 		r, _ := http.NewRequest(method, srv.URL+path, strings.NewReader(body))
 		resp, err := http.DefaultClient.Do(r)
@@ -141,7 +141,7 @@ func TestC6OuterEdgeConnectProxy(t *testing.T) {
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode != http.StatusNotFound {
-			t.Errorf("old NDJSON route %s %s returned %d; want 404 (facade must be deleted)", method, path, resp.StatusCode)
+			t.Errorf("REST data-plane route %s %s returned %d; want 404 (no facade)", method, path, resp.StatusCode)
 		}
 	}
 	assertGone(http.MethodPost, "/v1/sandboxes/"+string(sid)+"/processes", `{"cmd":"/bin/sh"}`)

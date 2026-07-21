@@ -141,7 +141,8 @@ func TestSlowSubscriberDroppedSourceNeverBlocks(t *testing.T) {
 // frame. Per the best-effort-tail contract that dropped end frame — exit code
 // included — is silently lost for THAT copy; the channel still closes cleanly and
 // finish must NOT block or panic. (Making the drop observable end-to-end is an
-// M4 liveness-signal decision, not M3 — see finish() NOTE and open-decisions.)
+// health-quadrant/connection-activity decision — see finish() NOTE and
+// open-decisions.)
 func TestFinishOnFullWindowIsSilentlyLossy(t *testing.T) {
 	p := newProc(1, nil)
 	sub, _, _, _ := p.subscribe()

@@ -1,8 +1,8 @@
 //go:build substrate
 
-// L2 transport round-trip (M1 §8, Task D done-when) against the REAL sandboxd
-// running under real runsc: Start streams stdout, Write+Read round-trips, and
-// PID 1 restarts the transport child in place (D5.3). Requires root.
+// L2 transport round-trip against the REAL sandboxd running under real runsc:
+// Start streams stdout, Write+Read round-trips, and PID 1 restarts the transport
+// child in place (D5.3). Requires root.
 //
 //	sudo env PATH=$PATH GOTOOLCHAIN=local GOFLAGS=-mod=mod GOSUMDB=off HOME=$HOME \
 //	  go test -tags substrate -v -count=1 -timeout 180s ./test/ -run Transport
