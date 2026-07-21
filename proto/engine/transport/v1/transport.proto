@@ -19,7 +19,10 @@ option go_package = "engine/internal/transport/gen/engine/transport/v1;transport
 
 // Health is the unary readiness/liveness probe (§4.3 L2 / transport D4.5). Its
 // first success is the resume readiness gate that flips a sandbox to running
-// (guest-runtime D5.2 要点①) — the engine never trusts a bare TCP accept.
+// (guest-runtime D5.2 要点①) — the engine never trusts a bare TCP accept. It is
+// also the ACTIVITY probe (§4.3 / reaper-health D2): one RPC carries L2
+// liveness AND the sandbox-global idle duration, so the reaper never needs a
+// second round-trip to tell healthy from idle.
 service HealthService {
   rpc Check(CheckRequest) returns (CheckResponse) {}
 }
@@ -27,6 +30,20 @@ service HealthService {
 message CheckRequest {}
 message CheckResponse {
   bool ok = 1;
+  // idle_millis is how long (in ms) since the sandbox's LAST I/O across ALL
+  // processes + ptys — sandboxd stamps a single sandbox-global "last I/O" time
+  // in the paths I/O already flows through (proc.broadcast output, writeInput
+  // input) and reports now-lastIO here (reaper-health D2 / §4.3 activity
+  // signal). Measured GUEST-side on purpose: a detached process still producing
+  // output with NO client attached (§3.2) is invisible to any host-side proxy,
+  // which would false-idle a working sandbox (reaper-health D1).
+  //
+  // ONLY meaningful when ok=true: it rides a SUCCESSFUL Health response, so a
+  // transport-down / booting / dead guest yields no reading at all. The
+  // classifier must therefore never read idle from a failed probe → never
+  // misclassify an unreachable sandbox as idle (reaper-health D2 unreadable-
+  // idle guard). A guest with no I/O since boot reports the ms since boot.
+  int64 idle_millis = 2;
 }
 
 // ProcessService is the §5.E process primitive: start / connect / input /

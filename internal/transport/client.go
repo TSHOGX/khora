@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"time"
 
 	"connectrpc.com/connect"
 	"golang.org/x/net/http2"
@@ -50,15 +51,15 @@ func Dial(ep Endpoint) Client {
 // DialFunc adapts Dial to the mediator's Deps.Dial signature.
 func DialFunc(ep Endpoint) Client { return Dial(ep) }
 
-func (c *connectClient) Health(ctx context.Context) error {
+func (c *connectClient) Health(ctx context.Context) (HealthStatus, error) {
 	resp, err := c.health.Check(ctx, connect.NewRequest(&v1.CheckRequest{}))
 	if err != nil {
-		return err
+		return HealthStatus{}, err
 	}
 	if !resp.Msg.Ok {
-		return errors.New("transport: health not ok")
+		return HealthStatus{}, errors.New("transport: health not ok")
 	}
-	return nil
+	return HealthStatus{Idle: time.Duration(resp.Msg.IdleMillis) * time.Millisecond}, nil
 }
 
 func (c *connectClient) Start(ctx context.Context, spec StartSpec) (<-chan ProcessEvent, error) {

@@ -331,7 +331,7 @@ func (m *Mediator) awaitHealthy(ctx context.Context, pl *runtime.Placement) erro
 	cl := m.deps.Dial(transport.Endpoint(pl.TransportEndpoint))
 	for {
 		hctx, cancel := context.WithTimeout(ctx, time.Second)
-		err := cl.Health(hctx)
+		_, err := cl.Health(hctx)
 		cancel()
 		if err == nil {
 			return nil
@@ -564,7 +564,8 @@ func (m *Mediator) probeReady(ctx context.Context, pl *runtime.Placement) bool {
 	cl := m.deps.Dial(transport.Endpoint(pl.TransportEndpoint))
 	hctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	return cl.Health(hctx) == nil
+	_, err := cl.Health(hctx)
+	return err == nil
 }
 
 // Client returns a stateless transport client for the sandbox's CURRENT

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"engine/internal/rootfs"
 	"engine/internal/runtime"
@@ -140,13 +141,19 @@ func (f *fakeRuntime) ReclaimOrphans(_ context.Context, keep []string) error {
 }
 
 // fakeClient satisfies transport.Client; only Health matters for the mediator.
-type fakeClient struct{ healthy bool }
+// idle is the sandbox-global idle duration a successful Health reports back
+// (reaper-health D2 activity signal) — the classifier reads it to tell healthy
+// from idle. Zero unless a test sets it.
+type fakeClient struct {
+	healthy bool
+	idle    time.Duration
+}
 
-func (c *fakeClient) Health(context.Context) error {
+func (c *fakeClient) Health(context.Context) (transport.HealthStatus, error) {
 	if c.healthy {
-		return nil
+		return transport.HealthStatus{Idle: c.idle}, nil
 	}
-	return fmt.Errorf("not healthy")
+	return transport.HealthStatus{}, fmt.Errorf("not healthy")
 }
 func (c *fakeClient) Start(context.Context, transport.StartSpec) (<-chan transport.ProcessEvent, error) {
 	return nil, nil

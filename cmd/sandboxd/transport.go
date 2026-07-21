@@ -29,9 +29,17 @@ func transportMode() {
 		logf("transport: PR_SET_CHILD_SUBREAPER failed: %v", errno)
 	}
 
+	// One sandbox-global activity clock (reaper-health D2), shared by the
+	// process server (stamps I/O) and the health server (reports idle). It is
+	// transient/process-local — reborn here on every transport (re)start, which
+	// is correct: a fresh transport child that has served no I/O yet is "idle
+	// since (re)start", and the reaper reads the guest-observable truth, not a
+	// cross-restart memory (§5.E stateless).
+	activity := newActivityClock()
+
 	mux := http.NewServeMux()
-	mux.Handle(transportv1connect.NewHealthServiceHandler(&healthServer{}))
-	mux.Handle(transportv1connect.NewProcessServiceHandler(&processServer{}))
+	mux.Handle(transportv1connect.NewHealthServiceHandler(&healthServer{activity: activity}))
+	mux.Handle(transportv1connect.NewProcessServiceHandler(&processServer{activity: activity}))
 	mux.Handle(transportv1connect.NewFsServiceHandler(&fsServer{}))
 
 	// Publish our pid so supervision/tests can target the transport child
@@ -64,10 +72,18 @@ const transportPidFile = "/tmp/.sandboxd-transport.pid"
 
 // --- Health service (§4.3 L2 / transport D4.5) -------------------------------
 
-type healthServer struct{}
+type healthServer struct {
+	// activity is the shared sandbox-global last-I/O clock (reaper-health D2).
+	// Check reports now-lastIO as idle_millis — the §4.3 activity signal riding
+	// the same probe that answers L2 liveness (one RPC, no second round-trip).
+	activity *activityClock
+}
 
-func (*healthServer) Check(_ context.Context, _ *connect.Request[v1.CheckRequest]) (*connect.Response[v1.CheckResponse], error) {
-	return connect.NewResponse(&v1.CheckResponse{Ok: true}), nil
+func (h *healthServer) Check(_ context.Context, _ *connect.Request[v1.CheckRequest]) (*connect.Response[v1.CheckResponse], error) {
+	return connect.NewResponse(&v1.CheckResponse{
+		Ok:         true,
+		IdleMillis: h.activity.idleMillis(),
+	}), nil
 }
 
 // --- fs service (§5.E fs primitive) ------------------------------------------

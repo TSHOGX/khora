@@ -218,7 +218,7 @@ func TestReconcileAdoptSurvivor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("client after adopt: %v", err)
 	}
-	if err := cl.Health(ctx); err != nil {
+	if _, err := cl.Health(ctx); err != nil {
 		t.Fatalf("adopted endpoint health: %v", err)
 	}
 	t.Logf("✓ survivor re-adopted at same IP %s, addressable", epAfter)

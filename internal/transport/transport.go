@@ -32,7 +32,10 @@ package transport
 // DOMAIN seam; the concrete Connect client translates domain↔proto so
 // the mediator never sees generated types.
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // Endpoint is the current transport endpoint (netns veth IP:port), discovered
 // at placement time (§5.A ⑥). Never cached across resume (§4.3 要点③).
@@ -67,6 +70,19 @@ type StartSpec struct {
 
 type PtySize struct{ Rows, Cols uint16 }
 
+// HealthStatus is the domain projection of a successful Health probe (§4.3 L2 +
+// activity signal). It carries the sandbox-global idle duration the reaper's
+// classifier reads to tell healthy from idle (reaper-health D2). Only valid
+// when Health returned a nil error — a failed probe yields no trustworthy
+// activity reading, which is exactly the unreadable-idle guard: the classifier
+// must never read Idle from a failed probe (reaper-health D2).
+type HealthStatus struct {
+	// Idle is how long since the sandbox's last I/O across all processes + ptys
+	// (reaper-health D2). Zero for callers/guests that never did I/O since the
+	// transport (re)started ("idle since start").
+	Idle time.Duration
+}
+
 // InputWriter is an ordered input stream to one process (stdin / pty-in). It is
 // the domain projection of the StreamInput client-stream (transport D4.3):
 // keystroke ordering is guaranteed by the single stream. Close ends the stream
@@ -83,8 +99,12 @@ type InputWriter interface {
 type Client interface {
 	// Health is the unary readiness/liveness probe (§4.3 L2 / transport D4.5).
 	// First success is the resume readiness gate that flips state to running
-	// (guest-runtime D5.2 要点①) — the engine does not trust bare TCP accept.
-	Health(ctx context.Context) error
+	// (guest-runtime D5.2 要点①) — the engine does not trust bare TCP accept. The
+	// returned HealthStatus carries the sandbox-global idle duration (§4.3
+	// activity signal); it is only meaningful when err == nil. Readiness callers
+	// (cold-start ⑦ gate, adopt probe) ignore it and check err alone; the reaper
+	// classifier reads Idle (reaper-health D2).
+	Health(ctx context.Context) (HealthStatus, error)
 
 	// Start launches a process and returns a channel of output events
 	// (server-stream). Addressed by the returned pid thereafter.

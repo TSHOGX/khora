@@ -31,6 +31,11 @@ import (
 type processServer struct {
 	mu    sync.Mutex
 	procs map[int]*proc
+	// activity is the sandbox-global last-I/O clock (§4.3 activity signal,
+	// reaper-health D2). Shared with the healthServer so Health.Check reports
+	// idle duration. Every proc created here carries a reference to it and
+	// stamps it on broadcast/writeInput.
+	activity *activityClock
 }
 
 // Residual tuning values (open-decisions §5.E — numeric knobs, do NOT change
@@ -48,6 +53,7 @@ func (s *processServer) register(p *proc) {
 	if s.procs == nil {
 		s.procs = make(map[int]*proc)
 	}
+	p.activity = s.activity // share the sandbox-global I/O clock (reaper-health D2)
 	s.procs[p.pid] = p
 	s.mu.Unlock()
 }
@@ -87,6 +93,12 @@ type subscriber struct {
 // input handles (stdin pipe; pty master).
 type proc struct {
 	pid int
+
+	// activity is the shared sandbox-global last-I/O clock (reaper-health D2),
+	// set by processServer.register. Stamped on every output (broadcast) and
+	// input (writeInput). nil when a proc is built outside the server (unit
+	// tests) — activityClock methods are nil-safe.
+	activity *activityClock
 
 	mu       sync.Mutex
 	ring     ringBuffer
@@ -133,6 +145,15 @@ func (r *ringBuffer) snapshot() []frame {
 // every live subscriber. A subscriber whose window is full is dropped
 // (invariant 1) — the source NEVER blocks here.
 func (p *proc) broadcast(f frame) {
+	if f.kind == 'd' {
+		// Stamp sandbox-global activity on OUTPUT (reaper-health D2). Done here,
+		// in the path EVERY output frame flows through, so a detached process
+		// producing output with no client attached still counts as active
+		// (§3.2 / reaper-health D1 — the whole reason the signal is guest-side).
+		// Off p.mu: the atomic store needs no lock, and keeping it out avoids any
+		// question of holding the fan-out mutex a beat longer.
+		p.activity.stamp()
+	}
 	p.mu.Lock()
 	if f.kind == 'd' {
 		p.ring.append(f)
@@ -239,6 +260,11 @@ func (p *proc) writeInput(data []byte, ptyIn bool) error {
 		w = p.stdin
 	}
 	p.mu.Unlock()
+	// Stamp sandbox-global activity on INPUT (reaper-health D2): a keystroke /
+	// stdin write is I/O even if the process produces no output in response.
+	// Stamped before the (possibly blocking) Write — the input arriving IS the
+	// activity, regardless of when the child drains it.
+	p.activity.stamp()
 	_, err := w.Write(data)
 	return err
 }

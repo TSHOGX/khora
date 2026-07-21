@@ -73,7 +73,7 @@ func waitHealth(cl transport.Client, d time.Duration) bool {
 	deadline := time.Now().Add(d)
 	for time.Now().Before(deadline) {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		err := cl.Health(ctx)
+		_, err := cl.Health(ctx)
 		cancel()
 		if err == nil {
 			return true
