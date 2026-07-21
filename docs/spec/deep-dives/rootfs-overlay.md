@@ -49,10 +49,10 @@ upper 是宿主普通目录树且 tar 出完整 diff 层、容器内 sha256 与�
 
 ---
 
-## D2. 演进目标:外层 overlayfs + content-addressed diff
+## D2. 载体形状与演进目标:外层 overlayfs + content-addressed diff
 
-留驻 upper 之上有一条成熟的演进路径,值得现在就想清楚,因为它决定了 §3.1.1 的抽象形状。它的持久化
-**完全不碰 runsc 的 overlay**,三步:
+外层 overlayfs 载体(①②,当前已定物化见 D3)天然容纳一条成熟的演进路径(③),值得现在就想清楚,
+因为它决定了 §3.1.1 的抽象形状。三步的持久化**完全不碰 runsc 的 overlay**:
 
 **① runsc overlay 关掉**(`--overlay2=none --file-access=shared`):runsc 拿到的 rootfs 是**引擎在
 外面已经挂好的宿主内核 overlayfs 的 merged 目录**,经 gofer(`file-access=shared`)代理进 guest。
@@ -60,7 +60,7 @@ upper 是宿主普通目录树且 tar 出完整 diff 层、容器内 sha256 与�
 **② upper 是内核 overlayfs 的普通目录树**:merged mount 的 `upperdir=` 就是宿主上一个真实路径,可
 直接 `filepath.Walk` 遍历——与 gVisor 那个启动即 `unlink` 的 filestore 是两个世界(D1)。
 
-**③ 持久单元是 content-addressed diff,不是留驻的 upper**:
+**③ 演进目标的持久单元是 content-addressed diff,而非留驻 upper**(当前持久单元是留驻 upper,见 D0/D3):
 - 把 upper 提取成 OCI diff tar + `{MediaType, Digest, Size}` descriptor,推到 object store。
 - resume/claim 时把 diff apply 回**新容器**的 live rootfs bind mount 上。
 - 相对某 baseline 层做**增量** diff——天然分层。
