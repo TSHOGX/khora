@@ -32,6 +32,17 @@ type processProxy struct{ e *Engine }
 // fsProxy re-proxies FsService to the sandbox's sandboxd (D6).
 type fsProxy struct{ e *Engine }
 
+// proxyErr sanitizes an inner transport-client error before it crosses to the
+// external client. The inner client dials the netns veth IP (client.go), so a
+// raw dial/transport error carries that IP:port — returning it verbatim would
+// leak placement to the engine's edge (§6.2 / D6.1: placement never exposed).
+// Map to CodeUnavailable with a placement-free message; the real cause stays in
+// engine logs, not the wire. (Stream errors that arrive via drainEvents are a
+// separate, known M4 seam item — see dataplane doc / transport.md.)
+func proxyErr(err error) error {
+	return connect.NewError(connect.CodeUnavailable, errors.New("sandbox transport unavailable"))
+}
+
 // clientFor resolves the transport client for the header-named sandbox. The
 // endpoint resolution stays inside the mediator (§6.2: placement never exposed).
 func (e *Engine) clientFor(hdrGet func(string) string) (transport.Client, error) {
@@ -60,7 +71,7 @@ func (p *processProxy) Start(ctx context.Context, req *connect.Request[v1.StartR
 	}
 	ch, err := cl.Start(ctx, spec)
 	if err != nil {
-		return connect.NewError(connect.CodeInternal, err)
+		return proxyErr(err)
 	}
 	return forwardEvents(stream, ch)
 }
@@ -72,7 +83,7 @@ func (p *processProxy) Connect(ctx context.Context, req *connect.Request[v1.Conn
 	}
 	ch, err := cl.Connect(ctx, int(req.Msg.Pid))
 	if err != nil {
-		return connect.NewError(connect.CodeInternal, err)
+		return proxyErr(err)
 	}
 	return forwardEvents(stream, ch)
 }
@@ -88,17 +99,17 @@ func (p *processProxy) StreamInput(ctx context.Context, stream *connect.ClientSt
 		if in == nil {
 			in, err = cl.StreamInput(ctx, int(m.Pid))
 			if err != nil {
-				return nil, connect.NewError(connect.CodeInternal, err)
+				return nil, proxyErr(err)
 			}
 		}
 		if err := in.Send(m.Data, m.PtyIn); err != nil {
 			_ = in.Close()
-			return nil, connect.NewError(connect.CodeInternal, err)
+			return nil, proxyErr(err)
 		}
 	}
 	if in != nil {
 		if err := in.Close(); err != nil {
-			return nil, connect.NewError(connect.CodeInternal, err)
+			return nil, proxyErr(err)
 		}
 	}
 	if err := stream.Err(); err != nil {
@@ -113,7 +124,7 @@ func (p *processProxy) SendInput(ctx context.Context, req *connect.Request[v1.Se
 		return nil, err
 	}
 	if err := cl.SendInput(ctx, int(req.Msg.Pid), req.Msg.Data, req.Msg.PtyIn); err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, proxyErr(err)
 	}
 	return connect.NewResponse(&v1.SendInputResponse{}), nil
 }
@@ -124,7 +135,7 @@ func (p *processProxy) SendSignal(ctx context.Context, req *connect.Request[v1.S
 		return nil, err
 	}
 	if err := cl.SendSignal(ctx, int(req.Msg.Pid), int(req.Msg.Signal)); err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, proxyErr(err)
 	}
 	return connect.NewResponse(&v1.SendSignalResponse{}), nil
 }
@@ -138,7 +149,7 @@ func (p *processProxy) Update(ctx context.Context, req *connect.Request[v1.Updat
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("Update requires pty size"))
 	}
 	if err := cl.Update(ctx, int(req.Msg.Pid), transport.PtySize{Rows: uint16(req.Msg.Pty.Rows), Cols: uint16(req.Msg.Pty.Cols)}); err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, proxyErr(err)
 	}
 	return connect.NewResponse(&v1.UpdateResponse{}), nil
 }
@@ -149,7 +160,7 @@ func (p *processProxy) CloseStdin(ctx context.Context, req *connect.Request[v1.C
 		return nil, err
 	}
 	if err := cl.CloseStdin(ctx, int(req.Msg.Pid)); err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, proxyErr(err)
 	}
 	return connect.NewResponse(&v1.CloseStdinResponse{}), nil
 }
@@ -161,7 +172,7 @@ func (p *processProxy) List(ctx context.Context, req *connect.Request[v1.ListReq
 	}
 	pids, err := cl.List(ctx)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, proxyErr(err)
 	}
 	out := make([]int32, 0, len(pids))
 	for _, p := range pids {
@@ -179,7 +190,7 @@ func (f *fsProxy) Read(ctx context.Context, req *connect.Request[v1.ReadRequest]
 	}
 	data, err := cl.Read(ctx, req.Msg.Path, req.Msg.Offset, req.Msg.Length)
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, proxyErr(err)
 	}
 	return connect.NewResponse(&v1.ReadResponse{Data: data}), nil
 }
@@ -190,7 +201,7 @@ func (f *fsProxy) Write(ctx context.Context, req *connect.Request[v1.WriteReques
 		return nil, err
 	}
 	if err := cl.Write(ctx, req.Msg.Path, req.Msg.Data); err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, proxyErr(err)
 	}
 	return connect.NewResponse(&v1.WriteResponse{BytesWritten: int64(len(req.Msg.Data))}), nil
 }
