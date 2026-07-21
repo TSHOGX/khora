@@ -297,6 +297,10 @@ func (p *proc) closeStdin() error {
 	if p.pty != nil {
 		pty := p.pty
 		p.mu.Unlock()
+		// The ^D keystroke is INPUT I/O — stamp it like writeInput (reaper-health
+		// D2), so closing stdin counts as activity and can't leave a sandbox that
+		// was just interacted with looking idle.
+		p.activity.stamp()
 		_, err := pty.Write([]byte{0x04}) // ^D
 		return err
 	}
@@ -304,6 +308,7 @@ func (p *proc) closeStdin() error {
 		w := p.stdin
 		p.stdin = nil
 		p.mu.Unlock()
+		p.activity.stamp() // stdin close is input-side I/O too (reaper-health D2)
 		return w.Close()
 	}
 	p.mu.Unlock()
