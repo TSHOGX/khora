@@ -214,47 +214,73 @@ func (p *proc) unsubscribe(sub *subscriber) {
 }
 
 // writeInput writes to the process's pty master (ptyIn) or stdin pipe.
+//
+// The blocking Write MUST happen OUTSIDE p.mu (D4.3 invariant 1: the source
+// never blocks). If we held mu across a Write that blocks on a full pipe (child
+// busy writing stdout, not reading stdin), pumpSource→broadcast would deadlock
+// waiting for mu while the child deadlocks waiting for its stdout to drain. So
+// snapshot the writer handle under mu, release, then write unlocked. io.Writer
+// is safe to use concurrently with the mu-guarded fan-out; only the handle
+// pointer needs lock protection.
 func (p *proc) writeInput(data []byte, ptyIn bool) error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
+	var w io.Writer
 	if ptyIn {
 		if p.pty == nil {
+			p.mu.Unlock()
 			return errString("process has no pty")
 		}
-		_, err := p.pty.Write(data)
-		return err
+		w = p.pty
+	} else {
+		if p.stdin == nil {
+			p.mu.Unlock()
+			return errString("stdin closed")
+		}
+		w = p.stdin
 	}
-	if p.stdin == nil {
-		return errString("stdin closed")
-	}
-	_, err := p.stdin.Write(data)
+	p.mu.Unlock()
+	_, err := w.Write(data)
 	return err
 }
 
 // resize applies a new PTY size (transport D4.3 Update). Errors if no pty.
+//
+// The TIOCSWINSZ ioctl is non-blocking so it wouldn't deadlock the fan-out, but
+// we follow writeInput's snapshot-then-act-unlocked shape uniformly so no I/O on
+// the pty handle is ever done under p.mu (D4.3 invariant 1).
 func (p *proc) resize(rows, cols uint16) error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	if p.pty == nil {
+		p.mu.Unlock()
 		return errString("process has no pty")
 	}
-	return setWinsize(p.pty, rows, cols)
+	pty := p.pty
+	p.mu.Unlock()
+	return setWinsize(pty, rows, cols)
 }
 
 // closeStdin closes the stdin pipe (non-pty) or writes VEOF (pty Ctrl-D). For a
 // pty the master stays open (still the output source) — only EOF is injected.
+//
+// Like writeInput, the pty ^D Write is done outside p.mu so it can't block the
+// fan-out (D4.3 invariant 1). The stdin Close path nils the handle, so it stays
+// under the lock (a pointer mutation, not a blocking op) — but snapshots and
+// clears before releasing so a racing writeInput sees stdin==nil.
 func (p *proc) closeStdin() error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	if p.pty != nil {
-		_, err := p.pty.Write([]byte{0x04}) // ^D
+		pty := p.pty
+		p.mu.Unlock()
+		_, err := pty.Write([]byte{0x04}) // ^D
 		return err
 	}
 	if p.stdin != nil {
-		err := p.stdin.Close()
+		w := p.stdin
 		p.stdin = nil
-		return err
+		p.mu.Unlock()
+		return w.Close()
 	}
+	p.mu.Unlock()
 	return nil
 }
 

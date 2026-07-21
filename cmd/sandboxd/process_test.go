@@ -2,11 +2,31 @@ package main
 
 import (
 	"testing"
+	"time"
 )
 
 // L1 (no substrate): the D4.3 fan-out invariants as pure logic. The real
 // runsc round-trip (C2/C3/C4) is in test/transport_substrate_test.go; these
 // pin the hub mechanics deterministically and under -race.
+
+// blockingWriter simulates a child whose input pipe is full: Write blocks until
+// release is closed. Used to prove writeInput does not hold p.mu across a
+// blocking write (which would freeze the fan-out — D4.3 invariant 1).
+type blockingWriter struct {
+	entered chan struct{} // closed-ish: signals Write was reached
+	release chan struct{} // Write returns once this is closed
+}
+
+func (b *blockingWriter) Write(p []byte) (int, error) {
+	select {
+	case b.entered <- struct{}{}:
+	default:
+	}
+	<-b.release
+	return len(p), nil
+}
+
+func (b *blockingWriter) Close() error { return nil }
 
 func drain(ch <-chan frame) []frame {
 	var out []frame
@@ -157,4 +177,44 @@ func TestSubscribeAfterEnded(t *testing.T) {
 	if endF.kind != 'e' || endF.exitCode != 7 {
 		t.Fatalf("end frame = %v; want end exit=7", endF)
 	}
+}
+
+// invariant 1 (source never blocks — regression for the writeInput-under-mu
+// deadlock): a writeInput that blocks in Write (child not draining its input)
+// must NOT hold p.mu, so broadcast/subscribe/finish stay live meanwhile. Before
+// the fix this test deadlocks (broadcast waits for mu held by the stuck write).
+func TestWriteInputDoesNotBlockFanOut(t *testing.T) {
+	bw := &blockingWriter{entered: make(chan struct{}, 1), release: make(chan struct{})}
+	p := newProc(1, bw)
+	sub, _, _, _ := p.subscribe()
+
+	// Kick off a write that will block inside bw.Write (input pipe "full").
+	writeDone := make(chan error, 1)
+	go func() { writeDone <- p.writeInput([]byte("stuck"), false) }()
+	<-bw.entered // write is now parked inside Write
+
+	// With the write parked, the fan-out must still flow: broadcast delivers,
+	// subscribe works, finish completes. If writeInput held p.mu, all three
+	// would block here and the test would hang to -timeout.
+	done := make(chan struct{})
+	go func() {
+		p.broadcast(frame{kind: 'd', data: []byte("live")})
+		s2, _, _, _ := p.subscribe()
+		if s2 != nil {
+			p.unsubscribe(s2)
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fan-out blocked while writeInput parked in Write — source blocked, invariant 1 violated")
+	}
+
+	// Let the write finish and confirm it returned cleanly.
+	close(bw.release)
+	if err := <-writeDone; err != nil {
+		t.Fatalf("writeInput returned error: %v", err)
+	}
+	_ = sub
 }
