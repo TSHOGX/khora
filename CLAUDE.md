@@ -125,12 +125,19 @@ slims to boundary + open agenda — nothing lives in full in both places.
 - If an approach **fails twice, root-cause it** — don't stack patches. Surface
   the cause and a different approach.
 
-## Out of scope (external / historical — mine lessons, never cite as a live dep)
+## No compatibility burden (staged, pre-deployment)
 
-The pre-move spec (Mac-side `docs/plan/`), `archieve/`, `ref-repo/`, `research/`.
-Deep-dives that referenced them now carry neutral markers, not links. When you
-need a rationale from there, **re-derive it from first principles into a living
-doc here** (spec / deep-dive / ADR), don't add a dangling link back.
+**There are no live instances.** Persistent data (store.db, overlays, runsc
+state) can be discarded and rebuilt at any time. Therefore write **no schema
+migration / no version-compat / no backward-compat code** — a breaking change
+edits the schema and deletes the old path in place, full stop.
+
+A compat branch is a **negative asset right now**: it widens the code surface
+and manufactures fake invariants — "the comment claims one thing, the code does
+another" — exactly the silent drift the spec discipline exists to prevent. When
+the schema grows a column, put it in `CREATE TABLE` and regenerate the store; do
+not `ALTER` an imagined old file. This rule lifts when we actually deploy — at
+that point compatibility becomes a real constraint and this section gets revised.
 
 ## Commits
 
