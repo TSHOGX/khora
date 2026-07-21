@@ -355,17 +355,23 @@ func TestM3LongStreamKeepalive(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 	// collect in the background so we observe keepalive frames as they arrive.
+	// pid is handed off over a channel (not a shared var) so the -race detector
+	// sees a clean happens-before between the stream goroutine and this one.
 	res := make(chan struct {
 		data string
 		ka   bool
 	}, 1)
+	pidCh := make(chan int, 1)
 	go func() {
 		var b strings.Builder
 		ka := false
 		for ev := range ch {
 			switch ev.Kind {
 			case "start":
-				pid = ev.PID
+				select {
+				case pidCh <- ev.PID:
+				default:
+				}
 			case "data":
 				b.Write(ev.Data)
 			case "keepalive":
@@ -378,12 +384,18 @@ func TestM3LongStreamKeepalive(t *testing.T) {
 		}{b.String(), ka}
 	}()
 
-	// wait past the keepalive interval while the stream is idle.
-	time.Sleep(keepaliveWait)
-	// pid should be set by now; unblock the read.
+	// the start event arrives immediately; get the pid before idling.
+	select {
+	case pid = <-pidCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no start pid")
+	}
 	if pid <= 0 {
 		t.Fatal("no start pid")
 	}
+	// hold the stream idle past the keepalive interval (guest `read` blocks,
+	// producing nothing): the server must emit a keepalive and NOT idle-kill it.
+	time.Sleep(keepaliveWait)
 	if err := cl.SendInput(ctx, pid, []byte("go\n"), false); err != nil {
 		t.Fatalf("SendInput: %v", err)
 	}
