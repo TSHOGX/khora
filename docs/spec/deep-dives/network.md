@@ -236,20 +236,17 @@ egress 有两跳,deny-set 少钉一跳就漏:
 > 逻辑。deny-set 的 **L0 清单是引擎资产**(像 D7 的 classify/decide reference),两跳都引用同一份,
 > 不各自维护——否则两跳语义漂移,地板被从缝里穿过。
 
-### D5.5 跨沙箱网络隔离(§2.3 的网络维度空洞,支柱①管不到)
+### D5.5 跨沙箱网络隔离:为什么支柱①管不到,靠什么守
 
-**支柱①(syscall 拦截)守不住这条**:它虚拟化 syscall,不拦网络包——guest 合法用网络,包本就要出去。
-§2.3「不可触及面」只列了**存储**跨沙箱隔离(其他沙箱的 Overlay/Volume,靠支柱①),**网络可达性是真
-空洞**。single-node 若所有沙箱 netns 挂同一 L2 网桥同网段,sandbox A 能直连 sandbox B 的 veth IP
-(§5.E transport 正是用 veth IP 直连,sibling 在网桥上有可路由 IP),完全绕开 gateway。
+跨沙箱**网络**隔离是一条**独立的 control-plane invariant**,不搭支柱① 的车(§2.3 已收此结论,推理在此)。
+**支柱①(syscall 拦截)守不住它**:它虚拟化 syscall,不拦网络包——guest 合法用网络,包本就要出去。存储
+跨沙箱隔离(其他沙箱的 Overlay/Volume)能靠支柱①,网络可达性不能。single-node 若所有沙箱 netns 挂同一
+L2 网桥同网段,sandbox A 能直连 sandbox B 的 veth IP(§5.E transport 正是用 veth IP 直连,sibling 在网桥
+上有可路由 IP),完全绕开 gateway。
 
-D5.1「默认拒绝其余出站」字面能涵盖,但"出站"通常指南北向,**东西向(sibling IP)是否在内有歧义**。
-显式钉成 invariant:
-
-> 一个沙箱的网络可达集**恰好** = {gateway ingress,策略显式放行的端点};**sibling 沙箱不可达**,
-> 除非经显式策略、且**经 gateway 中转,而非 L2 直连**。
-
-物化两条路(placement/provider 细节):(i) steering nft 把 sibling 网段也纳入 default-deny(sibling IP
+D5.1「默认拒绝其余出站」字面能涵盖,但"出站"通常指南北向,**东西向(sibling IP)是否在内有歧义**——故
+§2.3 把它显式钉成 invariant(可达集恰好 = {gateway ingress,策略显式放行的端点},sibling 经 gateway 中转
+而非 L2 直连)。本文只补它的**物化两条路**(placement/provider 细节):(i) steering nft 把 sibling 网段也纳入 default-deny(sibling IP
 进 L0 地板);(ii) 每沙箱**点对点 veth、不共享 L2 网桥**,从二层邻接根上消除。倾向 (i)——与 D5.4 ①
 同一套 nft,零新机制;(ii) 作为更强隔离的 provider 演进项。
 
@@ -344,6 +341,6 @@ gateway seam 的接口有个边界抉择:**协议分类(classify)+ 策略求值(
   §4.1 审计事件)登记在 [`open-decisions.md`](../open-decisions.md),本表不复制。
 
 > 以上登记在 [`open-decisions.md`](../open-decisions.md)。本文 D0–D8 是已定结论,其规范陈述在 spec
-> §2.1/§2.4/§5.D;D5.3–D5.6 是新收敛的 invariant,已一行式毕业进 §2.3/§2.4/§5.D。
+> §2.1/§2.4/§5.D;D5.3–D5.6 的 invariant 亦已一行式落进 §2.3/§2.4/§5.D。
 > 本文展开推理与要守的 invariant,不与 spec 重复正文。
 

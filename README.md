@@ -34,5 +34,5 @@ go test ./...
 ```
 
 Milestone ladder (see [`docs/plans/README.md`](docs/plans/README.md)):
-M1 walking skeleton → M2 store+§4.4 → M3 reaper+health → M4 Volume →
-M5 network egress → M6 Promote+GC → M7 credentials.
+M1 walking skeleton → M2 store+§4.4 → M3 transport depth → M4 reaper+health →
+M5 Volume → M6 network egress → M7 Promote+GC → M8 credential store.

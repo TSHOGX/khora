@@ -93,14 +93,14 @@ ACP 验证的三条判断(都指向"turn 不进 engine 控制面"):
   context),各由 capability 门控,agent 不支持就明说——**"重启行为不确定"是显式能力位,
   不是 engine 用 lease/grace 去保证的东西**。
 
-这三条在新模型里**天然成立**,因为 session 根本不在 engine 里——engine 没有 turn 表可仲裁,
+这三条**天然成立**,因为 session 根本不在 engine 里——engine 没有 turn 表可仲裁,
 也没有会话内容可持有。session 层的状态(sessionId↔driver 映射、恢复能力、审计事件流)**全在
 engine 外那层自己管**。
 
 ### D1.3 engine 侧只有 process / fs:没有 lane / payload 注册表 / turn 仲裁
 
 两个无状态服务(D1.1)+ session 外移(D1.2)之后,engine 侧不需要任何统一传输原语、payload
-类型系统或 turn 仲裁。逐条锁定它们各自的正当替代,防止移植代码时被带回:
+类型系统或 turn 仲裁。逐条锁定它们各自的正当替代,防止把不必要的抽象带回引擎:
 
 - **不需要统一传输原语(lane)**:一个"什么都管"的传输抽象要承担的五件事——多路复用、每连接定序、
   可重启、控制面注册、checkpoint quiesce——前四件由 **Connect-RPC / HTTP-2 原生多 stream + 每
