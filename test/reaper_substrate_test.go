@@ -1,0 +1,481 @@
+//go:build substrate
+
+// L3/L4 §4.3 reaper acceptance against REAL runsc. Drives the assembled engine
+// + reaper through each health quadrant and TTL disposition on live containers:
+// false-idle guard (D2), multi-connection idle (§3.2), idle→auto-pause,
+// live killed-container→crash-pause, transport-down same-IP restart,
+// transport crash-loop escalation (D4b), paused→evict, and the reaper-vs-verb
+// lock seam. Each assertion states its property inline. Requires root.
+//
+//	sudo env PATH=$PATH GOTOOLCHAIN=local GOFLAGS=-mod=mod GOSUMDB=off HOME=$HOME \
+//	  go test -tags substrate -v -count=1 -timeout 600s ./test/ -run Reaper
+package test
+
+import (
+	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"engine/internal/lifecycle"
+	"engine/internal/model"
+	"engine/internal/orchestrator"
+	"engine/internal/transport"
+	"engine/test/harness"
+)
+
+func dur(d time.Duration) *time.Duration { return &d }
+
+// tickerSrc is a tiny static guest binary that prints a line every 100ms for N
+// seconds, then exits. The bare rootfs is dash + libc only (no coreutils, no
+// `sleep`), so a shell producer loop cannot pace itself — this injects real
+// paced output to drive the activity signal deterministically (§4.3 / D2).
+const tickerSrc = `package main
+import ("fmt";"os";"strconv";"time")
+func main(){
+  n,_ := strconv.Atoi(os.Args[1])
+  end := time.Now().Add(time.Duration(n)*time.Second)
+  for time.Now().Before(end){ fmt.Println("tick"); time.Sleep(100*time.Millisecond) }
+}`
+
+// lastKind returns the most recent outbox event Kind for a sandbox (§4.4-C:
+// transitions are published to the outbox; a test reads it to assert the
+// disposition Kind — auto-paused / crash-paused / destroyed).
+func lastKind(t *testing.T, eng *orchestrator.Engine, sid model.SandboxID) string {
+	t.Helper()
+	evs, err := eng.Store.UnpublishedEvents(context.Background())
+	if err != nil {
+		t.Fatalf("outbox: %v", err)
+	}
+	kind := ""
+	for _, ev := range evs {
+		if ev.Sandbox == sid {
+			kind = ev.Kind
+		}
+	}
+	return kind
+}
+
+// killTransportChild kills the transport child from inside the guest (dash kill
+// builtin), targeting the pid published to the tmpfs pidfile. PID1 restarts it.
+func killTransportChild(t *testing.T, cl transport.Client) {
+	t.Helper()
+	ctx := context.Background()
+	pidBytes, err := cl.Read(ctx, "/tmp/.sandboxd-transport.pid", 0, 0)
+	if err != nil {
+		t.Fatalf("read transport pidfile: %v", err)
+	}
+	pid := strings.TrimSpace(string(pidBytes))
+	if pid == "" {
+		t.Fatal("empty transport pidfile")
+	}
+	ch, err := cl.Start(ctx, transport.StartSpec{Cmd: "/bin/sh", Args: []string{"-c", "kill -KILL " + pid}})
+	if err != nil {
+		t.Fatalf("start kill: %v", err)
+	}
+	for range ch {
+	}
+}
+
+// idle sandbox (no I/O) → auto-paused after idle_timeout (§4.3 idle quadrant).
+func TestReaperIdleAutoPauseRealRunsc(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root")
+	}
+	ctx := context.Background()
+	eng, _ := setupEngine(t, 30*time.Second)
+	m := eng.Mediator
+
+	sid, err := m.Create(ctx, lifecycle.CreateSpec{Template: "bare", IdleTimeout: dur(2 * time.Second), Retention: dur(0)})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	t.Cleanup(func() { _ = m.Destroy(ctx, sid) })
+
+	time.Sleep(3 * time.Second) // no I/O → guest idle crosses the threshold
+	lifecycle.NewReaper(m, time.Hour, time.Hour).Sweep(ctx)
+
+	if stt, _ := m.State(ctx, sid); stt != model.Paused {
+		t.Fatalf("idle sandbox state=%s; want paused (auto-pause)", stt)
+	}
+	if k := lastKind(t, eng, sid); k != "auto-paused" {
+		t.Fatalf("idle disposition Kind=%q; want auto-paused", k)
+	}
+	t.Logf("✓ idle (no I/O) → auto-paused after idle_timeout")
+}
+
+// D2 false-idle guard: a DETACHED process still producing output with NO client
+// draining it is NOT auto-paused. The guest stamps activity on broadcast even
+// with no subscriber (§3.2), so idle_millis stays low; host-side stamping would
+// false-idle a working sandbox (reaper-health D1).
+func TestReaperFalseIdleGuardRealRunsc(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root")
+	}
+	ctx := context.Background()
+	eng, base := setupEngine(t, 30*time.Second)
+	m := eng.Mediator
+	harness.InjectStaticBin(t, filepath.Join(base, "templates"), "bare", "ticker", tickerSrc)
+
+	sid, err := m.Create(ctx, lifecycle.CreateSpec{Template: "bare", IdleTimeout: dur(2 * time.Second), Retention: dur(0)})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	t.Cleanup(func() { _ = m.Destroy(ctx, sid) })
+	cl, err := m.Client(sid)
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+
+	// A process that keeps producing output for ~8s. We consume the Start event,
+	// then STOP reading — the process keeps pumping into its ring guest-side with
+	// no client draining, which is the exact §3.2 detached case.
+	ch, err := cl.Start(ctx, transport.StartSpec{Cmd: "/usr/bin/ticker", Args: []string{"8"}})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	<-ch // read only the start event; deliberately stop draining thereafter.
+
+	// sweep across a window LONGER than idle_timeout — the producing process must
+	// keep the sandbox non-idle throughout.
+	r := lifecycle.NewReaper(m, time.Hour, time.Hour)
+	deadline := time.Now().Add(6 * time.Second)
+	for time.Now().Before(deadline) {
+		r.Sweep(ctx)
+		if stt, _ := m.State(ctx, sid); stt != model.Running {
+			t.Fatalf("detached producing process was auto-paused (D2 false-idle): state=%s", stt)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	t.Logf("✓ detached process still producing output → NOT auto-paused (D2 guest-side activity)")
+}
+
+// multi-connection idle (§3.2): activity is sandbox-global = max over all procs
+// + ptys. With one process idle and one still producing I/O, the sandbox is NOT
+// idle; it becomes idle only once ALL go quiet past idle_timeout.
+func TestReaperMultiConnectionIdleRealRunsc(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root")
+	}
+	ctx := context.Background()
+	eng, base := setupEngine(t, 30*time.Second)
+	m := eng.Mediator
+	harness.InjectStaticBin(t, filepath.Join(base, "templates"), "bare", "ticker", tickerSrc)
+
+	sid, err := m.Create(ctx, lifecycle.CreateSpec{Template: "bare", IdleTimeout: dur(2 * time.Second), Retention: dur(0)})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	t.Cleanup(func() { _ = m.Destroy(ctx, sid) })
+	cl, err := m.Client(sid)
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+
+	// conn A: short-lived, goes quiet immediately. conn B: keeps producing ~8s.
+	if _, err := cl.Start(ctx, transport.StartSpec{Cmd: "/usr/bin/ticker", Args: []string{"1"}}); err != nil {
+		t.Fatalf("start A: %v", err)
+	}
+	chB, err := cl.Start(ctx, transport.StartSpec{Cmd: "/usr/bin/ticker", Args: []string{"8"}})
+	if err != nil {
+		t.Fatalf("start B: %v", err)
+	}
+	<-chB
+
+	// while B produces, sweeps must NOT auto-pause (A idle but B active → sandbox
+	// active, activity = max).
+	r := lifecycle.NewReaper(m, time.Hour, time.Hour)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		r.Sweep(ctx)
+		if stt, _ := m.State(ctx, sid); stt != model.Running {
+			t.Fatalf("sandbox auto-paused while one connection still active (§3.2 max): state=%s", stt)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	t.Logf("✓ one connection active keeps the sandbox non-idle (§3.2 activity = max over all)")
+
+	// drain B to completion so ALL connections go quiet, then it must auto-pause.
+	go func() {
+		for range chB {
+		}
+	}()
+	// wait for B to finish (~8s of output) + idle_timeout, sweeping.
+	paused := false
+	for i := 0; i < 40; i++ {
+		time.Sleep(500 * time.Millisecond)
+		r.Sweep(ctx)
+		if stt, _ := m.State(ctx, sid); stt == model.Paused {
+			paused = true
+			break
+		}
+	}
+	if !paused {
+		t.Fatalf("sandbox did not auto-pause after ALL connections went quiet (§3.2)")
+	}
+	t.Logf("✓ once ALL connections idle past idle_timeout → auto-paused")
+}
+
+// killContainer kills+deletes the runsc container out from under the engine
+// (simulates substrate death: L1 goes dead while the engine still holds the
+// live handle). runscRoot is StateDir/runsc-root; the cid is sbxc_<sid>.
+func killContainer(t *testing.T, base string, sid model.SandboxID) {
+	t.Helper()
+	root := filepath.Join(base, "state", "runsc-root")
+	cid := "sbxc_" + string(sid)
+	for _, args := range [][]string{
+		{"runsc", "--root=" + root, "kill", cid, "KILL"},
+		{"runsc", "--root=" + root, "delete", "--force", cid},
+	} {
+		cmd := exec.Command(args[0], args[1:]...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Logf("killContainer %v: %v: %s (continuing)", args, err, out)
+		}
+	}
+}
+
+// a killed `running` container → crash-paused by the LIVE reaper (§4.2
+// involuntary pause). Proves the reaper drives the demote, not only the
+// boot-time reconcile path. L1 dead + L2 down → dead-recoverable → crash-pause.
+func TestReaperLiveCrashPauseRealRunsc(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root")
+	}
+	ctx := context.Background()
+	eng, base := setupEngine(t, 30*time.Second)
+	m := eng.Mediator
+
+	// long idle_timeout so this is NOT an idle auto-pause — it must be crash-pause.
+	sid, err := m.Create(ctx, lifecycle.CreateSpec{Template: "bare", IdleTimeout: dur(time.Hour), Retention: dur(0)})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	t.Cleanup(func() { _ = m.Destroy(ctx, sid) })
+
+	// kill the container: L1 dead. The engine still thinks it is running (holds
+	// the live handle) until the reaper classifies it.
+	killContainer(t, base, sid)
+
+	// give the kill a moment, then sweep.
+	time.Sleep(500 * time.Millisecond)
+	lifecycle.NewReaper(m, time.Hour, time.Hour).Sweep(ctx)
+
+	if stt, _ := m.State(ctx, sid); stt != model.Paused {
+		t.Fatalf("killed running state=%s; want paused (live crash-pause)", stt)
+	}
+	if k := lastKind(t, eng, sid); k != "crash-paused" {
+		t.Fatalf("dead-recoverable Kind=%q; want crash-paused (§4.2 involuntary)", k)
+	}
+	t.Logf("✓ killed running container → crash-paused by the LIVE reaper")
+}
+
+// transport child killed → classified transport-down; PID1 restarts it on the
+// SAME IP; NO crash-pause, no cold-start, no new epoch (§5.E.1). The reaper
+// WAITS within budget.
+func TestReaperTransportDownSameIPRealRunsc(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root")
+	}
+	ctx := context.Background()
+	eng, _ := setupEngine(t, 30*time.Second)
+	m := eng.Mediator
+
+	sid, err := m.Create(ctx, lifecycle.CreateSpec{Template: "bare", IdleTimeout: dur(time.Hour), Retention: dur(0)})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	t.Cleanup(func() { _ = m.Destroy(ctx, sid) })
+	epBefore, _ := m.Endpoint(sid)
+	cl, err := m.Client(sid)
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+
+	// kill the transport child (NOT the container). PID1 restarts it in place.
+	killTransportChild(t, cl)
+
+	// with a GENEROUS budget, the reaper must WAIT, not crash-pause. Sweep during
+	// the restart window.
+	r := lifecycle.NewReaper(m, time.Hour, time.Hour)
+	for i := 0; i < 6; i++ {
+		r.Sweep(ctx)
+		if stt, _ := m.State(ctx, sid); stt != model.Running {
+			t.Fatalf("transport-down sandbox left running-state=%s during in-place restart; want running (no crash-pause)", stt)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	// endpoint unchanged (same IP — not a resume).
+	epAfter, err := m.Endpoint(sid)
+	if err != nil || epAfter != epBefore {
+		t.Fatalf("endpoint changed %s → %s (err=%v); want SAME IP (§5.E.1, not a resume)", epBefore, epAfter, err)
+	}
+	// and it serves again after the in-place restart.
+	if _, err := m.Client(sid); err != nil {
+		t.Fatalf("client after restart: %v", err)
+	}
+	t.Logf("✓ transport child killed → transport-down, PID1 restarts SAME IP %s, no crash-pause", epAfter)
+}
+
+// D4b crash-loop escalation: a transport child that NEVER comes healthy
+// (crash-loop, via the /tmp sentinel) past the restart budget is escalated to
+// dead-recoverable → resume (new IP, new epoch) — not waited on forever.
+func TestReaperTransportCrashLoopEscalationRealRunsc(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root")
+	}
+	ctx := context.Background()
+	eng, _ := setupEngine(t, 20*time.Second)
+	m := eng.Mediator
+
+	sid, err := m.Create(ctx, lifecycle.CreateSpec{Template: "bare", IdleTimeout: dur(time.Hour), Retention: dur(0)})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	t.Cleanup(func() { _ = m.Destroy(ctx, sid) })
+	epBefore, _ := m.Endpoint(sid)
+	cl, err := m.Client(sid)
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+
+	// arm the crash-loop: write the sentinel to tmpfs /tmp, then kill the child.
+	// PID1 re-execs it, it sees the sentinel and exits → crash-loops. L1 (the
+	// container) stays alive, L2 never comes up = transport-down forever.
+	if err := cl.Write(ctx, "/tmp/.sandboxd-crashloop", []byte("x")); err != nil {
+		t.Fatalf("arm sentinel: %v", err)
+	}
+	killTransportChild(t, cl)
+
+	// tight budget so escalation triggers quickly. Sweep on a real ticker cadence
+	// until the sandbox comes back running at a NEW IP (escalation resumed it).
+	r := lifecycle.NewReaper(m, time.Hour, 2*time.Second)
+	var epAfter string
+	escalated := false
+	for i := 0; i < 40; i++ {
+		r.Sweep(ctx)
+		if stt, _ := m.State(ctx, sid); stt == model.Running {
+			if ep, err := m.Endpoint(sid); err == nil && ep != epBefore {
+				epAfter = ep
+				escalated = true
+				break
+			}
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if !escalated {
+		stt, _ := m.State(ctx, sid)
+		t.Fatalf("crash-loop transport not escalated to resume within window (state=%s); want running at NEW IP (D4b)", stt)
+	}
+	if epAfter == epBefore {
+		t.Fatalf("escalation reused IP %s; want NEW IP/epoch (§3.3 / D4b cold-start)", epBefore)
+	}
+	// escalation went through crash-pause then resume.
+	evs, _ := eng.Store.UnpublishedEvents(ctx)
+	sawCrashPause, sawResume := false, false
+	for _, ev := range evs {
+		if ev.Sandbox != sid {
+			continue
+		}
+		switch ev.Kind {
+		case "crash-paused":
+			sawCrashPause = true
+		case "resumed":
+			sawResume = true
+		}
+	}
+	if !sawCrashPause || !sawResume {
+		t.Fatalf("escalation did not emit crash-paused+resumed (D4b)")
+	}
+	t.Logf("✓ crash-loop transport escalated past budget → resume at NEW IP %s → %s (D4b)", epBefore, epAfter)
+}
+
+// paused sandbox past retention → evict → destroyed (§4.1 evict = reaper's
+// automatic destroy of a paused sandbox).
+func TestReaperEvictPastRetentionRealRunsc(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root")
+	}
+	ctx := context.Background()
+	eng, base := setupEngine(t, 30*time.Second)
+	m := eng.Mediator
+
+	// short retention so the paused sandbox crosses it quickly.
+	sid, err := m.Create(ctx, lifecycle.CreateSpec{Template: "bare", IdleTimeout: dur(time.Hour), Retention: dur(2 * time.Second)})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	up := upperDir(t, eng, base, sid)
+	if err := m.Pause(ctx, sid); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+
+	time.Sleep(3 * time.Second) // exceed retention
+	lifecycle.NewReaper(m, time.Hour, time.Hour).Sweep(ctx)
+
+	if _, err := m.State(ctx, sid); err == nil {
+		t.Fatalf("paused-past-retention record still present; want destroyed (evict)")
+	}
+	if k := lastKind(t, eng, sid); k != "destroyed" {
+		t.Fatalf("evict Kind=%q; want destroyed (§4.1)", k)
+	}
+	if _, err := os.Stat(up); !os.IsNotExist(err) {
+		t.Fatalf("upper survived evict (want reclaimed via synchronous Destroy): %v", err)
+	}
+	t.Logf("✓ paused past retention → evict → destroyed, upper reclaimed")
+}
+
+// reaper-vs-verb seam: a user verb holding the transition lock makes the reaper
+// SKIP the sandbox (TryLock-skip, §4.4-B) — no race, no misclassification. We
+// hold the lock via a slow in-flight resume and confirm a concurrent sweep does
+// not dispose the sandbox.
+func TestReaperSkipsVerbHeldLockRealRunsc(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root")
+	}
+	ctx := context.Background()
+	eng, _ := setupEngine(t, 30*time.Second)
+	m := eng.Mediator
+
+	// idle_timeout tiny so the sweep WOULD auto-pause if it did not skip.
+	sid, err := m.Create(ctx, lifecycle.CreateSpec{Template: "bare", IdleTimeout: dur(1 * time.Millisecond), Retention: dur(0)})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	t.Cleanup(func() { _ = m.Destroy(ctx, sid) })
+
+	// Pause, then resume in the background — resume holds the transition lock for
+	// its whole cold-start chain (§4.4-B). While it is in-flight, a concurrent
+	// sweep-storm must SKIP this sandbox (TryLock fails) and never dispose it.
+	if err := m.Pause(ctx, sid); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+
+	stop := make(chan struct{})
+	r := lifecycle.NewReaper(m, time.Hour, time.Hour)
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				r.Sweep(ctx) // hammer sweeps while resume holds the lock
+			}
+		}
+	}()
+
+	err = m.Resume(ctx, sid) // holds the lock for the whole chain
+	close(stop)
+	if err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+
+	// resume won the lock the whole time; the concurrent sweeps skipped the
+	// sandbox rather than racing a disposition into it → it is running.
+	if stt, _ := m.State(ctx, sid); stt != model.Running {
+		t.Fatalf("state=%s; want running (reaper must not dispose a lock-held sandbox, §4.4-B)", stt)
+	}
+	t.Logf("✓ reaper TryLock-skips a sandbox held by an in-flight verb (§4.4-B)")
+}

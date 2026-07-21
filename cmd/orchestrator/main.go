@@ -27,18 +27,22 @@ func main() {
 		health    = flag.Duration("health-timeout", 30*time.Second, "cold-start readiness gate timeout (⑦)")
 		idleTO    = flag.Duration("idle-timeout", 30*time.Minute, "default idle TTL: running idle past this → auto-pause (§4.3)")
 		retention = flag.Duration("retention", 24*time.Hour, "default retention TTL: paused past this → evict (§4.3)")
+		sweep     = flag.Duration("reaper-interval", 30*time.Second, "reaper sweep cadence (§4.3)")
+		tdBudget  = flag.Duration("transport-down-budget", 2*time.Minute, "transport-down restart budget before escalate→resume (D4b)")
 		sudo      = flag.Bool("sudo", false, "prefix runsc/ip with sudo (dev; prod runs as root)")
 	)
 	flag.Parse()
 
 	eng, err := orchestrator.New(orchestrator.Config{
-		TemplatesDir:       *templates,
-		StateDir:           *state,
-		StorePath:          *storePath,
-		HealthTimeout:      *health,
-		DefaultIdleTimeout: *idleTO,
-		DefaultRetention:   *retention,
-		Sudo:               *sudo,
+		TemplatesDir:        *templates,
+		StateDir:            *state,
+		StorePath:           *storePath,
+		HealthTimeout:       *health,
+		DefaultIdleTimeout:  *idleTO,
+		DefaultRetention:    *retention,
+		SweepInterval:       *sweep,
+		TransportDownBudget: *tdBudget,
+		Sudo:                *sudo,
 	})
 	if err != nil {
 		log.Fatalf("orchestrator: assemble: %v", err)
@@ -52,6 +56,11 @@ func main() {
 
 	// async outbox publisher (§4.4-C): drain the durable outbox to the event sink.
 	go eng.Publisher.Run(context.Background(), time.Second)
+
+	// §4.3 reaper: the autonomous control loop (auto-pause / crash-pause / evict
+	// + periodic reconcile). Started AFTER startup reconcile so it never races
+	// the boot-time orphan reclaim / re-adoption.
+	go eng.Reaper.Run(context.Background())
 
 	log.Printf("orchestrator: serving §6.1 API on %s (templates=%s state=%s store=%s)", *addr, *templates, *state, *storePath)
 	if err := http.ListenAndServe(*addr, eng.HTTPHandler()); err != nil {

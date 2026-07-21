@@ -43,6 +43,11 @@ type Config struct {
 	DefaultIdleTimeout time.Duration
 	DefaultRetention   time.Duration
 
+	// SweepInterval / TransportDownBudget are the reaper's tuning knobs
+	// (reaper-health D5). Zero → NewReaper's conservative defaults.
+	SweepInterval       time.Duration
+	TransportDownBudget time.Duration
+
 	// FaultAfterColdStart is a TEST-ONLY injection hook forwarded to the
 	// mediator to simulate a crash mid-transition. nil in production.
 	FaultAfterColdStart func(id model.SandboxID)
@@ -53,6 +58,10 @@ type Engine struct {
 	Mediator  *lifecycle.Mediator
 	Store     store.Store
 	Publisher *store.Publisher
+	// Reaper is the §4.3 autonomous control loop (auto-pause / crash-pause /
+	// evict + periodic reconcile). Built here; started by the caller AFTER
+	// startup Reconcile, via Reaper.Run in its own goroutine.
+	Reaper *lifecycle.Reaper
 }
 
 // New wires the assembly. It does not start any server, and it does NOT run
@@ -105,7 +114,9 @@ func New(cfg Config) (*Engine, error) {
 		log.Printf("event: %s sandbox=%s state=%s id=%s", ev.Kind, ev.Sandbox, ev.State, ev.ID)
 	}))
 
-	return &Engine{Mediator: med, Store: st, Publisher: pub}, nil
+	reaper := lifecycle.NewReaper(med, cfg.SweepInterval, cfg.TransportDownBudget)
+
+	return &Engine{Mediator: med, Store: st, Publisher: pub, Reaper: reaper}, nil
 }
 
 // Reconcile runs the §4.4-A startup crash-reconciliation (orphan reclaim +

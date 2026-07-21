@@ -23,7 +23,24 @@ import (
 // not PID 1 — guest-runtime D4.2), then serves Connect-RPC over h2c on a fixed
 // TCP port inside the guest netns. It knows NOTHING of agent/turn/session
 // (transport D1) — pure process/fs mechanism.
+// crashLoopSentinel is a TEST-ONLY fault-injection point (the guest analog of
+// the mediator's FaultAfterColdStart hook): if this file exists on the guest's
+// tmpfs /tmp when transport mode starts, the child exits BEFORE serving. A test
+// writes it, then kills the transport child — PID1 re-execs it, it sees the
+// sentinel and exits, and it keeps crash-looping (L1 container alive, L2 never
+// comes up = transport-down forever). This manufactures the §4.3 transport-down
+// crash-loop the reaper must escalate past the restart budget (D4b). Because
+// /tmp is tmpfs (not the Overlay), it is CLEARED on resume — so the reaper's
+// escalation cold-start comes up healthy on a fresh /tmp. Carries NO production
+// semantics; a production guest never has this file.
+const crashLoopSentinel = "/tmp/.sandboxd-crashloop"
+
 func transportMode() {
+	if _, err := os.Stat(crashLoopSentinel); err == nil {
+		logf("transport: crash-loop sentinel present (%s) — exiting before serve (TEST fault injection)", crashLoopSentinel)
+		os.Exit(1)
+	}
+
 	// PR_SET_CHILD_SUBREAPER = 36 (guest-runtime D4.2 / §5.E.1).
 	if _, _, errno := syscall.Syscall(syscall.SYS_PRCTL, unix_PR_SET_CHILD_SUBREAPER, 1, 0); errno != 0 {
 		logf("transport: PR_SET_CHILD_SUBREAPER failed: %v", errno)
