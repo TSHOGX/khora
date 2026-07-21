@@ -498,6 +498,31 @@ func (m *Mediator) unwind(ctx context.Context, id model.SandboxID, ov *rootfs.Ov
 // next boot; killing a live survivor is not. Reconcile is idempotent, so a
 // skipped item is simply retried next start.
 func (m *Mediator) Reconcile(ctx context.Context) error {
+	return m.reconcile(ctx, false)
+}
+
+// ReconcilePeriodic runs the §4.4-A reverse-diff against a LIVE orchestrator
+// (reaper-health D4). It is the SAME diff as startup Reconcile, plus the two
+// additions that only matter when the orchestrator is alive with a populated
+// live-map and in-flight transitions:
+//
+//  1. TryLock-SKIP a `running` sandbox whose transition lock is HELD — a held
+//     lock means an in-flight resume / user verb is driving it (§4.4-B). At
+//     startup all locks are fresh so this never triggers; live, treating a
+//     held (being-built) placement as an orphan would tear down the resource
+//     out from under an active resume. Skipped items retry next tick.
+//  2. PROTECT live-map placements THIS process built: a `running` sandbox we
+//     already hold a live handle for is not an orphan and needs no Adopt
+//     re-recognition (that is the crash-recovery path). Add it straight to keep.
+//     Only a `running` with NO live handle (never built here → shouldn't happen,
+//     or first tick after a crash = startup semantics) runs adopt/demote.
+//
+// It shares Reconcile's body; the periodic flag selects these two behaviors.
+func (m *Mediator) ReconcilePeriodic(ctx context.Context) error {
+	return m.reconcile(ctx, true)
+}
+
+func (m *Mediator) reconcile(ctx context.Context, periodic bool) error {
 	recs, err := m.deps.Store.ListSandboxes(ctx)
 	if err != nil {
 		return fmt.Errorf("reconcile: list records: %w", err)
@@ -531,23 +556,37 @@ func (m *Mediator) Reconcile(ctx context.Context) error {
 			// (resumable, §4.2). The netns/container fall to ReclaimOrphans.
 			m.reclaimOrphanOverlay(ctx, rec, false)
 		case model.Running:
-			adopted, err := m.adoptOrDemote(ctx, rec)
-			switch {
-			case err != nil:
-				// could not resolve this survivor (probe error, un-rebuildable
-				// handle). Do NOT reclaim it — it may still be live; a torn-down
-				// live container leaks and breaks transport (§4.4-A). Protect the
-				// placement and retry on the next boot (idempotent).
-				m.deps.Logf("reconcile: skip running %s (protected, not reclaimed): %v", rec.ID, err)
-				keep = append(keep, string(rec.ID))
-			case adopted:
-				// alive + ready + handle rebuilt → keep its placement.
-				keep = append(keep, string(rec.ID))
-			default:
-				// cleanly determined dead → demoted to paused inside adoptOrDemote;
-				// unmount its orphan Overlay mount, keep the upper.
-				m.reclaimOrphanOverlay(ctx, rec, false)
+			if periodic {
+				// (1) skip a sandbox a verb is driving (held lock, §4.4-B). Not an
+				// orphan — protect its placement and retry next tick.
+				l, ok := m.tryLock(rec.ID)
+				if !ok {
+					keep = append(keep, string(rec.ID))
+					continue
+				}
+				// (2) a live handle THIS process built → not an orphan, no re-adopt
+				// needed. Keep and move on (still holding the lock briefly). Re-read
+				// under the lock so a resume/pause that just finished is respected.
+				if cur, gerr := m.deps.Store.GetSandbox(ctx, rec.ID); gerr != nil || cur.State != model.Running {
+					l.Unlock()
+					continue // state changed under us → not our concern this pass
+				}
+				if m.hasLive(rec.ID) {
+					l.Unlock()
+					keep = append(keep, string(rec.ID))
+					continue
+				}
+				// running, no live handle, lock held by us: crash-recovery semantics
+				// (never built here / first tick after crash). Adopt-or-demote under
+				// the held lock, then release.
+				adopted, aerr := m.adoptOrDemoteLocked(ctx, rec)
+				l.Unlock()
+				m.reconcileRunningOutcome(ctx, rec, adopted, aerr, &keep)
+				continue
 			}
+			// startup: locks are all fresh, live-map empty → blocking adopt/demote.
+			adopted, err := m.adoptOrDemote(ctx, rec)
+			m.reconcileRunningOutcome(ctx, rec, adopted, err, &keep)
 		}
 	}
 
@@ -568,6 +607,28 @@ func (m *Mediator) Reconcile(ctx context.Context) error {
 		m.deps.Logf("reconcile: reclaim orphans (retried next boot): %v", err)
 	}
 	return nil
+}
+
+// reconcileRunningOutcome folds an adopt-or-demote result into keep / orphan
+// handling — shared by startup and periodic reconcile (§4.4-A dual). err =
+// unresolved → PROTECT (keep, retry next pass); adopted → keep; cleanly dead →
+// demoted inside adoptOrDemote, unmount its orphan Overlay mount (upper kept).
+func (m *Mediator) reconcileRunningOutcome(ctx context.Context, rec model.Sandbox, adopted bool, err error, keep *[]string) {
+	switch {
+	case err != nil:
+		// could not resolve this survivor (probe error, un-rebuildable handle). Do
+		// NOT reclaim it — it may still be live; a torn-down live container leaks
+		// and breaks transport (§4.4-A protect-on-uncertainty). Retry next pass.
+		m.deps.Logf("reconcile: skip running %s (protected, not reclaimed): %v", rec.ID, err)
+		*keep = append(*keep, string(rec.ID))
+	case adopted:
+		// alive + ready + handle rebuilt → keep its placement.
+		*keep = append(*keep, string(rec.ID))
+	default:
+		// cleanly determined dead → demoted to paused inside adoptOrDemote; unmount
+		// its orphan Overlay mount, keep the upper.
+		m.reclaimOrphanOverlay(ctx, rec, false)
+	}
 }
 
 // reclaimOrphanOverlay unmounts a sandbox's lingering merged Overlay mount left
@@ -615,7 +676,14 @@ func (m *Mediator) adoptOrDemote(ctx context.Context, rec model.Sandbox) (bool, 
 	l := m.lock(rec.ID)
 	l.Lock()
 	defer l.Unlock()
+	return m.adoptOrDemoteLocked(ctx, rec)
+}
 
+// adoptOrDemoteLocked is adoptOrDemote's body with the transition lock ALREADY
+// HELD by the caller. Startup reconcile takes the lock blocking (adoptOrDemote);
+// periodic reconcile takes it via tryLock (skip-if-held) and calls this — Go
+// mutexes are not reentrant, so the two entry points must not both lock.
+func (m *Mediator) adoptOrDemoteLocked(ctx context.Context, rec model.Sandbox) (bool, error) {
 	pl, alive, err := m.deps.Runtime.Adopt(ctx, string(rec.ID))
 	if err != nil {
 		return false, fmt.Errorf("adopt probe: %w", err) // uncertain → protect
@@ -694,6 +762,17 @@ func (m *Mediator) Endpoint(id model.SandboxID) (string, error) {
 		return "", fmt.Errorf("sandbox %s has no live placement (not running)", id)
 	}
 	return ls.placement.TransportEndpoint, nil
+}
+
+// hasLive reports whether the mediator holds a live placement handle for the
+// sandbox (§4.4-A: the periodic reconcile protects live-map placements that
+// THIS process built — they are not orphans and need no Adopt re-recognition,
+// reaper-health D4).
+func (m *Mediator) hasLive(id model.SandboxID) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	ls := m.live[id]
+	return ls != nil && ls.placement != nil
 }
 
 // State returns the sandbox's current lifecycle state (§6.1 GET).

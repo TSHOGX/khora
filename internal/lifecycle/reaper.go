@@ -66,8 +66,9 @@ func NewReaper(m *Mediator, interval, transportDownBudget time.Duration) *Reaper
 	}
 }
 
-// Run drives Sweep on a ticker until ctx is cancelled (§4.3 autonomous loop).
-// The orchestrator starts it after startup reconcile, in its own goroutine.
+// Run drives one tick on a ticker until ctx is cancelled (§4.3 autonomous
+// loop). The orchestrator starts it after startup reconcile, in its own
+// goroutine.
 func (r *Reaper) Run(ctx context.Context) {
 	t := time.NewTicker(r.interval)
 	defer t.Stop()
@@ -76,9 +77,24 @@ func (r *Reaper) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			r.Sweep(ctx)
+			r.tick(ctx)
 		}
 	}
+}
+
+// tick is one full cycle: periodic reconcile THEN sweep (reaper-health D4: one
+// tick, the two consumers of the health model run in order). Reconcile handles
+// "state vs reality" (orphan placements, dead `running` → crash-pause, takeover);
+// the sweep handles "state right but should advance" (TTL auto-pause/evict,
+// transport-down budget). Reconcile first so a `running` record whose unit died
+// is demoted before the sweep would redundantly reach the same verdict; the
+// sweep is idempotent either way. Reconcile failure is logged, not fatal — the
+// sweep still runs, and reconcile retries next tick (§4.4-A skip-and-log).
+func (r *Reaper) tick(ctx context.Context) {
+	if err := r.m.ReconcilePeriodic(ctx); err != nil {
+		r.m.deps.Logf("reaper: periodic reconcile (retried next tick): %v", err)
+	}
+	r.Sweep(ctx)
 }
 
 // Sweep is one full pass: classify every sandbox and dispatch per quadrant /

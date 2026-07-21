@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"engine/internal/model"
+	"engine/internal/runtime"
 	"engine/internal/store"
 	"engine/internal/transport"
 )
@@ -192,6 +193,85 @@ func TestReconcileSkipAndLogOnUncertainSurvivor(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("skip not logged; logs=%v", logs)
+	}
+}
+
+// periodic reconcile (§4.4-A live variant / reaper-health D4): a `running`
+// sandbox this process built (live-map handle present) is protected — kept from
+// reclaim WITHOUT a redundant Adopt re-recognition (that is the crash-recovery
+// path, not needed when we already hold the handle). Its placement lands in keep.
+func TestPeriodicReconcileProtectsLiveSurvivor(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	rt := &fakeRuntime{adoptAlive: map[string]bool{}}
+	m := New(Deps{
+		Store: st, Runtime: rt, Rootfs: &fakeRootfs{},
+		Dial:          func(transport.Endpoint) transport.Client { return &fakeClient{healthy: true} },
+		HealthTimeout: time.Second,
+	})
+	// a running sandbox WITH a live handle (built by this process).
+	seedRec(t, st, "live_run", "ov_lr", model.Running)
+	m.put("live_run", &liveState{placement: &runtime.Placement{TransportEndpoint: "10.0.0.5:9000"}})
+
+	if err := m.ReconcilePeriodic(ctx); err != nil {
+		t.Fatalf("ReconcilePeriodic: %v", err)
+	}
+
+	// still running, still holds its live handle.
+	if rec, _ := st.GetSandbox(ctx, "live_run"); rec.State != model.Running {
+		t.Fatalf("live survivor demoted: %s", rec.State)
+	}
+	if _, err := m.Endpoint("live_run"); err != nil {
+		t.Fatalf("live survivor lost its handle: %v", err)
+	}
+	// NOT re-adopted (we already held the handle) — Adopt must not have been called.
+	for _, c := range rt.Calls() {
+		if c == "Adopt:live_run" {
+			t.Fatalf("periodic reconcile re-adopted a live survivor (should skip: D4)")
+		}
+	}
+	// protected in keep.
+	var reclaimCall string
+	for _, c := range rt.Calls() {
+		if strings.HasPrefix(c, "ReclaimOrphans:") {
+			reclaimCall = c
+		}
+	}
+	if reclaimCall != "ReclaimOrphans:keep=live_run" {
+		t.Fatalf("live survivor not protected: keep=%q; want live_run", reclaimCall)
+	}
+}
+
+// periodic reconcile skips a `running` sandbox whose transition lock is HELD (an
+// in-flight resume/verb) — it must NOT be treated as an orphan or demoted, just
+// protected and retried (§4.4-A live variant addition 1).
+func TestPeriodicReconcileSkipsLockedSandbox(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	rt := &fakeRuntime{adoptAlive: map[string]bool{}}
+	m := New(Deps{
+		Store: st, Runtime: rt, Rootfs: &fakeRootfs{},
+		Dial:          func(transport.Endpoint) transport.Client { return &fakeClient{healthy: true} },
+		HealthTimeout: time.Second,
+	})
+	seedRec(t, st, "held_run", "ov_hr", model.Running)
+	// NO live handle — so if not for the held lock, the periodic path would run
+	// adopt/demote. Holding the lock must make it skip that entirely.
+	l := m.lock("held_run")
+	l.Lock()
+	defer l.Unlock()
+
+	if err := m.ReconcilePeriodic(ctx); err != nil {
+		t.Fatalf("ReconcilePeriodic: %v", err)
+	}
+	// not demoted, and Adopt never ran (we skipped before probing).
+	if rec, _ := st.GetSandbox(ctx, "held_run"); rec.State != model.Running {
+		t.Fatalf("locked sandbox demoted: %s; want running (skip)", rec.State)
+	}
+	for _, c := range rt.Calls() {
+		if c == "Adopt:held_run" {
+			t.Fatalf("periodic reconcile probed a lock-held sandbox (should skip: §4.4-A)")
+		}
 	}
 }
 
