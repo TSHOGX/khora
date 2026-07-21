@@ -54,7 +54,12 @@ type LaunchSpec struct {
 	Rootfs    RootfsSource
 	Steering  SteeringSpec
 	Limits    ResourceLimits
-	GuestUser string // create-time default run-as (§2.2 / §6.2)
+	// GuestUser is the create-time default run-as (§2.2 / §6.2).
+	// NOT YET ENFORCED (deferred): local_runsc.Launch/buildOCISpec currently
+	// hardcode UID/GID 0 and ignore this field, so the sandbox default runs as
+	// root regardless. Applying it (OCI process.user via guest user-lookup) is a
+	// scoped follow-on; see the guest_user deferral note in transport.proto.
+	GuestUser string
 }
 
 // Placement is the opaque handle to this launch's physical resources — rebound

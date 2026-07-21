@@ -73,6 +73,14 @@ message StartRequest {
   string cwd = 4;
   // guest_user is the per-Start run-as (like `sudo -u`, §6.2) — NOT the sandbox
   // default identity. Empty = inherit.
+  //
+  // NOT YET ENFORCED (deferred): sandboxd currently ignores this field and execs
+  // every process as the guest default (root, §2.2). Wiring the run-as
+  // (SysProcAttr.Credential via guest user-lookup) is a scoped follow-on; until
+  // then a non-empty guest_user is silently NOT applied. Tracked in the M-series
+  // plan / open-decisions §5.E. Not a host-isolation gap (§2.2: guest identity
+  // is guest-internal hygiene, not a security pillar), but a documented-API param
+  // that fails open — do not rely on it for in-guest privilege separation yet.
   string guest_user = 5;
   // pty, when set, allocates a PTY of the given size (transport D4.3).
   PtySize pty = 6;

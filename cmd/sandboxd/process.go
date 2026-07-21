@@ -351,6 +351,13 @@ func (s *processServer) Start(ctx context.Context, req *connect.Request[v1.Start
 	cmd := exec.Command(m.Cmd, m.Args...)
 	cmd.Env = m.Env
 	cmd.Dir = m.Cwd
+	// NOTE: m.GuestUser (per-Start run-as, §6.2) is NOT YET ENFORCED (deferred).
+	// We exec as the guest default (root, §2.2) regardless. Applying it means
+	// resolving the guest user (uid/gid via /etc/passwd) and setting
+	// SysProcAttr.Credential below — a scoped follow-on. See the guest_user
+	// deferral note in transport.proto. A non-empty m.GuestUser is silently
+	// ignored today; not a host-isolation gap, but a documented param that fails
+	// open — must be implemented before relying on in-guest privilege separation.
 
 	var p *proc
 	var sources []source

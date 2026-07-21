@@ -72,6 +72,9 @@ func buildOCISpec(mergedPath, netnsPath string) *ociSpec {
 		OCIVersion: "1.0.0",
 		Process: ociProcess{
 			Terminal: false,
+			// Hardcoded root: the sandbox-default run-as (LaunchSpec.GuestUser) is
+			// NOT YET ENFORCED (deferred) — see the note on LaunchSpec.GuestUser.
+			// PID 1 is sandboxd init; a non-root guest default would apply here.
 			User:     ociUser{UID: 0, GID: 0},
 			Args:     []string{"/sbin/sandboxd", "init"},
 			Env:      []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "HOME=/root"},
