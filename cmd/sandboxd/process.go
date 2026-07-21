@@ -33,10 +33,10 @@ type processServer struct {
 	procs map[int]*proc
 }
 
-// Residual tuning values (open-decisions §5.E —落地时取值, do NOT change D4/D6
-// shape). Chosen for M3: enough tail to redraw an interactive screen without
-// unbounded guest memory; a window deep enough for a healthy consumer but small
-// enough that a stuck one is dropped promptly.
+// Residual tuning values (open-decisions §5.E — numeric knobs, do NOT change
+// D4/D6 shape). Sized so: the ring holds enough tail to redraw an interactive
+// screen without unbounded guest memory; the window is deep enough for a healthy
+// consumer but small enough that a stuck one is dropped promptly.
 const (
 	ringCapBytes      = 64 * 1024        // per-process output ring byte cap (invariant 2)
 	subWindowFrames   = 256              // per-subscriber send window (invariant 1)
@@ -153,7 +153,7 @@ func (p *proc) broadcast(f frame) {
 // subscribers, and closes their channels. A subscriber that Connects after this
 // sees ended=true from subscribe and replays the ring + end directly.
 //
-// Lossy-by-design boundary (D4.3, transport.md:255/:263): a per-subscriber copy
+// Lossy-by-design boundary (D4.3 invariant 1 / D1.3): a per-subscriber copy
 // is best-effort. If a subscriber's window is full at exit (too slow to receive
 // even the end frame), that end frame — exit code included — is silently dropped
 // for THAT copy; the channel still closes and serveSubscriber returns a clean

@@ -136,7 +136,7 @@ func TestSlowSubscriberDroppedSourceNeverBlocks(t *testing.T) {
 	}
 }
 
-// invariant 1 boundary (lossy-by-design, D4.3 transport.md:255/:263): a
+// invariant 1 boundary (lossy-by-design, D4.3 invariant 1 / D1.3): a
 // subscriber whose window is exactly full at process exit cannot receive the end
 // frame. Per the best-effort-tail contract that dropped end frame — exit code
 // included — is silently lost for THAT copy; the channel still closes cleanly and

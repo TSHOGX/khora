@@ -40,8 +40,9 @@ CREATE TABLE IF NOT EXISTS sandboxes (
 -- KNOWN LIMITATION (open-decisions §2 §4.1/§4.4-C row): published rows are
 -- marked (published_at set), NEVER deleted, so this table grows monotonically.
 -- The partial index below keeps the publisher's unpublished-scan from
--- degrading, but at-rest size is unbounded. Pruning (retention/replay window) is
--- deferred to the M3+ replay-window decision, not a bug to fix in M2.
+-- degrading, but at-rest size is unbounded. Pruning (retention/replay window)
+-- is deferred to the event-stream replay-window decision (open-decisions §2),
+-- by design — not an oversight.
 CREATE TABLE IF NOT EXISTS outbox (
 	id           TEXT PRIMARY KEY,       -- transition-unique event ID (§4.4-C)
 	sandbox      TEXT NOT NULL,

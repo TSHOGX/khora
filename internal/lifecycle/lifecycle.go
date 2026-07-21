@@ -108,9 +108,9 @@ func (m *Mediator) lock(id model.SandboxID) *sync.Mutex {
 	return l
 }
 
-// CreateSpec is the create verb input (§6.1 POST /v1/sandboxes). M1 ignores
-// network/volumes (M4/M5); they are here to keep the API shape stable (§6.2
-// create-time injection is a flow shape, not late-bound).
+// CreateSpec is the create verb input (§6.1 POST /v1/sandboxes). network/volumes
+// are not yet consumed (Volume = M5, egress = M6); they are here to keep the API
+// shape stable (§6.2 create-time injection is a flow shape, not late-bound).
 type CreateSpec struct {
 	Template  model.TemplateID
 	GuestUser string
@@ -363,8 +363,8 @@ func (m *Mediator) unwind(ctx context.Context, id model.SandboxID, ov *rootfs.Ov
 // (§4.4-A / plan §4). The process just (re)started, so the live-map is empty and
 // all transition locks are fresh — every in-flight resume that was running is
 // dead, so half-built placements need NO lock to identify (lock-based
-// identification is only for the M3 periodic reconcile against a LIVE
-// orchestrator). It is a dual operation, NOT reclaim-all:
+// identification is only for the periodic reconcile against a LIVE orchestrator,
+// M4). It is a dual operation, NOT reclaim-all:
 //
 //   - `creating` record → the create crashed mid-chain, never reached running,
 //     has no at-rest resting state → delete the record (→ destroyed); its
@@ -500,8 +500,8 @@ func (m *Mediator) reclaimOrphanOverlay(ctx context.Context, rec model.Sandbox, 
 // container would be optimistically adopted with an un-serving endpoint: if L2
 // does not answer, we demote to paused (recoverable via a fresh cold-start on the
 // next resume) rather than record a dead handle. It is a SINGLE boot-time probe,
-// deliberately NOT M3's continuous four-quadrant health classifier
-// (open-decisions §2 §4.4-A row).
+// deliberately NOT the continuous four-quadrant health classifier (M4;
+// open-decisions §2 §4.4-A row).
 func (m *Mediator) adoptOrDemote(ctx context.Context, rec model.Sandbox) (bool, error) {
 	l := m.lock(rec.ID)
 	l.Lock()

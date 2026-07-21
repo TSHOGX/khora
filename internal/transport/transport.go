@@ -16,11 +16,12 @@
 // byte streams are explicitly lossy (shell has no persistent SoT); any
 // "don't drop" guarantee is the upper layer's job (session adapter, engine-外).
 //
-// M3 scope: the full process data plane — Start / Connect (server-stream) /
+// Surface: the full process data plane — Start / Connect (server-stream) /
 // StreamInput (client-stream) / SendInput / SendSignal / Update / CloseStdin /
 // List, plus fs Read / Write and Health. Bounded ring replay on Connect and
 // slow-subscriber non-blocking drop (D4.3's two invariants) live in the guest
-// server (cmd/sandboxd). fs breadth + multipart bypass grow post-M3.
+// server (cmd/sandboxd). fs breadth (list/stat/mkdir/…) + multipart bypass are a
+// later increment.
 package transport
 
 // Wire stubs are generated from proto/engine/transport/v1/transport.proto via

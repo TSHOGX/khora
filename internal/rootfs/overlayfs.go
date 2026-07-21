@@ -29,7 +29,7 @@ type HostOverlayFS struct {
 	StateDir string
 	// TemplatesDir resolves a TemplateID to its read-only lower dir:
 	// TemplatesDir/<template>. Templates are static directories in M1 (§6, no
-	// Promote / layering until M6).
+	// Promote / layering until M7).
 	TemplatesDir string
 }
 

@@ -149,8 +149,7 @@ func TestC6OuterEdgeConnectProxy(t *testing.T) {
 
 	// --- error path never leaks placement: pause the sandbox so its placement is
 	// gone, then a unary proxy op must error WITHOUT the netns IP in the message
-	// (proxyErr sanitizes inner dial errors — §6.2 / D6.1). This is the path the
-	// raw CodeInternal wrap used to leak the IP on.
+	// (proxyErr sanitizes inner dial errors — §6.2 / D6.1).
 	if err := m.Pause(ctx, sid); err != nil {
 		t.Fatalf("pause for error-path check: %v", err)
 	}

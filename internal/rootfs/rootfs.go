@@ -7,8 +7,8 @@
 // The FS Provider is the §5.B storage seam. Its abstraction exposes only
 // "OverlayID + referenced Template + at-rest readable" and NEVER "it is a host
 // upper path" (§3.1.1 对内也 ID 寻址) — the host path is locked inside this
-// subsystem. M1 ships the single-node "resident upper directory" unit (D3);
-// content-addressed diff layers are an M6+ evolution behind the same seam.
+// subsystem. Ships the single-node "resident upper directory" unit (D3);
+// content-addressed diff layers are a later evolution behind the same seam.
 package rootfs
 
 import "context"

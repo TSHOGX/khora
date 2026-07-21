@@ -57,7 +57,7 @@ type ociNamespace struct {
 
 // caps is the M1 guest capability set: enough for sandboxd to bind a netns TCP
 // port and exec processes. Egress steering / dropping down to a minimal set is
-// M5 work; M1 is network=none-ish (simplest reachable netns only, plan §3).
+// M6 work; today the netns is the simplest reachable one (plan §3).
 var caps = []string{
 	"CAP_NET_BIND_SERVICE", "CAP_NET_ADMIN", "CAP_NET_RAW",
 	"CAP_SYS_ADMIN", "CAP_CHOWN", "CAP_DAC_OVERRIDE",

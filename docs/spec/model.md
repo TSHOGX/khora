@@ -135,10 +135,10 @@ Overlay(B)、按挂载表重挂 Volume(C)、按网络策略重建 egress(D);E(�
 §3.1 三态讲 rootfs 可变性,本节四态讲生命周期机。)
 
 ```text
-creating ──▶ running ──pause / auto-pause──▶ paused ──▶ destroyed
-                │   ▲                          │   │         ▲
-                │   └────────── resume ────────┘   │         │
-                └──────── destroy ─────────────────┴─────────┘
+creating ──▶ running ──pause / auto-pause / crash──▶ paused ──▶ destroyed
+                │   ▲                                 │   │         ▲
+                │   └──────────── resume ─────────────┘   │         │
+                └──────── destroy ────────────────────────┴─────────┘
         (destroy 可从 running 或 paused 发起;evict = reaper 对 paused 的自动 destroy)
 ```
 
@@ -147,6 +147,9 @@ creating ──▶ running ──pause / auto-pause──▶ paused ──▶ de
 - **自动转换**(reaper 守护):`running` 空闲超阈值 → `auto-pause`;`paused` 超保留期 →
   `evict`。**`evict` 就是 reaper 对 `paused` 沙箱触发的 `destroy`**——同一个 `→ destroyed`
   终态,只是触发方是 reaper 而非用户。
+- **非自愿转换**(对账驱动):启动/周期对账发现一个 `running` 沙箱的隔离单元已死时,CAS 把它降到
+  `paused`(§4.2 崩溃变体 / §4.4-A)——`running → paused` 的第三条触发,与用户 `pause`、reaper
+  `auto-pause` 并列,事件 Kind 为 `crash-paused`(见下条)。
 - **转换对外发布为事件**:每次状态机转换(created / paused / auto-paused / crash-paused / resumed /
   destroyed …)发布到一条 **event stream**;webhook、metrics、计费等 subscriber 在**引擎之外**消费,
   **引擎不知道也不依赖谁在订阅**。这是 observability / 计费的接法——单向、additive(§1.3:add a
