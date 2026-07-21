@@ -37,6 +37,12 @@ type Config struct {
 	// (":memory:") for tests that don't need durability across a New() call.
 	StorePath string
 
+	// DefaultIdleTimeout / DefaultRetention are the engine-wide TTL defaults
+	// (§4.3 / reaper-health D5) applied to a create that omits them. Zero →
+	// the mediator's built-in conservative defaults (lifecycle.New).
+	DefaultIdleTimeout time.Duration
+	DefaultRetention   time.Duration
+
 	// FaultAfterColdStart is a TEST-ONLY injection hook forwarded to the
 	// mediator to simulate a crash mid-transition. nil in production.
 	FaultAfterColdStart func(id model.SandboxID)
@@ -88,6 +94,8 @@ func New(cfg Config) (*Engine, error) {
 		Rootfs:              rp,
 		Dial:                transport.DialFunc,
 		HealthTimeout:       cfg.HealthTimeout,
+		DefaultIdleTimeout:  cfg.DefaultIdleTimeout,
+		DefaultRetention:    cfg.DefaultRetention,
 		FaultAfterColdStart: cfg.FaultAfterColdStart,
 	})
 

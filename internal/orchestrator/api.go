@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
@@ -61,6 +62,12 @@ func (e *Engine) HTTPHandler() http.Handler {
 type createReq struct {
 	TemplateID string `json:"template_id"`
 	GuestUser  string `json:"guest_user"`
+	// IdleTimeout / Retention are the optional TTL Binding inputs (§6.1
+	// idle_timeout?/retention?). Accepted as Go duration strings ("30m", "24h")
+	// so the unit is explicit on the wire; omitted/"" → engine-wide default
+	// (materialized by the mediator at create).
+	IdleTimeout string `json:"idle_timeout"`
+	Retention   string `json:"retention"`
 }
 type createResp struct {
 	SandboxID string `json:"sandbox_id"`
@@ -72,9 +79,26 @@ func (e *Engine) handleCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	sid, err := e.Mediator.Create(r.Context(), lifecycle.CreateSpec{
+	spec := lifecycle.CreateSpec{
 		Template: model.TemplateID(req.TemplateID), GuestUser: req.GuestUser,
-	})
+	}
+	if req.IdleTimeout != "" {
+		d, err := time.ParseDuration(req.IdleTimeout)
+		if err != nil {
+			http.Error(w, "idle_timeout: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		spec.IdleTimeout = &d
+	}
+	if req.Retention != "" {
+		d, err := time.ParseDuration(req.Retention)
+		if err != nil {
+			http.Error(w, "retention: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		spec.Retention = &d
+	}
+	sid, err := e.Mediator.Create(r.Context(), spec)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

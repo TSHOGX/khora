@@ -55,6 +55,21 @@ type Sandbox struct {
 	// a configurable guest default — NOT a security invariant (§2.2).
 	GuestUser string
 
+	// IdleTimeout and Retention are the lifecycle TTL — per-sandbox Binding
+	// fields (§3.4: SoT is the control-plane record, stable across resume,
+	// materialized each placement), consumed by the reaper (§4.3):
+	//   - IdleTimeout: a `running` sandbox idle (no I/O) longer than this →
+	//     auto-pause (§4.1 automatic transition).
+	//   - Retention: a `paused` sandbox older than this → evict (reaper's
+	//     destroy of a paused sandbox, §4.1).
+	// These EXIST here (unlike the still-omitted volume/network Binding) because
+	// M4's reaper is a live consumer — a justified model growth, not a
+	// speculative reservation (§1.3). A create that omits them gets the
+	// engine-wide default resolved at create time, so the stored value is always
+	// the concrete duration the reaper reads (default site: lifecycle.Deps).
+	IdleTimeout time.Duration
+	Retention   time.Duration
+
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }

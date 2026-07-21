@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"engine/internal/model"
@@ -29,13 +30,15 @@ type SQLite struct {
 
 const sqliteSchema = `
 CREATE TABLE IF NOT EXISTS sandboxes (
-	id          TEXT PRIMARY KEY,
-	template    TEXT NOT NULL,
-	overlay     TEXT NOT NULL,
-	state       TEXT NOT NULL,
-	guest_user  TEXT NOT NULL,
-	created_at  INTEGER NOT NULL, -- unix nanos
-	updated_at  INTEGER NOT NULL
+	id           TEXT PRIMARY KEY,
+	template     TEXT NOT NULL,
+	overlay      TEXT NOT NULL,
+	state        TEXT NOT NULL,
+	guest_user   TEXT NOT NULL,
+	idle_timeout INTEGER NOT NULL DEFAULT 0, -- TTL Binding, ns (§3.4 / §4.3)
+	retention    INTEGER NOT NULL DEFAULT 0, -- TTL Binding, ns (§3.4 / §4.3)
+	created_at   INTEGER NOT NULL, -- unix nanos
+	updated_at   INTEGER NOT NULL
 );
 -- KNOWN LIMITATION (open-decisions §2 §4.1/§4.4-C row): published rows are
 -- marked (published_at set), NEVER deleted, so this table grows monotonically.
@@ -100,7 +103,30 @@ func OpenSQLite(path string) (*SQLite, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("store/sqlite: schema: %w", err)
 	}
+	// Additive migration for a store.db created before the TTL Binding columns
+	// (M4). CREATE TABLE IF NOT EXISTS never alters an existing table, so a
+	// pre-M4 file lacks idle_timeout/retention. ALTER ... ADD COLUMN is
+	// idempotent-by-ignore: a "duplicate column name" error means a current-
+	// schema DB already has it, which is fine. NOT NULL DEFAULT 0 backfills old
+	// rows with 0 → the reaper reads them as "use the engine default" (the
+	// mediator resolves 0 to the configured default at classify time).
+	for _, col := range []string{
+		`ALTER TABLE sandboxes ADD COLUMN idle_timeout INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE sandboxes ADD COLUMN retention INTEGER NOT NULL DEFAULT 0`,
+	} {
+		if _, err := db.ExecContext(context.Background(), col); err != nil && !isDuplicateColumn(err) {
+			_ = db.Close()
+			return nil, fmt.Errorf("store/sqlite: migrate TTL columns: %w", err)
+		}
+	}
 	return &SQLite{db: db}, nil
+}
+
+// isDuplicateColumn reports whether err is SQLite's "duplicate column name"
+// (the benign outcome of re-running an additive ADD COLUMN on a DB that already
+// has the column — the current-schema case).
+func isDuplicateColumn(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "duplicate column name")
 }
 
 // Close releases the database handle.
@@ -145,10 +171,11 @@ func (s *SQLite) CreateSandbox(ctx context.Context, sb model.Sandbox, ev *Event)
 			return err
 		}
 		if _, err := t.Exec(
-			`INSERT INTO sandboxes(id, template, overlay, state, guest_user, created_at, updated_at)
-			 VALUES(?,?,?,?,?,?,?)`,
+			`INSERT INTO sandboxes(id, template, overlay, state, guest_user, idle_timeout, retention, created_at, updated_at)
+			 VALUES(?,?,?,?,?,?,?,?,?)`,
 			string(sb.ID), string(sb.Template), string(sb.Overlay), string(sb.State),
-			sb.GuestUser, sb.CreatedAt.UnixNano(), sb.UpdatedAt.UnixNano(),
+			sb.GuestUser, int64(sb.IdleTimeout), int64(sb.Retention),
+			sb.CreatedAt.UnixNano(), sb.UpdatedAt.UnixNano(),
 		); err != nil {
 			return err
 		}
@@ -158,13 +185,13 @@ func (s *SQLite) CreateSandbox(ctx context.Context, sb model.Sandbox, ev *Event)
 
 func (s *SQLite) GetSandbox(ctx context.Context, id model.SandboxID) (model.Sandbox, error) {
 	return scanSandbox(s.db.QueryRowContext(ctx,
-		`SELECT id, template, overlay, state, guest_user, created_at, updated_at FROM sandboxes WHERE id=?`,
+		`SELECT id, template, overlay, state, guest_user, idle_timeout, retention, created_at, updated_at FROM sandboxes WHERE id=?`,
 		string(id)))
 }
 
 func (s *SQLite) ListSandboxes(ctx context.Context) ([]model.Sandbox, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, template, overlay, state, guest_user, created_at, updated_at FROM sandboxes ORDER BY created_at`)
+		`SELECT id, template, overlay, state, guest_user, idle_timeout, retention, created_at, updated_at FROM sandboxes ORDER BY created_at`)
 	if err != nil {
 		return nil, err
 	}
@@ -260,8 +287,8 @@ type rowScanner interface {
 func scanSandbox(r rowScanner) (model.Sandbox, error) {
 	var sb model.Sandbox
 	var id, tmpl, ov, state string
-	var created, updated int64
-	err := r.Scan(&id, &tmpl, &ov, &state, &sb.GuestUser, &created, &updated)
+	var idleTimeout, retention, created, updated int64
+	err := r.Scan(&id, &tmpl, &ov, &state, &sb.GuestUser, &idleTimeout, &retention, &created, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return model.Sandbox{}, ErrNotFound
 	}
@@ -272,6 +299,8 @@ func scanSandbox(r rowScanner) (model.Sandbox, error) {
 	sb.Template = model.TemplateID(tmpl)
 	sb.Overlay = model.OverlayID(ov)
 	sb.State = model.Lifecycle(state)
+	sb.IdleTimeout = time.Duration(idleTimeout)
+	sb.Retention = time.Duration(retention)
 	sb.CreatedAt = time.Unix(0, created)
 	sb.UpdatedAt = time.Unix(0, updated)
 	return sb, nil

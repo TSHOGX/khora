@@ -41,6 +41,16 @@ type Deps struct {
 	// HealthTimeout bounds the ⑦ readiness gate (guest-runtime D5.1).
 	HealthTimeout time.Duration
 
+	// DefaultIdleTimeout / DefaultRetention are the engine-wide TTL defaults
+	// (§4.3 / §1.1 single-binary config) applied when a CreateSpec omits them.
+	// Conservative numeric knobs (reaper-health D5): they bound no invariant's
+	// shape, only detection latency, and stay tunable. Zero here falls back to
+	// the package defaults (defaultIdleTimeout / defaultRetention) so a caller
+	// that leaves Deps unset still gets a sane, non-zero TTL rather than a
+	// sandbox that auto-pauses instantly.
+	DefaultIdleTimeout time.Duration
+	DefaultRetention   time.Duration
+
 	// Logf reports per-item reconciliation outcomes that are skipped rather than
 	// fatal (§4.4-A startup reconcile is skip-and-log: one un-adoptable sandbox
 	// must not abort recovery of the rest). Defaults to log.Printf; tests inject a
@@ -80,9 +90,25 @@ type liveState struct {
 	merged    *rootfs.Merged
 }
 
+// TTL defaults (§4.3 / reaper-health D5): conservative, revisable numeric knobs
+// noted at their config site. They bound no invariant's shape — only how long
+// an idle `running` / a `paused` sandbox lingers before the reaper acts. A
+// create that omits them, and a Deps that leaves the Default* fields zero, both
+// resolve to these.
+const (
+	defaultIdleTimeout = 30 * time.Minute // running idle → auto-pause
+	defaultRetention   = 24 * time.Hour   // paused → evict
+)
+
 func New(deps Deps) *Mediator {
 	if deps.HealthTimeout == 0 {
 		deps.HealthTimeout = 30 * time.Second
+	}
+	if deps.DefaultIdleTimeout == 0 {
+		deps.DefaultIdleTimeout = defaultIdleTimeout
+	}
+	if deps.DefaultRetention == 0 {
+		deps.DefaultRetention = defaultRetention
 	}
 	if deps.Logf == nil {
 		deps.Logf = log.Printf
@@ -119,6 +145,16 @@ func (m *Mediator) lock(id model.SandboxID) *sync.Mutex {
 type CreateSpec struct {
 	Template  model.TemplateID
 	GuestUser string
+
+	// IdleTimeout / Retention are the OPTIONAL TTL Binding inputs (§3.4 / §4.3;
+	// §6.1 POST /v1/sandboxes idle_timeout?/retention?). nil = omitted → the
+	// engine-wide default (Deps.Default*) is materialized into the stored record
+	// at create time, so the reaper always reads a concrete duration, never a
+	// sentinel. A non-nil pointer is honored verbatim (including an explicit
+	// zero, which the reaper treats as "no such deadline" — see the reaper's
+	// TTL handling in stage 4).
+	IdleTimeout *time.Duration
+	Retention   *time.Duration
 }
 
 // Create runs the cold-start chain for a fresh sandbox (guest-runtime D5.1,
@@ -137,7 +173,18 @@ func (m *Mediator) Create(ctx context.Context, spec CreateSpec) (model.SandboxID
 	rec := model.Sandbox{
 		ID: sid, Template: spec.Template, Overlay: oid,
 		State: model.Creating, GuestUser: spec.GuestUser,
-		CreatedAt: now, UpdatedAt: now,
+		// Materialize the TTL Binding once, at create (§3.4: Binding is stable
+		// across resume; the stored value is the concrete duration the reaper
+		// reads). Omitted inputs resolve to the engine-wide default here.
+		IdleTimeout: m.deps.DefaultIdleTimeout,
+		Retention:   m.deps.DefaultRetention,
+		CreatedAt:   now, UpdatedAt: now,
+	}
+	if spec.IdleTimeout != nil {
+		rec.IdleTimeout = *spec.IdleTimeout
+	}
+	if spec.Retention != nil {
+		rec.Retention = *spec.Retention
 	}
 	// The transient creating-insert is an internal step of the create verb, not
 	// an externally-visible §4.1 transition — it publishes nothing (nil Event).

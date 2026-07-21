@@ -42,7 +42,11 @@ func mkRec(id string) model.Sandbox {
 	now := time.Now()
 	return model.Sandbox{
 		ID: model.SandboxID(id), Template: "bare", Overlay: model.OverlayID("ov_" + id),
-		State: model.Creating, CreatedAt: now, UpdatedAt: now,
+		State: model.Creating,
+		// TTL Binding (§3.4 / §4.3): non-zero, distinct values so the round-trip
+		// assertion catches a column swapped or dropped.
+		IdleTimeout: 30 * time.Minute, Retention: 12 * time.Hour,
+		CreatedAt: now, UpdatedAt: now,
 	}
 }
 
@@ -62,6 +66,10 @@ func testCreateGetConflict(t *testing.T, mk Factory) {
 	}
 	if got.ID != "a" || got.State != model.Creating || got.Overlay != "ov_a" {
 		t.Fatalf("roundtrip mismatch: %+v", got)
+	}
+	// TTL Binding survives the round-trip (§3.4: stored as the concrete Binding).
+	if got.IdleTimeout != 30*time.Minute || got.Retention != 12*time.Hour {
+		t.Fatalf("TTL Binding roundtrip mismatch: idle=%s retention=%s; want 30m/12h", got.IdleTimeout, got.Retention)
 	}
 	// duplicate ID → ErrConflict.
 	if err := s.CreateSandbox(ctx, mkRec("a"), nil); err != store.ErrConflict {

@@ -42,6 +42,58 @@ func TestCreateHappyPath(t *testing.T) {
 	}
 }
 
+// TTL Binding materialization (§3.4 / §4.3): a create that OMITS idle_timeout /
+// retention stores the engine-wide default; a create that provides them stores
+// the given values verbatim (including an explicit zero). The stored record
+// always carries a concrete duration the reaper reads — never a sentinel.
+func TestCreateMaterializesTTLBinding(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	m := New(Deps{
+		Store: st, Runtime: &fakeRuntime{}, Rootfs: &fakeRootfs{},
+		Dial:               func(transport.Endpoint) transport.Client { return &fakeClient{healthy: true} },
+		HealthTimeout:      500 * time.Millisecond,
+		DefaultIdleTimeout: 15 * time.Minute,
+		DefaultRetention:   6 * time.Hour,
+	})
+
+	// omitted → engine default materialized.
+	sid, err := m.Create(ctx, CreateSpec{Template: "bare"})
+	if err != nil {
+		t.Fatalf("Create (default TTL): %v", err)
+	}
+	rec, _ := st.GetSandbox(ctx, sid)
+	if rec.IdleTimeout != 15*time.Minute || rec.Retention != 6*time.Hour {
+		t.Fatalf("default TTL not materialized: idle=%s retention=%s; want 15m/6h", rec.IdleTimeout, rec.Retention)
+	}
+
+	// explicit values honored verbatim.
+	idle, ret := 3*time.Minute, 90*time.Minute
+	sid2, err := m.Create(ctx, CreateSpec{Template: "bare", IdleTimeout: &idle, Retention: &ret})
+	if err != nil {
+		t.Fatalf("Create (explicit TTL): %v", err)
+	}
+	rec2, _ := st.GetSandbox(ctx, sid2)
+	if rec2.IdleTimeout != idle || rec2.Retention != ret {
+		t.Fatalf("explicit TTL not honored: idle=%s retention=%s; want 3m/90m", rec2.IdleTimeout, rec2.Retention)
+	}
+
+	// explicit zero honored (NOT overridden by default): a caller opting a
+	// sandbox out of a deadline.
+	zero := time.Duration(0)
+	sid3, err := m.Create(ctx, CreateSpec{Template: "bare", IdleTimeout: &zero})
+	if err != nil {
+		t.Fatalf("Create (zero idle): %v", err)
+	}
+	rec3, _ := st.GetSandbox(ctx, sid3)
+	if rec3.IdleTimeout != 0 {
+		t.Fatalf("explicit zero idle overridden: %s; want 0", rec3.IdleTimeout)
+	}
+	if rec3.Retention != 6*time.Hour {
+		t.Fatalf("omitted retention not defaulted alongside explicit-zero idle: %s; want 6h", rec3.Retention)
+	}
+}
+
 // create: cold-start failure reclaims half-built placement + empty Overlay
 // and deletes the record → destroyed; no `failed` state.
 func TestCreateUnwindOnLaunchFailure(t *testing.T) {

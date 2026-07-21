@@ -25,16 +25,20 @@ func main() {
 		state     = flag.String("state", "./scratch/state", "state root (overlays + runsc state/bundles)")
 		storePath = flag.String("store", "./scratch/store.db", "SQLite store file (ADR-0004)")
 		health    = flag.Duration("health-timeout", 30*time.Second, "cold-start readiness gate timeout (⑦)")
+		idleTO    = flag.Duration("idle-timeout", 30*time.Minute, "default idle TTL: running idle past this → auto-pause (§4.3)")
+		retention = flag.Duration("retention", 24*time.Hour, "default retention TTL: paused past this → evict (§4.3)")
 		sudo      = flag.Bool("sudo", false, "prefix runsc/ip with sudo (dev; prod runs as root)")
 	)
 	flag.Parse()
 
 	eng, err := orchestrator.New(orchestrator.Config{
-		TemplatesDir:  *templates,
-		StateDir:      *state,
-		StorePath:     *storePath,
-		HealthTimeout: *health,
-		Sudo:          *sudo,
+		TemplatesDir:       *templates,
+		StateDir:           *state,
+		StorePath:          *storePath,
+		HealthTimeout:      *health,
+		DefaultIdleTimeout: *idleTO,
+		DefaultRetention:   *retention,
+		Sudo:               *sudo,
 	})
 	if err != nil {
 		log.Fatalf("orchestrator: assemble: %v", err)
