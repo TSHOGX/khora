@@ -200,7 +200,7 @@ Overlay upper,保证 at-rest 字节一致,§5.B"只读 at-rest")。生命周期�
 状态:持久态全在后端的 Overlay 工件里,substrate 意外死掉(sentry 崩溃、node 掉电)⟺ RAM/CPU
 被释放 ⟺ 与一次 pause 的**盘上效果完全等价**。因此恢复一个崩溃的沙箱 = 一次 resume,不是特殊
 路径。这给 reaper 提了个要求——须把"substrate 已死但可恢复"与"健康且空闲"分开,崩溃的沙箱要走
-resume 而非 auto-pause 的优雅静止(健康态四分与判据见 §4.3)。
+resume 而非 auto-pause 的静止(健康态四分与判据见 §4.3)。
 
 > **注意范围:这里的"崩溃"专指 substrate 死亡(sentry/容器整死)**——即 §4.3 探活的 L1 失败。
 > transport 模式 `sandboxd` 单独崩溃**不属于**这条路径:它由 PID1 原地重启、同 IP 恢复(§5.E.1),
@@ -226,8 +226,8 @@ resume 而非 auto-pause 的优雅静止(健康态四分与判据见 §4.3)。
 | 健康态 | 判据(L1 substrate / L2 transport) | 处置 |
 | --- | --- | --- |
 | **healthy** | L1 活 + L2 通,且有连接活跃(近期有 I/O:进程输出 / pty 读写) | 保持 `running`,不动 |
-| **idle** | L1 活 + L2 通,但**所有**连接都 idle(近期无任何 I/O) | 超阈值 → **auto-pause** 优雅静止(§4.2) |
-| **transport-down(瞬态)** | **L1 活、L2 不通**——transport 子进程崩了,PID1 正在原地重启(§5.E.1) | **等重启**;端口在**同一 IP** 上恢复,**不是** dead-recoverable、**不**走 resume;超重启预算才升级 |
+| **idle** | L1 活 + L2 通,但**所有**连接都 idle(近期无任何 I/O) | 超阈值 → **auto-pause** 静止到一致点(§4.2;flush 由 substrate 保证,不依赖协作握手) |
+| **transport-down(瞬态)** | **L1 活、L2 不通**——transport 子进程崩了,PID1 正在原地重启(§5.E.1) | **等重启**;端口在**同一 IP** 上恢复,**不是** dead-recoverable、**不**走 resume;**连续 transport-down 超重启预算 → 升级为 dead-recoverable 走 resume**(防崩溃循环卡死,机制见 reaper-health D4b) |
 | **dead-recoverable** | **L1 探不到**(容器整死),持久态(Overlay 工件)在后端完好 | 走 **resume**(§4.2),换新 IP 冷启,**不是** auto-pause |
 
 > **连接活动信号在 guest 侧量,不在 host 侧。** `sandboxd` 在输出/输入路径(`broadcast`/`writeInput`)打一个
@@ -239,7 +239,7 @@ resume 而非 auto-pause 的优雅静止(健康态四分与判据见 §4.3)。
 三个关键区分,都靠"两层探活 + 连接活动"三者交叉判,缺一会误判:
 
 - **dead-recoverable 与 idle 表现相同**(都"无活跃连接"),必须靠 L1 而非连接活动来分——崩溃的
-  沙箱绝不能被当成 idle 去走 auto-pause 的"优雅静止",它要走 resume。
+  沙箱绝不能被当成 idle 去走 auto-pause 的静止(它假定 substrate 活着、能停到一致点),它要走 resume。
 - **transport-down 与 dead-recoverable 表现相同**(L2 都不通),必须靠 L1 来分——transport 崩溃是
   **进程内可恢复**(PID1 同 IP 原地重启,成本远低于 resume),错判成 dead-recoverable 会无谓地触发
   一次整链冷启换 IP。transport 崩 ≠ 容器崩,是 §5.E.1「init 与 transport 分进程」的直接结果。
@@ -261,6 +261,10 @@ L2 探活成功翻成 `running`(时序见 [`deep-dives/guest-runtime.md`](./deep
 Binding**(§3.4:跨 resume 稳定、每次 placement 物化):两个阈值——`idle_timeout`(`running` idle 超它 →
 auto-pause)与 `retention`(`paused` 超它 → evict)——是沙箱控制面记录的字段,create 时可给、缺省落引擎级
 默认(§1.1 单二进制配置)。取默认值为纯调参(见 [`deep-dives/reaper-health.md`](./deep-dives/reaper-health.md) D5)。
+**auto-pause 的锁内活动重读(竞态兜底)**:活动度不是 lifecycle-state,§4.4-B 的 CAS 比对不到它,故 sweep 的
+「判 idle → 处置」窗口里沙箱刚变活跃时,auto-pause 的 CAS 仍会通过。为不误冻正在干活的沙箱,`auto-pause` 拿
+转换锁后除 CAS 外**再重读一次活动信号**(当前 `idle_millis`),仍超阈才冻结、否则放弃本轮。处置由此建立在锁内
+最新的「态 + 活动」双重快照上(推理见 [`deep-dives/reaper-health.md`](./deep-dives/reaper-health.md) D3)。
 - **对象回收(uniform object model invariant)**:每个一等持久对象(sandbox / Overlay 工件 /
   Volume / Template / 挂载行)带 **生命周期状态 + refcount** 作为**固有字段**(不是 reaper 的私有
   实现)。无 owner 列——回收只看 refcount/TTL,不看"谁拥有"(§1.4)。连接(process)不是持久对象,

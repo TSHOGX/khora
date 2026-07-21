@@ -29,7 +29,6 @@
 | **§5.C Volume(契约边界外)** | Volume 四条契约已定(§5.C);待细化的四条边界项(独占卷抢占策略 / shared-rw ENOSPC 复合行为 / 直连变更 vs live-ro reader 准入 / snapshot 一致性标注进 §6) | **详见 [`deep-dives/volume.md`](./deep-dives/volume.md) D5**,本表不复制。多为产品层策略或落 §6 时定 |
 | **§1.4 侧信道** | co-residency 策略(不共核/不共调度)在**多租户接入时**的具体物化 | 随多租户激活才做,落在 placement 层;五支柱不变 |
 | **§4.3 对象回收 sweep** | 引用-回收原子性不变量已定(§4.3)。**待细化**:refcount 物化成计数字段 vs 由"引用行是否存在"查询导出的取舍、sweep 的触发时机与批量策略、destroy 删字节的异步重试与 refcount==0 判定的具体落地 | 仅登记 sweep **实现**细节。谁消费:§4.3 reaper / §5.C 挂载行 / §5.B Template lineage GC |
-| **§4.4-A 周期对账 + 连续健康分类** | **已收敛(M4)**,详见 [`deep-dives/reaper-health.md`](./deep-dives/reaper-health.md) D3/D4:周期对账 = 启动对账同一份反向对账,只多「跳持锁沙箱 + 保护 live-map 活 placement」两条;连续健康分类 = L1×L2×活动三交叉的四象限,分类器只读不持锁、对持锁沙箱 TryLock 跳过。egress 面 nft 资源枚举随 §5.D(M6)并入;TTL 默认值为纯调参。**settled + not-yet-built**,归 M4 plan,此行待 M4 gate 后删。 | 谁消费:§4.3 reaper / §5.A provider |
 | **§4.1 / §4.4-C 事件流(对外面)** | 投递算法、store 原子提交契约、后端(ADR-0004 SQLite)已定。**待细化的是对外面**:event schema、可重放窗口大小、subscriber 接入/续位约定。<br>**两处已知限制(设计使然,非缺陷)**:① outbox **只标记不删行**、随转换单调增长(部分索引 `WHERE published_at IS NULL` 令 unpublished 扫描不退化,at-rest 无界)——修剪策略(保留期 / 归档)随「可重放窗口」一并落地(窗口定 ⇒ 修剪 = 删窗口外已发布行);② `store.DedupSink` 是引擎内**参考实现**,`seen` 进程内 / 无界 / 非持久,重启不记得崩前已投递的 ID(靠 outbox 重发 + 真实 subscriber 侧持久去重兜底,§4.4-C at-least-once)——真实 subscriber 在引擎外自行持久去重,不在引擎内加。 | additive(add a subscriber);引擎不追踪 subscriber、只保证可靠写入一条可重放 stream |
 | **§4.2 pause 静止点(仅剩参数级)** | 协议两层结构已定(§4.2 + deep-dive D4.4:① drain-barrier ② `SIGTSTP`+观测 `/proc` stopped+超时降 `SIGSTOP`,不引入 guest 内 ack 通道)。**残留纯调参**:grace 时长、可 handle 信号的具体选择、是否给模板一个可选"可协作 flush"钩子(默认不需要) | 非架构,落地时定;不改两层结构。见 [`deep-dives/guest-runtime.md`](./deep-dives/guest-runtime.md) D4.4 |
 | **§5.D 凭证存储 seam** | 凭证"留宿主侧"的**后端**(secret-store):怎么存、注册、轮转。此处只留**at-rest 后端**选型;alias→directives 的 **resolve/缓存/失效契约**是另一条 seam,见下行 | 一类可插拔 seam(类比 runtime/FS provider);明文不进控制面/Overlay,只在宿主侧独立后端 |
@@ -64,7 +63,7 @@
 | 缺口 | 现状 vs 目标 | 落地归属 |
 | --- | --- | --- |
 | **§2.2 / §6.2 guest 身份 run-as** | 契约已定(§2.2 默认非 root + sudo;§6.2 两级 run-as:create 期沙箱默认身份 + 每次 `Start` 的 `guest_user`)。**未兑现**:两级都被丢弃——`oci.go` 硬编码 UID/GID 0、`sandboxd` Start 不设 `SysProcAttr.Credential`,`guest_user` 静默失效(fail-open 到 root)。落地需:guest 侧 uid/gid 查询(`/etc/passwd`)+ OCI `process.user` + Start 的 `Credential`。**非宿主隔离缺口**(§2.2:guest 身份是 guest 内卫生,非安全支柱),但在被 in-guest 特权分隔依赖前须实现 | §5.A `local_runsc` / §5.E `sandboxd`;先建内置 Template 的非 root 用户(§2 §5.A 模板行) |
-| **低危已知小项**(均已在对应代码点留注) | ① PID1 reaper `Wait4(-1)` 与监督循环 `cmd.Wait()` 竞争 transport 退出码(自愈重启不受影响,仅退出码/telemetry 竞态,Go1.23 pidfd 或已收窄);② PID1 容器级信号扇出当前是单子进程转发 + 退出(transport 为唯一子进程时正确,长跑 sibling 落地时升级为组扇出);③ 每沙箱转换锁 map 只增不删(高 churn 慢泄漏,删除与持锁竞争需谨慎);④ outbox publisher 头阻塞(一条投递失败挡住其后全部,保序/at-least-once 正确,与可重放窗口一并定) | 均非正确性破坏;①②③ 随 reaper(M4)、④ 随事件流可重放窗口(后续增量)择机收口 |
+| **低危已知小项**(均已在对应代码点留注) | outbox publisher 头阻塞(一条投递失败挡住其后全部,保序/at-least-once 正确,与可重放窗口一并定) | 非正确性破坏;随事件流可重放窗口(后续增量)择机收口。<br>*(三项 reaper 相关小项〔PID1 退出码竞争 / 信号扇出 / 转换锁 map 泄漏〕已随 M4 plan 迁出本表)* |
 
 ---
 
