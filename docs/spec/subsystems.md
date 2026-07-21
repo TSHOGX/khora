@@ -241,8 +241,8 @@
   这个 daemon 是"CLI/TUI/WebUI 都是同一套 API 的平级 client"(§6)成真的具体载体。它**必须保持
   通用**:不内嵌任何 agent/turn/session 语义,那些是 engine 外 adapter 的事(见末条)。
 - **载体:netns 内 TCP,不用 vsock**:`sandboxd` 在 guest netns 里监听一个 TCP 端口,连接由 gVisor
-  userspace netstack(sentry)终结,宿主经该 netns 的 veth IP 直连——unary 走 HTTP、双向流走 WebSocket /
-  h2c(带即时 flush),保序、亚毫秒即时、大 payload 无死锁。冷启换新 netns IP(旧 IP 作废)零改动重连,
+  userspace netstack(sentry)终结,宿主经该 netns 的 veth IP 直连——unary 走 HTTP、流式走 h2c
+  (server-stream/client-stream + 即时 flush),保序、亚毫秒即时、大 payload 无死锁。冷启换新 netns IP(旧 IP 作废)零改动重连,
   **直接兑现 §3.3「载体不编码 placement」**。那个 veth IP 由 placement(§5.A)分配、非 runsc 产物;宿主
   如何拿到 IP 归 §5.A,不进本子系统。细节见 [`deep-dives/transport.md`](./deep-dives/transport.md) D4。
 - **无状态**:约束的是**控制面持久 SoT**——engine 不为连接维护持久记录,"沙箱上现在跑着什么进程" =

@@ -31,7 +31,7 @@ M2 因此把 M1 立对形状的三条不变量各压到"真并发 / 真崩溃"�
 | **§4.4-A** 失败原子退源态 + 重启对账(回收孤儿 + 接管存活) | `model.md §4.4` | orchestrator 启动对账:孤儿回收 + 存活 running 重新接管;provider 扩 Adopt/ReclaimOrphans |
 
 **两处已定选型(开工即成立,归属见 §6):** 后端 = **SQLite**(纯 Go,ADR-0004);对账 = **仅启动**
-(周期对账归 M3)。
+(周期对账归 M4)。
 
 ---
 
@@ -39,9 +39,9 @@ M2 因此把 M1 立对形状的三条不变量各压到"真并发 / 真崩溃"�
 
 | 不做 | 属于 | 为什么能安全后置 |
 | --- | --- | --- |
-| **周期对账** + §4.4-B 持锁辨识(跳过 in-flight resume 的活 placement) | M3 | 启动对账(M2)锁全没了,无需与转换锁协调;活着的 orchestrator 周期对账要辨识"正在建的活 placement"、须持锁辨识,与 reaper 同属 M3 |
-| reaper + 健康态四分 + single-flight 分类器 | M3 | M2 对账仅启动触发,不引运行时健康分类 |
-| Volume / egress / Promote / 凭证 / 容量帽 | M4–M7 | 与 §4.4 三不变量正交 |
+| **周期对账** + §4.4-B 持锁辨识(跳过 in-flight resume 的活 placement) | M4 | 启动对账(M2)锁全没了,无需与转换锁协调;活着的 orchestrator 周期对账要辨识"正在建的活 placement"、须持锁辨识,与 reaper 同属 M4 |
+| reaper + 健康态四分 + single-flight 分类器 | M4 | M2 对账仅启动触发,不引运行时健康分类 |
+| Volume / egress / Promote / 凭证 / 容量帽 | M5–M8 | 与 §4.4 三不变量正交 |
 | 对外 event schema / 重放窗口 / subscriber 接入续位 | 随后续增量 | §4.4-C:引擎只保证"可靠写入一条可重放 stream";schema 是 subscriber 侧 / 落 §6 时定 |
 
 > `store.Memory` **不删**——它是 §1.3 Behavior seam 的第二实现,L1 单测继续用(快、不落盘)。
@@ -81,7 +81,7 @@ mediator 启动路径**调** provider 的枚举/回收 + 调 store 的按态对�
 ## 4. 启动对账:崩溃后怎么收拾(§4.4-A 的核心)
 
 进程刚崩 ⟹ live-map 空、转换锁全无 ⟹ 无"正在建的活 placement"要靠持锁辨识保护(那是周期对账才需的,
-M3)。但**不能一律回收**:§4.4-A 说 `running` 沙箱的**活** placement 本就不是孤儿。对账因此是**对偶**的
+M4)。但**不能一律回收**:§4.4-A 说 `running` 沙箱的**活** placement 本就不是孤儿。对账因此是**对偶**的
 ——回收孤儿 + 重新接管存活者。逐条按 store 态处理(枚举本机 engine placement 后,与 store 记录 diff):
 
 - `creating` → **删记录 → destroyed**,其半建 placement 归孤儿回收(create 半途崩,从未 running,无可退静止态)。

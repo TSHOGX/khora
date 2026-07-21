@@ -1,5 +1,10 @@
 # M3 — transport 深度:process/fs 数据面兑现到"多连接并发"
 
+> **✅ SHIPPED — 历史记录,非活动计划。** 本里程碑已交付并过评审门;A1–A10 + B1–B7 回归 + C1–C7 在真机
+> runsc 上 `-race` 全绿,D4.3 慢订阅者处置(断开)与外沿投影(D6)已回写 spec/deep-dive。引擎"现在是
+> 什么"以 `docs/spec/` 为准,本文只留作前瞻记录(`docs/plans/README.md` 的 expire-as-shipped 纪律)。
+> 后续里程碑不改本文。
+
 > engine 的 **M3 前瞻计划**。只答四件事:切到哪(scope)、开工前备好什么(DoR)、按什么次序开工
 > (risk-first)、怎么算通过(acceptance)。架构规格在 `docs/spec/`——§5.E 的**边界**已在
 > `subsystems.md §5.E` 定死,wire **机制**已在 [`deep-dives/transport.md`](../spec/deep-dives/transport.md)
@@ -25,7 +30,7 @@ M1 把传输**载体**立对了(netns 内 TCP、Connect-RPC/h2c、`Health` 探�
 M3 只做**数据面的正确性承重核心**,不做 fs 广度(见 §2)。核心的风险**不在 substrate 集成**(M1 已 retire),
 **在扇出并发正确性**——两条 D4.3 invariant 是这一层的 §4.4(编译绿证明不了)。
 
-**本里程碑不新增 spec**:D4/D6 已把机制与外沿投影设计完;M3 是**实现settled设计**。撞到 D4 欠定
+**本里程碑不新增 spec**:D4/D6 已把机制与外沿投影设计完;M3 是**实现 settled 设计**。撞到 D4 欠定
 (如环形缓冲字节上界)按 open-decisions §5.E 的"残留纯调参"取值,不回改 deep-dive 形状。
 
 ---

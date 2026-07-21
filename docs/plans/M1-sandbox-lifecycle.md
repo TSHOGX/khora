@@ -82,19 +82,19 @@ M1 用两种手法,作用在两个不同层,别混:
 | 不做 | 属于 | 为什么能安全后置 |
 | --- | --- | --- |
 | store 持久化 + §4.4 三不变量的**深度**(outbox / 崩溃对账 / 真并发压测) | M2 | M1 用进程内 `store.Memory` 跑通竖切,并把 CAS + 转换锁的**形状**立对(§4.4-B);真事务、事件 outbox、多线程并发压测、崩溃重启对账是独立里程碑,要配故障注入 |
-| reaper + 健康态四分(两层探活 × 连接活动) | M3 | M1 手动驱动四个动词,不自动回收;探活只用 L2 的一次 Health(§4.3 的 readiness 门,非四分器) |
-| Volume(挂载表 / 租约 / 直连写 regime) | M4 | 竖切不挂任何 Volume;冷启链跳过 ②(§6.1 `volumes?` 参数存在但 M1 恒空) |
-| Network **egress 数据面**(gateway / deny-set / nft 引流 / 凭证注入) | M5 | 冷启链跳过 ③;M1 只建**最简 netns**(见下),不出公网、无策略面。`SteeringSpec` 恒空 |
-| Promote + 分层 Template + refcount GC | M6 | Template 是一个静态目录,不 promote、不 fork;destroy 同步删 upper 即可 |
-| 凭证 store seam | M7 | 无出网即无凭证注入 |
+| reaper + 健康态四分(两层探活 × 连接活动) | M4 | M1 手动驱动四个动词,不自动回收;探活只用 L2 的一次 Health(§4.3 的 readiness 门,非四分器) |
+| Volume(挂载表 / 租约 / 直连写 regime) | M5 | 竖切不挂任何 Volume;冷启链跳过 ②(§6.1 `volumes?` 参数存在但 M1 恒空) |
+| Network **egress 数据面**(gateway / deny-set / nft 引流 / 凭证注入) | M6 | 冷启链跳过 ③;M1 只建**最简 netns**(见下),不出公网、无策略面。`SteeringSpec` 恒空 |
+| Promote + 分层 Template + refcount GC | M7 | Template 是一个静态目录,不 promote、不 fork;destroy 同步删 upper 即可 |
+| 凭证 store seam | M8 | 无出网即无凭证注入 |
 | 完整 D4 wire(`StreamInput` client-stream / multipart 旁路 / 环形回放 / keepalive) | 随后续增量 | M1 只需 `Start`(server-stream)/ `SendInput` / `Read` / `Write` / `Health` 五个能跑 |
-| content-addressed diff 层 / project quota 容量帽 / pause flush 精确一致点 | M6 / 后续 | 持久单元 M1 用「留驻 upper 目录」(D3);diff 层、容量帽(D6)、flush 一致点是同一接缝上的演进,不阻塞竖切 |
+| content-addressed diff 层 / project quota 容量帽 / pause flush 精确一致点 | M7 / 后续 | 持久单元 M1 用「留驻 upper 目录」(D3);diff 层、容量帽(D6)、flush 一致点是同一接缝上的演进,不阻塞竖切 |
 
 **一处必须点破的 scoping 判断——③ 出网数据面在 M1 外,但 §5.E transport 需要 netns veth 可达。**
 载体是「netns 内 TCP,宿主经 veth IP 直连」(§5.E / D4.1),因此 M1 **仍要建一个最简 netns + veth**
 让宿主够得到 sandboxd 的监听端口——但**只到「可达」为止**:无 egress gateway、无 deny-set、无 nft 引流、
 无 §5.D 策略面。这落在 `local_runsc` provider 的 `Launch` 内(placement 的一部分),`SteeringSpec` 恒空。
-「最简 netns 可达」与「egress 强制」是两件事,M1 只做前者,后者整体是 M5 的安全关键工作。
+「最简 netns 可达」与「egress 强制」是两件事,M1 只做前者,后者整体是 M6 的安全关键工作。
 
 > **`store.Memory` 站位 M2 的持久后端**:M2 落 SQLite(ADR-0004)+ §4.4-C 原子提交契约时按同一
 > `store.Store` 接口替换,CAS 形状 M1 已立对(见 §4),上层不改。(`store.Memory` 本身 M2 保留为该
@@ -145,7 +145,7 @@ canonical 链(D5.1)是 ①–⑦,`create` 与 `resume` 共享,只差前缀与失
 - **① 必在 ④ 之前**——挂载在 runsc 启动时从 OCI spec 取、运行中不可热改(§2.5)。
 - **⑦ 是唯一屏障**——「已拉起」与「running」之间只此一道门,readiness = **首次 Health RPC 成功**
   (不信裸 TCP accept:accept 可能早于 handler 接好,D5.2 要点①/D4.5)。M1 只用这一次 L2 探活作
-  readiness 门,不引入 §4.3 的两层探活 + 四分器(那是 M3)。
+  readiness 门,不引入 §4.3 的两层探活 + 四分器(那是 M4)。
 - **转换锁全程持有 ①–⑦**——从 CAS 前置校验一直持到 ⑦ 翻 `running`(或超时 unwind),不在 guest
   listening 前提前放手(§4.4-B / D5.1)。M1 即便基本单线程,也要把锁的持有区间放对,M2 填真并发 + outbox。
 - **失败出口(§4.4-A / D5.2 要点④)**:拉起 / 探活失败先回收半建 placement(netns/veth/overlay mount),
