@@ -1,13 +1,13 @@
 // Package store is the control-plane record seam (§1.1 / §4.4-C). It is a
-// Behavior seam (§1.3): an interface with pluggable implementations. M1 ships
-// an in-memory implementation; M2 swaps in an embedded single-node backend
-// (SQLite, ADR-0004) WITHOUT changing this interface — that is the whole point of
-// a seam (register an implementation, don't reshape the callers).
+// Behavior seam (§1.3): an interface with pluggable implementations. Two live
+// side by side behind it — an in-memory map (for fast unit tests) and the
+// embedded single-node backend (SQLite, ADR-0004) — chosen by registration,
+// not by reshaping callers; that is the whole point of a seam.
 //
-// The interface itself must promise the minimal guarantees the algorithms need
-// (§4.4-C): "lifecycle-state change + outbox append = single atomic commit" is
-// an M2 addition, but the CAS shape below is fixed in M1 so the §4.4-B transition
-// lock has somewhere to land. NEVER design the API so a backend reports whether
+// The interface itself promises the minimal guarantees the algorithms need
+// (§4.4-C): "lifecycle-state change + outbox append = single atomic commit".
+// The CAS shape below gives the §4.4-B transition lock somewhere to land.
+// NEVER design the API so a backend reports whether
 // it supports transactions and the algorithm branches on it — that leaks
 // backend differences into correctness (§4.4-C).
 package store

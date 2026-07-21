@@ -18,7 +18,7 @@ import (
 )
 
 // HTTPHandler exposes the minimal §6.1 sandbox-centric API — ID-addressed, no
-// host paths / placement exposed (§6.2). M1 scope: sandbox lifecycle
+// host paths / placement exposed (§6.2): sandbox lifecycle
 // (create/get/pause/resume/destroy/list) + process.Start + fs read/write, all
 // proxied by sandbox ID (the orchestrator resolves the current endpoint
 // internally via the mediator, so placement never leaves the engine).
@@ -30,7 +30,7 @@ import (
 // sandbox_id — D6.2). The two mount on one mux: Connect services own their
 // /engine.transport.v1.*/ paths, control-plane REST owns /v1/... . The whole
 // thing is wrapped in h2c so the data-plane server-streams work over cleartext
-// HTTP/2 (D4.2). The old NDJSON facade is gone (D6.3).
+// HTTP/2 (D4.2). The data plane is Connect-only, no REST/NDJSON facade (D6.3).
 func (e *Engine) HTTPHandler() http.Handler {
 	mux := http.NewServeMux()
 

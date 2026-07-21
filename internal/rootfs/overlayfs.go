@@ -9,7 +9,7 @@ import (
 	"syscall"
 )
 
-// HostOverlayFS is the M1 single-node FS provider (§5.B): it assembles the
+// HostOverlayFS is the single-node FS provider (§5.B): it assembles the
 // sandbox's writable Overlay artifact as a host kernel overlayfs — lower =
 // Template, upper+work = the resident Overlay directory, merged = the rootfs
 // handed to runsc (rootfs-overlay D0/D3). runsc runs --overlay2=none
@@ -28,8 +28,8 @@ type HostOverlayFS struct {
 	// StateDir holds per-Overlay materialization: StateDir/<id>/{upper,work,merged}.
 	StateDir string
 	// TemplatesDir resolves a TemplateID to its read-only lower dir:
-	// TemplatesDir/<template>. Templates are static directories in M1 (§6, no
-	// Promote / layering until M7).
+	// TemplatesDir/<template>. Templates are static directories (§6; Promote /
+	// layering is a later addition).
 	TemplatesDir string
 }
 
@@ -132,9 +132,10 @@ func (p *HostOverlayFS) Unmount(_ context.Context, m *Merged) error {
 	return nil
 }
 
-// DestroyOverlay reclaims upper+work bytes (terminal destroy, §4.1). M1 deletes
-// synchronously (M2 → refcount async sweep). Separate from placement teardown;
-// the mediator invokes each (§4 subsystems don't call each other).
+// DestroyOverlay reclaims upper+work bytes (terminal destroy, §4.1). Deletes
+// synchronously; a refcount-driven async sweep is the eventual form. Separate
+// from placement teardown; the mediator invokes each (§4 subsystems don't call
+// each other).
 func (p *HostOverlayFS) DestroyOverlay(_ context.Context, o *Overlay) error {
 	dir := filepath.Join(p.StateDir, o.ID)
 	// best-effort unmount first in case merged is still mounted.

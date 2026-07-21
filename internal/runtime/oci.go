@@ -1,9 +1,9 @@
 package runtime
 
 // Minimal OCI runtime-spec (config.json) builder. We emit only the fields runsc
-// needs for M1 (§5.A / rootfs-overlay), not the full runtime-spec — pulling the
-// whole opencontainers/runtime-spec module in for a handful of fields would be
-// weight §1.1 rejects. The shape is validated against the Task A spike bundle.
+// needs (§5.A / rootfs-overlay), not the full runtime-spec — pulling the whole
+// opencontainers/runtime-spec module in for a handful of fields would be weight
+// §1.1 rejects.
 
 type ociSpec struct {
 	OCIVersion string     `json:"ociVersion"`
@@ -55,9 +55,10 @@ type ociNamespace struct {
 	Path string `json:"path,omitempty"`
 }
 
-// caps is the M1 guest capability set: enough for sandboxd to bind a netns TCP
-// port and exec processes. Egress steering / dropping down to a minimal set is
-// M6 work; today the netns is the simplest reachable one (plan §3).
+// caps is the guest capability set: enough for sandboxd to bind a netns TCP
+// port and exec processes. Egress steering / dropping down to a minimal set
+// arrives with the network subsystem; today the netns is the simplest reachable
+// one.
 var caps = []string{
 	"CAP_NET_BIND_SERVICE", "CAP_NET_ADMIN", "CAP_NET_RAW",
 	"CAP_SYS_ADMIN", "CAP_CHOWN", "CAP_DAC_OVERRIDE",

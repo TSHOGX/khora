@@ -40,12 +40,12 @@ const (
 // and lives with the runtime provider, not in the identity record (§3.3).
 //
 // Minimal shape by one rule: a field exists here only when this record actually
-// carries it today. Binding fields that later milestones add (mounted volumes →
-// M5, network policy → M6, resource limits) are omitted until then rather than
-// stubbed — this record is a data shape, not a settled interface signature, so an
-// unused field would be a speculative reservation (§1.3). (Contrast the runtime
-// provider's SteeringSpec/ResourceLimits, which DO exist now: they are named
-// members of the settled §5.A contract 4-tuple — "settled, not yet built".)
+// carries it today. Binding fields not yet consumed (mounted volumes, network
+// policy, resource limits) are omitted rather than stubbed — this record is a
+// data shape, not a settled interface signature, so an unused field would be a
+// speculative reservation (§1.3). (Contrast the runtime provider's
+// SteeringSpec/ResourceLimits, which DO exist now: they are named members of the
+// settled §5.A contract 4-tuple — "settled, not yet built".)
 type Sandbox struct {
 	ID       SandboxID
 	Template TemplateID

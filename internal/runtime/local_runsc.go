@@ -27,9 +27,9 @@ import (
 // Placement-local resources are NAMED by SandboxID (§4.4-A: labeling placement
 // with its SandboxID is the §3.3 reverse — allowed. It lets Adopt re-recognize a
 // sandbox's own resources after a control-plane crash and ReclaimOrphans identify
-// which resources back which sandbox). This is what closes the old ipSeq
-// cross-restart TODO: a restarted process learns which IPs survivors hold (from
-// Adopt) and its allocator skips them.
+// which resources back which sandbox). SandboxID-named IPs survive a restart: a
+// restarted process learns which IPs survivors hold (from Adopt) and its
+// allocator skips them.
 //
 // Contract discipline (§5.A): the Provider interface carries only policy +
 // handles. Host primitives — cgroup path, netns fd, the merged host path — live

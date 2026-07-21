@@ -61,8 +61,8 @@ type Provider interface {
 	Unmount(ctx context.Context, m *Merged) error
 
 	// DestroyOverlay reclaims the upper+work bytes (destroy terminal state,
-	// §4.1). M1 deletes synchronously; M2 moves to refcount-driven async sweep
-	// (§4.3). Separate from placement teardown — the mediator invokes each
+	// §4.1). Deletes synchronously; a refcount-driven async sweep (§4.3) is the
+	// eventual form. Separate from placement teardown — the mediator invokes each
 	// (§4: subsystems don't call each other).
 	DestroyOverlay(ctx context.Context, o *Overlay) error
 

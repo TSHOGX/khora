@@ -44,8 +44,8 @@ type Endpoint string
 const Port = 9000
 
 // ProcessEvent is one item of a process output stream: oneof{start,data,end,
-// keepalive} (transport D4.3). M1 carries start(pid) / data(stdout|stderr) /
-// end(exit_code).
+// keepalive} (transport D4.3) — start(pid) / data(stdout|stderr) /
+// end(exit_code) / keepalive.
 type ProcessEvent struct {
 	Kind     string // "start" | "data" | "end" | "keepalive"
 	PID      int    // set on start

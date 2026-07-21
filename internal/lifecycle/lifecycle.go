@@ -7,9 +7,8 @@
 // The verbs create / pause / resume / destroy are here. Each is a serialized,
 // CAS-guarded transition (§4.4-B: one transition lock per sandbox, verbs
 // serialize on it, and inside the lock a compare-and-set precondition check
-// rejects a verb whose source state is wrong). M1 wires the lock + CAS shape
-// even though M1 is largely single-threaded, so M2 fills in real concurrency
-// and the outbox (§4.4-C) without reshaping callers.
+// rejects a verb whose source state is wrong). Every transition commits its
+// state change and its outbox event in one atomic store op (§4.4-C).
 package lifecycle
 
 import (
@@ -55,7 +54,7 @@ type Deps struct {
 	// still reads the SOURCE state (`paused` for resume / `creating` for create).
 	// This manufactures the §4.4-A crash scenarios (orphan half-build + surviving
 	// container with lost handle) that Reconcile must clean up. nil in production;
-	// it carries NO production semantics (plan §7 R5).
+	// it carries NO production semantics.
 	FaultAfterColdStart func(id model.SandboxID)
 }
 
@@ -95,9 +94,8 @@ func New(deps Deps) *Mediator {
 	}
 }
 
-// lock returns the per-sandbox transition lock, creating it on first use
+// lock returns the per-sandbox transition mutex, creating it on first use
 // (§4.4-B: all lifecycle verbs for the SAME sandbox serialize on it).
-// lock returns the per-sandbox transition mutex, creating it on first use.
 //
 // KNOWN LIMITATION: entries are never removed, even after destroy — the map
 // grows by one mutex per distinct SandboxID ever seen (a slow leak under high
@@ -115,8 +113,9 @@ func (m *Mediator) lock(id model.SandboxID) *sync.Mutex {
 }
 
 // CreateSpec is the create verb input (§6.1 POST /v1/sandboxes). network/volumes
-// are not yet consumed (Volume = M5, egress = M6); they are here to keep the API
-// shape stable (§6.2 create-time injection is a flow shape, not late-bound).
+// are not yet consumed (Volume and egress are later subsystems); they are here
+// to keep the API shape stable (§6.2 create-time injection is a flow shape, not
+// late-bound).
 type CreateSpec struct {
 	Template  model.TemplateID
 	GuestUser string
@@ -252,8 +251,9 @@ func (m *Mediator) Resume(ctx context.Context, id model.SandboxID) error {
 }
 
 // Destroy = terminal `destroyed` (§4.1). The transition (mark destroyed) is
-// decoupled from byte reclamation: M1 deletes the Overlay synchronously (M2:
-// async refcount sweep, §4.3/§4.4). Valid from running or paused; idempotent
+// decoupled from byte reclamation: the Overlay is deleted synchronously here;
+// an async refcount sweep (§4.3/§4.4) is the eventual form. Valid from running
+// or paused; idempotent
 // (already-gone record → nil). The lock held here is the same one resume holds
 // for its whole chain, so destroy CANNOT delete an Overlay mid-cold-start
 // (§4.4-B: closes the destroy-vs-resume data race).
@@ -325,7 +325,7 @@ func (m *Mediator) coldStart(ctx context.Context, id model.SandboxID, ov *rootfs
 }
 
 // awaitHealthy polls the transport Health RPC until first success or timeout
-// (⑦; the single readiness barrier, plan §5).
+// (⑦; the single readiness barrier of the cold-start chain, guest-runtime D5).
 func (m *Mediator) awaitHealthy(ctx context.Context, pl *runtime.Placement) error {
 	deadline := time.Now().Add(m.deps.HealthTimeout)
 	cl := m.deps.Dial(transport.Endpoint(pl.TransportEndpoint))
@@ -366,11 +366,12 @@ func (m *Mediator) unwind(ctx context.Context, id model.SandboxID, ov *rootfs.Ov
 
 // Reconcile is the §4.4-A startup crash-reconciliation: one local scan diffing
 // host placement × store records, run ONCE at orchestrator boot before serving
-// (§4.4-A / plan §4). The process just (re)started, so the live-map is empty and
+// (§4.4-A). The process just (re)started, so the live-map is empty and
 // all transition locks are fresh — every in-flight resume that was running is
 // dead, so half-built placements need NO lock to identify (lock-based
-// identification is only for the periodic reconcile against a LIVE orchestrator,
-// M4). It is a dual operation, NOT reclaim-all:
+// identification is only for the periodic reconcile against a LIVE
+// orchestrator, deferred to open-decisions §2). It is a dual operation, NOT
+// reclaim-all:
 //
 //   - `creating` record → the create crashed mid-chain, never reached running,
 //     has no at-rest resting state → delete the record (→ destroyed); its
@@ -506,7 +507,7 @@ func (m *Mediator) reclaimOrphanOverlay(ctx context.Context, rec model.Sandbox, 
 // container would be optimistically adopted with an un-serving endpoint: if L2
 // does not answer, we demote to paused (recoverable via a fresh cold-start on the
 // next resume) rather than record a dead handle. It is a SINGLE boot-time probe,
-// deliberately NOT the continuous four-quadrant health classifier (M4;
+// deliberately NOT the continuous four-quadrant health classifier (deferred to
 // open-decisions §2 §4.4-A row).
 func (m *Mediator) adoptOrDemote(ctx context.Context, rec model.Sandbox) (bool, error) {
 	l := m.lock(rec.ID)

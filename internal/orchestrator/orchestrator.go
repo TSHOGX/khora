@@ -24,7 +24,7 @@ import (
 
 // Config is the orchestrator's local configuration (§1.1 one config).
 type Config struct {
-	// TemplatesDir holds Template directories (static in M1; TemplateID → dir).
+	// TemplatesDir holds Template directories (static; TemplateID → dir).
 	TemplatesDir string
 	// StateDir is the root for overlay materialization + runsc state/bundles.
 	StateDir string
@@ -37,8 +37,8 @@ type Config struct {
 	// (":memory:") for tests that don't need durability across a New() call.
 	StorePath string
 
-	// FaultAfterColdStart is a TEST-ONLY (R5) injection hook forwarded to the
-	// mediator to simulate a crash mid-transition. nil in production (plan §7 R5).
+	// FaultAfterColdStart is a TEST-ONLY injection hook forwarded to the
+	// mediator to simulate a crash mid-transition. nil in production.
 	FaultAfterColdStart func(id model.SandboxID)
 }
 

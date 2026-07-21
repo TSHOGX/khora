@@ -10,7 +10,7 @@ import (
 )
 
 // initMode is the minimal self-authored PID 1 (§5.E.1 / guest-runtime D4.1).
-// tini source is the correctness checklist; we implement the M1 subset:
+// tini source is the correctness checklist; we implement the subset we need:
 //   - reaper: waitpid(-1, WNOHANG) loop draining zombies on SIGCHLD;
 //   - container-level signal fan-out: forward SIGTERM/SIGINT to the transport
 //     child (directed per-process signals belong to transport mode, D4.3);

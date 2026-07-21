@@ -23,8 +23,8 @@ import (
 // an independent copy, and keeps a per-process bounded output ring buffer so a
 // late Connect replays recent bytes before joining live (D4.3 invariant 2).
 //
-// procs maps pid→proc. Like the M1 stdin table it is transport-process-local,
-// non-authoritative, and dies with the transport process — NOT a control-plane
+// procs maps pid→proc. It is transport-process-local, non-authoritative, and
+// dies with the transport process — NOT a control-plane
 // registry (§5.E: List scans /proc live). D4.3 explicitly places the ring buffer
 // inside "no *persistent* SoT": transient, per-process, gone when the process
 // (or transport) dies, never crossing resume.
@@ -160,11 +160,11 @@ func (p *proc) broadcast(f frame) {
 // end. This is the same "lossy is the slow subscriber's copy, not the source"
 // rule the broadcast path enforces, extended to the exit instant.
 //
-// NOTE (M4): "you were dropped" is not observable end-to-end today anyway — the
-// domain seam (client.go drainEvents ignores stream.Err(); ProcessEvent has no
-// error field) cannot carry a terminal error across the fan-out channel. Making
-// subscriber-drop an observable liveness signal is deferred to M4 (health
-// quadrant / connection-activity), where it belongs; not reconciled here.
+// NOTE: "you were dropped" is not observable end-to-end anyway — the domain
+// seam (client.go drainEvents ignores stream.Err(); ProcessEvent has no error
+// field) cannot carry a terminal error across the fan-out channel. Making
+// subscriber-drop an observable liveness signal belongs with the health
+// quadrant / connection-activity work (§4.3), not here.
 func (p *proc) finish(exitCode int) {
 	p.mu.Lock()
 	p.ended = true
@@ -354,10 +354,11 @@ func (s *processServer) Start(ctx context.Context, req *connect.Request[v1.Start
 	// NOTE: m.GuestUser (per-Start run-as, §6.2) is NOT YET ENFORCED (deferred).
 	// We exec as the guest default (root, §2.2) regardless. Applying it means
 	// resolving the guest user (uid/gid via /etc/passwd) and setting
-	// SysProcAttr.Credential below — a scoped follow-on. See the guest_user
-	// deferral note in transport.proto. A non-empty m.GuestUser is silently
-	// ignored today; not a host-isolation gap, but a documented param that fails
-	// open — must be implemented before relying on in-guest privilege separation.
+	// SysProcAttr.Credential below — an additive follow-on. See the guest_user
+	// deferral note in transport.proto and open-decisions §4. A non-empty
+	// m.GuestUser is ignored; not a host-isolation gap, but a documented param
+	// that fails open — must be implemented before relying on in-guest privilege
+	// separation.
 
 	var p *proc
 	var sources []source
@@ -429,7 +430,7 @@ func (s *processServer) Start(ctx context.Context, req *connect.Request[v1.Start
 func (s *processServer) Connect(ctx context.Context, req *connect.Request[v1.ConnectRequest], stream *connect.ServerStream[v1.ProcessEvent]) error {
 	p, ok := s.get(int(req.Msg.Pid))
 	if !ok {
-		return connect.NewError(connect.CodeNotFound, errString("no such live process pid "+strconv.Itoa(int(req.Msg.Pid))))
+		return errNoSuchPid(int(req.Msg.Pid))
 	}
 	sub, snap, ended, endF := p.subscribe()
 	if sub != nil {
@@ -501,7 +502,7 @@ func (s *processServer) StreamInput(_ context.Context, stream *connect.ClientStr
 		if p == nil {
 			var ok bool
 			if p, ok = s.get(int(m.Pid)); !ok {
-				return nil, connect.NewError(connect.CodeNotFound, errString("no such live process pid "+strconv.Itoa(int(m.Pid))))
+				return nil, errNoSuchPid(int(m.Pid))
 			}
 		}
 		if err := p.writeInput(m.Data, m.PtyIn); err != nil {
@@ -520,7 +521,7 @@ func (s *processServer) Update(_ context.Context, req *connect.Request[v1.Update
 	m := req.Msg
 	p, ok := s.get(int(m.Pid))
 	if !ok {
-		return nil, connect.NewError(connect.CodeNotFound, errString("no such live process pid "+strconv.Itoa(int(m.Pid))))
+		return nil, errNoSuchPid(int(m.Pid))
 	}
 	if m.Pty == nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errString("Update requires pty size"))
@@ -535,7 +536,7 @@ func (s *processServer) Update(_ context.Context, req *connect.Request[v1.Update
 func (s *processServer) CloseStdin(_ context.Context, req *connect.Request[v1.CloseStdinRequest]) (*connect.Response[v1.CloseStdinResponse], error) {
 	p, ok := s.get(int(req.Msg.Pid))
 	if !ok {
-		return nil, connect.NewError(connect.CodeNotFound, errString("no such live process pid "+strconv.Itoa(int(req.Msg.Pid))))
+		return nil, errNoSuchPid(int(req.Msg.Pid))
 	}
 	if err := p.closeStdin(); err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
@@ -547,7 +548,7 @@ func (s *processServer) SendInput(_ context.Context, req *connect.Request[v1.Sen
 	m := req.Msg
 	p, ok := s.get(int(m.Pid))
 	if !ok {
-		return nil, connect.NewError(connect.CodeNotFound, errString("no such live process pid "+strconv.Itoa(int(m.Pid))))
+		return nil, errNoSuchPid(int(m.Pid))
 	}
 	if err := p.writeInput(m.Data, m.PtyIn); err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
@@ -584,3 +585,9 @@ func (*processServer) List(_ context.Context, _ *connect.Request[v1.ListRequest]
 type errString string
 
 func (e errString) Error() string { return string(e) }
+
+// errNoSuchPid is the NotFound returned when a pid has no live process (List
+// scans /proc, so a stale pid simply isn't there).
+func errNoSuchPid(pid int) error {
+	return connect.NewError(connect.CodeNotFound, errString("no such live process pid "+strconv.Itoa(pid)))
+}

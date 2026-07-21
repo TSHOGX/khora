@@ -6,7 +6,7 @@
 // primitives (§5.A ❌ list). A provider must NOT be handed "a cgroup path / a
 // netns fd / the Overlay's absolute host path" — a unit scheduled onto a remote
 // node cannot produce those, and leaking them binds the interface to a
-// host-local assumption that no non-local provider could ever satisfy. M1 ships
+// host-local assumption that no non-local provider could ever satisfy. There is
 // exactly one implementation, local_runsc; the interface exists to keep the
 // abstraction boundary clean, not to support other backends today (§1.1).
 package runtime
@@ -22,7 +22,7 @@ type RootfsSource struct {
 	// NOTE (seam discipline): this is a host path and is therefore only ever
 	// populated/consumed by the local_runsc provider. It stays out of any
 	// cross-provider decision. A remote provider would carry a different handle
-	// shape here. Kept concrete in M1 because local_runsc is the only impl.
+	// shape here. Kept concrete because local_runsc is the only impl.
 	MergedPath string
 }
 
@@ -35,18 +35,18 @@ type RootfsSource struct {
 // (which we omit — see model.Sandbox), this type EXISTS now because it is a named
 // member of the settled §5.A contract 4-tuple (rootfs / steering / limits /
 // identity) — "settled, not yet built" (§1.3), not a speculative reservation.
-// Filled in when egress lands (M6).
+// Filled in when the egress data plane lands.
 type SteeringSpec struct{}
 
 // ResourceLimits is the rate-axis Binding the provider materializes at
 // placement time (§3.4 / §5.A): CPU / RAM / disk-IO → cgroup for local_runsc.
 // Disk CAPACITY is NOT here — that is an FS-layer quota owned by §5.B/§5.C
-// (§3.4 两轴切分). M1 leaves these zero (unlimited).
+// (§3.4 两轴切分). These are zero (unlimited) until resource limits are wired.
 type ResourceLimits struct {
 	CPUMillis  int64
 	MemoryByte int64
-	// disk-IO (io controller) added when M1 grows resource limits; capacity
-	// axis intentionally absent — it belongs to the FS provider.
+	// disk-IO (io controller) joins here when resource limits are wired; the
+	// capacity axis is intentionally absent — it belongs to the FS provider.
 }
 
 // LaunchSpec is the provider input — the contract's left-hand side:
@@ -58,10 +58,11 @@ type LaunchSpec struct {
 	Steering  SteeringSpec
 	Limits    ResourceLimits
 	// GuestUser is the create-time default run-as (§2.2 / §6.2).
-	// NOT YET ENFORCED (deferred): local_runsc.Launch/buildOCISpec currently
-	// hardcode UID/GID 0 and ignore this field, so the sandbox default runs as
-	// root regardless. Applying it (OCI process.user via guest user-lookup) is a
-	// scoped follow-on; see the guest_user deferral note in transport.proto.
+	// NOT YET ENFORCED (deferred): local_runsc.Launch/buildOCISpec hardcode
+	// UID/GID 0 and ignore this field, so the sandbox default runs as root
+	// regardless. Applying it (OCI process.user via guest user-lookup) is an
+	// additive follow-on; see the guest_user deferral note in transport.proto
+	// and open-decisions §4.
 	GuestUser string
 }
 
@@ -75,7 +76,7 @@ type Placement struct {
 	// signal (§4.3 placement/IP-as-epoch) — the engine does not add a counter.
 	TransportEndpoint string
 
-	// handle is provider-private state for stop/start (M1 local_runsc: the
+	// handle is provider-private state for stop/start (local_runsc: the
 	// runsc container id + netns name). Deliberately not exported — callers
 	// address by SandboxID, not by placement internals.
 	handle any

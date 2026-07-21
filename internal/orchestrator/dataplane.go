@@ -16,7 +16,7 @@ import (
 // call to the sandbox's current endpoint resolved by sandbox_id via the mediator
 // (placement NEVER leaves the engine, §6.2 / D6.1). One wire — the inner
 // transport.proto is reused verbatim at the outer edge, no translation layer
-// and no NDJSON facade (D6.2 / D6.3).
+// and no REST/NDJSON facade (D6.2 / D6.3).
 //
 // Addressing: the proto is pid-addressed (no sandbox_id field — D4.6 vocabulary
 // boundary keeps product/placement concepts out of the wire). The outer edge
@@ -38,7 +38,7 @@ type fsProxy struct{ e *Engine }
 // leak placement to the engine's edge (§6.2 / D6.1: placement never exposed).
 // Map to CodeUnavailable with a placement-free message; the real cause stays in
 // engine logs, not the wire. (Stream errors that arrive via drainEvents are a
-// separate, known M4 seam item — see dataplane doc / transport.md.)
+// separate seam item tied to the health quadrant — see transport.md D4.3.)
 func proxyErr(err error) error {
 	return connect.NewError(connect.CodeUnavailable, errors.New("sandbox transport unavailable"))
 }
