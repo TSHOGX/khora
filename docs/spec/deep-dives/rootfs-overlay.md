@@ -89,7 +89,7 @@ Overlay 增量)、§5.B 底层存储附带能力(CoW 落 reflink)、§3.1.1 载�
 **持久单元:先做「留驻 upper 目录」。** upper 就地留在后端,pause 零捕获、resume 重挂同一 upper
 冷启——最贴近 §4.2 的原文语义,上手最快,兑现 pause/resume 与 Promote 的 at-rest 读已足够。
 **content-addressed diff 层(提取成 OCI tar + digest)是后续演进项**,不是现在要做的:它换来
-分层 Template / fork / 跨 host 白送(参考实现走这条),但要额外实现 tar 提取 + baseline 增量 +
+分层 Template / fork / 跨 host 白送,但要额外实现 tar 提取 + baseline 增量 +
 object store 接口。二者共用同一个 Overlay 抽象,上层无感——先做前者、后者随 roadmap 对 fork/
 multi-node 的优先级演进,靠 D4 的 seam 保证演进时上层不改。
 
@@ -115,7 +115,7 @@ reflink 来补分层,那其实又滑回上面的 overlayfs 底层存储附带能
    Promote/fork 代码**一行不改**。宿主路径必须锁死在 FS 子系统内部(§3.1.1「对内也 ID 寻址」)。
 2. **物化经 FS provider seam**(§5.B):今天唯一实现是 single-node 的「本机内核 overlayfs +
    本地目录」;diff 层 / multi-node(PV / 对象存储)是**注册另一个 FS provider 或换持久单元**,
-   不改模型。参考实现把 diff 推 object store 正是这个 seam 的一种实现——按 D3,现在做留驻 upper,
+   不改模型。把 diff 推 object store 便是这个 seam 的一种实现——按 D3,现在做留驻 upper,
    抽象要能容纳后续的 diff 层演进。
 3. **不引入 containerd**(与 §1.1「单二进制、无重型外部依赖」冲突):复用 containerd overlayfs
    snapshotter 只在已经跑在 containerd 上时才划算。我们**在引擎内薄薄实现**「组装 overlayfs

@@ -120,9 +120,8 @@ reparent 到 `sandboxd` 而非 PID 1——不当 PID 1 也能收割自己关心�
 
 - **每进程监督状态机**:per-process 一个 `cmd.Wait()` 的 monitor goroutine + 状态枚举
   (running/stopped/killed/crashed)+ exit/start handler。
-- **每进程 pgid 纪律**:非 PTY 进程 `Setpgid` 自成组、定向信号 `kill(-pgid)` 再 fallback
-  `kill(pid)`;**PTY 进程不 setpgid**(pty 自建 session 管 job control,再 setpgid 会打架)。这条
-  PTY vs 非 PTY 非对称 tini 覆盖不到(D4.5 C1)。
+- **每进程 pgid 纪律**:非 PTY 进程 `Setpgid` 自成组、PTY 进程交给 pty 的 session——这条 tini 覆盖
+  不到的 PTY vs 非 PTY 非对称,完整推理见 D4.5 C1。
 - **drain-barrier**:pause/resume 前用一道 barrier 挡住 in-flight mutating RPC、等其排空——正是 D4.4
   协作式静止点、D5.2 单飞守卫要的原语。
 
