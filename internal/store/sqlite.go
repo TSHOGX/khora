@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"engine/internal/model"
@@ -103,30 +102,10 @@ func OpenSQLite(path string) (*SQLite, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("store/sqlite: schema: %w", err)
 	}
-	// Additive migration for a store.db created before the TTL Binding columns
-	// (M4). CREATE TABLE IF NOT EXISTS never alters an existing table, so a
-	// pre-M4 file lacks idle_timeout/retention. ALTER ... ADD COLUMN is
-	// idempotent-by-ignore: a "duplicate column name" error means a current-
-	// schema DB already has it, which is fine. NOT NULL DEFAULT 0 backfills old
-	// rows with 0 → the reaper reads them as "use the engine default" (the
-	// mediator resolves 0 to the configured default at classify time).
-	for _, col := range []string{
-		`ALTER TABLE sandboxes ADD COLUMN idle_timeout INTEGER NOT NULL DEFAULT 0`,
-		`ALTER TABLE sandboxes ADD COLUMN retention INTEGER NOT NULL DEFAULT 0`,
-	} {
-		if _, err := db.ExecContext(context.Background(), col); err != nil && !isDuplicateColumn(err) {
-			_ = db.Close()
-			return nil, fmt.Errorf("store/sqlite: migrate TTL columns: %w", err)
-		}
-	}
+	// No schema migration: there are no live instances, so the schema is whatever
+	// CREATE TABLE declares today (CLAUDE.md "No compatibility burden"). A column
+	// growth edits sqliteSchema in place; the store.db is discarded and rebuilt.
 	return &SQLite{db: db}, nil
-}
-
-// isDuplicateColumn reports whether err is SQLite's "duplicate column name"
-// (the benign outcome of re-running an additive ADD COLUMN on a DB that already
-// has the column — the current-schema case).
-func isDuplicateColumn(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "duplicate column name")
 }
 
 // Close releases the database handle.
