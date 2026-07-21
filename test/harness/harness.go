@@ -60,7 +60,7 @@ func BuildTemplate(t *testing.T, repoRoot, templatesDir, name, sandboxdBin strin
 
 // BuildBrokenTemplate builds a Template whose /sbin/sandboxd exits immediately
 // (Health never comes up) — used to inject a ⑦ cold-start failure on real runsc
-// (A9 L4). The entrypoint is a tiny static binary that just exits 0.
+// (L4). The entrypoint is a tiny static binary that just exits 0.
 func BuildBrokenTemplate(t *testing.T, repoRoot, templatesDir, name string) {
 	t.Helper()
 	src := filepath.Join(t.TempDir(), "exiter")

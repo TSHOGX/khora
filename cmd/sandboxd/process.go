@@ -84,7 +84,7 @@ type subscriber struct {
 
 // proc is the per-process fan-out hub (transient, non-authoritative — see
 // processServer doc). Holds the bounded ring, the live subscriber set, and the
-// input handles (stdin pipe; pty master is Task D).
+// input handles (stdin pipe; pty master).
 type proc struct {
 	pid int
 
@@ -92,7 +92,7 @@ type proc struct {
 	ring     ringBuffer
 	subs     map[*subscriber]struct{}
 	stdin    io.WriteCloser
-	pty      *os.File // set only for pty processes (Task D)
+	pty      *os.File // set only for pty processes
 	ended    bool
 	endFrame frame
 }
@@ -363,7 +363,7 @@ func (s *processServer) Start(ctx context.Context, req *connect.Request[v1.Start
 	var p *proc
 	var sources []source
 	if m.Pty != nil {
-		// PTY branch (transport D4.3): pure-Go pty pair (R1). The slave is the
+		// PTY branch (transport D4.3): pure-Go pty pair. The slave is the
 		// child's controlling terminal; the master is the single merged output
 		// source AND the keyboard-input sink. Setsid makes the child a session
 		// leader; Setctty binds the slave (fd 0) as its controlling tty.

@@ -25,11 +25,11 @@
 package transport
 
 // Wire stubs are generated from proto/engine/transport/v1/transport.proto via
-// buf (schema-first, Task S). Regenerate with: cd proto && buf generate.
+// buf (schema-first). Regenerate with: cd proto && buf generate.
 // Requires buf + protoc-gen-go + protoc-gen-connect-go on PATH. The generated
 // code lives in internal/transport/gen/... and is committed (buf/protoc are not
 // guaranteed present on every checkout). This Client interface is the host-side
-// DOMAIN seam; the concrete Connect client (Task D) translates domain↔proto so
+// DOMAIN seam; the concrete Connect client translates domain↔proto so
 // the mediator never sees generated types.
 
 import "context"

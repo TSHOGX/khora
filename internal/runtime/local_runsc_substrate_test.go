@@ -36,7 +36,7 @@ func buildFixtureRootfs(t *testing.T, dst string) {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("build fakeguest: %v: %s", err, out)
 	}
-	// reuse the R1 rootfs builder.
+	// reuse the shared rootfs builder.
 	build := exec.Command("../../test/preflight/build-rootfs.sh", dst, bin)
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build-rootfs: %v: %s", err, out)
@@ -58,7 +58,7 @@ func TestLaunchStopDestroyAgainstRealRunsc(t *testing.T) {
 
 	// Runtime provider consumes an already-merged rootfs (opaque RootfsSource).
 	// For an L2 runtime test we point it straight at the Template dir (read-only
-	// base is enough; the fakeguest writes nothing). Overlay assembly is Task B.
+	// base is enough; the fakeguest writes nothing).
 	spec := LaunchSpec{
 		Sandbox: "s1",
 		Rootfs:  RootfsSource{MergedPath: filepath.Join(tmplRoot, "bare")},
@@ -126,7 +126,7 @@ func TestLaunchResumeGetsNewIP(t *testing.T) {
 	t.Logf("ep1=%s ep2=%s (new IP on resume)", ep1, pl2.TransportEndpoint)
 }
 
-// Task E / B6 mechanism: Adopt an already-running container after a "crash"
+// Adopt an already-running container after a "crash"
 // (simulated by a fresh provider instance with an empty live-map). Adopt must
 // rebuild the handle from the SandboxID, judge it alive, and rediscover the SAME
 // IP (not a new epoch); the re-dialed endpoint is reachable; then Destroy via the
@@ -190,7 +190,7 @@ func TestAdoptRunningContainerSameIP(t *testing.T) {
 	t.Logf("Adopt+Destroy ✓ no leak")
 }
 
-// Adopt of a sandbox with NO live container returns alive=false (B6 dead case).
+// Adopt of a sandbox with NO live container returns alive=false (dead case).
 func TestAdoptDeadContainer(t *testing.T) {
 	mustRoot(t)
 	ctx := context.Background()
@@ -208,8 +208,8 @@ func TestAdoptDeadContainer(t *testing.T) {
 	}
 }
 
-// ReclaimOrphans tears down placements not in keep, leaves kept ones running
-// (B5/B7 mechanism). Launch two, keep one, reclaim → the kept container stays
+// ReclaimOrphans tears down placements not in keep, leaves kept ones running.
+// Launch two, keep one, reclaim → the kept container stays
 // reachable, the orphan's netns is gone.
 func TestReclaimOrphans(t *testing.T) {
 	mustRoot(t)

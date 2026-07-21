@@ -95,7 +95,7 @@ type Store interface {
 	// first. This is the PUBLISHER read side (§4.4-C) — it is deliberately NOT
 	// part of the atomic-commit contract (not in the transition commit); the
 	// publisher reads async, delivers, then marks. at-least-once: a crash after
-	// deliver but before MarkPublished re-returns the same rows (B2).
+	// deliver but before MarkPublished re-returns the same rows.
 	UnpublishedEvents(ctx context.Context) ([]Event, error)
 
 	// MarkPublished marks one outbox row (by event ID) as delivered so it stops

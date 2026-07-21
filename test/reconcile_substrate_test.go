@@ -1,7 +1,7 @@
 //go:build substrate
 
 // L4 §4.4-A startup crash-reconciliation acceptance against REAL runsc. Each
-// test (B5–B7) drives the assembled engine to a crash mid-transition (the fault
+// test drives the assembled engine to a crash mid-transition (the fault
 // hook), then builds a SECOND engine over the SAME store file + state dir — a
 // faithful process restart — and runs Reconcile. Requires root.
 //
@@ -86,11 +86,11 @@ func countEngineNetns(t *testing.T) int {
 	return n
 }
 
-// B5: crash mid-resume (placement half/fully built, store still `paused`) →
+// crash mid-resume (placement half/fully built, store still `paused`) →
 // restart → reconcile reclaims the orphan placement, upper intact, record stays
 // paused. Also covers the `creating` orphan (→ record deleted, placement
 // reclaimed).
-func TestReconcileB5OrphanReclaim(t *testing.T) {
+func TestReconcileOrphanReclaim(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("needs root")
 	}
@@ -153,7 +153,7 @@ func TestReconcileB5OrphanReclaim(t *testing.T) {
 		if _, err := os.Stat(up); err != nil {
 			t.Fatalf("upper reclaimed by reconcile (must persist, §4.4-A): %v", err)
 		}
-		t.Logf("B5 ✓ orphan placement reclaimed, record stays paused, upper intact")
+		t.Logf("✓ orphan placement reclaimed, record stays paused, upper intact")
 	}()
 }
 
@@ -162,12 +162,12 @@ func eng1Create(t *testing.T, f reconcileFixture) *orchestrator.Engine {
 	return f.engine(t, nil)
 }
 
-// B6: a `running` sandbox whose container SURVIVES a control-plane crash →
+// a `running` sandbox whose container SURVIVES a control-plane crash →
 // restart → reconcile probes it alive → Adopt rebuilds the handle at the SAME
 // IP (not a resume, no new epoch); the adopted sandbox is addressable again
 // (destroy tears the live container down cleanly). Contrast: a `running` whose
 // container is DEAD → CAS-demoted to paused.
-func TestReconcileB6AdoptSurvivor(t *testing.T) {
+func TestReconcileAdoptSurvivor(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("needs root")
 	}
@@ -221,7 +221,7 @@ func TestReconcileB6AdoptSurvivor(t *testing.T) {
 	if err := cl.Health(ctx); err != nil {
 		t.Fatalf("adopted endpoint health: %v", err)
 	}
-	t.Logf("B6 ✓ survivor re-adopted at same IP %s, addressable", epAfter)
+	t.Logf("✓ survivor re-adopted at same IP %s, addressable", epAfter)
 
 	// destroy tears the live container down cleanly (no leak) — proves the handle
 	// was truly rebuilt.
@@ -231,12 +231,12 @@ func TestReconcileB6AdoptSurvivor(t *testing.T) {
 	if _, err := eng.Store.GetSandbox(ctx, sid); err == nil {
 		t.Fatal("record present after destroy of adopted sandbox")
 	}
-	t.Logf("B6 ✓ destroy of adopted sandbox clean (no leak)")
+	t.Logf("✓ destroy of adopted sandbox clean (no leak)")
 }
 
-// B7: after reconcile there is no engine residue, and a second reconcile is a
+// after reconcile there is no engine residue, and a second reconcile is a
 // no-op (idempotent); no `failed` intermediate state ever appears.
-func TestReconcileB7NoResidueIdempotent(t *testing.T) {
+func TestReconcileNoResidueIdempotent(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("needs root")
 	}
@@ -290,5 +290,5 @@ func TestReconcileB7NoResidueIdempotent(t *testing.T) {
 	if countEngineNetns(t) != nsBefore {
 		t.Fatalf("second reconcile changed netns count")
 	}
-	t.Logf("B7 ✓ no residue, no failed state, reconcile idempotent")
+	t.Logf("✓ no residue, no failed state, reconcile idempotent")
 }

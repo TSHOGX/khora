@@ -240,7 +240,7 @@ func testOutboxOutlivesRecord(t *testing.T, mk Factory) {
 
 // testDurability: for durable backends, records AND unpublished outbox rows
 // survive a reopen (process restart) — the substrate for §4.4-A reconciliation
-// and B2 redelivery. Memory (reopen == nil) skips.
+// and redelivery. Memory (reopen == nil) skips.
 func testDurability(t *testing.T, mk Factory) {
 	ctx := context.Background()
 	s, reopen := mk(t)

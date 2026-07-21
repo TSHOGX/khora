@@ -92,7 +92,7 @@ func TestPublisherRetriesOnSinkFailure(t *testing.T) {
 	}
 }
 
-// B2: inject "delivered but crashed BEFORE MarkPublished" on a durable store,
+// inject "delivered but crashed BEFORE MarkPublished" on a durable store,
 // then restart → the same transition ID is re-delivered → the DedupSink forwards
 // it only once, so a billing-style handler never double-counts. Redeliver, not
 // drop, and dedup absorbs the redelivery.

@@ -36,7 +36,7 @@ import (
 // ONLY inside this implementation. A remote provider would carry different handle
 // shapes; nothing here leaks upward.
 type LocalRunsc struct {
-	// RunscRoot is the pinned canonical `runsc --root` (R2: wrong root → `list`
+	// RunscRoot is the pinned canonical `runsc --root` (wrong root → `list`
 	// silently empty; §4.4-A reconcile enumerates against this one root).
 	RunscRoot string
 	// StateDir holds per-launch OCI bundles: StateDir/<cid>/config.json.
@@ -195,7 +195,7 @@ func (p *LocalRunsc) Launch(ctx context.Context, spec LaunchSpec) (_ *Placement,
 		return nil, fmt.Errorf("runtime: write config.json: %w", err)
 	}
 
-	// ④c: launch runsc with pinned flags (R3), detached.
+	// ④c: launch runsc with pinned flags, detached.
 	if err = p.runscLaunch(ctx, &h); err != nil {
 		return nil, fmt.Errorf("runtime: runsc run: %w", err)
 	}
@@ -391,7 +391,7 @@ func (p *LocalRunsc) teardownPlacement(h *placementHandle) {
 }
 
 // buildNetns creates the netns + veth pair and assigns IPs (§5.A mechanism,
-// proven by the Task A spike / m1-substrate-livespec).
+// proven on the real substrate).
 func (p *LocalRunsc) buildNetns(h *placementHandle, hostIP, guestIP string) error {
 	vethGuest := vethGuestName(h.vethHost)
 	// idempotent: clear any stale same-named resources first.
@@ -416,8 +416,8 @@ func (p *LocalRunsc) buildNetns(h *placementHandle, hostIP, guestIP string) erro
 	return nil
 }
 
-// runscGlobalFlags returns `runsc --root=<pinned>` + the five global pins (R3;
-// all global, before the subcommand).
+// runscGlobalFlags returns `runsc --root=<pinned>` + the five global pins
+// (all global, before the subcommand).
 func (p *LocalRunsc) runscGlobalFlags() []string {
 	return []string{
 		p.RunscBin,

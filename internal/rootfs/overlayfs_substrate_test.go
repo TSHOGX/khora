@@ -52,7 +52,7 @@ func TestOverlayCoWAndRemountByteIdentical(t *testing.T) {
 		t.Fatalf("CreateOverlay: %v", err)
 	}
 
-	// --- mount 1: merged sees Template content (A2 CoW read-through) ---------
+	// --- mount 1: merged sees Template content (CoW read-through) ------------
 	m, err := p.Mount(ctx, o)
 	if err != nil {
 		t.Fatalf("Mount: %v", err)
@@ -80,7 +80,7 @@ func TestOverlayCoWAndRemountByteIdentical(t *testing.T) {
 		t.Fatalf("lower Template was polluted by copy-up (want clean): %v", err)
 	}
 
-	// --- resume: OpenOverlay + re-mount SAME upper → byte-identical (A7) -----
+	// --- resume: OpenOverlay + re-mount SAME upper → byte-identical ----------
 	o2, err := p.OpenOverlay(ctx, "ov-test", "bare")
 	if err != nil {
 		t.Fatalf("OpenOverlay: %v", err)

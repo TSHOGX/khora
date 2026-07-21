@@ -68,7 +68,7 @@ func seedPausedStore(t *testing.T, st store.Store, sid, oid, tmpl string) {
 	}
 }
 
-// B3: N goroutines race resume/pause/destroy on the SAME paused sandbox under
+// N goroutines race resume/pause/destroy on the SAME paused sandbox under
 // -race. The transition lock serializes them and CAS rejects the ones facing an
 // already-changed state — exactly one verb advances the sandbox, no data race,
 // no torn state. Runs on both store backends (§4.4-B is mediator-layer, backend
@@ -134,7 +134,7 @@ func TestStressConcurrentVerbsOneSandbox(t *testing.T) {
 	}
 }
 
-// B4: the lock is held for the WHOLE resume cold-start, so a concurrent destroy
+// the lock is held for the WHOLE resume cold-start, so a concurrent destroy
 // cannot acquire the lock and therefore cannot delete the Overlay in-flight
 // resume is mounting. Only after resume lands (or unwinds) does destroy proceed.
 // This is the data-race §4.4-B closes; run on the persistent store too.
@@ -184,7 +184,7 @@ func TestStressDestroyBlockedDuringResume(t *testing.T) {
 	}
 }
 
-// B3 (CAS rejects illegal source): a burst of pauses on a paused sandbox — all
+// CAS rejects illegal source: a burst of pauses on a paused sandbox — all
 // must be rejected (pause requires running), none may corrupt state.
 func TestStressPauseRejectedOnPaused(t *testing.T) {
 	for _, bk := range stressBackends() {

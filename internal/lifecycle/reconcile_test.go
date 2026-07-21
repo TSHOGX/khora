@@ -196,7 +196,7 @@ func TestReconcileSkipAndLogOnUncertainSurvivor(t *testing.T) {
 }
 
 // Reconcile is idempotent: a second pass over an already-reconciled store makes
-// no further changes (B7 幂等).
+// no further changes (幂等).
 func TestReconcileIdempotent(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemory()

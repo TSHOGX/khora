@@ -7,8 +7,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// openPTY allocates a new PTY pair in PURE Go — no cgo openpty (R1: sandboxd is
-// a static CGO-free guest ELF). It opens /dev/ptmx, reads the slave number via
+// openPTY allocates a new PTY pair in PURE Go — no cgo openpty (sandboxd is a
+// static CGO-free guest ELF). It opens /dev/ptmx, reads the slave number via
 // TIOCGPTN, unlocks it via TIOCSPTLCK, then opens /dev/pts/N. master is the host
 // side (process output + keyboard input); slave becomes the child's controlling
 // terminal. Both are O_NOCTTY so opening them doesn't steal a controlling tty.
