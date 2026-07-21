@@ -97,6 +97,12 @@ func New(deps Deps) *Mediator {
 
 // lock returns the per-sandbox transition lock, creating it on first use
 // (§4.4-B: all lifecycle verbs for the SAME sandbox serialize on it).
+// lock returns the per-sandbox transition mutex, creating it on first use.
+//
+// KNOWN LIMITATION: entries are never removed, even after destroy — the map
+// grows by one mutex per distinct SandboxID ever seen (a slow leak under high
+// churn). Not a correctness bug; deleting on destroy races a verb blocked on
+// acquiring the same lock, so it needs care (open-decisions §2 known-items).
 func (m *Mediator) lock(id model.SandboxID) *sync.Mutex {
 	m.mu.Lock()
 	defer m.mu.Unlock()

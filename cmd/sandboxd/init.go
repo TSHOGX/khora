@@ -25,6 +25,11 @@ func initMode() {
 	logf("init(pid %d): starting", os.Getpid())
 
 	// Reaper. SIGCHLD → drain all reapable children (§ D4.1 waitpid loop).
+	// KNOWN LIMITATION: this blind Wait4(-1) also reaps the supervised transport
+	// child, racing the supervise loop's cmd.Wait() below — whichever wins, the
+	// loser gets ECHILD and the transport exit status is lost. The loop restarts
+	// the child either way, so this is exit-code/telemetry-only, not a correctness
+	// bug (open-decisions §2 known-items). Go 1.23+ pidfd-based Wait may narrow it.
 	sigchld := make(chan os.Signal, 16)
 	signal.Notify(sigchld, syscall.SIGCHLD)
 	go func() {
@@ -44,6 +49,10 @@ func initMode() {
 
 	// Container-level signals → forward to transport child, then exit (PID 1
 	// exiting tears down the container). PID 1 must install these explicitly.
+	// This is a single-child forward, correct while the transport child is PID 1's
+	// only child — PID-1 exit reaps the rest. When template-provided long-running
+	// siblings land, this becomes a real group fan-out (open-decisions §2
+	// known-items; the "fan-out" naming anticipates that).
 	termCh := make(chan os.Signal, 4)
 	signal.Notify(termCh, syscall.SIGTERM, syscall.SIGINT)
 	go func() {

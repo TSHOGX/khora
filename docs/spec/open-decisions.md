@@ -5,10 +5,11 @@
 > 抽出登记在本文,避免把"未定"与"已定"混在同一篇里。下文出现的 `§X.Y` 是全局 §编号,按 SPEC.md
 > 顶部「文档地图」定位到具体文件。
 >
-> **怎么组织。** 三类分开:**§1 落地前验证**(阻塞子系统的 spike)、**§2 待细化设计点**
-> (架构已定、内部机制未展开)、**§3 待拍板选型**(有候选、未定论)。每条标注**归属章节 +
-> 当前倾向/fallback + 谁来消费结论**。已在深挖文档里详述的条目,此处只给一行摘要 + 指针,
-> **不复制正文**(保持无冗余)。
+> **怎么组织。** 前三类是**未定**项:**§1 落地前验证**(阻塞子系统的 spike)、**§2 待细化设计点**
+> (架构已定、内部机制未展开)、**§3 待拍板选型**(有候选、未定论)。**§4 是实现缺口登记**——设计
+> **已定**、代码**尚未落地或待收口**的项(不是"未定决策",而是"已定未建",按 CLAUDE.md 本属 plan
+> territory,但当前无 owning plan 时集中于此备查)。每条标注**归属 + 当前倾向/fallback + 谁消费**。
+> 已在深挖文档详述的条目,此处只给一行摘要 + 指针,**不复制正文**(保持无冗余)。
 
 ---
 
@@ -41,11 +42,8 @@
 | **§2.3 / §4 ENOSPC 标准行为** | per-sandbox 帽把"撑满整机"降级成"撑满自己"已定(§2.3);**待细化**:打到自己帽时的标准行为——guest 见普通 `ENOSPC`(定)、是否发一条**容量压力事件**(Consumption seam,add a subscriber 做告警)、是否触发 auto-pause(倾向不强制)、软阈告警 + 硬阈拒写的双阈是否都做 | additive(add a subscriber);谁消费:§2.3 爆炸半径不变量 + §4.1 事件流 + 可选 §4.3 reaper |
 | **§4 节点磁盘压力准入门** | 允许超卖(见 §3 选型)时 per-sandbox 帽不足以保证整机不满;**待细化**:mediator 在 create / resume 物化 upper 前的**节点余量准入检查**(不足则 create 失败 / resume 留 `paused`,落 §4.4-A 原子退回源态,不留脏态)+ 运行时磁盘压力监控的阈值与 reaper 反应 | 谁消费:§4 mediator create/resume 编排 + §4.3 reaper;与超卖选型(§3)耦合 |
 | **§5.E transport(残留调参)** | wire 机制(内沿 Connect,D4)与外沿投影(D6)、溢出处置(断开订阅者,D4.3 invariant 1)均已定进 spec/deep-dive。此处仅留**可调数值旋钮**,当前值可随经验再调:① 输出环形缓冲字节上界 = **64 KiB**(重绘保真 vs 内存)② 慢订阅者发送窗口 = **256 帧** ③ `keepalive` 周期 = **20s** | 纯数值,不影响 D4/D6 形状;谁消费:§5.E transport 实现 |
-| **§5.E.1 resume 冷启时序** | 拓扑(§5.E.1)、探活二分 + 单飞守卫(§4.3)已定;待收进 spec 的是 resume canonical 链(引擎侧 ①–⑦ + readiness 门)与失败/重试语义 | **详见 [`deep-dives/guest-runtime.md`](./deep-dives/guest-runtime.md) D5** |
-| **§2.2 / §6.2 guest 身份 run-as(实现缺口)** | 身份**契约**已定(§2.2 默认非 root + sudo;§6.2 两级 run-as:create 期沙箱默认身份 + 每次 `Start` 的 `guest_user`)。**未兑现**:两级 run-as 今天都被丢弃——`oci.go` 硬编码 UID/GID 0、`sandboxd` Start 不设 `SysProcAttr.Credential`,`guest_user` 静默失效(fail-open 到 root)。落地需:guest 侧 uid/gid 查询(`/etc/passwd`)+ OCI `process.user`(默认身份)+ Start 的 `Credential`(每次 run-as)。**非宿主隔离缺口**(§2.2:guest 身份是 guest 内卫生,非安全支柱),但在被 in-guest 特权分隔依赖前须实现 | 谁消费:§5.A `local_runsc` / §5.E `sandboxd`;先建内置 Template 的非 root 用户(见下行) |
 | **§5.A / 模板** | **内置 Template 目录**:一个 bare base(uv/pip/git/build-essential + 非 root + sudo),各 agent 栈(claude-code/opencode/pi)经同一 lineage 机制叠在 bare base 之上(§3.1 分层) | guest 装包是一次性 exec、不引入 init 依赖,见 [`deep-dives/guest-runtime.md`](./deep-dives/guest-runtime.md) D3.1 |
 | **§6 部署形态** | 高层形态已定(§1.1:单二进制 + 配置 + 本地 store,store 后端见 ADR-0004);仅待细化打包 / 配置 schema | 对齐 §1.1 部署目标 |
-| **实现级已知小项(非架构,评审记录)** | 一致性评审记下、择机收口的低危项,均已在代码留注:① PID1 reaper 的 `Wait4(-1)` 与监督循环 `cmd.Wait()` 竞争 transport 子进程退出码(自愈重启不受影响,仅退出码/telemetry 竞态,Go1.23 pidfd 或已收窄);② PID1「容器级信号扇出」在 M3 拓扑下是单子进程转发 + 退出(transport 是唯一子进程,行为正确,注释措辞待长跑 sibling 落地时校正);③ 每沙箱转换锁 map 只增不删(destroy 后不回收 mutex,长期高 churn 的慢泄漏,删除与持锁竞争需谨慎);④ outbox publisher 头阻塞(一条投递失败挡住其后全部,保序/at-least-once 正确,与 §4.1 可重放窗口一并定) | 均非正确性破坏;M4(reaper/事件流)前后择机收口 |
 
 ---
 
@@ -58,5 +56,17 @@
 
 ---
 
+## 4. 实现缺口(设计已定,代码未落地 / 待收口)
+
+> 这些**不是未定决策**——设计已在 spec/deep-dive 定死,只是代码尚未兑现或有待收口的小项。按
+> CLAUDE.md「settled + not-yet-built 属 plan」,owning milestone 的 plan 出现后应迁入其中并从此移除。
+
+| 缺口 | 现状 vs 目标 | 落地归属 |
+| --- | --- | --- |
+| **§2.2 / §6.2 guest 身份 run-as** | 契约已定(§2.2 默认非 root + sudo;§6.2 两级 run-as:create 期沙箱默认身份 + 每次 `Start` 的 `guest_user`)。**未兑现**:两级都被丢弃——`oci.go` 硬编码 UID/GID 0、`sandboxd` Start 不设 `SysProcAttr.Credential`,`guest_user` 静默失效(fail-open 到 root)。落地需:guest 侧 uid/gid 查询(`/etc/passwd`)+ OCI `process.user` + Start 的 `Credential`。**非宿主隔离缺口**(§2.2:guest 身份是 guest 内卫生,非安全支柱),但在被 in-guest 特权分隔依赖前须实现 | §5.A `local_runsc` / §5.E `sandboxd`;先建内置 Template 的非 root 用户(§2 §5.A 模板行) |
+| **低危已知小项**(均已在对应代码点留注) | ① PID1 reaper `Wait4(-1)` 与监督循环 `cmd.Wait()` 竞争 transport 退出码(自愈重启不受影响,仅退出码/telemetry 竞态,Go1.23 pidfd 或已收窄);② PID1 容器级信号扇出当前是单子进程转发 + 退出(transport 为唯一子进程时正确,长跑 sibling 落地时升级为组扇出);③ 每沙箱转换锁 map 只增不删(高 churn 慢泄漏,删除与持锁竞争需谨慎);④ outbox publisher 头阻塞(一条投递失败挡住其后全部,保序/at-least-once 正确,与可重放窗口一并定) | 均非正确性破坏;①②③ 随 reaper(M4)、④ 随事件流可重放窗口(后续增量)择机收口 |
+
+---
+
 > **纪律:** 任何一项拍板后,先更新对应深挖文档或 plan 的相应章节,**再从本登记移除**——保证
-> "已定"进 plan、"未定"留本文,两边不重叠。
+> "已定"进 plan、"未定"留本文,两边不重叠。§4 的缺口同理:owning plan 出现即迁入、从此移除。
