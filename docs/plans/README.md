@@ -27,7 +27,7 @@ Acceptance for the shipped milestones lives in the substrate tests
 
 | # | Plan | Capability delivered | Anchors |
 | --- | --- | --- | --- |
-| **M4** | *(next)* | Reaper + health quadrant (two-tier liveness × connection activity) + periodic reconcile | §4.3 · §4.4-A |
+| **M4** | [`M4-reaper-health.md`](./M4-reaper-health.md) *(building)* | Reaper + health quadrant (two-tier liveness × connection activity) + periodic reconcile | §4.3 · §4.4-A |
 | **M5** | *(planned)* | Volume: mount table, exclusive lease, direct-write regime | §5.C |
 | **M6** | *(planned)* | Network egress data plane + layered deny-set + credential injection (**security-critical**) | §5.D · §2.4 |
 | **M7** | *(planned)* | Promote + layered Templates + refcount GC | §5.B · §4.3 |
