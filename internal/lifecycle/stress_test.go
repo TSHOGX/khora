@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"engine/internal/model"
+	"engine/internal/runtime"
 	"engine/internal/store"
 	"engine/internal/transport"
 )
@@ -179,6 +180,117 @@ func TestStressDestroyBlockedDuringResume(t *testing.T) {
 			// after both, record is gone and Overlay was destroyed AFTER resume.
 			if _, err := st.GetSandbox(context.Background(), "sbx_b4"); !errors.Is(err, store.ErrNotFound) {
 				t.Fatalf("record should be gone; got %v", err)
+			}
+		})
+	}
+}
+
+// seedRunningStore inserts a `running` record and installs a live-map handle so
+// the reaper's classify can resolve an endpoint (managed by this orchestrator).
+func seedRunningStore(t *testing.T, m *Mediator, st store.Store, sid, oid, tmpl string, idle, retention time.Duration) {
+	t.Helper()
+	ctx := context.Background()
+	now := time.Now()
+	if err := st.CreateSandbox(ctx, model.Sandbox{
+		ID: model.SandboxID(sid), Template: model.TemplateID(tmpl),
+		Overlay: model.OverlayID(oid), State: model.Creating,
+		IdleTimeout: idle, Retention: retention, CreatedAt: now, UpdatedAt: now,
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CompareAndSetState(ctx, model.SandboxID(sid), model.Creating, model.Running, nil); err != nil {
+		t.Fatal(err)
+	}
+	m.put(model.SandboxID(sid), &liveState{placement: &runtime.Placement{TransportEndpoint: "10.0.0.1:9000"}})
+}
+
+// The reaper-WINS-the-lock direction (symmetric to TestStressConcurrentVerbsOneSandbox,
+// which races only user verbs). A reaper Sweep loop runs concurrently with user
+// pause/resume/destroy on the SAME sandbox: the reaper can auto-pause (idle) or
+// evict (paused past retention) while user verbs race it. §4.4-B's per-sandbox
+// lock serializes reaper dispositions against user verbs, and CAS rejects the
+// loser facing an already-changed state — so no data race (under -race), no torn
+// state, exactly one verb advances the sandbox at a time. Both backends.
+func TestStressReaperRacesUserVerbs(t *testing.T) {
+	for _, bk := range stressBackends() {
+		t.Run(bk.name, func(t *testing.T) {
+			st := bk.mk(t)
+			// idle client (idle far exceeds the tiny idle_timeout) so classify →
+			// HealthIdle and the reaper tries to auto-pause; tiny retention so a
+			// paused sandbox is immediately evict-eligible → maximal reaper pressure.
+			rp, rt := &fakeRootfs{}, &fakeRuntime{adoptAlive: map[string]bool{}}
+			m := New(Deps{
+				Store: st, Runtime: rt, Rootfs: rp,
+				Dial:          func(transport.Endpoint) transport.Client { return &fakeClient{healthy: true, idle: time.Hour} },
+				HealthTimeout: 2 * time.Second,
+			})
+			r := NewReaper(m, time.Hour, time.Hour)
+			seedRunningStore(t, m, st, "sbx_rr", "ov_rr", "bare", time.Millisecond, time.Nanosecond)
+
+			ctx := context.Background()
+			stop := make(chan struct{})
+			var reaperWG sync.WaitGroup
+			reaperWG.Add(1)
+			go func() {
+				defer reaperWG.Done()
+				for {
+					select {
+					case <-stop:
+						return
+					default:
+						r.Sweep(ctx) // classify + auto-pause/evict, all lock+CAS guarded
+					}
+				}
+			}()
+
+			const N = 24
+			var wg sync.WaitGroup
+			errs := make([]error, N)
+			results := make([]string, N)
+			for i := 0; i < N; i++ {
+				wg.Add(1)
+				go func(i int) {
+					defer wg.Done()
+					switch i % 3 {
+					case 0:
+						results[i] = "resume"
+						errs[i] = m.Resume(ctx, "sbx_rr")
+					case 1:
+						results[i] = "pause"
+						errs[i] = m.Pause(ctx, "sbx_rr")
+					case 2:
+						results[i] = "destroy"
+						errs[i] = m.Destroy(ctx, "sbx_rr")
+					}
+				}(i)
+			}
+			wg.Wait()
+			close(stop)
+			reaperWG.Wait()
+
+			// Every user-verb error must be a clean CAS/precondition rejection or nil
+			// — never torn/unexpected, even though the reaper was mutating state
+			// underneath (it lost/won the lock cleanly each round).
+			for i, e := range errs {
+				if e == nil {
+					continue
+				}
+				if errors.Is(e, store.ErrConflict) || errors.Is(e, store.ErrNotFound) ||
+					strings.Contains(e.Error(), "want paused") {
+					continue
+				}
+				t.Fatalf("goroutine %d (%s): unexpected error %v", i, results[i], e)
+			}
+			// Final state legal: running / paused / gone — never creating or garbage.
+			rec, gerr := st.GetSandbox(ctx, "sbx_rr")
+			if errors.Is(gerr, store.ErrNotFound) {
+				return // destroyed/evicted won — legal
+			}
+			if gerr != nil {
+				t.Fatalf("final GetSandbox: %v", gerr)
+			}
+			if rec.State != model.Running && rec.State != model.Paused {
+				t.Fatalf("final state = %s; want running/paused/destroyed", rec.State)
 			}
 		})
 	}
