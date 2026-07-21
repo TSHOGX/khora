@@ -39,7 +39,7 @@ agent),共享同一 FS 与网络。
 > **systrap** = sentry 默认的拦截模式,用 seccomp 陷阱捕获 syscall(无需 KVM);**gofer** =
 > gVisor 中代理 guest 文件访问的宿主侧进程。
 >
-> **本系统术语**:**engine** = 本计划要造的沙箱抽象本身;**orchestrator** = 承载 engine 的那个
+> **本系统术语**:**engine** = 本 spec 描述的沙箱抽象本身;**orchestrator** = 承载 engine 的那个
 > 单二进制;**控制面** = engine 内持有权威记录的那部分;**store** = 控制面记录(Binding、各对象
 > 的 lifecycle-state/refcount)的持久后端,经接口抽象、可换实现;**runtime provider** /
 > **FS provider** = 两类可插拔实现 seam,分别物化"用什么跑隔离进程"(§5.A)与"Overlay/Template
@@ -67,7 +67,7 @@ agent),共享同一 FS 与网络。
 | `agent` | 引擎不认识、不寻址 agent(§3.2.1);只有 sandbox/process/fs 原子 | 可(描述引擎外 / 产品层时) |
 
 > **前提:部署在能运行 gVisor 的 Linux 宿主上**(能安装 seccomp 过滤器、能处理信号、内核版本
-> 够新)。这是 systrap 的固有门槛,凡能跑 gVisor 的平台即满足,本计划当作既定前提,不再赘述。
+> 够新)。这是 systrap 的固有门槛,凡能跑 gVisor 的平台即满足,engine 当作既定前提,不再赘述。
 
 > **两条底线:no-hypervisor + 可移植性。** 任何"用可移植性换性能"的决定一律**拒绝,或藏到
 > provider 后面做成可插拔**(§5.A)。platform 即"可插拔"的一例:唯一实现 `local_runsc` 把它 pin 成
@@ -79,7 +79,7 @@ agent),共享同一 FS 与网络。
 > 不是因为 no-hypervisor。)
 
 这条 no-hypervisor 延伸出一个关键设计选择:**"在哪儿、用什么跑一个隔离的进程上下文" 被抽象成
-可插拔的 runtime provider**(§5.A)。**今天唯一实现、也是本计划唯一要兑现的,是 single-node 的
+可插拔的 runtime provider**(§5.A)。**今天唯一实现、也是 engine 唯一要兑现的,是 single-node 的
 宿主 runsc 进程**;provider 接口存在的意义是**保持这个抽象边界干净**,而非现在就去支持别的后端
 (K8s Pod / GKE Sandbox 这类"被调度的远端隔离单元"仅作校准接口边界的纸面参照,不进落地路径,
 见 §5.A)。
@@ -173,7 +173,7 @@ no-hypervisor、可自托管、状态透明**的引擎。五条立足点:
 5. **agent-runtime 作用域**——多连接并发 + swarm 拓扑在产品层(§3.2.1)+ 凭证留宿主(§5.D),
    正是 E2B 整个交给用户那一层。
 
-详细竞品比对不在本计划展开,这里只钉**我们自己的边界**。
+详细竞品比对不在本 spec 展开,这里只钉**我们自己的边界**。
 
 ---
 
@@ -201,8 +201,8 @@ no-hypervisor、可自托管、状态透明**的引擎。五条立足点:
 | ⑤ | **受控的挂载面** | 挂进 guest 的东西经控制面裁决,guest 不能自己扩大挂载面 | 挂载表为 Binding,resume 按表重挂(§5.C) | control-plane(物化归 placement) |
 
 **这张表就是"provider 安全义务"的全部来源**:任何 provider 必须维持 ①②(见 §2.4);③④ 的**策略强制
-与凭证注入由引擎自有的 egress 数据面承担**(§5.D),provider 只负责**把 egress 引流进该数据面**,故
-**不进 resolve 路径**;⑤ 的策略在控制面、物化落 placement。换 provider 只可能触及 ①② 与 ③⑤ 的物化层
+与凭证注入由引擎自有的 egress 数据面承担**(§5.D),provider 只负责**把 egress 引流进该数据面**(下方
+callout 精确到"不进 resolve 路径");⑤ 的策略在控制面、物化落 placement。换 provider 只可能触及 ①② 与 ③⑤ 的物化层
 (对 ③ 即引流),**绝不触及 ④、③⑤ 的策略层、以及 ③④ 的数据面 enforcement**。
 
 > **③ 的 enforcement 不是一整块落 placement**(见 [`deep-dives/network.md`](./deep-dives/network.md)):
@@ -287,7 +287,7 @@ exhaustive)是一条可验收义务**:不写死它,guest 一条直连就绕过�
 这些是 single-node `local_runsc` 物化所依赖的 runsc 事实,直接影响上面几节的判断。持久化模型的
 关键支撑事实(不存内存 ⟹ 持久态 = 纯文件层)及其下游附加能力在 §5.B 展开,这里只列 runsc 侧事实。
 
-| 事实 | 对本计划的影响 |
+| 事实 | 对 engine 的影响 |
 | --- | --- |
 | systrap(默认)用 `SECCOMP_RET_TRAP` 拦 syscall,**不需要 KVM / 嵌套虚拟化** | 坐实 no-hypervisor(§1.1)的技术前提 |
 | 内存 checkpoint/restore **要求跨宿主 CPU-feature 匹配** | 我们不存内存(§4.2),**此约束直接消失** |
@@ -295,10 +295,9 @@ exhaustive)是一条可验收义务**:不写死它,guest 一条直连就绕过�
 | 挂载在**启动时**从 OCI spec 取,运行中不可热改 | 挂载拓扑变更 = resume 边界操作(§5.C) |
 | runsc `--overlay2` 全族(`memory`/`self`/`dir=`)**均不跨容器生命周期持久**——`dir=` 启动即 `unlink` filestore,干净停 = 数据蒸发 | 持久层**不用 runsc 自管 overlay**;改由 engine 在 runsc 外用宿主内核 overlayfs 组装,runsc 收 `--overlay2=none --file-access=shared`(§5.B) |
 
-> **持久层载体**:engine 在 runsc 外用**宿主内核 overlayfs** 组装可写层,交给
-> `--overlay2=none --file-access=shared` 的 runsc,持久态即宿主上的普通目录树(可 `tar`、跨 host 可移、
-> 字节一致)。载体的完整物化、CoW/一致性证据与替代路径归 §5.B,展开见
-> [`deep-dives/rootfs-overlay.md`](./deep-dives/rootfs-overlay.md)。
+> **持久层载体**由此定:不用 runsc 自管 overlay,改由 engine 在 runsc 外用宿主内核 overlayfs 组装。
+> 载体的完整物化、CoW/一致性证据与替代路径归 §5.B(展开见
+> [`deep-dives/rootfs-overlay.md`](./deep-dives/rootfs-overlay.md)),此处只锚定它所依赖的 runsc 事实。
 
 
 ---

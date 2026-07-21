@@ -323,12 +323,10 @@ runsc kill → veth → netns。此时 overlay-umount 早于 runsc-kill 是**安
 placement → 重新接管**(provider 按 SandboxID 重认自己的资源、重建句柄、重发现端点)。**接管不是 resume**:
 同一 placement、同一 IP,不换 epoch(§3.3/§4.3),因为隔离单元从未重启。仅当探活判定该 `running` 的隔离
 单元**已死**,才按 §4.2「崩溃 = 非自愿 pause」CAS 降到 `paused`(其半建 placement 若有,归上一段回收)。
-provider 要能按 SandboxID 重认资源,故 placement-local 资源须携带 SandboxID 标签——这是 §3.3「身份不编码
-placement」的**反向**,不违反它(placement 资源标注它服务哪个 SandboxID,是允许的;被禁的是用 placement
-反推/编码 identity)。provider 的枚举/接管/回收机制签名(`Adopt` / `ReclaimOrphans`)与 SandboxID 标注
-落在 §5.A(过 provider 的 ❌ 宿主原语清单)。**判活是两层,与冷启 ⑦ 就绪门对齐**:provider 出 L1(隔离
-单元是否起来)+ 端点,mediator 再补**一次 L2 `Health` 探针**才认作可接管——L1 活但 L2 不应答(如
-`created`-未监听)不是可接管的活,一律降 `paused`(可经下次 resume 冷启恢复),不把死句柄填进 live-map。
+重认存活者要求 provider 能按 SandboxID 枚举自己的 placement-local 资源——其机制(`Adopt`/`ReclaimOrphans`
+签名、SandboxID 标注是 §3.3「身份不编码 placement」的允许反向、两层判活 L1+一次 L2 `Health`)落在 §5.A,
+本节不复述。编排语义是:**判活与冷启 ⑦ 就绪门对齐**——L1 活但 L2 不应答(如 `created`-未监听)不是可接管的
+活,一律降 `paused`(可经下次 resume 冷启恢复),不把死句柄填进 live-map。
 **启动对账的失败处置是 skip-and-log**:某沙箱对账不了(探活报错、句柄重建失败)不阻断其余沙箱的恢复;对
 无法干净判定的 `running` 存活者取**保守**——保护其 placement 不回收(漏拆活容器不可逆,泄漏 placement 下次
 启动再收),对账幂等,跳过项下次重来。接管期的单次就绪探针不是 §4.3 的连续四象限健康分类(启动对账下锁
@@ -353,9 +351,8 @@ placement」的**反向**,不违反它(placement 资源标注它服务哪个 San
 - **归属**:锁与 CAS 是 §4 mediator 的编排义务,store 只提供 `lifecycle-state` 的**条件写(compare-and-set)**
   机制——不违反"子系统间不互调"(§4 开头),因为串行化发生在 mediator 层,不是让某子系统去调另一个。
 - **与 resume single-flight(§4.3)的关系:锁承重正确性,single-flight 只承重效率。** 锁全程持有已独占
-  整条 resume,**并发动词打架的正确性由锁兜底**。single-flight 管的是另一层:reaper 的健康分类器**不走
-  转换锁**(只读探针、不改态),故 resume in-flight 期它照跑会误判 `dead-recoverable`、空跑注定失败的
-  resume 尝试并误报。single-flight 在这段挂起分类,避免空转与误报——**不承重并发正确性**(§4.3)。
+  整条 resume,**并发动词打架的正确性由锁兜底**;single-flight 是另一层——它挂起 in-flight resume 期的
+  健康分类以免空转/误报(机制见 §4.3),**不承重并发正确性**。
 
 **不变量 C —— 状态提交与事件发布单次原子,算法一份、后端差异收口在 store 契约后。** §4.1 每次转换要
 发事件到 event stream,计费类 subscriber 靠它记账,**漏一条就漏账**。危险的做法是让"后端支不支持事务"
