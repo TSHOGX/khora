@@ -152,6 +152,12 @@ func (p *proc) broadcast(f frame) {
 // finish marks the process ended, delivers the end frame to remaining
 // subscribers, and closes their channels. A subscriber that Connects after this
 // sees ended=true from subscribe and replays the ring + end directly.
+//
+// The end frame carries the exit code — process-result semantics, weightier than
+// a mid-stream byte. If a subscriber's window is full at exit (healthy but sitting
+// exactly at the cap), the end frame can't be delivered; we then mark it overflow
+// like the broadcast drop path so serveSubscriber surfaces ResourceExhausted
+// rather than a silent clean-end that hides both the drop and the exit code.
 func (p *proc) finish(exitCode int) {
 	p.mu.Lock()
 	p.ended = true
@@ -160,6 +166,7 @@ func (p *proc) finish(exitCode int) {
 		select {
 		case sub.ch <- p.endFrame:
 		default:
+			sub.overflow.Store(true)
 		}
 		delete(p.subs, sub)
 		close(sub.ch)

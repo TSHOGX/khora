@@ -116,6 +116,29 @@ func TestSlowSubscriberDroppedSourceNeverBlocks(t *testing.T) {
 	}
 }
 
+// invariant 1 boundary: a subscriber whose window is exactly full at process
+// exit cannot receive the end frame. It must be marked overflow (dropped), so
+// serveSubscriber reports ResourceExhausted — NOT a silent clean-end that would
+// hide both the drop and the exit code (process-result semantics).
+func TestFinishOnFullWindowMarksOverflow(t *testing.T) {
+	p := newProc(1, nil)
+	sub, _, _, _ := p.subscribe()
+	// Fill the window to the brim without draining, staying just under the
+	// broadcast-drop threshold (broadcast drops on the send that can't fit).
+	for i := 0; i < subWindowFrames; i++ {
+		p.broadcast(frame{kind: 'd', data: []byte("z")})
+	}
+	if sub.overflow.Load() {
+		t.Fatal("subscriber dropped before finish; window fill overshot the cap")
+	}
+	// Exit now: the end frame has nowhere to go → must mark overflow, not vanish.
+	p.finish(0)
+	if !sub.overflow.Load() {
+		t.Fatal("full-window subscriber not marked overflow at finish; end frame silently dropped")
+	}
+	_ = drain(sub.ch) // closed by finish; must terminate
+}
+
 // a subscriber attaching after the process ended replays the ring and gets end.
 func TestSubscribeAfterEnded(t *testing.T) {
 	p := newProc(1, nil)
