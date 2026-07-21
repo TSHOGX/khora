@@ -42,10 +42,12 @@
 - **runtime provider 是本子系统的核心 seam**:"在哪儿、用什么跑一个隔离的进程上下文" 经一个
   可插拔 provider 接口表达。接口必须用**策略 + 句柄**而非**宿主原语**表达——否则把接口绑死在
   "宿主本地"假设上,将来任何非本地形态的 provider 都无法承接:
-  - ❌ 泄漏宿主原语:"给我一个 cgroup 路径 / 一个 netns fd / Overlay 的宿主绝对路径"——一个
-    被调度到远端 node 的隔离单元根本给不出这些。
+  - ❌ 泄漏宿主原语:"给我一个 cgroup 路径 / 一个 netns fd / Overlay 的**内部**宿主绝对路径
+    (upper/work)"——一个被调度到远端 node 的隔离单元根本给不出这些。
   - ✅ 契约式:`(rootfs 来源, 引流要求, 资源上限, guest 身份) → (placement 句柄, transport
-    端点, 生命周期控制 stop/start)`。**引流要求**是 §5.D 给的 ingress 描述符 + default-deny(把
+    端点, 生命周期控制 stop/start)`。**`rootfs 来源`是一个不透明句柄**:`local_runsc` 下它恰好物化成
+    一个 merged rootfs 路径,远端形态下会是另一种句柄——被禁的是 Overlay 的**内部** upper/work 路径
+    (§5.B 已把它设为不可导出),而**已 merged 好的 rootfs 句柄**是本子系统合法的入参,二者不矛盾。**引流要求**是 §5.D 给的 ingress 描述符 + default-deny(把
     egress 全量引导进引擎数据面,§5.D),不是完整网络策略——策略 enforcement 与凭证注入在引擎数据面里,
     不在 provider。
   今天唯一实现 `local_runsc` 把引流要求物化成 nft+netns、把 §3.4 的资源上限经 **OCI `linux.resources`**

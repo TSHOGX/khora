@@ -22,7 +22,7 @@ type Overlay struct {
 	// upperPath / workPath are the single-node materialization (D3 resident
 	// upper). Unexported: they must not leak above the Rootfs subsystem
 	// (§3.1.1). work MUST share the same overlayfs-capable FS as upper, and
-	// (for M6 capacity caps) the same quota unit (D6.3).
+	// (for the later disk-capacity cap) the same quota unit (D6.3).
 	upperPath string
 	workPath  string
 }

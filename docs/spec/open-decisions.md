@@ -45,6 +45,7 @@
 | **§2.2 / §6.2 guest 身份 run-as(实现缺口)** | 身份**契约**已定(§2.2 默认非 root + sudo;§6.2 两级 run-as:create 期沙箱默认身份 + 每次 `Start` 的 `guest_user`)。**未兑现**:两级 run-as 今天都被丢弃——`oci.go` 硬编码 UID/GID 0、`sandboxd` Start 不设 `SysProcAttr.Credential`,`guest_user` 静默失效(fail-open 到 root)。落地需:guest 侧 uid/gid 查询(`/etc/passwd`)+ OCI `process.user`(默认身份)+ Start 的 `Credential`(每次 run-as)。**非宿主隔离缺口**(§2.2:guest 身份是 guest 内卫生,非安全支柱),但在被 in-guest 特权分隔依赖前须实现 | 谁消费:§5.A `local_runsc` / §5.E `sandboxd`;先建内置 Template 的非 root 用户(见下行) |
 | **§5.A / 模板** | **内置 Template 目录**:一个 bare base(uv/pip/git/build-essential + 非 root + sudo),各 agent 栈(claude-code/opencode/pi)经同一 lineage 机制叠在 bare base 之上(§3.1 分层) | guest 装包是一次性 exec、不引入 init 依赖,见 [`deep-dives/guest-runtime.md`](./deep-dives/guest-runtime.md) D3.1 |
 | **§6 部署形态** | 高层形态已定(§1.1:单二进制 + 配置 + 本地 store,store 后端见 ADR-0004);仅待细化打包 / 配置 schema | 对齐 §1.1 部署目标 |
+| **实现级已知小项(非架构,评审记录)** | 一致性评审记下、择机收口的低危项,均已在代码留注:① PID1 reaper 的 `Wait4(-1)` 与监督循环 `cmd.Wait()` 竞争 transport 子进程退出码(自愈重启不受影响,仅退出码/telemetry 竞态,Go1.23 pidfd 或已收窄);② PID1「容器级信号扇出」在 M3 拓扑下是单子进程转发 + 退出(transport 是唯一子进程,行为正确,注释措辞待长跑 sibling 落地时校正);③ 每沙箱转换锁 map 只增不删(destroy 后不回收 mutex,长期高 churn 的慢泄漏,删除与持锁竞争需谨慎);④ outbox publisher 头阻塞(一条投递失败挡住其后全部,保序/at-least-once 正确,与 §4.1 可重放窗口一并定) | 均非正确性破坏;M4(reaper/事件流)前后择机收口 |
 
 ---
 

@@ -31,8 +31,11 @@ type RootfsSource struct {
 // network policy — policy enforcement and credential injection live in the
 // engine's own egress data plane, not in the provider (§5.A / §2.1 ③④).
 //
-// M1 is network=none, so this is empty. The type exists now to keep the ④-step
-// contract shape correct for M5.
+// Network is none today, so this is empty. Unlike a data record's unused fields
+// (which we omit — see model.Sandbox), this type EXISTS now because it is a named
+// member of the settled §5.A contract 4-tuple (rootfs / steering / limits /
+// identity) — "settled, not yet built" (§1.3), not a speculative reservation.
+// Filled in when egress lands (M6).
 type SteeringSpec struct{}
 
 // ResourceLimits is the rate-axis Binding the provider materializes at
