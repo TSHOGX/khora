@@ -95,6 +95,20 @@ func (m *Memory) CompareAndSetState(_ context.Context, id model.SandboxID, expec
 	return nil
 }
 
+// SetUpdatedAtForTest backdates a record's UpdatedAt. TEST-ONLY seam: reaper
+// retention math measures "how long paused" from UpdatedAt (the last state
+// change), and tests need to simulate a sandbox paused long ago without
+// sleeping. NOT part of the Store interface — it carries no production
+// semantics. No-op for an unknown ID.
+func (m *Memory) SetUpdatedAtForTest(id model.SandboxID, t time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if s, ok := m.rec[id]; ok {
+		s.UpdatedAt = t
+		m.rec[id] = s
+	}
+}
+
 func (m *Memory) DeleteSandbox(_ context.Context, id model.SandboxID, ev *Event) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

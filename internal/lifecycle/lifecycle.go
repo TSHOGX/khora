@@ -138,6 +138,23 @@ func (m *Mediator) lock(id model.SandboxID) *sync.Mutex {
 	return l
 }
 
+// tryLock attempts to acquire a sandbox's transition lock WITHOUT blocking
+// (§4.4-B). Returns (mutex, true) with the lock HELD on success — the caller
+// must Unlock it. Returns (nil, false) if a verb already holds it: for the
+// reaper and periodic reconcile, a held lock means "a verb is driving this
+// sandbox (in-flight resume / user pause / …)", so we SKIP it this round rather
+// than misclassify it (reaper-health D3: an in-flight resume has L2 down and
+// would classify dead-recoverable; skipping is the single-flight guard, adding
+// no §4.1 state). This is the ONLY non-blocking acquire; every user verb takes
+// the lock blocking.
+func (m *Mediator) tryLock(id model.SandboxID) (*sync.Mutex, bool) {
+	l := m.lock(id)
+	if l.TryLock() {
+		return l, true
+	}
+	return nil, false
+}
+
 // CreateSpec is the create verb input (§6.1 POST /v1/sandboxes). Network/volume
 // Binding inputs are deliberately OMITTED until those subsystems land — omitted,
 // not stubbed (same rule as model.Sandbox; §1.3 no speculative reservation). The
@@ -233,11 +250,26 @@ func (m *Mediator) Pause(ctx context.Context, id model.SandboxID) error {
 	l := m.lock(id)
 	l.Lock()
 	defer l.Unlock()
-
-	if err := m.deps.Store.CompareAndSetState(ctx, id, model.Running, model.Paused, newEvent(id, "paused", model.Paused)); err != nil {
+	if err := m.pauseLocked(ctx, id, "paused"); err != nil {
 		return fmt.Errorf("pause: %w", err)
 	}
-	// release placement + unmount overlay; upper persists (§4.2 零捕获).
+	return nil
+}
+
+// pauseLocked commits a running→paused transition with the given event Kind and
+// releases the sandbox's placement. CALLER MUST HOLD the transition lock
+// (§4.4-B). Shared by the user Pause verb ("paused") and the reaper's
+// auto-pause ("auto-paused") / crash-pause ("crash-paused"): identical state
+// transition + placement release, the Kind carries WHY (§4.1: three pause-like
+// Kinds, all state=paused). Pause always lands a legal `paused` (§4.4: no middle
+// dirty state), so we CAS the state first, then release placement-local
+// resources; the Overlay artifact is already on the backend and captured NOTHING
+// (§4.2 零捕获). Stop is best-effort and idempotent, so it is also correct for a
+// crash-pause whose container is already dead (it reclaims the lingering netns).
+func (m *Mediator) pauseLocked(ctx context.Context, id model.SandboxID, kind string) error {
+	if err := m.deps.Store.CompareAndSetState(ctx, id, model.Running, model.Paused, newEvent(id, kind, model.Paused)); err != nil {
+		return err
+	}
 	ls := m.take(id)
 	if ls != nil {
 		if ls.placement != nil {
@@ -270,7 +302,17 @@ func (m *Mediator) Resume(ctx context.Context, id model.SandboxID) error {
 	if rec.State != model.Paused {
 		return fmt.Errorf("resume: %w (state=%s, want paused)", store.ErrConflict, rec.State)
 	}
+	return m.resumeLocked(ctx, rec)
+}
 
+// resumeLocked cold-starts a NEW container on the sandbox's Overlay (new IP,
+// §3.3) and flips paused→running at ⑦. CALLER MUST HOLD the transition lock and
+// have verified the source state is `paused` (§4.4-B). Shared by the user Resume
+// verb and the reaper's transport-down crash-loop escalation (D4b: after
+// crash-pause, the same lock resumes to break the wedge). On failure it unwinds
+// the half-built placement and leaves the record `paused` (§4.4-A / D5.2 ④).
+func (m *Mediator) resumeLocked(ctx context.Context, rec model.Sandbox) error {
+	id := rec.ID
 	// ① re-open + re-mount the SAME Overlay artifact (resume prefix).
 	ov, err := m.deps.Rootfs.OpenOverlay(ctx, string(rec.Overlay), string(rec.Template))
 	if err != nil {
@@ -316,7 +358,20 @@ func (m *Mediator) Destroy(ctx context.Context, id model.SandboxID) error {
 		}
 		return fmt.Errorf("destroy: %w", err)
 	}
+	return m.destroyLocked(ctx, rec)
+}
 
+// destroyLocked marks a sandbox `destroyed` and reclaims its bytes + placement.
+// CALLER MUST HOLD the transition lock (§4.4-B). Shared by the user Destroy verb
+// (valid from running or paused) and the reaper's evict (a paused sandbox past
+// retention). The transition (mark destroyed) is decoupled from byte
+// reclamation: the Overlay is deleted synchronously here; an async refcount
+// sweep (§4.3/§4.4) is the eventual form (M7). Emitting Kind "destroyed" matches
+// §4.1 — evict is "the reaper's automatic destroy", the SAME terminal, not a
+// distinct Kind. Because the lock is held for the whole chain, destroy/evict
+// CANNOT delete an Overlay mid-cold-start (§4.4-B: destroy-vs-resume race).
+func (m *Mediator) destroyLocked(ctx context.Context, rec model.Sandbox) error {
+	id := rec.ID
 	// tear down any live placement + mount (running case).
 	ls := m.take(id)
 	if ls != nil {

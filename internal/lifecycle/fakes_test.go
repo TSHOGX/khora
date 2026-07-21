@@ -143,17 +143,29 @@ func (f *fakeRuntime) ReclaimOrphans(_ context.Context, keep []string) error {
 // fakeClient satisfies transport.Client; only Health matters for the mediator.
 // idle is the sandbox-global idle duration a successful Health reports back
 // (reaper-health D2 activity signal) — the classifier reads it to tell healthy
-// from idle. Zero unless a test sets it.
+// from idle. Zero unless a test sets it. idleFn, if set, overrides idle and is
+// called per probe — used to simulate a sandbox that becomes active BETWEEN the
+// sweep classify and the lock-held re-read (the D3 activity-race guard test).
 type fakeClient struct {
-	healthy bool
-	idle    time.Duration
+	healthy   bool
+	idle      time.Duration
+	idleFn    func() time.Duration
+	healthyFn func() bool // if set, overrides healthy per probe (D4b escalation test)
 }
 
 func (c *fakeClient) Health(context.Context) (transport.HealthStatus, error) {
-	if c.healthy {
-		return transport.HealthStatus{Idle: c.idle}, nil
+	healthy := c.healthy
+	if c.healthyFn != nil {
+		healthy = c.healthyFn()
 	}
-	return transport.HealthStatus{}, fmt.Errorf("not healthy")
+	if !healthy {
+		return transport.HealthStatus{}, fmt.Errorf("not healthy")
+	}
+	idle := c.idle
+	if c.idleFn != nil {
+		idle = c.idleFn()
+	}
+	return transport.HealthStatus{Idle: idle}, nil
 }
 func (c *fakeClient) Start(context.Context, transport.StartSpec) (<-chan transport.ProcessEvent, error) {
 	return nil, nil

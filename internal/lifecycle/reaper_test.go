@@ -1,0 +1,323 @@
+package lifecycle
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"engine/internal/model"
+	"engine/internal/runtime"
+	"engine/internal/store"
+	"engine/internal/transport"
+)
+
+// reaper dispatch as pure logic against fakes (§4.3 quadrants → §4.1
+// transitions). The real runsc round-trip (auto-pause after idle, live
+// crash-pause, transport-down same-IP, crash-loop escalation, evict) is the
+// stage-6 substrate e2e; these pin the dispatch + the D3 activity-race guard +
+// the D4b budget + the TryLock-skip deterministically.
+
+// reaperEnv wires a mediator + reaper with a controllable Health client and
+// Adopt verdicts, and installs a live-map handle for a `running` sandbox so
+// classify can resolve an endpoint.
+type reaperEnv struct {
+	m  *Mediator
+	r  *Reaper
+	st *store.Memory
+	rt *fakeRuntime
+	cl *fakeClient
+}
+
+func newReaperEnv(t *testing.T, budget time.Duration) *reaperEnv {
+	t.Helper()
+	st := store.NewMemory()
+	rt := &fakeRuntime{adoptAlive: map[string]bool{}}
+	cl := &fakeClient{healthy: true}
+	m := New(Deps{
+		Store: st, Runtime: rt, Rootfs: &fakeRootfs{},
+		Dial:          func(transport.Endpoint) transport.Client { return cl },
+		HealthTimeout: time.Second,
+	})
+	return &reaperEnv{m: m, r: NewReaper(m, time.Hour, budget), st: st, rt: rt, cl: cl}
+}
+
+// seedRunning inserts a `running` record with a live-map handle (so it is
+// managed by this orchestrator, not a reconcile-takeover case).
+func (e *reaperEnv) seedRunning(t *testing.T, id string, idleTimeout, retention time.Duration) {
+	t.Helper()
+	ctx := context.Background()
+	now := time.Now()
+	if err := e.st.CreateSandbox(ctx, model.Sandbox{
+		ID: model.SandboxID(id), Template: "bare", Overlay: model.OverlayID("ov_" + id),
+		State: model.Creating, IdleTimeout: idleTimeout, Retention: retention,
+		CreatedAt: now, UpdatedAt: now,
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.CompareAndSetState(ctx, model.SandboxID(id), model.Creating, model.Running, nil); err != nil {
+		t.Fatal(err)
+	}
+	e.m.put(model.SandboxID(id), &liveState{placement: &runtime.Placement{TransportEndpoint: "10.0.0.1:9000"}})
+}
+
+func (e *reaperEnv) seedPaused(t *testing.T, id string, retention time.Duration, pausedAgo time.Duration) {
+	t.Helper()
+	ctx := context.Background()
+	now := time.Now()
+	if err := e.st.CreateSandbox(ctx, model.Sandbox{
+		ID: model.SandboxID(id), Template: "bare", Overlay: model.OverlayID("ov_" + id),
+		State: model.Creating, Retention: retention,
+		CreatedAt: now, UpdatedAt: now,
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	_ = e.st.CompareAndSetState(ctx, model.SandboxID(id), model.Creating, model.Running, nil)
+	if err := e.st.CompareAndSetState(ctx, model.SandboxID(id), model.Running, model.Paused, nil); err != nil {
+		t.Fatal(err)
+	}
+	// backdate UpdatedAt so retention math sees it as paused `pausedAgo` ago.
+	e.st.SetUpdatedAtForTest(model.SandboxID(id), now.Add(-pausedAgo))
+}
+
+func (e *reaperEnv) state(t *testing.T, id string) model.Lifecycle {
+	t.Helper()
+	rec, err := e.st.GetSandbox(context.Background(), model.SandboxID(id))
+	if err != nil {
+		return model.Lifecycle("<gone>")
+	}
+	return rec.State
+}
+
+func (e *reaperEnv) lastKind(id string) string {
+	evs, _ := e.st.UnpublishedEvents(context.Background())
+	kind := ""
+	for _, ev := range evs {
+		if ev.Sandbox == model.SandboxID(id) {
+			kind = ev.Kind
+		}
+	}
+	return kind
+}
+
+// idle past idle_timeout → auto-pause, emitting Kind "auto-paused" (§4.1: the
+// idle Kind, distinct from user "paused" and reconcile "crash-paused").
+func TestReaperAutoPausesIdle(t *testing.T) {
+	e := newReaperEnv(t, time.Minute)
+	e.seedRunning(t, "idle", 10*time.Second, 0)
+	e.cl.idle = 30 * time.Second // ≥ idle_timeout
+
+	e.r.Sweep(context.Background())
+
+	if got := e.state(t, "idle"); got != model.Paused {
+		t.Fatalf("idle sandbox state=%s; want paused", got)
+	}
+	if k := e.lastKind("idle"); k != "auto-paused" {
+		t.Fatalf("idle event Kind=%q; want auto-paused", k)
+	}
+}
+
+// a healthy (recent I/O) running sandbox is left untouched.
+func TestReaperLeavesHealthyRunning(t *testing.T) {
+	e := newReaperEnv(t, time.Minute)
+	e.seedRunning(t, "busy", 10*time.Second, 0)
+	e.cl.idle = 1 * time.Second // < idle_timeout
+
+	e.r.Sweep(context.Background())
+
+	if got := e.state(t, "busy"); got != model.Running {
+		t.Fatalf("healthy sandbox state=%s; want running", got)
+	}
+}
+
+// D3 activity-race guard: a sandbox classified idle at sweep, but active again
+// by the lock-held re-read, is NOT auto-paused. CAS on lifecycle-state alone
+// would not catch it (state is still running); the lock-held activity re-read
+// does. We simulate it with an idleFn that returns idle on the first probe (the
+// sweep classify) and active on the second (the auto-pause re-read).
+func TestReaperActivityRaceGuardAbortsAutoPause(t *testing.T) {
+	e := newReaperEnv(t, time.Minute)
+	e.seedRunning(t, "racy", 10*time.Second, 0)
+	call := 0
+	e.cl.idleFn = func() time.Duration {
+		call++
+		if call == 1 {
+			return 30 * time.Second // sweep classify: idle
+		}
+		return 1 * time.Second // lock-held re-read: active again
+	}
+
+	e.r.Sweep(context.Background())
+
+	if got := e.state(t, "racy"); got != model.Running {
+		t.Fatalf("sandbox active-in-window was auto-paused: state=%s; want running (D3 guard)", got)
+	}
+	if call < 2 {
+		t.Fatalf("auto-pause did not re-read activity under the lock (probes=%d; want ≥2)", call)
+	}
+}
+
+// dead-recoverable (L2 down + L1 dead) under a LIVE orchestrator → crash-pause
+// (§4.2 involuntary pause), Kind "crash-paused". Proves the live reaper drives
+// the same demote reconcile does at boot.
+func TestReaperCrashPausesDeadRecoverable(t *testing.T) {
+	e := newReaperEnv(t, time.Minute)
+	e.seedRunning(t, "dead", 10*time.Second, 0)
+	e.cl.healthy = false                             // L2 down
+	e.rt.adoptAlive = map[string]bool{"dead": false} // L1 dead
+
+	e.r.Sweep(context.Background())
+
+	if got := e.state(t, "dead"); got != model.Paused {
+		t.Fatalf("dead-recoverable state=%s; want paused", got)
+	}
+	if k := e.lastKind("dead"); k != "crash-paused" {
+		t.Fatalf("dead-recoverable Kind=%q; want crash-paused", k)
+	}
+}
+
+// transport-down (L2 down + L1 alive) → WAIT, not crash-pause. Stays running;
+// PID1 restarts the transport child in place (§5.E.1). No escalation within
+// budget.
+func TestReaperWaitsOnTransportDownWithinBudget(t *testing.T) {
+	e := newReaperEnv(t, time.Hour) // generous budget
+	e.seedRunning(t, "td", 10*time.Second, 0)
+	e.cl.healthy = false                          // L2 down
+	e.rt.adoptAlive = map[string]bool{"td": true} // L1 alive
+
+	e.r.Sweep(context.Background())
+	e.r.Sweep(context.Background()) // second tick, still within budget
+
+	if got := e.state(t, "td"); got != model.Running {
+		t.Fatalf("transport-down state=%s; want running (wait for in-place restart, not crash-pause)", got)
+	}
+	if _, tracked := e.r.downSince["td"]; !tracked {
+		t.Fatal("transport-down streak not tracked for budget accounting (D4b)")
+	}
+}
+
+// D4b escalation: transport-down PAST the restart budget → escalate to
+// dead-recoverable = crash-pause then resume (new epoch), so a crash-looping
+// transport child cannot wedge the sandbox forever. Ends running again.
+func TestReaperEscalatesTransportDownPastBudget(t *testing.T) {
+	e := newReaperEnv(t, time.Hour)
+	e.seedRunning(t, "loop", 10*time.Second, 0)
+	e.cl.healthy = false                            // L2 down (crash-looping child)
+	e.rt.adoptAlive = map[string]bool{"loop": true} // L1 alive
+
+	// first sweep: record the streak start.
+	e.r.Sweep(context.Background())
+	if got := e.state(t, "loop"); got != model.Running {
+		t.Fatalf("after first tick state=%s; want running (within budget)", got)
+	}
+	// backdate the streak start past the budget → next sweep escalates.
+	e.r.downSince["loop"] = time.Now().Add(-2 * time.Hour)
+
+	// The escalating sweep probes Health twice: once in classify (must be DOWN so
+	// it classifies transport-down and escalates), then again at the resume's ⑦
+	// readiness gate (must be UP so the new cold-start comes healthy). Drive the
+	// transition by probe count.
+	probe := 0
+	e.cl.healthyFn = func() bool {
+		probe++
+		return probe > 1 // #1 (classify) down; #2+ (⑦ gate) up
+	}
+
+	e.r.Sweep(context.Background())
+
+	if got := e.state(t, "loop"); got != model.Running {
+		t.Fatalf("after escalation state=%s; want running (crash-pause→resume, D4b)", got)
+	}
+	// the escalation went through crash-pause then resume: the last event is
+	// "resumed", and a "crash-paused" preceded it.
+	evs, _ := e.st.UnpublishedEvents(context.Background())
+	var kinds []string
+	for _, ev := range evs {
+		if ev.Sandbox == "loop" {
+			kinds = append(kinds, ev.Kind)
+		}
+	}
+	sawCrashPause, sawResume := false, false
+	for _, k := range kinds {
+		if k == "crash-paused" {
+			sawCrashPause = true
+		}
+		if k == "resumed" {
+			sawResume = true
+		}
+	}
+	if !sawCrashPause || !sawResume {
+		t.Fatalf("escalation events=%v; want both crash-paused and resumed (D4b)", kinds)
+	}
+	if _, tracked := e.r.downSince["loop"]; tracked {
+		t.Fatal("transport-down streak not cleared after escalation")
+	}
+}
+
+// a healthy sweep clears a prior transport-down streak (recovery ends the
+// budget accounting — the next down starts a fresh streak).
+func TestReaperHealthyClearsTransportDownStreak(t *testing.T) {
+	e := newReaperEnv(t, time.Hour)
+	e.seedRunning(t, "flap", 10*time.Second, 0)
+	e.cl.healthy = false
+	e.rt.adoptAlive = map[string]bool{"flap": true}
+	e.r.Sweep(context.Background())
+	if _, tracked := e.r.downSince["flap"]; !tracked {
+		t.Fatal("streak not tracked after transport-down")
+	}
+	// recovers.
+	e.cl.healthy = true
+	e.r.Sweep(context.Background())
+	if _, tracked := e.r.downSince["flap"]; tracked {
+		t.Fatal("healthy sweep did not clear the transport-down streak")
+	}
+}
+
+// evict: a paused sandbox past retention → destroyed (§4.1 evict = reaper's
+// automatic destroy). A paused sandbox within retention is left alone.
+func TestReaperEvictsPausedPastRetention(t *testing.T) {
+	e := newReaperEnv(t, time.Minute)
+	e.seedPaused(t, "old", 1*time.Hour, 2*time.Hour)     // past retention
+	e.seedPaused(t, "fresh", 1*time.Hour, 1*time.Minute) // within retention
+
+	e.r.Sweep(context.Background())
+
+	if got := e.state(t, "old"); got != model.Lifecycle("<gone>") {
+		t.Fatalf("paused-past-retention state=%s; want destroyed (record gone)", got)
+	}
+	if k := e.lastKind("old"); k != "destroyed" {
+		t.Fatalf("evict Kind=%q; want destroyed", k)
+	}
+	if got := e.state(t, "fresh"); got != model.Paused {
+		t.Fatalf("within-retention paused state=%s; want paused (not evicted)", got)
+	}
+}
+
+// zero retention = opted out of eviction: never evicted however old.
+func TestReaperZeroRetentionNeverEvicts(t *testing.T) {
+	e := newReaperEnv(t, time.Minute)
+	e.seedPaused(t, "keep", 0, 1000*time.Hour)
+	e.r.Sweep(context.Background())
+	if got := e.state(t, "keep"); got != model.Paused {
+		t.Fatalf("zero-retention paused state=%s; want paused (never evicted)", got)
+	}
+}
+
+// TryLock-skip: a sandbox whose transition lock is HELD (a verb driving it) is
+// skipped — the reaper neither classifies nor disposes it, so no race with an
+// in-flight resume and no misclassification into dead-recoverable.
+func TestReaperSkipsLockedSandbox(t *testing.T) {
+	e := newReaperEnv(t, time.Minute)
+	e.seedRunning(t, "held", 10*time.Second, 0)
+	e.cl.idle = 30 * time.Second // would auto-pause if not skipped
+
+	// hold the lock as a concurrent verb would.
+	l := e.m.lock("held")
+	l.Lock()
+	defer l.Unlock()
+
+	e.r.Sweep(context.Background())
+
+	if got := e.state(t, "held"); got != model.Running {
+		t.Fatalf("locked sandbox was disposed: state=%s; want running (TryLock-skip)", got)
+	}
+}
