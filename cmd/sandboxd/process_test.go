@@ -116,11 +116,13 @@ func TestSlowSubscriberDroppedSourceNeverBlocks(t *testing.T) {
 	}
 }
 
-// invariant 1 boundary: a subscriber whose window is exactly full at process
-// exit cannot receive the end frame. It must be marked overflow (dropped), so
-// serveSubscriber reports ResourceExhausted — NOT a silent clean-end that would
-// hide both the drop and the exit code (process-result semantics).
-func TestFinishOnFullWindowMarksOverflow(t *testing.T) {
+// invariant 1 boundary (lossy-by-design, D4.3 transport.md:255/:263): a
+// subscriber whose window is exactly full at process exit cannot receive the end
+// frame. Per the best-effort-tail contract that dropped end frame — exit code
+// included — is silently lost for THAT copy; the channel still closes cleanly and
+// finish must NOT block or panic. (Making the drop observable end-to-end is an
+// M4 liveness-signal decision, not M3 — see finish() NOTE and open-decisions.)
+func TestFinishOnFullWindowIsSilentlyLossy(t *testing.T) {
 	p := newProc(1, nil)
 	sub, _, _, _ := p.subscribe()
 	// Fill the window to the brim without draining, staying just under the
@@ -131,12 +133,13 @@ func TestFinishOnFullWindowMarksOverflow(t *testing.T) {
 	if sub.overflow.Load() {
 		t.Fatal("subscriber dropped before finish; window fill overshot the cap")
 	}
-	// Exit now: the end frame has nowhere to go → must mark overflow, not vanish.
+	// Exit with a full window: end frame has nowhere to go and is dropped for this
+	// copy. finish must complete (source never blocks) and the channel must close.
 	p.finish(0)
-	if !sub.overflow.Load() {
-		t.Fatal("full-window subscriber not marked overflow at finish; end frame silently dropped")
+	got := drain(sub.ch) // must terminate (channel closed by finish)
+	if len(got) != subWindowFrames {
+		t.Fatalf("drained %d frames; want %d data frames (end frame silently lost, by design)", len(got), subWindowFrames)
 	}
-	_ = drain(sub.ch) // closed by finish; must terminate
 }
 
 // a subscriber attaching after the process ended replays the ring and gets end.

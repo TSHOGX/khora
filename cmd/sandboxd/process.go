@@ -153,11 +153,18 @@ func (p *proc) broadcast(f frame) {
 // subscribers, and closes their channels. A subscriber that Connects after this
 // sees ended=true from subscribe and replays the ring + end directly.
 //
-// The end frame carries the exit code — process-result semantics, weightier than
-// a mid-stream byte. If a subscriber's window is full at exit (healthy but sitting
-// exactly at the cap), the end frame can't be delivered; we then mark it overflow
-// like the broadcast drop path so serveSubscriber surfaces ResourceExhausted
-// rather than a silent clean-end that hides both the drop and the exit code.
+// Lossy-by-design boundary (D4.3, transport.md:255/:263): a per-subscriber copy
+// is best-effort. If a subscriber's window is full at exit (too slow to receive
+// even the end frame), that end frame — exit code included — is silently dropped
+// for THAT copy; the channel still closes and serveSubscriber returns a clean
+// end. This is the same "lossy is the slow subscriber's copy, not the source"
+// rule the broadcast path enforces, extended to the exit instant.
+//
+// NOTE (M4): "you were dropped" is not observable end-to-end today anyway — the
+// domain seam (client.go drainEvents ignores stream.Err(); ProcessEvent has no
+// error field) cannot carry a terminal error across the fan-out channel. Making
+// subscriber-drop an observable liveness signal is deferred to M4 (health
+// quadrant / connection-activity), where it belongs; not reconciled here.
 func (p *proc) finish(exitCode int) {
 	p.mu.Lock()
 	p.ended = true
@@ -166,7 +173,6 @@ func (p *proc) finish(exitCode int) {
 		select {
 		case sub.ch <- p.endFrame:
 		default:
-			sub.overflow.Store(true)
 		}
 		delete(p.subs, sub)
 		close(sub.ch)
