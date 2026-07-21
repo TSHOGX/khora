@@ -94,10 +94,10 @@ pause/resume 与 multi-node provider(§5.A)同时成立的前提。
 - **Frozen(读字节)**:SoT 是后端上的字节——沙箱 **Overlay 工件**(经 FS provider 寻址)、
   data Volume 内容(各自后端)。resume 直接读回。
 - **Binding(按控制面记录重建)**:SoT 是沙箱自己的控制面记录——引用哪个 Template、挂了哪些
-  Volume、**资源上限(CPU/RAM/disk)**、placement、网络策略。resume 时按**当前
-  记录**重建,不读冻结字节。资源上限是 Binding 而非 placement:取值跨 resume 稳定保持,每次
-  placement 时把它物化(§5.A/§5.B/§5.C)。连接(process)**不是 Binding**:engine 不存连接记录,
-  resume 后由 client 重新发起(§5.E)。
+  Volume、**资源上限(CPU/RAM/disk)**、**生命周期 TTL(`idle_timeout`/`retention`,§4.3)**、placement、
+  网络策略。resume 时按**当前记录**重建,不读冻结字节。资源上限与 TTL 是 Binding 而非 placement:取值跨
+  resume 稳定保持,每次 placement 时把它物化(§5.A/§5.B/§5.C)。连接(process)**不是 Binding**:engine
+  不存连接记录,resume 后由 client 重新发起(§5.E)。
 
 > **"disk 上限"是两条正交的轴,物化落点不同。** **disk I/O**(带宽 / IOPS 速率节流)由 §5.A 落
 > cgroup(`io` controller),和 CPU/RAM 同族;**disk 容量**(at-rest 最多占多少字节)cgroup 管不了
@@ -225,10 +225,16 @@ resume 而非 auto-pause 的优雅静止(健康态四分与判据见 §4.3)。
 
 | 健康态 | 判据(L1 substrate / L2 transport) | 处置 |
 | --- | --- | --- |
-| **healthy** | L1 活 + L2 通,且有连接活跃(实时 `process.List` 有进程活动 / pty 有 I/O) | 保持 `running`,不动 |
-| **idle** | L1 活 + L2 通,但**所有**连接都 idle(无进程活动、pty 无 I/O) | 超阈值 → **auto-pause** 优雅静止(§4.2) |
+| **healthy** | L1 活 + L2 通,且有连接活跃(近期有 I/O:进程输出 / pty 读写) | 保持 `running`,不动 |
+| **idle** | L1 活 + L2 通,但**所有**连接都 idle(近期无任何 I/O) | 超阈值 → **auto-pause** 优雅静止(§4.2) |
 | **transport-down(瞬态)** | **L1 活、L2 不通**——transport 子进程崩了,PID1 正在原地重启(§5.E.1) | **等重启**;端口在**同一 IP** 上恢复,**不是** dead-recoverable、**不**走 resume;超重启预算才升级 |
 | **dead-recoverable** | **L1 探不到**(容器整死),持久态(Overlay 工件)在后端完好 | 走 **resume**(§4.2),换新 IP 冷启,**不是** auto-pause |
+
+> **连接活动信号在 guest 侧量,不在 host 侧。** `sandboxd` 在输出/输入路径(`broadcast`/`writeInput`)打一个
+> **沙箱全局「上次 I/O」时戳**,`Health` 探针带回 idle 时长(一处三用,§5.E / transport D4.5)。**不在 host 侧
+> 数据面代理处量**:分离式进程模型下(§3.2)进程无客户端 attach 时仍持续产出到环形缓冲,host 侧看不到这些字节,
+> 会把干活的沙箱误判成 idle。判据是 **I/O 活动**而非 CPU 占用(纯 CPU-bound 零 I/O 不计,为 spec 的 idle 定义
+> 本身)。完整推理与分类器/单飞/周期对账的落地见 [`deep-dives/reaper-health.md`](./deep-dives/reaper-health.md)。
 
 三个关键区分,都靠"两层探活 + 连接活动"三者交叉判,缺一会误判:
 
@@ -251,7 +257,10 @@ L2 探活成功翻成 `running`(时序见 [`deep-dives/guest-runtime.md`](./deep
 再连(§3.3"载体不编码 placement")。不新增独立计数字段,placement 的每次重绑天然携带"这是新实例"的语义。
 
 **TTL / 驱逐**:每个沙箱带生命周期状态(§4.1 的 `creating`/`running`/`paused`/`destroyed`)
-与 TTL;reaper 按 TTL 推进 `running`→(auto-pause)→`paused`→(evict)→`destroyed`。
+与 TTL;reaper 按 TTL 推进 `running`→(auto-pause)→`paused`→(evict)→`destroyed`。**TTL 是 per-sandbox
+Binding**(§3.4:跨 resume 稳定、每次 placement 物化):两个阈值——`idle_timeout`(`running` idle 超它 →
+auto-pause)与 `retention`(`paused` 超它 → evict)——是沙箱控制面记录的字段,create 时可给、缺省落引擎级
+默认(§1.1 单二进制配置)。取默认值为纯调参(见 [`deep-dives/reaper-health.md`](./deep-dives/reaper-health.md) D5)。
 - **对象回收(uniform object model invariant)**:每个一等持久对象(sandbox / Overlay 工件 /
   Volume / Template / 挂载行)带 **生命周期状态 + refcount** 作为**固有字段**(不是 reaper 的私有
   实现)。无 owner 列——回收只看 refcount/TTL,不看"谁拥有"(§1.4)。连接(process)不是持久对象,
@@ -310,8 +319,10 @@ resume **全程持有转换锁**,持锁即在建,否则会误收正在建的活 
 持锁辨识只在 orchestrator 活着的**周期对账**下才需要。存活 `running` 的活 placement 不是孤儿,另半段接管
 见下。)单机权威 store(§1.1)令这次对账退化成**一次本地扫描 diff 一张本地表**,无阶段记录、与
 placement/IP-as-epoch(§4.3)正交,**不重新引入世代计数**。
-D5 的 workdir/upper 孤儿是其一个特例;触发时机(仅启动 vs 周期)、与 §4.4-B 锁的协调、如何枚举本机
-netns/IP/nft/gateway/overlay-mount 及批量策略见 [`open-decisions.md`](./open-decisions.md)。
+D5 的 workdir/upper 孤儿是其一个特例。**周期对账**(orchestrator 活着时跑)= 启动对账**同一份反向对账**,
+只多两条:① 对**持锁**沙箱 `TryLock` 跳过(持锁 = 在建的活 placement,§4.4-B),② 保护 live-map 里本进程亲手
+建的活 placement 不当孤儿。触发时机、锁协调、本机资源枚举(egress 面 nft/gateway 随 §5.D M6 并入)与批量策略
+见 [`deep-dives/reaper-health.md`](./deep-dives/reaper-health.md) D4。
 
 **回收次序:活路径严格反向依赖序,启动对账力拆在前。** 活着的 `destroy`/`pause` 握着进程内 placement
 句柄,按严格反向依赖序拆(runsc → overlay umount → netns),干净卸载。**启动对账没有进程内句柄**,只有
@@ -336,8 +347,9 @@ placement → 重新接管**(provider 按 SandboxID 重认自己的资源、重�
 **启动对账的失败处置是 skip-and-log**:某沙箱对账不了(探活报错、句柄重建失败)不阻断其余沙箱的恢复;对
 无法干净判定的 `running` 存活者取**保守**——保护其 placement 不回收(漏拆活容器不可逆,泄漏 placement 下次
 启动再收),对账幂等,跳过项下次重来。接管期的单次就绪探针不是 §4.3 的连续四象限健康分类(启动对账下锁
-已全无,"L1 活、L2 瞬态不通"一律降 `paused` 偏保守);连续健康分类、与 §4.4-B 锁协调的**周期对账**仍
-待细化,见 [`open-decisions.md`](./open-decisions.md)。
+已全无,"L1 活、L2 瞬态不通"一律降 `paused` 偏保守)。orchestrator 活着时跑的**连续健康分类**(四象限,区分
+transport-down 瞬态、免无谓冷启)与**周期对账**(与 §4.4-B 锁协调)的落地见
+[`deep-dives/reaper-health.md`](./deep-dives/reaper-health.md) D3/D4。
 
 **不变量 B —— 每沙箱一把转换锁,动词串行 + CAS 前置校验。** 单机嵌入式 store 下仍有并发:用户
 `pause` 与 `resume` 同时到、用户 `resume` 与 reaper `evict` 竞争、两个 `pause` 叠加。仲裁机制:

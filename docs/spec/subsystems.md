@@ -251,6 +251,9 @@
   实时 `process.List`、不落控制面注册表。可重启性不由 engine 承担:裸 pty 字节流明说 lossy(shell 本无
   持久 SoT),任何"不丢"担保由上层自理。transport 进程内瞬时、非权威的输出环形缓冲(供 `Connect` 回放 +
   慢订阅者非阻塞丢弃)不在此约束内,机制见 [`deep-dives/transport.md`](./deep-dives/transport.md) D4.3。
+  同类瞬时信号:`Health` 探针带回的**沙箱全局「上次 I/O」时戳**(§4.3 idle 象限的连接活动信号),进程内、
+  随 transport 消亡、不跨 resume、不进控制面——量的是"此刻多久没 I/O",不是连接注册表。为何在 guest 侧量见
+  [`deep-dives/reaper-health.md`](./deep-dives/reaper-health.md) D1。
 - **session 是 engine 外的纯加法**:agent 会话语义(turn / 历史 / 恢复,形态对齐 ACP——Zed 提出
   的 Agent Client Protocol,"coding agent 界的 LSP")**不在 engine 内实现**,而是 engine 外的
   adapter 叠在 `process`/`fs` 之上——

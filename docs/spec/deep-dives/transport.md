@@ -291,11 +291,13 @@ RPC 清单:全 unary + 大文件 multipart 旁路,不做 watch(抄 E2B 除 watch
 
 ### D4.5 liveness / readiness:一个 `Health` 探针
 
-`sandboxd` transport 模式暴露一个 unary `Health{}`→`{ok}`。它一处两用,不另造协议:transport 探活
-探针(spec §4.3 两层探活的
-transport 层)与 resume readiness 门(guest-runtime D5.2 要点①:首次 `Health` 成功即翻 `running`,不信
-裸 TCP accept)。**用专门的 `Health` 而非 `process.List` 兜底**——`Health` 恒定开销、不列进程,探活
-开销不随进程数偏移。
+`sandboxd` transport 模式暴露一个 unary `Health{}`→`{ok, idle_millis}`。它**一处三用**,不另造协议:
+transport 探活探针(spec §4.3 两层探活的 transport 层)、resume readiness 门(guest-runtime D5.2 要点①:
+首次 `Health` 成功即翻 `running`,不信裸 TCP accept),以及**连接活动探针**(§4.3 idle 象限:`idle_millis` =
+`now - 沙箱全局上次 I/O 时戳`,transport 在 `broadcast`/`writeInput` 打戳)。**用专门的 `Health` 而非
+`process.List` 兜底**——`Health` 恒定开销、不列进程,探活与活动读取都不随进程数偏移;idle 与 L2「通不通」
+一次 RPC 拿全,不分两次往返。信号为何在 guest 侧量(而非 host 侧数据面代理)见
+[`reaper-health.md`](./reaper-health.md) D1。
 
 ### D4.6 三条刻意偏离
 

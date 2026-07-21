@@ -21,7 +21,7 @@ CRUD、无流:
 
 ```text
 # Sandbox 生命周期
-POST   /v1/sandboxes                 {template_id, network?, volumes?, guest_user?}  → {sandbox_id}
+POST   /v1/sandboxes                 {template_id, network?, volumes?, guest_user?, idle_timeout?, retention?}  → {sandbox_id}
 GET    /v1/sandboxes/{id}                                                          → {state, ...}
 POST   /v1/sandboxes/{id}/pause
 POST   /v1/sandboxes/{id}/resume
