@@ -127,9 +127,7 @@ func New(deps Deps) *Mediator {
 // grows by one mutex per distinct SandboxID ever seen (a slow leak under high
 // churn). Not a correctness bug; deleting on destroy races a verb blocked on
 // acquiring the same lock (it would let a blocked verb and a fresh verb serialize
-// on DIFFERENT mutexes), so it needs care. Tracked in
-// docs/plans/M4-reaper-health.md "Low-risk items to close opportunistically"
-// (migrated there from open-decisions §4).
+// on DIFFERENT mutexes), so it needs care. Tracked in open-decisions §4.
 func (m *Mediator) lock(id model.SandboxID) *sync.Mutex {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -172,7 +170,7 @@ type CreateSpec struct {
 	// at create time, so the reaper always reads a concrete duration, never a
 	// sentinel. A non-nil pointer is honored verbatim (including an explicit
 	// zero, which the reaper treats as "no such deadline" — see the reaper's
-	// TTL handling in stage 4).
+	// TTL handling).
 	IdleTimeout *time.Duration
 	Retention   *time.Duration
 }
@@ -369,7 +367,7 @@ func (m *Mediator) Destroy(ctx context.Context, id model.SandboxID) error {
 // (valid from running or paused) and the reaper's evict (a paused sandbox past
 // retention). The transition (mark destroyed) is decoupled from byte
 // reclamation: the Overlay is deleted synchronously here; an async refcount
-// sweep (§4.3/§4.4) is the eventual form (M7). Emitting Kind "destroyed" matches
+// sweep (§4.3/§4.4) is the eventual form. Emitting Kind "destroyed" matches
 // §4.1 — evict is "the reaper's automatic destroy", the SAME terminal, not a
 // distinct Kind. Because the lock is held for the whole chain, destroy/evict
 // CANNOT delete an Overlay mid-cold-start (§4.4-B: destroy-vs-resume race).

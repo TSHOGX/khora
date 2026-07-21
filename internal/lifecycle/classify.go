@@ -10,7 +10,7 @@ import (
 
 // Health is the §4.3 four-quadrant health classification of a `running`
 // sandbox, plus an explicit "unknown → skip" for the cases the classifier must
-// not guess at (reaper-health D3). The reaper (stage 4) dispatches per quadrant.
+// not guess at (reaper-health D3). The reaper dispatches per quadrant.
 type Health int
 
 const (
@@ -63,7 +63,7 @@ const classifyProbeTimeout = 2 * time.Second
 // classify computes the §4.3 health quadrant of a sandbox from L1 (substrate
 // liveness) × L2 (transport Health) × activity (idle duration). It is READ-ONLY
 // — no transition lock, no state change (reaper-health D3: the classifier only
-// reads; dispositions take the lock in stage 4). The ORDER is the D2
+// reads; dispositions take the transition lock). The ORDER is the D2
 // unreadable-idle guard made structural:
 //
 //	L2 up  ⟹ L1 alive (sandboxd answered from inside the live container), so a
@@ -109,7 +109,7 @@ func (m *Mediator) classify(ctx context.Context, rec model.Sandbox) Health {
 	// L2 down: disambiguate via an L1 liveness probe (Adopt gives the three-way
 	// outcome — alive / dead / uncertain — matching §4.4-A). We only need its
 	// liveness verdict; the rebuilt placement is discarded (the classifier is
-	// read-only, dispositions rebuild handles under the lock in stage 4).
+	// read-only, dispositions rebuild handles under the transition lock).
 	_, alive, aerr := m.deps.Runtime.Adopt(ctx, string(rec.ID))
 	switch {
 	case aerr != nil:

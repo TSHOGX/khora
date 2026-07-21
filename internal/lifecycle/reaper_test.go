@@ -13,9 +13,10 @@ import (
 
 // reaper dispatch as pure logic against fakes (§4.3 quadrants → §4.1
 // transitions). The real runsc round-trip (auto-pause after idle, live
-// crash-pause, transport-down same-IP, crash-loop escalation, evict) is the
-// stage-6 substrate e2e; these pin the dispatch + the D3 activity-race guard +
-// the D4b budget + the TryLock-skip deterministically.
+// crash-pause, transport-down same-IP, crash-loop escalation, evict) lives in
+// the substrate e2e (test/reaper_substrate_test.go); these pin the dispatch +
+// the D3 activity-race guard + the D4b budget + the TryLock-skip
+// deterministically.
 
 // reaperEnv wires a mediator + reaper with a controllable Health client and
 // Adopt verdicts, and installs a live-map handle for a `running` sandbox so

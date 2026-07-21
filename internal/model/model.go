@@ -63,7 +63,7 @@ type Sandbox struct {
 	//   - Retention: a `paused` sandbox older than this → evict (reaper's
 	//     destroy of a paused sandbox, §4.1).
 	// These EXIST here (unlike the still-omitted volume/network Binding) because
-	// M4's reaper is a live consumer — a justified model growth, not a
+	// the reaper is a live consumer — a justified model growth, not a
 	// speculative reservation (§1.3). A create that omits them gets the
 	// engine-wide default resolved at create time, so the stored value is always
 	// the concrete duration the reaper reads (default site: lifecycle.Deps).

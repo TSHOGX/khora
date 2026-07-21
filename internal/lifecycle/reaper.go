@@ -14,8 +14,8 @@ import (
 // drives, per quadrant, the automatic/involuntary lifecycle transitions the
 // state machine (§4.1) names but nothing else triggers — auto-pause, evict, and
 // the LIVE (not just boot-time) crash-pause. It also folds in the periodic
-// reconcile (stage 5) so one tick classifies once and both consumers dispatch
-// off it (reaper-health D4: 同一个 tick 先分类、再分派).
+// reconcile so one tick classifies once and both consumers dispatch off it
+// (reaper-health D4: 同一个 tick 先分类、再分派).
 //
 // Dispositions go through the §4.4-B transition lock + CAS on the Mediator; the
 // Reaper owns only the loop cadence and the transport-down restart budget
