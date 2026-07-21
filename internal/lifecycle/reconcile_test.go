@@ -129,12 +129,14 @@ func TestReconcileDemoteEmitsEvent(t *testing.T) {
 	evs, _ := st.UnpublishedEvents(ctx)
 	found := false
 	for _, e := range evs {
-		if e.Sandbox == "run_dead" && e.Kind == "paused" && e.State == model.Paused {
+		// involuntary demote emits "crash-paused", distinct from user "paused"
+		// and reaper "auto-paused" (§4.1 / §4.2).
+		if e.Sandbox == "run_dead" && e.Kind == "crash-paused" && e.State == model.Paused {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("no paused event emitted on involuntary demote; got %+v", evs)
+		t.Fatalf("no crash-paused event emitted on involuntary demote; got %+v", evs)
 	}
 }
 

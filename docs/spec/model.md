@@ -147,10 +147,13 @@ creating ──▶ running ──pause / auto-pause──▶ paused ──▶ de
 - **自动转换**(reaper 守护):`running` 空闲超阈值 → `auto-pause`;`paused` 超保留期 →
   `evict`。**`evict` 就是 reaper 对 `paused` 沙箱触发的 `destroy`**——同一个 `→ destroyed`
   终态,只是触发方是 reaper 而非用户。
-- **转换对外发布为事件**:每次状态机转换(created / auto-paused / resumed / destroyed …)发布到
-  一条 **event stream**;webhook、metrics、计费等 subscriber 在**引擎之外**消费,**引擎不知道也
-  不依赖谁在订阅**。这是 observability / 计费的接法——单向、additive(§1.3:add a subscriber),
-  不是引擎反过来回调外部系统。**状态提交与事件发布如何做到不丢不错(计费级),见 §4.4。**
+- **转换对外发布为事件**:每次状态机转换(created / paused / auto-paused / crash-paused / resumed /
+  destroyed …)发布到一条 **event stream**;webhook、metrics、计费等 subscriber 在**引擎之外**消费,
+  **引擎不知道也不依赖谁在订阅**。这是 observability / 计费的接法——单向、additive(§1.3:add a
+  subscriber),不是引擎反过来回调外部系统。**三种 pause 类事件的态都是 `paused`,但 Kind 分承其因**:
+  `paused` = 用户暂停、`auto-paused` = reaper 空闲暂停、`crash-paused` = 对账发现单元已死的**非自愿**
+  降级(§4.2 崩溃变体);态相同,Kind 让 subscriber 分辨"为何暂停"。**状态提交与事件发布如何做到不丢
+  不错(计费级),见 §4.4。**
 
 ### 4.2 pause / resume:FS-first,无内存快照
 

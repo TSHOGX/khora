@@ -47,9 +47,12 @@ type Event struct {
 	// `sandbox` is a core atom, not a banned product concept (§1.1 vocabulary).
 	Sandbox model.SandboxID
 	// Kind is the transition name ("created" / "paused" / "resumed" /
-	// "destroyed" / "auto-paused" …). Free-form here; the external event schema
-	// is a subscriber-side concern (§4.4-C: engine only guarantees reliable
-	// write to a replayable stream).
+	// "destroyed" / "auto-paused" / "crash-paused" …). The three pause-like Kinds
+	// are distinct on purpose: "paused" = user pause, "auto-paused" = reaper idle
+	// pause, "crash-paused" = involuntary demote of a dead unit at reconcile
+	// (§4.1 / §4.2) — all land state=paused, the Kind carries WHY. Free-form here;
+	// the external event schema is a subscriber-side concern (§4.4-C: engine only
+	// guarantees reliable write to a replayable stream).
 	Kind string
 	// State is the resulting lifecycle-state after the transition.
 	State model.Lifecycle

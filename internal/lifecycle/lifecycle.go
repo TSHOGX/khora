@@ -519,8 +519,13 @@ func (m *Mediator) adoptOrDemote(ctx context.Context, rec model.Sandbox) (bool, 
 	}
 	if !alive {
 		// dead / not-serving → involuntary pause (§4.2). Its placement, if any, is
-		// reclaimed as an orphan (this sandbox is not added to keep).
-		if err := m.deps.Store.CompareAndSetState(ctx, rec.ID, model.Running, model.Paused, newEvent(rec.ID, "paused", model.Paused)); err != nil && err != store.ErrConflict {
+		// reclaimed as an orphan (this sandbox is not added to keep). The event
+		// Kind is "crash-paused", NOT "paused": this is the §4.2 involuntary pause
+		// (found dead/not-serving at reconcile), distinct from a user pause and
+		// from the reaper's idle "auto-paused". State is the same `paused`; the
+		// Kind lets a subscriber tell why it paused (§4.1 names transitions
+		// distinctly). See store.Event.Kind.
+		if err := m.deps.Store.CompareAndSetState(ctx, rec.ID, model.Running, model.Paused, newEvent(rec.ID, "crash-paused", model.Paused)); err != nil && err != store.ErrConflict {
 			return false, fmt.Errorf("demote to paused: %w", err) // uncertain → protect
 		}
 		return false, nil
