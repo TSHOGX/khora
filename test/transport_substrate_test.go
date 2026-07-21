@@ -20,6 +20,13 @@ import (
 )
 
 func launchOne(t *testing.T) (transport.Client, func()) {
+	return launchWith(t, nil)
+}
+
+// launchWith builds the bare Template + one running sandbox, optionally calling
+// inject(templatesDir, "bare") after the Template is built (to drop test probes
+// into the rootfs) and before it is launched. Returns a ready transport client.
+func launchWith(t *testing.T, inject func(templatesDir, template string)) (transport.Client, func()) {
 	t.Helper()
 	ctx := context.Background()
 	repo := harness.RepoRoot(t)
@@ -28,6 +35,9 @@ func launchOne(t *testing.T) (transport.Client, func()) {
 
 	sbxd := harness.BuildSandboxd(t, repo)
 	harness.BuildTemplate(t, repo, tmpl, "bare", sbxd)
+	if inject != nil {
+		inject(tmpl, "bare")
+	}
 	rp, rt := harness.Providers(t, base, tmpl)
 
 	ov, err := rp.CreateOverlay(ctx, "ovD", "bare")

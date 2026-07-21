@@ -1,0 +1,401 @@
+//go:build substrate
+
+// M3 transport-depth acceptance (plan §6.2 C1–C5, C7) against the REAL sandboxd
+// under real runsc: PTY interactive loop, multi-connection fan-out, Connect ring
+// replay, signal-to-group, and keepalive on a long idle stream. Requires root.
+//
+//	sudo env PATH=$PATH GOTOOLCHAIN=local GOFLAGS=-mod=mod GOSUMDB=off HOME=$HOME \
+//	  go test -tags substrate -v -count=1 -timeout 300s ./test/ -run M3
+package test
+
+import (
+	"context"
+	"strings"
+	"testing"
+	"time"
+
+	"engine/internal/transport"
+	"engine/test/harness"
+)
+
+// collect drains a process event channel until end, returning accumulated data
+// bytes, the pid, exit code, and whether a keepalive was seen.
+type collected struct {
+	pid       int
+	data      strings.Builder
+	exit      int
+	gotEnd    bool
+	keepalive bool
+}
+
+func collectUntilEnd(ch <-chan transport.ProcessEvent) collected {
+	var c collected
+	c.exit = -1
+	for ev := range ch {
+		switch ev.Kind {
+		case "start":
+			c.pid = ev.PID
+		case "data":
+			c.data.Write(ev.Data)
+		case "keepalive":
+			c.keepalive = true
+		case "end":
+			c.exit = ev.ExitCode
+			c.gotEnd = true
+		}
+	}
+	return c
+}
+
+// C1: PTY interactive loop — start /bin/sh with a pty, type a command via
+// StreamInput, see the output stream back; resize via Update reflected by
+// `stty size`; CloseStdin ends the shell (Ctrl-D).
+func TestM3PtyInteractiveLoop(t *testing.T) {
+	// The bare template has no `stty`; inject a tiny static winsize reader that
+	// prints "SIZE <rows> <cols>" from TIOCGWINSZ on its own stdin tty.
+	cl, cleanup := launchWith(t, func(templatesDir, template string) {
+		harness.InjectStaticBin(t, templatesDir, template, "winsize", winsizeProbeSrc)
+	})
+	defer cleanup()
+	ctx := context.Background()
+
+	ch, err := cl.Start(ctx, transport.StartSpec{
+		Cmd: "/bin/sh", Pty: &transport.PtySize{Rows: 24, Cols: 80},
+	})
+	if err != nil {
+		t.Fatalf("Start pty: %v", err)
+	}
+	// grab pid from the first event.
+	var pid int
+	for ev := range ch {
+		if ev.Kind == "start" {
+			pid = ev.PID
+			break
+		}
+	}
+	if pid <= 0 {
+		t.Fatal("no start event with pid")
+	}
+
+	// collect output concurrently.
+	out := make(chan string, 1)
+	go func() {
+		var b strings.Builder
+		for ev := range ch {
+			if ev.Kind == "data" {
+				b.Write(ev.Data)
+			}
+		}
+		out <- b.String()
+	}()
+
+	in, err := cl.StreamInput(ctx, pid)
+	if err != nil {
+		t.Fatalf("StreamInput: %v", err)
+	}
+	// resize to 40x120, then have the shell print its size and a marker.
+	if err := cl.Update(ctx, pid, transport.PtySize{Rows: 40, Cols: 120}); err != nil {
+		t.Fatalf("Update resize: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if err := in.Send([]byte("winsize; echo PTY_MARKER_$((6*7))\n"), true); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	time.Sleep(500 * time.Millisecond)
+	// CloseStdin (Ctrl-D) ends the interactive shell.
+	if err := cl.CloseStdin(ctx, pid); err != nil {
+		t.Fatalf("CloseStdin: %v", err)
+	}
+	_ = in.Close()
+
+	got := <-out
+	if !strings.Contains(got, "PTY_MARKER_42") {
+		t.Errorf("pty output missing echoed marker; got:\n%s", got)
+	}
+	if !strings.Contains(got, "SIZE 40 120") {
+		t.Errorf("winsize did not reflect Update resize (want \"SIZE 40 120\"); got:\n%s", got)
+	}
+}
+
+// winsizeProbeSrc is a pure-Go TIOCGWINSZ reader injected into the guest
+// (no coreutils/stty in the bare template). Prints "SIZE <rows> <cols>".
+const winsizeProbeSrc = `package main
+
+import (
+	"fmt"
+	"os"
+	"unsafe"
+	"syscall"
+)
+
+func main() {
+	type winsize struct{ Row, Col, X, Y uint16 }
+	var ws winsize
+	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, os.Stdin.Fd(),
+		uintptr(0x5413), uintptr(unsafe.Pointer(&ws))) // TIOCGWINSZ
+	if errno != 0 {
+		fmt.Printf("SIZE ERR %v\n", errno)
+		return
+	}
+	fmt.Printf("SIZE %d %d\n", ws.Row, ws.Col)
+}
+`
+
+// C2: multi-connection fan-out — one pid, two Connect, each an independent full
+// copy; disconnect one, the other and the process keep flowing.
+func TestM3MultiConnectionFanOut(t *testing.T) {
+	cl, cleanup := launchOne(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	// a long-ish producer so Connects attach while it is live.
+	ch, err := cl.Start(ctx, transport.StartSpec{
+		Cmd: "/bin/sh", Args: []string{"-c", "for i in 1 2 3 4 5; do echo LINE_$i; sleep 0.4; done"},
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	var pid int
+	for ev := range ch {
+		if ev.Kind == "start" {
+			pid = ev.PID
+			break
+		}
+	}
+	if pid <= 0 {
+		t.Fatal("no pid")
+	}
+	// drain the Start stream in the background (source keeps flowing).
+	go func() {
+		for range ch {
+		}
+	}()
+
+	a, err := cl.Connect(ctx, pid)
+	if err != nil {
+		t.Fatalf("Connect a: %v", err)
+	}
+	b, err := cl.Connect(ctx, pid)
+	if err != nil {
+		t.Fatalf("Connect b: %v", err)
+	}
+
+	// a fully drains; b is closed early (disconnect) and must not disturb a.
+	adone := make(chan collected, 1)
+	go func() { adone <- collectUntilEnd(a) }()
+	// read a couple events from b then stop reading (simulate disconnect via ctx
+	// is heavy; here we just stop draining and let it be dropped — a must be fine).
+	go func() {
+		n := 0
+		for range b {
+			n++
+			if n >= 1 {
+				break
+			}
+		}
+	}()
+
+	ca := <-adone
+	if !ca.gotEnd {
+		t.Fatal("subscriber a never saw end")
+	}
+	// a should have seen the full tail of lines (it attached slightly late but
+	// the ring replays recent lines; at minimum the later lines are present).
+	if !strings.Contains(ca.data.String(), "LINE_5") {
+		t.Errorf("subscriber a missing later output; got:\n%s", ca.data.String())
+	}
+}
+
+// C3: Connect replay — produce output, THEN Connect; the new subscriber gets
+// recent ring bytes before live, not a blank screen. The bare template has no
+// coreutils (no `sleep`), so we hold the process alive with dash's `read`
+// builtin (blocks on stdin) and drive it with SendInput — deterministic, no
+// timing race.
+func TestM3ConnectReplaysRing(t *testing.T) {
+	cl, cleanup := launchOne(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	// echo EARLY, block on read, then echo LATE once we send a line.
+	ch, err := cl.Start(ctx, transport.StartSpec{
+		Cmd: "/bin/sh", Args: []string{"-c", "echo EARLY_OUTPUT; read x; echo LATE_OUTPUT"},
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	var pid int
+	for ev := range ch {
+		if ev.Kind == "start" {
+			pid = ev.PID
+			break
+		}
+	}
+	if pid <= 0 {
+		t.Fatal("no pid")
+	}
+	go func() {
+		for range ch { // drain the Start stream; keeps the source flowing
+		}
+	}()
+
+	// EARLY_OUTPUT lands in the ring, then the process blocks on read. Connect
+	// fresh: it must replay EARLY before anything live.
+	time.Sleep(500 * time.Millisecond)
+	sub, err := cl.Connect(ctx, pid)
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	done := make(chan collected, 1)
+	go func() { done <- collectUntilEnd(sub) }()
+
+	// unblock `read` so the process emits LATE_OUTPUT live to both subscribers.
+	time.Sleep(300 * time.Millisecond)
+	if err := cl.SendInput(ctx, pid, []byte("go\n"), false); err != nil {
+		t.Fatalf("SendInput: %v", err)
+	}
+	c := <-done
+	if !strings.Contains(c.data.String(), "EARLY_OUTPUT") {
+		t.Errorf("Connect did not replay EARLY_OUTPUT (blank-screen bug); got:\n%s", c.data.String())
+	}
+	if !strings.Contains(c.data.String(), "LATE_OUTPUT") {
+		t.Errorf("Connect did not receive live LATE_OUTPUT; got:\n%s", c.data.String())
+	}
+}
+
+// C5: SendSignal reaches the whole process group (fork subtree), no orphans.
+// A shell backgrounds a `blocker` child (blocks forever, dies on default
+// SIGTERM) then waits; SIGTERM to the GROUP must end the whole stream (parent +
+// child), not leave the child running as an orphan.
+func TestM3SignalProcessGroup(t *testing.T) {
+	// The bare template has no coreutils, and a backgrounded dash `read` gets
+	// stdin=/dev/null (immediate EOF) so it can't block. Inject a static blocker
+	// that blocks unconditionally and terminates on SIGTERM (Go default action).
+	cl, cleanup := launchWith(t, func(templatesDir, template string) {
+		harness.InjectStaticBin(t, templatesDir, template, "blocker", blockerSrc)
+	})
+	defer cleanup()
+	ctx := context.Background()
+
+	// Backgrounded `blocker` (a forked child) + the parent `wait`. Both share the
+	// process group AND inherit the stdout fd, so the output stream reaches EOF
+	// only when the WHOLE group has died. If SendSignal only hit the parent pid,
+	// the orphaned blocker would keep stdout open and the stream would never end.
+	ch, err := cl.Start(ctx, transport.StartSpec{
+		Cmd: "/bin/sh", Args: []string{"-c", "blocker & echo FORKED; wait"},
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	var pid int
+	for ev := range ch {
+		if ev.Kind == "start" {
+			pid = ev.PID
+			break
+		}
+	}
+	if pid <= 0 {
+		t.Fatal("no start pid")
+	}
+
+	ended := make(chan int, 1)
+	go func() { ended <- collectUntilEnd(ch).exit }()
+
+	time.Sleep(500 * time.Millisecond) // let the fork happen
+	// SIGTERM (15) — the server defaults to kill(-pgid) so the whole group dies.
+	if err := cl.SendSignal(ctx, pid, 15); err != nil {
+		t.Fatalf("SendSignal: %v", err)
+	}
+
+	select {
+	case <-ended:
+		// good: parent + backgrounded child both terminated by the group signal
+		// (stdout fully closed only because no group member survived as orphan).
+	case <-time.After(10 * time.Second):
+		t.Fatal("output stream did not end on SIGTERM — a group member survived (signal did not reach the whole pgid)")
+	}
+}
+
+// blockerSrc blocks forever; it does not catch SIGTERM, so the group signal's
+// default action (terminate) kills it — the discriminator for kill(-pgid) vs
+// kill(pid) in C5.
+const blockerSrc = `package main
+
+import "time"
+
+// Loop on a timer (not select{}, which trips Go's deadlock detector and exits).
+// SIGTERM is uncaught → default action terminates the process.
+func main() {
+	for {
+		time.Sleep(time.Hour)
+	}
+}
+`
+
+// C7: a long idle output stream is NOT killed by an idle deadline, and
+// keepalive frames arrive periodically. Uses a short keepalive by relying on the
+// server's configured interval; we wait long enough to see at least one.
+func TestM3LongStreamKeepalive(t *testing.T) {
+	if testing.Short() {
+		t.Skip("keepalive timing test skipped in -short")
+	}
+	cl, cleanup := launchOne(t)
+	defer cleanup()
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	defer cancel()
+
+	// an idle shell that produces nothing until we send input (no coreutils
+	// `sleep`; `read` blocks). We hold it idle ACROSS the keepalive interval, so
+	// the server must emit at least one keepalive; the stream must NOT be killed
+	// by any idle deadline (D4.2). Then we unblock it to a clean end.
+	var pid int
+	ch, err := cl.Start(ctx, transport.StartSpec{
+		Cmd: "/bin/sh", Args: []string{"-c", "read x; echo DONE"},
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	// collect in the background so we observe keepalive frames as they arrive.
+	res := make(chan struct {
+		data string
+		ka   bool
+	}, 1)
+	go func() {
+		var b strings.Builder
+		ka := false
+		for ev := range ch {
+			switch ev.Kind {
+			case "start":
+				pid = ev.PID
+			case "data":
+				b.Write(ev.Data)
+			case "keepalive":
+				ka = true
+			}
+		}
+		res <- struct {
+			data string
+			ka   bool
+		}{b.String(), ka}
+	}()
+
+	// wait past the keepalive interval while the stream is idle.
+	time.Sleep(keepaliveWait)
+	// pid should be set by now; unblock the read.
+	if pid <= 0 {
+		t.Fatal("no start pid")
+	}
+	if err := cl.SendInput(ctx, pid, []byte("go\n"), false); err != nil {
+		t.Fatalf("SendInput: %v", err)
+	}
+	r := <-res
+	if !strings.Contains(r.data, "DONE") {
+		t.Errorf("long idle stream did not survive to produce DONE; got:\n%s", r.data)
+	}
+	if !r.ka {
+		t.Errorf("no keepalive frame arrived on an idle stream held %s (interval 20s)", keepaliveWait)
+	}
+}
+
+// keepaliveWait is how long C7 holds the stream idle — past the server's 20s
+// keepalive interval so at least one keepalive frame must arrive.
+const keepaliveWait = 23 * time.Second

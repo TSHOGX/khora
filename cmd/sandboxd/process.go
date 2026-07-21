@@ -218,15 +218,50 @@ func (p *proc) writeInput(data []byte, ptyIn bool) error {
 	return err
 }
 
-// run pumps stdout+stderr into the fan-out until both hit EOF, waits for exit,
-// then finishes the hub and unregisters. The process is launched with an
+// resize applies a new PTY size (transport D4.3 Update). Errors if no pty.
+func (p *proc) resize(rows, cols uint16) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.pty == nil {
+		return errString("process has no pty")
+	}
+	return setWinsize(p.pty, rows, cols)
+}
+
+// closeStdin closes the stdin pipe (non-pty) or writes VEOF (pty Ctrl-D). For a
+// pty the master stays open (still the output source) — only EOF is injected.
+func (p *proc) closeStdin() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.pty != nil {
+		_, err := p.pty.Write([]byte{0x04}) // ^D
+		return err
+	}
+	if p.stdin != nil {
+		err := p.stdin.Close()
+		p.stdin = nil
+		return err
+	}
+	return nil
+}
+
+// source is one output reader tagged with its stream name.
+type source struct {
+	r    io.Reader
+	name string
+}
+
+// run pumps each source into the fan-out until EOF, waits for exit, then
+// finishes the hub and unregisters. Non-pty has two sources (stdout/stderr);
+// pty has one ("pty" — the master merges both). The process is launched with an
 // INDEPENDENT context (not the Start stream's) so it outlives a Start
 // disconnect — that is what makes Connect reattach possible (§3.2).
-func (p *proc) run(cmd *exec.Cmd, stdout, stderr io.Reader, onExit func()) {
+func (p *proc) run(cmd *exec.Cmd, sources []source, onExit func()) {
 	var wg sync.WaitGroup
-	wg.Add(2)
-	go p.pumpSource(&wg, stdout, "stdout")
-	go p.pumpSource(&wg, stderr, "stderr")
+	wg.Add(len(sources))
+	for _, s := range sources {
+		go p.pumpSource(&wg, s.r, s.name)
+	}
 	wg.Wait()
 	p.finish(waitExit(cmd))
 	onExit()
@@ -268,9 +303,6 @@ func waitExit(cmd *exec.Cmd) int {
 // Start launches a process and server-streams its output events.
 func (s *processServer) Start(ctx context.Context, req *connect.Request[v1.StartRequest], stream *connect.ServerStream[v1.ProcessEvent]) error {
 	m := req.Msg
-	if m.Pty != nil {
-		return connect.NewError(connect.CodeUnimplemented, errString("pty pending Task D"))
-	}
 	if m.Cmd == "" {
 		return connect.NewError(connect.CodeInvalidArgument, errString("empty cmd"))
 	}
@@ -280,27 +312,51 @@ func (s *processServer) Start(ctx context.Context, req *connect.Request[v1.Start
 	cmd := exec.Command(m.Cmd, m.Args...)
 	cmd.Env = m.Env
 	cmd.Dir = m.Cwd
-	// Own pgid so SendSignal can target the whole tree (transport D4.3).
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return connect.NewError(connect.CodeInternal, err)
+	var p *proc
+	var sources []source
+	if m.Pty != nil {
+		// PTY branch (transport D4.3): pure-Go pty pair (R1). The slave is the
+		// child's controlling terminal; the master is the single merged output
+		// source AND the keyboard-input sink. Setsid makes the child a session
+		// leader; Setctty binds the slave (fd 0) as its controlling tty.
+		master, slave, err := openPTY(uint16(m.Pty.Rows), uint16(m.Pty.Cols))
+		if err != nil {
+			return connect.NewError(connect.CodeInternal, err)
+		}
+		cmd.Stdin, cmd.Stdout, cmd.Stderr = slave, slave, slave
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true}
+		if err := cmd.Start(); err != nil {
+			master.Close()
+			slave.Close()
+			return connect.NewError(connect.CodeInternal, err)
+		}
+		_ = slave.Close() // parent keeps only the master
+		p = newProc(cmd.Process.Pid, master)
+		p.pty = master
+		sources = []source{{r: master, name: "pty"}}
+	} else {
+		// Own pgid so SendSignal can target the whole tree (transport D4.3).
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			return connect.NewError(connect.CodeInternal, err)
+		}
+		stderr, err := cmd.StderrPipe()
+		if err != nil {
+			return connect.NewError(connect.CodeInternal, err)
+		}
+		stdin, err := cmd.StdinPipe()
+		if err != nil {
+			return connect.NewError(connect.CodeInternal, err)
+		}
+		if err := cmd.Start(); err != nil {
+			return connect.NewError(connect.CodeInternal, err)
+		}
+		p = newProc(cmd.Process.Pid, stdin)
+		sources = []source{{r: stdout, name: "stdout"}, {r: stderr, name: "stderr"}}
 	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return connect.NewError(connect.CodeInternal, err)
-	}
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		return connect.NewError(connect.CodeInternal, err)
-	}
-
-	if err := cmd.Start(); err != nil {
-		return connect.NewError(connect.CodeInternal, err)
-	}
-	pid := cmd.Process.Pid
-	p := newProc(pid, stdin)
+	pid := p.pid
 	s.register(p)
 
 	// Subscribe BEFORE the source pumps start so Start sees everything live
@@ -314,7 +370,7 @@ func (s *processServer) Start(ctx context.Context, req *connect.Request[v1.Start
 		}
 		return err
 	}
-	go p.run(cmd, stdout, stderr, func() { s.unregister(pid) })
+	go p.run(cmd, sources, func() { s.unregister(pid) })
 
 	if sub != nil {
 		defer p.unsubscribe(sub)
@@ -388,18 +444,57 @@ func sendFrame(stream *connect.ServerStream[v1.ProcessEvent], f frame) error {
 	return nil
 }
 
-// --- M3 wire methods pending Task D (pty interactive) ------------------------
-
-func (s *processServer) StreamInput(_ context.Context, _ *connect.ClientStream[v1.StreamInputRequest]) (*connect.Response[v1.StreamInputResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errString("StreamInput: pending Task D"))
+// StreamInput writes an ordered client-stream of input frames to one process
+// (keystrokes to a pty). pid is taken from the first frame; ordering is the
+// single stream's (transport D4.3). engine does NOT arbitrate multiple writers
+// (D4.3: bytes interleave, Unix semantics — that is the product layer's call).
+func (s *processServer) StreamInput(_ context.Context, stream *connect.ClientStream[v1.StreamInputRequest]) (*connect.Response[v1.StreamInputResponse], error) {
+	var p *proc
+	for stream.Receive() {
+		m := stream.Msg()
+		if p == nil {
+			var ok bool
+			if p, ok = s.get(int(m.Pid)); !ok {
+				return nil, connect.NewError(connect.CodeNotFound, errString("no such live process pid "+strconv.Itoa(int(m.Pid))))
+			}
+		}
+		if err := p.writeInput(m.Data, m.PtyIn); err != nil {
+			return nil, connect.NewError(connect.CodeInternal, err)
+		}
+	}
+	if err := stream.Err(); err != nil {
+		return nil, err
+	}
+	return connect.NewResponse(&v1.StreamInputResponse{}), nil
 }
 
-func (s *processServer) Update(_ context.Context, _ *connect.Request[v1.UpdateRequest]) (*connect.Response[v1.UpdateResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errString("Update: pending Task D"))
+// Update resizes a process's PTY (transport D4.3). No-op-erroring on a non-pty
+// process (nothing to resize).
+func (s *processServer) Update(_ context.Context, req *connect.Request[v1.UpdateRequest]) (*connect.Response[v1.UpdateResponse], error) {
+	m := req.Msg
+	p, ok := s.get(int(m.Pid))
+	if !ok {
+		return nil, connect.NewError(connect.CodeNotFound, errString("no such live process pid "+strconv.Itoa(int(m.Pid))))
+	}
+	if m.Pty == nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errString("Update requires pty size"))
+	}
+	if err := p.resize(uint16(m.Pty.Rows), uint16(m.Pty.Cols)); err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	return connect.NewResponse(&v1.UpdateResponse{}), nil
 }
 
-func (s *processServer) CloseStdin(_ context.Context, _ *connect.Request[v1.CloseStdinRequest]) (*connect.Response[v1.CloseStdinResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errString("CloseStdin: pending Task D"))
+// CloseStdin closes stdin (non-pty) or sends EOF (pty, Ctrl-D equivalent).
+func (s *processServer) CloseStdin(_ context.Context, req *connect.Request[v1.CloseStdinRequest]) (*connect.Response[v1.CloseStdinResponse], error) {
+	p, ok := s.get(int(req.Msg.Pid))
+	if !ok {
+		return nil, connect.NewError(connect.CodeNotFound, errString("no such live process pid "+strconv.Itoa(int(req.Msg.Pid))))
+	}
+	if err := p.closeStdin(); err != nil {
+		return nil, connect.NewError(connect.CodeInternal, err)
+	}
+	return connect.NewResponse(&v1.CloseStdinResponse{}), nil
 }
 
 func (s *processServer) SendInput(_ context.Context, req *connect.Request[v1.SendInputRequest]) (*connect.Response[v1.SendInputResponse], error) {

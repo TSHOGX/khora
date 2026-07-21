@@ -86,6 +86,28 @@ func BuildBrokenTemplate(t *testing.T, repoRoot, templatesDir, name string) {
 	}
 }
 
+// InjectStaticBin compiles a single-file static Go program (src) into the
+// already-built Template dir at /usr/bin/<name>. Used to drop tiny test probes
+// into the bare rootfs (which has no coreutils) — e.g. a winsize reader for the
+// PTY resize acceptance (C1). CGO off so it runs in the guest with no loader deps.
+func InjectStaticBin(t *testing.T, templatesDir, template, name, mainSrc string) {
+	t.Helper()
+	srcDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(srcDir, "main.go"), []byte(mainSrc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(templatesDir, template, "usr", "bin", name)
+	cmd := exec.Command("go", "build", "-o", dst, filepath.Join(srcDir, "main.go"))
+	cmd.Dir = srcDir
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GO111MODULE=off")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("InjectStaticBin %s: %v: %s", name, err, out)
+	}
+	if err := os.Chmod(dst, 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // Providers builds the two real providers rooted under base.
 func Providers(t *testing.T, base, templatesDir string) (*rootfs.HostOverlayFS, *runtime.LocalRunsc) {
 	t.Helper()
