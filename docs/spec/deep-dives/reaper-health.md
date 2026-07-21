@@ -159,11 +159,11 @@ PID1 重启计数,取其一,首版取**连续 transport-down 时长超一个阈�
 
 ## D5. 边界与仍待
 
-- **对象回收 refcount/GC sweep(§4.3 uniform-object invariant)不在本文,也不在 M4。** 那是 Template lineage /
-  Volume 挂载行的引用-回收原子性(§4.3 + §4.4-C),归 M7。M4 的 `evict` 走**现有 `Destroy` 同步删 Overlay**
-  的老路,**不按 refcount 异步删字节**——reaper 在此只推**生命周期态**。二者的接缝(evict 标 destroyed 与异步
-  删字节解耦)spec §4.4 已定,M4 只用其同步半边。
+- **对象回收 refcount/GC sweep(§4.3 uniform-object invariant)不在本文。** 那是 Template lineage /
+  Volume 挂载行的引用-回收原子性(§4.3 + §4.4-C),另属对象回收 sweep。reaper 的 `evict` 走**现有 `Destroy`
+  同步删 Overlay** 的老路,**不按 refcount 异步删字节**——reaper 在此只推**生命周期态**。二者的接缝(evict 标
+  destroyed 与异步删字节解耦)spec §4.4 已定,reaper 只用其同步半边。
 - **TTL 取值**(default `idle_timeout` / `retention`)是纯数值旋钮,同 transport 的 ring/window(open-decisions
-  §5.E 行):M4 取保守默认、在配置点标注、留可调,不影响任何 invariant 形状。
-- **egress 面资源枚举**并入周期对账,随 §5.D(M6)落地;本文预留位。
+  §5.E 行):取保守默认、在配置点标注、留可调,不影响任何 invariant 形状。
+- **egress 面资源枚举**并入周期对账,随 §5.D 数据面落地;本文预留位。
 - **CPU-bound 活动**若将来证明需计入,healthServer 加一份 `/proc` jiffies 采样(D1 末),additive。

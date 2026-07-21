@@ -63,7 +63,7 @@
 | 缺口 | 现状 vs 目标 | 落地归属 |
 | --- | --- | --- |
 | **§2.2 / §6.2 guest 身份 run-as** | 契约已定(§2.2 默认非 root + sudo;§6.2 两级 run-as:create 期沙箱默认身份 + 每次 `Start` 的 `guest_user`)。**未兑现**:两级都被丢弃——`oci.go` 硬编码 UID/GID 0、`sandboxd` Start 不设 `SysProcAttr.Credential`,`guest_user` 静默失效(fail-open 到 root)。落地需:guest 侧 uid/gid 查询(`/etc/passwd`)+ OCI `process.user` + Start 的 `Credential`。**非宿主隔离缺口**(§2.2:guest 身份是 guest 内卫生,非安全支柱),但在被 in-guest 特权分隔依赖前须实现 | §5.A `local_runsc` / §5.E `sandboxd`;先建内置 Template 的非 root 用户(§2 §5.A 模板行) |
-| **低危已知小项**(均已在对应代码点留注) | outbox publisher 头阻塞(一条投递失败挡住其后全部,保序/at-least-once 正确,与可重放窗口一并定) | 非正确性破坏;随事件流可重放窗口(后续增量)择机收口。<br>*(三项 reaper 相关小项〔PID1 退出码竞争 / 信号扇出 / 转换锁 map 泄漏〕已随 M4 plan 迁出本表)* |
+| **低危已知小项**(均已在对应代码点留注,非正确性破坏) | ① **outbox publisher 头阻塞**——一条投递失败挡住其后全部(保序 / at-least-once 正确);随事件流可重放窗口(后续增量)择机收口。② **PID1 退出码竞争**——`init.go` 盲 `Wait4(-1)` reaper 与监督循环 `cmd.Wait()` 争 transport 子进程退出码,输者拿 `ECHILD`;自愈重启不受影响,只是退出码/telemetry 可能丢(Go 1.23+ pidfd Wait 或已收窄)。③ **PID1 容器级信号扇出单子进程**——当前只转发给唯一的 transport 子进程(transport 是唯一子进程时正确);模板自带长跑 sibling 落地后升级成进程组扇出(§5.E.1)。④ **转换锁 map 只增不删**——`lifecycle.go` 每见一个新 SandboxID 加一把锁、destroy 后不回收(高 churn 下慢泄漏);destroy 时删锁会与阻塞在同锁上的动词竞争(令阻塞动词与新动词序列化到不同锁上),需谨慎处理 | 均择机收口;owning plan 出现即迁入其中并从本表移除 |
 
 ---
 
