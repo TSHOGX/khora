@@ -42,7 +42,7 @@ func TestCreateHappyPath(t *testing.T) {
 	}
 }
 
-// A9 (create): cold-start failure reclaims half-built placement + empty Overlay
+// create: cold-start failure reclaims half-built placement + empty Overlay
 // and deletes the record → destroyed; no `failed` state.
 func TestCreateUnwindOnLaunchFailure(t *testing.T) {
 	rp, rt := &fakeRootfs{}, &fakeRuntime{failLaunch: true}
@@ -66,7 +66,36 @@ func TestCreateUnwindOnLaunchFailure(t *testing.T) {
 	}
 }
 
-// A9 (create ⑦): Health never succeeds → timeout → placement Destroyed, overlay
+// create: mount failure is the earliest cold-start failure (① before ④), so the
+// runtime is never launched; unwind still destroys the empty Overlay and deletes
+// the record → destroyed, no `failed` state.
+func TestCreateUnwindOnMountFailure(t *testing.T) {
+	rp, rt := &fakeRootfs{failMount: true}, &fakeRuntime{}
+	m, st := newTestMediator(rp, rt, true)
+
+	sid, err := m.Create(context.Background(), CreateSpec{Template: "bare"})
+	if err == nil {
+		t.Fatal("Create should have failed at mount")
+	}
+	// record deleted (no failed state).
+	if _, err := st.GetSandbox(context.Background(), sid); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("record should be deleted, got %v", err)
+	}
+	// mount failed before ④, so the runtime was never launched.
+	if len(rt.Calls()) != 0 {
+		t.Errorf("runtime should not be launched when mount fails; calls=%v", rt.Calls())
+	}
+	// the empty overlay is still reclaimed on unwind; nothing to unmount.
+	calls := strings.Join(rp.Calls(), ",")
+	if strings.Contains(calls, "Unmount:") {
+		t.Errorf("nothing to unmount when mount never succeeded; calls=%v", rp.Calls())
+	}
+	if !strings.Contains(calls, "DestroyOverlay:") {
+		t.Errorf("empty overlay not destroyed on mount-fail unwind; calls=%v", rp.Calls())
+	}
+}
+
+// create ⑦: Health never succeeds → timeout → placement Destroyed, overlay
 // reclaimed, record deleted.
 func TestCreateUnwindOnHealthTimeout(t *testing.T) {
 	rp, rt := &fakeRootfs{}, &fakeRuntime{}
@@ -84,7 +113,7 @@ func TestCreateUnwindOnHealthTimeout(t *testing.T) {
 	}
 }
 
-// A9 (resume): cold-start failure reclaims half-built placement but stays
+// resume: cold-start failure reclaims half-built placement but stays
 // `paused` (persistent Overlay untouched — NOT destroyed).
 func TestResumeUnwindStaysPaused(t *testing.T) {
 	rp, rt := &fakeRootfs{}, &fakeRuntime{failLaunch: true}
@@ -123,7 +152,7 @@ func TestPauseRequiresRunning(t *testing.T) {
 	}
 }
 
-// A10 (CAS): two concurrent resumes on a paused sandbox — the loser re-does CAS
+// CAS: two concurrent resumes on a paused sandbox — the loser re-does CAS
 // against the already-changed state and is rejected (ErrConflict); exactly one
 // wins → running.
 func TestResumeResumeCASShape(t *testing.T) {
@@ -159,7 +188,7 @@ func TestResumeResumeCASShape(t *testing.T) {
 	}
 }
 
-// A10 (lock): resume holds the transition lock for its whole cold-start; a
+// lock: resume holds the transition lock for its whole cold-start; a
 // concurrent destroy CANNOT acquire the lock and therefore cannot delete the
 // Overlay mid-cold-start (§4.4-B closes the destroy-vs-resume race).
 func TestDestroyBlockedDuringResumeColdStart(t *testing.T) {

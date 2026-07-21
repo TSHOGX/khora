@@ -47,7 +47,7 @@ type Deps struct {
 	// capturing sink.
 	Logf func(format string, args ...any)
 
-	// FaultAfterColdStart is a TEST-ONLY (R5) injection hook: if non-nil it runs
+	// FaultAfterColdStart is a TEST-ONLY injection hook: if non-nil it runs
 	// right after coldStart records the live placement but BEFORE the committing
 	// CAS to `running`. A test panics/exits from it to simulate the orchestrator
 	// crashing mid-transition — leaving a fully-built placement while the store
@@ -112,10 +112,10 @@ func (m *Mediator) lock(id model.SandboxID) *sync.Mutex {
 	return l
 }
 
-// CreateSpec is the create verb input (§6.1 POST /v1/sandboxes). network/volumes
-// are not yet consumed (Volume and egress are later subsystems); they are here
-// to keep the API shape stable (§6.2 create-time injection is a flow shape, not
-// late-bound).
+// CreateSpec is the create verb input (§6.1 POST /v1/sandboxes). Network/volume
+// Binding inputs are deliberately OMITTED until those subsystems land — omitted,
+// not stubbed (same rule as model.Sandbox; §1.3 no speculative reservation). The
+// §6.2 create-time injection flow shape holds regardless of when they arrive.
 type CreateSpec struct {
 	Template  model.TemplateID
 	GuestUser string
@@ -161,7 +161,7 @@ func (m *Mediator) Create(ctx context.Context, spec CreateSpec) (model.SandboxID
 		return "", fmt.Errorf("create: cold start: %w", err)
 	}
 
-	// R5 fault injection: simulate a crash after the placement is fully built but
+	// fault injection: simulate a crash after the placement is fully built but
 	// before the committing CAS — store still reads `creating` (§4.4-A create var).
 	if m.deps.FaultAfterColdStart != nil {
 		m.deps.FaultAfterColdStart(sid)
@@ -236,7 +236,7 @@ func (m *Mediator) Resume(ctx context.Context, id model.SandboxID) error {
 		return fmt.Errorf("resume: cold start: %w", err)
 	}
 
-	// R5 fault injection: simulate a crash after the placement is fully built but
+	// fault injection: simulate a crash after the placement is fully built but
 	// before the committing CAS — store still reads `paused` (§4.4-A resume var).
 	if m.deps.FaultAfterColdStart != nil {
 		m.deps.FaultAfterColdStart(id)
@@ -253,8 +253,8 @@ func (m *Mediator) Resume(ctx context.Context, id model.SandboxID) error {
 // Destroy = terminal `destroyed` (§4.1). The transition (mark destroyed) is
 // decoupled from byte reclamation: the Overlay is deleted synchronously here;
 // an async refcount sweep (§4.3/§4.4) is the eventual form. Valid from running
-// or paused; idempotent
-// (already-gone record → nil). The lock held here is the same one resume holds
+// or paused; idempotent (already-gone record → nil). The lock held here is the
+// same one resume holds
 // for its whole chain, so destroy CANNOT delete an Overlay mid-cold-start
 // (§4.4-B: closes the destroy-vs-resume data race).
 func (m *Mediator) Destroy(ctx context.Context, id model.SandboxID) error {

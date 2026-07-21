@@ -117,7 +117,7 @@ func (f *fakeRuntime) Destroy(_ context.Context, _ *runtime.Placement) error {
 
 // Adopt/ReclaimOrphans back the §4.4-A reconciliation path. The fake is driven
 // by adoptAlive (per-sandbox liveness the test sets up) and records reclaim
-// calls so Task F's reconciliation orchestration can be tested as pure logic.
+// calls so the reconciliation orchestration can be tested as pure logic.
 func (f *fakeRuntime) Adopt(_ context.Context, sandbox string) (*runtime.Placement, bool, error) {
 	f.log("Adopt:" + sandbox)
 	f.mu.Lock()
