@@ -1,13 +1,13 @@
 // Package engine.transport.v1 is the §5.E wire contract: the two stateless RPC
-// services the engine exposes (process / fs) plus a Health probe. This is the
-// schema-first source (Task S); host client stub + guest server stub generate
+// services the engine exposes (process / fs) plus a Health probe. It is the
+// schema-first source of truth; host client stub + guest server stub generate
 // from it. Connect-RPC over h2c (transport D4.2).
 //
-// M3 scope (transport D4.3, plan §5): the full process data plane —
-// Start / Connect (server-stream) / StreamInput (client-stream) /
-// SendInput / SendSignal / Update / CloseStdin / List; fs.Read / Write; Health.
-// keepalive is a ProcessEvent variant on long output streams (D4.2). fs breadth
-// (List/Stat/MakeDir/Remove/Move + multipart bypass) is a post-M3 increment.
+// process data plane (transport D4.3): Start / Connect (server-stream) /
+// StreamInput (client-stream) / SendInput / SendSignal / Update / CloseStdin /
+// List. keepalive is a ProcessEvent variant on long output streams (D4.2). fs
+// exposes Read (offset) / Write; the rest of the fs surface
+// (List/Stat/MakeDir/Remove/Move + multipart bypass) is an additive follow-on.
 //
 // Vocabulary boundary (§1.1): NO agent / session / turn / tag — process is
 // addressed by guest-native pid only (transport D4.6).
@@ -126,6 +126,14 @@ type StartRequest struct {
 	Cwd  string   `protobuf:"bytes,4,opt,name=cwd,proto3" json:"cwd,omitempty"`
 	// guest_user is the per-Start run-as (like `sudo -u`, §6.2) — NOT the sandbox
 	// default identity. Empty = inherit.
+	//
+	// NOT YET ENFORCED (deferred): sandboxd ignores this field and execs every
+	// process as the guest default (root, §2.2). Wiring the run-as
+	// (SysProcAttr.Credential via guest user-lookup) is an additive follow-on;
+	// until then a non-empty guest_user is NOT applied. Tracked in
+	// open-decisions §4. Not a host-isolation gap (§2.2: guest identity is
+	// guest-internal hygiene, not a security pillar), but a documented-API param
+	// that fails open — do not rely on it for in-guest privilege separation yet.
 	GuestUser string `protobuf:"bytes,5,opt,name=guest_user,json=guestUser,proto3" json:"guest_user,omitempty"`
 	// pty, when set, allocates a PTY of the given size (transport D4.3).
 	Pty *PtySize `protobuf:"bytes,6,opt,name=pty,proto3" json:"pty,omitempty"`

@@ -1,13 +1,13 @@
 // Package engine.transport.v1 is the §5.E wire contract: the two stateless RPC
-// services the engine exposes (process / fs) plus a Health probe. This is the
-// schema-first source (Task S); host client stub + guest server stub generate
+// services the engine exposes (process / fs) plus a Health probe. It is the
+// schema-first source of truth; host client stub + guest server stub generate
 // from it. Connect-RPC over h2c (transport D4.2).
 //
-// M3 scope (transport D4.3, plan §5): the full process data plane —
-// Start / Connect (server-stream) / StreamInput (client-stream) /
-// SendInput / SendSignal / Update / CloseStdin / List; fs.Read / Write; Health.
-// keepalive is a ProcessEvent variant on long output streams (D4.2). fs breadth
-// (List/Stat/MakeDir/Remove/Move + multipart bypass) is a post-M3 increment.
+// process data plane (transport D4.3): Start / Connect (server-stream) /
+// StreamInput (client-stream) / SendInput / SendSignal / Update / CloseStdin /
+// List. keepalive is a ProcessEvent variant on long output streams (D4.2). fs
+// exposes Read (offset) / Write; the rest of the fs surface
+// (List/Stat/MakeDir/Remove/Move + multipart bypass) is an additive follow-on.
 //
 // Vocabulary boundary (§1.1): NO agent / session / turn / tag — process is
 // addressed by guest-native pid only (transport D4.6).
@@ -450,7 +450,7 @@ type FsServiceClient interface {
 	// Read reads sandbox file bytes at an offset. The engine keeps no read
 	// cursor and no cross-resume offset continuity (transport D4.4).
 	Read(context.Context, *connect.Request[v1.ReadRequest]) (*connect.Response[v1.ReadResponse], error)
-	// Write writes sandbox file bytes (whole-file, offset 0 in M1).
+	// Write writes sandbox file bytes (whole-file, offset 0).
 	Write(context.Context, *connect.Request[v1.WriteRequest]) (*connect.Response[v1.WriteResponse], error)
 }
 
@@ -500,7 +500,7 @@ type FsServiceHandler interface {
 	// Read reads sandbox file bytes at an offset. The engine keeps no read
 	// cursor and no cross-resume offset continuity (transport D4.4).
 	Read(context.Context, *connect.Request[v1.ReadRequest]) (*connect.Response[v1.ReadResponse], error)
-	// Write writes sandbox file bytes (whole-file, offset 0 in M1).
+	// Write writes sandbox file bytes (whole-file, offset 0).
 	Write(context.Context, *connect.Request[v1.WriteRequest]) (*connect.Response[v1.WriteResponse], error)
 }
 
