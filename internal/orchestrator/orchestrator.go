@@ -1,8 +1,8 @@
 // Package orchestrator is the single engine-host assembly (§1.1): it wires the
-// in-memory store + the two providers (local_runsc, host_overlayfs) + the §4
-// lifecycle mediator + the transport dialer, and exposes the minimal §6.1
-// sandbox-centric API. Deployment target is "single orchestrator binary + one
-// config + local store" with no heavy external dependency (§1.1).
+// persistent store (SQLite, ADR-0004) + the two providers (local_runsc,
+// host_overlayfs) + the §4 lifecycle mediator + the transport dialer, and exposes
+// the minimal §6.1 sandbox-centric API. Deployment target is "single orchestrator
+// binary + one config + local store" with no heavy external dependency (§1.1).
 //
 // Swapping store / provider is registering an implementation (§1.3), not editing
 // this file — the assembly holds the seams, not concrete assumptions.

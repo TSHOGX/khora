@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"errors"
+	"log"
 
 	"connectrpc.com/connect"
 
@@ -36,10 +37,12 @@ type fsProxy struct{ e *Engine }
 // external client. The inner client dials the netns veth IP (client.go), so a
 // raw dial/transport error carries that IP:port — returning it verbatim would
 // leak placement to the engine's edge (§6.2 / D6.1: placement never exposed).
-// Map to CodeUnavailable with a placement-free message; the real cause stays in
-// engine logs, not the wire. (Stream errors that arrive via drainEvents are a
-// separate seam item tied to the health quadrant — see transport.md D4.3.)
+// Map to CodeUnavailable with a placement-free message; the real cause is logged
+// engine-side (so it stays debuggable) but never crosses to the wire. (Stream
+// errors that arrive via drainEvents are a separate seam item tied to the health
+// quadrant — see transport.md D4.3.)
 func proxyErr(err error) error {
+	log.Printf("dataplane: transport proxy error (sanitized to client): %v", err)
 	return connect.NewError(connect.CodeUnavailable, errors.New("sandbox transport unavailable"))
 }
 
