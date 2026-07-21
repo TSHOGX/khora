@@ -35,12 +35,28 @@ type Reaper struct {
 	// for a crash-loop (reaper-health D5).
 	transportDownBudget time.Duration
 
-	// downSince tracks, per sandbox, when it was FIRST seen continuously
-	// transport-down this streak. Reset the moment it classifies as anything
-	// else. Reaper-loop-local (single goroutine drives Sweep), so no lock. This
-	// is the "连续 transport-down 时长" measure D4b picks as simplest — no PID1
-	// restart-count upcall needed.
-	downSince map[model.SandboxID]time.Time
+	// downSince tracks, per sandbox, the CONTINUOUS transport-down streak D4b
+	// measures ("连续 transport-down 时长") — the simplest measure D4b picks, no
+	// PID1 restart-count upcall needed. Keyed additionally by placement EPOCH (the
+	// transport endpoint / IP, §4.3 placement-IP-as-epoch): a PID1 in-place restart
+	// keeps the SAME IP (§5.E.1) and so is genuinely the same streak, while any
+	// resume / pause+resume rebinds a NEW IP (§3.3) and MUST start a fresh streak.
+	// Epoch-keying is what makes the streak survive an in-place restart yet reset
+	// across a placement change that happened BETWEEN two sweeps (no intervening
+	// sweep to observe the transition) — the case a "reset on observed non-down
+	// outcome" alone would miss, letting a stale pre-resume timestamp escalate a
+	// fresh transport-down straight past the budget. Reaper-loop-local (single
+	// goroutine drives Sweep), so no lock.
+	downSince map[model.SandboxID]downStreak
+}
+
+// downStreak is one sandbox's continuous transport-down streak (D4b): when it
+// began, and the placement epoch (transport endpoint / IP) it began on. A streak
+// whose epoch no longer matches the sandbox's current placement is stale (the
+// placement was rebound by a resume) and is restarted, not honored.
+type downStreak struct {
+	since time.Time
+	epoch string // placement transport endpoint at streak start (§4.3 IP-as-epoch)
 }
 
 // reaper defaults (reaper-health D5 numeric knobs; bound no invariant's shape).
@@ -62,7 +78,7 @@ func NewReaper(m *Mediator, interval, transportDownBudget time.Duration) *Reaper
 		m:                   m,
 		interval:            interval,
 		transportDownBudget: transportDownBudget,
-		downSince:           make(map[model.SandboxID]time.Time),
+		downSince:           make(map[model.SandboxID]downStreak),
 	}
 }
 
@@ -110,20 +126,29 @@ func (r *Reaper) Sweep(ctx context.Context) {
 		r.m.deps.Logf("reaper: list sandboxes (retried next tick): %v", err)
 		return
 	}
-	seen := make(map[model.SandboxID]bool, len(recs))
+	// downThisTick = the sandboxes RE-CONFIRMED continuously transport-down this
+	// sweep. The D4b budget measures a CONTINUOUS streak (reaper-health D4b: "连续
+	// transport-down 时长"), so any sandbox NOT re-confirmed transport-down this
+	// tick — because it went healthy, paused, was skipped (held lock),
+	// classified Unknown, or is simply gone — must have its streak dropped. We
+	// record confirmations here and prune downSince to exactly this set at the
+	// end, rather than deleting on each individual "good" outcome (which missed
+	// the paused / Unknown / skipped paths and let a stale pre-pause timestamp
+	// escalate a fresh transport-down straight past the budget).
+	downThisTick := make(map[model.SandboxID]bool)
 	for _, rec := range recs {
-		seen[rec.ID] = true
 		switch rec.State {
 		case model.Running:
-			r.sweepRunning(ctx, rec)
+			r.sweepRunning(ctx, rec, downThisTick)
 		case model.Paused:
 			r.sweepPaused(ctx, rec)
 		}
 	}
-	// forget transport-down streaks for sandboxes that are gone (destroyed /
-	// evicted) so the tracker cannot leak or misfire on a recycled ID.
+	// Prune every streak not re-confirmed transport-down this tick. Subsumes the
+	// gone-record GC (a destroyed/evicted id is never re-confirmed) AND the
+	// pause/resume/Unknown/skip resets — so the streak is truly CONTINUOUS.
 	for id := range r.downSince {
-		if !seen[id] {
+		if !downThisTick[id] {
 			delete(r.downSince, id)
 		}
 	}
@@ -134,10 +159,13 @@ func (r *Reaper) Sweep(ctx context.Context) {
 // lock has a verb driving it (in-flight resume / user pause) → skip this round,
 // no race, no misclassification. The lock is held across classify AND dispose so
 // the disposition acts on a lock-consistent view (D3), not a stale pre-lock one.
-func (r *Reaper) sweepRunning(ctx context.Context, rec model.Sandbox) {
+func (r *Reaper) sweepRunning(ctx context.Context, rec model.Sandbox, downThisTick map[model.SandboxID]bool) {
 	l, ok := r.m.tryLock(rec.ID)
 	if !ok {
-		return // a verb holds the lock — skip (single-flight guard, D3)
+		// a verb holds the lock — skip (single-flight guard, D3). NOT re-confirmed
+		// transport-down this tick, so its streak (if any) is pruned at sweep end:
+		// a sandbox a verb just touched is not "continuously" down.
+		return
 	}
 	defer l.Unlock()
 
@@ -155,20 +183,22 @@ func (r *Reaper) sweepRunning(ctx context.Context, rec model.Sandbox) {
 	case HealthDeadRecoverable:
 		// LIVE crash-pause (§4.2 involuntary pause): the isolation unit died under
 		// a running orchestrator. Same disposition reconcile does at boot, driven
-		// now by the reaper. Clear any transport-down streak — this is death, not
-		// a transient.
-		delete(r.downSince, cur.ID)
+		// now by the reaper. Not re-confirmed transport-down → streak pruned at
+		// sweep end (this is death, not a transient).
 		if err := r.m.pauseLocked(ctx, cur.ID, "crash-paused"); err != nil && err != store.ErrConflict {
 			r.m.deps.Logf("reaper: crash-pause %s (retried next tick): %v", cur.ID, err)
 		}
 	case HealthTransportDown:
+		// re-confirm the streak this tick BEFORE dispatch; the D4b budget is read
+		// inside. This is the ONLY outcome that keeps a streak alive to sweep end.
+		downThisTick[cur.ID] = true
 		r.handleTransportDownLocked(ctx, cur)
 	case HealthHealthy:
-		// keep running; a healthy sandbox ends any transport-down streak.
-		delete(r.downSince, cur.ID)
+		// keep running; not re-confirmed → streak pruned at sweep end.
 	default:
 		// HealthUnknown (uncertain L1 / no live handle): do nothing, retry next
-		// tick (protect-on-uncertainty, reaper-health D3).
+		// tick (protect-on-uncertainty, reaper-health D3). Not re-confirmed → a
+		// prior streak is pruned (an Unknown tick breaks continuity, D4b).
 	}
 }
 
@@ -186,7 +216,8 @@ func (r *Reaper) autoPauseLocked(ctx context.Context, rec model.Sandbox) {
 		// became active (or unreachable) in the window → abort, re-judge next tick.
 		return
 	}
-	delete(r.downSince, rec.ID)
+	// idle → not re-confirmed transport-down this tick, so its streak (if any) is
+	// pruned at sweep end; no explicit delete needed here.
 	if err := r.m.pauseLocked(ctx, rec.ID, "auto-paused"); err != nil && err != store.ErrConflict {
 		r.m.deps.Logf("reaper: auto-pause %s (retried next tick): %v", rec.ID, err)
 	}
@@ -201,15 +232,26 @@ func (r *Reaper) autoPauseLocked(ctx context.Context, rec model.Sandbox) {
 // wedge (D4b). Both steps run under the held lock, same path a user
 // pause+resume would take.
 func (r *Reaper) handleTransportDownLocked(ctx context.Context, rec model.Sandbox) {
-	first, tracked := r.downSince[rec.ID]
-	if !tracked {
-		r.downSince[rec.ID] = time.Now()
-		return // first sighting this streak — wait for the in-place restart
+	// The streak is tied to the placement epoch (IP). Resolve the sandbox's
+	// CURRENT endpoint: an in-place PID1 restart keeps the same IP (§5.E.1) so the
+	// streak continues; a resume rebound a new IP (§3.3) so any prior streak is
+	// stale and this is a fresh one. A missing endpoint (no live handle) shouldn't
+	// reach here — transport-down means L1 alive + a live-map endpoint that failed
+	// L2 — but treat it defensively as a fresh streak with an empty epoch.
+	epoch, _ := r.m.Endpoint(rec.ID)
+
+	streak, tracked := r.downSince[rec.ID]
+	if !tracked || streak.epoch != epoch {
+		// first sighting this streak, OR the placement changed under us (stale
+		// epoch from a between-sweep resume) → start a fresh streak on this epoch.
+		r.downSince[rec.ID] = downStreak{since: time.Now(), epoch: epoch}
+		return // wait for the in-place restart
 	}
-	if time.Since(first) < r.transportDownBudget {
-		return // still within budget — keep waiting
+	if time.Since(streak.since) < r.transportDownBudget {
+		return // still within budget on the same epoch — keep waiting
 	}
-	// past the restart budget → escalate (D4b). crash-pause, then resume.
+	// past the restart budget on ONE continuous epoch → escalate (D4b): crash-pause,
+	// then resume.
 	r.m.deps.Logf("reaper: %s transport-down past budget (%s) → escalate to resume (D4b)", rec.ID, r.transportDownBudget)
 	delete(r.downSince, rec.ID)
 	if err := r.m.pauseLocked(ctx, rec.ID, "crash-paused"); err != nil {

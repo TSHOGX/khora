@@ -209,8 +209,10 @@ func TestReaperEscalatesTransportDownPastBudget(t *testing.T) {
 	if got := e.state(t, "loop"); got != model.Running {
 		t.Fatalf("after first tick state=%s; want running (within budget)", got)
 	}
-	// backdate the streak start past the budget → next sweep escalates.
-	e.r.downSince["loop"] = time.Now().Add(-2 * time.Hour)
+	// backdate the streak start past the budget, on the SAME placement epoch the
+	// live handle carries (10.0.0.1:9000) so it is a continuous same-IP streak →
+	// next sweep escalates (D4b).
+	e.r.downSince["loop"] = downStreak{since: time.Now().Add(-2 * time.Hour), epoch: "10.0.0.1:9000"}
 
 	// The escalating sweep probes Health twice: once in classify (must be DOWN so
 	// it classifies transport-down and escalates), then again at the resume's ⑦
@@ -269,6 +271,63 @@ func TestReaperHealthyClearsTransportDownStreak(t *testing.T) {
 	e.r.Sweep(context.Background())
 	if _, tracked := e.r.downSince["flap"]; tracked {
 		t.Fatal("healthy sweep did not clear the transport-down streak")
+	}
+}
+
+// D4b regression: a transport-down streak must NOT survive a between-tick
+// placement change (pause+resume rebinds a new IP, §3.3). Without epoch-keying, a
+// stale pre-resume start time would let a FRESH transport-down escalate straight
+// past the budget on the very next tick — bypassing the restart budget the whole
+// mechanism exists to grant. Here we simulate the streak having begun on an OLD
+// epoch; the sandbox now lives on a new one, so the reaper must start a fresh
+// streak (within budget → WAIT), not escalate.
+func TestReaperTransportDownStreakResetsAcrossEpochChange(t *testing.T) {
+	e := newReaperEnv(t, time.Hour)
+	e.seedRunning(t, "moved", 10*time.Second, 0) // live handle @ 10.0.0.1:9000
+	e.cl.healthy = false                         // L2 down
+	e.rt.adoptAlive = map[string]bool{"moved": true}
+
+	// a long-past streak, but recorded on a DIFFERENT (old) placement epoch — as
+	// if the sandbox had been transport-down before a resume rebound its IP.
+	e.r.downSince["moved"] = downStreak{since: time.Now().Add(-2 * time.Hour), epoch: "10.0.0.99:9000"}
+
+	e.r.Sweep(context.Background())
+
+	// must NOT have escalated (that would have crash-paused→resumed); still running
+	// and waiting, with a FRESH streak on the current epoch.
+	if got := e.state(t, "moved"); got != model.Running {
+		t.Fatalf("state=%s; want running — a stale-epoch streak must not escalate a fresh down (D4b)", got)
+	}
+	streak, tracked := e.r.downSince["moved"]
+	if !tracked {
+		t.Fatal("fresh streak not tracked after epoch change")
+	}
+	if streak.epoch != "10.0.0.1:9000" {
+		t.Fatalf("streak epoch=%q; want the current placement 10.0.0.1:9000 (fresh streak)", streak.epoch)
+	}
+	if time.Since(streak.since) > time.Minute {
+		t.Fatalf("streak start not reset to now on epoch change (since=%s ago)", time.Since(streak.since))
+	}
+}
+
+// D4b regression: a HealthUnknown tick (uncertain L1 / momentarily absent live
+// handle) breaks continuity — the streak must be pruned, so a subsequent
+// transport-down starts a fresh budget rather than inheriting the old start time.
+func TestReaperTransportDownStreakClearedByUnknownTick(t *testing.T) {
+	e := newReaperEnv(t, time.Hour)
+	e.seedRunning(t, "u", 10*time.Second, 0)
+	e.cl.healthy = false // L2 down
+	e.rt.adoptAlive = map[string]bool{"u": true}
+	e.r.Sweep(context.Background())
+	if _, tracked := e.r.downSince["u"]; !tracked {
+		t.Fatal("streak not tracked after transport-down")
+	}
+
+	// next tick classifies Unknown: uncertain L1 (Adopt errors) while L2 still down.
+	e.rt.adoptErr = map[string]error{"u": context.DeadlineExceeded}
+	e.r.Sweep(context.Background())
+	if _, tracked := e.r.downSince["u"]; tracked {
+		t.Fatal("Unknown tick did not clear the transport-down streak (breaks D4b continuity)")
 	}
 }
 
