@@ -126,7 +126,10 @@ func New(deps Deps) *Mediator {
 // KNOWN LIMITATION: entries are never removed, even after destroy — the map
 // grows by one mutex per distinct SandboxID ever seen (a slow leak under high
 // churn). Not a correctness bug; deleting on destroy races a verb blocked on
-// acquiring the same lock, so it needs care (open-decisions §2 known-items).
+// acquiring the same lock (it would let a blocked verb and a fresh verb serialize
+// on DIFFERENT mutexes), so it needs care. Tracked in
+// docs/plans/M4-reaper-health.md "Low-risk items to close opportunistically"
+// (migrated there from open-decisions §4).
 func (m *Mediator) lock(id model.SandboxID) *sync.Mutex {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -370,6 +373,14 @@ func (m *Mediator) Destroy(ctx context.Context, id model.SandboxID) error {
 // §4.1 — evict is "the reaper's automatic destroy", the SAME terminal, not a
 // distinct Kind. Because the lock is held for the whole chain, destroy/evict
 // CANNOT delete an Overlay mid-cold-start (§4.4-B: destroy-vs-resume race).
+//
+// NOTE — no source-state CAS here (unlike pause/resume). destroy is deliberately
+// valid from BOTH `running` and `paused` (§4.1 / §4.4-A decouples it) and is
+// idempotent, so there is no single "expected" source state to compare-and-set
+// against. The invariant is LOCK-enforced, not CAS-enforced: the held transition
+// lock serializes destroy against every other verb, and a `creating` record is
+// never observable here because Create holds the lock for its whole chain. The
+// terminal DeleteSandbox is idempotent (ErrNotFound → already gone).
 func (m *Mediator) destroyLocked(ctx context.Context, rec model.Sandbox) error {
 	id := rec.ID
 	// tear down any live placement + mount (running case).
@@ -415,14 +426,23 @@ func (m *Mediator) coldStart(ctx context.Context, id model.SandboxID, ov *rootfs
 		_ = m.deps.Rootfs.Unmount(ctx, merged)
 		return fmt.Errorf("launch: %w", err)
 	}
+	// Record the live placement the MOMENT it physically exists — before the
+	// readiness gate, not after ⑦. A concurrent periodic reconcile that started
+	// after our create/resume was snapshotted would otherwise see this freshly
+	// launched netns/container as an orphan (not in `recs`, not yet in the
+	// live-map) and reclaim it during the awaitHealthy window. Seeding it here
+	// puts it in liveIDs() so the periodic keep-set protects it (§4.4-A). The
+	// transition lock is held for the whole chain, so this is not visible to a
+	// user verb. On a health-gate failure we take() it back out and tear down.
+	m.put(id, &liveState{placement: pl, merged: merged})
 	// ⑦ readiness gate: poll Health RPC to first success (not bare TCP accept;
 	// guest-runtime D5.2 要点①).
 	if err := m.awaitHealthy(ctx, pl); err != nil {
+		m.take(id) // un-record before teardown so a racing reconcile sees no live handle
 		_ = m.deps.Runtime.Destroy(ctx, pl)
 		_ = m.deps.Rootfs.Unmount(ctx, merged)
 		return fmt.Errorf("health gate: %w", err)
 	}
-	m.put(id, &liveState{placement: pl, merged: merged})
 	return nil
 }
 
@@ -530,64 +550,55 @@ func (m *Mediator) reconcile(ctx context.Context, periodic bool) error {
 
 	// keep = SandboxIDs whose placement must NOT be reclaimed: successfully
 	// re-adopted `running` survivors PLUS any `running` sandbox we could not
-	// resolve (protect-on-uncertainty). A `paused`/`creating` sandbox holds no
+	// resolve (protect-on-uncertainty) PLUS — in the periodic path — any sandbox
+	// a verb is actively building (held lock) or that we already hold a live
+	// handle for. A `paused`/`creating` sandbox with no in-flight verb holds no
 	// legitimate live placement, so it never enters keep.
 	keep := make([]string, 0)
 
 	for _, rec := range recs {
-		switch rec.State {
-		case model.Creating:
-			// crashed mid-create: never reached a resting state → delete record.
-			// Its half-built placement (if any) falls to ReclaimOrphans (not in
-			// keep); its empty Overlay upper never held useful state → reclaim it.
-			// Publishes NOTHING (nil Event): a crashed `creating` never reached a
-			// running/visible state, so — exactly like the live create-unwind path
-			// (see Create), which deletes with nil — there was no "created" event
-			// and there must be no unpaired "destroyed" (a billing subscriber must
-			// not see a destroyed for a sandbox it never saw created). §4.4-A frames
-			// this as an internal half-step, not an externally-visible §4.1 transition.
-			m.reclaimOrphanOverlay(ctx, rec, true)
-			if err := m.deps.Store.DeleteSandbox(ctx, rec.ID, nil); err != nil && err != store.ErrNotFound {
-				m.deps.Logf("reconcile: skip creating %s: delete record: %v", rec.ID, err)
-			}
-		case model.Paused:
-			// keep the record; a half-built placement (crashed mid-resume) is an
-			// orphan → unmount its lingering Overlay mount, but KEEP the upper
-			// (resumable, §4.2). The netns/container fall to ReclaimOrphans.
-			m.reclaimOrphanOverlay(ctx, rec, false)
-		case model.Running:
-			if periodic {
-				// (1) skip a sandbox a verb is driving (held lock, §4.4-B). Not an
-				// orphan — protect its placement and retry next tick.
-				l, ok := m.tryLock(rec.ID)
-				if !ok {
-					keep = append(keep, string(rec.ID))
-					continue
-				}
-				// (2) a live handle THIS process built → not an orphan, no re-adopt
-				// needed. Keep and move on (still holding the lock briefly). Re-read
-				// under the lock so a resume/pause that just finished is respected.
-				if cur, gerr := m.deps.Store.GetSandbox(ctx, rec.ID); gerr != nil || cur.State != model.Running {
-					l.Unlock()
-					continue // state changed under us → not our concern this pass
-				}
-				if m.hasLive(rec.ID) {
-					l.Unlock()
-					keep = append(keep, string(rec.ID))
-					continue
-				}
-				// running, no live handle, lock held by us: crash-recovery semantics
-				// (never built here / first tick after crash). Adopt-or-demote under
-				// the held lock, then release.
-				adopted, aerr := m.adoptOrDemoteLocked(ctx, rec)
-				l.Unlock()
-				m.reconcileRunningOutcome(ctx, rec, adopted, aerr, &keep)
+		if periodic {
+			// A held transition lock means a verb (in-flight create / resume /
+			// user pause) is driving this sandbox — its placement is being BUILT,
+			// not orphaned. Skip it UNIFORMLY IN ALL STATES (§4.4-A "对持锁沙箱
+			// 一律跳过"; reaper-health D4 addition 1), not just `running`: tearing
+			// down a being-built create (destroys overlay + empty upper) or resume
+			// (tears down the netns/container it just launched) out from under the
+			// verb is the exact corruption the skip exists to prevent. Protect its
+			// placement (add to keep) and retry next tick. At startup this never
+			// triggers — locks are all fresh (see Reconcile).
+			l, ok := m.tryLock(rec.ID)
+			if !ok {
+				keep = append(keep, string(rec.ID))
 				continue
 			}
-			// startup: locks are all fresh, live-map empty → blocking adopt/demote.
-			adopted, err := m.adoptOrDemote(ctx, rec)
-			m.reconcileRunningOutcome(ctx, rec, adopted, err, &keep)
+			// Re-read under the lock: a verb that finished between the snapshot and
+			// acquiring the lock may have changed the state. Reconcile the CURRENT
+			// record; a gone record (a crashed-create just deleted) → nothing to do.
+			cur, gerr := m.deps.Store.GetSandbox(ctx, rec.ID)
+			if gerr != nil {
+				l.Unlock()
+				continue
+			}
+			m.reconcileRecordLocked(ctx, cur, &keep)
+			l.Unlock()
+			continue
 		}
+		// startup: locks are all fresh, live-map empty → adoptOrDemote takes its
+		// own lock (adoptOrDemote vs adoptOrDemoteLocked, §4.4-B).
+		m.reconcileRecord(ctx, rec, &keep)
+	}
+
+	// Periodic only: protect every placement THIS process currently holds a live
+	// handle for (§4.4-A / reaper-health D4 addition 2). A build that completed
+	// AFTER the ListSandboxes snapshot is in the live-map but not in `recs`, and a
+	// re-adopted survivor is already here — seeding keep from the live-map covers
+	// both so ReclaimOrphans never tears down a live placement it just missed in
+	// the record scan. The dedup keeps the keep-set a true set (a re-adopted
+	// survivor is in both the record scan and the live-map). At startup the
+	// live-map is empty, so this is a no-op.
+	if periodic {
+		keep = dedup(append(keep, m.liveIDs()...))
 	}
 
 	// reclaim every engine placement not backing a kept sandbox: orphans from
@@ -607,6 +618,98 @@ func (m *Mediator) reconcile(ctx context.Context, periodic bool) error {
 		m.deps.Logf("reconcile: reclaim orphans (retried next boot): %v", err)
 	}
 	return nil
+}
+
+// reconcileRecord handles one record at STARTUP (no lock held, live-map empty).
+// running → adoptOrDemote takes its own transition lock (§4.4-B).
+func (m *Mediator) reconcileRecord(ctx context.Context, rec model.Sandbox, keep *[]string) {
+	switch rec.State {
+	case model.Creating:
+		// crashed mid-create: never reached a resting state → delete record. Its
+		// half-built placement (if any) falls to ReclaimOrphans (not in keep); its
+		// empty Overlay upper never held useful state → reclaim it. Publishes
+		// NOTHING (nil Event): a crashed `creating` never reached a running/visible
+		// state, so — exactly like the live create-unwind path — there was no
+		// "created" event and there must be no unpaired "destroyed" (a billing
+		// subscriber must not see a destroyed for a sandbox it never saw created).
+		m.reclaimOrphanOverlay(ctx, rec, true)
+		if err := m.deps.Store.DeleteSandbox(ctx, rec.ID, nil); err != nil && err != store.ErrNotFound {
+			m.deps.Logf("reconcile: skip creating %s: delete record: %v", rec.ID, err)
+		}
+	case model.Paused:
+		// keep the record; a half-built placement (crashed mid-resume) is an orphan
+		// → unmount its lingering Overlay mount, but KEEP the upper (resumable,
+		// §4.2). The netns/container fall to ReclaimOrphans.
+		m.reclaimOrphanOverlay(ctx, rec, false)
+	case model.Running:
+		adopted, err := m.adoptOrDemote(ctx, rec)
+		m.reconcileRunningOutcome(ctx, rec, adopted, err, keep)
+	}
+}
+
+// reconcileRecordLocked handles one record in the PERIODIC path with the
+// transition lock ALREADY HELD by the caller (tryLock succeeded → no verb is
+// driving this sandbox right now). Same dual as startup, except a `running`
+// sandbox we already hold a live handle for is not an orphan and needs no Adopt
+// re-recognition (that is the crash-recovery path) — keep it straight away
+// (reaper-health D4 addition 2). Only a `running` with NO live handle runs
+// adopt/demote (never built here → shouldn't happen, or first tick after a crash
+// = startup semantics).
+func (m *Mediator) reconcileRecordLocked(ctx context.Context, rec model.Sandbox, keep *[]string) {
+	switch rec.State {
+	case model.Creating:
+		// Lock held + still `creating` means the create is NOT in flight (it would
+		// hold the lock and we'd have skipped) — so this is a crashed-create orphan,
+		// same as startup. Delete + reclaim the empty upper.
+		m.reclaimOrphanOverlay(ctx, rec, true)
+		if err := m.deps.Store.DeleteSandbox(ctx, rec.ID, nil); err != nil && err != store.ErrNotFound {
+			m.deps.Logf("reconcile: skip creating %s: delete record: %v", rec.ID, err)
+		}
+	case model.Paused:
+		// Lock held + `paused` means no resume is in flight — a cleanly paused
+		// sandbox has no merged mount, so this is a best-effort no-op; a lingering
+		// mount from a crashed mid-resume is unmounted, upper KEPT (§4.2).
+		m.reclaimOrphanOverlay(ctx, rec, false)
+	case model.Running:
+		if m.hasLive(rec.ID) {
+			*keep = append(*keep, string(rec.ID)) // live handle we built → not an orphan
+			return
+		}
+		adopted, aerr := m.adoptOrDemoteLocked(ctx, rec)
+		m.reconcileRunningOutcome(ctx, rec, adopted, aerr, keep)
+	}
+}
+
+// liveIDs snapshots the SandboxIDs the mediator currently holds a live placement
+// handle for (§4.4-A periodic keep-set seed). Ordering is irrelevant — keep is a
+// set to the provider.
+func (m *Mediator) liveIDs() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]string, 0, len(m.live))
+	for id, ls := range m.live {
+		if ls != nil && ls.placement != nil {
+			out = append(out, string(id))
+		}
+	}
+	return out
+}
+
+// dedup returns ids with duplicates removed, order preserved. The keep-set is a
+// SET to ReclaimOrphans; the record scan and the live-map seed can name the same
+// re-adopted survivor, and the assertion-friendly single-entry form keeps tests
+// (and logs) honest.
+func dedup(ids []string) []string {
+	seen := make(map[string]bool, len(ids))
+	out := ids[:0]
+	for _, id := range ids {
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	return out
 }
 
 // reconcileRunningOutcome folds an adopt-or-demote result into keep / orphan

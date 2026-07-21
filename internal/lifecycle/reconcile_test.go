@@ -275,6 +275,149 @@ func TestPeriodicReconcileSkipsLockedSandbox(t *testing.T) {
 	}
 }
 
+// waitForCall polls fn's recorded calls until `want` appears or the deadline
+// hits (used to synchronize on a verb reaching its gated Launch, i.e. holding
+// the transition lock).
+func waitForCall(t *testing.T, calls func() []string, wantPrefix string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, c := range calls() {
+			if strings.HasPrefix(c, wantPrefix) {
+				return
+			}
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for call with prefix %q; got %v", wantPrefix, calls())
+}
+
+// periodic reconcile must NOT tear down an IN-FLIGHT create (§4.4-A "对持锁沙箱
+// 一律跳过", ALL states — reaper-health D4 addition 1). A live Create holds the
+// transition lock across its whole cold-start with the record reading `creating`;
+// a periodic tick in that window must skip it, NOT delete the record + destroy
+// the overlay it is building. This pins the bug where the periodic path applied
+// the lock-held skip only to `running`, so the `creating` arm ran unconditionally.
+func TestPeriodicReconcileSkipsInFlightCreate(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	rp := &fakeRootfs{}
+	gate := make(chan struct{})
+	rt := &fakeRuntime{launchGate: gate, adoptAlive: map[string]bool{}}
+	m := New(Deps{
+		Store: st, Runtime: rt, Rootfs: rp,
+		Dial:          func(transport.Endpoint) transport.Client { return &fakeClient{healthy: true} },
+		HealthTimeout: time.Second,
+	})
+
+	done := make(chan struct{})
+	var sid model.SandboxID
+	var createErr error
+	go func() {
+		sid, createErr = m.Create(ctx, CreateSpec{Template: "bare"})
+		close(done)
+	}()
+
+	// wait until Create is blocked inside Launch → lock held, record `creating`.
+	waitForCall(t, rt.Calls, "Launch:") // any Launch; only this create is running
+	// resolve the in-flight creating record id.
+	recs, _ := st.ListSandboxes(ctx)
+	var creatingID model.SandboxID
+	for _, r := range recs {
+		if r.State == model.Creating {
+			creatingID = r.ID
+		}
+	}
+	if creatingID == "" {
+		t.Fatal("no creating record while Create is mid-Launch")
+	}
+
+	rootfsBefore := len(rp.Calls())
+	if err := m.ReconcilePeriodic(ctx); err != nil {
+		t.Fatalf("ReconcilePeriodic: %v", err)
+	}
+
+	// the in-flight create must survive untouched: record still creating, overlay
+	// NOT destroyed by the reconcile.
+	if rec, err := st.GetSandbox(ctx, creatingID); err != nil || rec.State != model.Creating {
+		t.Fatalf("in-flight create disturbed: state=%s err=%v; want creating (skipped)", rec.State, err)
+	}
+	for _, c := range rp.Calls()[rootfsBefore:] {
+		if c == "DestroyOverlay:"+string(recs[0].Overlay) || c == "AdoptMerged:"+string(recs[0].Overlay) {
+			t.Fatalf("reconcile touched an in-flight create's overlay: %s", c)
+		}
+	}
+
+	close(gate) // let Create finish
+	<-done
+	if createErr != nil {
+		t.Fatalf("Create failed: %v", createErr)
+	}
+	if rec, _ := st.GetSandbox(ctx, sid); rec.State != model.Running {
+		t.Fatalf("create did not reach running after reconcile skip: %s", rec.State)
+	}
+}
+
+// periodic reconcile must NOT tear down an IN-FLIGHT resume (§4.4-A, ALL states).
+// A live Resume holds the lock across cold-start with the record reading `paused`;
+// a periodic tick must skip it, NOT unmount the merged overlay it just mounted or
+// reclaim the placement it just launched. Pins the `paused`-arm half of the same
+// bug.
+func TestPeriodicReconcileSkipsInFlightResume(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	rp := &fakeRootfs{}
+	gate := make(chan struct{})
+	rt := &fakeRuntime{launchGate: gate, adoptAlive: map[string]bool{}}
+	m := New(Deps{
+		Store: st, Runtime: rt, Rootfs: rp,
+		Dial:          func(transport.Endpoint) transport.Client { return &fakeClient{healthy: true} },
+		HealthTimeout: time.Second,
+	})
+	seedRec(t, st, "res_x", "ov_res", model.Paused)
+
+	done := make(chan struct{})
+	var resumeErr error
+	go func() {
+		resumeErr = m.Resume(ctx, "res_x")
+		close(done)
+	}()
+
+	// wait until Resume is blocked inside Launch → lock held, record still `paused`.
+	waitForCall(t, rt.Calls, "Launch:res_x")
+
+	rootfsBefore := len(rp.Calls())
+	if err := m.ReconcilePeriodic(ctx); err != nil {
+		t.Fatalf("ReconcilePeriodic: %v", err)
+	}
+
+	// the reconcile must not have unmounted / re-adopted the resume's overlay.
+	for _, c := range rp.Calls()[rootfsBefore:] {
+		if c == "AdoptMerged:ov_res" || c == "Unmount:/fake/merged/ov_res" || c == "DestroyOverlay:ov_res" {
+			t.Fatalf("reconcile touched an in-flight resume's overlay: %s", c)
+		}
+	}
+	// its placement must be PROTECTED in keep (held lock → skip → keep).
+	var reclaimCall string
+	for _, c := range rt.Calls() {
+		if strings.HasPrefix(c, "ReclaimOrphans:") {
+			reclaimCall = c
+		}
+	}
+	if !strings.Contains(reclaimCall, "res_x") {
+		t.Fatalf("in-flight resume not protected from reclaim: keep=%q; want it to contain res_x", reclaimCall)
+	}
+
+	close(gate) // let Resume finish
+	<-done
+	if resumeErr != nil {
+		t.Fatalf("Resume failed: %v", resumeErr)
+	}
+	if rec, _ := st.GetSandbox(ctx, "res_x"); rec.State != model.Running {
+		t.Fatalf("resume did not reach running after reconcile skip: %s", rec.State)
+	}
+}
+
 // Reconcile is idempotent: a second pass over an already-reconciled store makes
 // no further changes (幂等).
 func TestReconcileIdempotent(t *testing.T) {
