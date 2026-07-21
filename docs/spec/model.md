@@ -59,7 +59,7 @@ ssh 同一台 Linux,是 Unix 模型本身。**每条连接 = `process` 服务的
 一个沙箱里可能要跑多个 agent、不同种 agent,甚至 **agent 自己再派生 agent**(swarm)。
 **engine 只提供 process/fs 两个通用机制,从不认识"agent"这个概念**。三层切开,各归其位:
 
-- **Engine 层(本计划造的)**:沙箱就是一台机器,只暴露 `process`(起/连/控进程)和 `fs`(读写
+- **Engine 层**:沙箱就是一台机器,只暴露 `process`(起/连/控进程)和 `fs`(读写
   文件)。agent 派生 agent = 一台 Linux 上的进程经 localhost 互相说话,engine **不追踪、也不该
   追踪**(符合解耦前提)。engine 侧**没有**命名端点、tag、会话注册表这类原语。
 - **寻址用 guest 原生机制,不靠 engine 造命名空间**:要跟某个(含被派生的)agent 说话,用它的
@@ -160,7 +160,7 @@ creating ──▶ running ──pause / auto-pause / crash──▶ paused ─�
 
 ### 4.2 pause / resume:FS-first,无内存快照
 
-这是本计划与"重型快照系统"的根本分野:
+这是本引擎与"重型快照系统"的根本分野:
 
 - **pause** = 把沙箱静止到一致点 → 干净停掉 runsc 容器。Overlay 工件**本来就在后端上**,
   pause 时它**什么都不用做**;停容器即释放 RAM/CPU。
