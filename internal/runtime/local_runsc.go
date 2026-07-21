@@ -377,12 +377,14 @@ func (p *LocalRunsc) teardownPlacement(h *placementHandle) {
 	// runsc kill+delete (releases the container's cgroup leaf on delete).
 	_ = p.runsc(context.Background(), "kill", h.cid, "KILL")
 	_ = p.runsc(context.Background(), "delete", "--force", h.cid)
-	// netns delete cascades the peer veth; also drop the host veth in case not.
-	if h.netns != "" {
-		_ = p.ipCmd("netns", "del", h.netns)
-	}
+	// Strict reverse-dependency order (§4.4-A: build was netns → veth → runsc, so
+	// teardown is runsc → veth → netns). Deleting the HOST veth cascades its guest
+	// peer (a veth pair dies with either end), leaving an empty netns to drop last.
 	if h.vethHost != "" {
 		_ = p.ipCmd("link", "del", h.vethHost)
+	}
+	if h.netns != "" {
+		_ = p.ipCmd("netns", "del", h.netns)
 	}
 	if h.bundleDir != "" {
 		_ = os.RemoveAll(h.bundleDir)
