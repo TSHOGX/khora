@@ -68,7 +68,6 @@ const (
 // teardown needs — the placement-local resource kinds relevant here (§4.4-A
 // reclaim order: runsc → veth → netns).
 type placementHandle struct {
-	sandbox   string
 	cid       string
 	netns     string
 	vethHost  string
@@ -84,7 +83,6 @@ func namesFor(sandbox string) placementHandle {
 	sum := sha256.Sum256([]byte(sandbox))
 	short := hex.EncodeToString(sum[:])[:12] // 12 hex → "vh"+12 = 14 ≤ 15 (IFNAMSIZ)
 	return placementHandle{
-		sandbox:  sandbox,
 		cid:      cidPrefix + sandbox,
 		netns:    nsPrefix + sandbox,
 		vethHost: "vh" + short,
@@ -481,12 +479,7 @@ func (p *LocalRunsc) run(ctx context.Context, argv []string) error {
 
 // runOut executes a command and returns stdout. On non-zero exit it wraps the
 // combined output in the error so failures report real output.
-func (p *LocalRunsc) runOut(ctx context.Context, argv []string, netnsExec ...string) ([]byte, error) {
-	// netnsExec (optional) runs the command inside a named netns: `ip netns exec
-	// <ns> <argv...>` when argv starts with "ip", we instead use `ip -n <ns>`.
-	if len(netnsExec) == 1 && len(argv) > 0 && argv[0] == "ip" {
-		argv = append([]string{"ip", "-n", netnsExec[0]}, argv[1:]...)
-	}
+func (p *LocalRunsc) runOut(ctx context.Context, argv []string) ([]byte, error) {
 	if p.Sudo {
 		argv = append([]string{"sudo", "-n"}, argv...)
 	}

@@ -18,14 +18,14 @@ import "context"
 type Overlay struct {
 	ID       string // OverlayID (opaque above §5.B)
 	Template string // the Template it references as read-only lower (§3.1.1 Binding)
-
-	// upperPath / workPath are the single-node materialization (D3 resident
-	// upper). Unexported: they must not leak above the Rootfs subsystem
-	// (§3.1.1). work MUST share the same overlayfs-capable FS as upper, and
-	// (for the later disk-capacity cap) the same quota unit (D6.3).
-	upperPath string
-	workPath  string
 }
+
+// The single-node host paths (upper/work/merged) are NOT carried on this struct:
+// they derive deterministically from ID under the FS provider's StateDir (see
+// HostOverlayFS.upperPath/workPath), so the provider recomputes them on demand
+// and nothing above §5.B ever sees them (§3.1.1 对内也 ID 寻址). upper/work must
+// share one overlayfs-capable FS and one quota unit for the later disk-capacity
+// cap (D6.3).
 
 // Merged is a handle to an assembled merged rootfs, ready to hand to the
 // runtime provider as an opaque RootfsSource (§5.A: provider doesn't know how

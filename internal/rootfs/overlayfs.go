@@ -55,14 +55,10 @@ func (p *HostOverlayFS) lowerPath(template string) string {
 	return filepath.Join(p.TemplatesDir, template)
 }
 
-// handle rebuilds the private Overlay struct fields from the ID.
+// handle builds the above-subsystem Overlay view ({ID, Template}); host paths
+// are derived on demand from the ID, not stored (see rootfs.go).
 func (p *HostOverlayFS) handle(overlayID, template string) *Overlay {
-	return &Overlay{
-		ID:        overlayID,
-		Template:  template,
-		upperPath: p.upperPath(overlayID),
-		workPath:  p.workPath(overlayID),
-	}
+	return &Overlay{ID: overlayID, Template: template}
 }
 
 // CreateOverlay allocates an empty upper (① create prefix). It does NOT mount.

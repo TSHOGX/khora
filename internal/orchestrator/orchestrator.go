@@ -47,7 +47,6 @@ type Engine struct {
 	Mediator  *lifecycle.Mediator
 	Store     store.Store
 	Publisher *store.Publisher
-	cfg       Config
 }
 
 // New wires the assembly. It does not start any server, and it does NOT run
@@ -98,7 +97,7 @@ func New(cfg Config) (*Engine, error) {
 		log.Printf("event: %s sandbox=%s state=%s id=%s", ev.Kind, ev.Sandbox, ev.State, ev.ID)
 	}))
 
-	return &Engine{Mediator: med, Store: st, Publisher: pub, cfg: cfg}, nil
+	return &Engine{Mediator: med, Store: st, Publisher: pub}, nil
 }
 
 // Reconcile runs the §4.4-A startup crash-reconciliation (orphan reclaim +

@@ -65,11 +65,11 @@ type Mediator struct {
 	mu    sync.Mutex // guards locks map only
 	locks map[model.SandboxID]*sync.Mutex
 
-	// placements + merged hold the live placement handle and mounted merged
-	// rootfs per sandbox. In-memory and non-authoritative: placement-local state
-	// (§3.3, rebound every resume), NOT persistent SoT. M2's crash reconciliation
-	// (§4.4-A) rebuilds the equivalent by scanning host resources against the
-	// authoritative store.
+	// live holds the per-sandbox liveState (placement handle + mounted merged
+	// rootfs). In-memory and non-authoritative: placement-local state (§3.3,
+	// rebound every resume), NOT persistent SoT. Crash reconciliation (§4.4-A)
+	// rebuilds the equivalent by scanning host resources against the authoritative
+	// store.
 	live map[model.SandboxID]*liveState
 }
 

@@ -24,8 +24,7 @@ import (
 // the outbox is a first-class table and the state row + event row commit together
 // without contortion.
 type SQLite struct {
-	db   *sql.DB
-	path string
+	db *sql.DB
 }
 
 const sqliteSchema = `
@@ -100,7 +99,7 @@ func OpenSQLite(path string) (*SQLite, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("store/sqlite: schema: %w", err)
 	}
-	return &SQLite{db: db, path: path}, nil
+	return &SQLite{db: db}, nil
 }
 
 // Close releases the database handle.
