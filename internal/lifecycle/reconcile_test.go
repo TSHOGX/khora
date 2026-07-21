@@ -67,9 +67,18 @@ func TestReconcileDualDispatch(t *testing.T) {
 		t.Fatalf("Reconcile: %v", err)
 	}
 
-	// creating → deleted (destroyed).
+	// creating → deleted, publishing NOTHING (a crashed creating never reached a
+	// visible running state, matching the live create-unwind path — no unpaired
+	// "destroyed" for a sandbox no subscriber ever saw created).
 	if _, err := st.GetSandbox(ctx, "creat_x"); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("creating record not deleted: %v", err)
+	}
+	if evs, _ := st.UnpublishedEvents(ctx); len(evs) > 0 {
+		for _, e := range evs {
+			if e.Sandbox == "creat_x" {
+				t.Errorf("creating→delete published event %q; want none (never was visible)", e.Kind)
+			}
+		}
 	}
 	// paused → kept, still paused.
 	if rec, err := st.GetSandbox(ctx, "paused_x"); err != nil || rec.State != model.Paused {

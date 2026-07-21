@@ -403,12 +403,17 @@ func (m *Mediator) Reconcile(ctx context.Context) error {
 	for _, rec := range recs {
 		switch rec.State {
 		case model.Creating:
-			// crashed mid-create: never reached a resting state → destroy record.
+			// crashed mid-create: never reached a resting state → delete record.
 			// Its half-built placement (if any) falls to ReclaimOrphans (not in
-			// keep); its empty Overlay upper never held useful state → reclaim it
-			// (create's terminal is destroyed, §4.1).
+			// keep); its empty Overlay upper never held useful state → reclaim it.
+			// Publishes NOTHING (nil Event): a crashed `creating` never reached a
+			// running/visible state, so — exactly like the live create-unwind path
+			// (see Create), which deletes with nil — there was no "created" event
+			// and there must be no unpaired "destroyed" (a billing subscriber must
+			// not see a destroyed for a sandbox it never saw created). §4.4-A frames
+			// this as an internal half-step, not an externally-visible §4.1 transition.
 			m.reclaimOrphanOverlay(ctx, rec, true)
-			if err := m.deps.Store.DeleteSandbox(ctx, rec.ID, newEvent(rec.ID, "destroyed", model.Destroyed)); err != nil && err != store.ErrNotFound {
+			if err := m.deps.Store.DeleteSandbox(ctx, rec.ID, nil); err != nil && err != store.ErrNotFound {
 				m.deps.Logf("reconcile: skip creating %s: delete record: %v", rec.ID, err)
 			}
 		case model.Paused:
