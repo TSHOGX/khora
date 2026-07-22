@@ -379,17 +379,15 @@ func (s *processServer) Start(ctx context.Context, req *connect.Request[v1.Start
 
 	// Independent context: the process must outlive this Start stream so a later
 	// Connect can reattach (§3.2). Signals/exit end it, not a client disconnect.
+	//
+	// Processes run as guest root — the engine defaults to root and does not model
+	// guest users (§2.2: guest identity is not a host-isolation pillar; sentry
+	// virtualizes guest uid 0, so guest-root costs nothing on the isolation axis).
+	// "Run as a different user" is a guest-native concern (su/sudo), not an engine
+	// primitive (§3.2.1).
 	cmd := exec.Command(m.Cmd, m.Args...)
 	cmd.Env = m.Env
 	cmd.Dir = m.Cwd
-	// NOTE: m.GuestUser (per-Start run-as, §6.2) is NOT YET ENFORCED (deferred).
-	// We exec as the guest default (root, §2.2) regardless. Applying it means
-	// resolving the guest user (uid/gid via /etc/passwd) and setting
-	// SysProcAttr.Credential below — an additive follow-on. See the guest_user
-	// deferral note in transport.proto and open-decisions §4. A non-empty
-	// m.GuestUser is ignored; not a host-isolation gap, but a documented param
-	// that fails open — must be implemented before relying on in-guest privilege
-	// separation.
 
 	var p *proc
 	var sources []source

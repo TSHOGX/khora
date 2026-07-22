@@ -44,7 +44,7 @@ Template   不可变、内容寻址的只读底座(可被多沙箱共享/fork)
 ### 3.2 沙箱 = 持久单元,连接 = 多路并发的 process
 
 ```text
-Sandbox(持久单元:Overlay 工件、挂载的 Volume、网络策略、guest 身份、资源上限)  ← 稳定、不透明 ID
+Sandbox(持久单元:Overlay 工件、挂载的 Volume、网络策略、资源上限)  ← 稳定、不透明 ID
   ├── shell        (process + PTY)
   ├── agent        (process,如 Claude)
   └── agent        (process,如 Pi)     ← 多路并发,共享同一沙箱的 FS / 网络

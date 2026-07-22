@@ -46,8 +46,8 @@
 
 安装工具链(Python / npm / Node / Rust 等)与部署长驻 DB 是两回事。`apt`/`npm`/`pip`/cargo 都是
 **一次性命令**——exec、跑完就退,不是 `service xxx start` 的守护进程,**根本不碰 init**。默认进
-sandbox 是 root(镜像未切 `USER` 时),安装依赖的权限天然满足;guest 内 root 被 sentry 在用户态拦截、
-逃不到宿主(spec §2.2),所以"放心让需要 root 的安装在里面跑"正是 gVisor 的姿势。唯一前置是网络:
+sandbox 就是 root(引擎默认 guest root,§2.2),安装依赖的权限天然满足;guest 内 root 被 sentry 在用户态
+拦截、逃不到宿主(spec §2.2),所以"放心让需要 root 的安装在里面跑"正是 gVisor 的姿势。唯一前置是网络:
 `apt`/`npm` 出网走 spec §5.D 的出站默认放行(经 egress gateway)。
 
 > postgres 之所以麻烦,不是 gVisor 的 syscall 兼容性(postgres-on-gVisor 能跑),而是"容器没有

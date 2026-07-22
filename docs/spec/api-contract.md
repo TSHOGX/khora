@@ -21,7 +21,7 @@ CRUD、无流:
 
 ```text
 # Sandbox 生命周期
-POST   /v1/sandboxes                 {template_id, network?, volumes?, guest_user?, idle_timeout?, retention?}  → {sandbox_id}
+POST   /v1/sandboxes                 {template_id, network?, volumes?, idle_timeout?, retention?}  → {sandbox_id}
 GET    /v1/sandboxes/{id}                                                          → {state, ...}
 POST   /v1/sandboxes/{id}/pause
 POST   /v1/sandboxes/{id}/resume
@@ -57,7 +57,7 @@ wire 看 proto:
 ```text
 # Process(连接)— 起进程 / 重连 / 输入 / 信号 / 列进程;PTY 是带 pty 字段的特例,pid 寻址
 #   权威:ProcessService.{Start,Connect,StreamInput,SendInput,SendSignal,Update,List,CloseStdin}
-(示意)  processes                     {cmd, args?, pty?, cwd?, env?, guest_user?}   → {pid, stream}
+(示意)  processes                     {cmd, args?, pty?, cwd?, env?}   → {pid, stream}
 (示意)  processes/{pid}/connect                                                     → {stream}(重连,先回放有界环形缓冲再接 live,D4.3)
 (示意)  processes/{pid}/signal        {signal}
 (示意)  processes                                                                    (实时 list,无注册表)
@@ -74,9 +74,8 @@ wire 看 proto:
 
 - **ID 寻址**:对外只认 sandbox / template / volume 的不透明 ID 与进程 pid,不暴露宿主路径或
   placement。同一要求贯彻到引擎内部的 Overlay 工件(§3.1.1)。
-- **创建期注入身份**:网络 / Volume 挂载 / guest 默认身份(create 参数 `guest_user`,即 §2.2 的 guest
-  默认运行用户)在 create 时一次性绑定(不做晚绑定);但身份**经控制面通道注入**这一**流程形状**不被
-  抄近路绕过,以后接预热池(晚绑定)复用同一注入点即可。process 上的 `guest_user` 是另一回事——它只是
-  该次 `Start` 的 run-as(以哪个 guest 用户 exec,类比 `sudo -u`),不改沙箱创建期绑定的默认身份。
+- **创建期注入绑定**:网络 / Volume 挂载在 create 时一次性绑定(不做晚绑定);但**经控制面通道注入**
+  这一**流程形状**不被抄近路绕过,以后接预热池(晚绑定)复用同一注入点即可。**guest 身份不在其列**:
+  默认 guest root,引擎不建模 guest 用户,create 与 `Start` 都无 run-as 参数(§2.2 / §3.2.1)。
 - **store / runtime provider 走接口**:换后端 / 加 provider 是注册一个新实现,不改上层模型
   (§1.3 只做加法;provider 始终是抽象契约,见 §1.1 / §5.A)。

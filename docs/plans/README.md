@@ -28,9 +28,9 @@ Acceptance for the shipped milestones lives in the substrate tests
 
 | # | Plan | Capability delivered | Anchors |
 | --- | --- | --- | --- |
-| **M5** | *(planned)* | Volume: mount table, exclusive lease, direct-write regime | §5.C |
-| **M6** | *(planned)* | Network egress data plane + layered deny-set + credential injection (**security-critical**) | §5.D · §2.4 |
-| **M7** | *(planned)* | Promote + layered Templates + refcount GC | §5.B · §4.3 |
+| **M5** | *(planned)* | Templates: first-class Template rows (lifecycle + refcount + lineage) + reference-reclaim atomicity + Promote + refcount GC | §5.B · §4.3 |
+| **M6** | *(planned)* | Volume: mount table, exclusive lease (= refcount mount row), direct-write regime | §5.C |
+| **M7** | *(planned)* | Network egress data plane + layered deny-set + credential injection (**security-critical**) | §5.D · §2.4 |
 | **M8** | *(planned)* | Credential store seam | §5.D |
 
 The §6 API / CLI contract grows alongside from M1 — it is not a separate
@@ -46,6 +46,17 @@ transport surface is real (PTY, `Connect`, multi-connection fan-out) — so the
 reaper landed on real signals and folded in the periodic reconcile deferred from
 M2.
 
-M5–M8 each add one subsystem/capability on already-verified seams. The
-security-critical egress work (M6) lands only after the lifecycle + storage +
-transport foundation is solid.
+**Reordering after M4 (2026-07-22).** **Templates (M5) is pulled ahead of Volume**
+(the old ladder had Volume next): it faces the hardest object-model case directly
+— `create-from-Template` is already an *unprotected reference* today (Template is a
+bare directory, no row / refcount / lineage) — so M5 pours the **uniform object
+model + reference-reclaim atomicity** foundation (§4.3) that the README
+first-principled but no code has built yet. Volume (M6) then reuses that
+foundation (its exclusive lease *is* a refcount mount row, §5.C). The
+security-critical egress work (M7) still lands only after the lifecycle + storage
++ transport foundation is solid.
+
+> A guest run-as identity milestone was briefly planned here, then dropped: the
+> engine **defaults to guest root and does not model guest users** (§2.2 —
+> guest-root is not a host-isolation pillar; "run as user X" is a guest-native
+> `su`/`sudo` concern, §3.2.1). There is nothing to build, so no milestone.

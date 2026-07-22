@@ -68,7 +68,7 @@ func (p *processProxy) Start(ctx context.Context, req *connect.Request[v1.StartR
 		return err
 	}
 	m := req.Msg
-	spec := transport.StartSpec{Cmd: m.Cmd, Args: m.Args, Env: m.Env, Cwd: m.Cwd, GuestUser: m.GuestUser}
+	spec := transport.StartSpec{Cmd: m.Cmd, Args: m.Args, Env: m.Env, Cwd: m.Cwd}
 	if m.Pty != nil {
 		spec.Pty = &transport.PtySize{Rows: uint16(m.Pty.Rows), Cols: uint16(m.Pty.Cols)}
 	}

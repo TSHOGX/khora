@@ -88,17 +88,13 @@ message StartRequest {
   repeated string args = 2;
   repeated string env = 3;
   string cwd = 4;
-  // guest_user is the per-Start run-as (like `sudo -u`, §6.2) — NOT the sandbox
-  // default identity. Empty = inherit.
-  //
-  // NOT YET ENFORCED (deferred): sandboxd ignores this field and execs every
-  // process as the guest default (root, §2.2). Wiring the run-as
-  // (SysProcAttr.Credential via guest user-lookup) is an additive follow-on;
-  // until then a non-empty guest_user is NOT applied. Tracked in
-  // open-decisions §4. Not a host-isolation gap (§2.2: guest identity is
-  // guest-internal hygiene, not a security pillar), but a documented-API param
-  // that fails open — do not rely on it for in-guest privilege separation yet.
-  string guest_user = 5;
+  // Field 5 was guest_user (per-Start run-as). REMOVED: the engine defaults to
+  // guest root and does not model guest users — "run as user X" is a guest-native
+  // concern (su/sudo), not an engine primitive (§3.2.1 寻址用 guest 原生机制).
+  // Re-add additively iff a real consumer appears (§1.3). Field number 5 is left
+  // reserved so it is never silently reused with different semantics.
+  reserved 5;
+  reserved "guest_user";
   // pty, when set, allocates a PTY of the given size (transport D4.3).
   PtySize pty = 6;
 }

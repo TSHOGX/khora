@@ -73,9 +73,12 @@ func buildOCISpec(mergedPath, netnsPath string) *ociSpec {
 		OCIVersion: "1.0.0",
 		Process: ociProcess{
 			Terminal: false,
-			// Hardcoded root: the sandbox-default run-as (LaunchSpec.GuestUser) is
-			// NOT YET ENFORCED (deferred) — see the note on LaunchSpec.GuestUser.
-			// PID 1 is sandboxd init; a non-root guest default would apply here.
+			// Guest root (uid/gid 0). This is the engine default, not a stub: guest
+			// identity is not a host-isolation pillar (§2.2 — sentry virtualizes guest
+			// uid 0, sentry is unprivileged on the host), so guest-root costs nothing
+			// on the isolation axis and is the most direct expression of §1.1's
+			// "root-capable agent sandbox". PID 1 is sandboxd init; it stays root so
+			// it can hold CAP_NET_* for the netns transport port (§5.A).
 			User:     ociUser{UID: 0, GID: 0},
 			Args:     []string{"/sbin/sandboxd", "init"},
 			Env:      []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "HOME=/root"},

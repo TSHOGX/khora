@@ -65,7 +65,6 @@ func (c *connectClient) Health(ctx context.Context) (HealthStatus, error) {
 func (c *connectClient) Start(ctx context.Context, spec StartSpec) (<-chan ProcessEvent, error) {
 	req := &v1.StartRequest{
 		Cmd: spec.Cmd, Args: spec.Args, Env: spec.Env, Cwd: spec.Cwd,
-		GuestUser: spec.GuestUser,
 	}
 	if spec.Pty != nil {
 		req.Pty = &v1.PtySize{Rows: uint32(spec.Pty.Rows), Cols: uint32(spec.Pty.Cols)}

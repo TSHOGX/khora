@@ -161,8 +161,7 @@ func (m *Mediator) tryLock(id model.SandboxID) (*sync.Mutex, bool) {
 // not stubbed (same rule as model.Sandbox; §1.3 no speculative reservation). The
 // §6.2 create-time injection flow shape holds regardless of when they arrive.
 type CreateSpec struct {
-	Template  model.TemplateID
-	GuestUser string
+	Template model.TemplateID
 
 	// IdleTimeout / Retention are the OPTIONAL TTL Binding inputs (§3.4 / §4.3;
 	// §6.1 POST /v1/sandboxes idle_timeout?/retention?). nil = omitted → the
@@ -190,7 +189,7 @@ func (m *Mediator) Create(ctx context.Context, spec CreateSpec) (model.SandboxID
 	now := time.Now()
 	rec := model.Sandbox{
 		ID: sid, Template: spec.Template, Overlay: oid,
-		State: model.Creating, GuestUser: spec.GuestUser,
+		State: model.Creating,
 		// Materialize the TTL Binding once, at create (§3.4: Binding is stable
 		// across resume; the stored value is the concrete duration the reaper
 		// reads). Omitted inputs resolve to the engine-wide default here.
@@ -217,7 +216,7 @@ func (m *Mediator) Create(ctx context.Context, spec CreateSpec) (model.SandboxID
 		_ = m.deps.Store.DeleteSandbox(ctx, sid, nil) // nothing built, never visible
 		return "", fmt.Errorf("create: overlay: %w", err)
 	}
-	if err := m.coldStart(ctx, sid, ov, spec.GuestUser); err != nil {
+	if err := m.coldStart(ctx, sid, ov); err != nil {
 		// create has no fallback state: reclaim half-built placement + empty
 		// Overlay, delete the record → destroyed (§4.4-A / D5.2 要点④). The
 		// sandbox was never running, so this unwind-delete publishes nothing.
@@ -319,7 +318,7 @@ func (m *Mediator) resumeLocked(ctx context.Context, rec model.Sandbox) error {
 	if err != nil {
 		return fmt.Errorf("resume: open overlay: %w", err)
 	}
-	if err := m.coldStart(ctx, id, ov, rec.GuestUser); err != nil {
+	if err := m.coldStart(ctx, id, ov); err != nil {
 		// resume has a fallback state: reclaim half-built placement, stay paused
 		// (persistent Overlay artifact untouched; §4.4-A).
 		m.unwind(ctx, id, ov, false)
@@ -408,7 +407,7 @@ func (m *Mediator) destroyLocked(ctx context.Context, rec model.Sandbox) error {
 // shared by create and resume (guest-runtime D5.1). On success the live
 // placement + merged are recorded in the mediator. On any error it returns
 // without recording (the caller unwinds).
-func (m *Mediator) coldStart(ctx context.Context, id model.SandboxID, ov *rootfs.Overlay, guestUser string) error {
+func (m *Mediator) coldStart(ctx context.Context, id model.SandboxID, ov *rootfs.Overlay) error {
 	// ① mount lower(Template)/upper/work → merged.
 	merged, err := m.deps.Rootfs.Mount(ctx, ov)
 	if err != nil {
@@ -416,9 +415,8 @@ func (m *Mediator) coldStart(ctx context.Context, id model.SandboxID, ov *rootfs
 	}
 	// ④ launch runsc (sandboxd entrypoint), ⑤ guest boots, ⑥ IP discovered.
 	pl, err := m.deps.Runtime.Launch(ctx, runtime.LaunchSpec{
-		Sandbox:   string(id),
-		Rootfs:    runtime.RootfsSource{MergedPath: merged.MergedPath},
-		GuestUser: guestUser,
+		Sandbox: string(id),
+		Rootfs:  runtime.RootfsSource{MergedPath: merged.MergedPath},
 	})
 	if err != nil {
 		_ = m.deps.Rootfs.Unmount(ctx, merged)

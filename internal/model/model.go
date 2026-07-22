@@ -51,9 +51,11 @@ type Sandbox struct {
 	Template TemplateID
 	Overlay  OverlayID // the writable delta this sandbox owns (§3.1.1)
 	State    Lifecycle
-	// GuestUser is the create-time default run-as identity (§2.2 / §6.2),
-	// a configurable guest default — NOT a security invariant (§2.2).
-	GuestUser string
+
+	// No guest-identity field: the sandbox runs as guest root by default and the
+	// engine does not model guest users (§2.2 — guest identity is not a
+	// host-isolation pillar). "Run as user X" is a guest-native concern (su/sudo),
+	// not engine state (§3.2.1).
 
 	// IdleTimeout and Retention are the lifecycle TTL — per-sandbox Binding
 	// fields (§3.4: SoT is the control-plane record, stable across resume,

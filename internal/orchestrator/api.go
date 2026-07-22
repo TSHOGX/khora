@@ -61,7 +61,6 @@ func (e *Engine) HTTPHandler() http.Handler {
 
 type createReq struct {
 	TemplateID string `json:"template_id"`
-	GuestUser  string `json:"guest_user"`
 	// IdleTimeout / Retention are the optional TTL Binding inputs (§6.1
 	// idle_timeout?/retention?). Accepted as Go duration strings ("30m", "24h")
 	// so the unit is explicit on the wire; omitted/"" → engine-wide default
@@ -80,7 +79,7 @@ func (e *Engine) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	spec := lifecycle.CreateSpec{
-		Template: model.TemplateID(req.TemplateID), GuestUser: req.GuestUser,
+		Template: model.TemplateID(req.TemplateID),
 	}
 	if req.IdleTimeout != "" {
 		d, err := time.ParseDuration(req.IdleTimeout)

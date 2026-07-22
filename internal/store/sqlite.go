@@ -33,7 +33,6 @@ CREATE TABLE IF NOT EXISTS sandboxes (
 	template     TEXT NOT NULL,
 	overlay      TEXT NOT NULL,
 	state        TEXT NOT NULL,
-	guest_user   TEXT NOT NULL,
 	idle_timeout INTEGER NOT NULL DEFAULT 0, -- TTL Binding, ns (§3.4 / §4.3)
 	retention    INTEGER NOT NULL DEFAULT 0, -- TTL Binding, ns (§3.4 / §4.3)
 	created_at   INTEGER NOT NULL, -- unix nanos
@@ -150,10 +149,10 @@ func (s *SQLite) CreateSandbox(ctx context.Context, sb model.Sandbox, ev *Event)
 			return err
 		}
 		if _, err := t.Exec(
-			`INSERT INTO sandboxes(id, template, overlay, state, guest_user, idle_timeout, retention, created_at, updated_at)
-			 VALUES(?,?,?,?,?,?,?,?,?)`,
+			`INSERT INTO sandboxes(id, template, overlay, state, idle_timeout, retention, created_at, updated_at)
+			 VALUES(?,?,?,?,?,?,?,?)`,
 			string(sb.ID), string(sb.Template), string(sb.Overlay), string(sb.State),
-			sb.GuestUser, int64(sb.IdleTimeout), int64(sb.Retention),
+			int64(sb.IdleTimeout), int64(sb.Retention),
 			sb.CreatedAt.UnixNano(), sb.UpdatedAt.UnixNano(),
 		); err != nil {
 			return err
@@ -164,13 +163,13 @@ func (s *SQLite) CreateSandbox(ctx context.Context, sb model.Sandbox, ev *Event)
 
 func (s *SQLite) GetSandbox(ctx context.Context, id model.SandboxID) (model.Sandbox, error) {
 	return scanSandbox(s.db.QueryRowContext(ctx,
-		`SELECT id, template, overlay, state, guest_user, idle_timeout, retention, created_at, updated_at FROM sandboxes WHERE id=?`,
+		`SELECT id, template, overlay, state, idle_timeout, retention, created_at, updated_at FROM sandboxes WHERE id=?`,
 		string(id)))
 }
 
 func (s *SQLite) ListSandboxes(ctx context.Context) ([]model.Sandbox, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, template, overlay, state, guest_user, idle_timeout, retention, created_at, updated_at FROM sandboxes ORDER BY created_at`)
+		`SELECT id, template, overlay, state, idle_timeout, retention, created_at, updated_at FROM sandboxes ORDER BY created_at`)
 	if err != nil {
 		return nil, err
 	}
@@ -267,7 +266,7 @@ func scanSandbox(r rowScanner) (model.Sandbox, error) {
 	var sb model.Sandbox
 	var id, tmpl, ov, state string
 	var idleTimeout, retention, created, updated int64
-	err := r.Scan(&id, &tmpl, &ov, &state, &sb.GuestUser, &idleTimeout, &retention, &created, &updated)
+	err := r.Scan(&id, &tmpl, &ov, &state, &idleTimeout, &retention, &created, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return model.Sandbox{}, ErrNotFound
 	}

@@ -60,12 +60,11 @@ type ProcessEvent struct {
 // StartSpec starts a process (§5.E process service). PTY is the Pty!=nil special
 // case (transport D4.3: pty not a separate service). guest-native pid addressing.
 type StartSpec struct {
-	Cmd       string
-	Args      []string
-	Env       []string
-	Cwd       string
-	GuestUser string   // per-Start run-as, like `sudo -u` (§6.2) — not the sandbox default
-	Pty       *PtySize // non-nil = allocate a PTY
+	Cmd  string
+	Args []string
+	Env  []string
+	Cwd  string
+	Pty  *PtySize // non-nil = allocate a PTY
 }
 
 type PtySize struct{ Rows, Cols uint16 }

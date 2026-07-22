@@ -33,9 +33,10 @@ type RootfsSource struct {
 //
 // Network is none today, so this is empty. Unlike a data record's unused fields
 // (which we omit — see model.Sandbox), this type EXISTS now because it is a named
-// member of the settled §5.A contract 4-tuple (rootfs / steering / limits /
-// identity) — "settled, not yet built" (§1.3), not a speculative reservation.
-// Filled in when the egress data plane lands.
+// member of the settled §5.A contract 3-tuple (rootfs / steering / limits) —
+// "settled, not yet built" (§1.3), not a speculative reservation. (Guest identity
+// is NOT a member: the sandbox runs as guest root and the engine does not model
+// guest users, §2.2 / §3.2.1.) Filled in when the egress data plane lands.
 type SteeringSpec struct{}
 
 // ResourceLimits is the rate-axis Binding the provider materializes at
@@ -51,19 +52,16 @@ type ResourceLimits struct {
 
 // LaunchSpec is the provider input — the contract's left-hand side:
 //
-//	(rootfs 来源, 引流要求, 资源上限, guest 身份) → (placement 句柄, transport 端点, stop/start)
+//	(rootfs 来源, 引流要求, 资源上限) → (placement 句柄, transport 端点, stop/start)
 type LaunchSpec struct {
-	Sandbox   string // opaque sandbox id, for naming/logging only
-	Rootfs    RootfsSource
-	Steering  SteeringSpec
-	Limits    ResourceLimits
-	// GuestUser is the create-time default run-as (§2.2 / §6.2).
-	// NOT YET ENFORCED (deferred): local_runsc.Launch/buildOCISpec hardcode
-	// UID/GID 0 and ignore this field, so the sandbox default runs as root
-	// regardless. Applying it (OCI process.user via guest user-lookup) is an
-	// additive follow-on; see the guest_user deferral note in transport.proto
-	// and open-decisions §4.
-	GuestUser string
+	Sandbox  string // opaque sandbox id, for naming/logging only
+	Rootfs   RootfsSource
+	Steering SteeringSpec
+	Limits   ResourceLimits
+	// No guest-identity field: the sandbox runs as guest root by default and the
+	// engine does not model guest users (§2.2 — guest identity is not a
+	// host-isolation pillar; sentry virtualizes guest uid 0). "Run as user X" is a
+	// guest-native concern (su/sudo), not an engine primitive (§3.2.1).
 }
 
 // Placement is the opaque handle to this launch's physical resources — rebound

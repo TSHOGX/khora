@@ -217,8 +217,12 @@ callout 精确到"不进 resolve 路径");⑤ 的策略在控制面、物化落 
 guest 内部卫生,不是宿主隔离支柱**——五条支柱无一以"guest 非 root"为前提。这也正是"自由安装依赖"
 需要的(`apt` 要 root)。
 
-由此:**guest 身份是可配置的 guest 默认值,不是 security invariant**。默认非 root 进入 + 镜像预置
-`sudo`,用户经 shell 提权安装依赖。代价落在 **guest 内数据面**(§2.3),这是接受的产品取舍。
+由此:**默认就是 guest root**,不引入非 root 默认身份、也不预置切用户机制。既然 guest-root 在隔离轴
+上一文不值(被支柱①虚拟化、逃不到宿主),root 默认是 §1.1「可拿 root 的 agent 沙箱」最直接的表达,
+装依赖的权限天然满足(§5.A guest-runtime D3.1)。**引擎不建模 guest 用户**:「以某用户运行」是 guest
+原生的事(`su`/`sudo`,产品/模板层自理),不是引擎原语(§3.2.1);引擎既无 create 期"默认身份"字段,
+也无 per-`Start` run-as 参数。放开 root 的代价落在 **guest 内数据面**(§2.3),这是接受的产品取舍。
+将来若真有消费者要引擎级 run-as,再按 §1.3 additive 加回,不预留。
 
 ### 2.3 数据面取舍:精确列举可触及面 vs 不可触及面
 

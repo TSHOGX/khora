@@ -10,7 +10,7 @@
 五个子系统**平级**,只依赖 §3 的共用模型(沙箱身份 + store),**不互相依赖**(防成环)。
 本节定目标与边界;各子系统待细化的内部机制登记在 [`open-decisions.md`](./open-decisions.md)。
 
-- **5.A Runtime** — runsc 进程生命周期、guest 身份、三态物化(沙箱"怎么跑")。
+- **5.A Runtime** — runsc 进程生命周期、三态物化(沙箱"怎么跑")。
 - **5.B Rootfs** — Template(只读底层)+ 可写 Overlay 工件;pause/resume 与 Promote 都挂在
   这里(沙箱"是什么")。
 - **5.C Volume** — 解耦、ID 寻址、独立生命周期的存储(额外"挂了哪些独立数据")。
@@ -31,7 +31,8 @@
 - **目标**:让单个沙箱持久、可变、可拿 root、可冷启 from Template。
 - 提供 **runsc 进程级 start/stop 机制**(供 §4 的 create/pause/resume/destroy 动词驱动),
   物化三态模型(§3.1)。动词归 §4,本子系统只给机制(§4 开头"动词归 §4,机制归 §5")。
-- guest 身份**可配置**:默认非 root + sudo 可提权(§2)。
+- guest 默认 **root**;引擎不建模 guest 用户,「以某用户运行」是 guest 原生的事(`su`/`sudo`),
+  不是引擎原语(§2.2 / §3.2.1)。
 - **资源上限物化(只管速率轴)**:沙箱的 CPU/RAM/**disk I/O** 上限是 Binding(§3.4),由本子系统在
   每次 placement 时物化——single-node provider 落成 cgroup(CPU/RAM 限额 + `io` controller 的带宽/
   IOPS 节流);别的 provider 落成其调度层的等价资源约束。**disk 容量上限不在此**——它是 FS 层配额,
@@ -44,8 +45,8 @@
   "宿主本地"假设上,将来任何非本地形态的 provider 都无法承接:
   - ❌ 泄漏宿主原语:"给我一个 cgroup 路径 / 一个 netns fd / Overlay 的**内部**宿主绝对路径
     (upper/work)"——一个被调度到远端 node 的隔离单元根本给不出这些。
-  - ✅ 契约式:`(rootfs 来源, 引流要求, 资源上限, guest 身份) → (placement 句柄, transport
-    端点, 生命周期控制 stop/start)`。**`rootfs 来源`是一个不透明句柄**:`local_runsc` 下它恰好物化成
+  - ✅ 契约式:`(rootfs 来源, 引流要求, 资源上限) → (placement 句柄, transport
+    端点, 生命周期控制 stop/start)`。(不含 guest 身份:默认 guest root,引擎不建模 guest 用户,§2.2。)**`rootfs 来源`是一个不透明句柄**:`local_runsc` 下它恰好物化成
     一个 merged rootfs 路径,远端形态下会是另一种句柄——被禁的是 Overlay 的**内部** upper/work 路径
     (§5.B 已把它设为不可导出),而**已 merged 好的 rootfs 句柄**是本子系统合法的入参,二者不矛盾。**引流要求**是 §5.D 给的 ingress 描述符 + default-deny(把
     egress 全量引导进引擎数据面,§5.D),不是完整网络策略——策略 enforcement 与凭证注入在引擎数据面里,
