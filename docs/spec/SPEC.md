@@ -150,7 +150,7 @@ agent),共享同一 FS 与网络。
 
 | 非目标(今天不做) | 未来接入路径 | 担保它的 seam / invariant |
 | --- | --- | --- |
-| **warm pool**:不为 ms 级感知启动维持完全就绪的沙箱 | 复用"身份经控制面在创建期注入"的流程形状,改为晚绑定(§6.2) | 注入流程形状(§6.2) |
+| **warm pool**:不为 ms 级感知启动维持完全就绪的沙箱 | 复用"网络 / Volume 绑定经控制面在创建期注入"的流程形状,改为晚绑定(§6.2) | 注入流程形状(§6.2) |
 | **授权主体 / 多租户**:不引入 owner / principal 概念 | 加一张 `sandbox↔principal↔capability` join table | Data join table + ID 寻址 invariant |
 | ↳ 连带推迟 **微架构侧信道**(Spectre 类跨租户) | 多租户接入时,placement 层加 co-residency 策略(不共核 / 不共调度) | 引擎外 placement 策略(随多租户激活,§2 五支柱不变) |
 | **多 node / 多 orchestrator HA / 跨宿主迁移**:聚焦单 node、单 orchestrator | 注册一个面向"被调度的远端隔离单元"的 provider(由其调度层承担跨 node) | Behavior registry(runtime provider,§5.A)+ 身份不编码 placement |
@@ -217,9 +217,9 @@ callout 精确到"不进 resolve 路径");⑤ 的策略在控制面、物化落 
 guest 内部卫生,不是宿主隔离支柱**——五条支柱无一以"guest 非 root"为前提。这也正是"自由安装依赖"
 需要的(`apt` 要 root)。
 
-由此:**默认就是 guest root**,不引入非 root 默认身份、也不预置切用户机制。既然 guest-root 在隔离轴
-上一文不值(被支柱①虚拟化、逃不到宿主),root 默认是 §1.1「可拿 root 的 agent 沙箱」最直接的表达,
-装依赖的权限天然满足(§5.A guest-runtime D3.1)。**引擎不建模 guest 用户**:「以某用户运行」是 guest
+由此:**默认就是 guest root**,不引入非 root 默认身份、也不预置切用户机制。既然它在隔离轴上一文不值,
+root 默认就是 §1.1「可拿 root 的 agent 沙箱」最直接的表达,装依赖的权限也天然满足(§5.A guest-runtime
+D3.1)。**引擎不建模 guest 用户**:「以某用户运行」是 guest
 原生的事(`su`/`sudo`,产品/模板层自理),不是引擎原语(§3.2.1);引擎既无 create 期"默认身份"字段,
 也无 per-`Start` run-as 参数。放开 root 的代价落在 **guest 内数据面**(§2.3),这是接受的产品取舍。
 将来若真有消费者要引擎级 run-as,再按 §1.3 additive 加回,不预留。

@@ -43,20 +43,12 @@ shared FS/network" real. M4's reaper had to follow transport: the §4.3 `idle`
 quadrant and TTL-evict are defined against a **connection-activity signal** ("all
 connections idle — no process activity, no pty I/O"), which only exists once the
 transport surface is real (PTY, `Connect`, multi-connection fan-out) — so the
-reaper landed on real signals and folded in the periodic reconcile deferred from
-M2.
+reaper landed on real signals and folded in the periodic reconcile from M2.
 
-**Reordering after M4 (2026-07-22).** **Templates (M5) is pulled ahead of Volume**
-(the old ladder had Volume next): it faces the hardest object-model case directly
-— `create-from-Template` is already an *unprotected reference* today (Template is a
-bare directory, no row / refcount / lineage) — so M5 pours the **uniform object
-model + reference-reclaim atomicity** foundation (§4.3) that the README
-first-principled but no code has built yet. Volume (M6) then reuses that
-foundation (its exclusive lease *is* a refcount mount row, §5.C). The
-security-critical egress work (M7) still lands only after the lifecycle + storage
-+ transport foundation is solid.
-
-> A guest run-as identity milestone was briefly planned here, then dropped: the
-> engine **defaults to guest root and does not model guest users** (§2.2 —
-> guest-root is not a host-isolation pillar; "run as user X" is a guest-native
-> `su`/`sudo` concern, §3.2.1). There is nothing to build, so no milestone.
+**Templates (M5) come before Volume** because Templates face the hardest
+object-model case directly: `create-from-Template` is an *unprotected reference*
+today (Template is a bare directory — no row / refcount / lineage), so M5 pours
+the **uniform object model + reference-reclaim atomicity** foundation (§4.3) that
+Volume (M6) then reuses — its exclusive lease *is* a refcount mount row (§5.C).
+The security-critical egress work (M7) lands only after the lifecycle + storage +
+transport foundation is solid.

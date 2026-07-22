@@ -46,7 +46,7 @@
   - ❌ 泄漏宿主原语:"给我一个 cgroup 路径 / 一个 netns fd / Overlay 的**内部**宿主绝对路径
     (upper/work)"——一个被调度到远端 node 的隔离单元根本给不出这些。
   - ✅ 契约式:`(rootfs 来源, 引流要求, 资源上限) → (placement 句柄, transport
-    端点, 生命周期控制 stop/start)`。(不含 guest 身份:默认 guest root,引擎不建模 guest 用户,§2.2。)**`rootfs 来源`是一个不透明句柄**:`local_runsc` 下它恰好物化成
+    端点, 生命周期控制 stop/start)`。**`rootfs 来源`是一个不透明句柄**:`local_runsc` 下它恰好物化成
     一个 merged rootfs 路径,远端形态下会是另一种句柄——被禁的是 Overlay 的**内部** upper/work 路径
     (§5.B 已把它设为不可导出),而**已 merged 好的 rootfs 句柄**是本子系统合法的入参,二者不矛盾。**引流要求**是 §5.D 给的 ingress 描述符 + default-deny(把
     egress 全量引导进引擎数据面,§5.D),不是完整网络策略——策略 enforcement 与凭证注入在引擎数据面里,

@@ -88,11 +88,10 @@ message StartRequest {
   repeated string args = 2;
   repeated string env = 3;
   string cwd = 4;
-  // Field 5 was guest_user (per-Start run-as). REMOVED: the engine defaults to
-  // guest root and does not model guest users — "run as user X" is a guest-native
-  // concern (su/sudo), not an engine primitive (§3.2.1 寻址用 guest 原生机制).
-  // Re-add additively iff a real consumer appears (§1.3). Field number 5 is left
-  // reserved so it is never silently reused with different semantics.
+  // No run-as field: the engine defaults to guest root and does not model guest
+  // users — "run as user X" is a guest-native concern (su/sudo), not an engine
+  // primitive (§2.2 / §3.2.1). Field 5 is reserved so it is never reused with
+  // different semantics.
   reserved 5;
   reserved "guest_user";
   // pty, when set, allocates a PTY of the given size (transport D4.3).

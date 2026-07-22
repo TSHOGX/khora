@@ -45,7 +45,7 @@ const (
 // data shape, not a settled interface signature, so an unused field would be a
 // speculative reservation (§1.3). (Contrast the runtime provider's
 // SteeringSpec/ResourceLimits, which DO exist now: they are named members of the
-// settled §5.A contract 4-tuple — "settled, not yet built".)
+// settled §5.A contract 3-tuple — "settled, not yet built".)
 type Sandbox struct {
 	ID       SandboxID
 	Template TemplateID

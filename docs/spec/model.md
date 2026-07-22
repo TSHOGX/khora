@@ -325,7 +325,7 @@ resume **全程持有转换锁**,持锁即在建,否则会误收正在建的活 
 placement/IP-as-epoch(§4.3)正交,**不重新引入世代计数**。
 D5 的 workdir/upper 孤儿是其一个特例。**周期对账**(orchestrator 活着时跑)= 启动对账**同一份反向对账**,
 只多两条:① 对**持锁**沙箱 `TryLock` 跳过(持锁 = 在建的活 placement,§4.4-B),② 保护 live-map 里本进程亲手
-建的活 placement 不当孤儿。触发时机、锁协调、本机资源枚举(egress 面 nft/gateway 随 §5.D M6 并入)与批量策略
+建的活 placement 不当孤儿。触发时机、锁协调、本机资源枚举(egress 面 nft/gateway 随 §5.D M7 并入)与批量策略
 见 [`deep-dives/reaper-health.md`](./deep-dives/reaper-health.md) D4。
 
 **回收次序:活路径严格反向依赖序,启动对账力拆在前。** 活着的 `destroy`/`pause` 握着进程内 placement
