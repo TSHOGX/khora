@@ -74,4 +74,13 @@ type Provider interface {
 	// Merged is opaque above this subsystem. It does NOT mount — a NOT-mounted
 	// overlay is a caller error (that sandbox's container is not actually live).
 	AdoptMerged(ctx context.Context, o *Overlay) (*Merged, error)
+
+	// ListBuiltinTemplates enumerates the static Template directories the
+	// deployment ships (§8 boot seed): each subdirectory of TemplatesDir is a
+	// platform-preseeded Template whose bytes are already on the backend. Returns
+	// the directory names, which ARE the builtin TemplateIDs. bytes-first (§5.B)
+	// is naturally satisfied — the dirs exist before the mediator seeds any row.
+	// The host TemplatesDir path stays private to this subsystem (§3.1.1); only
+	// the opaque IDs cross the seam.
+	ListBuiltinTemplates(ctx context.Context) ([]string, error)
 }

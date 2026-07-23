@@ -119,6 +119,13 @@ func New(cfg Config) (*Engine, error) {
 	return &Engine{Mediator: med, Store: st, Publisher: pub, Reaper: reaper}, nil
 }
 
+// SeedTemplates runs the §8 boot seed (ensure a builtin `templates` row per
+// static Template directory). Call once at boot BEFORE serving any create —
+// the sandboxes.template FK (§4.3) needs the builtin rows present.
+func (e *Engine) SeedTemplates(ctx context.Context) error {
+	return e.Mediator.SeedBuiltinTemplates(ctx)
+}
+
 // Reconcile runs the §4.4-A startup crash-reconciliation (orphan reclaim +
 // running re-adoption). Call once at boot, before serving the API.
 func (e *Engine) Reconcile(ctx context.Context) error { return e.Mediator.Reconcile(ctx) }

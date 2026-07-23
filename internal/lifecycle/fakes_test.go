@@ -41,6 +41,7 @@ type fakeRootfs struct {
 	mu        sync.Mutex
 	calls     []string
 	failMount bool
+	builtins  []string // §8 boot-seed list returned by ListBuiltinTemplates
 }
 
 func (f *fakeRootfs) log(s string) {
@@ -81,6 +82,15 @@ func (f *fakeRootfs) DestroyOverlay(_ context.Context, o *rootfs.Overlay) error 
 func (f *fakeRootfs) AdoptMerged(_ context.Context, o *rootfs.Overlay) (*rootfs.Merged, error) {
 	f.log("AdoptMerged:" + o.ID)
 	return &rootfs.Merged{MergedPath: "/fake/merged/" + o.ID}, nil
+}
+
+// builtins is the list ListBuiltinTemplates returns (§8 boot seed). Empty by
+// default; a test sets it to drive the seed. L1 tests seed the store directly
+// via seedBare, so most leave this empty.
+func (f *fakeRootfs) ListBuiltinTemplates(context.Context) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.builtins...), nil
 }
 
 type fakeRuntime struct {

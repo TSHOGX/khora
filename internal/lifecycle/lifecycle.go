@@ -482,6 +482,40 @@ func (m *Mediator) unwind(ctx context.Context, id model.SandboxID, ov *rootfs.Ov
 	}
 }
 
+// SeedBuiltinTemplates is the §8 boot seed: an idempotent reconcile that ensures
+// a `templates` row exists (builtin=1, no parent) for every static Template
+// directory the deployment ships (Rootfs.ListBuiltinTemplates). It MUST run
+// before the engine serves any create — the sandboxes.template FK (§4.3) would
+// otherwise reject a create referencing a builtin whose row is absent.
+//
+// bytes-first is inherent (§5.B / §4.3 INV-3): the layer directory exists on the
+// backend before this inserts its row, so there is never a row pointing at
+// nonexistent bytes. Idempotent: a row that already exists (ErrConflict) is a
+// no-op — re-running across restarts leaves the builtin row count unchanged
+// (acceptance §11.8). Failure policy matches §4.4-A startup reconcile —
+// skip-and-log a single un-seedable Template rather than aborting boot; only a
+// failure to enumerate at all is returned fatal.
+func (m *Mediator) SeedBuiltinTemplates(ctx context.Context) error {
+	ids, err := m.deps.Rootfs.ListBuiltinTemplates(ctx)
+	if err != nil {
+		return fmt.Errorf("seed templates: list builtins: %w", err)
+	}
+	now := time.Now()
+	for _, id := range ids {
+		err := m.deps.Store.CreateTemplate(ctx, model.Template{
+			ID:        model.TemplateID(id),
+			Builtin:   true,
+			CreatedAt: now,
+		})
+		if err != nil && err != store.ErrConflict {
+			// skip-and-log: one bad builtin must not abort boot; the seed is
+			// idempotent so it retries next start (§8 / §4.4-A skip-and-log).
+			m.deps.Logf("seed templates: skip builtin %s: %v", id, err)
+		}
+	}
+	return nil
+}
+
 // Reconcile is the §4.4-A startup crash-reconciliation: one local scan diffing
 // host placement × store records, run ONCE at orchestrator boot before serving
 // (§4.4-A). The process just (re)started, so the live-map is empty and

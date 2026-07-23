@@ -163,6 +163,30 @@ func (p *HostOverlayFS) AdoptMerged(_ context.Context, o *Overlay) (*Merged, err
 	return &Merged{MergedPath: merged}, nil
 }
 
+// ListBuiltinTemplates enumerates the static Template directories under
+// TemplatesDir (§8 boot seed). Each subdirectory name is a builtin TemplateID;
+// its bytes are the read-only lower shipped with the deployment (bytes-first is
+// inherent — the dir exists before any row). The host TemplatesDir path never
+// leaves this subsystem — only the opaque IDs (§3.1.1). A missing TemplatesDir
+// is treated as "no builtins" (empty), not an error: a deployment may ship only
+// Promote-built Templates.
+func (p *HostOverlayFS) ListBuiltinTemplates(_ context.Context) ([]string, error) {
+	entries, err := os.ReadDir(p.TemplatesDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("rootfs: list templates: %w", err)
+	}
+	out := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() {
+			out = append(out, e.Name())
+		}
+	}
+	return out, nil
+}
+
 // isMountpoint reports whether path is a mount point by comparing its device
 // number to its parent's (a mount boundary changes st_dev). Cheap, no /proc
 // parse, correct for overlayfs.

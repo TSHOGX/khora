@@ -48,6 +48,13 @@ func main() {
 		log.Fatalf("orchestrator: assemble: %v", err)
 	}
 
+	// §8 boot seed BEFORE anything else: ensure a builtin `templates` row per
+	// static Template directory, so a create's sandboxes.template FK (§4.3)
+	// resolves. Idempotent across restarts.
+	if err := eng.SeedTemplates(context.Background()); err != nil {
+		log.Fatalf("orchestrator: seed builtin templates: %v", err)
+	}
+
 	// §4.4-A startup reconciliation BEFORE serving: reclaim orphan placements
 	// left by a prior crash + re-adopt survivors so they are addressable again.
 	if err := eng.Reconcile(context.Background()); err != nil {
