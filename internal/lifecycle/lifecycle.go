@@ -922,6 +922,23 @@ func (m *Mediator) List(ctx context.Context) ([]model.Sandbox, error) {
 	return m.deps.Store.ListSandboxes(ctx)
 }
 
+// ListTemplates returns all Template rows (§6.1 GET /v1/templates).
+func (m *Mediator) ListTemplates(ctx context.Context) ([]model.Template, error) {
+	return m.deps.Store.ListTemplates(ctx)
+}
+
+// DeleteTemplate removes a Template row iff nothing references it (§6.1 DELETE
+// /v1/templates/{id}). The store's reference protection (§4.3) surfaces as
+// store.ErrInUse — a referenced Template (by a sandbox, or a child layer via
+// parent) cannot be deleted — which the API layer maps to 409 template in use.
+// The layer's now-orphaned bytes are reclaimed by the §5.B orphan sweep, NOT in
+// this row delete (§4.4 状态转换与字节回收解耦). This is a pure store operation:
+// no placement, no transition lock — Template is not a state-machine object
+// (§4.3 existence-is-state), so there is no per-sandbox lock to hold.
+func (m *Mediator) DeleteTemplate(ctx context.Context, id model.TemplateID) error {
+	return m.deps.Store.DeleteTemplate(ctx, id)
+}
+
 // put/take manage the in-memory liveState map.
 func (m *Mediator) put(id model.SandboxID, ls *liveState) {
 	m.mu.Lock()
