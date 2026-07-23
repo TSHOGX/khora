@@ -13,16 +13,19 @@ package runtime
 
 import "context"
 
-// RootfsSource is an OPAQUE handle to an already-merged rootfs, produced by the
-// Rootfs subsystem (§5.B). The provider receives a merged rootfs to run and
-// does NOT know how it was assembled (§5.B / rootfs-overlay D4): the provider
-// does not see "upper path" or "lower is a Template" — only "run this rootfs".
+// RootfsSource is the handle to an already-merged rootfs, produced by the Rootfs
+// subsystem (§5.B). The provider receives a merged rootfs to run and does NOT
+// know how it was assembled (§5.B / rootfs-overlay D4): it does not see "upper
+// path" or "lower is a Template" — only "run this rootfs".
+//
+// The handle shape is provider-specific: local_runsc, the sole impl, needs a
+// host path, so that is what the field carries. This is NOT the interface
+// leaking a host primitive — MergedPath is populated and consumed only by
+// local_runsc and never enters a cross-provider decision. A remote provider
+// would define a different handle shape (open-decisions §5.A: RootfsSource
+// remote form); the seam stays clean because callers never inspect it.
 type RootfsSource struct {
 	// MergedPath is the merged overlay directory to hand to runsc as its root.
-	// NOTE (seam discipline): this is a host path and is therefore only ever
-	// populated/consumed by the local_runsc provider. It stays out of any
-	// cross-provider decision. A remote provider would carry a different handle
-	// shape here. Kept concrete because local_runsc is the only impl.
 	MergedPath string
 }
 

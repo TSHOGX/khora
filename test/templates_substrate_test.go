@@ -1,11 +1,11 @@
 //go:build substrate
 
-// L3/L4 M5 acceptance: the Template object model against REAL runsc + the
-// assembled engine. Covers the P1 gate criteria: delete-referenced →
-// 409-equivalent (ErrInUse), reference-vs-reclaim atomicity under real
-// concurrency, the E2B-bug regression (a paused sandbox's Template stays
-// undeletable), boot-seed idempotency, and the orphan-layer sweep reclaiming a
-// crashed-Promote staging layer. Each assertion states its property inline.
+// M5 acceptance: the Template object model against REAL runsc + the assembled
+// engine. Covers delete-referenced → 409-equivalent (ErrInUse), reference-vs-
+// reclaim atomicity under real concurrency, the E2B-bug regression (a paused
+// sandbox's Template stays undeletable), boot-seed idempotency, and the
+// orphan-layer sweep reclaiming a crashed-Promote staging layer. Each assertion
+// states its property inline.
 //
 //	sudo env PATH=$PATH GOTOOLCHAIN=local GOFLAGS=-mod=mod GOSUMDB=off HOME=$HOME \
 //	  go test -tags substrate -v -count=1 -timeout 300s ./test/ -run M5
@@ -158,10 +158,10 @@ func TestM5BootSeedIdempotent(t *testing.T) {
 	t.Logf("✓ boot seed idempotent (%d builtin rows unchanged across re-seed)", len(after))
 }
 
-// bytes-first sweep (P1 portion, §5.B / §4.4-A): a Promote-built layer dir with no live
+// bytes-first sweep (§5.B / §4.4-A): a Promote-built layer dir with no live
 // templates row is a crashed-Promote orphan → the boot sweep reclaims it; a live
-// layer is kept. Simulated by planting layer dirs directly (the full Promote
-// crash path is exercised in P2).
+// layer is kept. Simulated by planting layer dirs directly; the full Promote
+// crash path is exercised in TestM5PromoteCrashBeforeRowIsReclaimed.
 func TestM5OrphanLayerSweep(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("needs root")

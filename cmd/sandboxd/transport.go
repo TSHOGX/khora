@@ -85,6 +85,10 @@ const unix_PR_SET_CHILD_SUBREAPER = 36
 // transportPidFile is where transport mode publishes its own pid (on tmpfs
 // /tmp, which is mounted rw in the guest). Non-authoritative; for supervision
 // and test targeting of the transport child (its pid is not fixed).
+//
+// This and crashLoopSentinel are engine-injected runtime files that Promote must
+// exclude from a frozen layer: rootfs.promoteExcludedPaths lists their
+// upper-relative forms and MUST be kept in sync with the paths here.
 const transportPidFile = "/tmp/.sandboxd-transport.pid"
 
 // --- Health service (§4.3 L2 / transport D4.5) -------------------------------

@@ -318,11 +318,14 @@ func validateSeg(name, v string) error {
 }
 
 // promoteExcludedPaths is the minimal excluded-path set (§5.B / §3.1 Promote;
-// rootfs-overlay D5): engine-injected
-// guest-runtime paths that must NOT be captured into a Promoted layer. Today
-// these are the two sandboxd transport portal sentinel files (relative to the
-// upper root). Volume mount-point placeholders join this set when Volume lands
-// (M6); the full list is tracked in rootfs-overlay D5.
+// rootfs-overlay D5): engine-injected guest-runtime paths that must NOT be
+// captured into a Promoted layer. Today these are the sandboxd transport portal
+// files, written upper-relative (the guest daemon writes them under /tmp, which
+// is the upper's tmp/). These MUST track the guest daemon's own paths in
+// cmd/sandboxd/transport.go — a rename there without a matching edit here leaks
+// a runtime file into a frozen layer (no compile coupling: separate binaries).
+// Volume mount-point placeholders join this set when Volume lands; the full list
+// is tracked in rootfs-overlay D5.
 var promoteExcludedPaths = []string{
 	"tmp/.sandboxd-transport.pid", // transport child pidfile (§5.E.1)
 	"tmp/.sandboxd-crashloop",     // PID1 crash-loop sentinel (§5.E.1)

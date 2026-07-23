@@ -43,10 +43,8 @@ CREATE TABLE IF NOT EXISTS templates (
 CREATE TABLE IF NOT EXISTS sandboxes (
 	id           TEXT PRIMARY KEY,
 	-- template FK RESTRICT: a Template referenced by any sandbox cannot be
-	-- deleted (§4.3 INV-1/INV-2). This is the persistent reference row E2B lost
-	-- track of (M5 §4): it lives here from creating through destroyed, visible
-	-- to RESTRICT even for a paused/snapshot sandbox. Destructive schema change,
-	-- no migration (CLAUDE.md 无兼容负担): the store.db is rebuilt, not ALTERed.
+	-- deleted (§4.3 INV-1/INV-2). The reference is a persistent row seen by
+	-- RESTRICT from creating through destroyed, even for a paused sandbox.
 	template     TEXT NOT NULL REFERENCES templates(id) ON DELETE RESTRICT,
 	overlay      TEXT NOT NULL,
 	state        TEXT NOT NULL,
@@ -118,9 +116,6 @@ func OpenSQLite(path string) (*SQLite, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("store/sqlite: schema: %w", err)
 	}
-	// No schema migration: there are no live instances, so the schema is whatever
-	// CREATE TABLE declares today (CLAUDE.md "No compatibility burden"). A column
-	// growth edits sqliteSchema in place; the store.db is discarded and rebuilt.
 	return &SQLite{db: db}, nil
 }
 

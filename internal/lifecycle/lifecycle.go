@@ -85,9 +85,9 @@ type Mediator struct {
 	// layer bytes are being written to the backend but whose `templates` row has
 	// not been inserted yet (bytes-first, §5.B). The orphan-layer sweep must skip
 	// these — "bytes on disk, no row" is a Promote in progress, not an orphan
-	// (the placement live-map's twin, §4.4-A). Empty until Promote lands (P2); a
-	// crashed Promote's staging layer is correctly absent here at boot, so it is
-	// reclaimed as a true orphan. Guarded by mu.
+	// (the placement live-map's twin, §4.4-A). A crashed Promote's staging layer
+	// is absent here at boot, so the sweep correctly reclaims it as a true orphan.
+	// Guarded by mu.
 	buildingLayers map[model.TemplateID]bool
 }
 
@@ -360,13 +360,10 @@ func (m *Mediator) resumeLocked(ctx context.Context, rec model.Sandbox) error {
 	return nil
 }
 
-// Destroy = terminal `destroyed` (§4.1). The transition (mark destroyed) is
-// decoupled from byte reclamation: the Overlay is deleted synchronously here;
-// an async refcount sweep (§4.3/§4.4) is the eventual form. Valid from running
-// or paused; idempotent (already-gone record → nil). The lock held here is the
-// same one resume holds
-// for its whole chain, so destroy CANNOT delete an Overlay mid-cold-start
-// (§4.4-B: closes the destroy-vs-resume data race).
+// Destroy = terminal `destroyed` (§4.1). Valid from running or paused;
+// idempotent (already-gone record → nil). The lock held here is the same one
+// resume holds for its whole chain, so destroy CANNOT delete an Overlay
+// mid-cold-start (§4.4-B: closes the destroy-vs-resume data race).
 func (m *Mediator) Destroy(ctx context.Context, id model.SandboxID) error {
 	l := m.lock(id)
 	l.Lock()
@@ -385,12 +382,13 @@ func (m *Mediator) Destroy(ctx context.Context, id model.SandboxID) error {
 // destroyLocked marks a sandbox `destroyed` and reclaims its bytes + placement.
 // CALLER MUST HOLD the transition lock (§4.4-B). Shared by the user Destroy verb
 // (valid from running or paused) and the reaper's evict (a paused sandbox past
-// retention). The transition (mark destroyed) is decoupled from byte
-// reclamation: the Overlay is deleted synchronously here; an async refcount
-// sweep (§4.3/§4.4) is the eventual form. Emitting Kind "destroyed" matches
-// §4.1 — evict is "the reaper's automatic destroy", the SAME terminal, not a
-// distinct Kind. Because the lock is held for the whole chain, destroy/evict
-// CANNOT delete an Overlay mid-cold-start (§4.4-B: destroy-vs-resume race).
+// retention). Marking the record destroyed is decoupled from byte reclamation:
+// the Overlay is deleted synchronously here, and a crash between the two leaves
+// the Overlay as an orphan the layer sweep reclaims at boot (§4.3/§4.4-A).
+// Emitting Kind "destroyed" matches §4.1 — evict is "the reaper's automatic
+// destroy", the SAME terminal, not a distinct Kind. Because the lock is held for
+// the whole chain, destroy/evict CANNOT delete an Overlay mid-cold-start
+// (§4.4-B: destroy-vs-resume race).
 //
 // NOTE — no source-state CAS here (unlike pause/resume). destroy is deliberately
 // valid from BOTH `running` and `paused` (§4.1 / §4.4-A decouples it) and is

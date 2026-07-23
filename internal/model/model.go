@@ -14,9 +14,8 @@ import "time"
 type SandboxID string
 
 // TemplateID is the opaque identity of an immutable read-only base (§3.1).
-// Immutability is enforced by the read-only lower + refcount protection, NOT by
-// content hashing — a content digest is an optional dedup/integrity evolution
-// (§5.B / rootfs-overlay D3), separate from identity.
+// Immutability is enforced by the read-only lower + refcount protection; the
+// identity is opaque, not a content hash.
 type TemplateID string
 
 // OverlayID identifies the sandbox's writable delta layer as a first-class,
@@ -42,8 +41,7 @@ type OverlayID string
 //     count.
 type Template struct {
 	// ID is the opaque identity (§3.1): "tmpl_<token>" for Promote-built,
-	// the static directory name for builtin. Identity is opaque, NOT a content
-	// hash — a content digest is an optional dedup/integrity anchor (below).
+	// the static directory name for builtin.
 	ID TemplateID
 
 	// Parent expresses lineage (§4.3 / §5.B multi-lowerdir): the Template this

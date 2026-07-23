@@ -39,7 +39,7 @@ func RunContract(t *testing.T, mk Factory) {
 	t.Run("OutboxRowOutlivesRecord", func(t *testing.T) { testOutboxOutlivesRecord(t, mk) })
 	t.Run("Durability", func(t *testing.T) { testDurability(t, mk) })
 
-	// Template object model (§4.3 / M5): same assertions both backends.
+	// Template object model (§4.3): same assertions both backends.
 	t.Run("TemplateCRUD", func(t *testing.T) { testTemplateCRUD(t, mk) })
 	t.Run("TemplateReferenceProtection", func(t *testing.T) { testTemplateRefProtection(t, mk) })
 	t.Run("TemplateLineageProtection", func(t *testing.T) { testTemplateLineage(t, mk) })
@@ -352,8 +352,8 @@ func testTemplateCRUD(t *testing.T, mk Factory) {
 
 // testTemplateRefProtection: a Template referenced by a sandbox cannot be
 // deleted (§4.3 INV-1 被引用即拒删 → ErrInUse); once the sandbox is gone, the
-// delete succeeds. This is the E2B-bug immunity (M5 §4): the reference is a
-// persistent row, seen by RESTRICT.
+// delete succeeds. The reference is a persistent row, seen by RESTRICT — the
+// E2B-bug immunity (§4.3).
 func testTemplateRefProtection(t *testing.T, mk Factory) {
 	ctx := context.Background()
 	s, _ := mk(t)
