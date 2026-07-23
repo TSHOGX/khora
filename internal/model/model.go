@@ -25,6 +25,47 @@ type TemplateID string
 // the Rootfs subsystem (§3.1.1 对内也 ID 寻址).
 type OverlayID string
 
+// Template is a first-class persistent object: an immutable, read-only base a
+// sandbox cold-starts from (§3.1 / §4.3). It is the sharpest application of the
+// uniform object model — lineage — so it is the first object to materialize the
+// {derived refcount} pattern (§4.3):
+//
+//   - No State field. Template uses "existence IS the state" (§4.3): the row
+//     existing = ready, deleting the row = destroyed, no intermediate state.
+//     This is what FORCES bytes-first materialization (§5.B): with no not-ready
+//     escape hatch, the layer bytes MUST be fully on the backend before the row
+//     is inserted, or a crash leaves a row pointing at nonexistent bytes.
+//   - No refcount field. "Is it deletable" is DERIVED (§4.3 INV-1): it has no
+//     referencing live rows (no sandbox references it, no child Template names it
+//     as Parent). The store's FK RESTRICT (SQLite) / Go check (Memory) enforces
+//     "referenced → cannot delete" as a contract promise, not a materialized
+//     count.
+type Template struct {
+	// ID is the opaque identity (§3.1): "tmpl_<token>" for Promote-built,
+	// the static directory name for builtin. Identity is opaque, NOT a content
+	// hash — a content digest is an optional dedup/integrity anchor (below).
+	ID TemplateID
+
+	// Parent expresses lineage (§4.3 / §5.B multi-lowerdir): the Template this
+	// one layers on top of. Empty = a base layer (no parent). A referencing
+	// child protects its parent from deletion (FK RESTRICT, §4.3 INV-2 引用向上).
+	Parent TemplateID
+
+	// ContentDigest is a nullable future anchor for dedup / integrity
+	// (rootfs-overlay D3). Identity is the opaque ID; the digest is NOT filled or
+	// used this milestone (M5 §2 out-of-scope) — carried so the schema does not
+	// need a destructive rebuild when content-addressing lands.
+	ContentDigest string
+
+	// Builtin marks a platform-preseeded Template (boot-seed reconciled from a
+	// static TemplatesDir directory, §8) vs one produced by Promote. Both are
+	// equally protected by RESTRICT — a referenced builtin is just as
+	// undeletable as a referenced Promoted layer (§6 DELETE).
+	Builtin bool
+
+	CreatedAt time.Time
+}
+
 // Lifecycle is the §4.1 state machine. Exactly four states — no `failed`
 // intermediate state (§4.4: the absence is a conclusion of the model, not an
 // omission), no independent generation counter (§3.3 uses Placement / §4.3 uses
