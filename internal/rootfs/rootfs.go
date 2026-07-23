@@ -93,7 +93,8 @@ type Provider interface {
 	AdoptMerged(ctx context.Context, o *Overlay) (*Merged, error)
 
 	// ListBuiltinTemplates enumerates the static Template directories the
-	// deployment ships (§8 boot seed): each subdirectory of TemplatesDir is a
+	// deployment ships (boot seed — existence-as-state §4.3, idempotent reconcile
+	// §4.4-A): each subdirectory of TemplatesDir is a
 	// platform-preseeded Template whose bytes are already on the backend. Returns
 	// the directory names, which ARE the builtin TemplateIDs. bytes-first (§5.B)
 	// is naturally satisfied — the dirs exist before the mediator seeds any row.
@@ -107,8 +108,9 @@ type Provider interface {
 	// consistent at-rest point (equivalent to a pause, §4.2) and torn down its
 	// mount, so the upper is a plain host dir tree safe to read (§2.5 / §5.B
 	// 只读 at-rest). It COPIES the upper into the layer dir, EXCLUDING the
-	// engine-injected runtime paths that must not be captured (§7 excluded paths:
-	// at minimum sandboxd's portal/work files). It does NOT insert any store row
+	// engine-injected runtime paths that must not be captured (§5.B / §3.1
+	// Promote; excluded paths detailed in rootfs-overlay D5: today the two
+	// sandboxd portal sentinel files). It does NOT insert any store row
 	// and does NOT wire lineage — that is the mediator's bytes-first sequel
 	// (write bytes here → insert the templates row after, §4.3 INV-3). A crash
 	// after this returns but before the row insert leaves an orphan layer the
@@ -117,12 +119,12 @@ type Provider interface {
 	PromoteToTemplate(ctx context.Context, o *Overlay, newTemplateID string) error
 
 	// SweepOrphanLayers reclaims Promote-built layer directories with no live
-	// `templates` row (§9 orphan-layer sweep). It is the §5.B twin of §4.4-A
+	// `templates` row (orphan-layer sweep, §5.B / §4.4-A). It is the §5.B twin of §4.4-A
 	// placement reclamation: the mediator computes `live` (the layer IDs the
 	// authoritative store still has a row for) and passes it in — the provider
 	// enumerates only its OWN layer dirs and deletes any not in `live` and not in
 	// `building` (§4 subsystems don't call the store). `building` is the
-	// in-flight-Promote keep-set (§9): a synchronous Promote has its layer bytes
+	// in-flight-Promote keep-set (§5.B / §4.4-A): a synchronous Promote has its layer bytes
 	// on disk BEFORE the row is inserted, so a concurrent sweep seeing "bytes, no
 	// row" must NOT tear it down (the placement live-map's twin). At boot
 	// `building` is empty — a crashed Promote's staging layer IS a true orphan and

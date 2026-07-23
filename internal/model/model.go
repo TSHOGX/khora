@@ -51,14 +51,9 @@ type Template struct {
 	// child protects its parent from deletion (FK RESTRICT, §4.3 INV-2 引用向上).
 	Parent TemplateID
 
-	// ContentDigest is a nullable future anchor for dedup / integrity
-	// (rootfs-overlay D3). Identity is the opaque ID; the digest is NOT filled or
-	// used this milestone (M5 §2 out-of-scope) — carried so the schema does not
-	// need a destructive rebuild when content-addressing lands.
-	ContentDigest string
-
 	// Builtin marks a platform-preseeded Template (boot-seed reconciled from a
-	// static TemplatesDir directory, §8) vs one produced by Promote. Both are
+	// static TemplatesDir directory, §4.3 existence-as-state / §4.4-A idempotent
+	// reconcile) vs one produced by Promote. Both are
 	// equally protected by RESTRICT — a referenced builtin is just as
 	// undeletable as a referenced Promoted layer (§6 DELETE).
 	Builtin bool

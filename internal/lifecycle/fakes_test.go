@@ -16,7 +16,7 @@ import (
 
 // seedBare inserts the "bare" builtin Template into st so a sandbox create /
 // insert satisfies the §4.3 template FK (M5). Production does this via the boot
-// seed (§8); the L1 tests do it explicitly. Extra ids can be seeded too.
+// seed; the L1 tests do it explicitly. Extra ids can be seeded too.
 func seedBare(t *testing.T, st interface {
 	CreateTemplate(context.Context, model.Template) error
 }, ids ...string) {
@@ -41,10 +41,10 @@ type fakeRootfs struct {
 	mu        sync.Mutex
 	calls     []string
 	failMount bool
-	builtins  []string // §8 boot-seed list returned by ListBuiltinTemplates
+	builtins  []string // boot-seed list returned by ListBuiltinTemplates
 	// promoteGate blocks PromoteToTemplate mid-freeze (bytes-down, row-not-yet
 	// window) until closed; promoteReached (if set) is closed when the freeze is
-	// entered, so a test can synchronize a concurrent sweep against it (§9).
+	// entered, so a test can synchronize a concurrent sweep against it (§4.4-A).
 	promoteGate    chan struct{}
 	promoteReached chan struct{}
 }
@@ -80,7 +80,7 @@ func (f *fakeRootfs) OpenOverlay(_ context.Context, id string, lower []string) (
 func (f *fakeRootfs) PromoteToTemplate(ctx context.Context, o *rootfs.Overlay, newID string) error {
 	f.log("PromoteToTemplate:" + o.ID + "->" + newID)
 	// promoteGate, if non-nil, blocks the freeze (bytes-down window) until a test
-	// signals — used to prove a concurrent sweep respects buildingLayers (§9).
+	// signals — used to prove a concurrent sweep respects buildingLayers (§4.4-A).
 	if f.promoteGate != nil {
 		if f.promoteReached != nil {
 			close(f.promoteReached)
@@ -114,7 +114,7 @@ func (f *fakeRootfs) AdoptMerged(_ context.Context, o *rootfs.Overlay) (*rootfs.
 	return &rootfs.Merged{MergedPath: "/fake/merged/" + o.ID}, nil
 }
 
-// builtins is the list ListBuiltinTemplates returns (§8 boot seed). Empty by
+// builtins is the list ListBuiltinTemplates returns (boot seed). Empty by
 // default; a test sets it to drive the seed. L1 tests seed the store directly
 // via seedBare, so most leave this empty.
 func (f *fakeRootfs) ListBuiltinTemplates(context.Context) ([]string, error) {
@@ -124,7 +124,7 @@ func (f *fakeRootfs) ListBuiltinTemplates(context.Context) ([]string, error) {
 }
 
 // SweepOrphanLayers records the (live,building) keep-sets it was called with
-// (§9) so the mediator's sweep wiring can be asserted as pure logic. Reclaims
+// (§5.B / §4.4-A) so the mediator's sweep wiring can be asserted as pure logic. Reclaims
 // nothing in the fake (no real layer dirs).
 func (f *fakeRootfs) SweepOrphanLayers(_ context.Context, live, building []string) (int, error) {
 	f.log("SweepOrphanLayers:live=" + strings.Join(append([]string(nil), live...), "|") +

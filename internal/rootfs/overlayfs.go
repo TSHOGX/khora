@@ -30,12 +30,12 @@ type HostOverlayFS struct {
 	StateDir string
 	// TemplatesDir resolves a BUILTIN TemplateID to its read-only lower dir:
 	// TemplatesDir/<template>. Builtin templates are static directories shipped
-	// with the deployment (§8 boot seed); they are deployment assets, never swept.
+	// with the deployment (boot seed, §4.3); they are deployment assets, never swept.
 	TemplatesDir string
 	// LayersDir holds Promote-built layer directories: LayersDir/<templateID>.
 	// These are the immutable read-only layers a Promote freezes (§5.B) — the
 	// bytes-first artifact whose orphans (no live templates row) the sweep
-	// reclaims (§9). Distinct from TemplatesDir so the sweep never touches a
+	// reclaims (§5.B / §4.4-A). Distinct from TemplatesDir so the sweep never touches a
 	// deployment-shipped builtin.
 	LayersDir string
 }
@@ -209,7 +209,7 @@ func (p *HostOverlayFS) AdoptMerged(_ context.Context, o *Overlay) (*Merged, err
 }
 
 // ListBuiltinTemplates enumerates the static Template directories under
-// TemplatesDir (§8 boot seed). Each subdirectory name is a builtin TemplateID;
+// TemplatesDir (boot seed, §4.3). Each subdirectory name is a builtin TemplateID;
 // its bytes are the read-only lower shipped with the deployment (bytes-first is
 // inherent — the dir exists before any row). The host TemplatesDir path never
 // leaves this subsystem — only the opaque IDs (§3.1.1). A missing TemplatesDir
@@ -233,7 +233,7 @@ func (p *HostOverlayFS) ListBuiltinTemplates(_ context.Context) ([]string, error
 }
 
 // SweepOrphanLayers reclaims Promote-built layer dirs under LayersDir with no
-// live `templates` row (§9). It reuses the §4.4-A reverse-reconcile shape: the
+// live `templates` row (§5.B / §4.4-A). It reuses the §4.4-A reverse-reconcile shape: the
 // authoritative set (`live` + `building`) is passed in, the provider diffs it
 // against what is on disk and deletes the difference. `building` protects an
 // in-flight Promote whose bytes are down but whose row is not yet inserted
@@ -260,7 +260,7 @@ func (p *HostOverlayFS) SweepOrphanLayers(_ context.Context, live, building []st
 			continue
 		}
 		// orphan: a layer dir with no live row and not being built → reclaim its
-		// bytes (§9). The row-vs-bytes decoupling means the row is already gone
+		// bytes (§5.B / §4.4-A). The row-vs-bytes decoupling means the row is already gone
 		// (DELETE template) or never landed (crashed Promote); either way the
 		// bytes are safe to drop.
 		if err := os.RemoveAll(filepath.Join(p.LayersDir, e.Name())); err != nil {
@@ -317,11 +317,12 @@ func validateSeg(name, v string) error {
 	return nil
 }
 
-// promoteExcludedPaths is the §7 minimal excluded-path set: engine-injected
-// guest-runtime paths that must NOT be captured into a Promoted layer. These
-// are sandboxd's transport portal/work files (relative to the upper root).
-// Volume mount-point placeholders join this set when Volume lands (M6); the
-// full list is tracked in rootfs-overlay D5.
+// promoteExcludedPaths is the minimal excluded-path set (§5.B / §3.1 Promote;
+// rootfs-overlay D5): engine-injected
+// guest-runtime paths that must NOT be captured into a Promoted layer. Today
+// these are the two sandboxd transport portal sentinel files (relative to the
+// upper root). Volume mount-point placeholders join this set when Volume lands
+// (M6); the full list is tracked in rootfs-overlay D5.
 var promoteExcludedPaths = []string{
 	"tmp/.sandboxd-transport.pid", // transport child pidfile (§5.E.1)
 	"tmp/.sandboxd-crashloop",     // PID1 crash-loop sentinel (§5.E.1)
@@ -330,7 +331,7 @@ var promoteExcludedPaths = []string{
 // PromoteToTemplate freezes the source Overlay's at-rest upper into a new
 // read-only layer dir under LayersDir (§5.B Promote). bytes-first: this writes
 // ONLY bytes — the caller inserts the templates row afterward (§4.3 INV-3). The
-// copy excludes the engine-injected runtime paths (§7). The caller must have
+// copy excludes the engine-injected runtime paths (§5.B / §3.1; rootfs-overlay D5). The caller must have
 // quiesced + unmounted the sandbox first, so upper is a stable plain dir tree
 // (§2.5). The layer is built at a staging path then atomically renamed into
 // place, so a crash mid-copy never leaves a half-written layer at the final ID

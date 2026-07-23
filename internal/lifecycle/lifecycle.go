@@ -81,7 +81,7 @@ type Mediator struct {
 	// store.
 	live map[model.SandboxID]*liveState
 
-	// buildingLayers is the §9 in-flight-Promote keep-set: TemplateIDs whose
+	// buildingLayers is the in-flight-Promote keep-set: TemplateIDs whose
 	// layer bytes are being written to the backend but whose `templates` row has
 	// not been inserted yet (bytes-first, §5.B). The orphan-layer sweep must skip
 	// these — "bytes on disk, no row" is a Promote in progress, not an orphan
@@ -428,7 +428,7 @@ func (m *Mediator) destroyLocked(ctx context.Context, rec model.Sandbox) error {
 }
 
 // Promote freezes a sandbox's current Overlay into a new Template layer (§3.1 /
-// §5.B / §7). It accepts a `running` or `paused` source; a `running` source is
+// §5.B). It accepts a `running` or `paused` source; a `running` source is
 // first quiesced to a consistent at-rest point via pauseLocked (equivalent to a
 // pause, §4.2) and LEFT paused (the caller resumes on demand). The whole
 // operation holds the source's transition lock (§4.4-B), so it serializes
@@ -438,7 +438,7 @@ func (m *Mediator) destroyLocked(ctx context.Context, rec model.Sandbox) error {
 // bytes-first (§4.3 INV-3 / §5.B): the new layer bytes are written FIRST
 // (PromoteToTemplate), then the `templates` row is inserted. The layer id is
 // registered in buildingLayers for the freeze window so a concurrent periodic
-// sweep does not reclaim the in-flight layer (§9). A crash after the bytes are
+// sweep does not reclaim the in-flight layer (§4.4-A). A crash after the bytes are
 // written but before the row insert leaves an orphan layer the sweep reclaims —
 // never a row pointing at nonexistent bytes.
 //
@@ -471,7 +471,7 @@ func (m *Mediator) Promote(ctx context.Context, id model.SandboxID) (model.Templ
 	newID := model.TemplateID("tmpl_" + randToken())
 
 	// register the in-flight layer BEFORE writing bytes so a concurrent sweep
-	// protects it (§9). Unregister in all exit paths.
+	// protects it (§4.4-A). Unregister in all exit paths.
 	m.markBuilding(newID)
 	defer m.unmarkBuilding(newID)
 
@@ -499,7 +499,7 @@ func (m *Mediator) Promote(ctx context.Context, id model.SandboxID) (model.Templ
 	return newID, nil
 }
 
-// markBuilding / unmarkBuilding manage the §9 in-flight-Promote keep-set.
+// markBuilding / unmarkBuilding manage the §4.4-A in-flight-Promote keep-set.
 func (m *Mediator) markBuilding(id model.TemplateID) {
 	m.mu.Lock()
 	m.buildingLayers[id] = true
@@ -591,7 +591,7 @@ func (m *Mediator) unwind(ctx context.Context, id model.SandboxID, ov *rootfs.Ov
 	}
 }
 
-// SeedBuiltinTemplates is the §8 boot seed: an idempotent reconcile that ensures
+// SeedBuiltinTemplates is the boot seed: an idempotent reconcile that ensures
 // a `templates` row exists (builtin=1, no parent) for every static Template
 // directory the deployment ships (Rootfs.ListBuiltinTemplates). It MUST run
 // before the engine serves any create — the sandboxes.template FK (§4.3) would
@@ -600,8 +600,8 @@ func (m *Mediator) unwind(ctx context.Context, id model.SandboxID, ov *rootfs.Ov
 // bytes-first is inherent (§5.B / §4.3 INV-3): the layer directory exists on the
 // backend before this inserts its row, so there is never a row pointing at
 // nonexistent bytes. Idempotent: a row that already exists (ErrConflict) is a
-// no-op — re-running across restarts leaves the builtin row count unchanged
-// (acceptance §11.8). Failure policy matches §4.4-A startup reconcile —
+// no-op — re-running across restarts leaves the builtin row count unchanged.
+// Failure policy matches §4.4-A startup reconcile —
 // skip-and-log a single un-seedable Template rather than aborting boot; only a
 // failure to enumerate at all is returned fatal.
 func (m *Mediator) SeedBuiltinTemplates(ctx context.Context) error {
@@ -618,7 +618,7 @@ func (m *Mediator) SeedBuiltinTemplates(ctx context.Context) error {
 		})
 		if err != nil && err != store.ErrConflict {
 			// skip-and-log: one bad builtin must not abort boot; the seed is
-			// idempotent so it retries next start (§8 / §4.4-A skip-and-log).
+			// idempotent so it retries next start (§4.4-A skip-and-log).
 			m.deps.Logf("seed templates: skip builtin %s: %v", id, err)
 		}
 	}
@@ -626,13 +626,13 @@ func (m *Mediator) SeedBuiltinTemplates(ctx context.Context) error {
 }
 
 // SweepOrphanLayers reclaims Promote-built layer bytes with no live `templates`
-// row (§9). It is the §5.B twin of ReclaimOrphans: the mediator reads the
+// row (§5.B / §4.4-A). It is the §5.B twin of ReclaimOrphans: the mediator reads the
 // AUTHORITATIVE store for the live layer IDs, snapshots the in-flight-Promote
 // keep-set, and hands both to the FS provider — which enumerates its own layer
 // dirs and deletes the difference (§4 subsystems don't call the store). Run at
 // boot (a crashed Promote's staging layer is a true orphan → reclaimed, the
 // buildingLayers set being empty) and periodically by the reaper (an in-flight
-// Promote is protected by buildingLayers, §9). Skip-and-log per §4.4-A: a sweep
+// Promote is protected by buildingLayers, §4.4-A). Skip-and-log per §4.4-A: a sweep
 // failure is not fatal; it retries next pass.
 //
 // Only Promote-built (builtin=false) layers are swept: builtins live under the
@@ -693,7 +693,7 @@ func (m *Mediator) resolveLower(ctx context.Context, template model.TemplateID) 
 	return lower, nil
 }
 
-// buildingLayerIDs snapshots the in-flight-Promote keep-set (§9). Ordering is
+// buildingLayerIDs snapshots the in-flight-Promote keep-set (§4.4-A). Ordering is
 // irrelevant — it is a set to the provider.
 func (m *Mediator) buildingLayerIDs() []string {
 	m.mu.Lock()

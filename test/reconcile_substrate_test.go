@@ -68,7 +68,7 @@ func (f reconcileFixture) engine(t *testing.T, fault func(model.SandboxID)) *orc
 	if err != nil {
 		t.Fatalf("orchestrator.New: %v", err)
 	}
-	// §8 boot seed each start (idempotent) so the "bare" builtin row is present
+	// boot seed each start (idempotent) so the "bare" builtin row is present
 	// for the FK before any create — mirrors production per-boot seeding.
 	if err := eng.SeedTemplates(context.Background()); err != nil {
 		t.Fatalf("seed builtin templates: %v", err)

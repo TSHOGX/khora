@@ -43,7 +43,7 @@ func setupEngine(t *testing.T, healthTimeout time.Duration) (*orchestrator.Engin
 	if err != nil {
 		t.Fatalf("orchestrator.New: %v", err)
 	}
-	// §8 boot seed BEFORE create: ensure the "bare" builtin `templates` row so
+	// boot seed BEFORE create: ensure the "bare" builtin `templates` row so
 	// the sandboxes.template FK (§4.3) resolves. Production runs this at boot.
 	if err := eng.SeedTemplates(context.Background()); err != nil {
 		t.Fatalf("seed builtin templates: %v", err)
@@ -201,7 +201,7 @@ func TestE2EColdStartUnwindRealRunsc(t *testing.T) {
 	if err != nil {
 		t.Fatalf("orchestrator.New: %v", err)
 	}
-	// §8 boot seed so the "broken" builtin row exists — the create must fail at
+	// boot seed so the "broken" builtin row exists — the create must fail at
 	// the ⑦ health gate, NOT at the template FK.
 	if err := eng.SeedTemplates(ctx); err != nil {
 		t.Fatalf("seed builtin templates: %v", err)

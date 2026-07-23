@@ -119,7 +119,7 @@ func New(cfg Config) (*Engine, error) {
 	return &Engine{Mediator: med, Store: st, Publisher: pub, Reaper: reaper}, nil
 }
 
-// SeedTemplates runs the §8 boot seed (ensure a builtin `templates` row per
+// SeedTemplates runs the boot seed (§4.3 + §4.4-A: ensure a builtin `templates` row per
 // static Template directory). Call once at boot BEFORE serving any create —
 // the sandboxes.template FK (§4.3) needs the builtin rows present.
 func (e *Engine) SeedTemplates(ctx context.Context) error {
@@ -130,7 +130,7 @@ func (e *Engine) SeedTemplates(ctx context.Context) error {
 // running re-adoption). Call once at boot, before serving the API.
 func (e *Engine) Reconcile(ctx context.Context) error { return e.Mediator.Reconcile(ctx) }
 
-// SweepOrphanLayers runs the §9 orphan-layer sweep (reclaim Promote-built layer
+// SweepOrphanLayers runs the §5.B / §4.4-A orphan-layer sweep (reclaim Promote-built layer
 // bytes with no live templates row). Call once at boot after SeedTemplates so a
 // crashed Promote's staging layer is reclaimed; the reaper repeats it per tick.
 func (e *Engine) SweepOrphanLayers(ctx context.Context) error {

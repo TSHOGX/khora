@@ -37,7 +37,6 @@ const sqliteSchema = `
 CREATE TABLE IF NOT EXISTS templates (
 	id             TEXT PRIMARY KEY,          -- opaque "tmpl_<token>" / builtin = static dir name
 	parent         TEXT REFERENCES templates(id) ON DELETE RESTRICT, -- lineage; NULL = base layer
-	content_digest TEXT,                       -- nullable future dedup/integrity anchor (unused, M5 §2)
 	builtin        INTEGER NOT NULL DEFAULT 0, -- 1 = platform-preseeded (boot seed), 0 = Promote-built
 	created_at     INTEGER NOT NULL            -- unix nanos
 );
@@ -306,17 +305,13 @@ func (s *SQLite) CreateTemplate(ctx context.Context, tm model.Template) error {
 		if tm.Parent != "" {
 			parent = string(tm.Parent)
 		}
-		var digest any
-		if tm.ContentDigest != "" {
-			digest = tm.ContentDigest
-		}
 		builtin := 0
 		if tm.Builtin {
 			builtin = 1
 		}
 		if _, err := t.Exec(
-			`INSERT INTO templates(id, parent, content_digest, builtin, created_at) VALUES(?,?,?,?,?)`,
-			string(tm.ID), parent, digest, builtin, tm.CreatedAt.UnixNano(),
+			`INSERT INTO templates(id, parent, builtin, created_at) VALUES(?,?,?,?)`,
+			string(tm.ID), parent, builtin, tm.CreatedAt.UnixNano(),
 		); err != nil {
 			if isFKViolation(err) {
 				return ErrTemplateNotFound // missing parent layer
@@ -329,13 +324,13 @@ func (s *SQLite) CreateTemplate(ctx context.Context, tm model.Template) error {
 
 func (s *SQLite) GetTemplate(ctx context.Context, id model.TemplateID) (model.Template, error) {
 	return scanTemplate(s.db.QueryRowContext(ctx,
-		`SELECT id, parent, content_digest, builtin, created_at FROM templates WHERE id=?`,
+		`SELECT id, parent, builtin, created_at FROM templates WHERE id=?`,
 		string(id)))
 }
 
 func (s *SQLite) ListTemplates(ctx context.Context) ([]model.Template, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, parent, content_digest, builtin, created_at FROM templates ORDER BY created_at`)
+		`SELECT id, parent, builtin, created_at FROM templates ORDER BY created_at`)
 	if err != nil {
 		return nil, err
 	}
@@ -376,10 +371,10 @@ func (s *SQLite) DeleteTemplate(ctx context.Context, id model.TemplateID) error 
 func scanTemplate(r rowScanner) (model.Template, error) {
 	var tm model.Template
 	var id string
-	var parent, digest sql.NullString
+	var parent sql.NullString
 	var builtin int
 	var created int64
-	err := r.Scan(&id, &parent, &digest, &builtin, &created)
+	err := r.Scan(&id, &parent, &builtin, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return model.Template{}, ErrTemplateNotFound
 	}
@@ -388,7 +383,6 @@ func scanTemplate(r rowScanner) (model.Template, error) {
 	}
 	tm.ID = model.TemplateID(id)
 	tm.Parent = model.TemplateID(parent.String) // "" when NULL
-	tm.ContentDigest = digest.String            // "" when NULL
 	tm.Builtin = builtin != 0
 	tm.CreatedAt = time.Unix(0, created)
 	return tm, nil

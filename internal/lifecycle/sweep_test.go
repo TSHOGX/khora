@@ -12,7 +12,7 @@ import (
 )
 
 // The mediator's SweepOrphanLayers reads the authoritative store for live layer
-// IDs and hands the FS provider (live, building). §9: only Promote-built
+// IDs and hands the FS provider (live, building). §5.B / §4.4-A: only Promote-built
 // (non-builtin) rows are live candidates — a builtin's dir is under TemplatesDir,
 // never a sweep candidate — and the in-flight-Promote keep-set is included.
 func TestMediatorSweepPassesLiveAndBuilding(t *testing.T) {
@@ -63,7 +63,7 @@ func TestMediatorSweepPassesLiveAndBuilding(t *testing.T) {
 	}
 }
 
-// §11.6 (in-flight guard): while a Promote is mid-freeze (bytes down, row not
+// in-flight guard: while a Promote is mid-freeze (bytes down, row not
 // yet inserted), a concurrent sweep must see the layer in the buildingLayers
 // keep-set and NOT reclaim it. Deterministic via a gate that blocks the freeze.
 func TestInFlightPromoteProtectedFromSweep(t *testing.T) {

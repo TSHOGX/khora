@@ -28,7 +28,7 @@
 | **§2 安全模型** | 五支柱各自的 enforcement 细节;§2.3 数据面在 shared-rw Volume 等场景下的复合影响 | 支柱契约已定,逐条 enforcement 后续展开 |
 | **§5.C Volume(契约边界外)** | Volume 四条契约已定(§5.C);待细化的四条边界项(独占卷抢占策略 / shared-rw ENOSPC 复合行为 / 直连变更 vs live-ro reader 准入 / snapshot 一致性标注进 §6) | **详见 [`deep-dives/volume.md`](./deep-dives/volume.md) D5**,本表不复制。多为产品层策略或落 §6 时定 |
 | **§1.4 侧信道** | co-residency 策略(不共核/不共调度)在**多租户接入时**的具体物化 | 随多租户激活才做,落在 placement 层;五支柱不变 |
-| **§4.3 对象回收 sweep(§5.C 挂载行消费者)** | 引用-回收原子性不变量已定(§4.3:derived refcount + 外键)。Template lineage 的落地(FK 引用保护、孤儿层 sweep + in-flight 守卫、周期 sweep 接入 reaper)**已随 M5 shipped**(§5.B / §9)。**待细化的只剩 §5.C 挂载行消费者**:独占租约 = 挂载行 refcount,其 sweep/回收随 Volume 子系统落地定 | 谁消费:§5.C 挂载行(Volume 里程碑);reaper 复用 §4.4-A 反向对账形状 |
+| **§4.3 对象回收 sweep(§5.C 挂载行消费者)** | 引用-回收原子性不变量已定(§4.3:derived refcount + 外键);Template lineage 已随 M5 shipped(§5.B)。**待细化的只剩 §5.C 挂载行消费者**:独占租约 = 挂载行 refcount,其 sweep/回收随 Volume 子系统落地定 | 谁消费:§5.C 挂载行(Volume 里程碑);reaper 复用 §4.4-A 反向对账形状 |
 | **§4.1 / §4.4-C 事件流(对外面)** | 投递算法、store 原子提交契约、后端(ADR-0004 SQLite)已定。**待细化的是对外面**:event schema、可重放窗口大小、subscriber 接入/续位约定。两处设计使然的已知限制(outbox 只标记不删行、随转换单调增长;`store.DedupSink` 参考实现进程内/非持久)均已在对应代码点留注,随「可重放窗口」一并收口。 | additive(add a subscriber);引擎不追踪 subscriber、只保证可靠写入一条可重放 stream |
 | **§4.2 pause 静止点(仅剩参数级)** | 协议两层结构已定(§4.2 + deep-dive D4.4:① drain-barrier ② `SIGTSTP`+观测 `/proc` stopped+超时降 `SIGSTOP`,不引入 guest 内 ack 通道)。**残留纯调参**:grace 时长、可 handle 信号的具体选择、是否给模板一个可选"可协作 flush"钩子(默认不需要) | 非架构,落地时定;不改两层结构。见 [`deep-dives/guest-runtime.md`](./deep-dives/guest-runtime.md) D4.4 |
 | **§5.D 凭证存储 seam** | 凭证"留宿主侧"的**后端**(secret-store):怎么存、注册、轮转。此处只留**at-rest 后端**选型;alias→directives 的 **resolve/缓存/失效契约**是另一条 seam,见下行 | 一类可插拔 seam(类比 runtime/FS provider);明文不进控制面/Overlay,只在宿主侧独立后端 |

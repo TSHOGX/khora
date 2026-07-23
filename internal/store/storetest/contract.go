@@ -12,6 +12,8 @@ package storetest
 
 import (
 	"context"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -43,6 +45,7 @@ func RunContract(t *testing.T, mk Factory) {
 	t.Run("TemplateLineageProtection", func(t *testing.T) { testTemplateLineage(t, mk) })
 	t.Run("SandboxRefMissingTemplate", func(t *testing.T) { testSandboxRefMissingTemplate(t, mk) })
 	t.Run("TemplateDurability", func(t *testing.T) { testTemplateDurability(t, mk) })
+	t.Run("ReferenceReclaimRace", func(t *testing.T) { testReferenceReclaimRace(t, mk) })
 }
 
 // seedTmpl inserts a base (parent-less) Template so a sandbox referencing it
@@ -313,7 +316,7 @@ func testTemplateCRUD(t *testing.T, mk Factory) {
 	ctx := context.Background()
 	s, _ := mk(t)
 	tm := model.Template{
-		ID: "tmpl_base", ContentDigest: "sha256:deadbeef", Builtin: true,
+		ID: "tmpl_base", Builtin: true,
 		CreatedAt: time.Now(),
 	}
 	if err := s.CreateTemplate(ctx, tm); err != nil {
@@ -323,7 +326,7 @@ func testTemplateCRUD(t *testing.T, mk Factory) {
 	if err != nil {
 		t.Fatalf("get template: %v", err)
 	}
-	if got.ID != "tmpl_base" || got.Parent != "" || got.ContentDigest != "sha256:deadbeef" || !got.Builtin {
+	if got.ID != "tmpl_base" || got.Parent != "" || !got.Builtin {
 		t.Fatalf("template round-trip mismatch: %+v", got)
 	}
 	// duplicate → ErrConflict.
@@ -409,8 +412,9 @@ func testTemplateLineage(t *testing.T, mk Factory) {
 
 // testSandboxRefMissingTemplate: creating a sandbox that references a
 // nonexistent Template fails (§4.3 reference-side atomicity: create loses when
-// the parent Template is absent). The boot seed (§8) exists precisely to make
-// the builtin rows present before any create.
+// the parent Template is absent). The boot seed (§4.3 existence-as-state /
+// §4.4-A idempotent reconcile) exists precisely to make the builtin rows present
+// before any create.
 func testSandboxRefMissingTemplate(t *testing.T, mk Factory) {
 	ctx := context.Background()
 	s, _ := mk(t)
@@ -441,5 +445,154 @@ func testTemplateDurability(t *testing.T, mk Factory) {
 	// lineage RESTRICT still holds after reopen.
 	if err := s2.DeleteTemplate(ctx, "t1"); err != store.ErrInUse {
 		t.Fatalf("post-reopen delete referenced parent = %v; want ErrInUse", err)
+	}
+}
+
+// testReferenceReclaimRace is the DYNAMIC half of §4.3 (model.md 引用-回收原子性):
+// the static "referenced → cannot delete" judgment is not enough; the spec adds
+// an invariant that closes the reclaim-vs-reference TOCTOU window. This test
+// exercises that window directly — for many trials it races a DeleteTemplate
+// against several CreateSandbox referrers AND a child CreateTemplate, all
+// referencing the SAME Template, launched simultaneously.
+//
+// The invariant (per §4.3): the authoritative single store serializes reference
+// and reclaim so they NEVER interleave — either
+//   - the DELETE commits first → the template is gone and EVERY referencing
+//     create loses with ErrTemplateNotFound (no sandbox row is left pointing at a
+//     deleted template), OR
+//   - a reference commits first → the DELETE loses with ErrInUse and the template
+//     survives.
+//
+// Never both, never a torn state. Runs on BOTH backends via RunContract, so the
+// SQLite FK-RESTRICT path and the Memory Go-check path prove the SAME contract
+// (§1.3 seam). Run under -race.
+func testReferenceReclaimRace(t *testing.T, mk Factory) {
+	ctx := context.Background()
+	s, _ := mk(t)
+
+	const (
+		trials = 300
+		refs   = 4 // concurrent sandbox referrers per trial
+	)
+	for i := 0; i < trials; i++ {
+		tmplID := model.TemplateID(fmt.Sprintf("race_tmpl_%d", i))
+		childID := model.TemplateID(fmt.Sprintf("race_child_%d", i))
+		if err := s.CreateTemplate(ctx, model.Template{ID: tmplID, Builtin: true, CreatedAt: time.Now()}); err != nil {
+			t.Fatalf("trial %d: seed template: %v", i, err)
+		}
+
+		var (
+			wg    sync.WaitGroup
+			start = make(chan struct{}) // release all goroutines at once for max contention
+			mu    sync.Mutex
+			sbOK  []model.SandboxID // sandbox creates that returned nil
+		)
+		var delErr, childErr error // each written by exactly one goroutine, read after Wait
+
+		launch := func(fn func()) {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				fn()
+			}()
+		}
+
+		// the reclaim
+		launch(func() { delErr = s.DeleteTemplate(ctx, tmplID) })
+		// a child Template referencing tmpl as parent (lineage reference-side)
+		launch(func() {
+			childErr = s.CreateTemplate(ctx, model.Template{ID: childID, Parent: tmplID, CreatedAt: time.Now()})
+		})
+		// sandbox referrers
+		for j := 0; j < refs; j++ {
+			sbID := model.SandboxID(fmt.Sprintf("race_sb_%d_%d", i, j))
+			launch(func() {
+				sb := mkRec(string(sbID))
+				sb.Template = tmplID
+				sb.Overlay = model.OverlayID("ov_" + string(sbID))
+				err := s.CreateSandbox(ctx, sb, nil)
+				switch {
+				case err == nil:
+					mu.Lock()
+					sbOK = append(sbOK, sbID)
+					mu.Unlock()
+				case err == store.ErrTemplateNotFound:
+					// clean loss: the reclaim won this reference (§4.3).
+				default:
+					t.Errorf("trial %d: sandbox create = %v; want nil or ErrTemplateNotFound", i, err)
+				}
+			})
+		}
+
+		close(start)
+		wg.Wait()
+
+		// --- outcome must be one of the two clean verdicts, never torn ---
+		if delErr != nil && delErr != store.ErrInUse {
+			t.Fatalf("trial %d: delete = %v; want nil or ErrInUse", i, delErr)
+		}
+		if childErr != nil && childErr != store.ErrTemplateNotFound {
+			t.Fatalf("trial %d: child create = %v; want nil or ErrTemplateNotFound", i, childErr)
+		}
+
+		_, getErr := s.GetTemplate(ctx, tmplID)
+		templateGone := getErr == store.ErrTemplateNotFound
+		if !templateGone && getErr != nil {
+			t.Fatalf("trial %d: get template = %v", i, getErr)
+		}
+
+		// delete succeeded IFF the template is now absent.
+		if (delErr == nil) != templateGone {
+			t.Fatalf("trial %d: delErr=%v but templateGone=%v (delete/existence disagree)", i, delErr, templateGone)
+		}
+
+		// If the reclaim won, NO reference may have committed: no sandbox referrer
+		// succeeded and the child create must have lost. Both succeeding is the
+		// TOCTOU bug the invariant forbids.
+		if templateGone {
+			if len(sbOK) != 0 {
+				t.Fatalf("trial %d: TORN STATE: template reclaimed but %d sandbox create(s) succeeded referencing it", i, len(sbOK))
+			}
+			if childErr == nil {
+				t.Fatalf("trial %d: TORN STATE: template reclaimed but child create succeeded referencing it", i)
+			}
+		}
+
+		// No sandbox row may point at a reclaimed template, and exactly the
+		// successful creates leave rows (a create that errored must leave none).
+		list, err := s.ListSandboxes(ctx)
+		if err != nil {
+			t.Fatalf("trial %d: list sandboxes: %v", i, err)
+		}
+		refCount := 0
+		for _, sb := range list {
+			if sb.Template == tmplID {
+				refCount++
+			}
+		}
+		if templateGone && refCount != 0 {
+			t.Fatalf("trial %d: TORN STATE: template deleted yet %d sandbox row(s) still reference it", i, refCount)
+		}
+		if refCount != len(sbOK) {
+			t.Fatalf("trial %d: %d sandbox rows reference tmpl but %d creates returned nil", i, refCount, len(sbOK))
+		}
+
+		// clean up this trial's rows (referrers first, then the template).
+		for _, id := range sbOK {
+			if err := s.DeleteSandbox(ctx, id, nil); err != nil {
+				t.Fatalf("trial %d: cleanup sandbox %s: %v", i, id, err)
+			}
+		}
+		if childErr == nil {
+			if err := s.DeleteTemplate(ctx, childID); err != nil {
+				t.Fatalf("trial %d: cleanup child: %v", i, err)
+			}
+		}
+		if !templateGone {
+			if err := s.DeleteTemplate(ctx, tmplID); err != nil {
+				t.Fatalf("trial %d: cleanup template: %v", i, err)
+			}
+		}
 	}
 }

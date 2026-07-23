@@ -48,8 +48,9 @@ func main() {
 		log.Fatalf("orchestrator: assemble: %v", err)
 	}
 
-	// §8 boot seed BEFORE anything else: ensure a builtin `templates` row per
-	// static Template directory, so a create's sandboxes.template FK (§4.3)
+	// boot seed (§4.3 + §4.4-A) BEFORE anything else: ensure a builtin
+	// `templates` row per static Template directory, so a create's
+	// sandboxes.template FK (§4.3)
 	// resolves. Idempotent across restarts.
 	if err := eng.SeedTemplates(context.Background()); err != nil {
 		log.Fatalf("orchestrator: seed builtin templates: %v", err)
@@ -61,7 +62,7 @@ func main() {
 		log.Fatalf("orchestrator: startup reconciliation: %v", err)
 	}
 
-	// §9 orphan-layer sweep at boot: reclaim any Promote-built layer bytes with
+	// §5.B / §4.4-A orphan-layer sweep at boot: reclaim any Promote-built layer bytes with
 	// no live templates row (e.g. a Promote that crashed after writing the layer
 	// but before inserting the row — bytes-first, §5.B). Non-fatal; the reaper
 	// repeats it. buildingLayers is empty at boot, so a crashed-Promote staging

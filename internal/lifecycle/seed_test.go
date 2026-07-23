@@ -12,7 +12,7 @@ import (
 )
 
 // newSeedMediator builds a mediator whose fakeRootfs reports the given builtin
-// Template dirs (§8 boot seed source), over a fresh empty store.
+// Template dirs (boot seed source), over a fresh empty store.
 func newSeedMediator(t *testing.T, builtins ...string) (*Mediator, *store.Memory) {
 	t.Helper()
 	st := store.NewMemory()
@@ -25,9 +25,9 @@ func newSeedMediator(t *testing.T, builtins ...string) (*Mediator, *store.Memory
 	return m, st
 }
 
-// §8 boot seed: every static Template dir gets a builtin row (builtin=1, no
+// boot seed: every static Template dir gets a builtin row (builtin=1, no
 // parent), and the seed is IDEMPOTENT — running it twice leaves the row count
-// unchanged and adds no duplicates (acceptance §11.8).
+// unchanged and adds no duplicates.
 func TestSeedBuiltinTemplatesIdempotent(t *testing.T) {
 	ctx := context.Background()
 	m, st := newSeedMediator(t, "bare", "agent-stack")
@@ -60,7 +60,7 @@ func TestSeedBuiltinTemplatesIdempotent(t *testing.T) {
 
 // The seed makes a create's sandboxes.template FK resolve: before seeding, a
 // create referencing a builtin fails (§4.3 reference-side); after seeding it
-// succeeds. This is exactly why the seed MUST run before serving (§8).
+// succeeds. This is exactly why the seed MUST run before serving.
 func TestSeedEnablesCreate(t *testing.T) {
 	ctx := context.Background()
 	m, _ := newSeedMediator(t, "bare")

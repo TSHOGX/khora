@@ -111,7 +111,7 @@ func (r *Reaper) tick(ctx context.Context) {
 		r.m.deps.Logf("reaper: periodic reconcile (retried next tick): %v", err)
 	}
 	r.Sweep(ctx)
-	// §9 orphan-layer sweep, alongside the placement reconcile: reclaim
+	// §5.B / §4.4-A orphan-layer sweep, alongside the placement reconcile: reclaim
 	// Promote-built layer bytes with no live templates row. An in-flight Promote
 	// is protected by the mediator's buildingLayers keep-set. Non-fatal.
 	if err := r.m.SweepOrphanLayers(ctx); err != nil {

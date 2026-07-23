@@ -9,7 +9,8 @@ import (
 
 // PromoteToTemplate is a plain host-side copy (no mount, no root), so it runs in
 // the default unit suite. It freezes a sandbox's at-rest upper into a new
-// read-only layer dir, EXCLUDING the engine-injected runtime paths (§7).
+// read-only layer dir, EXCLUDING the engine-injected runtime paths (§5.B / §3.1;
+// rootfs-overlay D5).
 
 func newProvider(t *testing.T) (*HostOverlayFS, string) {
 	t.Helper()
@@ -37,10 +38,10 @@ func writeUpper(t *testing.T, p *HostOverlayFS, id string, files map[string]stri
 	}
 }
 
-// §7 / §5.B: Promote copies the upper into a new layer dir byte-for-byte, but
-// EXCLUDES the sandboxd portal/work paths (they must not enter the frozen layer,
-// acceptance §11.7). bytes-first: the layer exists on disk after Promote, ready
-// for the row insert.
+// §5.B / §3.1: Promote copies the upper into a new layer dir byte-for-byte, but
+// EXCLUDES the sandboxd portal sentinel files (they must not enter the frozen
+// layer — the excluded-path acceptance property, rootfs-overlay D5). bytes-first:
+// the layer exists on disk after Promote, ready for the row insert.
 func TestPromoteToTemplateExcludesRuntimePaths(t *testing.T) {
 	ctx := context.Background()
 	p, _ := newProvider(t)
@@ -48,8 +49,8 @@ func TestPromoteToTemplateExcludesRuntimePaths(t *testing.T) {
 	writeUpper(t, p, "ov_src", map[string]string{
 		"home/work/app.py":            "print('hello')",
 		"etc/installed-pkg":           "PKG",
-		"tmp/.sandboxd-transport.pid": "12345", // §7 excluded
-		"tmp/.sandboxd-crashloop":     "x",     // §7 excluded
+		"tmp/.sandboxd-transport.pid": "12345", // excluded (§5.B / D5)
+		"tmp/.sandboxd-crashloop":     "x",     // excluded (§5.B / D5)
 		"tmp/user-scratch":            "keepme", // NOT excluded (only the sandboxd paths are)
 	})
 
@@ -70,7 +71,7 @@ func TestPromoteToTemplateExcludesRuntimePaths(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(layer, "tmp/user-scratch")); err != nil {
 		t.Errorf("non-excluded tmp file was dropped: %v", err)
 	}
-	// §7 excluded sandboxd paths must NOT be in the layer.
+	// excluded sandboxd paths must NOT be in the layer (§5.B / D5).
 	if _, err := os.Stat(filepath.Join(layer, "tmp/.sandboxd-transport.pid")); !os.IsNotExist(err) {
 		t.Errorf("sandboxd pidfile leaked into layer: %v", err)
 	}

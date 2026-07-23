@@ -28,9 +28,9 @@ func exists(t *testing.T, path string) bool {
 	return err == nil
 }
 
-// §9: a layer dir with no live row and not building is an orphan → reclaimed; a
-// live one is kept; an in-flight-Promote one (building) is protected even
-// though it has no live row yet (bytes-first, §5.B).
+// §5.B / §4.4-A: a layer dir with no live row and not building is an orphan →
+// reclaimed; a live one is kept; an in-flight-Promote one (building) is protected
+// even though it has no live row yet (bytes-first, §5.B).
 func TestSweepOrphanLayers(t *testing.T) {
 	ctx := context.Background()
 	base := t.TempDir()
@@ -62,7 +62,7 @@ func TestSweepOrphanLayers(t *testing.T) {
 }
 
 // At boot the building keep-set is empty, so a crashed-Promote staging layer
-// (bytes on disk, no row) is a TRUE orphan and is reclaimed (§9).
+// (bytes on disk, no row) is a TRUE orphan and is reclaimed (§5.B / §4.4-A).
 func TestSweepReclaimsCrashedPromoteStagingAtBoot(t *testing.T) {
 	ctx := context.Background()
 	base := t.TempDir()

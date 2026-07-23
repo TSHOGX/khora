@@ -15,7 +15,7 @@ import (
 
 func newTestMediator(t *testing.T, rp *fakeRootfs, rt *fakeRuntime, healthy bool) (*Mediator, *store.Memory) {
 	st := store.NewMemory()
-	seedBare(t, st) // §4.3 template FK: the "bare" builtin row must pre-exist (boot seed, §8)
+	seedBare(t, st) // §4.3 template FK: the "bare" builtin row must pre-exist (boot seed)
 	m := New(Deps{
 		Store:         st,
 		Runtime:       rt,

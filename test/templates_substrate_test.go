@@ -1,7 +1,7 @@
 //go:build substrate
 
 // L3/L4 M5 acceptance: the Template object model against REAL runsc + the
-// assembled engine. Covers the P1 gate criteria (M5 §11): delete-referenced →
+// assembled engine. Covers the P1 gate criteria: delete-referenced →
 // 409-equivalent (ErrInUse), reference-vs-reclaim atomicity under real
 // concurrency, the E2B-bug regression (a paused sandbox's Template stays
 // undeletable), boot-seed idempotency, and the orphan-layer sweep reclaiming a
@@ -25,7 +25,7 @@ import (
 	"engine/internal/store"
 )
 
-// §11.1: create-from-Template → DeleteTemplate is refused (ErrInUse, → 409);
+// create-from-Template → DeleteTemplate is refused (ErrInUse, → 409);
 // after the sandbox is destroyed the Template is deletable. Real runsc create.
 func TestM5DeleteReferencedTemplate(t *testing.T) {
 	if os.Geteuid() != 0 {
@@ -59,7 +59,7 @@ func TestM5DeleteReferencedTemplate(t *testing.T) {
 	t.Logf("✓ referenced Template protected; deletable once unreferenced")
 }
 
-// §11.4 (E2B-bug regression): a PAUSED sandbox still holds a persistent
+// E2B-bug regression: a PAUSED sandbox still holds a persistent
 // reference row to its Template, so RESTRICT sees it and the delete is refused —
 // exactly the case E2B lost track of (the reference lived only in memory).
 func TestM5PausedSandboxProtectsTemplate(t *testing.T) {
@@ -88,7 +88,7 @@ func TestM5PausedSandboxProtectsTemplate(t *testing.T) {
 	t.Logf("✓ paused sandbox's Template stays undeletable (persistent reference row)")
 }
 
-// §11.3: create-from-Template racing DeleteTemplate under real concurrency —
+// create-from-Template racing DeleteTemplate under real concurrency —
 // exactly one side wins, the other fails cleanly, never a dangling reference or
 // lost bytes. Runs many rounds against the real SQLite store (single-writer
 // serialization is the arbiter, §4.3).
@@ -137,7 +137,7 @@ func TestM5ReferenceReclaimAtomicity(t *testing.T) {
 	t.Logf("✓ %d rounds: reference-vs-reclaim never left a dangling reference", rounds)
 }
 
-// §11.8: the boot seed is idempotent — reconciling twice leaves the builtin row
+// the boot seed is idempotent — reconciling twice leaves the builtin row
 // count unchanged. Runs against the real SQLite store via the assembled engine.
 func TestM5BootSeedIdempotent(t *testing.T) {
 	if os.Geteuid() != 0 {
@@ -158,7 +158,7 @@ func TestM5BootSeedIdempotent(t *testing.T) {
 	t.Logf("✓ boot seed idempotent (%d builtin rows unchanged across re-seed)", len(after))
 }
 
-// §11.5 (bytes-first sweep, P1 portion): a Promote-built layer dir with no live
+// bytes-first sweep (P1 portion, §5.B / §4.4-A): a Promote-built layer dir with no live
 // templates row is a crashed-Promote orphan → the boot sweep reclaims it; a live
 // layer is kept. Simulated by planting layer dirs directly (the full Promote
 // crash path is exercised in P2).
@@ -194,9 +194,9 @@ func TestM5OrphanLayerSweep(t *testing.T) {
 	t.Logf("✓ orphan layer reclaimed, live layer kept")
 }
 
-// §11.7 (Promote end-to-end): write a file into a sandbox → Promote → create a
+// Promote end-to-end (§3.1 / §5.B): write a file into a sandbox → Promote → create a
 // NEW sandbox from the new Template → the file is visible (the freeze took
-// effect); and the sandboxd portal path is NOT in the frozen layer (§7 excluded).
+// effect); and the sandboxd portal path is NOT in the frozen layer (excluded-paths, §5.B).
 func TestM5PromoteEndToEnd(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("needs root")
@@ -220,7 +220,7 @@ func TestM5PromoteEndToEnd(t *testing.T) {
 		t.Fatalf("write marker: %v", err)
 	}
 
-	// Promote → new Template; source is left paused (§7).
+	// Promote → new Template; source is left paused (§3.1 / §5.B).
 	newTmpl, err := m.Promote(ctx, src)
 	if err != nil {
 		t.Fatalf("promote: %v", err)
@@ -254,7 +254,7 @@ func TestM5PromoteEndToEnd(t *testing.T) {
 	}
 	t.Logf("✓ child from promoted Template sees the frozen change (%s)", marker)
 
-	// §7 excluded: the sandboxd portal pidfile must NOT be in the frozen layer.
+	// excluded-paths (§5.B): the sandboxd portal pidfile must NOT be in the frozen layer.
 	layerDir := filepath.Join(base, "state", "layers", string(newTmpl))
 	if _, err := os.Stat(filepath.Join(layerDir, "tmp", ".sandboxd-transport.pid")); !os.IsNotExist(err) {
 		t.Fatalf("sandboxd portal path leaked into promoted layer: %v", err)
@@ -262,7 +262,7 @@ func TestM5PromoteEndToEnd(t *testing.T) {
 	t.Logf("✓ sandboxd portal path excluded from the frozen layer")
 }
 
-// §11.2 (lineage protection): Promote a child layer T2 over T1 → deleting T1 is
+// lineage protection (§4.3): Promote a child layer T2 over T1 → deleting T1 is
 // refused while T2 exists (RESTRICT 引用向上); delete T2 first, then T1.
 func TestM5LineageProtection(t *testing.T) {
 	if os.Geteuid() != 0 {
@@ -315,7 +315,7 @@ func TestM5LineageProtection(t *testing.T) {
 	t.Logf("✓ lineage protection: parent undeletable while child exists")
 }
 
-// §11.5 full (bytes-first crash): simulate a Promote that wrote the layer bytes
+// bytes-first crash, full (§5.B / §4.4-A): simulate a Promote that wrote the layer bytes
 // but crashed before inserting the row (a staging→final layer with no templates
 // row). The boot sweep reclaims it, leaving no broken ready state.
 func TestM5PromoteCrashBeforeRowIsReclaimed(t *testing.T) {

@@ -56,7 +56,7 @@ func (e *Engine) HTTPHandler() http.Handler {
 	mux.HandleFunc("/v1/sandboxes/", e.handleSandboxSub)
 
 	// --- Template lifecycle: §6.1 REST/JSON (immutable object, §3.1/§4.3) ---
-	// GET /v1/templates (list) ; POST /v1/templates (Promote — P2, not yet).
+	// GET /v1/templates (list) ; POST /v1/templates (Promote).
 	mux.HandleFunc("/v1/templates", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -114,7 +114,9 @@ func (e *Engine) handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	sid, err := e.Mediator.Create(r.Context(), spec)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		// route through statusFor so a bad template_id (store.ErrTemplateNotFound,
+		// the §4.3 reference side) surfaces as 404, not a raw 500.
+		statusFor(w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, createResp{SandboxID: string(sid)})
