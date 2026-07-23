@@ -47,8 +47,8 @@
     (upper/work)"——一个被调度到远端 node 的隔离单元根本给不出这些。
   - ✅ 契约式:`(rootfs 来源, 引流要求, 资源上限) → (placement 句柄, transport
     端点, 生命周期控制 stop/start)`。**`rootfs 来源`是一个不透明句柄**:`local_runsc` 下它恰好物化成
-    一个 merged rootfs 路径,远端形态下会是另一种句柄——被禁的是 Overlay 的**内部** upper/work 路径
-    (§5.B 已把它设为不可导出),而**已 merged 好的 rootfs 句柄**是本子系统合法的入参,二者不矛盾。**引流要求**是 §5.D 给的 ingress 描述符 + default-deny(把
+    一个已 merged 好的 rootfs 路径,远端形态下会是另一种句柄——被禁的只是上一条那个**内部** upper/work
+    路径,已 merged 的 rootfs 句柄是合法入参。**引流要求**是 §5.D 给的 ingress 描述符 + default-deny(把
     egress 全量引导进引擎数据面,§5.D),不是完整网络策略——策略 enforcement 与凭证注入在引擎数据面里,
     不在 provider。
   今天唯一实现 `local_runsc` 把引流要求物化成 nft+netns、把 §3.4 的资源上限经 **OCI `linux.resources`**
@@ -61,7 +61,7 @@
   - **网络 placement 机制**:`--network=sandbox` 的 runsc **只 adopt 一个已存在的 netns、不自建**。故
     `local_runsc` 先建 netns + veth、**给 guest 端分配 IP**,再经 OCI `linux.namespaces[type=network].path`
     把 netns 交给 runsc;sentry 加入后在 boot 时把内核侧 L3 地址**收进自己的 netstack**(boot 后从内核侧读
-    不到该地址,veth 链路仍在)。由此 §3.3/D5.1 冷启链的 ⑥「发现 IP」对 local_runsc 退化成**读回引擎自己的
+    不到该地址,veth 链路仍在)。由此 D5.1 冷启链的 ⑥「发现 IP」对 local_runsc 退化成**读回引擎自己的
     分配**——不做 boot 后探测。resume 每次**新建 netns**(§3.3 换新 IP),故无「复用 netns 须重灌地址」问题。
   - **对账机制(§4.4-A 崩溃变体的 provider 面)**:除 `Launch`/`Stop`/`Destroy` 外,provider 再出两个
     枚举/接管/回收机制,供 §4 mediator 的启动对账驱动(动词仍归 §4):
@@ -126,10 +126,19 @@
   overlayfs 的 FS。这是 §4「机制归 §5」的直接落点——生命周期在 create/resume 时调用它,provider
   不关心 rootfs 怎么拼出来的。
 - **Promote**:把当前 Overlay 固化成新 Template 的底层——可写层降为只读底层,Template 因此
-  天然分层(像分层镜像)。Promote 需要的仅是"at-rest 读到上层字节去 tar/hash",外层 overlayfs 的
-  upper 是宿主普通目录树,直接 tar 即可(§2.5 已验)。
-- **分层 Template**:一摞只读层(像 OCI image),Promote 往上叠一层。这是 **FS provider 怎么
-  存/引用冻结层**的事,位于 runsc overlay 机制**之上**,与 overlay 由谁管那一层无关。
+  天然分层(像分层镜像)。Promote 需要的仅是"at-rest 读到上层字节固化成一个新只读层",外层 overlayfs 的
+  upper 是宿主普通目录树,直接读即可(§2.5 已验)。**读的是抢占式干净停后的 at-rest upper**(§4.2 静止点;
+  协作式应用层安全点非正确性前提,substrate flush 本就保证)。
+- **分层 Template = multi-lowerdir**:一摞只读层(像 OCI image),Promote 往上叠一层——新 Template 的
+  lower 栈 = `[新层, ...父 Template 的 lower 栈]`,沿 lineage(`parent` 引用)展开。这是 **FS provider
+  怎么存/引用冻结层**的事,位于 runsc overlay 机制**之上**,与 overlay 由谁管那一层无关。
+  content-addressed diff(提 OCI tar + digest)是演进项(rootfs-overlay D3),抽象不变。
+- **不可变工件字节先行(bytes-first,§4.3 存在即状态的硬约束)**:Template 无 state 列、行存在即
+  ready,故其字节(新只读层目录)必须**先在后端完全物化、再插控制面行**。create-from-Template =
+  引用既有层(字节早在);Promote = 先写层字节、后插 Template 行——crash 在中间只留**孤儿层字节**
+  (可回收),绝不出现"行指向不存在字节"的破损 ready 态。**孤儿层 sweep**:无对应活行的层目录 =
+  孤儿,复用 §4.4-A 反向对账回收(不靠 FK 删字节);同步 Promote 期间在建层由一个 **in-flight 构建
+  keep-set** 保护、不被周期 sweep 误拆(placement live-map 的同形,§4.4-A)。
 - **Promote 捕获只含 Overlay 树**:固化沙箱 FS = 固化 Overlay 这棵树。挂载进来的 Volume **不在
   这棵树里**——挂载点(如 `/home/workspace`)在固化结果里只是一个**空目录占位**,Volume 内容不进
   去(它在各自后端,§5.C)。这跟 `tar` 一个挂了 NFS 的目录只 tar 到挂载点空壳是同一回事。
@@ -237,10 +246,10 @@
   无状态的 RPC 服务**,二者自足 = 一个 E2B 式沙箱;agent 会话语义不在 engine 内(见末条)。
 - **in-guest daemon(`sandboxd`,核心组件)**:连接在 guest 内的终点是一个**payload 无关的
   daemon**,只暴露两个**通用**能力,且**对 agent / turn / session 一无所知**:
-  1. **process** —— 起进程 / 重连 / 发输入 / 发信号 / 列进程,PTY 是带 pty 字段的特例
-     (shell 只是 `exec /bin/bash` 带 PTY);进程按 pid 寻址(guest 原生)。
-  2. **fs** —— `read`(可带 offset)/ `write` / `list` / `stat`,大文件走旁路;**不做 watch**
-     (消费方用 `read`+`stat` 自行轮询拉增量)。
+  1. **process** —— 起进程 / 重连 / 发输入(含 resize、关 stdin)/ 发信号 / 列进程,PTY 是带 pty
+     字段的特例(shell 只是 `exec /bin/bash` 带 PTY);进程按 pid 寻址(guest 原生)。
+  2. **fs** —— `read`(可带 offset)/ `write` / `list` / `stat` / `mkdir` / `remove` / `move`,
+     大文件走旁路;**不做 watch**(消费方用 `read`+`stat` 自行轮询拉增量)。
   这个 daemon 是"CLI/TUI/WebUI 都是同一套 API 的平级 client"(§6)成真的具体载体。它**必须保持
   通用**:不内嵌任何 agent/turn/session 语义,那些是 engine 外 adapter 的事(见末条)。
 - **载体:netns 内 TCP,不用 vsock**:`sandboxd` 在 guest netns 里监听一个 TCP 端口,连接由 gVisor

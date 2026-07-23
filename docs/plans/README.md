@@ -28,7 +28,7 @@ Acceptance for the shipped milestones lives in the substrate tests
 
 | # | Plan | Capability delivered | Anchors |
 | --- | --- | --- | --- |
-| **M5** | *(planned)* | Templates: first-class Template rows (lifecycle + refcount + lineage) + reference-reclaim atomicity + Promote + refcount GC | §5.B · §4.3 |
+| **M5** | [`M5-templates.md`](./M5-templates.md) | Uniform object model on Template lineage: first-class Template rows (opaque ID + `parent` lineage, **existence-as-state**, **derived** refcount) + FK-enforced reference-reclaim atomicity + safe delete/GC + Promote (multi-lowerdir) | §5.B · §4.3 |
 | **M6** | *(planned)* | Volume: mount table, exclusive lease (= refcount mount row), direct-write regime | §5.C |
 | **M7** | *(planned)* | Network egress data plane + layered deny-set + credential injection (**security-critical**) | §5.D · §2.4 |
 | **M8** | *(planned)* | Credential store seam | §5.D |

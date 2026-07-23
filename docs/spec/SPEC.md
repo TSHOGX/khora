@@ -49,7 +49,7 @@ agent),共享同一 FS 与网络。
 > **五子系统 canonical 短名**(§5,代码包名 / 日志 / 评审一律用这些,不用章节号指代):
 > **Runtime**(§5.A,执行基底)· **Rootfs**(§5.B,rootfs/Overlay)· **Volume**(§5.C)·
 > **Network**(§5.D)· **Transport**(§5.E)。三处 `fs`/`FS`/`Rootfs` 刻意区分,勿混:
-> **Rootfs** = 子系统 5.B;**`fs`** = §5.E Transport 的一个 wire 服务(`read/write/list/stat`);
+> **Rootfs** = 子系统 5.B;**`fs`** = §5.E Transport 的一个 wire 服务(`read/write/list/stat/mkdir/remove/move`);
 > **FS provider** = §5.B/§5.C 共用的存储物化 seam("Overlay/Volume 落在哪个后端"),跨两个子系统、
 > 不专属 Rootfs,故不改名。同理 **Runtime**(子系统 5.A)vs **Sandbox**(§3.2 顶层持久单元)分指
 > "用什么跑" vs "哪一个沙箱"。
@@ -259,7 +259,7 @@ D3.1)。**引擎不建模 guest 用户**:「以某用户运行」是 guest
 
 ### 2.4 provider 的安全义务(抽象,不绑定任何具体 provider)
 
-§2.1 的两组切分已经把它讲完,这里只收口成一句可验收的义务,供将来评估任何 provider 用:
+把 §2.1 两组切分收口成一句可验收的义务,供将来评估任何 provider 用:
 
 > **一个合格的 runtime provider,必须维持 substrate-borne 的 ①②(用户态内核拦截 syscall + 基底
 > 在宿主非特权);对 ③ 它只负责一件事——把隔离单元的每一条 egress exhaustive 地引流进引擎指定的

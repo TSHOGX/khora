@@ -130,7 +130,7 @@ tick 里先分类、再分派**:分类结果既喂 reaper 的 TTL 处置,也喂�
 **失败策略沿用 §4.4-A:skip-and-log,对不确定的 `running` 存活者取保守**(保护其 placement 不回收,漏拆可逆、
 误拆不可逆),对账幂等,跳过项下轮重来。**批量策略**:首版逐沙箱串行判、单轮全量扫(单机、沙箱数有限,足够);
 若将来规模变大,分批 + 限流是 additive 调参,不改本形状。**枚举本机资源**当前只有 runsc 容器 + netns + overlay
-mount(egress 面 nft/gateway 随 §5.D M7 落地时并入枚举,这里预留位置、不提前建)。
+mount(egress 面 nft/gateway 随 §5.D 数据面落地时并入枚举,这里预留位置、不提前建)。
 
 ---
 

@@ -56,7 +56,7 @@ the machine can't reach).
 | overlayfs: CoW correct, upper is a plain host dir, re-mount byte-identical | amd64 (ECS) + arm64 | fresh workdir required per (re-)mount; copy-up files root-owned (design detail → rootfs-overlay D5) |
 | pinned runsc flags launch + exec `/bin/sh` | arm64 | all five pins are **global** flags (before the `run` subcommand); config `root.path` = the externally-merged overlay dir |
 | network: host dials an in-guest listener through the sentry netstack by veth IP; fresh netns → new IP | amd64 (ECS) + arm64 | sentry-terminated (`ss` shows zero kernel listeners while host gets responses); `ip netns del` cascades the peer veth; mechanism in §5.A |
-| §4.4-A reconcile: enumerate + idempotent teardown of placement resources | arm64 | primitives + reclaim order in open-decisions §4.4-A |
+| §4.4-A reconcile: enumerate + idempotent teardown of placement resources | arm64 | primitives + reclaim order in model.md §4.4-A + reaper-health D4 |
 
 **Privilege.** `--network=sandbox` rejects `--rootless`, so the
 orchestrator/launcher needs root (or CAP_NET_ADMIN+CAP_SYS_ADMIN) to materialize

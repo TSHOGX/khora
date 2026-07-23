@@ -138,12 +138,14 @@ reflink 来补分层,那其实又滑回上面的 overlayfs 底层存储附带能
   **root-owned**——destroy 删 upper 也须特权。这正是「宿主路径 + mount 生命周期锁死在 §5.B 子系统内、
   不外露给调用方」(§3.1.1)的又一条落地理由:特权 mount 是子系统机制,不是 mediator 的活。
 - **容量配额(disk 容量轴,§3.4)**:per-sandbox 的 upper+work 容量帽怎么物化,见 D6。
-- **pause flush 到一致点的时序**:字节一致性在"干净停(kill+delete)后"已验;仍需锁定的是 pause
-  这个动作把 sentry/gofer 的写 flush 到 upper 的**精确一致点**(§4.2 静止点),确保 Promote/
-  snapshot 读到的是完整状态而非半写。
+- **pause flush 一致点**:**substrate 半已定并被依赖**——干净停(kill+delete)后 sentry/gofer 的写
+  flush 到 upper 的 at-rest 一致性已验(D0/D3),Promote 读的正是这个抢占式停后的 at-rest upper
+  (guest-runtime D4.4:不依赖进程配合)。**仍开放的只是应用层协作安全点**(长跑进程到安全点再冻,
+  避免截断 in-flight 写)——纯优化、非正确性前提,单独追踪于 guest-runtime D4.4 / open-decisions §2。
 - **excluded paths / portal paths**:提取 Promote/snapshot 时要过滤掉引擎自身注入的运行时路径
   (如 guest 内 daemon 的工作目录)与 Volume 挂载点占位(§5.B「Promote 捕获只含 Overlay 树、Volume
-  挂载点是空占位」)。精确清单待定。
+  挂载点是空占位」)。**最小集(至少 sandboxd portal/工作目录)由 Promote 里程碑落地**;完整清单仍开放
+  ——Volume 挂载点占位待 Volume 子系统落地才出现。
 - **content-addressed diff 层(演进项,演进条件见 D3)**:落地时要实现 tar 提取 + baseline 增量 +
   object store 接口(能力映射见 D2)。
 

@@ -28,20 +28,20 @@
 | **§2 安全模型** | 五支柱各自的 enforcement 细节;§2.3 数据面在 shared-rw Volume 等场景下的复合影响 | 支柱契约已定,逐条 enforcement 后续展开 |
 | **§5.C Volume(契约边界外)** | Volume 四条契约已定(§5.C);待细化的四条边界项(独占卷抢占策略 / shared-rw ENOSPC 复合行为 / 直连变更 vs live-ro reader 准入 / snapshot 一致性标注进 §6) | **详见 [`deep-dives/volume.md`](./deep-dives/volume.md) D5**,本表不复制。多为产品层策略或落 §6 时定 |
 | **§1.4 侧信道** | co-residency 策略(不共核/不共调度)在**多租户接入时**的具体物化 | 随多租户激活才做,落在 placement 层;五支柱不变 |
-| **§4.3 对象回收 sweep** | 引用-回收原子性不变量已定(§4.3)。**待细化**:refcount 物化成计数字段 vs 由"引用行是否存在"查询导出的取舍、sweep 的触发时机与批量策略、destroy 删字节的异步重试与 refcount==0 判定的具体落地 | 仅登记 sweep **实现**细节。谁消费:§4.3 reaper / §5.C 挂载行 / §5.B Template lineage GC |
-| **§4.1 / §4.4-C 事件流(对外面)** | 投递算法、store 原子提交契约、后端(ADR-0004 SQLite)已定。**待细化的是对外面**:event schema、可重放窗口大小、subscriber 接入/续位约定。<br>**两处已知限制(设计使然,非缺陷)**:① outbox **只标记不删行**、随转换单调增长(部分索引 `WHERE published_at IS NULL` 令 unpublished 扫描不退化,at-rest 无界)——修剪策略(保留期 / 归档)随「可重放窗口」一并落地(窗口定 ⇒ 修剪 = 删窗口外已发布行);② `store.DedupSink` 是引擎内**参考实现**,`seen` 进程内 / 无界 / 非持久,重启不记得崩前已投递的 ID(靠 outbox 重发 + 真实 subscriber 侧持久去重兜底,§4.4-C at-least-once)——真实 subscriber 在引擎外自行持久去重,不在引擎内加。 | additive(add a subscriber);引擎不追踪 subscriber、只保证可靠写入一条可重放 stream |
+| **§4.3 对象回收 sweep(§5.C 挂载行消费者)** | 引用-回收原子性不变量已定(§4.3:derived refcount + 外键)。Template lineage 的落地(sweep 触发时机/批量、孤儿字节回收)已由 Templates 里程碑收口。**待细化的只剩 §5.C 挂载行消费者**:独占租约 = 挂载行 refcount,其 sweep/回收随 Volume 子系统落地定 | 谁消费:§5.C 挂载行(Volume 里程碑);reaper 复用 §4.4-A 反向对账形状 |
+| **§4.1 / §4.4-C 事件流(对外面)** | 投递算法、store 原子提交契约、后端(ADR-0004 SQLite)已定。**待细化的是对外面**:event schema、可重放窗口大小、subscriber 接入/续位约定。两处设计使然的已知限制(outbox 只标记不删行、随转换单调增长;`store.DedupSink` 参考实现进程内/非持久)均已在对应代码点留注,随「可重放窗口」一并收口。 | additive(add a subscriber);引擎不追踪 subscriber、只保证可靠写入一条可重放 stream |
 | **§4.2 pause 静止点(仅剩参数级)** | 协议两层结构已定(§4.2 + deep-dive D4.4:① drain-barrier ② `SIGTSTP`+观测 `/proc` stopped+超时降 `SIGSTOP`,不引入 guest 内 ack 通道)。**残留纯调参**:grace 时长、可 handle 信号的具体选择、是否给模板一个可选"可协作 flush"钩子(默认不需要) | 非架构,落地时定;不改两层结构。见 [`deep-dives/guest-runtime.md`](./deep-dives/guest-runtime.md) D4.4 |
 | **§5.D 凭证存储 seam** | 凭证"留宿主侧"的**后端**(secret-store):怎么存、注册、轮转。此处只留**at-rest 后端**选型;alias→directives 的 **resolve/缓存/失效契约**是另一条 seam,见下行 | 一类可插拔 seam(类比 runtime/FS provider);明文不进控制面/Overlay,只在宿主侧独立后端 |
 | **§5.D egress 数据面 seam + 两条契约** | 引擎自有 egress 数据面(gateway,行为 seam)与两条传输无关薄契约的**精确签名**:① **resolve 契约**(数据面↔resolver:alias+目标上下文 → directives+过期+version 戳 + 失效信号)② **ingress 契约**(数据面↔引流:抽象描述符 + 双向劫持能力协商)。行为的两种强制模式(builtin 内联求值 / 外部编译下发)对接口要求不同 | **详见 [`deep-dives/network.md`](./deep-dives/network.md) D3/D7**,本表不复制。今天只建接口形状 + builtin 单实现(模式 1),registry plumbing 缓(D6);谁消费:§5.D 数据面 + 未来远端 provider |
 | **§5.D 凭证注入模式** | builtin 首版支持哪些注入模式,各自约束:MITM(TLS terminate-reoriginate,每 SNI 现签叶子)/ 明文 alias 端点 / placeholder 替换 / header 注入 / SSH re-origination | **别过早钉 MITM 为唯一路径**;MITM 选中才需 guest 信任注入(CA 证书进 guest、私钥留数据面),落 §5.B 模板 / §5.E.1。见 [`deep-dives/network.md`](./deep-dives/network.md) D9 |
 | **§2.4 / §5.D egress deny-set 分层** | 三条 invariant 已定并毕业进 spec(§2.3/§2.4;推理 [`deep-dives/network.md`](./deep-dives/network.md) D5.3–D5.6)。**残留细粒度**:① L0 地板精确清单(orchestrator 自身端点 / sibling 网段如何在 placement 时算出;link-local/loopback 已定)② 内网 deny-safe 放行的 NetworkPolicy 语法 ③ fail-closed 是否发 §4.1 压力/审计事件(倾向发) | 谁消费:§5.A steering 物化 + §5.D 数据面 dial 逻辑 + placement;L0 清单是引擎资产、两跳共用一份 |
 | **§5.A provider 接口(远端形态入参)** | 核心 `Provider` 签名(策略+句柄)已定且经 `local_runsc` 兑现(§5.A)。**待细化的仅剩远端形态的入参形状**:`RootfsSource`(本地 `MergedPath` vs 远端句柄)、`SteeringSpec`(M7 egress 引流描述符)、`ResourceLimits` 在非 cgroup 调度层的等价物——用"被调度的远端隔离单元"作纸面参照反推,**不实现任何远端 provider** | 谁消费:未来远端 provider;`local_runsc` 已是唯一实现 |
-| **§5.B Overlay 物化** | 载体与持久单元(留驻 upperdir)已定(§5.B);待细化:workdir/孤儿回收、pause flush 一致点、Promote 的 excluded paths、content-addressed diff 层(演进项)、multi-node 经 FS provider 跨 node 寻址(PV/对象存储) | **详见 [`deep-dives/rootfs-overlay.md`](./deep-dives/rootfs-overlay.md) D5**,本表不复制 |
+| **§5.B Overlay 物化** | 载体与持久单元(留驻 upperdir)已定(§5.B);待细化:沙箱 upper/work 的 workdir 新建与孤儿回收、pause flush 一致点的**应用层协作安全点**(substrate 半已定、Promote excluded-paths 已由 Templates 里程碑收口)、content-addressed diff 层(演进项)、multi-node 经 FS provider 跨 node 寻址(PV/对象存储) | **详见 [`deep-dives/rootfs-overlay.md`](./deep-dives/rootfs-overlay.md) D5**,本表不复制 |
 | **§3.4 / §5.B / §5.C disk 容量帽物化** | 两轴切分(速率归 cgroup、容量归 FS 配额)与 per-sandbox upper 帽的三种手段已定(§3.4 / §5.B / D6:首版 project quota,work+upper 同配额)。**待细化**:首版 project quota 的落地(project id 分配/回收、软硬双阈取值、destroy 时清理)、Volume per-volume 帽在其后端的物化 | **详见 [`deep-dives/rootfs-overlay.md`](./deep-dives/rootfs-overlay.md) D6**;谁消费:§5.B/§5.C FS provider |
 | **§2.3 / §4 ENOSPC 标准行为** | per-sandbox 帽把"撑满整机"降级成"撑满自己"已定(§2.3);**待细化**:打到自己帽时的标准行为——guest 见普通 `ENOSPC`(定)、是否发一条**容量压力事件**(Consumption seam,add a subscriber 做告警)、是否触发 auto-pause(倾向不强制)、软阈告警 + 硬阈拒写的双阈是否都做 | additive(add a subscriber);谁消费:§2.3 爆炸半径不变量 + §4.1 事件流 + 可选 §4.3 reaper |
 | **§4 节点磁盘压力准入门** | 允许超卖(见 §3 选型)时 per-sandbox 帽不足以保证整机不满;**待细化**:mediator 在 create / resume 物化 upper 前的**节点余量准入检查**(不足则 create 失败 / resume 留 `paused`,落 §4.4-A 原子退回源态,不留脏态)+ 运行时磁盘压力监控的阈值与 reaper 反应 | 谁消费:§4 mediator create/resume 编排 + §4.3 reaper;与超卖选型(§3)耦合 |
 | **§5.E transport(残留调参)** | wire 机制(内沿 Connect,D4)与外沿投影(D6)、溢出处置(断开订阅者,D4.3 invariant 1)均已定进 spec/deep-dive。此处仅留**可调数值旋钮**,当前值可随经验再调:① 输出环形缓冲字节上界 = **64 KiB**(重绘保真 vs 内存)② 慢订阅者发送窗口 = **256 帧** ③ `keepalive` 周期 = **20s** | 纯数值,不影响 D4/D6 形状;谁消费:§5.E transport 实现 |
-| **§5.A / 模板** | **内置 Template 目录**:一个 bare base(uv/pip/git/build-essential;可选 sudo,仅作 guest 内便利、非引擎语义),各 agent 栈(claude-code/opencode/pi)经同一 lineage 机制叠在 bare base 之上(§3.1 分层) | guest 默认 root(§2.2),装包是一次性 exec、不引入 init 依赖,见 [`deep-dives/guest-runtime.md`](./deep-dives/guest-runtime.md) D3.1 |
+| **§5.A / 模板(内容目录)** | **内置 Template 的内容清单**:一个 bare base(uv/pip/git/build-essential;可选 sudo,仅作 guest 内便利、非引擎语义),各 agent 栈(claude-code/opencode/pi)叠在 bare base 之上。**这是产品/模板层的内容选型**;其一等行化 + boot seed + 叠层机制(multi-lowerdir)已由对象模型(§4.3/§5.B)与 Templates 里程碑收口 | guest 默认 root(§2.2),装包是一次性 exec、不引入 init 依赖,见 [`deep-dives/guest-runtime.md`](./deep-dives/guest-runtime.md) D3.1 |
 | **§6 部署形态** | 高层形态已定(§1.1:单二进制 + 配置 + 本地 store,store 后端见 ADR-0004);仅待细化打包 / 配置 schema | 对齐 §1.1 部署目标 |
 
 ---
@@ -62,7 +62,10 @@
 
 | 缺口 | 现状 vs 目标 | 落地归属 |
 | --- | --- | --- |
-| **低危已知小项**(均已在对应代码点留注,非正确性破坏) | ① **outbox publisher 头阻塞**——一条投递失败挡住其后全部(保序 / at-least-once 正确);随事件流可重放窗口(后续增量)择机收口。② **PID1 退出码竞争**——`init.go` 盲 `Wait4(-1)` reaper 与监督循环 `cmd.Wait()` 争 transport 子进程退出码,输者拿 `ECHILD`;自愈重启不受影响,只是退出码/telemetry 可能丢(Go 1.23+ pidfd Wait 或已收窄)。③ **PID1 容器级信号扇出单子进程**——当前只转发给唯一的 transport 子进程(transport 是唯一子进程时正确);模板自带长跑 sibling 落地后升级成进程组扇出(§5.E.1)。④ **转换锁 map 只增不删**——`lifecycle.go` 每见一个新 SandboxID 加一把锁、destroy 后不回收(高 churn 下慢泄漏);destroy 时删锁会与阻塞在同锁上的动词竞争(令阻塞动词与新动词序列化到不同锁上),需谨慎处理 | 均择机收口;owning plan 出现即迁入其中并从本表移除 |
+| **① outbox publisher 头阻塞**(已留注,非正确性破坏) | 一条投递失败挡住其后全部(保序 / at-least-once 正确) | 随事件流可重放窗口(后续增量)择机收口 |
+| **② PID1 退出码竞争**(已留注,非正确性破坏) | `init.go` 盲 `Wait4(-1)` reaper 与监督循环 `cmd.Wait()` 争 transport 子进程退出码,输者拿 `ECHILD`;自愈重启不受影响,只退出码/telemetry 可能丢(Go 1.23+ pidfd Wait 或已收窄) | 择机收口 |
+| **③ PID1 容器级信号扇出单子进程**(已留注,非正确性破坏) | 当前只转发给唯一的 transport 子进程(transport 是唯一子进程时正确) | 模板自带长跑 sibling 落地后升级成进程组扇出(§5.E.1) |
+| **④ 转换锁 map 只增不删**(已留注,非正确性破坏) | `lifecycle.go` 每见一个新 SandboxID 加一把锁、destroy 后不回收(高 churn 下慢泄漏);destroy 时删锁会与阻塞在同锁上的动词竞争(令阻塞动词与新动词序列化到不同锁上),需谨慎处理 | 择机收口 |
 
 ---
 

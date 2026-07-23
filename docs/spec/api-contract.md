@@ -28,10 +28,10 @@ POST   /v1/sandboxes/{id}/resume
 DELETE /v1/sandboxes/{id}                                                          (destroy)
 GET    /v1/sandboxes                                                               (list)
 
-# Template
+# Template(不可变工件:opaque ID 作身份,存在即状态,§3.1 / §4.3)
 GET    /v1/templates
 POST   /v1/templates                 {from_sandbox_id}   (Promote: 静止后固化沙箱,§3.1)        → {template_id}
-DELETE /v1/templates/{id}
+DELETE /v1/templates/{id}            (被沙箱/子层引用时 → 409 template in use;引用-回收原子性 §4.3)
 
 # Volume(与沙箱生命周期解耦)
 POST   /v1/volumes                   {size?, backend?}                              → {volume_id}

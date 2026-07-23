@@ -15,8 +15,10 @@ Template   不可变、内容寻址的只读底座(可被多沙箱共享/fork)
             └─(可选)Promote = 把当前 Overlay 固化成新 Template
 ```
 
-- **Template**:不可变、共享、可 fork。平台预置(纯净 base、带某 agent 的栈…),或用户
-  Promote 自建。内容寻址作为其不可变标识。
+- **Template**:不可变、共享、可 fork,**opaque ID 作身份**。平台预置(纯净 base、带某 agent
+  的栈…),或用户 Promote 自建。不可变性由**只读底层 + refcount 保护**兑现,不靠内容 hash——hash
+  只能*检测*篡改、不能*阻止*(阻止靠只读机制);**内容摘要是可选的去重/完整性演进锚点**(§5.B /
+  rootfs-overlay D3),身份与去重/缓存是干净分开的两件事。
 - **Overlay**:本沙箱相对 Template 的**可写增量层**(apt/pip 与 `$HOME` 都写进它),叠在
   Template 之上构成 Live 的可写 rootfs。**Overlay 是一等、ID 寻址、与 Template 解耦的持久工件**
   (见 3.1.1),不是 Template 的附属物。
@@ -81,7 +83,7 @@ ssh 同一台 Linux,是 Unix 模型本身。**每条连接 = `process` 服务的
 | --- | --- | --- | --- |
 | **Sandbox** | 这个持久沙箱(Overlay 工件 / 挂载的 Volume) | **稳定、不透明** | resume 后仍是同一个沙箱 |
 | **Process** | 一条连接(shell / 各 agent) | 临时、可并发 | pid 寻址,连接建立时由 guest 分配,可 `Connect` 重连 |
-| *(非身份)* **Placement** | netns/IP / 容器 / cgroup / 进程 uid / 落在哪个 node | **每次重新绑定** | resume 时从头分配 |
+| *(非身份)* **Placement** | netns/IP / 容器 / cgroup / 宿主侧进程 uid / 落在哪个 node | **每次重新绑定** | resume 时从头分配 |
 
 铁律:**Sandbox 身份不编码 placement**。沙箱 resume 后 IP / 容器 / cgroup / node 都可能变,但
 Overlay 工件没变(会话历史等也只是 Overlay 里的字节,不另算身份),仍是同一个沙箱。这是 §4
@@ -258,7 +260,7 @@ L2 探活成功翻成 `running`(时序见 [`deep-dives/guest-runtime.md`](./deep
 
 **TTL / 驱逐**:每个沙箱带生命周期状态(§4.1 的 `creating`/`running`/`paused`/`destroyed`)
 与 TTL;reaper 按 TTL 推进 `running`→(auto-pause)→`paused`→(evict)→`destroyed`。**TTL 是 per-sandbox
-Binding**(§3.4:跨 resume 稳定、每次 placement 物化):两个阈值——`idle_timeout`(`running` idle 超它 →
+Binding**(§3.4):两个阈值——`idle_timeout`(`running` idle 超它 →
 auto-pause)与 `retention`(`paused` 超它 → evict)——是沙箱控制面记录的字段,create 时可给、缺省落引擎级
 默认(§1.1 单二进制配置)。取默认值为纯调参(见 [`deep-dives/reaper-health.md`](./deep-dives/reaper-health.md) D5)。
 **auto-pause 的锁内活动重读(竞态兜底)**:活动度不是 lifecycle-state,§4.4-B 的 CAS 比对不到它,故 sweep 的
@@ -266,21 +268,32 @@ auto-pause)与 `retention`(`paused` 超它 → evict)——是沙箱控制面记
 转换锁后除 CAS 外**再重读一次活动信号**(当前 `idle_millis`),仍超阈才冻结、否则放弃本轮。处置由此建立在锁内
 最新的「态 + 活动」双重快照上(推理见 [`deep-dives/reaper-health.md`](./deep-dives/reaper-health.md) D3)。
 - **对象回收(uniform object model invariant)**:每个一等持久对象(sandbox / Overlay 工件 /
-  Volume / Template / 挂载行)带 **生命周期状态 + refcount** 作为**固有字段**(不是 reaper 的私有
-  实现)。无 owner 列——回收只看 refcount/TTL,不看"谁拥有"(§1.4)。连接(process)不是持久对象,
-  不参与回收。Template lineage 最尖:被某沙箱引用作只读底层(create-from-Template / Promote 叠层 /
-  fork 多实例都是这一种引用)时,refcount > 0,**绝不可删**。具体 sweep 逻辑随用随加,但可判定语义
-  现在就要有。**挂载行的 refcount 直接承载 §5.C 的 Volume 独占租约**(机制归 §5.C)。
+  Volume / Template / 挂载行)带**可判定的回收语义**(不是 reaper 的私有实现)。切成**普适**与
+  **仅可变对象**两半:
+  - **refcount 普适、且 derived**:回收看「有没有引用它的活行」,**不物化计数字段**(由引用行是否
+    存在查询导出——单机权威 store 下与物化计数等价,见下条与 §4.4-C)。无 owner 列——只看
+    refcount/TTL,不看"谁拥有"(§1.4)。连接(process)不是持久对象,不参与回收。
+  - **显式生命周期状态机只属于会真正转换的可变对象(sandbox,§4.1 四态)**。**不可变工件
+    (Template,及后续挂载行)用「存在即状态」**:行存在 = ready、删行 = destroyed,无中间态,
+    故不设 state 列。**代价与硬约束**:存在即状态没有 not-ready 逃生舱,故**强制字节先行物化**
+    (bytes-first,见 §5.B);有 state 列的对象(sandbox 的 `creating`)才可行先行、由 reconcile 兜底。
+    **在途/可失败的构建是独立 build 实体**(将来 additive 一张 build 表,承载 building/ready/failed),
+    不塞进不可变工件的存在性。
+  Template lineage 最尖:被某沙箱引用作只读底层(create-from-Template / Promote 叠层 / fork 多实例
+  都是这一种引用)时,refcount > 0,**绝不可删**。**挂载行的 refcount 直接承载 §5.C 的 Volume
+  独占租约**(机制归 §5.C)。
 - **引用-回收原子性(一条动态不变量)**:上面"refcount > 0 绝不可删"只是静态判据,还差一条把
   **reclaim-vs-reference 竞态**闭合的不变量——否则有经典 TOCTOU 窗口:GC 读到某 Template 层 refcount==0
   正要回收,同一刻一个新沙箱引用该层(每个 create-from-Template 都引用一个 Template 层,fork 只是被引用层
   恰是 Promote 出来的)。不变量:**「创建引用」(create/fork/Promote 引用 Template 层、建挂载行引用 Volume)
-  对目标 refcount 的 +1,与 GC「读到 refcount==0 → 回收」的判定-删除,必须是同一次原子 store 操作**——直接
-  复用 §4.4-C 的 store 原子提交契约,不新造机制。于是无中间窗口:引用先落则 GC 读到 >0 不删,GC 先占回收
-  标记则引用方 CAS 失败、转引一个活层。**权威单机 store(§1.1)是前提**:引用与回收都是其上的行操作,故
-  refcount 是 store 权威支撑的引用计数(物化成计数字段、或由"引用行是否存在"查询导出,单机 store 下等价),
-  非 lossy 计数;且 Template lineage **无环**,故统一用 store 权威 refcount,**不引入独立标记清扫器、也不需
-  世代序号式 GC 屏障**(后者是无事务 store 的补偿逻辑,原子提交契约已闭合竞态)。
+  与 GC「无引用 → 回收」的判定-删除,必须由同一个权威 store 串行仲裁**——直接复用 §4.4-C 的 store 原子
+  提交契约,不新造机制。derived refcount 下这退化成**外键约束**:引用是一条指向目标的行,回收是对目标的
+  一次 `DELETE`。于是无中间窗口:引用行先落则 `DELETE` 撞「被引用」拒删(转引一个活层)、`DELETE` 先提交
+  则引用方插入撞「目标不存在」失败。**权威单机 store(§1.1)是前提**:引用与回收都是其上的行操作,单写者
+  串行令二者不交错,**无需显式 CAS**——竞态从 schema 掉出来。且 Template lineage **无环**,故统一用 store
+  权威的存在性判定,**不引入独立标记清扫器、也不需世代序号式 GC 屏障**(后者是无事务 store 的补偿逻辑,
+  原子提交契约已闭合竞态)。**「被引用即拒删」是 store 接口的契约承诺**(seam,§1.3):SQLite 用 FK
+  RESTRICT 兑现、Memory 用 Go 检查兑现,与 §4.4-C 原子提交同构——后端差异不漏进正确性。
 
 ### 4.4 转换的并发与失败语义
 
@@ -325,15 +338,14 @@ resume **全程持有转换锁**,持锁即在建,否则会误收正在建的活 
 placement/IP-as-epoch(§4.3)正交,**不重新引入世代计数**。
 D5 的 workdir/upper 孤儿是其一个特例。**周期对账**(orchestrator 活着时跑)= 启动对账**同一份反向对账**,
 只多两条:① 对**持锁**沙箱 `TryLock` 跳过(持锁 = 在建的活 placement,§4.4-B),② 保护 live-map 里本进程亲手
-建的活 placement 不当孤儿。触发时机、锁协调、本机资源枚举(egress 面 nft/gateway 随 §5.D M7 并入)与批量策略
+建的活 placement 不当孤儿。触发时机、锁协调、本机资源枚举与批量策略
 见 [`deep-dives/reaper-health.md`](./deep-dives/reaper-health.md) D4。
 
 **回收次序:活路径严格反向依赖序,启动对账力拆在前。** 活着的 `destroy`/`pause` 握着进程内 placement
-句柄,按严格反向依赖序拆(runsc → overlay umount → netns),干净卸载。**启动对账没有进程内句柄**,只有
-一张本地表:它逐条**先力拆(`MNT_DETACH`)孤儿 merged mount**、再由 provider `ReclaimOrphans` 做
-runsc kill → veth → netns。此时 overlay-umount 早于 runsc-kill 是**安全的**——孤儿无论如何都要拆,力拆
-只把 mount 从命名空间摘下、内核在容器最后一个引用释放时才真正回收,**upper 分毫不动**(§4.4-A 持久态
-不碰)。故两条路径的次序刻意不同:活路径求干净,启动对账求"一次扫描拆净、不阻塞在忙 mount 上"。
+句柄,按严格反向依赖序拆干净;**启动对账没有进程内句柄**、只有一张本地表,故对孤儿 mount 走力拆
+(不阻塞在忙 mount 上),且**upper 分毫不动**(§4.4-A 持久态不碰)。两条路径次序刻意不同——活路径求
+干净、启动对账求"一次扫描拆净";精确拆解次序(力拆/`ReclaimOrphans` 的 runsc→veth→netns)见
+[`deep-dives/reaper-health.md`](./deep-dives/reaper-health.md) D4。
 
 **A 崩溃变体的另一半 —— 对存活的 `running` placement 重新接管句柄,不是回收。** 上面的反向对账只讲了
 "回收孤儿";但一个 `running` 沙箱的**活** placement **本就不是孤儿**(它支撑一个 store 应持有 placement
@@ -347,12 +359,10 @@ placement → 重新接管**(provider 按 SandboxID 重认自己的资源、重�
 重认存活者要求 provider 能按 SandboxID 枚举自己的 placement-local 资源——其机制(`Adopt`/`ReclaimOrphans`
 签名、SandboxID 标注是 §3.3「身份不编码 placement」的允许反向、两层判活 L1+一次 L2 `Health`)落在 §5.A,
 本节不复述。编排语义是:**判活与冷启 ⑦ 就绪门对齐**——L1 活但 L2 不应答(如 `created`-未监听)不是可接管的
-活,一律降 `paused`(可经下次 resume 冷启恢复),不把死句柄填进 live-map。
-**启动对账的失败处置是 skip-and-log**:某沙箱对账不了(探活报错、句柄重建失败)不阻断其余沙箱的恢复;对
-无法干净判定的 `running` 存活者取**保守**——保护其 placement 不回收(漏拆活容器不可逆,泄漏 placement 下次
-启动再收),对账幂等,跳过项下次重来。接管期的单次就绪探针不是 §4.3 的连续四象限健康分类(启动对账下锁
-已全无,"L1 活、L2 瞬态不通"一律降 `paused` 偏保守)。orchestrator 活着时跑的**连续健康分类**(四象限,区分
-transport-down 瞬态、免无谓冷启)与**周期对账**(与 §4.4-B 锁协调)的落地见
+活,一律降 `paused`(可经下次 resume 冷启恢复),不把死句柄填进 live-map。**失败处置是 skip-and-log +
+对不确定的 `running` 存活者取保守**(保护其 placement 不回收——漏拆活容器不可逆、泄漏 placement 下次
+启动再收;对账幂等,跳过项下次重来)。接管期单次就绪探针与 orchestrator 活着时的**连续健康分类**(四象限,
+区分 transport-down 瞬态)、**周期对账**(与 §4.4-B 锁协调)的落地见
 [`deep-dives/reaper-health.md`](./deep-dives/reaper-health.md) D3/D4。
 
 **不变量 B —— 每沙箱一把转换锁,动词串行 + CAS 前置校验。** 单机嵌入式 store 下仍有并发:用户

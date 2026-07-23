@@ -13,7 +13,10 @@ import "time"
 // sandbox (§3.3 铁律).
 type SandboxID string
 
-// TemplateID identifies an immutable, content-addressed read-only base (§3.1).
+// TemplateID is the opaque identity of an immutable read-only base (§3.1).
+// Immutability is enforced by the read-only lower + refcount protection, NOT by
+// content hashing — a content digest is an optional dedup/integrity evolution
+// (§5.B / rootfs-overlay D3), separate from identity.
 type TemplateID string
 
 // OverlayID identifies the sandbox's writable delta layer as a first-class,
