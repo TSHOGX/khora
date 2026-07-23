@@ -80,6 +80,15 @@ type Mediator struct {
 	// rebuilds the equivalent by scanning host resources against the authoritative
 	// store.
 	live map[model.SandboxID]*liveState
+
+	// buildingLayers is the §9 in-flight-Promote keep-set: TemplateIDs whose
+	// layer bytes are being written to the backend but whose `templates` row has
+	// not been inserted yet (bytes-first, §5.B). The orphan-layer sweep must skip
+	// these — "bytes on disk, no row" is a Promote in progress, not an orphan
+	// (the placement live-map's twin, §4.4-A). Empty until Promote lands (P2); a
+	// crashed Promote's staging layer is correctly absent here at boot, so it is
+	// reclaimed as a true orphan. Guarded by mu.
+	buildingLayers map[model.TemplateID]bool
 }
 
 // liveState is the mediator's in-memory handle to a running sandbox's
@@ -114,9 +123,10 @@ func New(deps Deps) *Mediator {
 		deps.Logf = log.Printf
 	}
 	return &Mediator{
-		deps:  deps,
-		locks: make(map[model.SandboxID]*sync.Mutex),
-		live:  make(map[model.SandboxID]*liveState),
+		deps:           deps,
+		locks:          make(map[model.SandboxID]*sync.Mutex),
+		live:           make(map[model.SandboxID]*liveState),
+		buildingLayers: make(map[model.TemplateID]bool),
 	}
 }
 
@@ -514,6 +524,58 @@ func (m *Mediator) SeedBuiltinTemplates(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// SweepOrphanLayers reclaims Promote-built layer bytes with no live `templates`
+// row (§9). It is the §5.B twin of ReclaimOrphans: the mediator reads the
+// AUTHORITATIVE store for the live layer IDs, snapshots the in-flight-Promote
+// keep-set, and hands both to the FS provider — which enumerates its own layer
+// dirs and deletes the difference (§4 subsystems don't call the store). Run at
+// boot (a crashed Promote's staging layer is a true orphan → reclaimed, the
+// buildingLayers set being empty) and periodically by the reaper (an in-flight
+// Promote is protected by buildingLayers, §9). Skip-and-log per §4.4-A: a sweep
+// failure is not fatal; it retries next pass.
+//
+// Only Promote-built (builtin=false) layers are swept: builtins live under the
+// deployment-shipped TemplatesDir, a different root the provider never scans, so
+// they are structurally out of the candidate set — a builtin row's absence
+// could never orphan a builtin dir.
+func (m *Mediator) SweepOrphanLayers(ctx context.Context) error {
+	tmpls, err := m.deps.Store.ListTemplates(ctx)
+	if err != nil {
+		return fmt.Errorf("sweep layers: list templates: %w", err)
+	}
+	live := make([]string, 0, len(tmpls))
+	for _, t := range tmpls {
+		// A builtin's dir is under TemplatesDir (not LayersDir), so it is not a
+		// sweep candidate; only Promote-built layers have a LayersDir dir. Passing
+		// only non-builtin IDs keeps `live` tight without affecting correctness
+		// (a builtin id would simply never match a LayersDir entry).
+		if !t.Builtin {
+			live = append(live, string(t.ID))
+		}
+	}
+	building := m.buildingLayerIDs()
+	n, err := m.deps.Rootfs.SweepOrphanLayers(ctx, live, building)
+	if err != nil {
+		return fmt.Errorf("sweep layers: %w", err)
+	}
+	if n > 0 {
+		m.deps.Logf("sweep layers: reclaimed %d orphan layer(s)", n)
+	}
+	return nil
+}
+
+// buildingLayerIDs snapshots the in-flight-Promote keep-set (§9). Ordering is
+// irrelevant — it is a set to the provider.
+func (m *Mediator) buildingLayerIDs() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]string, 0, len(m.buildingLayers))
+	for id := range m.buildingLayers {
+		out = append(out, string(id))
+	}
+	return out
 }
 
 // Reconcile is the §4.4-A startup crash-reconciliation: one local scan diffing

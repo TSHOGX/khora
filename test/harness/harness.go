@@ -111,7 +111,7 @@ func InjectStaticBin(t *testing.T, templatesDir, template, name, mainSrc string)
 // Providers builds the two real providers rooted under base.
 func Providers(t *testing.T, base, templatesDir string) (*rootfs.HostOverlayFS, *runtime.LocalRunsc) {
 	t.Helper()
-	rp, err := rootfs.NewHostOverlayFS(filepath.Join(base, "overlays"), templatesDir)
+	rp, err := rootfs.NewHostOverlayFS(filepath.Join(base, "overlays"), templatesDir, filepath.Join(base, "layers"))
 	if err != nil {
 		t.Fatalf("rootfs provider: %v", err)
 	}

@@ -27,21 +27,30 @@ import (
 type HostOverlayFS struct {
 	// StateDir holds per-Overlay materialization: StateDir/<id>/{upper,work,merged}.
 	StateDir string
-	// TemplatesDir resolves a TemplateID to its read-only lower dir:
-	// TemplatesDir/<template>. Templates are static directories (§6; Promote /
-	// layering is a later addition).
+	// TemplatesDir resolves a BUILTIN TemplateID to its read-only lower dir:
+	// TemplatesDir/<template>. Builtin templates are static directories shipped
+	// with the deployment (§8 boot seed); they are deployment assets, never swept.
 	TemplatesDir string
+	// LayersDir holds Promote-built layer directories: LayersDir/<templateID>.
+	// These are the immutable read-only layers a Promote freezes (§5.B) — the
+	// bytes-first artifact whose orphans (no live templates row) the sweep
+	// reclaims (§9). Distinct from TemplatesDir so the sweep never touches a
+	// deployment-shipped builtin.
+	LayersDir string
 }
 
-// NewHostOverlayFS constructs the provider, ensuring StateDir exists.
-func NewHostOverlayFS(stateDir, templatesDir string) (*HostOverlayFS, error) {
-	if stateDir == "" || templatesDir == "" {
-		return nil, fmt.Errorf("rootfs: StateDir and TemplatesDir are required")
+// NewHostOverlayFS constructs the provider, ensuring StateDir + LayersDir exist.
+func NewHostOverlayFS(stateDir, templatesDir, layersDir string) (*HostOverlayFS, error) {
+	if stateDir == "" || templatesDir == "" || layersDir == "" {
+		return nil, fmt.Errorf("rootfs: StateDir, TemplatesDir and LayersDir are required")
 	}
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
 		return nil, fmt.Errorf("rootfs: create StateDir: %w", err)
 	}
-	return &HostOverlayFS{StateDir: stateDir, TemplatesDir: templatesDir}, nil
+	if err := os.MkdirAll(layersDir, 0o755); err != nil {
+		return nil, fmt.Errorf("rootfs: create LayersDir: %w", err)
+	}
+	return &HostOverlayFS{StateDir: stateDir, TemplatesDir: templatesDir, LayersDir: layersDir}, nil
 }
 
 func (p *HostOverlayFS) Name() string { return "host_overlayfs" }
@@ -185,6 +194,45 @@ func (p *HostOverlayFS) ListBuiltinTemplates(_ context.Context) ([]string, error
 		}
 	}
 	return out, nil
+}
+
+// SweepOrphanLayers reclaims Promote-built layer dirs under LayersDir with no
+// live `templates` row (§9). It reuses the §4.4-A reverse-reconcile shape: the
+// authoritative set (`live` + `building`) is passed in, the provider diffs it
+// against what is on disk and deletes the difference. `building` protects an
+// in-flight Promote whose bytes are down but whose row is not yet inserted
+// (bytes-first, §5.B) — without it a concurrent sweep would tear the layer out
+// from under the Promote. A missing LayersDir → nothing to sweep.
+func (p *HostOverlayFS) SweepOrphanLayers(_ context.Context, live, building []string) (int, error) {
+	keep := make(map[string]bool, len(live)+len(building))
+	for _, id := range live {
+		keep[id] = true
+	}
+	for _, id := range building {
+		keep[id] = true
+	}
+	entries, err := os.ReadDir(p.LayersDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("rootfs: sweep list layers: %w", err)
+	}
+	reclaimed := 0
+	for _, e := range entries {
+		if !e.IsDir() || keep[e.Name()] {
+			continue
+		}
+		// orphan: a layer dir with no live row and not being built → reclaim its
+		// bytes (§9). The row-vs-bytes decoupling means the row is already gone
+		// (DELETE template) or never landed (crashed Promote); either way the
+		// bytes are safe to drop.
+		if err := os.RemoveAll(filepath.Join(p.LayersDir, e.Name())); err != nil {
+			return reclaimed, fmt.Errorf("rootfs: sweep reclaim layer %s: %w", e.Name(), err)
+		}
+		reclaimed++
+	}
+	return reclaimed, nil
 }
 
 // isMountpoint reports whether path is a mount point by comparing its device

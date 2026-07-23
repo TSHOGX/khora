@@ -83,4 +83,18 @@ type Provider interface {
 	// The host TemplatesDir path stays private to this subsystem (§3.1.1); only
 	// the opaque IDs cross the seam.
 	ListBuiltinTemplates(ctx context.Context) ([]string, error)
+
+	// SweepOrphanLayers reclaims Promote-built layer directories with no live
+	// `templates` row (§9 orphan-layer sweep). It is the §5.B twin of §4.4-A
+	// placement reclamation: the mediator computes `live` (the layer IDs the
+	// authoritative store still has a row for) and passes it in — the provider
+	// enumerates only its OWN layer dirs and deletes any not in `live` and not in
+	// `building` (§4 subsystems don't call the store). `building` is the
+	// in-flight-Promote keep-set (§9): a synchronous Promote has its layer bytes
+	// on disk BEFORE the row is inserted, so a concurrent sweep seeing "bytes, no
+	// row" must NOT tear it down (the placement live-map's twin). At boot
+	// `building` is empty — a crashed Promote's staging layer IS a true orphan and
+	// is correctly reclaimed. Deployment-shipped builtin Template dirs live under
+	// a different root and are NEVER candidates. Returns the count reclaimed.
+	SweepOrphanLayers(ctx context.Context, live, building []string) (int, error)
 }

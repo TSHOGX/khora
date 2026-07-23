@@ -61,6 +61,15 @@ func main() {
 		log.Fatalf("orchestrator: startup reconciliation: %v", err)
 	}
 
+	// §9 orphan-layer sweep at boot: reclaim any Promote-built layer bytes with
+	// no live templates row (e.g. a Promote that crashed after writing the layer
+	// but before inserting the row — bytes-first, §5.B). Non-fatal; the reaper
+	// repeats it. buildingLayers is empty at boot, so a crashed-Promote staging
+	// layer is correctly a true orphan.
+	if err := eng.SweepOrphanLayers(context.Background()); err != nil {
+		log.Printf("orchestrator: boot orphan-layer sweep (retried by reaper): %v", err)
+	}
+
 	// async outbox publisher (§4.4-C): drain the durable outbox to the event sink.
 	go eng.Publisher.Run(context.Background(), time.Second)
 

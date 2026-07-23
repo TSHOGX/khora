@@ -93,6 +93,15 @@ func (f *fakeRootfs) ListBuiltinTemplates(context.Context) ([]string, error) {
 	return append([]string(nil), f.builtins...), nil
 }
 
+// SweepOrphanLayers records the (live,building) keep-sets it was called with
+// (§9) so the mediator's sweep wiring can be asserted as pure logic. Reclaims
+// nothing in the fake (no real layer dirs).
+func (f *fakeRootfs) SweepOrphanLayers(_ context.Context, live, building []string) (int, error) {
+	f.log("SweepOrphanLayers:live=" + strings.Join(append([]string(nil), live...), "|") +
+		";building=" + strings.Join(append([]string(nil), building...), "|"))
+	return 0, nil
+}
+
 type fakeRuntime struct {
 	mu         sync.Mutex
 	calls      []string

@@ -42,7 +42,7 @@ func TestOverlayCoWAndRemountByteIdentical(t *testing.T) {
 	makeTemplate(t, filepath.Join(tmplDir, "bare"))
 	stateDir := filepath.Join(base, "state")
 
-	p, err := NewHostOverlayFS(stateDir, tmplDir)
+	p, err := NewHostOverlayFS(stateDir, tmplDir, filepath.Join(base, "layers"))
 	if err != nil {
 		t.Fatalf("NewHostOverlayFS: %v", err)
 	}

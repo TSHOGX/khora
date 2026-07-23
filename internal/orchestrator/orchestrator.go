@@ -75,7 +75,7 @@ func New(cfg Config) (*Engine, error) {
 		cfg.HealthTimeout = 30 * time.Second
 	}
 
-	rp, err := rootfs.NewHostOverlayFS(cfg.StateDir+"/overlays", cfg.TemplatesDir)
+	rp, err := rootfs.NewHostOverlayFS(cfg.StateDir+"/overlays", cfg.TemplatesDir, cfg.StateDir+"/layers")
 	if err != nil {
 		return nil, err
 	}
@@ -129,3 +129,10 @@ func (e *Engine) SeedTemplates(ctx context.Context) error {
 // Reconcile runs the §4.4-A startup crash-reconciliation (orphan reclaim +
 // running re-adoption). Call once at boot, before serving the API.
 func (e *Engine) Reconcile(ctx context.Context) error { return e.Mediator.Reconcile(ctx) }
+
+// SweepOrphanLayers runs the §9 orphan-layer sweep (reclaim Promote-built layer
+// bytes with no live templates row). Call once at boot after SeedTemplates so a
+// crashed Promote's staging layer is reclaimed; the reaper repeats it per tick.
+func (e *Engine) SweepOrphanLayers(ctx context.Context) error {
+	return e.Mediator.SweepOrphanLayers(ctx)
+}
