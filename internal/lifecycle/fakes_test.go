@@ -56,13 +56,25 @@ func (f *fakeRootfs) Calls() []string {
 }
 
 func (f *fakeRootfs) Name() string { return "fake_rootfs" }
-func (f *fakeRootfs) CreateOverlay(_ context.Context, id, tmpl string) (*rootfs.Overlay, error) {
-	f.log("CreateOverlay:" + id)
-	return &rootfs.Overlay{ID: id, Template: tmpl}, nil
+func (f *fakeRootfs) CreateOverlay(_ context.Context, id string, lower []string) (*rootfs.Overlay, error) {
+	f.log("CreateOverlay:" + id + ";lower=" + strings.Join(lower, "|"))
+	tmpl := ""
+	if len(lower) > 0 {
+		tmpl = lower[0]
+	}
+	return &rootfs.Overlay{ID: id, Template: tmpl, Lower: append([]string(nil), lower...)}, nil
 }
-func (f *fakeRootfs) OpenOverlay(_ context.Context, id, tmpl string) (*rootfs.Overlay, error) {
-	f.log("OpenOverlay:" + id)
-	return &rootfs.Overlay{ID: id, Template: tmpl}, nil
+func (f *fakeRootfs) OpenOverlay(_ context.Context, id string, lower []string) (*rootfs.Overlay, error) {
+	f.log("OpenOverlay:" + id + ";lower=" + strings.Join(lower, "|"))
+	tmpl := ""
+	if len(lower) > 0 {
+		tmpl = lower[0]
+	}
+	return &rootfs.Overlay{ID: id, Template: tmpl, Lower: append([]string(nil), lower...)}, nil
+}
+func (f *fakeRootfs) PromoteToTemplate(_ context.Context, o *rootfs.Overlay, newID string) error {
+	f.log("PromoteToTemplate:" + o.ID + "->" + newID)
+	return nil
 }
 func (f *fakeRootfs) Mount(_ context.Context, o *rootfs.Overlay) (*rootfs.Merged, error) {
 	f.log("Mount:" + o.ID)

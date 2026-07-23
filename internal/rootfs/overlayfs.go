@@ -3,6 +3,7 @@ package rootfs
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -60,39 +61,63 @@ func (p *HostOverlayFS) Name() string { return "host_overlayfs" }
 func (p *HostOverlayFS) upperPath(id string) string  { return filepath.Join(p.StateDir, id, "upper") }
 func (p *HostOverlayFS) workPath(id string) string   { return filepath.Join(p.StateDir, id, "work") }
 func (p *HostOverlayFS) mergedPath(id string) string { return filepath.Join(p.StateDir, id, "merged") }
-func (p *HostOverlayFS) lowerPath(template string) string {
-	return filepath.Join(p.TemplatesDir, template)
+
+// layerPath resolves a lower-stack ID to its on-disk read-only layer dir. A
+// layer is EITHER a Promote-built layer under LayersDir OR a deployment-shipped
+// builtin under TemplatesDir; we prefer LayersDir (Promote layers) and fall back
+// to TemplatesDir (builtins). Both roots are private to this subsystem (§3.1.1);
+// the caller only ever sees the opaque ID.
+func (p *HostOverlayFS) layerPath(id string) (string, error) {
+	if lp := filepath.Join(p.LayersDir, id); dirExists(lp) {
+		return lp, nil
+	}
+	if tp := filepath.Join(p.TemplatesDir, id); dirExists(tp) {
+		return tp, nil
+	}
+	return "", fmt.Errorf("rootfs: layer %q not found under layers or templates", id)
 }
 
-// handle builds the above-subsystem Overlay view ({ID, Template}); host paths
-// are derived on demand from the ID, not stored (see rootfs.go).
-func (p *HostOverlayFS) handle(overlayID, template string) *Overlay {
-	return &Overlay{ID: overlayID, Template: template}
+func dirExists(path string) bool {
+	fi, err := os.Stat(path)
+	return err == nil && fi.IsDir()
 }
 
-// CreateOverlay allocates an empty upper (① create prefix). It does NOT mount.
-func (p *HostOverlayFS) CreateOverlay(_ context.Context, overlayID, template string) (*Overlay, error) {
-	if err := p.validate(overlayID, template); err != nil {
+// handle builds the above-subsystem Overlay view ({ID, Template, Lower}); host
+// paths are derived on demand from the IDs, not stored (see rootfs.go).
+func (p *HostOverlayFS) handle(overlayID string, lower []string) *Overlay {
+	tmpl := ""
+	if len(lower) > 0 {
+		tmpl = lower[0]
+	}
+	return &Overlay{ID: overlayID, Template: tmpl, Lower: append([]string(nil), lower...)}
+}
+
+// CreateOverlay allocates an empty upper over a read-only lower stack (① create
+// prefix). It does NOT mount.
+func (p *HostOverlayFS) CreateOverlay(_ context.Context, overlayID string, lower []string) (*Overlay, error) {
+	if err := p.validateStack(overlayID, lower); err != nil {
 		return nil, err
 	}
-	if _, err := os.Stat(p.lowerPath(template)); err != nil {
-		return nil, fmt.Errorf("rootfs: Template %q not found: %w", template, err)
+	for _, id := range lower {
+		if _, err := p.layerPath(id); err != nil {
+			return nil, err
+		}
 	}
 	if err := os.MkdirAll(p.upperPath(overlayID), 0o755); err != nil {
 		return nil, fmt.Errorf("rootfs: create upper: %w", err)
 	}
-	return p.handle(overlayID, template), nil
+	return p.handle(overlayID, lower), nil
 }
 
 // OpenOverlay reconstructs a handle for an existing artifact (resume prefix).
-func (p *HostOverlayFS) OpenOverlay(_ context.Context, overlayID, template string) (*Overlay, error) {
-	if err := p.validate(overlayID, template); err != nil {
+func (p *HostOverlayFS) OpenOverlay(_ context.Context, overlayID string, lower []string) (*Overlay, error) {
+	if err := p.validateStack(overlayID, lower); err != nil {
 		return nil, err
 	}
 	if _, err := os.Stat(p.upperPath(overlayID)); err != nil {
 		return nil, fmt.Errorf("rootfs: Overlay %q upper missing (not created?): %w", overlayID, err)
 	}
-	return p.handle(overlayID, template), nil
+	return p.handle(overlayID, lower), nil
 }
 
 // Mount assembles lower(Template)/upper/work → merged (① of the cold-start
@@ -101,14 +126,25 @@ func (p *HostOverlayFS) OpenOverlay(_ context.Context, overlayID, template strin
 // upper (pause captured nothing, §4.2).
 func (p *HostOverlayFS) Mount(_ context.Context, o *Overlay) (*Merged, error) {
 	id := o.ID
-	lower := p.lowerPath(o.Template)
 	upper := p.upperPath(id)
 	work := p.workPath(id)
 	merged := p.mergedPath(id)
 
-	if _, err := os.Stat(lower); err != nil {
-		return nil, fmt.Errorf("rootfs: lower Template missing: %w", err)
+	// Resolve the lower stack to host dirs. overlayfs lowerdir is COLON-separated,
+	// leaf-first (lowerdir=leaf:...:base) — the SAME leaf-first order as o.Lower
+	// (§5.B multi-lowerdir: 新 Template 的 lower 栈 = [新层, ...父栈]).
+	lowerDirs := make([]string, 0, len(o.Lower))
+	for _, lid := range o.Lower {
+		lp, err := p.layerPath(lid)
+		if err != nil {
+			return nil, fmt.Errorf("rootfs: mount lower: %w", err)
+		}
+		lowerDirs = append(lowerDirs, lp)
 	}
+	if len(lowerDirs) == 0 {
+		return nil, fmt.Errorf("rootfs: mount overlay %s: empty lower stack", id)
+	}
+
 	// fresh workdir each mount.
 	if err := os.RemoveAll(work); err != nil {
 		return nil, fmt.Errorf("rootfs: clear stale work: %w", err)
@@ -119,7 +155,7 @@ func (p *HostOverlayFS) Mount(_ context.Context, o *Overlay) (*Merged, error) {
 		}
 	}
 
-	opts := fmt.Sprintf("lowerdir=%s,upperdir=%s,workdir=%s", lower, upper, work)
+	opts := fmt.Sprintf("lowerdir=%s,upperdir=%s,workdir=%s", strings.Join(lowerDirs, ":"), upper, work)
 	if err := syscall.Mount("overlay", merged, "overlay", 0, opts); err != nil {
 		return nil, fmt.Errorf("rootfs: mount overlay at %s (%s): %w", merged, opts, err)
 	}
@@ -252,15 +288,136 @@ func isMountpoint(path string) (bool, error) {
 	return st.Dev != parent.Dev, nil
 }
 
-// validate keeps IDs to a safe single path segment (no traversal / separators).
-func (p *HostOverlayFS) validate(overlayID, template string) error {
-	for name, v := range map[string]string{"overlayID": overlayID, "template": template} {
-		if v == "" {
-			return fmt.Errorf("rootfs: empty %s", name)
-		}
-		if strings.ContainsAny(v, "/\\") || v == "." || v == ".." {
-			return fmt.Errorf("rootfs: unsafe %s %q", name, v)
+// validateStack keeps the overlay ID and every lower-stack ID to a safe single
+// path segment (no traversal / separators), and requires a non-empty stack.
+func (p *HostOverlayFS) validateStack(overlayID string, lower []string) error {
+	if err := validateSeg("overlayID", overlayID); err != nil {
+		return err
+	}
+	if len(lower) == 0 {
+		return fmt.Errorf("rootfs: empty lower stack for overlay %q", overlayID)
+	}
+	for _, id := range lower {
+		if err := validateSeg("lower", id); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+// validateSeg rejects an empty or path-unsafe single segment (also used by
+// PromoteToTemplate for the new layer ID).
+func validateSeg(name, v string) error {
+	if v == "" {
+		return fmt.Errorf("rootfs: empty %s", name)
+	}
+	if strings.ContainsAny(v, "/\\") || v == "." || v == ".." {
+		return fmt.Errorf("rootfs: unsafe %s %q", name, v)
+	}
+	return nil
+}
+
+// promoteExcludedPaths is the §7 minimal excluded-path set: engine-injected
+// guest-runtime paths that must NOT be captured into a Promoted layer. These
+// are sandboxd's transport portal/work files (relative to the upper root).
+// Volume mount-point placeholders join this set when Volume lands (M6); the
+// full list is tracked in rootfs-overlay D5.
+var promoteExcludedPaths = []string{
+	"tmp/.sandboxd-transport.pid", // transport child pidfile (§5.E.1)
+	"tmp/.sandboxd-crashloop",     // PID1 crash-loop sentinel (§5.E.1)
+}
+
+// PromoteToTemplate freezes the source Overlay's at-rest upper into a new
+// read-only layer dir under LayersDir (§5.B Promote). bytes-first: this writes
+// ONLY bytes — the caller inserts the templates row afterward (§4.3 INV-3). The
+// copy excludes the engine-injected runtime paths (§7). The caller must have
+// quiesced + unmounted the sandbox first, so upper is a stable plain dir tree
+// (§2.5). The layer is built at a staging path then atomically renamed into
+// place, so a crash mid-copy never leaves a half-written layer at the final ID
+// (a staging dir is a plain orphan the sweep reclaims).
+func (p *HostOverlayFS) PromoteToTemplate(_ context.Context, o *Overlay, newTemplateID string) error {
+	if err := validateSeg("newTemplateID", newTemplateID); err != nil {
+		return err
+	}
+	upper := p.upperPath(o.ID)
+	if _, err := os.Stat(upper); err != nil {
+		return fmt.Errorf("rootfs: promote: source upper missing: %w", err)
+	}
+	dst := filepath.Join(p.LayersDir, newTemplateID)
+	if dirExists(dst) {
+		return fmt.Errorf("rootfs: promote: layer %q already exists", newTemplateID)
+	}
+	// stage under a sibling temp dir on the SAME FS (LayersDir) so the final
+	// rename is atomic. A crash before the rename leaves the staging dir; it is
+	// NOT at the final ID, so no row will ever reference it → sweep reclaims it.
+	staging := dst + ".staging"
+	_ = os.RemoveAll(staging)
+	excluded := make(map[string]bool, len(promoteExcludedPaths))
+	for _, e := range promoteExcludedPaths {
+		excluded[filepath.Clean(e)] = true
+	}
+	if err := copyTree(upper, staging, excluded); err != nil {
+		_ = os.RemoveAll(staging)
+		return fmt.Errorf("rootfs: promote: copy upper: %w", err)
+	}
+	if err := os.Rename(staging, dst); err != nil {
+		_ = os.RemoveAll(staging)
+		return fmt.Errorf("rootfs: promote: finalize layer: %w", err)
+	}
+	return nil
+}
+
+// copyTree recursively copies src into dst, skipping paths (relative to src,
+// cleaned) present in excluded. Preserves mode bits and symlinks. dst is created.
+// Files are copied byte-for-byte (the layer is a plain read-only dir tree, §5.B).
+func copyTree(src, dst string, excluded map[string]bool) error {
+	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		if rel != "." && excluded[filepath.Clean(rel)] {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		target := filepath.Join(dst, rel)
+		switch {
+		case info.IsDir():
+			return os.MkdirAll(target, info.Mode().Perm())
+		case info.Mode()&os.ModeSymlink != 0:
+			link, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			return os.Symlink(link, target)
+		case info.Mode().IsRegular():
+			return copyFile(path, target, info.Mode().Perm())
+		default:
+			// skip devices/sockets/pipes — a frozen read-only layer holds only a
+			// normal file tree (an engine-injected socket is excluded anyway).
+			return nil
+		}
+	})
+}
+
+func copyFile(src, dst string, perm os.FileMode) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, perm)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
 }

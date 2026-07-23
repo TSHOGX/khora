@@ -17,7 +17,20 @@ import "context"
 // this subsystem it is referenced by ID; the host materialization is private.
 type Overlay struct {
 	ID       string // OverlayID (opaque above §5.B)
-	Template string // the Template it references as read-only lower (§3.1.1 Binding)
+	Template string // the immediate Template it references (§3.1.1 Binding; = Lower[0])
+
+	// Lower is the resolved multi-lowerdir stack, LEAF-FIRST: the layered
+	// Template's read-only lower stack expanded along its lineage (§5.B 分层
+	// Template = multi-lowerdir). Lower[0] is the leaf (the referenced Template),
+	// the tail its ancestors down to the base. len 1 for a base Template (no
+	// parent) — the pre-Promote single-lower case, behaviorally unchanged.
+	//
+	// The MEDIATOR computes this by walking the authoritative `templates.parent`
+	// chain (§4.3 lineage) and passes the ID stack across the seam — the store is
+	// the single source of truth for lineage; the FS provider only maps each ID
+	// to its layer dir (§4 subsystems don't read the store). IDs cross the seam,
+	// host paths stay inside (§3.1.1).
+	Lower []string
 }
 
 // The single-node host paths (upper/work/merged) are NOT carried on this struct:
@@ -38,17 +51,21 @@ type Merged struct {
 type Provider interface {
 	Name() string
 
-	// CreateOverlay allocates an empty writable Overlay referencing a Template
-	// (the create prefix of the cold-start chain, ① for create; guest-runtime
-	// D5.1). Returns the Overlay by ID + private host materialization.
-	CreateOverlay(ctx context.Context, overlayID, template string) (*Overlay, error)
+	// CreateOverlay allocates an empty writable Overlay over a read-only lower
+	// STACK (the create prefix of the cold-start chain, ① for create;
+	// guest-runtime D5.1). lower is leaf-first: lower[0] is the immediate
+	// Template, the tail its ancestors (§5.B multi-lowerdir). The mediator
+	// resolved it from the authoritative lineage (§4.3); len 1 = a base Template.
+	// Returns the Overlay by ID + private host materialization.
+	CreateOverlay(ctx context.Context, overlayID string, lower []string) (*Overlay, error)
 
 	// OpenOverlay reconstructs the handle for an EXISTING Overlay artifact from
-	// its ID + referenced Template (§3.1.1: Overlay is ID-addressed, so the
-	// handle is rebuildable from the store record, not kept in memory). This is
-	// the resume prefix — the artifact was created earlier and persists on the
-	// backend across pause (§4.2 零捕获). It does NOT allocate new bytes.
-	OpenOverlay(ctx context.Context, overlayID, template string) (*Overlay, error)
+	// its ID + resolved lower STACK (§3.1.1: Overlay is ID-addressed, so the
+	// handle is rebuildable from the store record, not kept in memory; the
+	// mediator re-resolves the lineage each time). This is the resume prefix —
+	// the artifact was created earlier and persists on the backend across pause
+	// (§4.2 零捕获). It does NOT allocate new bytes.
+	OpenOverlay(ctx context.Context, overlayID string, lower []string) (*Overlay, error)
 
 	// Mount assembles lower(Template)/upper/work into a merged rootfs (① of the
 	// cold-start chain). Called by the §4 mediator at create/resume; the mount
@@ -83,6 +100,21 @@ type Provider interface {
 	// The host TemplatesDir path stays private to this subsystem (§3.1.1); only
 	// the opaque IDs cross the seam.
 	ListBuiltinTemplates(ctx context.Context) ([]string, error)
+
+	// PromoteToTemplate freezes a sandbox's at-rest Overlay upper into a NEW
+	// read-only layer directory addressed by newTemplateID (§5.B Promote / §3.1
+	// Promote). The caller (mediator) has already quiesced the sandbox to a
+	// consistent at-rest point (equivalent to a pause, §4.2) and torn down its
+	// mount, so the upper is a plain host dir tree safe to read (§2.5 / §5.B
+	// 只读 at-rest). It COPIES the upper into the layer dir, EXCLUDING the
+	// engine-injected runtime paths that must not be captured (§7 excluded paths:
+	// at minimum sandboxd's portal/work files). It does NOT insert any store row
+	// and does NOT wire lineage — that is the mediator's bytes-first sequel
+	// (write bytes here → insert the templates row after, §4.3 INV-3). A crash
+	// after this returns but before the row insert leaves an orphan layer the
+	// sweep reclaims. Overlay carries the source's OverlayID; newTemplateID names
+	// the frozen layer dir under LayersDir.
+	PromoteToTemplate(ctx context.Context, o *Overlay, newTemplateID string) error
 
 	// SweepOrphanLayers reclaims Promote-built layer directories with no live
 	// `templates` row (§9 orphan-layer sweep). It is the §5.B twin of §4.4-A

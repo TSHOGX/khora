@@ -220,8 +220,14 @@ func (m *Mediator) Create(ctx context.Context, spec CreateSpec) (model.SandboxID
 		return "", fmt.Errorf("create: insert record: %w", err)
 	}
 
-	// ① build empty Overlay + run the cold-start chain.
-	ov, err := m.deps.Rootfs.CreateOverlay(ctx, string(oid), string(spec.Template))
+	// ① build empty Overlay over the resolved lineage lower stack (§5.B
+	// multi-lowerdir) + run the cold-start chain.
+	lower, err := m.resolveLower(ctx, spec.Template)
+	if err != nil {
+		_ = m.deps.Store.DeleteSandbox(ctx, sid, nil) // nothing built, never visible
+		return "", fmt.Errorf("create: resolve lineage: %w", err)
+	}
+	ov, err := m.deps.Rootfs.CreateOverlay(ctx, string(oid), lower)
 	if err != nil {
 		_ = m.deps.Store.DeleteSandbox(ctx, sid, nil) // nothing built, never visible
 		return "", fmt.Errorf("create: overlay: %w", err)
@@ -323,8 +329,13 @@ func (m *Mediator) Resume(ctx context.Context, id model.SandboxID) error {
 // the half-built placement and leaves the record `paused` (§4.4-A / D5.2 ④).
 func (m *Mediator) resumeLocked(ctx context.Context, rec model.Sandbox) error {
 	id := rec.ID
-	// ① re-open + re-mount the SAME Overlay artifact (resume prefix).
-	ov, err := m.deps.Rootfs.OpenOverlay(ctx, string(rec.Overlay), string(rec.Template))
+	// ① re-open + re-mount the SAME Overlay artifact (resume prefix), re-resolving
+	// the lineage lower stack from the store (§5.B multi-lowerdir).
+	lower, err := m.resolveLower(ctx, rec.Template)
+	if err != nil {
+		return fmt.Errorf("resume: resolve lineage: %w", err)
+	}
+	ov, err := m.deps.Rootfs.OpenOverlay(ctx, string(rec.Overlay), lower)
 	if err != nil {
 		return fmt.Errorf("resume: open overlay: %w", err)
 	}
@@ -400,8 +411,11 @@ func (m *Mediator) destroyLocked(ctx context.Context, rec model.Sandbox) error {
 			_ = m.deps.Rootfs.Unmount(ctx, ls.merged)
 		}
 	}
-	// reclaim the Overlay artifact (byte deletion; §4.1 destroy).
-	ov, err := m.deps.Rootfs.OpenOverlay(ctx, string(rec.Overlay), string(rec.Template))
+	// reclaim the Overlay artifact (byte deletion; §4.1 destroy). Byte reclaim
+	// uses only the OverlayID (DestroyOverlay derives StateDir/<id>); the lower
+	// stack is irrelevant here (no mount), so a single-element stack suffices and
+	// avoids a lineage walk that could fail mid-teardown.
+	ov, err := m.deps.Rootfs.OpenOverlay(ctx, string(rec.Overlay), []string{string(rec.Template)})
 	if err == nil {
 		_ = m.deps.Rootfs.DestroyOverlay(ctx, ov)
 	}
@@ -564,6 +578,34 @@ func (m *Mediator) SweepOrphanLayers(ctx context.Context) error {
 		m.deps.Logf("sweep layers: reclaimed %d orphan layer(s)", n)
 	}
 	return nil
+}
+
+// resolveLower walks the authoritative `templates.parent` lineage from the given
+// Template down to its base, returning the read-only lower STACK leaf-first
+// (§5.B multi-lowerdir: [leaf, ...ancestors, base]). The mediator owns this walk
+// because lineage lives in the store (§4.3) and the FS provider must not read it
+// (§4 subsystems don't call the store) — the resolved ID stack crosses the seam,
+// host paths stay inside (§3.1.1). A cycle is impossible (lineage is a DAG built
+// child→existing-parent, §4.3), but we bound the walk defensively.
+func (m *Mediator) resolveLower(ctx context.Context, template model.TemplateID) ([]string, error) {
+	lower := make([]string, 0, 4)
+	seen := make(map[model.TemplateID]bool)
+	for id := template; id != ""; {
+		if seen[id] {
+			return nil, fmt.Errorf("resolve lineage: cycle at %s", id)
+		}
+		seen[id] = true
+		t, err := m.deps.Store.GetTemplate(ctx, id)
+		if err != nil {
+			return nil, fmt.Errorf("resolve lineage: %s: %w", id, err)
+		}
+		lower = append(lower, string(id))
+		id = t.Parent
+	}
+	if len(lower) == 0 {
+		return nil, fmt.Errorf("resolve lineage: empty for %q", template)
+	}
+	return lower, nil
 }
 
 // buildingLayerIDs snapshots the in-flight-Promote keep-set (§9). Ordering is
@@ -835,7 +877,9 @@ func (m *Mediator) reconcileRunningOutcome(ctx context.Context, rec model.Sandbo
 // is the persistent SoT and is KEPT (§4.4-A 持久态分毫不动). Best-effort: a
 // not-mounted overlay (nothing to clean) is not an error.
 func (m *Mediator) reclaimOrphanOverlay(ctx context.Context, rec model.Sandbox, destroyUpper bool) {
-	ov, err := m.deps.Rootfs.OpenOverlay(ctx, string(rec.Overlay), string(rec.Template))
+	// ID-only reclamation (AdoptMerged/DestroyOverlay derive paths from the
+	// OverlayID); no mount, so a single-element lower stack suffices.
+	ov, err := m.deps.Rootfs.OpenOverlay(ctx, string(rec.Overlay), []string{string(rec.Template)})
 	if err != nil {
 		return // no artifact on disk → nothing to unmount
 	}
@@ -905,8 +949,10 @@ func (m *Mediator) adoptOrDemoteLocked(ctx context.Context, rec model.Sandbox) (
 
 	// alive + serving → re-attach the still-mounted overlay + record the live
 	// handle so destroy/transport work again (§4.4-A: without this the survivor is
-	// un-addressable — destroy would leak the live container).
-	ov, err := m.deps.Rootfs.OpenOverlay(ctx, string(rec.Overlay), string(rec.Template))
+	// un-addressable — destroy would leak the live container). AdoptMerged
+	// recovers the EXISTING kernel mount by OverlayID (no re-mount), so the lower
+	// stack is not needed — a single-element stack satisfies validation.
+	ov, err := m.deps.Rootfs.OpenOverlay(ctx, string(rec.Overlay), []string{string(rec.Template)})
 	if err != nil {
 		return false, fmt.Errorf("reopen overlay: %w", err) // uncertain → protect
 	}
