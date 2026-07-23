@@ -3,8 +3,10 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -39,7 +41,16 @@ func seedTemplate(t *testing.T, mem *store.Memory, id, parent string, builtin bo
 
 func do(t *testing.T, method, url string) *http.Response {
 	t.Helper()
-	req, err := http.NewRequest(method, url, nil)
+	return doBody(t, method, url, "")
+}
+
+func doBody(t *testing.T, method, url, body string) *http.Response {
+	t.Helper()
+	var rdr io.Reader
+	if body != "" {
+		rdr = strings.NewReader(body)
+	}
+	req, err := http.NewRequest(method, url, rdr)
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
@@ -116,12 +127,24 @@ func TestAPIDeleteTemplateReferenceProtection(t *testing.T) {
 	}
 }
 
-// POST /v1/templates (Promote) is not implemented until M5 P2 → 501.
-func TestAPIPromoteNotImplementedYet(t *testing.T) {
+// POST /v1/templates {from_sandbox_id} is the Promote endpoint (§6.1). An empty
+// body → 400 (from_sandbox_id required); a promote of an unknown sandbox → 404
+// (ErrNotFound). The full freeze path is exercised on the substrate (needs a
+// real Overlay upper).
+func TestAPIPromoteValidation(t *testing.T) {
 	srv, _ := apiFixture(t)
+
+	// missing from_sandbox_id → 400.
 	resp := do(t, http.MethodPost, srv.URL+"/v1/templates")
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusNotImplemented {
-		t.Fatalf("POST templates = %d; want 501 (Promote is P2)", resp.StatusCode)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("POST templates (empty) = %d; want 400", resp.StatusCode)
+	}
+
+	// unknown sandbox → 404.
+	resp = doBody(t, http.MethodPost, srv.URL+"/v1/templates", `{"from_sandbox_id":"ghost"}`)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("POST templates (unknown sandbox) = %d; want 404", resp.StatusCode)
 	}
 }

@@ -62,9 +62,7 @@ func (e *Engine) HTTPHandler() http.Handler {
 		case http.MethodGet:
 			e.handleListTemplates(w, r)
 		case http.MethodPost:
-			// Promote (POST {from_sandbox_id}) lands in M5 P2; until then the
-			// endpoint exists but is not implemented.
-			http.Error(w, "template create (Promote) not implemented", http.StatusNotImplemented)
+			e.handlePromote(w, r)
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
@@ -133,6 +131,33 @@ func (e *Engine) handleList(w http.ResponseWriter, r *http.Request) {
 		out = append(out, map[string]string{"sandbox_id": string(s.ID), "state": string(s.State)})
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+type promoteReq struct {
+	FromSandboxID string `json:"from_sandbox_id"`
+}
+type promoteResp struct {
+	TemplateID string `json:"template_id"`
+}
+
+// handlePromote is POST /v1/templates {from_sandbox_id} → {template_id} (§6.1
+// Promote): freeze the sandbox's current Overlay into a new Template (§3.1).
+func (e *Engine) handlePromote(w http.ResponseWriter, r *http.Request) {
+	var req promoteReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.FromSandboxID == "" {
+		http.Error(w, "from_sandbox_id is required", http.StatusBadRequest)
+		return
+	}
+	tid, err := e.Mediator.Promote(r.Context(), model.SandboxID(req.FromSandboxID))
+	if err != nil {
+		statusFor(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, promoteResp{TemplateID: string(tid)})
 }
 
 func (e *Engine) handleListTemplates(w http.ResponseWriter, r *http.Request) {

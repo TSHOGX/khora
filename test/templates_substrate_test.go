@@ -193,3 +193,157 @@ func TestM5OrphanLayerSweep(t *testing.T) {
 	}
 	t.Logf("✓ orphan layer reclaimed, live layer kept")
 }
+
+// §11.7 (Promote end-to-end): write a file into a sandbox → Promote → create a
+// NEW sandbox from the new Template → the file is visible (the freeze took
+// effect); and the sandboxd portal path is NOT in the frozen layer (§7 excluded).
+func TestM5PromoteEndToEnd(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root")
+	}
+	ctx := context.Background()
+	eng, base := setupEngine(t, 30*time.Second)
+	m := eng.Mediator
+
+	// source sandbox: write a marker into its Overlay (the "installed" change).
+	src, err := m.Create(ctx, lifecycle.CreateSpec{Template: "bare"})
+	if err != nil {
+		t.Fatalf("create source: %v", err)
+	}
+	t.Cleanup(func() { _ = m.Destroy(ctx, src) })
+	cl, err := m.Client(src)
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	marker := []byte("PROMOTED_" + time.Now().Format("150405.000000"))
+	if err := cl.Write(ctx, "/etc/promoted-marker", marker); err != nil {
+		t.Fatalf("write marker: %v", err)
+	}
+
+	// Promote → new Template; source is left paused (§7).
+	newTmpl, err := m.Promote(ctx, src)
+	if err != nil {
+		t.Fatalf("promote: %v", err)
+	}
+	if stt, _ := m.State(ctx, src); stt != model.Paused {
+		t.Fatalf("source state after promote = %s; want paused", stt)
+	}
+	// lineage: new Template's parent is the source's Template ("bare").
+	trec, err := eng.Store.GetTemplate(ctx, newTmpl)
+	if err != nil {
+		t.Fatalf("get new template: %v", err)
+	}
+	if trec.Parent != "bare" || trec.Builtin {
+		t.Fatalf("new template lineage wrong: parent=%q builtin=%v; want bare/false", trec.Parent, trec.Builtin)
+	}
+	t.Logf("✓ promote → %s (parent=bare, builtin=false), source paused", newTmpl)
+
+	// new sandbox from the promoted Template → sees the marker (freeze effective).
+	child, err := m.Create(ctx, lifecycle.CreateSpec{Template: newTmpl})
+	if err != nil {
+		t.Fatalf("create from promoted template: %v", err)
+	}
+	t.Cleanup(func() { _ = m.Destroy(ctx, child) })
+	ccl, err := m.Client(child)
+	if err != nil {
+		t.Fatalf("child client: %v", err)
+	}
+	got, err := ccl.Read(ctx, "/etc/promoted-marker", 0, 0)
+	if err != nil || string(got) != string(marker) {
+		t.Fatalf("promoted marker not visible in child: got %q err=%v; want %q", got, err, marker)
+	}
+	t.Logf("✓ child from promoted Template sees the frozen change (%s)", marker)
+
+	// §7 excluded: the sandboxd portal pidfile must NOT be in the frozen layer.
+	layerDir := filepath.Join(base, "state", "layers", string(newTmpl))
+	if _, err := os.Stat(filepath.Join(layerDir, "tmp", ".sandboxd-transport.pid")); !os.IsNotExist(err) {
+		t.Fatalf("sandboxd portal path leaked into promoted layer: %v", err)
+	}
+	t.Logf("✓ sandboxd portal path excluded from the frozen layer")
+}
+
+// §11.2 (lineage protection): Promote a child layer T2 over T1 → deleting T1 is
+// refused while T2 exists (RESTRICT 引用向上); delete T2 first, then T1.
+func TestM5LineageProtection(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root")
+	}
+	ctx := context.Background()
+	eng, _ := setupEngine(t, 30*time.Second)
+	m := eng.Mediator
+
+	// build a T1 by promoting a sandbox off "bare".
+	s1, err := m.Create(ctx, lifecycle.CreateSpec{Template: "bare"})
+	if err != nil {
+		t.Fatalf("create s1: %v", err)
+	}
+	t1, err := m.Promote(ctx, s1)
+	if err != nil {
+		t.Fatalf("promote s1→T1: %v", err)
+	}
+	_ = m.Destroy(ctx, s1) // drop s1's reference; T1 now referenced only by lineage later
+
+	// build T2 as a child of T1: create a sandbox from T1, promote it.
+	s2, err := m.Create(ctx, lifecycle.CreateSpec{Template: t1})
+	if err != nil {
+		t.Fatalf("create s2 from T1: %v", err)
+	}
+	t2, err := m.Promote(ctx, s2)
+	if err != nil {
+		t.Fatalf("promote s2→T2: %v", err)
+	}
+	t.Cleanup(func() { _ = m.Destroy(ctx, s2) })
+	if tr, _ := eng.Store.GetTemplate(ctx, t2); tr.Parent != t1 {
+		t.Fatalf("T2 parent = %q; want %s", tr.Parent, t1)
+	}
+
+	// s2 still references T1 (its lineage) AND T2 (direct) — but the point of the
+	// test is the parent-child RESTRICT, so first drop s2 so only lineage pins T1.
+	_ = m.Destroy(ctx, s2)
+
+	// T1 is referenced by T2's parent → RESTRICT refuses delete.
+	if err := m.DeleteTemplate(ctx, t1); !errors.Is(err, store.ErrInUse) {
+		t.Fatalf("delete T1 (parent of T2) = %v; want ErrInUse", err)
+	}
+	// delete T2 first, then T1 is deletable.
+	if err := m.DeleteTemplate(ctx, t2); err != nil {
+		t.Fatalf("delete T2: %v", err)
+	}
+	if err := m.DeleteTemplate(ctx, t1); err != nil {
+		t.Fatalf("delete T1 after T2 gone: %v", err)
+	}
+	t.Logf("✓ lineage protection: parent undeletable while child exists")
+}
+
+// §11.5 full (bytes-first crash): simulate a Promote that wrote the layer bytes
+// but crashed before inserting the row (a staging→final layer with no templates
+// row). The boot sweep reclaims it, leaving no broken ready state.
+func TestM5PromoteCrashBeforeRowIsReclaimed(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root")
+	}
+	ctx := context.Background()
+	eng, base := setupEngine(t, 30*time.Second)
+
+	// a finalized layer dir with NO templates row = the "crashed after bytes,
+	// before row" state (bytes-first, §5.B). buildingLayers is empty at boot.
+	crashed := filepath.Join(base, "state", "layers", "tmpl_crashed_promote")
+	if err := os.MkdirAll(filepath.Join(crashed, "etc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(crashed, "etc", "x"), []byte("orphan"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := eng.SweepOrphanLayers(ctx); err != nil {
+		t.Fatalf("boot sweep: %v", err)
+	}
+	if _, err := os.Stat(crashed); !os.IsNotExist(err) {
+		t.Fatalf("crashed-Promote orphan layer survived boot sweep: %v", err)
+	}
+	// no row was ever inserted → no broken ready state.
+	if _, err := eng.Store.GetTemplate(ctx, "tmpl_crashed_promote"); !errors.Is(err, store.ErrTemplateNotFound) {
+		t.Fatalf("unexpected row for crashed promote: %v", err)
+	}
+	t.Logf("✓ crashed-Promote layer (bytes, no row) reclaimed at boot, no broken ready state")
+}

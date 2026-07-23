@@ -62,3 +62,70 @@ func TestMediatorSweepPassesLiveAndBuilding(t *testing.T) {
 		t.Errorf("building set not forwarded: %q", got)
 	}
 }
+
+// §11.6 (in-flight guard): while a Promote is mid-freeze (bytes down, row not
+// yet inserted), a concurrent sweep must see the layer in the buildingLayers
+// keep-set and NOT reclaim it. Deterministic via a gate that blocks the freeze.
+func TestInFlightPromoteProtectedFromSweep(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	seedBare(t, st)
+	gate := make(chan struct{})
+	reached := make(chan struct{})
+	rp := &fakeRootfs{promoteGate: gate, promoteReached: reached}
+	m := New(Deps{
+		Store: st, Runtime: &fakeRuntime{}, Rootfs: rp,
+		Dial:          func(transport.Endpoint) transport.Client { return &fakeClient{healthy: true} },
+		HealthTimeout: time.Second,
+	})
+
+	// a paused source to promote (no cold-start needed).
+	seedPaused(t, st, "sbx_p", "ov_p", "bare")
+
+	// start Promote in the background; it will block inside the freeze.
+	promoted := make(chan model.TemplateID, 1)
+	go func() {
+		tid, err := m.Promote(ctx, "sbx_p")
+		if err != nil {
+			t.Errorf("promote: %v", err)
+		}
+		promoted <- tid
+	}()
+
+	// wait until the freeze is entered → the layer id is registered in
+	// buildingLayers (markBuilding ran before PromoteToTemplate).
+	select {
+	case <-reached:
+	case <-time.After(2 * time.Second):
+		t.Fatal("promote never reached the freeze")
+	}
+
+	// the building keep-set now holds exactly the in-flight layer.
+	building := m.buildingLayerIDs()
+	if len(building) != 1 {
+		t.Fatalf("buildingLayers = %v; want exactly the in-flight layer", building)
+	}
+	// a concurrent sweep must forward that id as protected (not reclaim it).
+	if err := m.SweepOrphanLayers(ctx); err != nil {
+		t.Fatalf("concurrent sweep: %v", err)
+	}
+	var swept string
+	for _, c := range rp.Calls() {
+		if strings.HasPrefix(c, "SweepOrphanLayers:") {
+			swept = c
+		}
+	}
+	if !strings.Contains(swept, "building="+building[0]) {
+		t.Fatalf("in-flight layer not protected during sweep: %q (building=%v)", swept, building)
+	}
+
+	// release the freeze → Promote completes, row inserted, keep-set cleared.
+	close(gate)
+	tid := <-promoted
+	if _, err := st.GetTemplate(ctx, tid); err != nil {
+		t.Fatalf("promoted template row missing after completion: %v", err)
+	}
+	if len(m.buildingLayerIDs()) != 0 {
+		t.Fatalf("buildingLayers not cleared after promote: %v", m.buildingLayerIDs())
+	}
+}

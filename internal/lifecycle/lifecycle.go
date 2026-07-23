@@ -427,6 +427,91 @@ func (m *Mediator) destroyLocked(ctx context.Context, rec model.Sandbox) error {
 	return nil
 }
 
+// Promote freezes a sandbox's current Overlay into a new Template layer (§3.1 /
+// §5.B / §7). It accepts a `running` or `paused` source; a `running` source is
+// first quiesced to a consistent at-rest point via pauseLocked (equivalent to a
+// pause, §4.2) and LEFT paused (the caller resumes on demand). The whole
+// operation holds the source's transition lock (§4.4-B), so it serializes
+// against concurrent destroy/resume — destroy cannot delete the Overlay bytes
+// mid-freeze.
+//
+// bytes-first (§4.3 INV-3 / §5.B): the new layer bytes are written FIRST
+// (PromoteToTemplate), then the `templates` row is inserted. The layer id is
+// registered in buildingLayers for the freeze window so a concurrent periodic
+// sweep does not reclaim the in-flight layer (§9). A crash after the bytes are
+// written but before the row insert leaves an orphan layer the sweep reclaims —
+// never a row pointing at nonexistent bytes.
+//
+// Returns the new TemplateID. The new Template's parent is the source sandbox's
+// current Template, so lineage is the source's stack + this frozen layer on top
+// (§5.B multi-lowerdir).
+func (m *Mediator) Promote(ctx context.Context, id model.SandboxID) (model.TemplateID, error) {
+	l := m.lock(id)
+	l.Lock()
+	defer l.Unlock()
+
+	rec, err := m.deps.Store.GetSandbox(ctx, id)
+	if err != nil {
+		return "", fmt.Errorf("promote: %w", err)
+	}
+	switch rec.State {
+	case model.Running:
+		// quiesce to a consistent at-rest point (equivalent to pause, §4.2) and
+		// stay paused. Uses the "paused" Kind — from the event stream's view this
+		// is an ordinary pause; Promote is not a §4.1 lifecycle transition.
+		if err := m.pauseLocked(ctx, id, "paused"); err != nil {
+			return "", fmt.Errorf("promote: quiesce: %w", err)
+		}
+	case model.Paused:
+		// already at-rest; the placement is already released.
+	default:
+		return "", fmt.Errorf("promote: %w (state=%s, want running or paused)", store.ErrConflict, rec.State)
+	}
+
+	newID := model.TemplateID("tmpl_" + randToken())
+
+	// register the in-flight layer BEFORE writing bytes so a concurrent sweep
+	// protects it (§9). Unregister in all exit paths.
+	m.markBuilding(newID)
+	defer m.unmarkBuilding(newID)
+
+	// open the source Overlay by ID (byte read only, no mount) and freeze its
+	// at-rest upper into the new layer dir (bytes-first).
+	ov, err := m.deps.Rootfs.OpenOverlay(ctx, string(rec.Overlay), []string{string(rec.Template)})
+	if err != nil {
+		return "", fmt.Errorf("promote: open overlay: %w", err)
+	}
+	if err := m.deps.Rootfs.PromoteToTemplate(ctx, ov, string(newID)); err != nil {
+		return "", fmt.Errorf("promote: freeze layer: %w", err)
+	}
+
+	// bytes are down → NOW insert the templates row (parent = source's Template,
+	// builtin=0). If this fails, the layer bytes are an orphan the sweep reclaims
+	// (bytes-first: no broken ready row).
+	if err := m.deps.Store.CreateTemplate(ctx, model.Template{
+		ID:        newID,
+		Parent:    rec.Template,
+		Builtin:   false,
+		CreatedAt: time.Now(),
+	}); err != nil {
+		return "", fmt.Errorf("promote: insert template row: %w", err)
+	}
+	return newID, nil
+}
+
+// markBuilding / unmarkBuilding manage the §9 in-flight-Promote keep-set.
+func (m *Mediator) markBuilding(id model.TemplateID) {
+	m.mu.Lock()
+	m.buildingLayers[id] = true
+	m.mu.Unlock()
+}
+
+func (m *Mediator) unmarkBuilding(id model.TemplateID) {
+	m.mu.Lock()
+	delete(m.buildingLayers, id)
+	m.mu.Unlock()
+}
+
 // coldStart runs ①(mount)④(launch)⑤⑥⑦(health) for a given Overlay handle,
 // shared by create and resume (guest-runtime D5.1). On success the live
 // placement + merged are recorded in the mediator. On any error it returns

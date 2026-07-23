@@ -42,6 +42,11 @@ type fakeRootfs struct {
 	calls     []string
 	failMount bool
 	builtins  []string // §8 boot-seed list returned by ListBuiltinTemplates
+	// promoteGate blocks PromoteToTemplate mid-freeze (bytes-down, row-not-yet
+	// window) until closed; promoteReached (if set) is closed when the freeze is
+	// entered, so a test can synchronize a concurrent sweep against it (§9).
+	promoteGate    chan struct{}
+	promoteReached chan struct{}
 }
 
 func (f *fakeRootfs) log(s string) {
@@ -72,8 +77,21 @@ func (f *fakeRootfs) OpenOverlay(_ context.Context, id string, lower []string) (
 	}
 	return &rootfs.Overlay{ID: id, Template: tmpl, Lower: append([]string(nil), lower...)}, nil
 }
-func (f *fakeRootfs) PromoteToTemplate(_ context.Context, o *rootfs.Overlay, newID string) error {
+func (f *fakeRootfs) PromoteToTemplate(ctx context.Context, o *rootfs.Overlay, newID string) error {
 	f.log("PromoteToTemplate:" + o.ID + "->" + newID)
+	// promoteGate, if non-nil, blocks the freeze (bytes-down window) until a test
+	// signals — used to prove a concurrent sweep respects buildingLayers (§9).
+	if f.promoteGate != nil {
+		if f.promoteReached != nil {
+			close(f.promoteReached)
+			f.promoteReached = nil
+		}
+		select {
+		case <-f.promoteGate:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	return nil
 }
 func (f *fakeRootfs) Mount(_ context.Context, o *rootfs.Overlay) (*rootfs.Merged, error) {
