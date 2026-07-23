@@ -5,12 +5,33 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"testing"
 	"time"
 
+	"engine/internal/model"
 	"engine/internal/rootfs"
 	"engine/internal/runtime"
 	"engine/internal/transport"
 )
+
+// seedBare inserts the "bare" builtin Template into st so a sandbox create /
+// insert satisfies the §4.3 template FK (M5). Production does this via the boot
+// seed (§8); the L1 tests do it explicitly. Extra ids can be seeded too.
+func seedBare(t *testing.T, st interface {
+	CreateTemplate(context.Context, model.Template) error
+}, ids ...string) {
+	t.Helper()
+	if len(ids) == 0 {
+		ids = []string{"bare"}
+	}
+	for _, id := range ids {
+		if err := st.CreateTemplate(context.Background(), model.Template{
+			ID: model.TemplateID(id), Builtin: true, CreatedAt: time.Now(),
+		}); err != nil {
+			t.Fatalf("seed template %q: %v", id, err)
+		}
+	}
+}
 
 // fakeRootfs / fakeRuntime / fakeClient are L1 fakes (no substrate): they record
 // call order and inject failures so the mediator's lock + CAS + unwind logic can

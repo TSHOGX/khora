@@ -30,6 +30,7 @@ func newClassifyFixture(t *testing.T, id string, idleTimeout time.Duration, l2He
 	t.Helper()
 	ctx := context.Background()
 	st := store.NewMemory()
+	seedBare(t, st) // §4.3 template FK
 	rt := &fakeRuntime{
 		adoptAlive: map[string]bool{id: adoptAlive},
 	}

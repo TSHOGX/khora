@@ -21,6 +21,12 @@ import (
 type Memory struct {
 	mu  sync.Mutex
 	rec map[model.SandboxID]model.Sandbox
+	// tmpl holds Template rows (§4.3 first-class object). Memory delivers the
+	// SAME §4.3 reference-protection contract SQLite gives via FK RESTRICT, but
+	// with a Go scan under the one mutex (§1.3 seam: one set of assertions, two
+	// backends). Existence-is-state: presence in this map = the Template's ready
+	// state (§4.3), no separate state field.
+	tmpl map[model.TemplateID]model.Template
 	// outbox is append-only, ordered — the publisher reads oldest-first. Like the
 	// SQLite backend, published rows are marked, never removed (same unbounded-
 	// growth known limitation; open-decisions §2 §4.1/§4.4-C row). Bounded in
@@ -35,7 +41,10 @@ type outboxRow struct {
 }
 
 func NewMemory() *Memory {
-	return &Memory{rec: make(map[model.SandboxID]model.Sandbox)}
+	return &Memory{
+		rec:  make(map[model.SandboxID]model.Sandbox),
+		tmpl: make(map[model.TemplateID]model.Template),
+	}
 }
 
 // appendEvent records ev in the outbox. MUST be called with m.mu held so it
@@ -53,8 +62,75 @@ func (m *Memory) CreateSandbox(_ context.Context, s model.Sandbox, ev *Event) er
 	if _, ok := m.rec[s.ID]; ok {
 		return ErrConflict
 	}
+	// FK RESTRICT equivalent (§4.3 reference-side): the referenced Template must
+	// exist. Under the one mutex, a concurrent DeleteTemplate cannot interleave —
+	// the same single-writer serialization SQLite gets, so the atomicity is
+	// identical (§4.3 单写者串行 / §4.4-C 铁律: no backend-difference in correctness).
+	if _, ok := m.tmpl[s.Template]; !ok {
+		return ErrTemplateNotFound
+	}
 	m.rec[s.ID] = s
 	m.appendEvent(ev) // same commit as the insert (§4.4-C)
+	return nil
+}
+
+func (m *Memory) CreateTemplate(_ context.Context, t model.Template) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.tmpl[t.ID]; ok {
+		return ErrConflict
+	}
+	// non-empty parent must exist (lineage FK, §4.3 INV-2 引用向上).
+	if t.Parent != "" {
+		if _, ok := m.tmpl[t.Parent]; !ok {
+			return ErrTemplateNotFound
+		}
+	}
+	m.tmpl[t.ID] = t
+	return nil
+}
+
+func (m *Memory) GetTemplate(_ context.Context, id model.TemplateID) (model.Template, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	t, ok := m.tmpl[id]
+	if !ok {
+		return model.Template{}, ErrTemplateNotFound
+	}
+	return t, nil
+}
+
+func (m *Memory) ListTemplates(_ context.Context) ([]model.Template, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]model.Template, 0, len(m.tmpl))
+	for _, t := range m.tmpl {
+		out = append(out, t)
+	}
+	return out, nil
+}
+
+func (m *Memory) DeleteTemplate(_ context.Context, id model.TemplateID) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.tmpl[id]; !ok {
+		return ErrTemplateNotFound
+	}
+	// RESTRICT equivalent: scan for any live referencing row — a sandbox pinning
+	// it, or a child Template naming it as parent. Either → ErrInUse (§4.3 INV-1
+	// 被引用即拒删). This is the Go-check twin of SQLite's FK RESTRICT; the two run
+	// the SAME contract assertions (§1.3 seam).
+	for _, s := range m.rec {
+		if s.Template == id {
+			return ErrInUse
+		}
+	}
+	for _, t := range m.tmpl {
+		if t.Parent == id {
+			return ErrInUse
+		}
+	}
+	delete(m.tmpl, id)
 	return nil
 }
 

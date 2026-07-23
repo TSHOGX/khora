@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"engine/internal/model"
@@ -28,9 +29,26 @@ type SQLite struct {
 }
 
 const sqliteSchema = `
+-- templates: first-class immutable object (§3.1 / §4.3). Existence-is-state
+-- (no state column), derived refcount (no count column). parent is a
+-- self-reference expressing lineage; ON DELETE RESTRICT declares "a referenced
+-- parent layer cannot be deleted" (§4.3 INV-2 引用向上). MUST be created before
+-- the sandboxes table so the sandboxes.template FK below resolves.
+CREATE TABLE IF NOT EXISTS templates (
+	id             TEXT PRIMARY KEY,          -- opaque "tmpl_<token>" / builtin = static dir name
+	parent         TEXT REFERENCES templates(id) ON DELETE RESTRICT, -- lineage; NULL = base layer
+	content_digest TEXT,                       -- nullable future dedup/integrity anchor (unused, M5 §2)
+	builtin        INTEGER NOT NULL DEFAULT 0, -- 1 = platform-preseeded (boot seed), 0 = Promote-built
+	created_at     INTEGER NOT NULL            -- unix nanos
+);
 CREATE TABLE IF NOT EXISTS sandboxes (
 	id           TEXT PRIMARY KEY,
-	template     TEXT NOT NULL,
+	-- template FK RESTRICT: a Template referenced by any sandbox cannot be
+	-- deleted (§4.3 INV-1/INV-2). This is the persistent reference row E2B lost
+	-- track of (M5 §4): it lives here from creating through destroyed, visible
+	-- to RESTRICT even for a paused/snapshot sandbox. Destructive schema change,
+	-- no migration (CLAUDE.md 无兼容负担): the store.db is rebuilt, not ALTERed.
+	template     TEXT NOT NULL REFERENCES templates(id) ON DELETE RESTRICT,
 	overlay      TEXT NOT NULL,
 	state        TEXT NOT NULL,
 	idle_timeout INTEGER NOT NULL DEFAULT 0, -- TTL Binding, ns (§3.4 / §4.3)
@@ -155,6 +173,12 @@ func (s *SQLite) CreateSandbox(ctx context.Context, sb model.Sandbox, ev *Event)
 			int64(sb.IdleTimeout), int64(sb.Retention),
 			sb.CreatedAt.UnixNano(), sb.UpdatedAt.UnixNano(),
 		); err != nil {
+			// FK RESTRICT on template: the referenced Template does not exist —
+			// the reference-side of §4.3 atomicity (a concurrent DELETE won, or
+			// boot seed hasn't run). create loses cleanly (§6 create-from-Template).
+			if isFKViolation(err) {
+				return ErrTemplateNotFound
+			}
 			return err
 		}
 		return insertEvent(t, ev)
@@ -255,6 +279,119 @@ func (s *SQLite) MarkPublished(ctx context.Context, eventID string) error {
 		`UPDATE outbox SET published_at=? WHERE id=? AND published_at IS NULL`,
 		time.Now().UnixNano(), eventID)
 	return err
+}
+
+// isFKViolation reports whether err is a SQLite foreign-key constraint failure.
+// modernc.org/sqlite surfaces it in the error text (no typed sentinel exposed);
+// this is the seam's translation point from a raw driver error to the §4.3
+// contract verdict (ErrInUse on RESTRICT-delete, ErrTemplateNotFound on a
+// missing-parent insert). Keeping the string match HERE, not in callers, is what
+// stops the backend detail leaking into correctness (§4.4-C 铁律).
+func isFKViolation(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "FOREIGN KEY constraint failed")
+}
+
+func (s *SQLite) CreateTemplate(ctx context.Context, tm model.Template) error {
+	return s.tx(ctx, func(t *sql.Tx) error {
+		var exists int
+		if err := t.QueryRow(`SELECT 1 FROM templates WHERE id=?`, string(tm.ID)).Scan(&exists); err == nil {
+			return ErrConflict
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		// parent is nullable: empty TemplateID → SQL NULL (a base layer). A
+		// non-NULL parent is FK-checked here — a missing parent → the insert hits
+		// the FK and we translate to ErrTemplateNotFound (§4.3 reference-side).
+		var parent any
+		if tm.Parent != "" {
+			parent = string(tm.Parent)
+		}
+		var digest any
+		if tm.ContentDigest != "" {
+			digest = tm.ContentDigest
+		}
+		builtin := 0
+		if tm.Builtin {
+			builtin = 1
+		}
+		if _, err := t.Exec(
+			`INSERT INTO templates(id, parent, content_digest, builtin, created_at) VALUES(?,?,?,?,?)`,
+			string(tm.ID), parent, digest, builtin, tm.CreatedAt.UnixNano(),
+		); err != nil {
+			if isFKViolation(err) {
+				return ErrTemplateNotFound // missing parent layer
+			}
+			return err
+		}
+		return nil
+	})
+}
+
+func (s *SQLite) GetTemplate(ctx context.Context, id model.TemplateID) (model.Template, error) {
+	return scanTemplate(s.db.QueryRowContext(ctx,
+		`SELECT id, parent, content_digest, builtin, created_at FROM templates WHERE id=?`,
+		string(id)))
+}
+
+func (s *SQLite) ListTemplates(ctx context.Context) ([]model.Template, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, parent, content_digest, builtin, created_at FROM templates ORDER BY created_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]model.Template, 0)
+	for rows.Next() {
+		tm, err := scanTemplate(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, tm)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLite) DeleteTemplate(ctx context.Context, id model.TemplateID) error {
+	return s.tx(ctx, func(t *sql.Tx) error {
+		res, err := t.Exec(`DELETE FROM templates WHERE id=?`, string(id))
+		if err != nil {
+			// FK RESTRICT: a sandbox or child Template still references it →
+			// ErrInUse (§4.3 INV-1 被引用即拒删 / §6 DELETE → 409).
+			if isFKViolation(err) {
+				return ErrInUse
+			}
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return ErrTemplateNotFound
+		}
+		return nil
+	})
+}
+
+func scanTemplate(r rowScanner) (model.Template, error) {
+	var tm model.Template
+	var id string
+	var parent, digest sql.NullString
+	var builtin int
+	var created int64
+	err := r.Scan(&id, &parent, &digest, &builtin, &created)
+	if errors.Is(err, sql.ErrNoRows) {
+		return model.Template{}, ErrTemplateNotFound
+	}
+	if err != nil {
+		return model.Template{}, err
+	}
+	tm.ID = model.TemplateID(id)
+	tm.Parent = model.TemplateID(parent.String) // "" when NULL
+	tm.ContentDigest = digest.String            // "" when NULL
+	tm.Builtin = builtin != 0
+	tm.CreatedAt = time.Unix(0, created)
+	return tm, nil
 }
 
 // rowScanner is satisfied by both *sql.Row and *sql.Rows.

@@ -13,8 +13,9 @@ import (
 	"engine/internal/transport"
 )
 
-func newTestMediator(rp *fakeRootfs, rt *fakeRuntime, healthy bool) (*Mediator, *store.Memory) {
+func newTestMediator(t *testing.T, rp *fakeRootfs, rt *fakeRuntime, healthy bool) (*Mediator, *store.Memory) {
 	st := store.NewMemory()
+	seedBare(t, st) // §4.3 template FK: the "bare" builtin row must pre-exist (boot seed, §8)
 	m := New(Deps{
 		Store:         st,
 		Runtime:       rt,
@@ -27,7 +28,7 @@ func newTestMediator(rp *fakeRootfs, rt *fakeRuntime, healthy bool) (*Mediator, 
 
 func TestCreateHappyPath(t *testing.T) {
 	rp, rt := &fakeRootfs{}, &fakeRuntime{}
-	m, st := newTestMediator(rp, rt, true)
+	m, st := newTestMediator(t, rp, rt, true)
 
 	sid, err := m.Create(context.Background(), CreateSpec{Template: "bare"})
 	if err != nil {
@@ -49,6 +50,7 @@ func TestCreateHappyPath(t *testing.T) {
 func TestCreateMaterializesTTLBinding(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemory()
+	seedBare(t, st) // §4.3 template FK
 	m := New(Deps{
 		Store: st, Runtime: &fakeRuntime{}, Rootfs: &fakeRootfs{},
 		Dial:               func(transport.Endpoint) transport.Client { return &fakeClient{healthy: true} },
@@ -98,7 +100,7 @@ func TestCreateMaterializesTTLBinding(t *testing.T) {
 // and deletes the record → destroyed; no `failed` state.
 func TestCreateUnwindOnLaunchFailure(t *testing.T) {
 	rp, rt := &fakeRootfs{}, &fakeRuntime{failLaunch: true}
-	m, st := newTestMediator(rp, rt, true)
+	m, st := newTestMediator(t, rp, rt, true)
 
 	sid, err := m.Create(context.Background(), CreateSpec{Template: "bare"})
 	if err == nil {
@@ -123,7 +125,7 @@ func TestCreateUnwindOnLaunchFailure(t *testing.T) {
 // the record → destroyed, no `failed` state.
 func TestCreateUnwindOnMountFailure(t *testing.T) {
 	rp, rt := &fakeRootfs{failMount: true}, &fakeRuntime{}
-	m, st := newTestMediator(rp, rt, true)
+	m, st := newTestMediator(t, rp, rt, true)
 
 	sid, err := m.Create(context.Background(), CreateSpec{Template: "bare"})
 	if err == nil {
@@ -151,7 +153,7 @@ func TestCreateUnwindOnMountFailure(t *testing.T) {
 // reclaimed, record deleted.
 func TestCreateUnwindOnHealthTimeout(t *testing.T) {
 	rp, rt := &fakeRootfs{}, &fakeRuntime{}
-	m, st := newTestMediator(rp, rt, false) // never healthy
+	m, st := newTestMediator(t, rp, rt, false) // never healthy
 
 	sid, err := m.Create(context.Background(), CreateSpec{Template: "bare"})
 	if err == nil || !strings.Contains(err.Error(), "health") {
@@ -169,7 +171,7 @@ func TestCreateUnwindOnHealthTimeout(t *testing.T) {
 // `paused` (persistent Overlay untouched — NOT destroyed).
 func TestResumeUnwindStaysPaused(t *testing.T) {
 	rp, rt := &fakeRootfs{}, &fakeRuntime{failLaunch: true}
-	m, st := newTestMediator(rp, rt, true)
+	m, st := newTestMediator(t, rp, rt, true)
 	ctx := context.Background()
 
 	// seed a paused sandbox directly.
@@ -195,7 +197,7 @@ func TestResumeUnwindStaysPaused(t *testing.T) {
 // CAS precondition: pause requires running.
 func TestPauseRequiresRunning(t *testing.T) {
 	rp, rt := &fakeRootfs{}, &fakeRuntime{}
-	m, st := newTestMediator(rp, rt, true)
+	m, st := newTestMediator(t, rp, rt, true)
 	seedPaused(t, st, "sbx_p", "ov_p", "bare")
 
 	err := m.Pause(context.Background(), "sbx_p")
@@ -209,7 +211,7 @@ func TestPauseRequiresRunning(t *testing.T) {
 // wins → running.
 func TestResumeResumeCASShape(t *testing.T) {
 	rp, rt := &fakeRootfs{}, &fakeRuntime{}
-	m, st := newTestMediator(rp, rt, true)
+	m, st := newTestMediator(t, rp, rt, true)
 	seedPaused(t, st, "sbx_r", "ov_r", "bare")
 
 	var wg sync.WaitGroup
@@ -247,7 +249,7 @@ func TestDestroyBlockedDuringResumeColdStart(t *testing.T) {
 	rp := &fakeRootfs{}
 	gate := make(chan struct{})
 	rt := &fakeRuntime{launchGate: gate}
-	m, st := newTestMediator(rp, rt, true)
+	m, st := newTestMediator(t, rp, rt, true)
 	seedPaused(t, st, "sbx_lock", "ov_lock", "bare")
 
 	// start resume; it will block inside Launch (holding the lock).
@@ -295,6 +297,9 @@ func seedPaused(t *testing.T, st *store.Memory, sid, oid, tmpl string) {
 	t.Helper()
 	ctx := context.Background()
 	now := time.Now()
+	// §4.3 template FK: ensure the referenced Template row exists first. Idempotent
+	// across repeat calls with the same tmpl (ErrConflict is fine → ignore).
+	_ = st.CreateTemplate(ctx, model.Template{ID: model.TemplateID(tmpl), Builtin: true, CreatedAt: now})
 	if err := st.CreateSandbox(ctx, model.Sandbox{
 		ID: model.SandboxID(sid), Template: model.TemplateID(tmpl),
 		Overlay: model.OverlayID(oid), State: model.Creating,

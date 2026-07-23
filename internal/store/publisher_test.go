@@ -16,6 +16,16 @@ func ev(id, evid, kind string, state model.Lifecycle) *store.Event {
 	return &store.Event{ID: evid, Sandbox: model.SandboxID(id), Kind: kind, State: state, OccurredAt: time.Now()}
 }
 
+// seedPubTmpl inserts the "bare" Template these publisher tests reference, so
+// the sandbox insert satisfies the §4.3 template FK (the publisher behavior
+// under test is unchanged; the seed just makes the referenced row present).
+func seedPubTmpl(t *testing.T, st store.Store) {
+	t.Helper()
+	if err := st.CreateTemplate(context.Background(), model.Template{ID: "bare", Builtin: true, CreatedAt: time.Now()}); err != nil {
+		t.Fatalf("seed template: %v", err)
+	}
+}
+
 // countingSink records every Deliver call (including redeliveries).
 type countingSink struct {
 	mu       sync.Mutex
@@ -44,7 +54,8 @@ func (s *countingSink) ids() []string {
 func TestPublisherDeliversAndMarks(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemory()
-	_ = st.CreateSandbox(ctx, model.Sandbox{ID: "a", State: model.Creating}, nil)
+	seedPubTmpl(t, st)
+	_ = st.CreateSandbox(ctx, model.Sandbox{ID: "a", Template: "bare", State: model.Creating}, nil)
 	_ = st.CompareAndSetState(ctx, "a", model.Creating, model.Running, ev("a", "e1", "created", model.Running))
 	_ = st.CompareAndSetState(ctx, "a", model.Running, model.Paused, ev("a", "e2", "paused", model.Paused))
 
@@ -74,7 +85,8 @@ func TestPublisherDeliversAndMarks(t *testing.T) {
 func TestPublisherRetriesOnSinkFailure(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemory()
-	_ = st.CreateSandbox(ctx, model.Sandbox{ID: "a", State: model.Creating}, nil)
+	seedPubTmpl(t, st)
+	_ = st.CreateSandbox(ctx, model.Sandbox{ID: "a", Template: "bare", State: model.Creating}, nil)
 	_ = st.CompareAndSetState(ctx, "a", model.Creating, model.Running, ev("a", "e1", "created", model.Running))
 
 	sink := &countingSink{failNext: errors.New("sink down")}
@@ -106,7 +118,10 @@ func TestPublisherAtLeastOnceDedupOnRestart(t *testing.T) {
 	}
 
 	// two committed transitions with durable outbox rows.
-	_ = st.CreateSandbox(ctx, model.Sandbox{ID: "a", State: model.Creating}, nil)
+	if err := st.CreateTemplate(ctx, model.Template{ID: "bare", Builtin: true, CreatedAt: time.Now()}); err != nil {
+		t.Fatalf("seed template: %v", err)
+	}
+	_ = st.CreateSandbox(ctx, model.Sandbox{ID: "a", Template: "bare", State: model.Creating}, nil)
 	_ = st.CompareAndSetState(ctx, "a", model.Creating, model.Running, ev("a", "e1", "created", model.Running))
 	_ = st.CompareAndSetState(ctx, "a", model.Running, model.Paused, ev("a", "e2", "paused", model.Paused))
 

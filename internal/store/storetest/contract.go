@@ -36,6 +36,25 @@ func RunContract(t *testing.T, mk Factory) {
 	t.Run("MarkPublishedIdempotent", func(t *testing.T) { testMarkPublished(t, mk) })
 	t.Run("OutboxRowOutlivesRecord", func(t *testing.T) { testOutboxOutlivesRecord(t, mk) })
 	t.Run("Durability", func(t *testing.T) { testDurability(t, mk) })
+
+	// Template object model (§4.3 / M5): same assertions both backends.
+	t.Run("TemplateCRUD", func(t *testing.T) { testTemplateCRUD(t, mk) })
+	t.Run("TemplateReferenceProtection", func(t *testing.T) { testTemplateRefProtection(t, mk) })
+	t.Run("TemplateLineageProtection", func(t *testing.T) { testTemplateLineage(t, mk) })
+	t.Run("SandboxRefMissingTemplate", func(t *testing.T) { testSandboxRefMissingTemplate(t, mk) })
+	t.Run("TemplateDurability", func(t *testing.T) { testTemplateDurability(t, mk) })
+}
+
+// seedTmpl inserts a base (parent-less) Template so a sandbox referencing it
+// satisfies the §4.3 FK. Every sandbox-creating subtest calls it first: the
+// sandboxes.template FK now REQUIRES the row to pre-exist (§6 前提 / boot seed).
+func seedTmpl(t *testing.T, s store.Store, id string) {
+	t.Helper()
+	if err := s.CreateTemplate(context.Background(), model.Template{
+		ID: model.TemplateID(id), Builtin: true, CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("seed template %q: %v", id, err)
+	}
 }
 
 func mkRec(id string) model.Sandbox {
@@ -57,6 +76,7 @@ func ev(id, evid, kind string, state model.Lifecycle) *store.Event {
 func testCreateGetConflict(t *testing.T, mk Factory) {
 	ctx := context.Background()
 	s, _ := mk(t)
+	seedTmpl(t, s, "bare")
 	if err := s.CreateSandbox(ctx, mkRec("a"), nil); err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -84,6 +104,7 @@ func testCreateGetConflict(t *testing.T, mk Factory) {
 func testCASPreconditions(t *testing.T, mk Factory) {
 	ctx := context.Background()
 	s, _ := mk(t)
+	seedTmpl(t, s, "bare")
 	_ = s.CreateSandbox(ctx, mkRec("a"), nil)
 
 	// wrong expected → ErrConflict, state unchanged.
@@ -109,6 +130,7 @@ func testCASPreconditions(t *testing.T, mk Factory) {
 func testDelete(t *testing.T, mk Factory) {
 	ctx := context.Background()
 	s, _ := mk(t)
+	seedTmpl(t, s, "bare")
 	_ = s.CreateSandbox(ctx, mkRec("a"), nil)
 	if err := s.DeleteSandbox(ctx, "a", nil); err != nil {
 		t.Fatalf("delete: %v", err)
@@ -128,6 +150,7 @@ func testList(t *testing.T, mk Factory) {
 	if l, _ := s.ListSandboxes(ctx); len(l) != 0 {
 		t.Fatalf("empty list len=%d", len(l))
 	}
+	seedTmpl(t, s, "bare")
 	_ = s.CreateSandbox(ctx, mkRec("a"), nil)
 	_ = s.CreateSandbox(ctx, mkRec("b"), nil)
 	l, err := s.ListSandboxes(ctx)
@@ -152,6 +175,7 @@ func testList(t *testing.T, mk Factory) {
 func testOutboxAtomic(t *testing.T, mk Factory) {
 	ctx := context.Background()
 	s, _ := mk(t)
+	seedTmpl(t, s, "bare")
 	_ = s.CreateSandbox(ctx, mkRec("a"), nil)
 	e := ev("a", "evt_1", "resumed", model.Running)
 	if err := s.CompareAndSetState(ctx, "a", model.Creating, model.Running, e); err != nil {
@@ -185,6 +209,7 @@ func testOutboxAtomic(t *testing.T, mk Factory) {
 func testOutboxNil(t *testing.T, mk Factory) {
 	ctx := context.Background()
 	s, _ := mk(t)
+	seedTmpl(t, s, "bare")
 	// nil Event on every mutation → nothing to publish.
 	_ = s.CreateSandbox(ctx, mkRec("a"), nil)
 	_ = s.CompareAndSetState(ctx, "a", model.Creating, model.Running, nil)
@@ -201,6 +226,7 @@ func testOutboxNil(t *testing.T, mk Factory) {
 func testMarkPublished(t *testing.T, mk Factory) {
 	ctx := context.Background()
 	s, _ := mk(t)
+	seedTmpl(t, s, "bare")
 	_ = s.CreateSandbox(ctx, mkRec("a"), nil)
 	_ = s.CompareAndSetState(ctx, "a", model.Creating, model.Running, ev("a", "evt_1", "created", model.Running))
 	_ = s.CompareAndSetState(ctx, "a", model.Running, model.Paused, ev("a", "evt_2", "paused", model.Paused))
@@ -233,6 +259,7 @@ func testMarkPublished(t *testing.T, mk Factory) {
 func testOutboxOutlivesRecord(t *testing.T, mk Factory) {
 	ctx := context.Background()
 	s, _ := mk(t)
+	seedTmpl(t, s, "bare")
 	_ = s.CreateSandbox(ctx, mkRec("a"), nil)
 	if err := s.DeleteSandbox(ctx, "a", ev("a", "evt_d", "destroyed", model.Destroyed)); err != nil {
 		t.Fatalf("delete+event: %v", err)
@@ -255,6 +282,7 @@ func testDurability(t *testing.T, mk Factory) {
 	if reopen == nil {
 		t.Skip("backend is not durable across reopen")
 	}
+	seedTmpl(t, s, "bare")
 	_ = s.CreateSandbox(ctx, mkRec("a"), nil)
 	_ = s.CompareAndSetState(ctx, "a", model.Creating, model.Running, ev("a", "evt_1", "created", model.Running))
 
@@ -275,5 +303,143 @@ func testDurability(t *testing.T, mk Factory) {
 	s3 := reopen(t)
 	if un, _ := s3.UnpublishedEvents(ctx); len(un) != 0 {
 		t.Fatalf("published mark lost across reopen: %d rows", len(un))
+	}
+}
+
+// testTemplateCRUD: round-trip a Template + its fields, duplicate → ErrConflict,
+// missing → ErrTemplateNotFound, delete an unreferenced row succeeds and is then
+// gone (§4.3 existence-is-state).
+func testTemplateCRUD(t *testing.T, mk Factory) {
+	ctx := context.Background()
+	s, _ := mk(t)
+	tm := model.Template{
+		ID: "tmpl_base", ContentDigest: "sha256:deadbeef", Builtin: true,
+		CreatedAt: time.Now(),
+	}
+	if err := s.CreateTemplate(ctx, tm); err != nil {
+		t.Fatalf("create template: %v", err)
+	}
+	got, err := s.GetTemplate(ctx, "tmpl_base")
+	if err != nil {
+		t.Fatalf("get template: %v", err)
+	}
+	if got.ID != "tmpl_base" || got.Parent != "" || got.ContentDigest != "sha256:deadbeef" || !got.Builtin {
+		t.Fatalf("template round-trip mismatch: %+v", got)
+	}
+	// duplicate → ErrConflict.
+	if err := s.CreateTemplate(ctx, tm); err != store.ErrConflict {
+		t.Fatalf("duplicate template = %v; want ErrConflict", err)
+	}
+	// missing → ErrTemplateNotFound.
+	if _, err := s.GetTemplate(ctx, "nope"); err != store.ErrTemplateNotFound {
+		t.Fatalf("get missing template = %v; want ErrTemplateNotFound", err)
+	}
+	// unreferenced delete succeeds, then the row is gone.
+	if err := s.DeleteTemplate(ctx, "tmpl_base"); err != nil {
+		t.Fatalf("delete unreferenced template: %v", err)
+	}
+	if _, err := s.GetTemplate(ctx, "tmpl_base"); err != store.ErrTemplateNotFound {
+		t.Fatalf("get after delete = %v; want ErrTemplateNotFound", err)
+	}
+	// deleting a missing template → ErrTemplateNotFound.
+	if err := s.DeleteTemplate(ctx, "tmpl_base"); err != store.ErrTemplateNotFound {
+		t.Fatalf("delete missing template = %v; want ErrTemplateNotFound", err)
+	}
+}
+
+// testTemplateRefProtection: a Template referenced by a sandbox cannot be
+// deleted (§4.3 INV-1 被引用即拒删 → ErrInUse); once the sandbox is gone, the
+// delete succeeds. This is the E2B-bug immunity (M5 §4): the reference is a
+// persistent row, seen by RESTRICT.
+func testTemplateRefProtection(t *testing.T, mk Factory) {
+	ctx := context.Background()
+	s, _ := mk(t)
+	seedTmpl(t, s, "bare")
+	if err := s.CreateSandbox(ctx, mkRec("a"), nil); err != nil {
+		t.Fatalf("create sandbox: %v", err)
+	}
+	// referenced → ErrInUse.
+	if err := s.DeleteTemplate(ctx, "bare"); err != store.ErrInUse {
+		t.Fatalf("delete referenced template = %v; want ErrInUse", err)
+	}
+	// row still there (the failed delete changed nothing).
+	if _, err := s.GetTemplate(ctx, "bare"); err != nil {
+		t.Fatalf("template vanished on failed delete: %v", err)
+	}
+	// remove the referrer → now deletable.
+	if err := s.DeleteSandbox(ctx, "a", nil); err != nil {
+		t.Fatalf("delete sandbox: %v", err)
+	}
+	if err := s.DeleteTemplate(ctx, "bare"); err != nil {
+		t.Fatalf("delete after referrer gone: %v", err)
+	}
+}
+
+// testTemplateLineage: a parent Template referenced by a child (parent = id)
+// cannot be deleted (§4.3 INV-2 引用向上 → ErrInUse); delete the child first,
+// then the parent. Also: a child with a MISSING parent cannot be created
+// (reference-side atomicity).
+func testTemplateLineage(t *testing.T, mk Factory) {
+	ctx := context.Background()
+	s, _ := mk(t)
+	now := time.Now()
+	if err := s.CreateTemplate(ctx, model.Template{ID: "t1", Builtin: true, CreatedAt: now}); err != nil {
+		t.Fatalf("create t1: %v", err)
+	}
+	// child with a missing parent → ErrTemplateNotFound (reference-side).
+	if err := s.CreateTemplate(ctx, model.Template{ID: "t2", Parent: "ghost", CreatedAt: now}); err != store.ErrTemplateNotFound {
+		t.Fatalf("child of missing parent = %v; want ErrTemplateNotFound", err)
+	}
+	// valid child.
+	if err := s.CreateTemplate(ctx, model.Template{ID: "t2", Parent: "t1", CreatedAt: now}); err != nil {
+		t.Fatalf("create t2(parent=t1): %v", err)
+	}
+	// parent referenced by child → ErrInUse.
+	if err := s.DeleteTemplate(ctx, "t1"); err != store.ErrInUse {
+		t.Fatalf("delete referenced parent = %v; want ErrInUse", err)
+	}
+	// delete child, then parent.
+	if err := s.DeleteTemplate(ctx, "t2"); err != nil {
+		t.Fatalf("delete child t2: %v", err)
+	}
+	if err := s.DeleteTemplate(ctx, "t1"); err != nil {
+		t.Fatalf("delete parent t1 after child gone: %v", err)
+	}
+}
+
+// testSandboxRefMissingTemplate: creating a sandbox that references a
+// nonexistent Template fails (§4.3 reference-side atomicity: create loses when
+// the parent Template is absent). The boot seed (§8) exists precisely to make
+// the builtin rows present before any create.
+func testSandboxRefMissingTemplate(t *testing.T, mk Factory) {
+	ctx := context.Background()
+	s, _ := mk(t)
+	// no seed → "bare" absent.
+	if err := s.CreateSandbox(ctx, mkRec("a"), nil); err != store.ErrTemplateNotFound {
+		t.Fatalf("create referencing missing template = %v; want ErrTemplateNotFound", err)
+	}
+}
+
+// testTemplateDurability: Template rows survive a reopen (durable backends);
+// existence-is-state means the row IS the persistent object (§4.3).
+func testTemplateDurability(t *testing.T, mk Factory) {
+	ctx := context.Background()
+	s, reopen := mk(t)
+	if reopen == nil {
+		t.Skip("backend is not durable across reopen")
+	}
+	_ = s.CreateTemplate(ctx, model.Template{ID: "t1", Builtin: true, CreatedAt: time.Now()})
+	_ = s.CreateTemplate(ctx, model.Template{ID: "t2", Parent: "t1", CreatedAt: time.Now()})
+	s2 := reopen(t)
+	got, err := s2.GetTemplate(ctx, "t2")
+	if err != nil {
+		t.Fatalf("template lost across reopen: %v", err)
+	}
+	if got.Parent != "t1" {
+		t.Fatalf("lineage lost across reopen: parent=%q want t1", got.Parent)
+	}
+	// lineage RESTRICT still holds after reopen.
+	if err := s2.DeleteTemplate(ctx, "t1"); err != store.ErrInUse {
+		t.Fatalf("post-reopen delete referenced parent = %v; want ErrInUse", err)
 	}
 }

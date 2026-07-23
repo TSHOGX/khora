@@ -32,6 +32,7 @@ type reaperEnv struct {
 func newReaperEnv(t *testing.T, budget time.Duration) *reaperEnv {
 	t.Helper()
 	st := store.NewMemory()
+	seedBare(t, st) // §4.3 template FK: both seedRunning/seedPaused reference "bare"
 	rt := &fakeRuntime{adoptAlive: map[string]bool{}}
 	cl := &fakeClient{healthy: true}
 	m := New(Deps{

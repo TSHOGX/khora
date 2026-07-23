@@ -28,6 +28,20 @@ var ErrConflict = errors.New("store: state precondition failed")
 // ErrNotFound is returned when a sandbox record does not exist.
 var ErrNotFound = errors.New("store: sandbox not found")
 
+// ErrTemplateNotFound is returned when a Template record does not exist —
+// including the reference-side failure: inserting a sandbox (or child Template)
+// that references a Template no concurrent transaction left in place (§4.3
+// 引用-回收原子性: DELETE committed first → the referrer hits missing-parent).
+var ErrTemplateNotFound = errors.New("store: template not found")
+
+// ErrInUse is the §4.3 reference-protection verdict: a DeleteTemplate lost to a
+// live referencing row (a sandbox pinning it, or a child Template naming it as
+// parent). It is the store SEAM's contract promise (§4.3 INV-1 / §1.3), NOT a
+// SQLite feature leaking out: SQLite delivers it via FK RESTRICT, Memory via a
+// Go scan — the two backends run one set of assertions (§4.4-C 铁律). The API
+// layer maps it to a clean 409 template in use (§6.1), never a raw 500.
+var ErrInUse = errors.New("store: template in use")
+
 // Event is one outbox row: a §4.1 lifecycle transition to publish to the event
 // stream (created / paused / resumed / destroyed …). It is appended in the SAME
 // atomic commit as the state change that produced it (§4.4-C) — a committed
@@ -102,4 +116,34 @@ type Store interface {
 	// coming back from UnpublishedEvents. Idempotent: marking an unknown or
 	// already-marked ID is a no-op.
 	MarkPublished(ctx context.Context, eventID string) error
+
+	// --- Template CRUD (§4.3 uniform object model / M5) ---------------------
+	//
+	// Template is a first-class persistent object with DERIVED refcount and
+	// existence-is-state (§4.3): no state column, no materialized count. These
+	// methods are the store's slice of the §4.3 引用-回收原子性 contract — the
+	// reference-protection promise (a referenced Template cannot be deleted) is
+	// delivered here, identically by both backends (§1.3 seam).
+
+	// CreateTemplate inserts a Template row. If Parent is non-empty it must
+	// reference an existing Template (lineage, §4.3 INV-2 引用向上): a missing
+	// parent → ErrTemplateNotFound (the reference-side of the atomicity race,
+	// §4.3). Returns ErrConflict on a duplicate ID. Bytes-first (§5.B): the
+	// caller has already fully materialized the layer bytes before this insert —
+	// existence-is-state has no not-ready escape hatch (§4.3 INV-3).
+	CreateTemplate(ctx context.Context, t model.Template) error
+
+	// GetTemplate reads a Template row; ErrTemplateNotFound if absent.
+	GetTemplate(ctx context.Context, id model.TemplateID) (model.Template, error)
+
+	// ListTemplates returns all Template rows.
+	ListTemplates(ctx context.Context) ([]model.Template, error)
+
+	// DeleteTemplate removes a Template row iff nothing references it (§4.3 /
+	// §6 DELETE). A live referencing row — a sandbox whose template = id, or a
+	// child Template whose parent = id — makes it ErrInUse (RESTRICT). A missing
+	// row → ErrTemplateNotFound. The reclaim of the layer's bytes is DECOUPLED
+	// from this row delete (§4.4 / §5.B orphan sweep) — this only removes the
+	// row; the now-orphaned bytes are reclaimed by the sweep, not here.
+	DeleteTemplate(ctx context.Context, id model.TemplateID) error
 }
