@@ -144,8 +144,9 @@ reflink 来补分层,那其实又滑回上面的 overlayfs 底层存储附带能
   避免截断 in-flight 写)——纯优化、非正确性前提,单独追踪于 guest-runtime D4.4 / open-decisions §2。
 - **excluded paths / portal paths**:提取 Promote/snapshot 时要过滤掉引擎自身注入的运行时路径
   (如 guest 内 daemon 的工作目录)与 Volume 挂载点占位(§5.B「Promote 捕获只含 Overlay 树、Volume
-  挂载点是空占位」)。**最小集(至少 sandboxd portal/工作目录)由 Promote 里程碑落地**;完整清单仍开放
-  ——Volume 挂载点占位待 Volume 子系统落地才出现。
+  挂载点是空占位」)。**最小集(sandboxd 的 transport pidfile / crashloop sentinel)已随 M5 shipped**
+  (`internal/rootfs` 的 `promoteExcludedPaths`);完整清单仍开放——Volume 挂载点占位待 Volume 子系统
+  落地才出现。
 - **content-addressed diff 层(演进项,演进条件见 D3)**:落地时要实现 tar 提取 + baseline 增量 +
   object store 接口(能力映射见 D2)。
 

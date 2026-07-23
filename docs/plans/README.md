@@ -20,6 +20,7 @@ built is now part of the converged architecture; read `docs/spec/`, not a plan:
 | **M2** ✅ | Persistent store + the three §4.4 invariants in depth: atomic commit + outbox, true-concurrency stress, startup crash-reconciliation (backend = ADR-0004) | §4.4 · §5.A |
 | **M3** ✅ | Transport depth (§5.E): PTY + multi-connection fan-out + `Connect` reconnect + bounded ring-replay + the two D4.3 fan-out invariants; external data-plane Connect projection (D6) | §5.E · §3.2 · §6 |
 | **M4** ✅ | Reaper + health quadrant (two-tier liveness × guest-side connection activity) + live periodic reconcile: `auto-pause` / `evict` / live `crash-pause` | §4.3 · §4.4-A |
+| **M5** ✅ | Uniform object model on Template lineage: first-class Template rows (opaque ID + `parent` lineage, **existence-as-state**, **derived** refcount) + FK-enforced reference-reclaim atomicity + safe delete/GC + boot seed + orphan-layer sweep + Promote (multi-lowerdir freeze, bytes-first) | §3.1 · §4.3 · §5.B · §6.1 |
 
 Acceptance for the shipped milestones lives in the substrate tests
 (`test/*_substrate_test.go`), which state each assertion's property inline.
@@ -28,7 +29,6 @@ Acceptance for the shipped milestones lives in the substrate tests
 
 | # | Plan | Capability delivered | Anchors |
 | --- | --- | --- | --- |
-| **M5** | [`M5-templates.md`](./M5-templates.md) | Uniform object model on Template lineage: first-class Template rows (opaque ID + `parent` lineage, **existence-as-state**, **derived** refcount) + FK-enforced reference-reclaim atomicity + safe delete/GC + Promote (multi-lowerdir) | §5.B · §4.3 |
 | **M6** | *(planned)* | Volume: mount table, exclusive lease (= refcount mount row), direct-write regime | §5.C |
 | **M7** | *(planned)* | Network egress data plane + layered deny-set + credential injection (**security-critical**) | §5.D · §2.4 |
 | **M8** | *(planned)* | Credential store seam | §5.D |
@@ -45,10 +45,10 @@ connections idle — no process activity, no pty I/O"), which only exists once t
 transport surface is real (PTY, `Connect`, multi-connection fan-out) — so the
 reaper landed on real signals and folded in the periodic reconcile from M2.
 
-**Templates (M5) come before Volume** because Templates face the hardest
-object-model case directly: `create-from-Template` is an *unprotected reference*
-today (Template is a bare directory — no row / refcount / lineage), so M5 pours
-the **uniform object model + reference-reclaim atomicity** foundation (§4.3) that
-Volume (M6) then reuses — its exclusive lease *is* a refcount mount row (§5.C).
+**Templates (M5) came before Volume** because Templates faced the hardest
+object-model case directly: `create-from-Template` was an *unprotected reference*
+(Template was a bare directory — no row / refcount / lineage), so M5 poured the
+**uniform object model + reference-reclaim atomicity** foundation (§4.3) that
+Volume (M6) now reuses — its exclusive lease *is* a refcount mount row (§5.C).
 The security-critical egress work (M7) lands only after the lifecycle + storage +
 transport foundation is solid.
