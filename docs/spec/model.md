@@ -103,7 +103,7 @@ pause/resume 与 multi-node provider(§5.A)同时成立的前提。
 
 > **"disk 上限"是两条正交的轴,物化落点不同。** **disk I/O**(带宽 / IOPS 速率节流)由 §5.A 落
 > cgroup(`io` controller),和 CPU/RAM 同族;**disk 容量**(at-rest 最多占多少字节)cgroup 管不了
-> ——它是文件系统层的配额,由 §5.B(Overlay upper+work)/ §5.C(每个 Volume)的 FS provider 落。
+> ——它是文件系统层的配额,由 §5.B(Overlay upper+work)/ §5.C(每个 Volume)经二者共享的存储 substrate 原语落。
 > 两轴都是 Binding、都在 placement 时物化,只是速率归 cgroup、容量归 FS 配额。容量轴是 §2.3 爆炸
 > 半径对磁盘维度的 enforce 点。
 

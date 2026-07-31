@@ -34,7 +34,7 @@ POST   /v1/templates                 {from_sandbox_id}   (Promote: 静止后固�
 DELETE /v1/templates/{id}            (被沙箱/子层引用时 → 409 template in use;引用-回收原子性 §4.3)
 
 # Volume(与沙箱生命周期解耦)
-POST   /v1/volumes                   {size?, backend?}                              → {volume_id}
+POST   /v1/volumes                   {size?, backend?, access_mode?}                → {volume_id}
 GET    /v1/volumes                                                                 (list)
 GET    /v1/volumes/{id}                                                            (inspect)
 DELETE /v1/volumes/{id}

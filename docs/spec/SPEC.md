@@ -41,18 +41,21 @@ agent),共享同一 FS 与网络。
 >
 > **本系统术语**:**engine** = 本 spec 描述的沙箱抽象本身;**orchestrator** = 承载 engine 的那个
 > 单二进制;**控制面** = engine 内持有权威记录的那部分;**store** = 控制面记录(Binding、各对象
-> 的 lifecycle-state/refcount)的持久后端,经接口抽象、可换实现;**runtime provider** /
-> **FS provider** = 两类可插拔实现 seam,分别物化"用什么跑隔离进程"(§5.A)与"Overlay/Template
-> 落在哪个存储"(§5.B);**driver** = 某个具体 agent 的 CLI 二进制(claude-code / opencode / pi
+> 的 lifecycle-state/refcount)的持久后端,经接口抽象、可换实现;**可插拔实现 seam** 有三类,分别物化
+> "用什么跑隔离进程"(**runtime provider**,§5.A)、"沙箱 rootfs 由哪些层合成、落在哪"(**rootfs
+> provider**,§5.B)、"独立 Volume 落在哪个后端"(**volume backend**,§5.C);后两者**是两个不同形状、
+> 各自注册的接口,不是同一个 seam**——§5.B 物化分层合成(multi-lowerdir + upper/work + Promote),§5.C
+> 物化自足的独立存储单元(直接 bind、无合成),只**共享底层存储 substrate 原语**(btrfs subvolume /
+> qgroup / reflink);**driver** = 某个具体 agent 的 CLI 二进制(claude-code / opencode / pi
 > 等);**Overlay 工件** = 本沙箱相对 Template 的可写增量层(§3.1)。
 >
 > **五子系统 canonical 短名**(§5,代码包名 / 日志 / 评审一律用这些,不用章节号指代):
 > **Runtime**(§5.A,执行基底)· **Rootfs**(§5.B,rootfs/Overlay)· **Volume**(§5.C)·
 > **Network**(§5.D)· **Transport**(§5.E)。三处 `fs`/`FS`/`Rootfs` 刻意区分,勿混:
 > **Rootfs** = 子系统 5.B;**`fs`** = §5.E Transport 的一个 wire 服务(`read/write/list/stat/mkdir/remove/move`);
-> **FS provider** = §5.B/§5.C 共用的存储物化 seam("Overlay/Volume 落在哪个后端"),跨两个子系统、
-> 不专属 Rootfs,故不改名。同理 **Runtime**(子系统 5.A)vs **Sandbox**(§3.2 顶层持久单元)分指
-> "用什么跑" vs "哪一个沙箱"。
+> **rootfs provider**(§5.B)与 **volume backend**(§5.C)= 两个**不同**的存储物化 seam,各属其子系统、
+> 各自形状、各自注册,只共享底层存储 substrate 原语(btrfs subvolume/qgroup/reflink),不是同一个接口。
+> 同理 **Runtime**(子系统 5.A)vs **Sandbox**(§3.2 顶层持久单元)分指 "用什么跑" vs "哪一个沙箱"。
 
 **引擎词汇边界(engine vocabulary boundary)。** 第一性原则(见 engine 根 CLAUDE.md)要求产品语义不进
 引擎;命名阶段就拦住,比实现期再移除更省。下表限定**引擎内实体命名**(类型 / 包 / 字段 / API 端点),

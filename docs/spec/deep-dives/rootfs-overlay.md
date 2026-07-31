@@ -164,31 +164,40 @@ reflink 来补分层,那其实又滑回上面的 overlayfs 底层存储附带能
 让**同盘所有沙箱**的 upper 写失败——击穿 §2.3「放大只发生在本沙箱数据面内」。容量上限因此必须由
 FS provider 显式施加(§5.B),这与 D0 载体正交:载体给"普通目录树",配额给"这棵树最多多大"。
 
-### D6.2 三种物化手段(single-node)
+### D6.2 物化手段(single-node):btrfs subvolume + qgroup 为首选
 
 | 手段 | 隔离强度 | 代价 | 适配 |
 | --- | --- | --- | --- |
-| **project quota**(xfs/ext4:给 upper+work 子树打一个 project id + 硬限) | 中,可软/硬双阈 | 最轻,upper 是普通目录树天然支持,无额外挂载 | **single-node 首选** |
+| **btrfs subvolume + qgroup limit**(给 upper+work 所在 subvolume 打一个 qgroup 硬限) | 中,硬 `ENOSPC` 到帽 | 最轻:qgroup 在本 substrate 已 fs-wide 启用,两条 `btrfs` 子命令,无额外挂载;subvolume 同时兑现廉价原子快照 | **single-node 首选** |
 | **loop 设备**(每沙箱一个定长 image 文件,内建 FS 后挂载,upper/work 落其中) | 强,物理定长隔离 | per-sandbox loop dev + mount 生命周期管理,资源更重 | 需要强物理隔离时 |
 | **独立 FS / thin LV**(每沙箱一个 thin volume 或独立分区) | 最强 | 最重,依赖 LVM/卷管理 | 特殊高隔离场景 |
 
-三者是**同一个 FS provider seam 的不同实现分支**(D4 seam 2),抽象对上层一字不变:上层只见"这个
-Overlay 有个容量帽(Binding)",不见帽是 project id 还是 loop image。**首版做 project quota**——最贴合
-D0 的"upper 是普通目录树"这一既得事实,零额外挂载、软硬双阈天然支持,够用。
+> **首选 = btrfs subvolume + qgroup(实测)。** substrate(ADR-0002)是 **btrfs**,它**无 project quota**,
+> 故 project-quota 类手段(xfs/ext4)在本盘不适用。实测:btrfs `qgroup limit` 打到 subvolume 后写满触发
+> 精确到帽的硬 `ENOSPC`,overlayfs upper/work 落在 btrfs subvol 上正常(含 copy-up)。选它还有一个结构收益
+> ——把存储单元定为 subvolume,同时给 Volume(§5.C)兑现廉价原子快照(volume.md D6/D7)。caveat:
+> `btrfs-progs` 在 `sbx` 默认未装,须显式加为依赖。
 
-### D6.3 关键约束:work 必须与 upper 同配额
+三者是**同一个存储 substrate 原语的不同实现分支**,抽象对上层一字不变:上层只见"这个 Overlay 有个容量帽
+(Binding)",不见帽是 qgroup 还是 loop image。
+
+### D6.3 关键约束:work 必须与 upper 同配额(subvolume 天然满足)
 
 overlayfs 的 copy-up(改 lower 文件时把它整份拷到可写层)**先落 workdir、再 rename 进 upper**。
 若只给 upper 打配额、漏掉 work,copy-up 期间的写就是一条**绕过帽**的路径。D5 的实测约束"work 与
-upper 必须同一个支持 overlayfs 的 FS"在这里进一步收紧为:**work 与 upper 必须记进同一个 project id
-/ 同一个 loop image / 同一个 thin volume**——容量核算把两者当一体。
+upper 必须同一个支持 overlayfs 的 FS"在这里进一步收紧为:**work 与 upper 必须记进同一个 qgroup /
+同一个 loop image / 同一个 thin volume**——容量核算把两者当一体。**btrfs subvolume 天然满足**:upper 与
+work 同处一个 subvolume → 一个 qgroup 覆盖两者,无绕过路径(实测 copy-up 流量全计入)。
 
-### D6.4 归属与不产生子系统互调
+### D6.4 归属:一个跨 §5.B/§5.C 共享的 substrate 原语,不产生子系统互调
 
-配额施加**全程在 §5.B FS 子系统内部完成**(打 project id、设 loop image 尺寸都是 FS 子系统的
-mount/物化动作),不调用别的子系统;帽的**取值**(Binding)由 §4 mediator 在 create/resume 编排时
-连同 rootfs 来源一起下发——这本就是 mediator 的职责,不违反"子系统间不互调"(§4 开头)。multi-node
-形态下,PV-backed overlay 的容量帽 = PV 的 size request,仍是 FS provider 的活,抽象不变(§3.1.1)。
+容量帽的物化机制(create-subvolume + set-qgroup-limit + delete-subvolume)对 **§5.B 的 Overlay upper+work
+子树**与 **§5.C 的 per-volume 单元**是**同一套**——它是一个**共享存储 substrate 原语**,跨两个子系统复用
+(作 Volume 的共享内部代码落地、Volume 首个消费者;§5.B 复用它给 upper 打帽是随后一个小 hardening,volume.md
+D7)。施加动作全程在存储物化侧完成,不调用别的子系统;帽的
+**取值**(Binding)由 §4 mediator 在 create/resume 编排时连同 rootfs 来源 / 挂载表一起下发——这本就是
+mediator 的职责,不违反"子系统间不互调"(§4 开头)。multi-node 形态下,PV-backed 单元的容量帽 = PV 的
+size request,仍是那一侧后端的活,抽象不变(§3.1.1)。
 
 ### D6.5 边界:帽之外还有两层行为
 

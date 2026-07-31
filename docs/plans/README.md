@@ -29,9 +29,13 @@ Acceptance for the shipped milestones lives in the substrate tests
 
 | # | Plan | Capability delivered | Anchors |
 | --- | --- | --- | --- |
-| **M6** | *(planned)* | Volume: mount table, exclusive lease (= refcount mount row), direct-write regime | §5.C |
+| **M6** | *(planned)* | Volume: independent subsystem + own `volume.Backend` seam (local = btrfs subvolume; remote-FUSE deferred), mount table, exclusive lease (= refcount mount row), access modes, direct-write regime, btrfs snapshot/clone. Builds the subvolume+qgroup capacity primitive as shared internal code — Volume is its first consumer. | §5.C · volume D1–D8 |
 | **M7** | *(planned)* | Network egress data plane + layered deny-set + credential injection (**security-critical**) | §5.D · §2.4 |
 | **M8** | *(planned)* | Credential store seam | §5.D |
+
+A later small hardening (folded into M6's review or a follow-on) has **§5.B adopt
+the same subvolume+qgroup helper** to cap the Overlay upper+work — shared code,
+gated once it has a live consumer, not as a standalone rung (rootfs-overlay D6).
 
 The §6 API / CLI contract grows alongside from M1 — it is not a separate
 milestone.
@@ -50,5 +54,11 @@ object-model case directly: `create-from-Template` was an *unprotected reference
 (Template was a bare directory — no row / refcount / lineage), so M5 poured the
 **uniform object model + reference-reclaim atomicity** foundation (§4.3) that
 Volume (M6) now reuses — its exclusive lease *is* a refcount mount row (§5.C).
-The security-critical egress work (M7) lands only after the lifecycle + storage +
-transport foundation is solid.
+
+**Volume (M6) models its storage unit as a btrfs subvolume**, which it needs
+anyway for cheap atomic snapshot/clone; the subvolume+qgroup capacity mechanism
+is built as shared internal code with Volume as first consumer, rather than as a
+standalone rung — a cap with no consumer isn't a gateable capability, and neither
+subsystem is capped today (rootfs-overlay D6, volume D7). The security-critical
+egress work (M7) lands only after the lifecycle + storage + transport foundation
+is solid.

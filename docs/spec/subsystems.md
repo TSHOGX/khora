@@ -19,8 +19,10 @@
 
 > Rootfs 与 Volume 分两个子系统,因为它们几乎每根轴都不同:**Overlay 工件**的生命周期**随沙箱**、
 > 引用某个 Template、就是 pause/resume 的那份冻结层;Volume 生命周期**独立**、先于/晚于沙箱
-> 存活、自带管理 API 与后端。二者**都** ID 寻址、都经 FS provider 物化、只共用宿主 CoW/reflink
-> **底层存储**,但模型不共用:Overlay 引用 Template 且随沙箱回收,Volume 谁都不引用、独立回收。
+> 存活、自带管理 API 与后端。二者**都** ID 寻址,但**各有自己的物化 seam**(§5.B `rootfs.Provider`
+> 物化分层合成,§5.C `volume.Backend` 物化自足存储单元),**不共用一个 FS provider**——只共享底层存储
+> substrate 原语(btrfs subvolume / qgroup / reflink);模型也不共用:Overlay 引用 Template 且随沙箱
+> 回收,Volume 谁都不引用、独立回收。
 
 ### 5.A Runtime(执行基底)
 
@@ -36,7 +38,7 @@
 - **资源上限物化(只管速率轴)**:沙箱的 CPU/RAM/**disk I/O** 上限是 Binding(§3.4),由本子系统在
   每次 placement 时物化——single-node provider 落成 cgroup(CPU/RAM 限额 + `io` controller 的带宽/
   IOPS 节流);别的 provider 落成其调度层的等价资源约束。**disk 容量上限不在此**——它是 FS 层配额,
-  归 §5.B(Overlay upper+work)/ §5.C(每个 Volume)的 FS provider(§3.4 两轴切分)。
+  归 §5.B(Overlay upper+work)/ §5.C(每个 Volume),经二者共享的存储 substrate 原语物化(§3.4 两轴切分)。
 - **启动**:从 Template 冷启(秒级),可叠加现成 restore / 启动优化。容器 entrypoint 是
   `sandboxd`(init 模式当 PID 1,§5.E.1)——本子系统只负责"把它作为 PID 1 拉起",guest 内的
   init/reaper/re-exec 拓扑归 §5.E.1,不在此展开。
@@ -156,14 +158,18 @@
 - **目标**:把"额外要独立存活的数据"做成一等公民,生命周期与任何沙箱解耦。
 - **定义**:ID 寻址的持久存储单元,先于沙箱建、晚于沙箱亡、未挂载也在;可挂到多个沙箱的
   不同路径,**不进沙箱持久态 / 不进 Promote 捕获**,各自后端。
-- **共享/独占策略**:exclusive(挂载租约强制)/ shared-ro / shared-rw(只保证同沙箱内多
-  连接(process)的 POSIX 语义;**跨沙箱 rw coherence 引擎不定义(undefined)**——gofer/sentry
-  各自缓存让跨隔离边界的共享可变一致性本质不可靠,引擎不承诺、用户文档诚实标出)。
-- **单机物化 = gofer 代理宿主目录,与 rootfs 同载体、无 FUSE**:Volume 的单机后端是宿主上一个
-  目录(可自带 per-volume 配额),写进 runsc OCI mount spec、由 gofer 在 `--file-access=shared`
-  下代理进 guest——与 §5.B 的 merged rootfs 同一条路径。**FUSE 只属远端后端**(multi-node),封在
-  那个 FS provider 内、不进核心模型(为何单机不需要 FUSE 见
-  [`deep-dives/volume.md`](./deep-dives/volume.md) D1)。
+- **独立子系统、独立 seam `volume.Backend`**:Volume **不与 §5.B 共用 FS provider**——它有自己的物化
+  seam,只吐**一样东西:一个宿主挂载点**(runsc 写进 OCI mount spec、gofer 代理进 guest,与 merged
+  rootfs 同构)。与 §5.B 只共享底层存储 substrate 原语(btrfs subvolume/qgroup/reflink)。
+- **共享/独占策略**:`AccessMode ∈ {Exclusive, SharedReadOnly, SharedReadWrite}`(独占挂载唯一 /
+  只读扇出 / 共享读写;后者只保证同沙箱内多连接(process)的 POSIX 语义,**跨沙箱 rw coherence 引擎不
+  定义(undefined)**——gofer/sentry 各自缓存让跨隔离边界的共享可变一致性本质不可靠,引擎不承诺、
+  用户文档诚实标出)。**不用 `owner` 命名**(§1.1 词汇边界)。
+- **backend 两条臂,gofer 侧零差异**:**local(默认)**= 宿主上一个 **btrfs subvolume**(自带 qgroup 帽 +
+  廉价原子快照),gofer 代理普通目录、POSIX 由宿主内核白拿;**remote**(S3 / NFS / …)= backend 维护的
+  **宿主侧 FUSE 挂载点**,gofer 同样代理进 guest。**FUSE 只在宿主侧、绝不在 guest 内**(gVisor 内 FUSE
+  支持有限),且封在该 remote backend 内、不进核心模型(两条臂均已在 substrate 验证;为何不"全走 FUSE"、
+  FUSE 定位见 [`deep-dives/volume.md`](./deep-dives/volume.md) D1)。
 - **未挂载也能操作**:create/delete/list/inspect/snapshot/clone + 直接 import/export
   内容。对外**一律 Volume ID 寻址,不暴露宿主路径**。
 - **写入 regime 唯一(横切不变量,防双写撕裂)**:Volume 有挂载与直连 API 两条写入路径,引擎守一条
@@ -171,21 +177,25 @@
   (import / restore-into)一律拒绝**;无 live-rw 挂载时直连写才放行。门开在"**活的**写入方",不是
   "在挂载表里":**paused 沙箱不算 live writer**(容器已停、无活 gofer),此时直连写安全,且 resume
   后自然见到新内容。这是控制面读 store 后对直连 API 的准入裁决,
-  不引入反向代理(证伪见 [`deep-dives/volume.md`](./deep-dives/volume.md) D3)。
-- **快照默认 crash-consistent,与 Overlay 不对称**:Overlay 的 Promote 能强一致,因它**单 owner**、
-  可 pause 到 at-rest 读(§5.B);Volume 打破此前提(shared-rw 多 owner、挂载中不想停)。故 Volume
-  快照 = 后端(reflink/CoW)对当前盘上字节的原子快照、**不静默写入方**,一致性等价"那一刻拔电源"
-  ——正是 §4.2 已接受的"崩溃 = 非自愿 pause"底线。要 app-consistent:**独占卷**由调用方先 pause 其
-  owner(复用 §4.2 静止点)再快照,是现有原语的**组合**、引擎不加机制;**shared-rw 不提供**
-  app-consistent(协调 N 个沙箱是产品语义,§1.3 否决)。推导见
-  [`deep-dives/volume.md`](./deep-dives/volume.md) D2。
+  不引入反向代理(证伪见 [`deep-dives/volume.md`](./deep-dives/volume.md) D5)。
+- **快照 / 克隆 = per-backend capability,默认 crash-consistent,与 Overlay 不对称**:local 后端用
+  `btrfs subvolume snapshot`(整树、原子、瞬时)兑现;是否支持由 backend 的 capability 查询决定(纯目录 /
+  某些 remote 后端可不支持,调用即 400)。不对称的根源:Overlay 的 Promote 能强一致,因它**单一写入方**、
+  可 pause 到 at-rest 读(§5.B);Volume 打破此前提(shared-rw 多写入方、挂载中不想停)。故 Volume 快照
+  = 后端对当前盘上字节的原子快照、**不静默写入方**,一致性等价"那一刻拔电源"——正是 §4.2 已接受的
+  "崩溃 = 非自愿 pause"底线。要 app-consistent:**独占卷**由调用方先 pause 其持有沙箱(复用 §4.2 静止点)
+  再快照,是现有原语的**组合**、引擎不加机制;**shared-rw 不提供** app-consistent(协调 N 个沙箱是产品
+  语义,§1.3 否决)。**不移植 s0fs 式用户态 segment 引擎**(那是"POSIX over 对象存储"的 remote 后端义务)。
+  推导见 [`deep-dives/volume.md`](./deep-dives/volume.md) D6。
 - **挂载关系是 Binding(§3.4)**:"挂了哪些、挂到哪、什么策略"记在控制面挂载表,resume 时
   按当前挂载表**重新挂**回去,而非从冻结字节恢复——Volume 永远是那一个真身,不分叉副本。
-- **独占租约 = §4.3 的挂载行,不是带心跳的独立机制**:exclusive 卷的"挂载租约"就是 §4.3 那个一等
-  持久对象「挂载行」(带生命周期态 + refcount,单机权威 store 里的一行);建 exclusive 挂载行前控制面
-  CAS 校验无冲突挂载行,有则拒。**崩溃保持租约是正确行为**:沙箱崩溃 = dead-recoverable(§4.3),它会
-  resume 回同一卷,崩溃即释放会让 resume 撞车——与 §4.2「崩溃走 resume 恢复」一致。租约**只在挂载行被
-  拆时释放**:沙箱 destroy(含 reaper 对 paused 超 TTL 的 evict)→ 挂载行拆除 → 独占解除,**reaper 的
+- **独占租约 = §4.3 那条 Exclusive 挂载行的存在本身,不是带心跳的独立机制**:exclusive 卷的"租约"就是
+  §4.3 那个一等持久对象「挂载行」的存在(带 refcount,单机权威 store 里的一行)——**不引入 `Lease` 类型、
+  不加 `owner` 字段**,租约是由挂载行派生的状态(如 Template refcount 是派生的)。建 exclusive 挂载行前
+  控制面校验无冲突挂载行,有则拒(store 侧靠一条 `UNIQUE(volume) WHERE access='exclusive'` 偏索引强制
+  唯一性——Volume 里程碑相对 M5 唯一的新不变量)。**崩溃保持租约是正确行为**:沙箱崩溃 = dead-recoverable(§4.3),
+  它会 resume 回同一卷,崩溃即释放会让 resume 撞车——与 §4.2「崩溃走 resume 恢复」一致。租约**只在挂载
+  行被拆时释放**:沙箱 destroy(含 reaper 对 paused 超 TTL 的 evict)→ 挂载行拆除 → 独占解除,**reaper 的
   TTL 就是"无人释放"的兜底**,不需心跳。心跳式回收是未来 multi-node provider 的义务(node 死亡由其调度
   层接),不进核心(证伪见 [`deep-dives/volume.md`](./deep-dives/volume.md) D4)。
 - **挂载拓扑变更发生在 resume 边界,不是热挂**:runsc 从 OCI spec 在**启动时**取挂载,运行中
@@ -194,10 +204,11 @@
 - **挂载拓扑规则**:挂载点宿主目录归 Overlay 工件(沙箱 rootfs);**Volume 之间不嵌套挂载**
   (不把一个 Volume 挂进另一个 Volume 的子树),否则 Promote 捕获里挂载点占位的归属会含糊。
 - **容量配额是 per-volume 属性,不是 per-sandbox(disk 容量轴,§3.4)**:一个 Volume 的容量上限
-  记在它自己的对象记录上,由 FS provider 在其后端物化;它**不能归给某个沙箱**——shared-rw Volume
+  记在它自己的对象记录上,由 §5.C backend 在其后端物化;它**不能归给某个沙箱**——shared-rw Volume
   被多个沙箱共写,占用无法拆到单沙箱头上。这与 §5.B 的 Overlay upper 帽(per-sandbox)是两个独立
-  的容量帽,各自 enforce。物化手段与 §5.B 同族(project quota / 独立 FS),见
-  [`deep-dives/rootfs-overlay.md`](./deep-dives/rootfs-overlay.md) D6。
+  的容量帽,各自 enforce,但**共享同一个底层 substrate 原语**(btrfs subvolume + qgroup limit)——该原语
+  跨 §5.B/§5.C 复用,见 [`deep-dives/rootfs-overlay.md`](./deep-dives/rootfs-overlay.md) D6
+  与 [`deep-dives/volume.md`](./deep-dives/volume.md) D7。
 - **不含**:沙箱自身的 rootfs / Overlay 工件(→ B)。
 
 ### 5.D Network(可达性策略)
