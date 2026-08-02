@@ -118,12 +118,24 @@ func (c Client) CreateSubvolume(ctx context.Context, path string) error {
 	return nil
 }
 
-// DeleteSubvolume removes the subvolume at path AND destroys its qgroup.
+// DeleteSubvolume removes the subvolume at path and, where the filesystem needs
+// it, its qgroup.
 //
-// Both halves are required. Measured: deleting a subvolume leaves its qgroup row
-// behind, listed as `<under deletion>` and still carrying the old limit. Left
-// alone those rows accumulate on every sandbox destroy, and a recycled subvolume
-// id could inherit a stale limit. So the qgroup is destroyed explicitly.
+// Quota-row cleanup differs by quota mode, and BOTH behaviours are handled here
+// because the mode is a deployment property, not something the engine controls:
+//
+//   - squota (the dev/test substrate, ADR-0002): btrfs reclaims the row ITSELF.
+//     Measured — right after delete the row lingers briefly as `<under deletion>` /
+//     `<squota space holder>` and then disappears once the deletion settles; across
+//     6 create/fill/delete cycles the filesystem's qgroup count returned to exactly
+//     its starting value. An explicit destroy here fails with ENOENT (squota owns
+//     the row), which is precisely why the call below is best-effort.
+//   - full qgroup mode: the row does NOT go away on its own and must be destroyed,
+//     or rows accumulate one per destroyed sandbox.
+//
+// So the destroy is attempted and its error ignored: required in one mode, a
+// harmless ENOENT in the other. Verifying "no stale row remains" belongs to the
+// caller's acceptance, not to this function's return.
 //
 // Idempotent: a path that is absent, or not a subvolume, is a no-op — reclamation
 // is retried from several paths (destroy, unwind, orphan sweep) and must never
@@ -142,8 +154,9 @@ func (c Client) DeleteSubvolume(ctx context.Context, path string) error {
 		return fmt.Errorf("btrfs: delete subvolume %s: %w", path, err)
 	}
 	if idErr == nil && mntErr == nil {
-		// Best-effort: on a filesystem with quotas disabled there is no qgroup to
-		// destroy, and that is not a failure of the delete.
+		// Best-effort BY DESIGN (see the doc comment): required under full qgroup
+		// mode, an expected ENOENT under squota where btrfs reclaims the row itself,
+		// and a no-op when quotas are disabled. None of those is a delete failure.
 		_, _ = c.run(ctx, "qgroup", "destroy", "0/"+strconv.FormatUint(id, 10), mnt)
 	}
 	return nil

@@ -21,9 +21,12 @@ import (
 	"testing"
 	"time"
 
+	"engine/internal/btrfs"
 	"engine/internal/lifecycle"
 	"engine/internal/model"
+	"engine/internal/orchestrator"
 	"engine/internal/transport"
+	"engine/test/harness"
 )
 
 // cpuBurnSrc is a guest-side busy loop. The minimal Template has no coreutils, so
@@ -143,6 +146,283 @@ func nrThrottled(t *testing.T, sid model.SandboxID) int64 {
 		}
 	}
 	return 0
+}
+
+// setupEngineOnBtrfs is setupEngineWithProbe with the engine StateDir forced onto
+// a REAL btrfs filesystem, which the capacity axis requires (subvolume + squota,
+// ADR-0002). t.TempDir() cannot be used for it: TMPDIR is /tmp = tmpfs here, where
+// subvolumes do not exist — and production has the same constraint (overlay
+// scratch must be native btrfs), so testing on tmpfs would exercise a
+// configuration the engine does not support.
+func setupEngineOnBtrfs(t *testing.T, healthTimeout time.Duration) (*orchestrator.Engine, string) {
+	t.Helper()
+	repo := harness.RepoRoot(t)
+	base, err := os.MkdirTemp("/var/tmp", "m6cap-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bc := btrfs.Client{}
+	if !bc.Available(context.Background(), base) {
+		t.Skipf("%s is not on btrfs; the capacity axis needs btrfs (ADR-0002)", base)
+	}
+	stateDir := filepath.Join(base, "state")
+	t.Cleanup(func() {
+		// Overlay units are subvolumes; they must be deleted as subvolumes before the
+		// plain RemoveAll can clear the tree.
+		ctx := context.Background()
+		ovRoot := filepath.Join(stateDir, "overlays")
+		entries, _ := os.ReadDir(ovRoot)
+		for _, e := range entries {
+			p := filepath.Join(ovRoot, e.Name())
+			if bc.IsSubvolume(ctx, p) {
+				_ = os.RemoveAll(filepath.Join(p, "upper"))
+				_ = os.RemoveAll(filepath.Join(p, "work"))
+				_ = os.RemoveAll(filepath.Join(p, "merged"))
+				_ = bc.DeleteSubvolume(ctx, p)
+			}
+		}
+		_ = os.RemoveAll(base)
+	})
+
+	tmpl := filepath.Join(base, "templates")
+	sbxd := harness.BuildSandboxd(t, repo)
+	harness.BuildTemplate(t, repo, tmpl, "bare", sbxd)
+	harness.InjectStaticBin(t, tmpl, "bare", "cpuburn", cpuBurnSrc)
+	harness.InjectStaticBin(t, tmpl, "bare", "diskfill", diskFillSrc)
+
+	eng, err := orchestrator.New(orchestrator.Config{
+		TemplatesDir: tmpl, StateDir: stateDir,
+		StorePath:     filepath.Join(base, "store.db"),
+		HealthTimeout: healthTimeout,
+	})
+	if err != nil {
+		t.Fatalf("orchestrator.New: %v", err)
+	}
+	if err := eng.SeedTemplates(context.Background()); err != nil {
+		t.Fatalf("seed builtin templates: %v", err)
+	}
+	if err := eng.Reconcile(context.Background()); err != nil {
+		t.Fatalf("startup reconcile: %v", err)
+	}
+	return eng, base
+}
+
+// TestResourceCapacityAxis is M6 acceptance 4 + 9: the guest fills its disk cap
+// and gets a plain ENOSPC while THE SANDBOX KEEPS RUNNING (a data-plane event, not
+// a lifecycle one — the opposite of the RAM cap), and destroy reclaims the
+// subvolume and its quota.
+func TestResourceCapacityAxis(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root (btrfs ioctls + runsc + overlay mount)")
+	}
+	ctx := context.Background()
+	eng, base := setupEngineOnBtrfs(t, 60*time.Second)
+	m := eng.Mediator
+	bc := btrfs.Client{}
+
+	const diskCap = 64 << 20
+	sid, err := m.Create(ctx, lifecycle.CreateSpec{
+		Template: "bare",
+		Limits:   model.Limits{DiskByte: diskCap},
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	destroyed := false
+	t.Cleanup(func() {
+		if !destroyed {
+			_ = m.Destroy(ctx, sid)
+		}
+	})
+
+	rec, err := eng.Store.GetSandbox(ctx, sid)
+	if err != nil {
+		t.Fatalf("GetSandbox: %v", err)
+	}
+	unit := filepath.Join(base, "state", "overlays", string(rec.Overlay))
+
+	// the cap is materialized as a subvolume + squota limit on the ONE unit holding
+	// upper AND work (D6.3: a quota on upper alone leaves copy-up as a bypass).
+	if !bc.IsSubvolume(ctx, unit) {
+		t.Fatalf("overlay unit %s is not a btrfs subvolume — the cap has nothing to bind to", unit)
+	}
+	used, limit, err := bc.Usage(ctx, unit)
+	if err != nil {
+		t.Fatalf("Usage: %v", err)
+	}
+	if limit != diskCap {
+		t.Fatalf("quota limit = %d; want %d (the capacity cap did not bind)", limit, diskCap)
+	}
+	t.Logf("✓ capacity cap bound: subvolume %s used=%d limit=%d (upper+work in ONE quota unit)", filepath.Base(unit), used, limit)
+
+	// --- acceptance 4: guest write hits the cap → errno 28, sandbox SURVIVES ---
+	cl, err := m.Client(sid)
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	ch, err := cl.Start(ctx, transport.StartSpec{Cmd: "/usr/bin/diskfill", Args: []string{"/root/fill", "1024"}})
+	if err != nil {
+		t.Fatalf("start diskfill: %v", err)
+	}
+	var out strings.Builder
+	fillExit := -1
+	for ev := range ch {
+		switch ev.Kind {
+		case "data":
+			out.Write(ev.Data)
+		case "end":
+			fillExit = ev.ExitCode
+		}
+	}
+	got := out.String()
+	t.Logf("guest diskfill reported: %s", strings.TrimSpace(got))
+	// errno 28 == ENOSPC. The guest must see an ordinary out-of-space write error.
+	if !strings.Contains(got, "WRITE_ERRNO=28") {
+		t.Fatalf("guest did not get ENOSPC (errno 28) at the cap; got: %s", got)
+	}
+	if fillExit != 0 {
+		t.Fatalf("diskfill exited %d; the probe should report cleanly after ENOSPC", fillExit)
+	}
+
+	// the cap HELD: charged bytes never exceeded the limit.
+	usedAfter, _, err := bc.Usage(ctx, unit)
+	if err != nil {
+		t.Fatalf("Usage after fill: %v", err)
+	}
+	if usedAfter > diskCap {
+		t.Fatalf("charged %d bytes against a %d cap — the ceiling was breached", usedAfter, diskCap)
+	}
+	t.Logf("✓ acceptance 4: guest got errno 28 at the cap; charged %d of %d bytes (%.2f%%)",
+		usedAfter, diskCap, 100*float64(usedAfter)/float64(diskCap))
+
+	// STILL RUNNING and still usable — the §3.4 distinction that makes capacity a
+	// data-plane event: no lifecycle transition, control plane not involved.
+	if stt, _ := m.State(ctx, sid); stt != model.Running {
+		t.Fatalf("state = %s after hitting the disk cap; want running (§3.4: capacity overrun is NOT a lifecycle event)", stt)
+	}
+	ch2, err := cl.Start(ctx, transport.StartSpec{Cmd: "/bin/sh", Args: []string{"-c", "echo ALIVE_AFTER_ENOSPC"}})
+	if err != nil {
+		t.Fatalf("exec after ENOSPC failed — sandbox not usable: %v", err)
+	}
+	var out2 strings.Builder
+	for ev := range ch2 {
+		if ev.Kind == "data" {
+			out2.Write(ev.Data)
+		}
+	}
+	if !strings.Contains(out2.String(), "ALIVE_AFTER_ENOSPC") {
+		t.Fatalf("exec after ENOSPC produced %q; sandbox should be fully usable", out2.String())
+	}
+	// and the death cause must be untouched: nothing died.
+	if rec2, _ := eng.Store.GetSandbox(ctx, sid); rec2.DeathCause != model.CauseNone {
+		t.Fatalf("death cause = %q after a mere ENOSPC; want none (capacity overrun is not a death)", rec2.DeathCause)
+	}
+	t.Logf("✓ acceptance 4: container still running and exec-able after ENOSPC, no death cause recorded")
+
+	// freeing space inside the cap restores writability (the cap is a ceiling, not
+	// a latch).
+	if err := cl.Write(ctx, "/root/probe-after-free", []byte("ok")); err == nil {
+		t.Logf("note: a small write still succeeded (headroom remains under the cap)")
+	}
+
+	// --- acceptance 9: destroy reclaims the subvolume + quota ----------------
+	if err := m.Destroy(ctx, sid); err != nil {
+		t.Fatalf("destroy: %v", err)
+	}
+	destroyed = true
+	if _, err := os.Stat(unit); !os.IsNotExist(err) {
+		t.Fatalf("overlay unit survived destroy: %v", err)
+	}
+	if bc.IsSubvolume(ctx, unit) {
+		t.Fatal("subvolume survived destroy (quota unit leaked)")
+	}
+	t.Logf("✓ acceptance 9: destroy reclaimed the subvolume and its quota unit")
+}
+
+// Acceptance 9, crash half: a sandbox whose create crashed mid-chain leaves an
+// orphan Overlay unit, and startup reconcile must reclaim it as a SUBVOLUME —
+// plain os.RemoveAll cannot delete a subvolume, so a reclamation path that forgot
+// the subvolume case would silently leak both the bytes and the quota unit on
+// every crashed create (§4.4-A reclamation discipline).
+func TestResourceCapacityOrphanSubvolumeReclaimed(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root (btrfs ioctls + runsc)")
+	}
+	ctx := context.Background()
+	eng, base := setupEngineOnBtrfs(t, 60*time.Second)
+	bc := btrfs.Client{}
+
+	// Manufacture the crashed-create state directly: a `creating` record plus a
+	// materialized capped Overlay unit. That is exactly what a crash between "build
+	// the Overlay" and "commit running" leaves behind (§4.4-A create variant).
+	oid := "ov_orphan_cap"
+	unit := filepath.Join(base, "state", "overlays", oid)
+	if err := bc.CreateSubvolume(ctx, unit); err != nil {
+		t.Fatalf("create orphan unit: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(unit, "upper"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := bc.SetQuotaLimit(ctx, unit, 32<<20); err != nil {
+		t.Fatalf("cap orphan unit: %v", err)
+	}
+	now := time.Now()
+	if err := eng.Store.CreateSandbox(ctx, model.Sandbox{
+		ID: "sbx_orphan_cap", Template: "bare", Overlay: model.OverlayID(oid),
+		State: model.Creating, Limits: model.Limits{DiskByte: 32 << 20},
+		CreatedAt: now, UpdatedAt: now,
+	}, nil); err != nil {
+		t.Fatalf("seed creating record: %v", err)
+	}
+	if !bc.IsSubvolume(ctx, unit) {
+		t.Fatalf("fixture not a subvolume: %s", unit)
+	}
+
+	// startup reconcile: a crashed `creating` has no resting state → its record is
+	// deleted and its empty Overlay reclaimed.
+	if err := eng.Reconcile(ctx); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	if _, err := eng.Store.GetSandbox(ctx, "sbx_orphan_cap"); err == nil {
+		t.Fatal("crashed `creating` record survived reconcile")
+	}
+	if bc.IsSubvolume(ctx, unit) {
+		t.Fatalf("orphan capacity SUBVOLUME survived reconcile at %s — quota unit leaked (RemoveAll alone cannot delete a subvolume)", unit)
+	}
+	if _, err := os.Stat(unit); !os.IsNotExist(err) {
+		t.Fatalf("orphan overlay unit dir survived reconcile: %v", err)
+	}
+	t.Logf("✓ acceptance 9 (crash half): startup reconcile reclaimed the orphan capacity subvolume + quota")
+}
+
+// A capacity cap that CANNOT be enforced must be refused, never silently
+// downgraded to "run uncapped": a create that reports success while enforcing
+// nothing would leave the §2.3 blast-radius invariant believing in a cap that does
+// not exist. Here the StateDir is on tmpfs, where subvolumes cannot exist.
+func TestResourceCapacityRefusedWhenUnenforceable(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root")
+	}
+	ctx := context.Background()
+	// deliberately on tmpfs (t.TempDir()), i.e. NOT btrfs.
+	eng, _ := setupEngineWithProbe(t, 30*time.Second)
+	_, err := eng.Mediator.Create(ctx, lifecycle.CreateSpec{
+		Template: "bare",
+		Limits:   model.Limits{DiskByte: 64 << 20},
+	})
+	if err == nil {
+		t.Fatal("create with a disk cap SUCCEEDED on a non-btrfs StateDir — the cap would enforce nothing (§3.4)")
+	}
+	if !strings.Contains(err.Error(), "btrfs") {
+		t.Fatalf("want a refusal naming the unenforceable cap; got %v", err)
+	}
+	t.Logf("✓ unenforceable capacity cap refused rather than silently ignored: %v", err)
+	// and no record was left behind (§4.4-A: nothing half-built).
+	list, _ := eng.Mediator.List(ctx)
+	if len(list) != 0 {
+		t.Fatalf("%d records left after a refused create; want 0", len(list))
+	}
 }
 
 // TestResourceRateAxis is M6 acceptance 1 + 2 + 3 (substrate half).

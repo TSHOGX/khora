@@ -178,10 +178,10 @@ func buildOCISpec(mergedPath, netnsPath, cgroupsPath string, limits ResourceLimi
 			// on the isolation axis and is the most direct expression of §1.1's
 			// "root-capable agent sandbox". PID 1 is sandboxd init; it stays root so
 			// it can hold CAP_NET_* for the netns transport port (§5.A).
-			User:     ociUser{UID: 0, GID: 0},
-			Args:     []string{"/sbin/sandboxd", "init"},
-			Env:      []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "HOME=/root"},
-			Cwd:      "/",
+			User: ociUser{UID: 0, GID: 0},
+			Args: []string{"/sbin/sandboxd", "init"},
+			Env:  []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "HOME=/root"},
+			Cwd:  "/",
 			Capabilities: ociCapabilities{
 				Bounding: caps, Effective: caps, Permitted: caps,
 			},

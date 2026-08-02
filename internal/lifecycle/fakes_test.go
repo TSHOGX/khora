@@ -292,11 +292,11 @@ func (c *fakeClient) Connect(context.Context, int) (<-chan transport.ProcessEven
 func (c *fakeClient) StreamInput(context.Context, int) (transport.InputWriter, error) {
 	return nil, nil
 }
-func (c *fakeClient) SendInput(context.Context, int, []byte, bool) error { return nil }
-func (c *fakeClient) SendSignal(context.Context, int, int) error         { return nil }
+func (c *fakeClient) SendInput(context.Context, int, []byte, bool) error   { return nil }
+func (c *fakeClient) SendSignal(context.Context, int, int) error           { return nil }
 func (c *fakeClient) Update(context.Context, int, transport.PtySize) error { return nil }
-func (c *fakeClient) CloseStdin(context.Context, int) error              { return nil }
-func (c *fakeClient) List(context.Context) ([]int, error)                { return nil, nil }
+func (c *fakeClient) CloseStdin(context.Context, int) error                { return nil }
+func (c *fakeClient) List(context.Context) ([]int, error)                  { return nil, nil }
 func (c *fakeClient) Read(context.Context, string, int64, int64) ([]byte, error) {
 	return nil, nil
 }
