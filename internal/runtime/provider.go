@@ -42,10 +42,16 @@ type RootfsSource struct {
 // guest users, §2.2 / §3.2.1.) Filled in when the egress data plane lands.
 type SteeringSpec struct{}
 
-// ResourceLimits is the rate-axis Binding the provider materializes at
-// placement time (§3.4 / §5.A): CPU / RAM / disk-IO → cgroup for local_runsc.
-// Disk CAPACITY is NOT here — that is an FS-layer quota owned by §5.B/§5.C
-// (§3.4 两轴切分). These are zero (unlimited) until resource limits are wired.
+// ResourceLimits is the Binding the provider materializes at placement time
+// (§3.4 / §5.A): CPU / disk-IO rate + RAM → cgroup for local_runsc. Disk
+// CAPACITY is NOT here — that is an FS-layer quota owned by §5.B/§5.C (§3.4).
+//
+// RAM is a SAFETY limit, not a resource limit (§3.4): exceeding it terminates
+// the sandbox (a lifecycle event) rather than failing one operation, because the
+// substrate offers no "guest process gets ENOMEM while the sandbox survives"
+// path. How the provider splits one MemoryByte into guest-visible RAM vs a host
+// ceiling is ITS OWN internal detail — the interface states only N (§5.A).
+// These are zero (unlimited) until resource limits are wired.
 type ResourceLimits struct {
 	CPUMillis  int64
 	MemoryByte int64

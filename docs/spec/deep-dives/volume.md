@@ -39,7 +39,7 @@ Volume 相对 §5.B 的 Overlay 只多几个属性,每个属性对应一条契�
 | **可被多沙箱并发挂** | 跨沙箱 rw coherence undefined(D4) | —(本质如此) |
 | **独立快照 / 克隆** | 默认 crash-consistent、per-backend capability(D6) | 二段式 checkpoint(D6)· 用户态 segment 引擎(D6) |
 | **独占** | 租约 = §4.3 挂载行(D3/D4) | 心跳双回收(D4) |
-| **容量帽** | btrfs subvolume + qgroup,跨 §5.B/§5.C 共享原语(D7) | project quota(D7,substrate 不支持) |
+| **容量帽** | btrfs subvolume + squota,跨 §5.B/§5.C 共享原语(D7) | project quota(D7,substrate 不支持) |
 
 ---
 
@@ -74,7 +74,7 @@ List/Stat…}`,好处是缓存 / 加密 / 配额 / 审计能在 FUSE 层统一�
   `volumefuse.Session` 是一个 **40 方法**的接口(Lookup/Rename/Flock/CopyFileRange/xattr/…),其 s3 后端
   对 Rename/锁/Fallocate/xattr 只能返回 `EOPNOTSUPP`,直接暴露了"自己实现 POSIX"的工程量与语义损失。
 - **统一缓存 / 加密 / 配额 / 审计是分布式诉求**:加密只在数据离开信任边界(进 S3 / 共享缓存)时才必要;
-  统一缓存是"对象存储无 POSIX 缓存"的补偿。单机可信节点上,配额有 btrfs qgroup(D7)、审计有 §4.1 事件流,
+  统一缓存是"对象存储无 POSIX 缓存"的补偿。单机可信节点上,配额有 btrfs squota(D7)、审计有 §4.1 事件流,
   都不必挤进 FUSE 层。
 - **结论**:一个完整的 FUSE `Session` 接口**只为"合成型 backend"(把非 FS 的后端合成成 FS)保留**;
   local backend(真实宿主 FS)根本不需要它。所以引擎的 seam 可以很窄(D2)——统一发生在 seam(都吐宿主
@@ -87,14 +87,14 @@ List/Stat…}`,好处是缓存 / 加密 / 配额 / 审计能在 FUSE 层统一�
 Volume 是独立子系统、有自己的 seam `volume.Backend`,**与 §5.B 的 `rootfs.Provider` 是两个不同形状、
 各自注册的接口**:§5.B 物化**分层合成**(沿 Template lineage 解析 multi-lowerdir 下层栈 + 可写 upper/work,
 经内核 overlayfs 合成 merged,并支持 Promote 冻结);§5.C 物化**一个自足的独立存储单元**(直接 bind、无
-合成、无下层栈、无 lineage)。二者只共享底层 substrate 原语(btrfs subvolume + qgroup + reflink/snapshot,
+合成、无下层栈、无 lineage)。二者只共享底层 substrate 原语(btrfs subvolume + 配额 + reflink/snapshot,
 见 D7),不共用一个物化接口。
 
 seam 沿用 §5.A `runtime.Provider` / §5.B `rootfs.Provider` 的既定约定:**ID 过 seam,宿主路径留 seam 内;
 策略+句柄,不泄漏宿主原语**。核心动作:
 
 - `Materialize(volumeID, accessMode) → Mounted` —— 备好一个可挂的宿主挂载点(local:确保 subvolume 存在
-  并可选打 qgroup 帽;remote:拉起 FUSE 挂点)。返回一个**不透明 `Mounted` 句柄**,只携带一个 backend 私有
+  并可选打配额帽;remote:拉起 FUSE 挂点)。返回一个**不透明 `Mounted` 句柄**,只携带一个 backend 私有
   的宿主路径(`SourcePath`,仅 `local_runsc` 消费,如同 `Merged.MergedPath`)。
 - `Unmount(m)` —— 拆宿主侧挂载(local:no-op 或 detach;remote:umount FUSE)。**卸载不删数据**。
 - `AdoptMounted(volumeID) → Mounted` —— 崩溃后重认一个仍挂着的挂载点(§4.4-A,`AdoptMerged` 的孪生)。
@@ -218,7 +218,7 @@ snapshot` 更是**整树、原子、瞬时**(实测新快照仅 16KiB exclusive 
 
 所以:**采纳语义模型**(快照=不可变时间点、fork=CoW 子卷、二者元数据级廉价)与**能力矩阵**(快照/fork 是
 per-backend capability),**丢弃 segment/manifest 实现**——让 btrfs 当"materializer"。若把 Volume 建模成一个
-**btrfs subvolume**,快照/克隆 = `btrfs subvolume snapshot`,与 D7 的容量帽(qgroup 打在 subvolume 上)
+**btrfs subvolume**,快照/克隆 = `btrfs subvolume snapshot`,与 D7 的容量帽(配额打在 subvolume 上)
 天然合一:同一个存储单元同时得到廉价快照与硬容量帽,这是"卷=subvolume"的强理由。
 
 ### D6.2 快照默认 crash-consistent,与 Overlay 不对称
@@ -239,24 +239,23 @@ Overlay 的 Promote 能强一致,因它**单一写入方**、可 pause 到 at-re
 
 ---
 
-## D7. 容量配额:btrfs subvolume + qgroup,跨 §5.B/§5.C 共享原语
+## D7. 容量配额:btrfs subvolume + squota,跨 §5.B/§5.C 共享原语
 
 §5.C 的 per-volume 容量帽与 §5.B 的 per-sandbox Overlay upper 帽是**同一个物化问题的两处应用**(§3.4 容量
-轴)。真实 substrate(ADR-0002:btrfs)上实测结论:
+轴)。机制、模式选择(squota 而非完整 qgroup)与全栈实测结论**在 rootfs-overlay D6.2 一处讲清**,本文不复制;
+要点只两条:
 
-- **机制**:`qgroup limit` 打到 subvolume,写满触发**精确到帽的硬 `ENOSPC`**(连 `mkdir` 都拒);qgroups 在
-  本盘已 fs-wide 启用,无需额外挂载。overlayfs upper/work 落在 btrfs subvol 上正常(含 copy-up),且因
-  upper+work 同处一个 subvolume → 一个 qgroup 天然覆盖两者(满足 rootfs-overlay D6.3「work 必须与 upper 同
-  配额」约束,无绕过路径)。
-- **loop 设备**是"需强物理隔离"的 fallback(本盘亦可跑);btrfs 无 project quota,故 project-quota 类手段
-  不适用本 substrate(详见 rootfs-overlay D6.2)。
+- **机制** = subvolume + `squota` limit,写满触发精确到帽的硬 `ENOSPC`,配额在本盘已 fs-wide 启用。
+  `btrfs-progs` 是显式依赖(`sbx` 上已装,v6.17.1)。**loop 设备**是"需强物理隔离"的 fallback。
+- **模式是 squota,不是完整 qgroup**,且本基底**改不了模式**(quota-ctl ioctl 即便 root 全 CAP 亦 EPERM)。
+  这对 Volume 的直接影响:**snapshot/clone 出来的卷,其 reflink 字节在 squota 下不向新卷计费**——快照廉价
+  这一性质因此在配额语义上也成立,但"一个卷占多少真实磁盘"要从节点级核算看,不能只看单卷配额(与 D6.2 里
+  Template layer 字节同源的问题)。
 
-**归属**:容量帽是一个**共享存储 substrate 原语**(§5.B overlay upper 与 §5.C per-volume 同用 create-subvolume
-+ set-qgroup-limit + delete-subvolume),跨两个子系统复用。它作 Volume 的**共享内部代码**落地(Volume 是首个
-消费者:它本就要把存储单元定为 subvolume 以兑现廉价快照);§5.B 复用同一 helper 给 overlay upper 打帽,是随后
-一个小 hardening,不作独立里程碑一级(帽无消费者则非可验收 capability)。它够轻(两条 `btrfs` 子命令、qgroup
-已启用)。**caveat**:`btrfs-progs` 在 `sbx` 默认未装,实现须显式加此依赖;且本引擎不是该盘 qgroup
-命名空间的唯一所有者(OrbStack 也用),嵌套 subvol/qgroup 实测共存无碍。
+**归属**:它是一个**共享存储 substrate 原语**,跨两个子系统复用——落成叶子包 `internal/btrfs`,**共享的是
+代码不是 seam**(不做 `QuotaProvider` 横切接口,理由见 rootfs-overlay D6.4)。**首个消费者是 §5.B 的
+Overlay upper**(资源治理里程碑),Volume 落地时**复用同一个包、不重造也不改其形状**。本引擎不是该盘配额
+命名空间的唯一所有者(OrbStack 也用),嵌套 subvol 实测共存无碍。
 
 ---
 

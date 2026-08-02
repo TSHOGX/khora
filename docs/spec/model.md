@@ -101,11 +101,23 @@ pause/resume 与 multi-node provider(§5.A)同时成立的前提。
   resume 稳定保持,每次 placement 时把它物化(§5.A/§5.B/§5.C)。连接(process)**不是 Binding**:engine
   不存连接记录,resume 后由 client 重新发起(§5.E)。
 
-> **"disk 上限"是两条正交的轴,物化落点不同。** **disk I/O**(带宽 / IOPS 速率节流)由 §5.A 落
-> cgroup(`io` controller),和 CPU/RAM 同族;**disk 容量**(at-rest 最多占多少字节)cgroup 管不了
-> ——它是文件系统层的配额,由 §5.B(Overlay upper+work)/ §5.C(每个 Volume)经二者共享的存储 substrate 原语落。
-> 两轴都是 Binding、都在 placement 时物化,只是速率归 cgroup、容量归 FS 配额。容量轴是 §2.3 爆炸
-> 半径对磁盘维度的 enforce 点。
+> **"资源上限"是三个维度,各用自己该用的机制物化,超限后果也就各自不同。** 三者都是 Binding、
+> 都在 placement 时物化:
+>
+> | 维度 | 机制 | 超限后果 | 定位 |
+> | --- | --- | --- | --- |
+> | **CPU / disk I/O**(速率) | §5.A 落 cgroup(`cpu` / `io` controller) | guest 变慢,无错误 | 资源上限:公平分配 |
+> | **disk 容量**(at-rest 字节) | 文件系统层配额,§5.B(Overlay upper+work)/ §5.C(每 Volume)经二者共享的存储 substrate 原语落 | `write()` 返 `ENOSPC`,**沙箱照常存活** | 资源上限:公平分配 |
+> | **RAM** | 宿主 memcg(+ `oom.group=1`) | **沙箱终止** | **安全限:约束爆炸半径** |
+>
+> **disk 容量与 disk I/O 是两条正交的轴**,别混:cgroup 管不了 at-rest 占多少字节,配额管不了读写
+> 速率。容量轴是 §2.3 爆炸半径对磁盘维度的 enforce 点。
+>
+> **RAM 上限不是资源上限,它是安全限。** 它约束爆炸半径,不提供公平分配。超限的后果是一条
+> **生命周期事件(沙箱终止)**,不是一次操作失败——因为 substrate 上不存在"guest 内进程拿到
+> `ENOMEM` 而沙箱存活"这条路:gVisor 无 guest 内 OOM killer,guest 内 `MemTotal` 只是开机读一次的
+> 装饰值,着力点只有宿主 memcg。故 RAM 超限是**控制面必须知道的状态转换**(§4.3 有其处置分类),
+> 而 CPU/disk 超限是数据面内的事件(guest 自己处理一个慢速或一个 errno),控制面不介入。
 
 > 注意 Overlay 工件**横跨两类**:它的**字节**是 Frozen(直接读回),但它**引用哪个 Template**
 > 是 Binding(控制面记录)。resume = 读回 Overlay 字节 + 按记录把它叠回当前 Template 之上,二者
@@ -151,7 +163,8 @@ creating ──▶ running ──pause / auto-pause / crash──▶ paused ─�
   终态,只是触发方是 reaper 而非用户。
 - **非自愿转换**(对账驱动):启动/周期对账发现一个 `running` 沙箱的隔离单元已死时,CAS 把它降到
   `paused`(§4.2 崩溃变体 / §4.4-A)——`running → paused` 的第三条触发,与用户 `pause`、reaper
-  `auto-pause` 并列,事件 Kind 为 `crash-paused`(见下条)。
+  `auto-pause` 并列,事件 Kind 为 `crash-paused`(见下条)。**死因随这次 CAS 同一提交落库**(§4.3):
+  它决定该沙箱之后走 resume 还是不走,而信号在提交后即不可恢复。
 - **转换对外发布为事件**:每次状态机转换(created / paused / auto-paused / crash-paused / resumed /
   destroyed …)发布到一条 **event stream**;webhook、metrics、计费等 subscriber 在**引擎之外**消费,
   **引擎不知道也不依赖谁在订阅**。这是 observability / 计费的接法——单向、additive(§1.3:add a
@@ -202,7 +215,7 @@ Overlay upper,保证 at-rest 字节一致,§5.B"只读 at-rest")。生命周期�
 状态:持久态全在后端的 Overlay 工件里,substrate 意外死掉(sentry 崩溃、node 掉电)⟺ RAM/CPU
 被释放 ⟺ 与一次 pause 的**盘上效果完全等价**。因此恢复一个崩溃的沙箱 = 一次 resume,不是特殊
 路径。这给 reaper 提了个要求——须把"substrate 已死但可恢复"与"健康且空闲"分开,崩溃的沙箱要走
-resume 而非 auto-pause 的静止(健康态四分与判据见 §4.3)。
+resume 而非 auto-pause 的静止(健康态分类与判据见 §4.3)。
 
 > **注意范围:这里的"崩溃"专指 substrate 死亡(sentry/容器整死)**——即 §4.3 探活的 L1 失败。
 > transport 模式 `sandboxd` 单独崩溃**不属于**这条路径:它由 PID1 原地重启、同 IP 恢复(§5.E.1),
@@ -223,14 +236,32 @@ resume 而非 auto-pause 的静止(健康态四分与判据见 §4.3)。
 - **L1 — substrate 探活**:runsc/sentry 容器是否活(§5.A)。
 - **L2 — transport 探活**:向 netns IP:port 发一个 `Health` RPC 是否成功(§5.E,见 transport.md D4.5)。
 
-**健康态四分(先两层探活,再判 idle——兑现 §4.2 的要求)。** 处置**互不相同**:
+**健康态分类(先两层探活,再判 idle——兑现 §4.2 的要求)。** 处置**互不相同**:
 
 | 健康态 | 判据(L1 substrate / L2 transport) | 处置 |
 | --- | --- | --- |
 | **healthy** | L1 活 + L2 通,且有连接活跃(近期有 I/O:进程输出 / pty 读写) | 保持 `running`,不动 |
 | **idle** | L1 活 + L2 通,但**所有**连接都 idle(近期无任何 I/O) | 超阈值 → **auto-pause** 静止到一致点(§4.2;flush 由 substrate 保证,不依赖协作握手) |
 | **transport-down(瞬态)** | **L1 活、L2 不通**——transport 子进程崩了,PID1 正在原地重启(§5.E.1) | **等重启**;端口在**同一 IP** 上恢复,**不是** dead-recoverable、**不**走 resume;**连续 transport-down 超重启预算 → 升级为 dead-recoverable 走 resume**(防崩溃循环卡死,机制见 reaper-health D4b) |
-| **dead-recoverable** | **L1 探不到**(容器整死),持久态(Overlay 工件)在后端完好 | 走 **resume**(§4.2),换新 IP 冷启,**不是** auto-pause |
+| **dead-recoverable** | **L1 探不到**(容器整死),持久态(Overlay 工件)在后端完好,**且死因不是撞资源帽** | 走 **resume**(§4.2),换新 IP 冷启,**不是** auto-pause |
+| **resource-terminated** | **L1 探不到,且死因是撞 RAM 帽**(§3.4 安全限:沙箱被整组终止) | **不 resume**、不 auto-pause——留 `paused` 等人工介入或改帽。resume 会让同一负载再次触发终止,即崩溃循环 |
+
+> **resource-terminated 与 dead-recoverable 并列,不是它的子类。** 两者 L1 都探不到、持久态都完好,
+> 表现完全相同;区分只能靠**死因信号**,而处置**相反**(一个必须 resume,一个必须不 resume)。死因跨
+> §5.A seam 时是**抽象枚举**(`{Unknown, Gone, ResourceExceeded}`),不是 errno / cgroup 文件:
+> `local_runsc` 从自己的 memcg 得出结论,远端 provider 从其调度层的终止原因得出同一结论,**mediator
+> 只看枚举**。这让该分类跨 provider 成立,而非 host-local hack。
+>
+> **死因必须在观测到的那一刻落库,且与降级 CAS 同一次提交。** 死因信号是**易失的**(local 形态下它
+> 在 provider 的 placement-local 资源里,随 placement 拆除而消失,也不跨宿主重启),所以"事后再问一次"
+> 这条路不存在:降级提交之后证据已不可恢复。故 `crash-paused` 的 CAS 与死因写入是**一次原子提交**
+> (§4.4-C 同一形状)。
+>
+> **`Unknown` 是一等合法值,不是错误。** 读不到死因时按 `dead-recoverable` 处置(去 resume),**由有界
+> 重试兜底**:若确是撞帽,同一负载会再次触发终止,而这一次必然发生在控制面眼前(它刚做完 resume),
+> 于是被观测并落库——未知状态**自我纠正**,崩溃循环被界在多一次 resume 上,与"连续 transport-down 超
+> 重启预算 → 升级"同形。**一条诚实的残留**:自我纠正只对确定可复现的耗尽成立;偶发尖峰可能反复以
+> `Unknown` 死亡而不被观测到,重试上界仍挡住无限循环,但收敛到 `resource-terminated` 无保证。
 
 > **连接活动信号在 guest 侧量,不在 host 侧。** `sandboxd` 在输出/输入路径(`broadcast`/`writeInput`)打一个
 > **沙箱全局「上次 I/O」时戳**,`Health` 探针带回 idle 时长(一处三用,§5.E / transport D4.5)。**不在 host 侧
@@ -361,7 +392,7 @@ placement → 重新接管**(provider 按 SandboxID 重认自己的资源、重�
 本节不复述。编排语义是:**判活与冷启 ⑦ 就绪门对齐**——L1 活但 L2 不应答(如 `created`-未监听)不是可接管的
 活,一律降 `paused`(可经下次 resume 冷启恢复),不把死句柄填进 live-map。**失败处置是 skip-and-log +
 对不确定的 `running` 存活者取保守**(保护其 placement 不回收——漏拆活容器不可逆、泄漏 placement 下次
-启动再收;对账幂等,跳过项下次重来)。接管期单次就绪探针与 orchestrator 活着时的**连续健康分类**(四象限,
+启动再收;对账幂等,跳过项下次重来)。接管期单次就绪探针与 orchestrator 活着时的**连续健康分类**(见 §4.3,
 区分 transport-down 瞬态)、**周期对账**(与 §4.4-B 锁协调)的落地见
 [`deep-dives/reaper-health.md`](./deep-dives/reaper-health.md) D3/D4。
 

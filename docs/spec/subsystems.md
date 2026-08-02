@@ -21,7 +21,7 @@
 > 引用某个 Template、就是 pause/resume 的那份冻结层;Volume 生命周期**独立**、先于/晚于沙箱
 > 存活、自带管理 API 与后端。二者**都** ID 寻址,但**各有自己的物化 seam**(§5.B `rootfs.Provider`
 > 物化分层合成,§5.C `volume.Backend` 物化自足存储单元),**不共用一个 FS provider**——只共享底层存储
-> substrate 原语(btrfs subvolume / qgroup / reflink);模型也不共用:Overlay 引用 Template 且随沙箱
+> substrate 原语(btrfs subvolume / 配额 / reflink);模型也不共用:Overlay 引用 Template 且随沙箱
 > 回收,Volume 谁都不引用、独立回收。
 
 ### 5.A Runtime(执行基底)
@@ -35,10 +35,16 @@
   物化三态模型(§3.1)。动词归 §4,本子系统只给机制(§4 开头"动词归 §4,机制归 §5")。
 - guest 默认 **root**;引擎不建模 guest 用户,「以某用户运行」是 guest 原生的事(`su`/`sudo`),
   不是引擎原语(§2.2 / §3.2.1)。
-- **资源上限物化(只管速率轴)**:沙箱的 CPU/RAM/**disk I/O** 上限是 Binding(§3.4),由本子系统在
-  每次 placement 时物化——single-node provider 落成 cgroup(CPU/RAM 限额 + `io` controller 的带宽/
-  IOPS 节流);别的 provider 落成其调度层的等价资源约束。**disk 容量上限不在此**——它是 FS 层配额,
-  归 §5.B(Overlay upper+work)/ §5.C(每个 Volume),经二者共享的存储 substrate 原语物化(§3.4 两轴切分)。
+- **资源上限物化(速率轴 + RAM)**:沙箱的 CPU / **disk I/O** 速率上限与 **RAM** 上限是 Binding(§3.4),
+  由本子系统在每次 placement 时物化——single-node provider 落成 cgroup(`cpu` / `io` controller 的
+  节流 + memcg);别的 provider 落成其调度层的等价资源约束。**disk 容量上限不在此**——它是 FS 层配额,
+  归 §5.B(Overlay upper+work)/ §5.C(每个 Volume),经二者共享的存储 substrate 原语物化(§3.4)。
+- **RAM 是安全限,其"一个旋钮/两个值"的摊分是 provider 内部细节**:接口只说 `MemoryByte = N`
+  (§3.4 Binding);provider 自己决定怎么把"N 字节 RAM"物化。`local_runsc` 内部把 guest 可见 RAM 设成
+  N、宿主天花板设成 `N + overhead`(overhead 是**它的实现常数**,非契约成员——远端 provider 的开销
+  构成完全不同:可能是 VM balloon、可能是调度层的 memory request)。**不这么切就是 spec bug**:两者
+  都设 N 时 guest 被告知 N 却在低于 N 处被终止。终止的**确定性**(整组、非内核挑 victim)同属
+  provider 义务,见 §2.4。
 - **启动**:从 Template 冷启(秒级),可叠加现成 restore / 启动优化。容器 entrypoint 是
   `sandboxd`(init 模式当 PID 1,§5.E.1)——本子系统只负责"把它作为 PID 1 拉起",guest 内的
   init/reaper/re-exec 拓扑归 §5.E.1,不在此展开。
@@ -54,9 +60,11 @@
     egress 全量引导进引擎数据面,§5.D),不是完整网络策略——策略 enforcement 与凭证注入在引擎数据面里,
     不在 provider。
   今天唯一实现 `local_runsc` 把引流要求物化成 nft+netns、把 §3.4 的资源上限经 **OCI `linux.resources`**
-  下发给 runsc 落成 cgroup(cgroupfs driver)。**cgroup 归属:runsc 从 container-id 自建一个根级 leaf
-  cgroup、`delete` 时回收**;引擎**不**自建父层级(单二进制无 systemd scope、也无 kubelet-式 cgroup
-  driver 代建父目录——自建父 subtree 即反 §1.1 重造那一层)。故一个**孤儿 CID-cgroup 就是孤儿 placement**
+  下发给 runsc 落成 cgroup(cgroupfs driver)。**cgroup 归属:引擎建父层、叶子归 runsc**——runsc 只创建
+  `cgroupsPath` 的最后一段且要求父层已存在,**并且只对自己创建的叶子写限额**(引擎若预建完整路径,限额会
+  **静默不生效而 launch 照常成功**);故引擎 `mkdir` 父层 + 开其 `subtree_control`,叶子留给 runsc 建、
+  `delete` 时由它回收,launch 后**断言限额确已生效**。父层是一个**扁平命名容器**、不是 kubelet-式 cgroup
+  driver 层级(不代建每沙箱中间层,那才是反 §1.1 重造那一层)。故一个**孤儿 CID-cgroup 就是孤儿 placement**
   的可扫信号,§4.4-A 周期对账兜底。provider 是**引流与资源上限的物化方**,不碰策略权威、不进 resolve
   路径(§5.D)。**多 node / 调度 / 跨宿主因此天然位于未来某个 provider 内,核心模型不感知**(§1.1 /
   §1.3:provider 是 registry 的一种实现)。
@@ -67,9 +75,11 @@
     分配**——不做 boot 后探测。resume 每次**新建 netns**(§3.3 换新 IP),故无「复用 netns 须重灌地址」问题。
   - **对账机制(§4.4-A 崩溃变体的 provider 面)**:除 `Launch`/`Stop`/`Destroy` 外,provider 再出两个
     枚举/接管/回收机制,供 §4 mediator 的启动对账驱动(动词仍归 §4):
-    - `Adopt(SandboxID) → (placement 句柄, alive)`——按 SandboxID **重认**该沙箱自己的 placement-local
+    - `Adopt(SandboxID) → (placement 句柄, alive, 死因)`——按 SandboxID **重认**该沙箱自己的 placement-local
       资源、重建**不透明**句柄、重发现 transport 端点(**同一端点、不换 epoch**,隔离单元从未重启,§3.3);
-      `alive=false` = 已死/不存在。右侧仍是**策略+句柄**,过上面的 ❌ 宿主原语清单。
+      `alive=false` = 已死/不存在,此时**顺带交出死因**(抽象枚举,§4.3):这是 placement 尚完整的最后一刻,
+      而死因信号随 placement 拆除即消失,**事后无法补问**。判不出即报 `Unknown`,不许猜。右侧仍是**策略+句柄**,
+      过上面的 ❌ 宿主原语清单——死因是枚举,不是 errno / cgroup 文件。
     - `ReclaimOrphans(keep []SandboxID)`——拆掉不在 keep 集里的全部 engine placement(反向依赖序 runsc
       kill/delete → veth → netns;overlay umount 归 mediator 侧,子系统不互调)。keep 由 mediator 读**权威
       store** 算出喂进来(provider 不反向调 store,§4 开头);持久态(Overlay upper)**绝不碰**(§4.4-A)。
@@ -147,10 +157,15 @@
 - **底层存储附带能力(single-node)**:snapshot/clone 落在 CoW FS(reflink)上廉价。这是 single-node
   provider 的附加能力,不是模型对宿主路径的依赖。
 - **容量配额是本子系统的物化职责(disk 容量轴,§3.4)**:per-sandbox 的 disk 容量上限(Binding)由
-  FS provider 在 placement 时施加到 **Overlay upper 子树 + work**(两者同一份配额)。物化手段(project
-  quota / loop / 独立 FS)与其权衡见 [`deep-dives/rootfs-overlay.md`](./deep-dives/rootfs-overlay.md)
-  D6。**Template 只读、不被沙箱写,不设 per-sandbox 帽**——其增长由 Promote + refcount GC(§4.3)
-  控制,只作节点容量核算的输入,是全局核算问题而非隔离问题。
+  FS provider 在 placement 时施加到 **Overlay upper 子树 + work**(**两者落在同一个存储单元 ⇒ 同一份
+  配额,无绕过路径**)。local 物化 = **btrfs subvolume + squota limit**;超限时 guest 拿到普通
+  `ENOSPC`、**沙箱照常存活**(§3.4)。为何是 squota 而非完整 qgroup、以及它带来的"Template 字节不受帽
+  覆盖"代价,见 [`deep-dives/rootfs-overlay.md`](./deep-dives/rootfs-overlay.md) D6。
+  **Template 只读、不被沙箱写,不设 per-sandbox 帽**——其增长由 Promote + refcount GC(§4.3)控制,
+  只作节点容量核算的输入,是全局核算问题而非隔离问题。
+- **容量核算只信后端配额,永不信 guest 侧数字**:sentry 会**伪造 `st_blocks`**(guest 对稀疏文件报
+  出按大小推算的块数,宿主真实值可为 0),故 provider 报出的字节必须来自后端配额/统计,不能来自
+  guest 内的 `stat`。这条同样适用于 §5.C。
 - **不含**:Volume 的生命周期与挂载策略(→ C)、Overlay 跑在哪个进程上下文(→ A)。
 
 ### 5.C Volume(解耦的独立存储)
@@ -160,12 +175,12 @@
   不同路径,**不进沙箱持久态 / 不进 Promote 捕获**,各自后端。
 - **独立子系统、独立 seam `volume.Backend`**:Volume **不与 §5.B 共用 FS provider**——它有自己的物化
   seam,只吐**一样东西:一个宿主挂载点**(runsc 写进 OCI mount spec、gofer 代理进 guest,与 merged
-  rootfs 同构)。与 §5.B 只共享底层存储 substrate 原语(btrfs subvolume/qgroup/reflink)。
+  rootfs 同构)。与 §5.B 只共享底层存储 substrate 原语(btrfs subvolume/配额/reflink)。
 - **共享/独占策略**:`AccessMode ∈ {Exclusive, SharedReadOnly, SharedReadWrite}`(独占挂载唯一 /
   只读扇出 / 共享读写;后者只保证同沙箱内多连接(process)的 POSIX 语义,**跨沙箱 rw coherence 引擎不
   定义(undefined)**——gofer/sentry 各自缓存让跨隔离边界的共享可变一致性本质不可靠,引擎不承诺、
   用户文档诚实标出)。**不用 `owner` 命名**(§1.1 词汇边界)。
-- **backend 两条臂,gofer 侧零差异**:**local(默认)**= 宿主上一个 **btrfs subvolume**(自带 qgroup 帽 +
+- **backend 两条臂,gofer 侧零差异**:**local(默认)**= 宿主上一个 **btrfs subvolume**(自带配额帽 +
   廉价原子快照),gofer 代理普通目录、POSIX 由宿主内核白拿;**remote**(S3 / NFS / …)= backend 维护的
   **宿主侧 FUSE 挂载点**,gofer 同样代理进 guest。**FUSE 只在宿主侧、绝不在 guest 内**(gVisor 内 FUSE
   支持有限),且封在该 remote backend 内、不进核心模型(两条臂均已在 substrate 验证;为何不"全走 FUSE"、
@@ -206,7 +221,7 @@
 - **容量配额是 per-volume 属性,不是 per-sandbox(disk 容量轴,§3.4)**:一个 Volume 的容量上限
   记在它自己的对象记录上,由 §5.C backend 在其后端物化;它**不能归给某个沙箱**——shared-rw Volume
   被多个沙箱共写,占用无法拆到单沙箱头上。这与 §5.B 的 Overlay upper 帽(per-sandbox)是两个独立
-  的容量帽,各自 enforce,但**共享同一个底层 substrate 原语**(btrfs subvolume + qgroup limit)——该原语
+  的容量帽,各自 enforce,但**共享同一个底层 substrate 原语**(btrfs subvolume + squota limit)——该原语
   跨 §5.B/§5.C 复用,见 [`deep-dives/rootfs-overlay.md`](./deep-dives/rootfs-overlay.md) D6
   与 [`deep-dives/volume.md`](./deep-dives/volume.md) D7。
 - **不含**:沙箱自身的 rootfs / Overlay 工件(→ B)。

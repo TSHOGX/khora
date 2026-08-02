@@ -164,43 +164,79 @@ reflink 来补分层,那其实又滑回上面的 overlayfs 底层存储附带能
 让**同盘所有沙箱**的 upper 写失败——击穿 §2.3「放大只发生在本沙箱数据面内」。容量上限因此必须由
 FS provider 显式施加(§5.B),这与 D0 载体正交:载体给"普通目录树",配额给"这棵树最多多大"。
 
-### D6.2 物化手段(single-node):btrfs subvolume + qgroup 为首选
+### D6.2 物化手段(single-node):btrfs subvolume + squota 为首选
 
 | 手段 | 隔离强度 | 代价 | 适配 |
 | --- | --- | --- | --- |
-| **btrfs subvolume + qgroup limit**(给 upper+work 所在 subvolume 打一个 qgroup 硬限) | 中,硬 `ENOSPC` 到帽 | 最轻:qgroup 在本 substrate 已 fs-wide 启用,两条 `btrfs` 子命令,无额外挂载;subvolume 同时兑现廉价原子快照 | **single-node 首选** |
+| **btrfs subvolume + squota limit**(给 upper+work 所在 subvolume 打一个配额硬限) | 中,硬 `ENOSPC` 到帽 | 最轻:配额在本 substrate 已 fs-wide 启用,两条 `btrfs` 子命令,无额外挂载;subvolume 同时兑现廉价原子快照 | **single-node 首选** |
 | **loop 设备**(每沙箱一个定长 image 文件,内建 FS 后挂载,upper/work 落其中) | 强,物理定长隔离 | per-sandbox loop dev + mount 生命周期管理,资源更重 | 需要强物理隔离时 |
 | **独立 FS / thin LV**(每沙箱一个 thin volume 或独立分区) | 最强 | 最重,依赖 LVM/卷管理 | 特殊高隔离场景 |
 
-> **首选 = btrfs subvolume + qgroup(实测)。** substrate(ADR-0002)是 **btrfs**,它**无 project quota**,
-> 故 project-quota 类手段(xfs/ext4)在本盘不适用。实测:btrfs `qgroup limit` 打到 subvolume 后写满触发
-> 精确到帽的硬 `ENOSPC`,overlayfs upper/work 落在 btrfs subvol 上正常(含 copy-up)。选它还有一个结构收益
-> ——把存储单元定为 subvolume,同时给 Volume(§5.C)兑现廉价原子快照(volume.md D6/D7)。caveat:
-> `btrfs-progs` 在 `sbx` 默认未装,须显式加为依赖。
+> **首选 = btrfs subvolume + squota(实测,全栈)。** substrate(ADR-0002)是 **btrfs**,它**无 project
+> quota**,故 project-quota 类手段(xfs/ext4)在本盘不适用。实测穿透
+> `subvolume → overlayfs upper/work → gofer → sentry → guest` 整条链:写满触发**精确到帽的硬 `ENOSPC`**
+> (errno 28 在 `write()` 上报,`fsync`/`close` 返 0,精度 ~0.05%),**容器照常存活**(可再 exec),
+> 稀疏文件 / `fallocate` / hardlink / 从 lower rename 均未找到绕过账目的路径。选它还有一个结构收益——把
+> 存储单元定为 subvolume,同时给 Volume(§5.C)兑现廉价原子快照(volume.md D6/D7)。
+
+**为何是 squota 而非完整 qgroup(定了)。** 三条:① squota 就是为"每工作负载一个 subvolume"设计的
+(低开销、无 rescan 风暴);② **语义才对得上要管的东西**——沙箱**新写的**字节。完整 qgroup 下 copy-up 的
+reflink 会把 `referenced` 顶过帽(实测 98 MiB / 64 MiB 帽),事后才靠拒新写回落,**付了代价仍拿不到硬顶**;
+而向一个沙箱收取它从 Template reflink 来的字节(内容不是它写的)本身就存疑;③ 开发/测试基底(`sbx`)
+**改不了模式**(`BTRFS_IOC_QUOTA_CTL` 即便 root 带全 `CAP_SYS_ADMIN` 也 EPERM),选完整 qgroup 等于让
+spec 与基底长期分叉(CLAUDE.md 警告的漂移)。
+
+> **代价,必须连带处理**:squota 下沙箱撑不破自己的帽,但 **Template / layer 字节仍占真实磁盘且无帽
+> 覆盖**。故节点容量核算式必须把 layer 字节单列:`Σ(每沙箱 disk 帽) + Σ(实测 layer 字节) ≤ 配置的节点
+> 容量`。这也正是"不超卖"可算的前提(D6.5)。
+
+**copy-up 撞帽不会损坏 merged 视图(实测)。** 跨 fs 强制真拷贝时,`open(O_WRONLY)` 干净地返 errno 28,
+文件在 merged 里**尺寸正确、与 lower 原件逐字节一致**,upper/work 无残留半成品——overlayfs 拷进 workdir
+临时文件、成功才 link 进 upper,失败完整回滚。**但同 fs 上 copy-up 是 reflink**,不受帽约束地被接纳,
+故帽对 copy-up 不是硬顶(见上,squota 下 reflink 永久免费,这恰是选它的理由之一)。
+
+**`btrfs-progs` 是显式依赖**(`sbx` 上已装,实测 v6.17.1)。另一条实现时会撞的坑:**sentry 伪造
+`st_blocks`**——guest 对 512 MiB 稀疏文件报 `536870912`,宿主真实值为 `0`。**容量核算只信配额,永不信
+guest 侧数字**(§5.B)。
 
 三者是**同一个存储 substrate 原语的不同实现分支**,抽象对上层一字不变:上层只见"这个 Overlay 有个容量帽
-(Binding)",不见帽是 qgroup 还是 loop image。
+(Binding)",不见帽是 squota 还是 loop image。
 
 ### D6.3 关键约束:work 必须与 upper 同配额(subvolume 天然满足)
 
 overlayfs 的 copy-up(改 lower 文件时把它整份拷到可写层)**先落 workdir、再 rename 进 upper**。
 若只给 upper 打配额、漏掉 work,copy-up 期间的写就是一条**绕过帽**的路径。D5 的实测约束"work 与
-upper 必须同一个支持 overlayfs 的 FS"在这里进一步收紧为:**work 与 upper 必须记进同一个 qgroup /
+upper 必须同一个支持 overlayfs 的 FS"在这里进一步收紧为:**work 与 upper 必须记进同一个配额单元 /
 同一个 loop image / 同一个 thin volume**——容量核算把两者当一体。**btrfs subvolume 天然满足**:upper 与
-work 同处一个 subvolume → 一个 qgroup 覆盖两者,无绕过路径(实测 copy-up 流量全计入)。
+work 同处一个 subvolume → 一个配额覆盖两者,无绕过路径(实测:`work`/`upper` 在 merged 视图里不可见,
+copy-up 流量全计入)。
 
 ### D6.4 归属:一个跨 §5.B/§5.C 共享的 substrate 原语,不产生子系统互调
 
-容量帽的物化机制(create-subvolume + set-qgroup-limit + delete-subvolume)对 **§5.B 的 Overlay upper+work
-子树**与 **§5.C 的 per-volume 单元**是**同一套**——它是一个**共享存储 substrate 原语**,跨两个子系统复用
-(作 Volume 的共享内部代码落地、Volume 首个消费者;§5.B 复用它给 upper 打帽是随后一个小 hardening,volume.md
-D7)。施加动作全程在存储物化侧完成,不调用别的子系统;帽的
+容量帽的物化机制(create-subvolume + set-quota-limit + delete-subvolume)对 **§5.B 的 Overlay upper+work
+子树**与 **§5.C 的 per-volume 单元**是**同一套**——它是一个**共享存储 substrate 原语**,跨两个子系统复用。
+
+> **共享的是代码,不是 seam。** 它落成一个**叶子包**(`internal/btrfs`),只包 subvolume
+> create/delete/snapshot + quota limit,**不认识 Overlay / Volume / SandboxID**;§5.B 与 §5.C 各自
+> import 它,如同各自 import `os`。**不做一个 `QuotaProvider` 横切接口**——远端 FS provider 会用完全
+> 不同的手段兑现容量帽(对象存储配额 / 配额 API),横切接口只会把 btrfs 假设焊进所有实现。两者都不调
+> **对方**,只是共用一个 substrate 工具,故不违反"子系统间不互调"。**Overlay upper 是首个消费者**
+> (§5.B),Volume 落地时复用同一个包。
+
+施加动作全程在存储物化侧完成,不调用别的子系统;帽的
 **取值**(Binding)由 §4 mediator 在 create/resume 编排时连同 rootfs 来源 / 挂载表一起下发——这本就是
 mediator 的职责,不违反"子系统间不互调"(§4 开头)。multi-node 形态下,PV-backed 单元的容量帽 = PV 的
 size request,仍是那一侧后端的活,抽象不变(§3.1.1)。
 
-### D6.5 边界:帽之外还有两层行为
+### D6.5 边界:帽之外还有两层行为(均已定)
 
-D6 只解决**per-sandbox 帽怎么物化**——把"撑满整机"降级成"撑满自己"。帽被打满时的 ENOSPC 标准
-行为、以及允许超卖时的节点磁盘压力准入,是跨子系统的行为与策略,尚未定,见
-[`open-decisions.md`](../open-decisions.md)。
+D6 只解决**per-sandbox 帽怎么物化**——把"撑满整机"降级成"撑满自己"。另两层:
+
+- **打满时的标准行为**:guest 见普通 `ENOSPC`、**沙箱照常存活**(§3.4:容量超限是数据面内的事件,
+  控制面不介入)。**只做硬阈拒写**——不发容量压力事件、不触发 auto-pause;软阈告警 / 压力事件随事件流
+  「可重放窗口」那轮统一收口(现在单开一个 event kind,到时要改两遍)。
+- **节点级不超卖**:`Σ(每沙箱 disk 帽) + Σ(实测 layer 字节) ≤ 配置的节点容量`,在 create / resume 物化
+  upper 前由 §4 mediator 核算;不足则 create 失败 / resume 留 `paused`(§4.4-A 原子退回源态)。layer 字节
+  必须单列,因为 squota 不覆盖它们(D6.2)。**有限超卖 + 磁盘压力监控是后续增量**,不是当前形态。
+
+两层的落地归 M6(`docs/plans/M6-resource-governance.md`)。
