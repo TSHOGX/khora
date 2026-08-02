@@ -19,7 +19,7 @@ built is now part of the converged architecture; read `docs/spec/`, not a plan:
 | **M1** ✅ | Single sandbox `create / pause / resume / destroy` end-to-end; CAS + transition-lock shape, cold-start failure unwind | §3.3 · §4 · §5.A · §5.B · §5.E |
 | **M2** ✅ | Persistent store + the three §4.4 invariants in depth: atomic commit + outbox, true-concurrency stress, startup crash-reconciliation (backend = ADR-0004) | §4.4 · §5.A |
 | **M3** ✅ | Transport depth (§5.E): PTY + multi-connection fan-out + `Connect` reconnect + bounded ring-replay + the two D4.3 fan-out invariants; external data-plane Connect projection (D6) | §5.E · §3.2 · §6 |
-| **M4** ✅ | Reaper + health quadrant (two-tier liveness × guest-side connection activity) + live periodic reconcile: `auto-pause` / `evict` / live `crash-pause` | §4.3 · §4.4-A |
+| **M4** ✅ | Reaper + health classification (two-tier liveness × guest-side connection activity) + live periodic reconcile: `auto-pause` / `evict` / live `crash-pause` | §4.3 · §4.4-A |
 | **M5** ✅ | Uniform object model on Template lineage: first-class Template rows (opaque ID + `parent` lineage, **existence-as-state**, **derived** refcount) + FK-enforced reference-reclaim atomicity + safe delete/GC + boot seed + orphan-layer sweep + Promote (multi-lowerdir freeze, bytes-first) | §3.1 · §4.3 · §5.B · §6.1 |
 
 Acceptance for the shipped milestones lives in the substrate tests
@@ -29,13 +29,10 @@ Acceptance for the shipped milestones lives in the substrate tests
 
 | # | Plan | Capability delivered | Anchors |
 | --- | --- | --- | --- |
-| **M6** | *(planned)* | Volume: independent subsystem + own `volume.Backend` seam (local = btrfs subvolume; remote-FUSE deferred), mount table, exclusive lease (= refcount mount row), access modes, direct-write regime, btrfs snapshot/clone. Builds the subvolume+qgroup capacity primitive as shared internal code — Volume is its first consumer. | §5.C · volume D1–D8 |
-| **M7** | *(planned)* | Network egress data plane + layered deny-set + credential injection (**security-critical**) | §5.D · §2.4 |
-| **M8** | *(planned)* | Credential store seam | §5.D |
-
-A later small hardening (folded into M6's review or a follow-on) has **§5.B adopt
-the same subvolume+qgroup helper** to cap the Overlay upper+work — shared code,
-gated once it has a live consumer, not as a standalone rung (rootfs-overlay D6).
+| **M6** | [`M6-resource-governance.md`](./M6-resource-governance.md) | Resource governance — §3.4's limits become real enforcement. Three dimensions, three mechanisms: CPU/IO rate → cgroup; disk capacity → btrfs subvolume + squota on the Overlay upper+work; RAM → host memcg + `oom.group=1` (a **safety** limit — exceeding it terminates the sandbox, so it also needs the `resource-terminated` disposition). Plus the no-oversubscribe admission gate. Builds `internal/btrfs` as a leaf package, first consumer being the Overlay upper. | §2.3 · §3.4 · §4.3 · §5.A · §5.B |
+| **M7** | *(planned)* | Volume: independent subsystem + own `volume.Backend` seam (local = btrfs subvolume; remote-FUSE deferred), mount table, exclusive lease (= refcount mount row), access modes, direct-write regime, btrfs snapshot/clone. Reuses M6's `internal/btrfs` package unchanged. | §5.C · volume D1–D8 |
+| **M8** | *(planned)* | Network egress data plane + layered deny-set + credential injection (**security-critical**) | §5.D · §2.4 |
+| **M9** | *(planned)* | Credential store seam | §5.D |
 
 The §6 API / CLI contract grows alongside from M1 — it is not a separate
 milestone.
@@ -44,7 +41,7 @@ milestone.
 substrate before anything layered on; M2 hardened the correctness invariants M1
 stubbed (in-memory store); M3 made the headline "multi-connection concurrent,
 shared FS/network" real. M4's reaper had to follow transport: the §4.3 `idle`
-quadrant and TTL-evict are defined against a **connection-activity signal** ("all
+state and TTL-evict are defined against a **connection-activity signal** ("all
 connections idle — no process activity, no pty I/O"), which only exists once the
 transport surface is real (PTY, `Connect`, multi-connection fan-out) — so the
 reaper landed on real signals and folded in the periodic reconcile from M2.
@@ -53,12 +50,27 @@ reaper landed on real signals and folded in the periodic reconcile from M2.
 object-model case directly: `create-from-Template` was an *unprotected reference*
 (Template was a bare directory — no row / refcount / lineage), so M5 poured the
 **uniform object model + reference-reclaim atomicity** foundation (§4.3) that
-Volume (M6) now reuses — its exclusive lease *is* a refcount mount row (§5.C).
+Volume (M7) reuses — its exclusive lease *is* a refcount mount row (§5.C).
 
-**Volume (M6) models its storage unit as a btrfs subvolume**, which it needs
-anyway for cheap atomic snapshot/clone; the subvolume+qgroup capacity mechanism
-is built as shared internal code with Volume as first consumer, rather than as a
-standalone rung — a cap with no consumer isn't a gateable capability, and neither
-subsystem is capped today (rootfs-overlay D6, volume D7). The security-critical
-egress work (M7) lands only after the lifecycle + storage + transport foundation
-is solid.
+**Resource governance (M6) comes before Volume** for three reasons:
+
+- **§2.3 asserts an invariant nothing currently enforces.** "A guest's `dd` only
+  makes its own `write()` fail, it cannot fill the host disk" holds only with a
+  capacity cap, and §2.3 itself notes this dimension is *not* guarded by pillar ①
+  (syscall interception virtualizes syscalls, not resource usage) — so one legal
+  `write()` breaches it today. By contrast §5.D's gap is not a hole: the netns has
+  one /30 veth pair and no default route, so egress is already deny-all, and the
+  network milestone *opens* a controlled path rather than closing a leak.
+- **The dependency runs this way.** Volume needs subvolumes (for cheap snapshots
+  and its own cap), but subvolume+quota does not need Volume — and the Overlay
+  upper is already a consumer, one per sandbox. So the shared primitive
+  (`internal/btrfs`) lands with its first consumer here, and Volume imports it
+  unchanged.
+- **Risk separation.** Volume is the largest rung (new subsystem + new seam + new
+  store table + new uniqueness invariant + six mediator hooks + snapshot/clone +
+  §6 endpoints). Proving the capacity primitive against the simpler consumer
+  first — single writer, no shared-rw, no snapshots — keeps two independent risk
+  sources off one review gate.
+
+The security-critical egress work (M8) still lands only after the lifecycle +
+storage + transport foundation is solid.
