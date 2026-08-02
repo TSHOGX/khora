@@ -63,10 +63,10 @@ func seedPausedStore(t *testing.T, st store.Store, sid, oid, tmpl string) {
 	}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.CompareAndSetState(ctx, model.SandboxID(sid), model.Creating, model.Running, nil); err != nil {
+	if err := st.CompareAndSetState(ctx, model.SandboxID(sid), model.Creating, model.Running, nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.CompareAndSetState(ctx, model.SandboxID(sid), model.Running, model.Paused, nil); err != nil {
+	if err := st.CompareAndSetState(ctx, model.SandboxID(sid), model.Running, model.Paused, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -202,7 +202,7 @@ func seedRunningStore(t *testing.T, m *Mediator, st store.Store, sid, oid, tmpl 
 	}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.CompareAndSetState(ctx, model.SandboxID(sid), model.Creating, model.Running, nil); err != nil {
+	if err := st.CompareAndSetState(ctx, model.SandboxID(sid), model.Creating, model.Running, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	m.put(model.SandboxID(sid), &liveState{placement: &runtime.Placement{TransportEndpoint: "10.0.0.1:9000"}})

@@ -13,6 +13,12 @@ package rootfs
 
 import "context"
 
+// CapUnchanged is the OpenOverlay capByte sentinel for "rebuild the handle, do
+// not touch the quota" (see OpenOverlay). Negative, so it can never collide with
+// a real cap or with 0 = uncapped — the distinction matters because 0 is itself a
+// meaningful instruction (remove the cap).
+const CapUnchanged int64 = -1
+
 // Overlay is the ID-addressed, Template-decoupled frozen layer (§3.1.1). Above
 // this subsystem it is referenced by ID; the host materialization is private.
 type Overlay struct {
@@ -57,7 +63,15 @@ type Provider interface {
 	// Template, the tail its ancestors (§5.B multi-lowerdir). The mediator
 	// resolved it from the authoritative lineage (§4.3); len 1 = a base Template.
 	// Returns the Overlay by ID + private host materialization.
-	CreateOverlay(ctx context.Context, overlayID string, lower []string) (*Overlay, error)
+	//
+	// capByte is the §3.4 disk-CAPACITY cap (Binding), applied to the upper+work
+	// storage unit. It crosses the seam as a PLAIN BYTE COUNT — the caller states
+	// intent, the provider chooses the mechanism (local: btrfs subvolume + squota;
+	// a remote FS provider would use an object-store quota or its own accounting).
+	// This is why capacity is NOT a cross-cutting QuotaProvider interface: such an
+	// interface would weld the btrfs assumption into every implementation (§5.B /
+	// rootfs-overlay D6.4). 0 = uncapped.
+	CreateOverlay(ctx context.Context, overlayID string, lower []string, capByte int64) (*Overlay, error)
 
 	// OpenOverlay reconstructs the handle for an EXISTING Overlay artifact from
 	// its ID + resolved lower STACK (§3.1.1: Overlay is ID-addressed, so the
@@ -65,7 +79,19 @@ type Provider interface {
 	// mediator re-resolves the lineage each time). This is the resume prefix —
 	// the artifact was created earlier and persists on the backend across pause
 	// (§4.2 零捕获). It does NOT allocate new bytes.
-	OpenOverlay(ctx context.Context, overlayID string, lower []string) (*Overlay, error)
+	//
+	// capByte RE-APPLIES the capacity Binding from the current record (§3.4): the
+	// cap is re-materialized at each placement rather than trusted to whatever the
+	// storage unit was left carrying, so an edited cap takes effect on resume and a
+	// quota lost to an external change is restored. 0 = uncapped, which also
+	// REMOVES any cap the unit still carries (the record is the authority).
+	//
+	// CapUnchanged means "reconstruct the handle only, touch no quota" — for the
+	// callers that are NOT materializing a placement (destroy, a Promote byte-read,
+	// orphan reclamation, re-adopting a live survivor). Those must not pass 0: a
+	// handle rebuild is not a statement that the sandbox is uncapped, and clearing a
+	// live sandbox's quota mid-teardown or mid-adopt would silently un-cap it.
+	OpenOverlay(ctx context.Context, overlayID string, lower []string, capByte int64) (*Overlay, error)
 
 	// Mount assembles lower(Template)/upper/work into a merged rootfs (① of the
 	// cold-start chain). Called by the §4 mediator at create/resume; the mount
@@ -117,6 +143,22 @@ type Provider interface {
 	// sweep reclaims. Overlay carries the source's OverlayID; newTemplateID names
 	// the frozen layer dir under LayersDir.
 	PromoteToTemplate(ctx context.Context, o *Overlay, newTemplateID string) error
+
+	// MeasuredBytes reports the total bytes this provider's storage currently
+	// holds for layers + Overlay uppers — the term the §3.4 admission gate cannot
+	// derive from the caps alone (rootfs-overlay D6.5). It exists because squota
+	// charges a sandbox only for bytes IT wrote: Template/layer bytes and free
+	// reflinked copy-ups occupy real disk that no per-sandbox cap covers, so the
+	// node-capacity inequality needs this measured term listed separately.
+	//
+	// Same shape as SweepOrphanLayers (§4: mediator asks, provider answers): the
+	// provider measures only its OWN storage and never reads the store.
+	//
+	// It reports what the BACKEND says, never what a guest says — the sentry
+	// FABRICATES st_blocks (a 512 MiB sparse file reads as 536870912 blocks in the
+	// guest while the host's true allocation is 0), so guest-side numbers are
+	// unusable for capacity accounting (§5.B 容量核算只信后端配额).
+	MeasuredBytes(ctx context.Context) (int64, error)
 
 	// SweepOrphanLayers reclaims Promote-built layer directories with no live
 	// `templates` row (orphan-layer sweep, §5.B / §4.4-A). It is the §5.B twin of §4.4-A

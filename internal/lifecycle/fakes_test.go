@@ -42,6 +42,11 @@ type fakeRootfs struct {
 	calls     []string
 	failMount bool
 	builtins  []string // boot-seed list returned by ListBuiltinTemplates
+	// measuredBytes is what MeasuredBytes reports (the §3.4 admission gate's
+	// layer-bytes term); measureErr makes it fail, so the fail-closed path can be
+	// asserted.
+	measuredBytes int64
+	measureErr    error
 	// promoteGate blocks PromoteToTemplate mid-freeze (bytes-down, row-not-yet
 	// window) until closed; promoteReached (if set) is closed when the freeze is
 	// entered, so a test can synchronize a concurrent sweep against it (§4.4-A).
@@ -61,21 +66,45 @@ func (f *fakeRootfs) Calls() []string {
 }
 
 func (f *fakeRootfs) Name() string { return "fake_rootfs" }
-func (f *fakeRootfs) CreateOverlay(_ context.Context, id string, lower []string) (*rootfs.Overlay, error) {
-	f.log("CreateOverlay:" + id + ";lower=" + strings.Join(lower, "|"))
+
+// capNote renders the capacity-cap argument into the call log so tests can assert
+// the §3.4 Binding really crossed the seam at each placement (M6 acceptance 3),
+// and that handle-only rebuilds pass CapUnchanged rather than 0 (which would
+// clear a live cap).
+func capNote(capByte int64) string {
+	if capByte == rootfs.CapUnchanged {
+		return ";cap=unchanged"
+	}
+	return fmt.Sprintf(";cap=%d", capByte)
+}
+
+func (f *fakeRootfs) CreateOverlay(_ context.Context, id string, lower []string, capByte int64) (*rootfs.Overlay, error) {
+	f.log("CreateOverlay:" + id + ";lower=" + strings.Join(lower, "|") + capNote(capByte))
 	tmpl := ""
 	if len(lower) > 0 {
 		tmpl = lower[0]
 	}
 	return &rootfs.Overlay{ID: id, Template: tmpl, Lower: append([]string(nil), lower...)}, nil
 }
-func (f *fakeRootfs) OpenOverlay(_ context.Context, id string, lower []string) (*rootfs.Overlay, error) {
-	f.log("OpenOverlay:" + id + ";lower=" + strings.Join(lower, "|"))
+func (f *fakeRootfs) OpenOverlay(_ context.Context, id string, lower []string, capByte int64) (*rootfs.Overlay, error) {
+	f.log("OpenOverlay:" + id + ";lower=" + strings.Join(lower, "|") + capNote(capByte))
 	tmpl := ""
 	if len(lower) > 0 {
 		tmpl = lower[0]
 	}
 	return &rootfs.Overlay{ID: id, Template: tmpl, Lower: append([]string(nil), lower...)}, nil
+}
+
+// MeasuredBytes backs the §3.4 admission gate's layer-bytes term (rootfs-overlay
+// D6.5: squota does not cover layer bytes, so they are accounted separately).
+func (f *fakeRootfs) MeasuredBytes(context.Context) (int64, error) {
+	f.log("MeasuredBytes")
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.measureErr != nil {
+		return 0, f.measureErr
+	}
+	return f.measuredBytes, nil
 }
 func (f *fakeRootfs) PromoteToTemplate(ctx context.Context, o *rootfs.Overlay, newID string) error {
 	f.log("PromoteToTemplate:" + o.ID + "->" + newID)
@@ -144,6 +173,14 @@ type fakeRuntime struct {
 	// adoptErr drives a per-sandbox Adopt PROBE error (uncertain → mediator
 	// protects the placement, skip-and-log; §4.4-A).
 	adoptErr map[string]error
+	// adoptCause drives the per-sandbox DEATH CAUSE Adopt hands out with an
+	// alive=false verdict (§4.3): it is what separates dead-recoverable from
+	// resource-terminated. Absent → CauseUnknown, itself a legal verdict.
+	adoptCause map[string]runtime.DeathCause
+	// launchLimits records the ResourceLimits each Launch was called with, so tests
+	// can assert the §3.4 Binding is re-materialized at every placement from the
+	// record (M6 acceptance 3) rather than read back from a frozen value.
+	launchLimits []runtime.ResourceLimits
 }
 
 func (f *fakeRuntime) log(s string) {
@@ -159,7 +196,13 @@ func (f *fakeRuntime) Calls() []string {
 
 func (f *fakeRuntime) Name() string { return "fake_runsc" }
 func (f *fakeRuntime) Launch(ctx context.Context, spec runtime.LaunchSpec) (*runtime.Placement, error) {
+	// The call log keeps the bare "Launch:<id>" form — several tests match it
+	// EXACTLY as a synchronization predicate. The limits are asserted from
+	// launchLimits instead of by string-matching the log.
 	f.log("Launch:" + spec.Sandbox)
+	f.mu.Lock()
+	f.launchLimits = append(f.launchLimits, spec.Limits)
+	f.mu.Unlock()
 	if f.launchGate != nil {
 		select {
 		case <-f.launchGate:
@@ -189,21 +232,24 @@ func (f *fakeRuntime) Destroy(_ context.Context, _ *runtime.Placement) error {
 // Adopt/ReclaimOrphans back the §4.4-A reconciliation path. The fake is driven
 // by adoptAlive (per-sandbox liveness the test sets up) and records reclaim
 // calls so the reconciliation orchestration can be tested as pure logic.
-func (f *fakeRuntime) Adopt(_ context.Context, sandbox string) (*runtime.Placement, bool, error) {
+func (f *fakeRuntime) Adopt(_ context.Context, sandbox string) (*runtime.Placement, bool, runtime.DeathCause, error) {
 	f.log("Adopt:" + sandbox)
 	f.mu.Lock()
 	alive := f.adoptAlive[sandbox]
 	err := f.adoptErr[sandbox]
+	cause := f.adoptCause[sandbox] // zero value = CauseUnknown, a legal verdict
 	f.seq++
 	ep := fmt.Sprintf("10.9.9.%d:9000", f.seq)
 	f.mu.Unlock()
 	if err != nil {
-		return nil, false, err
+		return nil, false, runtime.CauseUnknown, err
 	}
 	if !alive {
-		return nil, false, nil
+		// dead → hand out the cause with the verdict, the real provider's contract
+		// (§4.3: read it while the placement is still intact, there is no later).
+		return nil, false, cause, nil
 	}
-	return &runtime.Placement{TransportEndpoint: ep}, true, nil
+	return &runtime.Placement{TransportEndpoint: ep}, true, runtime.CauseUnknown, nil
 }
 func (f *fakeRuntime) ReclaimOrphans(_ context.Context, keep []string) error {
 	f.log("ReclaimOrphans:keep=" + strings.Join(append([]string(nil), keep...), "|"))

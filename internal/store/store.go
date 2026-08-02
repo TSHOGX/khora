@@ -98,7 +98,17 @@ type Store interface {
 	// (§4.4-C). This is the mechanism the §4 mediator's transition lock uses for
 	// CAS precondition checks; serialization happens in the mediator layer, not
 	// by one subsystem calling another (§4 开头).
-	CompareAndSetState(ctx context.Context, id model.SandboxID, expected, next model.Lifecycle, ev *Event) error
+	//
+	// cause (if non-nil) sets death_cause in the SAME commit. This is why the
+	// death cause rides the EXISTING CAS path instead of getting its own write
+	// point: §4.3 requires the crash-paused demotion and the death cause to be
+	// ONE atomic commit, because the signal is volatile — after the demotion
+	// commits, the placement can be torn down at any moment and the evidence is
+	// unrecoverable, so a "write the cause just afterwards" window does not exist.
+	// nil = leave death_cause untouched (every non-death transition). A non-nil
+	// CauseNone CLEARS it (a successful resume: the sandbox is up, so its previous
+	// death no longer explains anything).
+	CompareAndSetState(ctx context.Context, id model.SandboxID, expected, next model.Lifecycle, ev *Event, cause *model.DeathCause) error
 
 	// DeleteSandbox removes a sandbox record (terminal `destroyed`, §4.1),
 	// appending ev in the same commit if non-nil (§4.4-C). The outbox row

@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"engine/internal/model"
+	"engine/internal/runtime"
 	"engine/internal/transport"
 )
 
@@ -34,9 +35,21 @@ const (
 	// (D4b) — that escalation is the reaper's, not the classifier's.
 	HealthTransportDown
 	// HealthDeadRecoverable = L1 dead (the isolation unit is gone), persistent
-	// Overlay intact. Recovery is the resume cold-start path, NOT auto-pause's
-	// quiesce (§4.3) — the reaper crash-pauses it (§4.2 involuntary pause).
+	// Overlay intact, AND the death was not a resource cap. Recovery is the resume
+	// cold-start path, NOT auto-pause's quiesce (§4.3) — the reaper crash-pauses it
+	// (§4.2 involuntary pause), and a resume may follow.
 	HealthDeadRecoverable
+	// HealthResourceTerminated = L1 dead AND the death cause was a resource cap
+	// (the §3.4 RAM safety limit, whole-group termination).
+	//
+	// PARALLEL to HealthDeadRecoverable, not a subtype of it (§4.3): both have L1
+	// dead and intact persistent state, and they are INDISTINGUISHABLE by
+	// observation — only the death cause separates them — yet their dispositions
+	// are OPPOSITE. dead-recoverable must resume; this must NOT, because resuming
+	// re-runs the same workload into the same cap, which is a crash loop. It is
+	// still crash-paused (the state is `paused` either way); what differs is that
+	// the recorded cause then blocks resume.
+	HealthResourceTerminated
 )
 
 func (h Health) String() string {
@@ -49,6 +62,8 @@ func (h Health) String() string {
 		return "transport-down"
 	case HealthDeadRecoverable:
 		return "dead-recoverable"
+	case HealthResourceTerminated:
+		return "resource-terminated"
 	default:
 		return "unknown"
 	}
@@ -75,11 +90,21 @@ const classifyProbeTimeout = 2 * time.Second
 // Because idle is read ONLY on the L2-up branch, an unreachable sandbox can
 // NEVER be misclassified as idle from a stale last-known activity (D2): no
 // trustworthy idle reading exists without a successful probe.
-func (m *Mediator) classify(ctx context.Context, rec model.Sandbox) Health {
+// It returns the death cause ALONGSIDE the quadrant, and that pairing is
+// structural rather than convenient (§4.3 / reaper-health D4c). The classifier is
+// read-only: it discards the placement handle Adopt rebuilt. But the death signal
+// lives IN that placement and dies with it, so a cause read here and not returned
+// is a cause thrown away — and the disposition cannot re-read it, because by then
+// teardown may have destroyed the evidence. Hence the cause travels out with the
+// classification, to be committed by the disposition in the same CAS.
+//
+// The returned cause is meaningful ONLY for the two dead quadrants; it is
+// CauseUnknown elsewhere.
+func (m *Mediator) classify(ctx context.Context, rec model.Sandbox) (Health, runtime.DeathCause) {
 	// Only a `running` sandbox has a health quadrant (§4.3). paused → TTL/evict,
 	// creating/destroyed → not the classifier's concern.
 	if rec.State != model.Running {
-		return HealthUnknown
+		return HealthUnknown, runtime.CauseUnknown
 	}
 
 	// Resolve the endpoint from the live-map. A `running` sandbox the live
@@ -88,7 +113,7 @@ func (m *Mediator) classify(ctx context.Context, rec model.Sandbox) Health {
 	// (D4), not a health quadrant — skip it (Unknown).
 	ep, err := m.Endpoint(rec.ID)
 	if err != nil {
-		return HealthUnknown
+		return HealthUnknown, runtime.CauseUnknown
 	}
 
 	// L2 probe (§4.3 L2 + activity signal, one RPC — D2).
@@ -101,24 +126,34 @@ func (m *Mediator) classify(ctx context.Context, rec model.Sandbox) Health {
 		// IdleTimeout means "no idle deadline" → never idle (the sandbox opted out
 		// of auto-pause); it stays healthy regardless of how long it has been quiet.
 		if rec.IdleTimeout > 0 && st.Idle >= rec.IdleTimeout {
-			return HealthIdle
+			return HealthIdle, runtime.CauseUnknown
 		}
-		return HealthHealthy
+		return HealthHealthy, runtime.CauseUnknown
 	}
 
 	// L2 down: disambiguate via an L1 liveness probe (Adopt gives the three-way
 	// outcome — alive / dead / uncertain — matching §4.4-A). We only need its
-	// liveness verdict; the rebuilt placement is discarded (the classifier is
-	// read-only, dispositions rebuild handles under the transition lock).
-	_, alive, aerr := m.deps.Runtime.Adopt(ctx, string(rec.ID))
+	// liveness verdict and, if dead, its death cause; the rebuilt placement is
+	// discarded (the classifier is read-only, dispositions rebuild handles under
+	// the transition lock).
+	_, alive, cause, aerr := m.deps.Runtime.Adopt(ctx, string(rec.ID))
 	switch {
 	case aerr != nil:
 		// UNCERTAIN (L1-alive but endpoint unrecoverable, §4.4-A). Never tear down
 		// or misclassify on uncertainty — skip and retry next tick.
-		return HealthUnknown
+		return HealthUnknown, runtime.CauseUnknown
 	case alive:
-		return HealthTransportDown
+		return HealthTransportDown, runtime.CauseUnknown
+	case cause == runtime.CauseResourceExceeded:
+		// Dead BECAUSE of a resource cap → the parallel quadrant with the opposite
+		// disposition (§4.3): crash-pause but never resume.
+		return HealthResourceTerminated, cause
 	default:
-		return HealthDeadRecoverable
+		// Dead of something else, or undeterminable. CauseUnknown lands here too, and
+		// that is the deliberate §4.3 fallback: treat it as dead-recoverable and
+		// resume, with bounded retry self-correcting a misread — if it really was the
+		// cap, the same workload re-triggers termination, this time under the control
+		// plane's eye, and THAT observation records the real cause.
+		return HealthDeadRecoverable, cause
 	}
 }

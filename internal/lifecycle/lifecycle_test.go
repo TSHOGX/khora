@@ -308,10 +308,10 @@ func seedPaused(t *testing.T, st *store.Memory, sid, oid, tmpl string) {
 		t.Fatal(err)
 	}
 	// creating → running → paused to reach a legal paused record.
-	if err := st.CompareAndSetState(ctx, model.SandboxID(sid), model.Creating, model.Running, nil); err != nil {
+	if err := st.CompareAndSetState(ctx, model.SandboxID(sid), model.Creating, model.Running, nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.CompareAndSetState(ctx, model.SandboxID(sid), model.Running, model.Paused, nil); err != nil {
+	if err := st.CompareAndSetState(ctx, model.SandboxID(sid), model.Running, model.Paused, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 }

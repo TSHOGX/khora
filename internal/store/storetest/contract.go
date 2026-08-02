@@ -111,21 +111,21 @@ func testCASPreconditions(t *testing.T, mk Factory) {
 	_ = s.CreateSandbox(ctx, mkRec("a"), nil)
 
 	// wrong expected → ErrConflict, state unchanged.
-	if err := s.CompareAndSetState(ctx, "a", model.Running, model.Paused, nil); err != store.ErrConflict {
+	if err := s.CompareAndSetState(ctx, "a", model.Running, model.Paused, nil, nil); err != store.ErrConflict {
 		t.Fatalf("CAS wrong-expected = %v; want ErrConflict", err)
 	}
 	if got, _ := s.GetSandbox(ctx, "a"); got.State != model.Creating {
 		t.Fatalf("state changed on failed CAS: %s", got.State)
 	}
 	// right expected → succeeds.
-	if err := s.CompareAndSetState(ctx, "a", model.Creating, model.Running, nil); err != nil {
+	if err := s.CompareAndSetState(ctx, "a", model.Creating, model.Running, nil, nil); err != nil {
 		t.Fatalf("CAS right-expected: %v", err)
 	}
 	if got, _ := s.GetSandbox(ctx, "a"); got.State != model.Running {
 		t.Fatalf("state = %s; want running", got.State)
 	}
 	// CAS on missing → ErrNotFound.
-	if err := s.CompareAndSetState(ctx, "nope", model.Running, model.Paused, nil); err != store.ErrNotFound {
+	if err := s.CompareAndSetState(ctx, "nope", model.Running, model.Paused, nil, nil); err != store.ErrNotFound {
 		t.Fatalf("CAS missing = %v; want ErrNotFound", err)
 	}
 }
@@ -181,7 +181,7 @@ func testOutboxAtomic(t *testing.T, mk Factory) {
 	seedTmpl(t, s, "bare")
 	_ = s.CreateSandbox(ctx, mkRec("a"), nil)
 	e := ev("a", "evt_1", "resumed", model.Running)
-	if err := s.CompareAndSetState(ctx, "a", model.Creating, model.Running, e); err != nil {
+	if err := s.CompareAndSetState(ctx, "a", model.Creating, model.Running, e, nil); err != nil {
 		t.Fatalf("CAS+event: %v", err)
 	}
 	// state committed.
@@ -200,7 +200,7 @@ func testOutboxAtomic(t *testing.T, mk Factory) {
 		t.Fatalf("event fields mismatch: %+v", un[0])
 	}
 	// a FAILED CAS must NOT append its event (atomicity: no state change, no row).
-	if err := s.CompareAndSetState(ctx, "a", model.Paused, model.Destroyed, ev("a", "evt_bad", "destroyed", model.Destroyed)); err != store.ErrConflict {
+	if err := s.CompareAndSetState(ctx, "a", model.Paused, model.Destroyed, ev("a", "evt_bad", "destroyed", model.Destroyed), nil); err != store.ErrConflict {
 		t.Fatalf("expected ErrConflict, got %v", err)
 	}
 	un, _ = s.UnpublishedEvents(ctx)
@@ -215,7 +215,7 @@ func testOutboxNil(t *testing.T, mk Factory) {
 	seedTmpl(t, s, "bare")
 	// nil Event on every mutation → nothing to publish.
 	_ = s.CreateSandbox(ctx, mkRec("a"), nil)
-	_ = s.CompareAndSetState(ctx, "a", model.Creating, model.Running, nil)
+	_ = s.CompareAndSetState(ctx, "a", model.Creating, model.Running, nil, nil)
 	_ = s.DeleteSandbox(ctx, "a", nil)
 	un, err := s.UnpublishedEvents(ctx)
 	if err != nil {
@@ -231,8 +231,8 @@ func testMarkPublished(t *testing.T, mk Factory) {
 	s, _ := mk(t)
 	seedTmpl(t, s, "bare")
 	_ = s.CreateSandbox(ctx, mkRec("a"), nil)
-	_ = s.CompareAndSetState(ctx, "a", model.Creating, model.Running, ev("a", "evt_1", "created", model.Running))
-	_ = s.CompareAndSetState(ctx, "a", model.Running, model.Paused, ev("a", "evt_2", "paused", model.Paused))
+	_ = s.CompareAndSetState(ctx, "a", model.Creating, model.Running, ev("a", "evt_1", "created", model.Running), nil)
+	_ = s.CompareAndSetState(ctx, "a", model.Running, model.Paused, ev("a", "evt_2", "paused", model.Paused), nil)
 
 	if un, _ := s.UnpublishedEvents(ctx); len(un) != 2 {
 		t.Fatalf("want 2 unpublished, got %d", len(un))
@@ -287,7 +287,7 @@ func testDurability(t *testing.T, mk Factory) {
 	}
 	seedTmpl(t, s, "bare")
 	_ = s.CreateSandbox(ctx, mkRec("a"), nil)
-	_ = s.CompareAndSetState(ctx, "a", model.Creating, model.Running, ev("a", "evt_1", "created", model.Running))
+	_ = s.CompareAndSetState(ctx, "a", model.Creating, model.Running, ev("a", "evt_1", "created", model.Running), nil)
 
 	s2 := reopen(t)
 	got, err := s2.GetSandbox(ctx, "a")

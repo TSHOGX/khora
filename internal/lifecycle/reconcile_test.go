@@ -36,12 +36,12 @@ func seedRec(t *testing.T, st store.Store, id, ov string, state model.Lifecycle)
 	case model.Creating:
 		// leave as creating.
 	case model.Running:
-		if err := st.CompareAndSetState(ctx, model.SandboxID(id), model.Creating, model.Running, nil); err != nil {
+		if err := st.CompareAndSetState(ctx, model.SandboxID(id), model.Creating, model.Running, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 	case model.Paused:
-		_ = st.CompareAndSetState(ctx, model.SandboxID(id), model.Creating, model.Running, nil)
-		if err := st.CompareAndSetState(ctx, model.SandboxID(id), model.Running, model.Paused, nil); err != nil {
+		_ = st.CompareAndSetState(ctx, model.SandboxID(id), model.Creating, model.Running, nil, nil)
+		if err := st.CompareAndSetState(ctx, model.SandboxID(id), model.Running, model.Paused, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 	}

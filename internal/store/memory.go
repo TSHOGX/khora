@@ -154,7 +154,7 @@ func (m *Memory) ListSandboxes(_ context.Context) ([]model.Sandbox, error) {
 	return out, nil
 }
 
-func (m *Memory) CompareAndSetState(_ context.Context, id model.SandboxID, expected, next model.Lifecycle, ev *Event) error {
+func (m *Memory) CompareAndSetState(_ context.Context, id model.SandboxID, expected, next model.Lifecycle, ev *Event, cause *model.DeathCause) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	s, ok := m.rec[id]
@@ -165,6 +165,12 @@ func (m *Memory) CompareAndSetState(_ context.Context, id model.SandboxID, expec
 		return ErrConflict
 	}
 	s.State = next
+	// death cause under the SAME lock as the state change (§4.3 / §4.4-C): the
+	// Go-mutex twin of SQLite's single transaction — a committed crash-paused
+	// demotion can never lack its cause. nil = leave untouched.
+	if cause != nil {
+		s.DeathCause = *cause
+	}
 	s.UpdatedAt = time.Now()
 	m.rec[id] = s
 	m.appendEvent(ev) // state change + event append, one commit (§4.4-C)
@@ -181,6 +187,21 @@ func (m *Memory) SetUpdatedAtForTest(id model.SandboxID, t time.Time) {
 	defer m.mu.Unlock()
 	if s, ok := m.rec[id]; ok {
 		s.UpdatedAt = t
+		m.rec[id] = s
+	}
+}
+
+// SetLimitsForTest overwrites a record's resource-limit Binding. TEST-ONLY seam,
+// like SetUpdatedAtForTest: it exists so a test can prove the caps are a BINDING
+// (re-materialized from the record at every placement, §3.4) rather than frozen
+// placement state — edit the record while paused, resume, and the new values must
+// take effect. There is no production "edit limits" verb yet, so this carries no
+// production semantics. No-op for an unknown ID.
+func (m *Memory) SetLimitsForTest(id model.SandboxID, l model.Limits) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if s, ok := m.rec[id]; ok {
+		s.Limits = l
 		m.rec[id] = s
 	}
 }

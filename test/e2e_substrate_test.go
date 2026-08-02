@@ -67,6 +67,35 @@ func upperDir(t *testing.T, eng *orchestrator.Engine, base string, id model.Sand
 	return filepath.Join(base, "state", "overlays", string(rec.Overlay), "upper")
 }
 
+// setupEngineWithProbe is setupEngine plus the tiny guest probes the M6 resource
+// assertions need (the minimal Template ships no coreutils, so a busy loop and a
+// disk filler are injected as static binaries).
+func setupEngineWithProbe(t *testing.T, healthTimeout time.Duration) (*orchestrator.Engine, string) {
+	t.Helper()
+	repo := harness.RepoRoot(t)
+	base := t.TempDir()
+	tmpl := filepath.Join(base, "templates")
+	sbxd := harness.BuildSandboxd(t, repo)
+	harness.BuildTemplate(t, repo, tmpl, "bare", sbxd)
+	harness.InjectStaticBin(t, tmpl, "bare", "cpuburn", cpuBurnSrc)
+	harness.InjectStaticBin(t, tmpl, "bare", "diskfill", diskFillSrc)
+	eng, err := orchestrator.New(orchestrator.Config{
+		TemplatesDir: tmpl, StateDir: filepath.Join(base, "state"),
+		StorePath:     filepath.Join(base, "store.db"),
+		HealthTimeout: healthTimeout,
+	})
+	if err != nil {
+		t.Fatalf("orchestrator.New: %v", err)
+	}
+	if err := eng.SeedTemplates(context.Background()); err != nil {
+		t.Fatalf("seed builtin templates: %v", err)
+	}
+	if err := eng.Reconcile(context.Background()); err != nil {
+		t.Fatalf("startup reconcile: %v", err)
+	}
+	return eng, base
+}
+
 func TestE2EWalkingSkeleton(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("e2e needs root (runsc --network=sandbox + overlay mount)")

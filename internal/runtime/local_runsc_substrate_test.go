@@ -161,7 +161,7 @@ func TestAdoptRunningContainerSameIP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewLocalRunsc (restart): %v", err)
 	}
-	adopted, alive, err := p2.Adopt(ctx, "sbxADOPT")
+	adopted, alive, _, err := p2.Adopt(ctx, "sbxADOPT")
 	if err != nil {
 		t.Fatalf("Adopt: %v", err)
 	}
@@ -199,7 +199,7 @@ func TestAdoptDeadContainer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewLocalRunsc: %v", err)
 	}
-	_, alive, err := p.Adopt(ctx, "sbxGHOST")
+	_, alive, _, err := p.Adopt(ctx, "sbxGHOST")
 	if err != nil {
 		t.Fatalf("Adopt: %v", err)
 	}

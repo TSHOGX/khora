@@ -47,7 +47,7 @@ func TestOverlayCoWAndRemountByteIdentical(t *testing.T) {
 		t.Fatalf("NewHostOverlayFS: %v", err)
 	}
 
-	o, err := p.CreateOverlay(ctx, "ov-test", []string{"bare"})
+	o, err := p.CreateOverlay(ctx, "ov-test", []string{"bare"}, 0)
 	if err != nil {
 		t.Fatalf("CreateOverlay: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestOverlayCoWAndRemountByteIdentical(t *testing.T) {
 	}
 
 	// --- resume: OpenOverlay + re-mount SAME upper → byte-identical ----------
-	o2, err := p.OpenOverlay(ctx, "ov-test", []string{"bare"})
+	o2, err := p.OpenOverlay(ctx, "ov-test", []string{"bare"}, 0)
 	if err != nil {
 		t.Fatalf("OpenOverlay: %v", err)
 	}

@@ -40,7 +40,7 @@ func launchWith(t *testing.T, inject func(templatesDir, template string)) (trans
 	}
 	rp, rt := harness.Providers(t, base, tmpl)
 
-	ov, err := rp.CreateOverlay(ctx, "ovD", []string{"bare"})
+	ov, err := rp.CreateOverlay(ctx, "ovD", []string{"bare"}, 0)
 	if err != nil {
 		t.Fatalf("CreateOverlay: %v", err)
 	}

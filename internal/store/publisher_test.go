@@ -56,8 +56,8 @@ func TestPublisherDeliversAndMarks(t *testing.T) {
 	st := store.NewMemory()
 	seedPubTmpl(t, st)
 	_ = st.CreateSandbox(ctx, model.Sandbox{ID: "a", Template: "bare", State: model.Creating}, nil)
-	_ = st.CompareAndSetState(ctx, "a", model.Creating, model.Running, ev("a", "e1", "created", model.Running))
-	_ = st.CompareAndSetState(ctx, "a", model.Running, model.Paused, ev("a", "e2", "paused", model.Paused))
+	_ = st.CompareAndSetState(ctx, "a", model.Creating, model.Running, ev("a", "e1", "created", model.Running), nil)
+	_ = st.CompareAndSetState(ctx, "a", model.Running, model.Paused, ev("a", "e2", "paused", model.Paused), nil)
 
 	sink := &countingSink{}
 	p := store.NewPublisher(st, sink)
@@ -87,7 +87,7 @@ func TestPublisherRetriesOnSinkFailure(t *testing.T) {
 	st := store.NewMemory()
 	seedPubTmpl(t, st)
 	_ = st.CreateSandbox(ctx, model.Sandbox{ID: "a", Template: "bare", State: model.Creating}, nil)
-	_ = st.CompareAndSetState(ctx, "a", model.Creating, model.Running, ev("a", "e1", "created", model.Running))
+	_ = st.CompareAndSetState(ctx, "a", model.Creating, model.Running, ev("a", "e1", "created", model.Running), nil)
 
 	sink := &countingSink{failNext: errors.New("sink down")}
 	p := store.NewPublisher(st, sink)
@@ -122,8 +122,8 @@ func TestPublisherAtLeastOnceDedupOnRestart(t *testing.T) {
 		t.Fatalf("seed template: %v", err)
 	}
 	_ = st.CreateSandbox(ctx, model.Sandbox{ID: "a", Template: "bare", State: model.Creating}, nil)
-	_ = st.CompareAndSetState(ctx, "a", model.Creating, model.Running, ev("a", "e1", "created", model.Running))
-	_ = st.CompareAndSetState(ctx, "a", model.Running, model.Paused, ev("a", "e2", "paused", model.Paused))
+	_ = st.CompareAndSetState(ctx, "a", model.Creating, model.Running, ev("a", "e1", "created", model.Running), nil)
+	_ = st.CompareAndSetState(ctx, "a", model.Running, model.Paused, ev("a", "e2", "paused", model.Paused), nil)
 
 	// count how many times the dedup handler actually fires (billing semantics).
 	var mu sync.Mutex

@@ -43,20 +43,74 @@ type RootfsSource struct {
 type SteeringSpec struct{}
 
 // ResourceLimits is the Binding the provider materializes at placement time
-// (§3.4 / §5.A): CPU / disk-IO rate + RAM → cgroup for local_runsc. Disk
-// CAPACITY is NOT here — that is an FS-layer quota owned by §5.B/§5.C (§3.4).
+// (§3.4 / §5.A): CPU rate + RAM → cgroup for local_runsc. Disk CAPACITY is NOT
+// here — that is an FS-layer quota owned by §5.B/§5.C (§3.4), because cgroup
+// cannot cap at-rest bytes and a quota cannot cap a rate. Adding a DiskByte
+// field here would weld two orthogonal axes onto one mechanism.
+//
+// This carries PURE POLICY — numeric intent only. No cgroup path appears here or
+// anywhere in the Provider interface (§5.A ❌ list): local_runsc synthesizes its
+// own cgroup path internally from the cid, the same way it synthesizes netns and
+// container names. A remote provider cannot produce a cgroup path at all, and
+// accepting one would bind this contract to a host-local assumption.
 //
 // RAM is a SAFETY limit, not a resource limit (§3.4): exceeding it terminates
 // the sandbox (a lifecycle event) rather than failing one operation, because the
 // substrate offers no "guest process gets ENOMEM while the sandbox survives"
 // path. How the provider splits one MemoryByte into guest-visible RAM vs a host
-// ceiling is ITS OWN internal detail — the interface states only N (§5.A).
-// These are zero (unlimited) until resource limits are wired.
+// ceiling is ITS OWN internal detail — the interface states only N (§5.A):
+// local_runsc adds a sentry/gofer overhead constant, while a remote provider's
+// overhead may be a VM balloon or a scheduler memory request. Zero = unlimited.
+//
+// The disk-IO RATE cap (§3.4's other rate-axis half) is deliberately absent: it
+// has no consumer today and whether it gets a per-sandbox knob is UNSETTLED
+// (open-decisions §3, with the measured substrate constraint that runsc's
+// io.max write needs a whole-disk MAJ:MIN). Its absence is a registered pending
+// decision, not an omission — adding the field before a consumer exists is the
+// speculative reservation §1.3 rejects.
 type ResourceLimits struct {
-	CPUMillis  int64
+	CPUMillis  int64 // 1000 = one full CPU
 	MemoryByte int64
-	// disk-IO (io controller) joins here when resource limits are wired; the
-	// capacity axis is intentionally absent — it belongs to the FS provider.
+}
+
+// DeathCause is the ABSTRACT enum a provider reports when it finds an isolation
+// unit dead (§4.3 / §2.4). It crosses the §5.A seam as an enum and NEVER as an
+// errno or a cgroup file path: local_runsc concludes it by reading its own
+// memcg's oom_group_kill, a remote provider from its scheduler's termination
+// reason, and the §4 mediator — which must never learn that memcg exists —
+// dispatches on these three values alone. That is what makes the §4.3
+// resource-terminated disposition provider-portable rather than a host-local
+// hack.
+//
+// It mirrors model.DeathCause: this is the §5.A wire form, the model one is the
+// persisted form. They are deliberately separate types so the provider seam does
+// not depend on the control-plane record shape.
+type DeathCause int
+
+const (
+	// CauseUnknown = the unit is gone but WHY is undeterminable. A LEGAL verdict,
+	// not a failure — a provider MUST report it rather than guess (§2.4 不许猜).
+	// §4.3 has a bounded-retry fallback path for it.
+	CauseUnknown DeathCause = iota
+	// CauseGone = dead for a non-resource reason (sentry crash, external kill,
+	// clean exit). Disposition: dead-recoverable → resume (§4.3).
+	CauseGone
+	// CauseResourceExceeded = terminated for exceeding a resource cap (today the
+	// RAM safety limit, whole-group via oom.group=1). Disposition:
+	// resource-terminated → do NOT resume (§4.3): the same workload would
+	// re-trigger the same termination, which is a crash loop.
+	CauseResourceExceeded
+)
+
+func (c DeathCause) String() string {
+	switch c {
+	case CauseGone:
+		return "gone"
+	case CauseResourceExceeded:
+		return "resource-exceeded"
+	default:
+		return "unknown"
+	}
 }
 
 // LaunchSpec is the provider input — the contract's left-hand side:
@@ -122,19 +176,31 @@ type Provider interface {
 	// resources, probes L1 liveness, and rediscovers the transport endpoint — the
 	// SAME endpoint, NOT a new epoch, because the isolation unit never restarted
 	// (§3.3). The return is a THREE-way outcome, not a boolean:
-	//   - (placement, true, nil)  → L1-alive and endpoint recovered; caller runs
-	//     its L2 Health probe, then adopts.
-	//   - (nil, false, nil)       → isolation unit genuinely DEAD/absent; caller
-	//     CAS-demotes the record to paused (§4.2 involuntary pause).
-	//   - (nil, false, err)       → UNCERTAIN: L1-alive but the endpoint could not
+	//   - (placement, true, _, nil)  → L1-alive and endpoint recovered; caller runs
+	//     its L2 Health probe, then adopts. The cause is meaningless here.
+	//   - (nil, false, cause, nil)   → isolation unit genuinely DEAD/absent; caller
+	//     CAS-demotes the record to paused (§4.2 involuntary pause) AND persists
+	//     cause in that same commit (§4.3).
+	//   - (nil, false, _, err)       → UNCERTAIN: L1-alive but the endpoint could not
 	//     be recovered. This is NOT death — the caller must PROTECT the placement
 	//     (not reclaim it) and retry next boot (§4.4-A protect-on-uncertainty:
 	//     tearing down a maybe-live container is irreversible). A provider MUST NOT
 	//     collapse this case into alive=false.
+	//
+	// The DEATH CAUSE rides the alive=false return for a hard reason (§4.3 /
+	// reaper-health D4c): the signal is placement-local and VOLATILE — for
+	// local_runsc it is the memcg leaf's oom_group_kill, destroyed by the
+	// `runsc delete` inside teardown — so this "unit is dead, placement still
+	// intact" instant is the LAST moment it is readable. There is no
+	// ask-again-later: a provider that tears down before reading has destroyed the
+	// evidence. Hence the provider MUST read it before returning, not the caller
+	// afterwards. Undeterminable → CauseUnknown, never a guess (§2.4).
+	//
 	// Left-hand side is engine vocabulary (SandboxID); right-hand side is an OPAQUE
-	// handle — no host primitive leaks (§5.A ❌ list). This is why placement-local
-	// resources must carry a SandboxID label — the §3.3 reverse, allowed (§4.4-A).
-	Adopt(ctx context.Context, sandboxID string) (p *Placement, alive bool, err error)
+	// handle + an ABSTRACT enum — no host primitive leaks (§5.A ❌ list). This is why
+	// placement-local resources must carry a SandboxID label — the §3.3 reverse,
+	// allowed (§4.4-A).
+	Adopt(ctx context.Context, sandboxID string) (p *Placement, alive bool, cause DeathCause, err error)
 
 	// ReclaimOrphans tears down every engine placement whose SandboxID is NOT in
 	// keep (§4.4-A: an orphan is a placement backing no sandbox the store says

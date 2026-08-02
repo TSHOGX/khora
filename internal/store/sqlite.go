@@ -50,6 +50,17 @@ CREATE TABLE IF NOT EXISTS sandboxes (
 	state        TEXT NOT NULL,
 	idle_timeout INTEGER NOT NULL DEFAULT 0, -- TTL Binding, ns (§3.4 / §4.3)
 	retention    INTEGER NOT NULL DEFAULT 0, -- TTL Binding, ns (§3.4 / §4.3)
+	-- resource-limit Binding (§3.4): re-materialized at each placement FROM these
+	-- columns, never read back from a frozen placement. 0 = unlimited. Three
+	-- separate columns because the three dimensions use three mechanisms with
+	-- three different overrun consequences (§3.4) — not one fungible "size".
+	cpu_millis   INTEGER NOT NULL DEFAULT 0, -- §5.A cgroup cpu
+	memory_byte  INTEGER NOT NULL DEFAULT 0, -- §5.A host memcg (SAFETY limit)
+	disk_byte    INTEGER NOT NULL DEFAULT 0, -- §5.B FS quota on Overlay upper+work
+	-- why the unit was last found dead (§4.3). Committed in the SAME transaction
+	-- as the crash-paused CAS — the signal is volatile and cannot be re-read
+	-- afterwards (§4.4-C). '' = never observed dead.
+	death_cause  TEXT NOT NULL DEFAULT '',
 	created_at   INTEGER NOT NULL, -- unix nanos
 	updated_at   INTEGER NOT NULL
 );
@@ -161,10 +172,13 @@ func (s *SQLite) CreateSandbox(ctx context.Context, sb model.Sandbox, ev *Event)
 			return err
 		}
 		if _, err := t.Exec(
-			`INSERT INTO sandboxes(id, template, overlay, state, idle_timeout, retention, created_at, updated_at)
-			 VALUES(?,?,?,?,?,?,?,?)`,
+			`INSERT INTO sandboxes(id, template, overlay, state, idle_timeout, retention,
+			   cpu_millis, memory_byte, disk_byte, death_cause, created_at, updated_at)
+			 VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
 			string(sb.ID), string(sb.Template), string(sb.Overlay), string(sb.State),
 			int64(sb.IdleTimeout), int64(sb.Retention),
+			sb.Limits.CPUMillis, sb.Limits.MemoryByte, sb.Limits.DiskByte,
+			string(sb.DeathCause),
 			sb.CreatedAt.UnixNano(), sb.UpdatedAt.UnixNano(),
 		); err != nil {
 			// FK RESTRICT on template: the referenced Template does not exist —
@@ -181,13 +195,17 @@ func (s *SQLite) CreateSandbox(ctx context.Context, sb model.Sandbox, ev *Event)
 
 func (s *SQLite) GetSandbox(ctx context.Context, id model.SandboxID) (model.Sandbox, error) {
 	return scanSandbox(s.db.QueryRowContext(ctx,
-		`SELECT id, template, overlay, state, idle_timeout, retention, created_at, updated_at FROM sandboxes WHERE id=?`,
+		`SELECT id, template, overlay, state, idle_timeout, retention,
+		   cpu_millis, memory_byte, disk_byte, death_cause, created_at, updated_at
+		 FROM sandboxes WHERE id=?`,
 		string(id)))
 }
 
 func (s *SQLite) ListSandboxes(ctx context.Context) ([]model.Sandbox, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, template, overlay, state, idle_timeout, retention, created_at, updated_at FROM sandboxes ORDER BY created_at`)
+		`SELECT id, template, overlay, state, idle_timeout, retention,
+		   cpu_millis, memory_byte, disk_byte, death_cause, created_at, updated_at
+		 FROM sandboxes ORDER BY created_at`)
 	if err != nil {
 		return nil, err
 	}
@@ -203,7 +221,7 @@ func (s *SQLite) ListSandboxes(ctx context.Context) ([]model.Sandbox, error) {
 	return out, rows.Err()
 }
 
-func (s *SQLite) CompareAndSetState(ctx context.Context, id model.SandboxID, expected, next model.Lifecycle, ev *Event) error {
+func (s *SQLite) CompareAndSetState(ctx context.Context, id model.SandboxID, expected, next model.Lifecycle, ev *Event, cause *model.DeathCause) error {
 	return s.tx(ctx, func(t *sql.Tx) error {
 		var cur string
 		err := t.QueryRow(`SELECT state FROM sandboxes WHERE id=?`, string(id)).Scan(&cur)
@@ -216,9 +234,19 @@ func (s *SQLite) CompareAndSetState(ctx context.Context, id model.SandboxID, exp
 		if model.Lifecycle(cur) != expected {
 			return ErrConflict // failed CAS → rollback drops any event (§4.4-C atomicity)
 		}
-		if _, err := t.Exec(`UPDATE sandboxes SET state=?, updated_at=? WHERE id=?`,
-			string(next), time.Now().UnixNano(), string(id)); err != nil {
-			return err
+		// state + death_cause + outbox row in ONE statement set inside ONE
+		// transaction (§4.4-C / §4.3): a committed crash-paused demotion can never
+		// lack its death cause, because there is no window between them.
+		if cause == nil {
+			if _, err := t.Exec(`UPDATE sandboxes SET state=?, updated_at=? WHERE id=?`,
+				string(next), time.Now().UnixNano(), string(id)); err != nil {
+				return err
+			}
+		} else {
+			if _, err := t.Exec(`UPDATE sandboxes SET state=?, death_cause=?, updated_at=? WHERE id=?`,
+				string(next), string(*cause), time.Now().UnixNano(), string(id)); err != nil {
+				return err
+			}
 		}
 		return insertEvent(t, ev)
 	})
@@ -390,9 +418,10 @@ type rowScanner interface {
 
 func scanSandbox(r rowScanner) (model.Sandbox, error) {
 	var sb model.Sandbox
-	var id, tmpl, ov, state string
-	var idleTimeout, retention, created, updated int64
-	err := r.Scan(&id, &tmpl, &ov, &state, &idleTimeout, &retention, &created, &updated)
+	var id, tmpl, ov, state, deathCause string
+	var idleTimeout, retention, cpuMillis, memoryByte, diskByte, created, updated int64
+	err := r.Scan(&id, &tmpl, &ov, &state, &idleTimeout, &retention,
+		&cpuMillis, &memoryByte, &diskByte, &deathCause, &created, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return model.Sandbox{}, ErrNotFound
 	}
@@ -405,6 +434,8 @@ func scanSandbox(r rowScanner) (model.Sandbox, error) {
 	sb.State = model.Lifecycle(state)
 	sb.IdleTimeout = time.Duration(idleTimeout)
 	sb.Retention = time.Duration(retention)
+	sb.Limits = model.Limits{CPUMillis: cpuMillis, MemoryByte: memoryByte, DiskByte: diskByte}
+	sb.DeathCause = model.DeathCause(deathCause)
 	sb.CreatedAt = time.Unix(0, created)
 	sb.UpdatedAt = time.Unix(0, updated)
 	return sb, nil

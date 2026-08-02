@@ -82,6 +82,15 @@ type createReq struct {
 	// (materialized by the mediator at create).
 	IdleTimeout string `json:"idle_timeout"`
 	Retention   string `json:"retention"`
+	// Resource-limit Binding inputs (§6.1 / §3.4). Omitted / 0 = unlimited on that
+	// axis. Three separate fields because the three axes use three mechanisms with
+	// three different overrun consequences (§3.4) — not one blended "size".
+	// disk_byte is the capacity axis (FS quota, sandbox survives ENOSPC);
+	// memory_byte is the SAFETY limit (exceeding it terminates the sandbox).
+	// There is deliberately no io_* field — see open-decisions §3.
+	CPUMillis  int64 `json:"cpu_millis"`
+	MemoryByte int64 `json:"memory_byte"`
+	DiskByte   int64 `json:"disk_byte"`
 }
 type createResp struct {
 	SandboxID string `json:"sandbox_id"`
@@ -93,8 +102,17 @@ func (e *Engine) handleCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if req.CPUMillis < 0 || req.MemoryByte < 0 || req.DiskByte < 0 {
+		http.Error(w, "resource limits must be non-negative (0 = unlimited)", http.StatusBadRequest)
+		return
+	}
 	spec := lifecycle.CreateSpec{
 		Template: model.TemplateID(req.TemplateID),
+		Limits: model.Limits{
+			CPUMillis:  req.CPUMillis,
+			MemoryByte: req.MemoryByte,
+			DiskByte:   req.DiskByte,
+		},
 	}
 	if req.IdleTimeout != "" {
 		d, err := time.ParseDuration(req.IdleTimeout)
@@ -260,6 +278,16 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 
 func statusFor(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, lifecycle.ErrInsufficientCapacity):
+		// §3.4 admission refusal: nothing is wrong with the request or the sandbox —
+		// the NODE cannot honor another promise. 507 Insufficient Storage says
+		// "capacity", where 409 would wrongly imply a state conflict the caller could
+		// resolve by retrying.
+		http.Error(w, err.Error(), http.StatusInsufficientStorage)
+	case errors.Is(err, lifecycle.ErrResourceTerminated):
+		// §4.3 resource-terminated: a state conflict the caller resolves by raising
+		// the cap or destroying the sandbox — 409, never a raw 500.
+		http.Error(w, err.Error(), http.StatusConflict)
 	case errors.Is(err, store.ErrNotFound), errors.Is(err, store.ErrTemplateNotFound):
 		http.Error(w, err.Error(), http.StatusNotFound)
 	case errors.Is(err, store.ErrInUse):

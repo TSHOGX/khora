@@ -72,17 +72,83 @@ const (
 	Destroyed Lifecycle = "destroyed"
 )
 
+// Limits is the per-sandbox resource-limit Binding (§3.4). SoT is the
+// control-plane record: the values are stable across resume and RE-MATERIALIZED
+// at each placement from the record, never read back from a frozen placement.
+//
+// Three dimensions, three mechanisms, three DIFFERENT overrun consequences —
+// they are deliberately NOT interchangeable knobs (§3.4):
+//
+//   - CPUMillis  → §5.A cgroup `cpu` controller. Overrun = the guest runs
+//     slower, no error. A resource limit (fair sharing).
+//   - DiskByte   → §5.B FS-layer quota on the Overlay upper+work (NOT cgroup —
+//     cgroup cannot cap at-rest bytes, §3.4 容量与 I/O 是两条正交的轴).
+//     Overrun = the guest's write() gets ENOSPC and THE SANDBOX LIVES ON: a
+//     data-plane event the control plane does not observe.
+//   - MemoryByte → §5.A host memcg. Overrun TERMINATES the sandbox, so this one
+//     is a SAFETY limit bounding blast radius (§2.3), not a fair-sharing limit:
+//     the substrate offers no "guest process gets ENOMEM while the sandbox
+//     survives" path, so it is a lifecycle event the control plane MUST see
+//     (§4.3 resource-terminated).
+//
+// Zero on any dimension = unlimited (that dimension is not materialized).
+//
+// The disk-IO rate cap (§3.4's other rate-axis half) has NO field here on
+// purpose — it has no consumer today, and whether it gets a per-sandbox knob at
+// all is UNSETTLED (open-decisions §3). Its absence is a registered pending
+// decision, not an oversight.
+type Limits struct {
+	CPUMillis  int64 // 1000 = one full CPU
+	MemoryByte int64
+	DiskByte   int64
+}
+
+// DeathCause is why a sandbox's isolation unit is gone (§4.3). It is an ABSTRACT
+// ENUM, never an errno or a cgroup file: local_runsc concludes it from its own
+// memcg, a remote provider from its scheduler's termination reason, and the §4
+// mediator only ever sees these three values (§2.4 / §5.A Adopt contract). That
+// is what makes resource-terminated work across providers instead of being a
+// host-local hack.
+//
+// It is persisted on the sandbox record because the signal is VOLATILE — it
+// lives in placement-local state and vanishes when the placement is torn down,
+// so "ask again later" does not exist. It is written in the SAME commit as the
+// crash-paused demotion CAS (§4.3 / §4.4-C).
+type DeathCause string
+
+const (
+	// CauseNone is the resting value for a sandbox that has not been observed
+	// dead. Not a death cause — the absence of one.
+	CauseNone DeathCause = ""
+	// CauseUnknown = the unit is gone but WHY could not be determined. A
+	// first-class legal value, NOT an error (§4.3): the disposition is to treat
+	// it as dead-recoverable and resume, with bounded retry self-correcting a
+	// misread (if it really was the RAM cap, the same workload re-triggers
+	// termination, this time in the control plane's plain view). Providers MUST
+	// report this rather than guess (§2.4 不许猜).
+	CauseUnknown DeathCause = "unknown"
+	// CauseGone = the unit died for a reason that is NOT a resource cap (sentry
+	// crash, external kill, clean guest exit). Disposition: dead-recoverable →
+	// resume (§4.3).
+	CauseGone DeathCause = "gone"
+	// CauseResourceExceeded = the unit was terminated for exceeding a resource
+	// cap (today: the RAM safety limit, whole-group). Disposition:
+	// resource-terminated → do NOT resume (§4.3) — resuming re-runs the same
+	// workload into the same cap, which is a crash loop.
+	CauseResourceExceeded DeathCause = "resource-exceeded"
+)
+
 // Sandbox is the persistent unit (§3.2): the durable record the control plane
 // owns. Placement is deliberately NOT a field here — it is rebound every resume
 // and lives with the runtime provider, not in the identity record (§3.3).
 //
 // Minimal shape by one rule: a field exists here only when this record actually
 // carries it today. Binding fields not yet consumed (mounted volumes, network
-// policy, resource limits) are omitted rather than stubbed — this record is a
-// data shape, not a settled interface signature, so an unused field would be a
-// speculative reservation (§1.3). (Contrast the runtime provider's
-// SteeringSpec/ResourceLimits, which DO exist now: they are named members of the
-// settled §5.A contract 3-tuple — "settled, not yet built".)
+// policy) are omitted rather than stubbed — this record is a data shape, not a
+// settled interface signature, so an unused field would be a speculative
+// reservation (§1.3). (Contrast the runtime provider's SteeringSpec, which DOES
+// exist now: it is a named member of the settled §5.A contract 3-tuple —
+// "settled, not yet built".)
 type Sandbox struct {
 	ID       SandboxID
 	Template TemplateID
@@ -108,6 +174,21 @@ type Sandbox struct {
 	// the concrete duration the reaper reads (default site: lifecycle.Deps).
 	IdleTimeout time.Duration
 	Retention   time.Duration
+
+	// Limits is the resource-limit Binding (§3.4), materialized into this record
+	// at create and RE-APPLIED at every placement from the record — that is what
+	// makes it a Binding rather than placement state: a resume re-derives the caps
+	// from here instead of reading back a frozen value (§3.4 / M6 acceptance 3).
+	Limits Limits
+
+	// DeathCause records WHY this sandbox's isolation unit was last found dead
+	// (§4.3). Written in the SAME commit as the crash-paused CAS that demoted it,
+	// because the signal is volatile and unrecoverable afterwards (§4.4-C same
+	// shape). It is what separates the two otherwise-identical §4.3 dispositions:
+	// dead-recoverable (resume it) vs resource-terminated (do NOT). Cleared on a
+	// successful resume — a sandbox that came back up is no longer explained by
+	// its previous death.
+	DeathCause DeathCause
 
 	CreatedAt time.Time
 	UpdatedAt time.Time

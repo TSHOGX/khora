@@ -56,7 +56,7 @@ func (e *reaperEnv) seedRunning(t *testing.T, id string, idleTimeout, retention 
 	}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.st.CompareAndSetState(ctx, model.SandboxID(id), model.Creating, model.Running, nil); err != nil {
+	if err := e.st.CompareAndSetState(ctx, model.SandboxID(id), model.Creating, model.Running, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	e.m.put(model.SandboxID(id), &liveState{placement: &runtime.Placement{TransportEndpoint: "10.0.0.1:9000"}})
@@ -73,8 +73,8 @@ func (e *reaperEnv) seedPaused(t *testing.T, id string, retention time.Duration,
 	}, nil); err != nil {
 		t.Fatal(err)
 	}
-	_ = e.st.CompareAndSetState(ctx, model.SandboxID(id), model.Creating, model.Running, nil)
-	if err := e.st.CompareAndSetState(ctx, model.SandboxID(id), model.Running, model.Paused, nil); err != nil {
+	_ = e.st.CompareAndSetState(ctx, model.SandboxID(id), model.Creating, model.Running, nil, nil)
+	if err := e.st.CompareAndSetState(ctx, model.SandboxID(id), model.Running, model.Paused, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	// backdate UpdatedAt so retention math sees it as paused `pausedAgo` ago.

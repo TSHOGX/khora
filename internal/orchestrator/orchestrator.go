@@ -48,6 +48,15 @@ type Config struct {
 	SweepInterval       time.Duration
 	TransportDownBudget time.Duration
 
+	// NodeDiskByte / NodeMemoryByte are the §3.4 no-oversubscribe budgets the
+	// admission gate admits against (§1.1 one config). Zero leaves that axis
+	// UNMETERED — deliberately not defaulted: the engine must not invent a capacity
+	// number and start refusing creates on a guess. Operators set them below the
+	// raw device/RAM size, since neither budget models the store, logs, runsc
+	// state, or per-sandbox sentry/gofer overhead.
+	NodeDiskByte   int64
+	NodeMemoryByte int64
+
 	// FaultAfterColdStart is a TEST-ONLY injection hook forwarded to the
 	// mediator to simulate a crash mid-transition. nil in production.
 	FaultAfterColdStart func(id model.SandboxID)
@@ -106,6 +115,10 @@ func New(cfg Config) (*Engine, error) {
 		DefaultIdleTimeout:  cfg.DefaultIdleTimeout,
 		DefaultRetention:    cfg.DefaultRetention,
 		FaultAfterColdStart: cfg.FaultAfterColdStart,
+		NodeCapacity: lifecycle.NodeCapacity{
+			DiskByte:   cfg.NodeDiskByte,
+			MemoryByte: cfg.NodeMemoryByte,
+		},
 	})
 
 	// outbox publisher → a log sink (§4.4-C: the engine only guarantees reliable

@@ -183,16 +183,29 @@ func (r *Reaper) sweepRunning(ctx context.Context, rec model.Sandbox, downThisTi
 		return
 	}
 
-	switch h := r.m.classify(ctx, cur); h {
+	h, cause := r.m.classify(ctx, cur)
+	switch h {
 	case HealthIdle:
 		r.autoPauseLocked(ctx, cur)
-	case HealthDeadRecoverable:
+	case HealthDeadRecoverable, HealthResourceTerminated:
 		// LIVE crash-pause (§4.2 involuntary pause): the isolation unit died under
 		// a running orchestrator. Same disposition reconcile does at boot, driven
 		// now by the reaper. Not re-confirmed transport-down → streak pruned at
 		// sweep end (this is death, not a transient).
-		if err := r.m.pauseLocked(ctx, cur.ID, "crash-paused"); err != nil && err != store.ErrConflict {
+		//
+		// BOTH quadrants crash-pause — the state is `paused` either way. What differs
+		// is the CAUSE committed alongside it (§4.3): the classifier read it while the
+		// placement was still intact, and pauseLocked persists it in the SAME commit
+		// as the CAS, because a moment later teardown destroys the evidence. That
+		// recorded cause is what makes resume refuse a resource-terminated sandbox
+		// while a dead-recoverable one resumes normally — identical states,
+		// opposite dispositions, separated only by this value.
+		dc := deathCauseOf(cause)
+		if err := r.m.pauseLocked(ctx, cur.ID, "crash-paused", &dc); err != nil && err != store.ErrConflict {
 			r.m.deps.Logf("reaper: crash-pause %s (retried next tick): %v", cur.ID, err)
+		} else if err == nil {
+			r.m.deps.Logf("reaper: %s crash-paused, health=%s death-cause=%s%s",
+				cur.ID, h, dc, resumeNote(h))
 		}
 	case HealthTransportDown:
 		// re-confirm the streak this tick BEFORE dispatch; the D4b budget is read
@@ -208,6 +221,16 @@ func (r *Reaper) sweepRunning(ctx context.Context, rec model.Sandbox, downThisTi
 	}
 }
 
+// resumeNote spells out the disposition in the log line, so an operator reading
+// "crash-paused" can tell whether the engine intends to bring it back (§4.3's two
+// parallel quadrants are otherwise indistinguishable in a log).
+func resumeNote(h Health) string {
+	if h == HealthResourceTerminated {
+		return " (will NOT resume: raise the cap or destroy it, §4.3)"
+	}
+	return ""
+}
+
 // autoPauseLocked auto-pauses an idle sandbox — with the D3 activity-race guard.
 // CALLER HOLDS the lock. The sweep's classify→dispose window can be seconds; a
 // sandbox that became active inside it is STILL `running`, so §4.4-B's CAS (which
@@ -218,13 +241,14 @@ func (r *Reaper) sweepRunning(ctx context.Context, rec model.Sandbox, downThisTi
 // lock-latest {state + activity} double snapshot, not the sweep-start
 // classification (reaper-health D3).
 func (r *Reaper) autoPauseLocked(ctx context.Context, rec model.Sandbox) {
-	if h := r.m.classify(ctx, rec); h != HealthIdle {
+	if h, _ := r.m.classify(ctx, rec); h != HealthIdle {
 		// became active (or unreachable) in the window → abort, re-judge next tick.
 		return
 	}
 	// idle → not re-confirmed transport-down this tick, so its streak (if any) is
 	// pruned at sweep end; no explicit delete needed here.
-	if err := r.m.pauseLocked(ctx, rec.ID, "auto-paused"); err != nil && err != store.ErrConflict {
+	// nil cause: an idle auto-pause is not a death and must not stamp one.
+	if err := r.m.pauseLocked(ctx, rec.ID, "auto-paused", nil); err != nil && err != store.ErrConflict {
 		r.m.deps.Logf("reaper: auto-pause %s (retried next tick): %v", rec.ID, err)
 	}
 }
@@ -260,7 +284,10 @@ func (r *Reaper) handleTransportDownLocked(ctx context.Context, rec model.Sandbo
 	// then resume.
 	r.m.deps.Logf("reaper: %s transport-down past budget (%s) → escalate to resume (D4b)", rec.ID, r.transportDownBudget)
 	delete(r.downSince, rec.ID)
-	if err := r.m.pauseLocked(ctx, rec.ID, "crash-paused"); err != nil {
+	// nil cause: escalation is not a death observation — L1 is ALIVE here (that is
+	// what transport-down means), so there is nothing dead to explain and stamping
+	// a cause would be inventing one (§2.4 不许猜).
+	if err := r.m.pauseLocked(ctx, rec.ID, "crash-paused", nil); err != nil {
 		if err != store.ErrConflict {
 			r.m.deps.Logf("reaper: escalate crash-pause %s (retried next tick): %v", rec.ID, err)
 		}

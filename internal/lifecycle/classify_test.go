@@ -50,7 +50,7 @@ func newClassifyFixture(t *testing.T, id string, idleTimeout time.Duration, l2He
 	}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.CompareAndSetState(ctx, model.SandboxID(id), model.Creating, model.Running, nil); err != nil {
+	if err := st.CompareAndSetState(ctx, model.SandboxID(id), model.Creating, model.Running, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if !noHandle {
@@ -60,6 +60,16 @@ func newClassifyFixture(t *testing.T, id string, idleTimeout time.Duration, l2He
 }
 
 func classifyOf(t *testing.T, f classifyFixture, id string) Health {
+	t.Helper()
+	h, _ := classifyWithCause(t, f, id)
+	return h
+}
+
+// classifyWithCause also returns the death cause the classifier carried out
+// alongside the quadrant (§4.3 / reaper-health D4c: the signal dies with the
+// placement, so a classifier that read it but did not return it has thrown it
+// away and the disposition can never recover it).
+func classifyWithCause(t *testing.T, f classifyFixture, id string) (Health, runtime.DeathCause) {
 	t.Helper()
 	rec, err := f.st.GetSandbox(context.Background(), model.SandboxID(id))
 	if err != nil {

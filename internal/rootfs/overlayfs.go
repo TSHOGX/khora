@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+
+	"engine/internal/btrfs"
 )
 
 // HostOverlayFS is the single-node FS provider (§5.B): it assembles the
@@ -25,6 +27,16 @@ import (
 // mount/umount are privileged (CAP_SYS_ADMIN) and copy-up files are root-owned
 // (rootfs-overlay D5); the orchestrator therefore runs as root (ADR-0002).
 // That privilege, and the host paths, stay sealed here — never in the mediator.
+// The disk-CAPACITY cap (§3.4 容量轴 / §5.B) is materialized here as a btrfs
+// subvolume carrying an squota limit, via the internal/btrfs leaf package
+// (rootfs-overlay D6.2/D6.4).
+//
+// The unit is StateDir/<id>, holding BOTH upper and work — one subvolume, hence
+// ONE quota covering both. That is a correctness requirement, not tidiness
+// (D6.3): overlayfs copy-up writes into workdir FIRST and only then renames into
+// upper, so a quota on upper alone leaves copy-up as a path straight around the
+// cap. Measured with both in the one subvolume: work/upper are invisible in the
+// merged view and all copy-up traffic is charged.
 type HostOverlayFS struct {
 	// StateDir holds per-Overlay materialization: StateDir/<id>/{upper,work,merged}.
 	StateDir string
@@ -38,6 +50,48 @@ type HostOverlayFS struct {
 	// reclaims (§5.B / §4.4-A). Distinct from TemplatesDir so the sweep never touches a
 	// deployment-shipped builtin.
 	LayersDir string
+
+	// Btrfs materializes the §3.4 capacity cap (subvolume + squota). A shared
+	// substrate TOOL, not a seam — §5.C will import the same package for
+	// per-volume caps (rootfs-overlay D6.4).
+	Btrfs btrfs.Client
+}
+
+// unitPath is the per-Overlay storage unit holding upper+work — the thing the
+// capacity quota attaches to (one unit ⇒ one quota ⇒ no copy-up bypass, D6.3).
+func (p *HostOverlayFS) unitPath(id string) string { return filepath.Join(p.StateDir, id) }
+
+// applyCap materializes the capacity Binding on an Overlay's storage unit (§3.4 /
+// §5.B). Called from BOTH create and open, because the cap is re-applied at every
+// placement from the current record rather than trusted to whatever the unit was
+// left carrying (§3.4 Binding).
+//
+// A requested cap that CANNOT be enforced is a hard error, never a silent
+// downgrade to "run uncapped": ignoring it would leave every §2.3 blast-radius
+// assertion believing in a cap that does not exist. capByte 0 removes any
+// lingering cap, keeping the record the single authority.
+func (p *HostOverlayFS) applyCap(ctx context.Context, id string, capByte int64) error {
+	if capByte == CapUnchanged {
+		return nil // handle-only rebuild: touch no quota (see OpenOverlay)
+	}
+	unit := p.unitPath(id)
+	if capByte <= 0 {
+		// Uncapped by intent. If the unit is a subvolume (a cap was set before and
+		// has since been cleared) drop the limit, so the record stays authoritative.
+		if p.Btrfs.IsSubvolume(ctx, unit) {
+			if err := p.Btrfs.SetQuotaLimit(ctx, unit, 0); err != nil {
+				return fmt.Errorf("rootfs: clear capacity cap on %s: %w", id, err)
+			}
+		}
+		return nil
+	}
+	if !p.Btrfs.IsSubvolume(ctx, unit) {
+		return fmt.Errorf("rootfs: overlay %s storage unit %s is not a btrfs subvolume — refusing to run with an unenforceable %d-byte cap (§3.4)", id, unit, capByte)
+	}
+	if err := p.Btrfs.SetQuotaLimit(ctx, unit, capByte); err != nil {
+		return fmt.Errorf("rootfs: apply capacity cap on %s: %w", id, err)
+	}
+	return nil
 }
 
 // NewHostOverlayFS constructs the provider, ensuring StateDir + LayersDir exist.
@@ -94,7 +148,12 @@ func (p *HostOverlayFS) handle(overlayID string, lower []string) *Overlay {
 
 // CreateOverlay allocates an empty upper over a read-only lower stack (① create
 // prefix). It does NOT mount.
-func (p *HostOverlayFS) CreateOverlay(_ context.Context, overlayID string, lower []string) (*Overlay, error) {
+//
+// When a capacity cap is requested the storage unit is created as a btrfs
+// SUBVOLUME so the quota has something to attach to; uncapped Overlays stay plain
+// directories (no subvolume, nothing to reclaim beyond the bytes). upper and work
+// both live inside that one unit, so one quota covers both (D6.3).
+func (p *HostOverlayFS) CreateOverlay(ctx context.Context, overlayID string, lower []string, capByte int64) (*Overlay, error) {
 	if err := p.validateStack(overlayID, lower); err != nil {
 		return nil, err
 	}
@@ -103,19 +162,35 @@ func (p *HostOverlayFS) CreateOverlay(_ context.Context, overlayID string, lower
 			return nil, err
 		}
 	}
+	if capByte > 0 {
+		if !p.Btrfs.Available(ctx, p.StateDir) {
+			return nil, fmt.Errorf("rootfs: overlay %s requests a %d-byte capacity cap but StateDir is not on btrfs — refusing to run uncapped (§3.4)", overlayID, capByte)
+		}
+		if err := p.Btrfs.CreateSubvolume(ctx, p.unitPath(overlayID)); err != nil {
+			return nil, fmt.Errorf("rootfs: create capacity unit: %w", err)
+		}
+	}
 	if err := os.MkdirAll(p.upperPath(overlayID), 0o755); err != nil {
 		return nil, fmt.Errorf("rootfs: create upper: %w", err)
+	}
+	if err := p.applyCap(ctx, overlayID, capByte); err != nil {
+		return nil, err
 	}
 	return p.handle(overlayID, lower), nil
 }
 
-// OpenOverlay reconstructs a handle for an existing artifact (resume prefix).
-func (p *HostOverlayFS) OpenOverlay(_ context.Context, overlayID string, lower []string) (*Overlay, error) {
+// OpenOverlay reconstructs a handle for an existing artifact (resume prefix) and
+// RE-APPLIES the capacity cap from the current record (§3.4 Binding: every
+// placement re-materializes the cap rather than reading back a frozen value).
+func (p *HostOverlayFS) OpenOverlay(ctx context.Context, overlayID string, lower []string, capByte int64) (*Overlay, error) {
 	if err := p.validateStack(overlayID, lower); err != nil {
 		return nil, err
 	}
 	if _, err := os.Stat(p.upperPath(overlayID)); err != nil {
 		return nil, fmt.Errorf("rootfs: Overlay %q upper missing (not created?): %w", overlayID, err)
+	}
+	if err := p.applyCap(ctx, overlayID, capByte); err != nil {
+		return nil, err
 	}
 	return p.handle(overlayID, lower), nil
 }
@@ -181,14 +256,116 @@ func (p *HostOverlayFS) Unmount(_ context.Context, m *Merged) error {
 // synchronously; a refcount-driven async sweep is the eventual form. Separate
 // from placement teardown; the mediator invokes each (§4 subsystems don't call
 // each other).
-func (p *HostOverlayFS) DestroyOverlay(_ context.Context, o *Overlay) error {
-	dir := filepath.Join(p.StateDir, o.ID)
+// The capacity unit is reclaimed along with the bytes: the subvolume AND its
+// qgroup (a deleted subvolume otherwise leaves a stale `<under deletion>` qgroup
+// row carrying the old limit — measured), so destroy leaves no quota residue
+// behind (M6 acceptance 9 / §4.4-A reclamation discipline).
+func (p *HostOverlayFS) DestroyOverlay(ctx context.Context, o *Overlay) error {
+	dir := p.unitPath(o.ID)
 	// best-effort unmount first in case merged is still mounted.
 	_ = syscall.Unmount(p.mergedPath(o.ID), syscall.MNT_DETACH)
+	// Empty the unit's contents FIRST: `subvolume delete` requires the subvolume
+	// itself, and its children (upper/work/merged dirs) are ordinary directories
+	// inside it, so they go by RemoveAll. For an uncapped (plain-dir) Overlay this
+	// single call is the whole reclamation.
+	if p.Btrfs.IsSubvolume(ctx, dir) {
+		for _, sub := range []string{p.upperPath(o.ID), p.workPath(o.ID), p.mergedPath(o.ID)} {
+			if err := os.RemoveAll(sub); err != nil {
+				return fmt.Errorf("rootfs: destroy overlay %s: clear %s: %w", o.ID, sub, err)
+			}
+		}
+		if err := p.Btrfs.DeleteSubvolume(ctx, dir); err != nil {
+			return fmt.Errorf("rootfs: destroy overlay %s: %w", o.ID, err)
+		}
+		// the (now-empty) unit dir itself
+		if err := os.RemoveAll(dir); err != nil {
+			return fmt.Errorf("rootfs: destroy overlay %s: %w", o.ID, err)
+		}
+		return nil
+	}
 	if err := os.RemoveAll(dir); err != nil {
 		return fmt.Errorf("rootfs: destroy overlay %s: %w", o.ID, err)
 	}
 	return nil
+}
+
+// MeasuredBytes reports the bytes this provider's storage holds for Promote-built
+// layers + Overlay units — the §3.4 admission term the caps cannot express
+// (rootfs-overlay D6.5: squota charges only bytes a sandbox WROTE, so layer bytes
+// and free reflinked copy-ups are real disk under no per-sandbox cap).
+//
+// Measured from the HOST side (apparent on-disk sizes via lstat), never from
+// anything a guest reports: the sentry fabricates st_blocks, so guest numbers are
+// unusable for accounting (§5.B 容量核算只信后端配额). For a capped Overlay unit
+// the authoritative number is its own qgroup, so that is preferred when present.
+func (p *HostOverlayFS) MeasuredBytes(ctx context.Context) (int64, error) {
+	var total int64
+
+	// Promote-built layers: plain read-only dir trees, no quota of their own —
+	// exactly the term that must be listed separately.
+	layers, err := os.ReadDir(p.LayersDir)
+	if err != nil && !os.IsNotExist(err) {
+		return 0, fmt.Errorf("rootfs: measure layers: %w", err)
+	}
+	for _, e := range layers {
+		if !e.IsDir() {
+			continue
+		}
+		n, err := dirBytes(filepath.Join(p.LayersDir, e.Name()))
+		if err != nil {
+			return 0, fmt.Errorf("rootfs: measure layer %s: %w", e.Name(), err)
+		}
+		total += n
+	}
+
+	// Overlay units. A capped unit's qgroup is the authoritative charge; an
+	// uncapped one is walked.
+	units, err := os.ReadDir(p.StateDir)
+	if err != nil && !os.IsNotExist(err) {
+		return 0, fmt.Errorf("rootfs: measure overlays: %w", err)
+	}
+	for _, e := range units {
+		if !e.IsDir() {
+			continue
+		}
+		unit := p.unitPath(e.Name())
+		if p.Btrfs.IsSubvolume(ctx, unit) {
+			if used, _, err := p.Btrfs.Usage(ctx, unit); err == nil {
+				total += used
+				continue
+			}
+			// fall through to the walk if the qgroup is unreadable
+		}
+		n, err := dirBytes(unit)
+		if err != nil {
+			return 0, fmt.Errorf("rootfs: measure overlay %s: %w", e.Name(), err)
+		}
+		total += n
+	}
+	return total, nil
+}
+
+// dirBytes sums the apparent sizes of regular files under root. Host-side lstat
+// only — see MeasuredBytes on why guest-reported sizes are never used. A
+// disappearing file (concurrent destroy) is skipped rather than failing the sweep.
+func dirBytes(root string) (int64, error) {
+	var total int64
+	err := filepath.Walk(root, func(_ string, info os.FileInfo, err error) error {
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+		if info.Mode().IsRegular() {
+			total += info.Size()
+		}
+		return nil
+	})
+	if err != nil && !os.IsNotExist(err) {
+		return 0, err
+	}
+	return total, nil
 }
 
 // AdoptMerged reconstructs the merged handle for an Overlay still mounted after

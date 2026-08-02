@@ -15,6 +15,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -26,6 +27,33 @@ import (
 	"engine/internal/store"
 	"engine/internal/transport"
 )
+
+// ErrResourceTerminated is the §4.3 resource-terminated verdict surfaced as a
+// verb error: this sandbox was terminated for exceeding its RAM safety limit, so
+// resume is REFUSED (unlike dead-recoverable, which resumes). The API layer maps
+// it to 409 — a state conflict the caller resolves by raising the cap or
+// destroying the sandbox, not a server fault.
+var ErrResourceTerminated = errors.New("lifecycle: sandbox resource-terminated")
+
+// ErrInsufficientCapacity is the §3.4 admission verdict: honoring this sandbox's
+// caps would oversubscribe the node. Distinct from a state conflict — nothing is
+// wrong with the sandbox, the node is simply full — so the API maps it to 507.
+var ErrInsufficientCapacity = errors.New("lifecycle: insufficient node capacity")
+
+// deathCauseOf translates the §5.A provider enum into the persisted model enum.
+// Two types on purpose (§5.A): the provider seam must not depend on the
+// control-plane record shape. The translation lives HERE, in the mediator, which
+// is the only place that legitimately knows both.
+func deathCauseOf(c runtime.DeathCause) model.DeathCause {
+	switch c {
+	case runtime.CauseGone:
+		return model.CauseGone
+	case runtime.CauseResourceExceeded:
+		return model.CauseResourceExceeded
+	default:
+		return model.CauseUnknown
+	}
+}
 
 // Deps are the mechanisms the mediator orchestrates. It holds the seams, not
 // concrete implementations — swapping local_runsc / SQLite is registering an
@@ -40,6 +68,11 @@ type Deps struct {
 
 	// HealthTimeout bounds the ⑦ readiness gate (guest-runtime D5.1).
 	HealthTimeout time.Duration
+
+	// NodeCapacity is the §3.4 no-oversubscribe budget the admission gate admits
+	// against (§1.1 single-binary config). Zero on a dimension leaves that axis
+	// unmetered — see NodeCapacity.
+	NodeCapacity NodeCapacity
 
 	// DefaultIdleTimeout / DefaultRetention are the engine-wide TTL defaults
 	// (§4.3 / §1.1 single-binary config) applied when a CreateSpec omits them.
@@ -182,6 +215,14 @@ type CreateSpec struct {
 	// TTL handling).
 	IdleTimeout *time.Duration
 	Retention   *time.Duration
+
+	// Limits is the OPTIONAL resource-limit Binding input (§3.4; §6.1 POST
+	// /v1/sandboxes cpu_millis?/memory_byte?/disk_byte?). Zero on an axis =
+	// unlimited there. Unlike the TTLs there is no engine-wide default to
+	// substitute: "unlimited" is a meaningful, honest resting value for a cap,
+	// whereas a made-up default cap would silently constrain workloads the
+	// operator never limited.
+	Limits model.Limits
 }
 
 // Create runs the cold-start chain for a fresh sandbox (guest-runtime D5.1,
@@ -205,13 +246,27 @@ func (m *Mediator) Create(ctx context.Context, spec CreateSpec) (model.SandboxID
 		// reads). Omitted inputs resolve to the engine-wide default here.
 		IdleTimeout: m.deps.DefaultIdleTimeout,
 		Retention:   m.deps.DefaultRetention,
-		CreatedAt:   now, UpdatedAt: now,
+		// Resource limits are materialized into the record the same way and for the
+		// same reason (§3.4 Binding): every placement re-reads them from here, so
+		// the stored value is the single authority for all three axes. Omitted =
+		// zero = unlimited on that axis.
+		Limits:    spec.Limits,
+		CreatedAt: now, UpdatedAt: now,
 	}
 	if spec.IdleTimeout != nil {
 		rec.IdleTimeout = *spec.IdleTimeout
 	}
 	if spec.Retention != nil {
 		rec.Retention = *spec.Retention
+	}
+
+	// Admission gate (§3.4 / rootfs-overlay D6.5 节点级不超卖): the node must be
+	// able to HONOR every cap it has promised, so a new promise is checked against
+	// the capacity actually left. Runs BEFORE any bytes or placement are
+	// materialized, so a rejected create leaves nothing half-built (M6 acceptance
+	// 8). Nothing has been inserted yet either — the record insert is below.
+	if err := m.admit(ctx, rec.Limits, ""); err != nil {
+		return "", err
 	}
 	// The transient creating-insert is an internal step of the create verb, not
 	// an externally-visible §4.1 transition — it publishes nothing (nil Event).
@@ -227,12 +282,16 @@ func (m *Mediator) Create(ctx context.Context, spec CreateSpec) (model.SandboxID
 		_ = m.deps.Store.DeleteSandbox(ctx, sid, nil) // nothing built, never visible
 		return "", fmt.Errorf("create: resolve lineage: %w", err)
 	}
-	ov, err := m.deps.Rootfs.CreateOverlay(ctx, string(oid), lower)
+	// The capacity cap is applied HERE, as the Overlay is allocated: it is an FS
+	// quota on the upper+work storage unit, so it belongs to the Rootfs subsystem's
+	// materialization, not to the runtime provider (§3.4 / §5.B). The mediator only
+	// passes the numeric intent across the seam.
+	ov, err := m.deps.Rootfs.CreateOverlay(ctx, string(oid), lower, rec.Limits.DiskByte)
 	if err != nil {
 		_ = m.deps.Store.DeleteSandbox(ctx, sid, nil) // nothing built, never visible
 		return "", fmt.Errorf("create: overlay: %w", err)
 	}
-	if err := m.coldStart(ctx, sid, ov); err != nil {
+	if err := m.coldStart(ctx, sid, ov, rec.Limits); err != nil {
 		// create has no fallback state: reclaim half-built placement + empty
 		// Overlay, delete the record → destroyed (§4.4-A / D5.2 要点④). The
 		// sandbox was never running, so this unwind-delete publishes nothing.
@@ -249,7 +308,7 @@ func (m *Mediator) Create(ctx context.Context, spec CreateSpec) (model.SandboxID
 
 	// ⑦ readiness passed → flip creating→running (CAS) + emit "created" in the
 	// same commit (§4.4-C).
-	if err := m.deps.Store.CompareAndSetState(ctx, sid, model.Creating, model.Running, newEvent(sid, "created", model.Running)); err != nil {
+	if err := m.deps.Store.CompareAndSetState(ctx, sid, model.Creating, model.Running, newEvent(sid, "created", model.Running), nil); err != nil {
 		m.unwind(ctx, sid, ov, true)
 		_ = m.deps.Store.DeleteSandbox(ctx, sid, nil)
 		return "", fmt.Errorf("create: commit running: %w", err)
@@ -266,7 +325,9 @@ func (m *Mediator) Pause(ctx context.Context, id model.SandboxID) error {
 	l := m.lock(id)
 	l.Lock()
 	defer l.Unlock()
-	if err := m.pauseLocked(ctx, id, "paused"); err != nil {
+	// A user pause is not a death: no cause to record (nil leaves the column
+	// untouched).
+	if err := m.pauseLocked(ctx, id, "paused", nil); err != nil {
 		return fmt.Errorf("pause: %w", err)
 	}
 	return nil
@@ -282,8 +343,13 @@ func (m *Mediator) Pause(ctx context.Context, id model.SandboxID) error {
 // resources; the Overlay artifact is already on the backend and captured NOTHING
 // (§4.2 零捕获). Stop is best-effort and idempotent, so it is also correct for a
 // crash-pause whose container is already dead (it reclaims the lingering netns).
-func (m *Mediator) pauseLocked(ctx context.Context, id model.SandboxID, kind string) error {
-	if err := m.deps.Store.CompareAndSetState(ctx, id, model.Running, model.Paused, newEvent(id, kind, model.Paused)); err != nil {
+// cause carries the §4.3 death cause for the INVOLUNTARY variants (crash-pause):
+// it is committed in the SAME store call as the demotion CAS, because the signal
+// is volatile and there is no window afterwards in which to write it (§4.3 /
+// §4.4-C). nil for the voluntary variants (user pause / auto-pause), which are
+// not deaths and must leave any previously recorded cause alone.
+func (m *Mediator) pauseLocked(ctx context.Context, id model.SandboxID, kind string, cause *model.DeathCause) error {
+	if err := m.deps.Store.CompareAndSetState(ctx, id, model.Running, model.Paused, newEvent(id, kind, model.Paused), cause); err != nil {
 		return err
 	}
 	ls := m.take(id)
@@ -318,6 +384,16 @@ func (m *Mediator) Resume(ctx context.Context, id model.SandboxID) error {
 	if rec.State != model.Paused {
 		return fmt.Errorf("resume: %w (state=%s, want paused)", store.ErrConflict, rec.State)
 	}
+	// §4.3 resource-terminated: this sandbox was terminated for exceeding its RAM
+	// safety limit, and that disposition is the OPPOSITE of dead-recoverable's —
+	// resuming re-runs the same workload into the same cap, i.e. a crash loop. It
+	// stays `paused` until a human intervenes or the cap is raised. This is exactly
+	// why the death cause has to be persisted (§4.3): the state alone cannot
+	// distinguish the two cases, they look identical.
+	if rec.DeathCause == model.CauseResourceExceeded {
+		return fmt.Errorf("resume: %w: sandbox was resource-terminated (RAM cap %d bytes); raise the cap or destroy it — resuming would re-trigger termination (§4.3)",
+			ErrResourceTerminated, rec.Limits.MemoryByte)
+	}
 	return m.resumeLocked(ctx, rec)
 }
 
@@ -329,17 +405,28 @@ func (m *Mediator) Resume(ctx context.Context, id model.SandboxID) error {
 // the half-built placement and leaves the record `paused` (§4.4-A / D5.2 ④).
 func (m *Mediator) resumeLocked(ctx context.Context, rec model.Sandbox) error {
 	id := rec.ID
+	// Admission gate before anything is materialized (§3.4 no-oversubscribe). This
+	// sandbox's own promised cap is EXCLUDED from the committed total — it is
+	// already counted there, and double-counting it would make a resume of an
+	// unchanged sandbox fail against its own reservation. On failure the record
+	// stays `paused`, the atomic fallback source state (§4.4-A / M6 acceptance 8).
+	if err := m.admit(ctx, rec.Limits, rec.ID); err != nil {
+		return err
+	}
 	// ① re-open + re-mount the SAME Overlay artifact (resume prefix), re-resolving
 	// the lineage lower stack from the store (§5.B multi-lowerdir).
 	lower, err := m.resolveLower(ctx, rec.Template)
 	if err != nil {
 		return fmt.Errorf("resume: resolve lineage: %w", err)
 	}
-	ov, err := m.deps.Rootfs.OpenOverlay(ctx, string(rec.Overlay), lower)
+	// Re-apply the capacity cap from the CURRENT record (§3.4 Binding): a resume
+	// re-materializes the quota rather than trusting whatever the subvolume was
+	// left carrying, so an edited cap takes effect and a lost quota is restored.
+	ov, err := m.deps.Rootfs.OpenOverlay(ctx, string(rec.Overlay), lower, rec.Limits.DiskByte)
 	if err != nil {
 		return fmt.Errorf("resume: open overlay: %w", err)
 	}
-	if err := m.coldStart(ctx, id, ov); err != nil {
+	if err := m.coldStart(ctx, id, ov, rec.Limits); err != nil {
 		// resume has a fallback state: reclaim half-built placement, stay paused
 		// (persistent Overlay artifact untouched; §4.4-A).
 		m.unwind(ctx, id, ov, false)
@@ -353,7 +440,13 @@ func (m *Mediator) resumeLocked(ctx context.Context, rec model.Sandbox) error {
 	}
 
 	// ⑦ readiness passed → flip paused→running (CAS) + emit "resumed" (§4.4-C).
-	if err := m.deps.Store.CompareAndSetState(ctx, id, model.Paused, model.Running, newEvent(id, "resumed", model.Running)); err != nil {
+	// CLEAR the death cause in this same commit: the sandbox is up, so its previous
+	// death no longer explains its state. This is also what bounds the §4.3
+	// self-correcting retry — an Unknown death that resumes fine does not stay
+	// pinned to a stale cause, and if the workload re-triggers the cap the NEXT
+	// observation writes the real cause in the control plane's plain view.
+	cleared := model.CauseNone
+	if err := m.deps.Store.CompareAndSetState(ctx, id, model.Paused, model.Running, newEvent(id, "resumed", model.Running), &cleared); err != nil {
 		m.unwind(ctx, id, ov, false)
 		return fmt.Errorf("resume: commit running: %w", err)
 	}
@@ -413,7 +506,7 @@ func (m *Mediator) destroyLocked(ctx context.Context, rec model.Sandbox) error {
 	// uses only the OverlayID (DestroyOverlay derives StateDir/<id>); the lower
 	// stack is irrelevant here (no mount), so a single-element stack suffices and
 	// avoids a lineage walk that could fail mid-teardown.
-	ov, err := m.deps.Rootfs.OpenOverlay(ctx, string(rec.Overlay), []string{string(rec.Template)})
+	ov, err := m.deps.Rootfs.OpenOverlay(ctx, string(rec.Overlay), []string{string(rec.Template)}, rootfs.CapUnchanged)
 	if err == nil {
 		_ = m.deps.Rootfs.DestroyOverlay(ctx, ov)
 	}
@@ -457,7 +550,7 @@ func (m *Mediator) Promote(ctx context.Context, id model.SandboxID) (model.Templ
 		// quiesce to a consistent at-rest point (equivalent to pause, §4.2) and
 		// stay paused. Uses the "paused" Kind — from the event stream's view this
 		// is an ordinary pause; Promote is not a §4.1 lifecycle transition.
-		if err := m.pauseLocked(ctx, id, "paused"); err != nil {
+		if err := m.pauseLocked(ctx, id, "paused", nil); err != nil {
 			return "", fmt.Errorf("promote: quiesce: %w", err)
 		}
 	case model.Paused:
@@ -475,7 +568,7 @@ func (m *Mediator) Promote(ctx context.Context, id model.SandboxID) (model.Templ
 
 	// open the source Overlay by ID (byte read only, no mount) and freeze its
 	// at-rest upper into the new layer dir (bytes-first).
-	ov, err := m.deps.Rootfs.OpenOverlay(ctx, string(rec.Overlay), []string{string(rec.Template)})
+	ov, err := m.deps.Rootfs.OpenOverlay(ctx, string(rec.Overlay), []string{string(rec.Template)}, rootfs.CapUnchanged)
 	if err != nil {
 		return "", fmt.Errorf("promote: open overlay: %w", err)
 	}
@@ -514,16 +607,26 @@ func (m *Mediator) unmarkBuilding(id model.TemplateID) {
 // shared by create and resume (guest-runtime D5.1). On success the live
 // placement + merged are recorded in the mediator. On any error it returns
 // without recording (the caller unwinds).
-func (m *Mediator) coldStart(ctx context.Context, id model.SandboxID, ov *rootfs.Overlay) error {
+func (m *Mediator) coldStart(ctx context.Context, id model.SandboxID, ov *rootfs.Overlay, limits model.Limits) error {
 	// ① mount lower(Template)/upper/work → merged.
 	merged, err := m.deps.Rootfs.Mount(ctx, ov)
 	if err != nil {
 		return fmt.Errorf("mount overlay: %w", err)
 	}
 	// ④ launch runsc (sandboxd entrypoint), ⑤ guest boots, ⑥ IP discovered.
+	// limits come from the RECORD, re-materialized at every placement — that is
+	// what makes them a Binding rather than placement state (§3.4): a resume
+	// re-derives the caps from the current record instead of reading back a frozen
+	// value, so a cap edited while paused takes effect on the next resume
+	// (M6 acceptance 3). The capacity axis is NOT here — it is an FS quota applied
+	// by the Rootfs subsystem (§5.B), not a provider concern (§3.4).
 	pl, err := m.deps.Runtime.Launch(ctx, runtime.LaunchSpec{
 		Sandbox: string(id),
 		Rootfs:  runtime.RootfsSource{MergedPath: merged.MergedPath},
+		Limits: runtime.ResourceLimits{
+			CPUMillis:  limits.CPUMillis,
+			MemoryByte: limits.MemoryByte,
+		},
 	})
 	if err != nil {
 		_ = m.deps.Rootfs.Unmount(ctx, merged)
@@ -962,7 +1065,7 @@ func (m *Mediator) reconcileRunningOutcome(ctx context.Context, rec model.Sandbo
 func (m *Mediator) reclaimOrphanOverlay(ctx context.Context, rec model.Sandbox, destroyUpper bool) {
 	// ID-only reclamation (AdoptMerged/DestroyOverlay derive paths from the
 	// OverlayID); no mount, so a single-element lower stack suffices.
-	ov, err := m.deps.Rootfs.OpenOverlay(ctx, string(rec.Overlay), []string{string(rec.Template)})
+	ov, err := m.deps.Rootfs.OpenOverlay(ctx, string(rec.Overlay), []string{string(rec.Template)}, rootfs.CapUnchanged)
 	if err != nil {
 		return // no artifact on disk → nothing to unmount
 	}
@@ -1006,7 +1109,7 @@ func (m *Mediator) adoptOrDemote(ctx context.Context, rec model.Sandbox) (bool, 
 // periodic reconcile takes it via tryLock (skip-if-held) and calls this — Go
 // mutexes are not reentrant, so the two entry points must not both lock.
 func (m *Mediator) adoptOrDemoteLocked(ctx context.Context, rec model.Sandbox) (bool, error) {
-	pl, alive, err := m.deps.Runtime.Adopt(ctx, string(rec.ID))
+	pl, alive, cause, err := m.deps.Runtime.Adopt(ctx, string(rec.ID))
 	if err != nil {
 		return false, fmt.Errorf("adopt probe: %w", err) // uncertain → protect
 	}
@@ -1015,6 +1118,11 @@ func (m *Mediator) adoptOrDemoteLocked(ctx context.Context, rec model.Sandbox) (
 	// cold-start ⑦; §4.3 two-layer probe).
 	if alive && !m.probeReady(ctx, pl) {
 		alive = false
+		// L1 said alive, so nothing died and the provider reported no meaningful
+		// cause. Demoting an alive-but-not-serving unit must NOT stamp a death cause
+		// on it — that would be inventing one (§2.4 不许猜) and could wrongly pin it
+		// as resource-terminated, blocking every future resume.
+		cause = runtime.CauseUnknown
 	}
 	if !alive {
 		// dead / not-serving → involuntary pause (§4.2). Its placement, if any, is
@@ -1024,7 +1132,11 @@ func (m *Mediator) adoptOrDemoteLocked(ctx context.Context, rec model.Sandbox) (
 		// from the reaper's idle "auto-paused". State is the same `paused`; the
 		// Kind lets a subscriber tell why it paused (§4.1 names transitions
 		// distinctly). See store.Event.Kind.
-		if err := m.deps.Store.CompareAndSetState(ctx, rec.ID, model.Running, model.Paused, newEvent(rec.ID, "crash-paused", model.Paused)); err != nil && err != store.ErrConflict {
+		// The death cause is committed in THIS SAME CAS (§4.3 死因随降级 CAS 同一次
+		// 提交): the moment this returns, the placement may be reclaimed and the
+		// signal is gone forever, so there is no "write it just after" option.
+		dc := deathCauseOf(cause)
+		if err := m.deps.Store.CompareAndSetState(ctx, rec.ID, model.Running, model.Paused, newEvent(rec.ID, "crash-paused", model.Paused), &dc); err != nil && err != store.ErrConflict {
 			return false, fmt.Errorf("demote to paused: %w", err) // uncertain → protect
 		}
 		return false, nil
@@ -1035,7 +1147,7 @@ func (m *Mediator) adoptOrDemoteLocked(ctx context.Context, rec model.Sandbox) (
 	// un-addressable — destroy would leak the live container). AdoptMerged
 	// recovers the EXISTING kernel mount by OverlayID (no re-mount), so the lower
 	// stack is not needed — a single-element stack satisfies validation.
-	ov, err := m.deps.Rootfs.OpenOverlay(ctx, string(rec.Overlay), []string{string(rec.Template)})
+	ov, err := m.deps.Rootfs.OpenOverlay(ctx, string(rec.Overlay), []string{string(rec.Template)}, rootfs.CapUnchanged)
 	if err != nil {
 		return false, fmt.Errorf("reopen overlay: %w", err) // uncertain → protect
 	}
