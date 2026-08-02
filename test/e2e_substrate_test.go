@@ -79,6 +79,7 @@ func setupEngineWithProbe(t *testing.T, healthTimeout time.Duration) (*orchestra
 	harness.BuildTemplate(t, repo, tmpl, "bare", sbxd)
 	harness.InjectStaticBin(t, tmpl, "bare", "cpuburn", cpuBurnSrc)
 	harness.InjectStaticBin(t, tmpl, "bare", "diskfill", diskFillSrc)
+	harness.InjectStaticBin(t, tmpl, "bare", "memhog", memHogSrc)
 	eng, err := orchestrator.New(orchestrator.Config{
 		TemplatesDir: tmpl, StateDir: filepath.Join(base, "state"),
 		StorePath:     filepath.Join(base, "store.db"),

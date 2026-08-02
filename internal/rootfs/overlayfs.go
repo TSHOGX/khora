@@ -301,21 +301,33 @@ func (p *HostOverlayFS) DestroyOverlay(ctx context.Context, o *Overlay) error {
 func (p *HostOverlayFS) MeasuredBytes(ctx context.Context) (int64, error) {
 	var total int64
 
-	// Promote-built layers: plain read-only dir trees, no quota of their own —
-	// exactly the term that must be listed separately.
-	layers, err := os.ReadDir(p.LayersDir)
-	if err != nil && !os.IsNotExist(err) {
-		return 0, fmt.Errorf("rootfs: measure layers: %w", err)
-	}
-	for _, e := range layers {
-		if !e.IsDir() {
-			continue
-		}
-		n, err := dirBytes(filepath.Join(p.LayersDir, e.Name()))
+	// BOTH layer roots count, and missing either one is the exact undercount D6.2
+	// warns about — "Template / layer 字节仍占真实磁盘且无帽覆盖":
+	//   - LayersDir:    Promote-built read-only layers.
+	//   - TemplatesDir: deployment-shipped builtin Templates. Read-only and never
+	//     charged to any sandbox (§5.B sets no per-sandbox cap on them), yet they
+	//     occupy real disk — §5.B says their growth is an INPUT to node capacity
+	//     accounting, which is this term.
+	// Counting only LayersDir would silently overcommit the node by the entire size
+	// of the Template library, which on a fresh deployment is ALL of it.
+	for _, root := range []string{p.LayersDir, p.TemplatesDir} {
+		entries, err := os.ReadDir(root)
 		if err != nil {
-			return 0, fmt.Errorf("rootfs: measure layer %s: %w", e.Name(), err)
+			if os.IsNotExist(err) {
+				continue
+			}
+			return 0, fmt.Errorf("rootfs: measure layers under %s: %w", root, err)
 		}
-		total += n
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			n, err := dirBytes(filepath.Join(root, e.Name()))
+			if err != nil {
+				return 0, fmt.Errorf("rootfs: measure layer %s: %w", e.Name(), err)
+			}
+			total += n
+		}
 	}
 
 	// Overlay units. A capped unit's qgroup is the authoritative charge; an

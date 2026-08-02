@@ -95,6 +95,70 @@ func main() {
 }
 `
 
+// memHogSrc allocates in bounded steps with raw anonymous mmap and TOUCHES every
+// page, so the memory is really charged rather than merely reserved.
+//
+// Raw mmap rather than the Go heap deliberately: a refused Go allocation aborts
+// with a runtime fatal error, whereas mmap returns ENOMEM we can print — and under
+// a memcg cap with swap.max=0 the interesting outcome is not a refusal at all but
+// the whole-group kill, so the probe must not muddy that with its own panic. It is
+// hard-bounded by maxMiB: the host is shared, so an unbounded allocator is not an
+// acceptable test tool.
+//
+// Args: memhog <stepMiB> <maxMiB>
+const memHogSrc = `package main
+
+import (
+	"fmt"
+	"os"
+	"strconv"
+	"syscall"
+)
+
+func main() {
+	step, _ := strconv.Atoi(os.Args[1])
+	max, _ := strconv.Atoi(os.Args[2])
+	if step <= 0 || max <= 0 || max > 4096 {
+		fmt.Println("BAD_ARGS")
+		os.Exit(2)
+	}
+	page := syscall.Getpagesize()
+	var keep [][]byte
+	total := 0
+	for total < max {
+		b, err := syscall.Mmap(-1, 0, step*1024*1024,
+			syscall.PROT_READ|syscall.PROT_WRITE,
+			syscall.MAP_ANON|syscall.MAP_PRIVATE)
+		if err != nil {
+			fmt.Printf("MMAP_REFUSED total=%dMiB err=%v\n", total, err)
+			return
+		}
+		for i := 0; i < len(b); i += page {
+			b[i] = 0xA5
+		}
+		keep = append(keep, b)
+		total += step
+		fmt.Printf("TOUCHED=%dMiB\n", total)
+	}
+	fmt.Printf("ALLOC_COMPLETE=%dMiB\n", total)
+}
+`
+
+// hostLogBytes is the total size of the kernel/syslog files whose growth the
+// §2.3 bypass would show up in. See TestResourceRAMAxis: an unbounded OOM retry
+// storm writes kernel log at ~66 MB/s, and that path goes AROUND the disk capacity
+// cap, so "the sandbox died" is not by itself evidence the invariant held.
+func hostLogBytes(t *testing.T) int64 {
+	t.Helper()
+	var total int64
+	for _, f := range []string{"/var/log/syslog", "/var/log/kern.log"} {
+		if fi, err := os.Stat(f); err == nil {
+			total += fi.Size()
+		}
+	}
+	return total
+}
+
 // cgLeaf is the engine-owned cgroup leaf path for a sandbox. The test reads the
 // host cgroupfs directly — that is the whole point of the assertion: prove the
 // engine's INTENT actually landed on the substrate rather than trusting the
@@ -189,6 +253,7 @@ func setupEngineOnBtrfs(t *testing.T, healthTimeout time.Duration) (*orchestrato
 	harness.BuildTemplate(t, repo, tmpl, "bare", sbxd)
 	harness.InjectStaticBin(t, tmpl, "bare", "cpuburn", cpuBurnSrc)
 	harness.InjectStaticBin(t, tmpl, "bare", "diskfill", diskFillSrc)
+	harness.InjectStaticBin(t, tmpl, "bare", "memhog", memHogSrc)
 
 	eng, err := orchestrator.New(orchestrator.Config{
 		TemplatesDir: tmpl, StateDir: stateDir,
@@ -423,6 +488,396 @@ func TestResourceCapacityRefusedWhenUnenforceable(t *testing.T) {
 	if len(list) != 0 {
 		t.Fatalf("%d records left after a refused create; want 0", len(list))
 	}
+}
+
+// TestResourceRAMAxis is M6 acceptance 5 + 6: exceeding the RAM cap terminates
+// the sandbox DETERMINISTICALLY and WHOLE-GROUP, the host kernel log does not grow
+// without bound, and the death cause lands in the store in the SAME commit as the
+// crash-paused demotion — after which resume is REFUSED.
+//
+// The bounded-log assertion is not decoration. It is the only check that catches
+// the §2.3 bypass: if the cap is configured such that the kernel finds no eligible
+// victim, it retries the OOM forever and writes kernel log at ~66 MB/s until the
+// host disk is full — a path that goes straight AROUND the per-sandbox disk
+// capacity cap. A test that only asserted "the sandbox died" would pass while the
+// host filled up, which is why memory.oom.group=1 is a §2.4 provider obligation
+// rather than a tuning knob.
+func TestResourceRAMAxis(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root (cgroup writes + runsc)")
+	}
+	ctx := context.Background()
+	eng, _ := setupEngineWithProbe(t, 60*time.Second)
+	m := eng.Mediator
+
+	// 192 MiB is high enough that an eligible victim always exists (the sentry's
+	// own footprint is far smaller) and low enough to be cheap to fill.
+	const memCap = 192 << 20
+	sid, err := m.Create(ctx, lifecycle.CreateSpec{
+		Template: "bare",
+		Limits:   model.Limits{MemoryByte: memCap},
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	t.Cleanup(func() { _ = m.Destroy(ctx, sid) })
+
+	// The guest must be told N, not N+overhead: runsc derives MemTotal from the OCI
+	// limit at boot, and the point of the two-value split is that the guest sees
+	// exactly the cap it was promised (§5.A).
+	cl, err := m.Client(sid)
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	meminfo, err := cl.Read(ctx, "/proc/meminfo", 0, 0)
+	if err != nil {
+		t.Fatalf("read guest meminfo: %v", err)
+	}
+	var guestTotalKB int64
+	for _, line := range strings.Split(string(meminfo), "\n") {
+		if strings.HasPrefix(line, "MemTotal:") {
+			f := strings.Fields(line)
+			if len(f) >= 2 {
+				guestTotalKB, _ = strconv.ParseInt(f[1], 10, 64)
+			}
+		}
+	}
+	if guestTotalKB == 0 {
+		t.Fatalf("could not read guest MemTotal from:\n%s", meminfo)
+	}
+	// exactly N (192 MiB = 196608 KiB), NOT N+overhead.
+	if guestTotalKB != memCap/1024 {
+		t.Fatalf("guest MemTotal = %d KiB; want %d KiB (= N). The guest must be told N while the HOST ceiling is N+overhead (§5.A two values)",
+			guestTotalKB, memCap/1024)
+	}
+	hostCeil, _ := strconv.ParseInt(readCg(t, sid, "memory.max"), 10, 64)
+	if hostCeil <= memCap {
+		t.Fatalf("host memory.max = %d; want > N (%d) so the sandbox is not killed BELOW its promised cap", hostCeil, memCap)
+	}
+	t.Logf("✓ two values: guest MemTotal=%d KiB (= N) while host memory.max=%d (= N+overhead)", guestTotalKB, hostCeil)
+
+	logBefore := hostLogBytes(t)
+
+	// --- blow through the cap -------------------------------------------------
+	// Allocate well past the cap. The whole group must be killed; the probe never
+	// gets to report ALLOC_COMPLETE.
+	ch, err := cl.Start(ctx, transport.StartSpec{Cmd: "/usr/bin/memhog", Args: []string{"32", "512"}})
+	if err != nil {
+		t.Fatalf("start memhog: %v", err)
+	}
+	var out strings.Builder
+	for ev := range ch {
+		if ev.Kind == "data" {
+			out.Write(ev.Data)
+		}
+	}
+	t.Logf("guest memhog output (tail): %s", lastLines(out.String(), 3))
+	if strings.Contains(out.String(), "ALLOC_COMPLETE") {
+		t.Fatalf("guest allocated 512 MiB under a %d-byte cap without being terminated — the RAM cap did not bind", memCap)
+	}
+
+	// --- acceptance 5: whole-group, deterministic termination -----------------
+	// memory.events records the whole-group kill. Read it BEFORE any teardown: the
+	// leaf (and this evidence) dies with `runsc delete` (§4.3).
+	deadline := time.Now().Add(20 * time.Second)
+	var groupKills int64
+	for time.Now().Before(deadline) {
+		for _, line := range strings.Split(readCg(t, sid, "memory.events"), "\n") {
+			f := strings.Fields(line)
+			if len(f) == 2 && f[0] == "oom_group_kill" {
+				groupKills, _ = strconv.ParseInt(f[1], 10, 64)
+			}
+		}
+		if groupKills > 0 {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if groupKills == 0 {
+		t.Fatalf("memory.events shows oom_group_kill=0 — termination was not whole-group (§2.4 requires deterministic, whole-group termination)")
+	}
+	peak := readCg(t, sid, "memory.peak")
+	t.Logf("✓ acceptance 5: whole-group termination (oom_group_kill=%d, memory.peak=%s vs host ceiling %d)", groupKills, peak, hostCeil)
+
+	// bounded host log growth — the §2.3 bypass check.
+	logGrowth := hostLogBytes(t) - logBefore
+	const logBudget = 64 << 20 // generous; the runaway failure mode writes ~66 MB/s
+	if logGrowth > logBudget {
+		t.Fatalf("host kernel/syslog grew %d bytes during one RAM-cap termination (budget %d) — this is the §2.3 bypass: an OOM retry storm fills the HOST disk, going around the per-sandbox capacity cap",
+			logGrowth, logBudget)
+	}
+	t.Logf("✓ acceptance 5: host log growth bounded (%d bytes ≤ %d budget) — no OOM retry storm (§2.3 not bypassed)", logGrowth, logBudget)
+
+	// --- acceptance 6: death cause committed WITH the crash-paused demotion ---
+	// The reaper's sweep classifies the dead unit and disposes of it. This is the
+	// live path (a running orchestrator), the same one reconcile takes at boot.
+	lifecycle.NewReaper(m, time.Hour, time.Hour).Sweep(ctx)
+
+	rec, err := eng.Store.GetSandbox(ctx, sid)
+	if err != nil {
+		t.Fatalf("GetSandbox after termination: %v", err)
+	}
+	if rec.State != model.Paused {
+		t.Fatalf("state = %s after RAM termination; want paused (§4.2 involuntary pause)", rec.State)
+	}
+	if rec.DeathCause != model.CauseResourceExceeded {
+		t.Fatalf("death cause = %q; want %q — without it the control plane cannot tell this from an ordinary crash and would resume into the same cap (§4.3)",
+			rec.DeathCause, model.CauseResourceExceeded)
+	}
+	// the event Kind must say crash-paused, not paused: subscribers distinguish WHY.
+	if k := lastKind(t, eng, sid); k != "crash-paused" {
+		t.Fatalf("event Kind = %q; want crash-paused (§4.1: the state is paused either way, the Kind carries why)", k)
+	}
+	t.Logf("✓ acceptance 6: crash-paused with death_cause=%s persisted, event Kind=crash-paused", rec.DeathCause)
+
+	// ...and resume is REFUSED. This is the disposition that makes the whole death
+	// cause worth persisting: dead-recoverable resumes, resource-terminated must
+	// not, and the two are indistinguishable without it.
+	err = m.Resume(ctx, sid)
+	if err == nil {
+		t.Fatal("resume SUCCEEDED for a resource-terminated sandbox — it would re-run the same workload into the same cap (crash loop, §4.3)")
+	}
+	if !strings.Contains(err.Error(), "resource-terminated") {
+		t.Fatalf("resume error = %v; want a resource-terminated refusal", err)
+	}
+	if stt, _ := m.State(ctx, sid); stt != model.Paused {
+		t.Fatalf("state = %s after the refused resume; want it to STAY paused", stt)
+	}
+	t.Logf("✓ acceptance 6: resume refused and the sandbox stayed paused (%v)", err)
+}
+
+// lastLines returns the final n non-empty lines, to keep guest output in the log
+// readable without dumping hundreds of progress lines.
+func lastLines(s string, n int) string {
+	var keep []string
+	for _, l := range strings.Split(strings.TrimSpace(s), "\n") {
+		if strings.TrimSpace(l) != "" {
+			keep = append(keep, strings.TrimSpace(l))
+		}
+	}
+	if len(keep) > n {
+		keep = keep[len(keep)-n:]
+	}
+	return strings.Join(keep, " | ")
+}
+
+// TestResourceUnknownDeathCauseResumes is M6 acceptance 7: when the death cause
+// cannot be read it is `Unknown`, the sandbox is treated as dead-recoverable and
+// DOES resume, and the loop is bounded rather than infinite.
+//
+// Unknown arises for real whenever the memcg leaf is gone before the death is
+// observed — including the ordinary case of an UNCAPPED sandbox, which has no leaf
+// at all. That is the case exercised here: kill the container out from under the
+// engine and let the reaper classify it.
+func TestResourceUnknownDeathCauseResumes(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root")
+	}
+	ctx := context.Background()
+	eng, base := setupEngineWithProbe(t, 60*time.Second)
+	m := eng.Mediator
+
+	sid, err := m.Create(ctx, lifecycle.CreateSpec{Template: "bare"}) // uncapped → no memcg leaf
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	t.Cleanup(func() { _ = m.Destroy(ctx, sid) })
+
+	// kill the isolation unit behind the engine's back (an external SIGKILL, i.e.
+	// a death with no resource-cap evidence anywhere).
+	killContainer(t, base, sid)
+
+	lifecycle.NewReaper(m, time.Hour, time.Hour).Sweep(ctx)
+
+	rec, err := eng.Store.GetSandbox(ctx, sid)
+	if err != nil {
+		t.Fatalf("GetSandbox: %v", err)
+	}
+	if rec.State != model.Paused {
+		t.Fatalf("state = %s; want paused (crash-paused)", rec.State)
+	}
+	// Either Unknown (no leaf to read) or Gone (leaf readable, no group kill) is a
+	// legal verdict here; what must NOT happen is a false ResourceExceeded, which
+	// would wrongly block resume forever.
+	if rec.DeathCause == model.CauseResourceExceeded {
+		t.Fatalf("death cause = %q for an external kill — a false resource-terminated verdict permanently blocks resume (§2.4: report Unknown, never guess)", rec.DeathCause)
+	}
+	t.Logf("✓ acceptance 7: non-resource death recorded as %q (not a guessed resource-exceeded)", rec.DeathCause)
+
+	// ...and it RESUMES (the §4.3 fallback: treat as dead-recoverable, let bounded
+	// retry self-correct if the guess was wrong).
+	if err := m.Resume(ctx, sid); err != nil {
+		t.Fatalf("resume of a %q death was refused: %v — §4.3 requires the Unknown/Gone path to resume", rec.DeathCause, err)
+	}
+	if stt, _ := m.State(ctx, sid); stt != model.Running {
+		t.Fatalf("state = %s after resume; want running", stt)
+	}
+	// the resume CLEARED the cause: it no longer explains anything, and leaving it
+	// set would make the bounded-retry argument rest on a stale value.
+	after, _ := eng.Store.GetSandbox(ctx, sid)
+	if after.DeathCause != model.CauseNone {
+		t.Fatalf("death cause = %q after a successful resume; want cleared", after.DeathCause)
+	}
+	t.Logf("✓ acceptance 7: resumed to running and the death cause was cleared (bounded self-correction, §4.3)")
+}
+
+// TestResourceAdmissionGateOnSubstrate is M6 acceptance 8: a create whose caps
+// would oversubscribe the node fails and leaves NO half-built residue, and a paused
+// sandbox that no longer fits fails its resume and STAYS paused.
+func TestResourceAdmissionGateOnSubstrate(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root")
+	}
+	ctx := context.Background()
+	repo := harness.RepoRoot(t)
+	base, err := os.MkdirTemp("/var/tmp", "m6adm-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bc := btrfs.Client{}
+	if !bc.Available(ctx, base) {
+		t.Skipf("%s not on btrfs", base)
+	}
+	stateDir := filepath.Join(base, "state")
+	t.Cleanup(func() {
+		ovRoot := filepath.Join(stateDir, "overlays")
+		entries, _ := os.ReadDir(ovRoot)
+		for _, e := range entries {
+			p := filepath.Join(ovRoot, e.Name())
+			if bc.IsSubvolume(ctx, p) {
+				_ = os.RemoveAll(filepath.Join(p, "upper"))
+				_ = os.RemoveAll(filepath.Join(p, "work"))
+				_ = os.RemoveAll(filepath.Join(p, "merged"))
+				_ = bc.DeleteSubvolume(ctx, p)
+			}
+		}
+		_ = os.RemoveAll(base)
+	})
+	tmpl := filepath.Join(base, "templates")
+	sbxd := harness.BuildSandboxd(t, repo)
+	harness.BuildTemplate(t, repo, tmpl, "bare", sbxd)
+
+	// A node budget just big enough for ONE 64 MiB sandbox plus the Template bytes.
+	// The Template is a real rootfs (tens of MiB), which is exactly the term squota
+	// cannot see and the accounting must include (D6.5).
+	layerish, err := dirSize(tmpl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const capPer = 64 << 20
+	nodeDisk := layerish + capPer + (8 << 20) // room for exactly one
+
+	eng, err := orchestrator.New(orchestrator.Config{
+		TemplatesDir: tmpl, StateDir: stateDir,
+		StorePath:     filepath.Join(base, "store.db"),
+		HealthTimeout: 60 * time.Second,
+		NodeDiskByte:  nodeDisk,
+	})
+	if err != nil {
+		t.Fatalf("orchestrator.New: %v", err)
+	}
+	if err := eng.SeedTemplates(ctx); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	m := eng.Mediator
+	t.Logf("node disk budget = %d (template bytes ≈ %d + one %d cap + slack)", nodeDisk, layerish, capPer)
+
+	// first create fits.
+	sid1, err := m.Create(ctx, lifecycle.CreateSpec{Template: "bare", Limits: model.Limits{DiskByte: capPer}})
+	if err != nil {
+		t.Fatalf("first create (should fit): %v", err)
+	}
+	t.Cleanup(func() { _ = m.Destroy(ctx, sid1) })
+
+	// second must be REFUSED: Σcaps + layer bytes now exceeds the budget.
+	nsBefore := countSbxNetns(t)
+	_, err = m.Create(ctx, lifecycle.CreateSpec{Template: "bare", Limits: model.Limits{DiskByte: capPer}})
+	if err == nil {
+		t.Fatal("second create succeeded — the node budget is being oversubscribed (§3.4)")
+	}
+	if !strings.Contains(err.Error(), "capacity") {
+		t.Fatalf("want an insufficient-capacity refusal; got %v", err)
+	}
+	t.Logf("✓ acceptance 8: over-budget create refused: %v", err)
+
+	// The refusal must be accounting for the TEMPLATE bytes, not just the caps.
+	// Asserting the reported layer term is on the order of the real Template library
+	// is what catches the undercount D6.2 warns about: counting only Promote-built
+	// layers (and omitting deployment-shipped builtins) silently overcommits the
+	// node by the whole Template library, which on a fresh deployment is all of it.
+	// Measured here: 16 KiB (wrong, subvolume metadata only) vs ~14 MB (right).
+	if !strings.Contains(err.Error(), "layer bytes") {
+		t.Fatalf("refusal does not show the layer-bytes term: %v", err)
+	}
+	var reported int64
+	if _, serr := fmt.Sscanf(err.Error()[strings.Index(err.Error(), "layer bytes "):], "layer bytes %d", &reported); serr != nil {
+		t.Fatalf("could not parse the layer-bytes term from %q: %v", err, serr)
+	}
+	if reported < layerish/2 {
+		t.Fatalf("layer bytes reported as %d but the Template library alone is ~%d — deployment-shipped Template bytes are being omitted from node accounting (§5.B / D6.2 undercount)",
+			reported, layerish)
+	}
+	t.Logf("✓ acceptance 8: the layer term (%d) accounts for the real Template bytes (~%d), not just Promote-built layers", reported, layerish)
+
+	// NO half-built residue: no extra record, no netns, no extra overlay unit.
+	list, _ := m.List(ctx)
+	if len(list) != 1 {
+		t.Fatalf("%d sandbox records after a refused create; want 1 (no half-build, §4.4-A)", len(list))
+	}
+	if n := countSbxNetns(t); n > nsBefore {
+		t.Fatalf("refused create leaked a netns (before=%d after=%d)", nsBefore, n)
+	}
+	ovs, _ := os.ReadDir(filepath.Join(stateDir, "overlays"))
+	if len(ovs) != 1 {
+		t.Fatalf("%d overlay units after a refused create; want 1", len(ovs))
+	}
+	t.Logf("✓ acceptance 8: refused create left no residue (1 record, no new netns, 1 overlay unit)")
+
+	// --- resume half: a paused sandbox that no longer fits stays paused -------
+	if err := m.Pause(ctx, sid1); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+	// Shrink the budget out from under it by promoting more layer bytes into
+	// existence — simpler and more honest: rebuild the engine with a smaller budget,
+	// which is the same inequality the gate evaluates.
+	eng2, err := orchestrator.New(orchestrator.Config{
+		TemplatesDir: tmpl, StateDir: stateDir,
+		StorePath:     filepath.Join(base, "store.db"),
+		HealthTimeout: 60 * time.Second,
+		NodeDiskByte:  layerish, // no longer leaves room for the 64 MiB cap
+	})
+	if err != nil {
+		t.Fatalf("orchestrator.New (shrunk budget): %v", err)
+	}
+	if err := eng2.Mediator.Resume(ctx, sid1); err == nil {
+		t.Fatal("resume succeeded despite the node no longer having room for its cap")
+	} else {
+		t.Logf("✓ acceptance 8: over-budget resume refused: %v", err)
+	}
+	// §4.4-A: atomic return to the SOURCE state.
+	rec, err := eng2.Store.GetSandbox(ctx, sid1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.State != model.Paused {
+		t.Fatalf("state = %s after a refused resume; want it to STAY paused (§4.4-A atomic return to source state)", rec.State)
+	}
+	t.Logf("✓ acceptance 8: refused resume left the sandbox in `paused`")
+}
+
+// dirSize sums apparent file sizes under root (host-side, never guest-reported).
+func dirSize(root string) (int64, error) {
+	var total int64
+	err := filepath.Walk(root, func(_ string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info.Mode().IsRegular() {
+			total += info.Size()
+		}
+		return nil
+	})
+	return total, err
 }
 
 // TestResourceRateAxis is M6 acceptance 1 + 2 + 3 (substrate half).
