@@ -50,6 +50,7 @@
 | 选型 | 候选 | 当前倾向 | 归属 / 谁消费 |
 | --- | --- | --- | --- |
 | **checkpoint/restore 恢复 seam** | 进程态 checkpoint 恢复 / agent 原生 `--resume` 重放 | 两条都留,session 层按能力选。**注意与「无缝内存 resume」(§1.4 永久排除)不是一回事**:这里是**单进程级**冻结/恢复,不是全 VM 内存镜像(后者锁 CPU-feature、被 §4.2 否决) | [`deep-dives/transport.md`](./deep-dives/transport.md) D3 seam / D5 |
+| **disk I/O 速率帽有没有对外旋钮(§3.4 速率轴的另一半)** | ① **只做 CPU**:`ResourceLimits` 只出 `CPUMillis`,io 轴推迟到有真实消费者时再 additive 加(接口加一个字段 + OCI 多一段,不动形状)· ② **一并做**:`ResourceLimits` 加 `IOReadBPS`/`IOWriteBPS`,§6.1 create 加两个字段,provider 译成 OCI `blockIO.throttle{Read,Write}BpsDevice` · ③ 只在引擎配置里给一个**节点级默认** io 帽、不进 per-sandbox Binding | **倾向 ①(只做 CPU)**,理由是**这是缺一个消费者而非缺一个机制**:M6 的对外契约面(§6.1 create 字段)、`model.Sandbox` 的 Binding 字段、四列 schema、以及全部 10 条验收断言都**只列 CPU**,没有一条读 io;按 §1.3 成本判据,现在加 `IOReadBPS` 就是"只为假想未来加的、当下一文不值的结构"(reservation),该拒。**机制侧已实测可行,不是被 substrate 堵住**:runsc 确实会把 OCI `blockIO` 写进自己那个叶子的 `io.max`(实测 `254:16 rbps=1048576 wbps=1048576 riops=max wiops=max`),但**必须给整块盘的 MAJ:MIN,给分区号会让 launch 直接失败**(`write .../io.max: no such device`)——而"哪块盘"是宿主拓扑,per-sandbox Binding 里没有它,故选 ② 还要连带决定设备号从哪来(引擎配置?provider 自己从 StateDir 反查 PKNAME?),这本身是第二个待定项。**注意 §3.4 / §5.A 的速率轴措辞含 io**,故 ① 是"spec 的 io 那半留在 settled-not-yet-built",不是把它划出 spec;§2.3 的爆炸半径不依赖 io 帽(容量轴由 squota 守、CPU 由 cpu.max 守),所以推迟**不留安全缺口** | 谁消费:**今天没有消费者**(这正是倾向 ① 的依据)· 未来:§5.A `local_runsc` 的 `buildOCISpec` + §6.1 create + 节点容量核算(若走 ③)· 决定前 M6 按 ① 落地,`ResourceLimits` 注释标明 io 轴的缺位是**待拍板**、非遗漏 |
 
 ---
 
