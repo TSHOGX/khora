@@ -19,10 +19,9 @@ decision, hence an ADR rather than spec content.
 - **gVisor/runsc ecosystem is Go.** The substrate we build on (runsc, its OCI
   handling, `--overlay2`/`--file-access` flags) is Go; staying in-language keeps
   interop, debugging, and vendoring friction low.
-- **The §4.4-C atomic-commit contract wants a real transactional embedded
-  store.** `modernc.org/sqlite` (pure-Go SQLite, no cgo) gives "lifecycle-state
-  change + outbox append = single atomic commit" cleanly, and fits the §1.1
-  "single binary + local store, no heavy external dependency" deployment target.
+- **A transactional embedded store is available in-language.** Pure-Go, no-cgo
+  SQLite delivers the §4.4-C atomic commit and the §1.1 "single binary + local
+  store" target without leaving Go (backend decided in ADR-0004).
 - **Team familiarity** — existing domain and toolchain knowledge is in Go.
 
 ## Rejected / deferred

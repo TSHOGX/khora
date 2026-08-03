@@ -6,25 +6,24 @@
 > plan is deleted, not archived: the living truth of "what the engine is" moves
 > to `docs/spec/`, and the milestone survives only as this one-line ladder entry.
 >
-> Rule of thumb: **build one, gate it (review), then write the next.** Don't pull
-> later-milestone work forward (see `CLAUDE.md` → Milestone discipline).
+> Discipline (one at a time, review gate, no pulling work forward): `CLAUDE.md` →
+> Milestone discipline.
 
 ## Delivered
 
-**M1–M4 shipped** — their plans have expired (per expire-as-shipped). What they
-built is now part of the converged architecture; read `docs/spec/`, not a plan:
+**M1–M6 shipped**, plans expired. What they built is the converged architecture —
+read `docs/spec/`, not a plan. Acceptance lives in the substrate tests
+(`test/*_substrate_test.go` and `internal/*/*_substrate_test.go`), each assertion
+stating the property it proves inline.
 
 | # | Capability delivered | Where it lives now |
 | --- | --- | --- |
-| **M1** ✅ | Single sandbox `create / pause / resume / destroy` end-to-end; CAS + transition-lock shape, cold-start failure unwind | §3.3 · §4 · §5.A · §5.B · §5.E |
-| **M2** ✅ | Persistent store + the three §4.4 invariants in depth: atomic commit + outbox, true-concurrency stress, startup crash-reconciliation (backend = ADR-0004) | §4.4 · §5.A |
-| **M3** ✅ | Transport depth (§5.E): PTY + multi-connection fan-out + `Connect` reconnect + bounded ring-replay + the two D4.3 fan-out invariants; external data-plane Connect projection (D6) | §5.E · §3.2 · §6 |
-| **M4** ✅ | Reaper + health classification (two-tier liveness × guest-side connection activity) + live periodic reconcile: `auto-pause` / `evict` / live `crash-pause` | §4.3 · §4.4-A |
-| **M5** ✅ | Uniform object model on Template lineage: first-class Template rows (opaque ID + `parent` lineage, **existence-as-state**, **derived** refcount) + FK-enforced reference-reclaim atomicity + safe delete/GC + boot seed + orphan-layer sweep + Promote (multi-lowerdir freeze, bytes-first) | §3.1 · §4.3 · §5.B · §6.1 |
-| **M6** ✅ | Resource governance — §3.4's limits became real enforcement. Three dimensions, three mechanisms: CPU rate → cgroup (engine builds the parent, runsc owns the leaf, cap asserted post-launch because the trap fails OPEN); disk capacity → btrfs subvolume + squota on Overlay upper+work as ONE quota unit; RAM → host memcg with the one-knob/two-values split + `oom.group=1` (a **safety** limit, hence the `resource-terminated` disposition + death cause persisted in the demotion CAS). Plus the no-oversubscribe admission gate (two disjoint terms, a metered axis requires a cap) and `PATCH` as the Binding write point. Built `internal/btrfs` as a leaf package, first consumer the Overlay upper. | §2.3 · §2.4 · §3.4 · §4.1 · §4.3 · §5.A · §5.B · §6.1 |
-
-Acceptance for the shipped milestones lives in the substrate tests
-(`test/*_substrate_test.go`), which state each assertion's property inline.
+| **M1** | Single sandbox `create / pause / resume / destroy` end-to-end | §3.3 · §4 · §5.A · §5.B · §5.E |
+| **M2** | Persistent store + the three §4.4 invariants: atomic commit + outbox, true-concurrency, crash-reconciliation (backend = ADR-0004) | §4.4 · §5.A |
+| **M3** | Transport depth: PTY, multi-connection fan-out, `Connect` reconnect, bounded ring-replay, external data-plane projection | §5.E · §3.2 · §6 |
+| **M4** | Reaper + health classification + live periodic reconcile: `auto-pause` / `evict` / `crash-pause` | §4.3 · §4.4-A |
+| **M5** | Templates as first-class rows: `parent` lineage, existence-as-state, derived refcount, reference-reclaim atomicity, GC, boot seed, Promote | §3.1 · §4.3 · §5.B · §6.1 |
+| **M6** | Resource governance: §3.4's three axes enforced (cgroup CPU · btrfs squota disk · host memcg RAM), no-oversubscribe admission, `PATCH` as the Binding write point, `internal/btrfs` | §2.3 · §3.4 · §4.1 · §4.3 · §5.A · §5.B · §6.1 |
 
 ## Forward
 
@@ -37,40 +36,9 @@ Acceptance for the shipped milestones lives in the substrate tests
 The §6 API / CLI contract grows alongside from M1 — it is not a separate
 milestone.
 
-**Why this order.** M1 proved the five hardest joints coexist on the real
-substrate before anything layered on; M2 hardened the correctness invariants M1
-stubbed (in-memory store); M3 made the headline "multi-connection concurrent,
-shared FS/network" real. M4's reaper had to follow transport: the §4.3 `idle`
-state and TTL-evict are defined against a **connection-activity signal** ("all
-connections idle — no process activity, no pty I/O"), which only exists once the
-transport surface is real (PTY, `Connect`, multi-connection fan-out) — so the
-reaper landed on real signals and folded in the periodic reconcile from M2.
-
-**Templates (M5) came before Volume** because Templates faced the hardest
-object-model case directly: `create-from-Template` was an *unprotected reference*
-(Template was a bare directory — no row / refcount / lineage), so M5 poured the
-**uniform object model + reference-reclaim atomicity** foundation (§4.3) that
-Volume (M7) reuses — its exclusive lease *is* a refcount mount row (§5.C).
-
-**Resource governance (M6) came before Volume** for three reasons:
-
-- **§2.3 asserted an invariant nothing enforced.** "A guest's `dd` only
-  makes its own `write()` fail, it cannot fill the host disk" holds only with a
-  capacity cap, and §2.3 itself notes this dimension is *not* guarded by pillar ①
-  (syscall interception virtualizes syscalls, not resource usage) — so before M6 one
-  legal `write()` breached it. By contrast §5.D's gap is not a hole: the netns has
-  one /30 veth pair and no default route, so egress is already deny-all, and the
-  network milestone *opens* a controlled path rather than closing a leak.
-- **The dependency runs this way.** Volume needs subvolumes (for cheap snapshots
-  and its own cap), but subvolume+quota does not need Volume — and the Overlay
-  upper is already a consumer, one per sandbox. So the shared primitive
-  (`internal/btrfs`) landed with its first consumer there, and Volume imports it
-  unchanged.
-- **Risk separation.** Volume is the largest rung (new subsystem + new seam + new
-  store table + new uniqueness invariant + six mediator hooks + snapshot/clone +
-  §6 endpoints). Proving the capacity primitive against the simpler consumer
-  first — single writer, no shared-rw, no snapshots — kept two independent risk
-  sources off one review gate.
-
-The security-critical egress work (M8) still lands only after the lifecycle +
-storage + transport foundation is solid.
+**Why this order, forward.** M7 is the largest remaining rung — new subsystem +
+new seam + new store table + a new uniqueness invariant (exclusive lease) +
+mediator hooks + snapshot/clone + §6 endpoints. It inherits the M5 object model
+and imports `internal/btrfs` unchanged, so no new storage primitive lands with
+it. M8 is security-critical and lands only on top of a solid lifecycle +
+storage + transport foundation.

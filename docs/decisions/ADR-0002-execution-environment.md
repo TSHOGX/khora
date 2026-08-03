@@ -15,8 +15,7 @@ target where the build→run→test loop closes, otherwise milestone acceptance
 
 Develop and test inside an **OrbStack Linux machine named `sbx`**. runsc runs in
 **systrap** mode (seccomp trap, **no KVM / no nested virtualization**) as an
-unprivileged process — validated end-to-end (guest reports `4.19.0-gvisor`,
-`Starting gVisor...`, guest uid=0, no KVM).
+unprivileged process — validated end-to-end (matrix below).
 
 Claude Code runs **inside** `sbx` for development, pointed at the user's own
 Anthropic-compatible endpoint (not the macOS host's company-managed proxy, which
@@ -27,7 +26,7 @@ the machine can't reach).
 - **Native fs only for engine + overlay scratch.** Engine repo lives at
   `/home/hsw/engine` on the machine's native fs. The macOS shared mount
   (`/Users/...`, virtiofs) **cannot** host overlayfs upper/work — building there
-  fails. The Mac-side spec is readable via the mount for reference only.
+  fails.
 - **DNS hijack workaround.** The macOS host runs a VPN/ZTNA (`utun4`) that
   hijacks **all** plain DNS (:53) → synthetic `198.18.x` IPs the NAT'd machine
   can't route. Direct real-IP + :443/:80 egress works. Fix: resolve real IPs via
@@ -42,7 +41,7 @@ the machine can't reach).
 
 | Fact | Value |
 | --- | --- |
-| arch / kernel | **arm64** · `7.0.11-orbstack` |
+| arch / kernel | **arm64** · `7.0.14-orbstack` (OrbStack updates this in place; the engine depends on the capabilities below, not on an exact kernel build) |
 | runsc | `release-20260714.0` (spec 1.2.1), systrap, no KVM |
 | overlay / cgroup | overlay kernel module present · cgroup **v2** (cgroup2fs) |
 | engine scratch fs | **btrfs** on `/dev/vdb1` at `/home/hsw/engine` — native, not virtiofs; `cp --reflink=always` works (cheap §5.B CoW) |
@@ -58,7 +57,7 @@ the machine can't reach).
 | overlayfs: CoW correct, upper is a plain host dir, re-mount byte-identical | amd64 (ECS) + arm64 | fresh workdir required per (re-)mount; copy-up files root-owned (design detail → rootfs-overlay D5) |
 | pinned runsc flags launch + exec `/bin/sh` | arm64 | all five pins are **global** flags (before the `run` subcommand); config `root.path` = the externally-merged overlay dir |
 | network: host dials an in-guest listener through the sentry netstack by veth IP; fresh netns → new IP | amd64 (ECS) + arm64 | sentry-terminated (`ss` shows zero kernel listeners while host gets responses); `ip netns del` cascades the peer veth; mechanism in §5.A |
-| §4.4-A reconcile: enumerate + idempotent teardown of placement resources | arm64 | primitives + reclaim order in model.md §4.4-A + reaper-health D4 |
+| §4.4-A reconcile: enumerate + idempotent teardown of placement resources | arm64 | primitives + reclaim order in §4.4-A + reaper-health D4 |
 | cgroup v2 **leaf ownership**: engine creates the parent + delegates `subtree_control`, runsc creates the leaf and writes limits only to a leaf it created itself | arm64 | pre-creating the *full* path makes the cap **silently not apply while launch still succeeds** — fails OPEN, hence the mandatory post-launch read-back assertion (§5.A) |
 | RAM cap is hard only with swap pinned: OCI `swap == limit` ⇒ `memory.swap.max=0`; `memory.high` unusable | arm64 | limit alone lets the cgroup page out into zram and the cap stops binding; `memory.high` + unreclaimable anon turns throttling into a hang (§5.A / §3.4) |
 | squota capacity cap: guest write past the cap gets a clean `ENOSPC` through the gofer chain, **sandbox survives**, merged view uncorrupted | arm64 | reflinked copy-up is free under squota, so the cap governs newly-written bytes (rootfs-overlay D6.2/D6.5) |
@@ -70,7 +69,6 @@ placement. The **sentry itself stays unprivileged** (pillar ② intact); this is
 deployment caveat on §1.1 "runs in CI runner / inside a container" — that
 environment must grant those caps.
 
-**Arch scope.** The earlier substrate validations were amd64; `sbx` is arm64, so
-the milestone acceptance suites re-confirm overlay + netns on a *second*
-architecture (a plus). amd64 re-validation before production is an environment
-check (Go cross-compiles cleanly), out of scope for the current milestone work.
+**Arch scope.** `sbx` is arm64; the matrix above records which facts are
+additionally confirmed on amd64. Full amd64 re-validation before production is an
+environment check (Go cross-compiles cleanly), not an engine change.

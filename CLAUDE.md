@@ -23,37 +23,21 @@ implementation to justify anything.
 | `docs/spec/deep-dives/` | Single-topic design rationale hung under a § (the *why* / falsification / rejected options). |
 | `docs/spec/open-decisions.md` | Register of **unsettled** design questions. |
 | `docs/plans/` | One file per milestone, `M<N>-<capability>.md`: forward scope + acceptance + out-of-scope. **Expire as shipped.** Ladder index in `docs/plans/README.md`. |
-| `docs/decisions/` | ADRs: one-time **tool / environment / process** choices (why Go, why OrbStack, validation matrix). The **decision** is immutable — reversing it is a *new* superseding ADR, never an in-place rewrite; but the prose **may be corrected for factual accuracy** (stale cross-ref, milestone named as unshipped, superseded machine fact) so long as the edit doesn't alter *what was decided or why*. |
+| `docs/decisions/` | ADRs: one-time **tool / environment / process** choices (why Go, why OrbStack, validation matrix). The **decision** is immutable — reversing it is a *new* superseding ADR; stale prose around an unchanged decision is corrected in place. Full rule: ADR-0003. |
 | `cmd/` `internal/` `test/` | The code, implementing the spec. |
 
 **Relationship rule.** The spec is the **best current statement of intent**, not
-scripture. It captures what we mean the engine to be *at this phase*, and it will
-keep changing as we iterate — it can be questioned and corrected. What it must
-**not** be is edited casually as a side effect of a code change.
+scripture — it can be questioned and corrected, but never edited casually as a
+side effect of a code change. **Neither side is automatically right: a divergence
+is a signal to STOP, not to reconcile in passing.** When code and spec disagree,
+decide deliberately which side moves — fix the code to meet the intent, or revise
+the spec with its rationale (a real design shift is a deep-dive / open-decisions /
+ADR moment, not a one-liner in a feature commit) — then adjust promptly. The two
+anti-patterns: contorting code to satisfy a spec you never questioned, and
+rewriting the spec to rubber-stamp what the code did. Both are silent drift.
 
-So: **the spec is not automatically right, and neither is the code. A divergence
-between them is a signal to STOP, not to reconcile in passing.** When code and
-spec disagree (implementation hits a wall, an invariant doesn't hold, the spec
-turns out underspecified or plain wrong):
-
-1. **Stop and analyze** — is the spec expressing the right intent and the code
-   wrong, or did implementation teach us the spec's intent itself is wrong /
-   incomplete?
-2. **Decide which side moves** — fix the code to meet the intent, OR revise the
-   spec as a **deliberate, separate** decision (with its rationale; if it's a
-   real design shift, that's a deep-dive / open-decisions / ADR moment, not a
-   one-liner buried in a feature commit).
-3. **Then adjust promptly** — don't leave them diverged, and don't let code
-   silently bend to a spec you suspect is wrong just because "spec wins."
-
-The anti-patterns, both rejected: **(a) contorting code to satisfy a spec you
-haven't stopped to question**, and **(b) rewriting the spec to rubber-stamp
-whatever the code happened to do.** Both are silent drift. The discipline is the
-conscious stop in between.
-
-(Narrow, easy case: a pure **vocabulary** mismatch — code and spec using
-different names for the same thing — isn't a design divergence; just align the
-name on one side in the same change.)
+(A pure **vocabulary** mismatch is not a divergence — align the name on one side
+in the same change.)
 
 "Settled + built" and "settled, not yet built" are *both* spec; `plans/` tracks
 which is which.
@@ -84,12 +68,17 @@ slims to boundary + open agenda — nothing lives in full in both places.
 ## Code conventions
 
 - **Package names = the §5 canonical short-names:** `runtime` / `rootfs` /
-  `volume` / `network` / `transport`, plus `model` / `lifecycle` / `store`.
-  (`Rootfs` = §5.B subsystem; `fs` = the §5.E wire service; `FS provider` = the
-  §5.B/§5.C storage seam — three distinct things, don't merge.)
-- **Seams are interfaces** (§1.3 Behavior seam): `store`, `runtime.Provider`,
-  `rootfs.Provider`. Swapping a backend = registering an implementation, not
-  editing callers.
+  `volume` / `network` / `transport`, plus `model` / `lifecycle` / `store`,
+  `orchestrator` (the §1.1 assembly) and `btrfs` (a leaf substrate tool, model-
+  ignorant — not a subsystem).
+  (`Rootfs` = the §5.B subsystem; `fs` = the §5.E wire service; `rootfs provider`
+  = its §5.B storage seam — three distinct things, don't merge. Say `rootfs
+  provider`, never "FS provider": §5.C's `volume backend` is a *separate* seam,
+  not the other half of one shared FS seam.)
+- **Seams are interfaces** (§1.3 Behavior seam): `store.Store`,
+  `runtime.Provider`, `rootfs.Provider`, and `volume.Backend` (§5.C — a
+  *different* shape from `rootfs.Provider`, not one shared FS seam). Swapping a
+  backend = registering an implementation, not editing callers.
 - **`runtime.Provider` contract = policy + handles, NEVER host primitives** — no
   cgroup path / netns fd / host absolute path in the interface (§5.A). A remote
   provider cannot produce those; leaking them binds the abstraction to
@@ -97,8 +86,10 @@ slims to boundary + open agenda — nothing lives in full in both places.
 - **Engine vocabulary boundary (§1.1).** Banned as engine-internal entity names
   (types / packages / fields / API endpoints): `generation`, `principal`,
   `tenant`, `owner` (ownership sense), `session`, `turn`, `agent`. They keep
-  product semantics out at naming time. Fine in prose describing what the engine
-  does *not* do.
+  product semantics out at naming time. In prose the §1.1 table is finer-grained:
+  `session` / `turn` / `agent` are fine when describing what the engine does *not*
+  do, `owner` is fine only in the responsibility sense, and `generation` /
+  `principal` / `tenant` stay barred outright.
 - **Code matches spec vocabulary.** If code and spec disagree on a name, fix one
   in the same change.
 
@@ -109,7 +100,7 @@ slims to boundary + open agenda — nothing lives in full in both places.
   code + **all** overlay scratch live on **native fs**, never the virtiofs shared
   mount (overlayfs upper/work won't work there).
 - **Correctness lives in concurrency/failure invariants** (§4.4 the three, §4.3
-  health quadrant, §2.4 egress fail-closed), **not at compile time**. A green
+  health classification, §2.4 egress fail-closed), **not at compile time**. A green
   build proves nothing about these — write **fault-injection / e2e tests at the
   risky seams**.
 - **Verify on the real substrate before claiming done:** `go build` + `go vet` +

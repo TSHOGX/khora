@@ -2,17 +2,15 @@
 
 - **Status:** accepted
 - **Date:** 2026-07-20
-- **Consumers:** `internal/store` (the persistent implementation), M2 and every later milestone that relies on the §4.4-C atomic-commit contract.
+- **Consumers:** `internal/store` (the persistent implementation); everything that relies on the §4.4-C atomic-commit contract.
 
 ## Context
 
-`store.Store` is a Behavior seam (§1.3). M1 shipped `store.Memory` (a mutex over a
-map) as scaffolding; M2 makes records durable behind the **same interface**. The
-backend must deliver the §4.4-C contract — "lifecycle-state change + outbox append
-= single atomic commit" — and fit the §1.1 deployment target: single binary + one
-local store, no heavy external dependency. ADR-0001 already named `modernc.org/sqlite`
-as the intended backend at language-choice time; this ADR finalizes it against the
-one real alternative and records why.
+`store.Store` is a Behavior seam (§1.3): `store.Memory` (a mutex over a map)
+serves unit and contract tests, and the persistent backend must be durable behind
+the **same interface**. That backend must deliver the §4.4-C contract —
+"lifecycle-state change + outbox append = single atomic commit" — and fit the §1.1
+deployment target: single binary + one local store, no heavy external dependency.
 
 ## Decision
 

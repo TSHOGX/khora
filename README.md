@@ -3,23 +3,26 @@
 A persistent, mutable, root-capable agent sandbox engine — no-hypervisor
 (gVisor/runsc systrap), self-hostable, state-transparent.
 
-> **Architecture spec** (the source of truth for *what this should be*) lives
-> in `docs/spec/` (§1–§6). Milestone plans in `docs/plans/`, one-time decisions in `docs/decisions/`.
-> Milestones ship in order along the ladder in
-> [`docs/plans/README.md`](docs/plans/README.md) — start there for where the
-> implementation currently stands.
+> **Architecture spec** (the source of truth for *what this should be*) lives in
+> `docs/spec/` (§1–§6); one-time tool/environment choices in `docs/decisions/`.
+> For where the implementation stands and what ships next, start at the ladder:
+> [`docs/plans/README.md`](docs/plans/README.md).
 
 ## Layout (canonical subsystem short-names, §5)
 
 ```
-cmd/orchestrator/   single engine-host binary (§1.1): control plane + §4 mediator
-cmd/sandboxd/       in-guest daemon: init (PID 1) + transport (process/fs) modes (§5.E.1)
-internal/model/     §3 shared model: sandbox identity, lifecycle state (pure types)
-internal/lifecycle/ §4 mediator: state machine + transition lock + cold-start chain
-internal/store/     control-plane record seam: SQLite + in-memory, one interface
-internal/runtime/   §5.A: runtime provider seam + local_runsc
-internal/rootfs/    §5.B: FS provider seam + host overlayfs assembly
-internal/transport/ §5.E: host-side process/fs client + Health (Connect-RPC/h2c)
+cmd/orchestrator/      thin entrypoint: flags → Engine → serve the §6.1 API
+cmd/sandboxd/          in-guest daemon: init (PID 1) + transport (process/fs) modes (§5.E.1)
+internal/orchestrator/ the single engine-host assembly (§1.1): holds the seams, serves §6.1
+internal/model/        §3 shared model: sandbox identity, lifecycle state (pure types)
+internal/lifecycle/    §4 mediator: state machine + transition lock + cold-start chain
+internal/store/        control-plane record seam: SQLite + in-memory, one interface
+internal/runtime/      §5.A: runtime provider seam + local_runsc
+internal/rootfs/       §5.B: rootfs provider seam + host overlayfs assembly
+internal/transport/    §5.E: host-side process/fs client + Health (Connect-RPC/h2c)
+internal/btrfs/        leaf package: subvolume + squota primitives (no engine model)
+proto/                 transport wire schema; generated code under internal/transport/gen
+test/                  L2/L3 substrate acceptance + preflight fixtures
 ```
 
 ## Build & test
@@ -29,10 +32,12 @@ Runs on a Linux host with gVisor/runsc, kernel overlayfs, netns, cgroup v2
 must live on native fs, not a virtiofs shared mount.
 
 ```sh
-go build ./...
-go test ./...
-```
+go build ./... && go vet ./...
+go test ./...            # unit + contract tests only
 
-Milestone ladder (see [`docs/plans/README.md`](docs/plans/README.md)):
-M1 walking skeleton → M2 store+§4.4 → M3 transport depth → M4 reaper+health →
-M5 Volume → M6 network egress → M7 Promote+GC → M8 credential store.
+# L2/L3 acceptance against the real substrate (root; runsc/overlay/btrfs/netns).
+# Without root every overlay mount fails with EPERM. `-p 1` is required: these
+# packages each launch real runsc containers, and running them concurrently
+# starves the in-guest Health probes the reaper's idle classification needs.
+sudo env "PATH=$PATH" "HOME=$HOME" go test -tags substrate -count=1 -p 1 ./...
+```
