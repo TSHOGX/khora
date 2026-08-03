@@ -40,7 +40,7 @@ type fsProxy struct{ e *Engine }
 // Map to CodeUnavailable with a placement-free message; the real cause is logged
 // engine-side (so it stays debuggable) but never crosses to the wire. (Stream
 // errors that arrive via drainEvents are a separate seam item tied to the health
-// quadrant — see transport.md D4.3.)
+// health state — see transport.md D4.3.)
 func proxyErr(err error) error {
 	log.Printf("dataplane: transport proxy error (sanitized to client): %v", err)
 	return connect.NewError(connect.CodeUnavailable, errors.New("sandbox transport unavailable"))

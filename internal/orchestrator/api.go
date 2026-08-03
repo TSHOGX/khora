@@ -232,6 +232,8 @@ func (e *Engine) handleSandboxSub(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case sub == "" && r.Method == http.MethodGet:
 		e.handleGet(w, r, id)
+	case sub == "" && r.Method == http.MethodPatch:
+		e.handlePatch(w, r, id)
 	case sub == "" && r.Method == http.MethodDelete:
 		e.handleDestroy(w, r, id)
 	case sub == "pause" && r.Method == http.MethodPost:
@@ -242,6 +244,81 @@ func (e *Engine) handleSandboxSub(w http.ResponseWriter, r *http.Request) {
 		// process/fs data plane is Connect-RPC (transport D6), not REST here.
 		http.Error(w, "not found", http.StatusNotFound)
 	}
+}
+
+// patchReq is the §6.1 PATCH body — rewrite a sandbox's Binding (§3.4). Every
+// field is a POINTER so "omitted" is distinguishable from "set to zero", which
+// matters because zero is itself meaningful on these axes (`0 = unlimited` for a
+// cap, `retention: 0` = never evict). A value type could not express "leave this
+// one alone".
+type patchReq struct {
+	CPUMillis   *int64  `json:"cpu_millis"`
+	MemoryByte  *int64  `json:"memory_byte"`
+	DiskByte    *int64  `json:"disk_byte"`
+	IdleTimeout *string `json:"idle_timeout"`
+	Retention   *string `json:"retention"`
+}
+
+type patchResp struct {
+	SandboxID string `json:"sandbox_id"`
+	State     string `json:"state"`
+	// AppliesAt tells the caller WHEN the change takes effect rather than leaving
+	// them to infer it: "now" for TTL fields (the reaper re-reads the record every
+	// sweep) vs "next-resume" for resource caps (the providers materialize them at
+	// placement, §3.4). Making the deferral explicit is the point.
+	AppliesAt string `json:"applies_at"`
+}
+
+func (e *Engine) handlePatch(w http.ResponseWriter, r *http.Request, id model.SandboxID) {
+	var req patchReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if (req.CPUMillis != nil && *req.CPUMillis < 0) ||
+		(req.MemoryByte != nil && *req.MemoryByte < 0) ||
+		(req.DiskByte != nil && *req.DiskByte < 0) {
+		http.Error(w, "resource limits must be non-negative (0 = unlimited)", http.StatusBadRequest)
+		return
+	}
+	b := store.Binding{CPUMillis: req.CPUMillis, MemoryByte: req.MemoryByte, DiskByte: req.DiskByte}
+	for _, f := range []struct {
+		raw  *string
+		dst  **time.Duration
+		name string
+	}{
+		{req.IdleTimeout, &b.IdleTimeout, "idle_timeout"},
+		{req.Retention, &b.Retention, "retention"},
+	} {
+		if f.raw == nil {
+			continue
+		}
+		d, err := time.ParseDuration(*f.raw)
+		if err != nil {
+			http.Error(w, f.name+": "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if d < 0 {
+			http.Error(w, f.name+" must be non-negative (0 = no deadline)", http.StatusBadRequest)
+			return
+		}
+		*f.dst = &d
+	}
+
+	if err := e.Mediator.UpdateBinding(r.Context(), id, b); err != nil {
+		statusFor(w, err)
+		return
+	}
+	stt, err := e.Mediator.State(r.Context(), id)
+	if err != nil {
+		statusFor(w, err)
+		return
+	}
+	appliesAt := "now"
+	if b.CPUMillis != nil || b.MemoryByte != nil || b.DiskByte != nil {
+		appliesAt = "next-resume"
+	}
+	writeJSON(w, http.StatusOK, patchResp{SandboxID: string(id), State: string(stt), AppliesAt: appliesAt})
 }
 
 func (e *Engine) handleGet(w http.ResponseWriter, r *http.Request, id model.SandboxID) {
@@ -278,6 +355,13 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 
 func statusFor(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, lifecycle.ErrCapRequired):
+		// §3.4: the node meters this axis, so a cap is required. 400, NOT 507 —
+		// nothing is full; the request is invalid for this engine's configuration.
+		// Checked before ErrInsufficientCapacity below because the two are distinct
+		// verdicts and conflating them would tell the caller to wait for capacity
+		// that is not the problem.
+		http.Error(w, err.Error(), http.StatusBadRequest)
 	case errors.Is(err, lifecycle.ErrInsufficientCapacity):
 		// §3.4 admission refusal: nothing is wrong with the request or the sandbox —
 		// the NODE cannot honor another promise. 507 Insufficient Storage says

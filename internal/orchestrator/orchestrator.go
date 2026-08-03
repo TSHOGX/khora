@@ -143,6 +143,15 @@ func (e *Engine) SeedTemplates(ctx context.Context) error {
 // running re-adoption). Call once at boot, before serving the API.
 func (e *Engine) Reconcile(ctx context.Context) error { return e.Mediator.Reconcile(ctx) }
 
+// SweepOrphanOverlays runs the §4.4-A orphan-UNIT sweep (reclaim Overlay storage
+// units backing no sandbox row). At boot this is where the accumulated residue of
+// every prior run is collected: the in-flight keep-set is empty, so every unit
+// without a record is a true orphan. Call after Reconcile, which deletes crashed
+// `creating` records and so decides which units are orphans.
+func (e *Engine) SweepOrphanOverlays(ctx context.Context) error {
+	return e.Mediator.SweepOrphanOverlays(ctx)
+}
+
 // SweepOrphanLayers runs the §5.B / §4.4-A orphan-layer sweep (reclaim Promote-built layer
 // bytes with no live templates row). Call once at boot after SeedTemplates so a
 // crashed Promote's staging layer is reclaimed; the reaper repeats it per tick.

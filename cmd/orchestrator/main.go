@@ -29,6 +29,8 @@ func main() {
 		retention = flag.Duration("retention", 24*time.Hour, "default retention TTL: paused past this → evict (§4.3)")
 		sweep     = flag.Duration("reaper-interval", 30*time.Second, "reaper sweep cadence (§4.3)")
 		tdBudget  = flag.Duration("transport-down-budget", 2*time.Minute, "transport-down restart budget before escalate→resume (D4b)")
+		nodeDisk  = flag.Int64("node-disk-byte", 0, "§3.4 no-oversubscribe disk budget: bytes for sandbox Overlay upper+work plus Template/layer bytes; 0 = unmetered (axis not gated). Set BELOW the raw device size — the budget counts only what the engine may PROMISE guests, so per-sandbox substrate overhead (runsc state on disk) lives outside it. While metered, a create must specify a disk cap or it is refused")
+		nodeMem   = flag.Int64("node-memory-byte", 0, "§3.4 no-oversubscribe memory budget: total host RAM the engine may promise to sandboxes; 0 = unmetered (axis not gated). Set BELOW physical RAM — the budget counts only what the engine may PROMISE guests, so per-sandbox substrate overhead (sentry/gofer footprint) lives outside it. While metered, a create must specify a memory cap or it is refused")
 		sudo      = flag.Bool("sudo", false, "prefix runsc/ip with sudo (dev; prod runs as root)")
 	)
 	flag.Parse()
@@ -42,6 +44,8 @@ func main() {
 		DefaultRetention:    *retention,
 		SweepInterval:       *sweep,
 		TransportDownBudget: *tdBudget,
+		NodeDiskByte:        *nodeDisk,
+		NodeMemoryByte:      *nodeMem,
 		Sudo:                *sudo,
 	})
 	if err != nil {
@@ -69,6 +73,16 @@ func main() {
 	// layer is correctly a true orphan.
 	if err := eng.SweepOrphanLayers(context.Background()); err != nil {
 		log.Printf("orchestrator: boot orphan-layer sweep (retried by reaper): %v", err)
+	}
+
+	// §4.4-A orphan-UNIT sweep at boot: reclaim Overlay storage units backing no
+	// sandbox row — the residue of any destroy whose byte reclamation failed in a
+	// previous run (§4.4 licenses the deferral; this is the retry). Boot is where it
+	// pays off most: the in-flight keep-set is empty, so every unrecorded unit is a
+	// true orphan. Runs after Reconcile, which decides which records survive.
+	// Non-fatal; the reaper repeats it each tick.
+	if err := eng.SweepOrphanOverlays(context.Background()); err != nil {
+		log.Printf("orchestrator: boot orphan-unit sweep (retried by reaper): %v", err)
 	}
 
 	// async outbox publisher (§4.4-C): drain the durable outbox to the event sink.
