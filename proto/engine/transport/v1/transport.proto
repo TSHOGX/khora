@@ -182,8 +182,15 @@ message ListResponse {
   repeated int32 pids = 1;
 }
 
-// FsService is the §5.E fs primitive: Read (offset) / Write. No watch —
-// consumers poll Stat+Read (transport D2 / D4.4). List/Stat/etc grow later.
+// FsService is the §5.E fs primitive (transport D4.4): all unary, no watch.
+//
+// No watch, deliberately: a subscription would make the engine hold merge /
+// reconnect state and break §5.E statelessness, and inotify on a gVisor overlay
+// upperdir is unreliable anyway (§2.5). Consumers poll Stat+Read instead — the
+// render-vs-interact asymmetry (D2).
+//
+// Byte-carrying calls are bounded by the RPC message size on purpose; large
+// files use the HTTP multipart bypass (D4.4) rather than growing a chunked RPC.
 service FsService {
   // Read reads sandbox file bytes at an offset. The engine keeps no read
   // cursor and no cross-resume offset continuity (transport D4.4).
@@ -191,6 +198,106 @@ service FsService {
 
   // Write writes sandbox file bytes (whole-file, offset 0).
   rpc Write(WriteRequest) returns (WriteResponse) {}
+
+  // Stat describes one path. LSTAT semantics: a symlink is reported AS a
+  // symlink (with symlink_target set), never silently followed — the caller
+  // asked about this path, and there is no Readlink RPC to recover the target
+  // with if we collapsed it here.
+  rpc Stat(StatRequest) returns (StatResponse) {}
+
+  // List enumerates a directory, up to depth levels deep, FLATTENED into one
+  // list. Every entry carries its absolute path, so a flat result is
+  // unambiguous. No pagination: the engine does not hold a cursor (§5.E).
+  rpc List(FsServiceListRequest) returns (FsServiceListResponse) {}
+
+  // MakeDir creates a directory, CREATING PARENTS (mkdir -p). An existing
+  // directory is already_exists — the caller may treat that as benign, but the
+  // server does not erase the distinction.
+  rpc MakeDir(MakeDirRequest) returns (MakeDirResponse) {}
+
+  // Remove deletes a path RECURSIVELY, and is IDEMPOTENT: removing something
+  // that is not there succeeds. There is no `recursive` flag — for a trusted
+  // caller the non-recursive mode is a footgun with no upside, and it would add
+  // an error branch ("directory not empty") every caller must then handle.
+  rpc Remove(RemoveRequest) returns (RemoveResponse) {}
+
+  // Move renames source to destination, creating destination parents and
+  // OVERWRITING an existing destination (rename(2) semantics). Returns the
+  // entry at its new path. A cross-device move is rejected explicitly rather
+  // than silently copying — see the EXDEV note on the guest implementation.
+  rpc Move(MoveRequest) returns (MoveResponse) {}
+}
+
+// EntryType is what a path IS. UNSPECIFIED is deliberately the zero value: a
+// client that meets a type it does not know skips the entry instead of
+// misreading it, so adding a type later is additive.
+enum EntryType {
+  ENTRY_TYPE_UNSPECIFIED = 0;
+  ENTRY_TYPE_FILE = 1;
+  ENTRY_TYPE_DIRECTORY = 2;
+  ENTRY_TYPE_SYMLINK = 3;
+}
+
+// EntryInfo describes one filesystem entry. Built by ONE constructor shared by
+// Stat and List, so the two can never disagree about the same path.
+//
+// No owner / group / permission-string fields: the engine does not model guest
+// users (§2.2 / §3.2.1 — "run as user X" is guest-native), and a display string
+// is derivable from mode by the caller.
+message EntryInfo {
+  // name is the base name; path is absolute in the GUEST's namespace.
+  string name = 1;
+  string path = 2;
+  EntryType type = 3;
+  int64 size = 4;
+  // mode is the full st_mode including type bits, numeric — not a display
+  // string, so no information is lost on the wire.
+  uint32 mode = 5;
+  int64 mtime_unix_nano = 6;
+  // symlink_target is set IFF type == SYMLINK, absolutized against the link's
+  // own directory (a relative target is meaningless to a remote caller).
+  optional string symlink_target = 7;
+}
+
+message StatRequest {
+  string path = 1;
+}
+message StatResponse {
+  EntryInfo entry = 1;
+}
+
+// FsServiceListRequest is the fs directory listing. Service-prefixed because
+// proto messages share ONE namespace and ProcessService.List already owns
+// List{Request,Response} — this is also the spelling buf lint prescribes for the
+// collision.
+message FsServiceListRequest {
+  string path = 1;
+  // depth 1 = immediate children; N = N levels, flattened. Must be >= 1 —
+  // 0 is not a sentinel for "unlimited", it is invalid_argument.
+  uint32 depth = 2;
+}
+message FsServiceListResponse {
+  repeated EntryInfo entries = 1;
+}
+
+message MakeDirRequest {
+  string path = 1;
+}
+message MakeDirResponse {
+  EntryInfo entry = 1;
+}
+
+message RemoveRequest {
+  string path = 1;
+}
+message RemoveResponse {}
+
+message MoveRequest {
+  string source = 1;
+  string destination = 2;
+}
+message MoveResponse {
+  EntryInfo entry = 1;
 }
 
 message ReadRequest {

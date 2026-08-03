@@ -72,6 +72,34 @@ type StartSpec struct {
 
 type PtySize struct{ Rows, Cols uint16 }
 
+// EntryType is what a filesystem path IS (§5.E fs / transport D4.4). Mirrors the
+// wire enum as a domain type so the Client interface does not leak protobuf.
+type EntryType string
+
+const (
+	// EntryUnknown is the zero value: a type this engine version does not model.
+	// Callers should skip such an entry rather than guess — that is what makes
+	// adding a type later additive.
+	EntryUnknown   EntryType = ""
+	EntryFile      EntryType = "file"
+	EntryDirectory EntryType = "dir"
+	EntrySymlink   EntryType = "symlink"
+)
+
+// EntryInfo describes one filesystem entry (§5.E fs / transport D4.4). Carries no
+// owner/group: the engine does not model guest users (§2.2 / §3.2.1).
+type EntryInfo struct {
+	Name  string // base name
+	Path  string // absolute in the GUEST namespace
+	Type  EntryType
+	Size  int64
+	Mode  uint32 // full st_mode incl. type bits
+	MTime time.Time
+	// SymlinkTarget is set iff Type == EntrySymlink, absolutized against the
+	// link's own directory (a relative target means nothing to a host caller).
+	SymlinkTarget string
+}
+
 // HealthStatus is the domain projection of a successful Health probe (§4.3 L2 +
 // activity signal). It carries the sandbox-global idle duration the reaper's
 // classifier reads to tell healthy from idle (reaper-health D2). Only valid
@@ -145,4 +173,27 @@ type Client interface {
 
 	// Write writes sandbox file bytes.
 	Write(ctx context.Context, path string, data []byte) error
+
+	// Stat describes one path with LSTAT semantics — a symlink is reported as
+	// itself, with SymlinkTarget set (transport D4.4).
+	Stat(ctx context.Context, path string) (EntryInfo, error)
+
+	// ListDir enumerates a directory up to depth levels, FLATTENED (each entry
+	// carries its absolute path). depth must be >= 1; 0 is invalid, not
+	// "unlimited". Named ListDir, not List, because List is the PROCESS listing
+	// on this same interface.
+	ListDir(ctx context.Context, path string, depth uint32) ([]EntryInfo, error)
+
+	// MakeDir creates a directory including parents (mkdir -p). An existing path
+	// is an already-exists error.
+	MakeDir(ctx context.Context, path string) (EntryInfo, error)
+
+	// Remove deletes a path recursively, and is idempotent — removing something
+	// absent succeeds.
+	Remove(ctx context.Context, path string) error
+
+	// Move renames source→destination, creating destination parents and
+	// overwriting an existing destination. A cross-device move is refused
+	// (rename(2) cannot span filesystems) rather than silently copied.
+	Move(ctx context.Context, source, destination string) (EntryInfo, error)
 }

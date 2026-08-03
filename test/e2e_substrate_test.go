@@ -261,4 +261,3 @@ func TestE2EColdStartUnwindRealRunsc(t *testing.T) {
 	}
 	t.Logf("✓ record deleted, placement reclaimed, no orphan netns")
 }
-

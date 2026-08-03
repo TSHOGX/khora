@@ -77,6 +77,16 @@ const (
 	FsServiceReadProcedure = "/engine.transport.v1.FsService/Read"
 	// FsServiceWriteProcedure is the fully-qualified name of the FsService's Write RPC.
 	FsServiceWriteProcedure = "/engine.transport.v1.FsService/Write"
+	// FsServiceStatProcedure is the fully-qualified name of the FsService's Stat RPC.
+	FsServiceStatProcedure = "/engine.transport.v1.FsService/Stat"
+	// FsServiceListProcedure is the fully-qualified name of the FsService's List RPC.
+	FsServiceListProcedure = "/engine.transport.v1.FsService/List"
+	// FsServiceMakeDirProcedure is the fully-qualified name of the FsService's MakeDir RPC.
+	FsServiceMakeDirProcedure = "/engine.transport.v1.FsService/MakeDir"
+	// FsServiceRemoveProcedure is the fully-qualified name of the FsService's Remove RPC.
+	FsServiceRemoveProcedure = "/engine.transport.v1.FsService/Remove"
+	// FsServiceMoveProcedure is the fully-qualified name of the FsService's Move RPC.
+	FsServiceMoveProcedure = "/engine.transport.v1.FsService/Move"
 )
 
 // These variables are the protoreflect.Descriptor objects for the RPCs defined in this package.
@@ -95,6 +105,11 @@ var (
 	fsServiceServiceDescriptor                = v1.File_engine_transport_v1_transport_proto.Services().ByName("FsService")
 	fsServiceReadMethodDescriptor             = fsServiceServiceDescriptor.Methods().ByName("Read")
 	fsServiceWriteMethodDescriptor            = fsServiceServiceDescriptor.Methods().ByName("Write")
+	fsServiceStatMethodDescriptor             = fsServiceServiceDescriptor.Methods().ByName("Stat")
+	fsServiceListMethodDescriptor             = fsServiceServiceDescriptor.Methods().ByName("List")
+	fsServiceMakeDirMethodDescriptor          = fsServiceServiceDescriptor.Methods().ByName("MakeDir")
+	fsServiceRemoveMethodDescriptor           = fsServiceServiceDescriptor.Methods().ByName("Remove")
+	fsServiceMoveMethodDescriptor             = fsServiceServiceDescriptor.Methods().ByName("Move")
 )
 
 // HealthServiceClient is a client for the engine.transport.v1.HealthService service.
@@ -170,9 +185,17 @@ type ProcessServiceClient interface {
 	// Start launches a process and server-streams its output events
 	// (start / data / end / keepalive). Addressed by the returned pid thereafter.
 	Start(context.Context, *connect.Request[v1.StartRequest]) (*connect.ServerStreamForClient[v1.ProcessEvent], error)
-	// Connect reattaches to an already-running process, replaying the bounded
+	// Connect reattaches to an already-RUNNING process, replaying the bounded
 	// output ring buffer first, then joining the live stream (transport D4.3
 	// invariant 2). Multiple Connect can attach one pid (§3.2 multi-connection).
+	//
+	// Only a live pid is addressable: once a process exits, its `end` event goes to
+	// the subscribers attached AT THAT MOMENT and the pid stops resolving —
+	// Connect then returns not-found, and exit status is NOT held for later
+	// collection. That follows from addressing by guest-native pid, which the
+	// kernel recycles: a retained "pid N exited" record would start describing a
+	// different process the moment N is reused. A caller that needs exit status
+	// must be attached when the process ends (guest-runtime D4.3 C2).
 	Connect(context.Context, *connect.Request[v1.ConnectRequest]) (*connect.ServerStreamForClient[v1.ProcessEvent], error)
 	// StreamInput writes stdin (or pty-in) as an ordered client-stream — the
 	// interactive input path (keystrokes to a pty). Ordering is guaranteed by the
@@ -310,9 +333,17 @@ type ProcessServiceHandler interface {
 	// Start launches a process and server-streams its output events
 	// (start / data / end / keepalive). Addressed by the returned pid thereafter.
 	Start(context.Context, *connect.Request[v1.StartRequest], *connect.ServerStream[v1.ProcessEvent]) error
-	// Connect reattaches to an already-running process, replaying the bounded
+	// Connect reattaches to an already-RUNNING process, replaying the bounded
 	// output ring buffer first, then joining the live stream (transport D4.3
 	// invariant 2). Multiple Connect can attach one pid (§3.2 multi-connection).
+	//
+	// Only a live pid is addressable: once a process exits, its `end` event goes to
+	// the subscribers attached AT THAT MOMENT and the pid stops resolving —
+	// Connect then returns not-found, and exit status is NOT held for later
+	// collection. That follows from addressing by guest-native pid, which the
+	// kernel recycles: a retained "pid N exited" record would start describing a
+	// different process the moment N is reused. A caller that needs exit status
+	// must be attached when the process ends (guest-runtime D4.3 C2).
 	Connect(context.Context, *connect.Request[v1.ConnectRequest], *connect.ServerStream[v1.ProcessEvent]) error
 	// StreamInput writes stdin (or pty-in) as an ordered client-stream — the
 	// interactive input path (keystrokes to a pty). Ordering is guaranteed by the
@@ -452,6 +483,29 @@ type FsServiceClient interface {
 	Read(context.Context, *connect.Request[v1.ReadRequest]) (*connect.Response[v1.ReadResponse], error)
 	// Write writes sandbox file bytes (whole-file, offset 0).
 	Write(context.Context, *connect.Request[v1.WriteRequest]) (*connect.Response[v1.WriteResponse], error)
+	// Stat describes one path. LSTAT semantics: a symlink is reported AS a
+	// symlink (with symlink_target set), never silently followed — the caller
+	// asked about this path, and there is no Readlink RPC to recover the target
+	// with if we collapsed it here.
+	Stat(context.Context, *connect.Request[v1.StatRequest]) (*connect.Response[v1.StatResponse], error)
+	// List enumerates a directory, up to depth levels deep, FLATTENED into one
+	// list. Every entry carries its absolute path, so a flat result is
+	// unambiguous. No pagination: the engine does not hold a cursor (§5.E).
+	List(context.Context, *connect.Request[v1.FsServiceListRequest]) (*connect.Response[v1.FsServiceListResponse], error)
+	// MakeDir creates a directory, CREATING PARENTS (mkdir -p). An existing
+	// directory is already_exists — the caller may treat that as benign, but the
+	// server does not erase the distinction.
+	MakeDir(context.Context, *connect.Request[v1.MakeDirRequest]) (*connect.Response[v1.MakeDirResponse], error)
+	// Remove deletes a path RECURSIVELY, and is IDEMPOTENT: removing something
+	// that is not there succeeds. There is no `recursive` flag — for a trusted
+	// caller the non-recursive mode is a footgun with no upside, and it would add
+	// an error branch ("directory not empty") every caller must then handle.
+	Remove(context.Context, *connect.Request[v1.RemoveRequest]) (*connect.Response[v1.RemoveResponse], error)
+	// Move renames source to destination, creating destination parents and
+	// OVERWRITING an existing destination (rename(2) semantics). Returns the
+	// entry at its new path. A cross-device move is rejected explicitly rather
+	// than silently copying — see the EXDEV note on the guest implementation.
+	Move(context.Context, *connect.Request[v1.MoveRequest]) (*connect.Response[v1.MoveResponse], error)
 }
 
 // NewFsServiceClient constructs a client for the engine.transport.v1.FsService service. By default,
@@ -476,13 +530,48 @@ func NewFsServiceClient(httpClient connect.HTTPClient, baseURL string, opts ...c
 			connect.WithSchema(fsServiceWriteMethodDescriptor),
 			connect.WithClientOptions(opts...),
 		),
+		stat: connect.NewClient[v1.StatRequest, v1.StatResponse](
+			httpClient,
+			baseURL+FsServiceStatProcedure,
+			connect.WithSchema(fsServiceStatMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
+		list: connect.NewClient[v1.FsServiceListRequest, v1.FsServiceListResponse](
+			httpClient,
+			baseURL+FsServiceListProcedure,
+			connect.WithSchema(fsServiceListMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
+		makeDir: connect.NewClient[v1.MakeDirRequest, v1.MakeDirResponse](
+			httpClient,
+			baseURL+FsServiceMakeDirProcedure,
+			connect.WithSchema(fsServiceMakeDirMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
+		remove: connect.NewClient[v1.RemoveRequest, v1.RemoveResponse](
+			httpClient,
+			baseURL+FsServiceRemoveProcedure,
+			connect.WithSchema(fsServiceRemoveMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
+		move: connect.NewClient[v1.MoveRequest, v1.MoveResponse](
+			httpClient,
+			baseURL+FsServiceMoveProcedure,
+			connect.WithSchema(fsServiceMoveMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
 // fsServiceClient implements FsServiceClient.
 type fsServiceClient struct {
-	read  *connect.Client[v1.ReadRequest, v1.ReadResponse]
-	write *connect.Client[v1.WriteRequest, v1.WriteResponse]
+	read    *connect.Client[v1.ReadRequest, v1.ReadResponse]
+	write   *connect.Client[v1.WriteRequest, v1.WriteResponse]
+	stat    *connect.Client[v1.StatRequest, v1.StatResponse]
+	list    *connect.Client[v1.FsServiceListRequest, v1.FsServiceListResponse]
+	makeDir *connect.Client[v1.MakeDirRequest, v1.MakeDirResponse]
+	remove  *connect.Client[v1.RemoveRequest, v1.RemoveResponse]
+	move    *connect.Client[v1.MoveRequest, v1.MoveResponse]
 }
 
 // Read calls engine.transport.v1.FsService.Read.
@@ -495,6 +584,31 @@ func (c *fsServiceClient) Write(ctx context.Context, req *connect.Request[v1.Wri
 	return c.write.CallUnary(ctx, req)
 }
 
+// Stat calls engine.transport.v1.FsService.Stat.
+func (c *fsServiceClient) Stat(ctx context.Context, req *connect.Request[v1.StatRequest]) (*connect.Response[v1.StatResponse], error) {
+	return c.stat.CallUnary(ctx, req)
+}
+
+// List calls engine.transport.v1.FsService.List.
+func (c *fsServiceClient) List(ctx context.Context, req *connect.Request[v1.FsServiceListRequest]) (*connect.Response[v1.FsServiceListResponse], error) {
+	return c.list.CallUnary(ctx, req)
+}
+
+// MakeDir calls engine.transport.v1.FsService.MakeDir.
+func (c *fsServiceClient) MakeDir(ctx context.Context, req *connect.Request[v1.MakeDirRequest]) (*connect.Response[v1.MakeDirResponse], error) {
+	return c.makeDir.CallUnary(ctx, req)
+}
+
+// Remove calls engine.transport.v1.FsService.Remove.
+func (c *fsServiceClient) Remove(ctx context.Context, req *connect.Request[v1.RemoveRequest]) (*connect.Response[v1.RemoveResponse], error) {
+	return c.remove.CallUnary(ctx, req)
+}
+
+// Move calls engine.transport.v1.FsService.Move.
+func (c *fsServiceClient) Move(ctx context.Context, req *connect.Request[v1.MoveRequest]) (*connect.Response[v1.MoveResponse], error) {
+	return c.move.CallUnary(ctx, req)
+}
+
 // FsServiceHandler is an implementation of the engine.transport.v1.FsService service.
 type FsServiceHandler interface {
 	// Read reads sandbox file bytes at an offset. The engine keeps no read
@@ -502,6 +616,29 @@ type FsServiceHandler interface {
 	Read(context.Context, *connect.Request[v1.ReadRequest]) (*connect.Response[v1.ReadResponse], error)
 	// Write writes sandbox file bytes (whole-file, offset 0).
 	Write(context.Context, *connect.Request[v1.WriteRequest]) (*connect.Response[v1.WriteResponse], error)
+	// Stat describes one path. LSTAT semantics: a symlink is reported AS a
+	// symlink (with symlink_target set), never silently followed — the caller
+	// asked about this path, and there is no Readlink RPC to recover the target
+	// with if we collapsed it here.
+	Stat(context.Context, *connect.Request[v1.StatRequest]) (*connect.Response[v1.StatResponse], error)
+	// List enumerates a directory, up to depth levels deep, FLATTENED into one
+	// list. Every entry carries its absolute path, so a flat result is
+	// unambiguous. No pagination: the engine does not hold a cursor (§5.E).
+	List(context.Context, *connect.Request[v1.FsServiceListRequest]) (*connect.Response[v1.FsServiceListResponse], error)
+	// MakeDir creates a directory, CREATING PARENTS (mkdir -p). An existing
+	// directory is already_exists — the caller may treat that as benign, but the
+	// server does not erase the distinction.
+	MakeDir(context.Context, *connect.Request[v1.MakeDirRequest]) (*connect.Response[v1.MakeDirResponse], error)
+	// Remove deletes a path RECURSIVELY, and is IDEMPOTENT: removing something
+	// that is not there succeeds. There is no `recursive` flag — for a trusted
+	// caller the non-recursive mode is a footgun with no upside, and it would add
+	// an error branch ("directory not empty") every caller must then handle.
+	Remove(context.Context, *connect.Request[v1.RemoveRequest]) (*connect.Response[v1.RemoveResponse], error)
+	// Move renames source to destination, creating destination parents and
+	// OVERWRITING an existing destination (rename(2) semantics). Returns the
+	// entry at its new path. A cross-device move is rejected explicitly rather
+	// than silently copying — see the EXDEV note on the guest implementation.
+	Move(context.Context, *connect.Request[v1.MoveRequest]) (*connect.Response[v1.MoveResponse], error)
 }
 
 // NewFsServiceHandler builds an HTTP handler from the service implementation. It returns the path
@@ -522,12 +659,52 @@ func NewFsServiceHandler(svc FsServiceHandler, opts ...connect.HandlerOption) (s
 		connect.WithSchema(fsServiceWriteMethodDescriptor),
 		connect.WithHandlerOptions(opts...),
 	)
+	fsServiceStatHandler := connect.NewUnaryHandler(
+		FsServiceStatProcedure,
+		svc.Stat,
+		connect.WithSchema(fsServiceStatMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
+	fsServiceListHandler := connect.NewUnaryHandler(
+		FsServiceListProcedure,
+		svc.List,
+		connect.WithSchema(fsServiceListMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
+	fsServiceMakeDirHandler := connect.NewUnaryHandler(
+		FsServiceMakeDirProcedure,
+		svc.MakeDir,
+		connect.WithSchema(fsServiceMakeDirMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
+	fsServiceRemoveHandler := connect.NewUnaryHandler(
+		FsServiceRemoveProcedure,
+		svc.Remove,
+		connect.WithSchema(fsServiceRemoveMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
+	fsServiceMoveHandler := connect.NewUnaryHandler(
+		FsServiceMoveProcedure,
+		svc.Move,
+		connect.WithSchema(fsServiceMoveMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/engine.transport.v1.FsService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case FsServiceReadProcedure:
 			fsServiceReadHandler.ServeHTTP(w, r)
 		case FsServiceWriteProcedure:
 			fsServiceWriteHandler.ServeHTTP(w, r)
+		case FsServiceStatProcedure:
+			fsServiceStatHandler.ServeHTTP(w, r)
+		case FsServiceListProcedure:
+			fsServiceListHandler.ServeHTTP(w, r)
+		case FsServiceMakeDirProcedure:
+			fsServiceMakeDirHandler.ServeHTTP(w, r)
+		case FsServiceRemoveProcedure:
+			fsServiceRemoveHandler.ServeHTTP(w, r)
+		case FsServiceMoveProcedure:
+			fsServiceMoveHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -543,4 +720,24 @@ func (UnimplementedFsServiceHandler) Read(context.Context, *connect.Request[v1.R
 
 func (UnimplementedFsServiceHandler) Write(context.Context, *connect.Request[v1.WriteRequest]) (*connect.Response[v1.WriteResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("engine.transport.v1.FsService.Write is not implemented"))
+}
+
+func (UnimplementedFsServiceHandler) Stat(context.Context, *connect.Request[v1.StatRequest]) (*connect.Response[v1.StatResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("engine.transport.v1.FsService.Stat is not implemented"))
+}
+
+func (UnimplementedFsServiceHandler) List(context.Context, *connect.Request[v1.FsServiceListRequest]) (*connect.Response[v1.FsServiceListResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("engine.transport.v1.FsService.List is not implemented"))
+}
+
+func (UnimplementedFsServiceHandler) MakeDir(context.Context, *connect.Request[v1.MakeDirRequest]) (*connect.Response[v1.MakeDirResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("engine.transport.v1.FsService.MakeDir is not implemented"))
+}
+
+func (UnimplementedFsServiceHandler) Remove(context.Context, *connect.Request[v1.RemoveRequest]) (*connect.Response[v1.RemoveResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("engine.transport.v1.FsService.Remove is not implemented"))
+}
+
+func (UnimplementedFsServiceHandler) Move(context.Context, *connect.Request[v1.MoveRequest]) (*connect.Response[v1.MoveResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("engine.transport.v1.FsService.Move is not implemented"))
 }

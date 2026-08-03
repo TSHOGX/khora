@@ -310,3 +310,21 @@ func (c *fakeClient) Read(context.Context, string, int64, int64) ([]byte, error)
 	return nil, nil
 }
 func (c *fakeClient) Write(context.Context, string, []byte) error { return nil }
+
+// The fs metadata surface is inert here: these L1 tests exercise the §4 mediator,
+// which never calls fs — only the reaper's Health probe and the cold-start gate
+// matter. Present to satisfy transport.Client (and so a signature change breaks
+// the build rather than drifting silently).
+func (c *fakeClient) Stat(context.Context, string) (transport.EntryInfo, error) {
+	return transport.EntryInfo{}, nil
+}
+func (c *fakeClient) ListDir(context.Context, string, uint32) ([]transport.EntryInfo, error) {
+	return nil, nil
+}
+func (c *fakeClient) MakeDir(context.Context, string) (transport.EntryInfo, error) {
+	return transport.EntryInfo{}, nil
+}
+func (c *fakeClient) Remove(context.Context, string) error { return nil }
+func (c *fakeClient) Move(context.Context, string, string) (transport.EntryInfo, error) {
+	return transport.EntryInfo{}, nil
+}

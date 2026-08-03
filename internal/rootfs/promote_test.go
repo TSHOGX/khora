@@ -48,8 +48,8 @@ func TestPromoteToTemplateExcludesRuntimePaths(t *testing.T) {
 	writeUpper(t, p, "ov_src", map[string]string{
 		"home/work/app.py":            "print('hello')",
 		"etc/installed-pkg":           "PKG",
-		"tmp/.sandboxd-transport.pid": "12345", // excluded (§5.B / D5)
-		"tmp/.sandboxd-crashloop":     "x",     // excluded (§5.B / D5)
+		"tmp/.sandboxd-transport.pid": "12345",  // excluded (§5.B / D5)
+		"tmp/.sandboxd-crashloop":     "x",      // excluded (§5.B / D5)
 		"tmp/user-scratch":            "keepme", // NOT excluded (only the sandboxd paths are)
 	})
 

@@ -6,9 +6,10 @@
 // proxies a FUSE-backed mountpoint into the sandbox as a normal POSIX dir.
 //
 // Layout it serves:
-//   /from_fuse        -> "FUSE_BACKED_CONTENT\n"   (node 2, regular)
-//   /subdir/          -> dir                        (node 3)
-//   /subdir/nested    -> "FUSE_NESTED\n"            (node 4, regular)
+//
+//	/from_fuse        -> "FUSE_BACKED_CONTENT\n"   (node 2, regular)
+//	/subdir/          -> dir                        (node 3)
+//	/subdir/nested    -> "FUSE_NESTED\n"            (node 4, regular)
 //
 // Usage: fusehello <mountpoint>    (must run as root; mounts fstype "fuse")
 package main
@@ -143,9 +144,9 @@ func handle(fd int, req []byte) {
 		if min > 36 {
 			min = 36
 		}
-		binary.LittleEndian.PutUint32(out[4:8], min)   // minor
-		binary.LittleEndian.PutUint32(out[8:12], 0)    // max_readahead
-		binary.LittleEndian.PutUint32(out[12:16], 0)   // flags (no features)
+		binary.LittleEndian.PutUint32(out[4:8], min)     // minor
+		binary.LittleEndian.PutUint32(out[8:12], 0)      // max_readahead
+		binary.LittleEndian.PutUint32(out[12:16], 0)     // flags (no features)
 		binary.LittleEndian.PutUint32(out[24:28], 1<<17) // max_write = 128K
 		reply(fd, unique, 0, out)
 	case opGetattr:

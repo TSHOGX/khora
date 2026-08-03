@@ -22,9 +22,9 @@ type Sink interface {
 //
 // The ordering is the whole correctness argument:
 //
-//	1. read unpublished rows (oldest first)
-//	2. Deliver to the sink
-//	3. ONLY on success, MarkPublished
+//  1. read unpublished rows (oldest first)
+//  2. Deliver to the sink
+//  3. ONLY on success, MarkPublished
 //
 // A crash between (2) and (3) re-delivers the same event (same transition-unique
 // ID) after restart — never drops it. "Redeliver rather than drop" is the

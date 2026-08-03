@@ -187,5 +187,81 @@ func (c *connectClient) Write(ctx context.Context, path string, data []byte) err
 	return err
 }
 
+// entryFromWire converts a wire EntryInfo to the domain type. One place, so Stat
+// and ListDir cannot decode the same entry differently.
+func entryFromWire(e *v1.EntryInfo) EntryInfo {
+	if e == nil {
+		return EntryInfo{}
+	}
+	out := EntryInfo{
+		Name:  e.Name,
+		Path:  e.Path,
+		Size:  e.Size,
+		Mode:  e.Mode,
+		MTime: time.Unix(0, e.MtimeUnixNano),
+	}
+	switch e.Type {
+	case v1.EntryType_ENTRY_TYPE_FILE:
+		out.Type = EntryFile
+	case v1.EntryType_ENTRY_TYPE_DIRECTORY:
+		out.Type = EntryDirectory
+	case v1.EntryType_ENTRY_TYPE_SYMLINK:
+		out.Type = EntrySymlink
+	default:
+		// Unknown on the wire stays unknown here (EntryUnknown), rather than being
+		// coerced into "file" — a wrong type is worse than an admitted unknown.
+		out.Type = EntryUnknown
+	}
+	if e.SymlinkTarget != nil {
+		out.SymlinkTarget = *e.SymlinkTarget
+	}
+	return out
+}
+
+func (c *connectClient) Stat(ctx context.Context, path string) (EntryInfo, error) {
+	resp, err := c.fs.Stat(ctx, connect.NewRequest(&v1.StatRequest{Path: path}))
+	if err != nil {
+		return EntryInfo{}, err
+	}
+	return entryFromWire(resp.Msg.Entry), nil
+}
+
+func (c *connectClient) ListDir(ctx context.Context, path string, depth uint32) ([]EntryInfo, error) {
+	resp, err := c.fs.List(ctx, connect.NewRequest(&v1.FsServiceListRequest{
+		Path: path, Depth: depth,
+	}))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]EntryInfo, 0, len(resp.Msg.Entries))
+	for _, e := range resp.Msg.Entries {
+		out = append(out, entryFromWire(e))
+	}
+	return out, nil
+}
+
+func (c *connectClient) MakeDir(ctx context.Context, path string) (EntryInfo, error) {
+	resp, err := c.fs.MakeDir(ctx, connect.NewRequest(&v1.MakeDirRequest{Path: path}))
+	if err != nil {
+		return EntryInfo{}, err
+	}
+	return entryFromWire(resp.Msg.Entry), nil
+}
+
+func (c *connectClient) Remove(ctx context.Context, path string) error {
+	_, err := c.fs.Remove(ctx, connect.NewRequest(&v1.RemoveRequest{Path: path}))
+	return err
+}
+
+func (c *connectClient) Move(ctx context.Context, source, destination string) (EntryInfo, error) {
+	resp, err := c.fs.Move(ctx, connect.NewRequest(&v1.MoveRequest{
+		Source: source, Destination: destination,
+	}))
+	if err != nil {
+		return EntryInfo{}, err
+	}
+	return entryFromWire(resp.Msg.Entry), nil
+}
+
 // compile-time: connectClient satisfies Client.
 var _ Client = (*connectClient)(nil)

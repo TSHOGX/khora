@@ -1,0 +1,264 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"io"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"syscall"
+
+	"connectrpc.com/connect"
+
+	v1 "engine/internal/transport/gen/engine/transport/v1"
+)
+
+// --- fs service (§5.E fs primitive, transport D4.4) --------------------------
+//
+// All unary, no watch. Paths are GUEST-ABSOLUTE and are NOT confined to a root:
+// the caller is the engine (trusted, §6 assumes an authorized caller) and the
+// guest runs as root by design (§2.2), so the isolation boundary is the sandbox
+// itself — sentry, not a path check. A confinement here would buy nothing the
+// substrate does not already give, and would break the existing contract where
+// callers legitimately touch /etc, /root and /usr.
+//
+// Confinement WOULD be required if a path component ever came from data rather
+// than from the caller (an archive entry name, a template import). That is not
+// this surface.
+
+type fsServer struct{}
+
+// fsErr is the ONE errno → Connect code mapping for this service. Centralized on
+// purpose: a per-handler mapping drifts, and the drift is invisible because each
+// handler looks locally reasonable. Every fs handler returns through here.
+func fsErr(op, path string, err error) error {
+	if err == nil {
+		return nil
+	}
+	code := connect.CodeInternal
+	// ORDER IS LOAD-BEARING: the specific errnos come first, because Go's generic
+	// sentinels are broader than they look. errors.Is(ENOTEMPTY, fs.ErrExist) is
+	// TRUE, so testing fs.ErrExist earlier would report "directory not empty" as
+	// already_exists and send the caller down the wrong recovery path.
+	switch {
+	case errors.Is(err, syscall.ENOTEMPTY), errors.Is(err, syscall.EISDIR):
+		code = connect.CodeFailedPrecondition
+	case errors.Is(err, syscall.EXDEV):
+		// Reachable here in ordinary use, unlike on a single-filesystem host: the
+		// guest namespace stitches together the overlay upper, tmpfs /tmp and
+		// (later) Volume mounts, so a Move between two normal-looking paths can
+		// cross devices. Reported explicitly rather than falling through to
+		// `internal`, which would read as an engine bug instead of "rename cannot
+		// do this; copy then delete".
+		return connect.NewError(connect.CodeFailedPrecondition,
+			errors.New(op+" "+path+": cross-device move: rename(2) cannot move between filesystems — copy then remove instead"))
+	case errors.Is(err, syscall.EINVAL), errors.Is(err, syscall.ENAMETOOLONG), errors.Is(err, syscall.ENOTDIR), errors.Is(err, syscall.ELOOP):
+		code = connect.CodeInvalidArgument
+	case errors.Is(err, syscall.ENOSPC), errors.Is(err, syscall.EDQUOT):
+		// The §3.4 capacity cap surfacing as an ordinary write failure: the
+		// sandbox stays alive and only its own write fails (§2.3).
+		code = connect.CodeResourceExhausted
+	case errors.Is(err, fs.ErrNotExist), errors.Is(err, syscall.ENOENT):
+		code = connect.CodeNotFound
+	case errors.Is(err, fs.ErrExist), errors.Is(err, syscall.EEXIST):
+		code = connect.CodeAlreadyExists
+	case errors.Is(err, fs.ErrPermission), errors.Is(err, syscall.EACCES), errors.Is(err, syscall.EPERM):
+		code = connect.CodePermissionDenied
+	}
+	return connect.NewError(code, errors.New(op+" "+path+": "+err.Error()))
+}
+
+// entryInfo is the ONE EntryInfo constructor, shared by Stat and List so the two
+// can never report the same path differently. fi must come from an LSTAT (a
+// symlink is described as itself), and path must be absolute.
+func entryInfo(path string, fi os.FileInfo) *v1.EntryInfo {
+	e := &v1.EntryInfo{
+		Name:          fi.Name(),
+		Path:          path,
+		Type:          v1.EntryType_ENTRY_TYPE_FILE,
+		Size:          fi.Size(),
+		Mode:          uint32(fi.Mode()),
+		MtimeUnixNano: fi.ModTime().UnixNano(),
+	}
+	switch {
+	case fi.Mode()&os.ModeSymlink != 0:
+		e.Type = v1.EntryType_ENTRY_TYPE_SYMLINK
+		// Absolutize against the LINK's own directory: a relative target is
+		// meaningless to a caller outside the guest, and there is no Readlink RPC
+		// to resolve it with afterwards.
+		if tgt, err := os.Readlink(path); err == nil {
+			if !filepath.IsAbs(tgt) {
+				tgt = filepath.Join(filepath.Dir(path), tgt)
+			}
+			e.SymlinkTarget = &tgt
+		}
+	case fi.IsDir():
+		e.Type = v1.EntryType_ENTRY_TYPE_DIRECTORY
+	}
+	return e
+}
+
+func (*fsServer) Read(_ context.Context, req *connect.Request[v1.ReadRequest]) (*connect.Response[v1.ReadResponse], error) {
+	m := req.Msg
+	f, err := os.Open(m.Path)
+	if err != nil {
+		// Through the shared mapper: a permission failure must not report as
+		// not-found just because it happened on an open.
+		return nil, fsErr("read", m.Path, err)
+	}
+	defer f.Close()
+	if m.Offset > 0 {
+		if _, err := f.Seek(m.Offset, io.SeekStart); err != nil {
+			return nil, fsErr("read", m.Path, err)
+		}
+	}
+	var data []byte
+	if m.Length > 0 {
+		data = make([]byte, m.Length)
+		n, err := io.ReadFull(f, data)
+		if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+			return nil, fsErr("read", m.Path, err)
+		}
+		data = data[:n]
+	} else {
+		b, err := io.ReadAll(f)
+		if err != nil {
+			return nil, fsErr("read", m.Path, err)
+		}
+		data = b
+	}
+	return connect.NewResponse(&v1.ReadResponse{Data: data}), nil
+}
+
+func (*fsServer) Write(_ context.Context, req *connect.Request[v1.WriteRequest]) (*connect.Response[v1.WriteResponse], error) {
+	m := req.Msg
+	if err := os.WriteFile(m.Path, m.Data, 0o644); err != nil {
+		return nil, fsErr("write", m.Path, err)
+	}
+	return connect.NewResponse(&v1.WriteResponse{BytesWritten: int64(len(m.Data))}), nil
+}
+
+func (*fsServer) Stat(_ context.Context, req *connect.Request[v1.StatRequest]) (*connect.Response[v1.StatResponse], error) {
+	p := req.Msg.Path
+	fi, err := os.Lstat(p)
+	if err != nil {
+		return nil, fsErr("stat", p, err)
+	}
+	return connect.NewResponse(&v1.StatResponse{Entry: entryInfo(p, fi)}), nil
+}
+
+func (*fsServer) List(_ context.Context, req *connect.Request[v1.FsServiceListRequest]) (*connect.Response[v1.FsServiceListResponse], error) {
+	m := req.Msg
+	// depth 0 is INVALID, not "unlimited": an accidental zero value would
+	// otherwise silently walk an entire filesystem.
+	if m.Depth < 1 {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			errors.New("list "+m.Path+": depth must be >= 1"))
+	}
+	entries, err := listDir(m.Path, int(m.Depth))
+	if err != nil {
+		return nil, fsErr("list", m.Path, err)
+	}
+	return connect.NewResponse(&v1.FsServiceListResponse{Entries: entries}), nil
+}
+
+// listDir walks up to depth levels below root and returns a FLAT list. Flat
+// rather than nested because every entry carries its absolute path, which makes
+// the parent unambiguous without a tree shape on the wire.
+//
+// A directory that cannot be read mid-walk is SKIPPED rather than failing the
+// whole call: a listing is an observation, and one unreadable subdirectory should
+// not deny the caller everything else. An unreadable ROOT still errors (below).
+func listDir(root string, depth int) ([]*v1.EntryInfo, error) {
+	top, err := os.ReadDir(root)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*v1.EntryInfo, 0, len(top))
+	type level struct {
+		dir  string
+		ents []os.DirEntry
+		d    int
+	}
+	queue := []level{{dir: root, ents: top, d: 1}}
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		for _, de := range cur.ents {
+			p := filepath.Join(cur.dir, de.Name())
+			// Lstat, not de.Info(): consistent symlink reporting with Stat.
+			fi, err := os.Lstat(p)
+			if err != nil {
+				continue // vanished mid-walk; not the caller's problem
+			}
+			out = append(out, entryInfo(p, fi))
+			if fi.IsDir() && cur.d < depth {
+				sub, err := os.ReadDir(p)
+				if err != nil {
+					continue // unreadable subtree: skip, keep the rest
+				}
+				queue = append(queue, level{dir: p, ents: sub, d: cur.d + 1})
+			}
+		}
+	}
+	return out, nil
+}
+
+func (*fsServer) MakeDir(_ context.Context, req *connect.Request[v1.MakeDirRequest]) (*connect.Response[v1.MakeDirResponse], error) {
+	p := req.Msg.Path
+	// Report an existing path rather than succeeding silently — the caller may
+	// treat already_exists as benign, but the server does not erase the fact.
+	// Checked before MkdirAll because MkdirAll is itself idempotent.
+	if fi, err := os.Lstat(p); err == nil {
+		if fi.IsDir() {
+			return nil, connect.NewError(connect.CodeAlreadyExists,
+				errors.New("mkdir "+p+": directory already exists"))
+		}
+		return nil, connect.NewError(connect.CodeAlreadyExists,
+			errors.New("mkdir "+p+": path exists and is not a directory"))
+	}
+	if err := os.MkdirAll(p, 0o755); err != nil {
+		return nil, fsErr("mkdir", p, err)
+	}
+	fi, err := os.Lstat(p)
+	if err != nil {
+		return nil, fsErr("mkdir", p, err)
+	}
+	return connect.NewResponse(&v1.MakeDirResponse{Entry: entryInfo(p, fi)}), nil
+}
+
+func (*fsServer) Remove(_ context.Context, req *connect.Request[v1.RemoveRequest]) (*connect.Response[v1.RemoveResponse], error) {
+	p := req.Msg.Path
+	// Refuse "/" outright. The caller is trusted but not infallible, and a
+	// recursive delete of the guest root is not a request anyone means.
+	if filepath.Clean(p) == "/" {
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			errors.New("remove /: refusing to delete the guest root"))
+	}
+	// RemoveAll: recursive AND idempotent on a missing path (it returns nil), so
+	// "delete this" converges instead of erroring on a second call.
+	if err := os.RemoveAll(p); err != nil {
+		return nil, fsErr("remove", p, err)
+	}
+	return connect.NewResponse(&v1.RemoveResponse{}), nil
+}
+
+func (*fsServer) Move(_ context.Context, req *connect.Request[v1.MoveRequest]) (*connect.Response[v1.MoveResponse], error) {
+	m := req.Msg
+	if err := os.MkdirAll(filepath.Dir(m.Destination), 0o755); err != nil {
+		return nil, fsErr("move", m.Destination, err)
+	}
+	// rename(2): atomic, and it OVERWRITES an existing destination file. Stated
+	// in the RPC contract rather than guarded here — a caller that needs
+	// fail-if-exists can Stat first, and silently refusing would break the
+	// common "replace this file" case.
+	if err := os.Rename(m.Source, m.Destination); err != nil {
+		return nil, fsErr("move "+m.Source+" →", m.Destination, err)
+	}
+	fi, err := os.Lstat(m.Destination)
+	if err != nil {
+		return nil, fsErr("move", m.Destination, err)
+	}
+	return connect.NewResponse(&v1.MoveResponse{Entry: entryInfo(m.Destination, fi)}), nil
+}

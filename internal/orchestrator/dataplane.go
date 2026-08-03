@@ -209,6 +209,97 @@ func (f *fsProxy) Write(ctx context.Context, req *connect.Request[v1.WriteReques
 	return connect.NewResponse(&v1.WriteResponse{BytesWritten: int64(len(req.Msg.Data))}), nil
 }
 
+// entryToWire re-encodes a domain EntryInfo for the outer edge. The outer wire is
+// the SAME proto as the inner one (D6.2 one-wire), so this is a straight
+// projection — it exists only because the proxy speaks the domain Client
+// interface in between, never because the two edges differ.
+func entryToWire(e transport.EntryInfo) *v1.EntryInfo {
+	out := &v1.EntryInfo{
+		Name:          e.Name,
+		Path:          e.Path,
+		Type:          v1.EntryType_ENTRY_TYPE_UNSPECIFIED,
+		Size:          e.Size,
+		Mode:          e.Mode,
+		MtimeUnixNano: e.MTime.UnixNano(),
+	}
+	switch e.Type {
+	case transport.EntryFile:
+		out.Type = v1.EntryType_ENTRY_TYPE_FILE
+	case transport.EntryDirectory:
+		out.Type = v1.EntryType_ENTRY_TYPE_DIRECTORY
+	case transport.EntrySymlink:
+		out.Type = v1.EntryType_ENTRY_TYPE_SYMLINK
+	}
+	if e.SymlinkTarget != "" {
+		t := e.SymlinkTarget
+		out.SymlinkTarget = &t
+	}
+	return out
+}
+
+func (f *fsProxy) Stat(ctx context.Context, req *connect.Request[v1.StatRequest]) (*connect.Response[v1.StatResponse], error) {
+	cl, err := f.e.clientFor(req.Header().Get)
+	if err != nil {
+		return nil, err
+	}
+	e, err := cl.Stat(ctx, req.Msg.Path)
+	if err != nil {
+		return nil, proxyErr(err)
+	}
+	return connect.NewResponse(&v1.StatResponse{Entry: entryToWire(e)}), nil
+}
+
+func (f *fsProxy) List(ctx context.Context, req *connect.Request[v1.FsServiceListRequest]) (*connect.Response[v1.FsServiceListResponse], error) {
+	cl, err := f.e.clientFor(req.Header().Get)
+	if err != nil {
+		return nil, err
+	}
+	entries, err := cl.ListDir(ctx, req.Msg.Path, req.Msg.Depth)
+	if err != nil {
+		return nil, proxyErr(err)
+	}
+	out := make([]*v1.EntryInfo, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, entryToWire(e))
+	}
+	return connect.NewResponse(&v1.FsServiceListResponse{Entries: out}), nil
+}
+
+func (f *fsProxy) MakeDir(ctx context.Context, req *connect.Request[v1.MakeDirRequest]) (*connect.Response[v1.MakeDirResponse], error) {
+	cl, err := f.e.clientFor(req.Header().Get)
+	if err != nil {
+		return nil, err
+	}
+	e, err := cl.MakeDir(ctx, req.Msg.Path)
+	if err != nil {
+		return nil, proxyErr(err)
+	}
+	return connect.NewResponse(&v1.MakeDirResponse{Entry: entryToWire(e)}), nil
+}
+
+func (f *fsProxy) Remove(ctx context.Context, req *connect.Request[v1.RemoveRequest]) (*connect.Response[v1.RemoveResponse], error) {
+	cl, err := f.e.clientFor(req.Header().Get)
+	if err != nil {
+		return nil, err
+	}
+	if err := cl.Remove(ctx, req.Msg.Path); err != nil {
+		return nil, proxyErr(err)
+	}
+	return connect.NewResponse(&v1.RemoveResponse{}), nil
+}
+
+func (f *fsProxy) Move(ctx context.Context, req *connect.Request[v1.MoveRequest]) (*connect.Response[v1.MoveResponse], error) {
+	cl, err := f.e.clientFor(req.Header().Get)
+	if err != nil {
+		return nil, err
+	}
+	e, err := cl.Move(ctx, req.Msg.Source, req.Msg.Destination)
+	if err != nil {
+		return nil, proxyErr(err)
+	}
+	return connect.NewResponse(&v1.MoveResponse{Entry: entryToWire(e)}), nil
+}
+
 // forwardEvents pumps the domain output channel to the outer proto server-stream
 // (transparent passthrough: the outer edge sees the exact same frames the inner
 // sandboxd produced — one wire, D6.2).

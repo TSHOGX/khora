@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"io"
 	"net"
 	"net/http"
 	"os"
@@ -92,47 +91,7 @@ func (h *healthServer) Check(_ context.Context, _ *connect.Request[v1.CheckReque
 	}), nil
 }
 
-// --- fs service (§5.E fs primitive) ------------------------------------------
-
-type fsServer struct{}
-
-func (*fsServer) Read(_ context.Context, req *connect.Request[v1.ReadRequest]) (*connect.Response[v1.ReadResponse], error) {
-	m := req.Msg
-	f, err := os.Open(m.Path)
-	if err != nil {
-		return nil, connect.NewError(connect.CodeNotFound, err)
-	}
-	defer f.Close()
-	if m.Offset > 0 {
-		if _, err := f.Seek(m.Offset, 0); err != nil {
-			return nil, connect.NewError(connect.CodeInvalidArgument, err)
-		}
-	}
-	var data []byte
-	if m.Length > 0 {
-		data = make([]byte, m.Length)
-		n, err := io.ReadFull(f, data)
-		if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
-			return nil, connect.NewError(connect.CodeInternal, err)
-		}
-		data = data[:n]
-	} else {
-		b, err := io.ReadAll(f)
-		if err != nil {
-			return nil, connect.NewError(connect.CodeInternal, err)
-		}
-		data = b
-	}
-	return connect.NewResponse(&v1.ReadResponse{Data: data}), nil
-}
-
-func (*fsServer) Write(_ context.Context, req *connect.Request[v1.WriteRequest]) (*connect.Response[v1.WriteResponse], error) {
-	m := req.Msg
-	if err := os.WriteFile(m.Path, m.Data, 0o644); err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
-	}
-	return connect.NewResponse(&v1.WriteResponse{BytesWritten: int64(len(m.Data))}), nil
-}
+// The fs service (§5.E) lives in fs.go.
 
 // killProcessGroup signals pgid first (kill(-pgid)), falling back to pid
 // (transport D4.3 / §5.E.1: directed signals belong to transport mode).
