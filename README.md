@@ -21,6 +21,8 @@ internal/runtime/      §5.A: runtime provider seam + local_runsc
 internal/rootfs/       §5.B: rootfs provider seam + host overlayfs assembly
 internal/transport/    §5.E: host-side process/fs client + Health (Connect-RPC/h2c)
 internal/btrfs/        leaf package: subvolume + squota primitives (no engine model)
+internal/guestport/    leaf constant: the guest netns TCP port, shared by §5.A/§5.E
+internal/arch/         structural guards: subsystems must not import each other
 proto/                 transport wire schema; generated code under internal/transport/gen
 test/                  L2/L3 substrate acceptance + preflight fixtures
 ```

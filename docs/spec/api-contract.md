@@ -15,6 +15,9 @@
 > OpenAPI 事后描述);**process / fs 数据面 = Connect-RPC**(`engine.transport.v1` 两服务,权威契约
 > 是 `transport.proto`,client 经 `buf` 生成 stub)。client 一律经 `orchestrator` 居中、不直连
 > `sandboxd`(§4 mediator / D6.1)。数据面块的 REST 行**仅作形状示意**,不是权威端点(D6.2)。
+>
+> **这套 API 自身不做认证/授权**:引擎内无授权主体(§1.4 非目标),故 §6 假定调用方已被信任。谁能调用
+> 由**引擎外**决定(部署把它绑在本机/私网,或前置一层网关),那是 join table 的加法、不是引擎原语。
 
 **控制面(REST + JSON,权威端点)** —— 沙箱 / template / volume / network 生命周期,全是低频
 CRUD、无流:

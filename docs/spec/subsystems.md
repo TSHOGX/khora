@@ -124,9 +124,12 @@
   可写 rootfs 绑进容器。`apt`/`pip` 与 `$HOME` 全写进 Overlay。
 - **一条关键支撑事实**:**不存内存(§4.2)⟹ 持久态就是宿主上的纯文件层**——由此白拿跨 host / CPU /
   runsc 版本可移(§1.5#3)、可审计可 diff(宿主侧 `tar`/`diff` 即读)、以及下面的 Promote。
-- **只读 at-rest,不读 live**:**只在 pause / stop**(容器已停、runsc 已 flush)读 Overlay 字节,
-  **从不**在 guest 运行中读。因此"运行中经 gofer 缓存读到不一致状态"这类 live 一致性问题不在路径上。
-  干净停掉后 upper 是宿主普通目录树,冷启挂回字节一致(§2.5)。
+- **读 Overlay 内容只在 at-rest**:**只在 pause / stop**(容器已停、runsc 已 flush)读 Overlay 的**文件
+  内容**(Promote 固化走的正是这条路),**绝不**在 guest 运行中读内容。因此"运行中经 gofer 缓存读到不一致
+  状态"这类 live 一致性问题不在路径上。干净停掉后 upper 是宿主普通目录树,冷启挂回字节一致(§2.5)。
+  **这条约束的是内容,不是容量计量**:准入门要在别的沙箱正在跑时求节点用量(§3.4),那读的是后端的
+  **分配元数据**(已分配块数),不打开任何文件、与 gofer 缓存无关,故不受本条限制。两种读区分开:
+  内容要 at-rest,计量随时可问后端。
 - **载体:外层内核 overlayfs,runsc 不掺和写层**(§2.5;推导见
   [`deep-dives/rootfs-overlay.md`](./deep-dives/rootfs-overlay.md)):engine 在 runsc 外拼
   lower(Template)/upper/work,merged 交给 `--overlay2=none --file-access=shared` 的 runsc。**merged 的
@@ -291,6 +294,10 @@
   (server-stream/client-stream + 即时 flush),保序、亚毫秒即时、大 payload 无死锁。冷启换新 netns IP(旧 IP 作废)零改动重连,
   **直接兑现 §3.3「载体不编码 placement」**。那个 veth IP 由 placement(§5.A)分配、非 runsc 产物;宿主
   如何拿到 IP 归 §5.A,不进本子系统。细节见 [`deep-dives/transport.md`](./deep-dives/transport.md) D4。
+  **端点的两半分属两个子系统:IP 归 §5.A(它分配),端口归 §5.E(`sandboxd` 监听它)**。§5.A 要拼出
+  `IP:port` 就得知道端口,但**这不许成为 §5.A → §5.E 的依赖**(§4:子系统互不调用)——端口是一个共享
+  常量,故落在一个**无依赖的 leaf** 里,两端各自依赖该 leaf、彼此不依赖。端口可跨沙箱恒定,因为每个沙箱
+  自带 netns,消歧靠 veth IP 而非端口。
 - **无状态**:约束的是**控制面持久 SoT**——engine 不为连接维护持久记录,"沙箱上现在跑着什么进程" =
   实时 `process.List`、不落控制面注册表。可重启性不由 engine 承担:裸 pty 字节流明说 lossy(shell 本无
   持久 SoT),任何"不丢"担保由上层自理。transport 进程内瞬时、非权威的输出环形缓冲(供 `Connect` 回放 +
@@ -330,10 +337,16 @@ PID 1 = sandboxd（init 模式：reaper + 信号转发 + subreaper 兜底 + 监�
 - **transport 模式(子进程)**:就是本节的 process/fs 终点,**保持纯通用**、对 agent/turn/session
   一无所知。**定向信号**(单进程/进程组,§4.2 协作式静止点)归它(它握 pid/pgid 句柄);**容器级
   信号扇出**归 PID 1。
-- **代价:退出码跨 transport 重启 lossy。** `process.Wait` / 退出码保证**仅在 transport 单次存活期内**
-  成立,跨一次重启退化为「`process.List` 仍可见、退出码可能丢」——与裸 pty 字节流 lossy 同源
-  (engine 无状态,不丢担保由上层自理),不为它加内部状态。机制与 seam 见
-  [`deep-dives/guest-runtime.md`](./deep-dives/guest-runtime.md) D4.5。
+- **代价:退出码的送达有两条边界。** ① 跨 transport 重启 lossy:退出码保证**仅在 transport 单次存活期内**
+  成立,跨一次重启退化为「`process.List` 仍可见、退出码可能丢」;② 存活期**内**,进程一退出其 pid 立即
+  不可寻址——`end` 帧只发给退出那一刻在线的订阅者,此后 `Connect` 该 pid 是 not-found,**不留退出状态等人
+  来取**(pid 由内核回收,留一条已退出记录在 pid 复用时就变成在讲另一个进程)。两条都与裸 pty 字节流的
+  lossy 同源:engine 无状态,"不丢"担保由上层自理,不为它加内部状态。机制与 seam 见
+  [`deep-dives/guest-runtime.md`](./deep-dives/guest-runtime.md) D4.5 / D4.3 C2。
+- **guest 侧故障注入不进生产二进制。** 测试要制造"transport 起不来"的崩溃循环,靠的是 guest 内一个哨兵
+  文件;它**只在 `testguest` build tag 下编译**,生产 `sandboxd` 里根本不存在这段代码。理由是 §1.1 的
+  guest 可拿 root、可写自己的 FS:一条编进生产的故障路径,等于让沙箱能靠 touch 一个文件停掉自己的
+  transport。宿主侧的故障钩子(mediator 的 cold-start 注入)不受此限——那由引擎自己控制何时触发。
 - **常驻服务(若模板自带)与 transport 模式 `sandboxd` 平级**被 PID 1 托管,不塞进 `sandboxd`
   (§3.2.1 引擎一视同仁看待每个进程)。
 - **resume 冷启时序**(init→re-exec→监听→重连的精确次序、探活在哪一步判 healthy)见

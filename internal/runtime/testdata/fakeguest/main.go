@@ -10,6 +10,9 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
+
+	"engine/internal/guestport"
 )
 
 func main() {
@@ -17,9 +20,10 @@ func main() {
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, "OK")
 	})
-	// Port 9000 must match transport.Port; not imported here to keep this
-	// throwaway fake dependency-free (see the package doc).
-	ln, err := net.Listen("tcp", "0.0.0.0:9000")
+	// The port comes from the shared leaf, so this fake cannot drift from the real
+	// daemon. internal/guestport has no imports of its own, which is what keeps
+	// this throwaway dependency-free (see the package doc).
+	ln, err := net.Listen("tcp", net.JoinHostPort("0.0.0.0", strconv.Itoa(guestport.Port)))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "fakeguest: listen: %v\n", err)
 		os.Exit(1)

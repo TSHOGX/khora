@@ -230,9 +230,13 @@ L2 网桥同网段,sandbox A 能直连 sandbox B 的 veth IP(§5.E transport 正
 
 D5.1「默认拒绝其余出站」字面能涵盖,但"出站"通常指南北向,**东西向(sibling IP)是否在内有歧义**——故
 §2.3 把它显式钉成 invariant(可达集恰好 = {gateway ingress,策略显式放行的端点},sibling 经 gateway 中转
-而非 L2 直连)。本文只补它的**物化两条路**(placement/provider 细节):(i) steering nft 把 sibling 网段也纳入 default-deny(sibling IP
-进 L0 地板);(ii) 每沙箱**点对点 veth、不共享 L2 网桥**,从二层邻接根上消除。倾向 (i)——与 D5.4 ①
-同一套 nft,零新机制;(ii) 作为更强隔离的 provider 演进项。
+而非 L2 直连)。本文只补它的**物化两条路**(placement/provider 细节):(i) steering nft 把 sibling 网段也纳入 default-deny
+(sibling IP 进 L0 地板);(ii) 每沙箱**点对点 veth、不共享 L2 网桥**,从二层邻接根上消除。
+
+**(ii) 是首选,且 `local_runsc` 已是这个形态**:每沙箱一对 /30 veth、无共享网桥,二层邻接根本不存在——
+隔离更强,因为它消灭前提而不是拦截后果,不依赖任何一条 nft 规则写对。(i) 是**兜底**,给那些做不到点对点
+组网的 provider 用:与 D5.4 ① 同一套 nft、零新机制,但它把不变量押在规则的正确性上。故两条都留:(ii) 是
+本形态的物化,(i) 是 provider 换形态时的地板。
 
 ### D5.6 egress 全程 fail-closed(两处失败同源)
 

@@ -79,6 +79,11 @@ slims to boundary + open agenda — nothing lives in full in both places.
   `runtime.Provider`, `rootfs.Provider`, and `volume.Backend` (§5.C — a
   *different* shape from `rootfs.Provider`, not one shared FS seam). Swapping a
   backend = registering an implementation, not editing callers.
+- **"Subsystems never call each other" is enforced structurally**, not by review:
+  `internal/arch` fails if any §5 package imports another, or reaches into
+  `lifecycle`/`store`. Its allowlist is empty and should stay that way — when two
+  subsystems need the same fact, put it in a **leaf** package (`internal/guestport`
+  is the precedent), don't excuse the edge.
 - **`runtime.Provider` contract = policy + handles, NEVER host primitives** — no
   cgroup path / netns fd / host absolute path in the interface (§5.A). A remote
   provider cannot produce those; leaking them binds the abstraction to

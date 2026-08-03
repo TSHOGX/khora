@@ -14,22 +14,10 @@ import (
 	"golang.org/x/net/http2/h2c"
 	"golang.org/x/sys/unix"
 
-	"engine/internal/transport"
+	"engine/internal/guestport"
 	v1 "engine/internal/transport/gen/engine/transport/v1"
 	"engine/internal/transport/gen/engine/transport/v1/transportv1connect"
 )
-
-// crashLoopSentinel is a TEST-ONLY fault-injection point (the guest analog of
-// the mediator's FaultAfterColdStart hook): if this file exists on the guest's
-// tmpfs /tmp when transport mode starts, the child exits BEFORE serving. A test
-// writes it, then kills the transport child — PID1 re-execs it, it sees the
-// sentinel and exits, and it keeps crash-looping (L1 container alive, L2 never
-// comes up = transport-down forever). This manufactures the §4.3 transport-down
-// crash-loop the reaper must escalate past the restart budget (D4b). Because
-// /tmp is tmpfs (not the Overlay), it is CLEARED on resume — so the reaper's
-// escalation cold-start comes up healthy on a fresh /tmp. Carries NO production
-// semantics; a production guest never has this file.
-const crashLoopSentinel = "/tmp/.sandboxd-crashloop"
 
 // transportMode is the §5.E process/fs endpoint (the child of PID 1). It
 // declares itself a subreaper (so its process subtree's orphans reparent to it,
@@ -37,10 +25,7 @@ const crashLoopSentinel = "/tmp/.sandboxd-crashloop"
 // TCP port inside the guest netns. It knows NOTHING of agent/turn/session
 // (transport D1) — pure process/fs mechanism.
 func transportMode() {
-	if _, err := os.Stat(crashLoopSentinel); err == nil {
-		logf("transport: crash-loop sentinel present (%s) — exiting before serve (TEST fault injection)", crashLoopSentinel)
-		os.Exit(1)
-	}
+	exitIfCrashLoopSentinel()
 
 	// Declare ourselves subreaper so our subtree's orphans reparent here, not to
 	// PID 1 (guest-runtime D4.2 / §5.E.1).
@@ -66,7 +51,7 @@ func transportMode() {
 	// low pids, so it is NOT pid 2). Best-effort; not authoritative.
 	_ = os.WriteFile(transportPidFile, []byte(strconv.Itoa(os.Getpid())), 0o644)
 
-	addr := net.JoinHostPort("0.0.0.0", strconv.Itoa(transport.Port))
+	addr := net.JoinHostPort("0.0.0.0", strconv.Itoa(guestport.Port))
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		logf("transport: listen %s: %v", addr, err)

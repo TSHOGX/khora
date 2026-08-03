@@ -55,9 +55,17 @@ service ProcessService {
   // (start / data / end / keepalive). Addressed by the returned pid thereafter.
   rpc Start(StartRequest) returns (stream ProcessEvent) {}
 
-  // Connect reattaches to an already-running process, replaying the bounded
+  // Connect reattaches to an already-RUNNING process, replaying the bounded
   // output ring buffer first, then joining the live stream (transport D4.3
   // invariant 2). Multiple Connect can attach one pid (§3.2 multi-connection).
+  //
+  // Only a live pid is addressable: once a process exits, its `end` event goes to
+  // the subscribers attached AT THAT MOMENT and the pid stops resolving —
+  // Connect then returns not-found, and exit status is NOT held for later
+  // collection. That follows from addressing by guest-native pid, which the
+  // kernel recycles: a retained "pid N exited" record would start describing a
+  // different process the moment N is reused. A caller that needs exit status
+  // must be attached when the process ends (guest-runtime D4.3 C2).
   rpc Connect(ConnectRequest) returns (stream ProcessEvent) {}
 
   // StreamInput writes stdin (or pty-in) as an ordered client-stream — the

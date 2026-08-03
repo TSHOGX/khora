@@ -626,13 +626,17 @@ func validateSeg(name, v string) error {
 // captured into a Promoted layer. Today these are the sandboxd transport portal
 // files, written upper-relative (the guest daemon writes them under /tmp, which
 // is the upper's tmp/). These MUST track the guest daemon's own paths in
-// cmd/sandboxd/transport.go — a rename there without a matching edit here leaks
-// a runtime file into a frozen layer (no compile coupling: separate binaries).
-// Volume mount-point placeholders join this set when Volume lands; the full list
-// is tracked in rootfs-overlay D5.
+// cmd/sandboxd — a rename there without a matching edit here leaks a runtime
+// file into a frozen layer, and there is no compile coupling to catch it
+// (separate binaries). Volume mount-point placeholders join this set when Volume
+// lands; the full list is tracked in rootfs-overlay D5.
 var promoteExcludedPaths = []string{
 	"tmp/.sandboxd-transport.pid", // transport child pidfile (§5.E.1)
-	"tmp/.sandboxd-crashloop",     // PID1 crash-loop sentinel (§5.E.1)
+	// Crash-loop sentinel: only a `testguest` build reads it
+	// (cmd/sandboxd/faultinject_testguest.go), but the exclusion is
+	// unconditional — capturing it would mint a Template whose every sandbox is
+	// born unable to serve, and one list entry is cheaper than that failure.
+	"tmp/.sandboxd-crashloop",
 }
 
 // PromoteToTemplate freezes the source Overlay's at-rest upper into a new

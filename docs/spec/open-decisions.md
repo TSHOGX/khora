@@ -39,7 +39,6 @@
 
 | 选型 | 候选 | 当前倾向 | 归属 / 谁消费 |
 | --- | --- | --- | --- |
-| **checkpoint/restore 恢复 seam** | 进程态 checkpoint 恢复 / agent 原生 `--resume` 重放 | 两条都留,由 engine 外 adapter 按能力选。这是**单进程级**冻结/恢复,与 §1.4 永久排除的"无缝内存 resume"(全 VM 内存镜像)不同 | [`deep-dives/transport.md`](./deep-dives/transport.md) D3 seam / D5 |
 | **disk I/O 速率帽的整盘 MAJ:MIN 来源** | 宿主拓扑配置项 / 由 provider 自行推导 | 速率轴只做 CPU,io 轴待有真实消费者时同形加入(接口加一个字段 + OCI 多一段,不动形状;§1.3 成本判据:缺的是消费者,不是机制)。**待定的是**:`io.max` 需整块盘的 MAJ:MIN(给分区号则 launch 直接失败),而 per-sandbox Binding 里没有宿主拓扑 | 谁消费:§5.A 资源上限物化 |
 
 ---

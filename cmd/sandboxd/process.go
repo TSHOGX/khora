@@ -327,6 +327,14 @@ type source struct {
 // pty has one ("pty" — the master merges both). The process is launched with an
 // INDEPENDENT context (not the Start stream's) so it outlives a Start
 // disconnect — that is what makes Connect reattach possible (§3.2).
+//
+// finish-then-unregister is the exit-status delivery boundary, and it is
+// deliberately sharp: finish broadcasts `end` to whoever is attached now, then
+// the pid stops resolving, so a later Connect gets not-found rather than a
+// retained exit code. Holding the entry to serve late arrivals would mean
+// retaining state keyed by a guest pid the kernel can recycle — the record would
+// start describing a different process once the number is reused. Callers that
+// must not miss exit status stay attached (guest-runtime D4.3 C2).
 func (p *proc) run(cmd *exec.Cmd, sources []source, onExit func()) {
 	var wg sync.WaitGroup
 	wg.Add(len(sources))

@@ -97,9 +97,11 @@ const (
 // Zero on any dimension = unlimited (that dimension is not materialized).
 //
 // The disk-IO rate cap (§3.4's other rate-axis half) has NO field here on
-// purpose — it has no consumer today, and whether it gets a per-sandbox knob at
-// all is UNSETTLED (open-decisions §3). Its absence is a registered pending
-// decision, not an oversight.
+// purpose, and that is a settled deferral rather than an open question: the
+// mechanism is proven, the CONSUMER is what's missing, so adding the field now
+// would be the speculative reservation §1.3 rejects. It joins additively when a
+// consumer appears (one field here + one OCI section, no shape change). What is
+// still open is only where the whole-disk MAJ:MIN comes from (open-decisions §3).
 type Limits struct {
 	CPUMillis  int64 // 1000 = one full CPU
 	MemoryByte int64

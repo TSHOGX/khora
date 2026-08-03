@@ -62,12 +62,13 @@ type SteeringSpec struct{}
 // local_runsc adds a sentry/gofer overhead constant, while a remote provider's
 // overhead may be a VM balloon or a scheduler memory request. Zero = unlimited.
 //
-// The disk-IO RATE cap (§3.4's other rate-axis half) is deliberately absent: it
-// has no consumer today and whether it gets a per-sandbox knob is UNSETTLED
-// (open-decisions §3, with the measured substrate constraint that runsc's
-// io.max write needs a whole-disk MAJ:MIN). Its absence is a registered pending
-// decision, not an omission — adding the field before a consumer exists is the
-// speculative reservation §1.3 rejects.
+// The disk-IO RATE cap (§3.4's other rate-axis half) is deliberately absent, and
+// that is a settled deferral, not an open question: the mechanism is proven
+// (runsc writes OCI blockIO into its leaf's io.max), the CONSUMER is what's
+// missing — so adding the field before one exists is the speculative reservation
+// §1.3 rejects. It joins additively when a consumer appears. Still open is only
+// where the whole-disk MAJ:MIN comes from (open-decisions §3): io.max needs the
+// whole disk, and a per-sandbox Binding carries no host topology.
 type ResourceLimits struct {
 	CPUMillis  int64 // 1000 = one full CPU
 	MemoryByte int64

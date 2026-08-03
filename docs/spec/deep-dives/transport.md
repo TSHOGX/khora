@@ -97,10 +97,9 @@ engine 外那层自己管**。
 类型系统或 turn 仲裁。逐条锁定它们各自的正当替代,防止把不必要的抽象带回引擎:
 
 - **不需要统一传输原语(lane)**:一个"什么都管"的传输抽象要承担的五件事——多路复用、每连接定序、
-  可重启、控制面注册、checkpoint quiesce——前四件由 **Connect-RPC / HTTP-2 原生多 stream + 每
-  stream 天生有序 + checkpoint 接管可重启 + process/fs 无状态**逐件吸收;只剩 checkpoint quiesce
-  是真需求,由 §4.2 的 pause 静止点(抢占式冻结;协作式协议见 guest-runtime D4.4)单独提供。没有留给
-  "统一 lane"的职责。
+  可重启、控制面注册、冻结时的静止——前四件由 **Connect-RPC / HTTP-2 原生多 stream + 每 stream 天生
+  有序 + `Connect` 重连 + process/fs 无状态**逐件吸收;只剩"冻结时的静止"是真需求,由 §4.2 的 pause
+  静止点单独提供。没有留给"统一 lane"的职责。
 - **不需要 payload 类型系统**:jupyter = 起个 kernel 进程读流、file = fs 原语、cli = 起个进程——
   全在 process/fs 上拼得出来;`control`(agent 会话)划到 engine 外(D1.2)。故 engine 侧只有
   process / fs 两个通用机制,**新增任何交互形态 = engine 外叠一层,engine 一行不改**。
@@ -145,9 +144,10 @@ session 在 engine 外,加它**不回头改 engine**。这要求 engine 守住�
 
 - **process 的双向流足够通用**:能承载任意字节/帧,使 session adapter 可在其上跑 ACP 的
   JSON-RPC(prompt/update 等),engine 不需要理解流里的内容。
-- **process 支持 `Connect` 重连 + checkpoint/restore**:session 的"恢复"语义可建立在"进程
-  态被 checkpoint 保住 + 重连接回"之上,或建立在 agent 原生 `--resume` + `fs` 读历史之上。
-  两条路都不要求 engine 懂 session。
+- **process 支持 `Connect` 重连**:session 的"恢复"语义建立在 **agent 原生 `--resume` + `fs` 读历史**
+  之上——重连接回一条仍在跑的流,或从落盘的历史重放。**不建立在进程态 checkpoint 之上**:内存态冻结
+  整族(全 VM 镜像与单进程 checkpoint 一样)已被 §1.4 永久排除,理由是可移植性(内存态锁 CPU-feature,
+  §2.5)。这条路不要求 engine 懂 session。
 - **fs 能从沙箱外读到 agent 自带日志的字节与大小**(read+offset / stat):使 session 层/前端
   能渲染历史,engine 不提供也不需要"会话日志"这种概念。
 
@@ -157,8 +157,8 @@ session 在 engine 外,加它**不回头改 engine**。这要求 engine 守住�
 > **三个"借 ACP 但要改"的边界**(留给将来真正做 session 时处理,此处仅登记):
 > ① ACP 的 fs 是 agent **反向**调 client(方向 agent→client),本项目 fs 是**宿主→沙箱**——
 > session adapter 要做方向适配;② ACP **无审计**,本项目要 durable event(在 session 层旁挂,
-> 不在 engine);③ ACP 靠**重放**恢复,本项目 process 有 **checkpoint**,resume 可走进程态恢复
-> 而非重放。
+> 不在 engine);③ ACP 靠**重放**恢复,本项目也一样——resume 是冷启(§4.2 不存内存),故恢复走
+> `--resume` + `fs` 读历史,没有进程态恢复这条路。
 
 ---
 
@@ -303,9 +303,10 @@ transport 探活探针(spec §4.3 两层探活的 transport 层)、resume readin
 
 ## D5. 边界与仍待
 
-- **checkpoint / restore 原语**:engine 提供的进程级冻结/恢复(runsc),对齐 spec §4.2「不存内存、
-  resume 冷启」;给 session 层留的恢复 seam(进程态 vs `--resume` 重放)仍是 open-decision
-  ([`open-decisions.md`](../open-decisions.md) §3)。
+- **不提供 checkpoint / restore 原语**(已拍板,非待定):内存态冻结整族被 §1.4 永久排除——全 VM 镜像
+  与**单进程 checkpoint 是同一条约束**,都把状态锁在特定 CPU-feature 上(§2.5),持久态便不再能跨
+  host/CPU 搬(§1.5#3)。gVisor 在 systrap 下本可 checkpoint;我们不用,是为可移植性。恢复因此只有一条
+  路:`--resume` + `fs` 读历史(D3)。
 - **engine 独立使用形态**:只用 process/fs 的沙箱产品边界;session adapter 将来如何在外面叠。
 - **API / CLI 投影**:见 D6。spec §6.1 的 process/fs 两组端点按本节 RPC 清单细化(session 不进
   engine API);外沿协议分工(控制面 REST / 数据面 Connect)在 D6 定死。

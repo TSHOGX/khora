@@ -175,6 +175,14 @@ tini 的语义权威,前提是**它只有一个子进程、自己永不被重启
   「`process.List`(扫 `/proc`)仍可见、退出状态可能丢」。这与裸 pty 字节流的 lossy 同源:
   engine 无状态、可重启性不由 engine 承担,"不丢"担保由上层(session adapter)自理。**零新增机制**,
   不加 PID 1↔transport 的 exit-status 上报缝。
+
+  **同一存活期内也有一条边界:进程一退出,它的 pid 立即不可寻址。** `end` 帧广播给**当时已连上的**
+  订阅者,随后该 pid 从 transport 的进程表移除;此后 `Connect` 该 pid 一律 not-found,**不保留退出状态
+  等人来取**。这不是取舍不足而是 pid 寻址的直接后果:guest-native pid 会被内核回收,保留一条"pid 4242
+  已退出"的记录,在 4242 被复用的那一刻就变成了在讲另一个进程。要在退出后仍可寻址,前提是换成永不复用
+  的不透明 ID——那会连带要求一套分配器 + 回收策略,且 handle 的语义从"这个进程"变成"这个可被重启的位置"
+  (故还需一个 attempt/世代号),即一个 restart supervisor。§5.E 不做这件事:**退出状态的送达边界是
+  "退出那一刻在线的订阅者"**,要"不丢"就在 engine 外接住 `end` 帧。
   > **留的 seam(若 session 层证明必须"不丢"才做,不回头改 engine)**:PID 1 收全局孤儿退出
   > 状态时旁路记一份供新 transport 查询(一条极窄的内部上报缝)。列出它是为锁定"加它不动 transport /
   > engine 无状态契约",与 [`transport.md`](./transport.md) D3「守 seam」同纪律。

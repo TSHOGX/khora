@@ -98,8 +98,11 @@ seam 沿用 §5.A `runtime.Provider` / §5.B `rootfs.Provider` 的既定约定:*
 - `Unmount(m)` —— 拆宿主侧挂载(local:no-op 或 detach;remote:umount FUSE)。**卸载不删数据**。
 - `AdoptMounted(volumeID) → Mounted` —— 崩溃后重认一个仍挂着的挂载点(§4.4-A,`AdoptMerged` 的孪生)。
 - `DestroyVolume(volumeID)` —— 回收该 Volume 的后端字节(terminal)。
-- `SweepOrphanVolumes(live, building) → int` —— 孤儿卷字节 sweep,与 `SweepOrphanLayers` 一一同构:
-  mediator 读**权威 store** 算出 live 集喂进来,backend 只枚举自己的卷、删差集(§4 子系统不读 store)。
+- `SweepOrphanVolumes(live, building) → int` —— 孤儿卷字节 sweep。形状同所有反向对账:mediator 读**权威
+  store** 算出 live 集喂进来,backend 只枚举自己的卷、删差集(§4 子系统不读 store)。**它的孪生是
+  `SweepOrphanOverlays`,不是 `SweepOrphanLayers`**——两个 sweep 回收的东西结构不同:layer 是被 lineage
+  与 refcount **共享**的只读底座(判据是"还有没有行引用它"),而 Volume 和 Overlay 单元都是**自足的存储
+  单元**(判据是"这个单元自己还有没有活的拥有者")。Volume 是后者:一个卷就是一个独立单元,故按单元 sweep。
 - `Capabilities() → {Snapshot, Clone, DirectIO…}` —— **per-backend 能力查询**(D6):local(btrfs)报支持
   snapshot/clone;纯目录或某些 remote 后端可不支持,调用即 400,而非静默。
 
@@ -134,7 +137,7 @@ seam 沿用 §5.A `runtime.Provider` / §5.B `rootfs.Provider` 的既定约定:*
 | `resumeLocked` | 从 store **读回**挂载表(挂载行跨 pause 持久)、重新 `Materialize`——与 `resolveLower` 每次重解析血缘同理,卷是同一真身、拿新的宿主物化 |
 | `pauseLocked` | CAS 后:`Backend.Unmount` 每个卷(**挂载行保留**,租约不释放),对称于 Overlay「零捕获」 |
 | `destroyLocked` | 卸载活卷 → **先删挂载行、再 `DeleteSandbox`**(否则 `mounts.sandbox` FK 挡住沙箱删除);这是租约释放点 |
-| 启动/周期对账 | `SweepOrphanVolumes` 镜像 `SweepOrphanLayers`;`SeedBuiltinVolumes`(若有平台预置卷)镜像 `SeedBuiltinTemplates` |
+| 启动/周期对账 | `SweepOrphanVolumes` 镜像 `SweepOrphanOverlays`(按存储单元回收,见 D2);`SeedBuiltinVolumes`(若有平台预置卷)镜像 `SeedBuiltinTemplates` |
 
 **唯一的新不变量:独占挂载唯一性**。FK RESTRICT 给不了"一个卷至多一条 rw 挂载行"——这需要
 在 exclusive 卷上加一条 `UNIQUE(volume) WHERE access='exclusive'` 偏索引(SQLite)+ Memory 扫描孪生,

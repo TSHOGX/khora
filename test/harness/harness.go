@@ -35,11 +35,15 @@ func RepoRoot(t *testing.T) string {
 	return ""
 }
 
-// BuildSandboxd compiles the real cmd/sandboxd as a static binary.
+// BuildSandboxd compiles the real cmd/sandboxd as a static binary, with the
+// `testguest` tag so the guest-side fault-injection seam is present (the
+// crash-loop sentinel the reaper escalation test needs). That tag is what keeps
+// the fault path OUT of a production guest — see cmd/sandboxd/faultinject.go.
+// Everything else about this binary is the production build.
 func BuildSandboxd(t *testing.T, repoRoot string) string {
 	t.Helper()
 	bin := filepath.Join(t.TempDir(), "sandboxd")
-	cmd := exec.Command("go", "build", "-o", bin, "./cmd/sandboxd")
+	cmd := exec.Command("go", "build", "-tags", "testguest", "-o", bin, "./cmd/sandboxd")
 	cmd.Dir = repoRoot
 	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
 	if out, err := cmd.CombinedOutput(); err != nil {

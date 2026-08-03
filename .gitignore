@@ -10,3 +10,7 @@
 
 # editor / OS
 .DS_Store
+
+# build artifacts from `go build ./cmd/...` without -o
+/sandboxd
+/orchestrator

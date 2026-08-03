@@ -15,7 +15,7 @@ import (
 	"strings"
 	"sync"
 
-	"engine/internal/transport"
+	"engine/internal/guestport"
 )
 
 // LocalRunsc is the single-node runtime provider (§5.A). It materializes
@@ -271,7 +271,7 @@ func (p *LocalRunsc) Launch(ctx context.Context, spec LaunchSpec) (_ *Placement,
 		}
 	}
 
-	pl := &Placement{TransportEndpoint: fmt.Sprintf("%s:%d", guestIP, transport.Port)}
+	pl := &Placement{TransportEndpoint: fmt.Sprintf("%s:%d", guestIP, guestport.Port)}
 	pl.SetHandle(&h)
 	return pl, nil
 }
@@ -346,7 +346,7 @@ func (p *LocalRunsc) Adopt(ctx context.Context, sandbox string) (*Placement, boo
 	h.guestIP = ip
 	p.markInUse(ip) // survivor holds this IP — the allocator must skip it (§4.4-A)
 
-	pl := &Placement{TransportEndpoint: fmt.Sprintf("%s:%d", ip, transport.Port)}
+	pl := &Placement{TransportEndpoint: fmt.Sprintf("%s:%d", ip, guestport.Port)}
 	pl.SetHandle(&h)
 	// alive → the cause is meaningless (nothing died); report Unknown rather than
 	// inventing a value.

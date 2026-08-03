@@ -25,6 +25,8 @@
 // later increment.
 package transport
 
+import "engine/internal/guestport"
+
 // Wire stubs are generated from proto/engine/transport/v1/transport.proto via
 // buf (schema-first). Regenerate with: cd proto && buf generate.
 // Requires buf + protoc-gen-go + protoc-gen-connect-go on PATH. The generated
@@ -42,10 +44,10 @@ import (
 // at placement time (§5.A ⑥). Never cached across resume (§4.3 要点③).
 type Endpoint string
 
-// Port is the fixed TCP port sandboxd (transport mode) listens on inside the
-// guest netns. It can be constant across sandboxes because each sandbox has its
-// own netns — the veth IP disambiguates, not the port (§5.E netns-internal TCP).
-const Port = 9000
+// Port is the fixed TCP port sandboxd listens on inside the guest netns. It is
+// re-exported from the leaf internal/guestport so §5.A can compose IP:port
+// without importing this subsystem (see that package for why).
+const Port = guestport.Port
 
 // ProcessEvent is one item of a process output stream: oneof{start,data,end,
 // keepalive} (transport D4.3) — start(pid) / data(stdout|stderr) /
