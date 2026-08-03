@@ -181,12 +181,15 @@ func (p *proc) broadcast(f frame) {
 // end. This is the same "lossy is the slow subscriber's copy, not the source"
 // rule the broadcast path enforces, extended to the exit instant.
 //
-// NOTE: "you were dropped" is not observable end-to-end anyway — the domain
-// seam (client.go drainEvents ignores stream.Err(); ProcessEvent has no error
-// field) cannot carry a terminal error across the fan-out channel. Subscriber
-// drop is deliberately NOT a health signal: §4.3 classifies a sandbox from the
-// L2 Health probe and its guest-side activity clock, never from one
-// subscriber's copy being too slow.
+// "You were dropped" IS observable end-to-end: serveSubscriber returns
+// resource_exhausted on an overflow close, and the host client surfaces it as a
+// ProcessEvent{Kind:"error"} so a consumer can tell "the process finished" from
+// "your copy was dropped" — opposite situations that would otherwise both look
+// like a channel closing.
+//
+// It is still deliberately NOT a health signal: §4.3 classifies a sandbox from the
+// L2 Health probe and its guest-side activity clock, never from one subscriber's
+// copy being too slow. Observable to the caller, invisible to the reaper.
 func (p *proc) finish(exitCode int) {
 	p.mu.Lock()
 	p.ended = true

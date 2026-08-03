@@ -42,4 +42,10 @@ go test ./...            # unit + contract tests only
 # packages each launch real runsc containers, and running them concurrently
 # starves the in-guest Health probes the reaper's idle classification needs.
 sudo env "PATH=$PATH" "HOME=$HOME" go test -tags substrate -count=1 -p 1 ./...
+
+# The pause/write race (§4.2 drain barrier) is tagged separately: each round
+# overlaps a 64 MiB write with a pause, so it costs minutes rather than seconds.
+# Run it deliberately — the property it pins does not change per commit.
+sudo env "PATH=$PATH" "HOME=$HOME" \
+  go test -tags 'substrate drainrace' -count=1 -timeout 30m ./test/ -run TestPauseDrain
 ```

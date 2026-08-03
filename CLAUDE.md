@@ -111,6 +111,11 @@ slims to boundary + open agenda — nothing lives in full in both places.
 - **Verify on the real substrate before claiming done:** `go build` + `go vet` +
   the milestone's e2e acceptance on `sbx`. Report failures with output; don't
   hedge a verified pass.
+- **Test build tags:** `substrate` = needs real runsc/overlay/btrfs and root (the
+  routine gate; run it with `-p 1`). A test that costs *minutes* gets its OWN
+  additional tag (`drainrace` is the precedent) so the routine gate stays fast —
+  keep both tags, since these files borrow the shared substrate fixtures. Exact
+  invocations in `README.md`.
 
 ## Milestone discipline
 

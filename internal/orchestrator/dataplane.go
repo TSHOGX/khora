@@ -38,9 +38,11 @@ type fsProxy struct{ e *Engine }
 // raw dial/transport error carries that IP:port — returning it verbatim would
 // leak placement to the engine's edge (§6.2 / D6.1: placement never exposed).
 // Map to CodeUnavailable with a placement-free message; the real cause is logged
-// engine-side (so it stays debuggable) but never crosses to the wire. (Errors
-// arriving mid-stream are a separate seam item tied to the health state — see
-// transport.md D4.3.)
+// engine-side (so it stays debuggable) but never crosses to the wire. This also
+// carries mid-stream terminations — an overflow disconnect (D4.3 invariant 1)
+// reaches forwardEvents as a ProcessEvent{Kind:"error"} and ends the outer stream
+// through here, so the external client learns the stream died rather than seeing
+// it close as if the process had finished.
 func proxyErr(err error) error {
 	log.Printf("dataplane: transport proxy error (sanitized to client): %v", err)
 	return connect.NewError(connect.CodeUnavailable, errors.New("sandbox transport unavailable"))
@@ -353,6 +355,13 @@ func forwardEvents(stream *connect.ServerStream[v1.ProcessEvent], ch <-chan tran
 			pe.Kind = &v1.ProcessEvent_End{End: &v1.EndEvent{ExitCode: int32(ev.ExitCode)}}
 		case "keepalive":
 			pe.Kind = &v1.ProcessEvent_Keepalive{Keepalive: &v1.KeepaliveEvent{}}
+		case "error":
+			// The inner stream ended WITHOUT an end frame — typically the D4.3
+			// invariant-1 overflow disconnect. Terminate the outer stream with the
+			// same error rather than closing it cleanly: a clean close would tell the
+			// external client "the process finished", which is exactly wrong, and it
+			// would undo the distinction the guest went to the trouble of reporting.
+			return proxyErr(ev.Err)
 		default:
 			continue
 		}

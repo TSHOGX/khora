@@ -54,11 +54,21 @@ const Port = guestport.Port
 // keepalive} (transport D4.3) — start(pid) / data(stdout|stderr) /
 // end(exit_code) / keepalive.
 type ProcessEvent struct {
-	Kind     string // "start" | "data" | "end" | "keepalive"
+	Kind     string // "start" | "data" | "end" | "keepalive" | "error"
 	PID      int    // set on start
 	Stream   string // "stdout" | "stderr" | "pty" — set on data
 	Data     []byte // set on data
 	ExitCode int    // set on end
+	// Err is set on Kind == "error": the stream ended WITHOUT an end frame. The
+	// common cause is the D4.3 invariant-1 overflow disconnect — a subscriber that
+	// could not keep up is dropped, and the guest reports resource_exhausted to
+	// distinguish that from a clean end.
+	//
+	// This exists because the distinction is otherwise LOST at this seam: the guest
+	// is careful to signal it, and a consumer that only watches for "end" cannot
+	// tell "the process finished" from "your copy of the output was dropped". Those
+	// call for opposite responses — accept the exit code, or reconnect and re-read.
+	Err error
 }
 
 // StartSpec starts a process (§5.E process service). PTY is the Pty!=nil special
