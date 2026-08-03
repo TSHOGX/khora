@@ -270,10 +270,12 @@ Overlay upper,保证 at-rest 字节一致,§5.B"只读 at-rest")。生命周期�
 子系统只提供机制——不把静止点做进 §5.E process(那会让无状态、payload 无关的传输层引入进程
 语义)。静止点**按进程行为分两类原语,不按 agent/turn 语义分**:
 
-- **引擎自己发出的 mutating RPC**:先过一道 **host 侧 drain-barrier**——停收新的 mutating process/fs
-  RPC、等 in-flight 排空,再 flush、再冻结。这一层是**确定性**的(host 完全掌握自己发出的 RPC,无需
-  guest 配合、不引入 ack 通道),且它关掉的是一个具体窗口:`fs.Write` 是 truncate-then-write,抢占落在
-  两步之间会把文件留成空的。排空超时即降抢占。
+- **引擎自己发出的 mutating 写**:先过一道 **host 侧 drain-barrier**——停收新的 mutating fs 写、等
+  in-flight 排空,再 flush、再冻结。这一层是**确定性**的(host 完全掌握自己发出的 RPC,无需 guest 配合、
+  不引入 ack 通道),且它关掉的是一个具体、已实测的窗口:`fs.Write` 是 truncate-then-write,抢占落在两步
+  之间会把文件留成空的。**只挡写、不挡读**(挡读等于在 pause 期间关掉观测面);排空超时即降抢占,**绝不
+  让 pause 失败**——一条卡住的 RPC 不能让沙箱变成不可 pause,而超时的落点正是崩溃的落点(§4.2 已接受)。
+  crash-pause 不排空:容器已死,没有 in-flight 可等。
 - **guest 内的负载(裸 pty、长跑进程)**:走**抢占式**——直接冻结,不做协作握手。**应用层安全点不进
   引擎**:engine 不认识 agent(§3.2.1),既不能要求负载在信号里停到安全点、也无法验证它停对了;
   substrate flush(§5.B)本就保证,故这层协作非正确性前提(§4.4),其超时/强杀语义与崩溃一致——而崩溃

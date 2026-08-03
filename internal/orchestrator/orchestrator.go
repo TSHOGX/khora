@@ -31,6 +31,11 @@ type Config struct {
 	// HealthTimeout bounds the ⑦ readiness gate (guest-runtime D5.1). Zero → the
 	// mediator's default (lifecycle.New), the single defaulting site for this knob.
 	HealthTimeout time.Duration
+	// DrainGrace bounds the §4.2 pause drain barrier (D4.4): how long a voluntary
+	// pause waits for in-flight engine-issued fs writes before freezing anyway.
+	// Zero → the mediator's default. Negative disables the drain entirely, which
+	// only a test wants (it restores the truncate window the barrier closes).
+	DrainGrace time.Duration
 	// Sudo prefixes runsc/ip with sudo (dev convenience). Production runs the
 	// orchestrator as root and leaves this false.
 	Sudo bool
@@ -110,6 +115,7 @@ func New(cfg Config) (*Engine, error) {
 		Rootfs:              rp,
 		Dial:                transport.Dial,
 		HealthTimeout:       cfg.HealthTimeout,
+		DrainGrace:          cfg.DrainGrace,
 		DefaultIdleTimeout:  cfg.DefaultIdleTimeout,
 		DefaultRetention:    cfg.DefaultRetention,
 		FaultAfterColdStart: cfg.FaultAfterColdStart,

@@ -76,6 +76,14 @@ type Deps struct {
 	// HealthTimeout bounds the ⑦ readiness gate (guest-runtime D5.1).
 	HealthTimeout time.Duration
 
+	// DrainGrace bounds the §4.2 pause drain barrier: how long a voluntary freeze
+	// waits for engine-issued mutating fs RPCs to finish before freezing anyway
+	// (D4.4). Timing out is NOT a failure — it lands where a crash lands, which
+	// §4.2 accepts — so this only trades "how long a pause may wait" against "how
+	// likely a write is truncated". Zero disables the drain (straight to the
+	// preemptive freeze); New applies defaultDrainGrace when unset.
+	DrainGrace time.Duration
+
 	// NodeCapacity is the §3.4 no-oversubscribe budget the admission gate admits
 	// against (§1.1 single-binary config). Zero on a dimension leaves that axis
 	// unmetered — see NodeCapacity.
@@ -113,6 +121,13 @@ type Mediator struct {
 	deps  Deps
 	mu    sync.Mutex // guards locks map only
 	locks map[model.SandboxID]*sync.Mutex
+
+	// barrier drains engine-issued mutating fs RPCs before a voluntary freeze, so
+	// a pause cannot land mid-write and truncate a file (§4.2 / D4.4; see
+	// barrier.go). Separate from the transition lock: that serializes VERBS
+	// against each other, this one serializes a verb against in-flight DATA-PLANE
+	// work, which never takes the transition lock at all.
+	barrier *barrier
 
 	// admitMu serializes the §3.4 no-oversubscribe gate. The per-sandbox
 	// transition lock (§4.4-B) CANNOT do this job: the gate's invariant is
@@ -174,6 +189,13 @@ type liveState struct {
 const (
 	defaultIdleTimeout = 30 * time.Minute // running idle → auto-pause
 	defaultRetention   = 24 * time.Hour   // paused → evict
+
+	// defaultDrainGrace bounds the §4.2 pause drain (D4.4). Seconds, not minutes:
+	// the operations it waits for are single fs RPCs, so a healthy one finishes in
+	// milliseconds and anything still outstanding after this is stuck rather than
+	// slow. Waiting longer would delay every pause to accommodate a caller that is
+	// not coming back.
+	defaultDrainGrace = 5 * time.Second
 )
 
 func New(deps Deps) *Mediator {
@@ -189,9 +211,19 @@ func New(deps Deps) *Mediator {
 	if deps.Logf == nil {
 		deps.Logf = log.Printf
 	}
+	if deps.DrainGrace == 0 {
+		deps.DrainGrace = defaultDrainGrace
+	}
+	// A NEGATIVE grace means "no drain at all" and survives defaulting — only a
+	// test wants it (to restore the truncate window and prove the barrier closes a
+	// real one). Normalized to zero, which drainForPause treats as disabled.
+	if deps.DrainGrace < 0 {
+		deps.DrainGrace = 0
+	}
 	return &Mediator{
 		deps:             deps,
 		locks:            make(map[model.SandboxID]*sync.Mutex),
+		barrier:          newBarrier(),
 		live:             make(map[model.SandboxID]*liveState),
 		buildingLayers:   make(map[model.TemplateID]bool),
 		buildingOverlays: make(map[model.OverlayID]bool),
@@ -400,6 +432,19 @@ func (m *Mediator) Pause(ctx context.Context, id model.SandboxID) error {
 // auto-pause), which are not deaths and must leave any previously recorded cause
 // alone.
 func (m *Mediator) pauseLocked(ctx context.Context, id model.SandboxID, kind string, cause *model.DeathCause) error {
+	// Drain engine-issued mutating fs RPCs before freezing, for the VOLUNTARY
+	// variants only (§4.2 / D4.4). A crash-pause skips it: the container is already
+	// dead, so there is nothing in flight to finish and nothing left to truncate —
+	// waiting would only delay recording a death we have already observed.
+	//
+	// Before the CAS, not after: once the record says `paused`, a still-running
+	// write would be landing bytes into a sandbox the control plane already
+	// considers frozen. undrain unconditionally, or a failed CAS below would leave
+	// the sandbox refusing writes forever.
+	if kind != "crash-paused" {
+		m.drainForPause(id)
+		defer m.barrier.undrain(id)
+	}
 	if err := m.deps.Store.CompareAndSetState(ctx, id, model.Running, model.Paused, newEvent(id, kind, model.Paused), cause); err != nil {
 		return err
 	}

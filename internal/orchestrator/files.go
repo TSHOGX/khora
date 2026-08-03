@@ -108,6 +108,17 @@ func (e *Engine) handleFileUpload(w http.ResponseWriter, r *http.Request, id mod
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
+	// Barrier-gated like the mutating fs RPCs (§4.2 / D4.4): a streaming upload is
+	// the LONGEST engine-issued write there is, so it is the one a pause is most
+	// likely to interrupt. The guest's temp-file-then-rename means an interrupted
+	// upload cannot leave a partial file, but the drain still matters — it lets the
+	// upload FINISH rather than be discarded wholesale.
+	release, ok := e.Mediator.Enter(id, "files.upload "+path)
+	if !ok {
+		http.Error(w, "sandbox is pausing; retry after it settles", http.StatusServiceUnavailable)
+		return
+	}
+	defer release()
 	// And cap the actual stream too: ContentLength is a claim, and a chunked body
 	// does not set it at all.
 	body := http.MaxBytesReader(w, r.Body, maxUploadBytes)

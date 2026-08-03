@@ -60,6 +60,38 @@ func (e *Engine) clientFor(hdrGet func(string) string) (transport.Client, error)
 	return cl, nil
 }
 
+// mutatingClientFor is clientFor plus the §4.2 pause drain barrier, for handlers
+// that WRITE. The release func must be deferred by the caller.
+//
+// Only writes take the barrier. Reads (Read/Stat/List, process.List, Connect)
+// deliberately do not: they cannot truncate anything, and blocking them would
+// stall observability exactly when a pause is in progress — the moment an operator
+// most wants to look.
+//
+// process.Start / SendInput / SendSignal also deliberately do NOT take it. They
+// mutate guest state, but not through an engine-issued write with a truncate
+// window, and gating a long-lived Start stream on a drain would deadlock the
+// barrier against itself: the stream is in-flight until the process exits, so the
+// drain would wait for work that is waiting for the drain (D4.4).
+func (e *Engine) mutatingClientFor(hdrGet func(string) string, op string) (transport.Client, func(), error) {
+	id := model.SandboxID(hdrGet(sandboxIDHeader))
+	if id == "" {
+		return nil, nil, connect.NewError(connect.CodeInvalidArgument, errors.New("missing "+sandboxIDHeader+" header"))
+	}
+	cl, err := e.Mediator.Client(id)
+	if err != nil {
+		return nil, nil, connect.NewError(connect.CodeNotFound, err)
+	}
+	release, ok := e.Mediator.Enter(id, op)
+	if !ok {
+		// A pause is draining: refuse rather than queue. Queueing would starve the
+		// drain — the thing it is waiting for would be arriving work.
+		return nil, nil, connect.NewError(connect.CodeUnavailable,
+			errors.New("sandbox is pausing; retry after it settles"))
+	}
+	return cl, release, nil
+}
+
 // --- ProcessService proxy ----------------------------------------------------
 
 func (p *processProxy) Start(ctx context.Context, req *connect.Request[v1.StartRequest], stream *connect.ServerStream[v1.ProcessEvent]) error {
@@ -199,10 +231,13 @@ func (f *fsProxy) Read(ctx context.Context, req *connect.Request[v1.ReadRequest]
 }
 
 func (f *fsProxy) Write(ctx context.Context, req *connect.Request[v1.WriteRequest]) (*connect.Response[v1.WriteResponse], error) {
-	cl, err := f.e.clientFor(req.Header().Get)
+	// Barrier-gated: this is THE call the drain exists for. The guest's write is
+	// truncate-then-write, so a pause landing mid-call empties the file (D4.4).
+	cl, release, err := f.e.mutatingClientFor(req.Header().Get, "fs.Write "+req.Msg.Path)
 	if err != nil {
 		return nil, err
 	}
+	defer release()
 	if err := cl.Write(ctx, req.Msg.Path, req.Msg.Data); err != nil {
 		return nil, proxyErr(err)
 	}
@@ -266,10 +301,11 @@ func (f *fsProxy) List(ctx context.Context, req *connect.Request[v1.FsServiceLis
 }
 
 func (f *fsProxy) MakeDir(ctx context.Context, req *connect.Request[v1.MakeDirRequest]) (*connect.Response[v1.MakeDirResponse], error) {
-	cl, err := f.e.clientFor(req.Header().Get)
+	cl, release, err := f.e.mutatingClientFor(req.Header().Get, "fs.MakeDir "+req.Msg.Path)
 	if err != nil {
 		return nil, err
 	}
+	defer release()
 	e, err := cl.MakeDir(ctx, req.Msg.Path)
 	if err != nil {
 		return nil, proxyErr(err)
@@ -278,10 +314,11 @@ func (f *fsProxy) MakeDir(ctx context.Context, req *connect.Request[v1.MakeDirRe
 }
 
 func (f *fsProxy) Remove(ctx context.Context, req *connect.Request[v1.RemoveRequest]) (*connect.Response[v1.RemoveResponse], error) {
-	cl, err := f.e.clientFor(req.Header().Get)
+	cl, release, err := f.e.mutatingClientFor(req.Header().Get, "fs.Remove "+req.Msg.Path)
 	if err != nil {
 		return nil, err
 	}
+	defer release()
 	if err := cl.Remove(ctx, req.Msg.Path); err != nil {
 		return nil, proxyErr(err)
 	}
@@ -289,10 +326,11 @@ func (f *fsProxy) Remove(ctx context.Context, req *connect.Request[v1.RemoveRequ
 }
 
 func (f *fsProxy) Move(ctx context.Context, req *connect.Request[v1.MoveRequest]) (*connect.Response[v1.MoveResponse], error) {
-	cl, err := f.e.clientFor(req.Header().Get)
+	cl, release, err := f.e.mutatingClientFor(req.Header().Get, "fs.Move "+req.Msg.Source)
 	if err != nil {
 		return nil, err
 	}
+	defer release()
 	e, err := cl.Move(ctx, req.Msg.Source, req.Msg.Destination)
 	if err != nil {
 		return nil, proxyErr(err)
