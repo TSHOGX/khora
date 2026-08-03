@@ -271,8 +271,27 @@ RPC 清单(按 pid 寻址,tag 不进模型见 D4.6):
 RPC 清单:全 unary + 大文件 multipart 旁路,不做 watch。
 
 `Read{path,offset,len}` / `Write` / `List{path,depth}` / `Stat` / `MakeDir` / `Remove` / `Move`
-全 unary;`Stat` 返回 `EntryInfo{name,type,size,mode,mtime,...}`。**大文件走 HTTP multipart 上传/
-下载旁路**,不挤 RPC。
+全 unary;`Stat` 返回 `EntryInfo{name,path,type,size,mode,mtime,symlink_target?}`。
+
+**语义取最宽容的一档**(与成熟实现同):`MakeDir` 建父目录(`mkdir -p`),已存在报
+`already_exists`(不静默成功);`Remove` **递归且幂等**(删不存在的东西算成功),不给 `recursive` 开关
+——对可信调用方,严格档只是个陷阱,还多一条每个调用方都得处理的错误分支;`Move` 建目标父目录并**覆盖**
+目标(拒绝会让"替换这个文件"整类用法失效);`Stat` 是 **lstat**(符号链接报成它自己,`symlink_target`
+按链接自身所在目录绝对化——相对路径对 guest 外的调用方没有意义,且没有 `Readlink` RPC 可事后补救);
+`List` 的 `depth` 必须 ≥ 1,**0 是 `invalid_argument` 而非"无限"**,否则一次误传的零值会走遍整个文件系统。
+
+`EntryInfo` 不带 owner/group(引擎不建模 guest 用户,§2.2/§3.2.1),`EntryType` 的零值是
+`UNSPECIFIED`——客户端遇到不认识的类型应跳过而非猜,这才使"以后加一种类型"是加法。
+
+**`Stat` 与 `List` 共用同一个 `EntryInfo` 构造点**,不是风格问题:一个参考实现两条路径分开写,结果
+`List` 不填符号链接目标而 `Stat` 填,同一个条目取决于你怎么问它就长得不一样。
+
+**大文件走 HTTP 流式旁路**(`GET|PUT /files?path=`,与 Connect handler 共用 guest 的同一个监听端口),
+不挤 RPC。**阈值由调用方定,引擎不猜**:小载荷走 RPC 更省一次往返,大的必须流式。旁路买到的**不是尺寸
+上限**(RPC 也能收下很大的消息),而是**两端都不整份持有**——实测同一个 64 MiB 载荷,guest 侧
+`sandboxd` 的 VmRSS:旁路 +9 MB、RPC +338 MB(约 37×,且比值随文件增大)。这条是**安全性而非效率**:
+沙箱有 RAM 帽且超限即被终止(§3.4),用 RPC 推大文件等于拿写入目标的沙箱去撞自己的帽。上传在 guest 侧
+先写同目录临时文件再 `rename`,故传输中断不会留下半个文件(也因此这条路径没有 `Write` 的 truncate 窗口)。
 
 - **不提供 `watch`**:无论 server-stream 推送还是轮询式 watcher,**两套都
   不要**——watch 要 engine 持订阅/合并/重连状态(破 §5.E 无状态),且 gVisor overlay upperdir 上

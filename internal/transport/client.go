@@ -4,8 +4,11 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"io"
 	"net"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"connectrpc.com/connect"
@@ -24,6 +27,11 @@ type connectClient struct {
 	health  transportv1connect.HealthServiceClient
 	process transportv1connect.ProcessServiceClient
 	fs      transportv1connect.FsServiceClient
+
+	// hc/base back the large-file bypass (OpenRead / WriteStream), which is plain
+	// streaming HTTP on the same guest listener rather than an RPC (D4.4).
+	hc   *http.Client
+	base string
 }
 
 // Dial builds a stateless Client for one sandbox's current endpoint. h2c
@@ -45,6 +53,10 @@ func Dial(ep Endpoint) Client {
 		health:  transportv1connect.NewHealthServiceClient(hc, base),
 		process: transportv1connect.NewProcessServiceClient(hc, base),
 		fs:      transportv1connect.NewFsServiceClient(hc, base),
+		// Retained for the large-file bypass, which is plain HTTP on the same
+		// listener rather than an RPC (D4.4) — same h2c client, same base URL.
+		hc:   hc,
+		base: base,
 	}
 }
 
@@ -261,6 +273,88 @@ func (c *connectClient) Move(ctx context.Context, source, destination string) (E
 		return EntryInfo{}, err
 	}
 	return entryFromWire(resp.Msg.Entry), nil
+}
+
+// filesURL builds the bypass URL for a guest path. The path travels as a query
+// parameter, url-escaped, so a filename with spaces or '#' survives intact.
+func (c *connectClient) filesURL(path string) string {
+	return c.base + "/files?path=" + url.QueryEscape(path)
+}
+
+// bypassErr turns a non-2xx bypass response into an error, mapping the status back
+// to the same classification the RPC path uses so a caller sees one contract
+// regardless of which path carried the bytes.
+func bypassErr(op, path string, resp *http.Response) error {
+	// The guest's body is a short diagnostic; cap it so a misbehaving endpoint
+	// cannot stream an unbounded "error" into engine memory.
+	msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+	base := op + " " + path + ": " + strings.TrimSpace(string(msg))
+	switch resp.StatusCode {
+	case http.StatusNotFound:
+		return connect.NewError(connect.CodeNotFound, errors.New(base))
+	case http.StatusForbidden:
+		return connect.NewError(connect.CodePermissionDenied, errors.New(base))
+	case http.StatusInsufficientStorage:
+		return connect.NewError(connect.CodeResourceExhausted, errors.New(base))
+	case http.StatusBadRequest:
+		return connect.NewError(connect.CodeInvalidArgument, errors.New(base))
+	default:
+		return connect.NewError(connect.CodeInternal,
+			errors.New(base+" (status "+resp.Status+")"))
+	}
+}
+
+func (c *connectClient) OpenRead(ctx context.Context, path string) (io.ReadCloser, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.filesURL(path), nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		defer resp.Body.Close()
+		return nil, bypassErr("download", path, resp)
+	}
+	// The body is handed over UNREAD — that is the point of this path. The caller
+	// closes it.
+	return resp.Body, nil
+}
+
+func (c *connectClient) WriteStream(ctx context.Context, path string, src io.Reader) (int64, error) {
+	// counted wraps src so the byte total comes from what was actually consumed off
+	// the reader, not from a length the caller asserted.
+	counted := &countingReader{r: src}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.filesURL(path), counted)
+	if err != nil {
+		return 0, err
+	}
+	// octet-stream: the raw-body framing, so the request streams instead of being
+	// buffered into a multipart envelope.
+	req.Header.Set("Content-Type", "application/octet-stream")
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return counted.n, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return counted.n, bypassErr("upload", path, resp)
+	}
+	return counted.n, nil
+}
+
+// countingReader counts bytes passed through, so WriteStream can report what it
+// actually sent for a reader of unknown length.
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
 }
 
 // compile-time: connectClient satisfies Client.

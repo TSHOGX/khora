@@ -19,10 +19,10 @@
 //
 // Surface: the full process data plane — Start / Connect (server-stream) /
 // StreamInput (client-stream) / SendInput / SendSignal / Update / CloseStdin /
-// List, plus fs Read / Write and Health. Bounded ring replay on Connect and
-// slow-subscriber non-blocking drop (D4.3's two invariants) live in the guest
-// server (cmd/sandboxd). fs breadth (list/stat/mkdir/…) + multipart bypass are a
-// later increment.
+// List; the full fs surface — Read / Write / Stat / ListDir / MakeDir / Remove /
+// Move plus the streaming large-file bypass (OpenRead / WriteStream, D4.4); and
+// Health. Bounded ring replay on Connect and slow-subscriber non-blocking drop
+// (D4.3's two invariants) live in the guest server (cmd/sandboxd).
 package transport
 
 import "engine/internal/guestport"
@@ -37,6 +37,7 @@ import "engine/internal/guestport"
 
 import (
 	"context"
+	"io"
 	"time"
 )
 
@@ -196,4 +197,16 @@ type Client interface {
 	// overwriting an existing destination. A cross-device move is refused
 	// (rename(2) cannot span filesystems) rather than silently copied.
 	Move(ctx context.Context, source, destination string) (EntryInfo, error)
+
+	// OpenRead streams a guest file out — the large-file half of the fs surface
+	// (transport D4.4). Unlike Read it never materializes the file in memory at
+	// either end, so it is the path for anything big. The caller MUST Close the
+	// returned reader; the underlying HTTP response body stays open until it does.
+	OpenRead(ctx context.Context, path string) (io.ReadCloser, error)
+
+	// WriteStream streams src into a guest file, returning the bytes written. The
+	// guest writes to a temp file in the destination directory and renames, so an
+	// interrupted transfer cannot leave a partial file where a whole one is
+	// expected — which is why this path, unlike Write, has no truncate window.
+	WriteStream(ctx context.Context, path string, src io.Reader) (int64, error)
 }

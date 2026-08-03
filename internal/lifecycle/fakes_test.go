@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"context"
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 	"testing"
@@ -327,4 +328,12 @@ func (c *fakeClient) MakeDir(context.Context, string) (transport.EntryInfo, erro
 func (c *fakeClient) Remove(context.Context, string) error { return nil }
 func (c *fakeClient) Move(context.Context, string, string) (transport.EntryInfo, error) {
 	return transport.EntryInfo{}, nil
+}
+func (c *fakeClient) OpenRead(context.Context, string) (io.ReadCloser, error) {
+	return io.NopCloser(strings.NewReader("")), nil
+}
+func (c *fakeClient) WriteStream(_ context.Context, _ string, src io.Reader) (int64, error) {
+	// Drain src so a caller that streams into this fake sees its reader consumed,
+	// as the real client would.
+	return io.Copy(io.Discard, src)
 }

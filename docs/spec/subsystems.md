@@ -285,8 +285,9 @@
   daemon**,只暴露两个**通用**能力,且**对 agent / turn / session 一无所知**:
   1. **process** —— 起进程 / 重连 / 输入 / 信号 / resize / 列进程;PTY 是带 pty 字段的特例(shell 就是
      带 PTY 的 `exec /bin/bash`),进程按 pid 寻址(guest 原生)。
-  2. **fs** —— 读写沙箱文件:`read`(可带 offset)/ `write` 为已建面,`list` / `stat` / `mkdir` /
-     `remove` / `move` 与大文件旁路是同形加法;**不做 watch**(消费方用 `read`+`stat` 自行轮询拉增量)。
+  2. **fs** —— 读写沙箱文件:`read`(可带 offset)/ `write` / `stat` / `list` / `mkdir` / `remove` /
+     `move`,外加**大文件流式旁路**(与 RPC 共用 guest 同一监听端口,阈值由调用方定,D4.4);
+     **不做 watch**(消费方用 `read`+`stat` 自行轮询拉增量)。
   精确 RPC 清单以 proto 为权威契约(§6.1)。
   这个 daemon 是"CLI/TUI/WebUI 都是同一套 API 的平级 client"(§6)成真的具体载体。它**必须保持
   通用**:不内嵌任何 agent/turn/session 语义,那些是 engine 外 adapter 的事(见末条)。

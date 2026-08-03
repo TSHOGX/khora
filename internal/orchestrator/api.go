@@ -238,6 +238,13 @@ func (e *Engine) handleSandboxSub(w http.ResponseWriter, r *http.Request) {
 		e.doVerb(w, r, id, e.Mediator.Pause)
 	case sub == "resume" && r.Method == http.MethodPost:
 		e.doVerb(w, r, id, e.Mediator.Resume)
+	// The large-file bypass (§5.E fs / transport D4.4). REST rather than
+	// Connect-RPC because its whole purpose is to STREAM bytes: a file must not
+	// become one protobuf message, nor sit in memory at either end.
+	case sub == "files" && r.Method == http.MethodGet:
+		e.handleFileDownload(w, r, id)
+	case sub == "files" && (r.Method == http.MethodPut || r.Method == http.MethodPost):
+		e.handleFileUpload(w, r, id)
 	default:
 		// process/fs data plane is Connect-RPC (transport D6), not REST here.
 		http.Error(w, "not found", http.StatusNotFound)

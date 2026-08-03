@@ -40,6 +40,12 @@ POST   /v1/sandboxes/{id}/resume
 #   resource-terminated 的沙箱拒绝 resume → 409(§4.3;先 PATCH 抬帽)
 DELETE /v1/sandboxes/{id}                                                          (destroy)
 GET    /v1/sandboxes                                                               (list)
+GET    /v1/sandboxes/{id}/files?path=                                    (大文件下载,流式)
+PUT    /v1/sandboxes/{id}/files?path=                          → {path, bytes_written}(上传)
+#   §5.E fs 的**大文件旁路**(D4.4),是数据面里唯一走 REST 的一条:它的全部意义就是**流式**——
+#   大文件不该变成一条 protobuf 消息、也不该在任一端整份驻留(实测 RPC 路径要多占约 37 倍 guest 内存,
+#   而沙箱超 RAM 帽即被终止,§3.4)。小载荷仍走 `FsService.Read/Write`,**阈值由调用方定**。
+#   §6.2 的约束不变:沙箱仍按不透明 ID 寻址,guest 端点(placement)不出现在 wire 上。
 
 # Template(不可变工件:opaque ID 作身份,存在即状态,§3.1 / §4.3)
 GET    /v1/templates
@@ -76,11 +82,11 @@ client 从 `transport.proto` 经 `buf` 生成 stub、经 `orchestrator` 反代�
 (示意)  processes/{pid}/signal        {signal}
 (示意)  processes                                                                    (实时 list,无注册表)
 
-# FS(读写沙箱文件)— read 可带 offset,无 watch;大文件走 multipart 旁路
-#   权威:FsService.{Read,Write,List,Stat,MakeDir,Remove,Move}
+# FS(读写沙箱文件)— read 可带 offset,无 watch;语义与生效点见 D4.4
+#   权威:FsService.{Read,Write,Stat,List,MakeDir,Remove,Move}
 (示意)  fs?path=&offset=&len=                                                        (read / stat)
 (示意)  fs?path=                                                                     (write)
-(示意)  fs/list                       {path}
+(示意)  fs/list                       {path, depth}
 # agent 会话(session)不进 engine API——engine 外 adapter 在 process/fs 上的加法(§5.E / D1.2)
 ```
 

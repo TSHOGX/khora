@@ -44,6 +44,9 @@ func transportMode() {
 	mux.Handle(transportv1connect.NewHealthServiceHandler(&healthServer{activity: activity}))
 	mux.Handle(transportv1connect.NewProcessServiceHandler(&processServer{activity: activity}))
 	mux.Handle(transportv1connect.NewFsServiceHandler(&fsServer{}))
+	// The large-file bypass shares this mux, listener and port — a plain HTTP
+	// route beside the Connect handlers (files.go / transport D4.4).
+	registerFileRoutes(mux)
 
 	// Publish our pid so supervision/tests can target the transport child
 	// deterministically (the guest pid is not fixed — the Go runtime consumes
