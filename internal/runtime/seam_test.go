@@ -8,9 +8,56 @@ import (
 	"testing"
 )
 
+// bannedTokens are substrings that betray a host primitive crossing a seam.
+// Deliberately includes the storage/memcg vocabulary as well as cgroup: the §5.B
+// seam takes a plain byte count, and the §4.3 death cause crosses as an abstract
+// enum (never an errno or a memory.events read), so neither may name a mechanism.
+//
+// One list, shared by BOTH halves of the guard below (signatures and data-type
+// fields) — a token banned from a parameter must be equally banned from a field,
+// or the cheaper of the two spellings becomes the way in.
+var bannedTokens = []string{
+	"cgroup", "memcg", "oom",
+	"upperdir", "workdir", "hostpath", "abspath",
+	"subvolume", "qgroup", "squota", "errno",
+}
+
+// fieldExemptions are the exported seam fields permitted to carry a host-shaped
+// name, keyed "Type.Field" with the reason it is legitimate. The reason is the
+// point: an exemption without one is a bare allowlist, and the next leak arrives
+// through the same door claiming the same precedent.
+var fieldExemptions = map[string]string{
+	// §5.A explicitly permits an ALREADY-MERGED rootfs handle as a provider input.
+	// The provider is told "run this rootfs" and learns nothing about how it was
+	// assembled; what §5.A bans is the Overlay's INTERNAL upper/work paths, which
+	// would expose the overlayfs mechanism and make the seam unimplementable by a
+	// provider that assembles rootfs some other way. MergedPath is populated and
+	// consumed only by local_runsc and never enters a cross-provider decision
+	// (RootfsSource's own doc comment, and open-decisions §5.A for the remote form).
+	"RootfsSource.MergedPath": "§5.A permits a merged-rootfs handle as provider input; only upper/work are banned",
+	// The §5.B side of that same handoff: Merged is what the Rootfs subsystem hands
+	// across as an opaque RootfsSource. It is the ONE host-shaped name the storage
+	// seam exposes — upper/work deliberately do not appear on Overlay at all (the
+	// provider recomputes them from the ID, §3.1.1 对内也 ID 寻址), which is what
+	// keeps this single field a handle rather than a leak of the mechanism.
+	"Merged.MergedPath": "§5.B hands the merged rootfs across as an opaque handle; upper/work stay private",
+}
+
 // M6 acceptance 10 — STRUCTURAL assertion: no host primitive appears in the
-// §5.A / §5.B seam signatures. No cgroup path, no host filesystem path, no memcg
-// concept (§5.A ❌ list / §1.3 seam).
+// §5.A / §5.B seam. No cgroup path, no host filesystem path, no memcg concept
+// (§5.A ❌ list / §1.3 seam).
+//
+// Two halves, because a host primitive can cross a seam two ways and both cost
+// the same abstraction:
+//
+//  1. interface METHOD SIGNATURES — parameter names, parameter types, results.
+//  2. the exported FIELDS of the data types that ride those signatures.
+//
+// Half 2 exists because half 1 alone is weaker than the claim: LaunchSpec renders
+// as the bare identifier "LaunchSpec" in a signature, so a `CgroupPath string`
+// field on it would be invisible to a parameter-only scan — and a struct field is
+// the MORE likely spelling, since wiring a cgroup cap through a spec struct is
+// exactly where the temptation lands.
 //
 // This is a test rather than a review habit because the pressure to leak is
 // constant and the leak is CHEAP at the moment you write it: while wiring a
@@ -25,21 +72,6 @@ import (
 // legitimately handles cgroup paths, memcg files, and host paths — inside its own
 // body, which is precisely where they belong.
 func TestSeamCarriesNoHostPrimitives(t *testing.T) {
-	// Substrings that betray a host primitive crossing a seam. Deliberately
-	// includes the storage/memcg vocabulary as well as cgroup: the §5.B seam takes
-	// a plain byte count, and the §4.3 death cause crosses as an abstract enum
-	// (never an errno or a memory.events read), so neither may name a mechanism.
-	banned := []string{
-		"cgroup", "memcg", "oom",
-		"upperdir", "workdir", "hostpath", "abspath",
-		"subvolume", "qgroup", "squota", "errno",
-	}
-	// MergedPath is the ONE allowed host-shaped name and only as a RootfsSource
-	// field: §5.A explicitly permits an already-merged rootfs handle as an input
-	// (what is banned is the Overlay's INTERNAL upper/work paths). It is also
-	// exempted by being a struct field, not a method parameter — the check below
-	// only reads interface method signatures.
-
 	for _, target := range []struct{ file, iface string }{
 		{"provider.go", "Provider"},
 		{"../rootfs/rootfs.go", "Provider"},
@@ -76,7 +108,7 @@ func TestSeamCarriesNoHostPrimitives(t *testing.T) {
 				writeFields(&sig, fset, fn.Params)
 				writeFields(&sig, fset, fn.Results)
 				got := strings.ToLower(sig.String())
-				for _, b := range banned {
+				for _, b := range bannedTokens {
 					if strings.Contains(got, b) {
 						t.Errorf("%s.%s signature leaks host primitive %q (§5.A ❌ list): %s",
 							target.iface, name, b, sig.String())
@@ -90,6 +122,108 @@ func TestSeamCarriesNoHostPrimitives(t *testing.T) {
 				target.iface, target.file)
 		}
 	}
+
+	// Half 2 — the DATA TYPES that cross those signatures as parameters or
+	// returns. Every type listed here is reachable through the seam, so its
+	// exported fields are as much a part of the contract as the parameter list.
+	for _, target := range []struct {
+		file  string
+		types []string
+	}{
+		// §5.A: the contract 3-tuple (rootfs / steering / limits), the spec that
+		// carries them, and the placement handle returned.
+		{"provider.go", []string{
+			"RootfsSource", "SteeringSpec", "ResourceLimits", "LaunchSpec", "Placement",
+		}},
+		// §5.B: the storage seam's two data types.
+		{"../rootfs/rootfs.go", []string{"Overlay", "Merged"}},
+	} {
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, target.file, nil, parser.ParseComments)
+		if err != nil {
+			t.Fatalf("parse %s: %v", target.file, err)
+		}
+		want := make(map[string]bool, len(target.types))
+		for _, name := range target.types {
+			want[name] = true
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			ts, ok := n.(*ast.TypeSpec)
+			if !ok || !want[ts.Name.Name] {
+				return true
+			}
+			st, ok := ts.Type.(*ast.StructType)
+			if !ok {
+				return true
+			}
+			delete(want, ts.Name.Name)
+			for _, fld := range st.Fields.List {
+				// Only EXPORTED fields are part of the contract. An unexported field is
+				// provider-private and correct by design: Placement.handle holds
+				// local_runsc's container id + netns name precisely so callers cannot
+				// reach them (they address by SandboxID, §3.3) — flagging it would
+				// punish the pattern that keeps the seam clean.
+				names := exportedFieldNames(fld)
+				if len(names) == 0 {
+					continue
+				}
+				// Field NAMES and TYPES both matter, for the same reason parameter names
+				// do: `CgroupPath string` leaks the concept behind a plain string type,
+				// and a field typed `cgroupHandle` leaks it behind an innocuous name.
+				subject := strings.Join(names, " ") + " " + typeString(fset, fld.Type)
+				for _, fieldName := range names {
+					key := ts.Name.Name + "." + fieldName
+					if why, exempt := fieldExemptions[key]; exempt {
+						t.Logf("%s exempt: %s", key, why)
+						continue
+					}
+					got := strings.ToLower(subject)
+					for _, b := range bannedTokens {
+						if strings.Contains(got, b) {
+							t.Errorf("%s.%s leaks host primitive %q across the seam (§5.A ❌ list): %s",
+								ts.Name.Name, fieldName, b, strings.TrimSpace(subject))
+						}
+					}
+				}
+			}
+			return false
+		})
+		for name := range want {
+			t.Fatalf("struct %s not found in %s (test is stale — renamed, or no longer a struct?)",
+				name, target.file)
+		}
+	}
+}
+
+// exportedFieldNames returns the exported names a struct field declares. An
+// EMBEDDED field has no names, so it is reported under its type name — embedding
+// promotes the embedded type's fields into the outer type, which means it crosses
+// the seam just as a named field does.
+func exportedFieldNames(fld *ast.Field) []string {
+	if len(fld.Names) == 0 {
+		t := fld.Type
+		if star, ok := t.(*ast.StarExpr); ok {
+			t = star.X
+		}
+		switch e := t.(type) {
+		case *ast.Ident:
+			if e.IsExported() {
+				return []string{e.Name}
+			}
+		case *ast.SelectorExpr:
+			if e.Sel.IsExported() {
+				return []string{e.Sel.Name}
+			}
+		}
+		return nil
+	}
+	var out []string
+	for _, n := range fld.Names {
+		if n.IsExported() {
+			out = append(out, n.Name)
+		}
+	}
+	return out
 }
 
 func writeFields(sb *strings.Builder, fset *token.FileSet, fl *ast.FieldList) {

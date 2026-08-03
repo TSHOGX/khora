@@ -405,10 +405,17 @@ func TestResourceCapacityAxis(t *testing.T) {
 }
 
 // Acceptance 9, crash half: a sandbox whose create crashed mid-chain leaves an
-// orphan Overlay unit, and startup reconcile must reclaim it as a SUBVOLUME —
-// plain os.RemoveAll cannot delete a subvolume, so a reclamation path that forgot
-// the subvolume case would silently leak both the bytes and the quota unit on
-// every crashed create (§4.4-A reclamation discipline).
+// orphan Overlay unit, and startup reconcile must reclaim it as a SUBVOLUME plus
+// its quota unit (§4.4-A reclamation discipline).
+//
+// Measured caveat on what this test can and cannot prove: `rm -rf` DOES remove a
+// btrfs subvolume on this kernel (contents and all, exit 0), so a
+// directory-existence assertion alone does NOT distinguish a correct reclamation
+// path from one that merely unlinked the tree. The real divergence is the quota
+// row — `rm -rf` leaves a live limit on a dead subvolume id, and full qgroup mode
+// needs an explicit `qgroup destroy`. Under squota (this host) btrfs reclaims that
+// row asynchronously, so both paths converge within seconds. Hence the assertion
+// below checks the QUOTA UNIT, not just the directory.
 func TestResourceCapacityOrphanSubvolumeReclaimed(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("needs root (btrfs ioctls + runsc)")
@@ -713,7 +720,7 @@ func TestResourceUnknownDeathCauseResumes(t *testing.T) {
 		t.Fatalf("state = %s after resume; want running", stt)
 	}
 	// the resume CLEARED the cause: it no longer explains anything, and leaving it
-	// set would make the bounded-retry argument rest on a stale value.
+	// set would make the structural self-correction argument rest on a stale value.
 	after, _ := eng.Store.GetSandbox(ctx, sid)
 	if after.DeathCause != model.CauseNone {
 		t.Fatalf("death cause = %q after a successful resume; want cleared", after.DeathCause)
@@ -789,7 +796,7 @@ func TestResourceAdmissionGateOnSubstrate(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = m.Destroy(ctx, sid1) })
 
-	// second must be REFUSED: Σcaps + layer bytes now exceeds the budget.
+	// second must be REFUSED: Σcaps + uncapped bytes now exceeds the budget.
 	nsBefore := countSbxNetns(t)
 	_, err = m.Create(ctx, lifecycle.CreateSpec{Template: "bare", Limits: model.Limits{DiskByte: capPer}})
 	if err == nil {
@@ -806,18 +813,18 @@ func TestResourceAdmissionGateOnSubstrate(t *testing.T) {
 	// layers (and omitting deployment-shipped builtins) silently overcommits the
 	// node by the whole Template library, which on a fresh deployment is all of it.
 	// Measured here: 16 KiB (wrong, subvolume metadata only) vs ~14 MB (right).
-	if !strings.Contains(err.Error(), "layer bytes") {
+	if !strings.Contains(err.Error(), "uncapped bytes") {
 		t.Fatalf("refusal does not show the layer-bytes term: %v", err)
 	}
 	var reported int64
-	if _, serr := fmt.Sscanf(err.Error()[strings.Index(err.Error(), "layer bytes "):], "layer bytes %d", &reported); serr != nil {
-		t.Fatalf("could not parse the layer-bytes term from %q: %v", err, serr)
+	if _, serr := fmt.Sscanf(err.Error()[strings.Index(err.Error(), "uncapped bytes "):], "uncapped bytes %d", &reported); serr != nil {
+		t.Fatalf("could not parse the uncapped-bytes term from %q: %v", err, serr)
 	}
 	if reported < layerish/2 {
-		t.Fatalf("layer bytes reported as %d but the Template library alone is ~%d — deployment-shipped Template bytes are being omitted from node accounting (§5.B / D6.2 undercount)",
+		t.Fatalf("uncapped bytes reported as %d but the Template library alone is ~%d — deployment-shipped Template bytes are being omitted from node accounting (§5.B / D6.2 undercount)",
 			reported, layerish)
 	}
-	t.Logf("✓ acceptance 8: the layer term (%d) accounts for the real Template bytes (~%d), not just Promote-built layers", reported, layerish)
+	t.Logf("✓ acceptance 8: the uncapped term (%d) accounts for the real Template bytes (~%d), not just Promote-built layers", reported, layerish)
 
 	// NO half-built residue: no extra record, no netns, no extra overlay unit.
 	list, _ := m.List(ctx)
@@ -865,7 +872,9 @@ func TestResourceAdmissionGateOnSubstrate(t *testing.T) {
 	t.Logf("✓ acceptance 8: refused resume left the sandbox in `paused`")
 }
 
-// dirSize sums apparent file sizes under root (host-side, never guest-reported).
+// dirSize sums APPARENT sizes and is only a loose LOWER-BOUND reference for the
+// assertion above (the shipped Template tree is dense, so apparent ≈ allocated).
+// The engine itself counts ALLOCATED blocks — see rootfs.blockBytes.
 func dirSize(root string) (int64, error) {
 	var total int64
 	err := filepath.Walk(root, func(_ string, info os.FileInfo, err error) error {

@@ -112,6 +112,14 @@ func TestLaunchResumeGetsNewIP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Launch 1: %v", err)
 	}
+	// Two releases of pl1, deliberately, and they are not redundant: the Stop below
+	// is the test's ACT (pl1 must be down BEFORE pl2 launches, or "resume got a new
+	// IP" proves nothing), while this Cleanup is the failure-path guarantee — a
+	// t.Fatalf between here and that Stop would otherwise leak pl1's container,
+	// netns and veth into the dev environment, exactly the reclamation hole §4.4-A
+	// makes this suite's own subject. teardownPlacement is idempotent and
+	// best-effort, so running after the explicit Stop is a no-op.
+	t.Cleanup(func() { _ = p.Destroy(ctx, pl1) })
 	ep1 := pl1.TransportEndpoint
 	_ = p.Stop(ctx, pl1)
 
@@ -149,6 +157,12 @@ func TestAdoptRunningContainerSameIP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Launch: %v", err)
 	}
+	// Failure-path guarantee for the whole test, registered the moment there is
+	// something to reclaim. The later Destroy(adopted) is the test's ACT and tears
+	// the same container down by the same names; teardownPlacement is idempotent, so
+	// this cleanup is then a no-op. Without it, every t.Fatalf below — starting with
+	// the pre-adopt health poll — would leak the container, netns and veth.
+	t.Cleanup(func() { _ = p1.Destroy(ctx, pl) })
 	ep := pl.TransportEndpoint
 	url := "http://" + ep + "/health"
 	if !pollHealth(t, url, 15*time.Second) {
@@ -165,17 +179,17 @@ func TestAdoptRunningContainerSameIP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Adopt: %v", err)
 	}
+	// The ad-hoc Destroy that used to precede each Fatal below is gone: the Cleanup
+	// registered after Launch now covers EVERY failure path, including the ones a
+	// hand-written unwind would keep missing.
 	if !alive {
-		_ = p1.Destroy(ctx, pl)
 		t.Fatal("Adopt judged a running container dead")
 	}
 	if adopted.TransportEndpoint != ep {
-		_ = p1.Destroy(ctx, pl)
 		t.Fatalf("Adopt got endpoint %s; want SAME %s (§4.4-A 同一 IP)", adopted.TransportEndpoint, ep)
 	}
 	// adopted endpoint is reachable.
 	if !pollHealth(t, url, 5*time.Second) {
-		_ = p1.Destroy(ctx, pl)
 		t.Fatalf("adopted endpoint unreachable at %s", url)
 	}
 	t.Logf("Adopt ✓ same IP %s, reachable", adopted.TransportEndpoint)
@@ -221,16 +235,20 @@ func TestReclaimOrphans(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewLocalRunsc: %v", err)
 	}
+	// Each placement registers its OWN cleanup as soon as it exists, rather than one
+	// combined cleanup after both launches: with the latter, a Launch failure on the
+	// second sandbox leaked the first one (nothing had been registered yet).
 	mk := func(id string) *Placement {
+		t.Helper()
 		pl, err := p.Launch(ctx, LaunchSpec{Sandbox: id, Rootfs: RootfsSource{MergedPath: filepath.Join(tmplRoot, "bare")}})
 		if err != nil {
 			t.Fatalf("Launch %s: %v", id, err)
 		}
+		t.Cleanup(func() { _ = p.Destroy(ctx, pl) })
 		return pl
 	}
 	keep := mk("sbxKEEP")
 	orphan := mk("sbxORPHAN")
-	t.Cleanup(func() { _ = p.Destroy(ctx, keep); _ = p.Destroy(ctx, orphan) })
 
 	keepURL := "http://" + keep.TransportEndpoint + "/health"
 	orphanURL := "http://" + orphan.TransportEndpoint + "/health"

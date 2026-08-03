@@ -28,20 +28,51 @@ func btrfsScratch(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Cleanup REPORTS its own failures. Reclamation is §4.4-A's own subject here, so
+	// a scratch dir that silently survives the run is not a cosmetic annoyance: it
+	// is this suite losing the ability to tell "the engine leaks" from "my fixtures
+	// leak" on the dev box. Cleanup runs after the real assertions, so t.Errorf here
+	// can only add information.
 	t.Cleanup(func() {
 		c := Client{}
 		ctx := context.Background()
-		// remove any subvolumes we made before the plain RemoveAll (a subvolume
-		// cannot be rmdir'd).
-		entries, _ := os.ReadDir(dir)
+		// Remove any subvolumes we made before the plain RemoveAll — os.RemoveAll
+		// CANNOT delete a subvolume (rmdir(2) refuses one), which test/
+		// resource_substrate_test.go asserts about the engine's own reclaim path.
+		//
+		// ONE level of walking is enough TODAY, and the reason is that nothing in this
+		// package's tests nests: every subvolume is created directly under the scratch
+		// root (root/unit, root/churn, root/occupied), and btrfs.Client itself creates
+		// exactly the one path it is handed. Should that change, the RemoveAll
+		// verification below is the backstop — a nested subvolume makes RemoveAll(dir)
+		// fail, and the check reports the surviving path instead of swallowing it.
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Errorf("cleanup: cannot list scratch dir %s, subvolumes may leak: %v", dir, err)
+		}
 		for _, e := range entries {
 			p := filepath.Join(dir, e.Name())
-			if c.IsSubvolume(ctx, p) {
-				_ = os.RemoveAll(p) // contents first
-				_ = c.DeleteSubvolume(ctx, p)
+			if !c.IsSubvolume(ctx, p) {
+				continue
+			}
+			// contents first; the error is EXPECTED (this removes what is inside the
+			// subvolume but cannot rmdir the subvolume root), so it stays ignored — the
+			// DeleteSubvolume below is the call whose failure means a real leak.
+			_ = os.RemoveAll(p)
+			if err := c.DeleteSubvolume(ctx, p); err != nil {
+				t.Errorf("cleanup: DeleteSubvolume(%s) failed, quota unit leaked: %v", p, err)
 			}
 		}
-		_ = os.RemoveAll(dir)
+		if err := os.RemoveAll(dir); err != nil {
+			t.Errorf("cleanup: RemoveAll(%s): %v", dir, err)
+		}
+		// Verify, do not assume: a subvolume RemoveAll could not delete leaves the dir
+		// in place with no error worth trusting. Name the path so it can be cleaned by
+		// hand (`btrfs subvolume delete`).
+		if _, err := os.Stat(dir); !os.IsNotExist(err) {
+			t.Errorf("cleanup: scratch dir SURVIVED at %s (stat err=%v) — leaked on the dev box; "+
+				"a leftover subvolume cannot be removed by RemoveAll, delete it with `btrfs subvolume delete`", dir, err)
+		}
 	})
 	c := Client{}
 	if !c.Available(context.Background(), dir) {
