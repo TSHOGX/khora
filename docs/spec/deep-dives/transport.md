@@ -24,14 +24,8 @@
 位于 engine 之外(adapter / 上层组件)。形态对齐 ACP 的 `session/*`,但它的实现、状态、审计
 **全部在 engine 外**;engine 核心对"agent / turn / session"一无所知。
 
-| 层 | 是什么 | 何时做 | 在哪 |
-| --- | --- | --- | --- |
-| **engine 地基** | `process` + `fs`,自足 = E2B 式沙箱 | **现在** | engine 内 |
-| **session 加法** | ACP 形态的 agent 会话协议(prompt/update/load/resume) | **以后**,纯加法 | engine 外 |
-
 **核心纪律(要守死的一条)**:session 必须能作为**纯加法**叠在 `process` 上——加它**不改 engine
-核心**(对齐 `spec` §1.3「成本判据」)。本文为此预留 seam(D3),但现阶段**不为 session 在
-engine 里买任何单**。
+核心**(对齐 `spec` §1.3「成本判据」)。本文为此守住三个 seam(D3),engine 内不为 session 留任何槽。
 
 ---
 
@@ -40,10 +34,10 @@ engine 里买任何单**。
 设计压力来自三方:E2B(机制怎么收敛)、ACP(agent 会话怎么标准化)、渲染 vs 交互的非对称。
 三者交汇的结论是:**process/fs 是 engine 的全部,session 是 engine 外的加法。**
 
-### D1.1 `process` + `fs`:抄 E2B,因为"在沙箱里干活"本就只有两类,且自足
+### D1.1 `process` + `fs`:"在沙箱里干活"本就只有两类,且自足
 
-E2B 的 envd 守护进程只暴露两个 service:**Filesystem** 和 **Process**(PTY 并入 Process,
-不单独成 service)。理由是:沙箱里能做的一切,要么动文件系统、要么跑一个进程。把进程原语
+只需两个 service:**fs** 和 **process**(PTY 并入 process,不单独成 service)。理由是:沙箱里能做的
+一切,要么动文件系统、要么跑一个进程。把进程原语
 做足(可选 PTY + 双向流 + signal),则 **shell、命令执行、后台服务、jupyter kernel 全是
 "起一个进程"的特例**——不必为每种形态各开接口。
 
@@ -57,7 +51,7 @@ E2B 的 envd 守护进程只暴露两个 service:**Filesystem** 和 **Process**(
   (理由见 D4.4)。大文件走 HTTP multipart 旁路,不挤 RPC。
 
 这两个服务**无状态**:engine 不为它们维护任何持久 SoT。"沙箱上现在跑着什么进程" =
-向 sandboxd 实时 `process.List`,不存控制面记录。这是 E2B 同款——零进程注册表。
+向 sandboxd 实时 `process.List`,不存控制面记录:零进程注册表。
 
 **关键:这两个就够成一个完整产品。** process + fs = 一个持久、可 root、可挂多连接、可读写
 文件、可跑任意进程的隔离沙箱,即 `spec` §1.2 in-scope 的全部地基。它**不依赖 session 存在**
@@ -105,18 +99,15 @@ engine 外那层自己管**。
 - **不需要统一传输原语(lane)**:一个"什么都管"的传输抽象要承担的五件事——多路复用、每连接定序、
   可重启、控制面注册、checkpoint quiesce——前四件由 **Connect-RPC / HTTP-2 原生多 stream + 每
   stream 天生有序 + checkpoint 接管可重启 + process/fs 无状态**逐件吸收;只剩 checkpoint quiesce
-  是真需求,由 engine 的**进程级冻结原语**(D4)单独提供。没有留给"统一 lane"的职责。
+  是真需求,由 §4.2 的 pause 静止点(抢占式冻结;协作式协议见 guest-runtime D4.4)单独提供。没有留给
+  "统一 lane"的职责。
 - **不需要 payload 类型系统**:jupyter = 起个 kernel 进程读流、file = fs 原语、cli = 起个进程——
   全在 process/fs 上拼得出来;`control`(agent 会话)划到 engine 外(D1.2)。故 engine 侧只有
   process / fs 两个通用机制,**新增任何交互形态 = engine 外叠一层,engine 一行不改**。
-- **不做 turn 仲裁**:turn / session 整体在 engine 外,engine 控制面**不存** turn/lease/owner/
+- **不做 turn 仲裁**:turn / session 整体在 engine 外,engine 控制面**不存** turn/lease/归属方/
   游标/历史。engine 侧唯一与"可靠性"相关的承诺压到最低:process 双向流是尽力而为的在线流,
   中断时 in-flight 数据可能丢——裸 pty 字节流容忍丢字符(shell 无持久 SoT),agent 会话的审计幂等由
   engine 外 session 层自己保证。
-
-> **这正是 `spec` §1.5 立足点④的精确含义。** ④"开放交互模型"不是"payload registry 可插拔",
-> 而是"**engine 只两个通用原语(process/fs),开放性全在 engine 外 adapter**"——不是放弃开放性,
-> 而是把它放到正确的层:engine 小而稳,任何东西都能在 process/fs 上叠。
 
 ---
 
@@ -150,7 +141,7 @@ engine 外那层自己管**。
 
 ## D3. 要守住的 seam:保证 session 是纯加法
 
-现在不实现 session,但要保证将来加它**不回头改 engine**。需要 engine 现在就守住三个 seam:
+session 在 engine 外,加它**不回头改 engine**。这要求 engine 守住三个 seam:
 
 - **process 的双向流足够通用**:能承载任意字节/帧,使 session adapter 可在其上跑 ACP 的
   JSON-RPC(prompt/update 等),engine 不需要理解流里的内容。
@@ -197,7 +188,7 @@ transport 只依赖 placement 给出的结果——**netns 由谁建、veth IP �
   点对点 veth,正是为拦"sibling 直连 veth IP"而设)。
 - **外部**:除非**显式 publish**(可带 `auth`,§5.D)否则不可达。
 
-**与 E2B 的关键差异**:E2B `envd` 挂在**公网可达 URL** 上,故必须带 access token;本项目 `sandboxd` 只在
+**对照**:一个挂在**公网可达 URL** 上的 guest daemon 必须带 access token;本项目 `sandboxd` 只在
 netns 内、宿主经 veth 直连,攻击面小一个量级,**通道内 auth 在当前载体下是冗余的**。但这条**取决于载体
 形态**:若将来某 provider(§5.A)把 transport 暴露到不可信网络,通道内 auth 就从冗余变成必需——届时按该
 provider 补,属 §5.A provider 的网络义务,不改本 wire 协议。
@@ -205,7 +196,7 @@ provider 补,属 §5.A provider 的网络义务,不改本 wire 协议。
 ### D4.2 框架与流式分工
 
 - **RPC 框架 = Connect-RPC over h2c。** 一套 IDL 同时讲 Connect / gRPC / gRPC-web,unary 与 stream
-  同源,可走纯 HTTP(契合 D4.1 载体)。E2B `envd` 正是这套,直接抄形态。
+  同源,可走纯 HTTP(契合 D4.1 载体)。
 - **流式分工 = 非对称三分,不做全 duplex。**
 
   | 方向 | 形态 | RPC |
@@ -225,7 +216,7 @@ provider 补,属 §5.A provider 的网络义务,不改本 wire 协议。
 
 ### D4.3 process 服务面
 
-RPC 清单(抄 E2B envd 形态;按 pid 寻址,tag 不进模型见 D4.6):
+RPC 清单(按 pid 寻址,tag 不进模型见 D4.6):
 
 | RPC | 形态 | 语义 |
 | --- | --- | --- |
@@ -238,7 +229,7 @@ RPC 清单(抄 E2B envd 形态;按 pid 寻址,tag 不进模型见 D4.6):
 | `List{}` | unary | 实时枚举(**无注册表**,§5.E) |
 | `CloseStdin{pid}` | unary | 关 stdin(pty 下等价发 Ctrl-D) |
 
-事件 `oneof{start(pid), data(stdout|stderr|pty), end(exit_code), keepalive}`——抄 E2B。**PTY 不
+事件 `oneof{start(pid), data(stdout|stderr|pty), end(exit_code), keepalive}`。**PTY 不
 单独成服务**:`Start` 带 `pty.size` 即 pty 特例,resize=`Update`,输入走 input 的 pty 分支。
 
 - **多连接扇出:输出广播,输入不仲裁。** §3.2「多路并发挂同一沙箱」落到单进程即"多个 `Connect` 挂
@@ -251,13 +242,13 @@ RPC 清单(抄 E2B envd 形态;按 pid 寻址,tag 不进模型见 D4.6):
 - **扇出的两条正确性 invariant:源永不因订阅者阻塞 + 有界回放。** 「退订不影响其余」只说 disconnect;
   扇出还有两条必须显式钉死的规则,否则一个卡住的前端能冻结 guest 里的真实进程:
   1. **慢订阅者非阻塞丢弃,源 `write` 永不阻塞。** 每个 live 订阅者有独立**有界**发送窗口;窗口溢出
-     即对**该订阅者**非阻塞处置,**背压绝不回传到源**(PTY/进程)。这把 §D1.3「裸
+     即对**该订阅者**非阻塞处置,**背压绝不回传到源**(PTY/进程)。这把 D1.3「裸
      pty lossy」从模糊表述钉成可验收规则:lossy 的是**慢订阅者那一份拷贝**,不是源。
      - **溢出处置 = 断开该订阅者。** 理由:窗口一旦溢出,
        这份拷贝的字节流已有空洞、后续无从无缝续上;与其留一条**残缺**的 live 流让上层误以为完整,
        不如断开,由 client 重新 `Connect`——重连会先回放有界环形缓冲的近期 tail(invariant 2),
        比一条带洞的流干净。断开是**该订阅者**的事,源与其余订阅者不受影响。这不给源加任何"保证送达"
-       语义(§D1.3 lossy 边界不变);"你被断开了"是否升级成一条**可观测的连接活动信号**属 §4.3 健康态
+       语义(D1.3 lossy 边界不变);"你被断开了"是否升级成一条**可观测的连接活动信号**属 §4.3 健康态
        四分(reaper 侧)的活,不在本层——本层只保证源不被拖住。
   2. **`Connect` 先回放有界环形缓冲、再接 live。** 每进程维护一个 **per-process、in-guest、按字节上界**
      的输出环形缓冲(旧字节静默丢弃);`Connect{pid}` **先把缓冲内近期
@@ -268,7 +259,7 @@ RPC 清单(抄 E2B envd 形态;按 pid 寻址,tag 不进模型见 D4.6):
     落在"无 **持久** SoT"的措辞内(§5.E)。缓冲丢了只损失回放近况,不损失任何权威记录。
   - **边界:engine 只保证 best-effort 字节 tail,不保证屏幕重建。** 裸字节回放可能落在 ANSI 转义序列
     中段;**完整屏幕状态重建(tmux/screen 式 reflow)是 engine 外 client/adapter 的活**,engine 不理解
-    流内容(§D3 seam),不替终端发明它本不具备的语义(呼应 §D2「PTY 不落 scrollback 文件」)。
+    流内容(D3 seam),不替终端发明它本不具备的语义(呼应 D2「PTY 不落 scrollback 文件」)。
 - **信号默认发进程组,可寻址单进程。** `SendSignal` 默认对**进程目标的进程组**发(先 `kill(-pgid)`、
   fallback `kill(pid)`),因为 `apt`/build/
   dev-server 都 fork 子树,只杀父会留一堆孤儿。这是 spec §4.2 协作式静止点「向 guest 内进程发协作信号」
@@ -276,15 +267,15 @@ RPC 清单(抄 E2B envd 形态;按 pid 寻址,tag 不进模型见 D4.6):
 
 ### D4.4 fs 服务面
 
-RPC 清单:全 unary + 大文件 multipart 旁路,不做 watch(抄 E2B 除 watch 外)。
+RPC 清单:全 unary + 大文件 multipart 旁路,不做 watch。
 
 `Read{path,offset,len}` / `Write` / `List{path,depth}` / `Stat` / `MakeDir` / `Remove` / `Move`
 全 unary;`Stat` 返回 `EntryInfo{name,type,size,mode,mtime,...}`。**大文件走 HTTP multipart 上传/
-下载旁路**,不挤 RPC(E2B 同款)。
+下载旁路**,不挤 RPC。
 
-- **不提供 `watch`**:E2B envd 有 `WatchDir` server-stream + `CreateWatcher` 轮询两套,我们**两套都
+- **不提供 `watch`**:无论 server-stream 推送还是轮询式 watcher,**两套都
   不要**——watch 要 engine 持订阅/合并/重连状态(破 §5.E 无状态),且 gVisor overlay upperdir 上
-  inotify 可靠性存疑(§2.5)。消费方用 `Stat`+`Read(offset)` 自行轮询拉增量(§2 渲染 vs 交互非对称)。
+  inotify 可靠性存疑(§2.5)。消费方用 `Stat`+`Read(offset)` 自行轮询拉增量(D2 渲染 vs 交互非对称)。
 - **resume 后读无 offset 续传契约**:`fs.Read` 读的是 Overlay 工件**当前**字节;resume 换新容器后
   engine **不**保证跨 resume 的 offset 连续性(它无状态、不记读游标)。消费方跨 resume 要「从头整份
   读一遍」或自持游标按 `Stat.size` 变化决定增量。与"输入不仲裁"同源:engine 不替连接记状态。
@@ -344,7 +335,7 @@ E2B 的 SDK **直连** envd(经路由代理,`E2b-Sandbox-Id/Port` 头寻址)。�
 
 | 面 | 协议 | 端点(§6.1) | 为什么 |
 | --- | --- | --- | --- |
-| **控制面**(沙箱/template/volume/network 生命周期) | **REST + JSON**(OpenAPI 事后描述) | `POST /v1/sandboxes`、`pause`/`resume`、`DELETE`、`GET`、volume/template/publish… | 低频 CRUD,手调 / curl / 文档化友好;无强类型流。E2B 同款分法 |
+| **控制面**(沙箱/template/volume/network 生命周期) | **REST + JSON**(OpenAPI 事后描述) | `POST /v1/sandboxes`、`pause`/`resume`、`DELETE`、`GET`、volume/template/publish… | 低频 CRUD,手调 / curl / 文档化友好;无强类型流 |
 | **数据面**(process / fs) | **Connect-RPC over h2c**,proto 契约先行 | `engine.transport.v1.ProcessService` / `FsService`(D4.3/D4.4) | 有 server-stream + 强类型帧;proto 是**唯一契约源**,前端(TS)/ 未来多语言 SDK 全从它 `buf` 生成 client stub |
 
 **关键收益:内沿那份 proto 契约直接投影到外沿。** `orchestrator` 对外**复用同一份**
@@ -383,5 +374,6 @@ stream 翻成 NDJSON)。它被否决,三条理由:
   Connect 请求用请求头 `Engine-Sandbox-Id` 携带 id,反代 strip 掉它、经 mediator 解析当前端点后透传到
   内沿(placement 永不外泄,§6.2 / D6.1)。头名是实现约定,不改 wire 形状。
 - **实现级取值**:环形缓冲上界、慢订阅者发送窗口、`keepalive` 周期都是可随经验调的**数值旋钮**,不是
-  设计问题(形状由 D4.3/D6 定死);当前取值登记在 open-decisions §5.E,不在此复制。**溢出处置(断开)
+  设计问题(形状由 D4.3/D6 定死);取值登记在 [`open-decisions.md`](../open-decisions.md) §2 的 §5.E 行,
+  不在此复制。**溢出处置(断开)
   不在此列**——那是已在 D4.3 invariant 1 拍定的设计选择,不是旋钮。

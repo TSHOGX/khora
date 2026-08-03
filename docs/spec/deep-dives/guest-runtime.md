@@ -24,9 +24,6 @@
 系统守护服务"(`service`/`systemctl` 那套)为目标。判据干净:**是否需要 init 把它"开机拉起并常驻"**
 ——需要 → 移出范围;不需要、能被 exec 出来 → `process` + `publish` 两个现有原语即覆盖。
 
-这条收缩把"需要完整 init 系统"的整类需求移出范围,guest 启动拓扑因此只需一个**轻量 reaper**
-(D4)。
-
 ---
 
 ## D2. 两类进程的分界
@@ -116,14 +113,15 @@ reparent 到 `sandboxd` 而非 PID 1——不当 PID 1 也能收割自己关心�
 ### D4.3 transport 模式要落的三样机制,和一个要拒的模型
 
 收割语义无处可抄——它必须靠 D4.1 自研 + tini checklist。但 transport 模式要落的另外三样机制是成熟的
-进程管理套路,现在就锁定形状:
+进程管理套路,形状如下:
 
-- **每进程监督状态机**:per-process 一个 `cmd.Wait()` 的 monitor goroutine + 状态枚举
-  (running/stopped/killed/crashed)+ exit/start handler。
+- **每进程监督**:per-process 一个 `cmd.Wait()` 的 monitor goroutine,退出即广播 `end` 帧(退出码
+  `128+signo` on signal)。若将来要向调用方暴露更细的进程状态(running/stopped/killed/crashed),那是
+  这个 monitor 之上的 additive 加法,不改本拓扑。
 - **每进程 pgid 纪律**:非 PTY 进程 `Setpgid` 自成组、PTY 进程交给 pty 的 session——这条 tini 覆盖
   不到的 PTY vs 非 PTY 非对称,完整推理见 D4.5 C1。
-- **drain-barrier**:pause/resume 前用一道 barrier 挡住 in-flight mutating RPC、等其排空——正是 D4.4
-  协作式静止点、D5.2 单飞守卫要的原语。
+- **drain-barrier**:pause 前用一道 barrier 挡住 in-flight mutating RPC、等其排空——D4.4 协作式静止点
+  ① 那一层要的原语(D5.2 的单飞守卫在 host 侧、不用它)。
 
 **要拒的是"独立世代计数"identity 模型**(常见于分布式 init/supervisor:给每次运行挂一个
 `epoch`/`generation` 标签辨识陈旧实例)。引擎不引入它,用 spec §3.3/§4.3 的 placement/IP-as-epoch
@@ -145,22 +143,17 @@ spec §4.2 把静止点按进程行为分两类原语。裸 pty 走抢占式(直
   安全点**——进程正写一个逻辑单元写到一半(如 agent 写 JSONL 写到半行),冻结会留半条。而应用层
   安全点通用地无法由 engine 判定:engine 不认识 agent(spec §3.2.1),不能要求进程为 pause 实现回调。
 
-**协议因此两层,一层确定、一层尽力,都不引入 guest 内 ack 通道:**
+**协议因此两层,都不引入 guest 内 ack 通道**——① host 侧 drain-barrier(确定性:停收新的 mutating
+process/fs RPC、等 in-flight 排空,再交 §5.B flush;host 完全掌握自己发出的 RPC,复用 D4.3 那个原语)、
+② guest 内 `SIGTSTP` + 观测 `/proc` 到达 `T`(stopped)+ 超 grace 降 `SIGSTOP`(尽力)。规范陈述在
+§4.2,此处只留它为何收窄到这么小(上两条前提)与那条关键的"不做"(下)。
 
-- **① host 发起的 in-flight 写:drain-barrier(确定性)。** pause 编排先令 transport 模式进入 barrier
-  ——停收新的 mutating process/fs RPC、等 in-flight 的排空,再交 §5.B flush。这层不需要 guest 配合,因为
-  host 完全掌握自己发出的 RPC(复用 D4.3 的 drain-barrier 原语,只留 in-flight 计数 + 排空等待)。
-- **② guest 内长跑进程:信号 + 观测 stopped + 超时降级(尽力)。** 发一个**可被 handle 的** stop
-  请求(`SIGTSTP` 族,经 SendSignal 定向到进程组)——实现了 handler 的进程(如 agent 收到会 flush
-  历史再停)受益,没实现的走默认 stop。engine **不等进程主动 ack**,而是**观测 `/proc` 进程状态
-  到达 `T`(stopped)**——这是 engine 侧可观测的代理信号,不是 guest 进程回调,不违反"engine 不
-  认识 agent"。到达 stopped 或超 grace → §5.B flush → runsc 冻结;超时则降 `SIGSTOP` 抢占。
-
-**关键的"不做":不给长跑进程一个"我到安全点了"的主动上报通道。** 那要求进程为 pause 改代码
-(违反 spec §3.2.1),且它非正确性前提,不值得。"到没到安全点"要么由进程自己在 `SIGTSTP` handler
+**关键的"不做":不给长跑进程一个"我到安全点了"的主动上报通道**——那要求进程为 pause 改代码
+(违反 spec §3.2.1),且它非正确性前提。"到没到安全点"要么由进程自己在 `SIGTSTP` handler
 里体现(它停了 = 它认为到了),要么由 engine 观测 `/proc` 状态代理——engine 不引入应用层握手。
+这也是"不等 ack、只观测代理信号"不违反"engine 不认识 agent"的原因。
 
-参数级仍待(纯调参,不改两层结构,登记 open-decisions):grace 时长、可 handle 信号的具体选择、
+参数级残留(纯调参,不改两层结构,登记 open-decisions):grace 时长、可 handle 信号的具体选择、
 是否给模板一个可选"可协作 flush"钩子(默认不需要)。
 
 ### D4.5 tini checklist 覆盖不到的三条缝
@@ -178,18 +171,18 @@ tini 的语义权威,前提是**它只有一个子进程、自己永不被重启
 - **C2 — Wait / 退出码语义跨一次 transport 重启是 lossy。** transport 崩、PID 1 原地重启后:它作为
   subreaper 收养的子进程在它死的瞬间 reparent 到 PID 1(真 init),新 transport 丢了内存里的 pid/pgid
   句柄表、且那些进程现在挂在 PID 1 名下——新 transport `waitpid` 不到它们,退出状态被 PID 1 收走。
-  故 `process.Wait` / exit-code **仅在 transport 单次存活期内保证**,跨一次重启退化为
-  「`process.List`(扫 `/proc`)仍可见、Wait/exit-status 可能丢」。这与裸 pty 字节流的 lossy 同源:
+  故**退出码(`end` 事件)仅在 transport 单次存活期内保证**,跨一次重启退化为
+  「`process.List`(扫 `/proc`)仍可见、退出状态可能丢」。这与裸 pty 字节流的 lossy 同源:
   engine 无状态、可重启性不由 engine 承担,"不丢"担保由上层(session adapter)自理。**零新增机制**,
   不加 PID 1↔transport 的 exit-status 上报缝。
-  > **留的 seam(将来若 session 层证明必须"不丢"再做,不回头改 engine)**:PID 1 收全局孤儿退出
-  > 状态时旁路记一份供新 transport 查询(一条极窄的内部上报缝)。今天不做——列在这里是为锁定"加它
-  > 不动 transport / engine 无状态契约",与 [`transport.md`](./transport.md) D3「守 seam」同纪律。
+  > **留的 seam(若 session 层证明必须"不丢"才做,不回头改 engine)**:PID 1 收全局孤儿退出
+  > 状态时旁路记一份供新 transport 查询(一条极窄的内部上报缝)。列出它是为锁定"加它不动 transport /
+  > engine 无状态契约",与 [`transport.md`](./transport.md) D3「守 seam」同纪律。
 
 - **C3 — 收割权在 PID 1 与 transport 间的划分,含重启瞬态。** 正常态 transport 经
   `PR_SET_CHILD_SUBREAPER` 收自己后代、PID 1 只兜底全局孤儿;**瞬态**(transport 已死、新 transport
-  未接手)划分翻转——后代短暂 reparent 到 PID 1、由 PID 1 收(正是 C2 的成因)。这条瞬态契约要显式
-  写清,别默认"transport 永远在收自己后代"。
+  未接手)划分翻转——后代短暂 reparent 到 PID 1、由 PID 1 收(正是 C2 的成因)。故"transport 永远在收
+  自己后代"不成立。
 
 > C1(pgid 非对称)是成熟套路;C2/C3 只在**"独立 PID 1 + 监督重启"**拓扑下才出现(一个不当 PID 1、
 > 不被监督重启的普通 HTTP 子进程遇不到它们),是本引擎这套拓扑的新增议程。
@@ -258,7 +251,7 @@ Overlay 工件。
 
 ### D5.3 探活失败分两类(监督拓扑的后果)
 
-PID1 会**原地监督并重启** transport 子进程,于是 **transport 崩溃不再等于 substrate 死亡**:runsc
+PID1 会**原地监督并重启** transport 子进程,于是 **transport 崩溃不等于 substrate 死亡**:runsc
 活而端口不通,是 transport 子进程崩了、PID1 正在同 IP 原地重启(瞬态,不走 resume,成本远低于整链
 冷启);runsc 整个探不到才是 substrate 死亡(走 resume 换新 IP)。因此探活必须 **substrate +
 transport 两层都探**才能区分二者——完整的两层探针定义、健康态分类与处置见 spec §4.3。这条区分正是
@@ -269,4 +262,4 @@ D4.2 分进程拓扑换来的附加能力。
 ## D6. 边界与仍待
 
 - **协作式静止点**:仅剩参数级、不改两层结构,详见 D4.4。
-- **模板是否预置常驻进程**:目前不需要;若未来出现,平级托管,不进 `sandboxd`。
+- **模板是否预置常驻进程**:不需要;若出现,平级托管,不进 `sandboxd`。

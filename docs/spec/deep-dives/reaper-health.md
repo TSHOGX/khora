@@ -38,11 +38,8 @@ orchestrator 本就代理整条数据面(`processProxy`/`fsProxy`,transport D6),
 `proc.run` **持续**把进程输出泵进每进程的环形缓冲,**无论有没有客户端连着**——这正是"进程比 Start 流
 活得久、稍后 `Connect` 重连"能成立的前提。于是一个 agent 可以**跑几分钟、狂产输出、但零字节流过
 orchestrator**(没人 attach)。host 侧时戳会把它读成 idle,`auto-pause` 掉一个正在工作的沙箱。这是
-idle 定义层面的正确性 bug,不是调参能救的。
-
-**反过来,这个活动对 guest 侧恰恰可见**:每一帧输出都过 `proc.broadcast()`、每次输入都过
-`writeInput()`。所以「无进程活动、pty 无 I/O」是一件**guest 可观测**的事实,而且能在**已经存在**的路径上
-极廉价地打戳。故信号在 guest 侧量。
+idle 定义层面的正确性 bug,不是调参能救的。而同一份活动对 guest 侧恰恰可见——每一帧输出都过
+`proc.broadcast()`、每次输入都过 `writeInput()`,在**已经存在**的路径上极廉价地打戳。故信号在 guest 侧量。
 
 **为什么是 I/O 而不是 CPU。** spec §4.3 的判据措辞是 I/O 活动(`process.List 有进程活动 / pty 有 I/O`),
 不是「有 CPU 占用」。纯 CPU-bound、零 I/O 的进程(极少见于 agent 工作负载)不计入活动——这是 spec 的
@@ -54,22 +51,22 @@ idle 定义本身的选择,不是本实现的偷懒;若将来证明需要,升级
 ## D2. 信号的形状:沙箱全局单时戳,`Health` 探针带回
 
 - **粒度 = 沙箱全局,不是每 pid。** reaper 的处置是**每沙箱**的(auto-pause 整个沙箱),不是每连接的;
-  故只需一个「这个沙箱最近一次任意 I/O 的时刻」,取所有进程 + pty 的 max。`processServer` 持一个
-  `atomic.Int64`(unix 毫秒),`broadcast()` 与 `writeInput()` 各写一次 `Store(now)`。无锁、O(1)、不随
-  进程数偏移——与 §D4.5「`Health` 恒定开销、不列进程」同源。
-- **搭 `Health` 一处三用,不另造协议。** `Health.Check` 已一处两用(§4.3 L2 探活 + resume readiness 门,
-  transport D4.5)。现在 `CheckResponse` 多带一个 `idle_millis`(= `now - lastIO`),成第三用:活动探针。
+  故只需一个「这个沙箱最近一次任意 I/O 的时刻」,取所有进程 + pty 的 max。一个进程内共享的 unix-毫秒
+  原子时戳,`broadcast()` 与 `writeInput()` 各写一次。无锁、O(1)、不随
+  进程数偏移——与 transport D4.5「`Health` 恒定开销、不列进程」同源。
+- **搭 `Health` 一处三用,不另造协议。** `Health.Check` 同时是 §4.3 L2 探活、resume readiness 门
+  (transport D4.5)与活动探针:`CheckResponse` 带一个 `idle_millis`(= `now - lastIO`)。
   L2「通不通」与「idle 多久」本就该一次 RPC 拿全,分两个 RPC 是无谓往返。host 侧 `Client.Health` 的域
-  类型相应带回 idle 时长;冷启 ⑦ 门 / 接管 L2 探针这些老调用者忽略它即可(它们只看 err==nil)。
+  类型相应带回 idle 时长;冷启 ⑦ 门 / 接管 L2 探针只看 err==nil,忽略它即可。
 - **仍是无状态(§5.E)。** 这个时戳是 **transient、进程内、随 transport 进程消亡**的——和环形缓冲同一类
-  (D4.3 "no persistent SoT"),不跨 resume、不进控制面、不是连接注册表。它只回答「此刻这个 guest 多久
+  (transport D4.3「无**持久** SoT」),不跨 resume、不进控制面、不是连接注册表。它只回答「此刻这个 guest 多久
   没 I/O」,不记「谁连过、连了多久」。
 - **`idle_millis` 只在 L2 通时有意义——L2 不通绝不可读成 idle。** 活动时戳搭在 `Health` 响应里,只有探针
   **成功返回**才拿得到 `idle_millis`;L2 不通(transport-down / 冷启中 / 死亡)时根本没有可信的活动读数。
   分类器据此严守次序:**先看 L1×L2 定健康态,只有落入「L1 活 + L2 通」才继续用 `idle_millis` 分 healthy vs
   idle**——`idle` 健康态的判据本就含「L2 通」(§4.3 表)。故"探不到活动"永远归 transport-down / dead-recoverable
-  (按 L1 分),**绝不因读不到时戳而误判成 idle 去 auto-pause**。这条要在分类器落一个显式断言 + 一条测试(L2
-  down 时即便"看起来很久没 I/O"也不得进 idle 处置)。
+  (按 L1 分),**绝不因读不到时戳而误判成 idle 去 auto-pause**。分类器的次序本身就是这条断言:idle 只在
+  L2-up 分支读。
 
 ---
 
@@ -95,8 +92,7 @@ idle 定义本身的选择,不是本实现的偷懒;若将来证明需要,升级
      spec §4.4-B 的 CAS 只比对 lifecycle-state)。故 `auto-pause` 拿锁后**除 CAS 外须再重读一次活动信号**——
      取当前 `idle_millis`(一次 `Health` 探针;锁本就要持整条 pause,多一个 RPC 可忽略),仍 `≥ idle_timeout`
      才冻结,否则**放弃本次 auto-pause、下轮再判**。于是处置永远建立在**锁内最新的**「态 + 活动」双重快照上,
-     而非 sweep 起点的陈旧分类。**(落地时在 auto-pause 代码点留一行注释说明这条锁内重读,别让后人以为 CAS
-     已兜住。)**
+     而非 sweep 起点的陈旧分类。
   - 残留的亚微秒窗口(锁内重读之后、runsc 冻结之前用户恰好发输入)无害且不可消除:它与"用户在 pause 刚起步的
     瞬间发输入"无从区分,由 §4.2 pause 静止点语义正常处理,不算误暂停。§4.4-B「锁承重正确性、single-flight 只
     承重效率」在此精确为:分类器读到的是快照、可"看走眼"一瞬,而处置在锁内对**态 + 活动**同时重判才落定。
@@ -129,7 +125,7 @@ placement → 回收)。二者都建立在**同一次健康分类**之上(§4.3:
 tick 里先分类、再分派**:分类结果既喂 reaper 的 TTL 处置,也喂对账的 crash-pause / 孤儿回收,不跑两遍探活。
 
 **失败策略沿用 §4.4-A:skip-and-log,对不确定的 `running` 存活者取保守**(保护其 placement 不回收,漏拆可逆、
-误拆不可逆),对账幂等,跳过项下轮重来。**批量策略**:首版逐沙箱串行判、单轮全量扫(单机、沙箱数有限,足够);
+误拆不可逆),对账幂等,跳过项下轮重来。**批量策略**:逐沙箱串行判、单轮全量扫(单机、沙箱数有限,足够);
 若将来规模变大,分批 + 限流是 additive 调参,不改本形状。**枚举本机资源**当前只有 runsc 容器 + netns + overlay
 mount(egress 面 nft/gateway 随 §5.D 数据面落地时并入枚举,这里预留位置、不提前建)。
 
@@ -142,8 +138,8 @@ mount(egress 面 nft/gateway 随 §5.D 数据面落地时并入枚举,这里预�
 又崩)永远翻不回 L2 通,若无限等,该沙箱既回不到 healthy、又永远不被 auto-pause / crash-pause,成一个**卡死
 的黑洞**。故 transport-down **必须有一条收敛边界**——这正是 §4.3「超重启预算才升级」那半句要落地的机制。
 
-**判据 = 有界重启预算,升级方向 = dead-recoverable。** 一个沙箱**连续**分类为 transport-down 的时长(或等价的
-PID1 重启计数,取其一,首版取**连续 transport-down 时长超一个阈值**最简、不需 PID1 向控制面上报计数)超过
+**判据 = 有界重启预算,升级方向 = dead-recoverable。** 一个沙箱**连续**分类为 transport-down 的时长(判据取
+时长而非 PID1 重启计数:不需 PID1 向控制面上报计数)超过
 **重启预算**后,reaper 把它从 transport-down **升级**为 `dead-recoverable` 处置:走 resume(§4.2)换新 IP 整链
 冷启。理由:transport 原地重启本是"成本远低于 resume"的快路径(§4.3),但**快路径不收敛时,唯一仍能恢复该沙箱
 的手段就是整链冷启**——升级到 resume 是从"进程内可恢复"退回到"substrate 级恢复",与 dead-recoverable 同一处置,
@@ -190,18 +186,11 @@ memcg 叶子与 `.state`,而三条死亡发现路径(启动对账 / 周期对账
 > **还有第四条拆除路径,它不是发现路径:用户 `pause` 一个已经死掉的沙箱。** `pause` 不探活,CAS 因记录仍是
 > `running` 而成功,随后 `Stop` → teardown 把 memcg 连同死因一起销毁,而 `pause` 传的 cause 是 `nil`(它不是
 > 死亡观测,不该编造死因)。于是一个**确实撞了帽**的沙箱可能留下"从未死过"的记录。这不破 §4.3——`Unknown`
-> 的结构性自我纠正正是为这种情形准备的,下一次 resume 后的再次终止会被看见——但它是一处**已登记的窗口**,
-> 不是被忽略的疏漏。
+> 的结构性自我纠正正为此(§4.3),但它是一处**已登记的窗口**,不是被忽略的疏漏。
 
-**`Unknown` 是合法结论,不是失败。** 读不到死因时按 `dead-recoverable` 处置(去 resume)。**自我纠正是
-结构性的,不靠计数器**:若确是撞帽,下一次 resume 后同一负载会再次触发终止,而这一次发生在控制面眼前、
-placement 完整,于是被观测、随降级 CAS 落库,**此后 resume 由那条已落库的事实拒绝**。
-
-**为什么这里不能照搬 D4b 的形状(一条曾经写错的类比,现予纠正)。** D4b 界的是**引擎自己**的动作(等待)
-——故它的状态理所当然是 reaper 循环内的、按 epoch 键的、且**它不拒绝任何东西**。D4c 这里的"重试"是
-**调用方**的动作:引擎从不自己 resume 一个 dead-recoverable 沙箱(§4.1 的自动转换只有 auto-pause 与
-evict,引擎自主的 `paused → running` 只有 D4b 那一条升级)。**没有引擎侧的循环可界**,收敛的杠杆是
-死因落库 + `Resume` 的事实拒绝——这两件事 D4c 本来就为别的理由要求了。
+**`Unknown` 的处置与结构性自我纠正已毕业进 spec §4.3,本文不复述。** 本节只留它成立所依赖的两条实测
+事实(上)、读点唯一性(`Adopt` 的 `!alive` 分支),以及下面这条证伪——它解释了为什么"落库式重试计数"
+这条看似自然的备选根本不成立。
 
 **落库式重试计数没有可推导的重置点(这是它真正的死因)。** 每一次**完成**的 `Resume` 都是成功的
 (`resumeLocked` 只在 ⑦ 就绪门之后翻 `running`),死亡是**之后**异步到来的。故"尝试次数"只能在
@@ -216,21 +205,15 @@ per-sandbox 单调计数,**就是换了名字的世代计数**(§1.1 明令禁�
 销毁)。而按次数拒绝不依赖关于沙箱的任何事实,它说的是"你已经试够多次了"——一个关于**调用方执着程度**
 的判断,属产品层语义,且严格劣于把决定交还调用方(调用方可能刚修好负载,引擎无从知道)。
 
-残留(诚实说):结构性自我纠正只对**有帽且可复现**的耗尽成立。无帽沙箱本就不可能被自己的帽终止,其
-`Unknown` 不是误读;有帽沙箱若每次死亡时 placement 已被拆除,死因可反复读作 `Unknown`,收敛到
-`resource-terminated` 无保证。真正会烧宿主的那条路径(无可杀 victim → 内核无限重试 OOM、写满宿主盘)
-**已由 §2.4 的 `oom.group=1` 整组确定性终止根除**——那才是一直在保护宿主的东西,不是这条曾被写成
-"重试上界"的机制。
-
 ---
 
 ## D5. 边界与仍待
 
 - **对象回收 refcount/GC sweep(§4.3 uniform-object invariant)不在本文。** 那是 Template lineage /
-  Volume 挂载行的引用-回收原子性(§4.3 + §4.4-C),另属对象回收 sweep。reaper 的 `evict` 走**现有 `Destroy`
-  同步删 Overlay** 的老路,**不按 refcount 异步删字节**——reaper 在此只推**生命周期态**。二者的接缝(evict 标
-  destroyed 与异步删字节解耦)spec §4.4 已定,reaper 只用其同步半边。
+  Volume 挂载行的引用-回收原子性(§4.3 + §4.4-C),另属对象回收 sweep。reaper 的 `evict` 走 `Destroy` 的
+  **同步删 Overlay**,**不按 refcount 异步删字节**——reaper 在此只推**生命周期态**;失败后的字节由同一 tick
+  的孤儿单元 sweep 兜。二者的接缝(evict 标 destroyed 与异步删字节解耦)spec §4.4 已定。
 - **TTL 取值**(default `idle_timeout` / `retention`)是纯数值旋钮,同 transport 的 ring/window(open-decisions
-  §5.E 行):取保守默认、在配置点标注、留可调,不影响任何 invariant 形状。
+  §2 的 §5.E 行):取保守默认、在配置点标注、留可调,不影响任何 invariant 形状。
 - **egress 面资源枚举**并入周期对账,随 §5.D 数据面落地;本文预留位。
 - **CPU-bound 活动**若将来证明需计入,healthServer 加一份 `/proc` jiffies 采样(D1 末),additive。

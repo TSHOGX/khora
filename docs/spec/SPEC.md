@@ -53,9 +53,8 @@ agent),共享同一 FS 与网络。
 > **Runtime**(§5.A,执行基底)· **Rootfs**(§5.B,rootfs/Overlay)· **Volume**(§5.C)·
 > **Network**(§5.D)· **Transport**(§5.E)。三处 `fs`/`FS`/`Rootfs` 刻意区分,勿混:
 > **Rootfs** = 子系统 5.B;**`fs`** = §5.E Transport 的一个 wire 服务(`read/write/list/stat/mkdir/remove/move`);
-> **rootfs provider**(§5.B)与 **volume backend**(§5.C)= 两个**不同**的存储物化 seam,各属其子系统、
-> 各自形状、各自注册,只共享底层存储 substrate 原语(btrfs subvolume/qgroup/reflink),不是同一个接口。
-> 同理 **Runtime**(子系统 5.A)vs **Sandbox**(§3.2 顶层持久单元)分指 "用什么跑" vs "哪一个沙箱"。
+> **rootfs provider** / **volume backend** = 上面那两个不同形状的存储物化 seam。同理 **Runtime**(子系统 5.A)
+> vs **Sandbox**(§3.2 顶层持久单元)分指 "用什么跑" vs "哪一个沙箱"。
 
 **引擎词汇边界(engine vocabulary boundary)。** 第一性原则(见 engine 根 CLAUDE.md)要求产品语义不进
 引擎;命名阶段就拦住,比实现期再移除更省。下表限定**引擎内实体命名**(类型 / 包 / 字段 / API 端点),
@@ -72,20 +71,15 @@ agent),共享同一 FS 与网络。
 > **前提:部署在能运行 gVisor 的 Linux 宿主上**(能安装 seccomp 过滤器、能处理信号、内核版本
 > 够新)。这是 systrap 的固有门槛,凡能跑 gVisor 的平台即满足,engine 当作既定前提,不再赘述。
 
-> **两条底线:no-hypervisor + 可移植性。** 任何"用可移植性换性能"的决定一律**拒绝,或藏到
-> provider 后面做成可插拔**(§5.A)。platform 即"可插拔"的一例:唯一实现 `local_runsc` 把它 pin 成
-> `--platform=systrap`、不吃 runsc 默认(默认跨版本会漂移,§5.A),别的 provider 可另选。注意这是两条
-> 独立的约束:no-hypervisor 管"不要 KVM/嵌套
-> 虚拟化";**不存内存(§4.2)则是可移植性约束的结果**——内存 checkpoint 会把状态锁死在特定
-> CPU-feature 上(§2.5),持久态便不再能跨 host/CPU 自由搬(§1.5#3)。所以 resume 是冷启秒级而非
-> 亚秒。(gVisor 本身在 systrap 下能做 checkpoint、并不需要 hypervisor;我们不做它,是为可移植性,
-> 不是因为 no-hypervisor。)
+> **两条底线:no-hypervisor + 可移植性,彼此独立。** 任何"用可移植性换性能"的决定一律**拒绝,或藏到
+> provider 后面做成可插拔**(§5.A)——platform 即一例:`local_runsc` 把它 pin 成 `--platform=systrap`、
+> 不吃 runsc 默认(默认跨版本会漂移),别的 provider 可另选。no-hypervisor 管"不要 KVM/嵌套虚拟化";
+> **不存内存(§4.2)是可移植性的结果**,不是 no-hypervisor 的结果——gVisor 在 systrap 下本可 checkpoint,
+> 我们不做,因为内存态锁 CPU-feature(§2.5),持久态便不能跨 host/CPU 搬(§1.5#3)。故 resume 是冷启秒级。
 
-这条 no-hypervisor 延伸出一个关键设计选择:**"在哪儿、用什么跑一个隔离的进程上下文" 被抽象成
-可插拔的 runtime provider**(§5.A)。**今天唯一实现、也是 engine 唯一要兑现的,是 single-node 的
-宿主 runsc 进程**;provider 接口存在的意义是**保持这个抽象边界干净**,而非现在就去支持别的后端
-(K8s Pod / GKE Sandbox 这类"被调度的远端隔离单元"仅作校准接口边界的纸面参照,不进落地路径,
-见 §5.A)。
+"在哪儿、用什么跑一个隔离的进程上下文"因此被抽象成可插拔的 runtime provider(§5.A)。这个接口存在的
+意义是**保持抽象边界干净**,而非支持别的后端:唯一实现是 single-node 的宿主 runsc 进程,"被调度的远端
+隔离单元"(K8s Pod / GKE Sandbox)仅作校准接口边界的纸面参照,不进落地路径(§5.A)。
 
 ### 1.2 聚焦(in scope)
 
@@ -203,10 +197,8 @@ no-hypervisor、可自托管、状态透明**的引擎。五条立足点:
 | ④ | **凭证留宿主侧** | provider / model 凭证从不进 guest,guest 只见代理别名 | 凭证经引擎数据面在出站时注入,provider 不进 resolve 路径(§5.D) | control-plane(provider 不进 resolve 路径) |
 | ⑤ | **受控的挂载面** | 挂进 guest 的东西经控制面裁决,guest 不能自己扩大挂载面 | 挂载表为 Binding,resume 按表重挂(§5.C) | control-plane(物化归 placement) |
 
-**这张表就是"provider 安全义务"的全部来源**:任何 provider 必须维持 ①②(见 §2.4);③④ 的**策略强制
-与凭证注入由引擎自有的 egress 数据面承担**(§5.D),provider 只负责**把 egress 引流进该数据面**(下方
-callout 精确到"不进 resolve 路径");⑤ 的策略在控制面、物化落 placement。换 provider 只可能触及 ①② 与 ③⑤ 的物化层
-(对 ③ 即引流),**绝不触及 ④、③⑤ 的策略层、以及 ③④ 的数据面 enforcement**。
+**这张表就是"provider 安全义务"的全部来源**(收口成一句可验收的义务见 §2.4):换 provider 只可能触及
+①② 与 ③⑤ 的物化层(对 ③ 即引流),**绝不触及 ④、③⑤ 的策略层、以及 ③④ 的数据面 enforcement**。
 
 > **③ 的 enforcement 不是一整块落 placement**(见 [`deep-dives/network.md`](./deep-dives/network.md)):
 > 策略强制 + 凭证注入归**引擎数据面**(§5.D 的行为 seam,provider 无关)、只有**引流**随 provider 变。
@@ -221,8 +213,8 @@ guest 内部卫生,不是宿主隔离支柱**——五条支柱无一以"guest �
 需要的(`apt` 要 root)。
 
 由此:**默认就是 guest root**,不引入非 root 默认身份、也不预置切用户机制。既然它在隔离轴上一文不值,
-root 默认就是 §1.1「可拿 root 的 agent 沙箱」最直接的表达,装依赖的权限也天然满足(§5.A guest-runtime
-D3.1)。**引擎不建模 guest 用户**:「以某用户运行」是 guest
+root 默认就是 §1.1「可拿 root 的 agent 沙箱」最直接的表达,装依赖的权限也天然满足(§5.A;
+[`deep-dives/guest-runtime.md`](./deep-dives/guest-runtime.md) D3.1)。**引擎不建模 guest 用户**:「以某用户运行」是 guest
 原生的事(`su`/`sudo`,产品/模板层自理),不是引擎原语(§3.2.1);引擎既无 create 期"默认身份"字段,
 也无 per-`Start` run-as 参数。放开 root 的代价落在 **guest 内数据面**(§2.3),这是接受的产品取舍。
 将来若真有消费者要引擎级 run-as,再按 §1.3 additive 加回,不预留。
@@ -314,16 +306,5 @@ exhaustive)是一条可验收义务**:不写死它,guest 一条直连就绕过�
 | 挂载在**启动时**从 OCI spec 取,运行中不可热改 | 挂载拓扑变更 = resume 边界操作(§5.C) |
 | runsc `--overlay2` 全族(`memory`/`self`/`dir=`)**均不跨容器生命周期持久**——`dir=` 启动即 `unlink` filestore,干净停 = 数据蒸发 | 持久层**不用 runsc 自管 overlay**;改由 engine 在 runsc 外用宿主内核 overlayfs 组装,runsc 收 `--overlay2=none --file-access=shared`(§5.B) |
 
-> **持久层载体**由此定:不用 runsc 自管 overlay,改由 engine 在 runsc 外用宿主内核 overlayfs 组装。
 > 载体的完整物化、CoW/一致性证据与替代路径归 §5.B(展开见
 > [`deep-dives/rootfs-overlay.md`](./deep-dives/rootfs-overlay.md)),此处只锚定它所依赖的 runsc 事实。
-
-
----
-
-## 待细化与开放决策
-
-本 spec 只描述**已收敛的当前架构**。所有**尚未拍板的选型、待细化的内部机制、落地前要验证的假设**
-(如 provider 接口精确签名、Overlay 持久单元细化、wire 协议等)
-统一登记在 **[`open-decisions.md`](./open-decisions.md)**,不在各 spec 文件展开——保证 spec 里出现的都是
-"已定",未定项集中一处可查、拍板后再回填对应章节。

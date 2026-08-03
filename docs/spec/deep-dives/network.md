@@ -15,7 +15,7 @@
 那个"查策略 + 注凭证 + 按需 MITM"的 **egress 数据面(下称 gateway),不是 runtime provider 物化出来的
 东西,也不是引擎里写死的一段固定代码**。它内部还叠着**两根正交的可换轴**,必须现在就分开:
 
-| 轴 | 是什么 | provider 相关? | 今天唯一实现 | 未来加法 = |
+| 轴 | 是什么 | provider 相关? | 首个实现 | 未来加法 = |
 | --- | --- | --- | --- | --- |
 | **行为**(gateway *做什么*) | classify→decide→inject→按需 MITM | **无关** | `builtin`(自研基础版) | 换一个数据面实现(Envoy / 商用网关…) |
 | **落位与引流**(gateway *跑在哪、流量怎么进来*) | 宿主进程+TPROXY / sidecar / per-node daemon | **特异** | 宿主进程 + netns/nft/TPROXY | 换一个 runtime provider(K8s…) |
@@ -25,15 +25,15 @@
 连同**策略权威**(§5.D)与**凭证 at-rest 后端**(§5.D secret-store seam),一共**四块各自独立、各自只做
 一个基础实现**:
 
-| 块 | 归属 | 今天唯一实现 | 加法轴(§1.3) |
+| 块 | 归属 | 首个实现 | 加法轴(§1.3) |
 | --- | --- | --- | --- |
 | 策略权威(allow-deny / publish / 凭证路由) | §5.D | 控制面记录 | add a join table(Data) |
 | **egress 数据面(行为)** | §5.D 的 behavior seam | `builtin` | register an implementation |
 | **落位与引流** | §5.A runtime provider 的网络义务 | 宿主进程 + netns/TPROXY | register an implementation |
-| 凭证 at-rest 后端 | §5.D secret-store seam | 本地 AES-GCM 信封 | register an implementation |
+| 凭证 at-rest 后端 | §5.D secret-store seam | 宿主侧独立后端(选型未定,见 open-decisions) | register an implementation |
 
 四块只经**两条传输无关的薄契约**相遇(D3):**resolve**(数据面↔凭证 resolver)与 **ingress**(数据面↔
-引流)。两条今天都在进程内物化,但**接口形状留成"将来走网络零改动"**。
+引流)。两条在 single-node 下都是进程内调用,但**接口形状留成"走网络零改动"**。
 
 这套设计**不发明任何新 seam 类型**:Envoy = 注册数据面实现;K8s = 注册 runtime provider;Vault =
 注册 secret-store;新上游凭证 = 加策略行(全部 additive,落回 §1.3 三种加法之一,见 D8 litmus)。它把
@@ -57,24 +57,18 @@
 单机"就只是第 1 件(引流)的一种取值,不牵动另两件**——同一台 local_runsc 上就能把 builtin 换成 Envoy
 (只动第 2 件),换 provider 也不动数据面逻辑(只动第 1 件)。本文其余部分把这三件的接缝锁定。
 
-> **一个反面教训(为什么现在就分)。** 分布式 egress 实现常把这三件焊进一个 per-node daemon——那是
-> **分布式部署的产物**,不是这三件本该在一起。随之而来的一整套形态(节点级 daemon / annotation 下发 /
-> informer / applied-hash 握手 / resolve-over-HTTP / 数据库 NOTIFY / operator)**全是分布式传输
-> plumbing**,单机不需要,换成本地 channel / 进程内事件即可。真正的机制内核只有四样:TPROXY 引流、
-> classify→decide→转发核、凭证 alias/projection/cache/watermark 失效、guest CA 注入。
+> **为什么现在就分。** 把这三件焊进一个 per-node daemon 是**分布式部署的产物**,不是它们本该在一起:
+> 随之而来的一整套形态(节点级 daemon / annotation 下发 / informer / applied-hash 握手 /
+> resolve-over-HTTP / NOTIFY / operator)**全是分布式传输 plumbing**,单机换成本地 channel / 进程内事件即可。
+> 真正的机制内核只有四样:TPROXY 引流、classify→decide→转发核、凭证 alias/projection/cache/watermark 失效、
+> guest CA 注入。
 
 ---
 
 ## D2. 两根正交轴:为什么必须现在就分开
 
-D1 第 2 件(数据面)与第 1 件(引流)是两根**正交**的轴,不能合成"gateway 归 provider"一件:
-
-- **行为轴**:gateway *做什么*。allow-deny 强制、凭证注入、MITM 深度。换实现(builtin→Envoy→商用
-  egress 网关)沿此轴,**与 provider 无关**——换了也不动 netns/引流。
-- **落位轴**:gateway *跑在哪、流量怎么被引导进来*。宿主进程+TPROXY(single-node)/ pod sidecar /
-  per-node daemon(K8s)。换实现沿此轴,**随 runtime provider**——换了不动 gateway 的策略/注入逻辑。
-
-两轴正交的证据:**{builtin, Envoy} × {宿主进程, K8s sidecar} 每一格都是可独立注册的配置**——换行为不动
+D1 第 2 件(数据面行为)与第 1 件(落位与引流)是 D0 表列的两根**正交**轴,不能合成"gateway 归 provider"
+一件。两轴正交的证据:**{builtin, Envoy} × {宿主进程, K8s sidecar} 每一格都是可独立注册的配置**——换行为不动
 引流、换引流不动行为。一旦把 gateway 塞进 runtime provider 接口当"物化的一部分",两根轴被焊成一根,
 四格退化成对角线两格(只剩"单机+builtin""K8s+Envoy"),这正是把 gateway 焊进 provider 的病。
 
@@ -84,19 +78,18 @@ D1 第 2 件(数据面)与第 1 件(引流)是两根**正交**的轴,不能合�
 
 **为什么不能拖到有第二个实现再拆**(§1.3 成本判据自查):
 
-- 即便今天只有 local_runsc + builtin gateway,**数据面此刻就握 MITM CA 私钥、此刻就要够到 secret-store
-  去 resolve model key**。§5.A provider 接口签名**正在 open-decisions 里待定**——若此刻把 gateway 当
-  provider 物化的一部分,凭证 resolve 会顺势泄漏进 provider 契约,§2.4"支柱④ 与 provider 无关"当场
-  破产。这是**present 的接口设计正确性**,不是为假想未来预留。
-- 落在判据"该建"侧:seam / invariant 是你为当前实现本就该做的好设计,顺便成为未来落点。**接口边界的
-  形状**要现在建;具体的多实现注册机制可以缓(D6)。
+- **数据面本身就握 MITM CA 私钥、就要够到 secret-store 去 resolve model key**。若把 gateway 当作
+  provider 物化的一部分,凭证 resolve 会顺势泄漏进 §5.A provider 契约,§2.4"支柱④ 与 provider 无关"
+  当场破产。这是**接口设计的正确性问题**,不是为假想未来预留。
+- 落在判据"该建"侧:seam / invariant 是为 single-node 实现本就该做的好设计,顺便成为未来落点。
+  **接口边界的形状**承重,具体的多实现注册机制不承重(D6)。
 
 ---
 
 ## D3. 两条薄契约:四块只在这两处相遇
 
-四块解耦的关键不是"各写各的",而是**它们之间只暴露两条窄接口**,且两条都**传输无关**——今天进程内
-调用,接口形状留成"将来数据面被摆成远端 sidecar、走网络调用零改动"。这与
+四块解耦的关键不是"各写各的",而是**它们之间只暴露两条窄接口**,且两条都**传输无关**——single-node 下是
+进程内调用,接口形状留成"数据面被摆成远端 sidecar、走网络调用零改动"。这与
 [`transport.md`](./transport.md) D3"明确将来加它不回头改 engine 的接缝"是同一种纪律。
 
 ### D3.1 resolve 契约(数据面 ↔ 凭证 resolver)
@@ -169,7 +162,7 @@ resume(mediator 编排):
 
 ---
 
-## D5. 要守的 invariant(回写 spec §2.3 / §2.4 / §5.D)
+## D5. 要守的 invariant(规范陈述在 §2.3 / §2.4 / §5.D)
 
 ### D5.1 引流不可绕过(steering 必须 exhaustive)
 
@@ -184,12 +177,8 @@ gateway + 显式端点)。兜底强制的分层 deny-set(挡 metadata/内网/SSR
 > **逃逸即失败**,不是降级。
 
 与支柱④"provider 无关"分工清晰:**provider 保证流量不漏**(把每条 egress 强制导入关卡)、**凭证注入发生在
-引擎数据面内**——前者是引流义务,后者是数据面行为,分属两轴。
-
-### D5.2 数据面是唯一碰凭证的地方,provider 不进 resolve 路径
-
-凭证注入的执行方是 §5.D 的数据面(引擎自有行为 seam),**不是 provider**(精确边界见 D4)。于是支柱④
-真正 provider-无关:换 provider 只换引流,resolve 路径分毫不动。
+引擎数据面内**——前者是引流义务,后者是数据面行为,分属两轴;于是换 provider 只换引流,resolve 路径分毫
+不动(精确边界见 D4)。
 
 ### D5.3 分层 deny-set:IP 是承重墙,域名是便利层
 
@@ -201,21 +190,16 @@ TLS,gateway 看不到真实名字;即便上 MITM,guest 也能直连 **IP 字面�
 **dial 时钉 IP 一次、禁止连接期再解析**,一举覆盖三种域名层拦不住的逃逸:① 重绑定 TOCTOU(鉴权时
 解析到公网、dial 时重解析到内网)· ② IP 直连(guest 根本不做 DNS)· ③ Host/SNI 与目的 IP 背离。
 
-**IP 层三档姿态(强制力递减),外加一层域名便利层:**
+**三档姿态的清单(L0 地板 / 内网私有段 deny-safe / 公网默认放行)已毕业进 §2.4,本文不复制**;此处只留
+它们各自的判据与那一层不属 IP 的便利层:
 
-- **L0 · 不可覆盖地板(code 强制,任何 NetworkPolicy 抬不动)**:link-local(`169.254.0.0/16` +
-  IPv6 `fe80::/10`)· loopback · orchestrator 自身控制面/admin 端点 · **sibling 沙箱地址**(D5.5)。
-  **成员判据**:进 L0 当且仅当 (a) 到达它**击穿某条引擎 invariant**(宿主隔离 / 控制面权威 / 跨沙箱
-  隔离)且 (b) 引擎**不靠部署配置就能命名它**(IETF 保留段 / 自引用 / placement 自知)。由此**云 metadata
-  不单列**:AWS/GCP/Azure 的 metadata 都在 `169.254.169.254`(link-local)、被 L0 天然覆盖;
-  `metadata.google.internal` 这类主机名也不进地板——它解析出的 IP 落 link-local,dial 时照样拦。**引擎
-  因此不认识任何云厂商**,守 §1.1「不假设部署环境」。
-- **内网私有段(RFC1918)· 默认 deny-safe**:不进地板,**默认拒、但 NetworkPolicy 可显式放行某具体内网
-  端点**——自托管私有 registry / 内网服务是合法用途。deny-safe 是**配置默认、不是 code**:业务可整体改
-  姿态,与 L0 的 code 强制截然不同,兑现"引擎不独裁、不侵入业务网络,出厂安全但决定权在业务"。
-- **公网 · 随 §5.D「默认放行」**:不匹配 L0、也非内网私有段的目的地默认放行、经数据面 allow-deny 求值。
-  这是引擎「自由的网络使能者」(§1.2)的落点——**「默认放行」只对公网成立**,不含 L0(恒 deny)、也不含
-  内网私有段(出厂拒、业务可开)。spec §5.D 的「默认放行」即指这一档,不含 L0/内网私有段。
+- **L0 · 不可覆盖地板**的**成员判据**:进 L0 当且仅当 (a) 到达它**击穿某条引擎 invariant**(宿主隔离 /
+  控制面权威 / 跨沙箱隔离)且 (b) 引擎**不靠部署配置就能命名它**(IETF 保留段 / 自引用 / placement 自知)。
+  由此**云 metadata 不单列**:AWS/GCP/Azure 的 metadata 都在 `169.254.169.254`(link-local)、被 L0 天然
+  覆盖;`metadata.google.internal` 这类主机名也不进地板——它解析出的 IP 落 link-local,dial 时照样拦。
+  **引擎因此不认识任何云厂商**,守 §1.1「不假设部署环境」。
+- **内网私有段的 deny-safe 是配置默认、不是 code**:业务可整体改姿态,与 L0 的 code 强制截然不同,
+  兑现"引擎不独裁、不侵入业务网络,出厂安全但决定权在业务"。
 - **L2 域名 allow-list · 便利 + 审计层(best-effort)**:叠在 IP 层之上给人可读的放行/审计,DoH/IP 直连
   可绕,**不承担安全边界**。
 
@@ -269,20 +253,12 @@ resolve 失败的默认行为是**顶层安全基调,不是 resolve 契约的 sc
 
 ---
 
-## D6. buy-vs-defer:接口形状现在建,registry plumbing 缓
+## D6. 接口形状 vs registry plumbing:哪一半现在就该存在
 
-对 §1.3 判据最诚实的一刀——**"四块独立可换"不等于"今天就搭四个 open registry"**,后者会踩 reservation:
-
-| 项 | 现在做 | 缓做 | 理由 |
-| --- | --- | --- | --- |
-| **resolve / ingress 两条契约** | ✅ 接口形状 | — | present-need:数据面今天就握 CA 私钥、就要 resolve model key;内嵌 secret-store 直读或假设"我是本地子进程",K8s/Envoy 一来就动引擎 |
-| **数据面 behavior** | ✅ 写成接口清晰、不依赖宿主原语、不假设"我是子进程"的独立模块(好卫生、可单测) | ❌ 多实现注册机制 | 第二个实现(Envoy)成真前,registry plumbing 是 reservation。**接口形状 yes,机制 defer** |
-| **runtime provider 引流义务** | ✅ ingress 契约 + D5.1 不可绕过义务 | ❌ 第二个 provider | 同上,only `local_runsc` |
-| **secret-store 后端** | ✅ seam 已登记(open-decisions) | ❌ 第二个后端 | 同上 |
-
-即:今天代码里就一个 gateway 实现、一个 provider,**不需要真立 open registry**;要立的是**接口边界的
-形状**(两条契约 + 数据面模块不碰宿主原语/不假设本地),让将来加实现时零改引擎。这与 §1.3"微妙时序"
-一致——seam 形状现在建,具体的槽(registry plumbing)将来才建。
+对 §1.3 判据最诚实的一刀——**"四块独立可换"不等于"四个 open registry"**,后者会踩 reservation。要建的
+是**接口边界的形状**:两条契约(D3)+ 数据面模块不碰宿主原语、不假设"我是本地子进程";具体的槽
+(registry plumbing)随第二个实现出现才建。这正是 §1.3「微妙时序」:seam 形状现在建,槽将来建。四块
+各只有一个实现时,注册机制本身就是 reservation。
 
 ---
 
@@ -305,7 +281,7 @@ gateway seam 的接口有个边界抉择:**协议分类(classify)+ 策略求值(
 **两种模式策略权威都在 §5.D**:模式 1 靠内联同一份实现,模式 2 靠"编译等价 + 校验"。关键是**编译器是引擎
 的资产、不是各实现自研**——否则策略语义随实现偏移,破 §5.D 权威。接口取向随之定:gateway seam 不是"给你
 流量你全权处置",而是**要么"给你流量+我的裁决函数"(模式 1)、要么"给你我编译好的原生策略+校验门"(模式
-2)**。builtin 首版只需兑现模式 1;模式 2 的编译器接口是 seam 形状(留,D6),第二个实现成真前不搭。
+2)**。builtin 走模式 1;模式 2 的编译器接口是 seam 形状,随第二个实现出现才搭(D6)。
 
 ---
 
@@ -326,7 +302,7 @@ gateway seam 的接口有个边界抉择:**协议分类(classify)+ 策略求值(
 ## D9. 仍待细化的议程(登记 open-decisions)
 
 - **注入模式**:MITM(TLS terminate-reoriginate,每 SNI 现签叶子)/ 明文 alias 端点 / placeholder 替换 /
-  header 注入 / SSH re-origination——**别过早锁定 MITM 为唯一路径**。哪些模式进 builtin 首版、各自的约束
+  header 注入 / SSH re-origination——**别过早锁定 MITM 为唯一路径**。哪些模式进 builtin、各自的约束
   (如 body 替换要求已知 Content-Length、非压缩、≤1MiB)待定。
 - **guest 信任注入**(仅当"TLS-terminate 注入"模式被选中才需要):CA **证书**(非私钥)投进 guest、
   私钥留数据面、guest 导出 `SSL_CERT_FILE`/`NODE_EXTRA_CA_CERTS`/`REQUESTS_CA_BUNDLE`/`CURL_CA_BUNDLE`
@@ -340,7 +316,6 @@ gateway seam 的接口有个边界抉择:**协议分类(classify)+ 策略求值(
 - **D5.3–D5.6 的残留细粒度**(L0 地板精确清单 / 内网放行的 NetworkPolicy 语法 / fail-closed 是否发
   §4.1 审计事件)登记在 [`open-decisions.md`](../open-decisions.md),本表不复制。
 
-> 以上登记在 [`open-decisions.md`](../open-decisions.md)。本文 D0–D8 是已定结论,其规范陈述在 spec
-> §2.1/§2.4/§5.D;D5.3–D5.6 的 invariant 亦已一行式落进 §2.3/§2.4/§5.D。
-> 本文展开推理与要守的 invariant,不与 spec 重复正文。
+> 以上登记在 [`open-decisions.md`](../open-decisions.md)。D0–D8 的规范陈述在 §2.1/§2.3/§2.4/§5.D;
+> 本文只展开推理与要守的 invariant,不复制 spec 正文。
 
