@@ -97,8 +97,9 @@ pause/resume 与 multi-node provider(§5.A)同时成立的前提。
   data Volume 内容(各自后端)。resume 直接读回。
 - **Binding(按控制面记录重建)**:SoT 是沙箱自己的控制面记录——引用哪个 Template、挂了哪些
   Volume、**资源上限(CPU/RAM/disk)**、**生命周期 TTL(`idle_timeout`/`retention`,§4.3)**、placement、
-  网络策略。resume 时按**当前记录**重建,不读冻结字节。资源上限与 TTL 是 Binding 而非 placement:取值跨
-  resume 稳定保持,每次 placement 时把它物化(§5.A/§5.B/§5.C)。连接(process)**不是 Binding**:engine
+  网络策略。resume 时按**当前记录**重建,不读冻结字节。资源上限与 TTL 都是 Binding 而非 placement:取值跨
+  resume 稳定保持。**但物化点不同**:资源上限在每次 placement 时物化(§5.A/§5.B/§5.C);**TTL 没有任何
+  placement-local 物化**,它的消费者是 reaper,每轮 sweep 直接读记录。连接(process)**不是 Binding**:engine
   不存连接记录,resume 后由 client 重新发起(§5.E)。
 
 > **"资源上限"是三个维度,各用自己该用的机制物化,超限后果也就各自不同。** 三者都是 Binding、
@@ -112,6 +113,73 @@ pause/resume 与 multi-node provider(§5.A)同时成立的前提。
 >
 > **disk 容量与 disk I/O 是两条正交的轴**,别混:cgroup 管不了 at-rest 占多少字节,配额管不了读写
 > 速率。容量轴是 §2.3 爆炸半径对磁盘维度的 enforce 点。
+>
+> **三个维度就是全部,`pids` 被永久排除、不是缓做。** 实测:cgroup 的 `pids` 帽限的是**宿主 task**
+> (systrap 下每个 guest 进程约 2.3 个),设低了 sentry 直接 panic(`failed to get clone`)、整个沙箱消失
+> ——它是**可用性地雷而非资源帽**,与本节三个维度"超限后果各自明确"的性质根本不同(超 pids 帽的后果不是
+> 变慢、不是 `ENOSPC`、也不是可解释的终止,而是沙箱凭空不见)。故它不进 `ResourceLimits`、不进 §6.1,
+> 且这条是**结论不是待办**。
+
+> **节点级不超卖:两条独立预算,各自按"引擎承诺了什么"计量。** 每沙箱的帽只把"撑满整机"降级成
+> "撑满自己";帽的**总和**能否被兑现是另一件事,由 create / resume 前的**准入门**核算(§4)。两条预算
+> 互不通兑(内存与磁盘不可替换),**只有超限后果不优雅的轴才设预算**——磁盘容量(无辜沙箱吃 `ENOSPC`)
+> 与 RAM(沙箱被终止);CPU 超卖只是"guest 变慢,无错误",故无 CPU 预算。
+>
+> - `Σ(已声明的 disk 帽) + Σ(无帽覆盖的实测字节) ≤ 配置的磁盘预算`(推导见 rootfs-overlay D6.5)
+> - `Σ(已声明的 RAM 帽) ≤ 配置的 RAM 预算`
+>
+> **两项互斥,同一个物理字节只计一次。** 一项是**已声明的帽**(对未来增长的上界),一项是**无帽覆盖的
+> 已占字节**(唯一可得的真陈述):有帽的 Overlay upper 在实测项里**计 0**——把它的当前用量加上去等于
+> 在已有承诺之上再收一次,且那是预测而非已占。判据统一为**对每个对象取最强的可得陈述**。
+>
+> **两条预算都只计"引擎能命名的字节"。** layer 字节单列,是因为 **Template 是引擎的一等对象**
+> (§4.3 refcount / §5.B),它占的字节没有任何沙箱帽覆盖,引擎必须认账。而**基底自身的每沙箱开销
+> ——磁盘上的 runsc state、RAM 里的 sentry/gofer 足迹——在预算之外**:引擎不认识 sentry,RAM 的
+> "一个旋钮/两个值"摊分本就是 provider 内部细节(§5.A),把它算进核算式就是把 provider 的实现常数
+> 焊进 mediator 的账本。故预算的含义是**引擎可以向 guest 承诺的字节**,不是宿主的物理余量;operator
+> 把预算配在物理值之下,那道差额就是留给基底自身开销的。
+>
+> > **一条诚实的残留**:未计入的 RAM 开销与沙箱数成正比,其**占比随帽的大小反向放大**——1 GiB 帽下
+> > 约 6%,64 MiB 帽下可达 100%。故"按物理 RAM 的某个百分比配预算"这条指导**不对所有帽尺寸成立**。
+> > 若它将来真的咬人,收口手段是在引擎配置里给一个**最小 RAM 帽下限**(约束了比例上界,且不需要引擎
+> > 命名 overhead、不动 §5.A seam),不是把 overhead 变成契约成员。
+>
+> **一旦某轴被计量,该轴上的每个沙箱都必须有帽。** 无帽沙箱(取值 0 = 无上限)对核算式左侧贡献 0、
+> 却可占用右侧全部——它不是"少算一点",而是让整个不等式**不再描述那块盘**。故计量轴上的无帽 create /
+> resume 在准入处被**拒绝**(400,与"节点已满"507 是两件事),而**不是**按默认值静默补齐:拒绝可见,
+> 默认不可见——§2.3 之所以能说 `ENOSPC` 是"数据面内的**预期**结果",前提是那道边界被**显式声明**过。
+> `0 = 无上限` 仅在该轴**未被计量**时合法。**RAM 轴尤甚**:无帽意味着超限不再被约束在本沙箱内,且
+> 没有 memcg 可读、死因只能落 `Unknown`(§4.3)。CPU 不在核算内,`cpu_millis: 0` 恒合法。
+>
+> **抬高上限须重过准入门。** 准入门**从 store 求和**(含 `paused` 沙箱),所以任何对帽列的写入**当场**
+> 改变 Σ,不是等到 resume;抬帽因此必须在提交前重跑准入、**可能被拒**,降帽不需要。同理,任何**增加
+> 无帽字节**的控制面动作(如 Promote 固化新层)都应过同一道不等式。
+>
+> **`paused` 沙箱仍占两条预算**,尽管它物理上已释放 RAM/CPU(§4.2)。理由不是记账方便,而是 `paused`
+> 必须是**可逆的门**(§1.1):不计它,则新 create 会吃掉它 resume 所需的资源,resume 撞准入门留在
+> `paused`(§4.4-A),而 `UpdatedAt` 不前进 ⇒ `retention` 照走 ⇒ 沙箱被 evict、**Overlay 字节被销毁**
+> (§4.3)。准入门存在的理由正是"不让一个沙箱因**别的**沙箱的用量而失败";因别人的用量而被**销毁**
+> 比因它而写失败更严重。**代价明说**:一个大多数沙箱处于 `paused` 的节点会对着物理空闲的 RAM 拒绝
+> create,而 auto-pause(§4.3)正是引擎自己制造这个局面的那一手。这是"pause 保证可恢复"的价钱,接受。
+
+> **Binding 可写,写点唯一,生效点按消费者分两类。** Binding 的 SoT 是控制面记录,所以"改 Binding"
+> 就是改那条记录——§6.1 `PATCH /v1/sandboxes/{id}` 是 create 之外**唯一**的写点,与其他动词共用同一把
+> 转换锁 + 条件写提交(§4.4-B / §4.4-C)。生效点取决于**谁消费这个字段**:
+>
+> - **provider / FS provider 消费的(资源上限三轴)**:在**下一次 placement** 物化,即下一次 resume。
+>   故这类字段**只在 `paused` 可改**——对 `running` 沙箱接受一个要等未来某次 resume 才生效的编辑,会让
+>   记录与活着的隔离单元长期不一致,是"记录说一套、substrate 做一套"的假不变量。操作路径
+>   `pause → PATCH → resume`,与 §5.C 改挂载表、§5.D 改网络策略同一条路。
+> - **reaper 消费的(`idle_timeout` / `retention`)**:reaper 每轮 sweep 直接重读记录、**不经 placement**,
+>   故**立即生效**,`running` / `paused` 皆可改。
+>
+> **写入的三条附带纪律。** ① `PATCH` 只换整份绑定:未给的字段不动,且不存在"待定/未解析"值(§6.2)。
+> ② 它**不动 `UpdatedAt`**——`retention` 从那一列起算(§4.3),顺手刷新它等于把驱逐期限当作改帽的副作用
+> 悄悄延长。③ 它**不是 §4.1 转换**,故不发事件(与 Promote 同理);"改绑定要不要发一条非转换事件"随
+> event schema 那轮定(open-decisions §2)。
+>
+> **provider 不被要求就地改帽**:没有"把这个单元的帽设成 N,现在"这种调用——那是宿主原语形状的请求,
+> 被调度的远端隔离单元一般兑现不了(§5.A ❌ list)。改帽走的是"改记录 + 下次 placement 重物化"。
 >
 > **RAM 上限不是资源上限,它是安全限。** 它约束爆炸半径,不提供公平分配。超限的后果是一条
 > **生命周期事件(沙箱终止)**,不是一次操作失败——因为 substrate 上不存在"guest 内进程拿到
@@ -160,7 +228,9 @@ creating ──▶ running ──pause / auto-pause / crash──▶ paused ─�
   `paused` 都可发起,终态 `destroyed`(删 Overlay 工件)。
 - **自动转换**(reaper 守护):`running` 空闲超阈值 → `auto-pause`;`paused` 超保留期 →
   `evict`。**`evict` 就是 reaper 对 `paused` 沙箱触发的 `destroy`**——同一个 `→ destroyed`
-  终态,只是触发方是 reaper 而非用户。
+  终态,只是触发方是 reaper 而非用户。**两条自动转换都是"释放"方向**;引擎自主的
+  `paused → running` **只有一条**:transport-down 连续超重启预算后的升级(§4.3 / reaper-health D4b),
+  **dead-recoverable 不在其中**(它由显式动词恢复,§4.3)。
 - **非自愿转换**(对账驱动):启动/周期对账发现一个 `running` 沙箱的隔离单元已死时,CAS 把它降到
   `paused`(§4.2 崩溃变体 / §4.4-A)——`running → paused` 的第三条触发,与用户 `pause`、reaper
   `auto-pause` 并列,事件 Kind 为 `crash-paused`(见下条)。**死因随这次 CAS 同一提交落库**(§4.3):
@@ -244,7 +314,7 @@ resume 而非 auto-pause 的静止(健康态分类与判据见 §4.3)。
 | **idle** | L1 活 + L2 通,但**所有**连接都 idle(近期无任何 I/O) | 超阈值 → **auto-pause** 静止到一致点(§4.2;flush 由 substrate 保证,不依赖协作握手) |
 | **transport-down(瞬态)** | **L1 活、L2 不通**——transport 子进程崩了,PID1 正在原地重启(§5.E.1) | **等重启**;端口在**同一 IP** 上恢复,**不是** dead-recoverable、**不**走 resume;**连续 transport-down 超重启预算 → 升级为 dead-recoverable 走 resume**(防崩溃循环卡死,机制见 reaper-health D4b) |
 | **dead-recoverable** | **L1 探不到**(容器整死),持久态(Overlay 工件)在后端完好,**且死因不是撞资源帽** | 走 **resume**(§4.2),换新 IP 冷启,**不是** auto-pause |
-| **resource-terminated** | **L1 探不到,且死因是撞 RAM 帽**(§3.4 安全限:沙箱被整组终止) | **不 resume**、不 auto-pause——留 `paused` 等人工介入或改帽。resume 会让同一负载再次触发终止,即崩溃循环 |
+| **resource-terminated** | **L1 探不到,且死因是撞 RAM 帽**(§3.4 安全限:沙箱被整组终止) | **不 resume**、不 auto-pause——留 `paused`。resume 会让同一负载再次触发终止,即崩溃循环。**转机只有一条:改帽**——经 §6.1 `PATCH /v1/sandboxes/{id}` 抬高 `memory_byte`(须重过准入门,节点无容量则被拒),**该次提交同时清死因**,之后 resume 才放行。**它不豁免驱逐**(见下) |
 
 > **resource-terminated 与 dead-recoverable 并列,不是它的子类。** 两者 L1 都探不到、持久态都完好,
 > 表现完全相同;区分只能靠**死因信号**,而处置**相反**(一个必须 resume,一个必须不 resume)。死因跨
@@ -257,11 +327,25 @@ resume 而非 auto-pause 的静止(健康态分类与判据见 §4.3)。
 > 这条路不存在:降级提交之后证据已不可恢复。故 `crash-paused` 的 CAS 与死因写入是**一次原子提交**
 > (§4.4-C 同一形状)。
 >
-> **`Unknown` 是一等合法值,不是错误。** 读不到死因时按 `dead-recoverable` 处置(去 resume),**由有界
-> 重试兜底**:若确是撞帽,同一负载会再次触发终止,而这一次必然发生在控制面眼前(它刚做完 resume),
-> 于是被观测并落库——未知状态**自我纠正**,崩溃循环被界在多一次 resume 上,与"连续 transport-down 超
-> 重启预算 → 升级"同形。**一条诚实的残留**:自我纠正只对确定可复现的耗尽成立;偶发尖峰可能反复以
-> `Unknown` 死亡而不被观测到,重试上界仍挡住无限循环,但收敛到 `resource-terminated` 无保证。
+> **`Unknown` 是一等合法值,不是错误。** 读不到死因时按 `dead-recoverable` 处置(去 resume)。
+> **自我纠正是结构性的,不靠计数器**:若确是撞帽,下一次 resume 后同一负载会再次触发终止,而这一次
+> 发生在控制面眼前、placement 完整(有帽则死因信号在),于是被观测、随降级 CAS 落库,**此后 resume 由
+> 那条已落库的事实拒绝**——收敛确实发生在"多一次 resume"上,靠的是**死因落库 + 事实拒绝**这条本节
+> 已经要求的链路,**没有 resume 次数上界,也不需要有**。
+>
+> **为什么不需要:引擎从不自己 resume 一个 dead-recoverable 沙箱。** 引擎的处置义务到 `crash-paused` +
+> 死因落库 + 发事件为止(§4.1);`paused → running` 只有显式动词一条路(§4.1 的自动转换只有 auto-pause
+> 与 evict,外加 D4b 那一条 transport-down 升级)。于是"反复 resume 一个反复死掉的沙箱"不是引擎的循环,
+> 而是调用方逐次显式发起的选择;引擎无从、也不该按"你试了几次"去拒绝一个显式动词——这与
+> `resource-terminated` 的拒绝性质不同:后者拒的依据是**关于这个沙箱的一条已落库事实**,不是一个次数。
+> 想要"崩了自动拉起"的重启策略,是消费 `crash-paused` 事件再调 resume 的**引擎外 subscriber**
+> (§1.3 Consumption),不是引擎内的机制。
+>
+> **一条诚实的残留**:结构性自我纠正只对**有帽且可复现**的耗尽成立。无帽沙箱本就不可能被自己的帽终止,
+> 其 `Unknown` 不是误读;有帽沙箱若每次死亡时 placement 已被拆除(与 teardown 竞争、或跨宿主重启),
+> 死因可反复读作 `Unknown`,**收敛到 `resource-terminated` 无保证**。此时挡住无限循环的不是任何引擎侧
+> 上界,而是三件别的东西:每次重试都要调用方显式付一次动词、§2.4 的整组确定性终止已根除底层
+> "无可杀 victim → 无限重试"那条真正会烧宿主的路径、以及容量/RAM 帽本身。
 
 > **连接活动信号在 guest 侧量,不在 host 侧。** `sandboxd` 在输出/输入路径(`broadcast`/`writeInput`)打一个
 > **沙箱全局「上次 I/O」时戳**,`Health` 探针带回 idle 时长(一处三用,§5.E / transport D4.5)。**不在 host 侧
@@ -294,6 +378,15 @@ L2 探活成功翻成 `running`(时序见 [`deep-dives/guest-runtime.md`](./deep
 Binding**(§3.4):两个阈值——`idle_timeout`(`running` idle 超它 →
 auto-pause)与 `retention`(`paused` 超它 → evict)——是沙箱控制面记录的字段,create 时可给、缺省落引擎级
 默认(§1.1 单二进制配置)。取默认值为纯调参(见 [`deep-dives/reaper-health.md`](./deep-dives/reaper-health.md) D5)。
+> **「等人工介入」有期限,不是无限期挂起。** `resource-terminated` **不是**回收的例外:`retention` 的
+> 时钟从**死亡那一刻**(降级 CAS 落的 `UpdatedAt`)起算,超期照常 `evict`,连 Overlay 工件一并删。
+> 三条理由:① 回收判据只有 refcount 与 TTL(见下条),把**死因**——一个描述**过去**事件的诊断字段
+> ——加进驱逐谓词,是为一个既有旋钮已覆盖的场景加宽 reaper 契约;② 在不超卖的准入门(§3.4)下,豁免
+> 会造出一类"永久占着 Overlay 字节**与准入门额度**、却永远不会再跑"的沙箱,这比泄漏更糟——门把它当
+> 一份**活的承诺**;③ 需要无限期保留的场景不需要引擎加例外,`retention = 0`(无期限)这个既有旋钮就是
+> 它,而 `PATCH`(§3.4)让它**事后仍可设**。故处置是:留 `paused`,给人一个 `retention` 长的窗口去
+> 改帽 / Promote / destroy;窗口内无人介入即 evict。
+
 **auto-pause 的锁内活动重读(竞态兜底)**:活动度不是 lifecycle-state,§4.4-B 的 CAS 比对不到它,故 sweep 的
 「判 idle → 处置」窗口里沙箱刚变活跃时,auto-pause 的 CAS 仍会通过。为不误冻正在干活的沙箱,`auto-pause` 拿
 转换锁后除 CAS 外**再重读一次活动信号**(当前 `idle_millis`),仍超阈才冻结、否则放弃本轮。处置由此建立在锁内

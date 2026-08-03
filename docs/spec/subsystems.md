@@ -44,7 +44,8 @@
   N、宿主天花板设成 `N + overhead`(overhead 是**它的实现常数**,非契约成员——远端 provider 的开销
   构成完全不同:可能是 VM balloon、可能是调度层的 memory request)。**不这么切就是 spec bug**:两者
   都设 N 时 guest 被告知 N 却在低于 N 处被终止。终止的**确定性**(整组、非内核挑 victim)同属
-  provider 义务,见 §2.4。
+  provider 义务,见 §2.4。这也决定了它**不进节点容量核算**:overhead 是 provider 的实现常数,核算式
+  只计引擎能命名的字节(§3.4)。
 - **启动**:从 Template 冷启(秒级),可叠加现成 restore / 启动优化。容器 entrypoint 是
   `sandboxd`(init 模式当 PID 1,§5.E.1)——本子系统只负责"把它作为 PID 1 拉起",guest 内的
   init/reaper/re-exec 拓扑归 §5.E.1,不在此展开。
@@ -105,6 +106,15 @@
     目录(已钉)。
   - `--systemd-cgroup=false` —— 承上条 cgroupfs driver。
   精确 argv 属 provider 实现细节,不进本节;本节只固定"哪些键承重、各对哪条 §保证"。
+- **RAM 帽的两条实测硬约束**(物化时必守,否则帽形同虚设——都属"看起来配好了、实际不生效"那一类):
+  - **`memory.limit` 必须配 `swap`**:只设 limit 时 cgroup 会一路换页进 zram(实测 192 MiB 帽下分配掉
+    1 GiB、`oom` 计数 0),帽根本不成顶。OCI `swap` 与 limit 设成相等(⇒ v2 `memory.swap.max=0`)才是硬帽;
+    把宿主天花板抬到 `N + overhead` 之后**必须再把 swap 钉回 0**,否则那段 headroom 又变成 swap-backed。
+  - **`memory.high` 不能用**:`swap.max=0` 加不可回收 anon,会把"节流"变成挂起(实测 1282 次 throttle、
+    guest 停 >45 s)。只用硬 limit + `oom.group=1`。
+- **测 CPU 用量必须对 `cgroup.procs` 全体求和**:systrap 把 guest 线程跑成**独立的宿主 thread group**,
+  只采 sentry 的 `/proc/<pid>/stat` 会看到 ~0.01 CPU 的假象。这条约束的是**验收与运维观测的量法**,不是
+  enforcement 本身(节流由 `cpu.max` 兑现)。
 - **不含**:FS/rootfs 构成与固化(→ B)、Volume 挂载语义(→ C)、网络策略本身(→ D)、
   宿主↔guest I/O 通道(→ E)。
 
@@ -165,7 +175,15 @@
   只作节点容量核算的输入,是全局核算问题而非隔离问题。
 - **容量核算只信后端配额,永不信 guest 侧数字**:sentry 会**伪造 `st_blocks`**(guest 对稀疏文件报
   出按大小推算的块数,宿主真实值可为 0),故 provider 报出的字节必须来自后端配额/统计,不能来自
-  guest 内的 `stat`。这条同样适用于 §5.C。
+  guest 内的 `stat`。这条同样适用于 §5.C。**注意这条约束的是 guest 侧数字**——宿主侧的已分配块数
+  正是后端自己的分配陈述,是它指向的那个可信来源。
+- **provider 只报"无帽覆盖的字节"(节点核算的第二项,§3.4)**:seam 报出的是本子系统持有、且
+  **没有任何已声明容量帽覆盖**的字节总数——**有帽的单元不计**(mediator 已计其帽,重复计入等于对同一
+  份字节收两次费)。数字取自**后端**对这些字节的分配陈述(local = 已分配块数,**不是 apparent size**:
+  稀疏文件的 apparent size 会无界高估,在准入门里意味着**拒掉本可容纳的 create**),且**物理共享的
+  字节至多计一次**。契约用策略语言表述、不提 subvolume / qgroup / 目录遍历,故一个对象存储或网络 FS
+  provider 同样可以兑现它(各自问自己的后端)。这条对 §5.C 同构——per-volume 帽进第一项,其无帽字节
+  进第二项,**不新增第三项**。
 - **不含**:Volume 的生命周期与挂载策略(→ C)、Overlay 跑在哪个进程上下文(→ A)。
 
 ### 5.C Volume(解耦的独立存储)
@@ -287,7 +305,7 @@
   实时 `process.List`、不落控制面注册表。可重启性不由 engine 承担:裸 pty 字节流明说 lossy(shell 本无
   持久 SoT),任何"不丢"担保由上层自理。transport 进程内瞬时、非权威的输出环形缓冲(供 `Connect` 回放 +
   慢订阅者非阻塞丢弃)不在此约束内,机制见 [`deep-dives/transport.md`](./deep-dives/transport.md) D4.3。
-  同类瞬时信号:`Health` 探针带回的**沙箱全局「上次 I/O」时戳**(§4.3 idle 象限的连接活动信号),进程内、
+  同类瞬时信号:`Health` 探针带回的**沙箱全局「上次 I/O」时戳**(§4.3 idle 健康态的连接活动信号),进程内、
   随 transport 消亡、不跨 resume、不进控制面——量的是"此刻多久没 I/O",不是连接注册表。为何在 guest 侧量见
   [`deep-dives/reaper-health.md`](./deep-dives/reaper-health.md) D1。
 - **session 是 engine 外的纯加法**:agent 会话语义(turn / 历史 / 恢复,形态对齐 ACP——Zed 提出

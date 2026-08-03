@@ -36,9 +36,9 @@
 | **§5.D 凭证注入模式** | builtin 首版支持哪些注入模式,各自约束:MITM(TLS terminate-reoriginate,每 SNI 现签叶子)/ 明文 alias 端点 / placeholder 替换 / header 注入 / SSH re-origination | **别过早钉 MITM 为唯一路径**;MITM 选中才需 guest 信任注入(CA 证书进 guest、私钥留数据面),落 §5.B 模板 / §5.E.1。见 [`deep-dives/network.md`](./deep-dives/network.md) D9 |
 | **§2.4 / §5.D egress deny-set 分层** | 三条 invariant 已定并毕业进 spec(§2.3/§2.4;推理 [`deep-dives/network.md`](./deep-dives/network.md) D5.3–D5.6)。**残留细粒度**:① L0 地板精确清单(orchestrator 自身端点 / sibling 网段如何在 placement 时算出;link-local/loopback 已定)② 内网 deny-safe 放行的 NetworkPolicy 语法 ③ fail-closed 是否发 §4.1 压力/审计事件(倾向发) | 谁消费:§5.A steering 物化 + §5.D 数据面 dial 逻辑 + placement;L0 清单是引擎资产、两跳共用一份 |
 | **§5.A provider 接口(远端形态入参)** | 核心 `Provider` 签名(策略+句柄)已定且经 `local_runsc` 兑现(§5.A)。**待细化的仅剩远端形态的入参形状**:`RootfsSource`(本地 `MergedPath` vs 远端句柄)、`SteeringSpec`(egress 引流描述符,网络里程碑)、`ResourceLimits` 在非 cgroup 调度层的等价物——用"被调度的远端隔离单元"作纸面参照反推,**不实现任何远端 provider** | 谁消费:未来远端 provider;`local_runsc` 已是唯一实现 |
-| **§5.B Overlay 物化** | 载体与持久单元(留驻 upperdir)已定(§5.B);待细化:沙箱 upper/work 的 workdir 新建与孤儿回收、pause flush 一致点的**应用层协作安全点**(substrate 半已定)、**Promote excluded-paths 完整清单**(最小集——sandboxd portal/工作目录——已随 M5 shipped;Volume 挂载点占位待 Volume 里程碑)、content-addressed diff 层(演进项)、multi-node 经 rootfs provider 跨 node 寻址(PV/对象存储) | **详见 [`deep-dives/rootfs-overlay.md`](./deep-dives/rootfs-overlay.md) D5**,本表不复制 |
-| **§5.C per-volume 容量帽在 remote 后端的物化** | 单机 local 臂已定并归 M6 落地(subvolume + squota,§5.B Overlay upper 是首个消费者)。**待细化的只剩 remote 后端**:一个对象存储 / 网络 FS backend 用什么手段兑现"这个卷最多多大"(后端配额 API / 客户端侧核算),以及它与 `Capabilities()` 的关系 | 封在该 backend 内(volume.md D1/D7),不进核心;谁消费:未来 remote volume backend |
-| **§2.3 / §4 容量压力事件(软阈那一半)** | 硬阈行为已定并归 M6:guest 见普通 `ENOSPC`、沙箱存活、**只做硬阈拒写**(rootfs-overlay D6.5)。**待细化的只剩软阈**:是否发一条**容量压力事件**作告警(Consumption seam,add a subscriber)、阈值取值 | 刻意**随事件流「可重放窗口」那轮统一收口**——现在单开一个 event kind,到时要改两遍;谁消费:§4.1 事件流 |
+| **§5.B Overlay 物化** | 载体与持久单元(留驻 upperdir)已定(§5.B);upper/work 的 workdir 新建与孤儿回收**已随资源治理里程碑 shipped**(upper+work 同处一个 subvolume,孤儿 subvolume 由对账回收)。待细化:pause flush 一致点的**应用层协作安全点**(substrate 半已定)、**Promote excluded-paths 完整清单**(最小集——sandboxd portal/工作目录——已随 M5 shipped;Volume 挂载点占位待 Volume 里程碑)、content-addressed diff 层(演进项)、multi-node 经 rootfs provider 跨 node 寻址(PV/对象存储) | **详见 [`deep-dives/rootfs-overlay.md`](./deep-dives/rootfs-overlay.md) D5**,本表不复制 |
+| **§5.C per-volume 容量帽在 remote 后端的物化** | 单机 local 臂**已随资源治理里程碑 shipped**(subvolume + squota,§5.B Overlay upper 是首个消费者)。**待细化的只剩 remote 后端**:一个对象存储 / 网络 FS backend 用什么手段兑现"这个卷最多多大"(后端配额 API / 客户端侧核算),以及它与 `Capabilities()` 的关系 | 封在该 backend 内(volume.md D1/D7),不进核心;谁消费:未来 remote volume backend |
+| **§2.3 / §4 容量压力事件(软阈那一半)** | 硬阈行为**已 shipped**:guest 见普通 `ENOSPC`、沙箱存活、**只做硬阈拒写**(rootfs-overlay D6.5)。**待细化的只剩软阈**:是否发一条**容量压力事件**作告警(Consumption seam,add a subscriber)、阈值取值 | 刻意**随事件流「可重放窗口」那轮统一收口**——现在单开一个 event kind,到时要改两遍;谁消费:§4.1 事件流 |
 | **§5.E transport(残留调参)** | wire 机制(内沿 Connect,D4)与外沿投影(D6)、溢出处置(断开订阅者,D4.3 invariant 1)均已定进 spec/deep-dive。此处仅留**可调数值旋钮**,当前值可随经验再调:① 输出环形缓冲字节上界 = **64 KiB**(重绘保真 vs 内存)② 慢订阅者发送窗口 = **256 帧** ③ `keepalive` 周期 = **20s** | 纯数值,不影响 D4/D6 形状;谁消费:§5.E transport 实现 |
 | **§5.A / 模板(内容目录)** | **内置 Template 的内容清单**:一个 bare base(uv/pip/git/build-essential;可选 sudo,仅作 guest 内便利、非引擎语义),各 agent 栈(claude-code/opencode/pi)叠在 bare base 之上。**这是产品/模板层的内容选型**,仍开放;其一等行化 + boot seed + 叠层机制(multi-lowerdir)**已随 M5 shipped**(§4.3/§5.B) | guest 默认 root(§2.2),装包是一次性 exec、不引入 init 依赖,见 [`deep-dives/guest-runtime.md`](./deep-dives/guest-runtime.md) D3.1 |
 | **§6 部署形态** | 高层形态已定(§1.1:单二进制 + 配置 + 本地 store,store 后端见 ADR-0004);仅待细化打包 / 配置 schema | 对齐 §1.1 部署目标 |
@@ -50,7 +50,15 @@
 | 选型 | 候选 | 当前倾向 | 归属 / 谁消费 |
 | --- | --- | --- | --- |
 | **checkpoint/restore 恢复 seam** | 进程态 checkpoint 恢复 / agent 原生 `--resume` 重放 | 两条都留,session 层按能力选。**注意与「无缝内存 resume」(§1.4 永久排除)不是一回事**:这里是**单进程级**冻结/恢复,不是全 VM 内存镜像(后者锁 CPU-feature、被 §4.2 否决) | [`deep-dives/transport.md`](./deep-dives/transport.md) D3 seam / D5 |
-| **disk I/O 速率帽有没有对外旋钮(§3.4 速率轴的另一半)** | ① **只做 CPU**:`ResourceLimits` 只出 `CPUMillis`,io 轴推迟到有真实消费者时再 additive 加(接口加一个字段 + OCI 多一段,不动形状)· ② **一并做**:`ResourceLimits` 加 `IOReadBPS`/`IOWriteBPS`,§6.1 create 加两个字段,provider 译成 OCI `blockIO.throttle{Read,Write}BpsDevice` · ③ 只在引擎配置里给一个**节点级默认** io 帽、不进 per-sandbox Binding | **倾向 ①(只做 CPU)**,理由是**这是缺一个消费者而非缺一个机制**:M6 的对外契约面(§6.1 create 字段)、`model.Sandbox` 的 Binding 字段、四列 schema、以及全部 10 条验收断言都**只列 CPU**,没有一条读 io;按 §1.3 成本判据,现在加 `IOReadBPS` 就是"只为假想未来加的、当下一文不值的结构"(reservation),该拒。**机制侧已实测可行,不是被 substrate 堵住**:runsc 确实会把 OCI `blockIO` 写进自己那个叶子的 `io.max`(实测 `254:16 rbps=1048576 wbps=1048576 riops=max wiops=max`),但**必须给整块盘的 MAJ:MIN,给分区号会让 launch 直接失败**(`write .../io.max: no such device`)——而"哪块盘"是宿主拓扑,per-sandbox Binding 里没有它,故选 ② 还要连带决定设备号从哪来(引擎配置?provider 自己从 StateDir 反查 PKNAME?),这本身是第二个待定项。**注意 §3.4 / §5.A 的速率轴措辞含 io**,故 ① 是"spec 的 io 那半留在 settled-not-yet-built",不是把它划出 spec;§2.3 的爆炸半径不依赖 io 帽(容量轴由 squota 守、CPU 由 cpu.max 守),所以推迟**不留安全缺口** | 谁消费:**今天没有消费者**(这正是倾向 ① 的依据)· 未来:§5.A `local_runsc` 的 `buildOCISpec` + §6.1 create + 节点容量核算(若走 ③)· 决定前 M6 按 ① 落地,`ResourceLimits` 注释标明 io 轴的缺位是**待拍板**、非遗漏 |
+
+> **已拍板并移出本表:disk I/O 速率帽 = 只做 CPU。** io 轴推迟到有真实消费者时再 additive 加(接口加
+> 一个字段 + OCI 多一段,不动形状)。依据是 §1.3 成本判据——**缺的是消费者,不是机制**:§6.1 的 create
+> 字段、`model.Sandbox` 的 Binding、schema 四列、10 条验收断言全都只列 CPU,没有一条读 io。机制侧已实测
+> 可行(runsc 会把 OCI `blockIO` 写进它那个叶子的 `io.max`),**不是被 substrate 堵住**;真正的连带待决项
+> 是"整块盘的 MAJ:MIN 从哪来"(必须给整盘,给分区号 launch 直接失败`no such device`)——那是宿主拓扑,
+> per-sandbox Binding 里没有它,等有消费者时一并定。§3.4 / §5.A 的速率轴措辞含 io,故这是"io 那半留在
+> settled-not-yet-built",**不是把它划出 spec**;§2.3 的爆炸半径不依赖 io 帽(容量轴由 squota 守、CPU 由
+> `cpu.max` 守),推迟**不留安全缺口**。`ResourceLimits` 的注释已按此措辞。
 
 ---
 
@@ -65,7 +73,8 @@
 | **② PID1 退出码竞争**(已留注,非正确性破坏) | `init.go` 盲 `Wait4(-1)` reaper 与监督循环 `cmd.Wait()` 争 transport 子进程退出码,输者拿 `ECHILD`;自愈重启不受影响,只退出码/telemetry 可能丢(Go 1.23+ pidfd Wait 或已收窄) | 择机收口 |
 | **③ PID1 容器级信号扇出单子进程**(已留注,非正确性破坏) | 当前只转发给唯一的 transport 子进程(transport 是唯一子进程时正确) | 模板自带长跑 sibling 落地后升级成进程组扇出(§5.E.1) |
 | **④ 转换锁 map 只增不删**(已留注,非正确性破坏) | `lifecycle.go` 每见一个新 SandboxID 加一把锁、destroy 后不回收(高 churn 下慢泄漏);destroy 时删锁会与阻塞在同锁上的动词竞争(令阻塞动词与新动词序列化到不同锁上),需谨慎处理 | 择机收口 |
-| **⑤ substrate 测试泄漏 runsc 容器**(2026-07-31 实测发现) | `TestLaunchStopDestroyAgainstRealRunsc` 退出后留下 sandbox+gofer 进程(实测两对存活 6 天,bundle 目录早已不存在,被 init 收养)。测试自身的清理不可靠——`t.Cleanup` 未覆盖失败路径或未等回收完成。**回收纪律恰是 §4.4-A 的主题**,测试侧漏掉它会让真实泄漏在开发环境里长期不可见 | 择机收口;修在测试侧(确保 `runsc delete --force` 必达),不改引擎 |
+| **⑤ Promote 不过节点容量准入门** | `Promote` 固化新层会**增加"无帽覆盖的字节"**(核算式第二项,rootfs-overlay D6.5),但它不经准入门,故可把 Σ 推过节点预算。原则已定(§3.4:任何增加无帽字节的控制面动作都应过同一道不等式),只是代码未兑现 | 落地归属待定的下一个里程碑;**不追加进已冻结的资源治理里程碑** |
+| **⑥ `death_cause` 不在 §6.1 读面上** | 死因已落库(§4.3),但 `GET /v1/sandboxes/{id}` 不返回它,`resource-terminated` 只以 409 错误串现身。既然恢复决定归调用方(§4.3 narrowing),调用方就需要看到它所依据的那条事实 | 随事件流「可重放窗口 / event schema」那轮统一定读面(§2 的 §4.1 行) |
 
 ---
 
