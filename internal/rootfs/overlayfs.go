@@ -289,16 +289,36 @@ func (p *HostOverlayFS) DestroyOverlay(ctx context.Context, o *Overlay) error {
 	return nil
 }
 
-// MeasuredBytes reports the bytes this provider's storage holds for Promote-built
-// layers + Overlay units — the §3.4 admission term the caps cannot express
-// (rootfs-overlay D6.5: squota charges only bytes a sandbox WROTE, so layer bytes
-// and free reflinked copy-ups are real disk under no per-sandbox cap).
+// UncappedBytes reports the bytes this provider holds that NO declared capacity
+// cap covers — the second term of the §3.4 inequality (rootfs-overlay D6.5).
+// See the seam doc on rootfs.Provider for the contract; this is how the local
+// btrfs adapter honors it:
 //
-// Measured from the HOST side (apparent on-disk sizes via lstat), never from
-// anything a guest reports: the sentry fabricates st_blocks, so guest numbers are
-// unusable for accounting (§5.B 容量核算只信后端配额). For a capped Overlay unit
-// the authoritative number is its own qgroup, so that is preferred when present.
-func (p *HostOverlayFS) MeasuredBytes(ctx context.Context) (int64, error) {
+//	layer dirs (LayersDir + TemplatesDir) → counted: read-only, charged to no
+//	                                        sandbox, yet real disk
+//	Overlay unit WITH a quota limit        → ZERO: its cap is already a committed
+//	                                        promise the mediator counts
+//	Overlay unit with NO limit            → upper + work, enumerated explicitly
+//
+// Two subtleties, both load-bearing:
+//
+// "Capped" is keyed on the qgroup LIMIT, not on IsSubvolume: applyCap can clear a
+// limit to 0 and leave the subvolume in place, so a subvolume is not a reliable
+// proxy for a cap.
+//
+// The uncapped branch enumerates upper and work BY NAME rather than walking the
+// unit dir. `merged` lives inside the unit, and for a running sandbox that is the
+// live overlayfs mount exposing lower ∪ upper — walking the unit would descend
+// into it and count the whole Template stack a second time (it is already counted
+// from TemplatesDir). Enumerate-what-you-mean is correct by construction;
+// walk-and-filter is correct only while nothing else is ever placed in the unit.
+//
+// Bytes come from the BACKEND: the qgroup for capped units, allocated blocks
+// (st_blocks) for everything else. Never apparent size — a sparse file's apparent
+// size overstates its cost without bound, and in an admission gate overstatement
+// means refusing creates that would have fit. Never guest-side numbers either:
+// the sentry fabricates st_blocks in-guest (§5.B).
+func (p *HostOverlayFS) UncappedBytes(ctx context.Context) (int64, error) {
 	var total int64
 
 	// BOTH layer roots count, and missing either one is the exact undercount D6.2
@@ -322,7 +342,7 @@ func (p *HostOverlayFS) MeasuredBytes(ctx context.Context) (int64, error) {
 			if !e.IsDir() {
 				continue
 			}
-			n, err := dirBytes(filepath.Join(root, e.Name()))
+			n, err := blockBytes(filepath.Join(root, e.Name()))
 			if err != nil {
 				return 0, fmt.Errorf("rootfs: measure layer %s: %w", e.Name(), err)
 			}
@@ -330,8 +350,9 @@ func (p *HostOverlayFS) MeasuredBytes(ctx context.Context) (int64, error) {
 		}
 	}
 
-	// Overlay units. A capped unit's qgroup is the authoritative charge; an
-	// uncapped one is walked.
+	// Overlay units. A unit carrying a quota LIMIT is covered by the cap term and
+	// must contribute nothing here; only an uncapped unit's bytes belong to this
+	// term.
 	units, err := os.ReadDir(p.StateDir)
 	if err != nil && !os.IsNotExist(err) {
 		return 0, fmt.Errorf("rootfs: measure overlays: %w", err)
@@ -342,26 +363,57 @@ func (p *HostOverlayFS) MeasuredBytes(ctx context.Context) (int64, error) {
 		}
 		unit := p.unitPath(e.Name())
 		if p.Btrfs.IsSubvolume(ctx, unit) {
-			if used, _, err := p.Btrfs.Usage(ctx, unit); err == nil {
+			used, limit, err := p.Btrfs.Usage(ctx, unit)
+			if err == nil {
+				if limit > 0 {
+					continue // capped → the cap term already counts it (invariant 1)
+				}
+				// Subvolume with no limit: the qgroup is still the backend's own
+				// statement about these bytes, and it excludes reflinked extents shared
+				// with the layer (invariant 2), so prefer it over a walk.
 				total += used
 				continue
 			}
-			// fall through to the walk if the qgroup is unreadable
+			// Unreadable qgroup: fall through and enumerate. We cannot prove it is
+			// capped, and omitting real bytes would overcommit the node, so count them.
 		}
-		n, err := dirBytes(unit)
-		if err != nil {
-			return 0, fmt.Errorf("rootfs: measure overlay %s: %w", e.Name(), err)
+		// No quota unit (or an unreadable one): enumerate upper + work explicitly,
+		// never the unit dir — `merged` lives in there too (see the doc comment).
+		for _, sub := range []string{p.upperPath(e.Name()), p.workPath(e.Name())} {
+			n, err := blockBytes(sub)
+			if err != nil {
+				return 0, fmt.Errorf("rootfs: measure overlay %s: %w", e.Name(), err)
+			}
+			total += n
 		}
-		total += n
 	}
 	return total, nil
 }
 
-// dirBytes sums the apparent sizes of regular files under root. Host-side lstat
-// only — see MeasuredBytes on why guest-reported sizes are never used. A
-// disappearing file (concurrent destroy) is skipped rather than failing the sweep.
-func dirBytes(root string) (int64, error) {
+// blockBytes sums the ALLOCATED bytes of regular files under root — st_blocks×512,
+// the host filesystem's own statement of what those files cost.
+//
+// Not apparent size (st_size): a sparse file's apparent size overstates its cost
+// without bound (the spec's own example is a 512 MiB sparse file whose real
+// allocation is 0), and in an admission gate overstating means refusing creates
+// that would have fit. Allocated blocks are equal-or-better in every case — exact
+// for ordinary files, correct for holes, and they reflect compression.
+//
+// This does NOT contradict §5.B's "never trust st_blocks": that rule is about
+// GUEST-side numbers, which the sentry fabricates. Host-side st_blocks is the
+// backend's own allocation, which is the source that rule points at.
+//
+// Hardlinked files are counted once (dedup by dev+ino): a shipped Template tree
+// can carry them, and the same physical bytes must not be charged twice
+// (rootfs.Provider invariant 2). A disappearing file (concurrent destroy) is
+// skipped rather than failing the caller.
+func blockBytes(root string) (int64, error) {
 	var total int64
+	type inode struct {
+		dev uint64
+		ino uint64
+	}
+	seen := map[inode]bool{}
 	err := filepath.Walk(root, func(_ string, info os.FileInfo, err error) error {
 		if err != nil {
 			if os.IsNotExist(err) {
@@ -369,9 +421,24 @@ func dirBytes(root string) (int64, error) {
 			}
 			return err
 		}
-		if info.Mode().IsRegular() {
-			total += info.Size()
+		if !info.Mode().IsRegular() {
+			return nil
 		}
+		st, ok := info.Sys().(*syscall.Stat_t)
+		if !ok {
+			// No stat available (should not happen on Linux): fall back to apparent
+			// size rather than silently counting zero, which would undercount.
+			total += info.Size()
+			return nil
+		}
+		if st.Nlink > 1 {
+			k := inode{dev: uint64(st.Dev), ino: st.Ino}
+			if seen[k] {
+				return nil
+			}
+			seen[k] = true
+		}
+		total += st.Blocks * 512
 		return nil
 	})
 	if err != nil && !os.IsNotExist(err) {
@@ -419,6 +486,68 @@ func (p *HostOverlayFS) ListBuiltinTemplates(_ context.Context) ([]string, error
 		}
 	}
 	return out, nil
+}
+
+// SweepOrphanOverlays reclaims Overlay storage units under StateDir with no live
+// `sandboxes` row (§4.4-A reclamation discipline). See the seam doc on
+// rootfs.Provider for the contract and for why `building` is a separate keep-set
+// from `live`; this is how the local adapter honors it:
+//
+//	each StateDir subdirectory IS a unit, named by its OverlayID (the paths are
+//	derived from the ID, so enumeration recovers the identity without a store
+//	read), and one not in either keep-set goes through DestroyOverlay.
+//
+// Reclaiming via DestroyOverlay rather than RemoveAll is the load-bearing part: a
+// capped unit is a subvolume + qgroup and `subvolume delete` is the only thing
+// that removes it, so the one path that already gets that right (contents first,
+// then the subvolume, then its quota row) is reused rather than reimplemented.
+// For an uncapped unit it degenerates to exactly the RemoveAll the sibling does.
+//
+// Failure policy is SKIP-AND-LOG-SHAPED (§4.4-A): a unit that will not delete
+// does not abort the pass over the others — the error is returned after the loop
+// completes, along with the count actually reclaimed, so one wedged subvolume
+// cannot indefinitely shadow every other leak. The sweep is idempotent, so
+// whatever failed is retried next pass. A missing StateDir → nothing to sweep.
+func (p *HostOverlayFS) SweepOrphanOverlays(ctx context.Context, live, building []string) (int, error) {
+	keep := make(map[string]bool, len(live)+len(building))
+	for _, id := range live {
+		keep[id] = true
+	}
+	for _, id := range building {
+		keep[id] = true
+	}
+	entries, err := os.ReadDir(p.StateDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("rootfs: sweep list overlay units: %w", err)
+	}
+	reclaimed := 0
+	var failed []string
+	for _, e := range entries {
+		if !e.IsDir() || keep[e.Name()] {
+			continue
+		}
+		// Orphan: bytes with no live row and no create in flight. Either destroy
+		// deleted the record after DestroyOverlay failed (§4.4 licenses exactly
+		// that, deferring the retry to a sweep — this one), or the process died
+		// between the two. Either way the row is gone for good, so nothing above
+		// will ever ask about these bytes again and they are safe to drop.
+		//
+		// A handle is enough to name the unit: DestroyOverlay derives every path
+		// from the ID, so the lower stack is irrelevant here — the unit is being
+		// deleted, not mounted.
+		if err := p.DestroyOverlay(ctx, &Overlay{ID: e.Name()}); err != nil {
+			failed = append(failed, fmt.Sprintf("%s: %v", e.Name(), err))
+			continue
+		}
+		reclaimed++
+	}
+	if len(failed) > 0 {
+		return reclaimed, fmt.Errorf("rootfs: sweep reclaim overlay unit(s): %s", strings.Join(failed, "; "))
+	}
+	return reclaimed, nil
 }
 
 // SweepOrphanLayers reclaims Promote-built layer dirs under LayersDir with no

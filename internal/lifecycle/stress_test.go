@@ -329,3 +329,94 @@ func TestStressPauseRejectedOnPaused(t *testing.T) {
 		})
 	}
 }
+
+// §3.4 no-oversubscribe under TRUE CONCURRENCY — the crack the per-sandbox
+// transition lock cannot cover.
+//
+// Every other §4.4-B race in this file is about ONE sandbox, so the per-sandbox
+// lock serializes it. The admission gate is different in kind: its invariant is
+// node-GLOBAL (a sum over every record), while `Create` mints a FRESH SandboxID
+// and therefore takes a brand-new, uncontended lock. So N concurrent creates hold
+// N different locks and never serialize against each other at all.
+//
+// The failure this pins down is silent: each create is individually admissible,
+// every per-sandbox cap is honored, and the node still ends up over its declared
+// budget — precisely the oversubscription the gate exists to prevent (§2.3 from
+// the other direction: a sandbox's write failing because of OTHER sandboxes).
+// Without admitMu spanning {gate → insert}, all N read the store before any of
+// them inserts, all N pass, and the sum overshoots.
+//
+// Falsified by removing the admitMu Lock/Unlock around Create's gate: this fails
+// with ~7 admitted instead of 4.
+func TestConcurrentCreatesCannotOversubscribeTheNode(t *testing.T) {
+	for _, be := range stressBackends() {
+		t.Run(be.name, func(t *testing.T) {
+			const gib = int64(1) << 30
+			st := be.mk(t)
+			seedBare(t, st)
+			rp, rt := &fakeRootfs{}, &fakeRuntime{}
+			m := New(Deps{
+				Store: st, Runtime: rt, Rootfs: rp,
+				Dial:          func(transport.Endpoint) transport.Client { return &fakeClient{healthy: true} },
+				HealthTimeout: 500 * time.Millisecond,
+				// Budget fits EXACTLY 4 sandboxes of 1 GiB. Nothing else consumes it:
+				// the fake reports zero uncapped bytes.
+				NodeCapacity: NodeCapacity{DiskByte: 4 * gib},
+			})
+
+			const N = 12
+			var wg sync.WaitGroup
+			errs := make([]error, N)
+			for i := 0; i < N; i++ {
+				wg.Add(1)
+				go func(i int) {
+					defer wg.Done()
+					_, errs[i] = m.Create(context.Background(), CreateSpec{
+						Template: "bare", Limits: model.Limits{DiskByte: gib},
+					})
+				}(i)
+			}
+			wg.Wait()
+
+			admitted, refused := 0, 0
+			for i, e := range errs {
+				switch {
+				case e == nil:
+					admitted++
+				case errors.Is(e, ErrInsufficientCapacity):
+					refused++
+				default:
+					t.Fatalf("create %d failed for an unexpected reason: %v", i, e)
+				}
+			}
+			// The invariant, stated as the gate states it: admitted promises must fit.
+			if int64(admitted)*gib > 4*gib {
+				t.Fatalf("admitted %d sandboxes × 1 GiB against a 4 GiB budget — the node is oversubscribed (§3.4)", admitted)
+			}
+			// And the gate must not be needlessly stingy: the budget fits 4, so all 4
+			// slots should be taken. (A gate that refuses everything would satisfy the
+			// check above while being useless.)
+			if admitted != 4 {
+				t.Fatalf("admitted %d; want exactly 4 (budget fits 4 × 1 GiB)", admitted)
+			}
+			if refused != N-4 {
+				t.Fatalf("refused %d; want %d", refused, N-4)
+			}
+			// The store must agree — the sum over COMMITTED records is the thing the
+			// next gate run will read.
+			recs, err := st.ListSandboxes(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			var committed int64
+			for _, r := range recs {
+				if r.State != model.Destroyed {
+					committed += r.Limits.DiskByte
+				}
+			}
+			if committed > 4*gib {
+				t.Fatalf("committed caps in the store sum to %d > budget %d", committed, 4*gib)
+			}
+		})
+	}
+}

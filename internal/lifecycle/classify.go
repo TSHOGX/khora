@@ -9,16 +9,16 @@ import (
 	"engine/internal/transport"
 )
 
-// Health is the §4.3 four-quadrant health classification of a `running`
+// Health is the §4.3 health classification (five states) of a `running`
 // sandbox, plus an explicit "unknown → skip" for the cases the classifier must
-// not guess at (reaper-health D3). The reaper dispatches per quadrant.
+// not guess at (reaper-health D3). The reaper dispatches per health state.
 type Health int
 
 const (
 	// HealthUnknown = could not cleanly classify this round → the reaper does
 	// NOTHING and retries next tick. Two sources: the sandbox is not in the
 	// live-map (a store-`running` with no live handle is reconcile's takeover
-	// concern, D4 — not a health quadrant), or the L1 probe was UNCERTAIN
+	// concern, D4 — not a health state), or the L1 probe was UNCERTAIN
 	// (L1-alive but endpoint unrecoverable, §4.4-A protect-on-uncertainty). Never
 	// a disposition — the safe default.
 	HealthUnknown Health = iota
@@ -75,7 +75,7 @@ func (h Health) String() string {
 // concurrent-ish probing, short dispositions).
 const classifyProbeTimeout = 2 * time.Second
 
-// classify computes the §4.3 health quadrant of a sandbox from L1 (substrate
+// classify computes the §4.3 health state of a sandbox from L1 (substrate
 // liveness) × L2 (transport Health) × activity (idle duration). It is READ-ONLY
 // — no transition lock, no state change (reaper-health D3: the classifier only
 // reads; dispositions take the transition lock). The ORDER is the D2
@@ -90,7 +90,7 @@ const classifyProbeTimeout = 2 * time.Second
 // Because idle is read ONLY on the L2-up branch, an unreachable sandbox can
 // NEVER be misclassified as idle from a stale last-known activity (D2): no
 // trustworthy idle reading exists without a successful probe.
-// It returns the death cause ALONGSIDE the quadrant, and that pairing is
+// It returns the death cause ALONGSIDE the health state, and that pairing is
 // structural rather than convenient (§4.3 / reaper-health D4c). The classifier is
 // read-only: it discards the placement handle Adopt rebuilt. But the death signal
 // lives IN that placement and dies with it, so a cause read here and not returned
@@ -98,10 +98,10 @@ const classifyProbeTimeout = 2 * time.Second
 // teardown may have destroyed the evidence. Hence the cause travels out with the
 // classification, to be committed by the disposition in the same CAS.
 //
-// The returned cause is meaningful ONLY for the two dead quadrants; it is
+// The returned cause is meaningful ONLY for the two dead health states; it is
 // CauseUnknown elsewhere.
 func (m *Mediator) classify(ctx context.Context, rec model.Sandbox) (Health, runtime.DeathCause) {
-	// Only a `running` sandbox has a health quadrant (§4.3). paused → TTL/evict,
+	// Only a `running` sandbox has a health state (§4.3). paused → TTL/evict,
 	// creating/destroyed → not the classifier's concern.
 	if rec.State != model.Running {
 		return HealthUnknown, runtime.CauseUnknown
@@ -110,7 +110,7 @@ func (m *Mediator) classify(ctx context.Context, rec model.Sandbox) (Health, run
 	// Resolve the endpoint from the live-map. A `running` sandbox the live
 	// orchestrator manages holds a live handle here; one that does NOT (store
 	// says running, live-map empty) is the periodic reconcile's takeover concern
-	// (D4), not a health quadrant — skip it (Unknown).
+	// (D4), not a health state — skip it (Unknown).
 	ep, err := m.Endpoint(rec.ID)
 	if err != nil {
 		return HealthUnknown, runtime.CauseUnknown
@@ -145,15 +145,18 @@ func (m *Mediator) classify(ctx context.Context, rec model.Sandbox) (Health, run
 	case alive:
 		return HealthTransportDown, runtime.CauseUnknown
 	case cause == runtime.CauseResourceExceeded:
-		// Dead BECAUSE of a resource cap → the parallel quadrant with the opposite
+		// Dead BECAUSE of a resource cap → the parallel health state with the opposite
 		// disposition (§4.3): crash-pause but never resume.
 		return HealthResourceTerminated, cause
 	default:
 		// Dead of something else, or undeterminable. CauseUnknown lands here too, and
-		// that is the deliberate §4.3 fallback: treat it as dead-recoverable and
-		// resume, with bounded retry self-correcting a misread — if it really was the
-		// cap, the same workload re-triggers termination, this time under the control
-		// plane's eye, and THAT observation records the real cause.
+		// that is the deliberate §4.3 fallback: treat it as dead-recoverable, which a
+		// caller may then resume. The self-correction is STRUCTURAL, not counted — if
+		// it really was the cap, the same workload re-triggers termination after that
+		// resume, this time under the control plane's eye, and THAT observation records
+		// the real cause, which then refuses further resumes. No resume-attempt bound
+		// exists or is needed: the engine never resumes a dead-recoverable sandbox
+		// itself, so the retry is the caller's explicit choice (§4.3).
 		return HealthDeadRecoverable, cause
 	}
 }

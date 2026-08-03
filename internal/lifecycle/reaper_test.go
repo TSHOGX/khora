@@ -11,7 +11,7 @@ import (
 	"engine/internal/transport"
 )
 
-// reaper dispatch as pure logic against fakes (§4.3 quadrants → §4.1
+// reaper dispatch as pure logic against fakes (§4.3 health states → §4.1
 // transitions). The real runsc round-trip (auto-pause after idle, live
 // crash-pause, transport-down same-IP, crash-loop escalation, evict) lives in
 // the substrate e2e (test/reaper_substrate_test.go); these pin the dispatch +

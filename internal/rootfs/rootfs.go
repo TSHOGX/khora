@@ -144,21 +144,94 @@ type Provider interface {
 	// the frozen layer dir under LayersDir.
 	PromoteToTemplate(ctx context.Context, o *Overlay, newTemplateID string) error
 
-	// MeasuredBytes reports the total bytes this provider's storage currently
-	// holds for layers + Overlay uppers — the term the §3.4 admission gate cannot
-	// derive from the caps alone (rootfs-overlay D6.5). It exists because squota
-	// charges a sandbox only for bytes IT wrote: Template/layer bytes and free
-	// reflinked copy-ups occupy real disk that no per-sandbox cap covers, so the
-	// node-capacity inequality needs this measured term listed separately.
+	// UncappedBytes reports the total bytes this provider currently holds in its
+	// storage THAT NO DECLARED CAPACITY CAP COVERS — the second term of the §3.4
+	// node-capacity inequality (rootfs-overlay D6.5).
+	//
+	// The contract is a PREDICATE, not an enumeration, and that is what makes it
+	// provider-neutral: "bytes under no cap" is answerable by an object-store or
+	// network-FS provider (each asks its own backend) without the contract naming
+	// subvolumes, quotas, or directory walks. Two invariants:
+	//
+	//  1. DISJOINT from the cap term: a byte covered by a declared cap is NOT
+	//     reported here, because the mediator already counts that cap. Concretely a
+	//     CAPPED Overlay unit contributes ZERO — adding its current usage on top of
+	//     its own promise charges the same bytes twice, and its usage is a
+	//     PREDICTION where the cap is already an upper bound.
+	//  2. At most ONCE for physically shared bytes: a reflinked copy-up shares
+	//     extents with the layer it came from, and squota does not charge them to the
+	//     sandbox unit, so the layer side counts that extent exactly once. The
+	//     property that FORCES this term to exist (D6.2) is the same one that makes
+	//     the two terms naturally non-overlapping.
+	//
+	// So the term is "already-consumed capacity to subtract from the budget", not a
+	// forecast — which is why a promise-time gate may legitimately read it (§3.4:
+	// take the strongest available statement about each object — the cap where one
+	// exists, the measurement where none does).
 	//
 	// Same shape as SweepOrphanLayers (§4: mediator asks, provider answers): the
 	// provider measures only its OWN storage and never reads the store.
 	//
-	// It reports what the BACKEND says, never what a guest says — the sentry
-	// FABRICATES st_blocks (a 512 MiB sparse file reads as 536870912 blocks in the
-	// guest while the host's true allocation is 0), so guest-side numbers are
-	// unusable for capacity accounting (§5.B 容量核算只信后端配额).
-	MeasuredBytes(ctx context.Context) (int64, error)
+	// It reports what the BACKEND says its bytes cost, never what a guest says — the
+	// sentry FABRICATES st_blocks (a 512 MiB sparse file reads as 536870912 blocks
+	// in-guest while the host's true allocation is 0), so guest-side numbers are
+	// unusable for capacity accounting (§5.B 容量核算只信后端配额). Note that rule
+	// bans GUEST-side numbers; the host-side allocated-block count IS the backend's
+	// own statement and is the trustworthy source it points at.
+	UncappedBytes(ctx context.Context) (int64, error)
+
+	// SweepOrphanOverlays reclaims Overlay STORAGE UNITS with no live `sandboxes`
+	// row (§4.4-A reclamation discipline) — the §5.B *unit* twin of
+	// SweepOrphanLayers, which sweeps only layers. It supplies the retry §4.4
+	// already licenses but nothing implemented: destroy DISCARDS DestroyOverlay's
+	// error and deletes the record anyway ("删字节失败不阻塞、不回退状态转换…由
+	// refcount sweep(§4.3)异步重试"), yet SweepOrphanLayers scans only LayersDir
+	// and the periodic reconcile iterates only store RECORDS — so once the row was
+	// gone, nothing ever revisited the unit again and it leaked permanently. The
+	// crash-BEFORE-deletion half is separate and already covered (the mediator
+	// reclaims a record's orphan Overlay during §4.4-A reconcile); this is the
+	// POST-deletion half, where no record survives to hang reclamation off.
+	//
+	// Same contract as the sibling (§4: mediator asks, provider answers): the
+	// mediator computes `live` — every OverlayID the AUTHORITATIVE store still has
+	// a sandbox row for, in ANY state — and the provider enumerates only its OWN
+	// storage and deletes each unit in neither keep-set. The provider never reads
+	// the store.
+	//
+	// TWO keep-sets, and `building` is NOT redundant here even though create
+	// inserts its record BEFORE it allocates the unit. Write ORDER is not what
+	// protects a unit: `live` is a SNAPSHOT, and the provider's enumeration
+	// necessarily happens after it, so a create whose row lands after the snapshot
+	// presents as bytes on disk with no entry in `live` — indistinguishable from an
+	// orphan, and reclaimed out from under a sandbox that is about to run. That is
+	// the same "bytes exist, row not yet in hand" hazard `building` guards for
+	// Promote, reached by a different route (a stale keep-set rather than
+	// bytes-first ordering), so `building` is the in-flight-CREATE keep-set: an
+	// OverlayID whose materialization the mediator has begun and not yet settled.
+	// One argument would be sufficient only if the store read could be ordered
+	// AFTER the enumeration, which this call shape cannot express.
+	//
+	// The mediator should therefore snapshot `building` as LATE as possible, right
+	// before this call, so the set is current; a create that begins entirely after
+	// both snapshots is a residual window this shape shares with the sibling and
+	// closing it fully would require serializing the sweep against create in the
+	// mediator. At boot `building` is empty — every unit without a record is a true
+	// orphan and is correctly reclaimed.
+	//
+	// Reclamation goes through the full DestroyOverlay path rather than a directory
+	// delete, because since the capacity axis landed a CAPPED unit is a btrfs
+	// subvolume plus a quota row, and the two are reclaimed by different calls.
+	//
+	// Measured on `sbx` (squota mode), so the reason is narrower than "RemoveAll
+	// cannot delete a subvolume" — it CAN, contents and all, exit 0. What differs is
+	// the quota row: `rm -rf` leaves a live limit attached to a dead subvolume id,
+	// and under FULL qgroup mode an explicit `qgroup destroy` is required to drop
+	// it. Under squota btrfs reclaims the row asynchronously, so both paths converge
+	// within seconds and are indistinguishable a moment later — which is exactly why
+	// this must not be tested by directory existence alone. Going through
+	// DestroyOverlay keeps the provider correct in both quota modes instead of
+	// depending on which one the host happens to run. Returns the count reclaimed.
+	SweepOrphanOverlays(ctx context.Context, live, building []string) (int, error)
 
 	// SweepOrphanLayers reclaims Promote-built layer directories with no live
 	// `templates` row (orphan-layer sweep, §5.B / §4.4-A). It is the §5.B twin of §4.4-A

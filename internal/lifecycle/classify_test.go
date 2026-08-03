@@ -12,8 +12,8 @@ import (
 	"engine/internal/transport"
 )
 
-// classifier truth table (§4.3 four quadrants) as pure logic against fakes:
-// each quadrant from its L1 × L2 × activity inputs, plus the two "skip" cases
+// classifier truth table (§4.3 health states) as pure logic against fakes:
+// each health state from its L1 × L2 × activity inputs, plus the two "skip" cases
 // (no live handle, uncertain L1). The D2 unreadable-idle guard gets its own test.
 
 // classifyFixture builds a mediator whose L2 (Health) and L1 (Adopt) verdicts
@@ -66,7 +66,7 @@ func classifyOf(t *testing.T, f classifyFixture, id string) Health {
 }
 
 // classifyWithCause also returns the death cause the classifier carried out
-// alongside the quadrant (§4.3 / reaper-health D4c: the signal dies with the
+// alongside the health state (§4.3 / reaper-health D4c: the signal dies with the
 // placement, so a classifier that read it but did not return it has thrown it
 // away and the disposition can never recover it).
 func classifyWithCause(t *testing.T, f classifyFixture, id string) (Health, runtime.DeathCause) {
@@ -144,7 +144,7 @@ func TestClassifyUncertainL1IsUnknown(t *testing.T) {
 }
 
 // a store-`running` sandbox with NO live-map handle is reconcile's takeover
-// concern (D4), not a health quadrant → Unknown (reaper skips it).
+// concern (D4), not a health state → Unknown (reaper skips it).
 func TestClassifyNoLiveHandleIsUnknown(t *testing.T) {
 	f := newClassifyFixture(t, "sbx", 10*time.Second, true, 1*time.Second, true, nil, true /*noHandle*/)
 	if got := classifyOf(t, f, "sbx"); got != HealthUnknown {

@@ -40,6 +40,13 @@ var ErrResourceTerminated = errors.New("lifecycle: sandbox resource-terminated")
 // wrong with the sandbox, the node is simply full — so the API maps it to 507.
 var ErrInsufficientCapacity = errors.New("lifecycle: insufficient node capacity")
 
+// ErrCapRequired is the §3.4 verdict for a request that omits a cap on an axis
+// the node meters. DELIBERATELY distinct from ErrInsufficientCapacity: nothing is
+// full, so 507 would be a lie — the request is invalid for THIS engine's
+// configuration, which the API maps to 400. `0 = unlimited` stays legal on any
+// axis the operator has not declared a budget for.
+var ErrCapRequired = errors.New("lifecycle: node meters this axis, so a cap is required")
+
 // deathCauseOf translates the §5.A provider enum into the persisted model enum.
 // Two types on purpose (§5.A): the provider seam must not depend on the
 // control-plane record shape. The translation lives HERE, in the mediator, which
@@ -107,6 +114,24 @@ type Mediator struct {
 	mu    sync.Mutex // guards locks map only
 	locks map[model.SandboxID]*sync.Mutex
 
+	// admitMu serializes the §3.4 no-oversubscribe gate. The per-sandbox
+	// transition lock (§4.4-B) CANNOT do this job: the gate's invariant is
+	// node-GLOBAL (a sum over every record), while those locks are per-sandbox —
+	// and `Create` mints a fresh SandboxID, so two concurrent creates take two
+	// different locks and never serialize against each other at all. Each would
+	// read the store before either inserts, both would pass, and the node ends up
+	// over its declared budget with every individual cap honored.
+	//
+	// So the sum-then-commit sequence needs one arbiter. This is the same shape as
+	// §4.3's reference-reclaim invariant, which resolves the analogous
+	// read-then-decide-vs-concurrent-insert race by requiring a single serializing
+	// authority — there the store's atomic commit, here this mutex, because the
+	// decision spans a provider measurement the store cannot see.
+	//
+	// Held only across {read records → measure → compare → commit}, never across a
+	// cold start, so it does not couple unrelated sandboxes' launch latency.
+	admitMu sync.Mutex
+
 	// live holds the per-sandbox liveState (placement handle + mounted merged
 	// rootfs). In-memory and non-authoritative: placement-local state (§3.3,
 	// rebound every resume), NOT persistent SoT. Crash reconciliation (§4.4-A)
@@ -122,6 +147,15 @@ type Mediator struct {
 	// is absent here at boot, so the sweep correctly reclaims it as a true orphan.
 	// Guarded by mu.
 	buildingLayers map[model.TemplateID]bool
+
+	// buildingOverlays is buildingLayers' twin for Overlay UNITS: OverlayIDs whose
+	// storage the mediator has begun materializing and not yet settled. The unit
+	// sweep must skip these. Note the hazard differs from Promote's: create inserts
+	// its record BEFORE allocating the unit, so write order alone would seem to
+	// protect it — but the sweep's `live` set is a SNAPSHOT read before the
+	// provider enumerates, so a create committing in between presents as bytes with
+	// no live row, indistinguishable from an orphan. Guarded by mu.
+	buildingOverlays map[model.OverlayID]bool
 }
 
 // liveState is the mediator's in-memory handle to a running sandbox's
@@ -156,10 +190,11 @@ func New(deps Deps) *Mediator {
 		deps.Logf = log.Printf
 	}
 	return &Mediator{
-		deps:           deps,
-		locks:          make(map[model.SandboxID]*sync.Mutex),
-		live:           make(map[model.SandboxID]*liveState),
-		buildingLayers: make(map[model.TemplateID]bool),
+		deps:             deps,
+		locks:            make(map[model.SandboxID]*sync.Mutex),
+		live:             make(map[model.SandboxID]*liveState),
+		buildingLayers:   make(map[model.TemplateID]bool),
+		buildingOverlays: make(map[model.OverlayID]bool),
 	}
 }
 
@@ -264,16 +299,29 @@ func (m *Mediator) Create(ctx context.Context, spec CreateSpec) (model.SandboxID
 	// able to HONOR every cap it has promised, so a new promise is checked against
 	// the capacity actually left. Runs BEFORE any bytes or placement are
 	// materialized, so a rejected create leaves nothing half-built (M6 acceptance
-	// 8). Nothing has been inserted yet either — the record insert is below.
+	// 8).
+	//
+	// admitMu spans {gate → record insert} as ONE critical section, and that is
+	// load-bearing: the gate sums committed promises from the store, so a promise
+	// that has passed the gate but is not yet a row is invisible to a concurrent
+	// gate run. Two creates would then both pass and jointly overshoot the budget.
+	// The per-sandbox transition lock cannot close this — each create holds a
+	// DIFFERENT one (fresh SandboxID). Released before the cold start, which is the
+	// long part and needs no serialization.
+	m.admitMu.Lock()
 	if err := m.admit(ctx, rec.Limits, ""); err != nil {
+		m.admitMu.Unlock()
 		return "", err
 	}
 	// The transient creating-insert is an internal step of the create verb, not
 	// an externally-visible §4.1 transition — it publishes nothing (nil Event).
 	// The "created" event is emitted only when create COMPLETES → running below.
+	// Inserting it here also makes this promise visible to the next gate run.
 	if err := m.deps.Store.CreateSandbox(ctx, rec, nil); err != nil {
+		m.admitMu.Unlock()
 		return "", fmt.Errorf("create: insert record: %w", err)
 	}
+	m.admitMu.Unlock()
 
 	// ① build empty Overlay over the resolved lineage lower stack (§5.B
 	// multi-lowerdir) + run the cold-start chain.
@@ -286,6 +334,12 @@ func (m *Mediator) Create(ctx context.Context, spec CreateSpec) (model.SandboxID
 	// quota on the upper+work storage unit, so it belongs to the Rootfs subsystem's
 	// materialization, not to the runtime provider (§3.4 / §5.B). The mediator only
 	// passes the numeric intent across the seam.
+	// Protect the unit from the orphan-unit sweep for the whole create window
+	// (§4.4-A): the sweep's `live` snapshot may predate this sandbox's row even
+	// though the row was inserted first, so bytes-on-disk-with-no-live-entry is
+	// reachable without any ordering mistake. Held until create settles either way.
+	m.markBuildingOverlay(oid)
+	defer m.unmarkBuildingOverlay(oid)
 	ov, err := m.deps.Rootfs.CreateOverlay(ctx, string(oid), lower, rec.Limits.DiskByte)
 	if err != nil {
 		_ = m.deps.Store.DeleteSandbox(ctx, sid, nil) // nothing built, never visible
@@ -384,16 +438,6 @@ func (m *Mediator) Resume(ctx context.Context, id model.SandboxID) error {
 	if rec.State != model.Paused {
 		return fmt.Errorf("resume: %w (state=%s, want paused)", store.ErrConflict, rec.State)
 	}
-	// §4.3 resource-terminated: this sandbox was terminated for exceeding its RAM
-	// safety limit, and that disposition is the OPPOSITE of dead-recoverable's —
-	// resuming re-runs the same workload into the same cap, i.e. a crash loop. It
-	// stays `paused` until a human intervenes or the cap is raised. This is exactly
-	// why the death cause has to be persisted (§4.3): the state alone cannot
-	// distinguish the two cases, they look identical.
-	if rec.DeathCause == model.CauseResourceExceeded {
-		return fmt.Errorf("resume: %w: sandbox was resource-terminated (RAM cap %d bytes); raise the cap or destroy it — resuming would re-trigger termination (§4.3)",
-			ErrResourceTerminated, rec.Limits.MemoryByte)
-	}
 	return m.resumeLocked(ctx, rec)
 }
 
@@ -405,12 +449,39 @@ func (m *Mediator) Resume(ctx context.Context, id model.SandboxID) error {
 // the half-built placement and leaves the record `paused` (§4.4-A / D5.2 ④).
 func (m *Mediator) resumeLocked(ctx context.Context, rec model.Sandbox) error {
 	id := rec.ID
+	// §4.3 resource-terminated: this sandbox was terminated for exceeding its RAM
+	// safety limit, and that disposition is the OPPOSITE of dead-recoverable's —
+	// resuming re-runs the same workload into the same cap, i.e. a crash loop. It
+	// stays `paused` until the cap is raised (§6.1 PATCH, which clears the cause in
+	// the same commit) or it is destroyed. This is exactly why the death cause has
+	// to be persisted (§4.3): the state alone cannot distinguish the two cases.
+	//
+	// The check lives HERE rather than in the Resume verb so the invariant is
+	// STRUCTURAL — every path that actually performs a resume passes through this
+	// function, including the reaper's D4b transport-down escalation. That
+	// escalation cannot currently carry this cause (it fires only when L1 is ALIVE,
+	// and a `running` record cannot hold CauseResourceExceeded), so today the guard
+	// is unreachable from there — but a guard that depends on call-site convention
+	// is one refactor away from being wrong.
+	if rec.DeathCause == model.CauseResourceExceeded {
+		return fmt.Errorf("resume: %w: sandbox was resource-terminated (RAM cap %d bytes) — resuming would re-trigger termination. Raise memory_byte via PATCH /v1/sandboxes/%s (re-runs the admission gate; may be refused for node capacity), which clears the death cause and permits resume; or Promote it to keep its bytes under a new sandbox; or destroy it (§4.3)",
+			ErrResourceTerminated, rec.Limits.MemoryByte, id)
+	}
 	// Admission gate before anything is materialized (§3.4 no-oversubscribe). This
 	// sandbox's own promised cap is EXCLUDED from the committed total — it is
 	// already counted there, and double-counting it would make a resume of an
 	// unchanged sandbox fail against its own reservation. On failure the record
 	// stays `paused`, the atomic fallback source state (§4.4-A / M6 acceptance 8).
-	if err := m.admit(ctx, rec.Limits, rec.ID); err != nil {
+	//
+	// Under admitMu like create, though for a weaker reason: a resume adds NO new
+	// promise (its cap is already a committed row, which is why it excludes itself),
+	// so it cannot overshoot the budget by racing. It takes the lock to avoid
+	// evaluating against a half-inserted create and to keep one arbiter for the
+	// gate. Released immediately — the cold start below must not hold it.
+	m.admitMu.Lock()
+	err := m.admit(ctx, rec.Limits, rec.ID)
+	m.admitMu.Unlock()
+	if err != nil {
 		return err
 	}
 	// ① re-open + re-mount the SAME Overlay artifact (resume prefix), re-resolving
@@ -449,6 +520,85 @@ func (m *Mediator) resumeLocked(ctx context.Context, rec model.Sandbox) error {
 	if err := m.deps.Store.CompareAndSetState(ctx, id, model.Paused, model.Running, newEvent(id, "resumed", model.Running), &cleared); err != nil {
 		m.unwind(ctx, id, ov, false)
 		return fmt.Errorf("resume: commit running: %w", err)
+	}
+	return nil
+}
+
+// UpdateBinding rewrites a sandbox's Binding fields (§3.4 / §6.1 PATCH) — the
+// only write point for them besides create. It is NOT a §4.1 transition: the
+// state does not change, so it publishes no event (the same reasoning Promote
+// uses).
+//
+// Two materialization classes, and the split follows WHO CONSUMES the field:
+//
+//   - resource caps are consumed by the providers, which materialize only at
+//     placement — so they are editable ONLY from `paused` and take effect at the
+//     next resume. Accepting a cap edit on a `running` sandbox would leave the
+//     record and the live isolation unit disagreeing for an unbounded period,
+//     which is the kind of fake invariant CLAUDE.md calls a negative asset. One
+//     extra pause buys zero ambiguity.
+//   - TTLs are consumed by the reaper, which re-reads the record every sweep with
+//     no placement involved — so they are editable from either state and take
+//     effect immediately.
+//
+// Raising a cap is a NEW PROMISE and must clear admission (§3.4). The gate sums
+// from the store including `paused` records, so a raise changes Σ at THIS commit,
+// not at the eventual resume — skip the gate here and the store would immediately
+// hold a Σ over budget, refusing some unrelated create for an overcommit the
+// engine itself admitted. Lowering needs no gate (Σ shrinks).
+//
+// Raising memory_byte also CLEARS death_cause in the same commit, which is what
+// makes §4.3's resource-terminated remedy actually work: the resume guard reads
+// that column, and nothing else clears it before a successful resume — which the
+// guard itself prevents. Scoped tightly to a RAISE of the terminating axis: a
+// lowering, or an unrelated cap edit, must not re-arm a crash loop by wiping the
+// record of why the sandbox died.
+func (m *Mediator) UpdateBinding(ctx context.Context, id model.SandboxID, b store.Binding) error {
+	l := m.lock(id)
+	l.Lock()
+	defer l.Unlock()
+
+	if b.IsEmpty() {
+		return nil // nothing asked for → no write (idempotent)
+	}
+
+	rec, err := m.deps.Store.GetSandbox(ctx, id)
+	if err != nil {
+		return fmt.Errorf("update: %w", err)
+	}
+	switch rec.State {
+	case model.Paused:
+		// everything editable
+	case model.Running:
+		if b.CPUMillis != nil || b.MemoryByte != nil || b.DiskByte != nil {
+			return fmt.Errorf("update: %w: resource caps are editable only from `paused` (they re-materialize at the next placement, §3.4) — pause first, then PATCH, then resume; TTL fields are editable while running",
+				store.ErrConflict)
+		}
+	default:
+		return fmt.Errorf("update: %w (state=%s: a Binding is editable only from running or paused)", store.ErrConflict, rec.State)
+	}
+
+	newLimits, _, _ := b.Apply(rec)
+	raisesMemory := newLimits.MemoryByte > rec.Limits.MemoryByte
+	// Any raise on a metered axis is a new promise → re-gate. Excludes this
+	// sandbox's own committed caps, exactly as resume does, so it is measured
+	// against the delta rather than double-charged.
+	if newLimits.DiskByte > rec.Limits.DiskByte || raisesMemory || newLimits.CPUMillis > rec.Limits.CPUMillis {
+		m.admitMu.Lock()
+		err := m.admit(ctx, newLimits, id)
+		m.admitMu.Unlock()
+		if err != nil {
+			return err
+		}
+	}
+
+	var cause *model.DeathCause
+	if raisesMemory && rec.DeathCause == model.CauseResourceExceeded {
+		cleared := model.CauseNone
+		cause = &cleared
+	}
+	if err := m.deps.Store.UpdateBinding(ctx, id, rec.State, b, cause); err != nil {
+		return fmt.Errorf("update: %w", err)
 	}
 	return nil
 }
@@ -766,6 +916,39 @@ func (m *Mediator) SweepOrphanLayers(ctx context.Context) error {
 	return nil
 }
 
+// SweepOrphanOverlays reclaims Overlay storage units backing no sandbox record
+// (§4.4-A) — the unit twin of SweepOrphanLayers, and the retry §4.4 licenses for a
+// destroy whose byte reclamation failed ("删字节失败不阻塞…由 sweep 异步重试").
+// Without it a failed DestroyOverlay leaked its unit forever: the record is gone,
+// so nothing else ever revisits that OverlayID.
+//
+// `live` is every OverlayID the store still has a sandbox row for, in ANY state —
+// a `creating` or `paused` sandbox's unit is emphatically not an orphan. `building`
+// is snapshotted as LATE as possible, immediately before the call, because it
+// guards a stale-snapshot race rather than a write-order one: `live` is read first,
+// so a create committing after that read presents as bytes with no live entry.
+func (m *Mediator) SweepOrphanOverlays(ctx context.Context) error {
+	recs, err := m.deps.Store.ListSandboxes(ctx)
+	if err != nil {
+		return fmt.Errorf("sweep overlays: list sandboxes: %w", err)
+	}
+	live := make([]string, 0, len(recs))
+	for _, r := range recs {
+		if r.Overlay != "" {
+			live = append(live, string(r.Overlay))
+		}
+	}
+	building := m.buildingOverlayIDs()
+	n, err := m.deps.Rootfs.SweepOrphanOverlays(ctx, live, building)
+	if err != nil {
+		return fmt.Errorf("sweep overlays: %w", err)
+	}
+	if n > 0 {
+		m.deps.Logf("sweep overlays: reclaimed %d orphan Overlay unit(s)", n)
+	}
+	return nil
+}
+
 // resolveLower walks the authoritative `templates.parent` lineage from the given
 // Template down to its base, returning the read-only lower STACK leaf-first
 // (§5.B multi-lowerdir: [leaf, ...ancestors, base]). The mediator owns this walk
@@ -796,6 +979,32 @@ func (m *Mediator) resolveLower(ctx context.Context, template model.TemplateID) 
 
 // buildingLayerIDs snapshots the in-flight-Promote keep-set (§4.4-A). Ordering is
 // irrelevant — it is a set to the provider.
+// markBuildingOverlay / unmarkBuildingOverlay bracket the window in which an
+// Overlay unit exists on the backend but the sweep's view of the store may not yet
+// include its sandbox row (see buildingOverlays).
+func (m *Mediator) markBuildingOverlay(id model.OverlayID) {
+	m.mu.Lock()
+	m.buildingOverlays[id] = true
+	m.mu.Unlock()
+}
+
+func (m *Mediator) unmarkBuildingOverlay(id model.OverlayID) {
+	m.mu.Lock()
+	delete(m.buildingOverlays, id)
+	m.mu.Unlock()
+}
+
+// buildingOverlayIDs snapshots the in-flight-create keep-set.
+func (m *Mediator) buildingOverlayIDs() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]string, 0, len(m.buildingOverlays))
+	for id := range m.buildingOverlays {
+		out = append(out, string(id))
+	}
+	return out
+}
+
 func (m *Mediator) buildingLayerIDs() []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1095,7 +1304,7 @@ func (m *Mediator) reclaimOrphanOverlay(ctx context.Context, rec model.Sandbox, 
 // container would be optimistically adopted with an un-serving endpoint: if L2
 // does not answer, we demote to paused (recoverable via a fresh cold-start on the
 // next resume) rather than record a dead handle. It is a SINGLE boot-time probe,
-// deliberately NOT the continuous four-quadrant health classifier (deferred to
+// deliberately NOT the continuous health classifier (deferred to
 // open-decisions §2 §4.4-A row).
 func (m *Mediator) adoptOrDemote(ctx context.Context, rec model.Sandbox) (bool, error) {
 	l := m.lock(rec.ID)
@@ -1116,13 +1325,13 @@ func (m *Mediator) adoptOrDemoteLocked(ctx context.Context, rec model.Sandbox) (
 	// L2 readiness: an L1-live unit that does not answer Health right now is not
 	// cleanly adoptable — treat as not-serving and demote (aligns adopt with
 	// cold-start ⑦; §4.3 two-layer probe).
+	// notServing records that we are demoting an L1-ALIVE unit purely because it
+	// does not answer Health. Nothing died, so there is no cause to write — see the
+	// commit below, which passes nil rather than stamping one.
+	notServing := false
 	if alive && !m.probeReady(ctx, pl) {
 		alive = false
-		// L1 said alive, so nothing died and the provider reported no meaningful
-		// cause. Demoting an alive-but-not-serving unit must NOT stamp a death cause
-		// on it — that would be inventing one (§2.4 不许猜) and could wrongly pin it
-		// as resource-terminated, blocking every future resume.
-		cause = runtime.CauseUnknown
+		notServing = true
 	}
 	if !alive {
 		// dead / not-serving → involuntary pause (§4.2). Its placement, if any, is
@@ -1135,8 +1344,20 @@ func (m *Mediator) adoptOrDemoteLocked(ctx context.Context, rec model.Sandbox) (
 		// The death cause is committed in THIS SAME CAS (§4.3 死因随降级 CAS 同一次
 		// 提交): the moment this returns, the placement may be reclaimed and the
 		// signal is gone forever, so there is no "write it just after" option.
-		dc := deathCauseOf(cause)
-		if err := m.deps.Store.CompareAndSetState(ctx, rec.ID, model.Running, model.Paused, newEvent(rec.ID, "crash-paused", model.Paused), &dc); err != nil && err != store.ErrConflict {
+		//
+		// EXCEPT when the unit was L1-alive and merely not serving: nothing died, so
+		// there is no cause to record. Pass nil (leave the column untouched) rather
+		// than stamping CauseUnknown — "unknown" means "it is GONE but why is
+		// undeterminable" (see model.DeathCause), which would be a false statement
+		// about a unit L1 just reported as alive, i.e. exactly the guessing §2.4
+		// forbids. The reaper's transport-down escalation passes nil for the same
+		// reason.
+		var causePtr *model.DeathCause
+		if !notServing {
+			dc := deathCauseOf(cause)
+			causePtr = &dc
+		}
+		if err := m.deps.Store.CompareAndSetState(ctx, rec.ID, model.Running, model.Paused, newEvent(rec.ID, "crash-paused", model.Paused), causePtr); err != nil && err != store.ErrConflict {
 			return false, fmt.Errorf("demote to paused: %w", err) // uncertain → protect
 		}
 		return false, nil

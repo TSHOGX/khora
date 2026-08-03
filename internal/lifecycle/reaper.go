@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"engine/internal/model"
@@ -10,8 +11,8 @@ import (
 
 // Reaper is the engine's first autonomous background control loop (§4.3 /
 // reaper-health D0): it is NOT an independent collector but a CONSUMER of the
-// health model. Each tick it classifies every sandbox (§4.3 four quadrants) and
-// drives, per quadrant, the automatic/involuntary lifecycle transitions the
+// health model. Each tick it classifies every sandbox (§4.3 health states) and
+// drives, per health state, the automatic/involuntary lifecycle transitions the
 // state machine (§4.1) names but nothing else triggers — auto-pause, evict, and
 // the LIVE (not just boot-time) crash-pause. It also folds in the periodic
 // reconcile so one tick classifies once and both consumers dispatch off it
@@ -117,9 +118,18 @@ func (r *Reaper) tick(ctx context.Context) {
 	if err := r.m.SweepOrphanLayers(ctx); err != nil {
 		r.m.deps.Logf("reaper: orphan-layer sweep (retried next tick): %v", err)
 	}
+	// §4.4-A orphan-UNIT sweep: reclaim Overlay storage units backing no sandbox
+	// row. This is what makes §4.4's licensed retry real rather than deferred to the
+	// next restart — a DestroyOverlay that failed at 10:00 must not hold its
+	// subvolume and quota row until reboot. Runs AFTER the reconcile above, which
+	// may have deleted `creating` records, so their units are collected in the same
+	// tick rather than the next one. Non-fatal, same skip-and-log discipline.
+	if err := r.m.SweepOrphanOverlays(ctx); err != nil {
+		r.m.deps.Logf("reaper: orphan-unit sweep (retried next tick): %v", err)
+	}
 }
 
-// Sweep is one full pass: classify every sandbox and dispatch per quadrant /
+// Sweep is one full pass: classify every sandbox and dispatch per health state /
 // per TTL (reaper-health D4). Serial per-sandbox, single full scan — enough for
 // a single node with a bounded sandbox count; batching/rate-limiting is an
 // additive tuning change that does not alter this shape (reaper-health D4).
@@ -160,7 +170,7 @@ func (r *Reaper) Sweep(ctx context.Context) {
 	}
 }
 
-// sweepRunning classifies one `running` sandbox and disposes per quadrant, all
+// sweepRunning classifies one `running` sandbox and disposes per health state, all
 // under a NON-BLOCKING transition lock (reaper-health D3): a sandbox with a held
 // lock has a verb driving it (in-flight resume / user pause) → skip this round,
 // no race, no misclassification. The lock is held across classify AND dispose so
@@ -193,7 +203,7 @@ func (r *Reaper) sweepRunning(ctx context.Context, rec model.Sandbox, downThisTi
 		// now by the reaper. Not re-confirmed transport-down → streak pruned at
 		// sweep end (this is death, not a transient).
 		//
-		// BOTH quadrants crash-pause — the state is `paused` either way. What differs
+		// BOTH health states crash-pause — the state is `paused` either way. What differs
 		// is the CAUSE committed alongside it (§4.3): the classifier read it while the
 		// placement was still intact, and pauseLocked persists it in the SAME commit
 		// as the CAS, because a moment later teardown destroys the evidence. That
@@ -205,7 +215,7 @@ func (r *Reaper) sweepRunning(ctx context.Context, rec model.Sandbox, downThisTi
 			r.m.deps.Logf("reaper: crash-pause %s (retried next tick): %v", cur.ID, err)
 		} else if err == nil {
 			r.m.deps.Logf("reaper: %s crash-paused, health=%s death-cause=%s%s",
-				cur.ID, h, dc, resumeNote(h))
+				cur.ID, h, dc, resumeNote(h, cur.Retention))
 		}
 	case HealthTransportDown:
 		// re-confirm the streak this tick BEFORE dispatch; the D4b budget is read
@@ -223,12 +233,19 @@ func (r *Reaper) sweepRunning(ctx context.Context, rec model.Sandbox, downThisTi
 
 // resumeNote spells out the disposition in the log line, so an operator reading
 // "crash-paused" can tell whether the engine intends to bring it back (§4.3's two
-// parallel quadrants are otherwise indistinguishable in a log).
-func resumeNote(h Health) string {
-	if h == HealthResourceTerminated {
-		return " (will NOT resume: raise the cap or destroy it, §4.3)"
+// parallel health states are otherwise indistinguishable in a log).
+func resumeNote(h Health, retention time.Duration) string {
+	if h != HealthResourceTerminated {
+		return ""
 	}
-	return ""
+	// Name the remedy AND the deadline. "等人工介入" has a clock: retention runs from
+	// this demotion's UpdatedAt, and past it the reaper evicts — Overlay artifact
+	// included (§4.3). An operator who is not told that will assume the sandbox
+	// waits indefinitely.
+	if retention <= 0 {
+		return " (will NOT resume: raise memory_byte via PATCH, or destroy it; retention=0 so it is never evicted, §4.3)"
+	}
+	return fmt.Sprintf(" (will NOT resume: raise memory_byte via PATCH, or destroy it; evicted in %s if nobody intervenes, Overlay included, §4.3)", retention)
 }
 
 // autoPauseLocked auto-pauses an idle sandbox — with the D3 activity-race guard.

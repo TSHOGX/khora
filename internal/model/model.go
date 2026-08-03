@@ -121,11 +121,16 @@ const (
 	// dead. Not a death cause — the absence of one.
 	CauseNone DeathCause = ""
 	// CauseUnknown = the unit is gone but WHY could not be determined. A
-	// first-class legal value, NOT an error (§4.3): the disposition is to treat
-	// it as dead-recoverable and resume, with bounded retry self-correcting a
-	// misread (if it really was the RAM cap, the same workload re-triggers
-	// termination, this time in the control plane's plain view). Providers MUST
-	// report this rather than guess (§2.4 不许猜).
+	// first-class legal value, NOT an error (§4.3): the disposition is to treat it
+	// as dead-recoverable, which a caller may then resume. Self-correction is
+	// STRUCTURAL rather than counted: if it really was the RAM cap, the same
+	// workload re-triggers termination after that resume — this time in the control
+	// plane's plain view — and THAT observation records the real cause, after which
+	// the persisted fact refuses further resumes. There is no resume-attempt bound
+	// and none is needed: the engine never resumes a dead-recoverable sandbox
+	// itself (§4.1 lists no such automatic transition), so the retry is a caller's
+	// explicit choice, not an engine loop. Providers MUST report this rather than
+	// guess (§2.4 不许猜).
 	CauseUnknown DeathCause = "unknown"
 	// CauseGone = the unit died for a reason that is NOT a resource cap (sentry
 	// crash, external kill, clean guest exit). Disposition: dead-recoverable →

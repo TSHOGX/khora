@@ -42,10 +42,10 @@ type fakeRootfs struct {
 	calls     []string
 	failMount bool
 	builtins  []string // boot-seed list returned by ListBuiltinTemplates
-	// measuredBytes is what MeasuredBytes reports (the §3.4 admission gate's
-	// layer-bytes term); measureErr makes it fail, so the fail-closed path can be
+	// uncappedBytes is what UncappedBytes reports (the §3.4 admission gate's
+	// second term); measureErr makes it fail, so the fail-closed path can be
 	// asserted.
-	measuredBytes int64
+	uncappedBytes int64
 	measureErr    error
 	// promoteGate blocks PromoteToTemplate mid-freeze (bytes-down, row-not-yet
 	// window) until closed; promoteReached (if set) is closed when the freeze is
@@ -95,16 +95,17 @@ func (f *fakeRootfs) OpenOverlay(_ context.Context, id string, lower []string, c
 	return &rootfs.Overlay{ID: id, Template: tmpl, Lower: append([]string(nil), lower...)}, nil
 }
 
-// MeasuredBytes backs the §3.4 admission gate's layer-bytes term (rootfs-overlay
-// D6.5: squota does not cover layer bytes, so they are accounted separately).
-func (f *fakeRootfs) MeasuredBytes(context.Context) (int64, error) {
-	f.log("MeasuredBytes")
+// UncappedBytes backs the §3.4 admission gate's second term — bytes under no
+// declared cap (rootfs-overlay D6.5: squota does not charge layer bytes to any
+// sandbox, so they are accounted separately from the caps).
+func (f *fakeRootfs) UncappedBytes(context.Context) (int64, error) {
+	f.log("UncappedBytes")
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.measureErr != nil {
 		return 0, f.measureErr
 	}
-	return f.measuredBytes, nil
+	return f.uncappedBytes, nil
 }
 func (f *fakeRootfs) PromoteToTemplate(ctx context.Context, o *rootfs.Overlay, newID string) error {
 	f.log("PromoteToTemplate:" + o.ID + "->" + newID)
@@ -150,6 +151,14 @@ func (f *fakeRootfs) ListBuiltinTemplates(context.Context) ([]string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.builtins...), nil
+}
+
+// SweepOrphanOverlays records the (live,building) keep-sets so the mediator's
+// wiring can be asserted as pure logic (§4.4-A unit sweep). Reclaims nothing.
+func (f *fakeRootfs) SweepOrphanOverlays(_ context.Context, live, building []string) (int, error) {
+	f.log("SweepOrphanOverlays:live=" + strings.Join(append([]string(nil), live...), "|") +
+		";building=" + strings.Join(append([]string(nil), building...), "|"))
+	return 0, nil
 }
 
 // SweepOrphanLayers records the (live,building) keep-sets it was called with
