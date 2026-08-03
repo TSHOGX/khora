@@ -44,6 +44,13 @@ func filesPath(r *http.Request) (string, error) {
 // classification as the RPC path's fsErr — one rule, two encodings, so a caller
 // cannot observe a file as not-found over one path and permission-denied over the
 // other.
+//
+// It covers fewer errnos than fsErr, and only because fewer are reachable: this
+// route does open / create / rename-within-a-directory, so ENOTEMPTY, EXDEV and
+// ELOOP cannot arise here. Anything unlisted lands on 500, which the host client
+// turns into `internal` — the same fallback fsErr uses. If this route ever grows a
+// verb that can produce one of those, add the row rather than relying on the
+// fallback, since `internal` reads as an engine bug.
 func httpFsErr(w http.ResponseWriter, op, path string, err error) {
 	status := http.StatusInternalServerError
 	switch {

@@ -5,9 +5,13 @@
 //
 // process data plane (transport D4.3): Start / Connect (server-stream) /
 // StreamInput (client-stream) / SendInput / SendSignal / Update / CloseStdin /
-// List. keepalive is a ProcessEvent variant on long output streams (D4.2). fs
-// exposes Read (offset) / Write; the rest of the fs surface
-// (List/Stat/MakeDir/Remove/Move + multipart bypass) is an additive follow-on.
+// List. keepalive is a ProcessEvent variant on long output streams (D4.2).
+//
+// fs data plane (transport D4.4): Read (offset) / Write / Stat / List (depth) /
+// MakeDir / Remove / Move, all unary and no watch. Large files do NOT grow a
+// chunked RPC — they use the streaming HTTP bypass on the guest's same listener
+// (GET|PUT /files?path=), because what matters is that neither end holds the whole
+// file, not the message size.
 //
 // Vocabulary boundary (§1.1): NO agent / session / turn / tag — process is
 // addressed by guest-native pid only (transport D4.6).
