@@ -36,6 +36,6 @@ decision, hence an ADR rather than spec content.
 ## Caveat carried forward
 
 Go's type system does **not** protect the invariants that actually matter here
-(§4.4 the three, §4.3 quadrant, §2.4 fail-closed) — those live in
+(§4.4 the three, §4.3 health classification, §2.4 fail-closed) — those live in
 concurrency/failure behavior. See `CLAUDE.md` → Execution & verification: a green
 build proves nothing about them; fault-injection/e2e tests at the seams do.

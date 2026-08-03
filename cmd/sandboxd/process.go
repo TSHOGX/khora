@@ -185,7 +185,7 @@ func (p *proc) broadcast(f frame) {
 // seam (client.go drainEvents ignores stream.Err(); ProcessEvent has no error
 // field) cannot carry a terminal error across the fan-out channel. Making
 // subscriber-drop an observable liveness signal belongs with the health
-// quadrant / connection-activity work (§4.3), not here.
+// health-state / connection-activity work (§4.3), not here.
 func (p *proc) finish(exitCode int) {
 	p.mu.Lock()
 	p.ended = true

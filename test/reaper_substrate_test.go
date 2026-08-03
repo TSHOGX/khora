@@ -1,7 +1,7 @@
 //go:build substrate
 
 // L3/L4 §4.3 reaper acceptance against REAL runsc. Drives the assembled engine
-// + reaper through each health quadrant and TTL disposition on live containers:
+// + reaper through each health state and TTL disposition on live containers:
 // false-idle guard (D2), multi-connection idle (§3.2), idle→auto-pause,
 // live killed-container→crash-pause, transport-down same-IP restart,
 // transport crash-loop escalation (D4b), paused→evict, and the reaper-vs-verb
@@ -80,7 +80,7 @@ func killTransportChild(t *testing.T, cl transport.Client) {
 	}
 }
 
-// idle sandbox (no I/O) → auto-paused after idle_timeout (§4.3 idle quadrant).
+// idle sandbox (no I/O) → auto-paused after idle_timeout (§4.3 idle state).
 func TestReaperIdleAutoPauseRealRunsc(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("needs root")

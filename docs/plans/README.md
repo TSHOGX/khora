@@ -21,6 +21,7 @@ built is now part of the converged architecture; read `docs/spec/`, not a plan:
 | **M3** ✅ | Transport depth (§5.E): PTY + multi-connection fan-out + `Connect` reconnect + bounded ring-replay + the two D4.3 fan-out invariants; external data-plane Connect projection (D6) | §5.E · §3.2 · §6 |
 | **M4** ✅ | Reaper + health classification (two-tier liveness × guest-side connection activity) + live periodic reconcile: `auto-pause` / `evict` / live `crash-pause` | §4.3 · §4.4-A |
 | **M5** ✅ | Uniform object model on Template lineage: first-class Template rows (opaque ID + `parent` lineage, **existence-as-state**, **derived** refcount) + FK-enforced reference-reclaim atomicity + safe delete/GC + boot seed + orphan-layer sweep + Promote (multi-lowerdir freeze, bytes-first) | §3.1 · §4.3 · §5.B · §6.1 |
+| **M6** ✅ | Resource governance — §3.4's limits became real enforcement. Three dimensions, three mechanisms: CPU rate → cgroup (engine builds the parent, runsc owns the leaf, cap asserted post-launch because the trap fails OPEN); disk capacity → btrfs subvolume + squota on Overlay upper+work as ONE quota unit; RAM → host memcg with the one-knob/two-values split + `oom.group=1` (a **safety** limit, hence the `resource-terminated` disposition + death cause persisted in the demotion CAS). Plus the no-oversubscribe admission gate (two disjoint terms, a metered axis requires a cap) and `PATCH` as the Binding write point. Built `internal/btrfs` as a leaf package, first consumer the Overlay upper. | §2.3 · §2.4 · §3.4 · §4.1 · §4.3 · §5.A · §5.B · §6.1 |
 
 Acceptance for the shipped milestones lives in the substrate tests
 (`test/*_substrate_test.go`), which state each assertion's property inline.
@@ -29,7 +30,6 @@ Acceptance for the shipped milestones lives in the substrate tests
 
 | # | Plan | Capability delivered | Anchors |
 | --- | --- | --- | --- |
-| **M6** | [`M6-resource-governance.md`](./M6-resource-governance.md) | Resource governance — §3.4's limits become real enforcement. Three dimensions, three mechanisms: CPU/IO rate → cgroup; disk capacity → btrfs subvolume + squota on the Overlay upper+work; RAM → host memcg + `oom.group=1` (a **safety** limit — exceeding it terminates the sandbox, so it also needs the `resource-terminated` disposition). Plus the no-oversubscribe admission gate. Builds `internal/btrfs` as a leaf package, first consumer being the Overlay upper. | §2.3 · §3.4 · §4.3 · §5.A · §5.B |
 | **M7** | *(planned)* | Volume: independent subsystem + own `volume.Backend` seam (local = btrfs subvolume; remote-FUSE deferred), mount table, exclusive lease (= refcount mount row), access modes, direct-write regime, btrfs snapshot/clone. Reuses M6's `internal/btrfs` package unchanged. | §5.C · volume D1–D8 |
 | **M8** | *(planned)* | Network egress data plane + layered deny-set + credential injection (**security-critical**) | §5.D · §2.4 |
 | **M9** | *(planned)* | Credential store seam | §5.D |
@@ -52,24 +52,24 @@ object-model case directly: `create-from-Template` was an *unprotected reference
 **uniform object model + reference-reclaim atomicity** foundation (§4.3) that
 Volume (M7) reuses — its exclusive lease *is* a refcount mount row (§5.C).
 
-**Resource governance (M6) comes before Volume** for three reasons:
+**Resource governance (M6) came before Volume** for three reasons:
 
-- **§2.3 asserts an invariant nothing currently enforces.** "A guest's `dd` only
+- **§2.3 asserted an invariant nothing enforced.** "A guest's `dd` only
   makes its own `write()` fail, it cannot fill the host disk" holds only with a
   capacity cap, and §2.3 itself notes this dimension is *not* guarded by pillar ①
-  (syscall interception virtualizes syscalls, not resource usage) — so one legal
-  `write()` breaches it today. By contrast §5.D's gap is not a hole: the netns has
+  (syscall interception virtualizes syscalls, not resource usage) — so before M6 one
+  legal `write()` breached it. By contrast §5.D's gap is not a hole: the netns has
   one /30 veth pair and no default route, so egress is already deny-all, and the
   network milestone *opens* a controlled path rather than closing a leak.
 - **The dependency runs this way.** Volume needs subvolumes (for cheap snapshots
   and its own cap), but subvolume+quota does not need Volume — and the Overlay
   upper is already a consumer, one per sandbox. So the shared primitive
-  (`internal/btrfs`) lands with its first consumer here, and Volume imports it
+  (`internal/btrfs`) landed with its first consumer there, and Volume imports it
   unchanged.
 - **Risk separation.** Volume is the largest rung (new subsystem + new seam + new
   store table + new uniqueness invariant + six mediator hooks + snapshot/clone +
   §6 endpoints). Proving the capacity primitive against the simpler consumer
-  first — single writer, no shared-rw, no snapshots — keeps two independent risk
+  first — single writer, no shared-rw, no snapshots — kept two independent risk
   sources off one review gate.
 
 The security-critical egress work (M8) still lands only after the lifecycle +

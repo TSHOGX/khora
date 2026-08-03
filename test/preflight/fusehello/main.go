@@ -1,6 +1,6 @@
 // fusehello — a minimal read-only FUSE filesystem spoken directly over
 // /dev/fuse using only the Go stdlib (syscall + encoding/binary), so it builds
-// with GO111MODULE=off and no external module. It exists solely for M6 Spike 2:
+// with GO111MODULE=off and no external module. It exists solely for M7 (Volume) Spike 2:
 // mount it on the HOST, bind it into a runsc guest, and prove gVisor's gofer
 // proxies a FUSE-backed mountpoint into the sandbox as a normal POSIX dir.
 //

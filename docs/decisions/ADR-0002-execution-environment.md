@@ -46,6 +46,8 @@ the machine can't reach).
 | runsc | `release-20260714.0` (spec 1.2.1), systrap, no KVM |
 | overlay / cgroup | overlay kernel module present · cgroup **v2** (cgroup2fs) |
 | engine scratch fs | **btrfs** on `/dev/vdb1` at `/home/hsw/engine` — native, not virtiofs; `cp --reflink=always` works (cheap §5.B CoW) |
+| btrfs quota mode | **`squota`** (`/sys/fs/btrfs/*/qgroups/mode`) — the capacity axis depends on this specific mode, not merely on "btrfs" (why squota and not full qgroup: rootfs-overlay D6.2). The mode **cannot be changed here**: `BTRFS_IOC_QUOTA_CTL` returns EPERM even as root with full `CAP_SYS_ADMIN` |
+| btrfs-progs | **v6.17.1** — an explicit dependency: `internal/btrfs` shells out to `btrfs` and `findmnt` (both at `/usr/bin`) |
 | privilege | passwordless `sudo` available; mount/netns/veth/cgroup/runsc all need root |
 
 ## Substrate validation matrix
@@ -57,6 +59,10 @@ the machine can't reach).
 | pinned runsc flags launch + exec `/bin/sh` | arm64 | all five pins are **global** flags (before the `run` subcommand); config `root.path` = the externally-merged overlay dir |
 | network: host dials an in-guest listener through the sentry netstack by veth IP; fresh netns → new IP | amd64 (ECS) + arm64 | sentry-terminated (`ss` shows zero kernel listeners while host gets responses); `ip netns del` cascades the peer veth; mechanism in §5.A |
 | §4.4-A reconcile: enumerate + idempotent teardown of placement resources | arm64 | primitives + reclaim order in model.md §4.4-A + reaper-health D4 |
+| cgroup v2 **leaf ownership**: engine creates the parent + delegates `subtree_control`, runsc creates the leaf and writes limits only to a leaf it created itself | arm64 | pre-creating the *full* path makes the cap **silently not apply while launch still succeeds** — fails OPEN, hence the mandatory post-launch read-back assertion (§5.A) |
+| RAM cap is hard only with swap pinned: OCI `swap == limit` ⇒ `memory.swap.max=0`; `memory.high` unusable | arm64 | limit alone lets the cgroup page out into zram and the cap stops binding; `memory.high` + unreclaimable anon turns throttling into a hang (§5.A / §3.4) |
+| squota capacity cap: guest write past the cap gets a clean `ENOSPC` through the gofer chain, **sandbox survives**, merged view uncorrupted | arm64 | reflinked copy-up is free under squota, so the cap governs newly-written bytes (rootfs-overlay D6.2/D6.5) |
+| `memory.events`' `oom_group_kill` is readable as a death cause, and only while the placement is intact | arm64 | `oom_group_kill`, **not** `oom_kill` (the latter counts per-task and read 9 for one whole-group termination); `runsc delete` destroys the signal, which is why `Adopt` must read it before teardown (§4.3 / reaper-health D4c) |
 
 **Privilege.** `--network=sandbox` rejects `--rootless`, so the
 orchestrator/launcher needs root (or CAP_NET_ADMIN+CAP_SYS_ADMIN) to materialize

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# spike-qgroup-enospc.sh — M6 Spike 3: does a btrfs qgroup limit produce a clean,
+# spike-qgroup-enospc.sh — M6 (resource governance) Spike: does a btrfs qgroup limit produce a clean,
 # guest-visible ENOSPC through the WHOLE real stack —
 #   btrfs subvolume (qgroup limit) → overlayfs upper+work inside it
 #   → runsc --overlay2=none --file-access=shared gofer → sentry → guest process?
