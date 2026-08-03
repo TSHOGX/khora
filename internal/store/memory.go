@@ -177,6 +177,31 @@ func (m *Memory) CompareAndSetState(_ context.Context, id model.SandboxID, expec
 	return nil
 }
 
+func (m *Memory) UpdateBinding(_ context.Context, id model.SandboxID, expected model.Lifecycle, b Binding, cause *model.DeathCause) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s, ok := m.rec[id]
+	if !ok {
+		return ErrNotFound
+	}
+	// Conditional on the state the caller decided against (§4.4-B), so a resume or
+	// evict that landed in between makes this fail rather than write against a
+	// decision that no longer holds.
+	if s.State != expected {
+		return ErrConflict
+	}
+	s.Limits, s.IdleTimeout, s.Retention = b.Apply(s)
+	// Same lock as the field writes (§4.4-C): a raise that lifts the §4.3 refusal
+	// must not be observable without the cap that justifies it.
+	if cause != nil {
+		s.DeathCause = *cause
+	}
+	// UpdatedAt deliberately NOT touched — `retention` is measured from it (§4.3),
+	// so bumping it here would extend an eviction deadline as a side effect.
+	m.rec[id] = s
+	return nil
+}
+
 // SetUpdatedAtForTest backdates a record's UpdatedAt. TEST-ONLY seam: reaper
 // retention math measures "how long paused" from UpdatedAt (the last state
 // change), and tests need to simulate a sandbox paused long ago without

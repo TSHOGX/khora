@@ -74,6 +74,54 @@ type Event struct {
 	OccurredAt time.Time
 }
 
+// Binding is the mutable slice of a sandbox's §3.4 Binding — what §6.1 PATCH may
+// rewrite. Each field is a POINTER so "not given" is distinguishable from "set to
+// zero", which is load-bearing here: on these axes zero is itself a meaningful
+// instruction (`0 = unlimited` for a cap, `retention: 0` = never evict), so a
+// value-typed struct could not express "leave this alone" at all.
+//
+// Only fields the engine can actually re-materialize appear here. Template and
+// Overlay are NOT Binding-mutable (changing either would make it a different
+// sandbox, §3.3), and State is not here because this is not a transition — it is
+// conditional ON the state (§4.4-B).
+type Binding struct {
+	CPUMillis   *int64
+	MemoryByte  *int64
+	DiskByte    *int64
+	IdleTimeout *time.Duration
+	Retention   *time.Duration
+}
+
+// IsEmpty reports whether the Binding asks for no change at all, which callers
+// treat as a no-op rather than a write.
+func (b Binding) IsEmpty() bool {
+	return b.CPUMillis == nil && b.MemoryByte == nil && b.DiskByte == nil &&
+		b.IdleTimeout == nil && b.Retention == nil
+}
+
+// Apply folds the requested changes onto a copy of the current values, returning
+// what the record should hold. Kept here, next to the type, so both backends and
+// the mediator agree on "omitted = unchanged" rather than each re-deriving it.
+func (b Binding) Apply(cur model.Sandbox) (model.Limits, time.Duration, time.Duration) {
+	lim, idle, ret := cur.Limits, cur.IdleTimeout, cur.Retention
+	if b.CPUMillis != nil {
+		lim.CPUMillis = *b.CPUMillis
+	}
+	if b.MemoryByte != nil {
+		lim.MemoryByte = *b.MemoryByte
+	}
+	if b.DiskByte != nil {
+		lim.DiskByte = *b.DiskByte
+	}
+	if b.IdleTimeout != nil {
+		idle = *b.IdleTimeout
+	}
+	if b.Retention != nil {
+		ret = *b.Retention
+	}
+	return lim, idle, ret
+}
+
 // Store is the authoritative control-plane record backend (§1.1 / §4.4-C). It is
 // a Behavior seam (§1.3): the transition methods PROMISE "lifecycle-state change
 // + outbox append = single atomic commit" and each backend DELIVERS it — SQLite
@@ -126,6 +174,26 @@ type Store interface {
 	// coming back from UnpublishedEvents. Idempotent: marking an unknown or
 	// already-marked ID is a no-op.
 	MarkPublished(ctx context.Context, eventID string) error
+
+	// UpdateBinding rewrites a sandbox's Binding fields (§3.4) — the create-time
+	// write point's only sibling, backing §6.1 PATCH. It is CONDITIONAL on the
+	// current lifecycle-state, the same shape as CompareAndSetState (§4.4-B): the
+	// caller declares the state it decided against, and a mismatch is ErrConflict.
+	// That is what keeps a concurrent resume/evict from landing between the
+	// mediator's decision and this write.
+	//
+	// It does NOT change state, and it must NOT touch updated_at: `retention` is
+	// measured from that column (the moment the sandbox entered `paused`, §4.3), so
+	// bumping it here would silently extend an eviction deadline as a side effect of
+	// editing an unrelated cap.
+	//
+	// cause follows CompareAndSetState's convention exactly (nil = leave untouched,
+	// non-nil CauseNone = clear). A raise of the RAM cap passes &CauseNone so the
+	// §4.3 resource-terminated refusal is lifted in the SAME commit as the cap that
+	// lifts it — otherwise the documented remedy deadlocks: the guard reads
+	// death_cause, and nothing else clears it before a successful resume, which the
+	// guard itself prevents.
+	UpdateBinding(ctx context.Context, id model.SandboxID, expected model.Lifecycle, b Binding, cause *model.DeathCause) error
 
 	// --- Template CRUD (§4.3 uniform object model / M5) ---------------------
 	//

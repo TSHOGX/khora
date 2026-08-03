@@ -34,6 +34,19 @@ func RunContract(t *testing.T, mk Factory) {
 	t.Run("DeleteIdempotentShape", func(t *testing.T) { testDelete(t, mk) })
 	t.Run("List", func(t *testing.T) { testList(t, mk) })
 	t.Run("OutboxAtomicWithState", func(t *testing.T) { testOutboxAtomic(t, mk) })
+
+	// Death cause rides the CAS (§4.3 / §4.4-C): the demotion and the cause are
+	// ONE commit, so the cause write is part of the SAME contract both backends
+	// must honor — not a SQLite detail.
+	t.Run("CASPersistsDeathCause", func(t *testing.T) { testCASPersistsDeathCause(t, mk) })
+	t.Run("CASNilCauseLeavesDeathCause", func(t *testing.T) { testCASNilCauseLeavesDeathCause(t, mk) })
+	t.Run("CASCauseNoneClearsDeathCause", func(t *testing.T) { testCASCauseNoneClears(t, mk) })
+
+	// UpdateBinding (§3.4 / §6.1 PATCH): the create-time write point's only
+	// sibling. Its semantics are contract, not backend detail — omitted-means-
+	// unchanged, conditional on state, and it must NOT move updated_at.
+	t.Run("UpdateBindingPartialAndConditional", func(t *testing.T) { testUpdateBinding(t, mk) })
+
 	t.Run("OutboxNilPublishesNothing", func(t *testing.T) { testOutboxNil(t, mk) })
 	t.Run("MarkPublishedIdempotent", func(t *testing.T) { testMarkPublished(t, mk) })
 	t.Run("OutboxRowOutlivesRecord", func(t *testing.T) { testOutboxOutlivesRecord(t, mk) })
@@ -68,7 +81,27 @@ func mkRec(id string) model.Sandbox {
 		// TTL Binding (§3.4 / §4.3): non-zero, distinct values so the round-trip
 		// assertion catches a column swapped or dropped.
 		IdleTimeout: 30 * time.Minute, Retention: 12 * time.Hour,
+		// Limits Binding (§3.4): same discipline — non-zero and pairwise distinct
+		// (and distinct from the TTL nanos above) so a cpu/memory/disk column
+		// swapped or dropped is caught on read-back. The three axes are three
+		// mechanisms with three different overrun consequences, never
+		// interchangeable knobs (§3.4), so a silent swap is a real bug class.
+		Limits:    model.Limits{CPUMillis: 1500, MemoryByte: 256 << 20, DiskByte: 512 << 20},
 		CreatedAt: now, UpdatedAt: now,
+	}
+}
+
+// wantLimits mirrors mkRec's Limits Binding — the single place the expected
+// values live, so GetSandbox and ListSandboxes assert against one source.
+var wantLimits = model.Limits{CPUMillis: 1500, MemoryByte: 256 << 20, DiskByte: 512 << 20}
+
+// assertLimits checks the §3.4 Limits Binding survived a round-trip intact.
+// Compared as a whole struct: a swap between two axes leaves each field
+// individually "plausible", so only the joint value is a real guard.
+func assertLimits(t *testing.T, where string, got model.Limits) {
+	t.Helper()
+	if got != wantLimits {
+		t.Fatalf("%s: Limits Binding roundtrip mismatch: got %+v; want %+v", where, got, wantLimits)
 	}
 }
 
@@ -93,6 +126,14 @@ func testCreateGetConflict(t *testing.T, mk Factory) {
 	// TTL Binding survives the round-trip (§3.4: stored as the concrete Binding).
 	if got.IdleTimeout != 30*time.Minute || got.Retention != 12*time.Hour {
 		t.Fatalf("TTL Binding roundtrip mismatch: idle=%s retention=%s; want 30m/12h", got.IdleTimeout, got.Retention)
+	}
+	// Limits Binding likewise (§3.4): re-applied at every placement FROM this
+	// record, so a wrong read-back silently mis-caps the sandbox.
+	assertLimits(t, "GetSandbox", got.Limits)
+	// A fresh record has no death cause — CauseNone is the resting value, the
+	// absence of a death rather than a death (§4.3).
+	if got.DeathCause != model.CauseNone {
+		t.Fatalf("fresh record DeathCause = %q; want CauseNone", got.DeathCause)
 	}
 	// duplicate ID → ErrConflict.
 	if err := s.CreateSandbox(ctx, mkRec("a"), nil); err != store.ErrConflict {
@@ -166,9 +207,141 @@ func testList(t *testing.T, mk Factory) {
 	seen := map[model.SandboxID]bool{}
 	for _, r := range l {
 		seen[r.ID] = true
+		// The list read path carries the SAME Binding as the single-record read
+		// (§3.4): reconcile lists records at boot and re-materializes caps from
+		// them, so a column dropped only from the list SELECT would mis-cap every
+		// sandbox after a restart.
+		assertLimits(t, "ListSandboxes "+string(r.ID), r.Limits)
+		if r.DeathCause != model.CauseNone {
+			t.Fatalf("ListSandboxes %s: DeathCause = %q; want CauseNone", r.ID, r.DeathCause)
+		}
+		if r.IdleTimeout != 30*time.Minute || r.Retention != 12*time.Hour {
+			t.Fatalf("ListSandboxes %s: TTL Binding mismatch: idle=%s retention=%s; want 30m/12h", r.ID, r.IdleTimeout, r.Retention)
+		}
 	}
 	if !seen["a"] || !seen["b"] {
 		t.Fatalf("list missing ids: %+v", l)
+	}
+}
+
+// testCASPersistsDeathCause: a non-nil cause is written by the SAME
+// CompareAndSetState call that changes state (§4.3 / §4.4-C). The signal is
+// volatile — once the placement is torn down the evidence is unrecoverable — so
+// there is no "write the cause just afterwards" window to fall back on.
+func testCASPersistsDeathCause(t *testing.T, mk Factory) {
+	ctx := context.Background()
+	s, _ := mk(t)
+	seedTmpl(t, s, "bare")
+	_ = s.CreateSandbox(ctx, mkRec("a"), nil)
+	_ = s.CompareAndSetState(ctx, "a", model.Creating, model.Running, nil, nil)
+
+	// the crash-paused demotion: running → paused carrying WHY (§4.1 / §4.3).
+	cause := model.CauseGone
+	if err := s.CompareAndSetState(ctx, "a", model.Running, model.Paused,
+		ev("a", "evt_crash", "crash-paused", model.Paused), &cause); err != nil {
+		t.Fatalf("CAS+cause: %v", err)
+	}
+	got, err := s.GetSandbox(ctx, "a")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	// state AND cause both committed — one commit, never one without the other.
+	if got.State != model.Paused {
+		t.Fatalf("state = %s; want paused", got.State)
+	}
+	if got.DeathCause != model.CauseGone {
+		t.Fatalf("DeathCause = %q; want %q", got.DeathCause, model.CauseGone)
+	}
+	// the event landed in the same commit too (§4.4-C).
+	if un, _ := s.UnpublishedEvents(ctx); len(un) != 1 || un[0].ID != "evt_crash" {
+		t.Fatalf("crash-paused event missing from outbox: %+v", un)
+	}
+	// resource-exceeded is the other disposition (§4.3: do NOT resume) and must
+	// round-trip as its own distinct value, not collapse into "gone".
+	rex := model.CauseResourceExceeded
+	if err := s.CompareAndSetState(ctx, "a", model.Paused, model.Running, nil, &rex); err != nil {
+		t.Fatalf("CAS+resource-exceeded: %v", err)
+	}
+	if got, _ := s.GetSandbox(ctx, "a"); got.DeathCause != model.CauseResourceExceeded {
+		t.Fatalf("DeathCause = %q; want %q", got.DeathCause, model.CauseResourceExceeded)
+	}
+	// the Limits Binding is untouched by a cause-carrying CAS — the UPDATE must
+	// not clobber neighbouring columns (§3.4: caps are stable across resume).
+	if got, _ := s.GetSandbox(ctx, "a"); got.Limits != wantLimits {
+		t.Fatalf("CAS clobbered the Limits Binding: %+v; want %+v", got.Limits, wantLimits)
+	}
+}
+
+// testCASNilCauseLeavesDeathCause: nil cause = leave death_cause UNTOUCHED
+// (store.CompareAndSetState doc / §4.3). Every non-death transition passes nil,
+// so a nil that silently cleared would erase recorded evidence: a user pause or
+// an auto-pause landing on a sandbox already known dead would destroy the fact
+// that separates dead-recoverable from resource-terminated.
+func testCASNilCauseLeavesDeathCause(t *testing.T, mk Factory) {
+	ctx := context.Background()
+	s, _ := mk(t)
+	seedTmpl(t, s, "bare")
+	_ = s.CreateSandbox(ctx, mkRec("a"), nil)
+
+	// record a cause first.
+	rex := model.CauseResourceExceeded
+	if err := s.CompareAndSetState(ctx, "a", model.Creating, model.Paused, nil, &rex); err != nil {
+		t.Fatalf("seed cause: %v", err)
+	}
+	// a nil-cause transition (user pause / auto-pause / resume attempt) must not
+	// touch it, even across several hops.
+	if err := s.CompareAndSetState(ctx, "a", model.Paused, model.Running, nil, nil); err != nil {
+		t.Fatalf("CAS nil cause: %v", err)
+	}
+	if got, _ := s.GetSandbox(ctx, "a"); got.DeathCause != model.CauseResourceExceeded {
+		t.Fatalf("nil cause erased DeathCause: got %q; want %q", got.DeathCause, model.CauseResourceExceeded)
+	}
+	if err := s.CompareAndSetState(ctx, "a", model.Running, model.Paused, nil, nil); err != nil {
+		t.Fatalf("CAS nil cause (2): %v", err)
+	}
+	got, _ := s.GetSandbox(ctx, "a")
+	if got.DeathCause != model.CauseResourceExceeded {
+		t.Fatalf("nil cause erased DeathCause across hops: got %q; want %q", got.DeathCause, model.CauseResourceExceeded)
+	}
+	// state still tracks normally — "leave the cause alone" is not "ignore the CAS".
+	if got.State != model.Paused {
+		t.Fatalf("state = %s; want paused", got.State)
+	}
+}
+
+// testCASCauseNoneClears: a non-nil CauseNone CLEARS death_cause — the
+// successful-resume path (§4.3: a sandbox that came back up is no longer
+// explained by its previous death). CauseNone is the empty string, so "nil
+// leaves untouched" vs "&CauseNone clears" is a pointer-vs-value distinction the
+// contract depends on and a backend could easily collapse.
+func testCASCauseNoneClears(t *testing.T, mk Factory) {
+	ctx := context.Background()
+	s, _ := mk(t)
+	seedTmpl(t, s, "bare")
+	_ = s.CreateSandbox(ctx, mkRec("a"), nil)
+
+	unknown := model.CauseUnknown
+	if err := s.CompareAndSetState(ctx, "a", model.Creating, model.Paused, nil, &unknown); err != nil {
+		t.Fatalf("seed cause: %v", err)
+	}
+	if got, _ := s.GetSandbox(ctx, "a"); got.DeathCause != model.CauseUnknown {
+		t.Fatalf("seeded DeathCause = %q; want %q", got.DeathCause, model.CauseUnknown)
+	}
+	// the resume: paused → running clearing the cause in the same commit.
+	none := model.CauseNone
+	if err := s.CompareAndSetState(ctx, "a", model.Paused, model.Running,
+		ev("a", "evt_resumed", "resumed", model.Running), &none); err != nil {
+		t.Fatalf("CAS+CauseNone: %v", err)
+	}
+	got, err := s.GetSandbox(ctx, "a")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.DeathCause != model.CauseNone {
+		t.Fatalf("&CauseNone did not clear DeathCause: got %q", got.DeathCause)
+	}
+	if got.State != model.Running {
+		t.Fatalf("state = %s; want running", got.State)
 	}
 }
 
@@ -199,13 +372,44 @@ func testOutboxAtomic(t *testing.T, mk Factory) {
 	if un[0].ID != "evt_1" || un[0].Kind != "resumed" || un[0].Sandbox != "a" || un[0].State != model.Running {
 		t.Fatalf("event fields mismatch: %+v", un[0])
 	}
-	// a FAILED CAS must NOT append its event (atomicity: no state change, no row).
-	if err := s.CompareAndSetState(ctx, "a", model.Paused, model.Destroyed, ev("a", "evt_bad", "destroyed", model.Destroyed), nil); err != store.ErrConflict {
+	// A FAILED CAS must write NOTHING — this is the §4.4-C property in its
+	// strongest form: the call carries an event AND a death cause, and losing the
+	// precondition must leave all three (state, cause, outbox) exactly as they
+	// were. A backend that writes the cause before checking the precondition
+	// would record a death that never happened.
+	badCause := model.CauseResourceExceeded
+	if err := s.CompareAndSetState(ctx, "a", model.Paused, model.Destroyed,
+		ev("a", "evt_bad", "destroyed", model.Destroyed), &badCause); err != store.ErrConflict {
 		t.Fatalf("expected ErrConflict, got %v", err)
 	}
 	un, _ = s.UnpublishedEvents(ctx)
 	if len(un) != 1 {
 		t.Fatalf("failed CAS leaked an outbox row: %d rows", len(un))
+	}
+	after, err := s.GetSandbox(ctx, "a")
+	if err != nil {
+		t.Fatalf("get after failed CAS: %v", err)
+	}
+	if after.State != model.Running {
+		t.Fatalf("failed CAS changed state: %s; want running", after.State)
+	}
+	if after.DeathCause != model.CauseNone {
+		t.Fatalf("failed CAS persisted a death cause: %q; want CauseNone", after.DeathCause)
+	}
+
+	// The mirror case: a failed CAS must also not ERASE an already-recorded
+	// cause. Record one via a winning CAS, then lose a CAS carrying &CauseNone —
+	// the clear must roll back with everything else.
+	rex := model.CauseResourceExceeded
+	if err := s.CompareAndSetState(ctx, "a", model.Running, model.Paused, nil, &rex); err != nil {
+		t.Fatalf("seed cause: %v", err)
+	}
+	none := model.CauseNone
+	if err := s.CompareAndSetState(ctx, "a", model.Running, model.Running, nil, &none); err != store.ErrConflict {
+		t.Fatalf("expected ErrConflict on stale expected, got %v", err)
+	}
+	if got, _ := s.GetSandbox(ctx, "a"); got.DeathCause != model.CauseResourceExceeded {
+		t.Fatalf("failed CAS cleared the recorded cause: %q; want %q", got.DeathCause, model.CauseResourceExceeded)
 	}
 }
 
@@ -594,5 +798,87 @@ func testReferenceReclaimRace(t *testing.T, mk Factory) {
 				t.Fatalf("trial %d: cleanup template: %v", i, err)
 			}
 		}
+	}
+}
+
+// testUpdateBinding pins the §6.1 PATCH write point's contract (§3.4). Four
+// properties, all of which a backend could plausibly get wrong on its own:
+// partial application, the state precondition, the updated_at prohibition, and
+// the death-cause convention it shares with CompareAndSetState.
+func testUpdateBinding(t *testing.T, mk Factory) {
+	ctx := context.Background()
+	s, _ := mk(t)
+	seedTmpl(t, s, "bare")
+	rec := mkRec("u1")
+	rec.DeathCause = model.CauseResourceExceeded
+	if err := s.CreateSandbox(ctx, rec, nil); err != nil {
+		t.Fatal(err)
+	}
+	before, err := s.GetSandbox(ctx, "u1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// (1) OMITTED MEANS UNCHANGED. Only memory is given, so the other four fields
+	// must survive verbatim — a backend that writes zeros for absent fields would
+	// silently un-cap the sandbox on every PATCH.
+	want := int64(777 << 20)
+	if err := s.UpdateBinding(ctx, "u1", model.Creating, store.Binding{MemoryByte: &want}, nil); err != nil {
+		t.Fatalf("UpdateBinding: %v", err)
+	}
+	got, err := s.GetSandbox(ctx, "u1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Limits.MemoryByte != want {
+		t.Fatalf("memory = %d; want %d", got.Limits.MemoryByte, want)
+	}
+	if got.Limits.CPUMillis != before.Limits.CPUMillis || got.Limits.DiskByte != before.Limits.DiskByte {
+		t.Fatalf("untouched axes changed: %+v → %+v", before.Limits, got.Limits)
+	}
+	if got.IdleTimeout != before.IdleTimeout || got.Retention != before.Retention {
+		t.Fatalf("untouched TTLs changed: idle %s→%s, retention %s→%s",
+			before.IdleTimeout, got.IdleTimeout, before.Retention, got.Retention)
+	}
+	// nil cause leaves the recorded cause alone, exactly as in CompareAndSetState.
+	if got.DeathCause != model.CauseResourceExceeded {
+		t.Fatalf("death cause = %q; want it untouched by a nil-cause update", got.DeathCause)
+	}
+
+	// (2) UPDATED_AT MUST NOT MOVE. `retention` is measured from it (§4.3), so a
+	// backend that refreshes it here would silently extend eviction deadlines.
+	if !got.UpdatedAt.Equal(before.UpdatedAt) {
+		t.Fatalf("UpdatedAt moved (%s → %s); PATCH must not touch it (§4.3 retention clock)",
+			before.UpdatedAt, got.UpdatedAt)
+	}
+
+	// (3) CONDITIONAL ON STATE (§4.4-B): a caller that decided against one state
+	// must not have its write land after a concurrent transition moved it.
+	other := int64(1)
+	if err := s.UpdateBinding(ctx, "u1", model.Running, store.Binding{MemoryByte: &other}, nil); err != store.ErrConflict {
+		t.Fatalf("wrong-state update = %v; want ErrConflict", err)
+	}
+	if again, _ := s.GetSandbox(ctx, "u1"); again.Limits.MemoryByte != want {
+		t.Fatalf("a refused update still wrote: memory = %d", again.Limits.MemoryByte)
+	}
+
+	// (4) A non-nil CauseNone CLEARS the cause, in the SAME commit as the caps —
+	// this is what makes §4.3's 改帽 remedy able to complete at all.
+	cleared := model.CauseNone
+	bigger := int64(999 << 20)
+	if err := s.UpdateBinding(ctx, "u1", model.Creating, store.Binding{MemoryByte: &bigger}, &cleared); err != nil {
+		t.Fatalf("clearing update: %v", err)
+	}
+	final, _ := s.GetSandbox(ctx, "u1")
+	if final.DeathCause != model.CauseNone {
+		t.Fatalf("death cause = %q; want cleared", final.DeathCause)
+	}
+	if final.Limits.MemoryByte != bigger {
+		t.Fatalf("memory = %d; want %d (caps and the clear are one commit)", final.Limits.MemoryByte, bigger)
+	}
+
+	// missing record → ErrNotFound, not a silent no-op.
+	if err := s.UpdateBinding(ctx, "nope", model.Creating, store.Binding{MemoryByte: &want}, nil); err != store.ErrNotFound {
+		t.Fatalf("update of a missing record = %v; want ErrNotFound", err)
 	}
 }

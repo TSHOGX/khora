@@ -252,6 +252,51 @@ func (s *SQLite) CompareAndSetState(ctx context.Context, id model.SandboxID, exp
 	})
 }
 
+func (s *SQLite) UpdateBinding(ctx context.Context, id model.SandboxID, expected model.Lifecycle, b Binding, cause *model.DeathCause) error {
+	return s.tx(ctx, func(t *sql.Tx) error {
+		// Read the current record inside the transaction so the state check and the
+		// write cannot straddle a concurrent transition (§4.4-B).
+		var cur string
+		var lim model.Limits
+		var idleNanos, retNanos int64
+		err := t.QueryRow(
+			`SELECT state, cpu_millis, memory_byte, disk_byte, idle_timeout, retention
+			   FROM sandboxes WHERE id=?`, string(id),
+		).Scan(&cur, &lim.CPUMillis, &lim.MemoryByte, &lim.DiskByte, &idleNanos, &retNanos)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if model.Lifecycle(cur) != expected {
+			return ErrConflict
+		}
+		newLim, newIdle, newRet := b.Apply(model.Sandbox{
+			Limits:      lim,
+			IdleTimeout: time.Duration(idleNanos),
+			Retention:   time.Duration(retNanos),
+		})
+		// One statement set, one transaction (§4.4-C): the caps and the death-cause
+		// clear that lifts §4.3's refusal land together or not at all. updated_at is
+		// deliberately absent — `retention` is measured from it (§4.3).
+		if cause == nil {
+			_, err = t.Exec(
+				`UPDATE sandboxes SET cpu_millis=?, memory_byte=?, disk_byte=?, idle_timeout=?, retention=?
+				   WHERE id=?`,
+				newLim.CPUMillis, newLim.MemoryByte, newLim.DiskByte,
+				int64(newIdle), int64(newRet), string(id))
+		} else {
+			_, err = t.Exec(
+				`UPDATE sandboxes SET cpu_millis=?, memory_byte=?, disk_byte=?, idle_timeout=?, retention=?, death_cause=?
+				   WHERE id=?`,
+				newLim.CPUMillis, newLim.MemoryByte, newLim.DiskByte,
+				int64(newIdle), int64(newRet), string(*cause), string(id))
+		}
+		return err
+	})
+}
+
 func (s *SQLite) DeleteSandbox(ctx context.Context, id model.SandboxID, ev *Event) error {
 	return s.tx(ctx, func(t *sql.Tx) error {
 		res, err := t.Exec(`DELETE FROM sandboxes WHERE id=?`, string(id))
