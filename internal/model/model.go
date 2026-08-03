@@ -10,7 +10,7 @@ import "time"
 // SandboxID is the stable, opaque identity of a persistent sandbox (§3.3).
 // It does NOT encode placement: after resume the IP / container / cgroup / node
 // may all change, but the SandboxID is unchanged — same Overlay artifact, same
-// sandbox (§3.3 铁律).
+// sandbox (§3.3's iron rule).
 type SandboxID string
 
 // TemplateID is the opaque identity of an immutable read-only base (§3.1).
@@ -21,7 +21,8 @@ type TemplateID string
 // OverlayID identifies the sandbox's writable delta layer as a first-class,
 // ID-addressed, Template-decoupled artifact (§3.1.1). The host path where it
 // materializes is an FS-provider implementation detail and never leaks above
-// the Rootfs subsystem (§3.1.1 对内也 ID 寻址).
+// the Rootfs subsystem (§3.1.1: ID-addressed internally too, not just at the
+// external API).
 type OverlayID string
 
 // Template is a first-class persistent object: an immutable, read-only base a
@@ -34,7 +35,7 @@ type OverlayID string
 //     This is what FORCES bytes-first materialization (§5.B): with no not-ready
 //     escape hatch, the layer bytes MUST be fully on the backend before the row
 //     is inserted, or a crash leaves a row pointing at nonexistent bytes.
-//   - No refcount field. "Is it deletable" is DERIVED (§4.3 INV-1): it has no
+//   - No refcount field. "Is it deletable" is DERIVED (§4.3): it has no
 //     referencing live rows (no sandbox references it, no child Template names it
 //     as Parent). The store's FK RESTRICT (SQLite) / Go check (Memory) enforces
 //     "referenced → cannot delete" as a contract promise, not a materialized
@@ -46,7 +47,8 @@ type Template struct {
 
 	// Parent expresses lineage (§4.3 / §5.B multi-lowerdir): the Template this
 	// one layers on top of. Empty = a base layer (no parent). A referencing
-	// child protects its parent from deletion (FK RESTRICT, §4.3 INV-2 引用向上).
+	// child protects its parent from deletion (FK RESTRICT, §4.3: references
+	// point upward).
 	Parent TemplateID
 
 	// Builtin marks a platform-preseeded Template (boot-seed reconciled from a
@@ -82,7 +84,8 @@ const (
 //   - CPUMillis  → §5.A cgroup `cpu` controller. Overrun = the guest runs
 //     slower, no error. A resource limit (fair sharing).
 //   - DiskByte   → §5.B FS-layer quota on the Overlay upper+work (NOT cgroup —
-//     cgroup cannot cap at-rest bytes, §3.4 容量与 I/O 是两条正交的轴).
+//     cgroup cannot cap at-rest bytes; §3.4: capacity and I/O rate are two
+//     orthogonal axes).
 //     Overrun = the guest's write() gets ENOSPC and THE SANDBOX LIVES ON: a
 //     data-plane event the control plane does not observe.
 //   - MemoryByte → §5.A host memcg. Overrun TERMINATES the sandbox, so this one
@@ -130,7 +133,7 @@ const (
 	// and none is needed: the engine never resumes a dead-recoverable sandbox
 	// itself (§4.1 lists no such automatic transition), so the retry is a caller's
 	// explicit choice, not an engine loop. Providers MUST report this rather than
-	// guess (§2.4 不许猜).
+	// guess (§2.4: no guessing).
 	CauseUnknown DeathCause = "unknown"
 	// CauseGone = the unit died for a reason that is NOT a resource cap (sentry
 	// crash, external kill, clean guest exit). Disposition: dead-recoverable →
@@ -183,13 +186,13 @@ type Sandbox struct {
 	// Limits is the resource-limit Binding (§3.4), materialized into this record
 	// at create and RE-APPLIED at every placement from the record — that is what
 	// makes it a Binding rather than placement state: a resume re-derives the caps
-	// from here instead of reading back a frozen value (§3.4 / M6 acceptance 3).
+	// from here instead of reading back a frozen value (§3.4).
 	Limits Limits
 
 	// DeathCause records WHY this sandbox's isolation unit was last found dead
-	// (§4.3). Written in the SAME commit as the crash-paused CAS that demoted it,
-	// because the signal is volatile and unrecoverable afterwards (§4.4-C same
-	// shape). It is what separates the two otherwise-identical §4.3 dispositions:
+	// (§4.3). Written in the SAME commit as the crash-paused CAS that demoted it
+	// (§4.4-C; store.CompareAndSetState states why no later window exists). It is
+	// what separates the two otherwise-identical §4.3 dispositions:
 	// dead-recoverable (resume it) vs resource-terminated (do NOT). Cleared on a
 	// successful resume — a sandbox that came back up is no longer explained by
 	// its previous death.

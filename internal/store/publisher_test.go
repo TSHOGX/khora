@@ -17,8 +17,7 @@ func ev(id, evid, kind string, state model.Lifecycle) *store.Event {
 }
 
 // seedPubTmpl inserts the "bare" Template these publisher tests reference, so
-// the sandbox insert satisfies the §4.3 template FK (the publisher behavior
-// under test is unchanged; the seed just makes the referenced row present).
+// the sandbox insert satisfies the §4.3 template FK.
 func seedPubTmpl(t *testing.T, st store.Store) {
 	t.Helper()
 	if err := st.CreateTemplate(context.Background(), model.Template{ID: "bare", Builtin: true, CreatedAt: time.Now()}); err != nil {

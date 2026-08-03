@@ -12,7 +12,7 @@ import (
 	"engine/internal/btrfs"
 )
 
-// HostOverlayFS is the single-node FS provider (§5.B): it assembles the
+// HostOverlayFS is the single-node rootfs provider (§5.B): it assembles the
 // sandbox's writable Overlay artifact as a host kernel overlayfs — lower =
 // Template, upper+work = the resident Overlay directory, merged = the rootfs
 // handed to runsc (rootfs-overlay D0/D3). runsc runs --overlay2=none
@@ -259,7 +259,7 @@ func (p *HostOverlayFS) Unmount(_ context.Context, m *Merged) error {
 // The capacity unit is reclaimed along with the bytes: the subvolume AND its
 // qgroup (a deleted subvolume otherwise leaves a stale `<under deletion>` qgroup
 // row carrying the old limit — measured), so destroy leaves no quota residue
-// behind (M6 acceptance 9 / §4.4-A reclamation discipline).
+// behind (§4.4-A reclamation discipline).
 func (p *HostOverlayFS) DestroyOverlay(ctx context.Context, o *Overlay) error {
 	dir := p.unitPath(o.ID)
 	// best-effort unmount first in case merged is still mounted.
@@ -313,23 +313,15 @@ func (p *HostOverlayFS) DestroyOverlay(ctx context.Context, o *Overlay) error {
 // from TemplatesDir). Enumerate-what-you-mean is correct by construction;
 // walk-and-filter is correct only while nothing else is ever placed in the unit.
 //
-// Bytes come from the BACKEND: the qgroup for capped units, allocated blocks
-// (st_blocks) for everything else. Never apparent size — a sparse file's apparent
-// size overstates its cost without bound, and in an admission gate overstatement
-// means refusing creates that would have fit. Never guest-side numbers either:
-// the sentry fabricates st_blocks in-guest (§5.B).
+// Bytes come from the BACKEND: the qgroup for capped units, allocated blocks for
+// everything else — never apparent size, never guest-side numbers (see
+// blockBytes and rootfs.Provider.UncappedBytes).
 func (p *HostOverlayFS) UncappedBytes(ctx context.Context) (int64, error) {
 	var total int64
 
-	// BOTH layer roots count, and missing either one is the exact undercount D6.2
-	// warns about — "Template / layer 字节仍占真实磁盘且无帽覆盖":
-	//   - LayersDir:    Promote-built read-only layers.
-	//   - TemplatesDir: deployment-shipped builtin Templates. Read-only and never
-	//     charged to any sandbox (§5.B sets no per-sandbox cap on them), yet they
-	//     occupy real disk — §5.B says their growth is an INPUT to node capacity
-	//     accounting, which is this term.
-	// Counting only LayersDir would silently overcommit the node by the entire size
-	// of the Template library, which on a fresh deployment is ALL of it.
+	// BOTH layer roots count. Omitting TemplatesDir is the exact undercount D6.2
+	// warns about: it would overcommit the node by the whole Template library,
+	// which on a fresh deployment is ALL of it.
 	for _, root := range []string{p.LayersDir, p.TemplatesDir} {
 		entries, err := os.ReadDir(root)
 		if err != nil {
@@ -399,9 +391,9 @@ func (p *HostOverlayFS) UncappedBytes(ctx context.Context) (int64, error) {
 // that would have fit. Allocated blocks are equal-or-better in every case — exact
 // for ordinary files, correct for holes, and they reflect compression.
 //
-// This does NOT contradict §5.B's "never trust st_blocks": that rule is about
-// GUEST-side numbers, which the sentry fabricates. Host-side st_blocks is the
-// backend's own allocation, which is the source that rule points at.
+// This does NOT contradict §5.B's "never trust st_blocks": that rule bans
+// GUEST-side numbers (see rootfs.Provider.UncappedBytes). Host-side st_blocks is
+// the backend's own allocation statement, which is the source the rule points at.
 //
 // Hardlinked files are counted once (dedup by dev+ino): a shipped Template tree
 // can carry them, and the same physical bytes must not be charged twice
@@ -496,12 +488,6 @@ func (p *HostOverlayFS) ListBuiltinTemplates(_ context.Context) ([]string, error
 //	each StateDir subdirectory IS a unit, named by its OverlayID (the paths are
 //	derived from the ID, so enumeration recovers the identity without a store
 //	read), and one not in either keep-set goes through DestroyOverlay.
-//
-// Reclaiming via DestroyOverlay rather than RemoveAll is the load-bearing part: a
-// capped unit is a subvolume + qgroup and `subvolume delete` is the only thing
-// that removes it, so the one path that already gets that right (contents first,
-// then the subvolume, then its quota row) is reused rather than reimplemented.
-// For an uncapped unit it degenerates to exactly the RemoveAll the sibling does.
 //
 // Failure policy is SKIP-AND-LOG-SHAPED (§4.4-A): a unit that will not delete
 // does not abort the pass over the others — the error is returned after the loop
@@ -657,6 +643,12 @@ var promoteExcludedPaths = []string{
 // (§2.5). The layer is built at a staging path then atomically renamed into
 // place, so a crash mid-copy never leaves a half-written layer at the final ID
 // (a staging dir is a plain orphan the sweep reclaims).
+//
+// KNOWN GAP (registered in open-decisions §4 ⑤, not a defect of this function):
+// freezing a layer INCREASES the "bytes under no cap" term of the §3.4 node
+// inequality (rootfs-overlay D6.5), but Promote does not pass the admission gate,
+// so it can push Σ past the node budget. The principle is settled; the code is not
+// yet wired.
 func (p *HostOverlayFS) PromoteToTemplate(_ context.Context, o *Overlay, newTemplateID string) error {
 	if err := validateSeg("newTemplateID", newTemplateID); err != nil {
 		return err

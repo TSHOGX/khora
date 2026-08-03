@@ -8,16 +8,15 @@ import (
 	"engine/internal/model"
 )
 
-// Memory is the in-memory Store. It is NOT scaffolding to be deleted: it is the
-// second implementation of the §1.3 Behavior seam, kept for fast, disk-free L1
-// unit tests. The SQLite backend (ADR-0004) coexists behind the SAME interface;
-// which one the orchestrator assembles is register-an-implementation (§1.3).
+// Memory is the in-memory Store: the second implementation of the §1.3 Behavior
+// seam, serving fast, disk-free L1 unit tests. The SQLite backend (ADR-0004)
+// coexists behind the SAME interface; which one the orchestrator assembles is
+// register-an-implementation (§1.3).
 //
 // The single mutex is how Memory DELIVERS the §4.4-C atomic-commit contract:
 // "change the map + append the outbox slice" happen under one Lock, so a
 // transition and its event commit together or not at all — the SAME contract
-// SQLite delivers with BEGIN/COMMIT, expressed with no branch in the caller
-// (§4.4-C 铁律).
+// SQLite delivers with BEGIN/COMMIT, and the caller cannot tell which it got.
 type Memory struct {
 	mu  sync.Mutex
 	rec map[model.SandboxID]model.Sandbox
@@ -29,8 +28,9 @@ type Memory struct {
 	tmpl map[model.TemplateID]model.Template
 	// outbox is append-only, ordered — the publisher reads oldest-first. Like the
 	// SQLite backend, published rows are marked, never removed (same unbounded-
-	// growth known limitation; open-decisions §2 §4.1/§4.4-C row). Bounded in
-	// practice only by process lifetime since Memory is non-durable.
+	// growth known limitation; open-decisions §2, the §4.1/§4.4-C event-stream
+	// row). Bounded in practice only by process lifetime since Memory is
+	// non-durable.
 	outbox []outboxRow
 }
 
@@ -65,7 +65,7 @@ func (m *Memory) CreateSandbox(_ context.Context, s model.Sandbox, ev *Event) er
 	// FK RESTRICT equivalent (§4.3 reference-side): the referenced Template must
 	// exist. Under the one mutex, a concurrent DeleteTemplate cannot interleave —
 	// the same single-writer serialization SQLite gets, so the atomicity is
-	// identical (§4.3 单写者串行 / §4.4-C 铁律: no backend-difference in correctness).
+	// identical (§4.3 single-writer serialization).
 	if _, ok := m.tmpl[s.Template]; !ok {
 		return ErrTemplateNotFound
 	}
@@ -80,7 +80,7 @@ func (m *Memory) CreateTemplate(_ context.Context, t model.Template) error {
 	if _, ok := m.tmpl[t.ID]; ok {
 		return ErrConflict
 	}
-	// non-empty parent must exist (lineage FK, §4.3 INV-2 引用向上).
+	// non-empty parent must exist (lineage FK, §4.3: references point upward).
 	if t.Parent != "" {
 		if _, ok := m.tmpl[t.Parent]; !ok {
 			return ErrTemplateNotFound
@@ -117,9 +117,9 @@ func (m *Memory) DeleteTemplate(_ context.Context, id model.TemplateID) error {
 		return ErrTemplateNotFound
 	}
 	// RESTRICT equivalent: scan for any live referencing row — a sandbox pinning
-	// it, or a child Template naming it as parent. Either → ErrInUse (§4.3 INV-1
-	// 被引用即拒删). This is the Go-check twin of SQLite's FK RESTRICT; the two run
-	// the SAME contract assertions (§1.3 seam).
+	// it, or a child Template naming it as parent. Either → ErrInUse (§4.3
+	// referenced-means-undeletable). This is the Go-check twin of SQLite's FK
+	// RESTRICT; the two run the SAME contract assertions (§1.3 seam).
 	for _, s := range m.rec {
 		if s.Template == id {
 			return ErrInUse
@@ -165,9 +165,9 @@ func (m *Memory) CompareAndSetState(_ context.Context, id model.SandboxID, expec
 		return ErrConflict
 	}
 	s.State = next
-	// death cause under the SAME lock as the state change (§4.3 / §4.4-C): the
-	// Go-mutex twin of SQLite's single transaction — a committed crash-paused
-	// demotion can never lack its cause. nil = leave untouched.
+	// death cause under the SAME lock as the state change — the Go-mutex twin of
+	// SQLite's single transaction, delivering the atomicity
+	// Store.CompareAndSetState promises (§4.3 / §4.4-C). nil = leave untouched.
 	if cause != nil {
 		s.DeathCause = *cause
 	}
@@ -196,8 +196,7 @@ func (m *Memory) UpdateBinding(_ context.Context, id model.SandboxID, expected m
 	if cause != nil {
 		s.DeathCause = *cause
 	}
-	// UpdatedAt deliberately NOT touched — `retention` is measured from it (§4.3),
-	// so bumping it here would extend an eviction deadline as a side effect.
+	// UpdatedAt deliberately NOT touched (see Store.UpdateBinding).
 	m.rec[id] = s
 	return nil
 }
@@ -216,12 +215,12 @@ func (m *Memory) SetUpdatedAtForTest(id model.SandboxID, t time.Time) {
 	}
 }
 
-// SetLimitsForTest overwrites a record's resource-limit Binding. TEST-ONLY seam,
-// like SetUpdatedAtForTest: it exists so a test can prove the caps are a BINDING
+// SetLimitsForTest overwrites a record's resource-limit Binding, bypassing the
+// state precondition and admission gate UpdateBinding enforces. TEST-ONLY seam,
+// like SetUpdatedAtForTest: it lets a test prove the caps are a BINDING
 // (re-materialized from the record at every placement, §3.4) rather than frozen
 // placement state — edit the record while paused, resume, and the new values must
-// take effect. There is no production "edit limits" verb yet, so this carries no
-// production semantics. No-op for an unknown ID.
+// take effect. No-op for an unknown ID.
 func (m *Memory) SetLimitsForTest(id model.SandboxID, l model.Limits) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

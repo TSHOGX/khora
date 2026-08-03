@@ -7,9 +7,12 @@
 // The interface itself promises the minimal guarantees the algorithms need
 // (§4.4-C): "lifecycle-state change + outbox append = single atomic commit".
 // The CAS shape below gives the §4.4-B transition lock somewhere to land.
-// NEVER design the API so a backend reports whether
-// it supports transactions and the algorithm branches on it — that leaks
-// backend differences into correctness (§4.4-C).
+//
+// NO-CAPABILITY-BRANCH RULE (§4.4-C, and it governs every method here): NEVER
+// design the API so a backend reports whether it supports transactions and the
+// algorithm branches on it. Each backend must DELIVER the promised atomicity by
+// whatever means it has; a caller never learns which backend it is talking to,
+// because that is how backend differences would leak into correctness.
 package store
 
 import (
@@ -31,15 +34,16 @@ var ErrNotFound = errors.New("store: sandbox not found")
 // ErrTemplateNotFound is returned when a Template record does not exist —
 // including the reference-side failure: inserting a sandbox (or child Template)
 // that references a Template no concurrent transaction left in place (§4.3
-// 引用-回收原子性: DELETE committed first → the referrer hits missing-parent).
+// reference-reclaim atomicity: DELETE committed first → the referrer hits
+// missing-parent).
 var ErrTemplateNotFound = errors.New("store: template not found")
 
 // ErrInUse is the §4.3 reference-protection verdict: a DeleteTemplate lost to a
 // live referencing row (a sandbox pinning it, or a child Template naming it as
-// parent). It is the store SEAM's contract promise (§4.3 INV-1 / §1.3), NOT a
-// SQLite feature leaking out: SQLite delivers it via FK RESTRICT, Memory via a
-// Go scan — the two backends run one set of assertions (§4.4-C 铁律). The API
-// layer maps it to a clean 409 template in use (§6.1), never a raw 500.
+// parent). It is the store SEAM's contract promise (§4.3 / §1.3), NOT a SQLite
+// feature leaking out: SQLite delivers it via FK RESTRICT, Memory via a Go scan
+// — the two backends run one set of assertions. The API layer maps it to a clean
+// 409 template in use (§6.1), never a raw 500.
 var ErrInUse = errors.New("store: template in use")
 
 // Event is one outbox row: a §4.1 lifecycle transition to publish to the event
@@ -51,7 +55,7 @@ var ErrInUse = errors.New("store: template in use")
 // means "this store mutation publishes nothing" (the transient creating-insert
 // and the create-unwind delete are internal steps of a verb, not externally
 // visible §4.1 transitions) — that is a mediator semantic choice, NOT a backend
-// capability branch (§4.4-C 铁律).
+// capability branch.
 type Event struct {
 	// ID is the transition-unique key subscribers dedup on (§4.4-C
 	// at-least-once: a redelivered event carries the SAME ID). Backends use it
@@ -125,9 +129,9 @@ func (b Binding) Apply(cur model.Sandbox) (model.Limits, time.Duration, time.Dur
 // Store is the authoritative control-plane record backend (§1.1 / §4.4-C). It is
 // a Behavior seam (§1.3): the transition methods PROMISE "lifecycle-state change
 // + outbox append = single atomic commit" and each backend DELIVERS it — SQLite
-// via BEGIN/COMMIT, Memory via a single mutex over map+slice. NEVER add a method
-// that reports whether the backend supports transactions so the algorithm can
-// branch on it — that leaks backend differences into correctness (§4.4-C 铁律).
+// via BEGIN/COMMIT, Memory via a single mutex over map+slice. The
+// no-capability-branch rule in this file's package doc applies to every method
+// below.
 type Store interface {
 	// CreateSandbox inserts a new sandbox record in state `creating`, appending
 	// ev in the same commit if non-nil (§4.4-C). Returns ErrConflict on a
@@ -145,7 +149,7 @@ type Store interface {
 	// ErrConflict. ev (if non-nil) is appended to the outbox in the SAME commit
 	// (§4.4-C). This is the mechanism the §4 mediator's transition lock uses for
 	// CAS precondition checks; serialization happens in the mediator layer, not
-	// by one subsystem calling another (§4 开头).
+	// by one subsystem calling another (§4: verbs belong to the mediator).
 	//
 	// cause (if non-nil) sets death_cause in the SAME commit. This is why the
 	// death cause rides the EXISTING CAS path instead of getting its own write
@@ -195,20 +199,20 @@ type Store interface {
 	// guard itself prevents.
 	UpdateBinding(ctx context.Context, id model.SandboxID, expected model.Lifecycle, b Binding, cause *model.DeathCause) error
 
-	// --- Template CRUD (§4.3 uniform object model / M5) ---------------------
+	// --- Template CRUD (§4.3 uniform object model) ---------------------------
 	//
 	// Template is a first-class persistent object with DERIVED refcount and
 	// existence-is-state (§4.3): no state column, no materialized count. These
-	// methods are the store's slice of the §4.3 引用-回收原子性 contract — the
-	// reference-protection promise (a referenced Template cannot be deleted) is
-	// delivered here, identically by both backends (§1.3 seam).
+	// methods are the store's slice of the §4.3 reference-reclaim atomicity
+	// contract — the reference-protection promise (a referenced Template cannot be
+	// deleted) is delivered here, identically by both backends (§1.3 seam).
 
 	// CreateTemplate inserts a Template row. If Parent is non-empty it must
-	// reference an existing Template (lineage, §4.3 INV-2 引用向上): a missing
-	// parent → ErrTemplateNotFound (the reference-side of the atomicity race,
-	// §4.3). Returns ErrConflict on a duplicate ID. Bytes-first (§5.B): the
+	// reference an existing Template (§4.3 lineage, references point upward): a
+	// missing parent → ErrTemplateNotFound (the reference-side of the atomicity
+	// race, §4.3). Returns ErrConflict on a duplicate ID. Bytes-first (§5.B): the
 	// caller has already fully materialized the layer bytes before this insert —
-	// existence-is-state has no not-ready escape hatch (§4.3 INV-3).
+	// existence-is-state has no not-ready escape hatch (§4.3).
 	CreateTemplate(ctx context.Context, t model.Template) error
 
 	// GetTemplate reads a Template row; ErrTemplateNotFound if absent.

@@ -48,9 +48,6 @@ func Dial(ep Endpoint) Client {
 	}
 }
 
-// DialFunc adapts Dial to the mediator's Deps.Dial signature.
-func DialFunc(ep Endpoint) Client { return Dial(ep) }
-
 func (c *connectClient) Health(ctx context.Context) (HealthStatus, error) {
 	resp, err := c.health.Check(ctx, connect.NewRequest(&v1.CheckRequest{}))
 	if err != nil {

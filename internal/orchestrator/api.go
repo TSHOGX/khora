@@ -83,11 +83,9 @@ type createReq struct {
 	IdleTimeout string `json:"idle_timeout"`
 	Retention   string `json:"retention"`
 	// Resource-limit Binding inputs (§6.1 / §3.4). Omitted / 0 = unlimited on that
-	// axis. Three separate fields because the three axes use three mechanisms with
-	// three different overrun consequences (§3.4) — not one blended "size".
-	// disk_byte is the capacity axis (FS quota, sandbox survives ENOSPC);
-	// memory_byte is the SAFETY limit (exceeding it terminates the sandbox).
-	// There is deliberately no io_* field — see open-decisions §3.
+	// axis. Three separate fields, never one blended "size" — the axes and why they
+	// are not interchangeable are documented on model.Limits. There is deliberately
+	// no io_* field (open-decisions §3).
 	CPUMillis  int64 `json:"cpu_millis"`
 	MemoryByte int64 `json:"memory_byte"`
 	DiskByte   int64 `json:"disk_byte"`

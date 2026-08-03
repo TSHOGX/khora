@@ -183,9 +183,10 @@ func (p *proc) broadcast(f frame) {
 //
 // NOTE: "you were dropped" is not observable end-to-end anyway — the domain
 // seam (client.go drainEvents ignores stream.Err(); ProcessEvent has no error
-// field) cannot carry a terminal error across the fan-out channel. Making
-// subscriber-drop an observable liveness signal belongs with the health
-// health-state / connection-activity work (§4.3), not here.
+// field) cannot carry a terminal error across the fan-out channel. Subscriber
+// drop is deliberately NOT a health signal: §4.3 classifies a sandbox from the
+// L2 Health probe and its guest-side activity clock, never from one
+// subscriber's copy being too slow.
 func (p *proc) finish(exitCode int) {
 	p.mu.Lock()
 	p.ended = true

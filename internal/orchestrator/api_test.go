@@ -82,7 +82,8 @@ func TestAPIListTemplates(t *testing.T) {
 }
 
 // DELETE /v1/templates/{id}: unreferenced → 204; referenced by a sandbox → 409
-// (§4.3 被引用即拒删); after the sandbox is gone → 204; missing → 404.
+// (§4.3 referenced-means-undeletable); after the sandbox is gone → 204; missing
+// → 404.
 func TestAPIDeleteTemplateReferenceProtection(t *testing.T) {
 	srv, mem := apiFixture(t)
 	ctx := context.Background()

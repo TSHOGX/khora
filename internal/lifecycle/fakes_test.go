@@ -15,8 +15,8 @@ import (
 )
 
 // seedBare inserts the "bare" builtin Template into st so a sandbox create /
-// insert satisfies the §4.3 template FK (M5). Production does this via the boot
-// seed; the L1 tests do it explicitly. Extra ids can be seeded too.
+// insert satisfies the §4.3 template FK. Production does this via the boot seed;
+// the L1 tests do it explicitly. Extra ids can be seeded too.
 func seedBare(t *testing.T, st interface {
 	CreateTemplate(context.Context, model.Template) error
 }, ids ...string) {
@@ -68,9 +68,9 @@ func (f *fakeRootfs) Calls() []string {
 func (f *fakeRootfs) Name() string { return "fake_rootfs" }
 
 // capNote renders the capacity-cap argument into the call log so tests can assert
-// the §3.4 Binding really crossed the seam at each placement (M6 acceptance 3),
-// and that handle-only rebuilds pass CapUnchanged rather than 0 (which would
-// clear a live cap).
+// the §3.4 Binding really crossed the seam at each placement, and that
+// handle-only rebuilds pass CapUnchanged rather than 0 (which would clear a live
+// cap).
 func capNote(capByte int64) string {
 	if capByte == rootfs.CapUnchanged {
 		return ";cap=unchanged"
@@ -188,7 +188,7 @@ type fakeRuntime struct {
 	adoptCause map[string]runtime.DeathCause
 	// launchLimits records the ResourceLimits each Launch was called with, so tests
 	// can assert the §3.4 Binding is re-materialized at every placement from the
-	// record (M6 acceptance 3) rather than read back from a frozen value.
+	// record rather than read back from a frozen value.
 	launchLimits []runtime.ResourceLimits
 }
 

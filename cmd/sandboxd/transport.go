@@ -12,17 +12,13 @@ import (
 	"connectrpc.com/connect"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
+	"golang.org/x/sys/unix"
 
 	"engine/internal/transport"
 	v1 "engine/internal/transport/gen/engine/transport/v1"
 	"engine/internal/transport/gen/engine/transport/v1/transportv1connect"
 )
 
-// transportMode is the §5.E process/fs endpoint (the child of PID 1). It
-// declares itself a subreaper (so its process subtree's orphans reparent to it,
-// not PID 1 — guest-runtime D4.2), then serves Connect-RPC over h2c on a fixed
-// TCP port inside the guest netns. It knows NOTHING of agent/turn/session
-// (transport D1) — pure process/fs mechanism.
 // crashLoopSentinel is a TEST-ONLY fault-injection point (the guest analog of
 // the mediator's FaultAfterColdStart hook): if this file exists on the guest's
 // tmpfs /tmp when transport mode starts, the child exits BEFORE serving. A test
@@ -35,15 +31,21 @@ import (
 // semantics; a production guest never has this file.
 const crashLoopSentinel = "/tmp/.sandboxd-crashloop"
 
+// transportMode is the §5.E process/fs endpoint (the child of PID 1). It
+// declares itself a subreaper (so its process subtree's orphans reparent to it,
+// not PID 1 — guest-runtime D4.2), then serves Connect-RPC over h2c on a fixed
+// TCP port inside the guest netns. It knows NOTHING of agent/turn/session
+// (transport D1) — pure process/fs mechanism.
 func transportMode() {
 	if _, err := os.Stat(crashLoopSentinel); err == nil {
 		logf("transport: crash-loop sentinel present (%s) — exiting before serve (TEST fault injection)", crashLoopSentinel)
 		os.Exit(1)
 	}
 
-	// PR_SET_CHILD_SUBREAPER = 36 (guest-runtime D4.2 / §5.E.1).
-	if _, _, errno := syscall.Syscall(syscall.SYS_PRCTL, unix_PR_SET_CHILD_SUBREAPER, 1, 0); errno != 0 {
-		logf("transport: PR_SET_CHILD_SUBREAPER failed: %v", errno)
+	// Declare ourselves subreaper so our subtree's orphans reparent here, not to
+	// PID 1 (guest-runtime D4.2 / §5.E.1).
+	if err := unix.Prctl(unix.PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0); err != nil {
+		logf("transport: PR_SET_CHILD_SUBREAPER failed: %v", err)
 	}
 
 	// One sandbox-global activity clock (reaper-health D2), shared by the
@@ -79,8 +81,6 @@ func transportMode() {
 		os.Exit(1)
 	}
 }
-
-const unix_PR_SET_CHILD_SUBREAPER = 36
 
 // transportPidFile is where transport mode publishes its own pid (on tmpfs
 // /tmp, which is mounted rw in the guest). Non-authoritative; for supervision

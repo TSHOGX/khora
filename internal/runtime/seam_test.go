@@ -43,7 +43,7 @@ var fieldExemptions = map[string]string{
 	"Merged.MergedPath": "§5.B hands the merged rootfs across as an opaque handle; upper/work stay private",
 }
 
-// M6 acceptance 10 — STRUCTURAL assertion: no host primitive appears in the
+// STRUCTURAL assertion: no host primitive appears in the
 // §5.A / §5.B seam. No cgroup path, no host filesystem path, no memcg concept
 // (§5.A ❌ list / §1.3 seam).
 //
@@ -303,7 +303,7 @@ func TestResourceLimitsCarriesOnlyPolicy(t *testing.T) {
 	want := map[string]bool{"CPUMillis": true, "MemoryByte": true}
 	for _, f := range fields {
 		if !want[f] {
-			t.Errorf("ResourceLimits has unexpected field %q — capacity belongs to the FS provider (§3.4) and overhead is provider-internal (§5.A)", f)
+			t.Errorf("ResourceLimits has unexpected field %q — capacity belongs to the rootfs provider (§3.4) and overhead is provider-internal (§5.A)", f)
 		}
 		delete(want, f)
 	}

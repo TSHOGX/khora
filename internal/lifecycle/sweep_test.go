@@ -12,7 +12,7 @@ import (
 )
 
 // The mediator's SweepOrphanLayers reads the authoritative store for live layer
-// IDs and hands the FS provider (live, building). §5.B / §4.4-A: only Promote-built
+// IDs and hands the rootfs provider (live, building). §5.B / §4.4-A: only Promote-built
 // (non-builtin) rows are live candidates — a builtin's dir is under TemplatesDir,
 // never a sweep candidate — and the in-flight-Promote keep-set is included.
 func TestMediatorSweepPassesLiveAndBuilding(t *testing.T) {

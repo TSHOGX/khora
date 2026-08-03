@@ -128,7 +128,8 @@ func (m *Mediator) admit(ctx context.Context, want model.Limits, excludeID model
 	}
 	// Σ over COMMITTED promises. Every non-destroyed record counts, including
 	// `paused` ones: a paused sandbox still holds its Overlay bytes on the backend
-	// (§4.2 零捕获) and will expect its cap honored on resume, so its reservation
+	// (§4.2: pause captures nothing) and will expect its cap honored on resume, so
+	// its reservation
 	// is real. RAM is the one axis where a paused sandbox releases the resource
 	// (no container, no memcg) — but we still count it, because admitting new RAM
 	// against memory that a paused sandbox is entitled to reclaim on resume is

@@ -1,3 +1,7 @@
+// PromoteToTemplate is a plain host-side copy (no mount, no root), so it runs in
+// the default unit suite. It freezes a sandbox's at-rest upper into a new
+// read-only layer dir, EXCLUDING the engine-injected runtime paths (§5.B / §3.1;
+// rootfs-overlay D5).
 package rootfs
 
 import (
@@ -6,11 +10,6 @@ import (
 	"path/filepath"
 	"testing"
 )
-
-// PromoteToTemplate is a plain host-side copy (no mount, no root), so it runs in
-// the default unit suite. It freezes a sandbox's at-rest upper into a new
-// read-only layer dir, EXCLUDING the engine-injected runtime paths (§5.B / §3.1;
-// rootfs-overlay D5).
 
 func newProvider(t *testing.T) (*HostOverlayFS, string) {
 	t.Helper()

@@ -17,7 +17,8 @@ import (
 
 // storeFactory builds a fresh Store for a stress subtest. Both backends run the
 // SAME §4.4-B assertions — the transition lock + CAS are the mediator's
-// orchestration obligation (§4 开头), so they must hold identically no matter
+// orchestration obligation (§4: verbs belong to the mediator), so they must hold
+// identically no matter
 // which store backs them.
 type storeFactory struct {
 	name string

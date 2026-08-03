@@ -82,8 +82,8 @@ func (c Client) run(ctx context.Context, args ...string) ([]byte, error) {
 
 // IsSubvolume reports whether path is a btrfs subvolume. Used to keep
 // create/delete idempotent across restarts, and to let a caller tell a
-// subvolume-backed unit from a plain directory (a pre-M6 Overlay, or one on a
-// non-btrfs filesystem).
+// subvolume-backed unit from a plain directory (an uncapped Overlay, or one on
+// a non-btrfs filesystem).
 func (c Client) IsSubvolume(ctx context.Context, path string) bool {
 	if _, err := os.Stat(path); err != nil {
 		return false
@@ -182,10 +182,10 @@ func (c Client) SetQuotaLimit(ctx context.Context, path string, limitByte int64)
 }
 
 // Usage reports the bytes charged to the subvolume at path and its current limit
-// (limit 0 = none). This is the BACKEND's own accounting, which is the only
-// trustworthy source: the sentry fabricates st_blocks for guests (a 512 MiB
-// sparse file reads as 536870912 in-guest while the host's real allocation is 0),
-// so capacity accounting must never use guest-side numbers (§5.B).
+// (limit 0 = none). This is the BACKEND's own accounting — the only trustworthy
+// source for capacity — §5.B requires capacity accounting to come from the
+// backend's own statement, never from guest-side numbers (see
+// rootfs.Provider.UncappedBytes for why those are unusable).
 func (c Client) Usage(ctx context.Context, path string) (used, limit int64, err error) {
 	// -f filters to just this path's qgroup; --raw for exact bytes; --sync so the
 	// numbers reflect writes that have not yet been committed by a background

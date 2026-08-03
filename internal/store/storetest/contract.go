@@ -3,7 +3,7 @@
 // SQLite both call RunContract, so "the two backends run the SAME assertions"
 // is literally true, and the §4.4-C promise ("state change + outbox append =
 // single atomic commit") is proven identically on both — no per-backend fork
-// of the correctness checks (§4.4-C 铁律).
+// of the correctness checks (§4.4-C).
 //
 // It lives in its own package (not store_test) so the SQLite backend's test
 // file — in package store_test — can import and run it too without an import
@@ -63,7 +63,7 @@ func RunContract(t *testing.T, mk Factory) {
 
 // seedTmpl inserts a base (parent-less) Template so a sandbox referencing it
 // satisfies the §4.3 FK. Every sandbox-creating subtest calls it first: the
-// sandboxes.template FK now REQUIRES the row to pre-exist (§6 前提 / boot seed).
+// sandboxes.template FK REQUIRES the row to pre-exist (§6 premise / boot seed).
 func seedTmpl(t *testing.T, s store.Store, id string) {
 	t.Helper()
 	if err := s.CreateTemplate(context.Background(), model.Template{
@@ -225,9 +225,8 @@ func testList(t *testing.T, mk Factory) {
 }
 
 // testCASPersistsDeathCause: a non-nil cause is written by the SAME
-// CompareAndSetState call that changes state (§4.3 / §4.4-C). The signal is
-// volatile — once the placement is torn down the evidence is unrecoverable — so
-// there is no "write the cause just afterwards" window to fall back on.
+// CompareAndSetState call that changes state (§4.3 / §4.4-C) — see that method's
+// contract for why no later window exists.
 func testCASPersistsDeathCause(t *testing.T, mk Factory) {
 	ctx := context.Background()
 	s, _ := mk(t)
@@ -555,9 +554,9 @@ func testTemplateCRUD(t *testing.T, mk Factory) {
 }
 
 // testTemplateRefProtection: a Template referenced by a sandbox cannot be
-// deleted (§4.3 INV-1 被引用即拒删 → ErrInUse); once the sandbox is gone, the
-// delete succeeds. The reference is a persistent row, seen by RESTRICT — the
-// E2B-bug immunity (§4.3).
+// deleted (§4.3 referenced-means-undeletable → ErrInUse); once the sandbox is
+// gone, the delete succeeds. The reference is a persistent row, seen by RESTRICT
+// — the E2B-bug immunity (§4.3).
 func testTemplateRefProtection(t *testing.T, mk Factory) {
 	ctx := context.Background()
 	s, _ := mk(t)
@@ -583,7 +582,8 @@ func testTemplateRefProtection(t *testing.T, mk Factory) {
 }
 
 // testTemplateLineage: a parent Template referenced by a child (parent = id)
-// cannot be deleted (§4.3 INV-2 引用向上 → ErrInUse); delete the child first,
+// cannot be deleted (§4.3, references point upward → ErrInUse); delete the child
+// first,
 // then the parent. Also: a child with a MISSING parent cannot be created
 // (reference-side atomicity).
 func testTemplateLineage(t *testing.T, mk Factory) {
@@ -652,7 +652,8 @@ func testTemplateDurability(t *testing.T, mk Factory) {
 	}
 }
 
-// testReferenceReclaimRace is the DYNAMIC half of §4.3 (model.md 引用-回收原子性):
+// testReferenceReclaimRace is the DYNAMIC half of §4.3 (model.md
+// reference-reclaim atomicity):
 // the static "referenced → cannot delete" judgment is not enough; the spec adds
 // an invariant that closes the reclaim-vs-reference TOCTOU window. This test
 // exercises that window directly — for many trials it races a DeleteTemplate
@@ -863,7 +864,7 @@ func testUpdateBinding(t *testing.T, mk Factory) {
 	}
 
 	// (4) A non-nil CauseNone CLEARS the cause, in the SAME commit as the caps —
-	// this is what makes §4.3's 改帽 remedy able to complete at all.
+	// this is what makes §4.3's raise-the-cap remedy able to complete at all.
 	cleared := model.CauseNone
 	bigger := int64(999 << 20)
 	if err := s.UpdateBinding(ctx, "u1", model.Creating, store.Binding{MemoryByte: &bigger}, &cleared); err != nil {

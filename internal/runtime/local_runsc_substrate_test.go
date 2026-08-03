@@ -179,9 +179,6 @@ func TestAdoptRunningContainerSameIP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Adopt: %v", err)
 	}
-	// The ad-hoc Destroy that used to precede each Fatal below is gone: the Cleanup
-	// registered after Launch now covers EVERY failure path, including the ones a
-	// hand-written unwind would keep missing.
 	if !alive {
 		t.Fatal("Adopt judged a running container dead")
 	}

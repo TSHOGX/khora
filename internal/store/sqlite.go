@@ -17,9 +17,8 @@ import (
 // CGO_ENABLED=0, single embedded file (§1.1 local store, no external service).
 //
 // It DELIVERS the §4.4-C atomic-commit contract the interface promises — "state
-// change + outbox append" is one BEGIN/COMMIT — the same contract Memory
-// delivers with a mutex. The publish algorithm above never learns which backend
-// it runs on (§4.4-C 铁律); this file only implements the promise.
+// change + outbox append" is one BEGIN/COMMIT. This file only implements that
+// promise; the reasoning behind it lives on the Store interface.
 //
 // Multi-key transactions are exactly why SQLite was chosen over bbolt (ADR-0004):
 // the outbox is a first-class table and the state row + event row commit together
@@ -28,12 +27,18 @@ type SQLite struct {
 	db *sql.DB
 }
 
+// sqliteSchema is the ONE authoritative schema. There is no migration path: a
+// breaking change edits this constant and the store file is discarded and
+// rebuilt (CLAUDE.md "No compatibility burden"). IF NOT EXISTS makes OpenSQLite
+// idempotent across reopens of a file this same constant created — it is NOT a
+// version-tolerance mechanism, and a file whose columns disagree is a discard,
+// not something to detect or adapt to.
 const sqliteSchema = `
 -- templates: first-class immutable object (§3.1 / §4.3). Existence-is-state
 -- (no state column), derived refcount (no count column). parent is a
 -- self-reference expressing lineage; ON DELETE RESTRICT declares "a referenced
--- parent layer cannot be deleted" (§4.3 INV-2 引用向上). MUST be created before
--- the sandboxes table so the sandboxes.template FK below resolves.
+-- parent layer cannot be deleted" (§4.3: references point upward). MUST be
+-- created before the sandboxes table so the sandboxes.template FK below resolves.
 CREATE TABLE IF NOT EXISTS templates (
 	id             TEXT PRIMARY KEY,          -- opaque "tmpl_<token>" / builtin = static dir name
 	parent         TEXT REFERENCES templates(id) ON DELETE RESTRICT, -- lineage; NULL = base layer
@@ -43,33 +48,35 @@ CREATE TABLE IF NOT EXISTS templates (
 CREATE TABLE IF NOT EXISTS sandboxes (
 	id           TEXT PRIMARY KEY,
 	-- template FK RESTRICT: a Template referenced by any sandbox cannot be
-	-- deleted (§4.3 INV-1/INV-2). The reference is a persistent row seen by
-	-- RESTRICT from creating through destroyed, even for a paused sandbox.
+	-- deleted (§4.3). The reference is a persistent row seen by RESTRICT from
+	-- creating through destroyed, even for a paused sandbox.
 	template     TEXT NOT NULL REFERENCES templates(id) ON DELETE RESTRICT,
 	overlay      TEXT NOT NULL,
 	state        TEXT NOT NULL,
-	idle_timeout INTEGER NOT NULL DEFAULT 0, -- TTL Binding, ns (§3.4 / §4.3)
-	retention    INTEGER NOT NULL DEFAULT 0, -- TTL Binding, ns (§3.4 / §4.3)
+	-- TTL Binding, ns (§3.4 / §4.3). 0 = no such deadline. Always written
+	-- explicitly by CreateSandbox; the DEFAULT states the resting value.
+	idle_timeout INTEGER NOT NULL DEFAULT 0,
+	retention    INTEGER NOT NULL DEFAULT 0,
 	-- resource-limit Binding (§3.4): re-materialized at each placement FROM these
 	-- columns, never read back from a frozen placement. 0 = unlimited. Three
-	-- separate columns because the three dimensions use three mechanisms with
-	-- three different overrun consequences (§3.4) — not one fungible "size".
+	-- separate columns, never one fungible "size" — the axes and why they are not
+	-- interchangeable are documented on model.Limits.
 	cpu_millis   INTEGER NOT NULL DEFAULT 0, -- §5.A cgroup cpu
 	memory_byte  INTEGER NOT NULL DEFAULT 0, -- §5.A host memcg (SAFETY limit)
 	disk_byte    INTEGER NOT NULL DEFAULT 0, -- §5.B FS quota on Overlay upper+work
 	-- why the unit was last found dead (§4.3). Committed in the SAME transaction
-	-- as the crash-paused CAS — the signal is volatile and cannot be re-read
-	-- afterwards (§4.4-C). '' = never observed dead.
+	-- as the crash-paused CAS (see Store.CompareAndSetState for why that is
+	-- required). '' = never observed dead.
 	death_cause  TEXT NOT NULL DEFAULT '',
 	created_at   INTEGER NOT NULL, -- unix nanos
 	updated_at   INTEGER NOT NULL
 );
--- KNOWN LIMITATION (open-decisions §2 §4.1/§4.4-C row): published rows are
--- marked (published_at set), NEVER deleted, so this table grows monotonically.
--- The partial index below keeps the publisher's unpublished-scan from
--- degrading, but at-rest size is unbounded. Pruning (retention/replay window)
--- is deferred to the event-stream replay-window decision (open-decisions §2),
--- by design — not an oversight.
+-- KNOWN LIMITATION (open-decisions §2, the §4.1/§4.4-C event-stream row):
+-- published rows are marked (published_at set), NEVER deleted, so this table
+-- grows monotonically. The partial index below keeps the publisher's
+-- unpublished-scan from degrading, but at-rest size is unbounded. Pruning
+-- (retention/replay window) is deferred to the event-stream replay-window
+-- decision, by design — not an oversight.
 CREATE TABLE IF NOT EXISTS outbox (
 	id           TEXT PRIMARY KEY,       -- transition-unique event ID (§4.4-C)
 	sandbox      TEXT NOT NULL,
@@ -234,9 +241,8 @@ func (s *SQLite) CompareAndSetState(ctx context.Context, id model.SandboxID, exp
 		if model.Lifecycle(cur) != expected {
 			return ErrConflict // failed CAS → rollback drops any event (§4.4-C atomicity)
 		}
-		// state + death_cause + outbox row in ONE statement set inside ONE
-		// transaction (§4.4-C / §4.3): a committed crash-paused demotion can never
-		// lack its death cause, because there is no window between them.
+		// state + death_cause + outbox row in ONE transaction — the atomicity
+		// Store.CompareAndSetState promises (§4.4-C / §4.3).
 		if cause == nil {
 			if _, err := t.Exec(`UPDATE sandboxes SET state=?, updated_at=? WHERE id=?`,
 				string(next), time.Now().UnixNano(), string(id)); err != nil {
@@ -279,7 +285,7 @@ func (s *SQLite) UpdateBinding(ctx context.Context, id model.SandboxID, expected
 		})
 		// One statement set, one transaction (§4.4-C): the caps and the death-cause
 		// clear that lifts §4.3's refusal land together or not at all. updated_at is
-		// deliberately absent — `retention` is measured from it (§4.3).
+		// deliberately absent (see Store.UpdateBinding).
 		if cause == nil {
 			_, err = t.Exec(
 				`UPDATE sandboxes SET cpu_millis=?, memory_byte=?, disk_byte=?, idle_timeout=?, retention=?
@@ -353,7 +359,7 @@ func (s *SQLite) MarkPublished(ctx context.Context, eventID string) error {
 // this is the seam's translation point from a raw driver error to the §4.3
 // contract verdict (ErrInUse on RESTRICT-delete, ErrTemplateNotFound on a
 // missing-parent insert). Keeping the string match HERE, not in callers, is what
-// stops the backend detail leaking into correctness (§4.4-C 铁律).
+// stops the backend detail leaking into correctness (§4.4-C).
 func isFKViolation(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "FOREIGN KEY constraint failed")
 }
@@ -419,7 +425,7 @@ func (s *SQLite) DeleteTemplate(ctx context.Context, id model.TemplateID) error 
 		res, err := t.Exec(`DELETE FROM templates WHERE id=?`, string(id))
 		if err != nil {
 			// FK RESTRICT: a sandbox or child Template still references it →
-			// ErrInUse (§4.3 INV-1 被引用即拒删 / §6 DELETE → 409).
+			// ErrInUse (§4.3 referenced-means-undeletable / §6 DELETE → 409).
 			if isFKViolation(err) {
 				return ErrInUse
 			}

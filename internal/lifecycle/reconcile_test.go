@@ -201,7 +201,7 @@ func TestReconcileSkipAndLogOnUncertainSurvivor(t *testing.T) {
 // periodic reconcile (§4.4-A live variant / reaper-health D4): a `running`
 // sandbox this process built (live-map handle present) is protected — kept from
 // reclaim WITHOUT a redundant Adopt re-recognition (that is the crash-recovery
-// path, not needed when we already hold the handle). Its placement lands in keep.
+// path, unnecessary when the handle is already held). Its placement lands in keep.
 func TestPeriodicReconcileProtectsLiveSurvivor(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemory()
@@ -294,12 +294,13 @@ func waitForCall(t *testing.T, calls func() []string, wantPrefix string) {
 	t.Fatalf("timed out waiting for call with prefix %q; got %v", wantPrefix, calls())
 }
 
-// periodic reconcile must NOT tear down an IN-FLIGHT create (§4.4-A "对持锁沙箱
-// 一律跳过", ALL states — reaper-health D4 addition 1). A live Create holds the
+// periodic reconcile must NOT tear down an IN-FLIGHT create (§4.4-A: a lock-held
+// sandbox is skipped in ALL states — reaper-health D4 addition 1). A live Create
+// holds the
 // transition lock across its whole cold-start with the record reading `creating`;
 // a periodic tick in that window must skip it, NOT delete the record + destroy
-// the overlay it is building. This pins the bug where the periodic path applied
-// the lock-held skip only to `running`, so the `creating` arm ran unconditionally.
+// the overlay it is building. The lock-held skip applies in ALL states, not just
+// `running`.
 func TestPeriodicReconcileSkipsInFlightCreate(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemory()
@@ -364,8 +365,7 @@ func TestPeriodicReconcileSkipsInFlightCreate(t *testing.T) {
 // periodic reconcile must NOT tear down an IN-FLIGHT resume (§4.4-A, ALL states).
 // A live Resume holds the lock across cold-start with the record reading `paused`;
 // a periodic tick must skip it, NOT unmount the merged overlay it just mounted or
-// reclaim the placement it just launched. Pins the `paused`-arm half of the same
-// bug.
+// reclaim the placement it just launched — the `paused`-arm of the same skip.
 func TestPeriodicReconcileSkipsInFlightResume(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemory()
@@ -422,7 +422,7 @@ func TestPeriodicReconcileSkipsInFlightResume(t *testing.T) {
 }
 
 // Reconcile is idempotent: a second pass over an already-reconciled store makes
-// no further changes (幂等).
+// no further changes.
 func TestReconcileIdempotent(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemory()

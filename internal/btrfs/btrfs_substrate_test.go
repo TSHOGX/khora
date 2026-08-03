@@ -117,7 +117,7 @@ func TestSubvolumeLifecycleAndQuota(t *testing.T) {
 
 	// --- the cap is a HARD ceiling: writing past it fails with ENOSPC ---------
 	// dd is the host-side check; the guest-side ENOSPC through the whole
-	// gofer/sentry chain is asserted in the M6 capacity acceptance.
+	// gofer/sentry chain is asserted in test/resource_substrate_test.go.
 	out, derr := exec.Command("dd", "if=/dev/zero", "of="+filepath.Join(unit, "big"),
 		"bs=1M", "count=100", "status=none").CombinedOutput()
 	if derr == nil {

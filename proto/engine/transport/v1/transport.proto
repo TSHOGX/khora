@@ -90,10 +90,7 @@ message StartRequest {
   string cwd = 4;
   // No run-as field: the engine defaults to guest root and does not model guest
   // users — "run as user X" is a guest-native concern (su/sudo), not an engine
-  // primitive (§2.2 / §3.2.1). Field 5 is reserved so it is never reused with
-  // different semantics.
-  reserved 5;
-  reserved "guest_user";
+  // primitive (§2.2 / §3.2.1). Field 5 is unused.
   // pty, when set, allocates a PTY of the given size (transport D4.3).
   PtySize pty = 6;
 }

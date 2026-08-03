@@ -264,7 +264,7 @@ func (p *LocalRunsc) Launch(ctx context.Context, spec LaunchSpec) (_ *Placement,
 	// runsc does not write. The assertion is mandatory, not defensive: the
 	// leaf-ownership trap fails OPEN (limits skipped, launch succeeds), so without
 	// a read-back a mis-wired cap looks exactly like a working one (§5.A launch 后
-	// 断言限额确已生效 / M6 acceptance 2).
+	// 断言限额确已生效).
 	if limited {
 		if err = p.bindLimits(&h, spec.Limits); err != nil {
 			return nil, err
@@ -358,7 +358,7 @@ func (p *LocalRunsc) Adopt(ctx context.Context, sandbox string) (*Placement, boo
 // should hold one). keep is the store-derived set the mediator computes; the
 // provider only enumerates its own host resources and reverse-dep-order tears
 // down the rest. Persistent state (Overlay upper) is never touched — that is not
-// a placement resource (§4.4-A 持久态分毫不动).
+// a placement resource (§4.4-A 持久态不碰).
 func (p *LocalRunsc) ReclaimOrphans(ctx context.Context, keep []string) error {
 	keepSet := make(map[string]bool, len(keep))
 	for _, s := range keep {
@@ -569,11 +569,10 @@ func (p *LocalRunsc) bindLimits(h *placementHandle, limits ResourceLimits) error
 			return fmt.Errorf("runtime: set memory.oom.group (§2.4 deterministic whole-group termination): %w", err)
 		}
 
-		// (2) raise the HOST ceiling to N + overhead (the §5.A two-values split).
-		// Done AFTER launch on purpose: the guest's MemTotal was already derived
-		// from N at boot, and measurement confirms this bump does not move it. So
-		// the guest sees N while the host tolerates N plus the sentry/gofer
-		// footprint — instead of terminating the sandbox below the N it promised.
+		// (2) raise the HOST ceiling to N + overhead (the §5.A two-values split, see
+		// memOverheadBytes). Done AFTER launch on purpose: the guest's MemTotal was
+		// already derived from N at boot, and measurement confirms this bump does not
+		// move it.
 		host := limits.MemoryByte + memOverheadBytes
 		if err := writeCgroupFile(leaf, "memory.max", fmt.Sprintf("%d", host)); err != nil {
 			return fmt.Errorf("runtime: raise host memory ceiling: %w", err)
@@ -612,7 +611,8 @@ func writeCgroupFile(leaf, name, val string) error {
 // Read-window discipline: this is only callable while the placement is intact.
 // `runsc delete` inside teardownPlacement destroys the leaf and this signal with
 // it, which is why Adopt reads here rather than letting the caller ask later
-// (§4.3 死因随 Adopt 的已死结论一起交出).
+// (§4.3: the provider hands the death cause out together with its already-dead
+// verdict, because the signal does not survive teardown).
 func readDeathCause(cid string) DeathCause {
 	b, err := os.ReadFile(filepath.Join(cgroupLeafPath(cid), "memory.events"))
 	if err != nil {

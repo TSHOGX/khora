@@ -18,7 +18,7 @@ type Sink interface {
 
 // Publisher drains the store outbox to a Sink with at-least-once delivery
 // (§4.4-C). The algorithm is ONE piece of code against the Store interface — it
-// never learns which backend (Memory / SQLite) it runs on (§4.4-C 铁律).
+// never learns which backend (Memory / SQLite) it runs on.
 //
 // The ordering is the whole correctness argument:
 //
@@ -90,7 +90,8 @@ func (p *Publisher) Run(ctx context.Context, interval time.Duration) {
 // double-counts. It lives in the engine as a REFERENCE — real subscribers live
 // outside the engine and dedup however they like (§1.3 add a subscriber).
 //
-// KNOWN LIMITATION (by design, not a defect — open-decisions §2 §4.1/§4.4-C row):
+// KNOWN LIMITATION (by design, not a defect — open-decisions §2, the
+// §4.1/§4.4-C event-stream row):
 // `seen` is in-process, UNBOUNDED, and NON-PERSISTENT. It grows with distinct
 // event IDs and is empty after a restart, so it will NOT absorb a redelivery
 // that straddles a process restart. That is fine precisely because it is a

@@ -16,7 +16,7 @@ import (
 // state machine (§4.1) names but nothing else triggers — auto-pause, evict, and
 // the LIVE (not just boot-time) crash-pause. It also folds in the periodic
 // reconcile so one tick classifies once and both consumers dispatch off it
-// (reaper-health D4: 同一个 tick 先分类、再分派).
+// (reaper-health D4: one tick classifies first, then dispatches).
 //
 // Dispositions go through the §4.4-B transition lock + CAS on the Mediator; the
 // Reaper owns only the loop cadence and the transport-down restart budget
@@ -37,7 +37,8 @@ type Reaper struct {
 	transportDownBudget time.Duration
 
 	// downSince tracks, per sandbox, the CONTINUOUS transport-down streak D4b
-	// measures ("连续 transport-down 时长") — the simplest measure D4b picks, no
+	// measures (continuous transport-down duration) — the simplest measure D4b
+	// picks, no
 	// PID1 restart-count upcall needed. Keyed additionally by placement EPOCH (the
 	// transport endpoint / IP, §4.3 placement-IP-as-epoch): a PID1 in-place restart
 	// keeps the SAME IP (§5.E.1) and so is genuinely the same streak, while any
@@ -143,8 +144,8 @@ func (r *Reaper) Sweep(ctx context.Context) {
 		return
 	}
 	// downThisTick = the sandboxes RE-CONFIRMED continuously transport-down this
-	// sweep. The D4b budget measures a CONTINUOUS streak (reaper-health D4b: "连续
-	// transport-down 时长"), so any sandbox NOT re-confirmed transport-down this
+	// sweep. The D4b budget measures a CONTINUOUS streak (reaper-health D4b:
+	// continuous transport-down duration), so any sandbox NOT re-confirmed this
 	// tick — because it went healthy, paused, was skipped (held lock),
 	// classified Unknown, or is simply gone — must have its streak dropped. We
 	// record confirmations here and prune downSince to exactly this set at the
@@ -238,7 +239,8 @@ func resumeNote(h Health, retention time.Duration) string {
 	if h != HealthResourceTerminated {
 		return ""
 	}
-	// Name the remedy AND the deadline. "等人工介入" has a clock: retention runs from
+	// Name the remedy AND the deadline. "Waiting for a human" has a clock: retention
+	// runs from
 	// this demotion's UpdatedAt, and past it the reaper evicts — Overlay artifact
 	// included (§4.3). An operator who is not told that will assume the sandbox
 	// waits indefinitely.
@@ -303,7 +305,7 @@ func (r *Reaper) handleTransportDownLocked(ctx context.Context, rec model.Sandbo
 	delete(r.downSince, rec.ID)
 	// nil cause: escalation is not a death observation — L1 is ALIVE here (that is
 	// what transport-down means), so there is nothing dead to explain and stamping
-	// a cause would be inventing one (§2.4 不许猜).
+	// a cause would be inventing one (§2.4: no guessing).
 	if err := r.m.pauseLocked(ctx, rec.ID, "crash-paused", nil); err != nil {
 		if err != store.ErrConflict {
 			r.m.deps.Logf("reaper: escalate crash-pause %s (retried next tick): %v", rec.ID, err)

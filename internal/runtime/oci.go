@@ -48,18 +48,16 @@ type ociMount struct {
 
 type ociLinux struct {
 	Namespaces []ociNamespace `json:"namespaces"`
-	// CgroupsPath MUST be set explicitly whenever we emit resources (§5.A): omit
-	// it and runsc builds its leaf at the cgroup v2 ROOT, polluting the host
-	// namespace. It is NOT a host primitive crossing the seam — local_runsc
-	// synthesizes it internally from the cid, exactly like netns/cid names.
+	// CgroupsPath MUST be set explicitly whenever we emit resources: omit it and
+	// runsc builds its leaf at the cgroup v2 ROOT, polluting the host namespace.
 	CgroupsPath string `json:"cgroupsPath,omitempty"`
 	// Resources carries the §3.4 rate + RAM Binding translated into OCI form.
 	// omitempty: a sandbox with no limits emits no resources block at all, so
-	// runsc creates no cgroup leaf and behaves exactly as before M6.
+	// runsc creates no cgroup leaf and leaves no host cgroup footprint.
 	Resources *ociResources `json:"resources,omitempty"`
 }
 
-// ociResources is the §3.4 資源上限 → cgroup translation (§5.A: the provider
+// ociResources is the §3.4 资源上限 → cgroup translation (§5.A: the provider
 // materializes the Binding via OCI linux.resources; runsc lands it on the
 // cgroupfs driver).
 //
@@ -98,10 +96,12 @@ type ociNamespace struct {
 	Path string `json:"path,omitempty"`
 }
 
-// caps is the guest capability set: enough for sandboxd to bind a netns TCP
-// port and exec processes. Egress steering / dropping down to a minimal set
-// arrives with the network subsystem; today the netns is the simplest reachable
-// one.
+// caps is the guest capability set. It is deliberately BROAD, not minimal: the
+// guest runs as root by design and guest capabilities are not a host-isolation
+// pillar (§2.2 — sentry virtualizes them all, and sentry itself is unprivileged
+// on the host, §2.1 ①②). So this list is guest-internal hygiene only: enough for
+// sandboxd to bind its netns TCP port, exec processes, and let `apt`/`pip`
+// chown/chmod as they install (§1.1 root-capable sandbox).
 var caps = []string{
 	"CAP_NET_BIND_SERVICE", "CAP_NET_ADMIN", "CAP_NET_RAW",
 	"CAP_SYS_ADMIN", "CAP_CHOWN", "CAP_DAC_OVERRIDE",
@@ -150,13 +150,9 @@ func buildOCISpec(mergedPath, netnsPath, cgroupsPath string, limits ResourceLimi
 			// memOverhead is local_runsc's IMPLEMENTATION CONSTANT, not a contract
 			// member: a remote provider's overhead is a different thing entirely (VM
 			// balloon, scheduler memory request), which is exactly why ResourceLimits
-			// says only N (§5.A).
-			//
-			// Subtlety worth stating, since it is what makes this work: the guest is
-			// told N because runsc reads the limit from the OCI spec / its cgroup at
-			// BOOT. So the spec carries N (guest-visible truth) and the caller raises
-			// memory.max to N+overhead AFTER launch (host ceiling) — measured: the
-			// post-launch bump does not move the guest's MemTotal.
+			// says only N (§5.A). runsc reads this limit at BOOT to derive the
+			// guest's MemTotal, so the spec carries N and bindLimits raises the host
+			// ceiling to N+overhead after launch.
 			res.Memory = &ociMemory{
 				Limit: limits.MemoryByte,
 				// Swap == Limit ⇒ memory.swap.max=0: the cap is a hard ceiling rather

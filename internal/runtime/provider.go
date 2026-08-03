@@ -210,6 +210,6 @@ type Provider interface {
 	// mediator computes keep from the authoritative store and passes it in — the
 	// store is read by the mediator and fed to the provider, never the reverse
 	// (§4 subsystems don't call each other). Persistent state (Overlay upper) is
-	// never touched — it is not a placement resource (§4.4-A 持久态分毫不动).
+	// never touched — it is not a placement resource (§4.4-A 持久态不碰).
 	ReclaimOrphans(ctx context.Context, keep []string) error
 }

@@ -28,7 +28,8 @@ type Config struct {
 	TemplatesDir string
 	// StateDir is the root for overlay materialization + runsc state/bundles.
 	StateDir string
-	// HealthTimeout bounds the ⑦ readiness gate (guest-runtime D5.1).
+	// HealthTimeout bounds the ⑦ readiness gate (guest-runtime D5.1). Zero → the
+	// mediator's default (lifecycle.New), the single defaulting site for this knob.
 	HealthTimeout time.Duration
 	// Sudo prefixes runsc/ip with sudo (dev convenience). Production runs the
 	// orchestrator as root and leaves this false.
@@ -80,9 +81,6 @@ func New(cfg Config) (*Engine, error) {
 	if cfg.TemplatesDir == "" || cfg.StateDir == "" {
 		return nil, fmt.Errorf("orchestrator: TemplatesDir and StateDir are required")
 	}
-	if cfg.HealthTimeout == 0 {
-		cfg.HealthTimeout = 30 * time.Second
-	}
 
 	rp, err := rootfs.NewHostOverlayFS(cfg.StateDir+"/overlays", cfg.TemplatesDir, cfg.StateDir+"/layers")
 	if err != nil {
@@ -110,7 +108,7 @@ func New(cfg Config) (*Engine, error) {
 		Store:               st,
 		Runtime:             rt,
 		Rootfs:              rp,
-		Dial:                transport.DialFunc,
+		Dial:                transport.Dial,
 		HealthTimeout:       cfg.HealthTimeout,
 		DefaultIdleTimeout:  cfg.DefaultIdleTimeout,
 		DefaultRetention:    cfg.DefaultRetention,

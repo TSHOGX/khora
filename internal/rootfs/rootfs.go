@@ -1,8 +1,8 @@
 // Package rootfs is subsystem §5.B: Template (read-only lower) + the sandbox's
 // writable Overlay artifact, assembled as a merged rootfs via the host kernel's
 // overlayfs — runsc runs with --overlay2=none --file-access=shared and never
-// manages the write layer itself (§2.5 / §5.B, ECS-validated; rootfs-overlay
-// D0/D3).
+// manages the write layer itself (§2.5 / §5.B; rootfs-overlay D0/D3, validated
+// on both substrate arches per ADR-0002).
 //
 // The FS Provider is the §5.B storage seam. Its abstraction exposes only
 // "OverlayID + referenced Template + at-rest readable" and NEVER "it is a host
@@ -33,14 +33,14 @@ type Overlay struct {
 	//
 	// The MEDIATOR computes this by walking the authoritative `templates.parent`
 	// chain (§4.3 lineage) and passes the ID stack across the seam — the store is
-	// the single source of truth for lineage; the FS provider only maps each ID
+	// the single source of truth for lineage; the rootfs provider only maps each ID
 	// to its layer dir (§4 subsystems don't read the store). IDs cross the seam,
 	// host paths stay inside (§3.1.1).
 	Lower []string
 }
 
 // The single-node host paths (upper/work/merged) are NOT carried on this struct:
-// they derive deterministically from ID under the FS provider's StateDir (see
+// they derive deterministically from ID under the rootfs provider's StateDir (see
 // HostOverlayFS.upperPath/workPath), so the provider recomputes them on demand
 // and nothing above §5.B ever sees them (§3.1.1 对内也 ID 寻址). upper/work must
 // share one overlayfs-capable FS and one quota unit for the later disk-capacity
@@ -67,7 +67,7 @@ type Provider interface {
 	// capByte is the §3.4 disk-CAPACITY cap (Binding), applied to the upper+work
 	// storage unit. It crosses the seam as a PLAIN BYTE COUNT — the caller states
 	// intent, the provider chooses the mechanism (local: btrfs subvolume + squota;
-	// a remote FS provider would use an object-store quota or its own accounting).
+	// a remote rootfs provider would use an object-store quota or its own accounting).
 	// This is why capacity is NOT a cross-cutting QuotaProvider interface: such an
 	// interface would weld the btrfs assumption into every implementation (§5.B /
 	// rootfs-overlay D6.4). 0 = uncapped.
@@ -149,9 +149,9 @@ type Provider interface {
 	// node-capacity inequality (rootfs-overlay D6.5).
 	//
 	// The contract is a PREDICATE, not an enumeration, and that is what makes it
-	// provider-neutral: "bytes under no cap" is answerable by an object-store or
-	// network-FS provider (each asks its own backend) without the contract naming
-	// subvolumes, quotas, or directory walks. Two invariants:
+	// provider-neutral: "bytes under no cap" is answerable by a rootfs provider
+	// backed by an object store or a network FS (each asks its own backend) without
+	// the contract naming subvolumes, quotas, or directory walks. Two invariants:
 	//
 	//  1. DISJOINT from the cap term: a byte covered by a declared cap is NOT
 	//     reported here, because the mediator already counts that cap. Concretely a
@@ -175,9 +175,9 @@ type Provider interface {
 	// It reports what the BACKEND says its bytes cost, never what a guest says — the
 	// sentry FABRICATES st_blocks (a 512 MiB sparse file reads as 536870912 blocks
 	// in-guest while the host's true allocation is 0), so guest-side numbers are
-	// unusable for capacity accounting (§5.B 容量核算只信后端配额). Note that rule
-	// bans GUEST-side numbers; the host-side allocated-block count IS the backend's
-	// own statement and is the trustworthy source it points at.
+	// unusable for capacity accounting: §5.B requires the number to come from the
+	// backend's own statement. That bans GUEST-side numbers only — the host-side
+	// allocated-block count IS the backend's statement, and is the source it means.
 	UncappedBytes(ctx context.Context) (int64, error)
 
 	// SweepOrphanOverlays reclaims Overlay STORAGE UNITS with no live `sandboxes`
@@ -219,18 +219,11 @@ type Provider interface {
 	// orphan and is correctly reclaimed.
 	//
 	// Reclamation goes through the full DestroyOverlay path rather than a directory
-	// delete, because since the capacity axis landed a CAPPED unit is a btrfs
-	// subvolume plus a quota row, and the two are reclaimed by different calls.
-	//
-	// Measured on `sbx` (squota mode), so the reason is narrower than "RemoveAll
-	// cannot delete a subvolume" — it CAN, contents and all, exit 0. What differs is
-	// the quota row: `rm -rf` leaves a live limit attached to a dead subvolume id,
-	// and under FULL qgroup mode an explicit `qgroup destroy` is required to drop
-	// it. Under squota btrfs reclaims the row asynchronously, so both paths converge
-	// within seconds and are indistinguishable a moment later — which is exactly why
-	// this must not be tested by directory existence alone. Going through
-	// DestroyOverlay keeps the provider correct in both quota modes instead of
-	// depending on which one the host happens to run. Returns the count reclaimed.
+	// delete, because a CAPPED unit is a btrfs subvolume plus a quota row and the two
+	// are reclaimed by different calls (btrfs.Client.DeleteSubvolume handles both
+	// quota modes). Note this cannot be tested by directory existence alone —
+	// `rm -rf` does remove the tree, and what it leaves behind is the quota row.
+	// Returns the count reclaimed.
 	SweepOrphanOverlays(ctx context.Context, live, building []string) (int, error)
 
 	// SweepOrphanLayers reclaims Promote-built layer directories with no live

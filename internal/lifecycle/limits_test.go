@@ -33,7 +33,7 @@ func newLimitsMediator(t *testing.T, rp *fakeRootfs, rt *fakeRuntime, capacity N
 	return m, st
 }
 
-// M6 acceptance 3 (L1 half) — the caps are a BINDING: create materializes them
+// The caps are a BINDING: create materializes them
 // into the record, and every placement RE-DERIVES them from that record rather
 // than reading back a frozen placement value. The distinction is observable here
 // in a way it is not on the substrate: we mutate the stored record while the
@@ -55,12 +55,12 @@ func TestLimitsAreABindingRematerializedEachPlacement(t *testing.T) {
 		t.Fatalf("record limits = %+v; want %+v", rec.Limits, want)
 	}
 	// ...and pushed across the §5.A seam on the create placement. The capacity axis
-	// must NOT be in the runtime spec — it goes to the FS provider (§3.4).
+	// must NOT be in the runtime spec — it goes to the rootfs provider (§3.4).
 	if got := rt.launchLimits[0]; got.CPUMillis != 500 || got.MemoryByte != 192<<20 {
 		t.Fatalf("launch limits = %+v; want cpu=500 mem=%d", got, 192<<20)
 	}
 	if !contains(rp.Calls(), fmt.Sprintf("CreateOverlay:%s;lower=bare;cap=%d", rec.Overlay, 64<<20)) {
-		t.Fatalf("capacity cap did not reach the FS provider at create: %v", rp.Calls())
+		t.Fatalf("capacity cap did not reach the rootfs provider at create: %v", rp.Calls())
 	}
 
 	// Now the real assertion. Pause, EDIT the stored caps, resume: a Binding
@@ -232,7 +232,7 @@ func TestSuccessfulResumeClearsTheDeathCause(t *testing.T) {
 	}
 }
 
-// M6 acceptance 8 (L1 half) — the §3.4 admission gate. Asserts the FORMULA,
+// The §3.4 admission gate. Asserts the FORMULA,
 // including the term that is easy to omit: measured layer bytes, which no
 // per-sandbox cap covers under squota (rootfs-overlay D6.5).
 func TestAdmissionGateEnforcesTheAccountingFormula(t *testing.T) {
@@ -377,9 +377,8 @@ func TestAdmissionGateEnforcesTheAccountingFormula(t *testing.T) {
 		})
 
 		// resume is gated too, so turning a budget ON while uncapped records exist
-		// wedges them at `paused` (§4.4-A source state). Registered as the known
-		// residual of this rule: pre-deployment the remedy is destroy-and-recreate,
-		// and post-PATCH it becomes "add a cap, then resume".
+		// wedges them at `paused` (§4.4-A source state). The known residual of this
+		// rule; the remedy is "PATCH a cap onto the record, then resume".
 		t.Run("resume of an uncapped record on a now-metered node → refused, stays paused", func(t *testing.T) {
 			rp, rt := &fakeRootfs{}, &fakeRuntime{}
 			m, st := newLimitsMediator(t, rp, rt, NodeCapacity{})
@@ -422,7 +421,7 @@ func TestAdmissionGateEnforcesTheAccountingFormula(t *testing.T) {
 	})
 }
 
-// compile-time: the fake still satisfies the seams after the M6 signature change.
+// compile-time: the fakes satisfy the provider seams.
 var (
 	_ rootfs.Provider  = (*fakeRootfs)(nil)
 	_ runtime.Provider = (*fakeRuntime)(nil)
@@ -489,8 +488,8 @@ func TestUpdateBindingRewritesTheBinding(t *testing.T) {
 		}
 	})
 
-	// THE deadlock fix. §4.3 offers "raise the cap" as the resource-terminated
-	// remedy, but the resume guard reads death_cause and NOTHING else clears it —
+	// §4.3 offers "raise the cap" as the resource-terminated remedy, but the resume
+	// guard reads death_cause and NOTHING else clears it —
 	// only a successful resume does, which the guard itself prevents. So without
 	// clearing it here the documented remedy cannot complete, ever.
 	t.Run("raising memory clears the resource-terminated block", func(t *testing.T) {
@@ -514,10 +513,10 @@ func TestUpdateBindingRewritesTheBinding(t *testing.T) {
 			t.Fatalf("raise: %v", err)
 		}
 		if rec, _ := st.GetSandbox(ctx, sid); rec.DeathCause != model.CauseNone {
-			t.Fatalf("death cause = %q; want it CLEARED by the raise (§4.3 改帽)", rec.DeathCause)
+			t.Fatalf("death cause = %q; want it CLEARED by the raise (§4.3)", rec.DeathCause)
 		}
 		if err := m.Resume(ctx, sid); err != nil {
-			t.Fatalf("resume after raise: %v — the 改帽 remedy must actually complete", err)
+			t.Fatalf("resume after raise: %v — the raise-the-cap remedy must actually complete", err)
 		}
 	})
 

@@ -3,7 +3,8 @@
 // probe (§5.E / transport D4). This package is the HOST-SIDE client of those
 // services; the in-guest server lives in cmd/sandboxd (transport mode).
 //
-// Carrier: netns-internal TCP, no vsock (§5.E, ECS-validated). sandboxd listens
+// Carrier: netns-internal TCP, no vsock (§5.E; validated on both substrate
+// arches per ADR-0002). sandboxd listens
 // on a TCP port inside the guest netns; the host dials the netns veth IP —
 // unary over HTTP, streams over h2c with immediate flush. Framework is
 // Connect-RPC over h2c (transport D4.2). Cold start discovers the current netns
