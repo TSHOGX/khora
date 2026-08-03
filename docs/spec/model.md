@@ -107,12 +107,22 @@ pause/resume 与 multi-node provider(§5.A)同时成立的前提。
 >
 > | 维度 | 机制 | 超限后果 | 定位 |
 > | --- | --- | --- | --- |
-> | **CPU**(速率;disk I/O 同轴,待有消费者时同形加入) | §5.A 落 cgroup(`cpu` 节流) | guest 变慢,无错误 | 资源上限:公平分配 |
+> | **CPU**(速率;disk I/O 同轴,待有消费者时同形加入) | §5.A 落 cgroup:**上限 + 份额两者都写**(`cpu.max` 帽住峰值、`cpu.weight` 定竞争时的相对份额) | guest 变慢,无错误 | 资源上限:公平分配 |
 > | **disk 容量**(at-rest 字节) | 文件系统层配额,§5.B(Overlay upper+work)/ §5.C(每 Volume)经二者共享的存储 substrate 原语落 | `write()` 返 `ENOSPC`,**沙箱照常存活** | 资源上限:公平分配 |
 > | **RAM** | 宿主 memcg(+ `oom.group=1`) | **沙箱终止** | **安全限:约束爆炸半径** |
 >
 > **disk 容量与 disk I/O 是两条正交的轴**,别混:cgroup 管不了 at-rest 占多少字节,配额管不了读写
 > 速率。容量轴是 §2.3 爆炸半径对磁盘维度的 enforce 点。
+>
+> **CPU 轴上限与份额都写,是"公平分配"这个定位的必要条件。** 契约里仍只有**一个**旋钮(`cpu_millis`),
+> 上限与份额都由它派生(§1.3:不加字段、不动 seam 形状)。只写上限不够:cgroup 的默认权重对每个叶子相同,
+> 于是节点跑满时 4000-millis 与 250-millis 的沙箱**平分** CPU——各自的帽都没破,但完全不是它们被许诺的
+> 比例。份额正是让"CPU 不设准入门、允许超卖"(下条)在拥塞时**按比例**降级而非齐平降级的东西;它只在
+> 节点饱和且双方都 runnable 时起作用,低负载下不改变任何行为。
+>
+> **CPU 不设节点预算(不像 RAM / 容量)。** 判据是超限后果:CPU 超卖只让 guest 变慢、无错误,故无需准入门
+> (§3.4 准入门只守"超限后果不优雅"的轴)。这与两个成熟实现一致——其中一个曾把 CPU 作为配额维度**上线后
+> 又删除**,并刻意把调度请求压到上限的 1/10 来提高装箱密度。
 >
 > **三个维度就是全部,`pids` 永久排除。** 实测:cgroup 的 `pids` 帽限的是**宿主 task**(systrap 下每个
 > guest 进程约 2.3 个),设低了 sentry 直接 panic(`failed to get clone`)、整个沙箱消失——它是**可用性
@@ -260,13 +270,15 @@ Overlay upper,保证 at-rest 字节一致,§5.B"只读 at-rest")。生命周期�
 子系统只提供机制——不把静止点做进 §5.E process(那会让无状态、payload 无关的传输层引入进程
 语义)。静止点**按进程行为分两类原语,不按 agent/turn 语义分**:
 
-- **长跑进程(可能在 I/O 中途)**:走**协作式静止点**——给一个到安全点的机会,再 flush、再冻结,
-  避免截断 in-flight 写。识别"哪种进程要协作"是**进程行为**层面的事,不需要 engine 认识 agent/turn;
-  且协作只管**应用层安全点**,substrate flush(§5.B)本就保证,故协作非正确性前提(§4.4)。协议两层
-  (host 侧 drain-barrier + guest 侧信号观测)、不引入 guest 内 ack 通道,完整机制与参数级待办见
+- **引擎自己发出的 mutating RPC**:先过一道 **host 侧 drain-barrier**——停收新的 mutating process/fs
+  RPC、等 in-flight 排空,再 flush、再冻结。这一层是**确定性**的(host 完全掌握自己发出的 RPC,无需
+  guest 配合、不引入 ack 通道),且它关掉的是一个具体窗口:`fs.Write` 是 truncate-then-write,抢占落在
+  两步之间会把文件留成空的。排空超时即降抢占。
+- **guest 内的负载(裸 pty、长跑进程)**:走**抢占式**——直接冻结,不做协作握手。**应用层安全点不进
+  引擎**:engine 不认识 agent(§3.2.1),既不能要求负载在信号里停到安全点、也无法验证它停对了;
+  substrate flush(§5.B)本就保证,故这层协作非正确性前提(§4.4),其超时/强杀语义与崩溃一致——而崩溃
+  是 §4.2 已接受的底线。证伪与两个成熟实现的同向证据见
   [`deep-dives/guest-runtime.md`](./deep-dives/guest-runtime.md) D4.4。
-- **裸 pty(shell)**:走**抢占式**——pty 字节流本就明说 lossy(§5.E),直接 runsc 冻结,不需要
-  协作握手。
 
 为什么这样选是对的:
 
@@ -426,7 +438,7 @@ auto-pause)与 `retention`(`paused` 超它 → evict)——是沙箱控制面记
   运行中不可热改**(§2.5),所以 Volume 不是"起进程后再挂"而是拉起动作的组成部分,**不存在"进程起了、
   Volume 没挂上"的中间态**。失败只落在两处:①②③ 物化失败(还没碰 runsc,持久态分毫未动)、④/⑦ 拉起或
   探活失败。两者都**退回源态**(resume→`paused`、create→删记录),不留 `failed`。
-- **pause 静止失败**:协作式静止点只是"尽量不截断 in-flight 写"的优化,非正确性前提——协作超时 → 降
+- **pause 静止失败**:drain-barrier 只是"尽量不截断 in-flight 写"的优化,非正确性前提——排空超时 → 降
   抢占式冻结 → 最坏强杀,任一路径都落到**合法的 `paused`**(与 §4.2 崩溃语义一致)。故 pause 无中间脏态。
 - **destroy 删字节失败**:状态转换(标 `destroyed`)与字节回收(删 Overlay/Volume)**解耦**——转换是
   控制面动作,删字节由 refcount sweep(§4.3)异步重试。删字节失败不阻塞、不回退状态转换,destroy 天然幂等。

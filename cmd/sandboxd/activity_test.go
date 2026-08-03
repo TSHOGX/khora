@@ -78,8 +78,15 @@ func TestWriteInputStampsActivity(t *testing.T) {
 }
 
 // nil-safe: a proc built without a clock (unit tests, pre-register) does not
-// panic on broadcast/writeInput.
+// panic on broadcast/writeInput. The assertion is the absence of a panic, so it
+// is made explicit — otherwise this reads like a test that checks nothing.
 func TestActivityNilSafe(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("nil activity clock panicked: %v — every stamp site must nil-check, "+
+				"since a proc exists before register() attaches the clock", r)
+		}
+	}()
 	p := newProc(1, nil) // no activity set
 	p.broadcast(frame{kind: 'd', data: []byte("x")})
 	// writeInput with nil stdin errors, but must not panic on the nil clock.

@@ -33,8 +33,9 @@
 - guest 默认 **root**;引擎不建模 guest 用户,「以某用户运行」是 guest 原生的事(`su`/`sudo`),
   不是引擎原语(§2.2 / §3.2.1)。
 - **资源上限物化(速率轴 + RAM)**:沙箱的速率上限(CPU;disk I/O 同轴、待有消费者时同形加入)与 **RAM**
-  上限是 Binding(§3.4),由本子系统在每次 placement 时物化——single-node provider 落成 cgroup(`cpu`
-  节流 + memcg);别的 provider 落成其调度层的等价资源约束。**disk 容量上限不在此**——它是 FS 层配额,
+  上限是 Binding(§3.4),由本子系统在每次 placement 时物化——single-node provider 落成 cgroup(CPU 的
+  **上限与份额都写**:`cpu.max` + `cpu.weight`,二者同由 `cpu_millis` 派生,理由见 §3.4;RAM 落 memcg);
+  别的 provider 落成其调度层的等价资源约束(份额对应其调度权重)。**disk 容量上限不在此**——它是 FS 层配额,
   归 §5.B(Overlay upper+work)/ §5.C(每个 Volume),经二者共享的存储 substrate 原语物化(§3.4)。
 - **RAM 是安全限,其"一个旋钮/两个值"的摊分是 provider 内部细节**:接口只说 `MemoryByte = N`
   (§3.4 Binding);provider 自己决定怎么把"N 字节 RAM"物化。`local_runsc` 内部把 guest 可见 RAM 设成
@@ -335,8 +336,7 @@ PID 1 = sandboxd（init 模式：reaper + 信号转发 + subreaper 兜底 + 监�
   transport 模式经 `PR_SET_CHILD_SUBREAPER` 声明自己为 subreaper,自己拉起的进程树的孤儿
   reparent 到它、由它收割,PID 1 只收真正的全局孤儿。
 - **transport 模式(子进程)**:就是本节的 process/fs 终点,**保持纯通用**、对 agent/turn/session
-  一无所知。**定向信号**(单进程/进程组,§4.2 协作式静止点)归它(它握 pid/pgid 句柄);**容器级
-  信号扇出**归 PID 1。
+  一无所知。**定向信号**(单进程/进程组)归它(它握 pid/pgid 句柄);**容器级信号扇出**归 PID 1。
 - **代价:退出码的送达有两条边界。** ① 跨 transport 重启 lossy:退出码保证**仅在 transport 单次存活期内**
   成立,跨一次重启退化为「`process.List` 仍可见、退出码可能丢」;② 存活期**内**,进程一退出其 pid 立即
   不可寻址——`end` 帧只发给退出那一刻在线的订阅者,此后 `Connect` 该 pid 是 not-found,**不留退出状态等人

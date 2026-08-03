@@ -2,7 +2,7 @@
 
 > **定位:[`SPEC.md`](../SPEC.md) 的 guest 侧深挖文档。** 展开两块 spec 只留结论的推理:
 > ① **作用域**——引擎只支持"按需 exec 出来的进程",不以系统守护服务为目标(D1–D3);
-> ② **guest 启动拓扑 + 协作式静止点 + resume 冷启时序**(D4、D5)。规范结论在 spec §5.E.1 / §4.2 / §4.3。
+> ② **guest 启动拓扑 + pause 静止点 + resume 冷启时序**(D4、D5)。规范结论在 spec §5.E.1 / §4.2 / §4.3。
 >
 > **编号约定:** 本文自己的节用 `D` 前缀(D1、D4.4…);`§` 一律指 spec 的全局章节(§4.2 等),两套不混。
 
@@ -120,7 +120,7 @@ reparent 到 `sandboxd` 而非 PID 1——不当 PID 1 也能收割自己关心�
   这个 monitor 之上的 additive 加法,不改本拓扑。
 - **每进程 pgid 纪律**:非 PTY 进程 `Setpgid` 自成组、PTY 进程交给 pty 的 session——这条 tini 覆盖
   不到的 PTY vs 非 PTY 非对称,完整推理见 D4.5 C1。
-- **drain-barrier**:pause 前用一道 barrier 挡住 in-flight mutating RPC、等其排空——D4.4 协作式静止点
+- **drain-barrier**:pause 前用一道 barrier 挡住 in-flight mutating RPC、等其排空——D4.4 静止点协议
   ① 那一层要的原语(D5.2 的单飞守卫在 host 侧、不用它)。
 
 **要拒的是"独立世代计数"identity 模型**(常见于分布式 init/supervisor:给每次运行挂一个
@@ -128,33 +128,38 @@ reparent 到 `sandboxd` 而非 PID 1——不当 PID 1 也能收割自己关心�
 替代(spec §「引擎词汇边界」点名 `generation` 是最易被带回的概念)。禁词表拦得住词、拦不住概念
 ——drain-barrier 的**排空逻辑**要、任何往它上面挂 **generation 标签**的做法不要。
 
-**信号目标天然分裂**:定向信号(单进程 / 进程组,spec §4.2 协作式静止点、§5.E 信号通道)归
+**信号目标天然分裂**:定向信号(单进程 / 进程组,spec §4.2 静止点、§5.E 信号通道)归
 **transport 模式**(它握 pid/pgid 句柄);容器级信号扇出(runsc 收 `SIGTERM` → 转发子进程)归 **PID 1**。
 
-### D4.4 协作式静止点协议(spec §4.2 长跑进程原语的机制)
+### D4.4 pause 静止点协议(spec §4.2 的机制)
 
-spec §4.2 把静止点按进程行为分两类原语。裸 pty 走抢占式(直接冻结,无待办);本节只展开**协作式**。
-两个前提把协议收窄到很小:
+spec §4.2 的静止点只有一层要设计。两个前提把协议收窄到很小:
 
-- **协作式静止点只是"尽量不截断 in-flight 写"的优化,不是正确性前提**(spec §4.4):超时 → 降抢占 →
+- **静止点只是"尽量不截断 in-flight 写"的优化,不是正确性前提**(spec §4.4):超时 → 降抢占 →
   最坏强杀,任一路径都落到合法 `paused`(与崩溃语义一致)。不值得为它引入重协议。
-- **一致性分两层,只有一层要"协作"**。substrate 层的 flush 一致点(spec §5.B:runsc/gofer 把已
-  提交内核的 in-flight 写落到 Overlay upperdir)本就保证,不依赖进程配合。协作式唯一多要的是**应用层
+- **一致性分两层,只有一层归引擎管**。substrate 层的 flush 一致点(spec §5.B:runsc/gofer 把已
+  提交内核的 in-flight 写落到 Overlay upperdir)本就保证,不依赖进程配合。剩下的是**应用层
   安全点**——进程正写一个逻辑单元写到一半(如 agent 写 JSONL 写到半行),冻结会留半条。而应用层
   安全点通用地无法由 engine 判定:engine 不认识 agent(spec §3.2.1),不能要求进程为 pause 实现回调。
 
-**协议因此两层,都不引入 guest 内 ack 通道**——① host 侧 drain-barrier(确定性:停收新的 mutating
-process/fs RPC、等 in-flight 排空,再交 §5.B flush;host 完全掌握自己发出的 RPC,复用 D4.3 那个原语)、
-② guest 内 `SIGTSTP` + 观测 `/proc` 到达 `T`(stopped)+ 超 grace 降 `SIGSTOP`(尽力)。规范陈述在
-§4.2,此处只留它为何收窄到这么小(上两条前提)与那条关键的"不做"(下)。
+**协议只有一层:host 侧 drain-barrier。** 停收新的 mutating process/fs RPC、等 in-flight 排空,再交
+§5.B flush;host 完全掌握自己发出的 RPC,故这一层是**确定性**的,不需要 guest 配合、不引入 ack 通道
+(复用 D4.3 那个原语)。排空超时即降抢占,落到合法 `paused`。
+
+**它保护的是引擎自己造成的截断,这一点是具体的、可复现的**:`fs.Write` 是 truncate-then-write,一次
+落在这两步之间的抢占冻结会把文件留成**空的**——数据被销毁,而且是在一条**引擎自己发出**的 RPC 里。
+这不是"某个不认识的负载写了半行 JSONL"那类无法一般化的情形,而是引擎有义务、也有能力关掉的窗口。
+
+**不做 guest 内的协作式冻结(`SIGTSTP` + 观测 `/proc` 到 `T` + 超 grace 降 `SIGSTOP`)——已否决。**
+两条理由:① 它要求负载**自愿**在信号里停到安全点,而 engine 既不能要求、也无法验证(不认识 agent,
+spec §3.2.1);② 两个成熟实现都选了**不可屏蔽**的冻结(一个 `SIGSTOP` 进程组、一个 cgroup freezer),
+无一提供应用层安全点协议——证据方向一致。故应用层安全点**不进引擎**:它落在 §4.4「协作只是优化、
+不是正确性前提」那一侧,超时/强杀的语义与崩溃一致,而崩溃本就是 §4.2 接受的底线。
 
 **关键的"不做":不给长跑进程一个"我到安全点了"的主动上报通道**——那要求进程为 pause 改代码
-(违反 spec §3.2.1),且它非正确性前提。"到没到安全点"要么由进程自己在 `SIGTSTP` handler
-里体现(它停了 = 它认为到了),要么由 engine 观测 `/proc` 状态代理——engine 不引入应用层握手。
-这也是"不等 ack、只观测代理信号"不违反"engine 不认识 agent"的原因。
+(违反 spec §3.2.1),且它非正确性前提。engine 不引入应用层握手。
 
-参数级残留(纯调参,不改两层结构,登记 open-decisions):grace 时长、可 handle 信号的具体选择、
-是否给模板一个可选"可协作 flush"钩子(默认不需要)。
+参数级残留(纯调参,不改这一层的结构):drain 的 grace 时长。
 
 ### D4.5 tini checklist 覆盖不到的三条缝
 
@@ -269,5 +274,5 @@ D4.2 分进程拓扑换来的附加能力。
 
 ## D6. 边界与仍待
 
-- **协作式静止点**:仅剩参数级、不改两层结构,详见 D4.4。
+- **pause 静止点**:结构已定(单层 drain-barrier),仅剩 grace 取值,详见 D4.4。
 - **模板是否预置常驻进程**:不需要;若出现,平级托管,不进 `sandboxd`。

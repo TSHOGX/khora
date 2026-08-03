@@ -71,11 +71,30 @@ type ociResources struct {
 	Memory *ociMemory `json:"memory,omitempty"`
 }
 
-// ociCPU is the cpu-controller share (→ cgroup v2 cpu.max = "quota period").
+// ociCPU carries both halves of the CPU axis. Quota/Period become cgroup v2
+// `cpu.max` (the CEILING — "at most this much"), Shares becomes `cpu.weight`
+// (the SHARE — "this much relative to whoever else is runnable").
+//
+// Both are needed because they answer different questions and only the ceiling
+// was being set. §3.4 calls the CPU axis 公平分配, and a ceiling alone does not
+// deliver that: cgroup's default weight is identical for every leaf, so under a
+// saturated node a 4000-millis sandbox and a 250-millis one got EQUAL time — each
+// capped correctly, but sharing nothing like the ratio they were sold. Weight is
+// what makes the oversubscription §3.4 permits (no CPU admission gate, because
+// overrun only slows the guest) degrade proportionally instead of uniformly.
+//
+// Weight only bites when the node is saturated AND both are runnable; at low load
+// it changes nothing. That is the correct shape for a fairness knob.
 type ociCPU struct {
 	Quota  int64  `json:"quota,omitempty"`
 	Period uint64 `json:"period,omitempty"`
+	Shares uint64 `json:"shares,omitempty"`
 }
+
+// cpuSharesPerCPU is the conventional OCI shares value for one full CPU. The
+// runtime rescales shares into cgroup v2's 1..10000 `cpu.weight` range, so what
+// matters here is only the RATIO between sandboxes, not the absolute number.
+const cpuSharesPerCPU = 1024
 
 // ociMemory is the memcg ceiling. Swap MUST be set equal to Limit, which is the
 // OCI spelling of cgroup v2 `memory.swap.max=0` — a measured hard requirement,
@@ -134,9 +153,19 @@ func buildOCISpec(mergedPath, netnsPath, cgroupsPath string, limits ResourceLimi
 	if limits.CPUMillis > 0 || limits.MemoryByte > 0 {
 		res = &ociResources{}
 		if limits.CPUMillis > 0 {
+			// Ceiling and share are DERIVED FROM THE SAME CPUMillis, so this stays
+			// one knob in the contract (§1.3: no new field, no seam change) — the
+			// caller states "how much CPU", and the provider decides that this means
+			// both a cap and a proportional share. Shares floors at 2, the minimum
+			// the OCI runtime will map into a valid cpu.weight.
+			shares := uint64(cpuSharesPerCPU * limits.CPUMillis / 1000)
+			if shares < 2 {
+				shares = 2
+			}
 			res.CPU = &ociCPU{
 				Quota:  cpuPeriodMicros * limits.CPUMillis / 1000,
 				Period: cpuPeriodMicros,
+				Shares: shares,
 			}
 		}
 		if limits.MemoryByte > 0 {

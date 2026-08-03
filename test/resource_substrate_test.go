@@ -987,6 +987,18 @@ func TestResourceRateAxis(t *testing.T) {
 		if got := readCg(t, sid, "cpu.max"); got != wantCPU {
 			t.Fatalf("cpu.max = %q for %s; want %q — the cap did NOT bind", got, sid, wantCPU)
 		}
+		// The SHARE half of the axis, not just the ceiling. cpu.max alone leaves
+		// every leaf on cgroup's identical default weight, so on a saturated node
+		// sandboxes would split time EQUALLY regardless of the CPU they were sold —
+		// §3.4 calls this axis 公平分配, and a ceiling does not deliver that. Assert
+		// a non-default weight actually landed (both sandboxes here carry the same
+		// capMillis, so the proportionality itself is a ratio between DIFFERENT
+		// millis values; what this pins is that the knob is written at all).
+		gotW := readCg(t, sid, "cpu.weight")
+		if gotW == "" || gotW == "100" {
+			t.Fatalf("cpu.weight = %q for %s; want a derived weight, not the cgroup default — "+
+				"without it oversubscription degrades uniformly instead of proportionally (§3.4)", gotW, sid)
+		}
 		// memory.max is the HOST ceiling = N + provider overhead (§5.A two values):
 		// the guest is told N, the host tolerates N plus the sentry/gofer footprint,
 		// so the sandbox is never terminated below the N it was promised. Assert it is

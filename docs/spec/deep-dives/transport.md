@@ -262,8 +262,9 @@ RPC 清单(按 pid 寻址,tag 不进模型见 D4.6):
     流内容(D3 seam),不替终端发明它本不具备的语义(呼应 D2「PTY 不落 scrollback 文件」)。
 - **信号默认发进程组,可寻址单进程。** `SendSignal` 默认对**进程目标的进程组**发(先 `kill(-pgid)`、
   fallback `kill(pid)`),因为 `apt`/build/
-  dev-server 都 fork 子树,只杀父会留一堆孤儿。这是 spec §4.2 协作式静止点「向 guest 内进程发协作信号」
-  的落点。定向信号归 transport、容器级扇出归 PID1 的分裂见 guest-runtime.md D4.3(§5.E.1),不在此复述。
+  dev-server 都 fork 子树,只杀父会留一堆孤儿。这是 spec §4.2「向 guest 内进程发定向信号」的落点(注意
+  pause 的静止点本身不走这条路:它是 host 侧 drain-barrier,不给负载发协作信号,guest-runtime D4.4)。
+  定向信号归 transport、容器级扇出归 PID1 的分裂见 guest-runtime.md D4.3(§5.E.1),不在此复述。
 
 ### D4.4 fs 服务面
 
