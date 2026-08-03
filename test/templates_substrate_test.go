@@ -1,6 +1,6 @@
 //go:build substrate
 
-// M5 acceptance: the Template object model against REAL runsc + the assembled
+// Template object-model acceptance against REAL runsc + the assembled
 // engine. Covers delete-referenced → 409-equivalent (ErrInUse), reference-vs-
 // reclaim atomicity under real concurrency, the E2B-bug regression (a paused
 // sandbox's Template stays undeletable), boot-seed idempotency, and the
@@ -8,7 +8,7 @@
 // states its property inline.
 //
 //	sudo env PATH=$PATH GOTOOLCHAIN=local GOFLAGS=-mod=mod GOSUMDB=off HOME=$HOME \
-//	  go test -tags substrate -v -count=1 -timeout 300s ./test/ -run M5
+//	  go test -tags substrate -v -count=1 -timeout 300s ./test/ -run Template
 package test
 
 import (
@@ -27,7 +27,7 @@ import (
 
 // create-from-Template → DeleteTemplate is refused (ErrInUse, → 409);
 // after the sandbox is destroyed the Template is deletable. Real runsc create.
-func TestM5DeleteReferencedTemplate(t *testing.T) {
+func TestTemplateDeleteReferencedTemplate(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("needs root (runsc create)")
 	}
@@ -62,7 +62,7 @@ func TestM5DeleteReferencedTemplate(t *testing.T) {
 // E2B-bug regression: a PAUSED sandbox still holds a persistent
 // reference row to its Template, so RESTRICT sees it and the delete is refused —
 // exactly the case E2B lost track of (the reference lived only in memory).
-func TestM5PausedSandboxProtectsTemplate(t *testing.T) {
+func TestTemplatePausedSandboxProtectsTemplate(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("needs root")
 	}
@@ -92,7 +92,7 @@ func TestM5PausedSandboxProtectsTemplate(t *testing.T) {
 // exactly one side wins, the other fails cleanly, never a dangling reference or
 // lost bytes. Runs many rounds against the real SQLite store (single-writer
 // serialization is the arbiter, §4.3).
-func TestM5ReferenceReclaimAtomicity(t *testing.T) {
+func TestTemplateReferenceReclaimAtomicity(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("needs root")
 	}
@@ -139,7 +139,7 @@ func TestM5ReferenceReclaimAtomicity(t *testing.T) {
 
 // the boot seed is idempotent — reconciling twice leaves the builtin row
 // count unchanged. Runs against the real SQLite store via the assembled engine.
-func TestM5BootSeedIdempotent(t *testing.T) {
+func TestTemplateBootSeedIdempotent(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("needs root")
 	}
@@ -161,8 +161,8 @@ func TestM5BootSeedIdempotent(t *testing.T) {
 // bytes-first sweep (§5.B / §4.4-A): a Promote-built layer dir with no live
 // templates row is a crashed-Promote orphan → the boot sweep reclaims it; a live
 // layer is kept. Simulated by planting layer dirs directly; the full Promote
-// crash path is exercised in TestM5PromoteCrashBeforeRowIsReclaimed.
-func TestM5OrphanLayerSweep(t *testing.T) {
+// crash path is exercised in TestTemplatePromoteCrashBeforeRowIsReclaimed.
+func TestTemplateOrphanLayerSweep(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("needs root")
 	}
@@ -197,7 +197,7 @@ func TestM5OrphanLayerSweep(t *testing.T) {
 // Promote end-to-end (§3.1 / §5.B): write a file into a sandbox → Promote → create a
 // NEW sandbox from the new Template → the file is visible (the freeze took
 // effect); and the sandboxd portal path is NOT in the frozen layer (excluded-paths, §5.B).
-func TestM5PromoteEndToEnd(t *testing.T) {
+func TestTemplatePromoteEndToEnd(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("needs root")
 	}
@@ -264,7 +264,7 @@ func TestM5PromoteEndToEnd(t *testing.T) {
 
 // lineage protection (§4.3): Promote a child layer T2 over T1 → deleting T1 is
 // refused while T2 exists (RESTRICT 引用向上); delete T2 first, then T1.
-func TestM5LineageProtection(t *testing.T) {
+func TestTemplateLineageProtection(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("needs root")
 	}
@@ -281,7 +281,7 @@ func TestM5LineageProtection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("promote s1→T1: %v", err)
 	}
-	_ = m.Destroy(ctx, s1) // drop s1's reference; T1 now referenced only by lineage later
+	_ = m.Destroy(ctx, s1) // drop s1's direct reference to T1
 
 	// build T2 as a child of T1: create a sandbox from T1, promote it.
 	s2, err := m.Create(ctx, lifecycle.CreateSpec{Template: t1})
@@ -292,13 +292,13 @@ func TestM5LineageProtection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("promote s2→T2: %v", err)
 	}
-	t.Cleanup(func() { _ = m.Destroy(ctx, s2) })
+	t.Cleanup(func() { _ = m.Destroy(ctx, s2) }) // failure-path guarantee; the act is below
 	if tr, _ := eng.Store.GetTemplate(ctx, t2); tr.Parent != t1 {
 		t.Fatalf("T2 parent = %q; want %s", tr.Parent, t1)
 	}
 
-	// s2 still references T1 (its lineage) AND T2 (direct) — but the point of the
-	// test is the parent-child RESTRICT, so first drop s2 so only lineage pins T1.
+	// s2 references T1 (its lineage) AND T2 (direct). The subject is the
+	// parent-child RESTRICT, so drop s2 first and leave only lineage pinning T1.
 	_ = m.Destroy(ctx, s2)
 
 	// T1 is referenced by T2's parent → RESTRICT refuses delete.
@@ -318,7 +318,7 @@ func TestM5LineageProtection(t *testing.T) {
 // bytes-first crash, full (§5.B / §4.4-A): simulate a Promote that wrote the layer bytes
 // but crashed before inserting the row (a staging→final layer with no templates
 // row). The boot sweep reclaims it, leaving no broken ready state.
-func TestM5PromoteCrashBeforeRowIsReclaimed(t *testing.T) {
+func TestTemplatePromoteCrashBeforeRowIsReclaimed(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("needs root")
 	}

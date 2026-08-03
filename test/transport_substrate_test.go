@@ -134,8 +134,8 @@ func TestTransportWriteReadRoundTrip(t *testing.T) {
 }
 
 // PID 1 restarts the transport child in place (D5.3): kill the transport child
-// (pid 2 — init is pid 1 and re-execs transport as its first child), then
-// Health must recover on the SAME endpoint (not a resume, no new IP).
+// (found via the pidfile — its pid is not fixed), then Health must recover on
+// the SAME endpoint (not a resume, no new IP).
 func TestTransportPID1RestartsChild(t *testing.T) {
 	cl, cleanup := launchOne(t)
 	defer cleanup()

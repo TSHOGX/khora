@@ -1,14 +1,14 @@
 //go:build substrate
 
-// M6 acceptance on the REAL substrate: the §3.4 resource limits become real
-// enforcement. Requires root (cgroup writes + runsc + overlay mount).
+// Resource-governance acceptance on the REAL substrate: the §3.4 resource limits
+// are real enforcement. Requires root (cgroup writes + runsc + overlay mount).
 //
 //	sudo env PATH=$PATH GOTOOLCHAIN=local GOFLAGS=-mod=mod GOSUMDB=off HOME=$HOME \
 //	  go test -tags substrate -v -count=1 -timeout 900s ./test/ -run Resource
 //
-// Gate A (rate axis) lives here: acceptance 1 (real CPU throttling + no
-// cross-sandbox interference) and 2 (the cap DID bind, i.e. the leaf-ownership
-// trap is not silently swallowing it). Each assertion states its property inline.
+// The rate axis lives here: real CPU throttling with no cross-sandbox
+// interference, and proof the cap DID bind (the leaf-ownership trap is not
+// silently swallowing it). Each assertion states its property inline.
 package test
 
 import (
@@ -144,6 +144,26 @@ func main() {
 }
 `
 
+// unlinkSrc deletes a path via unlink(2). The capacity axis needs it because
+// freeing bytes at a FULL quota is only possible this way: a truncating open()
+// cannot get the space to open for writing, and truncate(2) succeeds without
+// releasing anything (squota holds an extent's charge until its inode dies). The
+// bare Template ships no `rm`, so this is injected as a static binary.
+//
+// Args: unlinker <path>
+const unlinkSrc = `package main
+
+import ("fmt";"os";"syscall")
+
+func main() {
+	if err := syscall.Unlink(os.Args[1]); err != nil {
+		fmt.Printf("UNLINK_ERR=%v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("UNLINKED")
+}
+`
+
 // hostLogBytes is the total size of the kernel/syslog files whose growth the
 // §2.3 bypass would show up in. See TestResourceRAMAxis: an unbounded OOM retry
 // storm writes kernel log at ~66 MB/s, and that path goes AROUND the disk capacity
@@ -179,7 +199,8 @@ func readCg(t *testing.T, sid model.SandboxID, file string) string {
 // cpuUsecOf sums the CPU time of EVERY task in the sandbox's cgroup, read from
 // cpu.stat's usage_usec.
 //
-// Summing over the whole cgroup is required, not incidental (M6 §4 constraint 3):
+// Summing over the whole cgroup is required, not incidental (§5.A 观测 CPU 用量要对
+// `cgroup.procs` 全体求和):
 // systrap runs each guest thread as its OWN host thread group, so sampling the
 // sentry's /proc/<pid>/stat alone reports a fictitious ~0.01 CPU while the sandbox
 // is in fact saturating its quota. cpu.stat aggregates the entire cgroup, which is
@@ -212,6 +233,25 @@ func nrThrottled(t *testing.T, sid model.SandboxID) int64 {
 	return 0
 }
 
+// cleanupOverlaySubvolumes removes Overlay units as SUBVOLUMES before a plain
+// RemoveAll can clear the tree — os.RemoveAll cannot delete a subvolume, so
+// without this the scratch tree survives and leaks quota units on the dev box.
+func cleanupOverlaySubvolumes(bc btrfs.Client, stateDir string) {
+	ctx := context.Background()
+	ovRoot := filepath.Join(stateDir, "overlays")
+	entries, _ := os.ReadDir(ovRoot)
+	for _, e := range entries {
+		p := filepath.Join(ovRoot, e.Name())
+		if !bc.IsSubvolume(ctx, p) {
+			continue
+		}
+		for _, sub := range []string{"upper", "work", "merged"} {
+			_ = os.RemoveAll(filepath.Join(p, sub))
+		}
+		_ = bc.DeleteSubvolume(ctx, p)
+	}
+}
+
 // setupEngineOnBtrfs is setupEngineWithProbe with the engine StateDir forced onto
 // a REAL btrfs filesystem, which the capacity axis requires (subvolume + squota,
 // ADR-0002). t.TempDir() cannot be used for it: TMPDIR is /tmp = tmpfs here, where
@@ -231,20 +271,7 @@ func setupEngineOnBtrfs(t *testing.T, healthTimeout time.Duration) (*orchestrato
 	}
 	stateDir := filepath.Join(base, "state")
 	t.Cleanup(func() {
-		// Overlay units are subvolumes; they must be deleted as subvolumes before the
-		// plain RemoveAll can clear the tree.
-		ctx := context.Background()
-		ovRoot := filepath.Join(stateDir, "overlays")
-		entries, _ := os.ReadDir(ovRoot)
-		for _, e := range entries {
-			p := filepath.Join(ovRoot, e.Name())
-			if bc.IsSubvolume(ctx, p) {
-				_ = os.RemoveAll(filepath.Join(p, "upper"))
-				_ = os.RemoveAll(filepath.Join(p, "work"))
-				_ = os.RemoveAll(filepath.Join(p, "merged"))
-				_ = bc.DeleteSubvolume(ctx, p)
-			}
-		}
+		cleanupOverlaySubvolumes(bc, stateDir)
 		_ = os.RemoveAll(base)
 	})
 
@@ -254,6 +281,7 @@ func setupEngineOnBtrfs(t *testing.T, healthTimeout time.Duration) (*orchestrato
 	harness.InjectStaticBin(t, tmpl, "bare", "cpuburn", cpuBurnSrc)
 	harness.InjectStaticBin(t, tmpl, "bare", "diskfill", diskFillSrc)
 	harness.InjectStaticBin(t, tmpl, "bare", "memhog", memHogSrc)
+	harness.InjectStaticBin(t, tmpl, "bare", "unlinker", unlinkSrc)
 
 	eng, err := orchestrator.New(orchestrator.Config{
 		TemplatesDir: tmpl, StateDir: stateDir,
@@ -272,7 +300,7 @@ func setupEngineOnBtrfs(t *testing.T, healthTimeout time.Duration) (*orchestrato
 	return eng, base
 }
 
-// TestResourceCapacityAxis is M6 acceptance 4 + 9: the guest fills its disk cap
+// TestResourceCapacityAxis: the guest fills its disk cap
 // and gets a plain ENOSPC while THE SANDBOX KEEPS RUNNING (a data-plane event, not
 // a lifecycle one — the opposite of the RAM cap), and destroy reclaims the
 // subvolume and its quota.
@@ -320,7 +348,7 @@ func TestResourceCapacityAxis(t *testing.T) {
 	}
 	t.Logf("✓ capacity cap bound: subvolume %s used=%d limit=%d (upper+work in ONE quota unit)", filepath.Base(unit), used, limit)
 
-	// --- acceptance 4: guest write hits the cap → errno 28, sandbox SURVIVES ---
+	// --- guest write hits the cap → errno 28, sandbox SURVIVES ---
 	cl, err := m.Client(sid)
 	if err != nil {
 		t.Fatalf("client: %v", err)
@@ -357,7 +385,7 @@ func TestResourceCapacityAxis(t *testing.T) {
 	if usedAfter > diskCap {
 		t.Fatalf("charged %d bytes against a %d cap — the ceiling was breached", usedAfter, diskCap)
 	}
-	t.Logf("✓ acceptance 4: guest got errno 28 at the cap; charged %d of %d bytes (%.2f%%)",
+	t.Logf("✓ guest got errno 28 at the cap; charged %d of %d bytes (%.2f%%)",
 		usedAfter, diskCap, 100*float64(usedAfter)/float64(diskCap))
 
 	// STILL RUNNING and still usable — the §3.4 distinction that makes capacity a
@@ -382,15 +410,50 @@ func TestResourceCapacityAxis(t *testing.T) {
 	if rec2, _ := eng.Store.GetSandbox(ctx, sid); rec2.DeathCause != model.CauseNone {
 		t.Fatalf("death cause = %q after a mere ENOSPC; want none (capacity overrun is not a death)", rec2.DeathCause)
 	}
-	t.Logf("✓ acceptance 4: container still running and exec-able after ENOSPC, no death cause recorded")
+	t.Logf("✓ container still running and exec-able after ENOSPC, no death cause recorded")
 
-	// freeing space inside the cap restores writability (the cap is a ceiling, not
-	// a latch).
-	if err := cl.Write(ctx, "/root/probe-after-free", []byte("ok")); err == nil {
-		t.Logf("note: a small write still succeeded (headroom remains under the cap)")
+	// The cap is a CEILING, not a latch: DELETING the filler returns its bytes to
+	// the quota and writes resume. Measured, and the mechanism matters — only
+	// deletion works here:
+	//   - a truncating open() fails, because O_TRUNC still has to open for writing
+	//     and there is no space to do it (measured: ENOSPC on open);
+	//   - truncate(2) SUCCEEDS yet frees nothing the quota can see, because squota
+	//     holds an extent's charge until the inode itself goes away;
+	//   - unlink releases the charge immediately (measured: the next write succeeds
+	//     on the first attempt, no settle window needed).
+	// The delete must happen IN-GUEST: the merged overlay is the live view, and
+	// mutating its upper from the host behind a mounted overlayfs is undefined.
+	chDel, err := cl.Start(ctx, transport.StartSpec{Cmd: "/usr/bin/unlinker", Args: []string{"/root/fill"}})
+	if err != nil {
+		t.Fatalf("start unlinker: %v", err)
 	}
+	var delOut strings.Builder
+	delExit := -1
+	for ev := range chDel {
+		switch ev.Kind {
+		case "data":
+			delOut.Write(ev.Data)
+		case "end":
+			delExit = ev.ExitCode
+		}
+	}
+	if delExit != 0 || !strings.Contains(delOut.String(), "UNLINKED") {
+		t.Fatalf("in-guest unlink of the filler failed (exit=%d): %s", delExit, delOut.String())
+	}
+	if err := cl.Write(ctx, "/root/probe-after-free", []byte("ok")); err != nil {
+		t.Fatalf("write after freeing space under the cap failed: %v — the cap latched instead of acting as a ceiling", err)
+	}
+	usedFreed, _, err := bc.Usage(ctx, unit)
+	if err != nil {
+		t.Fatalf("Usage after free: %v", err)
+	}
+	if usedFreed >= usedAfter {
+		t.Fatalf("charged bytes did not drop after deleting the filler (%d → %d) — the freed extents were never returned to the quota", usedAfter, usedFreed)
+	}
+	t.Logf("✓ the cap is a ceiling, not a latch: deleting the filler returned bytes to the quota (%d → %d of %d) and writes resumed",
+		usedAfter, usedFreed, diskCap)
 
-	// --- acceptance 9: destroy reclaims the subvolume + quota ----------------
+	// --- destroy reclaims the subvolume + quota -----------------------------
 	if err := m.Destroy(ctx, sid); err != nil {
 		t.Fatalf("destroy: %v", err)
 	}
@@ -401,7 +464,7 @@ func TestResourceCapacityAxis(t *testing.T) {
 	if bc.IsSubvolume(ctx, unit) {
 		t.Fatal("subvolume survived destroy (quota unit leaked)")
 	}
-	t.Logf("✓ acceptance 9: destroy reclaimed the subvolume and its quota unit")
+	t.Logf("✓ destroy reclaimed the subvolume and its quota unit")
 }
 
 // Acceptance 9, crash half: a sandbox whose create crashed mid-chain leaves an
@@ -465,7 +528,7 @@ func TestResourceCapacityOrphanSubvolumeReclaimed(t *testing.T) {
 	if _, err := os.Stat(unit); !os.IsNotExist(err) {
 		t.Fatalf("orphan overlay unit dir survived reconcile: %v", err)
 	}
-	t.Logf("✓ acceptance 9 (crash half): startup reconcile reclaimed the orphan capacity subvolume + quota")
+	t.Logf("✓ crash half: startup reconcile reclaimed the orphan capacity subvolume + quota")
 }
 
 // A capacity cap that CANNOT be enforced must be refused, never silently
@@ -497,7 +560,7 @@ func TestResourceCapacityRefusedWhenUnenforceable(t *testing.T) {
 	}
 }
 
-// TestResourceRAMAxis is M6 acceptance 5 + 6: exceeding the RAM cap terminates
+// TestResourceRAMAxis: exceeding the RAM cap terminates
 // the sandbox DETERMINISTICALLY and WHOLE-GROUP, the host kernel log does not grow
 // without bound, and the death cause lands in the store in the SAME commit as the
 // crash-paused demotion — after which resume is REFUSED.
@@ -583,7 +646,7 @@ func TestResourceRAMAxis(t *testing.T) {
 		t.Fatalf("guest allocated 512 MiB under a %d-byte cap without being terminated — the RAM cap did not bind", memCap)
 	}
 
-	// --- acceptance 5: whole-group, deterministic termination -----------------
+	// --- whole-group, deterministic termination ------------------------------
 	// memory.events records the whole-group kill. Read it BEFORE any teardown: the
 	// leaf (and this evidence) dies with `runsc delete` (§4.3).
 	deadline := time.Now().Add(20 * time.Second)
@@ -604,7 +667,7 @@ func TestResourceRAMAxis(t *testing.T) {
 		t.Fatalf("memory.events shows oom_group_kill=0 — termination was not whole-group (§2.4 requires deterministic, whole-group termination)")
 	}
 	peak := readCg(t, sid, "memory.peak")
-	t.Logf("✓ acceptance 5: whole-group termination (oom_group_kill=%d, memory.peak=%s vs host ceiling %d)", groupKills, peak, hostCeil)
+	t.Logf("✓ whole-group termination (oom_group_kill=%d, memory.peak=%s vs host ceiling %d)", groupKills, peak, hostCeil)
 
 	// bounded host log growth — the §2.3 bypass check.
 	logGrowth := hostLogBytes(t) - logBefore
@@ -613,9 +676,9 @@ func TestResourceRAMAxis(t *testing.T) {
 		t.Fatalf("host kernel/syslog grew %d bytes during one RAM-cap termination (budget %d) — this is the §2.3 bypass: an OOM retry storm fills the HOST disk, going around the per-sandbox capacity cap",
 			logGrowth, logBudget)
 	}
-	t.Logf("✓ acceptance 5: host log growth bounded (%d bytes ≤ %d budget) — no OOM retry storm (§2.3 not bypassed)", logGrowth, logBudget)
+	t.Logf("✓ host log growth bounded (%d bytes ≤ %d budget) — no OOM retry storm (§2.3 not bypassed)", logGrowth, logBudget)
 
-	// --- acceptance 6: death cause committed WITH the crash-paused demotion ---
+	// --- death cause committed WITH the crash-paused demotion ----------------
 	// The reaper's sweep classifies the dead unit and disposes of it. This is the
 	// live path (a running orchestrator), the same one reconcile takes at boot.
 	lifecycle.NewReaper(m, time.Hour, time.Hour).Sweep(ctx)
@@ -635,7 +698,7 @@ func TestResourceRAMAxis(t *testing.T) {
 	if k := lastKind(t, eng, sid); k != "crash-paused" {
 		t.Fatalf("event Kind = %q; want crash-paused (§4.1: the state is paused either way, the Kind carries why)", k)
 	}
-	t.Logf("✓ acceptance 6: crash-paused with death_cause=%s persisted, event Kind=crash-paused", rec.DeathCause)
+	t.Logf("✓ crash-paused with death_cause=%s persisted, event Kind=crash-paused", rec.DeathCause)
 
 	// ...and resume is REFUSED. This is the disposition that makes the whole death
 	// cause worth persisting: dead-recoverable resumes, resource-terminated must
@@ -650,7 +713,7 @@ func TestResourceRAMAxis(t *testing.T) {
 	if stt, _ := m.State(ctx, sid); stt != model.Paused {
 		t.Fatalf("state = %s after the refused resume; want it to STAY paused", stt)
 	}
-	t.Logf("✓ acceptance 6: resume refused and the sandbox stayed paused (%v)", err)
+	t.Logf("✓ resume refused and the sandbox stayed paused (%v)", err)
 }
 
 // lastLines returns the final n non-empty lines, to keep guest output in the log
@@ -668,7 +731,7 @@ func lastLines(s string, n int) string {
 	return strings.Join(keep, " | ")
 }
 
-// TestResourceUnknownDeathCauseResumes is M6 acceptance 7: when the death cause
+// TestResourceUnknownDeathCauseResumes: when the death cause
 // cannot be read it is `Unknown`, the sandbox is treated as dead-recoverable and
 // DOES resume, and the loop is bounded rather than infinite.
 //
@@ -709,7 +772,7 @@ func TestResourceUnknownDeathCauseResumes(t *testing.T) {
 	if rec.DeathCause == model.CauseResourceExceeded {
 		t.Fatalf("death cause = %q for an external kill — a false resource-terminated verdict permanently blocks resume (§2.4: report Unknown, never guess)", rec.DeathCause)
 	}
-	t.Logf("✓ acceptance 7: non-resource death recorded as %q (not a guessed resource-exceeded)", rec.DeathCause)
+	t.Logf("✓ non-resource death recorded as %q (not a guessed resource-exceeded)", rec.DeathCause)
 
 	// ...and it RESUMES (the §4.3 fallback: treat as dead-recoverable, let bounded
 	// retry self-correct if the guess was wrong).
@@ -725,10 +788,10 @@ func TestResourceUnknownDeathCauseResumes(t *testing.T) {
 	if after.DeathCause != model.CauseNone {
 		t.Fatalf("death cause = %q after a successful resume; want cleared", after.DeathCause)
 	}
-	t.Logf("✓ acceptance 7: resumed to running and the death cause was cleared (bounded self-correction, §4.3)")
+	t.Logf("✓ resumed to running and the death cause was cleared (bounded self-correction, §4.3)")
 }
 
-// TestResourceAdmissionGateOnSubstrate is M6 acceptance 8: a create whose caps
+// TestResourceAdmissionGateOnSubstrate: a create whose caps
 // would oversubscribe the node fails and leaves NO half-built residue, and a paused
 // sandbox that no longer fits fails its resume and STAYS paused.
 func TestResourceAdmissionGateOnSubstrate(t *testing.T) {
@@ -747,17 +810,7 @@ func TestResourceAdmissionGateOnSubstrate(t *testing.T) {
 	}
 	stateDir := filepath.Join(base, "state")
 	t.Cleanup(func() {
-		ovRoot := filepath.Join(stateDir, "overlays")
-		entries, _ := os.ReadDir(ovRoot)
-		for _, e := range entries {
-			p := filepath.Join(ovRoot, e.Name())
-			if bc.IsSubvolume(ctx, p) {
-				_ = os.RemoveAll(filepath.Join(p, "upper"))
-				_ = os.RemoveAll(filepath.Join(p, "work"))
-				_ = os.RemoveAll(filepath.Join(p, "merged"))
-				_ = bc.DeleteSubvolume(ctx, p)
-			}
-		}
+		cleanupOverlaySubvolumes(bc, stateDir)
 		_ = os.RemoveAll(base)
 	})
 	tmpl := filepath.Join(base, "templates")
@@ -797,7 +850,7 @@ func TestResourceAdmissionGateOnSubstrate(t *testing.T) {
 	t.Cleanup(func() { _ = m.Destroy(ctx, sid1) })
 
 	// second must be REFUSED: Σcaps + uncapped bytes now exceeds the budget.
-	nsBefore := countSbxNetns(t)
+	nsBefore := harness.CountEngineNetns(t)
 	_, err = m.Create(ctx, lifecycle.CreateSpec{Template: "bare", Limits: model.Limits{DiskByte: capPer}})
 	if err == nil {
 		t.Fatal("second create succeeded — the node budget is being oversubscribed (§3.4)")
@@ -805,7 +858,7 @@ func TestResourceAdmissionGateOnSubstrate(t *testing.T) {
 	if !strings.Contains(err.Error(), "capacity") {
 		t.Fatalf("want an insufficient-capacity refusal; got %v", err)
 	}
-	t.Logf("✓ acceptance 8: over-budget create refused: %v", err)
+	t.Logf("✓ over-budget create refused: %v", err)
 
 	// The refusal must be accounting for the TEMPLATE bytes, not just the caps.
 	// Asserting the reported layer term is on the order of the real Template library
@@ -824,21 +877,21 @@ func TestResourceAdmissionGateOnSubstrate(t *testing.T) {
 		t.Fatalf("uncapped bytes reported as %d but the Template library alone is ~%d — deployment-shipped Template bytes are being omitted from node accounting (§5.B / D6.2 undercount)",
 			reported, layerish)
 	}
-	t.Logf("✓ acceptance 8: the uncapped term (%d) accounts for the real Template bytes (~%d), not just Promote-built layers", reported, layerish)
+	t.Logf("✓ the uncapped term (%d) accounts for the real Template bytes (~%d), not just Promote-built layers", reported, layerish)
 
 	// NO half-built residue: no extra record, no netns, no extra overlay unit.
 	list, _ := m.List(ctx)
 	if len(list) != 1 {
 		t.Fatalf("%d sandbox records after a refused create; want 1 (no half-build, §4.4-A)", len(list))
 	}
-	if n := countSbxNetns(t); n > nsBefore {
+	if n := harness.CountEngineNetns(t); n > nsBefore {
 		t.Fatalf("refused create leaked a netns (before=%d after=%d)", nsBefore, n)
 	}
 	ovs, _ := os.ReadDir(filepath.Join(stateDir, "overlays"))
 	if len(ovs) != 1 {
 		t.Fatalf("%d overlay units after a refused create; want 1", len(ovs))
 	}
-	t.Logf("✓ acceptance 8: refused create left no residue (1 record, no new netns, 1 overlay unit)")
+	t.Logf("✓ refused create left no residue (1 record, no new netns, 1 overlay unit)")
 
 	// --- resume half: a paused sandbox that no longer fits stays paused -------
 	if err := m.Pause(ctx, sid1); err != nil {
@@ -859,7 +912,7 @@ func TestResourceAdmissionGateOnSubstrate(t *testing.T) {
 	if err := eng2.Mediator.Resume(ctx, sid1); err == nil {
 		t.Fatal("resume succeeded despite the node no longer having room for its cap")
 	} else {
-		t.Logf("✓ acceptance 8: over-budget resume refused: %v", err)
+		t.Logf("✓ over-budget resume refused: %v", err)
 	}
 	// §4.4-A: atomic return to the SOURCE state.
 	rec, err := eng2.Store.GetSandbox(ctx, sid1)
@@ -869,7 +922,7 @@ func TestResourceAdmissionGateOnSubstrate(t *testing.T) {
 	if rec.State != model.Paused {
 		t.Fatalf("state = %s after a refused resume; want it to STAY paused (§4.4-A atomic return to source state)", rec.State)
 	}
-	t.Logf("✓ acceptance 8: refused resume left the sandbox in `paused`")
+	t.Logf("✓ refused resume left the sandbox in `paused`")
 }
 
 // dirSize sums APPARENT sizes and is only a loose LOWER-BOUND reference for the
@@ -889,7 +942,8 @@ func dirSize(root string) (int64, error) {
 	return total, err
 }
 
-// TestResourceRateAxis is M6 acceptance 1 + 2 + 3 (substrate half).
+// TestResourceRateAxis: the CPU quota really throttles, the cap provably bound,
+// and it is re-materialized across resume (§3.4 / §5.A).
 func TestResourceRateAxis(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("needs root (cgroup writes + runsc --network=sandbox + overlay mount)")
@@ -902,7 +956,7 @@ func TestResourceRateAxis(t *testing.T) {
 	const memCap = 256 << 20
 
 	// Two sandboxes, SAME caps, on the same host: one will burn CPU, the other
-	// stays idle. The pair is what makes acceptance 1's second half checkable —
+	// stays idle. The pair is what makes the no-interference half checkable —
 	// per-sandbox throttling must not bleed across sandboxes.
 	busy, err := m.Create(ctx, lifecycle.CreateSpec{
 		Template: "bare",
@@ -922,7 +976,7 @@ func TestResourceRateAxis(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = m.Destroy(ctx, neighbor) })
 
-	// --- acceptance 2: the caps ACTUALLY BOUND ------------------------------
+	// --- the caps ACTUALLY BOUND --------------------------------------------
 	// This is the assertion that catches the §5.A leaf-ownership trap, whose
 	// failure mode is SILENT: if the engine pre-created the full cgroup path,
 	// runsc would write memory.swap.max=0, leave memory.max=max, and the launch
@@ -962,7 +1016,7 @@ func TestResourceRateAxis(t *testing.T) {
 			sid, wantCPU, hostCeil, memCap)
 	}
 
-	// --- acceptance 1: real throttling, measured over the WHOLE cgroup -------
+	// --- real throttling, measured over the WHOLE cgroup --------------------
 	cl, err := m.Client(busy)
 	if err != nil {
 		t.Fatalf("client: %v", err)
@@ -1000,16 +1054,16 @@ func TestResourceRateAxis(t *testing.T) {
 		t.Fatalf("nr_throttled = 0 while a busy loop ran under a %d-millis cap; the quota is not being enforced", capMillis)
 	}
 
-	// second half of acceptance 1: no cross-sandbox interference. The idle
+	// no cross-sandbox interference. The idle
 	// neighbor's own cgroup must be essentially untouched by its noisy sibling.
 	neighborCores := float64(deltaNeighbor) / float64(elapsed.Microseconds())
 	t.Logf("idle neighbor consumed %.4f cores in the same window", neighborCores)
 	if neighborCores > 0.15 {
 		t.Fatalf("idle neighbor burned %.3f cores — per-sandbox accounting is leaking across sandboxes", neighborCores)
 	}
-	t.Logf("✓ acceptance 1: rate axis throttles (%.3f ≈ %.2f cores, nr_throttled>0) and does not disturb a co-resident sandbox", gotCores, wantCores)
+	t.Logf("✓ rate axis throttles (%.3f ≈ %.2f cores, nr_throttled>0) and does not disturb a co-resident sandbox", gotCores, wantCores)
 
-	// --- acceptance 3: the cap is a BINDING, re-materialized across resume ---
+	// --- the cap is a BINDING, re-materialized across resume ----------------
 	// pause/resume, then re-read the cgroup: a NEW leaf under a NEW placement must
 	// carry the caps again, re-derived from the record rather than recovered from
 	// the old (now destroyed) placement.
@@ -1036,7 +1090,7 @@ func TestResourceRateAxis(t *testing.T) {
 	if got := readCg(t, busy, "memory.oom.group"); got != "1" {
 		t.Fatalf("after resume memory.oom.group = %q; want 1", got)
 	}
-	t.Logf("✓ acceptance 3: caps re-materialized on the NEW placement after resume (cpu.max=%s, swap.max=0, oom.group=1)", wantCPU)
+	t.Logf("✓ caps re-materialized on the NEW placement after resume (cpu.max=%s, swap.max=0, oom.group=1)", wantCPU)
 
 	// destroy → the leaf must be gone (reclamation discipline, §4.4-A).
 	if err := m.Destroy(ctx, busy); err != nil {
@@ -1050,7 +1104,7 @@ func TestResourceRateAxis(t *testing.T) {
 
 // An UNLIMITED sandbox (all caps zero) must create no cgroup leaf at all: no
 // resources block, no cgroupsPath, no footprint in the host cgroup namespace.
-// This keeps "no limits requested" behaviourally identical to pre-M6 and keeps the
+// This keeps "no limits requested" free of any host cgroup footprint and keeps the
 // engine parent free of empty leaves.
 func TestResourceUnlimitedSandboxHasNoCgroupLeaf(t *testing.T) {
 	if os.Geteuid() != 0 {

@@ -57,7 +57,9 @@ func setupEngine(t *testing.T, healthTimeout time.Duration) (*orchestrator.Engin
 }
 
 // upperDir returns the host upper path for a sandbox's Overlay (test-only peek
-// into placement-internal state to assert byte reclamation).
+// past the §5.B seam, which keeps host paths private, to assert byte
+// reclamation). The upper is PERSISTENT state, not placement state — §4.4-A
+// requires placement reclaim to leave it untouched.
 func upperDir(t *testing.T, eng *orchestrator.Engine, base string, id model.SandboxID) string {
 	t.Helper()
 	rec, err := eng.Store.GetSandbox(context.Background(), id)
@@ -67,9 +69,9 @@ func upperDir(t *testing.T, eng *orchestrator.Engine, base string, id model.Sand
 	return filepath.Join(base, "state", "overlays", string(rec.Overlay), "upper")
 }
 
-// setupEngineWithProbe is setupEngine plus the tiny guest probes the M6 resource
-// assertions need (the minimal Template ships no coreutils, so a busy loop and a
-// disk filler are injected as static binaries).
+// setupEngineWithProbe is setupEngine plus the tiny guest probes the resource
+// assertions need (the minimal Template ships no coreutils, so a busy loop, a
+// disk filler and a memory hog are injected as static binaries).
 func setupEngineWithProbe(t *testing.T, healthTimeout time.Duration) (*orchestrator.Engine, string) {
 	t.Helper()
 	repo := harness.RepoRoot(t)
@@ -237,7 +239,7 @@ func TestE2EColdStartUnwindRealRunsc(t *testing.T) {
 		t.Fatalf("seed builtin templates: %v", err)
 	}
 
-	nsBefore := countSbxNetns(t)
+	nsBefore := harness.CountEngineNetns(t)
 	_, err = eng.Mediator.Create(ctx, lifecycle.CreateSpec{Template: "broken"})
 	if err == nil {
 		t.Fatal("create should fail (Health never comes up)")
@@ -253,24 +255,10 @@ func TestE2EColdStartUnwindRealRunsc(t *testing.T) {
 		t.Fatalf("%d records left after unwind; want 0", len(list))
 	}
 	// no orphan netns (half-built placement reclaimed).
-	nsAfter := countSbxNetns(t)
+	nsAfter := harness.CountEngineNetns(t)
 	if nsAfter > nsBefore {
 		t.Fatalf("orphan netns leaked (before=%d after=%d)", nsBefore, nsAfter)
 	}
 	t.Logf("✓ record deleted, placement reclaimed, no orphan netns")
 }
 
-func countSbxNetns(t *testing.T) int {
-	t.Helper()
-	entries, err := os.ReadDir("/var/run/netns")
-	if err != nil {
-		return 0
-	}
-	n := 0
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), "sbxns_") {
-			n++
-		}
-	}
-	return n
-}

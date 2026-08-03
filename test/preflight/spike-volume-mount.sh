@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# spike-volume-mount.sh — M7 (Volume) Spike 1: does runsc (--overlay2=none
+# spike-volume-mount.sh — §5.C Volume local arm: does runsc (--overlay2=none
 # --file-access=shared) gofer-proxy an EXTRA rw host-dir bind mount into a live
 # guest, alongside the (plain) rootfs? This is the local Volume backend's floor:
 # a Volume = a host directory added to the OCI mount list.

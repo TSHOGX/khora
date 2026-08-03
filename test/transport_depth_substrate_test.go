@@ -6,6 +6,9 @@
 //
 //	sudo env PATH=$PATH GOTOOLCHAIN=local GOFLAGS=-mod=mod GOSUMDB=off HOME=$HOME \
 //	  go test -tags substrate -v -count=1 -timeout 300s ./test/ -run Transport
+//
+// That filter runs both transport suites (this depth one and the round-trip in
+// transport_substrate_test.go), which is usually what you want.
 package test
 
 import (

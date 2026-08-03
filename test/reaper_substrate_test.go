@@ -95,11 +95,27 @@ func TestReaperIdleAutoPauseRealRunsc(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = m.Destroy(ctx, sid) })
 
-	time.Sleep(3 * time.Second) // no I/O → guest idle crosses the threshold
-	lifecycle.NewReaper(m, time.Hour, time.Hour).Sweep(ctx)
-
-	if stt, _ := m.State(ctx, sid); stt != model.Paused {
-		t.Fatalf("idle sandbox state=%s; want paused (auto-pause)", stt)
+	// Poll rather than sleep-once: the disposition needs BOTH the guest's last-I/O
+	// stamp aged past idle_timeout AND an L2 probe that succeeds, because idle is
+	// read only on the L2-up branch (the D2 unreadable-idle guard). A probe that
+	// times out under load classifies transport-down, not idle, so a single fixed
+	// sleep can assert against a sandbox the classifier never called idle.
+	//
+	// Run this package with `-p 1` when running the whole substrate suite: other
+	// packages' substrate tests launch their own runsc containers concurrently, and
+	// that contention starves the probe for longer than any threshold set here.
+	r := lifecycle.NewReaper(m, time.Hour, time.Hour)
+	deadline := time.Now().Add(30 * time.Second)
+	var stt model.Lifecycle
+	for {
+		r.Sweep(ctx)
+		if stt, _ = m.State(ctx, sid); stt == model.Paused {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("idle sandbox state=%s; want paused (auto-pause) within 30s of a 2s idle_timeout", stt)
+		}
+		time.Sleep(500 * time.Millisecond)
 	}
 	if k := lastKind(t, eng, sid); k != "auto-paused" {
 		t.Fatalf("idle disposition Kind=%q; want auto-paused", k)

@@ -13,7 +13,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -76,21 +75,6 @@ func (f reconcileFixture) engine(t *testing.T, fault func(model.SandboxID)) *orc
 	return eng
 }
 
-func countEngineNetns(t *testing.T) int {
-	t.Helper()
-	entries, err := os.ReadDir("/var/run/netns")
-	if err != nil {
-		return 0
-	}
-	n := 0
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), "sbxns_") {
-			n++
-		}
-	}
-	return n
-}
-
 // crash mid-resume (placement half/fully built, store still `paused`) →
 // restart → reconcile reclaims the orphan placement, upper intact, record stays
 // paused. Also covers the `creating` orphan (→ record deleted, placement
@@ -101,13 +85,13 @@ func TestReconcileOrphanReclaim(t *testing.T) {
 	}
 	ctx := context.Background()
 	f := newReconcileFixture(t)
-	nsBefore := countEngineNetns(t)
+	nsBefore := harness.CountEngineNetns(t)
 
 	// --- pre-crash engine: create → pause, then resume that CRASHES at the fault
 	// point (placement fully built, store still paused).
 	var sid model.SandboxID
 	func() {
-		eng := eng1Create(t, f)
+		eng := f.engine(t, nil)
 		defer func() { _ = eng.Store.(*store.SQLite).Close() }()
 		var err error
 		sid, err = eng.Mediator.Create(ctx, lifecycle.CreateSpec{Template: "bare"})
@@ -138,8 +122,8 @@ func TestReconcileOrphanReclaim(t *testing.T) {
 		if err != nil || rec.State != model.Paused {
 			t.Fatalf("pre-reconcile: state=%v err=%v; want paused", rec.State, err)
 		}
-		if countEngineNetns(t) <= nsBefore {
-			t.Fatalf("expected a leaked orphan netns before reconcile (before=%d now=%d)", nsBefore, countEngineNetns(t))
+		if harness.CountEngineNetns(t) <= nsBefore {
+			t.Fatalf("expected a leaked orphan netns before reconcile (before=%d now=%d)", nsBefore, harness.CountEngineNetns(t))
 		}
 
 		// --- restart: reconcile.
@@ -151,8 +135,8 @@ func TestReconcileOrphanReclaim(t *testing.T) {
 		if rec2.State != model.Paused {
 			t.Fatalf("post-reconcile state=%s; want paused (§4.4-A)", rec2.State)
 		}
-		if countEngineNetns(t) != nsBefore {
-			t.Fatalf("orphan netns not reclaimed: before=%d after=%d", nsBefore, countEngineNetns(t))
+		if harness.CountEngineNetns(t) != nsBefore {
+			t.Fatalf("orphan netns not reclaimed: before=%d after=%d", nsBefore, harness.CountEngineNetns(t))
 		}
 		up := filepath.Join(upper, string(rec2.Overlay), "upper")
 		if _, err := os.Stat(up); err != nil {
@@ -160,11 +144,6 @@ func TestReconcileOrphanReclaim(t *testing.T) {
 		}
 		t.Logf("✓ orphan placement reclaimed, record stays paused, upper intact")
 	}()
-}
-
-// eng1Create builds an engine with no fault hook (for setup phases).
-func eng1Create(t *testing.T, f reconcileFixture) *orchestrator.Engine {
-	return f.engine(t, nil)
 }
 
 // a `running` sandbox whose container SURVIVES a control-plane crash →
@@ -247,7 +226,7 @@ func TestReconcileNoResidueIdempotent(t *testing.T) {
 	}
 	ctx := context.Background()
 	f := newReconcileFixture(t)
-	nsBefore := countEngineNetns(t)
+	nsBefore := harness.CountEngineNetns(t)
 
 	// create a `creating`-crash orphan: fault hook on CREATE leaves a fully built
 	// placement while the store still reads `creating`.
@@ -259,7 +238,7 @@ func TestReconcileNoResidueIdempotent(t *testing.T) {
 		_, _ = eng.Mediator.Create(ctx, lifecycle.CreateSpec{Template: "bare"})
 		t.Fatal("create should have crashed at the fault hook")
 	}()
-	if countEngineNetns(t) <= nsBefore {
+	if harness.CountEngineNetns(t) <= nsBefore {
 		t.Fatalf("expected a leaked orphan netns from crashed create")
 	}
 
@@ -278,8 +257,8 @@ func TestReconcileNoResidueIdempotent(t *testing.T) {
 	if _, err := eng.Store.GetSandbox(ctx, sid); err == nil {
 		t.Fatal("creating record survived reconcile (should be destroyed)")
 	}
-	if countEngineNetns(t) != nsBefore {
-		t.Fatalf("engine netns residue after reconcile: before=%d after=%d", nsBefore, countEngineNetns(t))
+	if harness.CountEngineNetns(t) != nsBefore {
+		t.Fatalf("engine netns residue after reconcile: before=%d after=%d", nsBefore, harness.CountEngineNetns(t))
 	}
 	// no `failed` state anywhere.
 	list, _ := eng.Store.ListSandboxes(ctx)
@@ -292,7 +271,7 @@ func TestReconcileNoResidueIdempotent(t *testing.T) {
 	if err := eng.Reconcile(ctx); err != nil {
 		t.Fatalf("reconcile 2 (idempotent): %v", err)
 	}
-	if countEngineNetns(t) != nsBefore {
+	if harness.CountEngineNetns(t) != nsBefore {
 		t.Fatalf("second reconcile changed netns count")
 	}
 	t.Logf("✓ no residue, no failed state, reconcile idempotent")

@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"engine/internal/rootfs"
@@ -106,6 +107,23 @@ func InjectStaticBin(t *testing.T, templatesDir, template, name, mainSrc string)
 	if err := os.Chmod(dst, 0o755); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// CountEngineNetns counts engine-owned netns on this host (the placement marker
+// local_runsc enumerates, §4.4-A). Tests use it to assert no orphan leaked.
+func CountEngineNetns(t *testing.T) int {
+	t.Helper()
+	entries, err := os.ReadDir("/var/run/netns")
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "sbxns_") {
+			n++
+		}
+	}
+	return n
 }
 
 // Providers builds the two real providers rooted under base.

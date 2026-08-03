@@ -26,13 +26,13 @@ fi
 rm -rf "$DEST"
 mkdir -p "$DEST"
 
-# usrmerge layout: real dirs under /usr, top-level compat symlinks.
+# usrmerge layout: real dirs under /usr, top-level symlinks pointing into them.
 mkdir -p "$DEST/usr/bin" "$DEST/usr/lib" "$DEST/usr/sbin"
 ln -s usr/bin "$DEST/bin"
 ln -s usr/lib "$DEST/lib"
 ln -s usr/sbin "$DEST/sbin"
 # arm64 dynamic loader lives at /lib/ld-linux-aarch64.so.1 via the symlink above;
-# also provide /lib64 compat for portability.
+# also provide /lib64 for loaders that record that path.
 ln -s usr/lib "$DEST/lib64"
 
 # Runtime/kernel mountpoints + writable scratch the guest expects.
