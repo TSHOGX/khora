@@ -199,8 +199,8 @@ func readCg(t *testing.T, sid model.SandboxID, file string) string {
 // cpuUsecOf sums the CPU time of EVERY task in the sandbox's cgroup, read from
 // cpu.stat's usage_usec.
 //
-// Summing over the whole cgroup is required, not incidental (§5.A 观测 CPU 用量要对
-// `cgroup.procs` 全体求和):
+// Summing over the whole cgroup is required, not incidental (§5.A: CPU usage must
+// be summed over all of `cgroup.procs`):
 // systrap runs each guest thread as its OWN host thread group, so sampling the
 // sentry's /proc/<pid>/stat alone reports a fictitious ~0.01 CPU while the sandbox
 // is in fact saturating its quota. cpu.stat aggregates the entire cgroup, which is
@@ -260,8 +260,7 @@ func cleanupOverlaySubvolumes(bc btrfs.Client, stateDir string) {
 // configuration the engine does not support.
 func setupEngineOnBtrfs(t *testing.T, healthTimeout time.Duration) (*orchestrator.Engine, string) {
 	t.Helper()
-	repo := harness.RepoRoot(t)
-	base, err := os.MkdirTemp("/var/tmp", "m6cap-")
+	base, err := os.MkdirTemp("/var/tmp", "cap-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -275,28 +274,16 @@ func setupEngineOnBtrfs(t *testing.T, healthTimeout time.Duration) (*orchestrato
 		_ = os.RemoveAll(base)
 	})
 
-	tmpl := filepath.Join(base, "templates")
-	sbxd := harness.BuildSandboxd(t, repo)
-	harness.BuildTemplate(t, repo, tmpl, "bare", sbxd)
-	harness.InjectStaticBin(t, tmpl, "bare", "cpuburn", cpuBurnSrc)
-	harness.InjectStaticBin(t, tmpl, "bare", "diskfill", diskFillSrc)
-	harness.InjectStaticBin(t, tmpl, "bare", "memhog", memHogSrc)
-	harness.InjectStaticBin(t, tmpl, "bare", "unlinker", unlinkSrc)
-
-	eng, err := orchestrator.New(orchestrator.Config{
-		TemplatesDir: tmpl, StateDir: stateDir,
-		StorePath:     filepath.Join(base, "store.db"),
+	eng, _ := harness.Engine(t, harness.EngineOpts{
+		BaseDir:       base,
 		HealthTimeout: healthTimeout,
+		Probes: map[string]string{
+			"cpuburn":  cpuBurnSrc,
+			"diskfill": diskFillSrc,
+			"memhog":   memHogSrc,
+			"unlinker": unlinkSrc,
+		},
 	})
-	if err != nil {
-		t.Fatalf("orchestrator.New: %v", err)
-	}
-	if err := eng.SeedTemplates(context.Background()); err != nil {
-		t.Fatalf("seed builtin templates: %v", err)
-	}
-	if err := eng.Reconcile(context.Background()); err != nil {
-		t.Fatalf("startup reconcile: %v", err)
-	}
 	return eng, base
 }
 
@@ -467,9 +454,9 @@ func TestResourceCapacityAxis(t *testing.T) {
 	t.Logf("✓ destroy reclaimed the subvolume and its quota unit")
 }
 
-// Acceptance 9, crash half: a sandbox whose create crashed mid-chain leaves an
-// orphan Overlay unit, and startup reconcile must reclaim it as a SUBVOLUME plus
-// its quota unit (§4.4-A reclamation discipline).
+// A sandbox whose create crashed mid-chain leaves an orphan Overlay unit, and
+// startup reconcile must reclaim it as a SUBVOLUME plus its quota unit (§4.4-A
+// reclamation discipline).
 //
 // Measured caveat on what this test can and cannot prove: `rm -rf` DOES remove a
 // btrfs subvolume on this kernel (contents and all, exit 0), so a
@@ -800,7 +787,7 @@ func TestResourceAdmissionGateOnSubstrate(t *testing.T) {
 	}
 	ctx := context.Background()
 	repo := harness.RepoRoot(t)
-	base, err := os.MkdirTemp("/var/tmp", "m6adm-")
+	base, err := os.MkdirTemp("/var/tmp", "admission-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -990,7 +977,7 @@ func TestResourceRateAxis(t *testing.T) {
 		// The SHARE half of the axis, not just the ceiling. cpu.max alone leaves
 		// every leaf on cgroup's identical default weight, so on a saturated node
 		// sandboxes would split time EQUALLY regardless of the CPU they were sold —
-		// §3.4 calls this axis 公平分配, and a ceiling does not deliver that. Assert
+		// §3.4 calls this axis FAIR SHARING, and a ceiling does not deliver that. Assert
 		// a non-default weight actually landed (both sandboxes here carry the same
 		// capMillis, so the proportionality itself is a ratio between DIFFERENT
 		// millis values; what this pins is that the knob is written at all).

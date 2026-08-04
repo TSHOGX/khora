@@ -14,7 +14,7 @@ import (
 	"engine/internal/transport"
 )
 
-// L1 tests for the §3.4 resource-limit Binding and the §4.3 death-cause
+// Unit tests for the §3.4 resource-limit Binding and the §4.3 death-cause
 // disposition — the mediator-side logic, as pure logic. The substrate behaviour
 // (does cpu.max really throttle, does the RAM cap really terminate) is asserted
 // on real runsc in test/resource_substrate_test.go; these cover the parts that
@@ -109,10 +109,11 @@ func TestHandleOnlyRebuildsDoNotTouchTheCap(t *testing.T) {
 	}
 }
 
-// §4.3 — the two dead health states are parallel, not nested: identical observations
-// (L1 dead, persistent state intact), OPPOSITE dispositions, separated only by the
-// death cause. Both crash-pause; only resource-terminated refuses to resume.
-func TestDeathCauseSeparatesTheTwoParallelDeadQuadrants(t *testing.T) {
+// §4.3 — the two dead HEALTH STATES are parallel, not nested: identical
+// observations (L1 dead, persistent state intact), OPPOSITE dispositions,
+// separated only by the death cause. Both crash-pause; only resource-terminated
+// refuses to resume, and a dead-recoverable one really does come back up.
+func TestDeathCauseSeparatesTheTwoParallelDeadHealthStates(t *testing.T) {
 	ctx := context.Background()
 	for _, tc := range []struct {
 		name       string
@@ -133,20 +134,22 @@ func TestDeathCauseSeparatesTheTwoParallelDeadQuadrants(t *testing.T) {
 			}
 			st := store.NewMemory()
 			seedBare(t, st)
-			// L2 down + L1 dead → the classifier consults Adopt for the cause.
+			// L2 is driven by this flag: DOWN while we classify the dead unit, then
+			// flipped UP so the resume below can actually reach `running`. Without the
+			// flip a permitted resume would still fail — at the ⑦ health gate — and the
+			// test would pass on the wrong error, proving only "the guard did not fire"
+			// rather than "the resume was allowed".
+			l2Up := false
 			m := New(Deps{
 				Store: st, Runtime: rt, Rootfs: rp,
-				Dial:          func(transport.Endpoint) transport.Client { return &fakeClient{healthy: false} },
+				Dial: func(transport.Endpoint) transport.Client {
+					return &fakeClient{healthyFn: func() bool { return l2Up }}
+				},
 				HealthTimeout: 200 * time.Millisecond,
 			})
-			// place a running sandbox with a live handle so classify resolves an endpoint
-			sid, err := m.Create(ctx, CreateSpec{Template: "bare", Limits: model.Limits{MemoryByte: 192 << 20}})
-			if err == nil {
-				t.Fatal("create should fail its health gate with an unhealthy client")
-			}
-			_ = sid
-			// Build the running state directly: create cannot pass the ⑦ gate with an
-			// unhealthy transport, and what we are testing is the DEAD path.
+			// Build the `running` state directly rather than via Create: L2 is down at
+			// this point (to reach the DEAD path below), so a create could not pass its
+			// ⑦ readiness gate.
 			sid2 := model.SandboxID("sbx_dead")
 			now := time.Now()
 			if err := st.CreateSandbox(ctx, model.Sandbox{
@@ -185,10 +188,20 @@ func TestDeathCauseSeparatesTheTwoParallelDeadQuadrants(t *testing.T) {
 				t.Fatalf("stored death cause = %q; want %q", after.DeathCause, tc.wantStored)
 			}
 
-			// the disposition that actually differs.
-			err = m.Resume(ctx, sid2)
-			if tc.wantResume && errors.Is(err, ErrResourceTerminated) {
-				t.Fatalf("resume was refused for a %s death; want it allowed (§4.3 dead-recoverable resumes)", tc.cause)
+			// The disposition that actually differs. L2 comes up first, so a
+			// PERMITTED resume runs the whole cold start and lands `running` — the
+			// assertion is that it SUCCEEDED, not merely that it failed for some other
+			// reason.
+			l2Up = true
+			err := m.Resume(ctx, sid2)
+			if tc.wantResume {
+				if err != nil {
+					t.Fatalf("resume of a %s death = %v; want it to SUCCEED (§4.3 dead-recoverable resumes)", tc.cause, err)
+				}
+				back, _ := st.GetSandbox(ctx, sid2)
+				if back.State != model.Running {
+					t.Fatalf("state = %s after a permitted resume; want running", back.State)
+				}
 			}
 			if !tc.wantResume {
 				if !errors.Is(err, ErrResourceTerminated) {
@@ -346,13 +359,14 @@ func TestAdmissionGateEnforcesTheAccountingFormula(t *testing.T) {
 		t.Run("disk metered, disk cap omitted → refused", func(t *testing.T) {
 			m, st := newLimitsMediator(t, &fakeRootfs{}, &fakeRuntime{}, NodeCapacity{DiskByte: 8 * gib})
 			_, err := m.Create(ctx, CreateSpec{Template: "bare", Limits: model.Limits{}})
-			if !errors.Is(err, ErrCapRequired) {
-				t.Fatalf("err = %v; want ErrCapRequired", err)
-			}
-			// NOT the same verdict as a full node: nothing is full here, so reporting
-			// insufficient capacity would be a lie (and the API maps the two differently).
-			if errors.Is(err, ErrInsufficientCapacity) {
-				t.Fatal("uncapped-create refusal must not be ErrInsufficientCapacity — nothing is full")
+			// The two verdicts must stay DISTINCT sentinels: nothing is full here, so
+			// reporting insufficient capacity would be a lie, and the API maps them to
+			// different statuses (400 vs 507 — the orchestrator's
+			// TestAdmissionVerdictsMapToDistinctStatuses pins that half). Asserted as
+			// one condition because `errors.Is(ErrInsufficientCapacity)` is unreachable
+			// once the first check has passed, so a separate `if` could never fail.
+			if !errors.Is(err, ErrCapRequired) || errors.Is(err, ErrInsufficientCapacity) {
+				t.Fatalf("err = %v; want ErrCapRequired and NOT ErrInsufficientCapacity", err)
 			}
 			// refused at PROMISE time → no record, nothing half-built (§4.4-A).
 			if recs, _ := st.ListSandboxes(ctx); len(recs) != 0 {

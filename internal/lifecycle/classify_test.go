@@ -14,7 +14,10 @@ import (
 
 // classifier truth table (§4.3 health states) as pure logic against fakes:
 // each health state from its L1 × L2 × activity inputs, plus the two "skip" cases
-// (no live handle, uncertain L1). The D2 unreadable-idle guard gets its own test.
+// (no live handle, uncertain L1).
+//
+// L1 / L2 here are the §4.3 PROBE LAYERS (substrate liveness / transport Health),
+// not a test-tier label.
 
 // classifyFixture builds a mediator whose L2 (Health) and L1 (Adopt) verdicts
 // are individually controllable, seeds a `running` record with the given
@@ -59,23 +62,19 @@ func newClassifyFixture(t *testing.T, id string, idleTimeout time.Duration, l2He
 	return classifyFixture{m: m, st: st, rt: rt}
 }
 
+// classifyOf returns just the health state — these tests are the L1×L2×activity
+// truth table. The death cause the classifier carries out ALONGSIDE the state
+// (§4.3 / reaper-health D4c) is asserted in limits_test.go's
+// TestDeathCauseSeparatesTheTwoParallelDeadHealthStates, which is where the cause
+// actually matters.
 func classifyOf(t *testing.T, f classifyFixture, id string) Health {
-	t.Helper()
-	h, _ := classifyWithCause(t, f, id)
-	return h
-}
-
-// classifyWithCause also returns the death cause the classifier carried out
-// alongside the health state (§4.3 / reaper-health D4c: the signal dies with the
-// placement, so a classifier that read it but did not return it has thrown it
-// away and the disposition can never recover it).
-func classifyWithCause(t *testing.T, f classifyFixture, id string) (Health, runtime.DeathCause) {
 	t.Helper()
 	rec, err := f.st.GetSandbox(context.Background(), model.SandboxID(id))
 	if err != nil {
 		t.Fatal(err)
 	}
-	return f.m.classify(context.Background(), rec)
+	h, _ := f.m.classify(context.Background(), rec)
+	return h
 }
 
 func TestClassifyHealthy(t *testing.T) {
@@ -110,11 +109,17 @@ func TestClassifyDeadRecoverable(t *testing.T) {
 	}
 }
 
-// D2 unreadable-idle guard: when L2 is DOWN, no idle_millis is available. The
-// sandbox must classify by L1 (into transport-down / dead-recoverable) and
-// NEVER into idle — even though the record's last-known activity might look
-// stale. Structurally, idle is only read on the L2-up branch, so a down probe
-// cannot yield idle regardless of any activity reading.
+// D2 unreadable-idle guard: when L2 is DOWN there is no trustworthy idle reading,
+// so the sandbox must classify by L1 alone and NEVER into idle.
+//
+// HONEST NOTE ON WHAT THIS PINS TODAY: `classify` reads idle only on the L2-up
+// branch, so with L2 down the fake's idle value is never consulted and this test
+// cannot fail independently of TestClassifyTransportDown /
+// TestClassifyDeadRecoverable. It is kept as a REGRESSION guard for the change
+// that would break the guard: adding a persisted last-activity field to the
+// record and consulting it when the probe fails. Then a 1ms idle_timeout on an
+// unreachable sandbox would classify idle and auto-pause a sandbox whose
+// substrate may be dead — and this test would be the one that catches it.
 func TestClassifyUnreadableIdleGuard(t *testing.T) {
 	// L2 down, L1 alive → must be transport-down, NOT idle (idle_timeout tiny so
 	// a naive classifier tempted to read stale activity would say idle).

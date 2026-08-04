@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-// L1 (no substrate): the D4.3 fan-out invariants as pure logic. The real
+// Unit (no substrate): the D4.3 fan-out invariants as pure logic. The real
 // runsc round-trip (C2/C3/C4) is in test/transport_substrate_test.go; these
 // pin the hub mechanics deterministically and under -race.
 

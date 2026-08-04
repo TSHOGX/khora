@@ -17,7 +17,7 @@ import (
 
 // seedBare inserts the "bare" builtin Template into st so a sandbox create /
 // insert satisfies the §4.3 template FK. Production does this via the boot seed;
-// the L1 tests do it explicitly. Extra ids can be seeded too.
+// the unit tests do it explicitly. Extra ids can be seeded too.
 func seedBare(t *testing.T, st interface {
 	CreateTemplate(context.Context, model.Template) error
 }, ids ...string) {
@@ -34,15 +34,27 @@ func seedBare(t *testing.T, st interface {
 	}
 }
 
-// fakeRootfs / fakeRuntime / fakeClient are L1 fakes (no substrate): they record
-// call order and inject failures so the mediator's lock + CAS + unwind logic can
-// be tested as pure logic (L1). The real providers are covered by L2/L3.
+// fakeRootfs / fakeRuntime / fakeClient are UNIT fakes (no substrate): they record
+// call order and inject failures so the mediator's lock + CAS + unwind logic can be
+// tested as pure logic. The real providers are covered by the substrate suites
+// (internal/*/**_substrate_test.go and test/).
+//
+// NB: "L1/L2" elsewhere in this package means the §4.3 PROBE LAYERS (substrate
+// liveness / transport Health), not a test tier — hence the wording here.
 
 type fakeRootfs struct {
 	mu        sync.Mutex
 	calls     []string
 	failMount bool
-	builtins  []string // boot-seed list returned by ListBuiltinTemplates
+	// The remaining failure knobs cover the rest of the cold-start / teardown
+	// chain, so a provider call can be failed at EVERY point the mediator calls
+	// one — not just the two the first tests happened to need. Each is named for
+	// the method it fails.
+	failCreateOverlay  bool
+	failPromote        bool
+	failDestroyOverlay bool
+	failUnmount        bool
+	builtins           []string // boot-seed list returned by ListBuiltinTemplates
 	// uncappedBytes is what UncappedBytes reports (the §3.4 admission gate's
 	// second term); measureErr makes it fail, so the fail-closed path can be
 	// asserted.
@@ -81,6 +93,9 @@ func capNote(capByte int64) string {
 
 func (f *fakeRootfs) CreateOverlay(_ context.Context, id string, lower []string, capByte int64) (*rootfs.Overlay, error) {
 	f.log("CreateOverlay:" + id + ";lower=" + strings.Join(lower, "|") + capNote(capByte))
+	if f.failCreateOverlay {
+		return nil, fmt.Errorf("injected CreateOverlay failure")
+	}
 	tmpl := ""
 	if len(lower) > 0 {
 		tmpl = lower[0]
@@ -123,6 +138,9 @@ func (f *fakeRootfs) PromoteToTemplate(ctx context.Context, o *rootfs.Overlay, n
 			return ctx.Err()
 		}
 	}
+	if f.failPromote {
+		return fmt.Errorf("injected PromoteToTemplate failure")
+	}
 	return nil
 }
 func (f *fakeRootfs) Mount(_ context.Context, o *rootfs.Overlay) (*rootfs.Merged, error) {
@@ -134,10 +152,16 @@ func (f *fakeRootfs) Mount(_ context.Context, o *rootfs.Overlay) (*rootfs.Merged
 }
 func (f *fakeRootfs) Unmount(_ context.Context, m *rootfs.Merged) error {
 	f.log("Unmount:" + m.MergedPath)
+	if f.failUnmount {
+		return fmt.Errorf("injected Unmount failure")
+	}
 	return nil
 }
 func (f *fakeRootfs) DestroyOverlay(_ context.Context, o *rootfs.Overlay) error {
 	f.log("DestroyOverlay:" + o.ID)
+	if f.failDestroyOverlay {
+		return fmt.Errorf("injected DestroyOverlay failure")
+	}
 	return nil
 }
 func (f *fakeRootfs) AdoptMerged(_ context.Context, o *rootfs.Overlay) (*rootfs.Merged, error) {
@@ -146,7 +170,7 @@ func (f *fakeRootfs) AdoptMerged(_ context.Context, o *rootfs.Overlay) (*rootfs.
 }
 
 // builtins is the list ListBuiltinTemplates returns (boot seed). Empty by
-// default; a test sets it to drive the seed. L1 tests seed the store directly
+// default; a test sets it to drive the seed. Unit tests seed the store directly
 // via seedBare, so most leave this empty.
 func (f *fakeRootfs) ListBuiltinTemplates(context.Context) ([]string, error) {
 	f.mu.Lock()
@@ -175,6 +199,13 @@ type fakeRuntime struct {
 	mu         sync.Mutex
 	calls      []string
 	failLaunch bool
+	// failStop / failDestroy fail the TEARDOWN half of the seam. The mediator
+	// deliberately ignores these errors (`_ =` at every call site), so the property
+	// they let a test pin is that the control-plane transition still lands correctly
+	// when placement teardown fails (§4.4-A: byte/placement reclamation is decoupled
+	// from the state transition).
+	failStop    bool
+	failDestroy bool
 	// launchGate, if non-nil, blocks Launch until closed (to hold the lock).
 	launchGate chan struct{}
 	seq        int
@@ -232,10 +263,16 @@ func (f *fakeRuntime) Launch(ctx context.Context, spec runtime.LaunchSpec) (*run
 }
 func (f *fakeRuntime) Stop(_ context.Context, _ *runtime.Placement) error {
 	f.log("Stop")
+	if f.failStop {
+		return fmt.Errorf("injected Stop failure")
+	}
 	return nil
 }
 func (f *fakeRuntime) Destroy(_ context.Context, _ *runtime.Placement) error {
 	f.log("Destroy")
+	if f.failDestroy {
+		return fmt.Errorf("injected Destroy failure")
+	}
 	return nil
 }
 
@@ -312,7 +349,7 @@ func (c *fakeClient) Read(context.Context, string, int64, int64) ([]byte, error)
 }
 func (c *fakeClient) Write(context.Context, string, []byte) error { return nil }
 
-// The fs metadata surface is inert here: these L1 tests exercise the §4 mediator,
+// The fs metadata surface is inert here: these unit tests exercise the §4 mediator,
 // which never calls fs — only the reaper's Health probe and the cold-start gate
 // matter. Present to satisfy transport.Client (and so a signature change breaks
 // the build rather than drifting silently).

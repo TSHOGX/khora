@@ -7,12 +7,16 @@
 package harness
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"engine/internal/model"
+	"engine/internal/orchestrator"
 	"engine/internal/rootfs"
 	"engine/internal/runtime"
 )
@@ -111,6 +115,114 @@ func InjectStaticBin(t *testing.T, templatesDir, template, name, mainSrc string)
 	if err := os.Chmod(dst, 0o755); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// EngineOpts are the knobs the substrate suites actually vary when building an
+// engine. Everything else (building sandboxd, building the Template, seeding
+// builtins) is identical in every caller, which is why it lives here rather than
+// being copied per file.
+//
+// The zero value is the common case: one "bare" Template on a t.TempDir() state
+// dir, default timeouts.
+type EngineOpts struct {
+	// HealthTimeout bounds the ⑦ readiness gate. Zero → 30s.
+	HealthTimeout time.Duration
+	// DrainGrace bounds the §4.2 pause drain. Zero → the engine default; NEGATIVE
+	// disables the drain, which only the drainrace suite wants.
+	DrainGrace time.Duration
+	// Probes are extra static Go binaries to inject into the Template before
+	// launch, keyed by the name they get under /usr/bin (the bare rootfs ships no
+	// coreutils, so anything a guest must run has to be injected).
+	Probes map[string]string
+	// TemplateFiles are extra files to plant in the Template (lower) tree, keyed by
+	// path relative to the Template root — e.g. a marker proving overlay
+	// read-through.
+	TemplateFiles map[string]string
+	// BaseDir overrides where the engine's state lives. Empty → t.TempDir(), which
+	// is tmpfs here; the capacity axis needs real btrfs and passes an explicit
+	// /var/tmp path instead (ADR-0002).
+	BaseDir string
+	// NodeDiskByte / NodeMemoryByte are the §3.4 admission budgets. Zero →
+	// unmetered.
+	NodeDiskByte   int64
+	NodeMemoryByte int64
+	// StorePath overrides the store file. Empty → <base>/store.db. A crash-pair
+	// test passes the SAME path to two engines to simulate a process restart.
+	StorePath string
+	// FaultAfterColdStart injects a crash right before the committing CAS.
+	FaultAfterColdStart func(id model.SandboxID)
+	// SkipReconcile leaves startup reconcile un-run, for a test that wants to
+	// inspect the pre-reconcile store.
+	SkipReconcile bool
+}
+
+// Engine builds an assembled engine on the real substrate: compiles sandboxd,
+// builds the Template (plus any probes/files), constructs the orchestrator, seeds
+// the builtin Template rows, and runs startup reconcile. Returns the engine and
+// the base dir (whose layout tests peek at to assert byte reclamation).
+//
+// Seeding before serving is not optional — the sandboxes.template FK (§4.3) would
+// reject every create otherwise — and running reconcile matches production boot
+// order, so the happy path is exercised against the same sequence production uses.
+func Engine(t *testing.T, opts EngineOpts) (*orchestrator.Engine, string) {
+	t.Helper()
+	ctx := context.Background()
+	repo := RepoRoot(t)
+
+	base := opts.BaseDir
+	if base == "" {
+		base = t.TempDir()
+	}
+	tmpl := filepath.Join(base, "templates")
+	sbxd := BuildSandboxd(t, repo)
+	BuildTemplate(t, repo, tmpl, "bare", sbxd)
+
+	for name, src := range opts.Probes {
+		InjectStaticBin(t, tmpl, "bare", name, src)
+	}
+	for rel, content := range opts.TemplateFiles {
+		full := filepath.Join(tmpl, "bare", rel)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	healthTimeout := opts.HealthTimeout
+	if healthTimeout == 0 {
+		healthTimeout = 30 * time.Second
+	}
+	storePath := opts.StorePath
+	if storePath == "" {
+		storePath = filepath.Join(base, "store.db")
+	}
+
+	eng, err := orchestrator.New(orchestrator.Config{
+		TemplatesDir:        tmpl,
+		StateDir:            filepath.Join(base, "state"),
+		StorePath:           storePath,
+		HealthTimeout:       healthTimeout,
+		DrainGrace:          opts.DrainGrace,
+		NodeDiskByte:        opts.NodeDiskByte,
+		NodeMemoryByte:      opts.NodeMemoryByte,
+		FaultAfterColdStart: opts.FaultAfterColdStart,
+	})
+	if err != nil {
+		t.Fatalf("orchestrator.New: %v", err)
+	}
+	if err := eng.SeedTemplates(ctx); err != nil {
+		t.Fatalf("seed builtin templates: %v", err)
+	}
+	if !opts.SkipReconcile {
+		// production parity: reconcile runs at boot. On a fresh store it is a no-op,
+		// which also asserts the §4.4-A path never disturbs a clean start.
+		if err := eng.Reconcile(ctx); err != nil {
+			t.Fatalf("startup reconcile: %v", err)
+		}
+	}
+	return eng, base
 }
 
 // CountEngineNetns counts engine-owned netns on this host (the placement marker

@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -81,11 +82,19 @@ func (e *reaperEnv) seedPaused(t *testing.T, id string, retention time.Duration,
 	e.st.SetUpdatedAtForTest(model.SandboxID(id), now.Add(-pausedAgo))
 }
 
+// state returns the sandbox's lifecycle state, or the sentinel "<gone>" when the
+// record has been deleted (which is how an evict/destroy presents). Only
+// ErrNotFound maps to the sentinel: any OTHER store error is a fault, and
+// collapsing it into "<gone>" would let a broken store read as a successful
+// eviction.
 func (e *reaperEnv) state(t *testing.T, id string) model.Lifecycle {
 	t.Helper()
 	rec, err := e.st.GetSandbox(context.Background(), model.SandboxID(id))
-	if err != nil {
+	if errors.Is(err, store.ErrNotFound) {
 		return model.Lifecycle("<gone>")
+	}
+	if err != nil {
+		t.Fatalf("GetSandbox(%s): %v", id, err)
 	}
 	return rec.State
 }

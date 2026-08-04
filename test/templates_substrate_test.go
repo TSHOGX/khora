@@ -40,7 +40,7 @@ func TestTemplateDeleteReferencedTemplate(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 
-	// referenced → ErrInUse (§4.3 被引用即拒删).
+	// referenced → ErrInUse (§4.3: referenced-means-undeletable).
 	if err := m.DeleteTemplate(ctx, "bare"); !errors.Is(err, store.ErrInUse) {
 		t.Fatalf("delete referenced template = %v; want ErrInUse", err)
 	}
@@ -263,7 +263,8 @@ func TestTemplatePromoteEndToEnd(t *testing.T) {
 }
 
 // lineage protection (§4.3): Promote a child layer T2 over T1 → deleting T1 is
-// refused while T2 exists (RESTRICT 引用向上); delete T2 first, then T1.
+// refused while T2 exists (RESTRICT; references point upward). Delete T2 first,
+// then T1.
 func TestTemplateLineageProtection(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("needs root")

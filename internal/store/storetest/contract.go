@@ -59,6 +59,97 @@ func RunContract(t *testing.T, mk Factory) {
 	t.Run("SandboxRefMissingTemplate", func(t *testing.T) { testSandboxRefMissingTemplate(t, mk) })
 	t.Run("TemplateDurability", func(t *testing.T) { testTemplateDurability(t, mk) })
 	t.Run("ReferenceReclaimRace", func(t *testing.T) { testReferenceReclaimRace(t, mk) })
+
+	// §4.4-C under CONCURRENT writers. Every other subtest here is
+	// single-threaded, so a backend whose CAS is not genuinely atomic — read,
+	// then write, without holding anything across the two — would pass all of
+	// them. Both backends must deliver this identically (§1.3 seam).
+	t.Run("ConcurrentCASSingleWinner", func(t *testing.T) { testConcurrentCAS(t, mk) })
+}
+
+// testConcurrentCAS: N goroutines race the SAME transition. Exactly ONE may win,
+// and exactly ONE outbox row may land.
+//
+// This is the §4.4-B CAS promise ("当前 lifecycle-state ≠ 期望源态则拒绝") and the
+// §4.4-C atomic-commit promise met at the same moment: a torn implementation
+// admits several winners, and each winner appends an event — so a single
+// transition would be billed N times, which is precisely the double-count
+// subscriber dedup CANNOT absorb (the events carry DIFFERENT transition IDs).
+//
+// The mediator's own transition lock would normally serialize these, which is
+// exactly why the check belongs here: the store must not depend on that lock for
+// its own contract, or a second caller of the seam inherits a race.
+func testConcurrentCAS(t *testing.T, mk Factory) {
+	ctx := context.Background()
+	s, _ := mk(t)
+	seedTmpl(t, s, "bare")
+
+	const trials = 50
+	const racers = 8
+	for i := 0; i < trials; i++ {
+		id := fmt.Sprintf("cas_%d", i)
+		if err := s.CreateSandbox(ctx, mkRec(id), nil); err != nil {
+			t.Fatalf("trial %d: create: %v", i, err)
+		}
+
+		var (
+			wg    sync.WaitGroup
+			start = make(chan struct{}) // release together, for maximum contention
+			mu    sync.Mutex
+			wins  int
+			errs  []error
+		)
+		for j := 0; j < racers; j++ {
+			wg.Add(1)
+			evID := fmt.Sprintf("evt_%d_%d", i, j)
+			go func() {
+				defer wg.Done()
+				<-start
+				// All racers attempt the IDENTICAL transition creating→running, each
+				// carrying its OWN event id.
+				err := s.CompareAndSetState(ctx, model.SandboxID(id),
+					model.Creating, model.Running,
+					ev(id, evID, "created", model.Running), nil)
+				mu.Lock()
+				defer mu.Unlock()
+				if err == nil {
+					wins++
+				} else {
+					errs = append(errs, err)
+				}
+			}()
+		}
+		close(start)
+		wg.Wait()
+
+		if wins != 1 {
+			t.Fatalf("trial %d: %d of %d racers won the SAME creating→running CAS; want exactly 1 — a non-atomic CAS lets several callers each believe they performed the transition (§4.4-B)", i, wins, racers)
+		}
+		// Every loser must lose CLEANLY, with the contract's sentinel.
+		for _, err := range errs {
+			if err != store.ErrConflict {
+				t.Fatalf("trial %d: loser got %v; want ErrConflict — a CAS that lost must say so, not fail opaquely", i, err)
+			}
+		}
+		// Exactly ONE outbox row for this sandbox. N rows would bill one transition
+		// N times, and their IDs differ so subscriber dedup could not collapse them.
+		un, err := s.UnpublishedEvents(ctx)
+		if err != nil {
+			t.Fatalf("trial %d: unpublished: %v", i, err)
+		}
+		rows := 0
+		for _, e := range un {
+			if e.Sandbox == model.SandboxID(id) {
+				rows++
+			}
+		}
+		if rows != 1 {
+			t.Fatalf("trial %d: %d outbox rows for one transition; want exactly 1 — the losing CAS must append NOTHING (§4.4-C: state change + outbox append are one commit, so a rejected transition writes neither)", i, rows)
+		}
+		if got, _ := s.GetSandbox(ctx, model.SandboxID(id)); got.State != model.Running {
+			t.Fatalf("trial %d: state = %s; want running", i, got.State)
+		}
+	}
 }
 
 // seedTmpl inserts a base (parent-less) Template so a sandbox referencing it

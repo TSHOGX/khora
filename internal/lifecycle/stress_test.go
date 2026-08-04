@@ -163,6 +163,12 @@ func TestStressDestroyBlockedDuringResume(t *testing.T) {
 			go func() { destroyDone <- m.Destroy(context.Background(), "sbx_b4") }()
 
 			// destroy must NOT have deleted the Overlay while resume holds the lock.
+			//
+			// A fixed sleep is SOUND here specifically because the assertion is
+			// NEGATIVE: it only gives destroy a window in which to (wrongly) proceed.
+			// Load can make destroy slower, i.e. produce a false PASS, never a false
+			// failure — so this cannot flake red. Do not copy the pattern to a positive
+			// assertion, where the polarity reverses and the sleep becomes a race.
 			time.Sleep(150 * time.Millisecond)
 			if contains(rp.Calls(), "DestroyOverlay:ov_b4") {
 				t.Fatal("destroy deleted Overlay mid-resume (lock not held whole transition)")

@@ -24,36 +24,16 @@ import (
 	"engine/test/harness"
 )
 
+// setupEngine builds an engine with the overlay read-through marker the vertical
+// slice asserts on. The build/seed/reconcile sequence itself lives in
+// harness.Engine, shared with every other substrate suite.
 func setupEngine(t *testing.T, healthTimeout time.Duration) (*orchestrator.Engine, string) {
 	t.Helper()
-	repo := harness.RepoRoot(t)
-	base := t.TempDir()
-	tmpl := filepath.Join(base, "templates")
-	sbxd := harness.BuildSandboxd(t, repo)
-	harness.BuildTemplate(t, repo, tmpl, "bare", sbxd)
-	// fixture: a marker in the Template (lower) to prove overlay read-through.
-	if err := os.WriteFile(filepath.Join(tmpl, "bare", "etc", "tmpl-marker"), []byte("FROM_TEMPLATE"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	eng, err := orchestrator.New(orchestrator.Config{
-		TemplatesDir: tmpl, StateDir: filepath.Join(base, "state"),
-		StorePath:     filepath.Join(base, "store.db"),
+	return harness.Engine(t, harness.EngineOpts{
 		HealthTimeout: healthTimeout,
+		// fixture: a marker in the Template (lower) to prove overlay read-through.
+		TemplateFiles: map[string]string{"etc/tmpl-marker": "FROM_TEMPLATE"},
 	})
-	if err != nil {
-		t.Fatalf("orchestrator.New: %v", err)
-	}
-	// boot seed BEFORE create: ensure the "bare" builtin `templates` row so
-	// the sandboxes.template FK (§4.3) resolves. Production runs this at boot.
-	if err := eng.SeedTemplates(context.Background()); err != nil {
-		t.Fatalf("seed builtin templates: %v", err)
-	}
-	// production parity: reconcile runs at boot. On a fresh store it is a no-op —
-	// asserting the §4.4-A path never disturbs the happy vertical slice.
-	if err := eng.Reconcile(context.Background()); err != nil {
-		t.Fatalf("startup reconcile (empty store): %v", err)
-	}
-	return eng, base
 }
 
 // upperDir returns the host upper path for a sandbox's Overlay (test-only peek
@@ -74,29 +54,14 @@ func upperDir(t *testing.T, eng *orchestrator.Engine, base string, id model.Sand
 // disk filler and a memory hog are injected as static binaries).
 func setupEngineWithProbe(t *testing.T, healthTimeout time.Duration) (*orchestrator.Engine, string) {
 	t.Helper()
-	repo := harness.RepoRoot(t)
-	base := t.TempDir()
-	tmpl := filepath.Join(base, "templates")
-	sbxd := harness.BuildSandboxd(t, repo)
-	harness.BuildTemplate(t, repo, tmpl, "bare", sbxd)
-	harness.InjectStaticBin(t, tmpl, "bare", "cpuburn", cpuBurnSrc)
-	harness.InjectStaticBin(t, tmpl, "bare", "diskfill", diskFillSrc)
-	harness.InjectStaticBin(t, tmpl, "bare", "memhog", memHogSrc)
-	eng, err := orchestrator.New(orchestrator.Config{
-		TemplatesDir: tmpl, StateDir: filepath.Join(base, "state"),
-		StorePath:     filepath.Join(base, "store.db"),
+	return harness.Engine(t, harness.EngineOpts{
 		HealthTimeout: healthTimeout,
+		Probes: map[string]string{
+			"cpuburn":  cpuBurnSrc,
+			"diskfill": diskFillSrc,
+			"memhog":   memHogSrc,
+		},
 	})
-	if err != nil {
-		t.Fatalf("orchestrator.New: %v", err)
-	}
-	if err := eng.SeedTemplates(context.Background()); err != nil {
-		t.Fatalf("seed builtin templates: %v", err)
-	}
-	if err := eng.Reconcile(context.Background()); err != nil {
-		t.Fatalf("startup reconcile: %v", err)
-	}
-	return eng, base
 }
 
 func TestE2EWalkingSkeleton(t *testing.T) {

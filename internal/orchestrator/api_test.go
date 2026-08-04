@@ -19,6 +19,12 @@ import (
 // the Template GET/DELETE endpoints are pure store operations (§4.3: Template is
 // not a state-machine object, so DeleteTemplate takes no placement / lock), so
 // the runtime/rootfs seams are never touched by these routes.
+//
+// CAUTION for anyone extending this fixture: Runtime/Rootfs/Dial are nil, which
+// the PATCH tests survive only because NodeCapacity is zero — that short-circuits
+// the admission gate before it would call Rootfs.UncappedBytes. Set a capacity
+// here and these tests nil-panic; build a mediator with fakes instead (see
+// dataplane_barrier_test.go's barrierFixture).
 func apiFixture(t *testing.T) (*httptest.Server, *store.Memory) {
 	t.Helper()
 	mem := store.NewMemory()
@@ -271,11 +277,11 @@ func TestAdmissionVerdictsMapToDistinctStatuses(t *testing.T) {
 		}
 		b, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
+		// 400, and specifically NOT 507: a 507 would claim the node is full, sending
+		// the caller off to wait for capacity that is not the problem. Checked as one
+		// condition — a separate `== 507` branch after this could never be reached.
 		if resp.StatusCode != http.StatusBadRequest {
-			t.Fatalf("status = %d (%s); want 400 — nothing is full, the request is invalid here", resp.StatusCode, b)
-		}
-		if resp.StatusCode == http.StatusInsufficientStorage {
-			t.Fatal("507 would claim the node is full, which it is not")
+			t.Fatalf("status = %d (%s); want 400 — nothing is full, the request is invalid here (507 would misdirect the caller)", resp.StatusCode, b)
 		}
 	})
 }

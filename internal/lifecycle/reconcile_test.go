@@ -244,6 +244,39 @@ func TestPeriodicReconcileProtectsLiveSurvivor(t *testing.T) {
 	}
 }
 
+// periodic reconcile: a live handle whose record is NOT in the scan snapshot must
+// still be protected (§4.4-A / reaper-health D4 addition 2).
+//
+// This is a DIFFERENT arm from TestPeriodicReconcileProtectsLiveSurvivor, which
+// has both a record and a handle and so exercises the record-scan path. The
+// hazard here is the one the live-map seed exists for: a create/resume that
+// COMMITTED AFTER ListSandboxes was read is in the live-map but absent from
+// `recs`, so the record scan cannot see it. Without seeding keep from the
+// live-map, ReclaimOrphans would be handed a keep-set that omits it and would
+// tear down the placement of a sandbox that just finished launching.
+func TestPeriodicReconcileProtectsLiveHandleMissingFromTheSnapshot(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	rt := &fakeRuntime{adoptAlive: map[string]bool{}}
+	m := New(Deps{
+		Store: st, Runtime: rt, Rootfs: &fakeRootfs{},
+		Dial:          func(transport.Endpoint) transport.Client { return &fakeClient{healthy: true} },
+		HealthTimeout: time.Second,
+	})
+	// A live handle with NO store record at all — precisely "committed after the
+	// snapshot" as the reconcile sees it.
+	m.put("late_build", &liveState{placement: &runtime.Placement{TransportEndpoint: "10.0.0.7:9000"}})
+
+	if err := m.ReconcilePeriodic(ctx); err != nil {
+		t.Fatalf("ReconcilePeriodic: %v", err)
+	}
+
+	reclaim := lastReclaimCall(rt.Calls())
+	if !strings.Contains(reclaim, "late_build") {
+		t.Fatalf("keep-set = %q; want it to contain late_build — a placement this process holds a live handle for is never an orphan, even when the record scan missed it (§4.4-A / D4 addition 2). Without this the reconcile tears down a sandbox that just finished launching.", reclaim)
+	}
+}
+
 // periodic reconcile skips a `running` sandbox whose transition lock is HELD (an
 // in-flight resume/verb) — it must NOT be treated as an orphan or demoted, just
 // protected and retried (§4.4-A live variant addition 1).
@@ -421,12 +454,19 @@ func TestPeriodicReconcileSkipsInFlightResume(t *testing.T) {
 	}
 }
 
-// Reconcile is idempotent: a second pass over an already-reconciled store makes
-// no further changes.
+// Reconcile is idempotent (§4.4-A: "a skipped item is simply retried next
+// start", so re-running must converge rather than accumulate). Idempotence here
+// means THREE things, and a record count alone catches none of them: the second
+// pass must not change any record, must not emit a second event (a duplicate
+// crash-paused is a double billing entry, §4.4-C), and must hand ReclaimOrphans
+// the SAME keep-set (a shrunken one on the second pass would tear down a
+// survivor the first pass correctly protected).
 func TestReconcileIdempotent(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemory()
-	rt := &fakeRuntime{adoptAlive: map[string]bool{"run_alive": true}}
+	// run_alive is adoptable; run_dead is not, so the first pass demotes it and
+	// emits one crash-paused — the event the second pass must NOT repeat.
+	rt := &fakeRuntime{adoptAlive: map[string]bool{"run_alive": true, "run_dead": false}}
 	m := New(Deps{
 		Store: st, Runtime: rt, Rootfs: &fakeRootfs{},
 		Dial:          func(transport.Endpoint) transport.Client { return &fakeClient{healthy: true} },
@@ -434,21 +474,69 @@ func TestReconcileIdempotent(t *testing.T) {
 	})
 	seedRec(t, st, "paused_x", "ov_p", model.Paused)
 	seedRec(t, st, "run_alive", "ov_ra", model.Running)
+	seedRec(t, st, "run_dead", "ov_rd", model.Running)
 
 	if err := m.Reconcile(ctx); err != nil {
 		t.Fatalf("Reconcile 1: %v", err)
 	}
 	before, _ := st.ListSandboxes(ctx)
+	beforeStates := statesOf(before)
+	beforeEvents, _ := st.UnpublishedEvents(ctx)
+	beforeKeep := lastReclaimCall(rt.Calls())
+
 	if err := m.Reconcile(ctx); err != nil {
 		t.Fatalf("Reconcile 2: %v", err)
 	}
 	after, _ := st.ListSandboxes(ctx)
-	if len(before) != len(after) {
-		t.Fatalf("second reconcile changed record count: %d → %d", len(before), len(after))
+	afterStates := statesOf(after)
+	afterEvents, _ := st.UnpublishedEvents(ctx)
+	afterKeep := lastReclaimCall(rt.Calls())
+
+	// (1) every record identical — not merely the same NUMBER of records.
+	if len(beforeStates) != len(afterStates) {
+		t.Fatalf("second reconcile changed record count: %d → %d", len(beforeStates), len(afterStates))
 	}
-	for _, r := range after {
-		if r.State != model.Paused && r.State != model.Running {
-			t.Fatalf("record %s in unexpected state after 2nd reconcile: %s", r.ID, r.State)
+	for id, st1 := range beforeStates {
+		st2, ok := afterStates[id]
+		if !ok {
+			t.Fatalf("second reconcile deleted record %s (was %s)", id, st1)
+		}
+		if st1 != st2 {
+			t.Fatalf("second reconcile moved %s: %s → %s", id, st1, st2)
 		}
 	}
+	// (2) no additional event. A re-emitted crash-paused for run_dead would double
+	// count in any subscriber that meters transitions (§4.4-C).
+	if len(afterEvents) != len(beforeEvents) {
+		t.Fatalf("second reconcile emitted %d extra event(s) (%d → %d); a re-run must publish nothing new",
+			len(afterEvents)-len(beforeEvents), len(beforeEvents), len(afterEvents))
+	}
+	// (3) the same keep-set. run_alive was adopted on pass 1 and is in the live-map
+	// on pass 2, so it must still be protected — by the live-handle arm rather than
+	// a fresh Adopt, but protected either way.
+	if beforeKeep != afterKeep {
+		t.Fatalf("second reconcile changed the keep-set: %q → %q — a survivor protected once must stay protected", beforeKeep, afterKeep)
+	}
+}
+
+// statesOf indexes records by id, so an idempotence check can compare records
+// individually instead of trusting a count.
+func statesOf(recs []model.Sandbox) map[model.SandboxID]model.Lifecycle {
+	out := make(map[model.SandboxID]model.Lifecycle, len(recs))
+	for _, r := range recs {
+		out[r.ID] = r.State
+	}
+	return out
+}
+
+// lastReclaimCall returns the most recent ReclaimOrphans call string, which
+// encodes the keep-set the mediator handed the provider.
+func lastReclaimCall(calls []string) string {
+	out := ""
+	for _, c := range calls {
+		if strings.HasPrefix(c, "ReclaimOrphans:") {
+			out = c
+		}
+	}
+	return out
 }

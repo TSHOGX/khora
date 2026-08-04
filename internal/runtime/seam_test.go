@@ -38,7 +38,7 @@ var fieldExemptions = map[string]string{
 	// The §5.B side of that same handoff: Merged is what the Rootfs subsystem hands
 	// across as an opaque RootfsSource. It is the ONE host-shaped name the storage
 	// seam exposes — upper/work deliberately do not appear on Overlay at all (the
-	// provider recomputes them from the ID, §3.1.1 对内也 ID 寻址), which is what
+	// provider recomputes them from the ID, §3.1.1: addressed by ID internally too), which is what
 	// keeps this single field a handle rather than a leak of the mechanism.
 	"Merged.MergedPath": "§5.B hands the merged rootfs across as an opaque handle; upper/work stay private",
 }

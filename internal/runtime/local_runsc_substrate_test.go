@@ -183,7 +183,7 @@ func TestAdoptRunningContainerSameIP(t *testing.T) {
 		t.Fatal("Adopt judged a running container dead")
 	}
 	if adopted.TransportEndpoint != ep {
-		t.Fatalf("Adopt got endpoint %s; want SAME %s (§4.4-A 同一 IP)", adopted.TransportEndpoint, ep)
+		t.Fatalf("Adopt got endpoint %s; want the SAME %s — adopt is not a resume, so the epoch must not change (§4.4-A)", adopted.TransportEndpoint, ep)
 	}
 	// adopted endpoint is reachable.
 	if !pollHealth(t, url, 5*time.Second) {

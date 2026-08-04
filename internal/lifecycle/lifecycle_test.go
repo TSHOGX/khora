@@ -206,9 +206,12 @@ func TestPauseRequiresRunning(t *testing.T) {
 	}
 }
 
-// CAS: two concurrent resumes on a paused sandbox — the loser re-does CAS
-// against the already-changed state and is rejected (ErrConflict); exactly one
-// wins → running.
+// Two concurrent resumes on a paused sandbox: exactly one wins → running, and
+// the loser is cleanly rejected. The loser blocks on the transition lock, then
+// fails Resume's READ-side precondition check (state is `running` by then, not
+// `paused`) — which is why the rejection reads "want paused" rather than coming
+// from the store's CAS. Both spellings wrap store.ErrConflict; the property is
+// that the loser never proceeds and never corrupts the state (§4.4-B).
 func TestResumeResumeCASShape(t *testing.T) {
 	rp, rt := &fakeRootfs{}, &fakeRuntime{}
 	m, st := newTestMediator(t, rp, rt, true)
@@ -242,54 +245,10 @@ func TestResumeResumeCASShape(t *testing.T) {
 	}
 }
 
-// lock: resume holds the transition lock for its whole cold-start; a
-// concurrent destroy CANNOT acquire the lock and therefore cannot delete the
-// Overlay mid-cold-start (§4.4-B closes the destroy-vs-resume race).
-func TestDestroyBlockedDuringResumeColdStart(t *testing.T) {
-	rp := &fakeRootfs{}
-	gate := make(chan struct{})
-	rt := &fakeRuntime{launchGate: gate}
-	m, st := newTestMediator(t, rp, rt, true)
-	seedPaused(t, st, "sbx_lock", "ov_lock", "bare")
-
-	// start resume; it will block inside Launch (holding the lock).
-	resumeDone := make(chan error, 1)
-	go func() { resumeDone <- m.Resume(context.Background(), "sbx_lock") }()
-
-	// wait until resume is inside Launch (lock held).
-	waitFor(t, func() bool { return contains(rt.Calls(), "Launch:sbx_lock") })
-
-	// fire destroy; it must BLOCK on the lock (cannot delete the Overlay).
-	destroyDone := make(chan error, 1)
-	go func() { destroyDone <- m.Destroy(context.Background(), "sbx_lock") }()
-
-	// give destroy a chance to (wrongly) proceed; assert it did NOT delete yet.
-	time.Sleep(150 * time.Millisecond)
-	if contains(rp.Calls(), "DestroyOverlay:ov_lock") {
-		t.Fatal("destroy deleted the Overlay while resume held the lock (race!)")
-	}
-	select {
-	case <-destroyDone:
-		t.Fatal("destroy completed while resume held the lock")
-	default:
-	}
-
-	// release Launch → resume completes → running; then destroy proceeds.
-	close(gate)
-	if err := <-resumeDone; err != nil {
-		t.Fatalf("resume: %v", err)
-	}
-	if err := <-destroyDone; err != nil {
-		t.Fatalf("destroy: %v", err)
-	}
-	// now the Overlay is destroyed and record gone.
-	if !contains(rp.Calls(), "DestroyOverlay:ov_lock") {
-		t.Errorf("Overlay not destroyed after destroy ran; calls=%v", rp.Calls())
-	}
-	if _, err := st.GetSandbox(context.Background(), "sbx_lock"); !errors.Is(err, store.ErrNotFound) {
-		t.Errorf("record should be gone after destroy; got %v", err)
-	}
-}
+// NOTE — the destroy-vs-resume lock race (§4.4-B) lives in
+// stress_test.go's TestStressDestroyBlockedDuringResume, which is this same
+// scenario run against BOTH store backends. It is deliberately not duplicated
+// here.
 
 // --- helpers -----------------------------------------------------------------
 

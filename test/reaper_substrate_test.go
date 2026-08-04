@@ -443,10 +443,23 @@ func TestReaperEvictPastRetentionRealRunsc(t *testing.T) {
 	t.Logf("✓ paused past retention → evict → destroyed, upper reclaimed")
 }
 
-// reaper-vs-verb seam: a user verb holding the transition lock makes the reaper
-// SKIP the sandbox (TryLock-skip, §4.4-B) — no race, no misclassification. We
-// hold the lock via a slow in-flight resume and confirm a concurrent sweep does
-// not dispose the sandbox.
+// reaper-vs-verb seam: a sandbox whose transition lock is HELD by an in-flight
+// verb must be SKIPPED by a concurrent sweep (TryLock-skip, §4.4-B).
+//
+// The scenario is chosen so the skip is actually REACHABLE, which took some care.
+// An in-flight resume leaves the record `paused` for its whole cold start, so a
+// concurrent sweep dispatches to the PAUSED arm, not the running one — and that
+// arm returns before it ever reaches TryLock unless the sandbox is also past its
+// retention. So the reachable race is: a paused sandbox that IS evict-eligible,
+// resumed at the same moment.
+//
+// That race is the severe one. Without the skip the reaper would evict — destroy
+// the record and DELETE the Overlay bytes — out from under a resume that is
+// mounting exactly those bytes. refcount cannot save it, because an in-flight
+// mount is not a persistent reference row (§4.4-B states this precisely).
+//
+// A retention of 1ns makes the sandbox evict-eligible the instant it pauses, so
+// every sweep in the storm below is a real eviction attempt.
 func TestReaperSkipsVerbHeldLockRealRunsc(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("needs root")
@@ -455,43 +468,71 @@ func TestReaperSkipsVerbHeldLockRealRunsc(t *testing.T) {
 	eng, _ := setupEngine(t, 30*time.Second)
 	m := eng.Mediator
 
-	// idle_timeout tiny so the sweep WOULD auto-pause if it did not skip.
-	sid, err := m.Create(ctx, lifecycle.CreateSpec{Template: "bare", IdleTimeout: dur(1 * time.Millisecond), Retention: dur(0)})
+	// idle_timeout long (this is not an idle test); retention 1ns so the sandbox is
+	// evict-eligible the moment it is paused — that is what carries a sweep past
+	// sweepPaused's retention gate and into the TryLock the test is about.
+	sid, err := m.Create(ctx, lifecycle.CreateSpec{Template: "bare", IdleTimeout: dur(time.Hour), Retention: dur(time.Nanosecond)})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	t.Cleanup(func() { _ = m.Destroy(ctx, sid) })
 
-	// Pause, then resume in the background — resume holds the transition lock for
-	// its whole cold-start chain (§4.4-B). While it is in-flight, a concurrent
-	// sweep-storm must SKIP this sandbox (TryLock fails) and never dispose it.
 	if err := m.Pause(ctx, sid); err != nil {
 		t.Fatalf("pause: %v", err)
 	}
 
+	// Hammer sweeps while the resume holds the lock. Each one finds a paused,
+	// past-retention sandbox and must decline to evict it because the lock is held.
 	stop := make(chan struct{})
+	done := make(chan struct{})
 	r := lifecycle.NewReaper(m, time.Hour, time.Hour)
 	go func() {
+		defer close(done)
 		for {
 			select {
 			case <-stop:
 				return
 			default:
-				r.Sweep(ctx) // hammer sweeps while resume holds the lock
+				r.Sweep(ctx)
 			}
 		}
 	}()
 
-	err = m.Resume(ctx, sid) // holds the lock for the whole chain
+	err = m.Resume(ctx, sid) // holds the transition lock for the whole cold start
 	close(stop)
-	if err != nil {
-		t.Fatalf("resume: %v", err)
-	}
+	<-done // no sweep still running when we inspect state
 
-	// resume won the lock the whole time; the concurrent sweeps skipped the
-	// sandbox rather than racing a disposition into it → it is running.
-	if stt, _ := m.State(ctx, sid); stt != model.Running {
-		t.Fatalf("state=%s; want running (reaper must not dispose a lock-held sandbox, §4.4-B)", stt)
+	// The resume must have SUCCEEDED. If a sweep evicted mid-cold-start, the record
+	// and its Overlay vanish underneath it and this fails — which is the whole point.
+	if err != nil {
+		t.Fatalf("resume failed while concurrent sweeps ran: %v — a sweep evicted the sandbox out from under an in-flight resume, deleting the Overlay it was mounting (§4.4-B TryLock-skip)", err)
 	}
-	t.Logf("✓ reaper TryLock-skips a sandbox held by an in-flight verb (§4.4-B)")
+	if stt, _ := m.State(ctx, sid); stt != model.Running {
+		t.Fatalf("state=%s; want running — the resume completed, so no sweep may have disposed of it (§4.4-B)", stt)
+	}
+	// And it was never destroyed behind the resume's back: a `destroyed` event would
+	// be the durable trace of an eviction that raced the verb.
+	for _, k := range eventKindsFor(t, eng, sid) {
+		if k == "destroyed" {
+			t.Fatalf("a concurrent sweep EVICTED a lock-held sandbox (events=%v) — the reaper must TryLock-skip a sandbox a verb is driving (§4.4-B / reaper-health D3)",
+				eventKindsFor(t, eng, sid))
+		}
+	}
+	t.Logf("✓ reaper TryLock-skips an evict-eligible sandbox held by an in-flight resume (§4.4-B)")
+}
+
+// eventKindsFor returns every outbox event Kind for a sandbox, in commit order.
+func eventKindsFor(t *testing.T, eng *orchestrator.Engine, sid model.SandboxID) []string {
+	t.Helper()
+	evs, err := eng.Store.UnpublishedEvents(context.Background())
+	if err != nil {
+		t.Fatalf("outbox: %v", err)
+	}
+	var out []string
+	for _, ev := range evs {
+		if ev.Sandbox == sid {
+			out = append(out, ev.Kind)
+		}
+	}
+	return out
 }

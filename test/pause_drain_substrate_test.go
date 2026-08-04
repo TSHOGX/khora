@@ -24,7 +24,6 @@ import (
 	"fmt"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -239,27 +238,14 @@ func waitForWriteInFlight(t *testing.T, ctx context.Context, cl transport.Client
 }
 
 // setupEngineWithDrain builds a real engine with an explicit DrainGrace. A
-// negative grace disables the drain (the pre-barrier behaviour).
+// negative grace disables the drain (the pre-barrier behaviour), which is the
+// only reason this suite needs its own builder at all.
 func setupEngineWithDrain(t *testing.T, grace time.Duration) *orchestrator.Engine {
 	t.Helper()
-	repo := harness.RepoRoot(t)
-	base := t.TempDir()
-	tmpl := filepath.Join(base, "templates")
-	sbxd := harness.BuildSandboxd(t, repo)
-	harness.BuildTemplate(t, repo, tmpl, "bare", sbxd)
-
-	eng, err := orchestrator.New(orchestrator.Config{
-		TemplatesDir:  tmpl,
-		StateDir:      filepath.Join(base, "state"),
-		StorePath:     filepath.Join(base, "store.db"),
+	eng, _ := harness.Engine(t, harness.EngineOpts{
 		HealthTimeout: 30 * time.Second,
 		DrainGrace:    grace,
+		SkipReconcile: true, // nothing to reconcile; every round creates fresh
 	})
-	if err != nil {
-		t.Fatalf("orchestrator.New: %v", err)
-	}
-	if err := eng.SeedTemplates(context.Background()); err != nil {
-		t.Fatalf("seed builtin templates: %v", err)
-	}
 	return eng
 }
