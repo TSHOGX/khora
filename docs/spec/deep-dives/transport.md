@@ -48,7 +48,7 @@
   size,键盘输入 = input 的 pty 分支。**进程按 pid 寻址**(guest 原生;tag 不进模型见 D4.6)。
 - **`fs`**:`Read(path, offset, len)` / `Write` / `List` / `Stat(size, mtime)` /
   `MakeDir` / `Remove` / `Move`。**不提供 `watch`**,消费方用 `stat`+`read(offset)` 自行轮询拉增量
-  (理由见 D4.4)。大文件走 HTTP multipart 旁路,不挤 RPC。
+  (理由见 D4.4)。大文件走 HTTP 流式旁路,不挤 RPC。
 
 这两个服务**无状态**:engine 不为它们维护任何持久 SoT。"沙箱上现在跑着什么进程" =
 向 sandboxd 实时 `process.List`,不存控制面记录:零进程注册表。
@@ -271,7 +271,7 @@ RPC 清单(按 pid 寻址,tag 不进模型见 D4.6):
 
 ### D4.4 fs 服务面
 
-RPC 清单:全 unary + 大文件 multipart 旁路,不做 watch。
+RPC 清单:全 unary + 大文件 HTTP 流式旁路,不做 watch。
 
 `Read{path,offset,len}` / `Write` / `List{path,depth}` / `Stat` / `MakeDir` / `Remove` / `Move`
 全 unary;`Stat` 返回 `EntryInfo{name,path,type,size,mode,mtime,symlink_target?}`。

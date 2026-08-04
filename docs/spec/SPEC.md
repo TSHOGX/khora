@@ -43,15 +43,14 @@ agent),共享同一 FS 与网络。
 > 单二进制;**控制面** = engine 内持有权威记录的那部分;**store** = 控制面记录(Binding、各对象
 > 的 lifecycle-state/refcount)的持久后端,经接口抽象、可换实现;**可插拔实现 seam** 有三类,分别物化
 > "用什么跑隔离进程"(**runtime provider**,§5.A)、"沙箱 rootfs 由哪些层合成、落在哪"(**rootfs
-> provider**,§5.B)、"独立 Volume 落在哪个后端"(**volume backend**,§5.C);后两者**是两个不同形状、
-> 各自注册的接口,不是同一个 seam**——§5.B 物化分层合成(multi-lowerdir + upper/work + Promote),§5.C
-> 物化自足的独立存储单元(直接 bind、无合成),只**共享底层存储 substrate 原语**(btrfs subvolume /
-> qgroup / reflink);**driver** = 某个具体 agent 的 CLI 二进制(claude-code / opencode / pi
-> 等);**Overlay 工件** = 本沙箱相对 Template 的可写增量层(§3.1)。
+> provider**,§5.B)、"独立 Volume 落在哪个后端"(**volume backend**,§5.C);后两者是两个不同形状、
+> 各自注册的接口,不是同一个 seam(为何分开、共享哪些 substrate 原语见 §5 前言);**driver** = 某个
+> 具体 agent 的 CLI 二进制(claude-code / opencode / pi 等);**Overlay 工件** = 本沙箱相对 Template
+> 的可写增量层(§3.1)。
 >
 > **五子系统 canonical 短名**(§5,代码包名 / 日志 / 评审一律用这些,不用章节号指代):
 > **Runtime**(§5.A,执行基底)· **Rootfs**(§5.B,rootfs/Overlay)· **Volume**(§5.C)·
-> **Network**(§5.D)· **Transport**(§5.E)。三处 `fs`/`FS`/`Rootfs` 刻意区分,勿混:
+> **Network**(§5.D)· **Transport**(§5.E)。四处 `fs`/`FS`/`Rootfs` 刻意区分,勿混:
 > **Rootfs** = 子系统 5.B;**`fs`** = §5.E Transport 的一个 wire 服务(`read/write/list/stat/mkdir/remove/move`);
 > **rootfs provider** / **volume backend** = 上面那两个不同形状的存储物化 seam。同理 **Runtime**(子系统 5.A)
 > vs **Sandbox**(§3.2 顶层持久单元)分指 "用什么跑" vs "哪一个沙箱"。
@@ -62,7 +61,7 @@ agent),共享同一 FS 与网络。
 
 | 禁用作引擎内实体名 | 为什么 / 用什么替代 | 可作普通行文? |
 | --- | --- | --- |
-| `generation` | 引擎不引入独立世代计数;"在哪"用 **Placement**(§3.3)、"是不是同一实例/陈旧性"用 **placement/IP 作 epoch**(§4.3)、并发仲裁用 **每沙箱转换锁 + CAS**(§4.4-B)、失败恢复靠 **原子退回源态 + orchestrator 重启对账回收孤儿 placement**(§4.4-A,故也无 `failed` 态) | 否(硬拦,防世代计数从别处渗回) |
+| `generation` | 引擎不引入独立世代计数;它想解决的四件事各有归属:**在哪** → Placement(§3.3)· **陈旧性** → placement/IP 作 epoch(§4.3)· **并发仲裁** → 每沙箱转换锁 + CAS(§4.4-B)· **失败恢复** → 原子退回源态 + 重启对账回收孤儿 placement(§4.4-A,故也无 `failed` 态) | 否(硬拦,防世代计数从别处渗回) |
 | `principal` / `tenant` | 引擎内无授权主体 / 租户(§1.4 非目标);多租户是引擎外 join table 的加法 | 否 |
 | `owner`(归属/授权义) | 沙箱无 owner 列,回收只看 refcount/TTL(§4.3 / §1.4) | 仅限**职责归属**义(如"idle 判定的 owner 是控制面")——那是"谁负责",非"谁拥有" |
 | `session` / `turn` | agent 会话语义是引擎外 adapter 的加法(§5.E),引擎只有 process/fs | 可,且必然出现在"这些在引擎外"的论述里 |
@@ -246,9 +245,8 @@ root 默认就是 §1.1「可拿 root 的 agent 沙箱」最直接的表达,装�
   guest 内 root 改不动(支柱⑤)。
 - sentry 之外的**宿主内核攻击面**——被支柱① 限制在用户态内核内。
 - **宿主盘的物理容量**——guest 写只吃自己 Overlay upper 的 per-sandbox 容量帽(§3.4 容量轴),吃不动
-  整块盘,故撑不满整机、撑不垮其余沙箱的写。**注意容量帽只管 guest 自己写的字节,不管内核代它写的
-  字节**:RAM 帽若配成"无可杀 victim"的形态,内核会无限重试 OOM 并把内核日志写满宿主盘——这条路
-  **绕开容量帽**,故 `memory.oom.group=1` 不是调参而是本不变量的组成部分(§3.4 RAM 维度)。
+  整块盘,故撑不满整机、撑不垮其余沙箱的写。**但容量帽只管 guest 自己写的字节,不管内核代它写的**:
+  故"确定且整组的终止"是本不变量的组成部分,不是调参——**它绕开容量帽**的那条路径见 §2.4。
 
 一句话:**放大只发生在"本沙箱数据面"内;宿主隔离(①②④)与跨沙箱隔离不受 guest 身份影响**。注意
 **资源耗尽维度不靠 syscall 拦截(支柱①)守**——①虚拟化的是 syscall、不是资源用量:CPU/RAM/IO 速率
@@ -262,8 +260,8 @@ root 默认就是 §1.1「可拿 root 的 agent 沙箱」最直接的表达,装�
 > **一个合格的 runtime provider,必须维持 substrate-borne 的 ①②(用户态内核拦截 syscall + 基底
 > 在宿主非特权);对 ③ 它只负责一件事——把隔离单元的每一条 egress exhaustive 地引流进引擎指定的
 > gateway、默认拒绝其余出站(逃逸即失败,不是降级);⑤ 它只按控制面下发的策略做 enforcement,不持策略
-> 权威;④ 它不进 resolve 路径(不解析别名、不调 resolver、不持求值权)。策略强制与凭证注入本身都发生在
-> 引擎自有的 egress 数据面里,不是 provider 的活。**
+> 权威;④ 它**不进 resolve 路径**(§2.1 义)。策略强制与凭证注入本身都发生在引擎自有的 egress 数据面
+> 里,不是 provider 的活。**
 
 **RAM 上限的物化附带两条可验收义务**(§3.4 RAM 是安全限,超限后果是沙箱终止):
 
@@ -272,8 +270,8 @@ root 默认就是 §1.1「可拿 root 的 agent 沙箱」最直接的表达,装�
   `local_runsc` 靠 `memory.oom.group=1` 兑现;远端 provider 靠其调度层的等价整组终止语义。
 - **终止原因必须可判**,且跨 seam 时是**抽象枚举**而非 errno / cgroup 文件——否则控制面无法把它与
   崩溃分开,会去 resume 一个必然再次终止的沙箱(§4.3 `resource-terminated` 与 `dead-recoverable` 并列)。
-  **provider 须在拆除自己的 placement 之前把死因交出来**:该信号一般是 placement-local 且易失的,
-  拆除后不可恢复(§4.3 落库要求)。判不出即报 `Unknown`——**不许猜**,§4.3 对未知有兜底路径。
+  **provider 须在拆除自己的 placement 之前把死因交出来**,判不出即报 `Unknown`、**不许猜**(信号为何
+  易失、为何必须当场落库、未知怎么兜底,全在 §4.3)。
 
 **egress 强制的三条 invariant(承重墙是 IP 层,不是域名)。** ③ 的策略求值在数据面,但兜底强制靠一条对
 **dial 时钉死的 IP** 求值的 **deny-set**——与凭证注入正交(推理、成员判据与逃逸分析见

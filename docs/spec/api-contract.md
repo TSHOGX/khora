@@ -42,10 +42,7 @@ DELETE /v1/sandboxes/{id}                                                       
 GET    /v1/sandboxes                                                               (list)
 GET    /v1/sandboxes/{id}/files?path=                                    (大文件下载,流式)
 PUT    /v1/sandboxes/{id}/files?path=                          → {path, bytes_written}(上传)
-#   §5.E fs 的**大文件旁路**(D4.4),是数据面里唯一走 REST 的一条:它的全部意义就是**流式**——
-#   大文件不该变成一条 protobuf 消息、也不该在任一端整份驻留(实测 RPC 路径要多占约 37 倍 guest 内存,
-#   而沙箱超 RAM 帽即被终止,§3.4)。小载荷仍走 `FsService.Read/Write`,**阈值由调用方定**。
-#   §6.2 的约束不变:沙箱仍按不透明 ID 寻址,guest 端点(placement)不出现在 wire 上。
+#   §5.E fs 的大文件旁路(D4.4),数据面里唯一走 REST 的一条;小载荷仍走 `FsService.Read/Write`。见下。
 
 # Template(不可变工件:opaque ID 作身份,存在即状态,§3.1 / §4.3)
 GET    /v1/templates
@@ -66,6 +63,11 @@ GET    /v1/volumes/{id}/export       (直连读出)
 GET    /v1/sandboxes/{id}/network
 POST   /v1/sandboxes/{id}/publish    {port, auth?}                                 → {url}
 ```
+
+> **为何 files 旁路走 REST 而不走 RPC:它的全部意义是流式。** 大文件不该变成一条 protobuf 消息、也不该在
+> 任一端整份驻留——实测 RPC 路径多占约 37 倍 guest 内存(transport D4.4),而沙箱超 RAM 帽即被终止
+> (§3.4),故这是安全性而非效率取舍。**阈值由调用方定**。§6.2 的约束不变:沙箱仍按不透明 ID 寻址,
+> guest 端点(placement)不出现在 wire 上。
 
 **数据面(Connect-RPC,权威 wire 是 proto,非下方 REST 行)** —— process / fs 有 server-stream +
 强类型帧,**权威契约是 `engine.transport.v1` 的 `ProcessService` / `FsService`**(D4.3/D4.4),
