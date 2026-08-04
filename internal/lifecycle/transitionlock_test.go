@@ -127,8 +127,8 @@ func TestTransitionLockMapCollectsAfterChurn(t *testing.T) {
 	// be outstanding: the map must be empty, not merely small.
 	if n := lockMapLen(m); n != 0 {
 		t.Fatalf("transition-lock map holds %d entries after %d churned sandboxes; want 0 "+
-			"(an entry outliving its verbs is the open-decisions §4 item ④ leak — some "+
-			"acquire site is missing its release)", n, workers*rounds)
+			"(an entry outliving its verbs is a regression of the leak this refcount "+
+			"closed — some acquire site is missing its release)", n, workers*rounds)
 	}
 }
 

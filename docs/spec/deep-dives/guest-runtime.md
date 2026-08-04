@@ -129,7 +129,10 @@ reparent 到 `sandboxd` 而非 PID 1——不当 PID 1 也能收割自己关心�
 ——drain-barrier 的**排空逻辑**要、任何往它上面挂 **generation 标签**的做法不要。
 
 **信号目标天然分裂**:定向信号(单进程 / 进程组,spec §4.2 静止点、§5.E 信号通道)归
-**transport 模式**(它握 pid/pgid 句柄);容器级信号扇出(runsc 收 `SIGTERM` → 转发子进程)归 **PID 1**。
+**transport 模式**(它握 pid/pgid 句柄);容器级信号扇出归 **PID 1**——它 `kill(-1, sig)` 广播给
+**本 pid namespace 内除自己以外的全部进程**,故模板自带的长跑 sibling 与 transport 的整棵子树一并覆盖,
+不只是它自己 spawn 的那一个子进程。这条判据是"不指定任何 pid/pgid":正因为不定向,它才落在 PID 1 侧
+而非 transport 侧——句柄留给定向那条路。
 
 ### D4.4 pause 静止点协议(spec §4.2 的机制)
 

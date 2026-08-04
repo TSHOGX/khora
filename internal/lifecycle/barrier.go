@@ -35,10 +35,13 @@ import (
 // barrier tracks in-flight engine-issued mutating operations per sandbox and lets
 // a pause wait for them to drain.
 //
-// Keyed per sandbox like the transition-lock map, and it shares that map's known
-// residual: entries are created on demand and not reclaimed, a slow leak under
-// high sandbox churn (registered in open-decisions §4 ④). Deliberately the same
-// shape rather than a second, different policy — one wart to fix, not two.
+// Keyed per sandbox like the transition-lock map. It used to share that map's
+// known residual — entries created on demand and never reclaimed, a slow leak
+// under high sandbox churn — but the transition lock has since been closed with a
+// refcount, so this is now the only such map. Still registered in
+// open-decisions §4; the same refcount shape should port, except that a barrier
+// entry is held by its cond rather than by an Unlock, so the collection point is
+// not structurally identical and needs its own argument.
 type barrier struct {
 	mu sync.Mutex
 	// cond signals when a sandbox's in-flight count reaches zero.
