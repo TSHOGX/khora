@@ -129,9 +129,13 @@ type Deps struct {
 
 // Mediator holds per-sandbox transition locks (§4.4-B).
 type Mediator struct {
-	deps  Deps
-	mu    sync.Mutex // guards locks map only
-	locks map[model.SandboxID]*sync.Mutex
+	deps Deps
+	// mu guards the mediator's in-memory maps — locks, live, buildingLayers and
+	// buildingOverlays — each held only across an O(1) map operation, never across
+	// a transition lock, a store call or a provider call. A transitionLock's
+	// Unlock takes mu AFTER releasing the transition mutex, so the two never nest.
+	mu    sync.Mutex
+	locks map[model.SandboxID]*transitionLock
 
 	// barrier drains engine-issued mutating fs RPCs before a voluntary freeze, so
 	// a pause cannot land mid-write and truncate a file (§4.2 / D4.4; see
@@ -233,7 +237,7 @@ func New(deps Deps) *Mediator {
 	}
 	return &Mediator{
 		deps:             deps,
-		locks:            make(map[model.SandboxID]*sync.Mutex),
+		locks:            make(map[model.SandboxID]*transitionLock),
 		barrier:          newBarrier(),
 		live:             make(map[model.SandboxID]*liveState),
 		buildingLayers:   make(map[model.TemplateID]bool),
@@ -241,22 +245,91 @@ func New(deps Deps) *Mediator {
 	}
 }
 
-// lock returns the per-sandbox transition mutex, creating it on first use
+// transitionLock is one sandbox's transition mutex (§4.4-B) plus the refcount
+// that decides when its map entry may be dropped.
+//
+// The naive reclamation — delete the entry when a verb finishes, or on destroy —
+// is a CORRECTNESS BUG, not a tidy-up: a verb already blocked in mu.Lock() holds
+// a pointer to this mutex, so deleting the entry lets the NEXT verb mint a fresh
+// mutex and the two then serialize on DIFFERENT mutexes. Both would be "holding
+// the sandbox's transition lock" while running concurrently, which is exactly
+// what §4.4-B forbids (and what a destroy racing an in-flight resume needs).
+//
+// refs is what closes that: it counts outstanding lock() handouts, not holders.
+// It is incremented under m.mu in the SAME critical section that finds-or-creates
+// the entry, so a caller cannot be handed a pointer to an entry that is
+// concurrently being deleted; and it is decremented only after the mutex is
+// released, so a blocked waiter always keeps refs > 0. An entry therefore reaches
+// refs == 0 only when nobody holds it, nobody is blocked on it, and nobody is
+// between lock() and Lock() — at which point deleting it is unobservable: the
+// next verb creates a fresh mutex with no contender to disagree with.
+type transitionLock struct {
+	mu sync.Mutex
+
+	// m/id let Unlock drop this handle's ref without the caller having to.
+	m  *Mediator
+	id model.SandboxID
+
+	// refs counts outstanding lock() handouts for this id. Guarded by m.mu, NOT
+	// by mu — it must be readable while mu is held by someone else.
+	refs int
+}
+
+// Lock acquires the transition lock, blocking until it is free.
+func (l *transitionLock) Lock() { l.mu.Lock() }
+
+// Unlock releases the transition lock AND the ref the matching lock() took. The
+// order matters: the mutex is released first so a blocked waiter can proceed,
+// and only then is the ref dropped — while a waiter exists its own ref keeps the
+// entry alive, so the drop can never collect an entry someone is still using.
+func (l *transitionLock) Unlock() {
+	l.mu.Unlock()
+	l.release()
+}
+
+// release drops one ref, collecting the map entry at zero.
+func (l *transitionLock) release() {
+	l.m.mu.Lock()
+	defer l.m.mu.Unlock()
+	l.refs--
+	switch {
+	case l.refs > 0:
+		return
+	case l.refs < 0:
+		// Unreachable by construction (one release per lock()). If it ever fires,
+		// some path released twice — which would let a live entry be collected
+		// under a holder and silently break §4.4-B. Fail loudly instead.
+		panic(fmt.Sprintf("lifecycle: transition lock for %s released more times than acquired", l.id))
+	}
+	// Only delete OUR entry: a re-created entry for the same id would be a
+	// different *transitionLock, and dropping that one here would collect an
+	// entry with live refs.
+	if cur, ok := l.m.locks[l.id]; ok && cur == l {
+		delete(l.m.locks, l.id)
+	}
+}
+
+// lock returns the per-sandbox transition lock, creating it on first use
 // (§4.4-B: all lifecycle verbs for the SAME sandbox serialize on it).
 //
-// KNOWN LIMITATION: entries are never removed, even after destroy — the map
-// grows by one mutex per distinct SandboxID ever seen (a slow leak under high
-// churn). Not a correctness bug; deleting on destroy races a verb blocked on
-// acquiring the same lock (it would let a blocked verb and a fresh verb serialize
-// on DIFFERENT mutexes), so it needs care. Tracked in open-decisions §4.
-func (m *Mediator) lock(id model.SandboxID) *sync.Mutex {
+// The returned handle carries a ref that MUST be released exactly once, which
+// Unlock does — so the standard shape
+//
+//	l := m.lock(id); l.Lock(); defer l.Unlock()
+//
+// is complete: no separate release call, and the deferred Unlock covers every
+// return path. The one shape that leaks is calling lock() and never unlocking;
+// tryLock is the only caller that can reach it, and it releases explicitly on
+// its failure path.
+func (m *Mediator) lock(id model.SandboxID) *transitionLock {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	l, ok := m.locks[id]
 	if !ok {
-		l = &sync.Mutex{}
+		l = &transitionLock{m: m, id: id}
 		m.locks[id] = l
 	}
+	l.refs++
 	return l
 }
 
@@ -269,11 +342,17 @@ func (m *Mediator) lock(id model.SandboxID) *sync.Mutex {
 // would classify dead-recoverable; skipping is the single-flight guard, adding
 // no §4.1 state). This is the ONLY non-blocking acquire; every user verb takes
 // the lock blocking.
-func (m *Mediator) tryLock(id model.SandboxID) (*sync.Mutex, bool) {
+//
+// On the SKIP path it releases the ref lock() took: the reaper and periodic
+// reconcile skip on every tick for as long as a verb is driving a sandbox, so a
+// ref retained here would accumulate per skipped round and the entry would never
+// be collected — the leak this refcount exists to close, with more code.
+func (m *Mediator) tryLock(id model.SandboxID) (*transitionLock, bool) {
 	l := m.lock(id)
-	if l.TryLock() {
+	if l.mu.TryLock() {
 		return l, true
 	}
+	l.release()
 	return nil, false
 }
 
