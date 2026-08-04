@@ -43,8 +43,8 @@ the machine can't reach).
 | --- | --- |
 | arch / kernel | **arm64** · `7.0.14-orbstack` (OrbStack updates this in place; the engine depends on the capabilities below, not on an exact kernel build) |
 | runsc | `release-20260714.0` (spec 1.2.1), systrap, no KVM |
-| overlay / cgroup | overlay kernel module present · cgroup **v2** (cgroup2fs) |
-| engine scratch fs | **btrfs** on `/dev/vdb1` at `/home/hsw/engine` — native, not virtiofs; `cp --reflink=always` works (cheap §5.B CoW) |
+| overlay / cgroup | overlay filesystem **builtin** (not a loadable module) · cgroup **v2** (cgroup2fs) |
+| engine scratch fs | **btrfs** on `/dev/vdb1` (the machine's root subvolume; the repo at `/home/hsw/engine` sits on it, not on a mount of its own) — native, not virtiofs; `cp --reflink=always` works (cheap §5.B CoW) |
 | btrfs quota mode | **`squota`** (`/sys/fs/btrfs/*/qgroups/mode`) — the capacity axis depends on this specific mode, not merely on "btrfs" (why squota and not full qgroup: rootfs-overlay D6.2). The mode **cannot be changed here**: `BTRFS_IOC_QUOTA_CTL` returns EPERM even as root with full `CAP_SYS_ADMIN` |
 | btrfs-progs | **v6.17.1** — an explicit dependency: `internal/btrfs` shells out to `btrfs` and `findmnt` (both at `/usr/bin`) |
 | privilege | passwordless `sudo` available; mount/netns/veth/cgroup/runsc all need root |

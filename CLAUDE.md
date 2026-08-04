@@ -69,16 +69,15 @@ slims to boundary + open agenda — nothing lives in full in both places.
 
 - **Package names = the §5 canonical short-names:** `runtime` / `rootfs` /
   `volume` / `network` / `transport`, plus `model` / `lifecycle` / `store`,
-  `orchestrator` (the §1.1 assembly) and `btrfs` (a leaf substrate tool, model-
-  ignorant — not a subsystem).
-  (`Rootfs` = the §5.B subsystem; `fs` = the §5.E wire service; `rootfs provider`
-  = its §5.B storage seam — three distinct things, don't merge. Say `rootfs
-  provider`, never "FS provider": §5.C's `volume backend` is a *separate* seam,
-  not the other half of one shared FS seam.)
+  `orchestrator` (the §1.1 assembly), and the non-subsystem leaves: `btrfs` (a
+  substrate tool, model-ignorant), `guestport` (one shared constant), `arch`
+  (structural guards, no production code).
+  (`Rootfs` = the §5.B subsystem; `fs` = the §5.E wire service; `rootfs provider` =
+  its §5.B storage seam; `volume backend` = §5.C's *separate* seam — four distinct
+  things, don't merge, and never say "FS provider". Table in §1.1.)
 - **Seams are interfaces** (§1.3 Behavior seam): `store.Store`,
-  `runtime.Provider`, `rootfs.Provider`, and `volume.Backend` (§5.C — a
-  *different* shape from `rootfs.Provider`, not one shared FS seam). Swapping a
-  backend = registering an implementation, not editing callers.
+  `runtime.Provider`, `rootfs.Provider`, `volume.Backend`. Swapping a backend =
+  registering an implementation, not editing callers.
 - **"Subsystems never call each other" is enforced structurally**, not by review:
   `internal/arch` fails if any §5 package imports another, or reaches into
   `lifecycle`/`store`. Its allowlist is empty and should stay that way — when two
@@ -87,23 +86,26 @@ slims to boundary + open agenda — nothing lives in full in both places.
 - **`runtime.Provider` contract = policy + handles, NEVER host primitives** — no
   cgroup path / netns fd / host absolute path in the interface (§5.A). A remote
   provider cannot produce those; leaking them binds the abstraction to
-  host-local.
+  host-local. **Also enforced structurally:** `internal/runtime/seam_test.go` scans
+  the interface's params, results *and* struct fields, so a host primitive smuggled
+  in on a field fails a test rather than a review.
 - **Engine vocabulary boundary (§1.1).** Banned as engine-internal entity names
   (types / packages / fields / API endpoints): `generation`, `principal`,
   `tenant`, `owner` (ownership sense), `session`, `turn`, `agent`. They keep
-  product semantics out at naming time. In prose the §1.1 table is finer-grained:
-  `session` / `turn` / `agent` are fine when describing what the engine does *not*
-  do, `owner` is fine only in the responsibility sense, and `generation` /
-  `principal` / `tenant` stay barred outright.
+  product semantics out at naming time. Prose is looser and the §1.1 table is
+  authoritative on exactly how much — consult it rather than guessing (e.g. `agent`
+  is fine for anything outside the engine, product layer included: "agent sandbox
+  engine" is the engine's own positioning; `generation` / `principal` / `tenant` are
+  barred outright).
 - **Code matches spec vocabulary.** If code and spec disagree on a name, fix one
   in the same change.
 
 ## Execution & verification
 
 - Runs on **Linux + gVisor/runsc + kernel overlayfs + netns + cgroup v2**. Dev/test
-  environment = OrbStack machine `sbx` (see `docs/decisions/ADR-0002`). Engine
-  code + **all** overlay scratch live on **native fs**, never the virtiofs shared
-  mount (overlayfs upper/work won't work there).
+  environment = OrbStack machine `sbx`. Engine code + **all** overlay scratch live on
+  **native fs**, never the virtiofs shared mount — reasoning and the measured machine
+  facts in `docs/decisions/ADR-0002`.
 - **Correctness lives in concurrency/failure invariants** (§4.4 the three, §4.3
   health classification, §2.4 egress fail-closed), **not at compile time**. A green
   build proves nothing about these — write **fault-injection / e2e tests at the
@@ -111,11 +113,15 @@ slims to boundary + open agenda — nothing lives in full in both places.
 - **Verify on the real substrate before claiming done:** `go build` + `go vet` +
   the milestone's e2e acceptance on `sbx`. Report failures with output; don't
   hedge a verified pass.
-- **Test build tags:** `substrate` = needs real runsc/overlay/btrfs and root (the
-  routine gate; run it with `-p 1`). A test that costs *minutes* gets its OWN
-  additional tag (`drainrace` is the precedent) so the routine gate stays fast —
-  keep both tags, since these files borrow the shared substrate fixtures. Exact
-  invocations in `README.md`.
+- **Test build tags**, on two axes. *Cost:* `substrate` = needs real
+  runsc/overlay/btrfs and root (the routine gate; run it with `-p 1`); a test that
+  costs *minutes* gets its OWN additional tag (`drainrace` is the precedent) so the
+  routine gate stays fast — keep both tags, since these files borrow the shared
+  substrate fixtures. *Compilation:* a tag may instead gate code that must not exist
+  in a production binary — `testguest` compiles the in-guest fault-injection seam,
+  absent from a production `sandboxd` because the guest can write its own fs (§5.E.1).
+  The harness applies that one itself; it is never passed by hand. Exact invocations
+  in `README.md`.
 
 ## Milestone discipline
 
@@ -133,12 +139,11 @@ state) can be discarded and rebuilt at any time. Therefore write **no schema
 migration / no version-compat / no backward-compat code** — a breaking change
 edits the schema and deletes the old path in place, full stop.
 
-A compat branch is a **negative asset right now**: it widens the code surface
-and manufactures fake invariants — "the comment claims one thing, the code does
-another" — exactly the silent drift the spec discipline exists to prevent. When
-the schema grows a column, put it in `CREATE TABLE` and regenerate the store; do
-not `ALTER` an imagined old file. This rule lifts when we actually deploy — at
-that point compatibility becomes a real constraint and this section gets revised.
+A compat branch is a **negative asset right now**: it widens the surface and
+manufactures fake invariants — the comment claims one thing, the code does another —
+exactly the silent drift the spec discipline exists to prevent. When the schema grows
+a column, put it in `CREATE TABLE` and regenerate; do not `ALTER` an imagined old
+file. This rule lifts when we deploy.
 
 ## Commits
 

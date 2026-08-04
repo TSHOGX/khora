@@ -71,6 +71,17 @@ type Deps struct {
 	Rootfs  rootfs.Provider
 	// Dial builds a stateless transport client for a discovered endpoint
 	// (§5.E: constructed per endpoint, discarded on resume).
+	//
+	// Returns the FULL Client, deliberately, even though §4's own logic only ever
+	// probes health (probeHealth / classify both narrow to transport.HealthProber at
+	// the point of use). The width is here because Mediator.Client re-exports this
+	// to the data plane, and THAT is worth the cost: endpoint resolution stays
+	// inside §4, so the orchestrator addresses sandboxes by SandboxID and never
+	// learns a placement (§6.2). Narrowing this field would move that resolution
+	// out and leak placement — a worse trade than one wide field.
+	//
+	// The visible cost is that an L1 fake must satisfy all three halves. Accepted:
+	// it is a test-only cost, and it buys the §6.2 invariant.
 	Dial func(transport.Endpoint) transport.Client
 
 	// HealthTimeout bounds the ⑦ readiness gate (guest-runtime D5.1).
@@ -854,9 +865,17 @@ func (m *Mediator) coldStart(ctx context.Context, id model.SandboxID, ov *rootfs
 
 // awaitHealthy polls the transport Health RPC until first success or timeout
 // (⑦; the single readiness barrier of the cold-start chain, guest-runtime D5).
+// probeHealth resolves a placement to just the readiness/liveness half of the
+// channel. Returning HealthProber rather than Client is the point: it states in
+// code that §4 never reaches into the process or fs surfaces, so a reader (or a
+// future edit) cannot mistake the mediator for a data-plane consumer.
+func (m *Mediator) probeHealth(pl *runtime.Placement) transport.HealthProber {
+	return m.deps.Dial(transport.Endpoint(pl.TransportEndpoint))
+}
+
 func (m *Mediator) awaitHealthy(ctx context.Context, pl *runtime.Placement) error {
 	deadline := time.Now().Add(m.deps.HealthTimeout)
-	cl := m.deps.Dial(transport.Endpoint(pl.TransportEndpoint))
+	cl := m.probeHealth(pl)
 	for {
 		hctx, cancel := context.WithTimeout(ctx, time.Second)
 		_, err := cl.Health(hctx)
@@ -1444,7 +1463,7 @@ func (m *Mediator) probeReady(ctx context.Context, pl *runtime.Placement) bool {
 	if pl == nil {
 		return false
 	}
-	cl := m.deps.Dial(transport.Endpoint(pl.TransportEndpoint))
+	cl := m.probeHealth(pl)
 	hctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	_, err := cl.Health(hctx)

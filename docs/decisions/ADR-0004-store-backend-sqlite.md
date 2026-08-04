@@ -42,7 +42,7 @@ deployment target: single binary + one local store, no heavy external dependency
 
 The seam is the whole point: **no caller may branch on backend capability** (§4.4-C).
 The one publish algorithm is written once against the interface; swapping SQLite for
-bbolt (or anything else) must never edit that algorithm. And per ADR-0001's caveat, a
-green build proves nothing about the §4.4 invariants — the atomic-commit and
-crash-reconciliation behavior is proven by the store fault-injection tests
-(`internal/store` + `test/reconcile_substrate_test.go`), not by the type system.
+bbolt (or anything else) must never edit that algorithm. And per ADR-0001's caveat,
+the atomic-commit and crash-reconciliation behavior is proven by the store
+fault-injection tests (`internal/store` + `test/reconcile_substrate_test.go`), not by
+the type system.

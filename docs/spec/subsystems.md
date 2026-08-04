@@ -19,9 +19,10 @@
 
 > Rootfs 与 Volume 分两个子系统:**Overlay 工件**生命周期**随沙箱**、引用某个 Template、就是
 > pause/resume 的那份冻结层;**Volume** 生命周期**独立**、先于/晚于沙箱存活、自带管理 API 与后端。
-> 二者都 ID 寻址,但**不共用一个物化 seam**——§5.B `rootfs.Provider` 物化分层合成、§5.C
-> `volume.Backend` 物化自足存储单元,只共享底层存储 substrate 原语(btrfs subvolume / 配额 /
-> reflink);回收也不同:Overlay 引用 Template 且随沙箱回收,Volume 谁都不引用、独立回收。
+> 二者都 ID 寻址,但**不共用一个物化 seam**——§5.B `rootfs.Provider` 物化分层合成(multi-lowerdir +
+> upper/work + Promote)、§5.C `volume.Backend` 物化自足存储单元(直接 bind、无合成),只共享底层存储
+> substrate 原语(btrfs subvolume / squota / reflink);回收也不同:Overlay 引用 Template 且随沙箱回收,
+> Volume 谁都不引用、独立回收。
 
 ### 5.A Runtime(执行基底)
 
@@ -35,15 +36,14 @@
 - **资源上限物化(速率轴 + RAM)**:沙箱的速率上限(CPU;disk I/O 同轴、待有消费者时同形加入)与 **RAM**
   上限是 Binding(§3.4),由本子系统在每次 placement 时物化——single-node provider 落成 cgroup(CPU 的
   **上限与份额都写**:`cpu.max` + `cpu.weight`,二者同由 `cpu_millis` 派生,理由见 §3.4;RAM 落 memcg);
-  别的 provider 落成其调度层的等价资源约束(份额对应其调度权重)。**disk 容量上限不在此**——它是 FS 层配额,
-  归 §5.B(Overlay upper+work)/ §5.C(每个 Volume),经二者共享的存储 substrate 原语物化(§3.4)。
+  别的 provider 落成其调度层的等价资源约束(份额对应其调度权重)。**disk 容量上限不在此**——它是 FS 层
+  配额,per-sandbox 的归 §5.B(Overlay upper+work)、per-volume 的归 §5.C。
 - **RAM 是安全限,其"一个旋钮/两个值"的摊分是 provider 内部细节**:接口只说 `MemoryByte = N`
   (§3.4 Binding);provider 自己决定怎么把"N 字节 RAM"物化。`local_runsc` 内部把 guest 可见 RAM 设成
   N、宿主天花板设成 `N + overhead`(overhead 是**它的实现常数**,非契约成员——远端 provider 的开销
   构成完全不同:可能是 VM balloon、可能是调度层的 memory request)。**不这么切就是 spec bug**:两者
-  都设 N 时 guest 被告知 N 却在低于 N 处被终止。终止的**确定性**(整组、非内核挑 victim)同属
-  provider 义务,见 §2.4。这也决定了它**不进节点容量核算**:overhead 是 provider 的实现常数,核算式
-  只计引擎能命名的字节(§3.4)。
+  都设 N 时 guest 被告知 N 却在低于 N 处被终止。它因此也**不进节点容量核算**(§3.4:核算式只计引擎能
+  命名的字节)。终止的**确定性**(整组、非内核挑 victim)同属 provider 义务,见 §2.4。
 - **启动**:从 Template 冷启(秒级),可叠加现成 restore / 启动优化。容器 entrypoint 是
   `sandboxd`(init 模式当 PID 1,§5.E.1)——本子系统只负责"把它作为 PID 1 拉起",guest 内的
   init/reaper/re-exec 拓扑归 §5.E.1,不在此展开。
@@ -77,8 +77,8 @@
     - `Adopt(SandboxID) → (placement 句柄, alive, 死因, err)`——按 SandboxID **重认**该沙箱自己的
       placement-local 资源、重建**不透明**句柄、重发现 transport 端点(**同一端点、不换 epoch**,隔离单元
       从未重启,§3.3)。三种结局互斥:**活且端点已恢复** → 交出句柄;**确已死/不存在** → `alive=false`,
-      并**顺带交出死因**(抽象枚举,§4.3)——这是 placement 尚完整的最后一刻,死因信号随 placement 拆除即
-      消失、**事后无法补问**,判不出即报 `Unknown`,不许猜;**L1 活但端点恢复不了 → 报错,不是死亡**——
+      并**顺带交出死因**——这是 placement 尚完整的最后一刻,信号为何易失、判不出为何只能报 `Unknown`
+      见 §4.3;**L1 活但端点恢复不了 → 报错,不是死亡**——
       provider 不得把"不确定"塌缩成 `alive=false`,否则 mediator 会去降级并拆掉一个证明活着的隔离单元
       (§4.4-A 对不确定取保守)。右侧仍是**策略+句柄**,过上面的 ❌ 宿主原语清单——死因是枚举,不是
       errno / cgroup 文件。
@@ -145,13 +145,13 @@
     provider 实现细节(§3.1.1)。
 - **Promote**:把当前 Overlay 固化成新 Template 的底层——可写层降为只读底层,Template 因此
   天然分层(像分层镜像)。Promote 需要的仅是"at-rest 读到上层字节固化成一个新只读层",外层 overlayfs 的
-  upper 是宿主普通目录树,直接读即可(§2.5)。**读的是抢占式干净停后的 at-rest upper**(§4.2 静止点;
-  协作式应用层安全点非正确性前提,substrate flush 本就保证)。
+  upper 是宿主普通目录树,直接读即可(§2.5)。**读的是干净停后的 at-rest upper**(§4.2 静止点:先 host 侧
+  drain-barrier、超时降抢占式;协作式应用层安全点非正确性前提,substrate flush 本就保证)。
 - **分层 Template = multi-lowerdir**:一摞只读层(像 OCI image),Promote 往上叠一层——新 Template 的
   lower 栈 = `[新层, ...父 Template 的 lower 栈]`,沿 lineage(`parent` 引用)展开。层怎么存/引用由
   **rootfs provider** 决定,位于 runsc overlay 机制**之上**;抽象不因存储形态而变(可选形态见
   rootfs-overlay D3)。
-- **不可变工件字节先行(bytes-first,§4.3 存在即状态的硬约束)**:Template 无 state 列、行存在即
+- **不可变工件字节先行(bytes-first)**:理由见 §4.3「存在即状态」——Template 无 state 列、行存在即
   ready,故其字节(新只读层目录)必须**先在后端完全物化、再插控制面行**。create-from-Template =
   引用既有层(字节早在);Promote = 先写层字节、后插 Template 行——crash 在中间只留**孤儿层字节**
   (可回收),绝不出现"行指向不存在字节"的破损 ready 态。**两个同形的孤儿 sweep**,都复用 §4.4-A 反向
@@ -188,9 +188,8 @@
 - **目标**:把"额外要独立存活的数据"做成一等公民,生命周期与任何沙箱解耦。
 - **定义**:ID 寻址的持久存储单元,先于沙箱建、晚于沙箱亡、未挂载也在;可挂到多个沙箱的
   不同路径,**不进沙箱持久态 / 不进 Promote 捕获**,各自后端。
-- **独立子系统、独立 seam `volume.Backend`**:Volume **不与 §5.B 共用物化 seam**——它有自己的,
-  只吐**一样东西:一个宿主挂载点**(runsc 写进 OCI mount spec、gofer 代理进 guest,与 merged
-  rootfs 同构)。与 §5.B 只共享底层存储 substrate 原语(btrfs subvolume/配额/reflink)。
+- **独立子系统、独立 seam `volume.Backend`**(不与 §5.B 共用物化 seam,见 §5 前言):它只吐**一样
+  东西:一个宿主挂载点**(runsc 写进 OCI mount spec、gofer 代理进 guest,与 merged rootfs 同构)。
 - **共享/独占策略**:`AccessMode ∈ {Exclusive, SharedReadOnly, SharedReadWrite}`(独占挂载唯一 /
   只读扇出 / 共享读写;后者只保证同沙箱内多连接(process)的 POSIX 语义,**跨沙箱 rw coherence 引擎不
   定义(undefined)**——gofer/sentry 各自缓存让跨隔离边界的共享可变一致性本质不可靠,引擎不承诺、
@@ -246,9 +245,9 @@
   CNI/sidecar)物化,与"资源上限是 Binding、cgroup 由 provider 物化"同构。所以 resume 时:**gateway
   由本子系统建/选,引流由 provider 建**;两者经 mediator 编排的两条薄契约(resolve / ingress)相遇、
   不互调(§4;详见 [`deep-dives/network.md`](./deep-dives/network.md))。
-- **出站**:三档姿态与两跳 deny-set 由 §2.4 定死(公网默认放行 / 内网私有段 deny-safe / L0 地板恒 deny;
-  承重墙是 dial 时对钉死 IP 求值的 deny-set,域名 allow-list 只作 best-effort)。本子系统持这些规则的
-  **策略权威**,provider 侧 nft 只放行到数据面 + 显式端点。数据面的**进程基数**(per-sandbox / per-node)
+- **出站**:三档姿态与两跳 deny-set 由 §2.4 定死(承重墙是 dial 时对钉死 IP 求值的 deny-set,域名
+  allow-list 只作 best-effort)。本子系统持这些规则的**策略权威**,provider 侧 nft 只放行到数据面 +
+  显式端点。数据面的**进程基数**(per-sandbox / per-node)
   是物化选择、**非模型承诺**:`local_runsc` 落成 per-sandbox,别的物化可 per-node 复用一个数据面而仍按
   源 IP 强制 per-sandbox 策略。
 - **入站**:默认关闭;**显式 publish** 把沙箱内端口暴露成外部入口,可带鉴权。publish 是**宿主侧
@@ -264,8 +263,8 @@
     "出站 allow-deny / 入站 publish 规则"同属 §5.D 的策略权威。
   - **注入执行**(引擎自有 egress 数据面):凭证在出站时**由引擎数据面(gateway)注入**,经一条传输
     无关的 **resolve 契约**(alias → 注入 directives + 过期 + 失效信号)拿注入材料,数据面持 TTL 缓存。
-    **provider 不进 resolve 路径**:它不解析别名、不调 resolver、不持求值权,即便凭证密文物理流经它
-    调度的基础设施(远端形态),它也只是引流方、不是 resolve 参与方。resolve 契约的精确 schema 见
+    **provider 不进 resolve 路径**(§2.1 义):即便凭证密文物理流经它调度的基础设施(远端形态),它也
+    只是引流方、不是 resolve 参与方。resolve 契约的精确 schema 见
     [`deep-dives/network.md`](./deep-dives/network.md) D3.1 / [`open-decisions.md`](./open-decisions.md)。
     **resolve 失败 fail-closed,作用域 per-connection**(理由见 §2.4 /
     [`deep-dives/network.md`](./deep-dives/network.md) D5.6)。
@@ -281,6 +280,12 @@
 - **目标**:让宿主可靠地在沙箱里跑进程、读写文件,支持多连接并发。**engine 只暴露两个通用、无状态的
   能力服务(process / fs),外加一个引擎自用的 `Health` 探针**(§4.3 L2 + 就绪门 + 活动信号,不是对外
   能力面);两个服务自足 = 一个 E2B 式沙箱,agent 会话语义不在 engine 内(见末条)。
+- **宿主侧客户端按这三块切开,不是一个大接口**:`Health` 探针 / process / fs 各自成一个接口,具体客户端
+  同时兑现三者。判据是**各处只依赖自己真正用到的那块**:§4 mediator 全程只用 `Health`(就绪门 + §4.3
+  分类器),数据面才是 process/fs 的消费方。反面是可度量的:曾经一个 18 方法的大接口让每个 L1 fake 都得
+  实现 17 个自己从不调用的方法,于是新增一条 fs RPC 会牵动十个与 fs 无关的测试文件。
+  (`Deps.Dial` 仍返回合并后的完整客户端——因为 mediator 要把它转交数据面,从而**端点解析留在 §4 内**、
+  调用方只按 SandboxID 寻址、placement 不外泄(§6.2)。这一处宽度换的是那条不变量,值得。)
 - **in-guest daemon(`sandboxd`,核心组件)**:连接在 guest 内的终点是一个**payload 无关的
   daemon**,只暴露两个**通用**能力,且**对 agent / turn / session 一无所知**:
   1. **process** —— 起进程 / 重连 / 输入 / 信号 / resize / 列进程;PTY 是带 pty 字段的特例(shell 就是

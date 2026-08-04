@@ -180,6 +180,15 @@ func (m *Mediator) Enter(id model.SandboxID, op string) (func(), bool) {
 // drainForPause runs the barrier before a voluntary freeze. Timeout is not a
 // failure: it logs the stragglers and lets the caller proceed preemptively, which
 // lands exactly where a crash lands (§4.2) — never leaving a sandbox un-pausable.
+//
+// On reaper sweep latency: this runs while the caller holds the sandbox's
+// transition lock, and the reaper sweeps sequentially, so a drain that waits its
+// full grace delays the rest of that sweep. It is bounded and rare rather than
+// structural — an auto-pause fires only for a sandbox the activity clock calls
+// IDLE, and idle means no in-flight I/O, so drain returns immediately with nothing
+// to wait for. Paying the grace requires a write that starts in the window between
+// the classifier's verdict and the freeze. If that ever shows up as sweep latency,
+// the fix is to drain outside the lock, not to shorten the grace.
 func (m *Mediator) drainForPause(id model.SandboxID) {
 	grace := m.deps.DrainGrace
 	if grace <= 0 {

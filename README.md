@@ -14,12 +14,13 @@ A persistent, mutable, root-capable agent sandbox engine — no-hypervisor
 cmd/orchestrator/      thin entrypoint: flags → Engine → serve the §6.1 API
 cmd/sandboxd/          in-guest daemon: init (PID 1) + transport (process/fs) modes (§5.E.1)
 internal/orchestrator/ the single engine-host assembly (§1.1): holds the seams, serves §6.1
+                       (incl. the streaming large-file bypass, the one non-RPC route)
 internal/model/        §3 shared model: sandbox identity, lifecycle state (pure types)
 internal/lifecycle/    §4 mediator: state machine + transition lock + cold-start chain
 internal/store/        control-plane record seam: SQLite + in-memory, one interface
 internal/runtime/      §5.A: runtime provider seam + local_runsc
 internal/rootfs/       §5.B: rootfs provider seam + host overlayfs assembly
-internal/transport/    §5.E: host-side process/fs client + Health (Connect-RPC/h2c)
+internal/transport/    §5.E: host-side process client + the 7-RPC fs surface + Health (Connect-RPC/h2c)
 internal/btrfs/        leaf package: subvolume + squota primitives (no engine model)
 internal/guestport/    leaf constant: the guest netns TCP port, shared by §5.A/§5.E
 internal/arch/         structural guards: subsystems must not import each other
@@ -31,7 +32,8 @@ test/                  L2/L3 substrate acceptance + preflight fixtures
 
 Runs on a Linux host with gVisor/runsc, kernel overlayfs, netns, cgroup v2
 (dev environment: OrbStack machine `sbx`). Engine code + all overlay scratch
-must live on native fs, not a virtiofs shared mount.
+must live on native fs, not a virtiofs shared mount — why, and the measured
+machine facts, in [`docs/decisions/ADR-0002`](docs/decisions/ADR-0002-execution-environment.md).
 
 ```sh
 go build ./... && go vet ./...
@@ -49,3 +51,7 @@ sudo env "PATH=$PATH" "HOME=$HOME" go test -tags substrate -count=1 -p 1 ./...
 sudo env "PATH=$PATH" "HOME=$HOME" \
   go test -tags 'substrate drainrace' -count=1 -timeout 30m ./test/ -run TestPauseDrain
 ```
+
+A third tag, `testguest`, compiles the in-guest fault-injection seam into `sandboxd`
+(absent from a production guest, §5.E.1). The substrate harness builds the guest
+binary with it automatically — you never pass it by hand.

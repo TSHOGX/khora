@@ -135,18 +135,34 @@ type InputWriter interface {
 	Close() error
 }
 
-// Client is the host-side transport client for one sandbox's current endpoint.
-// Stateless: constructed against an endpoint, discarded on resume.
-type Client interface {
-	// Health is the unary readiness/liveness probe (§4.3 L2 / transport D4.5).
-	// First success is the resume readiness gate that flips state to running
-	// (guest-runtime D5.2 要点①) — the engine does not trust bare TCP accept. The
-	// returned HealthStatus carries the sandbox-global idle duration (§4.3
-	// activity signal); it is only meaningful when err == nil. Readiness callers
-	// (cold-start ⑦ gate, adopt probe) ignore it and check err alone; the reaper
-	// classifier reads Idle (reaper-health D2).
-	Health(ctx context.Context) (HealthStatus, error)
+// The channel is split by CONCERN into three interfaces, composed into Client.
+// This is not decoration: each consumer should depend on what it actually uses.
+//
+//   - The §4 mediator uses HealthProber and nothing else — both its dial sites
+//     only probe readiness/liveness. Typing its dependency as the full 18-method
+//     Client made every L1 fake implement 17 methods it never calls, so adding one
+//     fs RPC churned ten lifecycle test files that have no opinion about fs.
+//   - The orchestrator's data plane is the real consumer of ProcessClient and
+//     FsClient — it proxies them to external callers.
+//
+// The concrete client implements all three, so nothing loses capability; only the
+// declared dependencies narrow.
 
+// HealthProber is the readiness/liveness half (§4.3 L2 / transport D4.5). It is
+// the ONLY part of the channel the §4 mediator needs.
+type HealthProber interface {
+	// Health is the unary readiness/liveness probe. First success is the resume
+	// readiness gate that flips state to running (guest-runtime D5.2 要点①) — the
+	// engine does not trust bare TCP accept. The returned HealthStatus carries the
+	// sandbox-global idle duration (§4.3 activity signal); it is only meaningful
+	// when err == nil. Readiness callers (cold-start ⑦ gate, adopt probe) ignore it
+	// and check err alone; the reaper classifier reads Idle (reaper-health D2).
+	Health(ctx context.Context) (HealthStatus, error)
+}
+
+// ProcessClient is the §5.E process primitive (transport D4.3): run, reattach,
+// input, signal, resize, list. Addressed by guest-native pid throughout.
+type ProcessClient interface {
 	// Start launches a process and returns a channel of output events
 	// (server-stream). Addressed by the returned pid thereafter.
 	Start(ctx context.Context, spec StartSpec) (<-chan ProcessEvent, error)
@@ -176,7 +192,11 @@ type Client interface {
 
 	// List enumerates processes live (no registry, §5.E).
 	List(ctx context.Context) ([]int, error)
+}
 
+// FsClient is the §5.E fs primitive (transport D4.4): the unary metadata surface
+// plus the streaming large-file bypass. No watch — consumers poll Stat+Read.
+type FsClient interface {
 	// Read reads sandbox file bytes at an offset; engine keeps no read cursor,
 	// no cross-resume offset continuity (transport D4.4). No watch — consumers
 	// poll Stat+Read (§ render-vs-interact asymmetry, transport D2).
@@ -219,4 +239,18 @@ type Client interface {
 	// interrupted transfer cannot leave a partial file where a whole one is
 	// expected — which is why this path, unlike Write, has no truncate window.
 	WriteStream(ctx context.Context, path string, src io.Reader) (int64, error)
+}
+
+// Client is the whole host-side channel to one sandbox's current endpoint —
+// everything the concrete client can do. Stateless: constructed against an
+// endpoint, discarded on resume (the endpoint's netns IP changes, §3.3 / §4.3
+// IP-as-epoch).
+//
+// Depend on the NARROWEST of the three above that your caller actually uses; take
+// this composed form only if you genuinely need all three (the data-plane proxy
+// does, since it re-exports the full surface).
+type Client interface {
+	HealthProber
+	ProcessClient
+	FsClient
 }

@@ -117,7 +117,7 @@ func (m *Mediator) classify(ctx context.Context, rec model.Sandbox) (Health, run
 	}
 
 	// L2 probe (§4.3 L2 + activity signal, one RPC — D2).
-	cl := m.deps.Dial(transport.Endpoint(ep))
+	var cl transport.HealthProber = m.deps.Dial(transport.Endpoint(ep))
 	hctx, cancel := context.WithTimeout(ctx, classifyProbeTimeout)
 	st, herr := cl.Health(hctx)
 	cancel()
