@@ -691,9 +691,15 @@ func (m *Mediator) Destroy(ctx context.Context, id model.SandboxID) error {
 // valid from BOTH `running` and `paused` (§4.1 / §4.4-A decouples it) and is
 // idempotent, so there is no single "expected" source state to compare-and-set
 // against. The invariant is LOCK-enforced, not CAS-enforced: the held transition
-// lock serializes destroy against every other verb, and a `creating` record is
-// never observable here because Create holds the lock for its whole chain. The
-// terminal DeleteSandbox is idempotent (ErrNotFound → already gone).
+// lock serializes destroy against every other verb. The terminal DeleteSandbox is
+// idempotent (ErrNotFound → already gone).
+//
+// A `creating` record IS reachable here, contrary to what "Create holds the lock
+// for its whole chain" would suggest: that holds only within one process lifetime.
+// A crash mid-create leaves a `creating` row, and if reconcile's cleanup delete
+// then fails it survives to be destroyed by an operator later. Such a record never
+// emitted `created`, so it must not emit `destroyed` — see the Kind selection
+// below.
 func (m *Mediator) destroyLocked(ctx context.Context, rec model.Sandbox) error {
 	id := rec.ID
 	// tear down any live placement + mount (running case).
@@ -716,7 +722,18 @@ func (m *Mediator) destroyLocked(ctx context.Context, rec model.Sandbox) error {
 	}
 	// delete the record → destroyed + emit "destroyed" in the same commit
 	// (§4.4-C). The outbox row outlives the deleted record.
-	if err := m.deps.Store.DeleteSandbox(ctx, id, newEvent(id, "destroyed", model.Destroyed)); err != nil {
+	//
+	// EXCEPT from `creating`, which publishes nothing: that record never emitted
+	// `created` (Create publishes only once the chain commits), so a `destroyed`
+	// here would be an unpaired terminal — a billing subscriber would be told a
+	// sandbox ended that it never saw begin. Reconcile already suppresses the event
+	// for exactly this case when it cleans up a crashed create; this is the same
+	// rule on the operator-driven path, so the two cannot disagree.
+	var ev *store.Event
+	if rec.State != model.Creating {
+		ev = newEvent(id, "destroyed", model.Destroyed)
+	}
+	if err := m.deps.Store.DeleteSandbox(ctx, id, ev); err != nil {
 		return fmt.Errorf("destroy: delete record: %w", err)
 	}
 	return nil

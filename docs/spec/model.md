@@ -96,19 +96,20 @@ pause/resume 与 multi-node provider(§5.A)同时成立的前提。
 - **Frozen(读字节)**:SoT 是后端上的字节——沙箱 **Overlay 工件**(经 rootfs provider 寻址)、
   data Volume 内容(各自后端)。resume 直接读回。
 - **Binding(按控制面记录重建)**:SoT 是沙箱自己的控制面记录——引用哪个 Template、挂了哪些
-  Volume、**资源上限(CPU/RAM/disk)**、**生命周期 TTL(`idle_timeout`/`retention`,§4.3)**、placement、
-  网络策略。resume 时按**当前记录**重建,不读冻结字节。资源上限与 TTL 都是 Binding 而非 placement:取值跨
-  resume 稳定保持。**但物化点不同**:资源上限在每次 placement 时物化(§5.A/§5.B/§5.C);**TTL 没有任何
-  placement-local 物化**,它的消费者是 reaper,每轮 sweep 直接读记录。连接(process)**不是 Binding**:engine
-  不存连接记录,resume 后由 client 重新发起(§5.E)。
+  Volume、**资源上限(CPU/RAM/disk)**、**生命周期 TTL(`idle_timeout`/`retention`,§4.3)**、网络策略。
+  resume 时按**当前记录**重建,不读冻结字节;取值跨 resume 稳定保持,故都是 Binding 而非 placement
+  (placement 每次重绑、不是 SoT,§3.3)。**但物化点不同**:资源上限在每次 placement 时物化
+  (§5.A/§5.B);**TTL 没有任何 placement-local 物化**,它的消费者是 reaper,每轮 sweep 直接读记录。
+  连接(process)**不是 Binding**:engine 不存连接记录,resume 后由 client 重新发起(§5.E)。
 
-> **"资源上限"是三个维度,各用自己该用的机制物化,超限后果也就各自不同。** 三者都是 Binding、
-> 都在 placement 时物化:
+> **"资源上限"是三个维度,各用自己该用的机制物化,超限后果也就各自不同。** 三者都是 per-sandbox
+> Binding、都在 placement 时物化(Volume 各自的容量帽**不在其列**:那是 per-volume 属性、记在卷记录上,
+> §5.C):
 >
 > | 维度 | 机制 | 超限后果 | 定位 |
 > | --- | --- | --- | --- |
 > | **CPU**(速率;disk I/O 同轴,待有消费者时同形加入) | §5.A 落 cgroup:**上限 + 份额两者都写**(`cpu.max` 帽住峰值、`cpu.weight` 定竞争时的相对份额) | guest 变慢,无错误 | 资源上限:公平分配 |
-> | **disk 容量**(at-rest 字节) | 文件系统层配额,§5.B(Overlay upper+work)/ §5.C(每 Volume)经二者共享的存储 substrate 原语落 | `write()` 返 `ENOSPC`,**沙箱照常存活** | 资源上限:公平分配 |
+> | **disk 容量**(at-rest 字节) | 文件系统层配额,§5.B 施加到 Overlay upper+work | `write()` 返 `ENOSPC`,**沙箱照常存活** | 资源上限:公平分配 |
 > | **RAM** | 宿主 memcg(+ `oom.group=1`) | **沙箱终止** | **安全限:约束爆炸半径** |
 >
 > **disk 容量与 disk I/O 是两条正交的轴**,别混:cgroup 管不了 at-rest 占多少字节,配额管不了读写
@@ -120,9 +121,9 @@ pause/resume 与 multi-node provider(§5.A)同时成立的前提。
 > 比例。份额正是让"CPU 不设准入门、允许超卖"(下条)在拥塞时**按比例**降级而非齐平降级的东西;它只在
 > 节点饱和且双方都 runnable 时起作用,低负载下不改变任何行为。
 >
-> **CPU 不设节点预算(不像 RAM / 容量)。** 判据是超限后果:CPU 超卖只让 guest 变慢、无错误,故无需准入门
-> (§3.4 准入门只守"超限后果不优雅"的轴)。这与两个成熟实现一致——其中一个曾把 CPU 作为配额维度**上线后
-> 又删除**,并刻意把调度请求压到上限的 1/10 来提高装箱密度。
+> **CPU 不设节点预算(不像 RAM / 容量)。** 判据是超限后果:CPU 超卖只让 guest 变慢、无错误,准入门只守
+> "超限后果不优雅"的轴。同向证据:成熟实现刻意把 CPU 调度请求压到上限的 1/10 以提高装箱密度,即把 CPU
+> 当作可超卖维度而非配额维度。
 >
 > **三个维度就是全部,`pids` 永久排除。** 实测:cgroup 的 `pids` 帽限的是**宿主 task**(systrap 下每个
 > guest 进程约 2.3 个),设低了 sentry 直接 panic(`failed to get clone`)、整个沙箱消失——它是**可用性
@@ -182,8 +183,9 @@ pause/resume 与 multi-node provider(§5.A)同时成立的前提。
 >
 > **写入的三条附带纪律。** ① `PATCH` 只换整份绑定:未给的字段不动,且不存在"待定/未解析"值(§6.2)。
 > ② 它**不动 `UpdatedAt`**——`retention` 从那一列起算(§4.3),顺手刷新它等于把驱逐期限当作改帽的副作用
-> 悄悄延长。③ 它**不是 §4.1 转换**,故不发事件(与 Promote 同理);"改绑定要不要发一条非转换事件"随
-> event schema 那轮定(open-decisions §2)。
+> 悄悄延长。③ 它**不是 §4.1 转换**,故不发事件——Promote 同理(只是 Promote **自身**不是转换;它内部对
+> `running` 源的静止是一次普通 pause,照发 `paused`)。"改绑定要不要发一条非转换事件"随 event schema
+> 那轮定(open-decisions §2)。
 >
 > **provider 不被要求就地改帽**:没有"把这个单元的帽设成 N,现在"这种调用——那是宿主原语形状的请求,
 > 被调度的远端隔离单元一般兑现不了(§5.A ❌ list)。改帽走的是"改记录 + 下次 placement 重物化"。
@@ -233,13 +235,13 @@ creating ──▶ running ──pause / auto-pause / crash──▶ paused ─�
 
 - **显式转换**(API 动词):`create` / `pause` / `resume` / `destroy`;`destroy` 从 `running` 或
   `paused` 都可发起,终态 `destroyed`(删 Overlay 工件)。
-- **自动转换**(reaper 守护):`running` 空闲超阈值 → `auto-pause`;`paused` 超保留期 →
-  `evict`。**`evict` 就是 reaper 对 `paused` 沙箱触发的 `destroy`**——同一个 `→ destroyed`
-  终态,只是触发方是 reaper 而非用户。**两条自动转换都是"释放"方向**;引擎自主的
-  `paused → running` **只有一条**:transport-down 连续超重启预算后的升级(§4.3 / reaper-health D4b),
-  **dead-recoverable 不在其中**(它由显式动词恢复,§4.3)。
+- **自动转换**(reaper 守护)**共三条**,两条"释放"方向:`running` 空闲超阈值 → `auto-pause`;
+  `paused` 超保留期 → `evict`(**`evict` 就是 reaper 对 `paused` 沙箱触发的 `destroy`**——同一个
+  `→ destroyed` 终态,只是触发方是 reaper 而非用户)。往 `running` 去的只有第三条:transport-down
+  连续超重启预算后的升级(§4.3 / reaper-health D4b);**L1 探不到的死亡不在其中**,那要显式动词恢复
+  (§4.3)。
 - **非自愿转换**(探活驱动):对账或 reaper sweep 发现一个 `running` 沙箱的隔离单元已死时,CAS 把它降到
-  `paused`(§4.2 崩溃变体 / §4.3 / §4.4-A)——`running → paused` 的第三条触发,与用户 `pause`、reaper
+  `paused`(§4.2 崩溃变体 / §4.3 / §4.4-A)——这是**进入 `paused` 的第三条路**,与用户 `pause`、reaper
   `auto-pause` 并列,事件 Kind 为 `crash-paused`(见下条)。**死因随这次 CAS 同一提交落库**(§4.3):
   它决定该沙箱之后走 resume 还是不走,而信号在提交后即不可恢复。
 - **转换对外发布为事件**:每次状态机转换(created / paused / auto-paused / crash-paused / resumed /
@@ -249,18 +251,22 @@ creating ──▶ running ──pause / auto-pause / crash──▶ paused ─�
   `paused` = 用户暂停、`auto-paused` = reaper 空闲暂停、`crash-paused` = 对账发现单元已死的**非自愿**
   降级(§4.2 崩溃变体);态相同,Kind 让 subscriber 分辨"为何暂停"。**状态提交与事件发布如何做到不丢
   不错(计费级),见 §4.4。**
+  > **终态必须成对:没见过 `created` 的沙箱不发 `destroyed`。** 一条 `creating` 记录还没对外可见过
+  > (`created` 只在 create 链提交后才发),故删除它**不发事件**——无论是对账清理崩溃残留,还是运维事后
+  > 手动 destroy 那条卡住的记录(崩溃后对账的删除本身也可能失败,故这条记录确实可达)。两条路径同一条
+  > 规则:否则计费类 subscriber 会收到一笔"结束了但从未开始"的账。
 
 ### 4.2 pause / resume:FS-first,无内存快照
 
 这是本引擎与"重型快照系统"的根本分野:
 
-- **pause** = 把沙箱静止到一致点 → 干净停掉 runsc 容器。Overlay 工件**本来就在后端上**,
-  pause 时它**什么都不用做**;停容器即释放 RAM/CPU。
+- **pause** = 把沙箱静止到一致点 → 干净停掉 runsc 容器。Overlay 工件**本来就在后端上**,pause
+  **不搬运、不捕获任何字节**,只需 flush 到一致点(§5.B);停容器即释放 RAM/CPU。
 - **resume**(引擎侧)= 用同一个 Overlay 工件 **冷启一个新容器** + 按 Binding 重挂 Volume / 重建
   egress。引擎的 resume **到此为止**——它只恢复沙箱基底,不碰会话。
 - **会话续接不在引擎 resume 内**:agent 要"接着上次聊"是 client/adapter 在重连后自己调 driver
   原生 `--resume`(读 Overlay 里的落盘历史),引擎不感知、也不参与(§5.E)。
-- **"FS 的 pause/resume" 不是独立机制**——Overlay 工件持续在后端,pause 这侧零捕获;难的内存那侧
+- **"FS 的 pause/resume" 不是独立机制**——Overlay 工件持续在后端,pause 这侧零搬运;难的内存那侧
   直接不做。
 
 **静止点归 pause(§4),不是某个子系统的一等属性。** "把沙箱静止到一致点"是 pause 动词编排的
@@ -341,8 +347,8 @@ resume 而非 auto-pause 的静止(健康态分类与判据见 §4.3)。
 > **`Unknown` 是一等合法值,不是错误。** 读不到死因时按 `dead-recoverable` 处置(去 resume)。
 > **自我纠正是结构性的,不靠计数器**:若确是撞帽,下一次 resume 后同一负载会再次触发终止,而这一次
 > 发生在控制面眼前、placement 完整,于是被观测、随降级 CAS 落库,**此后 resume 由那条已落库的事实
-> 拒绝**。**没有 resume 次数上界,也不需要有**:引擎从不自己 resume 一个 dead-recoverable 沙箱
-> (§4.1 的自动转换只有 auto-pause 与 evict,外加 reaper-health D4b 那一条 transport-down 升级),
+> 拒绝**。**没有 resume 次数上界,也不需要有**:引擎从不**因 L1 探不到**而自行 resume(§4.1 的三条
+> 自动转换里唯一往 `running` 去的那条,触发是 L1 **活**而 L2 不收敛,不是死亡观测),
 > 故重试是调用方逐次显式付出的选择,不是引擎的循环;按次数拒绝一个显式动词与按**已落库事实**拒绝
 > (`resource-terminated`)性质不同。想要"崩了自动拉起"是消费 `crash-paused` 事件的**引擎外 subscriber**
 > (§1.3 Consumption)。完整证伪(为何计数无可推导的重置点、为何它等价于被禁的世代计数)见
@@ -455,21 +461,23 @@ auto-pause)与 `retention`(`paused` 超它 → evict)——是沙箱控制面记
 placement 没建成、下次重来"。
 
 **A 的崩溃变体 —— orchestrator 自身崩在转换中途,由重启对账补做同一次回收,不落 intent/phase 日志。**
-上面的回收是进程内 defer 式,默认 orchestrator 活着能跑完;它自己崩在半途(如 resume 已建
-netns/IP/nft/overlay-mount、store 还停在 `paused`)时 defer 跑不了,留下**孤儿 placement**。注意此时
-**store 态并不含糊**——§4.4-C 的原子提交保证它只停在干净的源态或目标态、不撕裂;漏的只是宿主上那批
-半建 placement-local 资源(非持久对象,§4.3 refcount GC 与 §4.4-C outbox 都不扫它)。接法**不是向前记
-「意图+阶段」日志再重放**(那正是本节开头拒掉的持久分阶段事务),**而是反向对账**:placement
-派生自 store 权威态、可弃,orchestrator 启动即枚举本机 placement 资源,凡**不支撑任一按 store 应持有
-placement 的沙箱**(store 非 `running`、且未处于某次进行中 resume——后者靠 §4.4-B 转换锁辨识:in-flight
-resume **全程持有转换锁**,持锁即在建,否则会误收正在建的活 placement)者即孤儿,按本不变量回收。
-(**启动对账**下更简单:进程刚崩、锁全没了,一切进行中 resume 都已死,故半建 placement 的辨识无需持锁——
-持锁辨识只在 orchestrator 活着的**周期对账**下才需要。存活 `running` 的活 placement 不是孤儿,另半段接管
-见下。)单机权威 store(§1.1)令这次对账退化成**一次本地扫描 diff 一张本地表**,无阶段记录、与
-placement/IP-as-epoch(§4.3)正交,**不重新引入世代计数**。半建的 workdir/upper 孤儿是其一个特例
-(rootfs-overlay D5)。**周期对账**(orchestrator 活着时跑)= 启动对账**同一份反向对账**,只多两条:
-① 对**持锁**沙箱 `TryLock` 跳过(持锁 = 在建的活 placement,§4.4-B),② 保护 live-map 里本进程亲手建的活
-placement 不当孤儿。触发时机、锁协调、本机资源枚举与批量策略见
+上面的回收是进程内 defer 式;orchestrator 崩在半途(如 resume 已建 netns/IP/nft/overlay-mount、store 还停在
+`paused`)时 defer 跑不了,留下**孤儿 placement**。此时 **store 态并不含糊**——§4.4-C 的原子提交保证它只停在
+干净的源态或目标态;漏的只是宿主上那批半建 placement-local 资源(非持久对象,§4.3 refcount GC 与 §4.4-C
+outbox 都不扫它)。
+
+**接法是反向对账,不是向前记「意图+阶段」日志再重放**(后者正是本节开头拒掉的持久分阶段事务)。判据:
+placement 派生自 store 权威态、可弃,故枚举本机 placement 资源,凡**不支撑任一按 store 应持有 placement
+的沙箱**者即孤儿,按本不变量回收。单机权威 store(§1.1)令这次对账退化成**一次本地扫描 diff 一张本地表**,
+无阶段记录、与 placement/IP-as-epoch(§4.3)正交,**不重新引入世代计数**。半建的 workdir/upper 孤儿是其一个
+特例(rootfs-overlay D5)。两种跑法:
+
+- **启动对账**:进程刚崩、锁全没了,一切进行中 resume 都已死,故辨识无需持锁。
+- **周期对账**(orchestrator 活着时跑)= **同一份**反向对账,只多两条:① 对**持锁**沙箱 `TryLock` 跳过
+  ——in-flight resume **全程持有转换锁**(§4.4-B),持锁即在建,不跳会误收正在建的活 placement;② 保护
+  live-map 里本进程亲手建的活 placement 不当孤儿。
+
+存活 `running` 的活 placement 都不是孤儿,归下面的接管半段。触发时机、锁协调、本机资源枚举与批量策略见
 [`deep-dives/reaper-health.md`](./deep-dives/reaper-health.md) D4。
 
 **回收次序:活路径严格反向依赖序,启动对账力拆在前。** 活着的 `destroy`/`pause` 握着进程内 placement
@@ -478,21 +486,21 @@ placement 不当孤儿。触发时机、锁协调、本机资源枚举与批量�
 干净、启动对账求"一次扫描拆净";精确拆解次序(力拆/`ReclaimOrphans` 的 runsc→veth→netns)见
 [`deep-dives/reaper-health.md`](./deep-dives/reaper-health.md) D4。
 
-**A 崩溃变体的另一半 —— 对存活的 `running` placement 重新接管句柄,不是回收。** 上面的反向对账只讲了
-"回收孤儿";但一个 `running` 沙箱的**活** placement **本就不是孤儿**(它支撑一个 store 应持有 placement
-的沙箱),不该被回收。崩溃后真正缺的是:orchestrator 的进程内 placement 句柄(端点、provider 私有 handle)
-随进程蒸发了,而底层隔离单元还活着。**若只做回收、不补接管,后果不是脏态而是失联**:store 记 `running`、
-容器还在跑,但引擎握不到句柄——此后对它的 destroy 会漏拆活容器(泄漏)、transport 代理会因"无活 placement"
-失败。故对账是**对偶**的两半:**非 `running` 的半建 placement → 回收**(上一段);**`running` 的存活
-placement → 重新接管**(provider 按 SandboxID 重认自己的资源、重建句柄、重发现端点)。**接管不是 resume**:
-同一 placement、同一 IP,不换 epoch(§3.3/§4.3),因为隔离单元从未重启。仅当探活判定该 `running` 的隔离
-单元**已死**,才按 §4.2「崩溃 = 非自愿 pause」CAS 降到 `paused`(其半建 placement 若有,归上一段回收)。
-重认存活者要求 provider 能按 SandboxID 枚举自己的 placement-local 资源——其机制(`Adopt`/`ReclaimOrphans`
-签名、SandboxID 标注是 §3.3「身份不编码 placement」的允许反向、两层判活 L1+一次 L2 `Health`)落在 §5.A,
-本节不复述。编排语义是:**判活与冷启 ⑦ 就绪门对齐**——L1 活但 L2 不应答(如 `created`-未监听)不是可接管的
-活,一律降 `paused`(可经下次 resume 冷启恢复),不把死句柄填进 live-map。**失败处置是 skip-and-log +
-对不确定的 `running` 存活者取保守**(保护其 placement 不回收——漏拆活容器不可逆、泄漏 placement 下次
-启动再收;对账幂等,跳过项下次重来)。接管期单次就绪探针与 orchestrator 活着时的**连续健康分类**(见 §4.3,
+**A 崩溃变体的另一半 —— 对存活的 `running` placement 重新接管句柄,不是回收。** 崩溃后缺的不只是孤儿:
+orchestrator 的进程内 placement 句柄(端点、provider 私有 handle)随进程蒸发,而底层隔离单元还活着。**若只
+做回收、不补接管,后果不是脏态而是失联**:store 记 `running`、容器还在跑,但引擎握不到句柄——此后 destroy
+会漏拆活容器(泄漏)、transport 代理会因"无活 placement"失败。故对账是**对偶**的两半:
+
+- **非 `running` 的半建 placement → 回收**(上一段)。
+- **`running` 的存活 placement → 重新接管**:provider 按 SandboxID 重认自己的资源、重建句柄、重发现端点。
+  **接管不是 resume**——同一 placement、同一 IP、不换 epoch(§3.3/§4.3),因为隔离单元从未重启。
+
+编排语义两条:① **判活与冷启 ⑦ 就绪门对齐**——L1 活但 L2 不应答(如 `created`-未监听)不是可接管的活,一律
+按 §4.2「崩溃 = 非自愿 pause」降 `paused`(可经下次 resume 冷启恢复),不把死句柄填进 live-map;② **失败
+处置是 skip-and-log + 对不确定的 `running` 存活者取保守**,即保护其 placement 不回收——漏拆活容器不可逆,
+泄漏 placement 下次启动再收,且对账幂等、跳过项下次重来。重认存活者要求 provider 能按 SandboxID 枚举自己的
+placement-local 资源,其机制(`Adopt`/`ReclaimOrphans` 签名、SandboxID 标注为何是 §3.3 的允许反向、两层判活)
+落在 §5.A,本节不复述。接管期单次就绪探针与 orchestrator 活着时的**连续健康分类**(见 §4.3,
 区分 transport-down 瞬态)、**周期对账**(与 §4.4-B 锁协调)的落地见
 [`deep-dives/reaper-health.md`](./deep-dives/reaper-health.md) D3/D4。
 
