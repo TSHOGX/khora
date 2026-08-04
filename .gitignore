@@ -8,6 +8,10 @@
 /test/rootfs/
 /.spike/
 
+# agent tooling state — worktrees live under here as nested checkouts, and a
+# stray `git add -A` otherwise commits them as gitlinks
+/.claude/
+
 # editor / OS
 .DS_Store
 
