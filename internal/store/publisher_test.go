@@ -3,6 +3,7 @@ package store_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -170,6 +171,367 @@ func TestPublisherAtLeastOnceDedupOnRestart(t *testing.T) {
 	}
 	if counts["e2"] != 1 {
 		t.Fatalf("e2 counted %d times; want exactly 1", counts["e2"])
+	}
+}
+
+// --- A2: head-of-line blocking is kept; its operability is what got fixed ----
+
+// blockingSink fails (or blocks) on demand, so a test can hold the head.
+type blockingSink struct {
+	mu       sync.Mutex
+	failWith error         // non-nil → every Deliver fails
+	block    chan struct{} // non-nil → Deliver waits on it (ignoring ctx) before returning
+	calls    []string      // every Deliver attempt, in order
+}
+
+func (s *blockingSink) Deliver(_ context.Context, e store.Event) error {
+	s.mu.Lock()
+	s.calls = append(s.calls, e.ID)
+	fail, block := s.failWith, s.block
+	s.mu.Unlock()
+	if block != nil {
+		<-block // deliberately ignores ctx: models a sink that does not honor deadlines
+	}
+	return fail
+}
+func (s *blockingSink) attempts() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.calls)
+}
+func (s *blockingSink) heal() {
+	s.mu.Lock()
+	s.failWith = nil
+	s.mu.Unlock()
+}
+
+// seedEvents commits n transitions on one sandbox, returning the store.
+func seedEvents(t *testing.T, n int) store.Store {
+	t.Helper()
+	ctx := context.Background()
+	st := store.NewMemory()
+	seedPubTmpl(t, st)
+	_ = st.CreateSandbox(ctx, model.Sandbox{ID: "a", Template: "bare", State: model.Creating}, nil)
+	state := model.Creating
+	for i := 0; i < n; i++ {
+		next := model.Running
+		if state == model.Running {
+			next = model.Paused
+		}
+		if err := st.CompareAndSetState(ctx, "a", state, next,
+			ev("a", fmt.Sprintf("e%d", i), "flip", next), nil); err != nil {
+			t.Fatalf("seed %d: %v", i, err)
+		}
+		state = next
+	}
+	return st
+}
+
+// Head-of-line blocking is KEPT: a failing head must not let later events pass.
+// This is the semantic the whole design rests on — order carries meaning
+// (§4.4-C), so this test asserts the STALL, not its absence.
+func TestPublisherHeadOfLineBlocksLaterEvents(t *testing.T) {
+	ctx := context.Background()
+	st := seedEvents(t, 3)
+	sink := &blockingSink{failWith: errors.New("sink down")}
+	p := store.NewPublisherWithConfig(st, sink, store.PublisherConfig{
+		MaxAttempts: 5, BaseBackoff: 0, // no backoff: isolate the blocking property
+	})
+
+	if _, err := p.PublishOnce(ctx); err == nil {
+		t.Fatal("want an error while the head is failing")
+	}
+	// exactly ONE attempt happened — e1/e2 were not tried past the stuck e0.
+	if got := sink.attempts(); got != 1 {
+		t.Fatalf("sink saw %d attempts (%v); want 1 — later events must NOT be attempted past a failing head", got, sink.calls)
+	}
+	if un, _ := st.UnpublishedEvents(ctx); len(un) != 3 {
+		t.Fatalf("%d rows unpublished; want all 3 (nothing may be marked while the head is stuck)", len(un))
+	}
+
+	// once the head heals, the whole backlog drains IN ORDER.
+	sink.heal()
+	n, err := p.PublishOnce(ctx)
+	if err != nil || n != 3 {
+		t.Fatalf("after heal n=%d err=%v; want 3,nil", n, err)
+	}
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	want := []string{"e0", "e0", "e1", "e2"} // e0 retried, then strict order
+	if len(sink.calls) != len(want) {
+		t.Fatalf("delivery order %v; want %v", sink.calls, want)
+	}
+	for i := range want {
+		if sink.calls[i] != want[i] {
+			t.Fatalf("delivery order %v; want %v", sink.calls, want)
+		}
+	}
+}
+
+// The poison-envelope exit: an event that cannot be delivered is retried a
+// BOUNDED number of times, then the publisher halts with a distinguishable
+// signal — instead of retrying forever with nothing behind it ever moving.
+func TestPublisherPoisonEnvelopeHaltsAfterMaxAttempts(t *testing.T) {
+	ctx := context.Background()
+	st := seedEvents(t, 2)
+	sink := &blockingSink{failWith: errors.New("undecodable payload")}
+	const maxAttempts = 4
+	p := store.NewPublisherWithConfig(st, sink, store.PublisherConfig{
+		MaxAttempts: maxAttempts, BaseBackoff: 0,
+	})
+
+	var lastErr error
+	for i := 0; i < maxAttempts; i++ {
+		if _, lastErr = p.PublishOnce(ctx); lastErr == nil {
+			t.Fatalf("pass %d: want a delivery error", i)
+		}
+	}
+	if !errors.Is(lastErr, store.ErrHalted) {
+		t.Fatalf("after %d attempts err = %v; want ErrHalted", maxAttempts, lastErr)
+	}
+	if got := sink.attempts(); got != maxAttempts {
+		t.Fatalf("sink saw %d attempts; want exactly %d (the bound must hold)", got, maxAttempts)
+	}
+
+	// Halted means STOPPED, not slowed: further passes do not even attempt
+	// delivery, and they keep reporting ErrHalted rather than a generic failure.
+	for i := 0; i < 3; i++ {
+		if _, err := p.PublishOnce(ctx); !errors.Is(err, store.ErrHalted) {
+			t.Fatalf("post-halt pass %d err = %v; want ErrHalted", i, err)
+		}
+	}
+	if got := sink.attempts(); got != maxAttempts {
+		t.Fatalf("sink saw %d attempts after halting; want %d (a halted publisher must stop retrying)", got, maxAttempts)
+	}
+
+	// The signal an operator has to notice.
+	s := p.Stats()
+	if !s.Halted {
+		t.Fatal("Stats().Halted is false after the attempt bound was exhausted")
+	}
+	if s.HeadEventID != "e0" || s.Attempts != maxAttempts {
+		t.Fatalf("Stats() = %+v; want the blocked head e0 with %d attempts", s, maxAttempts)
+	}
+	if s.LastError == "" {
+		t.Fatal("Stats().LastError is empty; the halt must carry WHY")
+	}
+	// At-least-once is intact throughout: nothing was dropped or marked.
+	if un, _ := st.UnpublishedEvents(ctx); len(un) != 2 {
+		t.Fatalf("%d rows unpublished; want 2 — a halt must not drop or mark anything", len(un))
+	}
+
+	// Resume is the operator action: a fresh attempt budget, and a healed sink
+	// then drains normally.
+	sink.heal()
+	p.Resume()
+	if s := p.Stats(); s.Halted {
+		t.Fatal("Resume did not clear the halt")
+	}
+	n, err := p.PublishOnce(ctx)
+	if err != nil || n != 2 {
+		t.Fatalf("after Resume n=%d err=%v; want 2,nil", n, err)
+	}
+}
+
+// Backoff is respected (a retry inside the window is not attempted), capped, and
+// jittered. Cap and jitter fix different failures: uncapped backoff schedules the
+// next attempt beyond any useful horizon, un-jittered backoff synchronizes
+// multiple drainers onto the same due instant.
+func TestPublisherBackoffIsBoundedAndJittered(t *testing.T) {
+	ctx := context.Background()
+	st := seedEvents(t, 1)
+	sink := &blockingSink{failWith: errors.New("sink down")}
+	p := store.NewPublisherWithConfig(st, sink, store.PublisherConfig{
+		MaxAttempts: 50, BaseBackoff: time.Hour, MaxBackoff: 2 * time.Hour, JitterFraction: 0.2,
+	})
+
+	// first pass fails and arms the backoff.
+	if _, err := p.PublishOnce(ctx); err == nil {
+		t.Fatal("want a delivery error")
+	}
+	if got := sink.attempts(); got != 1 {
+		t.Fatalf("sink saw %d attempts; want 1", got)
+	}
+	// a pass INSIDE the backoff window must not attempt delivery again.
+	for i := 0; i < 5; i++ {
+		if _, err := p.PublishOnce(ctx); err != nil {
+			t.Fatalf("pass inside the backoff window returned %v; want nil (nothing due yet)", err)
+		}
+	}
+	if got := sink.attempts(); got != 1 {
+		t.Fatalf("sink saw %d attempts; want still 1 — the backoff window was not honored", got)
+	}
+	// the head is still reported as blocked while it waits.
+	if s := p.Stats(); s.Attempts != 1 || s.HeadEventID != "e0" || s.HeadSeq == 0 {
+		t.Fatalf("Stats() = %+v; want the blocked head e0 visible while waiting", s)
+	}
+
+	// The cap holds: with Base=1s, Max=5s, no attempt count can schedule beyond
+	// Max plus jitter. Measured through the observable schedule rather than the
+	// internal formula: 30 rapid failing passes must never stop being retried,
+	// which an uncapped exponential (2^30 s ≈ 34 years) would.
+	st2 := seedEvents(t, 1)
+	sink2 := &blockingSink{failWith: errors.New("sink down")}
+	p2 := store.NewPublisherWithConfig(st2, sink2, store.PublisherConfig{
+		MaxAttempts: 100, BaseBackoff: time.Millisecond, MaxBackoff: 5 * time.Millisecond, JitterFraction: 0.2,
+	})
+	deadline := time.Now().Add(2 * time.Second)
+	for sink2.attempts() < 20 && time.Now().Before(deadline) {
+		_, _ = p2.PublishOnce(ctx)
+		time.Sleep(time.Millisecond)
+	}
+	if got := sink2.attempts(); got < 20 {
+		t.Fatalf("only %d attempts in 2s with a 5ms cap; the exponential is not capped", got)
+	}
+
+	// Jitter: repeated arming of the SAME attempt number must not produce one
+	// identical delay every time, or several drainers would come due together.
+	// Observed via the wait: sample when each retry becomes due.
+	delays := map[time.Duration]int{}
+	for i := 0; i < 12; i++ {
+		st3 := seedEvents(t, 1)
+		sink3 := &blockingSink{failWith: errors.New("sink down")}
+		p3 := store.NewPublisherWithConfig(st3, sink3, store.PublisherConfig{
+			MaxAttempts: 5, BaseBackoff: 40 * time.Millisecond, MaxBackoff: time.Second, JitterFraction: 0.5,
+		})
+		_, _ = p3.PublishOnce(ctx) // arm attempt 1
+		start := time.Now()
+		for sink3.attempts() < 2 && time.Since(start) < time.Second {
+			_, _ = p3.PublishOnce(ctx)
+			time.Sleep(time.Millisecond)
+		}
+		delays[time.Since(start).Round(5*time.Millisecond)]++
+	}
+	if len(delays) < 2 {
+		t.Fatalf("12 armings produced a single distinct delay (%v); the backoff is not jittered", delays)
+	}
+}
+
+// Observability must survive the worker WEDGING. A sink blocked inside Deliver
+// freezes the drain goroutine; if health were sampled on that same goroutine, the
+// numbers would stop updating at exactly that moment and a wedged publisher would
+// be indistinguishable from an idle one. Stats is read from an independent
+// goroutine and must therefore keep telling the truth.
+func TestPublisherStatsStaySampleableWhileDrainIsWedged(t *testing.T) {
+	ctx := context.Background()
+	st := seedEvents(t, 2)
+	release := make(chan struct{})
+	sink := &blockingSink{block: release} // blocks, and IGNORES the deadline
+	p := store.NewPublisherWithConfig(st, sink, store.PublisherConfig{
+		MaxAttempts: 5, BaseBackoff: 0, DeliverTimeout: 20 * time.Millisecond,
+	})
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = p.PublishOnce(ctx) // wedges inside Deliver
+	}()
+
+	// Wait until the drain is actually inside Deliver.
+	deadline := time.Now().Add(2 * time.Second)
+	for sink.attempts() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if sink.attempts() == 0 {
+		t.Fatal("Deliver was never entered")
+	}
+
+	// The drain goroutine is now stuck. Sampling must still work — and must
+	// report a GROWING in-flight age, which is the fact that distinguishes a
+	// wedged worker from an idle one.
+	var first, second store.Stats
+	first = p.Stats() // this call must not block behind the wedged drain
+	time.Sleep(60 * time.Millisecond)
+	second = p.Stats()
+
+	if second.InFlightFor <= first.InFlightFor {
+		t.Fatalf("InFlightFor did not grow while the drain was wedged (%s → %s); a wedge is not distinguishable from idle",
+			first.InFlightFor, second.InFlightFor)
+	}
+	if second.InFlightFor < 50*time.Millisecond {
+		t.Fatalf("InFlightFor = %s after ~60ms wedged; want it to reflect the real in-flight age", second.InFlightFor)
+	}
+	// The deadline was exceeded but the sink ignored it — proving the timeout
+	// alone is not sufficient and the independent sample is what surfaces this.
+	if second.InFlightFor <= 20*time.Millisecond {
+		t.Fatalf("InFlightFor = %s; expected it to exceed DeliverTimeout for a sink that ignores ctx", second.InFlightFor)
+	}
+
+	close(release)
+	<-done
+
+	// After release, a healthy pass moves the heartbeat and clears in-flight.
+	if _, err := p.PublishOnce(ctx); err != nil {
+		t.Fatalf("post-release pass: %v", err)
+	}
+	s := p.Stats()
+	if s.InFlightFor != 0 {
+		t.Fatalf("InFlightFor = %s after the sink returned; want 0", s.InFlightFor)
+	}
+	if s.SinceHeartbeat > time.Second {
+		t.Fatalf("SinceHeartbeat = %s after a completed pass; the heartbeat is not advancing", s.SinceHeartbeat)
+	}
+}
+
+// Monitor reports from its own goroutine and stays silent while healthy.
+func TestPublisherMonitorReportsHaltAndStaysQuietWhenHealthy(t *testing.T) {
+	ctx := context.Background()
+
+	// healthy → no reports.
+	st := seedEvents(t, 2)
+	p := store.NewPublisherWithConfig(st, &countingSink{}, store.PublisherConfig{MaxAttempts: 3, BaseBackoff: 0})
+	if _, err := p.PublishOnce(ctx); err != nil {
+		t.Fatalf("healthy drain: %v", err)
+	}
+	var mu sync.Mutex
+	var reports []store.Stats
+	mctx, cancel := context.WithCancel(ctx)
+	go p.Monitor(mctx, 5*time.Millisecond, time.Hour, func(s store.Stats) {
+		mu.Lock()
+		reports = append(reports, s)
+		mu.Unlock()
+	})
+	time.Sleep(60 * time.Millisecond)
+	cancel()
+	mu.Lock()
+	n := len(reports)
+	mu.Unlock()
+	if n != 0 {
+		t.Fatalf("monitor reported %d times on a healthy publisher; want silence", n)
+	}
+
+	// halted → reported, from a goroutine that is not the drain.
+	st2 := seedEvents(t, 1)
+	sink2 := &blockingSink{failWith: errors.New("poison")}
+	p2 := store.NewPublisherWithConfig(st2, sink2, store.PublisherConfig{MaxAttempts: 2, BaseBackoff: 0})
+	for i := 0; i < 2; i++ {
+		_, _ = p2.PublishOnce(ctx)
+	}
+	reports = nil
+	mctx2, cancel2 := context.WithCancel(ctx)
+	defer cancel2()
+	go p2.Monitor(mctx2, 5*time.Millisecond, time.Hour, func(s store.Stats) {
+		mu.Lock()
+		reports = append(reports, s)
+		mu.Unlock()
+	})
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		got := len(reports)
+		mu.Unlock()
+		if got > 0 {
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(reports) == 0 {
+		t.Fatal("monitor never reported a HALTED publisher — the condition that must be noticed was silent")
+	}
+	if !reports[0].Halted || reports[0].HeadEventID != "e0" {
+		t.Fatalf("monitor report = %+v; want Halted on head e0", reports[0])
 	}
 }
 
