@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -433,6 +434,272 @@ func TestAdmissionGateEnforcesTheAccountingFormula(t *testing.T) {
 			t.Fatalf("unmetered node refused a create: %v", err)
 		}
 	})
+}
+
+// Promote must clear the SAME inequality as create (§3.4: any control-plane action
+// that increases uncapped bytes; rootfs-overlay D6.5 残留). A frozen layer is
+// charged to no sandbox cap, so it lands in the MEASURED term — the harm of not
+// gating it is not a failed Promote but an UNRELATED sandbox meeting ENOSPC nowhere
+// near its own cap, §2.3 containment broken from the other side.
+func TestPromotePassesTheNodeCapacityGate(t *testing.T) {
+	ctx := context.Background()
+	const gib = 1 << 30
+
+	// helper: a paused sandbox with a declared cap, on a node with the given budget.
+	setup := func(t *testing.T, budget, promoteCost, uncapped int64) (*Mediator, *store.Memory, *fakeRootfs) {
+		t.Helper()
+		rp := &fakeRootfs{promoteCost: promoteCost, uncappedBytes: uncapped}
+		m, st := newLimitsMediator(t, rp, &fakeRuntime{}, NodeCapacity{DiskByte: budget})
+		return m, st, rp
+	}
+
+	t.Run("over-budget promote is REFUSED and leaves no trace", func(t *testing.T) {
+		// 6 GiB committed cap + 1 GiB existing layers + a 4 GiB freeze = 11 > 10.
+		m, st, rp := setup(t, 10*gib, 4*gib, gib)
+		sid, err := m.Create(ctx, CreateSpec{Template: "bare", Limits: model.Limits{DiskByte: 6 * gib}})
+		if err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		if err := m.Pause(ctx, sid); err != nil {
+			t.Fatalf("pause: %v", err)
+		}
+		tid, err := m.Promote(ctx, sid)
+		if !errors.Is(err, ErrInsufficientCapacity) {
+			t.Fatalf("promote err = %v; want ErrInsufficientCapacity (6+1+4 > 10 GiB)", err)
+		}
+		if tid != "" {
+			t.Fatalf("refused promote returned a TemplateID %q", tid)
+		}
+		// no layer bytes: the freeze was never called, so there is nothing for the
+		// sweep to reclaim (a refusal must not leave an orphan).
+		for _, c := range rp.Calls() {
+			if strings.HasPrefix(c, "PromoteToTemplate:") {
+				t.Fatalf("refused promote still froze a layer: %v", rp.Calls())
+			}
+		}
+		// and no `templates` row beyond the seeded builtin.
+		tmpls, err := st.ListTemplates(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, tm := range tmpls {
+			if !tm.Builtin {
+				t.Fatalf("refused promote inserted a templates row: %+v", tm)
+			}
+		}
+		// legal resting state: the source is untouched (§4.4-A source state).
+		if rec, _ := st.GetSandbox(ctx, sid); rec.State != model.Paused {
+			t.Fatalf("state = %s; want paused (unchanged by a refusal)", rec.State)
+		}
+	})
+
+	t.Run("a promote that FITS is admitted", func(t *testing.T) {
+		// 6 committed + 1 layer + 2 freeze = 9 ≤ 10.
+		m, st, rp := setup(t, 10*gib, 2*gib, gib)
+		sid, err := m.Create(ctx, CreateSpec{Template: "bare", Limits: model.Limits{DiskByte: 6 * gib}})
+		if err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		if err := m.Pause(ctx, sid); err != nil {
+			t.Fatalf("pause: %v", err)
+		}
+		tid, err := m.Promote(ctx, sid)
+		if err != nil {
+			t.Fatalf("fitting promote refused: %v", err)
+		}
+		if _, err := st.GetTemplate(ctx, tid); err != nil {
+			t.Fatalf("admitted promote left no templates row: %v", err)
+		}
+		// The gate consulted the provider's forecast, and did so BEFORE the freeze —
+		// a forecast taken afterwards would be measuring a decision already made.
+		forecast, freeze := idxOfPrefix(rp.Calls(), "PromoteCostBytes:"), idxOfPrefix(rp.Calls(), "PromoteToTemplate:")
+		if forecast < 0 {
+			t.Fatalf("gate did not consult the provider forecast: %v", rp.Calls())
+		}
+		if freeze < 0 || forecast > freeze {
+			t.Fatalf("forecast did not precede the freeze: %v", rp.Calls())
+		}
+	})
+
+	// The gate runs BEFORE the quiesce, on purpose: placing it after would buy an
+	// exact byte count at the price of a refusal that MUTATED state — a running
+	// sandbox left `paused` because the node was full. §4.4-A wants a failed
+	// transition to return to its source state.
+	t.Run("refused promote of a RUNNING source leaves it running", func(t *testing.T) {
+		m, st, rp := setup(t, 10*gib, 5*gib, gib)
+		sid, err := m.Create(ctx, CreateSpec{Template: "bare", Limits: model.Limits{DiskByte: 6 * gib}})
+		if err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		if _, err := m.Promote(ctx, sid); !errors.Is(err, ErrInsufficientCapacity) {
+			t.Fatalf("promote err = %v; want ErrInsufficientCapacity", err)
+		}
+		if rec, _ := st.GetSandbox(ctx, sid); rec.State != model.Running {
+			t.Fatalf("state = %s; want RUNNING — a capacity refusal must not stop the sandbox as a side effect", rec.State)
+		}
+		// no quiesce happened at all: the placement is still live.
+		for _, c := range rp.Calls() {
+			if strings.HasPrefix(c, "Unmount:") {
+				t.Fatalf("refused promote quiesced the source anyway: %v", rp.Calls())
+			}
+		}
+	})
+
+	t.Run("unmetered node (capacity 0) still allows promote", func(t *testing.T) {
+		rp := &fakeRootfs{promoteCost: 900 * gib}
+		m, st := newLimitsMediator(t, rp, &fakeRuntime{}, NodeCapacity{})
+		sid, err := m.Create(ctx, CreateSpec{Template: "bare", Limits: model.Limits{}})
+		if err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		tid, err := m.Promote(ctx, sid)
+		if err != nil {
+			t.Fatalf("promote on an unmetered node was refused: %v", err)
+		}
+		if _, err := st.GetTemplate(ctx, tid); err != nil {
+			t.Fatalf("templates row missing: %v", err)
+		}
+	})
+
+	// A RAM-only budget must not gate a Promote: uncapped bytes are disk by
+	// construction and the two budgets are not fungible (§3.4).
+	t.Run("memory-only budget does not gate promote", func(t *testing.T) {
+		rp := &fakeRootfs{promoteCost: 900 * gib}
+		m, _ := newLimitsMediator(t, rp, &fakeRuntime{}, NodeCapacity{MemoryByte: 4 * gib})
+		sid, err := m.Create(ctx, CreateSpec{Template: "bare", Limits: model.Limits{MemoryByte: gib}})
+		if err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		if _, err := m.Promote(ctx, sid); err != nil {
+			t.Fatalf("promote gated against a RAM budget: %v", err)
+		}
+	})
+
+	// Fail CLOSED: an unforecastable freeze cannot be evaluated, and admitting blind
+	// is how the node ends up overcommitted at an unrelated sandbox's expense (§2.3).
+	t.Run("unforecastable freeze fails closed", func(t *testing.T) {
+		rp := &fakeRootfs{promoteCostErr: errors.New("backend unavailable")}
+		m, st := newLimitsMediator(t, rp, &fakeRuntime{}, NodeCapacity{DiskByte: 10 * gib})
+		sid, err := m.Create(ctx, CreateSpec{Template: "bare", Limits: model.Limits{DiskByte: gib}})
+		if err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		if _, err := m.Promote(ctx, sid); !errors.Is(err, ErrInsufficientCapacity) {
+			t.Fatalf("promote err = %v; want ErrInsufficientCapacity (fail closed)", err)
+		}
+		if rec, _ := st.GetSandbox(ctx, sid); rec.State != model.Running {
+			t.Fatalf("state = %s; want running (nothing mutated)", rec.State)
+		}
+	})
+}
+
+// The concurrency half of the Promote gate. The inequality is node-GLOBAL while the
+// transition lock is per-sandbox, so a gate that only measured could be raced: the
+// bytes a Promote is about to write are invisible to UncappedBytes until the copy
+// lands. The mediator therefore publishes a RESERVATION under admitMu, and this
+// test pins that a create racing an in-flight freeze sees it.
+func TestInFlightPromoteBytesAreVisibleToTheGate(t *testing.T) {
+	ctx := context.Background()
+	const gib = 1 << 30
+
+	gate := make(chan struct{})
+	reached := make(chan struct{})
+	rp := &fakeRootfs{promoteCost: 5 * gib, promoteGate: gate, promoteReached: reached}
+	m, st := newLimitsMediator(t, rp, &fakeRuntime{}, NodeCapacity{DiskByte: 10 * gib})
+
+	sid, err := m.Create(ctx, CreateSpec{Template: "bare", Limits: model.Limits{DiskByte: 2 * gib}})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := m.Pause(ctx, sid); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+
+	// Promote is admitted (2 committed + 5 growth = 7 ≤ 10) and then blocks inside
+	// the freeze, holding a 5 GiB reservation with ZERO bytes yet measurable.
+	done := make(chan error, 1)
+	go func() {
+		_, err := m.Promote(ctx, sid)
+		done <- err
+	}()
+	<-reached
+
+	// 2 committed + 0 measured + 5 reserved + 4 requested = 11 > 10 → refused.
+	// Without the reservation this would be 2+0+4 = 6 and would WRONGLY be admitted,
+	// leaving the node overcommitted the moment the layer lands.
+	if _, err := m.Create(ctx, CreateSpec{Template: "bare", Limits: model.Limits{DiskByte: 4 * gib}}); !errors.Is(err, ErrInsufficientCapacity) {
+		t.Fatalf("create racing an in-flight promote = %v; want ErrInsufficientCapacity (the reserved 5 GiB must count)", err)
+	}
+
+	close(gate)
+	if err := <-done; err != nil {
+		t.Fatalf("promote: %v", err)
+	}
+
+	// Reservation RELEASED once the bytes are real: the same create now fits (the
+	// fake measures 0, so 2+0+0+4 = 6 ≤ 10). A leaked reservation would shrink the
+	// node's admissible capacity permanently.
+	if _, err := m.Create(ctx, CreateSpec{Template: "bare", Limits: model.Limits{DiskByte: 4 * gib}}); err != nil {
+		t.Fatalf("create after the promote settled = %v; want admitted (reservation leaked?)", err)
+	}
+	if got := m.pendingUncapped(); got != 0 {
+		t.Fatalf("pending uncapped bytes = %d after the promote settled; want 0", got)
+	}
+	if recs, _ := st.ListSandboxes(ctx); len(recs) != 2 {
+		t.Fatalf("sandbox count = %d; want 2", len(recs))
+	}
+}
+
+// A REFUSED promote must not leak its reservation either — the gate never reserved,
+// so a later create sees the full budget.
+func TestRefusedPromoteReservesNothing(t *testing.T) {
+	ctx := context.Background()
+	const gib = 1 << 30
+	rp := &fakeRootfs{promoteCost: 20 * gib}
+	m, _ := newLimitsMediator(t, rp, &fakeRuntime{}, NodeCapacity{DiskByte: 10 * gib})
+	sid, err := m.Create(ctx, CreateSpec{Template: "bare", Limits: model.Limits{DiskByte: gib}})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := m.Promote(ctx, sid); !errors.Is(err, ErrInsufficientCapacity) {
+		t.Fatalf("promote err = %v; want refused", err)
+	}
+	if got := m.pendingUncapped(); got != 0 {
+		t.Fatalf("refused promote left %d reserved bytes; want 0", got)
+	}
+	if _, err := m.Create(ctx, CreateSpec{Template: "bare", Limits: model.Limits{DiskByte: 8 * gib}}); err != nil {
+		t.Fatalf("create after a refused promote = %v; want admitted (full budget available)", err)
+	}
+}
+
+// A FAILED freeze (bytes attempted, error returned) must also release. Otherwise a
+// flapping provider would ratchet the node's admissible capacity down to nothing.
+func TestFailedFreezeReleasesItsReservation(t *testing.T) {
+	ctx := context.Background()
+	const gib = 1 << 30
+	rp := &fakeRootfs{promoteCost: 5 * gib, failPromote: true}
+	m, _ := newLimitsMediator(t, rp, &fakeRuntime{}, NodeCapacity{DiskByte: 10 * gib})
+	sid, err := m.Create(ctx, CreateSpec{Template: "bare", Limits: model.Limits{DiskByte: gib}})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := m.Promote(ctx, sid); err == nil {
+		t.Fatal("promote with a failing freeze should error")
+	}
+	if got := m.pendingUncapped(); got != 0 {
+		t.Fatalf("failed freeze left %d reserved bytes; want 0", got)
+	}
+}
+
+// idxOfPrefix is the position of the first call with the given prefix, or -1 —
+// enough to assert both "it happened" and "it happened before that other thing".
+func idxOfPrefix(calls []string, prefix string) int {
+	for i, c := range calls {
+		if strings.HasPrefix(c, prefix) {
+			return i
+		}
+	}
+	return -1
 }
 
 // compile-time: the fakes satisfy the provider seams.

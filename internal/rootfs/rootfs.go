@@ -144,6 +144,38 @@ type Provider interface {
 	// the frozen layer dir under LayersDir.
 	PromoteToTemplate(ctx context.Context, o *Overlay, newTemplateID string) error
 
+	// PromoteCostBytes reports how many bytes a PromoteToTemplate of THIS Overlay
+	// would ADD to the UncappedBytes term (§3.4 / rootfs-overlay D6.5) — the
+	// forecast the mediator gates a Promote on, since a frozen layer is charged to
+	// no sandbox cap and so grows the node's uncapped total.
+	//
+	// It is asked BEFORE the source is quiesced, so it is an UPPER BOUND, not an
+	// exact count — a promise-time gate wants the conservative direction anyway
+	// (§3.4 refuses on the strongest available statement). Two consequences the
+	// contract fixes rather than leaves to each implementation:
+	//
+	//  1. It must NOT under-report what its own PromoteToTemplate will cost. An
+	//     implementation whose freeze does not preserve sparseness must project the
+	//     APPARENT size of a sparse file, not its allocation — otherwise a
+	//     hole-punched upper measures near zero and costs its full length once
+	//     copied, and the gate's bound points the wrong way. Symmetrically, an
+	//     implementation whose freeze is a reflink/snapshot may legitimately report
+	//     ~0: the question is the DELTA its own mechanism adds, not the upper's size.
+	//  2. Excluded paths (the engine-injected runtime debris PromoteToTemplate
+	//     drops) need not be subtracted. Counting them overstates, which is the
+	//     same direction as the pre-quiesce timing.
+	//
+	// Same shape as UncappedBytes (§4: mediator asks, provider answers): IDs cross
+	// the seam, host paths stay inside, the store is never read. A remote provider
+	// answers from its own backend's accounting — nothing here names a directory
+	// walk or a filesystem.
+	//
+	// A caller that has not yet quiesced the sandbox must treat the result as stale
+	// the moment it returns: the guest can keep writing. That residual is bounded by
+	// the sandbox's own remaining capacity headroom and is the same "true at the
+	// instant of admission" property the whole second term has (D6.5 残留).
+	PromoteCostBytes(ctx context.Context, o *Overlay) (int64, error)
+
 	// UncappedBytes reports the total bytes this provider currently holds in its
 	// storage THAT NO DECLARED CAPACITY CAP COVERS — the second term of the §3.4
 	// node-capacity inequality (rootfs-overlay D6.5).
