@@ -28,10 +28,17 @@ type Memory struct {
 	tmpl map[model.TemplateID]model.Template
 	// outbox is append-only, ordered — the publisher reads oldest-first. Like the
 	// SQLite backend, published rows are marked, never removed (same unbounded-
-	// growth known limitation; open-decisions §2, the §4.1/§4.4-C event-stream
-	// row). Bounded in practice only by process lifetime since Memory is
-	// non-durable.
+	// growth known limitation; open-decisions §2, "§4.4-C 事件流可重放窗口大小").
+	// Bounded in practice only by process lifetime since Memory is non-durable.
 	outbox []outboxRow
+	// nextSeq is the monotonic sequence counter (Store's sequence contract). It
+	// is assigned under m.mu, in the SAME critical section that makes the row
+	// visible — which is precisely how Memory delivers the no-visibility-gap
+	// promise: there is no window in which a number is taken but the row is not
+	// yet readable, so a lower sequence can never appear after a higher one has
+	// been served. It counts appends, NOT len(outbox), so it stays monotonic even
+	// if rows are ever removed.
+	nextSeq int64
 }
 
 // outboxRow is one persisted Event plus its published flag (§4.4-C outbox).
@@ -53,7 +60,10 @@ func (m *Memory) appendEvent(ev *Event) {
 	if ev == nil {
 		return
 	}
-	m.outbox = append(m.outbox, outboxRow{ev: *ev})
+	row := outboxRow{ev: *ev}
+	m.nextSeq++
+	row.ev.Seq = m.nextSeq // the store assigns it; any caller-set Seq is overwritten
+	m.outbox = append(m.outbox, row)
 }
 
 func (m *Memory) CreateSandbox(_ context.Context, s model.Sandbox, ev *Event) error {
@@ -245,12 +255,36 @@ func (m *Memory) UnpublishedEvents(_ context.Context) ([]Event, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	out := make([]Event, 0)
+	// the slice is append-ordered, so this is already Seq order.
 	for _, r := range m.outbox {
 		if !r.published {
 			out = append(out, r.ev)
 		}
 	}
 	return out, nil
+}
+
+// Events implements the §6.1 replay read (Store.Events). Delivery state is not a
+// predicate — replay is over the whole retained window.
+func (m *Memory) Events(_ context.Context, after int64, limit int) ([]Event, int64, int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.outbox) == 0 {
+		return []Event{}, 0, 0, nil
+	}
+	earliest := m.outbox[0].ev.Seq
+	latest := m.outbox[len(m.outbox)-1].ev.Seq
+	out := make([]Event, 0)
+	for _, r := range m.outbox {
+		if r.ev.Seq <= after {
+			continue
+		}
+		if len(out) >= limit {
+			break
+		}
+		out = append(out, r.ev)
+	}
+	return out, earliest, latest, nil
 }
 
 func (m *Memory) MarkPublished(_ context.Context, eventID string) error {

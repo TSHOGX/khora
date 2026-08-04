@@ -71,21 +71,44 @@ CREATE TABLE IF NOT EXISTS sandboxes (
 	created_at   INTEGER NOT NULL, -- unix nanos
 	updated_at   INTEGER NOT NULL
 );
--- KNOWN LIMITATION (open-decisions §2, the §4.1/§4.4-C event-stream row):
+-- KNOWN LIMITATION (open-decisions §2, "§4.4-C 事件流可重放窗口大小"):
 -- published rows are marked (published_at set), NEVER deleted, so this table
 -- grows monotonically. The partial index below keeps the publisher's
--- unpublished-scan from degrading, but at-rest size is unbounded. Pruning
--- (retention/replay window) is deferred to the event-stream replay-window
--- decision, by design — not an oversight.
+-- unpublished-scan from degrading, but at-rest size is unbounded. This is
+-- DEFERRED, not answered: the trim window has to be set from the reconnect
+-- window promised to external subscribers, and there are none yet, so there is
+-- no arguable value to pick. It remains a limitation and did NOT become a virtue
+-- by being decided upon.
 CREATE TABLE IF NOT EXISTS outbox (
-	id           TEXT PRIMARY KEY,       -- transition-unique event ID (§4.4-C)
+	-- seq is the §4.4-C cursor: the monotonic total order both the publisher and
+	-- the §6.1 GET /v1/events replay page on. It is the PRIMARY KEY (the rowid)
+	-- and the event ID is a UNIQUE column beside it — the two swapped roles
+	-- deliberately, because SQLite gives an INTEGER PRIMARY KEY the persistent
+	-- monotonic counter that a TEXT key cannot have.
+	--
+	-- Why occurred_at cannot be the cursor: unix nanos are not a total order —
+	-- two transitions in the same nanosecond have no tie-break, and the wall
+	-- clock can be stepped backwards by NTP, which would make an already-served
+	-- cursor position ambiguous.
+	--
+	-- Why AUTOINCREMENT and not a bare rowid: a bare rowid is max(rowid)+1, so
+	-- emptying the table RESTARTS it at 1 (measured) and a subscriber's cursor
+	-- would silently point past freshly-issued sequences — the same
+	-- sequence-rollback class of defect audited in the reference implementation.
+	-- Today we never delete rows, so max(rowid) is monotonic anyway and this is
+	-- DEFENCE IN DEPTH rather than strictly required: it makes the invariant a
+	-- property of the schema instead of a "we promise never to delete rows"
+	-- policy living in a comment. AUTOINCREMENT keeps the high-water mark in
+	-- sqlite_sequence, so it survives the table being emptied.
+	seq          INTEGER PRIMARY KEY AUTOINCREMENT,
+	id           TEXT NOT NULL UNIQUE,   -- transition-unique event ID (§4.4-C)
 	sandbox      TEXT NOT NULL,
 	kind         TEXT NOT NULL,
 	state        TEXT NOT NULL,
-	occurred_at  INTEGER NOT NULL,       -- unix nanos, publisher orders by this
+	occurred_at  INTEGER NOT NULL,       -- unix nanos; DATA, not the ordering key
 	published_at INTEGER                 -- NULL = unpublished (the query predicate)
 );
-CREATE INDEX IF NOT EXISTS outbox_unpublished ON outbox(occurred_at) WHERE published_at IS NULL;
+CREATE INDEX IF NOT EXISTS outbox_unpublished ON outbox(seq) WHERE published_at IS NULL;
 `
 
 // OpenSQLite opens (creating if absent) the persistent store at path and ensures
@@ -162,6 +185,9 @@ func insertEvent(t *sql.Tx, ev *Event) error {
 	if ev == nil {
 		return nil
 	}
+	// seq is omitted: the backend assigns it (Store's sequence contract). Any Seq
+	// the caller happened to set is ignored rather than trusted — the store owns
+	// this number.
 	_, err := t.Exec(
 		`INSERT INTO outbox(id, sandbox, kind, state, occurred_at, published_at) VALUES(?,?,?,?,?,NULL)`,
 		ev.ID, string(ev.Sandbox), ev.Kind, string(ev.State), ev.OccurredAt.UnixNano(),
@@ -322,18 +348,51 @@ func (s *SQLite) DeleteSandbox(ctx context.Context, id model.SandboxID, ev *Even
 }
 
 func (s *SQLite) UnpublishedEvents(ctx context.Context) ([]Event, error) {
+	// ORDER BY seq, not occurred_at: the sequence is the total order the Store
+	// contract promises (equal-nanosecond timestamps have no tie-break).
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, sandbox, kind, state, occurred_at FROM outbox WHERE published_at IS NULL ORDER BY occurred_at`)
+		`SELECT seq, id, sandbox, kind, state, occurred_at FROM outbox WHERE published_at IS NULL ORDER BY seq`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
+	return scanEvents(rows)
+}
+
+// Events implements the §6.1 replay read (Store.Events). Delivery state is not a
+// predicate here — replay is over the whole retained window.
+func (s *SQLite) Events(ctx context.Context, after int64, limit int) ([]Event, int64, int64, error) {
+	// Window bounds first, from the SAME connection (the pool is pinned to one),
+	// so the bounds and the page cannot straddle an unrelated writer.
+	var earliest, latest sql.NullInt64
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT MIN(seq), MAX(seq) FROM outbox`).Scan(&earliest, &latest); err != nil {
+		return nil, 0, 0, err
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT seq, id, sandbox, kind, state, occurred_at FROM outbox
+		   WHERE seq > ? ORDER BY seq LIMIT ?`, after, limit)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	defer rows.Close()
+	evs, err := scanEvents(rows)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	return evs, earliest.Int64, latest.Int64, nil
+}
+
+// scanEvents drains an outbox row set selecting (seq, id, sandbox, kind, state,
+// occurred_at) in that order. Shared by both read paths so they cannot drift
+// apart in how they materialize an Event.
+func scanEvents(rows *sql.Rows) ([]Event, error) {
 	out := make([]Event, 0)
 	for rows.Next() {
 		var e Event
 		var sandbox, state string
 		var occ int64
-		if err := rows.Scan(&e.ID, &sandbox, &e.Kind, &state, &occ); err != nil {
+		if err := rows.Scan(&e.Seq, &e.ID, &sandbox, &e.Kind, &state, &occ); err != nil {
 			return nil, err
 		}
 		e.Sandbox = model.SandboxID(sandbox)

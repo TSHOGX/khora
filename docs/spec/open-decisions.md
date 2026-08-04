@@ -21,7 +21,7 @@
 | --- | --- | --- |
 | **§5.C Volume(契约边界外)** | 契约在 §5.C;待细化的边界项:独占卷抢占策略 / shared-rw ENOSPC 复合行为(连带 §2.3 爆炸半径在多写入方下的复合表述)/ 直连变更 vs live-ro reader 准入 / snapshot 一致性标注进 §6 / 远端 backend 落地形态 | **详见 [`deep-dives/volume.md`](./deep-dives/volume.md) D8**,本表不复制。多为产品层策略或落 §6 时定 |
 | **§4.3 对象回收 sweep(§5.C 挂载行消费者)** | 待细化的是 §5.C 挂载行这一类消费者:独占租约 = 挂载行 refcount,其 sweep/回收形状随 Volume 子系统定 | 谁消费:§5.C 挂载行;reaper 复用 §4.4-A 反向对账形状 |
-| **§4.1 / §4.4-C 事件流(对外面)** | 待细化的是对外面:event schema、可重放窗口大小、subscriber 接入/续位约定。两处设计使然的限制(outbox 只标记不删行;`DedupSink` 参考实现非持久)随「可重放窗口」一并收口 | additive(add a subscriber);引擎不追踪 subscriber、只保证可靠写入一条可重放 stream |
+| **§4.4-C 事件流可重放窗口大小** | event schema、subscriber 续位约定、对外形状**已定**(pull + `seq` 游标,见 §4.4-C / §6.1 `GET /v1/events`)。**仍开放的只有一项:可重放窗口取多大**,即何时开始裁剪 outbox。今天不裁剪、行只标记不删,故 `sqlite.go` 的 at-rest 无界增长**仍是未解决的 KNOWN LIMITATION**;`DedupSink` 参考实现非持久同样保留。**这是被推迟而非被回答**:窗口必须由"承诺给外部订阅者的重连时长"定,而今天没有外部订阅者(引擎内 sink 只是打日志的参考实现、"已投递"几乎恒真),故没有可论证的取值,凭空取一个数是 §1.3 拒绝的投机性预留 | 谁消费:未来外部 subscriber。**410 已作为保留语义写进 §6.1 契约**(`after` 早于窗口),故将来加裁剪时**调用方契约无需变更**;裁剪本身在 SQLite 上是一条 `DELETE`,序号回退已由 `AUTOINCREMENT` 挡住 |
 | **§5.D 凭证存储 seam** | 凭证"留宿主侧"的**后端**(secret-store):怎么存、注册、轮转。此处只留**at-rest 后端**选型;alias→directives 的 **resolve/缓存/失效契约**是另一条 seam,见下行 | 一类可插拔 seam(类比 runtime / rootfs provider);明文不进控制面/Overlay,只在宿主侧独立后端 |
 | **§5.D egress 数据面 seam + 两条契约** | 引擎自有 egress 数据面(gateway,行为 seam)与两条传输无关薄契约的**精确签名**:① **resolve 契约**(数据面↔resolver:alias+目标上下文 → directives+过期+version 戳 + 失效信号)② **ingress 契约**(数据面↔引流:抽象描述符 + 双向劫持能力协商)。行为的两种强制模式(builtin 内联求值 / 外部编译下发)对接口要求不同 | **详见 [`deep-dives/network.md`](./deep-dives/network.md) D3/D7**,本表不复制。今天只建接口形状 + builtin 单实现(模式 1),registry plumbing 缓(D6);谁消费:§5.D 数据面 + 未来远端 provider |
 | **§5.D 凭证注入模式** | builtin 首版支持哪些注入模式、各自约束 | **别过早钉 MITM 为唯一路径**;MITM 选中才需 guest 信任注入(CA 证书进 guest、私钥留数据面),落 §5.B 模板 / §5.E.1。**详见 [`deep-dives/network.md`](./deep-dives/network.md) D9**,本表不复制 |
@@ -29,7 +29,6 @@
 | **§5.A provider 接口(远端形态入参)** | **待细化的是远端形态的入参形状**:`RootfsSource`(本地 `MergedPath` vs 远端句柄)、`SteeringSpec`(egress 引流描述符)、`ResourceLimits` 在非 cgroup 调度层的等价物——用"被调度的远端隔离单元"作纸面参照反推,**不实现任何远端 provider** | 谁消费:未来远端 provider |
 | **§5.B Overlay 物化** | 待细化:pause flush 一致点的**应用层协作安全点**、**Promote excluded-paths 中的 Volume 挂载点占位**、content-addressed diff 层、multi-node 经 rootfs provider 跨 node 寻址 | **详见 [`deep-dives/rootfs-overlay.md`](./deep-dives/rootfs-overlay.md) D5**,本表不复制 |
 | **§5.C per-volume 容量帽在 remote 后端的物化** | local 臂是 subvolume + squota(§5.B/§5.C 共享原语)。**待细化的是 remote 后端**:一个对象存储 / 网络 FS backend 用什么手段兑现"这个卷最多多大"(后端配额 API / 客户端侧核算),以及它与 `Capabilities()` 的关系 | 封在该 backend 内(volume.md D1/D7),不进核心;谁消费:未来 remote volume backend |
-| **§2.3 / §4 容量压力事件(软阈)** | 硬阈是既定行为:guest 见普通 `ENOSPC`、沙箱存活、只做硬阈拒写(§3.4 / rootfs-overlay D6.5)。**待细化的是软阈**:是否发一条**容量压力事件**作告警(Consumption seam,add a subscriber)、阈值取值 | 刻意**随事件流「可重放窗口」那轮统一收口**——现在单开一个 event kind,到时要改两遍;谁消费:§4.1 事件流 |
 | **§5.A / 模板(内容目录)** | **内置 Template 的内容清单**:一个 bare base(uv/pip/git/build-essential;可选 sudo,仅作 guest 内便利、非引擎语义),各 agent 栈(claude-code/opencode/pi)叠在 bare base 之上。**这是产品/模板层的内容选型**,仍开放(Template 的一等行化 / boot seed / multi-lowerdir 叠层机制是 §4.3 / §5.B 的既定架构,不在本行) | guest 默认 root(§2.2),装包是一次性 exec、不引入 init 依赖,见 [`deep-dives/guest-runtime.md`](./deep-dives/guest-runtime.md) D3.1 |
 
 ---
@@ -42,10 +41,7 @@
 
 ## 4. 实现缺口(设计已定,代码未落地 / 待收口)
 
-| 缺口 | 现状 vs 目标 | 落地归属 |
-| --- | --- | --- |
-| **outbox publisher 头阻塞**(已留注,非正确性破坏) | 一条投递失败挡住其后全部(保序 / at-least-once 正确) | 随事件流可重放窗口(后续增量)择机收口 |
-| **`death_cause` 不在 §6.1 读面上** | 死因已落库(§4.3),但 `GET /v1/sandboxes/{id}` 不返回它,`resource-terminated` 只以 409 错误串现身。既然恢复决定归调用方(§4.3 narrowing),调用方就需要看到它所依据的那条事实 | 随事件流「可重放窗口 / event schema」那轮统一定读面(§2 的 §4.1 行) |
+> 无。
 
 ---
 

@@ -65,6 +65,341 @@ func RunContract(t *testing.T, mk Factory) {
 	// then write, without holding anything across the two — would pass all of
 	// them. Both backends must deliver this identically (§1.3 seam).
 	t.Run("ConcurrentCASSingleWinner", func(t *testing.T) { testConcurrentCAS(t, mk) })
+
+	// The outbox sequence contract (see Store): total order, replay paging, and
+	// the adversarial no-visibility-gap case.
+	t.Run("SequenceTotalOrder", func(t *testing.T) { testSequenceTotalOrder(t, mk) })
+	t.Run("SequenceSurvivesReopen", func(t *testing.T) { testSequenceSurvivesReopen(t, mk) })
+	t.Run("EventsReplayPaging", func(t *testing.T) { testEventsReplayPaging(t, mk) })
+	t.Run("SequenceNoVisibilityGap", func(t *testing.T) { testSequenceNoVisibilityGap(t, mk) })
+}
+
+// testSequenceTotalOrder: every appended event gets a unique, strictly
+// increasing Seq, and both read paths return events in that order.
+//
+// This is the property occurred_at could not provide: these events are appended
+// in a tight loop, so several of them land in the SAME nanosecond on a fast
+// clock, and an occurred_at ordering has no tie-break to offer there.
+func testSequenceTotalOrder(t *testing.T, mk Factory) {
+	ctx := context.Background()
+	s, _ := mk(t)
+	seedTmpl(t, s, "bare")
+	if err := s.CreateSandbox(ctx, mkRec("a"), nil); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	const n = 20
+	state := model.Creating
+	for i := 0; i < n; i++ {
+		next := model.Running
+		if state == model.Running {
+			next = model.Paused
+		}
+		if err := s.CompareAndSetState(ctx, "a", state, next,
+			ev("a", fmt.Sprintf("evt_%02d", i), "flip", next), nil); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+		state = next
+	}
+
+	un, err := s.UnpublishedEvents(ctx)
+	if err != nil {
+		t.Fatalf("unpublished: %v", err)
+	}
+	if len(un) != n {
+		t.Fatalf("got %d events; want %d", len(un), n)
+	}
+	seen := map[int64]bool{}
+	var prev int64
+	for i, e := range un {
+		if e.Seq <= 0 {
+			t.Fatalf("event %d (%s) has Seq=%d; a read-back event must carry a positive sequence", i, e.ID, e.Seq)
+		}
+		if e.Seq <= prev {
+			t.Fatalf("event %d (%s) Seq=%d not strictly increasing after %d", i, e.ID, e.Seq, prev)
+		}
+		if seen[e.Seq] {
+			t.Fatalf("Seq %d issued twice", e.Seq)
+		}
+		seen[e.Seq] = true
+		prev = e.Seq
+		// append order must match sequence order: evt_00 first, evt_19 last.
+		if want := fmt.Sprintf("evt_%02d", i); e.ID != want {
+			t.Fatalf("position %d holds %s; want %s (read is not in append order)", i, e.ID, want)
+		}
+	}
+}
+
+// testSequenceSurvivesReopen: for a durable backend the sequence is monotonic
+// ACROSS a restart — a reopened store never re-issues a number a subscriber's
+// cursor has already passed. Memory (reopen == nil) skips.
+func testSequenceSurvivesReopen(t *testing.T, mk Factory) {
+	ctx := context.Background()
+	s, reopen := mk(t)
+	if reopen == nil {
+		t.Skip("backend is not durable across reopen")
+	}
+	seedTmpl(t, s, "bare")
+	_ = s.CreateSandbox(ctx, mkRec("a"), nil)
+	if err := s.CompareAndSetState(ctx, "a", model.Creating, model.Running,
+		ev("a", "evt_before", "created", model.Running), nil); err != nil {
+		t.Fatalf("pre-restart append: %v", err)
+	}
+	before, _, _, err := s.Events(ctx, 0, 10)
+	if err != nil {
+		t.Fatalf("events: %v", err)
+	}
+	if len(before) != 1 {
+		t.Fatalf("want 1 event pre-restart; got %d", len(before))
+	}
+	high := before[0].Seq
+
+	s2 := reopen(t)
+	if err := s2.CompareAndSetState(ctx, "a", model.Running, model.Paused,
+		ev("a", "evt_after", "paused", model.Paused), nil); err != nil {
+		t.Fatalf("post-restart append: %v", err)
+	}
+	after, _, _, err := s2.Events(ctx, high, 10)
+	if err != nil {
+		t.Fatalf("events after cursor: %v", err)
+	}
+	if len(after) != 1 || after[0].ID != "evt_after" {
+		t.Fatalf("resuming from cursor %d returned %+v; want just evt_after", high, after)
+	}
+	if after[0].Seq <= high {
+		t.Fatalf("post-restart Seq %d did not advance past %d — a cursor at %d would MISS this event",
+			after[0].Seq, high, high)
+	}
+}
+
+// testEventsReplayPaging: Store.Events pages by cursor, honors limit, and
+// reports the window bounds. Paging through in small pages must yield every
+// event exactly once, in order — no duplicate at the page boundary and no gap.
+func testEventsReplayPaging(t *testing.T, mk Factory) {
+	ctx := context.Background()
+	s, _ := mk(t)
+	seedTmpl(t, s, "bare")
+
+	// empty outbox: no events, and bounds are 0/0 rather than an error.
+	evs, earliest, latest, err := s.Events(ctx, 0, 10)
+	if err != nil {
+		t.Fatalf("events on empty outbox: %v", err)
+	}
+	if len(evs) != 0 || earliest != 0 || latest != 0 {
+		t.Fatalf("empty outbox: got %d events, bounds %d/%d; want 0 events, 0/0", len(evs), earliest, latest)
+	}
+
+	_ = s.CreateSandbox(ctx, mkRec("a"), nil)
+	const n = 7
+	state := model.Creating
+	for i := 0; i < n; i++ {
+		next := model.Running
+		if state == model.Running {
+			next = model.Paused
+		}
+		if err := s.CompareAndSetState(ctx, "a", state, next,
+			ev("a", fmt.Sprintf("e%d", i), "flip", next), nil); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+		state = next
+	}
+
+	// limit is honored.
+	page, earliest, latest, err := s.Events(ctx, 0, 3)
+	if err != nil {
+		t.Fatalf("first page: %v", err)
+	}
+	if len(page) != 3 {
+		t.Fatalf("limit=3 returned %d events", len(page))
+	}
+	if earliest <= 0 || latest <= 0 || earliest > latest {
+		t.Fatalf("bounds %d/%d are not a sane window", earliest, latest)
+	}
+	if latest != page[0].Seq+n-1 {
+		t.Fatalf("latest=%d does not match the last appended sequence (%d)", latest, page[0].Seq+n-1)
+	}
+
+	// page through with limit=2: every event exactly once, in order.
+	var ids []string
+	cursor := int64(0)
+	for i := 0; i < 100; i++ { // bounded: a non-advancing cursor must fail, not spin
+		pg, _, _, err := s.Events(ctx, cursor, 2)
+		if err != nil {
+			t.Fatalf("page at cursor %d: %v", cursor, err)
+		}
+		if len(pg) == 0 {
+			break
+		}
+		for _, e := range pg {
+			if e.Seq <= cursor {
+				t.Fatalf("page at cursor %d returned Seq %d — a served event was returned again", cursor, e.Seq)
+			}
+			ids = append(ids, e.ID)
+			cursor = e.Seq
+		}
+	}
+	if len(ids) != n {
+		t.Fatalf("paging yielded %d events (%v); want %d exactly once", len(ids), ids, n)
+	}
+	for i, got := range ids {
+		if want := fmt.Sprintf("e%d", i); got != want {
+			t.Fatalf("paged position %d = %s; want %s", i, got, want)
+		}
+	}
+
+	// Replay is over the retained window, NOT over delivery state: marking an
+	// event published must not remove it from replay.
+	if err := s.MarkPublished(ctx, "e0"); err != nil {
+		t.Fatalf("mark: %v", err)
+	}
+	all, _, _, err := s.Events(ctx, 0, 100)
+	if err != nil {
+		t.Fatalf("events after mark: %v", err)
+	}
+	if len(all) != n {
+		t.Fatalf("replay lost a published event: %d of %d remain", len(all), n)
+	}
+}
+
+// testSequenceNoVisibilityGap is the ADVERSARIAL case for promise 2 of the
+// sequence contract (see Store): once Seq = N is visible, nothing below N may
+// appear afterwards.
+//
+// The failure it hunts is a real, audited defect and not a hypothetical: a
+// backend that assigns the sequence at INSERT but makes rows visible at COMMIT
+// lets tx1 take 5, tx2 take 6, and tx2 commit first — so a reader consumes 6,
+// advances its cursor, and 5 then materializes behind an already-served event
+// where no cursor will ever look again. Note what does NOT save you: serializing
+// the readers. The ordering breaks on the producer side, so a lock around the
+// drain sees a perfectly ordered stream that is already missing a row.
+//
+// The check: writers append concurrently while a reader repeatedly polls with a
+// forward-only cursor, exactly as a subscriber would. Any row that appears below
+// the highest sequence the reader has already passed is the defect, and it is
+// caught rather than tolerated. SQLite passes by serializing write transactions
+// outright; Memory by assigning the sequence inside the same critical section
+// that publishes the row. A backend with a BIGSERIAL default and genuinely
+// concurrent write transactions FAILS here until it adds a watermark gate — that
+// failure is the entire point of this test, because the alternative is
+// discovering it during a billing reconciliation.
+func testSequenceNoVisibilityGap(t *testing.T, mk Factory) {
+	ctx := context.Background()
+	s, _ := mk(t)
+	seedTmpl(t, s, "bare")
+
+	const writers = 8
+	const perWriter = 12
+	for w := 0; w < writers; w++ {
+		if err := s.CreateSandbox(ctx, mkRec(fmt.Sprintf("w%d", w)), nil); err != nil {
+			t.Fatalf("create w%d: %v", w, err)
+		}
+	}
+
+	var (
+		wg    sync.WaitGroup
+		start = make(chan struct{})
+		done  = make(chan struct{})
+	)
+	for w := 0; w < writers; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			<-start
+			id := model.SandboxID(fmt.Sprintf("w%d", w))
+			state := model.Creating
+			for i := 0; i < perWriter; i++ {
+				next := model.Running
+				if state == model.Running {
+					next = model.Paused
+				}
+				// Retries are irrelevant to what is being measured: an append that
+				// fails simply produced no row. What matters is that every row that
+				// DID land is observed in sequence order.
+				if err := s.CompareAndSetState(ctx, id, state, next,
+					ev(string(id), fmt.Sprintf("w%d_%d", w, i), "flip", next), nil); err == nil {
+					state = next
+				}
+			}
+		}(w)
+	}
+
+	// The reader: a forward-only cursor, the way a real subscriber persists one.
+	var (
+		bad     []seqViolation
+		seenSeq = map[int64]bool{}
+		cursor  int64
+	)
+	readerDone := make(chan struct{})
+	go func() {
+		defer close(readerDone)
+		for {
+			select {
+			case <-done:
+				// one final sweep after the writers finish
+				drainCheck(ctx, t, s, &cursor, seenSeq, &bad)
+				return
+			default:
+				drainCheck(ctx, t, s, &cursor, seenSeq, &bad)
+			}
+		}
+	}()
+
+	close(start)
+	wg.Wait()
+	close(done)
+	<-readerDone
+
+	if len(bad) > 0 {
+		t.Fatalf("no-visibility-gap VIOLATED: %d row(s) appeared below an already-served cursor, e.g. Seq=%d id=%s appeared when the cursor was already at %d. A subscriber resuming from its cursor would never see them.",
+			len(bad), bad[0].seq, bad[0].id, bad[0].cursor)
+	}
+
+	// Sanity: the reader must actually have observed the rows that landed, or the
+	// assertion above passed vacuously.
+	final, _, _, err := s.Events(ctx, 0, 10000)
+	if err != nil {
+		t.Fatalf("final events read: %v", err)
+	}
+	if len(final) == 0 {
+		t.Fatal("no events landed at all — the test proved nothing")
+	}
+	for _, e := range final {
+		if !seenSeq[e.Seq] {
+			t.Fatalf("event Seq=%d id=%s was never visible to the forward-only reader (it is only reachable by rewinding the cursor)", e.Seq, e.ID)
+		}
+	}
+}
+
+// seqViolation is one observed no-visibility-gap breach: row `seq` (event `id`)
+// became visible when the forward-only reader had already served up to `cursor`.
+type seqViolation struct {
+	seq, cursor int64
+	id          string
+}
+
+// drainCheck reads the outbox once, recording any row that appears BELOW the
+// cursor already served — i.e. a visibility gap. Split out so the reader
+// goroutine runs the identical check on its final post-writer sweep.
+func drainCheck(ctx context.Context, t *testing.T, s store.Store, cursor *int64, seen map[int64]bool, bad *[]seqViolation) {
+	t.Helper()
+	// Read from the START each pass, not from the cursor: reading from the cursor
+	// could not detect a row that landed BELOW it — which is the whole defect.
+	evs, _, _, err := s.Events(ctx, 0, 10000)
+	if err != nil {
+		return // transient backend error is not what this test measures
+	}
+	for _, e := range evs {
+		if seen[e.Seq] {
+			continue
+		}
+		if e.Seq < *cursor {
+			*bad = append(*bad, seqViolation{seq: e.Seq, cursor: *cursor, id: e.ID})
+		}
+		seen[e.Seq] = true
+		if e.Seq > *cursor {
+			*cursor = e.Seq
+		}
+	}
 }
 
 // testConcurrentCAS: N goroutines race the SAME transition. Exactly ONE may win,

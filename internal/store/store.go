@@ -57,9 +57,20 @@ var ErrInUse = errors.New("store: template in use")
 // visible §4.1 transitions) — that is a mediator semantic choice, NOT a backend
 // capability branch.
 type Event struct {
+	// Seq is the outbox's monotonic total order — the CURSOR a subscriber
+	// resumes from (§6.1 GET /v1/events?after=). It is assigned BY THE BACKEND at
+	// append; a caller-supplied value is ignored (the mediator does not own this
+	// number, the store does). Zero on an Event being handed TO the store, and
+	// always > 0 on one read back out.
+	//
+	// It exists because OccurredAt cannot serve: unix nanos have no tie-break at
+	// equal nanos and the wall clock can be stepped backwards by NTP, so a
+	// timestamp is not a total order and a timestamp cursor cannot be resumed
+	// from unambiguously.
+	Seq int64
 	// ID is the transition-unique key subscribers dedup on (§4.4-C
-	// at-least-once: a redelivered event carries the SAME ID). Backends use it
-	// as the outbox row's primary key.
+	// at-least-once: a redelivered event carries the SAME ID). Backends key the
+	// outbox row uniquely on it.
 	ID string
 	// Sandbox is which sandbox transitioned. Fine as an engine-internal field —
 	// `sandbox` is a core atom, not a banned product concept (§1.1 vocabulary).
@@ -132,6 +143,39 @@ func (b Binding) Apply(cur model.Sandbox) (model.Limits, time.Duration, time.Dur
 // via BEGIN/COMMIT, Memory via a single mutex over map+slice. The
 // no-capability-branch rule in this file's package doc applies to every method
 // below.
+//
+// # The outbox sequence contract (§4.4-C), which every backend must deliver
+//
+// Two promises, stated HERE rather than left to whatever the backend happens to
+// do, because the whole point of invariant C is that the interface promises and
+// the backend delivers — never that the algorithm asks the backend what it
+// supports and branches:
+//
+//  1. TOTAL ORDER. Every appended Event gets a Seq that is unique and strictly
+//     increasing in append order. Reads that return events return them in Seq
+//     order.
+//
+//  2. NO VISIBILITY GAP. Once an event with Seq = N is VISIBLE to a reader, no
+//     event with Seq < N may become visible afterwards. A subscriber that has
+//     consumed through N and resumes from after=N has therefore not skipped
+//     anything, which is the entire basis on which a cursor is safe to persist.
+//
+// Promise 2 is the non-obvious one, and it is a real defect class rather than a
+// hypothetical: assign the sequence at INSERT but make the row visible at
+// COMMIT, and two concurrent producers interleave — tx1 takes 5, tx2 takes 6,
+// tx2 commits first, a reader consumes 6 and advances its cursor, and 5 then
+// appears BEHIND an already-delivered later event and is never seen. Serializing
+// the READERS (a lock around the drain) does not help; the ordering is broken on
+// the PRODUCER side.
+//
+// SQLite delivers promise 2 by serializing write transactions outright (a second
+// INSERT while another write transaction is open is refused with SQLITE_BUSY, so
+// "took a lower sequence, committed later" cannot arise) and Memory by appending
+// under the one mutex that also assigns the number. Neither is a licence to
+// treat this as a backend quirk: a backend that permits genuinely concurrent
+// write transactions (Postgres with a BIGSERIAL default) MUST add a watermark
+// gate — publish a sequence as visible only once every lower sequence has
+// committed — or it does not satisfy this interface. storetest asserts it.
 type Store interface {
 	// CreateSandbox inserts a new sandbox record in state `creating`, appending
 	// ev in the same commit if non-nil (§4.4-C). Returns ErrConflict on a
@@ -167,12 +211,28 @@ type Store interface {
 	// survives the record's deletion — it is a separate table/slice.
 	DeleteSandbox(ctx context.Context, id model.SandboxID, ev *Event) error
 
-	// UnpublishedEvents returns outbox rows not yet marked published, oldest
-	// first. This is the PUBLISHER read side (§4.4-C) — it is deliberately NOT
-	// part of the atomic-commit contract (not in the transition commit); the
-	// publisher reads async, delivers, then marks. at-least-once: a crash after
-	// deliver but before MarkPublished re-returns the same rows.
+	// UnpublishedEvents returns outbox rows not yet marked published, in Seq
+	// order (oldest first). This is the PUBLISHER read side (§4.4-C) — it is
+	// deliberately NOT part of the atomic-commit contract (not in the transition
+	// commit); the publisher reads async, delivers, then marks. at-least-once: a
+	// crash after deliver but before MarkPublished re-returns the same rows.
 	UnpublishedEvents(ctx context.Context) ([]Event, error)
+
+	// Events is the REPLAY read side backing §6.1 GET /v1/events: return at most
+	// limit events with Seq > after, in Seq order, plus the window bounds
+	// (earliest / latest Seq currently held, both 0 on an empty outbox).
+	//
+	// It reads the SAME rows as UnpublishedEvents over the SAME sequence — one
+	// stream with two readers, not two stores of events. Delivery state is
+	// deliberately invisible here: "has the in-process sink seen it" is not a fact
+	// an external subscriber's replay should depend on.
+	//
+	// limit is REQUIRED to be bounded by the caller AND capped again server-side
+	// at the API layer. The store honors what it is given; it does not invent a
+	// cap, because a second caller of the seam would then inherit a different one
+	// — the audited defect was exactly two read paths with mismatched caps, one of
+	// which materialized the entire backlog.
+	Events(ctx context.Context, after int64, limit int) (evs []Event, earliest, latest int64, err error)
 
 	// MarkPublished marks one outbox row (by event ID) as delivered so it stops
 	// coming back from UnpublishedEvents. Idempotent: marking an unknown or

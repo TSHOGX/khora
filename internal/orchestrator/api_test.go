@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -284,4 +285,250 @@ func TestAdmissionVerdictsMapToDistinctStatuses(t *testing.T) {
 			t.Fatalf("status = %d (%s); want 400 — nothing is full, the request is invalid here (507 would misdirect the caller)", resp.StatusCode, b)
 		}
 	})
+}
+
+// --- GET /v1/events (§6.1 / §4.4-C event-stream replay, pull only) -----------
+
+// seedSandboxEvents commits n lifecycle transitions on one sandbox so the outbox
+// has ordered rows to replay.
+func seedSandboxEvents(t *testing.T, mem *store.Memory, n int) {
+	t.Helper()
+	ctx := context.Background()
+	seedTemplate(t, mem, "bare", "", true)
+	if err := mem.CreateSandbox(ctx, model.Sandbox{
+		ID: "sb", Template: "bare", State: model.Creating, CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	}, nil); err != nil {
+		t.Fatalf("seed sandbox: %v", err)
+	}
+	state := model.Creating
+	for i := 0; i < n; i++ {
+		next, kind := model.Running, "resumed"
+		if state == model.Running {
+			next, kind = model.Paused, "paused"
+		}
+		if err := mem.CompareAndSetState(ctx, "sb", state, next, &store.Event{
+			ID: fmt.Sprintf("evt_%d", i), Sandbox: "sb", Kind: kind, State: next, OccurredAt: time.Now(),
+		}, nil); err != nil {
+			t.Fatalf("seed event %d: %v", i, err)
+		}
+		state = next
+	}
+}
+
+func getEvents(t *testing.T, srv *httptest.Server, query string) eventsResp {
+	t.Helper()
+	resp := do(t, http.MethodGet, srv.URL+"/v1/events"+query)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("GET /v1/events%s = %d: %s", query, resp.StatusCode, b)
+	}
+	var out eventsResp
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	return out
+}
+
+// The cursor contract: page forward with `after`, receive each event exactly
+// once, in sequence order, with the window bounds attached.
+func TestAPIEventsCursorPaging(t *testing.T) {
+	srv, mem := apiFixture(t)
+	seedSandboxEvents(t, mem, 5)
+
+	all := getEvents(t, srv, "")
+	if len(all.Events) != 5 {
+		t.Fatalf("got %d events; want 5", len(all.Events))
+	}
+	if all.Earliest != all.Events[0].Seq || all.Latest != all.Events[4].Seq {
+		t.Fatalf("window bounds %d/%d do not match the returned range %d..%d",
+			all.Earliest, all.Latest, all.Events[0].Seq, all.Events[4].Seq)
+	}
+	var prev int64
+	for i, e := range all.Events {
+		if e.Seq <= prev {
+			t.Fatalf("event %d has seq %d, not increasing after %d", i, e.Seq, prev)
+		}
+		prev = e.Seq
+		if e.ID != fmt.Sprintf("evt_%d", i) {
+			t.Fatalf("position %d holds %s; want evt_%d", i, e.ID, i)
+		}
+		if e.SandboxID != "sb" || e.Kind == "" || e.State == "" || e.OccurredAt == "" {
+			t.Fatalf("event %d is missing fields: %+v", i, e)
+		}
+	}
+
+	// page with limit=2 from a cursor: no duplicate at the boundary, no gap.
+	var ids []string
+	cursor := int64(0)
+	for i := 0; i < 10; i++ {
+		pg := getEvents(t, srv, fmt.Sprintf("?after=%d&limit=2", cursor))
+		if len(pg.Events) == 0 {
+			break
+		}
+		for _, e := range pg.Events {
+			if e.Seq <= cursor {
+				t.Fatalf("after=%d returned seq %d — an already-served event came back", cursor, e.Seq)
+			}
+			ids = append(ids, e.ID)
+			cursor = e.Seq
+		}
+	}
+	if len(ids) != 5 {
+		t.Fatalf("paging yielded %d events (%v); want 5 exactly once", len(ids), ids)
+	}
+
+	// a cursor at the head returns an empty page, not an error.
+	tail := getEvents(t, srv, fmt.Sprintf("?after=%d", all.Latest))
+	if len(tail.Events) != 0 {
+		t.Fatalf("cursor at latest returned %d events; want 0", len(tail.Events))
+	}
+	if tail.Latest != all.Latest {
+		t.Fatalf("empty page reported latest=%d; want %d (bounds must be reported regardless)", tail.Latest, all.Latest)
+	}
+}
+
+// The `limit` HARD CAP. Not a default: the caller controls the parameter, so a
+// default alone protects nothing. With no trimming the window is ALL history, so
+// after=0 pages through everything — which is why this cap is mandatory.
+func TestAPIEventsLimitIsHardCapped(t *testing.T) {
+	srv, mem := apiFixture(t)
+	seedSandboxEvents(t, mem, eventsMaxLimit+50)
+
+	// asking for far more than the cap yields at most the cap, not everything.
+	got := getEvents(t, srv, "?limit=100000")
+	if len(got.Events) != eventsMaxLimit {
+		t.Fatalf("limit=100000 returned %d events; want the hard cap %d", len(got.Events), eventsMaxLimit)
+	}
+	// the default applies when limit is omitted.
+	def := getEvents(t, srv, "")
+	if len(def.Events) != eventsDefaultLimit {
+		t.Fatalf("omitted limit returned %d events; want the default %d", len(def.Events), eventsDefaultLimit)
+	}
+	// a limit under the cap is honored as given.
+	small := getEvents(t, srv, "?limit=7")
+	if len(small.Events) != 7 {
+		t.Fatalf("limit=7 returned %d events", len(small.Events))
+	}
+}
+
+// Malformed cursor / limit are 400s, not 500s and not silent coercions.
+func TestAPIEventsRejectsBadParams(t *testing.T) {
+	srv, mem := apiFixture(t)
+	seedSandboxEvents(t, mem, 2)
+
+	for _, q := range []string{"?after=abc", "?after=-1", "?limit=abc", "?limit=0", "?limit=-5"} {
+		resp := do(t, http.MethodGet, srv.URL+"/v1/events"+q)
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("GET /v1/events%s = %d (%s); want 400", q, resp.StatusCode, body)
+		}
+	}
+	// non-GET is 405.
+	resp := do(t, http.MethodPost, srv.URL+"/v1/events")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("POST /v1/events = %d; want 405", resp.StatusCode)
+	}
+}
+
+// An empty outbox is an empty window, not an error — and specifically not a 410,
+// which is unreachable while nothing is trimmed.
+func TestAPIEventsEmptyOutbox(t *testing.T) {
+	srv, _ := apiFixture(t)
+	got := getEvents(t, srv, "?after=0")
+	if len(got.Events) != 0 || got.Earliest != 0 || got.Latest != 0 {
+		t.Fatalf("empty outbox: %+v; want no events and 0/0 bounds", got)
+	}
+}
+
+// Replay is over the retained window, NOT over delivery state: an event already
+// drained by the in-process publisher must still be replayable, because whether
+// the local sink has seen it is not a fact an external subscriber depends on.
+func TestAPIEventsReplayIgnoresDeliveryState(t *testing.T) {
+	srv, mem := apiFixture(t)
+	seedSandboxEvents(t, mem, 3)
+
+	p := store.NewPublisher(mem, store.NewDedupSink(func(store.Event) {}))
+	if n, err := p.PublishOnce(context.Background()); err != nil || n != 3 {
+		t.Fatalf("drain n=%d err=%v; want 3,nil", n, err)
+	}
+	if un, _ := mem.UnpublishedEvents(context.Background()); len(un) != 0 {
+		t.Fatalf("%d rows still unpublished after the drain", len(un))
+	}
+	got := getEvents(t, srv, "?after=0")
+	if len(got.Events) != 3 {
+		t.Fatalf("replay after a full drain returned %d events; want all 3", len(got.Events))
+	}
+}
+
+// --- death_cause on the §6.1 read path (§4.3) --------------------------------
+
+// The fact the §4.3 recovery decision rests on must be readable WITHOUT first
+// attempting the resume that would be refused.
+func TestAPIGetSandboxExposesDeathCause(t *testing.T) {
+	srv, mem := apiFixture(t)
+	ctx := context.Background()
+	seedTemplate(t, mem, "bare", "", true)
+	if err := mem.CreateSandbox(ctx, model.Sandbox{
+		ID: "sb", Template: "bare", State: model.Creating, CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	}, nil); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	// healthy sandbox: death_cause is ABSENT, not "" — absence means "not observed
+	// dead", so there is no falsy-but-present field to mistake for a liveness test.
+	resp := do(t, http.MethodGet, srv.URL+"/v1/sandboxes/sb")
+	raw, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET = %d: %s", resp.StatusCode, raw)
+	}
+	if strings.Contains(string(raw), "death_cause") {
+		t.Fatalf("healthy sandbox response carries a death_cause key: %s", raw)
+	}
+
+	// crash-paused with a resource-exceeded cause (the §4.3 do-NOT-resume case).
+	cause := model.CauseResourceExceeded
+	if err := mem.CompareAndSetState(ctx, "sb", model.Creating, model.Paused, nil, &cause); err != nil {
+		t.Fatalf("demote: %v", err)
+	}
+	resp = do(t, http.MethodGet, srv.URL+"/v1/sandboxes/sb")
+	var got sandboxResp
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	resp.Body.Close()
+	if got.State != string(model.Paused) {
+		t.Fatalf("state = %q; want paused", got.State)
+	}
+	if got.DeathCause != string(model.CauseResourceExceeded) {
+		t.Fatalf("death_cause = %q; want %q — the caller cannot make the §4.3 decision without it",
+			got.DeathCause, model.CauseResourceExceeded)
+	}
+
+	// List carries the same field, so deciding across several sandboxes does not
+	// need N+1 requests.
+	resp = do(t, http.MethodGet, srv.URL+"/v1/sandboxes")
+	var list []sandboxResp
+	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	resp.Body.Close()
+	if len(list) != 1 || list[0].DeathCause != string(model.CauseResourceExceeded) {
+		t.Fatalf("list = %+v; want one entry carrying the death cause", list)
+	}
+
+	// A successful-resume clear is reflected on the read path (no stale cause).
+	none := model.CauseNone
+	if err := mem.CompareAndSetState(ctx, "sb", model.Paused, model.Running, nil, &none); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	resp = do(t, http.MethodGet, srv.URL+"/v1/sandboxes/sb")
+	raw, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if strings.Contains(string(raw), "death_cause") {
+		t.Fatalf("cleared cause still present on the read path: %s", raw)
+	}
 }

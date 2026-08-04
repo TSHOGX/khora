@@ -127,8 +127,10 @@ func New(cfg Config) (*Engine, error) {
 
 	// outbox publisher → a log sink (§4.4-C: the engine only guarantees reliable
 	// write to a replayable stream; a real subscriber lives outside the engine).
+	// Default retry policy: bounded attempts, capped + jittered backoff (see
+	// store.PublisherConfig).
 	pub := store.NewPublisher(st, store.NewDedupSink(func(ev store.Event) {
-		log.Printf("event: %s sandbox=%s state=%s id=%s", ev.Kind, ev.Sandbox, ev.State, ev.ID)
+		log.Printf("event: %s sandbox=%s state=%s seq=%d id=%s", ev.Kind, ev.Sandbox, ev.State, ev.Seq, ev.ID)
 	}))
 
 	reaper := lifecycle.NewReaper(med, cfg.SweepInterval, cfg.TransportDownBudget)

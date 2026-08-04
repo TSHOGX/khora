@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"engine/internal/orchestrator"
+	"engine/internal/store"
 )
 
 func main() {
@@ -86,7 +87,32 @@ func main() {
 	}
 
 	// async outbox publisher (§4.4-C): drain the durable outbox to the event sink.
-	go eng.Publisher.Run(context.Background(), time.Second)
+	const publishInterval = time.Second
+	go eng.Publisher.Run(context.Background(), publishInterval)
+
+	// Publisher health, sampled on an INDEPENDENT goroutine (§4.4-C operability).
+	// This repo has no metrics dependency and this does not introduce one — the
+	// requirement is that a wedged drain be DISTINGUISHABLE from an idle one, and
+	// the log is what this codebase already uses for that class of fact. What
+	// makes it work is the goroutine, not the exporter: sampling on the drain
+	// itself would freeze the numbers exactly when the drain blocks, so silence
+	// would mean both "healthy" and "wedged".
+	//
+	// A halted publisher is the line that must be noticed: the event stream has
+	// STOPPED, which for a billing subscriber means charges stop accruing — it is
+	// not a degraded mode that heals itself, and clearing it is an operator action
+	// (Publisher.Resume).
+	go eng.Publisher.Monitor(context.Background(), 10*time.Second, 30*publishInterval, func(s store.Stats) {
+		if s.Halted {
+			log.Printf("ALERT: outbox publisher HALTED on event %s (seq %d) after %d attempts: %s — "+
+				"the event stream has stopped; %d rows are undelivered and nothing behind this event will be published until an operator intervenes",
+				s.HeadEventID, s.HeadSeq, s.Attempts, s.LastError, s.Backlog)
+			return
+		}
+		log.Printf("WARN: outbox publisher unhealthy: head=%s seq=%d attempts=%d backlog=%d published=%d since_heartbeat=%s in_flight_for=%s last_err=%q",
+			s.HeadEventID, s.HeadSeq, s.Attempts, s.Backlog, s.Published,
+			s.SinceHeartbeat.Round(time.Millisecond), s.InFlightFor.Round(time.Millisecond), s.LastError)
+	})
 
 	// §4.3 reaper: the autonomous control loop (auto-pause / crash-pause / evict
 	// + periodic reconcile). Started AFTER startup reconcile so it never races
