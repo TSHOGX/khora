@@ -25,7 +25,7 @@ needs the `drainrace` tag, so the routine gate does not cover it (see `README.md
 | **M4** | Reaper + health classification + live periodic reconcile: `auto-pause` / `evict` / `crash-pause` | §4.3 · §4.4-A |
 | **M5** | Templates as first-class rows: `parent` lineage, existence-as-state, derived refcount, reference-reclaim atomicity, GC, boot seed, Promote | §3.1 · §4.3 · §5.B · §6.1 |
 | **M6** | Resource governance: §3.4's three axes enforced (cgroup CPU · btrfs squota disk · host memcg RAM), no-oversubscribe admission, `PATCH` as the Binding write point, `internal/btrfs` | §2.3 · §3.4 · §4.1 · §4.3 · §5.A · §5.B · §6.1 |
-| **—** | *Post-M6 hardening (no rung, shipped):* the complete §5.E fs surface + streaming large-file bypass, the §4.2 pause drain barrier, `cpu.weight` beside `cpu.max`, and two structural guards — `internal/arch` (subsystems never import each other) with `internal/guestport` as the leaf that removed the last edge | §4.2 · §5.A · §5.E · §6.1 |
+| **—** | *Post-M6 hardening (no rung, shipped):* the complete §5.E fs surface + streaming large-file bypass, the §4.2 pause drain barrier, `cpu.weight` beside `cpu.max`, two structural guards (`internal/arch` — subsystems never import each other — with `internal/guestport` as the shared leaf that keeps its allowlist empty), and three closures: the §4.4-B transition-lock refcount, Promote through the §3.4 admission inequality, and PID 1's single-waiter reap table + namespace-wide signal broadcast | §3.4 · §4.2 · §4.4-B · §5.A · §5.E · §6.1 |
 
 ## Forward
 

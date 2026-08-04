@@ -46,12 +46,16 @@
 
 | 缺口 | 现状 vs 目标 | 落地归属 |
 | --- | --- | --- |
-| **① outbox publisher 头阻塞**(已留注,非正确性破坏) | 一条投递失败挡住其后全部(保序 / at-least-once 正确) | 随事件流可重放窗口(后续增量)择机收口 |
-| **② PID1 容器级 TERM 无宽限期** | PID 1 收 `SIGTERM`/`SIGINT` 后 `kill(-1, sig)` 广播、**紧接 `os.Exit(0)`**,而 PID 1 退出即拆掉 pid namespace——故那一发 TERM 事实上不可被处理,广播与直接 KILL 无差别。**今天不可达**:引擎销毁走 `runsc kill KILL` + `delete --force`(§5.A),从不向 guest PID 1 发 TERM,故无现存危害。**待定的是要不要有宽限期**:引擎是否想要"优雅关闭沙箱"这一语义(§4 today 只有 pause/destroy 两个动词)、若要则宽限多久、谁配置 | 择机收口;先于任何"向 guest 发 TERM"的调用方出现前拍板 |
-| **③ barrier map 只增不删**(已留注,非正确性破坏) | `barrier.go` 每见一个新 SandboxID 建一个条目、不回收(高 churn 下慢泄漏)。**曾与转换锁 map 同形、现已落单**:转换锁那侧已按 refcount 收口(`transitionLock.refs`),barrier 仍是原样,故它是引擎里唯一还剩的这类 map。同一道 refcount 形状大体可照搬,但**不是机械移植**:转换锁的条目在 `Unlock` 里回收,barrier 的条目由 `cond` 持有、没有对称的释放点,回收时机需另立论证 | 择机收口;参照转换锁的 refcount 形状 |
-| **④ `death_cause` 不在 §6.1 读面上** | 死因已落库(§4.3),但 `GET /v1/sandboxes/{id}` 不返回它,`resource-terminated` 只以 409 错误串现身。既然恢复决定归调用方(§4.3 narrowing),调用方就需要看到它所依据的那条事实 | 随事件流「可重放窗口 / event schema」那轮统一定读面(§2 的 §4.1 行) |
+| **outbox publisher 头阻塞**(已留注,非正确性破坏) | 一条投递失败挡住其后全部(保序 / at-least-once 正确) | 随事件流可重放窗口(后续增量)择机收口 |
+| **PID1 容器级 TERM 无宽限期** | PID 1 收 `SIGTERM`/`SIGINT` 后 `kill(-1, sig)` 广播、**紧接 `os.Exit(0)`**,而 PID 1 退出即拆掉 pid namespace——故那一发 TERM 事实上不可被处理,广播与直接 KILL 无差别。**今天不可达**:引擎销毁走 `runsc kill KILL` + `delete --force`(§5.A),从不向 guest PID 1 发 TERM,故无现存危害。**待定的是要不要有宽限期**:引擎是否想要"优雅关闭沙箱"这一语义(§4 今天只有 pause/destroy 两个动词)、若要则宽限多久、谁配置 | 择机收口;先于任何"向 guest 发 TERM"的调用方出现前拍板 |
+| **barrier map 只增不删**(已留注,非正确性破坏) | `barrier.go` 每见一个新 SandboxID 建一个条目、不回收(高 churn 下慢泄漏);引擎里唯一还剩的这类 map。转换锁那侧的 refcount(`transitionLock.refs`)是可参照的形状,但**不是机械移植**:转换锁的条目在 `Unlock` 里回收,barrier 的条目由 `cond` 持有、没有对称的释放点,回收时机需另立论证 | 择机收口;参照转换锁的 refcount 形状 |
+| **`death_cause` 不在 §6.1 读面上** | 死因已落库(§4.3),但 `GET /v1/sandboxes/{id}` 不返回它,`resource-terminated` 只以 409 错误串现身。既然恢复决定归调用方(§4.3 narrowing),调用方就需要看到它所依据的那条事实 | 随事件流「可重放窗口 / event schema」那轮统一定读面(§2 的 §4.1 行) |
 
 ---
 
 > **纪律:** 任何一项拍板后,先更新对应深挖文档或 plan 的相应章节,**再从本登记移除**——保证
 > "已定"进 plan、"未定"留本文,两边不重叠。§4 的缺口同理:owning plan 出现即迁入、从此移除。
+>
+> **引用本表按标题,不按位置。** 每一行的**加粗标题**就是它的名字(§2/§3 用 §编号,§4 用缺口名),行内
+> 不编号。理由是机制性的:收口一项就要删一行,而删行会把它下面所有行的序号平移——于是别处"§4 ②"这类
+> 引用**无声**改指另一条无关的项,删除方那边不会有任何报错。按标题引用则随收口一起失配,断得见。

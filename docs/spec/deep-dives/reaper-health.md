@@ -213,7 +213,7 @@ per-sandbox 单调计数,**就是换了名字的世代计数**(§1.1 明令禁�
   Volume 挂载行的引用-回收原子性(§4.3 + §4.4-C),另属对象回收 sweep。reaper 的 `evict` 走 `Destroy` 的
   **同步删 Overlay**,**不按 refcount 异步删字节**——reaper 在此只推**生命周期态**;失败后的字节由同一 tick
   的孤儿单元 sweep 兜。二者的接缝(evict 标 destroyed 与异步删字节解耦)spec §4.4 已定。
-- **TTL 取值**(default `idle_timeout` / `retention`)是纯数值旋钮,同 transport 的 ring/window(open-decisions
-  §2 的 §5.E 行):取保守默认、在配置点标注、留可调,不影响任何 invariant 形状。
+- **TTL 取值**(default `idle_timeout` / `retention`)是纯数值旋钮,同 transport 的 ring/window(见
+  [`transport.md`](./transport.md) D6.4 末条):取保守默认、在配置点标注、留可调,不影响任何 invariant 形状。
 - **egress 面资源枚举**并入周期对账,随 §5.D 数据面落地;本文预留位。
 - **CPU-bound 活动**若将来证明需计入,healthServer 加一份 `/proc` jiffies 采样(D1 末),additive。

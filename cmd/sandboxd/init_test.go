@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// These tests exercise the PID-1 reap/handoff seam (open-decisions §4 ②) as a
+// These tests exercise the PID-1 reap/handoff seam as a
 // plain host process — the logic is factored out of initMode precisely so it is
 // testable without being PID 1. What they prove: the single waiter never loses a
 // status, never blocks, survives an unregistered orphan and a double drain, and
