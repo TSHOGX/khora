@@ -208,7 +208,8 @@ type ProcessServiceClient interface {
 	// SendInput writes stdin (or pty-in) once — unary, for when no stream is held.
 	SendInput(context.Context, *connect.Request[v1.SendInputRequest]) (*connect.Response[v1.SendInputResponse], error)
 	// SendSignal signals a process; server defaults to the process group
-	// (kill(-pgid)) falling back to kill(pid) (transport D4.3 / §5.E.1).
+	// (kill(-pgid)) falling back to kill(pid) (transport D4.3 / §5.E.1). Directed
+	// only — see SendSignalRequest.pid on why pid <= 0 is refused.
 	SendSignal(context.Context, *connect.Request[v1.SendSignalRequest]) (*connect.Response[v1.SendSignalResponse], error)
 	// Update resizes a process's PTY (unary; not a separate service, a process
 	// field — transport D4.3).
@@ -356,7 +357,8 @@ type ProcessServiceHandler interface {
 	// SendInput writes stdin (or pty-in) once — unary, for when no stream is held.
 	SendInput(context.Context, *connect.Request[v1.SendInputRequest]) (*connect.Response[v1.SendInputResponse], error)
 	// SendSignal signals a process; server defaults to the process group
-	// (kill(-pgid)) falling back to kill(pid) (transport D4.3 / §5.E.1).
+	// (kill(-pgid)) falling back to kill(pid) (transport D4.3 / §5.E.1). Directed
+	// only — see SendSignalRequest.pid on why pid <= 0 is refused.
 	SendSignal(context.Context, *connect.Request[v1.SendSignalRequest]) (*connect.Response[v1.SendSignalResponse], error)
 	// Update resizes a process's PTY (unary; not a separate service, a process
 	// field — transport D4.3).

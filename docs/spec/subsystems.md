@@ -38,6 +38,12 @@
   **上限与份额都写**:`cpu.max` + `cpu.weight`,二者同由 `cpu_millis` 派生,理由见 §3.4;RAM 落 memcg);
   别的 provider 落成其调度层的等价资源约束(份额对应其调度权重)。**disk 容量上限不在此**——它是 FS 层
   配额,per-sandbox 的归 §5.B(Overlay upper+work)、per-volume 的归 §5.C。
+  - **disk I/O 速率轴落地时,整盘 MAJ:MIN 由 provider 自行推导**——与 RAM 的 overhead 同一形状:契约里
+    只有速率意图,设备号是 provider 内部细节。`local_runsc` 从自己的 state dir 反查 backing 整盘(`io.max`
+    要整块盘,给分区号则 launch 直接失败),该值全程不出本地 provider;远端 provider 用其调度层的等价物
+    表达速率帽。**否决"宿主拓扑配置项"**:无论落进 Binding 还是落进 provider 入参,都把一个宿主原语抬上了
+    跨 provider 契约面(下文 ❌ 清单)——设备号是彻底的宿主局部事实,远端 provider 根本产不出整盘设备号。
+    该禁令由 `internal/runtime/seam_test.go` 的 token 守卫结构性钉住(`major`/`minor`/`majmin`/`devno`)。
 - **RAM 是安全限,其"一个旋钮/两个值"的摊分是 provider 内部细节**:接口只说 `MemoryByte = N`
   (§3.4 Binding);provider 自己决定怎么把"N 字节 RAM"物化。`local_runsc` 内部把 guest 可见 RAM 设成
   N、宿主天花板设成 `N + overhead`(overhead 是**它的实现常数**,非契约成员——远端 provider 的开销

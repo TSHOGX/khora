@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -218,4 +219,27 @@ func TestWriteInputDoesNotBlockFanOut(t *testing.T) {
 		t.Fatalf("writeInput returned error: %v", err)
 	}
 	_ = sub
+}
+
+// The D4.3 subsystem boundary as pure logic: only pid > 0 is a directed target.
+// The substrate proof that a refused pid cannot destroy a real sandbox is C6 in
+// test/transport_depth_substrate_test.go; this pins the predicate itself,
+// including that the message says WHERE fan-out belongs — a caller that only
+// learns "invalid" keeps hunting for a transport-side way to do it.
+func TestValidateSignalPid(t *testing.T) {
+	for _, pid := range []int{-2147483648, -1, 0} {
+		err := validateSignalPid(pid)
+		if err == nil {
+			t.Errorf("validateSignalPid(%d) = nil, want refusal (pid <= 0 is POSIX fan-out)", pid)
+			continue
+		}
+		if !strings.Contains(err.Error(), "PID 1") {
+			t.Errorf("validateSignalPid(%d) message does not say fan-out belongs to PID 1: %v", pid, err)
+		}
+	}
+	for _, pid := range []int{1, 2, 12345} {
+		if err := validateSignalPid(pid); err != nil {
+			t.Errorf("validateSignalPid(%d) = %v, want nil (a directed target)", pid, err)
+		}
+	}
 }

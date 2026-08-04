@@ -96,8 +96,35 @@ func (h *healthServer) Check(_ context.Context, _ *connect.Request[v1.CheckReque
 
 // The fs service (§5.E) lives in fs.go.
 
+// signalPidErr is the message both ends use when a caller addresses SendSignal
+// at a non-positive pid. It says WHY rather than just "invalid": the pid is not
+// merely dangerous, it is addressed to the wrong subsystem.
+const signalPidErr = "pid must be > 0: SendSignal carries DIRECTED signals only " +
+	"(one process, defaulting to its group). pid <= 0 is POSIX fan-out — " +
+	"kill(0)/kill(-1) address a whole group or the whole pid namespace — and " +
+	"container-level fan-out belongs to guest PID 1, not the transport channel " +
+	"(guest-runtime D4.3 / §5.E.1)"
+
+// validateSignalPid enforces the D4.3 subsystem split at the transport entry
+// point. Only pid > 0 is a directed target; everything else is fan-out.
+//
+// This is the whole check on purpose — see SendSignal on why registry membership
+// is deliberately NOT required.
+func validateSignalPid(pid int) error {
+	if pid <= 0 {
+		return errString(signalPidErr)
+	}
+	return nil
+}
+
 // killProcessGroup signals pgid first (kill(-pgid)), falling back to pid
 // (transport D4.3 / §5.E.1: directed signals belong to transport mode).
+//
+// It REQUIRES a caller-validated pid > 0 (validateSignalPid); it does not
+// re-check. Both of its arms turn hostile on a non-positive pid — kill(-pid)
+// becomes the kill(-1) namespace broadcast at pid=1, and the fallback becomes a
+// directed kill(1) at pid=-1, which lands on PID 1's own TERM handler and tears
+// down the namespace.
 func killProcessGroup(pid, sig int) error {
 	if err := syscall.Kill(-pid, syscall.Signal(sig)); err == nil {
 		return nil

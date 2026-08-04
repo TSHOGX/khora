@@ -35,18 +35,13 @@
 
 ## 3. 待拍板的选型(有候选,未定论)
 
-| 选型 | 候选 | 当前倾向 | 归属 / 谁消费 |
-| --- | --- | --- | --- |
-| **disk I/O 速率帽的整盘 MAJ:MIN 来源** | 宿主拓扑配置项 / 由 provider 自行推导 | `io.max` 需**整块盘**的 MAJ:MIN(给分区号则 launch 直接失败),而 per-sandbox Binding 里没有宿主拓扑,故该值从哪来未定。轴本身是既定形状(§3.4 / §5.A:待有消费者时同形加入) | 谁消费:§5.A 资源上限物化 |
+> 无。
 
 ---
 
 ## 4. 实现缺口(设计已定,代码未落地 / 待收口)
 
-| 缺口 | 现状 vs 目标 | 落地归属 |
-| --- | --- | --- |
-| **PID1 容器级 TERM 无宽限期** | PID 1 收 `SIGTERM`/`SIGINT` 后 `kill(-1, sig)` 广播、**紧接 `os.Exit(0)`**,而 PID 1 退出即拆掉 pid namespace——故那一发 TERM 事实上不可被处理,广播与直接 KILL 无差别。**今天不可达**:引擎销毁走 `runsc kill KILL` + `delete --force`(§5.A),从不向 guest PID 1 发 TERM,故无现存危害。**待定的是要不要有宽限期**:引擎是否想要"优雅关闭沙箱"这一语义(§4 今天只有 pause/destroy 两个动词)、若要则宽限多久、谁配置 | 择机收口;先于任何"向 guest 发 TERM"的调用方出现前拍板 |
-| **barrier map 只增不删**(已留注,非正确性破坏) | `barrier.go` 每见一个新 SandboxID 建一个条目、不回收(高 churn 下慢泄漏);引擎里唯一还剩的这类 map。转换锁那侧的 refcount(`transitionLock.refs`)是可参照的形状,但**不是机械移植**:转换锁的条目在 `Unlock` 里回收,barrier 的条目由 `cond` 持有、没有对称的释放点,回收时机需另立论证 | 择机收口;参照转换锁的 refcount 形状 |
+> 无。
 
 ---
 

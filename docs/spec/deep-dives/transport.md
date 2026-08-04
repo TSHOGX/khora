@@ -268,6 +268,8 @@ RPC 清单(按 pid 寻址,tag 不进模型见 D4.6):
   dev-server 都 fork 子树,只杀父会留一堆孤儿。这是 spec §4.2「向 guest 内进程发定向信号」的落点(注意
   pause 的静止点本身不走这条路:它是 host 侧 drain-barrier,不给负载发协作信号,guest-runtime D4.4)。
   定向信号归 transport、容器级扇出归 PID1 的分裂见 guest-runtime.md D4.3(§5.E.1),不在此复述。
+  **故 `pid` 必须 > 0,否则 `invalid_argument`**:`pid <= 0` 在 POSIX 里就是扇出形式,归 PID 1 那侧;
+  校验点、实测后果与"沙箱级宽限期已否决"同在 D4.3,本表不复制。
 
 ### D4.4 fs 服务面
 

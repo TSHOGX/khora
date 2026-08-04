@@ -100,8 +100,13 @@ const (
 // purpose, and that is a settled deferral rather than an open question: the
 // mechanism is proven, the CONSUMER is what's missing, so adding the field now
 // would be the speculative reservation §1.3 rejects. It joins additively when a
-// consumer appears (one field here + one OCI section, no shape change). What is
-// still open is only where the whole-disk MAJ:MIN comes from (open-decisions §3).
+// consumer appears (one field here + one OCI section, no shape change) — and
+// what joins is a RATE and nothing more: the whole-disk MAJ:MIN that `io.max`
+// needs is DERIVED BY THE PROVIDER from its own state dir, never carried in this
+// record and never crossing the §5.A seam. A device number is an irreducibly
+// host-local fact, so putting it in the Binding would lift a host primitive into
+// a cross-provider contract (§5.A); a remote provider expresses the same cap
+// through its scheduler's equivalent instead.
 type Limits struct {
 	CPUMillis  int64 // 1000 = one full CPU
 	MemoryByte int64

@@ -16,10 +16,24 @@ import (
 // One list, shared by BOTH halves of the guard below (signatures and data-type
 // fields) — a token banned from a parameter must be equally banned from a field,
 // or the cheaper of the two spellings becomes the way in.
+//
+// The block-device vocabulary is banned for a reason worth stating, because the
+// axis it guards is not built yet. When the disk-IO RATE cap lands (§3.4's other
+// rate-axis half), `io.max` will need a WHOLE-DISK MAJ:MIN, and the settled
+// answer is that the provider DERIVES it from its own state dir rather than
+// receiving it (a device number is irreducibly host-local, so a remote provider
+// could not produce one — §5.A). Matching is by name SUBSTRING, and no token
+// above would have stopped a field spelled `MajMin` or `MajorNum`: without these
+// four, the decision's half-life is however long until the next person wires
+// that cap through a struct field, which is exactly the cheap-at-the-time leak
+// this test exists to catch. They ban the SPELLINGS of a device number, not
+// every synonym for one — a field named e.g. `DiskDevice` still gets through, so
+// this backstops the §5.A rule rather than replacing the need to know it.
 var bannedTokens = []string{
 	"cgroup", "memcg", "oom",
 	"upperdir", "workdir", "hostpath", "abspath",
 	"subvolume", "qgroup", "squota", "errno",
+	"major", "minor", "majmin", "devno",
 }
 
 // fieldExemptions are the exported seam fields permitted to carry a host-shaped

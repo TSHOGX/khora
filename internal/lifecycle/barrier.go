@@ -35,12 +35,26 @@ import (
 // barrier tracks in-flight engine-issued mutating operations per sandbox and lets
 // a pause wait for them to drain.
 //
-// Keyed per sandbox, and the one map here whose entries are created on demand and
-// never reclaimed — a slow leak under high sandbox churn, registered in
-// open-decisions. The transition lock's refcount is the shape to port, but not
-// mechanically: that one collects in Unlock, whereas a barrier entry is held by
-// its cond and has no symmetric release point, so the collection point needs its
-// own argument.
+// Both maps are keyed per sandbox and both RECLAIM, so neither grows with sandbox
+// churn — a load-bearing invariant, not an incidental tidiness, because these maps
+// are keyed by an identifier the caller mints without bound:
+//
+//   - an inFlight entry disappears when the LAST in-flight operation for that
+//     sandbox releases (enter's returned closure deletes the whole set once it
+//     empties, not just its own op);
+//   - a draining entry disappears at undrain, which every pause registers with
+//     defer BEFORE its CAS so a failed pause reclaims it too (§4.2 / D4.4).
+//
+// Emptiness is therefore the steady state: between operations a quiet sandbox has
+// no entry in either map, and the transition lock's refcount (§4.4-B) has no
+// analogue to port here — the count that matters IS the in-flight set, and it is
+// already exact.
+//
+// What keeps that true is a discipline at the call sites rather than anything the
+// type can enforce: enter hands back a release closure, and losing it strands an
+// entry forever, which no build error and no other assertion would notice. Hence
+// barrier_test.go's structural guard over the Enter call sites — see it before
+// adding one.
 type barrier struct {
 	mu sync.Mutex
 	// cond signals when a sandbox's in-flight count reaches zero.

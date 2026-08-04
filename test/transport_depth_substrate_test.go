@@ -1,8 +1,9 @@
 //go:build substrate
 
-// Transport-depth acceptance (C1–C5, C7) against the REAL sandboxd under real
+// Transport-depth acceptance (C1–C7) against the REAL sandboxd under real
 // runsc: PTY interactive loop, multi-connection fan-out, Connect ring replay,
-// signal-to-group, and keepalive on a long idle stream. Requires root.
+// signal-to-group, refusal of non-directed signal targets, and keepalive on a
+// long idle stream. Requires root.
 //
 //	sudo env PATH=$PATH GOTOOLCHAIN=local GOFLAGS=-mod=mod GOSUMDB=off HOME=$HOME \
 //	  go test -tags substrate -v -count=1 -timeout 300s ./test/ -run Transport
@@ -16,6 +17,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"connectrpc.com/connect"
 
 	"engine/internal/transport"
 	"engine/test/harness"
@@ -434,3 +437,91 @@ func TestTransportLongStreamKeepalive(t *testing.T) {
 // keepaliveWait is how long C7 holds the stream idle — past the server's 20s
 // keepalive interval so at least one keepalive frame must arrive.
 const keepaliveWait = 23 * time.Second
+
+// C6: SendSignal refuses a non-positive pid, and the sandbox survives it.
+//
+// This MUST be a substrate test, not a unit test: the assertion is that a real
+// pid<=0 request cannot destroy a real sandbox, and only runsc's pid namespace
+// contains the blast radius — kill(-1) on the host would signal the developer's
+// own session.
+//
+// Each case is measured against a LIVE workload, which is what makes the survival
+// assertion meaningful: the guest is not empty, so a fan-out would have something
+// to hit. Pre-fix, both cases below killed the sandbox outright (the RPC returned
+// "unavailable: unexpected EOF" and Health never came back).
+func TestTransportSignalRefusesNonPositivePid(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		pid  int
+		// what the unvalidated code did with this pid, i.e. what the refusal buys
+		wasHow string
+	}{
+		{"minus-one", -1, "kill(-(-1)) = directed kill(1) → PID 1's own TERM handler → namespace torn down"},
+		{"zero", 0, "kill(-0) = kill(0) → sandboxd's own process group, which is group 1 → PID 1 included"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cl, cleanup := launchOne(t)
+			defer cleanup()
+			ctx := context.Background()
+
+			// A live workload, held on `read` so it stays alive on its own.
+			ch, err := cl.Start(ctx, transport.StartSpec{
+				Cmd: "/bin/sh", Args: []string{"-c", "echo READY; read x"},
+			})
+			if err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			var pid int
+			for ev := range ch {
+				if ev.Kind == "start" {
+					pid = ev.PID
+					break
+				}
+			}
+			if pid <= 0 {
+				t.Fatal("no start pid")
+			}
+			ended := make(chan collected, 1)
+			go func() { ended <- collectUntilEnd(ch) }()
+			time.Sleep(300 * time.Millisecond)
+
+			// 15 = SIGTERM, the signal that is actually lethal here: PID 1 handles
+			// it, broadcasts, and exits.
+			err = cl.SendSignal(ctx, tc.pid, 15)
+			if err == nil {
+				t.Fatalf("SendSignal(pid=%d, SIGTERM) was ACCEPTED — %s", tc.pid, tc.wasHow)
+			}
+			if code := connect.CodeOf(err); code != connect.CodeInvalidArgument {
+				t.Errorf("SendSignal(pid=%d) code = %v, want invalid_argument (got err %v)", tc.pid, code, err)
+			}
+			// The message must explain the subsystem split, not just say "invalid" —
+			// a caller holding a pid<=0 needs to know fan-out is PID 1's, so it
+			// stops looking for a transport-side way to do it.
+			if !strings.Contains(err.Error(), "PID 1") {
+				t.Errorf("refusal does not say where fan-out belongs; got: %v", err)
+			}
+
+			// The sandbox survived: Health answers AND the workload is still running.
+			if _, err := cl.Health(ctx); err != nil {
+				t.Fatalf("sandbox did not survive SendSignal(pid=%d): Health: %v", tc.pid, err)
+			}
+			select {
+			case c := <-ended:
+				t.Fatalf("workload pid %d died despite the refusal (exit %d, streamErr %v)", pid, c.exit, c.streamErr)
+			case <-time.After(500 * time.Millisecond):
+				// still running, as required
+			}
+
+			// Control: a DIRECTED signal at the same workload still works, so the
+			// validation refused fan-out without breaking the real signal path.
+			if err := cl.SendSignal(ctx, pid, 15); err != nil {
+				t.Fatalf("directed SendSignal(pid=%d) broke: %v", pid, err)
+			}
+			select {
+			case <-ended:
+			case <-time.After(10 * time.Second):
+				t.Fatal("directed SIGTERM did not end the workload stream")
+			}
+		})
+	}
+}
