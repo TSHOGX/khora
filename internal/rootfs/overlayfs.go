@@ -10,6 +10,8 @@ import (
 	"syscall"
 
 	"engine/internal/btrfs"
+
+	"engine/internal/guestport"
 )
 
 // HostOverlayFS is the single-node rootfs provider (§5.B): it assembles the
@@ -639,6 +641,21 @@ var promoteExcludedPaths = []string{
 	"tmp/.sandboxd-crashloop",
 }
 
+// promoteExcludedPrefixes excludes engine-injected debris by BASE-NAME prefix,
+// for the cases where the exact path is not knowable in advance.
+//
+// The streaming upload's temp file is the reason this exists: it must be created in
+// the CALLER'S destination directory (rename(2) cannot cross filesystems, and /tmp
+// is a separate tmpfs), so it can appear anywhere the caller writes. A crash
+// mid-upload strands one, and an exact-path list cannot cover "anywhere". Freezing
+// that debris into a Template would ship it to every sandbox created from it.
+//
+// The prefix comes from internal/guestport, imported by BOTH binaries, so a rename
+// cannot silently drift the way the exact-path list above can.
+var promoteExcludedPrefixes = []string{
+	guestport.UploadTempPrefix,
+}
+
 // PromoteToTemplate freezes the source Overlay's at-rest upper into a new
 // read-only layer dir under LayersDir (§5.B Promote). bytes-first: this writes
 // ONLY bytes — the caller inserts the templates row afterward (§4.3 INV-3). The
@@ -702,6 +719,17 @@ func copyTree(src, dst string, excluded map[string]bool) error {
 				return filepath.SkipDir
 			}
 			return nil
+		}
+		// Prefix exclusion, for debris whose exact path is not knowable in advance
+		// (see promoteExcludedPrefixes). Matched on the BASE NAME, since an upload
+		// temp file can be left in any directory the caller writes to.
+		if rel != "." && !info.IsDir() {
+			base := filepath.Base(rel)
+			for _, pre := range promoteExcludedPrefixes {
+				if strings.HasPrefix(base, pre) {
+					return nil
+				}
+			}
 		}
 		target := filepath.Join(dst, rel)
 		switch {

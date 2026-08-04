@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"syscall"
+
+	"engine/internal/guestport"
 )
 
 // --- large-file bypass (§5.E fs / transport D4.4) ----------------------------
@@ -127,7 +129,13 @@ func handleFilesPut(w http.ResponseWriter, r *http.Request) {
 	// directory is atomic, so an interrupted upload cannot leave a truncated file
 	// where the caller expects a whole one. This is also why the streaming path
 	// does not share fs.Write's truncate-then-write hazard.
-	tmp, err := os.CreateTemp(filepath.Dir(p), ".upload-*")
+	//
+	// It must be the same directory, not /tmp: rename(2) cannot cross filesystems
+	// (EXDEV), and /tmp is a separate tmpfs mount. The cost is that a crash mid-
+	// upload strands a dotfile next to the caller's target, so the prefix below is
+	// matched by rootfs.promoteExcludedPrefixes — otherwise a Promote would freeze
+	// that debris into a Template. Renaming this prefix means changing it there too.
+	tmp, err := os.CreateTemp(filepath.Dir(p), guestport.UploadTempPrefix+"*")
 	if err != nil {
 		httpFsErr(w, "upload", p, err)
 		return

@@ -19,3 +19,15 @@ package guestport
 // guest netns. It can be constant across sandboxes because each sandbox has its
 // own netns — the veth IP disambiguates, not the port (§5.E netns-internal TCP).
 const Port = 9000
+
+// UploadTempPrefix is the filename prefix sandboxd uses for the in-progress temp
+// file of a streaming upload (§5.E fs / transport D4.4).
+//
+// It lives here for the same reason Port does: two binaries must agree on it and
+// neither should import the other. The guest creates these files; §5.B must EXCLUDE
+// them from a Promoted layer, because a crash mid-upload strands one next to the
+// caller's target and freezing that debris into a Template would ship it to every
+// sandbox created from it. The temp file cannot simply live in /tmp — rename(2)
+// cannot cross filesystems and /tmp is a separate tmpfs — so the two sides
+// coordinate on this prefix instead.
+const UploadTempPrefix = ".sandboxd-upload-"

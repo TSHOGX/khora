@@ -46,6 +46,18 @@ func Dial(ep Endpoint) Client {
 				var d net.Dialer
 				return d.DialContext(ctx, network, addr)
 			},
+			// Detect a guest that died mid-stream in SECONDS, not minutes. A sandbox
+			// terminated by its RAM cap (§3.4) never closes its streams — the process is
+			// simply gone — so without this the host waits out the kernel's TCP
+			// retransmit timeout, measured at ~150s, before the read fails. That is long
+			// enough to look like a hang rather than a death.
+			//
+			// h2 PING is the right layer: it works even when the stream is legitimately
+			// silent, so it cannot be confused with an idle-but-healthy long stream. The
+			// guest's own 20s application keepalive (D4.2) already establishes that
+			// silence this long is abnormal, so probing at 30s adds no false positives.
+			ReadIdleTimeout: 30 * time.Second,
+			PingTimeout:     10 * time.Second,
 		},
 	}
 	base := "http://" + string(ep)

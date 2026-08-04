@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"engine/internal/guestport"
 )
 
 func newProvider(t *testing.T) (*HostOverlayFS, string) {
@@ -51,6 +53,13 @@ func TestPromoteToTemplateExcludesRuntimePaths(t *testing.T) {
 		"tmp/.sandboxd-transport.pid": "12345",  // excluded (§5.B / D5)
 		"tmp/.sandboxd-crashloop":     "x",      // excluded (§5.B / D5)
 		"tmp/user-scratch":            "keepme", // NOT excluded (only the sandboxd paths are)
+		// Upload debris, excluded BY PREFIX rather than by exact path. A streaming
+		// upload's temp file must be created in the caller's own destination
+		// directory (rename(2) cannot cross filesystems), so a crash mid-upload can
+		// strand one ANYWHERE the caller writes — two different directories here, to
+		// pin that the rule is not tied to a location.
+		"home/work/" + guestport.UploadTempPrefix + "a1b2": "partial upload",
+		"etc/" + guestport.UploadTempPrefix + "deadbeef":   "partial upload",
 	})
 
 	ov := &Overlay{ID: "ov_src", Template: "bare", Lower: []string{"bare"}}
@@ -76,6 +85,17 @@ func TestPromoteToTemplateExcludesRuntimePaths(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(layer, "tmp/.sandboxd-crashloop")); !os.IsNotExist(err) {
 		t.Errorf("sandboxd crashloop sentinel leaked into layer: %v", err)
+	}
+	// Upload debris is excluded BY PREFIX, wherever it was stranded. Freezing it
+	// would ship one caller's interrupted upload to every sandbox created from this
+	// Template.
+	for _, debris := range []string{
+		"home/work/" + guestport.UploadTempPrefix + "a1b2",
+		"etc/" + guestport.UploadTempPrefix + "deadbeef",
+	} {
+		if _, err := os.Stat(filepath.Join(layer, debris)); !os.IsNotExist(err) {
+			t.Errorf("upload temp file %s leaked into layer: %v", debris, err)
+		}
 	}
 	// no leftover staging dir.
 	if _, err := os.Stat(layer + ".staging"); !os.IsNotExist(err) {
