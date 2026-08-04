@@ -56,6 +56,15 @@ import (
 // here rather than assumed. `0 = unlimited` stays legal on an UNMETERED axis,
 // where it is an honest resting value.
 //
+// TWO ENTRY POINTS, one inequality. `admit` gates a new/raised PROMISE (create,
+// resume, a cap raise) and adds to the FIRST term. `admitUncappedGrowth` gates a
+// control-plane action that adds bytes to the SECOND term with no cap over them
+// (Promote freezing a layer). They are deliberately not one function: which term
+// an action lands in is the whole content of the accounting argument above, so the
+// call site has to say it (§3.4 states the rule for both — a cap the node cannot
+// honor is refused, AND any action that increases uncapped bytes clears the same
+// inequality).
+//
 // Where this sits in the §4 structure: admission reads the AUTHORITATIVE store
 // (committed promises) and asks the Rootfs provider to measure its own bytes.
 // Both are mediator actions — the mediator reads the store and calls subsystem
@@ -88,6 +97,76 @@ type NodeCapacity struct {
 	// percent at a 1 GiB cap, up to 100% at a 64 MiB one. No "reserve X% of
 	// physical RAM" rule is therefore safe across all cap sizes.
 	MemoryByte int64
+}
+
+// admitUncappedGrowth is the SECOND entry point to the same inequality, for a
+// control-plane action that adds bytes to the MEASURED term instead of making a
+// new promise (§3.4: "any control-plane action that increases uncapped bytes
+// should clear the same inequality"; rootfs-overlay D6.5 残留). Promote is the
+// first such action — a frozen layer is charged to no sandbox cap, so it lands
+// entirely in the second term.
+//
+// It is a separate function rather than `admit(model.Limits{DiskByte: n})` for a
+// reason that is semantic, not cosmetic. The arithmetic coincides; the meaning does
+// not. `want` is a PROMISE — an upper bound on future growth, which the gate then
+// expects to find in the store as a committed cap and to count in the first term
+// forever after. These bytes are the opposite: they are about to be REAL, no cap
+// will ever cover them, and the next gate run will find them by MEASURING
+// (UncappedBytes), not by summing rows. Feeding them through `want` would also trip
+// the metered-axis-requires-a-cap check, which is a statement about sandboxes and
+// says nothing about a layer. Keeping the two entry points distinct is what stops
+// the two disjoint terms from being conflated (see the header).
+//
+// growth is a FORECAST, unlike the measured term it joins: it is asked before the
+// action runs, so it must be an upper bound (rootfs.Provider.PromoteCostBytes
+// states that contract). Only the disk budget is consulted — uncapped bytes are
+// disk by construction, and the two budgets are not fungible (§3.4).
+//
+// It is the CALLER's job to hold admitMu across {gate → make the growth visible},
+// exactly as create holds it across {gate → insert the record}. For Promote the
+// bytes do not become measurable until the copy finishes, which is far too long to
+// hold a node-global lock, so the mediator publishes a RESERVATION instead — see
+// pendingUncappedBytes.
+func (m *Mediator) admitUncappedGrowth(ctx context.Context, growth int64) error {
+	capDisk := m.deps.NodeCapacity.DiskByte
+	if capDisk <= 0 {
+		return nil // disk unmetered → this inequality does not describe this node
+	}
+	if growth < 0 {
+		return fmt.Errorf("admission: negative uncapped growth %d", growth)
+	}
+	recs, err := m.deps.Store.ListSandboxes(ctx)
+	if err != nil {
+		return fmt.Errorf("admission: list sandboxes: %w", err)
+	}
+	committedDisk, _ := sumCommitted(recs, "")
+	uncapped, err := m.deps.Rootfs.UncappedBytes(ctx)
+	if err != nil {
+		// Same fail-closed reasoning as admit: an unmeasurable backend means the
+		// inequality cannot be evaluated, and the cost of admitting blind lands on
+		// unrelated sandboxes (§2.3), not on this caller.
+		return fmt.Errorf("admission: %w: cannot measure uncapped bytes: %v", ErrInsufficientCapacity, err)
+	}
+	pending := m.pendingUncapped()
+	if total := committedDisk + uncapped + pending + growth; total > capDisk {
+		return fmt.Errorf("admission: %w: uncapped growth — committed caps %d + uncapped bytes %d + in-flight %d + growth %d = %d > node capacity %d",
+			ErrInsufficientCapacity, committedDisk, uncapped, pending, growth, total, capDisk)
+	}
+	return nil
+}
+
+// sumCommitted is Σ over COMMITTED promises, shared by both entry points so the
+// first term cannot drift between them. excludeID drops one sandbox's own row (see
+// admit); model.Destroyed records are already gone in every sense that matters.
+func sumCommitted(recs []model.Sandbox, excludeID model.SandboxID) (disk, mem int64) {
+	for _, r := range recs {
+		if r.ID == excludeID || r.State == model.Destroyed {
+			continue
+		}
+		disk += r.Limits.DiskByte
+		mem += r.Limits.MemoryByte
+	}
+	return disk, mem
 }
 
 // admit checks whether granting `want` keeps the node within its declared
@@ -134,14 +213,7 @@ func (m *Mediator) admit(ctx context.Context, want model.Limits, excludeID model
 	// (no container, no memcg) — but we still count it, because admitting new RAM
 	// against memory that a paused sandbox is entitled to reclaim on resume is
 	// exactly the oversubscription this gate exists to prevent.
-	var committedDisk, committedMem int64
-	for _, r := range recs {
-		if r.ID == excludeID || r.State == model.Destroyed {
-			continue
-		}
-		committedDisk += r.Limits.DiskByte
-		committedMem += r.Limits.MemoryByte
-	}
+	committedDisk, committedMem := sumCommitted(recs, excludeID)
 
 	if cap.DiskByte > 0 {
 		// The term the caps cannot express (D6.2): bytes under no declared cap —
@@ -156,9 +228,14 @@ func (m *Mediator) admit(ctx context.Context, want model.Limits, excludeID model
 			// failing open costs write failures across unrelated sandboxes (§2.3).
 			return fmt.Errorf("admission: %w: cannot measure uncapped bytes: %v", ErrInsufficientCapacity, err)
 		}
-		if total := committedDisk + uncapped + want.DiskByte; total > cap.DiskByte {
-			return fmt.Errorf("admission: %w: disk — committed caps %d + uncapped bytes %d + requested %d = %d > node capacity %d",
-				ErrInsufficientCapacity, committedDisk, uncapped, want.DiskByte, total, cap.DiskByte)
+		// In-flight uncapped growth counts too (pendingUncappedBytes): a Promote that
+		// has cleared its own gate and is mid-copy owns those bytes even though
+		// UncappedBytes cannot see all of them yet. Omitting it would let a create
+		// admitted during the copy find the capacity gone when the layer lands.
+		pending := m.pendingUncapped()
+		if total := committedDisk + uncapped + pending + want.DiskByte; total > cap.DiskByte {
+			return fmt.Errorf("admission: %w: disk — committed caps %d + uncapped bytes %d + in-flight %d + requested %d = %d > node capacity %d",
+				ErrInsufficientCapacity, committedDisk, uncapped, pending, want.DiskByte, total, cap.DiskByte)
 		}
 	}
 
@@ -169,4 +246,58 @@ func (m *Mediator) admit(ctx context.Context, want model.Limits, excludeID model
 		}
 	}
 	return nil
+}
+
+// reserveUncapped / releaseUncapped publish an in-flight addition to the measured
+// term so a CONCURRENT gate run sees it (§3.4 no-oversubscribe under concurrency).
+//
+// WHY A RESERVATION AND NOT JUST THE MUTEX. Every other gate caller holds admitMu
+// across {evaluate → make the change visible}: create inserts its record, a raise
+// commits the column, and the next run's store read finds it. Promote cannot do
+// that — its bytes only become visible to UncappedBytes as the copy proceeds, and
+// the copy is a full byte-for-byte tree copy. Holding a node-global lock for its
+// duration would serialize every create on the whole node behind one Promote. So
+// the reservation IS Promote's "commit": published under admitMu before the lock is
+// released, dropped once the bytes are real (or the attempt failed).
+//
+// Without it two concurrent Promotes each measure a pre-copy world, each fit, and
+// together overshoot — the same race admitMu exists to stop for create, reached by
+// a different route.
+//
+// It transiently DOUBLE-COUNTS: as the copy lands, those bytes appear in
+// UncappedBytes while the reservation still stands. That overstates the left side,
+// which refuses a create that might have fit — the conservative direction, and the
+// one this gate is supposed to err in. Undercounting would hand the failure to an
+// unrelated sandbox as ENOSPC (§2.3), which is the harm the gate exists to prevent.
+func (m *Mediator) reserveUncapped(n int64) {
+	if n <= 0 {
+		return
+	}
+	m.mu.Lock()
+	m.pendingUncappedBytes += n
+	m.mu.Unlock()
+}
+
+func (m *Mediator) releaseUncapped(n int64) {
+	if n <= 0 {
+		return
+	}
+	m.mu.Lock()
+	m.pendingUncappedBytes -= n
+	neg := m.pendingUncappedBytes < 0
+	m.mu.Unlock()
+	if neg {
+		// Unreachable by construction (one release per admitted reservation, via
+		// defer). Clamping to 0 would ERASE the evidence of the opposite bug: a
+		// reservation released once too FEW permanently shrinks the node's
+		// admissible capacity, and a silent clamp is what makes that invisible.
+		// Same choice, same reason, as the transition lock's refs < 0.
+		panic("lifecycle: uncapped reservation released more times than acquired")
+	}
+}
+
+func (m *Mediator) pendingUncapped() int64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.pendingUncappedBytes
 }

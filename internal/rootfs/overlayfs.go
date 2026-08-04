@@ -384,6 +384,59 @@ func (p *HostOverlayFS) UncappedBytes(ctx context.Context) (int64, error) {
 	return total, nil
 }
 
+// PromoteCostBytes forecasts what freezing this Overlay would add to the uncapped
+// term (§3.4 / D6.5). See the seam doc on rootfs.Provider for the contract; this
+// is how the local adapter honors it: PromoteToTemplate is a byte-for-byte copy of
+// the upper into LayersDir, so the cost is the upper's projected size on disk.
+//
+// It deliberately does NOT reuse blockBytes. That one reports ALLOCATED blocks,
+// which is right for measuring bytes already on disk but WRONG as a forecast of
+// this copy: copyFile is an io.Copy and does not punch holes, so a sparse file
+// with st_blocks=0 and st_size=512 MiB measures as 0 here and costs 512 MiB in the
+// layer. Under-reporting is the one direction the gate cannot tolerate, so each
+// regular file is projected at max(allocated, apparent) — apparent covers the
+// sparse case, allocated covers a file whose blocks exceed its length.
+//
+// Two deliberate overstatements, both the SAFE direction (seam contract point 2):
+// excluded paths are counted (they will not land in the layer), and hardlinks are
+// counted per link (copyTree does not re-link, so each link really does become an
+// independent file in the layer — this is the one place a per-link count is not a
+// double charge).
+//
+// The source is at-rest by convention only — the mediator gates BEFORE quiescing —
+// so a concurrent guest write makes this stale on return. That is stated at the
+// seam; the number is a bound at the instant of admission, like the term it feeds.
+func (p *HostOverlayFS) PromoteCostBytes(_ context.Context, o *Overlay) (int64, error) {
+	if o == nil {
+		return 0, fmt.Errorf("rootfs: promote cost: nil overlay")
+	}
+	upper := p.upperPath(o.ID)
+	var total int64
+	err := filepath.Walk(upper, func(_ string, info os.FileInfo, err error) error {
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil // raced with a destroy; a missing file costs nothing to copy
+			}
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return nil // dirs/symlinks/devices: no data bytes copied
+		}
+		size := info.Size()
+		if st, ok := info.Sys().(*syscall.Stat_t); ok {
+			if alloc := st.Blocks * 512; alloc > size {
+				size = alloc
+			}
+		}
+		total += size
+		return nil
+	})
+	if err != nil && !os.IsNotExist(err) {
+		return 0, fmt.Errorf("rootfs: promote cost for overlay %s: %w", o.ID, err)
+	}
+	return total, nil
+}
+
 // blockBytes sums the ALLOCATED bytes of regular files under root — st_blocks×512,
 // the host filesystem's own statement of what those files cost.
 //
@@ -665,11 +718,10 @@ var promoteExcludedPrefixes = []string{
 // place, so a crash mid-copy never leaves a half-written layer at the final ID
 // (a staging dir is a plain orphan the sweep reclaims).
 //
-// KNOWN GAP (registered in open-decisions §4 ⑤, not a defect of this function):
-// freezing a layer INCREASES the "bytes under no cap" term of the §3.4 node
-// inequality (rootfs-overlay D6.5), but Promote does not pass the admission gate,
-// so it can push Σ past the node budget. The principle is settled; the code is not
-// yet wired.
+// Freezing a layer INCREASES the "bytes under no cap" term of the §3.4 node
+// inequality (rootfs-overlay D6.5), so the mediator gates a Promote on
+// PromoteCostBytes before calling this — the forecast of what this copy will add.
+// This function does not gate anything itself: it is a mechanism (§4).
 func (p *HostOverlayFS) PromoteToTemplate(_ context.Context, o *Overlay, newTemplateID string) error {
 	if err := validateSeg("newTemplateID", newTemplateID); err != nil {
 		return err

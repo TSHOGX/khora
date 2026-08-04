@@ -182,6 +182,14 @@ type Mediator struct {
 	// provider enumerates, so a create committing in between presents as bytes with
 	// no live row, indistinguishable from an orphan. Guarded by mu.
 	buildingOverlays map[model.OverlayID]bool
+
+	// pendingUncappedBytes is in-flight growth of the §3.4 accounting formula's
+	// MEASURED term: bytes a gated control-plane action has been admitted to add
+	// but that the provider's measurement cannot see yet (a Promote mid-copy). The
+	// admission gate adds it to the left side so a concurrent run cannot spend the
+	// same capacity twice. Guarded by mu; see reserveUncapped for why a reservation
+	// rather than simply holding admitMu across the action.
+	pendingUncappedBytes int64
 }
 
 // liveState is the mediator's in-memory handle to a running sandbox's
@@ -758,12 +766,29 @@ func (m *Mediator) destroyLocked(ctx context.Context, rec model.Sandbox) error {
 // current Template, so lineage is the source's stack + this frozen layer on top
 // (§5.B multi-lowerdir).
 //
-// KNOWN GAP (registered: open-decisions §4 item ⑤, not an oversight): Promote
-// does NOT pass the §3.4 admission gate, yet freezing a layer ADDS to the
-// "bytes under no declared cap" term of the accounting formula, so it can push Σ
-// past the node budget. §3.4 settles the principle — any control-plane action
-// that adds uncapped bytes should clear the same inequality — but the code does
-// not yet implement it, and the fix belongs to a later milestone.
+// ADMISSION (§3.4 / rootfs-overlay D6.5): a frozen layer is charged to no sandbox
+// cap, so it grows the MEASURED term of the node accounting formula and must clear
+// the same inequality as a create. The refusal is ErrInsufficientCapacity (507),
+// and the harm it prevents is not "this Promote fails" — it is an UNRELATED sandbox
+// meeting ENOSPC nowhere near its own cap, i.e. §2.3 containment broken from the
+// other side. Gated through admitUncappedGrowth, never through `admit`: these bytes
+// join the measured term, not the promise term (see admission.go).
+//
+// The gate runs BEFORE the quiesce, deliberately, and the cost is stated in the
+// forecast's accuracy rather than in the state machine:
+//   - Placing it after the quiesce would buy an exact byte count (the upper is
+//     frozen) at the price of a REFUSAL THAT MUTATED STATE — a running sandbox left
+//     `paused`, with a `paused` event already published, because the node was full.
+//     §4.4-A wants a failed transition to return to its source state; "refused, and
+//     by the way your sandbox is stopped" is not that.
+//   - So the source is still live when it is measured, and the number is an upper
+//     bound that a concurrent guest write can outgrow (bounded by the sandbox's own
+//     remaining headroom, and PromoteCostBytes overstates on the other axes). This
+//     is the same "true at the instant of admission" residual the whole measured
+//     term carries (D6.5 残留) — not a new weakness.
+//
+// A refused Promote therefore leaves the sandbox in its ENTRY state (running stays
+// running, paused stays paused), no layer bytes on disk, and no `templates` row.
 func (m *Mediator) Promote(ctx context.Context, id model.SandboxID) (model.TemplateID, error) {
 	l := m.lock(id)
 	l.Lock()
@@ -773,18 +798,53 @@ func (m *Mediator) Promote(ctx context.Context, id model.SandboxID) (model.Templ
 	if err != nil {
 		return "", fmt.Errorf("promote: %w", err)
 	}
-	switch rec.State {
-	case model.Running:
+	// State check first, so an illegal source is a plain 409 that never measures
+	// anything.
+	if rec.State != model.Running && rec.State != model.Paused {
+		return "", fmt.Errorf("promote: %w (state=%s, want running or paused)", store.ErrConflict, rec.State)
+	}
+
+	// open the source Overlay by ID (byte read only, no mount). Needed by the gate
+	// below as well as the freeze, so it is opened before either.
+	ov, err := m.deps.Rootfs.OpenOverlay(ctx, string(rec.Overlay), []string{string(rec.Template)}, rootfs.CapUnchanged)
+	if err != nil {
+		return "", fmt.Errorf("promote: open overlay: %w", err)
+	}
+
+	// Admission gate, before the quiesce and before any bytes (see the doc above).
+	// Under admitMu for the same reason create is: the inequality is node-GLOBAL
+	// while the transition lock is per-sandbox, so two Promotes of two different
+	// sandboxes hold two different locks and would not serialize at all. The
+	// reservation published inside the critical section is what makes this Promote's
+	// claim visible to the next gate run before its bytes exist.
+	cost, err := m.deps.Rootfs.PromoteCostBytes(ctx, ov)
+	if err != nil {
+		// Unmeasurable → refuse, not admit blind: same fail-closed choice the gate
+		// makes for UncappedBytes, for the same reason (§2.3).
+		return "", fmt.Errorf("promote: %w: cannot forecast layer bytes: %v", ErrInsufficientCapacity, err)
+	}
+	m.admitMu.Lock()
+	err = m.admitUncappedGrowth(ctx, cost)
+	if err == nil {
+		m.reserveUncapped(cost)
+	}
+	m.admitMu.Unlock()
+	if err != nil {
+		return "", fmt.Errorf("promote: %w", err)
+	}
+	// Released once the bytes are REAL (and therefore visible to UncappedBytes) or
+	// the attempt is over. Deferred rather than dropped after the copy so every exit
+	// path releases it exactly once — a leaked reservation would permanently shrink
+	// the node's admissible capacity.
+	defer m.releaseUncapped(cost)
+
+	if rec.State == model.Running {
 		// quiesce to a consistent at-rest point (equivalent to pause, §4.2) and
 		// stay paused. Uses the "paused" Kind — from the event stream's view this
 		// is an ordinary pause; Promote is not a §4.1 lifecycle transition.
 		if err := m.pauseLocked(ctx, id, "paused", nil); err != nil {
 			return "", fmt.Errorf("promote: quiesce: %w", err)
 		}
-	case model.Paused:
-		// already at-rest; the placement is already released.
-	default:
-		return "", fmt.Errorf("promote: %w (state=%s, want running or paused)", store.ErrConflict, rec.State)
 	}
 
 	newID := model.TemplateID("tmpl_" + randToken())
@@ -794,12 +854,7 @@ func (m *Mediator) Promote(ctx context.Context, id model.SandboxID) (model.Templ
 	m.markBuilding(newID)
 	defer m.unmarkBuilding(newID)
 
-	// open the source Overlay by ID (byte read only, no mount) and freeze its
-	// at-rest upper into the new layer dir (bytes-first).
-	ov, err := m.deps.Rootfs.OpenOverlay(ctx, string(rec.Overlay), []string{string(rec.Template)}, rootfs.CapUnchanged)
-	if err != nil {
-		return "", fmt.Errorf("promote: open overlay: %w", err)
-	}
+	// freeze the at-rest upper into the new layer dir (bytes-first).
 	if err := m.deps.Rootfs.PromoteToTemplate(ctx, ov, string(newID)); err != nil {
 		return "", fmt.Errorf("promote: freeze layer: %w", err)
 	}

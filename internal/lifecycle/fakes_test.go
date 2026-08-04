@@ -60,6 +60,11 @@ type fakeRootfs struct {
 	// asserted.
 	uncappedBytes int64
 	measureErr    error
+	// promoteCost is what PromoteCostBytes forecasts a freeze of the source Overlay
+	// would add to the uncapped term (§3.4 Promote admission); promoteCostErr makes
+	// the forecast fail, so that fail-closed path can be asserted too.
+	promoteCost    int64
+	promoteCostErr error
 	// promoteGate blocks PromoteToTemplate mid-freeze (bytes-down, row-not-yet
 	// window) until closed; promoteReached (if set) is closed when the freeze is
 	// entered, so a test can synchronize a concurrent sweep against it (§4.4-A).
@@ -123,6 +128,20 @@ func (f *fakeRootfs) UncappedBytes(context.Context) (int64, error) {
 	}
 	return f.uncappedBytes, nil
 }
+
+// PromoteCostBytes backs the Promote admission gate (§3.4 / D6.5): the forecast of
+// what freezing this Overlay would ADD to the uncapped term. Logged so a test can
+// assert the gate really consulted the provider before the freeze.
+func (f *fakeRootfs) PromoteCostBytes(_ context.Context, o *rootfs.Overlay) (int64, error) {
+	f.log("PromoteCostBytes:" + o.ID)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.promoteCostErr != nil {
+		return 0, f.promoteCostErr
+	}
+	return f.promoteCost, nil
+}
+
 func (f *fakeRootfs) PromoteToTemplate(ctx context.Context, o *rootfs.Overlay, newID string) error {
 	f.log("PromoteToTemplate:" + o.ID + "->" + newID)
 	// promoteGate, if non-nil, blocks the freeze (bytes-down window) until a test

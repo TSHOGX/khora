@@ -71,6 +71,9 @@ func (barrierFakeRootfs) ListBuiltinTemplates(context.Context) ([]string, error)
 	return nil, nil
 }
 func (barrierFakeRootfs) UncappedBytes(context.Context) (int64, error) { return 0, nil }
+func (barrierFakeRootfs) PromoteCostBytes(context.Context, *rootfs.Overlay) (int64, error) {
+	return 0, nil
+}
 func (barrierFakeRootfs) SweepOrphanLayers(context.Context, []string, []string) (int, error) {
 	return 0, nil
 }

@@ -122,6 +122,114 @@ func TestPromotedLayerResolvesAsLower(t *testing.T) {
 	}
 }
 
+// PromoteCostBytes is the forecast the §3.4 admission gate runs a Promote against
+// (rootfs-overlay D6.5: a frozen layer is charged to no sandbox cap, so it grows the
+// measured term). The property that matters is the DIRECTION of its error: it must
+// never under-report what its own copy will cost, or the gate's bound points the
+// wrong way and the overshoot lands on an unrelated sandbox as ENOSPC (§2.3).
+//
+// The sharp case is a SPARSE file. blockBytes (used for bytes already on disk)
+// reports allocated blocks, which for a hole-punched file is ~0 — but copyFile is an
+// io.Copy and does not punch holes, so the layer pays the file's full length. The
+// forecast must therefore project apparent size, and this test pins that by
+// comparing the forecast against what the freeze ACTUALLY costs.
+func TestPromoteCostBytesDoesNotUnderReportASparseUpper(t *testing.T) {
+	ctx := context.Background()
+	p, _ := newProvider(t)
+
+	// a 4 MiB sparse file: apparent size 4 MiB, allocated blocks ~0.
+	const sparseLen = 4 << 20
+	upper := p.upperPath("ov_sparse")
+	if err := os.MkdirAll(upper, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Create(filepath.Join(upper, "sparse.img"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(sparseLen); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	ov := &Overlay{ID: "ov_sparse", Template: "bare", Lower: []string{"bare"}}
+	forecast, err := p.PromoteCostBytes(ctx, ov)
+	if err != nil {
+		t.Fatalf("PromoteCostBytes: %v", err)
+	}
+	// The allocated measurement, for contrast: this is what a naive forecast would
+	// have said, and it is the number that would have let the node overcommit.
+	allocated, err := blockBytes(upper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if forecast < sparseLen {
+		t.Fatalf("forecast = %d for a %d-byte sparse file (allocated reads %d) — under-reporting is the one direction the gate cannot tolerate",
+			forecast, sparseLen, allocated)
+	}
+
+	// and the freeze really does cost that: measure the layer afterwards.
+	if err := p.PromoteToTemplate(ctx, ov, "tmpl_sparse"); err != nil {
+		t.Fatalf("PromoteToTemplate: %v", err)
+	}
+	actual, err := blockBytes(filepath.Join(p.LayersDir, "tmpl_sparse"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if actual > forecast {
+		t.Fatalf("layer actually cost %d bytes but the forecast said %d — the gate would have admitted %d bytes it could not honor",
+			actual, forecast, actual-forecast)
+	}
+}
+
+// The forecast is an UPPER BOUND, not an exact count, and the two deliberate
+// overstatements are the safe direction (seam contract): excluded paths are counted
+// even though the freeze drops them. Asserted as "forecast ≥ what the layer cost",
+// which is the only property the gate depends on.
+func TestPromoteCostBytesBoundsTheRealCost(t *testing.T) {
+	ctx := context.Background()
+	p, _ := newProvider(t)
+	writeUpper(t, p, "ov_b", map[string]string{
+		"home/work/app.py":            "print('hello')",
+		"etc/installed-pkg":           "PKG",
+		"tmp/.sandboxd-transport.pid": "12345", // excluded from the layer, counted here
+	})
+	ov := &Overlay{ID: "ov_b", Template: "bare", Lower: []string{"bare"}}
+	forecast, err := p.PromoteCostBytes(ctx, ov)
+	if err != nil {
+		t.Fatalf("PromoteCostBytes: %v", err)
+	}
+	if forecast <= 0 {
+		t.Fatalf("forecast = %d for a non-empty upper; want > 0", forecast)
+	}
+	if err := p.PromoteToTemplate(ctx, ov, "tmpl_b"); err != nil {
+		t.Fatalf("PromoteToTemplate: %v", err)
+	}
+	actual, err := blockBytes(filepath.Join(p.LayersDir, "tmpl_b"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if actual > forecast {
+		t.Fatalf("layer cost %d > forecast %d: the forecast must bound the real cost", actual, forecast)
+	}
+}
+
+// An Overlay with no upper on disk yet forecasts 0 rather than failing: the gate
+// must be answerable for a sandbox that has written nothing, and a missing tree
+// costs nothing to copy.
+func TestPromoteCostBytesOfAnAbsentUpperIsZero(t *testing.T) {
+	p, _ := newProvider(t)
+	n, err := p.PromoteCostBytes(context.Background(), &Overlay{ID: "ov_missing", Lower: []string{"bare"}})
+	if err != nil {
+		t.Fatalf("PromoteCostBytes on an absent upper: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("forecast = %d; want 0", n)
+	}
+}
+
 // Promote refuses to overwrite an existing layer id (bytes-first + immutability:
 // a layer dir is written once).
 func TestPromoteRefusesExistingLayer(t *testing.T) {
