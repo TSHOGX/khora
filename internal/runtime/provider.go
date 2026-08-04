@@ -66,9 +66,13 @@ type SteeringSpec struct{}
 // that is a settled deferral, not an open question: the mechanism is proven
 // (runsc writes OCI blockIO into its leaf's io.max), the CONSUMER is what's
 // missing — so adding the field before one exists is the speculative reservation
-// §1.3 rejects. It joins additively when a consumer appears. Still open is only
-// where the whole-disk MAJ:MIN comes from (open-decisions §3): io.max needs the
-// whole disk, and a per-sandbox Binding carries no host topology.
+// §1.3 rejects. It joins additively when a consumer appears, and what joins is a
+// RATE alone: io.max needs a WHOLE-DISK MAJ:MIN, and that number is the
+// PROVIDER'S to derive from its own state dir (§5.A) — it is not a contract
+// member, because a per-sandbox Binding carries no host topology and a device
+// number is a host primitive no remote provider could produce. Hence the token
+// guard in seam_test.go bans `major`/`minor`/`majmin`/`devno` outright: this
+// field would be the natural place to smuggle one in.
 type ResourceLimits struct {
 	CPUMillis  int64 // 1000 = one full CPU
 	MemoryByte int64
