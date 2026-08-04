@@ -110,7 +110,7 @@ reparent 到 `sandboxd` 而非 PID 1——不当 PID 1 也能收割自己关心�
 **落地形态:一个二进制两个模式**(init 模式 PID 1 经 `/proc/self/exe` re-exec 出 transport 模式子进程),
 完整拓扑图见 spec §5.E.1。
 
-### D4.3 transport 模式要落的三样机制,和一个要拒的模型
+### D4.3 transport 模式要落的三样机制,和两个要拒的模型
 
 收割语义无处可抄——它必须靠 D4.1 自研 + tini checklist。但 transport 模式要落的另外三样机制是成熟的
 进程管理套路,形状如下:
@@ -133,6 +133,41 @@ reparent 到 `sandboxd` 而非 PID 1——不当 PID 1 也能收割自己关心�
 **本 pid namespace 内除自己以外的全部进程**,故模板自带的长跑 sibling 与 transport 的整棵子树一并覆盖,
 不只是它自己 spawn 的那一个子进程。这条判据是"不指定任何 pid/pgid":正因为不定向,它才落在 PID 1 侧
 而非 transport 侧——句柄留给定向那条路。
+
+**这条判据在 `SendSignal` 入口是可执行的,不只是分工描述:`pid <= 0` 判 `invalid_argument`。**
+POSIX 里 `pid <= 0` **就是**扇出形式(`kill(0)` 打整个进程组、`kill(-1)` 打整个 pid namespace),
+故它不是"危险取值",是**投错了子系统**——那条路归 PID 1,transport 侧没有它的入口。校验落在
+**guest 侧**(`cmd/sandboxd`),因为 §5.E.1 的前提是 guest 能写自己的 fs、必须自证;orchestrator 侧
+同形一道只作 fail-fast(少一次 RPC),不是权威。类型保持 `int32`:`uint32` 会让 wire 上的负值静默变成
+大正数,把一个显式 400 换成一条更难查的行为。
+
+它**只校验 pid > 0**,不查进程注册表——`Connect`/`SendInput`/`Update`/`CloseStdin` 必须查是因为要摸
+per-process 状态,而发信号只需要一个合法 pid;要求注册表命中会打断 §6.1 明写的
+「`List` 拿 pid → `SendSignal` 打它」配对(`List` 实时扫 `/proc`,返回的 pid 本就从未进过那张表)。
+
+**校验拦住的是什么——三个取值,已在 gVisor pid namespace 内实测(`SIGTERM`,绕过校验直发)。**
+`killProcessGroup` 的两级回退(先 `kill(-pid)`、失败再 `kill(pid)`)在 `pid <= 0` 上两臂都转为敌对:
+
+| 入参 | 实际发生 | 后果 |
+| --- | --- | --- |
+| `pid=-1` | `kill(-(-1))` = **定向** `kill(1)`,命中 PID 1 自己的 TERM handler | 沙箱被拆(RPC 收 `unexpected EOF`、Health 再不回来) |
+| `pid=0` | `kill(-0)` = `kill(0)`,打 sandboxd 自己的进程组——而 transport 的 `pgrp` 与 PID 1 同为 **1**(它由 PID 1 fork、不 `Setpgid`),故 PID 1 在组内 | 同上,沙箱被拆 |
+| `pid=1` | `kill(-1)` 命名空间广播。Linux `kill(-1)` **排除 PID 1 与调用者自身**,故沙箱存活,但**每个工作负载进程被连带杀死**(实测两个无关进程同时 `exit 143`);guest 内一个工作负载都没有时该发返 `ESRCH`,于是落到回退臂 `kill(1)`,变成 `pid=-1` 那一行——沙箱被拆 | 越权扇出;空 guest 下退化为拆沙箱 |
+
+即**校验缺席时,一条数据面 unary RPC 足以拆掉整个沙箱**。注意"引擎自己从不向 guest PID 1 发 TERM"
+(销毁走 `runsc kill KILL` + `delete --force`,§5.A)**不构成防线**:它只说明引擎自己不走那条路,而该
+能力是经数据面**开放给调用方**的,`SendSignal` 那条路一直通。§6.1 假定调用方已被信任、引擎不做授权,
+故要补的是**输入校验**,不是授权。
+
+**不做沙箱级宽限期——已否决。** PID 1 收 TERM 后广播、**紧接 `os.Exit(0)`**,而 PID 1 退出即拆
+pid namespace,故那一发 TERM 事实上不可被处理、与直接 KILL 无差别。**要拒的不是"没实现宽限",而是这个
+形状本身对不上:** ① 需要宽限的是**工作负载进程**——它才有要 flush 的东西,而进程级定向信号已经存在
+(就是上面那条 `SendSignal`),调用方要优雅关闭什么,它自己知道该打哪个 pid;② 沙箱级 TERM 想"优雅"
+就得让引擎判断"guest 里哪些进程值得等、等多久",那是**产品层策略**,§1.3 litmus 要挡在引擎外面
+(engine 不认识 agent,spec §3.2.1)。故 §4 的动词表保持 pause/destroy 两个,destroy 即刻生效。
+外部证据方向一致:e2b 的 `DELETE /sandboxes/{id}` summary 字面是 "Kill sandbox"、无宽限字段;
+sandbox0 沙箱 PodSpec 根本没设 `TerminationGracePeriodSeconds`(吃 kubelet 隐式 30s,一个没人为它论证过
+的值),而它**真正做过决定**的宽限期全在进程/会话粒度、宿主侧一个都没有。
 
 ### D4.4 pause 静止点协议(spec §4.2 的机制)
 

@@ -45,7 +45,6 @@
 | 缺口 | 现状 vs 目标 | 落地归属 |
 | --- | --- | --- |
 | **outbox publisher 头阻塞**(已留注,非正确性破坏) | 一条投递失败挡住其后全部(保序 / at-least-once 正确) | 随事件流可重放窗口(后续增量)择机收口 |
-| **PID1 容器级 TERM 无宽限期** | PID 1 收 `SIGTERM`/`SIGINT` 后 `kill(-1, sig)` 广播、**紧接 `os.Exit(0)`**,而 PID 1 退出即拆掉 pid namespace——故那一发 TERM 事实上不可被处理,广播与直接 KILL 无差别。**今天不可达**:引擎销毁走 `runsc kill KILL` + `delete --force`(§5.A),从不向 guest PID 1 发 TERM,故无现存危害。**待定的是要不要有宽限期**:引擎是否想要"优雅关闭沙箱"这一语义(§4 今天只有 pause/destroy 两个动词)、若要则宽限多久、谁配置 | 择机收口;先于任何"向 guest 发 TERM"的调用方出现前拍板 |
 | **`death_cause` 不在 §6.1 读面上** | 死因已落库(§4.3),但 `GET /v1/sandboxes/{id}` 不返回它,`resource-terminated` 只以 409 错误串现身。既然恢复决定归调用方(§4.3 narrowing),调用方就需要看到它所依据的那条事实 | 随事件流「可重放窗口 / event schema」那轮统一定读面(§2 的 §4.1 行) |
 
 ---

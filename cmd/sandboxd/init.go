@@ -53,12 +53,18 @@ func initMode() {
 	// side of D4.3: it targets no particular pid/pgid, so it is not a directed
 	// signal — those remain transport's (it holds the pid/pgid handles).
 	//
-	// NO GRACE PERIOD, and that predates the fan-out: the Exit below follows the
-	// broadcast immediately, and PID 1 exiting tears down the namespace, so the
-	// TERM cannot actually be acted on. Unreachable from the engine today — destroy
-	// sends KILL then `delete --force` and never TERMs PID 1 — and whether the
-	// engine wants a graceful-shutdown semantic at all is registered in
-	// open-decisions §4, not decided here.
+	// NO GRACE PERIOD, and that is DECIDED, not pending (guest-runtime D4.3): the
+	// Exit below follows the broadcast immediately, and PID 1 exiting tears down the
+	// namespace, so this TERM cannot be acted on — it is equivalent to KILL. A
+	// sandbox-level grace period is REJECTED because the shape does not fit: what
+	// has state to flush is the WORKLOAD process, and directed per-process signals
+	// already exist (SendSignal); making a sandbox-level TERM "graceful" would
+	// require the engine to decide which guest processes deserve waiting for and how
+	// long — product-layer policy that §1.3's litmus keeps outside.
+	//
+	// The engine still never sends this: destroy is `runsc kill KILL` +
+	// `delete --force` (§5.A). What a caller CAN reach is SendSignal, which refuses
+	// pid <= 0 precisely so this PID 1 path stays PID 1's (D4.3).
 	termCh := make(chan os.Signal, 4)
 	signal.Notify(termCh, syscall.SIGTERM, syscall.SIGINT)
 	go func() {
