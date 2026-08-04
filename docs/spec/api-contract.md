@@ -19,16 +19,24 @@
 > **这套 API 自身不做认证/授权**:引擎内无授权主体(§1.4 非目标),故 §6 假定调用方已被信任。谁能调用
 > 由**引擎外**决定(部署把它绑在本机/私网,或前置一层网关),那是 join table 的加法、不是引擎原语。
 
-**控制面(REST + JSON,权威端点)** —— 沙箱 / template / volume / network 生命周期,全是低频
-CRUD、无流:
+**控制面(REST + JSON,权威端点)** —— 沙箱 / template / volume / network 生命周期,外加事件流重放。
+**全是低频请求-响应,无长连接、无 server-push**:每条都是一来一回的 CRUD 语义,故连事件流也是
+**游标分页 GET**(`/v1/events`,见下)而非 SSE/websocket —— 引擎不持有任何 per-subscriber 状态
+(§1.3),这正是它能留在控制面的原因。**"无流"指的是没有推送面,不是没有事件面。**
 
 ```text
 # Sandbox 生命周期
 POST   /v1/sandboxes                 {template_id, network?, volumes?, idle_timeout?, retention?,
                                       cpu_millis?, memory_byte?, disk_byte?}        → {sandbox_id}
 #   资源上限三轴见 §3.4(Binding);按轴条件必填的规则见 §6.2。准入不足 → 507。
-GET    /v1/sandboxes/{id}                                                    → {sandbox_id, state}
-#   只读生命周期态。死因已落库(§4.3)但**不在本读面上**,登记见 open-decisions §4。
+GET    /v1/sandboxes/{id}                                     → {sandbox_id, state, death_cause?}
+#   只读生命周期态 + 死因(§4.3)。`death_cause` ∈ {`gone`, `resource-exceeded`, `unknown`},
+#   **未观测到死亡时该键不出现**(不是空串、不是 null):`CauseNone` 是"没有死因"而非一种死因,
+#   若序列化成 `""` 就会在绝大多数健康响应上摆一个 falsy 却存在的字段、诱人拿它当存活判据。
+#   **为何上读面**:§4.3 把恢复决定判给调用方(dead-recoverable → resume;resource-terminated →
+#   不 resume),那调用方就必须能读到它所依据的那条事实,而不是先发一个必被拒的 resume、从 409
+#   错误串里反推。值是 §4.3 的**抽象枚举**,绝不是 errno / cgroup 路径 —— 那种是宿主原语,
+#   远端 provider 产不出来(§5.A)。
 PATCH  /v1/sandboxes/{id}            {cpu_millis?, memory_byte?, disk_byte?, idle_timeout?, retention?}
                                                           → {sandbox_id, state, applies_at}
 #   改 Binding,生效点与可改状态见 §3.4。**wire 语义与 create 不同**:这里"未给"与"给 0"必须可区分
@@ -39,10 +47,32 @@ POST   /v1/sandboxes/{id}/pause
 POST   /v1/sandboxes/{id}/resume
 #   resource-terminated 的沙箱拒绝 resume → 409(§4.3;先 PATCH 抬帽)
 DELETE /v1/sandboxes/{id}                                                          (destroy)
-GET    /v1/sandboxes                                                               (list)
+GET    /v1/sandboxes                                   (list;每项与单读同形,含 `death_cause?`)
+#   list 也带死因是**为省一轮 N+1**:§6.2 全 ID 寻址,若不带,调用方见到若干 `paused` 就得逐个
+#   GET 才知道哪些可 resume —— 而那条事实 list 本来就持有。
 GET    /v1/sandboxes/{id}/files?path=                                    (大文件下载,流式)
 PUT    /v1/sandboxes/{id}/files?path=                          → {path, bytes_written}(上传)
 #   §5.E fs 的大文件旁路(D4.4),数据面里唯一走 REST 的一条;小载荷仍走 `FsService.Read/Write`。见下。
+
+# 事件流重放(§4.1 转换事件 / §4.4-C outbox);**只做 pull,无推送面**
+GET    /v1/events?after=<seq>&limit=<n>     → {events:[{seq,id,sandbox_id,kind,state,occurred_at}],
+                                               earliest, latest}
+#   `seq` 是**游标**:把收到的最后一个 `seq` 原样作下次 `after` 传回即续位。`after` 省略/0 = 从
+#   保留窗口起点。**排序键是 `seq`,不是 `occurred_at`** —— 后者同纳秒无 tie-break、且墙钟可被
+#   NTP 步进回退,故不是全序、不能当游标(§4.4-C)。
+#   `limit` 有**服务端硬上限**(默认 100、上限 1000),超限**截到上限**而非拒绝。硬上限而非仅默认值:
+#   参数由调用方控制,只给默认值等于没给。**方向要注意**:因为不裁剪,窗口 = 全部历史,故 `after=0`
+#   要翻的行只增不减 —— 不裁剪**加重**而非缓解无界 backlog 风险,这才是硬上限为必做项的原因。
+#   `{earliest, latest}` 是保留窗口边界(outbox 空时 0/0)。
+#   **410 是保留语义,今天不可达、不实现**:不裁剪 → `earliest` 永不前进,故"`after` 早于窗口"
+#   这个态构造不出来。写在契约里是为了**将来真加裁剪时调用方契约无需变更**——届时 `after < earliest`
+#   即 410,调用方须从 `earliest` 重新起。**不为不可达态写代码**(§1.3)。
+#   重放**按保留窗口,不按投递状态**:引擎内那个 sink 有没有收过某条,不是外部 subscriber 该依赖的事实。
+#   **为何在控制面**:游标分页 GET 就是 CRUD;且引擎级事件流既非 per-sandbox 也非 per-pid,数据面
+#   本就无处寻址它(§6.2)。**为何只做 pull**:pull 面按构造不持 per-subscriber 状态(无 subscriber
+#   表、无驱逐策略、无清理路径),而 §1.3 禁止引擎持有那类状态;日后若要 push,它是**对同一条查询
+#   做服务端轮询的表现层适配器**、共用同一 `seq`,故结构上零代价 —— **"push 作为适配器"不持状态,
+#   "push 作为真扇出"持,这是分界线**。
 
 # Template(不可变工件:opaque ID 作身份,存在即状态,§3.1 / §4.3)
 GET    /v1/templates
@@ -110,5 +140,9 @@ client 从 `transport.proto` 经 `buf` 生成 stub、经 `orchestrator` 反代�
   `resource-terminated` 拒绝 resume → **409**;计量轴缺帽 / 请求体不合法(负的帽、无法解析的 duration)
   → **400**;被引用的 Template 删除 → **409**;源态不合法的动词(如对 `running` 改帽、对非 `paused`
   沙箱 resume)→ **409**;未知 sandbox / template ID → **404**。
+  **`GET /v1/events`**:正常(含空窗口、空页)→ **200**;`after` 或 `limit` 不是整数 / `after` 为负 /
+  `limit` ≤ 0 → **400**(`limit` **超**上限不是错误,截到上限后仍 200);非 GET → **405**;
+  **410 = `after` 早于保留窗口**,**保留语义**、今日不可达(不裁剪 → `earliest` 永不前进),
+  故不实现 —— 登记在此只为让将来加裁剪时调用方契约无需变更。
 - **store / runtime provider 走接口**:换后端 / 加 provider 是注册一个新实现,不改上层模型
   (§1.3 只做加法;provider 始终是抽象契约,见 §1.1 / §5.A)。

@@ -248,8 +248,9 @@ Overlay upper**;Volume **复用同一个包,不重造、不改其形状**。本�
 
 - **独占卷的抢占 / 强制 detach 策略**(D4):默认独占直到 destroy/evict;要不要 admin 强制 detach、抢占
   优先级——策略,大概率产品层。
-- **shared-rw 打到 per-volume 帽 / ENOSPC 的复合行为**:多沙箱共写一卷、卷写满时各 guest 见到的 errno、
-  是否发容量压力事件——与 rootfs-overlay D6.5 的 per-sandbox ENOSPC 同族。
+- **shared-rw 打到 per-volume 帽 / ENOSPC 的复合行为**:多沙箱共写一卷、卷写满时各 guest 见到的 errno
+  ——与 rootfs-overlay D6.5 的 per-sandbox ENOSPC 同族。(**压力事件那一问已定:不发**,见 §4.4-C;
+  此处剩下的只是多写入方下的 errno 复合表述。)
 - **直连变更 vs live-ro reader 的准入细节**(D5 边界):有 live-**ro** 挂载时允许直连写会让 ro reader 的
   gofer 缓存与后端不 coherent;要不要加告警 / 版本戳 / 拒绝,精度问题。
 - **snapshot/clone 一致性标注如何进 §6 契约**(D6):API 是否显式标注"本快照 crash-consistent"、clone 出的

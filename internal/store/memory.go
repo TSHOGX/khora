@@ -28,9 +28,8 @@ type Memory struct {
 	tmpl map[model.TemplateID]model.Template
 	// outbox is append-only, ordered — the publisher reads oldest-first. Like the
 	// SQLite backend, published rows are marked, never removed (same unbounded-
-	// growth known limitation; open-decisions §2, the §4.1/§4.4-C event-stream
-	// row). Bounded in practice only by process lifetime since Memory is
-	// non-durable.
+	// growth known limitation; open-decisions §2, "§4.4-C 事件流可重放窗口大小").
+	// Bounded in practice only by process lifetime since Memory is non-durable.
 	outbox []outboxRow
 	// nextSeq is the monotonic sequence counter (Store's sequence contract). It
 	// is assigned under m.mu, in the SAME critical section that makes the row

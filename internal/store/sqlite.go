@@ -71,12 +71,14 @@ CREATE TABLE IF NOT EXISTS sandboxes (
 	created_at   INTEGER NOT NULL, -- unix nanos
 	updated_at   INTEGER NOT NULL
 );
--- KNOWN LIMITATION (open-decisions §2, the §4.1/§4.4-C event-stream row):
+-- KNOWN LIMITATION (open-decisions §2, "§4.4-C 事件流可重放窗口大小"):
 -- published rows are marked (published_at set), NEVER deleted, so this table
 -- grows monotonically. The partial index below keeps the publisher's
--- unpublished-scan from degrading, but at-rest size is unbounded. Pruning
--- (retention/replay window) is deferred to the event-stream replay-window
--- decision, by design — not an oversight.
+-- unpublished-scan from degrading, but at-rest size is unbounded. This is
+-- DEFERRED, not answered: the trim window has to be set from the reconnect
+-- window promised to external subscribers, and there are none yet, so there is
+-- no arguable value to pick. It remains a limitation and did NOT become a virtue
+-- by being decided upon.
 CREATE TABLE IF NOT EXISTS outbox (
 	-- seq is the §4.4-C cursor: the monotonic total order both the publisher and
 	-- the §6.1 GET /v1/events replay page on. It is the PRIMARY KEY (the rowid)
