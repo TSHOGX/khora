@@ -598,8 +598,24 @@ func (s *processServer) SendInput(_ context.Context, req *connect.Request[v1.Sen
 	return connect.NewResponse(&v1.SendInputResponse{}), nil
 }
 
+// SendSignal delivers a DIRECTED signal — one process target, defaulting to its
+// group (transport D4.3 / §5.E.1).
+//
+// It validates `pid > 0` and nothing more. It deliberately does NOT require
+// registry membership like Connect/SendInput/Update/CloseStdin do: those touch
+// per-process state and so must find the process in s.procs, whereas signalling
+// only needs a legal pid. Demanding a registry hit would break the §6.1
+// List-then-signal pairing, since List scans /proc live and returns pids that
+// were never in s.procs.
+//
+// The check is HERE (guest side) because §5.E.1's premise is that the guest can
+// write its own fs and must therefore validate for itself; the orchestrator
+// carries the same check only as fail-fast.
 func (s *processServer) SendSignal(_ context.Context, req *connect.Request[v1.SendSignalRequest]) (*connect.Response[v1.SendSignalResponse], error) {
 	m := req.Msg
+	if err := validateSignalPid(int(m.Pid)); err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errString(err.Error()))
+	}
 	if err := killProcessGroup(int(m.Pid), int(m.Signal)); err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}

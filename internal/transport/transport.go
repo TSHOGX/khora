@@ -182,6 +182,10 @@ type ProcessClient interface {
 
 	// SendSignal signals a process; defaults to the process group, falling back
 	// to the pid (transport D4.3 / §5.E.1 directed signals belong to transport mode).
+	//
+	// DIRECTED only: pid must be > 0, or the guest returns invalid_argument. pid <= 0
+	// is the POSIX fan-out form (a whole group, or the whole pid namespace) and
+	// container-level fan-out belongs to guest PID 1, not this channel (D4.3).
 	SendSignal(ctx context.Context, pid int, signal int) error
 
 	// Update resizes a process's PTY (unary; transport D4.3).

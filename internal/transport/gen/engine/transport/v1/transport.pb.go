@@ -1039,6 +1039,16 @@ type SendSignalRequest struct {
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
 
+	// pid MUST be > 0 — a single directed process target. pid <= 0 is
+	// `invalid_argument`, because in POSIX it is the fan-out form (kill(0) hits a
+	// whole process group, kill(-1) the whole pid namespace) and container-level
+	// fan-out belongs to guest PID 1, not this channel (guest-runtime D4.3 /
+	// §5.E.1). So it is not merely a dangerous value: it is addressed to the wrong
+	// subsystem.
+	//
+	// Kept `int32`, NOT `uint32`, on purpose: unsigned would silently reinterpret a
+	// wire negative as a huge positive pid, trading an explicit 400 for a subtler
+	// behavior (a signal delivered to nothing, or to an unrelated recycled pid).
 	Pid    int32 `protobuf:"varint,1,opt,name=pid,proto3" json:"pid,omitempty"`
 	Signal int32 `protobuf:"varint,2,opt,name=signal,proto3" json:"signal,omitempty"`
 }

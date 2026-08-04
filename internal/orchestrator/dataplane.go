@@ -166,7 +166,29 @@ func (p *processProxy) SendInput(ctx context.Context, req *connect.Request[v1.Se
 	return connect.NewResponse(&v1.SendInputResponse{}), nil
 }
 
+// signalPidErr mirrors the guest's message verbatim (cmd/sandboxd/transport.go)
+// so a caller gets the same explanation whichever end refuses. It is duplicated
+// rather than shared through a leaf package deliberately: what the two ends must
+// agree on is the RULE, and the rule is one comparison. A leaf existing only to
+// hold an error string would couple the guest binary to the host tree for
+// prose — and guestport's bar is a fact neither side can derive alone (the port,
+// the upload prefix), which this is not. A test pins the copies together instead
+// (dataplane_signal_test.go).
+const signalPidErr = "pid must be > 0: SendSignal carries DIRECTED signals only " +
+	"(one process, defaulting to its group). pid <= 0 is POSIX fan-out — " +
+	"kill(0)/kill(-1) address a whole group or the whole pid namespace — and " +
+	"container-level fan-out belongs to guest PID 1, not the transport channel " +
+	"(guest-runtime D4.3 / §5.E.1)"
+
+// SendSignal proxies a DIRECTED signal. The pid > 0 check here is fail-fast only
+// (one less RPC): the authoritative check is the guest's, because §5.E.1's premise
+// is that the guest can write its own fs and so must validate for itself. pid <= 0
+// is POSIX fan-out, which belongs to guest PID 1 rather than this channel
+// (guest-runtime D4.3).
 func (p *processProxy) SendSignal(ctx context.Context, req *connect.Request[v1.SendSignalRequest]) (*connect.Response[v1.SendSignalResponse], error) {
+	if req.Msg.Pid <= 0 {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New(signalPidErr))
+	}
 	cl, err := p.e.clientFor(req.Header().Get)
 	if err != nil {
 		return nil, err
