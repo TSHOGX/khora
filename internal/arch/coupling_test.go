@@ -41,10 +41,10 @@ var mediatorOnly = []string{
 // without one is a bare allowlist, and the next edge arrives through the same
 // door claiming the same precedent.
 //
-// Empty, and worth keeping empty. The one edge that used to exist —
-// runtime -> transport, to read the guest port constant — was removed by moving
-// that constant to the leaf internal/guestport rather than by being excused here.
-// A shared constant is a leaf, not a reason for a subsystem edge.
+// Empty, and worth keeping empty. When two subsystems need the same fact, the
+// answer is a leaf package they both depend on (internal/guestport, holding the
+// guest netns port shared by §5.A and §5.E, is the precedent), never an entry
+// here. A shared constant is a leaf, not a reason for a subsystem edge.
 var allowedEdges = map[string]string{}
 
 // pkg is the subset of `go list -json` we need.

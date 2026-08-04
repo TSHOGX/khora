@@ -532,9 +532,14 @@ func (m *Mediator) Pause(ctx context.Context, id model.SandboxID) error {
 // alone.
 func (m *Mediator) pauseLocked(ctx context.Context, id model.SandboxID, kind string, cause *model.DeathCause) error {
 	// Drain engine-issued mutating fs RPCs before freezing, for the VOLUNTARY
-	// variants only (§4.2 / D4.4). A crash-pause skips it: the container is already
-	// dead, so there is nothing in flight to finish and nothing left to truncate —
-	// waiting would only delay recording a death we have already observed.
+	// variants only (§4.2 / D4.4). A crash-pause skips it, and that holds for BOTH
+	// paths carrying this Kind even though only one of them is a death: what they
+	// share is that L2 is down, so no mutating fs RPC can still complete through it.
+	// Draining would buy nothing and cost the full grace — for a dead unit (nothing
+	// left to truncate) it would only delay recording a death already observed; for
+	// the D4b transport-down escalation (L1 alive, transport wedged) it would stall
+	// the sweep waiting on RPCs that cannot finish, which is the very wedge the
+	// escalation exists to break.
 	//
 	// Before the CAS, not after: once the record says `paused`, a still-running
 	// write would be landing bytes into a sandbox the control plane already

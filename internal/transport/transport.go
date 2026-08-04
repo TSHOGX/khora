@@ -25,8 +25,6 @@
 // (D4.3's two invariants) live in the guest server (cmd/sandboxd).
 package transport
 
-import "engine/internal/guestport"
-
 // Wire stubs are generated from proto/engine/transport/v1/transport.proto via
 // buf (schema-first). Regenerate with: cd proto && buf generate.
 // Requires buf + protoc-gen-go + protoc-gen-connect-go on PATH. The generated
@@ -39,6 +37,8 @@ import (
 	"context"
 	"io"
 	"time"
+
+	"engine/internal/guestport"
 )
 
 // Endpoint is the current transport endpoint (netns veth IP:port), discovered

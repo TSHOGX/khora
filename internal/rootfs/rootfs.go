@@ -4,7 +4,8 @@
 // manages the write layer itself (§2.5 / §5.B; rootfs-overlay D0/D3, validated
 // on both substrate arches per ADR-0002).
 //
-// The FS Provider is the §5.B storage seam. Its abstraction exposes only
+// The rootfs provider is the §5.B storage seam (never "FS provider" — `fs` is the
+// §5.E wire service, a different thing entirely, §1.1). Its abstraction exposes only
 // "OverlayID + referenced Template + at-rest readable" and NEVER "it is a host
 // upper path" (§3.1.1 对内也 ID 寻址) — the host path is locked inside this
 // subsystem. Ships the single-node "resident upper directory" unit (D3);

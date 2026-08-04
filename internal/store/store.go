@@ -78,8 +78,11 @@ type Event struct {
 	// Kind is the transition name ("created" / "paused" / "resumed" /
 	// "destroyed" / "auto-paused" / "crash-paused" …). The three pause-like Kinds
 	// are distinct on purpose: "paused" = user pause, "auto-paused" = reaper idle
-	// pause, "crash-paused" = involuntary demote of a dead unit at reconcile
-	// (§4.1 / §4.2) — all land state=paused, the Kind carries WHY. Free-form here;
+	// pause, "crash-paused" = INVOLUNTARY demote (§4.1 / §4.2) — which covers two
+	// paths, not just death: a unit found dead (cause recorded alongside) and the
+	// transport-down restart-budget escalation (reaper-health D4b), where L1 is
+	// still ALIVE and so no cause is stamped. Whether a cause is present is what
+	// separates them. All land state=paused, the Kind carries WHY. Free-form here;
 	// the external event schema is a subscriber-side concern (§4.4-C: engine only
 	// guarantees reliable write to a replayable stream).
 	Kind string

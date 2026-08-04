@@ -95,7 +95,9 @@ type createReq struct {
 	// Resource-limit Binding inputs (§6.1 / §3.4). Omitted / 0 = unlimited on that
 	// axis. Three separate fields, never one blended "size" — the axes and why they
 	// are not interchangeable are documented on model.Limits. There is deliberately
-	// no io_* field (open-decisions §3).
+	// no io_* field: the disk I/O rate axis joins in the same shape once it has a
+	// consumer (§3.4 / §5.A), and its one open question — where the whole-disk
+	// MAJ:MIN comes from — is settled (provider-derived, never on the seam).
 	CPUMillis  int64 `json:"cpu_millis"`
 	MemoryByte int64 `json:"memory_byte"`
 	DiskByte   int64 `json:"disk_byte"`

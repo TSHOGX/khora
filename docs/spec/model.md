@@ -249,8 +249,11 @@ creating ──▶ running ──pause / auto-pause / crash──▶ paused ─�
   destroyed …)发布到一条 **event stream**;webhook、metrics、计费等 subscriber 在**引擎之外**消费,
   **引擎不知道也不依赖谁在订阅**。这是 observability / 计费的接法——单向、additive(§1.3:add a
   subscriber),不是引擎反过来回调外部系统。**三种 pause 类事件的态都是 `paused`,但 Kind 分承其因**:
-  `paused` = 用户暂停、`auto-paused` = reaper 空闲暂停、`crash-paused` = 对账发现单元已死的**非自愿**
-  降级(§4.2 崩溃变体);态相同,Kind 让 subscriber 分辨"为何暂停"。**状态提交与事件发布如何做到不丢
+  `paused` = 用户暂停、`auto-paused` = reaper 空闲暂停、`crash-paused` = **非自愿**降级(§4.2 崩溃变体);
+  态相同,Kind 让 subscriber 分辨"为何暂停"。**`crash-paused` 覆盖两条非自愿路径,不只"单元已死"**:
+  ① 探活/对账发现隔离单元已死(带死因落库);② transport-down 连续超重启预算的升级(§4.3 / reaper-health
+  D4b)——那一条 **L1 仍活**,故**不带死因**(无可解释的死亡,§2.4 不许猜)。二者共用同一 Kind 是 D4b
+  的刻意选择(升级只改判处置健康态,不新造状态或动词);要区分它们的 subscriber 看**死因在不在**即可。**状态提交与事件发布如何做到不丢
   不错(计费级),见 §4.4。**
   > **终态必须成对:没见过 `created` 的沙箱不发 `destroyed`。** 一条 `creating` 记录还没对外可见过
   > (`created` 只在 create 链提交后才发),故删除它**不发事件**——无论是对账清理崩溃残留,还是运维事后
