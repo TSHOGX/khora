@@ -1659,6 +1659,14 @@ func (m *Mediator) hasLive(id model.SandboxID) bool {
 	return ls != nil && ls.placement != nil
 }
 
+// Get returns the sandbox record (§6.1 GET /v1/sandboxes/{id}). State is the
+// narrower read for callers that only need the lifecycle state; this one exists
+// because the §6.1 read shape also carries death_cause (§4.3: the recovery
+// decision is the caller's, so the caller needs the fact it decides on).
+func (m *Mediator) Get(ctx context.Context, id model.SandboxID) (model.Sandbox, error) {
+	return m.deps.Store.GetSandbox(ctx, id)
+}
+
 // State returns the sandbox's current lifecycle state (§6.1 GET).
 func (m *Mediator) State(ctx context.Context, id model.SandboxID) (model.Lifecycle, error) {
 	rec, err := m.deps.Store.GetSandbox(ctx, id)
@@ -1671,6 +1679,23 @@ func (m *Mediator) State(ctx context.Context, id model.SandboxID) (model.Lifecyc
 // List returns all sandbox records (§6.1 GET /v1/sandboxes).
 func (m *Mediator) List(ctx context.Context) ([]model.Sandbox, error) {
 	return m.deps.Store.ListSandboxes(ctx)
+}
+
+// Events serves the §6.1 GET /v1/events replay: at most limit events after the
+// given sequence cursor, plus the retained window's bounds (§4.4-C).
+//
+// PULL ONLY, and that is the load-bearing choice rather than a first step toward
+// push: the engine holds NO per-subscriber state (§1.3 forbids it) — no
+// subscriber map, no eviction policy, no cleanup path — because a cursor-paged
+// read needs none. Adding a server-side poll over this same query later would be
+// a presentation adapter reusing this same sequence, which is why it costs
+// nothing structurally to omit now. Push as an ADAPTER holds no state; push as
+// real fan-out does. That is the line.
+//
+// It is a pure store read: no placement, no transition lock. The stream is
+// engine-level rather than per-sandbox, so there is nothing to serialize against.
+func (m *Mediator) Events(ctx context.Context, after int64, limit int) ([]store.Event, int64, int64, error) {
+	return m.deps.Store.Events(ctx, after, limit)
 }
 
 // ListTemplates returns all Template rows (§6.1 GET /v1/templates).

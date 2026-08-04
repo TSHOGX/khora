@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -54,6 +55,15 @@ func (e *Engine) HTTPHandler() http.Handler {
 
 	// /v1/sandboxes/{id}[/pause|/resume]  (data-plane verbs are Connect, above)
 	mux.HandleFunc("/v1/sandboxes/", e.handleSandboxSub)
+
+	// GET /v1/events?after=&limit= — the §4.4-C event-stream replay (pull only).
+	mux.HandleFunc("/v1/events", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		e.handleEvents(w, r)
+	})
 
 	// --- Template lifecycle: §6.1 REST/JSON (immutable object, §3.1/§4.3) ---
 	// GET /v1/templates (list) ; POST /v1/templates (Promote).
@@ -144,9 +154,15 @@ func (e *Engine) handleList(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	out := make([]map[string]string, 0, len(list))
+	// Same shape as the single-sandbox read, death_cause included — see
+	// sandboxResp for why List carries it rather than forcing a GET per ID.
+	out := make([]sandboxResp, 0, len(list))
 	for _, s := range list {
-		out = append(out, map[string]string{"sandbox_id": string(s.ID), "state": string(s.State)})
+		out = append(out, sandboxResp{
+			SandboxID:  string(s.ID),
+			State:      string(s.State),
+			DeathCause: string(s.DeathCause),
+		})
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -326,13 +342,168 @@ func (e *Engine) handlePatch(w http.ResponseWriter, r *http.Request, id model.Sa
 	writeJSON(w, http.StatusOK, patchResp{SandboxID: string(id), State: string(stt), AppliesAt: appliesAt})
 }
 
-func (e *Engine) handleGet(w http.ResponseWriter, r *http.Request, id model.SandboxID) {
-	stt, err := e.Mediator.State(r.Context(), id)
+// Event-stream replay limits (§6.1 GET /v1/events).
+const (
+	// eventsDefaultLimit is the page size for a request that omits `limit`.
+	eventsDefaultLimit = 100
+
+	// eventsMaxLimit is a HARD server-side cap, not merely a default: a `limit`
+	// above it is clamped down, so no caller can ask for a bigger page. A default
+	// alone would be worthless here because the caller controls the parameter.
+	//
+	// There must be exactly ONE cap and every read path must share it. The audited
+	// failure was precisely two paths with mismatched caps — one capped at 10k, a
+	// second uncapped — so `after=0` on the uncapped one materialized the entire
+	// retained backlog (plus a same-sized channel) while holding a lock.
+	//
+	// Note the direction of the argument, which runs opposite to the intuitive
+	// one: because we never trim (see §4.4-C), the retained window is ALL history,
+	// so `after=0` must page through everything that ever happened and the row
+	// count only grows. Not trimming AGGRAVATES the unbounded-backlog hazard
+	// rather than relieving it, which is what makes this cap mandatory rather than
+	// a nicety.
+	eventsMaxLimit = 1000
+)
+
+type eventItem struct {
+	// Seq is the cursor: pass the last one back as `after` to resume. It is the
+	// ordering key — clients must not order by occurred_at, which has no tie-break
+	// at equal nanos and can move backwards if the wall clock is stepped.
+	Seq        int64  `json:"seq"`
+	ID         string `json:"id"`
+	SandboxID  string `json:"sandbox_id"`
+	Kind       string `json:"kind"`
+	State      string `json:"state"`
+	OccurredAt string `json:"occurred_at"`
+}
+
+type eventsResp struct {
+	Events []eventItem `json:"events"`
+	// Earliest / Latest bound the retained window (0/0 when the outbox is empty).
+	// They are reported even though nothing is trimmed today — the cost is zero
+	// and it fixes the response SHAPE now, so introducing trimming later needs no
+	// change to the caller contract. With no trimming `earliest` never advances,
+	// which is exactly why 410 is unreachable today and deliberately not
+	// implemented (documented as reserved semantics in api-contract.md §6.1).
+	Earliest int64 `json:"earliest"`
+	Latest   int64 `json:"latest"`
+}
+
+// handleEvents is GET /v1/events?after=<seq>&limit=<n> (§6.1 / §4.4-C): the
+// engine-level lifecycle event stream, replayed by cursor. PULL ONLY — the engine
+// tracks no subscribers (§1.3), so there is no state here to leak or clean up.
+//
+// A cursor-paged GET is ordinary CRUD, which is why this belongs on the control
+// plane: the stream is engine-level, neither per-sandbox nor per-pid, so the data
+// plane has nowhere to address it from.
+func (e *Engine) handleEvents(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+
+	after := int64(0)
+	if raw := q.Get("after"); raw != "" {
+		v, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			http.Error(w, "after: must be an integer sequence", http.StatusBadRequest)
+			return
+		}
+		if v < 0 {
+			http.Error(w, "after must be non-negative (0 = from the start of the retained window)", http.StatusBadRequest)
+			return
+		}
+		after = v
+	}
+
+	limit := eventsDefaultLimit
+	if raw := q.Get("limit"); raw != "" {
+		v, err := strconv.Atoi(raw)
+		if err != nil {
+			http.Error(w, "limit: must be an integer", http.StatusBadRequest)
+			return
+		}
+		if v <= 0 {
+			http.Error(w, "limit must be positive", http.StatusBadRequest)
+			return
+		}
+		limit = v
+	}
+	// The hard cap: clamp rather than reject, so a caller asking for more simply
+	// gets a full page and pages again. Rejecting would give the same protection
+	// but break a caller for asking a reasonable question.
+	if limit > eventsMaxLimit {
+		limit = eventsMaxLimit
+	}
+
+	evs, earliest, latest, err := e.Mediator.Events(r.Context(), after, limit)
 	if err != nil {
 		statusFor(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"sandbox_id": string(id), "state": string(stt)})
+	out := eventsResp{Events: make([]eventItem, 0, len(evs)), Earliest: earliest, Latest: latest}
+	for _, ev := range evs {
+		out.Events = append(out.Events, eventItem{
+			Seq:        ev.Seq,
+			ID:         ev.ID,
+			SandboxID:  string(ev.Sandbox),
+			Kind:       ev.Kind,
+			State:      string(ev.State),
+			OccurredAt: ev.OccurredAt.UTC().Format(time.RFC3339Nano),
+		})
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// sandboxResp is the §6.1 read shape for GET /v1/sandboxes/{id} and each element
+// of GET /v1/sandboxes.
+//
+// DeathCause shape, argued here because neither reference implementation offers a
+// precedent to copy (one models no terminal state at all, the other has a failed
+// state but no cause field anywhere):
+//
+//   - It is on the READ PATH because §4.3 puts the recovery decision on the
+//     caller: dead-recoverable → resume, resource-terminated → do NOT resume
+//     (resuming re-runs the same workload into the same cap, i.e. a crash loop).
+//     A caller who owns that decision needs the fact it decides on. Today it is
+//     reachable only as the text of a 409 from a resume that was already refused,
+//     which forces the caller to attempt the wrong thing in order to learn it
+//     should not.
+//   - `death_cause`, matching the model field and the store column exactly. It
+//     names a property of the sandbox atom, not a product concept, so it is clear
+//     of the §1.1 vocabulary boundary. The values are the abstract §4.3 enum
+//     (`gone` / `resource-exceeded` / `unknown`), never an errno or a cgroup
+//     path — an errno would be a host primitive on the wire and would not survive
+//     a remote provider.
+//   - OMITTED WHEN EMPTY (`omitempty`). CauseNone is the ABSENCE of a death
+//     rather than a kind of death, so serializing `"death_cause": ""` would put a
+//     falsy-but-present field on the overwhelmingly common healthy response and
+//     invite `if (resp.death_cause)` to be written as the liveness test. Absent
+//     means "not observed dead"; present always means "there is a cause, and it
+//     is this one". No `null`, for the same reason: two spellings of absence is
+//     one more than needed.
+//   - List gets it too, and this is not just symmetry. §6.2 is ID-addressing:
+//     a caller that finds several sandboxes `paused` in a list would otherwise
+//     have to fan out one GET per ID purely to learn which of them are resumable,
+//     turning a single list into N+1 requests to answer a question the list
+//     already holds. Keeping the two shapes identical also removes the chance of
+//     them drifting apart.
+type sandboxResp struct {
+	SandboxID string `json:"sandbox_id"`
+	State     string `json:"state"`
+	// DeathCause is why the isolation unit was last found dead (§4.3). Absent =
+	// never observed dead. See the type doc for why absent rather than "".
+	DeathCause string `json:"death_cause,omitempty"`
+}
+
+func (e *Engine) handleGet(w http.ResponseWriter, r *http.Request, id model.SandboxID) {
+	rec, err := e.Mediator.Get(r.Context(), id)
+	if err != nil {
+		statusFor(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, sandboxResp{
+		SandboxID:  string(rec.ID),
+		State:      string(rec.State),
+		DeathCause: string(rec.DeathCause),
+	})
 }
 
 func (e *Engine) doVerb(w http.ResponseWriter, r *http.Request, id model.SandboxID, verb func(context.Context, model.SandboxID) error) {
