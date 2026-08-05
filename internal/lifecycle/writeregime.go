@@ -43,12 +43,49 @@ import (
 // readiness gate) precisely so a concurrent reconcile does not mistake it for an
 // orphan.
 
+// THE INVARIANT IS SYMMETRIC, AND BOTH SIDES ARE GATED (§5.C). The paragraph above
+// states it from the direct-write side, but the hazard it prevents — two writers on the
+// same backend bytes, with the gofer/sentry caches incoherent against a host-side
+// write — DOES NOT CARE WHO ARRIVED FIRST. So the reverse holds too: while a direct
+// mutating operation is in flight, a cold start that would give that volume an rw mount
+// is refused as well (admitColdStartRW below). Gating one side only is equivalent to
+// gating neither — an import admitted at T0 plus a create/resume completing at T1
+// produces exactly the two concurrent writers, with no `paused` state anywhere in the
+// story.
+//
+// THE TWO SIDES DECIDE OVER ONE TABLE, keyed by volume and guarded by the ONE existing
+// m.mu: the live-rw holder set and the in-flight direct-write markers are two halves of
+// a single mutual-exclusion table, not two checks somebody has to keep consistent by
+// hand. Deliberately NOT a per-volume lock class: volume.md D3 records a MEASURED
+// deadlock from keying locks by volume (a volume-dimension verb reaching back for its
+// holders closes sbx→vol→sbx into a cycle), which is why this stays one flat map under
+// the mediator's existing mutex.
+//
+// THE COLD-START SIDE REFUSES, IT DOES NOT WAIT. The direct-write marker is held for
+// the WHOLE stream by contract, so its duration is unbounded in the payload size; a
+// cold start holds the sandbox's transition lock for its entire chain (§4.4-B), so
+// waiting would park destroy / pause / evict behind somebody's 40 GiB upload. A refusal
+// is retryable, explains its own remedy (wait for the import to finish), and lands on
+// §4.4-A's existing atomic return to the source state — resume stays `paused`, create
+// deletes its record — so it adds NO new failure semantics.
+
 // ErrVolumeLiveWriter is §6.2's fourth Volume 409: a direct content change was
 // refused because a live read-write mount holds the volume.
 //
 // 409 rather than 400 because it is a RETRYABLE state conflict — pausing the holder
 // (or destroying it) makes the same request succeed, which is the documented remedy.
 var ErrVolumeLiveWriter = errors.New("lifecycle: volume has a live read-write mount")
+
+// ErrVolumeDirectWriteInFlight is ErrVolumeLiveWriter's MIRROR — the same §5.C
+// invariant refusing from the other side: a cold start was refused because a direct
+// content write is in flight on a volume it would mount read-write.
+//
+// A DISTINCT sentinel rather than a reuse, because the object being refused and the
+// remedy are both different: this refusal names a SANDBOX verb (create / resume) and is
+// resolved by waiting for the import to finish, whereas ErrVolumeLiveWriter names a
+// volume verb resolved by pausing a sandbox. Folding them would hand the caller the
+// wrong remedy in one of the two directions.
+var ErrVolumeDirectWriteInFlight = errors.New("lifecycle: a direct write is in flight on a volume this sandbox would mount read-write")
 
 // admitDirectWrite decides "no live rw holder" AND publishes this write's in-flight
 // marker INSIDE THE SAME CRITICAL SECTION.
@@ -96,6 +133,41 @@ func (m *Mediator) admitDirectWrite(ctx context.Context, id model.VolumeID) (fun
 			delete(m.inFlightWrites, id)
 		}
 	}, nil
+}
+
+// admitColdStartRW is the write regime's OTHER side: it refuses a cold start that
+// would give a volume an rw mount while a direct write is in flight on that volume
+// (§5.C). Called by coldStart with the mount rows it is about to materialize.
+//
+// It takes the ROWS rather than reading them itself, because coldStart has already
+// read them — and re-reading would be worse than redundant: the decision would then
+// be made about a different snapshot than the one being materialized.
+//
+// READ-ONLY MOUNTS PASS. The refusal is about tearing, and a reader tears nothing —
+// the exact mirror of admitDirectWrite letting a live ro holder through. Refusing
+// here too would be more conservative and would tear nothing, and it would delete a
+// capability (booting a sandbox that only READS a volume being seeded), which
+// volume.md D5 calls the third kind of wrong.
+//
+// ONE ACQUISITION OF m.mu over the whole row set, not one per row: a write that
+// starts on the second volume after the first was cleared must not slip through the
+// gap. This is the same table admitDirectWrite decides on, under the same mutex,
+// which is what makes the two halves one mutual exclusion rather than two checks.
+// No store call happens under the lock (the rows are already in hand) — the
+// discipline the whole locking argument rests on.
+func (m *Mediator) admitColdStartRW(id model.SandboxID, rows []model.Mount) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, mt := range rows {
+		if mt.Access.ReadOnly() {
+			continue
+		}
+		if m.inFlightWrites[mt.Volume] > 0 {
+			return fmt.Errorf("%w: sandbox %s would mount volume %s read-write at %s while a direct content write is streaming into it — wait for that import to finish and retry (§5.C: the invariant is symmetric, and the cold start refuses rather than waits because it holds the sandbox's transition lock throughout)",
+				ErrVolumeDirectWriteInFlight, id, mt.Volume, mt.Path)
+		}
+	}
+	return nil
 }
 
 // inFlightWriteIDs snapshots the volumes with a direct write in flight, for the
