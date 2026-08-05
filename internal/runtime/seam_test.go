@@ -55,6 +55,14 @@ var fieldExemptions = map[string]string{
 	// provider recomputes them from the ID, §3.1.1: addressed by ID internally too), which is what
 	// keeps this single field a handle rather than a leak of the mechanism.
 	"Merged.MergedPath": "§5.B hands the merged rootfs across as an opaque handle; upper/work stay private",
+	// The §5.C twin of the two above, and exempted for the identical reason: §5.C's
+	// seam yields exactly ONE thing — a host mount point — which this provider then
+	// writes into an OCI bind. It is populated and consumed only by local_runsc, never
+	// interpreted above §5.C, and volumes are addressed by ID everywhere else (§6.2).
+	// The exemption is EXPLICIT rather than incidental: without an entry here the field
+	// would pass only because no banned token happens to appear in "SourcePath", which
+	// is a coincidence and not a decision.
+	"MountSource.SourcePath": "§5.C yields one host mount point as an opaque bind source (RootfsSource.MergedPath's precedent); consumed only by local_runsc, and the volume's ID/access mode deliberately do not cross",
 }
 
 // STRUCTURAL assertion: no host primitive appears in the
@@ -146,8 +154,13 @@ func TestSeamCarriesNoHostPrimitives(t *testing.T) {
 	}{
 		// §5.A: the contract 3-tuple (rootfs / steering / limits), the spec that
 		// carries them, and the placement handle returned.
+		// §5.A: the contract 3-tuple (rootfs / steering / limits), the spec that
+		// carries them, the §5.C mount sources riding beside it, and the placement
+		// handle returned. MountSource is listed because LaunchSpec renders as a bare
+		// identifier in every signature, so a host primitive on it would otherwise be
+		// invisible to both halves of this guard.
 		{"provider.go", []string{
-			"RootfsSource", "SteeringSpec", "ResourceLimits", "LaunchSpec", "Placement",
+			"RootfsSource", "SteeringSpec", "ResourceLimits", "LaunchSpec", "MountSource", "Placement",
 		}},
 		// §5.B: the storage seam's two data types.
 		{"../rootfs/rootfs.go", []string{"Overlay", "Merged"}},

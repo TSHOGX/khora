@@ -916,13 +916,26 @@ func (m *Mediator) Promote(ctx context.Context, id model.SandboxID) (model.Templ
 		return "", fmt.Errorf("promote: open overlay: %w", err)
 	}
 
+	// This sandbox's volume mount destinations, read from the mount table the mediator
+	// already holds. They are passed to BOTH Promote calls below, and the same slice is
+	// used for each: the forecast must model exactly what the freeze will do, or it
+	// charges shadowed bytes that are never copied and refuses Promotes against
+	// capacity that was never going to be consumed (rootfs-overlay D5).
+	//
+	// This is also why the set is a PARAMETER: §5.B can never ask §5.C for it, so no
+	// subsystem edge appears (§4) — the mediator holds the table and threads it through.
+	excludedMounts, err := m.mountDests(ctx, id)
+	if err != nil {
+		return "", fmt.Errorf("promote: read mount table: %w", err)
+	}
+
 	// Admission gate, before the quiesce and before any bytes (see the doc above).
 	// Under admitMu for the same reason create is: the inequality is node-GLOBAL
 	// while the transition lock is per-sandbox, so two Promotes of two different
 	// sandboxes hold two different locks and would not serialize at all. The
 	// reservation published inside the critical section is what makes this Promote's
 	// claim visible to the next gate run before its bytes exist.
-	cost, err := m.deps.Rootfs.PromoteCostBytes(ctx, ov)
+	cost, err := m.deps.Rootfs.PromoteCostBytes(ctx, ov, excludedMounts)
 	if err != nil {
 		// Unmeasurable → refuse, not admit blind: same fail-closed choice the gate
 		// makes for UncappedBytes, for the same reason (§2.3).
@@ -960,7 +973,7 @@ func (m *Mediator) Promote(ctx context.Context, id model.SandboxID) (model.Templ
 	defer m.unmarkBuilding(newID)
 
 	// freeze the at-rest upper into the new layer dir (bytes-first).
-	if err := m.deps.Rootfs.PromoteToTemplate(ctx, ov, string(newID)); err != nil {
+	if err := m.deps.Rootfs.PromoteToTemplate(ctx, ov, string(newID), excludedMounts); err != nil {
 		return "", fmt.Errorf("promote: freeze layer: %w", err)
 	}
 

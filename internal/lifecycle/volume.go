@@ -473,6 +473,25 @@ func (m *Mediator) SweepOrphanVolumes(ctx context.Context) error {
 	return nil
 }
 
+// mountDests reads one sandbox's volume mount destinations from the AUTHORITATIVE
+// mount table.
+//
+// It exists so §5.B can be HANDED the set rather than asking for it: the mediator
+// already holds the mount table and already calls Promote, so threading the
+// destinations through keeps §5.B from ever needing to consult §5.C and no subsystem
+// edge appears (§4 / rootfs-overlay D5).
+func (m *Mediator) mountDests(ctx context.Context, id model.SandboxID) ([]string, error) {
+	rows, err := m.deps.Store.ListMounts(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	dests := make([]string, 0, len(rows))
+	for _, mt := range rows {
+		dests = append(dests, mt.Path)
+	}
+	return dests, nil
+}
+
 // markBuildingVolume / unmarkBuildingVolume manage the in-flight-create keep-set.
 //
 // More necessary than the Overlay equivalent: an Overlay's row is inserted BEFORE

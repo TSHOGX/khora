@@ -143,7 +143,31 @@ type Provider interface {
 	// after this returns but before the row insert leaves an orphan layer the
 	// sweep reclaims. Overlay carries the source's OverlayID; newTemplateID names
 	// the frozen layer dir under LayersDir.
-	PromoteToTemplate(ctx context.Context, o *Overlay, newTemplateID string) error
+	//
+	// excludedMounts are THIS sandbox's Volume mount destinations, and they are a
+	// PER-PROMOTE PARAMETER rather than a static package list because a mount
+	// destination is per-sandbox: a package-level list has no way to know them
+	// (rootfs-overlay D5). Passing them in is also the architecturally cleaner route —
+	// the §4 mediator already holds the mount table and already calls Promote, so §5.B
+	// NEVER has to ask §5.C anything and no subsystem edge appears (§4).
+	//
+	// WHAT THEY ARE ACTUALLY FOR, because the obvious guess is wrong: they do NOT
+	// create the empty placeholder. That is the DEFAULT outcome — measured, after
+	// `runsc create` and before any guest code runs, the destination is already an
+	// ordinary empty directory, mode 0755, with zero overlayfs xattrs (and when the
+	// Template itself provides the destination the upper stays pristine). What they do
+	// is PRUNE PRE-EXISTING BYTES THE MOUNT SHADOWS: bytes written into the upper
+	// before the volume was bound over that path are invisible to every guest, yet
+	// they are still on disk, still in the upper, and would be copied into the frozen
+	// layer in full AND counted in both the sandbox's capacity cap and the cost
+	// forecast (rootfs-overlay D5).
+	//
+	// Paths follow the existing convention: relative to the upper, leading slash
+	// stripped. NESTED destinations prune the LEAF SUBTREE and accept an empty
+	// intermediate chain — settled in rootfs-overlay D5, because pruning only the leaf
+	// would leave ghost intermediates in the layer while excluding a top-level
+	// component would discard real guest data that legitimately lives beside the mount.
+	PromoteToTemplate(ctx context.Context, o *Overlay, newTemplateID string, excludedMounts []string) error
 
 	// PromoteCostBytes reports how many bytes a PromoteToTemplate of THIS Overlay
 	// would ADD to the UncappedBytes term (§3.4 / rootfs-overlay D6.5) — the
@@ -175,7 +199,12 @@ type Provider interface {
 	// the moment it returns: the guest can keep writing. That residual is bounded by
 	// the sandbox's own remaining capacity headroom and is the same "true at the
 	// instant of admission" property the whole second term has (D6.5 残留).
-	PromoteCostBytes(ctx context.Context, o *Overlay) (int64, error)
+	// excludedMounts MUST BE THE SAME SET PromoteToTemplate is given. Not a
+	// consistency nicety — a forecast that counts shadowed bytes the freeze will not
+	// copy is conservative in DIRECTION but KNOWN WRONG in value, so it refuses
+	// Promotes against capacity that was never going to be consumed. The two calls
+	// share one set so they cannot drift.
+	PromoteCostBytes(ctx context.Context, o *Overlay, excludedMounts []string) (int64, error)
 
 	// UncappedBytes reports the total bytes this provider currently holds in its
 	// storage THAT NO DECLARED CAPACITY CAP COVERS — the second term of the §3.4

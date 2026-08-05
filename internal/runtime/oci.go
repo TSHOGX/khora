@@ -148,7 +148,7 @@ const cpuPeriodMicros = 100_000
 // to runsc; the caller then asserts the cap actually landed.
 //
 // limits zero on every dimension → no resources block, no cgroupsPath, no leaf.
-func buildOCISpec(mergedPath, netnsPath, cgroupsPath string, limits ResourceLimits, memOverhead int64) *ociSpec {
+func buildOCISpec(mergedPath, netnsPath, cgroupsPath string, limits ResourceLimits, memOverhead int64, mounts []MountSource) *ociSpec {
 	var res *ociResources
 	if limits.CPUMillis > 0 || limits.MemoryByte > 0 {
 		res = &ociResources{}
@@ -193,6 +193,43 @@ func buildOCISpec(mergedPath, netnsPath, cgroupsPath string, limits ResourceLimi
 	if res == nil {
 		cgroupsPath = "" // no limits → no leaf, no cgroup namespace footprint
 	}
+	// The pseudo-filesystems the guest always gets, then the §5.C Volume binds.
+	//
+	// VOLUMES GO LAST, deliberately: appending after the fixed set means a volume
+	// destination can never displace /proc, /dev, /sys or /tmp — with runsc taking
+	// mounts in spec order, an earlier volume at one of those paths would shadow the
+	// pseudo-fs the guest needs to boot. Ordering here is a structural guarantee, so it
+	// costs nothing and removes a whole class of destination.
+	ociMounts := []ociMount{
+		{Destination: "/proc", Type: "proc", Source: "proc"},
+		{Destination: "/dev", Type: "tmpfs", Source: "tmpfs",
+			Options: []string{"nosuid", "strictatime", "mode=755", "size=65536k"}},
+		{Destination: "/sys", Type: "sysfs", Source: "sysfs",
+			Options: []string{"nosuid", "noexec", "nodev", "ro"}},
+		{Destination: "/tmp", Type: "tmpfs", Source: "tmpfs",
+			Options: []string{"nosuid", "nodev", "mode=1777"}},
+	}
+	for _, mt := range mounts {
+		// A plain bind, which is exactly the shape measured to work: with
+		// --overlay2=none --file-access=shared, runsc proxies an extra rw host directory
+		// through the gofer into the guest bidirectionally (volume.md D0 — the local
+		// backend's whole foundation), and a host FUSE mount point proxies identically
+		// (the future remote arm's foundation). Nothing here distinguishes the two.
+		opts := []string{"rbind", "rprivate"}
+		if mt.ReadOnly {
+			// The ro half of shared-ro: past this, the guest's write gets a clean EROFS
+			// rather than silently succeeding. See MountSource.ReadOnly for why the
+			// direction of this bit is load-bearing.
+			opts = append(opts, "ro")
+		}
+		ociMounts = append(ociMounts, ociMount{
+			Destination: mt.Dest,
+			Type:        "bind",
+			Source:      mt.SourcePath,
+			Options:     opts,
+		})
+	}
+
 	return &ociSpec{
 		OCIVersion: "1.0.0",
 		Process: ociProcess{
@@ -213,15 +250,7 @@ func buildOCISpec(mergedPath, netnsPath, cgroupsPath string, limits ResourceLimi
 		},
 		Root:     ociRoot{Path: mergedPath, Readonly: false},
 		Hostname: "guest",
-		Mounts: []ociMount{
-			{Destination: "/proc", Type: "proc", Source: "proc"},
-			{Destination: "/dev", Type: "tmpfs", Source: "tmpfs",
-				Options: []string{"nosuid", "strictatime", "mode=755", "size=65536k"}},
-			{Destination: "/sys", Type: "sysfs", Source: "sysfs",
-				Options: []string{"nosuid", "noexec", "nodev", "ro"}},
-			{Destination: "/tmp", Type: "tmpfs", Source: "tmpfs",
-				Options: []string{"nosuid", "nodev", "mode=1777"}},
-		},
+		Mounts:   ociMounts,
 		Linux: ociLinux{
 			Namespaces: []ociNamespace{
 				{Type: "pid"}, {Type: "mount"}, {Type: "ipc"}, {Type: "uts"},

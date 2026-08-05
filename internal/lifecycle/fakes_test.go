@@ -134,7 +134,7 @@ func (f *fakeRootfs) UncappedBytes(context.Context) (int64, error) {
 // PromoteCostBytes backs the Promote admission gate (§3.4 / D6.5): the forecast of
 // what freezing this Overlay would ADD to the uncapped term. Logged so a test can
 // assert the gate really consulted the provider before the freeze.
-func (f *fakeRootfs) PromoteCostBytes(_ context.Context, o *rootfs.Overlay) (int64, error) {
+func (f *fakeRootfs) PromoteCostBytes(_ context.Context, o *rootfs.Overlay, excludedMounts []string) (int64, error) {
 	f.log("PromoteCostBytes:" + o.ID)
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -144,7 +144,7 @@ func (f *fakeRootfs) PromoteCostBytes(_ context.Context, o *rootfs.Overlay) (int
 	return f.promoteCost, nil
 }
 
-func (f *fakeRootfs) PromoteToTemplate(ctx context.Context, o *rootfs.Overlay, newID string) error {
+func (f *fakeRootfs) PromoteToTemplate(ctx context.Context, o *rootfs.Overlay, newID string, excludedMounts []string) error {
 	f.log("PromoteToTemplate:" + o.ID + "->" + newID)
 	// promoteGate, if non-nil, blocks the freeze (bytes-down window) until a test
 	// signals — used to prove a concurrent sweep respects buildingLayers (§4.4-A).

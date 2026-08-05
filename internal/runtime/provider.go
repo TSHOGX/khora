@@ -128,10 +128,55 @@ type LaunchSpec struct {
 	Rootfs   RootfsSource
 	Steering SteeringSpec
 	Limits   ResourceLimits
+	// Mounts are the §5.C Volume mount points to bind into the guest, PEER to Rootfs
+	// rather than nested inside it. The nesting would be wrong twice over: the rootfs
+	// is ONE assembled composition while these are N self-sufficient host mount points,
+	// and they come from a DIFFERENT subsystem (§5.C, whose seam yields exactly one
+	// thing — a host mount point — which the provider then binds, §5 preamble).
+	//
+	// The provider treats each identically to how it treats the rootfs handle: an
+	// opaque source to bind, with no knowledge of what produced it (a local storage
+	// unit, or a remote backend's FUSE mount point — indistinguishable here, which is
+	// the point of the §5.C seam).
+	Mounts []MountSource
 	// No guest-identity field: the sandbox runs as guest root by default and the
 	// engine does not model guest users (§2.2 — guest identity is not a
 	// host-isolation pillar; sentry virtualizes guest uid 0). "Run as user X" is a
 	// guest-native concern (su/sudo), not an engine primitive (§3.2.1).
+}
+
+// MountSource is one Volume mount to bind into the guest (§5.C). It carries the host
+// mount point and where it goes — and deliberately NOT the volume's ID or its access
+// mode.
+//
+// No volume ID, because the provider has no use for one: it binds a source at a
+// destination, and identity is the mediator's concern (a remote provider would
+// receive its own handle shape for the same role, exactly as with RootfsSource).
+//
+// No AccessMode either — only ReadOnly, which is the one bit that changes what the
+// provider DOES. The mode's other half (exclusivity) is a control-plane fact already
+// decided before this call, so passing the enum would hand the provider a decision it
+// must not participate in.
+type MountSource struct {
+	// SourcePath is the host mount point, produced by the §5.C backend and opaque
+	// here — the same kind of handle RootfsSource.MergedPath is, and exempted in the
+	// seam guard for the same reason.
+	SourcePath string
+	// Dest is the absolute guest path to bind at.
+	Dest string
+	// ReadOnly makes this a read-only bind, materializing the shared-ro access mode.
+	//
+	// THE DIRECTION OF THIS BIT IS LOAD-BEARING, and it is a fact about the SUBSTRATE
+	// rather than an assumption about our code. "ro is enforced at runtime" holds only
+	// for a WRITABLE unit given a READ-ONLY mount: the guest's write gets a clean
+	// EROFS. The REVERSE — an immutable unit given a WRITABLE mount spec — is not a
+	// runtime error at all: `runsc create` HARD-FAILS in the gofer mount stage, so the
+	// container is never created and the guest never runs. The engine's design never
+	// produces a read-only unit (a snapshot yields an ordinary writable volume), so
+	// that path is unreachable — but this bit must not be treated as "safe either
+	// way", because one inverted bit turns what should be a 4xx at admission into an
+	// opaque cold-start mount failure (volume.md D1).
+	ReadOnly bool
 }
 
 // Placement is the opaque handle to this launch's physical resources — rebound

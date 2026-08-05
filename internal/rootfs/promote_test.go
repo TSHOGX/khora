@@ -63,7 +63,7 @@ func TestPromoteToTemplateExcludesRuntimePaths(t *testing.T) {
 	})
 
 	ov := &Overlay{ID: "ov_src", Template: "bare", Lower: []string{"bare"}}
-	if err := p.PromoteToTemplate(ctx, ov, "tmpl_new"); err != nil {
+	if err := p.PromoteToTemplate(ctx, ov, "tmpl_new", nil); err != nil {
 		t.Fatalf("PromoteToTemplate: %v", err)
 	}
 
@@ -110,7 +110,7 @@ func TestPromotedLayerResolvesAsLower(t *testing.T) {
 	ctx := context.Background()
 	p, _ := newProvider(t)
 	writeUpper(t, p, "ov_src", map[string]string{"etc/x": "1"})
-	if err := p.PromoteToTemplate(ctx, &Overlay{ID: "ov_src", Lower: []string{"bare"}}, "tmpl_new"); err != nil {
+	if err := p.PromoteToTemplate(ctx, &Overlay{ID: "ov_src", Lower: []string{"bare"}}, "tmpl_new", nil); err != nil {
 		t.Fatalf("promote: %v", err)
 	}
 	lp, err := p.layerPath("tmpl_new")
@@ -155,7 +155,7 @@ func TestPromoteCostBytesDoesNotUnderReportASparseUpper(t *testing.T) {
 	}
 
 	ov := &Overlay{ID: "ov_sparse", Template: "bare", Lower: []string{"bare"}}
-	forecast, err := p.PromoteCostBytes(ctx, ov)
+	forecast, err := p.PromoteCostBytes(ctx, ov, nil)
 	if err != nil {
 		t.Fatalf("PromoteCostBytes: %v", err)
 	}
@@ -171,7 +171,7 @@ func TestPromoteCostBytesDoesNotUnderReportASparseUpper(t *testing.T) {
 	}
 
 	// and the freeze really does cost that: measure the layer afterwards.
-	if err := p.PromoteToTemplate(ctx, ov, "tmpl_sparse"); err != nil {
+	if err := p.PromoteToTemplate(ctx, ov, "tmpl_sparse", nil); err != nil {
 		t.Fatalf("PromoteToTemplate: %v", err)
 	}
 	actual, err := blockBytes(filepath.Join(p.LayersDir, "tmpl_sparse"))
@@ -197,14 +197,14 @@ func TestPromoteCostBytesBoundsTheRealCost(t *testing.T) {
 		"tmp/.sandboxd-transport.pid": "12345", // excluded from the layer, counted here
 	})
 	ov := &Overlay{ID: "ov_b", Template: "bare", Lower: []string{"bare"}}
-	forecast, err := p.PromoteCostBytes(ctx, ov)
+	forecast, err := p.PromoteCostBytes(ctx, ov, nil)
 	if err != nil {
 		t.Fatalf("PromoteCostBytes: %v", err)
 	}
 	if forecast <= 0 {
 		t.Fatalf("forecast = %d for a non-empty upper; want > 0", forecast)
 	}
-	if err := p.PromoteToTemplate(ctx, ov, "tmpl_b"); err != nil {
+	if err := p.PromoteToTemplate(ctx, ov, "tmpl_b", nil); err != nil {
 		t.Fatalf("PromoteToTemplate: %v", err)
 	}
 	actual, err := blockBytes(filepath.Join(p.LayersDir, "tmpl_b"))
@@ -221,7 +221,7 @@ func TestPromoteCostBytesBoundsTheRealCost(t *testing.T) {
 // costs nothing to copy.
 func TestPromoteCostBytesOfAnAbsentUpperIsZero(t *testing.T) {
 	p, _ := newProvider(t)
-	n, err := p.PromoteCostBytes(context.Background(), &Overlay{ID: "ov_missing", Lower: []string{"bare"}})
+	n, err := p.PromoteCostBytes(context.Background(), &Overlay{ID: "ov_missing", Lower: []string{"bare"}}, nil)
 	if err != nil {
 		t.Fatalf("PromoteCostBytes on an absent upper: %v", err)
 	}
@@ -236,10 +236,110 @@ func TestPromoteRefusesExistingLayer(t *testing.T) {
 	ctx := context.Background()
 	p, _ := newProvider(t)
 	writeUpper(t, p, "ov_src", map[string]string{"etc/x": "1"})
-	if err := p.PromoteToTemplate(ctx, &Overlay{ID: "ov_src", Lower: []string{"bare"}}, "tmpl_dup"); err != nil {
+	if err := p.PromoteToTemplate(ctx, &Overlay{ID: "ov_src", Lower: []string{"bare"}}, "tmpl_dup", nil); err != nil {
 		t.Fatalf("first promote: %v", err)
 	}
-	if err := p.PromoteToTemplate(ctx, &Overlay{ID: "ov_src", Lower: []string{"bare"}}, "tmpl_dup"); err == nil {
+	if err := p.PromoteToTemplate(ctx, &Overlay{ID: "ov_src", Lower: []string{"bare"}}, "tmpl_dup", nil); err == nil {
 		t.Fatal("second promote to same id should fail (layer already exists)")
+	}
+}
+
+// TestPromotePrunesShadowedBytes is the property the per-Promote excluded set exists
+// for (M7 acceptance 18 / rootfs-overlay D5), and it is NOT "the mount point becomes
+// an empty placeholder" — that is the DEFAULT outcome and needs no exclusion at all.
+//
+// What the exclusions do is prune bytes that were written into the upper BEFORE a
+// volume was bound over that path. Those bytes are invisible to every guest (the guest
+// sees only the volume's entries), yet they are still on disk, still in the upper, and
+// would otherwise be copied into the frozen layer in full AND counted in both the
+// sandbox's capacity cap and the cost forecast.
+func TestPromotePrunesShadowedBytes(t *testing.T) {
+	ctx := context.Background()
+	p, _ := newProvider(t)
+	const id = "ov_shadow"
+
+	writeUpper(t, p, id, map[string]string{
+		// Bytes UNDER a future mount destination: shadowed once the volume is bound,
+		// so they must not enter the layer.
+		"data/stale":         "SHADOWED-BY-THE-MOUNT",
+		"data/nested/deeper": "ALSO-SHADOWED",
+		// Real guest data OUTSIDE any mount point: must survive.
+		"etc/app.conf": "REAL-GUEST-DATA",
+		// A sibling of the mount destination sharing its PARENT: this is what makes the
+		// "prune the leaf subtree, not a top-level component" rule falsifiable rather
+		// than merely asserted. Excluding `srv` wholesale would discard it.
+		"srv/keepme":       "SIBLING-OF-A-NESTED-DEST",
+		"srv/vol/shadowed": "SHADOWED-UNDER-A-NESTED-DEST",
+	})
+
+	const newID = "tmpl_shadow"
+	if err := p.PromoteToTemplate(ctx, &Overlay{ID: id}, newID, []string{"/data", "/srv/vol"}); err != nil {
+		t.Fatalf("promote: %v", err)
+	}
+	layer := filepath.Join(p.LayersDir, newID)
+
+	for _, gone := range []string{"data/stale", "data/nested/deeper", "srv/vol/shadowed"} {
+		if _, err := os.Stat(filepath.Join(layer, gone)); !os.IsNotExist(err) {
+			t.Errorf("%s entered the frozen layer (stat err = %v) — bytes shadowed by a mount are invisible to every guest but would be copied in full and charged to the cap and the forecast", gone, err)
+		}
+	}
+	for _, kept := range []string{"etc/app.conf", "srv/keepme"} {
+		if _, err := os.Stat(filepath.Join(layer, kept)); err != nil {
+			t.Errorf("%s was pruned from the layer: %v — only the LEAF subtree may be excluded; a top-level component would discard real guest data living beside the mount", kept, err)
+		}
+	}
+	// The mount destination itself may remain as an EMPTY placeholder — that is the
+	// documented default result and matches what a `tar` of a directory with something
+	// mounted on it captures. What must not remain is content.
+	if ents, err := os.ReadDir(filepath.Join(layer, "data")); err == nil && len(ents) != 0 {
+		t.Errorf("the mount destination in the layer is not empty: %d entries", len(ents))
+	}
+}
+
+// TestPromoteCostUsesTheSameExclusions: the forecast must model exactly what the
+// freeze does. A forecast that counts shadowed bytes is conservative in DIRECTION but
+// known WRONG in value, so it refuses Promotes against capacity that was never going
+// to be consumed — which is why both calls take the same set (rootfs-overlay D5).
+func TestPromoteCostUsesTheSameExclusions(t *testing.T) {
+	ctx := context.Background()
+	p, _ := newProvider(t)
+	const id = "ov_cost"
+
+	const shadowedSize = 512 << 10 // 512 KiB, well above block-rounding noise
+	big := make([]byte, shadowedSize)
+	upper := p.upperPath(id)
+	if err := os.MkdirAll(filepath.Join(upper, "data"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(upper, "data", "shadowed.bin"), big, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeUpper(t, p, id, map[string]string{"etc/keep": "REAL"})
+
+	withAll, err := p.PromoteCostBytes(ctx, &Overlay{ID: id}, nil)
+	if err != nil {
+		t.Fatalf("cost without exclusions: %v", err)
+	}
+	withExcluded, err := p.PromoteCostBytes(ctx, &Overlay{ID: id}, []string{"/data"})
+	if err != nil {
+		t.Fatalf("cost with exclusions: %v", err)
+	}
+	if drop := withAll - withExcluded; drop < shadowedSize/2 {
+		t.Errorf("excluding the mount destination dropped the forecast by only %d bytes (want ≥ %d) — the forecast still charges shadowed bytes the freeze will prune, so it refuses Promotes against capacity that was never going to be consumed",
+			drop, shadowedSize/2)
+	}
+
+	// And the forecast must NOT under-report what the freeze actually costs: it is an
+	// UPPER BOUND by contract, so compare it against the layer that gets written.
+	const newID = "tmpl_cost"
+	if err := p.PromoteToTemplate(ctx, &Overlay{ID: id}, newID, []string{"/data"}); err != nil {
+		t.Fatalf("promote: %v", err)
+	}
+	actual, err := blockBytes(filepath.Join(p.LayersDir, newID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withExcluded < actual {
+		t.Errorf("forecast %d UNDER-reports the actual layer cost %d — the contract requires an upper bound, and the gate's bound would point the wrong way", withExcluded, actual)
 	}
 }

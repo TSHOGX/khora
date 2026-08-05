@@ -249,7 +249,7 @@ func (p *LocalRunsc) Launch(ctx context.Context, spec LaunchSpec) (_ *Placement,
 	if limited {
 		cgPath = cgroupRelPath(h.cid)
 	}
-	oci := buildOCISpec(spec.Rootfs.MergedPath, netnsPath, cgPath, spec.Limits, memOverheadBytes)
+	oci := buildOCISpec(spec.Rootfs.MergedPath, netnsPath, cgPath, spec.Limits, memOverheadBytes, spec.Mounts)
 	b, _ := json.MarshalIndent(oci, "", "  ")
 	if err = os.WriteFile(filepath.Join(h.bundleDir, "config.json"), b, 0o644); err != nil {
 		return nil, fmt.Errorf("runtime: write config.json: %w", err)

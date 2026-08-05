@@ -407,18 +407,33 @@ func (p *HostOverlayFS) UncappedBytes(ctx context.Context) (int64, error) {
 // The source is at-rest by convention only — the mediator gates BEFORE quiescing —
 // so a concurrent guest write makes this stale on return. That is stated at the
 // seam; the number is a bound at the instant of admission, like the term it feeds.
-func (p *HostOverlayFS) PromoteCostBytes(_ context.Context, o *Overlay) (int64, error) {
+func (p *HostOverlayFS) PromoteCostBytes(_ context.Context, o *Overlay, excludedMounts []string) (int64, error) {
 	if o == nil {
 		return 0, fmt.Errorf("rootfs: promote cost: nil overlay")
 	}
 	upper := p.upperPath(o.ID)
+	// THE SAME exclusion set the freeze will use, built by the same function. Skipping
+	// this would keep the forecast conservative in direction but KNOWN WRONG in value:
+	// it would charge the shadowed bytes the freeze is about to prune, and so refuse
+	// Promotes against capacity that was never going to be consumed.
+	excluded := promoteExclusions(excludedMounts)
 	var total int64
-	err := filepath.Walk(upper, func(_ string, info os.FileInfo, err error) error {
+	err := filepath.Walk(upper, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			if os.IsNotExist(err) {
 				return nil // raced with a destroy; a missing file costs nothing to copy
 			}
 			return err
+		}
+		if rel, relErr := filepath.Rel(upper, path); relErr == nil && rel != "." && excluded[filepath.Clean(rel)] {
+			// Excluded: the freeze will not copy it, so it costs nothing. A DIRECTORY
+			// prunes its whole subtree, matching copyTree's semantics exactly — which is
+			// what makes "both calls use the same set" a real guarantee rather than two
+			// implementations that happen to agree today.
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 		if !info.Mode().IsRegular() {
 			return nil // dirs/symlinks/devices: no data bytes copied
@@ -688,7 +703,7 @@ var promoteExcludedPrefixes = []string{
 // inequality (rootfs-overlay D6.5), so the mediator gates a Promote on
 // PromoteCostBytes before calling this — the forecast of what this copy will add.
 // This function does not gate anything itself: it is a mechanism (§4).
-func (p *HostOverlayFS) PromoteToTemplate(_ context.Context, o *Overlay, newTemplateID string) error {
+func (p *HostOverlayFS) PromoteToTemplate(_ context.Context, o *Overlay, newTemplateID string, excludedMounts []string) error {
 	if err := validateSeg("newTemplateID", newTemplateID); err != nil {
 		return err
 	}
@@ -705,11 +720,7 @@ func (p *HostOverlayFS) PromoteToTemplate(_ context.Context, o *Overlay, newTemp
 	// NOT at the final ID, so no row will ever reference it → sweep reclaims it.
 	staging := dst + ".staging"
 	_ = os.RemoveAll(staging)
-	excluded := make(map[string]bool, len(promoteExcludedPaths))
-	for _, e := range promoteExcludedPaths {
-		excluded[filepath.Clean(e)] = true
-	}
-	if err := copyTree(upper, staging, excluded); err != nil {
+	if err := copyTree(upper, staging, promoteExclusions(excludedMounts)); err != nil {
 		_ = os.RemoveAll(staging)
 		return fmt.Errorf("rootfs: promote: copy upper: %w", err)
 	}
@@ -718,6 +729,42 @@ func (p *HostOverlayFS) PromoteToTemplate(_ context.Context, o *Overlay, newTemp
 		return fmt.Errorf("rootfs: promote: finalize layer: %w", err)
 	}
 	return nil
+}
+
+// promoteExclusions merges the STATIC engine-injected paths with THIS Promote's
+// volume mount destinations, and it is the single place the two are combined so the
+// freeze and the forecast cannot be given different sets.
+//
+// The two halves exist for different reasons and neither replaces the other: the
+// static list drops engine-injected runtime debris that must not be captured, while
+// the per-Promote destinations PRUNE THE PRE-EXISTING BYTES A MOUNT SHADOWS. Those
+// shadowed bytes are the whole point — invisible to every guest, yet still on disk,
+// still in the upper, and otherwise copied into the layer in full and charged to both
+// the capacity cap and the forecast (rootfs-overlay D5).
+//
+// Destinations arrive as absolute guest paths and are converted to the upper-relative,
+// leading-slash-stripped form the existing convention uses. NESTING is handled by
+// copyTree's own semantics: an excluded entry that names a directory skips that whole
+// subtree, so a nested destination prunes THE LEAF SUBTREE and leaves an empty
+// intermediate chain — which is the settled choice (rootfs-overlay D5), because
+// leaf-only pruning would leave ghost intermediates while excluding a top-level
+// component would discard real guest data living beside the mount.
+func promoteExclusions(excludedMounts []string) map[string]bool {
+	excluded := make(map[string]bool, len(promoteExcludedPaths)+len(excludedMounts))
+	for _, e := range promoteExcludedPaths {
+		excluded[filepath.Clean(e)] = true
+	}
+	for _, dest := range excludedMounts {
+		rel := strings.TrimPrefix(filepath.Clean("/"+strings.TrimSpace(dest)), "/")
+		if rel == "" || rel == "." {
+			// A destination of "/" would exclude the entire upper. It cannot arise (the
+			// mount-path validation rejects "/"), and silently excluding everything is the
+			// worst possible response to it, so it is dropped rather than honored.
+			continue
+		}
+		excluded[rel] = true
+	}
+	return excluded
 }
 
 // copyTree recursively copies src into dst, skipping paths (relative to src,

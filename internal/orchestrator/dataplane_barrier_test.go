@@ -64,14 +64,14 @@ func (barrierFakeRootfs) DestroyOverlay(context.Context, *rootfs.Overlay) error 
 func (barrierFakeRootfs) AdoptMerged(_ context.Context, o *rootfs.Overlay) (*rootfs.Merged, error) {
 	return &rootfs.Merged{MergedPath: "/fake/" + o.ID}, nil
 }
-func (barrierFakeRootfs) PromoteToTemplate(context.Context, *rootfs.Overlay, string) error {
+func (barrierFakeRootfs) PromoteToTemplate(context.Context, *rootfs.Overlay, string, []string) error {
 	return nil
 }
 func (barrierFakeRootfs) ListBuiltinTemplates(context.Context) ([]string, error) {
 	return nil, nil
 }
 func (barrierFakeRootfs) UncappedBytes(context.Context) (int64, error) { return 0, nil }
-func (barrierFakeRootfs) PromoteCostBytes(context.Context, *rootfs.Overlay) (int64, error) {
+func (barrierFakeRootfs) PromoteCostBytes(context.Context, *rootfs.Overlay, []string) (int64, error) {
 	return 0, nil
 }
 func (barrierFakeRootfs) SweepOrphanLayers(context.Context, []string, []string) (int, error) {
