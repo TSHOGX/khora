@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"strings"
 	"sync"
 	"testing"
@@ -220,7 +221,7 @@ func (r *blockingReader) Read(p []byte) (int, error) {
 		return 1, nil
 	}
 	<-r.gate
-	return 0, errEOF
+	// io.EOF, not a look-alike: ImportVolume tells "the source ended" from "the source
+	// failed", and only the real sentinel means the former.
+	return 0, io.EOF
 }
-
-var errEOF = errors.New("EOF")
