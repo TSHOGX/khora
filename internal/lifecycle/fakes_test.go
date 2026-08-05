@@ -135,7 +135,7 @@ func (f *fakeRootfs) UncappedBytes(context.Context) (int64, error) {
 // what freezing this Overlay would ADD to the uncapped term. Logged so a test can
 // assert the gate really consulted the provider before the freeze.
 func (f *fakeRootfs) PromoteCostBytes(_ context.Context, o *rootfs.Overlay, excludedMounts []string) (int64, error) {
-	f.log("PromoteCostBytes:" + o.ID)
+	f.log("PromoteCostBytes:" + o.ID + ";excluded=" + strings.Join(excludedMounts, "|"))
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.promoteCostErr != nil {
@@ -145,7 +145,7 @@ func (f *fakeRootfs) PromoteCostBytes(_ context.Context, o *rootfs.Overlay, excl
 }
 
 func (f *fakeRootfs) PromoteToTemplate(ctx context.Context, o *rootfs.Overlay, newID string, excludedMounts []string) error {
-	f.log("PromoteToTemplate:" + o.ID + "->" + newID)
+	f.log("PromoteToTemplate:" + o.ID + "->" + newID + ";excluded=" + strings.Join(excludedMounts, "|"))
 	// promoteGate, if non-nil, blocks the freeze (bytes-down window) until a test
 	// signals — used to prove a concurrent sweep respects buildingLayers (§4.4-A).
 	if f.promoteGate != nil {
@@ -491,6 +491,10 @@ type fakeRuntime struct {
 	mu         sync.Mutex
 	calls      []string
 	failLaunch bool
+	// launchMounts holds the §5.C mount specs the LAST Launch carried, so a test can
+	// assert what actually crossed the seam (the bind destination and the read-only
+	// bit) rather than trusting that the mediator assembled it.
+	launchMounts []runtime.MountSource
 	// failStop / failDestroy fail the TEARDOWN half of the seam. The mediator
 	// deliberately ignores these errors (`_ =` at every call site), so the property
 	// they let a test pin is that the control-plane transition still lands correctly
@@ -528,6 +532,13 @@ func (f *fakeRuntime) Calls() []string {
 }
 
 func (f *fakeRuntime) Name() string { return "fake_runsc" }
+
+// LastMounts returns the mount specs the most recent Launch received.
+func (f *fakeRuntime) LastMounts() []runtime.MountSource {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]runtime.MountSource(nil), f.launchMounts...)
+}
 func (f *fakeRuntime) Launch(ctx context.Context, spec runtime.LaunchSpec) (*runtime.Placement, error) {
 	// The call log keeps the bare "Launch:<id>" form — several tests match it
 	// EXACTLY as a synchronization predicate. The limits are asserted from
@@ -535,6 +546,10 @@ func (f *fakeRuntime) Launch(ctx context.Context, spec runtime.LaunchSpec) (*run
 	f.log("Launch:" + spec.Sandbox)
 	f.mu.Lock()
 	f.launchLimits = append(f.launchLimits, spec.Limits)
+	// The §5.C mount specs from the LAST launch, asserted from LastMounts rather than
+	// by string-matching the log — for the same reason the limits are: several tests
+	// match "Launch:<id>" exactly as a synchronization predicate.
+	f.launchMounts = append([]runtime.MountSource(nil), spec.Mounts...)
 	f.mu.Unlock()
 	if f.launchGate != nil {
 		select {

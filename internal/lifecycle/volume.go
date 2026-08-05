@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"engine/internal/model"
+	"engine/internal/runtime"
 	"engine/internal/volume"
 )
 
@@ -471,6 +472,90 @@ func (m *Mediator) SweepOrphanVolumes(ctx context.Context) error {
 		m.deps.Logf("sweep volumes: reclaimed %d orphan volume unit(s)", n)
 	}
 	return nil
+}
+
+// deleteMountsForCleanup drops a sandbox's mount rows on a cleanup path where the
+// caller cannot fail (reconcile's skip-and-log discipline, §4.4-A).
+//
+// It logs rather than returning, because the caller's next step is a record delete
+// whose own error is already logged-and-skipped — but the log is not decoration: if
+// this fails, RESTRICT blocks that delete on every subsequent boot and the log is the
+// only place that will ever say why the record is undeletable.
+func (m *Mediator) deleteMountsForCleanup(ctx context.Context, id model.SandboxID) {
+	if err := m.deps.Store.DeleteMounts(ctx, id); err != nil {
+		m.deps.Logf("reconcile: %s: delete mount rows FAILED (%v) — the record delete will be blocked by mounts.sandbox RESTRICT on this and every future boot", id, err)
+	}
+}
+
+// materializeMounts prepares every volume this sandbox's CURRENT mount table names,
+// returning the backend handles (for later Release) and the provider specs (for the
+// launch).
+//
+// The two halves are returned separately because they have different lifetimes: the
+// specs are consumed once, by this launch, while the handles live in liveState until
+// pause or destroy releases them.
+//
+// PARTIAL FAILURE RELEASES WHAT IT ALREADY TOOK. Without that, a cold start failing on
+// the third of four volumes leaves two materializations outstanding with no handle
+// anywhere — on the local arm that is harmless (Release is a no-op), but on the FUSE
+// arm it strands a process, which is exactly the class of leak the handle exists to
+// prevent.
+func (m *Mediator) materializeMounts(ctx context.Context, id model.SandboxID) ([]*volume.Materialized, []runtime.MountSource, error) {
+	rows, err := m.deps.Store.ListMounts(ctx, id)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read mount table: %w", err)
+	}
+	if len(rows) == 0 {
+		return nil, nil, nil
+	}
+	be := m.deps.Volume
+	if be == nil {
+		// The record says this sandbox has volumes and there is no backend to produce
+		// them. Refusing beats launching without them: a guest that finds its mount
+		// point empty writes into the Overlay instead, silently, and those bytes then
+		// live somewhere the caller never asked for.
+		return nil, nil, fmt.Errorf("sandbox %s has %d mount row(s) but no volume backend is registered", id, len(rows))
+	}
+	mounts := make([]*volume.Materialized, 0, len(rows))
+	specs := make([]runtime.MountSource, 0, len(rows))
+	for _, mt := range rows {
+		mz, err := be.Materialize(ctx, string(mt.Volume))
+		if err != nil {
+			m.releaseMounts(ctx, mounts)
+			return nil, nil, fmt.Errorf("materialize volume %s for %s: %w", mt.Volume, id, err)
+		}
+		mounts = append(mounts, mz)
+		specs = append(specs, runtime.MountSource{
+			SourcePath: mz.SourcePath,
+			Dest:       mt.Path,
+			// The ONE bit of the access mode the provider needs. Exclusivity was already
+			// decided in the control plane (the row's existence), so it does not cross —
+			// and the direction of this bit is load-bearing (runtime.MountSource.ReadOnly).
+			ReadOnly: mt.Access.ReadOnly(),
+		})
+	}
+	return mounts, specs, nil
+}
+
+// releaseMounts ends every materialization in the slice, best-effort.
+//
+// Best-effort is correct rather than lazy: Release PROMISES idempotency and tolerance
+// of an already-gone target (§5.C), so a failure here cannot mean "the bytes are still
+// live" — the bytes survive Release by definition. It is logged so a FUSE arm's stuck
+// unmount is visible without failing a pause that has already committed.
+func (m *Mediator) releaseMounts(ctx context.Context, mounts []*volume.Materialized) {
+	be := m.deps.Volume
+	if be == nil {
+		return
+	}
+	for _, mz := range mounts {
+		if mz == nil {
+			continue
+		}
+		if err := be.Release(ctx, mz); err != nil {
+			m.deps.Logf("release volume materialization %s: %v", mz.Volume, err)
+		}
+	}
 }
 
 // mountDests reads one sandbox's volume mount destinations from the AUTHORITATIVE

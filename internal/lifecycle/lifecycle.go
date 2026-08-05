@@ -222,6 +222,11 @@ type Mediator struct {
 type liveState struct {
 	placement *runtime.Placement
 	merged    *rootfs.Merged
+	// mounts are the §5.C materializations this placement is using, held so pause and
+	// destroy can Release each one. The MOUNT ROWS are not here — those are persistent
+	// control-plane state that survives pause (a resume re-mounts from the CURRENT
+	// table, §3.4); these are the placement-local handles, discarded with the placement.
+	mounts []*volume.Materialized
 }
 
 // TTL defaults (§4.3 / reaper-health D5): conservative, revisable numeric knobs
@@ -402,6 +407,18 @@ type CreateSpec struct {
 	IdleTimeout *time.Duration
 	Retention   *time.Duration
 
+	// Volumes is the volume-binding input (§6.1 POST /v1/sandboxes `volumes?`): the
+	// COMPLETE set of mounts this sandbox is created with.
+	//
+	// Bound at CREATE and injected through this control-plane path, which §6.2 requires
+	// as a flow SHAPE rather than as a timing constraint: a later warm-pool (late
+	// binding) reuses the same injection point, so the shape must not be short-circuited
+	// now even though nothing needs it yet.
+	//
+	// Each entry's Sandbox field is IGNORED and overwritten — the ID does not exist
+	// until Create mints it, so accepting one from the caller could only be wrong.
+	Volumes []model.Mount
+
 	// Limits is the OPTIONAL resource-limit Binding input (§3.4; §6.1 POST
 	// /v1/sandboxes cpu_millis?/memory_byte?/disk_byte?). Zero on an axis =
 	// unlimited there. Unlike the TTLs there is no engine-wide default to
@@ -469,10 +486,39 @@ func (m *Mediator) Create(ctx context.Context, spec CreateSpec) (model.SandboxID
 	}
 	m.admitMu.Unlock()
 
+	// Mount rows go in AFTER the record (mounts.sandbox FK needs it) and BEFORE the
+	// cold start (which reads the table to materialize). Inside the transition lock,
+	// like every other step of the verb.
+	//
+	// The store — not this function — arbitrates the exclusive lease, in one statement.
+	// A pre-check here could not work: Create just minted a fresh SandboxID, so two
+	// concurrent creates hold two DISJOINT transition locks and nothing serializes them
+	// (measured; store.Store.CreateMounts states it in full).
+	if len(spec.Volumes) > 0 {
+		binding := make([]model.Mount, 0, len(spec.Volumes))
+		for _, mt := range spec.Volumes {
+			binding = append(binding, model.Mount{
+				Sandbox: sid, // overwritten deliberately: the ID did not exist until now
+				Volume:  mt.Volume,
+				Path:    store.NormalizeMountPath(mt.Path),
+				Access:  mt.Access,
+			})
+		}
+		if err := m.deps.Store.CreateMounts(ctx, binding); err != nil {
+			// Nothing is built yet, so this needs no unwind beyond dropping the record —
+			// and the mount rows are all-or-nothing, so there are none to remove.
+			_ = m.deps.Store.DeleteSandbox(ctx, sid, nil)
+			return "", fmt.Errorf("create: bind volumes: %w", err)
+		}
+	}
+
 	// ① build empty Overlay over the resolved lineage lower stack (§5.B
 	// multi-lowerdir) + run the cold-start chain.
 	lower, err := m.resolveLower(ctx, spec.Template)
 	if err != nil {
+		// Mount rows are already in, so they must go before the record or RESTRICT
+		// blocks it — the same ordering destroy uses.
+		_ = m.deps.Store.DeleteMounts(ctx, sid)
 		_ = m.deps.Store.DeleteSandbox(ctx, sid, nil) // nothing built, never visible
 		return "", fmt.Errorf("create: resolve lineage: %w", err)
 	}
@@ -488,6 +534,10 @@ func (m *Mediator) Create(ctx context.Context, spec CreateSpec) (model.SandboxID
 	defer m.unmarkBuildingOverlay(oid)
 	ov, err := m.deps.Rootfs.CreateOverlay(ctx, string(oid), lower, rec.Limits.DiskByte)
 	if err != nil {
+		// This branch is BEFORE the cold start, so `unwind` has not run and the mount
+		// rows are still in place — they must go first or RESTRICT blocks the record
+		// delete and leaves an undeletable zombie.
+		_ = m.deps.Store.DeleteMounts(ctx, sid)
 		_ = m.deps.Store.DeleteSandbox(ctx, sid, nil) // nothing built, never visible
 		return "", fmt.Errorf("create: overlay: %w", err)
 	}
@@ -577,6 +627,12 @@ func (m *Mediator) pauseLocked(ctx context.Context, id model.SandboxID, kind str
 		if ls.placement != nil {
 			_ = m.deps.Runtime.Stop(ctx, ls.placement)
 		}
+		// Release each volume materialization, and note what is NOT done here: THE MOUNT
+		// ROWS STAY, so the exclusive lease is NOT released by a pause (§5.C — the lease
+		// is the row's existence). That is symmetric with the Overlay's "pause captures
+		// nothing": the placement-local materialization goes, the persistent binding
+		// stays, and the resume re-materializes from the table.
+		m.releaseMounts(ctx, ls.mounts)
 		if ls.merged != nil {
 			_ = m.deps.Rootfs.Unmount(ctx, ls.merged)
 		}
@@ -821,9 +877,27 @@ func (m *Mediator) destroyLocked(ctx context.Context, rec model.Sandbox) error {
 		if ls.placement != nil {
 			_ = m.deps.Runtime.Destroy(ctx, ls.placement)
 		}
+		m.releaseMounts(ctx, ls.mounts)
 		if ls.merged != nil {
 			_ = m.deps.Rootfs.Unmount(ctx, ls.merged)
 		}
+	}
+	// Delete the mount rows BEFORE the sandbox record, and the order is REQUIRED, not
+	// stylistic (measured): mounts.sandbox RESTRICT fires IMMEDIATELY, so leaving the
+	// rows would make DeleteSandbox below fail with ErrSandboxHasMounts and strand an
+	// undeletable record. Wrapping both in one transaction would not help, and
+	// `defer_foreign_keys` is rejected for a store-level reason (see
+	// store.Store.DeleteMounts).
+	//
+	// THIS IS THE LEASE RELEASE POINT (§5.C): the lease is the row's existence, so the
+	// rows going away IS the release — including the reaper's evict of a paused sandbox
+	// past retention, which reaches this same function.
+	//
+	// A failure here is returned rather than swallowed: unlike byte reclamation (which
+	// §4.4 lets the sweep retry), an undeleted mount row BLOCKS the record delete, so
+	// proceeding would just fail one line later with a less informative error.
+	if err := m.deps.Store.DeleteMounts(ctx, id); err != nil {
+		return fmt.Errorf("destroy: delete mount rows: %w", err)
 	}
 	// reclaim the Overlay artifact (byte deletion; §4.1 destroy). Byte reclaim
 	// uses only the OverlayID (DestroyOverlay derives StateDir/<id>); the lower
@@ -1014,6 +1088,18 @@ func (m *Mediator) coldStart(ctx context.Context, id model.SandboxID, ov *rootfs
 	if err != nil {
 		return fmt.Errorf("mount overlay: %w", err)
 	}
+	// ①b materialize this sandbox's Volumes from the CURRENT mount table (§5.C).
+	//
+	// Reading the table here rather than taking it as an argument is what makes the
+	// mount relationship a Binding (§3.4): create and resume run the same code, and a
+	// resume therefore re-mounts per whatever the table says NOW — not per whatever it
+	// said when the sandbox was last running, and not from any frozen byte. The volume
+	// is always the one real thing; it is never forked into a per-sandbox copy.
+	mounts, specs, err := m.materializeMounts(ctx, id)
+	if err != nil {
+		_ = m.deps.Rootfs.Unmount(ctx, merged)
+		return err
+	}
 	// ④ launch runsc (sandboxd entrypoint), ⑤ guest boots, ⑥ IP discovered.
 	// limits come from the RECORD, re-materialized at every placement — that is
 	// what makes them a Binding rather than placement state (§3.4): a resume
@@ -1024,12 +1110,14 @@ func (m *Mediator) coldStart(ctx context.Context, id model.SandboxID, ov *rootfs
 	pl, err := m.deps.Runtime.Launch(ctx, runtime.LaunchSpec{
 		Sandbox: string(id),
 		Rootfs:  runtime.RootfsSource{MergedPath: merged.MergedPath},
+		Mounts:  specs,
 		Limits: runtime.ResourceLimits{
 			CPUMillis:  limits.CPUMillis,
 			MemoryByte: limits.MemoryByte,
 		},
 	})
 	if err != nil {
+		m.releaseMounts(ctx, mounts)
 		_ = m.deps.Rootfs.Unmount(ctx, merged)
 		return fmt.Errorf("launch: %w", err)
 	}
@@ -1041,12 +1129,13 @@ func (m *Mediator) coldStart(ctx context.Context, id model.SandboxID, ov *rootfs
 	// puts it in liveIDs() so the periodic keep-set protects it (§4.4-A). The
 	// transition lock is held for the whole chain, so this is not visible to a
 	// user verb. On a health-gate failure we take() it back out and tear down.
-	m.put(id, &liveState{placement: pl, merged: merged})
+	m.put(id, &liveState{placement: pl, merged: merged, mounts: mounts})
 	// ⑦ readiness gate: poll Health RPC to first success (not bare TCP accept;
 	// guest-runtime D5.2 point ①).
 	if err := m.awaitHealthy(ctx, pl); err != nil {
 		m.take(id) // un-record before teardown so a racing reconcile sees no live handle
 		_ = m.deps.Runtime.Destroy(ctx, pl)
+		m.releaseMounts(ctx, mounts)
 		_ = m.deps.Rootfs.Unmount(ctx, merged)
 		return fmt.Errorf("health gate: %w", err)
 	}
@@ -1087,13 +1176,40 @@ func (m *Mediator) awaitHealthy(ctx context.Context, pl *runtime.Placement) erro
 // unwind reclaims a half-built placement (§4.4-A: failure recycles placement,
 // persistent Overlay artifact untouched). isCreate additionally destroys the
 // just-built empty Overlay (create has no fallback state; resume keeps it).
+// UNWIND MUST DELETE THE MOUNT ROWS ON THE CREATE PATH, and this is a DESIGN
+// REQUIREMENT rather than an implementation detail (§5.C / volume.md D3).
+//
+// The mount rows are written BEFORE the cold start, so every post-cold-start unwind
+// branch is followed by a DeleteSandbox that will hit mounts.sandbox RESTRICT. An
+// unwind that discarded that error would leave A ZOMBIE SANDBOX RECORD THAT CANNOT BE
+// DELETED — by anyone, ever: the record blocks on rows nothing else knows to remove,
+// and the sandbox never ran so no later verb will revisit it.
+//
+// That is why the deletion is here and not left to the caller's `_ =` DeleteSandbox:
+// those calls legitimately ignore their error (the create was already failing and
+// there is nothing better to do), which is exactly the shape that would swallow this
+// one silently.
+//
+// isCreate gates it because RESUME MUST NOT delete them: a failed resume stays
+// `paused` (§4.4-A atomic return to the source state), and its binding is persistent
+// control-plane state that the next resume re-materializes from. Deleting it would
+// silently detach volumes from a sandbox that is merely paused — and release its
+// exclusive leases, letting another sandbox take a volume this one still expects.
 func (m *Mediator) unwind(ctx context.Context, id model.SandboxID, ov *rootfs.Overlay, isCreate bool) {
 	if ls := m.take(id); ls != nil {
 		if ls.placement != nil {
 			_ = m.deps.Runtime.Destroy(ctx, ls.placement)
 		}
+		m.releaseMounts(ctx, ls.mounts)
 		if ls.merged != nil {
 			_ = m.deps.Rootfs.Unmount(ctx, ls.merged)
+		}
+	}
+	if isCreate {
+		// Reported, not discarded: if this fails the caller's DeleteSandbox is about to
+		// fail too, and the log is the only place that will say why the record survived.
+		if err := m.deps.Store.DeleteMounts(ctx, id); err != nil {
+			m.deps.Logf("unwind %s: delete mount rows FAILED (%v) — the record delete will now be blocked by mounts.sandbox RESTRICT, leaving an undeletable zombie record", id, err)
 		}
 	}
 	if isCreate && ov != nil {
@@ -1426,6 +1542,13 @@ func (m *Mediator) reconcileRecord(ctx context.Context, rec model.Sandbox, keep 
 		// "created" event and there must be no unpaired "destroyed" (a billing
 		// subscriber must not see a destroyed for a sandbox it never saw created).
 		m.reclaimOrphanOverlay(ctx, rec, true)
+		// Mount rows FIRST. This is the CRASH twin of unwind's requirement, and it is
+		// the path where getting it wrong is permanent: a create that died between
+		// writing its mount rows and completing leaves rows referencing a `creating`
+		// record, so RESTRICT blocks this delete on EVERY subsequent boot — an
+		// undeletable record that no verb will ever revisit. Nothing else in the engine
+		// knows to remove those rows.
+		m.deleteMountsForCleanup(ctx, rec.ID)
 		if err := m.deps.Store.DeleteSandbox(ctx, rec.ID, nil); err != nil && err != store.ErrNotFound {
 			m.deps.Logf("reconcile: skip creating %s: delete record: %v", rec.ID, err)
 		}
@@ -1455,6 +1578,7 @@ func (m *Mediator) reconcileRecordLocked(ctx context.Context, rec model.Sandbox,
 		// hold the lock and we'd have skipped) — so this is a crashed-create orphan,
 		// same as startup. Delete + reclaim the empty upper.
 		m.reclaimOrphanOverlay(ctx, rec, true)
+		m.deleteMountsForCleanup(ctx, rec.ID) // same requirement as the startup path
 		if err := m.deps.Store.DeleteSandbox(ctx, rec.ID, nil); err != nil && err != store.ErrNotFound {
 			m.deps.Logf("reconcile: skip creating %s: delete record: %v", rec.ID, err)
 		}
