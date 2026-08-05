@@ -1780,7 +1780,24 @@ func (m *Mediator) adoptOrDemoteLocked(ctx context.Context, rec model.Sandbox) (
 	if err != nil {
 		return false, fmt.Errorf("adopt merged: %w", err) // uncertain → protect
 	}
-	m.put(rec.ID, &liveState{placement: pl, merged: merged})
+	// Re-recognize this sandbox's §5.C volume materializations too, so the recovered
+	// liveState is COMPLETE.
+	//
+	// Without this the adopted survivor carries no volume handles, and the next
+	// pause/destroy Releases nothing. On the local arm that is invisible (Release is a
+	// no-op there by contract), which is exactly what makes it worth doing: on a remote
+	// arm the handle owns a live FUSE process, so a lost handle strands it — the leak the
+	// backend-private handle exists to prevent (volume.md D2/D3.1: no side table keyed by
+	// volume ID). "Invisible on the default arm" is not the same as correct.
+	mounts, err := m.adoptMounts(ctx, rec.ID)
+	if err != nil {
+		// UNCERTAIN → PROTECT, the §4.4-A rule for this whole function: refusing to adopt
+		// leaves the sandbox `running` with its placement in the keep-set, so nothing is
+		// torn down and the next pass retries. Recording a half-recovered liveState would
+		// be the worse outcome — a pause would then silently skip a Release it owed.
+		return false, fmt.Errorf("adopt volume materializations: %w", err)
+	}
+	m.put(rec.ID, &liveState{placement: pl, merged: merged, mounts: mounts})
 	return true, nil
 }
 

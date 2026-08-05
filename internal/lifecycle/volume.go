@@ -726,6 +726,50 @@ func (m *Mediator) materializeMounts(ctx context.Context, id model.SandboxID) ([
 	return mounts, specs, nil
 }
 
+// adoptMounts re-recognizes the volume materializations of a sandbox being ADOPTED
+// after a control-plane crash (§4.4-A) — rootfs.AdoptMerged's §5.C counterpart.
+//
+// It uses AdoptMaterialized, NOT Materialize, and the difference is the whole point.
+// Materialize is create-if-absent, so it would happily invent an empty unit for a
+// volume whose storage is gone — and then report the sandbox as cleanly adopted while
+// its guest holds a gofer onto the OLD, now-unlinked directory. That is
+// indistinguishable from a healthy adopt from the control plane's side, and the guest's
+// writes keep succeeding into bytes no host path can reach (the measured mis-sweep
+// blast radius, volume.md D7.2). Adopt REFUSES an absent unit instead, which is what
+// turns that case into "uncertain → protect" rather than a silent lie.
+//
+// A missing volume is therefore an ERROR here, deliberately, even though a fresh cold
+// start would recreate it: the guest that is ALREADY RUNNING cannot be re-pointed at a
+// new directory, so "recreate it empty" is not a recovery for a live sandbox. Failing
+// the adopt demotes nothing and tears nothing down — the caller keeps the sandbox in the
+// keep-set and retries — whereas a resume later will legitimately create-if-absent and
+// restart the guest clean (§5.C: data lost but recoverable).
+func (m *Mediator) adoptMounts(ctx context.Context, id model.SandboxID) ([]*volume.Materialized, error) {
+	rows, err := m.deps.Store.ListMounts(ctx, id)
+	if err != nil {
+		return nil, fmt.Errorf("read mount table: %w", err)
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	be := m.deps.Volume
+	if be == nil {
+		return nil, fmt.Errorf("sandbox %s has %d mount row(s) but no volume backend is registered", id, len(rows))
+	}
+	mounts := make([]*volume.Materialized, 0, len(rows))
+	for _, mt := range rows {
+		mz, err := be.AdoptMaterialized(ctx, string(mt.Volume))
+		if err != nil {
+			// Release what was already re-recognized: a partially rebuilt set is worse than
+			// none, because it is the shape that makes a later pause skip Releases it owes.
+			m.releaseMounts(ctx, mounts)
+			return nil, fmt.Errorf("volume %s of sandbox %s: %w", mt.Volume, id, err)
+		}
+		mounts = append(mounts, mz)
+	}
+	return mounts, nil
+}
+
 // releaseMounts ends every materialization in the slice, best-effort.
 //
 // Best-effort is correct rather than lazy: Release PROMISES idempotency and tolerance
@@ -863,8 +907,12 @@ func (m *Mediator) deriveVolume(ctx context.Context, srcID model.VolumeID, capBy
 		return "", fmt.Errorf("%s volume: %w: backend %q cannot enforce a capacity cap", kind, ErrVolumeCapUnsupported, be.Name())
 	}
 
-	src, err := m.deps.Store.GetVolume(ctx, srcID)
-	if err != nil {
+	// The source must exist as a RECORD, checked before an ID is minted and before any
+	// bytes move. The record is the authority (§3.4), so a backend that happens to hold
+	// bytes for a volume with no row is not a valid source — those bytes are an orphan the
+	// sweep is about to reclaim, and deriving from them would produce a child of something
+	// that is being deleted.
+	if _, err := m.deps.Store.GetVolume(ctx, srcID); err != nil {
 		return "", fmt.Errorf("%s volume: %w", kind, err)
 	}
 
@@ -884,6 +932,7 @@ func (m *Mediator) deriveVolume(ctx context.Context, srcID model.VolumeID, capBy
 		return "", err
 	}
 	// ONE backend call that both copies the bytes and writes the cap.
+	var err error
 	if isClone {
 		err = be.Clone(ctx, string(srcID), string(newID), capBytes)
 	} else {
@@ -910,7 +959,6 @@ func (m *Mediator) deriveVolume(ctx context.Context, srcID model.VolumeID, capBy
 		}
 		return "", fmt.Errorf("%s volume: insert record: %w", kind, err)
 	}
-	_ = src // the record was read to validate existence before any bytes moved
 	return newID, nil
 }
 

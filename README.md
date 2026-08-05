@@ -20,8 +20,12 @@ internal/lifecycle/    §4 mediator: state machine + transition lock + cold-star
 internal/store/        control-plane record seam: SQLite + in-memory, one interface
 internal/runtime/      §5.A: runtime provider seam + local_runsc
 internal/rootfs/       §5.B: rootfs provider seam + host overlayfs assembly
+internal/volume/       §5.C: volume.Backend seam + local btrfs arm + a TEST-ONLY plain-dir
+                       second arm (the seam's only falsification instrument) + volumetest
 internal/transport/    §5.E: host-side process client + the 7-RPC fs surface + Health (Connect-RPC/h2c)
 internal/btrfs/        leaf package: subvolume + squota primitives (no engine model)
+internal/allocbytes/   leaf package: "bytes actually allocated" for a tree — the one
+                       measurement §5.B and §5.C both need for §3.4's second term
 internal/guestport/    leaf constant: the guest netns TCP port, shared by §5.A/§5.E
 internal/arch/         structural guards: subsystems must not import each other
 proto/                 transport wire schema; generated code under internal/transport/gen

@@ -1,5 +1,10 @@
 # M7 — Volume(把"额外要独立存活的数据"做成一等公民)
 
+> **状态:三门全部落地,验收 24 条全过(unit + `-tags substrate -p 1` on `sbx`)。**
+> 等人工 review gate;**过了就整篇 expire**,只留 `README.md` 一行 ladder 条目
+> (CLAUDE.md「Expire as shipped」)。本文暂留,因为下面「落地实况」两条与 spec 的差异
+> 还没写回 spec——spec 改动是 gated decision,不在实现回合内做。
+>
 > ladder 见 [`README.md`](./README.md);spec 锚点见文末「附」。
 >
 > **设计已全部收敛进 spec**(§5.C / §3.4 / §4.3 / §6.1 / §6.2,推导与证伪在
@@ -7,6 +12,51 @@
 > 边界怎么切、实测约束怎么约束写法、store 侧四条 FK 路径怎么翻译、改哪些代码、怎么验收、内部怎么分门。
 >
 > **编号约定**:裸 `§N` 一律指 spec 全局章节;`Dx` 指 volume.md 的节;指本文自己的节时写「本文 §N」。
+
+---
+
+## 落地实况(与本文原文的差异,共两条 + 一处补漏)
+
+> 只记**与本文写下的东西不一致**的地方。一致的部分不复述——代码就是它自己的记录。
+
+**① sweep 的 seam 形状变了,原因是实测出的数据丢失。**(本文 §6 表里写的是
+`SweepOrphanVolumes(live, building)`「镜像 `SweepOrphanOverlays`」。)
+
+那个形状**会删掉已提交卷的字节**:mediator 分两次读 `live` 与 `building`,一个**整个创建过程**
+落在两次读之间的卷两个集合都不在,backend 于是把一个完整提交的卷删了。**实测:458 次并发 sweep 下
+6 个快照被删了 3 个。**
+
+Overlay 侧同形,且其注释把这段 skew 记成可接受的残留——**对 Overlay 差不多成立**:它的行**先于**
+单元插入,暴露的只有快照 skew。**卷是 bytes-first,暴露的是整个创建过程**。同一个形状,风险量级不同。
+
+改法:seam 拆成 **backend 只枚举(`ListUnitIDs`)、mediator 判定**,然后逐个 `DestroyVolume`。它靠
+**次序**而不是靠加锁关窗:每个候选的字节都早于全部检查;而一个已不在在飞集合里的候选,其行**必然已经
+插完**(标记只在插入之后才摘),故随后一次 per-candidate 的 store 读一定看得见它。不引新锁、不在锁内
+调 store。顺带把 §5.C 那两条安全要求放回它们该在的地方(「跳过出现在任何挂载行里的」「读失败就跳过」
+本来就是 mediator 侧的事实)。**改后:913 次 sweep / 6 个快照,零回收。**
+
+两侧都留了交叉引用(`volume.Backend.ListUnitIDs` 与 `rootfs.Provider.SweepOrphanOverlays`),
+Overlay 侧**故意不动**,理由与实测证据都写在原地。
+
+> **待写回 spec**:§5.C 的 sweep 契约描述仍是合并形状。契约语义没变(「mediator 算 live、backend 只
+> 枚举自己的存储」依然成立),但方法形状要更新。
+
+**② 断言 1、11、21 的分门与本文 §8 不符,因为在门 A 里物理上到不了。**
+
+三条都要「沙箱**挂着**卷」,而门 A 按自己的定义没有 `mounts` 表(「不碰挂载」)。做法是**拆,不是砍**:
+卷生命周期那半在门 A 断言(卷先于沙箱建、晚于沙箱亡且字节逐字节不变;`Materialize` 的
+create-if-absent 在双臂契约里;零沙箱 import→export),需要挂载的那半随 `mounts` 表进门 B。
+**没有任何一条被弱化**,24 条全过。
+
+**③ 一处补漏(本文没写,是真缺口)**:`AdoptMaterialized` 原本**没有生产消费者**——§4.4-A 接管一个
+crash 幸存者时只重建了 placement 与 merged,`liveState.mounts` 是空的,于是其后的 pause/destroy
+**什么都不 Release**。local 臂上完全看不出来(Release 按契约就是 no-op),这恰好是它值得补的理由:
+remote 臂上那个句柄握着一个活 FUSE 进程,丢句柄就是把它挂在那儿——正是「私有 handle」存在的目的。
+现在接管路径走 `AdoptMaterialized`(**不是** `Materialize`:后者 create-if-absent,会给一个存储已经
+没了的卷凭空造个空目录,然后**报告接管干净**,而 guest 还攥着旧的、已 unlink 的那个——控制面看不见
+的谎)。单元不在就让接管**失败**:活着的 guest 没法被重新指向一个新目录,故「重建成空的」对活沙箱
+不是恢复;失败即 §4.4-A 的「不确定取保守」,什么都不拆,下一轮重试(而 resume 那条路径**该**
+create-if-absent,因为它重启 guest)。
 
 ---
 
@@ -215,7 +265,7 @@ Volume 给 store 加了**四条新的引用关系**,它们的结局必须**互�
 
 | 位置 | 改动 |
 | --- | --- |
-| **`internal/volume`**(新,§5.C 子系统) | `Backend` seam(`Name` / `CreateVolume` / `SetCapacity` / `Usage` / `Materialize` / `Release` / `AdoptMaterialized` / `OpenRoot` / `DestroyVolume` / `UncappedBytes` / `Snapshot` / `Clone` / `SweepOrphanVolumes` / `Capabilities`)+ `local_btrfs` 实现 + **test-only `plain_dir` 第二臂** + `volumetest` 共享契约包 + `seam_test.go` 结构守卫。`OpenRoot` 返回的 `Root` **不含宿主路径**,两臂都用 `openat2(RESOLVE_IN_ROOT)`(plain_dir 臂与 btrfs 臂在这一条上机制相同) |
+| **`internal/volume`**(新,§5.C 子系统) | `Backend` seam(`Name` / `CreateVolume` / `SetCapacity` / `Usage` / `Materialize` / `Release` / `AdoptMaterialized` / `OpenRoot` / `DestroyVolume` / `UncappedBytes` / `Snapshot` / `Clone` / ~~`SweepOrphanVolumes`~~ → **`ListUnitIDs`**(见「落地实况」①)/ `ReclaimQuotaRows` / `DeletedRowIDs` / `Capabilities`)+ `local_btrfs` 实现 + **test-only `plain_dir` 第二臂** + `volumetest` 共享契约包 + `seam_test.go` 结构守卫。`OpenRoot` 返回的 `Root` **不含宿主路径**,两臂都用 `openat2(RESOLVE_IN_ROOT)`(plain_dir 臂与 btrfs 臂在这一条上机制相同) |
 | `internal/btrfs` | **原样复用,不改形状**;只加 `<stale>` 配额行回收要的两件:按 id 读行标签、按 id destroy(本文 §4⑧)。`DeleteSubvolume` 的 best-effort destroy 不动 |
 | `internal/model` | `VolumeID` / `Volume{ID, Backend, CapByte, Parent, CreatedAt}` / `Mount{Sandbox, Volume, Path, Access}` / `AccessMode`。**卷帽不进 `Limits`**——它不是 Binding 三轴(§3.4) |
 | `internal/store`(接口) | `CreateVolume` / `GetVolume` / `ListVolumes` / `SetVolumeCapacity` / `DeleteVolume`;`CreateMount`(原子,返租约冲突)/ `ListMounts(sandbox)` / `ListMountsByVolume` / `DeleteMounts(sandbox)`;**四个 sentinel**(本文 §5)。挂载行**不发事件**(非 §4.1 转换) |
@@ -227,7 +277,7 @@ Volume 给 store 加了**四条新的引用关系**,它们的结局必须**互�
 | `internal/rootfs`(seam) | **`PromoteToTemplate` / `PromoteCostBytes` 增 excluded-mount-points 入参**(本文 §3⑤);两者必须用同一集合 |
 | `internal/lifecycle` | 五处挂钩(`Create` 写挂载行、`coldStart` Materialize + 组 `LaunchSpec.Mounts`、`resumeLocked` 读回挂载表重 Materialize、`pauseLocked` Release、`destroyLocked` **先删挂载行再 `DeleteSandbox`**);`liveState` 加 `mounts`;**`unwind` 必须显式删挂载行**(今天那几处把错误写成 `_ =`,会留下一条删不掉的僵尸沙箱记录);`CreateSpec` 增 volume-binding 入参 |
 | `internal/lifecycle/admission.go` | `sumCommitted` 加 Σ(卷帽);disk 项加 `Volume.UncappedBytes`;**新增 `admitVolume(capBytes)` 入口**——不复用 `admit`(那条"计量轴必须有帽"的检查是关于**沙箱**的陈述);抬帽路径持 `admitMu` 跨 {gate → commit} |
-| `internal/lifecycle`(sweep) | `SweepOrphanVolumes` 镜像 `SweepOrphanOverlays`(mediator 算 live + building,backend 枚举自己)+ 配额行回收轮 |
+| `internal/lifecycle`(sweep) | ~~`SweepOrphanVolumes` 镜像 `SweepOrphanOverlays`~~ → **backend 只枚举、mediator 判定并逐个 destroy**(「落地实况」①:镜像形状实测会删掉已提交卷)+ 配额行回收轮 + **卷帽修复轮**(`RepairVolumeCaps`,D7.3 的修复态) |
 | `internal/orchestrator/api.go` | Volume **九个**端点(七个 + `import`/`export`);四个 409 各自映射 + **写入 regime 的第五种 409**(live-rw 挂载持有 ⟹ 拒直连变更);`size` 缺失 / 降帽越界 / 绑定自相矛盾 → 400;capability 不支持 → 400。import/export 流式,不整块缓冲 |
 | `internal/lifecycle`(写入 regime) | `admitDirectWrite(volumeID)`:在**持 live-map 那把锁的同一个临界区**内既裁决"无 live-rw 持有者"又发布 in-flight 标记(与既有在飞构建 keep-set 同形,**不引新锁类**)。谓词读 live-map,**不读** `sandboxes.state` |
 | `cmd/orchestrator/main.go` | `--volumes-dir`(默认 `StateDir/volumes`,与 overlays 同级);**boot 序列:卷 sweep 排在任何存储单元创建之前**(本文 §4⑪) |
@@ -278,14 +328,17 @@ Volume 给 store 加了**四条新的引用关系**,它们的结局必须**互�
 
 1. **门 A — 卷作为一等对象,不碰挂载。** seam + 两臂 + `volumes` 表 + `volumetest` 契约 + CRUD/PATCH 端点 +
    准入门那一半 + 孤儿卷字节 sweep + 结构守卫 + **`OpenRoot` 与 import/export 端点**。
-   断言 1、7、8、11、16、17、19、20、**22**。
+   断言 7、8、16、17、19、20、**22**,加断言 1 / 11 / 21 里**不需要挂载**的那半
+   (「落地实况」②:1、11、21 需要「沙箱挂着卷」,门 A 按定义没有 `mounts` 表,故拆开而不是砍掉)。
    **它可以独立交付**:一个能建、能改帽、能删、能**装进字节也能读出字节**、能被正确记账与回收的卷,
    只是还没人挂它。**写入 regime 的门此时不存在**——本门内没有 `mounts` 表,那条不变量**没有任何可被违反
    的方式**(不是"缓一缓",是本门内不存在写入方冲突);它随挂载表一起在门 B 落地。
 2. **门 B — 挂载表与租约。** `mounts` 表 + 四个 sentinel + `DeleteSandbox` 的 FK 分支 + Memory 三处扫描 +
    五处 mediator 挂钩(含 `unwind` 删行)+ `LaunchSpec.Mounts` + OCI bind + Promote 的 per-Promote 入参 +
    **写入 regime 的门与 in-flight 标记**(挂载表一出现,那条不变量的触发者就出现了)。
-   断言 2、3、4、5、6、9、10、18、**21、23、24**。**风险集中在 `unwind` 与删除次序**(那是留僵尸记录的两处)。
+   断言 2、3、4、5、6、9、10、18、**21、23、24**,以及断言 1 / 11 里挂载相关的那半。
+   **风险集中在 `unwind` 与删除次序**——预判对了,但**少了一处**:`reconcile` 清理 crash 掉的
+   `creating` 记录时也会撞 RESTRICT,而那条路径更糟(每次开机都撞,永久僵尸)。两处都补了。
 3. **门 C — snapshot / clone 与配额行回收。** `parent` + RESTRICT + 第四个 sentinel + `Snapshot`/`Clone`
    (含显式设帽 + 在飞集合 + 修复态)+ `<stale>` 行回收轮。断言 12、13、14、15。
    **排最后的理由是机制性的**:配额行泄漏的**唯一触发者**是 snapshot/clone,故这两件必须同门——把回收放进

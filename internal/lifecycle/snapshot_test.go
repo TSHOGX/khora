@@ -164,14 +164,14 @@ func TestRepairVolumeCapsReAssertsTheRecord(t *testing.T) {
 	// Simulate the crash residue: the record says capped, the storage says uncapped —
 	// which is what a death between the snapshot ioctl and the cap write leaves.
 	vb.mu.Lock()
-	vb.caps_[string(vid)] = 0
+	vb.appliedCaps[string(vid)] = 0
 	vb.mu.Unlock()
 
 	if err := m.RepairVolumeCaps(ctx); err != nil {
 		t.Fatalf("repair: %v", err)
 	}
 	vb.mu.Lock()
-	got := vb.caps_[string(vid)]
+	got := vb.appliedCaps[string(vid)]
 	vb.mu.Unlock()
 	if got != 32<<20 {
 		t.Fatalf("after the repair pass the storage carries %d, want the RECORD's %d — this is the crash window between a snapshot and its cap write, and it is a repair state rather than a legal one (volume.md D7.3)", got, 32<<20)
@@ -193,7 +193,7 @@ func TestRepairVolumeCapsReAssertsTheRecord(t *testing.T) {
 		t.Fatal(err)
 	}
 	vb.mu.Lock()
-	uncCap := vb.caps_[string(unc)]
+	uncCap := vb.appliedCaps[string(unc)]
 	vb.mu.Unlock()
 	if uncCap != 0 {
 		t.Errorf("the repair pass imposed a cap of %d on a deliberately UNCAPPED volume", uncCap)
@@ -279,7 +279,7 @@ func TestSnapshotCrashWindowLeavesReclaimableBytes(t *testing.T) {
 	// The BYTES exist...
 	vb.mu.Lock()
 	present := vb.units[string(crashed)]
-	capOnStorage := vb.caps_[string(crashed)]
+	capOnStorage := vb.appliedCaps[string(crashed)]
 	vb.mu.Unlock()
 	if !present {
 		t.Fatalf("the snapshot bytes do not exist at the crash point, so this window is not the one being tested")

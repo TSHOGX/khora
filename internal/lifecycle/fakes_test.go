@@ -260,10 +260,11 @@ type fakeVolume struct {
 	reclaimErr   error
 	enumErr      error
 
-	// caps_ records the cap each volume was created or derived WITH, so a test can
-	// assert the cap crossed the seam on the operation that made the bytes rather than
-	// trusting the record.
-	caps_ map[string]int64
+	// appliedCaps records the cap each volume was created or derived WITH — i.e. what
+	// actually reached the "storage" — so a test can assert the cap crossed the seam ON
+	// the operation that made the bytes rather than trusting the record. That is the
+	// distinction the whole cap-write invariant turns on (volume.md D7.3).
+	appliedCaps map[string]int64
 	// deletedRows stands in for the substrate's leaked quota rows: a test seeds ids and
 	// asserts the reclamation round consumed them.
 	deletedRows map[uint64]bool
@@ -281,7 +282,7 @@ func newFakeVolume() *fakeVolume {
 		caps:        volume.Capabilities{Snapshot: true, Clone: true, Quota: true},
 		units:       map[string]bool{},
 		roots:       map[string]*fakeRoot{},
-		caps_:       map[string]int64{},
+		appliedCaps: map[string]int64{},
 		deletedRows: map[uint64]bool{},
 	}
 }
@@ -316,10 +317,10 @@ func (f *fakeVolume) CreateVolume(_ context.Context, id string, capBytes int64) 
 	}
 	f.mu.Lock()
 	f.units[id] = true
-	if f.caps_ == nil {
-		f.caps_ = map[string]int64{}
+	if f.appliedCaps == nil {
+		f.appliedCaps = map[string]int64{}
 	}
-	f.caps_[id] = capBytes
+	f.appliedCaps[id] = capBytes
 	f.mu.Unlock()
 	return nil
 }
@@ -333,10 +334,10 @@ func (f *fakeVolume) SetCapacity(_ context.Context, id string, capBytes int64) e
 		return fmt.Errorf("fake: %w", volume.ErrUnsupported)
 	}
 	f.mu.Lock()
-	if f.caps_ == nil {
-		f.caps_ = map[string]int64{}
+	if f.appliedCaps == nil {
+		f.appliedCaps = map[string]int64{}
 	}
-	f.caps_[id] = capBytes
+	f.appliedCaps[id] = capBytes
 	f.mu.Unlock()
 	return nil
 }
@@ -347,7 +348,7 @@ func (f *fakeVolume) Usage(_ context.Context, id string) (int64, int64, error) {
 		return 0, 0, f.usageErr
 	}
 	f.mu.Lock()
-	limit := f.caps_[id]
+	limit := f.appliedCaps[id]
 	f.mu.Unlock()
 	return f.used, limit, nil
 }
@@ -433,10 +434,10 @@ func (f *fakeVolume) derive(srcID, newID string, capBytes int64, kind string) er
 	f.units[newID] = true
 	// The cap is recorded per volume, so a test can assert it was applied HERE rather
 	// than assumed from the record.
-	if f.caps_ == nil {
-		f.caps_ = map[string]int64{}
+	if f.appliedCaps == nil {
+		f.appliedCaps = map[string]int64{}
 	}
-	f.caps_[newID] = capBytes
+	f.appliedCaps[newID] = capBytes
 	// Content copies, so the shared property "the copy carries the source's bytes" is
 	// testable through the fake too.
 	if src, ok := f.roots[srcID]; ok {

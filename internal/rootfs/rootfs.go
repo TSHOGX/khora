@@ -280,6 +280,21 @@ type Provider interface {
 	// mediator. At boot `building` is empty — every unit without a record is a true
 	// orphan and is correctly reclaimed.
 	//
+	// THAT RESIDUAL WINDOW IS NOT HYPOTHETICAL, AND §5.C NO LONGER SHARES THIS SHAPE.
+	// volume.Backend originally mirrored this signature and it destroyed committed data:
+	// a volume whose ENTIRE creation fell between the mediator's `live` read and its
+	// `building` read was in neither set, so the backend deleted the bytes of a fully
+	// committed volume (measured: 3 of 6 snapshots destroyed under 458 overlapping
+	// sweeps). §5.C therefore split into "backend enumerates, mediator decides", which
+	// closes the window by ordering rather than locking — see volume.Backend.ListUnitIDs.
+	//
+	// This side is left as-is DELIBERATELY, and the asymmetry has a reason rather than
+	// being an oversight: an Overlay's `sandboxes` row is inserted BEFORE its unit is
+	// allocated, so only the snapshot SKEW is exposed here, whereas volume creation is
+	// bytes-first and exposes the whole create. The window is correspondingly far
+	// narrower — but "narrower" is not "closed", so if this ever needs hardening, the
+	// §5.C split is the shape to copy and the measurement above is the evidence.
+	//
 	// Reclamation goes through the full DestroyOverlay path rather than a directory
 	// delete, because a CAPPED unit is a btrfs subvolume plus a quota row and the two
 	// are reclaimed by different calls (btrfs.Client.DeleteSubvolume handles both

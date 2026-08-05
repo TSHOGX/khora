@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -384,5 +385,146 @@ func TestPromoteExcludesThisSandboxsMountDests(t *testing.T) {
 		if !strings.Contains(call, "/workspace") {
 			t.Errorf("%s did not receive the mount destination: %q — a static package list cannot know a per-sandbox dest (rootfs-overlay D5)", name, call)
 		}
+	}
+}
+
+// TestAdoptRecoversVolumeMaterializations closes the §1.3 / §4.4-A gap that
+// AdoptMaterialized existed for without a consumer: an adopted survivor's liveState must
+// carry its volume handles, or the next pause/destroy Releases nothing.
+//
+// THE FAILURE IS INVISIBLE ON THE LOCAL ARM, which is why it needs a test rather than a
+// reviewer: Release is a documented no-op there, so a lost handle changes nothing
+// observable. On a remote arm the handle owns a live FUSE process and losing it strands
+// that process — the exact leak the backend-private handle exists to prevent.
+func TestAdoptRecoversVolumeMaterializations(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	seedBare(t, st)
+	vb := newFakeVolume()
+	rt := &fakeRuntime{}
+	m := New(Deps{
+		Store: st, Runtime: rt, Rootfs: &fakeRootfs{}, Volume: vb,
+		Dial:          func(transport.Endpoint) transport.Client { return &fakeClient{healthy: true} },
+		HealthTimeout: 500 * time.Millisecond,
+		Logf:          func(string, ...any) {},
+	})
+	vid, err := m.CreateVolume(ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A `running` sandbox with a mount row, and NO live handle — exactly what a
+	// control-plane crash leaves behind for reconcile to adopt.
+	const sid = model.SandboxID("sbx_survivor")
+	if err := st.CreateSandbox(ctx, model.Sandbox{
+		ID: sid, Template: "bare", Overlay: "ov_survivor", State: model.Running,
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateMounts(ctx, []model.Mount{
+		{Sandbox: sid, Volume: vid, Path: "/data", Access: model.Exclusive},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rt.adoptAlive = map[string]bool{string(sid): true}
+
+	if err := m.Reconcile(ctx); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if !m.hasLive(sid) {
+		t.Fatalf("the survivor was not adopted, so this test proves nothing about its volumes")
+	}
+	// The backend was asked to RE-RECOGNIZE, not to materialize afresh: Materialize is
+	// create-if-absent and would have invented an empty unit for a volume whose storage
+	// was gone, reporting a clean adopt while the guest holds the old directory.
+	var sawAdopt, sawMaterialize bool
+	for _, c := range vb.Calls() {
+		if c == "AdoptMaterialized:"+string(vid) {
+			sawAdopt = true
+		}
+		if c == "Materialize:"+string(vid) {
+			sawMaterialize = true
+		}
+	}
+	if !sawAdopt {
+		t.Errorf("adopt did not re-recognize the volume: %v", vb.Calls())
+	}
+	if sawMaterialize {
+		t.Errorf("adopt called Materialize (create-if-absent) — that would invent an empty unit for a volume whose storage is gone and report a clean adopt while the guest holds the old one")
+	}
+	// And the recovered handle is USED: a pause now Releases it.
+	if err := m.Pause(ctx, sid); err != nil {
+		t.Fatalf("pause the adopted survivor: %v", err)
+	}
+	var released bool
+	for _, c := range vb.Calls() {
+		if c == "Release:"+string(vid) {
+			released = true
+		}
+	}
+	if !released {
+		t.Errorf("pausing the adopted survivor Released nothing: %v — a liveState without its volume handles owes a Release it can never make", vb.Calls())
+	}
+}
+
+// TestAdoptRefusesWhenAVolumeIsGone: an absent unit makes the adopt FAIL rather than
+// silently succeed, and the sandbox is left alone (§4.4-A uncertain → protect).
+//
+// "Recreate it empty" is not a recovery for a LIVE sandbox: the running guest cannot be
+// re-pointed at a new directory, so it would keep writing into the old unlinked one with
+// zero errors while the control plane reported everything healthy — the measured mis-sweep
+// blast radius (volume.md D7.2). A resume later legitimately creates-if-absent, because
+// that restarts the guest.
+func TestAdoptRefusesWhenAVolumeIsGone(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	seedBare(t, st)
+	vb := newFakeVolume()
+	rt := &fakeRuntime{}
+	var logged []string
+	m := New(Deps{
+		Store: st, Runtime: rt, Rootfs: &fakeRootfs{}, Volume: vb,
+		Dial:          func(transport.Endpoint) transport.Client { return &fakeClient{healthy: true} },
+		HealthTimeout: 500 * time.Millisecond,
+		Logf:          func(f string, a ...any) { logged = append(logged, fmt.Sprintf(f, a...)) },
+	})
+	vid, err := m.CreateVolume(ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const sid = model.SandboxID("sbx_survivor")
+	if err := st.CreateSandbox(ctx, model.Sandbox{
+		ID: sid, Template: "bare", Overlay: "ov_survivor", State: model.Running,
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateMounts(ctx, []model.Mount{
+		{Sandbox: sid, Volume: vid, Path: "/data", Access: model.Exclusive},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rt.adoptAlive = map[string]bool{string(sid): true}
+	// The volume's STORAGE is gone while its record and mount row remain — the residue a
+	// mis-sweep or an external deletion leaves.
+	vb.mu.Lock()
+	delete(vb.units, string(vid))
+	vb.mu.Unlock()
+
+	if err := m.Reconcile(ctx); err != nil {
+		t.Fatalf("reconcile returned fatal: %v — one un-adoptable sandbox must be skipped and logged, not abort recovery of the rest (§4.4-A)", err)
+	}
+	// NOT adopted, and NOT demoted either: the record stays `running` and its placement
+	// stays protected, so nothing was torn down and the next pass retries.
+	if m.hasLive(sid) {
+		t.Errorf("the sandbox was adopted despite its volume storage being gone — that reports a clean adopt while the guest holds an unlinked directory, which the control plane cannot see")
+	}
+	rec, err := st.GetSandbox(ctx, sid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.State != model.Running {
+		t.Errorf("state = %s; want running left untouched (uncertain → protect: refusing to adopt must not tear anything down)", rec.State)
+	}
+	if len(logged) == 0 {
+		t.Errorf("the refusal was silent — skip-and-log is the §4.4-A discipline, and the log is the only signal")
 	}
 }
