@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"sort"
 	"sync"
 	"time"
 
@@ -29,6 +30,15 @@ type Memory struct {
 	// vol holds Volume rows (§5.C first-class object, §4.3). Existence-is-state:
 	// presence in this map IS the volume's ready state, with no separate field.
 	vol map[model.VolumeID]model.Volume
+	// mounts is the mount table (§5.C). A SLICE rather than a map because no single
+	// column is its key — a row is identified by (sandbox, path) for topology and by
+	// (volume, access) for the lease, and both are scanned rather than looked up.
+	//
+	// Memory had NO reference scanning at all before M7 (DeleteSandbox only checked
+	// not-found), so all three scans below — sandbox side, volume side, and the lease —
+	// are newly written rather than inherited. That asymmetry is why the mount table is
+	// real work on BOTH backends and not just on the one with constraints.
+	mounts []model.Mount
 	// outbox is append-only, ordered — the publisher reads oldest-first. Like the
 	// SQLite backend, published rows are marked, never removed (same unbounded-
 	// growth known limitation; open-decisions §2, "§4.4-C 事件流可重放窗口大小").
@@ -201,8 +211,120 @@ func (m *Memory) DeleteVolume(_ context.Context, id model.VolumeID) error {
 	if _, ok := m.vol[id]; !ok {
 		return ErrVolumeNotFound // reported, never folded into success (§6.2)
 	}
+	// RESTRICT equivalent, VOLUME side — newly written for M7. The Go-check twin of
+	// SQLite's mounts.volume FK; both backends run the same contract assertions
+	// (§1.3 seam).
+	for _, mt := range m.mounts {
+		if mt.Volume == id {
+			return ErrVolumeInUse
+		}
+	}
 	delete(m.vol, id)
 	return nil
+}
+
+// --- Mount table (§5.C) ------------------------------------------------------
+//
+// Memory delivers the atomic lease under the ONE mutex it already holds — no new lock
+// class, which is the same "not a new mechanism" argument SQLite's single statement
+// makes (§5.C / volume.md D3).
+
+func (m *Memory) CreateMounts(_ context.Context, mounts []model.Mount) error {
+	if len(mounts) == 0 {
+		return nil
+	}
+	if err := validateBinding(mounts); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Reference side of §4.3 atomicity: both endpoints must exist. Under the one mutex
+	// a concurrent delete cannot interleave, so this is the same atomicity SQLite's FK
+	// gives inside its transaction.
+	for _, mt := range mounts {
+		if _, ok := m.rec[mt.Sandbox]; !ok {
+			return ErrNotFound
+		}
+		if _, ok := m.vol[mt.Volume]; !ok {
+			return ErrVolumeNotFound
+		}
+	}
+
+	// The lease predicate, evaluated against BOTH the committed rows and the rows this
+	// same binding is about to add — the second half matters because a binding could
+	// otherwise contend with itself and slip past.
+	pending := make([]model.Mount, 0, len(mounts))
+	for _, mt := range mounts {
+		for _, existing := range append(append([]model.Mount(nil), m.mounts...), pending...) {
+			if existing.Volume != mt.Volume {
+				continue
+			}
+			// The FULL predicate, not just "two exclusive rows": inserting exclusive when
+			// ANY row exists, or inserting anything when an EXCLUSIVE row exists.
+			if mt.Access == model.Exclusive || existing.Access == model.Exclusive {
+				return ErrMountLeaseConflict
+			}
+		}
+		// Topology assertions, against committed rows as well as this binding.
+		for _, existing := range append(append([]model.Mount(nil), m.mounts...), pending...) {
+			if existing.Sandbox != mt.Sandbox {
+				continue
+			}
+			if existing.Path == mt.Path || existing.Volume == mt.Volume {
+				return ErrMountBindingInvalid
+			}
+		}
+		pending = append(pending, mt)
+	}
+	// ALL-OR-NOTHING: nothing was appended to m.mounts until every row cleared, so a
+	// binding that lost anywhere above added no rows at all.
+	m.mounts = append(m.mounts, pending...)
+	return nil
+}
+
+func (m *Memory) ListMounts(_ context.Context, sandbox model.SandboxID) ([]model.Mount, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]model.Mount, 0)
+	for _, mt := range m.mounts {
+		if mt.Sandbox == sandbox {
+			out = append(out, mt)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
+	return out, nil
+}
+
+func (m *Memory) ListMountsByVolume(_ context.Context, volume model.VolumeID) ([]model.Mount, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]model.Mount, 0)
+	for _, mt := range m.mounts {
+		if mt.Volume == volume {
+			out = append(out, mt)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Sandbox != out[j].Sandbox {
+			return out[i].Sandbox < out[j].Sandbox
+		}
+		return out[i].Path < out[j].Path
+	})
+	return out, nil
+}
+
+func (m *Memory) DeleteMounts(_ context.Context, sandbox model.SandboxID) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	kept := m.mounts[:0]
+	for _, mt := range m.mounts {
+		if mt.Sandbox != sandbox {
+			kept = append(kept, mt)
+		}
+	}
+	m.mounts = kept
+	return nil // idempotent: no rows is success
 }
 
 func (m *Memory) GetSandbox(_ context.Context, id model.SandboxID) (model.Sandbox, error) {
@@ -306,6 +428,15 @@ func (m *Memory) DeleteSandbox(_ context.Context, id model.SandboxID, ev *Event)
 	defer m.mu.Unlock()
 	if _, ok := m.rec[id]; !ok {
 		return ErrNotFound
+	}
+	// RESTRICT equivalent, SANDBOX side — newly written for M7 (this method previously
+	// had only the not-found check). It is what makes the deletion ORDER required
+	// rather than stylistic on this backend too: the caller must DeleteMounts first,
+	// exactly as against SQLite, so one discipline covers both.
+	for _, mt := range m.mounts {
+		if mt.Sandbox == id {
+			return ErrSandboxHasMounts
+		}
 	}
 	delete(m.rec, id)
 	m.appendEvent(ev) // the outbox row outlives the deleted record (§4.4-C)

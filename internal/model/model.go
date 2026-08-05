@@ -117,7 +117,85 @@ type Volume struct {
 	CreatedAt time.Time
 }
 
-// Lifecycle is the §4.1 state machine. Exactly four states — no `failed`
+// AccessMode is how one MOUNT views a volume (§5.C). Three modes, and all three are
+// materialized with NO special mechanism — the same host directory reaches one or N
+// guests (measured; volume.md D1).
+//
+// IT IS A PROPERTY OF THE MOUNT ROW, NOT OF THE VOLUME, and the reason is
+// cardinality rather than taste: one volume can be shared-rw to sandbox A and
+// shared-ro to sandbox C AT THE SAME TIME (measured), so a per-volume field could not
+// carry it honestly. That is why it appears here and on the mount row, and nowhere on
+// model.Volume.
+//
+// The two halves are enforced in DIFFERENT places, and the split is load-bearing:
+// READ-ONLY is enforced AT RUNTIME (a read-only bind ⇒ the guest's write gets EROFS,
+// a clean POSIX refusal rather than a silent success), while EXCLUSIVITY is enforced
+// in the CONTROL PLANE (the mount row itself). Both are decided before the backend is
+// called, which is why the backend never learns the mode.
+type AccessMode string
+
+const (
+	// Exclusive means no other mount row may coexist for this volume. The lease IS
+	// this row's existence — there is no Lease object and no owner field (§5.C /
+	// volume.md D3/D4).
+	Exclusive AccessMode = "exclusive"
+	// SharedReadOnly is a read-only fanout mount. The guest's writes get EROFS.
+	SharedReadOnly AccessMode = "shared-ro"
+	// SharedReadWrite is a shared writable mount. It guarantees POSIX semantics only
+	// for multiple connections WITHIN one sandbox; CROSS-SANDBOX rw coherence is
+	// explicitly UNDEFINED (§5.C). Gofer and sentry each cache, so shared mutable
+	// consistency across an isolation boundary is unreliable in principle — the honest
+	// position is to promise nothing rather than to build a fragile mechanism that
+	// pretends to.
+	SharedReadWrite AccessMode = "shared-rw"
+)
+
+// ReadOnly reports whether this mode materializes as a read-only bind.
+func (a AccessMode) ReadOnly() bool { return a == SharedReadOnly }
+
+// Valid reports whether a is one of the three defined modes. The schema asserts the
+// same set, and that assertion is REQUIRED rather than belt-and-braces: the exclusive
+// lease's partial index has a LITERAL STRING predicate, so a mis-cased value would
+// make the index simply not apply and let two exclusive rows both insert — a silent
+// failure of the one new invariant Volume introduces (§5.C).
+func (a AccessMode) Valid() bool {
+	switch a {
+	case Exclusive, SharedReadOnly, SharedReadWrite:
+		return true
+	}
+	return false
+}
+
+// Mount is one row of the mount table: a FIRST-CLASS PERSISTENT OBJECT (§4.3), and
+// structurally just a doubling of the `sandboxes.template` reference — two columns,
+// each with ON DELETE RESTRICT, which is what gives both "a volume with a live mount
+// row cannot be deleted" and "a sandbox with a live mount row cannot be deleted".
+//
+// The mount relationship is a BINDING (§3.4): what is mounted, where, under which
+// mode is recorded here, and a resume RE-MOUNTS from the CURRENT table rather than
+// restoring from frozen bytes — a volume is always the one real thing, never forked
+// into a per-sandbox copy.
+//
+// Like Template and Volume it has NO state column and NO count column: existence is
+// the state, and "is this volume exclusively held" is DERIVED from the rows' presence
+// and access (§4.3). It is NOT a §4.1 lifecycle transition, so creating or deleting a
+// mount row publishes NO event.
+type Mount struct {
+	// Sandbox is the sandbox this mount belongs to. REFERENCES sandboxes(id) ON
+	// DELETE RESTRICT.
+	Sandbox SandboxID
+	// Volume is the volume mounted. REFERENCES volumes(id) ON DELETE RESTRICT.
+	Volume VolumeID
+	// Path is the guest destination, and it MUST be normalized before insert —
+	// absolute, cleaned, not "/" (§5.C). `/data`, `/data/`, and `/data/../data` are one
+	// mount point spelled three ways, and the UNIQUE(sandbox, path) assertion is a
+	// literal string comparison, so an un-normalized path makes the assertion SILENTLY
+	// not apply. Same trap as the CHECK beside the lease index.
+	Path string
+	// Access is how this mount views the volume. Per-ROW, never per-volume.
+	Access AccessMode
+}
+
 // intermediate state (§4.4: the absence is a conclusion of the model, not an
 // omission), no independent generation counter (§3.3 uses Placement / §4.3 uses
 // placement-IP-as-epoch instead).

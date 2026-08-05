@@ -12,7 +12,9 @@ package storetest
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -67,6 +69,23 @@ func RunContract(t *testing.T, mk Factory) {
 	t.Run("VolumeCapacityWritePoint", func(t *testing.T) { testVolumeCapacity(t, mk) })
 	t.Run("VolumeDeleteReportsNotFound", func(t *testing.T) { testVolumeDeleteNotFound(t, mk) })
 	t.Run("VolumeDurability", func(t *testing.T) { testVolumeDurability(t, mk) })
+
+	// Mount table (§5.C / §4.3). The suite had NO mount-shaped case before M7, so
+	// every one of these is newly written rather than inherited — and the Memory
+	// backend had no reference scanning at all, which is why they matter equally on
+	// both sides (§1.3 seam).
+	t.Run("MountCRUD", func(t *testing.T) { testMountCRUD(t, mk) })
+	t.Run("MountRestrictsVolumeDelete", func(t *testing.T) { testMountRestrictsVolume(t, mk) })
+	t.Run("MountRestrictsSandboxDelete", func(t *testing.T) { testMountRestrictsSandbox(t, mk) })
+	t.Run("ExclusiveLeaseInvariant", func(t *testing.T) { testExclusiveLease(t, mk) })
+	t.Run("ExclusiveDoesNotCoexistWithShared", func(t *testing.T) { testExclusiveVsShared(t, mk) })
+	t.Run("MountBindingSelfContradiction", func(t *testing.T) { testMountBindingInvalid(t, mk) })
+	t.Run("MountBindingIsAllOrNothing", func(t *testing.T) { testMountAllOrNothing(t, mk) })
+	t.Run("MountReferenceSideMissingEndpoint", func(t *testing.T) { testMountMissingEndpoint(t, mk) })
+	t.Run("MountVerdictsAreDistinguishable", func(t *testing.T) { testMountVerdictsDistinct(t, mk) })
+	t.Run("ConcurrentExclusiveAttachSingleWinner", func(t *testing.T) { testConcurrentLease(t, mk) })
+	t.Run("ForeignKeyEnforcementItself", func(t *testing.T) { testFKEnforcement(t, mk) })
+	t.Run("MountDurability", func(t *testing.T) { testMountDurability(t, mk) })
 
 	// §4.4-C under CONCURRENT writers. Every other subtest here is
 	// single-threaded, so a backend whose CAS is not genuinely atomic — read,
@@ -1459,5 +1478,542 @@ func testUpdateBinding(t *testing.T, mk Factory) {
 	// missing record → ErrNotFound, not a silent no-op.
 	if err := s.UpdateBinding(ctx, "nope", model.Creating, store.Binding{MemoryByte: &want}, nil); err != store.ErrNotFound {
 		t.Fatalf("update of a missing record = %v; want ErrNotFound", err)
+	}
+}
+
+// --- Mount table (§5.C / §4.3) -----------------------------------------------
+
+// seedVol inserts a Volume row so a mount referencing it satisfies the FK.
+func seedVol(t *testing.T, s store.Store, id string) {
+	t.Helper()
+	if err := s.CreateVolume(context.Background(), model.Volume{
+		ID: model.VolumeID(id), Backend: "test", CreatedAt: time.Now(),
+	}); err != nil && err != store.ErrConflict {
+		t.Fatalf("seed volume %q: %v", id, err)
+	}
+}
+
+// seedSbx inserts a sandbox row (template pre-seeded) so a mount referencing it
+// satisfies the FK.
+func seedSbx(t *testing.T, s store.Store, id string) {
+	t.Helper()
+	// Tolerates being called for several sandboxes in one subtest, unlike seedTmpl
+	// (which fatals on a duplicate — correct for its own callers, which seed once).
+	if err := s.CreateTemplate(context.Background(), model.Template{
+		ID: "bare", Builtin: true, CreatedAt: time.Now(),
+	}); err != nil && err != store.ErrConflict {
+		t.Fatalf("seed template: %v", err)
+	}
+	if err := s.CreateSandbox(context.Background(), model.Sandbox{
+		ID: model.SandboxID(id), Template: "bare", Overlay: model.OverlayID("ov_" + id),
+		State: model.Running, CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	}, nil); err != nil && err != store.ErrConflict {
+		t.Fatalf("seed sandbox %q: %v", id, err)
+	}
+}
+
+func mount(sbx, vol, path string, access model.AccessMode) model.Mount {
+	return model.Mount{
+		Sandbox: model.SandboxID(sbx), Volume: model.VolumeID(vol),
+		Path: path, Access: access,
+	}
+}
+
+// testMountCRUD: rows round-trip, both list views work, and delete is idempotent.
+// No event is published for any of it — a mount row is not a §4.1 transition (§4.3).
+func testMountCRUD(t *testing.T, mk Factory) {
+	ctx := context.Background()
+	s, _ := mk(t)
+	seedSbx(t, s, "sbx_a")
+	seedVol(t, s, "vol_1")
+	seedVol(t, s, "vol_2")
+
+	binding := []model.Mount{
+		mount("sbx_a", "vol_1", "/data", model.SharedReadWrite),
+		mount("sbx_a", "vol_2", "/cache", model.SharedReadOnly),
+	}
+	if err := s.CreateMounts(ctx, binding); err != nil {
+		t.Fatalf("create mounts: %v", err)
+	}
+	got, err := s.ListMounts(ctx, "sbx_a")
+	if err != nil {
+		t.Fatalf("list mounts: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("list returned %d rows, want 2: %+v", len(got), got)
+	}
+	// Ordered by path, so a caller re-materializing a binding gets a stable topology
+	// rather than map order.
+	if got[0].Path != "/cache" || got[1].Path != "/data" {
+		t.Errorf("rows are not path-ordered: %+v", got)
+	}
+	if got[1].Access != model.SharedReadWrite {
+		t.Errorf("access did not round-trip: %+v", got[1])
+	}
+
+	byVol, err := s.ListMountsByVolume(ctx, "vol_1")
+	if err != nil {
+		t.Fatalf("list by volume: %v", err)
+	}
+	if len(byVol) != 1 || byVol[0].Sandbox != "sbx_a" {
+		t.Errorf("list by volume = %+v, want one row for sbx_a", byVol)
+	}
+
+	// NO event was published by any of this (§4.3: mount rows are not transitions).
+	evs, _, _, err := s.Events(ctx, 0, 100)
+	if err != nil {
+		t.Fatalf("events: %v", err)
+	}
+	for _, ev := range evs {
+		if strings.Contains(ev.Kind, "mount") {
+			t.Errorf("a mount row published an event (%q) — mount rows are not §4.1 transitions", ev.Kind)
+		}
+	}
+
+	if err := s.DeleteMounts(ctx, "sbx_a"); err != nil {
+		t.Fatalf("delete mounts: %v", err)
+	}
+	if got, _ = s.ListMounts(ctx, "sbx_a"); len(got) != 0 {
+		t.Errorf("rows survived delete: %+v", got)
+	}
+	// Idempotent — destroy, unwind and evict all reach it.
+	if err := s.DeleteMounts(ctx, "sbx_a"); err != nil {
+		t.Errorf("second delete: %v", err)
+	}
+}
+
+// testMountRestrictsVolume is §6.2 verdict ①: a volume held by a live mount row
+// cannot be deleted, and the verdict is ErrVolumeInUse — NOT ErrInUse, whose text
+// names a Template and would misdirect the caller.
+func testMountRestrictsVolume(t *testing.T, mk Factory) {
+	ctx := context.Background()
+	s, _ := mk(t)
+	seedSbx(t, s, "sbx_a")
+	seedVol(t, s, "vol_1")
+	if err := s.CreateMounts(ctx, []model.Mount{mount("sbx_a", "vol_1", "/data", model.SharedReadWrite)}); err != nil {
+		t.Fatalf("create mount: %v", err)
+	}
+	err := s.DeleteVolume(ctx, "vol_1")
+	if !errors.Is(err, store.ErrVolumeInUse) {
+		t.Fatalf("delete a mounted volume = %v; want ErrVolumeInUse", err)
+	}
+	if errors.Is(err, store.ErrInUse) {
+		t.Errorf("the verdict reuses ErrInUse, whose text says \"template in use\" — a 409 naming the wrong object sends the caller to look at something unrelated (§6.2)")
+	}
+	// Released once the row is gone.
+	if err := s.DeleteMounts(ctx, "sbx_a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteVolume(ctx, "vol_1"); err != nil {
+		t.Errorf("delete after the mount row was removed: %v", err)
+	}
+}
+
+// testMountRestrictsSandbox is §6.2 verdict ②: a sandbox held by a live mount row
+// cannot be deleted.
+//
+// THIS TRANSLATION POINT DID NOT EXIST before M7 — DeleteSandbox returned the raw
+// driver error, which reached the API's default arm as a 500. The FK-violation
+// predicate was reusable; the translation was not.
+func testMountRestrictsSandbox(t *testing.T, mk Factory) {
+	ctx := context.Background()
+	s, _ := mk(t)
+	seedSbx(t, s, "sbx_a")
+	seedVol(t, s, "vol_1")
+	if err := s.CreateMounts(ctx, []model.Mount{mount("sbx_a", "vol_1", "/data", model.SharedReadWrite)}); err != nil {
+		t.Fatalf("create mount: %v", err)
+	}
+	err := s.DeleteSandbox(ctx, "sbx_a", nil)
+	if !errors.Is(err, store.ErrSandboxHasMounts) {
+		t.Fatalf("delete a sandbox with live mounts = %v; want ErrSandboxHasMounts (before M7 this was a raw driver error → 500)", err)
+	}
+	// And the ORDER is what resolves it: mounts first, then the sandbox. Measured,
+	// RESTRICT fires immediately, so no transaction wrapping buys order-independence.
+	if err := s.DeleteMounts(ctx, "sbx_a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteSandbox(ctx, "sbx_a", nil); err != nil {
+		t.Errorf("delete after mounts were removed: %v", err)
+	}
+}
+
+// testExclusiveLease is the ONE new store invariant Volume introduces (§5.C): a
+// volume has at most one `exclusive` mount row.
+func testExclusiveLease(t *testing.T, mk Factory) {
+	ctx := context.Background()
+	s, _ := mk(t)
+	seedSbx(t, s, "sbx_a")
+	seedSbx(t, s, "sbx_b")
+	seedVol(t, s, "vol_1")
+
+	if err := s.CreateMounts(ctx, []model.Mount{mount("sbx_a", "vol_1", "/data", model.Exclusive)}); err != nil {
+		t.Fatalf("first exclusive attach: %v", err)
+	}
+	err := s.CreateMounts(ctx, []model.Mount{mount("sbx_b", "vol_1", "/data", model.Exclusive)})
+	if !errors.Is(err, store.ErrMountLeaseConflict) {
+		t.Fatalf("second exclusive attach = %v; want ErrMountLeaseConflict", err)
+	}
+	// The lease is RELEASED by the row going away — there is no lease object to release
+	// separately (§5.C).
+	if err := s.DeleteMounts(ctx, "sbx_a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateMounts(ctx, []model.Mount{mount("sbx_b", "vol_1", "/data", model.Exclusive)}); err != nil {
+		t.Errorf("attach after the holder released: %v — the lease IS the row's existence", err)
+	}
+}
+
+// testExclusiveVsShared is the HALF THE PARTIAL INDEX CANNOT COVER, and the reason
+// the invariant needs the atomic statement rather than the index alone (§5.C).
+//
+// `UNIQUE(volume) WHERE access='exclusive'` forbids only TWO EXCLUSIVE rows. It does
+// NOT forbid an exclusive row coexisting with a shared one — but the invariant is "at
+// most one exclusive row AND it does not coexist with ANY other row for that volume".
+// Both directions are checked, because a predicate that only looks at the row being
+// inserted covers just one of them.
+func testExclusiveVsShared(t *testing.T, mk Factory) {
+	ctx := context.Background()
+
+	t.Run("shared cannot join an exclusive holder", func(t *testing.T) {
+		s, _ := mk(t)
+		seedSbx(t, s, "sbx_a")
+		seedSbx(t, s, "sbx_b")
+		seedVol(t, s, "vol_1")
+		if err := s.CreateMounts(ctx, []model.Mount{mount("sbx_a", "vol_1", "/data", model.Exclusive)}); err != nil {
+			t.Fatalf("exclusive attach: %v", err)
+		}
+		if err := s.CreateMounts(ctx, []model.Mount{mount("sbx_b", "vol_1", "/data", model.SharedReadWrite)}); !errors.Is(err, store.ErrMountLeaseConflict) {
+			t.Errorf("a SHARED attach onto an exclusively-held volume = %v; want ErrMountLeaseConflict — the partial index alone permits this, which is why it is only half the invariant", err)
+		}
+	})
+
+	t.Run("exclusive cannot join a shared holder", func(t *testing.T) {
+		s, _ := mk(t)
+		seedSbx(t, s, "sbx_a")
+		seedSbx(t, s, "sbx_b")
+		seedVol(t, s, "vol_1")
+		if err := s.CreateMounts(ctx, []model.Mount{mount("sbx_a", "vol_1", "/data", model.SharedReadWrite)}); err != nil {
+			t.Fatalf("shared attach: %v", err)
+		}
+		if err := s.CreateMounts(ctx, []model.Mount{mount("sbx_b", "vol_1", "/data", model.Exclusive)}); !errors.Is(err, store.ErrMountLeaseConflict) {
+			t.Errorf("an EXCLUSIVE attach onto a shared-held volume = %v; want ErrMountLeaseConflict", err)
+		}
+	})
+
+	t.Run("two SHARED mounts coexist", func(t *testing.T) {
+		s, _ := mk(t)
+		seedSbx(t, s, "sbx_a")
+		seedSbx(t, s, "sbx_b")
+		seedVol(t, s, "vol_1")
+		for _, sbx := range []string{"sbx_a", "sbx_b"} {
+			if err := s.CreateMounts(ctx, []model.Mount{mount(sbx, "vol_1", "/data", model.SharedReadWrite)}); err != nil {
+				t.Fatalf("shared attach for %s: %v — \"at most one rw row\" would contradict SharedReadWrite's whole fanout (§5.C)", sbx, err)
+			}
+		}
+		rows, err := s.ListMountsByVolume(ctx, "vol_1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(rows) != 2 {
+			t.Errorf("two shared mounts of one volume produced %d rows, want 2", len(rows))
+		}
+	})
+}
+
+// testMountBindingInvalid is the §6.2 400 set: a binding that CONTRADICTS ITSELF.
+//
+// 400 rather than 409 because it is decidable without reading any other row and no
+// retry can make it legal. A sandbox holds one COMPLETE binding and PATCH swaps whole
+// for whole, so there is no "add one mount to an existing set" operation a duplicate
+// could be relative to — every duplicate is a single submission disagreeing with
+// itself. §6.2's four 409s do not grow.
+func testMountBindingInvalid(t *testing.T, mk Factory) {
+	ctx := context.Background()
+	s, _ := mk(t)
+	seedSbx(t, s, "sbx_a")
+	for _, v := range []string{"vol_1", "vol_2"} {
+		seedVol(t, s, v)
+	}
+
+	for _, tc := range []struct {
+		name    string
+		binding []model.Mount
+		why     string
+	}{{
+		name: "same destination twice",
+		binding: []model.Mount{
+			mount("sbx_a", "vol_1", "/data", model.SharedReadWrite),
+			mount("sbx_a", "vol_2", "/data", model.SharedReadWrite),
+		},
+		why: "the second bind SHADOWS the first, so one volume is invisible in the guest while still counting in §3.4 and still holding its lease",
+	}, {
+		name: "same volume twice",
+		binding: []model.Mount{
+			mount("sbx_a", "vol_1", "/data", model.SharedReadWrite),
+			mount("sbx_a", "vol_1", "/other", model.SharedReadWrite),
+		},
+		why: "the rule stays single instead of forking by access mode",
+	}, {
+		name: "one volume nested inside another",
+		binding: []model.Mount{
+			mount("sbx_a", "vol_1", "/data", model.SharedReadWrite),
+			mount("sbx_a", "vol_2", "/data/sub", model.SharedReadWrite),
+		},
+		why: "UNIQUE(sandbox,path) CANNOT catch this — /data and /data/sub are different strings, so nesting needs a prefix scan",
+	}, {
+		name: "un-normalized path",
+		binding: []model.Mount{
+			mount("sbx_a", "vol_1", "/data/", model.SharedReadWrite),
+		},
+		why: "the uniqueness assertions are literal string comparisons, so an un-normalized path makes them silently not apply",
+	}, {
+		name: "unknown access mode",
+		binding: []model.Mount{
+			mount("sbx_a", "vol_1", "/data", model.AccessMode("Exclusive")),
+		},
+		why: "a mis-cased value makes the lease partial index NOT APPLY, letting two exclusive rows both insert — a silent failure of the one new invariant",
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := s.CreateMounts(ctx, tc.binding)
+			if !errors.Is(err, store.ErrMountBindingInvalid) {
+				t.Fatalf("CreateMounts = %v; want ErrMountBindingInvalid (%s)", err, tc.why)
+			}
+			// A rejected binding inserted NOTHING.
+			rows, _ := s.ListMounts(ctx, "sbx_a")
+			if len(rows) != 0 {
+				t.Errorf("a rejected binding left %d row(s) behind: %+v", len(rows), rows)
+			}
+		})
+	}
+}
+
+// testMountAllOrNothing: if any one mount in a binding loses the lease, NONE is
+// inserted. A sandbox holds one complete binding, so a partially-applied one is not a
+// state the model has.
+func testMountAllOrNothing(t *testing.T, mk Factory) {
+	ctx := context.Background()
+	s, _ := mk(t)
+	seedSbx(t, s, "sbx_holder")
+	seedSbx(t, s, "sbx_b")
+	seedVol(t, s, "vol_free")
+	seedVol(t, s, "vol_taken")
+
+	// vol_taken is exclusively held by someone else.
+	if err := s.CreateMounts(ctx, []model.Mount{mount("sbx_holder", "vol_taken", "/x", model.Exclusive)}); err != nil {
+		t.Fatalf("seed holder: %v", err)
+	}
+	// A two-mount binding where the FIRST would succeed and the second loses.
+	err := s.CreateMounts(ctx, []model.Mount{
+		mount("sbx_b", "vol_free", "/a", model.SharedReadWrite),
+		mount("sbx_b", "vol_taken", "/b", model.Exclusive),
+	})
+	if !errors.Is(err, store.ErrMountLeaseConflict) {
+		t.Fatalf("binding with one contended lease = %v; want ErrMountLeaseConflict", err)
+	}
+	rows, err := s.ListMounts(ctx, "sbx_b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 0 {
+		t.Errorf("a lost binding left %d row(s) behind: %+v — all-or-nothing means the first mount must not survive the second's failure", len(rows), rows)
+	}
+}
+
+// testMountMissingEndpoint is the reference side of §4.3 atomicity: a mount whose
+// sandbox or volume a concurrent delete already removed loses cleanly, with the
+// verdict naming WHICH endpoint is missing.
+func testMountMissingEndpoint(t *testing.T, mk Factory) {
+	ctx := context.Background()
+	s, _ := mk(t)
+	seedSbx(t, s, "sbx_a")
+	seedVol(t, s, "vol_1")
+
+	if err := s.CreateMounts(ctx, []model.Mount{mount("sbx_a", "vol_gone", "/data", model.SharedReadWrite)}); !errors.Is(err, store.ErrVolumeNotFound) {
+		t.Errorf("mount referencing an absent volume = %v; want ErrVolumeNotFound", err)
+	}
+	if err := s.CreateMounts(ctx, []model.Mount{mount("sbx_gone", "vol_1", "/data", model.SharedReadWrite)}); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("mount referencing an absent sandbox = %v; want ErrNotFound", err)
+	}
+}
+
+// testMountVerdictsDistinct pins §6.2's requirement directly: the four Volume
+// verdicts must stay MUTUALLY DISTINGUISHABLE.
+//
+// It exists because of how this degrades — someone later collapses two sentinels that
+// happen to map to the same status code, and the 409 then names the wrong object. The
+// audited failure is exactly that: reusing an "in use" error whose text says
+// "template".
+func testMountVerdictsDistinct(t *testing.T, mk Factory) {
+	ctx := context.Background()
+	s, _ := mk(t)
+	seedSbx(t, s, "sbx_a")
+	seedSbx(t, s, "sbx_b")
+	seedVol(t, s, "vol_1")
+	if err := s.CreateMounts(ctx, []model.Mount{mount("sbx_a", "vol_1", "/data", model.Exclusive)}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Collect one instance of each reachable verdict.
+	verdicts := map[string]error{
+		"volume held by a mount row":  s.DeleteVolume(ctx, "vol_1"),
+		"sandbox held by a mount row": s.DeleteSandbox(ctx, "sbx_a", nil),
+		"lease contended":             s.CreateMounts(ctx, []model.Mount{mount("sbx_b", "vol_1", "/d", model.Exclusive)}),
+		"binding self-contradictory": s.CreateMounts(ctx, []model.Mount{
+			mount("sbx_b", "vol_1", "/d", model.SharedReadWrite),
+			mount("sbx_b", "vol_1", "/e", model.SharedReadWrite),
+		}),
+	}
+	want := map[string]error{
+		"volume held by a mount row":  store.ErrVolumeInUse,
+		"sandbox held by a mount row": store.ErrSandboxHasMounts,
+		"lease contended":             store.ErrMountLeaseConflict,
+		"binding self-contradictory":  store.ErrMountBindingInvalid,
+	}
+	for name, got := range verdicts {
+		if !errors.Is(got, want[name]) {
+			t.Errorf("%s → %v; want %v", name, got, want[name])
+		}
+	}
+	// And each must NOT match any of the others, which is the property that actually
+	// degrades. Note ErrInUse is checked too: it is the one whose text names a Template.
+	all := []error{
+		store.ErrVolumeInUse, store.ErrSandboxHasMounts,
+		store.ErrMountLeaseConflict, store.ErrMountBindingInvalid, store.ErrInUse,
+	}
+	for name, got := range verdicts {
+		matches := 0
+		for _, sentinel := range all {
+			if errors.Is(got, sentinel) {
+				matches++
+			}
+		}
+		if matches != 1 {
+			t.Errorf("%s matches %d sentinels, want exactly 1 — the four §6.2 verdicts must be mutually distinguishable, and a 409 naming the wrong object misdirects the caller", name, matches)
+		}
+	}
+}
+
+// testConcurrentLease is the ADVERSARIAL case for §5.C's lease, and the reason the
+// judgment and the insert cannot be separated.
+//
+// A mediator-side pre-check plus an insert is a REAL cross-sandbox TOCTOU: two
+// concurrent creates mint two fresh SandboxIDs and hold two DISJOINT transition
+// locks, so nothing serializes them. Measured on the model: 8 racers with no
+// scheduling hooks broke the lease 2 times in 4000 iterations, and it reproduces every
+// time once an explicit scheduling point is added. So the STORE has to arbitrate.
+//
+// Run under -race. 24 racers, matching the measured configuration.
+func testConcurrentLease(t *testing.T, mk Factory) {
+	ctx := context.Background()
+	s, _ := mk(t)
+	seedVol(t, s, "vol_contended")
+	const racers = 24
+	for i := 0; i < racers; i++ {
+		seedSbx(t, s, fmt.Sprintf("sbx_%02d", i))
+	}
+
+	start := make(chan struct{})
+	results := make(chan error, racers)
+	var wg sync.WaitGroup
+	for i := 0; i < racers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start // release them all at once, so the window is as tight as possible
+			results <- s.CreateMounts(ctx, []model.Mount{
+				mount(fmt.Sprintf("sbx_%02d", i), "vol_contended", "/data", model.Exclusive),
+			})
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	var winners, conflicts, other int
+	for err := range results {
+		switch {
+		case err == nil:
+			winners++
+		case errors.Is(err, store.ErrMountLeaseConflict):
+			conflicts++
+		default:
+			other++
+			t.Errorf("unexpected error from a racer: %v", err)
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("%d racers won the exclusive lease, want exactly 1 (conflicts=%d other=%d) — the lease is the ONE new invariant Volume introduces (§5.C)", winners, conflicts, other)
+	}
+	if other != 0 {
+		t.Errorf("%d racers got a driver error rather than a clean verdict; the measured run had ZERO", other)
+	}
+	// And the table agrees: exactly one row.
+	rows, err := s.ListMountsByVolume(ctx, "vol_contended")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Errorf("the contended volume has %d mount rows, want 1: %+v", len(rows), rows)
+	}
+}
+
+// testFKEnforcement guards the ENFORCEMENT ITSELF, not just the verdicts, because
+// losing it is SILENT: measured, with the foreign-keys pragma off, deleting a
+// referenced row simply SUCCEEDS and returns nil. So this is asserted behaviorally
+// rather than by checking that a DSN string contains something.
+func testFKEnforcement(t *testing.T, mk Factory) {
+	ctx := context.Background()
+	s, _ := mk(t)
+	seedSbx(t, s, "sbx_a")
+	seedVol(t, s, "vol_1")
+	if err := s.CreateMounts(ctx, []model.Mount{mount("sbx_a", "vol_1", "/data", model.SharedReadWrite)}); err != nil {
+		t.Fatal(err)
+	}
+	// Both directions must REFUSE. A backend with enforcement disabled returns nil for
+	// both, and every verdict test above would still pass while the invariant was gone.
+	if err := s.DeleteVolume(ctx, "vol_1"); err == nil {
+		t.Error("deleting a REFERENCED volume returned nil — reference enforcement is off, which is a silent failure (the verdict tests cannot detect it)")
+	}
+	if err := s.DeleteSandbox(ctx, "sbx_a", nil); err == nil {
+		t.Error("deleting a REFERENCED sandbox returned nil — reference enforcement is off")
+	}
+	// And the rows really are still there.
+	if rows, _ := s.ListMounts(ctx, "sbx_a"); len(rows) != 1 {
+		t.Errorf("mount rows after two refused deletes = %d, want 1", len(rows))
+	}
+	if _, err := s.GetVolume(ctx, "vol_1"); err != nil {
+		t.Errorf("the volume was removed despite the refusal: %v", err)
+	}
+}
+
+// testMountDurability: the mount topology survives a restart, which is what makes it
+// a Binding rather than placement state — a resume re-mounts from the CURRENT table
+// (§3.4 / §5.C).
+func testMountDurability(t *testing.T, mk Factory) {
+	ctx := context.Background()
+	s, reopen := mk(t)
+	if reopen == nil {
+		t.Skip("backend is not durable across reopen")
+	}
+	seedSbx(t, s, "sbx_a")
+	seedVol(t, s, "vol_1")
+	if err := s.CreateMounts(ctx, []model.Mount{mount("sbx_a", "vol_1", "/data", model.Exclusive)}); err != nil {
+		t.Fatal(err)
+	}
+	s2 := reopen(t)
+	rows, err := s2.ListMounts(ctx, "sbx_a")
+	if err != nil {
+		t.Fatalf("mount rows lost across reopen: %v", err)
+	}
+	if len(rows) != 1 || rows[0].Access != model.Exclusive || rows[0].Path != "/data" {
+		t.Fatalf("mount row did not survive intact: %+v", rows)
+	}
+	// The LEASE survives too, and that is correct rather than incidental: a crash is
+	// dead-recoverable (§4.3), the sandbox will resume onto the same volume, and
+	// releasing on crash would make that resume collide. The lease releases only when
+	// the row is torn down (§5.C).
+	seedSbx(t, s2, "sbx_b")
+	if err := s2.CreateMounts(ctx, []model.Mount{mount("sbx_b", "vol_1", "/data", model.Exclusive)}); !errors.Is(err, store.ErrMountLeaseConflict) {
+		t.Errorf("the exclusive lease did not survive the restart (got %v) — a crash KEEPING the lease is correct behavior (§5.C)", err)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"path"
 	"strings"
 	"time"
 
@@ -130,6 +131,55 @@ CREATE TABLE IF NOT EXISTS volumes (
 	cap_byte   INTEGER NOT NULL DEFAULT 0,
 	created_at INTEGER NOT NULL             -- unix nanos
 );
+-- mounts: the mount table (§5.C), a first-class persistent object and structurally
+-- the DOUBLING of sandboxes.template — two columns, each ON DELETE RESTRICT, which
+-- together give "a volume with a live mount row cannot be deleted" AND "a sandbox
+-- with a live mount row cannot be deleted". No state column, no count column:
+-- whether a volume is exclusively held is DERIVED from these rows (§4.3).
+CREATE TABLE IF NOT EXISTS mounts (
+	sandbox TEXT NOT NULL REFERENCES sandboxes(id) ON DELETE RESTRICT,
+	volume  TEXT NOT NULL REFERENCES volumes(id)   ON DELETE RESTRICT,
+	-- guest destination, NORMALIZED by the caller (absolute, cleaned, not '/'). The
+	-- UNIQUE below is a literal string comparison, so '/data', '/data/' and
+	-- '/data/../data' would be three different mount points to it — an un-normalized
+	-- path makes the assertion SILENTLY not apply.
+	path    TEXT NOT NULL,
+	-- how THIS MOUNT views the volume; per-row, never per-volume (one volume can be
+	-- shared-rw to one sandbox and shared-ro to another at the same time).
+	--
+	-- The CHECK is REQUIRED, not defensive: the lease index below has a LITERAL STRING
+	-- predicate, so a mis-cased 'Exclusive' would make that index simply NOT APPLY and
+	-- let two exclusive rows both insert. That is a silent failure of the one new
+	-- invariant Volume introduces, so the legal set is asserted in the schema.
+	access  TEXT NOT NULL CHECK (access IN ('exclusive','shared-ro','shared-rw')),
+	-- Two topology assertions (§5.C), both judged 400 rather than 409 by the API:
+	--   (sandbox, path):   two volumes at one destination means the second BIND SHADOWS
+	--                      the first, so one volume is invisible in the guest while
+	--                      still counting in §3.4 and still holding its lease. "An
+	--                      exclusive lease on a volume the guest cannot see" is exactly
+	--                      the silent failure this catches.
+	--   (sandbox, volume): the same volume twice in one sandbox. It has no known
+	--                      consumer, and forbidding it keeps the rule single rather
+	--                      than forking by access mode (the lease predicate already
+	--                      refuses a second row when either is exclusive). Relaxing a
+	--                      validation later breaks no caller; tightening one does.
+	UNIQUE (sandbox, path),
+	UNIQUE (sandbox, volume)
+);
+-- SCHEMA-LEVEL ASSERTION, NOT THE INVARIANT'S ENFORCEMENT (§5.C). It forbids only
+-- "two exclusive rows" and does NOT forbid an exclusive row coexisting with a shared
+-- one — it covers half the invariant. The other half is delivered by the atomic
+-- INSERT…SELECT…WHERE NOT EXISTS in CreateMounts, which expresses the full predicate.
+--
+-- The predicate keys on 'access', which is IMMUTABLE FOR THE ROW'S LIFETIME, and that
+-- is a CHOICE rather than a coincidence. An external implementation keyed its
+-- live-owner partial index on a soft-delete TIMESTAMP instead: paths that set the
+-- column existed while NOTHING in the entire codebase ever cleared it back to NULL —
+-- so one mistaken write both condemned the volume permanently AND freed the
+-- uniqueness slot for a second holder to take. Writing the reason down is the point;
+-- otherwise the next person moves this onto some 'detached_at'.
+CREATE UNIQUE INDEX IF NOT EXISTS mounts_exclusive_lease
+	ON mounts(volume) WHERE access = 'exclusive';
 `
 
 // OpenSQLite opens (creating if absent) the persistent store at path and ensures
@@ -354,6 +404,15 @@ func (s *SQLite) DeleteSandbox(ctx context.Context, id model.SandboxID, ev *Even
 	return s.tx(ctx, func(t *sql.Tx) error {
 		res, err := t.Exec(`DELETE FROM sandboxes WHERE id=?`, string(id))
 		if err != nil {
+			// THE FK BRANCH M7 ADDED. Before it, this was a bare Exec whose error was
+			// returned unwrapped, so a mounts.sandbox RESTRICT violation reached the API's
+			// default arm as a 500 instead of a 409 (§6.2). The PREDICATE was reusable —
+			// isFKViolation is table- and column-agnostic — but the TRANSLATION POINT did
+			// not exist, which is exactly the half of "we get this for free" that was not
+			// free.
+			if isFKViolation(err) {
+				return ErrSandboxHasMounts
+			}
 			return err
 		}
 		n, err := res.RowsAffected()
@@ -597,6 +656,12 @@ func (s *SQLite) DeleteVolume(ctx context.Context, id model.VolumeID) error {
 	return s.tx(ctx, func(t *sql.Tx) error {
 		res, err := t.Exec(`DELETE FROM volumes WHERE id=?`, string(id))
 		if err != nil {
+			// mounts.volume RESTRICT: a live mount row holds it. Its OWN sentinel, not
+			// ErrInUse — that one's text names a Template (§6.2: the verdicts must be
+			// distinguishable, and a 409 naming the wrong object misdirects the caller).
+			if isFKViolation(err) {
+				return ErrVolumeInUse
+			}
 			return err
 		}
 		n, err := res.RowsAffected()
@@ -612,6 +677,189 @@ func (s *SQLite) DeleteVolume(ctx context.Context, id model.VolumeID) error {
 		return nil
 	})
 }
+
+// --- Mount table (§5.C) ------------------------------------------------------
+
+// CreateMounts inserts the whole binding atomically. See Store.CreateMounts for why
+// judgment and insert must be one statement rather than a pre-check plus an insert.
+func (s *SQLite) CreateMounts(ctx context.Context, mounts []model.Mount) error {
+	if len(mounts) == 0 {
+		return nil
+	}
+	if err := validateBinding(mounts); err != nil {
+		return err
+	}
+	return s.tx(ctx, func(t *sql.Tx) error {
+		for _, mt := range mounts {
+			// The full cross-row predicate, in ONE statement. It covers all four
+			// combinations the partial index is blind to: inserting exclusive when ANY row
+			// exists, and inserting anything when an EXCLUSIVE row exists.
+			// RowsAffected()==0 ⟹ the lease is contended.
+			res, err := t.Exec(
+				`INSERT INTO mounts(sandbox, volume, path, access)
+				 SELECT ?1, ?2, ?3, ?4
+				 WHERE NOT EXISTS (
+				   SELECT 1 FROM mounts m
+				   WHERE m.volume = ?2
+				     AND (?4 = 'exclusive' OR m.access = 'exclusive')
+				 )`,
+				string(mt.Sandbox), string(mt.Volume), mt.Path, string(mt.Access),
+			)
+			if err != nil {
+				// A missing sandbox or volume is the REFERENCE side of §4.3 atomicity (a
+				// concurrent delete won). The two are distinguished by which row is absent.
+				if isFKViolation(err) {
+					var exists int
+					if qerr := t.QueryRow(`SELECT 1 FROM volumes WHERE id=?`, string(mt.Volume)).Scan(&exists); errors.Is(qerr, sql.ErrNoRows) {
+						return ErrVolumeNotFound
+					}
+					return ErrNotFound
+				}
+				// A uniqueness violation is a DIFFERENT verdict from an FK one and needs its
+				// own predicate — isFKViolation correctly reports false here. Reaching this
+				// means validateBinding was bypassed or is wrong, so the schema assertion is
+				// doing its backstop job.
+				if isUniqueViolation(err) {
+					return ErrMountBindingInvalid
+				}
+				return err
+			}
+			n, err := res.RowsAffected()
+			if err != nil {
+				return err
+			}
+			if n == 0 {
+				// ALL-OR-NOTHING: returning here rolls the transaction back, so a
+				// multi-volume binding that loses one lease inserts NONE of its rows. A
+				// sandbox holds one complete binding, so a partial one is not a state the
+				// model has.
+				return ErrMountLeaseConflict
+			}
+		}
+		return nil
+	})
+}
+
+func (s *SQLite) ListMounts(ctx context.Context, sandbox model.SandboxID) ([]model.Mount, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT sandbox, volume, path, access FROM mounts WHERE sandbox=? ORDER BY path`,
+		string(sandbox))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanMounts(rows)
+}
+
+func (s *SQLite) ListMountsByVolume(ctx context.Context, volume model.VolumeID) ([]model.Mount, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT sandbox, volume, path, access FROM mounts WHERE volume=? ORDER BY sandbox, path`,
+		string(volume))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanMounts(rows)
+}
+
+func (s *SQLite) DeleteMounts(ctx context.Context, sandbox model.SandboxID) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM mounts WHERE sandbox=?`, string(sandbox))
+	return err // idempotent: zero rows is success
+}
+
+func scanMounts(rows *sql.Rows) ([]model.Mount, error) {
+	out := make([]model.Mount, 0)
+	for rows.Next() {
+		var mt model.Mount
+		var sandbox, volume, access string
+		if err := rows.Scan(&sandbox, &volume, &mt.Path, &access); err != nil {
+			return nil, err
+		}
+		mt.Sandbox = model.SandboxID(sandbox)
+		mt.Volume = model.VolumeID(volume)
+		mt.Access = model.AccessMode(access)
+		out = append(out, mt)
+	}
+	return out, rows.Err()
+}
+
+// isUniqueViolation reports whether err is a uniqueness/constraint failure that is
+// NOT an FK violation.
+//
+// It is a SEPARATE predicate from isFKViolation and must stay one: that match
+// correctly reports false for a uniqueness failure, so no single string match can
+// cover all four §6.2 verdicts. Same reasoning as isFKViolation for why this stays a
+// text match rather than a result-code comparison.
+func isUniqueViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "UNIQUE constraint failed") ||
+		strings.Contains(msg, "CHECK constraint failed")
+}
+
+// validateBinding rejects a binding that CONTRADICTS ITSELF, before any row is
+// written (§5.C, judged 400 by §6.2: decidable without reading another row, and no
+// retry can make it legal).
+//
+// It runs in the STORE rather than only at the API boundary so both backends deliver
+// one verdict from one implementation — and because the schema's UNIQUE assertions
+// cannot express all of it: `UNIQUE(sandbox, path)` CANNOT catch NESTING, since
+// `/data` and `/data/sub` are simply different strings. Nesting needs a prefix scan,
+// which is not expressible as a UNIQUE. Both layers stay: the check fires first, the
+// assertion is the net for when the check is bypassed or wrong.
+func validateBinding(mounts []model.Mount) error {
+	seenPath := make(map[string]bool, len(mounts))
+	seenVol := make(map[model.VolumeID]bool, len(mounts))
+	for _, mt := range mounts {
+		if !mt.Access.Valid() {
+			return fmt.Errorf("%w: access %q is not one of exclusive / shared-ro / shared-rw", ErrMountBindingInvalid, mt.Access)
+		}
+		if mt.Path != normalizedMountPath(mt.Path) {
+			return fmt.Errorf("%w: path %q is not normalized (absolute, cleaned, not \"/\") — the uniqueness assertions are literal string comparisons, so an un-normalized path makes them silently not apply",
+				ErrMountBindingInvalid, mt.Path)
+		}
+		if seenPath[mt.Path] {
+			return fmt.Errorf("%w: destination %q appears twice — the second bind would SHADOW the first, leaving one volume invisible in the guest while it still counts in §3.4 and still holds its lease",
+				ErrMountBindingInvalid, mt.Path)
+		}
+		if seenVol[mt.Volume] {
+			return fmt.Errorf("%w: volume %s appears twice in one sandbox", ErrMountBindingInvalid, mt.Volume)
+		}
+		seenPath[mt.Path] = true
+		seenVol[mt.Volume] = true
+	}
+	// Nesting: volumes must not mount inside one another's subtree (§5.C), or the
+	// ownership of the mount-point placeholder in a Promote capture becomes ambiguous.
+	// A prefix scan, because UNIQUE cannot express it.
+	for i, a := range mounts {
+		for j, b := range mounts {
+			if i == j {
+				continue
+			}
+			if strings.HasPrefix(b.Path, a.Path+"/") {
+				return fmt.Errorf("%w: %q is nested inside %q — volumes must not mount within one another's subtree",
+					ErrMountBindingInvalid, b.Path, a.Path)
+			}
+		}
+	}
+	return nil
+}
+
+// normalizedMountPath is the ONE definition of a normalized mount destination,
+// shared by the validation above and by the mediator that prepares bindings, so the
+// two cannot disagree about what "normalized" means.
+func normalizedMountPath(p string) string {
+	c := path.Clean("/" + strings.TrimSpace(p))
+	return c
+}
+
+// NormalizeMountPath exposes that definition to the mediator (§5.C requires paths to
+// be normalized BEFORE insert). Exported from the store because the store is where
+// the uniqueness assertions live, so the normalization and the assertions it protects
+// stay in one place.
+func NormalizeMountPath(p string) string { return normalizedMountPath(p) }
 
 func scanVolume(r rowScanner) (model.Volume, error) {
 	var v model.Volume

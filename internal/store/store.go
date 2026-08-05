@@ -57,6 +57,51 @@ var ErrInUse = errors.New("store: template in use")
 // nothing can produce (§1.3). They land with the constraints that can trigger them.
 var ErrVolumeNotFound = errors.New("store: volume not found")
 
+// The Volume reference verdicts (§6.2's four 409s). They are FOUR SEPARATE
+// SENTINELS, not one, and that is a requirement rather than tidiness: each names a
+// DIFFERENT object relationship, and ErrInUse's text says "template in use"
+// verbatim — reusing it returns a 409 that names the wrong object, sending the
+// caller to look at something unrelated.
+//
+// A storetest case asserts they stay mutually distinguishable, because the way this
+// degrades is by someone later collapsing two of them that happen to map to the same
+// status code.
+var (
+	// ErrVolumeInUse is verdict ①: deleting a volume that a live mount row holds
+	// (mounts.volume RESTRICT). The Template-shaped case, on a different object.
+	ErrVolumeInUse = errors.New("store: volume in use by a mount")
+
+	// ErrSandboxHasMounts is verdict ②'s sandbox side: deleting a sandbox that a live
+	// mount row holds (mounts.sandbox RESTRICT).
+	//
+	// THE TRANSLATION POINT FOR THIS DID NOT EXIST BEFORE M7. DeleteSandbox was a bare
+	// Exec whose error was returned unwrapped, so a RESTRICT violation reached the
+	// API's default arm as a 500 rather than a 409. The FK-violation PREDICATE was
+	// reusable (it is table- and column-agnostic); the translation was not, and that
+	// distinction is the whole of what "we got this for free" did and did not cover.
+	ErrSandboxHasMounts = errors.New("store: sandbox has live mounts")
+
+	// ErrMountLeaseConflict is verdict ③: an attach lost the exclusive lease. It needs
+	// its OWN predicate as well as its own sentinel — the FK-violation string match
+	// correctly reports FALSE for a uniqueness or predicate failure, so one match
+	// cannot cover all four verdicts.
+	//
+	// Unlike ①②④ this is a RETRYABLE state conflict: the caller may succeed later,
+	// once the holder releases.
+	ErrMountLeaseConflict = errors.New("store: volume already exclusively mounted")
+
+	// ErrMountBindingInvalid is the §6.2 400 (NOT a 409): a single submitted binding
+	// that CONTRADICTS ITSELF — the same destination twice, the same volume twice, or
+	// one volume nested inside another's subtree.
+	//
+	// 400 because it is decidable WITHOUT reading any other row, and no retry or state
+	// change can ever make it legal — which is exactly §6.2's 400 criterion. A sandbox
+	// holds one complete binding at any moment and PATCH swaps whole binding for whole
+	// binding, so there is no "add one mount to an existing set" operation for a
+	// duplicate to be relative to. §6.2's four 409s do not grow.
+	ErrMountBindingInvalid = errors.New("store: mount binding is self-contradictory")
+)
+
 // Event is one outbox row: a §4.1 lifecycle transition to publish to the event
 // stream (created / paused / resumed / destroyed …). It is appended in the SAME
 // atomic commit as the state change that produced it (§4.4-C) — a committed
@@ -363,5 +408,86 @@ type Store interface {
 	//
 	// Byte reclamation is DECOUPLED from this row delete (§4.4 / §5.C orphan sweep):
 	// this removes only the row, and the now-orphaned bytes are the sweep's job.
+	//
+	// A live mount row holding the volume makes it ErrVolumeInUse (RESTRICT) — a
+	// DIFFERENT verdict from ErrInUse, whose text names a Template.
 	DeleteVolume(ctx context.Context, id model.VolumeID) error
+
+	// --- Mount table (§5.C / §4.3) --------------------------------------------
+	//
+	// A mount row is a first-class persistent object, structurally the DOUBLING of
+	// `sandboxes.template`: two columns, each ON DELETE RESTRICT. No state column, no
+	// count column — "is this volume exclusively held" is DERIVED from the rows.
+	//
+	// Mount rows publish NO events: they are not §4.1 lifecycle transitions (§4.3, the
+	// rule Template and Volume CRUD already follow).
+
+	// CreateMounts inserts a sandbox's COMPLETE binding atomically, enforcing the
+	// exclusive lease — the ONE new store invariant Volume introduces (§5.C).
+	//
+	// THE JUDGMENT AND THE INSERT MUST NOT BE SEPARABLE. A mediator-side pre-check
+	// followed by an insert does NOT work, and this is a real measured TOCTOU rather
+	// than a theoretical one: two concurrent creates mint two fresh SandboxIDs and so
+	// hold two DISJOINT transition locks, meaning nothing serializes them against each
+	// other — the only lock held at that instant is each sandbox's own. Measured: 8
+	// racers, no scheduling hooks, broke the lease 2 times in 4000 iterations, and it
+	// reproduces every time with an explicit scheduling point. This is the same reason
+	// the admission gate needs its own mutex (a node-global invariant cannot be
+	// enforced by per-sandbox locks).
+	//
+	// So the BACKEND arbitrates: one statement expressing the whole cross-row
+	// predicate, serialized by the single authoritative store. This is NOT a new
+	// mechanism — it is §4.3's reference-reclaim shape (one authoritative store
+	// serializing judgment-and-action) applied to a second invariant. SQLite delivers
+	// it with INSERT…SELECT…WHERE NOT EXISTS inside one transaction; Memory under the
+	// one mutex it already holds. No new lock class on either side.
+	//
+	// The INVARIANT, stated precisely (§5.C): a volume has AT MOST ONE `exclusive`
+	// mount row, AND that row does not coexist with ANY other mount row for that
+	// volume. Note what it is NOT: "at most one rw row" would contradict
+	// SharedReadWrite's whole fanout.
+	//
+	// ALL-OR-NOTHING across the whole binding: if any one mount loses the lease, NONE
+	// is inserted. A sandbox holds one complete binding, so a partially-applied
+	// binding is not a state the model has.
+	//
+	// Verdicts: ErrMountLeaseConflict when the lease is contended;
+	// ErrMountBindingInvalid when the submitted binding contradicts itself (duplicate
+	// destination, duplicate volume, or nesting); ErrNotFound / ErrVolumeNotFound when
+	// a referenced sandbox or volume does not exist (the reference side of §4.3
+	// atomicity). Paths MUST already be normalized by the caller — the uniqueness
+	// assertions are literal string comparisons, so an un-normalized path makes them
+	// silently not apply.
+	CreateMounts(ctx context.Context, mounts []model.Mount) error
+
+	// ListMounts returns one sandbox's mount rows, ordered by path. This is what a
+	// resume re-materializes from: the mount relationship is a Binding, so a resume
+	// re-mounts per the CURRENT table rather than restoring frozen bytes (§3.4 / §5.C).
+	ListMounts(ctx context.Context, sandbox model.SandboxID) ([]model.Mount, error)
+
+	// ListMountsByVolume returns every mount row referencing one volume, in ANY
+	// sandbox and regardless of that sandbox's state.
+	//
+	// The orphan sweep needs it as a live-mount check INDEPENDENT of any FK (§5.C
+	// safety requirement): skip any volume appearing in ANY mount row, live or not. FK
+	// RESTRICT protects the ROW; this protects the BYTES, which is a different thing
+	// and the one a mis-sweep destroys.
+	ListMountsByVolume(ctx context.Context, volume model.VolumeID) ([]model.Mount, error)
+
+	// DeleteMounts removes ALL of one sandbox's mount rows. This is the LEASE RELEASE
+	// POINT: the lease is the row's existence, so the row going away IS the release
+	// (§5.C — there is no lease object to release separately).
+	//
+	// Idempotent (no rows → nil): destroy, unwind and evict all reach it.
+	//
+	// CALLERS MUST CALL THIS BEFORE DeleteSandbox, and the ORDER IS REQUIRED rather
+	// than stylistic (measured): RESTRICT fires IMMEDIATELY, so wrapping both deletes
+	// in one transaction buys NO order-independence. And `defer_foreign_keys` is
+	// REJECTED rather than untried: it does make the order irrelevant, but the
+	// violation then surfaces at Commit() — and when Go's Tx.Commit() returns an error
+	// SQLite has NOT rolled back, so on the pinned single connection the transaction
+	// stays open and subsequent pooled queries run INSIDE it, seeing uncommitted state
+	// no other handle can see. That is a store-level correctness risk, not a style
+	// preference.
+	DeleteMounts(ctx context.Context, sandbox model.SandboxID) error
 }
