@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"io/fs"
 	"strings"
 	"sync"
 	"testing"
@@ -13,6 +14,7 @@ import (
 	"engine/internal/rootfs"
 	"engine/internal/runtime"
 	"engine/internal/transport"
+	"engine/internal/volume"
 )
 
 // seedBare inserts the "bare" builtin Template into st so a sandbox create /
@@ -213,6 +215,277 @@ func (f *fakeRootfs) SweepOrphanLayers(_ context.Context, live, building []strin
 		";building=" + strings.Join(append([]string(nil), building...), "|"))
 	return 0, nil
 }
+
+// fakeVolume is the §5.C unit fake, the twin of fakeRootfs: it records call order
+// and injects failures so the mediator's volume verbs (gate → bytes → row, and the
+// unwind when the row loses) can be tested as pure logic. The real backends are
+// covered by internal/volume's shared contract suite, on both arms.
+//
+// EVERY mediator Deps in this package carries one, because the §3.4 disk inequality
+// sums BOTH subsystems' uncapped bytes: with the disk axis metered, a nil backend
+// makes the gate blind to every volume's bytes, and the gate fails CLOSED rather
+// than pretending that means "no volumes". So a test that meters disk and omits this
+// is not testing a leaner configuration — it is testing one production cannot have.
+type fakeVolume struct {
+	mu    sync.Mutex
+	calls []string
+
+	// caps is what Capabilities reports. Defaults (zero value) to a backend that
+	// supports NOTHING, so a test asserting the capability-negative 400 path does not
+	// have to opt in; the constructor below flips all three on for the common case.
+	caps volume.Capabilities
+
+	// uncappedBytes is the §5.C half of the §3.4 second term; measureErr makes it
+	// fail so the gate's fail-closed path can be asserted from this side too.
+	uncappedBytes int64
+	measureErr    error
+
+	// used / usageErr drive Usage, which the cap write point's STRICT-inequality
+	// refusal reads (§5.C / volume.md D7.3). usageErr specifically exercises
+	// "refuse to set a cap blind", since an under-usage cap is irreversible.
+	used     int64
+	usageErr error
+
+	failCreate  bool
+	failCap     bool
+	failDestroy bool
+
+	// units tracks which volume storage the fake believes exists, so a test can
+	// assert bytes-first ordering and the create unwind (row lost → bytes reclaimed)
+	// rather than only reading the call log.
+	units map[string]bool
+
+	// roots keeps ONE fakeRoot per volume, so content PERSISTS across separate
+	// OpenRoot calls. Handing out a fresh root each time would make an import
+	// invisible to the following export — and the property being tested (bytes go in
+	// and come back out with no sandbox anywhere, §5.C) is precisely that they
+	// persist.
+	roots map[string]*fakeRoot
+}
+
+func newFakeVolume() *fakeVolume {
+	return &fakeVolume{
+		caps:  volume.Capabilities{Snapshot: true, Clone: true, Quota: true},
+		units: map[string]bool{},
+		roots: map[string]*fakeRoot{},
+	}
+}
+
+func (f *fakeVolume) log(s string) {
+	f.mu.Lock()
+	f.calls = append(f.calls, s)
+	f.mu.Unlock()
+}
+
+func (f *fakeVolume) Calls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.calls...)
+}
+
+func (f *fakeVolume) Name() string { return "fake_volume" }
+
+func (f *fakeVolume) Capabilities() volume.Capabilities {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.caps
+}
+
+func (f *fakeVolume) CreateVolume(_ context.Context, id string, capBytes int64) error {
+	f.log(fmt.Sprintf("CreateVolume:%s:cap=%d", id, capBytes))
+	if f.failCreate {
+		return fmt.Errorf("fake: create volume %s failed", id)
+	}
+	if capBytes > 0 && !f.Capabilities().Quota {
+		return fmt.Errorf("fake: %w", volume.ErrUnsupported)
+	}
+	f.mu.Lock()
+	f.units[id] = true
+	f.mu.Unlock()
+	return nil
+}
+
+func (f *fakeVolume) SetCapacity(_ context.Context, id string, capBytes int64) error {
+	f.log(fmt.Sprintf("SetCapacity:%s:cap=%d", id, capBytes))
+	if f.failCap {
+		return fmt.Errorf("fake: set capacity on %s failed", id)
+	}
+	if capBytes > 0 && !f.Capabilities().Quota {
+		return fmt.Errorf("fake: %w", volume.ErrUnsupported)
+	}
+	return nil
+}
+
+func (f *fakeVolume) Usage(_ context.Context, id string) (int64, int64, error) {
+	f.log("Usage:" + id)
+	if f.usageErr != nil {
+		return 0, 0, f.usageErr
+	}
+	return f.used, 0, nil
+}
+
+func (f *fakeVolume) Materialize(_ context.Context, id string) (*volume.Materialized, error) {
+	f.log("Materialize:" + id)
+	f.mu.Lock()
+	f.units[id] = true // create-if-absent, matching the contract (§5.C)
+	f.mu.Unlock()
+	return &volume.Materialized{Volume: id, SourcePath: "/fake/volumes/" + id}, nil
+}
+
+func (f *fakeVolume) Release(_ context.Context, m *volume.Materialized) error {
+	if m == nil {
+		return nil
+	}
+	f.log("Release:" + m.Volume)
+	return nil
+}
+
+func (f *fakeVolume) AdoptMaterialized(_ context.Context, id string) (*volume.Materialized, error) {
+	f.log("AdoptMaterialized:" + id)
+	f.mu.Lock()
+	present := f.units[id]
+	f.mu.Unlock()
+	if !present {
+		return nil, fmt.Errorf("fake: volume %s not present", id)
+	}
+	return &volume.Materialized{Volume: id, SourcePath: "/fake/volumes/" + id}, nil
+}
+
+func (f *fakeVolume) OpenRoot(_ context.Context, id string) (volume.Root, error) {
+	f.log("OpenRoot:" + id)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.units[id] {
+		return nil, fmt.Errorf("fake: volume %s not present", id)
+	}
+	r, ok := f.roots[id]
+	if !ok {
+		r = &fakeRoot{files: map[string][]byte{}, dirs: map[string]bool{}}
+		f.roots[id] = r
+	}
+	return r, nil
+}
+
+func (f *fakeVolume) DestroyVolume(_ context.Context, id string) error {
+	f.log("DestroyVolume:" + id)
+	if f.failDestroy {
+		return fmt.Errorf("fake: destroy volume %s failed", id)
+	}
+	f.mu.Lock()
+	delete(f.units, id)
+	f.mu.Unlock()
+	return nil
+}
+
+func (f *fakeVolume) UncappedBytes(context.Context) (int64, error) {
+	f.log("UncappedBytes")
+	if f.measureErr != nil {
+		return 0, f.measureErr
+	}
+	return f.uncappedBytes, nil
+}
+
+func (f *fakeVolume) SweepOrphanVolumes(_ context.Context, live, building []string) (int, error) {
+	f.log("SweepOrphanVolumes:live=" + strings.Join(append([]string(nil), live...), "|") +
+		";building=" + strings.Join(append([]string(nil), building...), "|"))
+	return 0, nil
+}
+
+// fakeRoot is an in-memory volume.Root for the import/export verbs. It is
+// deliberately NOT root-confinement-checked: confinement is a property of the real
+// openat2 accessor and is asserted in internal/volume's own unit test, so faking it
+// here would only assert that the fake agrees with itself.
+type fakeRoot struct {
+	mu    sync.Mutex
+	files map[string][]byte
+	dirs  map[string]bool
+}
+
+func (r *fakeRoot) Stat(name string) (volume.FileInfo, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.dirs[name] || name == "." {
+		return volume.FileInfo{Name: name, IsDir: true}, nil
+	}
+	b, ok := r.files[name]
+	if !ok {
+		return volume.FileInfo{}, fs.ErrNotExist
+	}
+	return volume.FileInfo{Name: name, Size: int64(len(b))}, nil
+}
+
+func (r *fakeRoot) List(string) ([]volume.FileInfo, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]volume.FileInfo, 0, len(r.files))
+	for n, b := range r.files {
+		out = append(out, volume.FileInfo{Name: n, Size: int64(len(b))})
+	}
+	return out, nil
+}
+
+func (r *fakeRoot) ReadAt(name string, p []byte, off int64) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	b, ok := r.files[name]
+	if !ok {
+		return 0, fs.ErrNotExist
+	}
+	if off >= int64(len(b)) {
+		return 0, io.EOF
+	}
+	n := copy(p, b[off:])
+	if n < len(p) {
+		return n, io.EOF
+	}
+	return n, nil
+}
+
+func (r *fakeRoot) WriteAt(name string, p []byte, off int64) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	b := r.files[name]
+	if need := int(off) + len(p); need > len(b) {
+		grown := make([]byte, need)
+		copy(grown, b)
+		b = grown
+	}
+	copy(b[off:], p)
+	r.files[name] = b
+	return len(p), nil
+}
+
+func (r *fakeRoot) Mkdir(name string, _ fs.FileMode) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.dirs == nil {
+		r.dirs = map[string]bool{}
+	}
+	r.dirs[name] = true
+	return nil
+}
+
+func (r *fakeRoot) Remove(name string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.files, name)
+	delete(r.dirs, name)
+	return nil // idempotent, matching the contract
+}
+
+func (r *fakeRoot) Rename(oldName, newName string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	b, ok := r.files[oldName]
+	if !ok {
+		return fs.ErrNotExist
+	}
+	r.files[newName] = b
+	delete(r.files, oldName)
+	return nil
+}
+
+func (r *fakeRoot) Close() error { return nil }
 
 type fakeRuntime struct {
 	mu         sync.Mutex

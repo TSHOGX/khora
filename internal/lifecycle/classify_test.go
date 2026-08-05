@@ -42,6 +42,7 @@ func newClassifyFixture(t *testing.T, id string, idleTimeout time.Duration, l2He
 	}
 	m := New(Deps{
 		Store: st, Runtime: rt, Rootfs: &fakeRootfs{},
+		Volume:        newFakeVolume(),
 		Dial:          func(transport.Endpoint) transport.Client { return &fakeClient{healthy: l2Healthy, idle: idle} },
 		HealthTimeout: time.Second,
 	})

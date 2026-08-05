@@ -27,6 +27,7 @@ func newLimitsMediator(t *testing.T, rp *fakeRootfs, rt *fakeRuntime, capacity N
 	seedBare(t, st)
 	m := New(Deps{
 		Store: st, Runtime: rt, Rootfs: rp,
+		Volume:        newFakeVolume(),
 		Dial:          func(transport.Endpoint) transport.Client { return &fakeClient{healthy: true} },
 		HealthTimeout: 500 * time.Millisecond,
 		NodeCapacity:  capacity,
@@ -143,6 +144,7 @@ func TestDeathCauseSeparatesTheTwoParallelDeadHealthStates(t *testing.T) {
 			l2Up := false
 			m := New(Deps{
 				Store: st, Runtime: rt, Rootfs: rp,
+				Volume: newFakeVolume(),
 				Dial: func(transport.Endpoint) transport.Client {
 					return &fakeClient{healthyFn: func() bool { return l2Up }}
 				},

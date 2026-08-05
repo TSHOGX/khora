@@ -25,6 +25,7 @@ func main() {
 		templates = flag.String("templates", "./templates", "Template directory root (TemplateID → dir)")
 		state     = flag.String("state", "./scratch/state", "state root (overlays + runsc state/bundles)")
 		storePath = flag.String("store", "./scratch/store.db", "SQLite store file (ADR-0004)")
+		volumes   = flag.String("volumes-dir", "", "§5.C volume storage root, one unit per volume; empty = <state>/volumes. A SIBLING of the overlay root, never nested inside it — each subsystem's orphan sweep enumerates its own root, so nesting would put one subsystem's units inside the other's enumeration")
 		health    = flag.Duration("health-timeout", 30*time.Second, "cold-start readiness gate timeout (⑦)")
 		idleTO    = flag.Duration("idle-timeout", 30*time.Minute, "default idle TTL: running idle past this → auto-pause (§4.3)")
 		retention = flag.Duration("retention", 24*time.Hour, "default retention TTL: paused past this → evict (§4.3)")
@@ -40,6 +41,7 @@ func main() {
 		TemplatesDir:        *templates,
 		StateDir:            *state,
 		StorePath:           *storePath,
+		VolumesDir:          *volumes,
 		HealthTimeout:       *health,
 		DefaultIdleTimeout:  *idleTO,
 		DefaultRetention:    *retention,
@@ -59,6 +61,24 @@ func main() {
 	// resolves. Idempotent across restarts.
 	if err := eng.SeedTemplates(context.Background()); err != nil {
 		log.Fatalf("orchestrator: seed builtin templates: %v", err)
+	}
+
+	// §5.C / §4.4-A orphan-VOLUME sweep, and its position here is LOAD-BEARING rather
+	// than a matter of taste: it runs BEFORE anything can create a storage unit.
+	//
+	// A leaked quota row does not reserve its own unit id, so a restart can hand that
+	// id — ALONG WITH ITS CAP — to a brand-new volume, which then meets ENOSPC on a
+	// limit nobody set for it, or is silently over-provisioned. The engine cannot
+	// detect either from the inside: the cap it reads back looks exactly like the
+	// volume's own (§5.C / volume.md D7.1). Deferring this to the reaper's first tick
+	// would leave a window in which precisely that inheritance happens, so it is
+	// ordered ahead of Reconcile (which can materialize storage while re-adopting) and
+	// ahead of serving.
+	//
+	// Non-fatal: the reaper repeats it. At boot the in-flight keep-set is empty, so
+	// every unit without a record is a true orphan.
+	if err := eng.SweepOrphanVolumes(context.Background()); err != nil {
+		log.Printf("orchestrator: boot orphan-volume sweep (retried by reaper): %v", err)
 	}
 
 	// §4.4-A startup reconciliation BEFORE serving: reclaim orphan placements

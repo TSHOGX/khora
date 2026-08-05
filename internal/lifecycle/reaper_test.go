@@ -38,6 +38,7 @@ func newReaperEnv(t *testing.T, budget time.Duration) *reaperEnv {
 	cl := &fakeClient{healthy: true}
 	m := New(Deps{
 		Store: st, Runtime: rt, Rootfs: &fakeRootfs{},
+		Volume:        newFakeVolume(),
 		Dial:          func(transport.Endpoint) transport.Client { return cl },
 		HealthTimeout: time.Second,
 	})

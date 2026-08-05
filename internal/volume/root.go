@@ -271,6 +271,14 @@ func (r *localRoot) Mkdir(name string, perm fs.FileMode) error {
 func (r *localRoot) Remove(name string) error {
 	pfd, base, err := r.parentFD(name)
 	if err != nil {
+		// An absent PARENT means the target is absent too, which the contract defines as
+		// a no-op — not an error. Reporting the parent's ENOENT here would break
+		// idempotency in a way that only shows up on the paths that legitimately clear a
+		// not-yet-existing file (import does exactly that before writing), so the
+		// distinction is made here rather than left to each caller.
+		if errors.Is(err, unix.ENOENT) {
+			return nil
+		}
 		return err
 	}
 	defer unix.Close(pfd)

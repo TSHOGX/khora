@@ -20,6 +20,7 @@ func newTestMediator(t *testing.T, rp *fakeRootfs, rt *fakeRuntime, healthy bool
 		Store:         st,
 		Runtime:       rt,
 		Rootfs:        rp,
+		Volume:        newFakeVolume(),
 		Dial:          func(transport.Endpoint) transport.Client { return &fakeClient{healthy: healthy} },
 		HealthTimeout: 500 * time.Millisecond,
 	})
@@ -53,6 +54,7 @@ func TestCreateMaterializesTTLBinding(t *testing.T) {
 	seedBare(t, st) // §4.3 template FK
 	m := New(Deps{
 		Store: st, Runtime: &fakeRuntime{}, Rootfs: &fakeRootfs{},
+		Volume:             newFakeVolume(),
 		Dial:               func(transport.Endpoint) transport.Client { return &fakeClient{healthy: true} },
 		HealthTimeout:      500 * time.Millisecond,
 		DefaultIdleTimeout: 15 * time.Minute,

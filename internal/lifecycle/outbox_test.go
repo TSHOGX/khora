@@ -225,6 +225,7 @@ func TestPromoteFromPausedPublishesNothing(t *testing.T) {
 	rp := &fakeRootfs{}
 	m := New(Deps{
 		Store: st, Runtime: &fakeRuntime{}, Rootfs: rp,
+		Volume:        newFakeVolume(),
 		Dial:          func(transport.Endpoint) transport.Client { return &fakeClient{healthy: true} },
 		HealthTimeout: time.Second,
 	})

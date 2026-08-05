@@ -1,0 +1,275 @@
+package orchestrator
+
+import (
+	"encoding/json"
+	"errors"
+	"io"
+	"log"
+	"net/http"
+	"strings"
+
+	"engine/internal/lifecycle"
+	"engine/internal/model"
+)
+
+// The §6.1 Volume block: create / list / inspect / patch / delete + the two direct
+// content endpoints.
+//
+// Volumes are addressed by opaque ID and NOTHING here exposes a host path (§6.2):
+// the backend resolves storage internally, so the wire carries an ID, a byte count
+// and a root-relative path, never a location on the host.
+//
+// import/export need NO sandbox, and that is the point rather than a convenience:
+// together with create they are how "a volume's lifecycle is decoupled from any
+// sandbox" (§5.C) becomes true in substance rather than only in the record layer —
+// seeding a volume before any sandbox exists, and reading one after the last sandbox
+// is gone, have no other route.
+
+type volumeCreateReq struct {
+	// Size is the capacity cap in bytes. REQUIRED while the disk axis is metered
+	// (§3.4 / §6.2 conditionally-required-per-axis): an uncapped volume would
+	// contribute nothing to the node budget while free to consume all of it, so a
+	// missing size is a 400 rather than a silently-defaulted value. Omitted / 0 =
+	// uncapped, legal only on an unmetered axis.
+	Size int64 `json:"size"`
+	// There is deliberately NO access_mode field. It is a property of the MOUNT ROW,
+	// not of the volume — one volume can be shared-rw to one sandbox and shared-ro to
+	// another at the same time — so it appears only in a sandbox's `volumes` binding
+	// (§5.C / §6.1).
+}
+
+type volumeResp struct {
+	VolumeID string `json:"volume_id"`
+	// Size is the cap FROM THE RECORD, which is its only authority: the storage
+	// layer's read-back cannot distinguish "never capped" from "deliberately
+	// uncapped" (volume.md D7.3), so reporting the record is what keeps inspect
+	// honest about what the engine PROMISED — the same number the admission gate
+	// counts.
+	Size    int64  `json:"size"`
+	Backend string `json:"backend,omitempty"`
+	// UsedByte is the backend's own statement of consumed bytes. Omitted when it
+	// could not be read, rather than reported as 0 — a zero would read as "empty",
+	// and the caller uses this number to choose a new cap that must be strictly
+	// above it.
+	UsedByte int64 `json:"used_byte,omitempty"`
+}
+
+// registerVolumeRoutes mounts the Volume block on the control-plane mux.
+func (e *Engine) registerVolumeRoutes(mux *http.ServeMux) {
+	// POST /v1/volumes ; GET /v1/volumes
+	mux.HandleFunc("/v1/volumes", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			e.handleCreateVolume(w, r)
+		case http.MethodGet:
+			e.handleListVolumes(w, r)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+	// /v1/volumes/{id}[/import|/export]
+	mux.HandleFunc("/v1/volumes/", e.handleVolumeSub)
+}
+
+func (e *Engine) handleCreateVolume(w http.ResponseWriter, r *http.Request) {
+	var req volumeCreateReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.Size < 0 {
+		http.Error(w, "size must be non-negative (0 = uncapped)", http.StatusBadRequest)
+		return
+	}
+	id, err := e.Mediator.CreateVolume(r.Context(), req.Size)
+	if err != nil {
+		statusFor(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, volumeResp{VolumeID: string(id), Size: req.Size})
+}
+
+func (e *Engine) handleListVolumes(w http.ResponseWriter, r *http.Request) {
+	list, err := e.Mediator.ListVolumes(r.Context())
+	if err != nil {
+		statusFor(w, err)
+		return
+	}
+	// List reports the RECORD only, with no per-volume usage read: usage costs one
+	// backend round trip each, and a list is the one place where that multiplies by
+	// the number of volumes. A caller who needs usage inspects the volume.
+	out := make([]volumeResp, 0, len(list))
+	for _, v := range list {
+		out = append(out, volumeResp{VolumeID: string(v.ID), Size: v.CapByte, Backend: v.Backend})
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (e *Engine) handleVolumeSub(w http.ResponseWriter, r *http.Request) {
+	rest := strings.TrimPrefix(r.URL.Path, "/v1/volumes/")
+	parts := strings.SplitN(rest, "/", 2)
+	id := model.VolumeID(parts[0])
+	if id == "" {
+		http.Error(w, "missing volume id", http.StatusBadRequest)
+		return
+	}
+	sub := ""
+	if len(parts) == 2 {
+		sub = parts[1]
+	}
+
+	switch {
+	case sub == "" && r.Method == http.MethodGet:
+		e.handleInspectVolume(w, r, id)
+	case sub == "" && r.Method == http.MethodPatch:
+		e.handlePatchVolume(w, r, id)
+	case sub == "" && r.Method == http.MethodDelete:
+		e.handleDeleteVolume(w, r, id)
+	case sub == "import" && (r.Method == http.MethodPost || r.Method == http.MethodPut):
+		e.handleImportVolume(w, r, id)
+	case sub == "export" && r.Method == http.MethodGet:
+		e.handleExportVolume(w, r, id)
+	default:
+		http.Error(w, "not found", http.StatusNotFound)
+	}
+}
+
+func (e *Engine) handleInspectVolume(w http.ResponseWriter, r *http.Request, id model.VolumeID) {
+	info, err := e.Mediator.GetVolume(r.Context(), id)
+	if err != nil {
+		statusFor(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, volumeResp{
+		VolumeID: string(info.Volume.ID),
+		Size:     info.Volume.CapByte,
+		Backend:  info.Volume.Backend,
+		UsedByte: info.UsedByte,
+	})
+}
+
+// volumePatchReq is the §6.1 PATCH body. Size is a POINTER so "omitted" is
+// distinguishable from "set to 0", which matters because 0 is itself an instruction
+// here (remove the cap) rather than an absence.
+type volumePatchReq struct {
+	Size *int64 `json:"size"`
+}
+
+// handlePatchVolume is PATCH /v1/volumes/{id} {size} — the cap's only write point
+// besides create (§6.1).
+//
+// It works whether or not anything has the volume mounted, which is the exact
+// OPPOSITE of a sandbox cap (editable only while `paused`), so there is deliberately
+// no "pause it first" 409 here. The reason is mechanical: a sandbox cap
+// re-materializes at the next placement, while a volume has no placement of its own
+// — "defer to the next placement" would mean never for an unmounted volume (§5.C).
+//
+// A raise re-clears admission and may be 507; lowering below current usage is 400
+// (strict inequality — see lifecycle.ErrVolumeCapBelowUsage for why the engine
+// refuses what the substrate would accept). It emits no event: this is not a §4.1
+// transition.
+func (e *Engine) handlePatchVolume(w http.ResponseWriter, r *http.Request, id model.VolumeID) {
+	var req volumePatchReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.Size == nil {
+		http.Error(w, "size is required (it is the only editable field)", http.StatusBadRequest)
+		return
+	}
+	if *req.Size < 0 {
+		http.Error(w, "size must be non-negative (0 = uncapped)", http.StatusBadRequest)
+		return
+	}
+	if err := e.Mediator.SetVolumeCapacity(r.Context(), id, *req.Size); err != nil {
+		statusFor(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, volumeResp{VolumeID: string(id), Size: *req.Size})
+}
+
+func (e *Engine) handleDeleteVolume(w http.ResponseWriter, r *http.Request, id model.VolumeID) {
+	if err := e.Mediator.DeleteVolume(r.Context(), id); err != nil {
+		statusFor(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+type importResp struct {
+	VolumeID     string `json:"volume_id"`
+	Path         string `json:"path"`
+	BytesWritten int64  `json:"bytes_written"`
+}
+
+// handleImportVolume is POST /v1/volumes/{id}/import?path= (§6.1 direct write).
+//
+// The body STREAMS to the backend through a fixed buffer — it is never buffered
+// whole. That is the same reason the sandbox large-file route is REST rather than
+// RPC (§6.1): a file must not become one message, nor sit in memory at either end.
+//
+// `path` is relative to the VOLUME ROOT and out-of-root targets are unreachable —
+// the accessor is root-confined by construction (§5.C / volume.md D5.1), so a
+// traversal clamps inside the volume rather than being rejected by a check here.
+// Validating the string would be the weaker design: it would have to be right, where
+// the accessor cannot be wrong.
+func (e *Engine) handleImportVolume(w http.ResponseWriter, r *http.Request, id model.VolumeID) {
+	path := r.URL.Query().Get("path")
+	if path == "" {
+		http.Error(w, "path is required (relative to the volume root)", http.StatusBadRequest)
+		return
+	}
+	n, err := e.Mediator.ImportVolume(r.Context(), id, path, r.Body)
+	if err != nil {
+		statusFor(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, importResp{VolumeID: string(id), Path: path, BytesWritten: n})
+}
+
+// handleExportVolume is GET /v1/volumes/{id}/export?path= (§6.1 direct read),
+// streaming for the same reason import does.
+func (e *Engine) handleExportVolume(w http.ResponseWriter, r *http.Request, id model.VolumeID) {
+	path := r.URL.Query().Get("path")
+	if path == "" {
+		http.Error(w, "path is required (relative to the volume root)", http.StatusBadRequest)
+		return
+	}
+	// The status line has to be committed before the first byte, so a mid-stream
+	// failure cannot become a 4xx/5xx — it can only truncate the response. Content-Type
+	// is set accordingly, and the error is logged rather than written into the body,
+	// where it would be indistinguishable from volume content.
+	w.Header().Set("Content-Type", "application/octet-stream")
+	n, err := e.Mediator.ExportVolume(r.Context(), id, path, w)
+	if err != nil && n == 0 {
+		// Nothing written yet: a real status code is still possible.
+		statusFor(w, err)
+		return
+	}
+	if err != nil {
+		// Truncated. The response is already 200 with partial bytes, so the only honest
+		// signal left is the log — inventing a trailer the caller does not read, or
+		// appending an error message into the byte stream, would be worse.
+		log.Printf("volumes: export %s from %s truncated after %d bytes: %v", path, id, n, err)
+	}
+}
+
+// volumeStatus maps the §5.C / §6.2 Volume verdicts onto status codes. Called from
+// statusFor so the mapping lives beside the endpoints that produce it.
+func volumeStatus(err error) (int, bool) {
+	switch {
+	case errors.Is(err, lifecycle.ErrVolumeCapBelowUsage):
+		// 400, NOT 507: nothing is full, and no retry or state change makes this legal.
+		// The engine refuses it even though the substrate would accept it, because
+		// accepting manufactures a state the control plane cannot leave (§5.C /
+		// volume.md D7.3).
+		return http.StatusBadRequest, true
+	case errors.Is(err, lifecycle.ErrVolumeCapUnsupported):
+		// 400: the backend genuinely cannot enforce a cap (§6.2 capability query).
+		// Refused rather than silently run uncapped, which would leave every §2.3
+		// blast-radius assertion trusting a limit that is not there.
+		return http.StatusBadRequest, true
+	}
+	return 0, false
+}

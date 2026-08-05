@@ -45,6 +45,7 @@ func stressMediator(st store.Store, healthy bool) (*Mediator, *fakeRootfs, *fake
 		Store:         st,
 		Runtime:       rt,
 		Rootfs:        rp,
+		Volume:        newFakeVolume(),
 		Dial:          func(transport.Endpoint) transport.Client { return &fakeClient{healthy: healthy} },
 		HealthTimeout: 2 * time.Second,
 	})
@@ -150,6 +151,7 @@ func TestStressDestroyBlockedDuringResume(t *testing.T) {
 			rp, rt := &fakeRootfs{}, &fakeRuntime{launchGate: gate}
 			m := New(Deps{
 				Store: st, Runtime: rt, Rootfs: rp,
+				Volume:        newFakeVolume(),
 				Dial:          func(transport.Endpoint) transport.Client { return &fakeClient{healthy: true} },
 				HealthTimeout: 2 * time.Second,
 			})
@@ -232,6 +234,7 @@ func TestStressReaperRacesUserVerbs(t *testing.T) {
 			rp, rt := &fakeRootfs{}, &fakeRuntime{adoptAlive: map[string]bool{}}
 			m := New(Deps{
 				Store: st, Runtime: rt, Rootfs: rp,
+				Volume:        newFakeVolume(),
 				Dial:          func(transport.Endpoint) transport.Client { return &fakeClient{healthy: true, idle: time.Hour} },
 				HealthTimeout: 2 * time.Second,
 			})
@@ -364,6 +367,7 @@ func TestConcurrentCreatesCannotOversubscribeTheNode(t *testing.T) {
 			rp, rt := &fakeRootfs{}, &fakeRuntime{}
 			m := New(Deps{
 				Store: st, Runtime: rt, Rootfs: rp,
+				Volume:        newFakeVolume(),
 				Dial:          func(transport.Endpoint) transport.Client { return &fakeClient{healthy: true} },
 				HealthTimeout: 500 * time.Millisecond,
 				// Budget fits EXACTLY 4 sandboxes of 1 GiB. Nothing else consumes it:

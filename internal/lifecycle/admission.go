@@ -56,14 +56,29 @@ import (
 // here rather than assumed. `0 = unlimited` stays legal on an UNMETERED axis,
 // where it is an honest resting value.
 //
-// TWO ENTRY POINTS, one inequality. `admit` gates a new/raised PROMISE (create,
-// resume, a cap raise) and adds to the FIRST term. `admitUncappedGrowth` gates a
-// control-plane action that adds bytes to the SECOND term with no cap over them
-// (Promote freezing a layer). They are deliberately not one function: which term
-// an action lands in is the whole content of the accounting argument above, so the
-// call site has to say it (§3.4 states the rule for both — a cap the node cannot
-// honor is refused, AND any action that increases uncapped bytes clears the same
-// inequality).
+// BOTH TERMS SUM ACROSS §5.B AND §5.C, NOT JUST SANDBOXES (§3.4). The first term is
+// Σ(sandbox disk caps) + Σ(VOLUME caps); the second is
+// Σ(§5.B uncapped bytes) + Σ(§5.C uncapped bytes), each reported by its own
+// subsystem through the same-shaped seam method. There is NO third term: a volume
+// cap and a sandbox cap are LIKE TERMS on the same left-hand side — both are upper
+// bounds the engine has declared — even though a volume cap is recorded on the
+// volume rather than in some sandbox's Binding (§5.C: a volume has no placement of
+// its own). Omitting them is not "counting a little low": a node can be filled by a
+// pile of uncapped volumes while the gate refuses nothing at all.
+//
+// THREE ENTRY POINTS, one inequality. `admit` gates a new/raised per-SANDBOX
+// promise (create, resume, a cap raise) and adds to the FIRST term.
+// `admitUncappedGrowth` gates a control-plane action that adds bytes to the SECOND
+// term with no cap over them (Promote freezing a layer). `admitVolume` gates a new
+// VOLUME cap, which also lands in the first term.
+//
+// They are deliberately not one function: which term an action lands in is the whole
+// content of the accounting argument above, so the call site has to say it. And
+// `admitVolume` specifically must NOT reuse `admit` — that function's
+// metered-axis-requires-a-cap check is a statement about a SANDBOX (all three axes,
+// including RAM), while a volume has exactly one axis and no Binding at all. Passing
+// a volume through `admit` would demand a memory cap from an object that cannot have
+// one.
 //
 // Where this sits in the §4 structure: admission reads the AUTHORITATIVE store
 // (committed promises) and asks the Rootfs provider to measure its own bytes.
@@ -135,17 +150,16 @@ func (m *Mediator) admitUncappedGrowth(ctx context.Context, growth int64) error 
 	if growth < 0 {
 		return fmt.Errorf("admission: negative uncapped growth %d", growth)
 	}
-	recs, err := m.deps.Store.ListSandboxes(ctx)
+	committedDisk, err := m.committedDisk(ctx, "", "")
 	if err != nil {
-		return fmt.Errorf("admission: list sandboxes: %w", err)
+		return err
 	}
-	committedDisk, _ := sumCommitted(recs, "")
-	uncapped, err := m.deps.Rootfs.UncappedBytes(ctx)
+	uncapped, err := m.uncappedBytes(ctx)
 	if err != nil {
 		// Same fail-closed reasoning as admit: an unmeasurable backend means the
 		// inequality cannot be evaluated, and the cost of admitting blind lands on
 		// unrelated sandboxes (§2.3), not on this caller.
-		return fmt.Errorf("admission: %w: cannot measure uncapped bytes: %v", ErrInsufficientCapacity, err)
+		return fmt.Errorf("admission: %w: %v", ErrInsufficientCapacity, err)
 	}
 	pending := m.pendingUncapped()
 	if total := committedDisk + uncapped + pending + growth; total > capDisk {
@@ -167,6 +181,132 @@ func sumCommitted(recs []model.Sandbox, excludeID model.SandboxID) (disk, mem in
 		mem += r.Limits.MemoryByte
 	}
 	return disk, mem
+}
+
+// sumVolumeCaps is the §5.C half of the FIRST term: Σ(volume caps). Volume caps are
+// like terms with sandbox caps — both are declared upper bounds — so they join the
+// same sum rather than getting a term of their own (§3.4).
+//
+// excludeID drops one volume's own committed cap, used by a cap RAISE for the same
+// reason resume excludes its own sandbox: the existing cap is already a committed
+// row, so counting it beside the requested value would charge the volume twice and
+// refuse a raise that only needs the delta.
+func sumVolumeCaps(vols []model.Volume, excludeID model.VolumeID) int64 {
+	var total int64
+	for _, v := range vols {
+		if v.ID == excludeID {
+			continue
+		}
+		total += v.CapByte
+	}
+	return total
+}
+
+// committedDisk is the FIRST term in full: sandbox caps + volume caps, read from the
+// authoritative store. One function so no caller can accidentally sum only half of
+// it — omitting the volume half is a silent overcommit, not a rounding error (§3.4).
+func (m *Mediator) committedDisk(ctx context.Context, excludeSandbox model.SandboxID, excludeVolume model.VolumeID) (int64, error) {
+	recs, err := m.deps.Store.ListSandboxes(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("admission: list sandboxes: %w", err)
+	}
+	sandboxDisk, _ := sumCommitted(recs, excludeSandbox)
+	vols, err := m.deps.Store.ListVolumes(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("admission: list volumes: %w", err)
+	}
+	return sandboxDisk + sumVolumeCaps(vols, excludeVolume), nil
+}
+
+// uncappedBytes is the SECOND term in full: both subsystems' bytes under no declared
+// cap (§3.4 — the term sums across §5.B and §5.C, each answering about its own
+// storage through the same-shaped seam method).
+//
+// FAILS CLOSED on either side, including a missing volume backend. An unmeasurable
+// half means the inequality cannot be evaluated, and admitting on an unknown total is
+// how a node gets overcommitted; the cost of failing closed is a rejected create,
+// while the cost of failing open lands as ENOSPC on unrelated sandboxes (§2.3).
+func (m *Mediator) uncappedBytes(ctx context.Context) (int64, error) {
+	total, err := m.deps.Rootfs.UncappedBytes(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("cannot measure uncapped rootfs bytes: %w", err)
+	}
+	if m.deps.Volume == nil {
+		// Not "no volumes" — unknown. With the disk axis metered, a nil backend means
+		// every volume's bytes are invisible to this term, which is precisely the
+		// silent-overcommit shape the term exists to prevent.
+		return 0, fmt.Errorf("no volume backend registered, so §5.C's share of the uncapped term cannot be measured (§3.4)")
+	}
+	volBytes, err := m.deps.Volume.UncappedBytes(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("cannot measure uncapped volume bytes: %w", err)
+	}
+	return total + volBytes, nil
+}
+
+// admitVolume gates a NEW volume cap against the disk budget (§3.4 / §5.C). It is
+// the volume-shaped sibling of `admit`, deliberately not a call into it — see the
+// header for why routing a volume through `admit` would demand a memory cap from an
+// object that has no Binding.
+//
+// A METERED DISK AXIS REQUIRES A VOLUME CAP, for the reason §3.4 gives verbatim for
+// sandboxes: an uncapped volume contributes 0 to the left side while free to consume
+// all of the right, which does not undercount so much as make the inequality describe
+// a different device. So `size` is REQUIRED (400) while disk is metered, and
+// `0 = uncapped` stays legal only on an unmetered axis.
+//
+// The caller holds admitMu across {gate → make the promise visible}, exactly as
+// create does.
+func (m *Mediator) admitVolume(ctx context.Context, capBytes int64) error {
+	capDisk := m.deps.NodeCapacity.DiskByte
+	if capDisk <= 0 {
+		return nil // disk unmetered → this inequality does not describe this node
+	}
+	if capBytes <= 0 {
+		return fmt.Errorf("admission: %w: volume size — the node meters disk, so an uncapped volume would contribute nothing to the budget while free to consume all of it (§3.4 / §5.C)", ErrCapRequired)
+	}
+	committed, err := m.committedDisk(ctx, "", "")
+	if err != nil {
+		return err
+	}
+	uncapped, err := m.uncappedBytes(ctx)
+	if err != nil {
+		return fmt.Errorf("admission: %w: %v", ErrInsufficientCapacity, err)
+	}
+	pending := m.pendingUncapped()
+	if total := committed + uncapped + pending + capBytes; total > capDisk {
+		return fmt.Errorf("admission: %w: volume — committed caps %d + uncapped bytes %d + in-flight %d + requested %d = %d > node capacity %d",
+			ErrInsufficientCapacity, committed, uncapped, pending, capBytes, total, capDisk)
+	}
+	return nil
+}
+
+// admitVolumeRaise gates a cap RAISE on an existing volume (§6.1 PATCH: "raising
+// re-clears admission", §3.4: any write to a cap changes Σ at THIS commit rather
+// than at some later placement).
+//
+// The volume's own committed cap is EXCLUDED, so the check is against the increase
+// rather than double-charging a promise the node has already accepted — the same
+// exclusion resume applies to a sandbox's own caps.
+func (m *Mediator) admitVolumeRaise(ctx context.Context, id model.VolumeID, capBytes int64) error {
+	capDisk := m.deps.NodeCapacity.DiskByte
+	if capDisk <= 0 {
+		return nil
+	}
+	committed, err := m.committedDisk(ctx, "", id)
+	if err != nil {
+		return err
+	}
+	uncapped, err := m.uncappedBytes(ctx)
+	if err != nil {
+		return fmt.Errorf("admission: %w: %v", ErrInsufficientCapacity, err)
+	}
+	pending := m.pendingUncapped()
+	if total := committed + uncapped + pending + capBytes; total > capDisk {
+		return fmt.Errorf("admission: %w: volume cap raise — committed caps %d + uncapped bytes %d + in-flight %d + requested %d = %d > node capacity %d",
+			ErrInsufficientCapacity, committed, uncapped, pending, capBytes, total, capDisk)
+	}
+	return nil
 }
 
 // admit checks whether granting `want` keeps the node within its declared
@@ -213,20 +353,28 @@ func (m *Mediator) admit(ctx context.Context, want model.Limits, excludeID model
 	// (no container, no memcg) — but we still count it, because admitting new RAM
 	// against memory that a paused sandbox is entitled to reclaim on resume is
 	// exactly the oversubscription this gate exists to prevent.
-	committedDisk, committedMem := sumCommitted(recs, excludeID)
+	_, committedMem := sumCommitted(recs, excludeID)
 
 	if cap.DiskByte > 0 {
+		// The disk half of the first term sums BOTH subsystems: sandbox caps AND volume
+		// caps (§3.4). They are like terms, so they share one sum — and leaving the
+		// volume half out would let a pile of volumes overcommit the node while every
+		// sandbox cap stayed individually honored.
+		committedDisk, err := m.committedDisk(ctx, excludeID, "")
+		if err != nil {
+			return err
+		}
 		// The term the caps cannot express (D6.2): bytes under no declared cap —
-		// Template/layer dirs, and any uncapped Overlay unit. The provider measures
-		// its own storage; the mediator asks, the provider answers (§5.B, the same
-		// shape as SweepOrphanLayers).
-		uncapped, err := m.deps.Rootfs.UncappedBytes(ctx)
+		// Template/layer dirs, any uncapped Overlay unit, and any uncapped VOLUME. Each
+		// subsystem measures its own storage; the mediator asks, the subsystem answers
+		// (§5.B/§5.C, the same shape as SweepOrphanLayers).
+		uncapped, err := m.uncappedBytes(ctx)
 		if err != nil {
 			// Refuse rather than admit blind: an unmeasurable backend means the
 			// inequality cannot be evaluated, and admitting on an unknown total is how
 			// a node gets overcommitted. Failing closed costs a rejected create;
 			// failing open costs write failures across unrelated sandboxes (§2.3).
-			return fmt.Errorf("admission: %w: cannot measure uncapped bytes: %v", ErrInsufficientCapacity, err)
+			return fmt.Errorf("admission: %w: %v", ErrInsufficientCapacity, err)
 		}
 		// In-flight uncapped growth counts too (pendingUncappedBytes): a Promote that
 		// has cleared its own gate and is mid-copy owns those bytes even though

@@ -117,6 +117,7 @@ func TestPromoteRowInsertFailureLeavesNoBrokenReadyRow(t *testing.T) {
 	rp := &fakeRootfs{}
 	m := New(Deps{
 		Store: &rowInsertFailingStore{Store: st}, Runtime: &fakeRuntime{}, Rootfs: rp,
+		Volume:        newFakeVolume(),
 		Dial:          func(transport.Endpoint) transport.Client { return &fakeClient{healthy: true} },
 		HealthTimeout: time.Second,
 	})
@@ -195,6 +196,7 @@ func TestAdoptDemotesL1AliveButNotServingWithoutInventingADeathCause(t *testing.
 	}
 	m := New(Deps{
 		Store: st, Runtime: rt, Rootfs: &fakeRootfs{},
+		Volume:        newFakeVolume(),
 		Dial:          func(transport.Endpoint) transport.Client { return &fakeClient{healthy: false} },
 		HealthTimeout: time.Second,
 	})

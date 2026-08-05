@@ -57,6 +57,7 @@ func TestReconcileDualDispatch(t *testing.T) {
 	}}
 	m := New(Deps{
 		Store: st, Runtime: rt, Rootfs: rp,
+		Volume:        newFakeVolume(),
 		Dial:          func(transport.Endpoint) transport.Client { return &fakeClient{healthy: true} },
 		HealthTimeout: time.Second,
 	})
@@ -121,6 +122,7 @@ func TestReconcileDemoteEmitsEvent(t *testing.T) {
 	rt := &fakeRuntime{adoptAlive: map[string]bool{"run_dead": false}}
 	m := New(Deps{
 		Store: st, Runtime: rt, Rootfs: &fakeRootfs{},
+		Volume:        newFakeVolume(),
 		Dial:          func(transport.Endpoint) transport.Client { return &fakeClient{healthy: true} },
 		HealthTimeout: time.Second,
 	})
@@ -157,6 +159,7 @@ func TestReconcileSkipAndLogOnUncertainSurvivor(t *testing.T) {
 	var logs []string
 	m := New(Deps{
 		Store: st, Runtime: rt, Rootfs: &fakeRootfs{},
+		Volume:        newFakeVolume(),
 		Dial:          func(transport.Endpoint) transport.Client { return &fakeClient{healthy: true} },
 		HealthTimeout: time.Second,
 		Logf:          func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) },
@@ -208,6 +211,7 @@ func TestPeriodicReconcileProtectsLiveSurvivor(t *testing.T) {
 	rt := &fakeRuntime{adoptAlive: map[string]bool{}}
 	m := New(Deps{
 		Store: st, Runtime: rt, Rootfs: &fakeRootfs{},
+		Volume:        newFakeVolume(),
 		Dial:          func(transport.Endpoint) transport.Client { return &fakeClient{healthy: true} },
 		HealthTimeout: time.Second,
 	})
@@ -260,6 +264,7 @@ func TestPeriodicReconcileProtectsLiveHandleMissingFromTheSnapshot(t *testing.T)
 	rt := &fakeRuntime{adoptAlive: map[string]bool{}}
 	m := New(Deps{
 		Store: st, Runtime: rt, Rootfs: &fakeRootfs{},
+		Volume:        newFakeVolume(),
 		Dial:          func(transport.Endpoint) transport.Client { return &fakeClient{healthy: true} },
 		HealthTimeout: time.Second,
 	})
@@ -286,6 +291,7 @@ func TestPeriodicReconcileSkipsLockedSandbox(t *testing.T) {
 	rt := &fakeRuntime{adoptAlive: map[string]bool{}}
 	m := New(Deps{
 		Store: st, Runtime: rt, Rootfs: &fakeRootfs{},
+		Volume:        newFakeVolume(),
 		Dial:          func(transport.Endpoint) transport.Client { return &fakeClient{healthy: true} },
 		HealthTimeout: time.Second,
 	})
@@ -343,6 +349,7 @@ func TestPeriodicReconcileSkipsInFlightCreate(t *testing.T) {
 	rt := &fakeRuntime{launchGate: gate, adoptAlive: map[string]bool{}}
 	m := New(Deps{
 		Store: st, Runtime: rt, Rootfs: rp,
+		Volume:        newFakeVolume(),
 		Dial:          func(transport.Endpoint) transport.Client { return &fakeClient{healthy: true} },
 		HealthTimeout: time.Second,
 	})
@@ -407,6 +414,7 @@ func TestPeriodicReconcileSkipsInFlightResume(t *testing.T) {
 	rt := &fakeRuntime{launchGate: gate, adoptAlive: map[string]bool{}}
 	m := New(Deps{
 		Store: st, Runtime: rt, Rootfs: rp,
+		Volume:        newFakeVolume(),
 		Dial:          func(transport.Endpoint) transport.Client { return &fakeClient{healthy: true} },
 		HealthTimeout: time.Second,
 	})
@@ -469,6 +477,7 @@ func TestReconcileIdempotent(t *testing.T) {
 	rt := &fakeRuntime{adoptAlive: map[string]bool{"run_alive": true, "run_dead": false}}
 	m := New(Deps{
 		Store: st, Runtime: rt, Rootfs: &fakeRootfs{},
+		Volume:        newFakeVolume(),
 		Dial:          func(transport.Endpoint) transport.Client { return &fakeClient{healthy: true} },
 		HealthTimeout: time.Second,
 	})

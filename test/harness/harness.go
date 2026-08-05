@@ -215,6 +215,15 @@ func Engine(t *testing.T, opts EngineOpts) (*orchestrator.Engine, string) {
 	if err := eng.SeedTemplates(ctx); err != nil {
 		t.Fatalf("seed builtin templates: %v", err)
 	}
+	// Production parity, and it matters more than parity usually does: the
+	// orphan-VOLUME sweep runs BEFORE anything can create a storage unit (§5.C /
+	// volume.md D7.1). A leaked quota row reserves no unit id, so a restart can hand
+	// that id — along with its cap — to a brand-new volume. Running it here means the
+	// substrate suites exercise the same ordering production boots with, rather than a
+	// convenient one.
+	if err := eng.SweepOrphanVolumes(ctx); err != nil {
+		t.Logf("boot orphan-volume sweep (non-fatal, reaper retries): %v", err)
+	}
 	if !opts.SkipReconcile {
 		// production parity: reconcile runs at boot. On a fresh store it is a no-op,
 		// which also asserts the §4.4-A path never disturbs a clean start.

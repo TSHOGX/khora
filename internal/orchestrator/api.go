@@ -80,6 +80,11 @@ func (e *Engine) HTTPHandler() http.Handler {
 	// DELETE /v1/templates/{id} (referenced → 409 template in use, §4.3).
 	mux.HandleFunc("/v1/templates/", e.handleTemplateSub)
 
+	// --- Volume lifecycle: §6.1 REST/JSON (§5.C, decoupled from every sandbox) ---
+	// create/list/inspect/patch/delete + the two direct content endpoints, which
+	// need no sandbox at all (see volumes.go).
+	e.registerVolumeRoutes(mux)
+
 	// h2c so Connect server-streams work over cleartext HTTP/2 (D4.2).
 	return h2c.NewHandler(mux, &http2.Server{})
 }
@@ -532,6 +537,12 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 }
 
 func statusFor(w http.ResponseWriter, err error) {
+	// The §5.C Volume verdicts first: they are 400s that would otherwise be caught by
+	// a broader arm below and reported as something the caller could retry.
+	if code, ok := volumeStatus(err); ok {
+		http.Error(w, err.Error(), code)
+		return
+	}
 	switch {
 	case errors.Is(err, lifecycle.ErrCapRequired):
 		// §3.4: the node meters this axis, so a cap is required. 400, NOT 507 —
@@ -550,7 +561,13 @@ func statusFor(w http.ResponseWriter, err error) {
 		// §4.3 resource-terminated: a state conflict the caller resolves by raising
 		// the cap or destroying the sandbox — 409, never a raw 500.
 		http.Error(w, err.Error(), http.StatusConflict)
-	case errors.Is(err, store.ErrNotFound), errors.Is(err, store.ErrTemplateNotFound):
+	case errors.Is(err, store.ErrNotFound), errors.Is(err, store.ErrTemplateNotFound),
+		errors.Is(err, store.ErrVolumeNotFound):
+		// Volume not-found has its own sentinel so the 404 names the right object; a
+		// 404 mentioning the wrong one sends the caller looking in the wrong place.
+		// Note it is NOT folded into success on delete (§6.2): the reference-protection
+		// refusals arrive on that same path, and a delete that swallows not-found
+		// would swallow those too.
 		http.Error(w, err.Error(), http.StatusNotFound)
 	case errors.Is(err, store.ErrInUse):
 		// §4.3 reference protection: a referenced Template cannot be deleted →

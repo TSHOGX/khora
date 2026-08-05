@@ -43,6 +43,7 @@ func newLineageMediator(t *testing.T, rp *fakeRootfs) (*Mediator, *store.Memory)
 	seedLineage(t, st)
 	m := New(Deps{
 		Store: st, Runtime: &fakeRuntime{}, Rootfs: rp,
+		Volume:        newFakeVolume(),
 		Dial:          func(transport.Endpoint) transport.Client { return &fakeClient{healthy: true} },
 		HealthTimeout: 500 * time.Millisecond,
 	})
@@ -124,6 +125,7 @@ func TestCreateRefusesBrokenLineage(t *testing.T) {
 		// "mid" becomes unreadable, so resolving leaf→mid→base breaks partway.
 		Store:   &brokenLineageStore{Store: mem, missing: "mid"},
 		Runtime: &fakeRuntime{}, Rootfs: rp,
+		Volume:        newFakeVolume(),
 		Dial:          func(transport.Endpoint) transport.Client { return &fakeClient{healthy: true} },
 		HealthTimeout: 500 * time.Millisecond,
 	})

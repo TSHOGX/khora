@@ -20,6 +20,7 @@ import (
 	"engine/internal/runtime"
 	"engine/internal/store"
 	"engine/internal/transport"
+	"engine/internal/volume"
 )
 
 // Config is the orchestrator's local configuration (§1.1 one config).
@@ -53,6 +54,12 @@ type Config struct {
 	// (reaper-health D5). Zero → NewReaper's conservative defaults.
 	SweepInterval       time.Duration
 	TransportDownBudget time.Duration
+
+	// VolumesDir holds §5.C volume storage, one unit per volume. Empty →
+	// StateDir/volumes, a SIBLING of the overlay state root rather than nested inside
+	// it: each subsystem's orphan sweep enumerates its own root, so nesting would put
+	// one subsystem's units inside the other's enumeration.
+	VolumesDir string
 
 	// NodeDiskByte / NodeMemoryByte are the §3.4 no-oversubscribe budgets the
 	// admission gate admits against (§1.1 one config). Zero leaves that axis
@@ -97,6 +104,17 @@ func New(cfg Config) (*Engine, error) {
 	}
 	rt.Sudo = cfg.Sudo
 
+	// §5.C volume backend. The local arm is the default; registering a different one
+	// is a §1.3 registration, not an edit to the callers above.
+	volumesDir := cfg.VolumesDir
+	if volumesDir == "" {
+		volumesDir = cfg.StateDir + "/volumes"
+	}
+	vb, err := volume.NewLocalBtrfs(volumesDir)
+	if err != nil {
+		return nil, err
+	}
+
 	// persistent store (ADR-0004) — register-an-implementation swap from Memory,
 	// no caller change (§1.3). This durability is what CREATES the §4.4-A
 	// reconciliation need the mediator's Reconcile answers.
@@ -113,6 +131,7 @@ func New(cfg Config) (*Engine, error) {
 		Store:               st,
 		Runtime:             rt,
 		Rootfs:              rp,
+		Volume:              vb,
 		Dial:                transport.Dial,
 		HealthTimeout:       cfg.HealthTimeout,
 		DrainGrace:          cfg.DrainGrace,
@@ -163,4 +182,18 @@ func (e *Engine) SweepOrphanOverlays(ctx context.Context) error {
 // crashed Promote's staging layer is reclaimed; the reaper repeats it per tick.
 func (e *Engine) SweepOrphanLayers(ctx context.Context) error {
 	return e.Mediator.SweepOrphanLayers(ctx)
+}
+
+// SweepOrphanVolumes runs the §5.C / §4.4-A orphan-volume sweep (reclaim volume
+// storage backing no `volumes` row).
+//
+// ITS POSITION IN THE BOOT SEQUENCE IS LOAD-BEARING, not housekeeping: it must run
+// BEFORE any storage unit is created. A leaked quota row does not reserve its own
+// unit id, so a restart can hand that id — ALONG WITH ITS CAP — to a brand-new
+// volume, which then meets ENOSPC on a limit nobody set for it (or is silently
+// over-provisioned), and the engine cannot tell the difference from the inside.
+// Leaving it to the periodic tick would leave a window in which exactly that
+// inheritance happens (§5.C / volume.md D7.1).
+func (e *Engine) SweepOrphanVolumes(ctx context.Context) error {
+	return e.Mediator.SweepOrphanVolumes(ctx)
 }

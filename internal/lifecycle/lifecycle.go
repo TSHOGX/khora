@@ -26,6 +26,7 @@ import (
 	"engine/internal/runtime"
 	"engine/internal/store"
 	"engine/internal/transport"
+	"engine/internal/volume"
 )
 
 // ErrResourceTerminated is the §4.3 resource-terminated verdict surfaced as a
@@ -69,6 +70,15 @@ type Deps struct {
 	Store   store.Store
 	Runtime runtime.Provider
 	Rootfs  rootfs.Provider
+	// Volume is the §5.C backend (volume.Backend). REQUIRED whenever the disk axis
+	// is metered, and required in practice: the §3.4 disk inequality sums BOTH
+	// subsystems' uncapped bytes, so a nil backend would make the gate blind to every
+	// volume's bytes — and a pile of uncapped volumes could then fill the node
+	// without the gate refusing once. admitVolume therefore fails CLOSED on a nil
+	// backend rather than treating it as "no volumes", which is the same choice the
+	// gate makes for an unmeasurable provider (§2.3: failing open moves the cost onto
+	// unrelated sandboxes).
+	Volume volume.Backend
 	// Dial builds a stateless transport client for a discovered endpoint
 	// (§5.E: constructed per endpoint, discarded on resume).
 	//
@@ -188,6 +198,15 @@ type Mediator struct {
 	// no live row, indistinguishable from an orphan. Guarded by mu.
 	buildingOverlays map[model.OverlayID]bool
 
+	// buildingVolumes is the in-flight-create keep-set for volume storage (§5.C).
+	// It is MORE necessary than its two siblings rather than a third copy of the same
+	// idea: an Overlay's row is inserted BEFORE its unit is allocated, so there
+	// `building` only guards a stale keep-set snapshot — while volume creation is
+	// BYTES-FIRST (the ID must name the storage before any row can exist), so a
+	// perfectly healthy in-flight create presents as "bytes, no row" even to a
+	// completely fresh snapshot. Guarded by mu.
+	buildingVolumes map[model.VolumeID]bool
+
 	// pendingUncappedBytes is in-flight growth of the §3.4 accounting formula's
 	// MEASURED term: bytes a gated control-plane action has been admitted to add
 	// but that the provider's measurement cannot see yet (a Promote mid-copy). The
@@ -251,6 +270,7 @@ func New(deps Deps) *Mediator {
 		live:             make(map[model.SandboxID]*liveState),
 		buildingLayers:   make(map[model.TemplateID]bool),
 		buildingOverlays: make(map[model.OverlayID]bool),
+		buildingVolumes:  make(map[model.VolumeID]bool),
 	}
 }
 

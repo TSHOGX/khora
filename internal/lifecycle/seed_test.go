@@ -19,6 +19,7 @@ func newSeedMediator(t *testing.T, builtins ...string) (*Mediator, *store.Memory
 	rp := &fakeRootfs{builtins: builtins}
 	m := New(Deps{
 		Store: st, Runtime: &fakeRuntime{}, Rootfs: rp,
+		Volume:        newFakeVolume(),
 		Dial:          func(transport.Endpoint) transport.Client { return &fakeClient{healthy: true} },
 		HealthTimeout: 500 * time.Millisecond,
 	})
