@@ -168,14 +168,23 @@ seam 沿用 §5.A `runtime.Provider` / §5.B `rootfs.Provider` 的既定约定:*
   - **它不是 `Materialize` 的替代**:那一条要交给 runsc 一个可 bind 的宿主路径,这一条只在引擎进程内读写
     字节。两个消费者不同(`local_runsc` vs orchestrator 的 import/export 端点),故是两个方法。
 - `Name()` —— backend 标识(注册/诊断用)。
-- `SweepOrphanVolumes(live, building) → int` —— 孤儿卷字节 sweep。形状同所有反向对账:mediator 读**权威
-  store** 算出 live 集喂进来,backend 只枚举自己的卷、删差集(§4 子系统不读 store)。**它的孪生是
-  `SweepOrphanOverlays`,不是 `SweepOrphanLayers`**——两个 sweep 回收的东西结构不同:layer 是被 lineage
-  与 refcount **共享**的只读底座(判据是"还有没有行引用它"),而 Volume 和 Overlay 单元都是**自足的存储
-  单元**(判据是"这个单元自己还有没有活的拥有者")。Volume 是后者:一个卷就是一个独立单元,故按单元 sweep。
-  **中途失败是继续、不是中止**(它是尽力回收路径,一个单元卡住不该让其余全部留着),并返回已回收数;
-  安全要求(枚举形状、独立于 FK 的活挂载检查、出错即跳过)在 §5.C,回收程序在 D7。
-  - **`building` 在这里比 Overlay 那侧更必要**:Overlay 那边它只防**过期 keep-set**(行先插),而**卷的
+- `ListUnitIDs(ctx) → []string` —— **只枚举,不判定**。backend 报出它自己存储根下的全部存储单元 id;
+  "哪些是孤儿"由 mediator 判定、并逐个 `DestroyVolume`。**这个切法是实测逼出来的,不是风格选择**:
+  原本的形状是 `SweepOrphanVolumes(live, building)`(镜像 `SweepOrphanOverlays`,mediator 算两个集合喂进来、
+  backend 删差集),而它**会删掉已提交卷的字节**——mediator 分两次读 `live` 与 `building`,一个**整个创建
+  过程**落在两次读之间的卷两个集合都不在,backend 于是删了一个完整提交的卷。**实测:458 次并发 sweep 下
+  6 个快照被删了 3 个;改成本形状后 913 次 sweep / 6 个快照,零误回收。**
+  - **它靠次序闭合窗口,不靠加锁**:每个候选的字节都早于全部检查;而一个已不在在飞集合里的候选,其行
+    **必然已经插完**(标记只在插入之后才摘),故随后一次 per-candidate 的 store 读一定看得见它。不引新锁、
+    不在锁内调 store。
+  - **Overlay 侧故意保持合并形状**:那边的行**先于**单元插入,暴露的只有快照 skew,其注释把这段残留记为
+    可接受;**卷是 bytes-first,暴露的是整个创建过程**——同一个形状,风险量级不同。两侧留了交叉引用。
+  - 判定归 mediator 之后,§5.C 那三条安全要求(独立于 FK 的活挂载检查、跳过出现在**任何**挂载行里的单元、
+    读失败即跳过)**本来就是 mediator 侧的事实**,落在它那里而非 backend 里。
+  - **中途失败是继续、不是中止**(尽力回收路径,一个单元卡住不该让其余全部留着)。
+  - **为何按单元而非按引用**:layer 是被 lineage 与 refcount **共享**的只读底座(判据是"还有没有行引用
+    它"),而 Volume 和 Overlay 单元都是**自足的存储单元**(判据是"这个单元自己还有没有活的拥有者")。
+  - **在飞集合在这里比 Overlay 那侧更必要**:Overlay 那边它只防**过期 keep-set**(行先插),而**卷的
     创建是 bytes-first**(ID 必须先命名那个单元),故一次健康的在飞创建**即便 keep-set 是新鲜的**也表现为
     "有字节、无行";`Snapshot`/`Clone` 又是同一窗口的另两个生产者。
 - `Capabilities() → {Snapshot, Clone, Quota}` —— **per-backend 能力查询**(D6):local(btrfs)报支持
@@ -208,9 +217,11 @@ seam 沿用 §5.A `runtime.Provider` / §5.B `rootfs.Provider` 的既定约定:*
     匹配,对新增的每条 FK 路径**两个方向**都为真(缺父插入 / RESTRICT 删除,三条 FK 共六向),对唯一违反
     为假。**但沙箱侧的翻译点今天不存在**——删沙箱的实现没有 FK 分支,RESTRICT 会以裸驱动错误冒到 API 的
     `default` 分支变成 **500 而不是 409**。且既有的 `ErrInUse` 文案字面写着 "template in use",被挂载行
-    挡住的沙箱删除会返回一个说错对象的 409。故形状是**每个结局一个 sentinel**(§6.2 的四个 409 = 三条
-    RESTRICT + 租约唯一违反),不是复用一个。Memory 后端更要**新写**沙箱侧与卷侧两处引用扫描 + 契约用例
-    (既有契约清单里没有任何挂载形状的断言)。
+    挡住的沙箱删除会返回一个说错对象的 409。故形状是**每个结局一个 sentinel**——三条 RESTRICT
+    (`mounts.volume` / `mounts.sandbox` / `volumes.parent`)+ 租约唯一违反 = **四个 sentinel**,加上写入
+    regime 那条共**五个**,映射到 §6.2 的**四个结局类别**(② 有卷侧与沙箱侧两侧,计一类;计数计的是调用方
+    要分辨的语义种类,不是错误值个数)。不是复用一个。Memory 后端更要**新写**沙箱侧与卷侧两处引用扫描 +
+    契约用例(既有契约清单里没有任何挂载形状的断言)。
   - **删除次序是必需的,不是风格选择**(实测):RESTRICT **立即**生效,把两条删除包进一个事务**买不到**
     次序无关性,故必须先删挂载行、再删沙箱。**`defer_foreign_keys` 是个陷阱,实测拒绝它**:它确实让次序
     无关,但违反在 `Commit()` 才浮现,而 Go 的 `Tx.Commit()` 返错时 SQLite **并未回滚** —— 在被钉死的单
@@ -235,7 +246,7 @@ seam 沿用 §5.A `runtime.Provider` / §5.B `rootfs.Provider` 的既定约定:*
 | `resumeLocked` | 从 store **读回**挂载表(挂载行跨 pause 持久)、重新 `Materialize`——与 `resolveLower` 每次重解析血缘同理,卷是同一真身、拿新的宿主物化 |
 | `pauseLocked` | CAS 后:`Backend.Release` 每个卷(**挂载行保留**,租约不释放),对称于 Overlay「零捕获」 |
 | `destroyLocked` | 卸载活卷 → **先删挂载行、再 `DeleteSandbox`**(否则 `mounts.sandbox` FK 挡住沙箱删除);这是租约释放点 |
-| 启动/周期对账 | `SweepOrphanVolumes` 镜像 `SweepOrphanOverlays`(按存储单元回收,见 D2);`SeedBuiltinVolumes`(若有平台预置卷)镜像 `SeedBuiltinTemplates` |
+| 启动/周期对账 | mediator 侧 `SweepOrphanVolumes`:`Backend.ListUnitIDs` 枚举 → mediator 判定 → 逐个 `DestroyVolume`(**不**镜像 `SweepOrphanOverlays` 的合并形状,理由与实测见 D2);`SeedBuiltinVolumes`(若有平台预置卷)镜像 `SeedBuiltinTemplates` |
 
 **唯一的新不变量:独占租约**(规范陈述在 §5.C:至多一条 `exclusive` 行,且它不与该卷任何其他挂载行并存)。
 这是 Volume 引入的唯一一条新 store 断言。**两个读起来自然、实测都不成立的陈述**,各值一条证伪:

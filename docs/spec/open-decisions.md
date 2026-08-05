@@ -25,6 +25,7 @@
 | **§5.D egress 数据面 seam + 两条契约** | 引擎自有 egress 数据面(gateway,行为 seam)与两条传输无关薄契约的**精确签名**:① **resolve 契约**(数据面↔resolver:alias+目标上下文 → directives+过期+version 戳 + 失效信号)② **ingress 契约**(数据面↔引流:抽象描述符 + 双向劫持能力协商)。行为的两种强制模式(builtin 内联求值 / 外部编译下发)对接口要求不同 | **详见 [`deep-dives/network.md`](./deep-dives/network.md) D3/D7**,本表不复制。今天只建接口形状 + builtin 单实现(模式 1),registry plumbing 缓(D6);谁消费:§5.D 数据面 + 未来远端 provider |
 | **§5.D 凭证注入模式** | builtin 首版支持哪些注入模式、各自约束 | **别过早钉 MITM 为唯一路径**;MITM 选中才需 guest 信任注入(CA 证书进 guest、私钥留数据面),落 §5.B 模板 / §5.E.1。**详见 [`deep-dives/network.md`](./deep-dives/network.md) D9**,本表不复制 |
 | **§2.4 / §5.D egress deny-set 分层** | 三条 invariant 在 §2.3/§2.4(推理见 [`deep-dives/network.md`](./deep-dives/network.md) D5.3–D5.6)。**待细化的细粒度**:① L0 地板精确清单(orchestrator 自身端点 / sibling 网段如何在 placement 时算出;link-local/loopback 已定)② 内网 deny-safe 放行的 NetworkPolicy 语法 ③ fail-closed 是否发 §4.1 压力/审计事件(倾向发) | 谁消费:§5.A steering 物化 + §5.D 数据面 dial 逻辑 + placement;L0 清单是引擎资产、两跳共用一份 |
+| **§2.4 / §5.D L0 地板怎么挣到(机制)+ deny-set 住哪** | **明确推迟到 M8 一并决定**,不在 M7 收口回合内拍。已定的是**问题**与四条实测事实(见下方"M8 必须带上的实测"),未定的是机制:宿主端 veth / `netdev` 钩子的 `iif` 谓词、是否加 cap 收窄、是否夹 host forwarding,以及那份 placement 派生的 L0 清单**住在哪**(候选:mediator 按既有 keep-set 形状算出后分发给两跳——leaf 包不合适,因为 leaf 是给**静态**共享事实的,而这份清单要在运行时被写) | 谁消费:M8。**推迟的代价是明写的**:在 M8 落地前 §2.3 的 sibling-不可达与 §2.4 三条 invariant **都不成立**,见 §4 实现缺口 |
 | **§5.A provider 接口(远端形态入参)** | **待细化的是远端形态的入参形状**:`RootfsSource`(本地 `MergedPath` vs 远端句柄)、`SteeringSpec`(egress 引流描述符)、`ResourceLimits` 在非 cgroup 调度层的等价物——用"被调度的远端隔离单元"作纸面参照反推,**不实现任何远端 provider** | 谁消费:未来远端 provider |
 | **§5.B Overlay 物化** | 待细化:pause flush 一致点的**应用层协作安全点**、content-addressed diff 层、multi-node 经 rootfs provider 跨 node 寻址 | **详见 [`deep-dives/rootfs-overlay.md`](./deep-dives/rootfs-overlay.md) D5**,本表不复制。**Promote excluded-paths 里的 Volume 挂载点已定**:空占位默认就有、排除项只用来剪被遮蔽的子树,清单成为 **per-Promote 入参**、剪叶子接受空中间链(同文 D5) |
 | **§5.C per-volume 容量帽在 remote 后端的物化** | local 臂是 subvolume + squota(§5.B/§5.C 共享原语)。**待细化的是 remote 后端**:一个对象存储 / 网络 FS backend 用什么手段兑现"这个卷最多多大"(后端配额 API / 客户端侧核算),以及它与 `Capabilities()` 的关系 | 封在该 backend 内(volume.md D1/D7),不进核心;谁消费:未来 remote volume backend |
@@ -40,7 +41,29 @@
 
 ## 4. 实现缺口(设计已定,代码未落地 / 待收口)
 
-> 无。
+| 缺口 | 现状 | owning plan |
+| --- | --- | --- |
+| **§5.D 网络策略强制(支柱③ 的 enforcement)** | **设计已定(§2.4 三条 invariant / §5.D / network.md),代码一行未落**:无 `internal/network` 包,无 nft / TPROXY / deny-set。今天 `local_runsc` 只建 netns + veth + 两个 `/30`,**egress 不被强制**——沙箱当前到不了外网/兄弟/link-local,**仅因为没有默认路由**,而 guest root 持 `CAP_NET_ADMIN`、宿主 `ip_forward=1`,故一条 `ip route add default` 即可达宿主 LAN 与兄弟沙箱 IP(实测)。§2.4 三条 invariant 今天**无一成立**;宿主 loopback 与 orchestrator 控制面是被 `127.0.0.1` bind + `route_localnet=0` **偶然**覆盖的,不是被强制。**连带**:`GET /v1/sandboxes/{id}/network` / `POST …/publish` 两个端点 404,`POST /v1/sandboxes` 的 `network?` 键被静默丢弃(未知键)。**L0 地板怎么挣到、deny-set 住哪**两项是设计决策,见 §2 对应行 | **M8**(`docs/plans/M8-network.md`,待建) |
+
+> **为何登记在此而非留白**:本表的作用正是回答"哪些已定但还不真"。§5.D 是最大的未建面、且是安全关键面,
+> 而 `SPEC.md` §2.1③ / §2.4 是用**现在时**写的——一个只读 spec 的人会以为它已被强制。本行在 M8 落地后移除。
+>
+> **M8 必须带上的四条实测**(在 `sbx` 上量的,别重新发现一遍;它们已经改写了 network.md D5.5):
+>
+> 1. **点对点 `/30` veth 不隔离 sibling。** 两个真沙箱之间 **TCP 握手成功并读到载荷**——消除二层邻接不
+>    消除可达性,因为宿主在两段之间**路由**(`ip_forward=1`)。故 nft 地板是**强制**的,不是兜底;
+>    D5.5 原来的"(ii) 首选 / (i) 兜底"次序**是错的**,已改。
+> 2. **沙箱 netns 内的 nft 看不到 guest 报文。** gVisor netstack 经 L2(`fdbased`/`SOCK_RAW`)注入:
+>    5 个包在 netns `inet output`/`postrouting` 计数 **+0**、在 `netdev egress` **+5**、在**宿主侧**
+>    `prerouting` 全见。⇒ enforcement 挂宿主端 veth 或 `netdev` 钩子;**沙箱 netns 内的 TPROXY 不成立**。
+> 3. **`saddr` 谓词可被 guest 伪造,`iif` 谓词不可。** guest root 能给自己网卡加地址(`ip addr add`
+>    rc=0)从而绕过 `saddr` 规则(实测 3 个包命中"已绕过"计数器);`iif` 谓词在同一攻击下全数拦住。
+> 4. **逃逸需要两步、当前的"安全"是两个巧合。** `ip route add default via <host> dev <veth>`(**要带
+>    `dev`**,不带则 rc=0 但不通)+ 宿主侧 SNAT 存在,才真正出网;今天不通是"没有默认路由"**且**
+>    "没有 SNAT"两件事一起,不是任何一条强制。
+>
+> 另:`oci.go` 请求了 `CAP_NET_RAW` 而 guest 实际**拿不到**(runsc 默认掐掉),故 raw/AF_PACKET 伪造面
+> 当前是被一个**未声明的默认值**关住的——§5.A 已补上"钉死 `--net-raw=false` 并从请求列表移除该 cap"。
 
 ---
 

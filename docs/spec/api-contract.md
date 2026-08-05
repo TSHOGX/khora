@@ -28,9 +28,10 @@
 # Sandbox 生命周期
 POST   /v1/sandboxes                 {template_id, network?, volumes?, idle_timeout?, retention?,
                                       cpu_millis?, memory_byte?, disk_byte?}        → {sandbox_id}
+#   `network?` 是 M8 的入参,**今天尚未实现**(见下方 Network 块):现在传它会被静默忽略。
 #   资源上限三轴见 §3.4(Binding);按轴条件必填的规则见 §6.2。准入不足 → 507。
 #   `volumes` 每项 = {volume_id, path, access},`access` ∈ {exclusive, shared-ro, shared-rw} —— 它是
-#   **挂载行**的属性(§5.C),故在此给出而非在卷记录上。撞独占租约 → 409(§6.2 四个 409 之 ②)。
+#   **挂载行**的属性(§5.C),故在此给出而非在卷记录上。撞独占租约 → 409(§6.2 四个 409 之 ③)。
 GET    /v1/sandboxes/{id}                                     → {sandbox_id, state, death_cause?}
 #   只读生命周期态 + 死因(§4.3)。`death_cause` ∈ {`gone`, `resource-exceeded`, `unknown`},
 #   **未观测到死亡时该键不出现**(不是空串、不是 null):`CauseNone` 是"没有死因"而非一种死因,
@@ -51,6 +52,9 @@ PATCH  /v1/sandboxes/{id}            {cpu_millis?, memory_byte?, disk_byte?, idl
 #   **且租约已释放** —— 两件事不同步是设计事实,不是可以折叠成一个值的细节。attach 到 exclusive 已被占用
 #   的卷 → 409(§5.C 原子插入的 `RowsAffected()==0`)。
 #   对 `running` 改帽 → 409「先 pause」;抬上限重过准入门(可 507 / 400)。不发 §4.1 事件(非状态转换)。
+#   **`disk_byte` 的 `0 → N` 被拒(400)**:无帽沙箱的 upper 是普通目录树、其上没有可写的配额行,故这次
+#   写会声明一个每次 placement 都兑现不了的帽,而 §5.B 拒绝无帽运行 ⇒ 沙箱再也 resume 不起来。拒在写点
+#   (当场可见、零副作用),不拒在恢复路径(§3.4)。`N → 0` 撤帽与 `N → M` 改帽都合法。
 POST   /v1/sandboxes/{id}/pause
 POST   /v1/sandboxes/{id}/resume
 #   resource-terminated 的沙箱拒绝 resume → 409(§4.3;先 PATCH 抬帽)
@@ -101,7 +105,7 @@ PATCH  /v1/volumes/{id}              {size?}                                    
 #   连帽本身都再也改不动,唯一出路是删 guest 的字节(§5.C / volume.md D7.3)。改帽不受写入 regime 管
 #   (动的是分配上界、不是字节),但**改 `access` 在活挂载下被禁**——那是另一条,见 §5.C。不发事件。
 DELETE /v1/volumes/{id}
-#   两种 409(§6.2 四个中的 ①③):有活挂载行 → 409(被引用);**有活快照/克隆(子代卷)→ 409**
+#   两种 409(§6.2 四个中的 ①② 卷侧):有活挂载行 → 409(被引用);**有活快照/克隆(子代卷)→ 409**
 #   (lineage RESTRICT,与 Template 被子层引用同形)。两者是不同的对象关系,故 sentinel 与文案必须可区分。
 POST   /v1/volumes/{id}/snapshot     {size?}                                       → {volume_id}
 POST   /v1/volumes/{id}/clone        {size?}                                       → {volume_id}
@@ -117,8 +121,10 @@ GET    /v1/volumes/{id}/export       ?path=  (直连读出)
 #   谓词与 in-flight 标记的临界区要求见 §5.C)。字节流式,不整块缓冲。
 
 # Network(策略在 create 时绑定,改策略走 resume 边界;publish 是显式入站例外,可热加)
-GET    /v1/sandboxes/{id}/network
-POST   /v1/sandboxes/{id}/publish    {port, auth?}                                 → {url}
+# ⚠ 未建(M8):下面两条与 create 的 `network?` 键今天都不存在——两个端点 404,而 `network?` 作为未知键
+#   被 json 解码**静默丢弃**(调用方会以为策略已生效)。§5.D enforcement 的缺口登记在 open-decisions §4。
+GET    /v1/sandboxes/{id}/network                                              (M8,今日 404)
+POST   /v1/sandboxes/{id}/publish    {port, auth?}                → {url}      (M8,今日 404)
 ```
 
 > **为何 files 旁路走 REST 而不走 RPC:它的全部意义是流式。** 大文件不该变成一条 protobuf 消息、也不该在
@@ -168,10 +174,16 @@ client 从 `transport.proto` 经 `buf` 生成 stub、经 `orchestrator` 反代�
   → **400**;被引用的 Template 删除 → **409**;源态不合法的动词(如对 `running` 改帽、对非 `paused`
   沙箱 resume)→ **409**;未知 sandbox / template ID → **404**。
   **Volume 的四个 409 语义不同、须可区分**:① 删一个有活挂载行的卷(被引用,同 Template 那条);
-  ② 删一个有活子代卷的源(lineage RESTRICT,§5.C 快照);③ attach 撞独占租约(可重试的状态冲突);
-  ④ 有 live-rw 挂载时的直连变更(§5.C 写入 regime)。①②③在 store 侧是两类不同的约束违反
-  (FK-RESTRICT vs 唯一/谓词失配),故**翻译点要给各自的 sentinel**,不能共用一个"in use"文案——既有
-  `ErrInUse` 的文案写着 "template in use",复用它会返回一个说错对象的 409。
+  ② 删一个**被活挂载行挡住的对象**——它有**两侧**,卷侧(删有活子代卷的源,lineage RESTRICT,§5.C 快照)
+  与沙箱侧(删一个有活挂载行的沙箱,`mounts.sandbox` RESTRICT);③ attach 撞独占租约(可重试的状态冲突);
+  ④ 有 live-rw 挂载时的直连变更(§5.C 写入 regime)。
+  **四个是"结局类别"的计数,不是 sentinel 的计数**:② 的两侧是两条不同的 FK 路径、两个不同的对象关系,
+  故各有自己的 sentinel——**五个 sentinel 覆盖四个类别**。"四个不增加"约束的是**调用方要分辨的语义种类**,
+  不是实现里的错误值个数;新增一条 FK 路径若落在既有类别里,加 sentinel 不算增加类别。
+  ①②③在 store 侧是两类不同的约束违反(FK-RESTRICT vs 唯一/谓词失配),故**翻译点要给各自的 sentinel**,
+  不能共用一个"in use"文案——既有 `ErrInUse` 的文案写着 "template in use",复用它会返回一个说错对象的 409。
+  **另有一条不属于这四类**:源态不合法的动词(对 `running` 改帽、对非 `paused` 沙箱 resume、以及非法源态的
+  改绑定)本就按上文通则判 409,它是**动词的源态规则**、不是 Volume 的引用关系,故不进这个枚举。
   **幂等删除不得吞掉这些 409**:它们是 RESTRICT 触发的**全部**对外信号,若落进"不存在也返成功"的分支,
   守卫失败的删除就与成功的删除不可区分(一个外部实现正是这样:卷不存在返 `200 {"deleted": true}`,
   快照删除把三种 not-found 全折成成功)。

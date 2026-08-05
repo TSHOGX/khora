@@ -140,8 +140,16 @@ reflink 来补分层,那其实又滑回上面的 overlayfs 底层存储附带能
   (guest-runtime D4.4:不依赖进程配合)。**仍开放的只是应用层协作安全点**(长跑进程到安全点再冻,
   避免截断 in-flight 写)——纯优化、非正确性前提,单独追踪于 guest-runtime D4.4 / open-decisions §2。
 - **excluded paths / portal paths**:提取 Promote/snapshot 时要过滤掉引擎自身注入的运行时路径
-  (如 guest 内 daemon 的工作目录)。最小集是 sandboxd 的两个 portal 文件(transport pidfile /
-  crash-loop sentinel)。**Volume 挂载点那一半已实测定形**,且结论把问题重新框定了:
+  (如 guest 内 daemon 的工作目录)。
+  - **修正一条曾被写错的"最小集"**:早先记的最小集是 sandboxd 的两个 portal 文件(transport pidfile /
+    crash-loop sentinel),理由写作"guest daemon 把它们写在 `/tmp`,而 `/tmp` 就是 upper 的 `tmp/`"。
+    **那个理由是错的**:`/tmp` 由 OCI spec 挂成 **tmpfs**,故这两个文件**根本不进 upper**,排除它们是
+    针对一个物化上不可达的状态(其守卫测试因此在 assert 一个基底造不出来的局面,读起来像覆盖、实际为空)。
+    留着它们无害(一条 list 项比一个"每个沙箱生来不能服务的 Template"便宜),但**别把它们当成这条机制存在
+    的理由**。
+  - **真正落进 upper 的引擎注入物是大文件旁路的上传临时文件**(按 base-name 前缀排除,因为确切路径事前
+    不可知——它落在调用方自己指定的目录里)。这才是排除机制的活消费者。
+  - **Volume 挂载点那一半已实测定形**,且结论把问题重新框定了:
   - **空占位不需要排除项。** 实测:dest 在 lower 与 upper 都不存在时,`runsc create` 之后(任何 guest 代码
     之前)upper 里就已出现一个**普通空目录、mode 0755 root:root、零 overlayfs xattr**——不是 whiteout、
     不是 opaque、无 origin/redirect,且不继承源目录的权限。故**是"放置"物化了它,不是 payload**。

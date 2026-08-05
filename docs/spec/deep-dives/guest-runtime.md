@@ -115,9 +115,22 @@ reparent 到 `sandboxd` 而非 PID 1——不当 PID 1 也能收割自己关心�
 收割语义无处可抄——它必须靠 D4.1 自研 + tini checklist。但 transport 模式要落的另外三样机制是成熟的
 进程管理套路,形状如下:
 
-- **每进程监督**:per-process 一个 `cmd.Wait()` 的 monitor goroutine,退出即广播 `end` 帧(退出码
-  `128+signo` on signal)。若将来要向调用方暴露更细的进程状态(running/stopped/killed/crashed),那是
-  这个 monitor 之上的 additive 加法,不改本拓扑。
+- **每进程监督**:per-process 一个 monitor goroutine,退出即广播 `end` 帧(退出码 `128+signo` on
+  signal)。若将来要向调用方暴露更细的进程状态(running/stopped/killed/crashed),那是这个 monitor
+  之上的 additive 加法,不改本拓扑。
+  - **但它的状态不能来自 `cmd.Wait()`——那与 subreaper 职责不可共存,二者只能有一个赢。**
+    transport 模式按 §5.E.1 声明 `PR_SET_CHILD_SUBREAPER` **并因此必须自己跑 `Wait4(-1)`**,而
+    `Wait4(-1)` **无法排除某个 pid**:通配 waiter 与 per-child `cmd.Wait()` 竞争同一个状态,谁先收到谁
+    拿走。**实测:通配 waiter 先到时 `cmd.Wait()` 10/10 次返回 `waitid: no child processes`**——于是每一
+    个 `end` 帧的退出码都会是**编造**的,而退出码送达是 §5.E.1 明写的承重契约。故形状是:**单一通配
+    收割器 + 一张交接表**(pid → 等待者),monitor 从表里领自己那份状态,与 D4.1 里 PID 1 的
+    `reapTable` 同一机制(它正是为"通配 waiter 不得偷走已注册子进程的状态"而设计的)。
+  - **连带一条不显然的义务**:跳过 `cmd.Wait()` 也就跳过了它对 `StdoutPipe`/`StderrPipe` 父端的关闭,
+    故长命 daemon 里每个进程会漏 2 个 fd——输出泵必须在 EOF 时自己关。(PTY master 例外:它同时是输入
+    端,由进程终结路径统一关。)
+  - **一条更强的纪律**:**声明了 subreaper 却不收割,比根本不声明更糟**。不声明时孤儿 reparent 到 PID 1、
+    被它的 drain 收掉;声明了却没有 waiter,则孤儿全部堆在 transport 名下成为**永久僵尸**。故"声明"与
+    "装上通配 drain"必须是同一个动作、不可分开落地。
 - **每进程 pgid 纪律**:非 PTY 进程 `Setpgid` 自成组、PTY 进程交给 pty 的 session——这条 tini 覆盖
   不到的 PTY vs 非 PTY 非对称,完整推理见 D4.5 C1。
 - **drain-barrier**:pause 前用一道 barrier 挡住 in-flight mutating RPC、等其排空——D4.4 静止点协议

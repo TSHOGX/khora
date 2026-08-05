@@ -70,8 +70,9 @@ slims to boundary + open agenda — nothing lives in full in both places.
 - **Package names = the §5 canonical short-names:** `runtime` / `rootfs` /
   `volume` / `network` / `transport`, plus `model` / `lifecycle` / `store`,
   `orchestrator` (the §1.1 assembly), and the non-subsystem leaves: `btrfs` (a
-  substrate tool, model-ignorant), `guestport` (one shared constant), `arch`
-  (structural guards, no production code).
+  substrate tool, model-ignorant), `guestport` (shared constants two subsystems
+  must agree on — the guest port and the upload-temp prefix), `allocbytes`,
+  `arch` (structural guards, no production code).
   (`Rootfs` = the §5.B subsystem; `fs` = the §5.E wire service; `rootfs provider` =
   its §5.B storage seam; `volume backend` = §5.C's *separate* seam — four distinct
   things, don't merge, and never say "FS provider". Table in §1.1.)

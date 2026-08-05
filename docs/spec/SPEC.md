@@ -240,6 +240,8 @@ root 默认就是 §1.1「可拿 root 的 agent 沙箱」最直接的表达,装�
   **sibling 沙箱不可达**(除非经显式策略且经 gateway 中转,非 L2 直连)。**这条不靠支柱① 守**:①
   拦 syscall、不拦网络包(guest 合法用网络),故跨沙箱网络隔离是**独立的 control-plane invariant**,
   由 §5.D 策略 + provider steering 物化,与"存储跨沙箱隔离靠支柱①"并列(见 network.md D5.5)。
+  **⚠ 这一条今天不成立**:实测两个真沙箱之间 TCP 握手成功并读到载荷——点对点 `/30` veth 消除了二层邻接
+  但**宿主仍在两段之间路由**,而强制它的 nft 地板尚未落地(open-decisions §4 / network.md D5.5 的修正)。
 - **provider / model 凭证**(支柱④)——只在宿主侧,guest 永不见真 key。
 - **控制面记录本身**(Binding 的权威,§3.4)——挂载面、网络策略、资源上限的取值由控制面裁决,
   guest 内 root 改不动(支柱⑤)。
@@ -291,6 +293,13 @@ root 默认就是 §1.1「可拿 root 的 agent 沙箱」最直接的表达,装�
 今天只兑现 `local_runsc`,但义务是按"任何 provider 都要满足"写的。**引流不可绕过(steering 必须
 exhaustive)是一条可验收义务**:不写死它,guest 一条直连就绕过整个 §5.D 策略面(见
 [`deep-dives/network.md`](./deep-dives/network.md) D5.1)。
+
+> **⚠ 落地状态:本节的 ③ 与上面三条 egress invariant 是"已定、未建"。** ①②④⑤ 已被代码兑现,**③ 的
+> enforcement 一行未落**——没有 `internal/network`、没有 nft/TPROXY、没有 deny-set。今天沙箱到不了外网、
+> 兄弟与 link-local,**靠的是"没有默认路由"这一个事实,不是靠强制**;而 guest root 持 `CAP_NET_ADMIN`、
+> 宿主 `ip_forward=1`,故 guest 自己加一条默认路由即可达宿主 LAN 与兄弟沙箱(实测)。故本节读作**义务
+> 规格**(评估任何 provider 用),不是对当前代码的陈述。缺口、连带影响与 owning plan 登记在
+> [`open-decisions.md`](./open-decisions.md) §4;**L0 地板怎么挣到、deny-set 住哪**是两项待决设计。
 
 ### 2.5 substrate 事实核查
 
