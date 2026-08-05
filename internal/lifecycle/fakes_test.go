@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -255,6 +256,18 @@ type fakeVolume struct {
 	// rather than only reading the call log.
 	units map[string]bool
 
+	failSnapshot bool
+	reclaimErr   error
+	enumErr      error
+
+	// caps_ records the cap each volume was created or derived WITH, so a test can
+	// assert the cap crossed the seam on the operation that made the bytes rather than
+	// trusting the record.
+	caps_ map[string]int64
+	// deletedRows stands in for the substrate's leaked quota rows: a test seeds ids and
+	// asserts the reclamation round consumed them.
+	deletedRows map[uint64]bool
+
 	// roots keeps ONE fakeRoot per volume, so content PERSISTS across separate
 	// OpenRoot calls. Handing out a fresh root each time would make an import
 	// invisible to the following export — and the property being tested (bytes go in
@@ -265,9 +278,11 @@ type fakeVolume struct {
 
 func newFakeVolume() *fakeVolume {
 	return &fakeVolume{
-		caps:  volume.Capabilities{Snapshot: true, Clone: true, Quota: true},
-		units: map[string]bool{},
-		roots: map[string]*fakeRoot{},
+		caps:        volume.Capabilities{Snapshot: true, Clone: true, Quota: true},
+		units:       map[string]bool{},
+		roots:       map[string]*fakeRoot{},
+		caps_:       map[string]int64{},
+		deletedRows: map[uint64]bool{},
 	}
 }
 
@@ -301,6 +316,10 @@ func (f *fakeVolume) CreateVolume(_ context.Context, id string, capBytes int64) 
 	}
 	f.mu.Lock()
 	f.units[id] = true
+	if f.caps_ == nil {
+		f.caps_ = map[string]int64{}
+	}
+	f.caps_[id] = capBytes
 	f.mu.Unlock()
 	return nil
 }
@@ -313,6 +332,12 @@ func (f *fakeVolume) SetCapacity(_ context.Context, id string, capBytes int64) e
 	if capBytes > 0 && !f.Capabilities().Quota {
 		return fmt.Errorf("fake: %w", volume.ErrUnsupported)
 	}
+	f.mu.Lock()
+	if f.caps_ == nil {
+		f.caps_ = map[string]int64{}
+	}
+	f.caps_[id] = capBytes
+	f.mu.Unlock()
 	return nil
 }
 
@@ -321,7 +346,10 @@ func (f *fakeVolume) Usage(_ context.Context, id string) (int64, int64, error) {
 	if f.usageErr != nil {
 		return 0, 0, f.usageErr
 	}
-	return f.used, 0, nil
+	f.mu.Lock()
+	limit := f.caps_[id]
+	f.mu.Unlock()
+	return f.used, limit, nil
 }
 
 func (f *fakeVolume) Materialize(_ context.Context, id string) (*volume.Materialized, error) {
@@ -377,6 +405,79 @@ func (f *fakeVolume) DestroyVolume(_ context.Context, id string) error {
 	return nil
 }
 
+// Snapshot / Clone record the cap they were handed, which is the assertion that
+// matters: the cap must be written by THIS call, not by a follow-up the caller might
+// skip — a missed cap is silent and undetectable afterwards (volume.md D7.3).
+func (f *fakeVolume) Snapshot(_ context.Context, srcID, newID string, capBytes int64) error {
+	f.log(fmt.Sprintf("Snapshot:%s->%s:cap=%d", srcID, newID, capBytes))
+	return f.derive(srcID, newID, capBytes, "snapshot")
+}
+
+func (f *fakeVolume) Clone(_ context.Context, srcID, newID string, capBytes int64) error {
+	f.log(fmt.Sprintf("Clone:%s->%s:cap=%d", srcID, newID, capBytes))
+	return f.derive(srcID, newID, capBytes, "clone")
+}
+
+func (f *fakeVolume) derive(srcID, newID string, capBytes int64, kind string) error {
+	if !f.Capabilities().Snapshot {
+		return fmt.Errorf("fake: %s: %w", kind, volume.ErrUnsupported)
+	}
+	if f.failSnapshot {
+		return fmt.Errorf("fake: %s %s failed", kind, srcID)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.units[srcID] {
+		return fmt.Errorf("fake: %s: source %s not present", kind, srcID)
+	}
+	f.units[newID] = true
+	// The cap is recorded per volume, so a test can assert it was applied HERE rather
+	// than assumed from the record.
+	if f.caps_ == nil {
+		f.caps_ = map[string]int64{}
+	}
+	f.caps_[newID] = capBytes
+	// Content copies, so the shared property "the copy carries the source's bytes" is
+	// testable through the fake too.
+	if src, ok := f.roots[srcID]; ok {
+		cp := &fakeRoot{files: map[string][]byte{}, dirs: map[string]bool{}}
+		src.mu.Lock()
+		for n, b := range src.files {
+			cp.files[n] = append([]byte(nil), b...)
+		}
+		src.mu.Unlock()
+		f.roots[newID] = cp
+	}
+	return nil
+}
+
+// ReclaimQuotaRows / DeletedRowIDs back the §5.C leaked-row reclamation round. The fake
+// records what it was asked to reclaim so the mediator's wiring is assertable as pure
+// logic; it reclaims everything it is given.
+func (f *fakeVolume) ReclaimQuotaRows(_ context.Context, ids []uint64) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, fmt.Sprintf("ReclaimQuotaRows:n=%d", len(ids)))
+	n := 0
+	for _, id := range ids {
+		if f.deletedRows[id] {
+			delete(f.deletedRows, id)
+			n++
+		}
+	}
+	return n, f.reclaimErr
+}
+
+func (f *fakeVolume) DeletedRowIDs(context.Context) []uint64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]uint64, 0, len(f.deletedRows))
+	for id := range f.deletedRows {
+		out = append(out, id)
+	}
+	return out
+}
+
 func (f *fakeVolume) UncappedBytes(context.Context) (int64, error) {
 	f.log("UncappedBytes")
 	if f.measureErr != nil {
@@ -385,10 +486,22 @@ func (f *fakeVolume) UncappedBytes(context.Context) (int64, error) {
 	return f.uncappedBytes, nil
 }
 
-func (f *fakeVolume) SweepOrphanVolumes(_ context.Context, live, building []string) (int, error) {
-	f.log("SweepOrphanVolumes:live=" + strings.Join(append([]string(nil), live...), "|") +
-		";building=" + strings.Join(append([]string(nil), building...), "|"))
-	return 0, nil
+// ListUnitIDs is the backend's half of orphan reclamation: enumerate, and let the
+// mediator decide. enumErr lets a test drive the fail-closed path, where an unreadable
+// enumeration must reclaim NOTHING rather than be read as "no units".
+func (f *fakeVolume) ListUnitIDs(context.Context) ([]string, error) {
+	f.log("ListUnitIDs")
+	if f.enumErr != nil {
+		return nil, f.enumErr
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, 0, len(f.units))
+	for id := range f.units {
+		out = append(out, id)
+	}
+	sort.Strings(out) // deterministic, so a test can assert on the list
+	return out, nil
 }
 
 // fakeRoot is an in-memory volume.Root for the import/export verbs. It is

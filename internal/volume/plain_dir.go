@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"engine/internal/allocbytes"
 )
@@ -136,6 +135,33 @@ func (p *PlainDir) OpenRoot(_ context.Context, volumeID string) (Root, error) {
 	return NewLocalRoot(volumeID, p.unitPath(volumeID))
 }
 
+// Snapshot / Clone: NOT SUPPORTED, and refusing them is this arm's job (§5.C requires
+// an unsupported capability to be a clean typed refusal, never a silent no-op).
+//
+// A plain directory has no cheap whole-tree point-in-time copy. It could of course be
+// FAKED with a recursive byte copy — and that is precisely what must not happen: the
+// caller asked for a snapshot, whose contract is atomic and instantaneous, and a tree
+// walk of a live volume satisfies neither while looking like success. It is also what
+// makes this the arm the capability-negative contract case runs against.
+func (p *PlainDir) Snapshot(_ context.Context, srcID, newID string, _ int64) error {
+	return fmt.Errorf("volume: plain_dir cannot snapshot %s → %s: %w", srcID, newID, ErrUnsupported)
+}
+
+func (p *PlainDir) Clone(_ context.Context, srcID, newID string, _ int64) error {
+	return fmt.Errorf("volume: plain_dir cannot clone %s → %s: %w", srcID, newID, ErrUnsupported)
+}
+
+// ReclaimQuotaRows / DeletedRowIDs: nothing to reclaim. A plain directory has no quota
+// rows, so there is no residue and this arm costs the sweep nothing.
+//
+// It returns (0, nil) rather than ErrUnsupported deliberately: the sweep must not have
+// to ASK a backend whether it has rows and branch on the answer (§4.4-C's
+// no-capability-branch rule). An empty list and a zero count say the same thing without
+// putting a branch in the caller.
+func (p *PlainDir) ReclaimQuotaRows(context.Context, []uint64) (int, error) { return 0, nil }
+
+func (p *PlainDir) DeletedRowIDs(context.Context) []uint64 { return nil }
+
 func (p *PlainDir) DestroyVolume(_ context.Context, volumeID string) error {
 	if err := validateID(volumeID); err != nil {
 		return err
@@ -172,37 +198,21 @@ func (p *PlainDir) UncappedBytes(context.Context) (int64, error) {
 	return total, nil
 }
 
-func (p *PlainDir) SweepOrphanVolumes(ctx context.Context, live, building []string) (int, error) {
-	keep := make(map[string]bool, len(live)+len(building))
-	for _, id := range live {
-		keep[id] = true
-	}
-	for _, id := range building {
-		keep[id] = true
-	}
+func (p *PlainDir) ListUnitIDs(_ context.Context) ([]string, error) {
 	ents, err := os.ReadDir(p.Dir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return 0, nil
+			return nil, nil
 		}
-		return 0, fmt.Errorf("volume: sweep list units: %w", err)
+		return nil, fmt.Errorf("volume: enumerate units: %w", err)
 	}
-	reclaimed := 0
-	var failed []string
+	out := make([]string, 0, len(ents))
 	for _, e := range ents {
-		if !e.IsDir() || keep[e.Name()] {
-			continue
+		if e.IsDir() {
+			out = append(out, e.Name())
 		}
-		if err := p.DestroyVolume(ctx, e.Name()); err != nil {
-			failed = append(failed, fmt.Sprintf("%s: %v", e.Name(), err))
-			continue
-		}
-		reclaimed++
 	}
-	if len(failed) > 0 {
-		return reclaimed, fmt.Errorf("volume: sweep reclaim unit(s): %s", strings.Join(failed, "; "))
-	}
-	return reclaimed, nil
+	return out, nil
 }
 
 // compile-time: PlainDir satisfies Backend.

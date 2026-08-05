@@ -128,6 +128,21 @@ func (r *Reaper) tick(ctx context.Context) {
 	if err := r.m.SweepOrphanOverlays(ctx); err != nil {
 		r.m.deps.Logf("reaper: orphan-unit sweep (retried next tick): %v", err)
 	}
+	// §5.C orphan-VOLUME sweep. Same reasoning as the Overlay unit sweep: a
+	// DestroyVolume whose byte reclamation failed must not hold its unit until reboot.
+	if err := r.m.SweepOrphanVolumes(ctx); err != nil {
+		r.m.deps.Logf("reaper: orphan-volume sweep (retried next tick): %v", err)
+	}
+	// §5.C / volume.md D7 LEAKED QUOTA ROWS, and this one has to be periodic rather
+	// than boot-only for a mechanical reason: the transition to reclaimable is
+	// CONDITION-triggered, not time-triggered. A `<squota space holder>` becomes
+	// `<stale>` the moment its last live sharer goes away, and the FIRST attempt after
+	// that succeeds — so the round must be POLLED. Doing it at boot alone would hold
+	// leaked rows, each of which can hand its cap to an unrelated new volume after a
+	// remount, until the next restart.
+	if err := r.m.ReclaimQuotaRows(ctx); err != nil {
+		r.m.deps.Logf("reaper: quota-row reclamation (retried next tick): %v", err)
+	}
 }
 
 // Sweep is one full pass: classify every sandbox and dispatch per health state /

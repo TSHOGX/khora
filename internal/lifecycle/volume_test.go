@@ -468,42 +468,83 @@ func TestImportExportNeedsNoSandbox(t *testing.T) {
 	}
 }
 
-// TestSweepOrphanVolumesWiring: the mediator computes `live` from the AUTHORITATIVE
-// store and snapshots the in-flight keep-set, then hands both to the backend, which
-// enumerates its own storage (§4: subsystems never read the store).
+// TestSweepOrphanVolumesDecidesInTheMediator: the backend ENUMERATES and the mediator
+// DECIDES, and the decision is made AFTER enumeration.
 //
-// The keep-set matters MORE here than for Overlay units: volume creation is
-// bytes-first, so a healthy in-flight create presents as "bytes, no row" even to a
-// completely fresh snapshot.
-func TestSweepOrphanVolumesWiring(t *testing.T) {
+// That order closes a MEASURED window. With the diff done inside the backend from two
+// pre-read sets, a volume whose whole creation fell between the `live` read and the
+// `building` read was in neither and had its bytes deleted while FULLY COMMITTED
+// (measured on the substrate: 3 of 6 snapshots destroyed under 458 overlapping sweeps).
+// Enumerating first means every candidate's bytes predate all the checks, which is what
+// makes the checks conclusive.
+func TestSweepOrphanVolumesDecidesInTheMediator(t *testing.T) {
 	ctx := context.Background()
-	m, _, vb := volFixture(t)
+	m, st, vb := volFixture(t)
+
 	live, err := m.CreateVolume(ctx, 0)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	// An in-flight create, registered but with no row yet — exactly the bytes-first
-	// window.
+	// A true orphan: bytes with no row, the shape a crash leaves.
+	orphan, err := m.CreateVolume(ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.DeleteVolume(ctx, orphan); err != nil {
+		t.Fatal(err)
+	}
+	// An in-flight create: registered, bytes present, row not yet inserted.
+	if err := vb.CreateVolume(ctx, "vol_inflight", 0); err != nil {
+		t.Fatal(err)
+	}
 	m.markBuildingVolume("vol_inflight")
 	defer m.unmarkBuildingVolume("vol_inflight")
 
 	if err := m.SweepOrphanVolumes(ctx); err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
-	var sweep string
-	for _, c := range vb.Calls() {
-		if strings.HasPrefix(c, "SweepOrphanVolumes:") {
-			sweep = c
-		}
+
+	// The orphan is gone (positive control — without it a no-op sweep passes the rest).
+	vb.mu.Lock()
+	stillOrphan := vb.units[string(orphan)]
+	stillLive := vb.units[string(live)]
+	stillInFlight := vb.units["vol_inflight"]
+	vb.mu.Unlock()
+	if stillOrphan {
+		t.Errorf("the orphan survived the sweep — a sweep that reclaims nothing passes every negative assertion here")
 	}
-	if sweep == "" {
-		t.Fatal("the backend sweep was never called")
+	if !stillLive {
+		t.Errorf("a volume with a live RECORD was reclaimed")
 	}
-	if !strings.Contains(sweep, string(live)) {
-		t.Errorf("live keep-set is missing the committed volume %s: %q", live, sweep)
+	if !stillInFlight {
+		t.Errorf("an IN-FLIGHT create was reclaimed — volume creation is bytes-first, so a healthy in-flight create presents as 'bytes, no row' by construction")
 	}
-	if !strings.Contains(sweep, "vol_inflight") {
-		t.Errorf("building keep-set is missing the in-flight create: %q — volume creation is bytes-first, so an in-flight create looks exactly like an orphan", sweep)
+}
+
+// TestSweepOrphanVolumesFailsClosedOnUnreadableEnumeration: an enumeration error must
+// reclaim NOTHING. Measured, a bulk read fails wholesale and returns zero rows under
+// exactly the concurrent churn a sweep runs in — so "no units" and "the read failed"
+// must never be the same answer.
+func TestSweepOrphanVolumesFailsClosedOnUnreadableEnumeration(t *testing.T) {
+	ctx := context.Background()
+	m, st, vb := volFixture(t)
+	orphan, err := m.CreateVolume(ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.DeleteVolume(ctx, orphan); err != nil {
+		t.Fatal(err)
+	}
+	vb.enumErr = errors.New("bulk read failed wholesale")
+
+	if err := m.SweepOrphanVolumes(ctx); err == nil {
+		t.Fatal("the sweep reported success on an unreadable enumeration")
+	}
+	vb.mu.Lock()
+	survived := vb.units[string(orphan)]
+	vb.mu.Unlock()
+	if !survived {
+		t.Errorf("the sweep reclaimed something despite an unreadable enumeration — an error is not evidence that anything is an orphan (§5.C)")
 	}
 }
 

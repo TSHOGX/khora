@@ -151,6 +151,10 @@ type EngineOpts struct {
 	StorePath string
 	// FaultAfterColdStart injects a crash right before the committing CAS.
 	FaultAfterColdStart func(id model.SandboxID)
+	// FaultAfterVolumeBytes injects a crash inside snapshot/clone after the bytes AND
+	// the cap are written but before the `volumes` row is inserted — the §5.C window
+	// (volume.md D7.3).
+	FaultAfterVolumeBytes func(id model.VolumeID)
 	// SkipReconcile leaves startup reconcile un-run, for a test that wants to
 	// inspect the pre-reconcile store.
 	SkipReconcile bool
@@ -200,14 +204,15 @@ func Engine(t *testing.T, opts EngineOpts) (*orchestrator.Engine, string) {
 	}
 
 	eng, err := orchestrator.New(orchestrator.Config{
-		TemplatesDir:        tmpl,
-		StateDir:            filepath.Join(base, "state"),
-		StorePath:           storePath,
-		HealthTimeout:       healthTimeout,
-		DrainGrace:          opts.DrainGrace,
-		NodeDiskByte:        opts.NodeDiskByte,
-		NodeMemoryByte:      opts.NodeMemoryByte,
-		FaultAfterColdStart: opts.FaultAfterColdStart,
+		TemplatesDir:          tmpl,
+		StateDir:              filepath.Join(base, "state"),
+		StorePath:             storePath,
+		HealthTimeout:         healthTimeout,
+		DrainGrace:            opts.DrainGrace,
+		NodeDiskByte:          opts.NodeDiskByte,
+		NodeMemoryByte:        opts.NodeMemoryByte,
+		FaultAfterColdStart:   opts.FaultAfterColdStart,
+		FaultAfterVolumeBytes: opts.FaultAfterVolumeBytes,
 	})
 	if err != nil {
 		t.Fatalf("orchestrator.New: %v", err)
@@ -223,6 +228,17 @@ func Engine(t *testing.T, opts EngineOpts) (*orchestrator.Engine, string) {
 	// convenient one.
 	if err := eng.SweepOrphanVolumes(ctx); err != nil {
 		t.Logf("boot orphan-volume sweep (non-fatal, reaper retries): %v", err)
+	}
+	// Cap repair and quota-row reclamation, in production's order and position (§5.C /
+	// volume.md D7.3, D7): both run BEFORE anything can create a storage unit. Running
+	// them here means the substrate suites exercise the sequence production boots with
+	// rather than a convenient one — which matters most for the cap repair, whose whole
+	// job is to fix residue a previous run left.
+	if err := eng.RepairVolumeCaps(ctx); err != nil {
+		t.Logf("boot volume-cap repair (non-fatal, reaper retries): %v", err)
+	}
+	if err := eng.ReclaimQuotaRows(ctx); err != nil {
+		t.Logf("boot quota-row reclamation (non-fatal, reaper retries): %v", err)
 	}
 	if !opts.SkipReconcile {
 		// production parity: reconcile runs at boot. On a fresh store it is a no-op,

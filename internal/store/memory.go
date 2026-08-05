@@ -169,6 +169,12 @@ func (m *Memory) CreateVolume(_ context.Context, v model.Volume) error {
 	if _, ok := m.vol[v.ID]; ok {
 		return ErrConflict
 	}
+	// Lineage FK equivalent (§4.3, references point upward): a named parent must exist.
+	if v.Parent != "" {
+		if _, ok := m.vol[v.Parent]; !ok {
+			return ErrVolumeNotFound
+		}
+	}
 	m.vol[v.ID] = v
 	return nil
 }
@@ -217,6 +223,14 @@ func (m *Memory) DeleteVolume(_ context.Context, id model.VolumeID) error {
 	for _, mt := range m.mounts {
 		if mt.Volume == id {
 			return ErrVolumeInUse
+		}
+	}
+	// LINEAGE side, a DIFFERENT verdict: a live snapshot/clone names it as parent. The
+	// caller's remedy differs (delete the descendant vs detach a mount), so the two are
+	// never collapsed (§6.1).
+	for _, other := range m.vol {
+		if other.Parent == id {
+			return ErrVolumeHasDescendants
 		}
 	}
 	delete(m.vol, id)

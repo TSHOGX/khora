@@ -135,6 +135,14 @@ type Deps struct {
 	// container with lost handle) that Reconcile must clean up. nil in production;
 	// it carries NO production semantics.
 	FaultAfterColdStart func(id model.SandboxID)
+
+	// FaultAfterVolumeBytes is a TEST-ONLY injection hook: if non-nil it runs inside
+	// snapshot/clone, after the backend has produced the bytes AND written the cap, but
+	// BEFORE the `volumes` row is inserted. A test panics/exits from it to manufacture
+	// the §5.C crash window — bytes on disk, no row — and to prove the cap was written
+	// by the backend operation rather than by a follow-up the crash would have skipped
+	// (volume.md D7.3). nil in production; it carries NO production semantics.
+	FaultAfterVolumeBytes func(id model.VolumeID)
 }
 
 // Mediator holds per-sandbox transition locks (§4.4-B).

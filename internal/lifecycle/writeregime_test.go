@@ -4,9 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"io"
 	"strings"
-	"sync"
 	"testing"
 
 	"engine/internal/model"
@@ -127,55 +125,55 @@ func TestLiveReadOnlyMountDoesNotBlockDirectWrite(t *testing.T) {
 // concurrent sweep from reclaiming bytes mid-write (M7 acceptance 24).
 //
 // A volume being written to right now is IN USE even though nothing has it mounted —
-// which is exactly the case no mount row can express.
+// exactly the case no mount row can express. Asserted on the BYTES rather than on the
+// keep-set contents, because the bytes surviving is the property; the keep-set is one
+// implementation of it.
 func TestDirectWriteMarkerProtectsFromTheSweep(t *testing.T) {
 	ctx := context.Background()
-	m, _, vb, _ := mountFixture(t)
+	m, st, vb := volFixture(t)
 	vid, err := m.CreateVolume(ctx, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// Hold the marker by blocking inside the import's own read, so the sweep runs while
-	// the write is genuinely in flight rather than merely nearby.
-	released := make(chan struct{})
-	sweepDone := make(chan []string, 1)
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		_, _ = m.ImportVolume(ctx, vid, "f", &blockingReader{gate: released})
-	}()
-
-	// Wait until the marker is actually published, so this is not a timing race.
-	for {
-		if ids := m.inFlightWriteIDs(); len(ids) == 1 && ids[0] == string(vid) {
-			break
-		}
+	// The marker is taken through admitDirectWrite DIRECTLY rather than by racing a real
+	// ImportVolume, and that is not a shortcut. Isolating the marker requires the volume's
+	// ROW to be gone — otherwise the record alone protects the bytes and the test proves
+	// nothing — but ImportVolume checks the record first (an unknown volume is a clean
+	// 404), so a real import cannot even begin in that state. Waiting for a marker that
+	// can never be published is how the first version of this test spun forever.
+	release, err := m.admitDirectWrite(ctx, vid)
+	if err != nil {
+		t.Fatalf("admit the direct write: %v", err)
 	}
+	if err := st.DeleteVolume(ctx, vid); err != nil {
+		t.Fatal(err)
+	}
+
 	if err := m.SweepOrphanVolumes(ctx); err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
-	// The keep-set handed to the backend must contain the in-flight volume.
-	for _, c := range vb.Calls() {
-		if strings.HasPrefix(c, "SweepOrphanVolumes:") {
-			sweepDone <- []string{c}
-		}
+	vb.mu.Lock()
+	survived := vb.units[string(vid)]
+	vb.mu.Unlock()
+	if !survived {
+		t.Fatalf("the volume was reclaimed mid-write — the in-flight marker exists precisely to cover a write to a volume nothing has mounted (§5.C)")
 	}
-	close(released)
-	wg.Wait()
 
-	select {
-	case calls := <-sweepDone:
-		if !strings.Contains(calls[0], string(vid)) {
-			t.Errorf("the in-flight write was not in the sweep's keep-set: %q — a volume being written to is in use even with nothing mounted", calls[0])
-		}
-	default:
-		t.Fatal("the backend sweep was never called")
-	}
-	// And the marker is RELEASED afterwards, so it does not pin the volume forever.
+	release()
+	// The marker is RELEASED, so it does not pin the volume forever: with no row and no
+	// write in flight, these bytes ARE an orphan now and the next sweep takes them.
 	if ids := m.inFlightWriteIDs(); len(ids) != 0 {
-		t.Errorf("the in-flight marker survived the write: %v", ids)
+		t.Fatalf("the marker survived its release: %v", ids)
+	}
+	if err := m.SweepOrphanVolumes(ctx); err != nil {
+		t.Fatalf("second sweep: %v", err)
+	}
+	vb.mu.Lock()
+	stillThere := vb.units[string(vid)]
+	vb.mu.Unlock()
+	if stillThere {
+		t.Errorf("the volume survived a sweep after its write finished and its row was gone — the marker must not pin it permanently")
 	}
 }
 
@@ -205,23 +203,4 @@ func TestConcurrentDirectWritesEachHoldTheMarker(t *testing.T) {
 	if ids := m.inFlightWriteIDs(); len(ids) != 0 {
 		t.Errorf("the marker survived both releases: %v", ids)
 	}
-}
-
-// blockingReader yields one byte, then blocks until its gate closes, then reports EOF.
-// It holds an import open for as long as the test needs without any sleeping.
-type blockingReader struct {
-	gate  chan struct{}
-	wrote bool
-}
-
-func (r *blockingReader) Read(p []byte) (int, error) {
-	if !r.wrote {
-		r.wrote = true
-		p[0] = 'x'
-		return 1, nil
-	}
-	<-r.gate
-	// io.EOF, not a look-alike: ImportVolume tells "the source ended" from "the source
-	// failed", and only the real sentinel means the former.
-	return 0, io.EOF
 }

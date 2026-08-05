@@ -100,6 +100,15 @@ var (
 	// binding, so there is no "add one mount to an existing set" operation for a
 	// duplicate to be relative to. §6.2's four 409s do not grow.
 	ErrMountBindingInvalid = errors.New("store: mount binding is self-contradictory")
+
+	// ErrVolumeHasDescendants is verdict ②'s volume side: deleting a volume that a live
+	// snapshot or clone names as its parent (volumes.parent RESTRICT).
+	//
+	// It is a DIFFERENT object relationship from ErrVolumeInUse (held by a mount row),
+	// so it needs its own sentinel and its own text — this is D3's trap recurring on the
+	// fourth FK path, and §6.1 requires the two to be distinguishable because the
+	// caller's remedy differs: detach a mount vs delete a descendant.
+	ErrVolumeHasDescendants = errors.New("store: volume has live snapshots or clones")
 )
 
 // Event is one outbox row: a §4.1 lifecycle transition to publish to the event
@@ -409,8 +418,10 @@ type Store interface {
 	// Byte reclamation is DECOUPLED from this row delete (§4.4 / §5.C orphan sweep):
 	// this removes only the row, and the now-orphaned bytes are the sweep's job.
 	//
-	// A live mount row holding the volume makes it ErrVolumeInUse (RESTRICT) — a
-	// DIFFERENT verdict from ErrInUse, whose text names a Template.
+	// Two distinct RESTRICT verdicts, and they must stay distinguishable (§6.1):
+	// ErrVolumeInUse when a live mount row holds it, ErrVolumeHasDescendants when a live
+	// snapshot/clone names it as parent. Both differ again from ErrInUse, whose text
+	// names a Template.
 	DeleteVolume(ctx context.Context, id model.VolumeID) error
 
 	// --- Mount table (§5.C / §4.3) --------------------------------------------

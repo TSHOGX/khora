@@ -73,6 +73,10 @@ type Config struct {
 	// FaultAfterColdStart is a TEST-ONLY injection hook forwarded to the
 	// mediator to simulate a crash mid-transition. nil in production.
 	FaultAfterColdStart func(id model.SandboxID)
+	// FaultAfterVolumeBytes is a TEST-ONLY hook forwarded to the mediator: a crash inside
+	// snapshot/clone after the bytes and cap exist but before the row is inserted (§5.C /
+	// volume.md D7.3). nil in production.
+	FaultAfterVolumeBytes func(id model.VolumeID)
 }
 
 // Engine is the assembled engine host.
@@ -128,16 +132,17 @@ func New(cfg Config) (*Engine, error) {
 	}
 
 	med := lifecycle.New(lifecycle.Deps{
-		Store:               st,
-		Runtime:             rt,
-		Rootfs:              rp,
-		Volume:              vb,
-		Dial:                transport.Dial,
-		HealthTimeout:       cfg.HealthTimeout,
-		DrainGrace:          cfg.DrainGrace,
-		DefaultIdleTimeout:  cfg.DefaultIdleTimeout,
-		DefaultRetention:    cfg.DefaultRetention,
-		FaultAfterColdStart: cfg.FaultAfterColdStart,
+		Store:                 st,
+		Runtime:               rt,
+		Rootfs:                rp,
+		Volume:                vb,
+		Dial:                  transport.Dial,
+		HealthTimeout:         cfg.HealthTimeout,
+		DrainGrace:            cfg.DrainGrace,
+		DefaultIdleTimeout:    cfg.DefaultIdleTimeout,
+		DefaultRetention:      cfg.DefaultRetention,
+		FaultAfterColdStart:   cfg.FaultAfterColdStart,
+		FaultAfterVolumeBytes: cfg.FaultAfterVolumeBytes,
 		NodeCapacity: lifecycle.NodeCapacity{
 			DiskByte:   cfg.NodeDiskByte,
 			MemoryByte: cfg.NodeMemoryByte,
@@ -182,6 +187,27 @@ func (e *Engine) SweepOrphanOverlays(ctx context.Context) error {
 // crashed Promote's staging layer is reclaimed; the reaper repeats it per tick.
 func (e *Engine) SweepOrphanLayers(ctx context.Context) error {
 	return e.Mediator.SweepOrphanLayers(ctx)
+}
+
+// RepairVolumeCaps re-asserts every volume's RECORDED cap onto its storage (§5.C /
+// volume.md D7.3). Call at boot, in the same position as the orphan sweep.
+//
+// It exists because writing a snapshot's cap is necessarily the SECOND substrate call, so
+// a crash in between leaves a registered, live, UNCAPPED volume — and that is invisible
+// afterwards on its own, since the limit read cannot distinguish "never capped" from
+// "deliberately uncapped". The direction is always RECORD → STORAGE: adopting the
+// storage's value into the record would silently ratify exactly that crash residue.
+func (e *Engine) RepairVolumeCaps(ctx context.Context) error {
+	return e.Mediator.RepairVolumeCaps(ctx)
+}
+
+// ReclaimQuotaRows runs the §5.C / volume.md D7 leaked-quota-row reclamation round. The
+// `parent` FK demotes this from the main path to a backstop (it makes the leak-producing
+// deletion order unreachable through the API), but the residual paths — a crash between
+// two deletes, and the sweep's own per-unit ordering — do not pass through user intent,
+// so the round must exist and must be correct.
+func (e *Engine) ReclaimQuotaRows(ctx context.Context) error {
+	return e.Mediator.ReclaimQuotaRows(ctx)
 }
 
 // SweepOrphanVolumes runs the §5.C / §4.4-A orphan-volume sweep (reclaim volume

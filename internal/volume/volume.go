@@ -276,6 +276,82 @@ type Backend interface {
 	// lets the mediator tell "recover the handle" from "materialize afresh".
 	AdoptMaterialized(ctx context.Context, volumeID string) (*Materialized, error)
 
+	// Snapshot creates newID as a point-in-time copy of srcID's bytes, and Clone makes
+	// an independent writable copy. Both produce AN ORDINARY WRITABLE VOLUME with no
+	// read-only marker (§5.C / volume.md D6.1a) — the same object shape, and on the
+	// local arm the same substrate path; they differ in the SEMANTIC label a caller
+	// attaches, not in mechanism. Want immutability? Express it with a shared-ro MOUNT
+	// ROW, which is the same cardinality argument that keeps AccessMode off the volume.
+	//
+	// THE NEW ID IS ALLOCATED BY THE MEDIATOR, not minted here, and the reason is
+	// decisive rather than stylistic: bytes a backend named itself CANNOT have been
+	// registered in the in-flight keep-set before they existed, so a crash midway would
+	// leave bytes under a name no sweep can classify.
+	//
+	// capBytes IS NOT OPTIONAL AND IS NOT INHERITED, because THERE IS NOTHING TO
+	// INHERIT (measured, volume.md D7.3): the substrate gives a snapshot a BRAND-NEW
+	// UNCAPPED quota row in all four shapes tested (rw snapshot, read-only snapshot,
+	// snapshot of an uncapped source, snapshot of a source that had a cap set). Verified
+	// by WRITING, not by reading a number: 96 MiB (3× the source's cap) landed in full
+	// on an uncapped snapshot, while the same shape with a cap explicitly set failed
+	// precisely at the cap.
+	//
+	// SO SETTING THE CAP IS A MANDATORY STEP OF THIS METHOD, and it is NECESSARILY A
+	// SECOND CALL after the snapshot itself — no parameter makes the snapshot operation
+	// carry a cap. An implementation that "records size=N but forgets to set it" is
+	// SILENT AND UNDETECTABLE AFTERWARDS: Usage's limit read maps "never capped" and 0
+	// onto each other, so no reconcile, sweep or inspect can ever find the divergence.
+	// It must NOT be left to the caller to PATCH afterwards.
+	//
+	// The window that creates ("bytes exist, cap not yet set") is therefore REAL, and it
+	// is covered two ways: the mediator holds the in-flight keep-set across both calls,
+	// and the sweep treats "volume record exists, quota row uncapped" as A REPAIR STATE
+	// rather than a legal one.
+	//
+	// `snapshot -i <qgroupid>` is EXPLICITLY EXCLUDED as a way to make this one call: it
+	// is accepted under this quota mode but it sets MEMBERSHIP, not a cap — the new
+	// unit's own row is still uncapped while the parent's limit is enforced across ALL
+	// members, so one member exhausting it makes its SIBLINGS hit ENOSPC. It looks
+	// correct in a single-volume test and takes out neighbours in production.
+	//
+	// A backend that does not report the corresponding capability returns
+	// ErrUnsupported, and the mediator must ask BEFORE allocating an ID or moving bytes.
+	Snapshot(ctx context.Context, srcID, newID string, capBytes int64) error
+	Clone(ctx context.Context, srcID, newID string, capBytes int64) error
+
+	// ReclaimQuotaRows reclaims quota rows LEAKED by earlier deletions (§5.C, the
+	// recovery procedure in volume.md D7).
+	//
+	// WHY THIS IS A CORRECTNESS PATH AND NOT TIDINESS: a leaked row does not reserve its
+	// own unit id. So a remount can hand that id — ALONG WITH ITS CAP — to a brand-new
+	// unit, which then hits ENOSPC on a limit nobody set for it (measured: a unit that
+	// never had any limit hit ENOSPC at 3.3 MB), or is silently over-provisioned. The
+	// engine cannot tell from the inside: the limit it reads back looks exactly like
+	// the unit's own.
+	//
+	// The predicate is the row's LABEL, polled — the transition is CONDITION-triggered,
+	// not time-triggered: the FIRST attempt succeeds once the sharer is gone and the
+	// deletion settles, so sleeping and hoping is the wrong shape.
+	//
+	// ids are those recorded AT DELETION TIME. Never scan for reclaimable-looking rows
+	// (§5.C): a scan that misidentifies one produces an uncapped live volume with zero
+	// signal.
+	//
+	// Returns the count reclaimed. Rows that are not yet reclaimable are LEFT for a
+	// later round — a `<squota space holder>` can legitimately resist destruction for a
+	// live clone's entire lifetime, so that is not an error path, and the implementation
+	// must not spin on EBUSY.
+	ReclaimQuotaRows(ctx context.Context, ids []uint64) (int, error)
+
+	// DeletedRowIDs reports the quota-row ids this backend recorded at deletion time and
+	// has not yet reclaimed — the input ReclaimQuotaRows needs.
+	//
+	// It lives on the backend rather than in the control plane because it is
+	// substrate-specific residue, not engine state: a backend with no quota rows returns
+	// nothing and the whole path costs it nothing (§1.3 — no capability branch in the
+	// caller, which simply gets an empty list).
+	DeletedRowIDs(ctx context.Context) []uint64
+
 	// OpenRoot returns the root-confined content accessor for volumeID, usable
 	// WHILE UNMOUNTED (§5.C / volume.md D5.1). See Root.
 	//
@@ -308,44 +384,36 @@ type Backend interface {
 	// guest and never from apparent size.
 	UncappedBytes(ctx context.Context) (int64, error)
 
-	// SweepOrphanVolumes reclaims volume storage UNITS with no live `volumes` row
-	// (§4.4-A reverse reconciliation). Same shape as every reverse reconcile: the
-	// mediator reads the AUTHORITATIVE store to compute the keep-sets and hands them
-	// in; the backend enumerates only its OWN storage and deletes the difference
-	// (§4: subsystems never read the store).
+	// ListUnitIDs enumerates the volume IDs this backend currently holds storage for.
 	//
-	// Its twin is SweepOrphanOverlays, NOT SweepOrphanLayers, and the difference is
-	// structural: a layer is a read-only base SHARED by lineage and refcount ("does
-	// any row still reference it"), while a volume — like an Overlay unit — is a
-	// SELF-SUFFICIENT unit ("does this unit still have a live owner"). Volumes are
-	// the latter, so the sweep is per-unit.
+	// It is the ENUMERATION HALF of orphan reclamation; the mediator does the deciding
+	// and then calls DestroyVolume per orphan. That split is not cosmetic — it was forced
+	// by a MEASURED DEFECT in the combined shape (a `Sweep(live, building)` call that
+	// diffed inside the backend):
 	//
-	// `building` is MORE necessary here than on the Overlay side. There it guards
-	// only a stale keep-set (the row is inserted first); volume creation is
-	// BYTES-FIRST (the ID must name the unit before any row exists), so a perfectly
-	// healthy in-flight create presents as "bytes, no row" EVEN WITH A FRESH
-	// keep-set. Snapshot/Clone are two more producers of the same window.
+	//	A volume whose whole creation fit between the mediator's `live` read and its
+	//	`building` read appeared in NEITHER set, so the backend deleted the bytes of a
+	//	FULLY COMMITTED volume. Measured: 3 of 6 snapshots destroyed, with 458 sweeps
+	//	overlapping them.
 	//
-	// MID-SWEEP FAILURE IS CONTINUE, NOT ABORT: this is a best-effort reclamation
-	// path, and one stuck unit must not leave every other leak in place. It returns
-	// the count actually reclaimed.
+	// The Overlay sweep has the same shape and documents that skew as a tolerable
+	// residual, and for Overlays it nearly is: the row is inserted BEFORE the unit, so
+	// only the snapshot skew is exposed. VOLUMES ARE BYTES-FIRST, so the exposed interval
+	// is the ENTIRE create — which is why the same shape is not good enough here.
 	//
-	// THE SAFETY REQUIREMENTS ARE PART OF THE CONTRACT (§5.C), because every one of
-	// them fails SILENTLY when violated — a mis-sweep has NO detection path at all
-	// (measured: five ways of yanking a volume out from under a live guest killed no
-	// sandbox, the control plane saw nothing, and in three of them the guest's writes
-	// KEPT RETURNING SUCCESS into an unlinked inode):
+	// Splitting it lets the mediator RE-CHECK each candidate after enumeration, which
+	// closes the window by ordering rather than by locking: a candidate that is no longer
+	// in the in-flight set has necessarily had its row committed already (the mark is
+	// dropped only after the insert), so a fresh per-candidate store read sees it.
 	//
-	//  1. ENUMERATE BY PROBING EACH DIRECTORY ENTRY. Never use a filesystem-level
-	//     unit enumeration: its scope is the whole filesystem rather than the given
-	//     directory (measured: run in the volumes dir and in a sibling dir it returns
-	//     byte-identical results, including units belonging to other software on the
-	//     node).
-	//  2. SKIP ON ANY ENUMERATION OR READ ERROR — NEVER treat an empty result as
-	//     "no owner". Measured: under concurrent churn a bulk quota-row read fails
-	//     WHOLESALE and returns zero rows, and those are exactly the conditions a
-	//     sweep runs in.
-	//  3. The mediator additionally passes every volume that appears in ANY mount
-	//     row (live or not) inside `live`, which is a check independent of any FK.
-	SweepOrphanVolumes(ctx context.Context, live, building []string) (int, error)
+	// ENUMERATION MUST BE PER-DIRECTORY-ENTRY (§5.C): never a filesystem-level unit
+	// enumeration, whose scope is the whole filesystem regardless of the directory given
+	// (measured — it returns byte-identical results from a sibling directory, including
+	// units belonging to other software on the node).
+	//
+	// An enumeration error returns it: the mediator then reclaims NOTHING this pass. An
+	// empty list must never be produced from a failed read, because a caller cannot tell
+	// "no units" from "the read failed" (measured: under the concurrent churn a sweep runs
+	// in, a bulk quota read fails wholesale and returns zero rows).
+	ListUnitIDs(ctx context.Context) ([]string, error)
 }

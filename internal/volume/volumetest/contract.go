@@ -65,6 +65,130 @@ func RunContract(t *testing.T, mk Factory) {
 	t.Run("SweepReclaimsOnlyOrphans", func(t *testing.T) { testSweep(t, mk) })
 	t.Run("SweepSkipsBuilding", func(t *testing.T) { testSweepBuilding(t, mk) })
 	t.Run("UsageReportsWrittenBytes", func(t *testing.T) { testUsage(t, mk) })
+
+	// Snapshot / Clone (§5.C / volume.md D6.1a). On the arm without the capability
+	// these assert the TYPED refusal with no side effect; on the arm with it, that the
+	// cap is actually written — which is the failure that is silent and undetectable
+	// afterwards.
+	t.Run("SnapshotAndCloneOrTypedRefusal", func(t *testing.T) { testSnapshotClone(t, mk) })
+	t.Run("SnapshotCapIsWrittenNotInherited", func(t *testing.T) { testSnapshotCap(t, mk) })
+}
+
+// testSnapshotClone: either the backend supports them and produces an ORDINARY
+// WRITABLE volume carrying the source's bytes, or it refuses with a typed error and
+// leaves nothing behind.
+func testSnapshotClone(t *testing.T, mk Factory) {
+	b := mk(t)
+	if err := b.CreateVolume(ctx(), "vol_src", 0); err != nil {
+		t.Fatalf("create source: %v", err)
+	}
+	r, err := b.OpenRoot(ctx(), "vol_src")
+	if err != nil {
+		t.Fatalf("open source: %v", err)
+	}
+	const marker = "SOURCE-CONTENT"
+	if _, err := r.WriteAt("f", []byte(marker), 0); err != nil {
+		t.Fatalf("seed source: %v", err)
+	}
+	r.Close()
+
+	caps := b.Capabilities()
+	for _, tc := range []struct {
+		name      string
+		supported bool
+		call      func(newID string) error
+	}{
+		{"snapshot", caps.Snapshot, func(id string) error { return b.Snapshot(ctx(), "vol_src", id, 0) }},
+		{"clone", caps.Clone, func(id string) error { return b.Clone(ctx(), "vol_src", id, 0) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			newID := "vol_" + tc.name
+			err := tc.call(newID)
+			if !tc.supported {
+				if !errors.Is(err, volume.ErrUnsupported) {
+					t.Fatalf("%s on a backend that does not report the capability = %v; want volume.ErrUnsupported — it must be a clean typed refusal, never a silent no-op and never a faked tree copy", tc.name, err)
+				}
+				// AND no side effect: a refusal must not leave a half-made volume.
+				if _, err := b.OpenRoot(ctx(), newID); err == nil {
+					t.Errorf("the refused %s left a volume behind", tc.name)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("%s: %v", tc.name, err)
+			}
+			// It carries the source's bytes...
+			nr, err := b.OpenRoot(ctx(), newID)
+			if err != nil {
+				t.Fatalf("open the %s: %v", tc.name, err)
+			}
+			defer nr.Close()
+			buf := make([]byte, len(marker))
+			if _, err := nr.ReadAt("f", buf, 0); err != nil && err != io.EOF {
+				t.Fatalf("read the %s: %v", tc.name, err)
+			}
+			if string(buf) != marker {
+				t.Errorf("%s content = %q, want the source's %q", tc.name, buf, marker)
+			}
+			// ...and it is WRITABLE, with no read-only marker (volume.md D6.1a: it is an
+			// ordinary volume; immutability is expressed by a shared-ro MOUNT ROW instead).
+			if _, err := nr.WriteAt("written-into-the-copy", []byte("x"), 0); err != nil {
+				t.Errorf("the %s is not writable: %v — §5.C produces an ORDINARY WRITABLE volume, and the measured 'the writer pays' property is only meaningful if it is", tc.name, err)
+			}
+			// The SOURCE is unaffected by writes to the copy.
+			sr, err := b.OpenRoot(ctx(), "vol_src")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer sr.Close()
+			if _, err := sr.Stat("written-into-the-copy"); err == nil {
+				t.Errorf("a write into the %s appeared in the SOURCE — they must be independent units", tc.name)
+			}
+		})
+	}
+}
+
+// testSnapshotCap is the one that guards the SILENT failure (volume.md D7.3): the
+// substrate hands a snapshot a brand-new UNCAPPED quota row, so the cap must be written
+// by the snapshot operation itself — and an implementation that forgets cannot be caught
+// afterwards, because the limit read maps "never capped" and 0 onto each other.
+func testSnapshotCap(t *testing.T, mk Factory) {
+	b := mk(t)
+	if !b.Capabilities().Snapshot || !capable(b) {
+		t.Skip("this arm reports no snapshot or no quota capability; the cap assertion needs both")
+	}
+	// A source with a DIFFERENT cap, so an implementation that "inherited" would be
+	// visible as the wrong number rather than accidentally right.
+	const srcCap = 64 << 20
+	const newCap = 16 << 20
+	if err := b.CreateVolume(ctx(), "vol_capsrc", srcCap); err != nil {
+		t.Fatalf("create source: %v", err)
+	}
+	if err := b.Snapshot(ctx(), "vol_capsrc", "vol_capsnap", newCap); err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	_, limit, err := b.Usage(ctx(), "vol_capsnap")
+	if err != nil {
+		t.Fatalf("usage of the snapshot: %v", err)
+	}
+	if limit != newCap {
+		t.Fatalf("the snapshot's cap is %d, want the DECLARED %d (source had %d) — the substrate gives a snapshot an UNCAPPED row, so the cap must be written by the snapshot operation itself, and a miss is undetectable afterwards (volume.md D7.3)", limit, newCap, srcCap)
+	}
+	// The source's cap is untouched.
+	if _, srcLimit, err := b.Usage(ctx(), "vol_capsrc"); err != nil {
+		t.Fatal(err)
+	} else if srcLimit != srcCap {
+		t.Errorf("the source's cap changed to %d, want %d", srcLimit, srcCap)
+	}
+	// And an UNCAPPED snapshot really is uncapped rather than silently inheriting.
+	if err := b.Snapshot(ctx(), "vol_capsrc", "vol_uncapped", 0); err != nil {
+		t.Fatalf("uncapped snapshot: %v", err)
+	}
+	if _, limit, err = b.Usage(ctx(), "vol_uncapped"); err != nil {
+		t.Fatal(err)
+	} else if limit != 0 {
+		t.Errorf("a snapshot requested UNCAPPED came back with cap %d — the engine, not the substrate, is the authority on the cap", limit)
+	}
 }
 
 func ctx() context.Context { return context.Background() }
@@ -700,49 +824,78 @@ func testUncappedBytesGrows(t *testing.T, mk Factory) {
 	}
 }
 
-// testSweep is the positive-AND-negative pair, together in one call. A sweep test
-// that only checks "it did not delete the wrong thing" passes trivially for a sweep
-// that does NOTHING, so the same pass must also reclaim a real orphan.
+// testSweep covers the backend's half of orphan reclamation: ENUMERATION. The deciding
+// half is the mediator's, and that split is not cosmetic — it was forced by a measured
+// defect in the combined shape, where a volume whose whole creation fell between the
+// mediator's two pre-reads was in neither set and had its bytes deleted while fully
+// committed (see Backend.ListUnitIDs).
+//
+// So what the backend must deliver here is: every unit it holds, and an ERROR rather
+// than an empty list when it cannot tell.
 func testSweep(t *testing.T, mk Factory) {
 	b := mk(t)
-	for _, id := range []string{"vol_live", "vol_orphan"} {
+	for _, id := range []string{"vol_a", "vol_b"} {
 		if err := b.CreateVolume(ctx(), id, 0); err != nil {
 			t.Fatalf("create %s: %v", id, err)
 		}
 	}
-	n, err := b.SweepOrphanVolumes(ctx(), []string{"vol_live"}, nil)
+	ids, err := b.ListUnitIDs(ctx())
 	if err != nil {
-		t.Fatalf("sweep: %v", err)
+		t.Fatalf("enumerate: %v", err)
 	}
-	if n != 1 {
-		t.Errorf("sweep reclaimed %d, want exactly 1 (the orphan) — a sweep that reclaims nothing also passes a negative-only assertion", n)
+	got := map[string]bool{}
+	for _, id := range ids {
+		got[id] = true
 	}
-	if _, err := b.OpenRoot(ctx(), "vol_live"); err != nil {
-		t.Errorf("the LIVE volume was reclaimed: %v", err)
+	for _, want := range []string{"vol_a", "vol_b"} {
+		if !got[want] {
+			t.Errorf("enumeration is missing %s: %v — a unit the backend does not report can never be reclaimed", want, ids)
+		}
 	}
-	if _, err := b.OpenRoot(ctx(), "vol_orphan"); err == nil {
-		t.Errorf("the orphan volume survived the sweep")
+	// Enumeration is the INPUT to reclamation, and DestroyVolume is the action. Together
+	// they are what the mediator composes.
+	if err := b.DestroyVolume(ctx(), "vol_b"); err != nil {
+		t.Fatalf("destroy: %v", err)
+	}
+	ids, err = b.ListUnitIDs(ctx())
+	if err != nil {
+		t.Fatalf("re-enumerate: %v", err)
+	}
+	for _, id := range ids {
+		if id == "vol_b" {
+			t.Errorf("a destroyed unit is still enumerated: %v", ids)
+		}
+	}
+	if _, err := b.OpenRoot(ctx(), "vol_a"); err != nil {
+		t.Errorf("the surviving volume was damaged: %v", err)
 	}
 }
 
-// testSweepBuilding: `building` protects an in-flight create. It matters MORE here
-// than on the Overlay side — volume creation is BYTES-FIRST (the ID must name the
-// unit before any row exists), so a perfectly healthy in-flight create presents as
-// "bytes, no row" even with a completely fresh keep-set.
+// testSweepBuilding: an empty backend enumerates to an empty list WITHOUT error, which
+// the mediator must be able to distinguish from a failed read — concluding "no units"
+// from a failure would reclaim everything.
 func testSweepBuilding(t *testing.T, mk Factory) {
 	b := mk(t)
+	ids, err := b.ListUnitIDs(ctx())
+	if err != nil {
+		t.Fatalf("enumerate an empty backend: %v", err)
+	}
+	if len(ids) != 0 {
+		t.Errorf("an empty backend enumerated %v", ids)
+	}
+	// And after a create it reports exactly that unit — the property that makes
+	// "bytes exist, no row" visible to the mediator at all, which matters MORE here than
+	// on the Overlay side: volume creation is BYTES-FIRST, so a healthy in-flight create
+	// presents in exactly that shape.
 	if err := b.CreateVolume(ctx(), "vol_building", 0); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	n, err := b.SweepOrphanVolumes(ctx(), nil, []string{"vol_building"})
+	ids, err = b.ListUnitIDs(ctx())
 	if err != nil {
-		t.Fatalf("sweep: %v", err)
+		t.Fatalf("enumerate: %v", err)
 	}
-	if n != 0 {
-		t.Errorf("sweep reclaimed %d units while one was in flight, want 0", n)
-	}
-	if _, err := b.OpenRoot(ctx(), "vol_building"); err != nil {
-		t.Errorf("an in-flight create was swept out from under itself: %v", err)
+	if len(ids) != 1 || ids[0] != "vol_building" {
+		t.Errorf("enumeration = %v, want exactly [vol_building]", ids)
 	}
 }
 

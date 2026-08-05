@@ -126,6 +126,10 @@ func (e *Engine) handleVolumeSub(w http.ResponseWriter, r *http.Request) {
 		e.handlePatchVolume(w, r, id)
 	case sub == "" && r.Method == http.MethodDelete:
 		e.handleDeleteVolume(w, r, id)
+	case sub == "snapshot" && r.Method == http.MethodPost:
+		e.handleDeriveVolume(w, r, id, false)
+	case sub == "clone" && r.Method == http.MethodPost:
+		e.handleDeriveVolume(w, r, id, true)
 	case sub == "import" && (r.Method == http.MethodPost || r.Method == http.MethodPut):
 		e.handleImportVolume(w, r, id)
 	case sub == "export" && r.Method == http.MethodGet:
@@ -198,6 +202,45 @@ func (e *Engine) handleDeleteVolume(w http.ResponseWriter, r *http.Request, id m
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// handleDeriveVolume is POST /v1/volumes/{id}/snapshot and .../clone (§6.1).
+//
+// BOTH TAKE `size` AND NEITHER INHERITS, for two independent reasons: the substrate has
+// nothing to inherit (a snapshot gets a brand-new UNCAPPED quota row — measured, and
+// verified by writing 3× the source's cap into one), and inheriting would silently
+// DOUBLE the node's declared disk claim at every snapshot without the caller asking.
+// §3.4 counts the DECLARED cap precisely because the real bytes are metadata-level.
+//
+// So `size` is conditionally required exactly as on create — the same §6.2 rule
+// appearing at its second and third endpoint, not a new rule. A backend that does not
+// support the operation is 400, and the capability is asked BEFORE any bytes move.
+//
+// The result is an ORDINARY WRITABLE volume carrying `parent`; there is no read-only
+// snapshot type (§5.C / volume.md D6.1a). Immutability is expressed by a shared-ro
+// mount row.
+func (e *Engine) handleDeriveVolume(w http.ResponseWriter, r *http.Request, id model.VolumeID, isClone bool) {
+	var req volumeCreateReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.Size < 0 {
+		http.Error(w, "size must be non-negative (0 = uncapped)", http.StatusBadRequest)
+		return
+	}
+	var newID model.VolumeID
+	var err error
+	if isClone {
+		newID, err = e.Mediator.CloneVolume(r.Context(), id, req.Size)
+	} else {
+		newID, err = e.Mediator.SnapshotVolume(r.Context(), id, req.Size)
+	}
+	if err != nil {
+		statusFor(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, volumeResp{VolumeID: string(newID), Size: req.Size})
+}
+
 type importResp struct {
 	VolumeID     string `json:"volume_id"`
 	Path         string `json:"path"`
@@ -267,6 +310,11 @@ func (e *Engine) handleExportVolume(w http.ResponseWriter, r *http.Request, id m
 // mounts.sandbox translation point was added to fix, reappearing one layer up.
 func volumeStatus(err error) (int, bool) {
 	switch {
+	case errors.Is(err, store.ErrVolumeHasDescendants):
+		// The FOURTH FK path: a live snapshot or clone names this volume as its parent.
+		// 409, and DISTINCT from ErrVolumeInUse because the remedy differs — delete the
+		// descendant rather than detach a mount (§6.1).
+		return http.StatusConflict, true
 	case errors.Is(err, store.ErrVolumeInUse):
 		// ① delete a volume a live mount row holds. A state conflict the caller resolves
 		// by detaching or destroying the holder.

@@ -123,6 +123,12 @@ CREATE INDEX IF NOT EXISTS outbox_unpublished ON outbox(seq) WHERE published_at 
 CREATE TABLE IF NOT EXISTS volumes (
 	id         TEXT PRIMARY KEY,           -- opaque "vol_<token>"
 	backend    TEXT NOT NULL,              -- which registered volume.Backend holds the bytes
+	-- lineage: the volume this one was snapshotted/cloned from. NULL = not derived.
+	-- ON DELETE RESTRICT is a CORRECTNESS lever, not tidiness: a quota row leaks exactly
+	-- when a unit owning extents is deleted while a live sharer references them, and
+	-- measured, deleting sharers BEFORE the source leaks nothing. RESTRICT makes that
+	-- order the only reachable one, so the leak is PREVENTED rather than reclaimed.
+	parent     TEXT REFERENCES volumes(id) ON DELETE RESTRICT,
 	-- per-volume capacity cap, 0 = uncapped (§5.C / §3.4). THIS COLUMN IS THE
 	-- AUTHORITY: the substrate maps "no cap" and 0 onto each other in both
 	-- directions, so a read-back cannot distinguish "never capped" from
@@ -604,22 +610,34 @@ func (s *SQLite) CreateVolume(ctx context.Context, v model.Volume) error {
 		} else if !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
-		_, err := t.Exec(
-			`INSERT INTO volumes(id, backend, cap_byte, created_at) VALUES(?,?,?,?)`,
-			string(v.ID), v.Backend, v.CapByte, v.CreatedAt.UnixNano(),
-		)
-		return err
+		// parent is nullable: an empty VolumeID becomes SQL NULL (not derived). A
+		// non-NULL parent is FK-checked here, and a missing one translates to
+		// ErrVolumeNotFound (§4.3 reference side).
+		var parent any
+		if v.Parent != "" {
+			parent = string(v.Parent)
+		}
+		if _, err := t.Exec(
+			`INSERT INTO volumes(id, backend, parent, cap_byte, created_at) VALUES(?,?,?,?,?)`,
+			string(v.ID), v.Backend, parent, v.CapByte, v.CreatedAt.UnixNano(),
+		); err != nil {
+			if isFKViolation(err) {
+				return ErrVolumeNotFound // the named parent does not exist
+			}
+			return err
+		}
+		return nil
 	})
 }
 
 func (s *SQLite) GetVolume(ctx context.Context, id model.VolumeID) (model.Volume, error) {
 	return scanVolume(s.db.QueryRowContext(ctx,
-		`SELECT id, backend, cap_byte, created_at FROM volumes WHERE id=?`, string(id)))
+		`SELECT id, backend, parent, cap_byte, created_at FROM volumes WHERE id=?`, string(id)))
 }
 
 func (s *SQLite) ListVolumes(ctx context.Context) ([]model.Volume, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, backend, cap_byte, created_at FROM volumes ORDER BY created_at`)
+		`SELECT id, backend, parent, cap_byte, created_at FROM volumes ORDER BY created_at`)
 	if err != nil {
 		return nil, err
 	}
@@ -656,10 +674,15 @@ func (s *SQLite) DeleteVolume(ctx context.Context, id model.VolumeID) error {
 	return s.tx(ctx, func(t *sql.Tx) error {
 		res, err := t.Exec(`DELETE FROM volumes WHERE id=?`, string(id))
 		if err != nil {
-			// mounts.volume RESTRICT: a live mount row holds it. Its OWN sentinel, not
-			// ErrInUse — that one's text names a Template (§6.2: the verdicts must be
-			// distinguishable, and a 409 naming the wrong object misdirects the caller).
 			if isFKViolation(err) {
+				// TWO RESTRICT paths land here and the caller's remedy differs, so they must be
+				// told apart rather than collapsed: a mount row means "detach it", a descendant
+				// means "delete the snapshot". SQLite reports the same message text for both, so
+				// the distinction is drawn by asking WHICH reference exists.
+				var exists int
+				if qerr := t.QueryRow(`SELECT 1 FROM volumes WHERE parent=? LIMIT 1`, string(id)).Scan(&exists); qerr == nil {
+					return ErrVolumeHasDescendants
+				}
 				return ErrVolumeInUse
 			}
 			return err
@@ -864,8 +887,9 @@ func NormalizeMountPath(p string) string { return normalizedMountPath(p) }
 func scanVolume(r rowScanner) (model.Volume, error) {
 	var v model.Volume
 	var id, backend string
+	var parent sql.NullString
 	var capByte, created int64
-	err := r.Scan(&id, &backend, &capByte, &created)
+	err := r.Scan(&id, &backend, &parent, &capByte, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return model.Volume{}, ErrVolumeNotFound
 	}
@@ -874,6 +898,7 @@ func scanVolume(r rowScanner) (model.Volume, error) {
 	}
 	v.ID = model.VolumeID(id)
 	v.Backend = backend
+	v.Parent = model.VolumeID(parent.String) // "" when NULL
 	v.CapByte = capByte
 	v.CreatedAt = time.Unix(0, created)
 	return v, nil

@@ -468,47 +468,105 @@ func (m *Mediator) SweepOrphanVolumes(ctx context.Context) error {
 	if be == nil {
 		return nil
 	}
+	// ENUMERATE FIRST, then decide. The order is what closes a MEASURED window: with the
+	// diff done inside the backend from two pre-read sets, a volume whose whole creation
+	// fit between the `live` read and the `building` read was in neither, and the backend
+	// deleted the bytes of a FULLY COMMITTED volume (measured: 3 of 6 snapshots destroyed
+	// under 458 overlapping sweeps).
+	//
+	// Enumerating first means every candidate's bytes already existed before any of the
+	// checks below ran, which is what makes those checks conclusive.
+	units, err := be.ListUnitIDs(ctx)
+	if err != nil {
+		// Reclaim NOTHING: an unreadable enumeration is not evidence that anything is an
+		// orphan (§5.C — never conclude "no owner" from a failed read).
+		return fmt.Errorf("sweep volumes: enumerate units: %w", err)
+	}
+	if len(units) == 0 {
+		return nil
+	}
+
 	vols, err := m.deps.Store.ListVolumes(ctx)
 	if err != nil {
 		return fmt.Errorf("sweep volumes: list volumes: %w", err)
 	}
-	live := make([]string, 0, len(vols))
+	keep := make(map[string]bool, len(vols))
 	for _, v := range vols {
-		live = append(live, string(v.ID))
+		keep[string(v.ID)] = true
 	}
-	// A CHECK INDEPENDENT OF ANY FK (§5.C safety requirement): skip any volume that
-	// appears in ANY mount row, live or not. FK RESTRICT protects the ROW; this
-	// protects the BYTES, and the bytes are what a mis-sweep destroys — silently, with
-	// the guest's writes still returning success into an unlinked inode. A volume with
-	// a mount row is already in `live` via its own record, so this is belt AND braces
-	// on purpose: it survives a record that is somehow missing while a mount row
-	// remains.
+	// A CHECK INDEPENDENT OF ANY FK (§5.C safety requirement): keep any volume appearing
+	// in ANY mount row, live or not. FK RESTRICT protects the ROW; this protects the
+	// BYTES, and the bytes are what a mis-sweep destroys — silently, with the guest's
+	// writes still returning success into an unlinked inode. Belt AND braces on purpose:
+	// it survives a record that has somehow gone while a mount row remains.
 	for _, v := range vols {
 		rows, err := m.deps.Store.ListMountsByVolume(ctx, v.ID)
 		if err != nil {
-			// Read failure → reclaim NOTHING this pass. Never conclude "no owner" from a
-			// failed or empty read (measured: under concurrent churn a bulk read fails
-			// wholesale and returns zero rows — exactly the condition a sweep runs in).
 			return fmt.Errorf("sweep volumes: read mount table for %s: %w", v.ID, err)
 		}
 		if len(rows) > 0 {
-			live = append(live, string(v.ID))
+			keep[string(v.ID)] = true
 		}
 	}
-	building := m.buildingVolumeIDs()
-	// In-flight DIRECT WRITES join the keep-set: a volume being written to right now is
-	// in use even though nothing has it mounted, and that is precisely the case no
-	// mount row can express (§5.C — the marker and the write-regime decision are
-	// published in one critical section for this reason).
-	building = append(building, m.inFlightWriteIDs()...)
-	n, err := be.SweepOrphanVolumes(ctx, live, building)
-	if err != nil {
-		return fmt.Errorf("sweep volumes: %w", err)
+
+	reclaimed := 0
+	var failed []string
+	for _, id := range units {
+		if keep[id] {
+			continue
+		}
+		// A candidate with no row. Before destroying it, TWO checks whose ORDER is the
+		// whole correctness argument:
+		//
+		//  1. the in-flight sets — an in-flight create or a direct write in progress is
+		//     "bytes, no row" by construction, not an orphan; and
+		//  2. a FRESH per-candidate store read.
+		//
+		// Check 1 before check 2 is what makes the pair conclusive. The in-flight mark is
+		// dropped only AFTER the row is inserted, so a candidate that is NOT marked here
+		// has necessarily already committed its row — and check 2 then finds it. A
+		// candidate that IS marked is skipped outright. There is no third case, so no
+		// committed volume can be reclaimed, and no lock is held across a store call.
+		if m.isVolumeInFlight(model.VolumeID(id)) {
+			continue
+		}
+		if _, err := m.deps.Store.GetVolume(ctx, model.VolumeID(id)); err == nil {
+			// Its row landed after the snapshot above: not an orphan.
+			continue
+		} else if !errors.Is(err, store.ErrVolumeNotFound) {
+			// Unreadable → skip. An error is not evidence of absence.
+			m.deps.Logf("sweep volumes: %s: record unreadable, skipping: %v", id, err)
+			continue
+		}
+		// Genuinely an orphan: bytes exist, no row, nothing in flight.
+		if err := be.DestroyVolume(ctx, id); err != nil {
+			// CONTINUE, do not abort: this is a best-effort reclamation path and one stuck
+			// unit must not leave every other leak in place. The sweep is idempotent, so
+			// whatever failed is retried next pass.
+			failed = append(failed, fmt.Sprintf("%s: %v", id, err))
+			continue
+		}
+		reclaimed++
 	}
-	if n > 0 {
-		m.deps.Logf("sweep volumes: reclaimed %d orphan volume unit(s)", n)
+	if reclaimed > 0 {
+		m.deps.Logf("sweep volumes: reclaimed %d orphan volume unit(s)", reclaimed)
+	}
+	if len(failed) > 0 {
+		return fmt.Errorf("sweep volumes: reclaim unit(s): %s", strings.Join(failed, "; "))
 	}
 	return nil
+}
+
+// isVolumeInFlight reports whether a volume has an in-flight create/derive or an
+// in-flight direct write. Both are "bytes exist, no row (yet)" by construction.
+//
+// One accessor over both maps under ONE acquisition of mu, rather than two calls: a
+// candidate must not be able to slip between them by finishing one and starting the
+// other.
+func (m *Mediator) isVolumeInFlight(id model.VolumeID) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.buildingVolumes[id] || m.inFlightWrites[id] > 0
 }
 
 // RebindVolumes replaces a sandbox's WHOLE mount binding (§6.1 PATCH `volumes`).
@@ -735,4 +793,212 @@ func (m *Mediator) buildingVolumeIDs() []string {
 		out = append(out, string(id))
 	}
 	return out
+}
+
+// SnapshotVolume / CloneVolume produce a NEW volume from an existing one (§6.1
+// POST /v1/volumes/{id}/snapshot and .../clone).
+//
+// They are two entry points over one backend path on the local arm, because that is
+// what the substrate is: the same whole-tree operation, differing in the semantic label
+// (volume.md D6.1a). Keeping them separate is what lets a backend supporting only one
+// say so through Capabilities.
+//
+// The product is AN ORDINARY WRITABLE VOLUME with a `parent`, not a distinct read-only
+// type. Same cardinality argument as AccessMode: writability is a per-MOUNT verdict, so
+// a per-volume read-only flag could not be honest — and the measured "the writer pays,
+// in both directions" property is only meaningful while a snapshot is writable. Want
+// immutability? Use a shared-ro mount row.
+//
+// `size` IS REQUIRED WHEN DISK IS METERED and is NEVER inherited. Two independent
+// reasons: the substrate has nothing to inherit (a snapshot gets a brand-new UNCAPPED
+// quota row — measured in four shapes and verified by writing 3× the source's cap into
+// one), and on the policy side inheriting would silently DOUBLE the node's declared disk
+// claim at every snapshot, which the caller never asked for. §3.4 counts the DECLARED
+// cap precisely because the real bytes are metadata-level (~16 KiB).
+func (m *Mediator) SnapshotVolume(ctx context.Context, srcID model.VolumeID, capBytes int64) (model.VolumeID, error) {
+	return m.deriveVolume(ctx, srcID, capBytes, false)
+}
+
+func (m *Mediator) CloneVolume(ctx context.Context, srcID model.VolumeID, capBytes int64) (model.VolumeID, error) {
+	return m.deriveVolume(ctx, srcID, capBytes, true)
+}
+
+// deriveVolume is the shared body. The ORDER of its steps is the whole content:
+//
+//	capability → id → keep-set → gate → BYTES+CAP (one backend call) → row
+//
+// CAPABILITY FIRST, before an ID is minted and before a byte moves (volume.md D2). An
+// external implementation maps "unsupported" at its HTTP boundary while the error is
+// born deep inside, so its 400 arrives only after the source has been fetched, flushed
+// and materialized — and combined with mediator-minted IDs, a late check leaves a window
+// whose residue no sweep can classify.
+//
+// THE CAP IS WRITTEN INSIDE THE BACKEND CALL, never by a follow-up PATCH. It is
+// necessarily the second substrate operation (no parameter makes the copy carry a cap),
+// so the window "bytes exist, cap not set" is REAL — and a missed cap is SILENT AND
+// UNDETECTABLE AFTERWARDS, because the limit read maps "never capped" and 0 onto each
+// other. The window is covered twice: the in-flight keep-set spans it, and the sweep
+// treats "record exists, quota row uncapped" as a REPAIR state (see repairUncappedVolumes).
+func (m *Mediator) deriveVolume(ctx context.Context, srcID model.VolumeID, capBytes int64, isClone bool) (model.VolumeID, error) {
+	kind := "snapshot"
+	if isClone {
+		kind = "clone"
+	}
+	if capBytes < 0 {
+		return "", fmt.Errorf("%s volume: size must be non-negative (0 = uncapped), got %d", kind, capBytes)
+	}
+	be := m.deps.Volume
+	if be == nil {
+		return "", fmt.Errorf("%s volume: no volume backend registered", kind)
+	}
+	caps := be.Capabilities()
+	supported := caps.Snapshot
+	if isClone {
+		supported = caps.Clone
+	}
+	if !supported {
+		return "", fmt.Errorf("%s volume: %w: backend %q does not support %s", kind, ErrVolumeCapUnsupported, be.Name(), kind)
+	}
+	if capBytes > 0 && !caps.Quota {
+		return "", fmt.Errorf("%s volume: %w: backend %q cannot enforce a capacity cap", kind, ErrVolumeCapUnsupported, be.Name())
+	}
+
+	src, err := m.deps.Store.GetVolume(ctx, srcID)
+	if err != nil {
+		return "", fmt.Errorf("%s volume: %w", kind, err)
+	}
+
+	newID := model.VolumeID("vol_" + randToken())
+	rec := model.Volume{
+		ID: newID, Backend: be.Name(), Parent: srcID, CapByte: capBytes, CreatedAt: time.Now(),
+	}
+
+	// Registered BEFORE anything exists, so there is no instant in which bytes could sit
+	// unprotected — and this keep-set is what spans the bytes-then-cap window.
+	m.markBuildingVolume(newID)
+	defer m.unmarkBuildingVolume(newID)
+
+	m.admitMu.Lock()
+	if err := m.admitVolume(ctx, capBytes); err != nil {
+		m.admitMu.Unlock()
+		return "", err
+	}
+	// ONE backend call that both copies the bytes and writes the cap.
+	if isClone {
+		err = be.Clone(ctx, string(srcID), string(newID), capBytes)
+	} else {
+		err = be.Snapshot(ctx, string(srcID), string(newID), capBytes)
+	}
+	if err != nil {
+		m.admitMu.Unlock()
+		if errors.Is(err, volume.ErrUnsupported) {
+			return "", fmt.Errorf("%s volume: %w: %v", kind, ErrVolumeCapUnsupported, err)
+		}
+		return "", fmt.Errorf("%s volume: %w", kind, err)
+	}
+	// FAULT INJECTION POINT (test-only): simulate a crash between the backend operation
+	// and the row insert — the window that leaves a live, registered, UNCAPPED volume if
+	// the cap were not written inside the call above.
+	if m.deps.FaultAfterVolumeBytes != nil {
+		m.deps.FaultAfterVolumeBytes(newID)
+	}
+	err = m.deps.Store.CreateVolume(ctx, rec)
+	m.admitMu.Unlock()
+	if err != nil {
+		if derr := be.DestroyVolume(ctx, string(newID)); derr != nil {
+			m.deps.Logf("%s volume: unwind %s left bytes behind (the orphan sweep will retry): %v", kind, newID, derr)
+		}
+		return "", fmt.Errorf("%s volume: insert record: %w", kind, err)
+	}
+	_ = src // the record was read to validate existence before any bytes moved
+	return newID, nil
+}
+
+// repairUncappedVolumes is the §5.C / volume.md D7.3 REPAIR-STATE pass: a volume whose
+// RECORD declares a cap while its storage carries none.
+//
+// IT IS A REPAIR STATE, NOT A LEGAL ONE, and that distinction is the point. Writing the
+// cap is necessarily the second substrate call after a snapshot, so a crash in between
+// leaves a volume that is registered, live, and UNCAPPED — and nothing detects that
+// afterwards on its own, because the limit read maps "never capped" and 0 onto each
+// other. So the engine must re-assert the record's cap rather than trust what it finds.
+//
+// The direction is always RECORD → STORAGE. The record is the only authority (§3.4), so
+// a disagreement is always resolved by rewriting the storage, never by adopting the
+// storage's value into the record — the latter would silently ratify exactly the crash
+// residue this exists to fix.
+//
+// Runs in the same boot position as the orphan sweep, BEFORE anything creates a unit.
+func (m *Mediator) RepairVolumeCaps(ctx context.Context) error {
+	be := m.deps.Volume
+	if be == nil || !be.Capabilities().Quota {
+		return nil // nothing can be capped, so nothing can be missing a cap
+	}
+	vols, err := m.deps.Store.ListVolumes(ctx)
+	if err != nil {
+		return fmt.Errorf("repair volume caps: list volumes: %w", err)
+	}
+	repaired := 0
+	for _, v := range vols {
+		if v.CapByte <= 0 {
+			continue // the record says uncapped, so "no cap on storage" is correct
+		}
+		_, limit, err := be.Usage(ctx, string(v.ID))
+		if err != nil {
+			// Unreadable: draw no conclusion and change nothing (the same discipline the
+			// sweep follows — an unreadable state is not evidence of anything).
+			m.deps.Logf("repair volume caps: %s: usage unreadable, skipping: %v", v.ID, err)
+			continue
+		}
+		if limit == v.CapByte {
+			continue
+		}
+		// Disagreement. Re-assert the RECORD's cap.
+		if err := be.SetCapacity(ctx, string(v.ID), v.CapByte); err != nil {
+			m.deps.Logf("repair volume caps: %s: could not re-assert the recorded cap %d (storage reports %d): %v", v.ID, v.CapByte, limit, err)
+			continue
+		}
+		repaired++
+		m.deps.Logf("repair volume caps: %s carried %d on storage but %d in the record — re-asserted the record's cap (this is the crash window between a snapshot and its cap write, volume.md D7.3)", v.ID, limit, v.CapByte)
+	}
+	if repaired > 0 {
+		m.deps.Logf("repair volume caps: re-asserted %d cap(s)", repaired)
+	}
+	return nil
+}
+
+// ReclaimQuotaRows runs the §5.C / D7 leaked-quota-row reclamation round.
+//
+// A leaked row is a CORRECTNESS problem, not untidiness: it does not reserve its own
+// unit id, so a remount can hand that id — along with its CAP — to a brand-new volume,
+// which then hits ENOSPC on a limit nobody set for it (measured: a never-capped unit hit
+// ENOSPC at 3.3 MB) or is silently over-provisioned, with the engine unable to tell from
+// the inside.
+//
+// The `parent` FK demotes this from the MAIN path to a BACKSTOP: leaking requires
+// deleting a source while a live sharer remains, and RESTRICT makes that unreachable
+// through the API (→ 409). What is left are paths that do not pass through user intent —
+// a crash between deleting a sharer and deleting the source, and the sweep's own
+// per-unit ordering. That is exactly why its error handling is "leave it for the next
+// round" rather than "block".
+func (m *Mediator) ReclaimQuotaRows(ctx context.Context) error {
+	be := m.deps.Volume
+	if be == nil {
+		return nil
+	}
+	ids := be.DeletedRowIDs(ctx)
+	if len(ids) == 0 {
+		return nil
+	}
+	n, err := be.ReclaimQuotaRows(ctx, ids)
+	if n > 0 {
+		m.deps.Logf("reclaim quota rows: reclaimed %d leaked row(s)", n)
+	}
+	if err != nil {
+		// Informational, not fatal: every row named in it stays recorded and is retried.
+		// A `<squota space holder>` can legitimately resist reclamation for a live clone's
+		// entire lifetime, so this is normal operation rather than an error path.
+		m.deps.Logf("reclaim quota rows: %v", err)
+	}
+	return nil
 }

@@ -180,6 +180,31 @@ func (c Client) DeleteSubvolume(ctx context.Context, path string) error {
 	return nil
 }
 
+// Snapshot creates a WRITABLE snapshot of the subvolume at src, at dst. Whole-tree,
+// atomic and effectively instantaneous — measured, a new snapshot costs about 16 KiB of
+// exclusive metadata and copies no data.
+//
+// WRITABLE (no `-r`) because that is what §5.C's snapshot object is: an ordinary
+// writable volume, with immutability expressed by a read-only MOUNT ROW instead
+// (volume.md D6.1a). It also avoids a substrate wrinkle worth knowing about even though
+// the design path does not hit it: on this progs version a read-only unit must have its
+// ro property cleared before it can be deleted at all, so any code that creates one —
+// including test fixtures and cleanup traps — has to carry that step unconditionally.
+//
+// IT DOES NOT CARRY A CAP, and no flag makes it. The new unit gets a brand-new UNCAPPED
+// quota row, so the caller MUST set the cap in a second call; `-i <qgroupid>` looks like
+// the missing flag but sets MEMBERSHIP, whose limit is shared across all members (one
+// member exhausting it makes its SIBLINGS hit ENOSPC). See volume.Backend.Snapshot.
+func (c Client) Snapshot(ctx context.Context, src, dst string) error {
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return fmt.Errorf("btrfs: parent dir for %s: %w", dst, err)
+	}
+	if _, err := c.run(ctx, "subvolume", "snapshot", src, dst); err != nil {
+		return fmt.Errorf("btrfs: snapshot %s → %s: %w", src, dst, err)
+	}
+	return nil
+}
+
 // SetQuotaLimit caps the subvolume at path to limitByte (0 = remove the cap).
 //
 // This is the enforcement point for the §3.4 capacity axis: past the cap the
@@ -228,6 +253,141 @@ func (c Client) Usage(ctx context.Context, path string) (used, limit int64, err 
 		return used, limit, nil
 	}
 	return 0, 0, fmt.Errorf("btrfs: no qgroup row for %s (quotas disabled on this fs?)", path)
+}
+
+// QuotaRowState is what a quota row's LABEL says about it, which is the only
+// available predicate for whether the row can be reclaimed (see QuotaRowByID).
+type QuotaRowState string
+
+const (
+	// RowAbsent: the row is gone. Nothing to reclaim.
+	RowAbsent QuotaRowState = "absent"
+	// RowLive: the row belongs to a live unit (its label is a path). It must NEVER be
+	// touched — clearing a live unit's limit is the one operation that breaks an engine
+	// promise beyond data integrity, and unlike destroy it has no EBUSY self-protection.
+	RowLive QuotaRowState = "live"
+	// RowStale: the unit is deleted, its deletion has settled, and no sharer references
+	// its extents. THE ONLY DESTROYABLE STATE — measured, destroy succeeds exactly when
+	// the label is `<stale>`.
+	RowStale QuotaRowState = "stale"
+	// RowUnderDeletion: the transient right after a delete, before the cleaner has run.
+	// Destroy returns EBUSY; retry after a settle.
+	RowUnderDeletion QuotaRowState = "under-deletion"
+	// RowSpaceHolder: deleted, but a LIVE SHARER still references its extents. Destroy
+	// returns EBUSY, and this can legitimately persist for the ENTIRE LIFETIME of a live
+	// clone — so a sweep must leave it for a later round rather than spinning on it.
+	RowSpaceHolder QuotaRowState = "space-holder"
+	// RowUnknown: the read FAILED. Measured hazard, and the reason this value exists as
+	// a first-class answer rather than being folded into RowAbsent: under concurrent
+	// churn a bulk quota read fails WHOLESALE and returns zero rows (about 1 in 150),
+	// and those are exactly the conditions a sweep runs in. A reader that treats an
+	// empty result as "the row is gone" SILENTLY SKIPS A DESTROY, which is a permanent
+	// leak. Callers must draw no conclusion from this.
+	RowUnknown QuotaRowState = "unknown"
+)
+
+// QuotaRowByID reports the state of the quota row for subvolume id, by READING ITS
+// LABEL.
+//
+// BY ID, RECORDED AT DELETE TIME — never by scanning rows for something that looks
+// reclaimable. The failure mode of scanning is an uncapped LIVE volume plus zero
+// signal: a scan that misidentifies a row and clears its limit produces exactly that,
+// and nothing downstream can detect it (§5.C requires locating rows by the id recorded
+// at deletion for this reason).
+//
+// The state comes from the label because that is the only predicate the substrate
+// offers, and it CANNOT false-positive on a running unit: a live unit's label is its
+// PATH, while every reclaimable state is a `<...>` marker.
+//
+// A FAILED READ RETURNS RowUnknown, never RowAbsent. See RowUnknown.
+func (c Client) QuotaRowByID(ctx context.Context, id uint64, mountPoint string) QuotaRowState {
+	// -re --raw --sync, matching Usage: --sync so the answer reflects writes a
+	// background transaction has not committed yet.
+	out, err := c.run(ctx, "qgroup", "show", "-re", "--raw", "--sync", mountPoint)
+	if err != nil {
+		// The read failed WHOLESALE, which happens under exactly the concurrent churn a
+		// sweep runs in. Report it as unknown so the caller skips rather than concludes.
+		return RowUnknown
+	}
+	want := "0/" + strconv.FormatUint(id, 10)
+	for _, line := range strings.Split(string(out), "\n") {
+		f := strings.Fields(line)
+		if len(f) < 1 || f[0] != want {
+			continue
+		}
+		// qgroupid referenced exclusive max_referenced max_exclusive [path/label...]
+		if len(f) < 6 {
+			// A row with no label column at all: present, but nothing says it is
+			// reclaimable, so it is treated as live (the conservative direction).
+			return RowLive
+		}
+		label := strings.Join(f[5:], " ")
+		switch {
+		case strings.Contains(label, "<stale>"):
+			return RowStale
+		case strings.Contains(label, "<under deletion>"):
+			return RowUnderDeletion
+		case strings.Contains(label, "squota space holder"):
+			return RowSpaceHolder
+		default:
+			// A path, i.e. a LIVE unit. Never destroy, never clear.
+			return RowLive
+		}
+	}
+	return RowAbsent
+}
+
+// DestroyQuotaRow destroys the quota row for subvolume id.
+//
+// Separate from DeleteSubvolume's best-effort destroy, which cannot serve here: that
+// one fires immediately after the delete, when the row is `<under deletion>` or
+// `<squota space holder>` and the destroy therefore returns EBUSY. Reclaiming a
+// leaked row needs a LATER attempt, made when the label says the row is reclaimable —
+// which is why this is its own entry point taking an id rather than a path (the path
+// is gone by then).
+//
+// Returns the error verbatim so a caller can distinguish "destroyed" from EBUSY. It
+// must NOT be retried in a tight loop on EBUSY: a `<squota space holder>` can
+// legitimately be undestroyable for the entire lifetime of a live clone, so a bounded
+// number of rounds and then leaving the row is the correct behavior, not an error path.
+func (c Client) DestroyQuotaRow(ctx context.Context, id uint64, mountPoint string) error {
+	if _, err := c.run(ctx, "qgroup", "destroy", "0/"+strconv.FormatUint(id, 10), mountPoint); err != nil {
+		return fmt.Errorf("btrfs: destroy quota row 0/%d: %w", id, err)
+	}
+	return nil
+}
+
+// SubvolumeID exposes the numeric id, which names the quota row (0/<id>). It must be
+// captured BEFORE a delete: afterwards the path is unresolvable and the id is the only
+// handle on the row that delete may have leaked.
+func (c Client) SubvolumeID(ctx context.Context, path string) (uint64, error) {
+	return c.subvolumeID(ctx, path)
+}
+
+// MountPoint exposes the filesystem mount point containing path — the argument the
+// quota-row calls need, since they address a FILESYSTEM rather than a subvolume path.
+// Also captured before a delete, for the same reason.
+func (c Client) MountPoint(ctx context.Context, path string) (string, error) {
+	return c.mountPoint(ctx, path)
+}
+
+// Sync forces a commit and then waits for pending subvolume deletions to settle.
+//
+// THE ORDER IS THE WHOLE POINT, and it is a measured finding rather than a style
+// choice: `subvolume sync` ALONE blocks until the next periodic commit (measured 3–16
+// SECONDS), while preceding it with `filesystem sync` forces that commit so the pair
+// returns in 14–29 ms. Same effect, but bounded instead of "wait for a commit".
+//
+// Called ONCE PER SWEEP ROUND rather than once per unit, which is the other half of
+// keeping it bounded.
+func (c Client) Sync(ctx context.Context, mountPoint string) error {
+	if _, err := c.run(ctx, "filesystem", "sync", mountPoint); err != nil {
+		return fmt.Errorf("btrfs: filesystem sync %s: %w", mountPoint, err)
+	}
+	if _, err := c.run(ctx, "subvolume", "sync", mountPoint); err != nil {
+		return fmt.Errorf("btrfs: subvolume sync %s: %w", mountPoint, err)
+	}
+	return nil
 }
 
 // subvolumeID reads the numeric subvolume id, which names its qgroup (0/<id>).

@@ -87,6 +87,10 @@ func RunContract(t *testing.T, mk Factory) {
 	t.Run("ForeignKeyEnforcementItself", func(t *testing.T) { testFKEnforcement(t, mk) })
 	t.Run("MountDurability", func(t *testing.T) { testMountDurability(t, mk) })
 
+	// Volume lineage (§5.C / volume.md D6.1a): the FOURTH FK path, and the fourth
+	// distinct verdict.
+	t.Run("VolumeLineageProtection", func(t *testing.T) { testVolumeLineage(t, mk) })
+
 	// §4.4-C under CONCURRENT writers. Every other subtest here is
 	// single-threaded, so a backend whose CAS is not genuinely atomic — read,
 	// then write, without holding anything across the two — would pass all of
@@ -2015,5 +2019,60 @@ func testMountDurability(t *testing.T, mk Factory) {
 	seedSbx(t, s2, "sbx_b")
 	if err := s2.CreateMounts(ctx, []model.Mount{mount("sbx_b", "vol_1", "/data", model.Exclusive)}); !errors.Is(err, store.ErrMountLeaseConflict) {
 		t.Errorf("the exclusive lease did not survive the restart (got %v) — a crash KEEPING the lease is correct behavior (§5.C)", err)
+	}
+}
+
+// testVolumeLineage is the fourth FK path: a volume with a live snapshot or clone cannot
+// be deleted, and the verdict is DISTINCT from "held by a mount row".
+//
+// The FK is a CORRECTNESS lever rather than tidiness (volume.md D6.1a / D7.1): a quota
+// row leaks exactly when a unit owning extents is deleted while a live sharer still
+// references them, and measured, deleting sharers BEFORE the source leaks nothing.
+// RESTRICT makes that order the only reachable one, so the leak is PREVENTED — which is
+// why the external implementation that chose a pointer with NO constraint had to
+// hand-write children checks in three places and got all three in reclamation guards
+// rather than in a delete guard.
+func testVolumeLineage(t *testing.T, mk Factory) {
+	ctx := context.Background()
+	s, _ := mk(t)
+	seedVol(t, s, "vol_src")
+	if err := s.CreateVolume(ctx, model.Volume{
+		ID: "vol_snap", Backend: "test", Parent: "vol_src", CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("create a snapshot with a parent: %v", err)
+	}
+	// Lineage round-trips.
+	got, err := s.GetVolume(ctx, "vol_snap")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Parent != "vol_src" {
+		t.Errorf("parent = %q, want vol_src", got.Parent)
+	}
+
+	// The SOURCE is protected, with its OWN verdict.
+	err = s.DeleteVolume(ctx, "vol_src")
+	if !errors.Is(err, store.ErrVolumeHasDescendants) {
+		t.Fatalf("delete a volume with a live snapshot = %v; want ErrVolumeHasDescendants", err)
+	}
+	if errors.Is(err, store.ErrVolumeInUse) {
+		t.Errorf("the lineage verdict is indistinguishable from the mount verdict — the caller's remedy differs (delete the descendant vs detach a mount), so they must not be collapsed (§6.1)")
+	}
+
+	// DELETE THE DESCENDANT FIRST, then the source: the order the FK forces, and the
+	// order measured to leak nothing.
+	if err := s.DeleteVolume(ctx, "vol_snap"); err != nil {
+		t.Fatalf("delete the snapshot: %v", err)
+	}
+	if err := s.DeleteVolume(ctx, "vol_src"); err != nil {
+		t.Errorf("delete the source after its descendant: %v", err)
+	}
+
+	// A snapshot naming a parent that does not exist loses cleanly (reference side of
+	// §4.3 atomicity).
+	if err := s.CreateVolume(ctx, model.Volume{
+		ID: "vol_orphan", Backend: "test", Parent: "vol_gone", CreatedAt: time.Now(),
+	}); !errors.Is(err, store.ErrVolumeNotFound) {
+		t.Errorf("create with a missing parent = %v; want ErrVolumeNotFound", err)
 	}
 }

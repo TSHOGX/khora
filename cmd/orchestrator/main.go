@@ -81,6 +81,23 @@ func main() {
 		log.Printf("orchestrator: boot orphan-volume sweep (retried by reaper): %v", err)
 	}
 
+	// §5.C / volume.md D7.3 CAP REPAIR, in the same pre-creation position and for a
+	// related reason: writing a snapshot's cap is necessarily the second substrate call,
+	// so a crash in between leaves a registered, live, UNCAPPED volume — and that is
+	// invisible afterwards on its own, because the limit read cannot tell "never capped"
+	// from "deliberately uncapped". The record is re-asserted onto the storage; the
+	// reverse direction would ratify the crash residue.
+	if err := eng.RepairVolumeCaps(context.Background()); err != nil {
+		log.Printf("orchestrator: boot volume-cap repair (retried by reaper): %v", err)
+	}
+
+	// §5.C / volume.md D7 LEAKED QUOTA ROWS. A leaked row does not reserve its own unit
+	// id, so a remount can hand that id — along with its cap — to a brand-new volume.
+	// Runs here, before anything creates a unit, for exactly that reason.
+	if err := eng.ReclaimQuotaRows(context.Background()); err != nil {
+		log.Printf("orchestrator: boot quota-row reclamation (retried by reaper): %v", err)
+	}
+
 	// §4.4-A startup reconciliation BEFORE serving: reclaim orphan placements
 	// left by a prior crash + re-adopt survivors so they are addressable again.
 	if err := eng.Reconcile(context.Background()); err != nil {

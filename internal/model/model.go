@@ -103,6 +103,27 @@ type Volume struct {
 	// route a later operation to the SAME backend that allocated the bytes.
 	Backend string
 
+	// Parent expresses LINEAGE: the volume this one was snapshotted or cloned from.
+	// Empty = not derived from anything. `REFERENCES volumes(id) ON DELETE RESTRICT`,
+	// exactly like templates.parent (§4.3 lineage, references point upward).
+	//
+	// THE FK IS A CORRECTNESS ARGUMENT, NOT TIDINESS (volume.md D6.1a / D7.1). A quota
+	// row leaks precisely when a unit that OWNS extents is deleted while a live sharer
+	// still references them — and measured, "delete the sharers first, then the source"
+	// leaks NOTHING. RESTRICT makes that order THE ONLY REACHABLE ONE: deleting a source
+	// with a live descendant becomes a 409, so the leak is PREVENTED rather than
+	// reclaimed. Free, and it introduces no new mechanism — it is §1.3's "add a join
+	// table" (self-referential here) reusing the existing FK-violation predicate.
+	//
+	// An external implementation is the counter-example that pins this: it chose a
+	// POINTER WITH NO CONSTRAINT (ADD COLUMN + index, no REFERENCES), so it had to
+	// hand-write children checks in three places — and all three were RECLAMATION
+	// guards, none a DELETE guard. The control-plane row therefore disappeared while the
+	// bytes had to stay, and since every reclamation predicate was keyed on the source's
+	// own record, deleting that record made the bytes permanently unfindable. Our
+	// SweepOrphanVolumes would cover that case, but it SHOULD NOT HAVE TO.
+	Parent VolumeID
+
 	// CapByte is the per-volume capacity cap in bytes, 0 = uncapped (§5.C / §3.4).
 	//
 	// THIS RECORD IS THE AUTHORITY, always. The backend's read-back cannot serve:

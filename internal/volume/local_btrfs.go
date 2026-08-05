@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"engine/internal/allocbytes"
 	"engine/internal/btrfs"
@@ -30,6 +31,13 @@ type LocalBtrfs struct {
 	// Btrfs materializes the per-volume capacity cap. Shared CODE with §5.B
 	// (rootfs-overlay D6.4), not a shared interface.
 	Btrfs btrfs.Client
+
+	// mu guards deletedRows.
+	mu sync.Mutex
+	// deletedRows are quota-row ids recorded AT DELETE TIME, whose rows a deletion may
+	// have leaked (§5.C / volume.md D7). Recorded there because that is the last moment
+	// the id is obtainable — see recordDeletedRow.
+	deletedRows map[uint64]bool
 }
 
 // NewLocalBtrfs constructs the local arm, ensuring VolumesDir exists.
@@ -183,6 +191,193 @@ func (b *LocalBtrfs) Materialize(ctx context.Context, volumeID string) (*Materia
 	return &Materialized{Volume: volumeID, SourcePath: unit}, nil
 }
 
+// Snapshot and Clone are ONE code path on this arm, which is what volume.md D6.1a
+// concluded: the substrate implements both with the same whole-tree operation, and the
+// difference is the semantic label a caller attaches, not the mechanism. Keeping them
+// as two seam methods over one implementation is what lets a backend that supports only
+// one of them say so through Capabilities.
+func (b *LocalBtrfs) Snapshot(ctx context.Context, srcID, newID string, capBytes int64) error {
+	return b.snapshotPath(ctx, srcID, newID, capBytes, "snapshot")
+}
+
+func (b *LocalBtrfs) Clone(ctx context.Context, srcID, newID string, capBytes int64) error {
+	return b.snapshotPath(ctx, srcID, newID, capBytes, "clone")
+}
+
+// snapshotPath does the two-call sequence the substrate forces: copy the bytes, then
+// set the cap.
+//
+// SETTING THE CAP IS PART OF THIS METHOD, not the caller's follow-up, and that is the
+// whole reason the method exists in this shape. The substrate hands a snapshot a
+// BRAND-NEW UNCAPPED quota row (measured in all four shapes, and verified by writing 3×
+// the source's cap into one), and a missing cap is SILENT AND UNDETECTABLE AFTERWARDS
+// because the limit read maps "never capped" and 0 onto each other. The invariant is
+// therefore forced to write time — here.
+//
+// The window between the two calls is real and cannot be closed: no parameter makes the
+// copy carry a cap, and `-i <qgroupid>` sets MEMBERSHIP rather than a cap (its limit is
+// shared across all members, so one member exhausting it makes SIBLINGS hit ENOSPC —
+// looks fine in a single-volume test, takes out neighbours in production). The window is
+// covered by the mediator's in-flight keep-set plus the sweep's repair-state check.
+func (b *LocalBtrfs) snapshotPath(ctx context.Context, srcID, newID string, capBytes int64, kind string) error {
+	if err := validateID(srcID); err != nil {
+		return err
+	}
+	if err := validateID(newID); err != nil {
+		return err
+	}
+	if capBytes > 0 && !b.Btrfs.Available(ctx, b.VolumesDir) {
+		return fmt.Errorf("volume: %s of %s requests a %d-byte cap but VolumesDir is not on a quota-capable filesystem: %w", kind, srcID, capBytes, ErrUnsupported)
+	}
+	src := b.unitPath(srcID)
+	dst := b.unitPath(newID)
+	if !b.Btrfs.IsSubvolume(ctx, src) {
+		return fmt.Errorf("volume: %s: source %s is not a snapshottable storage unit: %w", kind, srcID, ErrUnsupported)
+	}
+	if _, err := os.Stat(dst); err == nil {
+		return fmt.Errorf("volume: %s: %s already exists", kind, newID)
+	}
+	// A WRITABLE snapshot: no `-r`. That is the design path (§5.C — a snapshot yields an
+	// ordinary writable volume), and it also sidesteps a substrate wrinkle: a read-only
+	// unit on this progs version needs `property set ro false` before it can be deleted
+	// at all, so test and cleanup code that ever creates one must carry that step
+	// unconditionally.
+	if err := b.Btrfs.Snapshot(ctx, src, dst); err != nil {
+		return fmt.Errorf("volume: %s %s → %s: %w", kind, srcID, newID, err)
+	}
+	// THE SECOND CALL, and skipping it is the silent failure described above.
+	if err := b.applyCap(ctx, newID, capBytes); err != nil {
+		// Leave the bytes: they are registered in the mediator's in-flight set and the
+		// record has not been inserted, so the sweep reclaims them as an orphan. Deleting
+		// them here would race that.
+		return fmt.Errorf("volume: %s %s → %s: set cap: %w", kind, srcID, newID, err)
+	}
+	return nil
+}
+
+// ReclaimQuotaRows implements the §5.C / D7 recovery procedure for rows an earlier
+// delete leaked. See Backend.ReclaimQuotaRows for why it is a correctness path.
+//
+// The procedure, in the measured order:
+//
+//  1. ONE sync per ROUND (not per unit): `filesystem sync` then `subvolume sync`. That
+//     order is a measured finding — `subvolume sync` alone waits for the next periodic
+//     commit (3–16 SECONDS), while forcing the commit first makes the pair return in
+//     14–29 ms. Same effect, bounded instead of open-ended.
+//  2. For each recorded id, READ THE LABEL and act on it: `<stale>` → destroy; absent →
+//     done; `<under deletion>` → retry after a settle; `<squota space holder>` → LEAVE
+//     for a later round (a live clone can hold one legitimately for its whole lifetime);
+//     read failed → UNKNOWN, draw no conclusion.
+//  3. A BOUNDED number of rounds (3), then leave the row and warn. NEVER spin on EBUSY
+//     — that bound is normal operation, not an error path.
+func (b *LocalBtrfs) ReclaimQuotaRows(ctx context.Context, ids []uint64) (int, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	mnt, err := b.Btrfs.MountPoint(ctx, b.VolumesDir)
+	if err != nil {
+		// No filesystem to address: nothing to reclaim, and guessing would be worse.
+		return 0, fmt.Errorf("volume: reclaim quota rows: %w", err)
+	}
+
+	pending := append([]uint64(nil), ids...)
+	reclaimed := 0
+	var stuck []string
+	const maxRounds = 3
+	for round := 0; round < maxRounds && len(pending) > 0; round++ {
+		// One sync per ROUND.
+		if err := b.Btrfs.Sync(ctx, mnt); err != nil {
+			// A failed sync means the labels may be stale, so this round would be reading
+			// unreliable state. Stop rather than act on it; the next sweep retries.
+			return reclaimed, fmt.Errorf("volume: reclaim quota rows: settle: %w", err)
+		}
+		var next []uint64
+		for _, id := range pending {
+			switch state := b.Btrfs.QuotaRowByID(ctx, id, mnt); state {
+			case btrfs.RowAbsent:
+				b.forgetDeletedRow(id) // reclaimed by the substrate itself; nothing to do
+			case btrfs.RowStale:
+				if err := b.Btrfs.DestroyQuotaRow(ctx, id, mnt); err != nil {
+					// It said stale and still refused: keep it for a later round rather than
+					// treating it as fatal.
+					next = append(next, id)
+					continue
+				}
+				reclaimed++
+				b.forgetDeletedRow(id)
+			case btrfs.RowUnderDeletion:
+				next = append(next, id) // transient: another settle should clear it
+			case btrfs.RowSpaceHolder:
+				// A LIVE SHARER still references its extents. This is legitimate and can last
+				// as long as that sharer does, so it is NOT retried within this call — it stays
+				// recorded for a future sweep.
+				stuck = append(stuck, fmt.Sprintf("0/%d: space holder (a live sharer still references its extents)", id))
+			case btrfs.RowUnknown:
+				// The read failed WHOLESALE, which happens under exactly the churn a sweep runs
+				// in. Draw NO conclusion: keep it recorded and try again next sweep.
+				stuck = append(stuck, fmt.Sprintf("0/%d: row state unreadable", id))
+			case btrfs.RowLive:
+				// The id belongs to a LIVE unit — either it was reused after our delete, or the
+				// recorded id is wrong. Either way: never touch it. Clearing a live unit's limit
+				// is the one operation that breaks an engine promise beyond data integrity and
+				// has no EBUSY self-protection.
+				b.forgetDeletedRow(id)
+				stuck = append(stuck, fmt.Sprintf("0/%d: now belongs to a LIVE unit, left untouched", id))
+			}
+		}
+		pending = next
+	}
+	for _, id := range pending {
+		stuck = append(stuck, fmt.Sprintf("0/%d: still not reclaimable after %d rounds", id, maxRounds))
+	}
+	if len(stuck) > 0 {
+		// Returned as information, not as a failure of the sweep: every entry here is a
+		// row that stays recorded and is retried later.
+		return reclaimed, fmt.Errorf("volume: quota rows left for a later round: %s", strings.Join(stuck, "; "))
+	}
+	return reclaimed, nil
+}
+
+// DeletedRowIDs returns the ids recorded at deletion time and not yet reclaimed.
+func (b *LocalBtrfs) DeletedRowIDs(context.Context) []uint64 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := make([]uint64, 0, len(b.deletedRows))
+	for id := range b.deletedRows {
+		out = append(out, id)
+	}
+	return out
+}
+
+// recordDeletedRow / forgetDeletedRow track ids whose row a delete may have leaked.
+//
+// RECORDED AT DELETE TIME, because that is the last moment the id is obtainable: after
+// the delete the path is unresolvable, and the id is the only handle on a row the
+// delete may have left behind. §5.C requires locating rows this way rather than by
+// scanning, because a scan that misidentifies a row yields an uncapped live volume with
+// zero signal.
+//
+// In-memory, so a crash loses the list. That is acceptable and bounded rather than a
+// gap being waved away: the ids only ever drive an idempotent reclaim, and the ROW
+// ITSELF is not lost — it stays on the filesystem. What a restart loses is the
+// knowledge that we were watching it. Persisting the list would mean a new store table
+// whose only consumer is a substrate-specific cleanup, which §1.3 argues against; the
+// residue is the same class of leak the orphan sweeps already exist to catch.
+func (b *LocalBtrfs) recordDeletedRow(id uint64) {
+	b.mu.Lock()
+	if b.deletedRows == nil {
+		b.deletedRows = map[uint64]bool{}
+	}
+	b.deletedRows[id] = true
+	b.mu.Unlock()
+}
+
+func (b *LocalBtrfs) forgetDeletedRow(id uint64) {
+	b.mu.Lock()
+	delete(b.deletedRows, id)
+	b.mu.Unlock()
+}
+
 // Release ends one materialization. A NO-OP on this arm, and that is a correct
 // implementation of an explicit promise rather than a stub: the promise is "this
 // materialization's source is no longer valid, THE BYTES SURVIVE, idempotent,
@@ -240,6 +435,13 @@ func (b *LocalBtrfs) DestroyVolume(ctx context.Context, volumeID string) error {
 		if err := os.RemoveAll(filepath.Join(unit, e.Name())); err != nil {
 			return fmt.Errorf("volume: destroy %s: clear %s: %w", volumeID, e.Name(), err)
 		}
+	}
+	// Capture the quota-row id BEFORE the delete: afterwards the path is unresolvable
+	// and this id is the only handle on a row the delete may leak (§5.C — rows are
+	// located by the id recorded at deletion, never by scanning). A failure to read it
+	// is not fatal to the delete; it only means the reclaim path cannot watch this row.
+	if id, idErr := b.Btrfs.SubvolumeID(ctx, unit); idErr == nil {
+		b.recordDeletedRow(id)
 	}
 	if err := b.Btrfs.DeleteSubvolume(ctx, unit); err != nil {
 		return fmt.Errorf("volume: destroy %s: %w", volumeID, err)
@@ -300,56 +502,34 @@ func (b *LocalBtrfs) UncappedBytes(ctx context.Context) (int64, error) {
 	return total, nil
 }
 
-// SweepOrphanVolumes reclaims units with no live row (§4.4-A). See
-// Backend.SweepOrphanVolumes for the contract and for why every safety requirement
-// below is a HARD requirement — a mis-sweep has no detection path at all.
+// ListUnitIDs enumerates the volume IDs this arm holds storage for (see
+// Backend.ListUnitIDs for why enumeration and deciding are split).
 //
-// ENUMERATION IS PER-DIRECTORY-ENTRY, deliberately: each VolumesDir subdirectory IS
-// a unit named by its VolumeID. A filesystem-level unit enumeration is FORBIDDEN
-// here (measured: its scope is the whole filesystem regardless of the directory
-// given, and it returns other software's units on the same node). internal/btrfs is
-// already the right shape for this; the requirement is not to "optimize" it away.
+// PER-DIRECTORY-ENTRY, deliberately: each VolumesDir subdirectory IS a unit named by its
+// VolumeID, so enumeration recovers identity without any store read. A filesystem-level
+// unit enumeration is FORBIDDEN here — measured, its scope is the whole filesystem
+// regardless of the directory given, and it returns other software's units on the same
+// node. internal/btrfs is already the right shape for this; the requirement is not to
+// "optimize" it away.
 //
-// A read or enumeration failure SKIPS the unit — it never concludes "no owner" from
-// an empty or failed read (measured: under concurrent churn a bulk quota read fails
-// wholesale and returns zero rows, which is exactly the condition a sweep runs in).
-//
-// Mid-sweep failure CONTINUES: the error is returned after the pass together with
-// the count actually reclaimed, so one wedged unit cannot indefinitely shadow every
-// other leak. The sweep is idempotent, so whatever failed is retried next pass.
-func (b *LocalBtrfs) SweepOrphanVolumes(ctx context.Context, live, building []string) (int, error) {
-	keep := make(map[string]bool, len(live)+len(building))
-	for _, id := range live {
-		keep[id] = true
-	}
-	for _, id := range building {
-		keep[id] = true
-	}
+// A read error is RETURNED, never flattened into an empty list: the mediator must be able
+// to tell "no units" from "the read failed", because concluding the former from the
+// latter reclaims everything.
+func (b *LocalBtrfs) ListUnitIDs(_ context.Context) ([]string, error) {
 	ents, err := os.ReadDir(b.VolumesDir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return 0, nil
+			return nil, nil // no directory yet: genuinely no units
 		}
-		// Enumeration failed: reclaim NOTHING. An empty listing must never be read as
-		// "every unit is an orphan".
-		return 0, fmt.Errorf("volume: sweep list units: %w", err)
+		return nil, fmt.Errorf("volume: enumerate units: %w", err)
 	}
-	reclaimed := 0
-	var failed []string
+	out := make([]string, 0, len(ents))
 	for _, e := range ents {
-		if !e.IsDir() || keep[e.Name()] {
-			continue
+		if e.IsDir() {
+			out = append(out, e.Name())
 		}
-		if err := b.DestroyVolume(ctx, e.Name()); err != nil {
-			failed = append(failed, fmt.Sprintf("%s: %v", e.Name(), err))
-			continue
-		}
-		reclaimed++
 	}
-	if len(failed) > 0 {
-		return reclaimed, fmt.Errorf("volume: sweep reclaim unit(s): %s", strings.Join(failed, "; "))
-	}
-	return reclaimed, nil
+	return out, nil
 }
 
 // compile-time: LocalBtrfs satisfies Backend.
