@@ -11,6 +11,7 @@ import (
 
 	"engine/internal/model"
 	"engine/internal/runtime"
+	"engine/internal/store"
 	"engine/internal/volume"
 )
 
@@ -296,6 +297,18 @@ func (m *Mediator) DeleteVolume(ctx context.Context, id model.VolumeID) error {
 // would otherwise leave the old tail attached and produce a file that is neither
 // the old nor the new content.
 func (m *Mediator) ImportVolume(ctx context.Context, id model.VolumeID, path string, src io.Reader) (int64, error) {
+	// The write-regime gate (§5.C). It is on IMPORT and not on EXPORT because the
+	// invariant is about TEARING: two writers to the same bytes. A read cannot tear
+	// anything, so gating it would cost a capability and buy nothing.
+	//
+	// The marker it publishes is held for the WHOLE stream, not just the decision —
+	// the sweep must not reclaim these bytes at byte 4 of 40 MiB either.
+	release, err := m.admitDirectWrite(ctx, id)
+	if err != nil {
+		return 0, err
+	}
+	defer release()
+
 	r, err := m.openVolumeRoot(ctx, id)
 	if err != nil {
 		return 0, err
@@ -463,7 +476,31 @@ func (m *Mediator) SweepOrphanVolumes(ctx context.Context) error {
 	for _, v := range vols {
 		live = append(live, string(v.ID))
 	}
+	// A CHECK INDEPENDENT OF ANY FK (§5.C safety requirement): skip any volume that
+	// appears in ANY mount row, live or not. FK RESTRICT protects the ROW; this
+	// protects the BYTES, and the bytes are what a mis-sweep destroys — silently, with
+	// the guest's writes still returning success into an unlinked inode. A volume with
+	// a mount row is already in `live` via its own record, so this is belt AND braces
+	// on purpose: it survives a record that is somehow missing while a mount row
+	// remains.
+	for _, v := range vols {
+		rows, err := m.deps.Store.ListMountsByVolume(ctx, v.ID)
+		if err != nil {
+			// Read failure → reclaim NOTHING this pass. Never conclude "no owner" from a
+			// failed or empty read (measured: under concurrent churn a bulk read fails
+			// wholesale and returns zero rows — exactly the condition a sweep runs in).
+			return fmt.Errorf("sweep volumes: read mount table for %s: %w", v.ID, err)
+		}
+		if len(rows) > 0 {
+			live = append(live, string(v.ID))
+		}
+	}
 	building := m.buildingVolumeIDs()
+	// In-flight DIRECT WRITES join the keep-set: a volume being written to right now is
+	// in use even though nothing has it mounted, and that is precisely the case no
+	// mount row can express (§5.C — the marker and the write-regime decision are
+	// published in one critical section for this reason).
+	building = append(building, m.inFlightWriteIDs()...)
 	n, err := be.SweepOrphanVolumes(ctx, live, building)
 	if err != nil {
 		return fmt.Errorf("sweep volumes: %w", err)
@@ -472,6 +509,100 @@ func (m *Mediator) SweepOrphanVolumes(ctx context.Context) error {
 		m.deps.Logf("sweep volumes: reclaimed %d orphan volume unit(s)", n)
 	}
 	return nil
+}
+
+// RebindVolumes replaces a sandbox's WHOLE mount binding (§6.1 PATCH `volumes`).
+// Returns whether any exclusive lease was released by the change.
+//
+// WHOLE BINDING, NOT A DELTA. §6.2 defines PATCH as swapping one complete binding for
+// another, and a sandbox holds one complete binding at every instant — so there is no
+// "attach one more" or "detach that one" operation, and an EMPTY slice legitimately
+// means detach everything. That is also what makes every duplicate a 400: a repeat is
+// a single submission contradicting itself, decidable without reading another row.
+//
+// THE TWO EFFECT TIMES DIVERGE, and it is deliberate (§6.1):
+//
+//   - the guest TOPOLOGY changes at the NEXT RESUME. runsc takes mounts from the OCI
+//     spec at startup and does not support hot add/remove, so "give a running sandbox a
+//     new volume" is "edit the table, then cold-resume" — the same path §4.2's FS-first
+//     pause/resume already uses.
+//   - a DETACH RELEASES THE EXCLUSIVE LEASE IMMEDIATELY, because the lease IS the row
+//     (§5.C). So another sandbox can take that volume at once, while this one still
+//     shows the old topology until it resumes.
+//
+// Those two cannot be folded into one `applies_at` value, which is why the response
+// carries both.
+//
+// It holds the transition lock, so a rebind cannot land in the middle of a cold start
+// that is reading the table to materialize (§4.4-B).
+func (m *Mediator) RebindVolumes(ctx context.Context, id model.SandboxID, binding []model.Mount) (bool, error) {
+	l := m.lock(id)
+	l.Lock()
+	defer l.Unlock()
+
+	rec, err := m.deps.Store.GetSandbox(ctx, id)
+	if err != nil {
+		return false, fmt.Errorf("rebind volumes: %w", err)
+	}
+	// Legal from running or paused, like every other Binding edit. `creating` is
+	// excluded because that sandbox's binding is mid-construction by its own create.
+	if rec.State != model.Running && rec.State != model.Paused {
+		return false, fmt.Errorf("rebind volumes: %w (state=%s: a binding is editable only from running or paused)", store.ErrConflict, rec.State)
+	}
+
+	before, err := m.deps.Store.ListMounts(ctx, id)
+	if err != nil {
+		return false, fmt.Errorf("rebind volumes: read current binding: %w", err)
+	}
+
+	// Stamp this sandbox's ID and normalize each path (§5.C — the store's uniqueness
+	// assertions are literal string comparisons).
+	next := make([]model.Mount, 0, len(binding))
+	for _, mt := range binding {
+		next = append(next, model.Mount{
+			Sandbox: id,
+			Volume:  mt.Volume,
+			Path:    store.NormalizeMountPath(mt.Path),
+			Access:  mt.Access,
+		})
+	}
+
+	// Replace: drop the old rows, then insert the new ones. The old rows MUST go first
+	// or the new binding collides with itself on the lease and on UNIQUE(sandbox,path)
+	// — a re-submitted identical binding would otherwise be refused for conflicting
+	// with the very rows it is replacing.
+	if err := m.deps.Store.DeleteMounts(ctx, id); err != nil {
+		return false, fmt.Errorf("rebind volumes: clear current binding: %w", err)
+	}
+	if err := m.deps.Store.CreateMounts(ctx, next); err != nil {
+		// The new binding lost (a contended lease, or it contradicts itself). RESTORE the
+		// previous one: a rejected rebind must leave the sandbox with the binding it had,
+		// not with none — silently detaching every volume because a new binding was
+		// invalid would be far worse than the refusal.
+		if rerr := m.deps.Store.CreateMounts(ctx, before); rerr != nil {
+			// Now the sandbox has NO binding and its previous one could not be restored.
+			// Logged loudly: it is recoverable by re-issuing the PATCH, but the caller must
+			// know the old binding is gone rather than assume the refusal was clean.
+			m.deps.Logf("rebind volumes %s: the new binding was refused (%v) AND the previous one could not be restored (%v) — the sandbox now has no mounts; re-issue the intended binding", id, err, rerr)
+		}
+		return false, fmt.Errorf("rebind volumes: %w", err)
+	}
+
+	// Did a detach release an exclusive lease? True when some volume held exclusively
+	// before is not held exclusively now — the caller waiting to attach it elsewhere can
+	// proceed immediately, even though this sandbox's topology changes only on resume.
+	stillExclusive := make(map[model.VolumeID]bool, len(next))
+	for _, mt := range next {
+		if mt.Access == model.Exclusive {
+			stillExclusive[mt.Volume] = true
+		}
+	}
+	for _, mt := range before {
+		if mt.Access == model.Exclusive && !stillExclusive[mt.Volume] {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // deleteMountsForCleanup drops a sandbox's mount rows on a cleanup path where the

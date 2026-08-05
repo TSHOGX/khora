@@ -10,6 +10,7 @@ import (
 
 	"engine/internal/lifecycle"
 	"engine/internal/model"
+	"engine/internal/store"
 )
 
 // The §6.1 Volume block: create / list / inspect / patch / delete + the two direct
@@ -257,7 +258,33 @@ func (e *Engine) handleExportVolume(w http.ResponseWriter, r *http.Request, id m
 
 // volumeStatus maps the §5.C / §6.2 Volume verdicts onto status codes. Called from
 // statusFor so the mapping lives beside the endpoints that produce it.
+//
+// ALL FOUR STORE VERDICTS ARE MAPPED HERE EXPLICITLY, and they must not be folded
+// into a shared "in use" arm: §6.2 requires them to stay distinguishable, and the
+// whole reason each has its own sentinel is that a 409 naming the wrong object sends
+// the caller to look at something unrelated. Before these arms existed, every one of
+// them reached statusFor's default and became a 500 — which is exactly the defect the
+// mounts.sandbox translation point was added to fix, reappearing one layer up.
 func volumeStatus(err error) (int, bool) {
+	switch {
+	case errors.Is(err, store.ErrVolumeInUse):
+		// ① delete a volume a live mount row holds. A state conflict the caller resolves
+		// by detaching or destroying the holder.
+		return http.StatusConflict, true
+	case errors.Is(err, store.ErrSandboxHasMounts):
+		// ② delete a sandbox a live mount row holds. Reachable only if a caller bypasses
+		// the mediator's destroy (which deletes the rows first), so it is a genuine
+		// 409 rather than an internal error.
+		return http.StatusConflict, true
+	case errors.Is(err, store.ErrMountLeaseConflict):
+		// ③ attach lost the exclusive lease — RETRYABLE once the holder releases.
+		return http.StatusConflict, true
+	case errors.Is(err, store.ErrMountBindingInvalid):
+		// 400, NOT one of the four 409s (§6.2): a single submitted binding contradicting
+		// itself is decidable without reading another row, and no retry or state change
+		// can make it legal. §6.2's four 409s do not grow.
+		return http.StatusBadRequest, true
+	}
 	switch {
 	case errors.Is(err, lifecycle.ErrVolumeCapBelowUsage):
 		// 400, NOT 507: nothing is full, and no retry or state change makes this legal.
@@ -265,6 +292,12 @@ func volumeStatus(err error) (int, bool) {
 		// accepting manufactures a state the control plane cannot leave (§5.C /
 		// volume.md D7.3).
 		return http.StatusBadRequest, true
+	case errors.Is(err, lifecycle.ErrVolumeLiveWriter):
+		// §6.2's FOURTH Volume 409: the write regime refused a direct change because a
+		// live read-write mount holds the volume. 409 rather than 400 because it is
+		// RETRYABLE — pausing the holder makes the same request succeed, which is the
+		// documented remedy (and a `paused` sandbox is deliberately NOT a live writer).
+		return http.StatusConflict, true
 	case errors.Is(err, lifecycle.ErrVolumeCapUnsupported):
 		// 400: the backend genuinely cannot enforce a cap (§6.2 capability query).
 		// Refused rather than silently run uncapped, which would leave every §2.3

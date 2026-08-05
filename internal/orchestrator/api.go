@@ -106,7 +106,55 @@ type createReq struct {
 	CPUMillis  int64 `json:"cpu_millis"`
 	MemoryByte int64 `json:"memory_byte"`
 	DiskByte   int64 `json:"disk_byte"`
+	// Volumes is the §6.1 `volumes?` binding: the COMPLETE set of volume mounts this
+	// sandbox is created with. `access` is given HERE and not on the volume record,
+	// because it is a property of the MOUNT (§5.C).
+	Volumes []volumeBindingItem `json:"volumes"`
 }
+
+// volumeBindingItem is one entry of a `volumes` binding, on create and on PATCH
+// (§6.1). One type for both, because §6.2 makes PATCH swap a whole binding for a whole
+// binding — the two carry the identical shape, and a second type would let them drift.
+type volumeBindingItem struct {
+	VolumeID string `json:"volume_id"`
+	Path     string `json:"path"`
+	Access   string `json:"access"`
+}
+
+// parseVolumeBinding converts wire items into mount rows, validating `access` at the
+// boundary so an unknown value is a plain 400 rather than a store verdict.
+//
+// The Sandbox field is deliberately left empty: on create the ID does not exist yet,
+// and on PATCH the mediator already knows it — accepting one from the caller could
+// only be wrong.
+func parseVolumeBinding(items []volumeBindingItem) ([]model.Mount, error) {
+	out := make([]model.Mount, 0, len(items))
+	for _, it := range items {
+		if it.VolumeID == "" {
+			return nil, errors.New("volumes: volume_id is required")
+		}
+		if it.Path == "" {
+			return nil, errors.New("volumes: path is required")
+		}
+		access := model.AccessMode(it.Access)
+		if it.Access == "" {
+			// No default is invented. A caller who does not say how a volume is mounted has
+			// not expressed a binding, and guessing would silently pick either an exclusive
+			// lease they did not ask for or a shared writer they did not intend.
+			return nil, errors.New("volumes: access is required (exclusive / shared-ro / shared-rw)")
+		}
+		if !access.Valid() {
+			return nil, errors.New("volumes: access must be one of exclusive / shared-ro / shared-rw, got " + it.Access)
+		}
+		out = append(out, model.Mount{
+			Volume: model.VolumeID(it.VolumeID),
+			Path:   it.Path,
+			Access: access,
+		})
+	}
+	return out, nil
+}
+
 type createResp struct {
 	SandboxID string `json:"sandbox_id"`
 }
@@ -121,8 +169,14 @@ func (e *Engine) handleCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "resource limits must be non-negative (0 = unlimited)", http.StatusBadRequest)
 		return
 	}
+	binding, err := parseVolumeBinding(req.Volumes)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	spec := lifecycle.CreateSpec{
 		Template: model.TemplateID(req.TemplateID),
+		Volumes:  binding,
 		Limits: model.Limits{
 			CPUMillis:  req.CPUMillis,
 			MemoryByte: req.MemoryByte,
@@ -285,6 +339,15 @@ type patchReq struct {
 	DiskByte    *int64  `json:"disk_byte"`
 	IdleTimeout *string `json:"idle_timeout"`
 	Retention   *string `json:"retention"`
+	// Volumes is the mount table's COMPLETE binding (§6.1). A POINTER slice so
+	// "omitted" is distinguishable from "given as empty" — and here that distinction
+	// carries real weight: an empty array means DETACH EVERYTHING, which is a legitimate
+	// request and must not be confused with "leave the mounts alone".
+	//
+	// It is on PATCH rather than on separate attach/detach endpoints because §6.2
+	// already defines PATCH as THE rebinding point: a sandbox holds one complete
+	// binding at all times, and PATCH swaps one whole binding for another.
+	Volumes *[]volumeBindingItem `json:"volumes"`
 }
 
 type patchResp struct {
@@ -295,6 +358,17 @@ type patchResp struct {
 	// sweep) vs "next-resume" for resource caps (the providers materialize them at
 	// placement, §3.4). Making the deferral explicit is the point.
 	AppliesAt string `json:"applies_at"`
+	// LeaseReleased reports that a detach took effect IMMEDIATELY, which
+	// `applies_at` alone cannot express (§6.1).
+	//
+	// A mount change SPLITS INTO TWO EFFECT TIMES, and that is a design fact rather
+	// than a detail to fold away: the guest TOPOLOGY changes at next-resume (runsc takes
+	// mounts at startup and does not hot-plug), while a DETACH RELEASES THE EXCLUSIVE
+	// LEASE AT ONCE — the lease is the row's existence, so deleting the row releases it
+	// now. A caller waiting to attach that volume elsewhere can proceed immediately even
+	// though the detaching sandbox still shows the old topology until it resumes.
+	// Omitted when nothing was released.
+	LeaseReleased bool `json:"lease_released,omitempty"`
 }
 
 func (e *Engine) handlePatch(w http.ResponseWriter, r *http.Request, id model.SandboxID) {
@@ -333,9 +407,32 @@ func (e *Engine) handlePatch(w http.ResponseWriter, r *http.Request, id model.Sa
 		*f.dst = &d
 	}
 
-	if err := e.Mediator.UpdateBinding(r.Context(), id, b); err != nil {
-		statusFor(w, err)
-		return
+	// The mount binding, if given. Parsed before UpdateBinding so a malformed one is a
+	// 400 that changed nothing.
+	var binding []model.Mount
+	if req.Volumes != nil {
+		var perr error
+		binding, perr = parseVolumeBinding(*req.Volumes)
+		if perr != nil {
+			http.Error(w, perr.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+
+	if !b.IsEmpty() {
+		if err := e.Mediator.UpdateBinding(r.Context(), id, b); err != nil {
+			statusFor(w, err)
+			return
+		}
+	}
+	released := false
+	if req.Volumes != nil {
+		var rerr error
+		released, rerr = e.Mediator.RebindVolumes(r.Context(), id, binding)
+		if rerr != nil {
+			statusFor(w, rerr)
+			return
+		}
 	}
 	stt, err := e.Mediator.State(r.Context(), id)
 	if err != nil {
@@ -343,10 +440,15 @@ func (e *Engine) handlePatch(w http.ResponseWriter, r *http.Request, id model.Sa
 		return
 	}
 	appliesAt := "now"
-	if b.CPUMillis != nil || b.MemoryByte != nil || b.DiskByte != nil {
+	if b.CPUMillis != nil || b.MemoryByte != nil || b.DiskByte != nil || req.Volumes != nil {
+		// A mount change materializes at the next placement, exactly like a resource cap
+		// — runsc takes mounts at startup, so there is no hot-plug path (§5.C).
 		appliesAt = "next-resume"
 	}
-	writeJSON(w, http.StatusOK, patchResp{SandboxID: string(id), State: string(stt), AppliesAt: appliesAt})
+	writeJSON(w, http.StatusOK, patchResp{
+		SandboxID: string(id), State: string(stt), AppliesAt: appliesAt,
+		LeaseReleased: released,
+	})
 }
 
 // Event-stream replay limits (§6.1 GET /v1/events).

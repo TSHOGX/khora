@@ -198,6 +198,12 @@ type Mediator struct {
 	// no live row, indistinguishable from an orphan. Guarded by mu.
 	buildingOverlays map[model.OverlayID]bool
 
+	// inFlightWrites counts direct content writes in flight per volume (§5.C write
+	// regime). Published in the SAME critical section that decides "no live rw
+	// holder" — see admitDirectWrite for why the two are inseparable. Guarded by mu,
+	// the same lock the live-map uses, so no new lock class enters the order.
+	inFlightWrites map[model.VolumeID]int
+
 	// buildingVolumes is the in-flight-create keep-set for volume storage (§5.C).
 	// It is MORE necessary than its two siblings rather than a third copy of the same
 	// idea: an Overlay's row is inserted BEFORE its unit is allocated, so there
@@ -276,6 +282,7 @@ func New(deps Deps) *Mediator {
 		buildingLayers:   make(map[model.TemplateID]bool),
 		buildingOverlays: make(map[model.OverlayID]bool),
 		buildingVolumes:  make(map[model.VolumeID]bool),
+		inFlightWrites:   make(map[model.VolumeID]int),
 	}
 }
 
