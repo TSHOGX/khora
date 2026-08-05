@@ -14,8 +14,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -81,6 +83,12 @@ func RunContract(t *testing.T, mk Factory) {
 	t.Run("ExclusiveDoesNotCoexistWithShared", func(t *testing.T) { testExclusiveVsShared(t, mk) })
 	t.Run("MountBindingSelfContradiction", func(t *testing.T) { testMountBindingInvalid(t, mk) })
 	t.Run("MountBindingIsAllOrNothing", func(t *testing.T) { testMountAllOrNothing(t, mk) })
+
+	// ReplaceMounts (§5.C): the whole-binding swap is ONE atomic commit, promised by
+	// the contract and honored by each backend its own way — the second application of
+	// §4.4-C's discipline. Two cases, both required by the spec bullet.
+	t.Run("ReplaceMountsKeepsOldBindingOnRefusal", func(t *testing.T) { testReplaceMountsKeepsOldBindingOnRefusal(t, mk) })
+	t.Run("ReplaceMountsNeverExposesZeroRows", func(t *testing.T) { testReplaceMountsNoZeroRowWindow(t, mk) })
 	t.Run("MountReferenceSideMissingEndpoint", func(t *testing.T) { testMountMissingEndpoint(t, mk) })
 	t.Run("MountVerdictsAreDistinguishable", func(t *testing.T) { testMountVerdictsDistinct(t, mk) })
 	t.Run("ConcurrentExclusiveAttachSingleWinner", func(t *testing.T) { testConcurrentLease(t, mk) })
@@ -1771,6 +1779,28 @@ func testMountBindingInvalid(t *testing.T, mk Factory) {
 		},
 		why: "the uniqueness assertions are literal string comparisons, so an un-normalized path makes them silently not apply",
 	}, {
+		name: "the guest root as destination",
+		binding: []model.Mount{
+			mount("sbx_a", "vol_1", "/", model.SharedReadWrite),
+		},
+		why: `"/" is the one illegal destination that is ALREADY NORMALIZED — path.Clean's fixed point — so the normalization check cannot catch it, and a bind there shadows the WHOLE guest rootfs (§5.C: absolute, cleaned, NOT "/")`,
+	}, {
+		// The spellings that normalize TO "/". They are refused by the normalization check
+		// rather than the root check, and both verdicts are the same 400 — asserted so the
+		// two checks together cover the family, not just the one spelling each was written
+		// for.
+		name: "a path that normalizes to the guest root",
+		binding: []model.Mount{
+			mount("sbx_a", "vol_1", "/data/..", model.SharedReadWrite),
+		},
+		why: `"/data/.." IS the guest root spelled indirectly; a normalize-then-accept would bind over the whole rootfs`,
+	}, {
+		name: "the guest root spelled with a trailing dot",
+		binding: []model.Mount{
+			mount("sbx_a", "vol_1", "/.", model.SharedReadWrite),
+		},
+		why: `same mount point as "/", a different string — literal UNIQUE comparisons make the difference silent`,
+	}, {
 		name: "unknown access mode",
 		binding: []model.Mount{
 			mount("sbx_a", "vol_1", "/data", model.AccessMode("Exclusive")),
@@ -1788,6 +1818,28 @@ func testMountBindingInvalid(t *testing.T, mk Factory) {
 				t.Errorf("a rejected binding left %d row(s) behind: %+v", len(rows), rows)
 			}
 		})
+	}
+
+	// The guest root survives the MEDIATOR'S PATH too, which is the shape a real request
+	// takes: the mediator normalizes every path before insert (§5.C), so a check that only
+	// caught the un-normalized spellings would pass every case above and still let
+	// NormalizeMountPath("/data/..") through as a legal "/". Asserted as a property over
+	// the whole family rather than one string, because a bind over the guest rootfs is
+	// exactly the kind of failure nothing downstream reports.
+	for _, spelling := range []string{"/", "//", "/.", "/data/..", " / ", "/./", "///."} {
+		normalized := store.NormalizeMountPath(spelling)
+		if normalized != "/" {
+			t.Errorf("NormalizeMountPath(%q) = %q; this case is meant to normalize to the guest root", spelling, normalized)
+			continue
+		}
+		err := s.CreateMounts(ctx, []model.Mount{mount("sbx_a", "vol_1", normalized, model.SharedReadWrite)})
+		if !errors.Is(err, store.ErrMountBindingInvalid) {
+			t.Errorf("CreateMounts with %q normalized to %q = %v; want ErrMountBindingInvalid — a bind at the guest root shadows the entire sandbox rootfs",
+				spelling, normalized, err)
+		}
+		if rows, _ := s.ListMounts(ctx, "sbx_a"); len(rows) != 0 {
+			t.Fatalf("a mount at the guest root (from %q) was INSERTED: %+v", spelling, rows)
+		}
 	}
 }
 
@@ -1821,6 +1873,216 @@ func testMountAllOrNothing(t *testing.T, mk Factory) {
 	if len(rows) != 0 {
 		t.Errorf("a lost binding left %d row(s) behind: %+v — all-or-nothing means the first mount must not survive the second's failure", len(rows), rows)
 	}
+}
+
+// testReplaceMountsKeepsOldBindingOnRefusal is the first of §5.C's two required
+// ReplaceMounts cases: a replacement that LOSES leaves the OLD binding intact and
+// observable.
+//
+// Under the two-commit shape this could not hold — the delete had already committed, so
+// the old binding's survival depended on a best-effort re-insert that could itself fail,
+// and the failure mode was "the new binding was refused AND the old one is gone". The
+// atomic promise removes that state, which is why the compensation code went with it.
+//
+// It also pins the RE-SUBMITTED IDENTICAL BINDING, which is the reason the delete must
+// come first: judged against the un-filtered rows, an identical binding contends with the
+// very rows it is replacing.
+func testReplaceMountsKeepsOldBindingOnRefusal(t *testing.T, mk Factory) {
+	ctx := context.Background()
+	s, _ := mk(t)
+	seedSbx(t, s, "sbx_a")
+	seedSbx(t, s, "sbx_holder")
+	seedVol(t, s, "vol_1")
+	seedVol(t, s, "vol_taken")
+
+	// sbx_a's binding: one exclusive mount. This is what must survive every refusal.
+	if err := s.CreateMounts(ctx, []model.Mount{mount("sbx_a", "vol_1", "/data", model.Exclusive)}); err != nil {
+		t.Fatalf("seed binding: %v", err)
+	}
+	// Someone else holds vol_taken exclusively, so any replacement naming it loses.
+	if err := s.CreateMounts(ctx, []model.Mount{mount("sbx_holder", "vol_taken", "/x", model.Exclusive)}); err != nil {
+		t.Fatalf("seed holder: %v", err)
+	}
+
+	assertOriginal := func(what string) {
+		t.Helper()
+		rows, err := s.ListMounts(ctx, "sbx_a")
+		if err != nil {
+			t.Fatalf("%s: list mounts: %v", what, err)
+		}
+		if len(rows) != 1 || rows[0].Volume != "vol_1" || rows[0].Path != "/data" || rows[0].Access != model.Exclusive {
+			t.Fatalf("%s left sbx_a with %+v; want the ORIGINAL exclusive vol_1@/data binding — a refused replacement must not detach anything (§5.C consequence ①)", what, rows)
+		}
+		// And the lease was never released: the row that IS the lease is still there.
+		byVol, err := s.ListMountsByVolume(ctx, "vol_1")
+		if err != nil {
+			t.Fatalf("%s: list by volume: %v", what, err)
+		}
+		if len(byVol) != 1 || byVol[0].Sandbox != "sbx_a" {
+			t.Fatalf("%s: vol_1 is held by %+v; want sbx_a's single exclusive row (consequence ②: the lease is never transiently released)", what, byVol)
+		}
+	}
+
+	// ① The replacement loses a lease. Note it KEEPS vol_1 and adds a contended volume,
+	// which is the realistic PATCH: "keep what I have, add this one".
+	err := s.ReplaceMounts(ctx, "sbx_a", []model.Mount{
+		mount("sbx_a", "vol_1", "/data", model.Exclusive),
+		mount("sbx_a", "vol_taken", "/other", model.Exclusive),
+	})
+	if !errors.Is(err, store.ErrMountLeaseConflict) {
+		t.Fatalf("replacement onto a contended lease = %v; want ErrMountLeaseConflict (the API maps it to 409)", err)
+	}
+	assertOriginal("a lease-contended replacement")
+
+	// ② The replacement contradicts ITSELF (two volumes at one destination). A 400, and
+	// the old binding must be just as intact — the verdict differs, the guarantee does not.
+	err = s.ReplaceMounts(ctx, "sbx_a", []model.Mount{
+		mount("sbx_a", "vol_1", "/data", model.SharedReadWrite),
+		mount("sbx_a", "vol_taken", "/data", model.SharedReadWrite),
+	})
+	if !errors.Is(err, store.ErrMountBindingInvalid) {
+		t.Fatalf("self-contradictory replacement = %v; want ErrMountBindingInvalid (the API maps it to 400)", err)
+	}
+	assertOriginal("a self-contradictory replacement")
+
+	// ③ A row naming a DIFFERENT sandbox is refused too, and this one matters because the
+	// alternative is destructive: the delete targets sbx_a, so accepting it would detach
+	// sbx_a and attach sbx_holder in a commit the caller thinks touched one sandbox.
+	err = s.ReplaceMounts(ctx, "sbx_a", []model.Mount{mount("sbx_holder", "vol_1", "/data", model.Exclusive)})
+	if !errors.Is(err, store.ErrMountBindingInvalid) {
+		t.Fatalf("replacement carrying another sandbox's row = %v; want ErrMountBindingInvalid", err)
+	}
+	assertOriginal("a replacement naming another sandbox")
+
+	// ④ The RE-SUBMITTED IDENTICAL binding SUCCEEDS. This is the case that forces
+	// delete-before-insert: against the un-filtered rows it would self-contend on both the
+	// lease and UNIQUE(sandbox, path).
+	if err := s.ReplaceMounts(ctx, "sbx_a", []model.Mount{mount("sbx_a", "vol_1", "/data", model.Exclusive)}); err != nil {
+		t.Fatalf("re-submitting the IDENTICAL binding = %v; want success — a replacement must not contend with the rows it is replacing", err)
+	}
+	assertOriginal("an identical re-submission")
+
+	// ⑤ And a successful replacement really does replace: empty means detach everything
+	// (§6.2 — PATCH swaps whole bindings, so this is not a special case).
+	if err := s.ReplaceMounts(ctx, "sbx_a", nil); err != nil {
+		t.Fatalf("replacement with an EMPTY binding = %v; want success (detach everything)", err)
+	}
+	if rows, _ := s.ListMounts(ctx, "sbx_a"); len(rows) != 0 {
+		t.Errorf("an empty replacement left %+v; want no rows", rows)
+	}
+	// The lease is released by that, so the previously-blocked volume is now takeable.
+	if err := s.CreateMounts(ctx, []model.Mount{mount("sbx_holder", "vol_1", "/data2", model.Exclusive)}); err != nil {
+		t.Errorf("vol_1 after a detaching replacement = %v; want takeable (the lease IS the row, so removing it IS the release)", err)
+	}
+}
+
+// testReplaceMountsNoZeroRowWindow is the ADVERSARIAL case for ReplaceMounts, in the shape
+// of testSequenceNoVisibilityGap: a concurrent ListMountsByVolume must NEVER observe zero
+// rows while a binding is being replaced.
+//
+// WHY THIS IS THE ONE THAT FAILED SILENTLY. ListMountsByVolume is the write-regime
+// predicate (§5.C): "no mount rows for this volume" means "nobody has it mounted, so a
+// direct host-side write is safe". A replacement implemented as DeleteMounts followed by
+// CreateMounts opens exactly that window — two independent commits, with the volume
+// looking unmounted in between — and nothing about it is visible to a single-threaded
+// test. The measured effect of the old shape is in the report for this change; it is
+// thousands of zero-row observations, not a rare one.
+//
+// The same window is consequence ② from the other side: no rows means no lease, so a
+// concurrent create could take a volume this PATCH intended to keep.
+//
+// Rebinding to the IDENTICAL binding is deliberate: it is the case that forces
+// delete-before-insert, so it is the one an implementation is most tempted to serve with
+// two calls.
+func testReplaceMountsNoZeroRowWindow(t *testing.T, mk Factory) {
+	ctx := context.Background()
+	s, _ := mk(t)
+	seedSbx(t, s, "sbx_a")
+	seedVol(t, s, "vol_watched")
+
+	binding := []model.Mount{mount("sbx_a", "vol_watched", "/data", model.Exclusive)}
+	if err := s.CreateMounts(ctx, binding); err != nil {
+		t.Fatalf("seed binding: %v", err)
+	}
+
+	const replacements = 300
+	var (
+		reads     atomic.Int64 // total observations the reader made
+		zeroReads atomic.Int64 // observations of ZERO rows — every one is a defect
+		wrongRows atomic.Int64 // observations of a row count that is neither 0 nor 1
+		writeErrs int
+	)
+	// The reader must be RUNNING before the first replacement. Without this barrier the
+	// test is vacuous on a fast backend rather than merely weak: measured on Memory, all
+	// 300 replacements completed in microseconds and the reader goroutine had been
+	// scheduled exactly ONCE — after the writer was done. The counter assertion below
+	// catches that, but the barrier is what makes the check meaningful in the first place.
+	ready := make(chan struct{})
+	done := make(chan struct{})
+	readerDone := make(chan struct{})
+	go func() {
+		defer close(readerDone)
+		first := true
+		for {
+			rows, err := s.ListMountsByVolume(ctx, "vol_watched")
+			if err == nil {
+				reads.Add(1)
+				switch len(rows) {
+				case 0:
+					zeroReads.Add(1)
+				case 1:
+				default:
+					wrongRows.Add(1)
+				}
+			}
+			if first {
+				first = false
+				close(ready)
+			}
+			select {
+			case <-done:
+				return
+			default:
+			}
+		}
+	}()
+	<-ready
+
+	for i := 0; i < replacements; i++ {
+		if err := s.ReplaceMounts(ctx, "sbx_a", binding); err != nil {
+			writeErrs++
+			t.Errorf("replacement %d = %v; want success (identical binding)", i, err)
+		}
+		// An explicit scheduling point between replacements, so the reader gets a turn even
+		// at GOMAXPROCS=1. It cannot hide a torn implementation — the window a two-commit
+		// replacement opens is INSIDE one iteration, not between them.
+		runtime.Gosched()
+	}
+	close(done)
+	<-readerDone
+
+	if zeroReads.Load() > 0 {
+		t.Fatalf("the write-regime predicate observed ZERO mount rows %d time(s) out of %d reads across %d replacements — the volume looked UNMOUNTED mid-replacement, which would wrongly admit a direct host-side write against a volume a live sandbox holds (§5.C consequence ③). A replacement must be ONE commit.",
+			zeroReads.Load(), reads.Load(), replacements)
+	}
+	if wrongRows.Load() > 0 {
+		t.Errorf("%d observation(s) saw a row count other than 0 or 1 — the exclusive lease was doubled mid-replacement", wrongRows.Load())
+	}
+	if writeErrs > 0 {
+		t.Fatalf("%d replacement(s) failed; the concurrency assertion above is not meaningful", writeErrs)
+	}
+	// NON-VACUITY: the assertion is only worth anything if the reader actually ran
+	// concurrently with the replacements. A reader that never got scheduled would report
+	// zero violations no matter how torn the implementation is — measured, that is exactly
+	// what happens on Memory without the barrier above (1 observation for 300 writes).
+	if reads.Load() < replacements {
+		t.Errorf("the reader made %d observation(s) across %d replacements — too few to have been interleaved, so the zero-row assertion passed vacuously", reads.Load(), replacements)
+	}
+	// And the binding is intact at the end.
+	if rows, _ := s.ListMounts(ctx, "sbx_a"); len(rows) != 1 {
+		t.Errorf("after %d replacements the binding is %+v; want the single row", replacements, rows)
+	}
+	t.Logf("%d replacements, %d concurrent ListMountsByVolume observations, %d saw zero rows", replacements, reads.Load(), zeroReads.Load())
 }
 
 // testMountMissingEndpoint is the reference side of §4.3 atomicity: a mount whose

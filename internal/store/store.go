@@ -471,6 +471,51 @@ type Store interface {
 	// silently not apply.
 	CreateMounts(ctx context.Context, mounts []model.Mount) error
 
+	// ReplaceMounts swaps one sandbox's COMPLETE binding for another — the write point
+	// behind §6.1 `PATCH /v1/sandboxes/{id}/volumes`. An EMPTY `next` legitimately means
+	// "detach everything" (§6.2: PATCH swaps whole bindings, there is no attach-one /
+	// detach-one operation), so it is not a special case and not a no-op.
+	//
+	// THE REPLACEMENT IS ONE ATOMIC COMMIT, AND THAT IS A CONTRACT PROMISE, not an
+	// implementation detail of one backend. §6.2 says a sandbox holds one complete
+	// binding at EVERY INSTANT; two independent commits (delete, then insert) contradict
+	// that literally, because between them the sandbox holds NO binding and that state is
+	// observable. Note what the order cannot fix: the delete MUST precede the insert — a
+	// re-submitted IDENTICAL binding would otherwise collide with the very rows it is
+	// replacing, on both the lease predicate and UNIQUE(sandbox, path) — so the answer is
+	// not to reorder the two statements but to put them in ONE commit.
+	//
+	// Three consequences, each a real defect of the two-commit shape rather than a
+	// theoretical one:
+	//
+	//  1. A REFUSED replacement leaves the sandbox on its OLD binding. There is no
+	//     "the new binding was rejected AND the old one is gone" outcome, so no
+	//     compensating re-insert is needed — and a compensation path for a state the
+	//     model denies is exactly the kind of code whose comment and behavior drift apart.
+	//  2. THE EXCLUSIVE LEASE IS NEVER TRANSIENTLY RELEASED. The lease IS the row (§5.C),
+	//     so a window with no rows is a window with no lease: a concurrent create could
+	//     take a volume THIS replacement intended to keep, and the caller who asked to
+	//     keep it would get a 409 for a lease it never gave up.
+	//  3. A CONCURRENT ListMountsByVolume NEVER OBSERVES ZERO ROWS. That query is the
+	//     write-regime predicate (§5.C direct write): "no mount rows" means "nobody has
+	//     it mounted, a direct host-side write is safe", so the intermediate state would
+	//     wrongly ADMIT a direct write against a volume a live sandbox is holding.
+	//
+	// THIS IS NOT A TRANSACTION ON THE SEAM. It is §4.4-C's discipline applied a second
+	// time: the INTERFACE METHOD promises the atomicity and each backend honors it BY ITS
+	// OWN MEANS (SQLite with one local transaction, Memory by replacing the rows under
+	// the one mutex it already holds). There is ONE algorithm, and it must never branch
+	// on "does this backend support transactions" — that would leak backend differences
+	// into correctness, which §4.4-C rejects outright.
+	//
+	// Verdicts are exactly CreateMounts's, because the API maps them to the same status
+	// codes: ErrMountLeaseConflict for a contended lease (409), ErrMountBindingInvalid
+	// for a binding that contradicts itself (400) — including a row whose Sandbox is not
+	// the `sandbox` being rebound, which would otherwise delete one sandbox's rows and
+	// insert another's — ErrNotFound / ErrVolumeNotFound when an endpoint is absent.
+	// Paths MUST already be normalized by the caller, same as CreateMounts.
+	ReplaceMounts(ctx context.Context, sandbox model.SandboxID, next []model.Mount) error
+
 	// ListMounts returns one sandbox's mount rows, ordered by path. This is what a
 	// resume re-materializes from: the mount relationship is a Binding, so a resume
 	// re-mounts per the CURRENT table rather than restoring frozen bytes (§3.4 / §5.C).
@@ -490,6 +535,15 @@ type Store interface {
 	// (§5.C — there is no lease object to release separately).
 	//
 	// Idempotent (no rows → nil): destroy, unwind and evict all reach it.
+	//
+	// IT SURVIVES ReplaceMounts RATHER THAN COLLAPSING INTO IT, and the distinction is
+	// semantic, not stylistic. Every remaining caller is a TEARDOWN: destroy, create's
+	// unwind, evict, reconcile's cleanup. Those have no "next" binding — the sandbox
+	// itself is going away — so `ReplaceMounts(id, nil)` would misdescribe them as a
+	// rebind to the empty binding and would drag in the endpoint-existence verdicts a
+	// teardown must not care about (it runs precisely when the row is about to vanish).
+	// A rebind, conversely, must NEVER be expressed as this call plus CreateMounts: that
+	// is the two-commit shape ReplaceMounts exists to forbid.
 	//
 	// CALLERS MUST CALL THIS BEFORE DeleteSandbox, and the ORDER IS REQUIRED rather
 	// than stylistic (measured): RESTRICT fires IMMEDIATELY, so wrapping both deletes

@@ -253,48 +253,93 @@ func (m *Memory) CreateMounts(_ context.Context, mounts []model.Mount) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	accepted, err := m.admitBinding(m.mounts, mounts)
+	if err != nil {
+		return err
+	}
+	// ALL-OR-NOTHING: nothing was appended to m.mounts until every row cleared, so a
+	// binding that lost anywhere above added no rows at all.
+	m.mounts = append(m.mounts, accepted...)
+	return nil
+}
+
+// ReplaceMounts swaps the whole binding under the ONE mutex Memory already holds. See
+// Store.ReplaceMounts for why the atomicity is a contract promise; here it is delivered by
+// filtering and appending in a single critical section, so no reader can be scheduled
+// between the two halves and observe the sandbox with no rows.
+func (m *Memory) ReplaceMounts(_ context.Context, sandbox model.SandboxID, next []model.Mount) error {
+	if err := validateReplacement(sandbox, next); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// The predicate is evaluated against the rows that SURVIVE the replacement — i.e. with
+	// this sandbox's own rows already dropped. That is the whole reason a rebind cannot be
+	// a delete plus a CreateMounts: judged against the un-filtered set, a re-submitted
+	// IDENTICAL binding contends with the very rows it is replacing.
+	kept := make([]model.Mount, 0, len(m.mounts))
+	for _, mt := range m.mounts {
+		if mt.Sandbox != sandbox {
+			kept = append(kept, mt)
+		}
+	}
+	accepted, err := m.admitBinding(kept, next)
+	if err != nil {
+		// m.mounts is untouched, so a refused replacement leaves the OLD binding intact
+		// (consequence ①) — the same all-or-nothing SQLite gets from rolling back.
+		return err
+	}
+	m.mounts = append(kept, accepted...)
+	return nil
+}
+
+// admitBinding evaluates the endpoint, lease and topology rules for `mounts` against
+// `base` (the rows that will coexist with them) and returns the rows to append. It
+// mutates nothing, so a caller that gets an error has changed no state.
+//
+// Callers MUST hold m.mu. Shared by CreateMounts and ReplaceMounts so the lease predicate
+// has ONE spelling on this backend, mirroring SQLite's shared insertBinding.
+func (m *Memory) admitBinding(base, mounts []model.Mount) ([]model.Mount, error) {
 	// Reference side of §4.3 atomicity: both endpoints must exist. Under the one mutex
 	// a concurrent delete cannot interleave, so this is the same atomicity SQLite's FK
 	// gives inside its transaction.
 	for _, mt := range mounts {
 		if _, ok := m.rec[mt.Sandbox]; !ok {
-			return ErrNotFound
+			return nil, ErrNotFound
 		}
 		if _, ok := m.vol[mt.Volume]; !ok {
-			return ErrVolumeNotFound
+			return nil, ErrVolumeNotFound
 		}
 	}
 
-	// The lease predicate, evaluated against BOTH the committed rows and the rows this
+	// The lease predicate, evaluated against BOTH the coexisting rows and the rows this
 	// same binding is about to add — the second half matters because a binding could
 	// otherwise contend with itself and slip past.
 	pending := make([]model.Mount, 0, len(mounts))
 	for _, mt := range mounts {
-		for _, existing := range append(append([]model.Mount(nil), m.mounts...), pending...) {
+		for _, existing := range append(append([]model.Mount(nil), base...), pending...) {
 			if existing.Volume != mt.Volume {
 				continue
 			}
 			// The FULL predicate, not just "two exclusive rows": inserting exclusive when
 			// ANY row exists, or inserting anything when an EXCLUSIVE row exists.
 			if mt.Access == model.Exclusive || existing.Access == model.Exclusive {
-				return ErrMountLeaseConflict
+				return nil, ErrMountLeaseConflict
 			}
 		}
-		// Topology assertions, against committed rows as well as this binding.
-		for _, existing := range append(append([]model.Mount(nil), m.mounts...), pending...) {
+		// Topology assertions, against coexisting rows as well as this binding.
+		for _, existing := range append(append([]model.Mount(nil), base...), pending...) {
 			if existing.Sandbox != mt.Sandbox {
 				continue
 			}
 			if existing.Path == mt.Path || existing.Volume == mt.Volume {
-				return ErrMountBindingInvalid
+				return nil, ErrMountBindingInvalid
 			}
 		}
 		pending = append(pending, mt)
 	}
-	// ALL-OR-NOTHING: nothing was appended to m.mounts until every row cleared, so a
-	// binding that lost anywhere above added no rows at all.
-	m.mounts = append(m.mounts, pending...)
-	return nil
+	return pending, nil
 }
 
 func (m *Memory) ListMounts(_ context.Context, sandbox model.SandboxID) ([]model.Mount, error) {
