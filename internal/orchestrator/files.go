@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -43,24 +44,32 @@ func fileParams(w http.ResponseWriter, r *http.Request) (string, bool) {
 	return p, true
 }
 
-// bypassStatus maps a transport-client error to an HTTP status. The inner client
+// bypassCode maps a transport-client error to an HTTP status. The inner client
 // already normalized the guest's status into a Connect code, so this is the same
 // classification the RPC edge reports — one contract, two encodings.
-func bypassStatus(w http.ResponseWriter, err error) {
+//
+// It returns a CODE and writes nothing, mirroring statusCodeFor: the body is the
+// funnel's business (writeErr). That split matters more here than on the control
+// paths, because the errors reaching this one are built by the inner transport
+// client, which dials the netns veth IP — client.go's `hc.Do` failures carry
+// `10.x.y.z:port` in their text, and §6.2 bars placement from the wire exactly as it
+// bars host paths. The data plane's RPC half already sanitized this (proxyErr); this
+// REST half was the arm that did not.
+func bypassCode(err error) int {
 	switch connect.CodeOf(err) {
 	case connect.CodeNotFound:
-		http.Error(w, err.Error(), http.StatusNotFound)
+		return http.StatusNotFound
 	case connect.CodePermissionDenied:
-		http.Error(w, err.Error(), http.StatusForbidden)
+		return http.StatusForbidden
 	case connect.CodeResourceExhausted:
 		// The §3.4 disk cap: valid request, no room. The sandbox stays alive (§2.3).
-		http.Error(w, err.Error(), http.StatusInsufficientStorage)
+		return http.StatusInsufficientStorage
 	case connect.CodeInvalidArgument:
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		return http.StatusBadRequest
 	case connect.CodeUnavailable:
-		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return http.StatusServiceUnavailable
 	default:
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return http.StatusInternalServerError
 	}
 }
 
@@ -71,12 +80,18 @@ func (e *Engine) handleFileDownload(w http.ResponseWriter, r *http.Request, id m
 	}
 	cl, err := e.Mediator.Client(id)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		writeErr(w, http.StatusNotFound, err)
 		return
 	}
 	body, err := cl.OpenRead(r.Context(), path)
 	if err != nil {
-		bypassStatus(w, err)
+		// The path is stated HERE rather than relied upon from the inner error, and the
+		// echo list carries it so the funnel lets it through. Both halves are needed: a
+		// transport-level failure's text is net/http's (`Get "http://10.x.y.z:9000/files?
+		// path=%2Fetc%2Fx": dial tcp …`), which names the file only inside a URL that is
+		// redacted WHOLE — so without this wrap the caller would get a sanitized 5xx that
+		// does not say which download failed.
+		writeErr(w, bypassCode(err), fmt.Errorf("download %s: %w", path, err), path)
 		return
 	}
 	defer body.Close()
@@ -105,7 +120,7 @@ func (e *Engine) handleFileUpload(w http.ResponseWriter, r *http.Request, id mod
 	}
 	cl, err := e.Mediator.Client(id)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		writeErr(w, http.StatusNotFound, err)
 		return
 	}
 	// Barrier-gated like the mutating fs RPCs (§4.2 / D4.4): a streaming upload is
@@ -124,7 +139,7 @@ func (e *Engine) handleFileUpload(w http.ResponseWriter, r *http.Request, id mod
 	body := http.MaxBytesReader(w, r.Body, maxUploadBytes)
 	n, err := cl.WriteStream(r.Context(), path, body)
 	if err != nil {
-		bypassStatus(w, err)
+		writeErr(w, bypassCode(err), fmt.Errorf("upload %s: %w", path, err), path)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{

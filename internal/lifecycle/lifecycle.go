@@ -48,6 +48,24 @@ var ErrInsufficientCapacity = errors.New("lifecycle: insufficient node capacity"
 // axis the operator has not declared a budget for.
 var ErrCapRequired = errors.New("lifecycle: node meters this axis, so a cap is required")
 
+// ErrUncappedDiskNotCappable is the §3.4 refusal of a `0 → N` write on a sandbox's
+// disk axis: an uncapped sandbox cannot be GIVEN a cap by a PATCH.
+//
+// 400, and refused at the WRITE POINT rather than at the next placement, because the
+// promise is unmaterializable and the alternative is a brick. The per-sandbox capacity
+// cap materializes as a quota on the Overlay's storage unit, and that unit is only
+// built as a btrfs subvolume when a cap was already present AT CREATE
+// (§5.B: `CreateOverlay` makes the subvolume only for `capByte > 0`); an uncapped
+// sandbox's upper is a plain directory tree with no quota row to write. §5.B's rule for
+// an unenforceable cap is "refuse the placement, never silently run uncapped" — so
+// accepting this PATCH would record a cap that EVERY future placement refuses, and the
+// sandbox could never resume again. A 200 would turn the sandbox into a brick.
+//
+// DIRECTIONAL: `N → 0` (drop the cap) and `N → M` (change it) stay legal. Only the
+// from-uncapped direction is refused, and only on disk — memory and CPU do not
+// materialize as storage units.
+var ErrUncappedDiskNotCappable = errors.New("lifecycle: an uncapped sandbox's disk axis cannot be capped by a PATCH")
+
 // deathCauseOf translates the §5.A provider enum into the persisted model enum.
 // Two types on purpose (§5.A): the provider seam must not depend on the
 // control-plane record shape. The translation lives HERE, in the mediator, which
@@ -816,15 +834,40 @@ func (m *Mediator) UpdateBinding(ctx context.Context, id model.SandboxID, b stor
 	}
 
 	newLimits, _, _ := b.Apply(rec)
+	// §3.4: `0 → N` on the DISK axis is a refused write, not a raise. The cap has no
+	// materialization to land on — the storage unit was only built as a quota-capable
+	// subvolume if a cap existed at create — so accepting would record a promise every
+	// future placement must refuse, and the sandbox would never resume again. Refused
+	// HERE, where nothing has changed yet and the caller can see it, rather than in the
+	// recovery path where it becomes an unresumable sandbox (see
+	// ErrUncappedDiskNotCappable). The remedy is in the message because there is exactly
+	// one: recreate the sandbox with the cap.
+	//
+	// Placed BEFORE the admission gate deliberately: this request is invalid regardless
+	// of how much room the node has, and running the gate first would let a full node
+	// answer 507 — telling the caller to wait for capacity that would never make this
+	// legal.
+	if rec.Limits.DiskByte == 0 && newLimits.DiskByte > 0 {
+		return fmt.Errorf("update: %w: sandbox %s was created uncapped on disk, so its Overlay storage unit carries no quota row and a %d-byte cap could never be enforced — §5.B refuses an unenforceable cap at every placement, so accepting this would leave the sandbox permanently unresumable. Create a new sandbox with disk_byte set (Promote this one first to carry its bytes over); `N → 0` and `N → M` remain legal",
+			ErrUncappedDiskNotCappable, id, newLimits.DiskByte)
+	}
 	raisesMemory := newLimits.MemoryByte > rec.Limits.MemoryByte
 	// Any raise on a metered axis is a new promise → re-gate. Excludes this
 	// sandbox's own committed caps, exactly as resume does, so it is measured
 	// against the delta rather than double-charged.
+	//
+	// admitMu spans {gate → commit} as ONE critical section, held by defer through
+	// the Store.UpdateBinding below — the same shape create uses for
+	// {gate → insert} and SetVolumeCapacity for {gate → apply → commit}. Releasing
+	// it after the gate would not serialize anything: two raises on DIFFERENT
+	// sandboxes hold DISJOINT per-sandbox transition locks (§4.4-B), so each would
+	// sum a Σ missing the other's uncommitted raise, both would pass, and both
+	// would commit — the node over budget with every individual cap honored. §3.4
+	// is explicit that a write to a cap changes Σ AT THIS COMMIT.
 	if newLimits.DiskByte > rec.Limits.DiskByte || raisesMemory || newLimits.CPUMillis > rec.Limits.CPUMillis {
 		m.admitMu.Lock()
-		err := m.admit(ctx, newLimits, id)
-		m.admitMu.Unlock()
-		if err != nil {
+		defer m.admitMu.Unlock()
+		if err := m.admit(ctx, newLimits, id); err != nil {
 			return err
 		}
 	}
@@ -1098,6 +1141,28 @@ func (m *Mediator) unmarkBuilding(id model.TemplateID) {
 // placement + merged are recorded in the mediator. On any error it returns
 // without recording (the caller unwinds).
 func (m *Mediator) coldStart(ctx context.Context, id model.SandboxID, ov *rootfs.Overlay, limits model.Limits) error {
+	// ⓪ the write-regime gate, cold-start side (§5.C, symmetric with
+	// admitDirectWrite): if a direct content write is streaming into a volume this
+	// placement would mount READ-WRITE, refuse. Gating only the direct-write side
+	// would leave the hazard fully open in the other order — an import admitted at T0
+	// plus this cold start completing at T1 is the two concurrent writers §5.C
+	// forbids, and no `paused` state appears anywhere in that story.
+	//
+	// FIRST, before the overlay is even mounted: a refusal that has built nothing is
+	// the §4.4-A "atomic return to the source state" for free — resume stays `paused`,
+	// create deletes its record — and there is nothing to unwind.
+	//
+	// The rows are read here and read AGAIN by materializeMounts below. That is not a
+	// TOCTOU: the caller holds this sandbox's transition lock for the whole chain
+	// (§4.4-B) and RebindVolumes — the only writer of this sandbox's rows — takes the
+	// same lock, so the two reads cannot disagree.
+	rows, err := m.deps.Store.ListMounts(ctx, id)
+	if err != nil {
+		return fmt.Errorf("read mount table: %w", err)
+	}
+	if err := m.admitColdStartRW(id, rows); err != nil {
+		return err
+	}
 	// ① mount lower(Template)/upper/work → merged.
 	merged, err := m.deps.Rootfs.Mount(ctx, ov)
 	if err != nil {

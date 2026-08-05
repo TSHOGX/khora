@@ -143,6 +143,19 @@ func (r *Reaper) tick(ctx context.Context) {
 	if err := r.m.ReclaimQuotaRows(ctx); err != nil {
 		r.m.deps.Logf("reaper: quota-row reclamation (retried next tick): %v", err)
 	}
+	// §5.C / volume.md D7.3 CAP REPAIR, periodic for the same reason the sweeps above
+	// are: the repair state is created at RUNTIME, not only by a crash before boot.
+	// Writing a snapshot's cap is necessarily the SECOND substrate call after the
+	// snapshot ioctl, so any failure between the two — not just a process death —
+	// leaves a registered, live, UNCAPPED volume whose record still promises N to the
+	// §3.4 gate. Boot-only repair would hold that divergence until the next restart,
+	// and it is INVISIBLE while it lasts: the limit read cannot tell "never capped"
+	// from "deliberately uncapped" (the `none ↔ 0` mapping), so no inspect, sweep or
+	// audit finds it. The RECORD is re-asserted onto the storage; the reverse
+	// direction would ratify the residue as the new truth.
+	if err := r.m.RepairVolumeCaps(ctx); err != nil {
+		r.m.deps.Logf("reaper: volume-cap repair (retried next tick): %v", err)
+	}
 }
 
 // Sweep is one full pass: classify every sandbox and dispatch per health state /

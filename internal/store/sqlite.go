@@ -713,54 +713,86 @@ func (s *SQLite) CreateMounts(ctx context.Context, mounts []model.Mount) error {
 		return err
 	}
 	return s.tx(ctx, func(t *sql.Tx) error {
-		for _, mt := range mounts {
-			// The full cross-row predicate, in ONE statement. It covers all four
-			// combinations the partial index is blind to: inserting exclusive when ANY row
-			// exists, and inserting anything when an EXCLUSIVE row exists.
-			// RowsAffected()==0 ⟹ the lease is contended.
-			res, err := t.Exec(
-				`INSERT INTO mounts(sandbox, volume, path, access)
-				 SELECT ?1, ?2, ?3, ?4
-				 WHERE NOT EXISTS (
-				   SELECT 1 FROM mounts m
-				   WHERE m.volume = ?2
-				     AND (?4 = 'exclusive' OR m.access = 'exclusive')
-				 )`,
-				string(mt.Sandbox), string(mt.Volume), mt.Path, string(mt.Access),
-			)
-			if err != nil {
-				// A missing sandbox or volume is the REFERENCE side of §4.3 atomicity (a
-				// concurrent delete won). The two are distinguished by which row is absent.
-				if isFKViolation(err) {
-					var exists int
-					if qerr := t.QueryRow(`SELECT 1 FROM volumes WHERE id=?`, string(mt.Volume)).Scan(&exists); errors.Is(qerr, sql.ErrNoRows) {
-						return ErrVolumeNotFound
-					}
-					return ErrNotFound
-				}
-				// A uniqueness violation is a DIFFERENT verdict from an FK one and needs its
-				// own predicate — isFKViolation correctly reports false here. Reaching this
-				// means validateBinding was bypassed or is wrong, so the schema assertion is
-				// doing its backstop job.
-				if isUniqueViolation(err) {
-					return ErrMountBindingInvalid
-				}
-				return err
-			}
-			n, err := res.RowsAffected()
-			if err != nil {
-				return err
-			}
-			if n == 0 {
-				// ALL-OR-NOTHING: returning here rolls the transaction back, so a
-				// multi-volume binding that loses one lease inserts NONE of its rows. A
-				// sandbox holds one complete binding, so a partial one is not a state the
-				// model has.
-				return ErrMountLeaseConflict
-			}
-		}
-		return nil
+		return insertBinding(t, mounts)
 	})
+}
+
+// ReplaceMounts swaps the whole binding in ONE transaction. See Store.ReplaceMounts for
+// why the atomicity is a contract promise (and why the delete cannot simply be reordered
+// after the insert).
+func (s *SQLite) ReplaceMounts(ctx context.Context, sandbox model.SandboxID, next []model.Mount) error {
+	if err := validateReplacement(sandbox, next); err != nil {
+		return err
+	}
+	return s.tx(ctx, func(t *sql.Tx) error {
+		// DELETE FIRST, INSERT SECOND, ONE COMMIT. The order is required (a re-submitted
+		// identical binding would collide with the rows it replaces); the single commit is
+		// what keeps the no-rows state from ever being observable — SQLite's write
+		// serialization plus the pinned single connection mean no other reader sees this
+		// transaction's intermediate rows at all.
+		if _, err := t.Exec(`DELETE FROM mounts WHERE sandbox=?`, string(sandbox)); err != nil {
+			return err
+		}
+		// Any verdict here rolls the DELETE back too, so a refused replacement leaves the
+		// OLD binding in place — that is consequence ① and it needs no compensating code.
+		return insertBinding(t, next)
+	})
+}
+
+// insertBinding inserts every row of a validated binding inside an EXISTING transaction,
+// enforcing the lease per row. Shared by CreateMounts and ReplaceMounts so the lease
+// predicate has ONE spelling: a second copy is how the two write points would drift apart
+// on the invariant §5.C calls the only new one Volume introduces.
+//
+// It assumes the binding was already validated (validateBinding / validateReplacement).
+func insertBinding(t *sql.Tx, mounts []model.Mount) error {
+	for _, mt := range mounts {
+		// The full cross-row predicate, in ONE statement. It covers all four
+		// combinations the partial index is blind to: inserting exclusive when ANY row
+		// exists, and inserting anything when an EXCLUSIVE row exists.
+		// RowsAffected()==0 ⟹ the lease is contended.
+		res, err := t.Exec(
+			`INSERT INTO mounts(sandbox, volume, path, access)
+			 SELECT ?1, ?2, ?3, ?4
+			 WHERE NOT EXISTS (
+			   SELECT 1 FROM mounts m
+			   WHERE m.volume = ?2
+			     AND (?4 = 'exclusive' OR m.access = 'exclusive')
+			 )`,
+			string(mt.Sandbox), string(mt.Volume), mt.Path, string(mt.Access),
+		)
+		if err != nil {
+			// A missing sandbox or volume is the REFERENCE side of §4.3 atomicity (a
+			// concurrent delete won). The two are distinguished by which row is absent.
+			if isFKViolation(err) {
+				var exists int
+				if qerr := t.QueryRow(`SELECT 1 FROM volumes WHERE id=?`, string(mt.Volume)).Scan(&exists); errors.Is(qerr, sql.ErrNoRows) {
+					return ErrVolumeNotFound
+				}
+				return ErrNotFound
+			}
+			// A uniqueness violation is a DIFFERENT verdict from an FK one and needs its
+			// own predicate — isFKViolation correctly reports false here. Reaching this
+			// means validateBinding was bypassed or is wrong, so the schema assertion is
+			// doing its backstop job.
+			if isUniqueViolation(err) {
+				return ErrMountBindingInvalid
+			}
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			// ALL-OR-NOTHING: returning here rolls the transaction back, so a
+			// multi-volume binding that loses one lease inserts NONE of its rows. A
+			// sandbox holds one complete binding, so a partial one is not a state the
+			// model has.
+			return ErrMountLeaseConflict
+		}
+	}
+	return nil
 }
 
 func (s *SQLite) ListMounts(ctx context.Context, sandbox model.SandboxID) ([]model.Mount, error) {
@@ -840,7 +872,20 @@ func validateBinding(mounts []model.Mount) error {
 			return fmt.Errorf("%w: access %q is not one of exclusive / shared-ro / shared-rw", ErrMountBindingInvalid, mt.Access)
 		}
 		if mt.Path != normalizedMountPath(mt.Path) {
-			return fmt.Errorf("%w: path %q is not normalized (absolute, cleaned, not \"/\") — the uniqueness assertions are literal string comparisons, so an un-normalized path makes them silently not apply",
+			return fmt.Errorf("%w: path %q is not normalized (absolute, cleaned) — the uniqueness assertions are literal string comparisons, so an un-normalized path makes them silently not apply",
+				ErrMountBindingInvalid, mt.Path)
+		}
+		// The guest root is normalized BUT ILLEGAL (§5.C: absolute, cleaned, not "/"), and
+		// this is a SEPARATE check rather than a stricter normalizer because "/" is a FIXED
+		// POINT of path.Clean: "//", "/.", "/data/.." and " / " all normalize TO "/" and are
+		// caught above, so only the bare "/" reaches here. Folding the two would mean making
+		// normalizedMountPath return a value that is not normalized — destroying the ONE
+		// definition NormalizeMountPath exists to share with the mediator. Rejected because a
+		// bind at "/" SHADOWS THE ENTIRE GUEST ROOTFS: the overlay is still there and still
+		// mounted, but nothing in it is reachable, and no uniqueness assertion can express
+		// "does not shadow everything".
+		if mt.Path == "/" {
+			return fmt.Errorf("%w: path %q is the guest root — a bind there shadows the ENTIRE sandbox rootfs, leaving the overlay mounted but unreachable",
 				ErrMountBindingInvalid, mt.Path)
 		}
 		if seenPath[mt.Path] {
@@ -870,9 +915,30 @@ func validateBinding(mounts []model.Mount) error {
 	return nil
 }
 
+// validateReplacement is validateBinding plus the one assertion a replacement adds: every
+// row must name the sandbox being rebound.
+//
+// It is a 400 rather than a silent filter because the alternative is genuinely
+// destructive: ReplaceMounts deletes `sandbox`'s rows, so a row carrying a DIFFERENT
+// sandbox would detach one sandbox and attach another in a single commit the caller
+// believes touched only one. Both backends run this, so it is contract, not a SQLite check.
+func validateReplacement(sandbox model.SandboxID, next []model.Mount) error {
+	for _, mt := range next {
+		if mt.Sandbox != sandbox {
+			return fmt.Errorf("%w: row for sandbox %s appears in a replacement of %s's binding — a replacement rewrites exactly one sandbox's rows",
+				ErrMountBindingInvalid, mt.Sandbox, sandbox)
+		}
+	}
+	return validateBinding(next)
+}
+
 // normalizedMountPath is the ONE definition of a normalized mount destination,
 // shared by the validation above and by the mediator that prepares bindings, so the
 // two cannot disagree about what "normalized" means.
+//
+// It answers "what is the canonical spelling of this path", NOT "is this path a legal
+// mount destination". "/" is a fixed point here — canonical, and still refused by
+// validateBinding above, which is the only place legality is decided.
 func normalizedMountPath(p string) string {
 	c := path.Clean("/" + strings.TrimSpace(p))
 	return c

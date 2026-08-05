@@ -494,20 +494,6 @@ func (m *Mediator) SweepOrphanVolumes(ctx context.Context) error {
 	for _, v := range vols {
 		keep[string(v.ID)] = true
 	}
-	// A CHECK INDEPENDENT OF ANY FK (§5.C safety requirement): keep any volume appearing
-	// in ANY mount row, live or not. FK RESTRICT protects the ROW; this protects the
-	// BYTES, and the bytes are what a mis-sweep destroys — silently, with the guest's
-	// writes still returning success into an unlinked inode. Belt AND braces on purpose:
-	// it survives a record that has somehow gone while a mount row remains.
-	for _, v := range vols {
-		rows, err := m.deps.Store.ListMountsByVolume(ctx, v.ID)
-		if err != nil {
-			return fmt.Errorf("sweep volumes: read mount table for %s: %w", v.ID, err)
-		}
-		if len(rows) > 0 {
-			keep[string(v.ID)] = true
-		}
-	}
 
 	reclaimed := 0
 	var failed []string
@@ -515,18 +501,23 @@ func (m *Mediator) SweepOrphanVolumes(ctx context.Context) error {
 		if keep[id] {
 			continue
 		}
-		// A candidate with no row. Before destroying it, TWO checks whose ORDER is the
-		// whole correctness argument:
+		// A candidate with no row. Before destroying it, THREE checks, the first two of
+		// which have a load-bearing ORDER:
 		//
 		//  1. the in-flight sets — an in-flight create or a direct write in progress is
-		//     "bytes, no row" by construction, not an orphan; and
-		//  2. a FRESH per-candidate store read.
+		//     "bytes, no row" by construction, not an orphan;
+		//  2. a FRESH per-candidate store read; and
+		//  3. the FK-independent mount-table read (see below), which needs 2 to have run
+		//     first to be worth anything.
 		//
-		// Check 1 before check 2 is what makes the pair conclusive. The in-flight mark is
+		// Check 1 before check 2 is what makes that pair conclusive. The in-flight mark is
 		// dropped only AFTER the row is inserted, so a candidate that is NOT marked here
 		// has necessarily already committed its row — and check 2 then finds it. A
 		// candidate that IS marked is skipped outright. There is no third case, so no
 		// committed volume can be reclaimed, and no lock is held across a store call.
+		//
+		// EVERY read here fails CLOSED: an error skips the candidate, and is never allowed
+		// to read as "no owner" (§5.C).
 		if m.isVolumeInFlight(model.VolumeID(id)) {
 			continue
 		}
@@ -538,7 +529,34 @@ func (m *Mediator) SweepOrphanVolumes(ctx context.Context) error {
 			m.deps.Logf("sweep volumes: %s: record unreadable, skipping: %v", id, err)
 			continue
 		}
-		// Genuinely an orphan: bytes exist, no row, nothing in flight.
+		// 3. A LIVE-MOUNT CHECK INDEPENDENT OF ANY FK (§5.C safety requirement): skip any
+		// unit whose id appears in ANY mount row, live or not.
+		//
+		// It is asked HERE, of the CANDIDATE UNIT ID, and that placement is the whole
+		// point. Asking it of the volumes that HAVE records instead would be inert — every
+		// such id is already kept by the loop above — and would answer a question no FK
+		// leaves open: `mounts.volume REFERENCES volumes(id) ON DELETE RESTRICT` already
+		// makes "record present" and "mount row present" co-extensive AS LONG AS THE FK
+		// HOLDS. This check earns its cost precisely because it does NOT trust that: the
+		// candidates reaching this line are the ids whose record is CONFIRMED ABSENT, so a
+		// mount row found here is exactly the FK-violating state the requirement names —
+		// a row still pointing at bytes nothing else vouches for.
+		//
+		// FK RESTRICT protects the ROW; this protects the BYTES, and the bytes are what a
+		// mis-sweep destroys — silently, with the guest's writes still returning success
+		// into an unlinked inode (volume.md D7.2: five ways of pulling a live volume, none
+		// killed the sandbox, three produced no errno at all).
+		if rows, err := m.deps.Store.ListMountsByVolume(ctx, model.VolumeID(id)); err != nil {
+			// SKIP, never "no owner": measured, a bulk read fails wholesale and returns zero
+			// rows under exactly the concurrent churn a sweep runs in (§5.C). Reclaiming on a
+			// failed read would be indistinguishable from reclaiming on an empty table.
+			m.deps.Logf("sweep volumes: %s: mount table unreadable, skipping: %v", id, err)
+			continue
+		} else if len(rows) > 0 {
+			m.deps.Logf("sweep volumes: %s: no record but %d mount row(s) still name it, skipping", id, len(rows))
+			continue
+		}
+		// Genuinely an orphan: bytes exist, no row, no mount row, nothing in flight.
 		if err := be.DestroyVolume(ctx, id); err != nil {
 			// CONTINUE, do not abort: this is a best-effort reclamation path and one stuck
 			// unit must not leave every other leak in place. The sweep is idempotent, so
@@ -625,24 +643,18 @@ func (m *Mediator) RebindVolumes(ctx context.Context, id model.SandboxID, bindin
 		})
 	}
 
-	// Replace: drop the old rows, then insert the new ones. The old rows MUST go first
-	// or the new binding collides with itself on the lease and on UNIQUE(sandbox,path)
-	// — a re-submitted identical binding would otherwise be refused for conflicting
-	// with the very rows it is replacing.
-	if err := m.deps.Store.DeleteMounts(ctx, id); err != nil {
-		return false, fmt.Errorf("rebind volumes: clear current binding: %w", err)
-	}
-	if err := m.deps.Store.CreateMounts(ctx, next); err != nil {
-		// The new binding lost (a contended lease, or it contradicts itself). RESTORE the
-		// previous one: a rejected rebind must leave the sandbox with the binding it had,
-		// not with none — silently detaching every volume because a new binding was
-		// invalid would be far worse than the refusal.
-		if rerr := m.deps.Store.CreateMounts(ctx, before); rerr != nil {
-			// Now the sandbox has NO binding and its previous one could not be restored.
-			// Logged loudly: it is recoverable by re-issuing the PATCH, but the caller must
-			// know the old binding is gone rather than assume the refusal was clean.
-			m.deps.Logf("rebind volumes %s: the new binding was refused (%v) AND the previous one could not be restored (%v) — the sandbox now has no mounts; re-issue the intended binding", id, err, rerr)
-		}
+	// ONE COMMIT, promised by the store contract (§5.C / store.Store.ReplaceMounts). The
+	// old rows must go before the new ones — a re-submitted identical binding would
+	// otherwise collide with the very rows it replaces, on the lease predicate and on
+	// UNIQUE(sandbox, path) — so the two statements are put in a SINGLE commit rather
+	// than reordered.
+	//
+	// THERE IS NO RESTORE BRANCH HERE, and its absence is the point: a refused
+	// replacement leaves the sandbox on its old binding by construction, so there is no
+	// "new binding rejected AND old one gone" state to compensate for. A compensation
+	// path for a state the model denies is a liability — it claims to repair something
+	// unreachable, and the repair itself can fail.
+	if err := m.deps.Store.ReplaceMounts(ctx, id, next); err != nil {
 		return false, fmt.Errorf("rebind volumes: %w", err)
 	}
 

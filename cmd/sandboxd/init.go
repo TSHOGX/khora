@@ -4,7 +4,6 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"sync"
 	"syscall"
 	"time"
 )
@@ -34,15 +33,10 @@ func initMode() {
 	// pidfdWait is waitid(P_PIDFD, WEXITED) *without* WNOWAIT, i.e. it reaps too
 	// — pidfd removes the pid-reuse race, not the two-reapers race. Instead the
 	// reaper hands the status to whoever registered that pid.
+	// The table is shared with transport mode (reap.go) — the single-waiter
+	// problem is identical on both sides; only which pids are "ours" differs.
 	reaper := newReapTable()
-
-	sigchld := make(chan os.Signal, 16)
-	signal.Notify(sigchld, syscall.SIGCHLD)
-	go func() {
-		for range sigchld {
-			reaper.drain()
-		}
-	}()
+	reaper.drainOnSIGCHLD()
 
 	// Container-level signals → fan out to EVERY other process in the guest,
 	// then exit (PID 1 exiting tears down the container). PID 1 must install
@@ -95,75 +89,5 @@ func initMode() {
 	}
 }
 
-// reapTable is PID 1's single-waiter reaper plus the handoff to supervisors.
-// The reaper drains every reapable child (the global-orphan backstop duty);
-// for pids someone registered, it delivers the wait status instead of dropping
-// it. Registration is serialized against a drain so a child can never be reaped
-// before its channel is in the table.
-type reapTable struct {
-	mu      sync.Mutex
-	waiters map[int]chan syscall.WaitStatus
-}
-
-func newReapTable() *reapTable {
-	return &reapTable{waiters: make(map[int]chan syscall.WaitStatus)}
-}
-
-// start forks cmd and returns its pid plus a channel that yields its wait
-// status exactly once. The lock spans Start so a SIGCHLD for this child cannot
-// be drained before the waiter is registered. The caller must NOT call
-// cmd.Wait() — the os.Process handle is released here (hence the returned pid),
-// since the reaper owns the wait.
-func (r *reapTable) start(cmd *exec.Cmd) (int, <-chan syscall.WaitStatus, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if err := cmd.Start(); err != nil {
-		return 0, nil, err
-	}
-	pid := cmd.Process.Pid
-	// Drop the wait obligation (and the pidfd it holds) so a long-lived PID 1
-	// does not leak one handle per restart; the reaper is the only waiter.
-	_ = cmd.Process.Release()
-	// Buffered so the reaper never blocks on a receiver that has not arrived —
-	// and never loses the status if the child dies before the loop selects.
-	ch := make(chan syscall.WaitStatus, 1)
-	r.waiters[pid] = ch
-	return pid, ch, nil
-}
-
-// drain reaps every currently-reapable child (§ D4.1 waitpid loop) and delivers
-// the status of any registered pid. An unregistered pid (a true global orphan
-// inherited by PID 1) is simply reaped and dropped; a registered one is handed
-// off over a cap-1 channel that is only ever sent to once, so the handoff itself
-// cannot block.
-//
-// Note the lock is taken AFTER Wait4, not around it — holding a mutex across a
-// syscall would buy nothing here. A pid can never be reaped before its waiter is
-// registered, because the registration side (start) holds r.mu across BOTH
-// cmd.Start and the map insert: if this loop reaps a child whose start has not
-// finished registering, it blocks at the Lock below until it has, and then finds
-// the channel. That ordering is where the no-lost-status property comes from.
-func (r *reapTable) drain() {
-	for {
-		var ws syscall.WaitStatus
-		pid, err := syscall.Wait4(-1, &ws, syscall.WNOHANG, nil)
-		if pid <= 0 || err != nil {
-			return // 0 = no reapable child right now; ECHILD = none at all
-		}
-		r.mu.Lock()
-		if ch, ok := r.waiters[pid]; ok {
-			delete(r.waiters, pid)
-			ch <- ws // cap 1, one send per registration: cannot block
-		}
-		r.mu.Unlock()
-	}
-}
-
-// exitCode maps a wait status to the conventional exit code (128+signo on
-// signal) — the D4.1 checklist item, here for PID 1's own supervision log.
-func exitCode(ws syscall.WaitStatus) int {
-	if ws.Signaled() {
-		return 128 + int(ws.Signal())
-	}
-	return ws.ExitStatus()
-}
+// The reapTable itself lives in reap.go — transport mode needs the same
+// single-waiter shape for its own subtree (§5.E.1), so it is not PID 1's alone.

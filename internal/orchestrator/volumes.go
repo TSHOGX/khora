@@ -75,7 +75,7 @@ func (e *Engine) registerVolumeRoutes(mux *http.ServeMux) {
 func (e *Engine) handleCreateVolume(w http.ResponseWriter, r *http.Request) {
 	var req volumeCreateReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
 	if req.Size < 0 {
@@ -176,7 +176,7 @@ type volumePatchReq struct {
 func (e *Engine) handlePatchVolume(w http.ResponseWriter, r *http.Request, id model.VolumeID) {
 	var req volumePatchReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
 	if req.Size == nil {
@@ -220,7 +220,7 @@ func (e *Engine) handleDeleteVolume(w http.ResponseWriter, r *http.Request, id m
 func (e *Engine) handleDeriveVolume(w http.ResponseWriter, r *http.Request, id model.VolumeID, isClone bool) {
 	var req volumeCreateReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
 	if req.Size < 0 {
@@ -266,7 +266,12 @@ func (e *Engine) handleImportVolume(w http.ResponseWriter, r *http.Request, id m
 	}
 	n, err := e.Mediator.ImportVolume(r.Context(), id, path, r.Body)
 	if err != nil {
-		statusFor(w, err)
+		// `path` is echoed: it is the caller's OWN parameter, so handing it back tells
+		// them nothing about the host. Everything else path-shaped in the error was
+		// authored below the API and is redacted (see sanitizeErr). Note the accessor is
+		// root-confined, so the string the mediator reports here can differ from what
+		// was sent — a traversal clamps — and only the exact token given is echoed.
+		statusFor(w, err, path)
 		return
 	}
 	writeJSON(w, http.StatusOK, importResp{VolumeID: string(id), Path: path, BytesWritten: n})
@@ -287,8 +292,9 @@ func (e *Engine) handleExportVolume(w http.ResponseWriter, r *http.Request, id m
 	w.Header().Set("Content-Type", "application/octet-stream")
 	n, err := e.Mediator.ExportVolume(r.Context(), id, path, w)
 	if err != nil && n == 0 {
-		// Nothing written yet: a real status code is still possible.
-		statusFor(w, err)
+		// Nothing written yet: a real status code is still possible. `path` is echoed for
+		// the same reason as on import — it is the caller's own parameter.
+		statusFor(w, err, path)
 		return
 	}
 	if err != nil {

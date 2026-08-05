@@ -121,8 +121,23 @@ type ociNamespace struct {
 // on the host, §2.1 ①②). So this list is guest-internal hygiene only: enough for
 // sandboxd to bind its netns TCP port, exec processes, and let `apt`/`pip`
 // chown/chmod as they install (§1.1 root-capable sandbox).
+//
+// CAP_NET_RAW is DELIBERATELY ABSENT, and its absence is the interesting entry.
+// It used to be requested here, and the guest never got it: measured, the guest's
+// CapEff has the NET_RAW bit CLEAR, because runsc's own `--net-raw=false` default
+// strips raw/AF_PACKET sockets regardless of what the OCI spec asks for. Asking
+// for a capability that can never be granted is a FAKE INVARIANT — a reader takes
+// it for a deliberate grant — so the request is gone and the real guarantee is
+// PINNED on the runsc side instead (`--net-raw=false` in runscGlobalFlags, §5.A
+// "钉死其依赖的整套 runsc flag、不继承默认"). That matters beyond tidiness:
+// §5.D's future predicate floor is keyed on the input interface, and a guest that
+// can forge L2 frames is a different threat model — so this must not rest on an
+// unpinned runsc default that can drift across versions.
+//
+// CAP_NET_ADMIN STAYS. It is guest-internal network work (routes, interfaces),
+// and §2.2 is explicit that guest caps are not an isolation pillar.
 var caps = []string{
-	"CAP_NET_BIND_SERVICE", "CAP_NET_ADMIN", "CAP_NET_RAW",
+	"CAP_NET_BIND_SERVICE", "CAP_NET_ADMIN",
 	"CAP_SYS_ADMIN", "CAP_CHOWN", "CAP_DAC_OVERRIDE",
 	"CAP_KILL", "CAP_SETUID", "CAP_SETGID", "CAP_FOWNER",
 }

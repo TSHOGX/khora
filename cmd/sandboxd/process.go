@@ -36,6 +36,13 @@ type processServer struct {
 	// idle duration. Every proc created here carries a reference to it and
 	// stamps it on broadcast/writeInput.
 	activity *activityClock
+	// reaper is transport mode's single wildcard waiter (reap.go). REQUIRED: it
+	// is where Start forks children and where their exit statuses come from,
+	// because transport mode owns Wait4(-1) for its own subtree (§5.E.1) and a
+	// per-child cmd.Wait() would race it — the loser gets ECHILD and the exit
+	// code is gone. Set by transportMode; a nil here is a programming error, not
+	// a supported mode.
+	reaper *reapTable
 }
 
 // Tuning values. Pure numeric knobs, tunable with experience — changing one does
@@ -321,9 +328,17 @@ func (p *proc) closeStdin() error {
 }
 
 // source is one output reader tagged with its stream name.
+//
+// closer is the parent end to close once this source hits EOF, or nil when
+// something else owns it. It exists because the reaper — not cmd.Wait() — waits
+// our children now (see proc.run): cmd.Wait is also what would have closed the
+// parent ends of the StdoutPipe/StderrPipe pipes, so skipping it means we close
+// them here or leak two fds per process. The pty master is deliberately nil: it
+// is both output source and input sink, so finish() owns closing it.
 type source struct {
-	r    io.Reader
-	name string
+	r      io.Reader
+	name   string
+	closer io.Closer
 }
 
 // run pumps each source into the fan-out until EOF, waits for exit, then
@@ -339,48 +354,46 @@ type source struct {
 // retaining state keyed by a guest pid the kernel can recycle — the record would
 // start describing a different process once the number is reused. Callers that
 // must not miss exit status stay attached (guest-runtime D4.3 C2).
-func (p *proc) run(cmd *exec.Cmd, sources []source, onExit func()) {
+//
+// The exit status arrives over `exited` — the reap table's handoff — NOT from
+// cmd.Wait(). Transport mode owns Wait4(-1) for its subtree (§5.E.1), and a
+// wildcard wait cannot exclude a pid, so a per-child cmd.Wait() here would race
+// the reaper for the same status: whoever lost would see ECHILD and this `end`
+// frame would carry a fabricated exit code. Same single-waiter rule as PID 1's
+// (reap.go), same reason.
+func (p *proc) run(exited <-chan syscall.WaitStatus, sources []source, onExit func()) {
 	var wg sync.WaitGroup
 	wg.Add(len(sources))
 	for _, s := range sources {
-		go p.pumpSource(&wg, s.r, s.name)
+		go p.pumpSource(&wg, s)
 	}
 	wg.Wait()
-	p.finish(waitExit(cmd))
+	// EOF on every source means the child closed them, which it does by dying —
+	// but "wrote its last byte" and "the kernel published a wait status" are
+	// different instants, so the status still has to be awaited, not assumed. A
+	// grandchild holding the pipes open past the child's exit is the reverse skew
+	// and equally fine: the receive has already completed by the time we get here.
+	p.finish(exitCode(<-exited))
 	onExit()
 }
 
-func (p *proc) pumpSource(wg *sync.WaitGroup, r io.Reader, name string) {
+func (p *proc) pumpSource(wg *sync.WaitGroup, s source) {
 	defer wg.Done()
-	br := bufio.NewReader(r)
+	if s.closer != nil {
+		// cmd.Wait() would have closed this; the reaper owns the wait, so we do.
+		defer s.closer.Close()
+	}
+	br := bufio.NewReader(s.r)
 	buf := make([]byte, 16*1024)
 	for {
 		n, rerr := br.Read(buf)
 		if n > 0 {
-			p.broadcast(frame{kind: 'd', stream: name, data: append([]byte(nil), buf[:n]...)})
+			p.broadcast(frame{kind: 'd', stream: s.name, data: append([]byte(nil), buf[:n]...)})
 		}
 		if rerr != nil {
 			return
 		}
 	}
-}
-
-// waitExit maps cmd.Wait into an exit code (128+signo on signal, convention).
-func waitExit(cmd *exec.Cmd) int {
-	werr := cmd.Wait()
-	if werr == nil {
-		return 0
-	}
-	if ee, ok := werr.(*exec.ExitError); ok {
-		code := ee.ExitCode()
-		if code < 0 {
-			if ws, ok := ee.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
-				return 128 + int(ws.Signal())
-			}
-		}
-		return code
-	}
-	return -1
 }
 
 // Start launches a process and server-streams its output events.
@@ -402,8 +415,14 @@ func (s *processServer) Start(ctx context.Context, req *connect.Request[v1.Start
 	cmd.Env = m.Env
 	cmd.Dir = m.Cwd
 
+	// Every fork goes through the reap table: it registers the waiter under the
+	// same lock as the fork, so the reaper cannot collect this child before we
+	// are entitled to its status (§5.E.1 single waiter — see reapTable.start).
+	// It also Releases the os.Process handle, so cmd.Process.Pid is cleared and
+	// the returned pid is the only handle; SendSignal targets it by number.
 	var p *proc
 	var sources []source
+	var exited <-chan syscall.WaitStatus
 	if m.Pty != nil {
 		// PTY branch (transport D4.3): pure-Go pty pair. The slave is the
 		// child's controlling terminal; the master is the single merged output
@@ -415,15 +434,18 @@ func (s *processServer) Start(ctx context.Context, req *connect.Request[v1.Start
 		}
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = slave, slave, slave
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true}
-		if err := cmd.Start(); err != nil {
+		pid, ch, err := s.reaper.start(cmd)
+		if err != nil {
 			master.Close()
 			slave.Close()
 			return connect.NewError(connect.CodeInternal, err)
 		}
 		_ = slave.Close() // parent keeps only the master
-		p = newProc(cmd.Process.Pid, master)
+		p = newProc(pid, master)
 		p.pty = master
+		// closer nil: the master is also the input sink, so finish() closes it.
 		sources = []source{{r: master, name: "pty"}}
+		exited = ch
 	} else {
 		// Own pgid so SendSignal can target the whole tree (transport D4.3).
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -439,11 +461,19 @@ func (s *processServer) Start(ctx context.Context, req *connect.Request[v1.Start
 		if err != nil {
 			return connect.NewError(connect.CodeInternal, err)
 		}
-		if err := cmd.Start(); err != nil {
+		pid, ch, err := s.reaper.start(cmd)
+		if err != nil {
 			return connect.NewError(connect.CodeInternal, err)
 		}
-		p = newProc(cmd.Process.Pid, stdin)
-		sources = []source{{r: stdout, name: "stdout"}, {r: stderr, name: "stderr"}}
+		p = newProc(pid, stdin)
+		// These two parent ends are exactly what cmd.Wait() would have closed;
+		// the reaper waits instead, so each pump closes its own on EOF.
+		// (stdin's parent end is closed by finish, as before.)
+		sources = []source{
+			{r: stdout, name: "stdout", closer: stdout},
+			{r: stderr, name: "stderr", closer: stderr},
+		}
+		exited = ch
 	}
 	pid := p.pid
 	s.register(p)
@@ -459,7 +489,7 @@ func (s *processServer) Start(ctx context.Context, req *connect.Request[v1.Start
 		}
 		return err
 	}
-	go p.run(cmd, sources, func() { s.unregister(pid) })
+	go p.run(exited, sources, func() { s.unregister(pid) })
 
 	if sub != nil {
 		defer p.unsubscribe(sub)

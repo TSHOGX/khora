@@ -11,26 +11,28 @@ import (
 	"connectrpc.com/connect"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
-	"golang.org/x/sys/unix"
 
 	"engine/internal/guestport"
 	v1 "engine/internal/transport/gen/engine/transport/v1"
 	"engine/internal/transport/gen/engine/transport/v1/transportv1connect"
 )
 
-// transportMode is the §5.E process/fs endpoint (the child of PID 1). It
-// declares itself a subreaper (so its process subtree's orphans reparent to it,
-// not PID 1 — guest-runtime D4.2), then serves Connect-RPC over h2c on a fixed
-// TCP port inside the guest netns. It knows NOTHING of agent/turn/session
-// (transport D1) — pure process/fs mechanism.
+// transportMode is the §5.E process/fs endpoint (the child of PID 1). It becomes
+// the reaper of its own process subtree (so its orphans reparent to it, not
+// PID 1, AND are collected by it — guest-runtime D4.2 / §5.E.1), then serves
+// Connect-RPC over h2c on a fixed TCP port inside the guest netns. It knows
+// NOTHING of agent/turn/session (transport D1) — pure process/fs mechanism.
 func transportMode() {
 	exitIfCrashLoopSentinel()
 
-	// Declare ourselves subreaper so our subtree's orphans reparent here, not to
-	// PID 1 (guest-runtime D4.2 / §5.E.1).
-	if err := unix.Prctl(unix.PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0); err != nil {
-		logf("transport: PR_SET_CHILD_SUBREAPER failed: %v", err)
-	}
+	// Subreaper declaration + the wildcard drain that collects what it attracts,
+	// in one call (guest-runtime D4.2 / §5.E.1). Declaring without draining would
+	// make every subtree orphan a permanent zombie — see startSubtreeReaper.
+	//
+	// This table is now this process's ONLY waiter, so the per-process monitors
+	// take their exit codes from it instead of cmd.Wait(); the processServer
+	// carries it for that purpose.
+	reaper := startSubtreeReaper()
 
 	// One sandbox-global activity clock (reaper-health D2), shared by the
 	// process server (stamps I/O) and the health server (reports idle). It is
@@ -42,7 +44,7 @@ func transportMode() {
 
 	mux := http.NewServeMux()
 	mux.Handle(transportv1connect.NewHealthServiceHandler(&healthServer{activity: activity}))
-	mux.Handle(transportv1connect.NewProcessServiceHandler(&processServer{activity: activity}))
+	mux.Handle(transportv1connect.NewProcessServiceHandler(&processServer{activity: activity, reaper: reaper}))
 	mux.Handle(transportv1connect.NewFsServiceHandler(&fsServer{}))
 	// The large-file bypass shares this mux, listener and port — a plain HTTP
 	// route beside the Connect handlers (files.go / transport D4.4).

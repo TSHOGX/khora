@@ -667,8 +667,18 @@ func (p *LocalRunsc) buildNetns(h *placementHandle, hostIP, guestIP string) erro
 	return nil
 }
 
-// runscGlobalFlags returns `runsc --root=<pinned>` + the five global pins
-// (all global, before the subcommand).
+// runscGlobalFlags returns `runsc --root=<pinned>` + the global pins (all global,
+// so they go BEFORE the subcommand).
+//
+// §5.A pins the WHOLE set local_runsc depends on rather than inheriting runsc's
+// defaults: each key carries one stated guarantee, and runsc's defaults drift
+// across versions while §5.B's cross-runsc-version portability may not rest on
+// "the default did not change". Two of these fail SILENTLY if dropped
+// (`--platform=systrap` currently matches the default; a wrong `--root` makes
+// `state`/`list` read empty and §4.4-A reverse reconciliation would see every live
+// placement as nonexistent), which is why TestRunscGlobalFlagsArePinned pins the
+// set by value rather than trusting review. Adding or removing a key here means
+// updating that test's table WITH the § guarantee the key carries.
 func (p *LocalRunsc) runscGlobalFlags() []string {
 	return []string{
 		p.RunscBin,
@@ -677,6 +687,12 @@ func (p *LocalRunsc) runscGlobalFlags() []string {
 		"--network=sandbox",
 		"--overlay2=none",
 		"--file-access=shared",
+		// Explicitly pinned rather than inherited (§5.A): runsc's own default
+		// already strips raw/AF_PACKET sockets, so the guarantee "the guest cannot
+		// forge L2 frames" would otherwise rest on an UNDECLARED default. §5.D's
+		// interface-keyed predicate floor depends on it. CAP_NET_RAW is
+		// correspondingly absent from the OCI cap request (see oci.go caps).
+		"--net-raw=false",
 		"--systemd-cgroup=false",
 	}
 }

@@ -4,8 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -162,7 +166,7 @@ type createResp struct {
 func (e *Engine) handleCreate(w http.ResponseWriter, r *http.Request) {
 	var req createReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
 	if req.CPUMillis < 0 || req.MemoryByte < 0 || req.DiskByte < 0 {
@@ -171,7 +175,7 @@ func (e *Engine) handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	binding, err := parseVolumeBinding(req.Volumes)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
 	spec := lifecycle.CreateSpec{
@@ -186,7 +190,7 @@ func (e *Engine) handleCreate(w http.ResponseWriter, r *http.Request) {
 	if req.IdleTimeout != "" {
 		d, err := time.ParseDuration(req.IdleTimeout)
 		if err != nil {
-			http.Error(w, "idle_timeout: "+err.Error(), http.StatusBadRequest)
+			writeErr(w, http.StatusBadRequest, fmt.Errorf("idle_timeout: %w", err))
 			return
 		}
 		spec.IdleTimeout = &d
@@ -194,7 +198,7 @@ func (e *Engine) handleCreate(w http.ResponseWriter, r *http.Request) {
 	if req.Retention != "" {
 		d, err := time.ParseDuration(req.Retention)
 		if err != nil {
-			http.Error(w, "retention: "+err.Error(), http.StatusBadRequest)
+			writeErr(w, http.StatusBadRequest, fmt.Errorf("retention: %w", err))
 			return
 		}
 		spec.Retention = &d
@@ -212,7 +216,7 @@ func (e *Engine) handleCreate(w http.ResponseWriter, r *http.Request) {
 func (e *Engine) handleList(w http.ResponseWriter, r *http.Request) {
 	list, err := e.Mediator.List(r.Context())
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
 	// Same shape as the single-sandbox read, death_cause included — see
@@ -240,7 +244,7 @@ type promoteResp struct {
 func (e *Engine) handlePromote(w http.ResponseWriter, r *http.Request) {
 	var req promoteReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
 	if req.FromSandboxID == "" {
@@ -258,7 +262,7 @@ func (e *Engine) handlePromote(w http.ResponseWriter, r *http.Request) {
 func (e *Engine) handleListTemplates(w http.ResponseWriter, r *http.Request) {
 	list, err := e.Mediator.ListTemplates(r.Context())
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
 	out := make([]map[string]any, 0, len(list))
@@ -374,7 +378,7 @@ type patchResp struct {
 func (e *Engine) handlePatch(w http.ResponseWriter, r *http.Request, id model.SandboxID) {
 	var req patchReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
 	if (req.CPUMillis != nil && *req.CPUMillis < 0) ||
@@ -397,11 +401,14 @@ func (e *Engine) handlePatch(w http.ResponseWriter, r *http.Request, id model.Sa
 		}
 		d, err := time.ParseDuration(*f.raw)
 		if err != nil {
-			http.Error(w, f.name+": "+err.Error(), http.StatusBadRequest)
+			writeErr(w, http.StatusBadRequest, fmt.Errorf("%s: %w", f.name, err))
 			return
 		}
 		if d < 0 {
-			http.Error(w, f.name+" must be non-negative (0 = no deadline)", http.StatusBadRequest)
+			// Through the funnel even though `f.name` is one of two engine-authored
+			// literals: the guard cannot see that, and an exemption for "this one is
+			// obviously fine" is how the rule stops being structural.
+			writeErr(w, http.StatusBadRequest, fmt.Errorf("%s must be non-negative (0 = no deadline)", f.name))
 			return
 		}
 		*f.dst = &d
@@ -414,7 +421,7 @@ func (e *Engine) handlePatch(w http.ResponseWriter, r *http.Request, id model.Sa
 		var perr error
 		binding, perr = parseVolumeBinding(*req.Volumes)
 		if perr != nil {
-			http.Error(w, perr.Error(), http.StatusBadRequest)
+			writeErr(w, http.StatusBadRequest, perr)
 			return
 		}
 	}
@@ -638,12 +645,175 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-func statusFor(w http.ResponseWriter, err error) {
+// --- the control plane's error edge (§6.2) ------------------------------------
+//
+// THREE FUNCTIONS, AND THE SPLIT IS THE WHOLE POINT: `statusCodeFor` decides WHICH
+// code, `sanitizeErr` decides WHAT TEXT the caller may see, and `writeErr` is the
+// ONLY place in the control plane where an `error` value becomes a response body.
+//
+// Before the split, statusFor did all three at once — `http.Error(w, err.Error(),
+// code)` repeated in every arm — and that shape is what leaked: the backend errors
+// arriving here interpolate ABSOLUTE HOST PATHS (`btrfs: create subvolume
+// /srv/state/volumes/vol_x: …`), so a failing `POST /v1/volumes` handed the caller
+// the engine's storage layout. §6.2 admits opaque IDs on the wire and NOTHING about
+// host paths or placement. Ten arms each doing their own write is ten chances to
+// forget, and a new arm forgets by default.
+//
+// This is the same move the DATA plane already made (dataplane.go proxyErr): log the
+// real cause engine-side, hand the caller a placement-free message. The control
+// plane cannot copy proxyErr's ONE constant message, because the §5.C verdicts must
+// stay DISTINGUISHABLE — a 409 naming the wrong object sends the caller to the wrong
+// remedy — so it redacts rather than replaces.
+
+// statusFor classifies err and answers with a sanitized body. `echo` names strings
+// the caller ALREADY KNOWS (their own request parameters), which are therefore safe
+// to hand back — see sanitizeErr.
+func statusFor(w http.ResponseWriter, err error, echo ...string) {
+	writeErr(w, statusCodeFor(err), err, echo...)
+}
+
+// writeErr is THE funnel: every error-shaped response in the control plane goes
+// through here, so sanitization is structural rather than remembered. `arch`-style
+// enforcement lives in edge_test.go — it fails if any production file in this
+// package calls `.Error()` outside sanitizeErr, or passes http.Error a message it
+// did not spell out as a literal. A new endpoint therefore cannot leak by omission;
+// it can only leak by editing the guard.
+//
+// The FULL error is logged, unredacted. Operators need the path — it is the only
+// thing that says WHICH unit failed — and the asymmetry is the design: the host
+// detail goes to the log, the verdict goes to the caller.
+func writeErr(w http.ResponseWriter, code int, err error, echo ...string) {
+	log.Printf("control plane: responding %d (full error, sanitized on the wire): %v", code, err)
+	http.Error(w, sanitizeErr(err, echo...), code)
+}
+
+// redacted stands in for a removed token. It is deliberately VISIBLE rather than
+// silently dropped: a caller reading "create subvolume [redacted]: permission
+// denied" can tell the engine withheld something and quote the message to an
+// operator who can find it in the log, where an elided token would read as a
+// mangled message.
+const redacted = "[redacted]"
+
+// placementShaped matches an IPv4 address with an optional port — the inner
+// transport endpoint's shape (a netns veth IP, §2.4 / D6.1). §6.2 bars placement
+// from the wire on the same footing as host paths, so the funnel strips both.
+var placementShaped = regexp.MustCompile(`^\d{1,3}(\.\d{1,3}){3}(:\d+)?$`)
+
+// sanitizeErr renders err for the wire with host-shaped detail removed.
+//
+// The rule is an ALLOWLIST OF WHAT THE CALLER ALREADY KNOWS, not a blocklist of
+// known-bad strings: every whitespace-delimited token that looks like an absolute
+// host path or a placement endpoint is redacted UNLESS it is one of `echo` — a
+// value this request itself carried in (the `?path=` of a files download, say).
+// Echoing a caller's own parameter back tells them nothing they did not type; every
+// other path-shaped token was authored somewhere below the API and is exactly the
+// class §6.2 excludes.
+//
+// SENTINEL MEANING SURVIVES INTACT, which is why redaction beats replacement here:
+// every sentinel's own text ("store: volume in use by a mount", "lifecycle: volume
+// has a live read-write mount") is path-free prose, so the verdict — and the object
+// it names, by opaque ID — passes through untouched while only the substrate's
+// coordinates are dropped.
+//
+// It is deliberately INDISCRIMINATE about guest paths it cannot attribute: a mount
+// destination inside somebody else's sandbox reads exactly like a host path from
+// here, so it is redacted too. That costs a little prose in a 409 that still names
+// the holding sandbox by ID, and it is the right direction to fail — the funnel
+// cannot be wrong about a path it never lets through.
+func sanitizeErr(err error, echo ...string) string {
+	fields := strings.Fields(err.Error())
+	for i, f := range fields {
+		lead, tok, trail := trimPunct(f)
+		if tok == "" || !hostShaped(tok) {
+			continue
+		}
+		if slices.Contains(echo, tok) {
+			continue
+		}
+		fields[i] = lead + redact(tok) + trail
+	}
+	return strings.Join(fields, " ")
+}
+
+// wireIDPrefixes are the object-ID prefixes §6.2 ADMITS on the wire: sandbox,
+// template and volume. Overlay (`ov_`) is deliberately absent — §3.1.1 keeps the
+// Overlay artifact ID-addressed INTERNALLY, and a caller can act on neither the ID
+// nor its location, so it is redacted with the rest of the path.
+var wireIDPrefixes = []string{"vol_", "sbx_", "tmpl_"}
+
+// redact replaces a host-shaped token, KEEPING a trailing engine-minted object ID if
+// the token ends in one.
+//
+// This is not a softening of the rule; it is what makes the rule survivable. The
+// engine composes its storage locations as `filepath.Join(<configured root>, <object
+// id>)`, so the ID is very often present in the error ONLY as that path's last
+// segment — `btrfs: set quota limit 4096 on /srv/volumes/vol_x: …` names the volume
+// nowhere else. Redacting the whole token there produces a 409/500 that says a cap
+// write failed on SOMETHING, which is precisely the "sends the caller to the wrong
+// remedy" failure §6.2's per-object sentinels exist to prevent.
+//
+// Keeping the last segment discloses nothing: the ID is the wire identity the caller
+// supplied in the URL, and the withheld prefix is what carried the host location.
+func redact(tok string) string {
+	if i := strings.LastIndexByte(tok, '/'); i >= 0 {
+		if last := tok[i+1:]; last != "" {
+			for _, p := range wireIDPrefixes {
+				if strings.HasPrefix(last, p) {
+					return redacted + "/" + last
+				}
+			}
+		}
+	}
+	return redacted
+}
+
+// hostShaped reports whether tok is an absolute host path, a placement endpoint, or a
+// URL carrying one.
+//
+// "Absolute" is the whole test for the path half, and it is sufficient because the
+// leak is always a filesystem location the engine composed from its own configured
+// roots — `filepath.Join(VolumesDir, volumeID)` and its siblings — and those are
+// absolute by construction. A relative token cannot name a location on the host
+// without the root that is being withheld.
+//
+// THE URL ARM IS NOT DEFENSIVE, IT IS THE DOMINANT REAL CASE on the bypass route: a
+// failed request from net/http reports itself as `Get "http://<host>:<port>/…":
+// dial tcp <host>:<port>: …`, so the endpoint appears TWICE and only the second
+// occurrence looks like a bare address. Matching the bare form alone redacts the
+// visible half and leaves the URL intact, which is the worst outcome — it reads as
+// sanitized while still naming the placement.
+func hostShaped(tok string) bool {
+	return (len(tok) > 1 && tok[0] == '/') ||
+		placementShaped.MatchString(tok) ||
+		strings.Contains(tok, "://")
+}
+
+// trimPunct splits a token into leading punctuation, the token proper, and trailing
+// punctuation, so `"/srv/x":` redacts to `"[redacted]":` rather than surviving
+// because a quote or a comma made it stop looking like a path. Error prose glues
+// punctuation onto paths constantly — `%s:` is the dominant wrapping idiom — so this
+// is the ordinary case, not an edge one.
+func trimPunct(f string) (lead, tok, trail string) {
+	const leadSet = `"'` + "`" + `([<`
+	const trailSet = `"'` + "`" + `)]>,;:.…`
+	i, j := 0, len(f)
+	for i < j && strings.ContainsRune(leadSet, rune(f[i])) {
+		i++
+	}
+	for j > i && strings.ContainsRune(trailSet, rune(f[j-1])) {
+		j--
+	}
+	return f[:i], f[i:j], f[j:]
+}
+
+// statusCodeFor is the §6.2 verdict → status mapping, and NOTHING ELSE: it writes
+// no response, so it cannot smuggle a body past the funnel. The mapping itself is
+// unchanged from when it lived inline.
+func statusCodeFor(err error) int {
 	// The §5.C Volume verdicts first: they are 400s that would otherwise be caught by
 	// a broader arm below and reported as something the caller could retry.
 	if code, ok := volumeStatus(err); ok {
-		http.Error(w, err.Error(), code)
-		return
+		return code
 	}
 	switch {
 	case errors.Is(err, lifecycle.ErrCapRequired):
@@ -652,17 +822,25 @@ func statusFor(w http.ResponseWriter, err error) {
 		// Checked before ErrInsufficientCapacity below because the two are distinct
 		// verdicts and conflating them would tell the caller to wait for capacity
 		// that is not the problem.
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		return http.StatusBadRequest
+	case errors.Is(err, lifecycle.ErrUncappedDiskNotCappable):
+		// §3.4 `0 → N` on the disk axis: the request is well-formed and the node may
+		// have plenty of room, but the promise is UNMATERIALIZABLE — an uncapped
+		// sandbox's Overlay unit carries no quota row, so the cap could never be
+		// enforced and §5.B would refuse every future placement. 400 (the request
+		// cannot be honored as asked), NOT 507 (nothing is full) and NOT 409 (no
+		// retry or state change makes it legal — the remedy is a new sandbox).
+		return http.StatusBadRequest
 	case errors.Is(err, lifecycle.ErrInsufficientCapacity):
 		// §3.4 admission refusal: nothing is wrong with the request or the sandbox —
 		// the NODE cannot honor another promise. 507 Insufficient Storage says
 		// "capacity", where 409 would wrongly imply a state conflict the caller could
 		// resolve by retrying.
-		http.Error(w, err.Error(), http.StatusInsufficientStorage)
+		return http.StatusInsufficientStorage
 	case errors.Is(err, lifecycle.ErrResourceTerminated):
 		// §4.3 resource-terminated: a state conflict the caller resolves by raising
 		// the cap or destroying the sandbox — 409, never a raw 500.
-		http.Error(w, err.Error(), http.StatusConflict)
+		return http.StatusConflict
 	case errors.Is(err, store.ErrNotFound), errors.Is(err, store.ErrTemplateNotFound),
 		errors.Is(err, store.ErrVolumeNotFound):
 		// Volume not-found has its own sentinel so the 404 names the right object; a
@@ -670,14 +848,14 @@ func statusFor(w http.ResponseWriter, err error) {
 		// Note it is NOT folded into success on delete (§6.2): the reference-protection
 		// refusals arrive on that same path, and a delete that swallows not-found
 		// would swallow those too.
-		http.Error(w, err.Error(), http.StatusNotFound)
+		return http.StatusNotFound
 	case errors.Is(err, store.ErrInUse):
 		// §4.3 reference protection: a referenced Template cannot be deleted →
 		// 409 template in use (§6.1 DELETE), never a raw 500.
-		http.Error(w, err.Error(), http.StatusConflict)
+		return http.StatusConflict
 	case errors.Is(err, store.ErrConflict):
-		http.Error(w, err.Error(), http.StatusConflict)
+		return http.StatusConflict
 	default:
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return http.StatusInternalServerError
 	}
 }
