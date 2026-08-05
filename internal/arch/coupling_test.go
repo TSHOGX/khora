@@ -15,10 +15,14 @@ import (
 // of these is the start of the dependency cycle the ownership rule exists to
 // prevent.
 //
-// volume (§5.C) and network (§5.D) are listed before they exist on purpose: the
-// guard should catch a bad edge the day the package lands, not the day someone
-// remembers to add it here. Absent packages are skipped, and staleness is checked
-// separately below.
+// network (§5.D) is listed before it exists on purpose: the guard should catch a
+// bad edge the day the package lands, not the day someone remembers to add it here.
+// Absent packages are skipped, and staleness is checked separately below.
+//
+// volume (§5.C) was in exactly that position and has now landed — which is the
+// pre-listing paying off: the edge it was most at risk of (routing volume content
+// through §5.E `fs`) was ruled out during design partly BECAUSE this guard's empty
+// allowlist would have failed on it (volume.md D5.1).
 var subsystems = []string{
 	"engine/internal/runtime",   // §5.A
 	"engine/internal/rootfs",    // §5.B
@@ -162,11 +166,12 @@ func TestGuardIsNotStale(t *testing.T) {
 	for _, p := range listPackages(t, "") {
 		present[p.ImportPath] = true
 	}
-	// The three built subsystems must exist. volume/network are deliberately
-	// absent until their milestones land, so they are not required here.
+	// The four built subsystems must exist. network is deliberately absent until its
+	// milestone lands, so it is not required here.
 	for _, s := range []string{
 		"engine/internal/runtime",
 		"engine/internal/rootfs",
+		"engine/internal/volume",
 		"engine/internal/transport",
 	} {
 		if !present[s] {

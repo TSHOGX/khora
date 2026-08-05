@@ -9,6 +9,7 @@ import (
 	"strings"
 	"syscall"
 
+	"engine/internal/allocbytes"
 	"engine/internal/btrfs"
 
 	"engine/internal/guestport"
@@ -450,48 +451,13 @@ func (p *HostOverlayFS) PromoteCostBytes(_ context.Context, o *Overlay) (int64, 
 // GUEST-side numbers (see rootfs.Provider.UncappedBytes). Host-side st_blocks is
 // the backend's own allocation statement, which is the source the rule points at.
 //
-// Hardlinked files are counted once (dedup by dev+ino): a shipped Template tree
-// can carry them, and the same physical bytes must not be charged twice
-// (rootfs.Provider invariant 2). A disappearing file (concurrent destroy) is
-// skipped rather than failing the caller.
+// The measurement itself lives in the internal/allocbytes LEAF because §5.C needs
+// the identical one for its own half of the §3.4 second term, and subsystems must
+// not import each other (§4) — so a shared leaf, not an edge and not two copies
+// that drift (internal/guestport is the precedent). This wrapper stays so the
+// reasoning above sits where §5.B's callers read it.
 func blockBytes(root string) (int64, error) {
-	var total int64
-	type inode struct {
-		dev uint64
-		ino uint64
-	}
-	seen := map[inode]bool{}
-	err := filepath.Walk(root, func(_ string, info os.FileInfo, err error) error {
-		if err != nil {
-			if os.IsNotExist(err) {
-				return nil
-			}
-			return err
-		}
-		if !info.Mode().IsRegular() {
-			return nil
-		}
-		st, ok := info.Sys().(*syscall.Stat_t)
-		if !ok {
-			// No stat available (should not happen on Linux): fall back to apparent
-			// size rather than silently counting zero, which would undercount.
-			total += info.Size()
-			return nil
-		}
-		if st.Nlink > 1 {
-			k := inode{dev: uint64(st.Dev), ino: st.Ino}
-			if seen[k] {
-				return nil
-			}
-			seen[k] = true
-		}
-		total += st.Blocks * 512
-		return nil
-	})
-	if err != nil && !os.IsNotExist(err) {
-		return 0, err
-	}
-	return total, nil
+	return allocbytes.Tree(root)
 }
 
 // AdoptMerged reconstructs the merged handle for an Overlay still mounted after
