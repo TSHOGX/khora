@@ -757,6 +757,17 @@ func (p *HostOverlayFS) PromoteToTemplate(_ context.Context, o *Overlay, newTemp
 // copyTree recursively copies src into dst, skipping paths (relative to src,
 // cleaned) present in excluded. Preserves mode bits and symlinks. dst is created.
 // Files are copied byte-for-byte (the layer is a plain read-only dir tree, §5.B).
+//
+// Byte-for-byte is deliberate, and `cp --reflink` is a TRAP here — the obvious
+// "make Promote cheap" optimisation leaks a btrfs qgroup row on EVERY Promote,
+// and the leak outlives the layer it came from. Measured on the squota substrate:
+// a reflink INTO a unit does not leak (copy-up's shape — the unit does not own
+// those extents), but a reflink OUT of one does: deleting the source afterwards
+// leaves a `<squota space holder>` row that never self-cleans, and a leaked row
+// does not reserve its own subvolume id, so a later remount can hand that id and
+// its stale cap to a brand-new unit (see internal/btrfs.DeleteSubvolume and
+// docs/spec/deep-dives/volume.md D7). Reflink here would need the sweep-side
+// reclamation path built first.
 func copyTree(src, dst string, excluded map[string]bool) error {
 	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
 		if err != nil {

@@ -419,6 +419,19 @@ func (s *SQLite) MarkPublished(ctx context.Context, eventID string) error {
 // contract verdict (ErrInUse on RESTRICT-delete, ErrTemplateNotFound on a
 // missing-parent insert). Keeping the string match HERE, not in callers, is what
 // stops the backend detail leaking into correctness (§4.4-C).
+//
+// The string match is the STABLE side, not a stopgap — do not "optimize" it into
+// a code comparison. Measured: with extended result codes on (the DSN turns them
+// on), the two FK directions report DIFFERENT codes — an insert with a missing
+// parent is 787 (SQLITE_CONSTRAINT_FOREIGNKEY) but deleting a row that an
+// ON DELETE RESTRICT reference points at is 1811 (SQLITE_CONSTRAINT_TRIGGER).
+// Isolated A/B confirms this is RESTRICT's own behaviour, not a driver quirk
+// (the same delete under the default NO ACTION reports 787). Both carry the same
+// message text, which is exactly why one string match covers every path; a
+// `code == 787` rewrite would silently stop recognising every RESTRICT-delete.
+// Unique violations (a second exclusive mount row, a PK collision) are a
+// DIFFERENT verdict and correctly report false here — they need their own
+// predicate and their own sentinel, not this one (§6.2's four distinct 409s).
 func isFKViolation(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "FOREIGN KEY constraint failed")
 }

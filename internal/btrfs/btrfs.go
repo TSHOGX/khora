@@ -124,18 +124,36 @@ func (c Client) CreateSubvolume(ctx context.Context, path string) error {
 // Quota-row cleanup differs by quota mode, and BOTH behaviours are handled here
 // because the mode is a deployment property, not something the engine controls:
 //
-//   - squota (the dev/test substrate, ADR-0002): btrfs reclaims the row ITSELF.
-//     Measured — right after delete the row lingers briefly as `<under deletion>` /
-//     `<squota space holder>` and then disappears once the deletion settles; across
-//     6 create/fill/delete cycles the filesystem's qgroup count returned to exactly
-//     its starting value. An explicit destroy here fails with ENOENT (squota owns
-//     the row), which is precisely why the call below is best-effort.
+//   - squota (the dev/test substrate, ADR-0002), unit owning NO shared extents:
+//     btrfs reclaims the row ITSELF. Measured — right after delete the row lingers
+//     briefly as `<under deletion>` and then disappears once the deletion settles;
+//     across 6 create/fill/delete cycles the filesystem's qgroup count returned to
+//     exactly its starting value. An explicit destroy here fails with ENOENT
+//     (squota owns the row), which is why the call below is best-effort. This is
+//     the ONLY squota case where best-effort suffices, and it is the case §5.B's
+//     Overlay upper is in today: the engine never snapshots an upper.
+//   - squota, unit whose extents are still referenced by a live sharer (§5.C
+//     snapshots/clones a volume, so this case is REACHABLE there): the row LEAKS.
+//     Measured — an immediate destroy returns EBUSY ("Device or resource busy"),
+//     NOT ENOENT, and the row does not self-clean (25s + 6 syncs did not move it).
+//     Its label is `<squota space holder>` while a sharer is alive and only becomes
+//     `<stale>` after the last sharer is gone; destroy succeeds exactly when the
+//     label is `<stale>`. The exact predicate for leaking is: the unit (i) owns
+//     extents AND (ii) is deleted while a live sharer still references them —
+//     "was snapshotted" is not the predicate, and having a cap is irrelevant.
+//     Reclaiming these rows is NOT cosmetic: nothing reserves a leaked row's
+//     subvolume id, so a remount can hand that id — and its cap — to a brand-new
+//     unit, which then hits ENOSPC on a limit nobody set for it (or gets silently
+//     over-provisioned), and Usage() cannot tell the difference. That reclamation
+//     belongs to the volume orphan sweep, which polls the label and destroys on
+//     `<stale>` (deleting sharers BEFORE sources leaks nothing at all); see
+//     docs/spec/deep-dives/volume.md D7.
 //   - full qgroup mode: the row does NOT go away on its own and must be destroyed,
 //     or rows accumulate one per destroyed sandbox.
 //
 // So the destroy is attempted and its error ignored: required in one mode, a
-// harmless ENOENT in the other. Verifying "no stale row remains" belongs to the
-// caller's acceptance, not to this function's return.
+// harmless ENOENT or a to-be-swept EBUSY in the other. Verifying "no stale row
+// remains" belongs to the caller's acceptance, not to this function's return.
 //
 // Idempotent: a path that is absent, or not a subvolume, is a no-op — reclamation
 // is retried from several paths (destroy, unwind, orphan sweep) and must never
