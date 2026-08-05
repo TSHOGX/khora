@@ -140,9 +140,29 @@ reflink 来补分层,那其实又滑回上面的 overlayfs 底层存储附带能
   (guest-runtime D4.4:不依赖进程配合)。**仍开放的只是应用层协作安全点**(长跑进程到安全点再冻,
   避免截断 in-flight 写)——纯优化、非正确性前提,单独追踪于 guest-runtime D4.4 / open-decisions §2。
 - **excluded paths / portal paths**:提取 Promote/snapshot 时要过滤掉引擎自身注入的运行时路径
-  (如 guest 内 daemon 的工作目录)与 Volume 挂载点占位(§5.B「Promote 捕获只含 Overlay 树、Volume
-  挂载点是空占位」)。最小集是 sandboxd 的两个 portal 文件(transport pidfile / crash-loop sentinel);
-  **仍开放的是完整清单**——Volume 挂载点占位待 Volume 子系统落地才出现。
+  (如 guest 内 daemon 的工作目录)。最小集是 sandboxd 的两个 portal 文件(transport pidfile /
+  crash-loop sentinel)。**Volume 挂载点那一半已实测定形**,且结论把问题重新框定了:
+  - **空占位不需要排除项。** 实测:dest 在 lower 与 upper 都不存在时,`runsc create` 之后(任何 guest 代码
+    之前)upper 里就已出现一个**普通空目录、mode 0755 root:root、零 overlayfs xattr**——不是 whiteout、
+    不是 opaque、无 origin/redirect,且不继承源目录的权限。故**是"放置"物化了它,不是 payload**。
+    §5.B 已写的结果("挂载点在固化结果里只是一个空目录占位")默认就成立。反向 hazard 也干净:guest 在
+    bind 下的写**全部**落到 Volume 宿主目录、upper 一无所得(有正向对照:同一次 launch 里另一个控制文件
+    确实进了 upper),即 **Volume 写入正确地落在沙箱 disk 帽之外、也在 Promote 捕获之外**。
+  - **尖锐的不对称:dest 缺失会脏 upper,Template 提供 dest 则 upper 纯净。** lower 里已有的 dest **不触发
+    copy-up**(实测后 upper 逐字节为空)。**设计副产品**:在内置 Template 里预置常用挂载点能让常见路径保持
+    干净,排除项则退化为正确性 backstop 而非常规机制。对用户自选 dest 不可依赖。
+  - **排除项真正要干的是剪掉被挂载点遮蔽的既有字节。** 实测:先在 upper 里种下 `dest/stale`、再用 bind
+    遮住它,guest **完全看不到**那些字节(只见 Volume 的条目),而它们仍在盘上、仍在 upper 里——于是会被
+    完整拷进冻结层,**并同时计进该沙箱的容量帽与代价预报**。既有机制已能正确做到剪除(排除项匹配到目录即
+    跳过整棵子树),**缺的不是匹配逻辑**。
+  - **因此挂载点集合必须是 per-Promote 入参,不能是静态包级清单**:Volume dest 是 per-sandbox 的挂载行,
+    静态清单无从得知。作为参数传入也是架构上更干净的路——§4 mediator 本来就持挂载表、本来就调 Promote,
+    故 **§5.B 永远不必去问 §5.C**(不产生子系统互调)。**代价预报走同一个集合**,否则它会继续把不会被拷的
+    遮蔽字节算进去(方向安全,但已知是错的)。路径按既有约定:**upper 相对、去掉前导斜杠**。
+  - **嵌套 dest 需要一个显式决定,已定**:嵌套 dest 的**整条链**都会进 upper(三级皆不存在时三级都被创建),
+    故只排叶子会在层里留下幽灵中间目录,而排顶层组件在一般情形下是错的(guest 可能合法地写了该目录下的
+    别的东西)。**定为:剪叶子子树、接受空的中间链**——它与 §5.B 已认可的空占位同形、只是多一级,
+    且**永不丢真实 guest 数据**。
 - **content-addressed diff 层(演进项,演进条件见 D3)**:落地时要实现 tar 提取 + baseline 增量 +
   object store 接口(能力映射见 D2)。
 

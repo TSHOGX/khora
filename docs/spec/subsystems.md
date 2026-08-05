@@ -169,6 +169,11 @@
   注入 guest 的运行时文件不进层**(`sandboxd` 的 portal / 哨兵文件,清单见 rootfs-overlay D5)。挂载进来
   的 Volume **也不在这棵树里**——挂载点(如 `/home/workspace`)在固化结果里只是一个**空目录占位**,
   Volume 内容不进去(它在各自后端,§5.C)。这跟 `tar` 一个挂了 NFS 的目录只 tar 到挂载点空壳是同一回事。
+  **空占位是默认结果、不靠排除项兑现**(实测:平坦无遮蔽的情形下,放置本身在 upper 里物化出一个普通空
+  目录、零 overlayfs xattr;Template 自己提供挂载点时 upper 甚至纯净无痕)。Volume 写入落在宿主目录里、
+  **既在沙箱 disk 帽之外、也在 Promote 捕获之外**(已验,带正向对照)。**排除项真正要干的是剪掉被挂载点
+  遮蔽的既有字节**(它们对每个 guest 都不可见,却会被完整拷进冻结层、并同时计进该沙箱的容量帽与代价预报)
+  ——因此挂载点集合必须作为**per-Promote 入参**传进来,不能是静态清单(见 rootfs-overlay D5)。
 - **底层存储附带能力(single-node)**:snapshot/clone 落在 CoW FS(reflink)上廉价。这是 single-node
   provider 的附加能力,不是模型对宿主路径的依赖。
 - **容量配额是本子系统的物化职责(disk 容量轴,§3.4)**:per-sandbox 的 disk 容量上限(Binding)由
@@ -196,10 +201,25 @@
   不同路径,**不进沙箱持久态 / 不进 Promote 捕获**,各自后端。
 - **独立子系统、独立 seam `volume.Backend`**(不与 §5.B 共用物化 seam,见 §5 前言):它只吐**一样
   东西:一个宿主挂载点**(runsc 写进 OCI mount spec、gofer 代理进 guest,与 merged rootfs 同构)。
-- **共享/独占策略**:`AccessMode ∈ {Exclusive, SharedReadOnly, SharedReadWrite}`(独占挂载唯一 /
+- **共享/独占策略**:`AccessMode ∈ {Exclusive, SharedReadOnly, SharedReadWrite}`(独占 /
   只读扇出 / 共享读写;后者只保证同沙箱内多连接(process)的 POSIX 语义,**跨沙箱 rw coherence 引擎不
   定义(undefined)**——gofer/sentry 各自缓存让跨隔离边界的共享可变一致性本质不可靠,引擎不承诺、
   用户文档诚实标出)。
+  - **AccessMode 是挂载行的属性,不是卷的属性**(基数是 per-挂载,不是 per-卷):实测同一个卷可以
+    **同时**对沙箱 A 是 shared-rw、对沙箱 C 是 shared-ro,故一个 per-卷字段无法诚实携带它。卷记录上
+    只有 `size` / `backend` / `parent`(lineage,见下文快照);`access` 只出现在挂载行上(§4.3),
+    `Materialize` 也不收它——**ro 的强制在
+    运行时**(ro bind ⇒ guest 的写得 `EROFS`,一个干净的 POSIX 拒绝而非静默成功),**排他性在控制面**
+    (挂载行),两者都在调用发生前已裁决,故都不需要 backend 知情(seam 侧的独立论据见
+    [`deep-dives/volume.md`](./deep-dives/volume.md) D2)。
+    - **"强制在运行时"只对"可写单元 + ro 挂载"这一向成立。** 反向——**不可变单元 + rw 挂载**——不是运行时
+      `EROFS`,而是 `runsc create` **硬失败于 gofer 挂载**(容器根本没被创建,guest 从未运行)。故这条 ro
+      规则的方向性必须显式:引擎绝不能让一个只读后端单元配上 rw 挂载规格,否则一个本该是准入期 4xx 的
+      错误会退化成冷启期一个不透明的 mount 失败。设计上这条不会被踩到(快照产出的是**普通可写卷**,见下文),
+      但它是关于基底的事实,不是关于我们代码的假设(实测见
+      [`deep-dives/volume.md`](./deep-dives/volume.md) D1)。
+  - 三种模式都**无特殊机制**、并发情形亦然(实测清单见
+    [`deep-dives/volume.md`](./deep-dives/volume.md) D1)。
 - **backend 两条臂,gofer 侧零差异**:**local(默认)**= 宿主上一个 **btrfs subvolume**(自带配额帽 +
   廉价原子快照),gofer 代理普通目录、POSIX 由宿主内核白拿;**remote**(S3 / NFS / …)= backend 维护的
   **宿主侧 FUSE 挂载点**,gofer 同样代理进 guest。**FUSE 只在宿主侧、绝不在 guest 内**(gVisor 内 FUSE
@@ -207,27 +227,90 @@
   [`deep-dives/volume.md`](./deep-dives/volume.md) D1)。
 - **未挂载也能操作**:create/delete/list/inspect/snapshot/clone + 直接 import/export
   内容。对外**一律 Volume ID 寻址,不暴露宿主路径**。
+  - **兑现方式是 seam 上一个根限定的内容访问器**(`OpenRoot`),**不经 §5.E 的 `fs`**:路径相对卷根、
+    越界不可达,local 臂 = `openat2(RESOLVE_IN_ROOT)`。为何不经 guest、以及机制的实测明细见
+    [`deep-dives/volume.md`](./deep-dives/volume.md) D2 / D5.1。
+  - **这条承诺兼答两个否则无解的场景,故它不是可选项**:**从零播种一个卷**(还没有任何沙箱时)与
+    **所有沙箱都没了之后读一个卷**。二者都在"卷与沙箱生命周期解耦"(本节开篇)的直接后果集里——一个
+    生命周期独立的对象,如果内容只能经沙箱进出,那它的独立性只是记录层面的。
 - **写入 regime 唯一(横切不变量,防双写撕裂)**:Volume 有挂载与直连 API 两条写入路径,引擎守一条
-  不变量——**只要有 live-rw 挂载正持有该卷(某沙箱 `running` 且 rw),直连 API 的变更操作
-  (import / restore-into)一律拒绝**;无 live-rw 挂载时直连写才放行。门开在"**活的**写入方",不是
-  "在挂载表里":**paused 沙箱不算 live writer**(容器已停、无活 gofer),此时直连写安全,且 resume
-  后自然见到新内容。裁决在控制面(读 store),不引入反向代理(证伪见
+  不变量——**只要有 live-rw 挂载正持有该卷,直连 API 的变更操作(import / restore-into)一律拒绝**;
+  无 live-rw 挂载时直连写才放行。门开在"**活的**写入方",不是"在挂载表里":**paused 沙箱不算 live
+  writer**(容器已停、无活 gofer),此时直连写安全,且 resume 后自然见到新内容。不引入反向代理(证伪见
   [`deep-dives/volume.md`](./deep-dives/volume.md) D5)。
+  - **"live" 的谓词来源是 gofer 存活(placement live-map),不是 `sandboxes.state`。** 实测该状态列
+    **双向**都不是忠实代理:冷启在健康门与 CAS-to-`running` **之前**就已记下活 placement(故记录说
+    `creating`/`paused` 而 gofer 已活,窗口最长 `HealthTimeout`),pause 则先 CAS 成 `paused`、**之后**
+    才停容器(故记录说 `paused` 而容器还在跑)。任何锁或 SQL 语句都修不了它——**被测的那个事实不住在
+    store 里**。故裁决读的是 mediator 的 live-map,且直连写自己的 in-flight 标记必须发布在**同一个**
+    临界区里(与既有 in-flight 构建 keep-set 同形,不引新锁类)。
 - **快照 / 克隆 = per-backend capability,默认 crash-consistent**:local 后端用 `btrfs subvolume
   snapshot`(整树、原子、瞬时)兑现,是否支持由 backend 的 capability 查询决定(纯目录 / 某些 remote
   后端可不支持,调用即 400、不静默)。快照是后端对当前盘上字节的原子快照、**不静默写入方**,一致性等价
   一次崩溃(§4.2 已接受的底线)。要 app-consistent 就先 pause 持有沙箱再快照——现有原语的**组合**,
   引擎不加机制;**shared-rw 不提供** app-consistent(协调 N 个沙箱是产品语义,§1.3 否决)。与 Overlay
   Promote 为何不对称,推导见 [`deep-dives/volume.md`](./deep-dives/volume.md) D6。
+  - **挂载中的活卷可以直接快照,不降级、不打扰 guest**(实测:持续写入下 guest 写入速率不受影响、零写入
+    错误,每个捕获点都落在宿主观测的活窗口内,append-only 日志在每次捕获里都是完整前缀;偶尔捕到一个刚被
+    `O_TRUNC` 清空、还没写回的文件,正是 crash-consistency 该给的东西)。**不需要 `fsync`/freeze 前置**
+    ——sync 无可测差别,而 freeze 与快照根本无法组合(D6.2)。
+  - **快照不破坏 per-volume 帽语义:写入方付账,两个方向都是**(实测)。覆写源只记源账、快照那行停在
+    元数据成本上不动;覆写快照只记快照账、源不动。三条后果:**一个没人写的快照卷不会自己涨到撞帽**、
+    两个卷的帽互相隔离(源钉在帽上时快照仍可写)、删源后快照的计费不回溯继承被释放的 extent。
+  - **快照 / 克隆产出的是一个普通的、可写的 Volume**,没有只读标记:可写性是 per-挂载的裁决(与 `access`
+    同一条基数论据),要不可变就用 `shared-ro` 挂载行表达。两者因此是**同一种对象、同一条 backend 路径**,
+    差别只在语义标注(推导与证伪见 [`deep-dives/volume.md`](./deep-dives/volume.md) D6.1a)。
+  - **新卷的帽必须由引擎在同一次 backend 操作里显式写入,`size` 必填、不继承**:实测基底给快照的是一条
+    **全新的无帽**配额行,没有可继承之物;而漏写是**静默且事后不可检出**的(`Usage()` 读回的"无帽"与故意
+    无帽逐字节相同)。故 `size` 在 disk 被计量时对这两个端点同样必填(§3.4 / §6.2 同一条规则),缺失即 400。
+    - 帽必然是快照 ioctl 之后的**第二次**调用,故"卷已在、帽未设"是一个真实中间态:它落在在飞集合里,
+      且 **sweep / adopt 必须把"卷记录存在、配额行无帽"当作修复态,不是合法态**(D7.3)。
+- **卷的容量帽在未挂载时也可编辑,且挂载中同样可编辑**(写点是 §6.1 `PATCH /v1/volumes/{id}`)。这与沙箱
+  资源上限只在 `paused` 可改**正好相反**,理由是机制性的:沙箱帽在 placement 时物化,而**卷没有自己的
+  placement**——"下次 placement 重物化"对一个未挂载的卷等于"永不",故卷帽直接落在其存储单元上,没有可推迟
+  之物,也就没有"先 pause"的 409。三条附带纪律:
+  - **改帽不受写入 regime 管**:它动的是分配上界、不是字节,不存在撕裂。(区别于**改 `access`**——那一条在
+    活挂载下被禁,见下文独占租约。)
+  - **抬帽须重过准入门**(§3.4:任何对帽的写入当场改变 Σ),可 507;降帽不需要。
+  - **但降到低于当前用量必须拒(400,判据是严格不等式)**:实测这会把该单元卡死且**不可逆**——其后连
+    `mkdir` 与"把已有文件 truncate 成 0"都 `ENOSPC`,而配额 ioctl 自己也 `ENOSPC`,帽既不能撤也不能抬,
+    唯一出路是删 guest 的字节。引擎不能代调用方做那件事,故不接受这种请求(细节见 D7.3)。
 - **挂载关系是 Binding(§3.4)**:"挂了哪些、挂到哪、什么策略"记在控制面挂载表,resume 时
   按当前挂载表**重新挂**回去,而非从冻结字节恢复——Volume 永远是那一个真身,不分叉副本。
 - **独占租约 = 那条 Exclusive 挂载行的存在本身**:租约不是独立对象,而是 §4.3 挂载行(一等持久对象、
-  derived refcount)的派生状态,故无 `Lease` 类型、无归属字段。建 exclusive 挂载行前控制面校验无冲突行,
-  有则拒;store 侧靠一条 `UNIQUE(volume) WHERE access='exclusive'` 偏索引强制唯一。**崩溃保持租约是正确
-  行为**——崩溃是 dead-recoverable(§4.3),沙箱会 resume 回同一卷,即时释放会让 resume 撞车(§4.2)。
-  租约**只在挂载行被拆时释放**(destroy,含 reaper 对 paused 超 TTL 的 evict),**reaper TTL 就是"无人
-  释放"的兜底**,不引心跳;心跳式回收是 multi-node provider 的义务、不进核心(证伪见
-  [`deep-dives/volume.md`](./deep-dives/volume.md) D4)。
+  derived refcount)的派生状态,故无 `Lease` 类型、无归属字段。**不变量的精确陈述**:一个卷上**至多一条
+  `exclusive` 挂载行,且该行不与该卷的任何其他挂载行并存**。
+  - **兑现在一条 store 语句里,判定与插入不可分开**:`INSERT … SELECT … WHERE NOT EXISTS`,
+    `RowsAffected()==0` ⟹ 租约冲突 → 409。**mediator 的前置校验 + 插入不行**——那是一个跨沙箱不被任何锁
+    序列化的真 TOCTOU(每次 create 新铸 SandboxID,两个并发 create 持两把不相交的转换锁),与准入门为何
+    需要一把独立互斥是同一条理由。这不是新机制:同一个权威 store 串行仲裁**判定-动作**,与 §4.3
+    引用-回收同形。语句、实测复现与锁序见 [`deep-dives/volume.md`](./deep-dives/volume.md) D3。
+  - **`UNIQUE(volume) WHERE access='exclusive'` 偏索引 + `CHECK (access IN (...))` 是 schema 级断言,不是
+    不变量的兑现方**:偏索引只禁"两条 exclusive"、**不禁 exclusive 与 shared 并存**(只覆盖一半);
+    而它的谓词是**字面串比较**,故 `CHECK` 是必需的——大小写打错会让偏索引根本不适用,是一类静默失效。
+    **谓词必须是行内不可变的属性**(此处 `access`),**不得建在可变的生命周期字段上**(理由与外部反面
+    教材见 D3)。
+- **挂载拓扑的两条唯一性断言,判 400 而非 409**:`UNIQUE(sandbox, path)` 与 `UNIQUE(sandbox, volume)`。
+  - **同一沙箱内两个卷挂到同一 dest 必须禁**:挂载物化成一条 OCI bind,同一 dest 两条 bind 意味着后者
+    **遮蔽**前者——于是一个卷在 guest 里不可见,却仍计进 §3.4、仍持着它的租约。"guest 看不见的卷上有一个
+    独占租约"正是 schema 断言要抓的那类静默失效。
+  - **同一个卷在一个沙箱内挂两次也禁**:独占租约的谓词(D3)已经在任一行是 exclusive 时拒掉同卷第二行,
+    故不禁的话规则会随 access mode 分叉;统一禁掉让规则唯一。它没有已知消费者,而禁是一条校验——以后放开
+    不破坏调用方,反之不然。(§5.C 上文"可挂到多个沙箱的不同路径"说的是多个**沙箱**,与此无关。)
+  - **判 400**:一个沙箱任何时刻持一份完整绑定,`PATCH` 只是整份换整份(§6.2),不存在"往已有集合里加一条
+    挂载"的操作。故每次重复都是**单次提交的绑定内部自相矛盾**——不读别的行即可判定,且没有任何重试或状态
+    变化能让它变合法,这正是 §6.2 的 400 判据。嵌套(见挂载拓扑规则)同类,也是 400。**§6.2 的四个 409 不增加。**
+  - **路径必须在插入前规范化(绝对、cleaned、非 `/`),否则 UNIQUE 静默不适用**:`/data`、`/data/`、
+    `/data/../data` 是一个挂载点三个字符串——与 `CHECK (access IN (...))` 必须存在于偏索引之侧是同一个
+    陷阱(唯一性断言里的字面串比较**静默**失效)。**且 `UNIQUE(sandbox, path)` 抓不到嵌套**(`/data` 与
+    `/data/sub` 是不同字符串),嵌套要靠校验里的前缀扫描,做不成 UNIQUE。两者都保留:校验先命中,断言是
+    校验被绕过或写错时的那道网。
+  - **有活挂载行时禁止修改卷的 access**——一条"保持没有"的显式禁令:在活挂载下把 exclusive 翻成 shared,
+    会让额外写入方进入一个"原持有者从不知道自己失去了排他"的卷,正是绕过上述断言的路径。
+  - **崩溃保持租约是正确行为**——崩溃是 dead-recoverable(§4.3),沙箱会 resume 回同一卷,即时释放会让
+    resume 撞车(§4.2)。租约**只在挂载行被拆时释放**(destroy,含 reaper 对 paused 超 TTL 的 evict),
+    **reaper TTL 就是"无人释放"的兜底**,不引心跳;心跳式回收是 multi-node provider 的义务、不进核心
+    (证伪见 [`deep-dives/volume.md`](./deep-dives/volume.md) D4)。
 - **挂载拓扑变更发生在 resume 边界,不是热挂**:runsc 从 OCI spec 在**启动时**取挂载,运行中
   **不支持**热加/热卸(仅有 EROFS debug 旁路,不用)。所以"给运行中沙箱挂个新 Volume" = 改挂载表
   Binding → 冷 resume 带新表,与 §4.2 的 FS-first pause/resume 复用同一条路径。
@@ -239,6 +322,44 @@
   的容量帽,各自 enforce,但**共享同一个底层 substrate 原语**(btrfs subvolume + squota limit)——该原语
   跨 §5.B/§5.C 复用,见 [`deep-dives/rootfs-overlay.md`](./deep-dives/rootfs-overlay.md) D6
   与 [`deep-dives/volume.md`](./deep-dives/volume.md) D7。
+  - **打满时的行为与 §5.B 的 per-sandbox 帽一致**(guest 见普通 `ENOSPC`、沙箱照常存活、控制面不介入,
+    §3.4),**并且对写入方的数量不敏感**:多个沙箱并发写同一个满卷时,每个写入方各自见到普通 `ENOSPC`、
+    每个沙箱都存活、帽仍精确——但**字节在写入方之间的划分是任意的**,谁多写不确定,且一个写入方可以在
+    对端已 `ENOSPC` 时继续成功。故两个方向都不承诺。
+  - **三条用户可见语义(调用方会撞上,不是内部记账细节)**:
+    1. **guest 无法发现自己的卷帽:`statfs` 报的是承载文件系统,不是帽**(实测 32 MiB 帽的卷上报 476 GiB
+       可用)。故 guest 侧的任何空间预检(装包器、包管理器、基于 `df` 的守卫)都会在 `write()` 失败前一刻
+       报告几百 GiB 可用而做错决定。**引擎不承诺 guest 侧 statfs 反映帽**;一个能诚实投影的后端可以做得
+       更好,那是该后端的义务、不是核心承诺(成因与外部旁证见
+       [`deep-dives/volume.md`](./deep-dives/volume.md) D7)。
+    2. **squota 下的帽是"终身写入预算",不是"活跃体积上限"。** 它**不退还被覆写的** extent(同一个
+       32 MiB 文件原地重写两次记 64 MiB),但**退还被删除的**(unlink 后立即结算、退还恰好是文件大小)。
+       故一个被反复原地重写的长命卷会在远小于其"当前体积"处撞帽,**收口手段是删除、不是覆写**。
+    3. **`ENOSPC` 不是一道黏性的墙。** 实测多次:撞帽之后的**下一次**小写有时仍会成功,随后才稳定失败
+       (机制与残余余量 + 释放失败写的超额预留一致,只测了行为、未测成因)。共享帽下对端的活动还会移动
+       这条线。故"拿到 ENOSPC 就停"与"拿到 ENOSPC 后一次小写仍可能落地"是两份不同的契约,引擎承诺的是
+       后者。
+- **回收与 sweep 的安全要求(local 臂,squota 特有)**:`SweepOrphanVolumes` 除了删孤儿字节,还要清
+  squota 泄漏的配额行;两件事都**误伤即静默**,故安全要求是契约的一部分:
+  - **泄漏的配额行是正确性问题,不是不整洁**:一行泄漏的行不为自己的存储单元 id 占位,故一次节点重启
+    可以把那个 id **连着它的帽**发给一个全新的卷,而引擎内部无法察觉这次错配。故 sweep 必须真的回收这些
+    行,且**在启动时、任何存储单元被创建之前先跑一次**——否则一次重启可以在第一个 sweep tick 之前就把
+    继承来的帽发出去。泄漏谓词、轮询谓词与回收程序见 [`deep-dives/volume.md`](./deep-dives/volume.md) D7。
+  - **枚举必须按目录逐条探测,不得用文件系统级的 subvolume 枚举**:后者的作用域是**整个文件系统 / 所在
+    存储单元**而不是给定目录(实测:在 volumes 目录与在兄弟的 overlay 目录下运行返回逐字节相同的结果,
+    且含节点上其他软件的存储单元)。逐条探测无前置条件地安全,且是引擎既有 `internal/btrfs` 的形状。
+  - **必须有一道独立于 FK 的活挂载检查**:跳过任何 id 出现在**任何**挂载行里的单元(不论是否 live);
+    **枚举或读取出错时跳过,绝不把空结果当成"无拥有者"**(实测:并发 churn 下配额行的批量读取会整体
+    失败并返回零行)。配额行**按删除时记下的 id 定位,绝不扫行**。
+  - **一次误 sweep 没有任何检测路径,这是上面每条要求都是硬要求的原因。** 它是数据面事件(实测:五种
+    拿掉活卷的手法**无一杀死沙箱**,控制面什么都看不到),但后果比"guest 见 I/O 错误"更糟——**guest 的写
+    仍然返回成功**,字节落进一个没有任何宿主路径可达的 unlinked inode、在拆除时消失,**一个工作集固定的
+    guest 永远不会察觉**(细节与五臂分布见 [`deep-dives/volume.md`](./deep-dives/volume.md) D7)。
+    连带一条**验收纪律**:"沙箱是否存活"恒真,故它作为断言永远不会失败、毫无守卫价值;要断言的是那些
+    **会静默通过**的性质。
+  - **`Backend.Materialize` 必须是 create-if-absent**:实测源不存在时 runsc 直接硬失败(不会静默建目录),
+    故若它是 open-only,一个被误 sweep 的沙箱将**永久无法 resume**;create-if-absent 则干净重启(数据
+    全失但可恢复)。这也是它承担"卷的字节按需存在"的地方。
 - **不含**:沙箱自身的 rootfs / Overlay 工件(→ B)。
 
 ### 5.D Network(可达性策略)

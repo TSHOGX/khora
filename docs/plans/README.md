@@ -32,11 +32,11 @@ needs the `drainrace` tag, so the routine gate does not cover it (see `README.md
 
 | # | Plan | Capability to deliver | Anchors |
 | --- | --- | --- | --- |
-| **M7** | `M7-volume.md` | Volume: independent subsystem + own `volume.Backend` seam (local = btrfs subvolume; remote-FUSE deferred), mount table, exclusive lease (= refcount mount row), access modes, direct-write regime, btrfs snapshot/clone. Reuses `internal/btrfs` unchanged. | §5.C · volume D1–D8 |
+| **M7** | [`M7-volume.md`](./M7-volume.md) **(written)** | Volume: independent subsystem + own `volume.Backend` seam (local = btrfs subvolume; remote-FUSE out of scope), volume as a first-class row with `parent` lineage, mount table, exclusive lease (= the mount row itself), access modes, the volume half of the admission gate, the cap write point, btrfs snapshot/clone, **direct import/export with the write-regime invariant and its in-flight marker** (the accessor is that invariant's only trigger, so the three land together), and two reclaim faces. Reuses `internal/btrfs` unchanged; the direct accessor is one `openat2(RESOLVE_IN_ROOT)` — it is how "a volume's lifecycle is decoupled from any sandbox" is cashed out (seed from zero / read after the last sandbox is gone). | §5.C · §3.4 · volume D1–D9 |
 | **M8** | `M8-network.md` | Network egress data plane + layered deny-set + credential injection (**security-critical**) | §5.D · §2.4 |
 | **M9** | `M9-credential-store.md` | Credential store seam | §5.D |
 
-(No plan file is written yet — the name is the one the plan will take.)
+(M8/M9 have no plan file yet — the name is the one the plan will take.)
 
 The §6 API / CLI contract grows alongside from M1 — it is not a separate
 milestone.

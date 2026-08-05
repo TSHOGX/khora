@@ -29,6 +29,8 @@
 POST   /v1/sandboxes                 {template_id, network?, volumes?, idle_timeout?, retention?,
                                       cpu_millis?, memory_byte?, disk_byte?}        → {sandbox_id}
 #   资源上限三轴见 §3.4(Binding);按轴条件必填的规则见 §6.2。准入不足 → 507。
+#   `volumes` 每项 = {volume_id, path, access},`access` ∈ {exclusive, shared-ro, shared-rw} —— 它是
+#   **挂载行**的属性(§5.C),故在此给出而非在卷记录上。撞独占租约 → 409(§6.2 四个 409 之 ②)。
 GET    /v1/sandboxes/{id}                                     → {sandbox_id, state, death_cause?}
 #   只读生命周期态 + 死因(§4.3)。`death_cause` ∈ {`gone`, `resource-exceeded`, `unknown`},
 #   **未观测到死亡时该键不出现**(不是空串、不是 null):`CauseNone` 是"没有死因"而非一种死因,
@@ -37,11 +39,17 @@ GET    /v1/sandboxes/{id}                                     → {sandbox_id, s
 #   不 resume),那调用方就必须能读到它所依据的那条事实,而不是先发一个必被拒的 resume、从 409
 #   错误串里反推。值是 §4.3 的**抽象枚举**,绝不是 errno / cgroup 路径 —— 那种是宿主原语,
 #   远端 provider 产不出来(§5.A)。
-PATCH  /v1/sandboxes/{id}            {cpu_millis?, memory_byte?, disk_byte?, idle_timeout?, retention?}
-                                                          → {sandbox_id, state, applies_at}
+PATCH  /v1/sandboxes/{id}            {cpu_millis?, memory_byte?, disk_byte?, idle_timeout?, retention?,
+                                      volumes?}           → {sandbox_id, state, applies_at}
 #   改 Binding,生效点与可改状态见 §3.4。**wire 语义与 create 不同**:这里"未给"与"给 0"必须可区分
 #   (帽的 0 = 无上限、`retention: 0` = 不驱逐),故请求字段**可空**——未给 = 不动该字段。TTL 收
 #   duration 字符串("48h")。`applies_at` ∈ {"now"(仅改 TTL), "next-resume"(改了任一资源上限)}。
+#   **`volumes` 是挂载表那份完整绑定**(每项 {volume_id, path, access});§6.2 已把 PATCH 定为改绑定点,
+#   故它在此列出而非另开 attach/detach 端点。**它的生效点分裂成两半,`applies_at` 一个值答不了**:
+#   挂载拓扑变更在 **next-resume** 才物化(runsc 启动时取挂载,§5.C 不热挂),而 **detach 立即释放独占
+#   租约**(租约就是那条挂载行,行一删租约即释放)。故 detach 的响应是 `applies_at: "next-resume"`
+#   **且租约已释放** —— 两件事不同步是设计事实,不是可以折叠成一个值的细节。attach 到 exclusive 已被占用
+#   的卷 → 409(§5.C 原子插入的 `RowsAffected()==0`)。
 #   对 `running` 改帽 → 409「先 pause」;抬上限重过准入门(可 507 / 400)。不发 §4.1 事件(非状态转换)。
 POST   /v1/sandboxes/{id}/pause
 POST   /v1/sandboxes/{id}/resume
@@ -80,14 +88,33 @@ POST   /v1/templates                 {from_sandbox_id}   (Promote: 静止后固�
 DELETE /v1/templates/{id}            (被沙箱/子层引用时 → 409 template in use;引用-回收原子性 §4.3)
 
 # Volume(与沙箱生命周期解耦)
-POST   /v1/volumes                   {size?, backend?, access_mode?}                → {volume_id}
+POST   /v1/volumes                   {size?, backend?}                             → {volume_id}
+#   **无 `access_mode`**:它是挂载行的属性、不是卷的属性(一个卷可同时对 A 是 shared-rw、对 C 是
+#   shared-ro,§5.C),故只出现在 create/PATCH sandbox 的 `volumes` 项里。`size` 在 disk 轴被计量时
+#   **必填**(§3.4 / §6.2 按轴条件必填),否则 400。
 GET    /v1/volumes                                                                 (list)
 GET    /v1/volumes/{id}                                                            (inspect)
+PATCH  /v1/volumes/{id}              {size?}                                       → {volume_id, size}
+#   卷帽的唯一写点(create 之外)。**未挂载与挂载中都可改**,与沙箱资源上限只在 `paused` 可改**相反**——
+#   卷没有自己的 placement,"下次 placement 重物化"对未挂载的卷等于"永不"(§5.C)。故无"先 pause"的 409。
+#   抬帽重过准入门(可 507);**降到低于当前用量 → 400**(严格不等式):实测那会把单元卡死且不可逆,
+#   连帽本身都再也改不动,唯一出路是删 guest 的字节(§5.C / volume.md D7.3)。改帽不受写入 regime 管
+#   (动的是分配上界、不是字节),但**改 `access` 在活挂载下被禁**——那是另一条,见 §5.C。不发事件。
 DELETE /v1/volumes/{id}
-POST   /v1/volumes/{id}/snapshot                                                   → {volume_id}
-POST   /v1/volumes/{id}/clone                                                      → {volume_id}
-POST   /v1/volumes/{id}/import       (直连写入;无 live-rw 挂载时才放行,§5.C 写入 regime)
-GET    /v1/volumes/{id}/export       (直连读出)
+#   两种 409(§6.2 四个中的 ①③):有活挂载行 → 409(被引用);**有活快照/克隆(子代卷)→ 409**
+#   (lineage RESTRICT,与 Template 被子层引用同形)。两者是不同的对象关系,故 sentinel 与文案必须可区分。
+POST   /v1/volumes/{id}/snapshot     {size?}                                       → {volume_id}
+POST   /v1/volumes/{id}/clone        {size?}                                       → {volume_id}
+#   **两者都收 `size`,且 disk 被计量时必填(缺失 → 400),不继承源的帽。** 基底侧没有可继承之物(实测:
+#   快照得到一条全新的无帽配额行),策略侧继承会静默把节点已声明的磁盘主张翻倍(§3.4 / volume.md D6.1a)。
+#   产出的是**普通可写卷**(无只读标记;要不可变用 `shared-ro` 挂载行),记录带 `parent` 指向源。
+#   新卷的帽同样过准入门(可 507)。后端不支持 → 400,且 capability 必须在分配 ID / 动字节**之前**问。
+POST   /v1/volumes/{id}/import       {path}  (直连写入;无 live-rw 挂载时才放行,§5.C 写入 regime)
+GET    /v1/volumes/{id}/export       ?path=  (直连读出)
+#   **不需要沙箱**——这是"卷与沙箱生命周期解耦"的兑现面:**从零播种**(还没有任何沙箱)与**读最后一个
+#   沙箱消失之后的卷**都走这里。`path` 相对卷根;越界不可达(seam 的 `OpenRoot` 是根限定的,§5.C / D5.1)。
+#   有 live-rw 挂载持有该卷 → **409**(写入 regime;`paused` 沙箱**不算** live writer,故此时放行——
+#   谓词与 in-flight 标记的临界区要求见 §5.C)。字节流式,不整块缓冲。
 
 # Network(策略在 create 时绑定,改策略走 resume 边界;publish 是显式入站例外,可热加)
 GET    /v1/sandboxes/{id}/network
@@ -140,6 +167,18 @@ client 从 `transport.proto` 经 `buf` 生成 stub、经 `orchestrator` 反代�
   `resource-terminated` 拒绝 resume → **409**;计量轴缺帽 / 请求体不合法(负的帽、无法解析的 duration)
   → **400**;被引用的 Template 删除 → **409**;源态不合法的动词(如对 `running` 改帽、对非 `paused`
   沙箱 resume)→ **409**;未知 sandbox / template ID → **404**。
+  **Volume 的四个 409 语义不同、须可区分**:① 删一个有活挂载行的卷(被引用,同 Template 那条);
+  ② 删一个有活子代卷的源(lineage RESTRICT,§5.C 快照);③ attach 撞独占租约(可重试的状态冲突);
+  ④ 有 live-rw 挂载时的直连变更(§5.C 写入 regime)。①②③在 store 侧是两类不同的约束违反
+  (FK-RESTRICT vs 唯一/谓词失配),故**翻译点要给各自的 sentinel**,不能共用一个"in use"文案——既有
+  `ErrInUse` 的文案写着 "template in use",复用它会返回一个说错对象的 409。
+  **幂等删除不得吞掉这些 409**:它们是 RESTRICT 触发的**全部**对外信号,若落进"不存在也返成功"的分支,
+  守卫失败的删除就与成功的删除不可区分(一个外部实现正是这样:卷不存在返 `200 {"deleted": true}`,
+  快照删除把三种 not-found 全折成成功)。
+  `size` 在被计量的 disk 轴上缺失(create / snapshot / clone 三处)→ **400**;卷帽降到低于当前用量
+  → **400**;挂载绑定内部自相矛盾(同一沙箱内 dest 重复 / 同卷重复 / 卷间嵌套)→ **400**(§5.C:
+  不读别的行即可判定,且无重试能让它合法);后端不支持 snapshot/clone → **400**(capability 查询的结果,
+  不静默,且必须在动字节之前问)。
   **`GET /v1/events`**:正常(含空窗口、空页)→ **200**;`after` 或 `limit` 不是整数 / `after` 为负 /
   `limit` ≤ 0 → **400**(`limit` **超**上限不是错误,截到上限后仍 200);非 GET → **405**;
   **410 = `after` 早于保留窗口**,**保留语义**、今日不可达(不裁剪 → `earliest` 永不前进),
