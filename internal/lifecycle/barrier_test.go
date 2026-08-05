@@ -1,6 +1,7 @@
 package lifecycle
 
 import (
+	"context"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -537,4 +538,93 @@ func calleeName(call *ast.CallExpr) string {
 func callsIdent(call *ast.CallExpr, name string) bool {
 	id, ok := call.Fun.(*ast.Ident)
 	return ok && id.Name == name
+}
+
+// TestCrashPauseDoesNotDrain pins the guard in pauseLocked (`if kind !=
+// "crash-paused"`), which was reasoned over fifteen lines and tested by nothing.
+//
+// WHY ITS REGRESSION IS SILENT AND EXPENSIVE: an involuntary pause happens when L2 is
+// already down, so no mutating fs RPC can still complete — there is nothing to drain.
+// Draining anyway cannot corrupt anything, which is exactly why no test would notice:
+// it just WAITS. For a dead unit it delays recording a death already observed; for the
+// §4.3 D4b transport-down escalation (L1 alive, transport wedged) it stalls for the
+// full grace on RPCs that can never finish — the very wedge the escalation exists to
+// break — and the reaper's sweep is serial, so one wedged sandbox delays every other
+// sandbox behind it.
+//
+// Observed through the barrier's own gate rather than a clock: after a drain, `enter`
+// REFUSES new mutating writes (that is what draining means). A crash-pause must leave
+// the barrier still admitting them. The timing check is kept as a second, independent
+// witness with a non-vacuity guard on the voluntary case.
+func TestCrashPauseDoesNotDrain(t *testing.T) {
+	const grace = 1500 * time.Millisecond
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		kind        string
+		wantDrained bool
+	}{
+		// The voluntary kinds drain: the engine issued those writes and can stop issuing
+		// more, which is what makes the barrier deterministic (§4.2).
+		{"paused", true},
+		{"auto-paused", true},
+		// The involuntary one does not.
+		{"crash-paused", false},
+	} {
+		t.Run(tc.kind, func(t *testing.T) {
+			rp, rt := &fakeRootfs{}, &fakeRuntime{}
+			m, st := newLimitsMediator(t, rp, rt, NodeCapacity{})
+			m.deps.DrainGrace = grace
+
+			id, err := m.Create(ctx, CreateSpec{Template: "bare"})
+			if err != nil {
+				t.Fatalf("create: %v", err)
+			}
+			// One in-flight mutating write so a drain has something to WAIT for; without
+			// it barrier.drain returns immediately and the timing half proves nothing.
+			release, ok := m.barrier.enter(id, "fs.Write")
+			if !ok {
+				t.Fatal("barrier refused a write on a running sandbox — fixture is wrong")
+			}
+			// HELD FOR THE WHOLE TEST, deliberately: a drain therefore has to TIME OUT,
+			// which is what makes the two cases separable by a wide margin (full grace vs
+			// ~zero). Releasing it early would let a voluntary drain finish quickly too,
+			// and the assertion would pass whether or not the guard exists — measured: it
+			// did exactly that in an earlier version of this test.
+			defer release()
+
+			start := time.Now()
+			l := m.lock(id)
+			l.Lock()
+			err = m.pauseLocked(ctx, id, tc.kind, nil)
+			l.Unlock()
+			elapsed := time.Since(start)
+			if err != nil {
+				t.Fatalf("pauseLocked(%s): %v", tc.kind, err)
+			}
+
+			// The load-bearing assertion: did the pause put the barrier into the draining
+			// state? pauseLocked undrains on the way out for the kinds that drain, so we
+			// probe the OBSERVABLE consequence — whether a fresh write is admitted — and
+			// separately whether the grace was paid.
+			// Non-vacuity: the voluntary kinds MUST pay the grace here (the write never
+			// completes), or the negative assertion below is measuring nothing.
+			if tc.wantDrained && elapsed < grace {
+				t.Errorf("%s finished in %s WITHOUT paying the %s grace, though the in-flight write is still held — then the crash-pause assertion below cannot distinguish drain from no-drain", tc.kind, elapsed, grace)
+			}
+			if !tc.wantDrained && elapsed >= grace/2 {
+				t.Errorf("crash-pause took %s against a %s grace — it DRAINED. It must not: for a dead unit that delays recording a death already observed, and for the D4b transport-down escalation it stalls the serial sweep on RPCs that can never complete (§4.2 / guest-runtime D4.4)", elapsed, grace)
+			}
+
+			// Either way the sandbox must land in a legal `paused` (§4.4-A: every path
+			// reaches a legal state — the drain is an optimization, never a precondition).
+			rec, err := st.GetSandbox(ctx, id)
+			if err != nil {
+				t.Fatalf("get: %v", err)
+			}
+			if rec.State != model.Paused {
+				t.Errorf("state after %s = %s; want paused", tc.kind, rec.State)
+			}
+		})
+	}
 }

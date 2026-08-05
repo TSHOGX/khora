@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -427,6 +428,176 @@ func TestConcurrentCreatesCannotOversubscribeTheNode(t *testing.T) {
 			}
 			if committed > 4*gib {
 				t.Fatalf("committed caps in the store sum to %d > budget %d", committed, 4*gib)
+			}
+		})
+	}
+}
+
+// slowCommitStore widens ONE seam — the Binding commit — so the {gate → commit}
+// window becomes observable instead of merely present. Everything else delegates.
+//
+// This is not making a race up: the window is real at any width, but at in-memory
+// speed eight goroutines finish gate-then-commit before the scheduler interleaves
+// them, so an unwidened test passes with the bug in place (measured: 10/10 runs on
+// both backends). A real commit — SQLite fsync under load, or any store behind a
+// network — is orders of magnitude slower than the gate's arithmetic, so the delay
+// makes the test resemble production rather than depart from it.
+//
+// The delay is deliberately on the COMMIT and not on the gate: it is the interval
+// between "this raise passed" and "this raise is visible to the next gate run"
+// that admitMu has to cover, per §3.4's "a write to a cap changes Σ at that
+// commit".
+type slowCommitStore struct {
+	store.Store
+	delay time.Duration
+}
+
+func (s slowCommitStore) UpdateBinding(ctx context.Context, id model.SandboxID, expected model.Lifecycle, b store.Binding, cause *model.DeathCause) error {
+	time.Sleep(s.delay)
+	return s.Store.UpdateBinding(ctx, id, expected, b, cause)
+}
+
+// The same §3.4 crack reached by the OTHER route: a cap RAISE via PATCH.
+//
+// TestConcurrentCreatesCannotOversubscribeTheNode covers create, where the fresh
+// SandboxID makes the disjoint-lock argument obvious. A raise looks safer at a
+// glance because the sandbox already exists and holds a transition lock — but that
+// lock is PER-SANDBOX (§4.4-B), so N raises on N DIFFERENT sandboxes hold N
+// disjoint locks and serialize against each other exactly as little as N creates
+// do. The node-global sum has one arbiter, admitMu, and it must span
+// {gate → commit}: §3.4 states that any write to a cap changes Σ AT THAT COMMIT,
+// so a gate that returns before committing has measured a Σ that is already stale.
+//
+// FALSIFIED, measured. Narrowing UpdateBinding's critical section back to the gate
+// alone (`m.admitMu.Lock(); err := m.admit(...); m.admitMu.Unlock()`, i.e. release
+// before Store.UpdateBinding) fails on both backends in 10/10 subtest runs:
+//
+//	committed disk caps sum to 42949672960 > node budget 21474836480
+//	(8 of 8 raises admitted)
+//
+// All eight raises pass a gate that each evaluated against a Σ missing the other
+// seven, committing 40 GiB of promises against a 20 GiB budget — 2× oversubscribed
+// with every individual cap honored. With admitMu held through the commit: 3
+// admitted, 5 refused, 20/20 runs green (and under -race).
+func TestConcurrentCapRaisesCannotOversubscribeTheNode(t *testing.T) {
+	for _, be := range stressBackends() {
+		t.Run(be.name, func(t *testing.T) {
+			const gib = int64(1) << 30
+			// Eight sandboxes, each starting at a 1 GiB cap and asking for 5 GiB,
+			// against a 20 GiB budget. Σ(committed) starts at 8 GiB, so the budget can
+			// absorb some raises but nowhere near all eight — which is the condition
+			// that makes the race observable rather than merely present.
+			const (
+				N        = 8
+				startCap = gib
+				wantCap  = 5 * gib
+				budget   = 20 * gib
+				// The k-th raise to be gated sees the OTHER seven caps: (k-1) already
+				// raised, (N-k) still at start (its own is excluded, like resume's).
+				// So it is admitted iff (k-1)*wantCap + (N-k)*startCap + wantCap ≤ budget:
+				//   k=3 → 10 + 5 + 5 = 20 ≤ 20  ✓
+				//   k=4 → 15 + 4 + 5 = 24 > 20  ✗
+				// Exactly 3 fit, in any interleaving — the count is order-independent
+				// because admitMu totally orders the {gate → commit} sections.
+				wantAdmitted = 3
+			)
+			st := be.mk(t)
+			seedBare(t, st)
+			// The mediator commits through the widened seam; the test seeds and reads
+			// through the bare store, so setup and assertions pay no delay.
+			m := New(Deps{
+				Store:   slowCommitStore{Store: st, delay: 20 * time.Millisecond},
+				Runtime: &fakeRuntime{}, Rootfs: &fakeRootfs{},
+				Volume:        newFakeVolume(),
+				Dial:          func(transport.Endpoint) transport.Client { return &fakeClient{healthy: true} },
+				HealthTimeout: 500 * time.Millisecond,
+				// The fake reports zero uncapped bytes, so the caps are the whole Σ.
+				NodeCapacity: NodeCapacity{DiskByte: budget, MemoryByte: 0},
+			})
+
+			// Caps are editable only from `paused` (§3.4), which is also the state a
+			// raise is expected to arrive in — so seed paused records directly rather
+			// than driving create, keeping the test about the gate and not cold start.
+			ids := make([]model.SandboxID, N)
+			ctx := context.Background()
+			for i := 0; i < N; i++ {
+				sid := model.SandboxID(fmt.Sprintf("sbx_raise_%d", i))
+				ids[i] = sid
+				seedPausedStore(t, st, string(sid), fmt.Sprintf("ov_raise_%d", i), "bare")
+				start := startCap
+				if err := st.UpdateBinding(ctx, sid, model.Paused, store.Binding{
+					DiskByte: &start,
+				}, nil); err != nil {
+					t.Fatalf("seed cap for %s: %v", sid, err)
+				}
+			}
+
+			// All N goroutines are released at once so they reach the gate together —
+			// the arrangement the race needs, and the one a burst of PATCHes produces.
+			start := make(chan struct{})
+			var wg sync.WaitGroup
+			errs := make([]error, N)
+			for i := 0; i < N; i++ {
+				wg.Add(1)
+				go func(i int) {
+					defer wg.Done()
+					<-start
+					want := wantCap
+					errs[i] = m.UpdateBinding(context.Background(), ids[i], store.Binding{
+						DiskByte: &want,
+					})
+				}(i)
+			}
+			close(start)
+			wg.Wait()
+
+			admitted, refused := 0, 0
+			for i, e := range errs {
+				switch {
+				case e == nil:
+					admitted++
+				case errors.Is(e, ErrInsufficientCapacity):
+					refused++
+				default:
+					t.Fatalf("raise %d failed for an unexpected reason: %v", i, e)
+				}
+			}
+
+			// THE POST-CONDITION, read from the authoritative store rather than from
+			// the return values: Σ over committed caps is what the next gate run sees,
+			// so that is where oversubscription is either present or absent.
+			recs, err := st.ListSandboxes(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var committed int64
+			for _, r := range recs {
+				if r.State != model.Destroyed {
+					committed += r.Limits.DiskByte
+				}
+			}
+			if committed > budget {
+				t.Fatalf("committed disk caps sum to %d > node budget %d (%d of %d raises admitted) — the node is oversubscribed (§3.4)",
+					committed, budget, admitted, N)
+			}
+
+			// Each admitted raise costs (wantCap - startCap); the rest stay at startCap.
+			// Stating it as arithmetic rather than a magic number keeps the check honest
+			// if the constants above move.
+			if want := int64(N)*startCap + int64(admitted)*(wantCap-startCap); committed != want {
+				t.Fatalf("committed %d; want %d for %d admitted raises — the store does not match the verbs' outcomes",
+					committed, want, admitted)
+			}
+
+			// NON-VACUITY. A gate that refused every raise would satisfy the inequality
+			// above while being useless, so pin the exact number the budget affords —
+			// derived on wantAdmitted above.
+			if admitted != wantAdmitted {
+				t.Fatalf("admitted %d raises; want exactly %d (budget %d against %d × %d requested beside %d)",
+					admitted, wantAdmitted, budget, N, wantCap, startCap)
+			}
+			if refused != N-wantAdmitted {
+				t.Fatalf("refused %d; want %d", refused, N-wantAdmitted)
 			}
 		})
 	}

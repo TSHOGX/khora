@@ -806,11 +806,18 @@ func TestUpdateBindingRewritesTheBinding(t *testing.T) {
 	// The mirror: an unrelated edit, or a LOWERING, must NOT wipe the record of why
 	// the sandbox died — that would re-arm the crash loop the refusal exists to stop.
 	t.Run("unrelated and lowering edits do not clear the cause", func(t *testing.T) {
+		//
+		// The disk case is an `N → M` change, and the record below is created WITH a disk
+		// cap for that reason: `0 → N` on disk is its own refused write (§3.4,
+		// ErrUncappedDiskNotCappable), so an uncapped record would make this subtest fail
+		// on the admission of the edit instead of on the property under test. The property
+		// is unchanged either way — a disk edit is not a memory raise — and now the edit
+		// exercised is a LEGAL one.
 		for _, tc := range []struct {
 			name string
 			b    func() store.Binding
 		}{
-			{"disk edit", func() store.Binding { v := int64(gib); return store.Binding{DiskByte: &v} }},
+			{"disk edit (N → M)", func() store.Binding { v := int64(gib); return store.Binding{DiskByte: &v} }},
 			{"memory lowered", func() store.Binding { v := int64(64 << 20); return store.Binding{MemoryByte: &v} }},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
@@ -820,8 +827,9 @@ func TestUpdateBindingRewritesTheBinding(t *testing.T) {
 				now := time.Now()
 				if err := st.CreateSandbox(ctx, model.Sandbox{
 					ID: sid, Template: "bare", Overlay: "ov_keep", State: model.Paused,
-					Limits: model.Limits{MemoryByte: 128 << 20}, DeathCause: model.CauseResourceExceeded,
-					CreatedAt: now, UpdatedAt: now,
+					Limits:     model.Limits{MemoryByte: 128 << 20, DiskByte: 64 << 20},
+					DeathCause: model.CauseResourceExceeded,
+					CreatedAt:  now, UpdatedAt: now,
 				}, nil); err != nil {
 					t.Fatal(err)
 				}
@@ -833,6 +841,114 @@ func TestUpdateBindingRewritesTheBinding(t *testing.T) {
 				}
 			})
 		}
+	})
+
+	// §3.4 — `0 → N` on the DISK axis is a REFUSED WRITE, not a raise. The cap
+	// materializes as a quota on the Overlay's storage unit, and that unit is only built
+	// as a quota-capable subvolume when a cap existed AT CREATE — so a cap written onto
+	// an uncapped record is one §5.B must refuse at every future placement, and the
+	// sandbox becomes permanently unresumable. A 200 here bricks it.
+	//
+	// THE DIRECTION IS THE WHOLE POINT, so all three are asserted together: only
+	// from-uncapped is refused; dropping and changing a cap stay legal.
+	t.Run("disk 0 → N is refused; N → 0 and N → M stay legal", func(t *testing.T) {
+		t.Run("0 → N refused, and the STORE IS UNCHANGED", func(t *testing.T) {
+			rp, rt := &fakeRootfs{}, &fakeRuntime{}
+			m, st := newLimitsMediator(t, rp, rt, NodeCapacity{})
+			// created UNCAPPED on disk → its unit is a plain directory, no quota row.
+			sid, err := m.Create(ctx, CreateSpec{Template: "bare", Limits: model.Limits{MemoryByte: 128 << 20}})
+			if err != nil {
+				t.Fatalf("create: %v", err)
+			}
+			if err := m.Pause(ctx, sid); err != nil {
+				t.Fatalf("pause: %v", err)
+			}
+			before, _ := st.GetSandbox(ctx, sid)
+			want := int64(gib)
+			err = m.UpdateBinding(ctx, sid, store.Binding{DiskByte: &want})
+			if !errors.Is(err, ErrUncappedDiskNotCappable) {
+				t.Fatalf("PATCH disk 0 → %d = %v; want ErrUncappedDiskNotCappable (§3.4: the cap is unmaterializable, so accepting it leaves the sandbox unresumable)", want, err)
+			}
+			// The refusal must be visible AT THE WRITE POINT with ZERO side effects — that
+			// is the reason it is here and not at the next placement (§3.4). Asserted on
+			// the whole record, not just the disk field: a refusal that committed the
+			// binding's OTHER fields would be a partial write nobody asked for.
+			after, _ := st.GetSandbox(ctx, sid)
+			if after.Limits != before.Limits {
+				t.Fatalf("refused PATCH changed the limits: %+v → %+v; the refusal must change NOTHING", before.Limits, after.Limits)
+			}
+			if after.State != before.State || !after.UpdatedAt.Equal(before.UpdatedAt) {
+				t.Fatalf("refused PATCH moved the record (state %s→%s, UpdatedAt %s→%s)", before.State, after.State, before.UpdatedAt, after.UpdatedAt)
+			}
+			// ...and the sandbox is still RESUMABLE, which is the harm being prevented. Had
+			// the cap been written, every placement would refuse it from here on.
+			if err := m.Resume(ctx, sid); err != nil {
+				t.Fatalf("resume after the refused PATCH = %v; want success — the refusal exists precisely to keep this working", err)
+			}
+		})
+
+		t.Run("N → 0 drops the cap", func(t *testing.T) {
+			rp, rt := &fakeRootfs{}, &fakeRuntime{}
+			m, st := newLimitsMediator(t, rp, rt, NodeCapacity{})
+			sid, err := m.Create(ctx, CreateSpec{Template: "bare", Limits: model.Limits{DiskByte: gib}})
+			if err != nil {
+				t.Fatalf("create: %v", err)
+			}
+			if err := m.Pause(ctx, sid); err != nil {
+				t.Fatalf("pause: %v", err)
+			}
+			zero := int64(0)
+			if err := m.UpdateBinding(ctx, sid, store.Binding{DiskByte: &zero}); err != nil {
+				t.Fatalf("PATCH disk N → 0 = %v; want it ADMITTED (dropping a cap only clears it, §3.4)", err)
+			}
+			if rec, _ := st.GetSandbox(ctx, sid); rec.Limits.DiskByte != 0 {
+				t.Fatalf("disk = %d; want 0 (the cap was dropped)", rec.Limits.DiskByte)
+			}
+		})
+
+		t.Run("N → M changes the cap", func(t *testing.T) {
+			rp, rt := &fakeRootfs{}, &fakeRuntime{}
+			m, st := newLimitsMediator(t, rp, rt, NodeCapacity{})
+			sid, err := m.Create(ctx, CreateSpec{Template: "bare", Limits: model.Limits{DiskByte: gib}})
+			if err != nil {
+				t.Fatalf("create: %v", err)
+			}
+			if err := m.Pause(ctx, sid); err != nil {
+				t.Fatalf("pause: %v", err)
+			}
+			// Both directions of an N → M edit: the unit is already a quota unit, so
+			// neither is unmaterializable.
+			for _, want := range []int64{4 * gib, 512 << 20} {
+				if err := m.UpdateBinding(ctx, sid, store.Binding{DiskByte: &want}); err != nil {
+					t.Fatalf("PATCH disk N → %d = %v; want it ADMITTED", want, err)
+				}
+				if rec, _ := st.GetSandbox(ctx, sid); rec.Limits.DiskByte != want {
+					t.Fatalf("disk = %d; want %d", rec.Limits.DiskByte, want)
+				}
+			}
+		})
+
+		// The refusal is scoped to DISK. Memory and CPU do not materialize as storage
+		// units, so `0 → N` on them is an ordinary raise and must stay one.
+		t.Run("memory and cpu 0 → N are ordinary raises", func(t *testing.T) {
+			rp, rt := &fakeRootfs{}, &fakeRuntime{}
+			m, st := newLimitsMediator(t, rp, rt, NodeCapacity{})
+			sid, err := m.Create(ctx, CreateSpec{Template: "bare", Limits: model.Limits{}})
+			if err != nil {
+				t.Fatalf("create: %v", err)
+			}
+			if err := m.Pause(ctx, sid); err != nil {
+				t.Fatalf("pause: %v", err)
+			}
+			mem, cpu := int64(256<<20), int64(500)
+			if err := m.UpdateBinding(ctx, sid, store.Binding{MemoryByte: &mem, CPUMillis: &cpu}); err != nil {
+				t.Fatalf("PATCH memory/cpu 0 → N = %v; want it ADMITTED (only the disk axis has an unmaterializable direction)", err)
+			}
+			rec, _ := st.GetSandbox(ctx, sid)
+			if rec.Limits.MemoryByte != mem || rec.Limits.CPUMillis != cpu {
+				t.Fatalf("limits = %+v; want memory=%d cpu=%d", rec.Limits, mem, cpu)
+			}
+		})
 	})
 
 	// A raise is a new promise, so it must clear admission (§3.4). The gate sums

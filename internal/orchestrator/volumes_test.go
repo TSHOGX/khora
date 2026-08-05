@@ -2,7 +2,9 @@ package orchestrator
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,8 +12,10 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"engine/internal/lifecycle"
+	"engine/internal/model"
 	"engine/internal/store"
 	"engine/internal/volume"
 )
@@ -389,6 +393,353 @@ func TestVolumeImportIsRootConfinedThroughTheEndpoint(t *testing.T) {
 		t.Logf("clamped path not readable back (%d) — the write may have been refused, which is also confined", resp.StatusCode)
 	}
 	resp.Body.Close()
+}
+
+// --- §6.2: no host path reaches an ERROR body ---------------------------------
+
+// pathLeakingBackend wraps a real backend and fails the three write entry points with
+// an error carrying the storage unit's ABSOLUTE HOST PATH.
+//
+// The message is copied from internal/btrfs verbatim in SHAPE — `btrfs: <verb> <path>:
+// <cause>` — because that is what the production arm actually produces: every substrate
+// call there is wrapped that way, and the path is filepath.Join(VolumesDir, volumeID)
+// (internal/volume/local_btrfs.go). So this fake is not inventing a hypothetical leak;
+// it reproduces the one the real backend hands the control plane on any ENOSPC, EPERM
+// or missing-subvolume failure.
+//
+// Faked rather than driven on the real btrfs arm because THE ARRIVING ERROR is the
+// whole input under test, and making the real substrate fail on demand needs root and
+// a substrate tag. What must be real is the ENGINE side of the boundary — the mediator,
+// the router and the funnel — and all three are.
+type pathLeakingBackend struct {
+	volume.Backend
+	unit string // the absolute host path the errors interpolate
+}
+
+func (b *pathLeakingBackend) CreateVolume(_ context.Context, volumeID string, _ int64) error {
+	return fmt.Errorf("btrfs: create subvolume %s: %w", b.unit+"/"+volumeID, errInjectedSubstrate)
+}
+
+func (b *pathLeakingBackend) SetCapacity(_ context.Context, volumeID string, _ int64) error {
+	return fmt.Errorf("btrfs: set quota limit 4096 on %s: %w", b.unit+"/"+volumeID, errInjectedSubstrate)
+}
+
+// OpenRoot SUCCEEDS and hands back a root whose IO fails with a host-path error.
+// Failing OpenRoot itself would be the weaker injection: the mediator has not touched
+// the caller's `path` at that point, so the resulting message could not carry both a
+// host path AND the caller's parameter — and "both, told apart correctly" is the
+// property under test.
+func (b *pathLeakingBackend) OpenRoot(_ context.Context, volumeID string) (volume.Root, error) {
+	return &pathLeakingRoot{unit: b.unit + "/" + volumeID}, nil
+}
+
+type pathLeakingRoot struct {
+	volume.Root
+	unit string
+}
+
+func (r *pathLeakingRoot) Stat(name string) (volume.FileInfo, error) {
+	return volume.FileInfo{}, fmt.Errorf("btrfs: stat %s: %w", r.unit+"/"+name, errInjectedSubstrate)
+}
+
+func (r *pathLeakingRoot) Mkdir(name string, _ os.FileMode) error {
+	return fmt.Errorf("btrfs: mkdir %s: %w", r.unit+"/"+name, errInjectedSubstrate)
+}
+
+func (r *pathLeakingRoot) Remove(name string) error {
+	return fmt.Errorf("btrfs: unlink %s: %w", r.unit+"/"+name, errInjectedSubstrate)
+}
+
+func (r *pathLeakingRoot) WriteAt(name string, _ []byte, _ int64) (int, error) {
+	return 0, fmt.Errorf("btrfs: write %s: %w", r.unit+"/"+name, errInjectedSubstrate)
+}
+
+func (r *pathLeakingRoot) ReadAt(name string, _ []byte, _ int64) (int, error) {
+	return 0, fmt.Errorf("btrfs: read %s: %w", r.unit+"/"+name, errInjectedSubstrate)
+}
+
+func (r *pathLeakingRoot) Close() error { return nil }
+
+var errInjectedSubstrate = errors.New("operation not permitted")
+
+// leakFixture serves a real router over a mediator whose backend leaks host paths, and
+// returns the two host strings the response must never contain: the volumes dir the
+// engine was configured with, and the temp root it lives under.
+func leakFixture(t *testing.T) (*httptest.Server, *store.Memory, string) {
+	t.Helper()
+	dir := t.TempDir()
+	mem := store.NewMemory()
+	real, err := volume.NewPlainDir(dir)
+	if err != nil {
+		t.Fatalf("new plain_dir backend: %v", err)
+	}
+	med := lifecycle.New(lifecycle.Deps{
+		Store:  mem,
+		Volume: &pathLeakingBackend{Backend: real, unit: dir},
+		Logf:   func(string, ...any) {},
+	})
+	eng := &Engine{Mediator: med, Store: mem}
+	srv := httptest.NewServer(eng.HTTPHandler())
+	t.Cleanup(srv.Close)
+	return srv, mem, dir
+}
+
+// assertNoHostPath is the §6.2 property, asserted on a response BODY: the caller sees
+// opaque IDs and no host location.
+//
+// It checks the configured dir (the specific leak), then the generic absolute-path
+// prefixes — `/home`, `/tmp`, `/var`, `/srv` — because a sanitizer tuned to one
+// configured root would pass this test while leaking every other path the engine
+// composes. Nothing legitimately in an error body starts with a slash: §6.2 addresses
+// sandboxes, templates and volumes by opaque ID, and a volume's own content paths are
+// root-RELATIVE.
+func assertNoHostPath(t *testing.T, what string, body []byte, hostDir string) {
+	t.Helper()
+	for _, leak := range append([]string{hostDir}, "/home", "/tmp", "/var", "/srv", "/proc") {
+		if leak != "" && bytes.Contains(body, []byte(leak)) {
+			t.Errorf("%s leaks a host path (%q) into the response body — §6.2 admits opaque IDs only: %s",
+				what, leak, bytes.TrimSpace(body))
+		}
+	}
+}
+
+// TestErrorBodiesCarryTheVerdictWithoutTheHostPath is the test the leak survived the
+// absence of: it drives REAL failures whose underlying error carries an absolute host
+// path, and asserts BOTH halves at once — the body names no host location, and it still
+// says which object relationship failed.
+//
+// Both halves are required, and asserting only the first is the trap: flattening every
+// arm to "internal error" satisfies "no host path" perfectly and destroys the §6.2
+// requirement that the four Volume 409s stay distinguishable. The whole reason each has
+// its own sentinel is that a 409 naming the wrong object sends the caller to the wrong
+// remedy — so each case below names the token that must SURVIVE the redaction.
+func TestErrorBodiesCarryTheVerdictWithoutTheHostPath(t *testing.T) {
+	t.Run("volume create: a leaking backend error becomes a 500 without the volumes dir", func(t *testing.T) {
+		srv, _, dir := leakFixture(t)
+		resp := doBody(t, http.MethodPost, srv.URL+"/v1/volumes", `{}`)
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		// The status code mapping is untouched by the sanitizer: an unclassified substrate
+		// failure is still a 500.
+		if resp.StatusCode != http.StatusInternalServerError {
+			t.Fatalf("create with a failing backend = %d, want 500: %s", resp.StatusCode, body)
+		}
+		assertNoHostPath(t, "POST /v1/volumes", body, dir)
+		// And the caller is not left with nothing: the verdict prose survives, so they can
+		// tell an allocation failure from a rejected request.
+		for _, want := range []string{"create volume", "allocate"} {
+			if !bytes.Contains(body, []byte(want)) {
+				t.Errorf("body does not say %q — the redaction took the meaning with the path: %s", want, bytes.TrimSpace(body))
+			}
+		}
+		// The redaction is VISIBLE rather than silent, so the caller can tell the engine
+		// withheld a detail and quote the message to an operator who has the log.
+		if !bytes.Contains(body, []byte(redacted)) {
+			t.Errorf("nothing marked redacted, so the path was either passed through or silently elided: %s", bytes.TrimSpace(body))
+		}
+	})
+
+	t.Run("volume patch: the 500 keeps its verdict and loses the unit path", func(t *testing.T) {
+		srv, mem, dir := leakFixture(t)
+		// The record exists (inserted directly — create is broken in this fixture by
+		// design), so PATCH reaches the backend rather than 404ing first.
+		if err := mem.CreateVolume(context.Background(), model.Volume{
+			ID: "vol_leaky", Backend: "plain_dir", CreatedAt: time.Now(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		resp := doBody(t, http.MethodPatch, srv.URL+"/v1/volumes/vol_leaky", `{"size":0}`)
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		assertNoHostPath(t, "PATCH /v1/volumes/{id}", body, dir)
+		// The volume ID is an opaque engine ID, so it MUST survive — it is how the caller
+		// knows which object the verdict is about.
+		if resp.StatusCode != http.StatusOK && !bytes.Contains(body, []byte("vol_leaky")) {
+			t.Errorf("the refusal does not name the volume it refused: %s", bytes.TrimSpace(body))
+		}
+	})
+
+	t.Run("volume import: the caller's own path is echoed, the host path is not", func(t *testing.T) {
+		srv, mem, dir := leakFixture(t)
+		if err := mem.CreateVolume(context.Background(), model.Volume{
+			ID: "vol_leaky", Backend: "plain_dir", CreatedAt: time.Now(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		resp := doBody(t, http.MethodPost, srv.URL+"/v1/volumes/vol_leaky/import?path=data/blob", "payload")
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		assertNoHostPath(t, "POST /v1/volumes/{id}/import", body, dir)
+		// `data/blob` is the caller's own parameter, so echoing it tells them nothing about
+		// the host — and it is what identifies WHICH import failed.
+		if !bytes.Contains(body, []byte("data/blob")) {
+			t.Errorf("the failure does not name the path the caller asked for, so they cannot tell which import failed: %s", bytes.TrimSpace(body))
+		}
+	})
+
+	t.Run("volume export: same funnel on the read side", func(t *testing.T) {
+		srv, mem, dir := leakFixture(t)
+		if err := mem.CreateVolume(context.Background(), model.Volume{
+			ID: "vol_leaky", Backend: "plain_dir", CreatedAt: time.Now(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		resp := do(t, http.MethodGet, srv.URL+"/v1/volumes/vol_leaky/export?path=data/blob")
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		assertNoHostPath(t, "GET /v1/volumes/{id}/export", body, dir)
+	})
+
+	t.Run("volume inspect: a failing usage read degrades rather than leaking", func(t *testing.T) {
+		srv, mem, dir := leakFixture(t)
+		if err := mem.CreateVolume(context.Background(), model.Volume{
+			ID: "vol_leaky", Backend: "plain_dir", CreatedAt: time.Now(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		resp := do(t, http.MethodGet, srv.URL+"/v1/volumes/vol_leaky")
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		assertNoHostPath(t, "GET /v1/volumes/{id}", body, dir)
+	})
+
+	t.Run("sandbox create: a leaking volume-mount failure keeps the sandbox id out of a path", func(t *testing.T) {
+		srv, mem, dir := leakFixture(t)
+		seedTemplate(t, mem, "bare", "", true)
+		// An unknown volume in the binding: the refusal travels the same funnel.
+		resp := doBody(t, http.MethodPost, srv.URL+"/v1/sandboxes",
+			`{"template_id":"bare","volumes":[{"volume_id":"vol_ghost","path":"/data","access":"shared-rw"}]}`)
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		assertNoHostPath(t, "POST /v1/sandboxes", body, dir)
+	})
+}
+
+// TestSanitizerKeepsEverySentinelDistinguishable is the other side of the same fence,
+// asserted on the SENTINEL TEXTS directly rather than through a fixture per verdict.
+//
+// §6.2 requires the four Volume 409s and the two 400s to stay distinguishable, and the
+// sanitizer is a text transform standing between them and the caller — so the property
+// to pin is that it is a no-op on every one of them. If a future tightening starts
+// redacting prose, this fails on the exact sentinel that lost its meaning rather than
+// on whichever endpoint happened to be covered elsewhere.
+func TestSanitizerKeepsEverySentinelDistinguishable(t *testing.T) {
+	for _, sentinel := range []error{
+		store.ErrVolumeInUse,
+		store.ErrVolumeHasDescendants,
+		store.ErrSandboxHasMounts,
+		store.ErrMountLeaseConflict,
+		store.ErrMountBindingInvalid,
+		store.ErrVolumeNotFound,
+		store.ErrNotFound,
+		store.ErrTemplateNotFound,
+		store.ErrInUse,
+		lifecycle.ErrVolumeCapBelowUsage,
+		lifecycle.ErrVolumeCapUnsupported,
+		lifecycle.ErrVolumeLiveWriter,
+		lifecycle.ErrCapRequired,
+		lifecycle.ErrInsufficientCapacity,
+		lifecycle.ErrResourceTerminated,
+	} {
+		if got := sanitizeErr(sentinel); got != sentinel.Error() {
+			t.Errorf("the sanitizer altered a sentinel's text:\n  before: %s\n  after:  %s\n"+
+				"every §6.2 verdict must survive verbatim — a 409 naming the wrong object sends the caller to the wrong remedy",
+				sentinel.Error(), got)
+		}
+	}
+}
+
+// TestSanitizerRedactsPathsAndPlacement pins the transform itself at the token level:
+// what goes, what stays, and the punctuation cases error prose actually produces.
+//
+// Unit-level rather than only end-to-end because the shapes below arrive from parts of
+// the engine the orchestrator's own tests cannot make fail without root — a btrfs
+// quota error, a netns dial error — and the funnel has to be right for those too.
+func TestSanitizerRedactsPathsAndPlacement(t *testing.T) {
+	for _, tc := range []struct {
+		name, in string
+		echo     []string // tokens the caller supplied, so they come back
+		gone     []string // must NOT appear in the output
+		kept     []string // must appear (the verdict, and the opaque IDs)
+	}{
+		{
+			name: "btrfs create wraps an absolute unit path",
+			in:   "create volume: allocate: btrfs: create subvolume /srv/state/volumes/vol_abc: exit status 1",
+			gone: []string{"/srv/state/volumes/vol_abc", "/srv"},
+			kept: []string{"create volume", "allocate", "exit status 1"},
+		},
+		{
+			name: "a trailing colon must not save the path",
+			in:   "btrfs: qgroup show /srv/volumes/vol_x: no such file",
+			gone: []string{"/srv/volumes/vol_x"},
+			kept: []string{"qgroup show", "no such file"},
+		},
+		{
+			name: "quoted paths are redacted too",
+			in:   `store: cannot open "/var/lib/engine/store.db" for writing`,
+			gone: []string{"/var/lib/engine/store.db", "/var"},
+			kept: []string{"cannot open", "for writing"},
+		},
+		{
+			name: "the netns endpoint is placement and goes as well",
+			in:   "dial tcp 10.88.0.7:9000: connect: connection refused",
+			gone: []string{"10.88.0.7", "10.88.0.7:9000"},
+			kept: []string{"connection refused"},
+		},
+		{
+			// net/http reports a failed request as `Get "<url>": dial tcp <host>: …`, so the
+			// endpoint appears TWICE and only the second copy looks like a bare address.
+			// Matching the bare form alone would redact the visible half and leave the URL —
+			// worse than not redacting, because it READS as sanitized.
+			name: "an endpoint hidden inside a URL goes too",
+			in:   `download /etc/x: Get "http://10.88.0.7:9000/files?path=%2Fetc%2Fx": dial tcp 10.88.0.7:9000: connection refused`,
+			// /etc/x is a GUEST path, indistinguishable from a host path here — which is why
+			// files.go states it itself and passes it as echo, rather than hoping the funnel
+			// can tell. This case pins that arrangement: with the echo, the caller learns
+			// which download failed and nothing about where the sandbox is.
+			echo: []string{"/etc/x"},
+			gone: []string{"10.88.0.7", "9000"},
+			kept: []string{"download", "/etc/x", "connection refused"},
+		},
+		{
+			name: "opaque IDs and root-relative paths are NOT paths and stay",
+			in:   "direct write to vol_abc: lifecycle: volume has a live read-write mount: sandbox sbx_9 holds it read-write at data/blob",
+			gone: []string{},
+			kept: []string{"vol_abc", "sbx_9", "live read-write mount", "data/blob"},
+		},
+		{
+			name: "a bare slash is not a path (it is prose or a root reference)",
+			in:   "mount binding is self-contradictory: / is not a legal destination",
+			gone: []string{},
+			kept: []string{"self-contradictory", "/ is not"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := sanitizeErr(errors.New(tc.in), tc.echo...)
+			for _, g := range tc.gone {
+				if strings.Contains(got, g) {
+					t.Errorf("%q survived sanitization: %s", g, got)
+				}
+			}
+			for _, k := range tc.kept {
+				if !strings.Contains(got, k) {
+					t.Errorf("%q was lost, so the caller cannot act on the verdict: %s", k, got)
+				}
+			}
+		})
+	}
+
+	// The echo allowlist: a token the CALLER supplied comes back, because handing back
+	// their own parameter tells them nothing about the host. It is an allowlist of exact
+	// tokens, so a sibling path under the same directory is still redacted.
+	got := sanitizeErr(errors.New("download /home/user/notes.txt: open /srv/state/overlays/ov_1/merged/home/user/notes.txt: no such file"), "/home/user/notes.txt")
+	if !strings.Contains(got, "/home/user/notes.txt") {
+		t.Errorf("the caller's own ?path= was redacted, leaving them unable to tell which download failed: %s", got)
+	}
+	if strings.Contains(got, "/srv/state/overlays") {
+		t.Errorf("the ENGINE's path survived because a similar-looking one was echoed: %s", got)
+	}
 }
 
 // writeFile / readFile are tiny os wrappers kept local to this file so the canary

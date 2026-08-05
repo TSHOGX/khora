@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"engine/internal/model"
 	"engine/internal/store"
@@ -545,6 +546,274 @@ func TestSweepOrphanVolumesFailsClosedOnUnreadableEnumeration(t *testing.T) {
 	vb.mu.Unlock()
 	if !survived {
 		t.Errorf("the sweep reclaimed something despite an unreadable enumeration — an error is not evidence that anything is an orphan (§5.C)")
+	}
+}
+
+// recordlessVolumeStore hides ONE volume's record while leaving its mount rows
+// intact — the state an FK is supposed to make impossible.
+//
+// It is the only way to reach the sweep's FK-independent live-mount check, and that
+// is the point rather than a limitation of the fake: both backends enforce RESTRICT
+// (SQLite's `mounts.volume ... ON DELETE RESTRICT`, Memory's ErrVolumeInUse twin), so
+// no sequence of legal API calls can produce "mount row, no record". A check whose
+// whole job is to not trust the FK can only be tested by breaking the FK. The shape
+// stands in for on-disk corruption, a hand-edited store.db, or a future backend whose
+// RESTRICT is weaker than assumed.
+type recordlessVolumeStore struct {
+	store.Store
+	hidden model.VolumeID
+}
+
+func (s *recordlessVolumeStore) GetVolume(ctx context.Context, id model.VolumeID) (model.Volume, error) {
+	if id == s.hidden {
+		return model.Volume{}, store.ErrVolumeNotFound
+	}
+	return s.Store.GetVolume(ctx, id)
+}
+
+func (s *recordlessVolumeStore) ListVolumes(ctx context.Context) ([]model.Volume, error) {
+	vols, err := s.Store.ListVolumes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]model.Volume, 0, len(vols))
+	for _, v := range vols {
+		if v.ID != s.hidden {
+			out = append(out, v)
+		}
+	}
+	return out, nil
+}
+
+// mountReadFailingStore fails ListMountsByVolume wholesale, which is the MEASURED
+// failure mode (§5.C): under the concurrent churn a sweep runs in, a bulk read fails
+// as a whole and returns zero rows. "The read failed" and "nothing owns it" must
+// never be the same answer.
+type mountReadFailingStore struct {
+	store.Store
+}
+
+func (s *mountReadFailingStore) ListMountsByVolume(context.Context, model.VolumeID) ([]model.Mount, error) {
+	return nil, errors.New("injected: mount table bulk read failed wholesale")
+}
+
+// TestSweepOrphanVolumesKeepsAUnitHeldOnlyByAMountRow is the FK-INDEPENDENT half of
+// the §5.C live-mount requirement: skip any unit whose id appears in ANY mount row,
+// live or not.
+//
+// The requirement is about the CANDIDATE UNIT IDS, not about the volumes that have
+// records. Asked of the volumes with records it is INERT — every such id is already
+// kept by the live-record set, so the loop can add nothing and the check passes
+// vacuously while protecting nothing. This test is arranged so that vacuous version
+// FAILS: the only thing standing between these bytes and DestroyVolume is a mount row.
+//
+// A mis-sweep has NO detection path, which is why this is asserted rather than
+// reasoned about: measured, five ways of pulling a live volume out from under a
+// writing guest killed the sandbox zero times, and three of the five produced no
+// errno at all — the guest's writes keep returning success into an unlinked inode
+// (volume.md D7.2).
+func TestSweepOrphanVolumesKeepsAUnitHeldOnlyByAMountRow(t *testing.T) {
+	ctx := context.Background()
+	m, st, vb := volFixture(t)
+
+	held, err := m.CreateVolume(ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateTemplate(ctx, model.Template{ID: "bare", Builtin: true, CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateSandbox(ctx, model.Sandbox{
+		ID: "sbx_writer", Template: "bare", Overlay: "ov_writer", State: model.Running,
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateMounts(ctx, []model.Mount{
+		{Sandbox: "sbx_writer", Volume: held, Path: "/data", Access: model.Exclusive},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// A true orphan alongside it: the POSITIVE CONTROL. Without it, a sweep that
+	// reclaims nothing at all would satisfy every other assertion here.
+	orphan, err := m.CreateVolume(ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.DeleteVolume(ctx, orphan); err != nil {
+		t.Fatal(err)
+	}
+
+	// Now the record goes away while the mount row stays: bytes + mount row + NO record.
+	m.deps.Store = &recordlessVolumeStore{Store: st, hidden: held}
+
+	if err := m.SweepOrphanVolumes(ctx); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+
+	vb.mu.Lock()
+	stillHeld := vb.units[string(held)]
+	stillOrphan := vb.units[string(orphan)]
+	vb.mu.Unlock()
+	if !stillHeld {
+		t.Errorf("a unit named by a live MOUNT ROW was reclaimed on the strength of its record being absent — FK RESTRICT protects the ROW, the §5.C mount check is what protects the BYTES, and the bytes are what a mis-sweep destroys silently (volume.md D7.2)")
+	}
+	if stillOrphan {
+		t.Errorf("the true orphan survived — without this the assertion above passes for a sweep that reclaims nothing")
+	}
+	// The check must be asked of the CANDIDATE, not of the volumes with records: had it
+	// been asked of the latter, the store would never have been queried for `held` at all
+	// (it is absent from ListVolumes), and the bytes above would be gone.
+	var asked bool
+	for _, c := range vb.Calls() {
+		if strings.Contains(c, "DestroyVolume:"+string(held)) {
+			asked = true
+		}
+	}
+	if asked {
+		t.Errorf("DestroyVolume was called on the mount-held unit: %v", vb.Calls())
+	}
+}
+
+// TestSweepOrphanVolumesSkipsWhenTheMountTableIsUnreadable: an unreadable mount table
+// SKIPS the candidate. §5.C states it as a hard requirement — 读取出错时跳过,绝不把空
+// 结果当成"无拥有者" — because the measured failure returns zero rows, making a failed
+// read look exactly like an empty one.
+//
+// The candidate here would otherwise be reclaimed (no record, nothing in flight), so
+// the assertion is load-bearing rather than incidental: only the read error stands
+// between it and DestroyVolume.
+func TestSweepOrphanVolumesSkipsWhenTheMountTableIsUnreadable(t *testing.T) {
+	ctx := context.Background()
+	m, st, vb := volFixture(t)
+
+	orphan, err := m.CreateVolume(ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.DeleteVolume(ctx, orphan); err != nil {
+		t.Fatal(err)
+	}
+	m.deps.Store = &mountReadFailingStore{Store: st}
+
+	// Skip-and-log, not abort: a sweep failure is not fatal and retries next pass
+	// (§4.4-A), so the sweep still reports success.
+	if err := m.SweepOrphanVolumes(ctx); err != nil {
+		t.Fatalf("sweep: %v — an unreadable mount table skips the candidate; it does not fail the pass (§4.4-A)", err)
+	}
+	vb.mu.Lock()
+	survived := vb.units[string(orphan)]
+	vb.mu.Unlock()
+	if !survived {
+		t.Errorf("a candidate was reclaimed while the mount table was UNREADABLE — measured, that read fails wholesale and returns zero rows, so treating the error as 'no owner' destroys the bytes of a mounted volume (§5.C)")
+	}
+}
+
+// twoCallDetectingStore records whether the mediator reached the mount table with the
+// TWO-CALL shape (DeleteMounts then CreateMounts) instead of the single ReplaceMounts
+// commit.
+//
+// It watches the seam rather than the outcome because the outcome is the part that looks
+// fine: two calls produce the same final rows, and only a concurrent reader can tell the
+// difference. A store-level contract test measures that window (storetest's
+// ReplaceMountsNeverExposesZeroRows); this one pins the CALLER, so re-introducing the
+// delete-then-insert pair in the mediator fails here rather than silently reopening it.
+type twoCallDetectingStore struct {
+	store.Store
+	deletes  int
+	creates  int
+	replaces int
+}
+
+func (s *twoCallDetectingStore) DeleteMounts(ctx context.Context, id model.SandboxID) error {
+	s.deletes++
+	return s.Store.DeleteMounts(ctx, id)
+}
+
+func (s *twoCallDetectingStore) CreateMounts(ctx context.Context, mounts []model.Mount) error {
+	s.creates++
+	return s.Store.CreateMounts(ctx, mounts)
+}
+
+func (s *twoCallDetectingStore) ReplaceMounts(ctx context.Context, id model.SandboxID, next []model.Mount) error {
+	s.replaces++
+	return s.Store.ReplaceMounts(ctx, id, next)
+}
+
+// TestRebindVolumesIsOneStoreCommit: a rebind goes through ReplaceMounts and NEVER
+// through DeleteMounts + CreateMounts — including on the REFUSED path, where the old
+// implementation issued a third call to re-insert the previous binding.
+//
+// That restore branch is gone rather than merely unused: with the replacement atomic,
+// "the new binding was refused AND the old one is gone" is not a reachable state, and a
+// compensation path for an unreachable state can only rot (its own failure had to be
+// logged as an unrecoverable-ish condition that could not actually occur).
+func TestRebindVolumesIsOneStoreCommit(t *testing.T) {
+	ctx := context.Background()
+	m, st, _ := volFixture(t)
+	spy := &twoCallDetectingStore{Store: st}
+	m.deps.Store = spy
+
+	seedRec(t, st, "sbx_r", "ov_r", model.Running)
+	seedRec(t, st, "sbx_other", "ov_o", model.Running)
+	keep, err := m.CreateVolume(ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	taken, err := m.CreateVolume(ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// sbx_r holds `keep` exclusively; sbx_other holds `taken` exclusively.
+	if err := st.CreateMounts(ctx, []model.Mount{
+		{Sandbox: "sbx_r", Volume: keep, Path: "/data", Access: model.Exclusive},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateMounts(ctx, []model.Mount{
+		{Sandbox: "sbx_other", Volume: taken, Path: "/x", Access: model.Exclusive},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	spy.deletes, spy.creates, spy.replaces = 0, 0, 0
+
+	// A rebind that LOSES: keep what I have, add the contended volume.
+	_, err = m.RebindVolumes(ctx, "sbx_r", []model.Mount{
+		{Volume: keep, Path: "/data", Access: model.Exclusive},
+		{Volume: taken, Path: "/other", Access: model.Exclusive},
+	})
+	if !errors.Is(err, store.ErrMountLeaseConflict) {
+		t.Fatalf("rebind onto a contended lease = %v; want ErrMountLeaseConflict (the API maps it to 409)", err)
+	}
+	if spy.deletes != 0 || spy.creates != 0 {
+		t.Errorf("a REFUSED rebind made %d DeleteMounts + %d CreateMounts call(s); want 0 of each — the two-call shape is what leaves the sandbox transiently unbound, and its compensating re-insert is exactly the branch this change deletes", spy.deletes, spy.creates)
+	}
+	if spy.replaces != 1 {
+		t.Errorf("a refused rebind made %d ReplaceMounts call(s), want 1", spy.replaces)
+	}
+	// The old binding is still there, with no restore call having been needed.
+	rows, err := st.ListMounts(ctx, "sbx_r")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Volume != keep || rows[0].Access != model.Exclusive {
+		t.Fatalf("after a refused rebind sbx_r holds %+v; want its original exclusive mount of %s", rows, keep)
+	}
+
+	// And the SUCCEEDING path is one call too — including the detach-everything case,
+	// which is a replacement with an empty binding rather than a delete (§6.2).
+	spy.replaces = 0
+	released, err := m.RebindVolumes(ctx, "sbx_r", nil)
+	if err != nil {
+		t.Fatalf("detach-everything rebind: %v", err)
+	}
+	if !released {
+		t.Error("detaching an exclusively-held volume reported no lease release; the caller waiting to attach it elsewhere depends on that flag (§6.1)")
+	}
+	if spy.deletes != 0 || spy.creates != 0 || spy.replaces != 1 {
+		t.Errorf("a detach-everything rebind made %d deletes + %d creates + %d replaces; want 0/0/1 — an empty binding is a replacement, not a DeleteMounts", spy.deletes, spy.creates, spy.replaces)
+	}
+	if rows, _ := st.ListMounts(ctx, "sbx_r"); len(rows) != 0 {
+		t.Errorf("after detaching everything sbx_r holds %+v; want nothing", rows)
 	}
 }
 

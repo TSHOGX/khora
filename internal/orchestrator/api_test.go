@@ -14,6 +14,7 @@ import (
 	"engine/internal/lifecycle"
 	"engine/internal/model"
 	"engine/internal/store"
+	"engine/internal/transport"
 )
 
 // apiFixture assembles an Engine over a Memory store with no real providers —
@@ -285,6 +286,45 @@ func TestAdmissionVerdictsMapToDistinctStatuses(t *testing.T) {
 			t.Fatalf("status = %d (%s); want 400 — nothing is full, the request is invalid here (507 would misdirect the caller)", resp.StatusCode, b)
 		}
 	})
+
+	// The OTHER verdict, which this test's name has always promised and which no test
+	// actually drove: a genuinely full node → 507. Worth its own subtest because the
+	// mapping at the API edge is one line, and a wrong status code there passes the
+	// entire suite — the refusal logic one layer down is well covered, so a regression
+	// would surface only as a caller told "bad request" about a node that is simply out
+	// of room, or told "full" and made to wait when retrying would never help.
+	//
+	// Asserted on statusCodeFor DIRECTLY rather than through a live server, and that is
+	// the honest unit here: the thing that was untested is a one-line SENTINEL → CODE
+	// mapping at the edge. Driving it end-to-end would need a full-node condition, which
+	// means a runtime+rootfs provider stack (the sandbox axis) or a quota-capable
+	// backend (the volume axis, since §3.4 makes a cap on a backend with no Quota
+	// capability a 400 rather than a silent drop) — neither of which is the property
+	// under test, and both of which are already covered where they belong: the refusal
+	// logic in internal/lifecycle's admission tests, the wire shape here.
+	t.Run("a full node → 507", func(t *testing.T) {
+		if got := statusCodeFor(lifecycle.ErrInsufficientCapacity); got != http.StatusInsufficientStorage {
+			t.Fatalf("ErrInsufficientCapacity → %d; want 507 — the request is VALID and the node is out of room (§6.2: 507 means capacity; 409 would imply a retryable state conflict, and 400 would blame a request that is fine)", got)
+		}
+		// The pair must stay DISTINCT. Collapsing them is the regression this test's name
+		// has always promised to catch: both verdicts arise in the same admission gate,
+		// so a refactor that funnels them through one arm is easy to write and silent.
+		if statusCodeFor(lifecycle.ErrCapRequired) == statusCodeFor(lifecycle.ErrInsufficientCapacity) {
+			t.Fatalf("ErrCapRequired and ErrInsufficientCapacity map to the SAME status (%d) — a missing cap is the caller's request being invalid for this deployment (400), a full node is a capacity condition (507)", statusCodeFor(lifecycle.ErrCapRequired))
+		}
+	})
+
+	// The third verdict on the same axis, and the one whose default would be worst: a
+	// `0 → N` disk cap PATCH is unmaterializable (§3.4), so it must read as "this
+	// request cannot be honored" and not as a server fault. Unmapped it would fall to
+	// the default arm and surface as 500 — telling the caller to retry something that
+	// can never succeed, and hiding an engine-authored explanation behind a generic
+	// error.
+	t.Run("an unmaterializable 0→N disk cap → 400", func(t *testing.T) {
+		if got := statusCodeFor(lifecycle.ErrUncappedDiskNotCappable); got != http.StatusBadRequest {
+			t.Fatalf("ErrUncappedDiskNotCappable → %d; want 400 — the request is well-formed but the promise cannot be materialized (§3.4). NOT 507 (nothing is full) and NOT 409 (no retry or state change makes it legal; the remedy is a new sandbox)", got)
+		}
+	})
 }
 
 // --- GET /v1/events (§6.1 / §4.4-C event-stream replay, pull only) -----------
@@ -530,5 +570,97 @@ func TestAPIGetSandboxExposesDeathCause(t *testing.T) {
 	resp.Body.Close()
 	if strings.Contains(string(raw), "death_cause") {
 		t.Fatalf("cleared cause still present on the read path: %s", raw)
+	}
+}
+
+// --- §6.2 on the REST bypass (the other half of the funnel) -------------------
+
+// placementLeakingClient is a transport.Client whose bypass calls fail the way the
+// REAL inner client fails: transport/client.go returns `hc.Do`'s error verbatim, and
+// that client dials the sandbox's NETNS VETH IP, so the message carries
+// `10.x.y.z:port`. §6.2 bars placement from the wire on the same footing as host
+// paths, and the RPC half of the data plane already sanitizes this (proxyErr) — the
+// REST bypass was the arm that did not.
+//
+// It also leaks a HOST overlay path, because the guest's own diagnostic travels back
+// through bypassErr and can name a location inside the merged rootfs.
+type placementLeakingClient struct {
+	*barrierFakeClient
+	endpoint string // the veth IP:port that must not reach the caller
+	hostPath string // an overlay path that must not reach the caller either
+}
+
+func (c *placementLeakingClient) OpenRead(context.Context, string) (io.ReadCloser, error) {
+	return nil, fmt.Errorf("Get \"http://%s/files?path=%%2Fetc%%2Fx\": dial tcp %s: connect: connection refused",
+		c.endpoint, c.endpoint)
+}
+
+func (c *placementLeakingClient) WriteStream(context.Context, string, io.Reader) (int64, error) {
+	return 0, fmt.Errorf("upload /etc/x: open %s/etc/x: permission denied", c.hostPath)
+}
+
+// TestFileBypassErrorsHideThePlacement: GET|PUT /v1/sandboxes/{id}/files refuse
+// WITHOUT naming the guest endpoint or a host path, and still say what failed.
+//
+// This route is REST rather than Connect precisely because it streams bytes, which is
+// how it ended up outside proxyErr's reach: it has its own status mapping
+// (bypassCode), and that mapping used to write `err.Error()` in every arm. Same class
+// of defect as the control-plane one, one layer over.
+func TestFileBypassErrorsHideThePlacement(t *testing.T) {
+	const veth = "10.88.0.7:9000"
+	const overlay = "/srv/state/overlays/ov_x/merged"
+	cl := &placementLeakingClient{
+		barrierFakeClient: &barrierFakeClient{},
+		endpoint:          veth,
+		hostPath:          overlay,
+	}
+	// Assembled here rather than through barrierFixture because that one hard-wires its
+	// own client, and the leaking one IS the input under test.
+	mem := store.NewMemory()
+	if err := mem.CreateTemplate(context.Background(), model.Template{
+		ID: "bare", Builtin: true, CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	med := lifecycle.New(lifecycle.Deps{
+		Store:         mem,
+		Runtime:       barrierFakeRuntime{},
+		Rootfs:        barrierFakeRootfs{},
+		Dial:          func(transport.Endpoint) transport.Client { return cl },
+		HealthTimeout: 2 * time.Second,
+		Logf:          func(string, ...any) {},
+	})
+	sid, err := med.Create(context.Background(), lifecycle.CreateSpec{Template: "bare"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	eng := &Engine{Mediator: med, Store: mem}
+	srv := httptest.NewServer(eng.HTTPHandler())
+	t.Cleanup(srv.Close)
+
+	base := srv.URL + "/v1/sandboxes/" + string(sid) + "/files?path=/etc/x"
+	for _, tc := range []struct{ name, method string }{
+		{"download", http.MethodGet},
+		{"upload", http.MethodPut},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := doBody(t, tc.method, base, "payload")
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				t.Fatalf("%s succeeded against a failing client", tc.name)
+			}
+			for _, leak := range []string{"10.88.0.7", veth, overlay, "/srv"} {
+				if strings.Contains(string(body), leak) {
+					t.Errorf("%s leaks %q — placement and host paths stay inside the engine (§6.2 / D6.1): %s",
+						tc.name, leak, strings.TrimSpace(string(body)))
+				}
+			}
+			// The caller's OWN guest path survives: it is what says which file failed, and
+			// they typed it.
+			if !strings.Contains(string(body), "/etc/x") {
+				t.Errorf("%s does not name the path the caller asked for: %s", tc.name, strings.TrimSpace(string(body)))
+			}
+		})
 	}
 }

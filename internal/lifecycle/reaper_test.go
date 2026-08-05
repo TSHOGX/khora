@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -390,5 +391,56 @@ func TestReaperSkipsLockedSandbox(t *testing.T) {
 
 	if got := e.state(t, "held"); got != model.Running {
 		t.Fatalf("locked sandbox was disposed: state=%s; want running (TryLock-skip)", got)
+	}
+}
+
+// TestReaperTickRunsEveryMaintenanceRound pins that one tick performs ALL FOUR
+// periodic maintenance rounds, not just the sweeps someone happened to remember.
+//
+// It exists because `RepairVolumeCaps` was wired at BOOT ONLY and nothing noticed.
+// That gap is invisible by construction: every round here is best-effort and
+// skip-and-log, so a missing one produces no error, no failed test and no log line —
+// the only symptom is a divergence that persists until the next process restart. For
+// the cap-repair round specifically the divergence is itself undetectable while it
+// lasts (volume.md D7.3: the limit read maps "never capped" and 0 onto each other),
+// so "it will be caught later" is false.
+//
+// Asserted by OBSERVED BACKEND CALLS rather than by reading the source, so it fails
+// if a round is deleted, short-circuited, or made conditional on something a plain
+// tick does not satisfy.
+func TestReaperTickRunsEveryMaintenanceRound(t *testing.T) {
+	vol := newFakeVolume()
+	m, _ := newLimitsMediator(t, &fakeRootfs{}, &fakeRuntime{}, NodeCapacity{})
+	m.deps.Volume = vol
+	r := &Reaper{m: m}
+
+	r.tick(context.Background())
+
+	// Seed the two conditions that make the later rounds REACH the backend: a leaked
+	// row id to reclaim, and a volume whose record promises a cap the storage lacks.
+	// Without them both rounds legitimately short-circuit (no ids / no records) and the
+	// test could not tell "ran and had nothing to do" from "never ran at all" — which
+	// is the whole failure mode being guarded.
+	id, err := m.CreateVolume(context.Background(), 8<<20)
+	if err != nil {
+		t.Fatalf("seed volume: %v", err)
+	}
+	vol.mu.Lock()
+	vol.deletedRows[4242] = true        // a leaked quota row for the reclamation round
+	delete(vol.appliedCaps, string(id)) // storage "forgets" the cap → the D7.3 repair state
+	vol.mu.Unlock()
+
+	before := strings.Join(vol.Calls(), ",")
+	r.tick(context.Background())
+	got := strings.Join(vol.Calls(), ",")
+
+	for call, why := range map[string]string{
+		"ListUnitIDs":      "§5.C orphan-volume sweep",
+		"ReclaimQuotaRows": "§5.C/D7 leaked quota-row reclamation",
+		"SetCapacity":      "§5.C/D7.3 volume-cap repair",
+	} {
+		if !strings.Contains(strings.TrimPrefix(got, before), call) {
+			t.Errorf("one tick never called %s (%s) — a periodic maintenance round is missing, and every round here is best-effort skip-and-log, so its absence raises NOTHING at runtime. Calls during the tick: %s", call, why, strings.TrimPrefix(got, before))
+		}
 	}
 }

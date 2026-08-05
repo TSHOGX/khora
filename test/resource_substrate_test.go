@@ -1011,7 +1011,26 @@ func TestResourceRateAxis(t *testing.T) {
 		if got := readCg(t, sid, "memory.oom.group"); got != "1" {
 			t.Fatalf("memory.oom.group = %q for %s; want 1 (§2.4: deterministic whole-group termination)", got, sid)
 		}
-		t.Logf("✓ %s caps bound on the real cgroup: cpu.max=%s memory.max=%d (N=%d + overhead) swap.max=0 oom.group=1",
+		// memory.high must be UNSET ("max"). §5.A forbids it outright: with
+		// swap.max=0 (asserted above) and unreclaimable anon pages there is nowhere
+		// for reclaim to push memory, so throttling degenerates into a HANG rather
+		// than a limit — measured at 1282 throttle events and a guest stalled past
+		// 45 s. The enforcement shape §5.A settles on is the hard limit plus
+		// oom.group=1: a clean whole-group termination instead of an indefinite stall.
+		//
+		// Read off the real cgroupfs rather than inferred from ociMemory having no
+		// High field, because that is not what the assertion is about. The engine
+		// honors this by OMISSION, so the risk is not "we set it" but "something
+		// else does" — a future host-side write in bindLimits (which already writes
+		// memory.max, memory.swap.max and memory.oom.group by hand), a runsc version
+		// that starts deriving one from the OCI limit, or a systemd/cgroup-driver
+		// default landing on the parent. None of those touch a Go struct, and every
+		// one of them turns the RAM cap from a kill into a wedge, so the only
+		// assertion that covers them is a read of the leaf itself.
+		if got := readCg(t, sid, "memory.high"); got != "max" {
+			t.Fatalf("memory.high = %q for %s; want \"max\" (unset). §5.A forbids memory.high: with swap.max=0 and unreclaimable anon, throttling becomes a HANG instead of a limit (measured: 1282 throttle events, guest stalled past 45 s) — the cap must be the hard limit + oom.group=1", got, sid)
+		}
+		t.Logf("✓ %s caps bound on the real cgroup: cpu.max=%s memory.max=%d (N=%d + overhead) swap.max=0 oom.group=1 high=max(unset)",
 			sid, wantCPU, hostCeil, memCap)
 	}
 

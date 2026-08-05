@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -337,4 +338,195 @@ func TestResourceLimitsCarriesOnlyPolicy(t *testing.T) {
 	for f := range want {
 		t.Errorf("ResourceLimits is missing the policy field %q", f)
 	}
+}
+
+// pinnedFlag is one runsc global flag together with the § guarantee it carries.
+// The `why` is the whole point of the table: a future edit that drops a key gets
+// told what it just gave up, rather than seeing a bare string diff.
+type pinnedFlag struct {
+	flag string
+	why  string
+}
+
+// pinnedRunscFlags is the §5.A pinned global flag set, by value. §5.A: local_runsc
+// 钉死其依赖的整套 runsc flag、不继承默认 —— runsc's defaults drift across versions
+// and §5.B's cross-runsc-version portability may not rest on "the default did not
+// change".
+var pinnedRunscFlags = []pinnedFlag{
+	{"--platform=systrap", "§1.1 no-hypervisor. FAILS SILENTLY: systrap is also runsc's current default, so dropping this changes nothing observable TODAY and breaks the moment a runsc version moves the default (e.g. to KVM) — exactly the drift §5.A pins against"},
+	{"--network=sandbox", "userspace netstack. host/hostinet lets the sentry use host sockets directly and violates §2 substrate pillar ① (REJECTED, not an alternative mode); it is also the precondition for §5.D steering (per-sandbox netns) and §5.E transport (netstack-terminated, dialed over the veth IP)"},
+	{"--overlay2=none", "§5.B/§5.C own the persistent layer OUTSIDE runsc; the gofer only proxies host dirs. runsc's own overlay would put guest writes somewhere the engine does not manage, so Promote would freeze an incomplete tree"},
+	{"--file-access=shared", "the other half of the same guarantee: the gofer proxies the host dir bidirectionally, which is what makes §5.C volume binds and the at-rest upper work at all (rootfs-overlay D0)"},
+	{"--net-raw=false", "§5.D: the guest cannot forge L2 frames. runsc's own default already strips raw/AF_PACKET, so WITHOUT this pin the guarantee is an UNDECLARED default — and §5.D's future interface-keyed predicate floor would face a raw-socket-capable guest with no test firing. Paired with CAP_NET_RAW's absence from oci.go caps"},
+	{"--systemd-cgroup=false", "cgroupfs driver, which the whole §5.A cgroup-ownership split assumes (engine mkdirs the parent, runsc creates the leaf). The systemd driver would place the leaf somewhere else entirely and the post-launch cap assertion would read the wrong path"},
+}
+
+// TestRunscGlobalFlagsArePinned asserts the EXACT §5.A pinned flag set, by value.
+//
+// This is a test rather than a review habit for the same reason the seam guard
+// above is: two of these keys fail SILENTLY.
+//
+//   - `--platform=systrap` matches runsc's current default, so dropping it is
+//     invisible until a runsc version moves that default.
+//   - `--root` is LOAD-BEARING, not a path preference (§5.A): point it at the wrong
+//     directory and `runsc state`/`list` return empty rather than erroring, which
+//     makes §4.4-A reverse reconciliation read EVERY live placement as nonexistent
+//     — and reclaim live sandboxes. A silently-empty enumeration is the worst shape
+//     a failure can take here, since it looks exactly like "nothing is running".
+//
+// Both halves are asserted: every pinned key is PRESENT (with its § guarantee named
+// in the failure), and no UNKNOWN flag has been added without a recorded reason.
+func TestRunscGlobalFlagsArePinned(t *testing.T) {
+	p := &LocalRunsc{RunscBin: "runsc", RunscRoot: "/var/run/engine-runsc", StateDir: "/var/lib/engine/state"}
+	argv := p.runscGlobalFlags()
+
+	if len(argv) == 0 || argv[0] != "runsc" {
+		t.Fatalf("argv[0] = %q; want the runsc binary first (global flags follow it, subcommand after)", argv)
+	}
+	flags := argv[1:]
+
+	// --root is asserted separately because it is VALUE-DERIVED (the configured
+	// root), not a constant — and because it carries the heaviest consequence.
+	wantRoot := "--root=" + p.RunscRoot
+	if flags[0] != wantRoot {
+		t.Errorf("first global flag = %q; want %q. §5.A: --root is the single addressing root for all runsc state — a wrong root makes state/list SILENTLY EMPTY, so §4.4-A reverse reconciliation reads every live placement as nonexistent and reclaims live sandboxes",
+			flags[0], wantRoot)
+	}
+
+	got := make(map[string]bool, len(flags))
+	for _, f := range flags {
+		got[f] = true
+	}
+	for _, pf := range pinnedRunscFlags {
+		if !got[pf.flag] {
+			t.Errorf("pinned runsc flag %s is MISSING from runscGlobalFlags — it carries: %s", pf.flag, pf.why)
+		}
+	}
+
+	// The reverse direction: an unrecorded flag. Not a style rule — an unpinned key
+	// that someone adds by hand is one nobody has attached a guarantee to, and §5.A's
+	// discipline is per-key ("哪些键承重、各对哪条 §保证").
+	known := map[string]bool{wantRoot: true}
+	for _, pf := range pinnedRunscFlags {
+		known[pf.flag] = true
+	}
+	for _, f := range flags {
+		if !known[f] {
+			t.Errorf("runscGlobalFlags carries unrecorded flag %q — §5.A pins each key to ONE stated guarantee; add it to pinnedRunscFlags with the § it serves (or drop it)", f)
+		}
+	}
+
+	// The flags must all be GLOBAL, i.e. emitted before any subcommand. runsc rejects
+	// a global flag placed after the subcommand, so ordering here is load-bearing.
+	for _, f := range flags {
+		if !strings.HasPrefix(f, "--") {
+			t.Errorf("runscGlobalFlags emits non-flag token %q — everything after the binary must be a global flag (the subcommand is appended by the callers)", f)
+		}
+	}
+}
+
+// CAP_NET_RAW must NOT be requested (§5.A / oci.go caps). Measured: the guest's
+// CapEff has the bit clear regardless, because runsc's --net-raw=false strips
+// raw/AF_PACKET sockets — so requesting it is a FAKE INVARIANT, a line that reads
+// as a deliberate grant for something the guest can never hold. The real guarantee
+// is the pinned flag above; this asserts the two halves stay consistent.
+//
+// CAP_NET_ADMIN is asserted PRESENT in the same test, because the tempting
+// "tighten the caps" edit is to drop both — and §2.2 is explicit that guest caps
+// are not an isolation pillar, so removing NET_ADMIN buys no isolation and costs
+// legitimate in-guest network work.
+func TestGuestCapsDoNotRequestNetRaw(t *testing.T) {
+	var hasAdmin bool
+	for _, c := range caps {
+		if c == "CAP_NET_RAW" {
+			t.Errorf("caps requests CAP_NET_RAW, which the guest provably never gets (measured: CapEff bit clear under --net-raw=false). Requesting an ungrantable cap is a fake invariant — the raw-socket guarantee belongs to the pinned --net-raw=false flag, not to this list (§5.A)")
+		}
+		if c == "CAP_NET_ADMIN" {
+			hasAdmin = true
+		}
+	}
+	if !hasAdmin {
+		t.Error("caps dropped CAP_NET_ADMIN — §2.2: guest caps are explicitly NOT an isolation pillar (the sentry virtualizes them and is itself unprivileged on the host), so removing it buys no isolation and breaks legitimate in-guest network work")
+	}
+}
+
+// A restarted allocator must not re-hand a survivor's IP to a NEW sandbox
+// (§5.A / §4.4-A: 接管存活者时把其 IP 标进分配器 inUse，重启后的分配器不会把该 IP
+// 再发给新沙箱).
+//
+// The failure mode is QUIET, which is why this is worth a test: the fresh process
+// has an empty inUse map and a randomized ipSeq, so nothing stops it from handing a
+// second sandbox the /30 a survivor is already using. Two sandboxes then share a
+// subnet, and the transport endpoint for at least one of them resolves to the wrong
+// guest — no error anywhere, just a sandbox answering as another.
+//
+// Simulated at the allocator level rather than through real runsc: what Adopt
+// contributes on the alive path is exactly the markInUse(ip) call, and allocSubnet
+// is the half that must honor it. Both are unit-testable, and the substrate suite
+// covers the Adopt plumbing that produces the IP.
+func TestRestartedAllocatorSkipsAnAdoptedSurvivorsIP(t *testing.T) {
+	base := t.TempDir()
+	p, err := NewLocalRunsc(base+"/root", base+"/state")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// ipSeq is REWOUND explicitly at each step, and that is what makes this test
+	// falsifiable rather than decorative. NewLocalRunsc randomizes the start, and the
+	// sequence walks ~16000 distinct /30s, so "allocate a few and check none collide"
+	// would pass whether or not the inUse check exists — the allocator simply would
+	// not come back around to the survivor's block. Rewinding to the exact seq that
+	// produced the survivor makes the NEXT call collide unless inUse stops it.
+	rewind := func(seq uint32) {
+		p.mu.Lock()
+		p.ipSeq = seq
+		p.mu.Unlock()
+	}
+
+	// The "survivor": an IP this restarted process learned from Adopt's alive path
+	// (Adopt calls markInUse after rediscovering the endpoint). Taken from the
+	// allocator itself so it is genuinely an address this instance hands out.
+	rewind(0)
+	survivorHost, survivorIP := p.allocSubnet()
+	p.freeIP(survivorIP) // the fresh process never allocated it — it ADOPTED it...
+	p.markInUse(survivorIP)
+
+	// the /30 pairing endpoint rediscovery depends on: guest = host + 1
+	// (rediscoverGuestIP reads the host veth address and adds one).
+	if want := incLastOctet(t, survivorHost); survivorIP != want {
+		t.Fatalf("allocSubnet gave host=%s guest=%s; guest must be host+1 or rediscoverGuestIP recovers the WRONG endpoint after a crash", survivorHost, survivorIP)
+	}
+
+	// ...and now the next allocation is pointed straight at it. Without the inUse
+	// skip in allocSubnet this returns survivorIP: a duplicate /30, two sandboxes
+	// sharing a subnet, and at least one transport endpoint resolving to the wrong
+	// guest — with no error raised anywhere.
+	rewind(0)
+	_, fresh := p.allocSubnet()
+	if fresh == survivorIP {
+		t.Fatalf("allocSubnet handed a new sandbox %s, which an adopted survivor holds (§4.4-A: a restarted allocator must skip IPs Adopt marked in use)", fresh)
+	}
+
+	// Freeing the survivor (its placement was torn down) returns the IP to
+	// circulation — otherwise a long-running process leaks its address space one
+	// /30 at a time. Rewound to the same seq, so this is the same single call.
+	p.freeIP(survivorIP)
+	p.freeIP(fresh)
+	rewind(0)
+	if _, reissued := p.allocSubnet(); reissued != survivorIP {
+		t.Errorf("after freeIP(%s) the allocator returned %s instead — a released IP must return to circulation", survivorIP, reissued)
+	}
+}
+
+func incLastOctet(t *testing.T, ip string) string {
+	t.Helper()
+	i := strings.LastIndex(ip, ".")
+	if i < 0 {
+		t.Fatalf("malformed IP %q", ip)
+	}
+	n, err := strconv.Atoi(ip[i+1:])
+	if err != nil {
+		t.Fatalf("malformed IP %q: %v", ip, err)
+	}
+	return ip[:i+1] + strconv.Itoa(n+1)
 }

@@ -40,18 +40,37 @@ func writeUpper(t *testing.T, p *HostOverlayFS, id string, files map[string]stri
 }
 
 // §5.B / §3.1: Promote copies the upper into a new layer dir byte-for-byte, but
-// EXCLUDES the sandboxd portal sentinel files (they must not enter the frozen
-// layer — the excluded-path acceptance property, rootfs-overlay D5). bytes-first:
+// EXCLUDES the engine-injected runtime debris (rootfs-overlay D5). bytes-first:
 // the layer exists on disk after Promote, ready for the row insert.
+//
+// THE LOAD-BEARING HALF IS THE UPLOAD DEBRIS, not the static tmp/ paths. D5 records
+// why, and it is worth stating here so this test is not read as stronger than it is:
+//
+//   - the two `tmp/.sandboxd-*` portal files CANNOT REACH THE UPPER at all. /tmp is
+//     mounted as tmpfs by the OCI spec (internal/runtime/oci.go), so the guest daemon's
+//     writes there never land in the upper's `tmp/`. The cases below plant them by
+//     hand, which means they exercise the matching logic against a state the substrate
+//     cannot produce. They stay because the list entries are harmless and cheap
+//     insurance (one line beats minting a Template whose every sandbox is born unable
+//     to serve), but they prove nothing about a real leak — do not treat them as the
+//     reason the exclusion mechanism exists.
+//   - the streaming upload's temp file is the REAL consumer: it must be created in the
+//     caller's own destination directory, because rename(2) cannot cross filesystems
+//     and /tmp is that separate tmpfs (cmd/sandboxd/files.go). So it lands in the
+//     upper, anywhere the caller writes, and a crash mid-upload strands one. That is
+//     the case with a live failure mode, and it is matched by PREFIX
+//     (guestport.UploadTempPrefix) because the exact path is unknowable in advance.
 func TestPromoteToTemplateExcludesRuntimePaths(t *testing.T) {
 	ctx := context.Background()
 	p, _ := newProvider(t)
 
 	writeUpper(t, p, "ov_src", map[string]string{
-		"home/work/app.py":            "print('hello')",
-		"etc/installed-pkg":           "PKG",
-		"tmp/.sandboxd-transport.pid": "12345",  // excluded (§5.B / D5)
-		"tmp/.sandboxd-crashloop":     "x",      // excluded (§5.B / D5)
+		"home/work/app.py":  "print('hello')",
+		"etc/installed-pkg": "PKG",
+		// Planted by hand; unreachable on the real substrate (/tmp is tmpfs). Matching
+		// logic only — see the doc comment.
+		"tmp/.sandboxd-transport.pid": "12345",
+		"tmp/.sandboxd-crashloop":     "x",
 		"tmp/user-scratch":            "keepme", // NOT excluded (only the sandboxd paths are)
 		// Upload debris, excluded BY PREFIX rather than by exact path. A streaming
 		// upload's temp file must be created in the caller's own destination
@@ -60,6 +79,14 @@ func TestPromoteToTemplateExcludesRuntimePaths(t *testing.T) {
 		// pin that the rule is not tied to a location.
 		"home/work/" + guestport.UploadTempPrefix + "a1b2": "partial upload",
 		"etc/" + guestport.UploadTempPrefix + "deadbeef":   "partial upload",
+		// NEGATIVE CONTROLS for the prefix rule, which is what makes the two lines
+		// above falsifiable rather than satisfiable by a blunter implementation.
+		// Without these, "exclude every dotfile" or "exclude the whole directory that
+		// held debris" would both pass — and either would silently discard real guest
+		// data (a `.env`, a `.git`, the user's own work beside a stranded upload).
+		"home/work/.env":         "SECRET=1", // a dotfile, NOT debris
+		"etc/keep-beside-debris": "REAL",     // shares a directory with debris
+		"home/work/notes-" + guestport.UploadTempPrefix + "x": "REAL", // prefix mid-name, not at the start
 	})
 
 	ov := &Overlay{ID: "ov_src", Template: "bare", Lower: []string{"bare"}}
@@ -94,7 +121,21 @@ func TestPromoteToTemplateExcludesRuntimePaths(t *testing.T) {
 		"etc/" + guestport.UploadTempPrefix + "deadbeef",
 	} {
 		if _, err := os.Stat(filepath.Join(layer, debris)); !os.IsNotExist(err) {
-			t.Errorf("upload temp file %s leaked into layer: %v", debris, err)
+			t.Errorf("upload temp file %s leaked into layer: %v (a crash mid-upload strands one anywhere the caller writes; freezing it ships one caller's interrupted upload to every sandbox created from this Template)", debris, err)
+		}
+	}
+	// The negative half of the prefix rule: it matches a BASE NAME that STARTS WITH
+	// the prefix, and nothing wider. Each of these would be swept up by a plausible
+	// over-broad implementation, and each is real guest data whose loss would be
+	// silent — the Template would simply be missing a file nobody notices until a
+	// sandbox built from it fails.
+	for _, kept := range []string{
+		"home/work/.env",
+		"etc/keep-beside-debris",
+		"home/work/notes-" + guestport.UploadTempPrefix + "x",
+	} {
+		if _, err := os.Stat(filepath.Join(layer, kept)); err != nil {
+			t.Errorf("%s was excluded: %v — the upload-debris rule must match a base name STARTING WITH the prefix, not every dotfile, not a whole directory that happened to hold debris, and not a mid-name occurrence", kept, err)
 		}
 	}
 	// no leftover staging dir.
@@ -288,11 +329,41 @@ func TestPromotePrunesShadowedBytes(t *testing.T) {
 			t.Errorf("%s was pruned from the layer: %v — only the LEAF subtree may be excluded; a top-level component would discard real guest data living beside the mount", kept, err)
 		}
 	}
-	// The mount destination itself may remain as an EMPTY placeholder — that is the
-	// documented default result and matches what a `tar` of a directory with something
-	// mounted on it captures. What must not remain is content.
-	if ents, err := os.ReadDir(filepath.Join(layer, "data")); err == nil && len(ents) != 0 {
-		t.Errorf("the mount destination in the layer is not empty: %d entries", len(ents))
+	// What happens to the mount DESTINATION DIRECTORY itself.
+	//
+	// SPEC/CODE DIVERGENCE, recorded here deliberately rather than silently reconciled
+	// (CLAUDE.md: a divergence is a signal to STOP, not to fix in passing).
+	//
+	//	§5.B says the mount point survives in a frozen layer as an EMPTY DIRECTORY
+	//	PLACEHOLDER ("挂载点在固化结果里只是一个空目录占位"), by analogy with `tar` of a
+	//	directory that has something mounted on it.
+	//
+	//	copyTree ACTUALLY PRUNES IT ENTIRELY. The exclusion check runs BEFORE the
+	//	MkdirAll that would create the target, and returns filepath.SkipDir — so no
+	//	directory is created at the destination and the whole subtree, dest included, is
+	//	absent from the layer. Measured: stat(layer/data) → ENOENT.
+	//
+	// Neither side is obviously right (§5.B's placeholder is the default outcome for an
+	// UNSHADOWED dest, which needs no exclusion at all — see D5 — so the two statements
+	// may simply be about different cases), and this is not the change to settle it in.
+	// Production behavior is therefore LEFT ALONE and the test pins what the code DOES.
+	//
+	// The previous assertion here was `if ents, err := os.ReadDir(dest); err == nil &&
+	// len(ents) != 0` — which passed VACUOUSLY on the real behavior: the directory is
+	// absent, so err != nil and the body never ran. It would have kept passing if the
+	// dest had been left full of shadowed content, since that path also depends on the
+	// ReadDir succeeding. Asserted unambiguously now.
+	dest := filepath.Join(layer, "data")
+	if _, err := os.Stat(dest); !os.IsNotExist(err) {
+		ents, _ := os.ReadDir(dest)
+		t.Errorf("mount destination %s exists in the layer (stat err = %v, %d entries) — copyTree returns SkipDir BEFORE creating the target dir, so the dest is pruned entirely. If this now behaves like §5.B's empty-placeholder instead, that is the divergence above RESOLVING; settle it in the spec and update this assertion deliberately, do not just relax it",
+			"data", err, len(ents))
+	}
+	// Either way, the property that actually matters holds: no SHADOWED CONTENT reaches
+	// the layer. Asserted independently of the dest's own existence, so it survives
+	// whichever way the divergence above is settled.
+	if ents, err := os.ReadDir(dest); err == nil && len(ents) != 0 {
+		t.Errorf("mount destination %s in the layer holds %d entries — bytes shadowed by a mount must never be frozen, whether or not the dest itself remains as a placeholder", dest, len(ents))
 	}
 }
 

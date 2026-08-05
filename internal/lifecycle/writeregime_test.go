@@ -120,6 +120,157 @@ func TestLiveReadOnlyMountDoesNotBlockDirectWrite(t *testing.T) {
 	}
 }
 
+// TestColdStartRefusedWhileADirectWriteIsInFlight is the SYMMETRIC half of §5.C's
+// write regime, and the half whose absence left the hazard fully open in one order: an
+// import admitted at T0 plus a resume completing at T1 produces the two concurrent
+// writers the invariant forbids, without passing through any `paused` state that the
+// direct-write side could have caught.
+//
+// The refusal is asserted on BOTH cold-start entry points, because they are different
+// verbs with different fallback states (§4.4-A) and a gate wired into only one of them
+// would be a gate on half the hazard.
+func TestColdStartRefusedWhileADirectWriteIsInFlight(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("resume is refused and STAYS PAUSED", func(t *testing.T) {
+		m, st, _, rt := mountFixture(t)
+		vid, err := m.CreateVolume(ctx, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sid, err := m.Create(ctx, CreateSpec{
+			Template: "bare",
+			Volumes:  []model.Mount{{Volume: vid, Path: "/data", Access: model.SharedReadWrite}},
+		})
+		if err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		if err := m.Pause(ctx, sid); err != nil {
+			t.Fatalf("pause: %v", err)
+		}
+		// A direct write is now legal (a `paused` sandbox is not a live writer) and takes
+		// the marker. Held open across the resume below — the real import holds it for the
+		// whole stream, so this is the state a resume genuinely races.
+		release, err := m.admitDirectWrite(ctx, vid)
+		if err != nil {
+			t.Fatalf("admit the direct write on a paused holder: %v", err)
+		}
+
+		launchesBefore := len(rt.Calls())
+		err = m.Resume(ctx, sid)
+		if !errors.Is(err, ErrVolumeDirectWriteInFlight) {
+			t.Fatalf("resume while a direct write is in flight = %v; want ErrVolumeDirectWriteInFlight — otherwise this resume and that import are the two concurrent writers §5.C forbids", err)
+		}
+		// The message must name the volume: the remedy is to wait for THAT import.
+		if !strings.Contains(err.Error(), string(vid)) {
+			t.Errorf("the refusal does not name the volume: %v", err)
+		}
+		// §4.4-A: atomic return to the SOURCE state. The refusal is taken before anything
+		// is materialized, so there is nothing half-built to leave behind either.
+		if rec, _ := st.GetSandbox(ctx, sid); rec.State != model.Paused {
+			t.Fatalf("state = %s; want it to stay paused (§4.4-A source state)", rec.State)
+		}
+		if len(rt.Calls()) != launchesBefore {
+			t.Fatalf("the refused resume still touched the runtime: %v", rt.Calls()[launchesBefore:])
+		}
+
+		// And the refusal is RETRYABLE, which is what makes "refuse, do not wait" an
+		// honest answer: the documented remedy really does clear it.
+		release()
+		if err := m.Resume(ctx, sid); err != nil {
+			t.Fatalf("resume after the import finished = %v; want success — the refusal must be retryable", err)
+		}
+	})
+
+	t.Run("create is refused and leaves NO record", func(t *testing.T) {
+		m, st, _, _ := mountFixture(t)
+		vid, err := m.CreateVolume(ctx, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		release, err := m.admitDirectWrite(ctx, vid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer release()
+
+		_, err = m.Create(ctx, CreateSpec{
+			Template: "bare",
+			Volumes:  []model.Mount{{Volume: vid, Path: "/data", Access: model.Exclusive}},
+		})
+		if !errors.Is(err, ErrVolumeDirectWriteInFlight) {
+			t.Fatalf("create mounting a volume mid-import = %v; want ErrVolumeDirectWriteInFlight (exclusive is an rw mode)", err)
+		}
+		// create has no fallback state, so §4.4-A means the record goes away entirely —
+		// including the mount rows, or the record would be an undeletable zombie.
+		if recs, _ := st.ListSandboxes(ctx); len(recs) != 0 {
+			t.Fatalf("refused create left %d sandbox record(s); want none (§4.4-A)", len(recs))
+		}
+		rows, err := st.ListMountsByVolume(ctx, vid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(rows) != 0 {
+			t.Fatalf("refused create left %d mount row(s) behind: %+v", len(rows), rows)
+		}
+	})
+}
+
+// TestColdStartWithAReadOnlyMountIsNotRefused is the permissive side of the same gate,
+// and it is the assertion that keeps the symmetry from costing a capability: a cold
+// start whose mount of the volume is READ-ONLY tears nothing, so a direct write in
+// flight must NOT block it. This mirrors admitDirectWrite letting a live ro holder
+// through.
+//
+// Refusing here as well would be more conservative and would tear nothing — and would
+// delete the ability to boot a sandbox that merely READS a volume being seeded, which
+// volume.md D5 calls the third kind of wrong.
+func TestColdStartWithAReadOnlyMountIsNotRefused(t *testing.T) {
+	ctx := context.Background()
+	m, st, _, _ := mountFixture(t)
+	vid, err := m.CreateVolume(ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release, err := m.admitDirectWrite(ctx, vid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	// The marker really is in flight — otherwise this test would pass for the wrong
+	// reason (nothing to refuse) and would keep passing if the gate refused ro mounts.
+	if ids := m.inFlightWriteIDs(); len(ids) != 1 {
+		t.Fatalf("precondition: in-flight writes = %v; want exactly this volume", ids)
+	}
+
+	sid, err := m.Create(ctx, CreateSpec{
+		Template: "bare",
+		Volumes:  []model.Mount{{Volume: vid, Path: "/ro", Access: model.SharedReadOnly}},
+	})
+	if err != nil {
+		t.Fatalf("create with a READ-ONLY mount during an import = %v; want success — a reader cannot tear the bytes, and refusing would trade away a capability", err)
+	}
+	if rec, _ := st.GetSandbox(ctx, sid); rec.State != model.Running {
+		t.Fatalf("state = %s; want running", rec.State)
+	}
+	// The mixed case pins that the gate reads the ACCESS MODE per row rather than
+	// "this sandbox touches that volume": one ro row on the in-flight volume plus an rw
+	// row on an unrelated one is still admissible.
+	other, err := m.CreateVolume(ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Create(ctx, CreateSpec{
+		Template: "bare",
+		Volumes: []model.Mount{
+			{Volume: vid, Path: "/ro", Access: model.SharedReadOnly},
+			{Volume: other, Path: "/rw", Access: model.SharedReadWrite},
+		},
+	}); err != nil {
+		t.Fatalf("create with ro on the in-flight volume + rw on another = %v; want success", err)
+	}
+}
+
 // TestDirectWriteMarkerProtectsFromTheSweep: the in-flight marker and the write-regime
 // decision are published in ONE critical section, and the marker is what keeps a
 // concurrent sweep from reclaiming bytes mid-write (M7 acceptance 24).
