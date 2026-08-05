@@ -60,6 +60,14 @@ func RunContract(t *testing.T, mk Factory) {
 	t.Run("TemplateDurability", func(t *testing.T) { testTemplateDurability(t, mk) })
 	t.Run("ReferenceReclaimRace", func(t *testing.T) { testReferenceReclaimRace(t, mk) })
 
+	// Volume object model (§5.C / §4.3): same assertions both backends. The suite
+	// had NO volume-shaped case before M7 — the shape had to be added rather than
+	// inherited.
+	t.Run("VolumeCRUD", func(t *testing.T) { testVolumeCRUD(t, mk) })
+	t.Run("VolumeCapacityWritePoint", func(t *testing.T) { testVolumeCapacity(t, mk) })
+	t.Run("VolumeDeleteReportsNotFound", func(t *testing.T) { testVolumeDeleteNotFound(t, mk) })
+	t.Run("VolumeDurability", func(t *testing.T) { testVolumeDurability(t, mk) })
+
 	// §4.4-C under CONCURRENT writers. Every other subtest here is
 	// single-threaded, so a backend whose CAS is not genuinely atomic — read,
 	// then write, without holding anything across the two — would pass all of
@@ -1075,6 +1083,150 @@ func testTemplateDurability(t *testing.T, mk Factory) {
 	// lineage RESTRICT still holds after reopen.
 	if err := s2.DeleteTemplate(ctx, "t1"); err != store.ErrInUse {
 		t.Fatalf("post-reopen delete referenced parent = %v; want ErrInUse", err)
+	}
+}
+
+// --- Volume (§5.C / §4.3) ----------------------------------------------------
+
+// testVolumeCRUD: a Volume round-trips intact and is addressed by its own
+// sentinel. Existence IS the state (§4.3) — there is no state column to check, so
+// what the assertions cover instead is that presence/absence is the whole answer.
+func testVolumeCRUD(t *testing.T, mk Factory) {
+	ctx := context.Background()
+	s, _ := mk(t)
+
+	// Absent → the VOLUME sentinel, not the sandbox one. A 404 naming the wrong
+	// object sends the caller looking in the wrong place (§6.2's reasoning about the
+	// Volume verdicts, applied to not-found).
+	if _, err := s.GetVolume(ctx, "nope"); err != store.ErrVolumeNotFound {
+		t.Fatalf("GetVolume(absent) = %v; want ErrVolumeNotFound", err)
+	}
+
+	v := model.Volume{ID: "vol_a", Backend: "local_btrfs", CapByte: 32 << 20, CreatedAt: time.Now()}
+	if err := s.CreateVolume(ctx, v); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	got, err := s.GetVolume(ctx, "vol_a")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.ID != v.ID || got.Backend != v.Backend || got.CapByte != v.CapByte {
+		t.Errorf("round trip = %+v, want ID/Backend/CapByte of %+v", got, v)
+	}
+
+	// Duplicate → ErrConflict, matching every other insert in this interface.
+	if err := s.CreateVolume(ctx, v); err != store.ErrConflict {
+		t.Errorf("duplicate create = %v; want ErrConflict", err)
+	}
+
+	// List is what the §3.4 admission gate sums Σ(volume caps) from, so it must
+	// return the cap, not just the identity.
+	list, err := s.ListVolumes(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(list) != 1 || list[0].CapByte != v.CapByte {
+		t.Errorf("list = %+v; want one row carrying CapByte %d — the admission gate sums this", list, v.CapByte)
+	}
+
+	if err := s.DeleteVolume(ctx, "vol_a"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if _, err := s.GetVolume(ctx, "vol_a"); err != store.ErrVolumeNotFound {
+		t.Errorf("get after delete = %v; want ErrVolumeNotFound", err)
+	}
+}
+
+// testVolumeCapacity: the cap write point, and the thing about it that is NOT
+// symmetric with UpdateBinding — it takes no lifecycle-state precondition.
+//
+// The asymmetry is mechanical rather than a relaxation (§5.C / §6.1 PATCH): a
+// sandbox cap re-materializes at the next placement, so editing one on a running
+// sandbox would leave record and live unit disagreeing — while a VOLUME HAS NO
+// PLACEMENT, so deferring to "next placement" would mean NEVER for an unmounted
+// volume. There is nothing to defer, so there is no state to be in the wrong one of.
+func testVolumeCapacity(t *testing.T, mk Factory) {
+	ctx := context.Background()
+	s, _ := mk(t)
+	if err := s.CreateVolume(ctx, model.Volume{ID: "vol_c", Backend: "local_btrfs", CreatedAt: time.Now()}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := s.SetVolumeCapacity(ctx, "vol_c", 64<<20); err != nil {
+		t.Fatalf("set capacity: %v", err)
+	}
+	got, err := s.GetVolume(ctx, "vol_c")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.CapByte != 64<<20 {
+		t.Errorf("cap after write = %d, want %d", got.CapByte, 64<<20)
+	}
+	// 0 is a MEANINGFUL value here (uncapped), not "unset": the record is the
+	// authority for the cap, so writing 0 must actually record 0 (§3.4 / volume.md
+	// D7.3 — the backend cannot be consulted to disambiguate, since it maps "no cap"
+	// and 0 onto each other).
+	if err := s.SetVolumeCapacity(ctx, "vol_c", 0); err != nil {
+		t.Fatalf("clear capacity: %v", err)
+	}
+	if got, _ = s.GetVolume(ctx, "vol_c"); got.CapByte != 0 {
+		t.Errorf("cap after clearing = %d, want 0", got.CapByte)
+	}
+	// Absent row → the volume sentinel.
+	if err := s.SetVolumeCapacity(ctx, "nope", 1); err != store.ErrVolumeNotFound {
+		t.Errorf("SetVolumeCapacity(absent) = %v; want ErrVolumeNotFound", err)
+	}
+}
+
+// testVolumeDeleteReportsNotFound pins §6.2's "idempotent delete must not swallow
+// the verdicts". Today the only verdict on this path is not-found; once the
+// reference-protection constraints land, they arrive HERE, and a backend that has
+// already learned to fold not-found into success would fold those too — making a
+// delete that a guard REFUSED indistinguishable from one that succeeded.
+//
+// That is not hypothetical: an external implementation returns
+// `200 {"deleted": true}` for a volume that does not exist and collapses three
+// distinct not-founds into success.
+func testVolumeDeleteNotFound(t *testing.T, mk Factory) {
+	ctx := context.Background()
+	s, _ := mk(t)
+	if err := s.DeleteVolume(ctx, "never"); err != store.ErrVolumeNotFound {
+		t.Fatalf("DeleteVolume(absent) = %v; want ErrVolumeNotFound — a delete that folds this into success cannot report a REFUSED delete either (§6.2)", err)
+	}
+	if err := s.CreateVolume(ctx, model.Volume{ID: "vol_d", Backend: "local_btrfs", CreatedAt: time.Now()}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := s.DeleteVolume(ctx, "vol_d"); err != nil {
+		t.Fatalf("first delete: %v", err)
+	}
+	if err := s.DeleteVolume(ctx, "vol_d"); err != store.ErrVolumeNotFound {
+		t.Errorf("second delete = %v; want ErrVolumeNotFound", err)
+	}
+}
+
+// testVolumeDurability: a volume outlives a process restart, and so does its cap.
+// This is the record-layer half of "a volume's lifecycle is decoupled from any
+// sandbox" (§5.C) — the byte-layer half is the backend's, asserted in volumetest.
+func testVolumeDurability(t *testing.T, mk Factory) {
+	ctx := context.Background()
+	s, reopen := mk(t)
+	if reopen == nil {
+		t.Skip("backend is not durable across reopen")
+	}
+	if err := s.CreateVolume(ctx, model.Volume{
+		ID: "vol_p", Backend: "local_btrfs", CapByte: 16 << 20, CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	s2 := reopen(t)
+	got, err := s2.GetVolume(ctx, "vol_p")
+	if err != nil {
+		t.Fatalf("volume lost across reopen: %v", err)
+	}
+	if got.CapByte != 16<<20 {
+		t.Errorf("cap lost across reopen: %d, want %d — the record is the cap's only authority (volume.md D7.3)", got.CapByte, 16<<20)
+	}
+	if got.Backend != "local_btrfs" {
+		t.Errorf("backend lost across reopen: %q — a later operation must route to the SAME backend that allocated the bytes", got.Backend)
 	}
 }
 

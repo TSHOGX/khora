@@ -61,6 +61,62 @@ type Template struct {
 	CreatedAt time.Time
 }
 
+// VolumeID is the opaque identity of a Volume (§5.C): decoupled, ID-addressed
+// storage whose lifecycle is independent of any sandbox — created before one,
+// surviving after one, existing while nothing has it mounted.
+//
+// Like every other ID in the engine it is opaque and does NOT encode placement or
+// a host path: the backend resolves the storage internally and only an unreadable
+// source handle surfaces from it (§3.1.1 addressed by ID internally too / §6.2 no
+// host paths on the wire).
+type VolumeID string
+
+// Volume is a first-class persistent object (§4.3), and its field list is
+// SHORTER than it looks like it should be — each absence is a decision:
+//
+//   - No State field. Existence IS the state (§4.3), exactly as with Template:
+//     the row existing = ready, deleting it = destroyed, no intermediate. That is
+//     what FORCES bytes-first materialization (§5.C): with no not-ready escape
+//     hatch the backend storage MUST be fully allocated before this row is
+//     inserted, or a crash leaves a row naming storage that does not exist.
+//   - No refcount field. "Is it deletable" is DERIVED (§4.3): no mount row
+//     references it, no child volume names it as parent.
+//   - NO AccessMode. It is a property of the MOUNT ROW, not of the volume, and
+//     the reason is cardinality rather than taste: one volume can be shared-rw to
+//     sandbox A and shared-ro to sandbox C AT THE SAME TIME (measured), so a
+//     per-volume field could not carry it honestly (§5.C).
+//   - No lease/owner field. An exclusive lease is not an object — it IS the
+//     existence of an `exclusive` mount row (§5.C / volume.md D3/D4).
+//
+// The cap deliberately does NOT live in model.Limits: the three Limits axes are
+// per-sandbox Binding materialized at each placement, while a volume cap is a
+// property of the volume recorded here — a volume has no placement of its own
+// (§3.4 / §5.C). It nonetheless counts in the FIRST term of the §3.4 node
+// inequality, alongside sandbox caps: both are "upper bounds the engine has
+// declared", so no third term is added.
+type Volume struct {
+	// ID is the opaque identity ("vol_<token>").
+	ID VolumeID
+
+	// Backend names which registered volume.Backend materializes this volume
+	// (§5.C two arms). Recorded rather than inferred: the mediator must be able to
+	// route a later operation to the SAME backend that allocated the bytes.
+	Backend string
+
+	// CapByte is the per-volume capacity cap in bytes, 0 = uncapped (§5.C / §3.4).
+	//
+	// THIS RECORD IS THE AUTHORITY, always. The backend's read-back cannot serve:
+	// the local substrate maps "no cap" and 0 onto each other in both directions, so
+	// "never capped" and "deliberately uncapped" are byte-for-byte identical when
+	// read from storage (volume.md D7.3). Any design that plans to reconcile the cap
+	// against the backend afterwards is unimplementable on that substrate — which is
+	// why the cap must be written in the same backend operation that creates the
+	// bytes.
+	CapByte int64
+
+	CreatedAt time.Time
+}
+
 // Lifecycle is the §4.1 state machine. Exactly four states — no `failed`
 // intermediate state (§4.4: the absence is a conclusion of the model, not an
 // omission), no independent generation counter (§3.3 uses Placement / §4.3 uses

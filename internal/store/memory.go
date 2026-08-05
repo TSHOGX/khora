@@ -26,6 +26,9 @@ type Memory struct {
 	// backends). Existence-is-state: presence in this map = the Template's ready
 	// state (§4.3), no separate state field.
 	tmpl map[model.TemplateID]model.Template
+	// vol holds Volume rows (§5.C first-class object, §4.3). Existence-is-state:
+	// presence in this map IS the volume's ready state, with no separate field.
+	vol map[model.VolumeID]model.Volume
 	// outbox is append-only, ordered — the publisher reads oldest-first. Like the
 	// SQLite backend, published rows are marked, never removed (same unbounded-
 	// growth known limitation; open-decisions §2, "§4.4-C 事件流可重放窗口大小").
@@ -51,6 +54,7 @@ func NewMemory() *Memory {
 	return &Memory{
 		rec:  make(map[model.SandboxID]model.Sandbox),
 		tmpl: make(map[model.TemplateID]model.Template),
+		vol:  make(map[model.VolumeID]model.Volume),
 	}
 }
 
@@ -141,6 +145,63 @@ func (m *Memory) DeleteTemplate(_ context.Context, id model.TemplateID) error {
 		}
 	}
 	delete(m.tmpl, id)
+	return nil
+}
+
+// --- Volume CRUD (§5.C) ------------------------------------------------------
+//
+// Memory delivers the SAME contract SQLite does, under the one mutex that already
+// serializes everything else here (§1.3 seam: one set of assertions, two backends).
+
+func (m *Memory) CreateVolume(_ context.Context, v model.Volume) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.vol[v.ID]; ok {
+		return ErrConflict
+	}
+	m.vol[v.ID] = v
+	return nil
+}
+
+func (m *Memory) GetVolume(_ context.Context, id model.VolumeID) (model.Volume, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	v, ok := m.vol[id]
+	if !ok {
+		return model.Volume{}, ErrVolumeNotFound
+	}
+	return v, nil
+}
+
+func (m *Memory) ListVolumes(_ context.Context) ([]model.Volume, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]model.Volume, 0, len(m.vol))
+	for _, v := range m.vol {
+		out = append(out, v)
+	}
+	return out, nil
+}
+
+func (m *Memory) SetVolumeCapacity(_ context.Context, id model.VolumeID, capByte int64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	v, ok := m.vol[id]
+	if !ok {
+		return ErrVolumeNotFound
+	}
+	v.CapByte = capByte
+	m.vol[id] = v
+	return nil
+}
+
+func (m *Memory) DeleteVolume(_ context.Context, id model.VolumeID) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.vol[id]; !ok {
+		return ErrVolumeNotFound // reported, never folded into success (§6.2)
+	}
+	delete(m.vol, id)
 	return nil
 }
 

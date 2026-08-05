@@ -46,6 +46,17 @@ var ErrTemplateNotFound = errors.New("store: template not found")
 // 409 template in use (§6.1), never a raw 500.
 var ErrInUse = errors.New("store: template in use")
 
+// ErrVolumeNotFound is returned when a Volume record does not exist (§5.C). It is
+// its OWN sentinel rather than a reuse of ErrNotFound ("sandbox not found") for the
+// reason §6.2 states about the Volume verdicts generally: a 404 whose text names
+// the wrong object sends the caller looking in the wrong place.
+//
+// The reference-protection verdicts (a volume held by a live mount row, a source
+// held by a live descendant) are deliberately NOT here yet: neither reference path
+// exists in the schema at this point, so a sentinel for them would be a verdict
+// nothing can produce (§1.3). They land with the constraints that can trigger them.
+var ErrVolumeNotFound = errors.New("store: volume not found")
+
 // Event is one outbox row: a §4.1 lifecycle transition to publish to the event
 // stream (created / paused / resumed / destroyed …). It is appended in the SAME
 // atomic commit as the state change that produced it (§4.4-C) — a committed
@@ -291,4 +302,66 @@ type Store interface {
 	// from this row delete (§4.4 / §5.B orphan sweep) — this only removes the
 	// row; the now-orphaned bytes are reclaimed by the sweep, not here.
 	DeleteTemplate(ctx context.Context, id model.TemplateID) error
+
+	// --- Volume CRUD (§5.C / §4.3 uniform object model) -----------------------
+	//
+	// Volume is a first-class persistent object with existence-is-state and a
+	// DERIVED refcount, exactly like Template (§4.3) — no state column, no
+	// materialized count. See model.Volume for what is deliberately absent from the
+	// row (access mode, lease, owner) and why.
+	//
+	// NONE of these methods take an *Event, and that is a semantic statement rather
+	// than an omission: a Volume is not a sandbox, so its CRUD is not a §4.1
+	// lifecycle transition and publishes nothing — the same rule Template CRUD
+	// follows (§4.3 / §6.1 PATCH "does not emit an event").
+
+	// CreateVolume inserts a Volume row. Returns ErrConflict on a duplicate ID.
+	//
+	// BYTES-FIRST (§5.C / §4.3): the caller has ALREADY allocated the backend storage
+	// and written its cap before this insert. Existence-is-state offers no not-ready
+	// state to park a half-built volume in, so a crash before this call leaves
+	// ORPHAN BYTES (which the sweep reclaims) rather than a row naming storage that
+	// does not exist.
+	CreateVolume(ctx context.Context, v model.Volume) error
+
+	// GetVolume reads a Volume row; ErrVolumeNotFound if absent.
+	GetVolume(ctx context.Context, id model.VolumeID) (model.Volume, error)
+
+	// ListVolumes returns all Volume rows. The §3.4 admission gate reads this to sum
+	// Σ(volume caps) into the FIRST term of the node inequality — a volume cap is a
+	// declared upper bound like a sandbox cap, so it is a like term rather than a new
+	// one.
+	ListVolumes(ctx context.Context) ([]model.Volume, error)
+
+	// SetVolumeCapacity rewrites one volume's cap — the §6.1 PATCH write point, and
+	// the only sibling of the create-time write.
+	//
+	// UNLIKE UpdateBinding IT IS NOT CONDITIONAL ON ANY LIFECYCLE STATE, and the
+	// reason is mechanical, not a relaxation: a sandbox cap is re-materialized at the
+	// next placement, so editing one on a `running` sandbox would leave the record
+	// and the live unit disagreeing — whereas a VOLUME HAS NO PLACEMENT OF ITS OWN,
+	// so "re-materialize next placement" would mean NEVER for an unmounted volume.
+	// The cap therefore lands on the storage directly, there is nothing to defer, and
+	// so there is no "pause it first" conflict to express (§5.C / §6.1 PATCH).
+	//
+	// The STRICT-inequality refusal ("lower below current usage") is NOT enforced
+	// here: it needs the backend's usage reading, which the store cannot and must not
+	// obtain (§4: the store holds records, the mediator asks subsystems). The mediator
+	// evaluates it before calling this.
+	//
+	// ErrVolumeNotFound if the row is absent.
+	SetVolumeCapacity(ctx context.Context, id model.VolumeID, capByte int64) error
+
+	// DeleteVolume removes a Volume row. A missing row → ErrVolumeNotFound.
+	//
+	// IDEMPOTENT DELETE MUST NOT SWALLOW THAT (§6.2): the not-found verdict is
+	// reported rather than folded into success. An external implementation folded
+	// three distinct not-founds into `200 {"deleted": true}`, which makes a delete
+	// that a guard REFUSED indistinguishable from one that succeeded — and the
+	// reference-protection refusals that land on this same path are the whole
+	// external signal those guards have.
+	//
+	// Byte reclamation is DECOUPLED from this row delete (§4.4 / §5.C orphan sweep):
+	// this removes only the row, and the now-orphaned bytes are the sweep's job.
+	DeleteVolume(ctx context.Context, id model.VolumeID) error
 }

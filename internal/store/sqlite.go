@@ -109,6 +109,27 @@ CREATE TABLE IF NOT EXISTS outbox (
 	published_at INTEGER                 -- NULL = unpublished (the query predicate)
 );
 CREATE INDEX IF NOT EXISTS outbox_unpublished ON outbox(seq) WHERE published_at IS NULL;
+-- volumes: first-class persistent object with a lifecycle DECOUPLED from every
+-- sandbox (§5.C / §4.3). Existence-is-state (no state column), derived refcount
+-- (no count column) — the same shape as templates.
+--
+-- What is deliberately NOT a column here, because each absence is a decision
+-- (see model.Volume): no access mode (it is a property of the MOUNT ROW — one
+-- volume can be shared-rw to one sandbox and shared-ro to another at the same
+-- time, so a per-volume column could not carry it honestly), no lease or owner
+-- (an exclusive lease IS the existence of an 'exclusive' mount row, not an
+-- object), and no state.
+CREATE TABLE IF NOT EXISTS volumes (
+	id         TEXT PRIMARY KEY,           -- opaque "vol_<token>"
+	backend    TEXT NOT NULL,              -- which registered volume.Backend holds the bytes
+	-- per-volume capacity cap, 0 = uncapped (§5.C / §3.4). THIS COLUMN IS THE
+	-- AUTHORITY: the substrate maps "no cap" and 0 onto each other in both
+	-- directions, so a read-back cannot distinguish "never capped" from
+	-- "deliberately uncapped" and no after-the-fact reconciliation against storage
+	-- is possible (volume.md D7.3).
+	cap_byte   INTEGER NOT NULL DEFAULT 0,
+	created_at INTEGER NOT NULL             -- unix nanos
+);
 `
 
 // OpenSQLite opens (creating if absent) the persistent store at path and ensures
@@ -512,6 +533,102 @@ func (s *SQLite) DeleteTemplate(ctx context.Context, id model.TemplateID) error 
 		}
 		return nil
 	})
+}
+
+// --- Volume CRUD (§5.C) ------------------------------------------------------
+
+func (s *SQLite) CreateVolume(ctx context.Context, v model.Volume) error {
+	return s.tx(ctx, func(t *sql.Tx) error {
+		var exists int
+		if err := t.QueryRow(`SELECT 1 FROM volumes WHERE id=?`, string(v.ID)).Scan(&exists); err == nil {
+			return ErrConflict
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		_, err := t.Exec(
+			`INSERT INTO volumes(id, backend, cap_byte, created_at) VALUES(?,?,?,?)`,
+			string(v.ID), v.Backend, v.CapByte, v.CreatedAt.UnixNano(),
+		)
+		return err
+	})
+}
+
+func (s *SQLite) GetVolume(ctx context.Context, id model.VolumeID) (model.Volume, error) {
+	return scanVolume(s.db.QueryRowContext(ctx,
+		`SELECT id, backend, cap_byte, created_at FROM volumes WHERE id=?`, string(id)))
+}
+
+func (s *SQLite) ListVolumes(ctx context.Context) ([]model.Volume, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, backend, cap_byte, created_at FROM volumes ORDER BY created_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]model.Volume, 0)
+	for rows.Next() {
+		v, err := scanVolume(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLite) SetVolumeCapacity(ctx context.Context, id model.VolumeID, capByte int64) error {
+	return s.tx(ctx, func(t *sql.Tx) error {
+		res, err := t.Exec(`UPDATE volumes SET cap_byte=? WHERE id=?`, capByte, string(id))
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return ErrVolumeNotFound
+		}
+		return nil
+	})
+}
+
+func (s *SQLite) DeleteVolume(ctx context.Context, id model.VolumeID) error {
+	return s.tx(ctx, func(t *sql.Tx) error {
+		res, err := t.Exec(`DELETE FROM volumes WHERE id=?`, string(id))
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			// Reported, never folded into success (§6.2): once the reference-protection
+			// constraints land on this same path, folding here would make a REFUSED
+			// delete indistinguishable from a successful one.
+			return ErrVolumeNotFound
+		}
+		return nil
+	})
+}
+
+func scanVolume(r rowScanner) (model.Volume, error) {
+	var v model.Volume
+	var id, backend string
+	var capByte, created int64
+	err := r.Scan(&id, &backend, &capByte, &created)
+	if errors.Is(err, sql.ErrNoRows) {
+		return model.Volume{}, ErrVolumeNotFound
+	}
+	if err != nil {
+		return model.Volume{}, err
+	}
+	v.ID = model.VolumeID(id)
+	v.Backend = backend
+	v.CapByte = capByte
+	v.CreatedAt = time.Unix(0, created)
+	return v, nil
 }
 
 func scanTemplate(r rowScanner) (model.Template, error) {
