@@ -109,10 +109,10 @@ slims to boundary + open agenda — nothing lives in full in both places.
 ## Execution & verification
 
 - Runs on **Linux + gVisor/runsc + kernel overlayfs + netns + cgroup v2 + btrfs
-  (`squota` mode, plus `btrfs-progs`)**. Dev/test
-  environment = OrbStack machine `sbx`. Engine code + **all** overlay scratch live on
-  **native fs**, never the virtiofs shared mount — reasoning and the measured machine
-  facts in `docs/decisions/ADR-0002`.
+  (`squota` mode, plus `btrfs-progs`)**; dev/test environment = OrbStack machine
+  `sbx`, with engine code + **all** overlay scratch on **native fs**, never the
+  virtiofs shared mount. Why each is a hard requirement, and the measured machine
+  facts: `docs/decisions/ADR-0002`.
 - **Correctness lives in concurrency/failure invariants** (§4.4 the three, §4.3
   health classification, §2.4 egress fail-closed), **not at compile time**. A green
   build proves nothing about these — write **fault-injection / e2e tests at the

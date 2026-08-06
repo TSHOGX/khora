@@ -10,8 +10,8 @@
 
 ## Delivered
 
-**M1–M7 shipped**, plans expired. What they built is the converged architecture —
-read `docs/spec/`, not a plan. Acceptance lives in the substrate tests
+**M1–M7 shipped.** What they built is the converged architecture — read
+`docs/spec/`, not a plan. Acceptance lives in the substrate tests
 (`test/*_substrate_test.go`, `internal/*/*_substrate_test.go`), each assertion
 stating inline the property it proves; invocations in [`README.md`](../../README.md).
 
@@ -35,11 +35,11 @@ stating inline the property it proves; invocations in [`README.md`](../../README
 Neither plan file exists yet — the name is the one the plan will take.
 
 **M8 cannot be written yet.** Two design decisions are open (how the L0 floor is
-earned, where the placement-derived deny-set lives) and four measured facts must be
-inherited rather than rediscovered. Both are registered in
-[`open-decisions.md`](../spec/open-decisions.md) — its §2 for the decisions, §4 for
-the enforcement gap. Read that first: today's cross-sandbox isolation rests on a
-missing route the guest is authorized to add, not on enforcement.
+earned, where the placement-derived deny-set lives), and four measured facts must be
+inherited rather than rediscovered. Both live in
+[`open-decisions.md`](../spec/open-decisions.md) — §2 for the decisions, §4 for the
+enforcement gap and the facts. Read it first: today's cross-sandbox isolation rests
+on a missing route the guest is authorized to add, not on enforcement.
 
 **Why M8 lands last.** It is the security-critical face, so it goes on top of a
 settled lifecycle + storage + transport foundation rather than beside one.

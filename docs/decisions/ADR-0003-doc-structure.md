@@ -38,10 +38,10 @@ Three sibling doc trees under `docs/`, each defined by a different lifecycle:
   reference research; raw external evidence is not a repo dependency. When a
   rationale is needed, re-derive it from first principles into a living doc
   (spec / deep-dive / ADR), never a dangling link out.
-- **Plans are named for the capability, not the technique.** A technique (e.g.
-  "walking skeleton") is a one-time phase that expires; it survives as a note in
-  the plan body while that plan lives, never as a document name — and once the plan
-  expires, only the capability survives, as the ladder entry.
+- **Why capability, not technique, names a plan.** A technique (e.g. "walking
+  skeleton") is a one-time phase that expires; it survives as a note in the plan
+  body while that plan lives, never as a document name. Once the plan expires,
+  only the capability survives, as the ladder entry.
 - **Deep-dive vs ADR don't overlap.** Deep-dives answer *why this **design***;
   ADRs answer *why this **tool / environment / process***. ADRs record facts not
   derivable from the code (language choice, execution environment).

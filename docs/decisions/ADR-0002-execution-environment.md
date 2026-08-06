@@ -2,14 +2,14 @@
 
 - **Status:** accepted
 - **Date:** 2026-07-17
-- **Consumers:** anyone building/testing the engine; the substrate validation matrix below.
+- **Consumers:** anyone building/testing the engine.
 
 ## Context
 
 The engine's substrate is Linux-only (gVisor/runsc, kernel overlayfs, netns,
-cgroup v2, root). Development happens from a macOS host. We need a real Linux
-target where the build→run→test loop closes, otherwise milestone acceptance
-(which must exercise runsc/overlay/netns on real hardware) cannot run.
+cgroup v2, root), while development happens from a macOS host. Milestone
+acceptance must exercise that substrate for real, so we need a Linux target where
+the build→run→test loop closes.
 
 ## Decision
 
@@ -21,7 +21,7 @@ Claude Code runs **inside** `sbx` for development, pointed at the user's own
 Anthropic-compatible endpoint (not the macOS host's company-managed proxy, which
 the machine can't reach).
 
-## Consequences / operating rules
+## Consequences
 
 - **Native fs only for engine + overlay scratch.** Engine repo lives at
   `/home/hsw/engine` on the machine's native fs. The macOS shared mount

@@ -26,7 +26,16 @@ deployment target: single binary + one local store, no heavy external dependency
   sandboxd already ships under — one toolchain story across the repo.
 - **Outbox is a first-class table**, queried by `published_at IS NULL`; the
   event-stream evolution (replay window, schema) has natural room to grow.
-- **Single-file embedded**, aligning with §1.1 (local store, no external service).
+- **Single-file embedded**, which is what the §1.1 deployment target asks for.
+
+## Consequences
+
+The seam is the whole point: **no caller may branch on backend capability** (§4.4-C).
+The one publish algorithm is written once against the interface; swapping SQLite for
+bbolt (or anything else) must never edit that algorithm. Per ADR-0001's consequence,
+the atomic-commit behavior is proven behaviorally, not by the type system: the shared
+store contract suite that BOTH backends run (`internal/store/storetest`), plus
+crash-reconciliation in `test/reconcile_substrate_test.go`.
 
 ## Rejected / deferred
 
@@ -37,12 +46,3 @@ deployment target: single binary + one local store, no heavy external dependency
   outbox and the atomic commit without contortion, and its query surface fits the
   event stream better. Not permanently excluded: the seam makes it a
   register-an-implementation swap if operational simplicity ever outweighs.
-
-## Caveat carried forward
-
-The seam is the whole point: **no caller may branch on backend capability** (§4.4-C).
-The one publish algorithm is written once against the interface; swapping SQLite for
-bbolt (or anything else) must never edit that algorithm. And per ADR-0001's caveat,
-the atomic-commit behavior is proven by the shared store contract suite that BOTH
-backends run (`internal/store/storetest`), and crash-reconciliation by
-`test/reconcile_substrate_test.go` — not by the type system.

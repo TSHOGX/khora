@@ -37,10 +37,9 @@ test/                  L2–L4 substrate acceptance + preflight fixtures
 ## Build & test
 
 Runs on a Linux host with gVisor/runsc, kernel overlayfs, netns, cgroup v2, and
-btrfs in `squota` mode + `btrfs-progs` (the §3.4 disk axis is materialized on it,
-and `internal/btrfs` shells out to `btrfs`/`findmnt`) — dev environment: OrbStack
-machine `sbx`. Engine code + all overlay scratch must live on native fs, not a
-virtiofs shared mount — why, and the measured machine facts, in
+btrfs in `squota` mode + `btrfs-progs` — dev environment: OrbStack machine `sbx`.
+Engine code + all overlay scratch must live on native fs, not a virtiofs shared
+mount. Why each of those is a hard requirement, and the measured machine facts:
 [`docs/decisions/ADR-0002`](docs/decisions/ADR-0002-execution-environment.md).
 
 ```sh
