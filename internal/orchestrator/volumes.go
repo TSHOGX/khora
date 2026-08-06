@@ -352,6 +352,14 @@ func volumeStatus(err error) (int, bool) {
 		// RETRYABLE — pausing the holder makes the same request succeed, which is the
 		// documented remedy (and a `paused` sandbox is deliberately NOT a live writer).
 		return http.StatusConflict, true
+	case errors.Is(err, lifecycle.ErrVolumeDirectWriteInFlight):
+		// The SAME §6.2 category as ErrVolumeLiveWriter, refused from the other side: a
+		// cold start would mount read-write a volume with a direct write in flight
+		// (§5.C's symmetric write regime). 409 for the same reason — it is retryable,
+		// and the remedy is waiting for that import to finish. Without this arm the
+		// refusal reaches the default arm as a 500, reporting a correctly-refused verb
+		// as an engine fault.
+		return http.StatusConflict, true
 	case errors.Is(err, lifecycle.ErrVolumeCapUnsupported):
 		// 400: the backend genuinely cannot enforce a cap (§6.2 capability query).
 		// Refused rather than silently run uncapped, which would leave every §2.3

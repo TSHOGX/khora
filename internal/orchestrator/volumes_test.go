@@ -210,7 +210,7 @@ func TestVolumeCapRefusalsAre400(t *testing.T) {
 	})
 }
 
-// TestVolumeImportExportRoundTrip is the endpoint half of M7 acceptance 21: bytes in
+// TestVolumeImportExportRoundTrip is the endpoint half of import → export: bytes in
 // and byte-for-byte back out, on a server that has NEVER had a sandbox.
 //
 // That is what makes "the volume's lifecycle is decoupled from any sandbox" true in
@@ -308,7 +308,7 @@ func TestVolumeImportExportRoundTrip(t *testing.T) {
 	}
 }
 
-// TestVolumeImportIsRootConfinedThroughTheEndpoint is M7 acceptance 22 reached
+// TestVolumeImportIsRootConfinedThroughTheEndpoint pins root confinement reached
 // through the WIRE rather than only at the accessor: a traversal-shaped `path`
 // lands inside the volume and the host file is untouched.
 //
@@ -616,6 +616,41 @@ func TestErrorBodiesCarryTheVerdictWithoutTheHostPath(t *testing.T) {
 	})
 }
 
+// TestWriteRegimeBothSidesMapTo409 pins the SYMMETRY of §5.C's write regime at the
+// status-code edge: both directions of the one invariant must reach the caller as the
+// same retryable verdict.
+//
+// The two sentinels are deliberately distinct because the remedies differ (pause the
+// holder vs wait for the import), but a distinct sentinel with no arm in the mapping
+// falls through to the default 500 — reporting a correctly-refused cold start as an
+// engine fault, and telling the caller nothing about the remedy. Asserted on the
+// mapping directly because that is where the defect lives: the refusal logic one layer
+// down is covered in internal/lifecycle, and driving the cold-start side end-to-end
+// needs a real in-flight upload racing a resume.
+func TestWriteRegimeBothSidesMapTo409(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"volume side: a live rw mount holds it", lifecycle.ErrVolumeLiveWriter},
+		{"sandbox side: a direct write is in flight", lifecycle.ErrVolumeDirectWriteInFlight},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := statusCodeFor(tc.err); got != http.StatusConflict {
+				t.Fatalf("statusCodeFor(%v) = %d; want 409 — both sides of the write regime are "+
+					"RETRYABLE state conflicts (§6.2), and 500 would report a correct refusal as an engine fault",
+					tc.err, got)
+			}
+		})
+	}
+	// And they must stay TELLABLE APART, since the remedy differs. Same status, different
+	// prose: folding them into one sentinel would hand the caller the wrong remedy in one
+	// of the two directions.
+	if lifecycle.ErrVolumeLiveWriter.Error() == lifecycle.ErrVolumeDirectWriteInFlight.Error() {
+		t.Error("the two write-regime sentinels carry identical text — the remedies differ (pause the holder vs wait for the import), so the caller cannot be left to guess")
+	}
+}
+
 // TestSanitizerKeepsEverySentinelDistinguishable is the other side of the same fence,
 // asserted on the SENTINEL TEXTS directly rather than through a fixture per verdict.
 //
@@ -638,6 +673,7 @@ func TestSanitizerKeepsEverySentinelDistinguishable(t *testing.T) {
 		lifecycle.ErrVolumeCapBelowUsage,
 		lifecycle.ErrVolumeCapUnsupported,
 		lifecycle.ErrVolumeLiveWriter,
+		lifecycle.ErrVolumeDirectWriteInFlight,
 		lifecycle.ErrCapRequired,
 		lifecycle.ErrInsufficientCapacity,
 		lifecycle.ErrResourceTerminated,

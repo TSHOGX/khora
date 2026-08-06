@@ -5,7 +5,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"strconv"
 
 	"connectrpc.com/connect"
 
@@ -32,6 +31,13 @@ import (
 // 507 from the guest. This exists so a runaway or malformed request cannot stream
 // unbounded bytes through the engine before the quota notices.
 const maxUploadBytes = 8 << 30 // 8 GiB
+
+// uploadResp is the §6.1 upload response. `bytes_written` is typed to match the
+// volume import response's field of the same name, so one name means one wire type.
+type uploadResp struct {
+	Path         string `json:"path"`
+	BytesWritten int64  `json:"bytes_written"`
+}
 
 // fileParams pulls the guest path off the query string. Guest-absolute paths, no
 // confinement — same contract as the fs RPCs (see cmd/sandboxd/fs.go for why).
@@ -142,8 +148,9 @@ func (e *Engine) handleFileUpload(w http.ResponseWriter, r *http.Request, id mod
 		writeErr(w, bypassCode(err), fmt.Errorf("upload %s: %w", path, err), path)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{
-		"path":          path,
-		"bytes_written": strconv.FormatInt(n, 10),
-	})
+	// bytes_written is a NUMBER, matching the volume import response's field of the
+	// same name (§6.1). One field name must not carry two wire types across two
+	// endpoints — a client that parses one and not the other is a defect we would be
+	// authoring into the contract.
+	writeJSON(w, http.StatusOK, uploadResp{Path: path, BytesWritten: n})
 }
