@@ -30,8 +30,7 @@ Three sibling doc trees under `docs/`, each defined by a different lifecycle:
   does the edit alter *what was decided or why*? If yes → new ADR. If it only
   fixes a stale fact around an unchanged decision → correct in place.
 
-`CLAUDE.md` lives at the engine root (Claude Code auto-loads it there) and
-encodes the resulting working rules.
+`CLAUDE.md` lives at the engine root because Claude Code auto-loads it there.
 
 ## Rationale
 

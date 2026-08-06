@@ -26,18 +26,22 @@ internal/transport/    §5.E: host-side process client + the 7-RPC fs surface + 
 internal/btrfs/        leaf package: subvolume + squota primitives (no engine model)
 internal/allocbytes/   leaf package: "bytes actually allocated" for a tree — the one
                        measurement §5.B and §5.C both need for §3.4's second term
-internal/guestport/    leaf constant: the guest netns TCP port, shared by §5.A/§5.E
-internal/arch/         structural guards: subsystems must not import each other
+internal/guestport/    leaf constants two subsystems must agree on: the guest netns TCP
+                       port (§5.A/§5.E) + the upload-temp prefix (§5.E/§5.B)
+internal/arch/         structural guards: subsystems must not import each other, nor
+                       read the control plane
 proto/                 transport wire schema; generated code under internal/transport/gen
-test/                  L2/L3 substrate acceptance + preflight fixtures
+test/                  L2–L4 substrate acceptance + preflight fixtures
 ```
 
 ## Build & test
 
-Runs on a Linux host with gVisor/runsc, kernel overlayfs, netns, cgroup v2
-(dev environment: OrbStack machine `sbx`). Engine code + all overlay scratch
-must live on native fs, not a virtiofs shared mount — why, and the measured
-machine facts, in [`docs/decisions/ADR-0002`](docs/decisions/ADR-0002-execution-environment.md).
+Runs on a Linux host with gVisor/runsc, kernel overlayfs, netns, cgroup v2, and
+btrfs in `squota` mode + `btrfs-progs` (the §3.4 disk axis is materialized on it,
+and `internal/btrfs` shells out to `btrfs`/`findmnt`) — dev environment: OrbStack
+machine `sbx`. Engine code + all overlay scratch must live on native fs, not a
+virtiofs shared mount — why, and the measured machine facts, in
+[`docs/decisions/ADR-0002`](docs/decisions/ADR-0002-execution-environment.md).
 
 ```sh
 go build ./... && go vet ./...

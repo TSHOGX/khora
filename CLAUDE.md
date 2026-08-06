@@ -75,7 +75,8 @@ slims to boundary + open agenda — nothing lives in full in both places.
   `arch` (structural guards, no production code).
   (`Rootfs` = the §5.B subsystem; `fs` = the §5.E wire service; `rootfs provider` =
   its §5.B storage seam; `volume backend` = §5.C's *separate* seam — four distinct
-  things, don't merge, and never say "FS provider". Table in §1.1.)
+  things, don't merge, and never say "FS provider". Spelled out in §1.1's
+  terminology block — the §1.1 *table* is the vocabulary boundary, a different thing.)
 - **Seams are interfaces** (§1.3 Behavior seam): `store.Store`,
   `runtime.Provider`, `rootfs.Provider`, `volume.Backend`. Swapping a backend =
   registering an implementation, not editing callers.
@@ -89,7 +90,11 @@ slims to boundary + open agenda — nothing lives in full in both places.
   provider cannot produce those; leaking them binds the abstraction to
   host-local. **Also enforced structurally:** `internal/runtime/seam_test.go` scans
   the interface's params, results *and* struct fields, so a host primitive smuggled
-  in on a field fails a test rather than a review.
+  in on a field fails a test rather than a review. `internal/volume/seam_test.go`
+  applies the same guard to `volume.Backend` — it inherits the §5.A token list
+  VERBATIM plus §5.C's storage spellings, so don't trim the copy. Same pattern at
+  the outer edge: `internal/orchestrator/edge_test.go` reads the AST to keep raw
+  error text (which interpolates host paths) out of §6.2 response bodies.
 - **Engine vocabulary boundary (§1.1).** Banned as engine-internal entity names
   (types / packages / fields / API endpoints): `generation`, `principal`,
   `tenant`, `owner` (ownership sense), `session`, `turn`, `agent`. They keep
@@ -103,7 +108,8 @@ slims to boundary + open agenda — nothing lives in full in both places.
 
 ## Execution & verification
 
-- Runs on **Linux + gVisor/runsc + kernel overlayfs + netns + cgroup v2**. Dev/test
+- Runs on **Linux + gVisor/runsc + kernel overlayfs + netns + cgroup v2 + btrfs
+  (`squota` mode, plus `btrfs-progs`)**. Dev/test
   environment = OrbStack machine `sbx`. Engine code + **all** overlay scratch live on
   **native fs**, never the virtiofs shared mount — reasoning and the measured machine
   facts in `docs/decisions/ADR-0002`.
