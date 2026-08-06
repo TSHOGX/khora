@@ -250,6 +250,11 @@ type FsClient interface {
 // endpoint, discarded on resume (the endpoint's netns IP changes, §3.3 / §4.3
 // IP-as-epoch).
 //
+// "Stateless" means THIS VALUE carries no state worth keeping — it does not mean
+// dialing is free of process-wide resources. The connection pool underneath is
+// shared and outlives any one Client (see Dial); that is what makes discarding
+// them freely safe, since a Client has nothing to close.
+//
 // Depend on the NARROWEST of the three above that your caller actually uses; take
 // this composed form only if you genuinely need all three (the data-plane proxy
 // does, since it re-exports the full surface).

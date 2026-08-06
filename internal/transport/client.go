@@ -22,7 +22,8 @@ import (
 // generated Connect-RPC stubs. It translates the DOMAIN types (StartSpec,
 // ProcessEvent, …) to/from proto so the mediator never sees generated types
 // (§5.E seam discipline). Stateless: built against one endpoint, discarded on
-// resume (the endpoint's netns IP changes, §3.3 / §4.3 IP-as-epoch).
+// resume (the endpoint's netns IP changes, §3.3 / §4.3 IP-as-epoch) — it holds
+// nothing to close, because the connection pool it borrows is shared (see Dial).
 type connectClient struct {
 	health  transportv1connect.HealthServiceClient
 	process transportv1connect.ProcessServiceClient
@@ -34,32 +35,67 @@ type connectClient struct {
 	base string
 }
 
+// sharedTransport is the ONE h2c transport every Dial hands out, and sharing it is
+// load-bearing rather than an optimization.
+//
+// A transport OWNS a connection pool, and each pooled HTTP/2 connection runs its own
+// read and write loops. Nothing closes a transport, so building one per Dial leaks
+// every connection it ever opened along with those goroutines: measured, 50 sequential
+// Health calls to one endpoint accepted 50 separate TCP connections (zero reuse) and
+// left ~150 goroutines resident. Dial is called per data-plane RPC and once per
+// running sandbox per reaper tick (every 30s), so the per-call shape grows without
+// bound in a process that is meant to run for weeks — fd exhaustion, not a slow leak.
+//
+// Sharing it does NOT weaken the §5.E "stateless, discarded on resume" property: what
+// that governs is the CLIENT (built against one endpoint, thrown away when the netns
+// IP changes, §3.3 / §4.3 IP-as-epoch), and connectClient is still per-endpoint. The
+// pool is keyed by host:port, so a resumed sandbox at a new IP gets a new connection
+// either way — the old endpoint's connection is simply no longer asked for.
+//
+// It also makes ReadIdleTimeout mean what it says: a connection abandoned after one
+// unary RPC is never around long enough for a PING to come due.
+var sharedTransport = &http2.Transport{
+	AllowHTTP: true,
+	// h2c: dial plain TCP, ignore the TLS config.
+	DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, network, addr)
+	},
+	// Detect a guest that died mid-stream in SECONDS, not minutes. A sandbox
+	// terminated by its RAM cap (§3.4) never closes its streams — the process is
+	// simply gone — so without this the host waits out the kernel's TCP
+	// retransmit timeout, measured at ~150s, before the read fails. That is long
+	// enough to look like a hang rather than a death.
+	//
+	// h2 PING is the right layer: it works even when the stream is legitimately
+	// silent, so it cannot be confused with an idle-but-healthy long stream. The
+	// guest's own 20s application keepalive (D4.2) already establishes that
+	// silence this long is abnormal, so probing at 30s adds no false positives.
+	ReadIdleTimeout: 30 * time.Second,
+	PingTimeout:     10 * time.Second,
+	// REQUIRED once the pool is shared, and it is the half that bounds the pool by
+	// SANDBOX CHURN rather than by request volume. Endpoints are per-placement: every
+	// destroy and every resume retires one for good (§3.3), and without an idle
+	// timeout its connection would sit in the pool for the life of the process —
+	// trading a per-call leak for a per-dead-sandbox one. Comfortably longer than the
+	// PING interval above, so a healthy-but-quiet stream is probed, never reaped.
+	IdleConnTimeout: 90 * time.Second,
+}
+
+// sharedClient wraps sharedTransport. Also handed to the generated Connect stubs,
+// which do not close it either.
+var sharedClient = &http.Client{Transport: sharedTransport}
+
 // Dial builds a stateless Client for one sandbox's current endpoint. h2c
 // (cleartext HTTP/2) so streams work without TLS — the netns channel needs no
 // in-channel auth (transport D4.1 trust model).
+//
+// Cheap by construction: it allocates the per-endpoint stubs and shares the
+// connection pool (see sharedTransport). No timeout is set on the http.Client —
+// per-call deadlines ride the ctx, and a blanket client timeout would cut off
+// legitimately long-lived streams (Start / Connect / the large-file bypass).
 func Dial(ep Endpoint) Client {
-	hc := &http.Client{
-		Transport: &http2.Transport{
-			AllowHTTP: true,
-			// h2c: dial plain TCP, ignore the TLS config.
-			DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
-				var d net.Dialer
-				return d.DialContext(ctx, network, addr)
-			},
-			// Detect a guest that died mid-stream in SECONDS, not minutes. A sandbox
-			// terminated by its RAM cap (§3.4) never closes its streams — the process is
-			// simply gone — so without this the host waits out the kernel's TCP
-			// retransmit timeout, measured at ~150s, before the read fails. That is long
-			// enough to look like a hang rather than a death.
-			//
-			// h2 PING is the right layer: it works even when the stream is legitimately
-			// silent, so it cannot be confused with an idle-but-healthy long stream. The
-			// guest's own 20s application keepalive (D4.2) already establishes that
-			// silence this long is abnormal, so probing at 30s adds no false positives.
-			ReadIdleTimeout: 30 * time.Second,
-			PingTimeout:     10 * time.Second,
-		},
-	}
+	hc := sharedClient
 	base := "http://" + string(ep)
 	return &connectClient{
 		health:  transportv1connect.NewHealthServiceClient(hc, base),
