@@ -199,7 +199,7 @@ type ProcessServiceClient interface {
 	// collection. That follows from addressing by guest-native pid, which the
 	// kernel recycles: a retained "pid N exited" record would start describing a
 	// different process the moment N is reused. A caller that needs exit status
-	// must be attached when the process ends (guest-runtime D4.3 C2).
+	// must be attached when the process ends (guest-runtime D4.5 C2).
 	Connect(context.Context, *connect.Request[v1.ConnectRequest]) (*connect.ServerStreamForClient[v1.ProcessEvent], error)
 	// StreamInput writes stdin (or pty-in) as an ordered client-stream — the
 	// interactive input path (keystrokes to a pty). Ordering is guaranteed by the
@@ -348,7 +348,7 @@ type ProcessServiceHandler interface {
 	// collection. That follows from addressing by guest-native pid, which the
 	// kernel recycles: a retained "pid N exited" record would start describing a
 	// different process the moment N is reused. A caller that needs exit status
-	// must be attached when the process ends (guest-runtime D4.3 C2).
+	// must be attached when the process ends (guest-runtime D4.5 C2).
 	Connect(context.Context, *connect.Request[v1.ConnectRequest], *connect.ServerStream[v1.ProcessEvent]) error
 	// StreamInput writes stdin (or pty-in) as an ordered client-stream — the
 	// interactive input path (keystrokes to a pty). Ordering is guaranteed by the

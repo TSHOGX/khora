@@ -33,8 +33,8 @@ func TestFsErrMapsEveryErrno(t *testing.T) {
 		{"EDQUOT", syscall.EDQUOT, connect.CodeResourceExhausted},
 		{"ENOTEMPTY", syscall.ENOTEMPTY, connect.CodeFailedPrecondition},
 		{"EISDIR", syscall.EISDIR, connect.CodeFailedPrecondition},
-		// EXDEV is reachable in ordinary use here (overlay upper + tmpfs + future
-		// volume mounts in one namespace) and must never fall through to internal.
+		// EXDEV is reachable in ordinary use here (overlay upper + tmpfs + volume
+		// mounts in one namespace) and must never fall through to internal.
 		{"EXDEV", syscall.EXDEV, connect.CodeFailedPrecondition},
 		{"EINVAL", syscall.EINVAL, connect.CodeInvalidArgument},
 		{"ENAMETOOLONG", syscall.ENAMETOOLONG, connect.CodeInvalidArgument},

@@ -379,10 +379,8 @@ func (b *LocalBtrfs) forgetDeletedRow(id uint64) {
 }
 
 // Release ends one materialization. A NO-OP on this arm, and that is a correct
-// implementation of an explicit promise rather than a stub: the promise is "this
-// materialization's source is no longer valid, THE BYTES SURVIVE, idempotent,
-// tolerant of an already-gone target" (see Backend.Release for why the method is
-// not called Unmount).
+// implementation of Backend.Release's four-part promise rather than a stub — see
+// there for the promise and for why the method is not called Unmount.
 func (b *LocalBtrfs) Release(context.Context, *Materialized) error { return nil }
 
 // AdoptMaterialized re-recognizes a still-present unit after a crash (§4.4-A). It

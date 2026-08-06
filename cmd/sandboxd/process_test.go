@@ -181,10 +181,10 @@ func TestSubscribeAfterEnded(t *testing.T) {
 	}
 }
 
-// invariant 1 (source never blocks — regression for the writeInput-under-mu
-// deadlock): a writeInput that blocks in Write (child not draining its input)
-// must NOT hold p.mu, so broadcast/subscribe/finish stay live meanwhile. Before
-// the fix this test deadlocks (broadcast waits for mu held by the stuck write).
+// invariant 1 (source never blocks): a writeInput that blocks in Write (child not
+// draining its input) must NOT hold p.mu, so broadcast/subscribe/finish stay live
+// meanwhile. Holding p.mu across the write deadlocks this test — broadcast waits on
+// the mu the stuck write is holding — which is what makes it a real guard.
 func TestWriteInputDoesNotBlockFanOut(t *testing.T) {
 	bw := &blockingWriter{entered: make(chan struct{}, 1), release: make(chan struct{})}
 	p := newProc(1, bw)

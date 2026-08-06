@@ -74,11 +74,10 @@ var (
 	// ErrSandboxHasMounts is verdict ②'s sandbox side: deleting a sandbox that a live
 	// mount row holds (mounts.sandbox RESTRICT).
 	//
-	// THE TRANSLATION POINT FOR THIS DID NOT EXIST BEFORE M7. DeleteSandbox was a bare
-	// Exec whose error was returned unwrapped, so a RESTRICT violation reached the
-	// API's default arm as a 500 rather than a 409. The FK-violation PREDICATE was
-	// reusable (it is table- and column-agnostic); the translation was not, and that
-	// distinction is the whole of what "we got this for free" did and did not cover.
+	// A sentinel is required even though the FK-violation PREDICATE is generic
+	// (isFKViolation is table- and column-agnostic): without a translation point in
+	// DeleteSandbox the raw driver error reaches the API's default arm as a 500 rather
+	// than a 409. The predicate is reusable; the translation is per-call-site.
 	ErrSandboxHasMounts = errors.New("store: sandbox has live mounts")
 
 	// ErrMountLeaseConflict is verdict ③: an attach lost the exclusive lease. It needs

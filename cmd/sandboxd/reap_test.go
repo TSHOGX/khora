@@ -170,18 +170,16 @@ func startOrphaner(t *testing.T, r *reapTable) (<-chan syscall.WaitStatus, int) 
 	return ch, gpid
 }
 
-// THE REGRESSION. Two phases, in the order that makes the bug visible:
+// Two phases, in the order that makes the failure visible:
 //
-// Phase 1 (subreaper declared, nothing draining) reproduces the broken state
-// exactly — the grandchild is reparented to us and sits as a permanent zombie 'Z'.
-// This is what transport mode did for every orphan in its subtree: the prctl call
-// attracted them and no Wait4(-1) ever collected them. It is also why the fix is
-// not "drop the prctl": phase 1 asserts the reparent, i.e. the behaviour the spec
-// wants, and only the collection was missing.
+// Phase 1 (subreaper declared, nothing draining) is the broken state: the grandchild
+// is reparented to us and sits as a permanent zombie 'Z'. Declaring the subreaper
+// ATTRACTS orphans, so without a Wait4(-1) drain they accumulate. This is also why
+// the answer is not "drop the prctl" — phase 1 asserts the reparent itself, which is
+// the behaviour §5.E.1 wants; only the collection has to accompany it.
 //
 // Phase 2 asserts drain() collects it: the /proc entry disappears, which for an
-// exited process means reaped. Before the fix this loop never terminates and the
-// test fails here.
+// exited process means reaped. Without the drain this loop never terminates.
 func TestSubtreeOrphanIsReaped(t *testing.T) {
 	asSubreaper(t)
 	r := newReapTable()
@@ -268,9 +266,9 @@ func TestProcRunEndFrameSurvivesConcurrentDrain(t *testing.T) {
 	}
 }
 
-// 128+signo through the same path: proc.run maps the wait status the reaper hands
-// it, so a killed process reports 128+signo in its end frame exactly as cmd.Wait
-// used to (D4.1 checklist / D4.3 per-process monitor).
+// 128+signo through the same path: proc.run maps the wait status the reaper hands it,
+// so a killed process reports 128+signo in its end frame (D4.1 checklist / D4.3
+// per-process monitor).
 func TestProcRunEndFrameIs128PlusSignoOnSignal(t *testing.T) {
 	asSubreaper(t)
 	r := newReapTable()
@@ -304,9 +302,10 @@ func TestProcRunEndFrameIs128PlusSignoOnSignal(t *testing.T) {
 	}
 }
 
-// The pumps must close the parent ends of the pipes now that no cmd.Wait() does
-// (see source.closer): otherwise transport mode leaks two fds per process started
-// over its whole lifetime, which for a long-lived guest daemon ends in EMFILE.
+// Closing the parent ends of the pipes is the PUMPS' job (see source.closer), since
+// nothing else waits on the child to do it: otherwise transport mode leaks two fds per
+// process started over its whole lifetime, which for a long-lived guest daemon ends in
+// EMFILE.
 func TestProcRunClosesPipeParentEnds(t *testing.T) {
 	asSubreaper(t)
 	r := newReapTable()

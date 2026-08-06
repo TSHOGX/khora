@@ -19,14 +19,13 @@ import (
 // bad edge the day the package lands, not the day someone remembers to add it here.
 // Absent packages are skipped, and staleness is checked separately below.
 //
-// volume (§5.C) was in exactly that position and has now landed — which is the
-// pre-listing paying off: the edge it was most at risk of (routing volume content
-// through §5.E `fs`) was ruled out during design partly BECAUSE this guard's empty
-// allowlist would have failed on it (volume.md D5.1).
+// Pre-listing is what gives the empty allowlist its force at DESIGN time, not just
+// at review time: routing volume content through §5.E `fs` was ruled out for §5.C
+// partly because this guard would have failed on it (volume.md D5.1).
 var subsystems = []string{
 	"engine/internal/runtime",   // §5.A
 	"engine/internal/rootfs",    // §5.B
-	"engine/internal/volume",    // §5.C (not yet built)
+	"engine/internal/volume",    // §5.C
 	"engine/internal/network",   // §5.D (not yet built)
 	"engine/internal/transport", // §5.E
 }

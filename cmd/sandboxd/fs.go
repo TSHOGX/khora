@@ -47,7 +47,7 @@ func fsErr(op, path string, err error) error {
 	case errors.Is(err, syscall.EXDEV):
 		// Reachable here in ordinary use, unlike on a single-filesystem host: the
 		// guest namespace stitches together the overlay upper, tmpfs /tmp and
-		// (later) Volume mounts, so a Move between two normal-looking paths can
+		// Volume mounts, so a Move between two normal-looking paths can
 		// cross devices. Reported explicitly rather than falling through to
 		// `internal`, which would read as an engine bug instead of "rename cannot
 		// do this; copy then delete".

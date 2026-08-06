@@ -273,7 +273,7 @@ func TestColdStartWithAReadOnlyMountIsNotRefused(t *testing.T) {
 
 // TestDirectWriteMarkerProtectsFromTheSweep: the in-flight marker and the write-regime
 // decision are published in ONE critical section, and the marker is what keeps a
-// concurrent sweep from reclaiming bytes mid-write (M7 acceptance 24).
+// concurrent sweep from reclaiming bytes mid-write.
 //
 // A volume being written to right now is IN USE even though nothing has it mounted —
 // exactly the case no mount row can express. Asserted on the BYTES rather than on the

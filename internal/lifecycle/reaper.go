@@ -214,9 +214,8 @@ func (r *Reaper) sweepRunning(ctx context.Context, rec model.Sandbox, downThisTi
 	}
 	defer l.Unlock()
 
-	// Re-read under the lock: the record may have changed state between the
-	// ListSandboxes snapshot and acquiring the lock (a user verb that finished
-	// before we tryLock'd). Dispose only if it is still `running`.
+	// Re-read under the lock: a user verb may have changed the record's state between
+	// the ListSandboxes snapshot and this lock acquisition.
 	cur, err := r.m.deps.Store.GetSandbox(ctx, rec.ID)
 	if err != nil || cur.State != model.Running {
 		return

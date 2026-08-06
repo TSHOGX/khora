@@ -1,6 +1,6 @@
 //go:build substrate
 
-// L3 acceptance for M7 Gate B, part 2: the write regime through real guests, Promote
+// L3 acceptance: the write regime through real guests, Promote
 // with a volume mounted, and what a sweep must NOT disturb. Requires root and real
 // btrfs.
 //
@@ -29,8 +29,7 @@ import (
 	"engine/internal/model"
 )
 
-// TestVolumeRegimeRefusesDirectWriteUnderALiveHolderAndAllowsItWhenPaused is M7
-// acceptance 23, BOTH directions.
+// TestVolumeRegimeRefusesDirectWriteUnderALiveHolderAndAllowsItWhenPaused pins the write regime in BOTH directions.
 //
 // The second direction is the one that matters most: `paused` is NOT a live writer, and
 // that is an explicitly written PROMISE rather than a detail that could be tightened
@@ -103,8 +102,7 @@ func TestVolumeRegimeRefusesDirectWriteUnderALiveHolderAndAllowsItWhenPaused(t *
 	}
 }
 
-// TestVolumeRegimeSeedWithoutASandboxThenMountThenReadAfterDestroy is M7 acceptance 21
-// in full — the half Gate A could not reach is the middle of it.
+// TestVolumeRegimeSeedWithoutASandboxThenMountThenReadAfterDestroy is import → export in full, with a real mount in the middle.
 //
 // This is the SUBSTANCE of "a volume's lifecycle is decoupled from any sandbox" (§5.C):
 // an object whose content can only move through a sandbox is independent on paper only.
@@ -181,16 +179,16 @@ func TestVolumeRegimeSeedWithoutASandboxThenMountThenReadAfterDestroy(t *testing
 	}
 }
 
-// TestVolumeRegimeSweepLeavesALiveGuestUntouched is M7 acceptances 7 (through a real
-// mount), 9 and 10, in one pass.
+// TestVolumeRegimeSweepLeavesALiveGuestUntouched covers three properties in one pass: the sweep keeps a mounted volume, its content
+// is unchanged, and its cap is untouched.
 //
-// Acceptance 9 exists because of a measured trap: asserting "the guest's write returned
+// The content assertion exists because of a measured trap: asserting "the guest's write returned
 // ok" passes even when the volume has been COMPLETELY DELETED underneath — the guest
 // writes into an unlinked inode and sees zero errors (volume.md D7.2). So the assertion
 // is that the STEADY STATE is byte-for-byte identical across the sweep, read from the
 // HOST.
 //
-// Acceptance 10 pins the cap: `limit none` is the ONE operation that breaks an engine
+// The cap assertion is the sharper one: `limit none` is the ONE operation that breaks an engine
 // promise beyond data integrity, and it has no EBUSY self-protection, so a sweep must
 // leave a live volume's cap exactly where it was.
 func TestVolumeRegimeSweepLeavesALiveGuestUntouched(t *testing.T) {
@@ -248,7 +246,7 @@ func TestVolumeRegimeSweepLeavesALiveGuestUntouched(t *testing.T) {
 	if _, err := os.Stat(orphanPath); !os.IsNotExist(err) {
 		t.Errorf("the orphan survived the sweep (%v) — a no-op sweep passes every other assertion here", err)
 	}
-	// Acceptance 9: the steady state is BYTE-FOR-BYTE identical, read from the host.
+	// The steady state must be BYTE-FOR-BYTE identical, read from the host.
 	after, err := os.ReadFile(filepath.Join(unit, "steady"))
 	if err != nil {
 		t.Fatalf("the live guest's volume content is unreadable after the sweep: %v", err)
@@ -256,7 +254,7 @@ func TestVolumeRegimeSweepLeavesALiveGuestUntouched(t *testing.T) {
 	if !bytes.Equal(before, after) {
 		t.Errorf("the live guest's steady state changed across the sweep: %q → %q — note that asserting 'the guest's write returned ok' would NOT catch this (a deleted volume still accepts writes into an unlinked inode)", before, after)
 	}
-	// Acceptance 10: the cap is UNCHANGED.
+	// The cap must be UNCHANGED.
 	_, limitAfter, err := bc.Usage(ctx, unit)
 	if err != nil {
 		t.Fatalf("read the cap after the sweep: %v", err)
@@ -274,7 +272,7 @@ func TestVolumeRegimeSweepLeavesALiveGuestUntouched(t *testing.T) {
 	}
 }
 
-// TestVolumeRegimePromoteExcludesTheMountPoint is M7 acceptance 18 on the substrate: a
+// TestVolumeRegimePromoteExcludesTheMountPoint pins the excluded set on the substrate: a
 // Promote of a sandbox that had a volume mounted captures the mount point as an EMPTY
 // PLACEHOLDER, the volume's content does NOT enter the layer, and the shadowed upper
 // bytes are pruned.
@@ -334,7 +332,7 @@ func TestVolumeRegimePromoteExcludesTheMountPoint(t *testing.T) {
 	}
 }
 
-// TestVolumeRegimeConcurrentImportAndSweep is M7 acceptance 24: an in-flight direct
+// TestVolumeRegimeConcurrentImportAndSweep pins the in-flight marker: an in-flight direct
 // write is not reclaimed as an orphan, because the marker is published in the SAME
 // critical section that decided the write was allowed.
 //

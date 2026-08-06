@@ -353,7 +353,7 @@ type source struct {
 // retained exit code. Holding the entry to serve late arrivals would mean
 // retaining state keyed by a guest pid the kernel can recycle — the record would
 // start describing a different process once the number is reused. Callers that
-// must not miss exit status stay attached (guest-runtime D4.3 C2).
+// must not miss exit status stay attached (guest-runtime D4.5 C2).
 //
 // The exit status arrives over `exited` — the reap table's handoff — NOT from
 // cmd.Wait(). Transport mode owns Wait4(-1) for its subtree (§5.E.1), and a

@@ -625,9 +625,9 @@ func (m *Mediator) Pause(ctx context.Context, id model.SandboxID) error {
 // Kinds, all state=paused). Pause always lands a legal `paused` (§4.4: no middle
 // dirty state), so we CAS the state first, then release placement-local
 // resources; the Overlay artifact is already on the backend and captured NOTHING
-// (§4.2: pause captures nothing). Stop is best-effort and idempotent, so it is
-// also correct for a
-// crash-pause whose container is already dead (it reclaims the lingering netns).
+// (§4.2: pause captures nothing). Stop is best-effort and idempotent, so it is also
+// correct for a crash-pause whose container is already dead (it reclaims the
+// lingering netns).
 // cause carries the §4.3 death cause for the INVOLUNTARY variants (crash-pause):
 // it is committed in the SAME store call as the demotion CAS (§4.3 / §4.4-C; see
 // store.CompareAndSetState). nil for the voluntary variants (user pause /

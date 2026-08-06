@@ -130,7 +130,7 @@ func TestCreateVolumeChecksCapabilityBeforeMovingBytes(t *testing.T) {
 	}
 }
 
-// TestVolumeCapWritePointRefusesLoweringBelowUsage is M7 acceptance 16 at the unit
+// TestVolumeCapWritePointRefusesLoweringBelowUsage pins the cap write point at the unit
 // level: the criterion is a STRICT inequality, and `== usage` is refused too.
 //
 // The reason for refusing what the substrate would accept is that accepting creates a
@@ -237,7 +237,7 @@ func TestVolumeCapEditableWhileNothingIsMounted(t *testing.T) {
 	}
 }
 
-// TestAdmissionCountsVolumeCaps is M7 acceptance 17: Σ(volume caps) is in the FIRST
+// TestAdmissionCountsVolumeCaps pins that Σ(volume caps) is in the FIRST
 // term, so volumes cannot oversubscribe the node, and a metered disk axis REQUIRES a
 // volume cap.
 //
@@ -416,7 +416,7 @@ func TestDeleteVolumeReportsNotFound(t *testing.T) {
 	}
 }
 
-// TestImportExportNeedsNoSandbox is the record-and-verb half of M7 acceptance 21:
+// TestImportExportNeedsNoSandbox is the record-and-verb half of import → export:
 // bytes go in and come back out on a node that has NEVER had a sandbox. That is what
 // makes "the volume's lifecycle is decoupled from any sandbox" true in substance
 // rather than only in the record layer (§5.C).

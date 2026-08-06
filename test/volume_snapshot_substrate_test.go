@@ -1,6 +1,6 @@
 //go:build substrate
 
-// L3 acceptance for M7 Gate C: snapshot / clone against real storage, including the
+// L3 acceptance: snapshot / clone against real storage, including the
 // crash window and the quota-row leak. Requires root and real btrfs.
 //
 //	sudo env PATH=$PATH GOTOOLCHAIN=local GOFLAGS=-mod=mod GOSUMDB=off HOME=$HOME \
@@ -59,7 +59,7 @@ func qgroupRowCount(t *testing.T, path string) int {
 	return n
 }
 
-// TestVolumeSnapshotOfALiveWrittenVolume is M7 acceptance 12: snapshotting a volume that
+// TestVolumeSnapshotOfALiveWrittenVolume pins the live case: snapshotting a volume that
 // a guest is actively writing must not disturb the writer, and the captured content must
 // be a COMPLETE PREFIX of an append-only log.
 //
@@ -88,7 +88,7 @@ func TestVolumeSnapshotOfALiveWrittenVolume(t *testing.T) {
 	// An APPEND-ONLY LOG of monotonically increasing lines, written continuously. The
 	// probe loop must outlast the whole run: a probe that ends on its own makes PID 1
 	// exit and the container go `stopped`, which is INDISTINGUISHABLE from "this change
-	// killed the sandbox" (harness lesson, M7 §4⑭).
+	// killed the sandbox".
 	cl, err := eng.Mediator.Client(sid)
 	if err != nil {
 		t.Fatal(err)
@@ -162,7 +162,7 @@ func TestVolumeSnapshotOfALiveWrittenVolume(t *testing.T) {
 	t.Logf("captured %d log lines as a complete prefix while the guest kept writing", len(lines))
 }
 
-// TestVolumeSnapshotCapIsEnforcedOnTheNewVolume is M7 acceptance 13, and it is the one
+// TestVolumeSnapshotCapIsEnforcedOnTheNewVolume is the one
 // that catches the failure volume.md D7.3 calls silent and undetectable afterwards.
 //
 // The substrate gives a snapshot a BRAND-NEW UNCAPPED quota row (measured in four shapes
@@ -236,7 +236,7 @@ func TestVolumeSnapshotCapIsEnforcedOnTheNewVolume(t *testing.T) {
 	}
 }
 
-// TestVolumeSnapshotSourceDeleteIsRefusedAndLeaksNoQuotaRow is M7 acceptance 14: deleting
+// TestVolumeSnapshotSourceDeleteIsRefusedAndLeaksNoQuotaRow pins the lineage refusal: deleting
 // a source with a live descendant is a 409, AND the filesystem's quota-row count returns
 // to baseline once things are deleted in the order the FK forces.
 //
@@ -307,7 +307,7 @@ func TestVolumeSnapshotSourceDeleteIsRefusedAndLeaksNoQuotaRow(t *testing.T) {
 	}
 }
 
-// TestVolumeSnapshotCrashBetweenBytesAndRowIsRepaired is M7 acceptance 15: a crash in the
+// TestVolumeSnapshotCrashBetweenBytesAndRowIsRepaired pins the crash window: a crash in the
 // load-bearing window leaves reclaimable bytes, and — the half that matters — the cap is
 // ALREADY on them, because it rode the same backend operation rather than a follow-up the
 // crash would have skipped.

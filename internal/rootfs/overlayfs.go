@@ -398,11 +398,11 @@ func (p *HostOverlayFS) UncappedBytes(ctx context.Context) (int64, error) {
 // regular file is projected at max(allocated, apparent) — apparent covers the
 // sparse case, allocated covers a file whose blocks exceed its length.
 //
-// Two deliberate overstatements, both the SAFE direction (seam contract point 2):
-// excluded paths are counted (they will not land in the layer), and hardlinks are
-// counted per link (copyTree does not re-link, so each link really does become an
-// independent file in the layer — this is the one place a per-link count is not a
-// double charge).
+// One deliberate overstatement, in the SAFE direction (seam contract point 2):
+// hardlinks are counted per link (copyTree does not re-link, so each link really does
+// become an independent file in the layer — this is the one place a per-link count is
+// not a double charge). Excluded paths are NOT counted: the walk below applies the
+// same exclusion set the freeze will, for the reason stated there.
 //
 // The source is at-rest by convention only — the mediator gates BEFORE quiescing —
 // so a concurrent guest write makes this stale on return. That is stated at the
@@ -693,8 +693,9 @@ var promoteExcludedPrefixes = []string{
 // PromoteToTemplate freezes the source Overlay's at-rest upper into a new
 // read-only layer dir under LayersDir (§5.B Promote). bytes-first: this writes
 // ONLY bytes — the caller inserts the templates row afterward (§4.3 INV-3). The
-// copy excludes the engine-injected runtime paths (§5.B / §3.1; rootfs-overlay D5). The caller must have
-// quiesced + unmounted the sandbox first, so upper is a stable plain dir tree
+// copy excludes the engine-injected runtime paths (§5.B / §3.1; rootfs-overlay D5).
+// The caller must have quiesced + unmounted the sandbox first, so upper is a stable
+// plain dir tree
 // (§2.5). The layer is built at a staging path then atomically renamed into
 // place, so a crash mid-copy never leaves a half-written layer at the final ID
 // (a staging dir is a plain orphan the sweep reclaims).

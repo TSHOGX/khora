@@ -210,8 +210,8 @@ func TestTransportMultiConnectionFanOut(t *testing.T) {
 
 	ca := <-adone
 	if !ca.gotEnd {
-		// Distinguish the two ways this can happen, because they call for opposite
-		// conclusions and used to look identical. If a was DROPPED as a slow
+		// Distinguish the two ways this can happen: they look identical at this
+		// assertion but call for opposite conclusions. If a was DROPPED as a slow
 		// subscriber (D4.3 invariant 1), that is the documented overflow behaviour
 		// under load rather than a fan-out defect — b's abandonment did not break a,
 		// a simply could not keep up. Only a silent close with no reason is the

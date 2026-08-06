@@ -113,14 +113,12 @@ func TestClassifyDeadRecoverable(t *testing.T) {
 // D2 unreadable-idle guard: when L2 is DOWN there is no trustworthy idle reading,
 // so the sandbox must classify by L1 alone and NEVER into idle.
 //
-// HONEST NOTE ON WHAT THIS PINS TODAY: `classify` reads idle only on the L2-up
-// branch, so with L2 down the fake's idle value is never consulted and this test
-// cannot fail independently of TestClassifyTransportDown /
-// TestClassifyDeadRecoverable. It is kept as a REGRESSION guard for the change
-// that would break the guard: adding a persisted last-activity field to the
-// record and consulting it when the probe fails. Then a 1ms idle_timeout on an
-// unreachable sandbox would classify idle and auto-pause a sandbox whose
-// substrate may be dead — and this test would be the one that catches it.
+// WHAT THIS PINS, PRECISELY: `classify` reads idle only on the L2-up branch, so with
+// L2 down the fake's idle value is never consulted and this test cannot fail
+// independently of TestClassifyTransportDown / TestClassifyDeadRecoverable. Its value
+// is the change it would catch — adding a persisted last-activity field to the record
+// and consulting it when the probe fails. A 1ms idle_timeout on an unreachable sandbox
+// would then classify idle and auto-pause a sandbox whose substrate may be dead.
 func TestClassifyUnreadableIdleGuard(t *testing.T) {
 	// L2 down, L1 alive → must be transport-down, NOT idle (idle_timeout tiny so
 	// a naive classifier tempted to read stale activity would say idle).

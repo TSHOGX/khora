@@ -241,7 +241,7 @@ func TestReclaimQuotaRowsWiring(t *testing.T) {
 	}
 }
 
-// TestSnapshotCrashWindowLeavesReclaimableBytes is the unit half of M7 acceptance 15:
+// TestSnapshotCrashWindowLeavesReclaimableBytes is the unit half of the snapshot crash window:
 // a crash after the bytes exist but before the row is inserted leaves ORPHAN BYTES, and
 // the cap is ALREADY WRITTEN because it rode the backend call rather than a follow-up
 // the crash would have skipped.

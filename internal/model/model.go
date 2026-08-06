@@ -313,12 +313,13 @@ const (
 // and lives with the runtime provider, not in the identity record (§3.3).
 //
 // Minimal shape by one rule: a field exists here only when this record actually
-// carries it today. Binding fields not yet consumed (mounted volumes, network
-// policy) are omitted rather than stubbed — this record is a data shape, not a
-// settled interface signature, so an unused field would be a speculative
-// reservation (§1.3). (Contrast the runtime provider's SteeringSpec, which DOES
-// exist now: it is a named member of the settled §5.A contract 3-tuple —
-// "settled, not yet built".)
+// carries it. The mount topology is consumed but lives in its own table (§5.C)
+// keyed by sandbox, not as a field here — a sandbox's volume set is many-to-many
+// and mutable independently of the identity record. Network policy (§5.D) is not
+// carried at all yet and is omitted rather than stubbed, since an unused field
+// would be a speculative reservation (§1.3). (Contrast the runtime provider's
+// SteeringSpec, which DOES exist: it is a named member of the settled §5.A
+// contract 3-tuple — "settled, not yet built".)
 type Sandbox struct {
 	ID       SandboxID
 	Template TemplateID

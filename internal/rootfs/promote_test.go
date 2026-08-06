@@ -286,7 +286,7 @@ func TestPromoteRefusesExistingLayer(t *testing.T) {
 }
 
 // TestPromotePrunesShadowedBytes is the property the per-Promote excluded set exists
-// for (M7 acceptance 18 / rootfs-overlay D5), and it is NOT "the mount point becomes
+// for (rootfs-overlay D5), and it is NOT "the mount point becomes
 // an empty placeholder" — that is the DEFAULT outcome and needs no exclusion at all.
 //
 // What the exclusions do is prune bytes that were written into the upper BEFORE a

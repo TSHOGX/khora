@@ -404,10 +404,9 @@ func testMaterializeConcurrent(t *testing.T, mk Factory) {
 	}
 }
 
-// testReleaseKeepsBytes pins the PROMISE Release makes, which is why it is not
-// called Unmount: this materialization's source is no longer valid, THE BYTES
-// SURVIVE, idempotent, tolerant of an already-gone target. A local no-op satisfies
-// all four; the smell would be one name with two undefined contracts.
+// testReleaseKeepsBytes drives all four parts of Backend.Release's promise. A local
+// no-op satisfies every one of them, which is the point: the seam is defined by the
+// promise, not by whether an arm has an unmount to perform.
 func testReleaseKeepsBytes(t *testing.T, mk Factory) {
 	b := mk(t)
 	if err := b.CreateVolume(ctx(), "vol_r", 0); err != nil {

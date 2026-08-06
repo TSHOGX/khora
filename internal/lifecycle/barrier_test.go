@@ -541,7 +541,7 @@ func callsIdent(call *ast.CallExpr, name string) bool {
 }
 
 // TestCrashPauseDoesNotDrain pins the guard in pauseLocked (`if kind !=
-// "crash-paused"`), which was reasoned over fifteen lines and tested by nothing.
+// "crash-paused"`).
 //
 // WHY ITS REGRESSION IS SILENT AND EXPENSIVE: an involuntary pause happens when L2 is
 // already down, so no mutating fs RPC can still complete — there is nothing to drain.
@@ -589,8 +589,8 @@ func TestCrashPauseDoesNotDrain(t *testing.T) {
 			// HELD FOR THE WHOLE TEST, deliberately: a drain therefore has to TIME OUT,
 			// which is what makes the two cases separable by a wide margin (full grace vs
 			// ~zero). Releasing it early would let a voluntary drain finish quickly too,
-			// and the assertion would pass whether or not the guard exists — measured: it
-			// did exactly that in an earlier version of this test.
+			// and the assertion would then pass whether or not the guard exists —
+			// measured, so this is a real trap and not a precaution.
 			defer release()
 
 			start := time.Now()

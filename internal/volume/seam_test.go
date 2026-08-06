@@ -114,7 +114,7 @@ func TestCapabilitiesMembersAreBool(t *testing.T) {
 }
 
 // TestGuardsCatchInjectedLeaks is the REVERSE-INJECTION verification the three
-// guards need to be worth anything (M7 acceptance 20).
+// guards need to be worth anything.
 //
 // A structural guard that has only ever run against clean source has never
 // demonstrated that it FAILS — and the failure path is the entire product. Each

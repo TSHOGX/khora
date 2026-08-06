@@ -1,6 +1,6 @@
 //go:build substrate
 
-// L3 acceptance for M7 Gate A: a Volume as a first-class object with a lifecycle
+// L3 acceptance: a Volume as a first-class object with a lifecycle
 // DECOUPLED from every sandbox — created before one exists, surviving after one is
 // destroyed, its content readable and writable while nothing has it mounted.
 // Requires root (storage units + quota ioctls) and a REAL btrfs state dir.
@@ -94,11 +94,12 @@ func volumeUnitPath(stateDir string, id model.VolumeID) string {
 	return filepath.Join(stateDir, "volumes", string(id))
 }
 
-// TestVolumeOutlivesItsSandbox is M7 acceptance 1, decomposed to what Gate A can
-// physically reach: the mounts table does not exist yet, so the volume is not bound
-// into the sandbox — but the LIFECYCLE claim (§5.C: a volume is created before a
-// sandbox and survives after one is destroyed, with its content byte-for-byte
-// intact) is fully testable now, and the mounted variant lands with the mounts table.
+// TestVolumeOutlivesItsSandbox pins the LIFECYCLE claim alone (§5.C: a volume is
+// created before a sandbox and survives after one is destroyed, with its content
+// byte-for-byte intact). Nothing is bound into the sandbox here on purpose — the
+// mounted variant of the same claim is
+// TestVolumeMountTwoConcurrentWritersBothReallyWrite and its neighbours in
+// volume_mount_substrate_test.go.
 func TestVolumeOutlivesItsSandbox(t *testing.T) {
 	ctx := context.Background()
 	eng, stateDir := volumeEngine(t, 0)
@@ -143,11 +144,12 @@ func TestVolumeOutlivesItsSandbox(t *testing.T) {
 	}
 }
 
-// TestVolumeSweepReclaimsOnlyOrphans is M7 acceptance 7 and 8 in one pass.
+// TestVolumeSweepReclaimsOnlyOrphans covers both the keep and the reclaim side in one
+// pass.
 //
 // The POSITIVE control is what makes it a real test: asserting only "the live volume
 // survived" would pass identically for a sweep that does NOTHING, so the same call
-// must also reclaim a true orphan. And acceptance 8 requires the enumeration to be
+// must also reclaim a true orphan. The enumeration must also be
 // per-directory rather than filesystem-wide — measured, a filesystem-level unit
 // enumeration returns byte-identical results regardless of the directory given,
 // including OTHER SOFTWARE's units on the node — so a sibling tree and an external
@@ -182,8 +184,8 @@ func TestVolumeSweepReclaimsOnlyOrphans(t *testing.T) {
 		t.Fatalf("orphan storage missing before the sweep: %v", err)
 	}
 
-	// A sandbox, so the SIBLING tree (§5.B overlay units) is populated. Acceptance 8:
-	// the volume sweep must not touch it.
+	// A sandbox, so the SIBLING tree (§5.B overlay units) is populated: the volume
+	// sweep must not touch it.
 	sid, err := eng.Mediator.Create(ctx, lifecycle.CreateSpec{Template: "bare"})
 	if err != nil {
 		t.Fatalf("create sandbox: %v", err)
@@ -195,7 +197,7 @@ func TestVolumeSweepReclaimsOnlyOrphans(t *testing.T) {
 		t.Fatalf("read sibling overlay root: %v", err)
 	}
 	if len(siblingsBefore) == 0 {
-		t.Fatal("no sibling overlay units exist, so acceptance 8 would pass vacuously")
+		t.Fatal("no sibling overlay units exist, so the sibling-tree assertion would pass vacuously")
 	}
 
 	// An EXTERNAL storage unit directly under the enumeration root — the shape a
@@ -239,7 +241,7 @@ func TestVolumeSweepReclaimsOnlyOrphans(t *testing.T) {
 		t.Errorf("live volume content = %q, want %q", out.String(), marker)
 	}
 
-	// Acceptance 8: the SIBLING tree is untouched, unit for unit.
+	// The SIBLING tree must be untouched, unit for unit.
 	siblingsAfter, err := os.ReadDir(overlayRoot)
 	if err != nil {
 		t.Fatalf("read sibling overlay root after sweep: %v", err)
@@ -258,7 +260,7 @@ func TestVolumeSweepReclaimsOnlyOrphans(t *testing.T) {
 	}
 }
 
-// TestVolumeCapWritePointOnRealStorage is M7 acceptance 16 against the real
+// TestVolumeCapWritePointOnRealStorage pins the cap write point against the real
 // substrate: a raise re-clears admission, and a lowering to at-or-below current usage
 // is refused with the STRICT inequality.
 //
@@ -348,7 +350,7 @@ func TestVolumeCapWritePointOnRealStorage(t *testing.T) {
 	}
 }
 
-// TestVolumeCapsCountAgainstTheNodeBudget is M7 acceptance 17 on real storage: a pile
+// TestVolumeCapsCountAgainstTheNodeBudget pins Σ(volume caps) on real storage: a pile
 // of volumes cannot fill the node while the gate refuses nothing, and a metered disk
 // axis makes a volume cap mandatory.
 //
@@ -405,15 +407,15 @@ func TestVolumeCapsCountAgainstTheNodeBudget(t *testing.T) {
 	}
 }
 
-// TestVolumeSeedAndReadBackWithoutAnySandbox is the Gate A half of M7 acceptance 21:
-// on a node that has NEVER had a sandbox, import → export returns the bytes
+// TestVolumeSeedAndReadBackWithoutAnySandbox pins the sandbox-free half of
+// import → export: on a node that has NEVER had a sandbox, the bytes come back
 // byte-for-byte.
 //
 // This is the SUBSTANCE of "the volume's lifecycle is decoupled from any sandbox"
 // (§5.C) rather than the record-layer version of it: an object whose content can only
-// move through a sandbox is only independent on paper. The remaining half of
-// acceptance 21 — a sandbox mounting the seeded volume and seeing the same bytes —
-// needs the mounts table and lands with it.
+// move through a sandbox is only independent on paper. The other half — a sandbox
+// mounting the seeded volume and seeing the same bytes — is
+// TestVolumeRegimeSeedWithoutASandboxThenMountThenReadAfterDestroy.
 func TestVolumeSeedAndReadBackWithoutAnySandbox(t *testing.T) {
 	ctx := context.Background()
 	eng, stateDir := volumeEngine(t, 0)

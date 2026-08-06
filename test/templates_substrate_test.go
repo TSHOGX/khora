@@ -2,8 +2,8 @@
 
 // Template object-model acceptance against REAL runsc + the assembled
 // engine. Covers delete-referenced → 409-equivalent (ErrInUse), reference-vs-
-// reclaim atomicity under real concurrency, the E2B-bug regression (a paused
-// sandbox's Template stays undeletable), boot-seed idempotency, and the
+// reclaim atomicity under real concurrency, a paused sandbox's Template staying
+// undeletable, boot-seed idempotency, and the
 // orphan-layer sweep reclaiming a crashed-Promote staging layer. Each assertion
 // states its property inline.
 //
@@ -59,9 +59,9 @@ func TestTemplateDeleteReferencedTemplate(t *testing.T) {
 	t.Logf("✓ referenced Template protected; deletable once unreferenced")
 }
 
-// E2B-bug regression: a PAUSED sandbox still holds a persistent
-// reference row to its Template, so RESTRICT sees it and the delete is refused —
-// exactly the case E2B lost track of (the reference lived only in memory).
+// A PAUSED sandbox still holds a persistent reference row to its Template, so
+// RESTRICT sees it and the delete is refused. This is the case an in-memory
+// reference count loses: nothing is running, so only a persisted row can carry it.
 func TestTemplatePausedSandboxProtectsTemplate(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("needs root")

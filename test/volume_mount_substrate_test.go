@@ -1,6 +1,6 @@
 //go:build substrate
 
-// L3 acceptance for M7 Gate B: Volumes actually MOUNTED into real guests. Requires
+// L3 acceptance: Volumes actually MOUNTED into real guests. Requires
 // root and a real btrfs state dir.
 //
 //	sudo env PATH=$PATH GOTOOLCHAIN=local GOFLAGS=-mod=mod GOSUMDB=off HOME=$HOME \
@@ -36,8 +36,7 @@ import (
 //
 // The command must be a SINGLE PHYSICAL LINE: a newline inside process.args makes
 // runsc reject the spec as an illegal string literal. And the bare rootfs ships no
-// coreutils, so only dash builtins are available — no `cat`, no `ls` (harness lesson,
-// M7 §4⑯).
+// coreutils, so only dash builtins are available — no `cat`, no `ls`.
 func guestSh(t *testing.T, eng *orchestrator.Engine, id model.SandboxID, script string) string {
 	t.Helper()
 	if strings.Contains(script, "\n") {
@@ -87,7 +86,7 @@ func mountEngine(t *testing.T) (*orchestrator.Engine, string) {
 	return eng, stateDir
 }
 
-// TestVolumeMountTwoConcurrentWritersBothReallyWrite is M7 acceptance 2, and it is the
+// TestVolumeMountTwoConcurrentWritersBothReallyWrite is the
 // LOAD-BEARING FOUNDATION of the whole AccessMode enum (volume.md D1): if a second
 // gofer could not attach the same source, SharedReadOnly's read fanout and
 // SharedReadWrite would both be unimplementable and the enum would collapse to
@@ -153,7 +152,7 @@ func TestVolumeMountTwoConcurrentWritersBothReallyWrite(t *testing.T) {
 	}
 }
 
-// TestVolumeMountReadOnlyArmGetsEROFS is M7 acceptance 3: a read-only mount coexists
+// TestVolumeMountReadOnlyArmGetsEROFS pins the read-only arm: a read-only mount coexists
 // with live read-write mounts, the guest's write fails with EROFS (a CLEAN POSIX
 // refusal, not EIO and not a fault), and — the half that would pass silently — THE HOST
 // NEVER SEES THAT WRITE.
@@ -225,7 +224,7 @@ func TestVolumeMountReadOnlyArmGetsEROFS(t *testing.T) {
 	}
 }
 
-// TestVolumeMountTopologyPersistsAcrossPause is M7 acceptance 5: the mount topology is
+// TestVolumeMountTopologyPersistsAcrossPause pins the mount topology as
 // a BINDING (§3.4), so a resume re-mounts per the CURRENT table — a NEW host
 // materialization of the SAME real volume, never a restored copy.
 func TestVolumeMountTopologyPersistsAcrossPause(t *testing.T) {
@@ -267,8 +266,7 @@ func TestVolumeMountTopologyPersistsAcrossPause(t *testing.T) {
 	}
 }
 
-// TestVolumeMountDetachReleasesTheLeaseBeforeTheTopologyChanges is M7 acceptance 6, and
-// the point is that THE TWO EFFECT TIMES ARE NOT SYNCHRONIZED — that is a design fact,
+// TestVolumeMountDetachReleasesTheLeaseBeforeTheTopologyChanges pins that THE TWO EFFECT TIMES ARE NOT SYNCHRONIZED — that is a design fact,
 // not a detail to fold into one value (§6.1).
 func TestVolumeMountDetachReleasesTheLeaseBeforeTheTopologyChanges(t *testing.T) {
 	ctx := context.Background()
@@ -327,7 +325,7 @@ func TestVolumeMountDetachReleasesTheLeaseBeforeTheTopologyChanges(t *testing.T)
 	}
 }
 
-// TestVolumeMountExclusiveLeaseUnderConcurrentAttach is M7 acceptance 4 end-to-end:
+// TestVolumeMountExclusiveLeaseUnderConcurrentAttach is the exclusive lease end-to-end:
 // 24 racers attach one volume exclusively, exactly one wins, the rest get the lease
 // verdict, and ZERO get a driver error.
 //

@@ -34,10 +34,9 @@ type Memory struct {
 	// column is its key — a row is identified by (sandbox, path) for topology and by
 	// (volume, access) for the lease, and both are scanned rather than looked up.
 	//
-	// Memory had NO reference scanning at all before M7 (DeleteSandbox only checked
-	// not-found), so all three scans below — sandbox side, volume side, and the lease —
-	// are newly written rather than inherited. That asymmetry is why the mount table is
-	// real work on BOTH backends and not just on the one with constraints.
+	// Reference protection on this backend is three explicit Go scans — sandbox side,
+	// volume side, and the lease — where SQLite gets them from constraints. Same
+	// contract, different mechanism (§1.3 seam).
 	mounts []model.Mount
 	// outbox is append-only, ordered — the publisher reads oldest-first. Like the
 	// SQLite backend, published rows are marked, never removed (same unbounded-
@@ -217,9 +216,8 @@ func (m *Memory) DeleteVolume(_ context.Context, id model.VolumeID) error {
 	if _, ok := m.vol[id]; !ok {
 		return ErrVolumeNotFound // reported, never folded into success (§6.2)
 	}
-	// RESTRICT equivalent, VOLUME side — newly written for M7. The Go-check twin of
-	// SQLite's mounts.volume FK; both backends run the same contract assertions
-	// (§1.3 seam).
+	// RESTRICT equivalent, VOLUME side: the Go-check twin of SQLite's mounts.volume
+	// FK. Both backends run the same contract assertions (§1.3 seam).
 	for _, mt := range m.mounts {
 		if mt.Volume == id {
 			return ErrVolumeInUse
@@ -488,8 +486,7 @@ func (m *Memory) DeleteSandbox(_ context.Context, id model.SandboxID, ev *Event)
 	if _, ok := m.rec[id]; !ok {
 		return ErrNotFound
 	}
-	// RESTRICT equivalent, SANDBOX side — newly written for M7 (this method previously
-	// had only the not-found check). It is what makes the deletion ORDER required
+	// RESTRICT equivalent, SANDBOX side. It is what makes the deletion ORDER required
 	// rather than stylistic on this backend too: the caller must DeleteMounts first,
 	// exactly as against SQLite, so one discipline covers both.
 	for _, mt := range m.mounts {

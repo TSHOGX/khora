@@ -64,18 +64,15 @@ func RunContract(t *testing.T, mk Factory) {
 	t.Run("TemplateDurability", func(t *testing.T) { testTemplateDurability(t, mk) })
 	t.Run("ReferenceReclaimRace", func(t *testing.T) { testReferenceReclaimRace(t, mk) })
 
-	// Volume object model (§5.C / §4.3): same assertions both backends. The suite
-	// had NO volume-shaped case before M7 — the shape had to be added rather than
-	// inherited.
+	// Volume object model (§5.C / §4.3): same assertions both backends.
 	t.Run("VolumeCRUD", func(t *testing.T) { testVolumeCRUD(t, mk) })
 	t.Run("VolumeCapacityWritePoint", func(t *testing.T) { testVolumeCapacity(t, mk) })
 	t.Run("VolumeDeleteReportsNotFound", func(t *testing.T) { testVolumeDeleteNotFound(t, mk) })
 	t.Run("VolumeDurability", func(t *testing.T) { testVolumeDurability(t, mk) })
 
-	// Mount table (§5.C / §4.3). The suite had NO mount-shaped case before M7, so
-	// every one of these is newly written rather than inherited — and the Memory
-	// backend had no reference scanning at all, which is why they matter equally on
-	// both sides (§1.3 seam).
+	// Mount table (§5.C / §4.3). These matter equally on both sides (§1.3 seam):
+	// SQLite gets reference protection from constraints, Memory from explicit scans,
+	// and only a shared suite proves the two agree.
 	t.Run("MountCRUD", func(t *testing.T) { testMountCRUD(t, mk) })
 	t.Run("MountRestrictsVolumeDelete", func(t *testing.T) { testMountRestrictsVolume(t, mk) })
 	t.Run("MountRestrictsSandboxDelete", func(t *testing.T) { testMountRestrictsSandbox(t, mk) })
@@ -1209,9 +1206,9 @@ func testVolumeCapacity(t *testing.T, mk Factory) {
 }
 
 // testVolumeDeleteReportsNotFound pins §6.2's "idempotent delete must not swallow
-// the verdicts". Today the only verdict on this path is not-found; once the
-// reference-protection constraints land, they arrive HERE, and a backend that has
-// already learned to fold not-found into success would fold those too — making a
+// the verdicts", on the cheapest verdict. It matters because it shares a path with
+// the reference-protection refusals (ErrVolumeInUse, ErrVolumeHasDescendants): a
+// backend that learned to fold not-found into success would fold those too, making a
 // delete that a guard REFUSED indistinguishable from one that succeeded.
 //
 // That is not hypothetical: an external implementation returns
@@ -1624,9 +1621,9 @@ func testMountRestrictsVolume(t *testing.T, mk Factory) {
 // testMountRestrictsSandbox is §6.2 verdict ②: a sandbox held by a live mount row
 // cannot be deleted.
 //
-// THIS TRANSLATION POINT DID NOT EXIST before M7 — DeleteSandbox returned the raw
-// driver error, which reached the API's default arm as a 500. The FK-violation
-// predicate was reusable; the translation was not.
+// The point of the case is the TRANSLATION: without a sentinel, DeleteSandbox returns
+// the raw driver error and the API's default arm makes it a 500. The FK-violation
+// predicate is reusable across tables; the translation is not.
 func testMountRestrictsSandbox(t *testing.T, mk Factory) {
 	ctx := context.Background()
 	s, _ := mk(t)
@@ -1637,7 +1634,7 @@ func testMountRestrictsSandbox(t *testing.T, mk Factory) {
 	}
 	err := s.DeleteSandbox(ctx, "sbx_a", nil)
 	if !errors.Is(err, store.ErrSandboxHasMounts) {
-		t.Fatalf("delete a sandbox with live mounts = %v; want ErrSandboxHasMounts (before M7 this was a raw driver error → 500)", err)
+		t.Fatalf("delete a sandbox with live mounts = %v; want ErrSandboxHasMounts (an untranslated driver error reaches the API's default arm as a 500)", err)
 	}
 	// And the ORDER is what resolves it: mounts first, then the sandbox. Measured,
 	// RESTRICT fires immediately, so no transaction wrapping buys order-independence.
@@ -1985,8 +1982,8 @@ func testReplaceMountsKeepsOldBindingOnRefusal(t *testing.T, mk Factory) {
 // direct host-side write is safe". A replacement implemented as DeleteMounts followed by
 // CreateMounts opens exactly that window — two independent commits, with the volume
 // looking unmounted in between — and nothing about it is visible to a single-threaded
-// test. The measured effect of the old shape is in the report for this change; it is
-// thousands of zero-row observations, not a rare one.
+// test. Measured against the two-commit shape: 299/31,653 and 9,103/196,029 zero-row
+// observations across two runs — thousands, not a rare race.
 //
 // The same window is consequence ② from the other side: no rows means no lease, so a
 // concurrent create could take a volume this PATCH intended to keep.

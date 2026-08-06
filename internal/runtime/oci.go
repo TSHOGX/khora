@@ -123,11 +123,11 @@ type ociNamespace struct {
 // chown/chmod as they install (§1.1 root-capable sandbox).
 //
 // CAP_NET_RAW is DELIBERATELY ABSENT, and its absence is the interesting entry.
-// It used to be requested here, and the guest never got it: measured, the guest's
-// CapEff has the NET_RAW bit CLEAR, because runsc's own `--net-raw=false` default
-// strips raw/AF_PACKET sockets regardless of what the OCI spec asks for. Asking
+// Requesting it here would not grant it: measured, the guest's CapEff has the
+// NET_RAW bit CLEAR, because runsc's own `--net-raw=false` default strips
+// raw/AF_PACKET sockets regardless of what the OCI spec asks for. Asking
 // for a capability that can never be granted is a FAKE INVARIANT — a reader takes
-// it for a deliberate grant — so the request is gone and the real guarantee is
+// it for a deliberate grant — so it is absent here and the real guarantee is
 // PINNED on the runsc side instead (`--net-raw=false` in runscGlobalFlags, §5.A
 // "钉死其依赖的整套 runsc flag、不继承默认"). That matters beyond tidiness:
 // §5.D's future predicate floor is keyed on the input interface, and a guest that

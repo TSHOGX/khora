@@ -410,12 +410,10 @@ func (s *SQLite) DeleteSandbox(ctx context.Context, id model.SandboxID, ev *Even
 	return s.tx(ctx, func(t *sql.Tx) error {
 		res, err := t.Exec(`DELETE FROM sandboxes WHERE id=?`, string(id))
 		if err != nil {
-			// THE FK BRANCH M7 ADDED. Before it, this was a bare Exec whose error was
-			// returned unwrapped, so a mounts.sandbox RESTRICT violation reached the API's
-			// default arm as a 500 instead of a 409 (§6.2). The PREDICATE was reusable —
-			// isFKViolation is table- and column-agnostic — but the TRANSLATION POINT did
-			// not exist, which is exactly the half of "we get this for free" that was not
-			// free.
+			// Without this branch a mounts.sandbox RESTRICT violation would reach the API's
+			// default arm as a 500 instead of a 409 (§6.2). isFKViolation is table- and
+			// column-agnostic, so the predicate is shared; the translation to a sentinel is
+			// per-call-site and cannot be inherited.
 			if isFKViolation(err) {
 				return ErrSandboxHasMounts
 			}

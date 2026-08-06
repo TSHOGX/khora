@@ -287,15 +287,14 @@ func TestAdmissionVerdictsMapToDistinctStatuses(t *testing.T) {
 		}
 	})
 
-	// The OTHER verdict, which this test's name has always promised and which no test
-	// actually drove: a genuinely full node → 507. Worth its own subtest because the
+	// The OTHER verdict: a genuinely full node → 507. Worth its own subtest because the
 	// mapping at the API edge is one line, and a wrong status code there passes the
 	// entire suite — the refusal logic one layer down is well covered, so a regression
 	// would surface only as a caller told "bad request" about a node that is simply out
 	// of room, or told "full" and made to wait when retrying would never help.
 	//
 	// Asserted on statusCodeFor DIRECTLY rather than through a live server, and that is
-	// the honest unit here: the thing that was untested is a one-line SENTINEL → CODE
+	// the honest unit here: the property is a one-line SENTINEL → CODE
 	// mapping at the edge. Driving it end-to-end would need a full-node condition, which
 	// means a runtime+rootfs provider stack (the sandbox axis) or a quota-capable
 	// backend (the volume axis, since §3.4 makes a cap on a backend with no Quota
@@ -306,9 +305,8 @@ func TestAdmissionVerdictsMapToDistinctStatuses(t *testing.T) {
 		if got := statusCodeFor(lifecycle.ErrInsufficientCapacity); got != http.StatusInsufficientStorage {
 			t.Fatalf("ErrInsufficientCapacity → %d; want 507 — the request is VALID and the node is out of room (§6.2: 507 means capacity; 409 would imply a retryable state conflict, and 400 would blame a request that is fine)", got)
 		}
-		// The pair must stay DISTINCT. Collapsing them is the regression this test's name
-		// has always promised to catch: both verdicts arise in the same admission gate,
-		// so a refactor that funnels them through one arm is easy to write and silent.
+		// The pair must stay DISTINCT. Both verdicts arise in the same admission gate, so
+		// a refactor that funnels them through one arm is easy to write and silent.
 		if statusCodeFor(lifecycle.ErrCapRequired) == statusCodeFor(lifecycle.ErrInsufficientCapacity) {
 			t.Fatalf("ErrCapRequired and ErrInsufficientCapacity map to the SAME status (%d) — a missing cap is the caller's request being invalid for this deployment (400), a full node is a capacity condition (507)", statusCodeFor(lifecycle.ErrCapRequired))
 		}
@@ -602,10 +600,10 @@ func (c *placementLeakingClient) WriteStream(context.Context, string, io.Reader)
 // TestFileBypassErrorsHideThePlacement: GET|PUT /v1/sandboxes/{id}/files refuse
 // WITHOUT naming the guest endpoint or a host path, and still say what failed.
 //
-// This route is REST rather than Connect precisely because it streams bytes, which is
-// how it ended up outside proxyErr's reach: it has its own status mapping
-// (bypassCode), and that mapping used to write `err.Error()` in every arm. Same class
-// of defect as the control-plane one, one layer over.
+// This route is REST rather than Connect precisely because it streams bytes, which puts
+// it outside proxyErr's reach: it has its own status mapping (bypassCode), so the
+// placement-hiding discipline has to be re-established here rather than inherited —
+// the same class of defect as the control-plane one, one layer over.
 func TestFileBypassErrorsHideThePlacement(t *testing.T) {
 	const veth = "10.88.0.7:9000"
 	const overlay = "/srv/state/overlays/ov_x/merged"
