@@ -45,6 +45,8 @@
 | --- | --- | --- |
 | **§5.D 网络策略强制(支柱③ 的 enforcement)** | **设计已定(§2.4 三条 invariant / §5.D / network.md),代码一行未落**:无 `internal/network` 包,无 nft / TPROXY / deny-set。今天 `local_runsc` 只建 netns + veth + 两个 `/30`,**egress 不被强制**——沙箱当前到不了外网/兄弟/link-local,**仅因为没有默认路由**,而 guest root 持 `CAP_NET_ADMIN`、宿主 `ip_forward=1`,故一条 `ip route add default` 即可达宿主 LAN 与兄弟沙箱 IP(实测)。§2.4 三条 invariant 今天**无一成立**;宿主 loopback 与 orchestrator 控制面是被 `127.0.0.1` bind + `route_localnet=0` **偶然**覆盖的,不是被强制。**连带**:`GET /v1/sandboxes/{id}/network` / `POST …/publish` 两个端点 404,`POST /v1/sandboxes` 的 `network?` 键被静默丢弃(未知键)。**L0 地板怎么挣到、deny-set 住哪**两项是设计决策,见 §2 对应行 | **M8**(`docs/plans/M8-network.md`,待建) |
 
+| **沙箱 disk 帽降到当前用量以下没有写点**(§3.4 严格不等式的 §5.B 一侧) | **设计已定([model.md](./model.md) §3.4 的"降帽不是安全方向"块),代码只落了卷侧那一半**:`lifecycle.SetVolumeCapacity` 用严格不等式把卷帽的 below-usage 降帽拒成 400(`ErrVolumeCapBelowUsage`),而 `UpdateBinding` 在 disk 轴上**只校验 `0 → N`**(`ErrUncappedDiskNotCappable`,`lifecycle.go:850`)——`N → M` 无校验通过,该处注释自己写着"`N → 0` 和 `N → M` remain legal"。故一次 `M ≤ 当前用量` 的 `PATCH` 返 200 并**卡死该存储单元**(与卷侧实测逐字节同形:其后 mkdir / 建文件 / truncate 成 0 全返 `ENOSPC`,配额 ioctl 自己也返 `ENOSPC`,帽既不能撤也不能抬)。**不是缺一条 `if`,是一次 seam 改造**:`rootfs.Provider` 只暴露 `PromoteCostBytes` 与 `UncappedBytes`,而 `UncappedBytes` 对**有帽单元刻意计 0**(那是它的契约),中介层因此读不到严格不等式所需的 per-sandbox 用量。收口需要 §5.B 新增一个沙箱级用量查询,形状照 `volume.Backend.Usage(ctx, id) (used, limit, err)` | **无**——M8 是网络、M9 是凭证,两个 plan 都不含此项;收口里程碑待定 |
+
 > **为何登记在此而非留白**:本表的作用正是回答"哪些已定但还不真"。§5.D 是最大的未建面、且是安全关键面,
 > 而 `SPEC.md` §2.1③ / §2.4 是用**现在时**写的——一个只读 spec 的人会以为它已被强制。§5.D 与冷启链
 > (guest-runtime D5.1 的 ③)各自带一条同样的未建标记。本行在 M8 落地后移除。
