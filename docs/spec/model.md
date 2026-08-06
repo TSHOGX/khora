@@ -27,12 +27,15 @@ Template   不可变、内容寻址的只读底座(可被多沙箱共享/fork)
 - **Paused**:静止后停掉 runsc 容器,Overlay 留在后端,释放 RAM/CPU。**不做内存快照**(§4.2)。
 - **Promote**:把当前 Overlay 固化成命名 Template 的新底层(像分层镜像),供以后 fork。**对一个
   逻辑上运行中的沙箱发起,但固化读的是 at-rest 字节**——引擎内部先把它静止/flush 到一致点(等价一次
-  pause),再读冻结的 Overlay 去固化;**绝不在容器运行中读文件内容**(§5.B"只读 at-rest")。
+  pause),再读冻结的 Overlay 去固化;**绝不在容器运行中读文件内容**(§5.B「读 Overlay 内容只在 at-rest」)。
   - **一处刻意的例外,且它只读元数据**:代价预报(`PromoteCostBytes`,过 §3.4 准入门用)walk 的是**还在
-    运行的** upper,只 `stat` 分配元数据、不打开任何文件——与 §5.B"计量随时可问后端"同一条豁免。
+    运行的** upper,只 `stat`、不打开任何文件——与 §5.B"计量随时可问后端"同一条豁免。**它按
+    `max(已分配, 表观大小)` 投影,不是纯分配陈述**:固化是一次不打洞的拷贝,故稀疏文件按分配算会低估,
+    而低估是准入门唯一不能容忍的方向。
     **为何必须在静止之前**:预报是准入门的入参,而静止本身已经是一次真 pause(会发 `paused` 事件);
     放到静止之后,一次因容量不足的拒绝就会留下一个**已被停掉**的沙箱,即"拒绝"带上了不可回退的副作用。
-    故次序是"先预报、再静止、再固化",预报的方向是安全的(上界:被排除项遮蔽的字节只会让它高估)。
+    故次序是"先预报、再静止、再固化"。预报用**与固化同一份排除集**(否则会为注定被剪掉的字节拒 Promote),
+    方向仍是安全的上界:硬链接按每条链接计,而固化确实会把它们展成独立文件。
 
 #### 3.1.1 Overlay 是解耦工件,不与 Template / 宿主路径绑定
 
@@ -70,7 +73,7 @@ ssh 同一台 Linux,是 Unix 模型本身。**每条连接 = `process` 服务的
   文件)。agent 派生 agent = 一台 Linux 上的进程经 localhost 互相说话,engine **不追踪、也不该
   追踪**(符合解耦前提)。engine 侧**没有**命名端点、tag、会话注册表这类原语。
 - **寻址用 guest 原生机制,不靠 engine 造命名空间**:要跟某个(含被派生的)agent 说话,用它的
-  pid / unix socket / 端口,经 `process` 能力连过去——**Linux 已有进程命名空间,engine 不再发明
+  pid / unix socket / 端口,经 `process` 能力连过去——**Linux 已有进程命名空间,engine 不另发明
   一个**。若产品要人类可读的名字,那是**数据**(agent 把"我是 planner"写进自己日志),产品层读
   日志即得映射,engine 永不解析名字。
 - **产品层(在 engine 之上,不在其内)**:"session"、swarm 拓扑(谁派生谁、DAG)、哪个 agent 归
@@ -102,14 +105,14 @@ pause/resume 与 multi-node provider(§5.A)同时成立的前提。
   data Volume 内容(各自后端)。resume 直接读回。
 - **Binding(按控制面记录重建)**:SoT 是沙箱自己的控制面记录——引用哪个 Template、挂了哪些
   Volume、**资源上限(CPU/RAM/disk)**、**生命周期 TTL(`idle_timeout`/`retention`,§4.3)**、网络策略。
-  resume 时按**当前记录**重建,不读冻结字节;取值跨 resume 稳定保持,故都是 Binding 而非 placement
-  (placement 每次重绑、不是 SoT,§3.3)。**但物化点不同**:资源上限在每次 placement 时物化
+  resume 时按**当前记录**重建,不读冻结字节。取值跨 resume 稳定保持,故都是 Binding——placement 每次
+  重绑、不是 SoT(§3.3)。**但物化点不同**:资源上限在每次 placement 时物化
   (§5.A/§5.B);**TTL 没有任何 placement-local 物化**,它的消费者是 reaper,每轮 sweep 直接读记录。
   连接(process)**不是 Binding**:engine 不存连接记录,resume 后由 client 重新发起(§5.E)。
 
 > **"资源上限"是三个维度,各用自己该用的机制物化,超限后果也就各自不同。** 三者都是 per-sandbox
-> Binding、都在 placement 时物化(Volume 各自的容量帽**不是其中一轴**:那是 per-volume 属性、记在卷记录
-> 上、由 §5.C 物化——但它**仍进节点核算式的第一项**,见下文):
+> Binding、都在 placement 时物化。**Volume 的容量帽不是其中一轴**——它是 per-volume 属性,记在卷记录上、
+> 由 §5.C 物化;但它仍进节点核算式的第一项(见下文):
 >
 > | 维度 | 机制 | 超限后果 | 定位 |
 > | --- | --- | --- | --- |
@@ -187,7 +190,9 @@ pause/resume 与 multi-node provider(§5.A)同时成立的前提。
 > > 但其后连 `mkdir` / 建文件 / **把已有文件 truncate 成 0** 都返 `ENOSPC`(只有 unlink 还活着),而且
 > > **配额 ioctl 自己也返 ENOSPC**——帽既不能撤、也不能抬,连抬到高于当前用量都不行。唯一出路是删字节
 > > 删到用量落回帽下。故引擎**不得接受这样的降帽**(§5.C 的卷帽写点把它拒成 400,判据是严格不等式);
-> > 沙箱 disk 帽同理,只是它今天的写点在 `paused` 且尚无人报告过用量,故那一侧的校验随消费者出现时补。
+> > 沙箱 disk 帽同理:同一条严格不等式适用,但**那一侧今天没有写点**,故一次降到当前用量以下的 `PATCH`
+> > 会被接受并卡死该单元(与卷侧逐字节同形)。收口需要 §5.B 报出 per-sandbox 用量(seam 已有
+> > `UncappedBytes`,但有帽单元计 0,读不出用量),故这是一条**已知缺口**,不是"随消费者出现"的选项。
 > > 这也是 §2.3 "`ENOSPC` 是数据面内的**预期**结果"那句话的前提在此**不成立**的地方:预期的前提是边界
 > > 被**显式声明**过,而一次被静默接受的缩帽对运行中的工作负载什么都没声明。
 >
@@ -201,8 +206,8 @@ pause/resume 与 multi-node provider(§5.A)同时成立的前提。
 > >
 > > **为什么不是"下次 placement 顺手把它转成配额单元"**:那要在 resume 热路径上搬字节(建新单元 → 拷
 > > → 换),给最承重的那条链新增一个带崩溃窗口的数据移动步骤,为的是一个调用方**重建沙箱就能得到**的结果。
-> > **也不是"干脆所有沙箱都建成配额单元"**:那让每个沙箱都付这份开销,并且改变非 btrfs `StateDir` 上的
-> > 行为——那里今天无帽沙箱本来跑得好好的。**方向性**:`N → 0`(撤帽)仍然合法,它只是把帽清掉;
+> > **也不是"干脆所有沙箱都建成配额单元"**:那让每个沙箱都付这份开销,并且要求 `StateDir` 必须是 btrfs
+> > ——无帽沙箱在任何 FS 上都应能跑。**方向性**:`N → 0`(撤帽)合法,它只是把帽清掉;
 > > `N → M`(改帽)也合法。被拒的只有 `0 → N` 这一向。
 >
 > **`paused` 沙箱仍占两条预算**,尽管它物理上已释放 RAM/CPU(§4.2)。理由不是记账方便,而是 `paused`
@@ -226,8 +231,7 @@ pause/resume 与 multi-node provider(§5.A)同时成立的前提。
 > **写入的三条附带纪律。** ① `PATCH` 只换整份绑定:未给的字段不动,且不存在"待定/未解析"值(§6.2)。
 > ② 它**不动 `UpdatedAt`**——`retention` 从那一列起算(§4.3),顺手刷新它等于把驱逐期限当作改帽的副作用
 > 悄悄延长。③ 它**不是 §4.1 转换**,故不发事件——Promote 同理(只是 Promote **自身**不是转换;它内部对
-> `running` 源的静止是一次普通 pause,照发 `paused`)。"改绑定要不要发一条非转换事件"随 event schema
-> 那轮定(open-decisions §2)。
+> `running` 源的静止是一次普通 pause,照发 `paused`)。
 >
 > **provider 不被要求就地改帽**:没有"把这个单元的帽设成 N,现在"这种调用——那是宿主原语形状的请求,
 > 被调度的远端隔离单元一般兑现不了(§5.A ❌ list)。改帽走的是"改记录 + 下次 placement 重物化"。
@@ -254,6 +258,9 @@ pause/resume 与 multi-node provider(§5.A)同时成立的前提。
 Overlay(B)、按挂载表重挂 Volume(C)、按网络策略重建 egress(D);E(传输)无状态,引擎不参与,
 由 client 自行重连。
 
+> **落地状态**:D(egress 重建)是"已定、未建"——`internal/network` 尚不存在,故今天的 resume 只跨
+> A/B/C 三个子系统;网络策略也还不是一条真的 Binding 列。缺口与 owning plan 见 open-decisions §4。
+
 由此定下职责归属,防止成环:
 
 > **动词归 §4,机制归 §5。** 生命周期(§4)持有状态机,按状态机**调用**每个子系统暴露的能力;
@@ -277,7 +284,8 @@ creating ──▶ running ──pause / auto-pause / crash──▶ paused ─�
 
 - **显式转换**(API 动词):`create` / `pause` / `resume` / `destroy`;`destroy` 从 `running` 或
   `paused` 都可发起,终态 `destroyed`(删 Overlay 工件)。
-- **自动转换**(reaper 守护)**共三条**,两条"释放"方向:`running` 空闲超阈值 → `auto-pause`;
+- **自动转换**(reaper 守护)**共三条**(下一条的非自愿降级不计在内,尽管它也由 reaper 的同一轮驱动),
+  两条"释放"方向:`running` 空闲超阈值 → `auto-pause`;
   `paused` 超保留期 → `evict`(**`evict` 就是 reaper 对 `paused` 沙箱触发的 `destroy`**——同一个
   `→ destroyed` 终态,只是触发方是 reaper 而非用户)。往 `running` 去的只有第三条:transport-down
   连续超重启预算后的升级(§4.3 / reaper-health D4b);**L1 探不到的死亡不在其中**,那要显式动词恢复
@@ -286,16 +294,17 @@ creating ──▶ running ──pause / auto-pause / crash──▶ paused ─�
   `paused`(§4.2 崩溃变体 / §4.3 / §4.4-A)——这是**进入 `paused` 的第三条路**,与用户 `pause`、reaper
   `auto-pause` 并列,事件 Kind 为 `crash-paused`(见下条)。**死因随这次 CAS 同一提交落库**(§4.3):
   它决定该沙箱之后走 resume 还是不走,而信号在提交后即不可恢复。
-- **转换对外发布为事件**:每次状态机转换(created / paused / auto-paused / crash-paused / resumed /
-  destroyed …)发布到一条 **event stream**;webhook、metrics、计费等 subscriber 在**引擎之外**消费,
+- **转换对外发布为事件**:每次状态机转换发布到一条 **event stream**,Kind 恰好六个——`created` /
+  `paused` / `auto-paused` / `crash-paused` / `resumed` / `destroyed`(**没有 `evict` Kind**:evict 发
+  `destroyed`);webhook、metrics、计费等 subscriber 在**引擎之外**消费,
   **引擎不知道也不依赖谁在订阅**。这是 observability / 计费的接法——单向、additive(§1.3:add a
   subscriber),不是引擎反过来回调外部系统。**三种 pause 类事件的态都是 `paused`,但 Kind 分承其因**:
   `paused` = 用户暂停、`auto-paused` = reaper 空闲暂停、`crash-paused` = **非自愿**降级(§4.2 崩溃变体);
   态相同,Kind 让 subscriber 分辨"为何暂停"。**`crash-paused` 覆盖两条非自愿路径,不只"单元已死"**:
   ① 探活/对账发现隔离单元已死(带死因落库);② transport-down 连续超重启预算的升级(§4.3 / reaper-health
   D4b)——那一条 **L1 仍活**,故**不带死因**(无可解释的死亡,§2.4 不许猜)。二者共用同一 Kind 是 D4b
-  的刻意选择(升级只改判处置健康态,不新造状态或动词);要区分它们的 subscriber 看**死因在不在**即可。**状态提交与事件发布如何做到不丢
-  不错(计费级),见 §4.4。**
+  的刻意选择(升级只改判处置健康态,不新造状态或动词);要区分它们的 subscriber 看**死因在不在**即可。
+  **状态提交与事件发布如何做到不丢不错(计费级),见 §4.4。**
   > **终态必须成对:没见过 `created` 的沙箱不发 `destroyed`。** 一条 `creating` 记录还没对外可见过
   > (`created` 只在 create 链提交后才发),故删除它**不发事件**——无论是对账清理崩溃残留,还是运维事后
   > 手动 destroy 那条卡住的记录(崩溃后对账的删除本身也可能失败,故这条记录确实可达)。两条路径同一条
@@ -322,10 +331,10 @@ Overlay upper,保证 at-rest 字节一致,§5.B"只读 at-rest")。生命周期�
 语义)。静止点**按进程行为分两类原语,不按 agent/turn 语义分**:
 
 - **引擎自己发出的 mutating 写**:先过一道 **host 侧 drain-barrier**——停收新的 mutating fs 写、等
-  in-flight 排空,再 flush、再冻结。这一层是**确定性**的(host 完全掌握自己发出的 RPC,无需 guest 配合、
-  不引入 ack 通道),且它关掉的是一个具体、已实测的窗口:`fs.Write` 是 truncate-then-write,抢占落在两步
-  之间会把文件留成空的。**只挡写、不挡读**(挡读等于在 pause 期间关掉观测面);排空超时即降抢占,**绝不
-  让 pause 失败**——一条卡住的 RPC 不能让沙箱变成不可 pause,而超时的落点正是崩溃的落点(§4.2 已接受)。
+  in-flight 排空,再 flush、再冻结。这一层**确定**:host 完全掌握自己发出的 RPC,无需 guest 配合、
+  不引入 ack 通道。它关掉的是一个具体窗口——`fs.Write` 是 truncate-then-write,抢占落在两步之间会把
+  文件留成空的。**只挡写、不挡读**:挡读等于在 pause 期间关掉观测面。**排空超时即降抢占,绝不让 pause
+  失败**——一条卡住的 RPC 不能让沙箱变成不可 pause,而超时的落点正是崩溃的落点(§4.2 已接受)。
   crash-pause 不排空:容器已死,没有 in-flight 可等。
 - **guest 内的负载(裸 pty、长跑进程)**:走**抢占式**——直接冻结,不做协作握手。**应用层安全点不进
   引擎**:engine 不认识 agent(§3.2.1),既不能要求负载在信号里停到安全点、也无法验证它停对了;
@@ -379,9 +388,10 @@ resume 而非 auto-pause 的静止(健康态分类与判据见 §4.3)。
 | --- | --- | --- |
 | **healthy** | L1 活 + L2 通,且有连接活跃(近期有 I/O:进程输出 / pty 读写) | 保持 `running`,不动 |
 | **idle** | L1 活 + L2 通,但**所有**连接都 idle(近期无任何 I/O) | 超阈值 → **auto-pause** 静止到一致点(§4.2;flush 由 substrate 保证,不依赖协作握手) |
-| **transport-down(瞬态)** | **L1 活、L2 不通**——transport 子进程崩了,PID1 正在原地重启(§5.E.1) | **等重启**;端口在**同一 IP** 上恢复,**不是** dead-recoverable、**不**走 resume;**连续 transport-down 超重启预算 → 升级为 dead-recoverable 走 resume**(防崩溃循环卡死,机制见 reaper-health D4b) |
-| **dead-recoverable** | **L1 探不到**(容器整死),持久态(Overlay 工件)在后端完好,**且死因不是撞资源帽** | 走 **resume**(§4.2),换新 IP 冷启,**不是** auto-pause |
-| **resource-terminated** | **L1 探不到,且死因是撞 RAM 帽**(§3.4 安全限:沙箱被整组终止) | **不 resume**、不 auto-pause——留 `paused`。resume 会让同一负载再次触发终止,即崩溃循环。**转机只有一条:改帽**——经 §6.1 `PATCH /v1/sandboxes/{id}` 抬高 `memory_byte`(须重过准入门,节点无容量则被拒),**该次提交同时清死因**,之后 resume 才放行。**它不豁免驱逐**(见下) |
+| **transport-down(瞬态)** | **L1 活、L2 不通**——transport 子进程崩了,PID1 正在原地重启(§5.E.1) | **等重启**;端口在**同一 IP** 上恢复,**不是** dead-recoverable、**不**走 resume;**连续 transport-down 超重启预算(以连续时长计,非 PID1 重启次数)→ 升级为 dead-recoverable 走 resume**(防崩溃循环卡死,机制见 reaper-health D4b) |
+| **dead-recoverable** | **L1 探不到**(容器整死),持久态(Overlay 工件)在后端完好,**且死因不是撞资源帽** | **crash-pause 降 `paused`**(§4.2 非自愿 pause),死因同一提交落库;恢复路径是 **resume**(换新 IP 冷启)、**由调用方显式发起**,不是 auto-pause 的静止 |
+| **resource-terminated** | **L1 探不到,且死因是撞 RAM 帽**(§3.4 安全限:沙箱被整组终止) | **不 resume**、不 auto-pause——留 `paused`。resume 会让同一负载再次触发终止,即崩溃循环。**转机只有一条:改帽**——经 §6.1 `PATCH /v1/sandboxes/{id}` 抬高 `memory_byte`(须**严格**大于原值,等值写入不清死因;须重过准入门,节点无容量则被拒),**该次提交同时清死因**,之后 resume 才放行;一次成功的 resume 同样清死因。**它不豁免驱逐**(见下) |
+| **unknown** | L2 不通,且 L1 判不出(provider 报错 / 无活 placement 句柄) | **什么都不做,下轮重试**——对不确定取保守(§4.4-A):既不降级也不 resume。它**永不是一种处置**,只是分类器的安全默认 |
 
 > **resource-terminated 与 dead-recoverable 并列,不是它的子类。** 两者 L1 都探不到、持久态都完好,
 > 表现完全相同;区分只能靠**死因信号**,而处置**相反**(一个必须 resume,一个必须不 resume)。死因跨
@@ -461,6 +471,8 @@ auto-pause)与 `retention`(`paused` 超它 → evict)——是沙箱控制面记
   - **refcount 普适、且 derived**:回收看「有没有引用它的活行」,**不物化计数字段**(由引用行是否
     存在查询导出——单机权威 store 下与物化计数等价,见下条与 §4.4-C)。无 owner 列——只看
     refcount/TTL,不看"谁拥有"(§1.4)。连接(process)不是持久对象,不参与回收。
+    **Overlay 工件是退化情形**:它恰好被一个沙箱行引用,故其回收谓词就是"无对应沙箱行",由孤儿单元
+    sweep 兜(§4.4-A),不需要计数。
   - **显式生命周期状态机只属于会真正转换的可变对象(sandbox,§4.1 四态)**。**不可变工件
     (Template,及后续挂载行)用「存在即状态」**:行存在 = ready、删行 = destroyed,无中间态,
     故不设 state 列。**代价与硬约束**:存在即状态没有 not-ready 逃生舱,故**强制字节先行物化**
@@ -502,7 +514,8 @@ auto-pause)与 `retention`(`paused` 超它 → evict)——是沙箱控制面记
 - **pause 静止失败**:drain-barrier 只是"尽量不截断 in-flight 写"的优化,非正确性前提——排空超时 → 降
   抢占式冻结 → 最坏强杀,任一路径都落到**合法的 `paused`**(与 §4.2 崩溃语义一致)。故 pause 无中间脏态。
 - **destroy 删字节失败**:状态转换(标 `destroyed`)与字节回收(删 Overlay/Volume)**解耦**——转换是
-  控制面动作,删字节由 refcount sweep(§4.3)异步重试。删字节失败不阻塞、不回退状态转换,destroy 天然幂等。
+  控制面动作,删字节失败后由**孤儿单元 sweep**(§4.4-A 反向对账,与 refcount GC 不是一回事)异步重试。
+  删字节失败不阻塞、不回退状态转换,destroy 天然幂等。
 
 由此定三条不变量,分接上面三道裂缝(A 接失败留脏态、B 接并发打架、C 接状态与事件不一致):
 
@@ -575,8 +588,7 @@ placement-local 资源,其机制(`Adopt`/`ReclaimOrphans` 签名、SandboxID 标
 - **归属**:锁与 CAS 是 §4 mediator 的编排义务,store 只提供 `lifecycle-state` 的**条件写(compare-and-set)**
   机制——不违反"子系统间不互调"(§4 开头),因为串行化发生在 mediator 层,不是让某子系统去调另一个。
 - **与 resume single-flight(§4.3)的关系:锁承重正确性,single-flight 只承重效率。** 锁全程持有已独占
-  整条 resume,**并发动词打架的正确性由锁兜底**;single-flight 是另一层——它挂起 in-flight resume 期的
-  健康分类以免空转/误报(机制见 §4.3),**不承重并发正确性**。
+  整条 resume,故并发动词打架的正确性全在这里;single-flight 解决的是另一件事(机制见 §4.3)。
 
 **不变量 C —— 状态提交与事件发布单次原子,算法一份、后端差异收口在 store 契约后。** §4.1 每次转换要
 发事件到 event stream,计费类 subscriber 靠它记账,**漏一条就漏账**。危险的做法是让"后端支不支持事务"
@@ -623,7 +635,7 @@ SQLite 靠**序列化写事务**兑现(另一个写事务开着时第二个 INSE
 时间版本化**时才可承受(迟到的重复在 merge 时落败、不复活旧态),我们的 sink 没有这层缓冲垫。
 
 **但"停摆"是取舍,"无界、无告警、不可见的停摆"是缺陷**,故三条可运维性是硬要求(机制落在
-`store.Publisher`):① **毒信封出口** —— 尝试次数上界 + 到界后**停止重试并latch一个必须被注意到的信号**
+`store.Publisher`):① **毒信封出口** —— 尝试次数上界 + 到界后**停止重试,并 latch 一个必须被注意到的信号**
 (清除它是运维动作,不自动解除:自动解除等于把上界退回成它要取代的无限重试);② **退避有上限且有
 jitter**,两者修的是不同故障 —— 无上限的指数退避约 20 次后排到几天以后,事件既不投递也不告警;无
 jitter 则多个 drainer 在同一到期时刻撞同一行;③ **可观测性不与被观测的循环同 goroutine** —— 这条是
@@ -638,9 +650,9 @@ jitter 则多个 drainer 在同一到期时刻撞同一行;③ **可观测性不
 gauge / 采样接(§1.3 add a subscriber,Consumption seam),不进引擎原语。外部证据同向:两个参考实现
 都只暴露 gauge / 采样,无人把压力发成事件。
 
-**保留窗口(裁剪)**:今天**不裁剪,行只标记不删**。`sqlite.go` 的 at-rest 无界增长
-**仍是 KNOWN LIMITATION、未被解决** —— 它没有因这个决定变成优点。这是**被推迟而非被回答**:裁剪窗口
-必须由"承诺给外部订阅者的重连时长"定,而今天引擎内的 sink 只是个打日志的参考实现、"已投递"几乎恒真,
-故**没有可论证的窗口取值**,凭空取一个数是 §1.3 拒绝的投机性预留。仍开放的就只剩这一项,见
+**保留窗口(裁剪)**:**不裁剪,行只标记不删**。代价明说:outbox 的 at-rest 体积无界增长,是一条
+**已知限制**,不是这条决定的优点。窗口取值必须由"承诺给外部订阅者的重连时长"论证,而引擎内的 sink
+是个打日志的参考实现、"已投递"几乎恒真,故**没有可论证的取值**;凭空取一个数是 §1.3 拒绝的投机性
+预留。这是本节唯一仍开放的一项,见
 [`open-decisions.md`](./open-decisions.md) §2 的事件流行。**连带**:`earliest` 恒为最小序号,故 §6.1
 的 410 今天不可达 —— 响应仍带 `{earliest, latest}`、410 写成保留语义,让将来真加裁剪时调用方契约无需变更。

@@ -192,8 +192,11 @@ transport 只依赖 placement 给出的结果——**netns 由谁建、veth IP �
   **本沙箱** FS、发信号)它作为 root 本就全能做;通道也**不持有凭证**——凭证从不进 guest(支柱④),
   `sandboxd` 只做 process/fs、对 model/provider 凭证一无所知。故"guest 可达控制通道"既不提权、也不泄
   凭证(纠正一个常见误判:它读不到凭证配置,因为凭证根本不在 guest 侧)。
-- **sibling 沙箱**:**够不到**——已被跨沙箱网络隔离挡死(§2.3 / network.md D5.5:sibling IP 进 L0 地板 /
-  点对点 veth,正是为拦"sibling 直连 veth IP"而设)。
+- **sibling 沙箱**:**按设计够不到**——跨沙箱网络隔离把它挡死(§2.3 / network.md D5.5:sibling IP 进 L0
+  地板;点对点 veth 是纵深的一层、不是物化方)。**⚠ 这一条今天不成立**:L0 地板未落地,实测两个真沙箱
+  之间 TCP 握手成功并读到载荷(network.md D5.5 / [`open-decisions.md`](../open-decisions.md) §4)。故下面
+  "通道内 auth 冗余"的结论在 M8 之前少一条支撑腿——sibling 今天到不了这个端口靠的是"guest 没有默认路由",
+  不是强制。
 - **外部**:除非**显式 publish**(可带 `auth`,§5.D)否则不可达。
 
 **对照**:一个挂在**公网可达 URL** 上的 guest daemon 必须带 access token;本项目 `sandboxd` 只在
@@ -271,8 +274,9 @@ RPC 清单(按 pid 寻址,tag 不进模型见 D4.6):
   - **边界:engine 只保证 best-effort 字节 tail,不保证屏幕重建。** 裸字节回放可能落在 ANSI 转义序列
     中段;**完整屏幕状态重建(tmux/screen 式 reflow)是 engine 外 client/adapter 的活**,engine 不理解
     流内容(D3 seam),不替终端发明它本不具备的语义(呼应 D2「PTY 不落 scrollback 文件」)。
-- **信号默认发进程组,可寻址单进程。** `SendSignal` 默认对**进程目标的进程组**发(先 `kill(-pgid)`、
-  fallback `kill(pid)`),因为 `apt`/build/
+- **信号默认发进程组,可寻址单进程。** `SendSignal` 默认对**进程目标的进程组**发(先 `kill(-pid)`、
+  fallback `kill(pid)`;`-pid` 就是进程组,因为非 PTY 的 `Start` 一律 `Setpgid` 自成组、PTY 走 `setsid`
+  ——C1 那条非对称是它成立的前提),因为 `apt`/build/
   dev-server 都 fork 子树,只杀父会留一堆孤儿。这是 spec §4.2「向 guest 内进程发定向信号」的落点(注意
   pause 的静止点本身不走这条路:它是 host 侧 drain-barrier,不给负载发协作信号,guest-runtime D4.4)。
   定向信号归 transport、容器级扇出归 PID1 的分裂见 guest-runtime.md D4.3(§5.E.1),不在此复述。
@@ -287,7 +291,8 @@ RPC 清单:全 unary + 大文件 HTTP 流式旁路,不做 watch。
 全 unary;`Stat` 返回 `EntryInfo{name,path,type,size,mode,mtime,symlink_target?}`。
 
 **语义取最宽容的一档**(与成熟实现同):`MakeDir` 建父目录(`mkdir -p`),已存在报
-`already_exists`(不静默成功);`Remove` **递归且幂等**(删不存在的东西算成功),不给 `recursive` 开关
+`already_exists`(不静默成功);`Remove` **递归且幂等**(删不存在的东西算成功;唯一例外是 guest 根 `/`,
+判 `invalid_argument`——一次误传的空路径不该等于擦掉整个沙箱),不给 `recursive` 开关
 ——对可信调用方,严格档只是个陷阱,还多一条每个调用方都得处理的错误分支;`Move` 建目标父目录并**覆盖**
 目标(拒绝会让"替换这个文件"整类用法失效);`Stat` 是 **lstat**(符号链接报成它自己,`symlink_target`
 按链接自身所在目录绝对化——相对路径对 guest 外的调用方没有意义,且没有 `Readlink` RPC 可事后补救);
@@ -299,7 +304,8 @@ RPC 清单:全 unary + 大文件 HTTP 流式旁路,不做 watch。
 **`Stat` 与 `List` 共用同一个 `EntryInfo` 构造点**,不是风格问题:一个参考实现两条路径分开写,结果
 `List` 不填符号链接目标而 `Stat` 填,同一个条目取决于你怎么问它就长得不一样。
 
-**大文件走 HTTP 流式旁路**(`GET|PUT /files?path=`,与 Connect handler 共用 guest 的同一个监听端口),
+**大文件走 HTTP 流式旁路**(`/files?path=`,`GET` 下载 / `PUT`|`POST` 上传,与三个 Connect handler 共用
+guest 的同一个监听端口),
 不挤 RPC。**阈值由调用方定,引擎不猜**:小载荷走 RPC 更省一次往返,大的必须流式。旁路买到的**不是尺寸
 上限**(RPC 也能收下很大的消息),而是**两端都不整份持有**——实测同一个 64 MiB 载荷,guest 侧
 `sandboxd` 的 VmRSS:旁路 +9 MB、RPC +338 MB(约 37×,且比值随文件增大)。这条是**安全性而非效率**:
@@ -315,7 +321,8 @@ RPC 清单:全 unary + 大文件 HTTP 流式旁路,不做 watch。
 
 ### D4.5 liveness / readiness:一个 `Health` 探针
 
-`sandboxd` transport 模式暴露一个 unary `Health{}`→`{ok, idle_millis}`。它**一处三用**,不另造协议:
+`sandboxd` transport 模式暴露一个 unary `HealthService.Check{}`→`{ok, idle_millis}`(proto 里它是与
+`ProcessService`/`FsService` **平级的第三个服务**,不是挂在两者上的一个方法)。它**一处三用**,不另造协议:
 transport 探活探针(spec §4.3 两层探活的 transport 层)、resume readiness 门(guest-runtime D5.2 要点①:
 首次 `Health` 成功即翻 `running`,不信裸 TCP accept),以及**连接活动探针**(§4.3 idle 象限:`idle_millis` =
 `now - 沙箱全局上次 I/O 时戳`,transport 在 `broadcast`/`writeInput` 打戳)。**用专门的 `Health` 而非
@@ -334,15 +341,15 @@ transport 探活探针(spec §4.3 两层探活的 transport 层)、resume readin
 
 ---
 
-## D5. 边界与仍待
+## D5. 边界
 
 - **不提供 checkpoint / restore 原语**(已拍板,非待定):内存态冻结整族被 §1.4 永久排除——全 VM 镜像
   与**单进程 checkpoint 是同一条约束**,都把状态锁在特定 CPU-feature 上(§2.5),持久态便不再能跨
   host/CPU 搬(§1.5#3)。gVisor 在 systrap 下本可 checkpoint;我们不用,是为可移植性。恢复因此只有一条
   路:`--resume` + `fs` 读历史(D3)。
-- **engine 独立使用形态**:只用 process/fs 的沙箱产品边界;session adapter 将来如何在外面叠。
-- **API / CLI 投影**:见 D6。spec §6.1 的 process/fs 两组端点按本节 RPC 清单细化(session 不进
-  engine API);外沿协议分工(控制面 REST / 数据面 Connect)在 D6 定死。
+- **session adapter 怎么在外面叠不在本文,也不在引擎内**:它是 engine 外的加法,只要 D3 那三个 seam 在
+  就能落地(D1.2),engine 侧无待办。
+- **外沿投影已定死在 D6**(控制面 REST / 数据面 Connect),同样不是待办。
 
 ---
 

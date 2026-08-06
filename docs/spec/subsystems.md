@@ -39,12 +39,12 @@
   别的 provider 落成其调度层的等价资源约束(份额对应其调度权重)。**disk 容量上限不在此**——它是 FS 层
   配额,per-sandbox 的归 §5.B(Overlay upper+work)、per-volume 的归 §5.C。
   - **disk I/O 速率轴落地时,整盘 MAJ:MIN 由 provider 自行推导**——与 RAM 的 overhead 同一形状:契约里
-    只有速率意图,设备号是 provider 内部细节。`local_runsc` 从自己的 state dir 反查 backing 整盘(`io.max`
-    要整块盘,给分区号则 launch 直接失败),该值全程不出本地 provider;远端 provider 用其调度层的等价物
-    表达速率帽。**否决"宿主拓扑配置项"**:无论落进 Binding 还是落进 provider 入参,都把一个宿主原语抬上了
+    只有速率意图,设备号是 provider 内部细节。**落地时** `local_runsc` 将从自己的 state dir 反查 backing
+    整盘(`io.max` 要整块盘,给分区号则 launch 直接失败),该值全程不出本地 provider;远端 provider 用其
+    调度层的等价物表达速率帽。**否决"宿主拓扑配置项"**:无论落进 Binding 还是落进 provider 入参,都把一个宿主原语抬上了
     跨 provider 契约面(下文 ❌ 清单)——设备号是彻底的宿主局部事实,远端 provider 根本产不出整盘设备号。
     该禁令由 `internal/runtime/seam_test.go` 的 token 守卫结构性钉住(`major`/`minor`/`majmin`/`devno`)。
-- **RAM 是安全限,其"一个旋钮/两个值"的摊分是 provider 内部细节**:接口只说 `MemoryByte = N`
+- **RAM 帽的摊分是 provider 内部细节**:接口只说 `MemoryByte = N`
   (§3.4 Binding);provider 自己决定怎么把"N 字节 RAM"物化。`local_runsc` 内部把 guest 可见 RAM 设成
   N、宿主天花板设成 `N + overhead`(overhead 是**它的实现常数**,非契约成员——远端 provider 的开销
   构成完全不同:可能是 VM balloon、可能是调度层的 memory request)。**不这么切就是 spec bug**:两者
@@ -113,12 +113,11 @@
     cap),不是隔离退让。
   - `--overlay2=none --file-access=shared` —— §5.B/§5.C 的持久层由 engine 在 runsc 外自管,gofer 只代理
     宿主目录。
-  - `--net-raw=false` —— **必须显式钉死,理由正是本节的"不继承默认"**。实测:OCI 里请求了
-    `CAP_NET_RAW`,而 guest 实际 `CapEff` 里该位是**清的**——runsc 用它自己的默认把 raw/AF_PACKET
-    socket 掐掉了。于是"guest 拿不到 raw socket"这条**当前只是一个未被声明的默认值**:它一旦跨版本漂移,
-    §5.D 的 `iif` 谓词地板就要面对一个能伪造二层帧的 guest,而没有任何测试会响。把它钉死,同时把
-    `CAP_NET_RAW` 从请求列表里去掉(请求一个必然拿不到的 cap 是个假不变量:它让读代码的人以为那是
-    刻意授予的)。
+  - `--net-raw=false` —— **必须显式钉死,理由正是本节的"不继承默认"**。runsc 的默认本就掐掉 raw/AF_PACKET
+    socket(OCI 里请求 `CAP_NET_RAW` 也拿不到,实测 guest `CapEff` 里该位是清的),故"guest 拿不到 raw
+    socket"若不钉死就**只是一个未被声明的默认值**:一旦跨版本漂移,§5.D 的 `iif` 谓词地板就要面对一个能
+    伪造二层帧的 guest,而没有任何测试会响。`CAP_NET_RAW` 因此也**不在请求列表里**——请求一个必然拿不到
+    的 cap 是个假不变量,它让读代码的人以为那是刻意授予的。
   - `--systemd-cgroup=false` —— 承上条 cgroupfs driver。
   精确 argv 属 provider 实现细节,不进本节;本节只固定"哪些键承重、各对哪条 §保证"。
 - **RAM 帽的两条硬约束**(不守则帽形同虚设):① **limit 必须配 swap**——OCI `swap` 与 limit 相等
@@ -182,11 +181,11 @@
     压着 Template 或 upper 的既有字节)——那时 dest 进排除项,而排除是**整棵子树剪掉**,故固化结果里该
     路径**根本不存在**(实测 `stat` 得 ENOENT),不是一个空目录。
     **两者都正确,因为要守的性质是"Volume 内容不进层、被遮蔽的字节不进层"**,而不是"层里一定有个空目录"。
-    冷启不受影响:`runsc create` 会在 dest 缺失时自己把它物化出来(同一条实测),故一个缺失的挂载点在
-    下一次放置时照样可用——这也是为什么 §5.B 不需要为情形 ② 补一个"造空目录"的步骤。Volume 写入落在宿主目录里、
-  **既在沙箱 disk 帽之外、也在 Promote 捕获之外**(已验,带正向对照)。**排除项真正要干的是剪掉被挂载点
-  遮蔽的既有字节**(它们对每个 guest 都不可见,却会被完整拷进冻结层、并同时计进该沙箱的容量帽与代价预报)
-  ——因此挂载点集合必须作为**per-Promote 入参**传进来,不能是静态清单(见 rootfs-overlay D5)。
+    冷启不受影响:`runsc create` 会在 dest 缺失时自己把它物化出来,故一个缺失的挂载点在下一次放置时照样
+    可用——这也是为什么 §5.B 不需要为情形 ② 补一个"造空目录"的步骤。
+  - **Volume 写入落在宿主目录里,既在沙箱 disk 帽之外、也在 Promote 捕获之外。排除项真正要干的是剪掉被
+    挂载点遮蔽的既有字节**(它们对每个 guest 都不可见,却会被完整拷进冻结层、并同时计进该沙箱的容量帽与
+    代价预报)——因此挂载点集合必须作为**per-Promote 入参**传进来,不能是静态清单(见 rootfs-overlay D5)。
 - **底层存储附带能力(single-node)**:snapshot/clone 落在 CoW FS(reflink)上廉价。这是 single-node
   provider 的附加能力,不是模型对宿主路径的依赖。
 - **容量配额是本子系统的物化职责(disk 容量轴,§3.4)**:per-sandbox 的 disk 容量上限(Binding)由
@@ -220,7 +219,8 @@
   用户文档诚实标出)。
   - **AccessMode 是挂载行的属性,不是卷的属性**(基数是 per-挂载,不是 per-卷):实测同一个卷可以
     **同时**对沙箱 A 是 shared-rw、对沙箱 C 是 shared-ro,故一个 per-卷字段无法诚实携带它。卷记录上
-    只有 `size` / `backend` / `parent`(lineage,见下文快照);`access` 只出现在挂载行上(§4.3),
+    只有 `cap_byte`(帽,wire 上叫 `size`)/ `backend` / `parent`(lineage,见下文快照);`access` 只出现
+    在挂载行上(§4.3),
     `Materialize` 也不收它——**ro 的强制在
     运行时**(ro bind ⇒ guest 的写得 `EROFS`,一个干净的 POSIX 拒绝而非静默成功),**排他性在控制面**
     (挂载行),两者都在调用发生前已裁决,故都不需要 backend 知情(seam 侧的独立论据见
@@ -247,7 +247,7 @@
     **所有沙箱都没了之后读一个卷**。二者都在"卷与沙箱生命周期解耦"(本节开篇)的直接后果集里——一个
     生命周期独立的对象,如果内容只能经沙箱进出,那它的独立性只是记录层面的。
 - **写入 regime 唯一(横切不变量,防双写撕裂)**:Volume 有挂载与直连 API 两条写入路径,引擎守一条
-  不变量——**只要有 live-rw 挂载正持有该卷,直连 API 的变更操作(import / restore-into)一律拒绝**;
+  不变量——**只要有 live-rw 挂载正持有该卷,直连 API 的变更操作(`import`)一律拒绝**;
   无 live-rw 挂载时直连写才放行。门开在"**活的**写入方",不是"在挂载表里":**paused 沙箱不算 live
   writer**(容器已停、无活 gofer),此时直连写安全,且 resume 后自然见到新内容。不引入反向代理(证伪见
   [`deep-dives/volume.md`](./deep-dives/volume.md) D5)。
@@ -304,7 +304,7 @@
 - **整份绑定的替换是一次原子提交,由 store 契约承诺**(`ReplaceMounts`):§6.2 说一个沙箱**任何时刻**持
   一份完整绑定、`PATCH` 只整份换整份,那这条就不能实现成"先删后插"两次独立提交。**删必须在插之前**
   (一份重新提交的相同绑定否则会与它正在替换的那些行自撞:租约谓词与 `UNIQUE(sandbox,path)`),故解法
-  不是换次序,而是把两步**收进同一次提交**。三条后果,每条都是当前两次提交形态下真实存在的缺陷:
+  不是换次序,而是把两步**收进同一次提交**。三条后果,每条都是两次独立提交守不住的性质:
   ① 失败时沙箱留在**原绑定**上,不会出现"新绑定被拒 + 旧绑定也没了"的空绑定;② 独占租约在替换过程中
   **不被短暂释放**,故并发 create 抢不走一个本次 PATCH 打算留住的卷;③ 写入 regime 的谓词
   (`ListMountsByVolume`)读不到"零挂载行"这个中间态,故并发直连写不会被误放行。
@@ -340,8 +340,9 @@
     陷阱(唯一性断言里的字面串比较**静默**失效)。**且 `UNIQUE(sandbox, path)` 抓不到嵌套**(`/data` 与
     `/data/sub` 是不同字符串),嵌套要靠校验里的前缀扫描,做不成 UNIQUE。两者都保留:校验先命中,断言是
     校验被绕过或写错时的那道网。
-  - **有活挂载行时禁止修改卷的 access**——一条"保持没有"的显式禁令:在活挂载下把 exclusive 翻成 shared,
-    会让额外写入方进入一个"原持有者从不知道自己失去了排他"的卷,正是绕过上述断言的路径。
+  - **`access` 没有独立写点,这是刻意的**:改 access 只能经整份绑定替换(`ReplaceMounts`),故它必然重过
+    租约谓词。**不要为它开一个 per-mount 写点**——在活挂载下把 exclusive 翻成 shared,会让额外写入方进入
+    一个"原持有者从不知道自己失去了排他"的卷,正是绕过上述断言的路径;真要开,须同时带上活挂载检查。
   - **崩溃保持租约是正确行为**——崩溃是 dead-recoverable(§4.3),沙箱会 resume 回同一卷,即时释放会让
     resume 撞车(§4.2)。租约**只在挂载行被拆时释放**(destroy,含 reaper 对 paused 超 TTL 的 evict),
     **reaper TTL 就是"无人释放"的兜底**,不引心跳;心跳式回收是 multi-node provider 的义务、不进核心
@@ -363,10 +364,10 @@
     对端已 `ENOSPC` 时继续成功。故两个方向都不承诺。
   - **三条用户可见语义(调用方会撞上,不是内部记账细节)**:
     1. **guest 无法发现自己的卷帽:`statfs` 报的是承载文件系统,不是帽**(实测 32 MiB 帽的卷上报 476 GiB
-       可用)。故 guest 侧的任何空间预检(装包器、包管理器、基于 `df` 的守卫)都会在 `write()` 失败前一刻
+       可用)。故 guest 侧任何空间预检(装包器、包管理器、基于 `df` 的守卫)都会在 `write()` 失败前一刻
        报告几百 GiB 可用而做错决定。**引擎不承诺 guest 侧 statfs 反映帽**;一个能诚实投影的后端可以做得
        更好,那是该后端的义务、不是核心承诺(成因与外部旁证见
-       [`deep-dives/volume.md`](./deep-dives/volume.md) D7)。
+       [`deep-dives/volume.md`](./deep-dives/volume.md) D7.4)。
     2. **squota 下的帽是"终身写入预算",不是"活跃体积上限"。** 它**不退还被覆写的** extent(同一个
        32 MiB 文件原地重写两次记 64 MiB),但**退还被删除的**(unlink 后立即结算、退还恰好是文件大小)。
        故一个被反复原地重写的长命卷会在远小于其"当前体积"处撞帽,**收口手段是删除、不是覆写**。
@@ -403,6 +404,11 @@
 ### 5.D Network(可达性策略)
 
 - **目标**:做"自由"的网络使能者,同时守住安全。每个沙箱**拉起时可定义**网络策略。
+
+> ⚠ **未建(M8)**:本节是目标定义,**代码一行未落**——无 `internal/network` 包,无 nft / TPROXY /
+> deny-set / gateway / resolve。§2.4 的三条 invariant 今天**无一成立**(今日的不可达来自一条缺失的默认
+> 路由,而 guest root 持 `CAP_NET_ADMIN` 可自行补上——实测)。缺口连带的两个 404 端点见 §6.1;完整现状
+> 与 M8 必须继承的实测见 [`open-decisions.md`](./open-decisions.md) §4。
 - **职责切分(策略 / 数据面 / 引流,三块)**:本子系统**持有策略**(出站 allow-deny、入站 publish
   规则、model 路由 + 凭证路由);策略的**强制与凭证注入由一个引擎自有的 egress 数据面(gateway)承担**
   ——它是本子系统的一个**行为 seam**(可换 builtin / Envoy / 商用网关,与 provider 无关);**引流**
@@ -456,8 +462,8 @@
   1. **process** —— 起进程 / 重连 / 输入 / 信号 / resize / 列进程;PTY 是带 pty 字段的特例(shell 就是
      带 PTY 的 `exec /bin/bash`),进程按 pid 寻址(guest 原生)。
   2. **fs** —— 读写沙箱文件:`read`(可带 offset)/ `write` / `stat` / `list` / `mkdir` / `remove` /
-     `move`,外加**大文件流式旁路**(与 RPC 共用 guest 同一监听端口,阈值由调用方定,D4.4);
-     **不做 watch**(消费方用 `read`+`stat` 自行轮询拉增量)。
+     `move`,外加**大文件流式旁路**(宿主侧 `OpenRead` / `WriteStream`,与 RPC 共用 guest 同一监听端口,
+     阈值由调用方定,D4.4);**不做 watch**(消费方用 `read`+`stat` 自行轮询拉增量)。
   精确 RPC 清单以 proto 为权威契约(§6.1)。
   这个 daemon 是"CLI/TUI/WebUI 都是同一套 API 的平级 client"(§6)成真的具体载体。它**必须保持
   通用**:不内嵌任何 agent/turn/session 语义,那些是 engine 外 adapter 的事(见末条)。
@@ -520,7 +526,7 @@ PID 1 = sandboxd（init 模式：reaper + 信号转发 + subreaper 兜底 + 监�
   不可寻址——`end` 帧只发给退出那一刻在线的订阅者,此后 `Connect` 该 pid 是 not-found,**不留退出状态等人
   来取**(pid 由内核回收,留一条已退出记录在 pid 复用时就变成在讲另一个进程)。两条都与裸 pty 字节流的
   lossy 同源:engine 无状态,"不丢"担保由上层自理,不为它加内部状态。机制与 seam 见
-  [`deep-dives/guest-runtime.md`](./deep-dives/guest-runtime.md) D4.5 / D4.3 C2。
+  [`deep-dives/guest-runtime.md`](./deep-dives/guest-runtime.md) D4.5(C2 / C3)。
 - **guest 侧故障注入不进生产二进制。** 测试要制造"transport 起不来"的崩溃循环,靠的是 guest 内一个哨兵
   文件;它**只在 `testguest` build tag 下编译**,生产 `sandboxd` 里根本不存在这段代码。理由是 §1.1 的
   guest 可拿 root、可写自己的 FS:一条编进生产的故障路径,等于让沙箱能靠 touch 一个文件停掉自己的

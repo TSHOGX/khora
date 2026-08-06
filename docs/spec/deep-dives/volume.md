@@ -279,18 +279,19 @@ WHERE NOT EXISTS (
 > **唯一的竞态写者是挂载行的 INSERT**,这把修法收窄了很多:resume 只**读**该表,destroy 只删自己沙箱的行
 > 且 FK RESTRICT 覆盖次序,pause 不写行。
 >
-> **谓词必须是行内不可变的属性**(§5.C 的禁令)有一个具体的外部反面教材,**已逐条核对源码**(不再是转述,
-> 对比 D9 的证据等级):某实现的 live-owner 偏唯一索引建在一个软删时间戳上(`UNIQUE(...) WHERE
+> **谓词必须是行内不可变的属性**(§5.C 的禁令)有一个具体的外部反面教材:某实现的 live-owner 偏唯一索引
+> 建在一个软删时间戳上(`UNIQUE(...) WHERE
 > cleanup_requested_at IS NULL`),写入它的路径存在、而**全代码库没有任何路径把它清回 NULL**——于是一次误标
 > 既永久判死该卷,又腾出唯一性槽位让第二个持有者插进来。我们的谓词是 `access`(行内不可变),这正是躲开该
 > 失败模式的原因;**它是一个选择,不是巧合**,故写下来,否则下一个人很容易把它改成某个 `detached_at`。
 >
-> **锁序(全序,已在模型里验过)**:`transitionLock(sandbox) → {volume 锁,按 volume ID 升序} → 准入互斥
-> (叶子)`。逐条核对调用图,每条现存路径本来就是 sbx→vol 或仅 vol;准入互斥**只要保持是叶子**(取了就放、
-> 其间不再等别的锁)即可组合。多卷按 ID 排序 + 去重可组合(32×40 混合并发 create 无死锁)。
-> **唯一会打破它的是"一个卷维度的动词去反查它的持有者"**(force-detach / 租约抢占,正是 D8 刻意推迟的
-> 那条)——它需要 vol→sbx,闭合成环,实测复现出真死锁。**故锁序是把抢占继续留在门外的一条独立论据**;
-> 若它将来要落地,必须从 store 解析出持有者、**先释放、再按全局序重新获取**。
+> **锁序(全序)**:`transitionLock(sandbox) → mediator 的 `mu`(live-map 与直连写的 in-flight 标记同住)`,
+> 以及 `transitionLock(sandbox) → 准入互斥`。**没有 per-volume 锁类,这是刻意的**:卷维度的互斥由上面那条
+> store 语句承担(D3 的整个论点),而写入 regime 的两半共用 live-map 那把 `mu`,故 Volume **不新增锁层**。
+> `mu` 与准入互斥**都只要保持是叶子**(取了就放、其间不再等别的锁)即可组合,两者彼此也不嵌套。
+> **这同时是把抢占留在门外的一条独立论据**:一个卷维度的动词要去反查它的持有者(force-detach / 租约抢占,
+> 正是 D8 刻意推迟的那条)就得引入一把 vol→sbx 方向的锁,与 `transitionLock → …` 闭合成环,实测复现出真
+> 死锁。若它将来要落地,必须从 store 解析出持有者、**先释放、再按全局序重新获取**。
 
 ### D3.1 证伪:store-级独占 token vs 进程内 open-handle refcount,不可混
 
@@ -433,9 +434,9 @@ Volume 快照默认 **crash-consistent**、与 Overlay 不对称的完整陈述�
   frozen 窗口内**不可中断地阻塞**、只在 thaw 之后才落地——它因此排到了它本想利用的那次静止**之后**,捕获
   的是 thaw 后的状态,相对裸快照**零一致性收益**;唯一的实际效果是把 guest 卡住,外加冻住整个节点的根
   文件系统(单机上卷与引擎状态常在同一个 btrfs 上)。
-- **连带的 harness 教训**:不要用 `timeout` 包住 frozen 窗口里的快照——一个被信号打断的阻塞快照会**破坏
-  freeze 计数**,其后的 thaw 返回 `EINVAL` 像是已解冻而快照照样落地(4/4 复现)。首轮据此报出的"快照失败 +
-  thaw 失败"两者都是测量工具制造的假失败。
+- **连带的 harness 约束**:不要用 `timeout` 包住 frozen 窗口里的快照——一个被信号打断的阻塞快照会**破坏
+  freeze 计数**,其后的 thaw 返回 `EINVAL` 像是已解冻而快照照样落地(4/4 复现)。踩上它会把测量工具制造的
+  假失败("快照失败 + thaw 失败")读成基底失败。
 
 ### D6.3 证伪:二段式 checkpoint
 
@@ -448,21 +449,22 @@ Volume 快照默认 **crash-consistent**、与 Overlay 不对称的完整陈述�
 
 ## D7. 容量配额:btrfs subvolume + squota,跨 §5.B/§5.C 共享原语
 
-§5.C 的 per-volume 容量帽与 §5.B 的 per-sandbox Overlay upper 帽是**同一个物化问题的两处应用**(§3.4 容量
-轴)。机制、模式选择(squota 而非完整 qgroup)与全栈实测结论**在 rootfs-overlay D6.2 一处讲清**,本文不复制;
-要点只两条:
+机制(btrfs subvolume + squota limit)、模式选择(squota 而非完整 qgroup,及本基底改不了模式)、全栈实测
+与归属(叶子包 `internal/btrfs`,**共享的是代码不是 seam**)**都在 rootfs-overlay D6 讲清,本文不复制**
+——§5.C 的 per-volume 帽与 §5.B 的 per-sandbox upper 帽是同一个物化问题的两处应用(§3.4 容量轴),Volume
+**复用同一个包,不重造、不改其形状**。
 
-- **机制** = subvolume + `squota` limit,写满触发精确到帽的硬 `ENOSPC`,配额在本盘已 fs-wide 启用。
-  `btrfs-progs` 是显式依赖(`sbx` 上已装,v6.17.1)。**loop 设备**是"需强物理隔离"的 fallback。
-- **模式是 squota,不是完整 qgroup**,且本基底**改不了模式**(quota-ctl ioctl 即便 root 全 CAP 亦 EPERM)。
-  这对 Volume 的直接影响:**snapshot/clone 出来的卷,其 reflink 字节在 squota 下不向新卷计费**——快照廉价
-  这一性质因此在配额语义上也成立,但"一个卷占多少真实磁盘"要从节点级核算看,不能只看单卷配额(与
-  rootfs-overlay D6.2 里 Template layer 字节同源的问题)。
+本节只留 Volume **自己引入**的三件事(Overlay 侧不存在,因为引擎从不快照 upper):**配额行会泄漏且是正确性
+bug**(D7.1)· **一次误 sweep 的爆炸半径**——它解释了 §5.C 每条 sweep 要求为何都是硬要求(D7.2)·
+**limit 侧:没有继承、漏设不可检出、降帽不可逆**,它定了两处契约形状(D7.3)。
 
-**归属**:它是一个**共享存储 substrate 原语**,跨两个子系统复用——落成叶子包 `internal/btrfs`,**共享的是
-代码不是 seam**(不做 `QuotaProvider` 横切接口,理由见 rootfs-overlay D6.4)。**首个消费者是 §5.B 的
-Overlay upper**;Volume **复用同一个包,不重造、不改其形状**。本引擎不是该盘配额
-命名空间的唯一所有者(OrbStack 也用,实测该 fs 上有 11 行外部 qgroup),嵌套 subvol 实测共存无碍。
+两条直接后果先记在此:
+
+- **snapshot/clone 出来的卷,其 reflink 字节在 squota 下不向新卷计费**——快照廉价这一性质因此在配额语义上
+  也成立;但"一个卷占多少真实磁盘"要从节点级核算看、不能只看单卷配额(与 rootfs-overlay D6.2 里 Template
+  layer 字节同源的问题)。
+- **本引擎不是该盘配额命名空间的唯一所有者**(实测该 fs 上有 11 行外部 qgroup,OrbStack 也用;嵌套 subvol
+  实测共存无碍)——这正是 §5.C「配额行按删除时记下的 id 定位,**绝不扫行**」的前提。
 
 ### D7.1 Volume 带来的新问题:squota 的配额行会泄漏,且它是正确性 bug
 
@@ -604,9 +606,6 @@ fabrication;`f_type` 是 gofer 的而非 btrfs 的),根因是 btrfs squota **没
 
 ## D9. 三条与参考实现的分歧
 
-> 证据等级:**第 1、2、3 条已逐条核对源码**(带 file:line 复核过);其余转述性描述仍是代读,凡影响决策的应
-> 自行核对。
-
 1. **按 ID 寻址,不按 name。** 一个参考实现的挂载项**按卷 name 寻址**,且其 SDK 手里握着完整卷对象(含 ID)
    时仍然只发 name。这与 §6.2「对外一律 Volume ID 寻址」正面相左,而我们有独立理由(§3.1.1 对内也 ID 寻址
    是同一条规则的内部延伸)。**保持 ID 寻址。**
@@ -625,7 +624,7 @@ fabrication;`f_type` 是 gofer 的而非 btrfs 的),根因是 btrfs squota **没
    + dir/file/path 两类,文件走 1 MiB 分块**流式**双向,请求只带 `{volume_id, volume_type, team_id}` + 路径,
    签名里根本没有沙箱);另一个把同一套能力做成 HTTP 文件 API,并在代码里明说它**必须**能在没有活沙箱时工作
    ——它的卷记录带一对默认 POSIX uid/gid 字段,**存在的理由就是"没有活沙箱可以提供身份"**。这条汇合不是巧合:
-   一个生命周期独立于沙箱的对象,内容进出却依赖沙箱,那它的独立性只在记录层面(D5.1 / M7 范围第 12 件)。
+   一个生命周期独立于沙箱的对象,内容进出却依赖沙箱,那它的独立性只在记录层面(D5.1)。
    - **但机制上我们不抄。** 其中一个为路径限定付的是**每请求一个新 mount namespace + bind + `pivot_root`**
      (还要 root、要 `LockOSThread` 的线程所有权协议)。实测同机对照:那套 **178 µs/op**,
      `openat2(RESOLVE_IN_ROOT)` **0.52 µs/op**——**342×**,且不要特权。它们的形状不是"安全需要这么贵",

@@ -20,8 +20,6 @@
 | **行为**(gateway *做什么*) | classify→decide→inject→按需 MITM | **无关** | `builtin`(自研基础版) | 换一个数据面实现(Envoy / 商用网关…) |
 | **落位与引流**(gateway *跑在哪、流量怎么进来*) | 宿主进程+TPROXY / sidecar / per-node daemon | **特异** | 宿主进程 + netns/nft/TPROXY | 换一个 runtime provider(K8s…) |
 
-> **"正交"是接口层可独立注册,不是能力无关**——行为能做多深受引流暴露的劫持能力约束(推理见 D2)。
-
 连同**策略权威**(§5.D)与**凭证 at-rest 后端**(§5.D secret-store seam),一共**四块各自独立、各自只做
 一个基础实现**:
 
@@ -73,7 +71,7 @@ D1 第 2 件(数据面行为)与第 1 件(落位与引流)是 D0 表列的两根
 四格退化成对角线两格(只剩"单机+builtin""K8s+Envoy"),这正是把 gateway 焊进 provider 的病。
 
 **但正交是接口层的可分离,不是能力无关**:每一格**能做到的行为上限**受该引流暴露的劫持能力约束
-(见 D0 注、D3.2)。"能独立注册"与"注册进来就什么都能做"是两回事——接口把两轴解开,让它们能各自替换
+(见 D3.2)。"能独立注册"与"注册进来就什么都能做"是两回事——接口把两轴解开,让它们能各自替换
 并**显式协商**能力档位,而不是假装行为不依赖引流。焊死时连协商的机会都没有,才是真正的病。
 
 **为什么不能拖到有第二个实现再拆**(§1.3 成本判据自查):
@@ -230,28 +228,26 @@ L2 网桥同网段,sandbox A 能直连 sandbox B 的 veth IP(§5.E transport 正
 
 D5.1「默认拒绝其余出站」字面能涵盖,但"出站"通常指南北向,**东西向(sibling IP)是否在内有歧义**——故
 §2.3 把它显式钉成 invariant(可达集恰好 = {gateway ingress,策略显式放行的端点},sibling 经 gateway 中转
-而非 L2 直连)。本文只补它的**物化两条路**(placement/provider 细节):(i) steering nft 把 sibling 网段也纳入 default-deny
-(sibling IP 进 L0 地板);(ii) 每沙箱**点对点 veth、不共享 L2 网桥**,消除二层邻接。
+而非 L2 直连)。本文只补它的**物化**(placement/provider 细节):
 
-> **修正(实测推翻本节原结论)。** 本节原先写的是"(ii) 是首选、(i) 是兜底",理由是点对点 veth
-> "消灭前提而不是拦截后果,不依赖任何一条 nft 规则写对"。**那个推理是错的,次序反了。**
->
-> **实测**:两个真 runsc 沙箱各自一对 `/30`、无共享网桥(即 `local_runsc` 今天的形态),sandbox A
-> **完成了到 sibling B guest IP 的 TCP 握手并读到其载荷**。原因是消除二层邻接**并不消除可达性**——
-> 宿主在两个 `/30` 之间**路由**(`ip_forward=1`),东西向根本不需要 L2 邻接。故 (ii) 关掉的只是
-> "同网段直连"这一条路径,不是不变量本身。
->
-> **因此:(i) 是强制地板,不是兜底。** 它必须真的存在,§2.3 的 sibling-不可达才有兑现方。(ii) 仍然值得
-> 保留(它确实少一类攻击面、且是今天的形态),但它是**纵深防御的一层,不是那条 invariant 的物化方**。
->
-> **两条连带的物化约束(同一次实测)**:① 规则**不能只写在沙箱 netns 内部**——gVisor netstack 经 L2
-> (`fdbased`/`SOCK_RAW`)注入,guest 报文**不遍历该 netns 的 L3 钩子**(实测 5 个包在 netns `inet
-> output`/`postrouting` 计数为 **+0**,在 `netdev egress` 为 +5,在**宿主侧** `prerouting` 全见);故
-> enforcement 挂**宿主端 veth**或 `netdev`/`egress` 钩子(§5.A 的"nft 打在 per-sandbox netns 上"要按此
-> 读:是宿主侧针对该 netns 的 veth,不是 netns 内的 filter 表)。这同时意味着**放在沙箱 netns 内的
-> TPROXY 不成立**,M8 设计前须先定这一点。② 谓词必须**按入接口(`iif`)**而非按源地址:guest root 能给
-> 自己网卡加地址(实测 `ip addr add` rc=0),**`saddr` 谓词被绕过**(3 个包命中"已绕过"计数器),
-> `iif` 谓词在同一攻击下全数拦住。
+**(i) steering nft 把 sibling 网段纳入 default-deny(sibling IP 进 L0 地板)是这条 invariant 唯一的物化方,
+不是兜底。** 点对点 veth 替代不了它:**消除二层邻接并不消除可达性**——宿主在两个 `/30` 之间**路由**
+(`ip_forward=1`),东西向根本不需要 L2 邻接。实测:两个真 runsc 沙箱各自一对 `/30`、无共享网桥(即
+`local_runsc` 今天的形态),sandbox A **完成了到 sibling B guest IP 的 TCP 握手并读到其载荷**。
+
+**(ii) 每沙箱点对点 veth、不共享 L2 网桥**因此是**纵深防御的一层**(它关掉"同网段直连"这一条路径,且是
+今天的形态),**不是那条 invariant 的物化方**。
+
+**两条连带的物化约束(同一次实测)**:① 规则**不能只写在沙箱 netns 内部**——gVisor netstack 经 L2
+(`fdbased`/`SOCK_RAW`)注入,guest 报文**不遍历该 netns 的 L3 钩子**(实测 5 个包在 netns `inet
+output`/`postrouting` 计数为 **+0**,在 `netdev egress` 为 +5,在**宿主侧** `prerouting` 全见);故
+enforcement 挂**宿主端 veth**或 `netdev`/`egress` 钩子(§5.A 的"nft 打在 per-sandbox netns 上"要按此
+读:是宿主侧针对该 netns 的 veth,不是 netns 内的 filter 表)。这同时意味着**放在沙箱 netns 内的 TPROXY
+不成立**。② 谓词必须**按入接口(`iif`)**而非按源地址:guest root 能给自己网卡加地址(实测 `ip addr add`
+rc=0),**`saddr` 谓词被绕过**(3 个包命中"已绕过"计数器),`iif` 谓词在同一攻击下全数拦住。
+
+> **⚠ 今天 (i) 尚未落地,故 §2.3 的 sibling-不可达不成立**——缺口、连带影响与 owning plan 见
+> [`open-decisions.md`](../open-decisions.md) §4。
 
 ### D5.6 egress 全程 fail-closed(两处失败同源)
 

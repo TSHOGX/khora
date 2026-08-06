@@ -41,7 +41,8 @@ agent),共享同一 FS 与网络。
 >
 > **本系统术语**:**engine** = 本 spec 描述的沙箱抽象本身;**orchestrator** = 承载 engine 的那个
 > 单二进制;**控制面** = engine 内持有权威记录的那部分;**store** = 控制面记录(Binding、各对象
-> 的 lifecycle-state/refcount)的持久后端,经接口抽象、可换实现;**可插拔实现 seam** 有三类,分别物化
+> 的 lifecycle-state,以及导出 refcount 所需的引用行)的持久后端,经接口抽象、可换实现;**可插拔实现
+> seam** 有三类,分别物化
 > "用什么跑隔离进程"(**runtime provider**,§5.A)、"沙箱 rootfs 由哪些层合成、落在哪"(**rootfs
 > provider**,§5.B)、"独立 Volume 落在哪个后端"(**volume backend**,§5.C);后两者是两个不同形状、
 > 各自注册的接口,不是同一个 seam(为何分开、共享哪些 substrate 原语见 §5 前言);**driver** = 某个
@@ -62,7 +63,7 @@ agent),共享同一 FS 与网络。
 | 禁用作引擎内实体名 | 为什么 / 用什么替代 | 可作普通行文? |
 | --- | --- | --- |
 | `generation` | 引擎不引入独立世代计数;它想解决的四件事各有归属:**在哪** → Placement(§3.3)· **陈旧性** → placement/IP 作 epoch(§4.3)· **并发仲裁** → 每沙箱转换锁 + CAS(§4.4-B)· **失败恢复** → 原子退回源态 + 重启对账回收孤儿 placement(§4.4-A,故也无 `failed` 态) | 否(硬拦,防世代计数从别处渗回) |
-| `principal` / `tenant` | 引擎内无授权主体 / 租户(§1.4 非目标);多租户是引擎外 join table 的加法 | 否 |
+| `principal` / `tenant` | 引擎内无授权主体 / 租户(§1.4 非目标);多租户是引擎外 join table 的加法 | 仅限"这些在引擎外"的论述(如 §1.4「多租户」、§3.2.1「哪个 agent 归哪个租户」);**不得作引擎内实体名** |
 | `owner`(归属/授权义) | 沙箱无 owner 列,回收只看 refcount/TTL(§4.3 / §1.4) | 仅限**职责归属**义(如"idle 判定的 owner 是控制面")——那是"谁负责",非"谁拥有" |
 | `session` / `turn` | agent 会话语义是引擎外 adapter 的加法(§5.E),引擎只有 process/fs | 可,且必然出现在"这些在引擎外"的论述里 |
 | `agent` | 引擎不认识、不寻址 agent(§3.2.1);只有 sandbox/process/fs 原子 | 可(描述引擎外 / 产品层时) |
@@ -71,8 +72,8 @@ agent),共享同一 FS 与网络。
 > 够新)。这是 systrap 的固有门槛,凡能跑 gVisor 的平台即满足,engine 当作既定前提,不再赘述。
 
 > **两条底线:no-hypervisor + 可移植性,彼此独立。** 任何"用可移植性换性能"的决定一律**拒绝,或藏到
-> provider 后面做成可插拔**(§5.A)——platform 即一例:`local_runsc` 把它 pin 成 `--platform=systrap`、
-> 不吃 runsc 默认(默认跨版本会漂移),别的 provider 可另选。no-hypervisor 管"不要 KVM/嵌套虚拟化";
+> provider 后面做成可插拔**(§5.A)——platform 即一例:`local_runsc` 把它钉成 `--platform=systrap`,
+> 不继承 runsc 默认(理由见 §5.A),别的 provider 可另选。no-hypervisor 管"不要 KVM/嵌套虚拟化";
 > **不存内存(§4.2)是可移植性的结果**,不是 no-hypervisor 的结果——gVisor 在 systrap 下本可 checkpoint,
 > 我们不做,因为内存态锁 CPU-feature(§2.5),持久态便不能跨 host/CPU 搬(§1.5#3)。故 resume 是冷启秒级。
 
@@ -240,8 +241,8 @@ root 默认就是 §1.1「可拿 root 的 agent 沙箱」最直接的表达,装�
   **sibling 沙箱不可达**(除非经显式策略且经 gateway 中转,非 L2 直连)。**这条不靠支柱① 守**:①
   拦 syscall、不拦网络包(guest 合法用网络),故跨沙箱网络隔离是**独立的 control-plane invariant**,
   由 §5.D 策略 + provider steering 物化,与"存储跨沙箱隔离靠支柱①"并列(见 network.md D5.5)。
-  **⚠ 这一条今天不成立**:实测两个真沙箱之间 TCP 握手成功并读到载荷——点对点 `/30` veth 消除了二层邻接
-  但**宿主仍在两段之间路由**,而强制它的 nft 地板尚未落地(open-decisions §4 / network.md D5.5 的修正)。
+  **⚠ 这一条今天不成立**:两个真沙箱之间 TCP 握手成功并读到载荷——点对点 `/30` veth 消除了二层邻接,
+  但**宿主仍在两段之间路由**,而强制它的 nft 地板尚未落地(缺口见 open-decisions §4 / network.md D5.5)。
 - **provider / model 凭证**(支柱④)——只在宿主侧,guest 永不见真 key。
 - **控制面记录本身**(Binding 的权威,§3.4)——挂载面、网络策略、资源上限的取值由控制面裁决,
   guest 内 root 改不动(支柱⑤)。
@@ -294,7 +295,8 @@ root 默认就是 §1.1「可拿 root 的 agent 沙箱」最直接的表达,装�
 exhaustive)是一条可验收义务**:不写死它,guest 一条直连就绕过整个 §5.D 策略面(见
 [`deep-dives/network.md`](./deep-dives/network.md) D5.1)。
 
-> **⚠ 落地状态:本节的 ③ 与上面三条 egress invariant 是"已定、未建"。** ①②④⑤ 已被代码兑现,**③ 的
+> **⚠ 落地状态:本节的 ③ 与上面三条 egress invariant 是"已定、未建"。** ①②⑤ 已被代码兑现;**④ 今天
+> 只是空真**——凭证后端、别名 resolve、注入路径一概未落(M9),它成立仅因引擎里还没有任何凭证。**③ 的
 > enforcement 一行未落**——没有 `internal/network`、没有 nft/TPROXY、没有 deny-set。今天沙箱到不了外网、
 > 兄弟与 link-local,**靠的是"没有默认路由"这一个事实,不是靠强制**;而 guest root 持 `CAP_NET_ADMIN`、
 > 宿主 `ip_forward=1`,故 guest 自己加一条默认路由即可达宿主 LAN 与兄弟沙箱(实测)。故本节读作**义务

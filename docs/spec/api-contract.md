@@ -12,8 +12,10 @@
 ### 6.1 资源与端点(控制面 REST + 数据面 Connect-RPC,分工见 [`deep-dives/transport.md`](./deep-dives/transport.md) D6)
 
 > **外沿协议分工**:沙箱/template/volume/network **生命周期 = REST + JSON**(控制面块,权威端点,
-> OpenAPI 事后描述);**process / fs 数据面 = Connect-RPC**(`engine.transport.v1` 两服务,权威契约
-> 是 `transport.proto`,client 经 `buf` 生成 stub)。client 一律经 `orchestrator` 居中、不直连
+> OpenAPI 事后描述);**process / fs 数据面 = Connect-RPC**(`engine.transport.v1`,权威契约是
+> `transport.proto`,client 经 `buf` 生成 stub。该 package 下是**三个**服务:对外的 `ProcessService` /
+> `FsService`,外加引擎自用的 `HealthService`——后者不是对外能力面,见 §5.E)。client 一律经
+> `orchestrator` 居中、不直连
 > `sandboxd`(§4 mediator / D6.1)。数据面块的 REST 行**仅作形状示意**,不是权威端点(D6.2)。
 >
 > **这套 API 自身不做认证/授权**:引擎内无授权主体(§1.4 非目标),故 §6 假定调用方已被信任。谁能调用
@@ -28,33 +30,33 @@
 # Sandbox 生命周期
 POST   /v1/sandboxes                 {template_id, network?, volumes?, idle_timeout?, retention?,
                                       cpu_millis?, memory_byte?, disk_byte?}        → {sandbox_id}
-#   `network?` 是 M8 的入参,**今天尚未实现**(见下方 Network 块):现在传它会被静默忽略。
+#   `network?` **今天尚未实现**(见下方 Network 块):现在传它会作为未知键被 json 解码静默丢弃。
 #   资源上限三轴见 §3.4(Binding);按轴条件必填的规则见 §6.2。准入不足 → 507。
 #   `volumes` 每项 = {volume_id, path, access},`access` ∈ {exclusive, shared-ro, shared-rw} —— 它是
 #   **挂载行**的属性(§5.C),故在此给出而非在卷记录上。撞独占租约 → 409(§6.2 四个 409 之 ③)。
 GET    /v1/sandboxes/{id}                                     → {sandbox_id, state, death_cause?}
 #   只读生命周期态 + 死因(§4.3)。`death_cause` ∈ {`gone`, `resource-exceeded`, `unknown`},
 #   **未观测到死亡时该键不出现**(不是空串、不是 null):`CauseNone` 是"没有死因"而非一种死因,
-#   若序列化成 `""` 就会在绝大多数健康响应上摆一个 falsy 却存在的字段、诱人拿它当存活判据。
+#   序列化成 `""` 会在健康响应上摆一个 falsy 却存在的字段、诱人拿它当存活判据。
 #   **为何上读面**:§4.3 把恢复决定判给调用方(dead-recoverable → resume;resource-terminated →
-#   不 resume),那调用方就必须能读到它所依据的那条事实,而不是先发一个必被拒的 resume、从 409
-#   错误串里反推。值是 §4.3 的**抽象枚举**,绝不是 errno / cgroup 路径 —— 那种是宿主原语,
-#   远端 provider 产不出来(§5.A)。
+#   不 resume),调用方必须能直接读到它所依据的事实,而不是先发一个必被拒的 resume、从 409 错误串里反推。
+#   值是 §4.3 的**抽象枚举**,绝不是 errno / cgroup 路径——远端 provider 产不出宿主原语(§5.A)。
 PATCH  /v1/sandboxes/{id}            {cpu_millis?, memory_byte?, disk_byte?, idle_timeout?, retention?,
-                                      volumes?}           → {sandbox_id, state, applies_at}
+                                      volumes?}  → {sandbox_id, state, applies_at, lease_released?}
 #   改 Binding,生效点与可改状态见 §3.4。**wire 语义与 create 不同**:这里"未给"与"给 0"必须可区分
 #   (帽的 0 = 无上限、`retention: 0` = 不驱逐),故请求字段**可空**——未给 = 不动该字段。TTL 收
-#   duration 字符串("48h")。`applies_at` ∈ {"now"(仅改 TTL), "next-resume"(改了任一资源上限)}。
+#   duration 字符串("48h")。`applies_at` ∈ {"now"(仅改 TTL), "next-resume"(改了任一资源上限
+#   **或挂载绑定**)}。
 #   **`volumes` 是挂载表那份完整绑定**(每项 {volume_id, path, access});§6.2 已把 PATCH 定为改绑定点,
 #   故它在此列出而非另开 attach/detach 端点。**它的生效点分裂成两半,`applies_at` 一个值答不了**:
 #   挂载拓扑变更在 **next-resume** 才物化(runsc 启动时取挂载,§5.C 不热挂),而 **detach 立即释放独占
 #   租约**(租约就是那条挂载行,行一删租约即释放)。故 detach 的响应是 `applies_at: "next-resume"`
-#   **且租约已释放** —— 两件事不同步是设计事实,不是可以折叠成一个值的细节。attach 到 exclusive 已被占用
+#   **且 `lease_released: true`** —— 两件事不同步是设计事实,不是可以折叠成一个值的细节。attach 到已被占用
 #   的卷 → 409(§5.C 原子插入的 `RowsAffected()==0`)。
 #   对 `running` 改帽 → 409「先 pause」;抬上限重过准入门(可 507 / 400)。不发 §4.1 事件(非状态转换)。
-#   **`disk_byte` 的 `0 → N` 被拒(400)**:无帽沙箱的 upper 是普通目录树、其上没有可写的配额行,故这次
-#   写会声明一个每次 placement 都兑现不了的帽,而 §5.B 拒绝无帽运行 ⇒ 沙箱再也 resume 不起来。拒在写点
-#   (当场可见、零副作用),不拒在恢复路径(§3.4)。`N → 0` 撤帽与 `N → M` 改帽都合法。
+#   **`disk_byte` 的 `0 → N` 被拒(400)**:无帽沙箱的 upper 上没有可写的配额行,故这次写会声明一个
+#   每次 placement 都兑现不了的帽,接受它等于把沙箱变成砖(完整推理与为何拒在写点见 §3.4)。
+#   `N → 0` 撤帽与 `N → M` 改帽都合法。
 POST   /v1/sandboxes/{id}/pause
 POST   /v1/sandboxes/{id}/resume
 #   resource-terminated 的沙箱拒绝 resume → 409(§4.3;先 PATCH 抬帽)
@@ -62,58 +64,63 @@ DELETE /v1/sandboxes/{id}                                                       
 GET    /v1/sandboxes                                   (list;每项与单读同形,含 `death_cause?`)
 #   list 也带死因是**为省一轮 N+1**:§6.2 全 ID 寻址,若不带,调用方见到若干 `paused` 就得逐个
 #   GET 才知道哪些可 resume —— 而那条事实 list 本来就持有。
-GET    /v1/sandboxes/{id}/files?path=                                    (大文件下载,流式)
-PUT    /v1/sandboxes/{id}/files?path=                          → {path, bytes_written}(上传)
+GET       /v1/sandboxes/{id}/files?path=                                 (大文件下载,流式)
+PUT|POST  /v1/sandboxes/{id}/files?path=                       → {path, bytes_written}(上传)
+#   `POST` 与 `PUT` 同义(上传不是幂等替换语义之争,收两个动词省调用方一次适配)。
 #   §5.E fs 的大文件旁路(D4.4),数据面里唯一走 REST 的一条;小载荷仍走 `FsService.Read/Write`。见下。
 
 # 事件流重放(§4.1 转换事件 / §4.4-C outbox);**只做 pull,无推送面**
 GET    /v1/events?after=<seq>&limit=<n>     → {events:[{seq,id,sandbox_id,kind,state,occurred_at}],
                                                earliest, latest}
 #   `seq` 是**游标**:把收到的最后一个 `seq` 原样作下次 `after` 传回即续位。`after` 省略/0 = 从
-#   保留窗口起点。**排序键是 `seq`,不是 `occurred_at`** —— 后者同纳秒无 tie-break、且墙钟可被
-#   NTP 步进回退,故不是全序、不能当游标(§4.4-C)。
+#   保留窗口起点。**排序键是 `seq`,不是 `occurred_at`**(后者不是全序,理由见 §4.4-C)。
 #   `limit` 有**服务端硬上限**(默认 100、上限 1000),超限**截到上限**而非拒绝。硬上限而非仅默认值:
-#   参数由调用方控制,只给默认值等于没给。**方向要注意**:因为不裁剪,窗口 = 全部历史,故 `after=0`
-#   要翻的行只增不减 —— 不裁剪**加重**而非缓解无界 backlog 风险,这才是硬上限为必做项的原因。
+#   参数由调用方控制,只给默认值等于没给。且因为不裁剪,窗口 = 全部历史,`after=0` 要翻的行只增不减
+#   —— 不裁剪**加重**而非缓解无界 backlog 风险,这才是硬上限为必做项的原因。
 #   `{earliest, latest}` 是保留窗口边界(outbox 空时 0/0)。
 #   **410 是保留语义,今天不可达、不实现**:不裁剪 → `earliest` 永不前进,故"`after` 早于窗口"
 #   这个态构造不出来。写在契约里是为了**将来真加裁剪时调用方契约无需变更**——届时 `after < earliest`
 #   即 410,调用方须从 `earliest` 重新起。**不为不可达态写代码**(§1.3)。
 #   重放**按保留窗口,不按投递状态**:引擎内那个 sink 有没有收过某条,不是外部 subscriber 该依赖的事实。
 #   **为何在控制面**:游标分页 GET 就是 CRUD;且引擎级事件流既非 per-sandbox 也非 per-pid,数据面
-#   本就无处寻址它(§6.2)。**为何只做 pull**:pull 面按构造不持 per-subscriber 状态(无 subscriber
-#   表、无驱逐策略、无清理路径),而 §1.3 禁止引擎持有那类状态;日后若要 push,它是**对同一条查询
-#   做服务端轮询的表现层适配器**、共用同一 `seq`,故结构上零代价 —— **"push 作为适配器"不持状态,
-#   "push 作为真扇出"持,这是分界线**。
+#   本就无处寻址它(§6.2)。**为何只做 pull**、以及 push 为何是零代价的适配器:§4.4-C。
 
 # Template(不可变工件:opaque ID 作身份,存在即状态,§3.1 / §4.3)
 GET    /v1/templates
-POST   /v1/templates                 {from_sandbox_id}   (Promote: 静止后固化,源沙箱留 `paused`,§3.1) → {template_id}
+POST   /v1/templates                 {from_sandbox_id}  (Promote,§3.1)          → {template_id}
+#   源须是 `running` 或 `paused`(否则 409)。`running` 的源被静止到 `paused` 后固化(照发一条普通
+#   `paused` 事件),`paused` 的源原地固化。过 §3.4 准入门(代价预报不足 → 507),且门在静止**之前**,
+#   故一次被拒的 Promote 不是一次可观测的转换。
 DELETE /v1/templates/{id}            (被沙箱/子层引用时 → 409 template in use;引用-回收原子性 §4.3)
 
 # Volume(与沙箱生命周期解耦)
-POST   /v1/volumes                   {size?, backend?}                             → {volume_id}
+POST   /v1/volumes                   {size?}                                  → {volume_id, size}
 #   **无 `access_mode`**:它是挂载行的属性、不是卷的属性(一个卷可同时对 A 是 shared-rw、对 C 是
 #   shared-ro,§5.C),故只出现在 create/PATCH sandbox 的 `volumes` 项里。`size` 在 disk 轴被计量时
 #   **必填**(§3.4 / §6.2 按轴条件必填),否则 400。
+#   **无 `backend` 入参**:后端是部署期注入的单一实现(与 store / runtime provider 同形,§1.3 注册
+#   而非选择),故它只出现在**响应**里,不是请求键。
 GET    /v1/volumes                                                                 (list)
-GET    /v1/volumes/{id}                                                            (inspect)
-PATCH  /v1/volumes/{id}              {size?}                                       → {volume_id, size}
-#   卷帽的唯一写点(create 之外)。**未挂载与挂载中都可改**,与沙箱资源上限只在 `paused` 可改**相反**——
-#   卷没有自己的 placement,"下次 placement 重物化"对未挂载的卷等于"永不"(§5.C)。故无"先 pause"的 409。
-#   抬帽重过准入门(可 507);**降到低于当前用量 → 400**(严格不等式):实测那会把单元卡死且不可逆,
-#   连帽本身都再也改不动,唯一出路是删 guest 的字节(§5.C / volume.md D7.3)。改帽不受写入 regime 管
-#   (动的是分配上界、不是字节),但**改 `access` 在活挂载下被禁**——那是另一条,见 §5.C。不发事件。
+GET    /v1/volumes/{id}              → {volume_id, size, backend?, used_byte?}     (inspect)
+#   `size` 是**记录里的帽**(唯一权威:后端读回分不清"从未设帽"与"故意无帽",volume.md D7.3);
+#   `used_byte` 是后端自陈的已用字节,**读不到时该键不出现**(不报 0——0 会被读成"空",而调用方要拿
+#   它选一个严格大于它的新帽)。list 不带 `used_byte`(每卷一次后端往返,list 上乘以卷数)。
+PATCH  /v1/volumes/{id}              {size}  (**必填**,它是唯一可编辑字段)       → {volume_id, size}
+#   卷帽的唯一写点(create 之外),`size` **必填**。**未挂载与挂载中都可改**,故无"先 pause"的 409——
+#   与沙箱资源上限只在 `paused` 可改相反,机制性理由见 §5.C。抬帽重过准入门(可 507);**降到低于当前
+#   用量 → 400**(严格不等式,§5.C / volume.md D7.3)。改帽不受写入 regime 管,但改 `access` 另有规则
+#   (§5.C)。不发事件。
 DELETE /v1/volumes/{id}
 #   两种 409(§6.2 四个中的 ①② 卷侧):有活挂载行 → 409(被引用);**有活快照/克隆(子代卷)→ 409**
 #   (lineage RESTRICT,与 Template 被子层引用同形)。两者是不同的对象关系,故 sentinel 与文案必须可区分。
-POST   /v1/volumes/{id}/snapshot     {size?}                                       → {volume_id}
-POST   /v1/volumes/{id}/clone        {size?}                                       → {volume_id}
-#   **两者都收 `size`,且 disk 被计量时必填(缺失 → 400),不继承源的帽。** 基底侧没有可继承之物(实测:
-#   快照得到一条全新的无帽配额行),策略侧继承会静默把节点已声明的磁盘主张翻倍(§3.4 / volume.md D6.1a)。
+POST   /v1/volumes/{id}/snapshot     {size?}                                  → {volume_id, size}
+POST   /v1/volumes/{id}/clone        {size?}                                  → {volume_id, size}
+#   **两者都收 `size`,且 disk 被计量时必填(缺失 → 400),不继承源的帽**——基底没有可继承之物,而
+#   策略侧继承会静默把节点已声明的磁盘主张翻倍(§5.C / volume.md D6.1a)。
 #   产出的是**普通可写卷**(无只读标记;要不可变用 `shared-ro` 挂载行),记录带 `parent` 指向源。
 #   新卷的帽同样过准入门(可 507)。后端不支持 → 400,且 capability 必须在分配 ID / 动字节**之前**问。
-POST   /v1/volumes/{id}/import       {path}  (直连写入;无 live-rw 挂载时才放行,§5.C 写入 regime)
+POST|PUT /v1/volumes/{id}/import     ?path=  (直连写入,body 即字节流;无 live-rw 挂载时才放行)
+                                             → {volume_id, path, bytes_written}
 GET    /v1/volumes/{id}/export       ?path=  (直连读出)
 #   **不需要沙箱**——这是"卷与沙箱生命周期解耦"的兑现面:**从零播种**(还没有任何沙箱)与**读最后一个
 #   沙箱消失之后的卷**都走这里。`path` 相对卷根;越界不可达(seam 的 `OpenRoot` 是根限定的,§5.C / D5.1)。
@@ -123,8 +130,8 @@ GET    /v1/volumes/{id}/export       ?path=  (直连读出)
 # Network(策略在 create 时绑定,改策略走 resume 边界;publish 是显式入站例外,可热加)
 # ⚠ 未建(M8):下面两条与 create 的 `network?` 键今天都不存在——两个端点 404,而 `network?` 作为未知键
 #   被 json 解码**静默丢弃**(调用方会以为策略已生效)。§5.D enforcement 的缺口登记在 open-decisions §4。
-GET    /v1/sandboxes/{id}/network                                              (M8,今日 404)
-POST   /v1/sandboxes/{id}/publish    {port, auth?}                → {url}      (M8,今日 404)
+GET    /v1/sandboxes/{id}/network                                              (今日 404)
+POST   /v1/sandboxes/{id}/publish    {port, auth?}                → {url}      (今日 404)
 ```
 
 > **为何 files 旁路走 REST 而不走 RPC:它的全部意义是流式。** 大文件不该变成一条 protobuf 消息、也不该在
@@ -173,6 +180,11 @@ client 从 `transport.proto` 经 `buf` 生成 stub、经 `orchestrator` 反代�
   `resource-terminated` 拒绝 resume → **409**;计量轴缺帽 / 请求体不合法(负的帽、无法解析的 duration)
   → **400**;被引用的 Template 删除 → **409**;源态不合法的动词(如对 `running` 改帽、对非 `paused`
   沙箱 resume)→ **409**;未知 sandbox / template ID → **404**。
+  **另外三个通则码**:pause 正在 drain 时的写操作(fs 变更 RPC / files 上传)→ **503**(§4.2 barrier:
+  拒绝而不排队,排队会把 drain 饿死;可重试);files 上传超引擎单请求上限(8 GiB)→ **413**;任何
+  集合/对象路由上的错方法 → **405**。
+  **成功码**:create / Promote / snapshot / clone → **201**;DELETE(sandbox / template / volume)
+  → **204**;其余读与动词 → **200**。
   **Volume 的四个 409 语义不同、须可区分**:① 删一个有活挂载行的卷(被引用,同 Template 那条);
   ② 删一个**被活挂载行挡住的对象**——它有**两侧**,卷侧(删有活子代卷的源,lineage RESTRICT,§5.C 快照)
   与沙箱侧(删一个有活挂载行的沙箱,`mounts.sandbox` RESTRICT);③ attach 撞独占租约(可重试的状态冲突);
@@ -185,15 +197,13 @@ client 从 `transport.proto` 经 `buf` 生成 stub、经 `orchestrator` 反代�
   **另有一条不属于这四类**:源态不合法的动词(对 `running` 改帽、对非 `paused` 沙箱 resume、以及非法源态的
   改绑定)本就按上文通则判 409,它是**动词的源态规则**、不是 Volume 的引用关系,故不进这个枚举。
   **幂等删除不得吞掉这些 409**:它们是 RESTRICT 触发的**全部**对外信号,若落进"不存在也返成功"的分支,
-  守卫失败的删除就与成功的删除不可区分(一个外部实现正是这样:卷不存在返 `200 {"deleted": true}`,
-  快照删除把三种 not-found 全折成成功)。
+  守卫失败的删除就与成功的删除不可区分(外部反面教材见 [`deep-dives/volume.md`](./deep-dives/volume.md) D9)。
   `size` 在被计量的 disk 轴上缺失(create / snapshot / clone 三处)→ **400**;卷帽降到低于当前用量
   → **400**;挂载绑定内部自相矛盾(同一沙箱内 dest 重复 / 同卷重复 / 卷间嵌套)→ **400**(§5.C:
   不读别的行即可判定,且无重试能让它合法);后端不支持 snapshot/clone → **400**(capability 查询的结果,
   不静默,且必须在动字节之前问)。
   **`GET /v1/events`**:正常(含空窗口、空页)→ **200**;`after` 或 `limit` 不是整数 / `after` 为负 /
   `limit` ≤ 0 → **400**(`limit` **超**上限不是错误,截到上限后仍 200);非 GET → **405**;
-  **410 = `after` 早于保留窗口**,**保留语义**、今日不可达(不裁剪 → `earliest` 永不前进),
-  故不实现 —— 登记在此只为让将来加裁剪时调用方契约无需变更。
+  **410 = `after` 早于保留窗口**:**保留语义**,今日不可达、不实现(理由见 §6.1)。
 - **store / runtime provider 走接口**:换后端 / 加 provider 是注册一个新实现,不改上层模型
   (§1.3 只做加法;provider 始终是抽象契约,见 §1.1 / §5.A)。

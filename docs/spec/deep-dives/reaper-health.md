@@ -52,12 +52,11 @@ idle 定义本身的选择,不是本实现的偷懒;若将来证明需要,升级
 
 - **粒度 = 沙箱全局,不是每 pid。** reaper 的处置是**每沙箱**的(auto-pause 整个沙箱),不是每连接的;
   故只需一个「这个沙箱最近一次任意 I/O 的时刻」,取所有进程 + pty 的 max。一个进程内共享的 unix-毫秒
-  原子时戳,`broadcast()` 与 `writeInput()` 各写一次。无锁、O(1)、不随
-  进程数偏移——与 transport D4.5「`Health` 恒定开销、不列进程」同源。
-- **搭 `Health` 一处三用,不另造协议。** `Health.Check` 同时是 §4.3 L2 探活、resume readiness 门
-  (transport D4.5)与活动探针:`CheckResponse` 带一个 `idle_millis`(= `now - lastIO`)。
-  L2「通不通」与「idle 多久」本就该一次 RPC 拿全,分两个 RPC 是无谓往返。host 侧 `Client.Health` 的域
-  类型相应带回 idle 时长;冷启 ⑦ 门 / 接管 L2 探针只看 err==nil,忽略它即可。
+  原子时戳,`broadcast()` 与 `writeInput()` 各写一次。无锁、O(1)、不随进程数偏移。
+- **搭 `Health`,不另造协议。** 探针本身(一处三用:L2 探活 / resume readiness 门 / 活动探针)定形在
+  transport D4.5,本文不复制。这里只钉活动那一用的形状:`CheckResponse` 带 `idle_millis`
+  (= `now - lastIO`),**与 L2「通不通」同一次 RPC 拿全**——分两个 RPC 是无谓往返。host 侧
+  `Client.Health` 的域类型相应带回 idle 时长;冷启 ⑦ 门 / 接管 L2 探针只看 err==nil,忽略它即可。
 - **仍是无状态(§5.E)。** 这个时戳是 **transient、进程内、随 transport 进程消亡**的——和环形缓冲同一类
   (transport D4.3「无**持久** SoT」),不跨 resume、不进控制面、不是连接注册表。它只回答「此刻这个 guest 多久
   没 I/O」,不记「谁连过、连了多久」。
@@ -180,7 +179,8 @@ mount(egress 面 nft/gateway 随 §5.D 数据面落地时并入枚举,这里预�
   "这个沙箱是不是因为自己的 RAM 帽被杀"。
 
 于是读点唯一落在 `Adopt` 的 `!alive` 分支返回前:`teardownPlacement` 的 `kill`→`delete` 两行会同时销毁
-memcg 叶子与 `.state`,而三条死亡发现路径(启动对账 / 周期对账 / reaper crash-pause)全都经过 `Adopt`。
+memcg 叶子与 runsc 自己在 `--root` 下的容器状态,而三条死亡发现路径(启动对账 / 周期对账 /
+reaper crash-pause)全都经过 `Adopt`。
 映射:`oom_group_kill > 0` → `ResourceExceeded`,否则 `Gone`,读不到 → `Unknown`。
 
 > **还有第四条拆除路径,它不是发现路径:用户 `pause` 一个已经死掉的沙箱。** `pause` 不探活,CAS 因记录仍是
@@ -207,13 +207,14 @@ per-sandbox 单调计数,**就是换了名字的世代计数**(§1.1 明令禁�
 
 ---
 
-## D5. 边界与仍待
+## D5. 边界
 
 - **对象回收 refcount/GC sweep(§4.3 uniform-object invariant)不在本文。** 那是 Template lineage /
   Volume 挂载行的引用-回收原子性(§4.3 + §4.4-C),另属对象回收 sweep。reaper 的 `evict` 走 `Destroy` 的
   **同步删 Overlay**,**不按 refcount 异步删字节**——reaper 在此只推**生命周期态**;失败后的字节由同一 tick
   的孤儿单元 sweep 兜。二者的接缝(evict 标 destroyed 与异步删字节解耦)spec §4.4 已定。
-- **TTL 取值**(default `idle_timeout` / `retention`)是纯数值旋钮,同 transport 的 ring/window(见
-  [`transport.md`](./transport.md) D6.4 末条):取保守默认、在配置点标注、留可调,不影响任何 invariant 形状。
+- **TTL 取值**(default `idle_timeout` / `retention`)与**重启预算取值**(D4b)都是数值旋钮,不是待办:
+  按 [`transport.md`](./transport.md) D6.4 的同一条纪律,取保守默认、在配置点标注、留可调,家只在代码里,
+  不登记为开放决策。
 - **egress 面资源枚举**并入周期对账,随 §5.D 数据面落地;本文预留位。
 - **CPU-bound 活动**若将来证明需计入,healthServer 加一份 `/proc` jiffies 采样(D1 末),additive。

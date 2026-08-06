@@ -286,17 +286,23 @@ tini 的语义权威,前提是**它只有一个子进程、自己永不被重启
 `resume` / `create`(生命周期动词,mediator)按序调用各子系统机制,拉起 → `running`:
 
 ```
+⓪ §4 写入 regime ： 读挂载表；若本次会给某卷 rw 挂载而该卷正有直连变更在飞 → 拒（§5.C；退回源态。
+                   门在最前，故一次拒绝什么都没建）
 ① §5.B Rootfs   ： 挂 merged overlay（lower=Template / upper=Overlay 工件 / work）
                    〔create：先建空 upper/work；resume：重挂同一 Overlay 工件〕
-② §5.C Volume   ： 按挂载表 Binding 备好 Volume（runsc 启动时从 OCI spec 取）
+② §5.C Volume   ： 按挂载表 Binding 逐个 Materialize，句柄组进 LaunchSpec.Mounts
+                   （runsc 启动时从 OCI spec 取，故必须在 ④ 之前）
 ③ §5.D Network  ： 按策略 Binding 建/选 egress 数据面（gateway）→ 产出 ingress 描述符
                    （数据面行为归引擎、落位后置到 ④ 的引流；见 network.md D3.2/D4）
+                   ⚠ 未建（M8）：这一步今天不存在，④ 只建 netns + veth + 两个 /30，egress 不被强制
+                   （open-decisions §4）
       └─ ①②③ 的产出由 §4 汇总交给 ④——子系统间不互调
 ④ §5.A Runtime  ： 重建 placement（netns/IP/cgroup 按资源上限 Binding + 按 ingress 描述符建 nft
                    引流，把 egress 全量逼进数据面）→ 以 sandboxd（init 模式）为 entrypoint 拉起 runsc
 ⑤ guest 内启动  ： PID1（init 模式）装 reaper+信号+监督 → 派生 transport 模式 sandboxd
                    → 子进程 PR_SET_CHILD_SUBREAPER → bind netns TCP → listening
-⑥ §5.A placement： 发现容器当前 netns IP（veth/CNI result/inspect）
+⑥ §5.A placement： 发现容器当前 netns IP（veth/CNI result/inspect；local_runsc 下退化成读回引擎
+                   自己的分配，不做 boot 后探测）
 ⑦ §4 探活门     ： 向 IP:port 发 Health RPC，轮询至首次成功 or 超时
       ├─ 首次成功 → state=running，发 resumed/created 事件（与状态提交单次原子，spec §4.4-C）→ API 返回
       └─ 超时/拉起失败 → 回收半建 placement 后：resume→留 paused 可重试；create→删记录/→destroyed
@@ -304,7 +310,8 @@ tini 的语义权威,前提是**它只有一个子进程、自己永不被重启
                    调 driver --resume（engine 不参与，spec §5.E）
 ```
 
-**顺序约束**:①②③ 必须在 ④ 之前物化(挂载在 runsc 启动时从 OCI spec 取,运行中不可热改);
+**顺序约束**:⓪ 必须在 ① 之前(一次被拒的冷启不该已经挂上 overlay);①②③ 必须在 ④ 之前物化(挂载在
+runsc 启动时从 OCI spec 取,运行中不可热改);
 ⑥ 需 netns 已存在(④ 之后);⑦ 需 IP 已知(⑥)**且**端口在听(⑤)——**⑦ 是"已拉起"与
 "running"之间唯一的屏障**。**并发约束**:§4.4-B 转换锁**全程持有**这条链——①前拿锁、⑦翻 `running`
 (或超时 unwind)才放,故整个 ①–⑦ 期间并发 `destroy`/`evict` 拿不到锁,不会去删正被挂载/冷启的
@@ -340,7 +347,10 @@ D4.2 分进程拓扑换来的附加能力。
 
 ---
 
-## D6. 边界与仍待
+## D6. 边界
 
-- **pause 静止点**:结构已定(单层 drain-barrier),仅剩 grace 取值,详见 D4.4。
-- **模板是否预置常驻进程**:不需要;若出现,平级托管,不进 `sandboxd`。
+- **pause 静止点**:结构已定(单层 drain-barrier,D4.4);**应用层协作安全点已否决**,不是待办。grace
+  时长是数值旋钮,家在代码里(`internal/lifecycle` 的 `defaultDrainGrace`),按 transport D6.4 的同一条
+  纪律**不登记为开放决策**——一个旋钮有两个家就会有两个值。
+- **模板是否预置常驻进程**:不需要;若出现,平级托管,不进 `sandboxd`。**内置 Template 的内容清单**是
+  产品/模板层选型,仍开放,登记在 [`open-decisions.md`](../open-decisions.md)(该行指回 D3.1)。
