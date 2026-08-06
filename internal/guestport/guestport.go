@@ -5,10 +5,10 @@
 // fact — sandboxd chose it — but §5.A also needs it, because §5.E assigns
 // endpoint discovery to §5.A ("宿主如何拿到 IP 归 §5.A"): local_runsc allocates
 // the veth IP and composes IP:port into the placement handle. Having §5.A read it
-// from internal/transport made the §5.A subsystem import §5.E and inherit its
-// whole Connect-RPC + protobuf dependency tree — 34 non-stdlib packages to read
-// one integer, and an edge pointing the opposite way from the spec's ownership
-// (§5.E depends on §5.A's result, not the reverse).
+// from internal/transport would make the §5.A subsystem import §5.E and inherit
+// its whole Connect-RPC + protobuf dependency tree — dozens of non-stdlib packages
+// to read one integer, and an edge pointing the opposite way from the spec's
+// ownership (§5.E depends on §5.A's result, not the reverse).
 //
 // So the constant lives here instead, where both sides depend on a leaf and
 // neither depends on the other. This is a shared substrate constant, not a seam:

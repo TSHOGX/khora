@@ -54,7 +54,7 @@ type Merged struct {
 	MergedPath string // the overlayfs merged dir; consumed by local_runsc only
 }
 
-// Provider is the §5.B FS-provider seam.
+// Provider is the §5.B rootfs-provider storage seam.
 type Provider interface {
 	Name() string
 
@@ -105,9 +105,10 @@ type Provider interface {
 	Unmount(ctx context.Context, m *Merged) error
 
 	// DestroyOverlay reclaims the upper+work bytes (destroy terminal state,
-	// §4.1). Deletes synchronously; a refcount-driven async sweep (§4.3) is the
-	// eventual form. Separate from placement teardown — the mediator invokes each
-	// (§4: subsystems don't call each other).
+	// §4.1), synchronously; a failure is retried asynchronously by
+	// SweepOrphanOverlays (§4.4-A orphan-unit sweep, not refcount GC). Separate
+	// from placement teardown — the mediator invokes each (§4: subsystems don't
+	// call each other).
 	DestroyOverlay(ctx context.Context, o *Overlay) error
 
 	// AdoptMerged reconstructs the merged-mount handle for an Overlay that is
@@ -244,15 +245,15 @@ type Provider interface {
 
 	// SweepOrphanOverlays reclaims Overlay STORAGE UNITS with no live `sandboxes`
 	// row (§4.4-A reclamation discipline) — the §5.B *unit* twin of
-	// SweepOrphanLayers, which sweeps only layers. It supplies the retry §4.4
-	// already licenses but nothing implemented: destroy DISCARDS DestroyOverlay's
-	// error and deletes the record anyway ("删字节失败不阻塞、不回退状态转换…由
-	// refcount sweep(§4.3)异步重试"), yet SweepOrphanLayers scans only LayersDir
-	// and the periodic reconcile iterates only store RECORDS — so once the row was
-	// gone, nothing ever revisited the unit again and it leaked permanently. The
-	// crash-BEFORE-deletion half is separate and already covered (the mediator
-	// reclaims a record's orphan Overlay during §4.4-A reconcile); this is the
-	// POST-deletion half, where no record survives to hang reclamation off.
+	// SweepOrphanLayers, which sweeps only layers. It carries the retry §4.4
+	// licenses: destroy DISCARDS DestroyOverlay's error and deletes the record
+	// anyway ("删字节失败不阻塞、不回退状态转换…由孤儿单元 sweep(§4.4-A 反向对账,
+	// 与 refcount GC 不是一回事)异步重试"), and this is the ONLY thing that revisits
+	// the unit afterwards — SweepOrphanLayers scans only LayersDir and the periodic
+	// reconcile iterates only store RECORDS, so with the row gone there is no record
+	// left to hang reclamation off. The crash-BEFORE-deletion half is separate and
+	// covered elsewhere (the mediator reclaims a record's orphan Overlay during
+	// §4.4-A reconcile); this is the POST-deletion half.
 	//
 	// Same contract as the sibling (§4: mediator asks, provider answers): the
 	// mediator computes `live` — every OverlayID the AUTHORITATIVE store still has

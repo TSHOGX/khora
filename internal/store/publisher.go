@@ -52,9 +52,9 @@ type Sink interface {
 //     arrival loses a merge instead of resurrecting stale state. Our sink has no
 //     such property, which independently argues for strict order.
 //
-// What was NOT acceptable is the operability of an unbounded stall, and that is
-// what the three mechanisms below fix. The stall is the deliberate trade; an
-// unbounded, unalerted, invisible stall is a defect:
+// What the three mechanisms below bound is the stall's OPERABILITY. The stall
+// itself is the deliberate trade; an unbounded, unalerted, invisible one is a
+// defect:
 //
 //  1. A POISON-ENVELOPE EXIT (MaxAttempts + Halted). An event that cannot be
 //     delivered after a bounded number of attempts stops being retried forever

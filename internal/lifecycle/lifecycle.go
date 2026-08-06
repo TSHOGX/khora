@@ -423,10 +423,11 @@ func (m *Mediator) tryLock(id model.SandboxID) (*transitionLock, bool) {
 	return nil, false
 }
 
-// CreateSpec is the create verb input (§6.1 POST /v1/sandboxes). Network/volume
-// Binding inputs are deliberately OMITTED until those subsystems land — omitted,
-// not stubbed (same rule as model.Sandbox; §1.3 no speculative reservation). The
-// §6.2 create-time injection flow shape holds regardless of when they arrive.
+// CreateSpec is the create verb input (§6.1 POST /v1/sandboxes). The network
+// (§5.D) Binding input is deliberately OMITTED until that subsystem lands —
+// omitted, not stubbed (same rule as model.Sandbox; §1.3 no speculative
+// reservation). The §6.2 create-time injection flow shape holds regardless of when
+// it arrives.
 type CreateSpec struct {
 	Template model.TemplateID
 
@@ -1375,7 +1376,7 @@ func (m *Mediator) SweepOrphanLayers(ctx context.Context) error {
 // (§4.4-A) — the unit twin of SweepOrphanLayers, and the retry §4.4 licenses for a
 // destroy whose byte reclamation failed (§4.4: a failed byte delete does not
 // block the transition; the sweep retries it asynchronously).
-// Without it a failed DestroyOverlay leaked its unit forever: the record is gone,
+// Without it a failed DestroyOverlay leaks its unit forever: the record is gone,
 // so nothing else ever revisits that OverlayID.
 //
 // `live` is every OverlayID the store still has a sandbox row for, in ANY state —

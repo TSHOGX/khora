@@ -211,13 +211,12 @@ func TestSubtreeOrphanIsReaped(t *testing.T) {
 }
 
 // THE WIRING GUARD. TestSubtreeOrphanIsReaped calls drain() itself, so it proves
-// the drain works — not that transport mode ever installs one, which was the
-// actual bug (the prctl was there, the waiter was not). This runs the real entry
-// point, startSubtreeReaper, in a fresh process and calls drain() nowhere: the
-// orphan is collected only if the SIGCHLD reaper is really wired up.
-//
-// Against the previous code — a bare unix.Prctl with no waiter — the helper exits
-// 1 with "grandchild is a zombie" on stderr.
+// the drain works — not that transport mode ever installs one. Those are separable:
+// a bare unix.Prctl with no waiter passes the first and is strictly worse than no
+// prctl at all (subtree orphans stop reparenting to PID 1 and pile up as permanent
+// zombies). This runs the real entry point, startSubtreeReaper, in a fresh process
+// and calls drain() nowhere, so the orphan is collected only if the SIGCHLD reaper
+// is really wired up; without it the helper exits 1 with "grandchild is a zombie".
 func TestStartSubtreeReaperReapsWithoutExplicitDrain(t *testing.T) {
 	cmd := exec.Command(os.Args[0], "-test.run=TestStartSubtreeReaperReapsWithoutExplicitDrain")
 	cmd.Env = append(os.Environ(), subtreeReaperHelperEnv+"=1")

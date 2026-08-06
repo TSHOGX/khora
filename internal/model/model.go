@@ -20,7 +20,7 @@ type TemplateID string
 
 // OverlayID identifies the sandbox's writable delta layer as a first-class,
 // ID-addressed, Template-decoupled artifact (§3.1.1). The host path where it
-// materializes is an FS-provider implementation detail and never leaks above
+// materializes is a rootfs-provider implementation detail and never leaks above
 // the Rootfs subsystem (§3.1.1: ID-addressed internally too, not just at the
 // external API).
 type OverlayID string
@@ -217,6 +217,7 @@ type Mount struct {
 	Access AccessMode
 }
 
+// Lifecycle is the §4.1 state machine. Exactly four states — no `failed`
 // intermediate state (§4.4: the absence is a conclusion of the model, not an
 // omission), no independent generation counter (§3.3 uses Placement / §4.3 uses
 // placement-IP-as-epoch instead).
@@ -338,7 +339,7 @@ type Sandbox struct {
 	//     auto-pause (§4.1 automatic transition).
 	//   - Retention: a `paused` sandbox older than this → evict (reaper's
 	//     destroy of a paused sandbox, §4.1).
-	// These EXIST here (unlike the still-omitted volume/network Binding) because
+	// These EXIST here (unlike the still-omitted network Binding) because
 	// the reaper is a live consumer — a justified model growth, not a
 	// speculative reservation (§1.3). A create that omits them gets the
 	// engine-wide default resolved at create time, so the stored value is always

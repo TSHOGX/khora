@@ -62,7 +62,8 @@ func pendingWaiters(r *reapTable) int {
 }
 
 // The core of ②: the reaper is the sole waiter and the supervisor still gets the
-// exit code. Before the fix, cmd.Wait() raced Wait4(-1) and one side got ECHILD.
+// exit code. A second waiter (cmd.Wait) would race Wait4(-1) and one side would get
+// ECHILD with the status gone.
 func TestReapTableDeliversExitCodeToSupervisor(t *testing.T) {
 	r := newReapTable()
 	startDraining(t, r)

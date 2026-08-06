@@ -331,10 +331,10 @@ func (p *proc) closeStdin() error {
 //
 // closer is the parent end to close once this source hits EOF, or nil when
 // something else owns it. It exists because the reaper — not cmd.Wait() — waits
-// our children now (see proc.run): cmd.Wait is also what would have closed the
-// parent ends of the StdoutPipe/StderrPipe pipes, so skipping it means we close
-// them here or leak two fds per process. The pty master is deliberately nil: it
-// is both output source and input sink, so finish() owns closing it.
+// our children (see proc.run): cmd.Wait is also what closes the parent ends of the
+// StdoutPipe/StderrPipe pipes, so skipping it means we close them here or leak two
+// fds per process. The pty master is deliberately nil: it is both output source and
+// input sink, so finish() owns closing it.
 type source struct {
 	r      io.Reader
 	name   string
@@ -380,7 +380,7 @@ func (p *proc) run(exited <-chan syscall.WaitStatus, sources []source, onExit fu
 func (p *proc) pumpSource(wg *sync.WaitGroup, s source) {
 	defer wg.Done()
 	if s.closer != nil {
-		// cmd.Wait() would have closed this; the reaper owns the wait, so we do.
+		// cmd.Wait() is what closes this; the reaper owns the wait, so we do.
 		defer s.closer.Close()
 	}
 	br := bufio.NewReader(s.r)
@@ -466,9 +466,9 @@ func (s *processServer) Start(ctx context.Context, req *connect.Request[v1.Start
 			return connect.NewError(connect.CodeInternal, err)
 		}
 		p = newProc(pid, stdin)
-		// These two parent ends are exactly what cmd.Wait() would have closed;
-		// the reaper waits instead, so each pump closes its own on EOF.
-		// (stdin's parent end is closed by finish, as before.)
+		// These two parent ends are exactly what cmd.Wait() closes; the reaper owns
+		// the wait instead, so each pump closes its own on EOF. stdin's parent end is
+		// closed by finish.
 		sources = []source{
 			{r: stdout, name: "stdout", closer: stdout},
 			{r: stderr, name: "stderr", closer: stderr},

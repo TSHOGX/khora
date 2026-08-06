@@ -55,8 +55,8 @@ type HostOverlayFS struct {
 	LayersDir string
 
 	// Btrfs materializes the §3.4 capacity cap (subvolume + squota). A shared
-	// substrate TOOL, not a seam — §5.C will import the same package for
-	// per-volume caps (rootfs-overlay D6.4).
+	// substrate TOOL, not a seam — §5.C imports the same package for per-volume
+	// caps (rootfs-overlay D6.4).
 	Btrfs btrfs.Client
 }
 
@@ -255,10 +255,12 @@ func (p *HostOverlayFS) Unmount(_ context.Context, m *Merged) error {
 	return nil
 }
 
-// DestroyOverlay reclaims upper+work bytes (terminal destroy, §4.1). Deletes
-// synchronously; a refcount-driven async sweep is the eventual form. Separate
-// from placement teardown; the mediator invokes each (§4 subsystems don't call
-// each other).
+// DestroyOverlay reclaims upper+work bytes (terminal destroy, §4.1),
+// synchronously. A failure here is retried by SweepOrphanOverlays, whose
+// predicate is "no live sandbox row" — not refcount GC (model.md: the Overlay
+// artifact is the degenerate case, referenced by exactly one sandbox row).
+// Separate from placement teardown; the mediator invokes each (§4 subsystems
+// don't call each other).
 // The capacity unit is reclaimed along with the bytes: the subvolume AND its
 // qgroup (a deleted subvolume otherwise leaves a stale `<under deletion>` qgroup
 // row carrying the old limit — measured), so destroy leaves no quota residue
@@ -664,8 +666,8 @@ func validateSeg(name, v string) error {
 // is the upper's tmp/). These MUST track the guest daemon's own paths in
 // cmd/sandboxd — a rename there without a matching edit here leaks a runtime
 // file into a frozen layer, and there is no compile coupling to catch it
-// (separate binaries). Volume mount-point placeholders join this set when Volume
-// lands; the full list is tracked in rootfs-overlay D5.
+// (separate binaries). It is the STATIC half of the exclusion set; a Promote's
+// volume mount destinations are merged in per-call by promoteExclusions.
 var promoteExcludedPaths = []string{
 	"tmp/.sandboxd-transport.pid", // transport child pidfile (§5.E.1)
 	// Crash-loop sentinel: only a `testguest` build reads it

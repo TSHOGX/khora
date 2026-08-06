@@ -651,13 +651,12 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 // code, `sanitizeErr` decides WHAT TEXT the caller may see, and `writeErr` is the
 // ONLY place in the control plane where an `error` value becomes a response body.
 //
-// Before the split, statusFor did all three at once — `http.Error(w, err.Error(),
-// code)` repeated in every arm — and that shape is what leaked: the backend errors
-// arriving here interpolate ABSOLUTE HOST PATHS (`btrfs: create subvolume
-// /srv/state/volumes/vol_x: …`), so a failing `POST /v1/volumes` handed the caller
-// the engine's storage layout. §6.2 admits opaque IDs on the wire and NOTHING about
-// host paths or placement. Ten arms each doing their own write is ten chances to
-// forget, and a new arm forgets by default.
+// The alternative shape — `http.Error(w, err.Error(), code)` in every arm — leaks by
+// construction: the backend errors arriving here interpolate ABSOLUTE HOST PATHS
+// (`btrfs: create subvolume /srv/state/volumes/vol_x: …`), so a failing
+// `POST /v1/volumes` would hand the caller the engine's storage layout. §6.2 admits
+// opaque IDs on the wire and NOTHING about host paths or placement. Ten arms each
+// doing their own write is ten chances to forget, and a new arm forgets by default.
 //
 // This is the same move the DATA plane already made (dataplane.go proxyErr): log the
 // real cause engine-side, hand the caller a placement-free message. The control
@@ -807,8 +806,7 @@ func trimPunct(f string) (lead, tok, trail string) {
 }
 
 // statusCodeFor is the §6.2 verdict → status mapping, and NOTHING ELSE: it writes
-// no response, so it cannot smuggle a body past the funnel. The mapping itself is
-// unchanged from when it lived inline.
+// no response, so it cannot smuggle a body past the funnel.
 func statusCodeFor(err error) int {
 	// The §5.C Volume verdicts first: they are 400s that would otherwise be caught by
 	// a broader arm below and reported as something the caller could retry.

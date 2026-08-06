@@ -3,8 +3,8 @@
 //
 // It is a LEAF package and deliberately ignorant of the engine's model. It knows
 // nothing of Overlay, Volume, Template, or SandboxID — it takes paths and byte
-// counts. §5.B (Overlay upper+work) and later §5.C (per-volume caps) each import
-// it the way they import `os` (rootfs-overlay D6.4).
+// counts. §5.B (Overlay upper+work) and §5.C (per-volume caps) each import it the
+// way they import `os` (rootfs-overlay D6.4).
 //
 // WHY A PACKAGE AND NOT A SEAM. The capacity cap is shared CODE, not a shared
 // INTERFACE. There is deliberately no cross-cutting QuotaProvider: a remote FS

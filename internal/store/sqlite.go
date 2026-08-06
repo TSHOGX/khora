@@ -690,8 +690,8 @@ func (s *SQLite) DeleteVolume(ctx context.Context, id model.VolumeID) error {
 			return err
 		}
 		if n == 0 {
-			// Reported, never folded into success (§6.2): once the reference-protection
-			// constraints land on this same path, folding here would make a REFUSED
+			// Reported, never folded into success (§6.2): the reference-protection
+			// refusals land on this same path, so folding here would make a REFUSED
 			// delete indistinguishable from a successful one.
 			return ErrVolumeNotFound
 		}

@@ -142,9 +142,9 @@ func TestSweepMissingLayersDir(t *testing.T) {
 // sweep that reclaimed the orphan by reclaiming everything would pass three
 // separate single-unit tests:
 //
-//	orphan  (no row, not in flight) → RECLAIMED. This is the leak §4.4 licenses
-//	                                 and nothing collected: destroy dropped
-//	                                 DestroyOverlay's error, then deleted the row.
+//	orphan  (no row, not in flight) → RECLAIMED. This is the residue §4.4
+//	                                 licenses: destroy drops DestroyOverlay's
+//	                                 error, then deletes the row.
 //	live    (row present)           → KEPT. Reclaiming it would delete a running
 //	                                 sandbox's writable layer.
 //	building (create in flight)     → KEPT. Bytes are down but the row is not yet
@@ -182,8 +182,8 @@ func TestSweepOrphanOverlays(t *testing.T) {
 }
 
 // At boot the in-flight keep-set is empty, so a unit whose record is already gone
-// is a TRUE orphan and is reclaimed — the exact post-deletion residue that had no
-// collector (§4.4-A). Also pins that the uncapped path is genuinely
+// is a TRUE orphan and is reclaimed — the post-deletion residue no record survives
+// to hang reclamation off (§4.4-A). Also pins that the uncapped path is genuinely
 // btrfs-independent: with every btrfs query failing the unit still goes away.
 func TestSweepOrphanOverlaysReclaimsPostDeletionResidueAtBoot(t *testing.T) {
 	ctx := context.Background()

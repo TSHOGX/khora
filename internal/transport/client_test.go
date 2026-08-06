@@ -71,7 +71,7 @@ func TestDialSharesOneConnectionPerEndpoint(t *testing.T) {
 	const calls = 50
 	for i := 0; i < calls; i++ {
 		// A fresh Client per call ON PURPOSE: that is exactly how §4 uses it (built per
-		// endpoint, discarded), and it is the usage the per-call transport punished.
+		// endpoint, discarded), and it is the usage a per-call transport punishes.
 		if _, err := transport.Dial(ep).Health(context.Background()); err == nil {
 			t.Fatal("expected the stub echo to fail decoding; the probe would prove nothing if it succeeded")
 		}

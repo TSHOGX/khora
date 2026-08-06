@@ -75,11 +75,11 @@ type ociResources struct {
 // `cpu.max` (the CEILING — "at most this much"), Shares becomes `cpu.weight`
 // (the SHARE — "this much relative to whoever else is runnable").
 //
-// Both are needed because they answer different questions and only the ceiling
-// was being set. §3.4 calls the CPU axis 公平分配, and a ceiling alone does not
-// deliver that: cgroup's default weight is identical for every leaf, so under a
-// saturated node a 4000-millis sandbox and a 250-millis one got EQUAL time — each
-// capped correctly, but sharing nothing like the ratio they were sold. Weight is
+// Both are required because they answer different questions. §3.4 calls the CPU
+// axis 公平分配, and a ceiling alone does not deliver that: cgroup's default weight
+// is identical for every leaf, so on a saturated node a 4000-millis sandbox and a
+// 250-millis one get EQUAL time — each capped correctly, sharing nothing like the
+// ratio they were sold (measured). Weight is
 // what makes the oversubscription §3.4 permits (no CPU admission gate, because
 // overrun only slows the guest) degrade proportionally instead of uniformly.
 //

@@ -49,12 +49,9 @@ var ErrInUse = errors.New("store: template in use")
 // ErrVolumeNotFound is returned when a Volume record does not exist (§5.C). It is
 // its OWN sentinel rather than a reuse of ErrNotFound ("sandbox not found") for the
 // reason §6.2 states about the Volume verdicts generally: a 404 whose text names
-// the wrong object sends the caller looking in the wrong place.
-//
-// The reference-protection verdicts (a volume held by a live mount row, a source
-// held by a live descendant) are deliberately NOT here yet: neither reference path
-// exists in the schema at this point, so a sentinel for them would be a verdict
-// nothing can produce (§1.3). They land with the constraints that can trigger them.
+// the wrong object sends the caller looking in the wrong place. The
+// reference-protection verdicts are separate sentinels for the same reason — see
+// below.
 var ErrVolumeNotFound = errors.New("store: volume not found")
 
 // The Volume reference verdicts (§6.2's four 409s). They are FOUR SEPARATE

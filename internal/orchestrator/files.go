@@ -59,8 +59,8 @@ func fileParams(w http.ResponseWriter, r *http.Request) (string, bool) {
 // paths, because the errors reaching this one are built by the inner transport
 // client, which dials the netns veth IP — client.go's `hc.Do` failures carry
 // `10.x.y.z:port` in their text, and §6.2 bars placement from the wire exactly as it
-// bars host paths. The data plane's RPC half already sanitized this (proxyErr); this
-// REST half was the arm that did not.
+// bars host paths. So this REST half sanitizes through the funnel, the same
+// guarantee the RPC half gets from proxyErr.
 func bypassCode(err error) int {
 	switch connect.CodeOf(err) {
 	case connect.CodeNotFound:

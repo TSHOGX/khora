@@ -139,9 +139,9 @@ type InputWriter interface {
 // This is not decoration: each consumer should depend on what it actually uses.
 //
 //   - The §4 mediator uses HealthProber and nothing else — both its dial sites
-//     only probe readiness/liveness. Typing its dependency as the full 18-method
-//     Client made every L1 fake implement 17 methods it never calls, so adding one
-//     fs RPC churned ten lifecycle test files that have no opinion about fs.
+//     only probe readiness/liveness. Typed as the full 18-method Client, every L1
+//     fake would owe 17 methods it never calls, and one added fs RPC would churn
+//     every lifecycle test file that has no opinion about fs.
 //   - The orchestrator's data plane is the real consumer of ProcessClient and
 //     FsClient — it proxies them to external callers.
 //

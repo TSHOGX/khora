@@ -177,9 +177,9 @@ func (r *Reaper) Sweep(ctx context.Context) {
 	// tick — because it went healthy, paused, was skipped (held lock),
 	// classified Unknown, or is simply gone — must have its streak dropped. We
 	// record confirmations here and prune downSince to exactly this set at the
-	// end, rather than deleting on each individual "good" outcome (which missed
-	// the paused / Unknown / skipped paths and let a stale pre-pause timestamp
-	// escalate a fresh transport-down straight past the budget).
+	// end, rather than deleting on each individual "good" outcome — that shape
+	// misses the paused / Unknown / skipped paths, letting a stale pre-pause
+	// timestamp escalate a fresh transport-down straight past the budget.
 	downThisTick := make(map[model.SandboxID]bool)
 	for _, rec := range recs {
 		switch rec.State {
