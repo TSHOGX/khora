@@ -33,9 +33,8 @@
 四块只经**两条传输无关的薄契约**相遇(D3):**resolve**(数据面↔凭证 resolver)与 **ingress**(数据面↔
 引流)。两条在 single-node 下都是进程内调用,但**接口形状留成"走网络零改动"**。
 
-这套设计**不发明任何新 seam 类型**:Envoy = 注册数据面实现;K8s = 注册 runtime provider;Vault =
-注册 secret-store;新上游凭证 = 加策略行(全部 additive,落回 §1.3 三种加法之一,见 D8 litmus)。它把
-三类既有 seam 摆对位置,并补上 resolve / ingress 两条契约。
+这套设计**不发明任何新 seam 类型**——它把三类既有 seam 摆对位置,并补上 resolve / ingress 两条契约;
+未来加法(Envoy / K8s / Vault / 新上游凭证)逐条落回 §1.3 三种加法之一,见 D8 litmus。
 
 ---
 
@@ -50,10 +49,10 @@
    **纯逻辑 + 承载凭证材料的进程**。
 3. **策略与凭证权威**:谁持 `NetworkPolicy`、谁存凭证 at-rest、谁下发、谁广播轮转失效。**控制面的事**。
 
-三件各走各的轴:引流随 provider,行为随数据面实现,权威在控制面(凭证 at-rest 后端是第四块,即 D0 表列
-的 secret-store 接缝,与这里分解的三件出口关卡关切正交,故本节不展开)。**只要把它们分开,"关卡跑在 K8s 还是
+三件各走各的轴:引流随 provider,行为随数据面实现,权威在控制面(凭证 at-rest 后端是 D0 表列的第四块
+secret-store 接缝,与这三件正交,本节不展开)。**只要把它们分开,"关卡跑在 K8s 还是
 单机"就只是第 1 件(引流)的一种取值,不牵动另两件**——同一台 local_runsc 上就能把 builtin 换成 Envoy
-(只动第 2 件),换 provider 也不动数据面逻辑(只动第 1 件)。本文其余部分把这三件的接缝锁定。
+(只动第 2 件),换 provider 也不动数据面逻辑(只动第 1 件)。
 
 > **为什么现在就分。** 把这三件焊进一个 per-node daemon 是**分布式部署的产物**,不是它们本该在一起:
 > 随之而来的一整套形态(节点级 daemon / annotation 下发 / informer / applied-hash 握手 /
@@ -68,11 +67,11 @@
 D1 第 2 件(数据面行为)与第 1 件(落位与引流)是 D0 表列的两根**正交**轴,不能合成"gateway 归 provider"
 一件。两轴正交的证据:**{builtin, Envoy} × {宿主进程, K8s sidecar} 每一格都是可独立注册的配置**——换行为不动
 引流、换引流不动行为。一旦把 gateway 塞进 runtime provider 接口当"物化的一部分",两根轴被焊成一根,
-四格退化成对角线两格(只剩"单机+builtin""K8s+Envoy"),这正是把 gateway 焊进 provider 的病。
+四格退化成对角线两格(只剩"单机+builtin""K8s+Envoy")。
 
 **但正交是接口层的可分离,不是能力无关**:每一格**能做到的行为上限**受该引流暴露的劫持能力约束
 (见 D3.2)。"能独立注册"与"注册进来就什么都能做"是两回事——接口把两轴解开,让它们能各自替换
-并**显式协商**能力档位,而不是假装行为不依赖引流。焊死时连协商的机会都没有,才是真正的病。
+并**显式协商**能力档位,而不是假装行为不依赖引流。焊死时连协商的机会都没有。
 
 **为什么不能拖到有第二个实现再拆**(§1.3 成本判据自查):
 
@@ -188,7 +187,7 @@ TLS,gateway 看不到真实名字;即便上 MITM,guest 也能直连 **IP 字面�
 **dial 时钉 IP 一次、禁止连接期再解析**,一举覆盖三种域名层拦不住的逃逸:① 重绑定 TOCTOU(鉴权时
 解析到公网、dial 时重解析到内网)· ② IP 直连(guest 根本不做 DNS)· ③ Host/SNI 与目的 IP 背离。
 
-**三档姿态的清单(L0 地板 / 内网私有段 deny-safe / 公网默认放行)已毕业进 §2.4,本文不复制**;此处只留
+**三档姿态的清单(L0 地板 / 内网私有段 deny-safe / 公网默认放行)的规范陈述在 §2.4,本文不复制**;此处只留
 它们各自的判据与那一层不属 IP 的便利层:
 
 - **L0 · 不可覆盖地板**的**成员判据**:进 L0 当且仅当 (a) 到达它**击穿某条引擎 invariant**(宿主隔离 /
@@ -220,7 +219,7 @@ egress 有两跳,deny-set 少钉一跳就漏:
 
 ### D5.5 跨沙箱网络隔离:为什么支柱①管不到,靠什么守
 
-跨沙箱**网络**隔离是一条**独立的 control-plane invariant**,不搭支柱① 的车(§2.3 已收此结论,推理在此)。
+跨沙箱**网络**隔离是一条**独立的 control-plane invariant**,不搭支柱① 的车(结论在 §2.3,推理在此)。
 **支柱①(syscall 拦截)守不住它**:它虚拟化 syscall,不拦网络包——guest 合法用网络,包本就要出去。存储
 跨沙箱隔离(其他沙箱的 Overlay/Volume)能靠支柱①,网络可达性不能。single-node 若所有沙箱 netns 挂同一
 L2 网桥同网段,sandbox A 能直连 sandbox B 的 veth IP(§5.E transport 正是用 veth IP 直连,sibling 在网桥
@@ -310,7 +309,7 @@ gateway seam 的接口有个边界抉择:**协议分类(classify)+ 策略求值(
 | 新上游凭证 / 新出站路由 | add policy rows(Data join table) | 否 |
 | egress 审计喂计费/observability | add a subscriber(Consumption,§4.1 event stream) | 否 |
 
-**全 additive,不发明新 seam 类型**——只把已有三类 seam 摆对位置 + 补两条契约。这正是 §1.3 要的形状。
+**全 additive,不发明新 seam 类型**——这正是 §1.3 要的形状。
 
 ---
 
@@ -328,9 +327,9 @@ gateway seam 的接口有个边界抉择:**协议分类(classify)+ 策略求值(
 - **ingress 描述符的精确形态**:single-node 退化端点 与 抽象描述符的最小公共接口。
 - **数据面 behavior seam 的接口精确签名**:与 §5.A provider 接口同批次定,确保两轴在签名层就分开、
   且签名里不出现"凭证/宿主原语"字样。
-- **D5.3–D5.6 的残留细粒度**(L0 地板精确清单 / 内网放行的 NetworkPolicy 语法 / fail-closed 是否发
-  §4.1 审计事件)登记在 [`open-decisions.md`](../open-decisions.md),本表不复制。
+- **D5.3–D5.6 的残留细粒度**:L0 地板精确清单 / 内网放行的 NetworkPolicy 语法 / fail-closed 是否发
+  §4.1 审计事件。
 
-> 以上登记在 [`open-decisions.md`](../open-decisions.md)。D0–D8 的规范陈述在 §2.1/§2.3/§2.4/§5.D;
+> 以上逐条登记在 [`open-decisions.md`](../open-decisions.md)。D0–D8 的规范陈述在 §2.1/§2.3/§2.4/§5.D;
 > 本文只展开推理与要守的 invariant,不复制 spec 正文。
 

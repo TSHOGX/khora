@@ -36,10 +36,8 @@
 
 ### D1.1 `process` + `fs`:"在沙箱里干活"本就只有两类,且自足
 
-只需两个 service:**fs** 和 **process**(PTY 并入 process,不单独成 service)。理由是:沙箱里能做的
-一切,要么动文件系统、要么跑一个进程。把进程原语
-做足(可选 PTY + 双向流 + signal),则 **shell、命令执行、后台服务、jupyter kernel 全是
-"起一个进程"的特例**——不必为每种形态各开接口。
+沙箱里能做的一切,要么动文件系统、要么跑一个进程。把进程原语做足(可选 PTY + 双向流 + signal),则
+**shell、命令执行、后台服务、jupyter kernel 全是"起一个进程"的特例**——不必为每种形态各开接口。
 
 据此,两个能力都定为 **Connect-RPC 服务**:
 
@@ -54,8 +52,7 @@
 向 sandboxd 实时 `process.List`,不存控制面记录:零进程注册表。
 
 **关键:这两个就够成一个完整产品。** process + fs = 一个持久、可 root、可挂多连接、可读写
-文件、可跑任意进程的隔离沙箱,即 `spec` §1.2 in-scope 的全部地基。它**不依赖 session 存在**
-就能独立交付、独立使用。session 是它之上的可选语义,不是它的一部分。
+文件、可跑任意进程的隔离沙箱,即 `spec` §1.2 in-scope 的全部地基,**不依赖 session 存在**就能独立交付。
 
 ### D1.2 `session`:形态抄 ACP,但它是 engine 外的加法,不是 engine 的职责
 
@@ -172,17 +169,18 @@ session 在 engine 外,加它**不回头改 engine**。这要求 engine 守住�
 
 transport 只依赖 placement 给出的结果——**netns 由谁建、veth IP 由谁分配、sentry 如何 adopt netns 都归
 §5.A**,不在本层重述。对 wire 协议只有一条约束落地:重连拿的是**当前** netns veth IP(冷启即变),不缓存
-固定地址(§3.3)。wire 协议建在这层载体上。
+固定地址(§3.3)。
 
 **连接池是进程级的一份,客户端才是 per-endpoint 的。** 宿主侧客户端"无状态、随手丢"(§5.E)说的是那个
 **值**,不是它底下的 TCP 连接:HTTP/2 连接池按 `IP:port` 键入,故它与"不缓存固定地址"并不冲突——换了 IP
-的 resume 自然拿到新连接,退役端点那条按 idle 超时(90s)老化掉。**每次拨号新建一个池则谁都不会关它**
-(客户端按契约就是被丢弃的),于是每条曾建立的连接连同其读写 goroutine 常驻到进程结束;而拨号既在每次
-数据面 RPC 上、也在 reaper 每轮对每个 running 沙箱的探活上,故增长与负载无关、只随沙箱数与 tick 周期走
-(实测:对同一端点 50 次调用 = 50 条连接、约 150 个常驻 goroutine)。这也是 `ReadIdleTimeout` 的前提:
-一条只服务过一次 unary 调用就被弃置的连接,活不到 PING 到期。
+的 resume 自然拿到新连接,退役端点那条按 idle 超时(90s)老化掉。`ReadIdleTimeout` 也以此为前提:一条
+只服务过一次 unary 调用就被弃置的连接,活不到 PING 到期。
 
-下面各条凡刻意偏离 E2B `envd` 的成熟形态,都点明理由。
+> **反面论证:若不共享池,而是每次拨号各建一个。** 客户端按契约就是被丢弃的,于是没有任何一方会去关那个
+> 池,每条建立过的连接连同其读写 goroutine 都常驻到进程结束。而拨号既在每次数据面 RPC 上、也在 reaper
+> 每轮对每个 running 沙箱的探活上,故增长**与负载无关**、只随沙箱数与 tick 周期走(实测:对同一端点
+> 50 次调用 = 50 条连接、约 150 个常驻 goroutine),终点是 fd 耗尽。共享一份池因此是正确性要求,
+> 不是效率优化。
 
 **通道信任模型:为什么 transport 不带通道内 auth(明确论证,非遗漏)。** `sandboxd` 在 guest netns 内
 **明文**监听、宿主经 veth IP 直连,通道本身不带 token / mTLS。这是攻击面分析的**结论**,不是漏项。逐一
@@ -190,13 +188,14 @@ transport 只依赖 placement 给出的结果——**netns 由谁建、veth IP �
 
 - **guest 自己**:够得到,但**拿不到新能力**。guest 内已是 root(§2.2),通道允许的一切(起进程、读写
   **本沙箱** FS、发信号)它作为 root 本就全能做;通道也**不持有凭证**——凭证从不进 guest(支柱④),
-  `sandboxd` 只做 process/fs、对 model/provider 凭证一无所知。故"guest 可达控制通道"既不提权、也不泄
-  凭证(纠正一个常见误判:它读不到凭证配置,因为凭证根本不在 guest 侧)。
+  `sandboxd` 只做 process/fs、对 model/provider 凭证一无所知。故"guest 可达控制通道"既不提权、也不泄凭证。
 - **sibling 沙箱**:**按设计够不到**——跨沙箱网络隔离把它挡死(§2.3 / network.md D5.5:sibling IP 进 L0
   地板;点对点 veth 是纵深的一层、不是物化方)。**⚠ 这一条今天不成立**:L0 地板未落地,实测两个真沙箱
-  之间 TCP 握手成功并读到载荷(network.md D5.5 / [`open-decisions.md`](../open-decisions.md) §4)。故下面
-  "通道内 auth 冗余"的结论在 M8 之前少一条支撑腿——sibling 今天到不了这个端口靠的是"guest 没有默认路由",
-  不是强制。
+  之间 TCP 握手成功并读到载荷(network.md D5.5)。今天挡住 sibling 的是**缺省配置的巧合,不是强制**,
+  且逃逸所需步数**按目标而异**:到 sibling 与宿主 LAN 只需 guest 自己加一条(带 `dev` 的)默认路由——
+  guest root 持 `CAP_NET_ADMIN`,加得动;真正出公网还额外要宿主侧 SNAT。逐条实测见
+  [`open-decisions.md`](../open-decisions.md) §4 第四条。故下面"通道内 auth 冗余"的结论在 M8 之前少一条
+  支撑腿。
 - **外部**:除非**显式 publish**(可带 `auth`,§5.D)否则不可达。
 
 **对照**:一个挂在**公网可达 URL** 上的 guest daemon 必须带 access token;本项目 `sandboxd` 只在
@@ -279,9 +278,9 @@ RPC 清单(按 pid 寻址,tag 不进模型见 D4.6):
   ——C1 那条非对称是它成立的前提),因为 `apt`/build/
   dev-server 都 fork 子树,只杀父会留一堆孤儿。这是 spec §4.2「向 guest 内进程发定向信号」的落点(注意
   pause 的静止点本身不走这条路:它是 host 侧 drain-barrier,不给负载发协作信号,guest-runtime D4.4)。
-  定向信号归 transport、容器级扇出归 PID1 的分裂见 guest-runtime.md D4.3(§5.E.1),不在此复述。
-  **故 `pid` 必须 > 0,否则 `invalid_argument`**:`pid <= 0` 在 POSIX 里就是扇出形式,归 PID 1 那侧;
-  校验点、实测后果与"沙箱级宽限期已否决"同在 D4.3,本表不复制。
+  **故 `pid` 必须 > 0,否则 `invalid_argument`**:`pid <= 0` 在 POSIX 里就是扇出形式,归 PID 1 那侧
+  ——那条分工(定向信号归 transport / 容器级扇出归 PID 1)、校验点、实测后果与"沙箱级宽限期已否决"同在
+  guest-runtime.md D4.3(§5.E.1),本表不复制。
 
 ### D4.4 fs 服务面
 
@@ -355,8 +354,8 @@ transport 探活探针(spec §4.3 两层探活的 transport 层)、resume readin
 
 ## D6. 外沿投影:控制面 REST + 数据面 Connect(client↔orchestrator)
 
-D4 定**内沿** wire(host↔`sandboxd`);本节定**外沿** wire(client〔前端/CLI/SDK〕↔`orchestrator`)。
-两沿的协议分工不同,理由如下。
+D4 定**内沿** wire(host↔`sandboxd`);本节定**外沿** wire(client〔前端/CLI/SDK〕↔`orchestrator`),
+两沿的协议分工不同。
 
 ### D6.1 一个不可绕过的前提:client 永远不直连 `sandboxd`
 

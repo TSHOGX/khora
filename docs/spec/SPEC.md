@@ -42,19 +42,18 @@ agent),共享同一 FS 与网络。
 > **本系统术语**:**engine** = 本 spec 描述的沙箱抽象本身;**orchestrator** = 承载 engine 的那个
 > 单二进制;**控制面** = engine 内持有权威记录的那部分;**store** = 控制面记录(Binding、各对象
 > 的 lifecycle-state,以及导出 refcount 所需的引用行)的持久后端,经接口抽象、可换实现;**可插拔实现
-> seam** 有三类,分别物化
-> "用什么跑隔离进程"(**runtime provider**,§5.A)、"沙箱 rootfs 由哪些层合成、落在哪"(**rootfs
-> provider**,§5.B)、"独立 Volume 落在哪个后端"(**volume backend**,§5.C);后两者是两个不同形状、
-> 各自注册的接口,不是同一个 seam(为何分开、共享哪些 substrate 原语见 §5 前言);**driver** = 某个
-> 具体 agent 的 CLI 二进制(claude-code / opencode / pi 等);**Overlay 工件** = 本沙箱相对 Template
-> 的可写增量层(§3.1)。
+> seam** 有三类,分别物化"用什么跑隔离进程"(**runtime provider**,§5.A)、"沙箱 rootfs 由哪些层
+> 合成、落在哪"(**rootfs provider**,§5.B)、"独立 Volume 落在哪个后端"(**volume backend**,§5.C);
+> **driver** = 某个具体 agent 的 CLI 二进制(claude-code / opencode / pi 等);**Overlay 工件** =
+> 本沙箱相对 Template 的可写增量层(§3.1)。
 >
 > **五子系统 canonical 短名**(§5,代码包名 / 日志 / 评审一律用这些,不用章节号指代):
 > **Runtime**(§5.A,执行基底)· **Rootfs**(§5.B,rootfs/Overlay)· **Volume**(§5.C)·
 > **Network**(§5.D)· **Transport**(§5.E)。四处 `fs`/`FS`/`Rootfs` 刻意区分,勿混:
 > **Rootfs** = 子系统 5.B;**`fs`** = §5.E Transport 的一个 wire 服务(`read/write/list/stat/mkdir/remove/move`);
-> **rootfs provider** / **volume backend** = 上面那两个不同形状的存储物化 seam。同理 **Runtime**(子系统 5.A)
-> vs **Sandbox**(§3.2 顶层持久单元)分指 "用什么跑" vs "哪一个沙箱"。
+> **rootfs provider** / **volume backend** = 两个不同形状、各自注册的存储物化 seam,不是同一个(为何
+> 分开、共享哪些 substrate 原语见 §5 前言)。同理 **Runtime**(子系统 5.A)vs **Sandbox**(§3.2 顶层
+> 持久单元)分指 "用什么跑" vs "哪一个沙箱"。
 
 **引擎词汇边界(engine vocabulary boundary)。** 第一性原则(见 engine 根 CLAUDE.md)要求产品语义不进
 引擎;命名阶段就拦住,比实现期再移除更省。下表限定**引擎内实体命名**(类型 / 包 / 字段 / API 端点),
@@ -69,7 +68,7 @@ agent),共享同一 FS 与网络。
 | `agent` | 引擎不认识、不寻址 agent(§3.2.1);只有 sandbox/process/fs 原子 | 可(描述引擎外 / 产品层时) |
 
 > **前提:部署在能运行 gVisor 的 Linux 宿主上**(能安装 seccomp 过滤器、能处理信号、内核版本
-> 够新)。这是 systrap 的固有门槛,凡能跑 gVisor 的平台即满足,engine 当作既定前提,不再赘述。
+> 够新)。这是 systrap 的固有门槛,凡能跑 gVisor 的平台即满足,engine 当作既定前提。
 
 > **两条底线:no-hypervisor + 可移植性,彼此独立。** 任何"用可移植性换性能"的决定一律**拒绝,或藏到
 > provider 后面做成可插拔**(§5.A)——platform 即一例:`local_runsc` 把它钉成 `--platform=systrap`,
@@ -77,7 +76,7 @@ agent),共享同一 FS 与网络。
 > **不存内存(§4.2)是可移植性的结果**,不是 no-hypervisor 的结果——gVisor 在 systrap 下本可 checkpoint,
 > 我们不做,因为内存态锁 CPU-feature(§2.5),持久态便不能跨 host/CPU 搬(§1.5#3)。故 resume 是冷启秒级。
 
-"在哪儿、用什么跑一个隔离的进程上下文"因此被抽象成可插拔的 runtime provider(§5.A)。这个接口存在的
+**"在哪儿、用什么跑一个隔离的进程上下文"正是 runtime provider 抽象掉的那件事。** 这个接口存在的
 意义是**保持抽象边界干净**,而非支持别的后端:唯一实现是 single-node 的宿主 runsc 进程,"被调度的远端
 隔离单元"(K8s Pod / GKE Sandbox)仅作校准接口边界的纸面参照,不进落地路径(§5.A)。
 
@@ -129,8 +128,8 @@ agent),共享同一 FS 与网络。
 
 > 任何要**进引擎**的未来需求,都应能归到 **register an implementation / add a join table / add a
 > subscriber** 三者之一。若三者都装不下、非改现有结构不可,先问一句:**它是不是根本不该进引擎**
-> ——能在引擎外叠 adapter 就该叠在外面(引擎外加法不受此判据约束)。若它确实属于引擎内、却三者
-> 都装不下,**才说明当前缺一类 seam 或某 invariant 没守住**,这是现在就该补的设计缺陷。
+> ——能在引擎外叠 adapter 就该叠在外面。若它确实属于引擎内、却三者都装不下,**才说明当前缺一类 seam
+> 或某 invariant 没守住**,这是现在就该补的设计缺陷。
 
 ### 1.4 非目标:不做什么,以及靠哪个 seam / invariant 保持可加
 
@@ -214,7 +213,7 @@ guest 内部卫生,不是宿主隔离支柱**——五条支柱无一以"guest �
 需要的(`apt` 要 root)。
 
 由此:**默认就是 guest root**,不引入非 root 默认身份、也不预置切用户机制。既然它在隔离轴上一文不值,
-root 默认就是 §1.1「可拿 root 的 agent 沙箱」最直接的表达,装依赖的权限也天然满足(§5.A;
+root 默认就是 §1.1「可拿 root 的 agent 沙箱」最直接的表达(§5.A;
 [`deep-dives/guest-runtime.md`](./deep-dives/guest-runtime.md) D3.1)。**引擎不建模 guest 用户**:「以某用户运行」是 guest
 原生的事(`su`/`sudo`,产品/模板层自理),不是引擎原语(§3.2.1);引擎既无 create 期"默认身份"字段,
 也无 per-`Start` run-as 参数。放开 root 的代价落在 **guest 内数据面**(§2.3),这是接受的产品取舍。
@@ -241,8 +240,8 @@ root 默认就是 §1.1「可拿 root 的 agent 沙箱」最直接的表达,装�
   **sibling 沙箱不可达**(除非经显式策略且经 gateway 中转,非 L2 直连)。**这条不靠支柱① 守**:①
   拦 syscall、不拦网络包(guest 合法用网络),故跨沙箱网络隔离是**独立的 control-plane invariant**,
   由 §5.D 策略 + provider steering 物化,与"存储跨沙箱隔离靠支柱①"并列(见 network.md D5.5)。
-  **⚠ 这一条今天不成立**:两个真沙箱之间 TCP 握手成功并读到载荷——点对点 `/30` veth 消除了二层邻接,
-  但**宿主仍在两段之间路由**,而强制它的 nft 地板尚未落地(缺口见 open-decisions §4 / network.md D5.5)。
+  **⚠ 这一条今天不成立**:点对点 `/30` veth 消除了二层邻接,但**宿主仍在两段之间路由**,而强制它的
+  nft 地板尚未落地(实测与缺口见 network.md D5.5 / open-decisions §4)。
 - **provider / model 凭证**(支柱④)——只在宿主侧,guest 永不见真 key。
 - **控制面记录本身**(Binding 的权威,§3.4)——挂载面、网络策略、资源上限的取值由控制面裁决,
   guest 内 root 改不动(支柱⑤)。
@@ -251,10 +250,9 @@ root 默认就是 §1.1「可拿 root 的 agent 沙箱」最直接的表达,装�
   整块盘,故撑不满整机、撑不垮其余沙箱的写。**但容量帽只管 guest 自己写的字节,不管内核代它写的**:
   故"确定且整组的终止"是本不变量的组成部分,不是调参——**它绕开容量帽**的那条路径见 §2.4。
 
-一句话:**放大只发生在"本沙箱数据面"内;宿主隔离(①②④)与跨沙箱隔离不受 guest 身份影响**。注意
-**资源耗尽维度不靠 syscall 拦截(支柱①)守**——①虚拟化的是 syscall、不是资源用量:CPU/RAM/IO 速率
-靠 cgroup(§5.A)、磁盘容量靠 FS 配额(§5.B/§5.C),缺了容量帽,`dd` 就是一条合法 `write()` 撑满
-共享盘、击穿本不变量。
+**资源耗尽维度同样不靠 syscall 拦截(支柱①)守**——①虚拟化的是 syscall、不是资源用量:CPU/RAM/IO
+速率靠 cgroup(§5.A)、磁盘容量靠 FS 配额(§5.B/§5.C),缺了容量帽,`dd` 就是一条合法 `write()`
+撑满共享盘、击穿本不变量。
 
 ### 2.4 provider 的安全义务(抽象,不绑定任何具体 provider)
 
@@ -291,17 +289,15 @@ root 默认就是 §1.1「可拿 root 的 agent 沙箱」最直接的表达,装�
 
 这条义务**不依赖任何具体 provider 形态**——无论"宿主本地进程"还是"被调度到远端 node 的隔离
 单元",义务清单一字不变(后者只是把 ①② 的物化换到它自己的隔离机制上,把 ③ 的引流换成 CNI/sidecar)。
-今天只兑现 `local_runsc`,但义务是按"任何 provider 都要满足"写的。**引流不可绕过(steering 必须
-exhaustive)是一条可验收义务**:不写死它,guest 一条直连就绕过整个 §5.D 策略面(见
-[`deep-dives/network.md`](./deep-dives/network.md) D5.1)。
+**引流不可绕过(steering 必须 exhaustive)是一条可验收义务**:不写死它,guest 一条直连就绕过整个
+§5.D 策略面(见 [`deep-dives/network.md`](./deep-dives/network.md) D5.1)。
 
 > **⚠ 落地状态:本节的 ③ 与上面三条 egress invariant 是"已定、未建"。** ①②⑤ 已被代码兑现;**④ 今天
 > 只是空真**——凭证后端、别名 resolve、注入路径一概未落(M9),它成立仅因引擎里还没有任何凭证。**③ 的
-> enforcement 一行未落**——没有 `internal/network`、没有 nft/TPROXY、没有 deny-set。今天沙箱到不了外网、
-> 兄弟与 link-local,**靠的是"没有默认路由"这一个事实,不是靠强制**;而 guest root 持 `CAP_NET_ADMIN`、
-> 宿主 `ip_forward=1`,故 guest 自己加一条默认路由即可达宿主 LAN 与兄弟沙箱(实测)。故本节读作**义务
-> 规格**(评估任何 provider 用),不是对当前代码的陈述。缺口、连带影响与 owning plan 登记在
-> [`open-decisions.md`](./open-decisions.md) §4;**L0 地板怎么挣到、deny-set 住哪**是两项待决设计。
+> enforcement 一行未落**:今天沙箱到不了外网、兄弟与 link-local,靠的是几个**巧合**而非任何强制——逐条
+> 巧合、逃逸要几步、连带影响与 owning plan 全在 [`open-decisions.md`](./open-decisions.md) §4,本节不
+> 复制。故本节读作**义务规格**(评估任何 provider 用),不是对当前代码的陈述;**L0 地板怎么挣到、
+> deny-set 住哪**是两项待决设计。
 
 ### 2.5 substrate 事实核查
 

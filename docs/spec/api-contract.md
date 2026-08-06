@@ -30,7 +30,7 @@
 # Sandbox 生命周期
 POST   /v1/sandboxes                 {template_id, network?, volumes?, idle_timeout?, retention?,
                                       cpu_millis?, memory_byte?, disk_byte?}        → {sandbox_id}
-#   `network?` **今天尚未实现**(见下方 Network 块):现在传它会作为未知键被 json 解码静默丢弃。
+#   `network?` **今天尚未实现** —— 见下方 Network 块的 ⚠。
 #   资源上限三轴见 §3.4(Binding);按轴条件必填的规则见 §6.2。准入不足 → 507。
 #   `volumes` 每项 = {volume_id, path, access},`access` ∈ {exclusive, shared-ro, shared-rw} —— 它是
 #   **挂载行**的属性(§5.C),故在此给出而非在卷记录上。撞独占租约 → 409(§6.2 四个 409 之 ③)。
@@ -75,8 +75,9 @@ GET    /v1/events?after=<seq>&limit=<n>     → {events:[{seq,id,sandbox_id,kind
 #   `seq` 是**游标**:把收到的最后一个 `seq` 原样作下次 `after` 传回即续位。`after` 省略/0 = 从
 #   保留窗口起点。**排序键是 `seq`,不是 `occurred_at`**(后者不是全序,理由见 §4.4-C)。
 #   `limit` 有**服务端硬上限**(默认 100、上限 1000),超限**截到上限**而非拒绝。硬上限而非仅默认值:
-#   参数由调用方控制,只给默认值等于没给。且因为不裁剪,窗口 = 全部历史,`after=0` 要翻的行只增不减
-#   —— 不裁剪**加重**而非缓解无界 backlog 风险,这才是硬上限为必做项的原因。
+#   参数由调用方控制,只给默认值等于没给。且**今天不裁剪 ⟹ 窗口 = 全部历史**,`after=0` 要翻的行只增
+#   不减 —— 不裁剪**加重**而非缓解无界 backlog 风险,这才是硬上限为必做项的原因。(窗口取多大仍开放,
+#   见 §4.4-C / [`open-decisions.md`](./open-decisions.md) §2;裁剪一旦加上,调用方契约不变——见下条 410。)
 #   `{earliest, latest}` 是保留窗口边界(outbox 空时 0/0)。
 #   **410 是保留语义,今天不可达、不实现**:不裁剪 → `earliest` 永不前进,故"`after` 早于窗口"
 #   这个态构造不出来。写在契约里是为了**将来真加裁剪时调用方契约无需变更**——届时 `after < earliest`
@@ -186,7 +187,7 @@ client 从 `transport.proto` 经 `buf` 生成 stub、经 `orchestrator` 反代�
   **成功码**:create / Promote / snapshot / clone → **201**;DELETE(sandbox / template / volume)
   → **204**;其余读与动词 → **200**。
   **Volume 的四个 409 语义不同、须可区分**:① 删一个有活挂载行的卷(被引用,同 Template 那条);
-  ② 删一个**被活挂载行挡住的对象**——它有**两侧**,卷侧(删有活子代卷的源,lineage RESTRICT,§5.C 快照)
+  ② 删一个**被活的引用行挡住的对象**——它有**两侧**,卷侧(删有活子代卷的源,lineage RESTRICT,§5.C 快照)
   与沙箱侧(删一个有活挂载行的沙箱,`mounts.sandbox` RESTRICT);③ attach 撞独占租约(可重试的状态冲突);
   ④ 有 live-rw 挂载时的直连变更(§5.C 写入 regime)。
   **四个是"结局类别"的计数,不是 sentinel 的计数**:② 的两侧是两条不同的 FK 路径、两个不同的对象关系,

@@ -20,7 +20,7 @@
 | 归属(plan §) | 待细化内容 | 备注 / 当前倾向 |
 | --- | --- | --- |
 | **§5.C Volume(契约边界外)** | 契约在 §5.C;待细化的边界项:独占卷抢占策略 / 直连变更 vs live-ro reader 准入 / snapshot **一致性标注**进 §6 / 远端 backend 落地形态 | **详见 [`deep-dives/volume.md`](./deep-dives/volume.md) D8**,本表不复制。多为产品层策略或落 §6 时定。抢占那条另有一条**锁序**论据(同文 D3:卷维度反查持有者会闭合成环,实测死锁) |
-| **§4.4-C 事件流可重放窗口大小** | 事件流的对外形状已定(pull + `seq` 游标,§4.4-C / §6.1)。**仍开放的只有一项:可重放窗口取多大**,即何时开始裁剪 outbox。**详见 §4.4-C 末段**(为何是被推迟而非被回答、连带的 at-rest KNOWN LIMITATION),本表不复制 | 谁消费:未来外部 subscriber。窗口取值须由"承诺给外部订阅者的重连时长"论证,而今天无外部订阅者。加裁剪时调用方契约无需变更(410 已是 §6.1 保留语义) |
+| **§4.4-C 事件流可重放窗口大小** | 事件流的对外形状已定(pull + `seq` 游标,§4.4-C / §6.1)。**仍开放的只有一项:可重放窗口取多大**,即何时开始裁剪 outbox。**详见 §4.4-C 末段**(为何是被推迟而非被回答、连带的 at-rest KNOWN LIMITATION),本表不复制 | 谁消费:未来外部 subscriber——取值须由"承诺给它的重连时长"论证,而今天没有这样的订阅者 |
 | **§5.D 凭证存储 seam** | 凭证"留宿主侧"的**后端**(secret-store):怎么存、注册、轮转。此处只留**at-rest 后端**选型;alias→directives 的 **resolve/缓存/失效契约**是另一条 seam,见下行 | 一类可插拔 seam(类比 runtime / rootfs provider);明文不进控制面/Overlay,只在宿主侧独立后端 |
 | **§5.D egress 数据面 seam + 两条契约** | 引擎自有 egress 数据面(gateway,行为 seam)与两条传输无关薄契约的**精确签名**:① **resolve 契约**(数据面↔resolver:alias+目标上下文 → directives+过期+version 戳 + 失效信号)② **ingress 契约**(数据面↔引流:抽象描述符 + 双向劫持能力协商)。行为的两种强制模式(builtin 内联求值 / 外部编译下发)对接口要求不同 | **详见 [`deep-dives/network.md`](./deep-dives/network.md) D3/D7**,本表不复制。今天只建接口形状 + builtin 单实现(模式 1),registry plumbing 缓(D6);谁消费:§5.D 数据面 + 未来远端 provider |
 | **§5.D 凭证注入模式** | builtin 首版支持哪些注入模式、各自约束 | **别过早钉 MITM 为唯一路径**;MITM 选中才需 guest 信任注入(CA 证书进 guest、私钥留数据面),落 §5.B 模板 / §5.E.1。**详见 [`deep-dives/network.md`](./deep-dives/network.md) D9**,本表不复制 |
@@ -43,13 +43,12 @@
 
 | 缺口 | 现状 | owning plan |
 | --- | --- | --- |
-| **§5.D 网络策略强制(支柱③ 的 enforcement)** | **设计已定(§2.4 三条 invariant / §5.D / network.md),代码一行未落**:无 `internal/network` 包,无 nft / TPROXY / deny-set。今天 `local_runsc` 只建 netns + veth + 两个 `/30`,**egress 不被强制**——沙箱当前到不了外网/兄弟/link-local,**仅因为没有默认路由**,而 guest root 持 `CAP_NET_ADMIN`、宿主 `ip_forward=1`,故一条 `ip route add default` 即可达宿主 LAN 与兄弟沙箱 IP(实测)。§2.4 三条 invariant 今天**无一成立**;宿主 loopback 与 orchestrator 控制面是被 `127.0.0.1` bind + `route_localnet=0` **偶然**覆盖的,不是被强制。**连带**:`GET /v1/sandboxes/{id}/network` / `POST …/publish` 两个端点 404,`POST /v1/sandboxes` 的 `network?` 键被静默丢弃(未知键)。**L0 地板怎么挣到、deny-set 住哪**两项是设计决策,见 §2 对应行 | **M8**(`docs/plans/M8-network.md`,待建) |
+| **§5.D 网络策略强制(支柱③ 的 enforcement)** | **设计已定(§2.4 三条 invariant / §5.D / network.md),代码一行未落**:无 `internal/network` 包,无 nft / TPROXY / deny-set。今天 `local_runsc` 只建 netns + veth + 两个 `/30`,**egress 不被强制**:§2.4 三条 invariant 今天**无一成立**,沙箱到不了外网 / 兄弟 / link-local 全是巧合(逐条见本节末第四条);宿主 loopback 与 orchestrator 控制面是被 `127.0.0.1` bind + `route_localnet=0` **偶然**覆盖的,同样不是被强制。**连带**:`GET /v1/sandboxes/{id}/network` / `POST …/publish` 两个端点 404,`POST /v1/sandboxes` 的 `network?` 键被静默丢弃(未知键)。**L0 地板怎么挣到、deny-set 住哪**两项是设计决策,见 §2 对应行 | **M8**(`docs/plans/M8-network.md`,待建) |
+| **沙箱 disk 帽降到当前用量以下没有写点**(§3.4 严格不等式的 §5.B 一侧) | **设计已定([model.md](./model.md) §3.4 的"降帽不是安全方向"块,卡死后的实测在那里,本表不复制),代码只落了卷侧那一半**:`lifecycle.SetVolumeCapacity` 用严格不等式把卷帽的 below-usage 降帽拒成 400(`ErrVolumeCapBelowUsage`),而 `lifecycle.UpdateBinding` 在 disk 轴上**只校验 `0 → N`**(`ErrUncappedDiskNotCappable`),`N → M` 无校验通过。故一次 `M ≤ 当前用量` 的 `PATCH` 返 200 并**卡死该存储单元**,与卷侧逐字节同形。**不是缺一条 `if`,是一次 seam 改造**:`rootfs.Provider` 只暴露 `PromoteCostBytes` 与 `UncappedBytes`,而 `UncappedBytes` 对**有帽单元刻意计 0**(那是它的契约),中介层因此读不到严格不等式所需的 per-sandbox 用量。收口需要 §5.B 新增一个沙箱级用量查询,形状照 `volume.Backend.Usage(ctx, id) (used, limit, err)` | **无**——M8 是网络、M9 是凭证,两个 plan 都不含此项;收口里程碑待定 |
 
-| **沙箱 disk 帽降到当前用量以下没有写点**(§3.4 严格不等式的 §5.B 一侧) | **设计已定([model.md](./model.md) §3.4 的"降帽不是安全方向"块),代码只落了卷侧那一半**:`lifecycle.SetVolumeCapacity` 用严格不等式把卷帽的 below-usage 降帽拒成 400(`ErrVolumeCapBelowUsage`),而 `UpdateBinding` 在 disk 轴上**只校验 `0 → N`**(`ErrUncappedDiskNotCappable`,`lifecycle.go:850`)——`N → M` 无校验通过,该处注释自己写着"`N → 0` 和 `N → M` remain legal"。故一次 `M ≤ 当前用量` 的 `PATCH` 返 200 并**卡死该存储单元**(与卷侧实测逐字节同形:其后 mkdir / 建文件 / truncate 成 0 全返 `ENOSPC`,配额 ioctl 自己也返 `ENOSPC`,帽既不能撤也不能抬)。**不是缺一条 `if`,是一次 seam 改造**:`rootfs.Provider` 只暴露 `PromoteCostBytes` 与 `UncappedBytes`,而 `UncappedBytes` 对**有帽单元刻意计 0**(那是它的契约),中介层因此读不到严格不等式所需的 per-sandbox 用量。收口需要 §5.B 新增一个沙箱级用量查询,形状照 `volume.Backend.Usage(ctx, id) (used, limit, err)` | **无**——M8 是网络、M9 是凭证,两个 plan 都不含此项;收口里程碑待定 |
-
-> **为何登记在此而非留白**:本表的作用正是回答"哪些已定但还不真"。§5.D 是最大的未建面、且是安全关键面,
-> 而 `SPEC.md` §2.1③ / §2.4 是用**现在时**写的——一个只读 spec 的人会以为它已被强制。§5.D 与冷启链
-> (guest-runtime D5.1 的 ③)各自带一条同样的未建标记。本行在 M8 落地后移除。
+> **为何 §5.D 那一行值得写这么长**:它是最大的未建面、又是安全关键面,而 `SPEC.md` §2.1③ / §2.4 用
+> **现在时**写——一个只读 spec 的人会以为它已被强制。§5.D 与冷启链(guest-runtime D5.1 的 ③)各自带一条
+> 同样的未建标记。该行在 M8 落地后移除。
 >
 > **M8 必须带上的实测**(在 `sbx` 上量的,别重新发现一遍):
 >
@@ -58,9 +57,10 @@
 > ② 沙箱 netns 内的 nft 看不到 guest 报文,故 enforcement 只能挂宿主端 veth 或 `netdev` 钩子,
 > **netns 内的 TPROXY 不成立**;③ `saddr` 谓词可被 guest 伪造、`iif` 谓词不可。
 >
-> **第四条只在本表有,别丢:逃逸需要两步,当前的"安全"是两个巧合。**
-> `ip route add default via <host> dev <veth>`(**要带 `dev`**,不带则 rc=0 但不通)+ 宿主侧 SNAT
-> 存在,才真正出网;今天不通是"没有默认路由"**且**"没有 SNAT"两件事一起,不是任何一条强制。
+> **第四条只在本表有,别丢:当前的"安全"是巧合,逃逸的步数按目标而异。**
+> 到宿主 LAN 与兄弟沙箱:一条 `ip route add default via <host> dev <veth>` 就够(**要带 `dev`**,不带则
+> rc=0 但不通)。**真正出网还要宿主侧 SNAT**:今天不通是"没有默认路由"**且**"没有 SNAT"两件事一起,
+> 不是任何一条强制。
 
 ---
 

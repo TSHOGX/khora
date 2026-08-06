@@ -5,9 +5,8 @@
 > 留深挖该留的三件事:每条契约**为什么是这个形状**、**排除了哪些备选(证伪)**、**契约边界外待办**
 > (登记 [`open-decisions.md`](../open-decisions.md))。
 >
-> **方法论(engine CLAUDE.md):** 从"设计该是什么样"正向推导。本文反复排除的一整族机制
-> (WAL→对象存储物化、内容寻址层、跨 node 心跳回收、head CAS、应用层加密)都是
-> **"POSIX over 一个远端、非 CoW、不可信对象存储"**的产物——解决单机引擎**根本没有的问题**。判据:凡属
+> **本文反复排除的一整族机制**(WAL→对象存储物化、内容寻址层、跨 node 心跳回收、head CAS、应用层加密)
+> 都是 **"POSIX over 一个远端、非 CoW、不可信对象存储"**的产物——解决单机引擎**根本没有的问题**。判据:凡属
 > **远端后端实现义务**的,封进"那个 backend"、不进核心;核心只认"Volume 经 backend seam 物化成一个
 > 宿主挂载点"。
 >
@@ -110,7 +109,7 @@ Volume 是独立子系统、有自己的 seam `volume.Backend`,**与 §5.B 的 `
 见 D7),不共用一个物化接口。
 
 seam 沿用 §5.A `runtime.Provider` / §5.B `rootfs.Provider` 的既定约定:**ID 过 seam,宿主路径留 seam 内;
-策略+句柄,不泄漏宿主原语**。
+策略 + 句柄,不泄漏宿主原语**。
 
 > **一条贯穿本节的形状规则:「分配」「设帽」「放置」是三个动作,不能压进一个调用。** 把它们合并会让创建、
 > 容量、准入项三者都无处安放——`DestroyVolume` 找不到创建的对手方、"别动配额"需要一个哨兵值、无帽卷的字节
@@ -134,9 +133,9 @@ seam 沿用 §5.A `runtime.Provider` / §5.B `rootfs.Provider` 的既定约定:*
     sweep 的沙箱永久无法 resume)。**并发性必须写进契约**——整个共享扇出设计依赖"同一个卷被多次并发
     物化"成立(已验)。
 - `Release(m)` —— 释放这一次物化(local:no-op;remote:umount FUSE)。**名字不叫 `Unmount`**:那个词命名了
-  默认臂**没有**的机制,而那正是一个 seam 长成某一个实现形状的方式。契约是一份**承诺**——这次物化的源不再
-  有效、**字节存续**、幂等、容忍目标已消失——故 local 臂的 no-op 是对明确承诺的正确实现,不是坏味道
-  (它是 `runtime.Stop` 的处境);坏味道是"no-op 或 detach"那种一个名字配两份未定义契约。
+  默认臂**没有**的机制,而那正是一个 seam 长成某一个实现形状的方式。契约四条:这次物化的源不再有效、
+  **字节存续**、幂等、容忍目标已消失——故 local 臂的 no-op 是对明确承诺的正确实现,不是坏味道
+  (同 `runtime.Stop`);坏味道是"no-op 或 detach"那种一个名字配两份未定义契约。
 - `AdoptMaterialized(volumeID) → Materialized` —— 崩溃后重认一个仍挂着的挂载点(§4.4-A,`AdoptMerged`
   的孪生)。
 - `CreateVolume(ctx, volumeID, capBytes)` / `SetCapacity(ctx, volumeID, capBytes)` —— **容量属于创建 + 它
@@ -169,11 +168,11 @@ seam 沿用 §5.A `runtime.Provider` / §5.B `rootfs.Provider` 的既定约定:*
     字节。两个消费者不同(`local_runsc` vs orchestrator 的 import/export 端点),故是两个方法。
 - `Name()` —— backend 标识(注册/诊断用)。
 - `ListUnitIDs(ctx) → []string` —— **只枚举,不判定**。backend 报出它自己存储根下的全部存储单元 id;
-  "哪些是孤儿"由 mediator 判定、并逐个 `DestroyVolume`。**这个切法是实测逼出来的,不是风格选择**:
-  原本的形状是 `SweepOrphanVolumes(live, building)`(镜像 `SweepOrphanOverlays`,mediator 算两个集合喂进来、
-  backend 删差集),而它**会删掉已提交卷的字节**——mediator 分两次读 `live` 与 `building`,一个**整个创建
+  "哪些是孤儿"由 mediator 判定、并逐个 `DestroyVolume`。**这个切法是实测逼出来的,不是风格选择**——
+  **否决"把判定也推给 backend"**(`SweepOrphanVolumes(live, building)`,mediator 算两个集合喂进来、
+  backend 删差集):它**会删掉已提交卷的字节**。mediator 分两次读 `live` 与 `building`,一个**整个创建
   过程**落在两次读之间的卷两个集合都不在,backend 于是删了一个完整提交的卷。**实测:458 次并发 sweep 下
-  6 个快照被删了 3 个;改成本形状后 913 次 sweep / 6 个快照,零误回收。**
+  6 个快照被删了 3 个;枚举-判定分离下 913 次 sweep / 6 个快照,零误回收。**
   - **它靠次序闭合窗口,不靠加锁**:每个候选的字节都早于全部检查;而一个已不在在飞集合里的候选,其行
     **必然已经插完**(标记只在插入之后才摘),故随后一次 per-candidate 的 store 读一定看得见它。不引新锁、
     不在锁内调 store。
@@ -254,9 +253,9 @@ seam 沿用 §5.A `runtime.Provider` / §5.B `rootfs.Provider` 的既定约定:*
 1. **不是"一个卷至多一条 rw 挂载行"** —— 那与 SharedReadWrite 的扇出(§5.C)直接矛盾:shared-rw 同样是 rw。
 2. **不是"控制面前置校验 + 插入,由单写者 store 序列化"** —— 单写者 store 串行化的是
    **每一次调用**,不是**跨两次调用的判定-动作**;而两个并发 `Create` 各自新铸 SandboxID、因此持两把**不
-   相交**的转换锁,那一刻唯一被持有的锁是本沙箱的。引擎自己的准入门文档已经逐字论证过同一件事(门的
-   不变量是节点全局的,而那些锁是 per-sandbox 的,故两个并发 create 根本不互相序列化——这正是准入门需要
-   一把独立互斥的理由)。实测:8 个 racer、无调度钩子、4000 次迭代里 2 次打破租约,加显式调度点则稳定复现。
+   相交**的转换锁,那一刻唯一被持有的锁是本沙箱的。§3.4 准入门是同一形状的另一例:门的不变量是节点
+   全局的,而转换锁是 per-sandbox 的,故并发 create 之间根本不互相序列化,门因此另需一把独立互斥。
+   实测:8 个 racer、无调度钩子、4000 次迭代里 2 次打破租约,加显式调度点则稳定复现。
 
 **兑现方式:让 store 原子地做,不加应用层锁。** 一条语句表达完整的跨行谓词(含偏索引盲的全部四种组合):
 
@@ -626,9 +625,9 @@ fabrication;`f_type` 是 gofer 的而非 btrfs 的),根因是 btrfs squota **没
    ——它的卷记录带一对默认 POSIX uid/gid 字段,**存在的理由就是"没有活沙箱可以提供身份"**。这条汇合不是巧合:
    一个生命周期独立于沙箱的对象,内容进出却依赖沙箱,那它的独立性只在记录层面(D5.1)。
    - **但机制上我们不抄。** 其中一个为路径限定付的是**每请求一个新 mount namespace + bind + `pivot_root`**
-     (还要 root、要 `LockOSThread` 的线程所有权协议)。实测同机对照:那套 **178 µs/op**,
-     `openat2(RESOLVE_IN_ROOT)` **0.52 µs/op**——**342×**,且不要特权。它们的形状不是"安全需要这么贵",
-     是那份代码早于(或忽略了)`RESOLVE_IN_ROOT`。**抄能力,不抄机制。**
+     (还要 root、要 `LockOSThread` 的线程所有权协议),同机实测比 `openat2(RESOLVE_IN_ROOT)` 贵 **342×**
+     (两个数字见 D5.1),且要特权。它们的形状不是"安全需要这么贵",是那份代码早于(或忽略了)
+     `RESOLVE_IN_ROOT`。**抄能力,不抄机制。**
    - **两者的另一半我们明确不抄:它们都没有在这条路径上放任何与挂载的协调。** 一个的宿主侧写与 guest 的活
      NFS 挂载各自独立打开同一棵树、无锁无租约无版本戳(两处调用点都已核对);另一个的删除是"删行 + 返 204 +
      一个游离 goroutine 去删字节,注释写着『失败了以后再清』",而**那个『以后』的清理程序在整个仓库里不存在**
