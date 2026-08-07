@@ -29,17 +29,34 @@ type RootfsSource struct {
 	MergedPath string
 }
 
-// SteeringSpec is the §5.D "引流要求": the ingress descriptor + default-deny
-// that forces all egress into the engine's data plane. It is NOT the full
-// network policy — policy enforcement and credential injection live in the
-// engine's own egress data plane, not in the provider (§5.A / §2.1 ③④).
+// SteeringSpec is the §5.D "可达性要求": what the provider must enforce so that
+// the sandbox's reachable set is exactly the declared one — the allow set and
+// publish endpoints derived from the declaration, plus the L0 floor and
+// default-deny. It carries the DERIVED result, not the declaration itself: §5.D
+// holds the declaration and generates rules, the provider installs them and
+// holds no authority (§5.A / §2.1 ③).
+//
+// Two obligations ride on this field and are easy to miss because neither shows
+// up in its shape (§2.4):
+//   - Installation must be ATOMIC with placement — rules go on after the
+//     netns/veth exist and before the isolated unit runs. Any window where the
+//     network is up but the rules are not is a fail-open window, and only the
+//     side creating the placement has that hook point. Adopt/ReclaimOrphans
+//     inherit this: a rule set is crash-surviving host state, like the netns.
+//   - The predicate must bind to a fact the guest cannot change — the host-side
+//     veth's input interface, NOT the source address, which guest root can
+//     forge with `ip addr add` (measured; network.md D5 ③). That is pillar ④.
+//     Spell it `iifname` (by NAME): `iif` freezes an ifindex at load time and
+//     silently fails open after a same-name veth rebuild (network.md D5 ⑫), and
+//     the two render identically in `nft list` — §5.A makes this a guard, not a
+//     review item.
 //
 // Network is none today, so this is empty. Unlike a data record's unused fields
 // (which we omit — see model.Sandbox), this type EXISTS now because it is a named
 // member of the settled §5.A contract 3-tuple (rootfs / steering / limits) —
 // "settled, not yet built" (§1.3), not a speculative reservation. (Guest identity
 // is NOT a member: the sandbox runs as guest root and the engine does not model
-// guest users, §2.2 / §3.2.1.) Filled in when the egress data plane lands.
+// guest users, §2.2 / §3.2.1.) Filled in by M8.
 type SteeringSpec struct{}
 
 // ResourceLimits is the Binding the provider materializes at placement time
@@ -122,7 +139,7 @@ func (c DeathCause) String() string {
 
 // LaunchSpec is the provider input — the contract's left-hand side:
 //
-//	(rootfs 来源, 引流要求, 资源上限) → (placement 句柄, transport 端点, stop/start)
+//	(rootfs 来源, 可达性要求, 资源上限) → (placement 句柄, transport 端点, stop/start)
 type LaunchSpec struct {
 	Sandbox  string // opaque sandbox id, for naming/logging only
 	Rootfs   RootfsSource

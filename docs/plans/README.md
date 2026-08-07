@@ -19,7 +19,7 @@ stating inline the property it proves; invocations in [`README.md`](../../README
 | --- | --- | --- |
 | **M1** | Single sandbox `create / pause / resume / destroy` end-to-end | §3.3 · §4 · §5.A · §5.B · §5.E |
 | **M2** | Persistent store + the three §4.4 invariants: atomic commit + outbox, true-concurrency, crash-reconciliation | §4.4 · §5.A · ADR-0004 |
-| **M3** | Transport depth: PTY, multi-connection fan-out, `Connect` reconnect, bounded ring-replay, external data-plane projection | §3.2 · §5.E · §6 |
+| **M3** | Transport depth: PTY, multi-connection fan-out, `Connect` reconnect, bounded ring-replay, the §6 outer-edge projection (control-plane REST + Connect-RPC) | §3.2 · §5.E · §6 |
 | **M4** | Reaper + health classification + live periodic reconcile: `auto-pause` / `evict` / `crash-pause` | §4.3 · §4.4-A |
 | **M5** | Templates as first-class rows: `parent` lineage, existence-as-state, derived refcount, reference-reclaim atomicity, GC, boot seed, Promote | §3.1 · §4.3 · §5.B · §6.1 |
 | **M6** | Resource governance: §3.4's three axes enforced (cgroup CPU · btrfs squota disk · host memcg RAM), no-oversubscribe admission, `PATCH` as the Binding write point | §2.3 · §3.4 · §4.1 · §4.3 · §5.A · §5.B · §6.1 |
@@ -29,17 +29,29 @@ stating inline the property it proves; invocations in [`README.md`](../../README
 
 | # | Plan | Capability to deliver | Anchors |
 | --- | --- | --- | --- |
-| **M8** | `M8-network.md` | Network egress data plane + layered deny-set + credential injection (**security-critical**) | §2.4 · §5.D |
-| **M9** | `M9-credential-store.md` | Credential store seam | §5.D |
+| **M8** | `M8-network.md` | Reachability that is **enforced**: the declared set is the reachable set, and the sandbox's network identity cannot be forged (**security-critical**) | §2.1 ③④ · §2.4 · §5.D |
 
-Neither plan file exists yet — the name is the one the plan will take.
+Its design is settled in the spec (§5.D's four-field declaration, §2.4's three
+invariants, [`network.md`](../spec/deep-dives/network.md) D1–D8), and the plan
+carries scope, acceptance, out-of-scope, and today's state. **Nothing gates the
+start of implementation** — `open-decisions.md` §1 (blocking spikes) is empty; the
+twelve facts the measurement pass produced are `network.md` D5, and M8 inherits
+them rather than rediscovering them.
 
-**M8 cannot be written yet.** Two design decisions are open (how the L0 floor is
-earned, where the placement-derived deny-set lives), and four measured facts must be
-inherited rather than rediscovered. Both live in
-[`open-decisions.md`](../spec/open-decisions.md) — §2 for the decisions, §4 for the
-enforcement gap and the facts. Read it first: today's cross-sandbox isolation rests
-on a missing route the guest is authorized to add, not on enforcement.
+Three of the twelve are worth knowing before reading the plan, because each is a
+construction that passes its obvious test while being broken: an over-broad allow
+above the L0 floor silently voids the floor; an `accept` in a *different* base
+chain on the same hook increments its own counter while the traffic is still
+dropped; and `iif` freezes an ifindex at load time, so a floor rule silently stops
+matching after a same-name veth rebuild — and `nft list` reverse-resolves the
+frozen integer back to a name, so a reviewer reading the rendered output cannot
+see it.
+
+**M8 is the last milestone, and the ladder ends there.** Credentials are a
+permanently excluded non-goal (§1.4), so no credential-store milestone follows:
+what a credential proxy needs from the engine, M8 delivers as the two invariants
+that proxy sits on — a reachable set narrowable to one endpoint, and an unforgeable
+sandbox identity.
 
 **Why M8 lands last.** It is the security-critical face, so it goes on top of a
 settled lifecycle + storage + transport foundation rather than beside one.

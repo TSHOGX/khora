@@ -261,9 +261,10 @@ func (b *LocalBtrfs) snapshotPath(ctx context.Context, srcID, newID string, capB
 // The procedure, in the measured order:
 //
 //  1. ONE sync per ROUND (not per unit): `filesystem sync` then `subvolume sync`. That
-//     order is a measured finding — `subvolume sync` alone waits for the next periodic
-//     commit (3–16 SECONDS), while forcing the commit first makes the pair return in
-//     14–29 ms. Same effect, bounded instead of open-ended.
+//     order is a measured finding — `subvolume sync` alone sleeps until the next
+//     periodic commit, so its cost is load-dependent rather than fixed (runs at 7-16 s
+//     and 19.1 s), while forcing the commit first returns in tens of ms (14-29 ms,
+//     53 ms). The ~3 orders of magnitude is the point, not any one interval.
 //  2. For each recorded id, READ THE LABEL and act on it: `<stale>` → destroy; absent →
 //     done; `<under deletion>` → retry after a settle; `<squota space holder>` → LEAVE
 //     for a later round (a live clone can hold one legitimately for its whole lifetime);

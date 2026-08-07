@@ -374,9 +374,12 @@ func (c Client) MountPoint(ctx context.Context, path string) (string, error) {
 // Sync forces a commit and then waits for pending subvolume deletions to settle.
 //
 // THE ORDER IS THE WHOLE POINT, and it is a measured finding rather than a style
-// choice: `subvolume sync` ALONE blocks until the next periodic commit (measured 3–16
-// SECONDS), while preceding it with `filesystem sync` forces that commit so the pair
-// returns in 14–29 ms. Same effect, but bounded instead of "wait for a commit".
+// choice: `subvolume sync` ALONE sleeps until the next periodic commit, so its cost
+// tracks the commit interval and the load rather than being a fixed property (runs
+// have landed at 7-16 s and at 19.1 s), while preceding it with `filesystem sync`
+// forces that commit so the pair returns in TENS OF MILLISECONDS (14-29 ms, 53 ms).
+// The load-bearing fact is that ~3 orders of magnitude, not any one interval: same
+// effect, bounded instead of "wait for a commit".
 //
 // Called ONCE PER SWEEP ROUND rather than once per unit, which is the other half of
 // keeping it bounded.

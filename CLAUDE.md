@@ -97,12 +97,14 @@ slims to boundary + open agenda — nothing lives in full in both places.
   error text (which interpolates host paths) out of §6.2 response bodies.
 - **Engine vocabulary boundary (§1.1).** Banned as engine-internal entity names
   (types / packages / fields / API endpoints): `generation`, `principal`,
-  `tenant`, `owner` (ownership sense), `session`, `turn`, `agent`. They keep
+  `tenant`, `owner` (ownership sense), `session`, `turn`, `agent`, plus the whole
+  credential family — `credential` / `secret` / `token` / `api_key` (§1.4 excludes
+  credentials permanently; the engine sees only a TCP flow to some address). They keep
   product semantics out at naming time. Prose is looser and the §1.1 table is
   authoritative on exactly how much — consult it rather than guessing (e.g. `agent`
   is fine for anything outside the engine, product layer included: "agent sandbox
-  engine" is the engine's own positioning; `generation` / `principal` / `tenant` are
-  barred outright).
+  engine" is the engine's own positioning; `generation` / `principal` / `tenant` and
+  the four credential spellings are barred outright).
 - **Code matches spec vocabulary.** If code and spec disagree on a name, fix one
   in the same change.
 

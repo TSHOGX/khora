@@ -2,7 +2,7 @@
 
 > **定位:[`§5.E`](../subsystems.md)(spec,导航见 [`SPEC.md`](../SPEC.md))的传输层深挖文档。** spec 只明确 §5.E 的边界
 > (engine 只暴露 process / fs 两个无状态服务,session 语义在 engine 外);本文展开这条边界背后的
-> **选型理由、ACP 会话映射、要守住的 seam**,并给出 **wire 协议(D4)** 与边界议程(D5)。
+> **选型理由、ACP 会话映射、要守住的 seam**,并给出 **wire 协议(D4)**、外沿投影(D5)与边界议程(D6)。
 >
 > **设计参照:** E2B `envd`(公开的沙箱守护进程,两服务收敛的先例)与 ACP(Zed 的 Agent Client
 > Protocol,coding agent 会话协议)。二者是公开可查的形态参照,不是本仓依赖;下文只取其**设计取向**,
@@ -12,8 +12,9 @@
 
 ## D0. 一句话结论
 
-传输用 **Connect-RPC**(HTTP-native,流式)。**engine 只实现两个服务**,它们构成自足的地基
-——等价于一个 E2B 式沙箱:
+传输用 **Connect-RPC**(HTTP-native,流式)。**engine 只暴露两个通用、无状态的能力服务(process / fs)**,
+它们构成自足的地基——等价于一个 E2B 式沙箱;另有一个**引擎自用的 `Health` 探针**(D4.5),它不属对外
+能力面,故不在表内(§5.E 同一措辞):
 
 | 服务 | 性质 | 在 engine 内? | 谁来用 |
 | --- | --- | --- | --- |
@@ -41,12 +42,10 @@
 
 据此,两个能力都定为 **Connect-RPC 服务**:
 
-- **`process`**:`Start`(带可选 `pty.size`)/ `Connect`(重连已有进程)/ `SendInput` /
-  `SendSignal` / `List`。PTY 不是独立服务,是 `Start` 带 PTY 字段的特例——resize = 更新
-  size,键盘输入 = input 的 pty 分支。**进程按 pid 寻址**(guest 原生;tag 不进模型见 D4.6)。
-- **`fs`**:`Read(path, offset, len)` / `Write` / `List` / `Stat(size, mtime)` /
-  `MakeDir` / `Remove` / `Move`。**不提供 `watch`**,消费方用 `stat`+`read(offset)` 自行轮询拉增量
-  (理由见 D4.4)。大文件走 HTTP 流式旁路,不挤 RPC。
+- **`process`**:PTY 不是独立服务,是 `Start` 带 PTY 字段的特例——resize = 更新 size,键盘输入 =
+  input 的 pty 分支。**进程按 pid 寻址**(guest 原生;tag 不进模型见 D4.6)。权威 RPC 清单见 D4.3。
+- **`fs`**:全 unary + 大文件 HTTP 流式旁路,**不提供 `watch`**(消费方用 `Stat`+`Read(offset)` 自行轮询
+  拉增量)。权威 RPC 清单与语义档位见 D4.4。
 
 这两个服务**无状态**:engine 不为它们维护任何持久 SoT。"沙箱上现在跑着什么进程" =
 向 sandboxd 实时 `process.List`,不存控制面记录:零进程注册表。
@@ -76,17 +75,10 @@
 `load` / `resume` / `stopReason`),**由 engine 外的 adapter 实现**。`control` payload 属这一层:
 它**不是 engine 的一种 payload 类型,而是 engine 外 session 层的协议**,对齐 ACP,engine 不持有它。
 
-ACP 验证的三条判断(都指向"turn 不进 engine 控制面"):
-
-- **turn 状态归 agent 进程**:ACP 无控制面,turn 是 agent 进程内的活动,对端只是观察者。
-- **会话历史归 agent 持有**:`sessionId` 由 agent 侧生成,历史用 driver-native 机制存。
-- **跨重启恢复是能力声明**:`session/load`(重放历史)vs `session/resume`(不重放、只恢复
-  context),各由 capability 门控,agent 不支持就明说——**"重启行为不确定"是显式能力位,
-  不是 engine 用 lease/grace 去保证的东西**。
-
-这三条**天然成立**,因为 session 根本不在 engine 里——engine 没有 turn 表可仲裁,
-也没有会话内容可持有。session 层的状态(sessionId↔driver 映射、恢复能力、审计事件流)**全在
-engine 外那层自己管**。
+ACP 用来验证这条划界的三点(turn 状态归 agent 进程 / 会话历史由 agent 侧生成并用 driver-native 机制存 /
+跨重启恢复是 `session/load` vs `session/resume` 的**显式能力位**,不是 engine 用 lease/grace 保证的东西)
+在本项目**天然成立**——engine 里根本没有 turn 表可仲裁、没有会话内容可持有。session 层的状态
+(sessionId↔driver 映射、恢复能力、审计事件流)全在 engine 外那层自己管。
 
 ### D1.3 engine 侧只有 process / fs:没有 lane / payload 注册表 / turn 仲裁
 
@@ -118,9 +110,9 @@ engine 外那层自己管**。
 | 引擎角色 | 通用 `fs`(read/stat,内容不透明) | `process`(duplex + signal) |
 | 要不要连接 | **不一定**(可完全不开流,只轮询 fs) | **要——这条流就是 process 交互** |
 
-- **渲染面**:engine 只保证"能读到字节 + 读到大小"(`fs.Read(offset)` + `fs.Stat`),
-  **不提供 watch**。要不要 push、隔多久 poll,是消费方(engine 外组件)自己的策略;变更推送
-  (inotify 式)是这之上的优化,不进 engine(理由见 D4.4),而轮询 `stat` 在 run-anywhere 下铁定可用。
+- **渲染面**:engine 只保证"能读到字节 + 读到大小"(`fs.Read(offset)` + `fs.Stat`)。要不要 push、隔多久
+  poll,是消费方(engine 外组件)自己的策略;轮询 `stat` 在 run-anywhere 下铁定可用。**不提供 watch**
+  的理由见 D4.4。
 - **交互面**:只有要**往活进程写**(给 shell 发键、给 agent 投消息)并拿实时双向回流时,
   才需要 `process` 的双向流。纯看历史/看状态,一条流都不用开。
 
@@ -171,32 +163,29 @@ transport 只依赖 placement 给出的结果——**netns 由谁建、veth IP �
 §5.A**,不在本层重述。对 wire 协议只有一条约束落地:重连拿的是**当前** netns veth IP(冷启即变),不缓存
 固定地址(§3.3)。
 
-**连接池是进程级的一份,客户端才是 per-endpoint 的。** 宿主侧客户端"无状态、随手丢"(§5.E)说的是那个
-**值**,不是它底下的 TCP 连接:HTTP/2 连接池按 `IP:port` 键入,故它与"不缓存固定地址"并不冲突——换了 IP
-的 resume 自然拿到新连接,退役端点那条按 idle 超时(90s)老化掉。`ReadIdleTimeout` 也以此为前提:一条
-只服务过一次 unary 调用就被弃置的连接,活不到 PING 到期。
+**进程级共享一份连接池是正确性要求(§5.E)。** `ReadIdleTimeout` 也以此为前提:一条只服务过一次 unary
+调用就被弃置的连接,活不到 PING 到期;退役端点那条按连接池的 idle 超时老化掉。
 
 > **反面论证:若不共享池,而是每次拨号各建一个。** 客户端按契约就是被丢弃的,于是没有任何一方会去关那个
 > 池,每条建立过的连接连同其读写 goroutine 都常驻到进程结束。而拨号既在每次数据面 RPC 上、也在 reaper
 > 每轮对每个 running 沙箱的探活上,故增长**与负载无关**、只随沙箱数与 tick 周期走(实测:对同一端点
-> 50 次调用 = 50 条连接、约 150 个常驻 goroutine),终点是 fd 耗尽。共享一份池因此是正确性要求,
-> 不是效率优化。
+> 50 次调用 = 50 条连接、约 150 个常驻 goroutine),终点是 fd 耗尽。
 
 **通道信任模型:为什么 transport 不带通道内 auth(明确论证,非遗漏)。** `sandboxd` 在 guest netns 内
 **明文**监听、宿主经 veth IP 直连,通道本身不带 token / mTLS。这是攻击面分析的**结论**,不是漏项。逐一
 过一遍谁够得到这个端口:
 
 - **guest 自己**:够得到,但**拿不到新能力**。guest 内已是 root(§2.2),通道允许的一切(起进程、读写
-  **本沙箱** FS、发信号)它作为 root 本就全能做;通道也**不持有凭证**——凭证从不进 guest(支柱④),
-  `sandboxd` 只做 process/fs、对 model/provider 凭证一无所知。故"guest 可达控制通道"既不提权、也不泄凭证。
-- **sibling 沙箱**:**按设计够不到**——跨沙箱网络隔离把它挡死(§2.3 / network.md D5.5:sibling IP 进 L0
+  **本沙箱** FS、发信号)它作为 root 本就全能做;通道上也**没有什么可偷的**——`sandboxd` 只做 process/fs,
+  而引擎里根本不存在凭证这个概念(§1.4 永久排除),故通道上不可能流过它。故"guest 可达控制通道"不提权。
+- **sibling 沙箱**:**按设计够不到**——跨沙箱网络隔离把它挡死(§2.3 / network.md D5 ①:sibling IP 进 L0
   地板;点对点 veth 是纵深的一层、不是物化方)。**⚠ 这一条今天不成立**:L0 地板未落地,实测两个真沙箱
-  之间 TCP 握手成功并读到载荷(network.md D5.5)。今天挡住 sibling 的是**缺省配置的巧合,不是强制**,
+  之间 TCP 握手成功并读到载荷(network.md D5 ①)。今天挡住 sibling 的是**缺省配置的巧合,不是强制**,
   且逃逸所需步数**按目标而异**:到 sibling 与宿主 LAN 只需 guest 自己加一条(带 `dev` 的)默认路由——
-  guest root 持 `CAP_NET_ADMIN`,加得动;真正出公网还额外要宿主侧 SNAT。逐条实测见
-  [`open-decisions.md`](../open-decisions.md) §4 第四条。故下面"通道内 auth 冗余"的结论在 M8 之前少一条
-  支撑腿。
-- **外部**:除非**显式 publish**(可带 `auth`,§5.D)否则不可达。
+  guest root 持 `CAP_NET_ADMIN`,加得动;真正出公网还额外要宿主侧 SNAT。逐条实测见 network.md D5 ⑤。
+  故下面"通道内 auth 冗余"的结论在 M8 之前少一条支撑腿。
+- **外部**:除非**显式 publish**(§5.D)否则不可达。**publish 自身不带鉴权字段**——引擎交付一个
+  `host ip:port`,任何调用方校验都在引擎外(§5.D),故它不为本条提供任何额外保护。
 
 **对照**:一个挂在**公网可达 URL** 上的 guest daemon 必须带 access token;本项目 `sandboxd` 只在
 netns 内、宿主经 veth 直连,攻击面小一个量级,**通道内 auth 在当前载体下是冗余的**。但这条**取决于载体
@@ -267,15 +256,12 @@ RPC 清单(按 pid 寻址,tag 不进模型见 D4.6):
      的输出环形缓冲(旧字节静默丢弃);`Connect{pid}` **先把缓冲内近期
      字节回放给新订阅者、再切入 live 流**。于是重连 / 刷新页面 / 多端挂载**立刻见最近状态而非空屏**——
      这正是 REPL / 交互式终端体验的刚需。
-  - **这不破 §5.E「无状态」**:无状态约束的是**控制面不持久 SoT**(无进程注册表、不跨 resume 续命);
-    环形缓冲是 transport 进程内的**瞬时、非权威、随进程消亡、不跨 resume/transport 重启**的加速结构,
-    落在"无 **持久** SoT"的措辞内(§5.E)。缓冲丢了只损失回放近况,不损失任何权威记录。
+  - (§5.E 已把这个环形缓冲列在"无状态"约束之外——它是进程内瞬时、非权威的加速结构,丢了只损失回放近况。)
   - **边界:engine 只保证 best-effort 字节 tail,不保证屏幕重建。** 裸字节回放可能落在 ANSI 转义序列
     中段;**完整屏幕状态重建(tmux/screen 式 reflow)是 engine 外 client/adapter 的活**,engine 不理解
     流内容(D3 seam),不替终端发明它本不具备的语义(呼应 D2「PTY 不落 scrollback 文件」)。
 - **信号默认发进程组,可寻址单进程。** `SendSignal` 默认对**进程目标的进程组**发(先 `kill(-pid)`、
-  fallback `kill(pid)`;`-pid` 就是进程组,因为非 PTY 的 `Start` 一律 `Setpgid` 自成组、PTY 走 `setsid`
-  ——C1 那条非对称是它成立的前提),因为 `apt`/build/
+  fallback `kill(pid)`;guest-runtime D4.5 C1 那条非对称是它成立的前提),因为 `apt`/build/
   dev-server 都 fork 子树,只杀父会留一堆孤儿。这是 spec §4.2「向 guest 内进程发定向信号」的落点(注意
   pause 的静止点本身不走这条路:它是 host 侧 drain-barrier,不给负载发协作信号,guest-runtime D4.4)。
   **故 `pid` 必须 > 0,否则 `invalid_argument`**:`pid <= 0` 在 POSIX 里就是扇出形式,归 PID 1 那侧
@@ -323,7 +309,7 @@ guest 的同一个监听端口),
 `sandboxd` transport 模式暴露一个 unary `HealthService.Check{}`→`{ok, idle_millis}`(proto 里它是与
 `ProcessService`/`FsService` **平级的第三个服务**,不是挂在两者上的一个方法)。它**一处三用**,不另造协议:
 transport 探活探针(spec §4.3 两层探活的 transport 层)、resume readiness 门(guest-runtime D5.2 要点①:
-首次 `Health` 成功即翻 `running`,不信裸 TCP accept),以及**连接活动探针**(§4.3 idle 象限:`idle_millis` =
+首次 `Health` 成功即翻 `running`,不信裸 TCP accept),以及**连接活动探针**(§4.3 idle 健康态:`idle_millis` =
 `now - 沙箱全局上次 I/O 时戳`,transport 在 `broadcast`/`writeInput` 打戳)。**用专门的 `Health` 而非
 `process.List` 兜底**——`Health` 恒定开销、不列进程,探活与活动读取都不随进程数偏移;idle 与 L2「通不通」
 一次 RPC 拿全,不分两次往返。信号为何在 guest 侧量(而非 host 侧数据面代理)见
@@ -340,24 +326,12 @@ transport 探活探针(spec §4.3 两层探活的 transport 层)、resume readin
 
 ---
 
-## D5. 边界
-
-- **不提供 checkpoint / restore 原语**(已拍板,非待定):内存态冻结整族被 §1.4 永久排除——全 VM 镜像
-  与**单进程 checkpoint 是同一条约束**,都把状态锁在特定 CPU-feature 上(§2.5),持久态便不再能跨
-  host/CPU 搬(§1.5#3)。gVisor 在 systrap 下本可 checkpoint;我们不用,是为可移植性。恢复因此只有一条
-  路:`--resume` + `fs` 读历史(D3)。
-- **session adapter 怎么在外面叠不在本文,也不在引擎内**:它是 engine 外的加法,只要 D3 那三个 seam 在
-  就能落地(D1.2),engine 侧无待办。
-- **外沿投影已定死在 D6**(控制面 REST / 数据面 Connect),同样不是待办。
-
----
-
-## D6. 外沿投影:控制面 REST + 数据面 Connect(client↔orchestrator)
+## D5. 外沿投影:控制面 REST + 数据面 Connect(client↔orchestrator)
 
 D4 定**内沿** wire(host↔`sandboxd`);本节定**外沿** wire(client〔前端/CLI/SDK〕↔`orchestrator`),
 两沿的协议分工不同。
 
-### D6.1 一个不可绕过的前提:client 永远不直连 `sandboxd`
+### D5.1 一个不可绕过的前提:client 永远不直连 `sandboxd`
 
 E2B 的 SDK **直连** envd(经路由代理,`E2b-Sandbox-Id/Port` 头寻址)。本项目**不能照抄这条**,
 原因是载体 + 纪律双重决定的:
@@ -368,10 +342,10 @@ E2B 的 SDK **直连** envd(经路由代理,`E2b-Sandbox-Id/Port` 头寻址)。�
   placement 永不外泄,§6.2)。client 直连 `sandboxd` 会把 placement 泄到引擎外,破 §3.3。
 
 所以外沿数据面**必须终结在 `orchestrator`、再由它 re-proxy 到内沿 `sandboxd`**。E2B「数据面直连」
-那份好处本项目拿不到(载体决定),但**typed-contract + 多语言 codegen 那份好处能拿**——这是 D6.2
+那份好处本项目拿不到(载体决定),但**typed-contract + 多语言 codegen 那份好处能拿**——这是 D5.2
 的全部动机。
 
-### D6.2 分工:控制面 REST/OpenAPI,数据面 Connect-RPC
+### D5.2 分工:控制面 REST/OpenAPI,数据面 Connect-RPC
 
 | 面 | 协议 | 端点(§6.1) | 为什么 |
 | --- | --- | --- | --- |
@@ -383,7 +357,7 @@ E2B 的 SDK **直连** envd(经路由代理,`E2b-Sandbox-Id/Port` 头寻址)。�
 ——无翻译层,内外沿只有一份 wire 表示。这兑现 §6「CLI/前端是同一套 API 的平级 client」:两端共用
 proto 生成的同一份 client。
 
-### D6.3 为什么数据面外沿走 Connect,而非 REST facade
+### D5.3 为什么数据面外沿走 Connect,而非 REST facade
 
 数据面外沿的另一条候选是**手写 REST facade + NDJSON chunked 流**(orchestrator 逐帧把内沿 Connect
 stream 翻成 NDJSON)。它被否决,三条理由:
@@ -399,7 +373,7 @@ stream 翻成 NDJSON)。它被否决,三条理由:
 **控制面为什么不一起上 Connect**:控制面是 CRUD,无流、无强类型帧红利,REST/OpenAPI 的手调与文档
 化价值更高;强上 proto 是负收益。分界线落在「有没有 stream / 强类型帧」上——数据面有,控制面没有。
 
-### D6.4 边界与残留
+### D5.4 边界与残留
 
 - **鉴权对齐 D4.1 的分层结论**:外沿(client↔orchestrator)是否加 auth 由 `orchestrator` 的部署
   形态决定(它可能挂公网),**与内沿 `sandboxd` 无通道内 auth 的结论正交**——别把内沿"通道内 auth
@@ -410,10 +384,22 @@ stream 翻成 NDJSON)。它被否决,三条理由:
   生成 client;新增一门语言的 client = 加一个 `buf` 生成目标,不改本投影形状(§6 契约随 milestone
   生长)。
 - **`sandbox_id` 走带外请求头,不进 wire。** D4.6 把 `sandbox_id` 挡在 proto 外(进程只按 guest-native
-  pid 寻址),D6.2 又强制外沿复用**同一份** `transport.proto`——两者合起来**逼出**一个带外载体:外沿
+  pid 寻址),D5.2 又强制外沿复用**同一份** `transport.proto`——两者合起来**逼出**一个带外载体:外沿
   Connect 请求用请求头 `Engine-Sandbox-Id` 携带 id,反代 strip 掉它、经 mediator 解析当前端点后透传到
-  内沿(placement 永不外泄,§6.2 / D6.1)。头名是实现约定,不改 wire 形状。
+  内沿(placement 永不外泄,§6.2 / D5.1)。头名是实现约定,不改 wire 形状。
 - **实现级取值**:环形缓冲上界、慢订阅者发送窗口、`keepalive` 周期都是可随经验调的**数值旋钮**,不是
-  设计问题(形状由 D4.3/D6 定死)。故取值只在代码里(`cmd/sandboxd/process.go` 的常量块),不登记为开放
+  设计问题(形状由 D4.3/D5 定死)。故取值只在代码里(`cmd/sandboxd/process.go` 的常量块),不登记为开放
   决策、也不在此复制——一个旋钮有两个家就会有两个值。**溢出处置(断开)不在此列**——那是已在 D4.3
   invariant 1 拍定的设计选择,不是旋钮。
+
+---
+
+## D6. 边界
+
+- **不提供 checkpoint / restore 原语**(已拍板,非待定):内存态冻结整族被 §1.4 永久排除——全 VM 镜像
+  与**单进程 checkpoint 是同一条约束**,都把状态锁在特定 CPU-feature 上(§2.5),持久态便不再能跨
+  host/CPU 搬(§1.5#3)。gVisor 在 systrap 下本可 checkpoint;我们不用,是为可移植性。恢复因此只有一条
+  路:`--resume` + `fs` 读历史(D3)。
+- **session adapter 怎么在外面叠不在本文,也不在引擎内**:它是 engine 外的加法,只要 D3 那三个 seam 在
+  就能落地(D1.2),engine 侧无待办。
+- **外沿投影已定死在 D5**(控制面 REST / 数据面 Connect),同样不是待办。

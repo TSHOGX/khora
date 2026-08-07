@@ -92,7 +92,8 @@ snap()  { btrfs subvolume snapshot "$1" "$2" >/dev/null; idof "$2" | tee -a "$OU
 del()   { btrfs subvolume delete "$1" >/dev/null; }
 fill()  { dd if=/dev/urandom of="$1" bs=1M count="${2:-8}" status=none conv=fsync; }
 # settle <fs> — force a transaction commit, THEN wait for the cleaner. Measured:
-# `subvolume sync` alone waits 7-16 s (it sleeps until the periodic commit);
+# `subvolume sync` alone waits seconds (it sleeps until the periodic commit, so the
+# cost is load-dependent, not fixed: runs have landed at 7-16 s and at 19.1 s);
 # preceding it with `filesystem sync` makes the pair return in ~0 s. Q3.
 settle(){ btrfs filesystem sync "${1:-$FS}" >/dev/null 2>&1 || true
           btrfs subvolume sync "${1:-$FS}" >/dev/null 2>&1 || true; }
@@ -284,7 +285,7 @@ echo "=================================================================="
 # <under deletion> to gone/stale — i.e. is it needed at all? (ii) Does it move a
 # <squota space holder> whose sharer is STILL ALIVE? Q1 already answered (ii) no;
 # this times (i), and times the two-step vs `subvolume sync` alone, because a sweep
-# that used the slow form would block for 7-16 s per pass.
+# that used the slow form would block for seconds per pass (7-16 s, 19.1 s observed).
 X_ID="$(mk "$WORK/sy1")"; fill "$WORK/sy1/d" 8; del "$WORK/sy1"
 echo "  (i) after delete, WITHOUT any sync, 5 rapid polls (labelNS: a --sync read"
 echo "      would force the very commit being measured):"
@@ -300,8 +301,9 @@ echo "      'filesystem sync' THEN 'subvolume sync': ${T_PAIR}ms -> label: $(lab
 echo "  -> sync IS required to leave <under deletion>: the label does not move on"
 echo "     its own within a poll burst, and does move once synced."
 echo "     Timings are LOAD-DEPENDENT, not a fixed property: 'subvolume sync' alone"
-echo "     sleeps until the next periodic commit (measured 7-16 s when one was not"
-echo "     already due, ${T_ALONE}ms here), while 'filesystem sync' first forces the"
+echo "     sleeps until the next periodic commit, so the wait is LOAD-DEPENDENT rather"
+echo "     than a fixed property (7-16 s and 19.1 s across runs; ${T_ALONE}ms here),"
+echo "     while 'filesystem sync' first forces the"
 echo "     commit and makes the pair bounded (${T_PAIR}ms). Prefer the pair — it cannot"
 echo "     be slower, and removes the dependence on commit timing."
 echo "     Neither helps a <squota space holder> with a live sharer (Q1)."

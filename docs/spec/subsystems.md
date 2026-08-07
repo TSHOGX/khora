@@ -14,7 +14,7 @@
 - **5.B Rootfs** — Template(只读底层)+ 可写 Overlay 工件;pause/resume 与 Promote 都挂在
   这里(沙箱"是什么")。
 - **5.C Volume** — 解耦、ID 寻址、独立生命周期的存储(额外"挂了哪些独立数据")。
-- **5.D Network** — 每个沙箱可定义的网络可达性策略。
+- **5.D Network** — 每个沙箱可声明的网络可达集,以及兑现它的规则集(沙箱"能到哪、谁能到它")。
 - **5.E Transport** — 宿主↔沙箱的通道:两个通用 RPC 服务(process / fs)。
 
 > Rootfs 与 Volume 分两个子系统:**Overlay 工件**生命周期**随沙箱**、引用某个 Template、就是
@@ -61,15 +61,25 @@
   权威表述在此**(§5.C `volume.Backend` 同守,清单原样继承):
   - ❌ 泄漏宿主原语:"给我一个 cgroup 路径 / 一个 netns fd / Overlay 的**内部**宿主绝对路径
     (upper/work)"——一个被调度到远端 node 的隔离单元根本给不出这些。
-  - ✅ 契约式:`(rootfs 来源, 引流要求, 资源上限) → (placement 句柄, transport
+  - ✅ 契约式:`(rootfs 来源, 可达性要求, 资源上限) → (placement 句柄, transport
     端点, 生命周期控制 stop/start)`。**`rootfs 来源`是一个不透明句柄**:`local_runsc` 下它恰好物化成
     一个已 merged 好的 rootfs 路径,远端形态下会是另一种句柄——被禁的只是上一条那个**内部** upper/work
-    路径,已 merged 的 rootfs 句柄是合法入参。**引流要求**是 §5.D 给的 ingress 描述符 + default-deny(把
-    egress 全量引导进引擎数据面,§5.D),不是完整网络策略——策略 enforcement 与凭证注入在引擎数据面里,
-    不在 provider。
-  唯一实现 `local_runsc` 把引流要求物化成 nft+netns、把 §3.4 的资源上限经 **OCI `linux.resources`**
-  下发给 runsc 落成 cgroup(cgroupfs driver)。provider 是**引流与资源上限的物化方**,不碰策略权威、
-  不进 resolve 路径(§5.D)。
+    路径,已 merged 的 rootfs 句柄是合法入参。**可达性要求(契约成员名 `SteeringSpec`)**是 §5.D 从声明
+    派生出来的**抽象规则集**:放行集 + L0 地板 + publish 端点描述符 + default-deny,**不是声明本身**
+    ——provider 收派生结果,不持声明权威。**渲染成 nft 文本、以及绑定 `iifname` / guest IP / publish 宿主
+    端点,都发生在 provider 内、在 placement 时**:那三样是 placement 的产物,也只有 provider 持有的
+    宿主原语,抬上跨 provider 契约面就是上一条 ❌ 清单里的泄漏(精确划分见 §5.D)。
+  唯一实现 `local_runsc` 把可达性要求渲染并物化成 nft + netns、把 §3.4 的资源上限经 **OCI `linux.resources`**
+  下发给 runsc 落成 cgroup(cgroupfs driver)。provider 是**规则集与资源上限的物化方**,不持声明权威
+  (§5.D)。
+  - **强制机制的安装必须与 placement 原子,这是 provider 的可验收义务**(§2.4):规则装在**建 netns/veth
+    之后、拉起隔离单元之前**;半建失败走 §4.4-A 回收。同一条义务延伸到 `Adopt` / `ReclaimOrphans`
+    (见下文对账机制)——规则集是崩溃幸存的宿主态,接管一个活 placement 必须连它一起重建。
+  - **谓词必须绑 guest 改不动的事实**(支柱④):`local_runsc` 落成**宿主端 veth 的入接口谓词**。
+    按源地址匹配是**实测可被 guest 伪造**的(network.md D5 ③),故这是安全断言而非风格选择;放在沙箱
+    netns 内部同样不成立(同处实测:guest 报文不遍历那些钩子)。**那个谓词必须写成 `iifname`(按名字),
+    不是 `iif`(按 ifindex)**:`iif` 在装载时把名字冻结成一个整数,veth 同名重建后**静默 fail-open**
+    ——实测包被投递而 drop 计数器为 0(D5 ⑫)。两者在 `nft list` 里长得一样,故这条靠渲染守卫而非评审。
   - **网络 placement 机制**:`--network=sandbox` 的 runsc **只 adopt 一个已存在的 netns、不自建**。故
     `local_runsc` 先建 netns + veth、**给 guest 端分配 IP**,再经 OCI `linux.namespaces[type=network].path`
     把 netns 交给 runsc;sentry 加入后在 boot 时把内核侧 L3 地址**收进自己的 netstack**(boot 后从内核侧读
@@ -109,8 +119,8 @@
     对账会把活 placement 全读成不存在;故它是承重键,不是路径偏好。
   - `--platform=systrap` —— 兑现 §1.1 no-hypervisor;platform 本身可插拔(别的 provider 可选 KVM,§1.1)。
   - `--network=sandbox`(userspace netstack)—— `host`/hostinet 让 sentry 直用宿主 socket、syscall
-    直透宿主内核,**违反 §2 substrate ①**(故否决,非"另一可选模式");且它是 §5.D 引流(per-sandbox
-    netns+nft/TPROXY)与 §5.E transport(netstack-terminated,宿主经 veth IP 拨通)的前提。**代价:它拒绝
+    直透宿主内核,**违反 §2 substrate ①**(故否决,非"另一可选模式");且它是 §5.D 强制(per-sandbox
+    netns + 宿主端 veth 上的 nft)与 §5.E transport(netstack-terminated,宿主经 veth IP 拨通)的前提。**代价:它拒绝
     `--rootless`**,故 orchestrator/launcher 须 root(或 CAP_NET_ADMIN+CAP_SYS_ADMIN)物化 placement——
     **sentry 自身仍非特权,支柱② 不破**;这是部署 caveat(§1.1「可跑在 CI/容器内」= 该环境须授予这些
     cap),不是隔离退让。
@@ -118,14 +128,14 @@
     宿主目录。
   - `--net-raw=false` —— runsc 的默认本就掐掉 raw/AF_PACKET socket(OCI 里请求 `CAP_NET_RAW` 也拿不到,
     实测 guest `CapEff` 里该位是清的),故"guest 拿不到 raw socket"若不钉死就**只是一个未被声明的
-    默认值**:一旦跨版本漂移,§5.D 的 `iif` 谓词地板就要面对一个能伪造二层帧的 guest,而没有任何
-    测试会响。`CAP_NET_RAW` 因此也**不在请求列表里**——请求一个必然拿不到的 cap 是个假不变量,它让
+    默认值**:一旦跨版本漂移,支柱④ 就要面对一个能伪造二层帧的 guest——入接口谓词赖以成立的正是
+    "guest 改不动自己出现在哪个接口上",而没有任何测试会响。`CAP_NET_RAW` 因此也**不在请求列表里**——请求一个必然拿不到的 cap 是个假不变量,它让
     读代码的人以为那是刻意授予的。
   - `--systemd-cgroup=false` —— 承上条 cgroupfs driver。
   精确 argv 属 provider 实现细节,不进本节;本节只固定"哪些键承重、各对哪条 §保证"。
 - **观测 CPU 用量要对 `cgroup.procs` 全体求和**:systrap 把 guest 线程跑成**独立的宿主 thread group**,
   只采 sentry 的 `/proc/<pid>/stat` 会严重低估。这约束的是量法,不是 enforcement(节流由 `cpu.max` 兑现)。
-- **不含**:rootfs 构成与固化(→ B)、Volume 挂载语义(→ C)、网络策略本身(→ D)、
+- **不含**:rootfs 构成与固化(→ B)、Volume 挂载语义(→ C)、网络声明本身(→ D)、
   宿主↔guest I/O 通道(→ E)。
 
 ### 5.B Rootfs(沙箱由什么构成)
@@ -294,7 +304,8 @@
   之物,也就没有"先 pause"的 409。三条附带纪律:
   - **改帽不受写入 regime 管**:它动的是分配上界、不是字节,不存在撕裂。(区别于**改 `access`**——那一条在
     活挂载下被禁,见下文独占租约。)
-  - **抬帽须重过准入门**(§3.4:任何对帽的写入当场改变 Σ),可 507;降帽不需要。
+  - **抬帽须重过准入门**(§3.4:卷帽落在 disk 轴,对它的写入当场改变那条 Σ——门只在 **disk / memory**
+    两轴上求值,CPU 不进任何节点不等式),可 507;降帽不需要。
   - **但降到低于当前用量必须拒(400,判据是严格不等式)**:实测这会把该单元卡死且**不可逆**——其后连
     `mkdir` 与"把已有文件 truncate 成 0"都 `ENOSPC`,而配额 ioctl 自己也 `ENOSPC`,帽既不能撤也不能抬,
     唯一出路是删 guest 的字节。引擎不能代调用方做那件事,故不接受这种请求(细节见 D7.3)。
@@ -374,11 +385,16 @@
        (机制与残余余量 + 释放失败写的超额预留一致,只测了行为、未测成因)。共享帽下对端的活动还会移动
        这条线。故"拿到 ENOSPC 就停"与"拿到 ENOSPC 后一次小写仍可能落地"是两份不同的契约,引擎承诺的是
        后者。
-- **回收与 sweep 的安全要求(local 臂,squota 特有)**:孤儿卷 sweep 除了删孤儿字节,还要清
-  squota 泄漏的配额行;两件事都**误伤即静默**,故安全要求是契约的一部分。**职责切分**:backend 只
-  `ListUnitIDs` 枚举自己的存储单元,**判定与逐个销毁归 mediator**——把判定也推给 backend(让它收 live 集
+- **回收与 sweep 的安全要求(local 臂,squota 特有)**:残留有三类,对应**三个互相独立的入口**,只是在
+  同一个启动位置与同一次 reaper tick 上依次调用——孤儿字节(`SweepOrphanVolumes`)· D7.3 的修复态
+  (`RepairVolumeCaps`)· squota 泄漏的配额行(`ReclaimQuotaRows`);**别读成一个 sweep 的三个阶段**,
+  三者的谓词、失败处置与可达路径都不同。三类都**误伤即静默**,故安全要求是契约的一部分。
+  **职责切分是两层的**:**判定与调度归 mediator**——它才持有 live 集,且把判定推给 backend(让它收 live 集
   去删差集)实测**会删掉已提交卷的字节**,推导与两组实测数字见
-  [`deep-dives/volume.md`](./deep-dives/volume.md) D2。故下面每条安全要求的落点都是 mediator 侧:
+  [`deep-dives/volume.md`](./deep-dives/volume.md) D2;**residue 的记账与枚举归 backend**——只有它知道自己
+  究竟有没有配额行,`Backend.ListUnitIDs` 枚举它持有的存储单元、`Backend.DeletedRowIDs` 报出它在删除时
+  记下的行 id——一个根本没有配额行的 backend 返回空,这条路径对它零成本(§1.3:调用方不长能力分支)。
+  故下面每条安全要求约束的是 **mediator 侧的判定**,其依据的记账事实由 backend 供给:
   - **泄漏的配额行是正确性问题,不是不整洁**:一行泄漏的行不为自己的存储单元 id 占位,故一次节点重启
     可以把那个 id **连着它的帽**发给一个全新的卷,而引擎内部无法察觉这次错配。故 sweep 必须真的回收这些
     行,且**在启动时、任何存储单元被创建之前先跑一次**——否则一次重启可以在第一个 sweep tick 之前就把
@@ -400,51 +416,159 @@
     全失但可恢复)。这也是它承担"卷的字节按需存在"的地方。
 - **不含**:沙箱自身的 rootfs / Overlay 工件(→ B)。
 
-### 5.D Network(可达性策略)
+### 5.D Network(可达性声明与其强制)
 
-- **目标**:做"自由"的网络使能者,同时守住安全。每个沙箱**拉起时可定义**网络策略。
+- **目标**:让每个沙箱的网络可达集**可声明、且被强制**。本子系统是那份声明的家,并生成兑现它的
+  **抽象规则集**(渲染与安装归 §5.A,见下)。
 
-> ⚠ **未建(M8)**:本节是目标定义,**代码一行未落**——无 `internal/network` 包,无 nft / TPROXY /
-> deny-set / gateway / resolve。§2.4 的三条 invariant 今天**无一成立**——今日的不可达是几个巧合而非强制,
-> 而 guest root 持 `CAP_NET_ADMIN`(各目标各需几步,实测逐条在 open-decisions §4 第四条)。缺口连带的
-> 两个 404 端点见 §6.1;完整现状
-> 与 M8 必须继承的实测见 [`open-decisions.md`](./open-decisions.md) §4。
-- **职责切分(策略 / 数据面 / 引流,三块)**:本子系统**持有策略**(出站 allow-deny、入站 publish
-  规则、model 路由 + 凭证路由);策略的**强制与凭证注入由一个引擎自有的 egress 数据面(gateway)承担**
-  ——它是本子系统的一个**行为 seam**(可换 builtin / Envoy / 商用网关,与 provider 无关);**引流**
-  (把 egress 引导进该数据面)是 **placement-local 资源**,由 §5.A provider 用 nft/netns/TPROXY(或
-  CNI/sidecar)物化,与"资源上限是 Binding、cgroup 由 provider 物化"同构。所以 resume 时:**gateway
-  由本子系统建/选,引流由 provider 建**;两者经 mediator 编排的两条薄契约(resolve / ingress)相遇、
-  不互调(§4;详见 [`deep-dives/network.md`](./deep-dives/network.md))。
-- **出站**:三档姿态与两跳 deny-set 由 §2.4 定死(承重墙是 dial 时对钉死 IP 求值的 deny-set,域名
-  allow-list 只作 best-effort)。本子系统持这些规则的**策略权威**,provider 侧 nft 只放行到数据面 +
-  显式端点。数据面的**进程基数**(per-sandbox / per-node)
-  是物化选择、**非模型承诺**:`local_runsc` 落成 per-sandbox,别的物化可 per-node 复用一个数据面而仍按
-  源 IP 强制 per-sandbox 策略。
-- **入站**:默认关闭;**显式 publish** 把沙箱内端口暴露成外部入口,可带鉴权。publish 是**宿主侧
-  规则**(nft DNAT)、纯加法、不触及容器,故可对运行中沙箱**热加**;创建期绑定的网络策略变更走 resume
-  边界(同 §5.C 改挂载表),是设计取舍而非技术限制。
-- model 访问 = gateway 上一条带 provider 凭证的出站路由,鉴权挂稳定沙箱身份(§3.3),
-  凭证留宿主侧。
-- **凭证生命周期(三层分解收口)**:凭证走的是和网络策略**完全同构**的三层分解,本子系统是它
-  的家、不散落无主——
-  - **不变量**(支柱④,§2.1):provider/model 凭证**从不进 guest**,guest 只见代理别名。这是
-    宿主隔离的一根支柱,与 provider 形态无关。
-  - **策略权威**(本子系统):"哪条出站路由用哪份凭证、注入到哪个上游"由本子系统持有;和
-    "出站 allow-deny / 入站 publish 规则"同属 §5.D 的策略权威。
-  - **注入执行**(引擎自有 egress 数据面):凭证在出站时**由引擎数据面(gateway)注入**,经一条传输
-    无关的 **resolve 契约**(alias → 注入 directives + 过期 + 失效信号)拿注入材料,数据面持 TTL 缓存。
-    **provider 不进 resolve 路径**(§2.1 义):即便凭证密文物理流经它调度的基础设施(远端形态),它也
-    只是引流方、不是 resolve 参与方。resolve 契约的精确 schema 见
-    [`deep-dives/network.md`](./deep-dives/network.md) D3.1 / [`open-decisions.md`](./open-decisions.md)。
-    **resolve 失败 fail-closed,作用域 per-connection**(理由见 §2.4 /
-    [`deep-dives/network.md`](./deep-dives/network.md) D5.6)。
-  - 凭证明文**既不进控制面 Binding 记录、也不进 Overlay 工件**(§3.4 无第三类"可撤销外部授权";
-    §2.3 凭证在"不可触及面")——它只存在于宿主侧一个独立后端。**这个后端(凭证怎么存/注册/轮转)
-    是一类可插拔 seam,尚未定,登记在 [`open-decisions.md`](./open-decisions.md)。**
-- **此处"鉴权"挂的是沙箱身份,不是用户/租户 principal**(后者仍是非目标,§1.4):publish 的
-  `auth` 校验入站调用方、model 路由按沙箱身份注入凭证,都不需要引入授权主体概念。
-- **不含**:宿主↔guest 控制通道(→ E)。
+> ⚠ **未建(M8)**:本节是目标定义,**代码一行未落**,故 §2.4 的三条 invariant 今天**无一成立**
+> (今日的不可达是几个巧合而非强制)。现状全貌见 [`plans/M8-network.md`](../plans/M8-network.md) §1,
+> M8 必须继承的实测见 [`deep-dives/network.md`](./deep-dives/network.md) D5,**本节不复制**。
+
+- **本子系统只有两件事:持有声明,生成规则。** 它**不搬字节、不终结连接、不贡献任何进程**。判据是
+  §1.1 第一性原则的直接应用——引擎该做的是那件"物理上只有它能做"的事(§2.4:强制机制必须与 placement
+  原子、谓词必须绑 guest 改不动的事实),而"终结一条连接、按应用层信息决定它去哪"**不需要**创建
+  namespace 的那一侧来做,故它不在引擎内。
+  - **规则生成是纯函数**:`(声明, L0 地板) → 抽象规则集`——**placement-free、免 root**,故**声明取值
+    组合的全部差异都能在这一层被单测钉住**,不必等 substrate。那份抽象规则集正是 §5.A 契约里
+    `SteeringSpec` 承载的东西。**签名是这两个入参,但输出粒度按钩子分**:同一条声明会在多个钩子上各产出
+    规则(下一条),故这一层的单测钉的是"每个钩子上各出了什么",不是一张扁平清单——把两侧压成一张清单,
+    钩子归属的差异就恰好从被钉住的那部分里漏掉。
+  - **声明的放行在 `input` 与 `forward` 两侧都发,且 `input` 侧必须自带一条 sibling drop。** 理由是本节
+    语义 ③ 自己的承诺:调用方要能声明自己的解析器,而唯一稳定可用的宿主本地解析器地址是**本沙箱自己的
+    `/30` 网关**,它落 `input`——只发 `forward` 的放行**到不了它**,那条承诺就没有兑现路径;而 `input` 侧
+    缺了那条 sibling drop,一条 `allow 10.0.0.0/8` 就会让本沙箱连上 sibling 的**网关**。**这与"地板在
+    `input` 侧不需要 daddr 清单"不冲突**:地板在那一侧是一条纯 ct-state 规则(它对宿主自身的任一地址已
+    穷尽、从不枚举),sibling drop 是**另一条**规则、谓词是 sibling CIDR——两条规则,不是往地板上挂一份
+    daddr 清单(推导与实测见 [`deep-dives/network.md`](./deep-dives/network.md) D4.2)。
+  - **渲染并安装归 §5.A**:nft 文本的渲染,以及 `iifname` / guest IP / publish 宿主端点的绑定,都在
+    provider 内、在 placement 时发生——那三样是 placement 的产物、是只有它持有的宿主原语,放进本子系统
+    的签名里既跑不起来(placement 尚不存在)、又把宿主原语抬上了跨 provider 契约面(§5.A ❌ 清单)。
+    规则集是 placement-local 资源,由 provider 在建 netns 与拉起隔离单元**之间**装上(§2.4 的原子性
+    义务)。次序不是风格——见 §5.A `SteeringSpec`。
+
+- **声明的形状:四个字段,全部只用 IP / 端口 / 协议词汇**(wire schema 见 §6.1):
+
+  ```text
+  egress.default    : deny | allow          # allow = 公网(减去 L0 地板与内网 deny-safe)
+  egress.allow[]    : {cidr, port, proto}   # 只收 IP 字面量,不收域名
+  egress.via[]      : {match[], endpoint}   # match[] 同为 {cidr, port, proto};命中者送进 endpoint
+  ingress.publish[] : {guest_port, proto}   # → host endpoint
+  ```
+
+  - **`{cidr, port, proto}` 是一个元组,不是三个可选项。** `proto` 恒显式,因为它是**格式要求**而非
+    可选维度:承载它的内核机制里,端口匹配本身就依赖协议匹配(理由见
+    [`deep-dives/network.md`](./deep-dives/network.md) D3.1)。故 `{cidr, port}` 不是良构的。
+  - **没有"姿态枚举"。** 姿态不是引擎概念,它是这几个字段的**取值组合**:`default:deny` + 无
+    `allow[]` + 无 `via[]` 就是"无出站";`default:deny` + 有 `via[]` 就是"只经某个汇合点"。少一个枚举,
+    就少一处引擎与产品语义的耦合点(§1.1)。
+  - **`egress.default` 必写,缺省非法**(与 `idle_timeout` / `retention` 同形):若"未指定"被解释成某个
+    默认值,记录里的空值就分辨不出"调用方选了它"还是"这条记录建于本字段存在之前"。
+  - **`via[].endpoint` 后面是什么,引擎不知道也不问。** 它是一个地址;引擎装一条把命中流量送去那里的
+    规则,仅此而已。**故那个地址不是引擎常量、也不是引擎配置项**——它是声明里的一个值,由调用方给出。
+  - **域名不收,只收 IP 字面量。** 理由是**代价而非不可行**——那条路要求引擎内长出一个 DNS 代理和一份会
+    churn 的产品清单,破 §1.1(完整推理、以及"有人已经走通了"的旁证见 network.md D2)。要"只准某个域名"
+    这种收窄,用 `via[]` 把流量交给引擎外的进程按应用层信息判。
+
+- **`publish` 是入站的显式例外,且是唯一可热加的一项。** 它把沙箱内一个端口暴露成一个宿主 `ip:port`,
+  是**纯宿主侧规则**、纯加法、不触及隔离单元,故可对运行中沙箱热加;而**出站三字段的变更走 resume 边界**
+  (同 §5.C 改挂载表),是设计取舍而非技术限制。
+  - **一条 publish 是一个规则集,不是一条规则**:`prerouting` 的 DNAT、一条把回程源地址改成**本沙箱自己
+    `/30` 网关**的 SNAT、`output` 钩子上**另一条**DNAT、以及挂在**钩子正确那条链**上的伴随 accept
+    (转换后的目标是 guest IP、要被路由出去,故落 `forward`,不落 `input`)。**四项缺一都不是"少一点功能"
+    而是一个坏掉的 publish**:缺 SNAT 则只在恰好有默认路由的沙箱上能用,缺 `output` 侧 DNAT 则宿主自身
+    拨不通(反之亦然,故"宿主上拨通了"不是 publish 生效的证据)。逐条实测见
+    [`deep-dives/network.md`](./deep-dives/network.md) D5 ⑬⑭⑮,**本节不复制数字**。义务在此:**生成器把
+    四项作为一个单元产出,provider 原子地装上**——中间不存在"只装了 DNAT"这种可观测态。**规则集变宽不
+    改变上面那三条性质**:仍是纯宿主侧、纯加法、不触及隔离单元,而正是那三条性质在给热加背书。
+  - **引擎交付的就是那个 `host ip:port`,前面摆什么都是引擎外的事**:TLS 终结、公网 hostname、证书、
+    任何形式的调用方校验。**声明里因此没有"鉴权"字段**——校验一个入站调用方必然要终结并理解应用层协议,
+    正是上面"引擎不贡献进程"排除掉的东西。(**按源 CIDR 收窄是个例外,因为它只是一条规则谓词、不需要
+    进程**;它不在今天的四字段里,将来加是纯加法。)
+  - **它因此是 Binding 写点唯一性的一条精确例外(§3.4:`PATCH` 是 create 之外唯一写点、provider 消费的
+    字段只在 `paused` 可改)**:`POST …/publish` 只写 `ingress.publish[]` 这**一个**字段,且可写在
+    `running` 沙箱上;出站三字段不在此列。理由就是上一条——纯宿主侧加法,不触及隔离单元,故不存在
+    "记录说一套、活着的隔离单元做一套"。
+  - **例外的是"可写在 `running` 上",不是"只写在 `running` 上"**:`paused` 同样合法,两态只差生效点。
+    §3.4 那条状态门是**对 `running` 的收紧**(不接受一个要等未来某次 resume 才生效的编辑),`paused` 一侧
+    对每个 Binding 字段都是开的;一个拒 `paused` 的 publish 端点会成为**唯一一个在 `paused` 比在 `running`
+    更难写的字段**,把 §3.4 的结构倒过来而换不到任何机制上的东西。**`paused` 上"记录描述了一个不存在的
+    入站口"不是新的假不变量**——placement 随 pause 释放,故 `paused` 沙箱的**整份**声明(出站三字段一并)
+    本就一条规则都没装;记录描述得**比现存的多**是 `paused` 的定义,反向才是 §2.4 要拦的。**代价更实**:
+    拒了 `paused`,给一个暂停沙箱加端口就只剩"先 resume"(一次冷启 + 一道准入门,可能 507)或整份 `PATCH`
+    两条路,而后者正是下面点名危险的那个写点——收紧反而把调用方赶上更不安全的路。
+  - **热加的项照样落进声明记录,它必须跨 resume 存活**:publish 不是一次一过的运行时旁路,下一次
+    placement 仍按当前记录重新生成规则集。
+  - **原子次序:先落库,再装规则;装不上就删回那行并返错。** 要守的不变量是**"不存在记录未描述的入站口"**,
+    它是单向的,故两个半成品只有一个可接受:**"记录有、规则未装"= 功能缺口,fail-closed 且下次 placement
+    自动补上**;**"规则装了、记录没有"= 一个引擎自己不知道的开放端口**,活到下次 placement。故次序不是风格。
+    **全程持该沙箱的转换锁**(§4.4-B),故与并发 resume/pause 不交错;
+    **引擎内那次写必须在锁内 read-append-commit**,否则两个并发 publish 会丢掉一条——那是引擎的 bug,
+    不是下面那条调用方侧的 sharp edge 能覆盖的。
+  - **基底的原子性只覆盖"装"这一侧,回删那一侧没有对等保护。** 装是原子的(实测:一批规则里有一条不合法
+    则整批回滚),故上一条规则集里"只装上了一部分"不是个要处置的态。但失败路径是**装不上就删回那行**,
+    那次回删跑在**拆**的一侧:它同样必须把四项**作为一批**发出,而若这批回删自己也失败,残留就是一份
+    **半拆的规则集**——它的坏法是"连得上、读超时"这一类,即最难诊断的那种(D5 ⑰)。**处置是承认它并收窄
+    承诺,不新增机制**:它落回的正是上面那个"规则装了、记录没有"的态,但是其中**最轻的一种**——残留只可能
+    是引擎刚为一个**调用方明确请求过的** `{guest_port, proto}` 装上的那一份的**子集**,而规则集全是加法,
+    故子集的可达性**严格窄于**全集:它开不出请求之外的任何东西,也活不过下次 placement(整份重建即清除)。
+    **剩下的真实代价只在可诊断性**:引擎必须把这次失败的回删连同涉及的 `{guest_port, proto}` 记进日志,
+    否则运维者面对的是一个"连上却没数据"的宿主端点,而控制面记录里没有任何对应项。
+  - **重复 publish 同一 `{guest_port, proto}` 是幂等 no-op**(返既有那条,不追加第二项)。**去重必须落在
+    声明层,基底不会替引擎发现它**:实测 nft 收下两条逐字相同的 DNAT 规则不报错、第二条恒不命中。而两条
+    相同项之下,经 `PATCH` 删掉一条仍留一条,即"撤掉了 publish 而端口还开着"——安全相关字段上的静默失败。
+  - **这次写不动 `UpdatedAt`**:`retention` 从那一列起算(§3.4 纪律 ②),否则给一个 `paused` 沙箱加端口会
+    顺带延长它的驱逐期限。**这条义务只因允许 `paused` 才存在。**
+  - **由此对整份 `network` 的 `PATCH` 有一条硬要求:必须 read-modify-write**——`PATCH` 只整份换整份,
+    故一份用旧读回值拼出来的绑定会**静默丢掉**期间经 `publish` 加进来的项。这是**安全相关字段上的真实
+    危险**(丢一条 publish 是可察觉的功能缺失,而反过来把一条本已删除的 publish 写回来则是重新开一个
+    入站口),不是风格提醒;wire 侧的规则由 §6.1 / §6.2 承载。
+  - **移除今天没有专用端点**:去掉一条 publish 走整份绑定 `PATCH`,故它与出站三字段同样**在下一次
+    resume 生效**。**这不是对称性的疏漏,而是"撤"与"加"在机制上不对偶**:加是纯加法、当场对所有流生效;
+    而**撤在 `running` 上撤不干净**——实测删掉那两条 DNAT 后新连接被拒,**但已建立的流仍在传数据**
+    (conntrack 持着那份 NAT 绑定,规则删除对它不求值;逐条见 network.md D5 ⑰)。故一个 `running` 上的
+    un-publish 只能承诺"不再收新连接"、不能承诺"这个端口关了",而两者的差别正是调用方撤一个入站口时想要的
+    东西。走 `next-resume` 的整份 `PATCH` **没有**这个歧义(placement 整个重建,旧流随之消失)。专用端点要
+    落地必须先答"撤的语义是否也要断开在途连接",那是一次独立的语义决定 + 一次测量,故不在今天。
+  - **调用方侧的 read-modify-write 有一条次序要求:那次 GET 必须排在 pause 之后。** 两个写点在 `paused` 上
+    **重叠**,故这个 lost update **不需要任何状态转换来穿插**——先 GET 再 pause 会把整个 pause 窗口纳入
+    危险区。安全序列是 `pause → GET → PATCH → resume`。**契约就此接受 last-writer-wins 并写明,不引入
+    乐观并发戳**:一个记录级版本号正是 §3.3 拒掉的世代计数(`generation` 在 §1.1 词汇边界上被直接禁)。
+    这一类冲突有一条**纯加法的根治路径**——给 `ingress.publish[]` 一个删的写点,`PATCH` 从此不必承载这个
+    字段,冲突**类别消失**而不是被检测;今天没有那个端点(见上条),故今天这是一条写明的 sharp edge。
+
+- **四条用户可见语义,契约必须明写**(调用方会撞上,不是内部细节):
+  1. **绑 `127.0.0.1` 的服务 publish 不到。** 沙箱有独立 netns 与独立 loopback,宿主侧的转发落到 guest
+     netstack,只听 loopback 的进程收不到投递。这是标准 TCP/IP 语义、不是基底怪癖,但几乎所有 dev server
+     默认绑 loopback,所以它会**看起来像 publish 坏了**。契约:要求 `0.0.0.0`,绑 loopback 时**连接被拒
+     且快速失败**(不是挂到超时)。**契约到此为止,不承诺"错误可归因"**:实测这一情形与"guest 里根本
+     没有监听者"在调用方侧**逐字相同**(两者都是 gVisor netstack 回的 RST,即 `connection refused`,
+     皆亚毫秒级),故一个外部调用方**无法**区分二者(network.md D5 ⑯)。要归因只能在引擎侧——引擎知道
+     自己给这个端口装了哪几条规则、并能读它们的计数器,而调用方只有一个 RST。
+  2. **未放行的 UDP 直接被丢,故 QUIC 在 `default:deny` 下不通而非降级。** `via[]` 的匹配对 UDP 不成立
+     (机制上取不到原始目标,见 network.md D3.2)。多数客户端回落 TCP,**但不保证**。这个失败方向比
+     "未匹配就放行"更安全,代价是它表现为"某些站点莫名不通"。**这条排除只在出站 / `via[]` 方向**——入站
+     `publish` 照收 `proto: udp`,DNAT 到一个固定 guest 端口不需要取回原始目标,那条机制反对到不了它
+     (wire 与状态码见 §6.1 / §6.2)。
+  3. **`default:deny` 下 DNS 要能用,调用方必须自己声明它——引擎刻意不代劳。** DNS 几乎全是 UDP,故上一条
+     的代价首先落在它身上:只放行 TCP/53 时解析器**不会回落 TCP**,实测症状是先挂 10–20 s 再报一个
+     **名字解析失败**(而非策略拒绝,D4.3 诊断错位的实例;数字见 network.md D5 ⑦)。故用法是把解析器地址
+     连同 `proto: udp` 写进 `egress.allow[]`;**唯一稳定可用的宿主本地解析器地址是本沙箱自己的 `/30`
+     网关**,而它的兑现路径是 `input` 侧的那条声明放行(上面规则生成义务里的那条,理由见 network.md D4.2)。
+     **为何不代劳**:代劳就要引擎认识"解析器"这个概念并持有一份
+     部署特异的地址,破 §1.1——与"域名不进引擎"同一条判据(network.md D2)。**哪些解析器地址实际可声明是
+     部署环境的性质**:绑 loopback 的那类对 gVisor guest 构造上不可达,落在地板 daddr 项内的那类被地板拦下
+     (实测逐条见 network.md D5 ⑦)。
+  4. **`default:allow` + publish 组合起来是一条外部 → 沙箱 → 公网的双向通路**(即开放代理)。单看两个
+     功能都合规,组合的语义要写明;**禁不禁是产品策略,不由引擎裁决**。
+
+- **声明是 Binding(§3.4)**,记在沙箱自己的控制面记录上,每次 placement 按**当前记录**重新生成规则集、
+  由 §5.A 渲染并装上。故它跨 resume 稳定、崩溃后由 §4.4-A 对账重建——规则和 netns 一样是崩溃幸存的宿主态。
+- **"此处不需要授权主体"**:声明按**不透明的沙箱 ID** 键入,故本子系统**不为多租户预留任何东西**
+  (§1.3 成本判据:那会是 reservation)。多租户仍是非目标,接入路径见 §1.4。
+- **不含**:宿主↔guest 控制通道(→ E);任何应用层行为、任何凭证概念(§1.4 永久排除)。
+  **别把本节读成"引擎里有个精简版网关"**——连接终结、协议识别、内容改写这类东西引擎侧不存在,承载
+  它们的 seam 也不存在。
 
 ### 5.E Transport(宿主↔沙箱通道)
 
@@ -496,7 +620,7 @@
 - **引擎支持的"跑东西"只有一类:经 exec 拉起的进程**(monitor / 构建 / `apt`|`pip` 安装 /
   dev server / artifact server),**不以系统守护服务(`service`/`systemctl` 那套)为目标**。这条把
   "需要完整 init 机制"的整类需求移出范围(详见 [`deep-dives/guest-runtime.md`](./deep-dives/guest-runtime.md))。
-- **不含**:agent / 会话 / turn 语义(→ engine 外 adapter)、网络策略(→ D)。
+- **不含**:agent / 会话 / turn 语义(→ engine 外 adapter)、网络声明与其强制(→ D)。
 
 #### 5.E.1 guest 启动拓扑:`sandboxd` 的两个进程角色
 
@@ -539,5 +663,5 @@ PID 1 = sandboxd（init 模式：reaper + 信号转发 + subreaper 兜底 + 监�
   [`deep-dives/guest-runtime.md`](./deep-dives/guest-runtime.md) D5。
 
 > **细节另见 [`deep-dives/transport.md`](./deep-dives/transport.md)**:Connect-RPC 选型、process/fs wire
-> 协议、session 划界与 seam、外沿投影(控制面 REST + 数据面 Connect,D6);**guest 启动拓扑的完整推理见
+> 协议、session 划界与 seam、外沿投影(控制面 REST + 数据面 Connect,D5);**guest 启动拓扑的完整推理见
 > [`deep-dives/guest-runtime.md`](./deep-dives/guest-runtime.md) D4**。

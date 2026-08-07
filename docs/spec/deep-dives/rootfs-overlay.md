@@ -13,8 +13,8 @@
 **持久层不用 runsc 自管的 overlay**(`--overlay2` 全族 `memory`/`self`/`dir=` 均不跨容器生命周期
 持久——实测 `dir=` 启动即 `unlink` filestore,干净停 = 数据蒸发,D1)。**载体改为 engine 在 runsc
 外自管的宿主内核 overlayfs**(物化方式见 D3)——此时 upper 是宿主上真正的普通目录树:tar 得动、
-可 diff、冷启挂得回、字节一致,兑现 §5.B 的全部附加能力。**持久单元 = 留驻 upper 目录;
-content-addressed diff 层是演进项(D3)。**
+可 diff、冷启挂得回、字节一致,兑现 §5.B 的全部附加能力。**持久单元 = 留驻 upper 目录**
+(content-addressed diff 层是演进项,定案与代价见 D3)。
 
 这条结论**不动模型层**:§3.1.1「Overlay 是 ID 寻址、与宿主路径解耦的冻结层」、§4.2「pause 零
 捕获、resume 冷启重挂」原样成立。runsc 的 overlay flag 不提供跨容器生命周期持久的 upper
@@ -60,14 +60,15 @@ upper 是宿主普通目录树且 tar 出完整 diff 层、容器内 sha256 与�
 **② upper 是内核 overlayfs 的普通目录树**:merged mount 的 `upperdir=` 就是宿主上一个真实路径,可
 直接 `filepath.Walk` 遍历——与 gVisor 那个启动即 `unlink` 的 filestore 是两个世界(D1)。
 
-**③ 演进目标的持久单元是 content-addressed diff,而非留驻 upper**(持久单元的定案见 D3):
+**③ 这个载体容得下一条 content-addressed diff 的演进路径**(持久单元本身是**留驻 upper**,已定,见 D3;
+③ 说的不是"持久单元其实是别的东西",而是"同一个抽象之下**还能**多长出这条路径"):
 - 把 upper 提取成 OCI diff tar + `{MediaType, Digest, Size}` descriptor,推到 object store。
 - resume/claim 时把 diff apply 回**新容器**的 live rootfs bind mount 上。
 - 相对某 baseline 层做**增量** diff——天然分层。
 
-**关键洞察**:持久单元不必是「一个一直躺在盘上的 upper 目录」,可以是「一个内容寻址的 diff 层」。
+**关键洞察**:持久单元**不必**是「一个一直躺在盘上的 upper 目录」——今天它就是,但抽象不靠这一点成立。
 **这正是 §3.1.1 的赌注**——把 Overlay 定义成「ID 寻址、与宿主路径解耦的冻结层」而非「一直在
-本地盘的 upper」。这套能力与模型逐条对上,也正是 diff 层作为演进项(D3 / D4 seam)成立的原因:
+本地盘的 upper」,于是换持久单元不动模型。这套能力与模型逐条对上(演进项的定案与代价见 D3):
 
 | diff 层能力 | 怎么给 | 对应我们的 § |
 | --- | --- | --- |
@@ -75,7 +76,7 @@ upper 是宿主普通目录树且 tar 出完整 diff 层、容器内 sha256 与�
 | Promote → 分层 Template | 相对 baseline 做增量,层层叠 | §5.B Promote / 分层 Template |
 | 跨 host 可移 | diff 是 object store 里的 OCI blob,不锁本地路径 | §5.B「纯文件层可移」+ §3.1.1 |
 | fork / clone | 从同一 diff/snapshot claim 多个沙箱 | §3.1 fork |
-| snapshot / restore | 命名 diff 记录,可 list/restore/delete | Promote 的超集 |
+| snapshot / restore | 命名 diff 记录,可 list/restore/delete | (无对应 §,纯演进期能力) |
 
 ---
 
@@ -112,8 +113,8 @@ reflink 来补分层,那其实又滑回上面的 overlayfs 底层存储附带能
    upper 路径」**——这样从留驻 upper 演进到 content-addressed diff,§4.2 的 resume、§3.1 的
    Promote/fork 代码**一行不改**。宿主路径必须锁死在 Rootfs 子系统内部(§3.1.1「对内也 ID 寻址」)。
 2. **物化经 rootfs provider seam**(§5.B):唯一实现是 single-node 的「本机内核 overlayfs +
-   本地目录」;diff 层 / multi-node(PV / 对象存储)是**注册另一个 rootfs provider 或换持久单元**,
-   不改模型。把 diff 推 object store 便是这个 seam 的一种实现——抽象须容得下它。
+   本地目录」;diff 层(演进项,见 D3)/ multi-node(PV / 对象存储)是**注册另一个 rootfs provider 或换
+   持久单元**,不改模型——抽象须容得下它。
 3. **不引入 containerd**(与 §1.1「单二进制、无重型外部依赖」冲突):复用 containerd overlayfs
    snapshotter 只在已经跑在 containerd 上时才划算。我们**在引擎内薄薄实现**「组装 overlayfs
    +(演进期)提取 diff」这一层,不拉整个 containerd 栈。这层薄实现本身就是上面 seam 2 的
@@ -121,9 +122,10 @@ reflink 来补分层,那其实又滑回上面的 overlayfs 底层存储附带能
 
 ---
 
-## D5. 这条载体上的机制与仍开放项
+## D5. 这条载体自带的机制约束(附一条演进项)
 
-> 载体与持久单元(留驻 upper)之上,本节记这条载体自带的约束,以及其中仍开放的部分。
+> 载体与持久单元(留驻 upper)之上,本节记这条载体自带的约束。除最后一条(content-addressed diff)以外
+> **都已定**——pause 一致点那条是**已否决**,不是待办。
 
 - **work dir 与 upper 的清理/回收**:overlayfs 需要一个 workdir(约束:与 upper 同一个支持 overlayfs
   的 FS)。**resume 重挂用同一 upper,但 workdir 必须新建一个空目录**——不可复用上次的 work(内核会
@@ -169,8 +171,7 @@ reflink 来补分层,那其实又滑回上面的 overlayfs 底层存储附带能
     故只排叶子会在层里留下幽灵中间目录,而排顶层组件在一般情形下是错的(guest 可能合法地写了该目录下的
     别的东西)。**定为:剪叶子子树、接受空的中间链**——它与 §5.B 已认可的空占位同形、只是多一级,
     且**永不丢真实 guest 数据**。
-- **content-addressed diff 层(演进项,演进条件见 D3)**:落地时要实现 tar 提取 + baseline 增量 +
-  object store 接口(能力映射见 D2)。
+- **content-addressed diff 层**:这条载体上**唯一真正仍开放**的一项。定案与代价见 D3,能力映射见 D2。
 
 ---
 
@@ -263,7 +264,7 @@ D6 只解决**per-sandbox 帽怎么物化**——把"撑满整机"降级成"撑�
   物化 upper 前由 §4 mediator 过一遍;不足则 create 失败 / resume 留 `paused`(§4.4-A 原子退回源态)。
   **有限超卖 + 磁盘压力监控不在此形态内**(后续增量)。
 
-  两项**互斥**的判据("对每个对象取最强的可得陈述"、有帽的 Overlay upper 在实测项里计 0)已毕业进
+  两项**互斥**的判据("对每个对象取最强的可得陈述"、有帽的 Overlay upper 在实测项里计 0)归
   §3.4;本文只补它成立的机制根据:squota 下 reflink 的 copy-up 不向沙箱单元计费、该 extent 在 layer
   一侧计过——**迫使第二项存在的性质(D6.2),恰好也让两项天然不重叠**。该轴被计量后每个沙箱必须有帽
   (否则不等式不再描述那块盘)的推理同在 §3.4。

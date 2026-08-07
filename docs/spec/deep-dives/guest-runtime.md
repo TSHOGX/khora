@@ -1,8 +1,9 @@
 # Guest 运行时边界:跑什么、谁当 PID 1、resume 怎么冷启
 
-> **定位:[`SPEC.md`](../SPEC.md) 的 guest 侧深挖文档。** 展开两块 spec 只留结论的推理:
-> ① **作用域**——引擎只支持"按需 exec 出来的进程",不以系统守护服务为目标(D1–D3);
-> ② **guest 启动拓扑 + pause 静止点 + resume 冷启时序**(D4、D5)。规范结论在 spec §5.E.1 / §4.2 / §4.3。
+> **定位:[`§5.E.1`](../subsystems.md)(guest 启动拓扑)的深挖文档,并涉及 [`§4.2`](../model.md)(pause
+> 静止点)、[`§4.3`](../model.md)(两层探活);导航见 [`SPEC.md`](../SPEC.md)。** 展开两块 spec 只留结论
+> 的推理:① **作用域**——引擎只支持"按需 exec 出来的进程",不以系统守护服务为目标(D1、D3);
+> ② **guest 启动拓扑 + pause 静止点 + resume 冷启时序**(D4、D5)。规范结论在 §5.E.1 / §4.2 / §4.3。
 >
 > **编号约定:** 本文自己的节用 `D` 前缀(D1、D4.4…);`§` 一律指 spec 的全局章节(§4.2 等),两套不混。
 
@@ -10,7 +11,7 @@
 
 ## D0. 一句话结论
 
-引擎只跑一类东西——**经 `process` 按需 exec 出来的进程**,不做系统守护服务(D1–D3),故 guest 只需一个
+引擎只跑一类东西——**经 `process` 按需 exec 出来的进程**,不做系统守护服务(D1、D3),故 guest 只需一个
 **轻量 reaper**。它靠"一个二进制、两个模式"实现:`sandboxd` 以 **init 模式**当 PID 1(自研最小 init,tini
 源码作正确性 checklist),re-exec 出 **transport 模式**子进程当 process/fs 终点(D4)。这条分进程拓扑换来
 崩溃隔离、热升级、以及**两层探活**区分 transport-down 与 substrate 死亡(D5)。
@@ -24,16 +25,12 @@
 系统守护服务"(`service`/`systemctl` 那套)为目标。判据干净:**是否需要 init 把它"开机拉起并常驻"**
 ——需要 → 移出范围;不需要、能被 exec 出来 → `process` + `publish` 两个现有原语即覆盖。
 
----
-
-## D2. 两类进程的分界
+判据落在两类东西上:
 
 | | 系统守护服务(不做) | 按需 exec 的进程(全部模型) |
 | --- | --- | --- |
 | 典型 | `service postgresql start` / `systemctl` | monitor、`apt install`、dev server、artifact server |
 | 怎么起 | init 在启动时拉起、作为基础设施常驻 | 经 `sandboxd` 的 `process` 能力拉起 |
-| 依赖 | SysV init 脚本 / systemd / dbus | 无;直接 fork 一个前台进程 |
-| 引擎视角 | 需要 init 系统 + 启动编排 | 一个进程 +(可选)一个被 publish 的端口 |
 
 ---
 
@@ -46,7 +43,7 @@
 sandbox 就是 root(spec §2.2:引擎默认 guest root、**不建模 guest 用户**,「以某用户运行」是 guest 原生
 的 `su`/`sudo`),安装依赖的权限天然满足;而 guest 内 root 被 sentry 在用户态拦截、逃不到宿主,所以
 "放心让需要 root 的安装在里面跑"正是 gVisor 的姿势。唯一前置是网络:
-`apt`/`npm` 出网走 spec §5.D 的出站默认放行(经 egress gateway)。
+`apt`/`npm` 出网靠 §5.D 声明里的出站放行(`egress.default: allow`,或一条覆盖上游的 `allow[]`)。
 
 > postgres 之所以麻烦,不是 gVisor 的 syscall 兼容性(postgres-on-gVisor 能跑),而是"容器没有
 > init 系统" + locale / 切用户等精简镜像通病。不以常驻 DB 服务为目标,这串坑整个不趟。
@@ -57,7 +54,7 @@ artifact server 就是两步,全落在现有能力上:
 
 ```
 process.Start("python -m http.server 8000")     ← spec §5.E process 能力
-POST /v1/sandboxes/{id}/publish {port:8000}      ← spec §5.D 入站 publish(可带鉴权)
+POST /v1/sandboxes/{id}/publish {guest_port:8000, proto:"tcp"}   ← spec §5.D 入站 publish(引擎只交付 host ip:port,声明里无鉴权字段)
 ```
 
 listen/accept + 读文件发响应都在 gVisor netstack 支持范围(吞吐不如 host 网络,serve artifact
@@ -111,7 +108,7 @@ reparent 到 `sandboxd` 而非 PID 1——不当 PID 1 也能收割自己关心�
 **落地形态:一个二进制两个模式**(init 模式 PID 1 经 `/proc/self/exe` re-exec 出 transport 模式子进程),
 完整拓扑图见 spec §5.E.1。
 
-### D4.3 transport 模式要落的三样机制,和两个要拒的模型
+### D4.3 transport 模式要落的机制、信号目标的分工,与两个要拒的形状
 
 收割语义无处可抄——它必须靠 D4.1 自研 + tini checklist。但 transport 模式要落的另外三样机制是成熟的
 进程管理套路,形状如下:
@@ -125,17 +122,15 @@ reparent 到 `sandboxd` 而非 PID 1——不当 PID 1 也能收割自己关心�
     拿走。**实测:通配 waiter 先到时 `cmd.Wait()` 10/10 次返回 `waitid: no child processes`**——于是每一
     个 `end` 帧的退出码都会是**编造**的,而退出码送达是 §5.E.1 明写的承重契约。故形状是:**单一通配
     收割器 + 一张交接表**(pid → 等待者),monitor 从表里领自己那份状态,与 D4.1 里 PID 1 的
-    `reapTable` 同一机制(它正是为"通配 waiter 不得偷走已注册子进程的状态"而设计的)。
+    `reapTable` 同一机制(它正是为"通配 waiter 不得偷走已注册子进程的状态"而设计的)。(『声明』与
+    『装上通配 drain』不可分开落地,§5.E.1。)
   - **连带一条不显然的义务**:跳过 `cmd.Wait()` 也就跳过了它对 `StdoutPipe`/`StderrPipe` 父端的关闭,
     故长命 daemon 里每个进程会漏 2 个 fd——输出泵必须在 EOF 时自己关。(PTY master 例外:它同时是输入
     端,由进程终结路径统一关。)
-  - **一条更强的纪律**:**声明了 subreaper 却不收割,比根本不声明更糟**。不声明时孤儿 reparent 到 PID 1、
-    被它的 drain 收掉;声明了却没有 waiter,则孤儿全部堆在 transport 名下成为**永久僵尸**。故"声明"与
-    "装上通配 drain"必须是同一个动作、不可分开落地。
 - **每进程 pgid 纪律**:非 PTY 进程 `Setpgid` 自成组、PTY 进程交给 pty 的 session——这条 tini 覆盖
   不到的 PTY vs 非 PTY 非对称,完整推理见 D4.5 C1。
-- **drain-barrier**:pause 前用一道 barrier 挡住 in-flight mutating RPC、等其排空——D4.4 静止点协议
-  ① 那一层要的原语(D5.2 的单飞守卫在 host 侧、不用它)。
+- **drain-barrier**:pause 前用一道 barrier 挡住 in-flight mutating 写、等其排空——D4.4 那一层 host 侧
+  drain-barrier 要的原语(D5.2 的单飞守卫在 host 侧、不用它)。
 
 **要拒的是"独立世代计数"identity 模型**(常见于分布式 init/supervisor:给每次运行挂一个
 `epoch`/`generation` 标签辨识陈旧实例)。引擎不引入它,用 spec §3.3/§4.3 的 placement/IP-as-epoch
@@ -168,10 +163,7 @@ per-process 状态,而发信号只需要一个合法 pid;要求注册表命中�
 | `pid=0` | `kill(-0)` = `kill(0)`,打 sandboxd 自己的进程组——而 transport 的 `pgrp` 与 PID 1 同为 **1**(它由 PID 1 fork、不 `Setpgid`),故 PID 1 在组内 | 同上,沙箱被拆 |
 | `pid=1` | `kill(-1)` 命名空间广播。Linux `kill(-1)` **排除 PID 1 与调用者自身**,故沙箱存活,但**每个工作负载进程被连带杀死**(实测两个无关进程同时 `exit 143`);guest 内一个工作负载都没有时该发返 `ESRCH`,于是落到回退臂 `kill(1)`,变成 `pid=-1` 那一行——沙箱被拆 | 越权扇出;空 guest 下退化为拆沙箱 |
 
-即**校验缺席时,一条数据面 unary RPC 足以拆掉整个沙箱**。注意"引擎自己从不向 guest PID 1 发 TERM"
-(销毁走 `runsc kill KILL` + `delete --force`,§5.A)**不构成防线**:它只说明引擎自己不走那条路,而该
-能力是经数据面**开放给调用方**的,`SendSignal` 那条路一直通。§6.1 假定调用方已被信任、引擎不做授权,
-故要补的是**输入校验**,不是授权。
+§6.1 假定调用方已被信任、引擎不做授权,故要补的是**输入校验**,不是授权。
 
 **不做沙箱级宽限期——已否决。** PID 1 收 TERM 后广播、**紧接 `os.Exit(0)`**,而 PID 1 退出即拆
 pid namespace,故那一发 TERM 事实上不可被处理、与直接 KILL 无差别。**要拒的不是"没实现宽限",而是这个
@@ -185,22 +177,9 @@ sandbox0 沙箱 PodSpec 根本没设 `TerminationGracePeriodSeconds`(吃 kubelet
 
 ### D4.4 pause 静止点协议(spec §4.2 的机制)
 
-spec §4.2 的静止点只有一层要设计。两个前提把协议收窄到很小:
-
-- **静止点只是"尽量不截断 in-flight 写"的优化,不是正确性前提**(spec §4.4):超时 → 降抢占 →
-  最坏强杀,任一路径都落到合法 `paused`(与崩溃语义一致)。不值得为它引入重协议。
-- **一致性分两层,只有一层归引擎管**。substrate 层的 flush 一致点(spec §5.B:runsc/gofer 把已
-  提交内核的 in-flight 写落到 Overlay upperdir)本就保证,不依赖进程配合。剩下的是**应用层
-  安全点**——进程正写一个逻辑单元写到一半(如 agent 写 JSONL 写到半行),冻结会留半条。而应用层
-  安全点通用地无法由 engine 判定:engine 不认识 agent(spec §3.2.1),不能要求进程为 pause 实现回调。
-
-**协议只有一层:host 侧 drain-barrier。** 停收新的 mutating process/fs RPC、等 in-flight 排空,再交
-§5.B flush;host 完全掌握自己发出的 RPC,故这一层是**确定性**的,不需要 guest 配合、不引入 ack 通道
-(复用 D4.3 那个原语)。排空超时即降抢占,落到合法 `paused`。
-
-**它保护的是引擎自己造成的截断,这一点是具体的、可复现的**:`fs.Write` 是 truncate-then-write,一次
-落在这两步之间的抢占冻结会把文件留成**空的**——数据被销毁,而且是在一条**引擎自己发出**的 RPC 里。
-这不是"某个不认识的负载写了半行 JSONL"那类无法一般化的情形,而是引擎有义务、也有能力关掉的窗口。
+形状与两个前提在 §4.2:协议**只有一层 host 侧 drain-barrier**——停收新的 mutating fs 写、等 in-flight
+排空,再交 §5.B flush(复用 D4.3 那个原语)。本节只补 §4.2 没有的三样:一个实测、一张不进 barrier 的
+清单、以及协作式冻结为何被否决。
 
 **已实测**:让一次 64 MiB 的 `fs.Write` 与 `Pause` 对撞、并等到写确实进入 guest 后才发 pause,关掉
 barrier 时出现被截断的文件(10 轮里有一轮只落了 36.7 MB),开启后 10 轮全部完整落盘。
@@ -226,8 +205,8 @@ spec §3.2.1);② 两个成熟实现都选了**不可屏蔽**的冻结(一个 `S
 **crash-pause 不排空**:容器已经死了,没有 in-flight 可等、也没有东西还能被截断,等只会推迟记录一件
 已经观测到的死亡。voluntary 的三条(用户 `pause`、`auto-pause`、Promote 的静止)才排空。
 
-参数级残留(纯调参,不改这一层的结构):drain 的 grace 时长(当前 5s——它等的是单条 fs RPC,健康的
-毫秒级完成,还挂着的是卡住而非慢)。
+参数级残留(纯调参,不改这一层的结构):drain 的 grace 时长——它等的是单条 fs RPC,健康的毫秒级完成,
+还挂着的是卡住而非慢。
 
 ### D4.5 tini checklist 覆盖不到的三条缝
 
@@ -249,13 +228,10 @@ tini 的语义权威,前提是**它只有一个子进程、自己永不被重启
   engine 无状态、可重启性不由 engine 承担,"不丢"担保由上层(session adapter)自理。**零新增机制**,
   不加 PID 1↔transport 的 exit-status 上报缝。
 
-  **同一存活期内也有一条边界:进程一退出,它的 pid 立即不可寻址。** `end` 帧广播给**当时已连上的**
-  订阅者,随后该 pid 从 transport 的进程表移除;此后 `Connect` 该 pid 一律 not-found,**不保留退出状态
-  等人来取**。这不是取舍不足而是 pid 寻址的直接后果:guest-native pid 会被内核回收,保留一条"pid 4242
-  已退出"的记录,在 4242 被复用的那一刻就变成了在讲另一个进程。要在退出后仍可寻址,前提是换成永不复用
-  的不透明 ID——那会连带要求一套分配器 + 回收策略,且 handle 的语义从"这个进程"变成"这个可被重启的位置"
-  (故还需一个 attempt/世代号),即一个 restart supervisor。§5.E 不做这件事:**退出状态的送达边界是
-  "退出那一刻在线的订阅者"**,要"不丢"就在 engine 外接住 `end` 帧。
+  **同一存活期内那条边界(pid 退出即不可寻址,§5.E.1)的落法只有一个**:要在退出后仍可寻址,前提是换成
+  永不复用的不透明 ID——那会连带要求一套分配器 + 回收策略,且 handle 的语义从"这个进程"变成"这个可被重启
+  的位置"(故还需一个 attempt/世代号),即一个 restart supervisor。§5.E 不做这件事,故要"不丢"就在
+  engine 外接住 `end` 帧。
   > **留的 seam(若 session 层证明必须"不丢"才做,不回头改 engine)**:PID 1 收全局孤儿退出
   > 状态时旁路记一份供新 transport 查询(一条极窄的内部上报缝)。列出它是为锁定"加它不动 transport /
   > engine 无状态契约",与 [`transport.md`](./transport.md) D3「守 seam」同纪律。
@@ -292,13 +268,14 @@ tini 的语义权威,前提是**它只有一个子进程、自己永不被重启
                    〔create：先建空 upper/work；resume：重挂同一 Overlay 工件〕
 ② §5.C Volume   ： 按挂载表 Binding 逐个 Materialize，句柄组进 LaunchSpec.Mounts
                    （runsc 启动时从 OCI spec 取，故必须在 ④ 之前）
-③ §5.D Network  ： 按策略 Binding 建/选 egress 数据面（gateway）→ 产出 ingress 描述符
-                   （数据面行为归引擎、落位后置到 ④ 的引流；见 network.md D3.2/D4）
-                   ⚠ 未建（M8）：这一步今天不存在，④ 只建 netns + veth + 两个 /30，egress 不被强制
-                   （open-decisions §4）
+③ §5.D Network  ： 按声明 Binding 生成规则集（纯函数：放行集 + L0 地板 + publish 端点 → 规则文本）
+                   ⚠ 未建（M8）：这一步今天不存在，④ 只建 netns + veth + 两个 /30，可达集不被强制
+                   （M8-network.md §1）
       └─ ①②③ 的产出由 §4 汇总交给 ④——子系统间不互调
-④ §5.A Runtime  ： 重建 placement（netns/IP/cgroup 按资源上限 Binding + 按 ingress 描述符建 nft
-                   引流，把 egress 全量逼进数据面）→ 以 sandboxd（init 模式）为 entrypoint 拉起 runsc
+④ §5.A Runtime  ： 重建 placement（netns/IP/cgroup 按资源上限 Binding；建 netns/veth 后、拉起前
+                   装 ③ 的规则集，谓词绑宿主端 veth 的 `iifname`（按名字；`iif` 按 ifindex，
+                   veth 同名重建后静默 fail-open，§5.A）——§2.4 原子性义务）
+                   → 以 sandboxd（init 模式）为 entrypoint 拉起 runsc
 ⑤ guest 内启动  ： PID1（init 模式）装 reaper+信号+监督 → 派生 transport 模式 sandboxd
                    → 子进程 PR_SET_CHILD_SUBREAPER → bind netns TCP → listening
 ⑥ §5.A placement： 发现容器当前 netns IP（veth/CNI result/inspect；local_runsc 下退化成读回引擎
@@ -319,38 +296,30 @@ Overlay 工件。
 
 ### D5.2 设计要点
 
-- **要点① — readiness = 首次 Health RPC 成功,复用 §4.3 探活探针,不另造 ready 协议。** 就绪信号不用
-  guest→host 的 ready 推送、不用裸 TCP accept(accept 可能早于 RPC handler 接好、抢跑),而是
-  engine 侧探针发一个应用层 `Health` RPC,首次成功即 `running`。readiness 与健康探测本是同一件事。
-- **要点② — in-flight resume 期不做健康分类(单飞守卫)。** resume 是**每沙箱单飞**的 in-flight 操作,
-  持有期间对该沙箱的健康分类挂起,直到 ⑦ 首次探活成功翻成 `running`(理由见 §4.3)。这是内存态操作守卫,
-  不新增 §4.1 状态。它只挡"不走锁的分类器在就绪门前空跑/误报",**不承重并发正确性**——并发动词
-  (destroy/evict)由 §4.4-B 全程持有的转换锁兜底(①–⑦ 期间它们拿不到锁)。
+- **要点① — readiness = 首次 `Health` RPC 成功,复用 §4.3 探活探针,不另造 ready 协议**(裸 TCP accept
+  可能早于 RPC handler 接好、抢跑;readiness 与健康探测本是同一件事)。
+- **要点② — in-flight resume 期不做健康分类(单飞守卫,§4.3)。** 落地形状(「非阻塞试锁 + 跳过」、它挡
+  什么、为何不承重并发正确性)见 [`reaper-health.md`](./reaper-health.md) D3。
 - **要点③ — resume API 在 running 时返回 = 调用方"可以连了"的信号。** engine 不向 client 推送就绪
   (无连接注册表、无回调)。持旧 IP 句柄的 client 连接失败即**重新解析当前 placement**(旧 IP 冷启
   即作废)——时序上只要求 client 不缓存旧 IP。
-- **要点④ — 冷启失败原子退回源态,不加 failed 态(spec §4.4-A)。** 拉起失败 / 超时先回收半建 placement
-  (netns/gateway/nft/overlay mount),持久态(Overlay 工件)完好在后端。出口按动词分:**resume** 退回
-  `paused`(仍可恢复);**create** 无可退静止态,清理半建资源(含空 Overlay)后删记录 / 进 `destroyed`。
-  两者都不引入补偿事务、不新增状态——失败只是"这次 placement 没建成",不是持久态损坏。
-- **要点⑤ — PID1 内部就绪被 transport 端口就绪吸收。** 外部唯一可观测的 readiness 就是 transport 端口
-  在听;PID1 装完 handler 才可能派生 transport 子进程(⑤),故探针门控的正是唯一要紧的事,PID1
-  内部次序不必对外暴露握手。
+- **要点④ — 冷启失败原子退回源态(⑦ 的失败臂),不加 failed 态、不引入补偿事务**(spec §4.4-A):失败只是
+  "这次 placement 没建成",持久态完好在后端。
+- **要点⑤ — PID1 内部就绪被 transport 端口就绪吸收**:PID1 装完 handler 才可能派生 transport 子进程(⑤),
+  故 ⑦ 那道门已门控唯一对外可观测的 readiness,PID1 内部次序不必暴露握手。
 
 ### D5.3 探活失败分两类(监督拓扑的后果)
 
-PID1 会**原地监督并重启** transport 子进程,于是 **transport 崩溃不等于 substrate 死亡**:runsc
-活而端口不通,是 transport 子进程崩了、PID1 正在同 IP 原地重启(瞬态,不走 resume,成本远低于整链
-冷启);runsc 整个探不到才是 substrate 死亡(走 resume 换新 IP)。因此探活必须 **substrate +
-transport 两层都探**才能区分二者——完整的两层探针定义、健康态分类与处置见 spec §4.3。这条区分正是
-D4.2 分进程拓扑换来的附加能力。
+PID1 会**原地监督并重启** transport 子进程,于是 **transport 崩溃不等于 substrate 死亡**——两层探针的
+定义、健康态分类与处置全在 spec §4.3。这条区分正是 D4.2 分进程拓扑换来的附加能力:少了独立 PID 1,
+"端口不通"就只剩一种解释。
 
 ---
 
 ## D6. 边界
 
 - **pause 静止点**:结构已定(单层 drain-barrier,D4.4);**应用层协作安全点已否决**,不是待办。grace
-  时长是数值旋钮,家在代码里(`internal/lifecycle` 的 `defaultDrainGrace`),按 transport D6.4 的同一条
+  时长是数值旋钮,家在代码里(`internal/lifecycle` 的 `defaultDrainGrace`),按 transport D5.4 的同一条
   纪律**不登记为开放决策**——一个旋钮有两个家就会有两个值。
 - **模板是否预置常驻进程**:不需要;若出现,平级托管,不进 `sandboxd`。**内置 Template 的内容清单**是
   产品/模板层选型,仍开放,登记在 [`open-decisions.md`](../open-decisions.md)(该行指回 D3.1)。

@@ -25,10 +25,14 @@ Volume 相对 §5.B 的 Overlay 只多几个属性,每个属性对应一条契�
 | 臂 | 物化 | 谁兑现 POSIX | 实测 |
 | --- | --- | --- | --- |
 | **local(默认)** | 宿主上一个目录(btrfs subvolume) | 宿主内核(gofer 代理普通目录) | 已验 |
-| **remote**(S3 / NFS / …) | 宿主侧 **FUSE** 挂载点,backend 维护、译成对后端的操作 | backend 自己在 FUSE 里兑现 | 已验 |
+| **remote**(S3 / NFS / …) | 宿主侧 **FUSE** 挂载点,backend 维护、译成对后端的操作 | backend 自己在 FUSE 里兑现 | 部分已验(读/枚举路径实测;写路径与真实后端未测,见 D8) |
 
 两臂**在 guest 侧零差异**(都是一条 gofer 代理的 OCI mount);差异只在"挂载点背后是普通目录还是 FUSE
-挂点"。Volume 相对 Overlay 的新属性与其契约 / 证伪:
+挂点"。
+
+**remote 臂那半未测不构成 seam 形状的未验前提,故不进 open-decisions。** seam 形状只依赖**穿透性**
+——gofer 会 descend 进宿主侧 FUSE 挂点、POSIX 语义穿透——读/枚举已证足以立住这条;写路径的行为是**该
+backend 自己的验收项**(D8),不是核心模型的前提。Volume 相对 Overlay 的新属性与其契约 / 证伪:
 
 | 新属性 | 契约(详见 §5.C) | 排除的备选 |
 | --- | --- | --- |
@@ -125,10 +129,9 @@ seam 沿用 §5.A `runtime.Provider` / §5.B `rootfs.Provider` 的既定约定:*
   (`SetHandle`/`Handle`,`Placement.handle` 的先例)——FUSE 臂要起/停一个进程,没有它就得另立一张按
   `volumeID` 键入的侧表,正是 D3.1 拒掉的那个"进程内 handle registry"。句柄必须带 `Volume`,否则
   `Release` 无从解析。
-  - **不收 `accessMode`**,两条独立论据、第二条致命:① 它不改变 backend 做的任何事(三种模式下宿主目录
-    完全相同,ro 的强制在运行时、排他性在控制面,都在调用发生前已裁决,故它该搭 `MountSource.ReadOnly`);
-    ② **基数就错了**——实测一个卷可同时对 A 是 shared-rw、对 C 是 shared-ro,`AccessMode` 是 per-挂载行的,
-    而 `Materialize` 是 per-卷的。
+  - **不收 `accessMode`**:它既不改变 backend 做的任何事(三种模式下宿主目录完全相同),基数也错了
+    (`AccessMode` 是 per-挂载行的,`Materialize` 是 per-卷的),故它搭 `MountSource.ReadOnly`——两者的
+    规范陈述归 §5.C。
   - **契约是 create-if-absent**,不是 open-only(理由见 §5.C:源缺失时 runsc 硬失败,open-only 会让被误
     sweep 的沙箱永久无法 resume)。**并发性必须写进契约**——整个共享扇出设计依赖"同一个卷被多次并发
     物化"成立(已验)。
@@ -148,15 +151,13 @@ seam 沿用 §5.A `runtime.Provider` / §5.B `rootfs.Provider` 的既定约定:*
   与 §5.B 同形)。**这是真缺口不是装饰**:没有它,每一个无帽卷的字节对准入门都不可见。
 - `Usage(ctx, volumeID) → (used, limit int64)` —— 单个卷的后端自述用量。**它是卷帽写点逼出来的,不是自选**:
   §5.C 要求拒绝"降到低于当前用量",判据是**严格不等式**,故引擎必须能读到当前用量;`inspect` 想报用量也走它。
-  - **`limit` 只能用于诊断,不能用于校验**:`internal/btrfs` 两个方向上都把 `none ↔ 0` 映射,故"从未设过帽"
-    与"故意无帽"读回来逐字节相同(D7.3)。**权威永远是卷记录**;任何"事后核对帽是否设对"的设计在这条基底上
-    不可实现,这正是把设帽逼到写时的另一半理由。
+  - **`limit` 只能用于诊断,不能用于校验,权威永远是卷记录**——理由(`none ↔ 0` 映射让"漏设帽"与"故意
+    无帽"读回来逐字节相同,故事后核对不可实现)见 D7.3。
 - `Snapshot(ctx, srcID, newID, capBytes)` / `Clone(...)` —— 归这个 seam,但**新卷的 ID 由 mediator 分配**
   (与 Promote 同规矩)。决定性理由:backend 自铸的 ID **无法在字节存在之前被登记进在飞集合**,故一次
   中途崩溃会留下一个任何 sweep 都无法归类的名字下的字节。
-  - **两者收 `capBytes` 而不是"继承源的帽",因为没有可继承之物**(实测,D7.3):基底给快照的是一条全新的
-    **无帽**配额行。故这两个方法的契约里**设帽是不可省的一步**,且它必然是快照 ioctl 之后的**第二次**调用
-    ——没有任何参数能让那个 ioctl 携带帽。由此产生的窗口是承重的,见 D7.3。
+  - **两者收 `capBytes` 而不是"继承源的帽",因为没有可继承之物**,故契约里**设帽是不可省的第二次调用**
+    ——非继承、必然是第二次调用、以及由此产生的那个承重窗口,全在 D7.3。
   - **两者可以是同一条 backend 代码路径**(实测:`property set ro false` 在本基底成功,`-r` 快照在仍只读时
     即可设帽,且帽完整穿过 ro→rw 转换)。差别只在 §5.C 的语义标注,不在机制。
 - `OpenRoot(ctx, volumeID) → Root` —— 直连内容访问器,**未挂载也能用**(§5.C 的那条承诺,D5.1 定形)。
@@ -178,14 +179,18 @@ seam 沿用 §5.A `runtime.Provider` / §5.B `rootfs.Provider` 的既定约定:*
     不在锁内调 store。
   - **Overlay 侧故意保持合并形状**:那边的行**先于**单元插入,暴露的只有快照 skew,其注释把这段残留记为
     可接受;**卷是 bytes-first,暴露的是整个创建过程**——同一个形状,风险量级不同。两侧留了交叉引用。
-  - 判定归 mediator 之后,§5.C 那三条安全要求(独立于 FK 的活挂载检查、跳过出现在**任何**挂载行里的单元、
-    读失败即跳过)**本来就是 mediator 侧的事实**,落在它那里而非 backend 里。
   - **中途失败是继续、不是中止**(尽力回收路径,一个单元卡住不该让其余全部留着)。
   - **为何按单元而非按引用**:layer 是被 lineage 与 refcount **共享**的只读底座(判据是"还有没有行引用
     它"),而 Volume 和 Overlay 单元都是**自足的存储单元**(判据是"这个单元自己还有没有活的拥有者")。
   - **在飞集合在这里比 Overlay 那侧更必要**:Overlay 那边它只防**过期 keep-set**(行先插),而**卷的
     创建是 bytes-first**(ID 必须先命名那个单元),故一次健康的在飞创建**即便 keep-set 是新鲜的**也表现为
     "有字节、无行";`Snapshot`/`Clone` 又是同一窗口的另两个生产者。
+- `ReclaimQuotaRows(ctx, ids) → (n int, err)` —— 回收**早先的删除泄漏掉的**配额行(D7.1 的那条路径的
+  backend 半)。**收 id、不自己扫行**:扫描的失败形态是一个无帽的活卷 + 零信号(D7.2)。未到可回收态的行
+  **留给下一轮**,不是错误——一个 `<squota space holder>` 可以在一个活克隆的整个生命期里合法地拒绝销毁。
+- `DeletedRowIDs(ctx) → []uint64` —— 上一条要吃的那份输入:本 backend 在**删除那一刻**记下、尚未回收的
+  配额行 id。**它落在 backend 而不是控制面上,是形状论据不是方便**:泄漏行是**该 substrate 的残留,不是引擎
+  状态**——一个没有配额行的 backend 返空,整条路径对它零成本,故调用方不需要一个能力分支(§1.3)。
 - `Capabilities() → {Snapshot, Clone, Quota}` —— **per-backend 能力查询**(D6):local(btrfs)报支持
   snapshot/clone/quota;纯目录或某些 remote 后端可不支持,调用即 400,而非静默。**成员必须是 `bool`**:
   一个 `map[string]string` 的特性表会把机制名当作**值**带过 seam,而任何扫标识符的结构守卫都看不见它。
@@ -216,11 +221,10 @@ seam 沿用 §5.A `runtime.Provider` / §5.B `rootfs.Provider` 的既定约定:*
     匹配,对新增的每条 FK 路径**两个方向**都为真(缺父插入 / RESTRICT 删除,三条 FK 共六向),对唯一违反
     为假。**但沙箱侧的翻译点今天不存在**——删沙箱的实现没有 FK 分支,RESTRICT 会以裸驱动错误冒到 API 的
     `default` 分支变成 **500 而不是 409**。且既有的 `ErrInUse` 文案字面写着 "template in use",被挂载行
-    挡住的沙箱删除会返回一个说错对象的 409。故形状是**每个结局一个 sentinel**——三条 RESTRICT
-    (`mounts.volume` / `mounts.sandbox` / `volumes.parent`)+ 租约唯一违反 = **四个 sentinel**,加上写入
-    regime 那条共**五个**,映射到 §6.2 的**四个结局类别**(② 有卷侧与沙箱侧两侧,计一类;计数计的是调用方
-    要分辨的语义种类,不是错误值个数)。不是复用一个。Memory 后端更要**新写**沙箱侧与卷侧两处引用扫描 +
-    契约用例(既有契约清单里没有任何挂载形状的断言)。
+    挡住的沙箱删除会返回一个说错对象的 409。故形状是**每个结局一个 sentinel**,而**哪个 sentinel 映到哪个
+    结局类别、以及"数的是调用方要分辨的语义种类而非错误值个数"这条计数规则,归 §6.2**——本文只主张"不是
+    复用一个"。Memory 后端更要**新写**沙箱侧与卷侧两处引用扫描 + 契约用例(既有契约清单里没有任何挂载
+    形状的断言)。
   - **删除次序是必需的,不是风格选择**(实测):RESTRICT **立即**生效,把两条删除包进一个事务**买不到**
     次序无关性,故必须先删挂载行、再删沙箱。**`defer_foreign_keys` 是个陷阱,实测拒绝它**:它确实让次序
     无关,但违反在 `Commit()` 才浮现,而 Go 的 `Tx.Commit()` 返错时 SQLite **并未回滚** —— 在被钉死的单
@@ -245,7 +249,8 @@ seam 沿用 §5.A `runtime.Provider` / §5.B `rootfs.Provider` 的既定约定:*
 | `resumeLocked` | 从 store **读回**挂载表(挂载行跨 pause 持久)、重新 `Materialize`——与 `resolveLower` 每次重解析血缘同理,卷是同一真身、拿新的宿主物化 |
 | `pauseLocked` | CAS 后:`Backend.Release` 每个卷(**挂载行保留**,租约不释放),对称于 Overlay「零捕获」 |
 | `destroyLocked` | 卸载活卷 → **先删挂载行、再 `DeleteSandbox`**(否则 `mounts.sandbox` FK 挡住沙箱删除);这是租约释放点 |
-| 启动/周期对账 | mediator 侧 `SweepOrphanVolumes`:`Backend.ListUnitIDs` 枚举 → mediator 判定 → 逐个 `DestroyVolume`(**不**镜像 `SweepOrphanOverlays` 的合并形状,理由与实测见 D2);`SeedBuiltinVolumes`(若有平台预置卷)镜像 `SeedBuiltinTemplates` |
+| `RebindVolumes`(`PATCH /v1/sandboxes/{id}/volumes`) | 整份挂载绑定的替换:一次 `store.ReplaceMounts` 在**同一个提交**里删旧行 + 插新行,新行走**同一条租约谓词**;拒绝时旧绑定原样留下(原子性是 §5.C 写明的 store 契约) |
+| 启动/周期对账 | **三个独立入口**,同一个启动位置与同一次 reaper tick 上依次调用:`SweepOrphanVolumes`(`Backend.ListUnitIDs` 枚举 → mediator 判定 → 逐个 `DestroyVolume`;**不**镜像 `SweepOrphanOverlays` 的合并形状,理由与实测见 D2)· `RepairVolumeCaps`(D7.3 的修复态)· `ReclaimQuotaRows`(D7.1 的泄漏行)。另有 `SeedBuiltinVolumes`(若有平台预置卷)镜像 `SeedBuiltinTemplates` |
 
 **唯一的新不变量:独占租约**(规范陈述在 §5.C:至多一条 `exclusive` 行,且它不与该卷任何其他挂载行并存)。
 这是 Volume 引入的唯一一条新 store 断言。**两个读起来自然、实测都不成立的陈述**,各值一条证伪:
@@ -275,8 +280,10 @@ WHERE NOT EXISTS (
 引用-回收**同形**(同一个权威 store 串行仲裁判定-动作)。Memory 侧是其既有互斥下的一个方法。偏索引与
 `CHECK (access IN (...))` 退为 schema 级断言(它们各自只覆盖一半,见 §5.C)。
 
-> **唯一的竞态写者是挂载行的 INSERT**,这把修法收窄了很多:resume 只**读**该表,destroy 只删自己沙箱的行
-> 且 FK RESTRICT 覆盖次序,pause 不写行。
+> **竞态写者只有两个,且都是挂载行的写**:`Create` 冷启链上的 INSERT,与 `RebindVolumes` 经
+> `store.ReplaceMounts` 的删+插(同一个提交、同一条租约谓词,故它不是第二套仲裁,是同一条谓词的第二个
+> 调用点)。这把修法收窄了很多:resume 只**读**该表,destroy 只删自己沙箱的行且 FK RESTRICT 覆盖次序,
+> pause 不写行。
 >
 > **谓词必须是行内不可变的属性**(§5.C 的禁令)有一个具体的外部反面教材:某实现的 live-owner 偏唯一索引
 > 建在一个软删时间戳上(`UNIQUE(...) WHERE
@@ -305,7 +312,7 @@ handle**,故第②层退化掉,只剩第①层(挂载行)。第②层因此是 *
 ## D4. 访问模式与独占租约
 
 三种访问模式的定义与语义、以及"独占租约 = 那条 Exclusive 挂载行的存在本身"(不引入 `Lease` 类型、
-不加归属字段;含"崩溃保持租约是正确行为"与 reaper TTL 兜底)已毕业进 §5.C,本文不复述。这里只留两点:
+不加归属字段;含"崩溃保持租约是正确行为"与 reaper TTL 兜底)的规范陈述归 §5.C。这里只留两点:
 命名取"共享 + 可写性"的**可观测属性**(§1.1 词汇边界禁用归属义的实体名),以及 SharedReadWrite 的
 "跨沙箱 rw coherence 不定义"与 D1.2 拒 FUSE-统一缓存**同源**——跨边界共享可变状态是难题,回应是
 **不承诺**,而非造脆弱机制假装承诺。本节其余篇幅给它排除掉的那条备选。
@@ -324,7 +331,7 @@ handle**,故第②层退化掉,只剩第①层(挂载行)。第②层因此是 *
 
 hazard 是真的:卷可能同时被运行中沙箱经 gofer rw 写、被直连 API 从宿主侧写同一后端 → 撕裂,且 gofer/sentry
 页缓存与直连写不 coherent。§5.C 用一条**不变量**堵掉它——该不变量(live-rw 挂载在持 ⟹ 直连变更一律拒;
-门开在"**活的**"写入方,`paused` 不算 live writer)的规范陈述在 §5.C,本文不复述,只给它的边界与证伪。
+门开在"**活的**"写入方,`paused` 不算 live writer)的规范陈述归 §5.C;本文只给它的边界与证伪。
 
 **未挂载时的直连操作**(create/delete/list/inspect/import/export):local 后端直接对宿主目录/subvolume 操作,
 单机场景简单,无需"惰性 attach"。"无挂载时临时开一个 backend 会话服务直连、闲置回收"这套是**合成型
@@ -339,7 +346,9 @@ backend 才需要的**(要一个打开的 FS 会话去服务),local 目录用不
    而未挂载的卷没有 guest;且把卷内容路由经 §5.E 会产生一条 `volume → transport` 的子系统边,
    `internal/arch` 的空 allowlist 当场失败。
 2. **窄访问器的安全边界只要一个 syscall。** `openat2(dirfd, path, RESOLVE_IN_ROOT)` 给出与 chroot
-   **逐条相同**的路径语义,且无特权、无 mount namespace、无线程钉定。实测四条(本机 6.x 内核):
+   **逐条相同**的路径语义,且无特权、无 mount namespace、无线程钉定。(实现同时带 `RESOLVE_NO_MAGICLINKS`
+   ——它独立堵掉经 `/proc/*/fd` 魔法链接的逃逸,**不改变**下面这四条路径语义,故是加固而非另一条边界。)
+   实测四条(本机 6.x 内核):
    `..` 在根处**夹住**(不是报错,是解析成根本身)· 绝对路径**按该根重新解释** · 指向根外的 symlink
    (相对与绝对都试过)解析回根内 · symlink 环报 `ELOOP`。写侧同验:经一条 `../../../d/f` 形状的路径
    create+write,字节落在卷内;一条指向宿主文件的 symlink 上的写**没有**碰到宿主文件。
@@ -440,7 +449,7 @@ Volume 快照默认 **crash-consistent**、与 Overlay 不对称的完整陈述�
 ### D6.3 证伪:二段式 checkpoint
 
 用"阻止新操作 + 排空飞行事务 + 强制刷盘"的二段式给挂载中卷拍一致快照——**不采用**,两头不落好:①对独占卷
-冗余(二段式本质就是 §4.2 的 pause 静止点,已被"pause owner 再快照"覆盖,再造一份会让 §5.C 反向依赖
+冗余(二段式本质就是 §4.2 的 pause 静止点,已被"pause 持有沙箱再快照"覆盖,再造一份会让 §5.C 反向依赖
 §4.2,违反子系统间不互调);②对 shared-rw 不够(N 个独立沙箱的 gofer 无共同协调者,强造一个就是把 swarm
 编排塞进引擎,§1.3 否决)。
 
@@ -488,12 +497,17 @@ extent 时被删除**。实测矩阵的两条推论:
 > **崩溃**卡在删共享者与删源之间,以及 sweep 自己按单元回收时的次序。故下面这个程序仍然必须存在、必须正确,
 > 但它守的是残余而不是主线——这也是为什么它的错误处置是"跳过并留到下轮",而不是"阻塞"。
 
-**回收程序**(§5.C 要求的那条路径,`SweepOrphanVolumes` 的职责)。每轮:
+**回收程序**(§5.C 要求的那条路径,mediator 侧归 `ReclaimQuotaRows`)。它与 `SweepOrphanVolumes`(回收
+孤儿字节)、`RepairVolumeCaps`(修 D7.3 的那个修复态)是**三个互相独立的入口**,只是在同一个启动位置与
+同一次 reaper tick 上被依次调用——**别把它们读成一个 sweep 的三个阶段**,三条残留的谓词、失败处置与
+可达路径都不同。每轮:
 
 1. **先删共享者(快照/克隆)、再删源** —— 按上面的矩阵,该次序一行不漏。
 2. **每轮一次** `filesystem sync` 然后 `subvolume sync`(不是每单元一次)。次序是实用发现:
-   `subvolume sync` 单独用会阻塞到下一次周期性 commit(实测 3–16 秒);前面先 `filesystem sync` 强制 commit,
-   两者合起来 14–29 ms 返回。**同样效果,从"等 commit"变成"有界"。**
+   `subvolume sync` 单独用会**睡到下一次周期性 commit**,故它的耗时随 commit 周期与负载浮动、**不是一个固定属性**
+   (多次实测落在数秒到十几秒:7–16 s、19.1 s);前面先 `filesystem sync` 强制那次 commit,两者合起来在**几十毫秒**
+   量级返回(实测 14–29 ms、53 ms)。**承重的是这个量级差(约三个数量级),不是任一具体区间**:效果相同,而从
+   "等一次 commit"变成"有界"。
 3. 对本轮删掉的每个 id 读它的配额行,**先查退出码**:读失败 → **未知**,不得据此下结论;无行 → 完成;
    **`<stale>` → destroy**(轮询谓词就是"标签恰为 `<stale>`");`<under deletion>` → 再 settle 后重试;
    `<squota space holder>`(有活共享者)→ **留着**、下轮再说。
@@ -558,8 +572,9 @@ D7 以上各节讲的都是**用量**侧(哪些字节记给谁)。**limit 侧是
   - 它是 D7.1 的**镜像,且严格更坏**:D7.1 要靠 remount 落在特定 id 上才触发(形状依赖),而漏设帽
     **每次快照都触发、无前置条件**。
   - 由此产生一个**承重的崩溃窗口**:帽必然是快照 ioctl 之后的第二次调用,故"快照已存在、帽还没设"是一个
-    真实中间态。在飞集合(`building`)必须覆盖它,且 sweep / adopt 路径要把"卷记录存在、配额行是 `none`"
-    当作**修复态**而不是合法态——否则一次崩溃留下的就是一个已登记、活着、无帽的卷。
+    真实中间态。在飞集合(`building`)必须覆盖它,且 `RepairVolumeCaps`(以及 adopt 路径)要把"卷记录存在、
+    配额行是 `none`"当作**修复态**而不是合法态——否则一次崩溃留下的就是一个已登记、活着、无帽的卷。
+    它是**自己的入口**,不是 `SweepOrphanVolumes` 里的一个分支(D7.1 的三入口)。
 - **降帽到低于当前用量会把单元卡死,且不可逆。** 基底接受这次降帽且**零校验**;既有字节安然无恙(读回逐字节
   相同);但其后 `mkdir` / 建文件 / **把已有文件 truncate 成 0** 全返 `ENOSPC`(只有 unlink 还活着),而且
   **配额 ioctl 自己也返 ENOSPC**——帽既不能撤、也不能抬,**连抬到高于当前用量都不行**。唯一出路是删字节删到
@@ -569,14 +584,16 @@ D7 以上各节讲的都是**用量**侧(哪些字节记给谁)。**limit 侧是
     接受),而是**接受会造出一个控制面出不来的状态**:修复要经由删 guest 的字节,而 §6 里没有任何东西允许
     引擎代调用方做这件事。§3.4 的"降帽不需要重过准入门"因此配了一条 caveat。
 
-### D7.4 guest 侧 statfs:一条显式的"不承诺",外加一条后端义务
+### D7.4 guest 侧 statfs 为什么不反映帽
 
-实测 guest 在 32 MiB 帽的卷上 `statfs` 看到 476 GiB 可用(宿主整盘数字的**忠实透传**,不是 sentry
-fabrication;`f_type` 是 gofer 的而非 btrfs 的),根因是 btrfs squota **没有 statfs 投影**。这与 §5.B 已有的
-"guest 侧数字不可用于容量核算"是同一条规则的另一个方向,但它是 **guest 可观测的意外**,故值得一条比
-"不承诺 statfs 反映帽"更强的陈述:**在 squota 上它一定不反映**。**一个独立的外部实现踩了同一个坑**
-(其挂载卷上报约 4.6 EB 可用,成因不同——疑似网络 FS 代理——症状同类),故这不是本基底的偶然。用户可见
-语义在 §5.C;对**能够**诚实投影的后端,把它陈述为该后端的义务(否则 guest 内 `df` 会撒谎),而非核心承诺。
+用户可见语义(含实测数字与"能诚实投影的后端"那条义务)在 §5.C;本节只留它的根因与外部佐证。
+
+**根因**:btrfs squota **没有 statfs 投影**,故 guest 看到的是宿主整盘数字的**忠实透传**——不是 sentry
+fabrication(`f_type` 是 gofer 的而非 btrfs 的,即这条数字根本没经过帽)。这与 §5.B 的"guest 侧数字不可用于
+容量核算"是同一条规则的另一个方向,但它是 **guest 可观测的意外**。**一个独立的外部实现踩了同一个坑**
+(其挂载卷上报约 4.6 EB 可用,成因不同——疑似网络 FS 代理——症状同类),故这不是本基底的偶然。
+
+故本节挣到一条比"不承诺 statfs 反映帽"更强的陈述:**在 squota 上它确定不反映**——这不是未承诺,是已知为假。
 
 ---
 
@@ -593,7 +610,8 @@ fabrication;`f_type` 是 gofer 的而非 btrfs 的),根因是 btrfs squota **没
 - **远端 backend 的落地形态**(D1/D2/D6):S3 / NFS backend 何时、以何形状落;其内部(host-FUSE 前端、
   完整 FUSE 会话的 POSIX 接口、以及若接对象存储则 WAL/manifest/segment/内容寻址/加密/GC 那一整套)
   **全封在该 backend 内**,不进核心——本文只确保 seam 形状容得下它。**D2 的 handle 形状是按"宿主 FUSE
-  挂点能经 gofer 代理"这一条已验事实推理得出的,FUSE 臂本身未实测**。
+  挂点能经 gofer 代理"这一条已验事实推理得出的,FUSE 臂只实测了读/枚举穿透(D0),写路径与真实远端
+  后端未测**。
   - 一条对**任何**未来 remote 臂成立的教训(来自一个分布式参考实现的失效,机制不用抄——我们单机、store
     即权威、无 split-brain):**让字节在所有权声明提交之前不可达,且绝不让两个 epoch 共用一个 key**。
     放在写之后的 CAS 拦不住两个写者算出逐字节相同的 key;而"payload 里存了校验和"救不了它,因为同一个
@@ -611,7 +629,11 @@ fabrication;`f_type` 是 gofer 的而非 btrfs 的),根因是 btrfs squota **没
 2. **我们有而两个参考实现都没有的三项**:只读挂载 / 任何形式的独占或租约 / per-volume 容量帽。特别是容量帽
    ——两个实现都没有任何字节上限字段,其中一个的容量甚至是**虚拟的**(`statfs` 硬编码 4 TiB,文档明说那"不是
    存储分配、不是硬配额、也不是节点文件系统容量"),配额只在 team 级、且是**事后测量**;而我们实测 btrfs
-   squota 精确到 0.02% 就能兑现。故 D8 的这几条**没有外部压力要求砍掉**。
+   squota 兑现的是**精确到帽的硬 `ENOSPC`**(精度 ~0.05%,rootfs-overlay D6.2)。故 D8 的这几条**没有外部压力
+   要求砍掉**——承重的是"硬配额 vs team 级事后测量"这个性质差,不是精度的具体值。
+   > ⚠ **那个精度数字的效力**:它出自 D6.2 的一次性实测,**没有脚本打印它**;而唯一在断言 ENOSPC 精度的
+   > `spike-volume-cap-snapshot.sh` 用的是**远宽于它的容差**(8 MiB 帽上 ±2 MiB)。故 `~0.05%` 可引作
+   > "落点紧贴帽"的量级证据,**不可引作一个可复现的精度指标**。
    - **快照/克隆不在这张缺口清单上**:其中一个实现两者都有真实实现(snapshot 是独立表、clone 是同类型 +
      源指针),而那两处实现细节反过来成了 D6.1a 最有力的两条论据(快照该不该是独立类型、`parent` 该不该
      带 FK),见该节。
