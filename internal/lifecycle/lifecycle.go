@@ -797,11 +797,12 @@ func (m *Mediator) resumeLocked(ctx context.Context, rec model.Sandbox) error {
 //     no placement involved — so they are editable from either state and take
 //     effect immediately.
 //
-// Raising a cap is a NEW PROMISE and must clear admission (§3.4). The gate sums
-// from the store including `paused` records, so a raise changes Σ at THIS commit,
-// not at the eventual resume — skip the gate here and the store would immediately
-// hold a Σ over budget, refusing some unrelated create for an overcommit the
-// engine itself admitted. Lowering needs no gate (Σ shrinks).
+// Raising a cap on a METERED axis — disk or memory, the only two node budgets
+// (§3.4) — is a NEW PROMISE and must clear admission. The gate sums from the store
+// including `paused` records, so a raise changes Σ at THIS commit, not at the
+// eventual resume — skip the gate here and the store would immediately hold a Σ
+// over budget, refusing some unrelated create for an overcommit the engine itself
+// admitted. Lowering needs no gate (Σ shrinks).
 //
 // Raising memory_byte also CLEARS death_cause in the same commit, which is what
 // makes §4.3's resource-terminated remedy actually work: the resume guard reads
@@ -857,6 +858,18 @@ func (m *Mediator) UpdateBinding(ctx context.Context, id model.SandboxID, b stor
 	// sandbox's own committed caps, exactly as resume does, so it is measured
 	// against the delta rather than double-charged.
 	//
+	// DISK AND MEMORY ONLY — cpu_millis is deliberately absent from the trigger set.
+	// §3.4 keeps CPU out of the node accounting entirely (`cpu_millis: 0` is always
+	// legal, and neither budget mentions it), so a CPU-only raise asks for zero
+	// additional bytes on either axis and the gate has nothing it could correctly
+	// refuse: once the left side has filled for reasons this PATCH does not touch
+	// (other sandboxes' caps, volume caps, or a grown MEASURED uncapped term), the
+	// only thing gating a CPU edit can produce is a FALSE disk- or RAM-flavoured
+	// 507 against a request for zero bytes. The
+	// metered-axis-requires-a-cap check has nothing to bite on either — a CPU edit
+	// changes neither cap it inspects. "All raises through one door" buys no
+	// invariant when the invariant behind that door is not about CPU.
+	//
 	// admitMu spans {gate → commit} as ONE critical section, held by defer through
 	// the Store.UpdateBinding below — the same shape create uses for
 	// {gate → insert} and SetVolumeCapacity for {gate → apply → commit}. Releasing
@@ -865,7 +878,7 @@ func (m *Mediator) UpdateBinding(ctx context.Context, id model.SandboxID, b stor
 	// sum a Σ missing the other's uncommitted raise, both would pass, and both
 	// would commit — the node over budget with every individual cap honored. §3.4
 	// is explicit that a write to a cap changes Σ AT THIS COMMIT.
-	if newLimits.DiskByte > rec.Limits.DiskByte || raisesMemory || newLimits.CPUMillis > rec.Limits.CPUMillis {
+	if newLimits.DiskByte > rec.Limits.DiskByte || raisesMemory {
 		m.admitMu.Lock()
 		defer m.admitMu.Unlock()
 		if err := m.admit(ctx, newLimits, id); err != nil {

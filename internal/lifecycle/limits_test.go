@@ -979,6 +979,48 @@ func TestUpdateBindingRewritesTheBinding(t *testing.T) {
 		}
 	})
 
+	// ...but a CPU-only raise is NOT a raise the gate can speak about. §3.4 keeps CPU
+	// out of the node accounting (`cpu_millis: 0` is always legal; neither budget
+	// mentions it), so running admit for it can only produce a FALSE refusal: the node
+	// below is full on BOTH budgets from another sandbox, and a PATCH asking for zero
+	// additional bytes must still land.
+	t.Run("a cpu-only raise does not run the gate", func(t *testing.T) {
+		rp, rt := &fakeRootfs{}, &fakeRuntime{}
+		m, st := newLimitsMediator(t, rp, rt, NodeCapacity{DiskByte: 4 * gib, MemoryByte: 4 * gib})
+		sid, err := m.Create(ctx, CreateSpec{Template: "bare", Limits: model.Limits{DiskByte: gib, MemoryByte: gib, CPUMillis: 500}})
+		if err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		if err := m.Pause(ctx, sid); err != nil {
+			t.Fatalf("pause: %v", err)
+		}
+		// The disk budget goes full underneath it: uncapped layer bytes are MEASURED, not
+		// promised, so the second term can grow after this sandbox was admitted until even
+		// its own unchanged cap no longer fits (the same fixture the resume gate uses).
+		rp.mu.Lock()
+		rp.uncappedBytes = 3*gib + 1
+		rp.mu.Unlock()
+		// Proof the node is genuinely over budget: a one-byte DISK raise — the very arm a
+		// CPU raise used to be routed through — is refused. Without this the subtest could
+		// pass on a node that was never full.
+		oneMore := gib + 1
+		if err := m.UpdateBinding(ctx, sid, store.Binding{DiskByte: &oneMore}); !errors.Is(err, ErrInsufficientCapacity) {
+			t.Fatalf("disk raise on a full node = %v; want ErrInsufficientCapacity (the fixture must really be exhausted)", err)
+		}
+		cpu := int64(2000)
+		if err := m.UpdateBinding(ctx, sid, store.Binding{CPUMillis: &cpu}); err != nil {
+			t.Fatalf("cpu-only raise = %v; want it ADMITTED — CPU is in neither node inequality (§3.4), so gating it can only yield a false 507", err)
+		}
+		rec, _ := st.GetSandbox(ctx, sid)
+		if rec.Limits.CPUMillis != cpu {
+			t.Fatalf("cpu = %d; want the raised %d persisted", rec.Limits.CPUMillis, cpu)
+		}
+		// and the axes the gate DOES own are untouched by the CPU edit.
+		if rec.Limits.DiskByte != gib || rec.Limits.MemoryByte != gib {
+			t.Fatalf("limits = %+v; want disk=%d memory=%d unchanged", rec.Limits, gib, gib)
+		}
+	})
+
 	// `retention` is measured from UpdatedAt (§4.3), so PATCH must not bump it —
 	// otherwise editing an unrelated cap silently extends an eviction deadline.
 	t.Run("PATCH does not touch UpdatedAt", func(t *testing.T) {
