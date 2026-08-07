@@ -31,7 +31,7 @@ import (
 // every synonym for one — a field named e.g. `DiskDevice` still gets through, so
 // this backstops the §5.A rule rather than replacing the need to know it.
 var bannedTokens = []string{
-	"cgroup", "memcg", "oom",
+	"cgroup", "memcg", "oom", "netns",
 	"upperdir", "workdir", "hostpath", "abspath",
 	"subvolume", "qgroup", "squota", "errno",
 	"major", "minor", "majmin", "devno",
