@@ -6,8 +6,11 @@
 # snapshotting a live mounted volume you should fsync / freeze the mount point")
 # load-bearing, or cargo cult?
 #
-# Builds on spike-volume-mount.sh (which proved a host dir bind-mounts rw into a
-# live guest via gofer) and changes exactly two things:
+# Takes as given that a host dir bind-mounts rw into a live guest via the gofer
+# (that floor is now guarded by test/volume_mount_substrate_test.go, which asserts
+# it five ways: concurrent writers, the ro arm's EROFS, topology across pause,
+# detach releasing the lease, and the exclusive lease under concurrent attach).
+# Against that floor it changes exactly two things:
 #   - the Volume is a real **btrfs subvolume** under /var/tmp, not a plain dir,
 #     because that is what the local volume backend materializes (§5.C);
 #   - the guest is **long-running and continuously writing**, not a one-shot
