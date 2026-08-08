@@ -389,18 +389,19 @@ type Match struct {
 	// D5 ⑪). The generator therefore does NOT fork for IPv6 here.
 	CTState []string
 
-	// CTOriginalDestV4 / CTOriginalPort pin the PRE-NAT tuple of a steered flow.
+	// CTOriginalDest / CTOriginalPort pin the PRE-NAT tuple of a steered flow.
 	// Both are required for `via[]`'s narrow accept together with the post-NAT
 	// DestPort, and all three are load-bearing: each omission has a measured
 	// counter-example, from "an undeclared original port reaching a declared
 	// listener" to "a declared port reaching a listener the declaration never
 	// named" (network.md D5 ⑩).
-	CTOriginalDestV4 *netip.Prefix
-	CTOriginalPort   uint16
-
-	// NotOutSelf adds `oifname != <this sandbox's veth>` — used by the egress
-	// masquerade so it cannot rewrite traffic staying inside the /30.
-	NotOutSelf bool
+	//
+	// A nil CTOriginalDest is the TRANSPARENT-INTERCEPTION shape and emits exactly
+	// one clause fewer. It must be nil there: the declaration authorized "any
+	// destination on that port", so keeping a cidr clause would block the traffic
+	// it authorized (network.md D3.3 / D5 ⑩). Both directions are asserted.
+	CTOriginalDest *netip.Prefix
+	CTOriginalPort uint16
 }
 
 // Rule is one abstract rule. Order within a hook is the order in RuleSet.Rules,
