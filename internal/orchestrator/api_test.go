@@ -650,7 +650,7 @@ func TestFileBypassErrorsHideThePlacement(t *testing.T) {
 			}
 			for _, leak := range []string{"10.88.0.7", veth, overlay, "/srv"} {
 				if strings.Contains(string(body), leak) {
-					t.Errorf("%s leaks %q — placement and host paths stay inside the engine (§6.2 / D6.1): %s",
+					t.Errorf("%s leaks %q — placement and host paths stay inside the engine (§6.2 / D5.1): %s",
 						tc.name, leak, strings.TrimSpace(string(body)))
 				}
 			}

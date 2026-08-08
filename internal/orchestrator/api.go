@@ -30,17 +30,17 @@ import (
 // internally via the mediator, so placement never leaves the engine).
 //
 // This is a deliberately small net/http router (no framework). The outer-edge
-// protocol split is settled (transport D6): the CONTROL plane (sandbox
+// protocol split is settled (transport D5): the CONTROL plane (sandbox
 // lifecycle) is REST/JSON on this router; the process/fs DATA plane is
 // Connect-RPC (the SAME transport.proto as the inner edge, re-proxied by
-// sandbox_id — D6.2). The two mount on one mux: Connect services own their
+// sandbox_id — D5.2). The two mount on one mux: Connect services own their
 // /engine.transport.v1.*/ paths, control-plane REST owns /v1/... . The whole
 // thing is wrapped in h2c so the data-plane server-streams work over cleartext
-// HTTP/2 (D4.2). The data plane is Connect-only, no REST/NDJSON facade (D6.3).
+// HTTP/2 (D4.2). The data plane is Connect-only, no REST/NDJSON facade (D5.3).
 func (e *Engine) HTTPHandler() http.Handler {
 	mux := http.NewServeMux()
 
-	// --- data plane: Connect-RPC re-proxy (transport D6) ---
+	// --- data plane: Connect-RPC re-proxy (transport D5) ---
 	mux.Handle(transportv1connect.NewProcessServiceHandler(&processProxy{e: e}))
 	mux.Handle(transportv1connect.NewFsServiceHandler(&fsProxy{e: e}))
 
@@ -327,7 +327,7 @@ func (e *Engine) handleSandboxSub(w http.ResponseWriter, r *http.Request) {
 	case sub == "files" && (r.Method == http.MethodPut || r.Method == http.MethodPost):
 		e.handleFileUpload(w, r, id)
 	default:
-		// process/fs data plane is Connect-RPC (transport D6), not REST here.
+		// process/fs data plane is Connect-RPC (transport D5), not REST here.
 		http.Error(w, "not found", http.StatusNotFound)
 	}
 }
@@ -694,7 +694,7 @@ func writeErr(w http.ResponseWriter, code int, err error, echo ...string) {
 const redacted = "[redacted]"
 
 // placementShaped matches an IPv4 address with an optional port — the inner
-// transport endpoint's shape (a netns veth IP, §2.4 / D6.1). §6.2 bars placement
+// transport endpoint's shape (a netns veth IP, §2.4 / D5.1). §6.2 bars placement
 // from the wire on the same footing as host paths, so the funnel strips both.
 var placementShaped = regexp.MustCompile(`^\d{1,3}(\.\d{1,3}){3}(:\d+)?$`)
 

@@ -46,7 +46,7 @@ type processServer struct {
 }
 
 // Tuning values. Pure numeric knobs, tunable with experience — changing one does
-// NOT change the D4/D6 shape, and this is their only home (they are deliberately
+// NOT change the D4/D5 shape, and this is their only home (they are deliberately
 // not a registered open decision). Sized so: the ring holds enough tail to redraw an interactive
 // screen without unbounded guest memory; the window is deep enough for a healthy
 // consumer but small enough that a stuck one is dropped promptly.

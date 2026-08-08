@@ -13,8 +13,10 @@
 // runsc uses sandboxd as the container entrypoint; init mode (PID 1) re-execs
 // itself via /proc/self/exe into transport mode as a child (§5.E.1). Splitting
 // the two: a transport crash degrades to in-process-recoverable (§4.2 崩溃 =
-// 非自愿 pause) instead of substrate death, enables hot-upgrade, and keeps PID 1
-// signal semantics away from the complex server (guest-runtime D4.2).
+// 非自愿 pause) instead of substrate death, and keeps PID 1 signal semantics away
+// from the complex server (guest-runtime D4.2). That restart is crash recovery
+// only, NOT a version-upgrade path: /proc/self/exe is a handle on PID 1's
+// already-open inode, so the supervise loop always re-execs the same bytes.
 package main
 
 import (
