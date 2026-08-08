@@ -27,7 +27,7 @@ import (
 // spelling becomes the way in.
 var bannedTokens = []string{
 	// inherited from §5.A, verbatim
-	"cgroup", "memcg", "oom",
+	"cgroup", "memcg", "oom", "netns",
 	"upperdir", "workdir", "hostpath", "abspath",
 	"subvolume", "qgroup", "squota", "errno",
 	"major", "minor", "majmin", "devno",
