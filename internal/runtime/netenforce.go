@@ -32,26 +32,51 @@ import (
 // fails with `Nexthop has invalid gateway` (network.md D5 ⑬). So it lands in the
 // SAME pre-launch window as the rules.
 
-// egressSetup installs the host-side mechanisms a routed-egress declaration needs.
+// egressSetup installs the host-side egress mechanisms.
 //
 // EXACTLY THREE, measured necessary AND sufficient for a real runsc guest to
 // complete TLS and a `git ls-remote` (network.md D5 ⑤): global `ip_forward`, a
 // guest-side default route carrying `dev`, and a masquerade for this /30. The
-// masquerade is part of the generated rule set (it is a rule); this function does
-// the other two.
+// masquerade is part of the generated rule set (it is a rule, and only emitted for a
+// routed-egress declaration); this function does the other two.
+//
+// # THE GUEST DEFAULT ROUTE IS INSTALLED UNCONDITIONALLY, INCLUDING UNDER `deny`
+//
+// That looks backwards and is the opposite: it is what makes the deny ENFORCED rather
+// than incidental.
+//
+// Without a default route, a `deny` sandbox's packet never leaves its netns — it dies
+// at `net unreachable` inside gVisor's netstack, the host's rules are never evaluated,
+// and every floor counter reads 0. That is precisely the state §2.4 calls a
+// coincidence rather than an invariant: guest root can add the route itself with ONE
+// command (measured, D5 ⑤ — `ip route add default via <host> dev <veth>`), so an
+// engine that relies on its absence has enforced nothing. It is also unassertable —
+// "unreachable with a zero counter" is indistinguishable from a bypassed floor
+// (D4.1), so the acceptance discipline could not tell the two apart.
+//
+// With the route present, the guest's packet reaches the host, meets the floor, and is
+// REJECTED by a rule that counts it. Same observable outcome for the guest, opposite
+// epistemic status: a refusal the engine performs and can prove, rather than an
+// accident it inherited. This is also what makes D5 ⑯'s failed assertion assertable
+// at last (there, the guest had no default route, so its egress died before reaching
+// the floor and the measurement was invalid rather than passing).
 //
 // THE MEASURED NEGATIVES MATTER AS MUCH, because each is a plausible thing to add:
-// `rp_filter` tightened to 1 does NOT affect this (the return route already goes
-// out that veth), and `proxy_arp`, `accept_local` and per-interface `forwarding` are
-// ALL unnecessary. So the provider adds none of them — an unnecessary sysctl write
-// is a host-global change the engine does not own.
-func (p *LocalRunsc) egressSetup(h *placementHandle, gatewayIP string) error {
-	// (1) global ip_forward. Note this is NOT an engine guarantee: it is already 1
-	// in this environment by default, which is exactly why D5 ① could measure a
-	// sibling handshake succeeding. The engine writes it because a routed-egress
-	// declaration cannot work without it, not because it discovered it.
-	if err := writeSysctl("net/ipv4/ip_forward", "1"); err != nil {
-		return fmt.Errorf("runtime: enable ip_forward (one of the three host-side egress mechanisms, D5 ⑤): %w", err)
+// `rp_filter` tightened to 1 does NOT affect this (the return route already goes out
+// that veth), and `proxy_arp`, `accept_local` and per-interface `forwarding` are ALL
+// unnecessary. So the provider adds none of them — an unnecessary sysctl write is a
+// host-global change the engine does not own.
+func (p *LocalRunsc) egressSetup(h *placementHandle, gatewayIP string, routed bool) error {
+	// (1) global ip_forward, only when this declaration can actually route. Note it is
+	// NOT an engine guarantee: it is already 1 in this environment by default, which is
+	// exactly why D5 ① could measure a sibling handshake succeeding. The engine writes
+	// it because a routed-egress declaration cannot work without it, not because it
+	// discovered it — and it does NOT write it for a `deny` sandbox, since that would
+	// change host-global state for a sandbox that will not use it.
+	if routed {
+		if err := writeSysctl("net/ipv4/ip_forward", "1"); err != nil {
+			return fmt.Errorf("runtime: enable ip_forward (one of the three host-side egress mechanisms, D5 ⑤): %w", err)
+		}
 	}
 	// (2) the guest-side default route, carrying `dev`. WITHOUT `dev` the command
 	// returns rc=0 and the route does not work (measured, D5 ⑤) — a silent failure,
@@ -60,6 +85,9 @@ func (p *LocalRunsc) egressSetup(h *placementHandle, gatewayIP string) error {
 	// BEFORE `runsc run`, because the sentry takes the L3 address off the kernel-side
 	// veth at boot and a post-boot add fails with `Nexthop has invalid gateway`
 	// (measured, D5 ⑬).
+	//
+	// Unconditional — see the doc comment for why the `deny` case needs it MORE, not
+	// less.
 	vethGuest := vethGuestName(h.vethHost)
 	if err := p.ipCmd("-n", h.netns, "route", "add", "default", "via", gatewayIP, "dev", vethGuest); err != nil {
 		return fmt.Errorf("runtime: add the guest default route (D5 ⑤: it must carry `dev`, and it "+

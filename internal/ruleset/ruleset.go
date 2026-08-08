@@ -179,6 +179,27 @@ const (
 	// HookForward is the per-sandbox filter forward chain: guest → anything the
 	// host routes, plus (in the other direction) traffic routed TO the guest.
 	HookForward
+	// HookForwardIngress is a SECOND per-sandbox filter forward chain, at a LATER
+	// priority than HookForward, carrying the inbound half: the publish companion
+	// accepts and the ingress default-deny.
+	//
+	// TWO CHAINS RATHER THAN ONE, and the split is a measured cross-sandbox ordering
+	// requirement rather than organization. Every per-sandbox table puts its chains on
+	// the SAME shared hook, so with one chain per sandbox at one priority, traffic from
+	// sandbox A to sandbox B's guest IP matches BOTH A's floor (`iifname A-veth`,
+	// sibling daddr) and B's ingress default-deny (`oifname B-veth`) — and which chain
+	// is evaluated first is not defined by anything the engine controls.
+	//
+	// Measured: B's chain won, so its `drop` terminated traversal (only a terminal
+	// verdict crosses chains) and A's floor counted ZERO. The security outcome is the
+	// same either way, but two things are not: the guest gets a 25-SECOND HANG instead
+	// of the clean connection failure §2.4's fail-closed promises in its second half,
+	// and WHICH counter moves depends on table creation order — so the one signal every
+	// deny assertion reads becomes non-deterministic (§2.4 / D4.1).
+	//
+	// Putting the floor strictly earlier makes the sibling case deterministic: A's
+	// floor rejects first, the guest fails fast, and A's counter is the one that moves.
+	HookForwardIngress
 	// HookPrerouting is the per-sandbox nat prerouting chain: `via[]` steering and
 	// the inbound half of a publish.
 	HookPrerouting
@@ -205,6 +226,8 @@ func (h Hook) String() string {
 		return "input"
 	case HookForward:
 		return "forward"
+	case HookForwardIngress:
+		return "forward-ingress"
 	case HookPrerouting:
 		return "prerouting"
 	case HookPostrouting:

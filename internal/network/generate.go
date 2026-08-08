@@ -491,13 +491,24 @@ func (g *gen) forwardChain(d Declaration) error {
 		Counter: "fwd_established_out",
 		Why:     "established/related, guest→out. Measured load-bearing: remove it and even an ALLOWED flow breaks, because the reverse direction has no other way in (D5 ⑨)",
 	})
+	// THE INBOUND RETURN ARM LIVES ON THE INGRESS CHAIN, not beside its outbound twin,
+	// and that placement is forced by the cross-chain rule (D5 ⑩): an accept ends only
+	// ITS OWN chain, while a drop terminates across chains. Put this arm on the main
+	// chain and the ingress default-deny below — on a later chain — still drops every
+	// reply it just accepted.
+	//
+	// Measured exactly that way: an allowed public egress flow had `fwd_established_in`
+	// counting 9 accepted packets AND `fwd_ingress_closed` dropping the same 9, so the
+	// guest hung 25 s on a flow whose request left and whose reply was refused by this
+	// engine. The accept must sit in the SAME chain as the drop it overrides, above it —
+	// the same rule that puts `via[]`'s narrow accept in the floor's chain.
 	g.emit(ruleset.Rule{
-		Hook:    ruleset.HookForward,
+		Hook:    ruleset.HookForwardIngress,
 		Scope:   ruleset.ScopeGuestOut,
 		Verdict: ruleset.Accept,
 		Match:   ruleset.Match{CTState: []string{"established", "related"}},
 		Counter: "fwd_established_in",
-		Why:     "established/related, in→guest (the reply half of a published flow, and of any allowed egress)",
+		Why:     "established/related, in→guest (the reply half of any allowed egress, and of a published flow). On the INGRESS chain because an accept ends only its own chain while the ingress drop crosses chains (D5 ⑩)",
 	})
 
 	// (3)(4) THE FLOOR's daddr list, ABOVE the declaration's allows — this is what
@@ -613,7 +624,7 @@ func (g *gen) forwardChain(d Declaration) error {
 	// post-NAT destination is a local address.
 	for i, p := range d.Ingress.Publish {
 		g.emit(ruleset.Rule{
-			Hook:    ruleset.HookForward,
+			Hook:    ruleset.HookForwardIngress,
 			Scope:   ruleset.ScopeGuestOut,
 			Verdict: ruleset.Accept,
 			Match:   ruleset.Match{DestGuest: true, Proto: protoOf(p.Proto), DestPort: p.GuestPort},
@@ -624,13 +635,20 @@ func (g *gen) forwardChain(d Declaration) error {
 
 	// (9) The inbound default-deny: ingress is closed unless published (§2.1 ③).
 	//
+	// On a SEPARATE chain at a later priority (HookForwardIngress), because this drop
+	// is the one rule of a per-sandbox table that can match ANOTHER sandbox's egress —
+	// traffic from A to B's guest IP is `oifname B-veth`. At one shared priority, B's
+	// drop raced A's floor and won, which cost the guest a 25-second hang instead of a
+	// clean refusal AND made the counter that moves depend on table creation order
+	// (measured; see ruleset.HookForwardIngress).
+	//
 	// `drop`, not `reject`, and the asymmetry with the guest-facing refusals above
 	// is deliberate: this one faces an EXTERNAL caller, to whom the engine promises
 	// nothing, and an ICMP error would confirm the sandbox exists. The guest-facing
 	// half of fail-closed (§2.4: "the guest gets a clean connection failure") is
 	// about the guest, and this refusal is not aimed at it.
 	g.emit(ruleset.Rule{
-		Hook:    ruleset.HookForward,
+		Hook:    ruleset.HookForwardIngress,
 		Scope:   ruleset.ScopeGuestOut,
 		Verdict: ruleset.Drop,
 		Counter: "fwd_ingress_closed",

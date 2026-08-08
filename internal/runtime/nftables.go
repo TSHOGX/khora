@@ -177,6 +177,10 @@ func chainSpec(h ruleset.Hook) (nftChain, error) {
 		// NOT named `fwd`: that is a reserved word in nft 1.1.6, and the collision
 		// desynchronizes the parser so every later chain reports a bogus error (D5 ㉔).
 		return nftChain{"c_forward", "filter", "forward", "filter"}, nil
+	case ruleset.HookForwardIngress:
+		// A LATER priority than the floor chain, so EVERY sandbox's floor is evaluated
+		// before ANY sandbox's ingress default-deny (see ruleset.HookForwardIngress).
+		return nftChain{"c_forward_in", "filter", "forward", "filter + 10"}, nil
 	case ruleset.HookPrerouting:
 		return nftChain{"c_prerouting", "nat", "prerouting", "dstnat"}, nil
 	case ruleset.HookPostrouting:

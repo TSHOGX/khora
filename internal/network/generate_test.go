@@ -846,15 +846,19 @@ func TestOnePublishEmitsAllFourParts(t *testing.T) {
 	if snat.Hook != ruleset.HookPostrouting {
 		t.Errorf("the return SNAT is on %s, want postrouting", snat.Hook)
 	}
-	// (4) the companion accept, on FORWARD — the OPPOSITE hook from `via[]`'s.
+	// (4) the companion accept, on the FORWARD hook — the OPPOSITE hook from `via[]`'s.
 	// After the DNAT a published flow's destination is the GUEST IP, so it must be
 	// routed onward and lands on `forward`; a steered flow's destination is
 	// host-local and lands on `input`. Measured both ways (D5 ⑮).
+	//
+	// On that hook's INGRESS chain specifically — a later priority, so every sandbox's
+	// floor is evaluated before any sandbox's inbound rules (see
+	// TestTheIngressDenyIsOnALaterChainThanTheFloor for the measured race).
 	acc := findRule(spec, "pub0_fwd")
-	if acc.Hook != ruleset.HookForward {
-		t.Errorf("the publish companion accept is on %s, want forward: post-DNAT the destination "+
-			"is the guest IP so it is ROUTED onward — the opposite of via[]'s hook assignment, and "+
-			"the two must not be copied from each other (D5 ⑮)", acc.Hook)
+	if acc.Hook != ruleset.HookForwardIngress {
+		t.Errorf("the publish companion accept is on %s, want the forward hook's ingress chain: "+
+			"post-DNAT the destination is the guest IP so it is ROUTED onward — the opposite of "+
+			"via[]'s hook assignment, and the two must not be copied from each other (D5 ⑮)", acc.Hook)
 	}
 	if acc.Verdict != ruleset.Accept || !acc.Match.DestGuest || acc.Match.DestPort != 8080 {
 		t.Errorf("the companion accept does not pin the guest destination and port: %+v", acc.Match)
@@ -900,19 +904,56 @@ func TestThePublishReturnSNATIsOnePerSandbox(t *testing.T) {
 // Ingress is closed by default (§2.1 ③): without an inbound default-deny anything
 // the host routes could reach the guest IP directly.
 func TestIngressIsClosedWhenNothingIsPublished(t *testing.T) {
-	fwd := mustGenerate(t, denyEmpty()).Rules.ByHook(ruleset.HookForward)
-	i := indexOf(fwd, "fwd_ingress_closed")
-	if i < 0 {
+	ing := mustGenerate(t, denyEmpty()).Rules.ByHook(ruleset.HookForwardIngress)
+	if indexOf(ing, "fwd_ingress_closed") < 0 {
 		t.Fatal("no inbound default-deny")
 	}
 	// It must be LAST among the guest-out rules, or it would pre-empt the publish
 	// companion accepts.
 	d := Zero()
 	d.Ingress.Publish = []Publish{{GuestPort: 8080, Proto: model.NetTCP}}
-	withPub := mustGenerate(t, d).Rules.ByHook(ruleset.HookForward)
+	withPub := mustGenerate(t, d).Rules.ByHook(ruleset.HookForwardIngress)
 	mustBefore(t, withPub, "pub0_fwd", "fwd_ingress_closed",
 		"the inbound default-deny must sit BELOW the publish companion accepts, or it refuses "+
 			"the very flows the publish opened")
+}
+
+// The ingress default-deny must live on a LATER-priority chain than the floor, and
+// this is a CROSS-SANDBOX ordering requirement rather than organization.
+//
+// The rule is `oifname <this sandbox's veth>`, so it matches traffic heading TOWARD
+// this guest — including another sandbox's egress to this guest's IP. Every
+// per-sandbox table sits on the same shared hook, so at ONE priority the two chains
+// race: measured, sandbox B's ingress drop won over sandbox A's floor, and because
+// only a terminal verdict crosses chains, A's floor counted ZERO.
+//
+// The security outcome is identical either way — the flow is refused — but two things
+// are not, and both are contract-level: the guest got a 25-SECOND HANG instead of the
+// clean connection failure §2.4's fail-closed promises in its second half, and WHICH
+// counter moves became dependent on table creation order, which makes the one signal
+// every deny assertion reads non-deterministic (§2.4 / D4.1).
+func TestTheIngressDenyIsOnALaterChainThanTheFloor(t *testing.T) {
+	spec := mustGenerate(t, denyEmpty())
+	floorHooks := map[string]ruleset.Hook{}
+	for _, r := range spec.Rules.Rules {
+		floorHooks[r.Counter] = r.Hook
+	}
+	if got := floorHooks["fwd_floor_v4"]; got != ruleset.HookForward {
+		t.Errorf("the floor is on %s, want the forward hook's main chain", got)
+	}
+	if got := floorHooks["fwd_ingress_closed"]; got != ruleset.HookForwardIngress {
+		t.Errorf("the ingress default-deny is on %s, want the LATER forward-ingress chain — at one "+
+			"shared priority another sandbox's ingress drop races this sandbox's floor, and measured, "+
+			"the ingress drop won: the guest hung 25 s instead of failing fast, and the floor counted "+
+			"zero (§2.4 fail-closed's second half / D4.1's counter signal)", got)
+	}
+	// The two must be different hooks, which is what produces two chains and therefore
+	// the deterministic priority ordering.
+	if floorHooks["fwd_floor_v4"] == floorHooks["fwd_ingress_closed"] {
+		t.Error("the floor and the ingress default-deny share a chain — then their relative order " +
+			"ACROSS sandboxes is undefined, and the counter that moves depends on which table was " +
+			"created first")
+	}
 }
 
 // The publish return path is not an EGRESS path (D1 ④): a declaration that

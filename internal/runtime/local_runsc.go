@@ -296,10 +296,8 @@ func (p *LocalRunsc) Launch(ctx context.Context, spec LaunchSpec) (_ *Placement,
 	if err = p.bindPublishEndpoints(&h, spec.Steering); err != nil {
 		return nil, err
 	}
-	if spec.Steering.RoutedEgress {
-		if err = p.egressSetup(&h, hostIP); err != nil {
-			return nil, err
-		}
+	if err = p.egressSetup(&h, hostIP, spec.Steering.RoutedEgress); err != nil {
+		return nil, err
 	}
 	if err = p.installRuleSet(ctx, &h, spec.Steering); err != nil {
 		return nil, err

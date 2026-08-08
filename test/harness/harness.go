@@ -8,6 +8,7 @@ package harness
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -158,6 +159,17 @@ type EngineOpts struct {
 	// SkipReconcile leaves startup reconcile un-run, for a test that wants to
 	// inspect the pre-reconcile store.
 	SkipReconcile bool
+
+	// SecondHopUID / SecondHopGID are the §2.4 invariant-2 deployment inputs: the
+	// uid/gid of the host-local process behind `egress.via[].endpoint`. Unset ⇒ no
+	// second-hop table is installed and `via[]` declarations are refused, so a suite
+	// exercising `via[]` MUST set them.
+	SecondHopUID *int
+	SecondHopGID *int
+
+	// HostPublishIP is the host address published endpoints bind to. Empty →
+	// loopback (the engine's conservative default).
+	HostPublishIP string
 }
 
 // Engine builds an assembled engine on the real substrate: compiles sandboxd,
@@ -213,6 +225,9 @@ func Engine(t *testing.T, opts EngineOpts) (*orchestrator.Engine, string) {
 		NodeMemoryByte:        opts.NodeMemoryByte,
 		FaultAfterColdStart:   opts.FaultAfterColdStart,
 		FaultAfterVolumeBytes: opts.FaultAfterVolumeBytes,
+		SecondHopUID:          opts.SecondHopUID,
+		SecondHopGID:          opts.SecondHopGID,
+		HostPublishIP:         opts.HostPublishIP,
 	})
 	if err != nil {
 		t.Fatalf("orchestrator.New: %v", err)
@@ -240,6 +255,13 @@ func Engine(t *testing.T, opts EngineOpts) (*orchestrator.Engine, string) {
 	if err := eng.ReclaimQuotaRows(ctx); err != nil {
 		t.Logf("boot quota-row reclamation (non-fatal, reaper retries): %v", err)
 	}
+	// §2.4 invariant 2's second half, in production's position: installed once, BEFORE
+	// serving and before Reconcile. With no uid supplied it installs nothing and
+	// removes a stale table from a previous run — which is what makes a suite that
+	// does NOT exercise `via[]` still exercise the removal path.
+	if err := eng.InstallSecondHopTable(ctx); err != nil {
+		t.Fatalf("install the second-hop table: %v", err)
+	}
 	if !opts.SkipReconcile {
 		// production parity: reconcile runs at boot. On a fresh store it is a no-op,
 		// which also asserts the §4.4-A path never disturbs a clean start.
@@ -248,6 +270,103 @@ func Engine(t *testing.T, opts EngineOpts) (*orchestrator.Engine, string) {
 		}
 	}
 	return eng, base
+}
+
+// NftCounter reads a named counter out of one sandbox's rule-set table.
+//
+// EVERY DENY ASSERTION IN THIS SUITE NEEDS IT, and that is the acceptance discipline
+// rather than thoroughness: "unreachable" alone is not a valid assertion, because a
+// rule set with the right rules in the wrong order behaves perfectly on ordinary
+// traffic and differs only when it is being bypassed — and a floor whose counter
+// reads 0 is INDISTINGUISHABLE from a floor that was bypassed (§2.4 / network.md
+// D4.1, D5 ⑧). So a deny is proved by "unreachable" AND "the counter moved after a
+// deliberate probe".
+//
+// Returns -1 when the counter does not exist, which a caller must treat as a failed
+// assertion rather than as zero: a missing counter means the rule was never
+// rendered, which is the same silent pass in a different disguise.
+func NftCounter(t *testing.T, sandbox model.SandboxID, counter string) int64 {
+	t.Helper()
+	table := "sbxnet_" + string(sandbox)
+	out, err := exec.Command("nft", "-j", "list", "counters", "table", "inet", table).Output()
+	if err != nil {
+		return -1
+	}
+	var doc struct {
+		Nftables []struct {
+			Counter *struct {
+				Name    string `json:"name"`
+				Packets int64  `json:"packets"`
+			} `json:"counter"`
+		} `json:"nftables"`
+	}
+	if err := json.Unmarshal(out, &doc); err != nil {
+		t.Fatalf("parse nft counters for %s: %v", table, err)
+	}
+	for _, o := range doc.Nftables {
+		if o.Counter != nil && o.Counter.Name == counter {
+			return o.Counter.Packets
+		}
+	}
+	return -1
+}
+
+// NftCounterIn reads a named counter out of an arbitrary table — used for the
+// ENGINE-LEVEL second-hop table, which is not per-sandbox.
+func NftCounterIn(t *testing.T, table, counter string) int64 {
+	t.Helper()
+	out, err := exec.Command("nft", "-j", "list", "counters", "table", "inet", table).Output()
+	if err != nil {
+		return -1
+	}
+	var doc struct {
+		Nftables []struct {
+			Counter *struct {
+				Name    string `json:"name"`
+				Packets int64  `json:"packets"`
+			} `json:"counter"`
+		} `json:"nftables"`
+	}
+	if err := json.Unmarshal(out, &doc); err != nil {
+		t.Fatalf("parse nft counters for %s: %v", table, err)
+	}
+	for _, o := range doc.Nftables {
+		if o.Counter != nil && o.Counter.Name == counter {
+			return o.Counter.Packets
+		}
+	}
+	return -1
+}
+
+// DumpRuleSet returns a sandbox's rule-set table as text, for a failure message. A
+// deny assertion that fails is almost always an ORDER problem, and the ordered
+// listing is the only thing that shows it.
+func DumpRuleSet(sandbox model.SandboxID) string {
+	out, err := exec.Command("nft", "list", "table", "inet", "sbxnet_"+string(sandbox)).CombinedOutput()
+	if err != nil {
+		return "(no rule-set table: " + err.Error() + ")"
+	}
+	return string(out)
+}
+
+// CountRuleSetTables counts engine per-sandbox rule-set tables on this host — the
+// leak assertion for the rule set, shaped exactly like CountEngineNetns. A rule set
+// is crash-surviving host state (§2.4), so it leaks the same way a netns does.
+func CountRuleSetTables(t *testing.T) int {
+	t.Helper()
+	out, err := exec.Command("nft", "list", "tables", "inet").Output()
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, line := range strings.Split(string(out), "\n") {
+		f := strings.Fields(strings.TrimSpace(line))
+		if len(f) == 3 && f[0] == "table" && f[1] == "inet" &&
+			strings.HasPrefix(f[2], "sbxnet_") && f[2] != "sbxnet_hop2" {
+			n++
+		}
+	}
+	return n
 }
 
 // CountEngineNetns counts engine-owned netns on this host (the placement marker
