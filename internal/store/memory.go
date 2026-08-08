@@ -92,6 +92,12 @@ func (m *Memory) CreateSandbox(_ context.Context, s model.Sandbox, ev *Event) er
 	if _, ok := m.tmpl[s.Template]; !ok {
 		return ErrTemplateNotFound
 	}
+	// Normalize the §5.D declaration on the way in, so this backend holds what SQLite
+	// holds: §6.1 requires the three arrays to always read back as `[]` rather than
+	// null, and SQLite gets that from marshalNetwork. Without it the two backends
+	// would disagree on the READ SHAPE of every declaration, and storetest's contract
+	// assertions would be pinning one backend's accident.
+	s.Network = s.Network.Normalize()
 	m.rec[s.ID] = s
 	m.appendEvent(ev) // same commit as the insert (§4.4-C)
 	return nil
@@ -440,7 +446,7 @@ func (m *Memory) UpdateBinding(_ context.Context, id model.SandboxID, expected m
 	if s.State != expected {
 		return ErrConflict
 	}
-	s.Limits, s.IdleTimeout, s.Retention = b.Apply(s)
+	s.Limits, s.IdleTimeout, s.Retention, s.Network = b.Apply(s)
 	// Same lock as the field writes (§4.4-C): a raise that lifts the §4.3 refusal
 	// must not be observable without the cap that justifies it.
 	if cause != nil {

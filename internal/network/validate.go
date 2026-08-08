@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/netip"
 
+	"engine/internal/model"
 	"engine/internal/ruleset"
 )
 
@@ -257,6 +258,15 @@ type Deployment struct {
 	// opposite behavior.
 	SecondHopUID *int
 	SecondHopGID *int
+
+	// HostLocal answers §6.2's fifth class ("is this endpoint an address of THIS
+	// host"). nil → SystemHostLocal, which reads the interface table.
+	//
+	// Injectable so the eight 400 classes are pinned against a FIXTURE in a root-free
+	// unit test rather than against whatever addresses the test machine happens to
+	// carry — otherwise those assertions would pass or fail with the CI host's
+	// networking.
+	HostLocal HostLocal
 }
 
 // SecondHopPinned reports whether the deployment supplied what §2.4's second
@@ -335,7 +345,7 @@ func Validate(d Declaration, given bool, hostLocal HostLocal) error {
 				return err
 			}
 			// CLASS 4.
-			if t.Proto == ruleset.UDP {
+			if t.Proto == model.NetUDP {
 				return invalid(ClassViaMatchUDP,
 					"%s names proto udp: there is no usable way to recover a redirected datagram's "+
 						"ORIGINAL destination — SO_ORIGINAL_DST fails on a UDP socket, and the cmsg "+
@@ -388,7 +398,7 @@ func Validate(d Declaration, given bool, hostLocal HostLocal) error {
 		if p.Proto == "" {
 			return invalid(ClassProtoMissing, "%s: `proto` is required (tcp | udp)", where)
 		}
-		if p.Proto != ruleset.TCP && p.Proto != ruleset.UDP {
+		if p.Proto != model.NetTCP && p.Proto != model.NetUDP {
 			return invalid(ClassProtoMissing, "%s: `proto` must be tcp or udp, got %q", where, p.Proto)
 		}
 		if p.GuestPort == 0 {
@@ -408,7 +418,7 @@ func validateTuple(t Tuple, where string) error {
 				"matching depends on protocol matching in the mechanism that carries it "+
 				"(network.md D3.1)", where)
 	}
-	if t.Proto != ruleset.TCP && t.Proto != ruleset.UDP {
+	if t.Proto != model.NetTCP && t.Proto != model.NetUDP {
 		return invalid(ClassProtoMissing, "%s: `proto` must be tcp or udp, got %q", where, t.Proto)
 	}
 	return nil

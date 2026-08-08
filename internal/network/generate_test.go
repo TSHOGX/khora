@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"engine/internal/model"
 	"engine/internal/ruleset"
 )
 
@@ -53,7 +54,7 @@ func denyEmpty() Declaration { return Zero() }
 func denyWithAllow(t *testing.T) Declaration {
 	t.Helper()
 	d := Zero()
-	d.Egress.Allow = []Tuple{{CIDR: mustCIDR(t, "1.1.1.1/32"), Port: 443, Proto: ruleset.TCP}}
+	d.Egress.Allow = []Tuple{{CIDR: mustCIDR(t, "1.1.1.1/32"), Port: 443, Proto: model.NetTCP}}
 	return d
 }
 
@@ -61,7 +62,7 @@ func denyWithVia(t *testing.T) Declaration {
 	t.Helper()
 	d := Zero()
 	d.Egress.Via = []Via{{
-		Match:    []Tuple{{CIDR: mustCIDR(t, "1.1.1.1/32"), Port: 443, Proto: ruleset.TCP}},
+		Match:    []Tuple{{CIDR: mustCIDR(t, "1.1.1.1/32"), Port: 443, Proto: model.NetTCP}},
 		Endpoint: "10.0.0.5:15443",
 	}}
 	return d
@@ -169,7 +170,7 @@ func TestTheFourDeclarationCombinations(t *testing.T) {
 func TestRuleOrderIsTheMechanism(t *testing.T) {
 	t.Run("floor above the declaration's allows, tier below them", func(t *testing.T) {
 		d := allowPublic()
-		d.Egress.Allow = []Tuple{{CIDR: mustCIDR(t, "10.0.0.0/8"), Port: 53, Proto: ruleset.UDP}}
+		d.Egress.Allow = []Tuple{{CIDR: mustCIDR(t, "10.0.0.0/8"), Port: 53, Proto: model.NetUDP}}
 		fwd := mustGenerate(t, d).Rules.ByHook(ruleset.HookForward)
 
 		mustBefore(t, fwd, "fwd_floor_v4", "allow0_fwd",
@@ -187,9 +188,9 @@ func TestRuleOrderIsTheMechanism(t *testing.T) {
 		// different outcomes, and the contract pins the choice so one declaration
 		// yields one reachable set under any implementation.
 		d := Zero()
-		d.Egress.Allow = []Tuple{{CIDR: mustCIDR(t, "1.1.1.1/32"), Port: 443, Proto: ruleset.TCP}}
+		d.Egress.Allow = []Tuple{{CIDR: mustCIDR(t, "1.1.1.1/32"), Port: 443, Proto: model.NetTCP}}
 		d.Egress.Via = []Via{{
-			Match:    []Tuple{{CIDR: mustCIDR(t, "1.1.1.1/32"), Port: 443, Proto: ruleset.TCP}},
+			Match:    []Tuple{{CIDR: mustCIDR(t, "1.1.1.1/32"), Port: 443, Proto: model.NetTCP}},
 			Endpoint: "10.0.0.5:15443",
 		}}
 		spec := mustGenerate(t, d)
@@ -208,10 +209,10 @@ func TestRuleOrderIsTheMechanism(t *testing.T) {
 	t.Run("multiple via[] entries are first-match-wins in declaration order", func(t *testing.T) {
 		d := Zero()
 		d.Egress.Via = []Via{{
-			Match:    []Tuple{{CIDR: mustCIDR(t, "1.1.1.1/32"), Port: 443, Proto: ruleset.TCP}},
+			Match:    []Tuple{{CIDR: mustCIDR(t, "1.1.1.1/32"), Port: 443, Proto: model.NetTCP}},
 			Endpoint: "10.0.0.5:15443",
 		}, {
-			Match:    []Tuple{{CIDR: mustCIDR(t, "1.0.0.0/8"), Port: 443, Proto: ruleset.TCP}},
+			Match:    []Tuple{{CIDR: mustCIDR(t, "1.0.0.0/8"), Port: 443, Proto: model.NetTCP}},
 			Endpoint: "10.0.0.5:15444",
 		}}
 		pre := mustGenerate(t, d).Rules.ByHook(ruleset.HookPrerouting)
@@ -231,7 +232,7 @@ func TestRuleOrderIsTheMechanism(t *testing.T) {
 		// this path, so reading only that counter turns a real leak into "the floor
 		// counter is 0" (an INVALID assertion, not a pass).
 		d := Zero()
-		d.Egress.Allow = []Tuple{{CIDR: mustCIDR(t, "10.0.0.0/8"), Port: 53, Proto: ruleset.UDP}}
+		d.Egress.Allow = []Tuple{{CIDR: mustCIDR(t, "10.0.0.0/8"), Port: 53, Proto: model.NetUDP}}
 		in := mustGenerate(t, d).Rules.ByHook(ruleset.HookInput)
 
 		mustBefore(t, in, "allow0_selfgw", "in_sibling",
@@ -358,7 +359,7 @@ func TestTheCidrClauseIsEmittedIffTheDeclarationPinnedOne(t *testing.T) {
 	// Transparent interception: `cidr: any`, i.e. "any destination on that port".
 	d := Zero()
 	d.Egress.Via = []Via{{
-		Match:    []Tuple{{Port: 443, Proto: ruleset.TCP}}, // no CIDR at all
+		Match:    []Tuple{{Port: 443, Proto: model.NetTCP}}, // no CIDR at all
 		Endpoint: "10.0.0.5:15443",
 	}}
 	transparent := mustGenerate(t, d)
@@ -381,7 +382,7 @@ func TestTheCidrClauseIsEmittedIffTheDeclarationPinnedOne(t *testing.T) {
 	// carrying a clause.
 	d0 := Zero()
 	d0.Egress.Via = []Via{{
-		Match:    []Tuple{{CIDR: mustCIDR(t, "0.0.0.0/0"), Port: 443, Proto: ruleset.TCP}},
+		Match:    []Tuple{{CIDR: mustCIDR(t, "0.0.0.0/0"), Port: 443, Proto: model.NetTCP}},
 		Endpoint: "10.0.0.5:15443",
 	}}
 	if got := findRule(mustGenerate(t, d0), "via0_0_accept").Match.CTOriginalDest; got != nil {
@@ -415,7 +416,7 @@ func TestTheSelfGatewayAllowCannotReachAGatewayTheDeclarationDidNotContain(t *te
 	// The dangerous shape: overlaps the /16, excludes any plausible gateway of the
 	// sandbox that declared it.
 	d := Zero()
-	d.Egress.Allow = []Tuple{{CIDR: mustCIDR(t, "10.66.99.0/24"), Port: 8080, Proto: ruleset.TCP}}
+	d.Egress.Allow = []Tuple{{CIDR: mustCIDR(t, "10.66.99.0/24"), Port: 8080, Proto: model.NetTCP}}
 	gw := findRule(mustGenerate(t, d), "allow0_selfgw")
 	if gw.Counter == "" {
 		t.Fatal("no self-gateway rule emitted for a declaration overlapping the sandbox space")
@@ -443,7 +444,7 @@ func TestTheSelfGatewayAllowCannotReachAGatewayTheDeclarationDidNotContain(t *te
 	// genuinely CONTAINS the gateway still reaches it — otherwise the fix would have
 	// broken §5.D semantics ③, which is the whole reason the rule exists.
 	d2 := Zero()
-	d2.Egress.Allow = []Tuple{{CIDR: mustCIDR(t, "10.0.0.0/8"), Port: 53, Proto: ruleset.UDP}}
+	d2.Egress.Allow = []Tuple{{CIDR: mustCIDR(t, "10.0.0.0/8"), Port: 53, Proto: model.NetUDP}}
 	gw2 := findRule(mustGenerate(t, d2), "allow0_selfgw")
 	if gw2.Match.DestSelfGatewayWithin == nil {
 		t.Fatal("the containing declaration lost its self-gateway rule")
@@ -461,14 +462,14 @@ func TestTheSelfGatewayAllowCannotReachAGatewayTheDeclarationDidNotContain(t *te
 // guards are actually reached rather than that they exist.
 func TestEveryGeneratedRuleSetPassesTheGuards(t *testing.T) {
 	pubUDP := Zero()
-	pubUDP.Ingress.Publish = []Publish{{GuestPort: 5353, Proto: ruleset.UDP}}
+	pubUDP.Ingress.Publish = []Publish{{GuestPort: 5353, Proto: model.NetUDP}}
 	allowAll := allowPublic()
-	allowAll.Egress.Allow = []Tuple{{CIDR: mustCIDR(t, "10.0.0.0/8"), Port: 53, Proto: ruleset.UDP}}
+	allowAll.Egress.Allow = []Tuple{{CIDR: mustCIDR(t, "10.0.0.0/8"), Port: 53, Proto: model.NetUDP}}
 	allowAll.Egress.Via = []Via{{
-		Match:    []Tuple{{Port: 443, Proto: ruleset.TCP}},
+		Match:    []Tuple{{Port: 443, Proto: model.NetTCP}},
 		Endpoint: "[fd00::1]:15443",
 	}}
-	allowAll.Ingress.Publish = []Publish{{GuestPort: 8080, Proto: ruleset.TCP}, {GuestPort: 5353, Proto: ruleset.UDP}}
+	allowAll.Ingress.Publish = []Publish{{GuestPort: 8080, Proto: model.NetTCP}, {GuestPort: 5353, Proto: model.NetUDP}}
 
 	for name, d := range map[string]Declaration{
 		"deny+empty": denyEmpty(), "deny+allow": denyWithAllow(t), "deny+via": denyWithVia(t),
@@ -628,7 +629,7 @@ func TestLoopAvoidanceIsNotABareUIDAccept(t *testing.T) {
 // The tier's position is the assertion, and the v6 half's MEMBERSHIP is too.
 func TestTheDenySafeTierIsLiftableAndSeparateFromTheFloor(t *testing.T) {
 	d := allowPublic()
-	d.Egress.Allow = []Tuple{{CIDR: mustCIDR(t, "192.168.139.3/32"), Port: 22, Proto: ruleset.TCP}}
+	d.Egress.Allow = []Tuple{{CIDR: mustCIDR(t, "192.168.139.3/32"), Port: 22, Proto: model.NetTCP}}
 	spec := mustGenerate(t, d)
 	fwd := spec.Rules.ByHook(ruleset.HookForward)
 
@@ -818,7 +819,7 @@ func TestTheGeneratorDoesNotForkForIPv6(t *testing.T) {
 // BROKEN publish rather than a smaller feature (§5.D).
 func TestOnePublishEmitsAllFourParts(t *testing.T) {
 	d := Zero()
-	d.Ingress.Publish = []Publish{{GuestPort: 8080, Proto: ruleset.TCP}}
+	d.Ingress.Publish = []Publish{{GuestPort: 8080, Proto: model.NetTCP}}
 	spec := mustGenerate(t, d)
 
 	// (1) prerouting DNAT — external callers.
@@ -865,9 +866,9 @@ func TestOnePublishEmitsAllFourParts(t *testing.T) {
 func TestThePublishReturnSNATIsOnePerSandbox(t *testing.T) {
 	d := Zero()
 	d.Ingress.Publish = []Publish{
-		{GuestPort: 8080, Proto: ruleset.TCP},
-		{GuestPort: 9090, Proto: ruleset.TCP},
-		{GuestPort: 5353, Proto: ruleset.UDP},
+		{GuestPort: 8080, Proto: model.NetTCP},
+		{GuestPort: 9090, Proto: model.NetTCP},
+		{GuestPort: 5353, Proto: model.NetUDP},
 	}
 	spec := mustGenerate(t, d)
 	n := 0
@@ -907,7 +908,7 @@ func TestIngressIsClosedWhenNothingIsPublished(t *testing.T) {
 	// It must be LAST among the guest-out rules, or it would pre-empt the publish
 	// companion accepts.
 	d := Zero()
-	d.Ingress.Publish = []Publish{{GuestPort: 8080, Proto: ruleset.TCP}}
+	d.Ingress.Publish = []Publish{{GuestPort: 8080, Proto: model.NetTCP}}
 	withPub := mustGenerate(t, d).Rules.ByHook(ruleset.HookForward)
 	mustBefore(t, withPub, "pub0_fwd", "fwd_ingress_closed",
 		"the inbound default-deny must sit BELOW the publish companion accepts, or it refuses "+
@@ -919,7 +920,7 @@ func TestIngressIsClosedWhenNothingIsPublished(t *testing.T) {
 // default-deny intact.
 func TestPublishDoesNotBecomeAnEgressPath(t *testing.T) {
 	d := Zero() // default: deny, no allow[], no via[]
-	d.Ingress.Publish = []Publish{{GuestPort: 8080, Proto: ruleset.TCP}}
+	d.Ingress.Publish = []Publish{{GuestPort: 8080, Proto: model.NetTCP}}
 	spec := mustGenerate(t, d)
 	fwd := spec.Rules.ByHook(ruleset.HookForward)
 	if indexOf(fwd, "fwd_default_deny") < 0 {
@@ -1003,12 +1004,12 @@ func TestGuestFacingRefusalsRejectWhileInboundDrops(t *testing.T) {
 // survives contact with a future editor who only sees the code.
 func TestEveryRuleCitesTheSectionItDelivers(t *testing.T) {
 	d := allowPublic()
-	d.Egress.Allow = []Tuple{{CIDR: mustCIDR(t, "10.0.0.0/8"), Port: 53, Proto: ruleset.UDP}}
+	d.Egress.Allow = []Tuple{{CIDR: mustCIDR(t, "10.0.0.0/8"), Port: 53, Proto: model.NetUDP}}
 	d.Egress.Via = []Via{{
-		Match:    []Tuple{{CIDR: mustCIDR(t, "1.1.1.1/32"), Port: 443, Proto: ruleset.TCP}},
+		Match:    []Tuple{{CIDR: mustCIDR(t, "1.1.1.1/32"), Port: 443, Proto: model.NetTCP}},
 		Endpoint: "10.0.0.5:15443",
 	}}
-	d.Ingress.Publish = []Publish{{GuestPort: 8080, Proto: ruleset.TCP}}
+	d.Ingress.Publish = []Publish{{GuestPort: 8080, Proto: model.NetTCP}}
 	for _, r := range mustGenerate(t, d).Rules.Rules {
 		if len(r.Why) < 20 {
 			t.Errorf("rule %q has a rationale too terse to be useful: %q", r.Counter, r.Why)
@@ -1030,10 +1031,10 @@ func TestEveryRuleCitesTheSectionItDelivers(t *testing.T) {
 func TestGenerationIsDeterministic(t *testing.T) {
 	d := allowPublic()
 	d.Egress.Allow = []Tuple{
-		{CIDR: mustCIDR(t, "10.0.0.0/8"), Port: 53, Proto: ruleset.UDP},
-		{CIDR: mustCIDR(t, "1.1.1.1/32"), Port: 443, Proto: ruleset.TCP},
+		{CIDR: mustCIDR(t, "10.0.0.0/8"), Port: 53, Proto: model.NetUDP},
+		{CIDR: mustCIDR(t, "1.1.1.1/32"), Port: 443, Proto: model.NetTCP},
 	}
-	d.Ingress.Publish = []Publish{{GuestPort: 8080, Proto: ruleset.TCP}, {GuestPort: 9090, Proto: ruleset.TCP}}
+	d.Ingress.Publish = []Publish{{GuestPort: 8080, Proto: model.NetTCP}, {GuestPort: 9090, Proto: model.NetTCP}}
 	a, b := mustGenerate(t, d), mustGenerate(t, d)
 	if len(a.Rules.Rules) != len(b.Rules.Rules) {
 		t.Fatalf("rule counts differ: %d vs %d", len(a.Rules.Rules), len(b.Rules.Rules))
@@ -1064,7 +1065,7 @@ func TestGenerationIsDeterministic(t *testing.T) {
 func TestGenerateRefusesAnEndpointItCannotPin(t *testing.T) {
 	d := Zero()
 	d.Egress.Via = []Via{{
-		Match:    []Tuple{{CIDR: mustCIDR(t, "1.1.1.1/32"), Port: 443, Proto: ruleset.TCP}},
+		Match:    []Tuple{{CIDR: mustCIDR(t, "1.1.1.1/32"), Port: 443, Proto: model.NetTCP}},
 		Endpoint: "10.0.0.5", // no port
 	}}
 	if _, err := Generate(d); err == nil {
@@ -1091,7 +1092,7 @@ func TestTheSelfGatewayAllowFollowsTheDeclaredSandboxSpaceOverlap(t *testing.T) 
 	} {
 		t.Run(name, func(t *testing.T) {
 			d := Zero()
-			d.Egress.Allow = []Tuple{{CIDR: mustCIDR(t, tc.cidr), Port: 53, Proto: ruleset.UDP}}
+			d.Egress.Allow = []Tuple{{CIDR: mustCIDR(t, tc.cidr), Port: 53, Proto: model.NetUDP}}
 			in := mustGenerate(t, d).Rules.ByHook(ruleset.HookInput)
 			got := indexOf(in, "allow0_selfgw") >= 0
 			if got != tc.want {

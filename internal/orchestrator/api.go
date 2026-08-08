@@ -114,6 +114,13 @@ type createReq struct {
 	// sandbox is created with. `access` is given HERE and not on the volume record,
 	// because it is a property of the MOUNT (§5.C).
 	Volumes []volumeBindingItem `json:"volumes"`
+	// Network is the §6.1 `network?` declaration (§5.D). A POINTER because omitting
+	// the whole object is LEGAL — it normalizes to an explicit {deny, [], [], []} at
+	// the write point — while giving the object and leaving out `egress.default` is
+	// §6.2's first 400 class. The two share a code path in most implementations, and
+	// whichever is handled first eats the other, so the distinction is carried rather
+	// than collapsed.
+	Network *networkWire `json:"network"`
 }
 
 // volumeBindingItem is one entry of a `volumes` binding, on create and on PATCH
@@ -165,7 +172,11 @@ type createResp struct {
 
 func (e *Engine) handleCreate(w http.ResponseWriter, r *http.Request) {
 	var req createReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+	// UNKNOWN FIELDS REFUSED (see strictDecode): without it a caller who typed
+	// `"netwrok"` gets a 201 and believes their declaration took effect, while the
+	// engine recorded the omitted-network normalization — a `deny` sandbox. Both
+	// outcomes are legal, which is exactly why the misspelling must be an error.
+	if err := strictDecode(r.Body, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
@@ -178,9 +189,27 @@ func (e *Engine) handleCreate(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
+	// The declaration is parsed and VALIDATED before the create verb runs, so §6.2's
+	// "validation precedes the admission gate" holds: an invalid declaration is
+	// refused before any byte is touched or any budget recorded, and 400 and 507 are
+	// therefore never both true.
+	var decl *model.NetworkDecl
+	if req.Network != nil {
+		got, derr := req.Network.decode()
+		if derr != nil {
+			statusFor(w, derr)
+			return
+		}
+		if verr := e.Mediator.ValidateDeclaration(got, true); verr != nil {
+			statusFor(w, verr)
+			return
+		}
+		decl = &got
+	}
 	spec := lifecycle.CreateSpec{
 		Template: model.TemplateID(req.TemplateID),
 		Volumes:  binding,
+		Network:  decl,
 		Limits: model.Limits{
 			CPUMillis:  req.CPUMillis,
 			MemoryByte: req.MemoryByte,
@@ -326,6 +355,17 @@ func (e *Engine) handleSandboxSub(w http.ResponseWriter, r *http.Request) {
 		e.handleFileDownload(w, r, id)
 	case sub == "files" && (r.Method == http.MethodPut || r.Method == http.MethodPost):
 		e.handleFileUpload(w, r, id)
+	// §6.1's Network block. `network` is GET-only and a wrong method there is a 405
+	// by the §6.2 general rule, NOT a 404 landing in the default arm below: the
+	// collection exists, the method does not apply to it.
+	case sub == "network" && r.Method == http.MethodGet:
+		e.handleNetworkGet(w, r, id)
+	case sub == "network":
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	case sub == "publish" && r.Method == http.MethodPost:
+		e.handlePublish(w, r, id)
+	case sub == "publish":
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	default:
 		// process/fs data plane is Connect-RPC (transport D5), not REST here.
 		http.Error(w, "not found", http.StatusNotFound)
@@ -352,6 +392,24 @@ type patchReq struct {
 	// already defines PATCH as THE rebinding point: a sandbox holds one complete
 	// binding at all times, and PATCH swaps one whole binding for another.
 	Volumes *[]volumeBindingItem `json:"volumes"`
+	// Network is the §5.D declaration, swapped WHOLE for WHOLE (§6.2 — no field-level
+	// merge, no pending value). A pointer for the usual reason, which carries real
+	// weight here: the zero declaration is not "no change", it is
+	// `{deny, [], [], []}` — the most restrictive declaration there is — so a value
+	// type would make every unrelated PATCH silently reset the sandbox to
+	// deny-everything.
+	//
+	// `applies_at: next-resume`, and editable only from `paused` (the mediator
+	// enforces the state gate): the provider materializes it at placement, so
+	// accepting the edit on `running` would leave the record and the live rule set
+	// disagreeing indefinitely.
+	//
+	// PUBLISH DOES NOT COME THROUGH HERE — it has its own hot-add endpoint — but it
+	// CAN be removed through here, since there is no un-publish endpoint. §6.1 makes
+	// the read-modify-write REQUIRED rather than advisory for exactly that reason: a
+	// binding built from a stale GET silently drops a publish added in between, and
+	// the reverse (writing back an already-removed publish) reopens an inbound port.
+	Network *networkWire `json:"network"`
 }
 
 type patchResp struct {
@@ -377,7 +435,7 @@ type patchResp struct {
 
 func (e *Engine) handlePatch(w http.ResponseWriter, r *http.Request, id model.SandboxID) {
 	var req patchReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+	if err := strictDecode(r.Body, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
@@ -432,6 +490,23 @@ func (e *Engine) handlePatch(w http.ResponseWriter, r *http.Request, id model.Sa
 			return
 		}
 	}
+	// The declaration, whole for whole. Parsed and validated BEFORE the write, so a
+	// malformed one is a 400 that changed nothing (§6.2).
+	if req.Network != nil {
+		decl, derr := req.Network.decode()
+		if derr != nil {
+			statusFor(w, derr)
+			return
+		}
+		if verr := e.Mediator.ValidateDeclaration(decl, true); verr != nil {
+			statusFor(w, verr)
+			return
+		}
+		if serr := e.Mediator.SetNetwork(r.Context(), id, decl); serr != nil {
+			statusFor(w, serr)
+			return
+		}
+	}
 	released := false
 	if req.Volumes != nil {
 		var rerr error
@@ -447,7 +522,7 @@ func (e *Engine) handlePatch(w http.ResponseWriter, r *http.Request, id model.Sa
 		return
 	}
 	appliesAt := "now"
-	if b.CPUMillis != nil || b.MemoryByte != nil || b.DiskByte != nil || req.Volumes != nil {
+	if b.CPUMillis != nil || b.MemoryByte != nil || b.DiskByte != nil || req.Volumes != nil || req.Network != nil {
 		// A mount change materializes at the next placement, exactly like a resource cap
 		// — runsc takes mounts at startup, so there is no hot-plug path (§5.C).
 		appliesAt = "next-resume"
@@ -811,6 +886,12 @@ func statusCodeFor(err error) int {
 	// The §5.C Volume verdicts first: they are 400s that would otherwise be caught by
 	// a broader arm below and reported as something the caller could retry.
 	if code, ok := volumeStatus(err); ok {
+		return code
+	}
+	// §6.2's declaration refusals, likewise ahead of the broader arms: every one is a
+	// property of the request that no retry can change, so a 409 or 507 here would
+	// send the caller to wait for something that will never happen.
+	if code, ok := networkStatus(err); ok {
 		return code
 	}
 	switch {

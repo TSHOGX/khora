@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"engine/internal/model"
+	"engine/internal/network"
 	"engine/internal/rootfs"
 	"engine/internal/runtime"
 	"engine/internal/store"
@@ -127,6 +128,18 @@ type Deps struct {
 	// against (§1.1 single-binary config). Zero on a dimension leaves that axis
 	// unmetered — see NodeCapacity.
 	NodeCapacity NodeCapacity
+
+	// Deployment carries what the DEPLOYING PARTY hands the engine, as distinct from
+	// what a declaration carries (§2.4 / §6.2): today, the uid/gid of the host-local
+	// process behind `egress.via[].endpoint`, which pins the SECOND hop.
+	//
+	// It is deployment input rather than a declaration field because of what the
+	// predicate is: the engine still does not know or ask what sits behind that
+	// endpoint (§5.D) — only which LOCAL uid's egress must be held under the same
+	// floor. With none supplied, no second-hop table is installed and `via[]`
+	// declarations are refused at the write point, because recording one would leave
+	// a confused deputy live while every first-hop assertion still passed.
+	Deployment network.Deployment
 
 	// DefaultIdleTimeout / DefaultRetention are the engine-wide TTL defaults
 	// (§4.3 / §1.1 single-binary config) applied when a CreateSpec omits them.
@@ -423,13 +436,24 @@ func (m *Mediator) tryLock(id model.SandboxID) (*transitionLock, bool) {
 	return nil, false
 }
 
-// CreateSpec is the create verb input (§6.1 POST /v1/sandboxes). The network
-// (§5.D) Binding input is deliberately OMITTED until that subsystem lands —
-// omitted, not stubbed (same rule as model.Sandbox; §1.3 no speculative
-// reservation). The §6.2 create-time injection flow shape holds regardless of when
-// it arrives.
+// CreateSpec is the create verb input (§6.1 POST /v1/sandboxes).
 type CreateSpec struct {
 	Template model.TemplateID
+
+	// Network is the §5.D reachability declaration (§6.1 `network?`). nil = the whole
+	// object was OMITTED, which is legal and normalizes to an explicit
+	// `{deny, [], [], []}` written into the record HERE, at the write point (§5.D).
+	//
+	// A POINTER because the two cases must stay distinguishable all the way down:
+	// "omitted" is legal, while "given but missing `egress.default`" is §6.2's first
+	// 400 class. They share one code path in most implementations, which is exactly
+	// why the distinction is carried rather than collapsed — whichever case is handled
+	// first would otherwise eat the other.
+	//
+	// Bound at CREATE through this control-plane path, which §6.2 requires as a flow
+	// SHAPE rather than a timing constraint (a later warm pool reuses the same
+	// injection point).
+	Network *model.NetworkDecl
 
 	// IdleTimeout / Retention are the OPTIONAL TTL Binding inputs (§3.4 / §4.3;
 	// §6.1 POST /v1/sandboxes idle_timeout?/retention?). nil = omitted → the
@@ -487,8 +511,19 @@ func (m *Mediator) Create(ctx context.Context, spec CreateSpec) (model.SandboxID
 		// same reason (§3.4 Binding): every placement re-reads them from here, so
 		// the stored value is the single authority for all three axes. Omitted =
 		// zero = unlimited on that axis.
-		Limits:    spec.Limits,
+		Limits: spec.Limits,
+		// The §5.D declaration, materialized into the record the same way and for the
+		// same reason (§3.4 Binding): every placement regenerates its rule set from
+		// here. An OMITTED `network` is normalized to an explicit {deny, [], [], []}
+		// AT THIS WRITE POINT (§5.D) — so the record always holds a chosen value, and
+		// "a null cannot be told from a choice" is structurally impossible rather than
+		// merely unlikely. `deny` because it is the fail-closed side, and because it is
+		// exactly the minimal declaration.
+		Network:   network.Zero(),
 		CreatedAt: now, UpdatedAt: now,
+	}
+	if spec.Network != nil {
+		rec.Network = spec.Network.Normalize()
 	}
 	if spec.IdleTimeout != nil {
 		rec.IdleTimeout = *spec.IdleTimeout
@@ -575,7 +610,7 @@ func (m *Mediator) Create(ctx context.Context, spec CreateSpec) (model.SandboxID
 		_ = m.deps.Store.DeleteSandbox(ctx, sid, nil) // nothing built, never visible
 		return "", fmt.Errorf("create: overlay: %w", err)
 	}
-	if err := m.coldStart(ctx, sid, ov, rec.Limits); err != nil {
+	if err := m.coldStart(ctx, rec, ov); err != nil {
 		// create has no fallback state: reclaim half-built placement + empty
 		// Overlay, delete the record → destroyed (§4.4-A / D5.2 point ④). The
 		// sandbox was never running, so this unwind-delete publishes nothing.
@@ -753,7 +788,7 @@ func (m *Mediator) resumeLocked(ctx context.Context, rec model.Sandbox) error {
 	if err != nil {
 		return fmt.Errorf("resume: open overlay: %w", err)
 	}
-	if err := m.coldStart(ctx, id, ov, rec.Limits); err != nil {
+	if err := m.coldStart(ctx, rec, ov); err != nil {
 		// resume has a fallback state: reclaim half-built placement, stay paused
 		// (persistent Overlay artifact untouched; §4.4-A).
 		m.unwind(ctx, id, ov, false)
@@ -835,7 +870,7 @@ func (m *Mediator) UpdateBinding(ctx context.Context, id model.SandboxID, b stor
 		return fmt.Errorf("update: %w (state=%s: a Binding is editable only from running or paused)", store.ErrConflict, rec.State)
 	}
 
-	newLimits, _, _ := b.Apply(rec)
+	newLimits, _, _, _ := b.Apply(rec)
 	// §3.4: `0 → N` on the DISK axis is a refused write, not a raise. The cap has no
 	// materialization to land on — the storage unit was only built as a quota-capable
 	// subvolume if a cap existed at create — so accepting would record a promise every
@@ -1154,7 +1189,8 @@ func (m *Mediator) unmarkBuilding(id model.TemplateID) {
 // shared by create and resume (guest-runtime D5.1). On success the live
 // placement + merged are recorded in the mediator. On any error it returns
 // without recording (the caller unwinds).
-func (m *Mediator) coldStart(ctx context.Context, id model.SandboxID, ov *rootfs.Overlay, limits model.Limits) error {
+func (m *Mediator) coldStart(ctx context.Context, rec model.Sandbox, ov *rootfs.Overlay) error {
+	id, limits := rec.ID, rec.Limits
 	// ⓪ the write-regime gate, cold-start side (§5.C, symmetric with
 	// admitDirectWrite): if a direct content write is streaming into a volume this
 	// placement would mount READ-WRITE, refuse. Gating only the direct-write side
@@ -1194,6 +1230,20 @@ func (m *Mediator) coldStart(ctx context.Context, id model.SandboxID, ov *rootfs
 		_ = m.deps.Rootfs.Unmount(ctx, merged)
 		return err
 	}
+	// ③b derive the §5.D rule set from the CURRENT record (§3.4 Binding: exactly like
+	// the caps, it is re-derived at every placement rather than read back from a
+	// frozen value, so a declaration edited while paused takes effect on this resume).
+	//
+	// A generation failure fails the COLD START, and there is no "launch it without
+	// the rules" branch — that would be the fail-open window §2.4 forbids, and §2.4 is
+	// explicit that escape is a FAILURE rather than a degradation. create deletes its
+	// record, resume stays `paused` (§4.4-A).
+	steering, err := m.steeringFor(rec)
+	if err != nil {
+		m.releaseMounts(ctx, mounts)
+		_ = m.deps.Rootfs.Unmount(ctx, merged)
+		return err
+	}
 	// ④ launch runsc (sandboxd entrypoint), ⑤ guest boots, ⑥ IP discovered.
 	// limits come from the RECORD, re-materialized at every placement — that is
 	// what makes them a Binding rather than placement state (§3.4): a resume
@@ -1201,10 +1251,15 @@ func (m *Mediator) coldStart(ctx context.Context, id model.SandboxID, ov *rootfs
 	// value, so a cap edited while paused takes effect on the next resume. The
 	// capacity axis is NOT here — it is an FS quota applied by the Rootfs
 	// subsystem (§5.B), not a provider concern (§3.4).
+	//
+	// The provider installs the rule set INSIDE this call, between building the
+	// netns/veth and starting the isolated unit — the atomicity §2.4 requires, and
+	// the only hook point that exists for it (network.md D1 ①).
 	pl, err := m.deps.Runtime.Launch(ctx, runtime.LaunchSpec{
-		Sandbox: string(id),
-		Rootfs:  runtime.RootfsSource{MergedPath: merged.MergedPath},
-		Mounts:  specs,
+		Sandbox:  string(id),
+		Rootfs:   runtime.RootfsSource{MergedPath: merged.MergedPath},
+		Mounts:   specs,
+		Steering: steering,
 		Limits: runtime.ResourceLimits{
 			CPUMillis:  limits.CPUMillis,
 			MemoryByte: limits.MemoryByte,
@@ -1858,6 +1913,32 @@ func (m *Mediator) adoptOrDemoteLocked(ctx context.Context, rec model.Sandbox) (
 	merged, err := m.deps.Rootfs.AdoptMerged(ctx, ov)
 	if err != nil {
 		return false, fmt.Errorf("adopt merged: %w", err) // uncertain → protect
+	}
+	// Re-install the §5.D rule set from the CURRENT record. §2.4 is explicit that a
+	// rule set is crash-surviving host state exactly like the netns, so taking over a
+	// live placement means rebuilding it too — it is not something that can be added
+	// afterwards, because "the network is up and the rules are not" is the fail-open
+	// window the whole atomicity obligation exists to close.
+	//
+	// The provider re-renders the whole table into ONE atomic file, which is both
+	// required and sufficient: measured, that leaves live flows intact 5/5 while a
+	// delete-then-install kills them 5/5, and the permission hidden in the same
+	// measurement is that no diff against the installed rules is needed (network.md
+	// D5 ㉒). The two prohibitions from that measurement are the provider's to honor.
+	//
+	// A FAILURE HERE IS UNCERTAINTY, NOT DEATH (§4.4-A protect-on-uncertainty): we
+	// return an error, so the caller keeps this sandbox in the keep-set and retries
+	// next pass. Demoting instead would tear down a container L1 just reported alive,
+	// which is irreversible; and recording the adoption while the rules failed to
+	// install would leave a `running` sandbox whose record claims a reachable set the
+	// kernel is not enforcing — precisely the divergence §6.1's read face promises
+	// cannot persist.
+	steering, err := m.steeringFor(rec)
+	if err != nil {
+		return false, fmt.Errorf("regenerate rule set for adopt: %w", err)
+	}
+	if err := m.deps.Runtime.ReinstallRuleSet(ctx, pl, steering); err != nil {
+		return false, fmt.Errorf("reinstall rule set for adopt: %w", err)
 	}
 	// Re-recognize this sandbox's §5.C volume materializations too, so the recovered
 	// liveState is COMPLETE.

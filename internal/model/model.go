@@ -5,7 +5,10 @@
 // other).
 package model
 
-import "time"
+import (
+	"net/netip"
+	"time"
+)
 
 // SandboxID is the stable, opaque identity of a persistent sandbox (§3.3).
 // It does NOT encode placement: after resume the IP / container / cgroup / node
@@ -217,6 +220,153 @@ type Mount struct {
 	Access AccessMode
 }
 
+// NetProto is the transport protocol a §5.D tuple names — the RECORD form.
+//
+// It is ALWAYS explicit, and that is a FORMAT requirement rather than an optional
+// dimension: in the kernel mechanism that carries it, port matching itself depends
+// on protocol matching, so `{cidr, port}` is not a well-formed tuple (§5.D /
+// network.md D3.1).
+//
+// A separate type from the enforcement layer's protocol enum, exactly as DeathCause
+// is separate from its provider-seam twin: the record shape and the rule-generation
+// vocabulary must be able to change independently, and `model` depends on no
+// subsystem.
+type NetProto string
+
+const (
+	NetTCP NetProto = "tcp"
+	NetUDP NetProto = "udp"
+)
+
+// NetTuple is `{cidr, port, proto}` (§5.D): ONE tuple, not three independent
+// options.
+type NetTuple struct {
+	// CIDR is the destination prefix, held PARSED and MASKED so the record carries a
+	// canonical value rather than whatever text arrived.
+	//
+	// An INVALID (zero) prefix means ANY destination — meaningful only inside
+	// `via[].match[]`, where it is the "transparent interception" value of this same
+	// field and the generator emits exactly one clause fewer for it (§5.D /
+	// network.md D3.3).
+	//
+	// Only IP LITERALS ever become one: no domain names, refused on COST grounds
+	// rather than feasibility — that road needs a DNS proxy, a TTL refresher coupled
+	// to connection tracking, and a churning product list inside the engine, and the
+	// third breaks §1.1 outright (network.md D2).
+	// NOTE ON THE JSON TAGS ON THIS TYPE: they serialize the RECORD, i.e. what the
+	// store persists. They are NOT the wire schema. The API layer carries its own
+	// wire type with `cidr` as a STRING, because netip.Prefix's own text
+	// unmarshaling ACCEPTS a v4-mapped literal (verified) — which would route
+	// straight past §6.2's eighth 400 class, whose whole point is to refuse those
+	// BEFORE any containment test (network.md D5 ⑲). A record type that could be
+	// decoded from untrusted input would make that class unenforceable.
+	CIDR netip.Prefix `json:"cidr"`
+	// Port is the destination port; zero means any port.
+	Port uint16 `json:"port,omitempty"`
+	// Proto is mandatory (see NetProto).
+	Proto NetProto `json:"proto"`
+}
+
+// AnyDest reports whether this tuple pins no destination address. The generator
+// emits the destination clause IF AND ONLY IF this is false, and BOTH directions
+// are load-bearing: keeping a cidr clause on a transparent-interception declaration
+// blocks the traffic that declaration authorized, while dropping it on an
+// explicit-endpoint declaration authorizes every OTHER address on that port
+// (measured both ways, network.md D5 ⑩).
+func (t NetTuple) AnyDest() bool { return !t.CIDR.IsValid() || t.CIDR.Bits() == 0 }
+
+// NetVia is one `egress.via[]` entry: flows matching any of Match go to Endpoint.
+//
+// WHAT SITS BEHIND THAT ENDPOINT, THE ENGINE DOES NOT KNOW AND DOES NOT ASK (§5.D).
+// It is an address; the engine installs a rule sending matched traffic there. So it
+// is a declaration VALUE — never an engine constant, never an engine config key.
+type NetVia struct {
+	Match []NetTuple `json:"match"`
+	// Endpoint is a HOST-LOCAL `ip:port`, and host-local is a CONTRACT requirement
+	// rather than a convenience: the second hop — that process's own egress on the
+	// sandbox's behalf — must be pinned by the KERNEL rather than by its own
+	// discipline, and the kernel's reach stops at this host. Accepting a remote
+	// endpoint would rest the L0 floor on that process's self-restraint, which is
+	// precisely the confused deputy §2.4's second invariant rejects (network.md D4.2).
+	Endpoint string `json:"endpoint"`
+}
+
+// NetPublish is one `ingress.publish[]` entry: a guest port exposed as a host
+// `ip:port`. The explicit inbound exception, and the ONE hot-addable item — a pure
+// host-side rule set, purely additive, touching no isolation unit (§5.D).
+type NetPublish struct {
+	GuestPort uint16   `json:"guest_port"`
+	Proto     NetProto `json:"proto"`
+}
+
+// NetEgressDefault is `egress.default` (§5.D). Two values, and there is NO POSTURE
+// ENUM: a posture is a COMBINATION of the four fields' values (`deny` + no allow +
+// no via = "no egress"; `deny` + via = "only through this rendezvous"), and each
+// enum would be one more coupling point between the engine and product semantics
+// (§1.1 / §5.D).
+type NetEgressDefault string
+
+const (
+	// NetDeny is the fail-closed side, and the value an omitted `network` normalizes
+	// to (it is also exactly the minimal declaration — "no network").
+	NetDeny NetEgressDefault = "deny"
+	// NetAllow is "the public internet, MINUS the L0 floor and the internal deny-safe
+	// tier" (§2.4) — emphatically not "everything": without that tier this value
+	// hands the host's whole LAN to the sandbox (measured, network.md D5 ⑤), i.e. it
+	// would deliver an `allow` strictly wider than §2.4 defines.
+	NetAllow NetEgressDefault = "allow"
+)
+
+// NetEgress is the outbound half of the declaration: the three fields that change
+// only at a resume boundary (§5.D).
+type NetEgress struct {
+	// Default is MANDATORY whenever a `network` object is given, and not out of
+	// strictness: if "unspecified" were read as some default value, a null in the
+	// record could no longer be told apart from "the caller chose that value" (§5.D,
+	// the same shape as idle_timeout / retention).
+	Default NetEgressDefault `json:"default"`
+	Allow   []NetTuple       `json:"allow"`
+	Via     []NetVia         `json:"via"`
+}
+
+// NetIngress is the inbound half: closed by default, opened item by item.
+type NetIngress struct {
+	Publish []NetPublish `json:"publish"`
+}
+
+// NetworkDecl is §5.D's four-field reachability declaration, in its RECORD form —
+// a Binding (§3.4) on the sandbox's own control-plane record.
+//
+// Every field uses IP / port / protocol vocabulary ONLY. The engine's enforcement
+// evaluates nothing else: no domain names, no TLS, no application-layer protocol
+// (§2.4 / network.md D2). The subsystem that owns the semantics is §5.D
+// (internal/network) — the TYPE lives here because the store persists it and
+// `model` depends on no subsystem, exactly as with Mount and Limits.
+type NetworkDecl struct {
+	Egress  NetEgress  `json:"egress"`
+	Ingress NetIngress `json:"ingress"`
+}
+
+// Normalize fills in the empty-slice spelling. §6.1 requires the three arrays to
+// ALWAYS appear as `[]` — never omitted, never null: they are DEFINITE values in the
+// record, while the omit-when-unreadable rule (`death_cause`, `used_byte`) governs
+// facts that cannot be READ, of which a declaration has none.
+//
+// Value receiver and copy-on-write: a read-modify-write cycle must not write
+// through to the value it just read.
+func (d NetworkDecl) Normalize() NetworkDecl {
+	if d.Egress.Allow == nil {
+		d.Egress.Allow = []NetTuple{}
+	}
+	if d.Egress.Via == nil {
+		d.Egress.Via = []NetVia{}
+	}
+	if d.Ingress.Publish == nil {
+		d.Ingress.Publish = []NetPublish{}
+	}
+	return d
+}
+
 // Lifecycle is the §4.1 state machine. Exactly four states — no `failed`
 // intermediate state (§4.4: the absence is a conclusion of the model, not an
 // omission), no independent generation counter (§3.3 uses Placement / §4.3 uses
@@ -317,10 +467,10 @@ const (
 // carries it. The mount topology is consumed but lives in its own table (§5.C)
 // keyed by sandbox, not as a field here — a sandbox's volume set is many-to-many
 // and mutable independently of the identity record. The network declaration
-// (§5.D) is not carried at all yet and is omitted rather than stubbed, since an
-// unused field would be a speculative reservation (§1.3). (Contrast the runtime provider's
-// SteeringSpec, which DOES exist: it is a named member of the settled §5.A
-// contract 3-tuple — "settled, not yet built".)
+// (§5.D) IS carried, as of M8: it is a Binding (§3.4) recorded on the sandbox's own
+// control-plane record, regenerated into a rule set at every placement from the
+// CURRENT record — which is what makes it stable across resume and rebuildable by
+// §4.4-A reconciliation after a crash.
 type Sandbox struct {
 	ID       SandboxID
 	Template TemplateID
@@ -352,6 +502,28 @@ type Sandbox struct {
 	// makes it a Binding rather than placement state: a resume re-derives the caps
 	// from here instead of reading back a frozen value (§3.4).
 	Limits Limits
+
+	// Network is the §5.D reachability declaration — a Binding, exactly like Limits
+	// and for the same reason: every placement regenerates its rule set from THIS
+	// record rather than reading back anything frozen, so an edit made while paused
+	// takes effect at the next resume and a crash-surviving rule set can be rebuilt
+	// from here (§3.4 / §4.4-A).
+	//
+	// It is stored as an OPAQUE JSON DOCUMENT rather than normalized into columns or
+	// side tables, and the reason is what the field IS: a whole-value Binding with
+	// exactly two write points, both of which replace or append to the whole
+	// document (§6.1 `PATCH` swaps whole binding for whole binding; `POST …/publish`
+	// appends one item). Nothing queries INTO it — the generator receives the whole
+	// declaration — so columns would buy no query and cost a table per repeated
+	// field. Contrast the mount table, which is normalized precisely because the
+	// exclusive lease is a CROSS-ROW predicate the store must arbitrate (§5.C).
+	//
+	// THE ZERO VALUE IS NOT A VALID DECLARATION. An omitted `network` normalizes to
+	// an explicit `{deny, [], [], []}` AT THE WRITE POINT (§5.D), so every record
+	// holds a chosen value and "a null cannot be told from a choice" is structurally
+	// impossible. A record read back with an empty Default means the row predates
+	// that write point, which is a bug rather than a state to interpret.
+	Network NetworkDecl
 
 	// DeathCause records WHY this sandbox's isolation unit was last found dead
 	// (§4.3). Written in the SAME commit as the crash-paused CAS that demoted it

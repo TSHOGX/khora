@@ -208,7 +208,7 @@ func (g *gen) emit(r ruleset.Rule) {
 func (g *gen) steering(d Declaration) {
 	for i, v := range d.Egress.Via {
 		for j, t := range v.Match {
-			m := ruleset.Match{Proto: t.Proto, DestPort: t.Port}
+			m := ruleset.Match{Proto: protoOf(t.Proto), DestPort: t.Port}
 			// The pre-NAT destination clause is emitted IF AND ONLY IF the declaration
 			// pinned a cidr. Transparent interception (`cidr: any`) authorizes "any
 			// destination on that port", so keeping the clause would block exactly the
@@ -237,7 +237,7 @@ func (g *gen) publishInbound(d Declaration) {
 			Hook:        ruleset.HookPrerouting,
 			Scope:       ruleset.ScopeHostEndpoint,
 			Verdict:     ruleset.DNAT,
-			Match:       ruleset.Match{Proto: p.Proto},
+			Match:       ruleset.Match{Proto: protoOf(p.Proto)},
 			ToGuestPort: p.GuestPort,
 			Counter:     fmt.Sprintf("pub%d_in_dnat", i),
 			Why:         fmt.Sprintf("ingress.publish[%d]: host endpoint → guest %s/%d (external callers)", i, p.Proto, p.GuestPort),
@@ -254,7 +254,7 @@ func (g *gen) publishHostPath(d Declaration) {
 			Hook:        ruleset.HookOutputNAT,
 			Scope:       ruleset.ScopeHostEndpoint,
 			Verdict:     ruleset.DNAT,
-			Match:       ruleset.Match{Proto: p.Proto},
+			Match:       ruleset.Match{Proto: protoOf(p.Proto)},
 			ToGuestPort: p.GuestPort,
 			Counter:     fmt.Sprintf("pub%d_out_dnat", i),
 			Why:         fmt.Sprintf("ingress.publish[%d]: the HOST's own path — host-originated traffic never traverses prerouting (D5 ⑭)", i),
@@ -348,7 +348,7 @@ func (g *gen) inputChain(d Declaration) error {
 		}
 		for j, t := range v.Match {
 			m := ruleset.Match{
-				Proto:          t.Proto,
+				Proto:          protoOf(t.Proto),
 				DestPort:       endpointPort, // post-NAT: the listener's port
 				CTOriginalPort: t.Port,       // pre-NAT: the declared port
 				CTState:        []string{"new"},
@@ -404,7 +404,7 @@ func (g *gen) inputChain(d Declaration) error {
 				// contained, i.e. lift the floor's host-itself item on an address the caller
 				// never named. The renderer ANDs the two into the intersection.
 				DestSelfGatewayWithin: &cidr,
-				Proto:                 t.Proto,
+				Proto:                 protoOf(t.Proto),
 				DestPort:              t.Port,
 			},
 			Counter: fmt.Sprintf("allow%d_selfgw", i),
@@ -434,7 +434,7 @@ func (g *gen) inputChain(d Declaration) error {
 	// reach a host-local address at all, which is why §5.D requires both sides
 	// (D4.2).
 	for i, t := range d.Egress.Allow {
-		m := ruleset.Match{Proto: t.Proto, DestPort: t.Port}
+		m := ruleset.Match{Proto: protoOf(t.Proto), DestPort: t.Port}
 		if !t.AnyDest() {
 			setDest(&m, t.CIDR)
 		}
@@ -525,7 +525,7 @@ func (g *gen) forwardChain(d Declaration) error {
 
 	// (5) The declaration's allows.
 	for i, t := range d.Egress.Allow {
-		m := ruleset.Match{Proto: t.Proto, DestPort: t.Port}
+		m := ruleset.Match{Proto: protoOf(t.Proto), DestPort: t.Port}
 		if !t.AnyDest() {
 			setDest(&m, t.CIDR)
 		}
@@ -616,7 +616,7 @@ func (g *gen) forwardChain(d Declaration) error {
 			Hook:    ruleset.HookForward,
 			Scope:   ruleset.ScopeGuestOut,
 			Verdict: ruleset.Accept,
-			Match:   ruleset.Match{DestGuest: true, Proto: p.Proto, DestPort: p.GuestPort},
+			Match:   ruleset.Match{DestGuest: true, Proto: protoOf(p.Proto), DestPort: p.GuestPort},
 			Counter: fmt.Sprintf("pub%d_fwd", i),
 			Why:     fmt.Sprintf("ingress.publish[%d] companion accept, on FORWARD (post-DNAT the destination is the guest IP, so it is routed onward — the opposite of via[]'s hook, D5 ⑮)", i),
 		})

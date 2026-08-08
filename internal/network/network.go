@@ -36,117 +36,40 @@ import (
 	"strconv"
 	"strings"
 
+	"engine/internal/model"
 	"engine/internal/ruleset"
 )
 
-// Default is `egress.default` — the only two values (§5.D wire schema). There is
-// NO posture enum: a posture is a COMBINATION of the four fields' values
-// (`deny` + no allow + no via = "no egress"; `deny` + via = "only through this
-// rendezvous"), and every enum would be one more coupling point between the
-// engine and product semantics (§1.1 / §5.D).
-type Default string
+// The DECLARATION TYPES live in `model`, not here, and that placement follows the
+// same rule Mount and Limits follow: the store persists this value, and `model`
+// depends on no subsystem (§5 preamble). What lives HERE is everything that carries
+// §5.D SEMANTICS — the normalization decision, the deduplication requirement, the
+// eight 400 classes, and the generator.
+//
+// These aliases exist so this package reads in its own vocabulary rather than
+// spelling `model.Net…` on every line. They are true aliases, not conversions:
+// there is ONE type, so no translation step can drift.
+type (
+	Declaration = model.NetworkDecl
+	Egress      = model.NetEgress
+	Ingress     = model.NetIngress
+	Tuple       = model.NetTuple
+	Via         = model.NetVia
+	Publish     = model.NetPublish
+	Default     = model.NetEgressDefault
+)
 
 const (
 	// DenyAll is the fail-closed side, and the value an omitted `network` object
 	// normalizes to (see Zero).
-	DenyAll Default = "deny"
+	DenyAll = model.NetDeny
 	// AllowPublic is "the public internet, MINUS the L0 floor and the internal
 	// deny-safe tier" (§2.4). It is emphatically not "everything": without the
 	// deny-safe tier this value would hand the host's whole LAN to the sandbox
 	// (measured, network.md D5 ⑤), i.e. it would deliver an `allow` strictly wider
 	// than §2.4 defines.
-	AllowPublic Default = "allow"
+	AllowPublic = model.NetAllow
 )
-
-// Tuple is `{cidr, port, proto}` — ONE tuple, not three independent options
-// (§5.D). `proto` is always explicit because it is a FORMAT requirement rather
-// than an optional dimension: in the kernel mechanism carrying it, port matching
-// itself depends on protocol matching, so `{cidr, port}` is not well-formed
-// (network.md D3.1). One consequence worth naming: the classic "port 80 and 443
-// do not stack, you need two rules" trap is structurally absent here, because
-// port and protocol are always both spelled out.
-type Tuple struct {
-	// CIDR is the destination prefix. Only IP LITERALS — no domain names, and the
-	// reason is COST, not feasibility: domain-level control would require a DNS
-	// proxy, a TTL refresher coupled to connection tracking, and a churning
-	// product list inside the engine, and the third breaks §1.1 outright
-	// (network.md D2). To narrow to a domain, hand the flow to a process outside
-	// the engine with `via[]`.
-	//
-	// An INVALID (zero) prefix means ANY destination, which is only meaningful
-	// inside `via[].match[]`: that is the "transparent interception" value of this
-	// same field, and the generator emits one clause FEWER for it (network.md
-	// D3.3 / D5 ⑩). A prefix with Bits()==0 is treated identically — a /0 pins
-	// nothing.
-	CIDR netip.Prefix
-	// Port is the destination port. Zero means any port.
-	Port uint16
-	// Proto is mandatory (see the type doc).
-	Proto ruleset.Proto
-}
-
-// AnyDest reports whether this tuple pins no destination address. The generator
-// emits the pre-NAT destination clause IF AND ONLY IF this is false, and both
-// directions are asserted: keeping a cidr clause on a transparent-interception
-// declaration would block the traffic the declaration authorized, while dropping
-// it on an explicit-endpoint declaration would authorize every other address on
-// that port (network.md D5 ⑩).
-func (t Tuple) AnyDest() bool { return !t.CIDR.IsValid() || t.CIDR.Bits() == 0 }
-
-// Via is one `egress.via[]` entry: flows matching any of `Match` are sent to
-// `Endpoint`.
-//
-// WHAT SITS BEHIND THAT ENDPOINT, THE ENGINE DOES NOT KNOW AND DOES NOT ASK
-// (§5.D). It is an address; the engine installs a rule sending matched traffic
-// there. So it is a declaration VALUE, never an engine constant or an engine
-// config key.
-type Via struct {
-	Match []Tuple
-	// Endpoint is a HOST-LOCAL `ip:port`. Host-local is a contract requirement,
-	// not a convenience: the second hop — that process's OWN egress on the
-	// sandbox's behalf — must be pinned by the KERNEL rather than by the process's
-	// own discipline, and the kernel's reach stops at this host. Accepting a remote
-	// endpoint would rest the floor on that process's self-restraint, which is
-	// precisely the confused deputy §2.4's second invariant rejects (network.md
-	// D4.2).
-	Endpoint string
-}
-
-// Publish is one `ingress.publish[]` entry: a guest port exposed as a host
-// `ip:port`. It is the explicit inbound exception and the ONE hot-addable item
-// (§5.D) — a pure host-side rule set, purely additive, touching no isolation
-// unit.
-type Publish struct {
-	GuestPort uint16
-	Proto     ruleset.Proto
-}
-
-// Egress is the outbound half of the declaration: the three fields that change
-// only at a resume boundary (§5.D).
-type Egress struct {
-	// Default is MANDATORY on the wire when a `network` object is given, and the
-	// reason is not strictness for its own sake: if "unspecified" were read as some
-	// default, a null in the record could no longer be told apart from "the caller
-	// chose that value" (§5.D, the same shape as idle_timeout / retention).
-	Default Default
-	Allow   []Tuple
-	Via     []Via
-}
-
-// Ingress is the inbound half: closed by default, opened item by item.
-type Ingress struct {
-	Publish []Publish
-}
-
-// Declaration is §5.D's four-field declaration — a Binding (§3.4), recorded on
-// the sandbox's own control-plane record and regenerated into a rule set at every
-// placement from the CURRENT record. That is what makes it stable across resume
-// and rebuildable by §4.4-A reconciliation after a crash: a rule set is
-// crash-surviving host state exactly like a netns.
-type Declaration struct {
-	Egress  Egress
-	Ingress Ingress
-}
 
 // Zero is what an OMITTED `network` object normalizes to, and the engine writes
 // this value into the record EXPLICITLY at the write point (§5.D / §6.1).
@@ -168,24 +91,6 @@ func Zero() Declaration {
 	}
 }
 
-// Normalize fills in the empty-slice spelling so a read-back never has to choose
-// between `[]` and null (§6.1: the three arrays always appear, empty is `[]`,
-// never omitted and never null — they are DEFINITE values in the record, and the
-// omit-when-unreadable rule governs facts that cannot be read, of which a
-// declaration has none).
-func (d Declaration) Normalize() Declaration {
-	if d.Egress.Allow == nil {
-		d.Egress.Allow = []Tuple{}
-	}
-	if d.Egress.Via == nil {
-		d.Egress.Via = []Via{}
-	}
-	if d.Ingress.Publish == nil {
-		d.Ingress.Publish = []Publish{}
-	}
-	return d
-}
-
 // AddPublish is the `POST …/publish` write, applied to the declaration:
 // idempotent on `{guest_port, proto}`.
 //
@@ -198,7 +103,7 @@ func (d Declaration) Normalize() Declaration {
 //
 // Returns the declaration and whether anything was added (false = the idempotent
 // no-op, which the API answers with the existing item).
-func (d Declaration) AddPublish(p Publish) (Declaration, bool) {
+func AddPublish(d Declaration, p Publish) (Declaration, bool) {
 	d = d.Normalize()
 	for _, cur := range d.Ingress.Publish {
 		if cur.GuestPort == p.GuestPort && cur.Proto == p.Proto {
@@ -209,6 +114,28 @@ func (d Declaration) AddPublish(p Publish) (Declaration, bool) {
 	copy(next, d.Ingress.Publish)
 	d.Ingress.Publish = append(next, p)
 	return d, true
+}
+
+// protoOf translates the RECORD's protocol enum into the enforcement layer's.
+//
+// The two are separate types on purpose, and the translation lives HERE — the same
+// shape DeathCause uses (§5.A: the provider seam must not depend on the
+// control-plane record shape, and the mediator is the one place that legitimately
+// knows both). `model` therefore depends on no subsystem and `ruleset` on no
+// record, while §5.D — which owns both halves of this particular conversion — pays
+// one switch statement for it.
+func protoOf(p model.NetProto) ruleset.Proto {
+	switch p {
+	case model.NetTCP:
+		return ruleset.TCP
+	case model.NetUDP:
+		return ruleset.UDP
+	}
+	// Unreachable for a validated declaration: Validate refuses anything but the two
+	// values. Returning the empty protocol makes the failure LOUD if it ever is
+	// reached — ruleset.Validate then rejects the rule for carrying a port with no
+	// protocol, rather than rendering a rule that matches the wrong traffic.
+	return ""
 }
 
 // ParseEndpoint splits a `via[].endpoint` into its address and port.

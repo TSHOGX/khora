@@ -69,6 +69,24 @@ CREATE TABLE IF NOT EXISTS sandboxes (
 	-- as the crash-paused CAS (see Store.CompareAndSetState for why that is
 	-- required). '' = never observed dead.
 	death_cause  TEXT NOT NULL DEFAULT '',
+	-- the §5.D reachability declaration (§3.4 Binding), as an OPAQUE JSON document.
+	-- Every placement regenerates its rule set from THIS column, so an edit made
+	-- while paused takes effect at the next resume and §4.4-A can rebuild a
+	-- crash-surviving rule set from it.
+	--
+	-- One column rather than normalized tables, because of what the field IS: a
+	-- whole-value Binding with exactly two write points, both of which replace or
+	-- append to the WHOLE document (§6.1 PATCH swaps whole binding for whole
+	-- binding; POST .../publish appends one item). Nothing queries INTO it -- the
+	-- generator receives the whole declaration — so columns would buy no query and
+	-- cost a table per repeated field. Contrast the mounts table, normalized precisely
+	-- because the exclusive lease is a CROSS-ROW predicate the store arbitrates.
+	--
+	-- NOT NULL with no DEFAULT: an omitted network object is normalized to an explicit
+	-- {deny, [], [], []} at the WRITE POINT (§5.D), so a row with no declaration
+	-- cannot be inserted. A schema default would reintroduce exactly the
+	-- "a null cannot be told from a choice" ambiguity that normalization removes.
+	network      TEXT NOT NULL,
 	created_at   INTEGER NOT NULL, -- unix nanos
 	updated_at   INTEGER NOT NULL
 );
@@ -281,14 +299,18 @@ func (s *SQLite) CreateSandbox(ctx context.Context, sb model.Sandbox, ev *Event)
 		} else if !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
+		netJSON, jerr := marshalNetwork(sb.Network)
+		if jerr != nil {
+			return jerr
+		}
 		if _, err := t.Exec(
 			`INSERT INTO sandboxes(id, template, overlay, state, idle_timeout, retention,
-			   cpu_millis, memory_byte, disk_byte, death_cause, created_at, updated_at)
-			 VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+			   cpu_millis, memory_byte, disk_byte, death_cause, network, created_at, updated_at)
+			 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			string(sb.ID), string(sb.Template), string(sb.Overlay), string(sb.State),
 			int64(sb.IdleTimeout), int64(sb.Retention),
 			sb.Limits.CPUMillis, sb.Limits.MemoryByte, sb.Limits.DiskByte,
-			string(sb.DeathCause),
+			string(sb.DeathCause), netJSON,
 			sb.CreatedAt.UnixNano(), sb.UpdatedAt.UnixNano(),
 		); err != nil {
 			// FK RESTRICT on template: the referenced Template does not exist —
@@ -306,7 +328,7 @@ func (s *SQLite) CreateSandbox(ctx context.Context, sb model.Sandbox, ev *Event)
 func (s *SQLite) GetSandbox(ctx context.Context, id model.SandboxID) (model.Sandbox, error) {
 	return scanSandbox(s.db.QueryRowContext(ctx,
 		`SELECT id, template, overlay, state, idle_timeout, retention,
-		   cpu_millis, memory_byte, disk_byte, death_cause, created_at, updated_at
+		   cpu_millis, memory_byte, disk_byte, death_cause, network, created_at, updated_at
 		 FROM sandboxes WHERE id=?`,
 		string(id)))
 }
@@ -314,7 +336,7 @@ func (s *SQLite) GetSandbox(ctx context.Context, id model.SandboxID) (model.Sand
 func (s *SQLite) ListSandboxes(ctx context.Context) ([]model.Sandbox, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, template, overlay, state, idle_timeout, retention,
-		   cpu_millis, memory_byte, disk_byte, death_cause, created_at, updated_at
+		   cpu_millis, memory_byte, disk_byte, death_cause, network, created_at, updated_at
 		 FROM sandboxes ORDER BY created_at`)
 	if err != nil {
 		return nil, err
@@ -365,13 +387,13 @@ func (s *SQLite) UpdateBinding(ctx context.Context, id model.SandboxID, expected
 	return s.tx(ctx, func(t *sql.Tx) error {
 		// Read the current record inside the transaction so the state check and the
 		// write cannot straddle a concurrent transition (§4.4-B).
-		var cur string
+		var cur, netJSON string
 		var lim model.Limits
 		var idleNanos, retNanos int64
 		err := t.QueryRow(
-			`SELECT state, cpu_millis, memory_byte, disk_byte, idle_timeout, retention
+			`SELECT state, cpu_millis, memory_byte, disk_byte, idle_timeout, retention, network
 			   FROM sandboxes WHERE id=?`, string(id),
-		).Scan(&cur, &lim.CPUMillis, &lim.MemoryByte, &lim.DiskByte, &idleNanos, &retNanos)
+		).Scan(&cur, &lim.CPUMillis, &lim.MemoryByte, &lim.DiskByte, &idleNanos, &retNanos, &netJSON)
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrNotFound
 		}
@@ -381,26 +403,35 @@ func (s *SQLite) UpdateBinding(ctx context.Context, id model.SandboxID, expected
 		if model.Lifecycle(cur) != expected {
 			return ErrConflict
 		}
-		newLim, newIdle, newRet := b.Apply(model.Sandbox{
+		curNet, nerr := unmarshalNetwork(netJSON)
+		if nerr != nil {
+			return nerr
+		}
+		newLim, newIdle, newRet, newNet := b.Apply(model.Sandbox{
 			Limits:      lim,
 			IdleTimeout: time.Duration(idleNanos),
 			Retention:   time.Duration(retNanos),
+			Network:     curNet,
 		})
+		nextNetJSON, jerr := marshalNetwork(newNet)
+		if jerr != nil {
+			return jerr
+		}
 		// One statement set, one transaction (§4.4-C): the caps and the death-cause
 		// clear that lifts §4.3's refusal land together or not at all. updated_at is
 		// deliberately absent (see Store.UpdateBinding).
 		if cause == nil {
 			_, err = t.Exec(
-				`UPDATE sandboxes SET cpu_millis=?, memory_byte=?, disk_byte=?, idle_timeout=?, retention=?
+				`UPDATE sandboxes SET cpu_millis=?, memory_byte=?, disk_byte=?, idle_timeout=?, retention=?, network=?
 				   WHERE id=?`,
 				newLim.CPUMillis, newLim.MemoryByte, newLim.DiskByte,
-				int64(newIdle), int64(newRet), string(id))
+				int64(newIdle), int64(newRet), nextNetJSON, string(id))
 		} else {
 			_, err = t.Exec(
-				`UPDATE sandboxes SET cpu_millis=?, memory_byte=?, disk_byte=?, idle_timeout=?, retention=?, death_cause=?
+				`UPDATE sandboxes SET cpu_millis=?, memory_byte=?, disk_byte=?, idle_timeout=?, retention=?, network=?, death_cause=?
 				   WHERE id=?`,
 				newLim.CPUMillis, newLim.MemoryByte, newLim.DiskByte,
-				int64(newIdle), int64(newRet), string(*cause), string(id))
+				int64(newIdle), int64(newRet), nextNetJSON, string(*cause), string(id))
 		}
 		return err
 	})
@@ -995,10 +1026,10 @@ type rowScanner interface {
 
 func scanSandbox(r rowScanner) (model.Sandbox, error) {
 	var sb model.Sandbox
-	var id, tmpl, ov, state, deathCause string
+	var id, tmpl, ov, state, deathCause, netJSON string
 	var idleTimeout, retention, cpuMillis, memoryByte, diskByte, created, updated int64
 	err := r.Scan(&id, &tmpl, &ov, &state, &idleTimeout, &retention,
-		&cpuMillis, &memoryByte, &diskByte, &deathCause, &created, &updated)
+		&cpuMillis, &memoryByte, &diskByte, &deathCause, &netJSON, &created, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return model.Sandbox{}, ErrNotFound
 	}
@@ -1013,6 +1044,11 @@ func scanSandbox(r rowScanner) (model.Sandbox, error) {
 	sb.Retention = time.Duration(retention)
 	sb.Limits = model.Limits{CPUMillis: cpuMillis, MemoryByte: memoryByte, DiskByte: diskByte}
 	sb.DeathCause = model.DeathCause(deathCause)
+	net, nerr := unmarshalNetwork(netJSON)
+	if nerr != nil {
+		return model.Sandbox{}, nerr
+	}
+	sb.Network = net
 	sb.CreatedAt = time.Unix(0, created)
 	sb.UpdatedAt = time.Unix(0, updated)
 	return sb, nil

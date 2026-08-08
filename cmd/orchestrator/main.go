@@ -34,8 +34,22 @@ func main() {
 		nodeDisk  = flag.Int64("node-disk-byte", 0, "§3.4 no-oversubscribe disk budget: bytes for sandbox Overlay upper+work plus Template/layer bytes; 0 = unmetered (axis not gated). Set BELOW the raw device size — the budget counts only what the engine may PROMISE guests, so per-sandbox substrate overhead (runsc state on disk) lives outside it. While metered, a create must specify a disk cap or it is refused")
 		nodeMem   = flag.Int64("node-memory-byte", 0, "§3.4 no-oversubscribe memory budget: total host RAM the engine may promise to sandboxes; 0 = unmetered (axis not gated). Set BELOW physical RAM — the budget counts only what the engine may PROMISE guests, so per-sandbox substrate overhead (sentry/gofer footprint) lives outside it. While metered, a create must specify a memory cap or it is refused")
 		sudo      = flag.Bool("sudo", false, "prefix runsc/ip with sudo (dev; prod runs as root)")
+		viaUID    = flag.Int("via-uid", -1, "§2.4 invariant 2: the uid of the host-local process behind `egress.via[].endpoint`, whose OWN egress the engine pins under the same L0 floor. A DEPLOYMENT input, never a declaration field — the engine does not know or ask what is behind that endpoint, only which local uid to pin. Unset (-1) ⇒ no second-hop table is installed AND `egress.via[]` declarations are REFUSED (400): accepting one would record a declaration whose invariant the engine cannot enforce, leaving a confused deputy live while every first-hop assertion still passes")
+		viaGID    = flag.Int("via-gid", -1, "the gid counterpart of --via-uid; unset (-1) = narrow by uid alone")
+		pubIP     = flag.String("publish-ip", "", "host address §5.D `ingress.publish[]` endpoints bind to; empty = 127.0.0.1. The conservative default is deliberate: publish is an EXPLICIT inbound exception (§2.1 ③), so reachability from outside this host must come from a decision rather than from omitting a flag")
 	)
 	flag.Parse()
+
+	// -1 is the "unset" sentinel because uid 0 is a REAL uid: a plain int flag could
+	// not tell "the operator said root" from "the operator said nothing", and those
+	// must behave oppositely (install the table and permit `via[]` vs neither).
+	var secondHopUID, secondHopGID *int
+	if *viaUID >= 0 {
+		secondHopUID = viaUID
+	}
+	if *viaGID >= 0 {
+		secondHopGID = viaGID
+	}
 
 	eng, err := orchestrator.New(orchestrator.Config{
 		TemplatesDir:        *templates,
@@ -49,6 +63,9 @@ func main() {
 		TransportDownBudget: *tdBudget,
 		NodeDiskByte:        *nodeDisk,
 		NodeMemoryByte:      *nodeMem,
+		SecondHopUID:        secondHopUID,
+		SecondHopGID:        secondHopGID,
+		HostPublishIP:       *pubIP,
 		Sudo:                *sudo,
 	})
 	if err != nil {
@@ -96,6 +113,21 @@ func main() {
 	// Runs here, before anything creates a unit, for exactly that reason.
 	if err := eng.ReclaimQuotaRows(context.Background()); err != nil {
 		log.Printf("orchestrator: boot quota-row reclamation (retried by reaper): %v", err)
+	}
+
+	// §2.4 invariant 2's second half: the ENGINE-LEVEL table pinning the second hop,
+	// installed once here. BEFORE serving, and before Reconcile adopts anything, for
+	// the same reason the per-sandbox rules go on before the isolated unit runs — a
+	// `via[]` declaration live while that table is absent is an unpinned confused
+	// deputy, and the symptom is a floor counter that does not move rather than an
+	// error (network.md D5 ㉔).
+	//
+	// FATAL rather than logged, unlike the sweeps above: those are retried by the
+	// reaper, while this one has no retry and its absence is a silent security gap.
+	// With no --via-uid it installs nothing (and removes a stale table from a previous
+	// run), which is not a gap — `via[]` is refused at the write point instead.
+	if err := eng.InstallSecondHopTable(context.Background()); err != nil {
+		log.Fatalf("orchestrator: install the second-hop table (§2.4 invariant 2): %v", err)
 	}
 
 	// §4.4-A startup reconciliation BEFORE serving: reclaim orphan placements

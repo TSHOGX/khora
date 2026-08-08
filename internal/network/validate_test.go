@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"engine/internal/ruleset"
+	"engine/internal/model"
 )
 
 // noHostLocal / allHostLocal are hostLocal fixtures. The predicate is a PARAMETER
@@ -71,7 +71,7 @@ func TestTheEightHundredClasses(t *testing.T) {
 			return Validate(Declaration{Egress: Egress{
 				Default: DenyAll,
 				Via: []Via{{
-					Match:    []Tuple{{CIDR: mustCIDR(t, "8.8.8.8/32"), Port: 53, Proto: ruleset.UDP}},
+					Match:    []Tuple{{CIDR: mustCIDR(t, "8.8.8.8/32"), Port: 53, Proto: model.NetUDP}},
 					Endpoint: "10.0.0.5:1080",
 				}},
 			}}, true, allHostLocal)
@@ -86,7 +86,7 @@ func TestTheEightHundredClasses(t *testing.T) {
 			return Validate(Declaration{Egress: Egress{
 				Default: DenyAll,
 				Via: []Via{{
-					Match:    []Tuple{{CIDR: mustCIDR(t, "1.1.1.1/32"), Port: 443, Proto: ruleset.TCP}},
+					Match:    []Tuple{{CIDR: mustCIDR(t, "1.1.1.1/32"), Port: 443, Proto: model.NetTCP}},
 					Endpoint: "203.0.113.9:8080",
 				}},
 			}}, true, noHostLocal)
@@ -99,7 +99,7 @@ func TestTheEightHundredClasses(t *testing.T) {
 			return Validate(Declaration{Egress: Egress{
 				Default: DenyAll,
 				Via: []Via{{
-					Match:    []Tuple{{CIDR: mustCIDR(t, "1.1.1.1/32"), Port: 443, Proto: ruleset.TCP}},
+					Match:    []Tuple{{CIDR: mustCIDR(t, "1.1.1.1/32"), Port: 443, Proto: model.NetTCP}},
 					Endpoint: "127.0.0.1:8080",
 				}},
 			}}, true, allHostLocal)
@@ -112,7 +112,7 @@ func TestTheEightHundredClasses(t *testing.T) {
 		run: func() error {
 			return Validate(Declaration{Egress: Egress{
 				Default: DenyAll,
-				Allow:   []Tuple{{CIDR: mustCIDR(t, "169.254.169.254/32"), Port: 80, Proto: ruleset.TCP}},
+				Allow:   []Tuple{{CIDR: mustCIDR(t, "169.254.169.254/32"), Port: 80, Proto: model.NetTCP}},
 			}}, true, noHostLocal)
 		},
 	}, {
@@ -121,7 +121,7 @@ func TestTheEightHundredClasses(t *testing.T) {
 		run: func() error {
 			return Validate(Declaration{Egress: Egress{
 				Default: DenyAll,
-				Allow:   []Tuple{{CIDR: mustCIDR(t, "127.0.0.53/32"), Port: 53, Proto: ruleset.UDP}},
+				Allow:   []Tuple{{CIDR: mustCIDR(t, "127.0.0.53/32"), Port: 53, Proto: model.NetUDP}},
 			}}, true, noHostLocal)
 		},
 	}, {
@@ -130,7 +130,7 @@ func TestTheEightHundredClasses(t *testing.T) {
 		run: func() error {
 			return Validate(Declaration{Egress: Egress{
 				Default: DenyAll,
-				Allow:   []Tuple{{CIDR: mustCIDR(t, "fe80::1/128"), Port: 80, Proto: ruleset.TCP}},
+				Allow:   []Tuple{{CIDR: mustCIDR(t, "fe80::1/128"), Port: 80, Proto: model.NetTCP}},
 			}}, true, noHostLocal)
 		},
 	}, {
@@ -234,7 +234,7 @@ func TestClassSevenDoesNotOverReach(t *testing.T) {
 		name: "supernet partially overlapping the floor",
 		d: Declaration{Egress: Egress{
 			Default: DenyAll,
-			Allow:   []Tuple{{CIDR: mustCIDR(t, "10.0.0.0/8"), Port: 53, Proto: ruleset.UDP}},
+			Allow:   []Tuple{{CIDR: mustCIDR(t, "10.0.0.0/8"), Port: 53, Proto: model.NetUDP}},
 		}},
 		why: "whole containment, never intersection (D5 ㉑)",
 	}, {
@@ -250,7 +250,7 @@ func TestClassSevenDoesNotOverReach(t *testing.T) {
 		d: Declaration{Egress: Egress{
 			Default: DenyAll,
 			Via: []Via{{
-				Match:    []Tuple{{CIDR: mustCIDR(t, "169.254.169.254/32"), Port: 80, Proto: ruleset.TCP}},
+				Match:    []Tuple{{CIDR: mustCIDR(t, "169.254.169.254/32"), Port: 80, Proto: model.NetTCP}},
 				Endpoint: "10.0.0.5:15080",
 			}},
 		}},
@@ -262,14 +262,14 @@ func TestClassSevenDoesNotOverReach(t *testing.T) {
 		name: "an allow inside the sibling CIDR",
 		d: Declaration{Egress: Egress{
 			Default: DenyAll,
-			Allow:   []Tuple{{CIDR: mustCIDR(t, "10.66.0.0/16"), Port: 53, Proto: ruleset.UDP}},
+			Allow:   []Tuple{{CIDR: mustCIDR(t, "10.66.0.0/16"), Port: 53, Proto: model.NetUDP}},
 		}},
 		why: "the sibling CIDR is excluded from class 7 (§6.2): this sandbox's own gateway lives there",
 	}, {
 		name: "an allow naming a single /32 gateway inside the sibling CIDR",
 		d: Declaration{Egress: Egress{
 			Default: DenyAll,
-			Allow:   []Tuple{{CIDR: mustCIDR(t, "10.66.250.1/32"), Port: 53, Proto: ruleset.UDP}},
+			Allow:   []Tuple{{CIDR: mustCIDR(t, "10.66.250.1/32"), Port: 53, Proto: model.NetUDP}},
 		}},
 		why: "§5.D semantics ③'s declared resolver path",
 	}, {
@@ -277,7 +277,7 @@ func TestClassSevenDoesNotOverReach(t *testing.T) {
 		name: "a supernet of link-local",
 		d: Declaration{Egress: Egress{
 			Default: DenyAll,
-			Allow:   []Tuple{{CIDR: mustCIDR(t, "169.0.0.0/8"), Port: 80, Proto: ruleset.TCP}},
+			Allow:   []Tuple{{CIDR: mustCIDR(t, "169.0.0.0/8"), Port: 80, Proto: model.NetTCP}},
 		}},
 		why: "containment is one-directional: the floor item must contain the declaration",
 	}}
@@ -298,7 +298,7 @@ func TestClassSevenDoesNotOverReach(t *testing.T) {
 func TestPublishAcceptsUDPWhileViaRefusesIt(t *testing.T) {
 	d := Declaration{
 		Egress:  Egress{Default: DenyAll},
-		Ingress: Ingress{Publish: []Publish{{GuestPort: 5353, Proto: ruleset.UDP}}},
+		Ingress: Ingress{Publish: []Publish{{GuestPort: 5353, Proto: model.NetUDP}}},
 	}
 	if err := Validate(d, true, noHostLocal); err != nil {
 		t.Errorf("publish with proto udp was refused: %v — a DNAT to a fixed guest port does not "+
@@ -308,7 +308,7 @@ func TestPublishAcceptsUDPWhileViaRefusesIt(t *testing.T) {
 	viaUDP := Declaration{Egress: Egress{
 		Default: DenyAll,
 		Via: []Via{{
-			Match:    []Tuple{{CIDR: mustCIDR(t, "8.8.8.8/32"), Port: 53, Proto: ruleset.UDP}},
+			Match:    []Tuple{{CIDR: mustCIDR(t, "8.8.8.8/32"), Port: 53, Proto: model.NetUDP}},
 			Endpoint: "10.0.0.5:1080",
 		}},
 	}}
@@ -384,11 +384,11 @@ func TestNormalizeIsIdempotentAndDoesNotAlias(t *testing.T) {
 // one leaves the other — "revoked, and the port is still open".
 func TestAddPublishIsIdempotentOnPortAndProto(t *testing.T) {
 	d := Zero()
-	d, added := d.AddPublish(Publish{GuestPort: 8080, Proto: ruleset.TCP})
+	d, added := AddPublish(d, Publish{GuestPort: 8080, Proto: model.NetTCP})
 	if !added {
 		t.Fatal("first publish reported no change")
 	}
-	d, added = d.AddPublish(Publish{GuestPort: 8080, Proto: ruleset.TCP})
+	d, added = AddPublish(d, Publish{GuestPort: 8080, Proto: model.NetTCP})
 	if added {
 		t.Error("a repeated publish of the same {guest_port, proto} reported a change")
 	}
@@ -398,16 +398,16 @@ func TestAddPublishIsIdempotentOnPortAndProto(t *testing.T) {
 			len(d.Ingress.Publish))
 	}
 	// Same port, DIFFERENT proto is a different item — the key is the pair.
-	d, added = d.AddPublish(Publish{GuestPort: 8080, Proto: ruleset.UDP})
+	d, added = AddPublish(d, Publish{GuestPort: 8080, Proto: model.NetUDP})
 	if !added || len(d.Ingress.Publish) != 2 {
 		t.Errorf("tcp/8080 and udp/8080 collapsed into one item (%d items, added=%v)", len(d.Ingress.Publish), added)
 	}
 	// It must not alias: the copy-on-append is what keeps a read-modify-write from
 	// writing through to the value it read.
 	base := Zero()
-	base, _ = base.AddPublish(Publish{GuestPort: 1, Proto: ruleset.TCP})
-	a, _ := base.AddPublish(Publish{GuestPort: 2, Proto: ruleset.TCP})
-	b, _ := base.AddPublish(Publish{GuestPort: 3, Proto: ruleset.TCP})
+	base, _ = AddPublish(base, Publish{GuestPort: 1, Proto: model.NetTCP})
+	a, _ := AddPublish(base, Publish{GuestPort: 2, Proto: model.NetTCP})
+	b, _ := AddPublish(base, Publish{GuestPort: 3, Proto: model.NetTCP})
 	if a.Ingress.Publish[1] == b.Ingress.Publish[1] {
 		t.Error("AddPublish aliased the backing array — two independent appends produced the same element")
 	}
@@ -424,7 +424,7 @@ func TestViaIsRefusedWhenTheDeploymentPinsNoSecondHop(t *testing.T) {
 	via := Declaration{Egress: Egress{
 		Default: DenyAll,
 		Via: []Via{{
-			Match:    []Tuple{{CIDR: mustCIDR(t, "1.1.1.1/32"), Port: 443, Proto: ruleset.TCP}},
+			Match:    []Tuple{{CIDR: mustCIDR(t, "1.1.1.1/32"), Port: 443, Proto: model.NetTCP}},
 			Endpoint: "10.0.0.5:15443",
 		}},
 	}}
@@ -505,7 +505,7 @@ func TestFloorEndpointIsReportedAsClassSixNotClassFive(t *testing.T) {
 	d := Declaration{Egress: Egress{
 		Default: DenyAll,
 		Via: []Via{{
-			Match:    []Tuple{{CIDR: mustCIDR(t, "1.1.1.1/32"), Port: 443, Proto: ruleset.TCP}},
+			Match:    []Tuple{{CIDR: mustCIDR(t, "1.1.1.1/32"), Port: 443, Proto: model.NetTCP}},
 			Endpoint: "127.0.0.1:8080",
 		}},
 	}}

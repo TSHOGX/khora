@@ -16,6 +16,7 @@ import (
 
 	"engine/internal/lifecycle"
 	"engine/internal/model"
+	"engine/internal/network"
 	"engine/internal/rootfs"
 	"engine/internal/runtime"
 	"engine/internal/store"
@@ -70,6 +71,32 @@ type Config struct {
 	NodeDiskByte   int64
 	NodeMemoryByte int64
 
+	// SecondHopUID / SecondHopGID pin the SECOND hop (§2.4 invariant 2): the uid/gid
+	// of the host-local process sitting behind `egress.via[].endpoint`, whose own
+	// egress must be held under the same L0 floor BY THE KERNEL rather than by its own
+	// discipline.
+	//
+	// A DEPLOYMENT input, never a declaration field (§2.4 / §6.2): the engine still
+	// does not know or ask what is behind that endpoint — only which local uid's
+	// egress to pin. Pointers because uid 0 is a real uid, and "the operator said
+	// root" must not read as "the operator said nothing".
+	//
+	// Unset ⇒ no second-hop table is installed AND `via[]` declarations are refused at
+	// the write point. Refused rather than accepted-unenforced, because accepting one
+	// records a declaration whose own invariant the engine cannot deliver, leaving a
+	// confused deputy live while every FIRST-hop assertion still passes (measured: hop
+	// 2 counts zero in `forward`, so the first-hop floor never evaluates it —
+	// network.md D5 ㉔).
+	SecondHopUID *int
+	SecondHopGID *int
+
+	// HostPublishIP is the host address published endpoints bind to (§5.D: the engine
+	// delivers a `host ip:port`, and what sits in front of it is outside the engine).
+	// Empty → loopback, which is the conservative default: publish is an EXPLICIT
+	// inbound exception (§2.1 ③), so external reachability must come from a decision
+	// rather than from omitting a flag.
+	HostPublishIP string
+
 	// FaultAfterColdStart is a TEST-ONLY injection hook forwarded to the
 	// mediator to simulate a crash mid-transition. nil in production.
 	FaultAfterColdStart func(id model.SandboxID)
@@ -107,6 +134,7 @@ func New(cfg Config) (*Engine, error) {
 		return nil, err
 	}
 	rt.Sudo = cfg.Sudo
+	rt.HostPublishIP = cfg.HostPublishIP
 
 	// §5.C volume backend. The local arm is the default; registering a different one
 	// is a §1.3 registration, not an edit to the callers above.
@@ -147,6 +175,10 @@ func New(cfg Config) (*Engine, error) {
 			DiskByte:   cfg.NodeDiskByte,
 			MemoryByte: cfg.NodeMemoryByte,
 		},
+		Deployment: network.Deployment{
+			SecondHopUID: cfg.SecondHopUID,
+			SecondHopGID: cfg.SecondHopGID,
+		},
 	})
 
 	// outbox publisher → a log sink (§4.4-C: the engine only guarantees reliable
@@ -172,6 +204,18 @@ func (e *Engine) SeedTemplates(ctx context.Context) error {
 // Reconcile runs the §4.4-A startup crash-reconciliation (orphan reclaim +
 // running re-adoption). Call once at boot, before serving the API.
 func (e *Engine) Reconcile(ctx context.Context) error { return e.Mediator.Reconcile(ctx) }
+
+// InstallSecondHopTable installs the ENGINE-LEVEL table pinning the second hop
+// (§2.4 invariant 2's second half). Call once at boot, BEFORE serving.
+//
+// Before serving is the requirement, and it mirrors why the rules are installed
+// before the isolated unit runs: a `via[]` declaration accepted while that table is
+// absent leaves an unpinned confused deputy for as long as the gap lasts. Idempotent
+// — it re-renders and re-installs whole, and with no uid supplied it removes any
+// stale table a previous run left under a uid this one does not have.
+func (e *Engine) InstallSecondHopTable(ctx context.Context) error {
+	return e.Mediator.InstallSecondHopTable(ctx)
+}
 
 // SweepOrphanOverlays runs the §4.4-A orphan-UNIT sweep (reclaim Overlay storage
 // units backing no sandbox row). At boot this is where the accumulated residue of

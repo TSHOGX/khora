@@ -17,7 +17,9 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"engine/internal/model"
@@ -169,20 +171,38 @@ type Binding struct {
 	DiskByte    *int64
 	IdleTimeout *time.Duration
 	Retention   *time.Duration
+	// Network is the §5.D declaration, replaced WHOLE (§6.2: PATCH swaps one
+	// complete binding for another; there is no field-level merge and no
+	// "pending/unresolved" value).
+	//
+	// A POINTER for the same reason as the others — "not given" must be
+	// distinguishable from "given" — but note what the distinction protects here.
+	// The zero declaration is not a no-op, it is `{deny, [], [], []}`: the most
+	// restrictive declaration there is. So a value type would make every unrelated
+	// PATCH (raising a RAM cap, changing a TTL) silently reset the sandbox's network
+	// to deny-everything.
+	//
+	// This is ALSO the field the `POST …/publish` hot-add writes through, carrying a
+	// declaration the mediator produced by read-append under the transition lock. The
+	// store does not know which of the two write points it is serving — both replace
+	// the whole value — which is why the append has to happen above it (§5.D: two
+	// concurrent publishes would otherwise lose one, and that is an engine bug rather
+	// than the caller-side sharp edge §6.1 documents).
+	Network *model.NetworkDecl
 }
 
 // IsEmpty reports whether the Binding asks for no change at all, which callers
 // treat as a no-op rather than a write.
 func (b Binding) IsEmpty() bool {
 	return b.CPUMillis == nil && b.MemoryByte == nil && b.DiskByte == nil &&
-		b.IdleTimeout == nil && b.Retention == nil
+		b.IdleTimeout == nil && b.Retention == nil && b.Network == nil
 }
 
 // Apply folds the requested changes onto a copy of the current values, returning
 // what the record should hold. Kept here, next to the type, so both backends and
 // the mediator agree on "omitted = unchanged" rather than each re-deriving it.
-func (b Binding) Apply(cur model.Sandbox) (model.Limits, time.Duration, time.Duration) {
-	lim, idle, ret := cur.Limits, cur.IdleTimeout, cur.Retention
+func (b Binding) Apply(cur model.Sandbox) (model.Limits, time.Duration, time.Duration, model.NetworkDecl) {
+	lim, idle, ret, net := cur.Limits, cur.IdleTimeout, cur.Retention, cur.Network
 	if b.CPUMillis != nil {
 		lim.CPUMillis = *b.CPUMillis
 	}
@@ -198,7 +218,50 @@ func (b Binding) Apply(cur model.Sandbox) (model.Limits, time.Duration, time.Dur
 	if b.Retention != nil {
 		ret = *b.Retention
 	}
-	return lim, idle, ret
+	if b.Network != nil {
+		// WHOLE replacement, and normalized on the way in so the record never holds a
+		// nil array where §6.1 promises `[]`.
+		net = b.Network.Normalize()
+	}
+	return lim, idle, ret, net
+}
+
+// marshalNetwork / unmarshalNetwork are the §5.D declaration's at-rest form.
+//
+// A FAILURE HERE IS RETURNED, NEVER SWALLOWED, and that is the point of having them
+// as named helpers rather than inline calls. The declaration is a security-relevant
+// field: reading it back as a zero value on a decode error would silently present a
+// sandbox as `{deny, [], [], []}` — which looks safe, and is catastrophic in the one
+// direction that matters, because the next placement would then generate a rule set
+// from that empty declaration and QUIETLY REVOKE a publish the caller is relying on
+// (or, on the read face, report a reachable set that is not the installed one).
+// Failing the read is the honest outcome: the record is unreadable, so no answer is
+// better than a plausible wrong one.
+func marshalNetwork(d model.NetworkDecl) (string, error) {
+	b, err := json.Marshal(d.Normalize())
+	if err != nil {
+		return "", fmt.Errorf("store: encode network declaration: %w", err)
+	}
+	return string(b), nil
+}
+
+func unmarshalNetwork(s string) (model.NetworkDecl, error) {
+	if s == "" {
+		// Only reachable for a row this schema could not have written (the column is
+		// NOT NULL with no default). Treated as corruption rather than as "no
+		// declaration": an omitted `network` is normalized to an explicit
+		// `{deny, [], [], []}` at the write point (§5.D), so an empty column means the
+		// row was written by something that bypassed that normalization.
+		return model.NetworkDecl{}, fmt.Errorf("store: sandbox row carries an EMPTY network declaration — " +
+			"an omitted `network` is normalized to an explicit {deny, [], [], []} at the write point " +
+			"(§5.D), so this row bypassed it. Refusing to read it as deny-everything, which would " +
+			"silently revoke any publish the caller is relying on")
+	}
+	var d model.NetworkDecl
+	if err := json.Unmarshal([]byte(s), &d); err != nil {
+		return model.NetworkDecl{}, fmt.Errorf("store: decode network declaration: %w", err)
+	}
+	return d.Normalize(), nil
 }
 
 // Store is the authoritative control-plane record backend (§1.1 / §4.4-C). It is
