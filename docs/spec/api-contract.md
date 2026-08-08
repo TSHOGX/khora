@@ -30,7 +30,9 @@
 # Sandbox 生命周期
 POST   /v1/sandboxes                 {template_id, network?, volumes?, idle_timeout?, retention?,
                                       cpu_millis?, memory_byte?, disk_byte?}        → {sandbox_id}
-#   `network?` = §5.D 的四字段声明,schema 见下方 Network 块(含 `egress.default` 必填)。
+#   `network?` = §5.D 的四字段声明,schema 见下方 Network 块(**给了就必须含 `egress.default`**)。
+#   **整份省略是合法的,归一化成 `{deny, [], [], []}` 并显式落库**(§5.D):故"省略 network"与"给了
+#   network 却漏 egress.default → 400"是两件不同的事,后者才是 §6.2 那张清单的第一类。
 #   **今天尚未实现** —— 见该块的 ⚠。
 #   资源上限三轴见 §3.4(Binding);按轴条件必填的规则见 §6.2。准入不足 → 507。
 #   `volumes` 每项 = {volume_id, path, access},`access` ∈ {exclusive, shared-ro, shared-rw} —— 它是
@@ -256,7 +258,8 @@ client 从 `transport.proto` 经 `buf` 生成 stub、经 `orchestrator` 反代�
   改绑定)本就按上文通则判 409,它是**动词的源态规则**、不是 Volume 的引用关系,故不进这个枚举。
   **幂等删除不得吞掉这些 409**:它们是 RESTRICT 触发的**全部**对外信号,若落进"不存在也返成功"的分支,
   守卫失败的删除就与成功的删除不可区分(外部反面教材见 [`deep-dives/volume.md`](./deep-dives/volume.md) D9)。
-  **网络声明的八类 400**(§5.D,全部是"不读别的行即可判定、且无重试能让它合法",同挂载绑定那条判据):
+  **网络声明的八类 400**(§5.D,全部是"不读别的行即可判定、且无重试能让它合法",同挂载绑定那条判据;
+  **第一类只在 `network` 对象存在时求值——整份省略是合法的,归一化成 `{deny, [], [], []}` 落库**,§5.D):
   `egress.default` 缺失 · `cidr` 处给了域名 · 元组缺 `proto` · `via[].match` 匹配 UDP ·
   **`via[].endpoint` 非宿主本地** · **`via[].endpoint` 落在 L0 地板的 daddr 清单项内**(即 link-local /
   loopback / sibling CIDR)· **`egress.allow[]` 的 `cidr` 整段落在地板"任何读法下都抬不动"的项内** ·
