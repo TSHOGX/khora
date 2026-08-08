@@ -18,6 +18,7 @@ import (
 	"engine/internal/lifecycle"
 	"engine/internal/model"
 	"engine/internal/rootfs"
+	"engine/internal/ruleset"
 	"engine/internal/runtime"
 	"engine/internal/store"
 	"engine/internal/transport"
@@ -93,6 +94,12 @@ func (barrierFakeRuntime) Adopt(context.Context, string) (*runtime.Placement, bo
 	return nil, false, runtime.CauseUnknown, nil
 }
 func (barrierFakeRuntime) ReclaimOrphans(context.Context, []string) error { return nil }
+func (barrierFakeRuntime) ReinstallRuleSet(context.Context, *runtime.Placement, runtime.SteeringSpec) error {
+	return nil
+}
+func (barrierFakeRuntime) InstallSecondHop(context.Context, ruleset.RuleSet, *int, *int) error {
+	return nil
+}
 
 // barrierFakeClient is a transport.Client whose Write can be BLOCKED, so a test
 // can hold one mutating op in flight and drive a pause into its drain wait

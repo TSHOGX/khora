@@ -13,6 +13,7 @@ import (
 
 	"engine/internal/model"
 	"engine/internal/rootfs"
+	"engine/internal/ruleset"
 	"engine/internal/runtime"
 	"engine/internal/transport"
 	"engine/internal/volume"
@@ -632,6 +633,20 @@ type fakeRuntime struct {
 	// can assert the §3.4 Binding is re-materialized at every placement from the
 	// record rather than read back from a frozen value.
 	launchLimits []runtime.ResourceLimits
+	// launchSteering holds the §5.D steering spec the LAST Launch carried. The
+	// network declaration is a Binding too (§3.4), so the same property applies: it
+	// must be re-derived from the current record at every placement, not carried over.
+	launchSteering runtime.SteeringSpec
+	// reinstalled records the specs ReinstallRuleSet received (§4.4-A: adopting a
+	// survivor must rebuild its rule set, which is crash-surviving host state).
+	reinstalled []runtime.SteeringSpec
+	// failReinstall fails the adopt-side rule-set install. The mediator must treat
+	// that as UNCERTAINTY and protect the placement rather than demote — tearing down
+	// a provably-live container is irreversible (§4.4-A).
+	failReinstall bool
+	// secondHopUID records what InstallSecondHop was handed, so a test can assert the
+	// engine-level table is installed once at startup with the deployment's uid.
+	secondHopUID *int
 }
 
 func (f *fakeRuntime) log(s string) {
@@ -660,6 +675,7 @@ func (f *fakeRuntime) Launch(ctx context.Context, spec runtime.LaunchSpec) (*run
 	f.log("Launch:" + spec.Sandbox)
 	f.mu.Lock()
 	f.launchLimits = append(f.launchLimits, spec.Limits)
+	f.launchSteering = spec.Steering
 	// The §5.C mount specs from the LAST launch, asserted from LastMounts rather than
 	// by string-matching the log — for the same reason the limits are: several tests
 	// match "Launch:<id>" exactly as a synchronization predicate.
@@ -722,6 +738,60 @@ func (f *fakeRuntime) Adopt(_ context.Context, sandbox string) (*runtime.Placeme
 func (f *fakeRuntime) ReclaimOrphans(_ context.Context, keep []string) error {
 	f.log("ReclaimOrphans:keep=" + strings.Join(append([]string(nil), keep...), "|"))
 	return nil
+}
+
+// ReinstallRuleSet / InstallSecondHop are the §5.D enforcement face of the
+// provider seam (§2.4). The fake records the calls and the rule counts, so the
+// mediator's ORCHESTRATION of them can be tested as pure logic — the rendering and
+// the kernel install are local_runsc's business and are covered on the real
+// substrate.
+//
+// The reinstall log line carries the rule COUNT rather than just the sandbox id,
+// because the property the mediator owes here is that Adopt re-installs a rule set
+// generated from the CURRENT record — an adopt that installed an empty one would
+// leave a survivor unenforced with every other adopt assertion still passing.
+func (f *fakeRuntime) ReinstallRuleSet(_ context.Context, pl *runtime.Placement, spec runtime.SteeringSpec) error {
+	f.log(fmt.Sprintf("ReinstallRuleSet:rules=%d", len(spec.Rules.Rules)))
+	f.mu.Lock()
+	f.reinstalled = append(f.reinstalled, spec)
+	f.mu.Unlock()
+	if f.failReinstall {
+		return fmt.Errorf("injected ReinstallRuleSet failure")
+	}
+	if pl != nil {
+		for _, pp := range spec.PublishPorts {
+			pl.PublishEndpoints = append(pl.PublishEndpoints, fmt.Sprintf("127.0.0.1:%d", 30000+pp.GuestPort))
+		}
+	}
+	return nil
+}
+
+func (f *fakeRuntime) InstallSecondHop(_ context.Context, rs ruleset.RuleSet, uid, gid *int) error {
+	got := "nil"
+	if uid != nil {
+		got = fmt.Sprintf("%d", *uid)
+	}
+	f.log(fmt.Sprintf("InstallSecondHop:uid=%s:rules=%d", got, len(rs.Rules)))
+	f.mu.Lock()
+	f.secondHopUID = uid
+	f.mu.Unlock()
+	return nil
+}
+
+// Reinstalled returns the steering specs ReinstallRuleSet received.
+func (f *fakeRuntime) Reinstalled() []runtime.SteeringSpec {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]runtime.SteeringSpec(nil), f.reinstalled...)
+}
+
+// LastSteering returns the steering spec the most recent Launch received — the
+// mediator's obligation is to derive it from the CURRENT record at every placement
+// (§3.4 Binding), so tests assert on it rather than on the log line.
+func (f *fakeRuntime) LastSteering() runtime.SteeringSpec {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.launchSteering
 }
 
 // fakeClient satisfies transport.Client; only Health matters for the mediator.

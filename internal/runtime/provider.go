@@ -11,7 +11,11 @@
 // abstraction boundary clean, not to support other backends today (§1.1).
 package runtime
 
-import "context"
+import (
+	"context"
+
+	"engine/internal/ruleset"
+)
 
 // RootfsSource is the handle to an already-merged rootfs, produced by the Rootfs
 // subsystem (§5.B). The provider receives a merged rootfs to run and does NOT
@@ -51,13 +55,73 @@ type RootfsSource struct {
 //     the two render identically in `nft list` — §5.A makes this a guard, not a
 //     review item.
 //
-// Network is none today, so this is empty. Unlike a data record's unused fields
-// (which we omit — see model.Sandbox), this type EXISTS now because it is a named
-// member of the settled §5.A contract 3-tuple (rootfs / steering / limits) —
-// "settled, not yet built" (§1.3), not a speculative reservation. (Guest identity
-// is NOT a member: the sandbox runs as guest root and the engine does not model
-// guest users, §2.2 / §3.2.1.) Filled in by M8.
-type SteeringSpec struct{}
+// # Why the payload is an ABSTRACT rule set rather than nft text
+//
+// The split is fixed by network.md D1 ② / D6: three things the rules must
+// eventually name are placement products only the provider holds — the host-side
+// veth name, the guest IP, and the publish host endpoint. Rendering here, above
+// the seam, would both fail to run (no placement exists when the rules are
+// generated) and lift a host primitive onto the cross-provider contract (the ❌
+// list above). So §5.D emits placement-FREE rules carrying Scope/Match flags
+// where a placement product belongs, and the provider substitutes the concrete
+// value at install time.
+//
+// The payoff is testability: every difference between declaration values is
+// pinned in root-free unit tests, and the substrate suite only has to prove
+// "installed, in the right order, and reconciled after a crash".
+//
+// The rule vocabulary lives in `internal/ruleset`, a LEAF both §5.D and §5.A
+// depend on — not in either subsystem, since `network` importing `runtime` (or the
+// reverse) is exactly the edge internal/arch fails on (CLAUDE.md: shared fact →
+// leaf, never an exemption).
+//
+// (Guest identity is NOT a member: the sandbox runs as guest root and the engine
+// does not model guest users, §2.2 / §3.2.1.)
+type SteeringSpec struct {
+	// Rules is the abstract, placement-free rule set (§5.D's pure function output).
+	// Empty = install nothing, which is NOT the same as "deny nothing": a
+	// declaration of `deny` + empty still generates the floor and a default-deny.
+	// Genuinely empty only where no declaration was produced at all.
+	Rules ruleset.RuleSet
+
+	// PublishPorts are the guest ports needing a host endpoint bound, in
+	// declaration order. The provider allocates one host endpoint per item at
+	// placement time and substitutes it into every rule scoped to it; the
+	// endpoints therefore do not appear here (they do not exist yet, and they are
+	// placement products either way).
+	PublishPorts []PublishPort
+
+	// RoutedEgress tells the provider whether this declaration can send anything
+	// through the host's router, i.e. whether the three host-side egress mechanisms
+	// must be put in place (network.md D5 ⑤: ip_forward, a guest default route
+	// carrying `dev`, and a masquerade for this /30 — measured necessary AND
+	// sufficient; rp_filter / proxy_arp / accept_local / per-interface forwarding
+	// are all measured unnecessary, so a provider must not add them).
+	//
+	// A derived FACT rather than a knob: `via[]` alone does not need it, because a
+	// steered flow is DNAT'd to a host-local endpoint and delivered locally.
+	RoutedEgress bool
+
+	// SecondHopUID / SecondHopGID identify the host-local process behind
+	// `via[].endpoint`, when the DEPLOYMENT supplied them (§2.4 / §6.2: a
+	// deployment input, never a declaration field — the engine still does not know
+	// what sits behind that endpoint, only which local uid's egress must be pinned
+	// under the same floor).
+	//
+	// They ride the spec rather than a separate call because the second-hop table is
+	// engine-level: one uid means one rule set regardless of sandbox count, so the
+	// provider installs it once at startup and not per placement. Pointers because
+	// uid 0 is a real uid — a value type could not tell "the operator said root"
+	// from "the operator said nothing", and those must behave oppositely.
+	SecondHopUID *int
+	SecondHopGID *int
+}
+
+// PublishPort is one `ingress.publish[]` item needing a host endpoint.
+type PublishPort struct {
+	GuestPort uint16
+	Proto     ruleset.Proto
+}
 
 // ResourceLimits is the Binding the provider materializes at placement time
 // (§3.4 / §5.A): CPU rate + RAM → cgroup for local_runsc. Disk CAPACITY is NOT
@@ -206,6 +270,23 @@ type Placement struct {
 	// signal (§4.3 placement/IP-as-epoch) — the engine does not add a counter.
 	TransportEndpoint string
 
+	// PublishEndpoints are the host `ip:port` each published guest port was bound
+	// to at this placement, in the SteeringSpec.PublishPorts order. They are what
+	// §6.1's `GET …/network` reports as `host_endpoint`.
+	//
+	// It is on Placement rather than in the record because that is what it IS: a
+	// placement product (§3.3), rebound every resume and invalidated with the old
+	// placement. Hence §6.1 omits the key entirely when the engine holds no live
+	// placement — a `paused` sandbox has no endpoint to report, and a falsy-but-
+	// present field would invite callers to read it as "is this publish in effect"
+	// (the same argument death_cause's omission rests on).
+	//
+	// Not a host primitive in the ❌-list sense: it is the address the engine
+	// DELIVERS to the caller as the whole point of publish (§5.D), so a remote
+	// provider produces one too — unlike a cgroup path or a netns fd, which such a
+	// provider could not produce at all.
+	PublishEndpoints []string
+
 	// handle is provider-private state for stop/start (local_runsc: the
 	// runsc container id + netns name). Deliberately not exported — callers
 	// address by SandboxID, not by placement internals.
@@ -278,5 +359,40 @@ type Provider interface {
 	// store is read by the mediator and fed to the provider, never the reverse
 	// (§4 subsystems don't call each other). Persistent state (Overlay upper) is
 	// never touched — it is not a placement resource (§4.4-A 持久态不碰).
+	//
+	// THE KEEP SET ARRIVES COMPLETE, and that is load-bearing rather than a calling
+	// convention (network.md D5 ㉒): reclaiming a live sandbox's rule set and then
+	// re-installing it during Adopt is literally the delete-then-install sequence
+	// measured to kill every live flow across the gap. The API shape makes that
+	// sequence inexpressible.
 	ReclaimOrphans(ctx context.Context, keep []string) error
+
+	// ReinstallRuleSet re-installs a SURVIVING sandbox's §5.D rule set after a
+	// control-plane restart — the second half of Adopt's obligation (§2.4: a rule set
+	// is crash-surviving host state exactly like the netns, so taking over a live
+	// placement means rebuilding it too; it is not something that can be added later).
+	//
+	// It MUST install as ONE atomic operation and MUST NOT flush connection tracking.
+	// Both are measured constraints, not implementation advice (network.md D5 ㉒): one
+	// atomic file leaves live flows intact 5/5, a delete-then-install kills them 5/5,
+	// and a conntrack flush kills them outright wherever `tcp_loose=0`. The permission
+	// hidden in the same measurement is that a provider may re-render blindly, with no
+	// diff against what is already installed.
+	ReinstallRuleSet(ctx context.Context, p *Placement, spec SteeringSpec) error
+
+	// InstallSecondHop installs the ENGINE-LEVEL rule set pinning the second hop
+	// (§2.4 invariant 2's second half): the egress of the host-local process behind
+	// `via[].endpoint`, narrowed by the deployment-supplied uid/gid.
+	//
+	// Called ONCE at startup rather than per placement, because the predicate is not
+	// per-sandbox: one uid covers every `via[]` in the deployment, and hop 2's traffic
+	// arrives on no interface, so there is nothing sandbox-specific to narrow by
+	// (measured: hop 2 counts ZERO in `forward` in all three shapes and is visible
+	// only in `output` — network.md D5 ㉔).
+	//
+	// A nil uid = the deployment supplied none: install nothing. The corresponding
+	// refusal of a `via[]` declaration happens at the write point, because a
+	// declaration whose own invariant the engine cannot enforce must be refused rather
+	// than half-honored.
+	InstallSecondHop(ctx context.Context, rs ruleset.RuleSet, uid, gid *int) error
 }

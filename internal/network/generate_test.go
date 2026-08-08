@@ -2,6 +2,7 @@ package network
 
 import (
 	"fmt"
+	"net/netip"
 	"strings"
 	"testing"
 
@@ -395,6 +396,62 @@ func findRule(s Spec, counter string) ruleset.Rule {
 		}
 	}
 	return ruleset.Rule{}
+}
+
+// The self-gateway allow must not reach a gateway the declaration never CONTAINED.
+//
+// The hole this closes, concretely: a sandbox on 10.66.250.0/30 (gateway
+// 10.66.250.1) declaring `allow 10.66.99.0/24:8080/tcp` OVERLAPS the sandbox
+// address space, so the rule is emitted — but 10.66.250.1 is not in the declared
+// CIDR. With the gateway clause alone, the caller reaches one address they never
+// named, on the declared port. That address is a HOST address, so any host process
+// bound `0.0.0.0:8080` becomes reachable: the floor's "any address of the host
+// itself" item (§2.4, measured D5 ⑧) lifted by a declaration that never named it.
+//
+// §2.4 permits the declared path (§5.D semantics ③) precisely BECAUSE the caller
+// named the gateway; overlap-without-containment is not that. So the rule must pin
+// the intersection, which the renderer materializes as two ANDed daddr clauses.
+func TestTheSelfGatewayAllowCannotReachAGatewayTheDeclarationDidNotContain(t *testing.T) {
+	// The dangerous shape: overlaps the /16, excludes any plausible gateway of the
+	// sandbox that declared it.
+	d := Zero()
+	d.Egress.Allow = []Tuple{{CIDR: mustCIDR(t, "10.66.99.0/24"), Port: 8080, Proto: ruleset.TCP}}
+	gw := findRule(mustGenerate(t, d), "allow0_selfgw")
+	if gw.Counter == "" {
+		t.Fatal("no self-gateway rule emitted for a declaration overlapping the sandbox space")
+	}
+	within := gw.Match.DestSelfGatewayWithin
+	if within == nil {
+		t.Fatal("the self-gateway rule carries no declared-prefix clause — a sandbox on " +
+			"10.66.250.0/30 would then reach 10.66.250.1:8080, an address this declaration does " +
+			"NOT contain, and with it any host process bound 0.0.0.0:8080 (§2.4's host-itself floor " +
+			"item, measured D5 ⑧)")
+	}
+	// The prefix is the DECLARED one, verbatim — not the sandbox space, and not
+	// widened. Widening it to 10.66.0.0/16 would restore the whole hole.
+	if within.String() != "10.66.99.0/24" {
+		t.Errorf("the clause pins %s, want the declared 10.66.99.0/24 — anything wider reopens the "+
+			"hole this clause exists to close", within)
+	}
+	// And the arithmetic the rule now expresses: this gateway is NOT in that prefix,
+	// so the intersection is empty and the rule cannot match.
+	gwAddr := netip.MustParseAddr("10.66.250.1")
+	if within.Contains(gwAddr) {
+		t.Fatalf("fixture is wrong: %s contains %s", within, gwAddr)
+	}
+	// The converse, so this is not just "a clause is present": a declaration that
+	// genuinely CONTAINS the gateway still reaches it — otherwise the fix would have
+	// broken §5.D semantics ③, which is the whole reason the rule exists.
+	d2 := Zero()
+	d2.Egress.Allow = []Tuple{{CIDR: mustCIDR(t, "10.0.0.0/8"), Port: 53, Proto: ruleset.UDP}}
+	gw2 := findRule(mustGenerate(t, d2), "allow0_selfgw")
+	if gw2.Match.DestSelfGatewayWithin == nil {
+		t.Fatal("the containing declaration lost its self-gateway rule")
+	}
+	if !gw2.Match.DestSelfGatewayWithin.Contains(gwAddr) {
+		t.Errorf("%s does not contain the gateway %s — §5.D semantics ③ has no delivery path left, "+
+			"which is the failure the fix must not introduce", gw2.Match.DestSelfGatewayWithin, gwAddr)
+	}
 }
 
 // --- gate A item 4: the render guards, on real generator output ---------------
@@ -1052,6 +1109,18 @@ func TestTheSelfGatewayAllowFollowsTheDeclaredSandboxSpaceOverlap(t *testing.T) 
 				// declared a resolver on a port, not "everything on my gateway".
 				if gw.Match.DestPort != 53 || gw.Match.Proto != ruleset.UDP {
 					t.Errorf("the self-gateway rule does not carry the declared port/proto: %+v", gw.Match)
+				}
+				// …AND the declared prefix, so the rule matches the INTERSECTION. The
+				// emission predicate above can only test OVERLAP (the gateway address is a
+				// placement product the generator does not know), so without this clause a
+				// declaration overlapping the sandbox space WITHOUT containing the gateway
+				// would still reach it — see the dedicated test below.
+				if gw.Match.DestSelfGatewayWithin == nil {
+					t.Error("the self-gateway rule does not carry the declared prefix — the emission " +
+						"test is OVERLAP, so without the prefix ANDed in, a declaration that never " +
+						"contained the gateway still reaches it")
+				} else if got := gw.Match.DestSelfGatewayWithin.String(); got != tc.cidr {
+					t.Errorf("the self-gateway rule pins prefix %s, want the declared %s", got, tc.cidr)
 				}
 			}
 		})

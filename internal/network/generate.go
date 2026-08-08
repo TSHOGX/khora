@@ -390,17 +390,25 @@ func (g *gen) inputChain(d Declaration) error {
 		if !intersectsSandboxSpace(t.CIDR) {
 			continue
 		}
+		cidr := t.CIDR
 		g.emit(ruleset.Rule{
 			Hook:    ruleset.HookInput,
 			Scope:   ruleset.ScopeGuestIn,
 			Verdict: ruleset.Accept,
 			Match: ruleset.Match{
 				DestSelfGateway: true,
-				Proto:           t.Proto,
-				DestPort:        t.Port,
+				// AND the declared prefix. The emission predicate above can only test
+				// OVERLAP — the gateway address is a placement product the generator does
+				// not know — so without this clause a declaration merely overlapping the
+				// sandbox space (`allow 10.66.99.0/24`) would also reach a gateway it never
+				// contained, i.e. lift the floor's host-itself item on an address the caller
+				// never named. The renderer ANDs the two into the intersection.
+				DestSelfGatewayWithin: &cidr,
+				Proto:                 t.Proto,
+				DestPort:              t.Port,
 			},
 			Counter: fmt.Sprintf("allow%d_selfgw", i),
-			Why:     fmt.Sprintf("egress.allow[%d] covers the sandbox address space: reach THIS sandbox's own /30 gateway — §5.D semantics ③'s only delivery path, and it must sit above the sibling drop (D5 ⑦)", i),
+			Why:     fmt.Sprintf("egress.allow[%d] ∩ this sandbox's own /30 gateway — §5.D semantics ③'s only delivery path, and it must sit above the sibling drop (D5 ⑦)", i),
 		})
 	}
 

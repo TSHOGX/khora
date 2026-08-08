@@ -50,9 +50,34 @@ type LocalRunsc struct {
 	// orchestrator as root and leaves this false.
 	Sudo bool
 
+	// HostPublishIP is the host address published endpoints are bound on (§5.D:
+	// the engine delivers a `host ip:port` and what sits in front of it is outside
+	// the engine). Empty → publishDefaultIP.
+	HostPublishIP string
+
 	mu    sync.Mutex
-	ipSeq uint32          // monotonic /30 subnet allocator within 10.66.0.0/16
+	ipSeq uint32          // monotonic /30 subnet allocator within ruleset.SandboxCIDR
 	inUse map[string]bool // guest IPs currently held (seeded by Adopt across restart)
+	// pubSeq / pubInUse allocate host ports for published endpoints, the same shape
+	// as the /30 allocator and for the same reason: a restarted process must not
+	// hand a new sandbox a port an adopted survivor holds.
+	pubSeq   uint16
+	pubInUse map[uint16]bool
+}
+
+// publishDefaultIP is the host address published endpoints bind to when the
+// deployment names none. Loopback by default, deliberately: publishing is an
+// EXPLICIT inbound exception (§2.1 ③), and binding it to every host interface by
+// default would make "the sandbox is reachable from the outside" a consequence of
+// omitting a flag rather than of a decision. A deployment that wants external
+// reachability names the address.
+const publishDefaultIP = "127.0.0.1"
+
+func (p *LocalRunsc) publishIP() string {
+	if p.HostPublishIP != "" {
+		return p.HostPublishIP
+	}
+	return publishDefaultIP
 }
 
 // resource-name prefixes: the provider OWNS this convention so enumeration is
@@ -97,11 +122,26 @@ const memOverheadBytes int64 = 64 << 20
 // teardown needs — the placement-local resource kinds relevant here (§4.4-A
 // reclaim order: runsc → veth → netns).
 type placementHandle struct {
+	// sandbox is the SandboxID this placement serves. Held so teardown and Adopt can
+	// derive the rule-set table name, which carries it verbatim (§4.4-A labeling).
+	sandbox   string
 	cid       string
 	netns     string
 	vethHost  string
 	guestIP   string
+	gatewayIP string
 	bundleDir string
+	// nftTable is this sandbox's rule-set table, or "" if none was installed. A
+	// PLACEMENT RESOURCE like the netns: it is crash-surviving host state, so
+	// teardown must remove it and reconciliation must rebuild or reclaim it — it
+	// cannot be added after the fact (§2.4).
+	nftTable string
+	// publishEndpoints maps each published guest port to the host `ip:port` bound
+	// for it AT THIS PLACEMENT (§3.3: rebound every resume, old one invalidated).
+	publishEndpoints map[uint16]string
+	// publishHostPorts are the host ports held, so teardown returns them to the
+	// allocator.
+	publishHostPorts []uint16
 	// cgroupLeaf is the host path of this sandbox's memcg/cpu leaf, or "" when the
 	// sandbox has no limits (no leaf was requested). Provider-private, like every
 	// other field here: it is the host primitive §5.A forbids in the interface, so
@@ -124,9 +164,15 @@ func namesFor(sandbox string) placementHandle {
 	sum := sha256.Sum256([]byte(sandbox))
 	short := hex.EncodeToString(sum[:])[:12] // 12 hex → "vh"+12 = 14 ≤ 15 (IFNAMSIZ)
 	return placementHandle{
+		sandbox:  sandbox,
 		cid:      cidPrefix + sandbox,
 		netns:    nsPrefix + sandbox,
 		vethHost: "vh" + short,
+		// The rule-set table carries the SandboxID verbatim, like the netns name, so
+		// enumeration is reversible and reconciliation can both re-adopt a survivor's
+		// rules and identify orphan tables (§4.4-A / §2.4: the rule set is
+		// crash-surviving host state).
+		nftTable: nftTableName(sandbox),
 	}
 }
 
@@ -149,8 +195,9 @@ func NewLocalRunsc(runscRoot, stateDir string) (*LocalRunsc, error) {
 		RunscBin:  "runsc",
 		// random start reduces subnet collision across restarts; inUse (seeded by
 		// Adopt during §4.4-A reconciliation) makes the guarantee exact.
-		ipSeq: uint32(rand.Intn(4000)),
-		inUse: make(map[string]bool),
+		ipSeq:    uint32(rand.Intn(4000)),
+		inUse:    make(map[string]bool),
+		pubInUse: make(map[uint16]bool),
 	}, nil
 }
 
@@ -220,6 +267,7 @@ func (p *LocalRunsc) Launch(ctx context.Context, spec LaunchSpec) (_ *Placement,
 	hostIP, guestIP := p.allocSubnet()
 	h := namesFor(spec.Sandbox)
 	h.guestIP = guestIP
+	h.gatewayIP = hostIP // the /30's host side IS this sandbox's gateway
 
 	// unwind half-built placement on any failure path.
 	defer func() {
@@ -231,6 +279,30 @@ func (p *LocalRunsc) Launch(ctx context.Context, spec LaunchSpec) (_ *Placement,
 	// ④a: build netns + veth + assign guest IP (engine pre-builds; runsc adopts).
 	if err = p.buildNetns(&h, hostIP, guestIP); err != nil {
 		return nil, fmt.Errorf("runtime: build netns: %w", err)
+	}
+
+	// ④a′: §5.D ENFORCEMENT, and its POSITION IS THE OBLIGATION (§2.4): the rules go
+	// on AFTER the netns/veth exist and BEFORE the isolated unit runs. Any window in
+	// which the network is up and the rules are not is a fail-open window, and only
+	// the side creating the placement has this hook point at all (network.md D1 ①).
+	// A failure here unwinds the half-built placement via the defer above (§4.4-A) —
+	// there is no "launch it anyway without the rules" path, because that is exactly
+	// the escape-is-failure-not-degradation rule (§2.4).
+	//
+	// The guest default route lands in the SAME pre-launch window, and for an
+	// independent reason: the sentry takes the L3 address off the kernel-side veth
+	// when it boots, so a post-boot `ip route add` fails with `Nexthop has invalid
+	// gateway` (measured, network.md D5 ⑬).
+	if err = p.bindPublishEndpoints(&h, spec.Steering); err != nil {
+		return nil, err
+	}
+	if spec.Steering.RoutedEgress {
+		if err = p.egressSetup(&h, hostIP); err != nil {
+			return nil, err
+		}
+	}
+	if err = p.installRuleSet(ctx, &h, spec.Steering); err != nil {
+		return nil, err
 	}
 
 	// ④b: write OCI bundle (root.path = merged, entrypoint = sandboxd, adopt netns).
@@ -281,9 +353,57 @@ func (p *LocalRunsc) Launch(ctx context.Context, spec LaunchSpec) (_ *Placement,
 		}
 	}
 
-	pl := &Placement{TransportEndpoint: fmt.Sprintf("%s:%d", guestIP, guestport.Port)}
+	pl := &Placement{
+		TransportEndpoint: fmt.Sprintf("%s:%d", guestIP, guestport.Port),
+		PublishEndpoints:  publishEndpointList(&h, spec.Steering),
+	}
 	pl.SetHandle(&h)
 	return pl, nil
+}
+
+// bindPublishEndpoints allocates one host endpoint per published guest port — the
+// binding §5.D leaves to the provider because it is a placement product (§5.A ❌
+// list / network.md D1 ②).
+func (p *LocalRunsc) bindPublishEndpoints(h *placementHandle, spec SteeringSpec) error {
+	if len(spec.PublishPorts) == 0 {
+		return nil
+	}
+	h.publishEndpoints = make(map[uint16]string, len(spec.PublishPorts))
+	for _, pp := range spec.PublishPorts {
+		if _, dup := h.publishEndpoints[pp.GuestPort]; dup {
+			// Deduplication is the declaration layer's job (§5.D: the substrate will not
+			// find it — nft accepts two identical DNATs and the second never matches). If
+			// two items reach here for one guest port, the two DNAT halves would target the
+			// same port from two endpoints, so refuse rather than bind a second one.
+			return fmt.Errorf("runtime: guest port %d appears twice in the steering spec — "+
+				"deduplication belongs to the declaration layer (§5.D)", pp.GuestPort)
+		}
+		port := p.allocPublishPort()
+		if port == 0 {
+			// The range is exhausted. Fail the launch rather than bind a colliding port:
+			// two sandboxes sharing a host endpoint means one of the two publishes
+			// silently never matches (nft accepts the duplicate DNAT without complaint —
+			// §5.D's reason deduplication cannot be left to the substrate).
+			return fmt.Errorf("runtime: no host port available for publishing guest port %d "+
+				"(range [%d,%d) exhausted)", pp.GuestPort, publishPortBase, publishPortBase+publishPortSpan)
+		}
+		h.publishHostPorts = append(h.publishHostPorts, port)
+		h.publishEndpoints[pp.GuestPort] = fmt.Sprintf("%s:%d", p.publishIP(), port)
+	}
+	return nil
+}
+
+// publishEndpointList returns the bound endpoints in the spec's declaration order,
+// which is the order §6.1's read face reports them in.
+func publishEndpointList(h *placementHandle, spec SteeringSpec) []string {
+	if len(spec.PublishPorts) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(spec.PublishPorts))
+	for _, pp := range spec.PublishPorts {
+		out = append(out, h.publishEndpoints[pp.GuestPort])
+	}
+	return out
 }
 
 // Stop cleanly stops the unit AND releases its placement-local resources
@@ -354,6 +474,11 @@ func (p *LocalRunsc) Adopt(ctx context.Context, sandbox string) (*Placement, boo
 		return nil, false, CauseUnknown, fmt.Errorf("runtime: Adopt %s: container alive but endpoint unrecoverable: %w", sandbox, err)
 	}
 	h.guestIP = ip
+	// The gateway is the /30's host side, i.e. guest-1 — recovered here because
+	// re-rendering the rule set needs it (the self-gateway allow and the publish
+	// return SNAT both name it), and because rediscoverGuestIP read it to derive the
+	// guest IP in the first place.
+	h.gatewayIP = decLastOctet(ip)
 	p.markInUse(ip) // survivor holds this IP — the allocator must skip it (§4.4-A)
 
 	pl := &Placement{TransportEndpoint: fmt.Sprintf("%s:%d", ip, guestport.Port)}
@@ -369,6 +494,20 @@ func (p *LocalRunsc) Adopt(ctx context.Context, sandbox string) (*Placement, boo
 // provider only enumerates its own host resources and reverse-dep-order tears
 // down the rest. Persistent state (Overlay upper) is never touched — that is not
 // a placement resource (§4.4-A 持久态不碰).
+//
+// # The keep-set must be complete BEFORE anything is deleted
+//
+// That is a hard constraint rather than a natural reading (network.md D5 ㉒). The
+// keep set arrives fully computed here, and this function deletes only what is
+// outside it — so "reclaim first, then adopt" is not expressible through this API,
+// which is deliberate: reclaiming a live sandbox's TABLE and then re-installing it
+// during Adopt is LITERALLY the delete-then-install sequence measured to kill every
+// live flow across the gap (5/5).
+//
+// The rule set is enumerated as its own resource class here, not inferred from the
+// netns list, because the two can disagree: a table survives a netns that was
+// already reclaimed, and that table is exactly the kind of stale host state a later
+// sandbox could inherit.
 func (p *LocalRunsc) ReclaimOrphans(ctx context.Context, keep []string) error {
 	keepSet := make(map[string]bool, len(keep))
 	for _, s := range keep {
@@ -377,6 +516,19 @@ func (p *LocalRunsc) ReclaimOrphans(ctx context.Context, keep []string) error {
 	found, err := p.enumeratePlacements()
 	if err != nil {
 		return err
+	}
+	// Rule-set tables belonging to sandboxes with no netns left: a table outlives
+	// the netns it referenced whenever a previous reclaim was interrupted between the
+	// two steps. Merged into the same pass so each orphan is torn down once.
+	tables, _ := p.enumerateRuleSetTables(ctx)
+	for _, tbl := range tables {
+		sandbox, ok := sandboxOfTable(tbl)
+		if !ok {
+			continue // the engine-level second-hop table belongs to the process, not a sandbox
+		}
+		if !contains(found, sandbox) {
+			found = append(found, sandbox)
+		}
 	}
 	for _, sandbox := range found {
 		if keepSet[sandbox] {
@@ -391,6 +543,68 @@ func (p *LocalRunsc) ReclaimOrphans(ctx context.Context, keep []string) error {
 		}
 		p.teardownPlacement(&h)
 	}
+	return nil
+}
+
+func contains(xs []string, x string) bool {
+	for _, s := range xs {
+		if s == x {
+			return true
+		}
+	}
+	return false
+}
+
+// ReinstallRuleSet re-renders and re-installs a surviving sandbox's rule set as ONE
+// atomic file — the §4.4-A Adopt face of §5.D enforcement.
+//
+// # Why it may re-install blindly, with no diff
+//
+// The atomic-reinstall measurement (network.md D5 ㉒) is not only a constraint, it
+// is also a PERMISSION: because one atomic `nft -f` file does not disturb a live
+// flow (5/5 survived, the ct entry's id unchanged, the masquerade counter at zero
+// while bytes kept moving — the flow runs on the transform already stored in the ct
+// entry and the nat hook is not re-evaluated), Adopt can re-render the whole rule
+// set and load it without reasoning about what is already there. That is far simpler
+// than diffing, and it is the ONLY shape that is safe.
+//
+// The two prohibitions from the same measurement:
+//   - NEVER `delete` the table and then install (5/5 flows died — packets sent
+//     during the gap left with the raw sandbox source address and the peer RST them).
+//     The atomic file's leading bare-`table` + `delete` + definition is all in ONE
+//     transaction, which is not the same thing.
+//   - NEVER flush conntrack, in any form. Under `tcp_loose=0` a flush kills live
+//     flows outright; this host's `tcp_loose=1` masks it by mid-stream-adopting the
+//     flow, and that is a sysctl the engine neither owns nor may depend on.
+//
+// The endpoints are re-bound here rather than recovered: `Adopt` returns the SAME
+// transport endpoint because the isolation unit never restarted (§3.3, no new
+// epoch), but a published host port is a host-side rule, and re-deriving it keeps
+// the record's read face consistent with what is actually installed.
+func (p *LocalRunsc) ReinstallRuleSet(ctx context.Context, pl *Placement, spec SteeringSpec) error {
+	h, ok := pl.Handle().(*placementHandle)
+	if !ok || h == nil {
+		return fmt.Errorf("runtime: ReinstallRuleSet on a placement with no handle")
+	}
+	if err := p.bindPublishEndpoints(h, spec); err != nil {
+		return err
+	}
+	for _, port := range h.publishHostPorts {
+		p.markPublishPortInUse(port)
+	}
+	if spec.RoutedEgress {
+		// The guest default route cannot be re-added after boot (the sentry took the L3
+		// address off the kernel-side veth, D5 ⑬) — but it does not need to be: the
+		// isolation unit never restarted, so the route it booted with is still in its
+		// netstack. Only the host-side halves are re-asserted.
+		if err := writeSysctl("net/ipv4/ip_forward", "1"); err != nil {
+			return fmt.Errorf("runtime: re-assert ip_forward during adopt: %w", err)
+		}
+	}
+	if err := p.installRuleSet(ctx, h, spec); err != nil {
+		return err
+	}
+	pl.PublishEndpoints = publishEndpointList(h, spec)
 	return nil
 }
 
@@ -463,6 +677,20 @@ func (p *LocalRunsc) rediscoverGuestIP(h *placementHandle) (string, error) {
 	return fmt.Sprintf("%s.%d", string(m[1]), lo+1), nil
 }
 
+// decLastOctet recovers the /30's host (gateway) address from the guest address —
+// the inverse of the launch allocation, which pins guest = host + 1.
+func decLastOctet(ip string) string {
+	i := strings.LastIndexByte(ip, '.')
+	if i < 0 {
+		return ""
+	}
+	n, err := strconv.Atoi(ip[i+1:])
+	if err != nil || n == 0 {
+		return ""
+	}
+	return ip[:i+1] + strconv.Itoa(n-1)
+}
+
 // teardownPlacement is the idempotent reclaim primitive (§4.4-A): reverse
 // dependency order runsc → overlay(mediator owns) → veth → netns. Every step is
 // best-effort so a partially-built placement (Launch failure) cleans fully.
@@ -488,6 +716,17 @@ func (p *LocalRunsc) teardownPlacement(h *placementHandle) {
 	} else {
 		_ = os.Remove(cgroupLeafPath(h.cid))
 	}
+	// The §5.D rule set. A PLACEMENT RESOURCE like the netns — crash-surviving host
+	// state (§2.4) — so it goes here rather than being left to leak, and it goes
+	// BEFORE the veth: a rule referencing a veth by NAME survives that veth's
+	// removal harmlessly (which is the whole reason for `iifname` over `iif`), but
+	// dropping the table first means a half-torn-down placement never has rules
+	// pointing at a veth that a later sandbox could recreate under the same name.
+	//
+	// `destroy` rather than `delete`: teardown runs on half-built placements where
+	// the table may never have been installed, and `delete` on a nonexistent table
+	// returns rc=1.
+	p.deleteRuleSet(h.nftTable)
 	// Strict reverse-dependency order (§4.4-A: build was netns → veth → runsc, so
 	// teardown is runsc → veth → netns). Deleting the HOST veth cascades its guest
 	// peer (a veth pair dies with either end), leaving an empty netns to drop last.
@@ -501,6 +740,9 @@ func (p *LocalRunsc) teardownPlacement(h *placementHandle) {
 		_ = os.RemoveAll(h.bundleDir)
 	}
 	p.freeIP(h.guestIP)
+	for _, port := range h.publishHostPorts {
+		p.freePublishPort(port)
+	}
 }
 
 // ensureCgroupParent creates the engine-owned parent layer and delegates the

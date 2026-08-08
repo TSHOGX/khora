@@ -373,6 +373,28 @@ type Match struct {
 	// which is a question of ORDER, not of set membership, and needs this
 	// placement-bound spelling to express.
 	DestSelfGateway bool
+	// DestSelfGatewayWithin, when set, additionally requires the gateway to lie
+	// inside this DECLARED prefix. The rendered rule carries BOTH clauses, and nft
+	// ANDs them — so the rule matches the INTERSECTION of "the gateway" and "what
+	// the caller declared".
+	//
+	// It is required rather than belt-and-braces, and the hole it closes is
+	// concrete. The generator cannot test containment: the gateway address is a
+	// placement product it does not know, so its emission predicate can only be
+	// "does the declared prefix OVERLAP the sandbox address space". With overlap
+	// alone, a sandbox on 10.66.250.0/30 that declared `allow 10.66.99.0/24:8080`
+	// would ALSO reach 10.66.250.1:8080 — one address its CIDR does not contain,
+	// on the declared port. That address is a HOST address, so any host process
+	// bound 0.0.0.0:8080 becomes reachable: the floor's "any address of the host
+	// itself" item (§2.4, measured D5 ⑧) lifted by a declaration that never named
+	// it. §2.4 permits the declared path (semantics ③) precisely because the
+	// caller NAMED the gateway; overlap-without-containment is not that.
+	//
+	// Carrying the prefix rather than having the renderer decide whether to emit
+	// the rule keeps the DECISION in the generator (only the gateway, only on
+	// declared ports — both unit-tested) while the renderer performs only the
+	// substitution it alone holds the operand for.
+	DestSelfGatewayWithin *netip.Prefix
 	// DestGuest matches "this sandbox's guest IP" — the destination a publish DNAT
 	// produces, used by the companion accept and the return SNAT.
 	DestGuest bool
