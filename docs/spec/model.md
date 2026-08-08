@@ -275,8 +275,8 @@ Overlay(B)、按挂载表重挂 Volume(C)、按网络声明重装规则集(D);E(
 由此定下职责归属,防止成环:
 
 > **动词归 §4,机制归 §5。** 生命周期(§4)持有状态机,按状态机**调用**每个子系统暴露的能力;
-> 子系统只提供机制(FS 提供"挂/卸 Overlay",Network 提供"生成规则集"…),**子系统之间永不
-> 互相调用**。"FS 在 resume 时去戳 Network" 这类跨子系统调用是被禁止的——那正是反向依赖成环的
+> 子系统只提供机制(Rootfs 提供"挂/卸 Overlay",Network 提供"生成规则集"…),**子系统之间永不
+> 互相调用**。"Rootfs 在 resume 时去戳 Network" 这类跨子系统调用是被禁止的——那正是反向依赖成环的
 > 起点。
 
 ### 4.1 状态机
@@ -395,6 +395,9 @@ resume 而非 auto-pause 的静止(健康态分类与判据见 §4.3)。
 
 **健康态分类(先两层探活,再判 idle——兑现 §4.2 的要求)。** 处置**互不相同**:
 
+**分类的定义域是 `running` 记录。** `paused` 只走 TTL/evict、`creating` / `destroyed` 不是分类器的对象;
+对它们取 `unknown` 是"不属本表",不是一次健康判定。
+
 | 健康态 | 判据(L1 substrate / L2 transport) | 处置 |
 | --- | --- | --- |
 | **healthy** | L1 活 + L2 通,且**未越 idle 阈值**——有连接活跃(近期有 I/O:进程输出 / pty 读写),或全体 idle 但时长未及 `idle_timeout`(含 `idle_timeout: 0` 不设期限) | 保持 `running`,不动 |
@@ -402,7 +405,7 @@ resume 而非 auto-pause 的静止(健康态分类与判据见 §4.3)。
 | **transport-down(瞬态)** | **L1 活、L2 不通**——transport 子进程崩了,PID1 正在原地重启(§5.E.1) | **等重启**;端口在**同一 IP** 上恢复,**不是** dead-recoverable、**不**走 resume;**连续 transport-down 超重启预算(以连续时长计,非 PID1 重启次数)→ 升级为 dead-recoverable 走 resume**(防崩溃循环卡死,机制见 reaper-health D4b) |
 | **dead-recoverable** | **L1 探不到**(容器整死),持久态(Overlay 工件)在后端完好,**且死因不是撞资源帽** | **crash-pause 降 `paused`**(§4.2 非自愿 pause),死因同一提交落库;恢复路径是 **resume**(换新 IP 冷启)、**由调用方显式发起**,不是 auto-pause 的静止 |
 | **resource-terminated** | **L1 探不到,且死因是撞 RAM 帽**(§3.4 安全限:沙箱被整组终止) | **不 resume**、不 auto-pause——留 `paused`。resume 会让同一负载再次触发终止,即崩溃循环。**转机只有一条:改帽**——经 §6.1 `PATCH /v1/sandboxes/{id}` 抬高 `memory_byte`(须**严格**大于原值,等值写入不清死因——**这条只约束清死因,不改 §3.4.3 的方向性**;须重过准入门,节点无容量则被拒),**该次提交同时清死因**,之后 resume 才放行;一次成功的 resume 同样清死因。**它不豁免驱逐**(见下) |
-| **unknown** | **两个来源,只有第二个经过 L2**:① live-map 里**没有该沙箱的活句柄**(store 记 `running`、本进程没在管它)——分类器当场返 unknown,**一个探针都不发**,那是 §4.4-A 接管半段的事;② L2 不通、且 L1 判不出(provider 报错) | **什么都不做,下轮重试**——对不确定取保守(§4.4-A):既不降级也不 resume。它**永不是一种处置**,只是分类器的安全默认 |
+| **unknown** | **三个来源,只有第三个经过 L2**:① 记录不是 `running`(不属本表,见上);② live-map 里**没有该沙箱的活句柄**(store 记 `running`、本进程没在管它)——分类器当场返 unknown,**一个探针都不发**,那是 §4.4-A 接管半段的事;③ L2 不通、且 L1 判不出(provider 报错) | **什么都不做,下轮重试**——对不确定取保守(§4.4-A):既不降级也不 resume。它**永不是一种处置**,只是分类器的安全默认 |
 
 > **resource-terminated 与 dead-recoverable 并列,不是它的子类。** 两者 L1 都探不到、持久态都完好,
 > 表现完全相同;区分只能靠**死因信号**,而处置**相反**(一个必须 resume,一个必须不 resume)。死因跨
@@ -598,10 +601,12 @@ placement-local 资源,其机制(`Adopt`/`ReclaimOrphans` 签名、SandboxID 标
   不发事件(§3.4.5),但它们全程持有该沙箱的这把锁,故与 `destroy`/`resume`/`evict` **互斥**——
   一次改帽不可能与一次正在推进的 resume 交错,也不可能在沙箱正被删时提交。
 - **锁内先做状态前置校验(CAS)**:每个动词声明它的合法源态(如 `resume` 要求 `paused`、`pause` 要求
-  `running`),当前 `lifecycle-state` ≠ 期望源态则**拒绝**,不执行。于是"pause 与 resume 同时来"= 后拿到
+  `running`),当前 `lifecycle-state` ≠ 期望源态则**拒绝**,不执行。**两个动词是刻意的例外,不是遗漏**:
+  `create` 的 ID 是新造的、没有源态可比;`destroy` 从 `running` / `paused` / `creating` 三态都合法且幂等,
+  故没有单一"期望源态"可 compare-and-set——它的串行化**全靠那把锁**,不靠 CAS。于是"pause 与 resume 同时来"= 后拿到
   锁者面对已变的态 CAS 失败。"resume 与 evict 竞争"= 谁先拿锁谁赢,而**输家怎么等,取决于它是谁发的**:
   - **用户动词**(`create`/`pause`/`resume`/`destroy`)**阻塞等锁**,等赢家整条转换落定后再拿到锁、对
-    **已变的态**重做 CAS(resume 赢则态已 `running`,`destroy` 要求 `paused` 被拒)。
+    **已变的态**重做 CAS(resume 赢则态已 `running`;`destroy` 无源态 CAS,见下)。
   - **reaper 发的动词**(`auto-pause`/`evict`,以及周期对账)**不阻塞**:它**试锁**(`TryLock`),不成即
     **跳过本轮**、留到下一轮重来(reaper-health D3)。理由是 reaper 是周期性的、无调用方在等它,而阻塞
     等锁会让一次长 resume 卡住整条 sweep;它跳过的沙箱下一轮自然重判,且那时态已是最新的。
@@ -677,7 +682,7 @@ drain 循环自己身上采样,数字会恰好在它卡住的那一刻停止更�
 gauge / 采样接(§1.3 add a subscriber,Consumption seam),不进引擎原语。外部证据同向:两个参考实现
 都只暴露 gauge / 采样,无人把压力发成事件。
 
-**保留窗口(裁剪)**:**不裁剪,行只标记不删**。代价明说:outbox 的 at-rest 体积无界增长,是一条
+**保留窗口(裁剪)**:**今天不裁剪,行只标记不删**。代价明说:outbox 的 at-rest 体积无界增长,是一条
 **已知限制**,不是这条决定的优点。窗口取值必须由"承诺给外部订阅者的重连时长"论证,而引擎内的 sink
 是个打日志的参考实现、"已投递"几乎恒真,故**没有可论证的取值**;凭空取一个数是 §1.3 拒绝的投机性
 预留。这是本节唯一仍开放的一项,见

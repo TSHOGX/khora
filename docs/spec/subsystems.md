@@ -15,7 +15,7 @@
   这里(沙箱"是什么")。
 - **5.C Volume** — 解耦、ID 寻址、独立生命周期的存储(额外"挂了哪些独立数据")。
 - **5.D Network** — 每个沙箱可声明的网络可达集,以及兑现它的规则集(沙箱"能到哪、谁能到它")。
-- **5.E Transport** — 宿主↔沙箱的通道:两个通用 RPC 服务(process / fs)。
+- **5.E Transport** — 宿主↔沙箱的通道:两个通用能力服务(process / fs),外加一个引擎自用的 `Health` 探针。
 
 > Rootfs 与 Volume 分两个子系统:**Overlay 工件**生命周期**随沙箱**、引用某个 Template、就是
 > pause/resume 的那份冻结层;**Volume** 生命周期**独立**、先于/晚于沙箱存活、自带管理 API 与后端。
@@ -83,8 +83,9 @@
   - **网络 placement 机制**:`--network=sandbox` 的 runsc **只 adopt 一个已存在的 netns、不自建**。故
     `local_runsc` 先建 netns + veth、**给 guest 端分配 IP**,再经 OCI `linux.namespaces[type=network].path`
     把 netns 交给 runsc;sentry 加入后在 boot 时把内核侧 L3 地址**收进自己的 netstack**(boot 后从内核侧读
-    不到该地址,veth 链路仍在)。由此 guest-runtime D5.1 冷启链的 ⑥「发现 IP」对 local_runsc 退化成
-    **读回引擎自己的分配**——不做 boot 后探测。resume 每次**新建 netns**(§3.3 换新 IP),故无「复用
+    不到该地址,veth 链路仍在)。由此 guest-runtime D5.1 冷启链的 ⑥ 对 local_runsc **不是一次 boot 后探测**:
+    launch 路径直接用引擎自己那次分配;`Adopt` 路径读**宿主端** veth 仍带的 /30 再 +1(分配把 guest 钉在
+    host+1),故崩溃重启后端点可重建而无需问 guest。resume 每次**新建 netns**(§3.3 换新 IP),故无「复用
     netns 须重灌地址」问题。
   - **cgroup 归属:引擎建父层、叶子归 runsc**——runsc 只创建 `cgroupsPath` 的最后一段且要求父层已存在,
     **并且只对自己创建的叶子写限额**(引擎若预建完整路径,限额会**静默不生效而 launch 照常成功**);故引擎
@@ -181,20 +182,14 @@
   靠 sweep 回收。
 - **Promote 捕获只含 Overlay 树,且排除引擎注入物**:固化沙箱 FS = 固化 Overlay 这棵树,但**引擎自己
   注入 guest 的运行时文件不进层**(`sandboxd` 的 portal / 哨兵文件,清单见 rootfs-overlay D5)。挂载进来
-  的 Volume **也不在这棵树里**——挂载点(如 `/home/workspace`)在固化结果里只是一个**空目录占位**,
-  Volume 内容不进去(它在各自后端,§5.C)。这跟 `tar` 一个挂了 NFS 的目录只 tar 到挂载点空壳是同一回事。
-  **空占位是默认结果、不靠排除项兑现**(实测:平坦无遮蔽的情形下,放置本身在 upper 里物化出一个普通空
-  目录、零 overlayfs xattr;Template 自己提供挂载点时 upper 甚至纯净无痕)。
-  - **两种情形结果不同,别把"空占位"读成对两者的承诺**:①**无遮蔽**(upper 里那个 dest 只是放置物化出的
-    空目录)——它本就是空的,不进排除项,固化结果里是**空目录占位**,即上面那句;②**有遮蔽**(dest 下
-    压着 Template 或 upper 的既有字节)——那时 dest 进排除项,而排除是**整棵子树剪掉**,故固化结果里该
-    路径**根本不存在**(实测 `stat` 得 ENOENT),不是一个空目录。
-    **两者都正确,因为要守的性质是"Volume 内容不进层、被遮蔽的字节不进层"**,而不是"层里一定有个空目录"。
-    冷启不受影响:`runsc create` 会在 dest 缺失时自己把它物化出来,故一个缺失的挂载点在下一次放置时照样
-    可用——这也是为什么 §5.B 不需要为情形 ② 补一个"造空目录"的步骤。
-  - **Volume 写入落在宿主目录里,既在沙箱 disk 帽之外、也在 Promote 捕获之外。排除项真正要干的是剪掉被
-    挂载点遮蔽的既有字节**(它们对每个 guest 都不可见,却会被完整拷进冻结层、并同时计进该沙箱的容量帽与
-    代价预报)——因此挂载点集合必须作为**per-Promote 入参**传进来,不能是静态清单(见 rootfs-overlay D5)。
+  的 Volume **也不在这棵树里**(它在各自后端,§5.C)——要守的性质是**"Volume 内容不进层、被挂载点遮蔽的
+  既有字节也不进层"**,而不是"层里一定有个空目录":挂载点(如 `/home/workspace`)在固化结果里**或是一个
+  空目录占位、或根本不存在**,两者都正确,别把"空占位"读成对两种情形的承诺(哪种情形给哪个结果,同处
+  D5)。冷启不受影响——`runsc create` 会在 dest 缺失时自己把它物化出来,故 §5.B
+  不需要补一个"造空目录"的步骤。
+  - **挂载点集合必须作为 per-Promote 入参传进来,不能是静态包级清单**:Volume dest 是 per-sandbox 的
+    挂载行,包级清单无从得知。这也让 **§5.B 永不必去问 §5.C**(不产生子系统互调)——§4 mediator 本来
+    就持挂载表、本来就调 Promote。**代价预报走同一个集合**。
 - **底层存储附带能力(single-node)**:snapshot/clone 落在 CoW FS(reflink)上廉价。这是 single-node
   provider 的附加能力,不是模型对宿主路径的依赖。
 - **容量配额是本子系统的物化职责(disk 容量轴,§3.4)**:per-sandbox 的 disk 容量上限(Binding)由
@@ -405,15 +400,12 @@
   - **必须有一道独立于 FK 的活挂载检查**:跳过任何 id 出现在**任何**挂载行里的单元(不论是否 live);
     **枚举或读取出错时跳过,绝不把空结果当成"无拥有者"**(实测:并发 churn 下配额行的批量读取会整体
     失败并返回零行)。配额行**按删除时记下的 id 定位,绝不扫行**。
-  - **一次误 sweep 没有任何检测路径,这是上面每条要求都是硬要求的原因。** 它是数据面事件(实测:五种
-    拿掉活卷的手法**无一杀死沙箱**,控制面什么都看不到),但后果比"guest 见 I/O 错误"更糟——**guest 的写
-    仍然返回成功**,字节落进一个没有任何宿主路径可达的 unlinked inode、在拆除时消失,**一个工作集固定的
-    guest 永远不会察觉**(细节与五臂分布见 [`deep-dives/volume.md`](./deep-dives/volume.md) D7)。
-    连带一条**验收纪律**:"沙箱是否存活"恒真,故它作为断言永远不会失败、毫无守卫价值;要断言的是那些
-    **会静默通过**的性质。
-  - **`Backend.Materialize` 必须是 create-if-absent**:实测源不存在时 runsc 直接硬失败(不会静默建目录),
-    故若它是 open-only,一个被误 sweep 的沙箱将**永久无法 resume**;create-if-absent 则干净重启(数据
-    全失但可恢复)。这也是它承担"卷的字节按需存在"的地方。
+  - **一次误 sweep 没有任何检测路径,这是上面每条要求都是硬要求的原因。** 它是纯数据面事件——沙箱照常
+    存活、**guest 的写仍然返回成功**、控制面什么都看不到(五种手法的实测分布与后果见
+    [`deep-dives/volume.md`](./deep-dives/volume.md) D7.2)。连带一条**验收纪律**:"沙箱是否存活"在这里
+    恒真,故它作为断言永远不会失败、毫无守卫价值;要断言的是那些**会静默通过**的性质。
+  - **`Backend.Materialize` 必须是 create-if-absent**:若它是 open-only,一个被误 sweep 的沙箱将**永久
+    无法 resume**;create-if-absent 则干净重启(数据全失但可恢复)。这也是它承担"卷的字节按需存在"的地方。
 - **不含**:沙箱自身的 rootfs / Overlay 工件(→ B)。
 
 ### 5.D Network(可达性声明与其强制)
@@ -438,7 +430,8 @@
     语义 ③ 自己的承诺:调用方要能声明自己的解析器,而唯一稳定可用的宿主本地解析器地址是**本沙箱自己的
     `/30` 网关**,它落 `input`——只发 `forward` 的放行**到不了它**,那条承诺就没有兑现路径;而 `input` 侧
     缺了那条 sibling drop,一条 `allow 10.0.0.0/8` 就会让本沙箱连上 sibling 的**网关**。**这与"地板在
-    `input` 侧不需要 daddr 清单"不冲突**:地板在那一侧是一条纯 ct-state 规则(它对宿主自身的任一地址已
+    `input` 侧不需要 daddr 清单"不冲突**:地板在那一侧是一条 `iifname` 收窄的纯 ct-state 规则(`iifname`
+    是它成为每沙箱规则的全部理由;它对宿主自身的任一地址已
     穷尽、从不枚举),sibling drop 是**另一条**规则、谓词是 sibling CIDR——两条规则,不是往地板上挂一份
     daddr 清单(推导与实测见 [`deep-dives/network.md`](./deep-dives/network.md) D4.2)。
   - **渲染并安装归 §5.A**:nft 文本的渲染,以及 `iifname` / guest IP / publish 宿主端点的绑定,都在
@@ -625,7 +618,7 @@
 #### 5.E.1 guest 启动拓扑:`sandboxd` 的两个进程角色
 
 `sandboxd` 是 guest 内核心组件,承担**两个正交职责**,靠**同一个二进制、两个进程**切开——不合并
-(合并会让最复杂的 transport 崩溃时导致整个 guest 崩溃,也堵死热升级),不引第二个二进制(守 §1.1
+(合并会让最复杂的 transport 崩溃时导致整个 guest 崩溃),不引第二个二进制(守 §1.1
 单二进制部署)。runsc 以 `sandboxd` 为容器 entrypoint,**init 模式**启动当 PID 1,再经
 `/proc/self/exe` **re-exec 自己进 transport 模式**当子进程:
 

@@ -249,8 +249,8 @@ seam 沿用 §5.A `runtime.Provider` / §5.B `rootfs.Provider` 的既定约定:*
 | `resumeLocked` | 从 store **读回**挂载表(挂载行跨 pause 持久)、重新 `Materialize`——与 `resolveLower` 每次重解析血缘同理,卷是同一真身、拿新的宿主物化 |
 | `pauseLocked` | CAS 后:`Backend.Release` 每个卷(**挂载行保留**,租约不释放),对称于 Overlay「零捕获」 |
 | `destroyLocked` | 卸载活卷 → **先删挂载行、再 `DeleteSandbox`**(否则 `mounts.sandbox` FK 挡住沙箱删除);这是租约释放点 |
-| `RebindVolumes`(`PATCH /v1/sandboxes/{id}/volumes`) | 整份挂载绑定的替换:一次 `store.ReplaceMounts` 在**同一个提交**里删旧行 + 插新行,新行走**同一条租约谓词**;拒绝时旧绑定原样留下(原子性是 §5.C 写明的 store 契约) |
-| 启动/周期对账 | **三个独立入口**,同一个启动位置与同一次 reaper tick 上依次调用:`SweepOrphanVolumes`(`Backend.ListUnitIDs` 枚举 → mediator 判定 → 逐个 `DestroyVolume`;**不**镜像 `SweepOrphanOverlays` 的合并形状,理由与实测见 D2)· `RepairVolumeCaps`(D7.3 的修复态)· `ReclaimQuotaRows`(D7.1 的泄漏行)。另有 `SeedBuiltinVolumes`(若有平台预置卷)镜像 `SeedBuiltinTemplates` |
+| `RebindVolumes`(`PATCH /v1/sandboxes/{id}` 的 `volumes` 键) | 整份挂载绑定的替换:一次 `store.ReplaceMounts` 在**同一个提交**里删旧行 + 插新行,新行走**同一条租约谓词**;拒绝时旧绑定原样留下(原子性是 §5.C 写明的 store 契约) |
+| 启动/周期对账 | **三个独立入口**,同一个启动位置与同一次 reaper tick 上依次调用:`SweepOrphanVolumes`(`Backend.ListUnitIDs` 枚举 → mediator 判定 → 逐个 `DestroyVolume`;**不**镜像 `SweepOrphanOverlays` 的合并形状,理由与实测见 D2)· `RepairVolumeCaps`(D7.3 的修复态)· `ReclaimQuotaRows`(D7.1 的泄漏行) |
 
 **唯一的新不变量:独占租约**(规范陈述在 §5.C:至多一条 `exclusive` 行,且它不与该卷任何其他挂载行并存)。
 这是 Volume 引入的唯一一条新 store 断言。**两个读起来自然、实测都不成立的陈述**,各值一条证伪:
@@ -294,10 +294,13 @@ WHERE NOT EXISTS (
 > **锁序(全序)**:`transitionLock(sandbox) → mediator 的 `mu`(live-map 与直连写的 in-flight 标记同住)`,
 > 以及 `transitionLock(sandbox) → 准入互斥`。**没有 per-volume 锁类,这是刻意的**:卷维度的互斥由上面那条
 > store 语句承担(D3 的整个论点),而写入 regime 的两半共用 live-map 那把 `mu`,故 Volume **不新增锁层**。
-> `mu` 与准入互斥**都只要保持是叶子**(取了就放、其间不再等别的锁)即可组合,两者彼此也不嵌套。
+> `mu` 严格是叶子(取了就放,其间不调 store、不调 backend、不等别的锁);**准入互斥不是**——它按契约横跨
+> {求和 → 物化 → 提交},持有期间会等 store 的单写者锁。两者仍可组合,因为**没有任何 store / backend 路径
+> 反向去取这两把锁**,且它们彼此不嵌套。
 > **这同时是把抢占留在门外的一条独立论据**:一个卷维度的动词要去反查它的持有者(force-detach / 租约抢占,
-> 正是 D8 刻意推迟的那条)就得引入一把 vol→sbx 方向的锁,与 `transitionLock → …` 闭合成环,实测复现出真
-> 死锁。若它将来要落地,必须从 store 解析出持有者、**先释放、再按全局序重新获取**。
+> 正是 D8 刻意推迟的那条)就得引入一把 vol→sbx 方向的锁,与 `transitionLock → …` 闭合成环。**这一条是从
+> 锁序推出的,repo 里没有它的复现载体**(与 D3 前两条不同——那两条的数字在 `store.Store.CreateMounts`
+> 的注释里)。若它将来要落地,必须从 store 解析出持有者、**先释放、再按全局序重新获取**。
 
 ### D3.1 证伪:store-级独占 token vs 进程内 open-handle refcount,不可混
 
@@ -511,7 +514,7 @@ extent 时被删除**。实测矩阵的两条推论:
 3. 对本轮删掉的每个 id 读它的配额行,**先查退出码**:读失败 → **未知**,不得据此下结论;无行 → 完成;
    **`<stale>` → destroy**(轮询谓词就是"标签恰为 `<stale>`");`<under deletion>` → 再 settle 后重试;
    `<squota space holder>`(有活共享者)→ **留着**、下轮再说。
-4. **轮内重试上界约 3 轮**,超界则留行 + warn(带 id 与标签)、下轮重试。**绝不在 EBUSY 上死转** ——
+4. **轮内重试上界 3 轮**,超界则留行 + warn(带 id 与标签)、下轮重试。**绝不在 EBUSY 上死转** ——
    一个 `<squota space holder>` 可以在一个活克隆的**整个生命期**里合法地无法 destroy,故该上界不是错误路径。
 
 > **转变是被条件触发的,不是被时间触发的**:共享者一死、删除一 settle,**第一次**尝试即成功;故必须轮询

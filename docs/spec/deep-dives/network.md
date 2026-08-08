@@ -18,7 +18,7 @@
 | | 引擎(本 spec) | 引擎外 |
 | --- | --- | --- |
 | 是什么 | 创建 netns 的那一侧:持有声明 + 生成抽象规则集 | 终结连接、按应用层信息决定去哪、搬字节的进程 |
-| 词汇表 | ID、IP、CIDR、port、proto、netns、veth、`iif`、DNAT | 字节、SNI、Host、上游地址、不透明字符串 |
+| 词汇表 | ID、IP、CIDR、port、proto、netns、veth、`iifname`、DNAT | 字节、SNI、Host、上游地址、不透明字符串 |
 | 失败后果 | **边界失效**(不可绕过性破产) | 该连接 fail-closed |
 | 进程基数 | **引擎贡献零个进程** | 由那一层自己决定 |
 
@@ -39,7 +39,8 @@ REST vs Connect-RPC 的外沿投影,与本文无关,勿混。)
 1. **规则集的渲染与安装必须与 placement 原子。** 规则要插在"建 netns/veth 之后、隔离单元跑起来之前"。
    外部进程**没有这个钩子点**——它最早只能在"沙箱已经在跑"之后观察到它,而那之间的任何窗口都是
    fail-open 窗口。`Adopt` / `ReclaimOrphans`(§5.A)同理:netns 是崩溃幸存的宿主态,规则集也是。
-2. **入接口(`iif`)绑定。** 只有建 netns 的那一侧知道**哪个 veth 属于哪个沙箱**。这是支柱④ 的物化,
+2. **入接口(`iifname`)绑定**(按**名字**,不是 ifindex —— `iif` 的 fail-open 见 D5 ⑫)**。** 只有建 netns
+   的那一侧知道**哪个 veth 属于哪个沙箱**。这是支柱④ 的物化,
    而它不可外迁:一个外部进程看到的是包,而包里的源地址是 guest 可写的(D5 ③ 实测)。
 3. **L0 地板,两跳都钉。** 只有引擎知道沙箱地址空间的 CIDR 与自己所在宿主的地址。若引擎只**公布**一份
    清单让外部进程自己遵守,那个进程当场成为被信任方——也就成 confused deputy(D4.2)。
@@ -191,7 +192,7 @@ guest 里一条绕过设置的直连、或走一个没被规则覆盖的协议/�
 
 | 目的地类别 | 落哪个钩子 | 该侧的地板谓词 |
 | --- | --- | --- |
-| 宿主**自身**的任一地址(veth IP / eth0 IP / 宿主本地的 link-local) | `input` | **纯 ct-state,不带任何 daddr 清单** |
+| 宿主**自身**的任一地址(veth IP / eth0 IP / 宿主本地的 link-local) | `input` | `iifname` + **纯 ct-state,不带任何 daddr 清单** |
 | 宿主会**路由**出去的东西(sibling / 中转 link-local / 内网 / 公网) | `forward` | ct-state + **显式 daddr 地板清单** |
 
 **已定:声明的放行也发在 `input`,并在该侧自带一条 sibling drop。** 生成器把声明的放行**同时发在 `input`
@@ -363,8 +364,8 @@ sibling 项是一条**静态 CIDR**,不是运行时维护的成员集——它�
 **这三件装齐之后,`egress.default: allow` 就真的把宿主 LAN 交出去了,故内网 deny-safe 档不是便利、是那句
 承诺的交付面。** 补测(`spike-denysafe-tiers.sh` 的对照臂):三件齐备、只有地板没有档位时,沙箱到宿主 LAN
 上另一台机器的 sshd(一个 RFC1918 地址 + tcp/22)的流量**离开 netns、被宿主路由,在 `forward` 钩子上只有
-一条 RFC1918 词汇的规则接得住它**——地板四项(loopback / link-local / sibling CIDR / 宿主自身的 ct-state)
-没有一项覆盖那个地址。⟹ **少了这一档,`default: allow` 等于把宿主 LAN 整个交给沙箱**;这一档**是否存在**
+一条 RFC1918 词汇的规则接得住它**——地板的四项(link-local / loopback / 宿主自身的任一地址 / sibling
+沙箱地址空间,次序按 §2.4)没有一项覆盖那个地址。⟹ **少了这一档,`default: allow` 等于把宿主 LAN 整个交给沙箱**;这一档**是否存在**
 因此不是开放问题(成员判据才是,见 D8)。
 
 > **⚠ 补测那一臂是可见性对照,不是"宿主 LAN 可达"的独立证明。** 它断言的是**档位规则看见了那条流量**
@@ -400,7 +401,9 @@ loopback 也非 link-local),**不在**地板任何一项里,故**此机上它可
 
 **⑧ 第一跳分裂成 `input` / `forward` 两个钩子,且 `input` 侧不需要地址清单。** 到宿主**自身**任一地址
 (veth IP、eth0 IP、宿主本地 link-local)落 `input`;到宿主会**路由**的东西(sibling、中转 link-local)落
-`forward`。据此一条**纯 ct-state** 的 `input` 地板静态覆盖宿主全部地址:装上后 guest 经**任何**宿主地址
+`forward`。据此一条 `iifname` 收窄的**纯 ct-state** `input` 地板静态覆盖宿主全部地址(`iifname` 是它成为
+**每沙箱**规则的全部理由——去掉它就不是地板而是一个宿主级入站杀伤开关,连 orchestrator 自己的
+`127.0.0.1` 监听与 sshd 一并拦掉,因为 loopback 也过 `input`):装上后 guest 经**任何**宿主地址
 都到不了一个 `0.0.0.0` 通配监听者,而**规则装好之后**新加的宿主地址**同样被拦**。⟹ **宿主自身端点从不被
 枚举**。仅 `forward` 的地板会**整个漏掉 guest→宿主**(实测:sibling 被拦
 而 guest→宿主 `CONNECTED`)。**两个反面症状相反**:朴素 daddr 地板压在 established accept 之上 →
@@ -445,7 +448,8 @@ conntrack original 条目)。**别让任何人"简化"掉它。**
 
 **这条同时量到一个新陷阱,它会让计数器断言读成健康:** 那条 accept **必须与地板 drop 同链**。放进
 **同钩子、更低 priority 的另一条基链**时,它**匹配了、accept 计数器涨了,而流量仍被地板 drop、连接仍失败**
-——因为基链的 `accept` 只结束**那条链**,包继续进下一条基链;**只有 `drop` 跨链终止**。⟹ **"accept 计数器
+——因为基链的 `accept` 只结束**那条链**,包继续进下一条基链;**只有终结型 verdict(`drop` / `reject`,后者
+发完差错报文后同样返 `NF_DROP`)跨链终止**。⟹ **"accept 计数器
 非 0"不足以证明放行生效**,working 那一侧必须同时断言可达。
 
 **⑪ 一条不带 family 限定的纯 ct-state `inet` `input` 规则连 IPv6 一起覆盖。** 结论、"guest 自造全局前缀

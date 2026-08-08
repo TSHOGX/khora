@@ -6,6 +6,8 @@
 > ② **guest 启动拓扑 + pause 静止点 + resume 冷启时序**(D4、D5)。规范结论在 §5.E.1 / §4.2 / §4.3。
 >
 > **编号约定:** 本文自己的节用 `D` 前缀(D1、D4.4…);`§` 一律指 spec 的全局章节(§4.2 等),两套不混。
+> **节号是稳定寻址锚,不是目录序号**:一经被引用就不再重排,故序列里的空号(D2 已并入 D1)是刻意保留、
+> 不复用的——与 network.md D5 顶部同一条纪律。
 
 ---
 
@@ -14,7 +16,7 @@
 引擎只跑一类东西——**经 `process` 按需 exec 出来的进程**,不做系统守护服务(D1、D3),故 guest 只需一个
 **轻量 reaper**。它靠"一个二进制、两个模式"实现:`sandboxd` 以 **init 模式**当 PID 1(自研最小 init,tini
 源码作正确性 checklist),re-exec 出 **transport 模式**子进程当 process/fs 终点(D4)。这条分进程拓扑换来
-崩溃隔离、热升级、以及**两层探活**区分 transport-down 与 substrate 死亡(D5)。
+崩溃隔离,以及**两层探活**区分 transport-down 与 substrate 死亡(D5)。
 
 ---
 
@@ -87,17 +89,16 @@ tini 二进制**是实打实的收益——少一个要版本化 / 追 CVE / 打
 
 ### D4.2 Q2:init 与 `sandboxd` 分进程,用"一个二进制两个模式"
 
-init 与 `sandboxd` **不合并成同一个进程**,三条工程理由:
+init 与 `sandboxd` **不合并成同一个进程**,两条工程理由:
 
 1. **崩溃爆炸半径 / 可重启性(最硬)**。`sandboxd` 是全系统最复杂、最会长、最会出 bug 的部分
    (wire 协议、流多路复用、pty、fs ops)。若它就是 PID 1,一崩**整个 guest 陪葬**——用户在跑的
    `apt` / dev server / build 全没。独立的 ~300 行 init 几乎永不变,能**原地重启 `sandboxd`** 而不
    导致沙箱崩溃,把 `sandboxd` 崩溃降级成**进程内可恢复**(对齐 spec §4.2「崩溃 = 非自愿的 pause」),
-   而非升格成一次 substrate 死亡。
-2. **热升级 `sandboxd`**。沙箱长命持久(idle→pause→resume 反复,spec §1.1),这寿命里会想换引擎
-   版本、重启 transport 层而**不打扰用户长跑进程**。`sandboxd` == PID 1 做不到;作为 init 的子进程
-   就能(init re-exec 新 `sandboxd`,老子进程 reparent 到 init 存活)。
-3. **PID 1 信号语义对复杂 server 有敌意**(D4.1)。Go 运行时(多线程 + 自带 signal handling)叠在
+   而非升格成一次 substrate 死亡。**这道重启只是崩溃恢复、不是换版本的通路**:`/proc/self/exe` 是
+   PID 1 已打开的那个 inode 的句柄、不在 exec 时重解析路径,故监督循环每次拉起的都是**同一份字节**
+   ——换版本只有"新 Template + 新 placement"这一条路。
+2. **PID 1 信号语义对复杂 server 有敌意**(D4.1)。Go 运行时(多线程 + 自带 signal handling)叠在
    PID 1 特殊规则上要格外小心;让极小的 init 当 PID 1、`sandboxd` 当普通子进程,这问题整个绕开。
 
 "reaper 要知道 `sandboxd` 拉起的进程,所以得放一起"这个合并动机被内核特性化解:
@@ -121,8 +122,8 @@ reparent 到 `sandboxd` 而非 PID 1——不当 PID 1 也能收割自己关心�
     `Wait4(-1)` **无法排除某个 pid**:通配 waiter 与 per-child `cmd.Wait()` 竞争同一个状态,谁先收到谁
     拿走。**实测:通配 waiter 先到时 `cmd.Wait()` 10/10 次返回 `waitid: no child processes`**——于是每一
     个 `end` 帧的退出码都会是**编造**的,而退出码送达是 §5.E.1 明写的承重契约。故形状是:**单一通配
-    收割器 + 一张交接表**(pid → 等待者),monitor 从表里领自己那份状态,与 D4.1 里 PID 1 的
-    `reapTable` 同一机制(它正是为"通配 waiter 不得偷走已注册子进程的状态"而设计的)。(『声明』与
+    收割器 + 一张交接表**(pid → 等待者),monitor 从表里领自己那份状态,与 PID 1 的收割器**同一份机制**
+    (`reapTable`,两个模式共用,§5.E.1;它正是为"通配 waiter 不得偷走已注册子进程的状态"而设计的)。(『声明』与
     『装上通配 drain』不可分开落地,§5.E.1。)
   - **连带一条不显然的义务**:跳过 `cmd.Wait()` 也就跳过了它对 `StdoutPipe`/`StderrPipe` 父端的关闭,
     故长命 daemon 里每个进程会漏 2 个 fd——输出泵必须在 EOF 时自己关。(PTY master 例外:它同时是输入
@@ -278,8 +279,9 @@ tini 的语义权威,前提是**它只有一个子进程、自己永不被重启
                    → 以 sandboxd（init 模式）为 entrypoint 拉起 runsc
 ⑤ guest 内启动  ： PID1（init 模式）装 reaper+信号+监督 → 派生 transport 模式 sandboxd
                    → 子进程 PR_SET_CHILD_SUBREAPER → bind netns TCP → listening
-⑥ §5.A placement： 发现容器当前 netns IP（veth/CNI result/inspect；local_runsc 下退化成读回引擎
-                   自己的分配，不做 boot 后探测）
+⑥ §5.A placement： 把 transport 端点定为 guest netns IP:port —— 不是一次 boot 后探测：launch
+                   路径直接用引擎自己那次分配；Adopt 路径读宿主端 veth 的 /30 再 +1（guest 侧
+                   地址已被 sentry netstack 收走、读不回来，§5.A）
 ⑦ §4 探活门     ： 向 IP:port 发 Health RPC，轮询至首次成功 or 超时
       ├─ 首次成功 → state=running，发 resumed/created 事件（与状态提交单次原子，spec §4.4-C）→ API 返回
       └─ 超时/拉起失败 → 回收半建 placement 后：resume→留 paused 可重试；create→删记录/→destroyed

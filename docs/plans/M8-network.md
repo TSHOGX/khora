@@ -63,12 +63,12 @@
 | **5** | `SteeringSpec` 变成真载荷 | 抽象规则集 + publish 端点描述符;**签名里不得出现宿主原语**(§5.A ❌ 清单,`seam_test.go` 已守) |
 | **6** | provider 侧渲染 + 安装 | 每沙箱**一张 nft 表**;`iifname` / guest IP / publish 宿主端点在 placement 时绑定 |
 | **7** | 安装与 placement 原子 | 装在**建 netns/veth 之后、拉起隔离单元之前**(§2.4);半建失败走 §4.4-A 回收 |
-| **8** | 出网三件宿主机制 | `ip_forward` · guest 侧带 `dev` 的默认路由 · 该 `/30` 的 masquerade(D5 ⑤;**今天一件都没有**)。**那条路由必须在 `runsc run` 之前装**:sentry 在 boot 时把 L3 地址从内核侧 veth 收走,boot 后 `ip route add` 报 `Nexthop has invalid gateway`(D5 ⑬)。**反面也量过**:`rp_filter` / `proxy_arp` / `accept_local` / per-if `forwarding` **都不需要**,别加 |
+| **8** | 出网三件宿主机制 | `ip_forward` · guest 侧带 `dev` 的默认路由 · 该 `/30` 的 masquerade(D5 ⑤;**引擎一件都不落**——`ip_forward` 恰好已是 1(环境默认,实测),故它不是引擎的保证,而 D5 ① 的 sibling 可达正是它的后果;另两件今天确实不存在)。**那条路由必须在 `runsc run` 之前装**:sentry 在 boot 时把 L3 地址从内核侧 veth 收走,boot 后 `ip route add` 报 `Nexthop has invalid gateway`(D5 ⑬)。**反面也量过**:`rp_filter` / `proxy_arp` / `accept_local` / per-if `forwarding` **都不需要**,别加 |
 | **8b** | publish 的两条伴随规则 | 一条 **`postrouting` SNAT 到本沙箱 `/30` 网关**(否则 publish 只在"guest 恰好有默认路由"时能用,D5 ⑬)· 一条 **`output` 钩子的 DNAT**(否则宿主自身拨不通,而这与"外部拨得通"是两条独立路径,D5 ⑭)。伴随 accept 挂 **`forward`**,不是 `input`(D5 ⑮) |
 | **9** | 两个 §6 端点 | `GET …/network`(今天 404)· `POST …/publish`(今天 404,热加写点) |
 | **10** | `network` 进 `PATCH` + create | 整份换整份、`next-resume` 生效;create 的 `network?` 今天被**静默丢弃** |
 | **11** | 规则集进 §4.4-A 对账 | `Adopt` 重建、`ReclaimOrphans` 拆除、按表名前缀枚举孤儿表。**三条硬约束(D5 ㉒,违反任一条都会掐断活连接)**:重装**必须是单个原子 `nft -f` 文件**(先 `delete` 再装 = 5/5 断流)· **对账全程不许清 conntrack**(`tcp_loose=0` 下清一次就断)· `ReclaimOrphans` 的 keep 集**必须在任何删表之前算好**(否则"先 reclaim 后 adopt"逐字就是那条会断流的写法)。**反面是个许可**:满足这三条时 `Adopt` 可以对捡到的表不做任何推理、直接整份重新渲染装上,不必 diff |
-| **12** | 三条渲染守卫(结构性) | 拒 `policy drop` 于每沙箱基链 · 拒 `iif`(只许 `iifname`)· 拒**未带 `iifname` 的 accept**。理由见本文 §4 ②③ 与 D5 ⑩ |
+| **12** | 三条渲染守卫(结构性) | 拒 `policy drop` 于每沙箱基链 · 拒 `iif`(只许 `iifname`)· 拒**任何未带 `iifname` 的规则**(accept 与 drop 一并)——accept 漏了它是所有沙箱地板上的洞(D5 ⑩ 末行),drop 漏了它更坏:drop 跨链终止,故一张表里未收窄的 drop 是宿主级入站杀伤开关(同本文 §4 ②)。理由见本文 §4 ②③ 与 D5 ⑩ |
 
 **第 8 件是"`egress.default` 有两个取值"的兑现面,不是附加便利**:今天 `allow` 与 `deny` 在行为上
 **不可区分**(两者都不通),故不落它就无法验收"声明被强制"——一个恒不通的引擎在每条 deny 断言上都
@@ -117,7 +117,7 @@ ifindex 反解回名字,故**评审读渲染输出看不出差别**,而症状只
 **评审看不出来**:`nft list` 平时把那个整数反解回名字,两种写法在列表里长得一样。⟹ **渲染守卫(第 12 件)**。
 
 **④ `input` 侧不带 daddr 清单,`forward` 侧必须带、且必须有自己的 default-deny。** "非 established"在宿主
-全部地址上是穷尽的,故**宿主自身的那些地址从不被算出**——地板第四项是"宿主自身的任一地址",由这一条纯
+全部地址上是穷尽的,故**宿主自身的那些地址从不被算出**——地板的"宿主自身的任一地址"项,由这一条纯
 ct-state 规则静态覆盖,引擎因此不必知道自己的 bind 地址(§2.4 / D5 ⑧)。**三条附带约束**:① sibling drop
 **之前**须放行"本沙箱自己的 `/30` 网关",否则连带杀掉宿主本地解析器(D5 ⑦);**该放行落 `input`**——那个
 网关是宿主自己的地址,声明的放行因此**两个钩子都发**,且 `input` 侧**必须自带一条 sibling drop**(否则一条
@@ -186,7 +186,7 @@ D5 ⑩,本文不复制**;③ **`forward` 侧不是只有 daddr 清单**:一条�
     并钉**它与地板 drop 同链且在其上**(跨链的 accept 会让计数器读成健康而功能是死的,本文 §4 ⑨)。
     **透明截获形态恰好少 `ct original ip daddr` 一个 clause**——断言"当且仅当声明钉了 cidr 时才发这个
     clause",两个方向都要有一例。
-4. **三条渲染守卫**:`policy drop` 于每沙箱基链 → 拒;`iif` → 拒;**未带 `iifname` 的 accept → 拒**
+4. **三条渲染守卫**:`policy drop` 于每沙箱基链 → 拒;`iif` → 拒;**未带 `iifname` 的 accept 与 drop → 均拒**
     (D5 ⑩:每沙箱表都是共用钩子上的 `policy accept` 基链,故一张表里未收窄的 accept 是**所有**沙箱地板上的
     洞)。
 5. L0 地板四项都在,且 **`input` 侧**在 sibling drop 之前有"本沙箱网关"放行(该网关是宿主自身地址,故这
@@ -221,6 +221,21 @@ D5 ⑩,本文不复制**;③ **`forward` 侧不是只有 daddr 清单**:一条�
     **它们是那三个 clause 承重的证明**,不是补充。
     (c) **`iifname` 那一维单独断言**:第二个沙箱的同样流量**不被本沙箱那条 accept 放行**(D5 ⑩ 末行——
     未加 `iifname` 的 accept 是所有沙箱地板上的洞)。
+9c. **`via[].endpoint` 不可达时,那条连接被拒、不落到下一条规则出网**(§2.4 fail-closed 点名的两种情形
+    里的第二种;第一种"声明放行不到的目标"由第 6 / 8 / 8b 条覆盖)。做法:第 9b 条那份规则集**一字不改**
+    地装在位,**杀掉(或停掉)宿主本地那个 listener 进程**,guest 重发同一条被引流的流量。**两半都要断言**:
+    (a) 连接**干净失败且快速**——形态与第 8b 条一致(按**量级**写,那条的数字 caveat 不在此重复)。
+    **机制不同,别照搬**:这里的 RST 来自宿主协议栈上没有 socket,不是规则集发的 `reject`。
+    (b) **流量没有出网,而这一半必须用计数器断言**:读**第 9b 条 (a) 那个 `input` 侧窄放行的计数器**
+    (它带 `ct state new`,故重拨一次就该 +1),断言它**仍然增长**。理由是钩子归属:DNAT 在 `prerouting`、
+    **不看有没有 listener**,故包照旧被转换并落进 `input`;而**一条目标不在宿主上又未被引流的流量根本
+    不经 `input`**(本文 §4 ④),故该计数器增长正面证明这个包走的仍是引流那条路、被本机消费掉了,
+    不可能同时被路由出去。**不要拿 `forward` 侧那条 default-deny 当这一半的断言**:引流成立时它在这条
+    路径上**恒 0**,而"恒 0"与"地板被绕过"按本门纪律不可区分,它只配当旁证(同一个包不该被数两次)。
+    (c) **作用域 per-connection**:同一沙箱、同一份声明下**另一条已放行的出站**(`allow[]` 那条,或
+    endpoint 仍活着的第二个 `via[]` 项)**照常可达**——endpoint 死掉不牵连它。
+    **这是要求性断言,不是继承来的实测**:D5 没有"listener 死掉"这一格(⑯ 那条"无监听者与绑 loopback
+    在调用方侧不可区分"是**入站**方向,按 D5.b 开头那句推不到出站),故门 B 是它第一次被量。
 10. **支柱④**:guest root `ip addr add` 伪造宿主/sibling 地址后重试 → 仍被拦,**且地板计数增长**
     (证是 `iifname` 拦的,不是 `rp_filter`)。
 10b. **IPv6 也被同一条地板覆盖**:guest 到**宿主侧 veth 的 `fe80::/64`**(内核自动配的,不是我们配的)

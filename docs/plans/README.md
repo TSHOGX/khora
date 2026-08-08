@@ -35,17 +35,12 @@ Its design is settled in the spec (§5.D's four-field declaration, §2.4's three
 invariants, [`network.md`](../spec/deep-dives/network.md) D1–D8), and the plan
 carries scope, acceptance, out-of-scope, and today's state. **Nothing gates the
 start of implementation** — `open-decisions.md` §1 (blocking spikes) is empty; the
-twelve facts the measurement pass produced are `network.md` D5, and M8 inherits
+facts the measurement pass produced are `network.md` D5 (①–㉓), and M8 inherits
 them rather than rediscovering them.
 
-Three of the twelve are worth knowing before reading the plan, because each is a
-construction that passes its obvious test while being broken: an over-broad allow
-above the L0 floor silently voids the floor; an `accept` in a *different* base
-chain on the same hook increments its own counter while the traffic is still
-dropped; and `iif` freezes an ifindex at load time, so a floor rule silently stops
-matching after a same-name veth rebuild — and `nft list` reverse-resolves the
-frozen integer back to a name, so a reviewer reading the rendered output cannot
-see it.
+Several of those facts are **constructions that pass their obvious test while
+being broken**, so the plan turns them into render guards rather than prose — read
+[`M8-network.md`](./M8-network.md) §4 before implementing.
 
 **M8 is the last milestone, and the ladder ends there.** Credentials are a
 permanently excluded non-goal (§1.4), so no credential-store milestone follows:

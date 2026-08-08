@@ -101,10 +101,14 @@ slims to boundary + open agenda — nothing lives in full in both places.
   credential family — `credential` / `secret` / `token` / `api_key` (§1.4 excludes
   credentials permanently; the engine sees only a TCP flow to some address). They keep
   product semantics out at naming time. Prose is looser and the §1.1 table is
-  authoritative on exactly how much — consult it rather than guessing (e.g. `agent`
-  is fine for anything outside the engine, product layer included: "agent sandbox
-  engine" is the engine's own positioning; `generation` / `principal` / `tenant` and
-  the four credential spellings are barred outright).
+  authoritative on exactly how much — consult it rather than guessing. Two shapes:
+  `generation` alone is barred **outright**, prose included (it is the one concept
+  that keeps seeping back in from elsewhere); every other row bars the engine-internal
+  NAME while permitting the word in prose that says "this lives outside the engine"
+  — `principal` / `tenant` and the four credential spellings included, which is why
+  §1.4 and §5.D can state those non-goals at all. `agent` is looser still: fine for
+  anything outside the engine, product layer included ("agent sandbox engine" is the
+  engine's own positioning).
 - **Code matches spec vocabulary.** If code and spec disagree on a name, fix one
   in the same change.
 

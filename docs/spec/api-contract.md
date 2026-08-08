@@ -16,7 +16,7 @@
 > `transport.proto`,client 经 `buf` 生成 stub。该 package 下是**三个**服务:对外的 `ProcessService` /
 > `FsService`,外加引擎自用的 `HealthService`——后者不是对外能力面,见 §5.E)。client 一律经
 > `orchestrator` 居中、不直连
-> `sandboxd`(§4 mediator / D6.1)。数据面块的 REST 行**仅作形状示意**,不是权威端点(D6.2)。
+> `sandboxd`(§4 mediator / D5.1)。数据面块的 REST 行**仅作形状示意**,不是权威端点(D5.3)。
 >
 > **这套 API 自身不做认证/授权**:引擎内无授权主体(§1.4 非目标),故 §6 假定调用方已被信任。谁能调用
 > 由**引擎外**决定(部署把它绑在本机/私网,或前置一层网关),那是 join table 的加法、不是引擎原语。
@@ -58,7 +58,9 @@ PATCH  /v1/sandboxes/{id}            {cpu_millis?, memory_byte?, disk_byte?, idl
 #   对 `running` 改帽 → 409「先 pause」;抬上限重过准入门(可 507 / 400)。不发 §4.1 事件(非状态转换)。
 #   **`disk_byte` 的 `0 → N` 被拒(400)**:无帽沙箱的 upper 上没有可写的配额行,故这次写会声明一个
 #   每次 placement 都兑现不了的帽,接受它等于把沙箱变成砖(完整推理与为何拒在写点见 §3.4)。
-#   `N → 0` 撤帽与 `N → M` 改帽都合法。
+#   `N → 0` 撤帽与 `N → M` 改帽都合法。**⚠ `N → M` 的写点未收口**:降到当前用量以下今天无校验、返 200
+#   并卡死该存储单元(卷侧已落,见 `PATCH /v1/volumes/{id}`)。缺口与所需的 §5.B seam 加法见
+#   [`open-decisions.md`](./open-decisions.md) 实现缺口表。
 #   **`network` 同为整份换整份**(§5.D 声明是 Binding),生效点 `next-resume`,故与资源上限同规则:
 #   对 `running` 沙箱改 → 409「先 pause」。**publish 不走这里**——它有自己的热加端点(见 Network 块)。
 #   **故改 `network` 必须 read-modify-write:先 GET `…/network`,在读回的那份上改,再整份回写。** 两个写点
@@ -197,9 +199,9 @@ POST   /v1/sandboxes/{id}/publish    {guest_port, proto}
 
 **数据面(Connect-RPC,权威 wire 是 proto,非下方 REST 行)** —— process / fs 有 server-stream +
 强类型帧,**权威契约是 `engine.transport.v1` 的 `ProcessService` / `FsService`**(D4.3/D4.4),
-client 从 `transport.proto` 经 `buf` 生成 stub、经 `orchestrator` 反代到 `sandboxd`(D6.1)。**沙箱寻址
+client 从 `transport.proto` 经 `buf` 生成 stub、经 `orchestrator` 反代到 `sandboxd`(D5.1)。**沙箱寻址
 走带外请求头 `Engine-Sandbox-Id`**:proto 本身只按 guest-native pid 寻址(D4.6 词汇边界),反代 strip
-掉该头、在引擎内解析当前端点(placement 永不外泄,§6.2 / D6.4)。下方 REST 行**仅作形状示意**(说明
+掉该头、在引擎内解析当前端点(placement 永不外泄,§6.2 / D5.4)。下方 REST 行**仅作形状示意**(说明
 有哪些操作、如何 pid/path 寻址),**不是可实现的权威端点**——真正的 wire 看 proto:
 
 ```text
@@ -259,7 +261,7 @@ client 从 `transport.proto` 经 `buf` 生成 stub、经 `orchestrator` 反代�
   **`via[].endpoint` 非宿主本地** · **`via[].endpoint` 落在 L0 地板的 daddr 清单项内**(即 link-local /
   loopback / sibling CIDR)· **`egress.allow[]` 的 `cidr` 整段落在地板"任何读法下都抬不动"的项内** ·
   **`cidr` 处给了 v4-mapped / v4-compatible 的 v6 字面量**。前六类里的第五、六类把 endpoint 夹成"宿主本地、
-  且不在地板的 **daddr 清单项**内"(**"宿主本地"必然落在地板第四项"宿主自身的任一地址"里,那不是矛盾**:
+  且不在地板的 **daddr 清单项**内"(**"宿主本地"必然落在地板的"宿主自身的任一地址"项里,那不是矛盾**:
   开洞靠次序、地板不被收窄,§2.4 那段边界),两者是同一个判据的两面:第二跳的规则由内核压在同一份宿主规则集
   后面,而内核只压得住本机
   进程——收下一个远端 endpoint 就等于把地板架在那个进程自己的自律上(confused deputy,§2.4 第二条明确拒的
@@ -283,7 +285,7 @@ client 从 `transport.proto` 经 `buf` 生成 stub、经 `orchestrator` 反代�
   要求调用方自己声明的那个宿主本地解析器地址(唯一稳定可用的一个,D5 ⑦)——即**这是被批准的声明路径,不是
   漏网**。到 sibling **自己**网关的那一半由 `input` 侧一条 sibling drop 兜住(同样在 D4.2),那是规则次序的
   职责、不是这一类 400 的。**附带一条独立理由**:一个提到 sibling CIDR 的 400 会把沙箱地址空间摆到 wire 上,
-  那是本节 ID 寻址明确排除的。② **命名宿主本地地址的条目**——判定它要枚举宿主地址,而地板第四项"宿主自身的
+  那是本节 ID 寻址明确排除的。② **命名宿主本地地址的条目**——判定它要枚举宿主地址,而地板的"宿主自身的
   任一地址"是**一条纯 ct-state 规则、从不被算出**(§2.4 / D5 ⑧);枚举它既把 D8 已收口的那类问题请回来,又不
   满足"无重试能让它合法"(宿主事后多一个地址就翻转),还会让**合法的内网超网不可声明**。③ **部分重叠**
   ——`10.0.0.0/8` 与落在地板内的沙箱 `/16` 必然相交,而实测次序把它解对(D5 ㉑),故判据**必须是整段包含**。

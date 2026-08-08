@@ -391,15 +391,3 @@ stream 翻成 NDJSON)。它被否决,三条理由:
   设计问题(形状由 D4.3/D5 定死)。故取值只在代码里(`cmd/sandboxd/process.go` 的常量块),不登记为开放
   决策、也不在此复制——一个旋钮有两个家就会有两个值。**溢出处置(断开)不在此列**——那是已在 D4.3
   invariant 1 拍定的设计选择,不是旋钮。
-
----
-
-## D6. 边界
-
-- **不提供 checkpoint / restore 原语**(已拍板,非待定):内存态冻结整族被 §1.4 永久排除——全 VM 镜像
-  与**单进程 checkpoint 是同一条约束**,都把状态锁在特定 CPU-feature 上(§2.5),持久态便不再能跨
-  host/CPU 搬(§1.5#3)。gVisor 在 systrap 下本可 checkpoint;我们不用,是为可移植性。恢复因此只有一条
-  路:`--resume` + `fs` 读历史(D3)。
-- **session adapter 怎么在外面叠不在本文,也不在引擎内**:它是 engine 外的加法,只要 D3 那三个 seam 在
-  就能落地(D1.2),engine 侧无待办。
-- **外沿投影已定死在 D5**(控制面 REST / 数据面 Connect),同样不是待办。
