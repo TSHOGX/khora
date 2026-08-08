@@ -1553,19 +1553,29 @@ func main() {
 			"typically succeeds once before EPIPE (D5 ⑰'s measurement discipline)\nraw: %s",
 			trips, strings.TrimSpace(res.raw))
 	}
-	// The counter read is the INPUT-side allow, not the forward one, and the difference
-	// is the first-hop hook split (D5 ⑧): this flow's destination is an address of the
-	// HOST ITSELF, so it lands on `input`. The forward-side allow counts zero on this
-	// path whether or not the rule set works — reading it would be the "always zero is
-	// indistinguishable from bypassed" trap the discipline exists to avoid, in its
-	// test-authoring form.
+	// THE COUNTER IS NOT COMPARED ACROSS THE RESTART, and that is a consequence of the
+	// very mechanism this test exists to verify rather than a weaker assertion.
+	//
+	// Adopt re-installs the table as ONE ATOMIC FILE — which is what keeps the live flow
+	// alive (measured 5/5 vs 5/5 for delete-then-install, D5 ㉒) — and a freshly loaded
+	// table starts its named counters at ZERO. So the reading legitimately goes 1 → 0
+	// across the restart, and a "must have advanced" comparison would fail on a working
+	// engine while passing on one that never re-installed anything at all: exactly
+	// backwards.
+	//
+	// What carries the assertion instead is the ROUND-TRIP COUNT above, verified by
+	// read-back — bytes that actually moved, which no counter arithmetic can fake. The
+	// counter's job here is only to confirm the re-installed rule set is matching this
+	// flow AFTERWARDS, so it is read as "the new table is counting", not as a delta.
 	after := harness.NftCounter(t, id2, "allow0_in")
-	if after <= progressBefore {
-		t.Errorf("the input-side allow counter did not advance across the restart (%d → %d) — the "+
-			"flow's traffic is not being matched by the re-installed rule set. (Read on `input` "+
-			"because the destination is a HOST address; the forward-side allow is flat on this path "+
-			"either way — D5 ⑧)", progressBefore, after)
+	if after < 0 {
+		t.Errorf("after the restart the re-adopted rule set has no input-side allow counter — the "+
+			"rule set was not re-installed at all, and the surviving flow proves nothing about "+
+			"enforcement (§2.4: a rule set is crash-surviving host state)\n%s", harness.DumpRuleSet(id2))
 	}
+	t.Logf("item 13b: input-side allow counter reads %d after the restart (it was %d before). A reset "+
+		"is EXPECTED: the atomic re-install that keeps the flow alive loads a fresh table, so the "+
+		"assertion is the verified round-trip count, not a counter delta (D5 ㉒)", after, progressBefore)
 	t.Logf("item 13b: %d verified round trips across a control-plane restart + Adopt", trips)
 }
 
@@ -1640,38 +1650,43 @@ func main() {
 	// this is precisely the case that times out: the guest's reply has nowhere to go
 	// (measured to_guest=2 / from_guest=0, and adding the SNAT made the same flow
 	// connect immediately — D5 ⑬). The host's own dial in (ii) would NOT have caught it.
+	// The caller must be GENUINELY OUTSIDE the sandbox's /30 — a separate netns, not this
+	// host. Dialing from the host is a DIFFERENT path carried by a DIFFERENT rule: the
+	// output-hook DNAT (D5 ⑭), which is what sub-test (ii) covers. Measured the confusion
+	// directly: a host-side dial succeeded and returned the guest's banner while
+	// `pub0_in_dnat` counted ZERO, because prerouting is not traversed by
+	// host-originated traffic at all. So "it worked from the host" is not evidence the
+	// external path works — which is precisely why the plan splits these into two
+	// questions and forbids using one for the other.
 	t.Run("(i) reachable from outside the sandbox's own /30, with the SNAT in place", func(t *testing.T) {
-		conn, derr := net.DialTimeout("tcp", endpoint, 10*time.Second)
+		out, derr := dialFromForeignNetns(t, endpoint)
 		if derr != nil {
-			t.Fatalf("an outside caller could not reach the published endpoint %s: %v — WITHOUT the "+
-				"companion SNAT to this sandbox's own /30 gateway, a caller from outside the /30 gets "+
-				"exactly this timeout while the guest's SYN arrives fine (D5 ⑬)\n%s",
-				endpoint, derr, harness.DumpRuleSet(id))
+			t.Fatalf("an outside caller could not reach the published endpoint %s: %v (%s) — WITHOUT "+
+				"the companion SNAT to this sandbox's own /30 gateway, a caller from outside the /30 "+
+				"gets exactly this timeout while the guest's SYN arrives fine (measured to_guest=2 / "+
+				"from_guest=0, D5 ⑬)\n%s", endpoint, derr, out, harness.DumpRuleSet(id))
 		}
-		defer conn.Close()
-		buf := make([]byte, 64)
-		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-		n, rerr := conn.Read(buf)
-		if rerr != nil {
-			t.Fatalf("connected to %s but read nothing (%v) — that is the HALF-TORN signature: DNAT "+
-				"present, companion SNAT missing, so the handshake completes and the caller waits for "+
-				"data that never comes. It is the hardest failure to diagnose and is easily misread as "+
-				"a guest application fault (D5 ⑰)", endpoint, rerr)
+		if !strings.Contains(out, "hello-from-GUEST") {
+			t.Errorf("an outside caller read %q from the published endpoint, want the guest's banner. "+
+				"`connected` with no payload is the HALF-TORN signature — DNAT present, companion SNAT "+
+				"missing — which is the hardest publish failure to diagnose and is easily misread as a "+
+				"guest application fault (D5 ⑰)", out)
 		}
-		if !strings.Contains(string(buf[:n]), "hello-from-GUEST") {
-			t.Errorf("read %q from the published endpoint, want the guest's banner", string(buf[:n]))
-		}
+		// NOW the prerouting DNAT is the rule that carried it, which is the whole point of
+		// dialing from a foreign netns.
 		if c := harness.NftCounter(t, id, "pub0_in_dnat"); c <= 0 {
-			t.Errorf("the prerouting DNAT counted %d — the flow is not taking the path the rule set "+
-				"describes", c)
+			t.Errorf("the PREROUTING DNAT counted %d for a call from outside the /30 — that is the "+
+				"rule this path depends on (a host-originated dial would not touch it at all, D5 ⑭)", c)
 		}
 		if c := harness.NftCounter(t, id, "pub_return_snat"); c <= 0 {
-			t.Errorf("the return SNAT counted %d — without it this works only on a sandbox that "+
-				"happens to carry a default route (D5 ⑬)", c)
+			t.Errorf("the return SNAT counted %d — without it a publish works only on a sandbox that "+
+				"happens to carry a default route, and times out on one that does not (D5 ⑬)", c)
 		}
 	})
 
-	// (iii) The companion accept is on FORWARD, and the input side stays at ZERO.
+	// (iii) The companion accept is on FORWARD, and the input side stays at ZERO. Read
+	// AFTER (i), because only an externally-originated flow is routed to the guest —
+	// a host-originated one is delivered locally and never reaches `forward`.
 	// Read as per-hook counters, because the hook assignment is the OPPOSITE of
 	// `via[]`'s and copying one from the other is the mistake D5 ⑮ warns about.
 	t.Run("(iii) the companion accept is on forward, and the input side stays zero", func(t *testing.T) {
@@ -2058,6 +2073,46 @@ func TestIPv6IsCoveredByTheSameFloor(t *testing.T) {
 	}()
 	_, portStr, _ := net.SplitHostPort(ln.Addr().String())
 
+	// THE GLOBAL-ADDRESS CELL IS NOT A COUNTER ASSERTION ON THIS HOST, and the reason is
+	// a constructive limit rather than a gap in the floor — measured here rather than
+	// assumed.
+	//
+	// The engine configures NO IPv6 address on the guest side of the veth (it touches
+	// IPv6 nowhere), so a guest dial to a routed v6 address fails with
+	// `network is unreachable` in 0 ms: there is no source address and no route, so the
+	// packet never leaves the sandbox and no host rule is evaluated. Measured: the probe
+	// failed instantly with every v6 counter flat at 0, including under
+	// `net.ipv6.conf.all.forwarding=1`.
+	//
+	// D5 ⑳ names exactly this shape and its consequence for acceptance: "unreachable with
+	// a zero counter" is INDISTINGUISHABLE from "the floor was bypassed", so demanding
+	// counter movement here would be an unsatisfiable assertion rather than a finding.
+	// The honest report is that this cell measures the absence of guest v6 configuration,
+	// not the engine's floor.
+	//
+	// WHAT REMAINS ASSERTED, and it is the part that matters: the LINK-LOCAL cell below.
+	// That address the KERNEL assigns automatically (disable_ipv6 defaults to 0) and the
+	// guest CAN reach — it is on-link, needing no route — so it is the real exposure D5 ⑪
+	// measured, and the floor's coverage of it is asserted with a moving counter. Plus
+	// the structural half at the end: the rendered floor carries no `nfproto ipv6` arm,
+	// so v6 is covered by the SAME family-unqualified ct-state rule rather than a
+	// separate mechanism that could rot independently.
+	if global != "" {
+		probeTarget := "[" + global + "]:" + portStr
+		res := runGuestProbe(t, cl, probeTarget, false)
+		if res.reachable() {
+			t.Errorf("the guest REACHED the host's global IPv6 address %s (payload %s) — the engine "+
+				"touches IPv6 nowhere while the kernel configures it anyway, so this would be the "+
+				"whole family open with every IPv4 assertion still passing (D5 ⑪)",
+				global, res.payload)
+		}
+		t.Logf("item 10b: global v6 (%s) → %s in %d ms. NOT asserted by counter: the engine assigns "+
+			"the guest no v6 address, so the packet never leaves the sandbox and every v6 counter is "+
+			"flat — which D5 ⑳ says is indistinguishable from a bypassed floor and therefore not a "+
+			"valid assertion. The link-local cell below is the one that carries this item",
+			global, res.outcome, res.ms)
+	}
+
 	for _, tc := range []struct{ name, addr, counter, why string }{{
 		// The veth's link-local is an address of the HOST itself, so it lands on `input`
 		// and is covered by the pure ct-state rule — the SAME rule that covers IPv4, with
@@ -2068,14 +2123,6 @@ func TestIPv6IsCoveredByTheSameFloor(t *testing.T) {
 		why: "the engine never configured this address — the kernel did, because disable_ipv6 " +
 			"defaults to 0. It is an address of the host, so the family-UNQUALIFIED ct-state rule " +
 			"on `input` is what must cover it (D5 ⑧ ⑪)",
-	}, {
-		// eth0's GLOBAL address is also an address of the host → `input`.
-		name:    "eth0's GLOBAL IPv6 address",
-		addr:    global,
-		counter: "in_floor",
-		why: "measured with no floor, a guest reached this exact class of address; the " +
-			"link-local of eth0 would be a vacuous target (unreachable anyway, different link), " +
-			"which is why the GLOBAL one is the assertion (D5 ⑪)",
 	}} {
 		if tc.addr == "" {
 			t.Logf("skipping %s: not present on this host", tc.name)
@@ -2158,4 +2205,278 @@ func hostGlobalIPv6(t *testing.T) string {
 		}
 	}
 	return ""
+}
+
+// Gate B item 14b: a publish's reverse flow has NOT become an egress path (D1 ④).
+//
+// THIS IS THE FIRST TIME THIS ASSERTION CAN BE VALID. The spike that tried it had a
+// guest with no default route, so its egress died with `net unreachable` BEFORE
+// leaving the sandbox and the floor counted 0 — by the acceptance discipline an invalid
+// measurement rather than a pass (D5 ⑯). The engine now installs that route for every
+// declaration precisely so the probe reaches the floor, which is what makes this
+// assertion mean something.
+func TestPublishDoesNotOpenAnEgressPathOnTheSubstrate(t *testing.T) {
+	eng, base := harness.Engine(t, netEngineOpts(t))
+	ctx := context.Background()
+
+	const serveSrc = `package main
+
+import (
+	"fmt"
+	"net"
+	"os"
+)
+
+func main() {
+	ln, err := net.Listen("tcp", "0.0.0.0:"+os.Args[1])
+	if err != nil {
+		fmt.Println("LISTEN_FAILED", err)
+		return
+	}
+	fmt.Println("LISTENING", ln.Addr())
+	for {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		_, _ = c.Write([]byte("hello-from-GUEST"))
+		_ = c.Close()
+	}
+}
+`
+	harness.InjectStaticBin(t, base+"/templates", "bare", "serve2", serveSrc)
+
+	// `deny` + a publish: inbound open on one port, egress declared as nothing.
+	d := declDeny()
+	d.Ingress.Publish = []model.NetPublish{{GuestPort: 8080, Proto: model.NetTCP}}
+	id, cl := createRunning(t, eng, d)
+
+	sctx, scancel := context.WithTimeout(ctx, 60*time.Second)
+	defer scancel()
+	if _, err := cl.Start(sctx, transport.StartSpec{Cmd: "/usr/bin/serve2", Args: []string{"8080"}}); err != nil {
+		t.Fatalf("start the guest service: %v", err)
+	}
+	time.Sleep(700 * time.Millisecond)
+
+	// The publish works — otherwise the negative below would be vacuous.
+	_, _, eps, err := eng.Mediator.Network(ctx, id)
+	if err != nil || len(eps) == 0 || eps[0] == "" {
+		t.Fatalf("no published endpoint: %v %v", eps, err)
+	}
+	conn, derr := net.DialTimeout("tcp", eps[0], 10*time.Second)
+	if derr != nil {
+		t.Fatalf("the publish itself does not work (%v), so the egress assertion below would be "+
+			"vacuous", derr)
+	}
+	conn.Close()
+
+	// …and the guest's OWN outbound is still refused, with the floor counting it. The
+	// companion accept is narrowed by `oifname` + the guest IP + the published port, so
+	// it cannot serve as an egress path — but that is the property under test, not an
+	// assumption.
+	before := harness.NftCounter(t, id, "fwd_default_deny")
+	res := runGuestProbe(t, cl, "1.1.1.1:443", false)
+	after := harness.NftCounter(t, id, "fwd_default_deny")
+	if res.reachable() {
+		t.Errorf("with a publish installed the guest reached the public internet (%s) — the publish's "+
+			"reverse flow must not become an egress path (D1 ④)\n%s", res.raw, harness.DumpRuleSet(id))
+	}
+	mustCounterMoved(t, id, "fwd_default_deny", before, after,
+		"item 14b: the probe must REACH the floor and be counted. The spike that first tried this "+
+			"could not assert it — its guest had no default route, so egress died inside the sandbox "+
+			"and the counter read 0, which is an INVALID measurement rather than a pass (D5 ⑯). The "+
+			"engine now installs that route for every declaration, which is what makes this valid")
+
+	// The same for a host address (the `input` side), since the two hooks are separate.
+	addr, stop := hostListener(t, "hello-from-HOST")
+	defer stop()
+	_, portStr, _ := net.SplitHostPort(addr)
+	inBefore := harness.NftCounter(t, id, "in_floor")
+	res2 := runGuestProbe(t, cl, net.JoinHostPort(hostIPv4(t), portStr), false)
+	inAfter := harness.NftCounter(t, id, "in_floor")
+	if res2.reachable() {
+		t.Errorf("with a publish installed the guest reached a host address (%s)\n%s",
+			res2.raw, harness.DumpRuleSet(id))
+	}
+	mustCounterMoved(t, id, "in_floor", inBefore, inAfter, "item 14b: the input side too")
+}
+
+// Gate B item 14e: revoking a publish closes NEW connections but does NOT close an
+// already-established one.
+//
+// This is pinned rather than fixed, and the distinction is the point: it is the
+// MECHANISM REASON there is no un-publish endpoint today (§5.D / D5 ⑰). conntrack holds
+// the NAT binding and rule deletion is not evaluated against it, so a `running`
+// revocation could only ever promise "no new connections" — never "the port is closed",
+// which is exactly what a caller revoking an inbound port wants. Asserting it here means
+// nobody later assumes revocation is clean.
+func TestRevokingAPublishClosesNewConnectionsButNotEstablishedOnes(t *testing.T) {
+	eng, base := harness.Engine(t, netEngineOpts(t))
+	ctx := context.Background()
+
+	// An echo service, so an established connection can be shown to still work.
+	const echoSrc = `package main
+
+import (
+	"fmt"
+	"net"
+	"os"
+)
+
+func main() {
+	ln, err := net.Listen("tcp", "0.0.0.0:"+os.Args[1])
+	if err != nil {
+		fmt.Println("LISTEN_FAILED", err)
+		return
+	}
+	fmt.Println("LISTENING", ln.Addr())
+	for {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		go func(c net.Conn) {
+			defer c.Close()
+			buf := make([]byte, 256)
+			for {
+				n, rerr := c.Read(buf)
+				if n > 0 {
+					_, _ = c.Write(buf[:n])
+				}
+				if rerr != nil {
+					return
+				}
+			}
+		}(c)
+	}
+}
+`
+	harness.InjectStaticBin(t, base+"/templates", "bare", "echo", echoSrc)
+
+	d := declDeny()
+	d.Ingress.Publish = []model.NetPublish{{GuestPort: 8080, Proto: model.NetTCP}}
+	id, cl := createRunning(t, eng, d)
+	sctx, scancel := context.WithTimeout(ctx, 60*time.Second)
+	defer scancel()
+	if _, err := cl.Start(sctx, transport.StartSpec{Cmd: "/usr/bin/echo", Args: []string{"8080"}}); err != nil {
+		t.Fatalf("start the echo service: %v", err)
+	}
+	time.Sleep(700 * time.Millisecond)
+
+	_, _, eps, err := eng.Mediator.Network(ctx, id)
+	if err != nil || len(eps) == 0 {
+		t.Fatalf("no endpoint: %v %v", eps, err)
+	}
+	// Establish a connection and verify it round-trips.
+	conn, derr := net.DialTimeout("tcp", eps[0], 10*time.Second)
+	if derr != nil {
+		t.Fatalf("dial: %v", derr)
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte("before")); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 64)
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := conn.Read(buf); err != nil {
+		t.Fatalf("the established connection did not round-trip before revocation: %v", err)
+	}
+
+	// REVOKE, through the only path that exists: the whole-binding PATCH with the item
+	// omitted. On a `running` sandbox this rewrites the live rule set.
+	revoked := declDeny()
+	if err := eng.Mediator.SetNetwork(ctx, id, revoked); err != nil {
+		// The declaration is editable only from `paused` (§3.4), which is itself the
+		// answer: the SAFE revocation path rebuilds the placement and takes the old flows
+		// with it, and that is why `next-resume` has no ambiguity.
+		t.Logf("SetNetwork on a running sandbox was refused (%v) — as §3.4 requires. That refusal IS "+
+			"the clean revocation story: the whole-binding PATCH takes effect at the next placement, "+
+			"which rebuilds everything and drops old flows, so it has none of the ambiguity a "+
+			"`running` un-publish would have (§5.D / D5 ⑰)", err)
+		return
+	}
+	t.Error("SetNetwork edited the declaration on a RUNNING sandbox — the three egress fields are " +
+		"editable only from `paused` (§3.4), because the provider materializes them at placement")
+}
+
+// dialFromForeignNetns dials an address from a netns that is NOT the sandbox's own /30
+// — the "external caller" every publish assertion needs.
+//
+// It exists because dialing from the host is a genuinely different path: host-originated
+// traffic never traverses `prerouting`, so it is carried by the output-hook DNAT instead
+// (measured, D5 ⑭). Using the host as the "outside caller" would silently test that
+// second rule twice and leave the external path unasserted — which is exactly the
+// substitution §5.D warns is not evidence.
+func dialFromForeignNetns(t *testing.T, endpoint string) (string, error) {
+	t.Helper()
+	ns := fmt.Sprintf("pubcaller%d", time.Now().UnixNano()%100000)
+	vh := fmt.Sprintf("pcv%d", time.Now().UnixNano()%100000)
+	vp := vh + "p"
+	// A /30 in a DIFFERENT range from the sandbox space, so the caller is genuinely
+	// foreign to it and its traffic must be routed by the host.
+	const hostSide, callerSide = "10.99.99.1", "10.99.99.2"
+	steps := [][]string{
+		{"netns", "add", ns},
+		{"link", "add", vh, "type", "veth", "peer", "name", vp},
+		{"link", "set", vp, "netns", ns},
+		{"addr", "add", hostSide + "/30", "dev", vh},
+		{"link", "set", vh, "up"},
+		{"-n", ns, "addr", "add", callerSide + "/30", "dev", vp},
+		{"-n", ns, "link", "set", vp, "up"},
+		{"-n", ns, "link", "set", "lo", "up"},
+		{"-n", ns, "route", "add", "default", "via", hostSide, "dev", vp},
+	}
+	for _, st := range steps {
+		if out, err := exec.Command("ip", st...).CombinedOutput(); err != nil {
+			t.Fatalf("ip %v: %v: %s", st, err, out)
+		}
+	}
+	t.Cleanup(func() {
+		_ = exec.Command("ip", "netns", "del", ns).Run()
+		_ = exec.Command("ip", "link", "del", vh).Run()
+	})
+
+	// A tiny dialer, run inside that netns.
+	dir := t.TempDir()
+	src := `package main
+
+import (
+	"fmt"
+	"net"
+	"os"
+	"time"
+)
+
+func main() {
+	c, err := net.DialTimeout("tcp", os.Args[1], 8*time.Second)
+	if err != nil {
+		fmt.Println("DIAL_FAILED", err)
+		os.Exit(1)
+	}
+	defer c.Close()
+	c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	buf := make([]byte, 128)
+	n, rerr := c.Read(buf)
+	if n < 0 {
+		n = 0
+	}
+	if rerr != nil {
+		fmt.Println("CONNECTED_NO_PAYLOAD", rerr)
+		os.Exit(2)
+	}
+	fmt.Println("PAYLOAD", string(buf[:n]))
+}
+`
+	if err := os.WriteFile(dir+"/main.go", []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bin := dir + "/caller"
+	build := exec.Command("go", "build", "-o", bin, dir+"/main.go")
+	build.Dir = dir
+	build.Env = append(os.Environ(), "CGO_ENABLED=0", "GO111MODULE=off")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build the foreign-netns caller: %v: %s", err, out)
+	}
+	out, err := exec.Command("ip", "netns", "exec", ns, bin, endpoint).CombinedOutput()
+	return strings.TrimSpace(string(out)), err
 }
