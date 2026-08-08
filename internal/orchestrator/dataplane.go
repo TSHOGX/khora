@@ -12,12 +12,12 @@ import (
 	v1 "engine/internal/transport/gen/engine/transport/v1"
 )
 
-// The outer-edge data plane (transport D6): the orchestrator mounts the SAME
+// The outer-edge data plane (transport D5): the orchestrator mounts the SAME
 // process/fs Connect services the inner sandboxd exposes, and re-proxies each
 // call to the sandbox's current endpoint resolved by sandbox_id via the mediator
-// (placement NEVER leaves the engine, §6.2 / D6.1). One wire — the inner
+// (placement NEVER leaves the engine, §6.2 / D5.1). One wire — the inner
 // transport.proto is reused verbatim at the outer edge, no translation layer
-// and no REST/NDJSON facade (D6.2 / D6.3).
+// and no REST/NDJSON facade (D5.2 / D5.3).
 //
 // Addressing: the proto is pid-addressed (no sandbox_id field — D4.6 vocabulary
 // boundary keeps product/placement concepts out of the wire). The outer edge
@@ -27,24 +27,54 @@ import (
 // subsystem directly.
 const sandboxIDHeader = "Engine-Sandbox-Id"
 
-// processProxy re-proxies ProcessService to the sandbox's sandboxd (D6).
+// processProxy re-proxies ProcessService to the sandbox's sandboxd (D5).
 type processProxy struct{ e *Engine }
 
-// fsProxy re-proxies FsService to the sandbox's sandboxd (D6).
+// fsProxy re-proxies FsService to the sandbox's sandboxd (D5).
 type fsProxy struct{ e *Engine }
 
 // proxyErr sanitizes an inner transport-client error before it crosses to the
 // external client. The inner client dials the netns veth IP (client.go), so a
 // raw dial/transport error carries that IP:port — returning it verbatim would
-// leak placement to the engine's edge (§6.2 / D6.1: placement never exposed).
-// Map to CodeUnavailable with a placement-free message; the real cause is logged
-// engine-side (so it stays debuggable) but never crosses to the wire. This also
-// carries mid-stream terminations — an overflow disconnect (D4.3 invariant 1)
-// reaches forwardEvents as a ProcessEvent{Kind:"error"} and ends the outer stream
-// through here, so the external client learns the stream died rather than seeing
-// it close as if the process had finished.
+// leak placement to the engine's edge (§6.2 / D5.1: placement never exposed).
+// The real cause is logged engine-side (so it stays debuggable) but never crosses
+// to the wire.
+//
+// The leak is in the MESSAGE, never in the CODE: a Connect code is one of a fixed
+// enum of ~16 values, so it cannot carry an address, a host path, or any other
+// placement fact. That splits the sanitization in two:
+//
+//   - The inner error IS a *connect.Error — sandboxd itself classified the failure
+//     and chose the code. Pass that code through with a message composed HERE from
+//     nothing but the code's own name; none of the inner text crosses. A fresh
+//     connect.NewError is built rather than the inner error forwarded, so its
+//     details/metadata do not ride along either.
+//   - The inner error is NOT a connect error — a raw dial/network failure, i.e.
+//     exactly the case that genuinely IS a transient transport outage. CodeUnavailable
+//     with a fixed message, which is also the honest answer for an error of unknown
+//     provenance: the engine cannot classify it, so it claims nothing.
+//
+// Collapsing everything to CodeUnavailable was the defect this replaces. That code
+// specifically means "transient, retry me", so a malformed argument or a missing
+// path came back as an invitation to retry forever, and four distinct conditions
+// arrived indistinguishable. Passing the code through also makes the RPC half agree
+// with the REST half, which already reports the guest's classification (files.go
+// bypassCode) over the same inner client.
+//
+// This also carries mid-stream terminations — an overflow disconnect (D4.3
+// invariant 1) reaches forwardEvents as a ProcessEvent{Kind:"error"} and ends the
+// outer stream through here, so the external client learns the stream died rather
+// than seeing it close as if the process had finished. That shape is unchanged; only
+// the code sharpens. It is the case that most wanted this: the guest reports an
+// overflow disconnect as resource_exhausted precisely so a consumer can tell it from
+// a clean end, and the old collapse threw that distinction away one hop later.
 func proxyErr(err error) error {
-	log.Printf("dataplane: transport proxy error (sanitized to client): %v", err)
+	log.Printf("dataplane: transport proxy error (code passed through, message sanitized): %v", err)
+	var ce *connect.Error
+	if errors.As(err, &ce) {
+		// ce.Code().String() is derived from the enum, not from the inner message.
+		return connect.NewError(ce.Code(), errors.New("sandbox call failed: "+ce.Code().String()))
+	}
 	return connect.NewError(connect.CodeUnavailable, errors.New("sandbox transport unavailable"))
 }
 
@@ -269,7 +299,7 @@ func (f *fsProxy) Write(ctx context.Context, req *connect.Request[v1.WriteReques
 }
 
 // entryToWire re-encodes a domain EntryInfo for the outer edge. The outer wire is
-// the SAME proto as the inner one (D6.2 one-wire), so this is a straight
+// the SAME proto as the inner one (D5.2 one-wire), so this is a straight
 // projection — it exists only because the proxy speaks the domain Client
 // interface in between, never because the two edges differ.
 func entryToWire(e transport.EntryInfo) *v1.EntryInfo {
@@ -364,7 +394,7 @@ func (f *fsProxy) Move(ctx context.Context, req *connect.Request[v1.MoveRequest]
 
 // forwardEvents pumps the domain output channel to the outer proto server-stream
 // (transparent passthrough: the outer edge sees the exact same frames the inner
-// sandboxd produced — one wire, D6.2).
+// sandboxd produced — one wire, D5.2).
 func forwardEvents(stream *connect.ServerStream[v1.ProcessEvent], ch <-chan transport.ProcessEvent) error {
 	for ev := range ch {
 		var pe v1.ProcessEvent

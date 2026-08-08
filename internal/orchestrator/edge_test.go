@@ -35,7 +35,7 @@ var edgeSources = []string{"api.go", "volumes.go", "files.go", "dataplane.go", "
 // same door citing the precedent.
 var errorTextExemptions = map[string]string{
 	"sanitizeErr": "IS the sanitizer — reading the text is the whole job; it redacts host-shaped tokens before returning",
-	"proxyErr":    "data-plane sanitizer (D6.1): logs the real cause engine-side and returns a fixed placement-free message",
+	"proxyErr":    "data-plane sanitizer (D5.1): logs the real cause engine-side and returns a placement-free message composed from the CODE alone — the inner text never crosses",
 }
 
 // TestControlPlaneErrorsGoThroughTheFunnel: no production file in this package reads
