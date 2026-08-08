@@ -443,7 +443,7 @@
 - **声明的形状:四个字段,全部只用 IP / 端口 / 协议词汇**(wire schema 见 §6.1):
 
   ```text
-  egress.default    : deny | allow          # allow = 公网(减去 L0 地板与内网 deny-safe)
+  egress.default    : deny | allow          # allow = 公网(减去 L0 地板与内网 deny-safe = RFC1918,§2.4)
   egress.allow[]    : {cidr, port, proto}   # 只收 IP 字面量,不收域名
   egress.via[]      : {match[], endpoint}   # match[] 同为 {cidr, port, proto};命中者送进 endpoint
   ingress.publish[] : {guest_port, proto}   # → host endpoint
