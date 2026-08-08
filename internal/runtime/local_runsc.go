@@ -16,6 +16,7 @@ import (
 	"sync"
 
 	"engine/internal/guestport"
+	"engine/internal/ruleset"
 )
 
 // LocalRunsc is the single-node runtime provider (§5.A). It materializes
@@ -158,18 +159,27 @@ func (p *LocalRunsc) Name() string { return "local_runsc" }
 // allocSubnet hands out a fresh /30 (host .1, guest .2) each call — resume gets
 // a NEW IP (§3.3 / §4.3 IP-as-epoch). It skips IPs already held (inUse), so a
 // freshly-restarted process cannot hand a new sandbox an IP a survivor adopted
-// (§4.4-A). 10.66.<hi>.<lo*4>/30.
+// (§4.4-A). <sandbox /16>.<hi>.<lo*4>/30.
+//
+// The /16 comes from `internal/ruleset`, NOT from a literal here, and that is a
+// correctness requirement rather than tidiness: §5.D's L0 floor names the same
+// /16 as its SIBLING item (the materialization of §2.3 cross-sandbox network
+// isolation, which point-to-point veth does not deliver on its own — the host
+// still routes between two /30s, measured D5 ①). Two literals could drift, and
+// the drift would hand out a /30 the floor does not cover — a silently reachable
+// sibling. One fact, one leaf (D5 ④).
 func (p *LocalRunsc) allocSubnet() (hostIP, guestIP string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	oct := ruleset.SandboxCIDR.Addr().As4()
 	for {
 		seq := p.ipSeq
 		p.ipSeq++
-		block := seq % 16000 // keep within 10.66.0.0/16 (64 /30s per third octet)
+		block := seq % 16000 // keep within the /16 (64 /30s per third octet)
 		third := (block / 64) % 256
 		base := (block % 64) * 4
-		hostIP = fmt.Sprintf("10.66.%d.%d", third, base+1)
-		guestIP = fmt.Sprintf("10.66.%d.%d", third, base+2)
+		hostIP = fmt.Sprintf("%d.%d.%d.%d", oct[0], oct[1], third, base+1)
+		guestIP = fmt.Sprintf("%d.%d.%d.%d", oct[0], oct[1], third, base+2)
 		if !p.inUse[guestIP] {
 			p.inUse[guestIP] = true
 			return hostIP, guestIP
@@ -423,7 +433,13 @@ func (p *LocalRunsc) containerRunning(ctx context.Context, cid string) (bool, er
 	return st.Status == "running" || st.Status == "created", nil
 }
 
-var inetRe = regexp.MustCompile(`inet (10\.66\.\d+)\.(\d+)/`)
+// inetRe recovers a host veth's /30 address, anchored on the SHARED sandbox /16
+// (ruleset.SandboxCIDR) rather than a literal — same reason allocSubnet derives
+// it: a second copy could drift from the floor's sibling item.
+var inetRe = func() *regexp.Regexp {
+	oct := ruleset.SandboxCIDR.Addr().As4()
+	return regexp.MustCompile(fmt.Sprintf(`inet (%d\.%d\.\d+)\.(\d+)/`, oct[0], oct[1]))
+}()
 
 // rediscoverGuestIP recovers the guest endpoint IP of a running placement (⑥ IP
 // rediscovery for Adopt) WITHOUT a new epoch (§4.4-A 同一 IP). runsc's

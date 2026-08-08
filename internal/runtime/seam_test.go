@@ -4,9 +4,12 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"net/netip"
 	"strconv"
 	"strings"
 	"testing"
+
+	"engine/internal/ruleset"
 )
 
 // bannedTokens are substrings that betray a host primitive crossing a seam.
@@ -515,6 +518,50 @@ func TestRestartedAllocatorSkipsAnAdoptedSurvivorsIP(t *testing.T) {
 	rewind(0)
 	if _, reissued := p.allocSubnet(); reissued != survivorIP {
 		t.Errorf("after freeIP(%s) the allocator returned %s instead — a released IP must return to circulation", survivorIP, reissued)
+	}
+}
+
+// Every /30 the allocator hands out must fall inside the CIDR §5.D's L0 floor
+// names as its SIBLING item (§2.3 / network.md D5 ①④).
+//
+// The two facts share one leaf constant precisely so they cannot drift, and this
+// asserts the allocator actually honors it — because the drift is SILENT and its
+// consequence is the invariant M8 exists to deliver: a /30 allocated outside the
+// floor's sibling item is a sandbox address the floor does not cover, i.e. a
+// reachable sibling with every reachability test still passing (point-to-point
+// veth does not isolate — measured, the host routes between two /30s and sandbox
+// A completed a TCP handshake to sibling B).
+func TestEveryAllocatedSubnetLiesInsideTheFloorsSiblingCIDR(t *testing.T) {
+	base := t.TempDir()
+	p, err := NewLocalRunsc(base+"/root", base+"/state")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Walk the whole allocator cycle rather than a handful: the wrap-around
+	// arithmetic (`block % 16000`, third octet, base+1/base+2) is where an
+	// out-of-range address would appear, and it appears only near the wrap.
+	p.mu.Lock()
+	p.ipSeq = 0
+	p.mu.Unlock()
+	for i := 0; i < 16000; i++ {
+		hostIP, guestIP := p.allocSubnet()
+		p.freeIP(guestIP)
+		for _, ip := range []string{hostIP, guestIP} {
+			a, perr := netip.ParseAddr(ip)
+			if perr != nil {
+				t.Fatalf("allocSubnet produced an unparseable address %q: %v", ip, perr)
+			}
+			if !ruleset.SandboxCIDR.Contains(a) {
+				t.Fatalf("allocSubnet handed out %s at seq %d, outside the floor's sibling CIDR %s — "+
+					"that address space is NOT covered by the L0 floor, so the sibling would be reachable "+
+					"with every reachability assertion still passing (§2.3 / D5 ①④)", ip, i, ruleset.SandboxCIDR)
+			}
+		}
+		// guest = host+1 within the /30 is what Adopt's endpoint rediscovery depends
+		// on (it reads the host veth and adds one).
+		if want := incLastOctet(t, hostIP); guestIP != want {
+			t.Fatalf("seq %d: host=%s guest=%s; guest must be host+1", i, hostIP, guestIP)
+		}
 	}
 }
 

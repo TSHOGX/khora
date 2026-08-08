@@ -157,6 +157,53 @@ func TestSubsystemsDoNotReadTheControlPlane(t *testing.T) {
 	}
 }
 
+// leaves are the packages that exist SO THAT the empty allowlist above can stay
+// empty: when two subsystems need the same fact, it goes in a leaf they both
+// depend on (CLAUDE.md), never behind an exemption. `guestport` is the precedent;
+// `ruleset` applies it a second time, holding the §2.4 static address facts and
+// the abstract rule vocabulary that §5.D generates and §5.A renders.
+//
+// A leaf is only a leaf while it imports NOTHING from the engine. The failure mode
+// is quiet and it defeats the whole construction: the moment `ruleset` imports
+// `runtime` (say, to reach a placement type), every §5.D package that depends on
+// it inherits that edge TRANSITIVELY, and the guard above still passes — it only
+// looks at direct imports. So this is checked here rather than trusted to the
+// package comment.
+var leaves = []string{
+	"engine/internal/guestport",
+	"engine/internal/ruleset",
+}
+
+// TestLeavesImportNothingFromTheEngine keeps the leaf packages leaves.
+func TestLeavesImportNothingFromTheEngine(t *testing.T) {
+	want := map[string]bool{}
+	for _, l := range leaves {
+		want[l] = true
+	}
+	for _, tags := range []string{"", "substrate"} {
+		for _, p := range listPackages(t, tags) {
+			if !want[p.ImportPath] {
+				continue
+			}
+			delete(want, p.ImportPath)
+			for _, group := range [][]string{p.Imports, p.TestImports, p.XTestImports} {
+				for _, imp := range group {
+					if !strings.HasPrefix(imp, "engine/") {
+						continue
+					}
+					t.Errorf("leaf %s imports %s (tags=%q) — a leaf exists so two subsystems can "+
+						"share a fact WITHOUT an edge between them, and it only works while it "+
+						"depends on nothing: an import here becomes a TRANSITIVE edge that the "+
+						"direct-import guard above cannot see", p.ImportPath, imp, tags)
+				}
+			}
+		}
+	}
+	for l := range want {
+		t.Errorf("leaf package %s not found — this guard is stale, and a stale guard passes vacuously", l)
+	}
+}
+
 // TestGuardIsNotStale fails if the subsystem list has drifted from reality —
 // otherwise renaming a package silently disables the checks above, which is worse
 // than not having them (they would still pass, and read as coverage).
