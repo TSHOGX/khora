@@ -35,7 +35,7 @@ Its design is settled in the spec (§5.D's four-field declaration, §2.4's three
 invariants, [`network.md`](../spec/deep-dives/network.md) D1–D8), and the plan
 carries scope, acceptance, out-of-scope, and today's state. **Nothing gates the
 start of implementation** — `open-decisions.md` §1 (blocking spikes) is empty; the
-facts the measurement pass produced are `network.md` D5 (①–㉓), and M8 inherits
+facts the measurement pass produced are `network.md` D5 (①–㉔), and M8 inherits
 them rather than rediscovering them.
 
 Several of those facts are **constructions that pass their obvious test while
