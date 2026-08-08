@@ -1516,7 +1516,7 @@ func main() {
 	// Wait until the flow has verified a few round trips, so the restart really lands
 	// mid-flow rather than before it started.
 	time.Sleep(3 * time.Second)
-	progressBefore := harness.NftCounter(t, id2, "allow0_fwd")
+	progressBefore := harness.NftCounter(t, id2, "allow0_in")
 
 	// THE RESTART, mid-flow: a second engine over the same store and state, running
 	// production's boot sequence. Its Adopt re-installs the rule set — as ONE atomic
@@ -1553,10 +1553,18 @@ func main() {
 			"typically succeeds once before EPIPE (D5 ⑰'s measurement discipline)\nraw: %s",
 			trips, strings.TrimSpace(res.raw))
 	}
-	after := harness.NftCounter(t, id2, "allow0_fwd")
+	// The counter read is the INPUT-side allow, not the forward one, and the difference
+	// is the first-hop hook split (D5 ⑧): this flow's destination is an address of the
+	// HOST ITSELF, so it lands on `input`. The forward-side allow counts zero on this
+	// path whether or not the rule set works — reading it would be the "always zero is
+	// indistinguishable from bypassed" trap the discipline exists to avoid, in its
+	// test-authoring form.
+	after := harness.NftCounter(t, id2, "allow0_in")
 	if after <= progressBefore {
-		t.Errorf("the allow counter did not advance across the restart (%d → %d) — the flow's traffic "+
-			"is not being matched by the re-installed rule set", progressBefore, after)
+		t.Errorf("the input-side allow counter did not advance across the restart (%d → %d) — the "+
+			"flow's traffic is not being matched by the re-installed rule set. (Read on `input` "+
+			"because the destination is a HOST address; the forward-side allow is flat on this path "+
+			"either way — D5 ⑧)", progressBefore, after)
 	}
 	t.Logf("item 13b: %d verified round trips across a control-plane restart + Adopt", trips)
 }

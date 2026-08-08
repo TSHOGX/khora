@@ -1,0 +1,79 @@
+=== RUN   TestALiveFlowSurvivesAControlPlaneRestartAndItsAdopt
+    network_substrate_test.go:1564: the input-side allow counter did not advance across the restart (1 → 0) — the flow's traffic is not being matched by the re-installed rule set. (Read on `input` because the destination is a HOST address; the forward-side allow is flat on this path either way — D5 ⑧)
+    network_substrate_test.go:1569: item 13b: 40 verified round trips across a control-plane restart + Adopt
+--- FAIL: TestALiveFlowSurvivesAControlPlaneRestartAndItsAdopt (21.86s)
+=== RUN   TestPublishOnAPausedSandboxRecordsWithoutInstallingRules
+--- PASS: TestPublishOnAPausedSandboxRecordsWithoutInstallingRules (1.62s)
+=== RUN   TestRepeatedPublishIsIdempotentOnTheHostToo
+--- PASS: TestRepeatedPublishIsIdempotentOnTheHostToo (0.93s)
+=== RUN   TestAStalePatchSilentlyDropsAHotAddedPublish
+    network_substrate_test.go:1983: item 15: a stale PATCH DID drop the hot-added publish, as §6.1 documents. This is why that GET is a contract requirement rather than a suggestion: the engine does not merge fields and does not carry an optimistic-concurrency stamp (a record version would be the generation counter §1.1 bans). The safe sequence is pause → GET → PATCH → resume, and the additive fix is a delete endpoint for publish, which removes the conflict CLASS
+--- PASS: TestAStalePatchSilentlyDropsAHotAddedPublish (0.85s)
+=== RUN   TestIPv6IsCoveredByTheSameFloor
+=== RUN   TestIPv6IsCoveredByTheSameFloor/the_host-side_veth's_kernel-assigned_link-local
+=== RUN   TestIPv6IsCoveredByTheSameFloor/eth0's_GLOBAL_IPv6_address
+    network_substrate_test.go:2095: eth0's GLOBAL IPv6 address: unreachable, but counter "in_floor" did not move (3 → 3). Per the acceptance discipline this is an INVALID assertion, not a pass: a floor whose counter reads 0 is indistinguishable from a floor that was bypassed (§2.4 / D4.1 / D5 ⑧).
+        table inet sbxnet_sbx_cbc635d6a51fd1c5 {
+        	counter in_established {
+        		packets 25 bytes 2134
+        	}
+        
+        	counter in_sibling {
+        		packets 0 bytes 0
+        	}
+        
+        	counter in_floor {
+        		packets 3 bytes 216
+        	}
+        
+        	counter fwd_established_out {
+        		packets 0 bytes 0
+        	}
+        
+        	counter fwd_established_in {
+        		packets 0 bytes 0
+        	}
+        
+        	counter fwd_floor_v4 {
+        		packets 0 bytes 0
+        	}
+        
+        	counter fwd_floor_v6 {
+        		packets 0 bytes 0
+        	}
+        
+        	counter fwd_default_deny {
+        		packets 0 bytes 0
+        	}
+        
+        	counter fwd_ingress_closed {
+        		packets 0 bytes 0
+        	}
+        
+        	chain c_input {
+        		type filter hook input priority filter; policy accept;
+        		iifname "vh7f020299f827" ct state established,related counter name "in_established" accept comment "return path for host→guest flows (transport included). Family-UNQUALIFIED on purpose: one such rule covers IPv6 too, so th…"
+        		iifname "vh7f020299f827" ip daddr 10.66.0.0/16 counter name "in_sibling" reject with icmp port-unreachable comment "L0 floor, sibling item on the input side: a SIBLING's /30 gateway is a host address, so only this chain sees it — the forw…"
+        		iifname "vh7f020299f827" ct state invalid,new,untracked counter name "in_floor" reject comment "L0 floor, host-itself item: a pure ct-state rule, so host addresses are NEVER enumerated and one added later is still covere…"
+        	}
+        
+        	chain c_forward {
+        		type filter hook forward priority filter; policy accept;
+        		iifname "vh7f020299f827" ct state established,related counter name "fwd_established_out" accept comment "established/related, guest→out. Measured load-bearing: remove it and even an ALLOWED flow breaks, because the reverse dire…"
+        		iifname "vh7f020299f827" ip daddr { 10.66.0.0/16, 127.0.0.0/8, 169.254.0.0/16 } counter name "fwd_floor_v4" reject with icmp port-unreachable comment "L0 floor daddr items, v4: loopback / link-local (every cloud metadata endpoint) / sibling sandbox address space — §2.3's …"
+        		iifname "vh7f020299f827" ip6 daddr { ::1, fe80::/10 } counter name "fwd_floor_v6" reject with icmpv6 port-unreachable comment "L0 floor daddr items, v6: loopback / link-local. Two rules only because `ip daddr` and `ip6 daddr` are family-typed — not …"
+        		iifname "vh7f020299f827" counter name "fwd_default_deny" reject comment "egress.default: deny — the forward side needs its OWN default-deny: a destination that is not on the host and was not stee…"
+        	}
+        
+        	chain c_forward_in {
+        		type filter hook forward priority filter + 10; policy accept;
+        		oifname "vh7f020299f827" ct state established,related counter name "fwd_established_in" accept comment "established/related, in→guest (the reply half of any allowed egress, and of a published flow). On the INGRESS chain becaus…"
+        		oifname "vh7f020299f827" counter name "fwd_ingress_closed" drop comment "ingress default-deny (§2.1 ③): inbound is closed unless published. Without it, anything the host routes could reach the g…"
+        	}
+        }
+--- FAIL: TestIPv6IsCoveredByTheSameFloor (4.00s)
+    --- PASS: TestIPv6IsCoveredByTheSameFloor/the_host-side_veth's_kernel-assigned_link-local (3.03s)
+    --- FAIL: TestIPv6IsCoveredByTheSameFloor/eth0's_GLOBAL_IPv6_address (0.01s)
+FAIL
+FAIL	engine/test	29.265s
+FAIL

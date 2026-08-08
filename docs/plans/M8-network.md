@@ -27,29 +27,30 @@
 
 ---
 
-## 1. 起点:今天的现状(spec 各处指向此处)
+## 1. 起点:落地进度(spec 各处指向此处)
 
-**§2.4 三条 invariant 今天无一成立。** spec 用现在时描述它们(§2.1 ③④ / §2.4 / §5.D),那是**义务规格**,
-不是对当前代码的陈述——本节是那份陈述的唯一出处,spec 侧只留指针。
+**spec 用现在时描述 §2.4 那三条 invariant(§2.1 ③④ / §2.4 / §5.D),那是义务规格。**
+本节是"代码兑现到哪一步"这句陈述的唯一出处,spec 侧只留指针。**本节随 M8 过评审门而整节删除。**
 
-- **代码一行未落**:无 `internal/network` 包,无 nft 规则集,无 L0 地板;`CREATE TABLE sandboxes` 里
-  **没有存那份声明的列**,故声明今天连落库处都没有。`local_runsc` 只建 netns + veth + 两个 `/30`。
-- **今天的"不可达"是巧合,不是强制**:沙箱到不了公网 / sibling / link-local 是"没有默认路由"**且**
-  "没有宿主侧 SNAT"两件事一起,而 guest root 持 `CAP_NET_ADMIN`、加得动那条路由(逐条与逃逸步数见
-  [`network.md`](../spec/deep-dives/network.md) D5 ⑤;sibling 已实测握手成功并读到载荷,D5 ①)。宿主
-  loopback 与 orchestrator 控制面是被 `127.0.0.1` bind + `route_localnet=0` **偶然**覆盖的,同样不是强制。
-- **支柱④ 只有 substrate 那一半**:每沙箱独立 netns + 点对点 veth 已在,**谓词那半没有**——它要等规则集
-  落地才有意义。
-- **两个端点 404** :`GET …/network` 与 `POST …/publish` 落到 sandbox 子路由的 `default` 分支。
-- **`POST /v1/sandboxes` 的 `network?` 被静默丢弃**:它是未知键,而全仓**无一处 `DisallowUnknownFields`**,
-  故调用方拿到 201 会以为声明已生效。
-- **IPv6 是一个默认打开的地址族,比"未建"更糟**:引擎从不碰 IPv6 而 `disable_ipv6` 默认 0,故内核给每条
-  沙箱 veth 自动配宿主侧 `fe80::/64`,本机 `eth0` 又有真实 IPv6;实测**无地板时 guest 不仅可达宿主侧 veth
-  的链路本地,还可达 `eth0` 的全局 IPv6**。**它不需要地板设计上的任何新东西**——一条不带 family 限定的纯
-  ct-state `inet` 规则连 IPv6 一起覆盖(D5 ⑪),故这一族的敞开纯粹是"地板一行未落"的后果,与 IPv4 那一半
-  同时消失。
+**已兑现(门 A 全部 + 门 B 已跑通的部分,均在真 substrate 上有输出)**:
 
-**本节随 M8 落地而整节删除**(plan expire 时一并消失)。
+- `internal/ruleset`(leaf,两跳共用的静态地址事实 + 抽象规则词汇)· `internal/network`(§5.D:声明、
+  八类 400、纯函数生成器、第二跳规则集)· `SteeringSpec` 真载荷 · provider 侧渲染 + 安装 + 四条渲染守卫 ·
+  声明落库(`sandboxes.network`,§3.4 Binding)· `coldStart` 每次 placement 从**当前记录**派生 ·
+  `Adopt` 重装规则集 · 两个 §6 端点 · 三个声明写点开 `DisallowUnknownFields` ·
+  `--via-uid`/`--via-gid`/`--publish-ip` 与起步时装一次的第二跳表。
+- **支柱④ 的谓词那一半已在**,并已按"guest root 伪造源地址后仍被拦、且地板计数增长"验收(门 B 第 10 条)。
+- **"不可达"不再是巧合**:`deny` 沙箱**照样装** guest 默认路由,故它的包真的打到地板上、被一条会计数的
+  规则 reject —— 对 guest 是同一个结局,而引擎从"继承了一个巧合"变成"执行了一次它能证明的拒绝"。
+  (原先只在 `RoutedEgress` 时装路由,包死在 gVisor netstack 里、地板计数恒 0 —— 这既是 D5 ⑤ 点名的
+  那个巧合,也在验收纪律下不可断言。)
+- **IPv6** 由同一条不带 family 限定的 ct-state 规则覆盖,渲染输出里无 `nfproto ipv6` 臂(门 B 第 10b 条)。
+
+**门 B 尚未跑通/未写的条目**(唯一的未兑现面):第 13/13b 条(对账 + 活流跨重启)· 第 14 系列(publish
+五问、14b/14c/14d/14e)· 第 15 条(`PATCH` 的 read-modify-write 危险)。这些条目的代码已落,断言在跑或待跑。
+
+**两处 spec 缺口已按纪律登记**(见 [`open-decisions.md`](../spec/open-decisions.md)):§6.2 的"第九类拒绝"
+(未给第二跳 uid 时收 `via[]`)· `GET …/network` 的响应能否原样回写给 `PATCH`。两条都在评审门上拍板。
 
 ---
 

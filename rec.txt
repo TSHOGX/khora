@@ -1,0 +1,9 @@
+=== RUN   TestReconciliationReadoptsARuleSetAndReclaimsAnOrphansTable
+--- PASS: TestReconciliationReadoptsARuleSetAndReclaimsAnOrphansTable (26.53s)
+=== RUN   TestALiveFlowSurvivesAControlPlaneRestartAndItsAdopt
+    network_substrate_test.go:1558: the allow counter did not advance across the restart (0 → 0) — the flow's traffic is not being matched by the re-installed rule set
+    network_substrate_test.go:1561: item 13b: 40 verified round trips across a control-plane restart + Adopt
+--- FAIL: TestALiveFlowSurvivesAControlPlaneRestartAndItsAdopt (22.28s)
+FAIL
+FAIL	engine/test	48.817s
+FAIL
