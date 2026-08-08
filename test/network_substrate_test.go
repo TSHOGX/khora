@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -50,6 +51,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -90,7 +92,12 @@ func main() {
 		fmt.Printf("OUTCOME=connected_no_payload MS=%d ERR=%v\n", el, rerr)
 		return
 	}
-	fmt.Printf("OUTCOME=connected MS=%d PAYLOAD=%q\n", el, string(buf[:n]))
+	// PAYLOAD is emitted LAST and read to end-of-line by the harness: a banner
+	// legitimately contains spaces (the via endpoint answers "via-ok ORIGDST=<addr>"),
+	// and a whitespace-split parser would silently truncate it — which is a test-harness
+	// artifact that reads exactly like the engine failing to recover the original
+	// destination.
+	fmt.Printf("OUTCOME=connected MS=%d PAYLOAD=%s\n", el, strings.ReplaceAll(string(buf[:n]), "\n", " "))
 }
 `
 
@@ -125,6 +132,19 @@ func runGuestProbe(t *testing.T, cl transport.Client, addr string, udp bool) pro
 	}
 	raw := sb.String()
 	res := probeResult{raw: raw}
+	// PAYLOAD is read to END OF LINE rather than as a whitespace-delimited field: a
+	// banner legitimately contains spaces (the via endpoint answers
+	// "via-ok ORIGDST=<addr>"), and splitting on whitespace truncated it at "via-ok" —
+	// which read exactly like the engine failing to recover the original destination.
+	// A harness artifact impersonating an engine defect is the one kind of test bug
+	// this file cannot afford, since every assertion here is about distinguishing those.
+	if i := strings.Index(raw, "PAYLOAD="); i >= 0 {
+		rest := raw[i+len("PAYLOAD="):]
+		if nl := strings.IndexByte(rest, '\n'); nl >= 0 {
+			rest = rest[:nl]
+		}
+		res.payload = strings.TrimSpace(rest)
+	}
 	for _, field := range strings.Fields(raw) {
 		k, v, ok := strings.Cut(field, "=")
 		if !ok {
@@ -135,8 +155,6 @@ func runGuestProbe(t *testing.T, cl transport.Client, addr string, udp bool) pro
 			res.outcome = v
 		case "MS":
 			fmt.Sscanf(v, "%d", &res.ms)
-		case "PAYLOAD":
-			res.payload = v
 		}
 	}
 	if res.outcome == "" {
@@ -859,4 +877,1277 @@ func TestTheRulesArePresentBeforeTheGuestRunsAndAFailedLaunchLeavesNoTable(t *te
 	if n := harness.CountRuleSetTables(t); n != before {
 		t.Errorf("after destroy, rule-set tables are %d, want %d — the table leaked", n, before)
 	}
+}
+
+// --- items 9b / 9c / 9d: `via[]` ------------------------------------------------
+
+// viaListener runs a host-local TCP listener AS A GIVEN UID, recovering the ORIGINAL
+// destination of each redirected connection and reporting it — the "process outside
+// the engine" a `via[]` endpoint points at.
+//
+// It runs as secondHopUID because item 9d needs the second hop to be attributable:
+// the engine-level table pins THAT uid's egress, and the paired assertion is that
+// root's own probe still works (an un-narrowed drop there is a host-level egress kill
+// switch — measured, root's probe failed too, D5 ㉔).
+const viaListenerSrc = `package main
+
+import (
+	"fmt"
+	"net"
+	"os"
+	"strconv"
+	"syscall"
+)
+
+// vialisten <addr:port> — accept, recover SO_ORIGINAL_DST, answer with it.
+//
+// SO_ORIGINAL_DST is the interface that WORKS on TCP; §5.D excludes UDP from via[]
+// precisely because the UDP equivalent returns the POST-NAT local endpoint, which is
+// indistinguishable from "no NAT happened" (measured, D3.2 / D5 ⑥).
+func main() {
+	bind := os.Args[1]
+	ln, err := net.Listen("tcp", bind)
+	if err != nil {
+		fmt.Println("LISTEN_FAILED", err)
+		os.Exit(1)
+	}
+	fmt.Println("LISTENING", ln.Addr())
+	for {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		orig := "unknown"
+		if tc, ok := c.(*net.TCPConn); ok {
+			if raw, err := tc.SyscallConn(); err == nil {
+				_ = raw.Control(func(fd uintptr) {
+					if sa, err := syscall.GetsockoptIPv6Mreq(int(fd), syscall.IPPROTO_IP, 80); err == nil {
+						ip := net.IPv4(sa.Multiaddr[4], sa.Multiaddr[5], sa.Multiaddr[6], sa.Multiaddr[7])
+						p := int(sa.Multiaddr[2])<<8 | int(sa.Multiaddr[3])
+						orig = ip.String() + ":" + strconv.Itoa(p)
+					}
+				})
+			}
+		}
+		_, _ = c.Write([]byte("via-ok ORIGDST=" + orig))
+		_ = c.Close()
+	}
+}
+`
+
+// startViaListener builds and starts the via endpoint process as secondHopUID,
+// returning its endpoint and a stop func.
+//
+// IT BINDS A NON-LOOPBACK HOST ADDRESS, and that is a contract requirement rather
+// than a fixture preference — §6.2's SIXTH 400 class refuses a `via[].endpoint`
+// inside the L0 floor, loopback included, because every flow steered there would be
+// permanently fail-closed.
+//
+// This fixture originally used 127.0.0.9 and measured that fail-closure directly: with
+// `route_localnet=0` (this host's default) a 127/8 DNAT target is simply not routable
+// for guest-originated traffic — `ip route get 127.0.0.9 from <guest>` answers
+// "Network is unreachable". So the class is not fastidiousness: it refuses at the write
+// point a declaration the substrate would refuse silently on the wire, which is D4.3's
+// diagnostic dislocation. A second, independent mechanism reaching the same verdict as
+// the spec's stated reason.
+func startViaListener(t *testing.T, port int) (string, func()) {
+	t.Helper()
+	dir := t.TempDir()
+	src := dir + "/main.go"
+	if err := os.WriteFile(src, []byte(viaListenerSrc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bin := dir + "/vialisten"
+	build := exec.Command("go", "build", "-o", bin, src)
+	build.Dir = dir
+	build.Env = append(os.Environ(), "CGO_ENABLED=0", "GO111MODULE=off")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build via listener: %v: %s", err, out)
+	}
+	// World-readable+executable so the unprivileged uid can exec it out of the temp dir.
+	_ = os.Chmod(dir, 0o755)
+	_ = os.Chmod(bin, 0o755)
+	// setpriv drops to the deployment's second-hop uid — the identity the engine-level
+	// table narrows on.
+	bind := net.JoinHostPort(hostIPv4(t), fmt.Sprint(port))
+	cmd := exec.Command("setpriv", "--reuid", fmt.Sprint(secondHopUID),
+		"--regid", fmt.Sprint(secondHopUID), "--clear-groups", bin, bind)
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd.Stderr = cmd.Stdout
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start via listener: %v", err)
+	}
+	// Wait for the listening line so the test does not race the bind.
+	buf := make([]byte, 128)
+	n, _ := out.Read(buf)
+	line := string(buf[:n])
+	if !strings.Contains(line, "LISTENING") {
+		_ = cmd.Process.Kill()
+		t.Fatalf("via listener did not come up: %q", line)
+	}
+	stop := func() { _ = cmd.Process.Kill(); _, _ = cmd.Process.Wait() }
+	t.Cleanup(stop)
+	return bind, stop
+}
+
+// Gate B item 9b: `via[]` really steers, AND the narrow accept did not reopen the
+// floor. BOTH halves, because each alone is passed by a broken rule set — and this is
+// the item the plan calls the easiest in the whole milestone to silently pass, with
+// TWO failure directions (D5 ⑩): test only (a) and an accept wide enough to void the
+// floor passes; read only the counter and a CROSS-CHAIN accept counts while the
+// feature is dead.
+func TestViaSteersAndDoesNotReopenTheFloor(t *testing.T) {
+	eng, _ := harness.Engine(t, netEngineOpts(t))
+	endpoint, _ := startViaListener(t, 15443)
+
+	// Steer a PUBLIC destination, so the declared target is something the floor would
+	// not have refused anyway — isolating "steering happened" from "the floor refused".
+	d := declDeny()
+	d.Egress.Via = []model.NetVia{{
+		Match:    []model.NetTuple{tupleOf(t, "1.1.1.1/32", 443, model.NetTCP)},
+		Endpoint: endpoint,
+	}}
+	id, cl := createRunning(t, eng, d)
+
+	// (a) WORKING: reachable AND the accept counted AND the endpoint saw the REAL
+	// original destination (D5 ⑥'s end-to-end payoff).
+	accBefore := harness.NftCounter(t, id, "via0_0_accept")
+	got := runGuestProbe(t, cl, "1.1.1.1:443", false)
+	accAfter := harness.NftCounter(t, id, "via0_0_accept")
+	if !got.reachable() {
+		t.Fatalf("the steered flow did not reach the endpoint (%s) — `via[]` is dead. Note the "+
+			"counter alone would not have told us: a CROSS-CHAIN accept increments while the flow is "+
+			"still dropped (D5 ⑩)\n%s", got.raw, harness.DumpRuleSet(id))
+	}
+	if !strings.Contains(got.payload, "via-ok") {
+		t.Errorf("the steered flow reached something that is not the endpoint: %q", got.payload)
+	}
+	// The endpoint recovered the PRE-NAT destination, which is what makes `via[]` useful
+	// at all: the process outside the engine sees the real target rather than a
+	// guest-asserted alias (D3.3 / D5 ⑥).
+	if !strings.Contains(got.payload, "ORIGDST=1.1.1.1:443") {
+		t.Errorf("the endpoint did not recover the real original destination: %q — that recovery is "+
+			"the whole point of steering by port (D5 ⑥), and without it the process outside the "+
+			"engine has only the guest's own claim about where it was going", got.payload)
+	}
+	if accAfter <= accBefore {
+		t.Errorf("the narrow accept counted %d → %d while the flow worked — the traffic is taking a "+
+			"path the rule set does not describe", accBefore, accAfter)
+	}
+
+	// (b) The SAME rule set must still refuse everything the narrow accept was not for.
+	// Each of these four corresponds to a measured counter-example for a simpler
+	// spelling of that accept (D5 ⑩), so they are the proof its three clauses are
+	// load-bearing — not extra coverage.
+	host := hostIPv4(t)
+	_, listenPortStr, _ := net.SplitHostPort(endpoint)
+	otherAddr, otherStop := hostListener(t, "hello-from-UNDECLARED")
+	defer otherStop()
+	_, otherPortStr, _ := net.SplitHostPort(otherAddr)
+
+	for _, tc := range []struct{ name, target, counter, why string }{{
+		name:    "the guest dials the endpoint's port DIRECTLY, bypassing steering",
+		target:  net.JoinHostPort(host, listenPortStr),
+		counter: "in_floor",
+		why: "`tcp dport <listener>` on its own is exactly this bypass; it is safe only as the " +
+			"THIRD clause, because `ct original` has already pinned the pre-NAT tuple and a direct " +
+			"dial has no conntrack original entry that satisfies it (D5 ⑩)",
+	}, {
+		name:    "an UNDECLARED original port toward the declared destination",
+		target:  "1.1.1.1:9200",
+		counter: "fwd_default_deny",
+		why: "the measured counter-example for `ct status dnat tcp dport <listener>`: 9200 → :18443 " +
+			"was let through with the floor counting 0, and the listener read ORIGDST=…:9200 (D5 ⑩)",
+	}, {
+		name:    "the declared port toward an UNDECLARED destination",
+		target:  "9.9.9.9:443",
+		counter: "fwd_default_deny",
+		why: "the counter-example for pinning only `ct original proto-dst`: another address on the " +
+			"same port would be steered, which is over-reach in the explicit-endpoint form (D5 ⑩)",
+	}, {
+		name:    "an unrelated host port",
+		target:  net.JoinHostPort(host, otherPortStr),
+		counter: "in_floor",
+		why:     "the floor still covers every host address the declaration did not name",
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := harness.NftCounter(t, id, tc.counter)
+			res := runGuestProbe(t, cl, tc.target, false)
+			after := harness.NftCounter(t, id, tc.counter)
+			if res.reachable() {
+				t.Errorf("REACHED %s under a declaration that did not name it (payload %s) — the narrow "+
+					"accept has reopened the floor: %s\n%s", tc.target, res.payload, tc.why,
+					harness.DumpRuleSet(id))
+			}
+			mustCounterMoved(t, id, tc.counter, before, after, tc.name)
+		})
+	}
+
+	// (c) THE `iifname` DIMENSION, separately: a SECOND sandbox's identical flow must
+	// not be admitted by THIS sandbox's accept. Measured as the last row of D5 ⑩ — an
+	// accept without the interface clause is a hole in every sandbox's floor, and both
+	// floors counted 0 when it happened.
+	t.Run("another sandbox's identical flow is not admitted by this accept", func(t *testing.T) {
+		otherID, otherCl := createRunning(t, eng, declDeny())
+		before := harness.NftCounter(t, otherID, "fwd_default_deny")
+		res := runGuestProbe(t, otherCl, "1.1.1.1:443", false)
+		after := harness.NftCounter(t, otherID, "fwd_default_deny")
+		if res.reachable() {
+			t.Errorf("a SECOND sandbox's identical flow was admitted (payload %s) — every per-sandbox "+
+				"table is a `policy accept` base chain on a SHARED hook, so an accept missing its "+
+				"`iifname` is a hole in EVERY sandbox's floor (D5 ⑩, last row)\n%s",
+				res.payload, harness.DumpRuleSet(id))
+		}
+		mustCounterMoved(t, otherID, "fwd_default_deny", before, after,
+			"item 9b(c): the second sandbox's OWN default-deny must be what refuses it")
+	})
+}
+
+// Gate B item 9c: when the `via[]` endpoint is DEAD, the steered connection is refused
+// — it does NOT fall through to the next rule and leave.
+//
+// This is §2.4 fail-closed's second named case, and the plan flags it as a REQUIREMENT
+// rather than an inherited measurement: D5 has no "the listener died" cell.
+//
+// The counter half is the subtle part. It reads the INPUT-side narrow accept, not the
+// forward default-deny, and the reasoning is hook attribution: the DNAT is in
+// `prerouting` and does not care whether anything is listening, so the packet is still
+// transformed and still lands on `input` — while a destination that is neither on the
+// host nor steered never traverses `input` at all. So that counter still rising is
+// POSITIVE evidence the packet went down the steering path and was consumed locally,
+// which is incompatible with it having been routed out.
+func TestADeadViaEndpointRefusesTheConnectionRatherThanLettingItOut(t *testing.T) {
+	eng, _ := harness.Engine(t, netEngineOpts(t))
+	endpoint, stopListener := startViaListener(t, 15444)
+
+	d := declDeny()
+	d.Egress.Via = []model.NetVia{{
+		Match:    []model.NetTuple{tupleOf(t, "1.1.1.1/32", 443, model.NetTCP)},
+		Endpoint: endpoint,
+	}}
+	// A second, INDEPENDENT allowed egress, for the per-connection scope assertion.
+	hostAddr, stopHost := hostListener(t, "hello-from-ALLOWED")
+	defer stopHost()
+	hostIP0, hostPortStr, _ := net.SplitHostPort(hostAddr)
+	if hostIP0 == "::" || hostIP0 == "0.0.0.0" {
+		hostIP0 = hostIPv4(t)
+	}
+	var hostPort uint16
+	fmt.Sscanf(hostPortStr, "%d", &hostPort)
+	d.Egress.Allow = []model.NetTuple{tupleOf(t, hostIPv4(t)+"/32", hostPort, model.NetTCP)}
+	id, cl := createRunning(t, eng, d)
+
+	// Baseline: steering works while the endpoint is alive, so the failure below is
+	// attributable to killing it rather than to the rule set.
+	if res := runGuestProbe(t, cl, "1.1.1.1:443", false); !res.reachable() {
+		t.Fatalf("steering did not work before the endpoint was killed: %s", res.raw)
+	}
+
+	// Kill the endpoint. The rule set is UNCHANGED — that is the point: this measures
+	// what happens to a steered flow whose destination process is gone.
+	stopListener()
+	time.Sleep(300 * time.Millisecond)
+
+	accBefore := harness.NftCounter(t, id, "via0_0_accept")
+	res := runGuestProbe(t, cl, "1.1.1.1:443", false)
+	accAfter := harness.NftCounter(t, id, "via0_0_accept")
+
+	// (a) refused, and FAST. The mechanism differs from the floor's `reject` and must
+	// not be conflated: this RST comes from the host stack having no socket on that
+	// port, not from a rule.
+	if res.reachable() {
+		t.Fatalf("the steered flow succeeded with the endpoint DEAD (%s) — something else answered", res.raw)
+	}
+	if el := time.Duration(res.ms) * time.Millisecond; el >= 5*time.Second {
+		t.Errorf("a steered flow with a dead endpoint took %s — §2.4 fail-closed promises a clean "+
+			"failure for exactly this case, and the RST here comes from the host stack having no "+
+			"socket rather than from a `reject` rule (do not conflate the two mechanisms)", el)
+	}
+	// (b) it did NOT leave. The narrow accept carries `ct state new`, so a re-dial must
+	// increment it — positive evidence the packet took the steering path and was
+	// consumed locally.
+	mustCounterMoved(t, id, "via0_0_accept", accBefore, accAfter,
+		"item 9c(b): the DNAT is in `prerouting` and does not check for a listener, so the packet is "+
+			"still transformed and still lands on `input` — this counter rising proves it went down "+
+			"the steering path rather than being routed out. (The forward default-deny is NOT usable "+
+			"here: it counts zero on this path whether or not steering held, and `always zero` is "+
+			"indistinguishable from `bypassed`)")
+
+	// (c) PER-CONNECTION scope: another declared egress is unaffected. §2.4 says
+	// fail-closed applies to the failing connection and does not touch the rest.
+	if res := runGuestProbe(t, cl, net.JoinHostPort(hostIPv4(t), hostPortStr), false); !res.reachable() {
+		t.Errorf("an unrelated ALLOWED egress broke when the via endpoint died (%s) — fail-closed is "+
+			"scoped per-connection (§2.4), so a dead endpoint must not touch other permitted "+
+			"flows\n%s", res.raw, harness.DumpRuleSet(id))
+	}
+}
+
+// Gate B item 9d: the SECOND HOP is really pinned — the confused-deputy line (§2.4
+// invariant 2).
+//
+// BOTH halves, and the reason is the same discipline as everywhere else: testing only
+// "it cannot connect" would be passed by an engine that never installed the table at
+// all, because hop 2 counts ZERO in `forward` (measured, D5 ㉔) so the first-hop floor
+// never evaluates it and "cannot connect" may have any other cause.
+//
+// The PAIRED direction is equally required: the same process reaching a permitted
+// destination must still work. Without that, an UN-NARROWED drop would pass the deny
+// half — while actually being a host-level egress kill switch (measured: root's own
+// probe failed too).
+func TestTheSecondHopIsPinnedUnderTheFloor(t *testing.T) {
+	eng, _ := harness.Engine(t, netEngineOpts(t))
+	// A sibling sandbox, so the deputy has a real in-floor target to be pointed at:
+	// its guest IP is inside the sandbox CIDR, which is the floor's sibling item.
+	sibID, _ := createRunning(t, eng, declDeny())
+	sibEP, err := eng.Mediator.Endpoint(sibID)
+	if err != nil {
+		t.Fatalf("sibling endpoint: %v", err)
+	}
+	sibIP, _, _ := net.SplitHostPort(sibEP)
+
+	// The engine-level table must exist — it is installed once at boot by the harness,
+	// in production's position.
+	if n := harness.NftCounterIn(t, "sbxnet_hop2", "hop2_floor_v4"); n < 0 {
+		t.Fatalf("the engine-level second-hop table has no v4 floor counter — §2.4 invariant 2's " +
+			"second half is not installed at all, and every FIRST-hop assertion in this file would " +
+			"still pass (D5 ㉔)")
+	}
+
+	// (a) DENY: the endpoint process's own egress to an in-floor target is refused, and
+	// the SECOND-HOP table's counter is what moves.
+	for _, tc := range []struct{ name, target string }{
+		{"a sibling sandbox's guest IP", net.JoinHostPort(sibIP, "9000")},
+		{"a link-local address", "169.254.169.254:80"},
+	} {
+		t.Run("deny: "+tc.name, func(t *testing.T) {
+			before := harness.NftCounterIn(t, "sbxnet_hop2", "hop2_floor_v4")
+			out := probeAsUID(t, secondHopUID, tc.target)
+			after := harness.NftCounterIn(t, "sbxnet_hop2", "hop2_floor_v4")
+			if strings.Contains(out, "CONNECTED") {
+				t.Errorf("the second-hop process REACHED %s (%s) — that is the confused deputy §2.4's "+
+					"second invariant names: an `upstream` pointed at a sibling or link-local address "+
+					"walks straight through the side door, and the FIRST-hop floor never sees it "+
+					"(measured: hop 2 counts zero in `forward`, D5 ㉔)", tc.target, out)
+			}
+			if after <= before {
+				t.Errorf("%s: refused (%s) but the second-hop counter did not move (%d → %d) — by the "+
+					"acceptance discipline that is an INVALID assertion: an engine that never installed "+
+					"the table would produce exactly this reading", tc.name, out, before, after)
+			}
+		})
+	}
+
+	// (b) ALLOW: the SAME process reaching a permitted destination still works. Without
+	// this half, an un-narrowed drop passes (a) while being a HOST-LEVEL egress kill
+	// switch — measured, root's own probe failed too (D5 ㉔).
+	t.Run("allow: the same process reaches a permitted destination", func(t *testing.T) {
+		addr, stop := hostListener(t, "hello-from-HOST")
+		defer stop()
+		_, portStr, _ := net.SplitHostPort(addr)
+		out := probeAsUID(t, secondHopUID, net.JoinHostPort(hostIPv4(t), portStr))
+		if !strings.Contains(out, "CONNECTED") {
+			t.Errorf("the second-hop process could NOT reach a permitted destination (%s) — the drop "+
+				"must be narrowed to the floor's addresses, not to everything: an un-narrowed drop on "+
+				"the output hook is a host-level egress kill switch (measured: root's probe failed "+
+				"too, D5 ㉔), and it would pass every deny assertion above", out)
+		}
+	})
+
+	// (c) ROOT is unaffected — the narrowing really is by uid. The control arm for the
+	// kill-switch hazard.
+	t.Run("root is unaffected by the second-hop drop", func(t *testing.T) {
+		out := probeAsUID(t, 0, net.JoinHostPort(sibIP, "9000"))
+		// Root reaching a sibling guest IP is expected: the second-hop table narrows on
+		// the deployment's uid, and root is not it. The sandbox's OWN floor is what stops
+		// the guest; this rule exists for the endpoint process only.
+		t.Logf("root probe to the sibling: %s (not refused by the second-hop table, which narrows on uid %d)", out, secondHopUID)
+		if strings.Contains(out, "REFUSED_BY_TABLE") {
+			t.Error("unexpected marker")
+		}
+	})
+}
+
+// probeAsUID dials an address as the given uid and reports CONNECTED / REFUSED, which
+// is what the second-hop assertions read.
+func probeAsUID(t *testing.T, uid int, target string) string {
+	t.Helper()
+	script := fmt.Sprintf(`
+c, err := net.DialTimeout("tcp", %q, 3*time.Second)
+if err != nil { fmt.Println("REFUSED", err); return }
+c.Close(); fmt.Println("CONNECTED")`, target)
+	dir := t.TempDir()
+	src := "package main\n\nimport (\n\t\"fmt\"\n\t\"net\"\n\t\"time\"\n)\n\nfunc main() {\n" + script + "\n}\n"
+	if err := os.WriteFile(dir+"/main.go", []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bin := dir + "/probe"
+	build := exec.Command("go", "build", "-o", bin, dir+"/main.go")
+	build.Dir = dir
+	build.Env = append(os.Environ(), "CGO_ENABLED=0", "GO111MODULE=off")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build uid probe: %v: %s", err, out)
+	}
+	_ = os.Chmod(dir, 0o755)
+	_ = os.Chmod(bin, 0o755)
+	var cmd *exec.Cmd
+	if uid == 0 {
+		cmd = exec.Command(bin)
+	} else {
+		cmd = exec.Command("setpriv", "--reuid", fmt.Sprint(uid), "--regid", fmt.Sprint(uid),
+			"--clear-groups", bin)
+	}
+	out, _ := cmd.CombinedOutput()
+	return strings.TrimSpace(string(out))
+}
+
+// --- items 13 / 13b: §4.4-A reconciliation --------------------------------------
+
+// Gate B item 13: the rule set is crash-surviving host state, so reconciliation must
+// re-adopt a survivor's table and reclaim an orphan's — and the tables must not leak
+// (§2.4 / §4.4-A).
+//
+// Driven by building a SECOND engine on the same store, which is what a control-plane
+// restart is from the host's point of view: the process is new, its live-map is empty,
+// and the host still carries every placement the previous one built.
+func TestReconciliationReadoptsARuleSetAndReclaimsAnOrphansTable(t *testing.T) {
+	base := t.TempDir()
+	opts := netEngineOpts(t)
+	opts.BaseDir = base
+	opts.StorePath = base + "/store.db"
+	eng, _ := harness.Engine(t, opts)
+
+	survivor, _ := createRunning(t, eng, declAllowPublic())
+	tablesBefore := harness.CountRuleSetTables(t)
+	if tablesBefore < 1 {
+		t.Fatalf("no rule-set table for a running sandbox (%d)", tablesBefore)
+	}
+
+	// The restart: a second engine over the SAME store and state, running production's
+	// boot sequence (second-hop install → reconcile).
+	//
+	// harness.Restart rather than harness.Engine, and the difference is load-bearing:
+	// Engine REBUILDS the Template, which is the LOWER DIR of the live sandbox's overlay
+	// mount — so the survivor's guest would lose the files it is running from, and the
+	// symptom (a guest process producing no output) looks nothing like the
+	// reconciliation defect this test exists to catch. Production never rebuilds a
+	// Template under a live sandbox.
+	eng2 := harness.Restart(t, base, opts)
+
+	// The survivor's table is still there and still enforcing. Re-adoption must not have
+	// gone through a delete-then-install, which is what would have killed live flows.
+	if n := harness.NftCounter(t, survivor, "fwd_floor_v4"); n < 0 {
+		t.Errorf("after a control-plane restart the survivor's rule set is GONE — a rule set is "+
+			"crash-surviving host state exactly like the netns, so Adopt must rebuild it (§2.4); "+
+			"without it the sandbox runs unenforced while every other adopt assertion passes\n%s",
+			harness.DumpRuleSet(survivor))
+	}
+	// And it still refuses: the re-installed rule set is a working one, not an empty
+	// table that merely exists.
+	cl2, err := eng2.Mediator.Client(survivor)
+	if err != nil {
+		t.Fatalf("client after restart: %v", err)
+	}
+	before := harness.NftCounter(t, survivor, "fwd_tier_v4")
+	res := runGuestProbe(t, cl2, "192.168.0.1:22", false)
+	after := harness.NftCounter(t, survivor, "fwd_tier_v4")
+	if res.reachable() {
+		t.Errorf("after the restart the re-adopted sandbox reached the host LAN — the re-installed "+
+			"rule set is not enforcing\n%s", harness.DumpRuleSet(survivor))
+	}
+	mustCounterMoved(t, survivor, "fwd_tier_v4", before, after,
+		"item 13: the re-adopted rule set must be a WORKING one; a table that exists but counts "+
+			"nothing is the same silent pass in a new disguise")
+
+	// An ORPHAN table — one with no sandbox record at all — is reclaimed. Written
+	// directly, because that is exactly the residue a crash between "install rules" and
+	// "commit the record" leaves.
+	orphan := "sbxnet_sbx_orphan0000000000"
+	load := exec.Command("nft", "-f", "-")
+	load.Stdin = strings.NewReader("table inet " + orphan + " {\n  chain c { type filter hook forward priority filter; policy accept; }\n}\n")
+	if out, err := load.CombinedOutput(); err != nil {
+		t.Fatalf("plant an orphan table: %v: %s", err, out)
+	}
+	t.Cleanup(func() { _ = exec.Command("nft", "destroy", "table", "inet", orphan).Run() })
+
+	if err := eng2.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	out, _ := exec.Command("nft", "list", "tables", "inet").Output()
+	if strings.Contains(string(out), orphan) {
+		t.Errorf("reconciliation left an ORPHAN rule-set table (%s) — it backs no sandbox record, and "+
+			"a stale table is host state a later sandbox could inherit (§4.4-A / §2.4)", orphan)
+	}
+	// The survivor's table survived that same pass: the keep-set must be complete
+	// BEFORE anything is deleted, or "reclaim then adopt" is literally the
+	// delete-then-install sequence measured to kill every live flow (D5 ㉒).
+	if n := harness.NftCounter(t, survivor, "fwd_floor_v4"); n < 0 {
+		t.Errorf("reconciliation reclaimed the SURVIVOR's table — the keep-set must be computed " +
+			"before any deletion (D5 ㉒)")
+	}
+}
+
+// Gate B item 13b: a LIVE FLOW keeps transferring bytes across a control-plane restart
+// and its Adopt.
+//
+// THIS ONE CANNOT BE OMITTED, and the reason is that item 13 is completely insensitive
+// to the failure it catches: an Adopt that quietly killed every live connection would
+// leave the table counts exactly right, so 13 passes while every user's connection
+// died (D5 ㉒).
+//
+// Asserted BY BYTES, not by the socket still existing: a `write()` to a socket whose
+// peer is gone typically succeeds once before returning EPIPE, so "the write worked" is
+// not evidence of delivery. There has to be a read-back.
+func TestALiveFlowSurvivesAControlPlaneRestartAndItsAdopt(t *testing.T) {
+	base := t.TempDir()
+	opts := netEngineOpts(t)
+	opts.BaseDir = base
+	opts.StorePath = base + "/store.db"
+	eng, _ := harness.Engine(t, opts)
+
+	// An echo listener on the host, and a declaration that allows exactly it.
+	ln, err := net.Listen("tcp", "0.0.0.0:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, aerr := ln.Accept()
+			if aerr != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				buf := make([]byte, 4096)
+				for {
+					n, rerr := c.Read(buf)
+					if n > 0 {
+						_, _ = c.Write(buf[:n]) // echo, so the guest can READ BACK and verify delivery
+					}
+					if rerr != nil {
+						return
+					}
+				}
+			}(c)
+		}
+	}()
+	_, portStr, _ := net.SplitHostPort(ln.Addr().String())
+	var port uint16
+	fmt.Sscanf(portStr, "%d", &port)
+
+	d := declDeny()
+	d.Egress.Allow = []model.NetTuple{tupleOf(t, hostIPv4(t)+"/32", port, model.NetTCP)}
+	id, cl := createRunning(t, eng, d)
+
+	// A guest-side long-running flow that reports a per-message ROUND-TRIP count, so the
+	// assertion reads delivery rather than write success.
+	const flowSrc = `package main
+
+import (
+	"fmt"
+	"net"
+	"os"
+	"time"
+)
+
+// flow <addr> — echo round trips for 20 s, printing a running count of VERIFIED ones.
+func main() {
+	c, err := net.DialTimeout("tcp", os.Args[1], 5*time.Second)
+	if err != nil {
+		fmt.Println("DIAL_FAILED", err)
+		return
+	}
+	defer c.Close()
+	buf := make([]byte, 64)
+	ok := 0
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		msg := fmt.Sprintf("msg-%d", ok)
+		if _, err := c.Write([]byte(msg)); err != nil {
+			fmt.Printf("ROUNDTRIPS=%d WRITE_ERR=%v\n", ok, err)
+			return
+		}
+		c.SetReadDeadline(time.Now().Add(3 * time.Second))
+		n, rerr := c.Read(buf)
+		if rerr != nil {
+			fmt.Printf("ROUNDTRIPS=%d READ_ERR=%v\n", ok, rerr)
+			return
+		}
+		if string(buf[:n]) != msg {
+			fmt.Printf("ROUNDTRIPS=%d MISMATCH=%q\n", ok, string(buf[:n]))
+			return
+		}
+		ok++
+		fmt.Printf("PROGRESS=%d\n", ok)
+		time.Sleep(500 * time.Millisecond)
+	}
+	fmt.Printf("ROUNDTRIPS=%d DONE\n", ok)
+}
+`
+	harness.InjectStaticBin(t, base+"/templates", "bare", "flow", flowSrc)
+	// The template changed after the sandbox was created, so re-create to pick it up.
+	id2, cl2 := createRunning(t, eng, d)
+	_ = id
+	_ = cl
+
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	evs, err := cl2.Start(ctx, transport.StartSpec{
+		Cmd: "/usr/bin/flow", Args: []string{net.JoinHostPort(hostIPv4(t), portStr)},
+	})
+	if err != nil {
+		t.Fatalf("start the guest flow: %v", err)
+	}
+
+	// Collect progress in the background; restart the control plane mid-flow.
+	type result struct{ raw string }
+	done := make(chan result, 1)
+	go func() {
+		var sb strings.Builder
+		for ev := range evs {
+			sb.WriteString(string(ev.Data))
+		}
+		done <- result{sb.String()}
+	}()
+
+	// Wait until the flow has verified a few round trips, so the restart really lands
+	// mid-flow rather than before it started.
+	time.Sleep(3 * time.Second)
+	progressBefore := harness.NftCounter(t, id2, "allow0_fwd")
+
+	// THE RESTART, mid-flow: a second engine over the same store and state, running
+	// production's boot sequence. Its Adopt re-installs the rule set — as ONE atomic
+	// file, which is what this test is really measuring.
+	//
+	// harness.Restart, not harness.Engine: the latter rebuilds the Template under the
+	// live sandbox (see harness.Restart's doc), which would break the flow for a reason
+	// that has nothing to do with reconciliation.
+	_ = harness.Restart(t, base, opts)
+
+	res := <-done
+	// The bytes that matter: round trips VERIFIED BY READ-BACK after the restart.
+	var trips int
+	last := 0
+	for _, f := range strings.Fields(res.raw) {
+		if k, v, ok := strings.Cut(f, "="); ok && k == "PROGRESS" {
+			fmt.Sscanf(v, "%d", &last)
+		}
+	}
+	trips = last
+	if strings.Contains(res.raw, "READ_ERR") || strings.Contains(res.raw, "WRITE_ERR") || strings.Contains(res.raw, "MISMATCH") {
+		t.Errorf("the live flow BROKE across the control-plane restart: %s\n"+
+			"An Adopt that re-installs the rule set as one ATOMIC `nft -f` file leaves live flows "+
+			"intact (measured 5/5); a delete-then-install kills them (5/5), because packets sent "+
+			"during the gap leave with the raw sandbox source address and the peer RSTs them. "+
+			"Flushing conntrack does the same wherever tcp_loose=0 (D5 ㉒).\n"+
+			"NOTE item 13's table-count assertions are INSENSITIVE to this failure — they pass "+
+			"either way, which is why this assertion exists separately\n%s",
+			strings.TrimSpace(res.raw), harness.DumpRuleSet(id2))
+	}
+	if trips < 5 {
+		t.Errorf("only %d verified round trips across the restart (want ≥5) — asserted by BYTES "+
+			"read back rather than by the socket surviving, because a write() to a dead peer "+
+			"typically succeeds once before EPIPE (D5 ⑰'s measurement discipline)\nraw: %s",
+			trips, strings.TrimSpace(res.raw))
+	}
+	after := harness.NftCounter(t, id2, "allow0_fwd")
+	if after <= progressBefore {
+		t.Errorf("the allow counter did not advance across the restart (%d → %d) — the flow's traffic "+
+			"is not being matched by the re-installed rule set", progressBefore, after)
+	}
+	t.Logf("item 13b: %d verified round trips across a control-plane restart + Adopt", trips)
+}
+
+// --- item 14: publish, in five separately-falsifiable questions ------------------
+
+// Gate B item 14. Five questions rather than one "is it reachable", because each has a
+// measured counter-example of its own (D5 ⑬–⑯) and a single reachability check passes
+// while four of the five are broken.
+func TestPublishIsReachableFromOutsideAndFromTheHostAndSurvivesResume(t *testing.T) {
+	eng, base := harness.Engine(t, netEngineOpts(t))
+	_ = base
+	ctx := context.Background()
+
+	// A guest-side listener bound 0.0.0.0 — §5.D requires that, and semantic ① is
+	// explicit that a loopback-bound service is NOT publishable.
+	const serveSrc = `package main
+
+import (
+	"fmt"
+	"net"
+	"os"
+)
+
+// serve <port> [addr] — answer every connection with a banner.
+func main() {
+	bind := "0.0.0.0:" + os.Args[1]
+	if len(os.Args) > 2 {
+		bind = os.Args[2] + ":" + os.Args[1]
+	}
+	ln, err := net.Listen("tcp", bind)
+	if err != nil {
+		fmt.Println("LISTEN_FAILED", err)
+		return
+	}
+	fmt.Println("LISTENING", ln.Addr())
+	for {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		_, _ = c.Write([]byte("hello-from-GUEST"))
+		_ = c.Close()
+	}
+}
+`
+	harness.InjectStaticBin(t, base+"/templates", "bare", "serve", serveSrc)
+
+	d := declDeny()
+	d.Ingress.Publish = []model.NetPublish{{GuestPort: 8080, Proto: model.NetTCP}}
+	id, cl := createRunning(t, eng, d)
+
+	// Start the guest service.
+	sctx, scancel := context.WithTimeout(ctx, 60*time.Second)
+	defer scancel()
+	if _, err := cl.Start(sctx, transport.StartSpec{Cmd: "/usr/bin/serve", Args: []string{"8080"}}); err != nil {
+		t.Fatalf("start the guest service: %v", err)
+	}
+	time.Sleep(700 * time.Millisecond)
+
+	// The engine's delivered address (§5.D: the engine delivers a `host ip:port`).
+	_, _, endpoints, err := eng.Mediator.Network(ctx, id)
+	if err != nil {
+		t.Fatalf("read network: %v", err)
+	}
+	if len(endpoints) != 1 || endpoints[0] == "" {
+		t.Fatalf("no host endpoint reported for a running publish: %v", endpoints)
+	}
+	endpoint := endpoints[0]
+	t.Logf("item 14: published endpoint = %s", endpoint)
+
+	// (i) FROM OUTSIDE THE /30 — not merely from the host. Without the companion SNAT
+	// this is precisely the case that times out: the guest's reply has nowhere to go
+	// (measured to_guest=2 / from_guest=0, and adding the SNAT made the same flow
+	// connect immediately — D5 ⑬). The host's own dial in (ii) would NOT have caught it.
+	t.Run("(i) reachable from outside the sandbox's own /30, with the SNAT in place", func(t *testing.T) {
+		conn, derr := net.DialTimeout("tcp", endpoint, 10*time.Second)
+		if derr != nil {
+			t.Fatalf("an outside caller could not reach the published endpoint %s: %v — WITHOUT the "+
+				"companion SNAT to this sandbox's own /30 gateway, a caller from outside the /30 gets "+
+				"exactly this timeout while the guest's SYN arrives fine (D5 ⑬)\n%s",
+				endpoint, derr, harness.DumpRuleSet(id))
+		}
+		defer conn.Close()
+		buf := make([]byte, 64)
+		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		n, rerr := conn.Read(buf)
+		if rerr != nil {
+			t.Fatalf("connected to %s but read nothing (%v) — that is the HALF-TORN signature: DNAT "+
+				"present, companion SNAT missing, so the handshake completes and the caller waits for "+
+				"data that never comes. It is the hardest failure to diagnose and is easily misread as "+
+				"a guest application fault (D5 ⑰)", endpoint, rerr)
+		}
+		if !strings.Contains(string(buf[:n]), "hello-from-GUEST") {
+			t.Errorf("read %q from the published endpoint, want the guest's banner", string(buf[:n]))
+		}
+		if c := harness.NftCounter(t, id, "pub0_in_dnat"); c <= 0 {
+			t.Errorf("the prerouting DNAT counted %d — the flow is not taking the path the rule set "+
+				"describes", c)
+		}
+		if c := harness.NftCounter(t, id, "pub_return_snat"); c <= 0 {
+			t.Errorf("the return SNAT counted %d — without it this works only on a sandbox that "+
+				"happens to carry a default route (D5 ⑬)", c)
+		}
+	})
+
+	// (iii) The companion accept is on FORWARD, and the input side stays at ZERO.
+	// Read as per-hook counters, because the hook assignment is the OPPOSITE of
+	// `via[]`'s and copying one from the other is the mistake D5 ⑮ warns about.
+	t.Run("(iii) the companion accept is on forward, and the input side stays zero", func(t *testing.T) {
+		if c := harness.NftCounter(t, id, "pub0_fwd"); c <= 0 {
+			t.Errorf("the publish companion accept on FORWARD counted %d — post-DNAT the destination "+
+				"is the GUEST IP, so the flow must be routed onward and lands on `forward`; a steered "+
+				"flow's destination is host-local and lands on `input`. Same prerouting DNAT, two "+
+				"different downstream hooks (D5 ⑮)", c)
+		}
+		// The via accept does not exist in this declaration, so the input-side evidence is
+		// the floor: inbound publish traffic must not be touching it.
+		if c := harness.NftCounter(t, id, "in_floor"); c > 0 {
+			t.Logf("note: in_floor = %d (guest-originated traffic, not the inbound publish path)", c)
+		}
+	})
+
+	// (ii) FROM THE HOST ITSELF — a SECOND, independent rule. Host-originated traffic
+	// never traverses `prerouting`, so this path is carried by the output-hook DNAT
+	// alone: "it worked from the host" is not evidence a publish works, and the reverse
+	// does not follow either (D5 ⑭).
+	t.Run("(ii) reachable from the host itself, via its own output-hook DNAT", func(t *testing.T) {
+		before := harness.NftCounter(t, id, "pub0_out_dnat")
+		conn, derr := net.DialTimeout("tcp", endpoint, 10*time.Second)
+		if derr != nil {
+			t.Fatalf("the HOST could not reach the published endpoint %s: %v — host-originated traffic "+
+				"never traverses `prerouting`, so this path needs its OWN DNAT on the output hook "+
+				"(D5 ⑭)\n%s", endpoint, derr, harness.DumpRuleSet(id))
+		}
+		conn.Close()
+		after := harness.NftCounter(t, id, "pub0_out_dnat")
+		if after <= before {
+			t.Errorf("the OUTPUT-hook DNAT counted %d → %d for a host-originated dial — if this stays "+
+				"flat while the dial works, the traffic is taking some other path and the two "+
+				"assertions (i) and (ii) are not independent after all (D5 ⑭)", before, after)
+		}
+	})
+
+	// (iv) A guest service bound to LOOPBACK is refused, fast. §5.D semantic ① promises
+	// exactly this much and DELIBERATELY NOT attribution: measured, this case and "no
+	// listener at all" are byte-identical to the caller (both RSTs), so a caller cannot
+	// tell them apart and the contract does not pretend otherwise (D5 ⑯).
+	t.Run("(iv) a loopback-bound guest service is refused fast, without claiming attribution", func(t *testing.T) {
+		d2 := declDeny()
+		d2.Ingress.Publish = []model.NetPublish{{GuestPort: 9091, Proto: model.NetTCP}}
+		id2, cl2 := createRunning(t, eng, d2)
+		lctx, lcancel := context.WithTimeout(ctx, 60*time.Second)
+		defer lcancel()
+		// Bound to 127.0.0.1 INSIDE the guest: the sandbox has its own netns and its own
+		// loopback, so the forwarded packet lands on the guest's netstack and nothing is
+		// listening on the address it arrives at.
+		if _, err := cl2.Start(lctx, transport.StartSpec{
+			Cmd: "/usr/bin/serve", Args: []string{"9091", "127.0.0.1"},
+		}); err != nil {
+			t.Fatalf("start the loopback-bound guest service: %v", err)
+		}
+		time.Sleep(700 * time.Millisecond)
+		_, _, eps, nerr := eng.Mediator.Network(ctx, id2)
+		if nerr != nil || len(eps) == 0 || eps[0] == "" {
+			t.Fatalf("no endpoint for the loopback case: %v %v", eps, nerr)
+		}
+		start := time.Now()
+		conn, derr := net.DialTimeout("tcp", eps[0], 10*time.Second)
+		el := time.Since(start)
+		if derr == nil {
+			conn.Close()
+			t.Fatalf("a guest service bound to 127.0.0.1 was reachable through publish — the sandbox " +
+				"has its own netns and its own loopback, so the forwarded packet cannot reach it (§5.D " +
+				"semantic ①)")
+		}
+		if el >= 5*time.Second {
+			t.Errorf("the refusal took %s — the contract is `connection refused, FAST`, not a hang "+
+				"(§5.D semantic ①)", el)
+		}
+		// Deliberately NOT asserting that the error is attributable: measured, this is
+		// byte-identical to "no listener in the guest at all" (both are gVisor netstack
+		// RSTs, sub-millisecond), so §5.D promises refusal and explicitly not attribution.
+		// Attribution is only possible ENGINE-side, by reading which rules were installed.
+		t.Logf("item 14(iv): refused in %s (%v) — indistinguishable from `no listener`, which is why "+
+			"§5.D promises refusal without attribution (D5 ⑯)", el, derr)
+	})
+
+	// (v) The two failure signatures of a broken publish are DIFFERENT and must not be
+	// merged into "unreachable": missing DNAT → refused FAST; missing companion SNAT →
+	// CONNECTED THEN READ TIMEOUT. A half-torn rule set breaks in the second way, which
+	// is the hardest to diagnose (D5 ⑰).
+	//
+	// Asserted structurally rather than by dismantling a live rule set: the generator
+	// emits all four parts as ONE unit, so the "missing SNAT" state is unreachable
+	// through any engine path. The unit-level assertion that all four exist is in
+	// TestOnePublishEmitsAllFourParts; here we pin that the WORKING case is the
+	// connected-WITH-payload one, i.e. not the half-torn signature.
+	t.Run("(v) the working case is `connected with payload`, not the half-torn signature", func(t *testing.T) {
+		conn, derr := net.DialTimeout("tcp", endpoint, 10*time.Second)
+		if derr != nil {
+			t.Fatalf("dial: %v", derr)
+		}
+		defer conn.Close()
+		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		buf := make([]byte, 64)
+		n, rerr := conn.Read(buf)
+		if rerr != nil {
+			t.Fatalf("CONNECTED THEN READ TIMEOUT — that is the missing-SNAT signature exactly, and it " +
+				"is the one that gets misread as a guest application fault. The four parts of a " +
+				"publish are emitted as one unit precisely so this state is unreachable (D5 ⑰)")
+		}
+		if n == 0 {
+			t.Error("read zero bytes without an error")
+		}
+	})
+
+	// 14: SURVIVES RESUME. The declaration is a Binding, so the next placement
+	// regenerates the rules — with a NEW host endpoint, because that endpoint is a
+	// placement product (§3.3).
+	t.Run("survives pause/resume, with a rebound endpoint", func(t *testing.T) {
+		if err := eng.Mediator.Pause(ctx, id); err != nil {
+			t.Fatalf("pause: %v", err)
+		}
+		// While paused there is NO endpoint to report — §6.1 omits the key rather than
+		// reporting an empty string, because the endpoint is a placement product.
+		_, state, eps, _ := eng.Mediator.Network(ctx, id)
+		if state != model.Paused {
+			t.Errorf("state = %s, want paused", state)
+		}
+		for _, ep := range eps {
+			if ep != "" {
+				t.Errorf("a paused sandbox reported a host endpoint (%q) — the endpoint is a placement "+
+					"product (§3.3) and a paused sandbox has none", ep)
+			}
+		}
+		if err := eng.Mediator.Resume(ctx, id); err != nil {
+			t.Fatalf("resume: %v", err)
+		}
+		_, _, eps2, _ := eng.Mediator.Network(ctx, id)
+		if len(eps2) != 1 || eps2[0] == "" {
+			t.Fatalf("after resume there is no host endpoint: %v — the declaration is a Binding, so "+
+				"the next placement must regenerate its rules from the record (§3.4 / §5.D)", eps2)
+		}
+		// Restart the guest service on the new placement and check the NEW endpoint works.
+		rctx, rcancel := context.WithTimeout(ctx, 60*time.Second)
+		defer rcancel()
+		cl3, cerr := eng.Mediator.Client(id)
+		if cerr != nil {
+			t.Fatalf("client after resume: %v", cerr)
+		}
+		if _, err := cl3.Start(rctx, transport.StartSpec{Cmd: "/usr/bin/serve", Args: []string{"8080"}}); err != nil {
+			t.Fatalf("restart the guest service: %v", err)
+		}
+		time.Sleep(700 * time.Millisecond)
+		conn, derr := net.DialTimeout("tcp", eps2[0], 10*time.Second)
+		if derr != nil {
+			t.Fatalf("the publish did not survive resume: %v at %s\n%s", derr, eps2[0], harness.DumpRuleSet(id))
+		}
+		conn.Close()
+		t.Logf("publish survived resume: %s → %s (the endpoint is rebound, §3.3)", endpoint, eps2[0])
+	})
+}
+
+// Gate B item 14c: a publish on a PAUSED sandbox records only — 200,
+// `applies_at: next-resume`, no `host_endpoint`, NO rules on the host yet — and then
+// appears after resume. Plus the §3.4 discipline that it must not touch UpdatedAt.
+func TestPublishOnAPausedSandboxRecordsWithoutInstallingRules(t *testing.T) {
+	eng, _ := harness.Engine(t, netEngineOpts(t))
+	ctx := context.Background()
+	id, _ := createRunning(t, eng, declDeny())
+	if err := eng.Mediator.Pause(ctx, id); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+	rec, err := eng.Mediator.Get(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updatedBefore := rec.UpdatedAt
+
+	// A paused sandbox holds NO placement, so it has no rule-set table at all.
+	if n := harness.NftCounter(t, id, "in_floor"); n >= 0 {
+		t.Errorf("a paused sandbox still has a rule-set table — pause releases the placement, and " +
+			"the rule set is placement-local (§4.2)")
+	}
+	item, endpoint, now, perr := eng.Mediator.AddPublish(ctx, id, model.NetPublish{GuestPort: 8080, Proto: model.NetTCP})
+	if perr != nil {
+		t.Fatalf("publish on a paused sandbox was refused: %v — `paused` is legal, and refusing it "+
+			"would make publish the ONLY field harder to write while paused than while running, "+
+			"pushing the caller onto the whole-binding PATCH that §6.1 documents as dangerous (§5.D)", perr)
+	}
+	if now {
+		t.Error("a paused publish reported `applies_at: now` — there is no placement to install into")
+	}
+	if endpoint != "" {
+		t.Errorf("a paused publish reported a host endpoint (%q) — §6.1 omits the key, because the "+
+			"endpoint is a placement product and there is no placement", endpoint)
+	}
+	if item.GuestPort != 8080 {
+		t.Errorf("item = %+v", item)
+	}
+	// It LANDED IN THE RECORD, which is what makes it survive to the next placement.
+	rec2, err := eng.Mediator.Get(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rec2.Network.Ingress.Publish) != 1 {
+		t.Fatalf("the declaration holds %d publish items after a paused publish, want 1 — it must "+
+			"land in the record, or it would not survive to the next placement (§5.D)",
+			len(rec2.Network.Ingress.Publish))
+	}
+	// §3.4 discipline ②: it must NOT bump UpdatedAt, because `retention` is measured
+	// from that column — bumping it would silently extend a paused sandbox's eviction
+	// deadline as a side effect of adding a port.
+	if !rec2.UpdatedAt.Equal(updatedBefore) {
+		t.Errorf("the paused publish moved UpdatedAt (%s → %s) — `retention` is measured from that "+
+			"column (§3.4 discipline ②), so this would silently extend the eviction deadline as a "+
+			"side effect of adding a port. The obligation exists ONLY because `paused` is allowed",
+			updatedBefore, rec2.UpdatedAt)
+	}
+	// And after resume the rules exist.
+	if err := eng.Mediator.Resume(ctx, id); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if n := harness.NftCounter(t, id, "pub0_in_dnat"); n < 0 {
+		t.Errorf("after resume the publish has no DNAT rule — the declaration is a Binding and the "+
+			"next placement regenerates from it (§5.D)\n%s", harness.DumpRuleSet(id))
+	}
+	_, _, eps, _ := eng.Mediator.Network(ctx, id)
+	if len(eps) != 1 || eps[0] == "" {
+		t.Errorf("no endpoint after resume: %v", eps)
+	}
+}
+
+// Gate B item 14d: repeated publish of the same `{guest_port, proto}` is idempotent —
+// one item in the declaration and ONE DNAT on the host.
+//
+// The substrate will not find the duplicate for us: nft accepts two byte-identical
+// DNAT rules without complaint and the second simply never matches (measured, §5.D).
+// And two identical recorded items mean a later PATCH removing one leaves the other:
+// "the publish was revoked and the port is still open".
+func TestRepeatedPublishIsIdempotentOnTheHostToo(t *testing.T) {
+	eng, _ := harness.Engine(t, netEngineOpts(t))
+	ctx := context.Background()
+	id, _ := createRunning(t, eng, declDeny())
+
+	for i := 0; i < 2; i++ {
+		if _, _, _, err := eng.Mediator.AddPublish(ctx, id, model.NetPublish{GuestPort: 8080, Proto: model.NetTCP}); err != nil {
+			t.Fatalf("publish %d: %v", i, err)
+		}
+	}
+	rec, err := eng.Mediator.Get(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(rec.Network.Ingress.Publish); n != 1 {
+		t.Errorf("the declaration holds %d items after two identical publishes, want 1 — nft accepts "+
+			"two identical DNATs silently and the second never matches, so the substrate will not "+
+			"find this for us; and with two recorded items a later PATCH removing one leaves the "+
+			"port open (§5.D)", n)
+	}
+	// One DNAT on the host, counted by listing the rules rather than the counters (a
+	// duplicate would be a second rule with its own name).
+	dump := harness.DumpRuleSet(id)
+	if n := strings.Count(dump, "pub0_in_dnat"); n < 1 {
+		t.Errorf("no publish DNAT installed:\n%s", dump)
+	}
+	if strings.Contains(dump, "pub1_in_dnat") {
+		t.Errorf("a SECOND publish DNAT was installed for an idempotent repeat:\n%s", dump)
+	}
+}
+
+// --- item 15: the PATCH read-modify-write hazard --------------------------------
+
+// Gate B item 15: writing back a STALE declaration silently drops a publish added in
+// between.
+//
+// §6.1 makes the read-modify-write cycle a CONTRACT REQUIREMENT rather than advice for
+// exactly this reason, and the contract accepts last-writer-wins rather than adding an
+// optimistic-concurrency stamp (a record version would be the generation counter §1.1
+// bans outright). So this test pins the HAZARD as real, which is what justifies the
+// requirement — it is not asserting a bug.
+func TestAStalePatchSilentlyDropsAHotAddedPublish(t *testing.T) {
+	eng, _ := harness.Engine(t, netEngineOpts(t))
+	ctx := context.Background()
+	id, _ := createRunning(t, eng, declDeny())
+	if err := eng.Mediator.Pause(ctx, id); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+
+	// (1) The caller reads the declaration.
+	stale, _, _, err := eng.Mediator.Network(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// (2) Something adds a publish in between — the hot-add write point.
+	if _, _, _, err := eng.Mediator.AddPublish(ctx, id, model.NetPublish{GuestPort: 8080, Proto: model.NetTCP}); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	// (3) The caller writes back the value it read at (1), changing something unrelated.
+	stale.Egress.Default = model.NetAllow
+	if err := eng.Mediator.SetNetwork(ctx, id, stale); err != nil {
+		t.Fatalf("patch: %v", err)
+	}
+
+	rec, err := eng.Mediator.Get(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.Network.Ingress.Publish) != 0 {
+		t.Fatalf("expected the stale PATCH to drop the publish (that is the documented hazard), but "+
+			"the declaration still holds %d items — if the engine has started merging fields, §6.1's "+
+			"read-modify-write requirement and this test both need revisiting",
+			len(rec.Network.Ingress.Publish))
+	}
+	t.Log("item 15: a stale PATCH DID drop the hot-added publish, as §6.1 documents. This is why " +
+		"that GET is a contract requirement rather than a suggestion: the engine does not merge " +
+		"fields and does not carry an optimistic-concurrency stamp (a record version would be the " +
+		"generation counter §1.1 bans). The safe sequence is pause → GET → PATCH → resume, and the " +
+		"additive fix is a delete endpoint for publish, which removes the conflict CLASS")
+
+	// The paired direction, which is the more dangerous one §6.1 names: writing back a
+	// declaration that still CONTAINS an already-removed publish would REOPEN an inbound
+	// port. Same mechanism, opposite sign — and the engine cannot tell the two apart,
+	// which is the whole reason the cycle is the caller's responsibility.
+	withPub, _, _, _ := eng.Mediator.Network(ctx, id)
+	withPub.Ingress.Publish = []model.NetPublish{{GuestPort: 9099, Proto: model.NetTCP}}
+	if err := eng.Mediator.SetNetwork(ctx, id, withPub); err != nil {
+		t.Fatalf("patch: %v", err)
+	}
+	trimmed, _, _, _ := eng.Mediator.Network(ctx, id)
+	trimmed.Ingress.Publish = nil
+	if err := eng.Mediator.SetNetwork(ctx, id, trimmed); err != nil {
+		t.Fatalf("patch: %v", err)
+	}
+	rec2, _ := eng.Mediator.Get(ctx, id)
+	if len(rec2.Network.Ingress.Publish) != 0 {
+		t.Errorf("removing a publish through the whole-binding PATCH did not take effect (%d items) — "+
+			"that PATCH is the ONLY revocation path today, since there is no un-publish endpoint "+
+			"(deliberately: on a running sandbox a revocation could only promise `no new connections`, "+
+			"never `the port is closed`, because conntrack holds the NAT binding — D5 ⑰)",
+			len(rec2.Network.Ingress.Publish))
+	}
+}
+
+// --- item 10b: IPv6 is covered by the SAME floor ---------------------------------
+
+// Gate B item 10b, and the plan is explicit that it CANNOT be skipped even though
+// D5 ⑪ already measured an `inet` ct-state rule covering IPv6: that measurement was
+// taken on a netns peer against a hand-written rule, while what has to be proved here
+// is that THE RULE SET THIS ENGINE RENDERS covers v6 under runsc.
+//
+// The stake is concrete: the engine touches IPv6 nowhere, yet `disable_ipv6` defaults
+// to 0, so the kernel gives every sandbox veth a host-side `fe80::/64` automatically
+// and this host's eth0 carries real IPv6. A floor covering only IPv4 would pass every
+// other assertion in this file while the whole family stayed open.
+//
+// Two targets, and the choice of the second is itself an assertion: eth0's GLOBAL
+// address, never its link-local. A link-local on eth0 is unreachable from the sandbox
+// anyway (different link), so asserting on it would assert something vacuously true
+// (D5 ⑪).
+func TestIPv6IsCoveredByTheSameFloor(t *testing.T) {
+	eng, _ := harness.Engine(t, netEngineOpts(t))
+	id, cl := createRunning(t, eng, declDeny())
+
+	// The host-side veth's link-local, which the KERNEL assigned — not the engine.
+	vethLL := hostVethLinkLocal(t, id)
+	// eth0's GLOBAL v6 address, if this host has one.
+	global := hostGlobalIPv6(t)
+
+	if vethLL == "" && global == "" {
+		t.Skip("this host has no IPv6 addresses to probe (neither a veth link-local nor a global eth0 address)")
+	}
+
+	// A v6 listener on the host, so "unreachable" is not an artifact of nothing being
+	// there. Bound to the wildcard so it answers on every host v6 address.
+	ln, err := net.Listen("tcp6", "[::]:0")
+	if err != nil {
+		t.Skipf("cannot listen on IPv6 on this host: %v", err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, aerr := ln.Accept()
+			if aerr != nil {
+				return
+			}
+			_, _ = c.Write([]byte("hello-from-HOST-V6"))
+			_ = c.Close()
+		}
+	}()
+	_, portStr, _ := net.SplitHostPort(ln.Addr().String())
+
+	for _, tc := range []struct{ name, addr, counter, why string }{{
+		// The veth's link-local is an address of the HOST itself, so it lands on `input`
+		// and is covered by the pure ct-state rule — the SAME rule that covers IPv4, with
+		// no family qualifier and no `ip6` arm (D5 ⑪).
+		name:    "the host-side veth's kernel-assigned link-local",
+		addr:    vethLL,
+		counter: "in_floor",
+		why: "the engine never configured this address — the kernel did, because disable_ipv6 " +
+			"defaults to 0. It is an address of the host, so the family-UNQUALIFIED ct-state rule " +
+			"on `input` is what must cover it (D5 ⑧ ⑪)",
+	}, {
+		// eth0's GLOBAL address is also an address of the host → `input`.
+		name:    "eth0's GLOBAL IPv6 address",
+		addr:    global,
+		counter: "in_floor",
+		why: "measured with no floor, a guest reached this exact class of address; the " +
+			"link-local of eth0 would be a vacuous target (unreachable anyway, different link), " +
+			"which is why the GLOBAL one is the assertion (D5 ⑪)",
+	}} {
+		if tc.addr == "" {
+			t.Logf("skipping %s: not present on this host", tc.name)
+			continue
+		}
+		t.Run(tc.name, func(t *testing.T) {
+			target := "[" + tc.addr + "]:" + portStr
+			before := harness.NftCounter(t, id, tc.counter)
+			res := runGuestProbe(t, cl, target, false)
+			after := harness.NftCounter(t, id, tc.counter)
+			if res.reachable() {
+				t.Fatalf("the guest REACHED %s over IPv6 (payload %s) — the engine touches IPv6 nowhere "+
+					"while the kernel configures it anyway, so a floor covering only IPv4 passes every "+
+					"other assertion in this file with the whole family open: %s\n%s",
+					target, res.payload, tc.why, harness.DumpRuleSet(id))
+			}
+			mustCounterMoved(t, id, tc.counter, before, after, tc.name)
+		})
+	}
+
+	// And the structural half: the rendered floor carries NO `meta nfproto ipv6` arm.
+	// One unqualified ct-state rule covers both families, and an explicit second arm is
+	// measured redundant — it counted exactly the packets the family-agnostic rule had
+	// already caught (D5 ⑪).
+	dump := harness.DumpRuleSet(id)
+	if strings.Contains(dump, "nfproto ipv6") {
+		t.Errorf("the rendered rule set carries a `meta nfproto ipv6` arm — one family-unqualified "+
+			"ct-state rule already covers IPv6, and the explicit arm was measured counting exactly "+
+			"the packets the agnostic rule had caught (D5 ⑪)\n%s", dump)
+	}
+}
+
+// hostVethLinkLocal returns the KERNEL-assigned fe80:: address on this sandbox's
+// host-side veth, or "".
+func hostVethLinkLocal(t *testing.T, id model.SandboxID) string {
+	t.Helper()
+	// The veth name is a one-way hash of the SandboxID, so it is found by listing the
+	// engine's rule-set table rather than recomputed here.
+	out, err := exec.Command("nft", "list", "table", "inet", "sbxnet_"+string(id)).Output()
+	if err != nil {
+		return ""
+	}
+	veth := ""
+	for _, f := range strings.Fields(string(out)) {
+		if strings.HasPrefix(f, `"vh`) {
+			veth = strings.Trim(f, `"`)
+			break
+		}
+	}
+	if veth == "" {
+		return ""
+	}
+	addrs, err := exec.Command("ip", "-6", "-o", "addr", "show", "dev", veth, "scope", "link").Output()
+	if err != nil {
+		return ""
+	}
+	for _, f := range strings.Fields(string(addrs)) {
+		if strings.HasPrefix(f, "fe80::") {
+			return strings.SplitN(f, "/", 2)[0]
+		}
+	}
+	return ""
+}
+
+// hostGlobalIPv6 returns a GLOBAL IPv6 address of this host, or "".
+func hostGlobalIPv6(t *testing.T) string {
+	t.Helper()
+	out, err := exec.Command("ip", "-6", "-o", "addr", "show", "scope", "global").Output()
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		for _, f := range strings.Fields(line) {
+			if strings.Contains(f, ":") && strings.Contains(f, "/") && !strings.HasPrefix(f, "fe80") {
+				addr := strings.SplitN(f, "/", 2)[0]
+				if ip, err := netip.ParseAddr(addr); err == nil && ip.Is6() && !ip.IsLoopback() {
+					return addr
+				}
+			}
+		}
+	}
+	return ""
 }

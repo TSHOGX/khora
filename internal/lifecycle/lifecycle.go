@@ -525,6 +525,20 @@ func (m *Mediator) Create(ctx context.Context, spec CreateSpec) (model.SandboxID
 	if spec.Network != nil {
 		rec.Network = spec.Network.Normalize()
 	}
+	// §6.2's declaration refusals, applied AT THE WRITE POINT rather than only at the
+	// API layer — which is what makes them structural. A validation that lives in one
+	// caller is a validation the next caller does not have, and this one is not
+	// hypothetical: it was found by a substrate test that drove the mediator directly
+	// and successfully created a sandbox whose `via[].endpoint` was inside the L0 floor
+	// — the declaration §6.2 class 6 refuses precisely because every steered flow would
+	// be permanently fail-closed. It then measured that fail-closure as a test failure.
+	//
+	// BEFORE the admission gate below, which §6.2 requires: an invalid declaration is
+	// refused before any byte is touched or any budget recorded, so 400 and 507 can
+	// never both be true for one request.
+	if err := m.ValidateDeclaration(rec.Network, spec.Network != nil); err != nil {
+		return "", err
+	}
 	if spec.IdleTimeout != nil {
 		rec.IdleTimeout = *spec.IdleTimeout
 	}

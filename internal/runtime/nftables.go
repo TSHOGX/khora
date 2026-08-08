@@ -310,6 +310,11 @@ func renderScope(r ruleset.Rule, ctx renderCtx) ([]string, error) {
 			fmt.Sprintf("%s daddr %s", fam, addr),
 			fmt.Sprintf("%s dport %d", proto, port),
 		}, nil
+	case ruleset.ScopeSecondHopReturn:
+		// No identity predicate: the narrowing IS the ct-state clause renderMatch emits.
+		// Legal only in the engine-level table, and only for an established/related
+		// accept — ruleset.Validate enforces both, so this arm carries no check of its own.
+		return nil, nil
 	case ruleset.ScopeSecondHopUID:
 		if ctx.secondHopUID == nil {
 			return nil, fmt.Errorf("runtime: rule %q is narrowed by the second-hop uid, but the "+
@@ -616,6 +621,12 @@ func renderGuards(text string, perSandbox bool) error {
 			continue
 		}
 		// The second-hop table: every DROP must carry `skuid`.
+		if strings.Contains(code, "accept") && !strings.Contains(code, "ct state") {
+			return fmt.Errorf("runtime: rendered second-hop rule %q is an accept with no ct-state "+
+				"narrowing — the only accept this table may carry is the RETURN arm for an already "+
+				"established flow. An unqualified accept here would admit NEW connections to in-floor "+
+				"addresses, which is the confused deputy §2.4 invariant 2 refuses (D4.2)", code)
+		}
 		if strings.Contains(code, "drop") && !strings.Contains(code, "meta skuid") {
 			return fmt.Errorf("runtime: rendered second-hop rule %q drops WITHOUT a `skuid` narrowing. "+
 				"On the output hook that is a HOST-LEVEL egress kill switch — measured, root's own "+
@@ -624,6 +635,15 @@ func renderGuards(text string, perSandbox bool) error {
 		}
 		// …and nothing in this table may be an accept narrowed by uid: `skuid` misses
 		// packets, so such an accept above a floor drop leaks whatever it misses.
+		// The return arm is the ONE legal accept here: `ct state established,related` with
+		// no identity predicate. It is safe for the reason a uid-narrowed accept is not —
+		// the measured leak is a property of `skuid` missing packets, and a ct-state
+		// predicate has no such gap (D5 ㉔). It cannot admit a NEW connection, which is
+		// what the confused deputy would be.
+		if strings.Contains(code, "accept") && strings.Contains(code, "ct state") &&
+			!strings.Contains(code, "meta skuid") && !strings.Contains(code, "new") {
+			continue
+		}
 		if strings.Contains(code, "accept") && strings.Contains(code, "meta skuid") {
 			return fmt.Errorf("runtime: rendered second-hop rule %q is a uid-narrowed ACCEPT. `skuid` "+
 				"does not reliably match every packet of a flow, so an accept narrowed by it leaks the "+

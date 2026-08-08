@@ -1,0 +1,18 @@
+=== RUN   TestViaSteersAndDoesNotReopenTheFloor
+=== RUN   TestViaSteersAndDoesNotReopenTheFloor/the_guest_dials_the_endpoint's_port_DIRECTLY,_bypassing_steering
+=== RUN   TestViaSteersAndDoesNotReopenTheFloor/an_UNDECLARED_original_port_toward_the_declared_destination
+=== RUN   TestViaSteersAndDoesNotReopenTheFloor/the_declared_port_toward_an_UNDECLARED_destination
+=== RUN   TestViaSteersAndDoesNotReopenTheFloor/an_unrelated_host_port
+=== RUN   TestViaSteersAndDoesNotReopenTheFloor/another_sandbox's_identical_flow_is_not_admitted_by_this_accept
+--- PASS: TestViaSteersAndDoesNotReopenTheFloor (1.78s)
+    --- PASS: TestViaSteersAndDoesNotReopenTheFloor/the_guest_dials_the_endpoint's_port_DIRECTLY,_bypassing_steering (0.02s)
+    --- PASS: TestViaSteersAndDoesNotReopenTheFloor/an_UNDECLARED_original_port_toward_the_declared_destination (0.01s)
+    --- PASS: TestViaSteersAndDoesNotReopenTheFloor/the_declared_port_toward_an_UNDECLARED_destination (0.01s)
+    --- PASS: TestViaSteersAndDoesNotReopenTheFloor/an_unrelated_host_port (0.01s)
+    --- PASS: TestViaSteersAndDoesNotReopenTheFloor/another_sandbox's_identical_flow_is_not_admitted_by_this_accept (0.36s)
+=== RUN   TestReconciliationReadoptsARuleSetAndReclaimsAnOrphansTable
+    network_substrate_test.go:1350: guest probe for 192.168.0.1:22 produced no verdict: ""
+--- FAIL: TestReconciliationReadoptsARuleSetAndReclaimsAnOrphansTable (1.56s)
+FAIL
+FAIL	engine/test	3.347s
+FAIL

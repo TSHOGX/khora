@@ -525,15 +525,25 @@ func TestTheTwoGuardScopesDoNotCross(t *testing.T) {
 			"mutually exclusive with §2.4 invariant 2", err)
 	}
 	for _, r := range rs.Rules {
-		if r.Scope != ruleset.ScopeSecondHopUID {
-			t.Errorf("second-hop rule %q is narrowed by %s, not by uid — that is the only predicate "+
-				"available on that hook (D5 ㉔)", r.Counter, r.Scope)
-		}
-		// Drops only: skuid misses packets, so an accept narrowed by it leaks them
-		// past the floor it sits above (the measured asymmetry, D5 ㉔).
-		if r.Verdict != ruleset.Drop {
-			t.Errorf("second-hop rule %q has verdict %s — only DROP is safe under a predicate that "+
-				"misses packets (D5 ㉔)", r.Counter, r.Verdict)
+		switch r.Scope {
+		case ruleset.ScopeSecondHopUID:
+			// A uid-narrowed rule may only DROP: skuid misses packets, so an accept narrowed
+			// by it leaks them past the floor it sits above (the measured asymmetry, D5 ㉔).
+			if r.Verdict != ruleset.Drop {
+				t.Errorf("second-hop rule %q is a uid-narrowed %s — only DROP is safe under a "+
+					"predicate that misses packets (D5 ㉔)", r.Counter, r.Verdict)
+			}
+		case ruleset.ScopeSecondHopReturn:
+			// The ONE accept this table may carry, and the distinction from the case above is
+			// the whole point: it is narrowed by CT-STATE, not by identity, and the measured
+			// leak is a property of `skuid` specifically. Without it this table drops the reply
+			// to the very flow a `via[]` declaration authorized — see the dedicated test below.
+			if r.Verdict != ruleset.Accept {
+				t.Errorf("the second-hop return arm %q has verdict %s, want accept", r.Counter, r.Verdict)
+			}
+		default:
+			t.Errorf("second-hop rule %q is narrowed by %s — on that hook the only predicates are "+
+				"the deployment uid and, for the return arm, ct-state (D5 ㉔)", r.Counter, r.Scope)
 		}
 	}
 }
@@ -606,10 +616,27 @@ func TestLoopAvoidanceIsNotABareUIDAccept(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, r := range rs.Rules {
-		if r.Verdict == ruleset.Accept {
-			t.Errorf("second-hop rule %q is an accept: a uid-narrowed accept above a floor drop "+
-				"leaks the packets skuid misses (D5 ㉔). Loop avoidance here is STRUCTURAL — every "+
-				"steering rule is interface-narrowed and hop 2 arrives on no interface", r.Counter)
+		if r.Verdict != ruleset.Accept {
+			continue
+		}
+		// The return arm is the one legal accept (ct-state narrowed). Anything else —
+		// especially a uid-narrowed one — is the unsafe shape D4.2's first row would have
+		// needed and D5 ㉔ measured leaking.
+		if r.Scope != ruleset.ScopeSecondHopReturn {
+			t.Errorf("second-hop rule %q is an accept narrowed by %s: a uid-narrowed accept above a "+
+				"floor drop leaks the packets skuid misses (D5 ㉔). Loop avoidance here is STRUCTURAL "+
+				"— every steering rule is interface-narrowed and hop 2 arrives on no interface",
+				r.Counter, r.Scope)
+		}
+		if len(r.Match.CTState) == 0 {
+			t.Errorf("the second-hop accept %q carries no ct-state clause — it would then admit NEW "+
+				"connections to in-floor addresses, which IS the confused deputy (D4.2)", r.Counter)
+		}
+		for _, st := range r.Match.CTState {
+			if st == "new" {
+				t.Errorf("the second-hop accept %q matches `new` — a new connection to an in-floor "+
+					"address is exactly what §2.4 invariant 2 refuses", r.Counter)
+			}
 		}
 	}
 	// The structural claim, asserted rather than asserted-in-prose: every steering
@@ -621,6 +648,66 @@ func TestLoopAvoidanceIsNotABareUIDAccept(t *testing.T) {
 				"COULD match it and the loop becomes reachable, which is what the (unsafe) "+
 				"uid accept would have had to prevent", r.Counter, r.Scope)
 		}
+	}
+}
+
+// The second-hop table must carry a RETURN arm above its floor, or it kills `via[]`.
+//
+// The mechanism is not obvious and was found on the substrate: the endpoint's REPLY to
+// the guest is host-originated (so it traverses `output`) and its DESTINATION IS THE
+// GUEST IP — which lies inside the sandbox address space, i.e. exactly the floor's
+// sibling item. So the floor matches the reply to the very flow the declaration
+// authorized.
+//
+// Measured with the floor alone: the steered flow reached the endpoint and was accepted
+// (`via0_0_dnat=1`, `via0_0_accept=1`, conntrack SYN_RECV) while `hop2_floor_v4`
+// counted 9 — the reply dropped by this engine, and the guest hung 25 s on a connection
+// whose request had succeeded.
+//
+// The arm does not weaken §2.4 invariant 2, and the assertion below is what pins that:
+// it must NOT match `new`, so a new connection to an in-floor address — the confused
+// deputy itself — still meets the floor.
+func TestTheSecondHopCarriesAReturnArmAboveItsFloor(t *testing.T) {
+	rs, err := SecondHopRules()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ret := indexOf(rs.Rules, "hop2_established")
+	v4 := indexOf(rs.Rules, "hop2_floor_v4")
+	v6 := indexOf(rs.Rules, "hop2_floor_v6")
+	if ret < 0 {
+		t.Fatal("the second-hop table has NO return arm — it therefore drops the reply to every " +
+			"steered flow, because that reply's destination is the guest IP and the guest IP lies in " +
+			"the floor's sibling item (measured: hop2_floor counted 9 while the guest hung 25 s)")
+	}
+	if ret > v4 || ret > v6 {
+		t.Errorf("the return arm is at %d but the floor drops are at %d/%d — it must sit ABOVE them "+
+			"IN THIS CHAIN: an accept ends only its own chain, so below the drop it would count "+
+			"while the reply still died (D5 ⑩'s cross-chain trap, same shape)", ret, v4, v6)
+	}
+	arm := rs.Rules[ret]
+	// It admits only ALREADY-ESTABLISHED flows. This is the line between "the reply to
+	// what the guest asked for" and "the deputy opening its own connection".
+	var established bool
+	for _, st := range arm.Match.CTState {
+		if st == "new" {
+			t.Error("the return arm matches `new` — that admits the endpoint process opening a NEW " +
+				"connection to an in-floor address, which is precisely the confused deputy §2.4 " +
+				"invariant 2 exists to refuse (D4.2)")
+		}
+		if st == "established" || st == "related" {
+			established = true
+		}
+	}
+	if !established {
+		t.Error("the return arm has no established/related clause, so it is not narrowed to a reply " +
+			"at all")
+	}
+	// And it carries NO uid predicate: the measured leak that forbids a uid-narrowed
+	// accept is a property of `skuid` missing packets, and a ct-state arm has no such
+	// gap. Using uid here would reintroduce exactly that leak.
+	if arm.Scope != ruleset.ScopeSecondHopReturn {
+		t.Errorf("the return arm is narrowed by %s, want the ct-state return scope", arm.Scope)
 	}
 }
 

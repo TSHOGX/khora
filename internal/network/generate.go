@@ -162,6 +162,36 @@ func routedEgress(d Declaration) bool {
 // this hop is stated over the floor.
 func SecondHopRules() (ruleset.RuleSet, error) {
 	g := &gen{}
+	// THE RETURN ARM, ABOVE THE FLOOR AND IN THE SAME CHAIN.
+	//
+	// Without it this table kills `via[]` outright, and the mechanism is worth stating
+	// because it is not obvious: the endpoint's REPLY to the guest is host-originated
+	// (so it traverses `output`) and its destination is the GUEST IP — which lies in the
+	// sandbox address space, i.e. exactly the floor's sibling item. So the floor below
+	// matches the reply to the very flow the declaration authorized.
+	//
+	// Measured: with the floor alone, a steered flow reached the endpoint and was
+	// accepted (`via0_0_dnat=1`, `via0_0_accept=1`, conntrack SYN_RECV) while
+	// `hop2_floor_v4` counted 9 — the reply dropped by this engine, and the guest hung
+	// 25 s on a connection whose request had succeeded.
+	//
+	// It does not weaken the invariant. The confused deputy §2.4 invariant 2 names is
+	// the endpoint process opening a NEW connection to an in-floor address; `ct state
+	// new` is precisely what this arm does not match, so a new connection still meets
+	// the floor. What passes is only the reverse direction of a flow the guest itself
+	// initiated — traffic conntrack already attributes to an established connection.
+	//
+	// It also has to be an ACCEPT rather than a narrower shape, and it is safe here for
+	// the reason a uid-narrowed accept is NOT: it carries no `skuid`. The measured
+	// asymmetry (D5 ㉔) is about skuid missing packets; a ct-state arm has no such gap.
+	g.emit(ruleset.Rule{
+		Hook:    ruleset.HookOutputFilter,
+		Scope:   ruleset.ScopeSecondHopReturn,
+		Verdict: ruleset.Accept,
+		Match:   ruleset.Match{CTState: []string{"established", "related"}},
+		Counter: "hop2_established",
+		Why:     "the reply half of a flow the GUEST initiated: host-originated, destination = the guest IP, which lies in the floor's sibling item — so without this arm this table drops the reply to the very flow the declaration authorized (measured: hop2_floor counted 9 while the guest hung). `ct state new` is excluded, so a NEW connection to an in-floor address still meets the floor (§2.4 invariant 2)",
+	})
 	g.emit(ruleset.Rule{
 		Hook:    ruleset.HookOutputFilter,
 		Scope:   ruleset.ScopeSecondHopUID,

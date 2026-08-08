@@ -369,6 +369,56 @@ func CountRuleSetTables(t *testing.T) int {
 	return n
 }
 
+// Restart builds a SECOND engine over an existing engine's state — what a
+// control-plane restart looks like from the host's point of view: a new process, an
+// empty live-map, and every placement the previous one built still on the host.
+//
+// It deliberately does NOT rebuild the Template or sandboxd, unlike Engine. That is
+// the whole reason it exists: re-running the rootfs builder rewrites
+// `<base>/templates/bare`, which is the LOWER DIR of every live sandbox's overlay
+// mount — so a survivor's guest loses the files it is running from, and the resulting
+// failure (a guest process that produces no output at all) looks nothing like the
+// reconciliation defect a test using it is trying to detect. Production never rebuilds
+// a Template under a live sandbox; a test that did would be measuring its own harness.
+//
+// It runs the real boot sequence in production's order: second-hop table → reconcile.
+func Restart(t *testing.T, base string, opts EngineOpts) *orchestrator.Engine {
+	t.Helper()
+	ctx := context.Background()
+	storePath := opts.StorePath
+	if storePath == "" {
+		storePath = filepath.Join(base, "store.db")
+	}
+	healthTimeout := opts.HealthTimeout
+	if healthTimeout == 0 {
+		healthTimeout = 30 * time.Second
+	}
+	eng, err := orchestrator.New(orchestrator.Config{
+		TemplatesDir:   filepath.Join(base, "templates"),
+		StateDir:       filepath.Join(base, "state"),
+		StorePath:      storePath,
+		HealthTimeout:  healthTimeout,
+		DrainGrace:     opts.DrainGrace,
+		NodeDiskByte:   opts.NodeDiskByte,
+		NodeMemoryByte: opts.NodeMemoryByte,
+		SecondHopUID:   opts.SecondHopUID,
+		SecondHopGID:   opts.SecondHopGID,
+		HostPublishIP:  opts.HostPublishIP,
+	})
+	if err != nil {
+		t.Fatalf("restart: orchestrator.New: %v", err)
+	}
+	if err := eng.InstallSecondHopTable(ctx); err != nil {
+		t.Fatalf("restart: install the second-hop table: %v", err)
+	}
+	if !opts.SkipReconcile {
+		if err := eng.Reconcile(ctx); err != nil {
+			t.Fatalf("restart: reconcile: %v", err)
+		}
+	}
+	return eng
+}
+
 // CountEngineNetns counts engine-owned netns on this host (the placement marker
 // local_runsc enumerates, §4.4-A). Tests use it to assert no orphan leaked.
 func CountEngineNetns(t *testing.T) int {

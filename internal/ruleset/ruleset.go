@@ -361,6 +361,28 @@ const (
 	// above a floor drop leaks whatever it fails to match (network.md D5 ㉔).
 	// Validate enforces it.
 	ScopeSecondHopUID
+	// ScopeSecondHopReturn narrows to the REPLY half of an already-established flow on
+	// the engine-level output chain → `ct state established,related` with no identity
+	// predicate at all.
+	//
+	// It exists because the second-hop floor otherwise refuses the reply to the very
+	// flow a `via[]` declaration authorized: that reply is host-originated (so it
+	// traverses `output`) and its destination is the GUEST IP, which lies inside the
+	// floor's sibling item. Measured — with the floor alone, a steered flow was accepted
+	// at the endpoint while this table dropped 9 reply packets and the guest hung 25 s.
+	//
+	// WHY THIS IS NOT A HOLE IN §2.4 INVARIANT 2. The confused deputy that invariant
+	// names is the endpoint process opening a NEW connection to an in-floor address, and
+	// `ct state new` is exactly what this scope does not match — so a new connection
+	// still meets the floor. What it admits is only the reverse direction of a flow the
+	// GUEST initiated, which conntrack has already attributed.
+	//
+	// It is also why this is a CT-STATE narrowing rather than a uid one. The measured
+	// asymmetry that forbids a uid-narrowed accept (skuid does not match every packet of
+	// a flow, so an accept narrowed by it leaks what it misses — D5 ㉔) is a property of
+	// `skuid`; a ct-state predicate has no such gap. Validate therefore permits an accept
+	// here and continues to refuse one narrowed by uid.
+	ScopeSecondHopReturn
 )
 
 func (s Scope) String() string {
@@ -373,6 +395,8 @@ func (s Scope) String() string {
 		return "host-endpoint"
 	case ScopeSecondHopUID:
 		return "second-hop-uid"
+	case ScopeSecondHopReturn:
+		return "second-hop-return"
 	}
 	return "unscoped"
 }
@@ -578,15 +602,44 @@ func Validate(rs RuleSet) error {
 			return fmt.Errorf("%s: a per-sandbox rule may not be narrowed by uid — that "+
 				"predicate belongs to the engine-level second-hop table (§2.4 / D5 ㉔)", where)
 		}
-		if !r.Hook.PerSandbox() && r.Scope != ScopeSecondHopUID {
-			return fmt.Errorf("%s: the engine-level output chain can only be narrowed by "+
-				"uid/gid — no interface predicate is available there, because the traffic "+
-				"arrives on no interface (D5 ㉔)", where)
+		if !r.Hook.PerSandbox() && r.Scope != ScopeSecondHopUID && r.Scope != ScopeSecondHopReturn {
+			return fmt.Errorf("%s: the engine-level output chain can only be narrowed by uid/gid "+
+				"(or, for the return arm, by ct-state) — no interface predicate is available there, "+
+				"because the traffic arrives on no interface (D5 ㉔)", where)
+		}
+		// The return arm is the ONE accept permitted in that table, and it must really be
+		// a ct-state narrowing: an accept there with no ct-state clause would admit NEW
+		// connections to in-floor addresses, which is the confused deputy itself.
+		if r.Scope == ScopeSecondHopReturn {
+			if r.Verdict != Accept {
+				return fmt.Errorf("%s: the second-hop RETURN scope exists to admit the reply half of "+
+					"an established flow; any other verdict there is a mistake", where)
+			}
+			var established bool
+			for _, st := range r.Match.CTState {
+				if st == "established" || st == "related" {
+					established = true
+				}
+				if st == "new" {
+					return fmt.Errorf("%s: the second-hop return arm must NOT match `new` — a new "+
+						"connection to an in-floor address IS the confused deputy §2.4 invariant 2 "+
+						"refuses (D4.2)", where)
+				}
+			}
+			if !established {
+				return fmt.Errorf("%s: the second-hop return arm carries no established/related "+
+					"ct-state clause, so it would admit NEW connections to in-floor addresses — "+
+					"exactly the confused deputy §2.4 invariant 2 exists to refuse", where)
+			}
 		}
 		// GUARD: a uid-narrowed rule may only DROP. skuid does not reliably match
 		// every packet of a flow, so an accept narrowed that way leaks whatever it
 		// misses down to the floor it was meant to sit above (D5 ㉔). Dropping is
 		// safe in the same conditions: losing the SYN kills the flow.
+		//
+		// Note the contrast with ScopeSecondHopReturn just above, which IS an accept in
+		// the same table: that one is narrowed by ct-state rather than by identity, and
+		// the measured leak is a property of `skuid` specifically.
 		if r.Scope == ScopeSecondHopUID && r.Verdict != Drop {
 			return fmt.Errorf("%s: a uid-narrowed rule may only DROP — `skuid` misses "+
 				"packets, so an accept/return narrowed by it leaks them past the floor "+
