@@ -1,9 +1,15 @@
 package main
 
 import (
+	"context"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
+
+	"connectrpc.com/connect"
+
+	v1 "engine/internal/transport/gen/engine/transport/v1"
 )
 
 // Unit (no substrate): the D4.3 fan-out invariants as pure logic. The real
@@ -242,4 +248,115 @@ func TestValidateSignalPid(t *testing.T) {
 			t.Errorf("validateSignalPid(%d) = %v, want nil (a directed target)", pid, err)
 		}
 	}
+}
+
+// failingSender fails the Nth Send (1 = the very first, the StartEvent). It is the
+// injectable half of the eventSender seam: connect's *ServerStream has no exported
+// constructor, so without it the Start first-frame failure arm is unreachable from
+// a unit test — and that arm is exactly where the leak below lived.
+type failingSender struct {
+	failAt int
+	n      int
+	sent   []*v1.ProcessEvent
+}
+
+func (f *failingSender) Send(e *v1.ProcessEvent) error {
+	f.n++
+	if f.n == f.failAt {
+		return errString("injected send failure")
+	}
+	f.sent = append(f.sent, e)
+	return nil
+}
+
+// The first-frame Send failure used to skip `go p.run(...)` entirely, and run's
+// onExit is unregister's ONLY call site. Three leaks followed, worst first: the
+// pumps never start, so the child blocks forever writing into a 64 KiB pipe nobody
+// reads — it cannot even exit; the s.procs entry stays for the daemon's life; and
+// three fds stay open (cmd.Wait is deliberately skipped, so pumpSource's
+// defer closer.Close() is what closes them).
+//
+// Drives the real handler through a real fork + real reaper. The child writes far
+// more than a pipe buffer, so "the pumps ran" and "the child could exit" are the
+// same observation: it can only finish if someone drained it.
+func TestStartSendFailureDoesNotLeakProcOrWedgeChild(t *testing.T) {
+	asSubreaper(t)
+	r := newReapTable()
+	startDraining(t, r)
+	s := &processServer{activity: &activityClock{}, reaper: r}
+
+	fs := &failingSender{failAt: 1} // fail the StartEvent itself
+	err := s.start(context.Background(), connect.NewRequest(&v1.StartRequest{
+		Cmd: "/bin/sh",
+		// >>64 KiB on stdout: only a running pump lets this child ever exit.
+		Args: []string{"-c", "i=0; while [ $i -lt 400 ]; do echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; i=$((i+1)); done"},
+	}), fs)
+	if err == nil {
+		t.Fatal("start returned nil; want the injected send failure")
+	}
+	if !strings.Contains(err.Error(), "injected send failure") {
+		t.Fatalf("start error = %v; want the injected send failure", err)
+	}
+
+	// Leak 2: the registry entry must drain, which can only happen via run's onExit.
+	waitFor(t, "s.procs to drop the pid after a first-frame Send failure", func() bool {
+		s.mu.Lock()
+		n := len(s.procs)
+		s.mu.Unlock()
+		return n == 0
+	})
+
+	// Leak 1 (the worst): the child had to be drained enough to EXIT and be reaped.
+	// A wedged child sits in /proc forever with a full pipe.
+	s.mu.Lock()
+	if len(s.procs) != 0 {
+		t.Fatalf("procs still holds %d entries", len(s.procs))
+	}
+	s.mu.Unlock()
+}
+
+// Same seam, the OTHER side of the boundary: a process that was started must not be
+// killed because a client went away. §3.2 gives Start an independent context so the
+// process outlives a disconnect (the premise of Connect reattach), and "kill on
+// first-frame failure" cannot be a contract — the same disconnect one frame later
+// leaves it alive, so special-casing the first frame would make dead-vs-alive turn
+// on invisible timing. So: still live and still reattachable right after the failure.
+func TestStartSendFailureLeavesProcessRunning(t *testing.T) {
+	asSubreaper(t)
+	r := newReapTable()
+	startDraining(t, r)
+	s := &processServer{activity: &activityClock{}, reaper: r}
+
+	fs := &failingSender{failAt: 1}
+	err := s.start(context.Background(), connect.NewRequest(&v1.StartRequest{
+		Cmd:  "/bin/sh",
+		Args: []string{"-c", "sleep 30"},
+	}), fs)
+	if err == nil {
+		t.Fatal("start returned nil; want the injected send failure")
+	}
+
+	s.mu.Lock()
+	var pid int
+	for p := range s.procs {
+		pid = p
+	}
+	s.mu.Unlock()
+	if pid == 0 {
+		t.Fatal("no proc registered; the process should still be tracked while it runs")
+	}
+	if _, _, ok := procState(pid); !ok {
+		t.Fatalf("pid %d is gone; a first-frame Send failure must not kill the process", pid)
+	}
+	// Reattachable: the whole point of not killing it.
+	if _, ok := s.get(pid); !ok {
+		t.Fatalf("pid %d not resolvable for Connect", pid)
+	}
+	// dash forks a grandchild for `sleep`, so kill the GROUP — a pid-directed kill
+	// leaves the grandchild holding the pipes and run() never returns.
+	_ = killProcessGroup(pid, int(syscall.SIGKILL))
+	waitFor(t, "the killed process to unregister", func() bool {
+		_, ok := s.get(pid)
+		return !ok
+	})
 }

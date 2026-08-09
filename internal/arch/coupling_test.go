@@ -15,9 +15,12 @@ import (
 // of these is the start of the dependency cycle the ownership rule exists to
 // prevent.
 //
-// network (§5.D) is listed before it exists on purpose: the guard should catch a
-// bad edge the day the package lands, not the day someone remembers to add it here.
-// Absent packages are skipped, and staleness is checked separately below.
+// Every entry is REQUIRED to exist (TestGuardIsNotStale). network (§5.D) was listed
+// here before it existed, so the guard would catch a bad edge the day the package
+// landed rather than the day someone remembered to add it; now that it has landed it
+// is required like the rest, because "absent packages are skipped" is a hole the
+// moment the package is real — a rename would leave §5.D unchecked with every test
+// still green.
 //
 // Pre-listing is what gives the empty allowlist its force at DESIGN time, not just
 // at review time: routing volume content through §5.E `fs` was ruled out for §5.C
@@ -26,7 +29,7 @@ var subsystems = []string{
 	"engine/internal/runtime",   // §5.A
 	"engine/internal/rootfs",    // §5.B
 	"engine/internal/volume",    // §5.C
-	"engine/internal/network",   // §5.D (not yet built)
+	"engine/internal/network",   // §5.D
 	"engine/internal/transport", // §5.E
 }
 
@@ -159,9 +162,7 @@ func TestSubsystemsDoNotReadTheControlPlane(t *testing.T) {
 
 // leaves are the packages that exist SO THAT the empty allowlist above can stay
 // empty: when two subsystems need the same fact, it goes in a leaf they both
-// depend on (CLAUDE.md), never behind an exemption. `guestport` is the precedent;
-// `ruleset` applies it a second time, holding the §2.4 static address facts and
-// the abstract rule vocabulary that §5.D generates and §5.A renders.
+// depend on (CLAUDE.md), never behind an exemption.
 //
 // A leaf is only a leaf while it imports NOTHING from the engine. The failure mode
 // is quiet and it defeats the whole construction: the moment `ruleset` imports
@@ -169,9 +170,23 @@ func TestSubsystemsDoNotReadTheControlPlane(t *testing.T) {
 // it inherits that edge TRANSITIVELY, and the guard above still passes — it only
 // looks at direct imports. So this is checked here rather than trusted to the
 // package comment.
+//
+// The list is every package carrying that structural role, not only the ones whose
+// doc comments say "leaf" — the transitive-edge argument is a property of being
+// depended on by two subsystems, and it holds VERBATIM for all four:
+//
+//   - guestport — the precedent: the guest netns port, shared by §5.A and §5.E.
+//   - ruleset — §2.4's static address facts plus the abstract rule vocabulary §5.D
+//     generates and §5.A renders. Also the reason its Validate must live outside
+//     both: it runs on the generate side and again before install.
+//   - btrfs — the substrate tool, model-ignorant, shared by §5.B (rootfs/overlayfs.go)
+//     and §5.C (volume/local_btrfs.go).
+//   - allocbytes — shared by §5.B and §5.C for the same reason.
 var leaves = []string{
 	"engine/internal/guestport",
 	"engine/internal/ruleset",
+	"engine/internal/btrfs",
+	"engine/internal/allocbytes",
 }
 
 // TestLeavesImportNothingFromTheEngine keeps the leaf packages leaves.
@@ -212,14 +227,12 @@ func TestGuardIsNotStale(t *testing.T) {
 	for _, p := range listPackages(t, "") {
 		present[p.ImportPath] = true
 	}
-	// The four built subsystems must exist. network is deliberately absent until its
-	// milestone lands, so it is not required here.
-	for _, s := range []string{
-		"engine/internal/runtime",
-		"engine/internal/rootfs",
-		"engine/internal/volume",
-		"engine/internal/transport",
-	} {
+	// EVERY listed subsystem must exist — the list is read straight from `subsystems`
+	// rather than restated, so the two cannot drift apart. A second hand-written copy
+	// is how §5.D came to be exempt here after its package had already landed: the
+	// checks above key off `subsystems`, and a package missing from `present` is simply
+	// skipped by `owner`, so a rename disables them while this test still passes.
+	for _, s := range subsystems {
 		if !present[s] {
 			t.Errorf("subsystem package %s not found — this guard is stale (renamed or moved), "+
 				"and a stale guard passes vacuously", s)

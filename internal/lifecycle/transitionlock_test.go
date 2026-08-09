@@ -108,7 +108,7 @@ func TestTransitionLockMapCollectsAfterChurn(t *testing.T) {
 					return
 				}
 				idle := 5 * time.Minute
-				if err := m.UpdateBinding(ctx, id, store.Binding{IdleTimeout: &idle}); !ok(err) {
+				if err := patchBinding(m, ctx, id, store.Binding{IdleTimeout: &idle}); !ok(err) {
 					t.Errorf("update %s: %v", id, err)
 					return
 				}

@@ -174,6 +174,19 @@ func (b *LocalBtrfs) Usage(ctx context.Context, volumeID string) (int64, int64, 
 // volume has no placement of its own, so there is no "re-materialize at next
 // placement" moment to hang it on (§5.C — the mechanical reason volume caps are
 // editable while unmounted, unlike sandbox caps).
+//
+// THAT LEAVES ONE GAP THE MEDIATOR CLOSES, named here because the dependency is
+// otherwise invisible from this side. The fallback below yields a PLAIN DIRECTORY
+// whenever CreateSubvolume fails on an absent path (VolumesDir not on a
+// quota-capable filesystem, or a substrate refusal), and a plain directory cannot
+// carry a cap at all — so a volume whose RECORD declares one is re-materialized
+// UNCAPPED, and that divergence is undetectable from storage afterwards, since the
+// limit read maps "never capped" and 0 onto each other (volume.md D7.3). Nothing on
+// this path re-asserts it; Mediator.RepairVolumeCaps is what does, and it can,
+// because a freshly recreated unit is EMPTY — the recorded cap is strictly above its
+// usage, which is the condition that pass requires before writing one. (For a volume
+// whose record says uncapped the fallback is simply correct: a plain directory is
+// exactly what "no cap" looks like on this arm.)
 func (b *LocalBtrfs) Materialize(ctx context.Context, volumeID string) (*Materialized, error) {
 	if err := validateID(volumeID); err != nil {
 		return nil, err

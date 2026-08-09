@@ -5,6 +5,7 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -25,9 +26,41 @@ import (
 // funnel's own doc comment necessarily quotes the leaky shape it replaced, and a
 // text scan would fail on the explanation of why it is wrong.
 
-// edgeSources are the production files scanned. Test files are excluded on purpose —
-// a test asserting on a raw error is doing its job.
-var edgeSources = []string{"api.go", "volumes.go", "files.go", "dataplane.go", "orchestrator.go"}
+// edgeSources returns the production files scanned: EVERY non-test .go file in this
+// package, read from the directory rather than listed by hand.
+//
+// A hand-written list is the one failure mode this guard cannot survive, because it
+// fails in the direction of passing. Measured: `network.go` arrived with M8 carrying
+// two §6 endpoints, was not added to the list, and a raw
+// `http.Error(w, "leak "+err.Error(), 500)` planted in handleNetworkGet passed BOTH
+// scanners green. That is precisely the "a new endpoint leaks only if someone deletes
+// a test, never by forgetting one" property above — and a per-file list reinstates the
+// forgetting. Enumerating the directory means a new production file is scanned the day
+// it lands, with nothing to remember.
+//
+// Test files are excluded on purpose — a test asserting on a raw error is doing its job.
+func edgeSources(t *testing.T) []string {
+	t.Helper()
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("read package dir: %v", err)
+	}
+	var srcs []string
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		srcs = append(srcs, name)
+	}
+	// A glob that silently matches nothing is a guard that passes vacuously — the same
+	// defect as the stale list, reached by a different route. api.go holds the §6 router
+	// and cannot legitimately disappear, so it doubles as the liveness anchor.
+	if !slices.Contains(srcs, "api.go") {
+		t.Fatalf("enumeration found no api.go (got %v) — this scan is not reading the package", srcs)
+	}
+	return srcs
+}
 
 // errorTextExemptions are the functions permitted to read an error's text, keyed by
 // name WITH THE REASON. Two entries, and both are the sanitizer or its logger — an
@@ -47,7 +80,7 @@ var errorTextExemptions = map[string]string{
 // unsanitized string cannot be written into a body by any route, including
 // fmt.Sprintf, string concatenation or a JSON field.
 func TestControlPlaneErrorsGoThroughTheFunnel(t *testing.T) {
-	for _, src := range edgeSources {
+	for _, src := range edgeSources(t) {
 		fset := token.NewFileSet()
 		f, err := parser.ParseFile(fset, src, nil, 0)
 		if err != nil {
@@ -90,7 +123,7 @@ func TestControlPlaneErrorsGoThroughTheFunnel(t *testing.T) {
 // never touches an error — `http.Error(w, "cannot open "+dir, 500)` reads perfectly
 // innocently and leaks just as much.
 func TestHTTPErrorBodiesAreLiteralsOrSanitized(t *testing.T) {
-	for _, src := range edgeSources {
+	for _, src := range edgeSources(t) {
 		fset := token.NewFileSet()
 		f, err := parser.ParseFile(fset, src, nil, 0)
 		if err != nil {

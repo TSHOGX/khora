@@ -46,10 +46,11 @@ type networkWire struct {
 	// member the read face itself produced belongs here. A misspelled `netwrok` is
 	// still a 400, which is the property that matters (§5.D / M8 plan item 3b).
 	//
-	// ⚠ Logged as a spec gap in open-decisions.md ("`GET …/network` 的响应能否原样
-	// 回写给 `PATCH`") — §6.1 requires the cycle and requires `state` in the response,
-	// but does not say whether the response body IS a legal request body. The code
-	// takes the leaning; the wording is a review-gate decision.
+	// SETTLED in §6.1 (`GET …/network`): the read face's read-only members — `state`
+	// here and `host_endpoint` on publishWire — are accepted and ignored on the write
+	// path, which is what makes the GET response body a legal PATCH request body. The
+	// rule is "every read-only member the read face emits", so a new one obliges a
+	// matching ignored member here.
 	State string `json:"state,omitempty"`
 }
 
@@ -67,17 +68,39 @@ type ingressWire struct {
 	Publish []publishWire `json:"publish"`
 }
 
-// tupleWire is `{cidr, port, proto}`. `cidr` may be OMITTED, which means "any
-// destination" — meaningful inside `via[].match[]`, where it is the
-// transparent-interception value and makes the generator emit exactly one clause
-// fewer (§5.D / network.md D3.3).
+// tupleWire is `{cidr, port, proto}`. TWO of the three members are WILDCARDABLE BY
+// OMISSION, and they say so the same way: `cidr` omitted means "any destination"
+// (the transparent-interception value inside `via[].match[]`, which makes the
+// generator emit exactly one clause fewer — §5.D / network.md D3.3), and `port`
+// omitted means "any port" (§5.D). `proto` is the one member with no wildcard, on
+// mechanism grounds: port matching depends on protocol matching in the kernel, so
+// `{cidr, port}` cannot be rendered at all (D3.1).
 type tupleWire struct {
 	// Omitted rather than rendered as "" when the tuple pins no destination — the
 	// read face's output has to be a legal write body (§6.1's read-modify-write), and
 	// `"cidr":""` round-trips only because decode() treats it as "any". Emitting the
 	// omission directly says what it means.
-	CIDR  string `json:"cidr,omitempty"`
-	Port  uint16 `json:"port"`
+	CIDR string `json:"cidr,omitempty"`
+	// Port carries `omitempty` for the same reason `cidr` above does, and the reason is
+	// NOT tidiness — it is §5.D's own criterion for requiring `egress.default`: if
+	// "unspecified" is read as some default value, the record's empty value can no
+	// longer be told from the caller having chosen it. Without `omitempty` the read face
+	// emits `"port": 0` for a wildcard, which reads as a port number that happens to be
+	// zero; a caller cannot tell that response from a record built before the field
+	// existed, and the wildcard survives only as a zero value's side effect. Omitting it
+	// says what it means, and keeps the GET response a legal PATCH body (§6.1).
+	//
+	// A VALUE TYPE, not a pointer, and deliberately: `egress.default` is a pointer
+	// because absent and `""` are BOTH REFUSED THERE with different messages, so the
+	// two must stay distinguishable. Here they are both LEGAL and mean the same thing —
+	// `"port": 0` and an omitted `port` decode to ONE record — so there is nothing to
+	// distinguish and a pointer would only invite a distinction the contract does not
+	// make. Two spellings collapsing onto one record is exactly how `cidr` already
+	// behaves (`"cidr": ""` decodes to any-destination), and it is the safe direction of
+	// §6.2's v4-mapped objection: what that class refuses is two spellings that
+	// SURVIVE INTO the record and then compare unequal on read-modify-write. These do
+	// not survive — the read face renders the wildcard exactly one way, as the omission.
+	Port  uint16 `json:"port,omitempty"`
 	Proto string `json:"proto"`
 }
 
@@ -89,6 +112,28 @@ type viaWire struct {
 type publishWire struct {
 	GuestPort uint16 `json:"guest_port"`
 	Proto     string `json:"proto"`
+
+	// HostEndpoint is ACCEPTED AND IGNORED on the write path, for exactly the reason
+	// `networkWire.State` is (see there — same contract requirement, same non-exemption
+	// from DisallowUnknownFields). It is the SECOND read-only member the read face
+	// produces, and the scope of that decision is "every read-only member the read face
+	// emits", not `state` alone: `DisallowUnknownFields` applies RECURSIVELY, so a
+	// `running` sandbox carrying one publish would have its GET response refused with
+	// `json: unknown field "host_endpoint"` — the read-modify-write cycle §6.1 makes a
+	// CONTRACT REQUIREMENT, broken one level down from where `state` lives.
+	//
+	// ⚠ COUNTERINTUITIVE, and it is why no test caught this: the friction appears only
+	// on the WRONG operation order. §5.D's safe sequence is `pause → GET → PATCH →
+	// resume`, and on that path the GET happens after the pause, when the engine holds
+	// no placement and therefore emits no `host_endpoint` at all — so the write-back
+	// works. Only `GET` BEFORE `pause` — the order §5.D names as dangerous, because it
+	// pulls the whole pause window into the lost-update window — hits the 400. So the
+	// gap ACCIDENTALLY acted as a guardrail against the unsafe order. It was never
+	// designed as one and must not be relied on as one: the guardrail is unprincipled
+	// (a `paused` sandbox with a stale read is equally lost-update-prone and sails
+	// through), it reports a JSON schema error for a concurrency mistake, and §6.1 owns
+	// that ordering requirement in prose where a caller can read it.
+	HostEndpoint string `json:"host_endpoint,omitempty"`
 }
 
 // decode turns the wire form into the record form, applying the two 400 classes that
@@ -128,6 +173,11 @@ func (w networkWire) decode() (model.NetworkDecl, error) {
 }
 
 func (t tupleWire) decode() (model.NetTuple, error) {
+	// `port` needs no branch and that is the point of the shapes chosen above: an
+	// omitted `port` and an explicit `"port": 0` both arrive here as 0 and both mean
+	// ANY PORT (§5.D), so there is exactly one recorded value for the wildcard and
+	// nothing for a later read-modify-write to disagree about. encodeTuple renders it
+	// back as the omission, which is the single spelling the read face produces.
 	out := model.NetTuple{Port: t.Port, Proto: model.NetProto(t.Proto)}
 	if t.CIDR == "" {
 		// Omitted = any destination. Legal, and only meaningful in `via[].match[]`.
@@ -180,6 +230,10 @@ func encodeNetwork(d model.NetworkDecl, endpoints []string) networkReadResp {
 	return out
 }
 
+// encodeTuple renders one tuple for the read face. BOTH wildcards come out as
+// OMISSIONS — `cidr` because the field is left empty, `port` because 0 plus
+// `omitempty` drops it — so the wildcard has exactly one spelling on the way out and
+// the response is a legal write body (§6.1's read-modify-write). See tupleWire.
 func encodeTuple(t model.NetTuple) tupleWire {
 	w := tupleWire{Port: t.Port, Proto: string(t.Proto)}
 	if t.CIDR.IsValid() {
@@ -316,9 +370,10 @@ func strictDecode(body io.Reader, v any) error {
 	return nil
 }
 
-// networkStatus maps §6.2's declaration refusals to 400 — ONE arm for all nine
-// classes, because every remedy is "fix the declaration" (or, for the ninth, "start
-// the engine with a second-hop uid"). The CLASS stays recoverable through
+// networkStatus maps §6.2's declaration refusals to 400 — ONE arm for all ten
+// refusals, because every remedy is "fix the declaration" (or, for the
+// deployment-natured one, "start the engine with a second-hop uid"). The CLASS stays
+// recoverable through
 // network.ClassOf for tests and logs; what §6.2 requires to stay distinguishable is
 // what the caller's REMEDY depends on, and here it does not vary by class.
 func networkStatus(err error) (int, bool) {

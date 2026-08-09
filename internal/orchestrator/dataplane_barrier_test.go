@@ -97,7 +97,7 @@ func (barrierFakeRuntime) ReclaimOrphans(context.Context, []string) error { retu
 func (barrierFakeRuntime) ReinstallRuleSet(context.Context, *runtime.Placement, runtime.SteeringSpec) error {
 	return nil
 }
-func (barrierFakeRuntime) InstallSecondHop(context.Context, ruleset.RuleSet, *int, *int) error {
+func (barrierFakeRuntime) InstallSecondHop(context.Context, ruleset.RuleSet, *int) error {
 	return nil
 }
 

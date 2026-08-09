@@ -739,7 +739,7 @@ func (s *twoCallDetectingStore) ReplaceMounts(ctx context.Context, id model.Sand
 	return s.Store.ReplaceMounts(ctx, id, next)
 }
 
-// TestRebindVolumesIsOneStoreCommit: a rebind goes through ReplaceMounts and NEVER
+// TestRebindIsOneStoreCommit: a rebind goes through ReplaceMounts and NEVER
 // through DeleteMounts + CreateMounts — including on the REFUSED path, where the old
 // implementation issued a third call to re-insert the previous binding.
 //
@@ -747,7 +747,7 @@ func (s *twoCallDetectingStore) ReplaceMounts(ctx context.Context, id model.Sand
 // "the new binding was refused AND the old one is gone" is not a reachable state, and a
 // compensation path for an unreachable state can only rot (its own failure had to be
 // logged as an unrecoverable-ish condition that could not actually occur).
-func TestRebindVolumesIsOneStoreCommit(t *testing.T) {
+func TestRebindIsOneStoreCommit(t *testing.T) {
 	ctx := context.Background()
 	m, st, _ := volFixture(t)
 	spy := &twoCallDetectingStore{Store: st}
@@ -777,7 +777,7 @@ func TestRebindVolumesIsOneStoreCommit(t *testing.T) {
 	spy.deletes, spy.creates, spy.replaces = 0, 0, 0
 
 	// A rebind that LOSES: keep what I have, add the contended volume.
-	_, err = m.RebindVolumes(ctx, "sbx_r", []model.Mount{
+	_, err = patchMounts(m, ctx, "sbx_r", []model.Mount{
 		{Volume: keep, Path: "/data", Access: model.Exclusive},
 		{Volume: taken, Path: "/other", Access: model.Exclusive},
 	})
@@ -802,7 +802,7 @@ func TestRebindVolumesIsOneStoreCommit(t *testing.T) {
 	// And the SUCCEEDING path is one call too — including the detach-everything case,
 	// which is a replacement with an empty binding rather than a delete (§6.2).
 	spy.replaces = 0
-	released, err := m.RebindVolumes(ctx, "sbx_r", nil)
+	released, err := patchMounts(m, ctx, "sbx_r", nil)
 	if err != nil {
 		t.Fatalf("detach-everything rebind: %v", err)
 	}

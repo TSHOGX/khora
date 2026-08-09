@@ -213,7 +213,7 @@ const (
 	HookOutputNAT
 	// HookOutputFilter is the ENGINE-LEVEL (not per-sandbox) filter output chain
 	// that pins the second hop (§2.4 invariant 2 / network.md D5 ㉔). It is a
-	// separate table because its predicate is the deployment-supplied uid/gid
+	// separate table because its predicate is the deployment-supplied uid
 	// rather than an interface: one uid means one rule set, independent of how
 	// many sandboxes exist, so it is installed once at startup and not per
 	// placement.
@@ -350,9 +350,19 @@ const (
 	// The host port is allocated per placement and per publish item, so it is a
 	// per-sandbox narrowing in the sense the guard cares about.
 	ScopeHostEndpoint
-	// ScopeSecondHopUID narrows to the deployment-supplied uid/gid of the process
+	// ScopeSecondHopUID narrows to the deployment-supplied uid of the process
 	// sitting behind `via[].endpoint` → `meta skuid <uid>`. Legal ONLY in the
 	// engine-level output table.
+	//
+	// UID and no gid: `skuid` is the only narrowing predicate `output` offers (D5 ㉔),
+	// and there is no `skgid` clause to pair with it. A gid narrowing could only be
+	// ANDed onto the floor drop, i.e. make the floor match LESS.
+	//
+	// The uid must not be the ENGINE'S OWN: the transport endpoint is a guest veth
+	// address inside SandboxCIDR — the floor's sibling item — dialed from the host, so
+	// that value drops the engine's own dial to every guest, and the return arm below
+	// deliberately does not catch a SYN. Refused at assembly, not here
+	// (network.ValidateSecondHopUID): a rule set cannot see whose uid it carries.
 	//
 	// It may narrow a DROP and never an ACCEPT, and that asymmetry is measured
 	// rather than stylistic: skuid does not reliably match every packet of a flow
@@ -448,6 +458,18 @@ type Match struct {
 
 	// Proto / DestPort are the post-NAT L4 selector. DestPort requires Proto (nft
 	// makes port matching depend on protocol matching, D3.1).
+	//
+	// A ZERO DestPort IS "ANY PORT", and it is the port-side twin of an empty DestV4 /
+	// DestV6: the renderer emits the `dport` clause if and only if it is non-zero, so a
+	// declaration that named no port renders one clause fewer. That is the mechanism
+	// behind §5.D's port wildcard, and BOTH directions carry weight — keeping a dport
+	// clause on a wildcard tuple would refuse the traffic the declaration authorized,
+	// while dropping it on a tuple that named a port would authorize every OTHER port on
+	// that destination. Same shape, same stakes, as Match.CTOriginalDest's nil case.
+	//
+	// It follows that a wildcard rule is NOT expressible as "port 0": port 0 is not a
+	// usable destination port, so no declaration loses the ability to name something by
+	// this encoding.
 	Proto    Proto
 	DestPort uint16
 
@@ -603,7 +625,7 @@ func Validate(rs RuleSet) error {
 				"predicate belongs to the engine-level second-hop table (§2.4 / D5 ㉔)", where)
 		}
 		if !r.Hook.PerSandbox() && r.Scope != ScopeSecondHopUID && r.Scope != ScopeSecondHopReturn {
-			return fmt.Errorf("%s: the engine-level output chain can only be narrowed by uid/gid "+
+			return fmt.Errorf("%s: the engine-level output chain can only be narrowed by uid "+
 				"(or, for the return arm, by ct-state) — no interface predicate is available there, "+
 				"because the traffic arrives on no interface (D5 ㉔)", where)
 		}

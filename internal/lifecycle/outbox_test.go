@@ -181,7 +181,7 @@ func TestUpdateBindingPublishesNothing(t *testing.T) {
 	before := kindsFor(t, st, sid)
 
 	bigger := int64(512 << 20)
-	if err := m.UpdateBinding(ctx, sid, store.Binding{MemoryByte: &bigger}); err != nil {
+	if err := patchBinding(m, ctx, sid, store.Binding{MemoryByte: &bigger}); err != nil {
 		t.Fatalf("UpdateBinding: %v", err)
 	}
 	after := kindsFor(t, st, sid)

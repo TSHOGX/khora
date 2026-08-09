@@ -160,12 +160,14 @@ type EngineOpts struct {
 	// inspect the pre-reconcile store.
 	SkipReconcile bool
 
-	// SecondHopUID / SecondHopGID are the §2.4 invariant-2 deployment inputs: the
-	// uid/gid of the host-local process behind `egress.via[].endpoint`. Unset ⇒ no
-	// second-hop table is installed and `via[]` declarations are refused, so a suite
-	// exercising `via[]` MUST set them.
+	// SecondHopUID is the §2.4 invariant-2 deployment input: the uid of the host-local
+	// process behind `egress.via[].endpoint`. Unset ⇒ no second-hop table is installed
+	// and `via[]` declarations are refused, so a suite exercising `via[]` MUST set it.
+	//
+	// It must be a uid the ENGINE does not run as. The substrate suites run as root, so
+	// passing 0 here would make orchestrator.New refuse to assemble — see
+	// network.ValidateSecondHopUID for why that uid drops the engine's own guest dials.
 	SecondHopUID *int
-	SecondHopGID *int
 
 	// HostPublishIP is the host address published endpoints bind to. Empty →
 	// loopback (the engine's conservative default).
@@ -226,7 +228,6 @@ func Engine(t *testing.T, opts EngineOpts) (*orchestrator.Engine, string) {
 		FaultAfterColdStart:   opts.FaultAfterColdStart,
 		FaultAfterVolumeBytes: opts.FaultAfterVolumeBytes,
 		SecondHopUID:          opts.SecondHopUID,
-		SecondHopGID:          opts.SecondHopGID,
 		HostPublishIP:         opts.HostPublishIP,
 	})
 	if err != nil {
@@ -402,7 +403,6 @@ func Restart(t *testing.T, base string, opts EngineOpts) *orchestrator.Engine {
 		NodeDiskByte:   opts.NodeDiskByte,
 		NodeMemoryByte: opts.NodeMemoryByte,
 		SecondHopUID:   opts.SecondHopUID,
-		SecondHopGID:   opts.SecondHopGID,
 		HostPublishIP:  opts.HostPublishIP,
 	})
 	if err != nil {

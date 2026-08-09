@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"fmt"
 	"net/netip"
 	"strings"
 	"testing"
@@ -16,7 +17,10 @@ func testCtx() renderCtx {
 		vethHost:         "vh0123456789ab",
 		guestIP:          "10.66.250.2",
 		gatewayIP:        "10.66.250.1",
-		publishEndpoints: map[uint16]string{8080: "127.0.0.1:21000"},
+		publishEndpoints: map[publishKey]string{
+			{port: 8080, proto: ruleset.TCP}: "127.0.0.1:21000",
+			{port: 8080, proto: ruleset.UDP}: "127.0.0.1:21001",
+		},
 	}
 }
 
@@ -137,6 +141,17 @@ func TestGuardRefusesAnUnNarrowedPerSandboxRule(t *testing.T) {
 		`ct state new counter name c accept`,
 		`counter name c drop`,
 		`tcp dport 443 counter name c accept`,
+		// THE L0 FLOOR WITH ITS `iifname` DROPPED. This is the rule class where the guard
+		// matters most and the one a bare-`daddr` criterion let through: the floor's
+		// forward arm and the deny-safe tier both render `ip daddr { … }`, so an address
+		// clause is not evidence of a per-sandbox narrowing at all. Without the `iifname`
+		// this drop terminates across chains and takes out every sandbox's traffic to
+		// those prefixes (measured both ways, D5 ⑧ ⑩).
+		`ip daddr { 10.66.0.0/16, 192.168.0.0/16 } counter name in_floor drop`,
+		`ip daddr 10.66.0.0/16 counter name c reject`,
+		// Same shape carrying a protocol but still no port: `meta l4proto tcp` narrows to
+		// a protocol, which every sandbox's traffic also has.
+		`ip daddr 10.66.0.0/16 meta l4proto tcp counter name c drop`,
 	} {
 		err := renderGuards("table inet t {\n  chain c {\n    "+bad+"\n  }\n}", true)
 		if err == nil {
@@ -144,6 +159,22 @@ func TestGuardRefusesAnUnNarrowedPerSandboxRule(t *testing.T) {
 				"is a hole in EVERY sandbox's floor (measured: another sandbox's flow was let through "+
 				"with both floors counting 0), and an un-narrowed drop terminates across chains "+
 				"(D5 ⑩)", bad)
+		}
+	}
+	// …and the ONE address-shaped narrowing that IS legal must still pass: a publish
+	// DNAT's host endpoint, whose per-sandbox part is the PORT (allocated per placement
+	// and per publish item), not the address. The guard requires the PAIR, so this arm
+	// is what keeps the pair-vs-bare-daddr distinction honest in both directions —
+	// tightening it to demand `iifname` literally would reject the two publish DNATs,
+	// which have no interface predicate available at all.
+	for _, ok := range []string{
+		`ip daddr 127.0.0.1 tcp dport 21000 counter name pub0_in_dnat dnat ip to 10.66.250.2:8080`,
+		`ip6 daddr ::1 udp dport 21001 counter name pub1_in_dnat dnat ip to 10.66.250.2:9090`,
+	} {
+		if err := renderGuards("table inet t {\n  chain c {\n    "+ok+"\n  }\n}", true); err != nil {
+			t.Errorf("the guard rejected a legal host-endpoint narrowing %q: %v — no interface "+
+				"predicate is available for a publish DNAT (prerouting sees an arbitrary caller "+
+				"interface, and the output-hook copy is locally generated), so this must pass", ok, err)
 		}
 	}
 	// The renderer cannot produce one: an unscoped rule is refused upstream by
@@ -419,6 +450,112 @@ func TestTheTransparentFormRendersOneFewerClause(t *testing.T) {
 	}
 }
 
+// §5.D's PORT WILDCARD, both directions: a rule carrying no port renders WITHOUT a
+// `dport` clause (so it really matches every port), and the same rule carrying one
+// renders WITH it (so the wildcard is not the only thing this can produce).
+//
+// Both halves are load-bearing in the same way the `cidr` pair is (D5 ⑩). Emitting a
+// `dport` clause for a wildcard tuple would refuse exactly the traffic the declaration
+// authorized — every port of that destination — and the failure would be invisible in
+// `nft list`, because a rule with one extra clause looks like a rule that was meant to
+// have it. Omitting the clause for a tuple that NAMED a port is the opposite and worse
+// error: it authorizes every OTHER port on that destination.
+//
+// This is the shape TestTheTransparentFormRendersOneFewerClause has for `cidr`, applied
+// to the field that until now had no assertion at all: `{cidr, proto}` was silently read
+// as "all ports", which is the right semantic reached by accident rather than by a
+// declared one.
+func TestThePortClauseIsRenderedIffTheDeclarationPinnedOne(t *testing.T) {
+	base := ruleset.Rule{
+		Hook: ruleset.HookForward, Scope: ruleset.ScopeGuestIn, Verdict: ruleset.Accept,
+		Match: ruleset.Match{
+			Proto:  ruleset.TCP,
+			DestV4: []netip.Prefix{netip.MustParsePrefix("1.1.1.1/32")},
+		},
+		Counter: "allow0_fwd", Why: "egress.allow[0] with no port — any port",
+	}
+	wildcard := mustRender(t, one(base), testCtx())
+	if strings.Contains(wildcard, "dport") {
+		t.Errorf("a tuple with no port rendered a `dport` clause — an omitted `port` means ANY "+
+			"PORT (§5.D), so the clause would refuse exactly the traffic the declaration "+
+			"authorized:\n%s", wildcard)
+	}
+	// The destination is still pinned: "any port" must not leak into "any destination".
+	if !strings.Contains(wildcard, "ip daddr 1.1.1.1/32") {
+		t.Errorf("the wildcard-port rule lost its destination clause:\n%s", wildcard)
+	}
+	// The protocol survives as a narrowing of its own — a wildcard on `port` is not a
+	// wildcard on `proto`, which has none (D3.1).
+	if !strings.Contains(wildcard, "meta l4proto tcp") {
+		t.Errorf("the wildcard-port rule dropped its protocol narrowing — `proto` has no "+
+			"wildcard (D3.1):\n%s", wildcard)
+	}
+
+	pinned := base
+	pinned.Match.DestPort = 443
+	explicit := mustRender(t, one(pinned), testCtx())
+	if !strings.Contains(explicit, "tcp dport 443") {
+		t.Errorf("a tuple that named a port did not render a `dport` clause — without it the "+
+			"rule authorizes every OTHER port on that destination:\n%s", explicit)
+	}
+	// NOT a length comparison, and the reason is worth recording because the obvious
+	// version of this assertion is WRONG here: the pinned form is three bytes SHORTER
+	// than the wildcard one. `tcp dport 443` carries nft's implicit protocol dependency,
+	// so the renderer drops the standalone `meta l4proto tcp` it emits for the wildcard —
+	// the two forms differ by a clause SWAP, not by one added clause. (Contrast
+	// TestTheTransparentFormRendersOneFewerClause, where the `cidr` pair really is one
+	// clause longer, because no other clause subsumes it.) So the assertion is on the
+	// clauses themselves, in both directions.
+	if strings.Contains(explicit, "meta l4proto") {
+		t.Errorf("the port-pinned form restated the protocol as `meta l4proto` on top of its "+
+			"`dport` clause — nft generates that dependency implicitly, and two rules meaning the "+
+			"same thing must not render differently:\n%s", explicit)
+	}
+}
+
+// The same wildcard on the PRE-NAT side of `via[]`'s narrow accept: a steered tuple that
+// named no port renders no `ct original proto-dst` clause, while one that named a port
+// renders it.
+//
+// D5 ⑩ calls all three clauses of this accept load-bearing, so the wildcard needs its own
+// assertion rather than an inference from the post-NAT case: what that measurement forbids
+// is an accept admitting MORE than the declaration authorized. Dropping the pre-NAT port
+// on a tuple that NAMED one does exactly that (an undeclared original port reaches a
+// declared listener). Dropping it on a tuple that named NO port does not — every original
+// port was authorized — and the other two clauses (`iifname`, the post-NAT listener port)
+// still pin the flow.
+func TestTheViaAcceptsPreNATPortFollowsTheSameWildcard(t *testing.T) {
+	base := ruleset.Rule{
+		Hook: ruleset.HookInput, Scope: ruleset.ScopeGuestIn, Verdict: ruleset.Accept,
+		Match: ruleset.Match{
+			Proto: ruleset.TCP, DestPort: 15443, CTState: []string{"new"},
+		},
+		Counter: "via0_0_accept", Why: "via[] accept, no declared port",
+	}
+	wildcard := mustRender(t, one(base), testCtx())
+	if strings.Contains(wildcard, "ct original proto-dst") {
+		t.Errorf("a via[] tuple with no port rendered a pre-NAT port clause — the declaration "+
+			"steered EVERY port, so the clause would block what it authorized:\n%s", wildcard)
+	}
+	// The two clauses that must never go missing, wildcard or not.
+	for _, want := range []string{`iifname "vh0123456789ab"`, "tcp dport 15443"} {
+		if !strings.Contains(wildcard, want) {
+			t.Errorf("the wildcard-port via accept is missing %q — dropping the interface makes "+
+				"it a hole in every other sandbox's floor, and dropping the post-NAT port lets it "+
+				"reach a listener the declaration never named (D5 ⑩):\n%s", want, wildcard)
+		}
+	}
+
+	pinned := base
+	pinned.Match.CTOriginalPort = 443
+	explicit := mustRender(t, one(pinned), testCtx())
+	if !strings.Contains(explicit, "ct original proto-dst 443") {
+		t.Errorf("a via[] tuple that named a port did not render its pre-NAT port clause — "+
+			"without it an UNDECLARED original port reaches a declared listener (D5 ⑩):\n%s",
+			explicit)
+	}
+}
+
 // A brace set renders without `auto-merge`. With it, nft LOADS a set holding nested
 // members but SILENTLY SWALLOWS the subnet — which would merge the floor away
 // (measured, network.md D5 ⑱). The safe failure direction is refusing to load.
@@ -592,6 +729,217 @@ func TestPublishPortAllocationDoesNotCollide(t *testing.T) {
 	if got := p.allocPublishPort(); got != 0 {
 		t.Errorf("allocPublishPort returned %d with the whole range held; want 0 (exhausted) — "+
 			"anything else means it either spun or handed out a port already in use", got)
+	}
+}
+
+// --- the publish BINDING: keyed on the pair, stable within a placement ----------
+
+// A publish's identity is `{guest_port, proto}`, so tcp/8080 and udp/8080 both get an
+// endpoint of their own.
+//
+// The declaration layer already keys on the pair (network.AddPublish dedupes on it,
+// §5.D defines idempotency on it), so a provider keying on the guest port alone
+// narrows the notion of identity BELOW the declaration's. The failure that produces is
+// not a missing rule but a false accusation: the generator emits all four DNATs, and
+// the BINDING refuses the second item as a duplicate whose deduplication "belongs to
+// the declaration layer" — which did its job. And since the declaration is in the
+// store by then, that refusal repeats at EVERY resume for a sandbox whose publish
+// calls both returned 200.
+func TestTCPAndUDPOnTheSameGuestPortAreTwoPublishes(t *testing.T) {
+	base := t.TempDir()
+	p, err := NewLocalRunsc(base+"/root", base+"/state")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := namesFor("sbx_pair")
+	spec := SteeringSpec{PublishPorts: []PublishPort{
+		{GuestPort: 8080, Proto: ruleset.TCP},
+		{GuestPort: 8080, Proto: ruleset.UDP},
+	}}
+	if err := p.bindPublishEndpoints(&h, spec); err != nil {
+		t.Fatalf("binding a legal `[{8080,tcp},{8080,udp}]` declaration failed: %v — both items pass "+
+			"the declaration layer and Generate emits four DNATs for them, so a refusal here is the "+
+			"provider's key width, not a duplicate", err)
+	}
+	tcpEP := h.publishEndpoints[publishKey{port: 8080, proto: ruleset.TCP}]
+	udpEP := h.publishEndpoints[publishKey{port: 8080, proto: ruleset.UDP}]
+	if tcpEP == "" || udpEP == "" {
+		t.Fatalf("one of the two items got no endpoint: tcp=%q udp=%q", tcpEP, udpEP)
+	}
+	if tcpEP == udpEP {
+		t.Errorf("tcp/8080 and udp/8080 share the host endpoint %s — they are two publishes, and one "+
+			"endpoint cannot carry both DNATs", tcpEP)
+	}
+	// Both must also RENDER, each picking up its own endpoint. The two DNAT halves of a
+	// publish are keyed by the same pair, so a port-only key would render both protocols'
+	// rules against whichever endpoint the map happened to hold.
+	rs := ruleset.RuleSet{
+		Counters: []string{"pub0_in_dnat", "pub1_in_dnat"},
+		Rules: []ruleset.Rule{
+			{Hook: ruleset.HookPrerouting, Scope: ruleset.ScopeHostEndpoint, Verdict: ruleset.DNAT,
+				Match: ruleset.Match{Proto: ruleset.TCP}, ToGuestPort: 8080, Counter: "pub0_in_dnat", Why: "tcp"},
+			{Hook: ruleset.HookPrerouting, Scope: ruleset.ScopeHostEndpoint, Verdict: ruleset.DNAT,
+				Match: ruleset.Match{Proto: ruleset.UDP}, ToGuestPort: 8080, Counter: "pub1_in_dnat", Why: "udp"},
+		},
+	}
+	ctx := testCtx()
+	ctx.publishEndpoints = h.publishEndpoints
+	text := mustRender(t, rs, ctx)
+	_, tcpPort, _ := splitEndpoint(tcpEP)
+	_, udpPort, _ := splitEndpoint(udpEP)
+	for _, want := range []string{
+		fmt.Sprintf("tcp dport %d", tcpPort),
+		fmt.Sprintf("udp dport %d", udpPort),
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("the rendered pair is missing %q:\n%s", want, text)
+		}
+	}
+}
+
+// A duplicate is still refused — on the PAIR. The substrate will not find it (nft
+// takes two identical DNATs and the second never matches), so this is the one refusal
+// that genuinely belongs here.
+func TestADuplicatePairIsStillRefused(t *testing.T) {
+	base := t.TempDir()
+	p, err := NewLocalRunsc(base+"/root", base+"/state")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := namesFor("sbx_dup")
+	err = p.bindPublishEndpoints(&h, SteeringSpec{PublishPorts: []PublishPort{
+		{GuestPort: 8080, Proto: ruleset.TCP},
+		{GuestPort: 8080, Proto: ruleset.TCP},
+	}})
+	if err == nil {
+		t.Error("two identical `{8080,tcp}` items bound without complaint — the two DNAT halves would " +
+			"target one guest port from two endpoints, and nft accepts the duplicate silently")
+	}
+}
+
+// WITHIN one placement, an existing publish's endpoint does NOT move when another is
+// hot-added. That is the §3.3 boundary, and both sides of it matter:
+//
+//   - ACROSS placements the endpoint MAY change — it is a placement product, which is
+//     why §6.1 reports it only while a placement exists and §3.3 forbids caching it.
+//   - WITHIN one placement it may not. §5.D endorses hot-adding a publish on a
+//     `running` sandbox precisely because it is PURELY ADDITIVE; re-drawing A's
+//     endpoint while adding B is not additive, and nothing in the record changed for A.
+func TestHotAddingAPublishDoesNotMoveTheExistingEndpoints(t *testing.T) {
+	base := t.TempDir()
+	p, err := NewLocalRunsc(base+"/root", base+"/state")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := namesFor("sbx_hotadd")
+	first := SteeringSpec{PublishPorts: []PublishPort{{GuestPort: 8080, Proto: ruleset.TCP}}}
+	if err := p.bindPublishEndpoints(&h, first); err != nil {
+		t.Fatal(err)
+	}
+	keyA := publishKey{port: 8080, proto: ruleset.TCP}
+	epA := h.publishEndpoints[keyA]
+
+	// A second publish arrives on the SAME placement (the hot-add path).
+	second := SteeringSpec{PublishPorts: []PublishPort{
+		{GuestPort: 8080, Proto: ruleset.TCP},
+		{GuestPort: 9090, Proto: ruleset.TCP},
+	}}
+	if err := p.bindPublishEndpoints(&h, second); err != nil {
+		t.Fatal(err)
+	}
+	if got := h.publishEndpoints[keyA]; got != epA {
+		t.Errorf("hot-adding a second publish moved the FIRST one's endpoint: %s → %s. §5.D endorses "+
+			"hot-adding because a publish is purely additive — a caller that just published 9090 would "+
+			"silently lose its 8080 endpoint, which no record change asked for", epA, got)
+	}
+	if h.publishEndpoints[publishKey{port: 9090, proto: ruleset.TCP}] == "" {
+		t.Error("the newly added publish got no endpoint")
+	}
+
+	// The IDEMPOTENT repeat: the mediator's AddPublish reaches the install path even when
+	// nothing was appended (added=false), so re-binding the same spec must be a no-op.
+	// §6.1 promises a repeated publish returns THE EXISTING one.
+	if err := p.bindPublishEndpoints(&h, second); err != nil {
+		t.Fatal(err)
+	}
+	if got := h.publishEndpoints[keyA]; got != epA {
+		t.Errorf("re-binding an unchanged spec moved an endpoint: %s → %s. §6.1 makes a repeated "+
+			"publish idempotent — returning the EXISTING item — so a second identical POST must not "+
+			"answer with a different host_endpoint", epA, got)
+	}
+
+	// Removing an item returns its port to the allocator while the survivor keeps its own.
+	if err := p.bindPublishEndpoints(&h, first); err != nil {
+		t.Fatal(err)
+	}
+	if got := h.publishEndpoints[keyA]; got != epA {
+		t.Errorf("dropping the other publish moved the survivor's endpoint: %s → %s", epA, got)
+	}
+	if len(h.publishHostPorts) != 1 {
+		t.Errorf("the handle holds %d host ports for one publish (%v) — teardown frees exactly this "+
+			"list, so a port left in it leaks and a port missing from it is handed to another sandbox",
+			len(h.publishHostPorts), h.publishHostPorts)
+	}
+	_, portA, _ := splitEndpoint(epA)
+	if len(h.publishHostPorts) == 1 && h.publishHostPorts[0] != portA {
+		t.Errorf("the held port %d is not the bound one %d", h.publishHostPorts[0], portA)
+	}
+}
+
+// Adopt recovers the endpoints from the INSTALLED table rather than re-drawing them
+// (§5.A: `Adopt` returns the same endpoint, no new epoch).
+//
+// This test drives the PARSER against text in the exact shape the renderer produces,
+// which is what makes the recovery reversible-by-construction rather than a general
+// nft parser. The live half — adopting two survivors without swapping their ports —
+// needs a real substrate and lives in the substrate suite.
+func TestPublishEndpointsAreRecoverableFromTheRenderedRules(t *testing.T) {
+	// Render exactly what gets installed for a two-item declaration, then read it back.
+	ctx := testCtx()
+	ctx.publishEndpoints = map[publishKey]string{
+		{port: 8080, proto: ruleset.TCP}: "127.0.0.1:21000",
+		{port: 8080, proto: ruleset.UDP}: "127.0.0.1:21001",
+		{port: 9090, proto: ruleset.TCP}: "127.0.0.1:21002",
+	}
+	var rules []ruleset.Rule
+	var counters []string
+	i := 0
+	for _, k := range []publishKey{
+		{port: 8080, proto: ruleset.TCP},
+		{port: 8080, proto: ruleset.UDP},
+		{port: 9090, proto: ruleset.TCP},
+	} {
+		for _, hook := range []ruleset.Hook{ruleset.HookPrerouting, ruleset.HookOutputNAT} {
+			name := fmt.Sprintf("pub%d_dnat", i)
+			counters = append(counters, name)
+			rules = append(rules, ruleset.Rule{
+				Hook: hook, Scope: ruleset.ScopeHostEndpoint, Verdict: ruleset.DNAT,
+				Match: ruleset.Match{Proto: k.proto}, ToGuestPort: k.port,
+				Counter: name,
+				Why:     fmt.Sprintf("ingress.publish[%d]: host endpoint → guest %s/%d", i, k.proto, k.port),
+			})
+			i++
+		}
+	}
+	text := mustRender(t, ruleset.RuleSet{Counters: counters, Rules: rules}, ctx)
+
+	got := map[publishKey]string{}
+	for _, m := range publishDNATRe.FindAllStringSubmatch(text, -1) {
+		var port, guest uint64
+		fmt.Sscanf(m[3], "%d", &port)
+		fmt.Sscanf(m[4], "%d", &guest)
+		got[publishKey{port: uint16(guest), proto: ruleset.Proto(m[2])}] = fmt.Sprintf("%s:%d", m[1], port)
+	}
+	for k, want := range ctx.publishEndpoints {
+		if got[k] != want {
+			t.Errorf("recovering %s from the rendered rules gave %q, want %q. Without this read-back a "+
+				"restarted process re-issues ports in adoption order, so two survivors can come back "+
+				"SWAPPED — a cached endpoint then reaches ANOTHER SANDBOX (§5.A Adopt: same endpoint, "+
+				"no new epoch)\n%s", k, got[k], want, text)
+		}
+	}
+	if len(got) != len(ctx.publishEndpoints) {
+		t.Errorf("recovered %d bindings from %d installed ones", len(got), len(ctx.publishEndpoints))
 	}
 }
 

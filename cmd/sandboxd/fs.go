@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -115,12 +116,25 @@ func (*fsServer) Read(_ context.Context, req *connect.Request[v1.ReadRequest]) (
 	}
 	var data []byte
 	if m.Length > 0 {
-		data = make([]byte, m.Length)
-		n, err := io.ReadFull(f, data)
-		if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		// `length` is an UPPER BOUND, never an allocation size. It arrives off the
+		// wire with no relation to the file, so `make([]byte, m.Length)` let one
+		// number size a guest-side allocation: measured on a 10-byte file, 1<<34
+		// allocated 16 GiB, and 1<<50 was an outright `makeslice: len out of range`
+		// panic. The sandbox has a RAM cap and is TERMINATED on exceeding it
+		// (§3.4), so that is a remote kill switch, which is why D4.4 calls "neither
+		// end holds the whole thing" a SECURITY property and not an efficiency one.
+		// LimitReader + a buffer that grows with ARRIVING bytes costs what the file
+		// actually yields.
+		//
+		// Deliberately NOT clamped by the file's reported Size(): measured,
+		// /proc/self/status reports size 0 while yielding ~1.1 KB, so a size
+		// clamp reads a whole class of files as EMPTY — a silent wrong answer,
+		// strictly worse than the allocation it was meant to bound.
+		var buf bytes.Buffer
+		if _, err := buf.ReadFrom(io.LimitReader(f, m.Length)); err != nil {
 			return nil, fsErr("read", m.Path, err)
 		}
-		data = data[:n]
+		data = buf.Bytes()
 	} else {
 		b, err := io.ReadAll(f)
 		if err != nil {

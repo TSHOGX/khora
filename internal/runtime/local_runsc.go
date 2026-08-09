@@ -7,10 +7,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/rand"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -136,11 +138,16 @@ type placementHandle struct {
 	// teardown must remove it and reconciliation must rebuild or reclaim it — it
 	// cannot be added after the fact (§2.4).
 	nftTable string
-	// publishEndpoints maps each published guest port to the host `ip:port` bound
-	// for it AT THIS PLACEMENT (§3.3: rebound every resume, old one invalidated).
-	publishEndpoints map[uint16]string
+	// publishEndpoints maps each published `{guest_port, proto}` to the host `ip:port`
+	// bound for it AT THIS PLACEMENT (§3.3: rebound every resume, old one invalidated —
+	// but STABLE within one placement, see bindPublishEndpoints).
+	//
+	// Keyed on the PAIR because that is a publish's identity at the declaration layer
+	// (§5.D): tcp/8080 and udp/8080 are two items, and a port-only key refuses the
+	// second as a duplicate.
+	publishEndpoints map[publishKey]string
 	// publishHostPorts are the host ports held, so teardown returns them to the
-	// allocator.
+	// allocator. Derived from publishEndpoints at every bind, never accumulated.
 	publishHostPorts []uint16
 	// cgroupLeaf is the host path of this sandbox's memcg/cpu leaf, or "" when the
 	// sandbox has no limits (no leaf was requested). Provider-private, like every
@@ -359,37 +366,185 @@ func (p *LocalRunsc) Launch(ctx context.Context, spec LaunchSpec) (_ *Placement,
 	return pl, nil
 }
 
-// bindPublishEndpoints allocates one host endpoint per published guest port — the
-// binding §5.D leaves to the provider because it is a placement product (§5.A ❌
+// bindPublishEndpoints binds one host endpoint per published `{guest_port, proto}` —
+// the binding §5.D leaves to the provider because it is a placement product (§5.A ❌
 // list / network.md D1 ②).
+//
+// # It binds only what is NOT already bound, and that distinction is the contract
+//
+// §3.3 says a host endpoint is a placement product: it changes from one placement to
+// the next and must not be cached as a stable identifier. That permits exactly one
+// kind of change and forbids two others, and the line between them is WITHIN vs
+// ACROSS a placement:
+//
+//   - ACROSS placements (pause→resume, or any rebuild) the endpoint may change. The
+//     placement is new, the netns and the IP are new, and §6.1 reports `host_endpoint`
+//     only while a placement exists precisely so a caller cannot come to rely on it.
+//   - WITHIN one placement it may NOT. Two callers reach this function on a LIVE
+//     placement: the publish hot-add (§5.D's one Binding field writable on `running`)
+//     and Adopt (§4.4-A). For the first, §5.D's endorsement of hot-adding rests on
+//     publish being PURELY ADDITIVE — re-drawing the endpoint of a publish nobody
+//     touched is not additive, and it also breaks §6.1's "a repeated publish is
+//     idempotent, return the existing one", since a second identical POST would answer
+//     with a DIFFERENT endpoint. For Adopt, §5.A promises the SAME endpoint and no new
+//     epoch: the isolation unit never restarted, so nothing about this placement is new
+//     and re-drawing would hand a caller's cached endpoint to whatever sandbox the
+//     allocator reaches next.
+//
+// So the reuse is keyed on what is already in the handle, and the ONE way a live
+// placement's handle can be missing its bindings — a control-plane restart, where the
+// handle is rebuilt from resource names — is closed on the Adopt side by reading the
+// endpoints back off the installed table (recoverPublishEndpoints).
 func (p *LocalRunsc) bindPublishEndpoints(h *placementHandle, spec SteeringSpec) error {
 	if len(spec.PublishPorts) == 0 {
+		// Nothing declared: release whatever this handle held, so the allocator does not
+		// keep a slot for a publish that is no longer in the record.
+		p.releasePublishPorts(h, nil)
+		h.publishEndpoints = nil
 		return nil
 	}
-	h.publishEndpoints = make(map[uint16]string, len(spec.PublishPorts))
+	bound := make(map[publishKey]string, len(spec.PublishPorts))
 	for _, pp := range spec.PublishPorts {
-		if _, dup := h.publishEndpoints[pp.GuestPort]; dup {
+		k := publishKey{port: pp.GuestPort, proto: pp.Proto}
+		if _, dup := bound[k]; dup {
 			// Deduplication is the declaration layer's job (§5.D: the substrate will not
 			// find it — nft accepts two identical DNATs and the second never matches). If
-			// two items reach here for one guest port, the two DNAT halves would target the
-			// same port from two endpoints, so refuse rather than bind a second one.
-			return fmt.Errorf("runtime: guest port %d appears twice in the steering spec — "+
-				"deduplication belongs to the declaration layer (§5.D)", pp.GuestPort)
+			// two items reach here for one PAIR, the two DNAT halves would target the same
+			// guest port from two endpoints, so refuse rather than bind a second one.
+			//
+			// The pair, not the port: `[{8080,tcp},{8080,udp}]` is two legal items that
+			// network.AddPublish appends and §5.D keys separately (see publishKey).
+			return fmt.Errorf("runtime: published %s appears twice in the steering spec — "+
+				"deduplication belongs to the declaration layer (§5.D)", k)
+		}
+		if ep, ok := h.publishEndpoints[k]; ok {
+			bound[k] = ep // already bound at this placement — see the doc comment
+			continue
 		}
 		port := p.allocPublishPort()
 		if port == 0 {
-			// The range is exhausted. Fail the launch rather than bind a colliding port:
-			// two sandboxes sharing a host endpoint means one of the two publishes
-			// silently never matches (nft accepts the duplicate DNAT without complaint —
-			// §5.D's reason deduplication cannot be left to the substrate).
-			return fmt.Errorf("runtime: no host port available for publishing guest port %d "+
-				"(range [%d,%d) exhausted)", pp.GuestPort, publishPortBase, publishPortBase+publishPortSpan)
+			// The range is exhausted. Fail rather than bind a colliding port: two sandboxes
+			// sharing a host endpoint means one of the two publishes silently never matches
+			// (nft accepts the duplicate DNAT without complaint — §5.D's reason
+			// deduplication cannot be left to the substrate).
+			return fmt.Errorf("runtime: no host port available for publishing %s "+
+				"(range [%d,%d) exhausted)", k, publishPortBase, publishPortBase+publishPortSpan)
 		}
-		h.publishHostPorts = append(h.publishHostPorts, port)
-		h.publishEndpoints[pp.GuestPort] = fmt.Sprintf("%s:%d", p.publishIP(), port)
+		bound[k] = joinHostPort(p.publishAddr(), port)
 	}
+	// Ports the record no longer publishes go back to the allocator; every port still
+	// bound stays held. publishHostPorts is rebuilt from the map so it cannot drift
+	// from it — teardown frees exactly what is bound.
+	p.releasePublishPorts(h, bound)
+	h.publishEndpoints = bound
 	return nil
 }
+
+// releasePublishPorts returns to the allocator every host port the handle holds that
+// `keep` does not, and resets publishHostPorts to keep's ports. Called on every
+// (re)bind so the held set is derived from the bindings rather than accumulated.
+//
+// INVARIANT for the ports that remain: every port in publishHostPorts is marked in
+// use — allocPublishPort marks what it hands out, and recoverPublishEndpoints marks
+// what it reads back off the installed table. No caller needs a follow-up marking
+// pass, and one would hide a gap rather than close it.
+func (p *LocalRunsc) releasePublishPorts(h *placementHandle, keep map[publishKey]string) {
+	held := make(map[uint16]bool, len(keep))
+	ports := make([]uint16, 0, len(keep))
+	for _, ep := range keep {
+		if _, port, err := splitEndpoint(ep); err == nil {
+			held[port] = true
+			ports = append(ports, port)
+		}
+	}
+	for _, port := range h.publishHostPorts {
+		if !held[port] {
+			p.freePublishPort(port)
+		}
+	}
+	sort.Slice(ports, func(i, j int) bool { return ports[i] < ports[j] })
+	h.publishHostPorts = ports
+}
+
+// publishAddr is the host address published endpoints bind on, parsed. An unparseable
+// HostPublishIP falls back to loopback rather than rendering a bare word into an
+// address position: nft resolves a bare word THROUGH THE HOST RESOLVER, so a
+// malformed address would not fail — it would silently become a rule matching an
+// unrelated IP (the same reason renderPrefixSet takes literals only).
+func (p *LocalRunsc) publishAddr() netip.Addr {
+	if addr, err := netip.ParseAddr(p.publishIP()); err == nil {
+		return addr
+	}
+	return netip.MustParseAddr(publishDefaultIP)
+}
+
+// recoverPublishEndpoints reads a surviving placement's publish bindings back OFF THE
+// INSTALLED TABLE, so Adopt keeps the endpoints the sandbox already has instead of
+// drawing new ones (§5.A `Adopt`: the same endpoint, no new epoch).
+//
+// This is the publish counterpart of rediscoverGuestIP + markInUse, and it is needed
+// for the same reason: a restarted process's allocator starts empty, so without a
+// read-back it re-issues ports in `ListSandboxes` order. Two survivors A@21000 and
+// B@21001 adopted in the other order come back SWAPPED — a caller's cached endpoint
+// then points at a DIFFERENT SANDBOX, which is worse than a stale endpoint and is not
+// what §3.3 licenses (that licenses a NEW placement's endpoint differing, not a live
+// placement's endpoint moving under it).
+//
+// Reversible by construction, like the netns name: the DNAT lines this provider
+// renders carry the host endpoint (`daddr` + `dport`) and the guest port (`dnat … to
+// <guest-ip>:<port>`) in one line, and the protocol keyword is the `dport` clause's
+// own — which is exactly the `{guest_port, proto}` key. Both DNAT halves (prerouting
+// and output) carry the same tuple, so parsing either yields the same map.
+//
+// Best-effort by design: a table that is absent or unparseable leaves the handle
+// unbound, and ReinstallRuleSet then binds fresh endpoints and re-installs. That is a
+// worse outcome (the endpoint moves) but not an unsafe one, and failing the adopt
+// instead would demote a container L1 just reported alive (§4.4-A protect-on-uncertainty
+// runs the other way).
+func (p *LocalRunsc) recoverPublishEndpoints(ctx context.Context, h *placementHandle) {
+	out, err := p.runOut(ctx, []string{"nft", "list", "table", "inet", nftTableName(h.sandbox)})
+	if err != nil {
+		return
+	}
+	bound := map[publishKey]string{}
+	for _, m := range publishDNATRe.FindAllStringSubmatch(string(out), -1) {
+		hostAddr, err := netip.ParseAddr(m[1])
+		if err != nil {
+			continue
+		}
+		hostPort, err := strconv.ParseUint(m[3], 10, 16)
+		if err != nil {
+			continue
+		}
+		guestPort, err := strconv.ParseUint(m[4], 10, 16)
+		if err != nil {
+			continue
+		}
+		k := publishKey{port: uint16(guestPort), proto: ruleset.Proto(m[2])}
+		bound[k] = joinHostPort(hostAddr, uint16(hostPort))
+	}
+	if len(bound) == 0 {
+		return
+	}
+	h.publishEndpoints = bound
+	// Hold the recovered ports in the allocator BEFORE anything else is placed, so a
+	// new sandbox cannot be handed a port this survivor is already using — the same
+	// obligation markInUse discharges for the /30.
+	p.releasePublishPorts(h, bound)
+	for _, port := range h.publishHostPorts {
+		p.markPublishPortInUse(port)
+	}
+}
+
+// publishDNATRe matches one rendered publish DNAT line in `nft list` output,
+// capturing the host address, the protocol, the host port and the guest port.
+//
+// It is anchored on the shape this provider itself renders (renderScope's
+// ScopeHostEndpoint arm + renderVerdict's DNAT arm), which is what makes it
+// reversible rather than a general nft parser. `nft list` quotes the counter name it
+// echoes back (measured) and normalizes nothing else in these clauses.
+var publishDNATRe = regexp.MustCompile(
+	`(?:ip|ip6) daddr (\S+) (tcp|udp) dport (\d+) [^\n]*?dnat (?:ip|ip6) to \[?[^\s\[\]]+?\]?:(\d+)`)
 
 // publishEndpointList returns the bound endpoints in the spec's declaration order,
 // which is the order §6.1's read face reports them in.
@@ -399,7 +554,7 @@ func publishEndpointList(h *placementHandle, spec SteeringSpec) []string {
 	}
 	out := make([]string, 0, len(spec.PublishPorts))
 	for _, pp := range spec.PublishPorts {
-		out = append(out, h.publishEndpoints[pp.GuestPort])
+		out = append(out, h.publishEndpoints[publishKey{port: pp.GuestPort, proto: pp.Proto}])
 	}
 	return out
 }
@@ -478,6 +633,12 @@ func (p *LocalRunsc) Adopt(ctx context.Context, sandbox string) (*Placement, boo
 	// guest IP in the first place.
 	h.gatewayIP = decLastOctet(ip)
 	p.markInUse(ip) // survivor holds this IP — the allocator must skip it (§4.4-A)
+	// Recover the publish bindings the same way and for the same reason: read them back
+	// off the INSTALLED table rather than re-drawing them. §5.A promises Adopt returns
+	// the SAME endpoint with no new epoch, and a restarted process's port allocator is
+	// empty — so without this, two survivors are re-issued ports in adoption order and
+	// can come back SWAPPED, pointing a caller's cached endpoint at another sandbox.
+	p.recoverPublishEndpoints(ctx, &h)
 
 	pl := &Placement{TransportEndpoint: fmt.Sprintf("%s:%d", ip, guestport.Port)}
 	pl.SetHandle(&h)
@@ -575,10 +736,25 @@ func contains(xs []string, x string) bool {
 //     flows outright; this host's `tcp_loose=1` masks it by mid-stream-adopting the
 //     flow, and that is a sysctl the engine neither owns nor may depend on.
 //
-// The endpoints are re-bound here rather than recovered: `Adopt` returns the SAME
-// transport endpoint because the isolation unit never restarted (§3.3, no new
-// epoch), but a published host port is a host-side rule, and re-deriving it keeps
-// the record's read face consistent with what is actually installed.
+// # Endpoints are PRESERVED here, and only new items get one
+//
+// The whole TABLE is re-rendered blindly; the BINDINGS are not re-drawn. Both callers
+// of this function operate on a LIVE placement — the publish hot-add and Adopt — and
+// for each, re-binding what is already bound breaks a promise the caller relies on:
+//
+//   - hot-add: §5.D endorses hot-adding a publish because it is PURELY ADDITIVE. Adding
+//     B while re-drawing A's endpoint is not additive, and §6.1's "a repeated publish
+//     is idempotent — return the existing one" would answer a second identical POST
+//     with a different endpoint (the mediator's AddPublish reaches here even when
+//     `added` is false, so the idempotent repeat travels this path too).
+//   - Adopt: §5.A promises the same endpoint and no new epoch. The isolation unit never
+//     restarted, so nothing about this placement is new.
+//
+// §3.3 is not in tension with that: it licenses the endpoint of a NEW placement
+// differing (and warns against caching it for that reason), not a live placement's
+// endpoint moving because someone else published something. A control-plane restart is
+// the one case where a live placement arrives here with an empty handle, and Adopt
+// closes it by reading the endpoints back off the installed table first.
 func (p *LocalRunsc) ReinstallRuleSet(ctx context.Context, pl *Placement, spec SteeringSpec) error {
 	h, ok := pl.Handle().(*placementHandle)
 	if !ok || h == nil {
@@ -586,9 +762,6 @@ func (p *LocalRunsc) ReinstallRuleSet(ctx context.Context, pl *Placement, spec S
 	}
 	if err := p.bindPublishEndpoints(h, spec); err != nil {
 		return err
-	}
-	for _, port := range h.publishHostPorts {
-		p.markPublishPortInUse(port)
 	}
 	if spec.RoutedEgress {
 		// The guest default route cannot be re-added after boot (the sentry took the L3

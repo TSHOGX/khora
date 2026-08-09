@@ -166,6 +166,41 @@ func parseVolumeBinding(items []volumeBindingItem) ([]model.Mount, error) {
 	return out, nil
 }
 
+// parseTTL is THE spelling of a wire TTL for both write points — create and PATCH
+// (§3.4 idle_timeout / retention). One function rather than two blocks, because the
+// defect it closes is precisely the two write points disagreeing: create parsed
+// without a sign check while PATCH refused a negative, so the SAME field was legal on
+// one and a 400 on the other.
+//
+// A NEGATIVE DURATION IS REFUSED, and the reason is that its effect is SILENT rather
+// than wrong-but-visible. Both consumers read a non-positive TTL as an OPT-OUT — the
+// reaper returns early on `Retention <= 0`, and idle classification only fires on
+// `IdleTimeout > 0` — so `-5m` does not produce an early deadline or an error; it
+// produces NEVER EVICT / NEVER IDLE-PAUSE. A caller who typed a duration they believed
+// was a deadline gets a sandbox that outlives every deadline, with nothing anywhere
+// reporting that their value was not honored. Refusing at the boundary is the only
+// place the mistake stays visible.
+//
+// `0` remains legal on both, and that is not an inconsistency: zero is the DOCUMENTED
+// opt-out spelling (§6.1 `retention: 0` = never evict), i.e. a chosen value, whereas a
+// negative is a value nothing in the engine can mean.
+//
+// Returns a POINTER because both call sites need one — create's CreateSpec and PATCH's
+// store.Binding both distinguish "not given" from "given".
+func parseTTL(field, raw string) (*time.Duration, error) {
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", field, err)
+	}
+	if d < 0 {
+		// Through the funnel even though `field` is one of two engine-authored literals:
+		// the §6.2 guard cannot see that, and an exemption for "this one is obviously
+		// fine" is how the rule stops being structural.
+		return nil, fmt.Errorf("%s must be non-negative (0 = no deadline; a negative value would read as never-evict / never-idle-pause at every consumer)", field)
+	}
+	return &d, nil
+}
+
 type createResp struct {
 	SandboxID string `json:"sandbox_id"`
 }
@@ -217,20 +252,20 @@ func (e *Engine) handleCreate(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 	if req.IdleTimeout != "" {
-		d, err := time.ParseDuration(req.IdleTimeout)
-		if err != nil {
-			writeErr(w, http.StatusBadRequest, fmt.Errorf("idle_timeout: %w", err))
+		d, terr := parseTTL("idle_timeout", req.IdleTimeout)
+		if terr != nil {
+			writeErr(w, http.StatusBadRequest, terr)
 			return
 		}
-		spec.IdleTimeout = &d
+		spec.IdleTimeout = d
 	}
 	if req.Retention != "" {
-		d, err := time.ParseDuration(req.Retention)
-		if err != nil {
-			writeErr(w, http.StatusBadRequest, fmt.Errorf("retention: %w", err))
+		d, terr := parseTTL("retention", req.Retention)
+		if terr != nil {
+			writeErr(w, http.StatusBadRequest, terr)
 			return
 		}
-		spec.Retention = &d
+		spec.Retention = d
 	}
 	sid, err := e.Mediator.Create(r.Context(), spec)
 	if err != nil {
@@ -457,64 +492,61 @@ func (e *Engine) handlePatch(w http.ResponseWriter, r *http.Request, id model.Sa
 		if f.raw == nil {
 			continue
 		}
-		d, err := time.ParseDuration(*f.raw)
-		if err != nil {
-			writeErr(w, http.StatusBadRequest, fmt.Errorf("%s: %w", f.name, err))
+		d, terr := parseTTL(f.name, *f.raw)
+		if terr != nil {
+			writeErr(w, http.StatusBadRequest, terr)
 			return
 		}
-		if d < 0 {
-			// Through the funnel even though `f.name` is one of two engine-authored
-			// literals: the guard cannot see that, and an exemption for "this one is
-			// obviously fine" is how the rule stops being structural.
-			writeErr(w, http.StatusBadRequest, fmt.Errorf("%s must be non-negative (0 = no deadline)", f.name))
-			return
-		}
-		*f.dst = &d
+		*f.dst = d
 	}
 
-	// The mount binding, if given. Parsed before UpdateBinding so a malformed one is a
-	// 400 that changed nothing.
-	var binding []model.Mount
+	// The mount binding, if given. Parsed before the write so a malformed one is a 400
+	// that changed nothing.
+	var mounts *[]model.Mount
 	if req.Volumes != nil {
-		var perr error
-		binding, perr = parseVolumeBinding(*req.Volumes)
+		binding, perr := parseVolumeBinding(*req.Volumes)
 		if perr != nil {
 			writeErr(w, http.StatusBadRequest, perr)
 			return
 		}
+		mounts = &binding
 	}
 
-	if !b.IsEmpty() {
-		if err := e.Mediator.UpdateBinding(r.Context(), id, b); err != nil {
-			statusFor(w, err)
-			return
-		}
-	}
-	// The declaration, whole for whole. Parsed and validated BEFORE the write, so a
-	// malformed one is a 400 that changed nothing (§6.2).
+	// The declaration, whole for whole (§6.2 — no field-level merge, no pending value).
+	//
+	// DECODED here, VALIDATED below the seam. The split is the §4 ownership line: the
+	// decode is a wire concern (this package owns the JSON shape and its 400s), while
+	// §6.2's declaration classes are a WRITE-POINT obligation the mediator applies for
+	// all three write points — create, PATCH, publish — so that a validation living in
+	// one caller is not a validation the next caller lacks. Rebind runs it first, ahead
+	// of even its state gate, so "validation precedes the admission gate" still holds.
 	if req.Network != nil {
-		decl, derr := req.Network.decode()
+		got, derr := req.Network.decode()
 		if derr != nil {
 			statusFor(w, derr)
 			return
 		}
-		if verr := e.Mediator.ValidateDeclaration(decl, true); verr != nil {
-			statusFor(w, verr)
-			return
-		}
-		if serr := e.Mediator.SetNetwork(r.Context(), id, decl); serr != nil {
-			statusFor(w, serr)
-			return
-		}
+		b.Network = &got
 	}
-	released := false
-	if req.Volumes != nil {
-		var rerr error
-		released, rerr = e.Mediator.RebindVolumes(r.Context(), id, binding)
-		if rerr != nil {
-			statusFor(w, rerr)
-			return
-		}
+
+	// ONE mediator call for the WHOLE request, and the shape is load-bearing rather than
+	// tidy. §4.4-B requires PATCH to hold this sandbox's transition lock for its whole
+	// duration, which three separately-locking calls cannot do: between them a resume or
+	// an evict fits entirely, so `{retention, network}` on a `paused` sandbox committed
+	// the retention and then answered 409 `state=running` — the caller told "nothing
+	// changed" while the store disagreed. Rebind evaluates every gate under one lock and
+	// orders the store-arbitrated mount commit first, so every 4xx from here really did
+	// change nothing.
+	released, err := e.Mediator.Rebind(r.Context(), id, lifecycle.RebindSpec{
+		Binding: b,
+		// A POINTER, so "detach everything" (`"volumes": []`) stays distinguishable from
+		// "leave the mounts alone" (field omitted) — §6.2 makes the empty array a real
+		// request, not a no-op.
+		Mounts: mounts,
+	})
+	if err != nil {
+		statusFor(w, err)
+		return
 	}
 	stt, err := e.Mediator.State(r.Context(), id)
 	if err != nil {

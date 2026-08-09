@@ -59,9 +59,9 @@ type renderCtx struct {
 	// guestIP and gatewayIP are the two halves of this sandbox's /30.
 	guestIP   string
 	gatewayIP string
-	// publishEndpoints maps a published guest port to the host `ip:port` bound for
-	// it at this placement.
-	publishEndpoints map[uint16]string
+	// publishEndpoints maps a published `{guest_port, proto}` to the host `ip:port`
+	// bound for it at this placement.
+	publishEndpoints map[publishKey]string
 	// secondHopUID is the deployment-supplied uid, for the engine-level table only.
 	secondHopUID *int
 }
@@ -289,10 +289,19 @@ func renderScope(r ruleset.Rule, ctx renderCtx) ([]string, error) {
 		}
 		return []string{fmt.Sprintf("oifname %q", ctx.vethHost)}, nil
 	case ruleset.ScopeHostEndpoint:
+		// The protocol is checked FIRST because it is half the endpoint's KEY: without
+		// it the lookup below would miss and report "no endpoint was bound", pointing at
+		// the binding for what is really a malformed rule.
+		proto := string(r.Match.Proto)
+		if proto == "" {
+			return nil, fmt.Errorf("runtime: rule %q is scoped to a host endpoint but names no protocol "+
+				"— the protocol is half of a publish's identity (§5.D keys on `{guest_port, proto}`), so "+
+				"there is no endpoint to look up without it", r.Counter)
+		}
 		ep, ok := ctx.publishEndpoints[endpointKeyOf(r)]
 		if !ok {
 			return nil, fmt.Errorf("runtime: rule %q is scoped to a publish host endpoint, but no "+
-				"endpoint was bound for guest port %d", r.Counter, endpointKeyOf(r))
+				"endpoint was bound for %s", r.Counter, endpointKeyOf(r))
 		}
 		addr, port, err := splitEndpoint(ep)
 		if err != nil {
@@ -301,10 +310,6 @@ func renderScope(r ruleset.Rule, ctx renderCtx) ([]string, error) {
 		fam := "ip"
 		if !addr.Is4() {
 			fam = "ip6"
-		}
-		proto := string(r.Match.Proto)
-		if proto == "" {
-			return nil, fmt.Errorf("runtime: rule %q is scoped to a host endpoint but names no protocol", r.Counter)
 		}
 		return []string{
 			fmt.Sprintf("%s daddr %s", fam, addr),
@@ -329,9 +334,28 @@ func renderScope(r ruleset.Rule, ctx renderCtx) ([]string, error) {
 		"host-level kill switch)", r.Counter)
 }
 
-// endpointKeyOf recovers which published guest port a host-endpoint-scoped rule
-// belongs to. Both DNAT halves target the guest port, so that is the key.
-func endpointKeyOf(r ruleset.Rule) uint16 { return r.ToGuestPort }
+// publishKey identifies a published endpoint. IT IS THE PAIR, not the guest port
+// alone, because that is what a publish IS at the declaration layer: §5.D's
+// idempotency and deduplication are both defined on `{guest_port, proto}`, so
+// `[{8080,tcp},{8080,udp}]` is two legal items and network.AddPublish appends both.
+// Keying the binding on the port alone silently narrows the provider's notion of
+// identity below the declaration's, and the failure is not a missing rule: the
+// generator emits all four DNATs, and the BINDING refuses the pair as a duplicate —
+// blaming the declaration layer for a key width only the provider chose. Because the
+// declaration is already in the store by then, that refusal repeats at every resume.
+type publishKey struct {
+	port  uint16
+	proto ruleset.Proto
+}
+
+func (k publishKey) String() string { return fmt.Sprintf("%s/%d", k.proto, k.port) }
+
+// endpointKeyOf recovers which published item a host-endpoint-scoped rule belongs
+// to. Both DNAT halves target the guest port and carry the protocol in Match.Proto,
+// which is exactly the declaration-layer identity (see publishKey).
+func endpointKeyOf(r ruleset.Rule) publishKey {
+	return publishKey{port: r.ToGuestPort, proto: r.Match.Proto}
+}
 
 // renderMatch renders the selector clauses.
 func renderMatch(m ruleset.Match, ctx renderCtx) ([]string, error) {
@@ -605,13 +629,14 @@ func renderGuards(text string, perSandbox bool) error {
 			continue
 		}
 		if perSandbox {
-			if !strings.Contains(code, "iifname") && !strings.Contains(code, "oifname") &&
-				!strings.Contains(code, "daddr") {
+			if !hasPerSandboxNarrowing(code) {
 				return fmt.Errorf("runtime: rendered per-sandbox rule %q carries NO narrowing. Every "+
 					"per-sandbox table is a `policy accept` base chain on a SHARED hook, so an "+
 					"un-narrowed accept is a hole in EVERY sandbox's floor, and an un-narrowed drop is "+
 					"worse — drops terminate across chains, making it a host-level kill switch "+
-					"(measured both ways)", code)
+					"(measured both ways). The three legal narrowings are `iifname` (ScopeGuestIn), "+
+					"`oifname` (ScopeGuestOut) and a host endpoint's `daddr` AND `dport` TOGETHER "+
+					"(ScopeHostEndpoint)", code)
 			}
 			if strings.Contains(code, "meta skuid") {
 				return fmt.Errorf("runtime: rendered per-sandbox rule %q is narrowed by uid. That "+
@@ -652,6 +677,40 @@ func renderGuards(text string, perSandbox bool) error {
 		}
 	}
 	return nil
+}
+
+// hasPerSandboxNarrowing reports whether a per-sandbox rule line carries one of the
+// THREE narrowings renderScope can actually produce for a per-sandbox table. It is
+// guard 3's criterion, and it is written against renderScope's real output rather than
+// against "some address clause is present".
+//
+// One entry per legal scope, and no fourth:
+//
+//   - `iifname` — ScopeGuestIn. The unforgeable one (D5 ③).
+//   - `oifname` — ScopeGuestOut. It cannot be spelled with `iifname` at all: a
+//     publish's companion accept sees the CALLER's interface, and the inbound
+//     default-deny narrows by where the traffic is going (D5 ⑮ / §2.1 ③).
+//   - `daddr` AND `dport` TOGETHER — ScopeHostEndpoint, whose whole clause is
+//     `ip daddr <host ip> <proto> dport <host port>`. The host port is allocated per
+//     placement and per publish item, and it is the PORT that makes the pair
+//     per-sandbox: the address alone is a host address every sandbox's table names.
+//
+// WHY THE PAIR AND NOT A BARE `daddr`: a bare `daddr` substring is not an interface
+// predicate and not per-sandbox — the L0 floor's forward arm and the deny-safe tier
+// both render `ip daddr { … }`, so accepting it would let a floor DROP THAT LOST ITS
+// `iifname` pass this guard, i.e. exactly the host-level kill switch guard 3 exists to
+// catch, in the one rule class where it does the most damage. The abstract half
+// (ruleset.Validate's ScopeNone check) and renderScope each refuse that rule today, so
+// this is not a live hole — but the text guard's ENTIRE reason to exist is being the
+// line that still holds when the abstract half is edited wrong (M8 plan §2 item 12:
+// refuse ANY rule without `iifname`, accept and drop alike).
+func hasPerSandboxNarrowing(code string) bool {
+	if strings.Contains(code, "iifname") || strings.Contains(code, "oifname") {
+		return true
+	}
+	// ` dport ` with the spaces, matching hasPortClause: it must be the clause, not a
+	// substring of some other word.
+	return strings.Contains(code, "daddr") && strings.Contains(code, " dport ")
 }
 
 // isRuleLine reports whether a line is a rule rather than a chain/table/counter

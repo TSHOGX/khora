@@ -543,7 +543,7 @@ func TestConcurrentCapRaisesCannotOversubscribeTheNode(t *testing.T) {
 					defer wg.Done()
 					<-start
 					want := wantCap
-					errs[i] = m.UpdateBinding(context.Background(), ids[i], store.Binding{
+					errs[i] = patchBinding(m, context.Background(), ids[i], store.Binding{
 						DiskByte: &want,
 					})
 				}(i)

@@ -261,7 +261,17 @@ type NetTuple struct {
 	// BEFORE any containment test (network.md D5 ⑲). A record type that could be
 	// decoded from untrusted input would make that class unenforceable.
 	CIDR netip.Prefix `json:"cidr"`
-	// Port is the destination port; zero means any port.
+	// Port is the destination port, and ZERO MEANS ANY PORT (§5.D) — the second of this
+	// tuple's two wildcards, alongside an invalid CIDR above.
+	//
+	// The record spelling is the ZERO VALUE while the WIRE spelling is an OMITTED field
+	// (`omitempty` on both faces, see the orchestrator's tupleWire), and the mapping is
+	// deliberately many-to-one in that direction only: an omitted `port` and an explicit
+	// `"port": 0` both record as 0, and the read face renders 0 back as the omission. So
+	// the wildcard has ONE recorded value and ONE emitted spelling, which is what keeps a
+	// read-modify-write cycle from producing a body that differs from the one it read
+	// (§6.1). A record holding 0 is therefore a CHOSEN value, not an absent one — the
+	// distinction §5.D requires `egress.default` to preserve.
 	Port uint16 `json:"port,omitempty"`
 	// Proto is mandatory (see NetProto).
 	Proto NetProto `json:"proto"`
@@ -274,6 +284,18 @@ type NetTuple struct {
 // explicit-endpoint declaration authorizes every OTHER address on that port
 // (measured both ways, network.md D5 ⑩).
 func (t NetTuple) AnyDest() bool { return !t.CIDR.IsValid() || t.CIDR.Bits() == 0 }
+
+// AnyPort reports whether this tuple pins no destination port, i.e. matches every
+// port (§5.D). It is AnyDest's twin, and a predicate with a NAME states the semantic
+// where a bare `Port == 0` only implies it.
+//
+// Note the asymmetry with AnyDest, which is a property of the two fields rather than
+// an inconsistency: AnyDest exists because the GENERATOR must branch on it (an invalid
+// prefix cannot be handed to a rule's address set at all), while the port wildcard
+// needs no generator branch — 0 already IS the wildcard encoding in ruleset.Match, and
+// the RENDERER emits the `dport` clause if and only if it is non-zero. So this is read
+// by the API layer and by tests asserting the semantic, not by the generator.
+func (t NetTuple) AnyPort() bool { return t.Port == 0 }
 
 // NetVia is one `egress.via[]` entry: flows matching any of Match go to Endpoint.
 //

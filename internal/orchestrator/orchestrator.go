@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"time"
 
 	"engine/internal/lifecycle"
@@ -71,14 +72,13 @@ type Config struct {
 	NodeDiskByte   int64
 	NodeMemoryByte int64
 
-	// SecondHopUID / SecondHopGID pin the SECOND hop (§2.4 invariant 2): the uid/gid
-	// of the host-local process sitting behind `egress.via[].endpoint`, whose own
-	// egress must be held under the same L0 floor BY THE KERNEL rather than by its own
-	// discipline.
+	// SecondHopUID pins the SECOND hop (§2.4 invariant 2): the uid of the host-local
+	// process sitting behind `egress.via[].endpoint`, whose own egress must be held
+	// under the same L0 floor BY THE KERNEL rather than by its own discipline.
 	//
 	// A DEPLOYMENT input, never a declaration field (§2.4 / §6.2): the engine still
 	// does not know or ask what is behind that endpoint — only which local uid's
-	// egress to pin. Pointers because uid 0 is a real uid, and "the operator said
+	// egress to pin. A pointer because uid 0 is a real uid, and "the operator said
 	// root" must not read as "the operator said nothing".
 	//
 	// Unset ⇒ no second-hop table is installed AND `via[]` declarations are refused at
@@ -87,8 +87,11 @@ type Config struct {
 	// confused deputy live while every FIRST-hop assertion still passes (measured: hop
 	// 2 counts zero in `forward`, so the first-hop floor never evaluates it —
 	// network.md D5 ㉔).
+	//
+	// Set to THIS PROCESS'S OWN euid ⇒ New refuses to assemble. That value would put
+	// the engine's own guest dials under the second-hop floor, whose daddr set contains
+	// the sandbox address space — see network.ValidateSecondHopUID.
 	SecondHopUID *int
-	SecondHopGID *int
 
 	// HostPublishIP is the host address published endpoints bind to (§5.D: the engine
 	// delivers a `host ip:port`, and what sits in front of it is outside the engine).
@@ -123,6 +126,23 @@ type Engine struct {
 func New(cfg Config) (*Engine, error) {
 	if cfg.TemplatesDir == "" || cfg.StateDir == "" {
 		return nil, fmt.Errorf("orchestrator: TemplatesDir and StateDir are required")
+	}
+
+	dep := network.Deployment{SecondHopUID: cfg.SecondHopUID}
+	// FAIL FAST, BEFORE ANY SUBSTRATE STATE EXISTS. A second-hop uid equal to this
+	// process's own euid puts the engine's OWN dials to guest veth addresses under the
+	// second-hop floor (its daddr set contains the whole sandbox address space), which
+	// takes out readiness, liveness and every RPC for every sandbox at once — and
+	// intermittently, since skuid misses packets. Refusing here rather than at boot's
+	// InstallSecondHopTable is deliberate: this is the LAST point at which nothing has
+	// been installed and no request has been served, and an engine that has already put
+	// that table in the kernel is past the point where discovering this helps.
+	//
+	// The check lives in the assembly rather than in cmd/ so every path reaches it —
+	// the substrate harness builds an Engine directly and would otherwise bypass a
+	// flag-level check entirely.
+	if err := network.ValidateSecondHopUID(dep, os.Geteuid()); err != nil {
+		return nil, fmt.Errorf("orchestrator: %w", err)
 	}
 
 	rp, err := rootfs.NewHostOverlayFS(cfg.StateDir+"/overlays", cfg.TemplatesDir, cfg.StateDir+"/layers")
@@ -175,10 +195,7 @@ func New(cfg Config) (*Engine, error) {
 			DiskByte:   cfg.NodeDiskByte,
 			MemoryByte: cfg.NodeMemoryByte,
 		},
-		Deployment: network.Deployment{
-			SecondHopUID: cfg.SecondHopUID,
-			SecondHopGID: cfg.SecondHopGID,
-		},
+		Deployment:   dep,
 	})
 
 	// outbox publisher → a log sink (§4.4-C: the engine only guarantees reliable

@@ -130,7 +130,7 @@ type Deps struct {
 	NodeCapacity NodeCapacity
 
 	// Deployment carries what the DEPLOYING PARTY hands the engine, as distinct from
-	// what a declaration carries (§2.4 / §6.2): today, the uid/gid of the host-local
+	// what a declaration carries (§2.4 / §6.2): today, the uid of the host-local
 	// process behind `egress.via[].endpoint`, which pins the SECOND hop.
 	//
 	// It is deployment input rather than a declaration field because of what the
@@ -829,123 +829,6 @@ func (m *Mediator) resumeLocked(ctx context.Context, rec model.Sandbox) error {
 	return nil
 }
 
-// UpdateBinding rewrites a sandbox's Binding fields (§3.4 / §6.1 PATCH) — the
-// only write point for them besides create. It is NOT a §4.1 transition: the
-// state does not change, so it publishes no event (the same reasoning Promote
-// uses).
-//
-// Two materialization classes, and the split follows WHO CONSUMES the field:
-//
-//   - resource caps are consumed by the providers, which materialize only at
-//     placement — so they are editable ONLY from `paused` and take effect at the
-//     next resume. Accepting a cap edit on a `running` sandbox would leave the
-//     record and the live isolation unit disagreeing for an unbounded period,
-//     which is the kind of fake invariant CLAUDE.md calls a negative asset. One
-//     extra pause buys zero ambiguity.
-//   - TTLs are consumed by the reaper, which re-reads the record every sweep with
-//     no placement involved — so they are editable from either state and take
-//     effect immediately.
-//
-// Raising a cap on a METERED axis — disk or memory, the only two node budgets
-// (§3.4) — is a NEW PROMISE and must clear admission. The gate sums from the store
-// including `paused` records, so a raise changes Σ at THIS commit, not at the
-// eventual resume — skip the gate here and the store would immediately hold a Σ
-// over budget, refusing some unrelated create for an overcommit the engine itself
-// admitted. Lowering needs no gate (Σ shrinks).
-//
-// Raising memory_byte also CLEARS death_cause in the same commit, which is what
-// makes §4.3's resource-terminated remedy actually work: the resume guard reads
-// that column, and nothing else clears it before a successful resume — which the
-// guard itself prevents. Scoped tightly to a RAISE of the terminating axis: a
-// lowering, or an unrelated cap edit, must not re-arm a crash loop by wiping the
-// record of why the sandbox died.
-func (m *Mediator) UpdateBinding(ctx context.Context, id model.SandboxID, b store.Binding) error {
-	l := m.lock(id)
-	l.Lock()
-	defer l.Unlock()
-
-	if b.IsEmpty() {
-		return nil // nothing asked for → no write (idempotent)
-	}
-
-	rec, err := m.deps.Store.GetSandbox(ctx, id)
-	if err != nil {
-		return fmt.Errorf("update: %w", err)
-	}
-	switch rec.State {
-	case model.Paused:
-		// everything editable
-	case model.Running:
-		if b.CPUMillis != nil || b.MemoryByte != nil || b.DiskByte != nil {
-			return fmt.Errorf("update: %w: resource caps are editable only from `paused` (they re-materialize at the next placement, §3.4) — pause first, then PATCH, then resume; TTL fields are editable while running",
-				store.ErrConflict)
-		}
-	default:
-		return fmt.Errorf("update: %w (state=%s: a Binding is editable only from running or paused)", store.ErrConflict, rec.State)
-	}
-
-	newLimits, _, _, _ := b.Apply(rec)
-	// §3.4: `0 → N` on the DISK axis is a refused write, not a raise. The cap has no
-	// materialization to land on — the storage unit was only built as a quota-capable
-	// subvolume if a cap existed at create — so accepting would record a promise every
-	// future placement must refuse, and the sandbox would never resume again. Refused
-	// HERE, where nothing has changed yet and the caller can see it, rather than in the
-	// recovery path where it becomes an unresumable sandbox (see
-	// ErrUncappedDiskNotCappable). The remedy is in the message because there is exactly
-	// one: recreate the sandbox with the cap.
-	//
-	// Placed BEFORE the admission gate deliberately: this request is invalid regardless
-	// of how much room the node has, and running the gate first would let a full node
-	// answer 507 — telling the caller to wait for capacity that would never make this
-	// legal.
-	if rec.Limits.DiskByte == 0 && newLimits.DiskByte > 0 {
-		return fmt.Errorf("update: %w: sandbox %s was created uncapped on disk, so its Overlay storage unit carries no quota row and a %d-byte cap could never be enforced — §5.B refuses an unenforceable cap at every placement, so accepting this would leave the sandbox permanently unresumable. Create a new sandbox with disk_byte set (Promote this one first to carry its bytes over); `N → 0` and `N → M` remain legal",
-			ErrUncappedDiskNotCappable, id, newLimits.DiskByte)
-	}
-	raisesMemory := newLimits.MemoryByte > rec.Limits.MemoryByte
-	// Any raise on a metered axis is a new promise → re-gate. Excludes this
-	// sandbox's own committed caps, exactly as resume does, so it is measured
-	// against the delta rather than double-charged.
-	//
-	// DISK AND MEMORY ONLY — cpu_millis is deliberately absent from the trigger set.
-	// §3.4 keeps CPU out of the node accounting entirely (`cpu_millis: 0` is always
-	// legal, and neither budget mentions it), so a CPU-only raise asks for zero
-	// additional bytes on either axis and the gate has nothing it could correctly
-	// refuse: once the left side has filled for reasons this PATCH does not touch
-	// (other sandboxes' caps, volume caps, or a grown MEASURED uncapped term), the
-	// only thing gating a CPU edit can produce is a FALSE disk- or RAM-flavoured
-	// 507 against a request for zero bytes. The
-	// metered-axis-requires-a-cap check has nothing to bite on either — a CPU edit
-	// changes neither cap it inspects. "All raises through one door" buys no
-	// invariant when the invariant behind that door is not about CPU.
-	//
-	// admitMu spans {gate → commit} as ONE critical section, held by defer through
-	// the Store.UpdateBinding below — the same shape create uses for
-	// {gate → insert} and SetVolumeCapacity for {gate → apply → commit}. Releasing
-	// it after the gate would not serialize anything: two raises on DIFFERENT
-	// sandboxes hold DISJOINT per-sandbox transition locks (§4.4-B), so each would
-	// sum a Σ missing the other's uncommitted raise, both would pass, and both
-	// would commit — the node over budget with every individual cap honored. §3.4
-	// is explicit that a write to a cap changes Σ AT THIS COMMIT.
-	if newLimits.DiskByte > rec.Limits.DiskByte || raisesMemory {
-		m.admitMu.Lock()
-		defer m.admitMu.Unlock()
-		if err := m.admit(ctx, newLimits, id); err != nil {
-			return err
-		}
-	}
-
-	var cause *model.DeathCause
-	if raisesMemory && rec.DeathCause == model.CauseResourceExceeded {
-		cleared := model.CauseNone
-		cause = &cleared
-	}
-	if err := m.deps.Store.UpdateBinding(ctx, id, rec.State, b, cause); err != nil {
-		return fmt.Errorf("update: %w", err)
-	}
-	return nil
-}
-
 // Destroy = terminal `destroyed` (§4.1). Valid from running or paused;
 // idempotent (already-gone record → nil). The lock held here is the same one
 // resume holds for its whole chain, so destroy CANNOT delete an Overlay
@@ -1218,8 +1101,8 @@ func (m *Mediator) coldStart(ctx context.Context, rec model.Sandbox, ov *rootfs.
 	//
 	// The rows are read here and read AGAIN by materializeMounts below. That is not a
 	// TOCTOU: the caller holds this sandbox's transition lock for the whole chain
-	// (§4.4-B) and RebindVolumes — the only writer of this sandbox's rows — takes the
-	// same lock, so the two reads cannot disagree.
+	// (§4.4-B) and Rebind — the only writer of this sandbox's rows — takes the same
+	// lock, so the two reads cannot disagree.
 	rows, err := m.deps.Store.ListMounts(ctx, id)
 	if err != nil {
 		return fmt.Errorf("read mount table: %w", err)
@@ -1912,6 +1795,53 @@ func (m *Mediator) adoptOrDemoteLocked(ctx context.Context, rec model.Sandbox) (
 		if err := m.deps.Store.CompareAndSetState(ctx, rec.ID, model.Running, model.Paused, newEvent(rec.ID, "crash-paused", model.Paused), causePtr); err != nil && err != store.ErrConflict {
 			return false, fmt.Errorf("demote to paused: %w", err) // uncertain → protect
 		}
+		return false, nil
+	}
+
+	// alive + serving, BUT this deployment cannot enforce the declaration it carries:
+	// its record holds `egress.via[]` and no second-hop uid was supplied, so the
+	// engine-level `output` table pinning the endpoint process is not installed
+	// (network.ValidatePlacement — the mechanism and the measurement are there).
+	//
+	// This arm exists because adopt is the ONE placement path where the alternatives
+	// are not equivalent, and the two obvious ones are both wrong:
+	//
+	//   - PROTECT (return an error, the default disposition of every uncertainty below)
+	//     would leave the sandbox `running` with its placement in the keep-set — i.e.
+	//     leave the unenforced deputy running, and re-decide identically on every
+	//     subsequent pass. Protect-on-uncertainty is for facts the engine could not
+	//     DETERMINE; this one is fully determined, and it is determined to be unsafe.
+	//   - ADOPT-THEN-REFUSE-THE-RULES is not available either: the rule set installs
+	//     fine (the second-hop pin is not part of it — see steeringFor), so there is no
+	//     install failure to lean on.
+	//
+	// So it demotes, and the demotion is a §4.2 involuntary pause with `alive` deliberately
+	// left true up to this point: NOTHING DIED. Passing no death cause is the same
+	// judgment the not-serving arm above makes for the same reason — a cause would be a
+	// false statement about a unit L1 just reported alive (§2.4 forbids guessing).
+	//
+	// Demoting a live unit is destructive, which is exactly why it is right here and not
+	// in the uncertainty arms: `paused` is the fail-CLOSED resting state (a paused
+	// sandbox has no placement and therefore not one rule installed), it is fully
+	// recoverable — the upper is untouched, and a resume succeeds the moment either
+	// remedy is applied — and the operator gets a `crash-paused` event plus this log line
+	// naming both remedies. The alternative preserves reachability the engine has just
+	// determined it cannot pin, which §2.4 classifies as a failure rather than a
+	// degradation.
+	if verr := network.ValidatePlacement(rec.Network, m.deps.Deployment); verr != nil {
+		m.deps.Logf("reconcile: demoting live sandbox %s to paused — it is alive and serving, but "+
+			"this deployment cannot enforce its recorded declaration: %v", rec.ID, verr)
+		if err := m.deps.Store.CompareAndSetState(ctx, rec.ID, model.Running, model.Paused,
+			newEvent(rec.ID, "crash-paused", model.Paused), nil); err != nil && err != store.ErrConflict {
+			// The CAS failed, so the record still says `running` — return an error so the
+			// caller PROTECTS the placement and this decision is retaken next pass. Reclaiming
+			// on a failed demotion would tear down a live container whose record still claims
+			// it, the one outcome worse than leaving it up for one more pass.
+			return false, fmt.Errorf("demote unenforceable via[] sandbox to paused: %w", err)
+		}
+		// adopted=false, err=nil: the caller reclaims the placement as an orphan, which
+		// is what actually removes the deputy's reachability — the netns and the rule set
+		// go with it.
 		return false, nil
 	}
 

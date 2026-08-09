@@ -396,8 +396,25 @@ func (p *proc) pumpSource(wg *sync.WaitGroup, s source) {
 	}
 }
 
+// eventSender is the one thing Start/Connect do with their stream: send events.
+// Narrowing to it makes the first-frame send FAILURE injectable — connect's
+// *ServerStream has no exported constructor, so with the concrete type the
+// leak-on-Send-failure path below is unreachable from a root-free unit test.
+//
+// A plain in-package interface, deliberately NOT a build tag: nothing here is
+// compiled-out fault injection in the §5.E.1 `testguest` sense (that tag exists
+// for a seam that must be ABSENT from a production sandboxd). Production wiring
+// is unchanged — *connect.ServerStream[v1.ProcessEvent] satisfies this already.
+type eventSender interface {
+	Send(*v1.ProcessEvent) error
+}
+
 // Start launches a process and server-streams its output events.
 func (s *processServer) Start(ctx context.Context, req *connect.Request[v1.StartRequest], stream *connect.ServerStream[v1.ProcessEvent]) error {
+	return s.start(ctx, req, stream)
+}
+
+func (s *processServer) start(ctx context.Context, req *connect.Request[v1.StartRequest], stream eventSender) error {
 	m := req.Msg
 	if m.Cmd == "" {
 		return connect.NewError(connect.CodeInvalidArgument, errString("empty cmd"))
@@ -481,6 +498,25 @@ func (s *processServer) Start(ctx context.Context, req *connect.Request[v1.Start
 	// Subscribe BEFORE the source pumps start so Start sees everything live
 	// (ring replay is empty for a fresh Start).
 	sub, snap, ended, endF := p.subscribe()
+
+	// UNCONDITIONALLY before the first Send, because run() is the only thing that
+	// ever drains this child, closes its pipe parent ends, and calls unregister —
+	// its onExit is unregister's sole call site. Gated behind a successful Send
+	// (as it was), a first-frame failure left the worst of the three behind: the
+	// pumps never start, so the child fills the 64 KiB pipe buffer on an unread
+	// stdout and blocks THERE forever, unable even to exit. Plus a permanent
+	// s.procs entry and three unclosed fds in a long-lived daemon. Ordering is
+	// safe: subscribe() above already registered this subscriber, so no frame is
+	// missed, and the reaper already owns the child's status either way.
+	//
+	// The already-forked process is left to run and be reaped, NOT killed. §3.2
+	// gives Start an independent context precisely so a process outlives a client
+	// disconnect (the premise of Connect reattach); "kill on first-frame failure"
+	// cannot be a contract, because the same disconnect one frame later leaves the
+	// process alive — special-casing the first frame would make dead-vs-alive
+	// depend on invisible timing.
+	go p.run(exited, sources, func() { s.unregister(pid) })
+
 	if err := stream.Send(&v1.ProcessEvent{
 		Kind: &v1.ProcessEvent_Start{Start: &v1.StartEvent{Pid: int32(pid)}},
 	}); err != nil {
@@ -489,7 +525,6 @@ func (s *processServer) Start(ctx context.Context, req *connect.Request[v1.Start
 		}
 		return err
 	}
-	go p.run(exited, sources, func() { s.unregister(pid) })
 
 	if sub != nil {
 		defer p.unsubscribe(sub)
@@ -514,7 +549,7 @@ func (s *processServer) Connect(ctx context.Context, req *connect.Request[v1.Con
 // serveSubscriber replays the ring snapshot, then either sends the end frame (if
 // the process already ended) or pumps the live window, emitting keepalives on
 // idle (D4.2 — no idle deadline on the long output stream).
-func serveSubscriber(ctx context.Context, stream *connect.ServerStream[v1.ProcessEvent], sub *subscriber, snap []frame, ended bool, endF frame) error {
+func serveSubscriber(ctx context.Context, stream eventSender, sub *subscriber, snap []frame, ended bool, endF frame) error {
 	for _, f := range snap {
 		if err := sendFrame(stream, f); err != nil {
 			return err
@@ -549,7 +584,7 @@ func serveSubscriber(ctx context.Context, stream *connect.ServerStream[v1.Proces
 	}
 }
 
-func sendFrame(stream *connect.ServerStream[v1.ProcessEvent], f frame) error {
+func sendFrame(stream eventSender, f frame) error {
 	switch f.kind {
 	case 'd':
 		return stream.Send(&v1.ProcessEvent{

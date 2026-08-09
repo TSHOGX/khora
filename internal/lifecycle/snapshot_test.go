@@ -200,6 +200,90 @@ func TestRepairVolumeCapsReAssertsTheRecord(t *testing.T) {
 	}
 }
 
+// TestRepairVolumeCapsNeverImposesACapBelowUsage guards the one way the repair pass can
+// be WORSE than doing nothing: re-asserting a recorded cap onto a unit that already holds
+// more than that.
+//
+// Measured (volume.md D7.3): such a cap is accepted by the substrate with zero validation
+// and then wedges the unit PERMANENTLY — `mkdir`, creating a file and even truncating an
+// existing file to zero all return ENOSPC, and the quota write itself returns ENOSPC, so
+// the cap can neither be removed nor raised. §6.1's write point refuses exactly this
+// predicate (ErrVolumeCapBelowUsage); this pass reaches the SAME backend call, so without
+// the guard a recovery path is the way around that refusal.
+//
+// The input state is reachable rather than hypothetical: D7.3's bearing-load window leaves
+// "record says cap=N, quota row says none", and `none` means unbounded writes meanwhile —
+// so usage above N needs nothing to misbehave.
+//
+// WHAT IS ASSERTED IS THAT IT SILENTLY PASSES, following D7.2's discipline: the property
+// is "SetCapacity is not called", read from the backend's own call log, NOT "the volume
+// still works". A wedge produces no errno on the control-plane side at all, so a liveness
+// assertion would pass on the broken code.
+func TestRepairVolumeCapsNeverImposesACapBelowUsage(t *testing.T) {
+	ctx := context.Background()
+	m, st, vb := volFixture(t)
+	const recordedCap = 32 << 20
+	vid, err := m.CreateVolume(ctx, recordedCap)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The D7.3 residue: the record promises a cap, the quota row carries none — and while
+	// it carried none the writer poured past that cap.
+	vb.mu.Lock()
+	vb.appliedCaps[string(vid)] = 0
+	vb.mu.Unlock()
+	vb.used = recordedCap + (8 << 20)
+
+	before := len(vb.Calls())
+	if err := m.RepairVolumeCaps(ctx); err != nil {
+		t.Fatalf("repair: %v", err)
+	}
+	for _, c := range vb.Calls()[before:] {
+		if strings.HasPrefix(c, "SetCapacity:") {
+			t.Fatalf("the repair pass called %q on a unit holding %d byte(s) — a cap at or below usage wedges the unit IRREVERSIBLY (afterwards even truncate-to-zero and the quota write itself return ENOSPC, so the cap can neither be removed nor raised), and this is the same predicate §6.1's write point refuses with ErrVolumeCapBelowUsage (volume.md D7.3)", c, vb.used)
+		}
+	}
+	// The RECORD is untouched either way: skipping is not "adopt the storage's value",
+	// which would ratify the residue (§3.4 — the record is the only authority).
+	rec, err := st.GetVolume(ctx, vid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.CapByte != recordedCap {
+		t.Errorf("the skip rewrote the RECORD to %d, want the declared %d", rec.CapByte, recordedCap)
+	}
+
+	// EQUALITY IS ALSO SKIPPED. `cap == usage` is accepted by the substrate and stored, but
+	// the very next write gets ENOSPC — so it means FULL, not "exactly enough". Hence the
+	// same strict inequality the write point uses, not >=.
+	vb.used = recordedCap
+	before = len(vb.Calls())
+	if err := m.RepairVolumeCaps(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range vb.Calls()[before:] {
+		if strings.HasPrefix(c, "SetCapacity:") {
+			t.Fatalf("the repair pass called %q at cap == usage — that cap is accepted and stored but means FULL rather than exactly enough, so the boundary belongs on the skip side (volume.md D7.3)", c)
+		}
+	}
+
+	// AND THE PASS IS NOT DISABLED: once usage drops back under the recorded cap the very
+	// next pass repairs the volume with no operator action. This is what makes the skip a
+	// deferral rather than a dead end, and it is why the volume being temporarily uncapped
+	// is acceptable — its bytes are counted by the §3.4 uncapped term meanwhile.
+	vb.used = 1 << 20
+	if err := m.RepairVolumeCaps(ctx); err != nil {
+		t.Fatal(err)
+	}
+	vb.mu.Lock()
+	got := vb.appliedCaps[string(vid)]
+	vb.mu.Unlock()
+	if got != recordedCap {
+		t.Errorf("after usage fell back under the cap the storage carries %d, want the RECORD's %d — the skip must be a deferral, not a permanent surrender of the cap", got, recordedCap)
+	}
+}
+
 // TestReclaimQuotaRowsWiring: the mediator asks the backend for the ids it recorded at
 // deletion time and hands them back to be reclaimed — never scanning for
 // reclaimable-looking rows, whose failure mode is an uncapped live volume with zero

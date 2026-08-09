@@ -102,19 +102,19 @@ type SteeringSpec struct {
 	// steered flow is DNAT'd to a host-local endpoint and delivered locally.
 	RoutedEgress bool
 
-	// SecondHopUID / SecondHopGID identify the host-local process behind
-	// `via[].endpoint`, when the DEPLOYMENT supplied them (§2.4 / §6.2: a
-	// deployment input, never a declaration field — the engine still does not know
-	// what sits behind that endpoint, only which local uid's egress must be pinned
-	// under the same floor).
+	// SecondHopUID identifies the host-local process behind `via[].endpoint`, when the
+	// DEPLOYMENT supplied it (§2.4 / §6.2: a deployment input, never a declaration
+	// field — the engine still does not know what sits behind that endpoint, only
+	// which local uid's egress must be pinned under the same floor).
 	//
-	// They ride the spec rather than a separate call because the second-hop table is
+	// It rides the spec rather than a separate call because the second-hop table is
 	// engine-level: one uid means one rule set regardless of sandbox count, so the
-	// provider installs it once at startup and not per placement. Pointers because
+	// provider installs it once at startup and not per placement. A pointer because
 	// uid 0 is a real uid — a value type could not tell "the operator said root"
-	// from "the operator said nothing", and those must behave oppositely.
+	// from "the operator said nothing", and those must behave oppositely. (It being
+	// a real uid does not make it a legal one: it is the engine's own, refused at
+	// assembly — network.ValidateSecondHopUID.)
 	SecondHopUID *int
-	SecondHopGID *int
 }
 
 // PublishPort is one `ingress.publish[]` item needing a host endpoint.
@@ -382,7 +382,12 @@ type Provider interface {
 
 	// InstallSecondHop installs the ENGINE-LEVEL rule set pinning the second hop
 	// (§2.4 invariant 2's second half): the egress of the host-local process behind
-	// `via[].endpoint`, narrowed by the deployment-supplied uid/gid.
+	// `via[].endpoint`, narrowed by the deployment-supplied uid.
+	//
+	// UID ONLY: `skuid` is the one narrowing predicate available on the `output` hook
+	// (D5 ㉔), and a gid clause could only be ANDed onto the floor drop — i.e. narrow
+	// the floor further, which is a second way for the pin to come off with the same
+	// invisible symptom.
 	//
 	// Called ONCE at startup rather than per placement, because the predicate is not
 	// per-sandbox: one uid covers every `via[]` in the deployment, and hop 2's traffic
@@ -394,5 +399,5 @@ type Provider interface {
 	// refusal of a `via[]` declaration happens at the write point, because a
 	// declaration whose own invariant the engine cannot enforce must be refused rather
 	// than half-honored.
-	InstallSecondHop(ctx context.Context, rs ruleset.RuleSet, uid, gid *int) error
+	InstallSecondHop(ctx context.Context, rs ruleset.RuleSet, uid *int) error
 }

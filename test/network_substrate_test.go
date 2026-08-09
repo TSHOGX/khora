@@ -16,6 +16,8 @@ import (
 	"engine/internal/lifecycle"
 	"engine/internal/model"
 	"engine/internal/orchestrator"
+	"engine/internal/ruleset"
+	"engine/internal/store"
 	"engine/internal/transport"
 	"engine/test/harness"
 )
@@ -841,6 +843,148 @@ func TestOneSandboxsRuleSetDoesNotAffectAnothers(t *testing.T) {
 	if res := runGuestProbe(t, allowCl, net.JoinHostPort(host, portStr), false); !res.reachable() {
 		t.Errorf("destroying the OTHER sandbox broke this one's reachable set (%s) — the tables must "+
 			"be independent units\n%s", res.raw, harness.DumpRuleSet(allowID))
+	}
+}
+
+// gatewayOf returns a sandbox's own /30 gateway — the host-side half of the pair the
+// engine allocated for it.
+//
+// Derived from the transport endpoint rather than read off a link, because the
+// allocation pins guest = host + 1 within the /30 (internal/runtime allocSubnet) and
+// the transport endpoint IS the guest IP. Recomputing it from `ip addr` would need the
+// veth name, which is a one-way hash of the SandboxID.
+func gatewayOf(t *testing.T, eng *orchestrator.Engine, id model.SandboxID) string {
+	t.Helper()
+	ep, err := eng.Mediator.Endpoint(id)
+	if err != nil {
+		t.Fatalf("endpoint for %s: %v", id, err)
+	}
+	guest, _, err := net.SplitHostPort(ep)
+	if err != nil {
+		t.Fatalf("endpoint %q: %v", ep, err)
+	}
+	addr, err := netip.ParseAddr(guest)
+	if err != nil || !addr.Is4() {
+		t.Fatalf("endpoint %q is not an IPv4 guest address", ep)
+	}
+	if !ruleset.SandboxCIDR.Contains(addr) {
+		t.Fatalf("guest %s is outside the sandbox address space %s — the whole premise of this "+
+			"assertion is that both gateways sit inside the floor's sibling item", addr, ruleset.SandboxCIDR)
+	}
+	o := addr.As4()
+	if o[3] == 0 {
+		t.Fatalf("guest %s has no host-side neighbour in its /30", addr)
+	}
+	o[3]--
+	return netip.AddrFrom4(o).String()
+}
+
+// Gate B item 11c: the input-side allow did NOT open a SIBLING's gateway along with
+// this sandbox's own.
+//
+// `allow 10.0.0.0/8` contains BOTH /30s, so nothing in the declaration separates the
+// two gateways — ORDER does, and order is what this asserts: the self-gateway allow
+// sits above the sibling drop, the declaration's own allows sit below it
+// (internal/network/generate.go inputChain steps 3/4/5).
+//
+// BOTH HALVES ARE REQUIRED, for two different reasons.
+//
+//   - Without the reachable half, a rule set that never emitted the self-gateway allow
+//     at all passes perfectly — and it has broken §5.D semantics ③, whose ONLY delivery
+//     path is this one: the sole stably-available host-local resolver address is this
+//     sandbox's own gateway, it is a host address so it lands on `input`, and a
+//     `forward`-only allow cannot reach it (D4.2 / D5 ⑦).
+//   - Without the counter, "cannot connect" is not an assertion at all. The counter
+//     that must move is `in_sibling`, the sibling drop ON THE INPUT HOOK. The
+//     `forward` side has its own sibling item (`fwd_floor_v4`, whose daddr set holds
+//     the same /16) and it counts ZERO on this path — a sibling's gateway is an
+//     address of the HOST, so only `input` ever sees it. Reading that counter instead
+//     would turn a real leak (measured: the guest reads the sibling's banner) into
+//     "the floor counter is 0", which by this file's discipline is an INVALID
+//     assertion rather than a pass (D4.2).
+func TestAnInputSideAllowReachesItsOwnGatewayButNotASiblings(t *testing.T) {
+	eng, _ := harness.Engine(t, netEngineOpts(t))
+
+	// ONE listener on 0.0.0.0, and that is the point rather than a shortcut: it is bound
+	// on EVERY host address, both gateways included, so at the socket layer the
+	// sibling's gateway is genuinely serving. Nothing but the rule set's order stands
+	// between the guest and that banner — which is exactly the leak D4.2 measured.
+	addr, stop := hostListener(t, "hello-from-GATEWAY")
+	defer stop()
+	_, portStr, _ := net.SplitHostPort(addr)
+	var port uint16
+	fmt.Sscanf(portStr, "%d", &port)
+
+	// The declaration names the WHOLE /8 with an explicit port: the assertion is a
+	// precise reachable/unreachable pair on one tuple, so a port wildcard would blur it.
+	d := declDeny()
+	d.Egress.Allow = []model.NetTuple{tupleOf(t, "10.0.0.0/8", port, model.NetTCP)}
+	aID, aCl := createRunning(t, eng, d)
+	// B exists only so that a SECOND /30 gateway is a live host address. Its own
+	// declaration is irrelevant — the rule under test is entirely in A's table.
+	bID, _ := createRunning(t, eng, declDeny())
+
+	aGW := gatewayOf(t, eng, aID)
+	bGW := gatewayOf(t, eng, bID)
+	if aGW == bGW {
+		t.Fatalf("both sandboxes report the same gateway %s — the /30 allocator handed out one "+
+			"subnet twice and this assertion would be vacuous", aGW)
+	}
+
+	// (1) A reaches its OWN gateway, and the SELF-GATEWAY rule is what carried it.
+	// Attribution matters here: the declaration's ordinary input-side allow
+	// (`allow0_in`) also matches this address, but it sits BELOW the sibling drop, so if
+	// it were the rule doing the work the packet would already have been rejected.
+	// Reading `allow0_selfgw` names the rule instead of inferring it.
+	selfBefore := harness.NftCounter(t, aID, "allow0_selfgw")
+	own := runGuestProbe(t, aCl, net.JoinHostPort(aGW, portStr), false)
+	selfAfter := harness.NftCounter(t, aID, "allow0_selfgw")
+	if !own.reachable() {
+		t.Fatalf("the sandbox could NOT reach a host-local endpoint on its OWN gateway %s:%d (%s) — "+
+			"§5.D semantics ③ (a caller declares its own resolver) has no other delivery path: that "+
+			"gateway is an address of the host, so the allow must be on the INPUT hook and it must "+
+			"sit ABOVE the sibling drop (D4.2 / D5 ⑦)\n%s", aGW, port, own.raw, harness.DumpRuleSet(aID))
+	}
+	if own.payload == "" || !strings.Contains(own.payload, "GATEWAY") {
+		t.Errorf("reached the own-gateway endpoint but read %q, want the listener's banner", own.payload)
+	}
+	if selfAfter < 0 {
+		t.Errorf("counter %q does not exist, so the self-gateway allow was never rendered — the "+
+			"reachability just observed came from some other rule, and semantics ③ is being served "+
+			"by accident\n%s", "allow0_selfgw", harness.DumpRuleSet(aID))
+	} else if selfAfter <= selfBefore {
+		t.Errorf("reached the own gateway but %q counted %d → %d — the traffic took a path the rule "+
+			"set does not describe, so this pass says nothing about the ORDER under test\n%s",
+			"allow0_selfgw", selfBefore, selfAfter, harness.DumpRuleSet(aID))
+	}
+
+	// (2)+(3) A does NOT reach the SIBLING's gateway, and the INPUT-side sibling drop is
+	// the counter that moves. `fwd_floor_v4` is sampled too — not as the assertion but
+	// to pin the measurement that makes it invalid: it must stay put.
+	sibBefore := harness.NftCounter(t, aID, "in_sibling")
+	fwdBefore := harness.NftCounter(t, aID, "fwd_floor_v4")
+	sib := runGuestProbe(t, aCl, net.JoinHostPort(bGW, portStr), false)
+	sibAfter := harness.NftCounter(t, aID, "in_sibling")
+	fwdAfter := harness.NftCounter(t, aID, "fwd_floor_v4")
+	if sib.reachable() {
+		t.Errorf("the sandbox REACHED the SIBLING's gateway %s:%d and read %q — an `allow 10.0.0.0/8` "+
+			"covers both /30s, so only ORDER separates them: the sibling drop must sit BETWEEN the "+
+			"self-gateway allow and the declaration's own allows. Below them, this is the leak D4.2 "+
+			"measured (the guest reads the sibling's banner)\n%s",
+			bGW, port, sib.payload, harness.DumpRuleSet(aID))
+	}
+	mustCounterMoved(t, aID, "in_sibling", sibBefore, sibAfter,
+		"item 11c: a sibling's gateway is an address of the HOST, so the drop that refuses it can only "+
+			"be the one on the INPUT hook")
+	if fwdAfter > fwdBefore {
+		t.Errorf("the forward-side floor counted %d → %d on this path — the measurement this "+
+			"assertion rests on is that it counts ZERO here (a sibling's gateway is a host address, "+
+			"so `forward` never sees it, D4.2). If it now moves, `in_sibling` may no longer be the "+
+			"rule doing the refusing and this test is reading the wrong counter\n%s",
+			fwdBefore, fwdAfter, harness.DumpRuleSet(aID))
+	} else {
+		t.Logf("forward-side floor stayed at %d across the sibling probe — the reason reading IT "+
+			"would be an invalid assertion (D4.2)", fwdBefore)
 	}
 }
 
@@ -1952,6 +2096,244 @@ func TestRepeatedPublishIsIdempotentOnTheHostToo(t *testing.T) {
 	}
 }
 
+// Item 14d, the half a declaration-layer assertion cannot reach: the repeat must return
+// THE SAME host endpoint, and hot-adding a publish must not move the endpoints already
+// bound at that placement.
+//
+// The idempotency §6.1 promises is "返既有那条" — return the EXISTING item — and the
+// declaration layer alone cannot deliver it: `AddPublish` reports added=false and writes
+// nothing, but the mediator still runs the install path (record and rules are one
+// un-halvable write), so the provider re-binds. A provider that re-draws the endpoints on
+// every reinstall therefore answers the second identical POST with a DIFFERENT
+// `host_endpoint`, and hot-adding B silently moves A's — while the declaration, the
+// counters and the reachability assertions all keep passing.
+//
+// Why this must be a substrate test rather than only a unit one: the endpoints asserted
+// here are the ones a caller actually reads, produced by the real allocator across three
+// real ReinstallRuleSet calls into real nft.
+func TestHotAddingAPublishDoesNotMoveTheEndpointsAlreadyBound(t *testing.T) {
+	eng, _ := harness.Engine(t, netEngineOpts(t))
+	ctx := context.Background()
+	id, _ := createRunning(t, eng, declDeny())
+
+	_, epA, now, err := eng.Mediator.AddPublish(ctx, id, model.NetPublish{GuestPort: 8080, Proto: model.NetTCP})
+	if err != nil {
+		t.Fatalf("publish 8080/tcp: %v", err)
+	}
+	if !now || epA == "" {
+		t.Fatalf("publish on a running sandbox: applies-now=%v endpoint=%q; want both set", now, epA)
+	}
+
+	// (1) The IDEMPOTENT REPEAT returns the same endpoint.
+	_, epRepeat, _, err := eng.Mediator.AddPublish(ctx, id, model.NetPublish{GuestPort: 8080, Proto: model.NetTCP})
+	if err != nil {
+		t.Fatalf("repeat publish: %v", err)
+	}
+	if epRepeat != epA {
+		t.Errorf("the idempotent repeat answered with %s, the first call with %s. §6.1 makes a repeated "+
+			"`{guest_port, proto}` return THE EXISTING one — a caller retrying a request whose 200 it "+
+			"never saw would otherwise be told its port had moved\n%s", epRepeat, epA, harness.DumpRuleSet(id))
+	}
+
+	// (2) HOT-ADDING a different publish leaves the first one's endpoint alone. §5.D
+	// endorses the hot-add on `running` precisely because a publish is PURELY ADDITIVE.
+	_, epB, _, err := eng.Mediator.AddPublish(ctx, id, model.NetPublish{GuestPort: 9090, Proto: model.NetTCP})
+	if err != nil {
+		t.Fatalf("publish 9090/tcp: %v", err)
+	}
+	if epB == epA {
+		t.Fatalf("two publishes share the host endpoint %s", epA)
+	}
+	_, _, eps, err := eng.Mediator.Network(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(eps) != 2 {
+		t.Fatalf("read back %d endpoints for two publishes: %v", len(eps), eps)
+	}
+	if eps[0] != epA {
+		t.Errorf("hot-adding 9090 moved 8080's endpoint: %s → %s. That breaks the pure-additivity §5.D "+
+			"rests on when it allows this write on a `running` sandbox — nothing in the record changed "+
+			"for 8080, so a caller holding the endpoint it was handed must not lose it\n%s",
+			epA, eps[0], harness.DumpRuleSet(id))
+	}
+	// The installed rules must agree with what the read face reports — a re-bind that
+	// updated the handle but not the table would be the same bug pointing the other way.
+	dump := harness.DumpRuleSet(id)
+	for _, ep := range eps {
+		ap, perr := netip.ParseAddrPort(ep)
+		if perr != nil {
+			t.Fatalf("endpoint %q is not ip:port: %v", ep, perr)
+		}
+		if !strings.Contains(dump, fmt.Sprintf("dport %d", ap.Port())) {
+			t.Errorf("the reported endpoint %s has no matching dport clause installed — the read face "+
+				"and the kernel disagree, which §6.1's biconditional says cannot persist\n%s", ep, dump)
+		}
+	}
+}
+
+// tcp/8080 and udp/8080 are TWO publishes, on the real substrate and across a resume.
+//
+// §5.D keys a publish on `{guest_port, proto}`: the declaration layer dedupes on the pair
+// and §6.1 defines idempotency on it, so this declaration is legal and the generator
+// emits four DNATs for it. A provider binding endpoints per GUEST PORT refuses the second
+// item as a duplicate — blaming the declaration layer for a key width only the provider
+// chose. And because the declaration is durable, that refusal then repeats at EVERY
+// placement: the resume below is the assertion that matters, since the sandbox's entry
+// point into the broken state was a `POST …/publish` that returned 200.
+func TestTCPAndUDPOnOneGuestPortAreTwoPublishesOnTheSubstrate(t *testing.T) {
+	eng, _ := harness.Engine(t, netEngineOpts(t))
+	ctx := context.Background()
+	id, _ := createRunning(t, eng, declDeny())
+
+	_, tcpEP, _, err := eng.Mediator.AddPublish(ctx, id, model.NetPublish{GuestPort: 8080, Proto: model.NetTCP})
+	if err != nil {
+		t.Fatalf("publish tcp/8080: %v", err)
+	}
+	_, udpEP, _, err := eng.Mediator.AddPublish(ctx, id, model.NetPublish{GuestPort: 8080, Proto: model.NetUDP})
+	if err != nil {
+		t.Fatalf("publish udp/8080 alongside tcp/8080: %v — both items pass the declaration layer "+
+			"(§5.D keys on the PAIR) and Generate emits four DNATs, so a refusal here is the "+
+			"provider's key width mistaken for a duplicate\n%s", err, harness.DumpRuleSet(id))
+	}
+	if tcpEP == udpEP {
+		t.Errorf("tcp/8080 and udp/8080 got the same endpoint %s — one endpoint cannot carry both", tcpEP)
+	}
+
+	// Both protocols' DNATs are installed, each narrowed by its OWN endpoint port.
+	dump := harness.DumpRuleSet(id)
+	for _, tc := range []struct {
+		proto, ep string
+	}{{"tcp", tcpEP}, {"udp", udpEP}} {
+		ap, perr := netip.ParseAddrPort(tc.ep)
+		if perr != nil {
+			t.Fatalf("endpoint %q: %v", tc.ep, perr)
+		}
+		want := fmt.Sprintf("%s dport %d", tc.proto, ap.Port())
+		if !strings.Contains(dump, want) {
+			t.Errorf("no %q clause installed — each item of the pair needs its own endpoint and its "+
+				"own DNAT\n%s", want, dump)
+		}
+	}
+
+	// THE RESUME: the declaration outlives this placement, so a pair-refusing binding
+	// makes the sandbox permanently unresumable.
+	if err := eng.Mediator.Pause(ctx, id); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+	if err := eng.Mediator.Resume(ctx, id); err != nil {
+		t.Fatalf("resume with `[{8080,tcp},{8080,udp}]` recorded: %v — the declaration is durable and "+
+			"every placement regenerates from it, so this sandbox would fail EVERY resume forever", err)
+	}
+	_, _, eps, err := eng.Mediator.Network(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(eps) != 2 || eps[0] == "" || eps[1] == "" {
+		t.Errorf("after resume the pair reports endpoints %v; want two bound\n%s", eps, harness.DumpRuleSet(id))
+	}
+}
+
+// Adopt keeps a survivor's publish endpoints instead of re-issuing them — asserted with
+// TWO survivors, because a single one cannot distinguish "recovered" from "re-issued in
+// the same order by luck".
+//
+// §5.A promises Adopt yields the same endpoint with no new epoch: the isolation unit never
+// restarted. A restarted process's port allocator starts EMPTY, and (unlike `ipSeq`) the
+// publish cursor is not randomized, so without a read-back both survivors are re-issued
+// the range's first ports in `ListSandboxes` order. A@21000 and B@21001 adopted in the
+// other order come back SWAPPED — and a swap is materially worse than a stale endpoint: a
+// caller's cached address then reaches ANOTHER SANDBOX. §3.3 licenses a NEW placement's
+// endpoint differing, not a live placement's endpoint moving to a different sandbox.
+func TestAdoptKeepsEachSurvivorsPublishEndpoints(t *testing.T) {
+	base := t.TempDir()
+	opts := netEngineOpts(t)
+	opts.BaseDir = base
+	opts.StorePath = base + "/store.db"
+	eng, _ := harness.Engine(t, opts)
+	ctx := context.Background()
+
+	d := declDeny()
+	d.Ingress.Publish = []model.NetPublish{{GuestPort: 8080, Proto: model.NetTCP}}
+	// THREE sandboxes, and the middle one is then DESTROYED. The gap that leaves in the
+	// port sequence is what makes this test falsifiable, and it is worth the extra
+	// sandbox: with two adjacent survivors, a re-issuing Adopt that happens to walk them
+	// in creation order hands back the very same ports and the test passes on LUCK
+	// (measured — the falsification run against a disabled read-back PASSED that way).
+	// With a hole in the sequence, no re-issue can reproduce the survivors' ports: a
+	// fresh cursor starts at the range base and allocates CONTIGUOUSLY, so the second
+	// survivor cannot land on its old port in either adoption order.
+	idA, _ := createRunning(t, eng, d)
+	idGap, _ := createRunning(t, eng, d)
+	idB, _ := createRunning(t, eng, d)
+	if err := eng.Mediator.Destroy(ctx, idGap); err != nil {
+		t.Fatalf("destroy the middle sandbox: %v", err)
+	}
+
+	epOf := func(t *testing.T, e *orchestrator.Engine, id model.SandboxID) string {
+		t.Helper()
+		_, _, eps, err := e.Mediator.Network(ctx, id)
+		if err != nil {
+			t.Fatalf("read network %s: %v", id, err)
+		}
+		if len(eps) != 1 || eps[0] == "" {
+			t.Fatalf("no endpoint for %s: %v", id, eps)
+		}
+		return eps[0]
+	}
+	beforeA, beforeB := epOf(t, eng, idA), epOf(t, eng, idB)
+	if beforeA == beforeB {
+		t.Fatalf("two sandboxes were handed the same host endpoint %s", beforeA)
+	}
+	t.Logf("before the restart: %s → %s, %s → %s", idA, beforeA, idB, beforeB)
+
+	// The restart: a new process over the same store and the same live placements.
+	// harness.Restart rather than Engine — Engine rebuilds the Template, which is the
+	// LOWER DIR of a live sandbox's overlay.
+	eng2 := harness.Restart(t, base, opts)
+
+	afterA, afterB := epOf(t, eng2, idA), epOf(t, eng2, idB)
+	t.Logf("after the restart: %s → %s, %s → %s", idA, afterA, idB, afterB)
+	if afterA != beforeA || afterB != beforeB {
+		t.Errorf("Adopt re-issued the publish endpoints instead of recovering them:\n"+
+			"  %s: %s → %s\n  %s: %s → %s\n"+
+			"§5.A promises Adopt returns the SAME endpoint with no new epoch — the isolation unit "+
+			"never restarted, so nothing about these placements is new. And the re-issue is not merely "+
+			"stale: with the port cursor starting from the range base in ListSandboxes order, two "+
+			"survivors SWAP, and a caller's cached endpoint then reaches the OTHER SANDBOX",
+			idA, beforeA, afterA, idB, beforeB, afterB)
+	}
+	// A swap specifically — called out separately because it is the harmful shape and a
+	// generic inequality message would not name it.
+	if afterA == beforeB && afterB == beforeA {
+		t.Errorf("the two survivors' endpoints were SWAPPED by adoption (%s now answers for %s) — this "+
+			"is the cross-sandbox misdirection, not just a rebound endpoint", beforeB, idA)
+	}
+	// The recovered endpoints must also be the ones actually INSTALLED, and the allocator
+	// must now hold them: a recovery that fixed the read face but left the ports free
+	// would hand one to the next sandbox created.
+	for _, tc := range []struct {
+		id model.SandboxID
+		ep string
+	}{{idA, afterA}, {idB, afterB}} {
+		ap, perr := netip.ParseAddrPort(tc.ep)
+		if perr != nil {
+			t.Fatalf("endpoint %q: %v", tc.ep, perr)
+		}
+		if dump := harness.DumpRuleSet(tc.id); !strings.Contains(dump, fmt.Sprintf("dport %d", ap.Port())) {
+			t.Errorf("%s reports endpoint %s but no matching dport clause is installed\n%s",
+				tc.id, tc.ep, dump)
+		}
+	}
+	idC, _ := createRunning(t, eng2, d)
+	epC := epOf(t, eng2, idC)
+	if epC == afterA || epC == afterB {
+		t.Errorf("a sandbox created after the restart was handed %s, which a SURVIVOR already holds — "+
+			"the recovered ports must be marked in use, the same obligation markInUse discharges for "+
+			"the /30 (§4.4-A)", epC)
+	}
+}
+
 // --- item 15: the PATCH read-modify-write hazard --------------------------------
 
 // Gate B item 15: writing back a STALE declaration silently drops a publish added in
@@ -1981,7 +2363,7 @@ func TestAStalePatchSilentlyDropsAHotAddedPublish(t *testing.T) {
 	}
 	// (3) The caller writes back the value it read at (1), changing something unrelated.
 	stale.Egress.Default = model.NetAllow
-	if err := eng.Mediator.SetNetwork(ctx, id, stale); err != nil {
+	if err := patchDecl(eng, ctx, id, stale); err != nil {
 		t.Fatalf("patch: %v", err)
 	}
 
@@ -2007,12 +2389,12 @@ func TestAStalePatchSilentlyDropsAHotAddedPublish(t *testing.T) {
 	// which is the whole reason the cycle is the caller's responsibility.
 	withPub, _, _, _ := eng.Mediator.Network(ctx, id)
 	withPub.Ingress.Publish = []model.NetPublish{{GuestPort: 9099, Proto: model.NetTCP}}
-	if err := eng.Mediator.SetNetwork(ctx, id, withPub); err != nil {
+	if err := patchDecl(eng, ctx, id, withPub); err != nil {
 		t.Fatalf("patch: %v", err)
 	}
 	trimmed, _, _, _ := eng.Mediator.Network(ctx, id)
 	trimmed.Ingress.Publish = nil
-	if err := eng.Mediator.SetNetwork(ctx, id, trimmed); err != nil {
+	if err := patchDecl(eng, ctx, id, trimmed); err != nil {
 		t.Fatalf("patch: %v", err)
 	}
 	rec2, _ := eng.Mediator.Get(ctx, id)
@@ -2385,17 +2767,17 @@ func main() {
 	// REVOKE, through the only path that exists: the whole-binding PATCH with the item
 	// omitted. On a `running` sandbox this rewrites the live rule set.
 	revoked := declDeny()
-	if err := eng.Mediator.SetNetwork(ctx, id, revoked); err != nil {
+	if err := patchDecl(eng, ctx, id, revoked); err != nil {
 		// The declaration is editable only from `paused` (§3.4), which is itself the
 		// answer: the SAFE revocation path rebuilds the placement and takes the old flows
 		// with it, and that is why `next-resume` has no ambiguity.
-		t.Logf("SetNetwork on a running sandbox was refused (%v) — as §3.4 requires. That refusal IS "+
+		t.Logf("the whole-binding PATCH on a running sandbox was refused (%v) — as §3.4 requires. That refusal IS "+
 			"the clean revocation story: the whole-binding PATCH takes effect at the next placement, "+
 			"which rebuilds everything and drops old flows, so it has none of the ambiguity a "+
 			"`running` un-publish would have (§5.D / D5 ⑰)", err)
 		return
 	}
-	t.Error("SetNetwork edited the declaration on a RUNNING sandbox — the three egress fields are " +
+	t.Error("the whole-binding PATCH edited the declaration on a RUNNING sandbox — the three egress fields are " +
 		"editable only from `paused` (§3.4), because the provider materializes them at placement")
 }
 
@@ -2479,4 +2861,17 @@ func main() {
 	}
 	out, err := exec.Command("ip", "netns", "exec", ns, bin, endpoint).CombinedOutput()
 	return strings.TrimSpace(string(out)), err
+}
+
+// patchDecl drives the §6.1 whole-binding PATCH with a declaration-only spec — what
+// `PATCH /v1/sandboxes/{id}` carries when the request names only `network`.
+//
+// It goes through the ONE PATCH verb because that is all there is: §4.4-B requires one
+// PATCH to be one acquisition of the transition lock, so the former declaration-only
+// entry point was deleted rather than kept as a wrapper. Driving the mediator directly
+// (rather than the HTTP face) is deliberate in this file — it is what proves §6.2's
+// declaration classes are enforced at the WRITE POINT and not only in the API layer.
+func patchDecl(eng *orchestrator.Engine, ctx context.Context, id model.SandboxID, d model.NetworkDecl) error {
+	_, err := eng.Mediator.Rebind(ctx, id, lifecycle.RebindSpec{Binding: store.Binding{Network: &d}})
+	return err
 }

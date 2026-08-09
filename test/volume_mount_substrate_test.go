@@ -289,7 +289,10 @@ func TestVolumeMountDetachReleasesTheLeaseBeforeTheTopologyChanges(t *testing.T)
 	}
 
 	// Detach by rebinding to an empty binding.
-	released, err := eng.Mediator.RebindVolumes(ctx, holder, nil)
+	// The one PATCH verb, with a mounts-only spec: a non-nil pointer to a nil slice is
+	// "detach everything" (§6.2), which is what this step asks for.
+	var detachAll []model.Mount
+	released, err := eng.Mediator.Rebind(ctx, holder, lifecycle.RebindSpec{Mounts: &detachAll})
 	if err != nil {
 		t.Fatalf("detach: %v", err)
 	}

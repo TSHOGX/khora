@@ -587,94 +587,6 @@ func (m *Mediator) isVolumeInFlight(id model.VolumeID) bool {
 	return m.buildingVolumes[id] || m.inFlightWrites[id] > 0
 }
 
-// RebindVolumes replaces a sandbox's WHOLE mount binding (§6.1 PATCH `volumes`).
-// Returns whether any exclusive lease was released by the change.
-//
-// WHOLE BINDING, NOT A DELTA. §6.2 defines PATCH as swapping one complete binding for
-// another, and a sandbox holds one complete binding at every instant — so there is no
-// "attach one more" or "detach that one" operation, and an EMPTY slice legitimately
-// means detach everything. That is also what makes every duplicate a 400: a repeat is
-// a single submission contradicting itself, decidable without reading another row.
-//
-// THE TWO EFFECT TIMES DIVERGE, and it is deliberate (§6.1):
-//
-//   - the guest TOPOLOGY changes at the NEXT RESUME. runsc takes mounts from the OCI
-//     spec at startup and does not support hot add/remove, so "give a running sandbox a
-//     new volume" is "edit the table, then cold-resume" — the same path §4.2's FS-first
-//     pause/resume already uses.
-//   - a DETACH RELEASES THE EXCLUSIVE LEASE IMMEDIATELY, because the lease IS the row
-//     (§5.C). So another sandbox can take that volume at once, while this one still
-//     shows the old topology until it resumes.
-//
-// Those two cannot be folded into one `applies_at` value, which is why the response
-// carries both.
-//
-// It holds the transition lock, so a rebind cannot land in the middle of a cold start
-// that is reading the table to materialize (§4.4-B).
-func (m *Mediator) RebindVolumes(ctx context.Context, id model.SandboxID, binding []model.Mount) (bool, error) {
-	l := m.lock(id)
-	l.Lock()
-	defer l.Unlock()
-
-	rec, err := m.deps.Store.GetSandbox(ctx, id)
-	if err != nil {
-		return false, fmt.Errorf("rebind volumes: %w", err)
-	}
-	// Legal from running or paused, like every other Binding edit. `creating` is
-	// excluded because that sandbox's binding is mid-construction by its own create.
-	if rec.State != model.Running && rec.State != model.Paused {
-		return false, fmt.Errorf("rebind volumes: %w (state=%s: a binding is editable only from running or paused)", store.ErrConflict, rec.State)
-	}
-
-	before, err := m.deps.Store.ListMounts(ctx, id)
-	if err != nil {
-		return false, fmt.Errorf("rebind volumes: read current binding: %w", err)
-	}
-
-	// Stamp this sandbox's ID and normalize each path (§5.C — the store's uniqueness
-	// assertions are literal string comparisons).
-	next := make([]model.Mount, 0, len(binding))
-	for _, mt := range binding {
-		next = append(next, model.Mount{
-			Sandbox: id,
-			Volume:  mt.Volume,
-			Path:    store.NormalizeMountPath(mt.Path),
-			Access:  mt.Access,
-		})
-	}
-
-	// ONE COMMIT, promised by the store contract (§5.C / store.Store.ReplaceMounts). The
-	// old rows must go before the new ones — a re-submitted identical binding would
-	// otherwise collide with the very rows it replaces, on the lease predicate and on
-	// UNIQUE(sandbox, path) — so the two statements are put in a SINGLE commit rather
-	// than reordered.
-	//
-	// THERE IS NO RESTORE BRANCH HERE, and its absence is the point: a refused
-	// replacement leaves the sandbox on its old binding by construction, so there is no
-	// "new binding rejected AND old one gone" state to compensate for. A compensation
-	// path for a state the model denies is a liability — it claims to repair something
-	// unreachable, and the repair itself can fail.
-	if err := m.deps.Store.ReplaceMounts(ctx, id, next); err != nil {
-		return false, fmt.Errorf("rebind volumes: %w", err)
-	}
-
-	// Did a detach release an exclusive lease? True when some volume held exclusively
-	// before is not held exclusively now — the caller waiting to attach it elsewhere can
-	// proceed immediately, even though this sandbox's topology changes only on resume.
-	stillExclusive := make(map[model.VolumeID]bool, len(next))
-	for _, mt := range next {
-		if mt.Access == model.Exclusive {
-			stillExclusive[mt.Volume] = true
-		}
-	}
-	for _, mt := range before {
-		if mt.Access == model.Exclusive && !stillExclusive[mt.Volume] {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
 // deleteMountsForCleanup drops a sandbox's mount rows on a cleanup path where the
 // caller cannot fail (reconcile's skip-and-log discipline, §4.4-A).
 //
@@ -988,6 +900,18 @@ func (m *Mediator) deriveVolume(ctx context.Context, srcID model.VolumeID, capBy
 // storage's value into the record — the latter would silently ratify exactly the crash
 // residue this exists to fix.
 //
+// BUT THE DIRECTION IS NOT A LICENCE TO WRITE ANY CAP: the same predicate the §6.1 write
+// point refuses (cap ≤ current usage, ErrVolumeCapBelowUsage) is refused here, because
+// this pass reaches the identical backend call and would otherwise be the way around it.
+// See the branch below for the measured mechanism and for why skipping is the safe
+// direction while imposing is the irreversible one.
+//
+// It is also the reason this pass BACKSTOPS LocalBtrfs.Materialize's fallback: that
+// fallback recreates a mis-swept unit as a PLAIN DIRECTORY, which carries no cap, and
+// nothing else re-asserts one. The dependency is worth naming because the guard below
+// preserves it exactly where it matters — a freshly recreated unit is EMPTY, so its usage
+// is 0 and any positive recorded cap is strictly above it.
+//
 // Runs in the same boot position as the orphan sweep, BEFORE anything creates a unit.
 func (m *Mediator) RepairVolumeCaps(ctx context.Context) error {
 	be := m.deps.Volume
@@ -1003,7 +927,7 @@ func (m *Mediator) RepairVolumeCaps(ctx context.Context) error {
 		if v.CapByte <= 0 {
 			continue // the record says uncapped, so "no cap on storage" is correct
 		}
-		_, limit, err := be.Usage(ctx, string(v.ID))
+		used, limit, err := be.Usage(ctx, string(v.ID))
 		if err != nil {
 			// Unreadable: draw no conclusion and change nothing (the same discipline the
 			// sweep follows — an unreadable state is not evidence of anything).
@@ -1013,7 +937,43 @@ func (m *Mediator) RepairVolumeCaps(ctx context.Context) error {
 		if limit == v.CapByte {
 			continue
 		}
-		// Disagreement. Re-assert the RECORD's cap.
+		// A DISAGREEMENT IS NOT ENOUGH TO ACT ON: the record's cap must also still be
+		// applicable. At or below what the unit already holds, re-asserting it does not
+		// repair the volume, it WEDGES it — measured (volume.md D7.3): the substrate
+		// accepts such a cap with zero validation, and afterwards `mkdir`, creating a file
+		// and even truncating an existing file to zero all return ENOSPC, while the quota
+		// write ITSELF returns ENOSPC too, so the cap can then neither be removed nor
+		// raised, not even back above usage. The only exit is deleting the guest's bytes,
+		// which §6 gives the engine no way to do for the caller.
+		//
+		// It is the SAME PREDICATE SetVolumeCapacity refuses at the §6.1 write point (see
+		// ErrVolumeCapBelowUsage), and it has to be checked here too: this path reaches the
+		// identical backend call without passing that guard, so a recovery pass would
+		// otherwise be the way around a refusal that exists precisely because the resulting
+		// state has no exit. The window that produces the input is real — D7.3's
+		// bearing-load window leaves "record says cap=N, quota row says none", and `none`
+		// means UNBOUNDED writes meanwhile, so usage past N is reachable without anything
+		// misbehaving.
+		//
+		// SKIPPING IS THE SAFE DIRECTION AND IMPOSING IS THE IRREVERSIBLE ONE. That
+		// asymmetry is the entire justification for this branch, not a preference: the
+		// skipped volume is temporarily UNCAPPED, so its bytes stop being covered by the
+		// §3.4.2 first term (declared caps) and are picked up by the SECOND one — the
+		// backend measures them through UncappedBytes — which keeps the node's inequality a
+		// true statement about this disk and errs conservatively. Imposing trades that for a
+		// storage unit no API call can ever unstick.
+		//
+		// Neither is it a dead end. Usage falling back under the recorded cap (the guest
+		// deletes bytes) makes the NEXT pass repair it with no operator action at all, and
+		// §6.1 PATCH /v1/volumes/{id} with a size STRICTLY above current usage is a legal
+		// raise that re-asserts a cap immediately (it re-clears admission, so it can be
+		// refused with 507, but it is never refused as a wedge).
+		if v.CapByte <= used {
+			m.deps.Logf("repair volume caps: %s: NOT re-asserting the recorded cap %d — the unit already holds %d byte(s), and a cap at or below usage wedges it irreversibly (§5.C / volume.md D7.3). It stays UNCAPPED and its bytes are counted by the §3.4 uncapped term; the exits are the guest freeing bytes (a later pass then repairs it) or PATCH /v1/volumes/%s with a size strictly greater than %d",
+				v.ID, v.CapByte, used, v.ID, used)
+			continue
+		}
+		// Disagreement, and the record's cap is still applicable. Re-assert it.
 		if err := be.SetCapacity(ctx, string(v.ID), v.CapByte); err != nil {
 			m.deps.Logf("repair volume caps: %s: could not re-assert the recorded cap %d (storage reports %d): %v", v.ID, v.CapByte, limit, err)
 			continue

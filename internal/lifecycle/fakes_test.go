@@ -647,6 +647,11 @@ type fakeRuntime struct {
 	// secondHopUID records what InstallSecondHop was handed, so a test can assert the
 	// engine-level table is installed once at startup with the deployment's uid.
 	secondHopUID *int
+	// publishBound is the per-placement endpoint binding, keyed on `{guest_port, proto}`
+	// like the real provider's (see bindPublish). Keyed by placement pointer because an
+	// endpoint is a PLACEMENT product: a new placement binds afresh, the same one reuses.
+	publishBound map[*runtime.Placement]map[runtime.PublishPort]string
+	pubSeq       int
 }
 
 func (f *fakeRuntime) log(s string) {
@@ -696,6 +701,12 @@ func (f *fakeRuntime) Launch(ctx context.Context, spec runtime.LaunchSpec) (*run
 	ep := fmt.Sprintf("10.0.0.%d:9000", f.seq)
 	f.mu.Unlock()
 	pl := &runtime.Placement{TransportEndpoint: ep}
+	// Launch binds the publish endpoints too, like the real provider — they are a
+	// PLACEMENT product (§3.3), so they appear with the placement rather than only when
+	// a later hot-add reinstalls the rule set. Without this the fake reports no endpoint
+	// for a publish that was already in the record at launch, which is the shape a
+	// resume takes.
+	pl.PublishEndpoints = f.bindPublish(pl, spec.Steering)
 	return pl, nil
 }
 func (f *fakeRuntime) Stop(_ context.Context, _ *runtime.Placement) error {
@@ -759,14 +770,46 @@ func (f *fakeRuntime) ReinstallRuleSet(_ context.Context, pl *runtime.Placement,
 		return fmt.Errorf("injected ReinstallRuleSet failure")
 	}
 	if pl != nil {
-		for _, pp := range spec.PublishPorts {
-			pl.PublishEndpoints = append(pl.PublishEndpoints, fmt.Sprintf("127.0.0.1:%d", 30000+pp.GuestPort))
-		}
+		pl.PublishEndpoints = f.bindPublish(pl, spec)
 	}
 	return nil
 }
 
-func (f *fakeRuntime) InstallSecondHop(_ context.Context, rs ruleset.RuleSet, uid, gid *int) error {
+// bindPublish models the provider's endpoint binding closely enough for the mediator's
+// orchestration to be tested: an endpoint is drawn ONCE per `{guest_port, proto}` per
+// placement and REUSED afterwards, and the list comes back in declaration order.
+//
+// Both properties are contract, not fake convenience. §5.D endorses hot-adding a
+// publish because it is purely additive, and §6.1 makes a repeated publish idempotent —
+// "return the existing one" — so a fake that re-drew on every reinstall would answer a
+// second identical POST with a different endpoint and let a mediator bug through. The
+// pair is the key for the same reason the real provider's is: tcp/8080 and udp/8080 are
+// two publishes (§5.D).
+func (f *fakeRuntime) bindPublish(pl *runtime.Placement, spec runtime.SteeringSpec) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.publishBound == nil {
+		f.publishBound = map[*runtime.Placement]map[runtime.PublishPort]string{}
+	}
+	bound := f.publishBound[pl]
+	if bound == nil {
+		bound = map[runtime.PublishPort]string{}
+		f.publishBound[pl] = bound
+	}
+	out := make([]string, 0, len(spec.PublishPorts))
+	for _, pp := range spec.PublishPorts {
+		ep, ok := bound[pp]
+		if !ok {
+			f.pubSeq++
+			ep = fmt.Sprintf("127.0.0.1:%d", 30000+f.pubSeq)
+			bound[pp] = ep
+		}
+		out = append(out, ep)
+	}
+	return out
+}
+
+func (f *fakeRuntime) InstallSecondHop(_ context.Context, rs ruleset.RuleSet, uid *int) error {
 	got := "nil"
 	if uid != nil {
 		got = fmt.Sprintf("%d", *uid)

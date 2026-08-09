@@ -10,21 +10,22 @@ import (
 	"engine/internal/ruleset"
 )
 
-// ErrDeclarationInvalid is the one verdict §6.2's eight 400 classes share: a
-// declaration that is decidable-invalid WITHOUT reading any other row, and that
-// no retry or state change could ever make legal — §6.2's 400 criterion, the same
-// one the mount-binding self-contradiction meets.
+// ErrDeclarationInvalid is the one verdict §6.2's nine declaration 400 classes
+// share: a declaration that is decidable-invalid WITHOUT reading any other row, and
+// that no retry or state change could ever make legal — §6.2's 400 criterion, the
+// same one the mount-binding self-contradiction meets.
 //
-// ONE sentinel for the status code, EIGHT classes for the caller, and the split is
+// ONE sentinel for the status code, NINE classes for the caller, and the split is
 // deliberate. §6.2's Volume verdicts establish the rule the other way round: what
 // must stay distinguishable is what the caller's REMEDY depends on. Here every
 // remedy is "fix the declaration", so one status and one sentinel is honest —
-// while the class is still recoverable via ClassOf, because the eight remedies are
+// while the class is still recoverable via ClassOf, because the nine remedies are
 // different EDITS and a test that could not tell them apart would let two classes
 // collapse into one.
 var ErrDeclarationInvalid = errors.New("network: declaration is invalid")
 
-// Class names one of §6.2's eight 400 classes.
+// Class names one of §6.2's nine declaration 400 classes (the tenth refusal,
+// ClassViaWithoutSecondHopUID, is a property of the DEPLOYMENT — see there).
 type Class string
 
 const (
@@ -38,9 +39,17 @@ const (
 	// grounds, not feasibility (network.md D2): use `via[]` to hand the flow to a
 	// process outside the engine that can judge by application-layer information.
 	ClassCIDRNotLiteral Class = "cidr-not-an-ip-literal"
-	// ClassProtoMissing — a tuple without `proto`. `{cidr, port}` is not
-	// well-formed: port matching depends on protocol matching in the mechanism
-	// that carries it (network.md D3.1).
+	// ClassProtoMissing — `proto` absent, or not one of the two values, at any of
+	// the three sites that carry one (`allow[]`, `via[].match[]`, `publish[]`).
+	// `{cidr, port}` is not well-formed: port matching depends on protocol matching
+	// in the mechanism that carries it (network.md D3.1).
+	//
+	// ABSENT and MISSPELLED are ONE class, not two, and class 1 is the precedent
+	// inside this same file: `egress.default` absent and `egress.default: "permit"`
+	// are both ClassDefaultMissing, because the caller's remedy is the same EDIT —
+	// write a legal value in that one field. §6.2's cardinality constrains the
+	// semantic kinds a caller must tell apart, not the number of error values in the
+	// implementation (the Volume verdicts settle this: five sentinels, four classes).
 	ClassProtoMissing Class = "tuple-missing-proto"
 	// ClassViaMatchUDP — a `via[].match[]` naming UDP. There is no usable
 	// interface for recovering the ORIGINAL destination of a redirected UDP
@@ -93,6 +102,36 @@ const (
 	// differs from the caller's text, and the two spellings compare unequal in
 	// every subsequent read-modify-write.
 	ClassV4Mapped Class = "cidr-v4-mapped-literal"
+	// ClassMalformedShape — a declaration OBJECT that does not hold together as a
+	// structure, independently of any value in it: a `via[]` entry with an empty
+	// `match[]`, or a `publish[]` entry with `guest_port: 0`.
+	//
+	// # Why this is a NINTH class rather than more values under class 3
+	//
+	// It is the cardinality criterion §6.2 states for the Volume verdicts, applied
+	// here: what must stay distinguishable is what the caller's REMEDY depends on.
+	// Class 3's remedy is "write `proto` in this tuple" — one field, one edit, and the
+	// error names the field. These two need the caller to ADD A MEMBER to an array
+	// (`match[]` has no entries at all) or to supply a port the request never
+	// mentioned. Both were previously reported as `tuple-missing-proto`, which sends
+	// the caller to look at a `proto` field that may well be perfectly written — or,
+	// for the empty `match[]`, that does not exist yet because there is no tuple.
+	//
+	// # Why the two share ONE class
+	//
+	// They are one semantic kind — "the shape does not stand up" — and their remedy is
+	// the same kind of edit: supply the structurally required member. Splitting them
+	// would count IMPLEMENTATION error values rather than caller-visible kinds, which
+	// is the direction §6.2 explicitly rejects (five Volume sentinels, four classes).
+	//
+	// # What is NOT this class
+	//
+	// A tuple with no `port` — that is LEGAL and means "any port" (§5.D). Wildcard by
+	// omission is a declared semantic, not a missing member, which is exactly the line
+	// this class draws: `match[]` empty steers NOTHING (an entry that matches nothing
+	// has no reading under which it does something), while `port` omitted has a
+	// reading and §5.D states it.
+	ClassMalformedShape Class = "malformed-shape"
 )
 
 // invalidError carries the class alongside the message.
@@ -104,16 +143,18 @@ type invalidError struct {
 func (e *invalidError) Error() string { return e.msg }
 
 // Unwrap makes every class satisfy errors.Is(err, ErrDeclarationInvalid), which
-// is what §6.2's status mapping keys on — one arm, eight classes.
+// is what §6.2's status mapping keys on — one arm, nine classes.
 func (e *invalidError) Unwrap() error { return ErrDeclarationInvalid }
 
 func invalid(c Class, format string, args ...any) error {
 	return &invalidError{class: c, msg: fmt.Sprintf("network: %s: %s", c, fmt.Sprintf(format, args...))}
 }
 
-// ClassViaWithoutSecondHopUID is a NINTH refusal, and it is NOT one of §6.2's
-// eight classes — §6.2 enumerates eight, all of them properties of the
-// declaration TEXT, and this one is a property of the DEPLOYMENT.
+// ClassViaWithoutSecondHopUID is the refusal PAST the declaration classes, and it is
+// NOT one of them — those are all properties of the declaration TEXT, and this one is
+// a property of the DEPLOYMENT. (It was "the ninth" while the text classes numbered
+// eight; the well-formedness class took that ordinal, which changes nothing about this
+// one — the boundary that matters is text-natured vs deployment-natured, not the count.)
 //
 // The refusal itself is mandated by the M8 plan (§5, the orchestrator row): the
 // second hop is pinned by an `output`-hook table narrowed by a uid the DEPLOYMENT
@@ -129,15 +170,17 @@ func invalid(c Class, format string, args ...any) error {
 // and nothing is full so 507 would be a lie — exactly ErrCapRequired's shape
 // ("the node meters this axis, so a cap is required"), which is likewise a 400
 // that depends on deployment configuration. Its own sentinel so the caller can
-// tell it from the eight; the remedy is an operator's, not theirs.
+// tell it from the declaration classes; the remedy is an operator's, not theirs.
 //
-// ⚠ Logged as a spec gap in open-decisions.md ("§6.2 第九类拒绝"): §6.2's list is
-// written as eight, and it states that the resource-cap rule is the ONE field
-// semantic depending on deployment configuration. Both need a decision at the M8
-// review gate; the code takes the leaning rather than the spec taking it silently.
+// SETTLED in §6.2, which now carries this refusal as a DEPLOYMENT-natured 400 stated
+// separately from the declaration-text classes, and no longer calls the resource-cap
+// rule the ONE field semantic that depends on deployment configuration — there are two.
+// What §6.2 requires to stay distinguishable is the caller's REMEDY, and that is why
+// this one keeps its own sentinel: fixing it is an operator's job (supply the
+// second-hop uid at startup), not the caller's — no edit to the declaration reaches it.
 const ClassViaWithoutSecondHopUID Class = "via-without-second-hop-uid"
 
-// ClassOf reports which of §6.2's eight classes an error is, if any.
+// ClassOf reports which of §6.2's nine declaration classes an error is, if any.
 func ClassOf(err error) (Class, bool) {
 	var ie *invalidError
 	if errors.As(err, &ie) {
@@ -205,7 +248,7 @@ func rejectV4Mapped(a netip.Addr, raw string) error {
 // predicate §6.2's fifth class needs.
 //
 // It is a PARAMETER rather than a package-level read of the interface table, so
-// the eight classes are pinned in a root-free unit test against a fixture instead
+// the declaration classes are pinned in a root-free unit test against a fixture instead
 // of against whatever addresses the test machine happens to carry. SystemHostLocal
 // is the production implementation.
 //
@@ -244,25 +287,38 @@ func SystemHostLocal(a netip.Addr) (bool, error) {
 	return a.IsLoopback(), nil
 }
 
+// ErrSecondHopUIDIsTheEngineItself is the STARTUP refusal of a second-hop uid equal
+// to the engine's own effective uid. Deliberately NOT an invalidError: the nine
+// declaration classes and the deployment one are all per-request 400s over a
+// declaration, while this one
+// is a property of the deployment ALONE — it is decidable with no declaration in
+// hand, it must be decided before the table is installed, and no request ever
+// reaches a state where returning it as a 400 would be right.
+var ErrSecondHopUIDIsTheEngineItself = errors.New("network: the second-hop uid is the engine's own uid")
+
 // Deployment is what the DEPLOYING PARTY hands the engine, as distinct from what
-// a declaration carries (§2.4 / §6.2: the uid/gid pinning the second hop is a
+// a declaration carries (§2.4 / §6.2: the uid pinning the second hop is a
 // deployment input, never a declaration field).
 type Deployment struct {
-	// SecondHopUID / SecondHopGID identify the host-local process behind
-	// `via[].endpoint`. Set = the engine installs the second-hop table at startup
-	// and `via[]` is permitted; unset = `via[]` is refused (see
-	// ClassViaWithoutSecondHopUID).
+	// SecondHopUID identifies the host-local process behind `via[].endpoint`. Set =
+	// the engine installs the second-hop table at startup and `via[]` is permitted;
+	// unset = `via[]` is refused (see ClassViaWithoutSecondHopUID).
 	//
 	// A POINTER because uid 0 is a real uid: a value type could not tell "the
 	// operator said root" from "the operator said nothing", and the two must lead to
 	// opposite behavior.
+	//
+	// UID ONLY, no gid counterpart, and that is a mechanism fact rather than a
+	// simplification: the one narrowing predicate available on the `output` hook is
+	// `skuid` (measured, network.md D5 ㉔). A gid clause would be ANDed onto the floor
+	// DROP, i.e. it could only make the floor match LESS — a second way for the pin to
+	// come off, with the same invisible symptom (a counter that does not move).
 	SecondHopUID *int
-	SecondHopGID *int
 
 	// HostLocal answers §6.2's fifth class ("is this endpoint an address of THIS
 	// host"). nil → SystemHostLocal, which reads the interface table.
 	//
-	// Injectable so the eight 400 classes are pinned against a FIXTURE in a root-free
+	// Injectable so the nine 400 classes are pinned against a FIXTURE in a root-free
 	// unit test rather than against whatever addresses the test machine happens to
 	// carry — otherwise those assertions would pass or fail with the CI host's
 	// networking.
@@ -273,9 +329,152 @@ type Deployment struct {
 // invariant needs to be ENFORCED rather than merely prefaced.
 func (dep Deployment) SecondHopPinned() bool { return dep.SecondHopUID != nil }
 
+// ValidateSecondHopUID refuses a second-hop uid equal to the ENGINE'S OWN effective
+// uid, at assembly time and before any table is installed.
+//
+// # It kills the transport plane, and the mechanism is the engine's own topology
+//
+// The second-hop floor arm is `meta skuid <uid> ip daddr {…, 10.66.0.0/16} drop` on
+// the engine-level `output` chain, and that daddr set contains ruleset.SandboxCIDR —
+// the /16 every guest /30 is carved out of. Meanwhile the transport endpoint IS a
+// guest veth IP:port, dialed BY THIS PROCESS from the host. So with `uid` == the
+// engine's own uid, every engine→guest dial matches the arm and is dropped: the
+// readiness gate, the reaper's liveness probe, every process/fs RPC and `/files`.
+//
+// The `hop2_established` return arm does not save it, BY DESIGN: it matches
+// `ct state established,related`, and the engine's dial is the SYN, i.e. `ct state
+// new` — precisely what that arm excludes so a new connection to an in-floor address
+// still meets the floor (§2.4 invariant 2). The one rule that would have to admit
+// this traffic is the one rule this table must never carry.
+//
+// # Why it is refused rather than worked around
+//
+// A `skuid` accept above the floor is not available: skuid misses packets, so such an
+// accept leaks whatever it misses past the floor it sits above (measured, network.md
+// D5 ㉔) — ruleset.Validate refuses one outright. And there is nothing to narrow the
+// engine's own dial by: it arrives on no interface, and its destination is exactly the
+// in-floor address the arm names. The two obligations are genuinely irreconcilable
+// under one uid, so the input is illegal, not merely awkward.
+//
+// # Why STARTUP rather than the write point
+//
+// The table is engine-level, so the damage is not scoped to a declaration or to a
+// sandbox: it lands on every sandbox at once, including ones with no `via[]` at all.
+// By the time a `via[]` declaration arrives the table has been installed for a while
+// and the engine is already dialing through a floor that drops it. Worse, the failure
+// is INTERMITTENT rather than deterministic — skuid matches ~4/5 packets of a flow
+// (D5 ㉔) — so it presents as flaky sandboxes rather than as a broken deployment.
+//
+// # Why it is NOT ValidateDeployment's ninth class
+//
+// ValidateDeployment judges "a declaration meets a deployment that gave NO uid" — a
+// per-request 400 whose remedy is an operator's but whose occasion is a request. This
+// judges "the deployment gave a uid that makes the engine drop its own traffic", which
+// needs no declaration to be wrong and must not wait for one.
+//
+// euid is a PARAMETER rather than an os.Geteuid() call here, the same shape and for
+// the same reason as HostLocal: the assertion is then pinned in a root-free unit test
+// against a fixture instead of against whatever uid the test process happens to run as.
+func ValidateSecondHopUID(dep Deployment, engineEUID int) error {
+	if dep.SecondHopUID == nil || *dep.SecondHopUID != engineEUID {
+		return nil
+	}
+	return fmt.Errorf("%w: %d is the uid this orchestrator runs as. The second-hop floor arm is "+
+		"`meta skuid %d ip daddr {…, %s} drop` on the engine-level `output` chain, and the engine's "+
+		"own transport endpoint is a GUEST veth address inside %s dialed from this host — so every "+
+		"engine→guest dial would match that arm and be dropped, taking out the readiness gate, the "+
+		"reaper's liveness probe, and every process/fs/files RPC, for EVERY sandbox at once (the "+
+		"table is engine-level, not per-sandbox). The `established,related` return arm does not "+
+		"admit it: that dial is `ct state new`, which the arm excludes precisely so a new connection "+
+		"to an in-floor address still meets the floor (§2.4 invariant 2). Nor is it survivable — "+
+		"`skuid` matches only about four packets in five (network.md D5 ㉔), so the symptom would be "+
+		"INTERMITTENT sandbox failures rather than a clean break. Run the `egress.via[]` endpoint "+
+		"process as its own dedicated uid and pass that one",
+		ErrSecondHopUIDIsTheEngineItself, engineEUID, engineEUID, ruleset.SandboxCIDR, ruleset.SandboxCIDR)
+}
+
+// ErrViaUnenforceableAtPlacement is the PLACEMENT-side refusal of an already-recorded
+// `via[]` declaration under a deployment that supplies no second-hop uid.
+//
+// Its own sentinel rather than ClassViaWithoutSecondHopUID's invalidError, because the
+// verdict differs where it matters: the write-point refusal is a 400 over a request
+// that carried the declaration, while this one judges a declaration ALREADY IN THE
+// RECORD against the deployment now running. Nothing about the request is malformed —
+// a resume carries no declaration at all — so 400 would send the caller to edit
+// something they did not send. See ValidatePlacement.
+var ErrViaUnenforceableAtPlacement = errors.New("network: the recorded egress.via[] cannot be enforced by this deployment")
+
+// ValidatePlacement re-checks, AT EVERY PLACEMENT, the deployment premise that
+// ValidateDeployment checked at the write point.
+//
+// # Why the write point is not enough
+//
+// The two checks read the same two facts, but they are not the same fact PAIR over
+// time. A declaration is durable — the record is its SoT and every placement
+// regenerates the rule set from it (§3.4 Binding) — while the second-hop uid is a
+// deployment input that lives and dies with one orchestrator process. So the pair can
+// come apart with no write at all: deployment A supplies the uid and admits a `via[]`
+// declaration into the record; the operator restarts WITHOUT the flag; every write
+// point is now correctly closed, and the row that got in under A is still there.
+//
+// Nothing on the placement path noticed, and that is mechanical rather than an
+// oversight anyone could have spotted in a rule set: Generate deliberately emits no
+// second-hop rule (the pin is one engine-level `output` table narrowed by uid, sized
+// by the deployment and not by the sandbox count — see its comment), so the rule set
+// it produces for a `via[]` declaration looks EXACTLY the same whether or not the pin
+// exists. The `prerouting` DNAT and the narrow `input` accept install and work; the
+// steered flow reaches the endpoint process; the endpoint process's own egress is
+// pinned by nothing.
+//
+// # Why that outcome is a refusal rather than a degradation
+//
+// It is the confused deputy §2.4's second invariant exists to reject, and its
+// distinguishing property is that NOTHING ELSE REPORTS IT. Hop 2 leaves on `output`
+// and is counted zero in `forward` in all three shapes (measured, network.md D5 ㉔),
+// so the first-hop floor never evaluates one of its packets: every first-hop
+// assertion, counter and deny test keeps passing over a host where the pin is gone.
+// §2.4 is explicit that escape is a FAILURE, not a degradation — so the placement that
+// would deliver it must fail, exactly as the write point that would record it does.
+//
+// # The general shape, which is the reason this function exists at all
+//
+// An invariant enforced only where state is WRITTEN holds only as long as nothing
+// else changes. This one is re-evaluated where the state is RE-MATERIALIZED, which is
+// the point at which the engine actually promises it.
+func ValidatePlacement(d Declaration, dep Deployment) error {
+	if len(d.Egress.Via) == 0 || dep.SecondHopPinned() {
+		return nil
+	}
+	return fmt.Errorf("%w: this sandbox's record carries %d `egress.via[]` entr%s, admitted by a "+
+		"deployment that supplied a second-hop uid — and THIS deployment supplies none, so the "+
+		"engine-level `output` table pinning the endpoint process's own egress is not installed. "+
+		"Placing the sandbox anyway would install a rule set that steers the guest's flows to that "+
+		"process with NO enforcement of §2.4's second invariant behind it: a confused deputy live on "+
+		"the host, reachable by the guest, egressing on its behalf under no floor. It would also be "+
+		"SILENT — hop 2 leaves on `output` and counts zero in `forward` (measured, network.md D5 ㉔), "+
+		"so the first-hop floor never evaluates one of its packets and every first-hop assertion, "+
+		"counter and deny test keeps passing. Two remedies, both an operator's: restart the "+
+		"orchestrator with the second-hop uid (`--via-uid`) so the pin is installed again, or "+
+		"`PATCH /v1/sandboxes/{id}` the declaration to drop `egress.via[]` (editable from `paused`, "+
+		"whole for whole) and place it without the steering",
+		ErrViaUnenforceableAtPlacement, len(d.Egress.Via), plural(len(d.Egress.Via)))
+}
+
+// plural spells the one suffix this file's messages need ("entry" / "entries").
+func plural(n int) string {
+	if n == 1 {
+		return "y"
+	}
+	return "ies"
+}
+
 // ValidateDeployment is the refusal that depends on the DEPLOYMENT rather than on
 // the declaration text — see ClassViaWithoutSecondHopUID for why it is separate
-// from §6.2's eight and why it is a 400.
+// from §6.2's nine declaration classes and why it is a 400.
+//
+// It is the WRITE-POINT half of the premise. ValidatePlacement is the other half, and
+// the two are not redundant: this one keeps the row out of the record, that one keeps
+// a row that got in under an earlier deployment from being materialized by this one.
 func ValidateDeployment(d Declaration, dep Deployment) error {
 	if len(d.Egress.Via) == 0 || dep.SecondHopPinned() {
 		return nil
@@ -290,7 +489,7 @@ func ValidateDeployment(d Declaration, dep Deployment) error {
 			"the second-hop uid, or declare `egress.allow[]` instead")
 }
 
-// Validate applies §6.2's eight 400 classes.
+// Validate applies §6.2's nine declaration 400 classes.
 //
 // IT RUNS BEFORE THE ADMISSION GATE (§6.2): an invalid declaration is refused
 // before any byte is touched or any budget is recorded, so 400 and 507 are never
@@ -336,8 +535,10 @@ func Validate(d Declaration, given bool, hostLocal HostLocal) error {
 	for i, v := range d.Egress.Via {
 		where := fmt.Sprintf("egress.via[%d]", i)
 		if len(v.Match) == 0 {
-			return invalid(ClassProtoMissing, "%s has no `match[]` — an entry that matches nothing "+
-				"steers nothing, and there is no default match", where)
+			return invalid(ClassMalformedShape, "%s has no `match[]` — an entry that matches nothing "+
+				"steers nothing, and there is no default match. Note the contrast with an omitted "+
+				"`port`, which IS legal and means any port (§5.D): that omission has a reading, an "+
+				"empty `match[]` has none", where)
 		}
 		for j, t := range v.Match {
 			mwhere := fmt.Sprintf("%s.match[%d]", where, j)
@@ -401,8 +602,15 @@ func Validate(d Declaration, given bool, hostLocal HostLocal) error {
 		if p.Proto != model.NetTCP && p.Proto != model.NetUDP {
 			return invalid(ClassProtoMissing, "%s: `proto` must be tcp or udp, got %q", where, p.Proto)
 		}
+		// A publish's `guest_port` is the DNAT target, so zero is not a wildcard here
+		// and could not be one: the rule rewrites the destination to ONE port on the
+		// guest IP. That is the whole asymmetry with a tuple's `port` — a MATCH omitting
+		// a port matches every port, while a TARGET omitting one has nothing to rewrite
+		// to (§5.D).
 		if p.GuestPort == 0 {
-			return invalid(ClassProtoMissing, "%s: `guest_port` is required and must be non-zero", where)
+			return invalid(ClassMalformedShape, "%s: `guest_port` is required and must be non-zero — "+
+				"it is the DNAT TARGET port, not a match, so zero has nothing to rewrite to. (A "+
+				"tuple's `port` is the opposite case: omitted there means any port, §5.D)", where)
 		}
 	}
 	return nil
@@ -411,12 +619,33 @@ func Validate(d Declaration, given bool, hostLocal HostLocal) error {
 // validateTuple applies class 3 (and the well-formedness class 2/8 already
 // handled at parse time cannot re-enter here, since a Tuple holds a parsed
 // prefix).
+//
+// # `port` IS NOT VALIDATED HERE, AND THAT IS THE DECIDED SEMANTIC
+//
+// An omitted `port` means ANY PORT — §5.D says so explicitly, and this function's
+// silence about the field is therefore a statement rather than a gap. The decision
+// went the other way from `proto` on purpose: `proto` is a FORMAT requirement (the
+// kernel mechanism makes port matching depend on protocol matching, D3.1), so
+// `{cidr, port}` genuinely cannot be rendered, while `{cidr, proto}` renders
+// perfectly into a rule with one clause fewer — the same shape an omitted `cidr`
+// already has.
+//
+// What made the old state a defect was not the semantic but its SPELLING. `port` was
+// a plain `uint16` with no `omitempty` on the wire, so the wildcard existed only as
+// the zero value's side effect: the read face rendered `"port": 0`, and §5.D's own
+// criterion for requiring `egress.default` — "if 'unspecified' were read as some
+// default, a null in the record could no longer be told from the caller choosing it"
+// — is exactly the shape that produces. The fix is that the wildcard is now WRITTEN:
+// `port` is omitted on both faces when it is any-port, so the record's spelling and
+// the caller's text agree, and the read face's output stays a legal write body
+// (§6.1's read-modify-write). See tupleWire in the orchestrator.
 func validateTuple(t Tuple, where string) error {
 	if t.Proto == "" {
 		return invalid(ClassProtoMissing,
 			"%s: `proto` is required — `{cidr, port}` is not a well-formed tuple, because port "+
 				"matching depends on protocol matching in the mechanism that carries it "+
-				"(network.md D3.1)", where)
+				"(network.md D3.1). `port` itself is OPTIONAL and omitting it means any port "+
+				"(§5.D); `proto` is the one member of the tuple with no wildcard", where)
 	}
 	if t.Proto != model.NetTCP && t.Proto != model.NetUDP {
 		return invalid(ClassProtoMissing, "%s: `proto` must be tcp or udp, got %q", where, t.Proto)

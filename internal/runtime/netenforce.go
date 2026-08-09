@@ -143,14 +143,20 @@ func (p *LocalRunsc) installRuleSet(ctx context.Context, h *placementHandle, spe
 // uid covers every `via[]` in the deployment, and the traffic arrives on no
 // interface, so there is nothing sandbox-specific to narrow by (network.md D5 ㉔).
 //
-// A nil uid means the deployment did not supply one: nothing is installed, and
-// `via[]` declarations are refused at the write point instead
-// (network.ValidateDeployment) — a declaration whose own invariant cannot be
-// enforced is refused rather than half-honored.
-func (p *LocalRunsc) InstallSecondHop(ctx context.Context, rs ruleset.RuleSet, uid, gid *int) error {
+// A nil uid means the deployment did not supply one. Nothing is installed — and the
+// STALE table from a PREVIOUS run is destroyed, which is the half a bare `return nil`
+// silently skipped: an nft table is crash-surviving host state exactly like a netns
+// (§2.4), so a run started without the flag would otherwise inherit an engine-level
+// `output` table narrowed by a uid it does not know, dropping traffic for a reason
+// absent from the running configuration and impossible for an operator to attribute.
+//
+// With no table installed there is no enforcement of §2.4's second invariant, so
+// `via[]` is refused at both ends: kept out of the record at the write points
+// (network.ValidateDeployment) and refused at placement for a row admitted by an
+// earlier deployment (network.ValidatePlacement).
+func (p *LocalRunsc) InstallSecondHop(ctx context.Context, rs ruleset.RuleSet, uid *int) error {
 	if uid == nil {
-		// Not an error: a deployment with no `via[]` needs no second-hop table. The
-		// refusal of a `via[]` declaration lives at the write point.
+		p.deleteRuleSet(SecondHopTable)
 		return nil
 	}
 	text, err := renderRuleSet(rs, renderCtx{table: SecondHopTable, secondHopUID: uid})

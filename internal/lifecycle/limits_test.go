@@ -728,7 +728,7 @@ func TestUpdateBindingRewritesTheBinding(t *testing.T) {
 			t.Fatalf("pause: %v", err)
 		}
 		want := int64(512 << 20)
-		if err := m.UpdateBinding(ctx, sid, store.Binding{MemoryByte: &want}); err != nil {
+		if err := patchBinding(m, ctx, sid, store.Binding{MemoryByte: &want}); err != nil {
 			t.Fatalf("UpdateBinding: %v", err)
 		}
 		rec, _ := st.GetSandbox(ctx, sid)
@@ -758,12 +758,12 @@ func TestUpdateBindingRewritesTheBinding(t *testing.T) {
 			t.Fatalf("create: %v", err)
 		}
 		bigger := int64(256 << 20)
-		if err := m.UpdateBinding(ctx, sid, store.Binding{MemoryByte: &bigger}); !errors.Is(err, store.ErrConflict) {
+		if err := patchBinding(m, ctx, sid, store.Binding{MemoryByte: &bigger}); !errors.Is(err, store.ErrConflict) {
 			t.Fatalf("cap edit while running = %v; want ErrConflict (pause first, §3.4)", err)
 		}
 		// TTL has no placement-local materialization, so it is editable live.
 		ttl := 5 * time.Minute
-		if err := m.UpdateBinding(ctx, sid, store.Binding{IdleTimeout: &ttl}); err != nil {
+		if err := patchBinding(m, ctx, sid, store.Binding{IdleTimeout: &ttl}); err != nil {
 			t.Fatalf("TTL edit while running: %v", err)
 		}
 		if rec, _ := st.GetSandbox(ctx, sid); rec.IdleTimeout != ttl {
@@ -792,7 +792,7 @@ func TestUpdateBindingRewritesTheBinding(t *testing.T) {
 			t.Fatalf("resume before raise = %v; want ErrResourceTerminated", err)
 		}
 		bigger := int64(512 << 20)
-		if err := m.UpdateBinding(ctx, sid, store.Binding{MemoryByte: &bigger}); err != nil {
+		if err := patchBinding(m, ctx, sid, store.Binding{MemoryByte: &bigger}); err != nil {
 			t.Fatalf("raise: %v", err)
 		}
 		if rec, _ := st.GetSandbox(ctx, sid); rec.DeathCause != model.CauseNone {
@@ -833,7 +833,7 @@ func TestUpdateBindingRewritesTheBinding(t *testing.T) {
 				}, nil); err != nil {
 					t.Fatal(err)
 				}
-				if err := m.UpdateBinding(ctx, sid, tc.b()); err != nil {
+				if err := patchBinding(m, ctx, sid, tc.b()); err != nil {
 					t.Fatalf("update: %v", err)
 				}
 				if rec, _ := st.GetSandbox(ctx, sid); rec.DeathCause != model.CauseResourceExceeded {
@@ -865,7 +865,7 @@ func TestUpdateBindingRewritesTheBinding(t *testing.T) {
 			}
 			before, _ := st.GetSandbox(ctx, sid)
 			want := int64(gib)
-			err = m.UpdateBinding(ctx, sid, store.Binding{DiskByte: &want})
+			err = patchBinding(m, ctx, sid, store.Binding{DiskByte: &want})
 			if !errors.Is(err, ErrUncappedDiskNotCappable) {
 				t.Fatalf("PATCH disk 0 → %d = %v; want ErrUncappedDiskNotCappable (§3.4: the cap is unmaterializable, so accepting it leaves the sandbox unresumable)", want, err)
 			}
@@ -898,7 +898,7 @@ func TestUpdateBindingRewritesTheBinding(t *testing.T) {
 				t.Fatalf("pause: %v", err)
 			}
 			zero := int64(0)
-			if err := m.UpdateBinding(ctx, sid, store.Binding{DiskByte: &zero}); err != nil {
+			if err := patchBinding(m, ctx, sid, store.Binding{DiskByte: &zero}); err != nil {
 				t.Fatalf("PATCH disk N → 0 = %v; want it ADMITTED (dropping a cap only clears it, §3.4)", err)
 			}
 			if rec, _ := st.GetSandbox(ctx, sid); rec.Limits.DiskByte != 0 {
@@ -919,7 +919,7 @@ func TestUpdateBindingRewritesTheBinding(t *testing.T) {
 			// Both directions of an N → M edit: the unit is already a quota unit, so
 			// neither is unmaterializable.
 			for _, want := range []int64{4 * gib, 512 << 20} {
-				if err := m.UpdateBinding(ctx, sid, store.Binding{DiskByte: &want}); err != nil {
+				if err := patchBinding(m, ctx, sid, store.Binding{DiskByte: &want}); err != nil {
 					t.Fatalf("PATCH disk N → %d = %v; want it ADMITTED", want, err)
 				}
 				if rec, _ := st.GetSandbox(ctx, sid); rec.Limits.DiskByte != want {
@@ -941,7 +941,7 @@ func TestUpdateBindingRewritesTheBinding(t *testing.T) {
 				t.Fatalf("pause: %v", err)
 			}
 			mem, cpu := int64(256<<20), int64(500)
-			if err := m.UpdateBinding(ctx, sid, store.Binding{MemoryByte: &mem, CPUMillis: &cpu}); err != nil {
+			if err := patchBinding(m, ctx, sid, store.Binding{MemoryByte: &mem, CPUMillis: &cpu}); err != nil {
 				t.Fatalf("PATCH memory/cpu 0 → N = %v; want it ADMITTED (only the disk axis has an unmaterializable direction)", err)
 			}
 			rec, _ := st.GetSandbox(ctx, sid)
@@ -965,7 +965,7 @@ func TestUpdateBindingRewritesTheBinding(t *testing.T) {
 			t.Fatalf("pause: %v", err)
 		}
 		tooBig := 5 * gib
-		if err := m.UpdateBinding(ctx, sid, store.Binding{MemoryByte: &tooBig}); !errors.Is(err, ErrInsufficientCapacity) {
+		if err := patchBinding(m, ctx, sid, store.Binding{MemoryByte: &tooBig}); !errors.Is(err, ErrInsufficientCapacity) {
 			t.Fatalf("over-budget raise = %v; want ErrInsufficientCapacity", err)
 		}
 		// refused → the record is untouched.
@@ -974,7 +974,7 @@ func TestUpdateBindingRewritesTheBinding(t *testing.T) {
 		}
 		// a LOWERING needs no gate (Σ shrinks) and is always allowed.
 		smaller := gib
-		if err := m.UpdateBinding(ctx, sid, store.Binding{MemoryByte: &smaller}); err != nil {
+		if err := patchBinding(m, ctx, sid, store.Binding{MemoryByte: &smaller}); err != nil {
 			t.Fatalf("lowering refused: %v", err)
 		}
 	})
@@ -1004,11 +1004,11 @@ func TestUpdateBindingRewritesTheBinding(t *testing.T) {
 		// CPU raise used to be routed through — is refused. Without this the subtest could
 		// pass on a node that was never full.
 		oneMore := gib + 1
-		if err := m.UpdateBinding(ctx, sid, store.Binding{DiskByte: &oneMore}); !errors.Is(err, ErrInsufficientCapacity) {
+		if err := patchBinding(m, ctx, sid, store.Binding{DiskByte: &oneMore}); !errors.Is(err, ErrInsufficientCapacity) {
 			t.Fatalf("disk raise on a full node = %v; want ErrInsufficientCapacity (the fixture must really be exhausted)", err)
 		}
 		cpu := int64(2000)
-		if err := m.UpdateBinding(ctx, sid, store.Binding{CPUMillis: &cpu}); err != nil {
+		if err := patchBinding(m, ctx, sid, store.Binding{CPUMillis: &cpu}); err != nil {
 			t.Fatalf("cpu-only raise = %v; want it ADMITTED — CPU is in neither node inequality (§3.4), so gating it can only yield a false 507", err)
 		}
 		rec, _ := st.GetSandbox(ctx, sid)
@@ -1035,7 +1035,7 @@ func TestUpdateBindingRewritesTheBinding(t *testing.T) {
 		}
 		before, _ := st.GetSandbox(ctx, sid)
 		v := int64(128 << 20)
-		if err := m.UpdateBinding(ctx, sid, store.Binding{DiskByte: &v}); err != nil {
+		if err := patchBinding(m, ctx, sid, store.Binding{DiskByte: &v}); err != nil {
 			t.Fatalf("update: %v", err)
 		}
 		after, _ := st.GetSandbox(ctx, sid)
@@ -1052,7 +1052,7 @@ func TestUpdateBindingRewritesTheBinding(t *testing.T) {
 		if err != nil {
 			t.Fatalf("create: %v", err)
 		}
-		if err := m.UpdateBinding(ctx, sid, store.Binding{}); err != nil {
+		if err := patchBinding(m, ctx, sid, store.Binding{}); err != nil {
 			t.Fatalf("empty PATCH: %v", err)
 		}
 	})

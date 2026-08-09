@@ -238,6 +238,11 @@ func (g *gen) emit(r ruleset.Rule) {
 func (g *gen) steering(d Declaration) {
 	for i, v := range d.Egress.Via {
 		for j, t := range v.Match {
+			// DestPort carries the tuple's port, and t.Port == 0 (AnyPort) is the WILDCARD
+			// the renderer turns into one clause fewer — a `via[]` entry that named no port
+			// steers every port of the matched destination to the endpoint (§5.D). No branch
+			// is needed here because the zero already IS the wildcard encoding in Match; the
+			// assertion that it renders as an absent `dport` lives in the runtime tests.
 			m := ruleset.Match{Proto: protoOf(t.Proto), DestPort: t.Port}
 			// The pre-NAT destination clause is emitted IF AND ONLY IF the declaration
 			// pinned a cidr. Transparent interception (`cidr: any`) authorizes "any
@@ -377,10 +382,22 @@ func (g *gen) inputChain(d Declaration) error {
 			return fmt.Errorf("egress.via[%d].endpoint: %w", i, err)
 		}
 		for j, t := range v.Match {
+			// A PORT WILDCARD (`t.Port == 0`) leaves the pre-NAT PORT clause off, exactly as
+			// `cidr: any` leaves the pre-NAT DESTINATION clause off — and that does not weaken
+			// this accept below what D5 ⑩ requires, because the clause it drops is the one the
+			// declaration itself declined to pin. What that measurement forbids is an accept
+			// admitting MORE than the declaration authorized: dropping the pre-NAT port on a
+			// tuple that NAMED one would let an undeclared original port reach a declared
+			// listener. Here no original port was declared — every port of the matched
+			// destination is steered — so "any original port, arriving on this sandbox's veth,
+			// destined for this endpoint's listener port" IS the authorized set, and the other
+			// two clauses still pin it. The `iifname` narrowing is untouched in every case,
+			// which is the clause whose absence would make this a hole in other sandboxes'
+			// floors.
 			m := ruleset.Match{
 				Proto:          protoOf(t.Proto),
 				DestPort:       endpointPort, // post-NAT: the listener's port
-				CTOriginalPort: t.Port,       // pre-NAT: the declared port
+				CTOriginalPort: t.Port,       // pre-NAT: the declared port, 0 = any (§5.D)
 				CTState:        []string{"new"},
 			}
 			if !t.AnyDest() {

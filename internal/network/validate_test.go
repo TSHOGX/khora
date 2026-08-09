@@ -25,8 +25,8 @@ func mustCIDR(t *testing.T, s string) netip.Prefix {
 	return p
 }
 
-// Gate A item 2: §6.2's eight 400 classes, one by one.
-func TestTheEightHundredClasses(t *testing.T) {
+// Gate A item 2: §6.2's nine declaration 400 classes, one by one.
+func TestTheNineHundredClasses(t *testing.T) {
 	cases := []struct {
 		name  string
 		class Class
@@ -154,6 +154,29 @@ func TestTheEightHundredClasses(t *testing.T) {
 		run: func() error {
 			_, err := ParseCIDR("::192.168.1.1")
 			return err
+		},
+	}, {
+		// CLASS 9, first shape. The remedy is to ADD A MEMBER to an empty array, which
+		// is why it is not class 3: there is no tuple yet for a `proto` field to be
+		// missing from.
+		name:  "via[] entry has an empty match[]",
+		class: ClassMalformedShape,
+		run: func() error {
+			return Validate(Declaration{Egress: Egress{
+				Default: DenyAll,
+				Via:     []Via{{Match: []Tuple{}, Endpoint: "127.0.0.9:15443"}},
+			}}, true, allHostLocal)
+		},
+	}, {
+		// CLASS 9, second shape. `guest_port` is a DNAT TARGET, so zero has nothing to
+		// rewrite to — the opposite of a tuple's `port`, where zero is the wildcard.
+		name:  "publish[] entry has guest_port 0",
+		class: ClassMalformedShape,
+		run: func() error {
+			return Validate(Declaration{
+				Egress:  Egress{Default: DenyAll},
+				Ingress: Ingress{Publish: []Publish{{GuestPort: 0, Proto: model.NetTCP}}},
+			}, true, noHostLocal)
 		},
 	}}
 
@@ -291,6 +314,129 @@ func TestClassSevenDoesNotOverReach(t *testing.T) {
 	}
 }
 
+// A tuple with NO `port` is LEGAL and means ANY PORT (§5.D), at all three sites that
+// carry a tuple.
+//
+// This is the direction that was silently wrong before the class list grew a
+// well-formedness bucket: `{cidr, proto}` was accepted and rendered as "every port on
+// that CIDR" — which is the RIGHT semantic, but it existed only as the zero value's
+// side effect, with nothing in §5.D saying so and nothing here asserting it. Now it is
+// a declared semantic, so it gets the assertion a declared semantic gets, in both
+// directions (the refusal direction is `proto`, asserted in the class table above).
+func TestAnOmittedPortMeansAnyPortAtEverySite(t *testing.T) {
+	cases := []struct {
+		name string
+		d    Declaration
+	}{{
+		name: "egress.allow[] without a port",
+		d: Declaration{Egress: Egress{
+			Default: DenyAll,
+			Allow:   []Tuple{{CIDR: mustCIDR(t, "1.1.1.1/32"), Proto: model.NetTCP}},
+		}},
+	}, {
+		name: "via[].match[] without a port",
+		d: Declaration{Egress: Egress{
+			Default: DenyAll,
+			Via: []Via{{
+				Match: []Tuple{{CIDR: mustCIDR(t, "1.1.1.1/32"), Proto: model.NetTCP}},
+				// NOT a loopback endpoint: that is class 6 regardless of the port, and it
+				// would make this case pass or fail for the wrong reason.
+				Endpoint: "10.0.0.5:15443",
+			}},
+		}},
+	}, {
+		// Both wildcards at once: no cidr AND no port. "Every TCP flow this sandbox
+		// opens goes to the endpoint" is a legal and useful declaration — it is what a
+		// transparent egress proxy is declared as.
+		name: "via[].match[] with neither cidr nor port",
+		d: Declaration{Egress: Egress{
+			Default: DenyAll,
+			Via:     []Via{{Match: []Tuple{{Proto: model.NetTCP}}, Endpoint: "10.0.0.5:15443"}},
+		}},
+	}}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := Validate(tc.d, true, allHostLocal); err != nil {
+				t.Errorf("refused a tuple with no port: %v — an omitted `port` means ANY PORT "+
+					"(§5.D); only `proto` is mandatory, because port matching depends on protocol "+
+					"matching in the kernel (D3.1)", err)
+			}
+		})
+	}
+
+	// The wildcard must also be READABLE as one rather than inferred from a bare zero,
+	// which is what AnyPort exists for (model.NetTuple's twin of AnyDest).
+	wild := Tuple{CIDR: mustCIDR(t, "1.1.1.1/32"), Proto: model.NetTCP}
+	if !wild.AnyPort() {
+		t.Error("a tuple with no port does not report AnyPort")
+	}
+	if (Tuple{Port: 443, Proto: model.NetTCP}).AnyPort() {
+		t.Error("a tuple that named a port reports AnyPort")
+	}
+}
+
+// The well-formedness class must be DISTINGUISHABLE from the proto class, and that is
+// the entire reason it exists as a class rather than as two more `invalid(...)` calls
+// under class 3.
+//
+// §6.2's cardinality criterion is the caller's REMEDY, not the implementation's error
+// count (five Volume sentinels, four classes). These remedies are different EDITS:
+// class 3 says "write `proto` in this tuple" — one field, and the error names it —
+// while class 9 says "this array has no entries" or "supply the target port". Reported
+// as `tuple-missing-proto`, an empty `match[]` sends the caller to inspect a `proto`
+// field that does not exist yet, because there is no tuple to hold one.
+func TestMalformedShapeIsDistinguishableFromAMisspelledProto(t *testing.T) {
+	emptyMatch := Validate(Declaration{Egress: Egress{
+		Default: DenyAll,
+		Via:     []Via{{Match: []Tuple{}, Endpoint: "10.0.0.5:15443"}},
+	}}, true, allHostLocal)
+	badProto := Validate(Declaration{Egress: Egress{
+		Default: DenyAll,
+		Via: []Via{{
+			Match:    []Tuple{{CIDR: mustCIDR(t, "1.1.1.1/32"), Port: 443, Proto: "tpc"}},
+			Endpoint: "10.0.0.5:15443",
+		}},
+	}}, true, allHostLocal)
+	if emptyMatch == nil || badProto == nil {
+		t.Fatalf("one of the two malformed declarations was accepted: emptyMatch=%v badProto=%v",
+			emptyMatch, badProto)
+	}
+	shapeClass, _ := ClassOf(emptyMatch)
+	protoClass, _ := ClassOf(badProto)
+	if shapeClass == protoClass {
+		t.Errorf("both report class %q — an empty `match[]` and a misspelled `proto` need "+
+			"DIFFERENT edits, so collapsing them sends the caller to inspect a `proto` field "+
+			"that does not exist yet (§6.2's remedy criterion)", shapeClass)
+	}
+	if shapeClass != ClassMalformedShape {
+		t.Errorf("empty match[] reports class %q, want %q", shapeClass, ClassMalformedShape)
+	}
+	if protoClass != ClassProtoMissing {
+		t.Errorf("misspelled proto reports class %q, want %q", protoClass, ClassProtoMissing)
+	}
+
+	// `guest_port: 0` shares class 9 with the empty `match[]` — ONE class, because both
+	// remedies are "supply the structurally required member". Splitting them would count
+	// implementation error values rather than caller-visible kinds.
+	zeroGuestPort := Validate(Declaration{
+		Egress:  Egress{Default: DenyAll},
+		Ingress: Ingress{Publish: []Publish{{Proto: model.NetTCP}}},
+	}, true, noHostLocal)
+	if zeroGuestPort == nil {
+		t.Fatal("a publish with guest_port 0 was accepted — it is a DNAT target, so zero has " +
+			"nothing to rewrite to")
+	}
+	if c, _ := ClassOf(zeroGuestPort); c != ClassMalformedShape {
+		t.Errorf("guest_port 0 reports class %q, want %q", c, ClassMalformedShape)
+	}
+	// …and every one of them is still a 400 through the single sentinel.
+	for _, err := range []error{emptyMatch, badProto, zeroGuestPort} {
+		if !errors.Is(err, ErrDeclarationInvalid) {
+			t.Errorf("%v does not satisfy errors.Is(_, ErrDeclarationInvalid)", err)
+		}
+	}
+}
+
 // `ingress.publish[]` with `proto: udp` is legal. §6.2 is explicit: `via[]`
 // excludes UDP because the original destination cannot be recovered, and a DNAT to
 // a FIXED guest port needs no such recovery — so that objection does not reach
@@ -417,9 +563,9 @@ func TestAddPublishIsIdempotentOnPortAndProto(t *testing.T) {
 // deployment supplied no second-hop uid, rather than installing a rule set with
 // no second-hop enforcement.
 //
-// This is a ninth refusal and it is NOT one of §6.2's eight — it is a property of
-// the DEPLOYMENT, not of the declaration text. Logged as a spec gap
-// (open-decisions "§6.2 第九类拒绝"); see ClassViaWithoutSecondHopUID.
+// This refusal is NOT one of §6.2's declaration-text classes — it is a property of
+// the DEPLOYMENT, which is why §6.2 states it separately and why it keeps its own
+// sentinel (its remedy is an operator's). See ClassViaWithoutSecondHopUID.
 func TestViaIsRefusedWhenTheDeploymentPinsNoSecondHop(t *testing.T) {
 	via := Declaration{Egress: Egress{
 		Default: DenyAll,
@@ -455,6 +601,157 @@ func TestViaIsRefusedWhenTheDeploymentPinsNoSecondHop(t *testing.T) {
 	noVia := Declaration{Egress: Egress{Default: AllowPublic}}
 	if err := ValidateDeployment(noVia, Deployment{}); err != nil {
 		t.Errorf("a declaration without via[] was refused for a missing second-hop uid: %v", err)
+	}
+}
+
+// The same premise, at PLACEMENT. The write-point check above is only half of it,
+// because the two facts it compares have different lifetimes: the declaration is durable
+// (record = SoT, regenerated at every placement, §3.4) while the uid is a per-process
+// deployment input. "Restart without the flag" separates them with no write anywhere —
+// the write points are then correctly closed and the row admitted by the previous
+// deployment is still in the store.
+//
+// It cannot be delegated to Generate, and that is the mechanism rather than a layering
+// preference: the second-hop pin is not part of a sandbox's rule set at all (one
+// engine-level `output` table narrowed by uid covers the deployment), so the generated
+// rule set for a `via[]` declaration is identical whether or not the pin exists. Absence
+// of enforcement is invisible in the artifact — it can only be a precondition on placing.
+//
+// The verdict is its OWN sentinel rather than the ninth class's 400: a resume or an adopt
+// carries no declaration, so "the request is invalid" would be a false statement and
+// would send the caller to edit something they never sent. The remedy is an operator's.
+func TestPlacementRefusesARecordedViaTheDeploymentCannotPin(t *testing.T) {
+	via := Declaration{Egress: Egress{
+		Default: DenyAll,
+		Via: []Via{{
+			Match:    []Tuple{{CIDR: mustCIDR(t, "1.1.1.1/32"), Port: 443, Proto: model.NetTCP}},
+			Endpoint: "10.0.0.5:15443",
+		}},
+	}}
+	err := ValidatePlacement(via, Deployment{})
+	if err == nil {
+		t.Fatal("a recorded via[] was placed under a deployment that pins no second hop — the rule " +
+			"set installs and the steered flow reaches the endpoint process, whose own egress is " +
+			"then pinned by nothing: the confused deputy §2.4 invariant 2 rejects, and invisible " +
+			"because hop 2 counts zero in `forward` (D5 ㉔)")
+	}
+	if !errors.Is(err, ErrViaUnenforceableAtPlacement) {
+		t.Errorf("the placement refusal carries no recoverable sentinel: %v", err)
+	}
+	// NOT the per-request 400: nothing about a resume/adopt request is malformed, and
+	// reporting it as a declaration class would point the caller at their own payload.
+	if errors.Is(err, ErrDeclarationInvalid) {
+		t.Error("the placement refusal maps to the declaration-invalid 400 sentinel — a resume " +
+			"carries no declaration, so 400 would send the caller to fix a payload they did not send")
+	}
+	if class, ok := ClassOf(err); ok {
+		t.Errorf("the placement refusal reports a §6.2 declaration class (%q); it is a property of "+
+			"the deployment meeting a RECORD, not of any request text", class)
+	}
+	// The message must name the mechanism and both remedies — an operator reading it has
+	// to know that restoring the flag or PATCHing the declaration are the two ways out.
+	for _, want := range []string{"confused deputy", "--via-uid", "PATCH", "forward"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal does not mention %q; it must explain the mechanism (the pin is not "+
+				"installed, hop 2 is invisible to every first-hop assertion) and both remedies, or an "+
+				"operator cannot act on it: %v", want, err)
+		}
+	}
+
+	// Given the uid, the same record places.
+	uid := 4711
+	if err := ValidatePlacement(via, Deployment{SecondHopUID: &uid}); err != nil {
+		t.Errorf("a via[] record was refused under a deployment that DOES pin the second hop: %v", err)
+	}
+	// uid 0 is a real uid here too, for the same reason as at the write point.
+	root := 0
+	if err := ValidatePlacement(via, Deployment{SecondHopUID: &root}); err != nil {
+		t.Errorf("uid 0 was treated as unset at placement: %v", err)
+	}
+	// A declaration with no via[] places under any deployment — this refusal must not
+	// become a general "no uid ⇒ no placement" gate.
+	noVia := Declaration{Egress: Egress{Default: AllowPublic}}
+	if err := ValidatePlacement(noVia, Deployment{}); err != nil {
+		t.Errorf("a declaration without via[] was refused at placement: %v", err)
+	}
+}
+
+// A second-hop uid EQUAL TO THE ENGINE'S OWN euid is refused, and this is the
+// assertion that did not exist while the defect did.
+//
+// The mechanism, in full, because "reject uid 0" looks like fastidiousness until it is
+// spelled out: the second-hop floor arm is a `meta skuid <uid>` drop whose daddr set
+// contains ruleset.SandboxCIDR (FloorV4's sibling item), and the engine's own transport
+// endpoint is a GUEST veth address inside that /16 dialed from the host. Under a uid
+// equal to the engine's, every engine→guest dial matches that arm. The
+// `established,related` return arm cannot rescue it BY DESIGN — the dial is `ct state
+// new`, exactly what the arm excludes so that a new connection to an in-floor address
+// still meets the floor (§2.4 invariant 2).
+//
+// Two things make it the worst shape of failure rather than merely a broken one, and
+// both are why this refuses at ASSEMBLY rather than at a write point:
+//   - the table is ENGINE-LEVEL, so every sandbox loses transport at once, including
+//     ones with no `via[]` at all;
+//   - `skuid` matches only ~4/5 packets of a flow (D5 ㉔), so the symptom is
+//     intermittent sandbox failure, not a clean break.
+//
+// The euid is a PARAMETER, which is what lets this run root-free: the refusal is
+// asserted against a fixture rather than against whatever uid the test process is.
+func TestASecondHopUIDEqualToTheEnginesOwnIsRefused(t *testing.T) {
+	// The production shape: the engine runs as root (ADR-0002) and the operator passes
+	// --via-uid 0.
+	root := 0
+	err := ValidateSecondHopUID(Deployment{SecondHopUID: &root}, 0)
+	if err == nil {
+		t.Fatal("a second-hop uid equal to the engine's own euid was accepted. That installs an " +
+			"engine-level `output` drop matching the engine's OWN dials to guest addresses (the " +
+			"floor's daddr set contains the sandbox /16, and the transport endpoint is a guest veth " +
+			"address), which kills readiness, liveness and every process/fs RPC for every sandbox — " +
+			"intermittently, since skuid misses packets (D5 ㉔)")
+	}
+	if !errors.Is(err, ErrSecondHopUIDIsTheEngineItself) {
+		t.Errorf("the refusal does not carry its sentinel: %v", err)
+	}
+	// It is NOT one of the declaration 400s. The distinction is load-bearing: mapping it
+	// to 400 would make it a per-request answer to a question no request asks, and the
+	// engine must refuse to ASSEMBLE rather than serve while dropping its own traffic.
+	if errors.Is(err, ErrDeclarationInvalid) {
+		t.Error("the refusal maps to the declaration-invalid sentinel — this is a property of the " +
+			"DEPLOYMENT alone, decidable with no declaration in hand, and it must fail startup " +
+			"rather than one request")
+	}
+	// The message must name the MECHANISM, not just call the uid invalid: an operator
+	// reading it has to learn that transport dies and that the symptom is intermittent,
+	// or they will retry the same value assuming a flake.
+	for _, want := range []string{"skuid", "10.66.0.0/16", "INTERMITTENT"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal does not mention %q — it must explain the mechanism and the "+
+				"intermittency, not just report an invalid uid: %v", want, err)
+		}
+	}
+
+	// Non-root parity: the rule is "the engine's own uid", not "uid 0". An engine
+	// running as 1000 must refuse 1000 and accept 0.
+	engine := 1000
+	if err := ValidateSecondHopUID(Deployment{SecondHopUID: &engine}, engine); err == nil {
+		t.Error("a non-root engine accepted its OWN uid — the predicate is euid equality, not a " +
+			"hardcoded 0")
+	}
+	if err := ValidateSecondHopUID(Deployment{SecondHopUID: &root}, engine); err != nil {
+		t.Errorf("uid 0 was refused by an engine that does not run as root: %v — uid 0 is only "+
+			"illegal because it is usually the ENGINE's uid, and nothing else: %v", err, err)
+	}
+
+	// Any other uid passes, and so does "no uid at all" (that case is
+	// ClassViaWithoutSecondHopUID's, refused per-declaration at the write point).
+	other := 12345
+	if err := ValidateSecondHopUID(Deployment{SecondHopUID: &other}, 0); err != nil {
+		t.Errorf("a dedicated non-engine uid was refused: %v", err)
+	}
+	if err := ValidateSecondHopUID(Deployment{}, 0); err != nil {
+		t.Errorf("an unset second-hop uid was refused at assembly: %v — that is not a broken "+
+			"deployment, it is a deployment with no `via[]`, and its refusal belongs at the write "+
+			"point instead", err)
 	}
 }
 

@@ -27,7 +27,33 @@ import (
 // The deployment's second-hop uid rides along because the provider installs the
 // engine-level table once at startup and needs to know whether one was supplied at
 // all; the DECLARATION never carries it (§2.4 / §6.2).
+//
+// # Why the deployment premise is RE-CHECKED here and not only at the write points
+//
+// Because a declaration outlives the deployment that admitted it. `via[]` is only
+// legal when the deployment supplies a second-hop uid (network.ValidateDeployment, at
+// create/PATCH/publish), but the uid is a per-process input while the declaration is a
+// durable record — so "restart without `--via-uid`" pulls the pair apart with no write
+// anywhere: the write points are now correctly closed, and the row admitted by the
+// previous run is still in the store, still regenerated at every placement.
+//
+// Re-checking here rather than in Generate is deliberate, and the division is the one
+// §5.D already draws: the second-hop pin is NOT part of a sandbox's rule set (one
+// engine-level `output` table narrowed by uid covers the whole deployment, installed
+// once at startup — see network.Generate's `filter output` comment), so its absence
+// cannot show up as a missing rule. It can only be a PRECONDITION on placing a
+// sandbox whose declaration needs it. network.ValidatePlacement holds the mechanism
+// and the measurement; this is the funnel that makes it structural — all three
+// placement paths (create's coldStart, resume's coldStart, adopt) derive their spec
+// here, exactly as all three write points go through ValidateDeclaration.
+//
+// The general shape, which is the reason to look for the pattern elsewhere: an
+// invariant a write point guards must be RE-EVALUATED wherever the state it guarded is
+// re-materialized.
 func (m *Mediator) steeringFor(rec model.Sandbox) (runtime.SteeringSpec, error) {
+	if err := network.ValidatePlacement(rec.Network, m.deps.Deployment); err != nil {
+		return runtime.SteeringSpec{}, fmt.Errorf("network: place %s: %w", rec.ID, err)
+	}
 	spec, err := network.Generate(rec.Network)
 	if err != nil {
 		return runtime.SteeringSpec{}, fmt.Errorf("network: generate rule set for %s: %w", rec.ID, err)
@@ -41,7 +67,6 @@ func (m *Mediator) steeringFor(rec model.Sandbox) (runtime.SteeringSpec, error) 
 		PublishPorts: ports,
 		RoutedEgress: spec.RoutedEgress,
 		SecondHopUID: m.deps.Deployment.SecondHopUID,
-		SecondHopGID: m.deps.Deployment.SecondHopGID,
 	}, nil
 }
 
@@ -62,18 +87,25 @@ func protoFor(p model.NetProto) ruleset.Proto {
 // traffic arrives on no interface at all (measured: it counts ZERO in `forward` in
 // all three shapes and is visible only in `output` — network.md D5 ㉔).
 //
-// With NO uid supplied it installs nothing, and the corresponding refusal lives at
-// the write points: a `via[]` declaration is rejected rather than recorded, because
-// recording it would leave a confused deputy live on the host while every FIRST-hop
-// assertion still passed (network.ValidateDeployment).
+// With NO uid supplied it installs nothing (and the provider drops a stale table left
+// by a previous run — see InstallSecondHop). §2.4's second invariant is then
+// unenforced, so `via[]` is refused at BOTH ends, which is one obligation in two
+// places rather than a belt-and-braces pair:
+//
+//   - the write points keep such a declaration out of the record
+//     (network.ValidateDeployment) — recording it would leave a confused deputy live
+//     while every FIRST-hop assertion still passed;
+//   - every placement re-checks the premise (network.ValidatePlacement, funnelled
+//     through steeringFor) — because a declaration admitted by a deployment that DID
+//     supply the uid outlives it, and "restart without the flag" pulls the two apart
+//     with no write anywhere.
 func (m *Mediator) InstallSecondHopTable(ctx context.Context) error {
 	if !m.deps.Deployment.SecondHopPinned() {
-		// Nothing to install — but the STALE table from a previous run, started with a
-		// uid this one does not have, must go. Leaving it would keep a host-level
-		// `output` table narrowed by an identity this deployment no longer knows about:
-		// a rule set nobody can explain, refusing traffic for a reason not in the
-		// current configuration.
-		if err := m.deps.Runtime.InstallSecondHop(ctx, ruleset.RuleSet{}, nil, nil); err != nil {
+		// The nil uid is handed to the provider rather than short-circuited here: tearing
+		// down the stale table is a MECHANISM (an nft table on this host), so it belongs to
+		// §5.A. The mediator's part is knowing that "no uid" is a state the provider must
+		// be TOLD about, not one it can be left to infer from never being called.
+		if err := m.deps.Runtime.InstallSecondHop(ctx, ruleset.RuleSet{}, nil); err != nil {
 			return err
 		}
 		return nil
@@ -82,7 +114,7 @@ func (m *Mediator) InstallSecondHopTable(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	return m.deps.Runtime.InstallSecondHop(ctx, rs, m.deps.Deployment.SecondHopUID, m.deps.Deployment.SecondHopGID)
+	return m.deps.Runtime.InstallSecondHop(ctx, rs, m.deps.Deployment.SecondHopUID)
 }
 
 // Network reads a sandbox's declaration together with the two facts §6.1's read face
@@ -122,52 +154,6 @@ func (m *Mediator) publishEndpoints(id model.SandboxID) []string {
 		return nil
 	}
 	return append([]string(nil), ls.placement.PublishEndpoints...)
-}
-
-// SetNetwork is the `PATCH /v1/sandboxes/{id}` write for the declaration: whole for
-// whole (§6.2 — no field-level merge, no pending value).
-//
-// Editable ONLY from `paused`, which is the same rule the resource caps follow and
-// for the same reason: the declaration is consumed by the provider, which
-// materializes it at placement. Accepting the edit on a `running` sandbox would
-// leave the record and the live rule set disagreeing for an unbounded period — a
-// fake invariant, on a security-relevant field. `applies_at: next-resume`.
-//
-// Note what does NOT come through here: `ingress.publish[]` has its own hot-add
-// endpoint. It can, however, be REMOVED through here, because there is no
-// un-publish endpoint — and that is a mechanism decision rather than an omission:
-// measured, deleting a publish's DNATs refuses new connections while ESTABLISHED
-// flows keep transferring data (conntrack holds the NAT binding and rule deletion
-// is not evaluated against it), so a `running` un-publish could only promise "no new
-// connections", never "the port is closed" — and the difference is exactly what a
-// caller revoking an inbound port wants. Going through this whole-binding PATCH has
-// no such ambiguity: the placement is rebuilt and the old flows go with it.
-func (m *Mediator) SetNetwork(ctx context.Context, id model.SandboxID, d model.NetworkDecl) error {
-	l := m.lock(id)
-	l.Lock()
-	defer l.Unlock()
-
-	rec, err := m.deps.Store.GetSandbox(ctx, id)
-	if err != nil {
-		return fmt.Errorf("set network: %w", err)
-	}
-	switch rec.State {
-	case model.Paused:
-		// editable
-	case model.Running:
-		return fmt.Errorf("set network: %w: the network declaration is editable only from `paused` "+
-			"(the rule set is regenerated at the next placement, §3.4/§5.D) — pause first, then "+
-			"PATCH, then resume. `POST /v1/sandboxes/%s/publish` is the one field that hot-adds on a "+
-			"running sandbox", store.ErrConflict, id)
-	default:
-		return fmt.Errorf("set network: %w (state=%s: a Binding is editable only from running or paused)",
-			store.ErrConflict, rec.State)
-	}
-	next := d.Normalize()
-	if err := m.deps.Store.UpdateBinding(ctx, id, rec.State, store.Binding{Network: &next}, nil); err != nil {
-		return fmt.Errorf("set network: %w", err)
-	}
-	return nil
 }
 
 // AddPublish is `POST /v1/sandboxes/{id}/publish` (§5.D / §6.1): the one Binding

@@ -3,13 +3,68 @@ package orchestrator
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"engine/internal/model"
 	"engine/internal/network"
 )
+
+// The assembly REFUSES a second-hop uid equal to its own euid, and it refuses BEFORE
+// touching anything — no provider constructed, no state directory materialized, no
+// table installed.
+//
+// Both halves are the assertion. `network.ValidateSecondHopUID` owns the mechanism
+// (see its test); this owns the POSITION, which is the part a flag-level check in
+// cmd/orchestrator would not deliver: the substrate harness builds an Engine directly,
+// so a check that lived in main.go would be bypassed by every test and by any embedder.
+// And placing it after the providers are up would mean discovering the problem from an
+// engine that has already installed the table and begun dialing through it.
+//
+// Root-free precisely because the check runs first: rootfs/runtime/btrfs are never
+// reached, so this test does not need the substrate the rest of the assembly does.
+func TestTheAssemblyRefusesItsOwnUIDAsTheSecondHopUID(t *testing.T) {
+	base := t.TempDir()
+	euid := os.Geteuid()
+	_, err := New(Config{
+		TemplatesDir: filepath.Join(base, "templates"),
+		StateDir:     filepath.Join(base, "state"),
+		StorePath:    ":memory:",
+		SecondHopUID: &euid,
+	})
+	if err == nil {
+		t.Fatal("the assembly accepted its own euid as the second-hop uid — that installs an " +
+			"engine-level output drop covering the engine's OWN dials to guest addresses, breaking " +
+			"transport for every sandbox at once and intermittently (network.ValidateSecondHopUID)")
+	}
+	if !errors.Is(err, network.ErrSecondHopUIDIsTheEngineItself) {
+		t.Errorf("New failed for some other reason than the self-uid refusal: %v", err)
+	}
+	// The position: nothing was materialized. If the check ever drifts below the
+	// provider construction, this is what fires.
+	if _, statErr := os.Stat(filepath.Join(base, "state")); statErr == nil {
+		t.Error("the refusal happened AFTER the providers materialized state — it must be the last " +
+			"point at which nothing exists yet, because an engine that has already installed the " +
+			"second-hop table is past the point where learning this helps")
+	}
+
+	// The control arm: the same config with a uid the engine does NOT run as gets past
+	// this check (it then fails or succeeds on the substrate, which is not this test's
+	// business — what matters is that the refusal is specific to the self-uid).
+	other := euid + 4711
+	if _, err := New(Config{
+		TemplatesDir: filepath.Join(base, "templates"),
+		StateDir:     filepath.Join(base, "state"),
+		StorePath:    ":memory:",
+		SecondHopUID: &other,
+	}); errors.Is(err, network.ErrSecondHopUIDIsTheEngineItself) {
+		t.Errorf("a uid the engine does not run as was refused as the engine's own: %v", err)
+	}
+}
 
 // --- the wire decode / encode contract ----------------------------------------
 
@@ -240,6 +295,129 @@ func TestAnExplicitEmptyDefaultIsDistinguishedFromAnAbsentOne(t *testing.T) {
 	}
 }
 
+// §5.D's PORT WILDCARD on the wire: a declaration carrying a wildcard tuple must come
+// back out of the read face as a legal write body that still MEANS the same thing.
+//
+// This is the property `cidr` already had and `port` did not. With `port` rendered as
+// `"port": 0`, the wildcard survived only as a zero value's side effect — the read face
+// emitted a port number that happens to be zero, which is §5.D's own objection to a
+// defaultable `egress.default`: the record's empty value stops being distinguishable
+// from the caller having chosen it. So the assertion is not "it round-trips" but "the
+// wildcard is SPELLED as the omission, on both faces".
+func TestThePortWildcardIsSpelledAsAnOmissionOnBothFaces(t *testing.T) {
+	// A wildcard tuple in each of the two egress sites, written the way a caller writes
+	// it: the field simply absent.
+	const in = `{"egress":{"default":"deny","allow":[{"cidr":"1.1.1.1/32","proto":"tcp"}],` +
+		`"via":[{"match":[{"proto":"tcp"}],"endpoint":"10.0.0.5:15443"}]},"ingress":{"publish":[]}}`
+	var w networkWire
+	dec := json.NewDecoder(strings.NewReader(in))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&w); err != nil {
+		t.Fatalf("a tuple with no `port` was refused by the decoder: %v — omitting it is legal "+
+			"and means any port (§5.D)", err)
+	}
+	decl, err := w.decode()
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !decl.Egress.Allow[0].AnyPort() || !decl.Egress.Via[0].Match[0].AnyPort() {
+		t.Fatalf("an omitted `port` did not decode to the any-port wildcard: %+v", decl)
+	}
+
+	out, err := json.Marshal(encodeNetwork(decl, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// THE READ FACE MUST NOT EMIT `"port": 0`. That spelling reads as a port number, and
+	// a caller cannot tell it from a record built before the field existed.
+	if strings.Contains(string(out), `"port":0`) {
+		t.Errorf("the read face rendered the wildcard as `\"port\":0` — it must render it as the "+
+			"OMISSION, or the recorded wildcard is indistinguishable from a caller who chose port "+
+			"zero (§5.D's criterion for requiring `egress.default`):\n%s", out)
+	}
+	if strings.Contains(string(out), `"port"`) {
+		t.Errorf("the read face emitted a `port` member for a wildcard tuple:\n%s", out)
+	}
+
+	// …and the output is a legal write body that still means any-port.
+	var back networkWire
+	rt := json.NewDecoder(bytes.NewReader(out))
+	rt.DisallowUnknownFields()
+	if err := rt.Decode(&back); err != nil {
+		t.Fatalf("the read face's own output is not a legal write body (%v):\n%s", err, out)
+	}
+	again, err := back.decode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !again.Egress.Allow[0].AnyPort() || !again.Egress.Via[0].Match[0].AnyPort() {
+		t.Errorf("the wildcard did not survive the round trip: %+v", again)
+	}
+
+	// THE OTHER DIRECTION, so the omission is not simply "port is never emitted": a tuple
+	// that NAMED a port must still carry it out, or every declaration would silently widen
+	// to all ports on the first read-modify-write.
+	pinned, err := networkWire{Egress: egressWire{
+		Allow: []tupleWire{{CIDR: "1.1.1.1/32", Port: 443, Proto: "tcp"}},
+	}}.decode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(encodeNetwork(pinned, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), `"port":443`) {
+		t.Errorf("a tuple that named a port lost it on the read face — every read-modify-write "+
+			"would then widen the declaration to ALL ports:\n%s", body)
+	}
+}
+
+// An EXPLICIT `"port": 0` and an omitted `port` must record the SAME value, and the read
+// face must render that value exactly one way.
+//
+// Two spellings of one meaning is only a defect when both SURVIVE INTO the record and
+// then compare unequal on a later read-modify-write — that is what §6.2's v4-mapped class
+// refuses. Here they collapse at the decoder, which is how `cidr` already behaves
+// (`"cidr": ""` decodes to any-destination). This asserts the collapse rather than
+// leaving it to be re-derived, because the alternative — admitting both and recording
+// them differently — is the failure that class exists to name.
+func TestAnExplicitZeroPortRecordsAsTheWildcardItself(t *testing.T) {
+	decodeOne := func(body string) model.NetTuple {
+		t.Helper()
+		var w networkWire
+		d := json.NewDecoder(strings.NewReader(body))
+		d.DisallowUnknownFields()
+		if err := d.Decode(&w); err != nil {
+			t.Fatalf("decode %s: %v", body, err)
+		}
+		got, err := w.decode()
+		if err != nil {
+			t.Fatalf("decode %s: %v", body, err)
+		}
+		return got.Egress.Allow[0]
+	}
+	omitted := decodeOne(`{"egress":{"default":"deny","allow":[{"cidr":"1.1.1.1/32","proto":"tcp"}]}}`)
+	explicit := decodeOne(`{"egress":{"default":"deny","allow":[{"cidr":"1.1.1.1/32","port":0,"proto":"tcp"}]}}`)
+	if omitted != explicit {
+		t.Errorf("`\"port\": 0` and an omitted `port` recorded DIFFERENT values (%+v vs %+v) — "+
+			"two spellings that survive into the record compare unequal on every subsequent "+
+			"read-modify-write, which is §6.2's v4-mapped objection", omitted, explicit)
+	}
+	if !explicit.AnyPort() {
+		t.Error("an explicit `\"port\": 0` did not record as the any-port wildcard — the decided " +
+			"semantic is that it is LEGAL and means any port, not a 400")
+	}
+	// One emitted spelling for the one recorded value.
+	out, err := json.Marshal(encodeTuple(explicit))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), `"port"`) {
+		t.Errorf("the read face emitted a `port` member for the wildcard: %s", out)
+	}
+}
+
 // Round-trip: what the caller writes must come back out of the read face in a form
 // they can PATCH straight back (§6.1 makes the read-modify-write a contract
 // requirement, so the read face's output has to be a legal write body).
@@ -283,16 +461,88 @@ func TestTheReadFaceOutputIsALegalWriteBody(t *testing.T) {
 	if len(again.Ingress.Publish) != 1 || again.Ingress.Publish[0].GuestPort != 8080 {
 		t.Errorf("the publish entry did not survive the round trip: %+v", again.Ingress.Publish)
 	}
-	// The `state` member the read face adds is NOT a write field, so a caller who
-	// PATCHes the GET response verbatim would be rejected by DisallowUnknownFields.
-	// That is worth knowing about explicitly rather than discovering: the round-trip
-	// above passes because `networkWire` has no `state`, and this asserts the read
-	// response's EXTRA member is the only difference.
+	// `encodeNetwork` alone does not set `state` — the handler does, which is why the
+	// body above round-trips without exercising the read-only members at all. That is
+	// precisely the hole TestAFullReadResponseIsALegalWriteBody closes.
 	var full networkReadResp
 	if err := json.Unmarshal(out, &full); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(string(out), `"state"`) && full.State != "" {
 		t.Error("unexpected non-empty state in a directly-encoded declaration")
+	}
+}
+
+// A FULL read response — one carrying BOTH read-only members the read face can emit,
+// `state` and a per-publish `host_endpoint` — must be a legal write body verbatim.
+//
+// This is the assertion the test above cannot make. It builds its body from
+// `encodeNetwork` alone, which sets neither read-only member (`state` is the handler's,
+// `host_endpoint` needs a live placement), so it round-trips while leaving §6.1's
+// contract requirement untested at both points where the response actually differs
+// from a declaration.
+//
+// The gap it hid was real: `DisallowUnknownFields` applies RECURSIVELY, so a `running`
+// sandbox with one publish produced a GET response that PATCH refused with
+// `json: unknown field "host_endpoint"` — one level down from where `state` lives. It
+// survived because §5.D's SAFE sequence (`pause → GET → PATCH → resume`) reads after
+// the pause, when there is no placement and hence no endpoint to emit; only the order
+// §5.D names as dangerous hit the 400.
+func TestAFullReadResponseIsALegalWriteBody(t *testing.T) {
+	decl := model.NetworkDecl{}
+	decl.Egress.Default = model.NetDeny
+	decl.Ingress.Publish = []model.NetPublish{{GuestPort: 8080, Proto: model.NetTCP}}
+
+	// A live placement: encodeNetwork renders `host_endpoint` for publish[0], and the
+	// handler stamps `state`. Together this is byte-for-byte what a caller GETs from a
+	// `running` sandbox that has published a port.
+	resp := encodeNetwork(decl, []string{"10.66.0.1:33445"})
+	resp.State = string(model.Running)
+	out, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"state"`, `"host_endpoint"`} {
+		if !strings.Contains(string(out), want) {
+			t.Fatalf("this test is only meaningful if the body carries %s — it does not, so the "+
+				"read face changed and the assertion below is vacuous:\n%s", want, out)
+		}
+	}
+
+	var back networkWire
+	dec := json.NewDecoder(bytes.NewReader(out))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&back); err != nil {
+		t.Fatalf("a full read response is not a legal write body (%v) — §6.1 makes the "+
+			"read-modify-write a CONTRACT REQUIREMENT, so every read-only member the read face "+
+			"emits must be accepted and ignored on the write path, `host_endpoint` included:\n%s",
+			err, out)
+	}
+
+	// Accepted AND IGNORED: the ignored members must not reach the record. An endpoint
+	// that survived decode would be a placement fact written back into a declaration.
+	again, err := back.decode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(again.Ingress.Publish) != 1 || again.Ingress.Publish[0].GuestPort != 8080 ||
+		again.Ingress.Publish[0].Proto != model.NetTCP {
+		t.Errorf("the publish entry did not survive the round trip: %+v", again.Ingress.Publish)
+	}
+	if again.Ingress.Publish[0] != (model.NetPublish{GuestPort: 8080, Proto: model.NetTCP}) {
+		t.Errorf("a read-only member leaked into the record through decode: %+v",
+			again.Ingress.Publish[0])
+	}
+
+	// The non-exemption, at the SAME nesting depth as the new ignored member: a
+	// misspelling inside a publish item is still refused. Ignoring `host_endpoint` must
+	// not have been implemented as "publish items tolerate unknown keys".
+	bad := `{"egress":{"default":"deny","allow":[],"via":[]},` +
+		`"ingress":{"publish":[{"guest_port":8080,"proto":"tcp","host_endpiont":"x"}]}}`
+	strict := json.NewDecoder(strings.NewReader(bad))
+	strict.DisallowUnknownFields()
+	if err := strict.Decode(&networkWire{}); err == nil {
+		t.Error("a misspelled key inside a publish item was accepted — accepting the read face's " +
+			"own read-only members is not a general exemption from DisallowUnknownFields (§6.1)")
 	}
 }

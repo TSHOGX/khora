@@ -1,15 +1,19 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"syscall"
 	"testing"
 
 	"connectrpc.com/connect"
+
+	v1 "engine/internal/transport/gen/engine/transport/v1"
 )
 
 // The errno→code table is the fs service's whole error contract, and a wrong row
@@ -178,4 +182,124 @@ func TestEntryInfoSymlinkIsLstatAndAbsolutized(t *testing.T) {
 		return
 	}
 	t.Errorf("List did not return the symlink at all; got %d entries", len(entries))
+}
+
+// `length` off the wire is an UPPER BOUND, not an allocation size. Pre-sizing a
+// buffer from it let one number drive a guest-side allocation of arbitrary size,
+// and the sandbox is TERMINATED on exceeding its RAM cap (§3.4) — so this is the
+// D4.4 "neither end holds the whole thing" security property, at the RPC.
+//
+// Asserted two ways because either alone is passable by a wrong fix: the returned
+// length (a size-clamp would also satisfy this) AND total bytes allocated, which
+// only a bound-not-preallocate fix satisfies. HeapAlloc deltas are noisy, so the
+// threshold is orders of magnitude below the 16 GiB the old code took for 1<<34
+// and far above ordinary test churn.
+func TestFsReadHugeLengthDoesNotPreallocate(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "small")
+	if err := os.WriteFile(p, []byte("0123456789"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	var before, after goruntime.MemStats
+	goruntime.GC()
+	goruntime.ReadMemStats(&before)
+
+	resp, err := (&fsServer{}).Read(context.Background(), connect.NewRequest(&v1.ReadRequest{
+		Path: p, Length: 1 << 34, // 16 GiB, on a 10-byte file
+	}))
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	goruntime.ReadMemStats(&after)
+
+	if got := string(resp.Msg.Data); got != "0123456789" {
+		t.Fatalf("Read data = %q, want %q", got, "0123456789")
+	}
+	const cap = 64 << 20 // 64 MiB: ~256x under 16 GiB, way over test churn
+	if grew := after.TotalAlloc - before.TotalAlloc; grew > cap {
+		t.Fatalf("Read(length=1<<34) allocated %d bytes on a 10-byte file; "+
+			"length must bound the read, not size the buffer", grew)
+	}
+}
+
+// A length larger than int64 slice range used to PANIC in makeslice before any
+// bound was applied — a request that kills the transport, not one that errors.
+func TestFsReadAbsurdLengthDoesNotPanic(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "small")
+	if err := os.WriteFile(p, []byte("hi"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	resp, err := (&fsServer{}).Read(context.Background(), connect.NewRequest(&v1.ReadRequest{
+		Path: p, Length: 1 << 50,
+	}))
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if got := string(resp.Msg.Data); got != "hi" {
+		t.Fatalf("Read data = %q, want %q", got, "hi")
+	}
+}
+
+// THE GUARD ON THE FIX ITSELF. The tempting bound is min(length, Size()), and it
+// is WRONG: measured, /proc/self/status reports st_size 0 while yielding >1 KB.
+// Clamping by size reads every such file as EMPTY — a silent wrong answer, worse
+// than the allocation it replaces. Nothing else in the suite would catch it, since
+// regular-file tests all have honest sizes.
+func TestFsReadProcFileWithZeroStatSize(t *testing.T) {
+	const p = "/proc/self/status"
+	fi, err := os.Stat(p)
+	if err != nil {
+		t.Skipf("no %s on this platform: %v", p, err)
+	}
+	if fi.Size() != 0 {
+		t.Skipf("%s reports size %d, not 0 — this guard needs a size-0 file", p, fi.Size())
+	}
+	want, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatalf("baseline read: %v", err)
+	}
+	resp, err := (&fsServer{}).Read(context.Background(), connect.NewRequest(&v1.ReadRequest{
+		Path: p, Length: 1 << 20,
+	}))
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if n := len(resp.Msg.Data); n == 0 {
+		t.Fatalf("Read(%s) returned 0 bytes though the file yields %d: "+
+			"length must not be clamped by a reported size of 0", p, len(want))
+	}
+	if !strings.Contains(string(resp.Msg.Data), "Name:") {
+		t.Fatalf("Read(%s) = %q; want the real content", p, resp.Msg.Data)
+	}
+}
+
+// length still truncates when it is genuinely smaller than the file, and offset
+// composes with it — the ordinary contract the bound must not have broken.
+func TestFsReadLengthTruncatesAndComposesWithOffset(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "f")
+	if err := os.WriteFile(p, []byte("abcdefghij"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	for _, tc := range []struct {
+		off, length int64
+		want        string
+	}{
+		{0, 4, "abcd"},
+		{6, 4, "ghij"},
+		{6, 100, "ghij"},     // length past EOF is not an error
+		{0, 0, "abcdefghij"}, // length<=0 = read to EOF
+	} {
+		resp, err := (&fsServer{}).Read(context.Background(), connect.NewRequest(&v1.ReadRequest{
+			Path: p, Offset: tc.off, Length: tc.length,
+		}))
+		if err != nil {
+			t.Fatalf("Read(off=%d,len=%d): %v", tc.off, tc.length, err)
+		}
+		if got := string(resp.Msg.Data); got != tc.want {
+			t.Fatalf("Read(off=%d,len=%d) = %q, want %q", tc.off, tc.length, got, tc.want)
+		}
+	}
 }

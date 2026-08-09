@@ -34,8 +34,7 @@ func main() {
 		nodeDisk  = flag.Int64("node-disk-byte", 0, "§3.4 no-oversubscribe disk budget: bytes for sandbox Overlay upper+work plus Template/layer bytes; 0 = unmetered (axis not gated). Set BELOW the raw device size — the budget counts only what the engine may PROMISE guests, so per-sandbox substrate overhead (runsc state on disk) lives outside it. While metered, a create must specify a disk cap or it is refused")
 		nodeMem   = flag.Int64("node-memory-byte", 0, "§3.4 no-oversubscribe memory budget: total host RAM the engine may promise to sandboxes; 0 = unmetered (axis not gated). Set BELOW physical RAM — the budget counts only what the engine may PROMISE guests, so per-sandbox substrate overhead (sentry/gofer footprint) lives outside it. While metered, a create must specify a memory cap or it is refused")
 		sudo      = flag.Bool("sudo", false, "prefix runsc/ip with sudo (dev; prod runs as root)")
-		viaUID    = flag.Int("via-uid", -1, "§2.4 invariant 2: the uid of the host-local process behind `egress.via[].endpoint`, whose OWN egress the engine pins under the same L0 floor. A DEPLOYMENT input, never a declaration field — the engine does not know or ask what is behind that endpoint, only which local uid to pin. Unset (-1) ⇒ no second-hop table is installed AND `egress.via[]` declarations are REFUSED (400): accepting one would record a declaration whose invariant the engine cannot enforce, leaving a confused deputy live while every first-hop assertion still passes")
-		viaGID    = flag.Int("via-gid", -1, "the gid counterpart of --via-uid; unset (-1) = narrow by uid alone")
+		viaUID    = flag.Int("via-uid", -1, "§2.4 invariant 2: the uid of the host-local process behind `egress.via[].endpoint`, whose OWN egress the engine pins under the same L0 floor. A DEPLOYMENT input, never a declaration field — the engine does not know or ask what is behind that endpoint, only which local uid to pin. Unset (-1) ⇒ no second-hop table is installed AND `egress.via[]` declarations are REFUSED (400): accepting one would record a declaration whose invariant the engine cannot enforce, leaving a confused deputy live while every first-hop assertion still passes. Must NOT be this process's own uid — that value puts the engine's own guest dials under the second-hop floor and is refused at startup (it would break transport for every sandbox, intermittently)")
 		pubIP     = flag.String("publish-ip", "", "host address §5.D `ingress.publish[]` endpoints bind to; empty = 127.0.0.1. The conservative default is deliberate: publish is an EXPLICIT inbound exception (§2.1 ③), so reachability from outside this host must come from a decision rather than from omitting a flag")
 	)
 	flag.Parse()
@@ -43,12 +42,15 @@ func main() {
 	// -1 is the "unset" sentinel because uid 0 is a REAL uid: a plain int flag could
 	// not tell "the operator said root" from "the operator said nothing", and those
 	// must behave oppositely (install the table and permit `via[]` vs neither).
-	var secondHopUID, secondHopGID *int
+	//
+	// "uid 0 is a real uid" says nothing about whether it is a LEGAL one here: it is
+	// this process's own uid (ADR-0002 — the engine runs as root), and that value would
+	// put the engine's own dials to guest addresses under the second-hop floor.
+	// orchestrator.New refuses it — in the assembly rather than here, so the substrate
+	// harness (which builds an Engine directly) cannot bypass the check.
+	var secondHopUID *int
 	if *viaUID >= 0 {
 		secondHopUID = viaUID
-	}
-	if *viaGID >= 0 {
-		secondHopGID = viaGID
 	}
 
 	eng, err := orchestrator.New(orchestrator.Config{
@@ -64,7 +66,6 @@ func main() {
 		NodeDiskByte:        *nodeDisk,
 		NodeMemoryByte:      *nodeMem,
 		SecondHopUID:        secondHopUID,
-		SecondHopGID:        secondHopGID,
 		HostPublishIP:       *pubIP,
 		Sudo:                *sudo,
 	})
