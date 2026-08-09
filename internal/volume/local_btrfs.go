@@ -140,6 +140,27 @@ func (b *LocalBtrfs) applyCap(ctx context.Context, volumeID string, capBytes int
 // unit. See Backend.Usage: the LIMIT half is DIAGNOSTIC ONLY — the substrate maps
 // "no cap" and 0 onto each other, so it cannot distinguish "never capped" from
 // "deliberately uncapped" and must never be used to validate the record.
+//
+// A QUOTA-CAPABLE UNIT WHOSE ROW CANNOT BE READ IS AN ERROR, NEVER AN UNCAPPED ONE.
+// Measured: `qgroup show -f <path>` enumerates EVERY row on the filesystem and
+// applies the filter afterwards, so a subvolume deleted concurrently ANYWHERE on
+// that filesystem fails the read wholesale — the error even names a row that is not
+// ours ("cannot find the qgroup 0/21680"), 157 failures in 2142 reads under churn.
+// The substrate's cleaner makes that churn asynchronous, so no caller can serialize
+// against it.
+//
+// Answering `(walk, 0, nil)` there is a DEFINITE answer synthesized from a failure,
+// which §4.4-A forbids a provider from producing, and it is wrong in BOTH halves:
+// the walk counts file data only while the row also charges metadata extents (16 KiB
+// on an EMPTY unit), so `used` comes back UNDER the substrate's own number and the
+// cap write point's strict inequality would admit a cap the substrate then wedges the
+// unit on (volume.md D7.3) — while limit 0 is indistinguishable from a deliberately
+// uncapped volume. Every caller already handles the error correctly: inspect degrades
+// its response, the §6.1 PATCH write point FAILS CLOSED, and RepairVolumeCaps draws no
+// conclusion. The fallback is what made those three handlers unreachable.
+//
+// The walk stays for a PLAIN-DIRECTORY unit, which has no row to read and for which
+// "no cap" is the truth rather than a guess.
 func (b *LocalBtrfs) Usage(ctx context.Context, volumeID string) (int64, int64, error) {
 	if err := validateID(volumeID); err != nil {
 		return 0, 0, err
@@ -147,13 +168,10 @@ func (b *LocalBtrfs) Usage(ctx context.Context, volumeID string) (int64, int64, 
 	unit := b.unitPath(volumeID)
 	if b.Btrfs.IsSubvolume(ctx, unit) {
 		used, limit, err := b.Btrfs.Usage(ctx, unit)
-		if err == nil {
-			return used, limit, nil
+		if err != nil {
+			return 0, 0, fmt.Errorf("volume: read the quota row of %s: %w", volumeID, err)
 		}
-		// Quotas unreadable (disabled on this fs, or a transient bulk-read failure):
-		// fall through to the allocation walk rather than reporting 0, which a caller
-		// would read as an empty volume and use to admit a cap lowering that then
-		// wedges the unit permanently (volume.md D7.3).
+		return used, limit, nil
 	}
 	used, err := allocbytes.Tree(unit)
 	if err != nil {
