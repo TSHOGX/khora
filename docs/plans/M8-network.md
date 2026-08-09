@@ -16,7 +16,7 @@
 `(声明, L0 地板) → 抽象规则集`)、**声明落进沙箱记录**(四字段 Binding + 一个热加写点)、
 **`SteeringSpec` 从空结构变成真载荷**、**provider 侧的渲染与安装**(每沙箱一张 nft 表,装在建 netns 之后、
 拉起隔离单元之前)、**出网所需的三件宿主机制**(今天一件都没有,故 `default:allow` 今天无从物化)、
-**第二跳的强制**(另一张引擎级 `output` 表,按部署期 uid/gid 收窄 —— §2.4 第二条 invariant 的后半句,
+**第二跳的强制**(另一张引擎级 `output` 表,按部署期 uid 收窄(`skuid`) —— §2.4 第二条 invariant 的后半句,
 今天连前置都只有一半),以及**规则集作为崩溃幸存宿主态进入 §4.4-A 对账**。
 
 它是 ladder 的最后一级,也是**唯一安全关键的一级**:验收的重点不是"能通",而是**那些会静默通过的性质**
@@ -24,33 +24,6 @@
 
 **不需要任何新 seam 类型**:`SteeringSpec` 是 §5.A 契约里既有的成员,`arch` 守卫已预先登记
 `internal/network`。
-
----
-
-## 1. 起点:落地进度(spec 各处指向此处)
-
-**spec 用现在时描述 §2.4 那三条 invariant(§2.1 ③④ / §2.4 / §5.D),那是义务规格。**
-本节是"代码兑现到哪一步"这句陈述的唯一出处,spec 侧只留指针。**本节随 M8 过评审门而整节删除。**
-
-**已兑现(门 A 全部 + 门 B 已跑通的部分,均在真 substrate 上有输出)**:
-
-- `internal/ruleset`(leaf,两跳共用的静态地址事实 + 抽象规则词汇)· `internal/network`(§5.D:声明、
-  八类 400、纯函数生成器、第二跳规则集)· `SteeringSpec` 真载荷 · provider 侧渲染 + 安装 + 四条渲染守卫 ·
-  声明落库(`sandboxes.network`,§3.4 Binding)· `coldStart` 每次 placement 从**当前记录**派生 ·
-  `Adopt` 重装规则集 · 两个 §6 端点 · 三个声明写点开 `DisallowUnknownFields` ·
-  `--via-uid`/`--via-gid`/`--publish-ip` 与起步时装一次的第二跳表。
-- **支柱④ 的谓词那一半已在**,并已按"guest root 伪造源地址后仍被拦、且地板计数增长"验收(门 B 第 10 条)。
-- **"不可达"不再是巧合**:`deny` 沙箱**照样装** guest 默认路由,故它的包真的打到地板上、被一条会计数的
-  规则 reject —— 对 guest 是同一个结局,而引擎从"继承了一个巧合"变成"执行了一次它能证明的拒绝"。
-  (原先只在 `RoutedEgress` 时装路由,包死在 gVisor netstack 里、地板计数恒 0 —— 这既是 D5 ⑤ 点名的
-  那个巧合,也在验收纪律下不可断言。)
-- **IPv6** 由同一条不带 family 限定的 ct-state 规则覆盖,渲染输出里无 `nfproto ipv6` 臂(门 B 第 10b 条)。
-
-**门 B 尚未跑通/未写的条目**(唯一的未兑现面):第 13/13b 条(对账 + 活流跨重启)· 第 14 系列(publish
-五问、14b/14c/14d/14e)· 第 15 条(`PATCH` 的 read-modify-write 危险)。这些条目的代码已落,断言在跑或待跑。
-
-**两处 spec 缺口已按纪律登记**(见 [`open-decisions.md`](../spec/open-decisions.md)):§6.2 的"第九类拒绝"
-(未给第二跳 uid 时收 `via[]`)· `GET …/network` 的响应能否原样回写给 `PATCH`。两条都在评审门上拍板。
 
 ---
 
@@ -62,7 +35,7 @@
 | **2** | L0 地板,住一个 leaf 包 | 四项全静态(D5 ④⑧):link-local(v4+v6)/ loopback / sibling CIDR / 宿主自身(ct-state)。**两跳共用一份** |
 | **3** | 声明落库 | `sandboxes` 表新增声明列(§3.4 Binding);`CREATE TABLE` 直接改,**不写迁移**(无兼容负担) |
 | **3b** | create 上省略 `network` 的归一化 | 省略 = `{deny, [], [], []}`,**在写点显式落库**(§5.D)。**它与第 4 件的第一类 400 是两件事**:整份省略合法,给了 `network` 却漏 `egress.default` 才 400。**故这一件与 `DisallowUnknownFields` 必须同时落**——否则一个拼错的 `netwrok` 键会被当成"省略",静默拿到一个 `deny` 沙箱而调用方以为自己声明了别的 |
-| **4** | 声明的八类 400 + 校验在准入门之前 | §6.2 那张清单逐条,**含 `via[].endpoint` 非宿主本地 / 落在地板内**两类,**外加 `egress.allow[]` 整段落在地板 loopback / link-local 项内**(判据是整段包含、不判 `port`/`proto`、**不覆盖 sibling CIDR 与宿主本地**——前者已因 `input` 侧也发声明放行而是活规则、是 §5.D 语义 ③ 的声明路径,D4.2 / D5 ㉑)与 **v4-mapped 字面量当场拒**(D5 ⑲,它是前一类的必要前置) |
+| **4** | 声明的九类 400 + 一类部署 400 + 校验在准入门之前 | §6.2 那张清单逐条,**含 `via[].endpoint` 非宿主本地 / 落在地板内**两类,**外加 `egress.allow[]` 整段落在地板 loopback / link-local 项内**(判据是整段包含、不判 `port`/`proto`、**不覆盖 sibling CIDR 与宿主本地**——前者已因 `input` 侧也发声明放行而是活规则、是 §5.D 语义 ③ 的声明路径,D4.2 / D5 ㉑)、**v4-mapped 字面量当场拒**(D5 ⑲,它是前一类的必要前置),与**良构性:声明对象自身立不起来**(`via[]` 条目的 `match[]` 为空 / `publish[]` 条目的 `guest_port` 为 0——remedy 是"给数组添一个结构上必需的成员",与"元组缺 `proto`"不是同一个语义种类,§6.2)。**第十条拒绝不属于这九类**:`via[]` 遇上未给第二跳 uid 的**部署**,是部署而非声明文本的性质(第 12b 件) |
 | **5** | `SteeringSpec` 变成真载荷 | 抽象规则集 + publish 端点描述符;**签名里不得出现宿主原语**(§5.A ❌ 清单,`seam_test.go` 已守) |
 | **6** | provider 侧渲染 + 安装 | 每沙箱**一张 nft 表**;`iifname` / guest IP / publish 宿主端点在 placement 时绑定 |
 | **7** | 安装与 placement 原子 | 装在**建 netns/veth 之后、拉起隔离单元之前**(§2.4);半建失败走 §4.4-A 回收 |
@@ -73,7 +46,7 @@
 | **10** | `network` 进 `PATCH` + create | 整份换整份、`next-resume` 生效;create 的 `network?` 今天被**静默丢弃** |
 | **11** | 规则集进 §4.4-A 对账 | `Adopt` 重建、`ReclaimOrphans` 拆除、按表名前缀枚举孤儿表。**三条硬约束(D5 ㉒,违反任一条都会掐断活连接)**:重装**必须是单个原子 `nft -f` 文件**(先 `delete` 再装 = 5/5 断流)· **对账全程不许清 conntrack**(`tcp_loose=0` 下清一次就断)· `ReclaimOrphans` 的 keep 集**必须在任何删表之前算好**(否则"先 reclaim 后 adopt"逐字就是那条会断流的写法)。**反面是个许可**:满足这三条时 `Adopt` 可以对捡到的表不做任何推理、直接整份重新渲染装上,不必 diff |
 | **12** | **四条**渲染守卫(结构性) | 拒 `policy drop` 于每沙箱基链 · 拒 `iif`(只许 `iifname`)· 于**每沙箱表内**拒**任何未带 `iifname` 的规则**(accept 与 drop 一并)——accept 漏了它是所有沙箱地板上的洞(D5 ⑩ 末行),drop 漏了它更坏:drop 跨链终止,故一张表里未收窄的 drop 是宿主级入站杀伤开关(同本文 §4 ②)· **于第二跳表内拒任何未带 `skuid` 的 drop**(第 12b 件,理由同上一条而钩子不同,本文 §4 ⑩)。理由见本文 §4 ②③⑩ 与 D5 ⑩㉔ |
-| **12b** | 第二跳的强制(§2.4 invariant 2 的后半句) | **一张引擎级(非每沙箱)的 `output` 表**:按部署期交给引擎的 `uid`/`gid` 收窄,压住 `via[]` 后面那个宿主本地进程的出站。**它必须是独立表**:谓词是 `skuid` 而非 `iifname`,一个 uid 对应一份规则、与沙箱数无关,故装在 orchestrator 起步时一次、不随 placement。**未落它 = §2.4 第二条 invariant 只交付了前置(non-host-local endpoint → 400),而那不是强制**(D5 ㉔) |
+| **12b** | 第二跳的强制(§2.4 invariant 2 的后半句) | **一张引擎级(非每沙箱)的 `output` 表**:按部署期交给引擎的 `uid` 收窄,压住 `via[]` 后面那个宿主本地进程的出站。**它必须是独立表**:谓词是 `skuid` 而非 `iifname`,一个 uid 对应一份规则、与沙箱数无关,故装在 orchestrator 起步时一次、不随 placement。**未落它 = §2.4 第二条 invariant 只交付了前置(non-host-local endpoint → 400),而那不是强制**(D5 ㉔) |
 
 **第 8 件是"`egress.default` 有两个取值"的兑现面,不是附加便利**:今天 `allow` 与 `deny` 在行为上
 **不可区分**(两者都不通),故不落它就无法验收"声明被强制"——一个恒不通的引擎在每条 deny 断言上都
@@ -176,16 +149,16 @@ D5 ⑩,本文不复制**;③ **`forward` 侧不是只有 daddr 清单**:一条�
 
 | 位置 | 改什么 |
 | --- | --- |
-| `internal/network/`(新) | 子系统:声明类型、L0 地板、纯函数生成器、八类 400 的校验。`arch` 守卫已预登记,不动守卫 |
+| `internal/network/`(新) | 子系统:声明类型、L0 地板、纯函数生成器、九类声明 400 + 一类部署 400 的校验。`arch` 守卫已预登记,不动守卫 |
 | leaf 包(新,或并入既有 leaf) | sibling CIDR 常量。**今天硬编码在 `local_runsc.allocSubnet` 里**,而生成器要用同一份 ⟹ 按 `guestport` 先例放 leaf,**不开子系统边** |
 | `internal/model/model.go` | `Sandbox` 加声明字段(今天刻意省略,注释明写"omitted rather than stubbed"——连同注释一起改) |
 | `internal/store/` | `CREATE TABLE sandboxes` 加列 + `Binding` 加字段 + `Apply`;两个后端同步 |
 | `internal/runtime/provider.go` | `SteeringSpec` 从 `struct{}` 变成真载荷(注释里的 "Filled in by M8" 兑现) |
 | `internal/runtime/local_runsc.go` | 渲染 + 安装(次序:`buildNetns` 之后、`runsc run` 之前)· 出网三件机制 · `teardownPlacement` 加拆表 · `Adopt`/`ReclaimOrphans` 认表 |
 | `internal/lifecycle/lifecycle.go` | `coldStart` 从记录读声明 → 生成 → 填 `SteeringSpec`(与 `limits` 同形,Binding 每次 placement 重新派生) |
-| `cmd/orchestrator/` + `internal/orchestrator/` | **第二跳的 uid/gid 是部署期入参**(§6.2:不是声明字段),故要一个 flag → 引擎;**第 12b 件那张 `output` 表在起步时装一次**,不随 placement。未给该入参时的行为要定死:**不装表即第二跳无强制**,故它应当是"给了才允许 `via[]`"——否则一份收下的声明兑现不了它自己的 invariant |
+| `cmd/orchestrator/` + `internal/orchestrator/` | **第二跳的 uid 是部署期入参**(§6.2:不是声明字段),故要一个 flag → 引擎;**第 12b 件那张 `output` 表在起步时装一次**,不随 placement。未给该入参时的行为要定死:**不装表即第二跳无强制**,故它应当是"给了才允许 `via[]`"——否则一份收下的声明兑现不了它自己的 invariant |
 | `internal/orchestrator/api.go` | 两个端点(今天落 `default` 分支 → 404)· `patchReq` 加 `network` · create 的 `network?` |
-| `internal/orchestrator/api.go`(§6.2) | 八类 400 进 `statusCodeFor` |
+| `internal/orchestrator/api.go`(§6.2) | 九类声明 400 + 一类部署 400 进 `statusCodeFor` |
 | **`DisallowUnknownFields`** | **全仓无一处**,故 create 的 `network?` 今天被**静默丢弃、调用方拿 201 以为生效**。至少在声明相关写点开启 |
 
 ---
@@ -198,7 +171,8 @@ D5 ⑩,本文不复制**;③ **`forward` 侧不是只有 daddr 清单**:一条�
 
 **门 A — 纯函数(免 root,`go test ./...`)**
 1. 声明取值组合 → 规则集:`deny`+空 / `deny`+`allow[]` / `deny`+`via[]` / `allow`,逐一钉住。
-2. 八类 400 逐条。**第七类两个方向都要有断言**:整段包含 → 400;**部分重叠的超网(`10.0.0.0/8`)→ 必须 200**(D5 ㉑);**同一 CIDR 出现在 `via[].match[]` 里 → 必须 200**(两字段判定不对称,D5 ㉑);**落在 sibling CIDR 内的 `allow[]`(含本沙箱网关那个 `/32`)→ 必须 200**(它是 §5.D 语义 ③ 的声明路径,不是死规则,D4.2)。**第八类**:`::ffff:<v4>` 字面量 → 400,且断言它在包含判定**之前**被拒(D5 ⑲)。
+2. 九类声明 400 逐条,**外加那一类部署 400**(`via[]` + 未给第二跳 uid,两侧都断言:写点与 placement 侧复查)。**第七类两个方向都要有断言**:整段包含 → 400;**部分重叠的超网(`10.0.0.0/8`)→ 必须 200**(D5 ㉑);**同一 CIDR 出现在 `via[].match[]` 里 → 必须 200**(两字段判定不对称,D5 ㉑);**落在 sibling CIDR 内的 `allow[]`(含本沙箱网关那个 `/32`)→ 必须 200**(它是 §5.D 语义 ③ 的声明路径,不是死规则,D4.2)。**第八类**:`::ffff:<v4>` 字面量 → 400,且断言它在包含判定**之前**被拒(D5 ⑲)。
+2c. **第九类(良构性)另钉两样,一正一反。** 正面:`via[]` 条目的 `match[]` 为空 → 400、`publish[]` 条目的 `guest_port` 为 0 → 400,且**报的类与"元组缺 `proto`"可区分**——否则调用方被送去检查一个尚不存在的字段(§6.2 那段 remedy 论证)。反面:**省略 `port` 是合法的通配、不是缺成员**,故 `allow[]` 与 `via[].match[]` **两处**都要断言"不给 `port` → 200",并断言那个通配**可读作通配**(`AnyPort`)而不是从一个裸 0 反推——两处共用一条判定路径时,把"空数组"与"零端口"读成同一件事恰好会吃掉这一格。
 2b. **省略 `network` 的归一化(第 3b 件)**:create 不给 `network` → 落库的是**显式的**
     `{deny, [], [], []}`,且 `GET …/network` 读回**三个数组都是 `[]`**(§6.1 那条"空就写 `[]`,不省略、
     不 null")。**两面都要**:另断言给了 `network` 却漏 `egress.default` **仍是 400** —— 两者共用一条
@@ -216,7 +190,15 @@ D5 ⑩,本文不复制**;③ **`forward` 侧不是只有 daddr 清单**:一条�
 4b. **第二跳的生成(§2.4 invariant 2 的后半句,纯函数侧)**:钉住它**发在 `output`、不发在 `forward`**
     (D5 ㉔ 量到 `forward` 上三种形状全计 0,故一条发错钩子的规则集在每条第一跳断言上都过、而第二跳完全未被
     求值);钉住**免环的那条不是单靠 `skuid` 的放行**(`skuid` 漏匹配的包会穿过它,D5 ㉔ 的不对称);钉住
-    **未给 uid/gid 入参时收 `via[]` 的声明会被拒**,而不是装一份没有第二跳强制的规则集。
+    **未给 uid 入参时收 `via[]` 的声明会被拒**,而不是装一份没有第二跳强制的规则集。
+    **这条两侧都要断言,因为写点守不住它**:声明是持久记录、uid 是每进程部署入参,故"带 `--via-uid` 收下
+    `via[]` → 去掉 flag 重启"这件常规运维把两者拆开,**没有任何一次写**。故除写点(`ValidateDeployment`)
+    还要钉住 **placement 侧复查**(`ValidatePlacement`,经 `steeringFor` 收成一个漏斗,覆盖 create/resume
+    的 coldStart 与 adopt 三条):resume 被拒且原子退回 `paused`;**adopt 那条是"活着也降级"**——单元 L1 活
+    且应答 Health,但本部署压不住它的声明,故降 `paused`(`crash-paused`、不带死因)并让 placement 落进
+    孤儿回收,而**不是**按"不确定"取保守(那会把一个未被压住的 deputy 永久留活)。
+    这条缺陷天然无声:第二跳在 `forward` 上计 0(D5 ㉔),且 `Generate` 本就不发第二跳规则,故规则集
+    在有无 pin 两种情形下**逐字节相同**——第一跳的每条断言都照过。
 4c. **内网 deny-safe 档(第 8c 件,纯函数侧)**:`default:allow` 下**发**这一档的 drop,且**排在声明放行
     之下、地板之上**——次序是断言:排到放行**之上**就不再是 deny-safe(声明抬不动它了),排到地板**之上**
     则一条 `allow 10.0.0.0/8` 会连带抬动地板的 sibling 项。**另断言它与地板不共用一个 set**(sibling `/16`
@@ -346,7 +328,7 @@ D5 ⑩,本文不复制**;③ **`forward` 侧不是只有 daddr 清单**:一条�
 
 ## 7. 内部怎么分门
 
-**门 A(纯函数)先行,整门可在免 root 下完成。** 它覆盖声明取值组合、八类 400、次序、四条守卫——即
+**门 A(纯函数)先行,整门可在免 root 下完成。** 它覆盖声明取值组合、九类声明 400 + 一类部署 400、次序、四条守卫——即
 **M8 全部"设计正确性"**。门 B 只证"装上了、次序对、崩溃后对得上账"。
 
 **第 8 件(出网三件机制)必须在门 B 第 6 条之前落地**,否则第 6 条在一个恒不通的引擎上假过。这是
@@ -386,6 +368,6 @@ D5 ⑩,本文不复制**;③ **`forward` 侧不是只有 daddr 清单**:一条�
 | provider 契约 3-tuple、`SteeringSpec`、对账机制 | §5.A |
 | 声明是 Binding、`PATCH` 是写点 | §3.4 |
 | 两个端点、wire schema、`applies_at` | §6.1 |
-| 八类 400、次序两条、校验早于准入门 | §6.2 |
+| 九类声明 400 + 一类部署 400、次序两条、校验早于准入门 | §6.2 |
 | 跨沙箱网络隔离是独立 invariant | §2.3 |
 | 推导 / 证伪 / 逐条实测 | [`network.md`](../spec/deep-dives/network.md) D0–D8 |

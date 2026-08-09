@@ -22,12 +22,15 @@ internal/runtime/      §5.A: runtime provider seam + local_runsc
 internal/rootfs/       §5.B: rootfs provider seam + host overlayfs assembly
 internal/volume/       §5.C: volume.Backend seam + local btrfs arm + a TEST-ONLY plain-dir
                        second arm (the seam's only falsification instrument) + volumetest
+internal/network/      §5.D: declaration validation + the rule GENERATOR (root-free, unit-testable)
 internal/transport/    §5.E: host-side process client + the 7-RPC fs surface + Health (Connect-RPC/h2c)
 internal/btrfs/        leaf package: subvolume + squota primitives (no engine model)
 internal/allocbytes/   leaf package: "bytes actually allocated" for a tree — the one
                        measurement §5.B and §5.C both need for §3.4's second term
 internal/guestport/    leaf constants two subsystems must agree on: the guest netns TCP
                        port (§5.A/§5.E) + the upload-temp prefix (§5.E/§5.B)
+internal/ruleset/      leaf: the abstract rule vocabulary §5.D generates and §5.A renders,
+                       §2.4's static address facts, and Validate — the criteria BOTH sides run
 internal/arch/         structural guards: subsystems must not import each other, nor
                        read the control plane
 proto/                 transport wire schema; generated code under internal/transport/gen

@@ -72,7 +72,9 @@ slims to boundary + open agenda — nothing lives in full in both places.
   `orchestrator` (the §1.1 assembly), and the non-subsystem leaves: `btrfs` (a
   substrate tool, model-ignorant), `guestport` (shared constants two subsystems
   must agree on — the guest port and the upload-temp prefix), `allocbytes`,
-  `arch` (structural guards, no production code).
+  `ruleset` (the abstract rule vocabulary §5.D generates and §5.A renders, plus
+  §2.4's static address facts and the criteria both sides check), `arch`
+  (structural guards, no production code).
   (`Rootfs` = the §5.B subsystem; `fs` = the §5.E wire service; `rootfs provider` =
   its §5.B storage seam; `volume backend` = §5.C's *separate* seam — four distinct
   things, don't merge, and never say "FS provider". Spelled out in §1.1's
@@ -85,6 +87,19 @@ slims to boundary + open agenda — nothing lives in full in both places.
   `lifecycle`/`store`. Its allowlist is empty and should stay that way — when two
   subsystems need the same fact, put it in a **leaf** package (`internal/guestport`
   is the precedent), don't excuse the edge.
+  **What may live in a leaf: facts, vocabulary, and pure CRITERIA — never a
+  mechanism.** `ruleset.Validate` is the criteria case and it is the right shape, not
+  a compromise: it must run on the **generate** side (`internal/network`, root-free
+  unit tests) *and* on the **install** side (`internal/runtime`, the last check before
+  the table goes in), and `RuleSet` is the type `SteeringSpec.Rules` carries — so
+  putting it in either subsystem *is* a `network`↔`runtime` edge and fails the guard.
+  The boundary that keeps this from becoming a loophole: a leaf may **decide** things
+  about values handed to it, and may do **no I/O, execute nothing, and touch no
+  substrate** (no nft, no netns, no filesystem). A leaf that acts is a subsystem
+  wearing a leaf's name, and it re-couples §5.B/§5.C or §5.D/§5.A through the back
+  door the empty allowlist exists to keep shut. Leaf-ness is checked
+  (`TestLeavesImportNothingFromTheEngine`) because the failure is transitive and
+  invisible to the direct-import guard.
 - **`runtime.Provider` contract = policy + handles, NEVER host primitives** — no
   cgroup path / netns fd / host absolute path in the interface (§5.A). A remote
   provider cannot produce those; leaking them binds the abstraction to
