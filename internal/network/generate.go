@@ -612,6 +612,14 @@ func (g *gen) forwardChain(d Declaration) error {
 	// a rule that never matches, i.e. one more legitimate zero in the counter
 	// signal every deny assertion reads.
 	//
+	// `drop`, not `reject`, and unlike the ingress default-deny below the reason is
+	// not secrecy: this refusal DOES face the guest. §2.4 scopes the guest-facing
+	// half of fail-closed to denials the engine owes an error for — a target the
+	// DECLARATION did not reach — and these addresses are not that. Under
+	// `default: allow` the caller asked for the public internet; the tier is telling
+	// it that the host's own LAN was never part of that, which is the §2.4 boundary
+	// itself rather than a denial within the declared set.
+	//
 	// Separate rules from the floor, never a shared set: the sibling /16 nests
 	// inside 10/8, and an nft interval set either refuses to load or silently
 	// merges the subnet away (measured, D5 ⑱). ruleset.Validate enforces it.
