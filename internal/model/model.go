@@ -293,8 +293,9 @@ func (t NetTuple) AnyDest() bool { return !t.CIDR.IsValid() || t.CIDR.Bits() == 
 // an inconsistency: AnyDest exists because the GENERATOR must branch on it (an invalid
 // prefix cannot be handed to a rule's address set at all), while the port wildcard
 // needs no generator branch — 0 already IS the wildcard encoding in ruleset.Match, and
-// the RENDERER emits the `dport` clause if and only if it is non-zero. So this is read
-// by the API layer and by tests asserting the semantic, not by the generator.
+// the RENDERER emits the `dport` clause if and only if it is non-zero. So no production
+// caller needs it; its readers are the tests that assert the semantic, which is what
+// keeps `Port == 0` from being re-derived by hand at a site that forgets what it means.
 func (t NetTuple) AnyPort() bool { return t.Port == 0 }
 
 // NetVia is one `egress.via[]` entry: flows matching any of Match go to Endpoint.
@@ -585,9 +586,8 @@ type Sandbox struct {
 	//     auto-pause (§4.1 automatic transition).
 	//   - Retention: a `paused` sandbox older than this → evict (reaper's
 	//     destroy of a paused sandbox, §4.1).
-	// These EXIST here (unlike the still-omitted network Binding) because
-	// the reaper is a live consumer — a justified model growth, not a
-	// speculative reservation (§1.3). A create that omits them gets the
+	// These EXIST here because the reaper is a live consumer — a justified model
+	// growth, not a speculative reservation (§1.3). A create that omits them gets the
 	// engine-wide default resolved at create time, so the stored value is always
 	// the concrete duration the reaper reads (default site: lifecycle.Deps).
 	IdleTimeout time.Duration

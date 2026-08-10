@@ -13,10 +13,10 @@ import (
 // render any rule shape without a real placement.
 func testCtx() renderCtx {
 	return renderCtx{
-		table:            "sbxnet_sbx_test",
-		vethHost:         "vh0123456789ab",
-		guestIP:          "10.66.250.2",
-		gatewayIP:        "10.66.250.1",
+		table:     "sbxnet_sbx_test",
+		vethHost:  "vh0123456789ab",
+		guestIP:   "10.66.250.2",
+		gatewayIP: "10.66.250.1",
 		publishEndpoints: map[publishKey]string{
 			{port: 8080, proto: ruleset.TCP}: "127.0.0.1:21000",
 			{port: 8080, proto: ruleset.UDP}: "127.0.0.1:21001",

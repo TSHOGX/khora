@@ -195,7 +195,7 @@ func New(cfg Config) (*Engine, error) {
 			DiskByte:   cfg.NodeDiskByte,
 			MemoryByte: cfg.NodeMemoryByte,
 		},
-		Deployment:   dep,
+		Deployment: dep,
 	})
 
 	// outbox publisher → a log sink (§4.4-C: the engine only guarantees reliable

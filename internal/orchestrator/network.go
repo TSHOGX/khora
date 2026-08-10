@@ -138,7 +138,7 @@ type publishWire struct {
 
 // decode turns the wire form into the record form, applying the two 400 classes that
 // are decidable at PARSE time (class 2: a name where a literal belongs; class 8: a
-// v4-mapped/v4-compatible spelling). The remaining six are Validate's.
+// v4-mapped/v4-compatible spelling). The remaining seven are Validate's.
 func (w networkWire) decode() (model.NetworkDecl, error) {
 	var d model.NetworkDecl
 	if w.Egress.Default != nil {

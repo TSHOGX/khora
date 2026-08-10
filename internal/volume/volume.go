@@ -79,22 +79,13 @@ type Materialized struct {
 	// and §6.2 keeps it off the wire — callers address volumes by ID.
 	SourcePath string
 
-	// handle is backend-private materialization state, UNEXPORTED on purpose
-	// (runtime.Placement.handle is the precedent). The FUSE arm of a future remote
-	// backend has to start and stop a process per materialization; without a place
-	// to keep that, it would need a side table keyed by volume ID — precisely the
-	// in-process handle registry volume.md D3.1 rejects. Keeping it unexported also
-	// keeps it out of the structural guard's contract surface, because it is not
-	// part of the contract.
-	handle any
+	// NO handle FIELD, and its absence is the same call Capabilities makes above:
+	// members need a CONSUMER (§1.3 forbids speculative reservation). The FUSE arm of
+	// a future remote backend would need somewhere to keep a per-materialization
+	// process — but no backend has one today, and `runtime.Placement.handle` (which
+	// does, with live callers) is the precedent to COPY THEN, not to pre-build now.
+	// The local backend materializes to a path and holds nothing else.
 }
-
-// SetHandle / Handle let a backend stash and recover its private materialization
-// state without exposing it above the seam.
-func (m *Materialized) SetHandle(h any) { m.handle = h }
-
-// Handle returns the backend-private state set by SetHandle.
-func (m *Materialized) Handle() any { return m.handle }
 
 // FileInfo is one entry's metadata as reported through Root — a deliberately
 // small, os-independent shape. It carries no host path: a Root handle addresses

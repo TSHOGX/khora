@@ -300,10 +300,10 @@ func scanSeam(src string) ([]string, error) {
 		}
 		delete(want, ts.Name.Name)
 		for _, fld := range st.Fields.List {
-			// Only EXPORTED fields are part of the contract. Materialized.handle is
-			// unexported precisely so a backend can keep private materialization state
-			// without it becoming contract — flagging it would punish the pattern that
-			// keeps the seam clean (runtime.Placement.handle is the precedent).
+			// Only EXPORTED fields are part of the contract, so that a backend can keep
+			// private state (a handle, a client) without it becoming contract — flagging
+			// an unexported field would punish the pattern that keeps the seam clean.
+			// `runtime.Placement.handle` is that pattern with live callers.
 			names := exportedFieldNames(fld)
 			if len(names) == 0 {
 				continue

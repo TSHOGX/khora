@@ -61,6 +61,20 @@ type pkg struct {
 	XTestImports []string
 }
 
+// tagMatrix is every build configuration these guards must hold under. A tag that
+// is not here is a configuration where a bad edge passes unseen, and the files
+// behind a tag are exactly the ones most likely to reach for a shortcut: they are
+// already allowed to touch the substrate.
+//
+//   - ""          the production build.
+//   - substrate   the root-only tests against real runsc/overlay/btrfs.
+//   - drainrace   the minute-scale tests, tagged separately so the routine gate
+//     stays fast; they also carry `substrate`, hence the pair.
+//   - testguest   the in-guest fault-injection seam, which must not exist in a
+//     production sandboxd — a guard that never ran with it on would not see an
+//     edge introduced by that seam.
+var tagMatrix = []string{"", "substrate", "drainrace", "testguest", "substrate,drainrace", "substrate,testguest"}
+
 // listPackages runs `go list -json` for the given tags. Build tags matter: the
 // substrate tests are behind `//go:build substrate` and are invisible to a
 // default list, so a bad edge introduced in one of them would go unseen.
@@ -105,7 +119,7 @@ func owner(importPath string) string {
 // rule. It checks production, test, and external-test imports, under both the
 // default and substrate build tags.
 func TestSubsystemsDoNotImportEachOther(t *testing.T) {
-	for _, tags := range []string{"", "substrate"} {
+	for _, tags := range tagMatrix {
 		for _, p := range listPackages(t, tags) {
 			self := owner(p.ImportPath)
 			if self == "" {
@@ -138,7 +152,7 @@ func TestSubsystemsDoNotImportEachOther(t *testing.T) {
 // lifecycle or store would let it read authoritative state directly instead of
 // being handed it (§4: subsystems don't read the store).
 func TestSubsystemsDoNotReadTheControlPlane(t *testing.T) {
-	for _, tags := range []string{"", "substrate"} {
+	for _, tags := range tagMatrix {
 		for _, p := range listPackages(t, tags) {
 			self := owner(p.ImportPath)
 			if self == "" {
@@ -189,13 +203,89 @@ var leaves = []string{
 	"engine/internal/allocbytes",
 }
 
+// inertLeaves are the leaves CLAUDE.md's second half binds: "a leaf may DECIDE
+// things about values handed to it, and may do NO I/O, execute nothing, and touch
+// no substrate. A leaf that acts is a subsystem wearing a leaf's name."
+//
+// This is a SEPARATE guard from the import check above, because that one only looks
+// for `engine/` imports — a leaf that imported `os/exec` and shelled out to `nft`
+// would pass it, and every other check here, while re-coupling §5.D to §5.A through
+// the back door the empty allowlist exists to keep shut. That is the whole loophole,
+// so it is checked rather than left to the package comment.
+//
+// NOT every leaf: `btrfs` and `allocbytes` are the OTHER kind. CLAUDE.md names
+// `btrfs` "a substrate tool, model-ignorant" — acting on the substrate is its
+// purpose, and `allocbytes` walks a tree to count bytes. What makes them safe is not
+// inertness but model-ignorance: neither knows a §5 type, so neither can carry a
+// mechanism between two subsystems. The leaves listed here are the ones whose safety
+// argument IS inertness — `ruleset` in particular must run identically on the
+// generate side (root-free unit tests) and the install side, which is only true
+// while it decides and never acts.
+var inertLeaves = []string{
+	"engine/internal/guestport",
+	"engine/internal/ruleset",
+}
+
+// actsOnTheWorld are stdlib packages a leaf cannot reach without doing the thing
+// CLAUDE.md forbids. Process execution and raw syscalls are the mechanism-smuggling
+// routes that matter (shelling out to `nft` / `ip`, or an ioctl); the filesystem and
+// network packages are here because "touch no substrate" covers reading it too — a
+// leaf that stats a path has made its answer depend on the host it runs on, which is
+// exactly what makes the generate-side and install-side runs stop agreeing.
+var actsOnTheWorld = []string{
+	"os/exec",
+	"syscall",
+	"golang.org/x/sys/unix",
+	"net",
+	"net/http",
+	"os",
+	"io/fs",
+	"path/filepath",
+}
+
+// TestInertLeavesDoNotAct enforces the second half of the leaf boundary.
+func TestInertLeavesDoNotAct(t *testing.T) {
+	banned := map[string]bool{}
+	for _, b := range actsOnTheWorld {
+		banned[b] = true
+	}
+	want := map[string]bool{}
+	for _, l := range inertLeaves {
+		want[l] = true
+	}
+	for _, tags := range tagMatrix {
+		for _, p := range listPackages(t, tags) {
+			if !want[p.ImportPath] {
+				continue
+			}
+			delete(want, p.ImportPath)
+			// Production imports only: a leaf's own TEST may read a fixture off disk
+			// without the leaf acting in production, and `go list` reports test imports
+			// on the same package.
+			for _, imp := range p.Imports {
+				if !banned[imp] {
+					continue
+				}
+				t.Errorf("leaf %s imports %s (tags=%q) — a leaf may DECIDE things about "+
+					"values handed to it, but may do no I/O, execute nothing, and touch no "+
+					"substrate (CLAUDE.md). A leaf that acts is a subsystem wearing a leaf's "+
+					"name, and it re-couples the two subsystems that share it through a door "+
+					"the import guard above cannot watch", p.ImportPath, imp, tags)
+			}
+		}
+	}
+	for l := range want {
+		t.Errorf("inert leaf %s not found — this guard is stale, and a stale guard passes vacuously", l)
+	}
+}
+
 // TestLeavesImportNothingFromTheEngine keeps the leaf packages leaves.
 func TestLeavesImportNothingFromTheEngine(t *testing.T) {
 	want := map[string]bool{}
 	for _, l := range leaves {
 		want[l] = true
 	}
-	for _, tags := range []string{"", "substrate"} {
+	for _, tags := range tagMatrix {
 		for _, p := range listPackages(t, tags) {
 			if !want[p.ImportPath] {
 				continue

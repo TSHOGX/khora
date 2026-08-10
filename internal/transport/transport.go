@@ -37,18 +37,11 @@ import (
 	"context"
 	"io"
 	"time"
-
-	"engine/internal/guestport"
 )
 
 // Endpoint is the current transport endpoint (netns veth IP:port), discovered
 // at placement time (§5.A ⑥). Never cached across resume (§4.3 要点③).
 type Endpoint string
-
-// Port is the fixed TCP port sandboxd listens on inside the guest netns. It is
-// re-exported from the leaf internal/guestport so §5.A can compose IP:port
-// without importing this subsystem (see that package for why).
-const Port = guestport.Port
 
 // ProcessEvent is one item of a process output stream: oneof{start,data,end,
 // keepalive} (transport D4.3) — start(pid) / data(stdout|stderr) /
