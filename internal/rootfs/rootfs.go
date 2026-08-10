@@ -7,7 +7,8 @@
 // The rootfs provider is the §5.B storage seam (never "FS provider" — `fs` is the
 // §5.E wire service, a different thing entirely, §1.1). Its abstraction exposes only
 // "OverlayID + referenced Template + at-rest readable" and NEVER "it is a host
-// upper path" (§3.1.1 对内也 ID 寻址) — the host path is locked inside this
+// upper path" (§3.1.1 "ID addressing applies internally too") — the host path is
+// locked inside this
 // subsystem. Ships the single-node "resident upper directory" unit (D3);
 // content-addressed diff layers are a later evolution behind the same seam.
 package rootfs
@@ -71,7 +72,8 @@ type Overlay struct {
 // The single-node host paths (upper/work/merged) are NOT carried on this struct:
 // they derive deterministically from ID under the rootfs provider's StateDir (see
 // HostOverlayFS.upperPath/workPath), so the provider recomputes them on demand
-// and nothing above §5.B ever sees them (§3.1.1 对内也 ID 寻址). upper/work must
+// and nothing above §5.B ever sees them (§3.1.1 "ID addressing applies internally
+// too"). upper/work must
 // share one overlayfs-capable FS and one quota unit for the later disk-capacity
 // cap (D6.3).
 
@@ -107,7 +109,7 @@ type Provider interface {
 	// handle is rebuildable from the store record, not kept in memory; the
 	// mediator re-resolves the lineage each time). This is the resume prefix —
 	// the artifact was created earlier and persists on the backend across pause
-	// (§4.2 零捕获). It does NOT allocate new bytes.
+	// (§4.2 zero-capture). It does NOT allocate new bytes.
 	//
 	// capByte RE-APPLIES the capacity Binding from the current record (§3.4): the
 	// cap is re-materialized at each placement rather than trusted to whatever the
@@ -129,7 +131,7 @@ type Provider interface {
 	Mount(ctx context.Context, o *Overlay) (*Merged, error)
 
 	// Unmount tears down the merged overlay (pause / destroy path). The upper
-	// directory persists on the backend across pause (§4.2 零捕获).
+	// directory persists on the backend across pause (§4.2 zero-capture).
 	Unmount(ctx context.Context, m *Merged) error
 
 	// DestroyOverlay reclaims the upper+work bytes (destroy terminal state,
@@ -140,7 +142,7 @@ type Provider interface {
 	DestroyOverlay(ctx context.Context, o *Overlay) error
 
 	// AdoptMerged reconstructs the merged-mount handle for an Overlay that is
-	// STILL mounted after a control-plane crash (§4.4-A 另一半). The overlayfs
+	// STILL mounted after a control-plane crash (§4.4-A's other half). The overlayfs
 	// mount is kernel state — it survives the orchestrator process, held by the
 	// still-running container — so on Adopt the mediator recovers the handle
 	// rather than re-mounting. The host path stays private (§3.1.1); the returned
@@ -310,8 +312,10 @@ type Provider interface {
 	// row (§4.4-A reclamation discipline) — the §5.B *unit* twin of
 	// SweepOrphanLayers, which sweeps only layers. It carries the retry §4.4
 	// licenses: destroy DISCARDS DestroyOverlay's error and deletes the record
-	// anyway ("删字节失败不阻塞、不回退状态转换…由孤儿单元 sweep(§4.4-A 反向对账,
-	// 与 refcount GC 不是一回事)异步重试"), and this is the ONLY thing that revisits
+	// anyway ("a failed byte deletion neither blocks nor rolls back the state
+	// transition … the orphan-unit sweep (§4.4-A's reverse reconciliation, which is
+	// not the same thing as refcount GC) retries asynchronously"), and this is the
+	// ONLY thing that revisits
 	// the unit afterwards — SweepOrphanLayers scans only LayersDir and the periodic
 	// reconcile iterates only store RECORDS, so with the row gone there is no record
 	// left to hang reclamation off. The crash-BEFORE-deletion half is separate and

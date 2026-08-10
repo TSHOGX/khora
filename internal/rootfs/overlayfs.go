@@ -21,7 +21,8 @@ import (
 // handed to runsc (rootfs-overlay D0/D3). runsc runs --overlay2=none
 // --file-access=shared and never manages the write layer.
 //
-// Host paths are LOCKED inside this subsystem (§3.1.1 对内也 ID 寻址): the
+// Host paths are LOCKED inside this subsystem (§3.1.1 "ID addressing applies
+// internally too"): the
 // Overlay's upper/work/merged all derive deterministically from the OverlayID
 // under StateDir, so the handle is reconstructable from a store record on
 // resume (OpenOverlay) without keeping it in memory. Above this subsystem an
@@ -30,7 +31,7 @@ import (
 // mount/umount are privileged (CAP_SYS_ADMIN) and copy-up files are root-owned
 // (rootfs-overlay D5); the orchestrator therefore runs as root (ADR-0002).
 // That privilege, and the host paths, stay sealed here — never in the mediator.
-// The disk-CAPACITY cap (§3.4 容量轴 / §5.B) is materialized here as a btrfs
+// The disk-CAPACITY cap (§3.4 capacity axis / §5.B) is materialized here as a btrfs
 // subvolume carrying an squota limit, via the internal/btrfs leaf package
 // (rootfs-overlay D6.2/D6.4).
 //
@@ -333,7 +334,7 @@ func (p *HostOverlayFS) Mount(_ context.Context, o *Overlay) (*Merged, error) {
 }
 
 // Unmount tears down the merged overlay (pause / destroy). upper persists
-// across pause (§4.2 零捕获).
+// across pause (§4.2 zero-capture).
 func (p *HostOverlayFS) Unmount(_ context.Context, m *Merged) error {
 	if m == nil || m.MergedPath == "" {
 		return nil

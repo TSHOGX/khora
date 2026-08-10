@@ -1495,7 +1495,7 @@ func (m *Mediator) buildingLayerIDs() []string {
 //     an orphan, reclaimed below. The upper is intact and resumable (§4.2).
 //   - `running` record → PROBE liveness via Adopt: alive → rebuild the live-map
 //     handle at the SAME IP (not a resume, no new epoch — the isolation unit
-//     never restarted, §4.4-A 另一半 — the takeover half); dead → CAS-demote to
+//     never restarted, §4.4-A's other half — the takeover half); dead → CAS-demote to
 //     `paused` (§4.2
 //     involuntary pause), emitting an event (ties §4.4-A to §4.4-C).
 //
@@ -1603,7 +1603,7 @@ func (m *Mediator) reconcile(ctx context.Context, periodic bool) error {
 	// already force-detached (MNT_DETACH) the orphan Overlay mounts in the loop
 	// above; ReclaimOrphans then does runsc kill → veth → netns. At STARTUP
 	// reconcile this overlay-umount-before-runsc-kill order is deliberate and safe
-	// (§4.4-A 回收次序 — reclamation ordering): the mediator has no live placement
+	// (§4.4-A reclamation ordering): the mediator has no live placement
 	// handle, only a table
 	// scan, and the orphan is being torn down regardless — a lazy detach just
 	// unhooks the mount, the kernel reclaims it when the container's last ref
@@ -1766,7 +1766,7 @@ func (m *Mediator) reclaimOrphanOverlay(ctx context.Context, rec model.Sandbox, 
 // adoptOrDemote handles a `running` record during reconciliation. It returns
 // (adopted, err):
 //   - adopted=true, err=nil  → survivor is live AND serving; handle rebuilt,
-//     recorded in the live-map (same IP, no epoch bump, §4.4-A 另一半 — the
+//     recorded in the live-map (same IP, no epoch bump, §4.4-A's other half — the
 //     takeover half).
 //   - adopted=false, err=nil → cleanly determined not-adoptable (isolation unit
 //     dead, OR alive-but-not-serving); CAS-demoted to paused (§4.2 involuntary

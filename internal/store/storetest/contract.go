@@ -454,7 +454,8 @@ func drainCheck(ctx context.Context, t *testing.T, s store.Store, cursor *int64,
 // testConcurrentCAS: N goroutines race the SAME transition. Exactly ONE may win,
 // and exactly ONE outbox row may land.
 //
-// This is the §4.4-B CAS promise ("当前 lifecycle-state ≠ 期望源态则拒绝") and the
+// This is the §4.4-B CAS promise ("if the current lifecycle-state ≠ the expected
+// source state it is refused") and the
 // §4.4-C atomic-commit promise met at the same moment: a torn implementation
 // admits several winners, and each winner appends an event — so a single
 // transition would be billed N times, which is precisely the double-count

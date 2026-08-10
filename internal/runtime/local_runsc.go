@@ -564,7 +564,8 @@ func publishEndpointList(h *placementHandle, spec SteeringSpec) []string {
 }
 
 // Stop cleanly stops the unit AND releases its placement-local resources
-// (§4.2 pause: release RAM/CPU; a paused sandbox "只占磁盘" — no netns/veth held).
+// (§4.2 pause: release RAM/CPU; a paused sandbox "occupies only disk" — no
+// netns/veth held).
 // The Overlay artifact is untouched (that is the Rootfs subsystem's, §4). resume
 // builds a fresh placement with a new IP (§3.3), so nothing here must survive.
 func (p *LocalRunsc) Stop(ctx context.Context, pl *Placement) error {
@@ -589,7 +590,7 @@ func (p *LocalRunsc) Destroy(ctx context.Context, pl *Placement) error {
 }
 
 // Adopt re-recognizes a surviving sandbox's placement after a control-plane
-// crash (§4.4-A 另一半): rebuild the handle from the SandboxID's stable resource
+// crash (§4.4-A's other half): rebuild the handle from the SandboxID's stable resource
 // names, probe liveness, and rediscover the endpoint by reading the SAME IP back
 // from the netns (NOT a new epoch — the isolation unit never restarted, §3.3).
 // alive=false means the isolation unit is dead/absent (caller CAS-demotes to
@@ -616,8 +617,8 @@ func (p *LocalRunsc) Adopt(ctx context.Context, sandbox string) (*Placement, boo
 		return nil, false, readDeathCause(h.cid), nil
 	}
 
-	// rediscover the endpoint (same IP — the container runs with it; §4.4-A 同一
-	// IP). runsc's --network=sandbox moves the guest veth into gVisor's netstack,
+	// rediscover the endpoint (same IP — the container runs with it; §4.4-A "the
+	// same IP"). runsc's --network=sandbox moves the guest veth into gVisor's netstack,
 	// so the guest IP is no longer visible inside the netns; but the HOST veth
 	// still carries its /30 host address, and our allocation pins guest = host+1.
 	ip, err := p.rediscoverGuestIP(&h)
@@ -656,7 +657,7 @@ func (p *LocalRunsc) Adopt(ctx context.Context, sandbox string) (*Placement, boo
 // should hold one). keep is the store-derived set the mediator computes; the
 // provider only enumerates its own host resources and reverse-dep-order tears
 // down the rest. Persistent state (Overlay upper) is never touched — that is not
-// a placement resource (§4.4-A 持久态不碰).
+// a placement resource (§4.4-A does not touch persistent state).
 //
 // # The keep-set must be complete BEFORE anything is deleted
 //
@@ -831,7 +832,7 @@ var inetRe = func() *regexp.Regexp {
 }()
 
 // rediscoverGuestIP recovers the guest endpoint IP of a running placement (⑥ IP
-// rediscovery for Adopt) WITHOUT a new epoch (§4.4-A 同一 IP). runsc's
+// rediscovery for Adopt) WITHOUT a new epoch (§4.4-A "the same IP"). runsc's
 // --network=sandbox moves the guest veth into gVisor's netstack, so the guest IP
 // is invisible inside the netns; but the HOST-side veth (named by SandboxID)
 // still carries its /30 host address, and the launch allocation pins

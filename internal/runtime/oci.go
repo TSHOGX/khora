@@ -57,7 +57,7 @@ type ociLinux struct {
 	Resources *ociResources `json:"resources,omitempty"`
 }
 
-// ociResources is the §3.4 资源上限 → cgroup translation (§5.A: the provider
+// ociResources is the §3.4 resource-ceiling → cgroup translation (§5.A: the provider
 // materializes the Binding via OCI linux.resources; runsc lands it on the
 // cgroupfs driver).
 //

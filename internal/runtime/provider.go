@@ -322,7 +322,7 @@ type Provider interface {
 	Destroy(ctx context.Context, p *Placement) error
 
 	// Adopt re-recognizes a SURVIVING sandbox's placement after a control-plane
-	// crash (§4.4-A 另一半 / startup reconciliation). Given the SandboxID it
+	// crash (§4.4-A's other half / startup reconciliation). Given the SandboxID it
 	// rebuilds the opaque placement handle from the sandbox's own labeled
 	// resources, probes L1 liveness, and rediscovers the transport endpoint — the
 	// SAME endpoint, NOT a new epoch, because the isolation unit never restarted
@@ -359,7 +359,8 @@ type Provider interface {
 	// mediator computes keep from the authoritative store and passes it in — the
 	// store is read by the mediator and fed to the provider, never the reverse
 	// (§4 subsystems don't call each other). Persistent state (Overlay upper) is
-	// never touched — it is not a placement resource (§4.4-A 持久态不碰).
+	// never touched — it is not a placement resource (§4.4-A does not touch
+	// persistent state).
 	//
 	// THE KEEP SET ARRIVES COMPLETE, and that is load-bearing rather than a calling
 	// convention (network.md D5 ㉒): reclaiming a live sandbox's rule set and then

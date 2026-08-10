@@ -10,7 +10,7 @@ import (
 	"warren/internal/model"
 )
 
-// --- pause drain barrier (§4.2 静止点 / guest-runtime D4.4) --------------------
+// --- pause drain barrier (§4.2 quiescent point / guest-runtime D4.4) ----------
 //
 // The barrier closes ONE specific window, and it is the engine's own: a mutating
 // fs RPC is in flight when pause freezes the sandbox. The guest's fs.Write is

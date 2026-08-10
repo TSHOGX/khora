@@ -1,707 +1,1073 @@
-# Sandbox Engine — 模型层(§3 沙箱模型 · §4 生命周期)
+# Sandbox Engine — the model layer (§3 sandbox model · §4 lifecycle)
 
-> 属 [SPEC.md](./SPEC.md);全局 §编号跨文件连续,导航见 SPEC.md 顶部「文档地图」。
+> Belongs to [SPEC.md](./SPEC.md); § numbers run continuously across files, and the
+> navigation is the "Document map" at the top of SPEC.md.
 
 ---
 
-## 3. 沙箱模型
+## 3. Sandbox model
 
-### 3.1 三态:可变性按层切开
+### 3.1 Three states: mutability cut along layers
 
 ```text
-Template   不可变、内容寻址的只读底座(可被多沙箱共享/fork)
-  └─ Live   = Template(只读底层) + 可写 Overlay + 运行内存          ← 临时、可变
-       └─ Paused = Overlay 落盘静止,容器停掉,释放 RAM/CPU          ← 只占存储
-            └─(可选)Promote = 把当前 Overlay 固化成新 Template
+Template   an immutable, content-addressed read-only base (shareable/forkable by many sandboxes)
+  └─ Live   = Template (read-only lower) + a writable Overlay + running memory   ← transient, mutable
+       └─ Paused = the Overlay quiesced on disk, the container stopped, RAM/CPU released
+            │                                                                     ← occupies storage only
+            └─ (optional) Promote = freeze the current Overlay into a new Template
 ```
 
-- **Template**:不可变、共享、可 fork,**opaque ID 作身份**。平台预置(纯净 base、带某 agent
-  的栈…),或用户 Promote 自建。不可变性由**只读底层 + refcount 保护**兑现,不靠内容 hash——hash
-  只能*检测*篡改、不能*阻止*(阻止靠只读机制);**内容摘要是可选的去重/完整性演进锚点**(§5.B /
-  rootfs-overlay D3),身份与去重/缓存是干净分开的两件事。
-- **Overlay**:本沙箱相对 Template 的**可写增量层**(apt/pip 与 `$HOME` 都写进它),叠在
-  Template 之上构成 Live 的可写 rootfs。**Overlay 是一等、ID 寻址、与 Template 解耦的持久工件**
-  (见 3.1.1),不是 Template 的附属物。
-- **Live**:`Template(只读底层) + Overlay(可写层) + 运行内存`。运行内存是临时的(pause 即弃,
-  §4.2);Overlay 持续在存储后端上。
-- **Paused**:静止后停掉 runsc 容器,Overlay 留在后端,释放 RAM/CPU。**不做内存快照**(§4.2)。
-- **Promote**:把当前 Overlay 固化成命名 Template 的新底层(像分层镜像),供以后 fork。**对一个
-  逻辑上运行中的沙箱发起,但固化读的是 at-rest 字节**——引擎内部先把它静止/flush 到一致点(等价一次
-  pause),再读冻结的 Overlay 去固化;**绝不在容器运行中读文件内容**(§5.B「读 Overlay 内容只在 at-rest」)。
-  - **一处刻意的例外**:代价预报(`PromoteCostBytes`,过 §3.4 准入门用)walk 的是**还在运行的** upper。
-    四条性质:
-    - **只读元数据**:只 `stat`、不打开任何文件——与 §5.B"计量随时可问后端"同一条豁免。
-    - **按 `max(已分配, 表观大小)` 投影,不是纯分配陈述**:固化是一次不打洞的拷贝,故稀疏文件按分配算
-      会低估,而低估是准入门唯一不能容忍的方向。
-    - **门在 quiesce 之前**,次序是先预报、再静止、再固化:静止本身已是一次真 pause、会发 `paused` 事件,
-      预报放到它之后会让一次容量不足的拒绝留下一个**已被停掉**的沙箱(rootfs-overlay D6.5)。
-    - **用与固化同一份排除集**:否则会为注定被剪掉的字节拒 Promote。方向仍是安全的上界——硬链接按每条
-      链接计,而固化确实会把它们展成独立文件。
+- **Template**: immutable, shared, forkable, with **an opaque ID as its identity**. Either
+  platform-provided (a clean base, a stack carrying some agent …) or built by the user via
+  Promote. Immutability is delivered by **a read-only lower layer + refcount protection**,
+  not by a content hash — a hash can only *detect* tampering, not *prevent* it (prevention
+  comes from the read-only mechanism); **a content digest is an optional evolution anchor
+  for deduplication/integrity** (§5.B / rootfs-overlay D3), and identity versus
+  deduplication/caching are two cleanly separated things.
+- **Overlay**: this sandbox's **writable delta layer** relative to its Template (apt/pip and
+  `$HOME` all write into it), stacked on top of the Template to form Live's writable rootfs.
+  **The Overlay is a first-class, ID-addressed persistent artifact decoupled from the
+  Template** (see 3.1.1), not an appendage of it.
+- **Live**: `Template (read-only lower) + Overlay (writable layer) + running memory`. The
+  running memory is transient (discarded on pause, §4.2); the Overlay persists on the
+  storage backend.
+- **Paused**: after quiescing, the runsc container is stopped, the Overlay stays on the
+  backend, and RAM/CPU are released. **No memory snapshot is taken** (§4.2).
+- **Promote**: freeze the current Overlay into the new lower layer of a named Template (like
+  a layered image), for later forks. **It is initiated against a logically running sandbox,
+  but the freeze reads at-rest bytes** — the engine internally quiesces/flushes it to a
+  consistent point (equivalent to one pause) and then reads the frozen Overlay to freeze it;
+  **file content is never read while the container runs** (§5.B "reading Overlay content
+  happens only at rest").
+  - **One deliberate exception**: the cost forecast (`PromoteCostBytes`, used to pass the
+    §3.4 admission gate) walks the **still-running** upper. Four properties:
+    - **Read-only metadata**: it only `stat`s and opens no file — the same exemption as
+      §5.B's "metering may be asked of the backend at any time".
+    - **Projected as `max(allocated, apparent size)` rather than a pure allocation
+      statement**: freezing is a copy that does not punch holes, so counting a sparse file by
+      allocation would underestimate, and underestimation is the one direction the admission
+      gate cannot tolerate.
+    - **The gate comes before the quiesce**, in the order forecast → quiesce → freeze: the
+      quiesce is itself a real pause and emits a `paused` event, so putting the forecast after
+      it would let a refusal for insufficient capacity leave behind a sandbox that has
+      **already been stopped** (rootfs-overlay D6.5).
+    - **It uses the same exclusion set as the freeze**: otherwise it would refuse a Promote
+      over bytes destined to be pruned. The direction is still a safe upper bound — hard links
+      are counted per link, and the freeze does indeed expand them into separate files.
 
-#### 3.1.1 Overlay 是解耦工件,不与 Template / 宿主路径绑定
+#### 3.1.1 The Overlay is a decoupled artifact, bound to neither the Template nor a host path
 
-这一条是 multi-node 能否成立的前提:Overlay 的物化位置不得退化成"upperdir 一直在本地盘上"。
+This is the precondition for multi-node being possible at all: the Overlay's materialized
+location must not degenerate into "the upperdir is always on a local disk".
 
-- **逻辑模型**:Overlay 是一份**经 rootfs provider 寻址的冻结层**(自带 ID 与属性),它**引用**一个
-  Template 作底层,但**存在何处与 Template 无关**——可以与 Template 同盘,也可以在另一块网络存储、
-  对象存储,其属性(大小、引用的 Template、refcount、生命周期态)甚至可单独建表记录。
-- **物化是 rootfs provider 的事,模型不假设宿主本地路径**:single-node 落成本机 overlayfs upperdir、
-  multi-node 落成可跨 node 寻址的层——具体两种物化见 §5.B。关键是模型层 Overlay 始终是"引用某
-  Template 的、ID 寻址的冻结层";**一旦假设宿主本地路径,任何非本地形态的 provider 一旦接入即失效**,
-  这正是 §3.3"身份不编码 placement"与 §4.2 pause/resume 在 multi-node 下成立的前提。
-- **对内也 ID 寻址**:§6.2 "对外不暴露宿主路径" 的要求**同样贯彻到引擎内部的 Rootfs 子系统**——
-  Overlay 在控制面里以 ID 与属性存在,宿主路径只是某个 provider 的实现细节,不进模型。
+- **The logical model**: the Overlay is **a frozen layer addressed through the rootfs
+  provider** (carrying its own ID and properties). It **references** a Template as its lower
+  layer, but **where it exists is independent of the Template** — it can be on the same disk
+  as the Template, or on another network store or object store, and its properties (size, the
+  Template it references, refcount, lifecycle state) can even be recorded in a separate table.
+- **Materialization is the rootfs provider's business, and the model assumes no host-local
+  path**: single-node lands it as a local overlayfs upperdir, multi-node as a layer
+  addressable across nodes — the two materializations are in §5.B. What matters is that at
+  the model layer an Overlay is always "an ID-addressed frozen layer referencing some
+  Template"; **the moment a host-local path is assumed, any non-local provider breaks the
+  instant it is plugged in**, and that is precisely the precondition for §3.3's "identity does
+  not encode placement" and for §4.2's pause/resume holding under multi-node.
+- **ID addressing applies internally too**: §6.2's requirement to "expose no host path
+  outwardly" is **carried through to the engine's own Rootfs subsystem** — an Overlay exists in
+  the control plane as an ID with properties, and a host path is merely some provider's
+  implementation detail, never entering the model.
 
-### 3.2 沙箱 = 持久单元,连接 = 多路并发的 process
+### 3.2 A sandbox is the persistent unit; a connection is a multiplexed concurrent process
 
 ```text
-Sandbox(持久单元:Overlay 工件、挂载的 Volume、网络声明、资源上限)  ← 稳定、不透明 ID
+Sandbox (the persistent unit: the Overlay artifact, mounted Volumes, the network declaration,
+         the resource ceilings)                                        ← stable, opaque ID
   ├── shell        (process + PTY)
-  ├── agent        (process,如 Claude)
-  └── agent        (process,如 Pi)     ← 多路并发,共享同一沙箱的 FS / 网络
+  ├── agent        (process, e.g. Claude)
+  └── agent        (process, e.g. Pi)     ← concurrent, sharing this sandbox's FS / network
 ```
 
-shell 是"每个沙箱上随时可用的一类连接",不是一种产品 mode。多个连接并发写同一 FS = 多人
-ssh 同一台 Linux,是 Unix 模型本身。**每条连接 = `process` 服务的一次 `Start`**(shell 即
-`exec /bin/bash` 带 PTY),按 pid 寻址、可 `Connect` 重连;engine 不为连接维护任何注册表(§5.E)。
+A shell is "a kind of connection available on every sandbox at any time", not a product mode.
+Several connections writing the same FS concurrently = several people ssh'd into one Linux
+box; that is the Unix model itself. **Every connection = one `Start` on the `process`
+service** (a shell being `exec /bin/bash` with a PTY), addressed by pid and reconnectable via
+`Connect`; the engine maintains no registry of connections (§5.E).
 
-#### 3.2.1 swarm / 多 agent:engine 不认识"agent",更不寻址它
+#### 3.2.1 Swarms / many agents: the engine does not know about "agents", let alone address them
 
-一个沙箱里可能要跑多个 agent、不同种 agent,甚至 **agent 自己再派生 agent**(swarm)。
-**engine 只提供 process/fs 两个通用机制,从不认识"agent"这个概念**。三层切开,各归其位:
+One sandbox may need to run several agents, of different kinds, and even **agents spawning
+further agents** (a swarm). **The engine provides only the two general mechanisms process/fs
+and never knows the concept "agent".** Three layers, each in its place:
 
-- **Engine 层**:沙箱就是一台机器,只暴露 `process`(起/连/控进程)和 `fs`(读写
-  文件)。agent 派生 agent = 一台 Linux 上的进程经 localhost 互相说话,engine **不追踪、也不该
-  追踪**(符合解耦前提)。engine 侧**没有**命名端点、tag、会话注册表这类原语。
-- **寻址用 guest 原生机制,不靠 engine 造命名空间**:要跟某个(含被派生的)agent 说话,用它的
-  pid / unix socket / 端口,经 `process` 能力连过去——**Linux 已有进程命名空间,engine 不另发明
-  一个**。若产品要人类可读的名字,那是**数据**(agent 把"我是 planner"写进自己日志),产品层读
-  日志即得映射,engine 永不解析名字。
-- **产品层(在 engine 之上,不在其内)**:"session"、swarm 拓扑(谁派生谁、DAG)、哪个 agent 归
-  哪个用户/租户——全位于这里,建在 engine 的 ID 寻址原子(sandbox / process / fs)之上(§1.4)。
-  agent 会话语义本身也是 engine 外的 adapter 加法(§5.E)。
+- **The engine layer**: a sandbox is just a machine, exposing only `process` (start/attach/
+  control a process) and `fs` (read/write files). An agent spawning an agent = processes on
+  one Linux box talking to each other over localhost, which the engine **does not track and
+  should not track** (consistent with the decoupling premise). On the engine side there are
+  **no** primitives such as named endpoints, tags, or a session registry.
+- **Addressing uses guest-native mechanisms; the engine builds no namespace of its own**: to
+  talk to some agent (a spawned one included), use its pid / unix socket / port and connect
+  through the `process` capability — **Linux already has a process namespace and the engine
+  does not invent a second one**. If a product wants human-readable names, that is **data**
+  (an agent writes "I am the planner" into its own log), the product layer reads the log to
+  get the mapping, and the engine never parses a name.
+- **The product layer (above the engine, not inside it)**: "sessions", swarm topology (who
+  spawned whom, the DAG), which agent belongs to which user/tenant — all of it lives here,
+  built on the engine's ID-addressed atoms (sandbox / process / fs) (§1.4). Agent session
+  semantics are themselves an adapter addition outside the engine (§5.E).
 
-### 3.3 Identity:指代,不是归属
+### 3.3 Identity: reference, not belonging
 
-这里的 **Identity 是"指代哪一个"**——即"这个沙箱""这条连接"指的是谁、它变了还算不算
-同一个。**不是"谁拥有它"**:用户身份 / 操作权限不在此讨论(也不在引擎内,见 §1.4)。下面
-三层里,前两层是**稳定指代**(跨变化保持同一),Placement 是**每次重绑的物理资源**——它列在表内
-正因为最容易被误当成身份:
+**Identity here means "which one is referred to"** — that is, who "this sandbox" or "this
+connection" points at, and whether it is still the same one after it changes. **It is not "who
+possesses it"**: user identity and operation permissions are not discussed here (and are not
+inside the engine either, see §1.4). Of the three layers below, the first two are **stable
+references** (staying the same across change), while Placement is **physical resources rebound
+every time** — it is listed in the table precisely because it is the thing most easily mistaken
+for identity:
 
-| 层 | 是什么 | 跨 pause/resume | 说明 |
+| Layer | What it is | Across pause/resume | Notes |
 | --- | --- | --- | --- |
-| **Sandbox** | 这个持久沙箱(Overlay 工件 / 挂载的 Volume) | **稳定、不透明** | resume 后仍是同一个沙箱 |
-| **Process** | 一条连接(shell / 各 agent) | 临时、可并发 | pid 寻址,连接建立时由 guest 分配,可 `Connect` 重连 |
-| *(非身份)* **Placement** | netns/IP / 容器 / cgroup / 落在哪个 node | **每次重新绑定** | resume 时从头分配 |
+| **Sandbox** | This persistent sandbox (the Overlay artifact / mounted Volumes) | **Stable, opaque** | Still the same sandbox after resume |
+| **Process** | One connection (a shell / some agent) | Transient, concurrent | Addressed by pid, allocated by the guest when the connection is established, reconnectable via `Connect` |
+| *(not an identity)* **Placement** | netns/IP / container / cgroup / which node it lands on | **Rebound every time** | Allocated from scratch on resume |
 
-铁律:**Sandbox 身份不编码 placement**。沙箱 resume 后 IP / 容器 / cgroup / node 都可能变,但
-Overlay 工件没变(会话历史等也只是 Overlay 里的字节,不另算身份),仍是同一个沙箱。这是 §4
-pause/resume 与 multi-node provider(§5.A)同时成立的前提。
+The iron rule: **a Sandbox's identity does not encode its placement.** After a resume the IP /
+container / cgroup / node may all differ, but the Overlay artifact has not changed (session
+history and the like are just bytes inside the Overlay and do not count separately as
+identity), so it is still the same sandbox. This is the precondition for §4's pause/resume and
+a multi-node provider (§5.A) holding at the same time.
 
-### 3.4 Source of Truth:两类
+### 3.4 Source of truth: two kinds
 
-按 **resume 行为**切开,只有两类:
+Cut by **resume behavior**, there are only two:
 
-- **Frozen(读字节)**:SoT 是后端上的字节——沙箱 **Overlay 工件**(经 rootfs provider 寻址)、
-  data Volume 内容(各自后端)。resume 直接读回。
-- **Binding(按控制面记录重建)**:SoT 是沙箱自己的控制面记录——引用哪个 Template、挂了哪些
-  Volume、**资源上限(CPU/RAM/disk)**、**生命周期 TTL(`idle_timeout`/`retention`,§4.3)**、网络声明。
-  resume 时按**当前记录**重建,不读冻结字节。取值跨 resume 稳定保持,故都是 Binding——placement 每次
-  重绑、不是 SoT(§3.3)。**但物化点不同**:资源上限在每次 placement 时物化
-  (§5.A/§5.B);**TTL 没有任何 placement-local 物化**,它的消费者是 reaper,每轮 sweep 直接读记录。
-  连接(process)**不是 Binding**:engine 不存连接记录,resume 后由 client 重新发起(§5.E)。
+- **Frozen (read the bytes)**: the SoT is the bytes on the backend — the sandbox's **Overlay
+  artifact** (addressed through the rootfs provider) and data Volume contents (each on its own
+  backend). Resume reads them straight back.
+- **Binding (rebuilt from the control-plane record)**: the SoT is the sandbox's own
+  control-plane record — which Template it references, which Volumes are mounted, the
+  **resource ceilings (CPU/RAM/disk)**, the **lifecycle TTLs (`idle_timeout`/`retention`,
+  §4.3)**, and the network declaration. Resume rebuilds from the **current record** and does
+  not read frozen bytes. Their values stay stable across resume, which is what makes them all
+  Bindings — a placement is rebound each time and is not a SoT (§3.3). **But their
+  materialization points differ**: resource ceilings materialize at every placement (§5.A/§5.B),
+  whereas **TTLs have no placement-local materialization at all** — their consumer is the reaper,
+  which reads the record directly on every sweep. A connection (process) is **not a Binding**:
+  the engine stores no connection records, and after a resume the client initiates them again
+  (§5.E).
 
-> 注意 Overlay 工件**横跨两类**:它的**字节**是 Frozen(直接读回),但它**引用哪个 Template**
-> 是 Binding(控制面记录)。resume = 读回 Overlay 字节 + 按记录把它叠回当前 Template 之上,二者
-> 缺一不可。
+> Note that the Overlay artifact **straddles both kinds**: its **bytes** are Frozen (read
+> straight back), but **which Template it references** is a Binding (a control-plane record).
+> Resume = read the Overlay bytes back + stack them onto the current Template per the record,
+> and neither half can be missing.
 
-> 没有第三类(可撤销的外部授权)。引擎里没有授权主体,也就没有"外部可撤销 authority",
-> 所有策略的权威都在沙箱自己的控制面记录里,归 Binding。
+> There is no third kind (revocable external authority). The engine has no authorization
+> subject, so there is no "externally revocable authority" either; every policy's authority
+> lives in the sandbox's own control-plane record and belongs to Binding.
 
-#### 3.4.1 资源上限的三条轴:各自的机制与超限后果
+#### 3.4.1 The three axes of resource ceilings: each mechanism, each consequence of exceeding it
 
-**"资源上限"是三个维度,各用自己该用的机制物化,超限后果也就各自不同。** 三者都是 per-sandbox
-Binding、都在 placement 时物化。**Volume 的容量帽不是其中一轴**——它是 per-volume 属性,记在卷记录上、
-由 §5.C 物化;但它仍进节点核算式的第一项(§3.4.2):
+**"Resource ceiling" is three dimensions, each materialized by the mechanism appropriate to
+it, so the consequence of exceeding each differs too.** All three are per-sandbox Bindings and
+all three materialize at placement time. **A Volume's capacity cap is not one of these axes** —
+it is a per-volume property, recorded on the volume record and materialized by §5.C; but it
+still enters the first term of the node accounting inequality (§3.4.2):
 
-| 维度 | 机制 | 超限后果 | 定位 |
+| Dimension | Mechanism | Consequence of exceeding | Role |
 | --- | --- | --- | --- |
-| **CPU**(速率;disk I/O 同轴,待有消费者时同形加入) | §5.A 落 cgroup:**上限 + 份额两者都写**(`cpu.max` 帽住峰值、`cpu.weight` 定竞争时的相对份额) | guest 变慢,无错误 | 资源上限:公平分配 |
-| **disk 容量**(at-rest 字节) | 文件系统层配额,§5.B 施加到 Overlay upper+work | `write()` 返 `ENOSPC`,**沙箱照常存活** | 资源上限:公平分配 |
-| **RAM** | 宿主 memcg(+ `oom.group=1`) | **沙箱终止** | **安全限:约束爆炸半径** |
+| **CPU** (a rate; disk I/O is the same axis and joins in the same shape once it has a consumer) | §5.A lands it on cgroup: **both a ceiling and a share are written** (`cpu.max` caps the peak, `cpu.weight` sets the relative share under contention) | The guest slows down, with no error | Resource ceiling: fair allocation |
+| **disk capacity** (at-rest bytes) | A filesystem-level quota, applied by §5.B to the Overlay upper+work | `write()` returns `ENOSPC` and **the sandbox lives on as usual** | Resource ceiling: fair allocation |
+| **RAM** | The host memcg (+ `oom.group=1`) | **The sandbox is terminated** | **A security limit: bounding the blast radius** |
 
-**disk 容量与 disk I/O 是两条正交的轴**,别混:cgroup 管不了 at-rest 占多少字节,配额管不了读写
-速率。容量轴是 §2.3 爆炸半径对磁盘维度的 enforce 点。
+**Disk capacity and disk I/O are two orthogonal axes** — do not conflate them: cgroup cannot
+govern how many bytes are occupied at rest, and a quota cannot govern read/write rate. The
+capacity axis is the enforcement point for §2.3's blast radius on the disk dimension.
 
-**CPU 轴上限与份额都写,是"公平分配"这个定位的必要条件。** 契约里仍只有**一个**旋钮(`cpu_millis`),
-上限与份额都由它派生(§1.3:不加字段、不动 seam 形状)。只写上限不够:cgroup 的默认权重对每个叶子相同,
-于是节点跑满时 4000-millis 与 250-millis 的沙箱**平分** CPU——各自的帽都没破,但完全不是它们被许诺的
-比例。份额正是让"CPU 不设准入门、允许超卖"(下条)在拥塞时**按比例**降级而非齐平降级的东西;它只在
-节点饱和且双方都 runnable 时起作用,低负载下不改变任何行为。
+**Writing both a ceiling and a share on the CPU axis is a necessary condition for the "fair
+allocation" role.** The contract still has only **one** knob (`cpu_millis`), from which both
+the ceiling and the share are derived (§1.3: no field added, seam shape untouched). Writing
+only the ceiling is not enough: cgroup's default weight is the same for every leaf, so when
+the node is saturated a 4000-millis and a 250-millis sandbox **split the CPU evenly** — neither
+cap is broken, but the ratio is nothing like what they were promised. The share is exactly what
+makes "no admission gate on CPU, oversubscription allowed" (next paragraph) degrade
+**proportionally** rather than uniformly under congestion; it takes effect only when the node
+is saturated and both parties are runnable, and changes nothing under low load.
 
-**CPU 不设节点预算(不像 RAM / 容量)。** 判据是超限后果:CPU 超卖只让 guest 变慢、无错误,而准入门
-只守"超限后果不优雅"的轴(§3.4.2)。同向证据:成熟实现刻意把 CPU 调度请求压到上限的 1/10 以提高装箱
-密度,即把 CPU 当作可超卖维度而非配额维度。
+**CPU gets no node budget (unlike RAM / capacity).** The criterion is the consequence of
+exceeding: oversubscribing CPU only slows the guest down with no error, and the admission gate
+guards only the axes whose consequence of exceeding is ungraceful (§3.4.2). Corroborating
+evidence: mature implementations deliberately compress CPU scheduling requests to 1/10 of the
+ceiling to improve packing density, treating CPU as an oversubscribable dimension rather than
+a quota dimension.
 
-**三个维度就是全部,`pids` 永久排除。** 实测:cgroup 的 `pids` 帽限的是**宿主 task**(systrap 下每个
-guest 进程约 2.3 个),设低了 sentry 直接 panic(`failed to get clone`)、整个沙箱消失——它是**可用性
-地雷而非资源帽**,与本节三个维度"超限后果各自明确"的性质根本不同(超 pids 帽的后果不是变慢、不是
-`ENOSPC`、也不是可解释的终止,而是沙箱凭空不见)。故它不进 `ResourceLimits`、不进 §6.1。
+**Three dimensions are all of them, and `pids` is permanently excluded.** Measured: cgroup's
+`pids` cap limits **host tasks** (about 2.3 per guest process under systrap), and setting it
+low makes the sentry panic outright (`failed to get clone`) and the entire sandbox disappear —
+it is **an availability landmine rather than a resource cap**, fundamentally unlike this
+section's three dimensions whose consequences of exceeding are each well-defined (exceeding a
+pids cap produces neither a slowdown, nor an `ENOSPC`, nor an explicable termination, but a
+sandbox vanishing into thin air). So it does not enter `ResourceLimits` and does not enter §6.1.
 
-#### 3.4.2 节点级不超卖:两条独立预算
+#### 3.4.2 No node-level oversubscription: two independent budgets
 
-**两条独立预算,各自按"引擎承诺了什么"计量。** 每沙箱的帽只把"撑满整机"降级成
-"撑满自己";帽的**总和**能否被兑现是另一件事,由 create / resume 前的**准入门**核算(§4)。两条预算
-互不通兑(内存与磁盘不可替换),**只有超限后果不优雅的轴才设预算**——磁盘容量(无辜沙箱吃 `ENOSPC`)
-与 RAM(沙箱被终止),故 §3.4.1 三轴里只有这两条在此。
+**Two independent budgets, each metering "what the engine has promised".** A per-sandbox cap
+only downgrades "fill the whole machine" to "fill your own share"; whether the **sum** of the
+caps can be delivered is a separate matter, computed by the **admission gate** before create /
+resume (§4). The two budgets are not interchangeable (memory and disk do not substitute for each
+other), and **only axes whose consequence of exceeding is ungraceful get a budget** — disk
+capacity (an innocent sandbox taking `ENOSPC`) and RAM (a sandbox being terminated), so of
+§3.4.1's three axes only these two are here.
 
-- `Σ(已声明的 disk 帽) + Σ(无帽覆盖的实测字节) ≤ 配置的磁盘预算`(第二项为何必须存在:rootfs-overlay
-  D6.2;谁在何时核算、Promote 这一路怎么过:同文 D6.5)
-  - **两项都跨 §5.B 与 §5.C 求和,不是只算沙箱。** 第一项 = `Σ(沙箱 disk 帽) + Σ(卷帽)`;第二项 =
-    `Σ(§5.B 无帽字节) + Σ(§5.C 无帽字节)`,后者由 §5.C backend 用与 §5.B 同形的 seam 方法报出。
-    **不新增第三项**:卷帽与沙箱帽是同一条不等式左侧的同类项(都是"引擎已声明的上界"),尽管卷帽
-    记在卷记录上而非某个沙箱的 Binding 上(§5.C)。漏掉它们的后果是当场超卖:一个节点可以被一堆
-    无帽卷填满而准入门一次都不拒。
-  - **该轴被计量 ⟹ 卷也必须有帽。** §3.4.3"计量轴上的每个沙箱都必须有帽"的理由对卷逐字成立,故 disk
-    被计量时卷的容量帽也是**条件必填**、缺失即拒——具体是哪几个端点收 `size`、拒成什么状态码,归
-    §6.1/§6.2(那里的"按轴条件必填"是同一条规则)。它们按**声明帽**计、不按元数据级的实际字节计——
-    "对每个对象取最强的可得陈述"已覆盖。
-  - **但"按声明帽计"是对引擎的要求,不是对基底的描述。** 实测:快照得到的是一条**全新的、无帽的**
-    配额行(四种形状皆然),基底不提供任何可继承的帽。故这条记账只有在**引擎自己去写那个帽**时才是
-    关于这个节点的真陈述,而漏写是静默的、事后不可检出的——机制、崩溃窗口与为何不可事后对账见
-    [`deep-dives/volume.md`](./deep-dives/volume.md) D7.3。
-- `Σ(已声明的 RAM 帽) ≤ 配置的 RAM 预算`
+- `Σ(declared disk caps) + Σ(measured bytes not covered by a cap) ≤ the configured disk budget`
+  (why the second term must exist: rootfs-overlay D6.2; who computes it when, and how the
+  Promote path passes it: D6.5 in the same file)
+  - **Both terms sum across §5.B and §5.C, not over sandboxes alone.** The first term =
+    `Σ(sandbox disk caps) + Σ(volume caps)`; the second = `Σ(§5.B uncapped bytes) + Σ(§5.C
+    uncapped bytes)`, the latter reported by the §5.C backend through a seam method of the same
+    shape as §5.B's. **No third term is added**: volume caps and sandbox caps are like terms on
+    the same left-hand side (both are "upper bounds the engine has declared"), even though a
+    volume cap is recorded on the volume record rather than in some sandbox's Binding (§5.C).
+    Omitting them oversubscribes on the spot: a node could be filled by a pile of uncapped
+    volumes without the admission gate ever refusing once.
+  - **The axis being metered ⟹ volumes must have caps too.** §3.4.3's reasoning that "every
+    sandbox on a metered axis must have a cap" holds word for word for volumes, so when disk is
+    metered a volume's capacity cap is **conditionally required** as well and missing it is a
+    refusal — exactly which endpoints take `size`, and which status code the refusal is, belong
+    to §6.1/§6.2 (whose "per-axis conditional-required" is the same rule). They are counted by
+    their **declared cap** rather than by metadata-level actual bytes — "take the strongest
+    available statement about each object" already covers this.
+  - **But "counted by the declared cap" is a requirement on the engine, not a description of
+    the substrate.** Measured: a snapshot yields **a brand-new, uncapped** quota row (in all
+    four shapes), and the substrate offers no inheritable cap. So this accounting is a true
+    statement about this node only when **the engine goes and writes that cap itself**, and
+    failing to write it is silent and undetectable after the fact — the mechanism, the crash
+    window, and why it cannot be reconciled after the fact are in
+    [`deep-dives/volume.md`](./deep-dives/volume.md) D7.3.
+- `Σ(declared RAM caps) ≤ the configured RAM budget`
 
-**两项互斥,同一个物理字节只计一次。** 一项是**已声明的帽**(对未来增长的上界),一项是**无帽覆盖的
-已占字节**(唯一可得的真陈述):有帽的 Overlay upper 在实测项里**计 0**——把它的当前用量加上去等于
-在已有承诺之上再收一次,且那是预测而非已占。判据统一为**对每个对象取最强的可得陈述**。
+**The two terms are mutually exclusive, and the same physical byte is counted once.** One term
+is **declared caps** (an upper bound on future growth), the other is **occupied bytes not
+covered by a cap** (the only available true statement): a capped Overlay upper **counts 0** in
+the measured term — adding its current usage would charge a second time on top of an existing
+promise, and that usage is a prediction rather than an occupancy. The criterion is uniformly
+**take the strongest available statement about each object**.
 
-**两条预算都只计"引擎能命名的字节"。** layer 字节单列,是因为 **Template 是引擎的一等对象**
-(§4.3 refcount / §5.B),它占的字节没有任何沙箱帽覆盖,引擎必须认账。而**基底自身的每沙箱开销
-——磁盘上的 runsc state、RAM 里的 sentry/gofer 足迹——在预算之外**:那是 provider 的实现常数
-(§5.A),算进核算式就是把它焊进 mediator 的账本。故预算的含义是**引擎可以向 guest 承诺的字节**,
-不是宿主的物理余量;operator 把预算配在物理值之下,那道差额就是留给基底自身开销的。
+**Both budgets count only "bytes the engine can name".** Layer bytes are itemized separately
+because **a Template is a first-class engine object** (§4.3 refcount / §5.B) and the bytes it
+occupies are covered by no sandbox cap, so the engine must account for them. Whereas **the
+substrate's own per-sandbox overhead — runsc state on disk, the sentry/gofer footprint in RAM —
+is outside the budgets**: that is the provider's implementation constant (§5.A), and counting it
+into the inequality would weld it into the mediator's ledger. So a budget means **the bytes the
+engine may promise a guest**, not the host's physical headroom; the operator configures the
+budget below the physical value, and that margin is what is left for the substrate's own
+overhead.
 
-> **一条诚实的残留**:未计入的 RAM 开销与沙箱数成正比,其占比随帽变小而放大,故"按物理 RAM 的某个
-> 百分比配预算"不对所有帽尺寸成立。若它咬人,收口手段是配一个**最小 RAM 帽下限**(约束比例上界,
-> 不需引擎命名 overhead、不动 §5.A seam),不是把 overhead 变成契约成员。
+> **One honest residual**: the uncounted RAM overhead is proportional to the number of
+> sandboxes, and its proportion grows as caps shrink, so "configure the budget as some
+> percentage of physical RAM" does not hold for all cap sizes. If it bites, the way to settle it
+> is to configure a **minimum RAM cap floor** (bounding the ratio's upper limit, requiring no
+> engine-named overhead and no change to the §5.A seam), not to make overhead a member of the
+> contract.
 
-#### 3.4.3 帽的写入规则:必须有帽、抬帽重核、两个被拒的方向
+#### 3.4.3 Rules for writing a cap: a cap is mandatory, raising re-runs the gate, two directions refused
 
-**一旦某轴被计量,该轴上的每个沙箱都必须有帽。** 无帽沙箱(取值 0 = 无上限)对核算式左侧贡献 0、
-却可占用右侧全部——它不是"少算一点",而是让整个不等式**不再描述那块盘**。故计量轴上的无帽 create /
-resume 在准入处被**拒绝**(400,与"节点已满"507 是两件事),而**不是**按默认值静默补齐:拒绝可见,
-默认不可见——§2.3 之所以能说 `ENOSPC` 是"数据面内的**预期**结果",前提是那道边界被**显式声明**过。
-`0 = 无上限` 仅在该轴**未被计量**时合法。**RAM 轴尤甚**:无帽意味着超限不再被约束在本沙箱内,且
-没有 memcg 可读、死因只能落 `Unknown`(§4.3)。CPU 不在核算内,`cpu_millis: 0` 恒合法。
+**Once an axis is metered, every sandbox on that axis must have a cap.** An uncapped sandbox
+(value 0 = no ceiling) contributes 0 to the inequality's left side while being able to occupy
+all of the right — that is not "undercounting a little", it makes the whole inequality **stop
+describing that disk**. So an uncapped create / resume on a metered axis is **refused** at
+admission (400, a different thing from "the node is full", 507), and is **not** silently filled
+in with a default: a refusal is visible and a default is not — the reason §2.3 can call `ENOSPC`
+an "**expected** outcome inside the data plane" is that the boundary was **declared explicitly**.
+`0 = no ceiling` is legal only when the axis is **not metered**. **The RAM axis most of all**:
+uncapped means exceeding is no longer confined to this sandbox, and there is no memcg to read, so
+the cause of death can only be `Unknown` (§4.3). CPU is not in the accounting, so `cpu_millis: 0`
+is always legal.
 
-**抬高上限须重过准入门。** 准入门**从 store 求和**(含 `paused` 沙箱),所以任何对帽列的写入**当场**
-改变 Σ,不是等到 resume;抬帽因此必须在提交前重跑准入、**可能被拒**,降帽不需要。同理,任何**增加
-无帽字节**的控制面动作(如 Promote 固化新层)都应过同一道不等式。
+**Raising a ceiling must re-run the admission gate.** The gate **sums from the store** (`paused`
+sandboxes included), so any write to a cap column changes Σ **on the spot** rather than at the
+next resume; a raise must therefore re-run admission before committing and **may be refused**,
+while a lowering need not. Likewise, any control-plane action that **increases uncapped
+bytes** (such as Promote freezing a new layer) must pass the same inequality.
 
-> **"降帽不需要重核"不等于"降帽是安全方向"。** Σ 的论断对:降只减小左侧。但**降到低于当前用量会把
-> 那个存储单元卡死,且不可逆**——基底接受这次降帽且零校验,其后一切增长字节的操作返 `ENOSPC`,
-> **连撤帽/抬帽本身也返 `ENOSPC`**,唯一出路是删 guest 的字节(实测明细、边界情形 `limit == 用量`
-> 与三条派生约束见 [`deep-dives/volume.md`](./deep-dives/volume.md) D7.3,本处不复制)。
-> 故引擎**不得接受这样的降帽**,判据是严格不等式;它也是上面"边界须被显式声明"的
-> 反面——一次被静默接受的缩帽对运行中的工作负载什么都没声明。**两侧各有写点**:卷侧在
-> `PATCH /v1/volumes/{id}`,沙箱 disk 侧在 `PATCH /v1/sandboxes/{id}`(400)。沙箱侧靠 §5.B 的
-> 沙箱级用量查询 seam 判定(为何"无帽字节"那一项答不了这个问题见 §3.4.2 的两项互斥)。
-> **沙箱侧的后果比卷侧更重**:帽在**每次** placement 被重放,故卡死的单元连 resume 都过不去——与下面
-> `0 → N` 那条被拒的写同一个后果。三条只在沙箱侧成立的实测(含 `limit == 用量` 同样卡死、以及它对
-> `Mount` 的"新 workdir"步骤施加的一条约束)见
-> [`deep-dives/rootfs-overlay.md`](./deep-dives/rootfs-overlay.md) D6.6。
+> **"A lowering need not be re-checked" does not mean "lowering is the safe direction".** The Σ
+> argument is right: lowering only shrinks the left side. But **lowering below current usage
+> wedges that storage unit, irreversibly** — the substrate accepts the lowering with zero
+> validation, after which every byte-growing operation returns `ENOSPC`, **including removing or
+> raising the cap itself**, and the only way out is deleting the guest's bytes (the measured
+> detail, the boundary case `limit == usage`, and three derived constraints are in
+> [`deep-dives/volume.md`](./deep-dives/volume.md) D7.3, not duplicated here).
+> So the engine **must not accept such a lowering**, and the criterion is a strict inequality; it
+> is also the converse of "the boundary must be declared explicitly" above — a silently accepted
+> shrink declares nothing to a running workload. **Each side has its own write point**: the volume
+> side at `PATCH /v1/volumes/{id}`, the sandbox disk side at `PATCH /v1/sandboxes/{id}` (400). The
+> sandbox side decides through §5.B's sandbox-level usage query seam (why the "uncapped bytes"
+> term cannot answer this question is §3.4.2's mutual exclusion).
+> **The consequence is worse on the sandbox side than the volume side**: the cap is replayed at
+> **every** placement, so a wedged unit cannot even get through a resume — the same consequence as
+> the refused `0 → N` write below. Three measurements that hold only on the sandbox side
+> (including `limit == usage` wedging equally, and a constraint it imposes on `Mount`'s "new
+> workdir" step) are in
+> [`deep-dives/rootfs-overlay.md`](./deep-dives/rootfs-overlay.md) D6.6.
 
-> **沙箱 disk 轴上,`0 → N`(从无帽变有帽)是一次被拒绝的写(400),不是一次抬帽。** 判据是"这次写
-> 承诺的东西,物化层兑现得了吗":per-sandbox 容量帽物化成一个带配额的存储单元,而**该单元只在 create
-> 时、且只在当时就有帽的情况下被建成配额单元**;一个无帽沙箱的 upper 是普通目录树,其上没有可写的配额
-> 行。故接受这次 PATCH 会让记录声明一个**每一次未来 placement 都兑现不了**的帽——而 §5.B 的纪律是
-> "帽兑现不了就拒绝这次 placement,绝不静默降级",于是那个沙箱**再也 resume 不起来**:一次 200 的
-> PATCH 把沙箱变成砖。**拒绝的落点必须是写点而不是 placement**:前者当场可见、什么都没改,后者是一个
-> 事后才炸、且炸在恢复路径上的失败。
+> **On the sandbox disk axis, `0 → N` (uncapped becoming capped) is a refused write (400), not a
+> raise.** The criterion is "can the materialization layer deliver what this write promises?":
+> a per-sandbox capacity cap materializes as a quota-bearing storage unit, and **that unit is
+> built as a quota unit only at create, and only if it had a cap at that time**; an uncapped
+> sandbox's upper is an ordinary directory tree with no writable quota row on it. So accepting
+> this PATCH would make the record declare a cap that **no future placement can ever deliver** —
+> and §5.B's discipline is "if the cap cannot be delivered, refuse this placement, never silently
+> degrade", so that sandbox **can never resume again**: one 200 PATCH turns the sandbox into a
+> brick. **The refusal must land at the write point rather than at placement**: the former is
+> visible on the spot and changes nothing, the latter is a failure that detonates later, on the
+> recovery path.
 >
-> **为什么不是"下次 placement 顺手把它转成配额单元"**:那要在 resume 热路径上搬字节(建新单元 → 拷
-> → 换),给最承重的那条链新增一个带崩溃窗口的数据移动步骤,为的是一个调用方**重建沙箱就能得到**的结果。
-> **也不是"干脆所有沙箱都建成配额单元"**:那让每个沙箱都付这份开销,并且要求 `StateDir` 必须是 btrfs
-> ——无帽沙箱在任何 FS 上都应能跑。**方向性**:`N → 0`(撤帽)合法,它只是把帽清掉;
-> `N → M`(改帽)也合法。被拒的只有 `0 → N` 这一向。
+> **Why not "convert it into a quota unit at the next placement while we are there"**: that would
+> move bytes on the resume hot path (build a new unit → copy → swap), adding a data-movement step
+> with a crash window to the most load-bearing chain, all for a result the caller **can get by
+> recreating the sandbox**. **Nor "just build every sandbox as a quota unit"**: that makes every
+> sandbox pay the overhead and requires `StateDir` to be btrfs — an uncapped sandbox should run on
+> any FS. **Directionality**: `N → 0` (removing the cap) is legal, it merely clears the cap; `N → M`
+> (changing it) is legal too. Only the `0 → N` direction is refused.
 
-#### 3.4.4 `paused` 沙箱仍占两条预算
+#### 3.4.4 A `paused` sandbox still occupies both budgets
 
-**`paused` 沙箱仍占两条预算**,尽管它物理上已释放 RAM/CPU(§4.2)。理由不是记账方便,而是 `paused`
-必须是**可逆的门**(§1.1):不计它,则新 create 会吃掉它 resume 所需的资源,resume 撞准入门留在
-`paused`(§4.4-A),而 `UpdatedAt` 不前进 ⇒ `retention` 照走 ⇒ 沙箱被 evict、**Overlay 字节被销毁**
-(§4.3)。准入门存在的理由正是"不让一个沙箱因**别的**沙箱的用量而失败";因别人的用量而被**销毁**
-比因它而写失败更严重。**代价明说**:一个大多数沙箱处于 `paused` 的节点会对着物理空闲的 RAM 拒绝
-create,而 auto-pause(§4.3)正是引擎自己制造这个局面的那一手。这是"pause 保证可恢复"的价钱,接受。
+**A `paused` sandbox still occupies both budgets**, even though it has physically released
+RAM/CPU (§4.2). The reason is not accounting convenience but that `paused` must be **a
+reversible gate** (§1.1): were it not counted, a new create would consume the resources its
+resume needs, the resume would hit the admission gate and stay `paused` (§4.4-A), and since
+`UpdatedAt` does not advance ⇒ `retention` runs on ⇒ the sandbox is evicted and **the Overlay
+bytes are destroyed** (§4.3). The very reason the admission gate exists is "do not let one
+sandbox fail because of **another** sandbox's usage"; being **destroyed** because of someone
+else's usage is worse than having a write fail because of it. **The cost, stated plainly**: a
+node where most sandboxes are `paused` will refuse creates while facing physically idle RAM, and
+auto-pause (§4.3) is the engine's own move that manufactures that situation. This is the price of
+"a pause guarantees recoverability", and it is accepted.
 
-#### 3.4.5 Binding 可写:写点唯一,生效点按消费者分三类
+#### 3.4.5 Bindings are writable: one write point, effective points in three classes by consumer
 
-**Binding 可写,写点唯一,生效点按消费者分三类。** Binding 的 SoT 是控制面记录,所以"改 Binding"
-就是改那条记录——§6.1 `PATCH /v1/sandboxes/{id}` 是 create 之外**唯一**的通用写点,与其他动词共用同一把
-转换锁 + 条件写提交(§4.4-B / §4.4-C)。**只有一个别的写点:`POST /v1/sandboxes/{id}/publish`,它只写
-`ingress.publish[]` 这一个字段**,且同样落库以跨 resume 存活(机制与理由见 §5.D)。生效点取决于
-**谁消费这个字段**:
+**Bindings are writable, the write point is unique, and effective points fall into three classes
+by consumer.** A Binding's SoT is the control-plane record, so "editing a Binding" is editing
+that record — §6.1's `PATCH /v1/sandboxes/{id}` is the **only** general write point besides
+create, sharing the same transition lock and conditional-write commit as the other verbs (§4.4-B
+/ §4.4-C). **There is exactly one other write point: `POST /v1/sandboxes/{id}/publish`, which
+writes the single field `ingress.publish[]`**, and it too persists in order to survive resume
+(the mechanism and reasoning are in §5.D). The effective point depends on **who consumes the
+field**:
 
-- **provider / rootfs provider 消费的(资源上限三轴)**:在**下一次 placement** 物化,即下一次 resume。
-  故这类字段**只在 `paused` 可改**——对 `running` 沙箱接受一个要等未来某次 resume 才生效的编辑,会让
-  记录与活着的隔离单元长期不一致,是"记录说一套、substrate 做一套"的假不变量。操作路径
-  `pause → PATCH → resume`,与 §5.C 改挂载表、§5.D 改网络声明同一条路。
-- **reaper 消费的(`idle_timeout` / `retention`)**:reaper 每轮 sweep 直接重读记录、**不经 placement**,
-  故**立即生效**,`running` / `paused` 皆可改。
-- **规则集消费的(`ingress.publish[]`)**:纯宿主侧规则的加法,**在 `running` 上就地重装整份规则集、
-  立即生效**,故它不受上面"先 pause"那条约束(`paused` 上则只落库,规则在下一次 placement 出现——那不是
-  不变量的缺口:没有 placement 的沙箱本就没有可绕过的东西)。**它是唯一一个不经 placement 就改宿主态的
-  Binding 字段**,故次序是"先落库、再装规则":反过来会留下一个引擎自己都不知道的开着的口。
+- **Consumed by the provider / rootfs provider (the three resource-ceiling axes)**: materialized
+  at the **next placement**, that is, the next resume. So these fields are **editable only in
+  `paused`** — accepting, on a `running` sandbox, an edit that takes effect only at some future
+  resume would leave the record inconsistent with the live isolation unit for a long time, a
+  false invariant of the "the record says one thing, the substrate does another" kind. The
+  operational path is `pause → PATCH → resume`, the same road as §5.C's mount-table edits and
+  §5.D's network-declaration edits.
+- **Consumed by the reaper (`idle_timeout` / `retention`)**: the reaper rereads the record
+  directly on every sweep and **does not go through a placement**, so these take effect
+  **immediately** and are editable in both `running` and `paused`.
+- **Consumed by the rule set (`ingress.publish[]`)**: purely an addition of host-side rules,
+  which **reinstalls the whole rule set in place on a `running` sandbox and takes effect
+  immediately**, so it is not subject to the "pause first" constraint above (on a `paused`
+  sandbox it only persists, and the rule appears at the next placement — which is not a gap in
+  the invariant: a sandbox with no placement has nothing to bypass in the first place). **It is
+  the only Binding field that changes host state without going through a placement**, so the
+  order is "persist first, then install the rules": the reverse would leave a hole open that the
+  engine itself does not know about.
 
-**Binding 的每次重新物化都要重新求值它的准入判据,而不只是重新渲染它的内容。** 写点(`PATCH` / create /
-`publish`)拒掉一份绑定所依据的判据,在**下一次 placement、崩溃对账的重装、以及任何修复性重扫**上必须
-再走一遍——那些路径**重建的是同一份宿主态**,故它们与写点承担的是同一条不变量,不是"已经查过了"的下游。
-**为什么必须写出来**:绑定持久、而它的判据要读的东西**不持久**——判据可能依赖部署期入参(每进程)、
-依赖存储单元的**当前**用量、依赖 placement 的产物。于是"落库 → 环境变化 → 重新物化"是一条**绕过那次
-拒绝的合法路径,中间没有任何写入**:一份在写点被正确拒绝的绑定,换个部署重启一次就活了。而这条路径
-**对写点侧的每条断言完全不敏感**——它们测的是写点,故它一路静默通过。这不是防御性编程:它是同一形状
-反复出现过的成因(重装路径丢掉判据的入参、修复扫描丢掉用量、重绑时按错的键去重),而症状恰好是
-"看起来一切正常"。
+**Every rematerialization of a Binding must re-evaluate its admission criteria, not merely
+re-render its content.** The criteria on which a write point (`PATCH` / create / `publish`)
+refuses a binding must be walked again at **the next placement, at a crash reconciliation's
+reinstall, and at any repair rescan** — those paths **rebuild the same host state**, so they
+carry the same invariant the write point does and are not a downstream of "it has been checked
+already".
+**Why this must be written out**: a binding is durable while what its criteria must read is
+**not** — the criteria may depend on deployment-time inputs (per process), on a storage unit's
+**current** usage, or on a placement's products. So "persist → the environment changes →
+rematerialize" is **a legal path that bypasses that refusal, with no write in between**: a
+binding correctly refused at the write point comes alive after one restart under a different
+deployment. And that path is **completely insensitive to every assertion on the write-point
+side** — those test the write point, so it passes silently all the way through. This is not
+defensive programming: it is a recurring cause of the same shape (a reinstall path losing the
+criteria's inputs, a repair scan losing usage, a rebind deduplicating by the wrong key), and the
+symptom happens to be "everything looks fine".
 
-**写入的三条附带纪律。** ① `PATCH` 只换整份绑定:未给的字段不动,且不存在"待定/未解析"值(§6.2)。
-② 它**不动 `UpdatedAt`**——`retention` 从那一列起算(§4.3),顺手刷新它等于把驱逐期限当作改帽的副作用
-悄悄延长。③ 它**不是 §4.1 转换**,故不发事件——Promote 同理(只是 Promote **自身**不是转换;它内部对
-`running` 源的静止是一次普通 pause,照发 `paused`)。
+**Three incidental disciplines on writing.** ① `PATCH` replaces the whole binding only: fields
+not given are untouched, and there are no "pending/unresolved" values (§6.2). ② It **does not
+touch `UpdatedAt`** — `retention` counts from that column (§4.3), and refreshing it in passing
+would quietly extend the eviction deadline as a side effect of changing a cap. ③ It is **not a
+§4.1 transition** and so emits no event — the same for Promote (except that Promote **itself** is
+not a transition; the quiesce it performs internally on a `running` source is an ordinary pause
+and emits `paused` as usual).
 
-**provider 不被要求就地改帽**:没有"把这个单元的帽设成 N,现在"这种调用——那是宿主原语形状的请求,
-被调度的远端隔离单元一般兑现不了(§5.A ❌ list)。改帽走的是"改记录 + 下次 placement 重物化"。
+**The provider is not required to change a cap in place**: there is no "set this unit's cap to N,
+now" call — that would be a request shaped like a host primitive, and a scheduled remote isolation
+unit generally cannot deliver it (§5.A's ❌ list). Changing a cap goes through "edit the record +
+rematerialize at the next placement".
 
-**RAM 上限不是资源上限,它是安全限。** 它约束爆炸半径,不提供公平分配。超限的后果是一条
-**生命周期事件(沙箱终止)**,不是一次操作失败——因为 substrate 上不存在"guest 内进程拿到
-`ENOMEM` 而沙箱存活"这条路:gVisor 无 guest 内 OOM killer,guest 内 `MemTotal` 只是开机读一次的
-装饰值,着力点只有宿主 memcg。故 RAM 超限是**控制面必须知道的状态转换**(§4.3 有其处置分类),
-而 CPU/disk 超限是数据面内的事件(guest 自己处理一个慢速或一个 errno),控制面不介入。
+**The RAM ceiling is not a resource ceiling; it is a security limit.** It bounds the blast radius
+and provides no fair allocation. The consequence of exceeding it is **a lifecycle event (the
+sandbox is terminated)** rather than one failed operation — because on this substrate there is no
+path where "a process inside the guest gets `ENOMEM` and the sandbox survives": gVisor has no
+in-guest OOM killer, the guest's `MemTotal` is a decorative value read once at boot, and the only
+point of leverage is the host memcg. So exceeding RAM is **a state transition the control plane
+must know about** (§4.3 has its disposition class), whereas exceeding CPU/disk is an event inside
+the data plane (the guest itself handles a slowdown or an errno) that the control plane does not
+get involved in.
 
 ---
 
-## 4. 生命周期模型
+## 4. Lifecycle model
 
-生命周期是**凌驾于五个子系统(§5)之上的协调者(mediator)**,不是第六个平级子系统,也不是某个
-子系统的内部功能。理由:`resume` 这**一个动作就横跨 A–D 四个子系统**——停/起进程(A)、重挂
-Overlay(B)、按挂载表重挂 Volume(C)、按网络声明重装规则集(D);E(传输)无状态,引擎不参与,
-由 client 自行重连。
+The lifecycle is **a mediator standing above the five subsystems (§5)**, not a sixth peer
+subsystem and not some subsystem's internal feature. The reason: `resume` **is one action that
+spans four subsystems, A–D** — stop/start processes (A), remount the Overlay (B), remount Volumes
+per the mount table (C), reinstall the rule set per the network declaration (D); E (transport) is
+stateless, the engine does not participate, and the client reconnects on its own.
 
-由此定下职责归属,防止成环:
+From this follows the assignment of responsibilities that prevents cycles:
 
-> **动词归 §4,机制归 §5。** 生命周期(§4)持有状态机,按状态机**调用**每个子系统暴露的能力;
-> 子系统只提供机制(Rootfs 提供"挂/卸 Overlay",Network 提供"生成规则集"…),**子系统之间永不
-> 互相调用**。"Rootfs 在 resume 时去戳 Network" 这类跨子系统调用是被禁止的——那正是反向依赖成环的
-> 起点。
+> **Verbs belong to §4, mechanisms to §5.** The lifecycle (§4) holds the state machine and
+> **calls** the capabilities each subsystem exposes according to it; subsystems provide
+> mechanisms only (Rootfs provides "mount/unmount an Overlay", Network provides "generate a rule
+> set" …), and **subsystems never call each other**. A cross-subsystem call such as "Rootfs pokes
+> Network during resume" is forbidden — that is exactly where a reverse-dependency cycle starts.
 
-### 4.1 状态机
+### 4.1 State machine
 
-四个生命周期状态:`creating` / `running` / `paused` / `destroyed`。(与 §3.1 三态的关系:
-`running`↔Live、`paused`↔Paused;Template 不是沙箱状态,`creating`/`destroyed` 无对应 FS 态。
-§3.1 三态讲 rootfs 可变性,本节四态讲生命周期机。)
+Four lifecycle states: `creating` / `running` / `paused` / `destroyed`. (Their relation to §3.1's
+three states: `running`↔Live, `paused`↔Paused; a Template is not a sandbox state, and
+`creating`/`destroyed` have no corresponding FS state. §3.1's three states are about rootfs
+mutability, this section's four are the lifecycle machine.)
 
 ```text
 creating ──▶ running ──pause / auto-pause / crash──▶ paused ──▶ destroyed
                 │   ▲                                 │   │         ▲
                 │   └──────────── resume ─────────────┘   │         │
                 └──────── destroy ────────────────────────┴─────────┘
-        (destroy 可从 running 或 paused 发起;evict = reaper 对 paused 的自动 destroy)
+        (destroy may be initiated from running or paused; evict = the reaper's automatic
+         destroy of a paused sandbox)
 ```
 
-- **显式转换**(API 动词):`create` / `pause` / `resume` / `destroy`;`destroy` 从 `running` 或
-  `paused` 都可发起,终态 `destroyed`(删 Overlay 工件)。
-- **自动转换**(reaper 守护)**共三条**。下一条的非自愿降级不计在内,尽管它也由 reaper 的同一轮驱动。
-  两条是"释放"方向:`running` 空闲超阈值 → `auto-pause`;
-  `paused` 超保留期 → `evict`(**`evict` 就是 reaper 对 `paused` 沙箱触发的 `destroy`**——同一个
-  `→ destroyed` 终态,只是触发方是 reaper 而非用户)。第三条是唯一能让沙箱回到 `running` 的:
-  transport-down 连续超重启预算后的升级(§4.3 / reaper-health D4b),它**不是一次 `paused → running`
-  跳跃,而是两步**——先 crash-pause 降到 `paused`(照发 `crash-paused`,不带死因),再由 reaper 紧接着
-  发起一次**普通 resume**,换新 IP 整链冷启;两步各自过 §4.4-B 的锁与 CAS,resume 失败就留在 `paused`。
-  **L1 探不到的死亡不在其中**,那要显式动词恢复(§4.3)。
-- **非自愿转换**(探活驱动):对账或 reaper sweep 发现一个 `running` 沙箱的隔离单元已死时,CAS 把它降到
-  `paused`(§4.2 崩溃变体 / §4.3 / §4.4-A)——这是**进入 `paused` 的第三条路**,与用户 `pause`、reaper
-  `auto-pause` 并列,事件 Kind 为 `crash-paused`(见下条)。**死因随这次 CAS 同一提交落库**(§4.3):
-  它决定该沙箱之后走 resume 还是不走,而信号在提交后即不可恢复。
-- **转换对外发布为事件**:每次状态机转换发布到一条 **event stream**,Kind 恰好六个——`created` /
-  `paused` / `auto-paused` / `crash-paused` / `resumed` / `destroyed`(**没有 `evict` Kind**:evict 发
-  `destroyed`);webhook、metrics、计费等 subscriber 在**引擎之外**消费,
-  **引擎不知道也不依赖谁在订阅**。这是 observability / 计费的接法——单向、additive(§1.3:add a
-  subscriber),不是引擎反过来回调外部系统。**三种 pause 类事件的态都是 `paused`,但 Kind 分承其因**:
-  `paused` = 用户暂停、`auto-paused` = reaper 空闲暂停、`crash-paused` = **非自愿**降级(§4.2 崩溃变体);
-  态相同,Kind 让 subscriber 分辨"为何暂停"。**`crash-paused` 覆盖两条非自愿路径,不只"单元已死"**:
-  ① 探活/对账发现隔离单元已死(带死因落库);② transport-down 连续超重启预算的升级(§4.3 / reaper-health
-  D4b)——那一条 **L1 仍活**,故**不带死因**(无可解释的死亡,§2.4 不许猜)。二者共用同一 Kind 是 D4b
-  的刻意选择(升级只改判处置健康态,不新造状态或动词);要区分它们的 subscriber 看**死因在不在**即可。
-  **状态提交与事件发布如何做到不丢不错(计费级),见 §4.4。**
-  > **终态必须成对:没见过 `created` 的沙箱不发 `destroyed`。** 一条 `creating` 记录还没对外可见过
-  > (`created` 只在 create 链提交后才发),故删除它**不发事件**——无论是对账清理崩溃残留,还是运维事后
-  > 手动 destroy 那条卡住的记录(崩溃后对账的删除本身也可能失败,故这条记录确实可达)。两条路径同一条
-  > 规则:否则计费类 subscriber 会收到一笔"结束了但从未开始"的账。
+- **Explicit transitions** (API verbs): `create` / `pause` / `resume` / `destroy`; `destroy` may
+  be initiated from either `running` or `paused`, with the terminal state `destroyed` (deleting
+  the Overlay artifact).
+- **Automatic transitions** (the reaper daemon), **three in total**. The involuntary demotion in
+  the next bullet is not counted among them, even though it too is driven by the same reaper
+  round. Two go in the "release" direction: a `running` sandbox idle past its threshold →
+  `auto-pause`; a `paused` sandbox past its retention period → `evict` (**`evict` IS the
+  `destroy` the reaper triggers on a `paused` sandbox** — the same `→ destroyed` terminal state,
+  only with the reaper rather than the user as trigger). The third is the only one that can bring
+  a sandbox back to `running`: the escalation after transport-down exceeds the restart budget
+  continuously (§4.3 / reaper-health D4b). It is **not one `paused → running` jump but two
+  steps** — first a crash-pause down to `paused` (emitting `crash-paused` as usual, carrying no
+  cause of death), then the reaper immediately initiating **an ordinary resume**, cold-starting
+  the whole chain on a new IP; each step passes §4.4-B's lock and CAS separately, and if the
+  resume fails it stays `paused`. **A death that L1 cannot detect is not among these** — that
+  requires an explicit verb to recover (§4.3).
+- **Involuntary transitions** (probe-driven): when a reconciliation or a reaper sweep finds that
+  a `running` sandbox's isolation unit is dead, a CAS demotes it to `paused` (§4.2's crash
+  variant / §4.3 / §4.4-A) — this is **the third road into `paused`**, alongside a user `pause`
+  and the reaper's `auto-pause`, with event Kind `crash-paused` (see the next bullet). **The
+  cause of death is persisted in the same commit as this CAS** (§4.3): it decides whether that
+  sandbox may take a resume afterwards, and the signal is unrecoverable once the commit is done.
+- **Transitions are published outward as events**: every state-machine transition is published to
+  an **event stream**, with exactly six Kinds — `created` / `paused` / `auto-paused` /
+  `crash-paused` / `resumed` / `destroyed` (**there is no `evict` Kind**: an evict emits
+  `destroyed`). Subscribers such as webhooks, metrics, and billing consume it **outside the
+  engine**, and **the engine neither knows nor depends on who is subscribed**. This is how
+  observability / billing attach — one-way and additive (§1.3: add a subscriber) — not the engine
+  calling back into external systems. **All three pause-class events have state `paused`, but the
+  Kind carries the reason**: `paused` = a user pause, `auto-paused` = the reaper's idle pause,
+  `crash-paused` = an **involuntary** demotion (§4.2's crash variant); the state is identical and
+  the Kind lets a subscriber tell "why it was paused". **`crash-paused` covers two involuntary
+  paths, not just "the unit is dead"**: ① a probe/reconciliation finding the isolation unit dead
+  (with a cause of death persisted); ② the escalation after transport-down exceeds the restart
+  budget continuously (§4.3 / reaper-health D4b) — in that one **L1 is still alive**, so it
+  **carries no cause of death** (there is no explicable death, and §2.4 says do not guess). Their
+  sharing one Kind is D4b's deliberate choice (the escalation only changes which health state is
+  acted on, inventing no new state or verb); a subscriber wanting to distinguish them looks at
+  **whether a cause of death is present**.
+  **How the state commit and the event publication manage to lose and mis-order nothing
+  (billing-grade) is in §4.4.**
+  > **Terminal states must pair up: a sandbox never seen as `created` emits no `destroyed`.** A
+  > `creating` record has never been externally visible (`created` is emitted only after the
+  > create chain commits), so deleting it **emits no event** — whether that deletion is a
+  > reconciliation cleaning up crash residue or an operator manually destroying a stuck record
+  > afterwards (the reconciliation's own deletion after a crash can also fail, so that record is
+  > genuinely reachable). One rule for both paths: otherwise a billing-class subscriber would
+  > receive an invoice that "ended but never began".
 
-### 4.2 pause / resume:FS-first,无内存快照
+### 4.2 pause / resume: FS-first, no memory snapshot
 
-这是本引擎与"重型快照系统"的根本分野:
+This is this engine's fundamental divergence from "heavyweight snapshot systems":
 
-- **pause** = 把沙箱静止到一致点 → 干净停掉 runsc 容器。Overlay 工件**本来就在后端上**,pause
-  **不搬运、不捕获任何字节**,只需 flush 到一致点(§5.B);停容器即释放 RAM/CPU。
-- **resume**(引擎侧)= 用同一个 Overlay 工件 **冷启一个新容器** + 按 Binding 重挂 Volume / 按网络
-  声明重装规则集。引擎的 resume **到此为止**——它只恢复沙箱基底,不碰会话。
-- **会话续接不在引擎 resume 内**:agent 要"接着上次聊"是 client/adapter 在重连后自己调 driver
-  原生 `--resume`(读 Overlay 里的落盘历史),引擎不感知、也不参与(§5.E)。
-- **"FS 的 pause/resume" 不是独立机制**——Overlay 工件持续在后端,pause 这侧零搬运;难的内存那侧
-  直接不做。
+- **pause** = quiesce the sandbox to a consistent point → cleanly stop the runsc container. The
+  Overlay artifact **is already on the backend**, so pause **moves and captures no bytes** and
+  need only flush to a consistent point (§5.B); stopping the container releases RAM/CPU.
+- **resume** (engine side) = **cold-start a new container** on the same Overlay artifact +
+  remount Volumes per the Binding / reinstall the rule set per the network declaration. The
+  engine's resume **stops there** — it restores the sandbox's substrate and does not touch
+  sessions.
+- **Session continuation is not inside the engine's resume**: an agent wanting to "pick up the
+  conversation" is the client/adapter calling the driver's native `--resume` itself after
+  reconnecting (reading the history on disk inside the Overlay); the engine neither perceives nor
+  participates in that (§5.E).
+- **"pause/resume of the FS" is not a separate mechanism** — the Overlay artifact stays on the
+  backend, so there is zero movement on the pause side; the hard part, memory, is simply not done.
 
-**静止点归 pause(§4),不是某个子系统的一等属性。** "把沙箱静止到一致点"是 pause 动词编排的
-一个动作,横跨三个子系统的机制、和 resume 同构:**§5.A 出冻结机制**(停/冻 runsc 容器)、
-**§5.E 出被闸住的 RPC 边**(引擎自己发出的 mutating fs 调用)、**§5.B 出 flush 一致点**
-(容器停前把 in-flight 写落到 Overlay upper,保证 at-rest 字节一致,§5.B"只读 at-rest")。生命周期
-持有"何时静止、静止到哪",子系统只提供机制——不把静止点做进 §5.E process(那会让无状态、payload
-无关的传输层引入进程语义)。静止点**按进程行为分两类原语,不按 agent/turn 语义分**:
+**The quiescent point belongs to pause (§4) and is not a first-class property of any subsystem.**
+"Quiesce the sandbox to a consistent point" is one action orchestrated by the pause verb, spanning
+three subsystems' mechanisms and isomorphic to resume: **§5.A supplies the freeze mechanism**
+(stop/freeze the runsc container), **§5.E supplies the gated RPC edge** (the mutating fs calls the
+engine itself issues), and **§5.B supplies the flush consistency point** (landing in-flight writes
+into the Overlay upper before the container stops, guaranteeing consistent at-rest bytes, §5.B
+"read at rest only"). The lifecycle holds "when to quiesce and to what point", and subsystems
+provide mechanisms only — the quiescent point is not built into §5.E's process (that would
+introduce process semantics into a stateless, payload-agnostic transport layer). The quiescent
+point **splits into two primitives by process behavior, not by agent/turn semantics**:
 
-- **引擎自己发出的 mutating 写**:先过一道 **host 侧 drain-barrier**——停收新的 mutating fs 写、等
-  in-flight 排空,再 flush、再冻结。它**确定**,因为 host 完全掌握自己发出的 RPC:无需 guest 配合、
-  不引入 ack 通道。它关掉的是一个具体窗口——`fs.Write` 是 truncate-then-write,抢占落在两步之间会把
-  文件留成空的。**只挡写、不挡读**:挡读等于在 pause 期间关掉观测面。**排空超时即降抢占,绝不让 pause
-  失败**——一条卡住的 RPC 不能让沙箱变成不可 pause,而超时的落点正是崩溃的落点(下文「崩溃 = 非自愿的
-  pause」已接受)。crash-pause 不排空:容器已死,没有 in-flight 可等。
-- **guest 内的负载(裸 pty、长跑进程)**:走**抢占式**——直接冻结,不做协作握手。**应用层安全点不进
-  引擎,已否决**:engine 不认识 agent(§3.2.1),既不能要求负载在信号里停到安全点、也无法验证它停对了;
-  substrate flush(§5.B)本就保证,故这层协作非正确性前提(§4.4)。证伪与两个成熟实现的同向证据见
-  [`deep-dives/guest-runtime.md`](./deep-dives/guest-runtime.md) D4.4。
+- **Mutating writes the engine itself issues**: they first pass a **host-side drain barrier** —
+  stop accepting new mutating fs writes, wait for in-flight ones to drain, then flush, then
+  freeze. It is **deterministic**, because the host has complete command of the RPCs it issues
+  itself: no guest cooperation is needed and no ack channel is introduced. What it closes is a
+  concrete window — `fs.Write` is truncate-then-write, and a preemption landing between the two
+  steps would leave the file empty. **It blocks writes only, not reads**: blocking reads would
+  amount to switching off the observability surface during a pause. **A drain timeout degrades to
+  preemption and never lets the pause fail** — one stuck RPC must not make a sandbox un-pausable,
+  and where the timeout lands is exactly where a crash lands ("a crash = an involuntary pause",
+  below, has already accepted that). A crash-pause does not drain: the container is already dead
+  and there is no in-flight work to wait for.
+- **Workloads inside the guest (a bare pty, a long-running process)**: handled **preemptively** —
+  frozen outright, with no cooperative handshake. **An application-layer safe point does not
+  enter the engine; that is rejected**: the engine does not know about agents (§3.2.1), so it can
+  neither require a workload to stop at a safe point on a signal nor verify that it stopped at
+  the right one; the substrate flush (§5.B) already guarantees what is needed, so this layer of
+  cooperation is not a correctness precondition (§4.4). The falsification and corroborating
+  evidence from two mature implementations are in
+  [`deep-dives/guest-runtime.md`](./deep-dives/guest-runtime.md) D4.4.
 
-为什么这样选是对的:
+Why this choice is right:
 
-1. **auto-pause 的触发点恰是内存最没用的时刻**。idle = 所有连接都 idle(agent 无 in-flight 活动、
-   pty 无 I/O),一个 idle 沙箱没有有价值的 in-flight 内存态可保。
-2. **正确性本就不该依赖内存态**——会话续接靠落盘的 driver/home 状态(由 adapter 读),冷启
-   重建不是退化,是契约。
-3. **代价**:resume 是冷启秒级,不是亚秒。resume 发生在 idle 之后、不在热路径,可接受。
+1. **Auto-pause triggers at precisely the moment memory is least useful.** Idle = every
+   connection is idle (no in-flight agent activity, no pty I/O), and an idle sandbox has no
+   valuable in-flight memory state to preserve.
+2. **Correctness should not depend on memory state in the first place** — session continuation
+   rests on driver/home state on disk (read by an adapter), and rebuilding on a cold start is not
+   a degradation but the contract.
+3. **The cost**: resume is a seconds-scale cold start, not sub-second. Resume happens after an
+   idle period rather than on a hot path, which is acceptable.
 
-副产品:沙箱持久态是**纯文件 Overlay 工件**,天然跨 host / CPU / runsc 版本可移(§1.5#3 / §5.B)。
+A by-product: a sandbox's persistent state is a **plain-file Overlay artifact**, inherently
+movable across host / CPU / runsc version (§1.5#3 / §5.B).
 
-**崩溃 = 非自愿的 pause,走同一条 resume 路径恢复。** FS-first 模型自然覆盖崩溃恢复,无需新
-状态:持久态全在后端的 Overlay 工件里,substrate 意外死掉(sentry 崩溃、node 掉电)⟺ RAM/CPU
-被释放 ⟺ 与一次 pause 的**盘上效果完全等价**。因此恢复一个崩溃的沙箱 = 一次 resume,不是特殊
-路径。这给 reaper 提了个要求——须把"substrate 已死但可恢复"与"健康且空闲"分开,崩溃的沙箱要走
-resume 而非 auto-pause 的静止(健康态分类与判据见 §4.3)。
+**A crash = an involuntary pause, recovered through the same resume path.** The FS-first model
+covers crash recovery naturally, with no new state: the persistent state is entirely in the
+Overlay artifact on the backend, so the substrate dying unexpectedly (a sentry crash, node power
+loss) ⟺ RAM/CPU released ⟺ **exactly equivalent on disk to a pause**. Recovering a crashed
+sandbox is therefore one resume, not a special path. This does impose a requirement on the reaper
+— it must separate "the substrate is dead but recoverable" from "healthy and idle", since a
+crashed sandbox must take a resume rather than auto-pause's quiesce (the health classes and their
+criteria are in §4.3).
 
-> **注意范围:这里的"崩溃"专指 substrate 死亡(sentry/容器整死)**——即 §4.3 探活的 L1 失败。
-> transport 模式 `sandboxd` 单独崩溃**不属于**这条路径:它由 PID1 原地重启、同 IP 恢复(§5.E.1),
-> 是**进程内可恢复**的 transport-down 瞬态(§4.3),不走 resume。两者靠两层探活区分。
-> **控制面(orchestrator)自身崩溃是第三根轴**,不在本节:它不损坏持久态、只可能留半建 placement,
-> 由 §4.4-A 的崩溃变体(重启对账)接,不走 resume。
+> **Note the scope: "crash" here means specifically the death of the substrate (the sentry/
+> container dying whole)** — that is, an L1 probe failure in §4.3.
+> A transport-mode `sandboxd` crashing on its own is **not** on this path: PID 1 restarts it in
+> place and it recovers on the same IP (§5.E.1), making it an **in-process recoverable**
+> transport-down transient (§4.3) that does not take a resume. The two are distinguished by the
+> two probe layers.
+> **The control plane (orchestrator) crashing itself is a third axis** and is not in this section:
+> it does not damage persistent state and can only leave half-built placements, which §4.4-A's
+> crash variant (startup reconciliation) catches, without taking a resume.
 
-### 4.3 健康与回收模型
+### 4.3 Health and reclamation model
 
-回收不是独立机制,而是**健康模型的消费者**:reaper 先判沙箱当前健康态,再据态处置。陈旧性检测由本节的
-健康模型 + placement/IP-as-epoch(见下)显式接住,不靠一个世代计数字段。
+Reclamation is not a separate mechanism but **a consumer of the health model**: the reaper first
+decides a sandbox's current health state, then acts according to it. Staleness detection is caught
+explicitly by this section's health model + placement/IP-as-epoch (below), without resting on a
+counter field.
 
-**探活是两层,不是一次。** PID1(init 模式 `sandboxd`)会**原地监督并重启** transport 模式子进程
-(§5.E.1),因此"substrate 活着"与"transport 端口在听"是**两个独立事实**,控制面必须**两个都判**才能
-正确分类:
+**Probing has two layers, not one.** PID 1 (`sandboxd` in init mode) **supervises and restarts in
+place** the transport-mode child process (§5.E.1), so "the substrate is alive" and "the transport
+port is listening" are **two independent facts**, and the control plane must **decide both** to
+classify correctly:
 
-- **L1 — substrate 探活**:runsc/sentry 容器是否活(§5.A)。
-- **L2 — transport 探活**:向 netns IP:port 发一个 `Health` RPC 是否成功(§5.E,见 transport.md D4.5)。
+- **L1 — the substrate probe**: is the runsc/sentry container alive (§5.A).
+- **L2 — the transport probe**: does a `Health` RPC to the netns IP:port succeed (§5.E, see
+  transport.md D4.5).
 
-> **这两个 `L` 是探活层号,与 OSI 层号无关。** network.md 讲报文注入时的 `L2`/`L3` 是 OSI 的链路层 / 网络层
-> (那里的 `L0` 又是另一回事:nft 地板),本节的 `L1`/`L2` 只指上面这两个探针。跨文档读时按各自定义处读。
+> **These two `L`s are probe-layer numbers and have nothing to do with OSI layer numbers.** The
+> `L2`/`L3` in network.md's discussion of packet injection are OSI's link / network layer (and the
+> `L0` there is yet another thing: the nft floor), while this section's `L1`/`L2` refer only to the
+> two probes above. When reading across documents, read each by its own definition.
 
-> **"两个都判"不等于"两次 round-trip":L2 通 ⟹ L1 活,故 L2 成功时 L1 探针被跳过。** `sandboxd` 是在
-> 隔离单元**内部**应答的,它答得出来就证明了容器活着——这不是省略一次检查,是用一个更强的观测同时结清
-> 两层。**只有 L2 不通时两层才真的分岔**(transport-down 瞬态 vs dead-recoverable),那时才需要单独问 L1。
-> 分类器因此永远不会在"L1 未知"的前提下读 idle:idle 只在 L2 通的那条分支上被读,而那条分支已蕴含 L1 活。
+> **"Decide both" does not mean "two round trips": L2 reachable ⟹ L1 alive, so the L1 probe is
+> skipped when L2 succeeds.** `sandboxd` answers from **inside** the isolation unit, so its being
+> able to answer proves the container is alive — this is not omitting a check, it is settling both
+> layers at once with a stronger observation. **Only when L2 is unreachable do the two layers
+> genuinely diverge** (a transport-down transient vs dead-recoverable), and only then must L1 be
+> asked separately. The classifier therefore never reads idle on the premise of "L1 unknown": idle
+> is read only on the branch where L2 is reachable, and that branch already implies L1 is alive.
 
-**健康态分类(先两层探活,再判 idle——兑现 §4.2 的要求)。** 处置**互不相同**:
+**Health classification (two probe layers first, then idle — delivering §4.2's requirement).** The
+dispositions are **all different**:
 
-**分类的定义域是 `running` 记录。** `paused` 只走 TTL/evict、`creating` / `destroyed` 不是分类器的对象;
-对它们取 `unknown` 是"不属本表",不是一次健康判定。
+**The classifier's domain is `running` records.** `paused` goes only through TTL/evict, and
+`creating` / `destroyed` are not the classifier's objects; taking `unknown` for them means "not in
+this table" rather than a health judgment.
 
-| 健康态 | 判据(L1 substrate / L2 transport) | 处置 |
+| Health state | Criteria (L1 substrate / L2 transport) | Disposition |
 | --- | --- | --- |
-| **healthy** | L1 活 + L2 通,且**未越 idle 阈值**——有连接活跃(近期有 I/O:进程输出 / pty 读写),或全体 idle 但时长未及 `idle_timeout`(含 `idle_timeout: 0` 不设期限) | 保持 `running`,不动 |
-| **idle** | L1 活 + L2 通,**所有**连接都 idle(近期无任何 I/O)**且 idle 时长已达 `idle_timeout`**——阈值是分类谓词本身,不是处置条件,故不存在"判了 idle 但未超阈值"这种态 | **auto-pause** 静止到一致点(§4.2;flush 由 substrate 保证,不依赖协作握手) |
-| **transport-down(瞬态)** | **L1 活、L2 不通**——transport 子进程崩了,PID1 正在原地重启(§5.E.1) | **等重启**;端口在**同一 IP** 上恢复,**不是** dead-recoverable、**不**走 resume;**连续 transport-down 超重启预算(以连续时长计,非 PID1 重启次数)→ 升级为 dead-recoverable 走 resume**(防崩溃循环卡死,机制见 reaper-health D4b) |
-| **dead-recoverable** | **L1 探不到**(容器整死),持久态(Overlay 工件)在后端完好,**且死因不是撞资源帽** | **crash-pause 降 `paused`**(§4.2 非自愿 pause),死因同一提交落库;恢复路径是 **resume**(换新 IP 冷启)、**由调用方显式发起**,不是 auto-pause 的静止 |
-| **resource-terminated** | **L1 探不到,且死因是撞 RAM 帽**(§3.4 安全限:沙箱被整组终止) | **不 resume**、不 auto-pause——留 `paused`。resume 会让同一负载再次触发终止,即崩溃循环。**转机只有一条:改帽**——经 §6.1 `PATCH /v1/sandboxes/{id}` 抬高 `memory_byte`(须**严格**大于原值,等值写入不清死因——**这条只约束清死因,不改 §3.4.3 的方向性**;须重过准入门,节点无容量则被拒),**该次提交同时清死因**,之后 resume 才放行;一次成功的 resume 同样清死因。**它不豁免驱逐**(见下) |
-| **unknown** | **三个来源,只有第三个经过 L2**:① 记录不是 `running`(不属本表,见上);② live-map 里**没有该沙箱的活句柄**(store 记 `running`、本进程没在管它)——分类器当场返 unknown,**一个探针都不发**,那是 §4.4-A 接管半段的事;③ L2 不通、且 L1 判不出(provider 报错) | **什么都不做,下轮重试**——对不确定取保守(§4.4-A):既不降级也不 resume。它**永不是一种处置**,只是分类器的安全默认 |
+| **healthy** | L1 alive + L2 reachable, and **the idle threshold has not been crossed** — some connection is active (recent I/O: process output / pty reads and writes), or all are idle but for less than `idle_timeout` (`idle_timeout: 0` = no deadline included) | Stay `running`, do nothing |
+| **idle** | L1 alive + L2 reachable, **all** connections idle (no I/O recently) **and the idle duration has reached `idle_timeout`** — the threshold is part of the classification predicate itself rather than a condition on the disposition, so there is no such state as "classified idle but under the threshold" | **auto-pause**, quiescing to a consistent point (§4.2; the flush is guaranteed by the substrate and depends on no cooperative handshake) |
+| **transport-down (transient)** | **L1 alive, L2 unreachable** — the transport child process crashed and PID 1 is restarting it in place (§5.E.1) | **Wait for the restart**; the port comes back on **the same IP**, so this is **not** dead-recoverable and does **not** take a resume; **transport-down continuously exceeding the restart budget (measured as continuous duration, not as a count of PID 1 restarts) → escalate to dead-recoverable and take a resume** (guarding against being stuck in a crash loop; mechanism in reaper-health D4b) |
+| **dead-recoverable** | **L1 undetectable** (the container died whole), the persistent state (the Overlay artifact) intact on the backend, **and the cause of death is not hitting a resource cap** | **crash-pause down to `paused`** (§4.2's involuntary pause), with the cause of death persisted in the same commit; the recovery path is a **resume** (a cold start on a new IP) **initiated explicitly by the caller**, not auto-pause's quiesce |
+| **resource-terminated** | **L1 undetectable, and the cause of death is hitting the RAM cap** (§3.4's security limit: the sandbox is terminated as a whole group) | **Do not resume** and do not auto-pause — stay `paused`. A resume would let the same workload trigger termination again, that is, a crash loop. **There is exactly one way out: change the cap** — raise `memory_byte` through §6.1's `PATCH /v1/sandboxes/{id}` (it must be **strictly** greater than the old value, since writing an equal value does not clear the cause of death — **this constrains only the clearing of the cause of death and does not change §3.4.3's directionality**; it must re-run the admission gate and is refused if the node has no capacity), and **that same commit clears the cause of death**, after which a resume is allowed; a successful resume clears it too. **It is not exempt from eviction** (see below) |
+| **unknown** | **Three sources, and only the third goes through L2**: ① the record is not `running` (not in this table, see above); ② the live-map holds **no live handle for this sandbox** (the store says `running` but this process is not managing it) — the classifier returns unknown on the spot and **sends no probe at all**, that being the business of §4.4-A's takeover half; ③ L2 unreachable and L1 undecidable (the provider errored) | **Do nothing, retry next round** — be conservative about uncertainty (§4.4-A): neither demote nor resume. It is **never a disposition**, only the classifier's safe default |
 
-> **resource-terminated 与 dead-recoverable 并列,不是它的子类。** 两者 L1 都探不到、持久态都完好,
-> 表现完全相同;区分只能靠**死因信号**,而处置**相反**(一个必须 resume,一个必须不 resume)。死因跨
-> §5.A seam 时是**抽象枚举**(`{Unknown, Gone, ResourceExceeded}`),不是 errno / cgroup 文件:
-> `local_runsc` 从自己的 memcg 得出结论,远端 provider 从其调度层的终止原因得出同一结论,**mediator
-> 只看枚举**。这让该分类跨 provider 成立,而非 host-local hack。
+> **resource-terminated stands alongside dead-recoverable and is not a subclass of it.** In both,
+> L1 is undetectable and the persistent state is intact, and they present identically; they can be
+> distinguished only by **the cause-of-death signal**, while their dispositions are **opposite**
+> (one must resume, the other must not). Across the §5.A seam the cause of death is an **abstract
+> enumeration** (`{Unknown, Gone, ResourceExceeded}`) rather than an errno / cgroup file:
+> `local_runsc` concludes it from its own memcg, a remote provider concludes the same from its
+> scheduling layer's termination reason, and **the mediator sees only the enumeration**. That is
+> what makes this classification hold across providers rather than being a host-local hack.
 >
-> **死因必须在观测到的那一刻落库,且与降级 CAS 同一次提交。** 死因信号是**易失的**(local 形态下它
-> 在 provider 的 placement-local 资源里,随 placement 拆除而消失,也不跨宿主重启),所以"事后再问一次"
-> 这条路不存在:降级提交之后证据已不可恢复。故 `crash-paused` 的 CAS 与死因写入是**一次原子提交**
-> (§4.4-C 同一形状)。
+> **The cause of death must be persisted at the instant it is observed, in the same commit as the
+> demoting CAS.** The cause-of-death signal is **volatile** (in the local shape it lives in the
+> provider's placement-local resources, disappearing when the placement is torn down and not
+> surviving a host restart), so "ask again later" is not a road that exists: after the demotion
+> commits, the evidence is unrecoverable. So `crash-paused`'s CAS and the cause-of-death write are
+> **one atomic commit** (the same shape as §4.4-C).
 >
-> **`Unknown` 是一等合法值,不是错误。** 读不到死因时按 `dead-recoverable` 处置(去 resume)。
-> **自我纠正是结构性的,不靠计数器**:若确是撞帽,下一次 resume 后同一负载会再次触发终止,而这一次
-> 发生在控制面眼前、placement 完整,于是被观测、随降级 CAS 落库,**此后 resume 由那条已落库的事实
-> 拒绝**。**没有 resume 次数上界,也不需要有**:引擎从不**因 L1 探不到**而自行 resume(§4.1 的三条
-> 自动转换里唯一往 `running` 去的那条,触发是 L1 **活**而 L2 不收敛,不是死亡观测),
-> 故重试是调用方逐次显式付出的选择,不是引擎的循环。想要"崩了自动拉起"是消费 `crash-paused` 事件的
-> **引擎外 subscriber**(§1.3 Consumption)。完整证伪(计数无可推导的重置点、按次数拒绝与按已落库事实
-> 拒绝性质不同、它等价于被禁的世代计数)见 [`deep-dives/reaper-health.md`](./deep-dives/reaper-health.md) D4c。
+> **`Unknown` is a first-class legal value, not an error.** When the cause of death cannot be read,
+> the disposition is `dead-recoverable` (go resume).
+> **Self-correction is structural and rests on no counter**: if it really was a cap being hit, the
+> same workload will trigger termination again after the next resume, and this time it happens in
+> front of the control plane with the placement intact, so it is observed, persisted along with the
+> demoting CAS, and **subsequent resumes are refused by that persisted fact**. **There is no upper
+> bound on resume attempts, and none is needed**: the engine never resumes on its own **because L1
+> is undetectable** (of §4.1's three automatic transitions, the only one heading toward `running`
+> is triggered by L1 being **alive** while L2 fails to converge, not by an observation of death),
+> so a retry is a choice the caller pays for explicitly each time rather than a loop of the
+> engine's. Wanting "automatically bring it back after a crash" is an **out-of-engine subscriber**
+> consuming `crash-paused` events (§1.3 Consumption). The full falsification (a count has no
+> derivable reset point; refusing by count differs in nature from refusing by a persisted fact; and
+> it is equivalent to the counter §1.1 bars) is in
+> [`deep-dives/reaper-health.md`](./deep-dives/reaper-health.md) D4c.
 >
-> **一条诚实的残留**:结构性自我纠正只对**有帽且可复现**的耗尽成立。有帽沙箱若每次死亡时 placement
-> 已被拆除(与 teardown 竞争、或跨宿主重启),死因可反复读作 `Unknown`,**收敛到 `resource-terminated`
-> 无保证**。挡住无限循环的不是任何引擎侧上界,而是:每次重试都要调用方显式付一次动词、§2.4 的整组
-> 确定性终止已根除"无可杀 victim → 无限重试"那条会烧宿主的路径、以及容量/RAM 帽本身。
+> **One honest residual**: structural self-correction holds only for exhaustion that is **capped
+> and reproducible**. If a capped sandbox has its placement already torn down at each death (racing
+> teardown, or a host restart), the cause of death can be read as `Unknown` repeatedly and
+> **convergence to `resource-terminated` is not guaranteed**. What stops an infinite loop is not any
+> engine-side bound but: every retry costing the caller an explicit verb, §2.4's deterministic
+> whole-group termination having already eradicated the host-burning "no killable victim → retry
+> forever" path, and the capacity/RAM caps themselves.
 
-> **连接活动信号在 guest 侧量,不在 host 侧。** `sandboxd` 在输出/输入路径打一个**沙箱全局「上次 I/O」
-> 时戳**,`Health` 探针带回 idle 时长(一处三用,§5.E / transport D4.5)。**不在 host 侧数据面代理处量**:
-> 分离式进程模型下(§3.2)进程无客户端 attach 时仍持续产出到环形缓冲,host 侧看不到这些字节,会把干活的
-> 沙箱误判成 idle。判据是 **I/O 活动**而非 CPU 占用(纯 CPU-bound 零 I/O 不计,是 idle 定义本身)。
-> 完整推理与分类器/单飞/周期对账的落地见 [`deep-dives/reaper-health.md`](./deep-dives/reaper-health.md)。
+> **The connection-activity signal is measured on the guest side, not the host side.** `sandboxd`
+> stamps a **sandbox-global "last I/O" timestamp** on the output/input paths, and the `Health` probe
+> carries the idle duration back (one thing serving three purposes, §5.E / transport D4.5). **It is
+> not measured at a host-side data-plane proxy**: under the detached process model (§3.2) a process
+> keeps producing into the ring buffer while no client is attached, the host side cannot see those
+> bytes, and a working sandbox would be misclassified as idle. The criterion is **I/O activity**
+> rather than CPU occupancy (a purely CPU-bound process with zero I/O does not count, which is the
+> definition of idle itself). The full reasoning and the implementation of the classifier /
+> single-flight / periodic reconciliation are in
+> [`deep-dives/reaper-health.md`](./deep-dives/reaper-health.md).
 
-三个关键区分,都靠"两层探活 + 连接活动"三者交叉判,缺一会误判:
+Three key distinctions, each decided by crossing all three of "two probe layers + connection
+activity"; drop one and it misclassifies:
 
-- **dead-recoverable 与 idle 表现相同**(都"无活跃连接"),必须靠 L1 而非连接活动来分——崩溃的
-  沙箱绝不能被当成 idle 去走 auto-pause 的静止(它假定 substrate 活着、能停到一致点),它要走 resume。
-- **transport-down 与 dead-recoverable 表现相同**(L2 都不通),必须靠 L1 来分——transport 崩溃是
-  **进程内可恢复**(PID1 同 IP 原地重启,成本远低于 resume),错判成 dead-recoverable 会无谓地触发
-  一次整链冷启换 IP。transport 崩 ≠ 容器崩,是 §5.E.1「init 与 transport 分进程」的直接结果。
-- 进程活着本身不等于活跃;两层探活都通本身不等于 healthy(还要看连接活动)。
+- **dead-recoverable and idle present identically** (both have "no active connection"), and must be
+  separated by L1 rather than by connection activity — a crashed sandbox must never be treated as
+  idle and taken through auto-pause's quiesce (which assumes the substrate is alive and can be
+  stopped at a consistent point); it must take a resume.
+- **transport-down and dead-recoverable present identically** (L2 unreachable in both), and must be
+  separated by L1 — a transport crash is **in-process recoverable** (PID 1 restarts it in place on
+  the same IP, at far lower cost than a resume), and misclassifying it as dead-recoverable would
+  needlessly trigger a whole-chain cold start on a new IP. A transport crash ≠ a container crash,
+  which is a direct consequence of §5.E.1's "init and transport are separate processes".
+- A process being alive does not itself mean active; both probe layers being reachable does not
+  itself mean healthy (connection activity must also be considered).
 
-**resume in-flight 期挂起分类。** resume 进行中 guest 尚未 listening,L2 必然不通;健康分类本身**只是只读探针、
-不改态**,照跑会误判成 dead-recoverable、空跑一次注定失败的 resume 尝试并发出误报。故 resume
-持有期间对该沙箱的健康分类挂起,直到首次 L2 探活成功翻成 `running`(时序见
-[`deep-dives/guest-runtime.md`](./deep-dives/guest-runtime.md) D5)。**这道守卫落在既有的那把转换锁上,不是
-一个与它并列的第二机制**:两句话就是全部——resume **全程持有**该锁(§4.4-B),而 reaper 侧的分类处置对
-持锁沙箱**试锁不成即跳过本轮**(§4.4-B),于是 in-flight 期天然没有分类发生,没有新的守卫对象。它**只承重
-效率与观测洁净(不空跑、不误报);并发动词打架的正确性由那把全程持有的锁兜底,不是这里**。它也**不新增
-§4.1 状态**(仍四态)。
+**Classification is suspended while a resume is in flight.** During a resume the guest is not yet
+listening, so L2 is necessarily unreachable; health classification is itself **only a read-only
+probe that changes no state**, but running it anyway would misclassify as dead-recoverable, spend a
+resume attempt certain to fail, and emit a false alarm. So health classification for that sandbox is
+suspended while the resume is held, until the first successful L2 probe flips it to `running` (the
+timing is in [`deep-dives/guest-runtime.md`](./deep-dives/guest-runtime.md) D5). **This guard lands
+on the existing transition lock and is not a second mechanism standing alongside it**: two sentences
+are all of it — a resume **holds that lock throughout** (§4.4-B), and the reaper's classification
+disposition **skips the round when its try-lock fails** on a locked sandbox (§4.4-B), so no
+classification happens during the in-flight period by construction and there is no new object to
+guard. It is **load-bearing only for efficiency and observational cleanliness (no wasted attempt, no
+false alarm); the correctness of concurrent verbs fighting is backstopped by that lock held
+throughout, not here**. It also **adds no §4.1 state** (still four).
 
-**陈旧性检测:placement/IP 即 epoch。** 沙箱冷启换新 netns IP、旧 IP 作废(§5.E),因此 **placement/IP
-变更本身就是那个 epoch 信号**——拿着旧 IP/旧 placement 句柄去说话即判定陈旧,重新解析当前 placement
-再连(§3.3"身份不编码 placement")。不新增独立计数字段,placement 的每次重绑天然携带"这是新实例"的语义。
+**Staleness detection: the placement/IP IS the epoch.** A sandbox cold-starts onto a new netns IP
+and the old IP is void (§5.E), so **a placement/IP change is itself that epoch signal** — speaking
+with an old IP / old placement handle is judged stale, and the current placement is re-resolved
+before reconnecting (§3.3's "identity does not encode placement"). No separate counter field is
+added; every rebinding of a placement inherently carries the semantics "this is a new instance".
 
-**TTL / 驱逐**:reaper 按 TTL 推进 §4.1 那两条"释放"方向的自动转换。**TTL 是 per-sandbox
-Binding**(§3.4):两个阈值——`idle_timeout`(`running` idle 超它 →
-auto-pause)与 `retention`(`paused` 超它 → evict)——是沙箱控制面记录的字段,create 时可给、缺省落引擎级
-默认(§1.1 单二进制配置),故记录里始终是 reaper 直接可读的具体时长。**取 0 = 该阈值不设期限**
-(`idle_timeout: 0` 永不 auto-pause、`retention: 0` 永不 evict)。默认取值为纯调参(见
-[`deep-dives/reaper-health.md`](./deep-dives/reaper-health.md) D5)。
-> **「等人工介入」有期限,不是无限期挂起。** `resource-terminated` **不是**回收的例外:`retention` 的
-> 时钟从**死亡那一刻**(降级 CAS 落的 `UpdatedAt`)起算,超期照常 `evict`,连 Overlay 工件一并删。
-> 三条理由:① 回收判据只有 refcount 与 TTL(见下条),把**死因**——一个描述**过去**事件的诊断字段
-> ——加进驱逐谓词,是为一个既有旋钮已覆盖的场景加宽 reaper 契约;② 在不超卖的准入门(§3.4)下,豁免
-> 会造出一类"永久占着 Overlay 字节**与准入门额度**、却永远不会再跑"的沙箱,这比泄漏更糟——门把它当
-> 一份**活的承诺**;③ 需要无限期保留的场景不需要引擎加例外,`retention = 0`(无期限)这个既有旋钮就是
-> 它,而 `PATCH`(§3.4)让它**事后仍可设**。故处置是:留 `paused`,给人一个 `retention` 长的窗口去
-> 改帽 / Promote / destroy;窗口内无人介入即 evict。
+**TTLs / eviction**: the reaper advances §4.1's two "release"-direction automatic transitions by
+TTL. **A TTL is a per-sandbox Binding** (§3.4): the two thresholds — `idle_timeout` (a `running`
+sandbox idle past it → auto-pause) and `retention` (a `paused` sandbox past it → evict) — are fields
+of the sandbox's control-plane record, given at create or falling back to the engine-level default
+(§1.1's single-binary configuration), so the record always holds a concrete duration the reaper can
+read directly. **A value of 0 = that threshold has no deadline** (`idle_timeout: 0` never
+auto-pauses, `retention: 0` never evicts). The default values are pure tuning (see
+[`deep-dives/reaper-health.md`](./deep-dives/reaper-health.md) D5).
+> **"Waiting for a human" has a deadline; it is not an indefinite suspension.** `resource-terminated`
+> is **not** an exception to reclamation: `retention`'s clock starts at **the instant of death** (the
+> `UpdatedAt` written by the demoting CAS), and past the deadline it is `evict`ed as usual, Overlay
+> artifact and all. Three reasons: ① the reclamation criteria are refcount and TTL only (next
+> bullet), and adding **the cause of death** — a diagnostic field describing a **past** event — to
+> the eviction predicate would widen the reaper contract for a scenario an existing knob already
+> covers; ② under a non-oversubscribing admission gate (§3.4) an exemption would manufacture a class
+> of sandbox that "permanently occupies Overlay bytes **and admission-gate allowance** while never
+> running again", which is worse than a leak — the gate treats it as **a live promise**; ③ a scenario
+> genuinely needing indefinite retention needs no engine exception, since `retention = 0` (no
+> deadline) is exactly that existing knob, and `PATCH` (§3.4) makes it **still settable after the
+> fact**. So the disposition is: stay `paused`, giving a human a window as long as `retention` to
+> change the cap / Promote / destroy; if nobody intervenes within the window, evict.
 
-**auto-pause 的锁内活动重读(竞态兜底)**:sweep 的「分类 → 处置」跑在**同一次持锁**内(§4.4-B 的那把锁),故
-lifecycle-state 一侧没有窗口。但**那把锁守的是引擎侧的转换,不是 guest 的 I/O**:活动度是 guest 内的事实、不是
-lifecycle-state,CAS 比对不到它,而分类的探针与处置前的探针之间隔着**一次 RPC 往返**,沙箱可以就在这一往返里
-变活跃——此时 auto-pause 的 CAS 仍会通过。为不误冻正在干活的沙箱,`auto-pause` 在锁内除 CAS 外**再重读一次
-活动信号**(当前 `idle_millis`),仍超阈才冻结、否则放弃本轮。处置由此建立在锁内
-最新的「态 + 活动」双重快照上(推理见 [`deep-dives/reaper-health.md`](./deep-dives/reaper-health.md) D3)。
-- **对象回收(uniform object model invariant)**:每个一等持久对象(sandbox / Overlay 工件 /
-  Volume / Template / 挂载行)带**可判定的回收语义**(不是 reaper 的私有实现)。切成**普适**与
-  **仅可变对象**两半:
-  - **refcount 普适、且 derived**:回收看「有没有引用它的活行」,**不物化计数字段**(由引用行是否
-    存在查询导出——单机权威 store 下与物化计数等价,见下条与 §4.4-C)。无 owner 列——只看
-    refcount/TTL,不看"谁拥有"(§1.4)。连接(process)不是持久对象,不参与回收。
-    **Overlay 工件是退化情形**:它恰好被一个沙箱行引用,故其回收谓词就是"无对应沙箱行",由孤儿单元
-    sweep 兜(§4.4-A),不需要计数。
-  - **显式生命周期状态机只属于会真正转换的可变对象(sandbox,§4.1 四态)**。**不可变工件
-    (Template,及后续挂载行)用「存在即状态」**:行存在 = ready、删行 = destroyed,无中间态,
-    故不设 state 列。**代价与硬约束**:存在即状态没有 not-ready 逃生舱,故**强制字节先行物化**
-    (bytes-first,见 §5.B);有 state 列的对象(sandbox 的 `creating`)才可行先行、由 reconcile 兜底。
-    **在途/可失败的构建是独立 build 实体**(将来 additive 一张 build 表,承载 building/ready/failed),
-    不塞进不可变工件的存在性。
-  Template lineage 最尖:被某沙箱引用作只读底层(create-from-Template / Promote 叠层 / fork 多实例
-  都是这一种引用)时,refcount > 0,**绝不可删**。**挂载行的 refcount 直接承载 §5.C 的 Volume
-  独占租约**(机制归 §5.C)。**Volume 也有 lineage**(快照 / 克隆的源,§5.C):它与 Template lineage
-  同形——引用向上、被引用者不可删——但它多守一件事:源在有活子代时被删会**泄漏一行后端配额**,故那条
-  RESTRICT 不只是策略,它是让"先删共享者、再删源"成为唯一可达次序的东西(见
-  [`deep-dives/volume.md`](./deep-dives/volume.md) D6.1a / D7.1)。
-- **引用-回收原子性(一条动态不变量)**:上面"refcount > 0 绝不可删"只是静态判据,还差一条把
-  **reclaim-vs-reference 竞态**闭合的不变量——否则有经典 TOCTOU 窗口:GC 读到某 Template 层 refcount==0
-  正要回收,同一刻一个新沙箱引用该层(每个 create-from-Template 都引用一个 Template 层,fork 只是被引用层
-  恰是 Promote 出来的)。不变量:**「创建引用」(create/fork/Promote 引用 Template 层、建挂载行引用 Volume)
-  与 GC「无引用 → 回收」的判定-删除,必须由同一个权威 store 串行仲裁**——直接复用 §4.4-C 的 store 原子
-  提交契约,不新造机制。derived refcount 下这退化成**外键约束**:引用是一条指向目标的行,回收是对目标的
-  一次 `DELETE`。于是无中间窗口:引用行先落则 `DELETE` 撞「被引用」拒删(转引一个活层)、`DELETE` 先提交
-  则引用方插入撞「目标不存在」失败。**权威单机 store(§1.1)是前提**:引用与回收都是其上的行操作,单写者
-  串行令二者不交错,**无需显式 CAS**——竞态从 schema 掉出来。且 Template lineage **无环**,故统一用 store
-  权威的存在性判定,**不引入独立标记清扫器、也不需世代序号式 GC 屏障**(后者是无事务 store 的补偿逻辑,
-  原子提交契约已闭合竞态)。**「被引用即拒删」是 store 接口的契约承诺**(seam,§1.3):SQLite 用 FK
-  RESTRICT 兑现、Memory 用 Go 检查兑现,与 §4.4-C 原子提交同构——后端差异不漏进正确性。
+**Auto-pause's in-lock activity re-read (a race backstop)**: a sweep's "classify → act" runs
+**within one lock hold** (§4.4-B's lock), so there is no window on the lifecycle-state side. But
+**that lock guards engine-side transitions, not the guest's I/O**: activity is a fact inside the
+guest rather than lifecycle-state, a CAS cannot compare against it, and between the classifying
+probe and the pre-disposition probe lies **one RPC round trip** in which the sandbox can become
+active — and auto-pause's CAS would still pass. So as not to wrongly freeze a working sandbox,
+`auto-pause` **re-reads the activity signal once more** inside the lock in addition to the CAS (the
+current `idle_millis`), freezing only if it is still past the threshold and abandoning the round
+otherwise. The disposition therefore rests on the freshest in-lock snapshot of both state and
+activity (reasoning in [`deep-dives/reaper-health.md`](./deep-dives/reaper-health.md) D3).
+- **Object reclamation (the uniform object model invariant)**: every first-class persistent object
+  (sandbox / Overlay artifact / Volume / Template / mount row) carries **decidable reclamation
+  semantics** (not the reaper's private implementation). Cut into two halves, **universal** and
+  **mutable objects only**:
+  - **refcount is universal and derived**: reclamation looks at "is there a live row referencing
+    it", and **no counter field is materialized** (it is derived by querying whether reference rows
+    exist — equivalent to a materialized count under a single-node authoritative store, see the
+    next bullet and §4.4-C). There is no owner column — only refcount/TTL matter, never "who
+    possesses it" (§1.4). A connection (process) is not a persistent object and does not
+    participate in reclamation.
+    **The Overlay artifact is a degenerate case**: it happens to be referenced by exactly one
+    sandbox row, so its reclamation predicate is simply "no corresponding sandbox row", caught by
+    the orphan-unit sweep (§4.4-A), and needs no count.
+  - **An explicit lifecycle state machine belongs only to mutable objects that genuinely transition
+    (the sandbox, §4.1's four states)**. **Immutable artifacts (Templates, and mount rows later) use
+    "existence is the state"**: the row existing = ready, deleting the row = destroyed, with no
+    intermediate state, so they have no state column. **The cost and the hard constraint**:
+    existence-as-state has no not-ready escape hatch, so it **mandates bytes-first
+    materialization** (see §5.B); only objects with a state column (the sandbox's `creating`) may
+    go record-first and be backstopped by reconcile.
+    **An in-progress / failable build is a separate build entity** (a build table added additively
+    later, carrying building/ready/failed) and is not stuffed into an immutable artifact's
+    existence.
+  Template lineage is the sharpest case: while referenced by some sandbox as its read-only lower
+  layer (create-from-Template / a Promote stacked layer / forking several instances are all this one
+  kind of reference), refcount > 0 and it **must never be deleted**. **A mount row's refcount
+  directly carries §5.C's Volume exclusive lease** (the mechanism belongs to §5.C). **Volumes have
+  lineage too** (the source of a snapshot / clone, §5.C): it is the same shape as Template lineage —
+  references point upward and the referenced cannot be deleted — but it holds one more thing:
+  deleting a source while live children exist would **leak a backend quota row**, so that RESTRICT
+  is not merely policy, it is what makes "delete the sharers first, then the source" the only
+  reachable order (see [`deep-dives/volume.md`](./deep-dives/volume.md) D6.1a / D7.1).
+- **Reference-reclamation atomicity (one dynamic invariant)**: "refcount > 0 must never be deleted"
+  above is only a static criterion, and one more invariant is needed to close the
+  **reclaim-vs-reference race** — otherwise there is the classic TOCTOU window: GC reads some
+  Template layer's refcount as 0 and is about to reclaim it, while at that same moment a new sandbox
+  references that layer (every create-from-Template references a Template layer, and a fork merely
+  has the referenced layer be one Promote produced). The invariant: **"creating a reference"
+  (create/fork/Promote referencing a Template layer, building a mount row referencing a Volume) and
+  GC's "no references → reclaim" decide-and-delete must be serialized by the same authoritative
+  store** — reusing §4.4-C's store atomic-commit contract directly, inventing no new mechanism.
+  Under a derived refcount this degenerates into **a foreign-key constraint**: a reference is a row
+  pointing at the target, and reclamation is a `DELETE` on the target. So there is no intermediate
+  window: if the reference row lands first, the `DELETE` hits "referenced" and is refused (the
+  reference lands on a live layer); if the `DELETE` commits first, the referencing insert hits "the
+  target does not exist" and fails. **An authoritative single-node store (§1.1) is the premise**:
+  both reference and reclamation are row operations on it, and a single serialized writer keeps them
+  from interleaving, so **no explicit CAS is needed** — the race falls out of the schema. And
+  Template lineage is **acyclic**, so store-authoritative existence checks are used uniformly, with
+  **no separate mark-and-sweep collector and no sequence-numbered GC barrier** (the latter being
+  compensation logic for a transactionless store, whereas the atomic-commit contract has already
+  closed the race). **"Referenced means refuse the delete" is a contractual promise of the store
+  interface** (a seam, §1.3): SQLite delivers it with FK RESTRICT, Memory with a Go check,
+  isomorphic to §4.4-C's atomic commit — backend differences do not leak into correctness.
 
-### 4.4 转换的并发与失败语义
+### 4.4 Concurrency and failure semantics of transitions
 
-§4.1 的状态机是**命令式**的,命令式状态机有三道经典裂缝:「转换到一半失败留脏态」「两个动词并发
-打架」「状态变了但事件没发出去(或反之)」。本引擎用单机嵌入式 store(§1.1)、以 placement/IP 作 epoch
-(§3.3),这一节用三条不变量分别接住这三道裂缝——不引入 `failed` 中间态、不引入世代计数。
+§4.1's state machine is **imperative**, and an imperative state machine has three classic fissures:
+"a transition fails halfway and leaves dirty state", "two verbs fight concurrently", and "the state
+changed but the event was not published (or vice versa)". This engine uses a single-node embedded
+store (§1.1) with the placement/IP as the epoch (§3.3), and this section catches those three
+fissures with three invariants — introducing no `failed` intermediate state and no counter.
 
-**四态(§4.1)不加失败态,这是模型的结论而非省略。** 逐个转换看,没有一个会卡在"跨子系统的中间脏态":
+**The four states (§4.1) get no failure state, and that is a conclusion of the model rather than an
+omission.** Transition by transition, not one of them can get stuck in a "cross-subsystem dirty
+intermediate state":
 
-- **resume / create 冷启失败**:canonical 冷启链(§5.E.1,见 [`deep-dives/guest-runtime.md`](./deep-dives/guest-runtime.md) D5)
-  先物化 Rootfs/Volume/Network(①②③)、再拉起 runsc(④)——**挂载在 runsc 启动时从 OCI spec 取,
-  运行中不可热改**(§2.5),所以 Volume 不是"起进程后再挂"而是拉起动作的组成部分,**不存在"进程起了、
-  Volume 没挂上"的中间态**。失败只落在两处:①②③ 物化失败(还没碰 runsc,持久态分毫未动)、④/⑦ 拉起或
-  探活失败。两者都**退回源态**(resume→`paused`、create→删记录),不留 `failed`。
-- **pause 静止失败**:drain-barrier 是优化而非正确性前提,故它的每条降级路径(排空超时 → 抢占式冻结 →
-  最坏强杀)都落到**合法的 `paused`**(§4.2)。故 pause 无中间脏态。
-- **destroy 删字节失败**:状态转换(标 `destroyed`)与字节回收(删 Overlay/Volume)**解耦**——转换是
-  控制面动作,删字节失败后由**孤儿单元 sweep**(§4.4-A 反向对账,与 refcount GC 不是一回事)异步重试。
-  删字节失败不阻塞、不回退状态转换,destroy 天然幂等。
+- **A resume / create cold start failing**: the canonical cold-start chain (§5.E.1, see
+  [`deep-dives/guest-runtime.md`](./deep-dives/guest-runtime.md) D5) materializes
+  Rootfs/Volume/Network first (①②③) and then brings runsc up (④) — and **mounts are taken from the
+  OCI spec when runsc starts and cannot be changed live** (§2.5), so a Volume is not "mounted after
+  the process starts" but a component of the bring-up action, and **there is no intermediate state
+  of "the process is up but the Volume is not mounted"**. Failure lands in only two places: ①②③
+  failing to materialize (runsc has not been touched and the persistent state is untouched), and
+  ④/⑦ failing to bring up or to probe. Both **roll back to the source state** (resume→`paused`,
+  create→delete the record), leaving no `failed`.
+- **A pause failing to quiesce**: the drain barrier is an optimization rather than a correctness
+  precondition, so each of its degradation paths (drain timeout → preemptive freeze → a hard kill in
+  the worst case) lands on **a legal `paused`** (§4.2). So pause has no dirty intermediate state.
+- **A destroy failing to delete bytes**: the state transition (marking `destroyed`) and byte
+  reclamation (deleting the Overlay/Volume) are **decoupled** — the transition is a control-plane
+  action, and after a byte deletion fails the **orphan-unit sweep** (§4.4-A's reverse
+  reconciliation, which is not the same thing as refcount GC) retries asynchronously. A failed byte
+  deletion neither blocks nor rolls back the state transition, and destroy is inherently idempotent.
 
-由此定三条不变量,分接上面三道裂缝(A 接失败留脏态、B 接并发打架、C 接状态与事件不一致):
+From this follow three invariants, catching the three fissures above (A catches dirty state after
+failure, B catches concurrent fights, C catches state-versus-event inconsistency):
 
-#### 4.4-A 不变量 A —— 转换失败原子退回源态,回收半建 placement,不引入补偿事务
+#### 4.4-A Invariant A — a failed transition rolls back atomically to the source state, half-built placements are reclaimed, and no compensating transaction is introduced
 
-持久态只在 Overlay 工件
-与 data Volume(§4.2),**任何转换失败都不损坏它**。失败时唯一要清理的是**本次转换半建的 placement**
-(netns/IP、nft 规则集、overlay mount)——而这本就是 §3.3「placement 每次 resume 重绑、旧的
-作废」的一部分,不是新增的补偿逻辑。所以失败处置是**回收半建 placement + 控制面态回到源态**,不是
-跨子系统的 saga/回滚。
+The persistent state lives only in the Overlay artifact and data Volumes (§4.2), and **no transition
+failure damages it**. The only thing to clean up on failure is **the placement this transition
+half-built** (netns/IP, the nft rule set, the overlay mount) — and that is already part of §3.3's
+"a placement is rebound at every resume and the old one is void", not added compensation logic. So
+the failure disposition is **reclaim the half-built placement + return the control-plane state to
+the source state**, not a cross-subsystem saga/rollback.
 
-**A 的崩溃变体 —— orchestrator 自身崩在转换中途,由重启对账补做同一次回收,不落 intent/phase 日志。**
-上面的回收是进程内 defer 式;orchestrator 崩在半途(如 resume 已建 netns/IP/nft/overlay-mount、store 还停在
-`paused`)时 defer 跑不了,留下**孤儿 placement**。此时 **store 态并不含糊**——§4.4-C 的原子提交保证它只停在
-干净的源态或目标态;漏的只是宿主上那批半建 placement-local 资源(非持久对象,§4.3 refcount GC 与 §4.4-C
-outbox 都不扫它)。
+**A's crash variant — the orchestrator itself crashing mid-transition, with startup reconciliation
+performing the same reclamation afterwards, and no intent/phase log written.** The reclamation above
+is `defer`-style within the process; when the orchestrator crashes halfway (say a resume has already
+built netns/IP/nft/overlay-mount while the store still sits at `paused`), the defers cannot run and
+an **orphan placement** is left behind. **The store's state is not ambiguous** at that point —
+§4.4-C's atomic commit guarantees it sits only at a clean source or target state; what is missing is
+merely that batch of half-built placement-local resources on the host (non-persistent objects, which
+neither §4.3's refcount GC nor §4.4-C's outbox scans).
 
-**接法是反向对账,不是向前记「意图+阶段」日志再重放**(后者正是本节开头拒掉的持久分阶段事务)。判据:
-placement 派生自 store 权威态、可弃,故枚举本机 placement 资源,凡**不支撑任一按 store 应持有 placement
-的沙箱**者即孤儿,按本不变量回收。单机权威 store(§1.1)令这次对账退化成**一次本地扫描 diff 一张本地表**,
-无阶段记录、与 placement/IP-as-epoch(§4.3)正交。半建的 workdir/upper 孤儿是其一个特例
-(rootfs-overlay D5)。两种跑法:
+**The way this is caught is reverse reconciliation, not writing a forward "intent + phase" log and
+replaying it** (the latter being exactly the durable multi-phase transaction rejected at the top of
+this section). The criterion: a placement is derived from the store's authoritative state and is
+discardable, so enumerate this host's placement resources, and any that **does not support a sandbox
+that should hold a placement according to the store** is an orphan, reclaimed per this invariant. An
+authoritative single-node store (§1.1) degenerates this reconciliation into **one local scan diffed
+against one local table**, with no phase records, orthogonal to placement/IP-as-epoch (§4.3). A
+half-built workdir/upper orphan is one special case of it (rootfs-overlay D5). Two ways to run it:
 
-- **启动对账**:进程刚崩、锁全没了,一切进行中 resume 都已死,故辨识无需持锁。
-- **周期对账**(orchestrator 活着时跑)= **同一份**反向对账,只多两条:① 对**持锁**沙箱 `TryLock` 跳过
-  ——in-flight resume **全程持有转换锁**(§4.4-B),持锁即在建,不跳会误收正在建的活 placement;② 保护
-  live-map 里本进程亲手建的活 placement 不当孤儿。
+- **Startup reconciliation**: the process has just crashed, every lock is gone, and every in-progress
+  resume is already dead, so identification needs no lock.
+- **Periodic reconciliation** (run while the orchestrator is alive) = **the same** reverse
+  reconciliation plus exactly two things: ① `TryLock`-skip **locked** sandboxes — an in-flight resume
+  **holds the transition lock throughout** (§4.4-B), holding the lock means building is under way,
+  and not skipping would wrongly reclaim a live placement being built; ② protect the live placements
+  this process built with its own hands in the live-map from being taken for orphans.
 
-存活 `running` 的活 placement 都不是孤儿,归下面的接管半段。触发时机、锁协调、本机资源枚举与批量策略见
-[`deep-dives/reaper-health.md`](./deep-dives/reaper-health.md) D4。
+The live placements of surviving `running` sandboxes are never orphans; they belong to the takeover
+half below. The trigger timing, lock coordination, host resource enumeration, and batching strategy
+are in [`deep-dives/reaper-health.md`](./deep-dives/reaper-health.md) D4.
 
-**回收次序:活路径严格反向依赖序,启动对账力拆在前。** 活着的 `destroy`/`pause` 握着进程内 placement
-句柄,按严格反向依赖序拆干净;**启动对账没有进程内句柄**、只有一张本地表,故对孤儿 mount 走力拆
-(不阻塞在忙 mount 上),且**upper 分毫不动**(§4.4-A 持久态不碰)。两条路径次序刻意不同——活路径求
-干净、启动对账求"一次扫描拆净"。**精确的反向依赖序归 §5.A**(它持有 placement-local 资源,也就持有它们
-的建立序),本节不复制那张次序;模型层只要两条性质:每步幂等、best-effort,故一次半建的 placement
-也能拆净;**overlay 的 umount 不在那条链上**,它归 mediator 一侧(§4.4-A 持久态不碰)。上面引
-reaper-health D4 只为**触发时机与锁协调**(周期对账何时跑、`TryLock` 怎么跳过持锁沙箱),次序不在那里。
+**Reclamation ordering: the live path uses strict reverse dependency order, startup reconciliation
+puts a forced teardown first.** A live `destroy`/`pause` holds in-process placement handles and tears
+down cleanly in strict reverse dependency order; **startup reconciliation has no in-process handles**,
+only a local table, so it force-tears orphan mounts (without blocking on a busy mount), and **the
+upper is not touched at all** (§4.4-A does not touch persistent state). The two paths' orderings
+differ deliberately — the live path aims for cleanliness, startup reconciliation for "tear it all
+down in one scan". **The precise reverse dependency order belongs to §5.A** (it holds the
+placement-local resources and therefore their construction order), and this section does not
+duplicate that ordering; the model layer needs only two properties: every step is idempotent and
+best-effort, so even a half-built placement can be torn down cleanly; and **the overlay's umount is
+not on that chain**, belonging to the mediator's side (§4.4-A does not touch persistent state). The
+reference to reaper-health D4 above is only for **trigger timing and lock coordination** (when
+periodic reconciliation runs, how `TryLock` skips locked sandboxes); the ordering is not there.
 
-**A 崩溃变体的另一半 —— 对存活的 `running` placement 重新接管句柄,不是回收。** 崩溃后缺的不只是孤儿:
-orchestrator 的进程内 placement 句柄(端点、provider 私有 handle)随进程蒸发,而底层隔离单元还活着。**若只
-做回收、不补接管,后果不是脏态而是失联**:store 记 `running`、容器还在跑,但引擎握不到句柄——此后 destroy
-会漏拆活容器(泄漏)、transport 代理会因"无活 placement"失败。故对账是**对偶**的两半:
+**The other half of A's crash variant — retaking handles on surviving `running` placements, which is
+not reclamation.** What is missing after a crash is not only orphans: the orchestrator's in-process
+placement handles (endpoints, provider-private handles) evaporate with the process while the
+underlying isolation unit is still alive. **If only reclamation is done and takeover is not, the
+consequence is not dirty state but loss of contact**: the store says `running` and the container is
+still running, but the engine cannot get a handle — after which a destroy would fail to tear down a
+live container (a leak) and the transport proxy would fail with "no live placement". So
+reconciliation is **dual**, in two halves:
 
-- **非 `running` 的半建 placement → 回收**(上一段)。
-- **`running` 的存活 placement → 重新接管**:provider 按 SandboxID 重认自己的资源、重建句柄、重发现端点。
-  **接管不是 resume**——同一 placement、同一 IP、不换 epoch(§3.3/§4.3),因为隔离单元从未重启。
+- **Half-built placements that are not `running` → reclaim** (the previous paragraphs).
+- **Surviving placements that are `running` → retake**: the provider re-recognizes its own resources
+  by SandboxID, rebuilds the handle, and rediscovers the endpoint.
+  **A takeover is not a resume** — the same placement, the same IP, and no new epoch (§3.3/§4.3),
+  because the isolation unit never restarted.
 
-编排语义两条:① **判活与冷启 ⑦ 就绪门对齐**——L1 活但 L2 不应答(如 `created`-未监听)不是可接管的活,一律
-按 §4.2「崩溃 = 非自愿 pause」降 `paused`(可经下次 resume 冷启恢复),不把死句柄填进 live-map;② **失败
-处置是 skip-and-log + 对不确定的 `running` 存活者取保守**,即保护其 placement 不回收——漏拆活容器不可逆,
-泄漏 placement 下次启动再收,且对账幂等、跳过项下次重来。重认存活者要求 provider 能按 SandboxID 枚举自己的
-placement-local 资源,其机制(`Adopt`/`ReclaimOrphans` 签名、SandboxID 标注为何是 §3.3 的允许反向、两层判活)
-落在 §5.A,本节不复述。接管期单次就绪探针与 orchestrator 活着时的**连续健康分类**(见 §4.3,
-区分 transport-down 瞬态)、**周期对账**(与 §4.4-B 锁协调)的落地见
-[`deep-dives/reaper-health.md`](./deep-dives/reaper-health.md) D3/D4。
+Two orchestration semantics: ① **the liveness decision is aligned with cold start's ⑦ readiness
+gate** — L1 alive but L2 not answering (a `created`-but-not-yet-listening unit, say) is not a
+takeable live unit, and is demoted to `paused` per §4.2's "a crash = an involuntary pause"
+(recoverable through a cold start at the next resume), rather than filling the live-map with a dead
+handle; ② **the failure disposition is skip-and-log + be conservative about an uncertain surviving
+`running`**, that is, protect its placement from reclamation — failing to tear down a live container
+is irreversible, whereas a leaked placement is collected at the next startup, and reconciliation is
+idempotent so a skipped item comes round again. Re-recognizing survivors requires the provider to be
+able to enumerate its own placement-local resources by SandboxID, and that mechanism (the
+`Adopt`/`ReclaimOrphans` signatures, why annotating with the SandboxID is a permitted reverse
+direction under §3.3, the two-layer liveness decision) lands in §5.A and is not restated here. The
+single readiness probe during takeover, the **continuous health classification** while the
+orchestrator is alive (see §4.3, distinguishing the transport-down transient), and the
+implementation of **periodic reconciliation** (with §4.4-B's lock coordination) are in
+[`deep-dives/reaper-health.md`](./deep-dives/reaper-health.md) D3/D4.
 
-#### 4.4-B 不变量 B —— 每沙箱一把转换锁,动词串行 + CAS 前置校验
+#### 4.4-B Invariant B — one transition lock per sandbox: verbs serialize, with a CAS precondition check
 
-单机嵌入式 store 下仍有并发:用户
-`pause` 与 `resume` 同时到、用户 `resume` 与 reaper `evict` 竞争、两个 `pause` 叠加。仲裁机制:
+Concurrency exists even under a single-node embedded store: a user `pause` and `resume` arriving at
+once, a user `resume` racing the reaper's `evict`, two `pause`s stacking. The arbitration mechanism:
 
-- **每沙箱一把转换锁**,所有生命周期动词(`create`/`pause`/`resume`/`destroy` + reaper 的
-  `auto-pause`/`evict`)对**同一沙箱**串行获取,一次只有一个动词在推进它。
-  **两个非转换写点也在同一把锁下**:`PATCH`(改 Binding)与 `Promote`(固化新层)虽不是 §4.1 转换、
-  不发事件(§3.4.5),但它们全程持有该沙箱的这把锁,故与 `destroy`/`resume`/`evict` **互斥**——
-  一次改帽不可能与一次正在推进的 resume 交错,也不可能在沙箱正被删时提交。
-- **锁内先做状态前置校验(CAS)**:每个动词声明它的合法源态(如 `resume` 要求 `paused`、`pause` 要求
-  `running`),当前 `lifecycle-state` ≠ 期望源态则**拒绝**,不执行。**两个动词是刻意的例外,不是遗漏**:
-  `create` 的 ID 是新造的、没有源态可比;`destroy` 从 `running` / `paused` / `creating` 三态都合法且幂等,
-  故没有单一"期望源态"可 compare-and-set——它的串行化**全靠那把锁**,不靠 CAS。于是"pause 与 resume 同时来"= 后拿到
-  锁者面对已变的态 CAS 失败。"resume 与 evict 竞争"= 谁先拿锁谁赢,而**输家怎么等,取决于它是谁发的**:
-  - **用户动词**(`create`/`pause`/`resume`/`destroy`)**阻塞等锁**,等赢家整条转换落定后再拿到锁、对
-    **已变的态**重做 CAS(resume 赢则态已 `running`;`destroy` 无源态 CAS,见下)。
-  - **reaper 发的动词**(`auto-pause`/`evict`,以及周期对账)**不阻塞**:它**试锁**(`TryLock`),不成即
-    **跳过本轮**、留到下一轮重来(reaper-health D3)。理由是 reaper 是周期性的、无调用方在等它,而阻塞
-    等锁会让一次长 resume 卡住整条 sweep;它跳过的沙箱下一轮自然重判,且那时态已是最新的。
-- **锁的持有区间 = 整条转换,不是只包 CAS 那一瞬。** 对 resume/create 这种冷启长动词,锁从 CAS 一直持到
-  ⑦翻成 `running`(或超时 unwind 回源态)才释放——**不在 guest listening 前提前放手**。于是"谁在物化
-  placement / 挂 Overlay"与"谁能改这个沙箱的态"落在同一把锁下:resume 正物化时,并发 `destroy`/`evict`
-  拿不到锁,不可能去删一个正被挂载/冷启的 Overlay 工件。这条闭合了否则会敞开的数据竞态(destroy 从
-  `paused` 合法、CAS 会通过,若锁已释放就会删掉 in-flight resume 脚下的字节——refcount 兜不住,因为
-  in-flight 挂载不是持久引用行)。
-- **归属**:锁与 CAS 是 §4 mediator 的编排义务,store 只提供 `lifecycle-state` 的**条件写(compare-and-set)**
-  机制——不违反"子系统间不互调"(§4 开头),因为串行化发生在 mediator 层,不是让某子系统去调另一个。
-- **锁全程持有已独占整条 resume,故并发动词打架的正确性全在这里**;§4.3 的"in-flight 期挂起分类"是这把
-  同一把锁的另一个后果(reaper 试锁跳过),不是另一道守卫,它只承重效率与观测洁净。
+- **One transition lock per sandbox**, acquired serially by every lifecycle verb
+  (`create`/`pause`/`resume`/`destroy` + the reaper's `auto-pause`/`evict`) for **the same sandbox**,
+  so only one verb advances it at a time.
+  **The two non-transition write points are under the same lock**: `PATCH` (editing a Binding) and
+  `Promote` (freezing a new layer) are not §4.1 transitions and emit no event (§3.4.5), but they hold
+  that sandbox's lock throughout and are therefore **mutually exclusive** with
+  `destroy`/`resume`/`evict` — a cap change cannot interleave with a resume in progress, and cannot
+  commit while the sandbox is being deleted.
+- **A state precondition check (CAS) comes first inside the lock**: every verb declares its legal
+  source state (`resume` requires `paused`, `pause` requires `running`), and if the current
+  `lifecycle-state` ≠ the expected source state it is **refused** and not executed. **Two verbs are
+  deliberate exceptions rather than omissions**: `create`'s ID is newly minted and there is no source
+  state to compare against; `destroy` is legal and idempotent from all three of `running` / `paused` /
+  `creating`, so there is no single "expected source state" to compare-and-set — its serialization
+  rests **entirely on that lock**, not on a CAS. So "pause and resume arriving together" = whoever
+  gets the lock second faces a changed state and fails the CAS. "resume racing evict" = whoever takes
+  the lock first wins, and **how the loser waits depends on who issued it**:
+  - **User verbs** (`create`/`pause`/`resume`/`destroy`) **block on the lock**, take it once the
+    winner's whole transition has settled, and redo the CAS against **the changed state** (if resume
+    won, the state is already `running`; `destroy` has no source-state CAS, see above).
+  - **Verbs the reaper issues** (`auto-pause`/`evict`, and periodic reconciliation) **do not block**:
+    they **try the lock** (`TryLock`) and on failure **skip the round**, leaving it for the next one
+    (reaper-health D3). The reason is that the reaper is periodic with no caller waiting on it, while
+    blocking on the lock would let one long resume stall the entire sweep; a sandbox it skips is
+    naturally reclassified next round, and by then the state is current.
+- **The lock's hold interval = the whole transition, not just the CAS instant.** For a long
+  cold-start verb like resume/create, the lock is held from the CAS until ⑦ flips it to `running` (or
+  a timeout unwinds it to the source state) — **it is not released early, before the guest is
+  listening**. So "who is materializing the placement / mounting the Overlay" and "who may change
+  this sandbox's state" fall under the same lock: while a resume is materializing, a concurrent
+  `destroy`/`evict` cannot take the lock and cannot delete an Overlay artifact that is being
+  mounted/cold-started. This closes a data race that would otherwise be wide open (a destroy is legal
+  from `paused` and its CAS would pass, so with the lock already released it would delete the bytes
+  under an in-flight resume's feet — and refcount does not catch it, because an in-flight mount is
+  not a persistent reference row).
+- **Ownership**: the lock and the CAS are the §4 mediator's orchestration obligations, and the store
+  only provides the **conditional-write (compare-and-set)** mechanism on `lifecycle-state` — which
+  does not violate "subsystems do not call each other" (top of §4), because the serialization happens
+  at the mediator layer rather than by having one subsystem call another.
+- **The lock, held throughout, already gives exclusive possession of the entire resume, so the
+  correctness of concurrent verbs fighting lives entirely here**; §4.3's "classification is suspended
+  during the in-flight period" is another consequence of this same lock (the reaper's try-lock skip)
+  rather than a second guard, and it is load-bearing only for efficiency and observational
+  cleanliness.
 
-#### 4.4-C 不变量 C —— 状态提交与事件发布单次原子,算法一份、后端差异收口在 store 契约后
+#### 4.4-C Invariant C — the state commit and the event publication are one atomic commit; one algorithm, with backend differences settled behind the store contract
 
-§4.1 每次转换要
-发事件到 event stream,计费类 subscriber 靠它记账,**漏一条就漏账**。危险的做法是让"后端支不支持事务"
-这个判断漏进发布算法、分裂成 N 套正确性。守法是 §1.3 seam/invariant 对偶的标准应用:
+Every §4.1 transition must publish an event to the event stream, billing-class subscribers keep
+accounts from it, and **losing one loses an invoice**. The dangerous approach is letting the judgment
+"does this backend support transactions" leak into the publishing algorithm and split it into N
+correctness regimes. The lawful approach is a standard application of §1.3's seam/invariant duality:
 
-- **算法只写一份**:transactional outbox + at-least-once 投递 + subscriber 幂等去重。状态转换与"待发事件"
-  记录**在同一次提交里落地**,发布器异步读 outbox 发出、发出后标记;事件带**转换唯一 ID**,subscriber 据此
-  去重。宁可重发(at-least-once)不可漏发。
-- **store 接口承诺,后端兑现**:store 是 Behavior seam(§1.3),它把算法需要的最小保证**收口成一条契约**——
-  「`lifecycle-state` 变更 + outbox 记录追加 = 单次原子提交」。**接口方法本身承诺这条原子性,后端必须兑现**:
-  支持事务的后端走本地事务,不支持多键原子的走「状态与事件写进同一文档/单键」降级。**绝不能设计成"后端返回
-  是否支持事务、算法据此分支"**——那会把后端差异漏进算法逻辑、分裂正确性。换后端不许动这一份算法,这正是
-  seam 的意义(register an implementation,不改现有结构)。
-- **引擎不追踪 subscriber**:引擎只保证"事件被可靠写入一条可重放的 stream";断线补发、消费位点是 subscriber
-  自己的事(§1.3 add a subscriber)。
+- **The algorithm is written exactly once**: a transactional outbox + at-least-once delivery +
+  idempotent deduplication by the subscriber. The state transition and the "event to be published"
+  record **land in the same commit**; a publisher reads the outbox asynchronously, sends, and marks
+  it sent; the event carries **a unique transition ID** by which subscribers deduplicate. Better to
+  resend (at-least-once) than to lose one.
+- **The store interface promises it, the backend delivers it**: the store is a Behavior seam (§1.3),
+  and it **settles the minimum guarantee the algorithm needs into one contract** — "a
+  `lifecycle-state` change + an outbox record appended = one atomic commit". **The interface method
+  itself promises that atomicity and the backend must deliver it**: a backend with transactions uses
+  a local transaction, one without multi-key atomicity falls back to "write the state and the event
+  into the same document/single key". **It must never be designed as "the backend reports whether it
+  supports transactions and the algorithm branches on that"** — that would leak backend differences
+  into the algorithm's logic and split correctness. Swapping backends must not touch this one
+  algorithm, and that is exactly what the seam is for (register an implementation, do not change
+  existing structure).
+- **The engine does not track subscribers**: it only guarantees that "the event is durably written to
+  a replayable stream"; resending after a disconnect and tracking a consumption position are the
+  subscriber's own business (§1.3 add a subscriber).
 
-**序号契约:全序 + 无可见性缺口,两条都由 store 接口承诺。** outbox 每行带一个**单调整数 `seq`**,它
-才是排序键与游标 —— `occurred_at`(unix 纳秒)**不是全序**:同纳秒无 tie-break,且墙钟可被 NTP 步进
-回退,故它无法充当可续位的游标。两条承诺:
+**The sequence-number contract: a total order + no visibility gap, both promised by the store
+interface.** Every outbox row carries a **monotonic integer `seq`**, and that is the ordering key and
+the cursor — `occurred_at` (unix nanoseconds) **is not a total order**: same-nanosecond values have
+no tie-break, and the wall clock can be stepped backwards by NTP, so it cannot serve as a resumable
+cursor. Two promises:
 
-- **全序**:每次追加拿到的 `seq` 唯一且严格递增;读取按 `seq` 序返回。
-- **无可见性缺口**:一旦 `seq = N` 对读方可见,就不再有 `seq < N` 的行**其后**才出现。这条正是"消费到
-  N 的 subscriber 从 `after=N` 续位不会漏"的**全部依据**。
+- **Total order**: the `seq` obtained by each append is unique and strictly increasing, and reads
+  return in `seq` order.
+- **No visibility gap**: once `seq = N` is visible to a reader, no row with `seq < N` appears
+  **afterwards**. This is the **entire basis** for "a subscriber that has consumed up to N resumes
+  from `after=N` without loss".
 
-第二条是**不显然**的那条,且是真实缺陷类而非假想:若序号在 INSERT 时分配、行在 COMMIT 时才可见,两个
-并发生产者就会交错 —— tx1 取 5、tx2 取 6、tx2 先提交,读方消费 6 并推进游标,5 随后出现在一个**已投递
-的更晚事件之后**,再无游标会回头看它。**注意什么救不了它:序列化读取方**。破的是生产侧,故读取侧加锁
-只会看到一条"完美有序但已经少了一行"的流。
+The second is the **non-obvious** one, and it is a real defect class rather than a hypothetical one:
+if the number is assigned at INSERT while the row becomes visible only at COMMIT, two concurrent
+producers interleave — tx1 takes 5, tx2 takes 6, tx2 commits first, the reader consumes 6 and advances
+its cursor, and 5 then appears **after an already-delivered later event**, with no cursor ever looking
+back at it. **Note what does not save it: serializing the readers.** What breaks is the producing
+side, so locking on the reading side would only observe a stream that is "perfectly ordered and
+already missing a row".
 
-按不变量 C 的守法,**这条写进 `store.Store` 契约、与原子提交并列**,不能是某个后端的偶然性质:
-SQLite 靠**序列化写事务**兑现(另一个写事务开着时第二个 INSERT 直接 `SQLITE_BUSY`,故"取到低序号者
-后提交"无从发生),Memory 靠**在同一临界区内既分配号又让行可见**兑现。而一个允许真并发写事务的后端
-(如 Postgres + `BIGSERIAL` 默认值)**必须另做水位闸** —— 低序号全部提交后才放行可见 —— 否则它不满足
-本接口;契约测试里有一条对抗性用例专钉这个,让后端差异**在契约测试里断掉,而不是在计费对账时断掉**。
+Per invariant C's lawful approach, **this is written into the `store.Store` contract alongside the
+atomic commit** and must not be some backend's incidental property: SQLite delivers it through
+**serialized write transactions** (with another write transaction open, a second INSERT gets
+`SQLITE_BUSY` outright, so "whoever took the lower number commits later" cannot arise), and Memory
+delivers it by **both allocating the number and making the row visible inside the same critical
+section**. A backend that permits genuinely concurrent write transactions (Postgres with a
+`BIGSERIAL` default, say) **must add a watermark gate** — visibility released only once all lower
+numbers have committed — or it does not satisfy this interface; the contract tests carry an
+adversarial case pinning exactly this, so backend differences **break in the contract test rather
+than during a billing reconciliation**.
 
-**对外面 = 只做 pull(游标分页 GET),放控制面。** 形状与状态码见 §6.1 的 `GET /v1/events`。判据是
-**引擎不能持 per-subscriber 状态**(§1.3):pull 面按构造无 subscriber 表、无驱逐策略、无清理路径;
-真扇出的 push 立刻需要这三样。日后要 push,它是**对同一条 pull 查询做服务端轮询的表现层适配器**、
-共用同一 `seq`,故结构上零代价 —— **"push 作为适配器"不持状态,"push 作为真扇出"持,这是分界线**。
+**Outward = pull only (a cursor-paginated GET), in the control plane.** The shape and status codes
+are in §6.1's `GET /v1/events`. The criterion is that **the engine must not hold per-subscriber
+state** (§1.3): a pull surface by construction has no subscriber table, no eviction policy, and no
+cleanup path, whereas a genuinely fan-out push needs all three immediately. If push is wanted later,
+it is **a presentation-layer adapter that server-polls the same pull query**, sharing the same `seq`,
+and so costs nothing structurally — **"push as an adapter" holds no state, "push as genuine fan-out"
+does, and that is the dividing line**.
 
-**头阻塞:保留,这是正确的一侧。** 一条投不出去的事件挡住其后全部。因为本节开头那句"漏一条就漏账"
-意味着**顺序承载语义**("先 pause 后 resume"与反之是两笔不同的账),跳过失败者是拿一个**可见的停摆**
-换一个**无声的错账**。反向条件也说明了它为何不能照抄别人的跳过式设计:跳过在 sink **构造即幂等且按逻辑
-时间版本化**时才可承受(迟到的重复在 merge 时落败、不复活旧态),我们的 sink 没有这层缓冲垫。
+**Head-of-line blocking: kept, and this is the correct side.** One undeliverable event blocks
+everything behind it. Because this section's opening "losing one loses an invoice" means **order
+carries semantics** ("pause then resume" and the reverse are two different invoices), skipping the
+failing one trades **a visible stall** for **a silent mis-accounting**. The converse also explains why
+we cannot copy someone else's skip-style design: skipping is tolerable only when the sink is
+**idempotent by construction and versioned by logical time** (a late duplicate loses at merge time
+and does not resurrect an old state), and our sink has no such cushion.
 
-**但"停摆"是取舍,"无界、无告警、不可见的停摆"是缺陷**,故三条可运维性是硬要求(机制全部落在
-`store.Publisher`,本节只立要求):① **毒信封出口** —— 重试有次数上界,到界后停止重试并 latch 一个必须
-被注意到的信号,清除它是运维动作、**不自动解除**:自动解除等于把上界退回成它要取代的无限重试;
-② **退避既有上限也有 jitter** —— 两者修的是不同故障:无上限的指数退避会把重试排到远期,事件既不投递
-也不告警;无 jitter 则多个 drainer 在同一到期时刻撞同一行;③ **可观测性与被观测的循环不同源** —— 在
-drain 循环自己身上采样,数字会恰好在它卡住的那一刻停止更新,于是"卡死的 worker"与"空闲"导出同一个
-陈旧值、不可区分,故采样点独立于该循环,且**卡在循环里**与**卡在 sink 的投递调用里**必须能分开看。
+**But "a stall" is a trade-off, while "an unbounded, unalarmed, invisible stall" is a defect**, so
+three operability properties are hard requirements (the mechanisms all land in `store.Publisher`, and
+this section only states the requirements): ① **a poison-envelope exit** — retries have a count
+bound, past which retrying stops and a signal that must be noticed is latched, and clearing it is an
+operator action that is **not automatically released**: automatic release would turn the bound back
+into the infinite retry it exists to replace; ② **backoff has both a ceiling and jitter** — the two
+fix different faults: unbounded exponential backoff schedules retries into the far future, where the
+event is neither delivered nor alarmed, while without jitter several drainers collide on the same row
+at the same expiry instant; ③ **observability does not share a source with the loop being observed**
+— sampling inside the drain loop itself means the numbers stop updating at precisely the moment it
+wedges, so "a wedged worker" and "idle" export the same stale value and are indistinguishable;
+therefore the sampling point is independent of that loop, and **stuck in the loop** versus **stuck in
+the sink's delivery call** must be separately visible.
 
-**容量压力事件(软阈):不发,不新增 event kind。** §2.3 / rootfs-overlay D6.5 的硬阈行为不变(guest
-见普通 `ENOSPC`、沙箱存活)。软阈**不作为 §4.1 事件**发出:容量压力是一个**连续量的采样**,而 §4.1
-事件流是**离散状态转换**的流 —— 把前者塞进后者,要么定一个无从论证的阈值把连续量二值化,要么让事件
-频率随负载抖动,两者都会污染"每条事件 = 一次转换"这个让 subscriber 能对账的性质。要监控就在外部按
-gauge / 采样接(§1.3 add a subscriber,Consumption seam),不进引擎原语。外部证据同向:两个参考实现
-都只暴露 gauge / 采样,无人把压力发成事件。
+**Capacity-pressure events (a soft threshold): not emitted, and no event kind is added.** §2.3 /
+rootfs-overlay D6.5's hard-threshold behavior is unchanged (the guest sees an ordinary `ENOSPC` and
+the sandbox survives). A soft threshold is **not emitted as a §4.1 event**: capacity pressure is **a
+sample of a continuous quantity**, whereas the §4.1 event stream is a stream of **discrete state
+transitions** — stuffing the former into the latter would either fix an unarguable threshold to
+binarize a continuous quantity, or let event frequency jitter with load, and both would contaminate
+the "every event = one transition" property that lets subscribers reconcile. To monitor it, attach
+externally as a gauge / by sampling (§1.3 add a subscriber, the Consumption seam), not as an engine
+primitive. External evidence points the same way: both reference implementations expose only gauges /
+samples, and nobody emits pressure as an event.
 
-**保留窗口(裁剪)**:**今天不裁剪,行只标记不删**。代价明说:outbox 的 at-rest 体积无界增长,是一条
-**已知限制**,不是这条决定的优点。窗口取值必须由"承诺给外部订阅者的重连时长"论证,而引擎内的 sink
-是个打日志的参考实现、"已投递"几乎恒真,故**没有可论证的取值**;凭空取一个数是 §1.3 拒绝的投机性
-预留。这是本节唯一仍开放的一项,见
-[`open-decisions.md`](./open-decisions.md) §2 的事件流行。**连带**:`earliest` 恒为最小序号,故 §6.1
-的 410 今天不可达 —— 响应仍带 `{earliest, latest}`、410 写成保留语义,让将来真加裁剪时调用方契约无需变更。
+**The retention window (trimming)**: **no trimming today; rows are only marked, never deleted.** The
+cost, stated plainly: the outbox's at-rest size grows without bound, which is **a known limitation**
+rather than a virtue of this decision. The window's value must be argued from "the reconnect duration
+promised to external subscribers", and the engine's own sink is a logging reference implementation
+whose "delivered" is very nearly always true, so **there is no arguable value**; picking a number out
+of the air is the speculative reservation §1.3 refuses. This is the only item in this section still
+open — see the event-stream row in [`open-decisions.md`](./open-decisions.md) §2. **A consequence**:
+`earliest` is always the smallest sequence number, so §6.1's 410 is unreachable today — the response
+still carries `{earliest, latest}` and the 410 is written as reserved semantics, so that when trimming
+is genuinely added the caller contract needs no change.
