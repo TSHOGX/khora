@@ -67,6 +67,36 @@ var ErrCapRequired = errors.New("lifecycle: node meters this axis, so a cap is r
 // materialize as storage units.
 var ErrUncappedDiskNotCappable = errors.New("lifecycle: an uncapped sandbox's disk axis cannot be capped by a PATCH")
 
+// ErrDiskCapBelowUsage is the §3.4 refusal of a disk cap that is not STRICTLY above the
+// sandbox's current Overlay usage — the §5.B-side twin of ErrVolumeCapBelowUsage, and the
+// same 400.
+//
+// The criterion is a STRICT inequality and `cap == usage` means FULL rather than "exactly
+// enough": measured, a limit set exactly equal to the unit's `referenced` is accepted and
+// stored, and re-applying it or raising it afterwards both return ENOSPC. Below usage is
+// the same wedge one step worse — creating a file, `mkdir`, and truncating an existing
+// file to zero all return ENOSPC, and so does the quota write itself, so the cap can be
+// neither raised nor removed. The only substrate exit is deleting the guest's bytes, which
+// §6 gives the engine no way to do for the caller.
+//
+// ON THE SANDBOX SIDE THE CONSEQUENCE IS STRICTLY WORSE THAN ON A VOLUME, which is why
+// this refusal is not merely symmetry: §5.B re-applies the record's cap at EVERY placement,
+// and re-applying it to a wedged unit fails the same way — so a 200 here does not just
+// wedge the bytes, it makes the sandbox permanently unresumable, exactly the brick that
+// ErrUncappedDiskNotCappable exists to prevent from the other direction. (`Mount`'s own
+// fresh-workdir step fails with ENOSPC too, so even skipping the quota write would not
+// resume it.)
+//
+// It fires on ANY positive cap this request writes, not only on a lowering. A raise can
+// land under usage too: if the unit's quota row was lost to an external change — the case
+// §5.B's per-placement re-application exists for — the guest can grow past the recorded
+// cap, and then even a cap ABOVE the recorded one can be at or below what the unit holds.
+//
+// It does NOT fire for a sandbox that filled its own cap the ordinary §3.4 way: squota
+// stops the guest with ENOSPC while usage is still strictly below the limit, so such a
+// sandbox's cap can be re-asserted and raised (§4.3's resource-terminated remedy).
+var ErrDiskCapBelowUsage = errors.New("lifecycle: sandbox disk cap must be strictly greater than current Overlay usage")
+
 // deathCauseOf translates the §5.A provider enum into the persisted model enum.
 // Two types on purpose (§5.A): the provider seam must not depend on the
 // control-plane record shape. The translation lives HERE, in the mediator, which
@@ -622,6 +652,18 @@ func (m *Mediator) Create(ctx context.Context, spec CreateSpec) (model.SandboxID
 		// delete and leaves an undeletable zombie.
 		_ = m.deps.Store.DeleteMounts(ctx, sid)
 		_ = m.deps.Store.DeleteSandbox(ctx, sid, nil) // nothing built, never visible
+		// §5.B's strict-inequality guard (rootfs.ErrCapBelowUsage) is reached on THIS path
+		// only when the requested cap is at or below the storage unit's own metadata floor
+		// (measured: an empty unit already charges 16 KiB) — i.e. the caller asked for a cap
+		// that is unenforceable from the unit's first instant. Create CARRIES `disk_byte`, so
+		// the verdict is a property of this request and belongs on the write-point sentinel
+		// (400), not on the placement-side one (409, whose remedy is to change state
+		// elsewhere). Same split as §6.1 already makes for the second-hop uid: a 400 at the
+		// write point that carries the field, a 409 at the placement that does not.
+		if errors.Is(err, rootfs.ErrCapBelowUsage) {
+			return "", fmt.Errorf("create: %w: a %d-byte disk_byte is at or below what the Overlay storage unit costs empty, so the cap could not be enforced from the sandbox's first instant: %w",
+				ErrDiskCapBelowUsage, rec.Limits.DiskByte, err)
+		}
 		return "", fmt.Errorf("create: overlay: %w", err)
 	}
 	if err := m.coldStart(ctx, rec, ov); err != nil {

@@ -32,6 +32,7 @@
 | **§5.B Overlay 物化** | 待细化:content-addressed diff 层、multi-node 经 rootfs provider 跨 node 寻址(**应用层协作安全点不在此列——已否决**,见 [`deep-dives/guest-runtime.md`](./deep-dives/guest-runtime.md) D4.4) | **详见 [`deep-dives/rootfs-overlay.md`](./deep-dives/rootfs-overlay.md) D5**,本表不复制 |
 | **§3.4 第二项在配额读失败时该往哪边错** | **不是"要不要 fallback",是 fallback 的方向没被论证过**。`LocalBtrfs.UncappedBytes` 在某个单元的配额行读不出来时落到 `allocbytes.Tree`,注释论据是"漏计真实字节会让节点超发,故测量是保守方向"——但那句话把误差方向当成了单向的,实测两向都有:走行走**只数常规文件**,而配额行**另计 metadata extent**(空单元实测 16384 B vs 走行走 0),故它对稀疏/小文件多的单元**低计**(超发方向);同时它把与源**物理共享**的 extent 全额计入,而配额行只计一次,故它对快照/克隆密集的单元**高计**(误拒方向)。**哪边占优取决于该节点的构成,不取决于代码**。触发条件不是罕见:`qgroup show` 为**每一行**解析路径后才过滤,故该文件系统上**任何**位置的并发删除都会让读整体失败(D7.1 已记 ~1/150;三路 churn 下实测 157/2142 ≈ 7.3%,报错甚至指名别人的行 `cannot find the qgroup 0/21680`),而 substrate 的 cleaner 是异步的,调用方无法与之串行化。**per-volume 的那一半已收口**(`Backend.Usage` 把不可读的行返成 error 而非 `(walk, 0, nil)`,D7.3 的严格不等式与 `RepairVolumeCaps` 因此才真的 fail-closed);本行只问**聚合项**该怎么办——`UncappedBytes` 没有 per-unit 的错误出口,一个单元读失败要么污染整个节点的数字、要么让整次准入读失败 | 倾向:先把两向误差量到"够不够大到会改变准入判决"再定形状,不预留机制;谁消费:§3.4 准入门——取值须由"这个节点上卷的实际构成"论证 |
 | **§5.C per-volume 容量帽在 remote 后端的物化** | local 臂是 subvolume + squota(§5.B/§5.C 共享原语)。**待细化的是 remote 后端**:一个对象存储 / 网络 FS backend 用什么手段兑现"这个卷最多多大"(后端配额 API / 客户端侧核算),以及它与 `Capabilities()` 的关系 | 封在该 backend 内(volume.md D1/D7),不进核心;谁消费:未来 remote volume backend |
+| **§6.1 沙箱读面是否报 `used_byte`** | 卷侧 `GET /v1/volumes/{id}` 有它,理由是"调用方要拿它选一个**严格大于**它的新帽";`PATCH /v1/sandboxes/{id}` 现在也有那条严格不等式(§3.4),故同一条理由对沙箱成立。**机制已就位、无需任何加法**:`rootfs.Provider.Usage` 已经报出这个数,故这纯粹是读面要不要多一个键。**倾向报**,并沿用卷侧那条省略规则(读不到时该键**不出现**,不报 0——0 会被读成"空")。今天的替代是 400 的文案里带上当前用量,够用但要调用方解析错误串 | 谁消费:改帽的调用方——取值须由"读面要不要为每次单读多付一次后端往返"论证(list 上乘以沙箱数的顾虑与卷侧逐字相同) |
 | **§5.A / 模板(内容目录)** | **内置 Template 的内容清单**:一个 bare base(uv/pip/git/build-essential;可选 sudo,仅作 guest 内便利、非引擎语义),各 agent 栈(claude-code/opencode/pi)叠在 bare base 之上。**这是产品/模板层的内容选型**,仍开放(Template 的一等行化 / boot seed / multi-lowerdir 叠层机制是 §4.3 / §5.B 的既定架构,不在本行) | guest 默认 root(§2.2),装包是一次性 exec、不引入 init 依赖,见 [`deep-dives/guest-runtime.md`](./deep-dives/guest-runtime.md) D3.1 |
 
 ---
@@ -44,9 +45,10 @@
 
 ## 4. 实现缺口(设计已定,代码未落地 / 待收口)
 
-| 缺口 | 现状 | owning plan |
-| --- | --- | --- |
-| **沙箱 disk 帽降到当前用量以下没有写点**(§3.4 严格不等式的 §5.B 一侧) | **设计已定([model.md](./model.md) §3.4 的"降帽不是安全方向"块,卡死后的实测在那里,本表不复制),代码只落了卷侧那一半**:`lifecycle.SetVolumeCapacity` 用严格不等式把卷帽的 below-usage 降帽拒成 400(`ErrVolumeCapBelowUsage`),而 `lifecycle.Rebind` 在 disk 轴上**只校验 `0 → N`**(`ErrUncappedDiskNotCappable`),`N → M` 无校验通过。故一次 `M ≤ 当前用量` 的 `PATCH` 返 200 并**卡死该存储单元**,与卷侧逐字节同形。**不是缺一条 `if`,是一次 seam 改造**:`rootfs.Provider` 只暴露 `PromoteCostBytes` 与 `UncappedBytes`,而 `UncappedBytes` 对**有帽单元刻意计 0**(那是它的契约),中介层因此读不到严格不等式所需的 per-sandbox 用量。收口需要 §5.B 新增一个沙箱级用量查询,形状照 `volume.Backend.Usage(ctx, id) (used, limit, err)` | **无**——M1–M8 梯子已走完,`docs/plans/` 因此为空;收口里程碑待定,开出时在那里建 plan |
+> 无。曾登记在此的唯一一条(**沙箱 disk 帽降到当前用量以下没有写点**)已收口:判据落在
+> `lifecycle.Rebind`(400,`ErrDiskCapBelowUsage`)与物化侧的 `rootfs` `applyCap`(placement 侧 409),
+> 靠新增的 §5.B 沙箱级用量查询 `Provider.Usage` 判定;实测与两侧形状的推理进
+> [`deep-dives/rootfs-overlay.md`](./deep-dives/rootfs-overlay.md) D6.6。
 
 ---
 

@@ -12,6 +12,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 )
 
@@ -103,5 +104,76 @@ func TestOverlayCoWAndRemountByteIdentical(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(stateDir, "ov-test")); !os.IsNotExist(err) {
 		t.Fatalf("overlay dir survived destroy")
+	}
+}
+
+// Mount must hand overlayfs an EMPTY workdir on every mount — the kernel rejects or
+// corrupts a reused one (rootfs-overlay D5). Mount satisfies that by EMPTYING the
+// directory rather than deleting and recreating it, because on a unit at its capacity cap
+// the `mkdir` needs a metadata extent the quota has no room for while emptying needs none
+// (D6.6). That is a real distinction on the substrate, so the invariant needs a test of its
+// own rather than riding on the remount above: an implementation that stopped clearing work
+// altogether would still pass the byte-identity assertions until a leftover made a mount
+// fail.
+//
+// Asserted through TWO successive mounts with debris planted in between, which is exactly
+// the resume shape (pause leaves a populated work behind).
+func TestMountClearsStaleWorkWithoutRecreatingIt(t *testing.T) {
+	mustRoot(t)
+	ctx := context.Background()
+
+	base := t.TempDir()
+	tmplDir := filepath.Join(base, "templates")
+	makeTemplate(t, filepath.Join(tmplDir, "bare"))
+	p, err := NewHostOverlayFS(filepath.Join(base, "state"), tmplDir, filepath.Join(base, "layers"))
+	if err != nil {
+		t.Fatalf("NewHostOverlayFS: %v", err)
+	}
+	o, err := p.CreateOverlay(ctx, "ov-work", []string{"bare"}, 0)
+	if err != nil {
+		t.Fatalf("CreateOverlay: %v", err)
+	}
+	m, err := p.Mount(ctx, o)
+	if err != nil {
+		t.Fatalf("Mount: %v", err)
+	}
+	if err := p.Unmount(ctx, m); err != nil {
+		t.Fatalf("Unmount: %v", err)
+	}
+
+	// Record the work dir's identity, then plant leftovers of the shape a previous mount
+	// leaves (the kernel's own `work/work`, plus a stray file).
+	work := p.workPath("ov-work")
+	var before syscall.Stat_t
+	if err := syscall.Stat(work, &before); err != nil {
+		t.Fatalf("stat work: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(work, "work"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(work, "leftover"), []byte("stale"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The mount must SUCCEED — which is the property: a stale work was cleared.
+	m2, err := p.Mount(ctx, o)
+	if err != nil {
+		t.Fatalf("re-Mount with a stale work dir = %v; Mount must clear it (overlayfs rejects a reused workdir, D5)", err)
+	}
+	t.Cleanup(func() { _ = p.Unmount(ctx, m2) })
+	if _, err := os.Stat(filepath.Join(work, "leftover")); !os.IsNotExist(err) {
+		t.Fatalf("the stale file survived Mount (%v); workdir must be emptied", err)
+	}
+
+	// ...and the directory was EMPTIED, not recreated: same inode. This is the half that
+	// keeps a full unit resumable (D6.6) — a recreate would need a metadata extent the
+	// quota cannot grant, and it is invisible to any assertion about mount success on a
+	// unit that is not full.
+	var after syscall.Stat_t
+	if err := syscall.Stat(work, &after); err != nil {
+		t.Fatalf("stat work after: %v", err)
+	}
+	if after.Ino != before.Ino {
+		t.Fatalf("work dir inode changed %d → %d — it was RECREATED, not emptied. On a unit at its capacity cap the mkdir returns ENOSPC (measured, tens of KiB of headroom), which makes a sandbox that hit the ordinary §3.4 ENOSPC permanently unresumable and breaks §4.2's reversible-gate promise (rootfs-overlay D6.6)", before.Ino, after.Ino)
 	}
 }

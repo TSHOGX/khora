@@ -69,6 +69,14 @@ type fakeRootfs struct {
 	// the forecast fail, so that fail-closed path can be asserted too.
 	promoteCost    int64
 	promoteCostErr error
+	// overlayUsed/overlayLimit are what Usage reports for ANY Overlay ID — the
+	// per-sandbox number the §6.1 disk-cap write point checks its strict inequality
+	// against (§3.4 / ErrDiskCapBelowUsage). usageErr makes the read fail, so that
+	// write point's fail-closed path can be asserted. Zero used is the common case:
+	// every cap a test writes is then strictly above it.
+	overlayUsed  int64
+	overlayLimit int64
+	usageErr     error
 	// promoteGate blocks PromoteToTemplate mid-freeze (bytes-down, row-not-yet
 	// window) until closed; promoteReached (if set) is closed when the freeze is
 	// entered, so a test can synchronize a concurrent sweep against it (§4.4-A).
@@ -118,6 +126,20 @@ func (f *fakeRootfs) OpenOverlay(_ context.Context, id string, lower []string, c
 		tmpl = lower[0]
 	}
 	return &rootfs.Overlay{ID: id, Template: tmpl, Lower: append([]string(nil), lower...)}, nil
+}
+
+// Usage backs the §6.1 disk-cap write point's strict inequality (§3.4): the
+// per-sandbox usage UncappedBytes deliberately cannot report, since a capped unit
+// contributes zero there by contract. Logged so a test can assert both that the
+// write point consulted the provider AND that an unrelated PATCH did NOT.
+func (f *fakeRootfs) Usage(_ context.Context, overlayID string) (int64, int64, error) {
+	f.log("Usage:" + overlayID)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.usageErr != nil {
+		return 0, 0, f.usageErr
+	}
+	return f.overlayUsed, f.overlayLimit, nil
 }
 
 // UncappedBytes backs the §3.4 admission gate's second term — bytes under no

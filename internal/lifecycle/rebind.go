@@ -194,6 +194,51 @@ func (m *Mediator) Rebind(ctx context.Context, id model.SandboxID, spec RebindSp
 		return false, fmt.Errorf("rebind: %w: sandbox %s was created uncapped on disk, so its Overlay storage unit carries no quota row and a %d-byte cap could never be enforced — §5.B refuses an unenforceable cap at every placement, so accepting this would leave the sandbox permanently unresumable. Create a new sandbox with disk_byte set (Promote this one first to carry its bytes over); `N → 0` and `N → M` remain legal",
 			ErrUncappedDiskNotCappable, id, newLimits.DiskByte)
 	}
+
+	// §3.4: an `N → M` disk edit must leave the cap STRICTLY above what the storage unit
+	// already holds. See ErrDiskCapBelowUsage for the measured wedge and for why the
+	// sandbox side is worse than the volume side. This is the §5.B half of the criterion
+	// SetVolumeCapacity already applies to §5.C, and it needed a new seam method to become
+	// checkable at all: UncappedBytes reports ZERO for a capped unit BY CONTRACT (the two
+	// §3.4 terms are disjoint), so the mediator had no way to read the per-sandbox number.
+	//
+	// GATED ON THE AXIS BEING WRITTEN (`b.DiskByte != nil`), not on the resulting value.
+	// A PATCH that only touches TTLs, `volumes` or the declaration must not pay a backend
+	// round trip — and, more importantly, must not be REFUSED because of a pre-existing
+	// divergence it does not touch. Within a request that does write the axis, every
+	// positive value is checked, raise and lowering alike (ErrDiskCapBelowUsage says why a
+	// raise is not automatically safe).
+	//
+	// PLACED BEFORE THE ADMISSION GATE for the same reason as the `0 → N` refusal above:
+	// this request is invalid no matter how much room the node has, and gating first would
+	// let a full node answer 507 — telling the caller to wait for capacity that would never
+	// make it legal.
+	//
+	// THE USAGE READ IS SOUND HERE PRECISELY BECAUSE OF THE `paused` GATE ABOVE. Caps are
+	// editable only from `paused`, so the container is stopped, the overlay is unmounted,
+	// and nothing can grow the upper between this read and the placement that applies the
+	// cap — §5.E's fs service needs a live guest, and a volume import writes to a volume,
+	// not to this unit. So unlike the volume side, this number cannot go stale under a
+	// concurrent writer. (The materialization side re-checks anyway, because §3.4.5
+	// requires it against changes that do not come through a write point at all.)
+	if b.DiskByte != nil && newLimits.DiskByte > 0 {
+		if m.deps.Rootfs == nil {
+			return false, fmt.Errorf("rebind: no rootfs provider registered")
+		}
+		used, _, err := m.deps.Rootfs.Usage(ctx, string(rec.Overlay))
+		if err != nil {
+			// FAIL CLOSED. Usage IS the decision here (unlike an inspect-shaped read, which
+			// may degrade): admitting a cap without knowing usage risks the irreversible
+			// wedge above, and that state has no exit through the API at all. The provider
+			// already retries the transient wholesale-read failure, so this is a real
+			// "cannot tell", not churn.
+			return false, fmt.Errorf("rebind: cannot read current Overlay usage of %s, refusing to set a %d-byte disk cap blind (a cap at or below usage wedges the storage unit irreversibly and leaves the sandbox unresumable, §3.4/§5.B): %w", id, newLimits.DiskByte, err)
+		}
+		if newLimits.DiskByte <= used {
+			return false, fmt.Errorf("rebind: %w: requested %d, current usage %d — a cap at or below usage wedges the Overlay storage unit irreversibly (afterwards even truncate-to-zero and the quota write itself return ENOSPC, so the cap can be neither raised nor removed, and every future placement fails, so the sandbox could never resume), and `cap == usage` means FULL rather than exactly enough. Choose a disk_byte strictly greater than %d, or 0 to drop the cap (§3.4 / §5.B)",
+				ErrDiskCapBelowUsage, newLimits.DiskByte, used, used)
+		}
+	}
 	raisesMemory := newLimits.MemoryByte > rec.Limits.MemoryByte
 	// Any raise on a metered axis is a new promise → re-gate. Excludes this
 	// sandbox's own committed caps, exactly as resume does, so it is measured

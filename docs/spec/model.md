@@ -204,9 +204,13 @@ resume 在准入处被**拒绝**(400,与"节点已满"507 是两件事),而**不
 > **连撤帽/抬帽本身也返 `ENOSPC`**,唯一出路是删 guest 的字节(实测明细、边界情形 `limit == 用量`
 > 与三条派生约束见 [`deep-dives/volume.md`](./deep-dives/volume.md) D7.3,本处不复制)。
 > 故引擎**不得接受这样的降帽**,判据是严格不等式;它也是上面"边界须被显式声明"的
-> 反面——一次被静默接受的缩帽对运行中的工作负载什么都没声明。**沙箱 disk 一侧的写点尚未收口**,
-> 状态、代码边界与所需的 §5.B seam 加法登记在 [`open-decisions.md`](./open-decisions.md) 实现缺口表的
-> "沙箱 disk 帽降到当前用量以下没有写点"一条。
+> 反面——一次被静默接受的缩帽对运行中的工作负载什么都没声明。**两侧各有写点**:卷侧在
+> `PATCH /v1/volumes/{id}`,沙箱 disk 侧在 `PATCH /v1/sandboxes/{id}`(400)。沙箱侧靠 §5.B 的
+> 沙箱级用量查询 seam 判定(为何"无帽字节"那一项答不了这个问题见 §3.4.2 的两项互斥)。
+> **沙箱侧的后果比卷侧更重**:帽在**每次** placement 被重放,故卡死的单元连 resume 都过不去——与下面
+> `0 → N` 那条被拒的写同一个后果。三条只在沙箱侧成立的实测(含 `limit == 用量` 同样卡死、以及它对
+> `Mount` 的"新 workdir"步骤施加的一条约束)见
+> [`deep-dives/rootfs-overlay.md`](./deep-dives/rootfs-overlay.md) D6.6。
 
 > **沙箱 disk 轴上,`0 → N`(从无帽变有帽)是一次被拒绝的写(400),不是一次抬帽。** 判据是"这次写
 > 承诺的东西,物化层兑现得了吗":per-sandbox 容量帽物化成一个带配额的存储单元,而**该单元只在 create
@@ -474,8 +478,7 @@ resume 而非 auto-pause 的静止(健康态分类与判据见 §4.3)。
 变更本身就是那个 epoch 信号**——拿着旧 IP/旧 placement 句柄去说话即判定陈旧,重新解析当前 placement
 再连(§3.3"身份不编码 placement")。不新增独立计数字段,placement 的每次重绑天然携带"这是新实例"的语义。
 
-**TTL / 驱逐**:每个沙箱带生命周期状态(§4.1 的 `creating`/`running`/`paused`/`destroyed`)
-与 TTL;reaper 按 TTL 推进 `running`→(auto-pause)→`paused`→(evict)→`destroyed`。**TTL 是 per-sandbox
+**TTL / 驱逐**:reaper 按 TTL 推进 §4.1 那两条"释放"方向的自动转换。**TTL 是 per-sandbox
 Binding**(§3.4):两个阈值——`idle_timeout`(`running` idle 超它 →
 auto-pause)与 `retention`(`paused` 超它 → evict)——是沙箱控制面记录的字段,create 时可给、缺省落引擎级
 默认(§1.1 单二进制配置),故记录里始终是 reaper 直接可读的具体时长。**取 0 = 该阈值不设期限**
@@ -582,9 +585,9 @@ placement 派生自 store 权威态、可弃,故枚举本机 placement 资源,�
 句柄,按严格反向依赖序拆干净;**启动对账没有进程内句柄**、只有一张本地表,故对孤儿 mount 走力拆
 (不阻塞在忙 mount 上),且**upper 分毫不动**(§4.4-A 持久态不碰)。两条路径次序刻意不同——活路径求
 干净、启动对账求"一次扫描拆净"。**精确的反向依赖序归 §5.A**(它持有 placement-local 资源,也就持有它们
-的建立序):`runsc kill/delete → cgroup 叶子 → veth → netns`,每步幂等、best-effort,故一次半建的
-placement 也能拆净;**overlay 的 umount 不在这条链上**,它归 mediator 一侧(§4.4-A 持久态不碰)。
-reaper-health D4 只被引用来说**触发时机与锁协调**(周期对账何时跑、`TryLock` 怎么跳过持锁沙箱),不含次序。
+的建立序),本节不复制那张次序;模型层只要两条性质:每步幂等、best-effort,故一次半建的 placement
+也能拆净;**overlay 的 umount 不在那条链上**,它归 mediator 一侧(§4.4-A 持久态不碰)。上面引
+reaper-health D4 只为**触发时机与锁协调**(周期对账何时跑、`TryLock` 怎么跳过持锁沙箱),次序不在那里。
 
 **A 崩溃变体的另一半 —— 对存活的 `running` placement 重新接管句柄,不是回收。** 崩溃后缺的不只是孤儿:
 orchestrator 的进程内 placement 句柄(端点、provider 私有 handle)随进程蒸发,而底层隔离单元还活着。**若只

@@ -951,6 +951,142 @@ func TestUpdateBindingRewritesTheBinding(t *testing.T) {
 		})
 	})
 
+	// §3.4 — an `N → M` disk edit must leave the cap STRICTLY above the Overlay unit's
+	// current usage. The substrate accepts a below-usage cap with ZERO validation and is
+	// then wedged permanently (creating a file, `mkdir`, truncate-to-zero and the quota
+	// write ITSELF all return ENOSPC), and on the SANDBOX side that is worse than on a
+	// volume: §5.B re-applies the record's cap at every placement, so the sandbox also
+	// becomes permanently unresumable. See ErrDiskCapBelowUsage.
+	t.Run("disk N → M below current usage is refused", func(t *testing.T) {
+		const cap0 = 64 << 20
+		// newCapped builds a paused, disk-capped sandbox whose unit reports `used` bytes.
+		newCapped := func(t *testing.T, used int64) (*Mediator, *store.Memory, *fakeRootfs, model.SandboxID) {
+			t.Helper()
+			rp, rt := &fakeRootfs{}, &fakeRuntime{}
+			m, st := newLimitsMediator(t, rp, rt, NodeCapacity{})
+			sid, err := m.Create(ctx, CreateSpec{Template: "bare", Limits: model.Limits{DiskByte: cap0}})
+			if err != nil {
+				t.Fatalf("create: %v", err)
+			}
+			if err := m.Pause(ctx, sid); err != nil {
+				t.Fatalf("pause: %v", err)
+			}
+			rp.mu.Lock()
+			rp.overlayUsed, rp.overlayLimit = used, cap0
+			rp.mu.Unlock()
+			return m, st, rp, sid
+		}
+
+		// The boundary is what the strict inequality is FOR: `cap == usage` is a wedged
+		// state too (measured — setting limit exactly equal to `referenced` is accepted, and
+		// re-applying or raising it then returns ENOSPC), so it means FULL rather than
+		// "exactly enough" and must be refused alongside anything below it.
+		for _, tc := range []struct {
+			name string
+			used int64
+			cap  int64
+			want error
+		}{
+			{"below usage", 32 << 20, 16 << 20, ErrDiskCapBelowUsage},
+			{"EQUAL to usage means FULL, not exactly enough", 32 << 20, 32 << 20, ErrDiskCapBelowUsage},
+			{"one byte above usage is legal", 32 << 20, (32 << 20) + 1, nil},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				m, st, _, sid := newCapped(t, tc.used)
+				before, _ := st.GetSandbox(ctx, sid)
+				err := patchBinding(m, ctx, sid, store.Binding{DiskByte: &tc.cap})
+				if !errors.Is(err, tc.want) {
+					t.Fatalf("PATCH disk %d → %d with usage %d = %v; want %v", cap0, tc.cap, tc.used, err, tc.want)
+				}
+				after, _ := st.GetSandbox(ctx, sid)
+				if tc.want == nil {
+					if after.Limits.DiskByte != tc.cap {
+						t.Fatalf("disk = %d; want %d (a cap strictly above usage is an ordinary edit)", after.Limits.DiskByte, tc.cap)
+					}
+					return
+				}
+				// A refusal must change NOTHING — that is the reason it lives at the write
+				// point rather than at the placement that would wedge the unit.
+				if after.Limits != before.Limits {
+					t.Fatalf("refused PATCH changed the limits: %+v → %+v", before.Limits, after.Limits)
+				}
+				if err := m.Resume(ctx, sid); err != nil {
+					t.Fatalf("resume after the refused PATCH = %v; want success — the refusal exists precisely to keep the sandbox resumable", err)
+				}
+			})
+		}
+
+		// A RAISE is checked too, and this is not redundant: if the unit's quota row was
+		// lost to an external change (the case §5.B's per-placement re-application exists
+		// for) the guest can grow past the recorded cap, and then even a cap ABOVE the
+		// recorded one can be at or below what the unit holds.
+		t.Run("a RAISE that still lands under usage is refused", func(t *testing.T) {
+			m, _, _, sid := newCapped(t, 128<<20) // usage past the recorded 64 MiB cap
+			raise := int64(96 << 20)              // above the record, still under usage
+			if err := patchBinding(m, ctx, sid, store.Binding{DiskByte: &raise}); !errors.Is(err, ErrDiskCapBelowUsage) {
+				t.Fatalf("PATCH disk raise to %d with usage 128 MiB = %v; want ErrDiskCapBelowUsage (a raise is not automatically safe)", raise, err)
+			}
+		})
+
+		// Dropping the cap only WIDENS what the unit may hold, so it is always safe and
+		// must not even consult usage — a `N → 0` on a unit whose row is unreadable has to
+		// keep working.
+		t.Run("N → 0 is admitted without reading usage", func(t *testing.T) {
+			m, st, rp, sid := newCapped(t, 128<<20)
+			rp.mu.Lock()
+			rp.usageErr = fmt.Errorf("injected unreadable quota row")
+			rp.mu.Unlock()
+			zero := int64(0)
+			if err := patchBinding(m, ctx, sid, store.Binding{DiskByte: &zero}); err != nil {
+				t.Fatalf("PATCH disk N → 0 = %v; want it ADMITTED without a usage read (clearing a cap cannot wedge anything)", err)
+			}
+			if rec, _ := st.GetSandbox(ctx, sid); rec.Limits.DiskByte != 0 {
+				t.Fatalf("disk = %d; want 0", rec.Limits.DiskByte)
+			}
+			for _, c := range rp.Calls() {
+				if strings.HasPrefix(c, "Usage:") {
+					t.Fatalf("N → 0 consulted the provider (%q); dropping a cap needs no usage number", c)
+				}
+			}
+		})
+
+		// FAIL CLOSED: usage IS the decision here, and admitting a cap without knowing
+		// usage risks a state with no exit through the API at all. The provider already
+		// retries the transient wholesale-read failure, so a failure that reaches here is a
+		// real "cannot tell".
+		t.Run("an unreadable usage refuses the PATCH and writes nothing", func(t *testing.T) {
+			m, st, rp, sid := newCapped(t, 0)
+			rp.mu.Lock()
+			rp.usageErr = fmt.Errorf("injected unreadable quota row")
+			rp.mu.Unlock()
+			before, _ := st.GetSandbox(ctx, sid)
+			want := int64(32 << 20)
+			err := patchBinding(m, ctx, sid, store.Binding{DiskByte: &want})
+			if err == nil {
+				t.Fatal("PATCH with an unreadable usage was ADMITTED; §3.4 requires failing closed — a blind cap can wedge the unit irreversibly")
+			}
+			if after, _ := st.GetSandbox(ctx, sid); after.Limits != before.Limits {
+				t.Fatalf("fail-closed PATCH still wrote: %+v → %+v", before.Limits, after.Limits)
+			}
+		})
+
+		// The check is GATED ON THE AXIS BEING WRITTEN. A PATCH that touches only TTLs must
+		// not pay a backend round trip — and must not be refused because of a divergence it
+		// does not touch. Driven with a usage that WOULD refuse a disk write.
+		t.Run("a PATCH that does not write disk never consults usage", func(t *testing.T) {
+			m, _, rp, sid := newCapped(t, 128<<20) // usage past the cap: a disk write would refuse
+			idle := 30 * time.Minute
+			if err := patchBinding(m, ctx, sid, store.Binding{IdleTimeout: &idle}); err != nil {
+				t.Fatalf("TTL-only PATCH = %v; want it ADMITTED — it writes no cap, so the disk criterion has nothing to say", err)
+			}
+			for _, c := range rp.Calls() {
+				if strings.HasPrefix(c, "Usage:") {
+					t.Fatalf("a TTL-only PATCH consulted the provider (%q); an unrelated PATCH must not be exposed to a quota-row read failure", c)
+				}
+			}
+		})
+	})
+
 	// A raise is a new promise, so it must clear admission (§3.4). The gate sums
 	// from the store including paused records, so Σ changes at THIS commit — not at
 	// the eventual resume.

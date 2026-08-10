@@ -14,6 +14,7 @@ import (
 	"engine/internal/lifecycle"
 	"engine/internal/model"
 	"engine/internal/network"
+	"engine/internal/rootfs"
 	"engine/internal/store"
 	"engine/internal/transport"
 )
@@ -322,6 +323,26 @@ func TestAdmissionVerdictsMapToDistinctStatuses(t *testing.T) {
 	t.Run("an unmaterializable 0→N disk cap → 400", func(t *testing.T) {
 		if got := statusCodeFor(lifecycle.ErrUncappedDiskNotCappable); got != http.StatusBadRequest {
 			t.Fatalf("ErrUncappedDiskNotCappable → %d; want 400 — the request is well-formed but the promise cannot be materialized (§3.4). NOT 507 (nothing is full) and NOT 409 (no retry or state change makes it legal; the remedy is a new sandbox)", got)
+		}
+	})
+
+	// The fourth verdict on this axis, and its SPLIT is the property under test. A disk
+	// cap at or below the Overlay unit's usage wedges the storage unit irreversibly
+	// (§3.4 / rootfs.ErrCapBelowUsage), and the engine refuses it in TWO places that must
+	// not answer the same code: the write point CARRIES `disk_byte` (400 — fix the value
+	// you sent), while resume/adopt do NOT (409 — the remedy is state elsewhere). This is
+	// the same asymmetry the via[] pair above rests on, and asserting both together is
+	// what keeps a later refactor from funnelling them into one arm.
+	t.Run("a disk cap below usage → 400 at the write point, 409 at placement", func(t *testing.T) {
+		if got := statusCodeFor(lifecycle.ErrDiskCapBelowUsage); got != http.StatusBadRequest {
+			t.Fatalf("ErrDiskCapBelowUsage → %d; want 400 — the request is well-formed but cannot be honored (§3.4 strict inequality). NOT 507 (nothing is full) and NOT 409 (no retry makes it legal; the caller must pick a larger size, or 0)", got)
+		}
+		wrapped := fmt.Errorf("lifecycle: resume: open overlay: %w", rootfs.ErrCapBelowUsage)
+		if got := statusCodeFor(wrapped); got != http.StatusConflict {
+			t.Fatalf("rootfs.ErrCapBelowUsage → %d; want 409 — the stored cap and the unit's current usage conflict, and the remedy (PATCH disk_byte above usage, or to 0, then resume) changes state elsewhere. NOT 500: nothing failed, and §5.B refused rather than wedging the unit. NOT 400: resume carries no cap to fix", got)
+		}
+		if statusCodeFor(lifecycle.ErrDiskCapBelowUsage) == statusCodeFor(wrapped) {
+			t.Fatal("the write-point and placement-side refusals map to the SAME status — they must not: one names a field the caller sent, the other does not")
 		}
 	})
 

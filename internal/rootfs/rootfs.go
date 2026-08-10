@@ -12,7 +12,35 @@
 // content-addressed diff layers are a later evolution behind the same seam.
 package rootfs
 
-import "context"
+import (
+	"context"
+	"errors"
+)
+
+// ErrCapBelowUsage is the §5.B placement-side refusal of a capacity cap that is not
+// STRICTLY above the storage unit's current usage (§3.4 / rootfs-overlay D6.6).
+//
+// It is a REFUSED PLACEMENT rather than a wedged unit, and that is the whole point.
+// Measured on this substrate: the cap is accepted with ZERO validation, and afterwards
+// creating a file, `mkdir`, and even truncating an existing file to zero all return
+// ENOSPC — while the quota write ITSELF returns ENOSPC, so the cap can then neither be
+// raised nor removed. On a §5.B unit that is worse than on a volume: applyCap re-applies
+// the record's cap at EVERY placement, and re-applying it to a wedged unit fails the same
+// way, so the sandbox is permanently unresumable. `Mount`'s own fresh-workdir step
+// (rm -rf work; mkdir work) fails with ENOSPC too, so even skipping the quota write would
+// not get the sandbox back.
+//
+// So the two directions are not symmetric: refusing leaves a `paused` sandbox whose exits
+// are ordinary API calls (PATCH the cap above usage, or to 0, and the next placement
+// applies it; or Promote and recreate), while imposing leaves a unit no API call can ever
+// unstick. `cap == usage` is included because it is ALSO a wedged state, measured: setting
+// limit exactly equal to `referenced` is accepted and stored, but re-applying it and
+// raising it both then return ENOSPC.
+//
+// It does NOT fire for a sandbox that filled its own cap the ordinary §3.4 way: squota
+// stops the guest with ENOSPC while usage is still strictly BELOW the limit (measured
+// 32 KiB of headroom), so re-applying that cap succeeds and this predicate never trips.
+var ErrCapBelowUsage = errors.New("rootfs: capacity cap must be strictly greater than the storage unit's current usage")
 
 // CapUnchanged is the OpenOverlay capByte sentinel for "rebuild the handle, do
 // not touch the quota" (see OpenOverlay). Negative, so it can never collide with
@@ -206,6 +234,41 @@ type Provider interface {
 	// Promotes against capacity that was never going to be consumed. The two calls
 	// share one set so they cannot drift.
 	PromoteCostBytes(ctx context.Context, o *Overlay, excludedMounts []string) (int64, error)
+
+	// Usage reports the backend's OWN statement of ONE Overlay unit's usage and the
+	// cap currently on its storage — the §5.B twin of volume.Backend.Usage.
+	//
+	// It is not a convenience: the §6.1 PATCH write point forces it (§3.4). A cap edit
+	// must refuse "lower the cap below current usage", the criterion is a STRICT
+	// inequality (see ErrCapBelowUsage), and the mediator cannot evaluate that without
+	// the per-sandbox number. UncappedBytes cannot answer it — a CAPPED unit contributes
+	// ZERO there BY CONTRACT (the two §3.4 terms are disjoint), which is exactly the
+	// unit a cap edit is about.
+	//
+	// BY ID, NOT BY *Overlay HANDLE, and the difference is behavioral rather than
+	// stylistic: a handle is only obtainable through OpenOverlay, which WRITES the quota.
+	// Running a placement-shaped call to read one number would re-apply a cap as a side
+	// effect of a query. Every host path stays inside (§3.1.1) — the unit is derivable
+	// from the ID.
+	//
+	// THE limit RESULT IS DIAGNOSTIC ONLY — NEVER USE IT TO VALIDATE, for the same reason
+	// as on the §5.C side: the local substrate maps "no cap" and 0 onto each other in BOTH
+	// directions, so "never capped" and "deliberately uncapped" read back byte-for-byte
+	// identical (volume.md D7.3). THE SANDBOX RECORD IS ALWAYS THE AUTHORITY (§3.4).
+	//
+	// AN UNREADABLE QUOTA ROW IS AN ERROR, NEVER A ZERO-CAP ANSWER. Synthesizing
+	// "(measured walk, 0, nil)" from a failed read is wrong in both halves and dangerous
+	// in one: a walk counts file data only while the row ALSO counts metadata extents
+	// (16 KiB on an EMPTY unit, measured), so the synthesized `used` comes back UNDER the
+	// substrate's own number — and the strict inequality would then admit a cap the
+	// substrate wedges the unit on. Callers handle the error: the write point FAILS
+	// CLOSED, and inspect-shaped readers degrade their answer.
+	//
+	// Same shape as the rest of this seam (§4: mediator asks, provider answers): the
+	// provider measures only its OWN storage and never reads the store. It reports what
+	// the BACKEND says, never what a guest says (see UncappedBytes for why guest-side
+	// numbers are unusable).
+	Usage(ctx context.Context, overlayID string) (used, limit int64, err error)
 
 	// UncappedBytes reports the total bytes this provider currently holds in its
 	// storage THAT NO DECLARED CAPACITY CAP COVERS — the second term of the §3.4

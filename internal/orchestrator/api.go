@@ -19,6 +19,7 @@ import (
 
 	"engine/internal/lifecycle"
 	"engine/internal/model"
+	"engine/internal/rootfs"
 	"engine/internal/store"
 	"engine/internal/transport/gen/engine/transport/v1/transportv1connect"
 )
@@ -948,6 +949,24 @@ func statusCodeFor(err error) int {
 		// cannot be honored as asked), NOT 507 (nothing is full) and NOT 409 (no
 		// retry or state change makes it legal — the remedy is a new sandbox).
 		return http.StatusBadRequest
+	case errors.Is(err, lifecycle.ErrDiskCapBelowUsage):
+		// §3.4 `N → M` on the disk axis, where M ≤ current Overlay usage. 400 for the same
+		// reasons as the volume twin (ErrVolumeCapBelowUsage): the request is well-formed
+		// but cannot be honored, nothing is full (so not 507), and no retry or state change
+		// makes it legal — the caller must pick a larger size, or 0. Checked BEFORE
+		// ErrInsufficientCapacity so a full node cannot turn this into a 507 that tells the
+		// caller to wait for capacity that would not help.
+		return http.StatusBadRequest
+	case errors.Is(err, rootfs.ErrCapBelowUsage):
+		// §3.4.5's PLACEMENT-side twin of the refusal above: a stored cap that is no longer
+		// strictly above the unit's usage, refused when it would be re-materialized rather
+		// than wedging the unit. 409, NOT 400, and the split is the same one §6.1 already
+		// makes for the second-hop uid: resume/adopt do not CARRY a cap, so a 400 would send
+		// the caller to fix something this request did not send. The remedy is state
+		// elsewhere — PATCH disk_byte strictly above usage (or to 0), then resume. Create
+		// reaches the same substrate condition while carrying `disk_byte`, and the mediator
+		// translates it there to the 400 sentinel above.
+		return http.StatusConflict
 	case errors.Is(err, lifecycle.ErrInsufficientCapacity):
 		// §3.4 admission refusal: nothing is wrong with the request or the sandbox —
 		// the NODE cannot honor another promise. 507 Insufficient Storage says

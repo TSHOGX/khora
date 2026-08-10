@@ -73,6 +73,22 @@ func (p *HostOverlayFS) unitPath(id string) string { return filepath.Join(p.Stat
 // downgrade to "run uncapped": ignoring it would leave every §2.3 blast-radius
 // assertion believing in a cap that does not exist. capByte 0 removes any
 // lingering cap, keeping the record the single authority.
+// THE STRICT-INEQUALITY GUARD BELOW IS THE MATERIALIZATION-SIDE HALF of the criterion
+// the §6.1 write point applies (lifecycle.ErrDiskCapBelowUsage). §3.4.5 requires it in
+// both places and says why: a Binding is durable while the facts its criterion reads are
+// NOT — this one reads the storage unit's CURRENT usage — so "commit → the environment
+// changes → re-materialize" is a legal path around a refusal with no write in between,
+// and it is insensitive to every assertion made about the write point. Concretely: a
+// quota row lost to an external change (the case OpenOverlay's cap re-application exists
+// for) lets the guest grow past the recorded cap, and the next placement would then write
+// that cap UNDER the unit's usage.
+//
+// §5.B ALSO CANNOT TAKE §5.C's ANSWER HERE. RepairVolumeCaps skips such a volume and
+// leaves it uncapped, which is safe there because the §3.4 second term then measures its
+// bytes. A placement has no such option: "帽兑现不了就拒绝这次 placement,绝不静默降级成
+// 不设帽跑" is §5.B's rule, because running uncapped makes every §2.3 assertion believe in
+// a cap that is not there. So this side REFUSES instead of skipping — and refusing is the
+// reversible direction (see ErrCapBelowUsage).
 func (p *HostOverlayFS) applyCap(ctx context.Context, id string, capByte int64) error {
 	if capByte == CapUnchanged {
 		return nil // handle-only rebuild: touch no quota (see OpenOverlay)
@@ -81,6 +97,11 @@ func (p *HostOverlayFS) applyCap(ctx context.Context, id string, capByte int64) 
 	if capByte <= 0 {
 		// Uncapped by intent. If the unit is a subvolume (a cap was set before and
 		// has since been cleared) drop the limit, so the record stays authoritative.
+		//
+		// No usage guard on this arm: clearing a limit can only WIDEN what the unit may
+		// hold, so it cannot wedge anything. (On an ALREADY-wedged unit the clear itself
+		// returns ENOSPC — measured — but that wedge predates this call and the error is
+		// reported rather than hidden.)
 		if p.Btrfs.IsSubvolume(ctx, unit) {
 			if err := p.Btrfs.SetQuotaLimit(ctx, unit, 0); err != nil {
 				return fmt.Errorf("rootfs: clear capacity cap on %s: %w", id, err)
@@ -91,10 +112,65 @@ func (p *HostOverlayFS) applyCap(ctx context.Context, id string, capByte int64) 
 	if !p.Btrfs.IsSubvolume(ctx, unit) {
 		return fmt.Errorf("rootfs: overlay %s storage unit %s is not a btrfs subvolume — refusing to run with an unenforceable %d-byte cap (§3.4)", id, unit, capByte)
 	}
+	// FAIL CLOSED on an unreadable row. Writing the cap blind is the IRREVERSIBLE
+	// direction, and a refused placement leaves the sandbox `paused` and retryable — so
+	// the asymmetry decides it, not a preference. The cost is bounded because the
+	// wholesale-failure mode this read has under concurrent churn is TRANSIENT and
+	// btrfs.Client.Usage retries it (measured there: 8/300 first-attempt failures → 0/300
+	// after retry). Note the failure never prints our own row, so there is no
+	// parse-around: the read either answers or it does not.
+	used, _, err := p.Btrfs.Usage(ctx, unit)
+	if err != nil {
+		return fmt.Errorf("rootfs: cannot read current usage of overlay %s, refusing to apply a %d-byte cap blind (a cap at or below usage wedges the unit irreversibly, §5.B): %w", id, capByte, err)
+	}
+	if capByte <= used {
+		return fmt.Errorf("rootfs: %w: overlay %s holds %d byte(s) and the record's cap is %d — applying it would wedge the storage unit permanently (afterwards even truncate-to-zero and the quota write itself return ENOSPC, so the cap could be neither raised nor removed, and every future placement would fail). The sandbox stays recoverable: PATCH disk_byte strictly above %d (or to 0) and the next resume applies it, or Promote it and create a fresh sandbox",
+			ErrCapBelowUsage, id, used, capByte, used)
+	}
 	if err := p.Btrfs.SetQuotaLimit(ctx, unit, capByte); err != nil {
 		return fmt.Errorf("rootfs: apply capacity cap on %s: %w", id, err)
 	}
 	return nil
+}
+
+// Usage reports one Overlay unit's usage and the cap on its storage. See the seam doc on
+// rootfs.Provider for the contract; this is how the local btrfs adapter honors it:
+//
+//	unit IS a subvolume     → the qgroup row (referenced, max_referenced); an unreadable
+//	                          row is an ERROR, never a synthesized zero-cap answer
+//	unit is a plain dir     → allocated blocks of upper + work, limit 0 (a plain
+//	                          directory has no row to read, and "no cap" is the TRUTH
+//	                          there rather than a guess)
+//
+// The plain-directory arm enumerates `upper` and `work` BY NAME rather than walking the
+// unit, for the same reason UncappedBytes does: `merged` lives inside the unit and for a
+// running sandbox it is the live overlayfs mount exposing lower ∪ upper, so walking the
+// unit would count the whole Template stack as this sandbox's usage. Enumerate-what-you-
+// mean is correct by construction.
+//
+// The subvolume arm needs no such care — `merged` is a mount point, so the extents visible
+// through it belong to the layer dirs, not to this unit's qgroup.
+func (p *HostOverlayFS) Usage(ctx context.Context, overlayID string) (int64, int64, error) {
+	if err := validateSeg("overlayID", overlayID); err != nil {
+		return 0, 0, err
+	}
+	unit := p.unitPath(overlayID)
+	if p.Btrfs.IsSubvolume(ctx, unit) {
+		used, limit, err := p.Btrfs.Usage(ctx, unit)
+		if err != nil {
+			return 0, 0, fmt.Errorf("rootfs: read the quota row of overlay %s: %w", overlayID, err)
+		}
+		return used, limit, nil
+	}
+	var used int64
+	for _, sub := range []string{p.upperPath(overlayID), p.workPath(overlayID)} {
+		n, err := blockBytes(sub)
+		if err != nil {
+			return 0, 0, fmt.Errorf("rootfs: measure usage of overlay %s: %w", overlayID, err)
+		}
+		used += n
+	}
+	return used, 0, nil
 }
 
 // NewHostOverlayFS constructs the provider, ensuring StateDir + LayersDir exist.
@@ -223,14 +299,30 @@ func (p *HostOverlayFS) Mount(_ context.Context, o *Overlay) (*Merged, error) {
 		return nil, fmt.Errorf("rootfs: mount overlay %s: empty lower stack", id)
 	}
 
-	// fresh workdir each mount.
-	if err := os.RemoveAll(work); err != nil {
-		return nil, fmt.Errorf("rootfs: clear stale work: %w", err)
-	}
+	// A fresh workdir each mount means EMPTIED, not RECREATED, and the difference is
+	// load-bearing on a full unit rather than stylistic.
+	//
+	// `RemoveAll(work)` + `MkdirAll(work)` cannot resume a sandbox that filled its own
+	// capacity cap: `mkdir` needs to allocate a metadata extent, and a full unit has only
+	// tens of KiB of headroom (measured: a 16 MiB cap fills to 16728064 B, leaving 49152 B,
+	// and the mkdir returns ENOSPC). Removing the directory frees nothing, because it was
+	// already empty — so the sequence spends headroom it does not have to reach a state it
+	// was already in. That made a sandbox which merely hit the ordinary §3.4 ENOSPC
+	// PERMANENTLY UNRESUMABLE, breaking §4.2's promise that pause is a REVERSIBLE gate (the
+	// same promise §3.4.4 pays a whole budget to keep). Emptying the CONTENTS keeps the
+	// directory's existing inode, and the kernel then creates `work/work` itself — measured
+	// to mount cleanly on a unit with that same 49 KiB of headroom.
+	//
+	// The overlayfs requirement is that workdir be EMPTY (the kernel rejects or corrupts a
+	// reused one, rootfs-overlay D5); it is not that the directory be a new inode. Emptying
+	// satisfies it exactly.
 	for _, d := range []string{upper, work, merged} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			return nil, fmt.Errorf("rootfs: mkdir %s: %w", d, err)
 		}
+	}
+	if err := emptyDir(work); err != nil {
+		return nil, fmt.Errorf("rootfs: clear stale work: %w", err)
 	}
 
 	opts := fmt.Sprintf("lowerdir=%s,upperdir=%s,workdir=%s", strings.Join(lowerDirs, ":"), upper, work)
@@ -611,6 +703,27 @@ func (p *HostOverlayFS) SweepOrphanLayers(_ context.Context, live, building []st
 		reclaimed++
 	}
 	return reclaimed, nil
+}
+
+// emptyDir removes everything INSIDE dir, keeping dir itself. See Mount for why the
+// distinction matters: on a unit at its capacity cap, recreating the directory needs a
+// metadata extent the quota has no room for, while emptying it needs none. An absent dir is
+// not an error — the caller has just ensured it exists, and "nothing inside" is the
+// requested state either way.
+func emptyDir(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	for _, e := range entries {
+		if err := os.RemoveAll(filepath.Join(dir, e.Name())); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // isMountpoint reports whether path is a mount point by comparing its device

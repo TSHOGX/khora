@@ -229,13 +229,44 @@ func (c Client) SetQuotaLimit(ctx context.Context, path string, limitByte int64)
 // source for capacity — §5.B requires capacity accounting to come from the
 // backend's own statement, never from guest-side numbers (see
 // rootfs.Provider.UncappedBytes for why those are unusable).
+// usageReadAttempts bounds the retry below. Three, because three is what the
+// measurement needed and no more (see Usage).
+const usageReadAttempts = 3
+
 func (c Client) Usage(ctx context.Context, path string) (used, limit int64, err error) {
 	// -f filters to just this path's qgroup; --raw for exact bytes; --sync so the
 	// numbers reflect writes that have not yet been committed by a background
 	// transaction (without it a just-written file can read as 0).
-	out, err := c.run(ctx, "qgroup", "show", "-re", "--raw", "--sync", "-f", path)
-	if err != nil {
-		return 0, 0, fmt.Errorf("btrfs: qgroup show %s: %w", path, err)
+	//
+	// RETRIED, AND THE RETRY IS LOAD-BEARING RATHER THAN DEFENSIVE. `-f` filters AFTER
+	// enumerating every row on the filesystem, so a subvolume deleted concurrently
+	// ANYWHERE on that fs fails this read WHOLESALE — the error even names a row that is
+	// not ours. Measured under three-way churn: 10/300 reads failed, and on failure our
+	// own row was printed 0/10 times, so there is nothing to parse around; the read
+	// either answers or it does not. The engine's own destroy path generates exactly that
+	// churn and the substrate's cleaner is asynchronous, so no caller can serialize
+	// against it.
+	//
+	// The failure is TRANSIENT, which is what makes a retry the right shape rather than a
+	// papering-over: under the same churn, three attempts turned 8 first-attempt failures
+	// into 0 final failures (300 reads). That matters beyond tidiness — the callers that
+	// must FAIL CLOSED on an unreadable row (the §6.1 cap write points, and §5.B's
+	// materialization guard, which sits on the create/resume hot path) pay for this read's
+	// reliability directly in refused requests and refused placements.
+	//
+	// The error contract is UNCHANGED: an error still means "unreadable, draw no
+	// conclusion" — it is simply much rarer. Nothing here retries a SEMANTIC failure
+	// (quotas disabled, no such row): those come back from the parse below, not from a
+	// non-zero exit.
+	var out []byte
+	for attempt := 1; ; attempt++ {
+		out, err = c.run(ctx, "qgroup", "show", "-re", "--raw", "--sync", "-f", path)
+		if err == nil {
+			break
+		}
+		if attempt == usageReadAttempts || ctx.Err() != nil {
+			return 0, 0, fmt.Errorf("btrfs: qgroup show %s (%d attempts): %w", path, attempt, err)
+		}
 	}
 	for _, line := range strings.Split(string(out), "\n") {
 		f := strings.Fields(line)

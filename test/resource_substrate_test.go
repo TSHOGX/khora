@@ -13,6 +13,7 @@ package test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -25,6 +26,7 @@ import (
 	"engine/internal/lifecycle"
 	"engine/internal/model"
 	"engine/internal/orchestrator"
+	"engine/internal/store"
 	"engine/internal/transport"
 	"engine/test/harness"
 )
@@ -164,6 +166,57 @@ func main() {
 }
 `
 
+// boundedFillSrc writes EXACTLY the requested number of MiB and reports what landed,
+// then reads the first bytes back. It is diskFillSrc's counterpart: that probe writes
+// until it FAILS (the right shape for proving the cap binds), while a cap-EDIT test needs
+// a unit with usage strictly inside its cap, so the amount has to be an input.
+//
+// It also serves as the writability probe, because the bare rootfs ships no coreutils —
+// there is no `dd` to fill with and no `cat` to read back, only /bin/sh and its built-ins.
+//
+// Args: boundedfill <path> <MiB>
+const boundedFillSrc = `package main
+
+import ("fmt";"os";"strconv")
+
+func main() {
+	path := os.Args[1]
+	mib, err := strconv.Atoi(os.Args[2])
+	if err != nil {
+		fmt.Printf("ARG_ERR=%v\n", err)
+		os.Exit(1)
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		fmt.Printf("OPEN_ERR=%v\n", err)
+		os.Exit(1)
+	}
+	buf := make([]byte, 1024*1024)
+	for i := range buf { buf[i] = byte(i) }
+	var total int64
+	for n := 0; n < mib; n++ {
+		w, werr := f.Write(buf)
+		total += int64(w)
+		if werr != nil {
+			fmt.Printf("WRITE_ERR=%v WROTE=%d\n", werr, total)
+			f.Close()
+			os.Exit(1)
+		}
+	}
+	if err := f.Close(); err != nil {
+		fmt.Printf("CLOSE_ERR=%v\n", err)
+		os.Exit(1)
+	}
+	// Read back, so "the write succeeded" is not merely "the syscall returned".
+	got, rerr := os.ReadFile(path)
+	if rerr != nil {
+		fmt.Printf("READ_ERR=%v\n", rerr)
+		os.Exit(1)
+	}
+	fmt.Printf("WROTE=%d READBACK=%d\n", total, len(got))
+}
+`
+
 // hostLogBytes is the total size of the kernel/syslog files whose growth the
 // §2.3 bypass would show up in. See TestResourceRAMAxis: an unbounded OOM retry
 // storm writes kernel log at ~66 MB/s, and that path goes AROUND the disk capacity
@@ -278,10 +331,11 @@ func setupEngineOnBtrfs(t *testing.T, healthTimeout time.Duration) (*orchestrato
 		BaseDir:       base,
 		HealthTimeout: healthTimeout,
 		Probes: map[string]string{
-			"cpuburn":  cpuBurnSrc,
-			"diskfill": diskFillSrc,
-			"memhog":   memHogSrc,
-			"unlinker": unlinkSrc,
+			"cpuburn":     cpuBurnSrc,
+			"diskfill":    diskFillSrc,
+			"boundedfill": boundedFillSrc,
+			"memhog":      memHogSrc,
+			"unlinker":    unlinkSrc,
 		},
 	})
 	return eng, base
@@ -545,6 +599,275 @@ func TestResourceCapacityRefusedWhenUnenforceable(t *testing.T) {
 	if len(list) != 0 {
 		t.Fatalf("%d records left after a refused create; want 0", len(list))
 	}
+}
+
+// TestResourceDiskCapBelowUsageRefused: the §3.4 strict inequality on the SANDBOX disk
+// axis, end to end on real btrfs — the §5.B twin of the volume cap's write point.
+//
+// WHAT MAKES THIS WORTH A SUBSTRATE TEST rather than only the unit-level refusal: the harm
+// being prevented is a substrate state, and it is irreversible. Measured on this shape, a
+// cap at or below the unit's usage is accepted by btrfs with ZERO validation, and
+// afterwards creating a file, `mkdir`, and even truncating an existing file to zero all
+// return ENOSPC — while the quota write ITSELF returns ENOSPC, so the cap can then be
+// neither raised nor removed. On a sandbox that is worse than on a volume: §5.B re-applies
+// the record's cap at EVERY placement, so re-applying the wedged cap fails the same way
+// and the sandbox is permanently unresumable (`Mount`'s own fresh-workdir step fails with
+// ENOSPC too, so even skipping the quota write would not resume it).
+//
+// So the assertion is not just "the PATCH was refused" but "the refusal CHANGED NOTHING":
+// the sandbox resumes and the guest still writes. That is the property a 200 destroys, and
+// no unit test can observe it.
+func TestResourceDiskCapBelowUsageRefused(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root (btrfs ioctls + runsc + overlay mount)")
+	}
+	ctx := context.Background()
+	eng, base := setupEngineOnBtrfs(t, 60*time.Second)
+	m := eng.Mediator
+	bc := btrfs.Client{}
+
+	const diskCap = 64 << 20
+	sid, err := m.Create(ctx, lifecycle.CreateSpec{
+		Template: "bare",
+		Limits:   model.Limits{DiskByte: diskCap},
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	t.Cleanup(func() { _ = m.Destroy(ctx, sid) })
+
+	// Put real guest bytes in the upper, so "current usage" is a substrate fact rather than
+	// a fixture. BOUNDED at 16 MiB inside the 64 MiB cap, deliberately NOT filling it: this
+	// test is about the cap WRITE POINT, and a full unit would drag in the separate
+	// full-sandbox-resume property (which has its own test below). Keeping them apart is
+	// what lets each failure name one cause.
+	cl, err := m.Client(sid)
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	if out := guestRun(t, ctx, cl, "/usr/bin/boundedfill", "/root/blob", "16"); !strings.Contains(out, "WROTE=16777216") {
+		t.Fatalf("the bounded fill did not write 16 MiB: %q", out)
+	}
+
+	rec, err := eng.Store.GetSandbox(ctx, sid)
+	if err != nil {
+		t.Fatalf("GetSandbox: %v", err)
+	}
+	unit := filepath.Join(base, "state", "overlays", string(rec.Overlay))
+
+	// Caps are editable only from `paused` (§3.4), which is also what makes the usage
+	// number stable: the container is stopped and nothing can grow the upper between the
+	// write point's read and the placement that would apply the cap.
+	if err := m.Pause(ctx, sid); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+	used, limit, err := bc.Usage(ctx, unit)
+	if err != nil {
+		t.Fatalf("read the unit's quota row: %v", err)
+	}
+	if limit != diskCap {
+		t.Fatalf("quota limit = %d; want %d — the cap did not bind, so this test would not be measuring what it claims", limit, diskCap)
+	}
+	if used == 0 {
+		t.Fatal("the unit charges 0 bytes after a guest fill; the below-usage predicate would be vacuous")
+	}
+	if used >= limit {
+		t.Fatalf("used=%d limit=%d — the fill was supposed to stay INSIDE the cap so this test isolates the write point; a full unit belongs to TestResourceDiskCapFullSandboxStillResumes", used, limit)
+	}
+	t.Logf("unit holds %d byte(s) under a %d cap", used, limit)
+
+	// --- the gap this closes: a PATCH to a cap AT or BELOW usage ------------------------
+	// Both boundary values, because `cap == usage` is ALSO a wedged state (measured:
+	// setting the limit exactly equal to `referenced` is accepted, and re-applying or
+	// raising it then returns ENOSPC) — so it means FULL, not "exactly enough".
+	for _, want := range []int64{used / 2, used} {
+		err := patchDisk(t, m, sid, want)
+		if !errorsIsDiskCapBelowUsage(err) {
+			t.Fatalf("PATCH disk_byte → %d with usage %d = %v; want lifecycle.ErrDiskCapBelowUsage (§3.4 strict inequality — the substrate accepts such a cap and is then wedged irreversibly)", want, used, err)
+		}
+		t.Logf("✓ refused a below-usage cap (%d ≤ %d): %v", want, used, err)
+	}
+
+	// THE REFUSAL CHANGED NOTHING — asserted on the substrate, not just the record.
+	if u2, l2, err := bc.Usage(ctx, unit); err != nil || u2 != used || l2 != limit {
+		t.Fatalf("after the refused PATCHes the quota row moved: used %d→%d limit %d→%d (err %v); a refusal must not touch the substrate", used, u2, limit, l2, err)
+	}
+	if r2, _ := eng.Store.GetSandbox(ctx, sid); r2.Limits.DiskByte != diskCap {
+		t.Fatalf("recorded disk cap = %d; want %d unchanged", r2.Limits.DiskByte, diskCap)
+	}
+
+	// ...and the sandbox is STILL RESUMABLE and still writable. This is the harm a 200
+	// would have caused: the next placement would have wedged the unit and every
+	// placement after it would have failed.
+	if err := m.Resume(ctx, sid); err != nil {
+		t.Fatalf("resume after the refused PATCH = %v; want success — the refusal exists precisely to keep this working", err)
+	}
+	cl2, err := m.Client(sid)
+	if err != nil {
+		t.Fatalf("client after resume: %v", err)
+	}
+	// A WRITE plus a READ-BACK: on a wedged unit the write is what fails (ENOSPC), so this
+	// is the assertion that distinguishes "refused and unharmed" from "refused but wedged
+	// anyway".
+	if out := guestRun(t, ctx, cl2, "/usr/bin/boundedfill", "/root/probe", "1"); !strings.Contains(out, "READBACK=1048576") {
+		t.Fatalf("guest write after the refused PATCH produced %q; the unit is wedged — the refusal did not protect it", out)
+	}
+	t.Logf("✓ sandbox resumed and the guest still writes: the refusal changed nothing")
+
+	// --- the legal direction still works: a raise STRICTLY above usage -------------------
+	if err := m.Pause(ctx, sid); err != nil {
+		t.Fatalf("pause before the raise: %v", err)
+	}
+	raise := int64(diskCap * 2)
+	if err := patchDisk(t, m, sid, raise); err != nil {
+		t.Fatalf("PATCH disk_byte → %d (strictly above usage) = %v; want it ADMITTED", raise, err)
+	}
+	if err := m.Resume(ctx, sid); err != nil {
+		t.Fatalf("resume after the raise: %v", err)
+	}
+	if _, l3, err := bc.Usage(ctx, unit); err != nil || l3 != raise {
+		t.Fatalf("after the raise the unit's limit = %d (err %v); want %d — a cap edit takes effect at the next placement (§3.4)", l3, err, raise)
+	}
+	t.Logf("✓ a raise strictly above usage is admitted and materialized at the next placement (limit now %d)", raise)
+}
+
+// TestResourceDiskCapFullSandboxStillResumes is the REVERSE guard on the predicate above,
+// and it is the reason the criterion is `cap <= used` rather than something looser.
+//
+// A sandbox that fills its own cap the ordinary §3.4 way (guest gets ENOSPC, sandbox
+// survives) must still pause and resume. Measured, that works because squota stops the
+// guest while usage is still STRICTLY below the limit (32 KiB of headroom in the spike), so
+// re-applying the cap succeeds. If the guard were ever widened — or if the substrate's
+// headroom vanished — this is the test that catches it, because the symptom would be a
+// sandbox that filled its disk and could never be resumed again.
+func TestResourceDiskCapFullSandboxStillResumes(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root (btrfs ioctls + runsc + overlay mount)")
+	}
+	ctx := context.Background()
+	eng, base := setupEngineOnBtrfs(t, 60*time.Second)
+	m := eng.Mediator
+	bc := btrfs.Client{}
+
+	const diskCap = 32 << 20
+	sid, err := m.Create(ctx, lifecycle.CreateSpec{Template: "bare", Limits: model.Limits{DiskByte: diskCap}})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	t.Cleanup(func() { _ = m.Destroy(ctx, sid) })
+
+	cl, err := m.Client(sid)
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	ch, err := cl.Start(ctx, transport.StartSpec{Cmd: "/usr/bin/diskfill", Args: []string{"/root/fill", "1024"}})
+	if err != nil {
+		t.Fatalf("start diskfill: %v", err)
+	}
+	var out strings.Builder
+	for ev := range ch {
+		if ev.Kind == "data" {
+			out.Write(ev.Data)
+		}
+	}
+	if !strings.Contains(out.String(), "WRITE_ERRNO=28") {
+		t.Fatalf("the guest did not reach ENOSPC at its cap; got %q — this test needs a genuinely FULL unit", strings.TrimSpace(out.String()))
+	}
+
+	rec, _ := eng.Store.GetSandbox(ctx, sid)
+	unit := filepath.Join(base, "state", "overlays", string(rec.Overlay))
+	used, limit, err := bc.Usage(ctx, unit)
+	if err != nil {
+		t.Fatalf("Usage: %v", err)
+	}
+	if used >= limit {
+		t.Fatalf("used=%d limit=%d — usage reached the limit, which is the WEDGED state; the guard's premise (squota leaves headroom) does not hold on this substrate and the placement-side predicate needs revisiting", used, limit)
+	}
+	t.Logf("full unit: used=%d limit=%d headroom=%d", used, limit, limit-used)
+
+	// The property: pause + resume must both succeed, which means applyCap re-asserted the
+	// SAME cap on a full unit without the strict-inequality guard refusing it.
+	if err := m.Pause(ctx, sid); err != nil {
+		t.Fatalf("pause of a full sandbox: %v", err)
+	}
+	if err := m.Resume(ctx, sid); err != nil {
+		t.Fatalf("resume of a FULL sandbox = %v; want success — filling your own cap is an ordinary §3.4 outcome, not a wedge, and the placement guard must not refuse it", err)
+	}
+	t.Logf("✓ a sandbox that filled its own cap still pauses and resumes")
+
+	// And the §4.3 remedy still works on it: raise the cap, resume, room again.
+	if err := m.Pause(ctx, sid); err != nil {
+		t.Fatalf("pause before raise: %v", err)
+	}
+	if err := patchDisk(t, m, sid, diskCap*4); err != nil {
+		t.Fatalf("PATCH raising a FULL sandbox's cap = %v; want it ADMITTED (this is §4.3's remedy)", err)
+	}
+	if err := m.Resume(ctx, sid); err != nil {
+		t.Fatalf("resume after raising a full sandbox's cap: %v", err)
+	}
+	t.Logf("✓ raise-the-cap remedy works on a full sandbox")
+}
+
+// TestResourceCreateRefusesCapBelowTheUnitFloor: a cap below what the storage unit costs
+// EMPTY is unenforceable from the sandbox's first instant, and §5.B refuses it rather than
+// producing a unit that is wedged at birth.
+//
+// The floor is a measured substrate fact, not a constant the engine names: a fresh
+// subvolume already charges ~16 KiB of metadata extents. Before the guard, such a create
+// wrote the cap, then failed deeper in the chain with an ENOSPC from `Mount`'s workdir
+// step — an unintelligible error for a request that was decidable up front.
+func TestResourceCreateRefusesCapBelowTheUnitFloor(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root (btrfs ioctls)")
+	}
+	ctx := context.Background()
+	eng, _ := setupEngineOnBtrfs(t, 30*time.Second)
+
+	_, err := eng.Mediator.Create(ctx, lifecycle.CreateSpec{
+		Template: "bare",
+		Limits:   model.Limits{DiskByte: 4096}, // below the ~16 KiB metadata floor
+	})
+	if !errorsIsDiskCapBelowUsage(err) {
+		t.Fatalf("create with a 4096-byte disk cap = %v; want lifecycle.ErrDiskCapBelowUsage — the cap is at or below what the unit costs empty, so it could never be enforced", err)
+	}
+	t.Logf("✓ create refused a cap below the unit's own floor: %v", err)
+
+	// Nothing half-built (§4.4-A): no record, and the create's unwind left no row behind.
+	list, _ := eng.Mediator.List(ctx)
+	if len(list) != 0 {
+		t.Fatalf("%d record(s) left after a refused create; want 0", len(list))
+	}
+}
+
+// guestRun execs a probe in the guest and returns everything it wrote to stdout/stderr.
+// It does NOT fail on a non-zero exit: several callers assert on the probe's own parseable
+// report (WROTE=/WRITE_ERR=), which is more precise than an exit code.
+func guestRun(t *testing.T, ctx context.Context, cl transport.Client, cmd string, args ...string) string {
+	t.Helper()
+	ch, err := cl.Start(ctx, transport.StartSpec{Cmd: cmd, Args: args})
+	if err != nil {
+		t.Fatalf("start %s: %v", cmd, err)
+	}
+	var out strings.Builder
+	for ev := range ch {
+		if ev.Kind == "data" {
+			out.Write(ev.Data)
+		}
+	}
+	return strings.TrimSpace(out.String())
+}
+
+// patchDisk drives the §6.1 PATCH write point with a disk_byte-only binding.
+func patchDisk(t *testing.T, m *lifecycle.Mediator, id model.SandboxID, capByte int64) error {
+	t.Helper()
+	_, err := m.Rebind(context.Background(), id, lifecycle.RebindSpec{
+		Binding: store.Binding{DiskByte: &capByte},
+	})
+	return err
+}
+
+func errorsIsDiskCapBelowUsage(err error) bool {
+	return errors.Is(err, lifecycle.ErrDiskCapBelowUsage)
 }
 
 // TestResourceRAMAxis: exceeding the RAM cap terminates
