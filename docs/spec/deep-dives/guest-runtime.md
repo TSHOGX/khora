@@ -1,332 +1,445 @@
-# Guest 运行时边界:跑什么、谁当 PID 1、resume 怎么冷启
+# The guest runtime boundary: what runs, who is PID 1, and how resume cold-starts
 
-> **定位:[`§5.E.1`](../subsystems.md)(guest 启动拓扑)的深挖文档,并涉及 [`§4.2`](../model.md)(pause
-> 静止点)、[`§4.3`](../model.md)(两层探活);导航见 [`SPEC.md`](../SPEC.md)。** 展开两块 spec 只留结论
-> 的推理:① **作用域**——引擎只支持"按需 exec 出来的进程",不以系统守护服务为目标(D1、D3);
-> ② **guest 启动拓扑 + pause 静止点 + resume 冷启时序**(D4、D5)。规范结论在 §5.E.1 / §4.2 / §4.3。
+> **Position: a deep dive on [`§5.E.1`](../subsystems.md) (the guest startup topology), also touching
+> [`§4.2`](../model.md) (the pause quiescent point) and [`§4.3`](../model.md) (the two probe layers);
+> navigation is in [`SPEC.md`](../SPEC.md).** It develops the reasoning behind two things the spec
+> states only as conclusions: ① **scope** — the engine supports only "processes exec'd on demand" and
+> does not target system daemon services (D1, D3); ② **the guest startup topology + the pause quiescent
+> point + the resume cold-start timing** (D4, D5). The normative conclusions are in §5.E.1 / §4.2 /
+> §4.3.
 >
-> **编号约定:** 本文自己的节用 `D` 前缀(D1、D4.4…);`§` 一律指 spec 的全局章节(§4.2 等),两套不混。
-> **节号是稳定寻址锚,不是目录序号**:一经被引用就不再重排,故序列里的空号(D2 已并入 D1)是刻意保留、
-> 不复用的——与 network.md D5 顶部同一条纪律。
+> **Numbering convention:** this document's own sections use a `D` prefix (D1, D4.4 …); `§` always
+> means a global spec section (§4.2 and so on), and the two are never mixed.
+> **Section numbers are stable addressing anchors, not table-of-contents ordinals**: once referenced
+> they are never renumbered, so a gap in the sequence (D2 having been folded into D1) is deliberately
+> preserved and not reused — the same discipline as the top of network.md D5.
 
 ---
 
-## D0. 一句话结论
+## D0. The conclusion in one sentence
 
-引擎只跑一类东西——**经 `process` 按需 exec 出来的进程**,不做系统守护服务(D1、D3),故 guest 只需一个
-**轻量 reaper**。它靠"一个二进制、两个模式"实现:`sandboxd` 以 **init 模式**当 PID 1(自研最小 init,tini
-源码作正确性 checklist),re-exec 出 **transport 模式**子进程当 process/fs 终点(D4)。这条分进程拓扑换来
-崩溃隔离,以及**两层探活**区分 transport-down 与 substrate 死亡(D5)。
+The engine runs exactly one class of thing — **processes exec'd on demand through `process`** — and does
+not do system daemon services (D1, D3), so the guest needs only a **lightweight reaper**. This is
+implemented as "one binary, two modes": `sandboxd` runs in **init mode** as PID 1 (a minimal init
+written ourselves, with tini's source as the correctness checklist) and re-execs a **transport mode**
+child as the process/fs endpoint (D4). This split-process topology buys crash isolation, plus the **two
+probe layers** that separate transport-down from substrate death (D5).
 
 ---
 
-## D1. 作用域:引擎只跑一类"东西"
+## D1. Scope: the engine runs exactly one class of "thing"
 
-引擎要支持的"跑东西"只有一类:**经 `sandboxd` 的 `process` 能力按需拉起的进程**
-(monitor / 构建 / `apt|npm|pip` 安装 / dev server / artifact HTTP server)。**不**以"开机即起的
-系统守护服务"(`service`/`systemctl` 那套)为目标。判据干净:**是否需要 init 把它"开机拉起并常驻"**
-——需要 → 移出范围;不需要、能被 exec 出来 → `process` + `publish` 两个现有原语即覆盖。
+There is one class of "running things" the engine must support: **processes brought up on demand through
+`sandboxd`'s `process` capability** (a monitor / a build / an `apt|npm|pip` install / a dev server / an
+artifact HTTP server). It does **not** target "system daemon services started at boot" (the
+`service`/`systemctl` world). The criterion is clean: **does it need init to "start it at boot and keep
+it resident"** — if yes → out of scope; if no, and it can be exec'd → the two existing primitives
+`process` + `publish` already cover it.
 
-判据落在两类东西上:
+The criterion lands on two classes of thing:
 
-| | 系统守护服务(不做) | 按需 exec 的进程(全部模型) |
+| | System daemon services (not done) | Processes exec'd on demand (the whole model) |
 | --- | --- | --- |
-| 典型 | `service postgresql start` / `systemctl` | monitor、`apt install`、dev server、artifact server |
-| 怎么起 | init 在启动时拉起、作为基础设施常驻 | 经 `sandboxd` 的 `process` 能力拉起 |
+| Typical | `service postgresql start` / `systemctl` | a monitor, `apt install`, a dev server, an artifact server |
+| How it starts | init brings it up at boot and it stays resident as infrastructure | brought up through `sandboxd`'s `process` capability |
 
 ---
 
-## D3. 两个典型需求都落在"按需 exec"这一侧
+## D3. Both typical needs fall on the "exec on demand" side
 
-### D3.1 `apt install`:一次性命令,不碰 init
+### D3.1 `apt install`: a one-shot command that does not touch init
 
-安装工具链(Python / npm / Node / Rust 等)与部署长驻 DB 是两回事。`apt`/`npm`/`pip`/cargo 都是
-**一次性命令**——exec、跑完就退,不是 `service xxx start` 的守护进程,**根本不碰 init**。默认进
-sandbox 就是 root(spec §2.2:引擎默认 guest root、**不建模 guest 用户**,「以某用户运行」是 guest 原生
-的 `su`/`sudo`),安装依赖的权限天然满足;而 guest 内 root 被 sentry 在用户态拦截、逃不到宿主,所以
-"放心让需要 root 的安装在里面跑"正是 gVisor 的姿势。唯一前置是网络:
-`apt`/`npm` 出网靠 §5.D 声明里的出站放行(`egress.default: allow`,或一条覆盖上游的 `allow[]`)。
+Installing a toolchain (Python / npm / Node / Rust …) and deploying a resident DB are two different
+things. `apt`/`npm`/`pip`/cargo are all **one-shot commands** — exec, run, exit — rather than
+`service xxx start` daemons, and they **do not touch init at all**. Entering the sandbox gives root by
+default (spec §2.2: the engine defaults the guest to root and **does not model guest users**, with "run
+as some user" being the guest's native `su`/`sudo`), so the privileges for installing dependencies are
+satisfied naturally; and root inside the guest is intercepted in userspace by the sentry and cannot
+escape to the host, so "let installs that need root run in there without worry" is exactly the gVisor
+posture. The only prerequisite is networking: `apt`/`npm` reaching out depends on the egress allowances
+in the §5.D declaration (`egress.default: allow`, or one `allow[]` covering the upstream).
 
-> postgres 之所以麻烦,不是 gVisor 的 syscall 兼容性(postgres-on-gVisor 能跑),而是"容器没有
-> init 系统" + locale / 切用户等精简镜像通病。不以常驻 DB 服务为目标,这串坑整个不趟。
+> What makes postgres awkward is not gVisor's syscall compatibility (postgres-on-gVisor does run) but
+> "the container has no init system" plus the usual slim-image afflictions around locale, switching
+> users, and so on. Not targeting a resident DB service means none of that string of pits is walked.
 
-### D3.2 serve HTML / artifact:不需要新原语
+### D3.2 Serving HTML / artifacts: no new primitive needed
 
-artifact server 就是两步,全落在现有能力上:
+An artifact server is two steps, both on existing capabilities:
 
 ```
-process.Start("python -m http.server 8000")     ← spec §5.E process 能力
-POST /v1/sandboxes/{id}/publish {guest_port:8000, proto:"tcp"}   ← spec §5.D 入站 publish(引擎只交付 host ip:port,声明里无鉴权字段)
+process.Start("python -m http.server 8000")     ← spec §5.E's process capability
+POST /v1/sandboxes/{id}/publish {guest_port:8000, proto:"tcp"}   ← spec §5.D's inbound publish (the
+                                                                   engine delivers only a host ip:port,
+                                                                   and the declaration has no
+                                                                   authentication field)
 ```
 
-listen/accept + 读文件发响应都在 gVisor netstack 支持范围(吞吐不如 host 网络,serve artifact
-够用)。引擎不知道"这是个 artifact server",只看见"一个进程 + 一个被 publish 的端口";"是
-artifact"是产品层语义,不进引擎(spec §3.2.1)。
+listen/accept plus reading a file and sending a response are all within the gVisor netstack's support
+(throughput is below host networking, which is fine for serving artifacts). The engine does not know
+"this is an artifact server"; it sees only "a process + a published port". "Being an artifact" is
+product-layer semantics and does not enter the engine (spec §3.2.1).
 
-一个细节:artifact server **命可以长**(查看期间一直在),这与"按需"不冲突——"按需"指的是
-**谁拉起、怎么拉起**(经 `process` 显式、可观测),不是寿命短。publish 生命周期本就独立于连接。
+One detail: an artifact server **may be long-lived** (staying up while things are being viewed), which
+does not conflict with "on demand" — "on demand" refers to **who starts it and how** (explicitly and
+observably, through `process`), not to a short lifetime. A publish's lifecycle is independent of any
+connection anyway.
 
 ---
 
-## D4. guest 启动拓扑:PID 1 用谁
+## D4. The guest startup topology: who is PID 1
 
-两个正交问题:**Q1** init 语义谁实现(自研 vs 打包 tini)、**Q2** init 要不要和 `sandboxd` 同进程。
+Two orthogonal questions: **Q1** who implements init semantics (write our own vs bundle tini), and
+**Q2** whether init should share a process with `sandboxd`.
 
-### D4.1 Q1:自研 init 语义,拿 tini 源码当正确性 checklist
+### D4.1 Q1: write the init semantics ourselves, using tini's source as the correctness checklist
 
-**自研,不打包 tini 二进制;tini 源码当可执行规格逐条抄语义。** tini 是"最小 init 一堆坑"的权威
-答案,checklist:
+**Write our own and bundle no tini binary; use tini's source as an executable specification and copy
+its semantics item by item.** tini is the authoritative answer to "a minimal init has a pile of pits",
+and the checklist is:
 
-- `waitpid(-1, …, WNOHANG)` 收割循环 + `ECHILD` 处理;
-- 信号转发(默认转给单个子进程,`-g` 转给整个进程组);
-- **PID 1 无默认信号处置**——内核不给 PID 1 装默认 handler,不显式处理的信号(除
-  `SIGKILL`/`SIGSTOP`)被静默丢弃,必须逐个显式装;
-- 退出码 `128+signo` 传播、`SA_RESTART` 语义、subreaper 交互。
+- the `waitpid(-1, …, WNOHANG)` reaping loop + handling `ECHILD`;
+- signal forwarding (to the single child by default, to the whole process group with `-g`);
+- **PID 1 has no default signal dispositions** — the kernel installs no default handlers for PID 1, so
+  signals not handled explicitly (other than `SIGKILL`/`SIGSTOP`) are silently discarded and each must
+  be installed explicitly;
+- propagating exit code `128+signo`, `SA_RESTART` semantics, and subreaper interactions.
 
-自研而非打包:对 spec §1.1「单二进制 + 配置 + 本地 store」的部署形态,**不往每个 base rootfs 塞一个
-tini 二进制**是实打实的收益——少一个要版本化 / 追 CVE / 打进模板的活动件。代价是 PID 1 正确性的
-失败模式脏(僵尸堆积、信号丢投、关机挂死),但这是**有界**问题(~300 行)、有 tini 兜底 checklist。
+Writing our own rather than bundling: for spec §1.1's deployment shape of "one binary + a config + a
+local store", **not stuffing a tini binary into every base rootfs** is a concrete gain — one fewer
+moving part to version, track CVEs for, and bake into templates. The cost is that PID 1 correctness has
+ugly failure modes (zombies piling up, signals lost, shutdown hanging), but it is a **bounded** problem
+(~300 lines) with tini's checklist as a backstop.
 
-### D4.2 Q2:init 与 `sandboxd` 分进程,用"一个二进制两个模式"
+### D4.2 Q2: init and `sandboxd` in separate processes, via "one binary, two modes"
 
-init 与 `sandboxd` **不合并成同一个进程**,两条工程理由:
+init and `sandboxd` are **not merged into one process**, for two engineering reasons:
 
-1. **崩溃爆炸半径 / 可重启性(最硬)**。`sandboxd` 是全系统最复杂、最会长、最会出 bug 的部分
-   (wire 协议、流多路复用、pty、fs ops)。若它就是 PID 1,一崩**整个 guest 陪葬**——用户在跑的
-   `apt` / dev server / build 全没。独立的 ~300 行 init 几乎永不变,能**原地重启 `sandboxd`** 而不
-   导致沙箱崩溃,把 `sandboxd` 崩溃降级成**进程内可恢复**(对齐 spec §4.2「崩溃 = 非自愿的 pause」),
-   而非升格成一次 substrate 死亡。**这道重启只是崩溃恢复、不是换版本的通路**:`/proc/self/exe` 是
-   PID 1 已打开的那个 inode 的句柄、不在 exec 时重解析路径,故监督循环每次拉起的都是**同一份字节**
-   ——换版本只有"新 Template + 新 placement"这一条路。
-2. **PID 1 信号语义对复杂 server 有敌意**(D4.1)。Go 运行时(多线程 + 自带 signal handling)叠在
-   PID 1 特殊规则上要格外小心;让极小的 init 当 PID 1、`sandboxd` 当普通子进程,这问题整个绕开。
+1. **Crash blast radius / restartability (the hardest reason).** `sandboxd` is the most complex,
+   fastest-growing, most bug-prone part of the whole system (the wire protocol, stream multiplexing,
+   pty, fs ops). Were it PID 1, one crash would **take the entire guest with it** — the user's running
+   `apt` / dev server / build all gone. A separate ~300-line init that almost never changes can
+   **restart `sandboxd` in place** without crashing the sandbox, downgrading a `sandboxd` crash to
+   **in-process recoverable** (aligned with spec §4.2's "a crash = an involuntary pause") rather than
+   promoting it to a substrate death. **That restart is crash recovery only and is not a path for
+   changing versions**: `/proc/self/exe` is a handle on the inode PID 1 already opened rather than a
+   path re-resolved at exec time, so the supervision loop brings up **the same bytes** every time —
+   changing versions has exactly one road, "a new Template + a new placement".
+2. **PID 1's signal semantics are hostile to a complex server** (D4.1). The Go runtime (multithreaded,
+   with its own signal handling) layered on PID 1's special rules requires great care; letting a tiny
+   init be PID 1 with `sandboxd` as an ordinary child sidesteps the problem entirely.
 
-"reaper 要知道 `sandboxd` 拉起的进程,所以得放一起"这个合并动机被内核特性化解:
-**`prctl(PR_SET_CHILD_SUBREAPER)`** 让 `sandboxd` 声明为 subreaper 后,它派生的进程树里的孤儿
-reparent 到 `sandboxd` 而非 PID 1——不当 PID 1 也能收割自己关心的后代(它有 context)。PID 1 于是
-只当**纯兜底**,收割真正的全局孤儿(在"只有按需进程"模型下这批极小)。
+The merge motive "the reaper must know about the processes `sandboxd` started, so they have to be
+together" is dissolved by a kernel feature: **`prctl(PR_SET_CHILD_SUBREAPER)`** lets `sandboxd` declare
+itself a subreaper, after which orphans in the process tree it spawned reparent to `sandboxd` rather
+than to PID 1 — so it can reap the descendants it cares about (having the context for them) without
+being PID 1. PID 1 then acts purely as **a backstop**, reaping genuinely global orphans (a very small
+set under an "on-demand processes only" model).
 
-**落地形态:一个二进制两个模式**(init 模式 PID 1 经 `/proc/self/exe` re-exec 出 transport 模式子进程),
-完整拓扑图见 spec §5.E.1。
+**The implementation shape: one binary, two modes** (init mode as PID 1 re-execing a transport-mode
+child through `/proc/self/exe`), with the full topology diagram in spec §5.E.1.
 
-### D4.3 transport 模式要落的机制、信号目标的分工,与两个要拒的形状
+### D4.3 What transport mode must implement, how signal targets divide, and two shapes to refuse
 
-收割语义无处可抄——它必须靠 D4.1 自研 + tini checklist。但 transport 模式要落的另外三样机制是成熟的
-进程管理套路,形状如下:
+Reaping semantics can be copied from nowhere — they must rest on D4.1's own implementation plus tini's
+checklist. But the other three mechanisms transport mode must implement are mature process-management
+patterns, shaped as follows:
 
-- **每进程监督**:per-process 一个 monitor goroutine,退出即广播 `end` 帧(退出码 `128+signo` on
-  signal)。若将来要向调用方暴露更细的进程状态(running/stopped/killed/crashed),那是这个 monitor
-  之上的 additive 加法,不改本拓扑。
-  - **但它的状态不能来自 `cmd.Wait()`——那与 subreaper 职责不可共存,二者只能有一个赢。**
-    transport 模式按 §5.E.1 声明 `PR_SET_CHILD_SUBREAPER` **并因此必须自己跑 `Wait4(-1)`**,而
-    `Wait4(-1)` **无法排除某个 pid**:通配 waiter 与 per-child `cmd.Wait()` 竞争同一个状态,谁先收到谁
-    拿走。**实测:通配 waiter 先到时 `cmd.Wait()` 10/10 次返回 `waitid: no child processes`**——于是每一
-    个 `end` 帧的退出码都会是**编造**的,而退出码送达是 §5.E.1 明写的承重契约。故形状是:**单一通配
-    收割器 + 一张交接表**(pid → 等待者),monitor 从表里领自己那份状态,与 PID 1 的收割器**同一份机制**
-    (`reapTable`,两个模式共用,§5.E.1;它正是为"通配 waiter 不得偷走已注册子进程的状态"而设计的)。(『声明』与
-    『装上通配 drain』不可分开落地,§5.E.1。)
-  - **连带一条不显然的义务**:跳过 `cmd.Wait()` 也就跳过了它对 `StdoutPipe`/`StderrPipe` 父端的关闭,
-    故长命 daemon 里每个进程会漏 2 个 fd——输出泵必须在 EOF 时自己关。(PTY master 例外:它同时是输入
-    端,由进程终结路径统一关。)
-- **每进程 pgid 纪律**:非 PTY 进程 `Setpgid` 自成组、PTY 进程交给 pty 的 session——这条 tini 覆盖
-  不到的 PTY vs 非 PTY 非对称,完整推理见 D4.5 C1。
-- **drain-barrier**:pause 前用一道 barrier 挡住 in-flight mutating 写、等其排空——D4.4 那一层 host 侧
-  drain-barrier 要的原语(D5.2 的单飞守卫在 host 侧、不用它)。
+- **Per-process supervision**: one monitor goroutine per process, broadcasting an `end` frame on exit
+  (with exit code `128+signo` on a signal). Should finer process states ever need exposing to callers
+  (running/stopped/killed/crashed), that is an additive addition on top of this monitor and does not
+  change this topology.
+  - **But its status must not come from `cmd.Wait()` — that cannot coexist with subreaper duty, and only
+    one of the two can win.** Transport mode declares `PR_SET_CHILD_SUBREAPER` per §5.E.1 **and must
+    therefore run `Wait4(-1)` itself**, and `Wait4(-1)` **cannot exclude a particular pid**: the
+    wildcard waiter and a per-child `cmd.Wait()` compete for the same status, and whoever receives it
+    first takes it. **Measured: when the wildcard waiter wins, `cmd.Wait()` returns
+    `waitid: no child processes` 10 times out of 10** — so every `end` frame's exit code would be
+    **fabricated**, while delivering exit codes is a load-bearing contract §5.E.1 states explicitly. So
+    the shape is: **a single wildcard reaper + a handoff table** (pid → waiter), from which a monitor
+    collects its own status, sharing **one mechanism** with PID 1's reaper (`reapTable`, used by both
+    modes, §5.E.1; it exists precisely so that "a wildcard waiter must not steal a registered child's
+    status"). ("Declaring" and "installing the wildcard drain" cannot be implemented apart, §5.E.1.)
+  - **One non-obvious obligation comes with it**: skipping `cmd.Wait()` also skips its closing of the
+    parent ends of `StdoutPipe`/`StderrPipe`, so a long-lived daemon leaks 2 fds per process — the
+    output pump must close them itself at EOF. (The PTY master is the exception: it is also the input
+    end and is closed uniformly by the process-termination path.)
+- **Per-process pgid discipline**: non-PTY processes `Setpgid` into their own group while PTY processes
+  are left to the pty's session — this PTY-vs-non-PTY asymmetry is not covered by tini, and the full
+  reasoning is in D4.5 C1.
+- **The drain barrier**: before a pause, a barrier blocks in-flight mutating writes and waits for them
+  to drain — the primitive D4.4's host-side drain barrier needs (D5.2's single-flight guard is on the
+  host side and does not use it).
 
-**要拒的是"独立世代计数"identity 模型**(常见于分布式 init/supervisor:给每次运行挂一个
-`epoch`/`generation` 标签辨识陈旧实例)。引擎不引入它,用 spec §3.3/§4.3 的 placement/IP-as-epoch
-替代(spec §「引擎词汇边界」点名 `generation` 是最易被带回的概念)。禁词表拦得住词、拦不住概念
-——drain-barrier 的**排空逻辑**要、任何往它上面挂 **generation 标签**的做法不要。
+**The shape to refuse is the "standalone counter" identity model** (common in distributed
+init/supervisors: tagging each run with an `epoch`/`generation` label to recognize a stale instance).
+The engine does not introduce it, using spec §3.3/§4.3's placement/IP-as-epoch instead (the spec's
+"engine vocabulary boundary" names `generation` as the concept most likely to be brought back). A banned
+word list stops the word, not the concept — the drain barrier's **draining logic** is wanted, and any
+practice of hanging **a counter label** on it is not.
 
-**信号目标天然分裂**:定向信号(单进程 / 进程组,spec §4.2 静止点、§5.E 信号通道)归
-**transport 模式**(它握 pid/pgid 句柄);容器级信号扇出归 **PID 1**——它 `kill(-1, sig)` 广播给
-**本 pid namespace 内除自己以外的全部进程**,故模板自带的长跑 sibling 与 transport 的整棵子树一并覆盖,
-不只是它自己 spawn 的那一个子进程。这条判据是"不指定任何 pid/pgid":正因为不定向,它才落在 PID 1 侧
-而非 transport 侧——句柄留给定向那条路。
+**Signal targets divide naturally**: directed signals (to one process / a process group, spec §4.2's
+quiescent point, §5.E's signal channel) belong to **transport mode** (which holds the pid/pgid handles);
+container-level signal fan-out belongs to **PID 1** — its `kill(-1, sig)` broadcasts to **every process
+in this pid namespace except itself**, so a long-running sibling the template ships is covered along
+with the transport's whole subtree, not just the one child it spawned. The criterion is "specifying no
+pid/pgid at all": precisely because it is undirected it lands on PID 1's side rather than the
+transport's — the handles are for the directed road.
 
-**这条判据在 `SendSignal` 入口是可执行的,不只是分工描述:`pid <= 0` 判 `invalid_argument`。**
-POSIX 里 `pid <= 0` **就是**扇出形式(`kill(0)` 打整个进程组、`kill(-1)` 打整个 pid namespace),
-故它不是"危险取值",是**投错了子系统**——那条路归 PID 1,transport 侧没有它的入口。校验落在
-**guest 侧**(`cmd/sandboxd`),因为 §5.E.1 的前提是 guest 能写自己的 fs、必须自证;orchestrator 侧
-同形一道只作 fail-fast(少一次 RPC),不是权威。类型保持 `int32`:`uint32` 会让 wire 上的负值静默变成
-大正数,把一个显式 400 换成一条更难查的行为。
+**That criterion is executable at `SendSignal`'s entry rather than merely a description of the division:
+`pid <= 0` is judged `invalid_argument`.** In POSIX, `pid <= 0` **is** the fan-out form (`kill(0)` hits
+the whole process group, `kill(-1)` the whole pid namespace), so it is not a "dangerous value" but **a
+misdelivery to the wrong subsystem** — that road belongs to PID 1, and the transport side has no entry
+for it. The validation lands on the **guest side** (`cmd/sandboxd`), because §5.E.1's premise is that the
+guest can write its own fs and must prove itself; an identically shaped check on the orchestrator side is
+only fail-fast (saving one RPC) and is not authoritative. The type stays `int32`: `uint32` would silently
+turn a negative value on the wire into a large positive one, trading an explicit 400 for a much
+harder-to-trace behavior.
 
-它**只校验 pid > 0**,不查进程注册表——`Connect`/`SendInput`/`Update`/`CloseStdin` 必须查是因为要摸
-per-process 状态,而发信号只需要一个合法 pid;要求注册表命中会打断 §6.1 明写的
-「`List` 拿 pid → `SendSignal` 打它」配对(`List` 实时扫 `/proc`,返回的 pid 本就从未进过那张表)。
+It **validates only pid > 0** and does not consult the process registry — `Connect`/`SendInput`/`Update`/
+`CloseStdin` must consult it because they touch per-process state, whereas sending a signal needs only a
+legal pid; requiring a registry hit would break the pairing §6.1 states explicitly, "`List` gives you a
+pid → `SendSignal` hits it" (`List` scans `/proc` live, and the pids it returns were never in that table
+to begin with).
 
-**校验拦住的是什么——三个取值,已在 gVisor pid namespace 内实测(`SIGTERM`,绕过校验直发)。**
-`killProcessGroup` 的两级回退(先 `kill(-pid)`、失败再 `kill(pid)`)在 `pid <= 0` 上两臂都转为敌对:
+**What the validation stops — three values, measured inside a gVisor pid namespace (`SIGTERM`, sent
+directly, bypassing the validation).** `killProcessGroup`'s two-level fallback (first `kill(-pid)`, then
+`kill(pid)` on failure) turns hostile on both arms when `pid <= 0`:
 
-| 入参 | 实际发生 | 后果 |
+| Input | What actually happens | Consequence |
 | --- | --- | --- |
-| `pid=-1` | `kill(-(-1))` = **定向** `kill(1)`,命中 PID 1 自己的 TERM handler | 沙箱被拆(RPC 收 `unexpected EOF`、Health 再不回来) |
-| `pid=0` | `kill(-0)` = `kill(0)`,打 sandboxd 自己的进程组——而 transport 的 `pgrp` 与 PID 1 同为 **1**(它由 PID 1 fork、不 `Setpgid`),故 PID 1 在组内 | 同上,沙箱被拆 |
-| `pid=1` | `kill(-1)` 命名空间广播。Linux `kill(-1)` **排除 PID 1 与调用者自身**,故沙箱存活,但**每个工作负载进程被连带杀死**(实测两个无关进程同时 `exit 143`);guest 内一个工作负载都没有时该发返 `ESRCH`,于是落到回退臂 `kill(1)`,变成 `pid=-1` 那一行——沙箱被拆 | 越权扇出;空 guest 下退化为拆沙箱 |
+| `pid=-1` | `kill(-(-1))` = a **directed** `kill(1)`, hitting PID 1's own TERM handler | The sandbox is torn down (RPCs get `unexpected EOF`, Health never returns) |
+| `pid=0` | `kill(-0)` = `kill(0)`, hitting sandboxd's own process group — and the transport's `pgrp` is **1**, the same as PID 1's (it is forked by PID 1 and does not `Setpgid`), so PID 1 is in that group | Same as above, the sandbox is torn down |
+| `pid=1` | `kill(-1)`, a namespace broadcast. Linux's `kill(-1)` **excludes PID 1 and the caller itself**, so the sandbox survives but **every workload process is killed along the way** (measured: two unrelated processes `exit 143` simultaneously); with no workload at all in the guest that send returns `ESRCH`, falling to the fallback arm `kill(1)`, which becomes the `pid=-1` row — the sandbox is torn down | Fan-out beyond what was asked; degenerates into tearing the sandbox down in an empty guest |
 
-§6.1 假定调用方已被信任、引擎不做授权,故要补的是**输入校验**,不是授权。
+§6.1 assumes the caller is already trusted and the engine does no authorization, so what must be added is
+**input validation**, not authorization.
 
-**而 `pid=1` 那一行的扇出被有意放行:校验只拦 `pid <= 0`。** 上表把机制与后果都写全了(命名空间广播打掉
-每个工作负载进程;空 guest 下 `ESRCH` 落到回退臂、退化成拆沙箱)。两条理由:① **`pid > 1` 会打断 §6.1 明写的 `List` → `SendSignal` 配对** —— `List` 实时扫 `/proc`,必然返回
-PID 1,于是 API 会吐出一个自己拒绝接受的 pid,那是比扇出更难解释的契约缺陷(同上一段"不查注册表"那条判据的
-延伸:那里拒的是注册表命中要求,这里拒的是把同一个配对从取值一侧掐断)。② 放行的依据是 **PID 1 是 guest
-原生可寻址对象**——上面三行里 `pid=-1` / `pid=0` 是**投错子系统**的扇出形式(POSIX 语义,transport 侧没有
-它们的入口),而 `1` 是一个合法的定向 pid,它的扇出是 Linux `kill(-1)` 语义的后果、由**调用方自担**。
+**And the fan-out in the `pid=1` row is deliberately allowed: the validation stops only `pid <= 0`.** The
+table above states both the mechanism and the consequence in full (a namespace broadcast kills every
+workload process; in an empty guest `ESRCH` falls to the fallback arm and degenerates into tearing the
+sandbox down). Two reasons: ① **`pid > 1` would break the `List` → `SendSignal` pairing §6.1 states
+explicitly** — `List` scans `/proc` live and necessarily returns PID 1, so the API would emit a pid it
+refuses to accept, a contract defect harder to explain than the fan-out (an extension of the previous
+paragraph's "does not consult the registry" criterion: there what is refused is a registry-hit
+requirement, here it is cutting the same pairing off from the value side). ② The basis for allowing it is
+that **PID 1 is a guest-native addressable object** — of the three rows above, `pid=-1` / `pid=0` are
+fan-out **forms misdelivered to the wrong subsystem** (POSIX semantics, with no entry on the transport
+side), whereas `1` is a legal directed pid whose fan-out is a consequence of Linux's `kill(-1)` semantics
+and is **the caller's own responsibility**.
 
-**不做沙箱级宽限期——已否决。** PID 1 收 TERM 后广播、**紧接 `os.Exit(0)`**,而 PID 1 退出即拆
-pid namespace,故那一发 TERM 事实上不可被处理、与直接 KILL 无差别。**要拒的不是"没实现宽限",而是这个
-形状本身对不上:** ① 需要宽限的是**工作负载进程**——它才有要 flush 的东西,而进程级定向信号已经存在
-(就是上面那条 `SendSignal`),调用方要优雅关闭什么,它自己知道该打哪个 pid;② 沙箱级 TERM 想"优雅"
-就得让引擎判断"guest 里哪些进程值得等、等多久",那是**产品层策略**,§1.3 litmus 要挡在引擎外面
-(engine 不认识 agent,spec §3.2.1)。故 §4 的动词表保持 pause/destroy 两个,destroy 即刻生效。
-外部证据方向一致:e2b 的 `DELETE /sandboxes/{id}` summary 字面是 "Kill sandbox"、无宽限字段;
-sandbox0 沙箱 PodSpec 根本没设 `TerminationGracePeriodSeconds`(吃 kubelet 隐式 30s,一个没人为它论证过
-的值),而它**真正做过决定**的宽限期全在进程/会话粒度、宿主侧一个都没有。
+**No sandbox-level grace period — rejected.** After receiving TERM, PID 1 broadcasts and then
+**immediately calls `os.Exit(0)`**, and PID 1 exiting tears down the pid namespace, so that one TERM
+cannot in fact be handled and is no different from a direct KILL. **What is refused is not "grace was not
+implemented" but that this shape does not fit:** ① what needs grace is a **workload process** — it is
+what has something to flush — and process-directed signals already exist (that very `SendSignal` above),
+so a caller who wants something shut down gracefully knows which pid to hit; ② for a sandbox-level TERM
+to be "graceful", the engine would have to judge "which processes in the guest are worth waiting for, and
+for how long", which is **product-layer policy** that §1.3's litmus keeps outside the engine (the engine
+does not know about agents, spec §3.2.1). So §4's verb table stays at pause/destroy, with destroy taking
+effect immediately.
+External evidence points the same way: e2b's `DELETE /sandboxes/{id}` summary reads literally "Kill
+sandbox" with no grace field; sandbox0's sandbox PodSpec does not set
+`TerminationGracePeriodSeconds` at all (inheriting kubelet's implicit 30s, a value nobody argued for),
+while the grace periods it **did** decide on are all at process/session granularity and none on the host
+side.
 
-### D4.4 pause 静止点协议(spec §4.2 的机制)
+### D4.4 The pause quiescent-point protocol (the mechanism for spec §4.2)
 
-形状与两个前提在 §4.2:协议**只有一层 host 侧 drain-barrier**——停收新的 mutating fs 写、等 in-flight
-排空,再交 §5.B flush(复用 D4.3 那个原语)。本节只补 §4.2 没有的三样:一个实测、一张不进 barrier 的
-清单、以及协作式冻结为何被否决。
+The shape and its two premises are in §4.2: the protocol is **only one host-side drain barrier** — stop
+accepting new mutating fs writes, wait for in-flight ones to drain, then hand over to §5.B's flush
+(reusing that primitive from D4.3). This section adds only the three things §4.2 does not have: one
+measurement, a list of what does not enter the barrier, and why a cooperative freeze was rejected.
 
-**已实测**:让一次 64 MiB 的 `fs.Write` 与 `Pause` 对撞、并等到写确实进入 guest 后才发 pause,关掉
-barrier 时出现被截断的文件(10 轮里有一轮只落了 36.7 MB),开启后 10 轮全部完整落盘。
+**Measured**: colliding a 64 MiB `fs.Write` with a `Pause` and waiting until the write had genuinely
+entered the guest before sending the pause, a truncated file appeared with the barrier off (one round in
+ten landed only 36.7 MB), while with it on all ten rounds landed complete.
 
-**闸门只挡"写",不挡"读"**:`Read`/`Stat`/`List`、`process.List`、`Connect` 一律不进 barrier——它们
-截断不了任何东西,而在 pause 进行中挡住它们,恰好是在运维最想看一眼的时刻把观测面停掉。`process.Start`
-/ `SendInput` / `SendSignal` 同样**不挡**:它们改的是 guest 状态,不经由"引擎发出的、带 truncate 窗口的
-写";且 `Start` 是长流,在它上面等排空会让 barrier 自锁——排空在等一条要等排空才结束的流。
+**The gate blocks "writes" only, never "reads"**: `Read`/`Stat`/`List`, `process.List`, and `Connect`
+never enter the barrier — they can truncate nothing, and blocking them during a pause would switch off
+the observability surface at exactly the moment an operator most wants a look. `process.Start` /
+`SendInput` / `SendSignal` are likewise **not blocked**: what they change is guest state, not something
+travelling through "a write the engine issued that carries a truncate window"; and `Start` is a long
+stream, so waiting for it to drain would self-deadlock the barrier — the drain would be waiting on a
+stream that only ends when the drain does.
 
-**不做 guest 内的协作式冻结(`SIGTSTP` + 观测 `/proc` 到 `T` + 超 grace 降 `SIGSTOP`)——已否决。**
-两条理由:① 它要求负载**自愿**在信号里停到安全点,而 engine 既不能要求、也无法验证(不认识 agent,
-spec §3.2.1);② 两个成熟实现都选了**不可屏蔽**的冻结(一个 `SIGSTOP` 进程组、一个 cgroup freezer),
-无一提供应用层安全点协议——证据方向一致。**反向的通道(进程主动上报"我到安全点了")同样否决**,理由同
-①:那要求长跑进程为 pause 改自己的代码(违反 spec §3.2.1)。故应用层安全点**不进引擎**、engine 不引入
-应用层握手:它落在 §4.4「协作只是优化、不是正确性前提」那一侧,超时/强杀的语义与崩溃一致,而崩溃本就是
-§4.2 接受的底线。
+**No cooperative freeze inside the guest (`SIGTSTP` + observing `/proc` for `T` + degrading to `SIGSTOP`
+past a grace period) — rejected.** Two reasons: ① it requires the workload to **voluntarily** stop at a
+safe point on a signal, which the engine can neither require nor verify (it does not know about agents,
+spec §3.2.1); ② two mature implementations both chose an **unmaskable** freeze (one `SIGSTOP`ping the
+process group, one using the cgroup freezer) and neither offers an application-layer safe-point protocol
+— the evidence points the same way. **The reverse channel (a process proactively reporting "I have
+reached a safe point") is likewise rejected**, for reason ①: it would require long-running processes to
+change their own code for pause (violating spec §3.2.1). So an application-layer safe point **does not
+enter the engine** and the engine introduces no application-layer handshake: it falls on §4.4's
+"cooperation is only an optimization, not a correctness precondition" side, where the semantics of a
+timeout / hard kill match those of a crash — and a crash is the bottom line §4.2 already accepts.
 
-**超时即抢占,不是让 pause 失败。** §4.4 把这一层放在"优化"一侧,故每条路径都必须落到合法的
-`paused`:一条卡住的 RPC 不能让沙箱变成不可 pause。超时只记下还没排空的操作(**按名字**,"还有 3 条"
-对读的人毫无用处)然后照常冻结——那个落点正是崩溃的落点,而崩溃是 §4.2 已接受的底线。(一个成熟实现
-在超时时**放弃 pause**;在这里那个取舍是错的,理由同上。)
+**A timeout preempts rather than failing the pause.** §4.4 places this layer on the "optimization" side,
+so every path must land on a legal `paused`: one stuck RPC must not make a sandbox un-pausable. A timeout
+merely records which operations had not drained (**by name** — "3 remaining" is useless to a reader) and
+freezes as usual: that landing point is exactly where a crash lands, and a crash is the bottom line §4.2
+already accepts. (One mature implementation **abandons the pause** on timeout; here that trade-off is
+wrong, for the reason above.)
 
-**crash-pause 不排空**:容器已经死了,没有 in-flight 可等、也没有东西还能被截断,等只会推迟记录一件
-已经观测到的死亡。voluntary 的三条(用户 `pause`、`auto-pause`、Promote 的静止)才排空。
+**A crash-pause does not drain**: the container is already dead, there is no in-flight work to wait for
+and nothing left that could be truncated, and waiting would only delay recording a death already
+observed. Only the three voluntary paths (a user `pause`, `auto-pause`, and Promote's quiesce) drain.
 
-参数级残留(纯调参,不改这一层的结构):drain 的 grace 时长——它等的是单条 fs RPC,健康的毫秒级完成,
-还挂着的是卡住而非慢。
+A parameter-level residual (pure tuning that does not change this layer's structure): the drain's grace
+duration — what it waits for is a single fs RPC, which completes in milliseconds when healthy, so
+anything still outstanding is stuck rather than slow.
 
-### D4.5 tini checklist 覆盖不到的三条缝
+### D4.5 Three seams tini's checklist cannot cover
 
-tini 的语义权威,前提是**它只有一个子进程、自己永不被重启**。而 transport 模式 `sandboxd` 是
-**N 个子进程 + PTY + 会被 PID 1 原地重启**(D5.3)。三条 tini 覆盖不到、须本引擎自己锁定,都位于
-"transport 模式握 pid/pgid 句柄"这一侧:
+tini's semantics are authoritative on the premise that **it has exactly one child and is never itself
+restarted**. Whereas transport-mode `sandboxd` has **N children + a PTY + gets restarted in place by
+PID 1** (D5.3). Three things tini does not cover and this engine must pin down itself, all on the
+"transport mode holds the pid/pgid handles" side:
 
-- **C1 — per-process pgid / session,PTY 非对称。** tini `-g` 只把信号转给它那唯一子进程的进程组;
-  `sandboxd` 要的是**每次** `process.Start` 给进程单独 `setpgid` 成独立组,好让 `process.signal(pid)`
-  定向打那一棵进程树。**但 PTY 特例反过来**:pty 已 `setsid` + 设控制终端做 job control,再 setpgid
-  会与 pty 的 session 管理打架。故契约分叉——**非 PTY 进程自成 pgid,PTY 进程交给 pty 的 session**,
-  定向信号对两者走不同路径。归 transport 模式,PID 1 不碰。
+- **C1 — per-process pgid / session, with PTY asymmetric.** tini's `-g` only forwards signals to its one
+  child's process group; what `sandboxd` needs is to `setpgid` **each** `process.Start` into its own
+  group, so that `process.signal(pid)` hits that one process tree in a directed way. **But the PTY case
+  is the reverse**: a pty has already done `setsid` + set a controlling terminal for job control, and a
+  further setpgid would fight the pty's session management. So the contract forks — **non-PTY processes
+  get their own pgid, PTY processes are left to the pty's session** — and directed signals take
+  different paths for the two. This belongs to transport mode, and PID 1 does not touch it.
 
-- **C2 — Wait / 退出码语义跨一次 transport 重启是 lossy。** transport 崩、PID 1 原地重启后:它作为
-  subreaper 收养的子进程在它死的瞬间 reparent 到 PID 1(真 init),新 transport 丢了内存里的 pid/pgid
-  句柄表、且那些进程现在挂在 PID 1 名下——新 transport `waitpid` 不到它们,退出状态被 PID 1 收走。
-  故**退出码(`end` 事件)仅在 transport 单次存活期内保证**,跨一次重启退化为
-  「`process.List`(扫 `/proc`)仍可见、退出状态可能丢」。这与裸 pty 字节流的 lossy 同源:
-  engine 无状态、可重启性不由 engine 承担,"不丢"担保由上层(session adapter)自理。**零新增机制**,
-  不加 PID 1↔transport 的 exit-status 上报缝。
+- **C2 — Wait / exit-code semantics are lossy across one transport restart.** After the transport crashes
+  and PID 1 restarts it in place: the children it had adopted as a subreaper reparent to PID 1 (the real
+  init) the instant it dies, the new transport has lost its in-memory pid/pgid handle table, and those
+  processes now sit under PID 1 — so the new transport cannot `waitpid` them and their exit statuses are
+  collected by PID 1. So **exit codes (`end` events) are guaranteed only within one transport lifetime**,
+  degrading across a restart to "`process.List` (scanning `/proc`) still sees it, the exit status may be
+  lost". This shares its origin with the raw pty byte stream's lossiness: the engine is stateless,
+  restartability is not the engine's burden, and a "lose nothing" guarantee is for a layer above (a
+  session adapter) to handle. **Zero new mechanism**, and no PID 1↔transport exit-status reporting seam
+  is added.
 
-  **同一存活期内那条边界(pid 退出即不可寻址,§5.E.1)的落法只有一个**:要在退出后仍可寻址,前提是换成
-  永不复用的不透明 ID——那会连带要求一套分配器 + 回收策略,且 handle 的语义从"这个进程"变成"这个可被重启
-  的位置"(故还需一个 attempt/世代号),即一个 restart supervisor。§5.E 不做这件事,故要"不丢"就在
-  engine 外接住 `end` 帧。
-  > **留的 seam(若 session 层证明必须"不丢"才做,不回头改 engine)**:PID 1 收全局孤儿退出
-  > 状态时旁路记一份供新 transport 查询(一条极窄的内部上报缝)。列出它是为锁定"加它不动 transport /
-  > engine 无状态契约",与 [`transport.md`](./transport.md) D3「守 seam」同纪律。
+  **The boundary within one lifetime (a pid becomes unaddressable the moment it exits, §5.E.1) has
+  exactly one way to be landed differently**: for it to remain addressable after exit, the premise would
+  be switching to an opaque ID that is never reused — which would also require an allocator + a
+  reclamation policy, and would change the handle's semantics from "this process" to "this restartable
+  position" (so an attempt/counter number would be needed too), that is, a restart supervisor. §5.E does
+  not do that, so wanting "lose nothing" means catching the `end` frame outside the engine.
+  > **The seam left open (to be built only if the session layer proves "lose nothing" is required, so the
+  > engine need not be revisited)**: PID 1, when collecting a global orphan's exit status, also records a
+  > copy on the side for the new transport to query (one very narrow internal reporting seam). Listing it
+  > pins down "adding it moves neither the transport nor the engine's stateless contract", the same
+  > discipline as [`transport.md`](./transport.md) D3's "hold the seam".
 
-- **C3 — 收割权在 PID 1 与 transport 间的划分,含重启瞬态。** 正常态 transport 经
-  `PR_SET_CHILD_SUBREAPER` 收自己后代、PID 1 只兜底全局孤儿;**瞬态**(transport 已死、新 transport
-  未接手)划分翻转——后代短暂 reparent 到 PID 1、由 PID 1 收(正是 C2 的成因)。故"transport 永远在收
-  自己后代"不成立。
+- **C3 — how reaping authority divides between PID 1 and the transport, including the restart transient.**
+  In the normal state the transport reaps its own descendants through `PR_SET_CHILD_SUBREAPER` and PID 1
+  only backstops global orphans; in the **transient** (the transport dead, the new one not yet in charge)
+  the division inverts — descendants briefly reparent to PID 1 and are reaped by it (which is exactly
+  what causes C2). So "the transport always reaps its own descendants" does not hold.
 
-> C1(pgid 非对称)是成熟套路;C2/C3 只在**"独立 PID 1 + 监督重启"**拓扑下才出现(一个不当 PID 1、
-> 不被监督重启的普通 HTTP 子进程遇不到它们),是本引擎这套拓扑的新增议程。
-
----
-
-## D5. resume 冷启时序
-
-载体(netns TCP,§5.E)、探活模型(§4.3)、transport 无状态、placement 发现 IP(§5.A)之上的编排。
-
-> **create 与 resume 是同一条冷启链,只差前缀与失败出口。** ④⑤⑥⑦(拉起 runsc + readiness 门)对
-> 两者同构;不同的只有:(a) 前缀——resume 重挂**已有** Overlay 工件,create 先建**空** Overlay +
-> 首次绑定 Volume/Network 记录;(b) 失败出口——resume 有可退的静止态(→ `paused`,要点④),create 没有,
-> 失败要清理半建资源(空 Overlay + placement)后删记录 / 进 `destroyed`(spec §4.4 不变量 A)。
-> create 的就绪窗口 / 半死处置复用 ⑦ 的 Health RPC 门,超时 / 拉起失败落到自己的失败出口。下面以
-> resume 为主线,create 差异随文标注。
-
-### D5.1 canonical 冷启链(create / resume 共享;动词归 §4,机制归 §5,子系统不互调)
-
-`resume` / `create`(生命周期动词,mediator)按序调用各子系统机制,拉起 → `running`:
-
-```
-⓪ §4 写入 regime ： 读挂载表；若本次会给某卷 rw 挂载而该卷正有直连变更在飞 → 拒（§5.C；退回源态。
-                   门在最前，故一次拒绝什么都没建）
-① §5.B Rootfs   ： 挂 merged overlay（lower=Template / upper=Overlay 工件 / work）
-                   〔create：先建空 upper/work；resume：重挂同一 Overlay 工件〕
-② §5.C Volume   ： 按挂载表 Binding 逐个 Materialize，句柄组进 LaunchSpec.Mounts
-                   （runsc 启动时从 OCI spec 取，故必须在 ④ 之前）
-③ §5.D Network  ： 按声明 Binding 生成规则集（纯函数：放行集 + L0 地板 + publish 端点 → 规则文本）
-      └─ ①②③ 的产出由 §4 汇总交给 ④——子系统间不互调
-④ §5.A Runtime  ： 重建 placement（netns/IP/cgroup 按资源上限 Binding；建 netns/veth 后、拉起前
-                   装 ③ 的规则集，谓词绑宿主端 veth 的 `iifname`（按名字；`iif` 按 ifindex，
-                   veth 同名重建后静默 fail-open，§5.A）——§2.4 原子性义务）
-                   → 以 sandboxd（init 模式）为 entrypoint 拉起 runsc
-⑤ guest 内启动  ： PID1（init 模式）装 reaper+信号+监督 → 派生 transport 模式 sandboxd
-                   → 子进程 PR_SET_CHILD_SUBREAPER → bind netns TCP → listening
-⑥ §5.A placement： 把 transport 端点定为 guest netns IP:port —— 不是一次 boot 后探测：launch
-                   路径直接用引擎自己那次分配；Adopt 路径读宿主端 veth 的 /30 再 +1（guest 侧
-                   地址已被 sentry netstack 收走、读不回来，§5.A）
-⑦ §4 探活门     ： 向 IP:port 发 Health RPC，轮询至首次成功 or 超时
-      ├─ 首次成功 → state=running，发 resumed/created 事件（与状态提交单次原子，spec §4.4-C）→ API 返回
-      └─ 超时/拉起失败 → 回收半建 placement 后：resume→留 paused 可重试；create→删记录/→destroyed
-⑧ （engine 外） ： client 重新解析 placement、对当前 IP 重连 process/fs；session adapter
-                   调 driver --resume（engine 不参与，spec §5.E）
-```
-
-**顺序约束**:⓪ 必须在 ① 之前(一次被拒的冷启不该已经挂上 overlay);①②③ 必须在 ④ 之前物化(挂载在
-runsc 启动时从 OCI spec 取,运行中不可热改);
-⑥ 需 netns 已存在(④ 之后);⑦ 需 IP 已知(⑥)**且**端口在听(⑤)——**⑦ 是"已拉起"与
-"running"之间唯一的屏障**。**并发约束**:§4.4-B 转换锁**全程持有**这条链——①前拿锁、⑦翻 `running`
-(或超时 unwind)才放,故整个 ①–⑦ 期间并发 `destroy`/`evict` 拿不到锁,不会去删正被挂载/冷启的
-Overlay 工件。
-
-### D5.2 设计要点
-
-- **要点① — readiness = 首次 `Health` RPC 成功,复用 §4.3 探活探针,不另造 ready 协议**(裸 TCP accept
-  可能早于 RPC handler 接好、抢跑;readiness 与健康探测本是同一件事)。
-- **要点② — in-flight resume 期不做健康分类(单飞守卫,§4.3)。** 落地形状(「非阻塞试锁 + 跳过」、它挡
-  什么、为何不承重并发正确性)见 [`reaper-health.md`](./reaper-health.md) D3。
-- **要点③ — resume API 在 running 时返回 = 调用方"可以连了"的信号。** engine 不向 client 推送就绪
-  (无连接注册表、无回调)。持旧 IP 句柄的 client 连接失败即**重新解析当前 placement**(旧 IP 冷启
-  即作废)——时序上只要求 client 不缓存旧 IP。
-- **要点④ — 冷启失败原子退回源态(⑦ 的失败臂),不加 failed 态、不引入补偿事务**(spec §4.4-A):失败只是
-  "这次 placement 没建成",持久态完好在后端。
-- **要点⑤ — PID1 内部就绪被 transport 端口就绪吸收**:PID1 装完 handler 才可能派生 transport 子进程(⑤),
-  故 ⑦ 那道门已门控唯一对外可观测的 readiness,PID1 内部次序不必暴露握手。
-
-### D5.3 探活失败分两类(监督拓扑的后果)
-
-PID1 会**原地监督并重启** transport 子进程,于是 **transport 崩溃不等于 substrate 死亡**——两层探针的
-定义、健康态分类与处置全在 spec §4.3。这条区分正是 D4.2 分进程拓扑换来的附加能力:少了独立 PID 1,
-"端口不通"就只剩一种解释。
+> C1 (the pgid asymmetry) is a mature pattern; C2/C3 arise only under the **"a separate PID 1 + supervised
+> restart"** topology (an ordinary HTTP child process that is neither PID 1 nor supervised-restarted never
+> meets them), and are this engine's own additional agenda.
 
 ---
 
-## D6. 边界
+## D5. The resume cold-start timing
 
-- **pause 静止点**:结构已定(单层 drain-barrier,D4.4);**应用层协作安全点已否决**,不是待办。grace
-  时长是数值旋钮,家在代码里(`internal/lifecycle` 的 `defaultDrainGrace`),按 transport D5.4 的同一条
-  纪律**不登记为开放决策**——一个旋钮有两个家就会有两个值。
-- **模板是否预置常驻进程**:不需要;若出现,平级托管,不进 `sandboxd`。**内置 Template 的内容清单**是
-  产品/模板层选型,仍开放,登记在 [`open-decisions.md`](../open-decisions.md)(该行指回 D3.1)。
+The orchestration on top of the carrier (netns TCP, §5.E), the probe model (§4.3), the transport's
+statelessness, and the placement discovering the IP (§5.A).
+
+> **create and resume are one cold-start chain, differing only in prefix and failure exit.** ④⑤⑥⑦
+> (bringing runsc up + the readiness gate) are isomorphic for both; all that differs is: (a) the prefix —
+> resume remounts an **existing** Overlay artifact, while create first builds an **empty** Overlay + binds
+> the Volume/Network records for the first time; (b) the failure exit — resume has a quiescent state to
+> fall back to (→ `paused`, point ④) while create does not, so on failure it must clean up half-built
+> resources (the empty Overlay + the placement) and then delete the record / go to `destroyed` (spec §4.4
+> invariant A).
+> create's readiness window and half-dead disposition reuse ⑦'s Health RPC gate, with a timeout / failed
+> bring-up landing on its own failure exit. Below, resume is the main line and create's differences are
+> annotated inline.
+
+### D5.1 The canonical cold-start chain (shared by create / resume; verbs belong to §4, mechanisms to §5, and subsystems do not call each other)
+
+`resume` / `create` (lifecycle verbs, the mediator) call each subsystem's mechanism in order, bringing it
+up → `running`:
+
+```
+⓪ §4 write regime : read the mount table; if this bring-up would rw-mount some volume while a direct
+                    mutation is in flight on it → refuse (§5.C; roll back to the source state. The gate
+                    is first, so a refusal has built nothing)
+① §5.B Rootfs     : mount the merged overlay (lower=Template / upper=the Overlay artifact / work)
+                    [create: build an empty upper/work first; resume: remount the same Overlay artifact]
+② §5.C Volume     : Materialize each entry of the mount-table Binding, with the handles grouped into
+                    LaunchSpec.Mounts (runsc takes mounts from the OCI spec at startup, so this must
+                    precede ④)
+③ §5.D Network    : generate the rule set from the declaration Binding (a pure function: the allow set +
+                    the L0 floor + publish endpoints → rule text)
+      └─ ①②③'s products are gathered by §4 and handed to ④ — subsystems do not call each other
+④ §5.A Runtime    : rebuild the placement (netns/IP/cgroup per the resource-ceiling Binding; install
+                    ③'s rule set after building the netns/veth and before bringing up, with the
+                    predicate bound to the host-side veth's `iifname` (by name; `iif` is by ifindex and
+                    silently fails open after a same-name veth rebuild, §5.A) — §2.4's atomicity
+                    obligation)
+                    → bring up runsc with sandboxd (init mode) as the entrypoint
+⑤ in-guest start  : PID 1 (init mode) installs the reaper + signals + supervision → spawns
+                    transport-mode sandboxd → the child does PR_SET_CHILD_SUBREAPER → binds netns TCP
+                    → listening
+⑥ §5.A placement  : fix the transport endpoint as the guest netns IP:port — not a post-boot probe: the
+                    launch path uses the engine's own allocation directly, and the Adopt path reads the
+                    host-side veth's /30 and adds 1 (the guest-side address has been absorbed by the
+                    sentry netstack and cannot be read back, §5.A)
+⑦ §4 probe gate   : send a Health RPC to IP:port, polling until the first success or a timeout
+      ├─ first success → state=running, emit the resumed/created event (atomic in one commit with the
+      │                  state commit, spec §4.4-C) → the API returns
+      └─ timeout / failed bring-up → after reclaiming the half-built placement: resume→stay paused and
+                         retryable; create→delete the record / →destroyed
+⑧ (outside the    : the client re-resolves the placement and reconnects process/fs to the current IP;
+   engine)          a session adapter calls driver --resume (the engine does not participate, spec §5.E)
+```
+
+**Ordering constraints**: ⓪ must precede ① (a refused cold start should not have mounted the overlay
+already); ①②③ must be materialized before ④ (mounts are taken from the OCI spec when runsc starts and
+cannot be changed live); ⑥ requires the netns to exist (after ④); ⑦ requires the IP to be known (⑥)
+**and** the port to be listening (⑤) — **⑦ is the only barrier between "brought up" and "running"**.
+**Concurrency constraint**: §4.4-B's transition lock is **held throughout** this chain — taken before ①
+and released only when ⑦ flips it to `running` (or a timeout unwinds it) — so throughout ①–⑦ a
+concurrent `destroy`/`evict` cannot take the lock and will not delete an Overlay artifact being mounted
+or cold-started.
+
+### D5.2 Design points
+
+- **Point ① — readiness = the first successful `Health` RPC, reusing §4.3's probe rather than inventing a
+  ready protocol** (a bare TCP accept may precede the RPC handler being wired up, causing a false start;
+  readiness and health probing are the same thing anyway).
+- **Point ② — no health classification while a resume is in flight (the single-flight guard, §4.3).** The
+  implementation shape ("a non-blocking try-lock + skip", what it stops, and why it is not load-bearing
+  for concurrency correctness) is in [`reaper-health.md`](./reaper-health.md) D3.
+- **Point ③ — the resume API returning at `running` IS the signal that the caller "may connect now".**
+  The engine pushes no readiness to clients (there is no connection registry and no callback). A client
+  holding a stale IP handle that fails to connect **re-resolves the current placement** (a cold start
+  voids the old IP) — the only timing requirement is that the client not cache an old IP.
+- **Point ④ — a failed cold start rolls back atomically to the source state (⑦'s failure arm), adding no
+  failed state and introducing no compensating transaction** (spec §4.4-A): a failure is only "this
+  placement was not built", and the persistent state is intact on the backend.
+- **Point ⑤ — PID 1's internal readiness is absorbed by the transport port's readiness**: PID 1 can only
+  spawn the transport child after installing its handlers (⑤), so ⑦'s gate already gates the one
+  externally observable readiness and PID 1's internal ordering need not expose a handshake.
+
+### D5.3 Probe failures split into two classes (a consequence of the supervision topology)
+
+PID 1 **supervises and restarts** the transport child in place, so **a transport crash is not a substrate
+death** — the two probes' definitions, the health classification, and the dispositions are all in spec
+§4.3. This distinction is exactly the additional capability D4.2's split-process topology buys: without a
+separate PID 1, "the port is unreachable" would have only one possible explanation.
+
+---
+
+## D6. Boundaries
+
+- **The pause quiescent point**: the structure is settled (a single drain barrier, D4.4); **an
+  application-layer cooperative safe point is rejected** rather than pending. The grace duration is a
+  numeric knob whose home is the code (`internal/lifecycle`'s `defaultDrainGrace`), and per the same
+  discipline as transport D5.4 it is **not registered as an open decision** — a knob with two homes ends
+  up with two values.
+- **Whether a template preinstalls a resident process**: not needed; should one appear, it is managed as a
+  peer and not stuffed into `sandboxd`. **The content list of the built-in Template** is a product/template
+  layer choice, still open, and registered in [`open-decisions.md`](../open-decisions.md) (that row points
+  back at D3.1).

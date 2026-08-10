@@ -41,7 +41,8 @@ import (
 )
 
 // Endpoint is the current transport endpoint (netns veth IP:port), discovered
-// at placement time (§5.A ⑥). Never cached across resume (§4.3 要点③).
+// at placement time (§5.A ⑥). Never cached across resume (guest-runtime D5.2
+// point ③).
 type Endpoint string
 
 // ProcessEvent is one item of a process output stream: oneof{start,data,end,
@@ -146,7 +147,7 @@ type InputWriter interface {
 // the ONLY part of the channel the §4 mediator needs.
 type HealthProber interface {
 	// Health is the unary readiness/liveness probe. First success is the resume
-	// readiness gate that flips state to running (guest-runtime D5.2 要点①) — the
+	// readiness gate that flips state to running (guest-runtime D5.2 point ①) — the
 	// engine does not trust bare TCP accept. The returned HealthStatus carries the
 	// sandbox-global idle duration (§4.3 activity signal); it is only meaningful
 	// when err == nil. Readiness callers (cold-start ⑦ gate, adopt probe) ignore it
