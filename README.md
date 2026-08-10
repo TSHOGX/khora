@@ -1,81 +1,194 @@
 # warren
 
-A self-hostable, no-hypervisor agent sandbox engine — persistent, mutable,
-root-capable, state-transparent. Runs on gVisor/runsc systrap, so it works where
-KVM is unavailable (unprivileged processes, CI runners, inside a container).
-
-> **Naming.** `warren` is the project and the Go module. **`engine` remains the
-> name of the abstraction itself** throughout `docs/spec/` — §1.1's terminology
-> block defines *engine* = the sandbox abstraction this spec describes and
-> *orchestrator* = the binary hosting it. The two are different layers, not two
-> names for one thing, so the spec was not rewritten. The protobuf wire package
-> stays `engine.transport.v1` for the same reason (and because that string is a
-> protocol identifier, not a project label).
-
-> **Architecture spec** (the source of truth for *what this should be*) lives in
-> `docs/spec/` (§1–§6); one-time tool/environment choices in `docs/decisions/`.
-> `docs/spec/` describes the engine in full, the acceptance tests below are the
-> record of what is proven on the real substrate, and everything still open is
-> registered in [`docs/spec/open-decisions.md`](docs/spec/open-decisions.md).
-> There is no `docs/plans/` tree at present: the M1–M8 ladder shipped and the last
-> registered implementation gap is closed, so `docs/spec/` plus those tests are the
-> whole record.
-
-## Layout (canonical subsystem short-names, §5)
-
-```
-cmd/orchestrator/      thin entrypoint: flags → Engine → serve the §6.1 API
-cmd/sandboxd/          in-guest daemon: init (PID 1) + transport (process/fs) modes (§5.E.1)
-internal/orchestrator/ the single engine-host assembly (§1.1): holds the seams, serves §6.1
-                       (incl. the streaming large-file bypass, the one non-RPC route)
-internal/model/        §3 shared model: sandbox identity, lifecycle state (pure types)
-internal/lifecycle/    §4 mediator: state machine + transition lock + cold-start chain
-internal/store/        control-plane record seam: SQLite + in-memory, one interface
-internal/runtime/      §5.A: runtime provider seam + local_runsc
-internal/rootfs/       §5.B: rootfs provider seam + host overlayfs assembly
-internal/volume/       §5.C: volume.Backend seam + local btrfs arm + a TEST-ONLY plain-dir
-                       second arm (the seam's only falsification instrument) + volumetest
-internal/network/      §5.D: declaration validation + the rule GENERATOR (root-free, unit-testable)
-internal/transport/    §5.E: host-side process client + the 7-RPC fs surface + Health (Connect-RPC/h2c)
-internal/btrfs/        leaf package: subvolume + squota primitives (no engine model)
-internal/allocbytes/   leaf package: "bytes actually allocated" for a tree — the one
-                       measurement §5.B and §5.C both need for §3.4's second term
-internal/guestport/    leaf constants two subsystems must agree on: the guest netns TCP
-                       port (§5.A/§5.E) + the upload-temp prefix (§5.E/§5.B)
-internal/ruleset/      leaf: the abstract rule vocabulary §5.D generates and §5.A renders,
-                       §2.4's static address facts, and Validate — the criteria BOTH sides run
-internal/arch/         structural guards: subsystems must not import each other, nor
-                       read the control plane
-proto/                 transport wire schema; generated code under internal/transport/gen
-test/                  end-to-end acceptance against the real substrate + preflight fixtures
-```
-
-## Build & test
-
-Runs on a Linux host with gVisor/runsc, kernel overlayfs, netns, cgroup v2,
-btrfs in `squota` mode + `btrfs-progs`, and the `nft` + `ip` binaries (nftables
-+ iproute2) — dev environment: OrbStack machine `sbx`.
-Engine code + all overlay scratch must live on native fs, not a virtiofs shared
-mount. Why each of those is a hard requirement, and the measured machine facts:
-[`docs/decisions/ADR-0002`](docs/decisions/ADR-0002-execution-environment.md).
+**A self-hostable agent sandbox engine that needs no hypervisor.** Sandboxes are
+persistent, mutable, and root-capable inside; their whole state is plain files on
+your disk. It runs on gVisor/runsc, so it works where KVM is unavailable — an
+unprivileged process, a CI runner, inside a container.
 
 ```sh
-go build ./... && go vet ./...
-go test ./...            # unit + contract tests only
+# create a sandbox
+curl -X POST localhost:8080/v1/sandboxes \
+     -d '{"template_id":"base","disk_byte":2147483648}'
+# → {"sandbox_id":"sbx_b2aaead92a907e0d"}
 
-# End-to-end acceptance against the real substrate (root; runsc/overlay/btrfs/netns).
-# Without root every overlay mount fails with EPERM. `-p 1` is required: these
-# packages each launch real runsc containers, and running them concurrently
-# starves the in-guest Health probes the reaper's idle classification needs.
+# write a file into it, read it back
+curl -X PUT 'localhost:8080/v1/sandboxes/sbx_b2aaead92a907e0d/files?path=/tmp/hello' \
+     --data-binary 'warren works'
+curl 'localhost:8080/v1/sandboxes/sbx_b2aaead92a907e0d/files?path=/tmp/hello'
+# → warren works
+```
+
+Sandboxes survive being paused: `POST /v1/sandboxes/{id}/pause` stops the world and
+`/resume` brings it back with the filesystem exactly as it was. There is no memory
+snapshot — persistence is the overlay on disk, which is why a sandbox is portable
+across hosts, CPUs and runsc versions rather than pinned to a set of CPU features.
+
+> **Status: pre-release.** The engine is complete and verified against the real
+> substrate (92 end-to-end acceptance tests on actual runsc/overlayfs/btrfs/nftables).
+> It is **not yet deployable as-is**: the control-plane API has no authentication or
+> TLS, there is no client library or CLI, and no production Template ships in this
+> repo. See [What is missing](#what-is-missing-before-you-deploy-this).
+
+## Why this instead of a managed sandbox service
+
+- **No hypervisor.** gVisor's systrap platform intercepts syscalls in userspace, so
+  there is no `/dev/kvm` requirement and no nested-virtualization problem.
+- **Self-hosted, single binary.** One `orchestrator` process, one config, a local
+  SQLite store. Your code and data never leave your infrastructure.
+- **State is transparent.** A sandbox's persistent state is an overlayfs upper
+  directory you can read, back up, and move. Not an opaque RAM image.
+- **Two primitives, not a framework.** The engine exposes `process` and `fs` and
+  nothing about agents, sessions, or users. Those belong in a layer above it.
+- **Egress is deny-by-default and enforced in the kernel.** A sandbox reaches only
+  what its declaration allows, via per-sandbox nftables rules with a floor that a
+  declaration cannot lift.
+
+## What it does
+
+| Capability | Shape |
+| --- | --- |
+| Sandbox lifecycle | create / get / list / pause / resume / destroy, ID-addressed |
+| Run processes | start, stream stdout/stderr, signal, PTY, reconnect to a running process |
+| Filesystem | read / write / stat / list / mkdir / remove / move, plus streaming upload |
+| Volumes | independent of any sandbox: create, mount, snapshot, clone, import/export |
+| Templates | promote a sandbox to an immutable base image other sandboxes derive from |
+| Resource caps | CPU, memory, and disk, enforced via cgroup v2 and btrfs quotas |
+| Networking | deny-by-default egress declarations; `publish` a guest port to the host |
+| Autonomous reaping | idle sandboxes auto-pause; paused ones expire on a retention TTL |
+| Event stream | a durable, replayable outbox of lifecycle transitions with a cursor |
+
+Nothing about *agents* is in the engine — no session, tenant, or credential concept.
+Credentials in particular are permanently out of scope: anything the engine handed a
+sandbox would be readable by guest root, so it cannot be a secrecy boundary. The
+supported pattern is to keep the secret in a process outside the sandbox and narrow
+the sandbox's egress to that endpoint.
+
+## Requirements
+
+A Linux host with:
+
+- **gVisor/runsc** (systrap platform), and **root** — `--network=sandbox` rejects
+  `--rootless`, so materializing a sandbox needs root or `CAP_NET_ADMIN` +
+  `CAP_SYS_ADMIN`. The sentry itself stays unprivileged.
+- **kernel overlayfs**, **netns**, **cgroup v2**
+- **btrfs in `squota` mode**, plus `btrfs-progs` — this is how disk caps are enforced
+- **`nft`** and **`ip`** (nftables + iproute2)
+- **Go 1.23+** to build
+
+Engine code and all overlay scratch must sit on a native filesystem, never a
+virtiofs shared mount. Why each requirement is hard, with the measurements behind it:
+[`docs/decisions/ADR-0002`](docs/decisions/ADR-0002-execution-environment.md).
+
+Development and testing happen on an OrbStack machine (`sbx`, arm64). The substrate
+facts are additionally confirmed on amd64 where noted in ADR-0002's validation matrix.
+
+## Build and run
+
+```sh
+go build ./cmd/orchestrator ./cmd/sandboxd
+
+# A Template is a directory holding a guest rootfs. Build a minimal one — it needs
+# the sandboxd binary, which becomes the guest's PID 1:
+test/preflight/build-rootfs.sh ./templates/base ./sandboxd
+
+# --state MUST be on a btrfs filesystem: disk caps are btrfs quotas, and the engine
+# refuses to run a capped sandbox uncapped rather than silently ignoring the cap.
+sudo ./orchestrator --templates ./templates --state /srv/warren/state
+# serving §6.1 API on 127.0.0.1:8080
+```
+
+The default listen address is loopback, deliberately: the API is unauthenticated, so
+reachability from anywhere else must be a decision rather than a default. Notable
+flags — `--node-disk-byte` / `--node-memory-byte` turn on no-oversubscribe admission,
+`--idle-timeout` / `--retention` set the reaping TTLs, `--publish-ip` sets the host
+address published guest ports bind to. `--help` lists all of them with their reasoning.
+
+## Test
+
+```sh
+go test ./...            # unit + contract tests, no root needed
+
+# End-to-end acceptance against the real substrate (needs root).
+# -p 1 is required: these packages launch real runsc containers, and running them
+# concurrently starves the in-guest health probes the reaper's idle logic needs.
 sudo env "PATH=$PATH" "HOME=$HOME" go test -tags substrate -count=1 -p 1 ./...
 
-# The pause/write race (§4.2 drain barrier) is tagged separately: each round
-# overlaps a 64 MiB write with a pause, so it costs minutes rather than seconds.
-# Run it deliberately — the property it pins does not change per commit.
+# The pause/write race (§4.2 drain barrier), tagged separately because each round
+# overlaps a 64 MiB write with a pause. Run it deliberately.
 sudo env "PATH=$PATH" "HOME=$HOME" \
   go test -tags 'substrate drainrace' -count=1 -timeout 30m ./test/ -run TestPauseDrain
 ```
 
-A third tag, `testguest`, compiles the in-guest fault-injection seam into `sandboxd`
-(absent from a production guest, §5.E.1). The substrate harness builds the guest
-binary with it automatically — you never pass it by hand.
+A third tag, `testguest`, compiles an in-guest fault-injection seam into `sandboxd`
+that is absent from a production guest. The substrate harness applies it itself; you
+never pass it by hand.
+
+The acceptance suite is the honest record of what works. It asserts adversarial
+properties, not happy paths — a forged source address does not bypass the egress
+floor, the floor survives a veth rebuild, a live TCP flow survives a control-plane
+restart, a crash between writing snapshot bytes and inserting its row is repaired on
+the next boot.
+
+## What is missing before you deploy this
+
+Known and deliberate, not oversights:
+
+- **No authentication, no TLS** on the control-plane API. It assumes an authorized
+  caller, so today it belongs on loopback behind something that terminates TLS and
+  authenticates. A separate gateway component is the planned home for that — it stays
+  outside the engine, because credentials are excluded from the engine by design.
+- **No client library or CLI.** Consumers speak HTTP/JSON plus Connect-RPC directly.
+- **No production Template.** `build-rootfs.sh` produces a test fixture that copies
+  the host's own userland and ships a `/bin/sh` with no coreutils.
+- **No `/healthz`, `/readyz`, or metrics**, and no graceful shutdown yet. Operational
+  signal is logs.
+- **Two unbounded-growth limitations**, both documented in place: the event outbox
+  never deletes published rows, and the reference dedup sink is an in-process map.
+  Both need a retention answer argued from a real subscriber's reconnect window.
+- **Single node.** One orchestrator, no HA, no cross-host migration. The runtime
+  provider seam is where a scheduled remote isolation unit would plug in.
+
+## Documentation
+
+- [`docs/spec/`](docs/spec/) — the architecture spec (§1–§6): what the engine should
+  be, and why. The best current statement of intent, revisable but never edited
+  casually. Currently written in Chinese; an English translation is planned.
+- [`docs/spec/deep-dives/`](docs/spec/deep-dives/) — single-topic rationale: the
+  measurements, the falsified alternatives, the options rejected and on what evidence.
+- [`docs/spec/open-decisions.md`](docs/spec/open-decisions.md) — everything still
+  genuinely unsettled. Settled and unsettled never overlap.
+- [`docs/decisions/`](docs/decisions/) — ADRs for one-time tool and environment
+  choices.
+
+## Layout
+
+```
+cmd/orchestrator/      the engine host: flags → Engine → serve the API
+cmd/sandboxd/          in-guest daemon: init (PID 1) + the process/fs transport
+internal/orchestrator/ the assembly: holds the seams, serves the API
+internal/model/        shared model: sandbox identity, lifecycle state (pure types)
+internal/lifecycle/    the mediator: state machine, transition lock, cold-start chain
+internal/store/        control-plane records: SQLite + in-memory behind one interface
+internal/runtime/      runtime provider seam + the local runsc implementation
+internal/rootfs/       rootfs provider seam + host overlayfs assembly
+internal/volume/       volume backend seam + local btrfs arm (+ a test-only second arm)
+internal/network/      egress declaration validation + the nftables rule generator
+internal/transport/    host-side process/fs client over Connect-RPC, plus Health
+internal/btrfs/        leaf: subvolume + squota primitives
+internal/allocbytes/   leaf: bytes actually allocated for a tree
+internal/guestport/    leaf: constants two subsystems must agree on
+internal/ruleset/      leaf: the rule vocabulary, static address facts, shared criteria
+internal/arch/         structural guards: subsystems must not import each other
+proto/                 transport wire schema
+test/                  end-to-end acceptance against the real substrate
+```
+
+Subsystems never call each other — that is enforced by a test, not by review. When two
+need the same fact it goes in a leaf package, and a leaf may decide things but may not
+do I/O or touch the substrate.
+
+> **On the name.** `warren` is the project and the Go module. Inside
+> [`docs/spec/`](docs/spec/), *engine* means the sandbox abstraction itself and
+> *orchestrator* means the binary hosting it — different layers, not other names for
+> the project, so the spec was not rewritten. The protobuf wire package stays
+> `engine.transport.v1` because that string is a protocol identifier.
