@@ -47,7 +47,9 @@ the machine can't reach).
 | engine scratch fs | **btrfs** on `/dev/vdb1` (the machine's root subvolume; the repo at `/home/hsw/engine` sits on it, not on a mount of its own) — native, not virtiofs; `cp --reflink=always` works (cheap §5.B CoW) |
 | btrfs quota mode | **`squota`** (`/sys/fs/btrfs/*/qgroups/mode`) — the capacity axis depends on this specific mode, not merely on "btrfs" (why squota and not full qgroup: rootfs-overlay D6.2). The mode **cannot be changed here**: `BTRFS_IOC_QUOTA_CTL` returns EPERM even as root with full `CAP_SYS_ADMIN` |
 | btrfs-progs | **v6.17.1** — an explicit dependency: `internal/btrfs` shells out to `btrfs` and `findmnt` (both at `/usr/bin`) |
-| privilege | passwordless `sudo` available; mount/netns/veth/cgroup/runsc all need root |
+| nftables | **v1.1.6** — an explicit dependency, the whole of §5.D's enforcement: `internal/runtime` shells out to `nft` (`/usr/sbin`). Two version-sensitive facts are load-bearing and both are guarded by tests rather than by a version check: `fwd` is a reserved word and cannot be a chain name, and a named counter must be declared before the chain referencing it (network.md D5 ㉔) |
+| iproute2 | **6.19.0** — an explicit dependency: `internal/runtime` shells out to `ip` (`/usr/sbin`) for netns / veth / addr / route |
+| privilege | passwordless `sudo` available; mount/netns/veth/cgroup/runsc/nft all need root |
 
 ## Substrate validation matrix
 

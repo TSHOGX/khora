@@ -39,8 +39,9 @@ test/                  L2–L4 substrate acceptance + preflight fixtures
 
 ## Build & test
 
-Runs on a Linux host with gVisor/runsc, kernel overlayfs, netns, cgroup v2, and
-btrfs in `squota` mode + `btrfs-progs` — dev environment: OrbStack machine `sbx`.
+Runs on a Linux host with gVisor/runsc, kernel overlayfs, netns, cgroup v2,
+btrfs in `squota` mode + `btrfs-progs`, and the `nft` + `ip` binaries (nftables
++ iproute2) — dev environment: OrbStack machine `sbx`.
 Engine code + all overlay scratch must live on native fs, not a virtiofs shared
 mount. Why each of those is a hard requirement, and the measured machine facts:
 [`docs/decisions/ADR-0002`](docs/decisions/ADR-0002-execution-environment.md).

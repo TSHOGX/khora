@@ -399,6 +399,9 @@ resume 而非 auto-pause 的静止(健康态分类与判据见 §4.3)。
 - **L1 — substrate 探活**:runsc/sentry 容器是否活(§5.A)。
 - **L2 — transport 探活**:向 netns IP:port 发一个 `Health` RPC 是否成功(§5.E,见 transport.md D4.5)。
 
+> **这两个 `L` 是探活层号,与 OSI 层号无关。** network.md 讲报文注入时的 `L2`/`L3` 是 OSI 的链路层 / 网络层
+> (那里的 `L0` 又是另一回事:nft 地板),本节的 `L1`/`L2` 只指上面这两个探针。跨文档读时按各自定义处读。
+
 > **"两个都判"不等于"两次 round-trip":L2 通 ⟹ L1 活,故 L2 成功时 L1 探针被跳过。** `sandboxd` 是在
 > 隔离单元**内部**应答的,它答得出来就证明了容器活着——这不是省略一次检查,是用一个更强的观测同时结清
 > 两层。**只有 L2 不通时两层才真的分岔**(transport-down 瞬态 vs dead-recoverable),那时才需要单独问 L1。

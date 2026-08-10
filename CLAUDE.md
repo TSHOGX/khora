@@ -130,7 +130,7 @@ slims to boundary + open agenda — nothing lives in full in both places.
 ## Execution & verification
 
 - Runs on **Linux + gVisor/runsc + kernel overlayfs + netns + cgroup v2 + btrfs
-  (`squota` mode, plus `btrfs-progs`)**; dev/test environment = OrbStack machine
+  (`squota` mode, plus `btrfs-progs`) + `nft` + `ip`**; dev/test environment = OrbStack machine
   `sbx`, with engine code + **all** overlay scratch on **native fs**, never the
   virtiofs shared mount. Why each is a hard requirement, and the measured machine
   facts: `docs/decisions/ADR-0002`.
