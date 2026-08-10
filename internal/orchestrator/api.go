@@ -401,6 +401,12 @@ func (e *Engine) handleSandboxSub(w http.ResponseWriter, r *http.Request) {
 		e.handlePublish(w, r, id)
 	case sub == "publish":
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	// The same §6.2 general rule for the older routes. They landed in `default` as 404,
+	// which contradicts §6.2 ("a wrong method on ANY collection/object route → 405")
+	// and was inconsistent with the two arms above for no reason anyone chose: the
+	// route exists, the method does not apply to it.
+	case sub == "files", sub == "pause", sub == "resume":
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	default:
 		// process/fs data plane is Connect-RPC (transport D5), not REST here.
 		http.Error(w, "not found", http.StatusNotFound)

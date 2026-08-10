@@ -546,3 +546,46 @@ func TestAFullReadResponseIsALegalWriteBody(t *testing.T) {
 			"own read-only members is not a general exemption from DisallowUnknownFields (§6.1)")
 	}
 }
+
+// …and the SAME rule at the publish endpoint, which is the other write face for this
+// field and was the gap: §6.1's rule is "every read-only member the read face emits is
+// accepted and ignored", not "every one on the PATCH path".
+//
+// `GET …/network` emits `host_endpoint` on a running sandbox's publish items, so a
+// caller re-posting one item they just read back hit a 400 on a key the engine itself
+// produced — precisely the friction §6.1 argues must not sit on the read-modify-write
+// path, one endpoint over from where it was fixed.
+func TestAReadBackPublishItemIsALegalPublishBody(t *testing.T) {
+	// Exactly what the read face emits for one publish item on a live placement.
+	resp := encodeNetwork(func() model.NetworkDecl {
+		d := model.NetworkDecl{}
+		d.Egress.Default = model.NetDeny
+		d.Ingress.Publish = []model.NetPublish{{GuestPort: 8080, Proto: model.NetTCP}}
+		return d
+	}(), []string{"10.66.0.1:33445"})
+	item, err := json.Marshal(resp.Ingress.Publish[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(item), `"host_endpoint"`) {
+		t.Fatalf("this test is only meaningful if the read face emits host_endpoint — it does "+
+			"not, so the assertion below is vacuous: %s", item)
+	}
+
+	var req publishReq
+	if err := strictDecode(bytes.NewReader(item), &req); err != nil {
+		t.Fatalf("a read-back publish item is not a legal publish body (%v) — §6.1 requires every "+
+			"read-only member the read face emits to be accepted and ignored on the write path, and "+
+			"this endpoint is a write path for the same field: %s", err, item)
+	}
+	if req.GuestPort != 8080 || req.Proto != string(model.NetTCP) {
+		t.Errorf("the item did not survive the round trip: %+v", req)
+	}
+
+	// The non-exemption, at this endpoint too.
+	if err := strictDecode(strings.NewReader(
+		`{"guest_port":8080,"proto":"tcp","host_endpiont":"x"}`), &publishReq{}); err == nil {
+		t.Error("a misspelled `host_endpiont` was accepted at the publish endpoint — accepting the " +
+			"read face's own read-only member is not a general exemption (§6.1)")
+	}
+}

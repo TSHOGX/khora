@@ -13,6 +13,7 @@ import (
 
 	"engine/internal/lifecycle"
 	"engine/internal/model"
+	"engine/internal/network"
 	"engine/internal/store"
 	"engine/internal/transport"
 )
@@ -323,6 +324,68 @@ func TestAdmissionVerdictsMapToDistinctStatuses(t *testing.T) {
 			t.Fatalf("ErrUncappedDiskNotCappable → %d; want 400 — the request is well-formed but the promise cannot be materialized (§3.4). NOT 507 (nothing is full) and NOT 409 (no retry or state change makes it legal; the remedy is a new sandbox)", got)
 		}
 	})
+
+	// The PLACEMENT-side network refusal, which fell to the default arm as 500. A resume
+	// or a publish carries no declaration, so 400 would send the caller to edit
+	// something they did not send; and nothing failed, so 500 is a lie that also tells
+	// them to retry. The asymmetry is what makes it unmistakable: the same operator
+	// condition (restart with no `--via-uid`) answers 400 on create and answered 500
+	// here.
+	t.Run("a recorded via[] this deployment cannot pin → 409", func(t *testing.T) {
+		wrapped := fmt.Errorf("lifecycle: cold start: %w", network.ErrViaUnenforceableAtPlacement)
+		if got := statusCodeFor(wrapped); got != http.StatusConflict {
+			t.Fatalf("ErrViaUnenforceableAtPlacement → %d; want 409 — the record and the running "+
+				"deployment conflict, and both documented remedies change state elsewhere (restart "+
+				"with the uid, or PATCH the via[] away). NOT 500: nothing failed, and retrying "+
+				"cannot help. NOT 400: the request carries no declaration to fix", got)
+		}
+		// It must stay distinguishable from the WRITE-point refusal of the same
+		// condition, which is a 400 over a request that did carry the declaration.
+		if statusCodeFor(wrapped) == statusCodeFor(network.ErrDeclarationInvalid) {
+			t.Error("the placement-side and write-point via[] refusals map to the same status — " +
+				"their remedies differ (an operator's vs the caller's), which is why the sentinel " +
+				"is separate (§6.2)")
+		}
+	})
+}
+
+// §6.2's general rule: a wrong method on ANY collection/object route is 405, not 404 —
+// the route exists, the method does not apply to it. Asserted across ALL the sandbox
+// sub-routes because the two M8 ones carried explicit arms while the three older ones
+// fell into `default` as 404, so the rule held on the newest half of the router only.
+func TestAWrongMethodOnEverySandboxSubRouteIs405(t *testing.T) {
+	mem := store.NewMemory()
+	med := lifecycle.New(lifecycle.Deps{Store: mem})
+	eng := &Engine{Mediator: med, Store: mem}
+	srv := httptest.NewServer(eng.HTTPHandler())
+	t.Cleanup(srv.Close)
+
+	// A method that is wrong for each route, chosen so none is the route's real verb.
+	for _, tc := range []struct{ method, sub string }{
+		{http.MethodDelete, "network"},
+		{http.MethodGet, "publish"},
+		{http.MethodDelete, "files"},
+		{http.MethodGet, "pause"},
+		{http.MethodGet, "resume"},
+	} {
+		t.Run(tc.method+" "+tc.sub, func(t *testing.T) {
+			req, err := http.NewRequest(tc.method, srv.URL+"/v1/sandboxes/sbx_x/"+tc.sub, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusMethodNotAllowed {
+				t.Errorf("%s /v1/sandboxes/{id}/%s → %d; want 405 (§6.2: a wrong method on any "+
+					"collection/object route is 405, never 404 — 404 says the route does not "+
+					"exist, which sends the caller to check their URL)", tc.method, tc.sub,
+					resp.StatusCode)
+			}
+		})
+	}
 }
 
 // --- GET /v1/events (§6.1 / §4.4-C event-stream replay, pull only) -----------

@@ -305,6 +305,18 @@ func (e *Engine) handleNetworkGet(w http.ResponseWriter, r *http.Request, id mod
 type publishReq struct {
 	GuestPort uint16 `json:"guest_port"`
 	Proto     string `json:"proto"`
+	// HostEndpoint is ACCEPTED AND IGNORED, exactly as `state` is on networkWire and
+	// for the same reason: §6.1's rule is that EVERY read-only member the read face
+	// emits is taken and ignored on the write path, so that a caller can round-trip
+	// what they read. `GET …/network` emits this key on a `running` sandbox's publish
+	// items, so without it here, re-posting one item back is a 400 on a field the
+	// engine itself produced — the friction §6.1 spends a paragraph refusing to
+	// impose, one endpoint over.
+	//
+	// It is not a general exemption from DisallowUnknownFields: a misspelled
+	// `host_endpiont` is still a 400. The engine never reads this value — the endpoint
+	// is a placement product (§3.3), so a caller cannot choose it.
+	HostEndpoint string `json:"host_endpoint"`
 }
 
 type publishResp struct {
@@ -379,6 +391,19 @@ func strictDecode(body io.Reader, v any) error {
 func networkStatus(err error) (int, bool) {
 	if lifecycle.IsDeclarationInvalid(err) {
 		return http.StatusBadRequest, true
+	}
+	// The PLACEMENT-side twin, and it is NOT a 400: a resume or a publish carries no
+	// declaration, so 400 would send the caller to edit something they did not send.
+	// A recorded `via[]` meets a deployment that supplies no second-hop uid — the
+	// record and the running deployment conflict, and BOTH documented remedies change
+	// state elsewhere (restart the engine with the uid, or PATCH the `via[]` away).
+	//
+	// Without this arm it fell through to 500, which tells the caller "engine fault,
+	// retry" when nothing failed and no retry can help. The asymmetry made it
+	// unmistakable: the SAME operator condition answered 400 on create (where
+	// ValidateDeployment sees the declaration) and 500 on resume.
+	if errors.Is(err, network.ErrViaUnenforceableAtPlacement) {
+		return http.StatusConflict, true
 	}
 	return 0, false
 }
