@@ -20,8 +20,8 @@ import (
 
 	"connectrpc.com/connect"
 
-	"engine/internal/transport"
-	"engine/test/harness"
+	"warren/internal/transport"
+	"warren/test/harness"
 )
 
 // collect drains a process event channel until end, returning accumulated data

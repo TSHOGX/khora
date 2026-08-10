@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"engine/internal/model"
-	"engine/internal/store"
+	"warren/internal/model"
+	"warren/internal/store"
 )
 
 // patchBinding drives the real PATCH verb with a Binding-only spec — what

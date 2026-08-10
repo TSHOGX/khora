@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"engine/internal/model"
+	"warren/internal/model"
 )
 
 // --- pause drain barrier (§4.2 静止点 / guest-runtime D4.4) --------------------

@@ -15,8 +15,8 @@ import (
 
 	"connectrpc.com/connect"
 
-	"engine/internal/transport"
-	"engine/test/harness"
+	"warren/internal/transport"
+	"warren/test/harness"
 )
 
 // The five metadata RPCs against a real guest. Unit tests cover the errno table

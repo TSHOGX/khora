@@ -19,7 +19,7 @@ syntax = "proto3";
 
 package engine.transport.v1;
 
-option go_package = "engine/internal/transport/gen/engine/transport/v1;transportv1";
+option go_package = "warren/internal/transport/gen/engine/transport/v1;transportv1";
 
 // Health is the unary readiness/liveness probe (§4.3 L2 / transport D4.5). Its
 // first success is the resume readiness gate that flips a sandbox to running

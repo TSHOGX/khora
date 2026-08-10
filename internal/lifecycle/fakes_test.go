@@ -11,12 +11,12 @@ import (
 	"testing"
 	"time"
 
-	"engine/internal/model"
-	"engine/internal/rootfs"
-	"engine/internal/ruleset"
-	"engine/internal/runtime"
-	"engine/internal/transport"
-	"engine/internal/volume"
+	"warren/internal/model"
+	"warren/internal/rootfs"
+	"warren/internal/ruleset"
+	"warren/internal/runtime"
+	"warren/internal/transport"
+	"warren/internal/volume"
 )
 
 // seedBare inserts the "bare" builtin Template into st so a sandbox create /

@@ -24,9 +24,9 @@ import (
 	"connectrpc.com/connect"
 	"golang.org/x/net/http2"
 
-	"engine/internal/lifecycle"
-	v1 "engine/internal/transport/gen/engine/transport/v1"
-	"engine/internal/transport/gen/engine/transport/v1/transportv1connect"
+	"warren/internal/lifecycle"
+	v1 "warren/internal/transport/gen/engine/transport/v1"
+	"warren/internal/transport/gen/engine/transport/v1/transportv1connect"
 )
 
 // h2cClient builds an http.Client that speaks cleartext HTTP/2 (h2c), matching

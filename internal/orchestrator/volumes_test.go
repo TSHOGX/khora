@@ -14,10 +14,10 @@ import (
 	"testing"
 	"time"
 
-	"engine/internal/lifecycle"
-	"engine/internal/model"
-	"engine/internal/store"
-	"engine/internal/volume"
+	"warren/internal/lifecycle"
+	"warren/internal/model"
+	"warren/internal/store"
+	"warren/internal/volume"
 )
 
 // volumeFixture assembles an Engine with a REAL volume backend — the test-only

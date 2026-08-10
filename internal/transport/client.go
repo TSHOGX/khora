@@ -14,8 +14,8 @@ import (
 	"connectrpc.com/connect"
 	"golang.org/x/net/http2"
 
-	v1 "engine/internal/transport/gen/engine/transport/v1"
-	"engine/internal/transport/gen/engine/transport/v1/transportv1connect"
+	v1 "warren/internal/transport/gen/engine/transport/v1"
+	"warren/internal/transport/gen/engine/transport/v1/transportv1connect"
 )
 
 // connectClient is the host-side implementation of Client backed by the

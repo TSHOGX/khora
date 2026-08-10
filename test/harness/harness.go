@@ -18,10 +18,10 @@ import (
 	"testing"
 	"time"
 
-	"engine/internal/model"
-	"engine/internal/orchestrator"
-	"engine/internal/rootfs"
-	"engine/internal/runtime"
+	"warren/internal/model"
+	"warren/internal/orchestrator"
+	"warren/internal/rootfs"
+	"warren/internal/runtime"
 )
 
 // RepoRoot resolves the engine repo root from this file's location.

@@ -15,14 +15,14 @@ import (
 	"testing"
 	"time"
 
-	"engine/internal/lifecycle"
-	"engine/internal/model"
-	"engine/internal/orchestrator"
-	"engine/internal/ruleset"
-	"engine/internal/runtime"
-	"engine/internal/store"
-	"engine/internal/transport"
-	"engine/test/harness"
+	"warren/internal/lifecycle"
+	"warren/internal/model"
+	"warren/internal/orchestrator"
+	"warren/internal/ruleset"
+	"warren/internal/runtime"
+	"warren/internal/store"
+	"warren/internal/transport"
+	"warren/test/harness"
 )
 
 // §5.D enforcement on the real substrate.

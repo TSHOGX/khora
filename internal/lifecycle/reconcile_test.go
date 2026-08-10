@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"engine/internal/model"
-	"engine/internal/runtime"
-	"engine/internal/store"
-	"engine/internal/transport"
+	"warren/internal/model"
+	"warren/internal/runtime"
+	"warren/internal/store"
+	"warren/internal/transport"
 )
 
 // reconcile L1: pure logic against fakes. Proves the §4.4-A dual dispatch —

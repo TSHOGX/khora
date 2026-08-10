@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"engine/internal/model"
-	"engine/internal/runtime"
-	"engine/internal/store"
-	"engine/internal/transport"
+	"warren/internal/model"
+	"warren/internal/runtime"
+	"warren/internal/store"
+	"warren/internal/transport"
 )
 
 // Provider-failure paths across the cold-start / teardown chain (§4.4-A). The

@@ -17,11 +17,11 @@ import (
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
 
-	"engine/internal/lifecycle"
-	"engine/internal/model"
-	"engine/internal/rootfs"
-	"engine/internal/store"
-	"engine/internal/transport/gen/engine/transport/v1/transportv1connect"
+	"warren/internal/lifecycle"
+	"warren/internal/model"
+	"warren/internal/rootfs"
+	"warren/internal/store"
+	"warren/internal/transport/gen/engine/transport/v1/transportv1connect"
 )
 
 // HTTPHandler exposes the minimal §6.1 sandbox-centric API — ID-addressed, no

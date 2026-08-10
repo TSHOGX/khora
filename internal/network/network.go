@@ -39,8 +39,8 @@ import (
 	"strconv"
 	"strings"
 
-	"engine/internal/model"
-	"engine/internal/ruleset"
+	"warren/internal/model"
+	"warren/internal/ruleset"
 )
 
 // The DECLARATION TYPES live in `model`, not here, and that placement follows the

@@ -11,12 +11,12 @@ import (
 	"testing"
 	"time"
 
-	"engine/internal/lifecycle"
-	"engine/internal/model"
-	"engine/internal/network"
-	"engine/internal/rootfs"
-	"engine/internal/store"
-	"engine/internal/transport"
+	"warren/internal/lifecycle"
+	"warren/internal/model"
+	"warren/internal/network"
+	"warren/internal/rootfs"
+	"warren/internal/store"
+	"warren/internal/transport"
 )
 
 // apiFixture assembles an Engine over a Memory store with no real providers —

@@ -7,9 +7,9 @@ import (
 	"io"
 	"net/http"
 
-	"engine/internal/lifecycle"
-	"engine/internal/model"
-	"engine/internal/network"
+	"warren/internal/lifecycle"
+	"warren/internal/model"
+	"warren/internal/network"
 )
 
 // This file carries §6.1's Network block: the `network?` create input, the whole-for-

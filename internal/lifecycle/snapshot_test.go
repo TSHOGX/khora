@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"engine/internal/model"
-	"engine/internal/store"
-	"engine/internal/volume"
+	"warren/internal/model"
+	"warren/internal/store"
+	"warren/internal/volume"
 )
 
 // TestSnapshotWritesTheCapInTheSameBackendCall is the unit-level guard for the failure

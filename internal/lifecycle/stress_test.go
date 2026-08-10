@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"engine/internal/model"
-	"engine/internal/runtime"
-	"engine/internal/store"
-	"engine/internal/transport"
+	"warren/internal/model"
+	"warren/internal/runtime"
+	"warren/internal/store"
+	"warren/internal/transport"
 )
 
 // storeFactory builds a fresh Store for a stress subtest. Both backends run the

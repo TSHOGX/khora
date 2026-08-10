@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"engine/internal/model"
-	"engine/internal/store"
+	"warren/internal/model"
+	"warren/internal/store"
 )
 
 // kindFor is the §4.1 kind matching a transition INTO state. Tests needing only "a

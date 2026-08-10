@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"engine/internal/model"
+	"warren/internal/model"
 )
 
 // noHostLocal / allHostLocal are hostLocal fixtures. The predicate is a PARAMETER

@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"engine/internal/model"
-	"engine/internal/ruleset"
+	"warren/internal/model"
+	"warren/internal/ruleset"
 )
 
 // --- helpers ------------------------------------------------------------------

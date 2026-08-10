@@ -14,9 +14,9 @@ import (
 	"testing"
 	"time"
 
-	"engine/internal/runtime"
-	"engine/internal/transport"
-	"engine/test/harness"
+	"warren/internal/runtime"
+	"warren/internal/transport"
+	"warren/test/harness"
 )
 
 func launchOne(t *testing.T) (transport.Client, func()) {

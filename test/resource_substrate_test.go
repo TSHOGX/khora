@@ -22,13 +22,13 @@ import (
 	"testing"
 	"time"
 
-	"engine/internal/btrfs"
-	"engine/internal/lifecycle"
-	"engine/internal/model"
-	"engine/internal/orchestrator"
-	"engine/internal/store"
-	"engine/internal/transport"
-	"engine/test/harness"
+	"warren/internal/btrfs"
+	"warren/internal/lifecycle"
+	"warren/internal/model"
+	"warren/internal/orchestrator"
+	"warren/internal/store"
+	"warren/internal/transport"
+	"warren/test/harness"
 )
 
 // cpuBurnSrc is a guest-side busy loop. The minimal Template has no coreutils, so

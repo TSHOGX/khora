@@ -22,8 +22,8 @@ import (
 	"testing"
 	"time"
 
-	"engine/internal/model"
-	"engine/internal/store"
+	"warren/internal/model"
+	"warren/internal/store"
 )
 
 // Factory builds a fresh, empty Store for one subtest. The bool return says

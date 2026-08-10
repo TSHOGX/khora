@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"engine/internal/model"
-	"engine/internal/network"
-	"engine/internal/store"
-	"engine/internal/transport"
+	"warren/internal/model"
+	"warren/internal/network"
+	"warren/internal/store"
+	"warren/internal/transport"
 )
 
 // The Deployment carries ONLY viaHostLocal: no second-hop uid, which is the state the

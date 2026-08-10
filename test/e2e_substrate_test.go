@@ -17,11 +17,11 @@ import (
 	"testing"
 	"time"
 
-	"engine/internal/lifecycle"
-	"engine/internal/model"
-	"engine/internal/orchestrator"
-	"engine/internal/transport"
-	"engine/test/harness"
+	"warren/internal/lifecycle"
+	"warren/internal/model"
+	"warren/internal/orchestrator"
+	"warren/internal/transport"
+	"warren/test/harness"
 )
 
 // setupEngine builds an engine with the overlay read-through marker the vertical

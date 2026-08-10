@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"engine/internal/model"
-	"engine/internal/store"
+	"warren/internal/model"
+	"warren/internal/store"
 )
 
 // The §4.4-B transition-lock map must be BOUNDED and its exclusion must hold

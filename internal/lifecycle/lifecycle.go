@@ -21,13 +21,13 @@ import (
 	"sync"
 	"time"
 
-	"engine/internal/model"
-	"engine/internal/network"
-	"engine/internal/rootfs"
-	"engine/internal/runtime"
-	"engine/internal/store"
-	"engine/internal/transport"
-	"engine/internal/volume"
+	"warren/internal/model"
+	"warren/internal/network"
+	"warren/internal/rootfs"
+	"warren/internal/runtime"
+	"warren/internal/store"
+	"warren/internal/transport"
+	"warren/internal/volume"
 )
 
 // ErrResourceTerminated is the §4.3 resource-terminated verdict surfaced as a

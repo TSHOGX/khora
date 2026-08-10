@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"engine/internal/model"
+	"warren/internal/model"
 )
 
 // A host endpoint is stable WITHIN a placement and only within one. These tests pin the

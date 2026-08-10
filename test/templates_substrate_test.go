@@ -20,9 +20,9 @@ import (
 	"testing"
 	"time"
 
-	"engine/internal/lifecycle"
-	"engine/internal/model"
-	"engine/internal/store"
+	"warren/internal/lifecycle"
+	"warren/internal/model"
+	"warren/internal/store"
 )
 
 // create-from-Template → DeleteTemplate is refused (ErrInUse, → 409);

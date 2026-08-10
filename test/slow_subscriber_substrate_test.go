@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	"engine/internal/transport"
+	"warren/internal/transport"
 )
 
 func TestC4SlowSubscriberDoesNotFreezeSource(t *testing.T) {

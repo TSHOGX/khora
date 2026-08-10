@@ -5,11 +5,11 @@ import (
 	"errors"
 	"fmt"
 
-	"engine/internal/model"
-	"engine/internal/network"
-	"engine/internal/ruleset"
-	"engine/internal/runtime"
-	"engine/internal/store"
+	"warren/internal/model"
+	"warren/internal/network"
+	"warren/internal/ruleset"
+	"warren/internal/runtime"
+	"warren/internal/store"
 )
 
 // This file is the §4 mediator's network face: it threads §5.D's generator output

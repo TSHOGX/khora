@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	"engine/internal/model"
-	"engine/internal/store"
+	"warren/internal/model"
+	"warren/internal/store"
 )
 
 // Reaper is the engine's first autonomous background control loop (§4.3 /

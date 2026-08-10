@@ -24,9 +24,9 @@ import (
 	"sync"
 	"testing"
 
-	"engine/internal/btrfs"
-	"engine/internal/lifecycle"
-	"engine/internal/model"
+	"warren/internal/btrfs"
+	"warren/internal/lifecycle"
+	"warren/internal/model"
 )
 
 // TestVolumeRegimeRefusesDirectWriteUnderALiveHolderAndAllowsItWhenPaused pins the write regime in BOTH directions.

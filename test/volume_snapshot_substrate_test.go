@@ -19,12 +19,12 @@ import (
 	"testing"
 	"time"
 
-	"engine/internal/btrfs"
-	"engine/internal/lifecycle"
-	"engine/internal/model"
-	"engine/internal/store"
-	"engine/internal/transport"
-	"engine/test/harness"
+	"warren/internal/btrfs"
+	"warren/internal/lifecycle"
+	"warren/internal/model"
+	"warren/internal/store"
+	"warren/internal/transport"
+	"warren/test/harness"
 )
 
 // runCmd runs a host command and returns its combined output. Local to this file: the

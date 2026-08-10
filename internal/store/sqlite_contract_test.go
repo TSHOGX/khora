@@ -4,8 +4,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"engine/internal/store"
-	"engine/internal/store/storetest"
+	"warren/internal/store"
+	"warren/internal/store/storetest"
 )
 
 // SQLite runs the SAME §4.4-C contract suite as Memory (§1.3 seam: the two

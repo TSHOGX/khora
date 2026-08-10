@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"engine/internal/ruleset"
+	"warren/internal/ruleset"
 )
 
 // testCtx is a rendering context with every placement product bound, so a test can

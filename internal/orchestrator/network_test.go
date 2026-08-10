@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"engine/internal/model"
-	"engine/internal/network"
+	"warren/internal/model"
+	"warren/internal/network"
 )
 
 // The assembly REFUSES a second-hop uid equal to its own euid, and it refuses BEFORE

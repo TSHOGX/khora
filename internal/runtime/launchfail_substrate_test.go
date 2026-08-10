@@ -14,7 +14,7 @@ import (
 	"strings"
 	"testing"
 
-	"engine/internal/ruleset"
+	"warren/internal/ruleset"
 )
 
 // A launch that fails AFTER the rule set is installed must take the table with it.

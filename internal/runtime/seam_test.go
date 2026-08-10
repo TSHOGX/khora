@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"engine/internal/ruleset"
+	"warren/internal/ruleset"
 )
 
 // bannedTokens are substrings that betray a host primitive crossing a seam.

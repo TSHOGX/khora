@@ -8,11 +8,11 @@ import (
 	"testing"
 	"time"
 
-	"engine/internal/lifecycle"
-	"engine/internal/model"
-	"engine/internal/store"
-	"engine/internal/transport"
-	"engine/internal/volume"
+	"warren/internal/lifecycle"
+	"warren/internal/model"
+	"warren/internal/store"
+	"warren/internal/transport"
+	"warren/internal/volume"
 )
 
 // bindingFixture assembles an Engine with fake runtime/rootfs seams and a REAL

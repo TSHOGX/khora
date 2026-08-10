@@ -8,7 +8,7 @@ import (
 
 	"connectrpc.com/connect"
 
-	"engine/internal/model"
+	"warren/internal/model"
 )
 
 // --- large-file bypass, outer edge (§5.E fs / transport D4.4) -----------------

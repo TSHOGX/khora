@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"net/netip"
 
-	"engine/internal/ruleset"
+	"warren/internal/ruleset"
 )
 
 // Spec is what §5.D hands across the §5.A seam: the abstract rule set plus the

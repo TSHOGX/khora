@@ -8,11 +8,11 @@ import (
 	"testing"
 	"time"
 
-	"engine/internal/model"
-	"engine/internal/rootfs"
-	"engine/internal/runtime"
-	"engine/internal/store"
-	"engine/internal/transport"
+	"warren/internal/model"
+	"warren/internal/rootfs"
+	"warren/internal/runtime"
+	"warren/internal/store"
+	"warren/internal/transport"
 )
 
 // Unit tests for the §3.4 resource-limit Binding and the §4.3 death-cause

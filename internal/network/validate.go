@@ -7,8 +7,8 @@ import (
 	"net"
 	"net/netip"
 
-	"engine/internal/model"
-	"engine/internal/ruleset"
+	"warren/internal/model"
+	"warren/internal/ruleset"
 )
 
 // ErrDeclarationInvalid is the one verdict §6.2's nine declaration 400 classes

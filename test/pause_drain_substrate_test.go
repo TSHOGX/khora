@@ -29,12 +29,12 @@ import (
 
 	"connectrpc.com/connect"
 
-	"engine/internal/lifecycle"
-	"engine/internal/orchestrator"
-	"engine/internal/transport"
-	v1 "engine/internal/transport/gen/engine/transport/v1"
-	"engine/internal/transport/gen/engine/transport/v1/transportv1connect"
-	"engine/test/harness"
+	"warren/internal/lifecycle"
+	"warren/internal/orchestrator"
+	"warren/internal/transport"
+	v1 "warren/internal/transport/gen/engine/transport/v1"
+	"warren/internal/transport/gen/engine/transport/v1/transportv1connect"
+	"warren/test/harness"
 )
 
 // THE hazard this barrier exists for. The guest's fs.Write is truncate-then-write

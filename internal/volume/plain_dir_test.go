@@ -3,8 +3,8 @@ package volume_test
 import (
 	"testing"
 
-	"engine/internal/volume"
-	"engine/internal/volume/volumetest"
+	"warren/internal/volume"
+	"warren/internal/volume/volumetest"
 )
 
 // TestPlainDirContract runs the shared seam contract against the TEST-ONLY

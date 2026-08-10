@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"engine/internal/model"
-	"engine/internal/runtime"
-	"engine/internal/store"
-	"engine/internal/transport"
+	"warren/internal/model"
+	"warren/internal/runtime"
+	"warren/internal/store"
+	"warren/internal/transport"
 )
 
 // reaper dispatch as pure logic against fakes (§4.3 health states → §4.1

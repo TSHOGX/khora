@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"engine/internal/model"
-	"engine/internal/store"
-	"engine/internal/transport"
+	"warren/internal/model"
+	"warren/internal/store"
+	"warren/internal/transport"
 )
 
 // mountFixture builds a mediator with all four seams faked and one volume seeded.

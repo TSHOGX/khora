@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"engine/internal/model"
-	"engine/internal/store"
-	"engine/internal/transport"
+	"warren/internal/model"
+	"warren/internal/store"
+	"warren/internal/transport"
 )
 
 // §4.4-C at the MEDIATOR layer. The store contract suite (storetest) proves each

@@ -24,12 +24,12 @@ import (
 	"testing"
 	"time"
 
-	"engine/internal/btrfs"
-	"engine/internal/lifecycle"
-	"engine/internal/model"
-	"engine/internal/orchestrator"
-	"engine/internal/transport"
-	"engine/test/harness"
+	"warren/internal/btrfs"
+	"warren/internal/lifecycle"
+	"warren/internal/model"
+	"warren/internal/orchestrator"
+	"warren/internal/transport"
+	"warren/test/harness"
 )
 
 // guestSh runs one shell command in a sandbox and returns its combined output.

@@ -26,11 +26,11 @@ import (
 // at review time: routing volume content through §5.E `fs` was ruled out for §5.C
 // partly because this guard would have failed on it (volume.md D5.1).
 var subsystems = []string{
-	"engine/internal/runtime",   // §5.A
-	"engine/internal/rootfs",    // §5.B
-	"engine/internal/volume",    // §5.C
-	"engine/internal/network",   // §5.D
-	"engine/internal/transport", // §5.E
+	"warren/internal/runtime",   // §5.A
+	"warren/internal/rootfs",    // §5.B
+	"warren/internal/volume",    // §5.C
+	"warren/internal/network",   // §5.D
+	"warren/internal/transport", // §5.E
 }
 
 // mediatorOnly are packages a §5 subsystem must never import. A subsystem that
@@ -38,8 +38,8 @@ var subsystems = []string{
 // (the keep-set pattern), precisely so the subsystem cannot form its own opinion
 // about authoritative state.
 var mediatorOnly = []string{
-	"engine/internal/lifecycle",
-	"engine/internal/store",
+	"warren/internal/lifecycle",
+	"warren/internal/store",
 }
 
 // allowedEdges are cross-subsystem imports permitted with the reason they are
@@ -84,7 +84,7 @@ func listPackages(t *testing.T, tags string) []pkg {
 	if tags != "" {
 		args = append(args, "-tags", tags)
 	}
-	args = append(args, "engine/...")
+	args = append(args, "warren/...")
 	out, err := exec.Command("go", args...).Output()
 	if err != nil {
 		t.Fatalf("go list -tags %q: %v", tags, err)
@@ -197,10 +197,10 @@ func TestSubsystemsDoNotReadTheControlPlane(t *testing.T) {
 //     and §5.C (volume/local_btrfs.go).
 //   - allocbytes — shared by §5.B and §5.C for the same reason.
 var leaves = []string{
-	"engine/internal/guestport",
-	"engine/internal/ruleset",
-	"engine/internal/btrfs",
-	"engine/internal/allocbytes",
+	"warren/internal/guestport",
+	"warren/internal/ruleset",
+	"warren/internal/btrfs",
+	"warren/internal/allocbytes",
 }
 
 // inertLeaves are the leaves CLAUDE.md's second half binds: "a leaf may DECIDE
@@ -222,8 +222,8 @@ var leaves = []string{
 // generate side (root-free unit tests) and the install side, which is only true
 // while it decides and never acts.
 var inertLeaves = []string{
-	"engine/internal/guestport",
-	"engine/internal/ruleset",
+	"warren/internal/guestport",
+	"warren/internal/ruleset",
 }
 
 // actsOnTheWorld are stdlib packages a leaf cannot reach without doing the thing
@@ -293,7 +293,7 @@ func TestLeavesImportNothingFromTheEngine(t *testing.T) {
 			delete(want, p.ImportPath)
 			for _, group := range [][]string{p.Imports, p.TestImports, p.XTestImports} {
 				for _, imp := range group {
-					if !strings.HasPrefix(imp, "engine/") {
+					if !strings.HasPrefix(imp, "warren/") {
 						continue
 					}
 					t.Errorf("leaf %s imports %s (tags=%q) — a leaf exists so two subsystems can "+

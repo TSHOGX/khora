@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"engine/internal/model"
+	"warren/internal/model"
 )
 
 // TestWriteRegimeRefusesWhileALiveRWMountHolds is the first direction of §5.C's
