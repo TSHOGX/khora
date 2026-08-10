@@ -146,7 +146,20 @@ func TestValidateCatchesEachSilentlyBrokenShape(t *testing.T) {
 		// per-sandbox narrowing at all.
 		name: "uid narrowing on a per-sandbox rule",
 		rs:   base(func(r *Rule) { r.Scope = ScopeSecondHopUID }),
-		want: "may not be narrowed by uid",
+		want: "second-hop scope",
+	}, {
+		// THE RETURN SCOPE ON A PER-SANDBOX HOOK, which is the worse half of the same
+		// crossing and was accepted while only the uid direction was guarded: this scope
+		// renders NO clause at all, so on a shared hook it is a completely un-narrowed
+		// accept. Only the renderer's text guard caught it, which puts the decision on
+		// the substrate at install time instead of here, root-free.
+		name: "second-hop return scope on a per-sandbox rule",
+		rs: base(func(r *Rule) {
+			r.Scope = ScopeSecondHopReturn
+			r.Verdict = Accept
+			r.Match = Match{CTState: []string{"established", "related"}}
+		}),
+		want: "second-hop scope",
 	}, {
 		// …and the reverse: the second hop arrives on no interface, so an interface
 		// predicate there is simply unreachable (D5 ㉔).
@@ -253,7 +266,11 @@ func TestOnlyTerminalVerdictsEndCrossChainTraversal(t *testing.T) {
 // PerSandbox is what gives the two render guards their disjoint scopes, so the
 // mapping is asserted rather than assumed: exactly one hook is engine-level.
 func TestExactlyOneHookIsEngineLevel(t *testing.T) {
-	all := []Hook{HookInput, HookForward, HookPrerouting, HookPostrouting, HookOutputNAT, HookOutputFilter}
+	// Every hook, INCLUDING HookForwardIngress. Enumerating by hand is why that one
+	// was missing: it is the hook whose priority carries the measured cross-sandbox
+	// ordering fix, so leaving it out left exactly the arm that matters unchecked.
+	all := []Hook{HookInput, HookForward, HookForwardIngress, HookPrerouting,
+		HookPostrouting, HookOutputNAT, HookOutputFilter}
 	engineLevel := 0
 	for _, h := range all {
 		if !h.PerSandbox() {

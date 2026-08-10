@@ -1073,6 +1073,12 @@ func TestChainSpecsMapHooksToTheKernelsOwnSplit(t *testing.T) {
 		ruleset.HookPostrouting:  {"c_postrouting", "nat", "postrouting", "srcnat"},
 		ruleset.HookOutputNAT:    {"c_output_nat", "nat", "output", "dstnat"},
 		ruleset.HookOutputFilter: {"c_output", "filter", "output", "filter"},
+		// THE INGRESS CHAIN, whose PRIORITY is the load-bearing part: at one shared
+		// priority a sibling sandbox's ingress drop raced this sandbox's floor and won,
+		// the floor counted ZERO, and which counter moved depended on table creation
+		// order. A typo collapsing `filter + 10` to `filter` restores that
+		// nondeterminism, and it was the one hook this table did not cover.
+		ruleset.HookForwardIngress: {"c_forward_in", "filter", "forward", "filter + 10"},
 	}
 	for hook, exp := range want {
 		got, err := chainSpec(hook)
@@ -1082,6 +1088,22 @@ func TestChainSpecsMapHooksToTheKernelsOwnSplit(t *testing.T) {
 		}
 		if got != exp {
 			t.Errorf("chainSpec(%s) = %+v, want %+v", hook, got, exp)
+		}
+	}
+	// The RELATION, not just the literals: the ingress chain must sit strictly later
+	// than the plain forward chain on the same hook, which is what keeps the two out
+	// of a race regardless of how either priority is spelled.
+	fwd, err1 := chainSpec(ruleset.HookForward)
+	in, err2 := chainSpec(ruleset.HookForwardIngress)
+	if err1 == nil && err2 == nil {
+		if fwd.hook != in.hook {
+			t.Errorf("the forward and ingress chains are on different hooks (%q vs %q) — the "+
+				"ordering argument only applies to two chains on the SAME hook", fwd.hook, in.hook)
+		}
+		if fwd.priority == in.priority {
+			t.Errorf("the forward and ingress chains share priority %q — measured: at one shared "+
+				"priority a sibling's ingress drop won over this sandbox's floor, the floor counted "+
+				"zero, and the winner depended on table creation order", fwd.priority)
 		}
 	}
 	if _, err := chainSpec(ruleset.Hook(99)); err == nil {

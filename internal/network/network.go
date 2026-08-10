@@ -154,6 +154,16 @@ func ParseEndpoint(ep string) (netip.Addr, uint16, error) {
 		return netip.Addr{}, 0, fmt.Errorf("endpoint address %q is not an IP literal: the engine "+
 			"resolves no names (§5.D)", host)
 	}
+	// §6.2's v4-mapped class applies HERE TOO, and for a reason of its own rather
+	// than by analogy with the tuple's `cidr`: `dnat` is family-typed. A v4-mapped
+	// endpoint renders `dnat ip6 to [::ffff:10.0.0.5]:1080` onto a flow whose packets
+	// are IPv4, because `netip.Addr.Is4` is FALSE for the mapped form — the rule
+	// installs, matches nothing, and `via[]` is silently dead with NO counter moving.
+	// The containment checks happen to survive the spelling (they unmap), which is
+	// exactly what makes this gap invisible from the validation side.
+	if verr := rejectV4Mapped(addr, host); verr != nil {
+		return netip.Addr{}, 0, verr
+	}
 	port, perr := strconv.ParseUint(portStr, 10, 16)
 	if perr != nil || port == 0 {
 		return netip.Addr{}, 0, fmt.Errorf("endpoint port %q is not a port number", portStr)

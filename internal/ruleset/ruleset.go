@@ -157,7 +157,7 @@ const (
 	UDP Proto = "udp"
 )
 
-// Hook is where a rule attaches. Six values, and the split is a MEASURED
+// Hook is where a rule attaches. Seven values, and the split is a MEASURED
 // structural fact rather than an implementation convenience:
 //
 //   - The first hop (the guest's own egress) splits across TWO hooks with
@@ -620,9 +620,18 @@ func Validate(rs RuleSet) error {
 		// interface is unreachable, because that traffic arrives on no interface
 		// (D5 ㉔). This is the "two tables, two guards, two predicates" split — it
 		// is not an exemption from one guard, it is two guards with disjoint scopes.
-		if r.Hook.PerSandbox() && r.Scope == ScopeSecondHopUID {
-			return fmt.Errorf("%s: a per-sandbox rule may not be narrowed by uid — that "+
-				"predicate belongs to the engine-level second-hop table (§2.4 / D5 ㉔)", where)
+		// BOTH second-hop scopes are refused here, not just the uid one. The RETURN
+		// scope is the more dangerous of the two on a per-sandbox hook: it renders NO
+		// clause at all (the narrowing it relies on is the ct-state match), so on a
+		// shared hook it is an entirely un-narrowed accept — a hole in every sandbox's
+		// floor. Guarding only the uid direction left that to the renderer's text
+		// guard, i.e. to install time on the real substrate, when the whole point of
+		// this half is deciding it root-free.
+		if r.Hook.PerSandbox() && (r.Scope == ScopeSecondHopUID || r.Scope == ScopeSecondHopReturn) {
+			return fmt.Errorf("%s: a per-sandbox rule may not carry a second-hop scope — neither "+
+				"predicate narrows to one placement, and the RETURN scope renders no clause at "+
+				"all, so on a shared hook it is an un-narrowed accept: a hole in EVERY sandbox's "+
+				"floor (§2.4 / D5 ⑩ ㉔)", where)
 		}
 		if !r.Hook.PerSandbox() && r.Scope != ScopeSecondHopUID && r.Scope != ScopeSecondHopReturn {
 			return fmt.Errorf("%s: the engine-level output chain can only be narrowed by uid "+

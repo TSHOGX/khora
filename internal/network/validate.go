@@ -1,6 +1,7 @@
 package network
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
@@ -226,12 +227,30 @@ func ParseCIDR(s string) (netip.Prefix, error) {
 	return p, nil
 }
 
-// v4Compatible is `::/96` — the deprecated v4-compatible form, refused for the
-// same reason as v4-mapped: a second spelling of an address that already has one.
-var v4Compatible = netip.MustParsePrefix("::/96")
+// isV4Compatible reports whether a is RFC 4291's deprecated `::a.b.c.d` form: the
+// high 96 bits zero AND the low 32 carrying a v4 address.
+//
+// The low-word test is what keeps this from over-reaching, and it is not a detail.
+// A bare `::/96` containment test also matches `::` and `::1` — and `::1/128` is a
+// FLOOR MEMBER (ruleset.FloorLiftableNever), so refusing it here makes §6.2's
+// SEVENTH class unreachable for v6 loopback: the parse refuses the tuple before the
+// containment test that would have reported the right class. It also refuses `::/0`,
+// the v6 spelling of "any destination", whose v4 counterpart `0.0.0.0/0` is legal.
+// RFC 4291 excludes both: the unspecified and loopback addresses are not v4
+// spellings of anything, and `::1` has no IPv4 form to rewrite it into — so the
+// refusal's own remedy ("write it in IPv4 form") could not be followed.
+func isV4Compatible(a netip.Addr) bool {
+	b := a.As16()
+	for _, x := range b[:12] {
+		if x != 0 {
+			return false
+		}
+	}
+	return binary.BigEndian.Uint32(b[12:]) > 1
+}
 
 func rejectV4Mapped(a netip.Addr, raw string) error {
-	if a.Is4() || a.Is4In6() || (a.Is6() && v4Compatible.Contains(a)) {
+	if a.Is4() || a.Is4In6() || (a.Is6() && isV4Compatible(a)) {
 		if a.Is4() {
 			return nil // an ordinary dotted-quad, the canonical spelling
 		}
@@ -514,6 +533,39 @@ func Validate(d Declaration, given bool, hostLocal HostLocal) error {
 		if err := validateTuple(t, fmt.Sprintf("egress.allow[%d]", i)); err != nil {
 			return err
 		}
+		// A WILDCARD DESTINATION IS ILLEGAL ON `allow[]`, and this is the one class whose
+		// reason is the floor itself rather than the shape of the request.
+		//
+		// The allows are emitted on `input` as well as `forward` (semantics ③: the caller
+		// must be able to declare their own resolver, whose only stable address is this
+		// sandbox's own /30 gateway — a host-local address, so `input`). On `input` the
+		// floor is a pure ct-state rule with NO address list, because "not established"
+		// is already exhaustive over every host address. An allow with no `cidr` therefore
+		// renders `iifname <veth> meta l4proto tcp accept` — no destination clause at all
+		// — ABOVE that floor, and hands the guest every address of the host itself on
+		// every port of that protocol. That is §2.4's one floor item no declaration may
+		// lift (network.md D5 ⑧), lifted by a declaration.
+		//
+		// It is invisible from the sibling side, which is why it needs its own class: the
+		// sibling drop sits above the allows and keeps holding, so every sibling-focused
+		// assertion still passes while the host-itself item is gone.
+		//
+		// CONTRAST WITH `via[].match[]`, where the same wildcard is LEGAL: there it is the
+		// declared transparent-interception form (D3.3), and the steering rule still pins
+		// the flow by its other two clauses (post-NAT port and `iifname`). An allow has no
+		// other clauses — nothing else narrows it — so the analogy does not carry. This is
+		// the same mechanism-based asymmetry between the two fields that class 7 already
+		// has.
+		if t.AnyDest() {
+			return invalid(ClassMalformedShape, "egress.allow[%d] names no `cidr` — a wildcard "+
+				"destination has no reading here other than lifting the L0 floor: the allows are "+
+				"emitted on the `input` hook too (§5.D semantics ③), where the floor carries no "+
+				"address list, so a destination-less accept above it would reach EVERY address of "+
+				"the host itself on every %s port (§2.4 / network.md D5 ⑧). Name the destination. "+
+				"(`via[].match[]` is the opposite case: there an omitted `cidr` is the declared "+
+				"transparent-interception form, because the steering rule still pins the flow by "+
+				"its post-NAT port and input interface, D3.3)", i, t.Proto)
+		}
 		// CLASS 7. WHOLE containment, never intersection, and that is measured
 		// rather than cautious: the floor sits ABOVE the declaration's allows, so
 		// ordering resolves a supernet correctly — an `allow 10.0.0.0/8` under a
@@ -568,6 +620,14 @@ func Validate(d Declaration, given bool, hostLocal HostLocal) error {
 		}
 		addr, _, err := ParseEndpoint(v.Endpoint)
 		if err != nil {
+			// PRESERVE a class the parse already decided. ParseEndpoint refuses a
+			// v4-mapped literal as ClassV4Mapped, and relabelling it "not host-local"
+			// would send the caller to check whether the address is on this host when
+			// their actual problem is the SPELLING — the same wrong-fix hazard the
+			// class-6-before-class-5 ordering below exists to avoid.
+			if _, ok := ClassOf(err); ok {
+				return err
+			}
 			return invalid(ClassViaEndpointNotHostLocal, "%s.endpoint: %v", where, err)
 		}
 		// CLASS 6 BEFORE CLASS 5, because loopback satisfies both and class 6 names
@@ -594,6 +654,7 @@ func Validate(d Declaration, given bool, hostLocal HostLocal) error {
 		}
 	}
 
+	seenPublish := make(map[model.NetPublish]int, len(d.Ingress.Publish))
 	for i, p := range d.Ingress.Publish {
 		where := fmt.Sprintf("ingress.publish[%d]", i)
 		if p.Proto == "" {
@@ -612,6 +673,26 @@ func Validate(d Declaration, given bool, hostLocal HostLocal) error {
 				"it is the DNAT TARGET port, not a match, so zero has nothing to rewrite to. (A "+
 				"tuple's `port` is the opposite case: omitted there means any port, §5.D)", where)
 		}
+		// SELF-CONTRADICTION WITHIN ONE DECLARATION — the same shape as a mount binding
+		// repeating a dest, and refused at the same place for the same reason.
+		//
+		// Two identical items are not "one harmless extra rule". §5.D puts deduplication
+		// at THIS layer precisely because the substrate will not do it: nft accepts two
+		// byte-identical DNATs without complaint and the second never matches. The
+		// provider does refuse the pair at PLACEMENT — but by then the row is committed,
+		// so that refusal repeats at every resume and the sandbox never starts again.
+		// The other half of §5.D's argument is worse: under two identical items, a later
+		// PATCH removing one leaves the port still open.
+		//
+		// `POST …/publish` dedups on its own (AddPublish), so this guards the paths that
+		// carry the whole array — create and PATCH.
+		if prev, dup := seenPublish[p]; dup {
+			return invalid(ClassMalformedShape, "%s duplicates ingress.publish[%d] (%s/%d) — a publish "+
+				"is keyed on `{guest_port, proto}` and two identical items cannot both take effect: "+
+				"the substrate accepts both rules and never matches the second, and a later PATCH "+
+				"removing one would leave the port open (§5.D)", where, prev, p.Proto, p.GuestPort)
+		}
+		seenPublish[p] = i
 	}
 	return nil
 }

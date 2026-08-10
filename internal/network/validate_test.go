@@ -134,6 +134,19 @@ func TestTheNineHundredClasses(t *testing.T) {
 			}}, true, noHostLocal)
 		},
 	}, {
+		// V6 LOOPBACK, and it is here because class 8 made this cell UNREACHABLE: a
+		// `::/96` containment test also matches `::1`, so the parse refused a floor
+		// member with the v4-mapped class and the advice "write it in IPv4 form" —
+		// which `::1` has no way to follow. Class 7 could never be reported for it.
+		name:  "egress.allow inside v6 loopback",
+		class: ClassAllowInsideFloor,
+		run: func() error {
+			return Validate(Declaration{Egress: Egress{
+				Default: DenyAll,
+				Allow:   []Tuple{{CIDR: mustCIDR(t, "::1/128"), Port: 80, Proto: model.NetTCP}},
+			}}, true, noHostLocal)
+		},
+	}, {
 		// CLASS 8, and it is class 7's NECESSARY PREREQUISITE (D5 ⑲).
 		name:  "cidr is a v4-mapped v6 literal",
 		class: ClassV4Mapped,
@@ -156,6 +169,24 @@ func TestTheNineHundredClasses(t *testing.T) {
 			return err
 		},
 	}, {
+		// THE ENDPOINT SIDE OF CLASS 8, whose reason is its own rather than an analogy
+		// with `cidr`: `dnat` is family-typed and `Is4()` is false for the mapped form,
+		// so this renders `dnat ip6 to …` onto an IPv4 flow — the rule installs, matches
+		// nothing, and `via[]` is silently dead with NO counter moving. The containment
+		// checks survive the spelling (they unmap), which is what hid it.
+		//
+		// The CLASS is the assertion, not merely the refusal: reporting this as
+		// "endpoint not host-local" would send the caller to check whether the address
+		// is on this host when their problem is how they spelled it.
+		name:  "via endpoint is a v4-mapped v6 literal",
+		class: ClassV4Mapped,
+		run: func() error {
+			return Validate(Declaration{Egress: Egress{Default: DenyAll, Via: []Via{{
+				Match:    []Tuple{{CIDR: mustCIDR(t, "1.1.1.1/32"), Port: 443, Proto: model.NetTCP}},
+				Endpoint: "[::ffff:10.0.0.5]:1080",
+			}}}}, true, allHostLocal)
+		},
+	}, {
 		// CLASS 9, first shape. The remedy is to ADD A MEMBER to an empty array, which
 		// is why it is not class 3: there is no tuple yet for a `proto` field to be
 		// missing from.
@@ -176,6 +207,40 @@ func TestTheNineHundredClasses(t *testing.T) {
 			return Validate(Declaration{
 				Egress:  Egress{Default: DenyAll},
 				Ingress: Ingress{Publish: []Publish{{GuestPort: 0, Proto: model.NetTCP}}},
+			}, true, noHostLocal)
+		},
+	}, {
+		// CLASS 9, third shape — and the one whose reason is the FLOOR rather than the
+		// request's shape. The allows are emitted on `input` too (semantics ③), where the
+		// floor carries no address list, so a destination-less accept above it reaches
+		// EVERY address of the host itself: §2.4's one unliftable item, lifted.
+		//
+		// It is invisible from the sibling side — the sibling drop sits above the allows
+		// and keeps holding — so every sibling-focused assertion passes while the
+		// host-itself item is gone. That is why it needs an assertion of its own.
+		name:  "egress.allow names no cidr",
+		class: ClassMalformedShape,
+		run: func() error {
+			return Validate(Declaration{Egress: Egress{
+				Default: DenyAll,
+				Allow:   []Tuple{{Proto: model.NetTCP}},
+			}}, true, noHostLocal)
+		},
+	}, {
+		// CLASS 9, fourth shape. §5.D puts deduplication at the DECLARATION layer because
+		// the substrate will not do it: nft accepts two byte-identical DNATs and never
+		// matches the second. The provider refuses the pair at PLACEMENT, but by then the
+		// row is committed — so that refusal repeats at every resume and the sandbox never
+		// starts again.
+		name:  "publish[] repeats one {guest_port, proto}",
+		class: ClassMalformedShape,
+		run: func() error {
+			return Validate(Declaration{
+				Egress: Egress{Default: DenyAll},
+				Ingress: Ingress{Publish: []Publish{
+					{GuestPort: 8080, Proto: model.NetTCP},
+					{GuestPort: 8080, Proto: model.NetTCP},
+				}},
 			}, true, noHostLocal)
 		},
 	}}
@@ -303,6 +368,44 @@ func TestClassSevenDoesNotOverReach(t *testing.T) {
 			Allow:   []Tuple{{CIDR: mustCIDR(t, "169.0.0.0/8"), Port: 80, Proto: model.NetTCP}},
 		}},
 		why: "containment is one-directional: the floor item must contain the declaration",
+	}, {
+		// `::1/128` MUST PARSE, or class 7 is unreachable for v6 loopback: a `::/96`
+		// containment test in class 8 also matches `::1`, and the parse then refuses a
+		// floor member with the wrong class and an unfollowable remedy. Here it must
+		// reach class 7 — which the class table asserts; this arm asserts the OTHER
+		// direction, that a legal v6 declaration nearby is not swept up.
+		name: "a v6 supernet of loopback",
+		d: Declaration{Egress: Egress{
+			Default: DenyAll,
+			Allow:   []Tuple{{CIDR: mustCIDR(t, "2606:4700::/32"), Port: 443, Proto: model.NetTCP}},
+		}},
+		why: "an ordinary global v6 prefix is not a v4 spelling of anything",
+	}, {
+		// THE WILDCARD DESTINATION IS LEGAL HERE and fatal on `allow[]` — the same
+		// mechanism asymmetry class 7 already has between the two fields. This is D3.3's
+		// declared transparent-interception form, and the steering rule still pins the
+		// flow by its post-NAT port and `iifname`; an allow has no other clauses at all.
+		name: "a cidr-less tuple inside via[].match[]",
+		d: Declaration{Egress: Egress{
+			Default: DenyAll,
+			Via: []Via{{
+				Match:    []Tuple{{Port: 443, Proto: model.NetTCP}},
+				Endpoint: "10.0.0.5:15443",
+			}},
+		}},
+		why: "an omitted cidr in via[].match[] is the transparent-interception form (D3.3)",
+	}, {
+		// Two publishes on ONE guest port are DISTINCT items: the key is
+		// {guest_port, proto}, so tcp and udp there are two rules, not a duplicate.
+		name: "tcp and udp published on the same guest port",
+		d: Declaration{
+			Egress: Egress{Default: DenyAll},
+			Ingress: Ingress{Publish: []Publish{
+				{GuestPort: 8080, Proto: model.NetTCP},
+				{GuestPort: 8080, Proto: model.NetUDP},
+			}},
+		},
+		why: "a publish is keyed on {guest_port, proto}, so these are two items",
 	}}
 
 	for _, tc := range cases {
