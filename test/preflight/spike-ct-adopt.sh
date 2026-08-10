@@ -37,7 +37,7 @@
 #      guest→peer TCP that keeps transferring, asserted by BYTES MOVING (the
 #      peer's per-message RX counter grows), not by a socket merely existing.
 #      A "still alive" claim read off a socket would pass on a dead flow.
-# (a2) Paired negative, per the門-B discipline (D4.1 / D5 ⑧): a floor whose drop
+# (a2) Paired negative, per the D4.1 acceptance discipline (D5 ⑧): a floor whose drop
 #      counter is 0 is indistinguishable from a floor that is bypassed. So the
 #      same rule set must be shown to DENY something (guest→peer on an
 #      undeclared port) with the drop counter moving. Without (a2), every
