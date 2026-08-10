@@ -223,8 +223,8 @@ func TestFsReadHugeLengthDoesNotPreallocate(t *testing.T) {
 	}
 }
 
-// A length larger than int64 slice range used to PANIC in makeslice before any
-// bound was applied — a request that kills the transport, not one that errors.
+// A length larger than int64 slice range PANICs in makeslice if it reaches there before
+// a bound is applied — a request that kills the transport rather than one that errors.
 func TestFsReadAbsurdLengthDoesNotPanic(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "small")

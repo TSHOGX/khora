@@ -1000,9 +1000,8 @@ func TestUpdateBindingRewritesTheBinding(t *testing.T) {
 		rp.mu.Lock()
 		rp.uncappedBytes = 3*gib + 1
 		rp.mu.Unlock()
-		// Proof the node is genuinely over budget: a one-byte DISK raise — the very arm a
-		// CPU raise used to be routed through — is refused. Without this the subtest could
-		// pass on a node that was never full.
+		// Proof the node is genuinely over budget: a one-byte DISK raise is refused.
+		// Without this the subtest could pass on a node that was never full.
 		oneMore := gib + 1
 		if err := patchBinding(m, ctx, sid, store.Binding{DiskByte: &oneMore}); !errors.Is(err, ErrInsufficientCapacity) {
 			t.Fatalf("disk raise on a full node = %v; want ErrInsufficientCapacity (the fixture must really be exhausted)", err)

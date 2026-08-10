@@ -238,10 +238,11 @@ func TestPatchRefusedRebindRestoresThePreviousBinding(t *testing.T) {
 // TestPatch400ChangesNothing: a PATCH that answers 400 left the record EXACTLY as it
 // was — asserted by reading the record back, not by trusting the status code.
 //
-// The defect this pins is the one a status-code-only test cannot see. `handlePatch`
-// used to call UpdateBinding and only THEN decode and validate the declaration, so
-// `{"memory_byte":N, <invalid network>}` answered 400 with the memory cap ALREADY
-// COMMITTED. The response said "your request was rejected"; the store said otherwise.
+// The defect this pins is the one a status-code-only test cannot see. Were `handlePatch`
+// to commit the binding and only THEN decode and validate the declaration,
+// `{"memory_byte":N, <invalid network>}` would answer 400 with the memory cap ALREADY
+// COMMITTED — the response saying "your request was rejected" while the store says
+// otherwise.
 // §6.2 requires validation to precede the admission gate precisely so a refusal touches
 // nothing, and the field the caller can observe afterwards is the only witness.
 //

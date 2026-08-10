@@ -372,7 +372,8 @@ func (e *Engine) handlePublish(w http.ResponseWriter, r *http.Request, id model.
 // outcomes, which is why the misspelling has to be an error rather than a default.
 //
 // It also makes the create path's `network?` a real field rather than one more
-// ignored key: before this, the key was dropped by the decoder with no signal at all.
+// ignored key: without it, a misspelled `network` object is dropped by the decoder
+// with no signal at all and the sandbox comes up with the default declaration.
 func strictDecode(body io.Reader, v any) error {
 	dec := json.NewDecoder(body)
 	dec.DisallowUnknownFields()

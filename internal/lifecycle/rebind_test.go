@@ -270,9 +270,9 @@ func TestRebindStateGateIsTheUnionAndPrecedesEveryWrite(t *testing.T) {
 // invalid declaration legal, so a 409 sends them to do work that changes nothing. It is
 // the same reasoning that puts the disk `0 → N` refusal ahead of the admission gate.
 //
-// This also pins WHERE the validation lives. It used to run in the API layer only; it is
-// now a write-point obligation on the mediator, so a caller reaching the mediator
-// directly (the substrate suites do) cannot bypass §6.2's classes.
+// This also pins WHERE the validation lives: it is a write-point obligation on the
+// mediator, not an API-layer one, so a caller reaching the mediator directly (the
+// substrate suites do) cannot bypass §6.2's classes.
 func TestRebindValidatesTheDeclarationBeforeTheStateGate(t *testing.T) {
 	ctx := context.Background()
 	m, st, _ := volFixture(t)

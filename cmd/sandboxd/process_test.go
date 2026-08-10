@@ -269,8 +269,8 @@ func (f *failingSender) Send(e *v1.ProcessEvent) error {
 	return nil
 }
 
-// The first-frame Send failure used to skip `go p.run(...)` entirely, and run's
-// onExit is unregister's ONLY call site. Three leaks followed, worst first: the
+// A first-frame Send failure must not skip `go p.run(...)`, because run's
+// onExit is unregister's ONLY call site. Three leaks follow if it does, worst first: the
 // pumps never start, so the child blocks forever writing into a 64 KiB pipe nobody
 // reads — it cannot even exit; the s.procs entry stays for the daemon's life; and
 // three fds stay open (cmd.Wait is deliberately skipped, so pumpSource's

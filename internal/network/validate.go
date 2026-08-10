@@ -114,9 +114,9 @@ const (
 	// Class 3's remedy is "write `proto` in this tuple" — one field, one edit, and the
 	// error names the field. These two need the caller to ADD A MEMBER to an array
 	// (`match[]` has no entries at all) or to supply a port the request never
-	// mentioned. Both were previously reported as `tuple-missing-proto`, which sends
-	// the caller to look at a `proto` field that may well be perfectly written — or,
-	// for the empty `match[]`, that does not exist yet because there is no tuple.
+	// mentioned. Folding either into `tuple-missing-proto` would send the caller to
+	// look at a `proto` field that may well be perfectly written — or, for the empty
+	// `match[]`, that does not exist yet because there is no tuple.
 	//
 	// # Why the two share ONE class
 	//
@@ -173,12 +173,12 @@ func invalid(c Class, format string, args ...any) error {
 // that depends on deployment configuration. Its own sentinel so the caller can
 // tell it from the declaration classes; the remedy is an operator's, not theirs.
 //
-// SETTLED in §6.2, which now carries this refusal as a DEPLOYMENT-natured 400 stated
-// separately from the declaration-text classes, and no longer calls the resource-cap
-// rule the ONE field semantic that depends on deployment configuration — there are two.
-// What §6.2 requires to stay distinguishable is the caller's REMEDY, and that is why
-// this one keeps its own sentinel: fixing it is an operator's job (supply the
-// second-hop uid at startup), not the caller's — no edit to the declaration reaches it.
+// §6.2 carries it as a DEPLOYMENT-natured 400 stated separately from the nine
+// declaration-text classes — one of exactly TWO field semantics that depend on
+// deployment configuration (the resource-cap rule is the other). What §6.2 requires to
+// stay distinguishable is the caller's REMEDY, and that is why this one keeps its own
+// sentinel: fixing it is an operator's job (supply the second-hop uid at startup), not
+// the caller's — no edit to the declaration reaches it.
 const ClassViaWithoutSecondHopUID Class = "via-without-second-hop-uid"
 
 // ClassOf reports which of §6.2's nine declaration classes an error is, if any.

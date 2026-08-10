@@ -1170,8 +1170,8 @@ func TestAnInputSideAllowReachesItsOwnGatewayButNotASiblings(t *testing.T) {
 // first thing the guest can possibly do is already refused. If the rules went on
 // after the unit started, the guest's first probe would be the one that got through.
 //
-// THE FAILED-LAUNCH HALF IS NOT HERE, and the name no longer claims it: this test used to
-// promise it and exercise only destroy, which reaches teardown with a COMPLETE placement.
+// THE FAILED-LAUNCH HALF IS NOT HERE, and the name deliberately does not claim it: what
+// this test exercises is destroy, which reaches teardown with a COMPLETE placement.
 // A failed launch reaches it half-built, which is the state `nft destroy`-over-`delete`
 // and the table-before-veth ordering exist for. No control-plane knob fails a launch after
 // the rules are installed, so that arm lives at the layer where it is reachable:
@@ -1267,12 +1267,12 @@ func main() {
 // inside the L0 floor, loopback included, because every flow steered there would be
 // permanently fail-closed.
 //
-// This fixture originally used 127.0.0.9 and measured that fail-closure directly: with
-// `route_localnet=0` (this host's default) a 127/8 DNAT target is simply not routable
-// for guest-originated traffic — `ip route get 127.0.0.9 from <guest>` answers
+// That fail-closure was measured on a loopback endpoint before this fixture moved off
+// it: with `route_localnet=0` (this host's default) a 127/8 DNAT target is simply not
+// routable for guest-originated traffic — `ip route get 127.0.0.9 from <guest>` answers
 // "Network is unreachable". So the class is not fastidiousness: it refuses at the write
 // point a declaration the substrate would refuse silently on the wire, which is D4.3's
-// diagnostic dislocation. A second, independent mechanism reaching the same verdict as
+// diagnostic dislocation — a second, independent mechanism reaching the same verdict as
 // the spec's stated reason.
 func startViaListener(t *testing.T, port int) (string, func()) {
 	t.Helper()
@@ -2909,9 +2909,9 @@ func main() {
 // pretend. It describes deleting a DNAT rule under a live placement, and there is no
 // endpoint that does this: the three egress fields plus `publish` are editable only from
 // `paused` (§3.4), because the provider materializes them at placement. A test that
-// PATCHes a `running` sandbox and then narrates the refusal has asserted nothing — the
-// echo service, the established connection and the round-trip check that used to stand
-// here were all set up and never used, and the failure branch below them was dead code.
+// PATCHes a `running` sandbox and then narrates the refusal has asserted nothing: an echo
+// service, an established connection and a round-trip check would all be set up and never
+// used, with the failure branch below them unreachable.
 //
 // The conntrack asymmetry itself (a deleted rule is not evaluated against an existing
 // binding, so a live revocation could only ever promise "no NEW connections") is a
