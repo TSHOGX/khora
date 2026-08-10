@@ -399,9 +399,9 @@ func networkStatus(err error) (int, bool) {
 	// record and the running deployment conflict, and BOTH documented remedies change
 	// state elsewhere (restart the engine with the uid, or PATCH the `via[]` away).
 	//
-	// Without this arm it fell through to 500, which tells the caller "engine fault,
-	// retry" when nothing failed and no retry can help. The asymmetry made it
-	// unmistakable: the SAME operator condition answered 400 on create (where
+	// Without this arm it falls through to 500, which tells the caller "engine fault,
+	// retry" when nothing failed and no retry can help — and the asymmetry makes that
+	// unmistakable: the SAME operator condition would answer 400 on create (where
 	// ValidateDeployment sees the declaration) and 500 on resume.
 	if errors.Is(err, network.ErrViaUnenforceableAtPlacement) {
 		return http.StatusConflict, true
