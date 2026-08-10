@@ -17,6 +17,7 @@ import (
 	"engine/internal/model"
 	"engine/internal/orchestrator"
 	"engine/internal/ruleset"
+	"engine/internal/runtime"
 	"engine/internal/store"
 	"engine/internal/transport"
 	"engine/test/harness"
@@ -797,10 +798,22 @@ func TestGuestFacingRefusalsFailFastRatherThanHanging(t *testing.T) {
 	// A refused destination that the floor rejects. Sub-second vs tens of seconds is
 	// the claim; the threshold sits far from both.
 	const fastEnough = 5 * time.Second
+	// SAMPLED AROUND THE PROBE, because "refused in 2 ms" is produced identically by the
+	// floor's `reject` and by the packet dying inside the netns before it ever reached a
+	// rule — and this is the one test whose documented first attempt failed for exactly
+	// that reason (the guest had no default route, so nothing left the sandbox and all
+	// four verdicts looked alike). The counter is what separates "the engine refused
+	// this, fast" from "nothing happened at all".
+	before := harness.NftCounter(t, id, "fwd_floor_v4")
 	res := runGuestProbe(t, cl, "169.254.169.254:80", false)
+	after := harness.NftCounter(t, id, "fwd_floor_v4")
 	if res.reachable() {
 		t.Fatalf("the probe REACHED a floor address: %s", res.raw)
 	}
+	mustCounterMoved(t, id, "fwd_floor_v4", before, after,
+		"item 8b: the floor counter must move, or the fast refusal proves nothing about the ENGINE — "+
+			"a packet dying in the netns is refused just as fast (this test's own first attempt "+
+			"failed that way)")
 	elapsed := time.Duration(res.ms) * time.Millisecond
 	if elapsed >= fastEnough {
 		t.Errorf("a guest-facing refusal took %s — §2.4's fail-closed promises the guest a CLEAN "+
@@ -1535,16 +1548,27 @@ func TestTheSecondHopIsPinnedUnderTheFloor(t *testing.T) {
 		}
 	})
 
-	// (c) ROOT is unaffected — the narrowing really is by uid. The control arm for the
-	// kill-switch hazard.
+	// (c) ROOT IS UNAFFECTED — the control arm for the kill-switch hazard, and the whole
+	// reason the drop must carry `skuid`: measured, an un-narrowed drop on this hook took
+	// out root's own probe too (D5 ㉔). Without this arm, such a drop passes (b) above
+	// while being a host-level egress kill switch.
+	//
+	// ASSERTED POSITIVELY, on the counter rather than on reachability. Root dialing a
+	// sibling guest IP is a HOST-ORIGINATED flow, so whether it connects depends on that
+	// sibling's own rule set, not on this table — the honest assertion is that the
+	// SECOND-HOP counter does not move for a uid the table does not name. (The previous
+	// form looked for a "REFUSED_BY_TABLE" marker that probeAsUID never prints, so it
+	// could not fail.)
 	t.Run("root is unaffected by the second-hop drop", func(t *testing.T) {
+		before := harness.NftCounterIn(t, runtime.SecondHopTable, "hop2_floor_v4")
 		out := probeAsUID(t, 0, net.JoinHostPort(sibIP, "9000"))
-		// Root reaching a sibling guest IP is expected: the second-hop table narrows on
-		// the deployment's uid, and root is not it. The sandbox's OWN floor is what stops
-		// the guest; this rule exists for the endpoint process only.
-		t.Logf("root probe to the sibling: %s (not refused by the second-hop table, which narrows on uid %d)", out, secondHopUID)
-		if strings.Contains(out, "REFUSED_BY_TABLE") {
-			t.Error("unexpected marker")
+		after := harness.NftCounterIn(t, runtime.SecondHopTable, "hop2_floor_v4")
+		if after != before {
+			t.Errorf("root's probe moved the second-hop counter (%d → %d) — the drop must be narrowed "+
+				"to the deployment's uid (%d), and an un-narrowed one is a HOST-LEVEL egress kill "+
+				"switch: measured, root's own probe failed too (D5 ㉔). It would still pass the deny "+
+				"half above, which is why this arm has to assert rather than log. out=%s",
+				before, after, secondHopUID, out)
 		}
 	})
 }
@@ -2567,9 +2591,10 @@ func TestIPv6IsCoveredByTheSameFloor(t *testing.T) {
 	// eth0's GLOBAL v6 address, if this host has one.
 	global := hostGlobalIPv6(t)
 
-	if vethLL == "" && global == "" {
-		t.Skip("this host has no IPv6 addresses to probe (neither a veth link-local nor a global eth0 address)")
-	}
+	// NO SKIP on the link-local: hostVethLinkLocal is fatal on every failure path, so the
+	// counter-backed cell below always runs. The global address stays optional (guarded at
+	// its own site) because it depends on this host's routed connectivity; the link-local
+	// does not, since the kernel assigns one to every veth.
 
 	// A v6 listener on the host, so "unreachable" is not an artifact of nothing being
 	// there. Bound to the wildcard so it answers on every host v6 address.
@@ -2673,14 +2698,21 @@ func TestIPv6IsCoveredByTheSameFloor(t *testing.T) {
 }
 
 // hostVethLinkLocal returns the KERNEL-assigned fe80:: address on this sandbox's
-// host-side veth, or "".
+// host-side veth. It never returns "" — every failure path is fatal (see below).
 func hostVethLinkLocal(t *testing.T, id model.SandboxID) string {
 	t.Helper()
+	// EVERY failure here is FATAL, not an empty string. The kernel assigns this address
+	// unconditionally (the engine never touches IPv6), so "not found" means the scrape
+	// broke — and returning "" made the caller skip the only counter-backed IPv6
+	// assertion in the suite while still reporting a pass. A silently-skipped assertion
+	// is the failure mode this suite's whole discipline exists to rule out.
+	//
 	// The veth name is a one-way hash of the SandboxID, so it is found by listing the
 	// engine's rule-set table rather than recomputed here.
 	out, err := exec.Command("nft", "list", "table", "inet", "sbxnet_"+string(id)).Output()
 	if err != nil {
-		return ""
+		t.Fatalf("could not list the rule-set table for %s (%v) — the veth name is scraped from it, "+
+			"and without it this test would silently skip its only counter-backed v6 assertion", id, err)
 	}
 	veth := ""
 	for _, f := range strings.Fields(string(out)) {
@@ -2690,17 +2722,24 @@ func hostVethLinkLocal(t *testing.T, id model.SandboxID) string {
 		}
 	}
 	if veth == "" {
-		return ""
+		t.Fatalf("no host veth name in the rule set for %s — every per-sandbox rule is narrowed by "+
+			"`iifname`, so its absence means the rule set is not what this test assumes:\n%s", id, out)
 	}
 	addrs, err := exec.Command("ip", "-6", "-o", "addr", "show", "dev", veth, "scope", "link").Output()
 	if err != nil {
-		return ""
+		t.Fatalf("could not read %s's link-local address (%v) — the kernel assigns it "+
+			"unconditionally, so this is a broken fixture, not a host without IPv6", veth, err)
 	}
-	for _, f := range strings.Fields(string(addrs)) {
-		if strings.HasPrefix(f, "fe80::") {
-			return strings.SplitN(f, "/", 2)[0]
+	for _, line := range strings.Split(string(addrs), "\n") {
+		fs := strings.Fields(line)
+		for i, f := range fs {
+			if f == "inet6" && i+1 < len(fs) {
+				return strings.SplitN(fs[i+1], "/", 2)[0]
+			}
 		}
 	}
+	t.Fatalf("%s carries no link-local IPv6 address — the kernel assigns one to every veth, so "+
+		"this is a broken fixture rather than a host without IPv6:\n%s", veth, addrs)
 	return ""
 }
 

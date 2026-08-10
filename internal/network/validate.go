@@ -50,7 +50,7 @@ const (
 	// are both ClassDefaultMissing, because the caller's remedy is the same EDIT —
 	// write a legal value in that one field. §6.2's cardinality constrains the
 	// semantic kinds a caller must tell apart, not the number of error values in the
-	// implementation (the Volume verdicts settle this: five sentinels, four classes).
+	// implementation (the Volume verdicts settle this: six sentinels, four classes).
 	ClassProtoMissing Class = "tuple-missing-proto"
 	// ClassViaMatchUDP — a `via[].match[]` naming UDP. There is no usable
 	// interface for recovering the ORIGINAL destination of a redirected UDP
@@ -123,7 +123,7 @@ const (
 	// They are one semantic kind — "the shape does not stand up" — and their remedy is
 	// the same kind of edit: supply the structurally required member. Splitting them
 	// would count IMPLEMENTATION error values rather than caller-visible kinds, which
-	// is the direction §6.2 explicitly rejects (five Volume sentinels, four classes).
+	// is the direction §6.2 explicitly rejects (six Volume sentinels, four classes).
 	//
 	// # What is NOT this class
 	//

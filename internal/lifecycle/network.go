@@ -215,7 +215,15 @@ func (m *Mediator) AddPublish(ctx context.Context, id model.SandboxID, p model.N
 	// Validate the RESULT, not the item: a declaration is validated as a whole, and
 	// this one must still be legal after the append (§6.2 — the checks run before
 	// anything is materialized).
-	if err := network.Validate(next, true, m.hostLocal()); err != nil {
+	//
+	// Through ValidateDeclaration, which is what makes "all three write points go
+	// through one funnel" true rather than nearly true: calling network.Validate
+	// directly here skipped ValidateDeployment, so a record already carrying `via[]`
+	// (written under a deployment that DID supply a uid) accepted a publish under one
+	// that does not — committing a declaration whose §2.4 invariant this engine cannot
+	// deliver, which is the very thing the deployment class exists to refuse. Publish
+	// cannot introduce `via[]` itself, so nothing was live; the funnel is the point.
+	if err := m.ValidateDeclaration(next, true); err != nil {
 		return p, "", false, err
 	}
 	if added {
@@ -297,7 +305,7 @@ func (m *Mediator) liveState(id model.SandboxID) *liveState {
 	return m.live[id]
 }
 
-// ValidateDeclaration applies §6.2's eight 400 classes plus the deployment refusal,
+// ValidateDeclaration applies §6.2's nine 400 classes plus the deployment refusal,
 // BEFORE the admission gate (§6.2: an invalid declaration is refused before any byte
 // is touched or any budget recorded, so 400 and 507 are never both true).
 //

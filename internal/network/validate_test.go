@@ -483,7 +483,7 @@ func TestAnOmittedPortMeansAnyPortAtEverySite(t *testing.T) {
 // under class 3.
 //
 // §6.2's cardinality criterion is the caller's REMEDY, not the implementation's error
-// count (five Volume sentinels, four classes). These remedies are different EDITS:
+// count (six Volume sentinels, four classes). These remedies are different EDITS:
 // class 3 says "write `proto` in this tuple" — one field, and the error names it —
 // while class 9 says "this array has no entries" or "supply the target port". Reported
 // as `tuple-missing-proto`, an empty `match[]` sends the caller to inspect a `proto`

@@ -38,6 +38,22 @@ import (
 // What is under test is placement: resume and adopt, the two paths that materialize a
 // row nobody is writing.
 
+// viaEndpoint is viaDecl's steering endpoint, and viaHostLocal is the HostLocal
+// predicate that makes it host-local.
+//
+// EVERY mediator in this file must be built with viaHostLocal, or the fixture is not
+// the fixture it claims to be. §6.2's fifth class (endpoint-not-host-local) is checked
+// AHEAD of the deployment class, so under the real interface table a test aiming at the
+// deployment class refuses one step earlier and an assertion phrased as
+// IsDeclarationInvalid passes on the wrong refusal — including when the deployment DOES
+// pin the uid, i.e. it would keep passing with the check under test deleted. Injecting
+// the predicate is the same discipline network's own unit tests use (noHostLocal /
+// allHostLocal): pin the answer to a fixture rather than to whatever addresses the test
+// machine happens to carry.
+const viaEndpoint = "10.0.0.5:15443"
+
+func viaHostLocal(a netip.Addr) (bool, error) { return a == netip.MustParseAddr("10.0.0.5"), nil }
+
 // viaDecl is a recorded declaration that steers one flow to a host-local endpoint —
 // legal under a deployment that pins the second hop, unenforceable under one that does
 // not.
@@ -51,7 +67,7 @@ func viaDecl(t *testing.T) model.NetworkDecl {
 		Default: model.NetDeny,
 		Via: []model.NetVia{{
 			Match:    []model.NetTuple{{CIDR: p, Port: 443, Proto: model.NetTCP}},
-			Endpoint: "10.0.0.5:15443",
+			Endpoint: viaEndpoint,
 		}},
 	}}.Normalize()
 }
@@ -306,11 +322,62 @@ func TestCreateWithViaIsRefusedWhenTheDeploymentPinsNoSecondHop(t *testing.T) {
 	if !IsDeclarationInvalid(err) {
 		t.Errorf("create's refusal is not the 400-shaped declaration refusal: %v", err)
 	}
+	// THE CLASS, not merely the category: the fixture endpoint is one class-5 slip away
+	// from refusing for a reason that has nothing to do with the deployment (see
+	// viaHostLocal), and IsDeclarationInvalid cannot tell the two apart.
+	if c, _ := network.ClassOf(err); c != network.ClassViaWithoutSecondHopUID {
+		t.Errorf("create refused with class %q, want %q — the refusal under test is the DEPLOYMENT's "+
+			"missing second-hop uid, and any other class means this test would keep passing with "+
+			"that check deleted", c, network.ClassViaWithoutSecondHopUID)
+	}
 	recs, lerr := st.ListSandboxes(ctx)
 	if lerr != nil {
 		t.Fatal(lerr)
 	}
 	if len(recs) != 0 {
 		t.Errorf("a refused create left %d record(s) behind; want none", len(recs))
+	}
+}
+
+// THE PUBLISH WRITE POINT, which was outside the funnel: AddPublish called
+// network.Validate directly and so skipped ValidateDeployment, while the funnel's own
+// doc comment claimed all three write points passed through ValidateDeclaration.
+//
+// Reachable without any via[] in the request: the record already carries one (written
+// under a deployment that DID supply a uid), and a publish under a deployment that does
+// not would commit a declaration whose §2.4 invariant this engine cannot deliver. That
+// is exactly the state the deployment class refuses at the other two write points.
+func TestPublishIsRefusedWhenTheRecordedViaOutlivesTheDeploymentsUID(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	seedBare(t, st)
+	seedPausedWithVia(t, st, "sbx_via")
+
+	// A deployment with NO second-hop uid, over a store whose record already carries a
+	// via[] — the ordinary operational shape (the record is persistent, the uid is a
+	// per-process deployment input, so a restart without the flag separates them with no
+	// write in between).
+	m := New(Deps{
+		Store: st, Runtime: &fakeRuntime{}, Rootfs: &fakeRootfs{},
+		Volume:        newFakeVolume(),
+		Dial:          func(transport.Endpoint) transport.Client { return &fakeClient{healthy: true} },
+		HealthTimeout: time.Second,
+		Deployment:    network.Deployment{HostLocal: viaHostLocal},
+	})
+
+	_, _, _, err := m.AddPublish(ctx, "sbx_via", model.NetPublish{GuestPort: 8080, Proto: model.NetTCP})
+	if err == nil {
+		t.Fatal("publish was accepted while the recorded via[] cannot be pinned by this deployment " +
+			"— committing it records a declaration whose §2.4 invariant the engine cannot deliver, " +
+			"which is exactly what the deployment class refuses at create and PATCH. AddPublish " +
+			"called network.Validate directly and so skipped ValidateDeployment")
+	}
+	if !IsDeclarationInvalid(err) {
+		t.Errorf("publish's refusal is not the 400-shaped declaration refusal: %v", err)
+	}
+	if c, _ := network.ClassOf(err); c != network.ClassViaWithoutSecondHopUID {
+		t.Errorf("publish refused with class %q, want %q — see the same note on create: without the "+
+			"class pinned, a class-5 refusal on the fixture endpoint satisfies IsDeclarationInvalid "+
+			"and the deployment check under test is never exercised", c, network.ClassViaWithoutSecondHopUID)
 	}
 }

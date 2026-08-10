@@ -9,10 +9,14 @@ import (
 	"time"
 
 	"engine/internal/model"
+	"engine/internal/network"
 	"engine/internal/store"
 	"engine/internal/transport"
 )
 
+// The Deployment carries ONLY viaHostLocal: no second-hop uid, which is the state the
+// via[] placement tests are about, plus the injected host-local predicate they need to
+// reach it (see viaHostLocal). Tests that want a pinned uid build their own Deps.
 func newTestMediator(t *testing.T, rp *fakeRootfs, rt *fakeRuntime, healthy bool) (*Mediator, *store.Memory) {
 	st := store.NewMemory()
 	seedBare(t, st) // §4.3 template FK: the "bare" builtin row must pre-exist (boot seed)
@@ -23,6 +27,7 @@ func newTestMediator(t *testing.T, rp *fakeRootfs, rt *fakeRuntime, healthy bool
 		Volume:        newFakeVolume(),
 		Dial:          func(transport.Endpoint) transport.Client { return &fakeClient{healthy: healthy} },
 		HealthTimeout: 500 * time.Millisecond,
+		Deployment:    network.Deployment{HostLocal: viaHostLocal},
 	})
 	return m, st
 }

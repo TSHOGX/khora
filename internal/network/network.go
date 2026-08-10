@@ -44,7 +44,7 @@ import (
 // same rule Mount and Limits follow: the store persists this value, and `model`
 // depends on no subsystem (§5 preamble). What lives HERE is everything that carries
 // §5.D SEMANTICS — the normalization decision, the deduplication requirement, the
-// eight 400 classes, and the generator.
+// nine 400 classes, and the generator.
 //
 // These aliases exist so this package reads in its own vocabulary rather than
 // spelling `model.Net…` on every line. They are true aliases, not conversions:
@@ -76,7 +76,7 @@ const (
 //
 // Two things this resolves, and they are different things: "the whole `network`
 // object omitted" is LEGAL (this value), while "a `network` object given but
-// missing `egress.default`" is the first of §6.2's eight 400 classes. Because the
+// missing `egress.default`" is the first of §6.2's nine 400 classes. Because the
 // normalization happens at the write point, the record always holds a chosen
 // value and the "a null cannot be told from a choice" problem it guards against
 // is structurally absent.
