@@ -348,11 +348,10 @@ func TestPromotePrunesShadowedBytes(t *testing.T) {
 	// may simply be about different cases), and this is not the change to settle it in.
 	// Production behavior is therefore LEFT ALONE and the test pins what the code DOES.
 	//
-	// The previous assertion here was `if ents, err := os.ReadDir(dest); err == nil &&
-	// len(ents) != 0` — which passed VACUOUSLY on the real behavior: the directory is
-	// absent, so err != nil and the body never ran. It would have kept passing if the
-	// dest had been left full of shadowed content, since that path also depends on the
-	// ReadDir succeeding. Asserted unambiguously now.
+	// The assertion must distinguish "absent" from "present but empty" EXPLICITLY: a
+	// `ReadDir(dest); err == nil && len(ents) != 0` shape passes vacuously here, since
+	// the directory is absent and the body never runs — and it would keep passing if
+	// dest were left full of shadowed content, which is the thing being ruled out.
 	dest := filepath.Join(layer, "data")
 	if _, err := os.Stat(dest); !os.IsNotExist(err) {
 		ents, _ := os.ReadDir(dest)

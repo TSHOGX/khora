@@ -591,11 +591,11 @@ func testRootTreeOps(t *testing.T, mk Factory) {
 	if err := r.Remove("dir/c"); err != nil {
 		t.Errorf("second remove: %v — Remove of an absent path must be a no-op", err)
 	}
-	// Idempotent ALSO when the PARENT is absent, which is a distinct case and was a
-	// real gap: an implementation that resolves the parent first will surface the
-	// parent's ENOENT and break idempotency. It shows up only on paths that clear a
-	// not-yet-existing file — which is exactly what an import does before writing, so
-	// the first import into a fresh directory failed until this was fixed.
+	// Idempotent ALSO when the PARENT is absent, which is a distinct case: an
+	// implementation that resolves the parent first surfaces the parent's ENOENT and
+	// breaks idempotency. It reaches production through the commonest path there is —
+	// clearing a not-yet-existing file is exactly what an import does before writing,
+	// so this is what makes a first import into a fresh directory work.
 	if err := r.Remove("no/such/parent/f"); err != nil {
 		t.Errorf("remove with an absent parent: %v — an absent parent means the target is absent, which the contract defines as a no-op", err)
 	}

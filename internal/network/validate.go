@@ -711,15 +711,14 @@ func Validate(d Declaration, given bool, hostLocal HostLocal) error {
 // perfectly into a rule with one clause fewer — the same shape an omitted `cidr`
 // already has.
 //
-// What made the old state a defect was not the semantic but its SPELLING. `port` was
-// a plain `uint16` with no `omitempty` on the wire, so the wildcard existed only as
-// the zero value's side effect: the read face rendered `"port": 0`, and §5.D's own
-// criterion for requiring `egress.default` — "if 'unspecified' were read as some
-// default, a null in the record could no longer be told from the caller choosing it"
-// — is exactly the shape that produces. The fix is that the wildcard is now WRITTEN:
-// `port` is omitted on both faces when it is any-port, so the record's spelling and
-// the caller's text agree, and the read face's output stays a legal write body
-// (§6.1's read-modify-write). See tupleWire in the orchestrator.
+// WHAT THE SEMANTIC NEEDS FROM THE SPELLING, and why a plain `uint16` with no
+// `omitempty` does not supply it: there the wildcard exists only as the zero value's
+// side effect, so the read face renders `"port": 0` — precisely the shape §5.D's own
+// criterion for requiring `egress.default` rules out ("if 'unspecified' is read as
+// some default, a null in the record cannot be told from the caller choosing it").
+// So the wildcard is WRITTEN: `port` is omitted on both faces when it is any-port, the
+// record's spelling and the caller's text agree, and the read face's output stays a
+// legal write body (§6.1's read-modify-write). See tupleWire in the orchestrator.
 func validateTuple(t Tuple, where string) error {
 	if t.Proto == "" {
 		return invalid(ClassProtoMissing,

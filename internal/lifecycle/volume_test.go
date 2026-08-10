@@ -739,14 +739,14 @@ func (s *twoCallDetectingStore) ReplaceMounts(ctx context.Context, id model.Sand
 	return s.Store.ReplaceMounts(ctx, id, next)
 }
 
-// TestRebindIsOneStoreCommit: a rebind goes through ReplaceMounts and NEVER
-// through DeleteMounts + CreateMounts — including on the REFUSED path, where the old
-// implementation issued a third call to re-insert the previous binding.
+// TestRebindIsOneStoreCommit: a rebind goes through ReplaceMounts and NEVER through
+// DeleteMounts + CreateMounts — including on the REFUSED path, which is where the
+// two-call shape would need a THIRD call to re-insert the previous binding.
 //
-// That restore branch is gone rather than merely unused: with the replacement atomic,
-// "the new binding was refused AND the old one is gone" is not a reachable state, and a
-// compensation path for an unreachable state can only rot (its own failure had to be
-// logged as an unrecoverable-ish condition that could not actually occur).
+// There is deliberately no such restore branch: with the replacement atomic, "the new
+// binding was refused AND the old one is gone" is not a reachable state, and a
+// compensation path for an unreachable state can only rot — its own failure would have
+// to be logged as an unrecoverable condition that cannot actually occur.
 func TestRebindIsOneStoreCommit(t *testing.T) {
 	ctx := context.Background()
 	m, st, _ := volFixture(t)

@@ -25,10 +25,10 @@ import (
 // the running deployment does not know — dropping traffic for a reason absent from the
 // configuration, which is unattributable from the outside.
 //
-// It needs the real substrate rather than a fake: the property IS the nft state, and the
-// previous shape of this code (an early `return nil`) satisfied every caller-side
-// assertion while leaving the table in place — the comment claimed the teardown, the code
-// skipped it, and no unit test could tell the difference.
+// It needs the real substrate rather than a fake: the property IS the nft state. A
+// teardown that returns early without removing the table satisfies every caller-side
+// assertion — no unit test can tell that shape from a real teardown, because the
+// difference exists only in the kernel.
 //
 // The rule set here is a hand-built stand-in rather than network.SecondHopRules: §5
 // subsystems never import each other (internal/arch enforces it), and the assertion is

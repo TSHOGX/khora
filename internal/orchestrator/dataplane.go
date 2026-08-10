@@ -54,20 +54,20 @@ type fsProxy struct{ e *Engine }
 //     with a fixed message, which is also the honest answer for an error of unknown
 //     provenance: the engine cannot classify it, so it claims nothing.
 //
-// Collapsing everything to CodeUnavailable was the defect this replaces. That code
-// specifically means "transient, retry me", so a malformed argument or a missing
-// path came back as an invitation to retry forever, and four distinct conditions
-// arrived indistinguishable. Passing the code through also makes the RPC half agree
-// with the REST half, which already reports the guest's classification (files.go
-// bypassCode) over the same inner client.
+// WHY THE CODE IS PASSED THROUGH RATHER THAN COLLAPSED to CodeUnavailable: that code
+// specifically means "transient, retry me", so collapsing turns a malformed argument
+// or a missing path into an invitation to retry forever, and makes four distinct
+// conditions arrive indistinguishable. Passing it through also makes the RPC half
+// agree with the REST half, which already reports the guest's classification
+// (files.go bypassCode) over the same inner client.
 //
 // This also carries mid-stream terminations — an overflow disconnect (D4.3
 // invariant 1) reaches forwardEvents as a ProcessEvent{Kind:"error"} and ends the
 // outer stream through here, so the external client learns the stream died rather
-// than seeing it close as if the process had finished. That shape is unchanged; only
-// the code sharpens. It is the case that most wanted this: the guest reports an
-// overflow disconnect as resource_exhausted precisely so a consumer can tell it from
-// a clean end, and the old collapse threw that distinction away one hop later.
+// than seeing it close as if the process had finished. It is the case that most needs
+// the code preserved: the guest reports an overflow disconnect as resource_exhausted
+// precisely so a consumer can tell it from a clean end, and a collapse here would
+// throw that distinction away one hop after it was made.
 func proxyErr(err error) error {
 	log.Printf("dataplane: transport proxy error (code passed through, message sanitized): %v", err)
 	var ce *connect.Error
