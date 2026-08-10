@@ -124,11 +124,15 @@ seam 沿用 §5.A `runtime.Provider` / §5.B `rootfs.Provider` 的既定约定:*
 核心动作:
 
 - `Materialize(ctx, volumeID) → Materialized` —— 备好一个可挂的宿主挂载点(local:确保存储单元存在;
-  remote:拉起 FUSE 挂点)。返回一个**不透明句柄**,只携带一个 backend 私有的宿主路径(`SourcePath`,
-  仅 `local_runsc` 消费,如同 `Merged.MergedPath`),外加一个**非导出的 backend 私有 handle**
-  (`SetHandle`/`Handle`,`Placement.handle` 的先例)——FUSE 臂要起/停一个进程,没有它就得另立一张按
-  `volumeID` 键入的侧表,正是 D3.1 拒掉的那个"进程内 handle registry"。句柄必须带 `Volume`,否则
-  `Release` 无从解析。
+  remote:拉起 FUSE 挂点)。返回一个**不透明句柄**,只携带两样:一个 backend 私有的宿主路径
+  (`SourcePath`,仅 `local_runsc` 消费,如同 `Merged.MergedPath`),以及 `Volume`——后者不是装饰,
+  否则 `Release` 无从解析这次物化属于哪个卷。
+  - **句柄上没有 backend 私有 handle 字段**,这与下面 `Capabilities` 不留 `DirectIO` 位是同一次判断
+    (§1.3 禁止预留):今天没有 backend 需要它,local 臂物化成一个路径、别的什么都不持。**加回的条件是
+    精确的**:当第一个 remote/合成 backend 存在、它要起/停一个 per-物化的进程时,才按 §1.3 additive 补上
+    非导出字段 + `SetHandle`/`Handle`——`runtime.Placement.handle`(那边有活的消费者)是**到那时**要照抄的
+    先例,不是此处已经沿用的先例。**而它到时候必须落在句柄上、不能落在侧表里**:一张按 `volumeID` 键入的
+    进程内侧表正是 D3.1 拒掉的那个"进程内 handle registry"。
   - **不收 `accessMode`**:它既不改变 backend 做的任何事(三种模式下宿主目录完全相同),基数也错了
     (`AccessMode` 是 per-挂载行的,`Materialize` 是 per-卷的),故它搭 `MountSource.ReadOnly`——两者的
     规范陈述归 §5.C。
