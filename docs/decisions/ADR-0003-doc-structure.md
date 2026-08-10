@@ -18,9 +18,13 @@ Three sibling doc trees under `docs/`, each defined by a different lifecycle:
 - **`docs/spec/`** — the converged §1–§6 architecture (+ `deep-dives/`,
   `open-decisions.md`). Slow-moving, long-lived, the source of truth for *what
   the engine should be*.
-- **`docs/plans/`** — one file per milestone, `M<N>-<capability>.md`.
-  Forward-looking, **expires as shipped**. Named for the capability delivered,
-  not the technique used.
+- **`docs/plans/`** — normally absent. **Not a per-milestone default**: a file goes
+  here only for work whose scope needs agreeing in advance, with an ADR or a
+  deep-dive preferred wherever the work fits one, those having permanent homes. The
+  lifecycle is the shortest of the three — forward-looking, **expires as shipped**,
+  deleted in the change that lands the last acceptance test. When a plan is written
+  it is named `M<N>-<capability>.md`, for the capability delivered, not the technique
+  used. When to write one at all: `CLAUDE.md`, Milestone discipline.
 - **`docs/decisions/`** — ADRs: one-time tool/environment/process choices.
   **The decision is immutable** — reversing it is a *new* ADR that supersedes,
   never an in-place rewrite of the old one. But an ADR's **prose may be corrected

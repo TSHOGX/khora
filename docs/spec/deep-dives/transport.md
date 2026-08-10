@@ -2,7 +2,8 @@
 
 > **定位:[`§5.E`](../subsystems.md)(spec,导航见 [`SPEC.md`](../SPEC.md))的传输层深挖文档。** spec 只明确 §5.E 的边界
 > (engine 只暴露 process / fs 两个无状态服务,session 语义在 engine 外);本文展开这条边界背后的
-> **选型理由、ACP 会话映射、要守住的 seam**,并给出 **wire 协议(D4)**、外沿投影(D5)与边界议程(D6)。
+> **选型理由、ACP 会话映射、要守住的 seam**,并给出 **wire 协议(D4)** 与外沿投影(D5,边界与残留见
+> 其 D5.4)。
 >
 > **设计参照:** E2B `envd`(公开的沙箱守护进程,两服务收敛的先例)与 ACP(Zed 的 Agent Client
 > Protocol,coding agent 会话协议)。二者是公开可查的形态参照,不是本仓依赖;下文只取其**设计取向**,
@@ -294,8 +295,9 @@ guest 的同一个监听端口),
 先写同目录临时文件再 `rename`,故传输中断不会留下半个文件(也因此这条路径没有 `Write` 的 truncate 窗口)。
 
 - **不提供 `watch`**:无论 server-stream 推送还是轮询式 watcher,**两套都
-  不要**——watch 要 engine 持订阅/合并/重连状态(破 §5.E 无状态),且 gVisor overlay upperdir 上
-  inotify 可靠性存疑(§2.5)。消费方用 `Stat`+`Read(offset)` 自行轮询拉增量(D2 渲染 vs 交互非对称)。
+  不要**。**承重的理由只有一条**:watch 要 engine 持订阅/合并/重连状态,破 §5.E 无状态。(另有一条
+  **未测的**顾虑——gVisor overlay upperdir 上 inotify 的可靠性;它没有实测依据,故只作旁注,不承重。)
+  消费方用 `Stat`+`Read(offset)` 自行轮询拉增量(D2 渲染 vs 交互非对称)。
 - **resume 后读无 offset 续传契约**:`fs.Read` 读的是 Overlay 工件**当前**字节;resume 换新容器后
   engine **不**保证跨 resume 的 offset 连续性(它无状态、不记读游标)。消费方跨 resume 要「从头整份
   读一遍」或自持游标按 `Stat.size` 变化决定增量。与"输入不仲裁"同源:engine 不替连接记状态。
@@ -349,8 +351,11 @@ E2B 的 SDK **直连** envd(经路由代理,`E2b-Sandbox-Id/Port` 头寻址)。�
 | **数据面**(process / fs) | **Connect-RPC over h2c**,proto 契约先行 | `engine.transport.v1.ProcessService` / `FsService`(D4.3/D4.4) | 有 server-stream + 强类型帧;proto 是**唯一契约源**,前端(TS)/ 未来多语言 SDK 全从它 `buf` 生成 client stub |
 
 **关键收益:内沿那份 proto 契约直接投影到外沿。** `orchestrator` 对外**复用同一份**
-`transport.proto`(而非另立外沿 schema),数据面外沿就是**Connect 反代 + 按 `sandbox_id` 解析端点**
-——无翻译层,内外沿只有一份 wire 表示。这兑现 §6「CLI/前端是同一套 API 的平级 client」:两端共用
+`transport.proto`(而非另立外沿 schema),数据面外沿就是**Connect 再代理 + 按 `sandbox_id` 解析端点**
+——无翻译层,内外沿只有一份 wire 表示。**"再代理"是 RPC 层的,不是 HTTP 层的**:orchestrator 自己挂同
+一组 Connect handler,再经解析出的 `transport.Client` 重新发起该调用,**不是**一个转发字节的 HTTP 反向
+代理。这条区别承重:错误必须在这一层被**重铸**而非原样转发,否则内沿的拨号错误会把 netns IP 带出去
+(§6.2 / D5.1 placement 永不外泄)。这兑现 §6「CLI/前端是同一套 API 的平级 client」:两端共用
 proto 生成的同一份 client。
 
 ### D5.3 为什么数据面外沿走 Connect,而非 REST facade
@@ -377,8 +382,8 @@ stream 翻成 NDJSON)。它被否决,三条理由:
 - **session 仍不进外沿 API**:D1.2 的划界不因投影而变——外沿只投影 process/fs,session adapter 在
   engine 外自带它的协议面(ACP 形态)。
 - **前端多语言 stub 是纯加法**:外沿复用同一份 `transport.proto`,前端(TS)/ 未来 SDK 从它 `buf`
-  生成 client;新增一门语言的 client = 加一个 `buf` 生成目标,不改本投影形状(§6 契约随 milestone
-  生长)。
+  生成 client;新增一门语言的 client = 加一个 `buf` 生成目标,不改本投影形状(§6 契约的当前面在
+  [`api-contract.md`](../api-contract.md),生长时加端点、不改这条投影)。
 - **`sandbox_id` 走带外请求头,不进 wire。** D4.6 把 `sandbox_id` 挡在 proto 外(进程只按 guest-native
   pid 寻址),D5.2 又强制外沿复用**同一份** `transport.proto`——两者合起来**逼出**一个带外载体:外沿
   Connect 请求用请求头 `Engine-Sandbox-Id` 携带 id,反代 strip 掉它、经 mediator 解析当前端点后透传到
