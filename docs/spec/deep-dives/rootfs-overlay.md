@@ -124,8 +124,8 @@ reflink 来补分层,那其实又滑回上面的 overlayfs 底层存储附带能
 
 ## D5. 这条载体自带的机制约束(附一条演进项)
 
-> 载体与持久单元(留驻 upper)之上,本节记这条载体自带的约束。除最后一条(content-addressed diff)以外
-> **都已定**——pause 一致点那条是**已否决**,不是待办。
+> 载体与持久单元(留驻 upper)之上,本节记这条载体自带的约束。**除最后一条(content-addressed diff)以外
+> 都已定**——已否决的按已否决记,不留成待办。
 
 - **work dir 与 upper 的清理/回收**:overlayfs 需要一个 workdir(约束:与 upper 同一个支持 overlayfs
   的 FS)。**resume 重挂用同一 upper,但 workdir 必须新建一个空目录**——不可复用上次的 work(内核会
@@ -201,7 +201,9 @@ rootfs provider 显式施加(§5.B),这与 D0 载体正交:载体给"普通目�
 > **首选 = btrfs subvolume + squota(实测,全栈)。** substrate(ADR-0002)是 **btrfs**,它**无 project
 > quota**,故 project-quota 类手段(xfs/ext4)在本盘不适用。实测穿透
 > `subvolume → overlayfs upper/work → gofer → sentry → guest` 整条链:写满触发**精确到帽的硬 `ENOSPC`**
-> (errno 28 在 `write()` 上报,`fsync`/`close` 返 0,精度 ~0.05%),**容器照常存活**(可再 exec),
+> (errno 28 在 `write()` 上报,`fsync`/`close` 返 0,落点紧贴帽——一次性实测 ~0.05%,**但这个数字只能引作
+> 量级证据、不可引作可复现的精度指标**:没有脚本打印它,而唯一断言 ENOSPC 精度的
+> `spike-volume-cap-snapshot.sh` 用的容差远宽于它,8 MiB 帽上 ±2 MiB),**容器照常存活**(可再 exec),
 > 稀疏文件 / `fallocate` / hardlink / 从 lower rename 均未找到绕过账目的路径。选它还有一个结构收益——把
 > 存储单元定为 subvolume,同时给 Volume(§5.C)兑现廉价原子快照(volume.md D6/D7)。
 

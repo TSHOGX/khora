@@ -34,7 +34,7 @@ internal/ruleset/      leaf: the abstract rule vocabulary §5.D generates and §
 internal/arch/         structural guards: subsystems must not import each other, nor
                        read the control plane
 proto/                 transport wire schema; generated code under internal/transport/gen
-test/                  L2–L4 substrate acceptance + preflight fixtures
+test/                  end-to-end acceptance against the real substrate + preflight fixtures
 ```
 
 ## Build & test
@@ -50,7 +50,7 @@ mount. Why each of those is a hard requirement, and the measured machine facts:
 go build ./... && go vet ./...
 go test ./...            # unit + contract tests only
 
-# L2/L3 acceptance against the real substrate (root; runsc/overlay/btrfs/netns).
+# End-to-end acceptance against the real substrate (root; runsc/overlay/btrfs/netns).
 # Without root every overlay mount fails with EPERM. `-p 1` is required: these
 # packages each launch real runsc containers, and running them concurrently
 # starves the in-guest Health probes the reaper's idle classification needs.

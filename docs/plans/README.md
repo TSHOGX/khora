@@ -28,16 +28,12 @@ stating inline the property it proves; invocations in [`README.md`](../../README
 
 ## Forward
 
-> **None.** M8 was the last rung; every milestone has shipped, so the living truth
-> of "what the engine is" is `docs/spec/` in full, with no forward plan beside it.
+> **None.** M8 was the last rung and every milestone has shipped, so the living
+> truth of "what the engine is" is `docs/spec/` in full, with no forward plan
+> beside it. The one open implementation gap is registered in
+> [`open-decisions.md`](../spec/open-decisions.md) §4, not here.
 
-**M8 was the last milestone, and the ladder ends there.** Credentials are a
-permanently excluded non-goal (§1.4), so no credential-store milestone follows:
-what a credential proxy needs from the engine, M8 delivers as the two invariants
-that proxy sits on — a reachable set narrowable to one endpoint, and an unforgeable
-sandbox identity.
-
-**Why M8 landed last.** It is the security-critical face, so it went on top of a
-settled lifecycle + storage + transport foundation rather than beside one.
-
-The §6 API / CLI contract grows alongside from M1 — it is not a separate milestone.
+Nothing follows because the remaining candidates are non-goals, not unbuilt rungs
+— credentials being the one that looks like a milestone and is not (§1.4 states
+why, and what the engine owes a credential proxy instead). The §6 API / CLI
+contract was never a milestone of its own: it grew alongside from M1.

@@ -175,20 +175,19 @@ GET    /v1/sandboxes/{id}/network    → {state, egress:{default, allow[], via[]
 #   非 GET → **405**(§6.2 通则,不是落进 404)。
 POST   /v1/sandboxes/{id}/publish    {guest_port, proto}
 #                        → {guest_port, proto, host_endpoint?, applies_at}
-#   纯宿主侧规则、纯加法、不触及隔离单元,故**可对运行中沙箱热加**(与出站声明走 resume 边界相反,§5.D)。
+#   **可对运行中沙箱热加**(与出站三字段走 resume 边界相反;那三条性质为何给热加背书见 §5.D)。
 #   **`running` 与 `paused` 都合法、都 200**,差别只在生效点:`running` 当场装规则(`applies_at: "now"`),
 #   `paused` 只落库、规则在下一次 placement 出现(`applies_at: "next-resume"`,且**无 `host_endpoint` 键**)。
 #   **响应照 `GET …/network` 那条省略规则**——写面与读面在同一字段上分叉即契约缺陷。为何 `paused` 合法、
 #   以及"拒 `paused` 反而把调用方赶上更不安全的整份 `PATCH`"见 §5.D。`creating` / `destroyed` → 409
 #   (动词的源态规则);未知 ID → 404。
-#   **重复 publish 同一 `{guest_port, proto}` 幂等**:返既有那条、不追加第二项(去重必须在声明层,基底不会
-#   替引擎发现它,§5.D)。**不发 §4.1 事件**(非状态转换)、**不动 `UpdatedAt`**(`retention` 从那列起算)。
+#   **重复 publish 同一 `{guest_port, proto}` 幂等**:返既有那条、不追加第二项(为何去重只能在声明层,
+#   以及漏掉它的后果,见 §5.D)。**不发 §4.1 事件**(非状态转换)、**不动 `UpdatedAt`**(`retention` 从那列起算)。
 #   `proto` 收 tcp 与 **udp**——`via[]` 那条 UDP 排除的机制理由在入站方向不成立(§6.2)。
 #   **它落库**:热加的是规则,写下的是声明,故这一条跨 resume 存活(声明是 Binding,每次 placement 按
 #   当前记录重装规则集,§5.D)。因此它是 `ingress.publish[]` 上**第二个写点**,与 PATCH 的整份换整份
 #   相互作用——read-modify-write 的要求与"无 un-publish 端点"见上方 PATCH 注。
-#   **无鉴权键**:校验一个入站调用方必然要终结并理解应用层协议,而引擎不贡献这样的进程(§5.D)。
-#   引擎交付一个 `host ip:port`,前面摆什么(TLS 终结 / hostname / 证书 / 调用方校验)都是引擎外的事。
+#   **无鉴权键,且不是遗漏**——响应交付的就是一个 `host ip:port`,前面摆什么都在引擎外(理由见 §5.D)。
 #   **要求 guest 侧绑 `0.0.0.0`**:沙箱有独立 netns 与独立 loopback,故绑 `127.0.0.1` 的服务 publish
 #   不到——契约是**连接被拒且快速失败**(不是挂到超时),**不承诺可归因**:实测它与"guest 里没有监听者"
 #   在调用方侧都是同一个 `connection refused`、不可区分(§5.D 四条用户可见语义之 ① / network.md D5 ⑯)。
