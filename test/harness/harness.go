@@ -1,6 +1,6 @@
 //go:build substrate
 
-// Package harness builds the real substrate fixtures shared by the L2/L3
+// Package harness builds the real substrate fixtures shared by the end-to-end
 // substrate tests (transport round-trip, e2e). It compiles the real sandboxd,
 // builds a guest rootfs Template with it (via the preflight builder), and
 // constructs the two real providers. Requires root.
@@ -9,10 +9,12 @@ package harness
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -45,17 +47,50 @@ func RepoRoot(t *testing.T) string {
 // crash-loop sentinel the reaper escalation test needs). That tag is what keeps
 // the fault path OUT of a production guest — see cmd/sandboxd/faultinject.go.
 // Everything else about this binary is the production build.
+// BUILT ONCE PER TEST BINARY, not per call. The inputs are identical at every call
+// site — same package, same tag, same CGO setting — so the ~0.5 s link was paid 30×
+// per run for the same bytes. Memoized here rather than at each caller because the
+// callers are the ones that must not have to think about it.
+//
+// The result is shared, so it must be TREATED AS READ-ONLY: it is copied into each
+// Template by build-rootfs.sh, never executed or modified in place. A test that needs
+// a DIFFERENT binary (the broken-Template arm) has its own builder and does not come
+// through here.
 func BuildSandboxd(t *testing.T, repoRoot string) string {
 	t.Helper()
-	bin := filepath.Join(t.TempDir(), "sandboxd")
-	cmd := exec.Command("go", "build", "-tags", "testguest", "-o", bin, "./cmd/sandboxd")
-	cmd.Dir = repoRoot
-	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("build sandboxd: %v: %s", err, out)
+	sandboxdOnce.Do(func() {
+		// Not t.TempDir(): that is removed when the FIRST caller's test ends, which
+		// would leave every later caller holding a path to a deleted file. os.MkdirTemp
+		// lives for the process, which is the lifetime the memoized value needs.
+		dir, err := os.MkdirTemp("", "harness-sandboxd")
+		if err != nil {
+			sandboxdErr = fmt.Errorf("temp dir for sandboxd: %w", err)
+			return
+		}
+		bin := filepath.Join(dir, "sandboxd")
+		cmd := exec.Command("go", "build", "-tags", "testguest", "-o", bin, "./cmd/sandboxd")
+		cmd.Dir = repoRoot
+		cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			sandboxdErr = fmt.Errorf("build sandboxd: %w: %s", err, out)
+			return
+		}
+		sandboxdBin = bin
+	})
+	// Every caller fails, not just the first: a memoized failure that only surfaced
+	// once would let later tests run against an empty path and fail somewhere less
+	// obvious.
+	if sandboxdErr != nil {
+		t.Fatalf("%v", sandboxdErr)
 	}
-	return bin
+	return sandboxdBin
 }
+
+var (
+	sandboxdOnce sync.Once
+	sandboxdBin  string
+	sandboxdErr  error
+)
 
 // BuildTemplate builds a guest rootfs Template dir named `name` under
 // templatesDir, using the preflight builder + the given sandboxd binary.
