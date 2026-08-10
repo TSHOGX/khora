@@ -563,7 +563,7 @@ const (
 // carries it. The mount topology is consumed but lives in its own table (§5.C)
 // keyed by sandbox, not as a field here — a sandbox's volume set is many-to-many
 // and mutable independently of the identity record. The network declaration
-// (§5.D) IS carried, as of M8: it is a Binding (§3.4) recorded on the sandbox's own
+// (§5.D) IS carried: it is a Binding (§3.4) recorded on the sandbox's own
 // control-plane record, regenerated into a rule set at every placement from the
 // CURRENT record — which is what makes it stable across resume and rebuildable by
 // §4.4-A reconciliation after a crash.

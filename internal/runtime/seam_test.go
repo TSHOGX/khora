@@ -526,7 +526,7 @@ func TestRestartedAllocatorSkipsAnAdoptedSurvivorsIP(t *testing.T) {
 //
 // The two facts share one leaf constant precisely so they cannot drift, and this
 // asserts the allocator actually honors it — because the drift is SILENT and its
-// consequence is the invariant M8 exists to deliver: a /30 allocated outside the
+// consequence is the invariant §2.4 exists to deliver: a /30 allocated outside the
 // floor's sibling item is a sandbox address the floor does not cover, i.e. a
 // reachable sibling with every reachability test still passing (point-to-point
 // veth does not isolate — measured, the host routes between two /30s and sandbox

@@ -223,7 +223,7 @@ func TestValidateCatchesEachSilentlyBrokenShape(t *testing.T) {
 // interface narrowing. That last point is the whole reason the guard is scoped by
 // table: a single "every rule carries iifname" rule would reject the one rule
 // §2.4 invariant 2 requires, and whichever check was written first would silently
-// win (M8 plan §2, item 12/12b).
+// win.
 func TestValidateAcceptsBothTablesLegalShapes(t *testing.T) {
 	rs := RuleSet{
 		Counters: []string{"floor", "hop2"},

@@ -85,7 +85,7 @@ const (
 	//
 	// Accepting it does not cost "one harmless extra rule": it manufactures a
 	// SECOND population of legitimate zeros in the one health signal the floor has,
-	// and every deny acceptance in M8 reads that signal. Same criterion as
+	// every deny acceptance reads that signal. Same criterion as
 	// "an uncapped sandbox cannot be given a disk cap" — a promise provably
 	// unmaterializable is refused at the write point.
 	ClassAllowInsideFloor Class = "allow-inside-the-floor"
@@ -157,8 +157,8 @@ func invalid(c Class, format string, args ...any) error {
 // eight; the well-formedness class took that ordinal, which changes nothing about this
 // one — the boundary that matters is text-natured vs deployment-natured, not the count.)
 //
-// The refusal itself is mandated by the M8 plan (§5, the orchestrator row): the
-// second hop is pinned by an `output`-hook table narrowed by a uid the DEPLOYMENT
+// The refusal itself follows from how the second hop is enforced: it is pinned by an
+// `output`-hook table narrowed by a uid the DEPLOYMENT
 // supplies, not the declaration (§2.4 / §6.2). With no uid there is no table and
 // therefore NO ENFORCEMENT of §2.4's second invariant — so accepting a `via[]`
 // declaration would record a declaration whose own invariant the engine cannot

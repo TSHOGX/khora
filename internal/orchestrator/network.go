@@ -44,7 +44,7 @@ type networkWire struct {
 	//
 	// THIS IS NOT A GENERAL EXEMPTION from DisallowUnknownFields: only a read-only
 	// member the read face itself produced belongs here. A misspelled `netwrok` is
-	// still a 400, which is the property that matters (§5.D / M8 plan item 3b).
+	// still a 400, which is the property that matters (§5.D).
 	//
 	// SETTLED in §6.1 (`GET …/network`): the read face's read-only members — `state`
 	// here and `host_endpoint` on publishWire — are accepted and ignored on the write

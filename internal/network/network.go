@@ -23,11 +23,14 @@
 // would both fail to run (no placement exists yet) and lift a host primitive onto
 // the cross-provider contract (§5.A ❌ list).
 //
-// The signature has two inputs but the output is grouped BY HOOK, and that is
-// load-bearing rather than presentational: one declaration produces rules on
-// several hooks with OPPOSITE predicate shapes (network.md D5 ⑧ ㉔), so flattening
-// the two sides into one list is exactly how the hook-assignment difference falls
-// out of the part a test pins.
+// The input is the declaration ALONE — the L0 floor is a static fact the `ruleset`
+// leaf holds, never a parameter, so no caller can pass a different floor. The output
+// is one ORDERED list in which each rule names its own hook, because order across
+// hooks is itself a security property (a `via[]` accept must sit above the floor drop
+// IN THE SAME CHAIN — D5 ⑩). Hooks are grouped only downstream, by the renderer and
+// by `ruleset.RuleSet.ByHook`, which is what a unit test uses to pin "what came out on
+// each hook" — the thing that matters, since one declaration produces rules on several
+// hooks with OPPOSITE predicate shapes (D5 ⑧ ㉔).
 package network
 
 import (

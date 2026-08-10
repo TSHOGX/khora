@@ -227,11 +227,11 @@ family 限定**的纯 ct-state `inet` 规则**同样匹配 IPv6** 并 drop,`esta
 > `fe80::/64`,而实测**无地板时 guest 不仅可达宿主侧 veth 的链路本地,还可达 `eth0` 的全局 IPv6**。
 > (反面也量了:`eth0` 的**链路本地**从沙箱**不可达**——链路本地只在自己那条链路上可达,故真正的暴露面是
 > 那个全局地址,而它恰好是 `input` 侧那条无清单规则覆盖的东西。)**地板落地后这两格的兑现方式不同,按
-> D5 ⑳ 的纪律分开记**:宿主侧 veth 的**链路本地**那格以**地板计数器移动**通过(门 B 第 10b 条);而
+> D5 ⑳ 的纪律分开记**:宿主侧 veth 的**链路本地**那格以**地板计数器移动**通过(`TestIPv6IsCoveredByTheSameFloor`);而
 > `eth0` 的**全局 v6** 那格今天是**不可达且计数为 0**——引擎从不给 guest 侧配 v6 地址,故那个包**根本没
 > 离开沙箱**,拦住它的不是地板。**它因此不是一条可断言的强制**,只是当前配置的一个后果:哪天 guest 侧
 > 有了 v6 地址,同一条不带 family 限定的 ct-state 规则就会接住它(D5 ⑪),而在那之前"计数为 0"与
-> "地板被绕过"在这一格上不可区分——故门 B 只按结构断言那一半(渲染输出里无 `nfproto ipv6` 臂)。
+> "地板被绕过"在这一格上不可区分——故验收只按结构断言那一半(渲染输出里无 `nfproto ipv6` 臂)。
 >
 > **"干脆把 veth 的 IPv6 关掉"是可实现的纵深防御,但只有宿主侧那一半站得住(实测 D5 ⑪)。**
 > 一端即足、**建好之后再设也生效**(不需要 `default` 作用域的 sysctl,故引擎不必改全局状态)、且扛住
@@ -265,7 +265,9 @@ family 限定**的纯 ct-state `inet` 规则**同样匹配 IPv6** 并 drop,`esta
 (进程退出后发出的 FIN 是可信的候选,未钉死;D5 ㉔)。**后果只落在 accept/`RETURN` 那一侧**:一条
 `skuid` 收窄的 **drop** 是安全的(SYN 被丢即整条流死),而一条 `skuid` 收窄的 **`RETURN`/accept 压在地板
 drop 之上**则不是——`skuid` 漏匹配的那些包会**穿过它落到下面**。⟹ **上表第一行不能只靠 `skuid` 写成放行**:
-要么让它同时钉住那条流的其他不变量(目标元组),要么接受"免环"靠别的机制。这一条在 M8 门 A 里有断言。
+要么让它同时钉住那条流的其他不变量(目标元组),要么接受"免环"靠别的机制。**这一条由渲染守卫强制**:
+`ruleset.Validate` 拒绝一条 uid 收窄的 accept,只许它 drop(`internal/runtime/nftables_test.go` 的第二跳守卫
+断言两向)。
 
 **谓词取 `uid`/`gid`,不取 mark。** 判据:uid 是**那个进程改不动的宿主侧事实**,而 mark 是我们自己写
 上去的、多一个可写错的环节。(旁证:成熟的 mesh 实现主谓词都是 owner-uid;有的完全不用 mark,用 mark
@@ -300,8 +302,8 @@ drop 之上**则不是——`skuid` 漏匹配的那些包会**穿过它落到下
 (名字解析本身要出网)。故"端点不可达"要能被归因,否则它表现为一个域名问题。**实测数字在 D5 ⑦**:
 `getent` 挂 20.06 s、`curl`/`git` 挂 10.08 s 后报 `Could not resolve host`——这条错位不是理论风险。
 
-**"干净的连接失败"这半承诺可能只有 `reject` 兑现,`drop` 不兑现**(D5 ⑨,**单来源、复现未成**——见该条末尾
-的效力说明)。gVisor netstack **认 ICMP 差错**,故同一条"拒绝"写成两种动作,guest 侧体验相差四个数量级:
+**"干净的连接失败"这半承诺只有 `reject` 兑现,`drop` 不兑现**(D5 ⑨)。gVisor netstack **认 ICMP 差错**,
+故同一条"拒绝"写成两种动作,guest 侧体验相差四个数量级:
 
 | 规则动作 | guest 看到什么 |
 | --- | --- |
@@ -309,15 +311,18 @@ drop 之上**则不是——`skuid` 漏匹配的那些包会**穿过它落到下
 | `reject with icmp admin-prohibited` | **0.002 s** `connect: no route to host` |
 | `reject with tcp reset` | **0.001 s** `connect: connection refused` |
 
-若成立,则一份纯 `drop` 的地板**满足 fail-closed 的安全那一半,却违反它自己写下的 guest 体验那一半**;
-两半都要,故**面向 guest 的拒绝用 `reject`**(安全性不受影响:两者都不放行),`drop` 留给不需要给 guest
-反馈的场合。**UDP 上另一套**:`reject with icmp admin-prohibited` 对 UDP 被 gVisor 忽略(仍挂 5 s),只有
+故一份纯 `drop` 的地板**满足 fail-closed 的安全那一半,却违反它自己写下的 guest 体验那一半**;两半都要,
+故**面向 guest 的拒绝用 `reject`**(安全性不受影响:两者都不放行),`drop` 留给不需要给 guest 反馈的场合。
+**UDP 上另一套**:`reject with icmp admin-prohibited` 对 UDP 被 gVisor 忽略(仍挂 5 s),只有
 `icmp port-unreachable` 被认(0.001 s `connection refused`)。
 
-> **⚠ 这组数字的效力弱于 D5 其余各条,别当同等证据用。** 它**只有一个来源**,而一次独立复现**因测试床坏掉
-> 而失败**(那次 guest 里根本没配默认路由,四种动作的"结果"全同是因为**没有任何包离开沙箱**——是无效测量,
-> 不是反证)。故:**结论方向可信**(gVisor netstack 认 ICMP 差错这件事有独立的机制依据),**具体数字待复现**。
-> M8 的验收断言按"亚秒 vs 数十秒"这个量级差写,**不要把 20.0 s / 0.002 s 写进断言**。
+> **两臂都已在 runsc 上复现**,其余条件逐项钉死(同一目标 `169.254.169.254:80`、同一个跑着的
+> guest,只改动作):`reject` 臂 **0 ms**——由
+> `TestGuestFacingRefusalsFailFastRatherThanHanging` 常态断言;`drop` 臂 **≥ 25 s**(探针自己的
+> `DialTimeout` 先到期,故那是下界而非测得的挂起时长)。上表的 20.0 s 出自另一次用不同 dialer 超时的测量,
+> 与此一致。**验收仍按"亚秒 vs 数十秒"这个量级差断言,不要把毫秒数写进断言**——钉死一个具体数字换不到任何
+> 东西,只让测试变脆。`drop` 臂**刻意不留成常态测试**:它每跑一次白挂 25 s,而它支撑的唯一结论(用 `reject`
+> 不用 `drop`)已经落在 `ruleset.Verdict` 里。
 
 **一条部署约束,引擎不校验它**:那个引擎外进程若要回问什么(它通常要),而它的出站已被 D4.2 第二跳压在
 地板后面——则它回问的那个端点**不能落在 L0 地板里**,否则第二跳当场把它自锁。这是**部署那一层的人要守
@@ -436,9 +441,9 @@ loopback 也非 link-local),**不在**地板任何一项里,故**此机上它可
 transport **彻底死**(响得很大声);宽 accept 压在地板之上 → **完全静默**,全部可达性测试照过,唯一信号是
 **地板计数器为 0**。故验收必须断言"netns 内不可达" **+** "刻意探测后地板计数非 0"。
 
-**⑨ gVisor 认 ICMP 差错,故 `drop` 与 `reject` 的 guest 体验差数个数量级**(单来源:20.0 s timeout vs
-0.002 s `no route to host`;**一次独立复现因测试床坏掉而失败,故数字待复现、方向可信**——效力说明在 D4.3
-末尾那个 ⚠ 块,本条不复制)。连带结论"面向 guest 的拒绝用 `reject`"在 D4.3。同一批测量确认
+**⑨ gVisor 认 ICMP 差错,故 `drop` 与 `reject` 的 guest 体验差数个数量级**(20.0 s timeout vs
+0.002 s `no route to host`;**两臂都已在 runsc 上复现**——`reject` 0 ms、`drop` ≥ 25 s,复现条件与"为何仍按
+量级断言"见 D4.3 末尾那个块,本条不复制)。连带结论"面向 guest 的拒绝用 `reject`"在 D4.3。同一批测量确认
 **gVisor 不改变 conntrack 与 original-dst 的任何结论**:一条 gVisor 发起的 HTTP 流其回程在
 `established,related` 上计 7 个包(`invalid`=0、`untracked`=0),且去掉 ct-state 放行后**被放行的流也断**
 (证明它承重);端口-only 重定向对 gVisor 发起的连接同样取回真实目标(`1.1.1.1:443` /
@@ -467,8 +472,8 @@ iifname "<vh>" ct original ip daddr <declared_cidr> ct original proto-dst <decla
 | 钉 cidr + proto-dst,**不钉 listener 端口** | 已声明的原始端口重定向到**未声明的 listener**(`9.9.9.9:443` → :19999) | guest 到达一个**声明从未命名**的监听者(读回 banner `hello-from-UNDECLARED`) |
 | 省掉 `iifname` | **另一个沙箱**的同样流量 | 沙箱 2 的连接被沙箱 1 的 accept 放行(两边地板计数均 0)——**每沙箱一张 `policy accept` 基链共用同一钩子,故一张表里未加 `iifname` 的 accept 是所有沙箱地板上的洞** |
 
-**`tcp dport <listener>` 单用正是门 B 那条"直连 listener 端口绕过引流"的旁路(M8 门 B),而作为第三个
-clause 它恰是堵住上表第三行的那一个**——同一个
+**`tcp dport <listener>` 单用正是"直连 listener 端口绕过引流"那条旁路(`TestViaSteersAndDoesNotReopenTheFloor`
+覆盖),而作为第三个 clause 它恰是堵住上表第三行的那一个**——同一个
 表达式既危险又必需,区别在于 `ct original` 已经先钉住了 pre-NAT 元组(而直连 listener 的流量没有可满足它的
 conntrack original 条目)。**别让任何人"简化"掉它。**
 
@@ -493,12 +498,13 @@ conntrack original 条目)。**别让任何人"简化"掉它。**
 
 > **量它的时候有一个会毁掉测量的陷阱,记在这里**:测试床若在重建 netns/veth 时**没有卸掉自己那张表**,
 > 规则里的 ifindex 就是对**上一次**的解析——从测试的视角看根本没发生重建,`iif` 于是表现成"从来不匹配"
-> 而不是"重建后不匹配"。M8 门 B 第 11b 条要断言在"重建之后"这个时点上,故它必须真的重装表。
+> 而不是"重建后不匹配"。`TestTheFloorStillHoldsAfterAVethRebuild` 要断言在"重建之后"这个时点上,故它必须真的
+重装表。
 
 **两条附带,都影响写法**:① `nft list` 平时会把那个冻结整数**反解回名字**,故两种写法在列表里**看起来
 一样**——只有当没有接口持有该 index 时才露出裸的 `iif 12`,**故评审看列表看不出来**;② `iif` 对
 **不存在的接口无法装载**(rc=1 `Interface does not exist`),且一个 `-f` 文件里混进一条这样的规则会
-**整份原子失败**(不留半张表)——方向是安全的,但它拿走了 M8 第 7 件原子性次序上的一个自由度。
+**整份原子失败**(不留半张表)——方向是安全的,但它拿走了"规则装在 guest 起跑之前"那条次序上的一个自由度。
 **一条未量但更坏的风险**:本次 ifindex 只增不减(8→10→12→16),从未观测到复用;若将来某个**别的**沙箱的
 veth 拿到一个退役的 index,一条 stale `iif` 规则会开始匹配**那个沙箱的流量**——不是漏洞而是**静默的跨沙箱
 错配**。未量,但它只增强这条守卫的理由。
@@ -564,7 +570,8 @@ v6 侧时,NAT64 映像那一半有了实测依据**。**但它推不出"整段 `
 
 > **⑩⑪⑫ 的测量床是普通 netns peer,不是真 runsc guest**(⑨ 已独立证明 gVisor 不改变 conntrack 与
 > original-dst 的任何结论,故这是被允许的省略)。⑩ 那两条新发现——**跨链 accept 的陷阱**与
-> **`forward` 侧需要自己的 default-deny**——已由 M8 门 B 在 runsc 下复跑。
+> **`forward` 侧需要自己的 default-deny**——已在 runsc 下复跑
+> (`TestOneSandboxsRuleSetDoesNotAffectAnothers` / `TestDenyEmptyIsUnreachableEverywhereWithFloorCountersMoving`)。
 
 ### D5.b 入站 / `publish`
 
@@ -589,14 +596,14 @@ guest **发起**的流量量的。**⑬–⑯** 在真 runsc guest + 一个独�
 > boot 后在该 netns 里 `ip addr` **只剩 `lo`**(veth link 仍在、仍 UP),故 `ip route add default via …`
 > 报 `Nexthop has invalid gateway` ——**guest 侧的路由只能在 boot 之前配,boot 之后配不上**。这与
 > "IP 由引擎自己分配、不做 boot 后探测"是同一个机制的两面,但后者约束的是**读**,这条约束的是**写**:
-> M8 第 8 件(出网三件机制)里"guest 侧带 `dev` 的默认路由"因此**必须在
-> `runsc run` 之前**装好,不能等拉起后补——它落在与规则集同一个原子窗口里(§2.4)。
+> 出网三件机制里"guest 侧带 `dev` 的默认路由"因此**必须在 `runsc run` 之前**装好,不能等拉起后补——
+> 它落在与规则集同一个原子窗口里(§2.4)。
 
 **⑭ 宿主自身发起的 publish 流量不经 `prerouting`,需要 `output` 钩子上自己一条 DNAT。** 同一份只装了
 `prerouting` DNAT 的规则集下,从**调用方 netns** 拨通(`pre_dnat` 计 1),从**宿主**拨同一个
 `ip:port` 则完全不被转换(`pre_dnat` 不动);补一条 `output`/`dstnat` 规则后宿主侧也通(`out_dnat` 计 1)。
 ⟹ **"宿主上的调试拨测能通"不是 publish 生效的证据,反之亦然**:两条路径由两条不同的规则承载,验收要
-分别断言。M8 门 B 第 14 条按此拆成两问。
+分别断言,而 `TestPublishIsReachableFromOutsideAndFromTheHostAndSurvivesResume` 按此拆成两问。
 
 **⑮ 转换后的 publish 流量落 `forward`,不落 `input`。** 实测 `fw_*` 计数随每条 publish 流增长而
 `in_*` 恒 0。⟹ **D5 ⑧⑩ 那个"被引流的流量落 `input`"的结论不可搬到入站**:`via[]` 的目标是**宿主本地
@@ -613,8 +620,9 @@ gVisor netstack 对两种情形都回 RST。⟹ **§5.D 用户可见语义 ① �
 
 > **一条本次未能有效断言的**:D 那一格想顺带证"publish 的伴随 accept 没有变成一条出站路径"(D1 ④),
 > 但该 guest 没有默认路由,故它的出站在**离开沙箱之前**就 `net is unreachable` 了,地板 drop 计数为
-> **0** ——按 D4.1 的纪律这是**无效断言**,不是一次通过。它由 M8 门 B 覆盖(那里的沙箱按第 8 件**有**
-> 默认路由,故同一条探测会真的打到地板上)。
+> **0** ——按 D4.1 的纪律这是**无效断言**,不是一次通过。它由
+> `TestPublishDoesNotOpenAnEgressPathOnTheSubstrate` 覆盖(那里的沙箱**有**默认路由,故同一条探测会真的
+> 打到地板上)。
 
 **⑰ 删掉 publish 的 DNAT 只关新连接,已建立的流照旧传数据;而只删伴随 SNAT 的失败签名完全不同。**
 两半都是实测(netns peer 床,一次性 fixture,**未入库**):
@@ -627,8 +635,9 @@ gVisor netstack 对两种情形都回 RST。⟹ **§5.D 用户可见语义 ① �
   回程不可路由(⑬ 的机制),故调用方挂在等一份永远不来的数据上。
 
 ⟹ 两条可操作结论。**一,`publish` 的撤销在 `running` 上撤不干净**——只能承诺"不再收新连接",不能承诺
-"这个端口关了",而两者的差别正是调用方撤一个入站口时想要的东西(故 un-publish 专用端点归 M8 之外,
-理由是机制而非工期)。**二,一份半拆的 publish 规则集会以最难诊断的方式坏掉**:少了 SNAT 表现为
+"这个端口关了",而两者的差别正是调用方撤一个入站口时想要的东西(故**没有 un-publish 专用端点**,理由是
+机制而非工期:撤销走 `PATCH` 整份声明,在下一次 placement 上才真的关掉那个口——
+`TestRevokingAPublishClosesThePortAtTheNextPlacement`)。**二,一份半拆的 publish 规则集会以最难诊断的方式坏掉**:少了 SNAT 表现为
 连上后挂住,极易被误读成 guest 侧应用故障。故"publish 不通"有**两个不同签名**,验收要分别断言、
 不能合并成"不可达"。
 
@@ -688,9 +697,12 @@ ct 表持有该流(按 guest IP + 端口成键、`[ASSURED]`),而**沙箱 netns 
 > 渲染整份装上,比 diff 简单得多。**连带约束 `ReclaimOrphans`**:它按表名前缀枚举,若在同一次对账里排在
 > `Adopt` 之前而顺手删掉了活沙箱的表,那**逐字是上表第二行**——故 keep 集必须在任何删除**之前**算好。
 >
-> **一条未测**:真正杀掉并重启一个 orchestrator 进程没有量过(M8 的 `Adopt` 还不存在)。上面量的是
-> 一次 `Adopt` **可能做的三种宿主态改动**,故"活流跨控制面重启存活"这个结论**条件于 `Adopt` 只做第一种**
-> ——那正是门 B 那条断言要守的东西。
+> **已复现,连同 `Adopt` 一起**:`TestALiveFlowSurvivesAControlPlaneRestartAndItsAdopt` 让一条 guest 侧的
+> 回显流跑在半途,期间起第二个引擎跑生产的 boot 次序、由它的 `Adopt` 重装规则集,断言**跨重启读回的往返
+> 次数**(不是 socket 还在——对死对端 `write()` 通常先成功一次才 EPIPE)。上面量的是一次 `Adopt`
+> **可能做的三种宿主态改动**,故该结论**条件于 `Adopt` 只做第一种**,而那正是这条断言守的东西。
+> **一处残留**:第二个引擎在同一进程内起(同一个 store 与 state 目录、生产的 boot 次序),OS 进程没有真被
+> 杀掉——差别落在进程级状态上,而这条结论承重的宿主态(ct 表、nft 表)都在进程之外。
 
 ---
 
@@ -728,8 +740,8 @@ provider 契约相遇,`SteeringSpec` 是承载这一半的那个成员,不新增
 **地板的成员清单与规则文本都已收口,不在本节**:清单四项全静态(D5 ④⑧)、`via[]` 那条窄放行的形状与
 IPv6 覆盖见 D5 ⑩⑪、`iif` 的 fail-open 见 D5 ⑫。**"声明的放行是否也发在 `input`"已定**(发,且该侧自带
 sibling drop——D4.2)。**内网 deny-safe 档的成员已收口**(RFC1918 + v6 机械派生,§2.4;本节只留"是否
-放宽")。**第二跳的钩子与谓词也已收口**(`output` + `skuid`,D5 ㉔——这一格是 M8 审核期间补量的,D4.2
-原先那句"只活在 `forward`"是错的)。**故 M8 开工无前置测量。** 仍开放的三项:
+放宽")。**第二跳的钩子与谓词也已收口**(`output` + `skuid`,D5 ㉔)。**故 §5.D 没有任何前置测量待做。**
+仍开放的三项:
 
 - **内网 deny-safe 档将来是否放宽到 RFC1918 之外**(**成员清单本身已收口进 §2.4**:RFC1918 三段 + v6
   机械派生。开放的只是放宽,而放宽是纯加法)。

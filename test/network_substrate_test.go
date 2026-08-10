@@ -23,7 +23,7 @@ import (
 	"engine/test/harness"
 )
 
-// M8 GATE B: §5.D enforcement on the real substrate (plan §6 items 6–15).
+// §5.D enforcement on the real substrate.
 //
 // # The acceptance discipline, which shapes every assertion in this file
 //
@@ -38,13 +38,21 @@ import (
 // The paired direction matters just as much and for the opposite reason: an engine
 // that could reach NOTHING would pass every deny assertion vacuously. That is why
 // item 7 (public egress actually works under `allow`) has to pass before items 7b/7c
-// mean anything, and why the plan fixes the order 8 → 7 → 8c → 7b/7c.
+// mean anything: the order 8 → 7 → 8c → 7b/7c is a real dependency, not a listing.
+//
+// # The `item N` labels
+//
+// THIS FILE'S OWN numbering, declared by the `--- item N: … ---` banners below and
+// used in failure messages so that a failing assertion inside a multi-part test names
+// itself. They are not a reference to anything outside this file. Keep a label stable
+// once written — the sub-letters (7b, 9d, 14e) encode which assertion depends on
+// which, as the paragraph above does for 7.
 
 // guestProbe is a tiny static binary injected into the Template: it dials an
 // address and prints a one-line verdict. The bare rootfs ships no coreutils, so
 // anything the guest must run has to be injected (harness.InjectStaticBin).
 //
-// It reports the OUTCOME and the elapsed time, because two gate B items turn on the
+// It reports the OUTCOME and the elapsed time, because two assertions turn on the
 // difference between "refused fast" and "hung": §2.4's fail-closed has a second half
 // — "the guest gets a clean connection failure" — that a pure-`drop` floor breaks
 // while satisfying the security half (network.md D5 ⑨).
@@ -196,7 +204,7 @@ func main() {
 	}
 	el := time.Since(start).Milliseconds()
 	if rerr != nil {
-		// Connected but read nothing. For TCP that is a real distinction the plan needs
+		// Connected but read nothing. For TCP that is a real distinction the assertions need
 		// (a half-torn publish presents exactly this way, D5 ⑰); for UDP it is how a
 		// silently-dropped datagram looks.
 		fmt.Printf("OUTCOME=connected_no_payload MS=%d ERR=%v\n", el, rerr)
@@ -350,7 +358,7 @@ func netEngineOpts(t *testing.T) harness.EngineOpts {
 	}
 }
 
-// secondHopUID is the uid the gate B `via[]` items run the endpoint process as. A
+// secondHopUID is the uid the `via[]` tests run the endpoint process as. A
 // fixed non-root uid: the whole point of item 9d is that the drop is narrowed to it
 // and does NOT take out the host (measured: an un-narrowed drop on that hook is a
 // host-level egress kill switch — network.md D5 ㉔).
@@ -384,7 +392,7 @@ func declAllowPublic() model.NetworkDecl {
 
 // --- item 6: `deny` + empty is unreachable EVERYWHERE, with counters moving ------
 
-// Gate B item 6. Four destination classes, and the COUNTERS ARE READ PER HOOK because
+// Four destination classes, and the COUNTERS ARE READ PER HOOK because
 // the two hooks see different traffic: a destination that is an address of the host
 // ITSELF lands on `input`, while something the host would ROUTE lands on `forward`
 // (measured, network.md D5 ⑧).
@@ -502,7 +510,7 @@ func TestDenyEmptyIsUnreachableEverywhereWithFloorCountersMoving(t *testing.T) {
 
 // --- item 9: the transport is not killed by the floor ---------------------------
 
-// Gate B item 9, and it is the LOUD counterpart to every silent failure in this file:
+// The LOUD counterpart to every silent failure in this file:
 // the floor's `input` side must not drop the guest's replies to the host.
 //
 // It is asserted here rather than left implicit in the other tests' use of the
@@ -544,9 +552,9 @@ func TestTheFloorDoesNotKillTheTransport(t *testing.T) {
 // --- items 7, 7b, 7c: `allow` delivers public egress, refuses the LAN, and the ---
 // --- tier is liftable while the floor is not ------------------------------------
 
-// The order here is the plan's, and it is a HARD constraint rather than a preference
-// (§7): item 7 must pass BEFORE 7b/7c mean anything, because an engine that could
-// reach nothing would pass every deny assertion vacuously.
+// The order here is a HARD constraint rather than a preference: item 7 must pass
+// BEFORE 7b/7c mean anything, because an engine that could reach nothing would pass
+// every deny assertion vacuously (see the file header).
 func TestAllowPublicDeliversEgressAndStillRefusesTheInternalTier(t *testing.T) {
 	eng, _ := harness.Engine(t, netEngineOpts(t))
 	host := hostIPv4(t)
@@ -671,7 +679,7 @@ func tupleOf(t *testing.T, cidr string, port uint16, proto model.NetProto) model
 
 // --- item 8: an allow[] entry admits EXACTLY its tuple --------------------------
 
-// Gate B item 8: the declared `{cidr, port, proto}` works and NOTHING ADJACENT does.
+// The declared `{cidr, port, proto}` works and NOTHING ADJACENT does.
 //
 // Both halves, because either alone is passable by a broken rule set: only the
 // positive and a rule set that admits everything passes; only the negative and one
@@ -726,11 +734,11 @@ func TestAnAllowEntryAdmitsExactlyItsTuple(t *testing.T) {
 	mustCounterMoved(t, id, "in_floor", floorBefore, floorAfter, "item 8: an undeclared port on a declared address")
 }
 
-// Gate B item 8's UDP half, asserted separately because UDP is DNS's only declarable
-// path (§5.D semantics ③) and because the plan is explicit that the assertion stops
-// at the RULE layer: whether `curl` in the guest can RESOLVE depends on
-// `resolv.conf`, which M8 does not write (the guest has no resolver configuration at
-// all today — measured, D5 ⑦).
+// The UDP half, asserted separately because UDP is DNS's only declarable path (§5.D
+// semantics ③) and because the assertion deliberately stops at the RULE layer:
+// whether `curl` in the guest can RESOLVE depends on `resolv.conf`, which the engine
+// does not write (the guest has no resolver configuration at all today — measured,
+// D5 ⑦).
 func TestADeclaredUDPTupleIsAdmittedAtTheRuleLayer(t *testing.T) {
 	eng, _ := harness.Engine(t, netEngineOpts(t))
 	host := hostIPv4(t)
@@ -793,12 +801,12 @@ func TestADeclaredUDPTupleIsAdmittedAtTheRuleLayer(t *testing.T) {
 	t.Logf("item 8 (udp): %s", got.raw)
 	// Deliberately NOT asserting name resolution: the guest ships no resolv.conf at
 	// all, so DNS does not work there for reasons that precede any §5.D policy — that
-	// is a template/product-layer content choice and explicitly out of M8's scope.
+	// is a template/product-layer content choice, outside the engine.
 }
 
 // --- item 8b: guest-facing refusals FAIL FAST rather than hang -----------------
 
-// Gate B item 8b: §2.4's fail-closed has a SECOND half — "the guest gets a clean
+// §2.4's fail-closed has a SECOND half — "the guest gets a clean
 // connection failure" — and a pure-`drop` floor satisfies the security half while
 // breaking this one. gVisor's netstack honors ICMP errors, so `reject` and `drop`
 // differ by orders of magnitude in what the guest experiences.
@@ -846,7 +854,7 @@ func TestGuestFacingRefusalsFailFastRatherThanHanging(t *testing.T) {
 // --- item 10 / 11b: pillar ④ — the predicate binds to a fact the guest cannot ---
 // --- change, and survives a veth rebuild ---------------------------------------
 
-// Gate B item 10: guest root FORGES a source address and the floor still holds.
+// Guest root FORGES a source address and the floor still holds.
 //
 // This is pillar ④'s acceptance: guest root can `ip addr add` (measured rc=0), so a
 // SOURCE-address predicate is bypassable while an INPUT-INTERFACE one is not (D5 ③).
@@ -911,7 +919,7 @@ func TestForgingASourceAddressDoesNotBypassTheFloor(t *testing.T) {
 			"did not simply make the packet undeliverable inside the sandbox")
 }
 
-// Gate B item 11b: after a pause→resume rebuilds the veth under the SAME NAME, the
+// After a pause→resume rebuilds the veth under the SAME NAME, the
 // floor still holds.
 //
 // This is the behavioral face of the `iifname`-over-`iif` guard, and the TIME POINT
@@ -962,7 +970,7 @@ func TestTheFloorStillHoldsAfterAVethRebuild(t *testing.T) {
 
 // --- item 11: cross-sandbox independence ---------------------------------------
 
-// Gate B item 11: two sandboxes hold two tables, and one's rule set does not affect
+// Two sandboxes hold two tables, and one's rule set does not affect
 // the other's reachable set.
 //
 // This is guard ①'s POSITIVE face: a `policy drop` in a per-sandbox table was
@@ -1044,7 +1052,7 @@ func gatewayOf(t *testing.T, eng *orchestrator.Engine, id model.SandboxID) strin
 	return netip.AddrFrom4(o).String()
 }
 
-// Gate B item 11c: the input-side allow did NOT open a SIBLING's gateway along with
+// The input-side allow did NOT open a SIBLING's gateway along with
 // this sandbox's own.
 //
 // `allow 10.0.0.0/8` contains BOTH /30s, so nothing in the declaration separates the
@@ -1155,7 +1163,7 @@ func TestAnInputSideAllowReachesItsOwnGatewayButNotASiblings(t *testing.T) {
 
 // --- item 12: atomicity — the rules are in place before the unit runs ----------
 
-// Gate B item 12: no fail-open window, and destroy leaves NO table.
+// No fail-open window, and destroy leaves NO table.
 //
 // The first half cannot be observed by polling from outside (the window it denies is
 // exactly the one that must not exist), so it is asserted STRUCTURALLY: the very
@@ -1309,10 +1317,9 @@ func startViaListener(t *testing.T, port int) (string, func()) {
 	return bind, stop
 }
 
-// Gate B item 9b: `via[]` really steers, AND the narrow accept did not reopen the
-// floor. BOTH halves, because each alone is passed by a broken rule set — and this is
-// the item the plan calls the easiest in the whole milestone to silently pass, with
-// TWO failure directions (D5 ⑩): test only (a) and an accept wide enough to void the
+// `via[]` really steers, AND the narrow accept did not reopen the floor. BOTH halves,
+// because each alone is passed by a broken rule set — and this is the easiest property
+// in this file to silently pass, with TWO failure directions (D5 ⑩): test only (a) and an accept wide enough to void the
 // floor passes; read only the counter and a CROSS-CHAIN accept counts while the
 // feature is dead.
 func TestViaSteersAndDoesNotReopenTheFloor(t *testing.T) {
@@ -1422,11 +1429,11 @@ func TestViaSteersAndDoesNotReopenTheFloor(t *testing.T) {
 	})
 }
 
-// Gate B item 9c: when the `via[]` endpoint is DEAD, the steered connection is refused
+// When the `via[]` endpoint is DEAD, the steered connection is refused
 // — it does NOT fall through to the next rule and leave.
 //
-// This is §2.4 fail-closed's second named case, and the plan flags it as a REQUIREMENT
-// rather than an inherited measurement: D5 has no "the listener died" cell.
+// This is §2.4 fail-closed's second named case, and it is a REQUIREMENT rather than an
+// inherited measurement: D5 has no "the listener died" cell.
 //
 // The counter half is the subtle part. It reads the INPUT-side narrow accept, not the
 // forward default-deny, and the reasoning is hook attribution: the DNAT is in
@@ -1501,7 +1508,7 @@ func TestADeadViaEndpointRefusesTheConnectionRatherThanLettingItOut(t *testing.T
 	}
 }
 
-// Gate B item 9d: the SECOND HOP is really pinned — the confused-deputy line (§2.4
+// The SECOND HOP is really pinned — the confused-deputy line (§2.4
 // invariant 2).
 //
 // BOTH halves, and the reason is the same discipline as everywhere else: testing only
@@ -1632,7 +1639,7 @@ c.Close(); fmt.Println("CONNECTED")`, target)
 
 // --- items 13 / 13b: §4.4-A reconciliation --------------------------------------
 
-// Gate B item 13: the rule set is crash-surviving host state, so reconciliation must
+// The rule set is crash-surviving host state, so reconciliation must
 // re-adopt a survivor's table and reclaim an orphan's — and the tables must not leak
 // (§2.4 / §4.4-A).
 //
@@ -1716,7 +1723,7 @@ func TestReconciliationReadoptsARuleSetAndReclaimsAnOrphansTable(t *testing.T) {
 	}
 }
 
-// Gate B item 13b: a LIVE FLOW keeps transferring bytes across a control-plane restart
+// A LIVE FLOW keeps transferring bytes across a control-plane restart
 // and its Adopt.
 //
 // THIS ONE CANNOT BE OMITTED, and the reason is that item 13 is completely insensitive
@@ -1908,7 +1915,7 @@ func main() {
 
 // --- item 14: publish, in five separately-falsifiable questions ------------------
 
-// Gate B item 14. Five questions rather than one "is it reachable", because each has a
+// Five questions rather than one "is it reachable", because each has a
 // measured counter-example of its own (D5 ⑬–⑯) and a single reachability check passes
 // while four of the five are broken.
 func TestPublishIsReachableFromOutsideAndFromTheHostAndSurvivesResume(t *testing.T) {
@@ -1983,7 +1990,7 @@ func main() {
 	// directly: a host-side dial succeeded and returned the guest's banner while
 	// `pub0_in_dnat` counted ZERO, because prerouting is not traversed by
 	// host-originated traffic at all. So "it worked from the host" is not evidence the
-	// external path works — which is precisely why the plan splits these into two
+	// external path works — which is precisely why these are split into two
 	// questions and forbids using one for the other.
 	t.Run("(i) reachable from outside the sandbox's own /30, with the SNAT in place", func(t *testing.T) {
 		out, derr := dialFromForeignNetns(t, endpoint)
@@ -2183,7 +2190,7 @@ func main() {
 	})
 }
 
-// Gate B item 14c: a publish on a PAUSED sandbox records only — 200,
+// A publish on a PAUSED sandbox records only — 200,
 // `applies_at: next-resume`, no `host_endpoint`, NO rules on the host yet — and then
 // appears after resume. Plus the §3.4 discipline that it must not touch UpdatedAt.
 func TestPublishOnAPausedSandboxRecordsWithoutInstallingRules(t *testing.T) {
@@ -2253,7 +2260,7 @@ func TestPublishOnAPausedSandboxRecordsWithoutInstallingRules(t *testing.T) {
 	}
 }
 
-// Gate B item 14d: repeated publish of the same `{guest_port, proto}` is idempotent —
+// Repeated publish of the same `{guest_port, proto}` is idempotent —
 // one item in the declaration and ONE DNAT on the host.
 //
 // The substrate will not find the duplicate for us: nft accepts two byte-identical
@@ -2531,7 +2538,7 @@ func TestAdoptKeepsEachSurvivorsPublishEndpoints(t *testing.T) {
 
 // --- item 15: the PATCH read-modify-write hazard --------------------------------
 
-// Gate B item 15: writing back a STALE declaration silently drops a publish added in
+// Writing back a STALE declaration silently drops a publish added in
 // between.
 //
 // §6.1 makes the read-modify-write cycle a CONTRACT REQUIREMENT rather than advice for
@@ -2604,8 +2611,8 @@ func TestAStalePatchSilentlyDropsAHotAddedPublish(t *testing.T) {
 
 // --- item 10b: IPv6 is covered by the SAME floor ---------------------------------
 
-// Gate B item 10b, and the plan is explicit that it CANNOT be skipped even though
-// D5 ⑪ already measured an `inet` ct-state rule covering IPv6: that measurement was
+// The IPv6 arm, which CANNOT be skipped even though D5 ⑪ already measured an `inet`
+// ct-state rule covering IPv6: that measurement was
 // taken on a netns peer against a hand-written rule, while what has to be proved here
 // is that THE RULE SET THIS ENGINE RENDERS covers v6 under runsc.
 //
@@ -2799,7 +2806,7 @@ func hostGlobalIPv6(t *testing.T) string {
 	return ""
 }
 
-// Gate B item 14b: a publish's reverse flow has NOT become an egress path (D1 ④).
+// A publish's reverse flow has NOT become an egress path (D1 ④).
 //
 // THIS IS THE FIRST TIME THIS ASSERTION CAN BE VALID. The spike that tried it had a
 // guest with no default route, so its egress died with `net unreachable` BEFORE
@@ -2893,7 +2900,7 @@ func main() {
 	mustCounterMoved(t, id, "in_floor", inBefore, inAfter, "item 14b: the input side too")
 }
 
-// Gate B item 14e: revocation. What the engine actually offers is ONE path, and this
+// Revocation. What the engine actually offers is ONE path, and this
 // asserts both of its halves.
 //
 // # Why the title is not "closes new connections but not established ones"

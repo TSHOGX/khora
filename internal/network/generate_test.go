@@ -74,7 +74,7 @@ func allowPublic() Declaration {
 	return d
 }
 
-// --- gate A item 1: the four declaration-value combinations -------------------
+// --- the four declaration-value combinations ----------------------------------
 
 // Each combination pins the rules it must produce AND the ones it must not. The
 // negatives matter as much: the deny-safe tier appearing under `default: deny`
@@ -163,7 +163,7 @@ func TestTheFourDeclarationCombinations(t *testing.T) {
 	}
 }
 
-// --- gate A item 3 + 4c: ORDER --------------------------------------------------
+// --- ORDER ---------------------------------------------------------------------
 
 // Order is the mechanism, not the presentation. Every pair below has a measured
 // counter-example on the wrong side.
@@ -455,7 +455,7 @@ func TestTheSelfGatewayAllowCannotReachAGatewayTheDeclarationDidNotContain(t *te
 	}
 }
 
-// --- gate A item 4: the render guards, on real generator output ---------------
+// --- the render guards, on real generator output -------------------------------
 
 // Every declaration the generator accepts must produce a rule set that passes the
 // abstract guards. Generate calls ruleset.Validate itself, so this asserts the
@@ -513,7 +513,7 @@ func TestEveryGeneratedRuleSetPassesTheGuards(t *testing.T) {
 // interface narrowing) must not be rejected by the per-sandbox interface guard.
 //
 // Otherwise the guard and §2.4 invariant 2 are mutually exclusive and whichever
-// was written first wins silently (M8 plan §2, items 12/12b).
+// was written first wins silently.
 func TestTheTwoGuardScopesDoNotCross(t *testing.T) {
 	rs, err := SecondHopRules()
 	if err != nil {
@@ -548,7 +548,7 @@ func TestTheTwoGuardScopesDoNotCross(t *testing.T) {
 	}
 }
 
-// --- gate A item 4b: the second hop, generator side ---------------------------
+// --- the second hop, generator side -------------------------------------------
 
 // The second hop must be emitted on `output` and NOWHERE ELSE.
 //
@@ -711,7 +711,7 @@ func TestTheSecondHopCarriesAReturnArmAboveItsFloor(t *testing.T) {
 	}
 }
 
-// --- gate A item 4c: the deny-safe tier, generator side -----------------------
+// --- the deny-safe tier, generator side ---------------------------------------
 
 // The tier's position is the assertion, and the v6 half's MEMBERSHIP is too.
 func TestTheDenySafeTierIsLiftableAndSeparateFromTheFloor(t *testing.T) {
@@ -777,7 +777,7 @@ func TestTheDenySafeTierIsLiftableAndSeparateFromTheFloor(t *testing.T) {
 	}
 }
 
-// --- gate A item 5: the floor's four items, and no IPv6 fork ------------------
+// --- the floor's four items, and no IPv6 fork ---------------------------------
 
 // The floor's four items must all be delivered, each in the shape §2.4 gives it.
 func TestAllFourFloorItemsAreDelivered(t *testing.T) {

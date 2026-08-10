@@ -304,7 +304,7 @@ func (v Verdict) String() string {
 func (v Verdict) Terminal() bool { return v == Reject || v == Drop }
 
 // Scope is the NARROWING every rule must carry, and it is the abstract form of
-// the render guards (§4 of the M8 plan / network.md D5 ⑩ ㉔).
+// the render guards (network.md D5 ⑩ ㉔).
 //
 // Why every rule needs one: each per-sandbox table puts a `policy accept` base
 // chain on a SHARED hook, so a rule in one sandbox's table is evaluated against
@@ -576,8 +576,7 @@ func (rs RuleSet) Hooks() []Hook {
 }
 
 // Validate is the ABSTRACT half of the render guards — the half that runs
-// root-free, in a unit test, over the generator's output (M8 plan §4 / §6 gate A
-// item 4).
+// root-free, in a unit test, over the generator's output.
 //
 // These are not defensive programming. Each one is a property that ONE WORD OF
 // EDITING breaks with no test firing and no visible difference in `nft list`

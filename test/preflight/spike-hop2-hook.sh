@@ -16,20 +16,20 @@
 # socket to ask.
 #
 # If that reading is right, three things follow and all three are load-bearing
-# for M8:
+# for the rule-set shape:
 #   * the L0 floor as designed (input + forward, iifname-narrowed) sees NONE of
 #     hop 2 — the confused-deputy path is wide open, and no floor counter moves,
 #     which is the silent-pass signature D4.1 warns about;
 #   * the hop-2 rules need an `output` base chain, which is NOT per-sandbox
 #     (one uid, one deployment) — so it cannot live in a per-sandbox table, and
-#     M8's render guard "every rule carries iifname" cannot apply to it;
+#     the render guard "every rule carries iifname" cannot apply to it;
 #   * that `output` chain needs its own narrowing guard, for exactly guard ②'s
 #     reason: an un-narrowed drop there is a HOST-level egress kill switch.
 #
 # So this script measures, for a host-local process's egress:
 #   Q1  which hooks see it: forward / output / postrouting
 #   Q2  whether `meta skuid` matches, per hook
-#   Q3  whether an iifname-narrowed floor (the M8 shape) sees it at all
+#   Q3  whether an iifname-narrowed floor (the L0 shape) sees it at all
 #   Q4  whether a skuid-narrowed drop in `output` actually enforces
 #   Q5  whether an un-narrowed drop in `output` is a host-wide kill switch
 #
@@ -69,7 +69,7 @@
 #
 # ⟹ D4.2's "this predicate lives entirely in `forward`" is WRONG as written; the
 #    hook is `output`. Consequences for the rule-set shape are written up in
-#    network.md D5 ㉔ and M8-network.md.
+#    network.md D5 ㉔.
 set -u
 
 HOP2_UID=12345
@@ -145,7 +145,7 @@ except Exception as e:
 
 say "Q1+Q2+Q3: which hooks see a host-local process's egress, and does skuid match"
 # Observation-only: every rule is a bare counter, no verdict. Three hooks x
-# {skuid-narrowed, unnarrowed}, plus the M8-shaped iifname floor for Q3.
+# {skuid-narrowed, unnarrowed}, plus the L0-shaped iifname floor for Q3.
 # NOTE two rendering constraints, both learned the hard way here:
 #  * named counters must be DECLARED BEFORE the chains referencing them in one
 #    -f file;

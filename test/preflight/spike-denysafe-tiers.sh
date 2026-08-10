@@ -44,7 +44,7 @@
 #     declaration while the floor is not. Both orderings are measured, because
 #     the wrong one fails silently (D5 ⑧/⑩: reachable, floor counter 0).
 #
-# Discipline (D4.1 / M8 gate B): a failed `nft -f` reads as "everything is
+# Discipline (D4.1): a failed `nft -f` reads as "everything is
 # reachable", which is indistinguishable from a missing rule. Every rule set is
 # asserted loaded before it is trusted, and every "blocked" claim is paired with
 # a counter that moved. A drop counter of 0 next to a failed dial is recorded as

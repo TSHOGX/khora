@@ -351,8 +351,8 @@ func TestAdmissionVerdictsMapToDistinctStatuses(t *testing.T) {
 
 // §6.2's general rule: a wrong method on ANY collection/object route is 405, not 404 —
 // the route exists, the method does not apply to it. Asserted across ALL the sandbox
-// sub-routes because the two M8 ones carried explicit arms while the three older ones
-// fell into `default` as 404, so the rule held on the newest half of the router only.
+// sub-routes because the two network ones carried explicit arms while the three others
+// fell into `default` as 404, so the rule held on half the router only.
 func TestAWrongMethodOnEverySandboxSubRouteIs405(t *testing.T) {
 	mem := store.NewMemory()
 	med := lifecycle.New(lifecycle.Deps{Store: mem})

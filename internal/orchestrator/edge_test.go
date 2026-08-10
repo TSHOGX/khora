@@ -30,8 +30,8 @@ import (
 // package, read from the directory rather than listed by hand.
 //
 // A hand-written list is the one failure mode this guard cannot survive, because it
-// fails in the direction of passing. Measured: `network.go` arrived with M8 carrying
-// two §6 endpoints, was not added to the list, and a raw
+// fails in the direction of passing. Measured: `network.go` arrived carrying two §6
+// endpoints, was not added to the list, and a raw
 // `http.Error(w, "leak "+err.Error(), 500)` planted in handleNetworkGet passed BOTH
 // scanners green. That is precisely the "a new endpoint leaks only if someone deletes
 // a test, never by forgetting one" property above — and a per-file list reinstates the

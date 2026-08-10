@@ -231,13 +231,13 @@ resume 在准入处被**拒绝**(400,与"节点已满"507 是两件事),而**不
 比因它而写失败更严重。**代价明说**:一个大多数沙箱处于 `paused` 的节点会对着物理空闲的 RAM 拒绝
 create,而 auto-pause(§4.3)正是引擎自己制造这个局面的那一手。这是"pause 保证可恢复"的价钱,接受。
 
-#### 3.4.5 Binding 可写:写点唯一,生效点按消费者分两类
+#### 3.4.5 Binding 可写:写点唯一,生效点按消费者分三类
 
-**Binding 可写,写点唯一,生效点按消费者分两类。** Binding 的 SoT 是控制面记录,所以"改 Binding"
+**Binding 可写,写点唯一,生效点按消费者分三类。** Binding 的 SoT 是控制面记录,所以"改 Binding"
 就是改那条记录——§6.1 `PATCH /v1/sandboxes/{id}` 是 create 之外**唯一**的通用写点,与其他动词共用同一把
 转换锁 + 条件写提交(§4.4-B / §4.4-C)。**只有一个别的写点:`POST /v1/sandboxes/{id}/publish`,它只写
-`ingress.publish[]` 这一个字段**——纯宿主侧规则的加法、可热加,故不受下面"先 pause"那条约束,且同样落库
-以跨 resume 存活(机制与理由见 §5.D)。生效点取决于**谁消费这个字段**:
+`ingress.publish[]` 这一个字段**,且同样落库以跨 resume 存活(机制与理由见 §5.D)。生效点取决于
+**谁消费这个字段**:
 
 - **provider / rootfs provider 消费的(资源上限三轴)**:在**下一次 placement** 物化,即下一次 resume。
   故这类字段**只在 `paused` 可改**——对 `running` 沙箱接受一个要等未来某次 resume 才生效的编辑,会让
@@ -245,6 +245,10 @@ create,而 auto-pause(§4.3)正是引擎自己制造这个局面的那一手。�
   `pause → PATCH → resume`,与 §5.C 改挂载表、§5.D 改网络声明同一条路。
 - **reaper 消费的(`idle_timeout` / `retention`)**:reaper 每轮 sweep 直接重读记录、**不经 placement**,
   故**立即生效**,`running` / `paused` 皆可改。
+- **规则集消费的(`ingress.publish[]`)**:纯宿主侧规则的加法,**在 `running` 上就地重装整份规则集、
+  立即生效**,故它不受上面"先 pause"那条约束(`paused` 上则只落库,规则在下一次 placement 出现——那不是
+  不变量的缺口:没有 placement 的沙箱本就没有可绕过的东西)。**它是唯一一个不经 placement 就改宿主态的
+  Binding 字段**,故次序是"先落库、再装规则":反过来会留下一个引擎自己都不知道的开着的口。
 
 **Binding 的每次重新物化都要重新求值它的准入判据,而不只是重新渲染它的内容。** 写点(`PATCH` / create /
 `publish`)拒掉一份绑定所依据的判据,在**下一次 placement、崩溃对账的重装、以及任何修复性重扫**上必须

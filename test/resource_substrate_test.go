@@ -45,7 +45,7 @@ func main() {
 `
 
 // diskFillSrc writes to a path until it fails, then reports the exact errno and
-// how many bytes it got in. Used by the capacity-axis assertion (Gate B): the
+// how many bytes it got in. Used by the capacity-axis assertion: the
 // interesting outcome is not "it failed" but WHICH errno the guest saw and whether
 // the sandbox survived it, so the probe prints a parseable result instead of just
 // exiting nonzero.

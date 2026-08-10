@@ -25,7 +25,7 @@ func mustCIDR(t *testing.T, s string) netip.Prefix {
 	return p
 }
 
-// Gate A item 2: §6.2's nine declaration 400 classes, one by one.
+// §6.2's nine declaration 400 classes, one by one.
 func TestTheNineHundredClasses(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -268,7 +268,7 @@ func TestTheNineHundredClasses(t *testing.T) {
 	}
 }
 
-// Gate A item 2, class 8's ORDERING half: a v4-mapped literal must be refused
+// Class 8's ORDERING half: a v4-mapped literal must be refused
 // BEFORE any containment judgment.
 //
 // The position is the whole point (D5 ⑲): `netip.Prefix.Contains` does NOT unmap,
@@ -306,7 +306,7 @@ func TestV4MappedIsRefusedBeforeAnyContainmentTest(t *testing.T) {
 	}
 }
 
-// Gate A item 2, the MUST-BE-200 half. Class 7 is the one class with a real risk of
+// The MUST-BE-200 half. Class 7 is the one class with a real risk of
 // over-reach, and each of these is a case a naive implementation refuses.
 func TestClassSevenDoesNotOverReach(t *testing.T) {
 	cases := []struct {
@@ -566,7 +566,7 @@ func TestPublishAcceptsUDPWhileViaRefusesIt(t *testing.T) {
 	}
 }
 
-// Gate A item 2b: omitting `network` normalizes to an EXPLICIT {deny, [], [], []},
+// Omitting `network` normalizes to an EXPLICIT {deny, [], [], []},
 // and "given but missing egress.default" is still a 400.
 //
 // BOTH DIRECTIONS, because the two share a code path and whichever is implemented
@@ -624,7 +624,7 @@ func TestNormalizeIsIdempotentAndDoesNotAlias(t *testing.T) {
 	}
 }
 
-// Gate A item 14d's declaration-layer half: repeated publish of the same
+// The declaration-layer half of publish idempotence: repeated publish of the same
 // `{guest_port, proto}` is idempotent.
 //
 // DEDUPLICATION HAS TO LIVE HERE, because the substrate will not find it: nft
@@ -662,9 +662,8 @@ func TestAddPublishIsIdempotentOnPortAndProto(t *testing.T) {
 	}
 }
 
-// Gate A item 4b's third assertion: a `via[]` declaration is REFUSED when the
-// deployment supplied no second-hop uid, rather than installing a rule set with
-// no second-hop enforcement.
+// A `via[]` declaration is REFUSED when the deployment supplied no second-hop uid,
+// rather than installing a rule set with no second-hop enforcement.
 //
 // This refusal is NOT one of §6.2's declaration-text classes — it is a property of
 // the DEPLOYMENT, which is why §6.2 states it separately and why it keeps its own
