@@ -355,6 +355,7 @@ drop 之上**则不是——`skuid` 漏匹配的那些包会**穿过它落到下
 | --- | --- | --- |
 | ⑬⑭⑮⑯ | publish 要伴随 SNAT · 宿主自身拨测要 `output` 侧 DNAT · 转换后落 `forward` · 绑 loopback 与无监听者不可区分 | `test/preflight/spike-publish-ingress.sh`(⑬ 的 DNAT-only 对照除外,见该条 ⚠) |
 | ㉒ | 接管时对规则集的三种改动里,只有"整份原子重装"不断流;清 ct 表是活连接杀手 | `test/preflight/spike-ct-adopt.sh` |
+| ㉔ | 第二跳只在 `output` 上可见、`forward` 上三种形状全计 0;那个钩子唯一的收窄谓词是 `skuid`,且它漏匹配 | `test/preflight/spike-hop2-hook.sh` |
 | ⑲⑳㉓、㉑ 第三组、⑤ 的档位那一段 | v4-mapped 不必作规则成员(危险换到校验层)· `forwarding=0` 不是守宿主 v6 地址的机制 · NAT64 前缀对 v4 词汇家族盲、但整段 drop 会拒掉公网出站 · 地板与档位的部分重叠靠次序解对 · `default:allow` 下宿主 LAN 只有档位接得住 | `test/preflight/spike-denysafe-tiers.sh`(㉓ 的端到端绕过除外,见该条 ⚠;⑤ 的可达性那一半仍是它自己的 runsc 测量,见该条 ⚠) |
 | ⑥⑩⑪⑫⑰⑱、㉑ 前两组 | 端口-only 保留原始目标 · `via[]` 窄放行的三个 clause · 一条无 family 限定的 `inet` 规则覆盖 IPv6 · `iif` 的 fail-open · interval set 拒嵌套 · 地板内目标经 `allow[]` 死 / 经 `via[]` 活 | **(一次性 fixture,未入库)** |
 | ①–⑤⑦⑧⑨ | sibling 可达 · netns 内钩子计 0 · `saddr` 可伪造而 `iif` 不可 · 沙箱地址空间是固定 CIDR · 出网三件 · `default:deny` 下的 DNS · 第一跳的钩子分裂 · `drop` vs `reject` | **(一次性 fixture,未入库)**——⑤ 的档位那一段例外,见上一行 |
@@ -384,9 +385,10 @@ rc=0),**`saddr` 谓词被绕过**(3 个包命中"已绕过"计数器);`iif` 谓�
 sibling 项是一条**静态 CIDR**,不是运行时维护的成员集——它因此可以住在一个无依赖的 leaf 包里,两跳共用
 同一份,不需要任何跨进程分发机制。
 
-**⑤ 今天的"安全"是巧合,逃逸步数按目标而异。** 到宿主 LAN 与 sibling:一条
+**⑤ 不装规则时的"不通"没有一条是强制,逃逸步数按目标而异。** 到宿主 LAN 与 sibling:guest 里一条
 `ip route add default via <host> dev <veth>` 就够(**要带 `dev`**,不带则 rc=0 但不通)。真正出网还差
-宿主侧 SNAT——今天不通是"没有默认路由"**且**"没有 SNAT"两件事一起,**不是任何一条强制**。
+宿主侧 SNAT——裸底座上不通是"没有默认路由"**且**"没有 SNAT"两件事一起,两件都只是**缺省**,
+故**规则是唯一的强制面**:这是 D4.1「收窄不可绕过」在出站侧的具体来源。
 **出网所需的宿主侧机制恰好三件、一件不多**(实测,真 runsc guest 完成了 TLS 与 `git ls-remote`):
 `ip_forward=1`(全局)· guest 侧带 `dev` 的默认路由 · 宿主侧对该 `/30` 的 masquerade。**反面也量了**:
 `rp_filter` 收严到 1 **不影响**(回程路由本就走该 veth),`proxy_arp` / `accept_local` / per-interface
@@ -573,6 +575,30 @@ v6 侧时,NAT64 映像那一半有了实测依据**。**但它推不出"整段 `
 > **`forward` 侧需要自己的 default-deny**——已在 runsc 下复跑
 > (`TestOneSandboxsRuleSetDoesNotAffectAnothers` / `TestDenyEmptyIsUnreachableEverywhereWithFloorCountersMoving`)。
 
+**㉔ 第二跳落 `output`,不落 `forward`;而 `output` 上的收窄谓词只能是 `skuid`,故那个钩子需要自己的
+渲染守卫。** 实测(`test/preflight/spike-hop2-hook.sh`,普通 netns peer 作目标):一个宿主本地进程的出站在
+`forward` 上**三种形状一律计 0**(`skuid` / 裸 daddr / `iifname` 各 0),而同一条流在 `output` 上全见
+(`out_any=5`)。`postrouting` 也计 0(nat 钩子只求值一条流的第一个包,且该表没装 NAT)。
+⟹ **D4.2 那张两钩子表只覆盖第一跳**;按它写出来的地板(`input` + `forward`,`iifname` 收窄)**看不到第二跳
+的任何一个包**,而这个漏法的症状是**地板计数器不动** —— D4.1 点名的静默通过。**三条连带结论,都影响写法**:
+
+| 量到的 | 对写法的约束 |
+| --- | --- |
+| `meta skuid` 在 `output` 上可求值并**确实拦得住**:该 uid 的探测失败、计数 3,而同一探测**以 root 跑拿到 banner** | 第二跳的强制点是 `output` 上一条 `skuid` 收窄的 drop |
+| **未收窄的 drop 在 `output` 上是宿主级出网杀伤开关**:root 的探测同样失败(计数 6) | 这是守卫 ② 的危险**在第二个钩子上的复现**,而**这里 `iifname` 当不了那个收窄**(流量不从任何接口进来)⟹ `output` 钩子要有**自己**的收窄守卫,谓词是 `skuid` |
+| `skuid` **不可靠匹配整条流**:直接反向测量读 `noown=0/5`,而 Q1 在 3 次运行的 2 次里读到 `skuid` 只匹配 4/5 | **drop 侧安全、accept/`RETURN` 侧不安全**(见 D4.2 那张表下面那段);漏匹配的包会穿过一条压在地板之上的放行 |
+
+**一条控制臂**:`output` 基链上的 `policy drop` **可以**被一条 `skuid !=` 的 accept 压住(root 拿到 banner)
+—— 与守卫 ② 量到的"`iifname` 收窄不了链 policy"**相反**。**别把它读成"这里可以用 `policy drop`"**:它成立
+只因为本地包几乎总带 owner,而上一行恰好说了那个"几乎"不是"全部"。
+
+**顺带两条纯渲染事实**,都会把故障现场指错地方:① 一个 `-f` 文件里**命名计数器必须声明在引用它的链之前**;
+② **`fwd` 是 nft 1.1.6 的保留词、不能作链名**,而报错会让**其后每条链**各报一个假语法错 —— 即一次链名撞车
+表现成"我的规则语法写错了",且现场在几条链之外。
+
+**测量床是普通 netns peer**(与 ⑩⑪⑫ 同一条允许理由:这里量的是 nft 的钩子归属与谓词语义,与发起方是不是
+gVisor 无关 —— 第二跳的发起方**本来就是宿主进程**,不是 guest)。
+
 ### D5.b 入站 / `publish`
 
 **这五条推不出自上面任何一条**——入站走 `prerouting` → 转换 → 某个钩子,而上面的钩子分裂结论(⑧)是对
@@ -640,30 +666,6 @@ gVisor netstack 对两种情形都回 RST。⟹ **§5.D 用户可见语义 ① �
 `TestRevokingAPublishClosesThePortAtTheNextPlacement`)。**二,一份半拆的 publish 规则集会以最难诊断的方式坏掉**:少了 SNAT 表现为
 连上后挂住,极易被误读成 guest 侧应用故障。故"publish 不通"有**两个不同签名**,验收要分别断言、
 不能合并成"不可达"。
-
-**㉔ 第二跳落 `output`,不落 `forward`;而 `output` 上的收窄谓词只能是 `skuid`,故那个钩子需要自己的
-渲染守卫。** 实测(`test/preflight/spike-hop2-hook.sh`,普通 netns peer 作目标):一个宿主本地进程的出站在
-`forward` 上**三种形状一律计 0**(`skuid` / 裸 daddr / `iifname` 各 0),而同一条流在 `output` 上全见
-(`out_any=5`)。`postrouting` 也计 0(nat 钩子只求值一条流的第一个包,且该表没装 NAT)。
-⟹ **D4.2 那张两钩子表只覆盖第一跳**;按它写出来的地板(`input` + `forward`,`iifname` 收窄)**看不到第二跳
-的任何一个包**,而这个漏法的症状是**地板计数器不动** —— D4.1 点名的静默通过。**三条连带结论,都影响写法**:
-
-| 量到的 | 对写法的约束 |
-| --- | --- |
-| `meta skuid` 在 `output` 上可求值并**确实拦得住**:该 uid 的探测失败、计数 3,而同一探测**以 root 跑拿到 banner** | 第二跳的强制点是 `output` 上一条 `skuid` 收窄的 drop |
-| **未收窄的 drop 在 `output` 上是宿主级出网杀伤开关**:root 的探测同样失败(计数 6) | 这是守卫 ② 的危险**在第二个钩子上的复现**,而**这里 `iifname` 当不了那个收窄**(流量不从任何接口进来)⟹ `output` 钩子要有**自己**的收窄守卫,谓词是 `skuid` |
-| `skuid` **不可靠匹配整条流**:直接反向测量读 `noown=0/5`,而 Q1 在 3 次运行的 2 次里读到 `skuid` 只匹配 4/5 | **drop 侧安全、accept/`RETURN` 侧不安全**(见 D4.2 那张表下面那段);漏匹配的包会穿过一条压在地板之上的放行 |
-
-**一条控制臂**:`output` 基链上的 `policy drop` **可以**被一条 `skuid !=` 的 accept 压住(root 拿到 banner)
-—— 与守卫 ② 量到的"`iifname` 收窄不了链 policy"**相反**。**别把它读成"这里可以用 `policy drop`"**:它成立
-只因为本地包几乎总带 owner,而上一行恰好说了那个"几乎"不是"全部"。
-
-**顺带两条纯渲染事实**,都会把故障现场指错地方:① 一个 `-f` 文件里**命名计数器必须声明在引用它的链之前**;
-② **`fwd` 是 nft 1.1.6 的保留词、不能作链名**,而报错会让**其后每条链**各报一个假语法错 —— 即一次链名撞车
-表现成"我的规则语法写错了",且现场在几条链之外。
-
-**测量床是普通 netns peer**(与 ⑩⑪⑫ 同一条允许理由:这里量的是 nft 的钩子归属与谓词语义,与发起方是不是
-gVisor 无关 —— 第二跳的发起方**本来就是宿主进程**,不是 guest)。
 
 ### D5.c 对账 / `Adopt`
 

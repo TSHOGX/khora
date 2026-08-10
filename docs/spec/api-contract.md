@@ -166,10 +166,10 @@ GET    /v1/sandboxes/{id}/network    → {state, egress:{default, allow[], via[]
 #   (安全相关字段上的 lost update),而三个写点都拒未知键,故若不收,一个把 GET 响应原样回写的调用方会因
 #   **回显引擎自己刚吐出的键**被 400——摩擦全落在那条承重路径上,把调用方推向 §5.D 点名危险的那条路。
 #   规则是「**读面吐出的每一个只读成员**」而不是「`state` 这一个」:拒未知键**递归生效**,故漏掉嵌在
-#   `publish[]` 里的 `host_endpoint` 会让一个带 publish 的 `running` 沙箱的响应体在低一层被拒(它只在
-#   §5.D 点名危险的那个次序上暴露——安全序列 `pause → GET → PATCH → resume` 的 GET 排在 pause 之后、
-#   无 placement 故不吐 endpoint,所以这道摩擦曾**意外**充当危险次序的护栏;那不是设计,也不得当护栏用:
-#   次序要求由 §5.D 以文字承载,而不是靠一个 JSON schema 错误去报一次并发错误)。
+#   `publish[]` 里的 `host_endpoint` 会让一个带 publish 的 `running` 沙箱的响应体在低一层被拒。
+#   **而那道 400 也不许当次序护栏留着**:它只在 §5.D 点名危险的那个次序上出现(安全次序
+#   `pause → GET → PATCH → resume` 的 GET 排在 pause 之后、无 placement 故不吐 endpoint),等于把一条
+#   并发次序要求藏进一个 JSON schema 错误里报;次序要求由 §5.D 以文字承载。
 #   **这不是给"拒未知键"开的普遍例外**:只有读面自己产生的只读成员在此列,拼错的 `netwrok`(以及 publish
 #   项里拼错的 `host_endpiont`)照旧 400。读面将来多一个只读成员,写面就相应多一个被忽略的成员。
 #   非 GET → **405**(§6.2 通则,不是落进 404)。
@@ -260,9 +260,12 @@ client 从 `transport.proto` 经 `buf` 生成 stub、经 `orchestrator` 反代�
   ② 删一个**被活的引用行挡住的对象**——它有**两侧**,卷侧(删有活子代卷的源,lineage RESTRICT,§5.C 快照)
   与沙箱侧(删一个有活挂载行的沙箱,`mounts.sandbox` RESTRICT);③ attach 撞独占租约(可重试的状态冲突);
   ④ 有 live-rw 挂载时的直连变更(§5.C 写入 regime)。
-  **四个是"结局类别"的计数,不是 sentinel 的计数**:② 的两侧是两条不同的 FK 路径、两个不同的对象关系,
-  故各有自己的 sentinel——**五个 sentinel 覆盖四个类别**。"四个不增加"约束的是**调用方要分辨的语义种类**,
-  不是实现里的错误值个数;新增一条 FK 路径若落在既有类别里,加 sentinel 不算增加类别。
+  **四个是"结局类别"的计数,不是 sentinel 的计数**:②④ 各自内部还要再分,因为**同一个类别可以从两侧被触发,
+  而两侧要报不同的对象**——② 的两侧是两条不同的 FK 路径(卷侧的 lineage RESTRICT vs 沙箱侧的
+  `mounts.sandbox` RESTRICT),④ 的两侧是写入 regime 的两个方向(直连变更撞上活的 rw 挂载 vs 冷启动要
+  rw 挂载一个正有直连写在飞的卷),故各有自己的 sentinel——**六个 sentinel 覆盖四个类别**。"四个不增加"
+  约束的是**调用方要分辨的语义种类**,不是实现里的错误值个数;新增一条触发路径若落在既有类别里,
+  加 sentinel 不算增加类别。
   ①②③在 store 侧是两类不同的约束违反(FK-RESTRICT vs 唯一/谓词失配),故**翻译点要给各自的 sentinel**,
   不能共用一个"in use"文案——既有 `ErrInUse` 的文案写着 "template in use",复用它会返回一个说错对象的 409。
   **另有一条不属于这四类**:源态不合法的动词(对 `running` 改帽、对非 `paused` 沙箱 resume、以及非法源态的
