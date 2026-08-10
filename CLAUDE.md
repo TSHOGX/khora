@@ -1,4 +1,11 @@
-# engine — working conventions
+# warren — working conventions
+
+> **Naming.** `warren` = the project and the Go module path. `engine` = the sandbox
+> abstraction itself, and that is what `docs/spec/` means by the word throughout
+> (§1.1 terminology: *engine* = the abstraction, *orchestrator* = the binary hosting
+> it). Different layers, not synonyms — so "the engine" below still reads exactly as
+> the spec intends. The protobuf wire package stays `engine.transport.v1`: it is a
+> protocol identifier, not a project label.
 
 ## What this is
 
@@ -22,7 +29,7 @@ implementation to justify anything.
 | `docs/spec/` | Converged architecture, §1–§6. The best current statement of *what the engine should be* — authoritative for intent, but revisable (see Relationship rule). Slow-moving. |
 | `docs/spec/deep-dives/` | Single-topic design rationale hung under a § (the *why* / falsification / rejected options). |
 | `docs/spec/open-decisions.md` | Register of **unsettled** design questions. |
-| `docs/plans/` | **Currently absent, and that is the shipped state** — plans expire as shipped and the M1–M8 ladder is done, so the living truth of "what the engine is" is `docs/spec/` in full. Recreate the tree only when a new milestone opens: one file per milestone, `M<N>-<capability>.md`, forward scope + acceptance + out-of-scope. |
+| `docs/plans/` | **Normally absent, and that is the healthy state.** It held the M1–M8 ladder's per-milestone plans; the ladder shipped and each plan was deleted as it shipped. Create a file here only for work whose scope genuinely needs agreeing in advance, and delete it in the change that lands the milestone's last acceptance test (see Milestone discipline). Prefer an ADR or a deep-dive — those have permanent homes. |
 | `docs/decisions/` | ADRs: one-time **tool / environment / process** choices (why Go, why OrbStack, validation matrix). The **decision** is immutable — reversing it is a *new* superseding ADR; stale prose around an unchanged decision is corrected in place. Full rule: ADR-0003. |
 | `cmd/` `internal/` `test/` | The code, implementing the spec. |
 
@@ -39,10 +46,9 @@ rewriting the spec to rubber-stamp what the code did. Both are silent drift.
 (A pure **vocabulary** mismatch is not a divergence — align the name on one side
 in the same change.)
 
-"Settled + built" and "settled, not yet built" are *both* spec. While a milestone
-is open its plan tracks which is which; with the ladder finished, the acceptance
-tests are that record — a §-claim with no substrate test behind it is the thing to
-be suspicious of.
+"Settled + built" and "settled, not yet built" are *both* spec. **The acceptance
+tests are the record of which is which** — a §-claim with no substrate test behind it
+is the thing to be suspicious of.
 
 ## Certainty-state flow (where a topic lives = how settled it is)
 
@@ -66,6 +72,29 @@ slims to boundary + open agenda — nothing lives in full in both places.
 2. **Ownership (§4):** does the new mechanism make one subsystem call another?
    That is the start of a dependency cycle. **Verbs belong to the §4 mediator,
    mechanisms to §5 subsystems; subsystems NEVER call each other.**
+
+## Language
+
+**English for everything the code carries:** identifiers, comments, error strings,
+log messages, commit messages, and every **new** document. This is the repo's own
+original convention restored, not a new imposition — 178 of its 230 commits are
+pure ASCII, and the drift to Chinese subjects started only 2026-08-06.
+
+`docs/spec/` prose is Chinese today. **It is not translated as a side effect of
+anything.** A wholesale translation of ~5k lines of load-bearing argument is the
+largest possible casual spec edit, and the Relationship rule above forbids exactly
+that. Translate it — if at all — as its own deliberate work with its own plan.
+
+Two consequences of that split:
+
+- **Canonical terms are already English on both sides** (`sandbox` / `placement` /
+  `Binding` / `provider` / `seam` / `squota` / `fail-closed` / `outbox` …). That is
+  what makes "code matches spec vocabulary" checkable at all — keep it true. What is
+  Chinese in the spec is the connective argument, never the vocabulary.
+- **A comment citing the Chinese spec quotes it VERBATIM**, Chinese included (~60
+  such lines today). A verbatim citation keeps drift detectable; a paraphrase
+  silently manufactures a second statement of the same rule. Quote, don't translate
+  in place.
 
 ## Code conventions
 
@@ -155,10 +184,22 @@ slims to boundary + open agenda — nothing lives in full in both places.
 
 ## Milestone discipline
 
-- **One milestone at a time.** Each has a plan (`docs/plans/M<N>-*.md` — write it
-  when the milestone opens) with explicit scope + acceptance + out-of-scope.
-  Don't pull later-milestone work forward.
+- **One milestone at a time.** Don't pull later-milestone work forward.
 - **Per-milestone review gate** before advancing.
+- **A plan file is NOT the default.** `docs/plans/` existed to track "built vs
+  not-yet-built" across the M1–M8 ladder; that ladder is done and the acceptance
+  tests are now that record. Write a scope document only when the work has
+  **competing viable approaches or a scope that needs agreeing first** — and then it
+  belongs in `docs/decisions/` (ADR: a one-time tool/architecture choice) or
+  `deep-dives/` (design rationale under a §), which are permanent homes, not a plan
+  that has to be remembered and deleted later. Mechanical work with a self-evident
+  scope (a translation pass, a rename, a registered gap with its design already
+  settled) gets no document — it gets a commit.
+- **If you do write a `docs/plans/M<N>-*.md`, deleting it is part of finishing the
+  milestone**, in the same change that lands the last acceptance test — not a
+  follow-up. A shipped plan is stale by construction: it describes intent that the
+  code and tests now state better, so leaving it creates a second, drifting account
+  of the same work. This is the mechanism that emptied `docs/plans/` for M1–M8.
 - If an approach **fails twice, root-cause it** — don't stack patches. Surface
   the cause and a different approach.
 

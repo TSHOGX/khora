@@ -1,14 +1,25 @@
-# engine
+# warren
 
-A persistent, mutable, root-capable agent sandbox engine — no-hypervisor
-(gVisor/runsc systrap), self-hostable, state-transparent.
+A self-hostable, no-hypervisor agent sandbox engine — persistent, mutable,
+root-capable, state-transparent. Runs on gVisor/runsc systrap, so it works where
+KVM is unavailable (unprivileged processes, CI runners, inside a container).
+
+> **Naming.** `warren` is the project and the Go module. **`engine` remains the
+> name of the abstraction itself** throughout `docs/spec/` — §1.1's terminology
+> block defines *engine* = the sandbox abstraction this spec describes and
+> *orchestrator* = the binary hosting it. The two are different layers, not two
+> names for one thing, so the spec was not rewritten. The protobuf wire package
+> stays `engine.transport.v1` for the same reason (and because that string is a
+> protocol identifier, not a project label).
 
 > **Architecture spec** (the source of truth for *what this should be*) lives in
 > `docs/spec/` (§1–§6); one-time tool/environment choices in `docs/decisions/`.
-> The M1–M8 ladder has shipped, so there is no separate plan tree beside the spec:
 > `docs/spec/` describes the engine in full, the acceptance tests below are the
 > record of what is proven on the real substrate, and everything still open is
 > registered in [`docs/spec/open-decisions.md`](docs/spec/open-decisions.md).
+> There is no `docs/plans/` tree at present: the M1–M8 ladder shipped and the last
+> registered implementation gap is closed, so `docs/spec/` plus those tests are the
+> whole record.
 
 ## Layout (canonical subsystem short-names, §5)
 
