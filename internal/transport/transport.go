@@ -15,7 +15,8 @@
 // Stateless (§5.E): the engine keeps no persistent SoT for connections. "What's
 // running now" = a live process.List, never a control-plane registry. Bare pty
 // byte streams are explicitly lossy (shell has no persistent SoT); any
-// "don't drop" guarantee is the upper layer's job (session adapter, engine-外).
+// "don't drop" guarantee is the upper layer's job (a session adapter, outside the
+// engine).
 //
 // Surface: the full process data plane — Start / Connect (server-stream) /
 // StreamInput (client-stream) / SendInput / SendSignal / Update / CloseStdin /

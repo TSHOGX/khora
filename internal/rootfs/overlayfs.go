@@ -86,8 +86,9 @@ func (p *HostOverlayFS) unitPath(id string) string { return filepath.Join(p.Stat
 //
 // §5.B ALSO CANNOT TAKE §5.C's ANSWER HERE. RepairVolumeCaps skips such a volume and
 // leaves it uncapped, which is safe there because the §3.4 second term then measures its
-// bytes. A placement has no such option: "帽兑现不了就拒绝这次 placement,绝不静默降级成
-// 不设帽跑" is §5.B's rule, because running uncapped makes every §2.3 assertion believe in
+// bytes. A placement has no such option: "if the cap cannot be delivered, refuse this
+// placement, and never silently degrade to running uncapped" is §5.B's rule, because
+// running uncapped makes every §2.3 assertion believe in
 // a cap that is not there. So this side REFUSES instead of skipping — and refusing is the
 // reversible direction (see ErrCapBelowUsage).
 func (p *HostOverlayFS) applyCap(ctx context.Context, id string, capByte int64) error {
@@ -287,7 +288,8 @@ func (p *HostOverlayFS) Mount(_ context.Context, o *Overlay) (*Merged, error) {
 
 	// Resolve the lower stack to host dirs. overlayfs lowerdir is COLON-separated,
 	// leaf-first (lowerdir=leaf:...:base) — the SAME leaf-first order as o.Lower
-	// (§5.B multi-lowerdir: 新 Template 的 lower 栈 = [新层, ...父栈]).
+	// (§5.B multi-lowerdir: the new Template's lower stack = [the new layer, ...the
+	// parent stack]).
 	lowerDirs := make([]string, 0, len(o.Lower))
 	for _, lid := range o.Lower {
 		lp, err := p.layerPath(lid)

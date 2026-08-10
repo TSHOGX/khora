@@ -33,7 +33,7 @@ type RootfsSource struct {
 	MergedPath string
 }
 
-// SteeringSpec is the §5.D "可达性要求": what the provider must enforce so that
+// SteeringSpec is §5.D's "reachability requirement": what the provider must enforce so that
 // the sandbox's reachable set is exactly the declared one — the allow set and
 // publish endpoints derived from the declaration, plus the L0 floor and
 // default-deny. It carries the DERIVED result, not the declaration itself: §5.D
@@ -204,7 +204,8 @@ func (c DeathCause) String() string {
 
 // LaunchSpec is the provider input — the contract's left-hand side:
 //
-//	(rootfs 来源, 可达性要求, 资源上限) → (placement 句柄, transport 端点, stop/start)
+//	(rootfs source, reachability requirement, resource ceilings) → (placement handle,
+//	 transport endpoint, stop/start)
 type LaunchSpec struct {
 	Sandbox  string // opaque sandbox id, for naming/logging only
 	Rootfs   RootfsSource
@@ -300,7 +301,8 @@ func (p *Placement) SetHandle(h any) { p.handle = h }
 func (p *Placement) Handle() any     { return p.handle }
 
 // Provider is the §5.A core seam. Verbs belong to §4 (the lifecycle mediator);
-// this interface only provides mechanism (§4 开头: 动词归 §4,机制归 §5).
+// this interface only provides mechanism (top of §4: verbs belong to §4, mechanisms
+// to §5).
 type Provider interface {
 	// Name identifies the provider (e.g. "local_runsc").
 	Name() string

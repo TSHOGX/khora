@@ -352,7 +352,8 @@ type pinnedFlag struct {
 }
 
 // pinnedRunscFlags is the §5.A pinned global flag set, by value. §5.A: local_runsc
-// 钉死其依赖的整套 runsc flag、不继承默认 —— runsc's defaults drift across versions
+// "pins the entire set of runsc flags it depends on and inherits no defaults" —
+// runsc's defaults drift across versions
 // and §5.B's cross-runsc-version portability may not rest on "the default did not
 // change".
 var pinnedRunscFlags = []pinnedFlag{
@@ -408,7 +409,8 @@ func TestRunscGlobalFlagsArePinned(t *testing.T) {
 
 	// The reverse direction: an unrecorded flag. Not a style rule — an unpinned key
 	// that someone adds by hand is one nobody has attached a guarantee to, and §5.A's
-	// discipline is per-key ("哪些键承重、各对哪条 §保证").
+	// discipline is per-key ("which keys are load-bearing, and which § guarantee each
+	// answers to").
 	known := map[string]bool{wantRoot: true}
 	for _, pf := range pinnedRunscFlags {
 		known[pf.flag] = true
@@ -454,8 +456,8 @@ func TestGuestCapsDoNotRequestNetRaw(t *testing.T) {
 }
 
 // A restarted allocator must not re-hand a survivor's IP to a NEW sandbox
-// (§5.A / §4.4-A: 接管存活者时把其 IP 标进分配器 inUse，重启后的分配器不会把该 IP
-// 再发给新沙箱).
+// (§5.A / §4.4-A: a takeover marks a survivor's IP as inUse in the allocator, so the
+// allocator after a restart does not hand that IP to a new sandbox).
 //
 // The failure mode is QUIET, which is why this is worth a test: the fresh process
 // has an empty inUse map and a randomized ipSeq, so nothing stops it from handing a

@@ -76,7 +76,8 @@ type ociResources struct {
 // (the SHARE — "this much relative to whoever else is runnable").
 //
 // Both are required because they answer different questions. §3.4 calls the CPU
-// axis 公平分配, and a ceiling alone does not deliver that: cgroup's default weight
+// axis is fair allocation, and a ceiling alone does not deliver that: cgroup's default
+// weight
 // is identical for every leaf, so on a saturated node a 4000-millis sandbox and a
 // 250-millis one get EQUAL time — each capped correctly, sharing nothing like the
 // ratio they were sold (measured). Weight is
@@ -129,7 +130,8 @@ type ociNamespace struct {
 // for a capability that can never be granted is a FAKE INVARIANT — a reader takes
 // it for a deliberate grant — so it is absent here and the real guarantee is
 // PINNED on the runsc side instead (`--net-raw=false` in runscGlobalFlags, §5.A
-// "钉死其依赖的整套 runsc flag、不继承默认"). That matters beyond tidiness:
+// "pins the entire set of runsc flags it depends on and inherits no defaults").
+// That matters beyond tidiness:
 // §5.D's future predicate floor is keyed on the input interface, and a guest that
 // can forge L2 frames is a different threat model — so this must not rest on an
 // unpinned runsc default that can drift across versions.

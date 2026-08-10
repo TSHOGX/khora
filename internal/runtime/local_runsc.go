@@ -97,7 +97,8 @@ const (
 const cgroupRoot = "/sys/fs/cgroup"
 
 // cgroupParent is the engine-owned cgroup layer beneath which runsc creates one
-// leaf per sandbox (§5.A cgroup 归属: 引擎建父层、叶子归 runsc).
+// leaf per sandbox (§5.A cgroup ownership: the engine builds the parent layer, the
+// leaf belongs to runsc).
 //
 // It is a FLAT NAMING CONTAINER, deliberately not a kubelet-style cgroup-driver
 // hierarchy (§5.A): we do not synthesize a per-sandbox intermediate level, since
@@ -354,8 +355,8 @@ func (p *LocalRunsc) Launch(ctx context.Context, spec LaunchSpec) (_ *Placement,
 	// ④d: ASSERT the caps actually bound, then apply the two host-side settings
 	// runsc does not write. The assertion is mandatory, not defensive: the
 	// leaf-ownership trap fails OPEN (limits skipped, launch succeeds), so without
-	// a read-back a mis-wired cap looks exactly like a working one (§5.A launch 后
-	// 断言限额确已生效).
+	// a read-back a mis-wired cap looks exactly like a working one (§5.A: assert after
+	// launch that the limits really did take effect).
 	if limited {
 		if err = p.bindLimits(&h, spec.Limits); err != nil {
 			return nil, err
@@ -626,7 +627,8 @@ func (p *LocalRunsc) Adopt(ctx context.Context, sandbox string) (*Placement, boo
 		// The container is L1-ALIVE but we could not recover its endpoint. This is
 		// UNCERTAINTY, not death — returning alive=false here would make the mediator
 		// CAS-demote and ReclaimOrphans tear down a provably-live container (§4.4-A
-		// 漏拆活容器不可逆). Surface an error instead so the mediator PROTECTS the
+		// failing to tear down a live container is irreversible). Surface an error instead
+		// so the mediator PROTECTS the
 		// placement and retries next boot (§4.4-A protect-on-uncertainty). alive=false
 		// is reserved for a genuinely dead/absent isolation unit (handled above).
 		return nil, false, CauseUnknown, fmt.Errorf("runtime: Adopt %s: container alive but endpoint unrecoverable: %w", sandbox, err)
@@ -922,7 +924,8 @@ func (p *LocalRunsc) teardownPlacement(h *placementHandle) {
 }
 
 // ensureCgroupParent creates the engine-owned parent layer and delegates the
-// controllers the leaf needs (§5.A 引擎建父层). Both halves are required: runsc
+// controllers the leaf needs (§5.A: the engine builds the parent layer). Both halves
+// are required: runsc
 // refuses to launch if the parent is absent ("open .../memory.swap.max: no such
 // file or directory"), and a leaf cannot carry cpu/memory limits unless the
 // parent has delegated those controllers via subtree_control. Idempotent.

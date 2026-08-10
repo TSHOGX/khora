@@ -93,7 +93,7 @@ func TestVolumeRegimeRefusesDirectWriteUnderALiveHolderAndAllowsItWhenPaused(t *
 	}
 
 	// And on resume the guest sees the new bytes, which is the second half of the
-	// promise ("resume 后自然见到新内容").
+	// promise ("the new content is naturally seen after a resume").
 	if err := eng.Mediator.Resume(ctx, sid); err != nil {
 		t.Fatalf("resume: %v", err)
 	}

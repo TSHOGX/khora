@@ -56,7 +56,7 @@ type Overlay struct {
 	Template string // the immediate Template it references (§3.1.1 Binding; = Lower[0])
 
 	// Lower is the resolved multi-lowerdir stack, LEAF-FIRST: the layered
-	// Template's read-only lower stack expanded along its lineage (§5.B 分层
+	// Template's read-only lower stack expanded along its lineage (§5.B layered
 	// Template = multi-lowerdir). Lower[0] is the leaf (the referenced Template),
 	// the tail its ancestors down to the base. len 1 for a base Template (no
 	// parent) — the pre-Promote single-lower case, behaviorally unchanged.
@@ -165,7 +165,7 @@ type Provider interface {
 	// Promote). The caller (mediator) has already quiesced the sandbox to a
 	// consistent at-rest point (equivalent to a pause, §4.2) and torn down its
 	// mount, so the upper is a plain host dir tree safe to read (§2.5 / §5.B
-	// 只读 at-rest). It COPIES the upper into the layer dir, EXCLUDING the
+	// read-only at rest). It COPIES the upper into the layer dir, EXCLUDING the
 	// engine-injected runtime paths that must not be captured (§5.B / §3.1
 	// Promote; excluded paths detailed in rootfs-overlay D5: today the two
 	// sandboxd portal sentinel files). It does NOT insert any store row

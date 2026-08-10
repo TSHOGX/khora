@@ -675,8 +675,9 @@ func TestSweepOrphanVolumesKeepsAUnitHeldOnlyByAMountRow(t *testing.T) {
 }
 
 // TestSweepOrphanVolumesSkipsWhenTheMountTableIsUnreadable: an unreadable mount table
-// SKIPS the candidate. §5.C states it as a hard requirement — 读取出错时跳过,绝不把空
-// 结果当成"无拥有者" — because the measured failure returns zero rows, making a failed
+// SKIPS the candidate. §5.C states it as a hard requirement — on a read error, skip,
+// and never treat an empty result as "no owner" — because the measured failure returns
+// zero rows, making a failed
 // read look exactly like an empty one.
 //
 // The candidate here would otherwise be reclaimed (no record, nothing in flight), so

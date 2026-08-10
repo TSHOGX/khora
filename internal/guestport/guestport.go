@@ -3,7 +3,8 @@
 //
 // It is a leaf with NO imports, and that is the point. The port is §5.E's own
 // fact — sandboxd chose it — but §5.A also needs it, because §5.E assigns
-// endpoint discovery to §5.A ("宿主如何拿到 IP 归 §5.A"): local_runsc allocates
+// endpoint discovery to §5.A ("how the host obtains the IP belongs to §5.A"):
+// local_runsc allocates
 // the veth IP and composes IP:port into the placement handle. Having §5.A read it
 // from internal/transport would make the §5.A subsystem import §5.E and inherit
 // its whole Connect-RPC + protobuf dependency tree — dozens of non-stdlib packages
