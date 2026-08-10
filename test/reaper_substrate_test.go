@@ -53,7 +53,7 @@ func lastKind(t *testing.T, eng *orchestrator.Engine, sid model.SandboxID) strin
 	kind := ""
 	for _, ev := range evs {
 		if ev.Sandbox == sid {
-			kind = ev.Kind
+			kind = string(ev.Kind)
 		}
 	}
 	return kind
@@ -531,7 +531,7 @@ func eventKindsFor(t *testing.T, eng *orchestrator.Engine, sid model.SandboxID) 
 	var out []string
 	for _, ev := range evs {
 		if ev.Sandbox == sid {
-			out = append(out, ev.Kind)
+			out = append(out, string(ev.Kind))
 		}
 	}
 	return out

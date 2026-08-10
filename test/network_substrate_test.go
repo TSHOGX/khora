@@ -47,6 +47,113 @@ import (
 // difference between "refused fast" and "hung": §2.4's fail-closed has a second half
 // — "the guest gets a clean connection failure" — that a pure-`drop` floor breaks
 // while satisfying the security half (network.md D5 ⑨).
+// forgerSrc adds an address to a guest interface using a raw netlink socket.
+//
+// It exists because the guest rootfs has NO `ip` binary — build-rootfs.sh installs
+// dash, the loader and sandboxd, nothing else — so the forgery step this test is named
+// for silently did nothing: exec of /sbin/ip failed with ENOENT, the error was
+// swallowed, and the test degenerated into a second copy of the plain floor probe. It
+// would then pass on an engine whose predicate WAS forgeable, which is the one thing
+// pillar ④'s acceptance exists to rule out.
+//
+// Raw RTM_NEWADDR rather than a vendored iproute2: the guest is root in its own netns
+// (§2.2), so the syscall is available and the dependency is zero.
+const forgerSrc = `package main
+
+import (
+	"fmt"
+	"net"
+	"os"
+	"syscall"
+	"unsafe"
+)
+
+func main() {
+	// forger <ipv4>. The target interface is DISCOVERED rather than passed: the guest
+	// side of the veth is named vg<hash-of-SandboxID> (§5.A), which no test can know
+	// statically, and hardcoding a guess is how this step silently did nothing before.
+	ip := net.ParseIP(os.Args[1]).To4()
+	if ip == nil {
+		fmt.Println("FORGE_FAIL bad address")
+		os.Exit(1)
+	}
+	all, err := net.Interfaces()
+	if err != nil {
+		fmt.Println("FORGE_FAIL enumerate:", err)
+		os.Exit(1)
+	}
+	var ifi *net.Interface
+	for i := range all {
+		if all[i].Flags&net.FlagLoopback == 0 && all[i].Flags&net.FlagUp != 0 {
+			ifi = &all[i]
+			break
+		}
+	}
+	if ifi == nil {
+		fmt.Println("FORGE_FAIL no non-loopback interface")
+		os.Exit(1)
+	}
+	fd, err := syscall.Socket(syscall.AF_NETLINK, syscall.SOCK_RAW, syscall.NETLINK_ROUTE)
+	if err != nil {
+		fmt.Println("FORGE_FAIL socket:", err)
+		os.Exit(1)
+	}
+	defer syscall.Close(fd)
+
+	// struct ifaddrmsg + one IFA_LOCAL/IFA_ADDRESS attribute each.
+	type ifAddrMsg struct {
+		Family, Prefixlen, Flags, Scope uint8
+		Index                           uint32
+	}
+	msg := ifAddrMsg{Family: syscall.AF_INET, Prefixlen: 32, Index: uint32(ifi.Index)}
+	body := (*[8]byte)(unsafe.Pointer(&msg))[:]
+	attr := func(typ uint16) []byte {
+		out := make([]byte, 8)
+		*(*uint16)(unsafe.Pointer(&out[0])) = 8 // rta_len
+		*(*uint16)(unsafe.Pointer(&out[2])) = typ
+		copy(out[4:], ip)
+		return out
+	}
+	payload := append(append(append([]byte{}, body...), attr(syscall.IFA_LOCAL)...), attr(syscall.IFA_ADDRESS)...)
+
+	hdr := make([]byte, 16)
+	*(*uint32)(unsafe.Pointer(&hdr[0])) = uint32(16 + len(payload))
+	*(*uint16)(unsafe.Pointer(&hdr[4])) = syscall.RTM_NEWADDR
+	*(*uint16)(unsafe.Pointer(&hdr[6])) = syscall.NLM_F_REQUEST | syscall.NLM_F_CREATE | syscall.NLM_F_EXCL | syscall.NLM_F_ACK
+	*(*uint32)(unsafe.Pointer(&hdr[8])) = 1 // seq
+	req := append(hdr, payload...)
+
+	sa := &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK}
+	if err := syscall.Sendto(fd, req, 0, sa); err != nil {
+		fmt.Println("FORGE_FAIL sendto:", err)
+		os.Exit(1)
+	}
+	buf := make([]byte, 4096)
+	n, _, rerr := syscall.Recvfrom(fd, buf, 0)
+	if rerr != nil {
+		fmt.Println("FORGE_FAIL recv:", rerr)
+		os.Exit(1)
+	}
+	if n >= 20 {
+		if code := *(*int32)(unsafe.Pointer(&buf[16])); code != 0 {
+			fmt.Printf("FORGE_FAIL netlink errno %d\n", -code)
+			os.Exit(1)
+		}
+	}
+	// Read it back: the assertion is that the address IS on the interface, not that
+	// the syscall returned 0.
+	addrs, _ := ifi.Addrs()
+	for _, a := range addrs {
+		if in, ok := a.(*net.IPNet); ok && in.IP.To4() != nil && in.IP.To4().Equal(ip) {
+			fmt.Println("FORGE_OK")
+			return
+		}
+	}
+	fmt.Println("FORGE_FAIL address not present after the add")
+	os.Exit(1)
+}
+`
+
 const guestProbeSrc = `package main
 
 import (
@@ -236,7 +343,7 @@ func netEngineOpts(t *testing.T) harness.EngineOpts {
 	t.Helper()
 	uid := secondHopUID
 	return harness.EngineOpts{
-		Probes:        map[string]string{"probe": guestProbeSrc},
+		Probes:        map[string]string{"probe": guestProbeSrc, "forger": forgerSrc},
 		SecondHopUID:  &uid,
 		HostPublishIP: hostIPv4(t),
 	}
@@ -718,32 +825,60 @@ func TestGuestFacingRefusalsFailFastRatherThanHanging(t *testing.T) {
 func TestForgingASourceAddressDoesNotBypassTheFloor(t *testing.T) {
 	eng, _ := harness.Engine(t, netEngineOpts(t))
 	id, cl := createRunning(t, eng, declDeny())
-	host := hostIPv4(t)
-	addr, stop := hostListener(t, "hello-from-HOST")
-	defer stop()
-	_, port, _ := net.SplitHostPort(addr)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	// guest root adds the HOST's own address to its interface — the forgery D5 ③
-	// measured succeeding at the `ip` level.
+	// guest root claims a SIBLING-SPACE address, which is what a source-address
+	// predicate would be fooled by (it is inside the floor). NOT the host's own
+	// address: adding that makes it locally owned inside the sandbox, so the probe
+	// below never leaves the netns and every host counter stays 0 — measured, and by
+	// D4.1 that is an INVALID assertion rather than a pass.
+	//
+	// THE FORGERY MUST ACTUALLY HAPPEN, and it is asserted loudly:
+	// a silently-skipped forgery makes this test indistinguishable from the plain floor
+	// probe, so it would pass on an engine whose predicate was forgeable — the single
+	// thing pillar ④'s acceptance exists to rule out.
 	evs, err := cl.Start(ctx, transport.StartSpec{
-		Cmd: "/sbin/ip", Args: []string{"addr", "add", host + "/32", "dev", "lo"},
+		Cmd: "/usr/bin/forger", Args: []string{"10.66.99.99"},
 	})
-	if err == nil {
-		for range evs {
+	if err != nil {
+		t.Fatalf("the forgery step did not RUN (%v) — without it this test cannot distinguish an "+
+			"interface predicate from a source-address one, and would pass on a forgeable engine "+
+			"(pillar ④ / D5 ③)", err)
+	}
+	var forgeOut strings.Builder
+	for e := range evs {
+		if len(e.Data) > 0 {
+			forgeOut.Write(e.Data)
 		}
 	}
-	before := harness.NftCounter(t, id, "in_floor")
-	res := runGuestProbe(t, cl, net.JoinHostPort(host, port), false)
-	after := harness.NftCounter(t, id, "in_floor")
-	if res.reachable() {
-		t.Fatalf("after forging a source address the guest REACHED %s — the predicate must bind to a "+
-			"fact the guest cannot change (pillar ④): a source-address predicate is measurably "+
-			"forgeable, an input-interface one is not (D5 ③)\n%s", host, harness.DumpRuleSet(id))
+	if !strings.Contains(forgeOut.String(), "FORGE_OK") {
+		t.Fatalf("guest root could not add the forged address to its interface (%q) — D5 ③ measured "+
+			"this SUCCEEDING, so a failure here means the fixture broke, not that the engine is "+
+			"safe: the whole point is that the forgery works and the floor holds anyway",
+			forgeOut.String())
 	}
-	mustCounterMoved(t, id, "in_floor", before, after,
-		"item 10: the floor counter must move, proving it was the INTERFACE predicate that refused rather than rp_filter or a routing artifact")
+	// THE PROBE TARGET IS A ROUTED FLOOR ADDRESS, not the host's own address, and the
+	// forgery is why. Adding the host's address to the guest's own interface makes that
+	// address LOCALLY OWNED inside the sandbox, so a dial to it never leaves the netns
+	// and every host counter stays 0 — "unreachable with a zero counter", which D4.1
+	// makes an INVALID assertion rather than a pass (it is indistinguishable from a
+	// bypassed floor). Link-local is in the floor's forward daddr list AND still routes,
+	// so the packet reaches the host and a counter moves.
+	const floorTarget = "169.254.169.254:80"
+	before := harness.NftCounter(t, id, "fwd_floor_v4")
+	res := runGuestProbe(t, cl, floorTarget, false)
+	after := harness.NftCounter(t, id, "fwd_floor_v4")
+	if res.reachable() {
+		t.Fatalf("after forging a floor-space source address the guest REACHED %s — the predicate "+
+			"must bind to a fact the guest cannot change (pillar ④): a source-address predicate is "+
+			"measurably forgeable, an input-interface one is not (D5 ③)\n%s",
+			floorTarget, harness.DumpRuleSet(id))
+	}
+	mustCounterMoved(t, id, "fwd_floor_v4", before, after,
+		"item 10: the floor counter must move, proving it was the INTERFACE predicate that refused "+
+			"rather than rp_filter or a routing artifact — and that the guest's address manipulation "+
+			"did not simply make the packet undeliverable inside the sandbox")
 }
 
 // Gate B item 11b: after a pause→resume rebuilds the veth under the SAME NAME, the
