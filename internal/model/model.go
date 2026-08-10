@@ -389,6 +389,41 @@ func (d NetworkDecl) Normalize() NetworkDecl {
 	return d
 }
 
+// Clone returns a declaration that shares no backing array with the receiver.
+//
+// It exists because Normalize is NOT a copy: it replaces nil slices, and passes a
+// non-nil slice through by identity. A store backend that hands out the record it
+// holds therefore hands out the live arrays, and a caller mutating a returned
+// declaration in place corrupts the store — on THAT BACKEND ONLY. SQLite cannot
+// alias, because it re-decodes JSON on every read, so the same mediator bug is
+// invisible against one backend and destructive against the other. §1.3 wants one set
+// of assertions over two backends, which requires them to agree on the read shape.
+func (d NetworkDecl) Clone() NetworkDecl {
+	out := d
+	out.Egress.Allow = cloneSlice(d.Egress.Allow)
+	out.Ingress.Publish = cloneSlice(d.Ingress.Publish)
+	out.Egress.Via = cloneSlice(d.Egress.Via)
+	// Each Via carries its own slice, so copying the outer one still leaves every
+	// match list shared.
+	for i := range out.Egress.Via {
+		out.Egress.Via[i].Match = cloneSlice(d.Egress.Via[i].Match)
+	}
+	return out
+}
+
+// cloneSlice copies a slice while PRESERVING the nil-vs-empty distinction, which
+// `append([]T(nil), s...)` does not: it returns nil for an empty input, and an empty
+// declaration array that read back as nil would put a `null` on the wire where §6.1
+// requires `[]` (the property that keeps the read face's output a legal write body).
+func cloneSlice[T any](s []T) []T {
+	if s == nil {
+		return nil
+	}
+	out := make([]T, len(s))
+	copy(out, s)
+	return out
+}
+
 // Lifecycle is the §4.1 state machine. Exactly four states — no `failed`
 // intermediate state (§4.4: the absence is a conclusion of the model, not an
 // omission), no independent generation counter (§3.3 uses Placement / §4.3 uses
@@ -401,6 +436,45 @@ const (
 	Paused    Lifecycle = "paused"
 	Destroyed Lifecycle = "destroyed"
 )
+
+// EventKind is the §4.1 transition-event kind. EXACTLY SIX, and the set is closed:
+// every §4.1 transition emits one of these and nothing else emits at all.
+//
+// Typed rather than left as a string because §4.1 states the closure and nothing
+// enforced it: the six spellings lived as literals in two packages, so a typo'd
+// `crash_paused` would compile, persist, and reach subscribers as a seventh kind. The
+// store schema asserts the same set, for the reason `mounts.access` does — a value the
+// schema cannot write is a value no reader has to handle.
+//
+// Note there is no `evict` kind: eviction reaches destroyLocked and emits Destroyed.
+// The three PAUSED kinds differ in WHY, which is what a subscriber needs to tell an
+// operator's pause from the reaper's idle sweep from a crash (§4.3).
+type EventKind string
+
+const (
+	EventCreated     EventKind = "created"
+	EventPaused      EventKind = "paused"
+	EventAutoPaused  EventKind = "auto-paused"
+	EventCrashPaused EventKind = "crash-paused"
+	EventResumed     EventKind = "resumed"
+	EventDestroyed   EventKind = "destroyed"
+)
+
+// EventKinds is the closed set, for the schema check and for any consumer that must
+// enumerate rather than hard-code.
+var EventKinds = []EventKind{
+	EventCreated, EventPaused, EventAutoPaused, EventCrashPaused, EventResumed, EventDestroyed,
+}
+
+// Valid reports whether k is one of the six.
+func (k EventKind) Valid() bool {
+	for _, v := range EventKinds {
+		if k == v {
+			return true
+		}
+	}
+	return false
+}
 
 // Limits is the per-sandbox resource-limit Binding (§3.4). SoT is the
 // control-plane record: the values are stable across resume and RE-MATERIALIZED

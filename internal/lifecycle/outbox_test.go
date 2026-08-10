@@ -32,7 +32,7 @@ func kindsFor(t *testing.T, st *store.Memory, id model.SandboxID) []string {
 	var out []string
 	for _, e := range evs {
 		if e.Sandbox == id {
-			out = append(out, e.Kind)
+			out = append(out, string(e.Kind))
 		}
 	}
 	return out
@@ -90,7 +90,7 @@ func TestLifecycleEmitsExactlyOneEventPerTransition(t *testing.T) {
 		if prev, dup := seen[e.ID]; dup {
 			t.Fatalf("events %q and %q share transition ID %q — subscriber dedup would DROP the second (§4.4-C)", prev, e.Kind, e.ID)
 		}
-		seen[e.ID] = e.Kind
+		seen[e.ID] = string(e.Kind)
 	}
 
 	// The destroyed event OUTLIVES the deleted record (§4.4-C): the record is gone
@@ -118,7 +118,7 @@ func TestFailedCreatePublishesNothing(t *testing.T) {
 	if len(evs) != 0 {
 		var kinds []string
 		for _, e := range evs {
-			kinds = append(kinds, e.Kind)
+			kinds = append(kinds, string(e.Kind))
 		}
 		t.Fatalf("a failed create published %v; want nothing — an unpaired event for a sandbox that never became visible", kinds)
 	}

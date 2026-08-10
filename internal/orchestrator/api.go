@@ -673,7 +673,7 @@ func (e *Engine) handleEvents(w http.ResponseWriter, r *http.Request) {
 			Seq:        ev.Seq,
 			ID:         ev.ID,
 			SandboxID:  string(ev.Sandbox),
-			Kind:       ev.Kind,
+			Kind:       string(ev.Kind),
 			State:      string(ev.State),
 			OccurredAt: ev.OccurredAt.UTC().Format(time.RFC3339Nano),
 		})

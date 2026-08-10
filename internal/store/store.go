@@ -145,10 +145,16 @@ type Event struct {
 	// paths, not just death: a unit found dead (cause recorded alongside) and the
 	// transport-down restart-budget escalation (reaper-health D4b), where L1 is
 	// still ALIVE and so no cause is stamped. Whether a cause is present is what
-	// separates them. All land state=paused, the Kind carries WHY. Free-form here;
-	// the external event schema is a subscriber-side concern (§4.4-C: engine only
-	// guarantees reliable write to a replayable stream).
-	Kind string
+	// separates them. All land state=paused, the Kind carries WHY.
+	//
+	// A TYPE rather than a bare string, and the schema asserts the same set. §4.1
+	// states a CLOSED set of exactly six kinds, and six string literals scattered
+	// across two packages is precisely the drift the vocabulary rules exist to
+	// prevent: a typo'd `crash_paused` would compile, persist, and reach subscribers
+	// as a seventh kind nothing declares. The external event schema stays a
+	// subscriber-side concern (§4.4-C) — that is about the WIRE shape, and does not
+	// mean the engine may write a kind it never named.
+	Kind model.EventKind
 	// State is the resulting lifecycle-state after the transition.
 	State model.Lifecycle
 	// OccurredAt is when the mediator constructed the transition.

@@ -122,7 +122,16 @@ CREATE TABLE IF NOT EXISTS outbox (
 	seq          INTEGER PRIMARY KEY AUTOINCREMENT,
 	id           TEXT NOT NULL UNIQUE,   -- transition-unique event ID (§4.4-C)
 	sandbox      TEXT NOT NULL,
-	kind         TEXT NOT NULL,
+	-- The CHECK asserts §4.1's CLOSED set of six kinds, for the reason mounts.access
+	-- carries one: a value the schema cannot write is a value no reader has to handle.
+	-- §4.1 states the closure and nothing enforced it, so a typo'd 'crash_paused' would
+	-- have compiled, persisted, and reached subscribers as a seventh kind. Kept in step
+	-- with model.EventKinds, which the Go side enumerates.
+	--
+	-- There is deliberately no 'evict': eviction reaches destroyLocked and emits
+	-- 'destroyed'. The three paused kinds differ in WHY (§4.3).
+	kind         TEXT NOT NULL CHECK (kind IN
+	                 ('created','paused','auto-paused','crash-paused','resumed','destroyed')),
 	state        TEXT NOT NULL,
 	occurred_at  INTEGER NOT NULL,       -- unix nanos; DATA, not the ordering key
 	published_at INTEGER                 -- NULL = unpublished (the query predicate)

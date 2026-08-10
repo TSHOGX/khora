@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"sync"
 	"time"
@@ -67,6 +68,22 @@ func NewMemory() *Memory {
 	}
 }
 
+// checkEventKind refuses a Kind outside §4.1's closed set, which is what the SQLite
+// arm's CHECK constraint does. Both backends must agree: a closed set enforced on one
+// of them only means a typo'd kind is rejected in production and accepted in the tests
+// that are supposed to prove the behaviour (§1.3 — one set of assertions, two
+// backends).
+func checkEventKind(ev *Event) error {
+	if ev == nil || ev.Kind.Valid() {
+		return nil
+	}
+	// A plain error, matching the SQLite arm: a CHECK violation is not one of the
+	// contract's named sentinels, and inventing one here would make the two backends
+	// differ on the error VALUE while agreeing on the refusal.
+	return fmt.Errorf("store: event kind %q is not one of §4.1's six (%v)",
+		ev.Kind, model.EventKinds)
+}
+
 // appendEvent records ev in the outbox. MUST be called with m.mu held so it
 // commits atomically with the state change beside it (§4.4-C).
 func (m *Memory) appendEvent(ev *Event) {
@@ -80,6 +97,9 @@ func (m *Memory) appendEvent(ev *Event) {
 }
 
 func (m *Memory) CreateSandbox(_ context.Context, s model.Sandbox, ev *Event) error {
+	if err := checkEventKind(ev); err != nil {
+		return err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, ok := m.rec[s.ID]; ok {
@@ -397,6 +417,11 @@ func (m *Memory) GetSandbox(_ context.Context, id model.SandboxID) (model.Sandbo
 	if !ok {
 		return model.Sandbox{}, ErrNotFound
 	}
+	// DEEP-COPY the declaration's slices. SQLite re-decodes JSON on every read and so
+	// cannot alias; handing out the live backing array here would let a caller's
+	// in-place mutation corrupt the store on ONE backend only — the read-shape
+	// divergence CreateSandbox's normalization exists to prevent.
+	s.Network = s.Network.Clone()
 	return s, nil
 }
 
@@ -405,12 +430,18 @@ func (m *Memory) ListSandboxes(_ context.Context) ([]model.Sandbox, error) {
 	defer m.mu.Unlock()
 	out := make([]model.Sandbox, 0, len(m.rec))
 	for _, s := range m.rec {
+		s.Network = s.Network.Clone() // see GetSandbox: the read shape must match SQLite's
 		out = append(out, s)
 	}
 	return out, nil
 }
 
 func (m *Memory) CompareAndSetState(_ context.Context, id model.SandboxID, expected, next model.Lifecycle, ev *Event, cause *model.DeathCause) error {
+	// BEFORE the lock and before any mutation: a refused event must leave the state
+	// untouched, because the transition and its event are one commit (§4.4-C).
+	if err := checkEventKind(ev); err != nil {
+		return err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	s, ok := m.rec[id]
@@ -487,6 +518,9 @@ func (m *Memory) SetLimitsForTest(id model.SandboxID, l model.Limits) {
 }
 
 func (m *Memory) DeleteSandbox(_ context.Context, id model.SandboxID, ev *Event) error {
+	if err := checkEventKind(ev); err != nil {
+		return err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, ok := m.rec[id]; !ok {

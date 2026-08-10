@@ -13,7 +13,17 @@ import (
 	"engine/internal/store"
 )
 
-func ev(id, evid, kind string, state model.Lifecycle) *store.Event {
+// kindFor is the §4.1 kind matching a transition INTO state. Tests needing only "a
+// valid event" must still name a real kind: both store backends assert §4.1's closed
+// set, so a placeholder is refused — which is what the closure is for.
+func kindFor(state model.Lifecycle) model.EventKind {
+	if state == model.Running {
+		return model.EventResumed
+	}
+	return model.EventPaused
+}
+
+func ev(id, evid string, kind model.EventKind, state model.Lifecycle) *store.Event {
 	return &store.Event{ID: evid, Sandbox: model.SandboxID(id), Kind: kind, State: state, OccurredAt: time.Now()}
 }
 
@@ -219,7 +229,7 @@ func seedEvents(t *testing.T, n int) store.Store {
 			next = model.Paused
 		}
 		if err := st.CompareAndSetState(ctx, "a", state, next,
-			ev("a", fmt.Sprintf("e%d", i), "flip", next), nil); err != nil {
+			ev("a", fmt.Sprintf("e%d", i), kindFor(next), next), nil); err != nil {
 			t.Fatalf("seed %d: %v", i, err)
 		}
 		state = next

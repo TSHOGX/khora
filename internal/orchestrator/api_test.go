@@ -403,9 +403,9 @@ func seedSandboxEvents(t *testing.T, mem *store.Memory, n int) {
 	}
 	state := model.Creating
 	for i := 0; i < n; i++ {
-		next, kind := model.Running, "resumed"
+		next, kind := model.Running, model.EventResumed
 		if state == model.Running {
-			next, kind = model.Paused, "paused"
+			next, kind = model.Paused, model.EventPaused
 		}
 		if err := mem.CompareAndSetState(ctx, "sb", state, next, &store.Event{
 			ID: fmt.Sprintf("evt_%d", i), Sandbox: "sb", Kind: kind, State: next, OccurredAt: time.Now(),

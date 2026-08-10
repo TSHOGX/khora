@@ -14,6 +14,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
 	"runtime"
 	"strings"
 	"sync"
@@ -50,6 +51,18 @@ func RunContract(t *testing.T, mk Factory) {
 	// sibling. Its semantics are contract, not backend detail — omitted-means-
 	// unchanged, conditional on state, and it must NOT move updated_at.
 	t.Run("UpdateBindingPartialAndConditional", func(t *testing.T) { testUpdateBinding(t, mk) })
+
+	// The §5.D declaration is a Binding column like the caps, so its round-trip is
+	// CONTRACT rather than backend detail — and it had no coverage here at all, which is
+	// how a read-shape divergence between the two backends survived: SQLite re-decodes
+	// JSON per read and cannot alias, while an in-memory map can hand out its live
+	// arrays.
+	t.Run("NetworkDeclarationRoundTrip", func(t *testing.T) { testNetworkRoundTrip(t, mk) })
+	t.Run("NetworkDeclarationReadIsNotAliased", func(t *testing.T) { testNetworkNotAliased(t, mk) })
+
+	// §4.1's event kinds are a CLOSED set of six, and that closure is a contract both
+	// backends must hold: a subscriber reading a seventh kind has no way to interpret it.
+	t.Run("EventKindsAreAClosedSet", func(t *testing.T) { testEventKindClosed(t, mk) })
 
 	t.Run("OutboxNilPublishesNothing", func(t *testing.T) { testOutboxNil(t, mk) })
 	t.Run("MarkPublishedIdempotent", func(t *testing.T) { testMarkPublished(t, mk) })
@@ -132,7 +145,7 @@ func testSequenceTotalOrder(t *testing.T, mk Factory) {
 			next = model.Paused
 		}
 		if err := s.CompareAndSetState(ctx, "a", state, next,
-			ev("a", fmt.Sprintf("evt_%02d", i), "flip", next), nil); err != nil {
+			ev("a", fmt.Sprintf("evt_%02d", i), kindFor(next), next), nil); err != nil {
 			t.Fatalf("append %d: %v", i, err)
 		}
 		state = next
@@ -234,7 +247,7 @@ func testEventsReplayPaging(t *testing.T, mk Factory) {
 			next = model.Paused
 		}
 		if err := s.CompareAndSetState(ctx, "a", state, next,
-			ev("a", fmt.Sprintf("e%d", i), "flip", next), nil); err != nil {
+			ev("a", fmt.Sprintf("e%d", i), kindFor(next), next), nil); err != nil {
 			t.Fatalf("append %d: %v", i, err)
 		}
 		state = next
@@ -352,7 +365,7 @@ func testSequenceNoVisibilityGap(t *testing.T, mk Factory) {
 				// fails simply produced no row. What matters is that every row that
 				// DID land is observed in sequence order.
 				if err := s.CompareAndSetState(ctx, id, state, next,
-					ev(string(id), fmt.Sprintf("w%d_%d", w, i), "flip", next), nil); err == nil {
+					ev(string(id), fmt.Sprintf("w%d_%d", w, i), kindFor(next), next), nil); err == nil {
 					state = next
 				}
 			}
@@ -567,7 +580,18 @@ func assertLimits(t *testing.T, where string, got model.Limits) {
 	}
 }
 
-func ev(id, evid, kind string, state model.Lifecycle) *store.Event {
+// kindFor is the §4.1 kind matching a transition INTO state. Tests that only need
+// "some valid event" must still name a real kind: the outbox schema asserts §4.1's
+// closed set, so a placeholder like "flip" is rejected — which is the point of the
+// constraint, not an obstacle to it.
+func kindFor(state model.Lifecycle) model.EventKind {
+	if state == model.Running {
+		return model.EventResumed
+	}
+	return model.EventPaused
+}
+
+func ev(id, evid string, kind model.EventKind, state model.Lifecycle) *store.Event {
 	return &store.Event{ID: evid, Sandbox: model.SandboxID(id), Kind: kind, State: state, OccurredAt: time.Now()}
 }
 
@@ -1490,6 +1514,184 @@ func testUpdateBinding(t *testing.T, mk Factory) {
 	}
 }
 
+// testNetworkRoundTrip pins the §5.D declaration's column-level contract: it survives
+// a write/read cycle intact, and UpdateBinding replaces it WHOLE (§6.2 — no field-level
+// merge) while leaving the other Binding fields alone.
+//
+// The empty-array shape is part of it: §6.1 requires the three arrays to read back as
+// `[]` and never as null, and that is what makes the read face's output a legal write
+// body. A backend that round-trips them as nil would break that on the wire.
+func testNetworkRoundTrip(t *testing.T, mk Factory) {
+	ctx := context.Background()
+	s, _ := mk(t)
+	seedTmpl(t, s, "bare")
+	rec := mkRec("n1")
+	rec.Network = model.NetworkDecl{
+		Egress: model.NetEgress{
+			Default: model.NetDeny,
+			Allow:   []model.NetTuple{{CIDR: netip.MustParsePrefix("1.1.1.1/32"), Port: 443, Proto: model.NetTCP}},
+			Via: []model.NetVia{{
+				Match:    []model.NetTuple{{CIDR: netip.MustParsePrefix("9.9.9.9/32"), Proto: model.NetTCP}},
+				Endpoint: "127.0.0.9:15443",
+			}},
+		},
+		Ingress: model.NetIngress{Publish: []model.NetPublish{{GuestPort: 8080, Proto: model.NetTCP}}},
+	}
+	if err := s.CreateSandbox(ctx, rec, nil); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetSandbox(ctx, "n1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Network.Egress.Default != model.NetDeny {
+		t.Errorf("egress.default = %q; want %q", got.Network.Egress.Default, model.NetDeny)
+	}
+	if len(got.Network.Egress.Allow) != 1 || got.Network.Egress.Allow[0].Port != 443 ||
+		got.Network.Egress.Allow[0].CIDR.String() != "1.1.1.1/32" {
+		t.Errorf("allow[] did not round-trip: %+v", got.Network.Egress.Allow)
+	}
+	if len(got.Network.Egress.Via) != 1 || got.Network.Egress.Via[0].Endpoint != "127.0.0.9:15443" ||
+		len(got.Network.Egress.Via[0].Match) != 1 {
+		t.Errorf("via[] did not round-trip: %+v", got.Network.Egress.Via)
+	}
+	if len(got.Network.Ingress.Publish) != 1 || got.Network.Ingress.Publish[0].GuestPort != 8080 {
+		t.Errorf("publish[] did not round-trip: %+v", got.Network.Ingress.Publish)
+	}
+
+	// WHOLE-FOR-WHOLE replacement, and the other Binding fields untouched by it.
+	next := model.NetworkDecl{Egress: model.NetEgress{Default: model.NetAllow}}.Normalize()
+	if err := s.UpdateBinding(ctx, "n1", rec.State, store.Binding{Network: &next}, nil); err != nil {
+		t.Fatalf("UpdateBinding(network): %v", err)
+	}
+	after, err := s.GetSandbox(ctx, "n1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Network.Egress.Default != model.NetAllow {
+		t.Errorf("egress.default = %q after replacement; want %q", after.Network.Egress.Default, model.NetAllow)
+	}
+	if len(after.Network.Egress.Allow) != 0 || len(after.Network.Egress.Via) != 0 ||
+		len(after.Network.Ingress.Publish) != 0 {
+		t.Errorf("the declaration was MERGED rather than replaced whole (§6.2): %+v", after.Network)
+	}
+	// …and the arrays must be `[]`, not nil: §6.1's read face never emits null.
+	if after.Network.Egress.Allow == nil || after.Network.Egress.Via == nil ||
+		after.Network.Ingress.Publish == nil {
+		t.Errorf("an array read back as nil; §6.1 requires `[]` so the read face's output stays a "+
+			"legal write body: %+v", after.Network)
+	}
+	if after.Limits != got.Limits || after.IdleTimeout != got.IdleTimeout {
+		t.Errorf("a network-only update touched another Binding field: %+v → %+v",
+			got.Limits, after.Limits)
+	}
+}
+
+// testNetworkNotAliased is the read-SHAPE half, and it is the one that failed: a caller
+// must not be able to mutate the store by writing through a value it read.
+//
+// SQLite cannot alias — it re-decodes JSON on every read — so an in-memory backend that
+// hands out its live backing arrays makes the same mediator bug destructive against one
+// backend and invisible against the other. §1.3 wants one set of assertions over two
+// backends, which requires them to agree here.
+func testNetworkNotAliased(t *testing.T, mk Factory) {
+	ctx := context.Background()
+	s, _ := mk(t)
+	seedTmpl(t, s, "bare")
+	rec := mkRec("n2")
+	rec.Network = model.NetworkDecl{
+		Egress: model.NetEgress{
+			Default: model.NetDeny,
+			Allow:   []model.NetTuple{{CIDR: netip.MustParsePrefix("1.1.1.1/32"), Port: 443, Proto: model.NetTCP}},
+			Via: []model.NetVia{{
+				Match:    []model.NetTuple{{CIDR: netip.MustParsePrefix("9.9.9.9/32"), Proto: model.NetTCP}},
+				Endpoint: "127.0.0.9:15443",
+			}},
+		},
+		Ingress: model.NetIngress{Publish: []model.NetPublish{{GuestPort: 8080, Proto: model.NetTCP}}},
+	}
+	if err := s.CreateSandbox(ctx, rec, nil); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetSandbox(ctx, "n2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A caller mutating what it read, at every nesting depth that carries a slice.
+	got.Network.Ingress.Publish[0].GuestPort = 9999
+	got.Network.Egress.Allow[0].Port = 1
+	got.Network.Egress.Via[0].Match[0].Proto = model.NetUDP
+
+	again, err := s.GetSandbox(ctx, "n2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Network.Ingress.Publish[0].GuestPort != 8080 {
+		t.Errorf("a caller's in-place edit reached the store: publish[0].guest_port = %d, want 8080 "+
+			"— the backend handed out its live backing array, which makes a mediator bug corrupt "+
+			"state on THIS backend and be invisible on the other",
+			again.Network.Ingress.Publish[0].GuestPort)
+	}
+	if again.Network.Egress.Allow[0].Port != 443 {
+		t.Errorf("a caller's in-place edit reached the store: allow[0].port = %d, want 443",
+			again.Network.Egress.Allow[0].Port)
+	}
+	if again.Network.Egress.Via[0].Match[0].Proto != model.NetTCP {
+		t.Errorf("a caller's in-place edit reached a NESTED slice: via[0].match[0].proto = %q, want "+
+			"tcp — the outer slice was copied but each Via carries its own match list",
+			again.Network.Egress.Via[0].Match[0].Proto)
+	}
+}
+
+// testEventKindClosed pins §4.1's closed set: each of the six is writable, and a kind
+// outside it is REFUSED rather than persisted.
+//
+// The refusal direction is the one that matters and the one nothing asserted before:
+// the six spellings lived as string literals in two packages, so a typo'd
+// `crash_paused` would have compiled, committed, and surfaced to subscribers as a kind
+// no §4.1 reader handles. This is the same reason mounts.access carries a CHECK.
+func testEventKindClosed(t *testing.T, mk Factory) {
+	ctx := context.Background()
+
+	// Every declared kind is writable. Iterating model.EventKinds rather than a hand
+	// list keeps this in step with the type: adding a kind without teaching the store
+	// about it fails here.
+	for i, k := range model.EventKinds {
+		s, _ := mk(t)
+		seedTmpl(t, s, "bare")
+		if err := s.CreateSandbox(ctx, mkRec("k1"), nil); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.CompareAndSetState(ctx, "k1", model.Creating, model.Running,
+			ev("k1", fmt.Sprintf("evt_ok_%d", i), k, model.Running), nil); err != nil {
+			t.Errorf("the declared kind %q was refused: %v — model.EventKinds and the store must "+
+				"agree on §4.1's set", k, err)
+		}
+	}
+
+	// …and one OUTSIDE the set is refused. `crash_paused` deliberately: an underscore
+	// for a hyphen is the realistic typo, and it is invisible to review.
+	s, _ := mk(t)
+	seedTmpl(t, s, "bare")
+	if err := s.CreateSandbox(ctx, mkRec("k2"), nil); err != nil {
+		t.Fatal(err)
+	}
+	err := s.CompareAndSetState(ctx, "k2", model.Creating, model.Running,
+		ev("k2", "evt_bad", model.EventKind("crash_paused"), model.Running), nil)
+	if err == nil {
+		t.Error("an undeclared event kind was PERSISTED — §4.1 states a closed set of six, and a " +
+			"seventh reaches subscribers as something no reader handles. The whole point of naming " +
+			"the set is that the store cannot write outside it")
+	}
+	// …and the refusal must not have committed the state change either: the event and
+	// the transition are ONE commit (§4.4-C), so a rejected event means a rejected
+	// transition.
+	if rec, gerr := s.GetSandbox(ctx, "k2"); gerr == nil && rec.State != model.Creating {
+		t.Errorf("the state moved to %q despite the event being refused — the transition and its "+
+			"event are one atomic commit (§4.4-C)", rec.State)
+	}
+}
+
 // --- Mount table (§5.C / §4.3) -----------------------------------------------
 
 // seedVol inserts a Volume row so a mount referencing it satisfies the FK.
@@ -1574,7 +1776,7 @@ func testMountCRUD(t *testing.T, mk Factory) {
 		t.Fatalf("events: %v", err)
 	}
 	for _, ev := range evs {
-		if strings.Contains(ev.Kind, "mount") {
+		if strings.Contains(string(ev.Kind), "mount") {
 			t.Errorf("a mount row published an event (%q) — mount rows are not §4.1 transitions", ev.Kind)
 		}
 	}

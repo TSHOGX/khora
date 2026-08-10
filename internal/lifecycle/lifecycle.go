@@ -683,7 +683,7 @@ func (m *Mediator) Pause(ctx context.Context, id model.SandboxID) error {
 // store.CompareAndSetState). nil for the voluntary variants (user pause /
 // auto-pause), which are not deaths and must leave any previously recorded cause
 // alone.
-func (m *Mediator) pauseLocked(ctx context.Context, id model.SandboxID, kind string, cause *model.DeathCause) error {
+func (m *Mediator) pauseLocked(ctx context.Context, id model.SandboxID, kind model.EventKind, cause *model.DeathCause) error {
 	// Drain engine-issued mutating fs RPCs before freezing, for the VOLUNTARY
 	// variants only (§4.2 / D4.4). A crash-pause skips it, and that holds for BOTH
 	// paths carrying this Kind even though only one of them is a death: what they
@@ -2033,7 +2033,7 @@ func (m *Mediator) take(id model.SandboxID) *liveState {
 // transition-unique ID (§4.4-C: subscribers dedup on it; a redelivered event
 // keeps the SAME ID). The mediator constructs it per transition semantics; the
 // store commits it atomically with the state change (§4.4-C).
-func newEvent(id model.SandboxID, kind string, state model.Lifecycle) *store.Event {
+func newEvent(id model.SandboxID, kind model.EventKind, state model.Lifecycle) *store.Event {
 	return &store.Event{
 		ID:         "evt_" + randToken(),
 		Sandbox:    id,

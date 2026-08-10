@@ -561,7 +561,7 @@ func TestCrashPauseDoesNotDrain(t *testing.T) {
 	ctx := context.Background()
 
 	for _, tc := range []struct {
-		kind        string
+		kind        model.EventKind
 		wantDrained bool
 	}{
 		// The voluntary kinds drain: the engine issued those writes and can stop issuing
@@ -571,7 +571,7 @@ func TestCrashPauseDoesNotDrain(t *testing.T) {
 		// The involuntary one does not.
 		{"crash-paused", false},
 	} {
-		t.Run(tc.kind, func(t *testing.T) {
+		t.Run(string(tc.kind), func(t *testing.T) {
 			rp, rt := &fakeRootfs{}, &fakeRuntime{}
 			m, st := newLimitsMediator(t, rp, rt, NodeCapacity{})
 			m.deps.DrainGrace = grace

@@ -106,7 +106,7 @@ func (e *reaperEnv) lastKind(id string) string {
 	kind := ""
 	for _, ev := range evs {
 		if ev.Sandbox == model.SandboxID(id) {
-			kind = ev.Kind
+			kind = string(ev.Kind)
 		}
 	}
 	return kind
@@ -248,7 +248,7 @@ func TestReaperEscalatesTransportDownPastBudget(t *testing.T) {
 	var kinds []string
 	for _, ev := range evs {
 		if ev.Sandbox == "loop" {
-			kinds = append(kinds, ev.Kind)
+			kinds = append(kinds, string(ev.Kind))
 		}
 	}
 	sawCrashPause, sawResume := false, false
