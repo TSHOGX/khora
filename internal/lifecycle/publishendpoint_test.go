@@ -89,7 +89,8 @@ func TestHotAddingAPublishKeepsTheEarlierEndpoints(t *testing.T) {
 
 // A repeated identical publish returns the SAME endpoint.
 //
-// §6.1: "重复 publish 同一 `{guest_port, proto}` 幂等——返既有那条". The declaration layer
+// §6.1: "Publishing the same `{guest_port, proto}` twice is idempotent: return the
+// existing item". The declaration layer
 // already handles this (network.AddPublish reports added=false and nothing is written),
 // but the mediator still runs the install path in that case — the record and the rules
 // are one un-halvable write — so the endpoint must survive a re-bind, not merely a

@@ -2330,7 +2330,7 @@ func TestRepeatedPublishIsIdempotentOnTheHostToo(t *testing.T) {
 // THE SAME host endpoint, and hot-adding a publish must not move the endpoints already
 // bound at that placement.
 //
-// The idempotency §6.1 promises is "返既有那条" — return the EXISTING item — and the
+// The idempotency §6.1 promises is "return the existing item" — and the
 // declaration layer alone cannot deliver it: `AddPublish` reports added=false and writes
 // nothing, but the mediator still runs the install path (record and rules are one
 // un-halvable write), so the provider re-binds. A provider that re-draws the endpoints on

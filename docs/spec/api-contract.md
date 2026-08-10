@@ -1,370 +1,599 @@
-# Sandbox Engine — API 与 CLI 契约(§6)
+# Sandbox Engine — API and CLI contract (§6)
 
-> 属 [SPEC.md](./SPEC.md);全局 §编号跨文件连续,导航见 SPEC.md 顶部「文档地图」。
+> Belongs to [SPEC.md](./SPEC.md); § numbers run continuously across files, and the
+> navigation is the "Document map" at the top of SPEC.md.
 
 ---
 
-## 6. API 与 CLI 契约
+## 6. API and CLI contract
 
-后端只暴露 **sandbox-centric** 的 API,**全 ID 寻址**;产品概念(session / mode 等)不进
-后端。**CLI 与前端是同一套 API 的平级 client**,CLI 是一等公民,不是后门。
+The backend exposes a **sandbox-centric** API only, **entirely ID-addressed**; product
+concepts (session / mode …) do not enter the backend. **The CLI and the frontend are peer
+clients of the same API** — the CLI is a first-class citizen, not a back door.
 
-### 6.1 资源与端点(控制面 REST + 数据面 Connect-RPC,分工见 [`deep-dives/transport.md`](./deep-dives/transport.md) D5)
+### 6.1 Resources and endpoints (control-plane REST + data-plane Connect-RPC; the split is in [`deep-dives/transport.md`](./deep-dives/transport.md) D5)
 
-> **外沿协议分工**:沙箱/template/volume/network **生命周期 = REST + JSON**(控制面块,权威端点,
-> OpenAPI 事后描述);**process / fs 数据面 = Connect-RPC**(`engine.transport.v1`,权威契约是
-> `transport.proto`,client 经 `buf` 生成 stub。该 package 下是**三个**服务:对外的 `ProcessService` /
-> `FsService`,外加引擎自用的 `HealthService`——后者不是对外能力面,见 §5.E)。client 一律经
-> `orchestrator` 居中、不直连
-> `sandboxd`(§4 mediator / D5.1)。数据面块的 REST 行**仅作形状示意**,不是权威端点(D5.3)。
+> **The outer-edge protocol split**: sandbox/template/volume/network **lifecycle = REST +
+> JSON** (the control-plane block, the authoritative endpoints, with OpenAPI describing them
+> after the fact); the **process / fs data plane = Connect-RPC** (`engine.transport.v1`,
+> whose authoritative contract is `transport.proto`, with clients generating stubs via
+> `buf`. That package holds **three** services: the outward-facing `ProcessService` /
+> `FsService`, plus `HealthService` for the engine's own use — the last is not an outward
+> capability surface, see §5.E). Clients always go through `orchestrator` in the middle and
+> never connect directly to `sandboxd` (§4 mediator / D5.1). The REST lines in the
+> data-plane block are **shape illustrations only**, not authoritative endpoints (D5.3).
 >
-> **这套 API 自身不做认证/授权**:引擎内无授权主体(§1.4 非目标),故 §6 假定调用方已被信任。谁能调用
-> 由**引擎外**决定(部署把它绑在本机/私网,或前置一层网关),那是 join table 的加法、不是引擎原语。
+> **This API does no authentication/authorization itself**: there is no authorization
+> subject inside the engine (§1.4 non-goals), so §6 assumes the caller is already trusted.
+> Who may call is decided **outside the engine** (the deployment binds it to localhost / a
+> private network, or puts a gateway in front), which is a join-table addition rather than
+> an engine primitive.
 
-**控制面(REST + JSON,权威端点)** —— 沙箱 / template / volume / network 生命周期,外加事件流重放。
-**全是低频请求-响应,无长连接、无 server-push**:每条都是一来一回的 CRUD 语义,故连事件流也是
-**游标分页 GET**(`/v1/events`,见下)而非 SSE/websocket —— 引擎不持有任何 per-subscriber 状态
-(§1.3),这正是它能留在控制面的原因。**"无流"指的是没有推送面,不是没有事件面。**
+**Control plane (REST + JSON, the authoritative endpoints)** — sandbox / template / volume
+/ network lifecycle, plus event-stream replay. **All of it is low-frequency
+request-response, with no long-lived connections and no server push**: every one has
+one-round-trip CRUD semantics, which is why even the event stream is a **cursor-paginated
+GET** (`/v1/events`, below) rather than SSE/websocket — the engine holds no per-subscriber
+state at all (§1.3), and that is exactly why it can stay in the control plane. **"No
+streaming" means there is no push surface, not that there is no event surface.**
 
 ```text
-# Sandbox 生命周期
+# Sandbox lifecycle
 POST   /v1/sandboxes                 {template_id, network?, volumes?, idle_timeout?, retention?,
                                       cpu_millis?, memory_byte?, disk_byte?}        → {sandbox_id}
-#   `network?` = §5.D 的四字段声明,schema 见下方 Network 块(**给了就必须含 `egress.default`**)。
-#   **整份省略是合法的,归一化成 `{deny, [], [], []}` 并显式落库**(§5.D):故"省略 network"与"给了
-#   network 却漏 egress.default → 400"是两件不同的事,后者才是 §6.2 那张清单的第一类。
-#   资源上限三轴见 §3.4(Binding);按轴条件必填的规则见 §6.2。准入不足 → 507。
-#   `volumes` 每项 = {volume_id, path, access},`access` ∈ {exclusive, shared-ro, shared-rw} —— 它是
-#   **挂载行**的属性(§5.C),故在此给出而非在卷记录上。撞独占租约 → 409(§6.2 四个 409 之 ③)。
+#   `network?` = the §5.D four-field declaration; the schema is in the Network block below
+#   (**if given, it MUST contain `egress.default`**).
+#   **Omitting the whole thing is legal, normalized to `{deny, [], [], []}` and persisted
+#   explicitly** (§5.D): so "network omitted" and "network given but egress.default missing
+#   → 400" are two different things, and only the latter is class 1 of §6.2's list.
+#   The three resource-ceiling axes are in §3.4 (Binding); the per-axis conditional-required
+#   rule is in §6.2. Insufficient admission → 507.
+#   Each `volumes` item = {volume_id, path, access}, with `access` ∈ {exclusive, shared-ro,
+#   shared-rw} — it is a property of the **mount row** (§5.C), so it is given here rather
+#   than on the volume record. Colliding with an exclusive lease → 409 (§6.2's third of four
+#   409s).
 GET    /v1/sandboxes/{id}                                     → {sandbox_id, state, death_cause?}
-#   只读生命周期态 + 死因(§4.3)。`death_cause` ∈ {`gone`, `resource-exceeded`, `unknown`},
-#   **未观测到死亡时该键不出现**(不是空串、不是 null):`CauseNone` 是"没有死因"而非一种死因,
-#   序列化成 `""` 会在健康响应上摆一个 falsy 却存在的字段、诱人拿它当存活判据。
-#   **为何上读面**:§4.3 把恢复决定判给调用方(dead-recoverable → resume;resource-terminated →
-#   不 resume),调用方必须能直接读到它所依据的事实,而不是先发一个必被拒的 resume、从 409 错误串里反推。
-#   值是 §4.3 的**抽象枚举**,绝不是 errno / cgroup 路径——远端 provider 产不出宿主原语(§5.A)。
+#   Read-only lifecycle state + cause of death (§4.3). `death_cause` ∈ {`gone`,
+#   `resource-exceeded`, `unknown`}, and **the key is absent when no death was observed**
+#   (not an empty string, not null): `CauseNone` is "there is no cause of death" rather than
+#   a kind of cause, and serializing it as `""` would place a falsy-but-present field on a
+#   health response, tempting a caller to use it as a liveness criterion.
+#   **Why it is on the read surface**: §4.3 assigns the recovery decision to the caller
+#   (dead-recoverable → resume; resource-terminated → do not resume), so the caller must be
+#   able to read the fact it decides on directly, rather than sending a resume that is
+#   certain to be refused and inferring backwards from a 409 error string.
+#   The value is §4.3's **abstract enumeration**, never an errno / cgroup path — a remote
+#   provider cannot produce host primitives (§5.A).
 PATCH  /v1/sandboxes/{id}            {cpu_millis?, memory_byte?, disk_byte?, idle_timeout?, retention?,
                                       volumes?, network?}
                                      → {sandbox_id, state, applies_at, lease_released?}
-#   改 Binding,生效点与可改状态见 §3.4。**wire 语义与 create 不同**:这里"未给"与"给 0"必须可区分
-#   (帽的 0 = 无上限、`retention: 0` = 不驱逐),故请求字段**可空**——未给 = 不动该字段。TTL 收
-#   duration 字符串("48h")。`applies_at` ∈ {"now"(仅改 TTL), "next-resume"(改了任一资源上限
-#   **或挂载绑定、或网络声明**)}。
-#   **`volumes` 是挂载表那份完整绑定**(每项 {volume_id, path, access});§6.2 已把 PATCH 定为改绑定点,
-#   故它在此列出而非另开 attach/detach 端点。**它的生效点分裂成两半,`applies_at` 一个值答不了**:
-#   挂载拓扑变更在 **next-resume** 才物化(runsc 启动时取挂载,§5.C 不热挂),而 **detach 立即释放独占
-#   租约**(租约就是那条挂载行,行一删租约即释放)。故 detach 的响应是 `applies_at: "next-resume"`
-#   **且 `lease_released: true`** —— 两件事不同步是设计事实,不是可以折叠成一个值的细节。attach 到已被占用
-#   的卷 → 409(§5.C 原子插入的 `RowsAffected()==0`)。
-#   对 `running` 改帽 → 409「先 pause」;抬上限重过准入门(可 507 / 400)。不发 §4.1 事件(非状态转换)。
-#   **`disk_byte` 的 `0 → N` 被拒(400)**:无帽沙箱的 upper 上没有可写的配额行,故这次写会声明一个
-#   每次 placement 都兑现不了的帽,接受它等于把沙箱变成砖(完整推理与为何拒在写点见 §3.4)。
-#   `N → 0` 撤帽与 `N → M` 改帽都合法,但 **`N → M` 降到当前用量以下 → 400**(严格不等式,与
-#   `PATCH /v1/volumes/{id}` 同一判据):基底照收这样的帽、随后单元不可逆卡死,而沙箱侧更重——帽在每次
-#   placement 被重放,故那个沙箱再也 resume 不起来。`cap == 用量` 意思是**满**、一并拒。**抬帽也查**:
-#   配额行被外部清掉后用量可以越过记录里的帽,故一次"抬到 M"也可能落在用量之下。用量读不出来 → 拒
-#   (fail closed)。**同一判据在 placement 侧是 409 而不是 400**:resume / adopt 不携带帽,故 400 会让
-#   调用方去改一个他这次没发的东西——与 `via[]` 那对"写点 400 / placement 409"同一条分法(§3.4 / §5.B)。
-#   **`network` 同为整份换整份**(§5.D 声明是 Binding),生效点 `next-resume`,故与资源上限同规则:
-#   对 `running` 沙箱改 → 409「先 pause」。**publish 不走这里**——它有自己的热加端点(见 Network 块)。
-#   **故改 `network` 必须 read-modify-write:先 GET `…/network`,在读回的那份上改,再整份回写。** 两个写点
-#   写同一份声明,而 PATCH 换整份:拿一份读旧了的声明回写,会把此间热加的 publish **静默丢掉**。引擎不做
-#   字段级合并、也不给一个乐观并发戳去检测这种冲突,最后一次 PATCH 就是结果——一个安全相关字段上的
-#   lost update,故调用方侧那次 GET 是契约要求而非建议。**今天没有 un-publish 端点**:撤一条 publish
-#   就是整份 `PATCH`(少写那一项),按 Binding 规则在 `next-resume` 生效。
+#   Edits the Binding; the effective point and which states allow the edit are in §3.4.
+#   **The wire semantics differ from create's**: here "not given" and "given as 0" must be
+#   distinguishable (a cap's 0 = no ceiling, `retention: 0` = never evict), so request fields
+#   are **nullable** — not given = leave that field alone. TTLs take a duration string
+#   ("48h"). `applies_at` ∈ {"now" (only TTLs changed), "next-resume" (any resource ceiling
+#   **or the mount binding or the network declaration** changed)}.
+#   **`volumes` is the mount table's complete binding** (each item {volume_id, path,
+#   access}); §6.2 already designates PATCH as the rebinding point, so it is listed here
+#   rather than in a separate attach/detach endpoint. **Its effective point splits in two,
+#   and one `applies_at` value cannot answer for both**: a mount-topology change materializes
+#   only at **next-resume** (runsc takes mounts at startup, §5.C does not hot-mount), whereas
+#   **detach releases the exclusive lease immediately** (the lease IS that mount row, and
+#   deleting the row releases it). So a detach responds with `applies_at: "next-resume"`
+#   **and `lease_released: true`** — the two things being out of step is a design fact, not a
+#   detail that can be folded into one value. Attaching to an already-occupied volume → 409
+#   (§5.C's atomic insert returning `RowsAffected()==0`).
+#   Changing a cap on a `running` sandbox → 409 "pause first"; raising a ceiling re-runs the
+#   admission gate (may 507 / 400). No §4.1 event is emitted (this is not a state
+#   transition).
+#   **`disk_byte` going `0 → N` is refused (400)**: an uncapped sandbox's upper has no
+#   writable quota row, so this write would declare a cap that no placement can ever deliver,
+#   and accepting it would turn the sandbox into a brick (the full reasoning, and why the
+#   refusal is at the write point, are in §3.4).
+#   `N → 0` (removing the cap) and `N → M` (changing it) are both legal, but **`N → M`
+#   lowered below current usage → 400** (a strict inequality, the same criterion as
+#   `PATCH /v1/volumes/{id}`): the substrate would accept such a cap and the unit would then
+#   be irreversibly wedged, and the sandbox side is worse — the cap is replayed on every
+#   placement, so that sandbox can never resume again. `cap == usage` means **full** and is
+#   refused too. **Cap-raising is checked as well**: once a quota row has been cleared
+#   externally, usage can exceed the cap in the record, so even a raise "up to M" can land
+#   below usage. If usage cannot be read → refuse (fail closed). **The same criterion is a
+#   409 rather than a 400 on the placement side**: resume / adopt carry no cap, so a 400
+#   would send the caller to change something they did not submit this time — the same split
+#   as the `via[]` pair of "400 at the write point / 409 at placement" (§3.4 / §5.B).
+#   **`network` is likewise whole-for-whole** (a §5.D declaration is a Binding), effective at
+#   `next-resume`, so the same rule as resource ceilings applies: editing it on a `running`
+#   sandbox → 409 "pause first". **publish does not go through here** — it has its own
+#   hot-add endpoint (see the Network block).
+#   **So editing `network` must be read-modify-write: GET `…/network` first, edit the copy
+#   you read back, then write the whole thing.** Two write points write the same declaration
+#   while PATCH replaces it wholesale: writing back a declaration read too long ago
+#   **silently drops** any publish hot-added in the meantime. The engine does no field-level
+#   merge and offers no optimistic-concurrency stamp to detect such a conflict; the last
+#   PATCH is the result — a lost update on a security-relevant field, which is why that GET
+#   on the caller's side is a contract requirement rather than advice. **There is no
+#   un-publish endpoint today**: withdrawing a publish is a whole `PATCH` (omitting that
+#   item), effective at `next-resume` per the Binding rule.
 POST   /v1/sandboxes/{id}/pause
 POST   /v1/sandboxes/{id}/resume
-#   resource-terminated 的沙箱拒绝 resume → 409(§4.3;先 PATCH 抬帽)
+#   A resource-terminated sandbox refuses resume → 409 (§4.3; PATCH the cap up first)
 DELETE /v1/sandboxes/{id}                                                          (destroy)
-GET    /v1/sandboxes                                   (list;每项与单读同形,含 `death_cause?`)
-#   list 也带死因是**为省一轮 N+1**:§6.2 全 ID 寻址,若不带,调用方见到若干 `paused` 就得逐个
-#   GET 才知道哪些可 resume —— 而那条事实 list 本来就持有。
-GET       /v1/sandboxes/{id}/files?path=                                 (大文件下载,流式)
-PUT|POST  /v1/sandboxes/{id}/files?path=                       → {path, bytes_written}(上传)
-#   `POST` 与 `PUT` 同义(上传不是幂等替换语义之争,收两个动词省调用方一次适配)。
-#   §5.E fs 的大文件旁路(D4.4),数据面里唯一走 REST 的一条;小载荷仍走 `FsService.Read/Write`。见下。
+GET    /v1/sandboxes                        (list; each item has the same shape as the
+                                             single read, `death_cause?` included)
+#   list carrying the cause of death too **saves an N+1 round**: §6.2 is entirely
+#   ID-addressed, so without it a caller seeing several `paused` sandboxes would have to GET
+#   each one to learn which are resumable — a fact the list already holds.
+GET       /v1/sandboxes/{id}/files?path=                        (large-file download, streaming)
+PUT|POST  /v1/sandboxes/{id}/files?path=                       → {path, bytes_written}(upload)
+#   `POST` and `PUT` are synonymous here (an upload is not a dispute about idempotent-replace
+#   semantics, and accepting both verbs saves the caller one adaptation).
+#   This is §5.E fs's large-file bypass (D4.4), the one data-plane operation that goes over
+#   REST; small payloads still go through `FsService.Read/Write`. See below.
 
-# 事件流重放(§4.1 转换事件 / §4.4-C outbox);**只做 pull,无推送面**
+# Event-stream replay (§4.1 transition events / §4.4-C outbox); **pull only, no push surface**
 GET    /v1/events?after=<seq>&limit=<n>     → {events:[{seq,id,sandbox_id,kind,state,occurred_at}],
                                                earliest, latest}
-#   `seq` 是**游标**:把收到的最后一个 `seq` 原样作下次 `after` 传回即续位。`after` 省略/0 = 从
-#   保留窗口起点。**排序键是 `seq`,不是 `occurred_at`**(后者不是全序,理由见 §4.4-C)。
-#   `limit` 有**服务端硬上限**(默认 100、上限 1000),超限**截到上限**而非拒绝。硬上限而非仅默认值:
-#   参数由调用方控制,只给默认值等于没给。且**今天不裁剪 ⟹ 窗口 = 全部历史**,`after=0` 要翻的行只增
-#   不减 —— 不裁剪**加重**而非缓解无界 backlog 风险,这才是硬上限为必做项的原因。(窗口取多大仍开放,
-#   见 §4.4-C / [`open-decisions.md`](./open-decisions.md) 该文 §2「§4.4-C 事件流可重放窗口大小」;裁剪一旦
-#   加上,调用方契约不变——见下条 410。)
-#   `{earliest, latest}` 是保留窗口边界(outbox 空时 0/0)。
-#   **410 是保留语义,今天不可达、不实现**:不裁剪 → `earliest` 永不前进,故"`after` 早于窗口"
-#   这个态构造不出来。写在契约里是为了**将来真加裁剪时调用方契约无需变更**——届时 `after < earliest`
-#   即 410,调用方须从 `earliest` 重新起。**不为不可达态写代码**(§1.3)。
-#   重放**按保留窗口,不按投递状态**:引擎内那个 sink 有没有收过某条,不是外部 subscriber 该依赖的事实。
-#   **为何在控制面**:游标分页 GET 就是 CRUD;且引擎级事件流既非 per-sandbox 也非 per-pid,数据面
-#   本就无处寻址它(§6.2)。**为何只做 pull**、以及 push 为何是零代价的适配器:§4.4-C。
+#   `seq` is the **cursor**: pass the last `seq` you received back verbatim as the next
+#   `after` to continue where you left off. `after` omitted/0 = from the start of the
+#   retention window. **The ordering key is `seq`, not `occurred_at`** (the latter is not a
+#   total order; reasoning in §4.4-C).
+#   `limit` has a **server-side hard ceiling** (default 100, ceiling 1000), and exceeding it
+#   **truncates to the ceiling** rather than being refused. A hard ceiling rather than only a
+#   default, because the parameter is caller-controlled and giving only a default is giving
+#   nothing. And **no trimming today ⟹ the window = all of history**, so the rows `after=0`
+#   must page through only ever grow — not trimming **aggravates** the unbounded-backlog risk
+#   rather than relieving it, which is the real reason the hard ceiling is mandatory. (How
+#   large the window should be is still open: see §4.4-C /
+#   [`open-decisions.md`](./open-decisions.md) §2 there, "§4.4-C the size of the replayable
+#   event-stream window". Once trimming is added, the caller contract does not change — see
+#   the 410 note below.)
+#   `{earliest, latest}` are the retention window's boundaries (0/0 when the outbox is empty).
+#   **410 is reserved semantics, unreachable today and not implemented**: no trimming ⟹
+#   `earliest` never advances, so the state "`after` is earlier than the window" cannot be
+#   constructed. It is written into the contract so that **when trimming is genuinely added
+#   the caller contract needs no change** — at that point `after < earliest` is a 410 and the
+#   caller must restart from `earliest`. **No code is written for an unreachable state**
+#   (§1.3).
+#   Replay is **by the retention window, not by delivery state**: whether the engine's own
+#   sink has seen some row is not a fact an external subscriber should depend on.
+#   **Why it is in the control plane**: a cursor-paginated GET is just CRUD, and an
+#   engine-level event stream is neither per-sandbox nor per-pid, so the data plane has
+#   nowhere to address it in the first place (§6.2). **Why it is pull-only**, and why push is
+#   a zero-cost adapter: §4.4-C.
 
-# Template(不可变工件:opaque ID 作身份,存在即状态,§3.1 / §4.3)
+# Template (an immutable artifact: an opaque ID is its identity, and existence is its state,
+# §3.1 / §4.3)
 GET    /v1/templates
-POST   /v1/templates                 {from_sandbox_id}  (Promote,§3.1)          → {template_id}
-#   源须是 `running` 或 `paused`(否则 409)。`running` 的源被静止到 `paused` 后固化(照发一条普通
-#   `paused` 事件),`paused` 的源原地固化。过 §3.4 准入门(代价预报不足 → 507),且门在静止**之前**,
-#   故一次被拒的 Promote 不是一次可观测的转换。
-DELETE /v1/templates/{id}            (被沙箱/子层引用时 → 409 template in use;引用-回收原子性 §4.3)
+POST   /v1/templates                 {from_sandbox_id}  (Promote, §3.1)         → {template_id}
+#   The source must be `running` or `paused` (otherwise 409). A `running` source is quiesced
+#   to `paused` and then frozen (emitting an ordinary `paused` event as usual); a `paused`
+#   source is frozen in place. It passes the §3.4 admission gate (an insufficient cost
+#   forecast → 507), and the gate is **before** quiescing, so a refused Promote is not an
+#   observable transition.
+DELETE /v1/templates/{id}            (referenced by a sandbox / a child layer → 409 template
+                                      in use; reference-reclamation atomicity in §4.3)
 
-# Volume(与沙箱生命周期解耦)
+# Volume (decoupled from any sandbox's lifecycle)
 POST   /v1/volumes                   {size?}                                  → {volume_id, size}
-#   **无 `access_mode`**:它是挂载行的属性、不是卷的属性(一个卷可同时对 A 是 shared-rw、对 C 是
-#   shared-ro,§5.C),故只出现在 create/PATCH sandbox 的 `volumes` 项里。`size` 在 disk 轴被计量时
-#   **必填**(§3.4 / §6.2 按轴条件必填),否则 400。
-#   **无 `backend` 入参**:后端是部署期注入的单一实现(与 store / runtime provider 同形,§1.3 注册
-#   而非选择),故它只出现在**响应**里,不是请求键。
+#   **No `access_mode`**: that is a property of the mount row, not of the volume (one volume
+#   can be shared-rw for A and shared-ro for C at the same time, §5.C), so it appears only in
+#   the `volumes` items of create/PATCH sandbox. `size` is **required** when the disk axis is
+#   metered (§3.4 / §6.2 per-axis conditional-required), otherwise 400.
+#   **No `backend` request field**: the backend is a single implementation injected at
+#   deployment time (the same shape as store / runtime provider — §1.3 registration rather
+#   than selection), so it appears only in the **response**, never as a request key.
 GET    /v1/volumes                                                                 (list)
 GET    /v1/volumes/{id}              → {volume_id, size, backend?, used_byte?}     (inspect)
-#   `size` 是**记录里的帽**(唯一权威:后端读回分不清"从未设帽"与"故意无帽",volume.md D7.3);
-#   `used_byte` 是后端自陈的已用字节,**读不到时该键不出现**(不报 0——0 会被读成"空",而调用方要拿
-#   它选一个严格大于它的新帽)。list 不带 `used_byte`(每卷一次后端往返,list 上乘以卷数)。
-PATCH  /v1/volumes/{id}              {size}  (**必填**,它是唯一可编辑字段)       → {volume_id, size}
-#   卷帽的唯一写点(create 之外),`size` **必填**。**未挂载与挂载中都可改**,故无"先 pause"的 409——
-#   与沙箱资源上限只在 `paused` 可改相反,机制性理由见 §5.C。抬帽重过准入门(可 507);**降到低于当前
-#   用量 → 400**(严格不等式,§5.C / volume.md D7.3)。改帽不受写入 regime 管,但改 `access` 另有规则
-#   (§5.C)。不发事件。
+#   `size` is **the cap in the record** (the sole authority: reading back from the backend
+#   cannot distinguish "never capped" from "deliberately uncapped", volume.md D7.3);
+#   `used_byte` is the used bytes as the backend reports them, and **the key is absent when it
+#   cannot be read** (not reported as 0 — a 0 would be read as "empty", while the caller wants
+#   to use it to pick a new cap strictly greater than it). list does not carry `used_byte` (one
+#   backend round trip per volume, multiplied by the number of volumes on a list).
+PATCH  /v1/volumes/{id}              {size}  (**required**; it is the only editable field)
+                                                                              → {volume_id, size}
+#   The only write point for a volume's cap besides create, and `size` is **required**.
+#   **Editable both when unmounted and while mounted**, so there is no "pause first" 409 here
+#   — the opposite of sandbox resource ceilings, which are editable only in `paused`; the
+#   mechanical reason is in §5.C. Raising the cap re-runs the admission gate (may 507);
+#   **lowering it below current usage → 400** (a strict inequality, §5.C / volume.md D7.3).
+#   Editing the cap is not governed by the write regime, but editing `access` has its own
+#   rules (§5.C). No event is emitted.
 DELETE /v1/volumes/{id}
-#   两种 409(§6.2 四个中的 ①② 卷侧):有活挂载行 → 409(被引用);**有活快照/克隆(子代卷)→ 409**
-#   (lineage RESTRICT,与 Template 被子层引用同形)。两者是不同的对象关系,故 sentinel 与文案必须可区分。
+#   Two kinds of 409 (the volume side of §6.2's ①②): a live mount row exists → 409
+#   (referenced); **a live snapshot/clone (a child volume) exists → 409** (lineage RESTRICT,
+#   the same shape as a Template referenced by a child layer). These are different object
+#   relations, so the sentinel and the message must be distinguishable.
 POST   /v1/volumes/{id}/snapshot     {size?}                                  → {volume_id, size}
 POST   /v1/volumes/{id}/clone        {size?}                                  → {volume_id, size}
-#   **两者都收 `size`,且 disk 被计量时必填(缺失 → 400),不继承源的帽**——基底没有可继承之物,而
-#   策略侧继承会静默把节点已声明的磁盘主张翻倍(§5.C / volume.md D6.1a)。
-#   产出的是**普通可写卷**(无只读标记;要不可变用 `shared-ro` 挂载行),记录带 `parent` 指向源。
-#   新卷的帽同样过准入门(可 507)。后端不支持 → 400,且 capability 必须在分配 ID / 动字节**之前**问。
-POST|PUT /v1/volumes/{id}/import     ?path=  (直连写入,body 即字节流;无 live-rw 挂载时才放行)
+#   **Both take `size`, required when disk is metered (missing → 400), and neither inherits
+#   the source's cap** — the substrate has nothing to inherit, and inheriting at the policy
+#   layer would silently double the disk claim the node has already declared (§5.C /
+#   volume.md D6.1a).
+#   What they produce is an **ordinary writable volume** (with no read-only marker; for
+#   immutability use a `shared-ro` mount row), whose record carries a `parent` pointing at the
+#   source. The new volume's cap passes the admission gate as well (may 507). Backend does not
+#   support it → 400, and the capability must be asked **before** an ID is allocated or a byte
+#   is moved.
+POST|PUT /v1/volumes/{id}/import     ?path=  (direct write, the body IS the byte stream;
+                                              allowed only when there is no live-rw mount)
                                              → {volume_id, path, bytes_written}
-GET    /v1/volumes/{id}/export       ?path=  (直连读出)
-#   **不需要沙箱**——这是"卷与沙箱生命周期解耦"的兑现面:**从零播种**(还没有任何沙箱)与**读最后一个
-#   沙箱消失之后的卷**都走这里。`path` 相对卷根;越界不可达(seam 的 `OpenRoot` 是根限定的,§5.C / D5.1)。
-#   有 live-rw 挂载持有该卷 → **409**(写入 regime;`paused` 沙箱**不算** live writer,故此时放行——
-#   谓词与 in-flight 标记的临界区要求见 §5.C)。字节流式,不整块缓冲。
+GET    /v1/volumes/{id}/export       ?path=  (direct read)
+#   **No sandbox needed** — this is where "a volume is decoupled from any sandbox's lifecycle"
+#   is delivered: **seeding from nothing** (no sandbox exists yet) and **reading a volume after
+#   the last sandbox is gone** both go through here. `path` is relative to the volume root, and
+#   escaping it is unreachable (the seam's `OpenRoot` is root-confined, §5.C / D5.1).
+#   A live-rw mount holds the volume → **409** (the write regime; a `paused` sandbox does
+#   **not** count as a live writer, so it is allowed then — the predicate and the critical
+#   section around the in-flight marker are in §5.C). Bytes stream; nothing is buffered whole.
 
-# Network(声明在 create 时绑定,改声明走 resume 边界;publish 是显式入站例外,可热加)
+# Network (the declaration is bound at create; changing it goes through the resume boundary;
+# publish is the explicit ingress exception and can be hot-added)
 GET    /v1/sandboxes/{id}/network    → {state, egress:{default, allow[], via[]}, ingress:{publish[]}}
-#   读回那份声明(§5.D 的四字段)。**三个数组恒出现,空就写 `[]`,不省略、不 null**:它们是记录里确定的
-#   取值,而 `death_cause` / `used_byte` 那条省略规则治的是**读不到的事实**,声明没有读不到的情形。
-#   `ingress.publish[]` 每项 = {guest_port, proto, host_endpoint?}。**`host_endpoint` 在引擎不持有活
-#   placement 时该键不出现**(不是空串、不是 null):端点是 placement 的产物(§3.3),`paused` 沙箱根本没有
-#   端点可报。理由与 `death_cause` 逐字同一条——一个 falsy 却存在的字段会诱人拿它当"这条 publish 是否生效"
-#   的判据;**而那个判据本身错位**:规则集整份随 placement 原子装上(§2.4),没有 per-publish 的安装态,
-#   故 per-项的有无只是把同一个 bit 复述 N 遍。endpoint 随 placement 变,不得当稳定标识缓存(§3.3)。
-#   **`state` 是本响应的成员**,与 `GET /v1/sandboxes/{id}` 同一取值、同一次 store 读,省调用方一轮
-#   "读回来还得再取一次态才能解释它"(同 list 带 `death_cause` 那条省 N+1 的判据):
-#   **`running` ⟺ 内核里装的那份就是本响应里的这份声明;非 `running` ⟹ 什么都没装。**
-#   这个双条件是 §5.D + §3.4 的机制结论、不是本端点的新承诺:声明每次 placement 按当前记录重新生成,而两个
-#   写点都不能让一个 `running` 沙箱的记录与它活着的规则集分叉(改出站三字段对 `running` 判 409;publish 把
-#   "落库"与"装规则"做成一次不可半成的写)。**故"已声明"与"已生效"之间不存在可持久的差**,读面要暴露的只有
-#   "有没有 placement"这一个 bit。**因此不加 `in_effect` / `pending` / `applies_at`**:① `in_effect` 是
-#   `state` 的第二种拼法且**越权**——引擎能诚实报"我持有一个 placement",不能报"内核里此刻真有这几条规则"
-#   (一个隔离单元已死而尚未被 §4.3 降级的 `running` 记录就是反例);② `pending` 要求记录里有第二份声明,
-#   而 §6.2 明写绑定"没有待定/未解析值",且 `paused` 那份不是待定、它就是声明本身;③ `applies_at` 是**写**
-#   响应的词汇,读面没有那次编辑,硬给一个也只是 `state` 的函数,还让同一个键在两个端点上意思不同。
-#   **本响应的响应体就是一份合法的 `PATCH` 请求体**——读面吐出的只读成员(`state`、以及 `publish[]` 每项的
-#   `host_endpoint`)在写面被**收下并忽略**。理由不是便利:上方 PATCH 注把 read-modify-write 定成**契约要求**
-#   (安全相关字段上的 lost update),而三个写点都拒未知键,故若不收,一个把 GET 响应原样回写的调用方会因
-#   **回显引擎自己刚吐出的键**被 400——摩擦全落在那条承重路径上,把调用方推向 §5.D 点名危险的那条路。
-#   规则是「**读面吐出的每一个只读成员**」而不是「`state` 这一个」:拒未知键**递归生效**,故漏掉嵌在
-#   `publish[]` 里的 `host_endpoint` 会让一个带 publish 的 `running` 沙箱的响应体在低一层被拒。
-#   **而那道 400 也不许当次序护栏留着**:它只在 §5.D 点名危险的那个次序上出现(安全次序
-#   `pause → GET → PATCH → resume` 的 GET 排在 pause 之后、无 placement 故不吐 endpoint),等于把一条
-#   并发次序要求藏进一个 JSON schema 错误里报;次序要求由 §5.D 以文字承载。
-#   **这不是给"拒未知键"开的普遍例外**:只有读面自己产生的只读成员在此列,拼错的 `netwrok`(以及 publish
-#   项里拼错的 `host_endpiont`)照旧 400。读面将来多一个只读成员,写面就相应多一个被忽略的成员。
-#   非 GET → **405**(§6.2 通则,不是落进 404)。
+#   Reads that declaration back (§5.D's four fields). **All three arrays are always present,
+#   written as `[]` when empty — never omitted, never null**: they are determined values in the
+#   record, whereas the omission rule for `death_cause` / `used_byte` governs **facts that
+#   cannot be read**, and a declaration has no unreadable case.
+#   Each `ingress.publish[]` item = {guest_port, proto, host_endpoint?}. **The `host_endpoint`
+#   key is absent when the engine holds no live placement** (not an empty string, not null): an
+#   endpoint is a product of the placement (§3.3), and a `paused` sandbox simply has no endpoint
+#   to report. The reason is word for word the `death_cause` one — a falsy-but-present field
+#   would tempt a caller to use it as the criterion for "is this publish in effect"; **and that
+#   criterion is itself misplaced**: the rule set is installed atomically and whole with the
+#   placement (§2.4), there is no per-publish installation state, so per-item presence would
+#   just restate the same bit N times. An endpoint changes with the placement and must not be
+#   cached as a stable identifier (§3.3).
+#   **`state` is a member of this response**, taking the same value from the same store read as
+#   `GET /v1/sandboxes/{id}`, sparing the caller a round of "having read it back, I must fetch
+#   the state to interpret it" (the same N+1-saving criterion as list carrying `death_cause`):
+#   **`running` ⟺ what is installed in the kernel IS the declaration in this response; not
+#   `running` ⟹ nothing is installed.**
+#   That biconditional is a mechanical consequence of §5.D + §3.4, not a new promise by this
+#   endpoint: the declaration is regenerated from the current record on every placement, and
+#   neither write point can make a `running` sandbox's record diverge from its live rule set
+#   (editing the three egress fields on a `running` sandbox is a 409; publish makes "persist"
+#   and "install the rules" one write that cannot half-complete). **So no durable difference
+#   exists between "declared" and "in effect"**, and the only bit the read surface has to expose
+#   is "is there a placement". **Hence no `in_effect` / `pending` / `applies_at` is added**: ①
+#   `in_effect` is a second spelling of `state` and **overreaches** — the engine can honestly
+#   report "I hold a placement", not "these rules really are in the kernel right now" (a
+#   `running` record whose isolation unit has died but has not yet been demoted by §4.3 is the
+#   counterexample); ② `pending` would require a second declaration in the record, while §6.2
+#   states plainly that a binding has "no pending/unresolved values", and the `paused` one is
+#   not pending — it IS the declaration; ③ `applies_at` is the vocabulary of a **write**
+#   response, the read surface has no such edit, and forcing one in would only make it a
+#   function of `state` while giving the same key different meanings at two endpoints.
+#   **This response's body IS a legal `PATCH` request body** — the read-only members the read
+#   surface emits (`state`, and `host_endpoint` in each `publish[]` item) are **accepted and
+#   ignored** on the write surface. The reason is not convenience: the PATCH note above makes
+#   read-modify-write a **contract requirement** (a lost update on a security-relevant field),
+#   and all three write points reject unknown keys, so without this a caller writing the GET
+#   response back verbatim would get a 400 for **echoing back keys the engine itself just
+#   emitted** — putting all the friction on that load-bearing path and pushing callers toward
+#   the road §5.D names as dangerous.
+#   The rule is "**every read-only member the read surface emits**" rather than "`state`
+#   alone": unknown-key rejection **applies recursively**, so missing the `host_endpoint`
+#   nested inside `publish[]` would get a `running` sandbox-with-publish response body rejected
+#   one level down.
+#   **And that 400 must not be kept as an ordering guardrail either**: it appears only on the
+#   ordering §5.D names as dangerous (in the safe order `pause → GET → PATCH → resume` the GET
+#   comes after the pause, so with no placement no endpoint is emitted), which would amount to
+#   reporting a concurrency-ordering requirement through a JSON schema error; that requirement
+#   is carried in §5.D's prose.
+#   **This is not a general exception to "reject unknown keys"**: only read-only members the
+#   read surface produces itself are on the list, and a misspelled `netwrok` (or a misspelled
+#   `host_endpiont` inside a publish item) is still a 400. If the read surface gains a
+#   read-only member later, the write surface gains a correspondingly ignored one.
+#   Non-GET → **405** (§6.2's general rule, not falling through to 404).
 POST   /v1/sandboxes/{id}/publish    {guest_port, proto}
 #                        → {guest_port, proto, host_endpoint?, applies_at}
-#   **可对运行中沙箱热加**(与出站三字段走 resume 边界相反;那三条性质为何给热加背书见 §5.D)。
-#   **`running` 与 `paused` 都合法、都 200**,差别只在生效点:`running` 当场装规则(`applies_at: "now"`),
-#   `paused` 只落库、规则在下一次 placement 出现(`applies_at: "next-resume"`,且**无 `host_endpoint` 键**)。
-#   **响应照 `GET …/network` 那条省略规则**——写面与读面在同一字段上分叉即契约缺陷。为何 `paused` 合法、
-#   以及"拒 `paused` 反而把调用方赶上更不安全的整份 `PATCH`"见 §5.D。`creating` / `destroyed` → 409
-#   (动词的源态规则);未知 ID → 404。
-#   **重复 publish 同一 `{guest_port, proto}` 幂等**:返既有那条、不追加第二项(为何去重只能在声明层,
-#   以及漏掉它的后果,见 §5.D)。**不发 §4.1 事件**(非状态转换)、**不动 `UpdatedAt`**(`retention` 从那列起算)。
-#   `proto` 收 tcp 与 **udp**——`via[]` 那条 UDP 排除的机制理由在入站方向不成立(§6.2)。
-#   **它落库**:热加的是规则,写下的是声明,故这一条跨 resume 存活(声明是 Binding,每次 placement 按
-#   当前记录重装规则集,§5.D)。因此它是 `ingress.publish[]` 上**第二个写点**,与 PATCH 的整份换整份
-#   相互作用——read-modify-write 的要求与"无 un-publish 端点"见上方 PATCH 注。
-#   **无鉴权键,且不是遗漏**——响应交付的就是一个 `host ip:port`,前面摆什么都在引擎外(理由见 §5.D)。
-#   **要求 guest 侧绑 `0.0.0.0`**:沙箱有独立 netns 与独立 loopback,故绑 `127.0.0.1` 的服务 publish
-#   不到——契约是**连接被拒且快速失败**(不是挂到超时),且**不承诺可归因**(为何不可区分见 §5.D 四条
-#   用户可见语义之 ①)。
+#   **Hot-addable on a running sandbox** (the opposite of the three egress fields, which go
+#   through the resume boundary; why those three properties endorse hot-add is in §5.D).
+#   **Both `running` and `paused` are legal and both 200**, differing only in the effective
+#   point: `running` installs the rule on the spot (`applies_at: "now"`), while `paused` only
+#   persists it and the rule appears at the next placement (`applies_at: "next-resume"`, with
+#   **no `host_endpoint` key**).
+#   **The response follows `GET …/network`'s omission rule** — a write surface and a read
+#   surface diverging on the same field is a contract defect. Why `paused` is legal, and why
+#   "refusing `paused` would instead drive callers onto the less safe whole `PATCH`", are in
+#   §5.D. `creating` / `destroyed` → 409 (the verb's source-state rule); an unknown ID → 404.
+#   **Publishing the same `{guest_port, proto}` twice is idempotent**: return the existing item
+#   and do not append a second one (why deduplication can only happen at the declaration layer,
+#   and the consequences of missing it, are in §5.D). **No §4.1 event is emitted** (not a state
+#   transition), and **`UpdatedAt` is not touched** (`retention` counts from that column).
+#   `proto` accepts tcp and **udp** — the mechanical reason `via[]` excludes UDP does not hold
+#   in the ingress direction (§6.2).
+#   **It persists**: what is hot-added is a rule, what is written down is a declaration, so this
+#   survives resume (a declaration is a Binding, and every placement reinstalls the rule set
+#   from the current record, §5.D). It is therefore the **second write point** on
+#   `ingress.publish[]` and interacts with PATCH's whole-for-whole replacement — the
+#   read-modify-write requirement and "there is no un-publish endpoint" are in the PATCH note
+#   above.
+#   **There is no authentication key, and that is not an oversight** — what the response
+#   delivers is a `host ip:port`, and whatever sits in front of it is outside the engine
+#   (reasoning in §5.D).
+#   **The guest side is required to bind `0.0.0.0`**: a sandbox has its own netns and its own
+#   loopback, so a service bound to `127.0.0.1` cannot be published to — the contract is that
+#   **the connection is refused and fails fast** (rather than hanging until timeout), and
+#   **attributability is not promised** (why the cases are indistinguishable is in §5.D's first
+#   of four user-visible semantics).
 ```
 
-> **`network?` 的 schema 就是 §5.D 那四个字段,全部只用 IP / 端口 / 协议词汇**——`egress.default`
-> (`deny|allow`,**必填**)· `egress.allow[]` · `egress.via[]` · `ingress.publish[]`。三处元组一律是
-> `{cidr, port, proto}`,`proto` **恒必填**;`cidr` **只收 IP 字面量**。**`cidr` 与 `port` 都可省,省略即
-> 通配**(任意目的 / 任意端口,§5.D),而**读面把通配渲染成"省略"而不是 `"port": 0`**——那是"读面输出必须
-> 是合法写体"这条(上方 PATCH 注)在这个字段上的具体要求。以上必填与收窄的理由在 §5.D
-> (机制侧见 network.md D2 / D3.1),违反它们的**状态码归 §6.2** 那张清单。**没有"姿态"枚举**:姿态是
-> 这四个字段的取值组合(§5.D)。
-> 声明是 Binding(§3.4),故它跟资源上限一样**只在 `paused` 可改**、经 `PATCH /v1/sandboxes/{id}`,
-> `applies_at: "next-resume"`;**唯一例外是 publish**,它有自己的热加端点(上面那条)。
+> **`network?`'s schema is exactly §5.D's four fields, all in a vocabulary of IP / port /
+> protocol only** — `egress.default` (`deny|allow`, **required**) · `egress.allow[]` ·
+> `egress.via[]` · `ingress.publish[]`. The tuple in all three places is `{cidr, port, proto}`,
+> with `proto` **always required** and `cidr` accepting **IP literals only**. **Both `cidr` and
+> `port` may be omitted, and omission means wildcard** (any destination / any port, §5.D),
+> while **the read surface renders a wildcard as "omitted" rather than `"port": 0`** — that is
+> what "the read surface's output must be a legal write body" (the PATCH note above) requires
+> concretely on this field. The reasons behind the required fields and the narrowing are in §5.D
+> (the mechanical side in network.md D2 / D3.1), and the **status codes** for violating them
+> belong to §6.2's list. **There is no "posture" enumeration**: a posture is a combination of
+> these four fields' values (§5.D).
+> The declaration is a Binding (§3.4), so like the resource ceilings it is **editable only in
+> `paused`**, through `PATCH /v1/sandboxes/{id}`, with `applies_at: "next-resume"`; **publish is
+> the sole exception** and has its own hot-add endpoint (above).
 
-> **为何 files 旁路走 REST 而不走 RPC:它的全部意义是流式。** 大文件不该变成一条 protobuf 消息、也不该在
-> 任一端整份驻留——实测 RPC 路径多占约 37 倍 guest 内存(transport D4.4),而沙箱超 RAM 帽即被终止
-> (§3.4),故这是安全性而非效率取舍。**阈值由调用方定**。§6.2 的约束不变:沙箱仍按不透明 ID 寻址,
-> guest 端点(placement)不出现在 wire 上。
+> **Why the files bypass uses REST rather than RPC: its entire point is streaming.** A large
+> file should not become one protobuf message, nor be resident whole at either end — the RPC
+> path was measured to occupy about 37× more guest memory (transport D4.4), and a sandbox
+> exceeding its RAM cap is terminated (§3.4), so this is a security rather than an efficiency
+> trade-off. **The threshold is the caller's to set.** §6.2's constraints are unchanged: the
+> sandbox is still addressed by an opaque ID, and the guest endpoint (the placement) never
+> appears on the wire.
 
-**数据面(Connect-RPC,权威 wire 是 proto,非下方 REST 行)** —— process / fs 有 server-stream +
-强类型帧,**权威契约是 `engine.transport.v1` 的 `ProcessService` / `FsService`**(D4.3/D4.4),
-client 从 `transport.proto` 经 `buf` 生成 stub、经 `orchestrator` 反代到 `sandboxd`(D5.1)。**沙箱寻址
-走带外请求头 `Engine-Sandbox-Id`**:proto 本身只按 guest-native pid 寻址(D4.6 词汇边界),反代 strip
-掉该头、在引擎内解析当前端点(placement 永不外泄,§6.2 / D5.4)。下方 REST 行**仅作形状示意**(说明
-有哪些操作、如何 pid/path 寻址),**不是可实现的权威端点**——真正的 wire 看 proto:
+**Data plane (Connect-RPC; the authoritative wire is the proto, not the REST lines below)** —
+process / fs have server-streaming plus strongly-typed frames, and **the authoritative contract
+is `engine.transport.v1`'s `ProcessService` / `FsService`** (D4.3/D4.4). Clients generate stubs
+from `transport.proto` via `buf` and are reverse-proxied through `orchestrator` to `sandboxd`
+(D5.1). **Sandbox addressing travels in an out-of-band request header, `Engine-Sandbox-Id`**:
+the proto itself addresses only by guest-native pid (D4.6 vocabulary boundary), and the reverse
+proxy strips that header and resolves the current endpoint inside the engine (a placement never
+leaks outward, §6.2 / D5.4). The REST lines below are **shape illustrations only** (showing which
+operations exist and how pid/path addressing works) and **are not implementable authoritative
+endpoints** — for the real wire, read the proto:
 
 ```text
-# Process(连接)— 起进程 / 重连 / 输入 / 信号 / 列进程;PTY 是带 pty 字段的特例,pid 寻址
-#   权威:ProcessService.{Start,Connect,StreamInput,SendInput,SendSignal,Update,List,CloseStdin}
-(示意)  processes                     {cmd, args?, pty?, cwd?, env?}   → {pid, stream}
-(示意)  processes/{pid}/connect                                                     → {stream}(重连,先回放有界环形缓冲再接 live,D4.3)
-(示意)  processes/{pid}/signal        {signal}
-(示意)  processes                                                                    (实时 list,无注册表)
+# Process (connections) — start / reconnect / input / signal / list; PTY is the special case
+# carrying a pty field, addressed by pid
+#   Authoritative: ProcessService.{Start,Connect,StreamInput,SendInput,SendSignal,Update,List,CloseStdin}
+(illustrative)  processes                     {cmd, args?, pty?, cwd?, env?}   → {pid, stream}
+(illustrative)  processes/{pid}/connect                     → {stream} (reconnect: replay the
+                                                             bounded ring buffer first, then
+                                                             attach live, D4.3)
+(illustrative)  processes/{pid}/signal        {signal}
+(illustrative)  processes                                   (live list, no registry)
 
-# FS(读写沙箱文件)— read 可带 offset,无 watch;语义与生效点见 D4.4
-#   权威:FsService.{Read,Write,Stat,List,MakeDir,Remove,Move}
-(示意)  fs?path=&offset=&len=                                                        (read / stat)
-(示意)  fs?path=                                                                     (write)
-(示意)  fs/list                       {path, depth}
-# agent 会话(session)不进 engine API——engine 外 adapter 在 process/fs 上的加法(§5.E / D1.2)
+# FS (reading and writing sandbox files) — read may carry an offset; no watch. Semantics and
+# effective points are in D4.4
+#   Authoritative: FsService.{Read,Write,Stat,List,MakeDir,Remove,Move}
+(illustrative)  fs?path=&offset=&len=                                          (read / stat)
+(illustrative)  fs?path=                                                       (write)
+(illustrative)  fs/list                       {path, depth}
+# Agent session semantics do not enter the engine API — they are an addition made by an adapter
+# outside the engine on top of process/fs (§5.E / D1.2)
 ```
 
-### 6.2 设计约束
+### 6.2 Design constraints
 
-- **ID 寻址**:对外只认 sandbox / template / volume 的不透明 ID 与进程 pid,不暴露宿主路径或
-  placement。同一要求贯彻到引擎内部的 Overlay 工件(§3.1.1)。
-- **创建期注入绑定,改绑定走同一注入点**:网络 / Volume 挂载在 create 时一次性绑定(不做晚绑定);
-  但**经控制面通道注入**这一**流程形状**不被抄近路绕过,以后接预热池(晚绑定)复用同一注入点即可。
-  **改**绑定经 `PATCH /v1/sandboxes/{id}`,一个沙箱**任何时刻都持有一份完整绑定**——`PATCH` 只把一份
-  完整绑定换成另一份完整绑定(未给的字段不变,**没有"待定/未解析"值**),物化仍在 placement 时经同一条
-  控制面注入点发生。这是**改绑定(rebinding)**,不是 §1.4 预热池那个意义上的**晚绑定**(晚绑定 = 沙箱
-  先存在而绑定未定),故不放松本约束。**guest 身份不在其列**:默认 guest root,引擎不建模 guest 用户,
-  create 与 `Start` 都无 run-as 参数(§2.2 / §3.2.1)。
-- **资源上限字段按轴条件必填**:某轴被节点预算计量时,create 必须在该轴给出取值(`0 = 无上限` 仅在
-  未计量轴上合法);缺失即拒(400),这与"节点已满"(507)是两件不同的事。这是 §6.1 **两条**取决于部署
-  配置的字段语义**之一**(另一条是下面网络声明那条**部署性质的 400**:`via[]` 遇上未给第二跳 uid 的部署),
-  故两条都显式写在此处而非留给实现。
-- **状态码**:准入容量不足 → **507**(说的是"容量",而非 409 那种调用方可重试的状态冲突);
-  `resource-terminated` 拒绝 resume → **409**;计量轴缺帽 / 请求体不合法(负的帽、无法解析的 duration)
-  → **400**;被引用的 Template 删除 → **409**;源态不合法的动词(如对 `running` 改帽、对非 `paused`
-  沙箱 resume)→ **409**;未知 sandbox / template ID → **404**。
-  **另外三个通则码**:pause 正在 drain 时的写操作(fs 变更 RPC / files 上传)→ **503**(§4.2 barrier:
-  拒绝而不排队,排队会把 drain 饿死;可重试);files 上传超引擎单请求上限(8 GiB)→ **413**;任何
-  集合/对象路由上的错方法 → **405**。
-  **成功码**:create / Promote / snapshot / clone → **201**;DELETE(sandbox / template / volume)
-  → **204**;其余读与动词 → **200**。
-  **Volume 的四个 409 语义不同、须可区分**:① 删一个有活挂载行的卷(被引用,同 Template 那条);
-  ② 删一个**被活的引用行挡住的对象**——它有**两侧**,卷侧(删有活子代卷的源,lineage RESTRICT,§5.C 快照)
-  与沙箱侧(删一个有活挂载行的沙箱,`mounts.sandbox` RESTRICT);③ attach 撞独占租约(可重试的状态冲突);
-  ④ 有 live-rw 挂载时的直连变更(§5.C 写入 regime)。
-  **四个是"结局类别"的计数,不是 sentinel 的计数**:②④ 各自内部还要再分,因为**同一个类别可以从两侧被触发,
-  而两侧要报不同的对象**——② 的两侧是两条不同的 FK 路径(卷侧的 lineage RESTRICT vs 沙箱侧的
-  `mounts.sandbox` RESTRICT),④ 的两侧是写入 regime 的两个方向(直连变更撞上活的 rw 挂载 vs 冷启动要
-  rw 挂载一个正有直连写在飞的卷),故各有自己的 sentinel——**六个 sentinel 覆盖四个类别**。"四个不增加"
-  约束的是**调用方要分辨的语义种类**,不是实现里的错误值个数;新增一条触发路径若落在既有类别里,
-  加 sentinel 不算增加类别。
-  ①②③在 store 侧是两类不同的约束违反(FK-RESTRICT vs 唯一/谓词失配),故**翻译点要给各自的 sentinel**,
-  不能共用一个"in use"文案——既有 `ErrInUse` 的文案写着 "template in use",复用它会返回一个说错对象的 409。
-  **另有一条不属于这四类**:源态不合法的动词(对 `running` 改帽、对非 `paused` 沙箱 resume、以及非法源态的
-  改绑定)本就按上文通则判 409,它是**动词的源态规则**、不是 Volume 的引用关系,故不进这个枚举。
-  **幂等删除不得吞掉这些 409**:它们是 RESTRICT 触发的**全部**对外信号,若落进"不存在也返成功"的分支,
-  守卫失败的删除就与成功的删除不可区分(外部反面教材见 [`deep-dives/volume.md`](./deep-dives/volume.md) D9)。
-  **网络声明的九类 400 + 一类部署 400**(§5.D。**九类声明 400** 全部是"不读别的行即可判定、且无重试能让它
-  合法",同挂载绑定那条判据;**第一类只在 `network` 对象存在时求值——整份省略是合法的,归一化成
-  `{deny, [], [], []}` 落库**,§5.D):
-  `egress.default` 缺失 · `cidr` 处给了域名 · 元组缺 `proto` · `via[].match` 匹配 UDP ·
-  **`via[].endpoint` 非宿主本地** · **`via[].endpoint` 落在 L0 地板的 daddr 清单项内**(即 link-local /
-  loopback / sibling CIDR)· **`egress.allow[]` 的 `cidr` 整段落在地板"任何读法下都抬不动"的项内** ·
-  **`cidr` 处给了 v4-mapped / v4-compatible 的 v6 字面量** · **良构性:声明对象自身立不起来**(与其中任何
-  取值无关)——`via[]` 条目的 `match[]` **为空**,或 `publish[]` 条目的 `guest_port` **为 0**。
-  **另有一类不属于这九类、性质是部署而非声明文本的 400**:`via[]` 声明遇上**未给第二跳 uid 的部署**
-  (见下方那段"另有一条网络 400 不属于上面那张清单")。
-  **第九类(良构性)为何是独立一类,而不是第三类下面多几个错误值**:判据就是上面 Volume 那条——**类的基数
-  约束的是"调用方要分辨的语义种类",不是实现里的错误值个数**。第三类的 remedy 是"在这个元组里写上
-  `proto`"(一个字段、一次编辑,且报错点名了那个字段);而这两样要求调用方**给数组添一个成员**
-  (`match[]` 根本没有条目,故也就没有元组可供 `proto` 缺失)或**补一个请求里从未提到的端口**。把它们报成
-  "元组缺 `proto`",是把调用方送去检查一个可能写得完全正确、甚至尚不存在的字段。**而这两样彼此合为一类**:
-  它们是同一个语义种类("形状立不起来"),remedy 也是同一类编辑(补上结构上必需的成员),分开就成了数
-  实现里的错误值。**不属于良构性的是"元组没写 `port`"**——那是**合法的,意为任意端口**(§5.D):省略通配是
-  一条被声明的语义、不是缺成员,而 `match[]` 为空在任何读法下都引不走任何流量。
-  前六类里的第五、六类把 endpoint 夹成"宿主本地、
-  且不在地板的 **daddr 清单项**内"(**"宿主本地"必然落在地板的"宿主自身的任一地址"项里,那不是矛盾**:
-  开洞靠次序、地板不被收窄,§2.4 那段边界),两者是同一个判据的两面:第二跳的规则由内核压在同一份宿主规则集
-  后面,而内核只压得住本机
-  进程——收下一个远端 endpoint 就等于把地板架在那个进程自己的自律上(confused deputy,§2.4 第二条明确拒的
-  东西);而落在地板内的 endpoint 是「声明抬不动地板」的直接后果,它让每一条命中流量**永久 fail-closed**。
-  两者都是**可证明永不能工作的声明**,故在写点当场拒(推理见 network.md D4.2 / D4.3)。**第六类只读地板的
-  daddr 清单项,不读"宿主自身"那一项**:后者是**一条 ct-state 规则而非地址枚举**,把它算进这条判定会让两类
-  400 合起来把 `via[]` 夹空。那条张力由 §5.D 的规则生成器用一条**窄放行**解掉——它**排在地板 drop 之上、
-  同一条链**,即靠**次序**开洞而**不收窄地板**(§2.4 那段边界;形状与逐条反例见 network.md D5 ⑩),不由这
-  两类 400 承担。
-  **压第二跳所用的 uid 是部署期交给引擎的输入,不是声明字段**(§5.D)。
+- **ID addressing**: outwardly only the opaque IDs of sandbox / template / volume and process
+  pids are recognized; host paths and placements are never exposed. The same requirement is
+  carried through to the Overlay artifact inside the engine (§3.1.1).
+- **Bindings are injected at create, and rebinding goes through the same injection point**:
+  network and Volume mounts are bound once at create (there is no late binding); but the
+  **flow shape** of **injecting through the control-plane channel** is not short-circuited, so
+  wiring up a warm pool (late binding) later just reuses the same injection point.
+  **Rebinding** goes through `PATCH /v1/sandboxes/{id}`, and a sandbox **holds one complete
+  binding at every instant** — `PATCH` only replaces one complete binding with another
+  (fields not given are unchanged, and there are **no "pending/unresolved" values**), with
+  materialization still happening at placement time through the same control-plane injection
+  point. This is **rebinding**, not **late binding** in §1.4's warm-pool sense (late binding =
+  the sandbox exists first while its binding is undetermined), so it does not relax this
+  constraint. **Guest identity is not among these**: guest root is the default, the engine does
+  not model guest users, and neither create nor `Start` has a run-as parameter (§2.2 / §3.2.1).
+- **Resource-ceiling fields are conditionally required per axis**: when an axis is metered by
+  the node budget, create must give a value on that axis (`0 = no ceiling` is legal only on an
+  unmetered axis); missing it is a refusal (400), which is a different thing from "the node is
+  full" (507). This is **one of two** field semantics in §6.1 that depend on deployment
+  configuration (the other is the network declaration's **deployment-natured 400** below:
+  `via[]` meeting a deployment that gave no second-hop uid), so both are written out explicitly
+  here rather than left to the implementation.
+- **Status codes**: insufficient admission capacity → **507** (it speaks of "capacity", not of
+  the caller-retryable state conflict a 409 means); a `resource-terminated` sandbox refusing
+  resume → **409**; a missing cap on a metered axis / an illegal request body (a negative cap,
+  an unparseable duration) → **400**; deleting a referenced Template → **409**; a verb with an
+  illegal source state (changing a cap on a `running` sandbox, resuming a non-`paused` one) →
+  **409**; an unknown sandbox / template ID → **404**.
+  **Three further general-rule codes**: a write operation while a pause is draining (an
+  fs-mutating RPC / a files upload) → **503** (the §4.2 barrier: refuse rather than queue, since
+  queueing would starve the drain; retryable); a files upload exceeding the engine's
+  single-request ceiling (8 GiB) → **413**; a wrong method on any collection/object route →
+  **405**.
+  **Success codes**: create / Promote / snapshot / clone → **201**; DELETE (sandbox / template /
+  volume) → **204**; all other reads and verbs → **200**.
+  **The Volume's four 409s mean different things and must be distinguishable**: ① deleting a
+  volume that has a live mount row (referenced, same as the Template one); ② deleting **an
+  object blocked by a live reference row** — which has **two sides**, the volume side (deleting
+  a source that has live child volumes, lineage RESTRICT, §5.C snapshots) and the sandbox side
+  (deleting a sandbox that has a live mount row, `mounts.sandbox` RESTRICT); ③ an attach
+  colliding with an exclusive lease (a retryable state conflict); ④ a direct-access mutation
+  while a live-rw mount exists (§5.C write regime).
+  **The four count "outcome categories", not sentinels**: ②④ each subdivide internally, because
+  **the same category can be triggered from two sides and the two sides must name different
+  objects** — ②'s two sides are two different FK paths (the volume side's lineage RESTRICT vs
+  the sandbox side's `mounts.sandbox` RESTRICT), and ④'s two sides are the write regime's two
+  directions (a direct-access mutation hitting a live rw mount vs a cold start wanting to
+  rw-mount a volume that has a direct write in flight), so each has its own sentinel — **six
+  sentinels covering four categories**. "The four do not grow" constrains **the kinds of
+  semantics a caller must tell apart**, not the number of error values in the implementation;
+  a new trigger path that lands in an existing category adds a sentinel without adding a
+  category.
+  On the store side ①②③ are two different classes of constraint violation (FK-RESTRICT vs a
+  uniqueness/predicate mismatch), so the **translation point must give each its own sentinel**
+  and must not share one "in use" message — the existing `ErrInUse` message reads "template in
+  use", and reusing it would return a 409 that names the wrong object.
+  **One more thing does not belong to these four**: a verb with an illegal source state
+  (changing a cap on a `running` sandbox, resuming a non-`paused` one, or rebinding from an
+  illegal source state) is already a 409 under the general rule above; it is **the verb's
+  source-state rule**, not a Volume reference relation, so it does not enter this enumeration.
+  **Idempotent deletion must not swallow these 409s**: they are the **entire** outward signal a
+  RESTRICT triggers, and were they to fall into the "return success even when absent" branch, a
+  deletion that failed its guard would be indistinguishable from one that succeeded (an external
+  cautionary example is in [`deep-dives/volume.md`](./deep-dives/volume.md) D9).
+  **The network declaration's nine classes of 400 + one deployment 400** (§5.D. **All nine
+  declaration 400s** are "decidable without reading another row, and no retry can make it
+  legal", the same criterion as the mount binding's; **the first class is evaluated only when
+  the `network` object is present — omitting the whole thing is legal and is normalized to
+  `{deny, [], [], []}` and persisted**, §5.D):
+  `egress.default` missing · a domain name given where a `cidr` belongs · a tuple missing
+  `proto` · `via[].match` matching UDP · **`via[].endpoint` not host-local** ·
+  **`via[].endpoint` falling inside one of the L0 floor's daddr list items** (that is,
+  link-local / loopback / the sibling CIDR) · **an `egress.allow[]` `cidr` falling entirely
+  inside a floor item that "no reading can lift"** · **a v4-mapped / v4-compatible v6 literal
+  given where a `cidr` belongs** · **well-formedness: the declaration object does not stand up
+  on its own** (independent of any value in it) — a `via[]` entry whose `match[]` is **empty**,
+  or a `publish[]` entry whose `guest_port` is **0**.
+  **One further 400 does not belong to these nine and is deployment-natured rather than a
+  property of the declaration text**: a `via[]` declaration meeting **a deployment that gave no
+  second-hop uid** (see "One more network 400 does not belong to the list above" below).
+  **Why the ninth class (well-formedness) is its own class rather than a few more error values
+  under the third**: the criterion is the Volume one above — **a class count constrains "the
+  kinds of semantics a caller must tell apart", not the number of error values in the
+  implementation**. The third class's remedy is "write `proto` into this tuple" (one field, one
+  edit, and the error names that field); these two instead require the caller to **add a member
+  to an array** (`match[]` has no entries at all, so there is no tuple for `proto` to be missing
+  from) or to **supply a port the request never mentioned**. Reporting them as "a tuple is
+  missing `proto`" would send the caller to inspect a field that may be written perfectly
+  correctly, or may not exist yet. **And these two merge into one class with each other**: they
+  are the same kind of semantics ("the shape does not stand up") with the same kind of remedy
+  (supply a structurally required member), and splitting them would be counting error values in
+  the implementation. **What is NOT a well-formedness failure is "the tuple did not write
+  `port`"** — that is **legal and means any port** (§5.D): omission-as-wildcard is a declared
+  semantics rather than a missing member, whereas an empty `match[]` steers no traffic under any
+  reading.
+  Of the first six, classes five and six clamp the endpoint to "host-local, and not inside one of
+  the floor's **daddr list items**" (**"host-local" necessarily falls inside the floor's "any
+  address of the host itself" item, and that is not a contradiction**: the hole is opened by
+  ordering and the floor is not narrowed — the boundary passage in §2.4). The two are two faces of
+  one criterion: the second hop's rules are held by the kernel behind the same host rule set, and
+  the kernel can only hold local processes down — accepting a remote endpoint would stand the floor
+  on that process's own self-discipline (a confused deputy, exactly what §2.4's second obligation
+  refuses); while an endpoint falling inside the floor is a direct consequence of "a declaration
+  cannot lift the floor", making every matching flow **permanently fail-closed**. Both are
+  **declarations provably unable to ever work**, so they are refused on the spot at the write point
+  (reasoning in network.md D4.2 / D4.3). **The sixth class reads only the floor's daddr list items,
+  not the "host itself" item**: the latter is **a ct-state rule rather than an address enumeration**,
+  and counting it into this decision would let the two classes of 400 together clamp `via[]` down to
+  nothing. That tension is resolved by §5.D's rule generator with a **narrow allowance** — sitting
+  **above the floor's drop in the same chain**, opening the hole by **ordering** and **not narrowing
+  the floor** (the §2.4 boundary passage; the shape and the counterexample for each omission are in
+  network.md D5 ⑩) — and is not carried by these two classes of 400.
+  **The uid used to hold the second hop down is an input handed to the engine at deployment time,
+  not a declaration field** (§5.D).
 
-  **另有一条网络 400 不属于上面那张清单:它是部署的性质,不是声明文本的性质** —— **一份带 `via[]` 的声明
-  遇上未给第二跳 uid 的部署,拒(400)**。上面每一类都能只读声明文本判定,而这一条即使声明**逐字合法**也要拒。
-  **为何必须拒**:第二跳靠一张按部署期 uid 收窄的 `output` 表压住(§2.4 / network.md D5 ㉔),没有 uid 就没有
-  那张表、也就**没有 §2.4 第二条 invariant 的强制**;收下它等于落库一份引擎兑现不了自己 invariant 的声明,
-  宿主上留着一个未被压住的 confused deputy,而**第一跳的每条断言对它完全不敏感**(实测:第二跳在 `forward`
-  上计 0,第一跳那份地板对它一个包都不评估)。判据与上面那张清单同形——不读别的行即可判定、无重试能让它合法、
-  且没有任何东西满了故 507 是谎——但**它必须与上面各类可区分**,因为**remedy 不同:这一条的 remedy 是运维的
-  (给引擎起步入参补上第二跳 uid),不是调用方的**(改声明改不动它)。故它自带 sentinel。
-  它**不并入 `via[].endpoint` 非宿主本地那一类**:后者判的是 endpoint 地址,这一条与 endpoint 取值无关。
+  **One more network 400 does not belong to the list above: it is a property of the deployment, not
+  of the declaration text** — **a declaration carrying `via[]` meeting a deployment that gave no
+  second-hop uid is refused (400)**. Every class above is decidable by reading the declaration text
+  alone, whereas this one refuses even a declaration that is **legal word for word**.
+  **Why it must be refused**: the second hop is held down by an `output` table narrowed by the
+  deployment-time uid (§2.4 / network.md D5 ㉔), and with no uid there is no such table and therefore
+  **no enforcement of §2.4's second invariant**. Accepting it would persist a declaration whose own
+  invariant the engine cannot deliver, leaving an unheld confused deputy on the host — and **every
+  assertion about the first hop is completely insensitive to it** (measured: the second hop counts 0
+  on `forward`, and the first hop's floor does not evaluate a single one of its packets). The
+  criterion has the same shape as the list above — decidable without reading another row, no retry
+  can make it legal, and nothing is full so a 507 would be a lie — but **it must be distinguishable
+  from those classes**, because **the remedy differs: this one's remedy is the operator's (add the
+  second-hop uid to the engine's startup inputs), not the caller's** (editing the declaration cannot
+  move it). So it carries its own sentinel.
+  It is **not merged into the `via[].endpoint`-not-host-local class**: that one decides on the
+  endpoint address, whereas this one is independent of the endpoint's value.
 
-  **同一个运维条件还有一个 placement 侧的孪生,而它是 409 不是 400**:一份**已落库**的 `via[]` 声明,在
-  **resume 或 publish** 上遇到未给第二跳 uid 的部署 → **409**。差别不在判据(与上面那条逐字相同),在
-  **调用方这次发了什么**:resume 与 publish **不携带声明**,故 400 会让调用方去改一个他这次没发的东西。
-  两条记录在案的 remedy 都改**别处**的状态(带 uid 重启引擎,或 `PATCH` 掉那个 `via[]`),这正是 409
-  ——"状态冲突、可重试"——的含义:落库的记录与在跑的部署冲突。**不许压成 500**:500 说的是"引擎故障、请重试",
-  而这里什么都没坏、重试也永远不会好。
+  **The same operational condition has a placement-side twin, and that one is a 409 rather than a
+  400**: an **already-persisted** `via[]` declaration meeting a deployment with no second-hop uid on
+  **resume or publish** → **409**. The difference is not in the criterion (word for word the same as
+  above) but in **what the caller submitted this time**: resume and publish **carry no declaration**,
+  so a 400 would send the caller to change something they did not submit. Both recorded remedies
+  change state **elsewhere** (restart the engine with the uid, or `PATCH` that `via[]` away), which
+  is precisely what 409 — "a state conflict, retryable" — means: the persisted record conflicts with
+  the running deployment. **It must not be flattened into a 500**: a 500 says "the engine failed,
+  please retry", whereas here nothing is broken and retrying will never help.
 
-  **第七类只覆盖 `egress.allow[]`,且只认地板里 loopback 与 link-local 两项**(`127.0.0.0/8` · `::1/128` ·
-  `169.254.0.0/16` · `fe80::/10`)。判据是**整段包含**而非相交:地板压在声明之上是契约(见下面次序两条),
-  故一条整段落在这些项内的 `allow[]` 是**永不被求值的死规则**——实测它自己的计数器恒 0 而地板计数在涨
-  (network.md D5 ㉑)。收下它的代价不是"多一条无害规则":它在**"计数器为 0"这个唯一的地板健康信号上制造
-  第二群合法的 0**,而每条 deny 验收都靠读这个信号。故与"无帽沙箱不可加 disk 帽"同判据——**可证明
-  兑现不了的声明在写点当场拒**。**`port` / `proto` 不参与判定**:地板 daddr 项不带端口限定,按地址被包含的
-  条目在任何端口上都死。**这一类刻意不覆盖三样**:
-  ① **sibling CIDR 内的条目**——生成器把声明的放行**同时发在 `input` 与 `forward`**(network.md D4.2),故一条
-  落在 sibling CIDR 内的 `allow[]` **不是死规则**:本沙箱自己的 `/30` 网关就在那个 CIDR 内,而它正是 §5.D
-  要求调用方自己声明的那个宿主本地解析器地址(唯一稳定可用的一个,D5 ⑦)——即**这是被批准的声明路径,不是
-  漏网**。到 sibling **自己**网关的那一半由 `input` 侧一条 sibling drop 兜住(同样在 D4.2),那是规则次序的
-  职责、不是这一类 400 的。**附带一条独立理由**:一个提到 sibling CIDR 的 400 会把沙箱地址空间摆到 wire 上,
-  那是本节 ID 寻址明确排除的。② **命名宿主本地地址的条目**——判定它要枚举宿主地址,而地板的"宿主自身的
-  任一地址"是**一条纯 ct-state 规则、从不被算出**(§2.4 / D5 ⑧);枚举它既把 D8 已收口的那类问题请回来,又不
-  满足"无重试能让它合法"(宿主事后多一个地址就翻转),还会让**合法的内网超网不可声明**。③ **部分重叠**
-  ——`10.0.0.0/8` 与落在地板内的沙箱 `/16` 必然相交,而实测次序把它解对(D5 ㉑),故判据**必须是整段包含**。
-  **`via[].match[]` 一律不判这一类**:实测被引流的流量经 `prerouting` DNAT **先于** filter 地板,落进
-  `input` 后由 D5 ⑩ 那条窄放行接住——即**地板内目标的 `via[]` 是活的**(D5 ㉑)。把这一类推广到
-  `via[].match[]` 会杀掉"把地板内目标交给引擎外进程判"这个用法,而那正是 `via[]` 的主用例之一。
-  **两个字段在此处判定不对称是机制事实,不是遗漏。**
+  **The seventh class covers `egress.allow[]` only, and recognizes only the floor's loopback and
+  link-local items** (`127.0.0.0/8` · `::1/128` · `169.254.0.0/16` · `fe80::/10`). The criterion is
+  **whole-range containment** rather than intersection: that the floor sits above the declaration is
+  contractual (see the two ordering rules below), so an `allow[]` falling entirely inside these items
+  is a **dead rule that is never evaluated** — measured, its own counter stays 0 while the floor's
+  counter climbs (network.md D5 ㉑). The cost of accepting it is not "one more harmless rule": it
+  **manufactures a second crowd of legitimate zeros on the one health signal the floor has, "the
+  counter is 0"**, and every deny acceptance test reads that signal. So it shares its criterion with
+  "an uncapped sandbox cannot be given a disk cap" — **a declaration provably undeliverable is
+  refused on the spot at the write point**. **`port` / `proto` do not participate in the decision**:
+  the floor's daddr items carry no port qualifier, so an entry contained by address is dead on every
+  port. **This class deliberately does not cover three things**:
+  ① **Entries inside the sibling CIDR** — the generator emits the declaration's allowances on
+  **both `input` and `forward`** (network.md D4.2), so an `allow[]` falling inside the sibling CIDR
+  is **not a dead rule**: this sandbox's own `/30` gateway is inside that CIDR, and that gateway is
+  exactly the host-local resolver address §5.D requires the caller to declare themselves (the only
+  stably usable one, D5 ⑦) — that is, **this is the sanctioned declaration path, not an escapee**.
+  The half that reaches a sibling's **own** gateway is caught by a sibling drop on the `input` side
+  (also in D4.2), which is the responsibility of rule ordering, not of this class of 400. **A
+  separate, independent reason**: a 400 mentioning the sibling CIDR would put the sandbox address
+  space on the wire, which this section's ID addressing explicitly excludes. ② **Entries naming a
+  host-local address** — deciding that would require enumerating host addresses, whereas the floor's
+  "any address of the host itself" is **a pure ct-state rule that is never computed** (§2.4 / D5 ⑧);
+  enumerating it would invite back the class of problem D8 has settled, would fail "no retry can
+  make it legal" (the host gaining an address afterwards flips it), and would also make **legitimate
+  private-network supernets undeclarable**. ③ **Partial overlap** — `10.0.0.0/8` necessarily
+  intersects the in-floor sandbox `/16`, and the measured ordering resolves that correctly (D5 ㉑),
+  so the criterion **must be whole-range containment**.
+  **`via[].match[]` is never decided under this class**: measured, steered traffic goes through
+  `prerouting` DNAT **before** the filter floor, and once in `input` it is caught by that narrow
+  allowance from D5 ⑩ — that is, **a `via[]` to an in-floor destination is live** (D5 ㉑).
+  Generalizing this class to `via[].match[]` would kill the "hand an in-floor destination to a
+  process outside the engine to judge" usage, which is one of `via[]`'s primary use cases.
+  **The two fields being decided asymmetrically here is a mechanical fact, not an oversight.**
 
-  **第八类是第七类的必要前置,不是独立的洁癖。** 一个按家族分支的包含判定会把 v4-mapped 字面量判成 v6、
-  只与 v6 成员比、**放它过**——而该包以 IPv4 离开、死在 v4 地板上(解包行为的实测与逐条推导见
-  network.md D5 ⑲,**本处不复制**)。**API 收下而线上静默拒绝**,正是 D4.3 那类诊断错位。故在**任何包含判定之前**就拒掉
-  这类字面量,而不是"归一化后再比":§5.D 说声明只收 IP 字面量,`::ffff:192.168.1.1` 是一个已有地址的**第二种
-  拼法**,收下它意味着落库的 Binding 与调用方的文本不同,而两种拼法在后续每一次 read-modify-write 里都比不
-  相等。**同时**在谓词内部照样 `.Unmap()`,这样将来若有人撤掉这条拒绝,包含判定不会静默地变成家族盲。
-  **publish 绑 loopback 不在其列**——那不是一个不合法的请求,而是一个合法请求下 guest 侧的连接被拒(§5.D)。
-  **`ingress.publish[]` 的 `proto: udp` 合法,不 400**:`via[]` 排除 UDP 是因为取不回原始目标
-  (network.md D3.2),而一条 DNAT 到固定 guest 端口的入站规则不需要那个机制,故那条反对不适用。
-  **一条流同时命中 `egress.allow[]` 与某条 `via[].match[]` 时,`via[]` 胜**——两者是可观测不同的两个结局
-  (引流 vs 直放),而一份既放行又引流同一条流的声明,最合理的读法是"把它引走";若真要直放,把它从
-  `via[].match[]` 里排除掉,而不是靠加一条 `allow[]` 覆盖。**多条 `via[]` 相互重叠时按声明中的先后取
-  first-match-wins**,后面的不再求值。规则顺序是安全性质而非风格(network.md D1 ④),故这两条次序必须在
-  契约里定死、不留给实现:同一份声明在两个实现下必须产生同一个可达集。
-  **校验在准入门之前**:一份不合法的声明在动任何字节 / 记任何预算之前就被拒,故 400 与 507 不会同时成立
-  ——一次请求要么因声明不合法被 400,要么声明合法而节点装不下被 507。
-  `size` 在被计量的 disk 轴上缺失(create / snapshot / clone 三处)→ **400**;卷帽降到低于当前用量
-  → **400**;挂载绑定内部自相矛盾(同一沙箱内 dest 重复 / 同卷重复 / 卷间嵌套)→ **400**(§5.C:
-  不读别的行即可判定,且无重试能让它合法);后端不支持 snapshot/clone → **400**(capability 查询的结果,
-  不静默,且必须在动字节之前问)。
-  **`GET /v1/events`**:正常(含空窗口、空页)→ **200**;`after` 或 `limit` 不是整数 / `after` 为负 /
-  `limit` ≤ 0 → **400**(`limit` **超**上限不是错误,截到上限后仍 200);非 GET → **405**;
-  **410 = `after` 早于保留窗口**:**保留语义**,今日不可达、不实现(理由见 §6.1)。
-- **store / runtime provider 走接口**:换后端 / 加 provider 是注册一个新实现,不改上层模型
-  (§1.3 只做加法;provider 始终是抽象契约,见 §1.1 / §5.A)。
+  **The eighth class is a necessary precondition for the seventh, not independent fastidiousness.**
+  A containment decision that branches by family would judge a v4-mapped literal to be v6, compare
+  it only against the v6 members, and **let it through** — while the packet leaves as IPv4 and dies
+  on the v4 floor (the measured unwrapping behavior and the step-by-step derivation are in
+  network.md D5 ⑲, **not duplicated here**). **The API accepting it while the wire silently refuses
+  it** is exactly the class of diagnostic mismatch D4.3 describes. So such literals are refused
+  **before any containment decision**, rather than "normalized and then compared": §5.D says a
+  declaration accepts IP literals only, `::ffff:192.168.1.1` is **a second spelling** of an address
+  that already has one, and accepting it would mean the persisted Binding differs from the caller's
+  text, while the two spellings compare unequal on every subsequent read-modify-write.
+  **At the same time** the predicate still calls `.Unmap()` internally, so that if someone withdraws
+  this refusal later, the containment decision does not silently become family-blind.
+  **A publish bound to loopback is not on this list** — that is not an illegal request but a legal
+  request under which the guest-side connection is refused (§5.D).
+  **`proto: udp` in `ingress.publish[]` is legal and not a 400**: `via[]` excludes UDP because the
+  original destination cannot be recovered (network.md D3.2), and an ingress rule that DNATs to a
+  fixed guest port needs no such mechanism, so that objection does not apply.
+  **When one flow matches both `egress.allow[]` and some `via[].match[]`, `via[]` wins** — the two
+  are observably different outcomes (steered vs let straight out), and for a declaration that both
+  allows and steers the same flow, the most reasonable reading is "steer it away"; if it really
+  should go straight out, exclude it from `via[].match[]` rather than covering it with an added
+  `allow[]`. **When several `via[]` entries overlap, first-match-wins in declaration order** and
+  later ones are not evaluated. Rule order is a security property rather than a matter of style
+  (network.md D1 ④), so these two orderings must be pinned in the contract rather than left to the
+  implementation: the same declaration must produce the same reachable set under two
+  implementations.
+  **Validation happens before the admission gate**: an illegal declaration is refused before a byte
+  is moved or a budget is recorded, so 400 and 507 cannot both hold — a request is either 400 for an
+  illegal declaration, or the declaration is legal and it is 507 because the node cannot fit it.
+  `size` missing on a metered disk axis (in all three of create / snapshot / clone) → **400**; a
+  volume cap lowered below current usage → **400**; a mount binding self-contradictory internally (a
+  duplicate dest within one sandbox / the same volume twice / volumes nested in each other) →
+  **400** (§5.C: decidable without reading another row, and no retry can make it legal); the backend
+  not supporting snapshot/clone → **400** (the result of a capability query, not silent, and it must
+  be asked before a byte is moved).
+  **`GET /v1/events`**: normal (an empty window and an empty page included) → **200**; `after` or
+  `limit` not an integer / `after` negative / `limit` ≤ 0 → **400** (`limit` **exceeding** the
+  ceiling is not an error — it truncates to the ceiling and is still 200); non-GET → **405**;
+  **410 = `after` earlier than the retention window**: **reserved semantics**, unreachable today and
+  not implemented (reasoning in §6.1).
+- **store / runtime provider go through interfaces**: swapping a backend or adding a provider means
+  registering a new implementation, not changing the model above it (§1.3 additive only; a provider
+  is always an abstract contract, see §1.1 / §5.A).
