@@ -71,6 +71,42 @@ var errorTextExemptions = map[string]string{
 	"proxyErr":    "data-plane sanitizer (D5.1): logs the real cause engine-side and returns a placement-free message composed from the CODE alone — the inner text never crosses",
 }
 
+// scanErrorTextReads and scanHTTPErrorBodies ARE the two guards. They are functions
+// rather than inline walks so that the reverse-injection test below drives the SAME code
+// the production scan drives, over source carrying the defect on purpose.
+//
+// The alternative — a second copy of the walk inside that test — checks a copy, not a
+// guard: the real scanner could narrow to nothing and the reverse-injection test would
+// keep passing on its own duplicate, which is precisely the reassurance-without-coverage
+// the volume/seam_test.go precedent exists to avoid.
+//
+// `report` receives the position and the enclosing function name; the caller decides
+// whether that is a failure or a count.
+func scanErrorTextReads(fset *token.FileSet, f *ast.File, report func(pos token.Position, enclosing string)) {
+	// enclosing tracks which function body the walk is inside, so a violation can name
+	// it and an exemption can be scoped to it.
+	var enclosing string
+	ast.Inspect(f, func(n ast.Node) bool {
+		switch d := n.(type) {
+		case *ast.FuncDecl:
+			enclosing = d.Name.Name
+		case *ast.FuncLit:
+			// Keep the enclosing name: a closure inside a handler is still that handler
+			// as far as this rule is concerned.
+		case *ast.CallExpr:
+			sel, ok := d.Fun.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "Error" || len(d.Args) != 0 {
+				return true
+			}
+			if _, exempt := errorTextExemptions[enclosing]; exempt {
+				return true
+			}
+			report(fset.Position(d.Pos()), enclosing)
+		}
+		return true
+	})
+}
+
 // TestControlPlaneErrorsGoThroughTheFunnel: no production file in this package reads
 // an error's text outside the sanitizer.
 //
@@ -86,30 +122,11 @@ func TestControlPlaneErrorsGoThroughTheFunnel(t *testing.T) {
 		if err != nil {
 			t.Fatalf("parse %s: %v", src, err)
 		}
-		// enclosing tracks which function body the walk is inside, so a violation can
-		// name it and an exemption can be scoped to it.
-		var enclosing string
-		ast.Inspect(f, func(n ast.Node) bool {
-			switch d := n.(type) {
-			case *ast.FuncDecl:
-				enclosing = d.Name.Name
-			case *ast.FuncLit:
-				// Keep the enclosing name: a closure inside a handler is still that handler
-				// as far as this rule is concerned.
-			case *ast.CallExpr:
-				sel, ok := d.Fun.(*ast.SelectorExpr)
-				if !ok || sel.Sel.Name != "Error" || len(d.Args) != 0 {
-					return true
-				}
-				if _, exempt := errorTextExemptions[enclosing]; exempt {
-					return true
-				}
-				t.Errorf("%s: %s calls .Error() outside the sanitizer — an error's raw text "+
-					"carries absolute host paths (btrfs wraps every call as `<verb> <path>: %%w`) "+
-					"and §6.2 keeps those off the wire. Route it through writeErr/statusFor instead.",
-					fset.Position(d.Pos()), enclosing)
-			}
-			return true
+		scanErrorTextReads(fset, f, func(pos token.Position, enclosing string) {
+			t.Errorf("%s: %s calls .Error() outside the sanitizer — an error's raw text "+
+				"carries absolute host paths (btrfs wraps every call as `<verb> <path>: %%w`) "+
+				"and §6.2 keeps those off the wire. Route it through writeErr/statusFor instead.",
+				pos, enclosing)
 		})
 	}
 }
@@ -129,44 +146,61 @@ func TestHTTPErrorBodiesAreLiteralsOrSanitized(t *testing.T) {
 		if err != nil {
 			t.Fatalf("parse %s: %v", src, err)
 		}
-		var enclosing string
-		ast.Inspect(f, func(n ast.Node) bool {
-			if d, ok := n.(*ast.FuncDecl); ok {
-				enclosing = d.Name.Name
-				return true
-			}
-			call, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			sel, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok || sel.Sel.Name != "Error" || len(call.Args) != 3 {
-				return true
-			}
-			pkg, ok := sel.X.(*ast.Ident)
-			if !ok || pkg.Name != "http" {
-				return true
-			}
-			if lit, ok := call.Args[1].(*ast.BasicLit); ok && lit.Kind == token.STRING {
-				return true
-			}
-			// writeErr is the ONE function that may write a composed body — it is the
-			// funnel, and the composition it writes is sanitizeErr's output. Exactly one
-			// exemption, and it is the sink every other site is required to use.
-			if enclosing == "writeErr" {
-				return true
-			}
+		scanHTTPErrorBodies(fset, f, func(pos token.Position, enclosing string) {
 			t.Errorf("%s: %s calls http.Error with a non-literal message — anything composed at "+
 				"runtime can carry a host path (§6.2). Use writeErr, which logs the full "+
-				"error and sanitizes the body.", fset.Position(call.Pos()), enclosing)
-			return true
+				"error and sanitizes the body.", pos, enclosing)
 		})
 	}
 }
 
-// TestTheGuardsActuallyFail drives both scanners over synthetic source carrying the
-// exact defect, because a guard whose failure path is never exercised is a guard
-// nobody has checked (volume/seam_test.go's reverse-injection precedent).
+// scanHTTPErrorBodies is the second guard — see scanErrorTextReads for why both are
+// functions.
+func scanHTTPErrorBodies(fset *token.FileSet, f *ast.File, report func(pos token.Position, enclosing string)) {
+	var enclosing string
+	ast.Inspect(f, func(n ast.Node) bool {
+		if d, ok := n.(*ast.FuncDecl); ok {
+			enclosing = d.Name.Name
+			return true
+		}
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "Error" || len(call.Args) != 3 {
+			return true
+		}
+		pkg, ok := sel.X.(*ast.Ident)
+		if !ok || pkg.Name != "http" {
+			return true
+		}
+		if lit, ok := call.Args[1].(*ast.BasicLit); ok && lit.Kind == token.STRING {
+			return true
+		}
+		// writeErr is the ONE function that may write a composed body — it is the
+		// funnel, and the composition it writes is sanitizeErr's output. Exactly one
+		// exemption, and it is the sink every other site is required to use.
+		if enclosing == "writeErr" {
+			return true
+		}
+		report(fset.Position(call.Pos()), enclosing)
+		return true
+	})
+}
+
+// TestTheGuardsActuallyFail drives THE TWO SCANNERS THEMSELVES over synthetic source
+// carrying the exact defect, because a guard whose failure path is never exercised is a
+// guard nobody has checked (volume/seam_test.go's reverse-injection precedent).
+//
+// It calls scanErrorTextReads / scanHTTPErrorBodies rather than re-walking the AST: an
+// inline duplicate of the walk would keep passing while the real scanner narrowed to
+// nothing, which is the failure this test exists to rule out.
+//
+// The fixture also exercises the EXEMPTIONS in the direction that can go wrong. An
+// exemption is keyed by enclosing function name, so a leak inside a function that happens
+// to be called `sanitizeErr` or `writeErr` is waved through — which is correct for the
+// real ones and would be a hole if the key ever matched more broadly.
 func TestTheGuardsActuallyFail(t *testing.T) {
 	const leaky = `package orchestrator
 
@@ -175,6 +209,12 @@ import "net/http"
 func handle(w http.ResponseWriter, err error, dir string) {
 	http.Error(w, err.Error(), 500)
 	http.Error(w, "cannot open "+dir, 500)
+}
+
+func sanitizeErr(err error) string { return err.Error() }
+
+func writeErr(w http.ResponseWriter, err error) {
+	http.Error(w, "engine: "+sanitizeErr(err), 500)
 }
 `
 	dir := t.TempDir()
@@ -188,32 +228,26 @@ func handle(w http.ResponseWriter, err error, dir string) {
 		t.Fatal(err)
 	}
 
-	rawReads, composedBodies := 0, 0
-	ast.Inspect(f, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-		sel, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok || sel.Sel.Name != "Error" {
-			return true
-		}
-		if len(call.Args) == 0 {
-			rawReads++
-			return true
-		}
-		if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "http" && len(call.Args) == 3 {
-			if lit, ok := call.Args[1].(*ast.BasicLit); !ok || lit.Kind != token.STRING {
-				composedBodies++
-			}
-		}
-		return true
+	var rawReads, composedBodies []string
+	scanErrorTextReads(fset, f, func(_ token.Position, enclosing string) {
+		rawReads = append(rawReads, enclosing)
 	})
-	if rawReads != 1 {
-		t.Errorf("the .Error() scanner found %d raw reads in source that has exactly 1 — it would not have caught the original defect", rawReads)
+	scanHTTPErrorBodies(fset, f, func(_ token.Position, enclosing string) {
+		composedBodies = append(composedBodies, enclosing)
+	})
+
+	// EXACTLY the unexempted sites, named. A count alone would be satisfied by the
+	// scanner finding the wrong site and missing the right one.
+	if want := []string{"handle"}; !slices.Equal(rawReads, want) {
+		t.Errorf("the .Error() scanner reported %v, want %v — `handle` reads the text and must be "+
+			"caught; `sanitizeErr` reads it too and is the exempted sanitizer, so a scanner that "+
+			"reports both has lost its exemption and one that reports neither would not have caught "+
+			"the original defect", rawReads, want)
 	}
-	if composedBodies != 2 {
-		t.Errorf("the http.Error scanner found %d non-literal bodies in source that has exactly 2", composedBodies)
+	if want := []string{"handle", "handle"}; !slices.Equal(composedBodies, want) {
+		t.Errorf("the http.Error scanner reported %v, want %v — both of `handle`'s bodies are "+
+			"non-literal (one from an error, one from plain concatenation, which leaks just as much), "+
+			"and `writeErr` is the single permitted composed body", composedBodies, want)
 	}
 	if !strings.Contains(leaky, "err.Error()") {
 		t.Fatal("fixture no longer contains the defect it exists to reproduce")

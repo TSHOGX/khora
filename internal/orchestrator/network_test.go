@@ -52,17 +52,33 @@ func TestTheAssemblyRefusesItsOwnUIDAsTheSecondHopUID(t *testing.T) {
 			"second-hop table is past the point where learning this helps")
 	}
 
-	// The control arm: the same config with a uid the engine does NOT run as gets past
-	// this check (it then fails or succeeds on the substrate, which is not this test's
-	// business — what matters is that the refusal is specific to the self-uid).
+	// THE CONTROL ARM, asserting success rather than the absence of one error. The same
+	// config with a uid the engine does not run as assembles cleanly (measured: err nil,
+	// state dir materialized — the assembly reaches no substrate, which is why this whole
+	// test is root-free).
+	//
+	// `err == nil` and not `!errors.Is(err, ErrSecondHopUIDIsTheEngineItself)`: the weaker
+	// form is satisfied by New failing for ANY unrelated reason, so it would keep passing
+	// if the config never reached the uid check at all — and then it would not be a control
+	// on anything. What it has to establish is that the refusal above is specific to the
+	// self-uid rather than to the presence of a second-hop uid.
 	other := euid + 4711
-	if _, err := New(Config{
+	eng, cerr := New(Config{
 		TemplatesDir: filepath.Join(base, "templates"),
 		StateDir:     filepath.Join(base, "state"),
 		StorePath:    ":memory:",
 		SecondHopUID: &other,
-	}); errors.Is(err, network.ErrSecondHopUIDIsTheEngineItself) {
-		t.Errorf("a uid the engine does not run as was refused as the engine's own: %v", err)
+	})
+	if cerr != nil {
+		t.Fatalf("a uid the engine does not run as was refused: %v — the check must reject the ENGINE'S "+
+			"OWN uid, not the feature", cerr)
+	}
+	if eng == nil {
+		t.Fatal("New returned no engine and no error")
+	}
+	if _, statErr := os.Stat(filepath.Join(base, "state")); statErr != nil {
+		t.Errorf("the control assembly did not materialize its state dir (%v) — then it never reached "+
+			"the uid check, and it is not a control on the refusal above", statErr)
 	}
 }
 

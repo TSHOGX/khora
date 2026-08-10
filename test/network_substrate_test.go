@@ -478,18 +478,11 @@ func TestDenyEmptyIsUnreachableEverywhereWithFloorCountersMoving(t *testing.T) {
 	// because the host still ROUTES between two /30s — measured, sandbox A completed a
 	// TCP handshake to sibling B and read its payload (D5 ①).
 	t.Run("a sibling sandbox's guest IP", func(t *testing.T) {
-		sibID, sibCl := createRunning(t, eng, declAllowPublic())
-		// Start a listener INSIDE the sibling, so the target genuinely answers.
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		if _, err := sibCl.Start(ctx, transport.StartSpec{
-			Cmd: "/usr/bin/probe", Args: []string{"listen"},
-		}); err != nil {
-			// The probe has no listen mode; use the sibling's transport port instead, which
-			// is a real listener inside that netns and is exactly the "sibling endpoint"
-			// §2.3 names.
-			t.Logf("probe has no listen mode (%v) — using the sibling's transport endpoint, which is a real listener in its netns", err)
-		}
+		sibID, _ := createRunning(t, eng, declAllowPublic())
+		// THE TARGET IS THE SIBLING'S TRANSPORT ENDPOINT: a real listener (sandboxd) inside
+		// that netns, which is exactly the "sibling endpoint" §2.3 names. So "unreachable"
+		// cannot be an artifact of nothing listening — the alternative reading this test has
+		// to rule out.
 		ep, err := eng.Mediator.Endpoint(sibID)
 		if err != nil {
 			t.Fatalf("sibling endpoint: %v", err)
@@ -743,7 +736,17 @@ func TestADeclaredUDPTupleIsAdmittedAtTheRuleLayer(t *testing.T) {
 	host := hostIPv4(t)
 
 	// A host-side UDP echo, so "admitted" is observable rather than inferred.
-	pc, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	//
+	// BOUND TO THE HOST ADDRESS, NOT THE WILDCARD, and this is load-bearing for the round
+	// trip below rather than tidiness. A wildcard-bound UDP socket has no source address
+	// pinned, so the kernel picks one per reply by route lookup — for a destination inside
+	// the sandbox /30 that is the veth's host-side address, not the address the guest sent
+	// to. The guest's socket is connected, so a reply from an unexpected source is
+	// discarded and the probe times out: measured as `connected_no_payload` after 5 s with
+	// the allow counter reading 0 → 1. That is a fixture artifact wearing the exact shape
+	// of an engine defect ("the rule matched but traffic does not flow") — the hazard the
+	// PAYLOAD-parsing note above is also about.
+	pc, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP(host), Port: 0})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -772,6 +775,20 @@ func TestADeclaredUDPTupleIsAdmittedAtTheRuleLayer(t *testing.T) {
 		t.Errorf("a declared UDP tuple counted %d → %d on the input-side allow — UDP is the ONLY "+
 			"declarable path for DNS under `default: deny` (§5.D semantics ③), so this rule has to "+
 			"bite\n%s", before, after, harness.DumpRuleSet(id))
+	}
+	// THE ROUND TRIP, which is what "observable rather than inferred" above means. The
+	// counter alone proves the rule MATCHED, not that UDP works: the datagram could match
+	// the input-side allow and still never come back, and the reply direction is carried
+	// by a different rule from the one counted here. Both halves or neither.
+	if !got.reachable() {
+		t.Errorf("a declared UDP tuple matched the allow (counter %d → %d) but the datagram did not "+
+			"round-trip: outcome=%q raw=%s\nUDP is the only declarable path for DNS under "+
+			"`default: deny` (§5.D semantics ③), so a tuple that counts but does not carry traffic is "+
+			"the feature being dead with its counter moving", before, after, got.outcome, got.raw)
+	}
+	if got.payload != "udp-banner" {
+		t.Errorf("the UDP reply payload was %q, want %q — the banner is what distinguishes "+
+			"\"the host answered\" from \"something answered\"", got.payload, "udp-banner")
 	}
 	t.Logf("item 8 (udp): %s", got.raw)
 	// Deliberately NOT asserting name resolution: the guest ships no resolv.conf at
@@ -1138,13 +1155,20 @@ func TestAnInputSideAllowReachesItsOwnGatewayButNotASiblings(t *testing.T) {
 
 // --- item 12: atomicity — the rules are in place before the unit runs ----------
 
-// Gate B item 12: no fail-open window, and a failed launch leaves NO table.
+// Gate B item 12: no fail-open window, and destroy leaves NO table.
 //
 // The first half cannot be observed by polling from outside (the window it denies is
 // exactly the one that must not exist), so it is asserted STRUCTURALLY: the very
 // first thing the guest can possibly do is already refused. If the rules went on
 // after the unit started, the guest's first probe would be the one that got through.
-func TestTheRulesArePresentBeforeTheGuestRunsAndAFailedLaunchLeavesNoTable(t *testing.T) {
+//
+// THE FAILED-LAUNCH HALF IS NOT HERE, and the name no longer claims it: this test used to
+// promise it and exercise only destroy, which reaches teardown with a COMPLETE placement.
+// A failed launch reaches it half-built, which is the state `nft destroy`-over-`delete`
+// and the table-before-veth ordering exist for. No control-plane knob fails a launch after
+// the rules are installed, so that arm lives at the layer where it is reachable:
+// runtime.TestAFailedLaunchLeavesNoRuleSetTable.
+func TestTheRulesArePresentBeforeTheGuestRunsAndDestroyLeavesNoTable(t *testing.T) {
 	eng, _ := harness.Engine(t, netEngineOpts(t))
 	before := harness.CountRuleSetTables(t)
 
@@ -1999,10 +2023,22 @@ func main() {
 				"flow's destination is host-local and lands on `input`. Same prerouting DNAT, two "+
 				"different downstream hooks (D5 ⑮)", c)
 		}
-		// The via accept does not exist in this declaration, so the input-side evidence is
-		// the floor: inbound publish traffic must not be touching it.
-		if c := harness.NftCounter(t, id, "in_floor"); c > 0 {
-			t.Logf("note: in_floor = %d (guest-originated traffic, not the inbound publish path)", c)
+		// AND THE INPUT SIDE STAYS ZERO — asserted, since it is half this subtest's claim.
+		// The two hooks are what makes publish and `via[]` distinguishable at all: both are
+		// the same prerouting DNAT, and only the downstream hook tells them apart (D5 ⑮). If
+		// inbound publish traffic showed up on the input floor, the post-DNAT destination
+		// would be host-local rather than the guest — i.e. the DNAT rewrote to the wrong
+		// address, which every forward-side assertion here would pass over.
+		//
+		// Zero is reachable rather than aspirational: this declaration is `deny` with no
+		// `via[]` and no `allow[]`, the guest runs nothing that dials out, and the engine's
+		// own transport replies are `established` and so met by the ct-state accept above the
+		// floor, never by the floor's drop.
+		if c := harness.NftCounter(t, id, "in_floor"); c != 0 {
+			t.Errorf("the input-side floor counted %d during an inbound publish flow — post-DNAT the "+
+				"destination must be the GUEST IP and land on `forward`; anything reaching the input "+
+				"floor means the rewrite produced a host-local destination, and the forward-side "+
+				"assertion above cannot see that (D5 ⑮)\n%s", c, harness.DumpRuleSet(id))
 		}
 	})
 
@@ -2857,102 +2893,94 @@ func main() {
 	mustCounterMoved(t, id, "in_floor", inBefore, inAfter, "item 14b: the input side too")
 }
 
-// Gate B item 14e: revoking a publish closes NEW connections but does NOT close an
-// already-established one.
+// Gate B item 14e: revocation. What the engine actually offers is ONE path, and this
+// asserts both of its halves.
 //
-// This is pinned rather than fixed, and the distinction is the point: it is the
-// MECHANISM REASON there is no un-publish endpoint today (§5.D / D5 ⑰). conntrack holds
-// the NAT binding and rule deletion is not evaluated against it, so a `running`
-// revocation could only ever promise "no new connections" — never "the port is closed",
-// which is exactly what a caller revoking an inbound port wants. Asserting it here means
-// nobody later assumes revocation is clean.
-func TestRevokingAPublishClosesNewConnectionsButNotEstablishedOnes(t *testing.T) {
-	eng, base := harness.Engine(t, netEngineOpts(t))
+// # Why the title is not "closes new connections but not established ones"
+//
+// That property is UNREACHABLE through any engine API, so a test named for it can only
+// pretend. It describes deleting a DNAT rule under a live placement, and there is no
+// endpoint that does this: the three egress fields plus `publish` are editable only from
+// `paused` (§3.4), because the provider materializes them at placement. A test that
+// PATCHes a `running` sandbox and then narrates the refusal has asserted nothing — the
+// echo service, the established connection and the round-trip check that used to stand
+// here were all set up and never used, and the failure branch below them was dead code.
+//
+// The conntrack asymmetry itself (a deleted rule is not evaluated against an existing
+// binding, so a live revocation could only ever promise "no NEW connections") is a
+// property of nftables, not of this engine, and it is the MECHANISM REASON there is no
+// un-publish endpoint (§5.D / D5 ⑰). It belongs in that rationale, not in an engine
+// acceptance test whose subject would have to be a rule deletion the engine never issues.
+//
+// # What is asserted
+//
+// (a) The whole-binding PATCH is REFUSED on `running` — positively, as the §3.4 rule it
+// is, rather than logged as an acceptable outcome.
+// (b) Revocation through the legal path — pause, PATCH, resume — genuinely CLOSES the
+// port: the external caller is refused and the DNAT is gone from the rebuilt rule set.
+// Nothing else in this file covers (b), and it is the half a caller revoking an inbound
+// port actually cares about.
+func TestRevokingAPublishClosesThePortAtTheNextPlacement(t *testing.T) {
+	eng, _ := harness.Engine(t, netEngineOpts(t))
 	ctx := context.Background()
-
-	// An echo service, so an established connection can be shown to still work.
-	const echoSrc = `package main
-
-import (
-	"fmt"
-	"net"
-	"os"
-)
-
-func main() {
-	ln, err := net.Listen("tcp", "0.0.0.0:"+os.Args[1])
-	if err != nil {
-		fmt.Println("LISTEN_FAILED", err)
-		return
-	}
-	fmt.Println("LISTENING", ln.Addr())
-	for {
-		c, err := ln.Accept()
-		if err != nil {
-			return
-		}
-		go func(c net.Conn) {
-			defer c.Close()
-			buf := make([]byte, 256)
-			for {
-				n, rerr := c.Read(buf)
-				if n > 0 {
-					_, _ = c.Write(buf[:n])
-				}
-				if rerr != nil {
-					return
-				}
-			}
-		}(c)
-	}
-}
-`
-	harness.InjectStaticBin(t, base+"/templates", "bare", "echo", echoSrc)
 
 	d := declDeny()
 	d.Ingress.Publish = []model.NetPublish{{GuestPort: 8080, Proto: model.NetTCP}}
-	id, cl := createRunning(t, eng, d)
-	sctx, scancel := context.WithTimeout(ctx, 60*time.Second)
-	defer scancel()
-	if _, err := cl.Start(sctx, transport.StartSpec{Cmd: "/usr/bin/echo", Args: []string{"8080"}}); err != nil {
-		t.Fatalf("start the echo service: %v", err)
-	}
-	time.Sleep(700 * time.Millisecond)
+	id, _ := createRunning(t, eng, d)
 
 	_, _, eps, err := eng.Mediator.Network(ctx, id)
 	if err != nil || len(eps) == 0 {
 		t.Fatalf("no endpoint: %v %v", eps, err)
 	}
-	// Establish a connection and verify it round-trips.
-	conn, derr := net.DialTimeout("tcp", eps[0], 10*time.Second)
-	if derr != nil {
-		t.Fatalf("dial: %v", derr)
-	}
-	defer conn.Close()
-	if _, err := conn.Write([]byte("before")); err != nil {
-		t.Fatal(err)
-	}
-	buf := make([]byte, 64)
-	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	if _, err := conn.Read(buf); err != nil {
-		t.Fatalf("the established connection did not round-trip before revocation: %v", err)
+	endpoint := eps[0]
+
+	// (a) The live edit is refused. ASSERTED, not narrated: this refusal is the whole
+	// reason revocation is a placement-time operation, so if it ever stopped holding,
+	// every argument resting on "materialized at placement" would be void.
+	revoked := declDeny()
+	if err := patchDecl(eng, ctx, id, revoked); err == nil {
+		t.Fatal("the whole-binding PATCH edited the declaration on a RUNNING sandbox — `publish` and " +
+			"the three egress fields are editable only from `paused` (§3.4), because the provider " +
+			"materializes them at placement. Accepting it here would leave the record and the live " +
+			"rule set disagreeing, with the record winning at the next placement")
 	}
 
-	// REVOKE, through the only path that exists: the whole-binding PATCH with the item
-	// omitted. On a `running` sandbox this rewrites the live rule set.
-	revoked := declDeny()
-	if err := patchDecl(eng, ctx, id, revoked); err != nil {
-		// The declaration is editable only from `paused` (§3.4), which is itself the
-		// answer: the SAFE revocation path rebuilds the placement and takes the old flows
-		// with it, and that is why `next-resume` has no ambiguity.
-		t.Logf("the whole-binding PATCH on a running sandbox was refused (%v) — as §3.4 requires. That refusal IS "+
-			"the clean revocation story: the whole-binding PATCH takes effect at the next placement, "+
-			"which rebuilds everything and drops old flows, so it has none of the ambiguity a "+
-			"`running` un-publish would have (§5.D / D5 ⑰)", err)
-		return
+	// (b) The legal path. pause → PATCH → resume rebuilds the placement from the record,
+	// which is what makes revocation unambiguous: there is no old rule to delete and no
+	// old binding to outlive it, because the whole netns and table are new.
+	if err := eng.Mediator.Pause(ctx, id); err != nil {
+		t.Fatalf("pause: %v", err)
 	}
-	t.Error("the whole-binding PATCH edited the declaration on a RUNNING sandbox — the three egress fields are " +
-		"editable only from `paused` (§3.4), because the provider materializes them at placement")
+	if err := patchDecl(eng, ctx, id, revoked); err != nil {
+		t.Fatalf("the whole-binding PATCH was refused on a PAUSED sandbox, which §3.4 permits: %v", err)
+	}
+	if err := eng.Mediator.Resume(ctx, id); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+
+	// The rule set no longer carries the DNAT. Structural half — checked first, because
+	// if the rule is still there the reachability result below says nothing about
+	// revocation.
+	dump := harness.DumpRuleSet(id)
+	if strings.Contains(dump, "dnat") {
+		t.Errorf("the rebuilt rule set still carries a dnat after the publish was revoked — the "+
+			"placement regenerates from the record (§3.4 Binding), so this means the record kept the "+
+			"item or Generate ignored its absence:\n%s", dump)
+	}
+
+	// And the external caller can no longer reach it. The endpoint is the one the engine
+	// handed out before revocation — the address a caller would still be holding.
+	// Reachability is the ABSENCE of DIAL_FAILED, not the presence of "CONNECTED": the
+	// dialer's three markers are DIAL_FAILED / CONNECTED_NO_PAYLOAD / PAYLOAD, so matching
+	// on "CONNECTED" would pass over PAYLOAD — the strongest evidence the port is open.
+	out, derr := dialFromForeignNetns(t, endpoint)
+	if derr == nil && !strings.Contains(out, "DIAL_FAILED") {
+		t.Errorf("the revoked endpoint %s still accepted a connection from an external caller (%s) — "+
+			"revocation at the next placement is the ONLY revocation this engine offers, so if the "+
+			"rebuild does not close the port there is no way to close it at all", endpoint, out)
+	}
+	t.Logf("item 14e: after pause→PATCH→resume the revoked endpoint %s answers %q (err=%v) and the "+
+		"rebuilt rule set carries no dnat", endpoint, out, derr)
 }
 
 // dialFromForeignNetns dials an address from a netns that is NOT the sandbox's own /30
