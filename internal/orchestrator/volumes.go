@@ -134,6 +134,12 @@ func (e *Engine) handleVolumeSub(w http.ResponseWriter, r *http.Request) {
 		e.handleImportVolume(w, r, id)
 	case sub == "export" && r.Method == http.MethodGet:
 		e.handleExportVolume(w, r, id)
+	// §6.2's general rule, mirroring handleSandboxSub: a wrong method on a route that
+	// EXISTS is 405. It has to enumerate the known subs rather than blanket the default
+	// arm, because the two verdicts stay distinguishable — an unrecognized sub-path is
+	// still 404 below, and answering it 405 would assert a route the engine does not have.
+	case sub == "", sub == "snapshot", sub == "clone", sub == "import", sub == "export":
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	default:
 		http.Error(w, "not found", http.StatusNotFound)
 	}

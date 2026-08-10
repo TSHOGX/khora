@@ -778,6 +778,66 @@ func TestSanitizerRedactsPathsAndPlacement(t *testing.T) {
 	}
 }
 
+// §6.2's general rule on the Volume half of the router: a wrong method on any
+// collection/object route is 405, not 404. Every one of these fell into
+// handleVolumeSub's `default` arm as a 404 — the same defect the sandbox sub-routes
+// had, surviving one router longer.
+//
+// The unknown sub-path is asserted in the SAME test on purpose: the fix is only
+// correct if it separates "this route exists, your method does not apply" from "no
+// such route". A blanket 405 on the default arm would pass every case above and
+// still be wrong, so the 404 case is what keeps the two verdicts distinguishable.
+func TestAWrongMethodOnEveryVolumeSubRouteIs405ButAnUnknownSubPathIs404(t *testing.T) {
+	mem := store.NewMemory()
+	med := lifecycle.New(lifecycle.Deps{Store: mem})
+	eng := &Engine{Mediator: med, Store: mem}
+	srv := httptest.NewServer(eng.HTTPHandler())
+	t.Cleanup(srv.Close)
+
+	// A method that is wrong for each route, chosen so none is one of the route's real
+	// verbs — `import` takes both POST and PUT, and the object itself takes GET/PATCH/
+	// DELETE, so "wrong" means outside that route's own accepted set.
+	for _, tc := range []struct {
+		method, sub string
+		want        int
+	}{
+		{http.MethodPost, "", http.StatusMethodNotAllowed},
+		{http.MethodGet, "snapshot", http.StatusMethodNotAllowed},
+		{http.MethodGet, "clone", http.StatusMethodNotAllowed},
+		{http.MethodGet, "import", http.StatusMethodNotAllowed},
+		{http.MethodPost, "export", http.StatusMethodNotAllowed},
+		// Not a route at all: 404 is the honest answer, and it must not be swept up by
+		// the 405 arms above.
+		{http.MethodGet, "bogus", http.StatusNotFound},
+	} {
+		t.Run(tc.method+" "+tc.sub, func(t *testing.T) {
+			url := srv.URL + "/v1/volumes/vol_x"
+			if tc.sub != "" {
+				url += "/" + tc.sub
+			}
+			req, err := http.NewRequest(tc.method, url, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+			if resp.StatusCode != tc.want {
+				route := "/v1/volumes/{id}"
+				if tc.sub != "" {
+					route += "/" + tc.sub
+				}
+				t.Errorf("%s %s → %d; want %d (§6.2: a wrong method on any "+
+					"collection/object route is 405, never 404 — 404 says the route does not "+
+					"exist, which sends the caller to check their URL; an unknown sub-path is "+
+					"the one case that IS a 404)", tc.method, route, resp.StatusCode, tc.want)
+			}
+		})
+	}
+}
+
 // writeFile / readFile are tiny os wrappers kept local to this file so the canary
 // checks read as "host truth", visibly separate from every path that goes through
 // the volume accessor.
