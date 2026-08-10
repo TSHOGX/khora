@@ -9,6 +9,8 @@ import (
 	"net/netip"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -163,6 +165,43 @@ func main() {
 }
 `
 
+// guestServeSrc is the in-guest listener both the publish and the
+// publish-does-not-open-egress arms inject: `serve <port> [addr]`, answering every
+// connection with a banner. ONE source for both — they had drifted into a superset and
+// a subset of each other (the subset simply always binding 0.0.0.0, which is this
+// source's default), and two copies of a fixture is two things to keep in step for no
+// assertion's benefit.
+const guestServeSrc = `package main
+
+import (
+	"fmt"
+	"net"
+	"os"
+)
+
+// serve <port> [addr] — answer every connection with a banner.
+func main() {
+	bind := "0.0.0.0:" + os.Args[1]
+	if len(os.Args) > 2 {
+		bind = os.Args[2] + ":" + os.Args[1]
+	}
+	ln, err := net.Listen("tcp", bind)
+	if err != nil {
+		fmt.Println("LISTEN_FAILED", err)
+		return
+	}
+	fmt.Println("LISTENING", ln.Addr())
+	for {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		_, _ = c.Write([]byte("hello-from-GUEST"))
+		_ = c.Close()
+	}
+}
+`
+
 const guestProbeSrc = `package main
 
 import (
@@ -305,6 +344,29 @@ func hostListener(t *testing.T, banner string) (string, func()) {
 	return ln.Addr().String(), func() { _ = ln.Close(); <-done }
 }
 
+// portOf returns a listener address's port BOTH ways: as the uint16 a declaration
+// needs and as the string a probe target needs. Both, because every call site wants
+// one or the other and the inline form is `SplitHostPort` + `Sscanf` with BOTH errors
+// dropped — and a dropped error here is not cosmetic: an unexpected address shape
+// yields port 0, which is the any-port WILDCARD in a tuple (§5.D), so a fixture slip
+// would WIDEN the declaration under test rather than fail it.
+func portOf(t *testing.T, addr string) (uint16, string) {
+	t.Helper()
+	_, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatalf("listener address %q is not host:port: %v", addr, err)
+	}
+	n, err := strconv.ParseUint(portStr, 10, 16)
+	if err != nil {
+		t.Fatalf("listener port %q is not a uint16: %v", portStr, err)
+	}
+	if n == 0 {
+		t.Fatalf("listener reported port 0 for %q — 0 is the any-port wildcard, which "+
+			"would widen the declaration this test means to pin", addr)
+	}
+	return uint16(n), portStr
+}
+
 // hostIPv4 returns a non-loopback IPv4 address of this host — the "an address of the
 // host itself" target for the floor assertions, and the LAN-facing address the
 // deny-safe tier's assertion needs.
@@ -410,7 +472,7 @@ func TestDenyEmptyIsUnreachableEverywhereWithFloorCountersMoving(t *testing.T) {
 	// must not reach a 0.0.0.0 listener through ANY host address.
 	addr, stop := hostListener(t, "hello-from-HOST")
 	defer stop()
-	_, port, _ := net.SplitHostPort(addr)
+	_, port := portOf(t, addr)
 
 	cases := []struct {
 		name    string
@@ -689,9 +751,7 @@ func TestAnAllowEntryAdmitsExactlyItsTuple(t *testing.T) {
 	host := hostIPv4(t)
 	addr, stop := hostListener(t, "hello-from-DECLARED")
 	defer stop()
-	_, portStr, _ := net.SplitHostPort(addr)
-	var port uint16
-	fmt.Sscanf(portStr, "%d", &port)
+	port, portStr := portOf(t, addr)
 
 	// The declared target is an address of the HOST, so this also exercises the rule
 	// §5.D requires on BOTH hooks: a forward-only allow cannot reach a host-local
@@ -722,7 +782,7 @@ func TestAnAllowEntryAdmitsExactlyItsTuple(t *testing.T) {
 	// Same address, so this isolates the port dimension.
 	other, otherStop := hostListener(t, "hello-from-UNDECLARED")
 	defer otherStop()
-	_, otherPortStr, _ := net.SplitHostPort(other)
+	_, otherPortStr := portOf(t, other)
 	floorBefore := harness.NftCounter(t, id, "in_floor")
 	res := runGuestProbe(t, cl, net.JoinHostPort(host, otherPortStr), false)
 	floorAfter := harness.NftCounter(t, id, "in_floor")
@@ -933,7 +993,7 @@ func TestTheFloorStillHoldsAfterAVethRebuild(t *testing.T) {
 	host := hostIPv4(t)
 	addr, stop := hostListener(t, "hello-from-HOST")
 	defer stop()
-	_, port, _ := net.SplitHostPort(addr)
+	_, port := portOf(t, addr)
 
 	// Establish the pre-rebuild baseline, so a failure after the rebuild is
 	// attributable to the rebuild.
@@ -981,9 +1041,7 @@ func TestOneSandboxsRuleSetDoesNotAffectAnothers(t *testing.T) {
 	host := hostIPv4(t)
 	addr, stop := hostListener(t, "hello-from-HOST")
 	defer stop()
-	_, portStr, _ := net.SplitHostPort(addr)
-	var port uint16
-	fmt.Sscanf(portStr, "%d", &port)
+	port, portStr := portOf(t, addr)
 
 	// A: denies everything. B: declares exactly this endpoint.
 	denyID, denyCl := createRunning(t, eng, declDeny())
@@ -1084,9 +1142,7 @@ func TestAnInputSideAllowReachesItsOwnGatewayButNotASiblings(t *testing.T) {
 	// between the guest and that banner — which is exactly the leak D4.2 measured.
 	addr, stop := hostListener(t, "hello-from-GATEWAY")
 	defer stop()
-	_, portStr, _ := net.SplitHostPort(addr)
-	var port uint16
-	fmt.Sscanf(portStr, "%d", &port)
+	port, portStr := portOf(t, addr)
 
 	// The declaration names the WHOLE /8 with an explicit port: the assertion is a
 	// precise reachable/unreachable pair on one tuple, so a port wildcard would blur it.
@@ -1274,28 +1330,55 @@ func main() {
 // point a declaration the substrate would refuse silently on the wire, which is D4.3's
 // diagnostic dislocation — a second, independent mechanism reaching the same verdict as
 // the spec's stated reason.
-func startViaListener(t *testing.T, port int) (string, func()) {
+// buildUnprivBin compiles a one-file Go program into a fresh temp dir and makes both
+// the dir and the binary world-executable, so an UNPRIVILEGED uid can exec it out of
+// a root-owned temp dir. The chmods are the point and are easy to omit: without them
+// the setpriv'd child fails with EACCES, which reads as "the rule set blocked it" —
+// a false positive on exactly the assertion these helpers exist to make.
+//
+// GO111MODULE=off because the source is a bare file outside the module tree.
+func buildUnprivBin(t *testing.T, name, src string) string {
 	t.Helper()
 	dir := t.TempDir()
-	src := dir + "/main.go"
-	if err := os.WriteFile(src, []byte(viaListenerSrc), 0o644); err != nil {
+	srcPath := filepath.Join(dir, "main.go")
+	if err := os.WriteFile(srcPath, []byte(src), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	bin := dir + "/vialisten"
-	build := exec.Command("go", "build", "-o", bin, src)
+	bin := filepath.Join(dir, name)
+	build := exec.Command("go", "build", "-o", bin, srcPath)
 	build.Dir = dir
 	build.Env = append(os.Environ(), "CGO_ENABLED=0", "GO111MODULE=off")
 	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build via listener: %v: %s", err, out)
+		t.Fatalf("build %s: %v: %s", name, err, out)
 	}
-	// World-readable+executable so the unprivileged uid can exec it out of the temp dir.
-	_ = os.Chmod(dir, 0o755)
-	_ = os.Chmod(bin, 0o755)
-	// setpriv drops to the deployment's second-hop uid — the identity the engine-level
-	// table narrows on.
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatalf("chmod %s: %v", dir, err)
+	}
+	if err := os.Chmod(bin, 0o755); err != nil {
+		t.Fatalf("chmod %s: %v", bin, err)
+	}
+	return bin
+}
+
+// asUID wraps a command so it runs as uid (dropping supplementary groups), or runs it
+// directly when uid is 0 — setpriv to the uid we already are would be a no-op that
+// still needs the binary reachable, so the branch keeps the root arm honest.
+func asUID(uid int, bin string, args ...string) *exec.Cmd {
+	if uid == 0 {
+		return exec.Command(bin, args...)
+	}
+	full := append([]string{"--reuid", fmt.Sprint(uid), "--regid", fmt.Sprint(uid),
+		"--clear-groups", bin}, args...)
+	return exec.Command("setpriv", full...)
+}
+
+func startViaListener(t *testing.T, port int) (string, func()) {
+	t.Helper()
+	bin := buildUnprivBin(t, "vialisten", viaListenerSrc)
+	// Drops to the deployment's second-hop uid — the identity the engine-level table
+	// narrows on.
 	bind := net.JoinHostPort(hostIPv4(t), fmt.Sprint(port))
-	cmd := exec.Command("setpriv", "--reuid", fmt.Sprint(secondHopUID),
-		"--regid", fmt.Sprint(secondHopUID), "--clear-groups", bin, bind)
+	cmd := asUID(secondHopUID, bin, bind)
 	out, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -1366,10 +1449,10 @@ func TestViaSteersAndDoesNotReopenTheFloor(t *testing.T) {
 	// spelling of that accept (D5 ⑩), so they are the proof its three clauses are
 	// load-bearing — not extra coverage.
 	host := hostIPv4(t)
-	_, listenPortStr, _ := net.SplitHostPort(endpoint)
+	_, listenPortStr := portOf(t, endpoint)
 	otherAddr, otherStop := hostListener(t, "hello-from-UNDECLARED")
 	defer otherStop()
-	_, otherPortStr, _ := net.SplitHostPort(otherAddr)
+	_, otherPortStr := portOf(t, otherAddr)
 
 	for _, tc := range []struct{ name, target, counter, why string }{{
 		name:    "the guest dials the endpoint's port DIRECTLY, bypassing steering",
@@ -1454,12 +1537,9 @@ func TestADeadViaEndpointRefusesTheConnectionRatherThanLettingItOut(t *testing.T
 	// A second, INDEPENDENT allowed egress, for the per-connection scope assertion.
 	hostAddr, stopHost := hostListener(t, "hello-from-ALLOWED")
 	defer stopHost()
-	hostIP0, hostPortStr, _ := net.SplitHostPort(hostAddr)
-	if hostIP0 == "::" || hostIP0 == "0.0.0.0" {
-		hostIP0 = hostIPv4(t)
-	}
-	var hostPort uint16
-	fmt.Sscanf(hostPortStr, "%d", &hostPort)
+	// The listener binds 0.0.0.0, so only its PORT is meaningful here; the address the
+	// declaration must name is the host's own routable one, which hostIPv4 resolves.
+	hostPort, hostPortStr := portOf(t, hostAddr)
 	d.Egress.Allow = []model.NetTuple{tupleOf(t, hostIPv4(t)+"/32", hostPort, model.NetTCP)}
 	id, cl := createRunning(t, eng, d)
 
@@ -1569,7 +1649,7 @@ func TestTheSecondHopIsPinnedUnderTheFloor(t *testing.T) {
 	t.Run("allow: the same process reaches a permitted destination", func(t *testing.T) {
 		addr, stop := hostListener(t, "hello-from-HOST")
 		defer stop()
-		_, portStr, _ := net.SplitHostPort(addr)
+		_, portStr := portOf(t, addr)
 		out := probeAsUID(t, secondHopUID, net.JoinHostPort(hostIPv4(t), portStr))
 		if !strings.Contains(out, "CONNECTED") {
 			t.Errorf("the second-hop process could NOT reach a permitted destination (%s) — the drop "+
@@ -1612,28 +1692,8 @@ func probeAsUID(t *testing.T, uid int, target string) string {
 c, err := net.DialTimeout("tcp", %q, 3*time.Second)
 if err != nil { fmt.Println("REFUSED", err); return }
 c.Close(); fmt.Println("CONNECTED")`, target)
-	dir := t.TempDir()
 	src := "package main\n\nimport (\n\t\"fmt\"\n\t\"net\"\n\t\"time\"\n)\n\nfunc main() {\n" + script + "\n}\n"
-	if err := os.WriteFile(dir+"/main.go", []byte(src), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	bin := dir + "/probe"
-	build := exec.Command("go", "build", "-o", bin, dir+"/main.go")
-	build.Dir = dir
-	build.Env = append(os.Environ(), "CGO_ENABLED=0", "GO111MODULE=off")
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build uid probe: %v: %s", err, out)
-	}
-	_ = os.Chmod(dir, 0o755)
-	_ = os.Chmod(bin, 0o755)
-	var cmd *exec.Cmd
-	if uid == 0 {
-		cmd = exec.Command(bin)
-	} else {
-		cmd = exec.Command("setpriv", "--reuid", fmt.Sprint(uid), "--regid", fmt.Sprint(uid),
-			"--clear-groups", bin)
-	}
-	out, _ := cmd.CombinedOutput()
+	out, _ := asUID(uid, buildUnprivBin(t, "probe", src)).CombinedOutput()
 	return strings.TrimSpace(string(out))
 }
 
@@ -1768,9 +1828,7 @@ func TestALiveFlowSurvivesAControlPlaneRestartAndItsAdopt(t *testing.T) {
 			}(c)
 		}
 	}()
-	_, portStr, _ := net.SplitHostPort(ln.Addr().String())
-	var port uint16
-	fmt.Sscanf(portStr, "%d", &port)
+	port, portStr := portOf(t, ln.Addr().String())
 
 	d := declDeny()
 	d.Egress.Allow = []model.NetTuple{tupleOf(t, hostIPv4(t)+"/32", port, model.NetTCP)}
@@ -1925,37 +1983,7 @@ func TestPublishIsReachableFromOutsideAndFromTheHostAndSurvivesResume(t *testing
 
 	// A guest-side listener bound 0.0.0.0 — §5.D requires that, and semantic ① is
 	// explicit that a loopback-bound service is NOT publishable.
-	const serveSrc = `package main
-
-import (
-	"fmt"
-	"net"
-	"os"
-)
-
-// serve <port> [addr] — answer every connection with a banner.
-func main() {
-	bind := "0.0.0.0:" + os.Args[1]
-	if len(os.Args) > 2 {
-		bind = os.Args[2] + ":" + os.Args[1]
-	}
-	ln, err := net.Listen("tcp", bind)
-	if err != nil {
-		fmt.Println("LISTEN_FAILED", err)
-		return
-	}
-	fmt.Println("LISTENING", ln.Addr())
-	for {
-		c, err := ln.Accept()
-		if err != nil {
-			return
-		}
-		_, _ = c.Write([]byte("hello-from-GUEST"))
-		_ = c.Close()
-	}
-}
-`
-	harness.InjectStaticBin(t, base+"/templates", "bare", "serve", serveSrc)
+	harness.InjectStaticBin(t, base+"/templates", "bare", "serve", guestServeSrc)
 
 	d := declDeny()
 	d.Ingress.Publish = []model.NetPublish{{GuestPort: 8080, Proto: model.NetTCP}}
@@ -2656,7 +2684,7 @@ func TestIPv6IsCoveredByTheSameFloor(t *testing.T) {
 			_ = c.Close()
 		}
 	}()
-	_, portStr, _ := net.SplitHostPort(ln.Addr().String())
+	_, portStr := portOf(t, ln.Addr().String())
 
 	// THE GLOBAL-ADDRESS CELL IS NOT A COUNTER ASSERTION ON THIS HOST, and the reason is
 	// a constructive limit rather than a gap in the floor — measured here rather than
@@ -2818,32 +2846,7 @@ func TestPublishDoesNotOpenAnEgressPathOnTheSubstrate(t *testing.T) {
 	eng, base := harness.Engine(t, netEngineOpts(t))
 	ctx := context.Background()
 
-	const serveSrc = `package main
-
-import (
-	"fmt"
-	"net"
-	"os"
-)
-
-func main() {
-	ln, err := net.Listen("tcp", "0.0.0.0:"+os.Args[1])
-	if err != nil {
-		fmt.Println("LISTEN_FAILED", err)
-		return
-	}
-	fmt.Println("LISTENING", ln.Addr())
-	for {
-		c, err := ln.Accept()
-		if err != nil {
-			return
-		}
-		_, _ = c.Write([]byte("hello-from-GUEST"))
-		_ = c.Close()
-	}
-}
-`
-	harness.InjectStaticBin(t, base+"/templates", "bare", "serve2", serveSrc)
+	harness.InjectStaticBin(t, base+"/templates", "bare", "serve2", guestServeSrc)
 
 	// `deny` + a publish: inbound open on one port, egress declared as nothing.
 	d := declDeny()
@@ -2889,7 +2892,7 @@ func main() {
 	// The same for a host address (the `input` side), since the two hooks are separate.
 	addr, stop := hostListener(t, "hello-from-HOST")
 	defer stop()
-	_, portStr, _ := net.SplitHostPort(addr)
+	_, portStr := portOf(t, addr)
 	inBefore := harness.NftCounter(t, id, "in_floor")
 	res2 := runGuestProbe(t, cl, net.JoinHostPort(hostIPv4(t), portStr), false)
 	inAfter := harness.NftCounter(t, id, "in_floor")
