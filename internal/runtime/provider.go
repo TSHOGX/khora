@@ -175,7 +175,8 @@ type DeathCause int
 
 const (
 	// CauseUnknown = the unit is gone but WHY is undeterminable. A LEGAL verdict,
-	// not a failure — a provider MUST report it rather than guess (§2.4 不许猜).
+	// not a failure — a provider MUST report it rather than guess (§2.4 "does not
+	// guess").
 	// §4.3 treats it as dead-recoverable, with STRUCTURAL (not counted)
 	// self-correction: a re-triggered termination after a caller's resume records
 	// the real cause.

@@ -1,401 +1,589 @@
 # Sandbox Engine — SPEC
 
-> 一个独立、可自托管、guest 内可自由配置的 Agent 沙箱引擎的**架构规格**(spec,非路线图)。
-> 描述引擎**应当是什么样、边界在哪、契约如何**;落地排期(roadmap)不在本 spec 范围。
+> The **architecture spec** (a spec, not a roadmap) of a standalone, self-hostable
+> agent sandbox engine that is freely configurable inside the guest. It describes
+> **what the engine should be, where its boundaries lie, and what it contracts to
+> do**; delivery scheduling (roadmap) is out of this spec's scope.
 
-## 文档地图(全局 §编号跨文件连续,按此定位)
+## Document map (§ numbers are globally unique and run continuously across files)
 
-本 spec 按「变化速度 × 读者」拆成多篇,`§` 编号全局唯一、跨文件连续,是稳定寻址锚
-(引用只写 `§3.3` 即可,不必关心它落在哪个文件)。
+This spec is split by *rate of change × reader*. `§` numbers are globally unique and
+continuous across files, which makes them a stable addressing anchor — a reference
+writes just `§3.3` and need not care which file it lands in.
 
-| 文件 | 覆盖 | 定位 |
+| File | Covers | Role |
 | --- | --- | --- |
-| **SPEC.md**(本文) | §1 定位与边界 · §2 安全模型 | 纲领,最稳,少改 |
-| [`model.md`](./model.md) | §3 沙箱模型 · §4 生命周期 | 核心模型,中速演进 |
-| [`subsystems.md`](./subsystems.md) | §5 子系统(A–E 目标定义) | 子系统边界 |
-| [`api-contract.md`](./api-contract.md) | §6 API 与 CLI 契约 | 改动最频繁 |
-| [`open-decisions.md`](./open-decisions.md) | 未定项登记 | 尚未拍板的选型 / 待验证假设 |
-| [`deep-dives/`](./deep-dives/) | 挂某 § 的单点深挖(proposal) | 结论稳定后回写对应 § |
+| **SPEC.md** (this file) | §1 positioning and boundaries · §2 security model | The charter: most stable, rarely changed |
+| [`model.md`](./model.md) | §3 sandbox model · §4 lifecycle | The core model, evolves at medium speed |
+| [`subsystems.md`](./subsystems.md) | §5 subsystems (A–E target definitions) | Subsystem boundaries |
+| [`api-contract.md`](./api-contract.md) | §6 API and CLI contract | Changes most often |
+| [`open-decisions.md`](./open-decisions.md) | Register of unsettled items | Choices not yet decided / assumptions still to verify |
+| [`deep-dives/`](./deep-dives/) | Single-topic deep dives hung under a § (proposals) | Written back into the owning § once the conclusion is stable |
 
-纪律见 [`CLAUDE.md`](../../CLAUDE.md):已定进本 spec,未定留 `open-decisions.md`,两边不重叠。
+For the discipline, see [`CLAUDE.md`](../../CLAUDE.md): settled goes into this spec,
+unsettled stays in `open-decisions.md`, and the two never overlap.
 
 ---
 
-## 1. 定位与边界
+## 1. Positioning and boundaries
 
-### 1.1 定位
+### 1.1 Positioning
 
-一个**持久、可变、可拿 root 的 agent 沙箱引擎**。隔离基底是可插拔的 runtime provider(§5.A),
-今天唯一实现是 gVisor(runsc)。一个沙箱从
-Template 拉起后,就是一个隔离的环境:运行时自由地 `apt`/`pip` 安装依赖、改文件系统,变更
-**持久留存**;可随时暂停(释放 RAM/CPU、只占磁盘)再恢复;可同时挂多个连接(shell、各类
-agent),共享同一 FS 与网络。
+A **persistent, mutable, root-capable agent sandbox engine**. The isolation substrate
+is a pluggable runtime provider (§5.A); today the only implementation is gVisor
+(runsc). Once a sandbox is launched from a Template it is an isolated environment: at
+runtime it freely installs dependencies with `apt`/`pip` and modifies its filesystem,
+and those changes **persist**. It can be paused at any time (releasing RAM/CPU,
+occupying only disk) and resumed. Several connections (a shell, various agents) can be
+attached at once, sharing one FS and one network.
 
-核心取向是**轻量、no-hypervisor**:不依赖 KVM、不依赖嵌套虚拟化——sentry 只是宿主上一个
-普通的非特权进程,因此**能跑在那些拿不到硬件虚拟化的地方**(普通云 ECS、容器内、CI runner)。
-目标部署形态是**单个 orchestrator 二进制 + 一份配置 + 本地 store**,无重型外部依赖。
+The core orientation is **lightweight, no-hypervisor**: no dependency on KVM and none
+on nested virtualization — the sentry is just an ordinary unprivileged process on the
+host, so it **runs in the places where hardware virtualization is unavailable**
+(commodity cloud VMs, inside a container, a CI runner). The target deployment shape is
+**one orchestrator binary + one config + a local store**, with no heavyweight external
+dependencies.
 
-> **一条条件限定:这句话说的是引擎自己的部署形态,不是"沙箱能做的事都不需要别的进程"。** 一个把出站
-> 收窄到某个汇合点的网络声明(§5.D `egress.via[]`)要求那个端点后面有一个**引擎外**的进程在听。引擎不拉起
-> 它、不健康检查它、也不知道它是什么——它只装一条指向某个地址的规则(§5.D)。故无 `egress.via[]` 的声明下
-> 这句话字面成立;有 `egress.via[]` 的声明下**部署拓扑多一个进程,而引擎的依赖清单不变**:端点不可达的
-> 后果落在那条连接上(§2.4 fail-closed),不落在引擎的启动路径、也不落在 create 路径上。
+> **One qualifier: that sentence describes the engine's OWN deployment shape, not "nothing
+> a sandbox can do requires another process".** A network declaration that narrows egress
+> down to some rendezvous point (§5.D `egress.via[]`) requires a process **outside the
+> engine** listening behind that endpoint. The engine does not start it, does not
+> health-check it, and does not know what it is — it only installs a rule pointing at some
+> address (§5.D). So under a declaration with no `egress.via[]` the sentence holds
+> literally; under one with `egress.via[]` **the deployment topology gains a process while
+> the engine's dependency list stays the same**: an unreachable endpoint has its
+> consequence on that one connection (§2.4 fail-closed), not on the engine's startup path
+> and not on the create path.
 
-> **gVisor 术语**(全文复用):**sentry** = gVisor 的用户态内核,拦截并虚拟化 guest 的 syscall;
-> **systrap** = sentry 默认的拦截模式,用 seccomp 陷阱捕获 syscall(无需 KVM);**gofer** =
-> gVisor 中代理 guest 文件访问的宿主侧进程。
+> **gVisor terminology** (reused throughout): **sentry** = gVisor's userspace kernel,
+> which intercepts and virtualizes the guest's syscalls; **systrap** = the sentry's
+> default interception mode, catching syscalls with a seccomp trap (no KVM needed);
+> **gofer** = the host-side process in gVisor that proxies the guest's file access.
 >
-> **本系统术语**:**engine** = 本 spec 描述的沙箱抽象本身;**orchestrator** = 承载 engine 的那个
-> 单二进制;**控制面** = engine 内持有权威记录的那部分;**store** = 控制面记录(Binding、各对象
-> 的 lifecycle-state,以及导出 refcount 所需的引用行)的持久后端,经接口抽象、可换实现;**可插拔实现
-> seam** 有三类,分别物化"用什么跑隔离进程"(**runtime provider**,§5.A)、"沙箱 rootfs 由哪些层
-> 合成、落在哪"(**rootfs provider**,§5.B)、"独立 Volume 落在哪个后端"(**volume backend**,§5.C);
-> **driver** = 某个具体 agent 的 CLI 二进制(claude-code / opencode / pi 等);**Overlay 工件** =
-> 本沙箱相对 Template 的可写增量层(§3.1)。
+> **This system's terminology**: **engine** = the sandbox abstraction this spec
+> describes; **orchestrator** = the single binary hosting the engine; **control plane** =
+> the part of the engine that holds the authoritative records; **store** = the durable
+> backend for control-plane records (Bindings, each object's lifecycle-state, and the
+> reference rows a derived refcount needs), abstracted behind an interface and
+> replaceable. There are three kinds of **pluggable-implementation seam**, materializing
+> respectively "what runs the isolated process" (**runtime provider**, §5.A), "which
+> layers compose a sandbox's rootfs and where it lands" (**rootfs provider**, §5.B), and
+> "which backend an independent Volume lands on" (**volume backend**, §5.C). **driver** =
+> the CLI binary of one specific agent (claude-code / opencode / pi …); **Overlay
+> artifact** = this sandbox's writable delta layer relative to its Template (§3.1).
 >
-> **五子系统 canonical 短名**(§5,代码包名 / 日志 / 评审一律用这些,不用章节号指代):
-> **Runtime**(§5.A,执行基底)· **Rootfs**(§5.B,rootfs/Overlay)· **Volume**(§5.C)·
-> **Network**(§5.D)· **Transport**(§5.E)。四处 `fs`/`FS`/`Rootfs` 刻意区分,勿混:
-> **Rootfs** = 子系统 5.B;**`fs`** = §5.E Transport 的一个 wire 服务(`read/write/list/stat/mkdir/remove/move`);
-> **rootfs provider** / **volume backend** = 两个不同形状、各自注册的存储物化 seam,不是同一个(为何
-> 分开、共享哪些 substrate 原语见 §5 前言)。同理 **Runtime**(子系统 5.A)vs **Sandbox**(§3.2 顶层
-> 持久单元)分指 "用什么跑" vs "哪一个沙箱"。
+> **Canonical short names of the five subsystems** (§5 — code package names, logs, and
+> review all use these, never a section number as a stand-in): **Runtime** (§5.A, the
+> execution substrate) · **Rootfs** (§5.B, rootfs/Overlay) · **Volume** (§5.C) ·
+> **Network** (§5.D) · **Transport** (§5.E). Four uses of `fs`/`FS`/`Rootfs` are
+> deliberately distinguished — do not merge them: **Rootfs** = subsystem 5.B; **`fs`** =
+> one wire service of §5.E Transport (`read/write/list/stat/mkdir/remove/move`); **rootfs
+> provider** / **volume backend** = two differently shaped, separately registered storage
+> materialization seams, and not the same thing (why they are separate, and which
+> substrate primitives they share, is in the §5 preamble). Likewise **Runtime**
+> (subsystem 5.A) vs **Sandbox** (§3.2, the top-level persistent unit) mean "what runs
+> it" vs "which sandbox".
 
-**引擎词汇边界(engine vocabulary boundary)。** 第一性原则(见 engine 根 CLAUDE.md)要求产品语义不进
-引擎;命名阶段就拦住,比实现期再移除更省。下表限定**引擎内实体命名**(类型 / 包 / 字段 / API 端点),
-不约束"描述引擎外的东西"时的普通行文——engine 讲清楚自己**不做**什么时,自然要提到这些词。
+**Engine vocabulary boundary.** The first principle (see the engine's root CLAUDE.md)
+requires that product semantics not enter the engine; stopping them at naming time is
+cheaper than removing them at implementation time. The table below constrains
+**engine-internal entity naming** (types / packages / fields / API endpoints). It does
+not constrain ordinary prose that *describes something outside the engine* — when the
+engine states clearly what it does **not** do, it naturally has to name these things.
 
-| 禁用作引擎内实体名 | 为什么 / 用什么替代 | 可作普通行文? |
+| Barred as an engine-internal name | Why / what to use instead | Allowed in ordinary prose? |
 | --- | --- | --- |
-| `generation` | 引擎不引入独立世代计数;它想解决的四件事各有归属:**在哪** → Placement(§3.3)· **陈旧性** → placement/IP 作 epoch(§4.3)· **并发仲裁** → 每沙箱转换锁 + CAS(§4.4-B)· **失败恢复** → 原子退回源态 + 重启对账回收孤儿 placement(§4.4-A,故也无 `failed` 态) | 否(硬拦,防世代计数从别处渗回) |
-| `principal` / `tenant` | 引擎内无授权主体 / 租户(§1.4 非目标);多租户是引擎外 join table 的加法 | 仅限"这些在引擎外"的论述(如 §1.4「多租户」、§3.2.1「哪个 agent 归哪个租户」);**不得作引擎内实体名** |
-| `owner`(归属/授权义) | 沙箱无 owner 列,回收只看 refcount/TTL(§4.3 / §1.4) | 仅限**职责归属**义(如"idle 判定的 owner 是控制面")——那是"谁负责",非"谁拥有" |
-| `session` / `turn` | agent 会话语义是引擎外 adapter 的加法(§5.E),引擎只有 process/fs | 可,且必然出现在"这些在引擎外"的论述里 |
-| `agent` | 引擎不认识、不寻址 agent(§3.2.1);只有 sandbox/process/fs 原子 | 可(描述引擎外 / 产品层时) |
-| `credential` / `secret` / `token` / `api_key` | 凭证整族永久排除(§1.4),引擎里没有这个概念——它看到的只是一条到某端点的 TCP 流(§5.D)。今天**空真**(引擎里本就没有凭证材料)。**这一条靠本表守,不靠结构性守卫**:`token` 在本仓有大量正当用法(不透明 ID 的 `tmpl_<token>`、词法 token),故一份机械 token 清单会大面积误报——与 `runtime`/`volume` 两处 `seam_test.go` 那种"宿主原语拼写有限且无正当用法"的情形不同 | 仅限"这些在引擎外"的论述(如 §1.4 那条非目标、§5.D);**不得作引擎内实体名** |
+| `generation` | The engine introduces no standalone generation counter; the four things such a counter wants to solve each belong somewhere else: **where it is** → Placement (§3.3) · **staleness** → placement/IP as the epoch (§4.3) · **concurrency arbitration** → per-sandbox transition lock + CAS (§4.4-B) · **failure recovery** → atomic rollback to the source state + startup reconciliation reclaiming orphan placements (§4.4-A, which is also why there is no `failed` state) | No (barred outright, to stop the counter seeping back in from elsewhere) |
+| `principal` / `tenant` | The engine has no authorization subject and no tenancy inside it (§1.4 non-goals); multi-tenancy is an addition made by a join table outside the engine | Only in prose asserting "these live outside the engine" (e.g. §1.4 "multi-tenancy", §3.2.1 "which agent belongs to which tenant"); **never as an engine-internal name** |
+| `owner` (belonging / authorization sense) | A sandbox has no owner column; reclamation looks only at refcount/TTL (§4.3 / §1.4) | Only in the **responsibility** sense (e.g. "the owner of the idle decision is the control plane") — that is "who is responsible for it", not "who possesses it" |
+| `session` / `turn` | Agent session semantics are an addition made by an adapter outside the engine (§5.E); the engine has only process/fs | Yes, and it necessarily appears in prose asserting "these live outside the engine" |
+| `agent` | The engine neither knows about nor addresses agents (§3.2.1); it has only the sandbox/process/fs atoms | Yes (when describing what is outside the engine, the product layer included) |
+| `credential` / `secret` / `token` / `api_key` | The credential family is permanently excluded (§1.4); the engine has no such concept — all it sees is a TCP flow to some endpoint (§5.D). Today this is **vacuously true** (there is no credential material in the engine at all). **This row is held by the table, not by a structural guard**: `token` has plenty of legitimate uses in this repo (the opaque ID `tmpl_<token>`, lexical tokens), so a mechanical token list would produce false positives at scale — unlike the situation at the two `seam_test.go` files in `runtime`/`volume`, where host-primitive spellings are finite and have no legitimate use | Only in prose asserting "these live outside the engine" (e.g. that §1.4 non-goal, §5.D); **never as an engine-internal name** |
 
-> **前提:部署在能运行 gVisor 的 Linux 宿主上**(能安装 seccomp 过滤器、能处理信号、内核版本
-> 够新)。这是 systrap 的固有门槛,凡能跑 gVisor 的平台即满足,engine 当作既定前提。
+> **Premise: deployed on a Linux host able to run gVisor** (able to install seccomp
+> filters, handle signals, on a new enough kernel). That is systrap's inherent
+> threshold; any platform that can run gVisor satisfies it, and the engine treats it
+> as given.
 
-> **两条底线:no-hypervisor + 可移植性,彼此独立。** 任何"用可移植性换性能"的决定一律**拒绝,或藏到
-> provider 后面做成可插拔**(§5.A)——platform 即一例:`local_runsc` 把它钉成 `--platform=systrap`,
-> 不继承 runsc 默认(理由见 §5.A),别的 provider 可另选。no-hypervisor 管"不要 KVM/嵌套虚拟化";
-> **不存内存(§4.2)是可移植性的结果**,不是 no-hypervisor 的结果——gVisor 在 systrap 下本可 checkpoint,
-> 我们不做,因为内存态锁 CPU-feature(§2.5),持久态便不能跨 host/CPU 搬(§1.5#3)。故 resume 是冷启秒级。
+> **Two bottom lines: no-hypervisor and portability, independent of each other.** Any
+> decision that **trades portability for performance is rejected, or hidden behind a
+> provider as pluggable** (§5.A) — platform is one such case: `local_runsc` pins it to
+> `--platform=systrap` and does not inherit the runsc default (reasoning in §5.A), while
+> another provider may choose otherwise. No-hypervisor governs "no KVM / no nested
+> virtualization"; **not storing memory (§4.2) is a consequence of portability**, not of
+> no-hypervisor — gVisor under systrap could checkpoint, and we decline to, because
+> memory state pins CPU features (§2.5), which would make the persistent state
+> unmovable across host/CPU (§1.5#3). Hence resume is a seconds-scale cold start.
 
-**"在哪儿、用什么跑一个隔离的进程上下文"正是 runtime provider 抽象掉的那件事。** 这个接口存在的
-意义是**保持抽象边界干净**,而非支持别的后端:唯一实现是 single-node 的宿主 runsc 进程,"被调度的远端
-隔离单元"(K8s Pod / GKE Sandbox)仅作校准接口边界的纸面参照,不进落地路径(§5.A)。
+**"Where, and with what, to run an isolated process context" is exactly what the
+runtime provider abstracts away.** The point of this interface is to **keep the
+abstraction boundary clean**, not to support other backends: the only implementation is
+the single-node host runsc process, and the "scheduled remote isolation unit" (a K8s
+Pod / GKE Sandbox) serves purely as a paper reference for calibrating the interface
+boundary, never entering the delivery path (§5.A).
 
-### 1.2 聚焦(in scope)
+### 1.2 In scope
 
-- 持久、可变、可 root 的单沙箱;运行时自由安装依赖,变更落盘留存。
-- 沙箱生命周期:创建 / 暂停 / 恢复 / 销毁 + 空闲自动暂停 + 到期回收(§4)。
-- 自定义 Template:平台预置 + 用户从沙箱固化(Promote,引擎内部静止后读 at-rest 字节,§3.1)。
-- Volume:与沙箱解耦的、ID 寻址的独立存储,可独立创建 / 操作 / 共享。
-- 可声明网络:每个沙箱拉起时可声明自己的网络可达集,并由引擎强制(§5.D / 支柱③④)。
-- 多连接传输:一个沙箱可并发挂多条连接(shell / agent / 工具),共享同一 FS 与网络。
-- 一套干净的、sandbox-centric 的 API / CLI 契约(§6)。
+- A persistent, mutable, root-capable single sandbox; dependencies installed freely at runtime, changes landing on disk and staying there.
+- Sandbox lifecycle: create / pause / resume / destroy + automatic idle pause + expiry reclamation (§4).
+- Custom Templates: platform-provided plus user-frozen-from-a-sandbox (Promote — the engine reads at-rest bytes after quiescing internally, §3.1).
+- Volumes: independent, ID-addressed storage decoupled from any sandbox, which can be created / operated / shared on its own.
+- Declarable networking: every sandbox may declare its own network reachable set at launch, and the engine enforces it (§5.D / pillars ③④).
+- Multi-connection transport: one sandbox can have several connections attached concurrently (shell / agent / tools), sharing one FS and one network.
+- One clean, sandbox-centric API / CLI contract (§6).
 
-### 1.3 扩展原则:对偶,指导当前怎么设计
+### 1.3 Extension principle: a duality that guides how we design today
 
-这是一套**通用方法论**(任何系统都适用),§1.4 再把每条非目标当成它的一次应用。底线是
-**单向依赖**:核心永不依赖扩展,扩展只单向依赖核心,不成环。其上是一条**对偶**:
+This is a **general methodology** (it applies to any system); §1.4 then treats each
+non-goal as one application of it. The bottom line is **one-way dependency**: the core
+never depends on an extension, an extension depends on the core one way only, and there
+is no cycle. On top of that sits a **duality**:
 
-- **约束面**:扩展只做加法(additive),不改现有结构。
-- **使能面**:今天必须在**正确的关节**留好 seams(可加东西的接缝)与 invariants(横切保护);
-  否则加法无处可落,扩展者被迫去改,约束面就破产。
+- **The constraining face**: extensions are additive only and do not alter existing structure.
+- **The enabling face**: today we must leave seams (joints where things can be added)
+  and invariants (cross-cutting protections) **at the right joints**; otherwise an
+  addition has nowhere to land, the extender is forced to modify, and the constraining
+  face goes bankrupt.
 
-**两类设计动作:**
+**Two kinds of design action:**
 
-1. **留 seams**——系统沿三条轴生长,每轴一个 additive-only 原型:
+1. **Leave seams** — the system grows along three axes, each with one additive-only archetype:
 
-   | 轴 | seam 原型 | "加法" = |
+   | Axis | Seam archetype | "An addition" = |
    | --- | --- | --- |
-   | **Behavior**(怎么做) | open registry(接口 + 可注册实现) | register an implementation |
-   | **Data**(存什么) | external join table(ID 寻址) | add a join table |
-   | **Consumption**(向外吐什么) | event stream(广播 + 订阅) | add a subscriber |
+   | **Behavior** (how it is done) | open registry (an interface + registrable implementations) | register an implementation |
+   | **Data** (what is stored) | external join table (ID-addressed) | add a join table |
+   | **Consumption** (what is emitted outward) | event stream (broadcast + subscribe) | add a subscriber |
 
-   这三条都是**引擎内**的 seam。还有一条**正交的引擎外轴**:有些扩展根本不进引擎,而是在引擎
-   暴露的原语之上**叠一层 adapter**,或在 placement 层加策略。引擎外加法天然零侵入——它**够不到**
-   引擎内部,无需引擎留任何 seam。所以下面的判据只约束**引擎内**扩展。
+   All three are seams **inside the engine**. There is also an **orthogonal axis outside
+   the engine**: some extensions do not enter the engine at all, instead **layering an
+   adapter** on top of the primitives it exposes, or adding policy at the placement
+   layer. An addition outside the engine is inherently zero-intrusion — it **cannot
+   reach** the engine's internals, and needs the engine to leave no seam at all. So the
+   criteria below constrain only extensions **inside the engine**.
 
-2. **守 invariants**——invariant 不"让你加东西",而"保证某核心属性不被污染",从而让 seam 真能
-   容纳未来实现。(本系统具体要守哪几条 invariant、各自落在哪,见 §3.3 / §4.3 / §6.2。)
+2. **Hold invariants** — an invariant does not "let you add something"; it "guarantees
+   some core property stays uncontaminated", which is what lets a seam actually
+   accommodate a future implementation. (Which invariants this system must hold, and
+   where each lands, is in §3.3 / §4.3 / §6.2.)
 
-**成本判据(最易做错):**
+**Cost criterion (the easiest thing to get wrong):**
 
-> seam / invariant 是你为**当前实现**本就该做的好设计,顺便成为未来加法的落点;reservation
-> (预留)是只为**假想未来**而加、当下一文不值的无用结构。**前者建,后者拒。**
+> A seam / invariant is good design you owed the **current implementation** anyway,
+> which incidentally becomes the landing point for a future addition; a **reservation**
+> is useless structure added only for an **imagined future**, worth nothing today.
+> **Build the former, refuse the latter.**
 
-微妙时序:**seam / invariant 现在建**(present 刚需),**join table 将来才建**(被 invariant
-担保零侵入)。即:不留具体的"槽"(列 / 钩子),但要有正确的 seam 形状。
+The subtle timing: **build the seam / invariant now** (a present necessity), **build the
+join table later** (guaranteed zero-intrusion by the invariant). That is: leave no
+concrete "slots" (columns / hooks), but do have the right seam shape.
 
-**Litmus test(每次建表 / 定接口前跑一遍):**
+**Litmus test (run it before every table you create and every interface you define):**
 
-> 任何要**进引擎**的未来需求,都应能归到 **register an implementation / add a join table / add a
-> subscriber** 三者之一。若三者都装不下、非改现有结构不可,先问一句:**它是不是根本不该进引擎**
-> ——能在引擎外叠 adapter 就该叠在外面。若它确实属于引擎内、却三者都装不下,**才说明当前缺一类 seam
-> 或某 invariant 没守住**,这是现在就该补的设计缺陷。
+> Any future need that wants **to enter the engine** should reduce to one of **register
+> an implementation / add a join table / add a subscriber**. If none of the three fits it
+> and existing structure must change, ask first: **does it belong in the engine at
+> all?** — anything that can be an adapter outside the engine should stay outside. If it
+> genuinely belongs inside the engine and yet none of the three fits, **only then** does
+> it mean a class of seam is missing or an invariant has not been held — a design defect
+> to repair now.
 
-### 1.4 非目标:不做什么,以及靠哪个 seam / invariant 保持可加
+### 1.4 Non-goals: what we do not do, and which seam / invariant keeps it addable
 
-明确划在边界外。先区分两类:**永久排除**(被某条底线否决,不会再加)和**今天不做、未来可零侵入
-接入**(延期项)。
+Explicitly outside the boundary. First, two categories: **permanently excluded**
+(vetoed by one of the bottom lines, never to be added) and **not done today, addable
+with zero intrusion later** (deferred items).
 
-- **永久排除——内存态冻结/恢复(整族)**:pause/resume 不做内存快照。这不是延期,是被可移植性
-  约束否决的(内存态锁 CPU-feature,§2.5)。**范围是整族,不只是"整个沙箱的内存镜像"**:单进程级
-  checkpoint 受同一条约束(锁的是同一批 CPU-feature),故也永久排除——差别只在镜像大小,不在可移植性
-  代价。我们提供的是**落盘 + 冷启逻辑续接**(§4.2),会话续接由 engine 外 adapter 在 process/fs 之上
-  做(`--resume` + 读落盘历史)——它**不是这条非目标的"未来接入路径"**,而是替代方案本身。
+- **Permanently excluded — freezing/restoring memory state (the whole family)**:
+  pause/resume takes no memory snapshot. This is not a deferral; it is vetoed by the
+  portability constraint (memory state pins CPU features, §2.5). **The scope is the whole
+  family, not just "a memory image of the entire sandbox"**: single-process checkpoint is
+  under the same constraint (it pins the same set of CPU features) and so is permanently
+  excluded too — the difference is image size, not portability cost. What we provide is
+  **landing on disk + logical continuation across a cold start** (§4.2); session
+  continuation is done by an adapter outside the engine on top of process/fs (`--resume`
+  plus reading the history off disk) — that is **not this non-goal's "future path in"**,
+  it is the alternative itself.
 
-- **永久排除——凭证(整族)**:引擎**不存、不注入、不认识**任何 provider / model 凭证;**引擎内无凭证
-  类型 / 字段 / 包 / 端点**,`credential` / `secret` / `token` / `api_key` 不作引擎内实体名。这同样不是
-  延期,被两条各自独立的理由否决:
-  - **正确的作用域引擎无从知道,钉死任一候选都是替产品层拍板。** 一张"沙箱用哪份凭证"的表按 sandbox ID
-    键入,就断言了 sandbox↔凭证是 1:1——某个产品可以这样选,但引擎没有任何依据去断言它;按真正的作用域
-    键入,则必须命名 `tenant` / `principal`——被 §1.1 词汇边界硬拦。两条路**对引擎都是封的**,这正是要点:
-    不是取舍,是这张表在引擎内不成立。
-  - **引擎交给 guest 的东西,guest root 一律可读。** 凡引擎持有并交进沙箱的字节,guest 内 uid 0 都读得到
-    (§2.2),载体是 Template 层、store 列还是进程 env 都不改变这一点(§5.B / §5.E),故引擎在构造上不可能
-    是**任何**凭证材料的保密边界。
-  **这条不留接入路径,因为不需要**:凭证在引擎外的进程里,坐在 §5.D `egress.via[]` 指向的那个端点后面。
-  引擎侧的加法是零——它只需要提供"把出站收窄到那个端点"(§5.D 的声明)和"沙箱身份不可伪造"(支柱④),
-  两样都是引擎本就该做的事。**故引擎里也不需要"真凭证 / 假凭证"这个维度**——它不知道某个字符串是不是
-  key,也就不需要知道它是不是真的(这条的可操作后果见
-  [`deep-dives/network.md`](./deep-dives/network.md) D1 末段)。
+- **Permanently excluded — credentials (the whole family)**: the engine **does not store,
+  does not inject, and does not know** any provider / model credential; there is **no
+  credential type / field / package / endpoint inside the engine**, and `credential` /
+  `secret` / `token` / `api_key` are not engine-internal names. This too is not a
+  deferral; it is vetoed by two independent reasons:
+  - **The engine cannot know the correct scope, and pinning any candidate is deciding on
+    the product layer's behalf.** A table of "which credential this sandbox uses" keyed by
+    sandbox ID asserts that sandbox↔credential is 1:1 — some product may choose that, but
+    the engine has no basis to assert it; keyed by the real scope, it would have to be
+    named `tenant` / `principal` — barred outright by the §1.1 vocabulary boundary. Both
+    roads are **closed to the engine**, and that is exactly the point: this is not a
+    trade-off, this table does not hold inside the engine.
+  - **Anything the engine hands the guest is readable by guest root.** Every byte the
+    engine holds and hands into the sandbox is readable by uid 0 inside the guest (§2.2),
+    and whether the carrier is a Template layer, a store column, or a process env changes
+    nothing about it (§5.B / §5.E) — so the engine cannot, by construction, be the secrecy
+    boundary for **any** credential material.
+  **This one leaves no path in, because none is needed**: the credential lives in a
+  process outside the engine, sitting behind the endpoint §5.D `egress.via[]` points at.
+  The engine-side addition is zero — all it must provide is "narrow egress down to that
+  endpoint" (the §5.D declaration) and "a sandbox's identity is unforgeable" (pillar ④),
+  both of which it owed anyway. **So the engine also has no need for the "real credential
+  vs fake credential" dimension** — it does not know whether some string is a key, and
+  therefore need not know whether it is a real one (the operational consequence of this is
+  in [`deep-dives/network.md`](./deep-dives/network.md), end of D1).
 
-下面是**延期项**:每条标出今天不做什么,以及未来靠 §1.3 的哪个 seam / invariant 零侵入接入
-——这就是"不堵死"的精确含义:指向一个已存在的 seam 或一条今天就守住的 invariant。
+Below are the **deferred items**: each states what is not done today, and which §1.3 seam
+/ invariant gives it a zero-intrusion path in later — that is the precise meaning of "not
+walled off": it points at a seam that already exists, or an invariant held today.
 
-| 非目标(今天不做) | 未来接入路径 | 担保它的 seam / invariant |
+| Non-goal (not done today) | Future path in | The seam / invariant that guarantees it |
 | --- | --- | --- |
-| **warm pool**:不为 ms 级感知启动维持完全就绪的沙箱 | 复用"网络 / Volume 绑定经控制面在创建期注入"的流程形状,改为晚绑定(§6.2) | 注入流程形状(§6.2) |
-| **授权主体 / 多租户**:不引入 owner / principal 概念 | 加一张 `sandbox↔principal↔capability` join table | Data join table + ID 寻址 invariant |
-| ↳ 连带推迟 **微架构侧信道**(Spectre 类跨租户) | 多租户接入时,placement 层加 co-residency 策略(不共核 / 不共调度) | 引擎外 placement 策略(随多租户激活,§2 五支柱不变) |
-| **多 node / 多 orchestrator HA / 跨宿主迁移**:聚焦单 node、单 orchestrator | 注册一个面向"被调度的远端隔离单元"的 provider(由其调度层承担跨 node) | Behavior registry(runtime provider,§5.A)+ 身份不编码 placement |
-| **成本上限(max-lifetime)**:只按 idle-TTL + refcount 回收,不设与活跃度无关的硬上限 | 上层 quota 加一张表 / 一个 subscriber 消费生命周期事件 | Data join table / Consumption(§4.1) |
+| **Warm pool**: no fully-ready sandboxes kept around for ms-perceived startup | Reuse the flow shape of "network / Volume bindings injected through the control plane at create time", switched to late binding (§6.2) | The injection flow shape (§6.2) |
+| **Authorization subject / multi-tenancy**: no owner / principal concept | Add a `sandbox↔principal↔capability` join table | Data join table + the ID-addressing invariant |
+| ↳ which also defers **microarchitectural side channels** (Spectre-class, across tenants) | When multi-tenancy arrives, add a co-residency policy at the placement layer (no shared core / no shared scheduling) | Placement policy outside the engine (activated together with multi-tenancy; §2's five pillars unchanged) |
+| **Multi-node / multi-orchestrator HA / cross-host migration**: focused on single node, single orchestrator | Register a provider facing a "scheduled remote isolation unit" (its scheduling layer carries the cross-node concern) | Behavior registry (runtime provider, §5.A) + identity that does not encode placement |
+| **Cost ceiling (max-lifetime)**: reclaim by idle-TTL + refcount only, with no hard ceiling unrelated to activity | An upper-layer quota adds a table / a subscriber consuming lifecycle events | Data join table / Consumption (§4.1) |
 
-> 共性:这些"接入路径"**今天一行代码都不写**,只确保对应的 seam 形状在、invariant 守住
-> (§1.3 成本判据)。
+> What they share: these "paths in" **have not a single line of code written today**;
+> they only ensure the corresponding seam shape exists and the invariant is held
+> (§1.3 cost criterion).
 
-### 1.5 差异化定位(轴与 E2B 不同)
+### 1.5 Differentiating position (a different axis from E2B)
 
-E2B 是**托管云**,卖一个跑在自有 fabric + KVM 上的高速专有 microVM;我们是**可嵌入、
-no-hypervisor、可自托管、状态透明**的引擎。五条立足点:
+E2B is a **managed cloud** selling a fast proprietary microVM running on its own fabric
+plus KVM; we are an **embeddable, no-hypervisor, self-hostable, state-transparent**
+engine. Five footholds:
 
-1. **no-hypervisor**——跑在 E2B 物理上跑不了的地方(gVisor systrap、非特权进程、无 KVM)。
-2. **自托管 / 数据主权**——单二进制 + 本地 store,代码/数据永不出自己的基础设施。
-3. **状态透明可移植**——持久态是纯文件 Overlay 工件(§5.B),跨 host / CPU / runsc 版本可移、
-   可审计;不是锁 CPU-feature 的 RAM 镜像。
-4. **开放交互模型**——engine 只两个通用原语(process/fs),agent / 会话语义是 engine 外 adapter
-   的加法(§5.E),开放性在 adapter 层而非锁进引擎。
-5. **agent-runtime 作用域**——多连接并发在引擎内(§5.E),swarm 拓扑与凭证在引擎外(§3.2.1 / §1.4),
-   而引擎为后者提供地基:一个**可强制收窄的可达集** + 一个**不可伪造的沙箱身份**(§5.D / 支柱④)。
-   E2B 把这一层整个交给用户,我们交的是能让那一层正确的两条不变量。
+1. **No-hypervisor** — runs where E2B physically cannot (gVisor systrap, an unprivileged process, no KVM).
+2. **Self-hosted / data sovereignty** — one binary + a local store; code and data never leave your own infrastructure.
+3. **Transparent, portable state** — the persistent state is a plain-file Overlay
+   artifact (§5.B), movable and auditable across host / CPU / runsc version; not a RAM
+   image that pins CPU features.
+4. **An open interaction model** — the engine has only two general primitives
+   (process/fs), and agent / session semantics are an addition made by an adapter outside
+   the engine (§5.E), so the openness lives in the adapter layer rather than being locked
+   into the engine.
+5. **Agent-runtime scope** — concurrent multi-connection is inside the engine (§5.E),
+   while swarm topology and credentials are outside it (§3.2.1 / §1.4), and the engine
+   provides the ground for the latter: a **reachable set that can be enforced narrow** +
+   an **unforgeable sandbox identity** (§5.D / pillar ④). E2B hands that whole layer to
+   the user; what we hand over are the two invariants that let that layer be correct.
 
-详细竞品比对不在本 spec 展开,这里只钉**我们自己的边界**。
+A detailed competitive comparison is out of scope here; this section pins only **our own
+boundary**.
 
 ---
 
-## 2. 安全模型
+## 2. Security model
 
-隔离边界由**宿主侧支柱**承担,与 guest 内部的自由度正交。放松的全部发生在 guest 内,
-**宿主隔离完全不改动**。
+The isolation boundary is carried by the **host-side pillars**, orthogonal to the
+freedom inside the guest. Everything that is relaxed happens inside the guest, and
+**host isolation is not modified at all**.
 
-### 2.1 五支柱:按"谁保证"切成两组
+### 2.1 The five pillars, cut into two groups by "who guarantees it"
 
-每条支柱写成 **抽象契约 + 今天的 single-node 物化**;并标注**enforcement 归属**——这一步直接划清了
-"换 provider 会触及什么"。两组:**substrate-borne**(隔离基底本身保证,换 provider 会触及)与
-**control-plane-borne**(权威在引擎控制面,与 provider 正交)。
+Each pillar is written as **an abstract contract + today's single-node
+materialization**, and is annotated with its **enforcement locus** — which directly
+delineates "what changing the provider would touch". Two groups: **substrate-borne**
+(guaranteed by the isolation substrate itself, and touched by a provider change) and
+**control-plane-borne** (the authority sits in the engine's control plane, orthogonal to
+the provider).
 
-> 下面会先用到几个后面才详述的词:**placement** = 每次 resume 重新绑定的物理资源(netns/IP /
-> 容器 / cgroup / node,§3.3);**Binding** = 记在控制面、resume 时按记录重建的那类状态(§3.4);
-> **runtime provider** = "用什么跑隔离进程"的可插拔实现(§5.A)。
+> A few words used below are only detailed later: **placement** = the physical resources
+> rebound on every resume (netns/IP / container / cgroup / node, §3.3); **Binding** = the
+> class of state recorded in the control plane and rebuilt from the record on resume
+> (§3.4); **runtime provider** = the pluggable implementation of "what runs the isolated
+> process" (§5.A).
 
-| # | 支柱 | 抽象契约 | single-node 物化 | enforcement 归属 |
+| # | Pillar | Abstract contract | Single-node materialization | Enforcement locus |
 | --- | --- | --- | --- | --- |
-| ① | **syscall 拦截** | guest 内任何 uid(含 0)的 syscall 都被一个用户态内核虚拟化拦截,不直透宿主内核 | gVisor sentry(systrap) | **substrate** |
-| ② | **基底宿主非特权 + seccomp** | 跑隔离基底的那个宿主进程本身非特权,且被 seccomp 收窄;宿主看到的永远是一个受限进程 | sentry 以非特权 + seccomp 运行 | **substrate** |
-| ③ | **网络可达性被强制收窄** | 沙箱的网络可达集恰好是**声明所允许的那一集**(可能是一个枚举的端点集,也可能是"公网减去 L0 地板与内网 deny-safe"),其余出站被拒;入站默认关闭、经显式 publish 打开 | 宿主端 veth 上的 nft 规则集,与 placement 原子安装(§5.D) | control-plane(声明的权威)· 强制机制归 placement |
-| ④ | **沙箱的网络身份不可伪造** | 一个沙箱在网络上表现出的身份,guest 内任何 uid(含 0)都改不动 | 每沙箱独立 netns + 点对点 veth;规则谓词绑**入接口**(`iifname`,按名字而非 ifindex — D5 ⑫)而非源地址(§5.D) | **substrate**(netns 边界)+ control-plane(谓词选择) |
-| ⑤ | **受控的挂载面** | 挂进 guest 的东西经控制面裁决,guest 不能自己扩大挂载面 | 挂载表为 Binding,resume 按表重挂(§5.C) | control-plane(物化归 placement) |
+| ① | **Syscall interception** | Syscalls from any uid inside the guest (0 included) are intercepted and virtualized by a userspace kernel, never passing straight through to the host kernel | gVisor sentry (systrap) | **substrate** |
+| ② | **The substrate's host process is unprivileged + seccomp'd** | The host process running the isolation substrate is itself unprivileged and narrowed by seccomp; what the host sees is always a confined process | The sentry runs unprivileged + seccomp'd | **substrate** |
+| ③ | **Network reachability is enforced narrow** | A sandbox's network reachable set is exactly **the set its declaration allows** (which may be an enumerated set of endpoints, or "the public internet minus the L0 floor and the deny-safe private tier"), and all other egress is refused; ingress is closed by default and opened by an explicit publish | An nft rule set on the host-side veth, installed atomically with the placement (§5.D) | control plane (authority over the declaration) · the enforcement mechanism belongs to placement |
+| ④ | **A sandbox's network identity is unforgeable** | The identity a sandbox presents on the network cannot be altered by any uid inside the guest (0 included) | A separate netns per sandbox + a point-to-point veth; rule predicates bind the **ingress interface** (`iifname`, by name rather than ifindex — D5 ⑫) rather than the source address (§5.D) | **substrate** (the netns boundary) + control plane (choice of predicate) |
+| ⑤ | **A controlled mount surface** | What gets mounted into the guest is adjudicated by the control plane; the guest cannot widen its own mount surface | The mount table is a Binding, and resume remounts from the table (§5.C) | control plane (materialization belongs to placement) |
 
-**这张表就是"provider 安全义务"的全部来源**(收口成一句可验收的义务见 §2.4):换 provider 只可能触及
-①②④ 与 ③⑤ 的**物化层**,**绝不触及 ③⑤ 的声明/策略层**。
+**This table is the entire source of the "provider security obligations"** (narrowed into
+one acceptance-testable obligation in §2.4): changing the provider can touch only ①②④
+and the **materialization layer** of ③⑤, and **never the declaration/policy layer of
+③⑤**.
 
-> **④ 为什么是一条支柱,而不是 ③ 的一个实现细节。** 不是因为它与 ③ 独立——恰恰相反,**④ 在 ③ 的上游**:
-> ③ 的契约以"这个**沙箱**的可达集"为主语,那个「恰好」的量词只在身份不可伪造时才有意义,一个可伪造的
-> 谓词让 A 冒领 B 的规则、于是 A 的可达集不再是 A 声明的那一集——**它同时也破了 ③**。反向才是独立的
-> (规则写错顺序可以只破 ③ 而 ④ 完好)。它自成一行靠另外两点:**它有一个 ③ 完全没提的消费者**(引擎外
-> 一切按沙箱身份做的判断都压在它上面,见下条),且**enforcement 归属不同**(substrate 的 netns 边界 +
-> 控制面的谓词选择,而 ③ 的权威整个在控制面)。实测过这条:guest root 能 `ip addr add` 给自己加地址,
-> 于是**按源地址匹配的谓词被绕过,按入接口匹配的不能**(推理与实测见
-> [`deep-dives/network.md`](./deep-dives/network.md) D5 ③)。故谓词的选择是一条安全断言,不是风格。
+> **Why ④ is a pillar rather than an implementation detail of ③.** Not because it is
+> independent of ③ — quite the opposite: **④ is upstream of ③**. ③'s contract takes "the
+> reachable set of *this sandbox*" as its subject, and that "exactly" quantifier is
+> meaningful only when identity is unforgeable; a forgeable predicate lets A claim B's
+> rules, so A's reachable set is no longer the set A declared — **which breaks ③ at the
+> same time**. Only the reverse direction is independent (rules written in the wrong order
+> can break ③ alone, with ④ intact). It earns its own row on two other counts: **it has a
+> consumer ③ never mentions** (everything outside the engine that judges by sandbox
+> identity rests on it — see the next note), and its **enforcement locus differs** (the
+> substrate's netns boundary + the control plane's choice of predicate, whereas ③'s
+> authority is entirely in the control plane). This has been measured: guest root can `ip
+> addr add` an address to itself, so **a predicate matching on source address is bypassed
+> and one matching on ingress interface is not** (reasoning and measurement in
+> [`deep-dives/network.md`](./deep-dives/network.md) D5 ③). The choice of predicate is
+> therefore a security assertion, not a matter of style.
 >
-> **④ 也是引擎在"凭证边界"上唯一承重的地方。** 凭证本身**不是引擎概念**(§1.4 非目标 / §5.D):引擎
-> 不持有、不注入、不认识它。但任何在引擎外做"这个沙箱能用哪份凭证"判断的东西,其正确性都建立在
-> "兄弟沙箱不能冒充这个沙箱"之上——那就是本条。引擎把这条守住,凭证归属的判断才有地基;守不住,外层
-> 授权无论怎么写都是错的。
+> **④ is also the only place the engine is load-bearing on the "credential boundary".**
+> A credential itself is **not an engine concept** (§1.4 non-goals / §5.D): the engine
+> does not hold it, inject it, or know about it. But anything outside the engine judging
+> "which credential this sandbox may use" has its correctness resting on "a sibling
+> sandbox cannot impersonate this sandbox" — which is this pillar. Hold this one, and
+> judgments about which credential belongs where have ground to stand on; fail to hold it,
+> and the outer layer's authorization is wrong no matter how it is written.
 
-### 2.2 guest 身份不是 security invariant
+### 2.2 Guest identity is not a security invariant
 
-**guest 内 root 不是宿主隔离边界。** gVisor 里的 uid 0 是 guest 内的 root,被 sentry 虚拟化
-(支柱①);sentry 自身在宿主非特权(支柱②)。所以 guest 是不是 root、有没有 capability,**只是
-guest 内部卫生,不是宿主隔离支柱**——五条支柱无一以"guest 非 root"为前提。这也正是"自由安装依赖"
-需要的(`apt` 要 root)。
+**Root inside the guest is not the host isolation boundary.** uid 0 in gVisor is root
+inside the guest, virtualized by the sentry (pillar ①), and the sentry itself is
+unprivileged on the host (pillar ②). So whether the guest is root, and what capabilities
+it holds, is **only hygiene inside the guest, not a host isolation pillar** — not one of
+the five pillars takes "the guest is non-root" as a premise. That is exactly what "install
+dependencies freely" needs (`apt` wants root).
 
-由此:**默认就是 guest root**,不引入非 root 默认身份、也不预置切用户机制。既然它在隔离轴上一文不值,
-root 默认就是 §1.1「可拿 root 的 agent 沙箱」最直接的表达(§5.A;
-[`deep-dives/guest-runtime.md`](./deep-dives/guest-runtime.md) D3.1)。**引擎不建模 guest 用户**:「以某用户运行」是 guest
-原生的事(`su`/`sudo`,产品/模板层自理),不是引擎原语(§3.2.1);引擎既无 create 期"默认身份"字段,
-也无 per-`Start` run-as 参数。放开 root 的代价落在 **guest 内数据面**(§2.3),这是接受的产品取舍。
-将来若真有消费者要引擎级 run-as,再按 §1.3 additive 加回,不预留。
+Hence: **guest root is the default**, with no non-root default identity introduced and no
+user-switching mechanism preinstalled. Since it is worth nothing on the isolation axis,
+the root default is the most direct expression of §1.1's "root-capable agent sandbox"
+(§5.A; [`deep-dives/guest-runtime.md`](./deep-dives/guest-runtime.md) D3.1). **The engine
+does not model guest users**: "run as some user" is native to the guest (`su`/`sudo`, for
+the product/template layer to handle), not an engine primitive (§3.2.1); the engine has
+neither a create-time "default identity" field nor a per-`Start` run-as parameter. The
+cost of allowing root lands on the **data plane inside the guest** (§2.3), an accepted
+product trade-off. If a consumer ever genuinely needs engine-level run-as, it can be
+added back additively per §1.3 — nothing is reserved for it.
 
-### 2.3 数据面取舍:精确列举可触及面 vs 不可触及面
+### 2.3 The data-plane trade-off: exactly which surfaces are reachable and which are not
 
-放开 guest 身份(root + 可写 Overlay 工件)放大的是**且仅是"本沙箱数据面"这一个维度**。把边界列死:
+Relaxing guest identity (root + a writable Overlay artifact) widens **one dimension and
+one only: this sandbox's data plane**. Pinning the boundary exhaustively:
 
-**能触及(已接受的影响范围,落在本沙箱数据面内):**
+**Reachable (the accepted blast radius, all inside this sandbox's data plane):**
 
-- 本沙箱 **Overlay 工件的全部内容**——`/usr`、`$HOME`、运行时装的任何包(§3.1.1)。**含把自己
-  的 disk 容量帽写满**:guest `dd` 打到 per-sandbox 容量帽(§3.4 容量轴)只让**自己**的 `write()`
-  拿 `ENOSPC`,是数据面内的预期结果,不外溢。
-- 按挂载策略挂进来的 **Volume**:各自遵 exclusive / shared-ro / shared-rw 语义(§5.C);root
-  能触及的是"已挂给本沙箱的那些",不是 Volume 全集。
-- **声明放行的出站端点** + publish 暴露的**入站端口**(§5.D)——即网络声明本就允许的那一面。**这一面的
-  宽度由声明的取值决定,不是一个固定的常量**:`egress.default: allow` 下它就是整个公网(减去 L0 地板与
-  内网 deny-safe),此时"字节不外流"不在引擎的承诺集里;`default: deny` + 单一 `egress.via[]` 下它约等于
-  一个地址。两者都是正确的引擎行为,差别是调用方声明了什么(§5.D)。
+- **The entire content of this sandbox's Overlay artifact** — `/usr`, `$HOME`, any package
+  installed at runtime (§3.1.1). **Including filling its own disk capacity cap**: a guest
+  `dd` hitting the per-sandbox capacity cap (§3.4 capacity axis) only makes **its own**
+  `write()` return `ENOSPC`, which is the expected in-data-plane outcome and does not spill
+  outward.
+- The **Volumes** mounted in per the mount policy, each honoring exclusive / shared-ro /
+  shared-rw semantics (§5.C); what root can reach is "those already mounted for this
+  sandbox", not the full set of Volumes.
+- The **egress endpoints the declaration allows** plus the **ingress ports** exposed by
+  publish (§5.D) — that is, the side the network declaration permitted in the first place.
+  **The width of this side is determined by the declaration's value, not by a fixed
+  constant**: under `egress.default: allow` it is the whole public internet (minus the L0
+  floor and the deny-safe private tier), and in that case "bytes do not flow out" is not in
+  the engine's set of promises; under `default: deny` plus a single `egress.via[]` it is
+  approximately one address. Both are correct engine behavior; the difference is what the
+  caller declared (§5.D).
 
-**不可触及(宿主侧 / 跨沙箱 invariant,放开 guest 身份也不动):**
+**Not reachable (host-side / cross-sandbox invariants, unmoved by relaxing guest identity):**
 
-- 宿主 FS、宿主进程、**其他沙箱的 Overlay 与 Volume**——被支柱① syscall 拦截隔离在 guest 外。
-- **其他沙箱的网络终点**——一个沙箱的网络可达集恰好是 {声明显式放行的端点},**sibling 沙箱不可达**,
-  且这一条**不因声明取值而放松**:sibling 地址空间在 L0 地板里,声明抬不动它(§2.4)。**这条不靠支柱① 守**:
-  ① 拦 syscall、不拦网络包(guest 合法用网络),故跨沙箱网络隔离是**独立的 control-plane invariant**,
-  由 §5.D 的规则集物化,与"存储跨沙箱隔离靠支柱①"并列(见 network.md D5)。**点对点 `/30` veth 只消除
-  二层邻接、宿主仍在两段之间路由**,故物化方是那条 nft 地板、veth 是纵深的一层。
-- **本沙箱的网络身份**(支柱④)——guest root 可以给自己的网卡加地址、改路由表,但改不动"哪个 veth 属于
-  哪个沙箱"这个事实,故引擎按入接口写的规则对它不可绕过。**这一条不含凭证**:凭证不是引擎概念(§1.4),
-  引擎既不持有也不承诺它(这条身份为何是引擎在凭证边界上唯一承重的地方,见 §2.1 ④ 的第二段注)。
-- **控制面记录本身**(Binding 的权威,§3.4)——挂载面、网络声明、资源上限的取值由控制面裁决,
-  guest 内 root 改不动(支柱⑤)。
-- sentry 之外的**宿主内核攻击面**——被支柱① 限制在用户态内核内。
-- **宿主盘的物理容量**——guest 写只吃自己 Overlay upper 的 per-sandbox 容量帽(§3.4 容量轴),吃不动
-  整块盘,故撑不满整机、撑不垮其余沙箱的写。**但容量帽只管 guest 自己写的字节,不管内核代它写的**:
-  故"确定且整组的终止"是本不变量的组成部分,不是调参——**它绕开容量帽**的那条路径见 §2.4。
+- The host FS, host processes, and **other sandboxes' Overlays and Volumes** — isolated
+  outside the guest by pillar ①'s syscall interception.
+- **Other sandboxes' network endpoints** — a sandbox's reachable set is exactly {the
+  endpoints the declaration explicitly allows}, **sibling sandboxes are unreachable**, and
+  this does **not** relax with the declaration's value: the sibling address space is in the
+  L0 floor and a declaration cannot lift it (§2.4). **This one is not held by pillar ①**:
+  ① intercepts syscalls, not network packets (the guest uses the network legitimately), so
+  cross-sandbox network isolation is an **independent control-plane invariant**,
+  materialized by §5.D's rule set, standing alongside "cross-sandbox storage isolation
+  rests on pillar ①" (see network.md D5). **A point-to-point `/30` veth only removes L2
+  adjacency, and the host still routes between the two ends**, so the materializer is that
+  nft floor and the veth is one layer of depth.
+- **This sandbox's own network identity** (pillar ④) — guest root can add addresses to its
+  NIC and change its routing table, but cannot change the fact of "which veth belongs to
+  which sandbox", so the rules the engine writes by ingress interface are unbypassable by
+  it. **This one does not include credentials**: a credential is not an engine concept
+  (§1.4), and the engine neither holds nor promises it (why this identity is the only place
+  the engine is load-bearing on the credential boundary is in §2.1 ④'s second note).
+- **The control-plane records themselves** (the authority of the Bindings, §3.4) — the
+  values of the mount surface, the network declaration, and the resource ceilings are
+  adjudicated by the control plane, and root inside the guest cannot change them (pillar ⑤).
+- The **host kernel attack surface** beyond the sentry — confined inside the userspace
+  kernel by pillar ①.
+- **The physical capacity of the host disk** — a guest write consumes only the per-sandbox
+  capacity cap of its own Overlay upper (§3.4 capacity axis) and cannot consume the whole
+  disk, so it can neither fill the machine nor break other sandboxes' writes. **But the
+  capacity cap governs only the bytes the guest writes itself, not those the kernel writes
+  on its behalf**: which is why "deterministic, whole-group termination" is a component of
+  this invariant rather than a tuning knob — the path by which **it bypasses the capacity
+  cap** is in §2.4.
 
-**资源耗尽维度同样不靠 syscall 拦截(支柱①)守**——①虚拟化的是 syscall、不是资源用量:CPU/RAM/IO
-速率靠 cgroup(§5.A)、磁盘容量靠 FS 配额(§5.B/§5.C),缺了容量帽,`dd` 就是一条合法 `write()`
-撑满共享盘、击穿本不变量。
+**The resource-exhaustion dimension is likewise not held by syscall interception (pillar
+①)** — ① virtualizes syscalls, not resource usage: CPU/RAM/IO rate rests on cgroup (§5.A)
+and disk capacity on FS quotas (§5.B/§5.C). Without a capacity cap, `dd` is a perfectly
+legal `write()` that fills the shared disk and breaks this invariant.
 
-### 2.4 provider 的安全义务(抽象,不绑定任何具体 provider)
+### 2.4 The provider's security obligations (abstract, bound to no specific provider)
 
-把 §2.1 两组切分收口成一句可验收的义务,供将来评估任何 provider 用:
+§2.1's two-group split, narrowed into one acceptance-testable obligation, for evaluating
+any future provider:
 
-> **一个合格的 runtime provider,必须维持 substrate-borne 的 ①②(用户态内核拦截 syscall + 基底
-> 在宿主非特权);对 ③ 它只负责一件事——把隔离单元的可达集 exhaustive 地收窄成「声明所允许的那一集」
-> (可能是一个枚举的端点集,也可能是"公网减去 L0 地板与内网 deny-safe"),默认拒绝其余出站(逃逸即失败,
-> 不是降级);对 ④ 它必须让规则的谓词绑在一个 **guest 改不动的事实**上
-> (不是 guest 可写的源地址);⑤ 它只按控制面下发的声明做 enforcement,不持声明权威。**
+> **A qualified runtime provider must maintain the substrate-borne ①② (a userspace kernel
+> intercepting syscalls + the substrate unprivileged on the host); for ③ it is responsible
+> for one thing only — narrowing the isolation unit's reachable set exhaustively down to
+> "the set the declaration allows" (which may be an enumerated set of endpoints, or "the
+> public internet minus the L0 floor and the deny-safe private tier"), refusing all other
+> egress by default (an escape is a failure, not a degradation); for ④ it must bind the
+> rules' predicate to a **fact the guest cannot change** (not a source address the guest can
+> write); and for ⑤ it only enforces the declaration the control plane hands down, holding
+> no authority over the declaration itself.**
 >
-> **一条附带的、容易被读漏的义务:强制机制必须与 placement 原子。** 规则集要在"隔离单元的网络已存在、
-> 但 guest 还没跑起来"之间安装完毕——任何一个"网络已通、规则未装"的窗口都是一个 fail-open 窗口,而
-> **这个钩子点只有创建 placement 的那一侧有**。规则集和 netns 一样是崩溃幸存的宿主态,故重启对账同样
-> 要把它一并重建/拆除,不是可以事后补的东西——机制归 §5.A。**而"重建"是把写点的准入判据重新求值一遍,
-> 不只是把内容重新渲染一遍**(§3.4.5 那条通则:声明持久、判据的入参不持久,故重装是一条能绕过写点那次
-> 拒绝的路径,且第一跳的每条断言对它完全不敏感)。这条把"谁来强制"这个问题
-> **在物理上**答完了——不是引擎想管网络,而是它是唯一**能**在正确时刻强制的一方(§5.D)。
+> **One incidental obligation that is easily read past: the enforcement mechanism must be
+> atomic with the placement.** The rule set must be fully installed in the interval where
+> "the isolation unit's network already exists but the guest is not yet running" — any
+> window of "network up, rules not installed" is a fail-open window, and **only the side
+> that creates the placement has that hook point**. Like the netns, the rule set is
+> crash-surviving host state, so startup reconciliation must rebuild/tear it down along
+> with everything else; it is not something that can be patched in afterwards — the
+> mechanism belongs to §5.A. **And "rebuild" means re-evaluating the write point's
+> admission criteria, not merely re-rendering the content** (§3.4.5's general rule: the
+> declaration is durable, the criteria's inputs are not, so a reinstall is a path that can
+> bypass that one refusal at the write point, and every assertion about the first hop is
+> completely insensitive to it). This settles the question of "who enforces" **physically**
+> — it is not that the engine wants to manage the network, but that it is the only party
+> that **can** enforce at the correct moment (§5.D).
 
-**RAM 上限的物化附带两条可验收义务**(§3.4 RAM 是安全限,超限后果是沙箱终止):
+**Materializing the RAM ceiling carries two acceptance-testable obligations** (§3.4: RAM
+is a security limit, and the consequence of exceeding it is sandbox termination):
 
-- **终止必须确定且整组**,不是由底层挑一个 victim。挑 victim 的形态既不确定(同配置多次运行结果不同),
-  又可能落进"无可杀 victim → 无限重试"的状态,而重试路径**绕开容量帽**、可写满宿主盘(§2.3)。
-  `local_runsc` 靠 `memory.oom.group=1` 兑现;远端 provider 靠其调度层的等价整组终止语义。
-- **终止原因必须可判**,且跨 seam 时是**抽象枚举**而非 errno / cgroup 文件——否则控制面无法把它与
-  崩溃分开,会去 resume 一个必然再次终止的沙箱(§4.3 `resource-terminated` 与 `dead-recoverable` 并列)。
-  **provider 须在拆除自己的 placement 之前把死因交出来**,判不出即报 `Unknown`、**不许猜**(信号为何
-  易失、为何必须当场落库、未知怎么兜底,全在 §4.3)。
+- **Termination must be deterministic and whole-group**, not the substrate picking a
+  victim. A victim-picking shape is both nondeterministic (the same configuration gives
+  different results across runs) and able to land in a "no killable victim → retry forever"
+  state, and the retry path **bypasses the capacity cap** and can fill the host disk
+  (§2.3). `local_runsc` delivers this with `memory.oom.group=1`; a remote provider delivers
+  it through its scheduling layer's equivalent whole-group termination semantics.
+- **The termination cause must be decidable**, and across a seam it is an **abstract
+  enumeration** rather than an errno / cgroup file — otherwise the control plane cannot
+  separate it from a crash and will go resume a sandbox that is certain to be terminated
+  again (§4.3 places `resource-terminated` alongside `dead-recoverable`). **A provider must
+  hand the cause of death out before tearing down its own placement**, and if it cannot
+  decide, it reports `Unknown` and **does not guess** (why the signal is volatile, why it
+  must be persisted on the spot, and how the unknown case is handled, are all in §4.3).
 
-**egress 强制的三条 invariant(承重墙是 IP 层,不是域名)。** 引擎的强制只用 **IP / 端口 / 协议**词汇
-求值——它不解析域名、不看 TLS、不认识任何应用层协议(为何域名不进引擎、以及"可解但代价明确"的那条路
-见 [`deep-dives/network.md`](./deep-dives/network.md) D2):
+**The three invariants of egress enforcement (the load-bearing wall is the IP layer, not
+the domain name).** The engine's enforcement evaluates in a vocabulary of **IP / port /
+protocol** only — it does not resolve domain names, does not look at TLS, and knows no
+application-layer protocol (why domain names do not enter the engine, and the "solvable but
+at an explicit cost" road, are in [`deep-dives/network.md`](./deep-dives/network.md) D2):
 
-- **L0 地板恒 deny,声明抬不动它**(code 强制)= link-local(含 IPv6,天然覆盖所有云 metadata)/
-  loopback / **宿主自身的任一地址**(由一条 `input` 侧、按 `iifname` 收窄的纯 ct-state 规则静态覆盖,
-  **从不枚举**——这一取法
-  既**严格宽于**"只收控制面端点"、又更便宜:一条从不被算出的静态规则,故引擎不必知道自己的 bind 地址,
-  "宿主地址变了要不要重渲染"整类问题也不存在,实测见 network.md D5 ⑧)/ **sibling 沙箱地址空间**。
-  其上是两档由声明决定的:**内网私有段默认 deny-safe**(可被声明显式放行)· **公网随 `egress.default`
-  取值**。**这一档的成员就是 RFC1918 三段**(`10/8` · `172.16/12` · `192.168/16`),v6 侧机械派生
-  (`fc00::/7`,加**各成员的** NAT64 映像 —— 按 RFC 6052 §2.2 派**成员的映像、绝不派 `64:ff9b::/96` 前缀
-  本身**,后者映射整个 v4 空间、公网一并在内,整段 drop 会拒掉 `allow` 承诺的公网出站,实测见
-  network.md D5 ㉓)。**取这一档而非更宽的 IANA GR=False 快照**:它覆盖唯一实测到的暴露面(三件出网机制
-  齐备时沙箱到宿主 LAN,D5 ⑤),而更宽的快照要带上五项 GR=True 的反向放行、还会撞上"interval set 拒嵌套
-  成员 / `auto-merge` 静默并子网"(D5 ⑱)——RFC1918 里没有 GR=True 成员,那两样代价一并消失。
-  **将来放宽是纯加法**(给一份静态清单加行,D7 litmus),故不为它预留机制。
-  **这一档与地板是两条按次序排的规则,不共用一个 set**:sibling `/16` 落在 `10/8` 内,共用要么装不上、
-  要么把地板静默并没(D5 ⑱)。**次序**:地板(恒 deny,抬不动)在**声明的放行之上**,而这一档在放行
-  **之下**(deny-safe 的全部含义就是"可被声明抬动")。**它只在 `default: allow` 下真的出规则**:
-  `deny` 下最底那条兜底拒绝已经覆盖这一档的每个地址,可达集逐字相同,而多装一条**永不匹配**的规则会在
-  "计数器为 0"这个唯一的健康信号上多制造一群合法的 0(D4.1 的同一条纪律)。地板只收
-  "到达它就击穿某条引擎 invariant、且引擎不靠部署配置就能命名它"的东西——引擎因此不认识任何云厂商
-  (成员判据见 network.md D1 ③ / D5 ④)。
-- **两跳都钉,且第二跳必须由内核执行、不靠对方自律。** 第一跳是 guest 的出站;第二跳是**坐在
-  `egress.via[]` 后面那个引擎外进程自己的出站**——它替 guest 发起连接,故它必须被压在同一份宿主规则集
-  后面,**而不是把地板清单下发给它去遵守**:下发即意味着它成了被信任方,也就是本 invariant 要拒的
-  confused deputy(推导见 network.md D4.2;沙箱地址空间是一个固定 CIDR、故这是一条**静态**规则,
-  证据在 network.md D5 ④)。由此还得出一条契约:**`via[].endpoint` 若非宿主本地,直接拒**——内核的射程
-  够不到它,收下就等于把地板架在那个进程的自律上;而该本地进程的 uid 是**部署方交给引擎的**输入,
-  不由声明携带。**且它不得是引擎自己的 uid**:引擎的 transport 端点是 guest veth 地址、由宿主侧发起,
-  而它落在地板的 sibling 项内,故那个取值会让引擎自己每一次拨通 guest 都命中第二跳地板——一次性打掉
-  全部沙箱的 readiness / 探活 / RPC,且因 `skuid` 漏匹配而表现为**间歇故障**。故它在起步时(装表之前)拒。
+- **The L0 floor is always deny and a declaration cannot lift it** (enforced in code) =
+  link-local (IPv6 included, which naturally covers every cloud metadata address) /
+  loopback / **any address of the host itself** (covered statically by a single pure
+  ct-state rule on the `input` side narrowed by `iifname`, **never enumerated** — this
+  formulation is both **strictly wider** than "only cover the control-plane endpoint" and
+  cheaper: one static rule that is never computed, so the engine need not know its own bind
+  address, and the whole class of "the host address changed, must we re-render?" questions
+  does not exist; measured in network.md D5 ⑧) / **the sibling sandbox address space**.
+  Above it sit two tiers determined by the declaration: **private internal ranges are
+  deny-safe by default** (liftable by an explicit declaration) · **the public internet
+  follows `egress.default`'s value**. **The members of this tier are exactly the three
+  RFC1918 ranges** (`10/8` · `172.16/12` · `192.168/16`), with the v6 side derived
+  mechanically (`fc00::/7`, plus the NAT64 image **of each member** — derived per RFC 6052
+  §2.2 as **the members' images, never the `64:ff9b::/96` prefix itself**, since the latter
+  maps the whole v4 space including the public internet, and dropping the entire range would
+  refuse the public egress that `allow` promises; measured in network.md D5 ㉓). **This tier
+  is taken rather than the wider IANA GR=False snapshot**: it covers the only exposure
+  surface actually measured (a sandbox reaching the host LAN when all three egress
+  mechanisms are in place, D5 ⑤), whereas the wider snapshot would have to carry five
+  GR=True reverse allowances and would also run into "interval sets refuse nested members /
+  `auto-merge` silently coalesces subnets" (D5 ⑱) — RFC1918 has no GR=True member, so both
+  of those costs disappear together. **Widening it later is purely additive** (adding a line
+  to a static list, D7 litmus), so no mechanism is reserved for it.
+  **This tier and the floor are two rules in sequence and do not share one set**: the
+  sibling `/16` falls inside `10/8`, and sharing would either fail to install or silently
+  coalesce the floor away (D5 ⑱). **The ordering**: the floor (always deny, unliftable) sits
+  **above the declaration's allowances**, while this tier sits **below** them (that a
+  declaration can lift it is the entire meaning of deny-safe). **It only actually emits a
+  rule under `default: allow`**: under `deny`, the bottom catch-all refusal already covers
+  every address in this tier, the reachable set is verbatim identical, and installing one
+  more rule that **never matches** would manufacture a crowd of legitimate zeros on the one
+  health signal we have, "the counter is 0" (the same discipline as D4.1). The floor admits
+  only things that "break some engine invariant on arrival, and that the engine can name
+  without relying on deployment configuration" — which is why the engine knows no cloud
+  vendor (membership criteria in network.md D1 ③ / D5 ④).
+- **Both hops are pinned, and the second hop must be enforced by the kernel rather than
+  resting on the other party's self-discipline.** The first hop is the guest's egress; the
+  second is **the egress of that engine-external process sitting behind `egress.via[]`** —
+  it originates the connection on the guest's behalf, so it must be held behind the same
+  host rule set, **rather than being handed the floor list to obey**: handing it down would
+  make it a trusted party, which is exactly the confused deputy this invariant exists to
+  refuse (derivation in network.md D4.2; the sandbox address space is a fixed CIDR, so this
+  is a **static** rule, evidence in network.md D5 ④). One contract follows: **if
+  `via[].endpoint` is not host-local, refuse outright** — the kernel's reach does not extend
+  to it, and accepting it would stand the floor on that process's self-discipline. The uid of
+  that local process is an input **the deployment hands the engine**, not something the
+  declaration carries. **And it must not be the engine's own uid**: the engine's transport
+  endpoint is a guest veth address dialed from the host side, and that falls inside the
+  floor's sibling item, so such a value would make the engine hit the second-hop floor on
+  every single dial to a guest — taking out readiness / liveness probing / RPC for all
+  sandboxes at once, and presenting as an **intermittent fault** because of `skuid` missing
+  matches. So it is refused at startup (before the table is installed).
 
-  **第二跳在第三个钩子上,不在第一跳那两个里。** 第二跳由一个**宿主本地进程**发起,故它既不经过 guest 的
-  入接口、**也不经过 `forward`**——实测它在 `forward` 上任何形状都计 0,只在 `output` 上可见,而那里唯一
-  可用的收窄谓词是 **`skuid`**(network.md D5 ㉔ —— 故部署入参只要 uid,gid 在那个钩子上没有对应子句)。
-  ⟹ **压住第二跳是一条独立的基链**,不是第一跳
-  规则的副产品;把它读成"地板顺带管住了"会得到一份第二跳完全未被求值的规则集,而**症状是地板计数器不动**。
-  该钩子因此有一条**与每沙箱链同源、谓词不同**的收窄义务:`output` 上一条未按 uid 收窄的 drop 是**宿主级
-  出网杀伤开关**(同一实测),而 `iifname` 在那里当不了这个收窄。
+  **The second hop is on a third hook, not on either of the first hop's two.** The second hop
+  is originated by a **host-local process**, so it traverses neither the guest's ingress
+  interface **nor `forward`** — measured, it counts 0 in any shape on `forward` and is
+  visible only on `output`, where the only usable narrowing predicate is **`skuid`**
+  (network.md D5 ㉔ — hence the deployment input needs only a uid; gid has no corresponding
+  clause on that hook). ⟹ **Holding the second hop down is an independent base chain**, not a
+  by-product of the first hop's rules; reading it as "the floor covers it incidentally"
+  yields a rule set in which the second hop is never evaluated at all, and **the symptom is
+  that the floor's counter does not move**. That hook therefore carries a narrowing
+  obligation **of the same origin as the per-sandbox chain but with a different predicate**:
+  a drop on `output` not narrowed by uid is a **host-level egress kill switch** (same
+  measurement), and `iifname` cannot serve as that narrowing there.
 
-  **地板与 `via[]` 的边界(不写出来就看着自相矛盾)**:`via[].endpoint` 必须宿主本地 ⟹ 被引流的流量恰好
-  落在地板的"宿主自身的任一地址"项里。开洞的方式是**次序,不是收窄地板**:`via[]` 的窄放行**排在地板
-  drop 之上、同一条链**,且必须同时钉 **pre-NAT 元组 ∧ post-NAT 端口 ∧ `iifname`**(三者缺一都有一条
-  活的反例,network.md D5 ⑩)。这是地板**被批准的那一个例外**,不是地板的减弱——guest 从未到达那个
-  地板内地址,到达它的是一个宿主本地进程。
-- **fail-closed,作用域 per-connection**:声明放行不到的目标、以及 `via[].endpoint` 不可达时的那条连接,
-  都**被拒绝**,而**不是落到下一条规则被放行出网**。逃逸/降级即失败,
-  只作用于失败的那条连接,不牵连其余已放行的出站。
-  > **"干净的连接失败"这半承诺的作用域是"有 guest 在等"的那些拒绝,不是全部拒绝。** 声明放行不到的
-  > 出站(即上面那条 fail-closed 本体)用 `reject`:gVisor 认 ICMP 差错,同一条拒绝写成 `drop` 与写成
-  > `reject`,guest 侧体验差数个量级。用 `drop` 的是三处**不欠 guest 一个差错**的拒绝:**第二跳自己的
-  > 出站**(发起者是宿主本地进程)· **内网 deny-safe 档** · **入站 default-deny**(面向一个引擎什么都没
-  > 承诺过的外部调用方,且一个 ICMP 差错会向外确认这个沙箱存在)。安全性两者相同:都不放行。判据与实测
-  > 量级见 [`deep-dives/network.md`](./deep-dives/network.md) D4.3 / D5 ⑨。
+  **The boundary between the floor and `via[]` (which looks self-contradictory until written
+  out)**: `via[].endpoint` must be host-local ⟹ the steered traffic lands exactly in the
+  floor's "any address of the host itself" item. The way the hole is opened is **ordering,
+  not narrowing the floor**: `via[]`'s narrow allowance sits **above the floor's drop, in the
+  same chain**, and must simultaneously pin the **pre-NAT tuple ∧ the post-NAT port ∧
+  `iifname`** (each of the three has a live counterexample when omitted, network.md D5 ⑩).
+  This is the floor's **one sanctioned exception**, not a weakening of it — the guest never
+  reaches that in-floor address; what reaches it is a host-local process.
+- **Fail-closed, scoped per-connection**: a destination the declaration does not allow, and
+  the one connection affected when `via[].endpoint` is unreachable, are both **refused**
+  rather than **falling through to the next rule and being let out**. An escape or a
+  degradation is a failure; the effect is confined to the connection that failed and does not
+  implicate the rest of the allowed egress.
+  > **The scope of the "clean connection failure" half-promise is the refusals with a guest
+  > waiting on them, not every refusal.** Egress the declaration does not allow (that is,
+  > the fail-closed rule itself above) uses `reject`: gVisor honors ICMP errors, and the same
+  > refusal written as `drop` versus as `reject` differs by orders of magnitude in the guest's
+  > experience. `drop` is used at the three refusals that **owe the guest no error**: **the
+  > second hop's own egress** (originated by a host-local process) · **the deny-safe private
+  > tier** · **ingress default-deny** (facing an external caller the engine promised nothing
+  > to, where an ICMP error would confirm outward that this sandbox exists). Security-wise the
+  > two are identical: neither lets anything through. The criteria and the measured magnitudes
+  > are in [`deep-dives/network.md`](./deep-dives/network.md) D4.3 / D5 ⑨.
 
-这份义务清单**不依赖任何具体 provider 形态**——无论"宿主本地进程"还是"被调度到远端 node 的隔离
-单元",逐条一字不变;后者只是把 ①②④ 的物化换到它自己的隔离机制上,把 ③ 的规则集换成 CNI /
-NetworkPolicy 之类的等价物。
+This obligation list **does not depend on any specific provider shape** — whether a
+"host-local process" or "an isolation unit scheduled onto a remote node", it holds word for
+word; the latter merely moves ①②④'s materialization onto its own isolation mechanism and
+swaps ③'s rule set for an equivalent such as CNI / NetworkPolicy.
 
-> **一条规格层的澄清:③ 的义务在 IPv6 上不另立一套。** 一条**不带 family 限定**的纯 ct-state `inet` 规则
-> 连 IPv6 一起覆盖,连 guest 自造的全局前缀也照拦(实测见
-> [`deep-dives/network.md`](./deep-dives/network.md) D5 ⑪),故地板清单里的 `fe80::/10` 是**声明层的一个
-> 成员**,不是一条独立的 v6 机制。
+> **One spec-level clarification: ③'s obligation does not set up a separate regime for
+> IPv6.** A pure ct-state `inet` rule **with no family qualifier** covers IPv6 along with
+> everything else, and stops even a global prefix the guest made up itself (measured in
+> [`deep-dives/network.md`](./deep-dives/network.md) D5 ⑪), so `fe80::/10` in the floor list
+> is **a member at the declaration layer**, not an independent v6 mechanism.
 
-### 2.5 substrate 事实核查
+### 2.5 Substrate fact check
 
-这些是 single-node `local_runsc` 物化所依赖的 runsc 事实,直接影响上面几节的判断。持久化模型的
-关键支撑事实(不存内存 ⟹ 持久态 = 纯文件层)及其下游附加能力在 §5.B 展开,这里只列 runsc 侧事实。
+These are the runsc facts the single-node `local_runsc` materialization depends on, and they
+directly affect the judgments in the sections above. The key supporting fact for the
+persistence model (not storing memory ⟹ persistent state = plain file layers) and its
+downstream extra capabilities are developed in §5.B; only the runsc-side facts are listed
+here.
 
-| 事实 | 对 engine 的影响 |
+| Fact | Consequence for the engine |
 | --- | --- |
-| systrap(默认)用 `SECCOMP_RET_TRAP` 拦 syscall,**不需要 KVM / 嵌套虚拟化** | 坐实 no-hypervisor(§1.1)的技术前提 |
-| 内存 checkpoint/restore **要求跨宿主 CPU-feature 匹配** | 我们不存内存(§4.2),**此约束直接消失** |
-| 在 guest 内的 iptables/nftables **仅部分支持**;且 guest 报文经 L2 注入,**不遍历沙箱 netns 的 L3 钩子**(实测) | 坐实强制只能挂在**宿主端 veth**(或 `netdev` 钩子)上(§5.D),既别下沉到 guest 内防火墙、**也别放进沙箱 netns 内**——后者计数为 0(network.md D5 ②) |
-| 挂载在**启动时**从 OCI spec 取,运行中不可热改 | 挂载拓扑变更 = resume 边界操作(§5.C) |
-| runsc `--overlay2` 全族(`memory`/`self`/`dir=`)**均不跨容器生命周期持久**——`dir=` 启动即 `unlink` filestore,干净停 = 数据蒸发 | 持久层**不用 runsc 自管 overlay**;改由 engine 在 runsc 外用宿主内核 overlayfs 组装,runsc 收 `--overlay2=none --file-access=shared`(§5.B) |
+| systrap (the default) intercepts syscalls with `SECCOMP_RET_TRAP` and **needs neither KVM nor nested virtualization** | Establishes the technical premise of no-hypervisor (§1.1) |
+| Memory checkpoint/restore **requires matching CPU features across hosts** | We do not store memory (§4.2), so **this constraint disappears outright** |
+| iptables/nftables inside the guest is **only partially supported**; and guest packets are injected at L2, so they **do not traverse the sandbox netns's L3 hooks** (measured) | Establishes that enforcement can only hang on the **host-side veth** (or a `netdev` hook) (§5.D): do not push it down into a firewall inside the guest, **and do not put it inside the sandbox netns** either — the latter counts 0 (network.md D5 ②) |
+| Mounts are taken from the OCI spec **at startup** and cannot be changed live | A mount-topology change is a resume-boundary operation (§5.C) |
+| The whole runsc `--overlay2` family (`memory`/`self`/`dir=`) **is non-persistent across the container's lifetime** — `dir=` unlinks the filestore at startup, so a clean stop means the data evaporates | The persistence layer **does not use runsc's self-managed overlay**; instead the engine assembles it outside runsc with the host kernel's overlayfs, and runsc gets `--overlay2=none --file-access=shared` (§5.B) |
 
-> 载体的完整物化、CoW/一致性证据与替代路径归 §5.B(展开见
-> [`deep-dives/rootfs-overlay.md`](./deep-dives/rootfs-overlay.md)),此处只锚定它所依赖的 runsc 事实。
+> The carrier's full materialization, the CoW/consistency evidence, and the alternative
+> paths belong to §5.B (developed in
+> [`deep-dives/rootfs-overlay.md`](./deep-dives/rootfs-overlay.md)); this section only
+> anchors the runsc facts it depends on.

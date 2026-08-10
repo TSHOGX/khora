@@ -152,7 +152,8 @@ Known and deliberate, not oversights:
 
 - [`docs/spec/`](docs/spec/) — the architecture spec (§1–§6): what the engine should
   be, and why. The best current statement of intent, revisable but never edited
-  casually. Currently written in Chinese; an English translation is planned.
+  casually. Being translated from Chinese to English one document at a time; §1–§2
+  (`SPEC.md`) are done.
 - [`docs/spec/deep-dives/`](docs/spec/deep-dives/) — single-topic rationale: the
   measurements, the falsified alternatives, the options rejected and on what evidence.
 - [`docs/spec/open-decisions.md`](docs/spec/open-decisions.md) — everything still

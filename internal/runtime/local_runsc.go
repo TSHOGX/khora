@@ -1051,7 +1051,7 @@ func readDeathCause(cid string) DeathCause {
 	if err != nil {
 		// No leaf (an unlimited sandbox, or already reclaimed) → we cannot tell.
 		// Unknown is a legal verdict and §4.3 self-corrects it; guessing is not
-		// allowed (§2.4 不许猜).
+		// allowed (§2.4 "does not guess").
 		return CauseUnknown
 	}
 	for _, line := range strings.Split(string(b), "\n") {
