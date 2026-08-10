@@ -5,8 +5,10 @@ A persistent, mutable, root-capable agent sandbox engine — no-hypervisor
 
 > **Architecture spec** (the source of truth for *what this should be*) lives in
 > `docs/spec/` (§1–§6); one-time tool/environment choices in `docs/decisions/`.
-> For where the implementation stands and what ships next, start at the ladder:
-> [`docs/plans/README.md`](docs/plans/README.md).
+> The M1–M8 ladder has shipped, so there is no separate plan tree beside the spec:
+> `docs/spec/` describes the engine in full, the acceptance tests below are the
+> record of what is proven on the real substrate, and everything still open is
+> registered in [`docs/spec/open-decisions.md`](docs/spec/open-decisions.md).
 
 ## Layout (canonical subsystem short-names, §5)
 

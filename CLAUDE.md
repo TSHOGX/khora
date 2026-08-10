@@ -22,7 +22,7 @@ implementation to justify anything.
 | `docs/spec/` | Converged architecture, §1–§6. The best current statement of *what the engine should be* — authoritative for intent, but revisable (see Relationship rule). Slow-moving. |
 | `docs/spec/deep-dives/` | Single-topic design rationale hung under a § (the *why* / falsification / rejected options). |
 | `docs/spec/open-decisions.md` | Register of **unsettled** design questions. |
-| `docs/plans/` | One file per milestone, `M<N>-<capability>.md`: forward scope + acceptance + out-of-scope. **Expire as shipped.** Ladder index in `docs/plans/README.md`. |
+| `docs/plans/` | **Currently absent, and that is the shipped state** — plans expire as shipped and the M1–M8 ladder is done, so the living truth of "what the engine is" is `docs/spec/` in full. Recreate the tree only when a new milestone opens: one file per milestone, `M<N>-<capability>.md`, forward scope + acceptance + out-of-scope. |
 | `docs/decisions/` | ADRs: one-time **tool / environment / process** choices (why Go, why OrbStack, validation matrix). The **decision** is immutable — reversing it is a *new* superseding ADR; stale prose around an unchanged decision is corrected in place. Full rule: ADR-0003. |
 | `cmd/` `internal/` `test/` | The code, implementing the spec. |
 
@@ -39,8 +39,10 @@ rewriting the spec to rubber-stamp what the code did. Both are silent drift.
 (A pure **vocabulary** mismatch is not a divergence — align the name on one side
 in the same change.)
 
-"Settled + built" and "settled, not yet built" are *both* spec; `plans/` tracks
-which is which.
+"Settled + built" and "settled, not yet built" are *both* spec. While a milestone
+is open its plan tracks which is which; with the ladder finished, the acceptance
+tests are that record — a §-claim with no substrate test behind it is the thing to
+be suspicious of.
 
 ## Certainty-state flow (where a topic lives = how settled it is)
 
@@ -153,9 +155,9 @@ slims to boundary + open agenda — nothing lives in full in both places.
 
 ## Milestone discipline
 
-- **One milestone at a time.** Each has a plan (`docs/plans/M<N>-*.md`) with
-  explicit scope + acceptance + out-of-scope. Don't pull later-milestone work
-  forward.
+- **One milestone at a time.** Each has a plan (`docs/plans/M<N>-*.md` — write it
+  when the milestone opens) with explicit scope + acceptance + out-of-scope.
+  Don't pull later-milestone work forward.
 - **Per-milestone review gate** before advancing.
 - If an approach **fails twice, root-cause it** — don't stack patches. Surface
   the cause and a different approach.
