@@ -1,212 +1,310 @@
-# Reaper 深挖:健康态怎么判、reaper 怎么据态处置、周期对账怎么与转换锁共存
+# Reaper deep dive: how health is judged, how the reaper acts on it, and how periodic reconciliation coexists with the transition lock
 
-> **定位:[`§4.3`](../model.md)(健康与回收模型)、[`§4.4-A`](../model.md)(崩溃变体 / 周期对账)的
-> 深挖文档,并涉及 [`§5.E`](../subsystems.md)(活动信号载体)、[`§4.4-B`](../model.md)(转换锁)。**
-> spec §4.3 定死了「两层探活 + 连接活动 → 健康态 → 处置互不相同」的形状、§4.4-A 定死了「反向对账 =
-> 一次本地扫描 diff 一张本地表 + 对偶回收/接管」;本文是这两处的**落地机制层**——六件机制各有一个正确的
-> 落点(下表六行):**活动信号从哪来(D1/D2)· 健康分类器与转换锁怎么共存,含分类→处置的活动竞态
-> (D3)· 周期对账与启动对账的两条差异
-> (D4)· transport-down 的收敛边界(D4b)· 死因如何随分类结果带出(D4c)。**
+> **Position: a deep dive on [`§4.3`](../model.md) (the health and reclamation model) and
+> [`§4.4-A`](../model.md) (the crash variant / periodic reconciliation), also touching
+> [`§5.E`](../subsystems.md) (the activity signal's carrier) and [`§4.4-B`](../model.md) (the
+> transition lock).**
+> Spec §4.3 fixes the shape "two probe layers + connection activity → a health state → dispositions
+> that all differ", and §4.4-A fixes "reverse reconciliation = one local scan diffed against one local
+> table + dual reclaim/takeover"; this document is the **mechanism layer** for both — six mechanisms,
+> each with one correct home (the six rows below): **where the activity signal comes from (D1/D2) · how
+> the health classifier coexists with the transition lock, including the classify→act activity race
+> (D3) · the two differences between periodic and startup reconciliation (D4) · transport-down's
+> convergence boundary (D4b) · how the cause of death is carried out with the classification result
+> (D4c).**
 >
-> **编号约定:** 本文自己的节用 `D` 前缀;`§` 一律指 spec 全局章节,两套不混。
+> **Numbering convention:** this document's own sections use a `D` prefix; `§` always means a global
+> spec section, and the two are never mixed.
 
 ---
 
-## D0. 一句话结论
+## D0. The conclusion in one sentence
 
-reaper **不是独立回收器**,是**健康模型的消费者**(§4.3):先对每个沙箱判当前健康态,再据态调 §4
-mediator 已有的动词(`pause`/`destroy` 的 reaper 变体)。它引入的唯一新机械是**周期后台循环**——引擎
-第一个不靠外部 API 调用、自主推进状态机的 actor。六件机制各有一个正确的落点:
+The reaper is **not an independent collector** but **a consumer of the health model** (§4.3): it first
+decides each sandbox's current health state, then calls the verbs the §4 mediator already has (the
+reaper variants of `pause`/`destroy`) according to that state. The only new machinery it introduces is
+a **periodic background loop** — the engine's first actor that advances the state machine autonomously
+rather than on an external API call. Six mechanisms, each with one correct home:
 
-| 机制 | 结论 | 落在 |
+| Mechanism | Conclusion | Lands in |
 | --- | --- | --- |
-| 连接活动信号 | **guest 侧、沙箱全局的「上次 I/O」时戳**,`Health` 探针带回 idle 时长;L2 不通时读不到、绝不误判成 idle | D2 / §5.E |
-| 分类器 vs 并发动词 | 分类器只读、不改态,但与处置跑在**同一次非阻塞试锁**内;`TryLock` 拿不到即跳过(在建/在转,不判) | D3 / §4.4-B |
-| 分类→处置的活动竞态 | 锁守引擎侧转换、不守 guest 的 I/O:两次探针之间沙箱可能变活跃,而活动度不是 lifecycle-state、CAS 比对不到;故 `auto-pause` **锁内再重读一次活动**,仍 idle 才冻结 | D3 / §4.4-B |
-| transport-down 收敛 | 瞬态等重启,但**连续超重启预算 → 升级 dead-recoverable 走 resume**,防崩溃循环卡死 | D4b / §4.3 |
-| 死因怎么从分类传到处置 | 分类器只读且**丢弃** placement,故死因必须**随分类结果一起带出**、不能让处置再问一次 | D4c / §4.3 |
-| 周期对账 | 与启动对账**同一份反向对账**,只多两条:跳持锁沙箱、保护 live-map 活 placement | D4 / §4.4-A |
+| The connection-activity signal | **A guest-side, sandbox-global "last I/O" timestamp**, with the idle duration carried back by the `Health` probe; when L2 is unreachable it cannot be read and must never be misjudged as idle | D2 / §5.E |
+| The classifier vs concurrent verbs | The classifier is read-only and changes no state, but runs inside the **same non-blocking try-lock** as the disposition; if `TryLock` fails, skip (something is being built or transitioned — do not judge) | D3 / §4.4-B |
+| The classify→act activity race | The lock guards engine-side transitions, not the guest's I/O: the sandbox may become active between the two probes, and activity is not lifecycle-state so a CAS cannot compare against it; hence `auto-pause` **re-reads activity once more inside the lock** and freezes only if it is still idle | D3 / §4.4-B |
+| transport-down convergence | A transient waits for the restart, but **continuously exceeding the restart budget → escalate to dead-recoverable and take a resume**, guarding against being stuck in a crash loop | D4b / §4.3 |
+| How the cause of death travels from classification to disposition | The classifier is read-only and **discards** the placement, so the cause of death must be **carried out together with the classification result** rather than letting the disposition ask again | D4c / §4.3 |
+| Periodic reconciliation | **The same reverse reconciliation** as startup's, plus exactly two things: skip locked sandboxes, protect live placements in the live-map | D4 / §4.4-A |
 
 ---
 
-## D1. 为什么活动信号必须在 guest 侧量,不能在 host 侧量
+## D1. Why the activity signal must be measured on the guest side and not the host side
 
-§4.3 `idle` 健康态的判据是「**所有**连接都 idle——无进程活动、pty 无 I/O」。天然的诱惑是在 host 侧量:
-orchestrator 本就代理整条数据面(`processProxy`/`fsProxy`,transport D5),看着字节流过顺手打个时戳即可,
-**零 guest 改动、transport 层不沾进程语义**。
+§4.3's criterion for the `idle` health state is "**all** connections are idle — no process activity, no
+pty I/O". The natural temptation is to measure it on the host side: the orchestrator already proxies the
+entire data plane (`processProxy`/`fsProxy`, transport D5), so it could stamp a timestamp as bytes flow
+past, with **zero guest changes and no process semantics touching the transport layer**.
 
-**这条是错的,会误判成 idle 把干活的 agent 冷冻掉。** 根因在 §3.2 的分离式进程模型:`sandboxd` 的
-`proc.run` **持续**把进程输出泵进每进程的环形缓冲,**无论有没有客户端连着**——这正是"进程比 Start 流
-活得久、稍后 `Connect` 重连"能成立的前提。于是一个 agent 可以**跑几分钟、狂产输出、但零字节流过
-orchestrator**(没人 attach)。host 侧时戳会把它读成 idle,`auto-pause` 掉一个正在工作的沙箱。这是
-idle 定义层面的正确性 bug,不是调参能救的。而同一份活动对 guest 侧恰恰可见——每一帧输出都过
-`proc.broadcast()`、每次输入都过 `writeInput()`,在**已经存在**的路径上极廉价地打戳。故信号在 guest 侧量。
+**That is wrong and would misjudge a working agent as idle and freeze it.** The root cause is §3.2's
+detached process model: `sandboxd`'s `proc.run` **continuously** pumps process output into a per-process
+ring buffer **whether or not a client is attached** — which is the very precondition for "a process
+outlives its Start stream and can be reattached later with `Connect`". So an agent can **run for
+minutes producing prolific output while zero bytes flow past the orchestrator** (nobody is attached). A
+host-side timestamp would read that as idle and `auto-pause` a sandbox that is working. This is a
+correctness bug at the level of idle's definition, not something tuning can rescue. Whereas the same
+activity is precisely visible on the guest side — every output frame passes `proc.broadcast()` and every
+input passes `writeInput()` — where a timestamp is very cheap on paths that **already exist**. So the
+signal is measured on the guest side.
 
-**为什么是 I/O 而不是 CPU。** spec §4.3 的判据措辞是 I/O 活动(`process.List 有进程活动 / pty 有 I/O`),
-不是「有 CPU 占用」。纯 CPU-bound、零 I/O 的进程(极少见于 agent 工作负载)不计入活动——这是 §4.3
-idle 定义本身的选择;若将来证明需要,升级成「CPU+I/O 采样」是 §5.E 的 additive 加法
-(healthServer 多读一份 `/proc/*/stat` jiffies),不改本文其余结论。
-
----
-
-## D2. 信号的形状:沙箱全局单时戳,`Health` 探针带回
-
-- **粒度 = 沙箱全局,不是每 pid。** reaper 的处置是**每沙箱**的(auto-pause 整个沙箱),不是每连接的;
-  故只需一个「这个沙箱最近一次任意 I/O 的时刻」,取所有进程 + pty 的 max。一个进程内共享的 unix-毫秒
-  原子时戳,`broadcast()` 与 `writeInput()` 各写一次。无锁、O(1)、不随进程数偏移。
-- **搭 `Health`,不另造协议。** 探针本身(一处三用:L2 探活 / resume readiness 门 / 活动探针)定形在
-  transport D4.5,本文不复制。这里只钉活动那一用的形状:`CheckResponse` 带 `idle_millis`
-  (= `now - lastIO`),**与 L2「通不通」同一次 RPC 拿全**——分两个 RPC 是无谓往返。host 侧
-  `Client.Health` 的域类型相应带回 idle 时长;冷启 ⑦ 门 / 接管 L2 探针只看 err==nil,忽略它即可。
-- **仍是无状态(§5.E)。** 这个时戳与输出环形缓冲是同一类瞬时信号,五条性质 §5.E 已列全,不复述。
-- **`idle_millis` 只在 L2 通时有意义——L2 不通绝不可读成 idle。** 活动时戳搭在 `Health` 响应里,只有探针
-  **成功返回**才拿得到 `idle_millis`;L2 不通(transport-down / 冷启中 / 死亡)时根本没有可信的活动读数。
-  分类器据此严守次序:**只有 L2 通(而它蕴含 L1 活,§4.3)那条分支才读 `idle_millis` 去分 healthy vs
-  idle**——`idle` 健康态的判据本就含「L2 通」(§4.3 表)。故"探不到活动"永远归 transport-down / dead-recoverable
-  (按 L1 分),**绝不因读不到时戳而误判成 idle 去 auto-pause**。
+**Why I/O and not CPU.** Spec §4.3 words its criterion as I/O activity (`process.List has process
+activity / the pty has I/O`), not "there is CPU occupancy". A purely CPU-bound process with zero I/O
+(very rare in agent workloads) does not count as activity — that is a choice of §4.3's idle definition
+itself; should it ever prove necessary, upgrading to "CPU+I/O sampling" is an additive change in §5.E
+(healthServer reading one more `/proc/*/stat` jiffies value) and changes no other conclusion here.
 
 ---
 
-## D3. 分类器与并发:只读探针跑在处置的同一把锁内,持锁沙箱跳过
+## D2. The signal's shape: one sandbox-global timestamp, carried back by the `Health` probe
 
-**健康分类器自身只读、不改态**(不申请任何锁),但 sweep **在同一次非阻塞试锁内**跑完「分类 → 处置」:
-拿到该沙箱的转换锁后重读记录、分类、按健康态处置,全程一个临界区。它对一个
-沙箱做的是:**先 L2**(`Health`,同一次 RPC 带回 idle)——L2 通 ⟹ L1 活(§4.3),故直接按 `idle_millis` 分
-healthy / idle,**L1 探针整个跳过**;**只有 L2 不通才补一次 L1 探针**(`Adopt`),用来把 transport-down
-(L1 活)与 dead-recoverable(L1 死)分开。处置动作照走 §4.4-B 的 CAS,只是**不必再拿一次锁**——它就在
-分类所用的那次持锁里,故**判定与处置之间没有窗口**,处置看到的是与判据一致的锁内视图。
-
-由此两条守则:
-
-- **对持锁沙箱 `TryLock` 跳过。** in-flight resume **全程持转换锁**(§4.4-B):guest 尚未 listening,L2 必不
-  通,分类器照跑会误判成 `dead-recoverable`、空发一次注定失败的 resume 尝试并误报(spec §4.3 明列此坑)。
-  故 sweep 对每沙箱先 `TryLock`:拿不到 = 有动词在推进它(在建/在转)= **跳过本轮**,不判不处置。这就是
-  spec 的 single-flight 守卫,落成「非阻塞试锁 + 跳过」,**不新增 §4.1 状态**(仍四态)。
-- **锁承重正确性,但它守的是引擎侧的转换、不是 guest 的 I/O。** 两条竞态,一条被锁彻底关掉,一条只被缩小:
-  1. **并发动词改了 lifecycle-state**(用户 `pause`/`resume`/`destroy` 插进来):这条**不存在窗口**——它们要
-     同一把锁,拿不到锁的一轮直接跳过;拿到锁后 sweep 先重读记录(源态不再 `running` 即放手),处置再走
-     **CAS 前置校验**(要求源态 `running`)。锁 + CAS 直接兜住。
-  2. **沙箱刚变活跃**(用户发了输入 / 进程恢复 I/O):**这条锁关不掉,CAS 也接不住**——活动度是 guest 内的
-     事实,不是 lifecycle-state,持有引擎侧的锁并不能阻止 guest 干活。而分类的那次探针与处置前的那次探针之间
-     隔着**一次 RPC 往返**,沙箱可以就在这一往返里变活跃。故规范要求 `auto-pause` 在**锁内再重读一次活动信号**
-     (仍 idle 才冻结),陈述在 §4.3;窗口从"一次往返"起算,这里只补它之后的残留。
-  - 残留的亚微秒窗口(锁内重读之后、runsc 冻结之前用户恰好发输入)无害且不可消除:它与"用户在 pause 刚起步的
-    瞬间发输入"无从区分,由 §4.2 pause 静止点语义正常处理,不算误暂停。§4.4-B「锁承重正确性、single-flight 只
-    承重效率」在此精确为:锁内的**态**是权威的,只有**活动**是个可"看走眼"一瞬的读数,故处置对它再判一次才落定。
-
-**让分类跑在锁内的代价,和它不是什么。** 直觉上的反对是"分类持锁会让 sweep 与用户动词长时间争锁、把 reaper
-变成延迟源"。这条不成立,因为 **sweep 永不阻塞**:它试锁,不成即跳过本轮(见上一条)。故争锁的方向是反的——
-不是 sweep 卡在用户动词后面,而是**该沙箱上至多一个用户动词多等一次探针往返**(正常毫秒级,上界是探针超时)。
-把"扫完全部沙箱的时长"当成"在一个沙箱上持锁的时长",是这条反对意见的算错处:持锁是逐沙箱的,与沙箱总数无关。
-换来的是**判定与处置之间没有窗口**——处置不必为"态可能已变"再补一次代偿性重读,lifecycle-state 一侧的竞态被
-关掉而不是被兜住。
+- **Granularity = sandbox-global, not per-pid.** The reaper's dispositions are **per sandbox**
+  (auto-pausing the whole sandbox) rather than per connection; so all that is needed is "the moment of
+  this sandbox's most recent I/O of any kind", the max over all processes + the pty. One process-shared
+  atomic unix-millisecond timestamp, written once by `broadcast()` and once by `writeInput()`.
+  Lock-free, O(1), and unbiased by the number of processes.
+- **It rides `Health` rather than inventing another protocol.** The probe itself (one thing serving
+  three purposes: the L2 probe / the resume readiness gate / the activity probe) is shaped in transport
+  D4.5 and is not duplicated here. Only the activity purpose's shape is pinned here: `CheckResponse`
+  carries `idle_millis` (= `now - lastIO`), **obtained in the same RPC as L2's reachable-or-not** —
+  splitting it into two RPCs would be a pointless round trip. The host-side `Client.Health`'s domain
+  type carries the idle duration back accordingly; cold start's ⑦ gate and the takeover L2 probe look
+  only at err==nil and may ignore it.
+- **It is still stateless (§5.E).** This timestamp and the output ring buffer are the same class of
+  transient signal, and §5.E lists all five properties already; not restated.
+- **`idle_millis` is meaningful only when L2 is reachable — an unreachable L2 must never be read as
+  idle.** The activity timestamp rides the `Health` response, so `idle_millis` is obtainable only when
+  the probe **returns successfully**; when L2 is unreachable (transport-down / mid-cold-start / dead)
+  there is no trustworthy activity reading at all.
+  The classifier therefore keeps a strict order: **only the branch where L2 is reachable (which implies
+  L1 is alive, §4.3) reads `idle_millis` to separate healthy from idle** — the `idle` health state's
+  criterion already includes "L2 reachable" (§4.3's table). So "activity could not be probed" always
+  belongs to transport-down / dead-recoverable (separated by L1), and **never becomes a misjudgment as
+  idle leading to an auto-pause** just because a timestamp could not be read.
 
 ---
 
-## D4. 周期对账 = 启动对账同一份逻辑,只多两条
+## D3. The classifier and concurrency: a read-only probe running inside the disposition's own lock, with locked sandboxes skipped
 
-周期对账仍是「一次本地扫描 diff 一张本地表」,与启动对账共用 `Reconcile` 的主体。(两条差异的规范陈述在
-§4.4-A。)本节落地 §4.4-A 向本文要的四样:触发时机、与转换锁的协调、本机资源枚举、批量与失败策略。
+**The health classifier is itself read-only and changes no state** (it acquires no lock), but the sweep
+runs "classify → act" to completion **inside the same non-blocking try-lock**: having taken that
+sandbox's transition lock it rereads the record, classifies, and acts according to the health state, all
+in one critical section. What it does to a sandbox is: **L2 first** (`Health`, the same RPC carrying the
+idle value back) — L2 reachable ⟹ L1 alive (§4.3), so it separates healthy / idle directly by
+`idle_millis` and **skips the L1 probe entirely**; **only when L2 is unreachable does it add an L1
+probe** (`Adopt`), used to separate transport-down (L1 alive) from dead-recoverable (L1 dead). The
+disposition still goes through §4.4-B's CAS, except that it **need not take the lock again** — it is
+already inside the hold the classification used, so **there is no window between decision and
+disposition** and what the disposition sees is the in-lock view consistent with the criteria.
 
-**周期对账 vs reaper 循环:两个消费者,一份健康判据,可同一个 tick。** reaper 处置 `idle`/`paused`-TTL 是
-「态对但该推进」;周期对账处置的是「态与现实不符」(store 说 `running`、单元已死 → `crash-paused`;孤儿
-placement → 回收)。故实现上**一个周期 tick 里两个消费者按序跑,而只有一个做健康分类**:对账在前,读
-live-map 处置 placement 侧(孤儿回收 / 接管),不发探针;sweep 在后,做那**唯一一次**分类,其结果同时喂
-TTL 处置与 crash-pause。对账先跑是为了让一个单元已死的 `running` 记录在 sweep 得出同一结论前就被降级
-——两者幂等,次序只省一次冗余判定,故**探活不跑两遍**。
+Two rules follow:
 
-**失败策略沿用 §4.4-A:skip-and-log,对不确定的 `running` 存活者取保守**(保护其 placement 不回收,漏拆可逆、
-误拆不可逆),对账幂等,跳过项下轮重来。**批量策略**:逐沙箱串行判、单轮全量扫(单机、沙箱数有限,足够);
-若将来规模变大,分批 + 限流是 additive 调参,不改本形状。**枚举本机资源**为 runsc 容器 + netns + overlay
-mount + §5.D 的 nft 规则集(`ReclaimOrphans` 按表名前缀枚举后者)。**规则集这一项的删除次序是硬约束**:
-keep 集必须在任何删除**之前**算好,否则一次排在 `Adopt` 之前的回收会顺手删掉活沙箱的表,而那逐字是
-"先 delete 再装"——会断掉活着的流(network.md D5 ㉒)。
+- **`TryLock`-skip locked sandboxes.** An in-flight resume **holds the transition lock throughout**
+  (§4.4-B): the guest is not yet listening, L2 is necessarily unreachable, and a classifier running
+  anyway would misjudge it as `dead-recoverable`, spend a resume attempt certain to fail, and raise a
+  false alarm (spec §4.3 names this pit explicitly). So the sweep `TryLock`s each sandbox first: failing
+  to get it = some verb is advancing it (being built / being transitioned) = **skip this round**,
+  judging and acting on nothing. This is the spec's single-flight guard, landed as "a non-blocking
+  try-lock + skip", and it **adds no §4.1 state** (still four).
+- **The lock is load-bearing for correctness, but what it guards is engine-side transitions, not the
+  guest's I/O.** Two races: one is closed completely by the lock, the other is only narrowed:
+  1. **A concurrent verb changed lifecycle-state** (a user `pause`/`resume`/`destroy` cutting in): this
+     one **has no window** — they want the same lock, and a round that cannot get the lock is skipped
+     outright; having taken the lock the sweep rereads the record first (letting go if the source state
+     is no longer `running`), and the disposition then goes through the **CAS precondition check**
+     (requiring source state `running`). The lock + the CAS catch it directly.
+  2. **The sandbox has just become active** (the user sent input / a process resumed I/O): **this one
+     the lock cannot close and a CAS cannot catch** — activity is a fact inside the guest rather than
+     lifecycle-state, and holding an engine-side lock does not stop the guest from working. And between
+     the classifying probe and the pre-disposition probe lies **one RPC round trip**, in which the
+     sandbox can become active. So the spec requires `auto-pause` to **re-read the activity signal once
+     more inside the lock** (freezing only if it is still idle), as stated in §4.3; the window starts
+     from "one round trip", and this section only adds what remains after that.
+  - The residual sub-microsecond window (the user sending input exactly after the in-lock re-read and
+    before runsc freezes) is harmless and ineliminable: it is indistinguishable from "the user sent
+    input at the instant a pause was starting", is handled normally by §4.2's pause quiescent-point
+    semantics, and does not count as a wrongful pause. §4.4-B's "the lock is load-bearing for
+    correctness, single-flight only for efficiency" becomes precise here: the **state** inside the lock
+    is authoritative, and only **activity** is a reading that can be momentarily "seen wrong", which is
+    why the disposition judges it once more before committing.
 
----
-
-## D4b. transport-down 的重启预算:瞬态与死亡之间的收敛边界
-
-§4.3 表把 transport-down 定为**瞬态**(L1 活、L2 不通 = transport 子进程崩了、PID1 正原地重启,§5.E.1),处置
-是**等重启**、不走 resume。但「等」不能无界:一个**崩溃循环**的 transport 子进程(bind 端口即 panic、re-exec
-又崩)永远翻不回 L2 通,若无限等,该沙箱既回不到 healthy、又永远不被 auto-pause / crash-pause,成一个**卡死
-的黑洞**。故 transport-down **必须有一条收敛边界**——这正是 §4.3「超重启预算才升级」那半句要落地的机制。
-
-**判据 = 有界重启预算,升级方向 = dead-recoverable。** 一个沙箱**连续**分类为 transport-down 的时长(判据取
-时长而非 PID1 重启计数:不需 PID1 向控制面上报计数)超过
-**重启预算**后,reaper 把它从 transport-down **升级**为 `dead-recoverable` 处置:走 resume(§4.2)换新 IP 整链
-冷启。理由:transport 原地重启本是"成本远低于 resume"的快路径(§4.3),但**快路径不收敛时,唯一仍能恢复该沙箱
-的手段就是整链冷启**——升级到 resume 是从"进程内可恢复"退回到"substrate 级恢复",与 dead-recoverable 同一处置,
-不新造状态、不新造动词。
-
-**这条不与 single-flight / 转换锁打架。** 升级后的 resume 照常走 §4.4-B 全程持锁 + §4.3 单飞守卫(持锁期分类
-挂起),与 dead-recoverable 触发的 resume 完全同路。reaper 在此只是**改判处置健康态**(transport-down→dead-recoverable),
-处置动作本身不特殊。
-
-**重启预算取值是纯调参**(同 idle_timeout / retention):保守默认(给 PID1 足够多次重启窗口,避免把一次慢重启
-误升级成冷启),配置点标注,可调,不影响本收敛边界的形状。
-
----
-
-## D4c. 死因必须随分类结果带出:信号易失,处置不能"再问一次"
-
-§4.3 把 `resource-terminated` 与 `dead-recoverable` 定为**并列**处置(前者不 resume),二者只能靠**死因**区分。
-这给分类器加了一条本文其余机制都没有的性质:**死因信号是易失的**——它活在 provider 的 placement-local 资源里,
-`Stop`/`Destroy`/`ReclaimOrphans` 任一条拆除 placement 即消失,也不跨宿主重启。于是三条约束连锁成立:
-
-- **读点唯一,在 L1 探活那一刻。** 分类器判 L1 死靠 `Adopt`(D3),而那正是 placement 尚完整的最后一刻。故
-  `Adopt` 的"已死"结论必须**顺带带出死因**,而不是让处置动词事后再查——事后 placement 可能已被拆掉。
-- **带出而非重取。** 分类器是**只读**的、判完就**丢弃**重建的 placement 句柄(D3)。所以死因必须随分类结果
-  一起返回给 reaper,由 reaper 交给处置动词;分类器读了却不带出,等于读了就扔。
-- **落库与降级 CAS 同一次提交。** 处置动词拿到死因后,写入必须与 `crash-paused` 的 CAS 原子(§4.4-C 同一形状)
-  ——CAS 之后 teardown 随时可跑,证据不可恢复,补写窗口不存在。
-
-**两条实测事实把设计空间压成唯一解:**
-
-- **runsc 的盘上状态里没有死因,所以"事后再问"这个世界不存在。** `--root=<dir>` 的持久 `.state` 虽扛宿主
-  重启,但只有身份 + 创建期快照:四例对照(OOM / 正常退 0 / 外部 SIGKILL / 退 42)的持久字段**逐字段相同**
-  ——无 exit code、无 signal、无 OOM 标志。更要小心的是持久 `status` 对已死容器**仍写着 `running`**(创建时
-  写、死时不更新),`runsc state` 报的 `stopped` 是**读时**探 pid 活性算出来的。**别信盘上那个字段**,重启后
-  那个 pid 也没有意义。
-- **唯一精确的 `ResourceExceeded` 信号是 memcg 叶子的 `oom_group_kill`,而它只活到 `runsc delete`。** 整组
-  击杀后实测 `oom_group_kill 1`、`memory.peak` 恰好顶到帽;容器已 `stopped` 但未 `delete` 时仍可读。
-  **用 `oom_group_kill`、不用 `oom_kill`**:后者是组内单 task 计数,同一次整组击杀实测为 9,无法回答
-  "这个沙箱是不是因为自己的 RAM 帽被杀"。
-
-于是读点唯一落在 `Adopt` 的 `!alive` 分支返回前:`teardownPlacement` 的 `kill`→`delete` 两行会同时销毁
-memcg 叶子与 runsc 自己在 `--root` 下的容器状态,而三条死亡发现路径(启动对账 / 周期对账 /
-reaper crash-pause)全都经过 `Adopt`。
-映射:`oom_group_kill > 0` → `ResourceExceeded`,否则 `Gone`,读不到 → `Unknown`。
-
-> **还有第四条拆除路径,它不是发现路径:用户 `pause` 一个已经死掉的沙箱。** `pause` 不探活,CAS 因记录仍是
-> `running` 而成功,随后 `Stop` → teardown 把 memcg 连同死因一起销毁,而 `pause` 传的 cause 是 `nil`(它不是
-> 死亡观测,不该编造死因)。于是一个**确实撞了帽**的沙箱可能留下"从未死过"的记录。这不破 §4.3——`Unknown`
-> 的结构性自我纠正正为此(§4.3),但它是一处**已登记的窗口**,不是被忽略的疏漏。
-
-**`Unknown` 的处置与结构性自我纠正在 §4.3**;此处只补它的备选为何不成立。
-
-**落库式重试计数没有可推导的重置点(这是它真正的死因)。** 每一次**完成**的 `Resume` 都是成功的
-(`resumeLocked` 只在 ⑦ 就绪门之后翻 `running`),死亡是**之后**异步到来的。故"尝试次数"只能在
-crash-pause 时计,它实质是一条**连续死亡 streak**,且必须跨过中间那次成功的 resume——而那次成功正是
-引擎拿到的唯一正向信号,代码在那里**刻意清掉死因**,好让陈旧状态不累积。于是只剩三个重置点,都不成立:
-成功即重置 ⇒ 计数永不超过 1、什么也没度量;永不重置 ⇒ 半年里合法崩溃五次的沙箱被永久砖化;按时间窗
-重置 ⇒ 那是**限流**,永不永久拒绝,既给不出所声称的上界、也不贡献收敛。此外,把它落进沙箱记录里的
-per-sandbox 单调计数,**就是换了名字的世代计数**(§1.1 明令禁止,理由正是"防世代计数从别处渗回")。
-
-**并且:按次数拒绝一个显式动词,与按事实拒绝是两回事。** §4.3 已经批准了一种拒绝,其正当性很具体:
-`resource-terminated` 拒的依据是**关于这个沙箱的一条已落库事实**,有因果解释力、原则上可补救(抬帽或
-销毁)。而按次数拒绝不依赖关于沙箱的任何事实,它说的是"你已经试够多次了"——一个关于**调用方执着程度**
-的判断,属产品层语义,且严格劣于把决定交还调用方(调用方可能刚修好负载,引擎无从知道)。
+**The cost of running classification inside the lock, and what it is not.** The intuitive objection is
+"classifying under the lock makes the sweep contend with user verbs for a long time and turns the reaper
+into a source of latency". That does not hold, because **the sweep never blocks**: it tries the lock and
+skips the round on failure (previous rule). So the contention runs the other way — it is not the sweep
+stuck behind a user verb, but **at most one user verb on that sandbox waiting one extra probe round
+trip** (milliseconds normally, bounded by the probe timeout). Mistaking "how long a full scan of every
+sandbox takes" for "how long the lock is held on one sandbox" is where that objection miscounts: the
+hold is per sandbox and independent of the total number of sandboxes. What it buys is **no window
+between decision and disposition** — the disposition need not add a compensating reread for "the state
+may have changed", and the lifecycle-state race is closed rather than merely caught.
 
 ---
 
-## D5. 边界
+## D4. Periodic reconciliation = the same logic as startup reconciliation, plus exactly two things
 
-- **对象回收 refcount/GC sweep(§4.3 `uniform object model invariant`)不在本文。** 那是 Template lineage /
-  Volume 挂载行的引用-回收原子性(§4.3 + §4.4-C),另属对象回收 sweep。reaper 的 `evict` 走 `Destroy` 的
-  **同步删 Overlay**,**不按 refcount 异步删字节**——reaper 在此只推**生命周期态**;失败后的字节由同一 tick
-  的孤儿单元 sweep 兜。二者的接缝(evict 标 destroyed 与异步删字节解耦)spec §4.4 已定。
-- **TTL 取值**(default `idle_timeout` / `retention`)与**重启预算取值**(D4b)都是数值旋钮,不是待办:
-  按 [`transport.md`](./transport.md) D5.4 的同一条纪律,取保守默认、在配置点标注、留可调——落点在代码,
-  不登记为开放决策。
-- **§5.D 规则集的枚举与重建**已并入周期对账:`Adopt` 整份原子重装、`ReclaimOrphans` 按表名前缀回收,
-  两者的次序约束见本文 D4 末段与 network.md D5 ㉒。
+Periodic reconciliation is still "one local scan diffed against one local table", sharing the body of
+`Reconcile` with startup reconciliation. (The normative statement of the two differences is in §4.4-A.)
+This section lands the four things §4.4-A asks of this document: trigger timing, coordination with the
+transition lock, host resource enumeration, and batching and failure strategy.
+
+**Periodic reconciliation vs the reaper loop: two consumers, one health criterion, and they may share a
+tick.** The reaper acting on `idle`/`paused`-TTL is "the state is right but should advance"; periodic
+reconciliation acts on "the state does not match reality" (the store says `running` while the unit is
+dead → `crash-paused`; an orphan placement → reclaim). So in the implementation **two consumers run in
+order within one periodic tick while only one of them classifies**: reconciliation goes first, reading
+the live-map and acting on the placement side (orphan reclamation / takeover) without sending probes;
+the sweep goes second and does that **one and only** classification, whose result feeds both the TTL
+dispositions and crash-pause. Reconciliation runs first so that a `running` record whose unit is dead is
+demoted before the sweep reaches the same conclusion — the two are idempotent, and the ordering only
+saves one redundant judgment, so **probing does not happen twice**.
+
+**The failure strategy follows §4.4-A: skip-and-log, and be conservative about an uncertain surviving
+`running`** (protect its placement from reclamation — failing to tear down is reversible, tearing down
+wrongly is not); reconciliation is idempotent and a skipped item comes round next time. **The batching
+strategy**: judge sandbox by sandbox serially, scanning all of them in one round (single node, a bounded
+number of sandboxes, which suffices); should the scale grow later, batching + rate limiting is additive
+tuning and does not change this shape. **Host resource enumeration** covers runsc containers + netns +
+overlay mounts + §5.D's nft rule sets (`ReclaimOrphans` enumerating the last by table-name prefix).
+**The deletion order for the rule-set item is a hard constraint**: the keep set must be computed
+**before** any deletion, or a reclamation ordered before `Adopt` would delete a live sandbox's table in
+passing — and that is word for word a "delete first, then install", which would break live flows
+(network.md D5 ㉒).
+
+---
+
+## D4b. transport-down's restart budget: the convergence boundary between a transient and a death
+
+§4.3's table defines transport-down as a **transient** (L1 alive, L2 unreachable = the transport child
+crashed and PID 1 is restarting it in place, §5.E.1), whose disposition is **wait for the restart**
+rather than take a resume. But "wait" cannot be unbounded: a transport child in a **crash loop** (it
+panics on binding the port, re-execs, and crashes again) never flips back to L2-reachable, and with
+unbounded waiting that sandbox neither returns to healthy nor is ever auto-paused / crash-paused,
+becoming a **wedged black hole**. So transport-down **must have a convergence boundary** — which is
+exactly the mechanism §4.3's "escalate only after exceeding the restart budget" clause wants landed.
+
+**The criterion = a bounded restart budget; the escalation direction = dead-recoverable.** Once the
+duration for which a sandbox has been **continuously** classified transport-down (the criterion takes
+duration rather than a count of PID 1 restarts — PID 1 need not report a count to the control plane)
+exceeds the **restart budget**, the reaper **escalates** it from transport-down to a
+`dead-recoverable` disposition: take a resume (§4.2), cold-starting the whole chain on a new IP. The
+reason: an in-place transport restart is the fast path that "costs far less than a resume" (§4.3), but
+**when the fast path does not converge, the only remaining means of recovering that sandbox is a
+whole-chain cold start** — escalating to a resume steps back from "in-process recoverable" to
+"substrate-level recovery", the same disposition as dead-recoverable, inventing no new state and no new
+verb.
+
+**This does not fight single-flight or the transition lock.** The escalated resume still goes through
+§4.4-B's hold-throughout plus §4.3's single-flight guard (classification suspended while the lock is
+held), exactly the same path as a resume triggered by dead-recoverable. The reaper here only **changes
+which health state is acted on** (transport-down→dead-recoverable), and the disposition itself is not
+special.
+
+**The restart budget's value is pure tuning** (like idle_timeout / retention): a conservative default
+(giving PID 1 a generous window of restarts, so one slow restart is not escalated into a cold start),
+annotated at the configuration point, adjustable, and not affecting this convergence boundary's shape.
+
+---
+
+## D4c. The cause of death must be carried out with the classification result: the signal is volatile and the disposition cannot "ask again"
+
+§4.3 defines `resource-terminated` and `dead-recoverable` as **peer** dispositions (the former does not
+resume), and the two can be separated only by the **cause of death**. That gives the classifier a
+property none of this document's other mechanisms has: **the cause-of-death signal is volatile** — it
+lives in the provider's placement-local resources and disappears the moment any of
+`Stop`/`Destroy`/`ReclaimOrphans` tears the placement down, and it does not survive a host restart. So
+three constraints hold in a chain:
+
+- **There is exactly one read point, at the instant of the L1 probe.** The classifier decides L1 is dead
+  through `Adopt` (D3), and that is the last moment the placement is still intact. So `Adopt`'s "already
+  dead" conclusion must **carry the cause of death out along with it** rather than letting the
+  disposition verb look it up afterwards — afterwards the placement may already be torn down.
+- **Carried out, not re-fetched.** The classifier is **read-only** and **discards** the placement handle
+  it rebuilt once it has judged (D3). So the cause of death must be returned to the reaper together with
+  the classification result, for the reaper to hand to the disposition verb; a classifier that reads it
+  without carrying it out has read it and thrown it away.
+- **Persisting it shares one commit with the demoting CAS.** Once the disposition verb has the cause of
+  death, writing it must be atomic with `crash-paused`'s CAS (the same shape as §4.4-C) — after the CAS
+  a teardown may run at any time, the evidence is unrecoverable, and there is no window for a
+  fill-in-later write.
+
+**Two measured facts compress the design space to a single solution:**
+
+- **runsc's on-disk state holds no cause of death, so the world of "ask again afterwards" does not
+  exist.** The durable `.state` under `--root=<dir>` does survive a host restart, but holds only
+  identity + a snapshot from creation time: across four controlled cases (OOM / a normal exit 0 / an
+  external SIGKILL / exit 42) the durable fields are **identical field for field** — no exit code, no
+  signal, no OOM flag. More treacherously, the durable `status` for an already-dead container **still
+  reads `running`** (written at creation and not updated at death), and the `stopped` that `runsc state`
+  reports is computed **at read time** by probing pid liveness. **Do not trust that on-disk field**, and
+  after a restart that pid is meaningless anyway.
+- **The only precise `ResourceExceeded` signal is the memcg leaf's `oom_group_kill`, and it lives only
+  until `runsc delete`.** After a whole-group kill, measured: `oom_group_kill 1` and `memory.peak`
+  reaching exactly the cap; still readable while the container is `stopped` but not yet `delete`d.
+  **Use `oom_group_kill`, not `oom_kill`**: the latter counts individual tasks within the group and
+  measured 9 for the same single whole-group kill, so it cannot answer "was this sandbox killed because
+  of its own RAM cap".
+
+So the one read point lands just before `Adopt`'s `!alive` branch returns: `teardownPlacement`'s
+`kill`→`delete` pair destroys both the memcg leaf and runsc's own container state under `--root`, and
+all three death-discovery paths (startup reconciliation / periodic reconciliation / the reaper's
+crash-pause) go through `Adopt`.
+The mapping: `oom_group_kill > 0` → `ResourceExceeded`, otherwise `Gone`, and unreadable → `Unknown`.
+
+> **There is a fourth teardown path, and it is not a discovery path: a user `pause` on a sandbox that is
+> already dead.** `pause` does not probe, its CAS succeeds because the record still says `running`, and
+> the subsequent `Stop` → teardown destroys the memcg along with the cause of death, while the cause
+> `pause` passes is `nil` (it is not a death observation and should not fabricate one). So a sandbox that
+> **really did hit its cap** may leave behind a record of "never died". This does not break §4.3 —
+> `Unknown`'s structural self-correction exists for exactly this (§4.3) — but it is **a registered
+> window** rather than an overlooked oversight.
+
+**`Unknown`'s disposition and structural self-correction are in §4.3**; here we only add why its
+alternatives do not hold.
+
+**A persisted retry count has no derivable reset point (this is its real cause of death).** Every
+**completed** `Resume` is a success (`resumeLocked` flips to `running` only after the ⑦ readiness gate),
+and death arrives **afterwards**, asynchronously. So an "attempt count" can only be incremented at
+crash-pause, making it in substance a **consecutive-death streak** that must span the successful resume
+in the middle — and that success is the one positive signal the engine ever gets, where the code
+**deliberately clears the cause of death** so stale state does not accumulate. That leaves three reset
+points, none of which holds: reset on success ⇒ the count never exceeds 1 and measures nothing; never
+reset ⇒ a sandbox that crashed legitimately five times over half a year is permanently bricked; reset on
+a time window ⇒ that is **rate limiting**, which never refuses permanently, so it neither provides the
+claimed bound nor contributes convergence. Besides, a per-sandbox monotonic count persisted into the
+sandbox record **is the very counter §1.1 bars under another name** (barred precisely to "stop it
+seeping back in from elsewhere").
+
+**And: refusing an explicit verb by count is a different thing from refusing it by fact.** §4.3 has
+already sanctioned one refusal, and its justification is specific: `resource-terminated` refuses on the
+basis of **a persisted fact about this sandbox**, which has causal explanatory power and is remediable
+in principle (raise the cap or destroy it). Refusing by count rests on no fact about the sandbox at all;
+it says "you have tried enough times" — a judgment about **the caller's persistence**, which is
+product-layer semantics, and strictly worse than handing the decision back to the caller (who may have
+just fixed the workload, something the engine has no way to know).
+
+---
+
+## D5. Boundaries
+
+- **Object-reclamation refcount/GC sweeps (§4.3's `uniform object model invariant`) are not in this
+  document.** That is the reference-reclamation atomicity of Template lineage / Volume mount rows (§4.3
+  + §4.4-C) and belongs to the object-reclamation sweep. The reaper's `evict` goes through `Destroy`'s
+  **synchronous Overlay deletion** and **does not delete bytes asynchronously by refcount** — the reaper
+  here only advances **lifecycle state**; bytes left behind by a failure are caught by the orphan-unit
+  sweep in the same tick. The seam between the two (evict marking destroyed being decoupled from
+  asynchronous byte deletion) is already fixed by spec §4.4.
+- **The TTL values** (the default `idle_timeout` / `retention`) and **the restart budget's value**
+  (D4b) are both numeric knobs rather than open items: per the same discipline as
+  [`transport.md`](./transport.md) D5.4, take a conservative default, annotate it at the configuration
+  point, and leave it adjustable — landing in code, not registered as an open decision.
+- **Enumerating and rebuilding §5.D's rule sets** is already folded into periodic reconciliation:
+  `Adopt` reinstalls the whole set atomically and `ReclaimOrphans` reclaims by table-name prefix, with
+  the ordering constraints on both in this document's D4 closing paragraph and network.md D5 ㉒.
