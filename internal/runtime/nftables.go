@@ -598,7 +598,7 @@ func joinHostPort(a netip.Addr, port uint16) string {
 // predicates — the guards are SCOPED BY TABLE rather than one guard with an
 // exemption, because a single "every rule carries iifname" guard would reject the
 // very rule §2.4 invariant 2 requires.
-func renderGuards(text string, perSandbox bool) error {
+func renderGuards(text string, perSandbox bool, endpoints map[publishKey]string) error {
 	for _, line := range strings.Split(text, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
@@ -629,7 +629,7 @@ func renderGuards(text string, perSandbox bool) error {
 			continue
 		}
 		if perSandbox {
-			if !hasPerSandboxNarrowing(code) {
+			if !hasPerSandboxNarrowing(code, endpoints) {
 				return fmt.Errorf("runtime: rendered per-sandbox rule %q carries NO narrowing. Every "+
 					"per-sandbox table is a `policy accept` base chain on a SHARED hook, so an "+
 					"un-narrowed accept is a hole in EVERY sandbox's floor, and an un-narrowed drop is "+
@@ -645,35 +645,44 @@ func renderGuards(text string, perSandbox bool) error {
 			}
 			continue
 		}
-		// The second-hop table: every DROP must carry `skuid`.
-		if strings.Contains(code, "accept") && !strings.Contains(code, "ct state") {
-			return fmt.Errorf("runtime: rendered second-hop rule %q is an accept with no ct-state "+
-				"narrowing — the only accept this table may carry is the RETURN arm for an already "+
-				"established flow. An unqualified accept here would admit NEW connections to in-floor "+
-				"addresses, which is the confused deputy §2.4 invariant 2 refuses (D4.2)", code)
-		}
-		if strings.Contains(code, "drop") && !strings.Contains(code, "meta skuid") {
-			return fmt.Errorf("runtime: rendered second-hop rule %q drops WITHOUT a `skuid` narrowing. "+
-				"On the output hook that is a HOST-LEVEL egress kill switch — measured, root's own "+
-				"probe failed too — and `iifname` cannot serve as the narrowing here, because this "+
-				"traffic arrives on no interface (network.md D5 ㉔)", code)
-		}
-		// …and nothing in this table may be an accept narrowed by uid: `skuid` misses
-		// packets, so such an accept above a floor drop leaks whatever it misses.
-		// The return arm is the ONE legal accept here: `ct state established,related` with
-		// no identity predicate. It is safe for the reason a uid-narrowed accept is not —
-		// the measured leak is a property of `skuid` missing packets, and a ct-state
-		// predicate has no such gap (D5 ㉔). It cannot admit a NEW connection, which is
-		// what the confused deputy would be.
-		if strings.Contains(code, "accept") && strings.Contains(code, "ct state") &&
-			!strings.Contains(code, "meta skuid") && !strings.Contains(code, "new") {
+		// The second-hop table. An ACCEPT is stated as a WHITELIST rather than as a set
+		// of enumerated refusals: the return arm is the only accept this table may
+		// carry, so an accept shape nobody anticipated must FAIL rather than fall
+		// through every branch. Enumerating refusals is how `ct state new … accept` —
+		// the confused deputy itself — passed: it matched no refusal and reached the
+		// end of the loop.
+		if strings.Contains(code, "accept") {
+			legal := strings.Contains(code, "ct state") &&
+				!strings.Contains(code, "new") &&
+				!strings.Contains(code, "meta skuid")
+			if !legal {
+				return fmt.Errorf("runtime: rendered second-hop rule %q is not the RETURN arm — the "+
+					"only accept this table may carry is `ct state established,related` with no "+
+					"identity predicate. An accept matching `new` admits NEW connections to in-floor "+
+					"addresses, the confused deputy §2.4 invariant 2 refuses (D4.2); one narrowed by "+
+					"`skuid` leaks the packets skuid misses past the floor it sits above (measured "+
+					"asymmetry, network.md D5 ㉔) — a uid narrowing is safe on a DROP only", code)
+			}
 			continue
 		}
-		if strings.Contains(code, "accept") && strings.Contains(code, "meta skuid") {
-			return fmt.Errorf("runtime: rendered second-hop rule %q is a uid-narrowed ACCEPT. `skuid` "+
-				"does not reliably match every packet of a flow, so an accept narrowed by it leaks the "+
-				"packets it misses past the floor it sits above (measured asymmetry, network.md D5 ㉔) "+
-				"— a uid narrowing is safe on a DROP only", code)
+		// EVERY TERMINAL VERDICT, not just the word `drop`: `reject` terminates
+		// traversal across chains identically (ruleset.Verdict.Terminal), so an
+		// un-narrowed reject here is the same host-level egress kill switch.
+		if (strings.Contains(code, "drop") || strings.Contains(code, "reject")) &&
+			!strings.Contains(code, "meta skuid") {
+			return fmt.Errorf("runtime: rendered second-hop rule %q carries a terminal verdict WITHOUT "+
+				"a `skuid` narrowing. On the output hook that is a HOST-LEVEL egress kill switch — "+
+				"measured, root's own probe failed too — and `iifname` cannot serve as the narrowing "+
+				"here, because this traffic arrives on no interface (network.md D5 ㉔)", code)
+		}
+		// A nat verdict has no business in this table at all: it pins the second hop
+		// under the L0 floor and does nothing else, so a DNAT here would steer
+		// host-originated traffic.
+		if strings.Contains(code, "dnat ") || strings.Contains(code, "snat ") ||
+			strings.Contains(code, "masquerade") {
+			return fmt.Errorf("runtime: rendered second-hop rule %q carries a nat verdict. The "+
+				"engine-level table pins the second hop under the floor and does nothing else "+
+				"(§2.4 invariant 2); a nat verdict there would steer host-originated traffic", code)
 		}
 	}
 	return nil
@@ -695,22 +704,40 @@ func renderGuards(text string, perSandbox bool) error {
 //     placement and per publish item, and it is the PORT that makes the pair
 //     per-sandbox: the address alone is a host address every sandbox's table names.
 //
-// WHY THE PAIR AND NOT A BARE `daddr`: a bare `daddr` substring is not an interface
-// predicate and not per-sandbox — the L0 floor's forward arm and the deny-safe tier
-// both render `ip daddr { … }`, so accepting it would let a floor DROP THAT LOST ITS
-// `iifname` pass this guard, i.e. exactly the host-level kill switch guard 3 exists to
-// catch, in the one rule class where it does the most damage. The abstract half
-// (ruleset.Validate's ScopeNone check) and renderScope each refuse that rule today, so
-// this is not a live hole — but the text guard's ENTIRE reason to exist is being the
-// line that still holds when the abstract half is edited wrong (M8 plan §2 item 12:
-// refuse ANY rule without `iifname`, accept and drop alike).
-func hasPerSandboxNarrowing(code string) bool {
+// WHY THE ENDPOINT SET AND NOT A `daddr`+`dport` TEXT SHAPE: that shape is not unique
+// to ScopeHostEndpoint. `renderMatch` emits `ip daddr … <proto> dport …` for ANY
+// declared tuple carrying a port, which is most of the declaration-derived rule set —
+// so keying on the shape let `ip daddr 10.66.0.0/16 tcp dport 22 … drop` through, i.e.
+// a floor drop that lost its `iifname`, which is exactly the host-level kill switch
+// this guard exists to catch, in the rule class where it does the most damage.
+// Matching against the endpoints ACTUALLY BOUND at this placement is what makes the
+// check structural: only a real published endpoint can satisfy it.
+//
+// The abstract half (ruleset.Validate's ScopeNone check) and renderScope each refuse an
+// unscoped rule today, so neither shape was a live hole — but the text guard's ENTIRE
+// reason to exist is being the line that still holds when the abstract half is edited
+// wrong, and against that standard keying on a shared text shape was no line at all.
+// The property itself: refuse ANY rule in a per-sandbox table that carries no
+// narrowing, accept and drop alike (§2.4 / network.md D5 ⑩ ㉔).
+func hasPerSandboxNarrowing(code string, endpoints map[publishKey]string) bool {
 	if strings.Contains(code, "iifname") || strings.Contains(code, "oifname") {
 		return true
 	}
-	// ` dport ` with the spaces, matching hasPortClause: it must be the clause, not a
-	// substring of some other word.
-	return strings.Contains(code, "daddr") && strings.Contains(code, " dport ")
+	// ScopeHostEndpoint is the one interfaceless per-sandbox narrowing, and it is
+	// identified by a BOUND endpoint: the host port is allocated per placement and per
+	// publish item, so the address and port together are what make the pair
+	// per-sandbox (the address alone is a host address every sandbox's table names).
+	for _, ep := range endpoints {
+		addr, port, err := splitEndpoint(ep)
+		if err != nil {
+			continue
+		}
+		if strings.Contains(code, fmt.Sprintf("daddr %s ", addr)) &&
+			strings.Contains(code, fmt.Sprintf(" dport %d ", port)) {
+			return true
+		}
+	}
+	return false
 }
 
 // isRuleLine reports whether a line is a rule rather than a chain/table/counter
@@ -733,8 +760,26 @@ func isRuleLine(code string) bool {
 	case strings.HasPrefix(code, "counter ") && !strings.HasPrefix(code, "counter name "):
 		return false // a counter DECLARATION, not a rule referencing one
 	}
-	return strings.Contains(code, "counter name ")
+	// A rule is identified by carrying a VERDICT, not by carrying a counter.
+	//
+	// Keying on `counter name ` let the worst case through: `drop` on its own, or
+	// `ip daddr 10.66.0.0/16 drop`, has no counter reference, so guards 3 and 4
+	// skipped it entirely — and an un-narrowed drop in a per-sandbox table is exactly
+	// the host-level kill switch guard 3 exists to catch. The counter requirement is
+	// ruleset.Validate's to enforce; this guard's whole job is to hold when that half
+	// is edited wrong, so it must not depend on that half having held.
+	for _, v := range ruleVerdicts {
+		if strings.Contains(code, v) {
+			return true
+		}
+	}
+	return false
 }
+
+// ruleVerdicts is every verdict a rendered rule can carry. `masquerade` and the two
+// nat verdicts are here because a rule can end in one of those with no filter verdict
+// at all, and an un-narrowed DNAT would steer another sandbox's traffic.
+var ruleVerdicts = []string{"accept", "drop", "reject", "dnat ", "snat ", "masquerade"}
 
 // stripComment removes a trailing `comment "…"` so the guards read the RULE and not
 // its rationale. Without this, a comment explaining why `policy drop` is refused

@@ -126,13 +126,15 @@ func (p *LocalRunsc) installRuleSet(ctx context.Context, h *placementHandle, spe
 	// The text-half render guards, immediately before install: each property they
 	// check is broken by one word of editing with no test firing and no visible
 	// difference in `nft list` (see renderGuards).
-	if err := renderGuards(text, true); err != nil {
+	if err := renderGuards(text, true, h.publishEndpoints); err != nil {
 		return err
 	}
 	if err := p.nftLoad(ctx, text); err != nil {
 		return fmt.Errorf("runtime: install rule set for %s: %w", h.sandbox, err)
 	}
-	h.nftTable = rctx.table
+	// No `h.nftTable = rctx.table` here: namesFor derives the same name for every
+	// handle, so the field is already set and assigning it again would suggest it
+	// means "installed", which it does not.
 	return nil
 }
 
@@ -167,7 +169,7 @@ func (p *LocalRunsc) InstallSecondHop(ctx context.Context, rs ruleset.RuleSet, u
 	// `skuid`, and no accept may. The per-sandbox interface guard would reject this
 	// table's rules outright, which is why the guards are scoped by table rather
 	// than one guard with an exemption.
-	if err := renderGuards(text, false); err != nil {
+	if err := renderGuards(text, false, nil); err != nil {
 		return err
 	}
 	if err := p.nftLoad(ctx, text); err != nil {

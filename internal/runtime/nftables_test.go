@@ -41,7 +41,7 @@ func one(r ruleset.Rule) ruleset.RuleSet {
 	return ruleset.RuleSet{Counters: []string{r.Counter}, Rules: []ruleset.Rule{r}}
 }
 
-// --- gate A item 4: the four render guards, on rendered TEXT ------------------
+// --- the four render guards, on rendered TEXT ---------------------------------
 
 // GUARD 1: no `policy drop` on a per-sandbox base chain.
 //
@@ -65,14 +65,14 @@ func TestGuardRefusesPolicyDropInAPerSandboxTable(t *testing.T) {
 	if strings.Contains(text, "policy drop") {
 		t.Error("the renderer emitted `policy drop`")
 	}
-	if err := renderGuards(text, true); err != nil {
+	if err := renderGuards(text, true, nil); err != nil {
 		t.Errorf("the guard rejected the renderer's own output: %v", err)
 	}
 
 	// Reverse injection: source carrying the exact defect. A guard whose failure path
 	// was never exercised is a guard nobody has checked.
 	injected := strings.Replace(text, "policy accept", "policy drop", 1)
-	err := renderGuards(injected, true)
+	err := renderGuards(injected, true, nil)
 	if err == nil {
 		t.Fatal("the guard accepted `policy drop` in a per-sandbox table — that is a cross-sandbox " +
 			"kill switch: a chain policy cannot be narrowed by an interface predicate, and it was " +
@@ -100,7 +100,7 @@ func TestGuardRefusesTheByIndexInterfaceSpelling(t *testing.T) {
 		if !strings.Contains(text, "iifname") && !strings.Contains(text, "oifname") {
 			t.Errorf("scope %s rendered without a by-name interface predicate:\n%s", scope, text)
 		}
-		if err := renderGuards(text, true); err != nil {
+		if err := renderGuards(text, true, nil); err != nil {
 			t.Errorf("the guard rejected a by-name predicate: %v", err)
 		}
 	}
@@ -111,7 +111,7 @@ func TestGuardRefusesTheByIndexInterfaceSpelling(t *testing.T) {
 		`oif "vh0123456789ab" counter name c drop`,
 		`iif 12 counter name c drop`,
 	} {
-		if err := renderGuards("table inet t {\n  chain c {\n    "+bad+"\n  }\n}", true); err == nil {
+		if err := renderGuards("table inet t {\n  chain c {\n    "+bad+"\n  }\n}", true, nil); err == nil {
 			t.Errorf("the guard accepted the by-INDEX spelling %q — it freezes an ifindex at load "+
 				"time and fails OPEN after a same-name veth rebuild, with the drop counter reading 0 "+
 				"(indistinguishable from `no traffic yet`), and `nft list` resolves it back to a name "+
@@ -124,7 +124,7 @@ func TestGuardRefusesTheByIndexInterfaceSpelling(t *testing.T) {
 		`oifname "vh0" counter name c accept`,
 		`meta iifkind "veth" iifname "vh0" counter name c drop`,
 	} {
-		if err := renderGuards("table inet t {\n  chain c {\n    "+ok+"\n  }\n}", true); err != nil {
+		if err := renderGuards("table inet t {\n  chain c {\n    "+ok+"\n  }\n}", true, nil); err != nil {
 			t.Errorf("the guard false-positived on %q: %v", ok, err)
 		}
 	}
@@ -151,9 +151,19 @@ func TestGuardRefusesAnUnNarrowedPerSandboxRule(t *testing.T) {
 		`ip daddr 10.66.0.0/16 counter name c reject`,
 		// Same shape carrying a protocol but still no port: `meta l4proto tcp` narrows to
 		// a protocol, which every sandbox's traffic also has.
-		`ip daddr 10.66.0.0/16 meta l4proto tcp counter name c drop`,
+		`ip daddr 10.66.0.0/16 meta l4proto tcp meta nfproto ipv4 counter name c drop`,
+		// THE FLOOR DROP CARRYING A PORT. This is the shape a `daddr`+`dport` text
+		// criterion accepted, and it is the worst one: `renderMatch` emits that pair for
+		// ANY declared tuple with a port, so the criterion the guard used was shared with
+		// most of the rule set. It must be identified by a BOUND endpoint instead — no
+		// endpoint is passed here, so nothing legitimises it.
+		`ip daddr 10.66.0.0/16 tcp dport 22 counter name fwd_floor_v4 drop`,
+		// NO COUNTER AT ALL, which is how the two worst cases slipped past: keying the
+		// rule test on `counter name ` skipped them before any narrowing check ran.
+		`ip daddr 10.66.0.0/16 drop`,
+		`drop`,
 	} {
-		err := renderGuards("table inet t {\n  chain c {\n    "+bad+"\n  }\n}", true)
+		err := renderGuards("table inet t {\n  chain c {\n    "+bad+"\n  }\n}", true, nil)
 		if err == nil {
 			t.Errorf("the guard accepted the un-narrowed per-sandbox rule %q — an un-narrowed accept "+
 				"is a hole in EVERY sandbox's floor (measured: another sandbox's flow was let through "+
@@ -167,11 +177,15 @@ func TestGuardRefusesAnUnNarrowedPerSandboxRule(t *testing.T) {
 	// is what keeps the pair-vs-bare-daddr distinction honest in both directions —
 	// tightening it to demand `iifname` literally would reject the two publish DNATs,
 	// which have no interface predicate available at all.
+	bound := map[publishKey]string{
+		{port: 8080, proto: ruleset.TCP}: "127.0.0.1:21000",
+		{port: 9090, proto: ruleset.UDP}: "[::1]:21001",
+	}
 	for _, ok := range []string{
 		`ip daddr 127.0.0.1 tcp dport 21000 counter name pub0_in_dnat dnat ip to 10.66.250.2:8080`,
 		`ip6 daddr ::1 udp dport 21001 counter name pub1_in_dnat dnat ip to 10.66.250.2:9090`,
 	} {
-		if err := renderGuards("table inet t {\n  chain c {\n    "+ok+"\n  }\n}", true); err != nil {
+		if err := renderGuards("table inet t {\n  chain c {\n    "+ok+"\n  }\n}", true, bound); err != nil {
 			t.Errorf("the guard rejected a legal host-endpoint narrowing %q: %v — no interface "+
 				"predicate is available for a publish DNAT (prerouting sees an arbitrary caller "+
 				"interface, and the output-hook copy is locally generated), so this must pass", ok, err)
@@ -215,26 +229,26 @@ func TestTheGuardScopesDoNotCross(t *testing.T) {
 		t.Errorf("the second-hop rule carries an interface predicate, which is unreachable there:\n%s", text)
 	}
 	// The second-hop guard accepts it…
-	if err := renderGuards(text, false); err != nil {
+	if err := renderGuards(text, false, nil); err != nil {
 		t.Fatalf("the second-hop guard rejected a legal second-hop rule: %v", err)
 	}
 	// …and this is the load-bearing pair: the PER-SANDBOX guard would reject it, which
 	// is exactly why the guards must be scoped by table rather than unified.
-	if err := renderGuards(text, true); err == nil {
+	if err := renderGuards(text, true, nil); err == nil {
 		t.Error("the per-sandbox guard ACCEPTED a uid-narrowed rule — the two guards must have " +
 			"disjoint scopes, and this direction is what proves they do: a single " +
 			"`every rule carries iifname` guard would reject the very rule §2.4 invariant 2 requires")
 	}
 
 	// An un-narrowed drop in the second-hop table is refused.
-	if err := renderGuards("table inet t {\n  chain c {\n    ip daddr 10.66.0.0/16 counter name c drop\n  }\n}", false); err == nil {
+	if err := renderGuards("table inet t {\n  chain c {\n    ip daddr 10.66.0.0/16 counter name c drop\n  }\n}", false, nil); err == nil {
 		t.Error("the second-hop guard accepted a drop with no `skuid` — on the output hook that is a " +
 			"HOST-LEVEL egress kill switch (measured: root's own probe failed too), and `iifname` " +
 			"cannot be the narrowing there because the traffic arrives on no interface (D5 ㉔)")
 	}
 	// A uid-narrowed ACCEPT is refused: skuid misses packets, so an accept narrowed
 	// by it leaks them past the floor it sits above (the measured asymmetry).
-	if err := renderGuards("table inet t {\n  chain c {\n    meta skuid 4711 counter name c accept\n  }\n}", false); err == nil {
+	if err := renderGuards("table inet t {\n  chain c {\n    meta skuid 4711 counter name c accept\n  }\n}", false, nil); err == nil {
 		t.Error("the second-hop guard accepted a uid-narrowed ACCEPT — `skuid` does not reliably " +
 			"match every packet of a flow, so the packets it misses fall through to whatever is " +
 			"below (D5 ㉔ asymmetry); a uid narrowing is safe on a DROP only")
@@ -245,6 +259,42 @@ func TestTheGuardScopesDoNotCross(t *testing.T) {
 		t.Error("renderRuleSet emitted a uid-scoped rule with no uid bound — silently dropping the " +
 			"narrowing produces the host-level egress kill switch the guard exists to prevent")
 	}
+
+	// THE SHAPES A `drop`-ONLY, ENUMERATED-REFUSAL GUARD LET THROUGH. Each is either a
+	// terminal verdict that is not the word `drop`, a verdict this table may not carry
+	// at all, or an accept that matched no enumerated refusal and fell out of the loop.
+	for _, bad := range []struct{ rule, why string }{
+		{`ip daddr 10.66.0.0/16 counter name hop2 reject`,
+			"`reject` terminates traversal across chains exactly as `drop` does " +
+				"(ruleset.Verdict.Terminal), so un-narrowed it is the same host-level kill switch"},
+		{`ip daddr 10.66.0.0/16 drop`,
+			"a rule with no counter reference: keying the rule test on `counter name ` " +
+				"skipped it before any narrowing check ran"},
+		{`counter name hop2 dnat ip to 1.2.3.4:80`,
+			"this table pins the second hop under the floor and does nothing else; a DNAT " +
+				"here would steer host-originated traffic"},
+		{`counter name hop2 snat ip to 1.2.3.4`, "same: no nat verdict belongs in this table"},
+		{`counter name hop2 masquerade`, "same: no nat verdict belongs in this table"},
+		{`ct state new counter name hop2 accept`,
+			"an accept matching `new` admits NEW connections to in-floor addresses — the " +
+				"confused deputy §2.4 invariant 2 refuses. It passed because the accept arm " +
+				"enumerated refusals instead of whitelisting the one legal shape"},
+		{`ct state new,established counter name hop2 accept`,
+			"same, spelled as a state list"},
+	} {
+		if err := renderGuards("table inet t {\n  chain c {\n    "+bad.rule+"\n  }\n}", false, nil); err == nil {
+			t.Errorf("the second-hop guard accepted %q — %s", bad.rule, bad.why)
+		}
+	}
+	// …and the ONE legal accept must still pass, or the whitelist has closed on the
+	// rule the return arm needs (it is what keeps a steered flow's replies alive:
+	// with the floor alone, 9 reply packets were dropped and the guest hung 25 s).
+	legal := `ct state established,related counter name hop2_established accept`
+	if err := renderGuards("table inet t {\n  chain c {\n    "+legal+"\n  }\n}", false, nil); err != nil {
+		t.Errorf("the second-hop guard rejected the RETURN arm %q: %v — it carries no identity "+
+			"predicate by design, and a ct-state predicate has none of `skuid`'s missed-packet gap",
+			legal, err)
+	}
 }
 
 // The guards must read the RULE, not its rationale. Several of these rules carry
@@ -253,7 +303,7 @@ func TestTheGuardScopesDoNotCross(t *testing.T) {
 // wrong direction (the same reason edge_test.go reads the AST rather than grepping).
 func TestGuardsIgnoreTheirOwnRationaleText(t *testing.T) {
 	line := `iifname "vh0" counter name c drop comment "not policy drop, and not iif: see D5 ⑫"`
-	if err := renderGuards("table inet t {\n  chain c {\n    "+line+"\n  }\n}", true); err != nil {
+	if err := renderGuards("table inet t {\n  chain c {\n    "+line+"\n  }\n}", true, nil); err != nil {
 		t.Errorf("a guard tripped on a rule's own COMMENT: %v — the comments have to be able to name "+
 			"the shapes they avoid, so the guard must read the rule and not the prose", err)
 	}
@@ -264,7 +314,7 @@ func TestGuardsIgnoreTheirOwnRationaleText(t *testing.T) {
 		Counter: "in_floor",
 		Why:     "L0 floor: NOT policy drop (cross-sandbox kill switch), and iifname not iif (D5 ⑫)",
 	})
-	if err := renderGuards(mustRender(t, rs, testCtx()), true); err != nil {
+	if err := renderGuards(mustRender(t, rs, testCtx()), true, nil); err != nil {
 		t.Errorf("a guard tripped on the renderer's own comment: %v", err)
 	}
 }
@@ -614,7 +664,8 @@ func TestGuestFacingRefusalsRenderAsReject(t *testing.T) {
 
 // The counter sits immediately before the verdict, so what a counter measures is
 // unambiguous: the packets this rule's verdict acted on. Every deny assertion in
-// gate B reads a counter, so an ambiguous placement would undermine all of them.
+// Every deny assertion on the real substrate reads a counter, so an ambiguous
+// placement would undermine all of them.
 func TestTheCounterSitsImmediatelyBeforeTheVerdict(t *testing.T) {
 	rs := one(ruleset.Rule{
 		Hook: ruleset.HookForward, Scope: ruleset.ScopeGuestIn, Verdict: ruleset.Reject,
@@ -974,7 +1025,8 @@ func TestThePublishDNATsRenderEndpointNarrowedAndGuestTargeted(t *testing.T) {
 			Match: ruleset.Match{Proto: ruleset.TCP}, ToGuestPort: 8080,
 			Counter: "pub0", Why: "publish",
 		})
-		text := mustRender(t, rs, testCtx())
+		ctx := testCtx()
+		text := mustRender(t, rs, ctx)
 		for _, want := range []string{
 			"ip daddr 127.0.0.1", // the bound host endpoint's address
 			"tcp dport 21000",    // …and its port: the per-sandbox narrowing
@@ -984,7 +1036,7 @@ func TestThePublishDNATsRenderEndpointNarrowedAndGuestTargeted(t *testing.T) {
 				t.Errorf("hook %s: the publish DNAT is missing %q:\n%s", hook, want, text)
 			}
 		}
-		if err := renderGuards(text, true); err != nil {
+		if err := renderGuards(text, true, ctx.publishEndpoints); err != nil {
 			t.Errorf("hook %s: the guards rejected a publish DNAT: %v", hook, err)
 		}
 	}
@@ -1025,7 +1077,7 @@ func TestTheSelfGatewayAllowRendersTheIntersection(t *testing.T) {
 		t.Errorf("the rule carries %d `ip daddr` clauses, want exactly 2 (the gateway AND the "+
 			"declared prefix):\n%s", n, text)
 	}
-	if err := renderGuards(text, true); err != nil {
+	if err := renderGuards(text, true, nil); err != nil {
 		t.Errorf("the guards rejected the intersection form: %v", err)
 	}
 

@@ -133,8 +133,12 @@ type placementHandle struct {
 	guestIP   string
 	gatewayIP string
 	bundleDir string
-	// nftTable is this sandbox's rule-set table, or "" if none was installed. A
-	// PLACEMENT RESOURCE like the netns: it is crash-surviving host state, so
+	// nftTable is this sandbox's rule-set table. ALWAYS set, because it is derived from
+	// the SandboxID rather than discovered — teardown uses `nft destroy`, which succeeds
+	// whether or not a table was ever installed, so there is no need for an "installed?"
+	// signal here and no window where the name is unknown.
+	//
+	// A PLACEMENT RESOURCE like the netns: it is crash-surviving host state, so
 	// teardown must remove it and reconciliation must rebuild or reclaim it — it
 	// cannot be added after the fact (§2.4).
 	nftTable string
