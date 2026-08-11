@@ -151,6 +151,63 @@ func TestSubsystemsDoNotImportEachOther(t *testing.T) {
 	}
 }
 
+// TestSubsystemsCannotReachEachOther is the TRANSITIVE form of the rule above, and it
+// closes that check's blind spot: it only looks at DIRECT imports, so `network` importing
+// `ruleset` which imports `runtime` is a real network/runtime edge that passes it. The
+// leaf guard below covers that for the four packages named in `leaves`, but membership is
+// a manual step — a shared package nobody listed gets neither check. Reachability needs
+// no registration, so coverage stops depending on someone remembering.
+//
+// The failure prints the PATH, not just the endpoints: "runtime reaches volume" is not
+// actionable, and the hops are where the fix is.
+//
+// PRODUCTION IMPORTS ONLY, deliberately. Test-import graphs are far more connected —
+// anything reaching test/harness transitively reaches every subsystem through
+// orchestrator — so a closure over them would report a path for every subsystem on a
+// correct tree. The direct check above keeps scanning test imports, which is where that
+// coverage stays. See ADR-0006, including why deriving `leaves` from "imported by ≥2
+// subsystems" was rejected instead.
+func TestSubsystemsCannotReachEachOther(t *testing.T) {
+	for _, tags := range tagMatrix {
+		imports := map[string][]string{}
+		for _, p := range listPackages(t, tags) {
+			imports[p.ImportPath] = p.Imports
+		}
+		for _, start := range subsystems {
+			// BFS, carrying the path so a hit can report how it got there.
+			type step struct {
+				pkg  string
+				path []string
+			}
+			seen := map[string]bool{start: true}
+			queue := []step{{pkg: start, path: []string{start}}}
+			for len(queue) > 0 {
+				cur := queue[0]
+				queue = queue[1:]
+				for _, imp := range imports[cur.pkg] {
+					if seen[imp] {
+						continue
+					}
+					seen[imp] = true
+					path := append(append([]string{}, cur.path...), imp)
+					// owner() so a subsystem's own subtree (transport/gen/...) is not a hit,
+					// matching the direct check's rule.
+					if got := owner(imp); got != "" && got != start {
+						t.Errorf("subsystem %s can REACH subsystem %s (tags=%q) via:\n    %s\n"+
+							"§5 subsystems must not call each other, transitively included: every "+
+							"package on that path inherits the edge while the direct-import guard "+
+							"stays green. Put the shared fact in a leaf that imports nothing from "+
+							"the engine (ADR-0006).",
+							start, got, tags, strings.Join(path, " -> "))
+						continue
+					}
+					queue = append(queue, step{pkg: imp, path: path})
+				}
+			}
+		}
+	}
+}
+
 // TestSubsystemsDoNotReadTheControlPlane pins the dependency DIRECTION: the
 // mediator drives subsystems, never the reverse. A subsystem reaching into
 // lifecycle or store would let it read authoritative state directly instead of

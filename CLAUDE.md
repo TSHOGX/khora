@@ -118,6 +118,12 @@ Two consequences of that split:
   `lifecycle`/`store`. Its allowlist is empty and should stay that way — when two
   subsystems need the same fact, put it in a **leaf** package (`internal/guestport`
   is the precedent), don't excuse the edge.
+  **Also checked TRANSITIVELY** (`TestSubsystemsCannotReachEachOther`): no subsystem
+  may *reach* another by any path of production imports, because the direct check is
+  blind to `network → ruleset → runtime` — a real edge every package on the path
+  inherits. Reachability needs no list, so an unlisted shared package is covered too;
+  the failure prints the path. Why this rather than deriving `leaves` mechanically:
+  `docs/decisions/ADR-0006`.
   **What may live in a leaf: facts, vocabulary, and pure CRITERIA — never a
   mechanism.** `ruleset.Validate` is the criteria case and it is the right shape, not
   a compromise: it must run on the **generate** side (`internal/network`, root-free
