@@ -137,11 +137,10 @@ func newEventsFollowCmd() *cobra.Command {
 						continue
 					}
 
-					fmt.Printf("%s [%s] %s %s -> %s\n",
+					fmt.Printf("%s [%s] %s %s\n",
 						evt.Timestamp.Format("15:04:05"),
 						evt.SandboxID,
 						evt.Event,
-						evt.State,
 						evt.State)
 				}
 			}
