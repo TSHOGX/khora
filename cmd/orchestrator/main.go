@@ -254,8 +254,8 @@ func main() {
 		// The order matters: drain HTTP first (in-flight requests keep working, and a
 		// mid-flight resume completes its chain intact — Shutdown does not cancel a
 		// handler's context), then stop the loops, then close the store.
-		err := eng.Shutdown(ctx, srv)
 		stopLoops()
+		err := eng.Shutdown(ctx, srv)
 		if err != nil {
 			log.Printf("orchestrator: shutdown: %v", err)
 			os.Exit(1)
