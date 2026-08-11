@@ -87,13 +87,16 @@ facts are additionally confirmed on amd64 where noted in ADR-0002's validation m
 ```sh
 go build ./cmd/orchestrator ./cmd/sandboxd
 
-# A Template is a directory holding a guest rootfs. Build a minimal one — it needs
-# the sandboxd binary, which becomes the guest's PID 1:
-test/preflight/build-rootfs.sh ./templates/base ./sandboxd
+# A Template is a directory holding a guest rootfs, and it needs the sandboxd binary,
+# which becomes the guest's PID 1. The repo ships the bare Template's DEFINITION
+# (templates/bare/) rather than the ~730 MB tree it builds — see that directory's
+# README for why. Needs skopeo + umoci:
+sudo ./templates/bare/build.sh /var/lib/warren/templates/bare ./sandboxd
 
 # --state MUST be on a btrfs filesystem: disk caps are btrfs quotas, and the engine
 # refuses to run a capped sandbox uncapped rather than silently ignoring the cap.
-sudo ./orchestrator --templates ./templates --state /srv/warren/state
+# --templates defaults to /var/lib/warren/templates, so it can be omitted here.
+sudo ./orchestrator --state /srv/warren/state
 # serving §6.1 API on 127.0.0.1:8080
 ```
 
@@ -144,8 +147,12 @@ Known and deliberate, not oversights:
   authenticates. A separate gateway component is the planned home for that — it stays
   outside the engine, because credentials are excluded from the engine by design.
 - **No client library or CLI.** Consumers speak HTTP/JSON plus Connect-RPC directly.
-- **No production Template.** `build-rootfs.sh` produces a test fixture that copies
-  the host's own userland and ships a `/bin/sh` with no coreutils.
+- **The bare Template resolves no names out of the box**, and that is by design rather
+  than an omission: it ships no `/etc/resolv.conf` and the engine injects none, so a
+  deployment supplies both the file and a UDP/53 `egress.allow[]` entry. The reasoning,
+  and the two alternatives that are worse, are in
+  [`templates/bare/README.md`](templates/bare/README.md). Note also that the repo holds
+  the Template's *definition*, not the built tree — you build it once.
 - **No `/healthz`, `/readyz`, or metrics**, and no graceful shutdown yet. Operational
   signal is logs.
 - **The event outbox does not trim by default.** `--event-retention` bounds it, but the

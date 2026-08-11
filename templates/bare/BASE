@@ -1,0 +1,7 @@
+# The base image, BY DIGEST. Digest-only and no tag: a reference carrying both is
+# rejected outright ("Docker references with both a tag and digest are currently not
+# supported"), so the tag it was resolved FROM is recorded here in prose instead —
+# which is the part a human re-pinning this needs to know.
+#
+# Resolved from: debian:bookworm-slim (arm64), 2026-08-11
+debian@sha256:817e6cf99d6fc127ff4ffe8580049b60deba0adfbbb2bd65ddc3ef8fbb7aade0

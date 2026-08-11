@@ -44,7 +44,6 @@
 
 | Belongs to (spec §) | The gap | Notes |
 | --- | --- | --- |
-| **The built-in Template artifact (§5.B)** | **The content list is settled in §5.B** (one bare base, nothing agent-shaped; the four correctness items; no `resolv.conf`); **the artifact does not exist.** `--templates` defaults to `./templates`, which is absent from the repo, so the boot seed enumerates an empty root — and the only builder is a **test fixture** that says so in its own header: it copies this machine's userland and ships a `/bin/sh` with **no coreutils, no CA bundle, no `nsswitch.conf`, and a one-line `/etc/passwd`** (verified by reading it; `ca-certificates` appears nowhere in the repo). What to build: a digest-pinned base-image export carrying §5.B's list, with the common Volume mount points preinstalled. Two things already hold and need no work — `/tmp` is at 1777 in the fixture **and** the OCI spec mounts a tmpfs over it at every placement anyway |
 
 ---
 

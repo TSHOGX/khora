@@ -353,6 +353,14 @@ boundaries; internal mechanisms still to be refined are registered in
   side is worse than the volume side, and why this side refuses while §5.C's side skips, are in
   [`deep-dives/rootfs-overlay.md`](./deep-dives/rootfs-overlay.md) D6.6.
 - **The built-in Template's contents are a deployment-replaceable choice carrying no engine
+  semantics, and the repo holds its DEFINITION rather than the artifact** (`templates/bare/`:
+  a digest-pinned base, the package list, config overlays, and the builder). The built tree
+  measures ~730 MB, so committing it would put that in git permanently and store a second
+  full copy on every re-pin — the definition is what is small, diffable and reviewable.
+  Consequently `--templates` names where BUILT Templates live and not where their definitions
+  do — and it defaults to an absolute path OUTSIDE any module tree, because a Template
+  carries mode-0700 root-owned directories that make a module-tree package walk fail for a
+  non-root user (the builder refuses such a destination for the same reason).
   semantics.** It is listed here because a deployment needs *some* answer, not because the engine
   depends on any of it: the engine's contract with a Template is only "an immutable ID-addressed
   read-only lower layer" (§3.1), so replacing the list breaks nothing above this subsystem, and

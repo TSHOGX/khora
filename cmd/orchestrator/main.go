@@ -22,7 +22,7 @@ import (
 func main() {
 	var (
 		addr      = flag.String("addr", "127.0.0.1:8080", "listen address for the §6.1 API")
-		templates = flag.String("templates", "./templates", "Template directory root (TemplateID → dir)")
+		templates = flag.String("templates", "/var/lib/warren/templates", "BUILT Template directory root: each subdirectory is a builtin Template whose directory name IS its TemplateID, and the boot seed registers every one it finds. The repo holds Template DEFINITIONS (templates/bare/), and `templates/bare/build.sh` writes the built artifact here — so this must NOT point at the definitions directory, or the seed registers source files as a runnable Template. Defaults to an ABSOLUTE path outside any Go module, unlike --state/--store, and that asymmetry is deliberate: a Template contains mode-0700 root-owned directories (Debian's /etc/ssl/private), so one built inside a module tree makes `go build ./...` fail for a non-root user. build.sh refuses an in-module destination for the same reason")
 		state     = flag.String("state", "./scratch/state", "state root (overlays + runsc state/bundles)")
 		storePath = flag.String("store", "./scratch/store.db", "SQLite store file (ADR-0004)")
 		volumes   = flag.String("volumes-dir", "", "§5.C volume storage root, one unit per volume; empty = <state>/volumes. A SIBLING of the overlay root, never nested inside it — each subsystem's orphan sweep enumerates its own root, so nesting would put one subsystem's units inside the other's enumeration")
