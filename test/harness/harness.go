@@ -8,6 +8,7 @@ package harness
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -136,23 +137,87 @@ func BuildBrokenTemplate(t *testing.T, repoRoot, templatesDir, name string) {
 // already-built Template dir at /usr/bin/<name>. Used to drop tiny test probes
 // into the bare rootfs (which has no coreutils) — e.g. a winsize reader for the
 // PTY resize acceptance (C1). CGO off so it runs in the guest with no loader deps.
+//
+// MEMOIZED ON SOURCE CONTENT, for the same reason BuildSandboxd is: a full run asks for
+// ~100 of these from only 14 distinct sources, and a probe build costs ~138 ms against
+// ~2 ms to copy one. Keyed on the source rather than on `name` because the same program
+// is deliberately injected under two names (guestServeSrc as both "serve" and "serve2"),
+// and a name key would rebuild identical bytes while a content key collapses them.
+//
+// The build still happens once per distinct source per test BINARY, not per call.
 func InjectStaticBin(t *testing.T, templatesDir, template, name, mainSrc string) {
 	t.Helper()
-	srcDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(srcDir, "main.go"), []byte(mainSrc), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	built := buildStaticProbe(t, mainSrc)
 	dst := filepath.Join(templatesDir, template, "usr", "bin", name)
-	cmd := exec.Command("go", "build", "-o", dst, filepath.Join(srcDir, "main.go"))
-	cmd.Dir = srcDir
-	cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GO111MODULE=off")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("InjectStaticBin %s: %v: %s", name, err, out)
+	// Copied rather than hardlinked: the cached binary outlives this Template, and a
+	// Template is wiped and rebuilt per test (build-rootfs.sh rm -rf's its dest), so a
+	// link would leave later callers holding a path into a deleted tree.
+	b, err := os.ReadFile(built)
+	if err != nil {
+		t.Fatalf("read cached probe %s: %v", name, err)
 	}
+	if err := os.WriteFile(dst, b, 0o755); err != nil {
+		t.Fatalf("install probe %s: %v", name, err)
+	}
+	// WriteFile does not apply the mode to an existing file, and a Template rebuilt
+	// between calls can leave one behind.
 	if err := os.Chmod(dst, 0o755); err != nil {
 		t.Fatal(err)
 	}
 }
+
+// buildStaticProbe compiles mainSrc once per process and returns the cached path. The
+// result is SHARED, so callers must treat it as read-only and copy it into place.
+func buildStaticProbe(t *testing.T, mainSrc string) string {
+	t.Helper()
+	key := fmt.Sprintf("%x", sha256.Sum256([]byte(mainSrc)))
+
+	probeCacheMu.Lock()
+	defer probeCacheMu.Unlock()
+	if e, ok := probeCache[key]; ok {
+		// Every caller fails, not only the first: a memoized failure surfaced once would
+		// let later tests run against an empty path and fail somewhere less obvious.
+		if e.err != nil {
+			t.Fatalf("%v", e.err)
+		}
+		return e.bin
+	}
+	// Not t.TempDir(): that is removed when the FIRST caller's test ends, which would
+	// leave every later caller holding a path to a deleted file. os.MkdirTemp lives for
+	// the process, which is the lifetime a memoized value needs.
+	dir, err := os.MkdirTemp("", "harness-probe")
+	if err != nil {
+		e := probeCacheEntry{err: fmt.Errorf("temp dir for probe: %w", err)}
+		probeCache[key] = e
+		t.Fatalf("%v", e.err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(mainSrc), 0o644); err != nil {
+		e := probeCacheEntry{err: fmt.Errorf("write probe source: %w", err)}
+		probeCache[key] = e
+		t.Fatalf("%v", e.err)
+	}
+	bin := filepath.Join(dir, "probe")
+	cmd := exec.Command("go", "build", "-o", bin, filepath.Join(dir, "main.go"))
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GO111MODULE=off")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		e := probeCacheEntry{err: fmt.Errorf("build probe: %w: %s", err, out)}
+		probeCache[key] = e
+		t.Fatalf("%v", e.err)
+	}
+	probeCache[key] = probeCacheEntry{bin: bin}
+	return bin
+}
+
+type probeCacheEntry struct {
+	bin string
+	err error
+}
+
+var (
+	probeCacheMu sync.Mutex
+	probeCache   = map[string]probeCacheEntry{}
+)
 
 // EngineOpts are the knobs the substrate suites actually vary when building an
 // engine. Everything else (building sandboxd, building the Template, seeding
@@ -490,16 +555,21 @@ func BtrfsBase(t *testing.T, prefix, why string, teardown func(stateDir string))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !(btrfs.Client{}).Available(context.Background(), base) {
-		t.Skipf("%s is not on btrfs; %s (ADR-0002)", base, why)
-	}
 	stateDir = filepath.Join(base, "state")
+	// Registered BEFORE the btrfs check, so a SKIP removes the dir too. The code this
+	// helper replaced checked first and leaked on skip; that path does not fire on a
+	// btrfs dev box, but /var/tmp on this machine already carries one leaked fixture dir
+	// from an earlier run, and a scratch dir that silently survives is exactly what costs
+	// the next run the ability to tell "the engine leaks" from "my fixtures leak".
 	t.Cleanup(func() {
 		if teardown != nil {
 			teardown(stateDir)
 		}
 		_ = os.RemoveAll(base)
 	})
+	if !(btrfs.Client{}).Available(context.Background(), base) {
+		t.Skipf("%s is not on btrfs; %s (ADR-0002)", base, why)
+	}
 	return base, stateDir
 }
 
