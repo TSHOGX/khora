@@ -289,7 +289,17 @@ func TestProcRunEndFrameIs128PlusSignoOnSignal(t *testing.T) {
 	r := newReapTable()
 	startDraining(t, r)
 
-	cmd := exec.Command("/bin/sh", "-c", "sleep 30")
+	// `exec sleep 30`, and the `exec` is load-bearing. Without it the shell FORKS
+	// sleep, and cmd.Start() returns as soon as the SHELL exists — so a SIGKILL landing
+	// before the fork kills the shell while `sleep 30` survives as an orphan holding the
+	// inherited stdout pipe open. drain() then blocks on that pipe for the full 30s.
+	// Measured on this box: 5/30 runs took 30.3s instead of 0.01s, and every one still
+	// PASSED, so the race only ever showed up as a slow suite.
+	//
+	// `exec` replaces the shell with sleep, so there is exactly one process, the pid
+	// signalled is the pid that dies, and no orphan can outlive it holding the pipe.
+	// A shorter sleep would have hidden the symptom without fixing the race.
+	cmd := exec.Command("/bin/sh", "-c", "exec sleep 30")
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatalf("StdoutPipe: %v", err)
