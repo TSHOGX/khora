@@ -6,9 +6,13 @@ package rootfs
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"warren/internal/btrfs"
 )
 
 // THE LOAD-BEARING PROPERTY IS THE `merged` TRAP, and it is the one an obvious
@@ -87,5 +91,45 @@ func TestUsageRejectsUnsafeID(t *testing.T) {
 		if _, _, err := p.Usage(context.Background(), bad); err == nil {
 			t.Fatalf("Usage(%q) was accepted; an unsafe segment must be refused", bad)
 		}
+	}
+}
+
+// TestUncappedBytesRefusesToWalkAUnitWhoseRowIsUnreadable is the §5.B half of the rule
+// the §5.C arm pins in internal/volume. The two terms of §3.4's inequality are one
+// design, so they must fail the same way: this term's shape IS the other's.
+//
+// The defect removed: an unreadable quota row used to fall through to enumerating
+// upper+work. On that path the `limit > 0` skip is unreachable, so a CAPPED unit got
+// enumerated as well — and a capped unit contributes ZERO here by contract, its cap
+// being counted by §3.4's first term. So the same bytes were billed twice, strictly in
+// the direction that inflates the left side of the admission inequality, and the symptom
+// is a create or resume refused with 507 on a node with room.
+//
+// A CAPPED unit with an unreadable row is the fixture, because that is the combination
+// the old code got wrong; an uncapped one would pass either way.
+func TestUncappedBytesRefusesToWalkAUnitWhoseRowIsUnreadable(t *testing.T) {
+	p, _ := newProvider(t)
+	const id = "ov_unreadable"
+	// Real bytes in upper, so a fallback walk would return something substantial.
+	writeUpper(t, p, id, map[string]string{"payload": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"})
+
+	p.Btrfs = btrfs.Client{Run: func(_ context.Context, argv []string) ([]byte, error) {
+		switch {
+		case len(argv) > 2 && argv[1] == "subvolume" && argv[2] == "show":
+			return []byte(id + "\n\tSubvolume ID:\t\t256\n"), nil
+		case len(argv) > 2 && argv[1] == "qgroup" && argv[2] == "show":
+			// The substrate's own failure shape: it names an unrelated row, which is why
+			// no caller can serialize against it (volume.md D7.1).
+			return nil, fmt.Errorf("%v: exit status 1: ERROR: cannot find the qgroup 0/21680", argv)
+		}
+		return nil, fmt.Errorf("unexpected command %v", argv)
+	}}
+
+	total, err := p.UncappedBytes(context.Background())
+	if err == nil {
+		t.Fatalf("UncappedBytes returned (%d, nil) with a unit whose quota row is unreadable — it must return the error. The limit is exactly what could not be read, so enumerating cannot tell a capped unit from an uncapped one, and a capped unit's bytes then land in the second term while its cap is already in the first (§3.4.2 disjointness)", total)
+	}
+	if !strings.Contains(err.Error(), id) {
+		t.Errorf("error %q does not name the overlay whose row could not be read", err)
 	}
 }

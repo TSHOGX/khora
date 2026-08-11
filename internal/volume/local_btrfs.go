@@ -493,9 +493,27 @@ func (b *LocalBtrfs) DestroyVolume(ctx context.Context, volumeID string) error {
 // storage unit: SetCapacity can clear a limit to 0 and leave the unit in place, so
 // the unit kind is not a reliable proxy for a cap.
 //
-// An UNREADABLE quota falls through to measuring rather than being skipped:
-// omitting real bytes would overcommit the node, and the measurement is the
-// conservative direction the gate is supposed to err in.
+// An UNREADABLE quota row is an ERROR, never a fallback to measuring, and the
+// walk it used to fall through to was wrong in a way the old rationale missed.
+// That rationale ("omitting real bytes would overcommit, so measuring is the
+// conservative direction") weighed the walk against the quota row as if the only
+// question were which number is closer. But on the failure path the `limit > 0`
+// skip above is UNREACHABLE, so the walk ran for CAPPED units too — and their
+// correct contribution here is ZERO, because the cap term already counts them.
+// So the fallback billed the same bytes twice, which §3.4.2's disjointness rule
+// forbids, at the magnitude of the whole unit rather than a rounding. It is also
+// strictly ONE-directional (the correct value being 0, any positive number
+// inflates the left side), so it cannot be argued as conservative in either
+// direction: it produces wrongful 507s on a live admission path.
+//
+// Returning the error is also what makes this consistent with the rest of the
+// seam: Backend.Usage already refuses to synthesize a number from an unreadable
+// row, §4.4-A refuses to collapse uncertainty into a definite answer, and §6.1
+// omits a usage it cannot read rather than reporting 0. This was the one place
+// that guessed.
+//
+// The read itself is retried inside the btrfs client (transient failure under
+// concurrent churn), so an error reaching here means it stayed unreadable.
 func (b *LocalBtrfs) UncappedBytes(ctx context.Context) (int64, error) {
 	ents, err := os.ReadDir(b.VolumesDir)
 	if err != nil {
@@ -512,17 +530,23 @@ func (b *LocalBtrfs) UncappedBytes(ctx context.Context) (int64, error) {
 		unit := b.unitPath(e.Name())
 		if b.Btrfs.IsSubvolume(ctx, unit) {
 			used, limit, err := b.Btrfs.Usage(ctx, unit)
-			if err == nil {
-				if limit > 0 {
-					continue // capped → the cap term already counts it
-				}
-				// Uncapped unit: the quota is still the backend's own statement about
-				// these bytes and it excludes extents physically shared with a source,
-				// so prefer it over a walk (counts shared bytes at most once).
-				total += used
-				continue
+			if err != nil {
+				// Unreadable, NOT unlimited: see the doc comment. A walk here would bill a
+				// capped unit's bytes on top of its own cap.
+				return 0, fmt.Errorf("volume: measure volume %s: %w", e.Name(), err)
 			}
+			if limit > 0 {
+				continue // capped → the cap term already counts it
+			}
+			// Uncapped unit: the quota is still the backend's own statement about these
+			// bytes and it excludes extents physically shared with a source, so prefer it
+			// over a walk (counts shared bytes at most once).
+			total += used
+			continue
 		}
+		// GENUINELY not a storage unit with a quota row (the plain-directory case), so a
+		// walk is the only statement available and is the right one — this is not the
+		// fallback removed above.
 		n, err := allocbytes.Tree(unit)
 		if err != nil {
 			return 0, fmt.Errorf("volume: measure volume %s: %w", e.Name(), err)

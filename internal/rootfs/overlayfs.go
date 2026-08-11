@@ -456,21 +456,26 @@ func (p *HostOverlayFS) UncappedBytes(ctx context.Context) (int64, error) {
 		unit := p.unitPath(e.Name())
 		if p.Btrfs.IsSubvolume(ctx, unit) {
 			used, limit, err := p.Btrfs.Usage(ctx, unit)
-			if err == nil {
-				if limit > 0 {
-					continue // capped → the cap term already counts it (invariant 1)
-				}
-				// Subvolume with no limit: the qgroup is still the backend's own
-				// statement about these bytes, and it excludes reflinked extents shared
-				// with the layer (invariant 2), so prefer it over a walk.
-				total += used
-				continue
+			if err != nil {
+				// Unreadable qgroup is an ERROR, not "assume uncapped". Enumerating here
+				// billed a CAPPED unit's bytes on top of its own cap — the `limit > 0` skip
+				// below is unreachable on this path — which §3.4.2's disjointness rule
+				// forbids and which inflates the admission gate's left side into a wrongful
+				// 507. The §5.C arm carries the same reasoning at length; the two must stay
+				// identical, since one term's shape is the other's.
+				return 0, fmt.Errorf("rootfs: measure overlay %s: %w", e.Name(), err)
 			}
-			// Unreadable qgroup: fall through and enumerate. We cannot prove it is
-			// capped, and omitting real bytes would overcommit the node, so count them.
+			if limit > 0 {
+				continue // capped → the cap term already counts it (invariant 1)
+			}
+			// Subvolume with no limit: the qgroup is still the backend's own statement
+			// about these bytes, and it excludes reflinked extents shared with the layer
+			// (invariant 2), so prefer it over a walk.
+			total += used
+			continue
 		}
-		// No quota unit (or an unreadable one): enumerate upper + work explicitly,
-		// never the unit dir — `merged` lives in there too (see the doc comment).
+		// GENUINELY not a quota unit: enumerate upper + work explicitly, never the unit
+		// dir — `merged` lives in there too (see the doc comment).
 		for _, sub := range []string{p.upperPath(e.Name()), p.workPath(e.Name())} {
 			n, err := blockBytes(sub)
 			if err != nil {

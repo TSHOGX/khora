@@ -71,6 +71,56 @@ func TestUsageRefusesToInventALimitWhenTheQuotaRowIsUnreadable(t *testing.T) {
 	}
 }
 
+// TestUncappedBytesRefusesToWalkAUnitWhoseRowIsUnreadable is the AGGREGATE half of
+// the rule the test above pins per volume, and the defect it guards is worse than an
+// imprecise number.
+//
+// UncappedBytes used to fall through to a walk when the quota read failed, justified
+// as "omitting real bytes would overcommit, so measuring is conservative". But on that
+// path the `limit > 0` skip is UNREACHABLE, so a CAPPED unit got walked too — and a
+// capped unit's correct contribution to this term is ZERO, because §3.4's cap term
+// already counts it. The fallback therefore billed the same bytes twice (§3.4.2
+// disjointness), at the magnitude of the whole unit, and strictly in ONE direction:
+// the left side of the admission inequality grows, so the symptom is a create or
+// resume refused with 507 on a node that has the room.
+//
+// The fixture is deliberately a CAPPED unit with an unreadable row, because that is
+// the combination the old code got wrong. Asserting on an uncapped unit would pass
+// either way.
+func TestUncappedBytesRefusesToWalkAUnitWhoseRowIsUnreadable(t *testing.T) {
+	dir := t.TempDir()
+	b, err := volume.NewLocalBtrfs(filepath.Join(dir, "volumes"))
+	if err != nil {
+		t.Fatalf("new local arm: %v", err)
+	}
+	unit := filepath.Join(dir, "volumes", "vol_capped")
+	if err := os.MkdirAll(unit, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Real bytes, so a walk would return something substantial rather than 0 — without
+	// this the assertion could pass on an empty directory by accident.
+	if err := os.WriteFile(filepath.Join(unit, "blob"), make([]byte, 1<<20), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	b.Btrfs = btrfs.Client{Run: func(_ context.Context, argv []string) ([]byte, error) {
+		switch {
+		case len(argv) > 2 && argv[1] == "subvolume" && argv[2] == "show":
+			return []byte("vol_capped\n\tSubvolume ID:\t\t256\n"), nil
+		case len(argv) > 2 && argv[1] == "qgroup" && argv[2] == "show":
+			return nil, fmt.Errorf("%v: exit status 1: ERROR: cannot find the qgroup 0/21680", argv)
+		}
+		return nil, fmt.Errorf("unexpected command %v", argv)
+	}}
+
+	total, err := b.UncappedBytes(context.Background())
+	if err == nil {
+		t.Fatalf("UncappedBytes returned (%d, nil) with a unit whose quota row is unreadable — it must return the error. Falling through to a walk cannot tell a capped unit from an uncapped one (the limit is exactly what could not be read), so a capped unit's bytes land in the second term while its cap is already in the first: the same bytes twice, and the node refuses admission it could have granted", total)
+	}
+	if !strings.Contains(err.Error(), "vol_capped") {
+		t.Errorf("error %q does not name the volume whose row could not be read", err)
+	}
+}
+
 // TestUsageStillWalksAPlainDirectoryUnit is the other side of the same branch: a
 // unit that is NOT a quota-capable one has no row to read, so "no cap" is the truth
 // rather than a guess and the walk is the right answer. Without this the fix above
