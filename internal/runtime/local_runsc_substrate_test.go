@@ -16,6 +16,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"warren/internal/waitfor"
 )
 
 func mustRoot(t *testing.T) {
@@ -275,18 +277,14 @@ func TestReclaimOrphans(t *testing.T) {
 
 func pollHealth(t *testing.T, url string, d time.Duration) bool {
 	t.Helper()
-	deadline := time.Now().Add(d)
 	c := &http.Client{Timeout: time.Second}
-	for time.Now().Before(deadline) {
+	return waitfor.Until(d, 200*time.Millisecond, func() bool {
 		resp, err := c.Get(url)
-		if err == nil {
-			b, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			if string(b) == "OK\n" {
-				return true
-			}
+		if err != nil {
+			return false
 		}
-		time.Sleep(200 * time.Millisecond)
-	}
-	return false
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return string(b) == "OK\n"
+	})
 }

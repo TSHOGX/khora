@@ -12,6 +12,7 @@ import (
 	"warren/internal/network"
 	"warren/internal/store"
 	"warren/internal/transport"
+	"warren/internal/waitfor"
 )
 
 // The Deployment carries ONLY viaHostLocal: no second-hop uid, which is the state the
@@ -293,12 +294,5 @@ func contains(ss []string, want string) bool {
 
 func waitFor(t *testing.T, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if cond() {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	t.Fatal("condition not met within 2s")
+	waitfor.Must(t, "the condition", 2*time.Second, 5*time.Millisecond, cond)
 }

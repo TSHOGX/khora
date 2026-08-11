@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	"warren/internal/waitfor"
 )
 
 // subtreeReaperHelperEnv re-enters this test binary as the helper below.
@@ -150,14 +152,7 @@ func procState(pid int) (state byte, ppid int, ok bool) {
 
 func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(handoffTimeout)
-	for time.Now().Before(deadline) {
-		if cond() {
-			return
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
-	t.Fatalf("timed out waiting for %s", what)
+	waitfor.Must(t, what, handoffTimeout, 2*time.Millisecond, cond)
 }
 
 // startOrphaner forks a child that forks a grandchild and exits immediately,

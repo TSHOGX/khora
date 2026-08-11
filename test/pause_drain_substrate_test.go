@@ -34,6 +34,7 @@ import (
 	"warren/internal/transport"
 	v1 "warren/internal/transport/gen/engine/transport/v1"
 	"warren/internal/transport/gen/engine/transport/v1/transportv1connect"
+	"warren/internal/waitfor"
 	"warren/test/harness"
 )
 
@@ -220,21 +221,18 @@ func runPauseWriteRace(t *testing.T, grace time.Duration, rounds int) raceResult
 //
 // Bounded: if the write finishes or never starts within the budget, the round just
 // becomes a "write won" / "preserved" outcome, which the caller classifies.
+// A timeout is NOT a failure here: the caller races a pause against this window, and
+// "the write never got in flight" is a legitimate round outcome its counters record.
 func waitForWriteInFlight(t *testing.T, ctx context.Context, cl transport.Client, path string, seedLen int) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
+	waitfor.Until(2*time.Second, time.Millisecond, func() bool {
 		st, err := cl.Stat(ctx, path)
 		if err != nil {
-			// Mid-truncate the path can briefly be unreadable; keep polling.
-			time.Sleep(time.Millisecond)
-			continue
+			return false // mid-truncate the path can briefly be unreadable; keep polling
 		}
-		if st.Size != int64(seedLen) {
-			return // truncated or already growing: the write is inside the guest
-		}
-		time.Sleep(time.Millisecond)
-	}
+		// truncated or already growing: the write is inside the guest
+		return st.Size != int64(seedLen)
+	})
 }
 
 // setupEngineWithDrain builds a real engine with an explicit DrainGrace. A

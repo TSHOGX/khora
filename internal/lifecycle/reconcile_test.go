@@ -12,6 +12,7 @@ import (
 	"warren/internal/runtime"
 	"warren/internal/store"
 	"warren/internal/transport"
+	"warren/internal/waitfor"
 )
 
 // reconcile L1: pure logic against fakes. Proves the §4.4-A dual dispatch —
@@ -319,18 +320,22 @@ func TestPeriodicReconcileSkipsLockedSandbox(t *testing.T) {
 // waitForCall polls fn's recorded calls until `want` appears or the deadline
 // hits (used to synchronize on a verb reaching its gated Launch, i.e. holding
 // the transition lock).
+// Until rather than Must: the timeout message has to carry the calls actually
+// observed, and a generic "timed out" that buries them is how a test stops
+// explaining itself.
 func waitForCall(t *testing.T, calls func() []string, wantPrefix string) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
+	ok := waitfor.Until(2*time.Second, 2*time.Millisecond, func() bool {
 		for _, c := range calls() {
 			if strings.HasPrefix(c, wantPrefix) {
-				return
+				return true
 			}
 		}
-		time.Sleep(2 * time.Millisecond)
+		return false
+	})
+	if !ok {
+		t.Fatalf("timed out waiting for call with prefix %q; got %v", wantPrefix, calls())
 	}
-	t.Fatalf("timed out waiting for call with prefix %q; got %v", wantPrefix, calls())
 }
 
 // periodic reconcile must NOT tear down an IN-FLIGHT create (§4.4-A: a lock-held

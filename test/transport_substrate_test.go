@@ -16,6 +16,7 @@ import (
 
 	"warren/internal/runtime"
 	"warren/internal/transport"
+	"warren/internal/waitfor"
 	"warren/test/harness"
 )
 
@@ -70,17 +71,12 @@ func launchWith(t *testing.T, inject func(templatesDir, template string)) (trans
 }
 
 func waitHealth(cl transport.Client, d time.Duration) bool {
-	deadline := time.Now().Add(d)
-	for time.Now().Before(deadline) {
+	return waitfor.Until(d, 200*time.Millisecond, func() bool {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
 		_, err := cl.Health(ctx)
-		cancel()
-		if err == nil {
-			return true
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
-	return false
+		return err == nil
+	})
 }
 
 func TestTransportStartStreamsStdout(t *testing.T) {
