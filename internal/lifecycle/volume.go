@@ -145,9 +145,17 @@ func (m *Mediator) CreateVolume(ctx context.Context, capBytes int64) (model.Volu
 // PROMISED, which is also what the admission gate counts.
 type VolumeInfo struct {
 	Volume model.Volume
-	// UsedByte is the backend's own statement of bytes consumed. Zero is a legitimate
-	// answer for an empty volume.
-	UsedByte int64
+	// UsedByte is the backend's own statement of bytes consumed, or NIL when the
+	// backend could not be read.
+	//
+	// A POINTER, because zero is a legitimate answer for an empty volume and the
+	// §6.1 contract says the key is absent IFF the number is unreadable. A value
+	// type cannot carry both facts: it would make "empty" and "unreadable" the same
+	// answer, and the caller's use for this number — choosing a new cap STRICTLY
+	// greater than it — needs them apart (an unreadable usage must not look like a
+	// volume with all its capacity free). Reachable on the plain-directory arm,
+	// where a fresh volume's walk really is 0.
+	UsedByte *int64
 }
 
 // GetVolume reads one volume's record and asks its backend for current usage
@@ -167,7 +175,7 @@ func (m *Mediator) GetVolume(ctx context.Context, id model.VolumeID) (VolumeInfo
 			// decision.
 			m.deps.Logf("inspect volume %s: usage unavailable: %v", id, err)
 		} else {
-			info.UsedByte = used
+			info.UsedByte = &used
 		}
 	}
 	return info, nil

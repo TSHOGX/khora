@@ -849,3 +849,85 @@ func readFile(path string) (string, error) {
 	b, err := os.ReadFile(path)
 	return string(b), err
 }
+
+// usageFailingBackend makes Usage unreadable while every other member stays the real
+// plain-directory arm's. A WRAPPER rather than a filesystem trick, deliberately: the
+// obvious tricks are both wrong here — removing the unit directory is a SUCCESSFUL read
+// of 0 (allocbytes.Tree treats a missing path as 0 on purpose, matching Materialize's
+// create-if-absent contract that a volume's bytes exist on demand), and chmod 000 does
+// not fail for root, so it would pass under `go test ./...` and fail under the substrate
+// suite, which runs as root.
+type usageFailingBackend struct {
+	volume.Backend
+	fail bool
+}
+
+func (b *usageFailingBackend) Usage(ctx context.Context, id string) (int64, int64, error) {
+	if b.fail {
+		return 0, 0, fmt.Errorf("volume: measure usage of %s: simulated unreadable backend", id)
+	}
+	return b.Backend.Usage(ctx, id)
+}
+
+// TestVolumeInspectDistinguishesZeroUsageFromUnreadable pins the §6.1 omission rule at
+// the WIRE, which is the only place it can be checked: the rule says `used_byte` is
+// absent IFF the number could not be read, so a genuine 0 must be PRESENT.
+//
+// This is exactly what `int64` plus `omitempty` could not express — Go drops a zero
+// value, so "an empty volume" and "the backend did not answer" serialized identically
+// and a caller could not tell them apart. That matters because the number's whole
+// purpose is choosing a new cap STRICTLY greater than it: an unreadable usage read as 0
+// looks like a volume with all of its capacity free.
+func TestVolumeInspectDistinguishesZeroUsageFromUnreadable(t *testing.T) {
+	mem := store.NewMemory()
+	real, err := volume.NewPlainDir(t.TempDir())
+	if err != nil {
+		t.Fatalf("new plain_dir backend: %v", err)
+	}
+	vb := &usageFailingBackend{Backend: real}
+	med := lifecycle.New(lifecycle.Deps{Store: mem, Volume: vb, Logf: func(string, ...any) {}})
+	eng := &Engine{Mediator: med, Store: mem}
+	srv := httptest.NewServer(eng.HTTPHandler())
+	t.Cleanup(srv.Close)
+
+	resp := doBody(t, http.MethodPost, srv.URL+"/v1/volumes", `{}`)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create = %d, want 201", resp.StatusCode)
+	}
+	id := decodeVolume(t, resp).VolumeID
+
+	// A FRESH volume on the plain-directory arm: usage is readable and genuinely 0.
+	body := inspectRaw(t, srv, id)
+	if !strings.Contains(body, `"used_byte":0`) {
+		t.Errorf("a readable usage of 0 is not reported as `\"used_byte\":0` — the key was dropped, so an EMPTY volume is indistinguishable from one whose usage could not be READ, while §6.1's omission rule says absent means unreadable. Body: %s", body)
+	}
+
+	// Now the same volume with an UNREADABLE backend.
+	vb.fail = true
+	body = inspectRaw(t, srv, id)
+	if strings.Contains(body, `"used_byte"`) {
+		t.Errorf("an UNREADABLE usage still emitted a used_byte key — it must be omitted, or the caller reads a failure as \"this volume is empty\" and picks a cap that wedges it. Body: %s", body)
+	}
+	// And the failure must not ride out as error text (§6.2 / edge_test).
+	for _, leak := range []string{"simulated", "measure usage"} {
+		if strings.Contains(body, leak) {
+			t.Errorf("the degraded response leaks backend error text (%q): %s", leak, body)
+		}
+	}
+}
+
+// inspectRaw returns the RAW inspect body — raw because the defect being pinned is a
+// serialization one, which a decoded struct would hide.
+func inspectRaw(t *testing.T, srv *httptest.Server, id string) string {
+	t.Helper()
+	resp := do(t, http.MethodGet, srv.URL+"/v1/volumes/"+id)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("inspect = %d, want 200 — inspect DEGRADES on an unreadable usage rather than failing; the cap write point is the one that fails closed", resp.StatusCode)
+	}
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	return string(b)
+}

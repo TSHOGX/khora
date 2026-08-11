@@ -300,7 +300,14 @@ func TestVolumeCapWritePointOnRealStorage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("inspect: %v", err)
 	}
-	used := info.UsedByte
+	// UsedByte is a POINTER so that "unreadable" and "genuinely 0" stay distinct on the
+	// §6.1 surface. Here nil is a real failure rather than an absent key: the volume was
+	// just written to on a quota-capable arm, and the strict-inequality check this test
+	// goes on to exercise cannot run at all without the number.
+	if info.UsedByte == nil {
+		t.Fatalf("usage came back unreadable after writing %d bytes — the strict-inequality check has nothing to compare against, and the cap write point would refuse every edit (fail closed)", written)
+	}
+	used := *info.UsedByte
 	if used < written/2 {
 		t.Fatalf("usage reads %d after writing %d bytes — the strict-inequality check depends on this number", used, written)
 	}

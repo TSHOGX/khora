@@ -52,7 +52,14 @@ type volumeResp struct {
 	// could not be read, rather than reported as 0 — a zero would read as "empty",
 	// and the caller uses this number to choose a new cap that must be strictly
 	// above it.
-	UsedByte int64 `json:"used_byte,omitempty"`
+	//
+	// A POINTER, and that is what makes the sentence above TRUE rather than merely
+	// intended: with `int64` plus omitempty, a genuine 0 also serializes as absent,
+	// so "empty" and "unreadable" become one answer — the collision this key's whole
+	// rationale exists to prevent. Not hypothetical: the plain-directory arm reports
+	// exactly 0 for a fresh volume, and on the §6.1 SANDBOX side a fresh uncapped
+	// upper+work walk is 0 in the common case.
+	UsedByte *int64 `json:"used_byte,omitempty"`
 }
 
 // registerVolumeRoutes mounts the Volume block on the control-plane mux.
