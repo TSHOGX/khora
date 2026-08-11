@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -745,4 +746,106 @@ func TestFileBypassErrorsHideThePlacement(t *testing.T) {
 			}
 		})
 	}
+}
+
+// usageRootfs is barrierFakeRootfs with a controllable Usage: a value, or a failure.
+type usageRootfs struct {
+	barrierFakeRootfs
+	used int64
+	err  error
+}
+
+func (u usageRootfs) Usage(context.Context, string) (int64, int64, error) {
+	if u.err != nil {
+		return 0, 0, u.err
+	}
+	return u.used, 0, nil
+}
+
+// TestSandboxReadSurfaceReportsUsedByte pins §6.1's `used_byte` on the SANDBOX single
+// read, with the three properties that make it usable rather than merely present.
+//
+// Why it is on the read surface at all: PATCH disk_byte refuses a cap that is not
+// STRICTLY greater than current usage (§3.4), so a caller changing a cap needs the
+// number — and its only other route is parsing it out of that 400's message text, which
+// is what §6.2's sanitizer discipline exists to stop callers doing.
+func TestSandboxReadSurfaceReportsUsedByte(t *testing.T) {
+	seedOne := func(t *testing.T, rp rootfs.Provider, state model.Lifecycle) (*httptest.Server, string) {
+		t.Helper()
+		mem := store.NewMemory()
+		seedTemplate(t, mem, "bare", "", true)
+		med := lifecycle.New(lifecycle.Deps{Store: mem, Rootfs: rp, Logf: func(string, ...any) {}})
+		eng := &Engine{Mediator: med, Store: mem}
+		srv := httptest.NewServer(eng.HTTPHandler())
+		t.Cleanup(srv.Close)
+		if err := mem.CreateSandbox(context.Background(), model.Sandbox{
+			ID: "sbx_u", Template: "bare", Overlay: "ov_u", State: state,
+		}, nil); err != nil {
+			t.Fatalf("seed sandbox: %v", err)
+		}
+		return srv, "sbx_u"
+	}
+
+	t.Run("a readable usage is reported, and a genuine 0 is PRESENT", func(t *testing.T) {
+		// 0 is the COMMON case here, not an edge one: a fresh uncapped sandbox's
+		// upper+work walk is 0. With a value type plus omitempty it would serialize as
+		// absent, which §6.1 defines to mean "unreadable" — so a caller would read "no
+		// bytes written yet" as "the backend did not answer", or the reverse.
+		srv, id := seedOne(t, usageRootfs{used: 0}, model.Paused)
+		body := readRaw(t, srv, "/v1/sandboxes/"+id)
+		if !strings.Contains(body, `"used_byte":0`) {
+			t.Errorf("a readable usage of 0 is not reported as `\"used_byte\":0` — an EMPTY sandbox is then indistinguishable from one whose usage could not be READ. Body: %s", body)
+		}
+	})
+
+	t.Run("present while paused, the only state a disk cap may be edited from", func(t *testing.T) {
+		// Unlike host_endpoint, this key does NOT depend on a live placement: the unit is
+		// readable at rest. Omitting it while paused would omit it from exactly the state
+		// its consumer works in (§3.4: changing a cap on a running sandbox is a 409).
+		srv, id := seedOne(t, usageRootfs{used: 4096}, model.Paused)
+		body := readRaw(t, srv, "/v1/sandboxes/"+id)
+		if !strings.Contains(body, `"used_byte":4096`) {
+			t.Errorf("used_byte missing or wrong for a PAUSED sandbox — that is the one state a disk cap may be edited from, so a caller that cannot read usage there cannot choose a legal cap. Body: %s", body)
+		}
+	})
+
+	t.Run("an unreadable usage OMITS the key and degrades rather than failing", func(t *testing.T) {
+		srv, id := seedOne(t, usageRootfs{err: errors.New("quota row unreadable")}, model.Running)
+		body := readRaw(t, srv, "/v1/sandboxes/"+id)
+		if strings.Contains(body, `"used_byte"`) {
+			t.Errorf("an unreadable usage still emitted used_byte — it must be omitted, or the caller reads a failure as \"this sandbox is empty\". Body: %s", body)
+		}
+		// The read still succeeds: the cap WRITE point fails closed, an inspect degrades.
+		if !strings.Contains(body, `"state":"running"`) {
+			t.Errorf("the response lost its other fields when usage was unreadable: %s", body)
+		}
+		// And the backend's error text must not ride out (§6.2 / edge_test).
+		if strings.Contains(body, "quota row") {
+			t.Errorf("the degraded response leaks backend error text: %s", body)
+		}
+	})
+
+	t.Run("the LIST omits it, because usage costs one round trip per sandbox", func(t *testing.T) {
+		srv, _ := seedOne(t, usageRootfs{used: 4096}, model.Paused)
+		body := readRaw(t, srv, "/v1/sandboxes")
+		if strings.Contains(body, `"used_byte"`) {
+			t.Errorf("the list carries used_byte — one backend round trip multiplied by the sandbox count, which is the same reason the volume list omits it (§6.1). Body: %s", body)
+		}
+	})
+}
+
+// readRaw returns a GET's raw body: raw because the properties above are serialization
+// ones, which a decoded struct would hide.
+func readRaw(t *testing.T, srv *httptest.Server, path string) string {
+	t.Helper()
+	resp := do(t, http.MethodGet, srv.URL+path)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s = %d, want 200", path, resp.StatusCode)
+	}
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	return string(b)
 }

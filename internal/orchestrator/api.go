@@ -685,6 +685,12 @@ func (e *Engine) handleEvents(w http.ResponseWriter, r *http.Request) {
 // sandboxResp is the §6.1 read shape for GET /v1/sandboxes/{id} and each element
 // of GET /v1/sandboxes.
 //
+// ONE TYPE, TWO SURFACES THAT DIFFER DELIBERATELY: the single read populates UsedByte,
+// the LIST leaves it nil so it is omitted. That is not an oversight to tidy up — usage
+// costs a backend round trip, and the list would pay it once per sandbox (§6.1, the same
+// rule the volume list follows). If you find yourself filling it in handleList, that is
+// the decision being reversed, not a gap being closed.
+//
 // DeathCause shape, argued here because neither reference implementation offers a
 // precedent to copy (one models no terminal state at all, the other has a failed
 // state but no cause field anywhere):
@@ -721,18 +727,37 @@ type sandboxResp struct {
 	// DeathCause is why the isolation unit was last found dead (§4.3). Absent =
 	// never observed dead. See the type doc for why absent rather than "".
 	DeathCause string `json:"death_cause,omitempty"`
+	// UsedByte is what this sandbox's Overlay unit consumes (upper + work) as the
+	// rootfs provider's backend reports it. Absent when it could not be read, never
+	// reported as 0 — the volume side's rule word for word (§6.1), because it answers
+	// the same question for the same consumer: `PATCH disk_byte` refuses a cap that is
+	// not STRICTLY greater than this, and the only other route to the number is parsing
+	// it out of that 400's message text.
+	//
+	// A POINTER, so a genuine 0 survives: a fresh uncapped sandbox's upper+work IS 0,
+	// so here the collision between "empty" and "unreadable" is the common case rather
+	// than an edge one.
+	//
+	// Present while `paused`, unlike HostEndpoint: the unit is readable AT REST, and
+	// `paused` is the only state a disk cap may be edited from (§3.4) — omitting it
+	// there would omit it from the one state its consumer works in.
+	UsedByte *int64 `json:"used_byte,omitempty"`
 }
 
 func (e *Engine) handleGet(w http.ResponseWriter, r *http.Request, id model.SandboxID) {
-	rec, err := e.Mediator.Get(r.Context(), id)
+	// Inspect rather than Get: the single read carries usage, which costs one backend
+	// round trip. The LIST deliberately does not (see handleList) — one round trip per
+	// sandbox multiplied by the sandbox count, the same reason the volume list omits it.
+	info, err := e.Mediator.Inspect(r.Context(), id)
 	if err != nil {
 		statusFor(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, sandboxResp{
-		SandboxID:  string(rec.ID),
-		State:      string(rec.State),
-		DeathCause: string(rec.DeathCause),
+		SandboxID:  string(info.Sandbox.ID),
+		State:      string(info.Sandbox.State),
+		DeathCause: string(info.Sandbox.DeathCause),
+		UsedByte:   info.UsedByte,
 	})
 }
 

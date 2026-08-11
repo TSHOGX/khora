@@ -2007,6 +2007,51 @@ func (m *Mediator) Get(ctx context.Context, id model.SandboxID) (model.Sandbox, 
 	return m.deps.Store.GetSandbox(ctx, id)
 }
 
+// SandboxInfo is the §6.1 single-read shape: the record plus the one fact that does
+// not live in it.
+type SandboxInfo struct {
+	Sandbox model.Sandbox
+	// UsedByte is what the Overlay storage unit consumes as the rootfs provider's own
+	// backend reports it (upper + work), or NIL when that could not be read.
+	//
+	// A POINTER for the same reason VolumeInfo's is: §6.1 says the key is absent IFF
+	// the number is unreadable, and zero is a legitimate reading — a fresh uncapped
+	// sandbox's upper+work really is 0, which is the COMMON case here rather than an
+	// edge one. A value type would make "nothing written yet" and "the backend did not
+	// answer" the same answer, and the caller's use for this number (choosing a cap
+	// STRICTLY greater than it) needs them apart.
+	UsedByte *int64
+}
+
+// Inspect reads one sandbox's record and asks its rootfs provider for current usage
+// (§6.1 GET /v1/sandboxes/{id}).
+//
+// Separate from Get rather than folded into it: Get is the plain record read that the
+// rest of the engine and several tests use, and it must not acquire a backend round
+// trip as a side effect. This is the same split GetVolume has against the store's own
+// volume read.
+func (m *Mediator) Inspect(ctx context.Context, id model.SandboxID) (SandboxInfo, error) {
+	rec, err := m.deps.Store.GetSandbox(ctx, id)
+	if err != nil {
+		return SandboxInfo{}, err
+	}
+	info := SandboxInfo{Sandbox: rec}
+	if rp := m.deps.Rootfs; rp != nil && rec.Overlay != "" {
+		used, _, err := rp.Usage(ctx, string(rec.Overlay))
+		if err != nil {
+			// DEGRADES rather than failing the read, which is the seam's own stated split:
+			// the cap write point fails closed because usage IS its decision, while an
+			// inspect-shaped reader reports what it can. Omitting the key is how the
+			// caller learns the difference (§6.1) — reporting 0 would tell it this sandbox
+			// is empty and invite a cap that the write point then refuses.
+			m.deps.Logf("inspect sandbox %s: usage unavailable: %v", id, err)
+		} else {
+			info.UsedByte = &used
+		}
+	}
+	return info, nil
+}
+
 // State returns the sandbox's current lifecycle state (§6.1 GET).
 func (m *Mediator) State(ctx context.Context, id model.SandboxID) (model.Lifecycle, error) {
 	rec, err := m.deps.Store.GetSandbox(ctx, id)
