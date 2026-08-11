@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"warren/internal/btrfs"
 	"warren/internal/model"
 	"warren/internal/orchestrator"
 	"warren/internal/rootfs"
@@ -469,6 +470,37 @@ func CountEngineNetns(t *testing.T) int {
 		}
 	}
 	return n
+}
+
+// BtrfsBase creates a state base on REAL btrfs under /var/tmp, skips the test when that
+// path is not btrfs, and registers teardown followed by removal. Returns the base and
+// its state dir.
+//
+// It exists because t.TempDir() is tmpfs here, so a suite whose subject is quotas, caps
+// or subvolume reclaim would exercise a configuration the engine does not support
+// (ADR-0002) — which is why the skip is a skip and not a silent pass on tmpfs.
+//
+// teardown runs BEFORE the RemoveAll and may be nil. It is a callback rather than
+// something this helper does itself because os.RemoveAll CANNOT delete a btrfs
+// subvolume (rmdir(2) refuses one), so the units have to go through the tool first —
+// and which units exist is the caller's knowledge, not the harness's.
+func BtrfsBase(t *testing.T, prefix, why string, teardown func(stateDir string)) (base, stateDir string) {
+	t.Helper()
+	base, err := os.MkdirTemp("/var/tmp", prefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !(btrfs.Client{}).Available(context.Background(), base) {
+		t.Skipf("%s is not on btrfs; %s (ADR-0002)", base, why)
+	}
+	stateDir = filepath.Join(base, "state")
+	t.Cleanup(func() {
+		if teardown != nil {
+			teardown(stateDir)
+		}
+		_ = os.RemoveAll(base)
+	})
+	return base, stateDir
 }
 
 // Providers builds the two real providers rooted under base.

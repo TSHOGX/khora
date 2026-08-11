@@ -17,14 +17,11 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"warren/internal/btrfs"
 	"warren/internal/lifecycle"
 	"warren/internal/model"
 	"warren/internal/orchestrator"
@@ -65,20 +62,7 @@ func guestSh(t *testing.T, eng *orchestrator.Engine, id model.SandboxID, script 
 // admission gate is not what refuses anything in these tests.
 func mountEngine(t *testing.T) (*orchestrator.Engine, string) {
 	t.Helper()
-	base, err := os.MkdirTemp("/var/tmp", "vol-mount-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	bc := btrfs.Client{}
-	if !bc.Available(context.Background(), base) {
-		t.Skipf("%s is not on btrfs (ADR-0002)", base)
-	}
-	stateDir := filepath.Join(base, "state")
-	t.Cleanup(func() {
-		cleanupVolumeUnits(bc, stateDir)
-		cleanupOverlaySubvolumes(bc, stateDir)
-		_ = os.RemoveAll(base)
-	})
+	base, stateDir := harness.BtrfsBase(t, "vol-mount-", "volume mounts are storage units", cleanupUnitsAndOverlays)
 	eng, _ := harness.Engine(t, harness.EngineOpts{
 		BaseDir:       base,
 		HealthTimeout: 90 * time.Second,

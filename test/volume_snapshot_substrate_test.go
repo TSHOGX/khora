@@ -317,20 +317,8 @@ func TestVolumeSnapshotSourceDeleteIsRefusedAndLeaksNoQuotaRow(t *testing.T) {
 // record's value.
 func TestVolumeSnapshotCrashBetweenBytesAndRowIsRepaired(t *testing.T) {
 	ctx := context.Background()
-	base, err := os.MkdirTemp("/var/tmp", "vol-crash-")
-	if err != nil {
-		t.Fatal(err)
-	}
+	base, stateDir := harness.BtrfsBase(t, "vol-crash-", "snapshot caps ride a btrfs operation", cleanupUnitsAndOverlays)
 	bc := btrfs.Client{}
-	if !bc.Available(ctx, base) {
-		t.Skipf("%s is not on btrfs (ADR-0002)", base)
-	}
-	stateDir := filepath.Join(base, "state")
-	t.Cleanup(func() {
-		cleanupVolumeUnits(bc, stateDir)
-		cleanupOverlaySubvolumes(bc, stateDir)
-		_ = os.RemoveAll(base)
-	})
 	storePath := filepath.Join(base, "store.db")
 
 	// Engine 1, with the crash injected between the snapshot bytes and the row insert.

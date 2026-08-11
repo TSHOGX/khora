@@ -41,26 +41,27 @@ import (
 // does not support.
 func volumeEngine(t *testing.T, diskBudget int64) (*orchestrator.Engine, string) {
 	t.Helper()
-	base, err := os.MkdirTemp("/var/tmp", "vol-e2e-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	bc := btrfs.Client{}
-	if !bc.Available(context.Background(), base) {
-		t.Skipf("%s is not on btrfs; per-volume caps need btrfs (ADR-0002)", base)
-	}
-	stateDir := filepath.Join(base, "state")
-	t.Cleanup(func() {
-		cleanupVolumeUnits(bc, stateDir)
-		cleanupOverlaySubvolumes(bc, stateDir)
-		_ = os.RemoveAll(base)
-	})
+	base, stateDir := harness.BtrfsBase(t, "vol-e2e-", "per-volume caps need btrfs", cleanupUnitsAndOverlays)
 	eng, _ := harness.Engine(t, harness.EngineOpts{
 		BaseDir:       base,
 		HealthTimeout: 60 * time.Second,
 		NodeDiskByte:  diskBudget,
 	})
 	return eng, stateDir
+}
+
+// cleanupUnitsAndOverlays and cleanupOverlaysOnly adapt the two cleanups below to
+// harness.BtrfsBase's teardown callback. Two named funcs rather than closures at each
+// call site because WHICH of the two a suite needs is a real distinction — a suite that
+// creates no volume has no units to reclaim — and naming it keeps that visible.
+func cleanupUnitsAndOverlays(stateDir string) {
+	bc := btrfs.Client{}
+	cleanupVolumeUnits(bc, stateDir)
+	cleanupOverlaySubvolumes(bc, stateDir)
+}
+
+func cleanupOverlaysOnly(stateDir string) {
+	cleanupOverlaySubvolumes(btrfs.Client{}, stateDir)
 }
 
 // cleanupVolumeUnits removes the volume storage units a run leaves behind. Needed
@@ -479,20 +480,8 @@ func TestVolumeSeedAndReadBackWithoutAnySandbox(t *testing.T) {
 // window in which exactly that inheritance happens.
 func TestVolumeSweepAtBootPrecedesStorageCreation(t *testing.T) {
 	ctx := context.Background()
-	base, err := os.MkdirTemp("/var/tmp", "vol-boot-")
-	if err != nil {
-		t.Fatal(err)
-	}
+	base, stateDir := harness.BtrfsBase(t, "vol-boot-", "the boot sweep acts on storage units", cleanupUnitsAndOverlays)
 	bc := btrfs.Client{}
-	if !bc.Available(ctx, base) {
-		t.Skipf("%s is not on btrfs (ADR-0002)", base)
-	}
-	stateDir := filepath.Join(base, "state")
-	t.Cleanup(func() {
-		cleanupVolumeUnits(bc, stateDir)
-		cleanupOverlaySubvolumes(bc, stateDir)
-		_ = os.RemoveAll(base)
-	})
 	storePath := filepath.Join(base, "store.db")
 
 	// First engine: create a volume, then drop only its row — the residue a crash

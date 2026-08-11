@@ -313,20 +313,8 @@ func cleanupOverlaySubvolumes(bc btrfs.Client, stateDir string) {
 // configuration the engine does not support.
 func setupEngineOnBtrfs(t *testing.T, healthTimeout time.Duration) (*orchestrator.Engine, string) {
 	t.Helper()
-	base, err := os.MkdirTemp("/var/tmp", "cap-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	bc := btrfs.Client{}
-	if !bc.Available(context.Background(), base) {
-		t.Skipf("%s is not on btrfs; the capacity axis needs btrfs (ADR-0002)", base)
-	}
-	stateDir := filepath.Join(base, "state")
-	t.Cleanup(func() {
-		cleanupOverlaySubvolumes(bc, stateDir)
-		_ = os.RemoveAll(base)
-	})
-
+	// base, not the state dir: this fixture's callers assert on the base layout.
+	base, _ := harness.BtrfsBase(t, "cap-", "the capacity axis needs btrfs", cleanupOverlaysOnly)
 	eng, _ := harness.Engine(t, harness.EngineOpts{
 		BaseDir:       base,
 		HealthTimeout: healthTimeout,
@@ -1110,19 +1098,7 @@ func TestResourceAdmissionGateOnSubstrate(t *testing.T) {
 	}
 	ctx := context.Background()
 	repo := harness.RepoRoot(t)
-	base, err := os.MkdirTemp("/var/tmp", "admission-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	bc := btrfs.Client{}
-	if !bc.Available(ctx, base) {
-		t.Skipf("%s not on btrfs", base)
-	}
-	stateDir := filepath.Join(base, "state")
-	t.Cleanup(func() {
-		cleanupOverlaySubvolumes(bc, stateDir)
-		_ = os.RemoveAll(base)
-	})
+	base, stateDir := harness.BtrfsBase(t, "admission-", "admission accounts for Template bytes squota cannot see", cleanupOverlaysOnly)
 	tmpl := filepath.Join(base, "templates")
 	sbxd := harness.BuildSandboxd(t, repo)
 	harness.BuildTemplate(t, repo, tmpl, "bare", sbxd)
