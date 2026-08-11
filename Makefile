@@ -11,7 +11,7 @@ LDFLAGS := -buildid= -s -w
 BUILDFLAGS := -trimpath -ldflags="$(LDFLAGS)"
 
 .PHONY: all
-all: bin/orchestrator bin/gateway bin/sandboxd
+all: bin/orchestrator bin/gateway bin/sandboxd bin/warren
 
 bin/orchestrator: $(shell find cmd/orchestrator internal -name '*.go')
 	@mkdir -p bin
@@ -24,6 +24,10 @@ bin/gateway: $(shell find cmd/gateway internal -name '*.go')
 bin/sandboxd: $(shell find cmd/sandboxd internal -name '*.go')
 	@mkdir -p bin
 	go build $(BUILDFLAGS) -o $@ ./cmd/sandboxd
+
+bin/warren: $(shell find cmd/warren -name '*.go')
+	@mkdir -p bin
+	go build $(BUILDFLAGS) -o $@ ./cmd/warren
 
 .PHONY: clean
 clean:
@@ -56,6 +60,14 @@ verify-reproducible:
 		echo "✓ sandboxd: reproducible"; \
 	else \
 		echo "✗ sandboxd: NOT reproducible"; exit 1; \
+	fi
+	@go build $(BUILDFLAGS) -o /tmp/warren-repro-test/warren1 ./cmd/warren
+	@sleep 1
+	@go build $(BUILDFLAGS) -o /tmp/warren-repro-test/warren2 ./cmd/warren
+	@if [ "$$(sha256sum /tmp/warren-repro-test/warren1 | cut -d' ' -f1)" = "$$(sha256sum /tmp/warren-repro-test/warren2 | cut -d' ' -f1)" ]; then \
+		echo "✓ warren: reproducible"; \
+	else \
+		echo "✗ warren: NOT reproducible"; exit 1; \
 	fi
 	@rm -rf /tmp/warren-repro-test
 	@echo "=== all binaries reproducible ==="
