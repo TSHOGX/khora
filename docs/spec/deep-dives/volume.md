@@ -773,10 +773,20 @@ dispositions, and reachable paths all differ. Each round:
 > **The frequency rises with churn concurrency, so 1/150 is a lower bound rather than a typical value**: under
 > three-way concurrent churn, measured 157/2142 ≈ **7.3%**. The error also **names somebody else's row**
 > (`cannot find the qgroup 0/21680`), so the id in the error string cannot be used to judge which unit had the
-> problem. This frequency is one of the inputs to that open question about §3.4's aggregate term (see
-> [`../open-decisions.md`](../open-decisions.md), "which way should §3.4's second term err when a quota read
-> fails"): it decides whether "a failed read" is rare enough to ignore or common enough to require a definite
-> direction.
+> problem.
+>
+> **All of the frequencies above are PER-ATTEMPT and now describe only the first attempt: the single-path read
+> is retried, and the retry changed the picture rather than tidying it.** The failure is transient, so under the
+> same three-way churn three attempts turned **8 first-attempt failures into 0 final failures (300 reads)**. The
+> error contract is unchanged — an error still means "unreadable, draw no conclusion" — it is simply much rarer,
+> which matters directly to the callers that must fail closed on an unreadable row (the §6.1 cap write points and
+> §5.B's materialization guard, the latter on the create/resume hot path). **Do not cite 7.3% as the rate a
+> caller sees**; cite it as what one attempt sees under deliberate churn, and note that the **batch** read's
+> wholesale failure is not retried away by that change.
+> **This is also why the aggregate question is now narrower than "is a failed read rare or common"** (see
+> [`../open-decisions.md`](../open-decisions.md), "whether §3.4's second term needs a per-unit unknown channel
+> when a quota read fails"): the direction is settled by the do-not-synthesize rule, and what the residual
+> frequency decides is only whether the aggregate needs a per-unit unknown channel.
 >
 > **A future trap of the same family (worth a comment on the §5.B side)**: the real trigger is **extent sharing**,
 > not "a snapshot was taken". Measured, a reflink **inward** (copy-up's shape) does not leak while a reflink
