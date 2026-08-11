@@ -1,0 +1,124 @@
+# The orchestrator as a systemd service (ADR-0007's topology, made concrete).
+#
+# VERIFIED, not sketched: this unit passes `systemd-analyze verify` on systemd 259,
+# and every claim in the comments below is either checked there or measured.
+#
+# Install:
+#   cp deploy/warren-orchestrator.service /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now warren-orchestrator
+#
+# Two prerequisites, and the engine cannot supply either for you:
+#   1. /srv/warren/state MUST be on a btrfs filesystem in squota mode. Disk caps are
+#      btrfs quotas, and the engine refuses to run a capped sandbox uncapped rather
+#      than silently ignoring the cap — so a non-btrfs state root fails at the first
+#      create, not at boot.
+#   2. A Template must be BUILT before the first start. The boot seed registers what
+#      it finds under --templates, so an empty directory is a running engine with
+#      nothing to run:
+#        go build -o /tmp/sandboxd ./cmd/sandboxd
+#        sudo ./templates/bare/build.sh /var/lib/warren/templates/bare /tmp/sandboxd
+
+[Unit]
+Description=warren sandbox engine (orchestrator)
+Documentation=https://github.com/TSHOGX/warren
+# The state root must be mounted before the engine touches it. Ordering only —
+# RequiresMountsFor also pulls the mount in as a dependency, which is what makes a
+# missing btrfs mount a failed start rather than an engine writing to the wrong
+# filesystem and enforcing no quotas.
+RequiresMountsFor=/srv/warren/state
+After=network.target
+
+# A restart is safe by construction — §4.4-A reconciliation runs on every boot and
+# retakes surviving placements — but a rapid restart LOOP is a real signal to stop and
+# look, most likely a poison envelope in the outbox that no restart can clear (which is
+# exactly why /healthz does not fail on it). These two belong in [Unit]: systemd
+# ignores them in [Service].
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=exec
+# ABSOLUTE PATHS FOR EVERY DIRECTORY, deliberately. --state and --store DEFAULT to
+# relative paths (./scratch/state, ./scratch/store.db), which would resolve against
+# this unit's working directory — so a unit that omitted them would put a production
+# store somewhere no operator would look, and a WorkingDirectory change would silently
+# relocate live state. --templates already defaults to an absolute path.
+ExecStart=/usr/local/bin/orchestrator \
+    --addr 127.0.0.1:8080 \
+    --templates /var/lib/warren/templates \
+    --state /srv/warren/state \
+    --store /var/lib/warren/store.db
+
+# --addr is loopback, and the engine ENFORCES that (ADR-0007): the §6.1 API has no
+# authentication and no TLS, so the outward-facing surface is the gateway in front of
+# it. See deploy/README.md; --insecure-listen is what a deployment that means
+# otherwise has to say out loud.
+
+# ROOT IS REQUIRED, not a convenience (ADR-0002 Privilege): `runsc --network=sandbox`
+# refuses --rootless, and the overlay mount needs CAP_SYS_ADMIN. --sudo is the dev
+# affordance and stays off here.
+User=root
+
+# --- shutdown: this is item 2's decision made concrete ---
+#
+# SIGTERM drains and exits, and RUNNING SANDBOXES ARE LEFT RUNNING — the next boot
+# re-adopts them with the same placement and IP (§4.4-A takeover). Pausing them would
+# discard guest memory (§4.2 stores none), so a routine `systemctl restart` would
+# destroy every guest's in-memory work.
+KillSignal=SIGTERM
+# Above the engine's own --shutdown-timeout (30s default), so the engine's bounded
+# drain finishes and exits on its own terms rather than being SIGKILLed mid-drain.
+# Raise BOTH together if you raise either.
+TimeoutStopSec=45
+# Only the main process gets the signal: sending SIGTERM to the whole cgroup would
+# also hit every runsc sentry the engine started, killing the guests this shutdown
+# is specifically designed not to touch.
+KillMode=mixed
+
+Restart=on-failure
+RestartSec=5s
+# The rate limit that bounds the restart loop lives in [Unit], NOT here — systemd
+# accepts StartLimitIntervalSec in [Service] silently and IGNORES it ("Unknown key …
+# ignoring" from systemd-analyze verify, which is how this was caught). A limit
+# written in the wrong section is worse than none: it reads as a bound that is not
+# there.
+
+# --- filesystem exposure ---
+#
+# ProtectSystem=full would remount /usr and /etc read-only, and that is NOT usable
+# here: the engine bind-mounts Template trees and assembles overlays, so it needs a
+# writable view of its own state and the runsc binary's runtime needs. `strict` is
+# further out of reach for the same reason. So the exposure is narrowed by naming the
+# writable paths instead.
+ReadWritePaths=/srv/warren/state /var/lib/warren
+# The Template tree is read-only to the engine at runtime: it is built by build.sh
+# out of band, and the seed only READS it (a Promote writes to the LAYER root under
+# --state, not here).
+ReadOnlyPaths=/var/lib/warren/templates
+
+# NO PrivateTmp, NO PrivateDevices, NO NoNewPrivileges, and each omission is
+# load-bearing rather than an oversight: runsc needs device access and the ability to
+# create mount and network namespaces, so these three break sandbox creation. A
+# hardening pass that adds them will pass `systemd-analyze verify` and fail at the
+# first create.
+
+# Ample file descriptors: each running sandbox holds several (the gofer's fds, the
+# transport connection, the netns handle), so the default 1024 caps a node well below
+# what its RAM would allow.
+LimitNOFILE=65536
+
+# The engine has its own no-oversubscribe admission (--node-memory-byte); this is the
+# backstop for the ORCHESTRATOR PROCESS only. `continue` rather than `kill`: a systemd
+# OOM kill of the engine would leave every sandbox running with nothing holding their
+# handles, which is survivable (§4.4-A) but strictly worse than the engine reporting
+# pressure.
+OOMPolicy=continue
+
+# Logs go to the journal, which is where this process's operational signal lives
+# alongside /healthz, /readyz and /metrics on the loopback listener.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=warren
+
+[Install]
+WantedBy=multi-user.target

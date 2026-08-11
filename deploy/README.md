@@ -87,6 +87,51 @@ contract between the two processes.
 the engine does not start it, health-check it, or know it exists. A gateway that is
 down is an unreachable API, not a degraded engine.
 
+## Bringing the engine itself up
+
+[`warren-orchestrator.service`](warren-orchestrator.service) is a systemd unit that
+passes `systemd-analyze verify` clean and was started, probed and stopped on a real
+box before being committed.
+
+```sh
+# 1. the state root must be btrfs in squota mode — disk caps ARE btrfs quotas
+mount | grep /srv/warren/state
+
+# 2. build a Template FIRST. The boot seed registers what it finds under --templates,
+#    so an empty directory is a running engine with nothing to run.
+go build -o /tmp/sandboxd ./cmd/sandboxd
+sudo ./templates/bare/build.sh /var/lib/warren/templates/bare /tmp/sandboxd
+
+# 3. install the binary and the unit
+go build ./cmd/orchestrator && sudo install -m755 orchestrator /usr/local/bin/
+sudo cp deploy/warren-orchestrator.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now warren-orchestrator
+```
+
+Three things about the unit are decisions rather than boilerplate:
+
+**Every directory is an absolute path.** `--state` and `--store` *default* to relative
+paths (`./scratch/state`, `./scratch/store.db`), which would resolve against the
+service's working directory — so a unit that omitted them would put a production store
+somewhere no operator would look, and a later `WorkingDirectory` change would silently
+relocate live state.
+
+**`TimeoutStopSec=45` sits above the engine's own `--shutdown-timeout` (30s).** The
+engine's drain is bounded and exits on its own terms; if systemd's patience were the
+shorter of the two, the drain would be SIGKILLed partway. Raise both together, never
+one.
+
+**`KillMode=mixed` — only the main process is signalled.** Signalling the whole cgroup
+would also hit every runsc sentry the engine started, killing the guests this shutdown
+is specifically designed to leave running. Measured: `systemctl stop` drains and exits
+with `Result=success`, `ExecMainStatus=0`, in about 0.2s on an idle node.
+
+The unit deliberately does **not** set `PrivateTmp`, `PrivateDevices`,
+`NoNewPrivileges`, or `ProtectSystem=full`. runsc needs device access and the ability
+to create mount and network namespaces, so each of those breaks sandbox creation — and
+each would pass `systemd-analyze verify` and fail at the first create. Exposure is
+narrowed by naming writable paths instead.
+
 ## Verifying a deployment
 
 The four checks worth running, and what a correct deployment answers:

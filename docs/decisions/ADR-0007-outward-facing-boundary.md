@@ -1,9 +1,9 @@
-# ADR-0007 — The outward-facing boundary: where authentication and TLS live, and what the engine refuses to listen on
+# ADR-0007 — The deployment topology: where authentication and TLS live, what the engine refuses to listen on, and how the process comes up
 
 - **Status:** accepted
 - **Date:** 2026-08-12
-- **Consumers:** anyone deploying this engine; `cmd/gateway`, `cmd/orchestrator`, and
-  the README's "Build and run" describe the resulting topology.
+- **Consumers:** anyone deploying this engine; `cmd/gateway`, `cmd/orchestrator`,
+  `deploy/` and the README's "Build and run" carry the resulting topology.
 
 ## Context
 
@@ -130,6 +130,52 @@ insecure shape, and the cost of documentation alone is a silently-published cont
 plane that can create root-capable sandboxes. This repo makes that trade the same way
 elsewhere — subsystem isolation is a test rather than a review note, and the
 substrate-gate exemption is a tool's verdict rather than a committer's claim.
+
+## The orchestrator's own deployment shape
+
+The topology above decides how the engine process itself comes up, so it is recorded
+here rather than in a second document. `deploy/warren-orchestrator.service` is the
+concrete form; three of its choices are decisions rather than boilerplate.
+
+**The unit pins absolute paths; the flag defaults do not move.** `--state` and
+`--store` default to `./scratch/state` and `./scratch/store.db`, relative to the
+working directory, while `--templates` is already absolute. That asymmetry is
+deliberate for the reason `--templates`' own flag help gives: a Template contains
+mode-0700 root-owned directories, so one built inside a module tree breaks `go build
+./...` for an ordinary user. The dev defaults are right for a dev run — `./scratch` is
+where a developer wants scratch state — and wrong for a service, where they would
+resolve against whatever working directory the unit happened to have. Pinning them in
+the unit fixes the deployment without making the dev path awkward. **Whether the
+defaults themselves should become absolute is left open, deliberately**: it would make
+every existing test and dev invocation write outside the repo, which is a bigger change
+than this stage needs and belongs to whoever wants it.
+
+**Stop behavior is the graceful-shutdown decision made concrete.** `KillSignal=SIGTERM`
+with `TimeoutStopSec=45` sitting *above* the engine's own `--shutdown-timeout` of 30 s,
+so the engine's bounded drain completes on its own terms instead of being SIGKILLed
+partway; the two are raised together or not at all. `KillMode=mixed` signals only the
+main process — signalling the whole cgroup would also hit every runsc sentry the engine
+started, killing precisely the guests this shutdown is designed to leave running.
+Measured on a real box: `systemctl stop` drains and exits with `Result=success` and
+`ExecMainStatus=0` in about 0.2 s on an idle node.
+
+**The hardening directives that look missing are refused on purpose.** No
+`PrivateTmp`, no `PrivateDevices`, no `NoNewPrivileges`, no `ProtectSystem=full`. runsc
+needs device access and the ability to create mount and network namespaces, and the
+engine assembles overlays, so each of those breaks sandbox creation — and each would
+pass `systemd-analyze verify` and fail at the first create, which is the worst shape a
+misconfiguration can take. Exposure is narrowed by naming writable paths
+(`ReadWritePaths`, `ReadOnlyPaths` on the Template tree) instead.
+
+Two prerequisites the engine cannot supply for itself, so provisioning must: the state
+root has to be **btrfs in squota mode** (disk caps *are* btrfs quotas, so a non-btrfs
+root fails at the first create rather than at boot), and a **Template must be built
+before the first start**, since the boot seed registers what it finds and an empty
+directory is a running engine with nothing to run.
+
+**The instance stays discardable.** Provisioning may say "rebuild the store"; it may
+never say "migrate it". `store.db`, the overlays and the runsc state are all
+reconstructible, and an internal deployment is not the trigger for compatibility work.
 
 ## Consequences
 

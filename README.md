@@ -101,6 +101,11 @@ sudo ./orchestrator --state /srv/warren/state
 # serving §6.1 API on 127.0.0.1:8080
 ```
 
+For a real deployment, [`deploy/`](deploy/) has the systemd unit and the
+authenticating TLS boundary that goes in front. Note that `--state` and `--store`
+default to paths relative to the working directory, which is fine for a dev run and
+wrong for a service — the unit pins them absolutely.
+
 The listen address must be loopback, and that is **enforced at startup**, not merely
 defaulted: the API is unauthenticated, so a routable listener has to be a decision
 stated out loud (`--insecure-listen`) rather than a flag value nobody noticed. Put an
@@ -208,7 +213,7 @@ Known and deliberate, not oversights:
 cmd/orchestrator/      the engine host: flags → Engine → serve the API
 cmd/sandboxd/          in-guest daemon: init (PID 1) + the process/fs transport
 cmd/gateway/           OUTSIDE the engine: mTLS + TLS termination in front of the API
-deploy/                the outward-facing boundary: nginx config, or cmd/gateway
+deploy/                deployment: the nginx/gateway boundary, plus the systemd unit
 internal/orchestrator/ the assembly: holds the seams, serves the API
 internal/model/        shared model: sandbox identity, lifecycle state (pure types)
 internal/lifecycle/    the mediator: state machine, transition lock, cold-start chain
