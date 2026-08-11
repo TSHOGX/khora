@@ -1352,20 +1352,6 @@ func (m *Mediator) SeedBuiltinTemplates(ctx context.Context) error {
 	return nil
 }
 
-// SweepOrphanLayers reclaims Promote-built layer bytes with no live `templates`
-// row (§5.B / §4.4-A). It is the §5.B twin of ReclaimOrphans: the mediator reads the
-// AUTHORITATIVE store for the live layer IDs, snapshots the in-flight-Promote
-// keep-set, and hands both to the rootfs provider — which enumerates its own layer
-// dirs and deletes the difference (§4 subsystems don't call the store). Run at
-// boot (a crashed Promote's staging layer is a true orphan → reclaimed, the
-// buildingLayers set being empty) and periodically by the reaper (an in-flight
-// Promote is protected by buildingLayers, §4.4-A). Skip-and-log per §4.4-A: a sweep
-// failure is not fatal; it retries next pass.
-//
-// Only Promote-built (builtin=false) layers are swept: builtins live under the
-// deployment-shipped TemplatesDir, a different root the provider never scans, so
-// they are structurally out of the candidate set — a builtin row's absence
-// could never orphan a builtin dir.
 // trimBatch bounds one trim pass. Deliberately not a knob: what it protects is the
 // store's write path, not anything a deployment reasons about, and a pass that falls
 // behind simply continues next tick.
@@ -1399,6 +1385,20 @@ func (m *Mediator) TrimOutbox(ctx context.Context) error {
 	return nil
 }
 
+// SweepOrphanLayers reclaims Promote-built layer bytes with no live `templates`
+// row (§5.B / §4.4-A). It is the §5.B twin of ReclaimOrphans: the mediator reads the
+// AUTHORITATIVE store for the live layer IDs, snapshots the in-flight-Promote
+// keep-set, and hands both to the rootfs provider — which enumerates its own layer
+// dirs and deletes the difference (§4 subsystems don't call the store). Run at
+// boot (a crashed Promote's staging layer is a true orphan → reclaimed, the
+// buildingLayers set being empty) and periodically by the reaper (an in-flight
+// Promote is protected by buildingLayers, §4.4-A). Skip-and-log per §4.4-A: a sweep
+// failure is not fatal; it retries next pass.
+//
+// Only Promote-built (builtin=false) layers are swept: builtins live under the
+// deployment-shipped TemplatesDir, a different root the provider never scans, so
+// they are structurally out of the candidate set — a builtin row's absence
+// could never orphan a builtin dir.
 func (m *Mediator) SweepOrphanLayers(ctx context.Context) error {
 	tmpls, err := m.deps.Store.ListTemplates(ctx)
 	if err != nil {

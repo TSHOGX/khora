@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"go/scanner"
 	"go/token"
-	"sort"
 	"strings"
 )
 
@@ -100,10 +99,19 @@ func tokens(path string, src []byte) ([]tokenPair, error) {
 	return out, nil
 }
 
-// directives returns the sorted set of comment lines the toolchain acts on.
+// directives returns, IN SOURCE ORDER, the comment lines the toolchain acts on.
 // Detection is liberal on purpose (leading spaces, tabs and block-comment '*'
 // are trimmed first): over-detecting costs one gate run, under-detecting silently
 // licenses a build change.
+//
+// The ORDER is part of the comparison, and this is the one place where discarding
+// position information would go too far. Unlike a token stream — where positions are
+// exactly what a comment growing above should be free to shift — a directive binds to
+// whatever DECLARATION follows it. So permuting two `//go:embed` lines among their vars
+// leaves the token stream identical AND the set of directives identical while changing
+// which file each var holds: measured on a scratch module, swapping two embeds took the
+// program from printing "AAA BBB" to "BBB AAA" while a sorted-set comparison still
+// reported no change. Sorting here would license exactly that.
 func directives(path string, src []byte) []string {
 	var fset token.FileSet
 	f := fset.AddFile(path, fset.Base(), len(src))
@@ -125,7 +133,6 @@ func directives(path string, src []byte) []string {
 			}
 		}
 	}
-	sort.Strings(out)
 	return out
 }
 
@@ -148,8 +155,10 @@ func hasCImport(toks []tokenPair) bool {
 	return false
 }
 
-// firstDiff returns a human-readable description of the first difference between
-// two sorted sets, or "" when they are equal.
+// firstDiff returns a human-readable description of the first difference between two
+// directive SEQUENCES, or "" when they are equal. Positional comparison is the point
+// (see directives): a reordering must read as a difference, so "removed X / added X"
+// for the same X is a legitimate verdict on a permutation rather than a confusing one.
 func firstDiff(oldSet, newSet []string) string {
 	for i := 0; i < len(oldSet) || i < len(newSet); i++ {
 		switch {
