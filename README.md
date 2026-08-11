@@ -7,15 +7,18 @@ unprivileged process, a CI runner, inside a container.
 
 ```sh
 # create a sandbox
-curl -X POST localhost:8080/v1/sandboxes \
-     -d '{"template_id":"base","disk_byte":2147483648}'
-# → {"sandbox_id":"sbx_b2aaead92a907e0d"}
+warren sandbox create --template base --disk 2G
+# → sbx_b2aaead92a907e0d
 
 # write a file into it, read it back
-curl -X PUT 'localhost:8080/v1/sandboxes/sbx_b2aaead92a907e0d/files?path=/tmp/hello' \
-     --data-binary 'warren works'
-curl 'localhost:8080/v1/sandboxes/sbx_b2aaead92a907e0d/files?path=/tmp/hello'
+echo 'warren works' | warren files write sbx_b2aaead92a907e0d /tmp/hello
+warren files read sbx_b2aaead92a907e0d /tmp/hello
 # → warren works
+
+# or use the API directly
+curl -X POST localhost:8080/v1/sandboxes \
+     -d '{"template_id":"base","disk_byte":2147483648}'
+curl 'localhost:8080/v1/sandboxes/sbx_b2aaead92a907e0d/files?path=/tmp/hello'
 ```
 
 Sandboxes survive being paused: `POST /v1/sandboxes/{id}/pause` stops the world and
@@ -26,8 +29,8 @@ across hosts, CPUs and runsc versions rather than pinned to a set of CPU feature
 > **Status: pre-release.** The engine is complete and verified against the real
 > substrate (908 end-to-end acceptance tests on actual runsc/overlayfs/btrfs/nftables),
 > and [`deploy/`](deploy/) carries the authenticating TLS boundary that goes in front of
-> it. Still missing before you deploy this: there is no client library or CLI, and no
-> production Template ships in this repo.
+> it. A CLI ships in `cmd/warren`. Still missing before you deploy this: no production
+> Template ships in this repo, and there are no client libraries for other languages yet.
 > See [What is missing](#what-is-missing-before-you-deploy-this).
 
 ## Why this instead of a managed sandbox service
@@ -182,7 +185,7 @@ Known and deliberate, not oversights:
   `--insecure-listen` says otherwise out loud — so the gateway is the only
   outward-facing surface by construction. What you still supply is the PKI: a server
   certificate and the CA that issues caller certificates.
-- **No client library or CLI.** Consumers speak HTTP/JSON plus Connect-RPC directly.
+- **A CLI wraps the API** (`cmd/warren`), covering the main workflows: sandbox lifecycle, files, volumes, templates, network, and events. It's a thin HTTP/JSON client over the §6.1 surface. No client library ships yet for other languages.
 - **The bare Template resolves no names out of the box**, and that is by design rather
   than an omission: it ships no `/etc/resolv.conf` and the engine injects none, so a
   deployment supplies both the file and a UDP/53 `egress.allow[]` entry. The reasoning,
