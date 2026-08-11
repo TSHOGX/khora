@@ -148,9 +148,12 @@ Known and deliberate, not oversights:
   the host's own userland and ships a `/bin/sh` with no coreutils.
 - **No `/healthz`, `/readyz`, or metrics**, and no graceful shutdown yet. Operational
   signal is logs.
-- **Two unbounded-growth limitations**, both documented in place: the event outbox
-  never deletes published rows, and the reference dedup sink is an in-process map.
-  Both need a retention answer argued from a real subscriber's reconnect window.
+- **The event outbox does not trim by default.** `--event-retention` bounds it, but the
+  default is 0 (never trim), because the right window is the reconnect duration you
+  promise your subscribers and the engine must not invent that number. Left unset, the
+  table grows with every lifecycle transition. The reference dedup sink is separately an
+  in-process map, deliberately — durable dedup belongs to a subscriber, outside the
+  engine.
 - **Single node.** One orchestrator, no HA, no cross-host migration. The runtime
   provider seam is where a scheduled remote isolation unit would plug in.
 
@@ -158,8 +161,7 @@ Known and deliberate, not oversights:
 
 - [`docs/spec/`](docs/spec/) — the architecture spec (§1–§6): what the engine should
   be, and why. The best current statement of intent, revisable but never edited
-  casually. Being translated from Chinese to English one document at a time; §1–§2
-  (`SPEC.md`) are done.
+  casually.
 - [`docs/spec/deep-dives/`](docs/spec/deep-dives/) — single-topic rationale: the
   measurements, the falsified alternatives, the options rejected and on what evidence.
 - [`docs/spec/open-decisions.md`](docs/spec/open-decisions.md) — everything still
@@ -186,6 +188,7 @@ internal/allocbytes/   leaf: bytes actually allocated for a tree
 internal/guestport/    leaf: constants two subsystems must agree on
 internal/ruleset/      leaf: the rule vocabulary, static address facts, shared criteria
 internal/arch/         structural guards: subsystems must not import each other
+internal/waitfor/      the one polling loop the suites share (re-checks past the deadline)
 proto/                 transport wire schema
 test/                  end-to-end acceptance against the real substrate
 ```
