@@ -86,18 +86,28 @@ facts are additionally confirmed on amd64 where noted in ADR-0002's validation m
 ## Build and run
 
 ```sh
-go build ./cmd/orchestrator ./cmd/sandboxd
+# Reproducible build: produces bit-identical binaries on repeated invocations
+make all
+# → bin/orchestrator, bin/gateway, bin/sandboxd
+
+# Or manually:
+go build -trimpath -ldflags="-buildid= -s -w" -o bin/orchestrator ./cmd/orchestrator
+go build -trimpath -ldflags="-buildid= -s -w" -o bin/gateway ./cmd/gateway
+go build -trimpath -ldflags="-buildid= -s -w" -o bin/sandboxd ./cmd/sandboxd
+
+# Verify reproducibility (optional):
+make verify-reproducible
 
 # A Template is a directory holding a guest rootfs, and it needs the sandboxd binary,
 # which becomes the guest's PID 1. The repo ships the bare Template's DEFINITION
 # (templates/bare/) rather than the ~730 MB tree it builds — see that directory's
 # README for why. Needs skopeo + umoci:
-sudo ./templates/bare/build.sh /var/lib/warren/templates/bare ./sandboxd
+sudo ./templates/bare/build.sh /var/lib/warren/templates/bare ./bin/sandboxd
 
 # --state MUST be on a btrfs filesystem: disk caps are btrfs quotas, and the engine
 # refuses to run a capped sandbox uncapped rather than silently ignoring the cap.
 # --templates defaults to /var/lib/warren/templates, so it can be omitted here.
-sudo ./orchestrator --state /srv/warren/state
+sudo ./bin/orchestrator --state /srv/warren/state
 # serving §6.1 API on 127.0.0.1:8080
 ```
 
