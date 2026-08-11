@@ -172,6 +172,15 @@ Two consequences of that split:
 - **Verify on the real substrate before claiming done:** `go build` + `go vet` +
   the milestone's e2e acceptance on `sbx`. Report failures with output; don't
   hedge a verified pass.
+  - **One narrow exemption, and it is proven mechanically, never claimed.** The
+    substrate gate may be skipped when `go run ./test/preflight/substrategate`
+    says so — it answers "not required" only if every changed file is a `.md` or a
+    `.go` whose **token stream** is unchanged with no toolchain directive edited
+    (a translation pass moving verbatim citations is the case that motivated it).
+    **`go build` / `go vet` / `go test ./...` are never skipped**, the verdict goes
+    in the commit message so a reviewer can re-run it, and both non-zero exit codes
+    mean run the gate. Why a token stream is the right equivalence, and why
+    "comment-only" is not: `docs/decisions/ADR-0005`.
 - **Test build tags**, on two axes. *Cost:* `substrate` = needs real
   runsc/overlay/btrfs and root (the routine gate; run it with `-p 1`); a test that
   costs *minutes* gets its OWN additional tag (`drainrace` is the precedent) so the
