@@ -24,10 +24,11 @@ snapshot — persistence is the overlay on disk, which is why a sandbox is porta
 across hosts, CPUs and runsc versions rather than pinned to a set of CPU features.
 
 > **Status: pre-release.** The engine is complete and verified against the real
-> substrate (92 end-to-end acceptance tests on actual runsc/overlayfs/btrfs/nftables).
-> It is **not yet deployable as-is**: the control-plane API has no authentication or
-> TLS, there is no client library or CLI, and no production Template ships in this
-> repo. See [What is missing](#what-is-missing-before-you-deploy-this).
+> substrate (92 end-to-end acceptance tests on actual runsc/overlayfs/btrfs/nftables),
+> and [`deploy/`](deploy/) now carries the authenticating TLS boundary that goes in
+> front of it. Still missing before you deploy this: there is no client library or CLI,
+> no `/healthz`/`/readyz` or metrics, and no production Template ships in this repo.
+> See [What is missing](#what-is-missing-before-you-deploy-this).
 
 ## Why this instead of a managed sandbox service
 
@@ -100,9 +101,11 @@ sudo ./orchestrator --state /srv/warren/state
 # serving §6.1 API on 127.0.0.1:8080
 ```
 
-The default listen address is loopback, deliberately: the API is unauthenticated, so
-reachability from anywhere else must be a decision rather than a default. Notable
-flags — `--node-disk-byte` / `--node-memory-byte` turn on no-oversubscribe admission,
+The listen address must be loopback, and that is **enforced at startup**, not merely
+defaulted: the API is unauthenticated, so a routable listener has to be a decision
+stated out loud (`--insecure-listen`) rather than a flag value nobody noticed. Put an
+authenticating TLS gateway in front of it — [`deploy/`](deploy/) has both options.
+Notable flags — `--node-disk-byte` / `--node-memory-byte` turn on no-oversubscribe admission,
 `--idle-timeout` / `--retention` set the reaping TTLs, `--publish-ip` sets the host
 address published guest ports bind to. `--help` lists all of them with their reasoning.
 
@@ -142,10 +145,14 @@ the next boot.
 
 Known and deliberate, not oversights:
 
-- **No authentication, no TLS** on the control-plane API. It assumes an authorized
-  caller, so today it belongs on loopback behind something that terminates TLS and
-  authenticates. A separate gateway component is the planned home for that — it stays
-  outside the engine, because credentials are excluded from the engine by design.
+- **No authentication, no TLS *in the engine*** — permanently, by design, because
+  credentials are excluded from it (§1.4). That boundary lives in front of the engine
+  instead, and [`deploy/`](deploy/) now provides it: a tested nginx config (the
+  recommended path) or `cmd/gateway`, an mTLS binary from this repo. The engine
+  enforces its own half — it **refuses a non-loopback `--addr` at startup** unless
+  `--insecure-listen` says otherwise out loud — so the gateway is the only
+  outward-facing surface by construction. What you still supply is the PKI: a server
+  certificate and the CA that issues caller certificates.
 - **No client library or CLI.** Consumers speak HTTP/JSON plus Connect-RPC directly.
 - **The bare Template resolves no names out of the box**, and that is by design rather
   than an omission: it ships no `/etc/resolv.conf` and the engine injects none, so a
@@ -181,6 +188,8 @@ Known and deliberate, not oversights:
 ```
 cmd/orchestrator/      the engine host: flags → Engine → serve the API
 cmd/sandboxd/          in-guest daemon: init (PID 1) + the process/fs transport
+cmd/gateway/           OUTSIDE the engine: mTLS + TLS termination in front of the API
+deploy/                the outward-facing boundary: nginx config, or cmd/gateway
 internal/orchestrator/ the assembly: holds the seams, serves the API
 internal/model/        shared model: sandbox identity, lifecycle state (pure types)
 internal/lifecycle/    the mediator: state machine, transition lock, cold-start chain

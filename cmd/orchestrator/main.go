@@ -21,7 +21,8 @@ import (
 
 func main() {
 	var (
-		addr      = flag.String("addr", "127.0.0.1:8080", "listen address for the §6.1 API")
+		addr      = flag.String("addr", "127.0.0.1:8080", "listen address for the §6.1 API. MUST be loopback unless --insecure-listen is passed, and that is REFUSED AT STARTUP rather than documented (ADR-0007): the API has no authentication and no TLS — by design, since §1.4 excludes the credential family from the engine permanently — so a routable listener publishes a control plane able to create root-capable sandboxes. A default is not a boundary; pinning this to loopback is what makes a TLS-terminating, authenticating gateway in front of it the only outward-facing surface BY CONSTRUCTION rather than by an operator remembering. Every loopback spelling is accepted (127/8, ::1, the v4-mapped form); an empty host is not, since it binds every interface, and a NAME is accepted only when every address it resolves to is loopback")
+		insecure  = flag.Bool("insecure-listen", false, "permit a NON-loopback --addr, publishing the unauthenticated §6.1 API (ADR-0007). It buys exactly one thing: the loopback check is not consulted — no authentication appears either way, so anything that can route to this host can create, read and destroy sandboxes and read every file in them. Pass it only where the network itself is the boundary (a private namespace, a host firewall). It exists so that publishing the API is a DECISION on the record — in `ps` output and in the startup log — rather than an omission; refusing outright would only push an operator to patch the source, which takes the decision out of the record entirely")
 		templates = flag.String("templates", "/var/lib/warren/templates", "BUILT Template directory root: each subdirectory is a builtin Template whose directory name IS its TemplateID, and the boot seed registers every one it finds. The repo holds Template DEFINITIONS (templates/bare/), and `templates/bare/build.sh` writes the built artifact here — so this must NOT point at the definitions directory, or the seed registers source files as a runnable Template. Defaults to an ABSOLUTE path outside any Go module, unlike --state/--store, and that asymmetry is deliberate: a Template contains mode-0700 root-owned directories (Debian's /etc/ssl/private), so one built inside a module tree makes `go build ./...` fail for a non-root user. build.sh refuses an in-module destination for the same reason")
 		state     = flag.String("state", "./scratch/state", "state root (overlays + runsc state/bundles)")
 		storePath = flag.String("store", "./scratch/store.db", "SQLite store file (ADR-0004)")
@@ -55,6 +56,8 @@ func main() {
 	}
 
 	eng, err := orchestrator.New(orchestrator.Config{
+		ListenAddr:          *addr,
+		InsecureListen:      *insecure,
 		TemplatesDir:        *templates,
 		StateDir:            *state,
 		StorePath:           *storePath,
@@ -191,6 +194,15 @@ func main() {
 	// the boot-time orphan reclaim / re-adoption.
 	go eng.Reaper.Run(context.Background())
 
+	// The published case is logged as a WARNING at the moment of serving, not merely
+	// permitted by the flag (ADR-0007): the flag records the decision in `ps` output,
+	// and this records it in the log an operator reads afterwards when asking why an
+	// unauthenticated control plane is reachable.
+	if *insecure {
+		log.Printf("WARNING: --insecure-listen: serving the §6.1 API on %s, which is NOT loopback. "+
+			"The API has NO authentication and NO TLS, so anything that can route to this host can "+
+			"create, read and destroy sandboxes and read every file in them (ADR-0007)", *addr)
+	}
 	log.Printf("orchestrator: serving §6.1 API on %s (templates=%s state=%s store=%s)", *addr, *templates, *state, *storePath)
 	if err := http.ListenAndServe(*addr, eng.HTTPHandler()); err != nil {
 		log.Fatalf("orchestrator: serve: %v", err)

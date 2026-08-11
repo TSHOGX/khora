@@ -99,6 +99,29 @@ type Config struct {
 	// the sandbox address space — see network.ValidateSecondHopUID.
 	SecondHopUID *int
 
+	// ListenAddr is the §6.1 API listen address, validated at assembly time against
+	// ADR-0007's loopback requirement. EMPTY = not validated, which is what every
+	// in-process caller wants: a test serving through httptest.NewServer never
+	// listens on this address at all, so there is nothing to classify.
+	//
+	// The refusal lives HERE rather than in cmd/ for the reason SecondHopUID's does:
+	// the substrate harness builds an Engine directly, so a flag-level check would be
+	// bypassed by every test and by any embedder. What differs is the empty case —
+	// a uid is either given or not, while a listen address only exists for a caller
+	// that is about to serve on it.
+	ListenAddr string
+	// InsecureListen is the deployment saying OUT LOUD that ListenAddr may be
+	// routable (ADR-0007). It buys exactly one thing: ValidateListenAddr is not
+	// consulted. The engine gains no authentication either way — this only records
+	// that publishing an unauthenticated control plane was a decision rather than an
+	// omission, which is the whole difference between a boundary and a default.
+	InsecureListen bool
+	// ResolveHost resolves a NAME in ListenAddr. nil → net.LookupHost. Injectable so
+	// the name arm is pinned against a fixture in a root-free unit test rather than
+	// against this machine's resolver (the same shape, and the same reason, as
+	// network.Deployment.HostLocal).
+	ResolveHost ResolveHost
+
 	// HostPublishIP is the host address published endpoints bind to (§5.D: the engine
 	// delivers a `host ip:port`, and what sits in front of it is outside the engine).
 	// Empty → loopback, which is the conservative default: publish is an EXPLICIT
@@ -149,6 +172,17 @@ func New(cfg Config) (*Engine, error) {
 	// flag-level check entirely.
 	if err := network.ValidateSecondHopUID(dep, os.Geteuid()); err != nil {
 		return nil, fmt.Errorf("orchestrator: %w", err)
+	}
+
+	// ADR-0007's enforcement half, in the same fail-fast position and for the same
+	// reason: this is the last point at which nothing has been installed and nothing
+	// has been served. An engine that has already put the second-hop table in the
+	// kernel and begun serving is past the point where learning "that listener is
+	// published" helps anyone.
+	if cfg.ListenAddr != "" && !cfg.InsecureListen {
+		if err := ValidateListenAddr(cfg.ListenAddr, cfg.ResolveHost); err != nil {
+			return nil, err
+		}
 	}
 
 	rp, err := rootfs.NewHostOverlayFS(cfg.StateDir+"/overlays", cfg.TemplatesDir, cfg.StateDir+"/layers")
