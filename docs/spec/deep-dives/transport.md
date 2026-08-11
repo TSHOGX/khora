@@ -1,394 +1,521 @@
-# Transport 深挖:两服务地基(process / fs)+ session 语义加法
+# Transport deep dive: the two-service foundation (process / fs) + session semantics as an addition
 
-> **定位:[`§5.E`](../subsystems.md)(spec,导航见 [`SPEC.md`](../SPEC.md))的传输层深挖文档。** spec 只明确 §5.E 的边界
-> (engine 只暴露 process / fs 两个无状态服务,session 语义在 engine 外);本文展开这条边界背后的
-> **选型理由、ACP 会话映射、要守住的 seam**,并给出 **wire 协议(D4)** 与外沿投影(D5,边界与残留见
-> 其 D5.4)。
+> **Position: the transport-layer deep dive for [`§5.E`](../subsystems.md) (spec; navigation in
+> [`SPEC.md`](../SPEC.md)).** The spec fixes only §5.E's boundary (the engine exposes just the two
+> stateless services process / fs, with session semantics outside the engine); this document develops
+> what lies behind that boundary — **the choice of framework, the ACP session mapping, and the seams to
+> hold** — and gives the **wire protocol (D4)** plus the outer-edge projection (D5, whose boundaries and
+> residuals are in D5.4).
 >
-> **设计参照:** E2B `envd`(公开的沙箱守护进程,两服务收敛的先例)与 ACP(Zed 的 Agent Client
-> Protocol,coding agent 会话协议)。二者是公开可查的形态参照,不是本仓依赖;下文只取其**设计取向**,
-> 结论在此自洽陈述。
+> **Design references:** E2B's `envd` (a public sandbox daemon, and the precedent for converging on two
+> services) and ACP (Zed's Agent Client Protocol, a session protocol for coding agents). Both are
+> publicly inspectable shape references rather than dependencies of this repo; only their **design
+> orientation** is taken below, and the conclusions are stated self-containedly here.
 
 ---
 
-## D0. 一句话结论
+## D0. The conclusion in one sentence
 
-传输用 **Connect-RPC**(HTTP-native,流式)。**engine 只暴露两个通用、无状态的能力服务(process / fs)**,
-它们构成自足的地基——等价于一个 E2B 式沙箱;另有一个**引擎自用的 `Health` 探针**(D4.5),它不属对外
-能力面,故不在表内(§5.E 同一措辞):
+The transport uses **Connect-RPC** (HTTP-native, streaming). **The engine exposes only two general,
+stateless capability services (process / fs)**, which form a self-sufficient foundation — equivalent to
+an E2B-style sandbox. There is also a **`Health` probe for the engine's own use** (D4.5), which is not
+part of the outward capability surface and so is not in the table (the same wording as §5.E):
 
-| 服务 | 性质 | 在 engine 内? | 谁来用 |
+| Service | Nature | Inside the engine? | Who uses it |
 | --- | --- | --- | --- |
-| **`process`** | 无状态机制原语:起进程 + 可选 PTY + 双向流 + signal | ✅ engine 内 | 任何要在沙箱里跑东西的人 |
-| **`fs`** | 无状态机制原语:read(offset)/write/list/stat | ✅ engine 内 | 任何要读写沙箱文件的人 |
+| **`process`** | A stateless mechanism primitive: start a process + an optional PTY + bidirectional streams + signals | ✅ inside | Anyone who wants to run something in a sandbox |
+| **`fs`** | A stateless mechanism primitive: read(offset)/write/list/stat | ✅ inside | Anyone who wants to read or write sandbox files |
 
-**`session`(agent 会话语义)不在 engine 内实现**,而是**叠在 `process` 之上的一层语义加法**,
-位于 engine 之外(adapter / 上层组件)。形态对齐 ACP 的 `session/*`,但它的实现、状态、审计
-**全部在 engine 外**;engine 核心对"agent / turn / session"一无所知。
+**`session` (agent session semantics) is not implemented inside the engine** but is **a layer of
+semantic addition stacked on `process`**, living outside the engine (an adapter / an upper-layer
+component). Its shape aligns with ACP's `session/*`, but its implementation, state, and audit trail are
+**entirely outside the engine**; the engine core knows nothing about "agent / turn / session".
 
-**核心纪律(要守死的一条)**:session 必须能作为**纯加法**叠在 `process` 上——加它**不改 engine
-核心**(对齐 `spec` §1.3「成本判据」)。本文为此守住三个 seam(D3),engine 内不为 session 留任何槽。
-
----
-
-## D1. 为什么 engine 只做这两个,session 划到外面
-
-设计压力来自三方:E2B(机制怎么收敛)、ACP(agent 会话怎么标准化)、渲染 vs 交互的非对称。
-三者交汇的结论是:**process/fs 是 engine 的全部,session 是 engine 外的加法。**
-
-### D1.1 `process` + `fs`:"在沙箱里干活"本就只有两类,且自足
-
-沙箱里能做的一切,要么动文件系统、要么跑一个进程。把进程原语做足(可选 PTY + 双向流 + signal),则
-**shell、命令执行、后台服务、jupyter kernel 全是"起一个进程"的特例**——不必为每种形态各开接口。
-
-据此,两个能力都定为 **Connect-RPC 服务**:
-
-- **`process`**:PTY 不是独立服务,是 `Start` 带 PTY 字段的特例——resize = 更新 size,键盘输入 =
-  input 的 pty 分支。**进程按 pid 寻址**(guest 原生;tag 不进模型见 D4.6)。权威 RPC 清单见 D4.3。
-- **`fs`**:全 unary + 大文件 HTTP 流式旁路,**不提供 `watch`**(消费方用 `Stat`+`Read(offset)` 自行轮询
-  拉增量)。权威 RPC 清单与语义档位见 D4.4。
-
-这两个服务**无状态**:engine 不为它们维护任何持久 SoT。"沙箱上现在跑着什么进程" =
-向 sandboxd 实时 `process.List`,不存控制面记录:零进程注册表。
-
-**关键:这两个就够成一个完整产品。** process + fs = 一个持久、可 root、可挂多连接、可读写
-文件、可跑任意进程的隔离沙箱,即 `spec` §1.2 in-scope 的全部地基,**不依赖 session 存在**就能独立交付。
-
-### D1.2 `session`:形态抄 ACP,但它是 engine 外的加法,不是 engine 的职责
-
-如果只有 process/fs,agent 就是"起一个进程读它的流"。这对 shell 完全够用;对 coding agent
-缺三样东西——**turn 语义、会话历史与恢复、结构化事件**。ACP(Zed 的 Agent Client Protocol,
-"coding agent 界的 LSP")把这三样标准化了。但**关键问题是:这三样该由谁提供?**
-
-答案是 **engine 之外**。理由有三,层层递进:
-
-1. **它们都能在 process/fs 之上拼出来,不需要 engine 原语。** turn 循环 = adapter 在 process
-   流上识别 prompt/输出/结束;会话历史 = agent 本就往自己 FS 写(`~/.claude` 的 JSONL,落在
-   Overlay 工件里,经 `fs` 可读);恢复 = adapter 调 agent 原生的 `--resume`。**engine 一个新
-   概念都不用加。**
-2. **它们是产品语义,塞进 engine 会污染地基(`spec` §1.3)。** "turn""session""哪个 agent"
-   都是产品层概念;让 engine 认识它们,就是把产品概念泄漏进沙箱引擎——被第一性原则否决。
-3. **ACP 自己就把 agent 当 engine 外的对等体。** ACP 里 agent 是 client 起的子进程,通过
-   `session/*` 对话——agent 和"跑它的环境"是分离的两层。本项目把这层映射成:**engine 提供环境
-   (process/fs),session adapter 在外面把具体 agent 翻译成 ACP 形态的会话协议。**
-
-所以 `session` = **ACP `session/*` 方法族**(`new` / `prompt` / `update` 流 / `cancel` /
-`load` / `resume` / `stopReason`),**由 engine 外的 adapter 实现**。`control` payload 属这一层:
-它**不是 engine 的一种 payload 类型,而是 engine 外 session 层的协议**,对齐 ACP,engine 不持有它。
-
-ACP 用来验证这条划界的三点(turn 状态归 agent 进程 / 会话历史由 agent 侧生成并用 driver-native 机制存 /
-跨重启恢复是 `session/load` vs `session/resume` 的**显式能力位**,不是 engine 用 lease/grace 保证的东西)
-在本项目**天然成立**——engine 里根本没有 turn 表可仲裁、没有会话内容可持有。session 层的状态
-(sessionId↔driver 映射、恢复能力、审计事件流)全在 engine 外那层自己管。
-
-### D1.3 engine 侧只有 process / fs:没有 lane / payload 注册表 / turn 仲裁
-
-两个无状态服务(D1.1)+ session 外移(D1.2)之后,engine 侧不需要任何统一传输原语、payload
-类型系统或 turn 仲裁。逐条锁定它们各自的正当替代,防止把不必要的抽象带回引擎:
-
-- **不需要统一传输原语(lane)**:一个"什么都管"的传输抽象要承担的五件事——多路复用、每连接定序、
-  可重启、控制面注册、冻结时的静止——前四件由 **Connect-RPC / HTTP-2 原生多 stream + 每 stream 天生
-  有序 + `Connect` 重连 + process/fs 无状态**逐件吸收;只剩"冻结时的静止"是真需求,由 §4.2 的 pause
-  静止点单独提供。没有留给"统一 lane"的职责。
-- **不需要 payload 类型系统**:jupyter = 起个 kernel 进程读流、file = fs 原语、cli = 起个进程——
-  全在 process/fs 上拼得出来;`control`(agent 会话)划到 engine 外(D1.2)。故 engine 侧只有
-  process / fs 两个通用机制,**新增任何交互形态 = engine 外叠一层,engine 一行不改**。
-- **不做 turn 仲裁**:turn / session 整体在 engine 外,engine 控制面**不存** turn/lease/归属方/
-  游标/历史。engine 侧唯一与"可靠性"相关的承诺压到最低:process 双向流是尽力而为的在线流,
-  中断时 in-flight 数据可能丢——裸 pty 字节流容忍丢字符(shell 无持久 SoT),agent 会话的审计幂等由
-  engine 外 session 层自己保证。
+**The core discipline (the one to hold to the death)**: a session must be able to stack on `process` as
+a **pure addition** — adding it **changes nothing in the engine core** (aligned with `spec` §1.3's "cost
+criterion"). This document holds three seams for that purpose (D3), and the engine reserves no slot for
+a session.
 
 ---
 
-## D2. 渲染 vs 交互:非对称,决定了 fs 不做 watch
+## D1. Why the engine does only these two, with session drawn outside
 
-"看一群 agent 在干嘛"(渲染)和"驱动一个 agent"(交互)是**两件不对称的事**,不该塞进同一原语:
+The design pressure comes from three directions: E2B (how mechanisms converge), ACP (how agent sessions
+are standardized), and the asymmetry between rendering and interaction. Where the three meet:
+**process/fs are all of the engine, and a session is an addition outside it.**
 
-| | **读 / 渲染** | **写 / 交互** |
+### D1.1 `process` + `fs`: "doing work in a sandbox" is only ever two things, and they are self-sufficient
+
+Everything doable in a sandbox either touches the filesystem or runs a process. Make the process
+primitive complete (an optional PTY + bidirectional streams + signals) and **a shell, command
+execution, a background service, and a jupyter kernel are all special cases of "start a process"** —
+with no need for a separate interface per shape.
+
+So both capabilities are defined as **Connect-RPC services**:
+
+- **`process`**: a PTY is not a separate service but a special case of `Start` carrying a PTY field —
+  resize = updating the size, keyboard input = input's pty branch. **Processes are addressed by pid**
+  (guest-native; why tags do not enter the model is in D4.6). The authoritative RPC list is in D4.3.
+- **`fs`**: all unary + an HTTP streaming bypass for large files, with **no `watch`** (consumers poll
+  for increments themselves using `Stat`+`Read(offset)`). The authoritative RPC list and semantic
+  choices are in D4.4.
+
+These two services are **stateless**: the engine maintains no durable SoT for them. "What processes are
+running on this sandbox right now" = a live `process.List` to sandboxd, with no control-plane record:
+zero process registry.
+
+**The key point: these two alone are enough to be a complete product.** process + fs = a persistent,
+root-capable, multi-connection, file-readable-and-writable, arbitrary-process-running isolated sandbox
+— that is, the entire foundation of `spec` §1.2's in-scope list, deliverable independently **without
+depending on a session existing**.
+
+### D1.2 `session`: the shape is taken from ACP, but it is an addition outside the engine rather than the engine's job
+
+With only process/fs, an agent is "start a process and read its stream". That is entirely sufficient for
+a shell; for a coding agent three things are missing — **turn semantics, session history and
+resumption, and structured events**. ACP (Zed's Agent Client Protocol, "the LSP of coding agents")
+standardizes those three. But **the question that matters is: who should provide them?**
+
+The answer is **outside the engine**. Three reasons, each building on the last:
+
+1. **All three can be assembled on top of process/fs and need no engine primitive.** The turn loop = an
+   adapter recognizing prompt/output/end on the process stream; session history = the agent writing to
+   its own FS anyway (`~/.claude`'s JSONL, landing in the Overlay artifact and readable through `fs`);
+   resumption = the adapter calling the agent's native `--resume`. **The engine adds not one new
+   concept.**
+2. **They are product semantics, and stuffing them into the engine contaminates the foundation
+   (`spec` §1.3).** "turn", "session", and "which agent" are all product-layer concepts; making the
+   engine know them leaks product concepts into a sandbox engine — vetoed by the first principle.
+3. **ACP itself treats an agent as a peer outside the engine.** In ACP an agent is a child process the
+   client starts, conversing through `session/*` — the agent and "the environment running it" are two
+   separate layers. This project maps that layer as: **the engine provides the environment (process/fs),
+   and a session adapter outside translates a concrete agent into an ACP-shaped session protocol.**
+
+So `session` = **ACP's `session/*` method family** (`new` / `prompt` / the `update` stream / `cancel` /
+`load` / `resume` / `stopReason`), **implemented by an adapter outside the engine**. The `control`
+payload belongs to that layer: it is **not a payload type of the engine but a protocol of the session
+layer outside it**, aligned with ACP, and the engine does not hold it.
+
+The three points by which ACP validates this line (turn state belongs to the agent process / session
+history is produced on the agent side and stored by a driver-native mechanism / resumption across a
+restart is an **explicit capability bit**, `session/load` vs `session/resume`, rather than something the
+engine guarantees with a lease or a grace period) **hold naturally** in this project — there is no turn
+table in the engine to arbitrate and no session content to hold. The session layer's state (the
+sessionId↔driver mapping, its resumption capability, its audit event stream) is all managed by that
+layer outside the engine.
+
+### D1.3 On the engine side there is only process / fs: no lane, no payload registry, no turn arbitration
+
+After two stateless services (D1.1) plus session moved outward (D1.2), the engine side needs no unified
+transport primitive, no payload type system, and no turn arbitration. Locking down each one's legitimate
+substitute, so an unnecessary abstraction is not carried back in:
+
+- **No unified transport primitive (a "lane") is needed**: the five things a
+  "handles-everything" transport abstraction would carry — multiplexing, per-connection ordering,
+  restartability, control-plane registration, and quiescing at freeze time — are absorbed one by one by
+  **Connect-RPC / HTTP-2's native multiple streams + each stream's inherent ordering + `Connect`
+  reattachment + process/fs being stateless**; only "quiescing at freeze time" is a genuine need, and
+  §4.2's pause quiescent point provides it separately. Nothing is left for a "unified lane" to do.
+- **No payload type system is needed**: jupyter = start a kernel process and read the stream, file = the
+  fs primitives, cli = start a process — all assemblable on process/fs; `control` (an agent session) is
+  drawn outside the engine (D1.2). So the engine side has only the two general mechanisms process / fs,
+  and **adding any new interaction shape = stacking a layer outside the engine, with not one line
+  changed inside it**.
+- **No turn arbitration**: turns / sessions live wholly outside the engine, and the engine's control
+  plane **does not store** turns, leases, ownership, cursors, or history. The engine's only
+  reliability-related promise is kept minimal: a process's bidirectional stream is a best-effort live
+  stream, and in-flight data may be lost on an interruption — a raw pty byte stream tolerates dropped
+  characters (a shell has no durable SoT), and audit idempotency for an agent session is guaranteed by
+  the session layer outside the engine.
+
+---
+
+## D2. Rendering vs interaction: an asymmetry, which is why fs has no watch
+
+"Watching what a group of agents is doing" (rendering) and "driving one agent" (interaction) are **two
+asymmetric things** that should not be forced into one primitive:
+
+| | **Read / render** | **Write / interact** |
 | --- | --- | --- |
-| 语义 | 旁观、回放、看状态 | 驱动一个正在跑的进程 |
-| 形态 | fan-out、多对一、pull | 点对点、duplex |
-| 引擎角色 | 通用 `fs`(read/stat,内容不透明) | `process`(duplex + signal) |
-| 要不要连接 | **不一定**(可完全不开流,只轮询 fs) | **要——这条流就是 process 交互** |
+| Semantics | Spectating, replaying, looking at state | Driving a running process |
+| Shape | fan-out, many-to-one, pull | point-to-point, duplex |
+| The engine's role | The general `fs` (read/stat, content opaque) | `process` (duplex + signals) |
+| Is a connection needed | **Not necessarily** (no stream need be opened at all — just poll fs) | **Yes — that stream IS the process interaction** |
 
-- **渲染面**:engine 只保证"能读到字节 + 读到大小"(`fs.Read(offset)` + `fs.Stat`)。要不要 push、隔多久
-  poll,是消费方(engine 外组件)自己的策略;轮询 `stat` 在 run-anywhere 下铁定可用。**不提供 watch**
-  的理由见 D4.4。
-- **交互面**:只有要**往活进程写**(给 shell 发键、给 agent 投消息)并拿实时双向回流时,
-  才需要 `process` 的双向流。纯看历史/看状态,一条流都不用开。
+- **The rendering face**: the engine guarantees only "the bytes can be read + the size can be read"
+  (`fs.Read(offset)` + `fs.Stat`). Whether to push and how often to poll is the consumer's own policy (a
+  component outside the engine); polling `stat` is reliably available in a run-anywhere setting. The
+  reason **no watch is provided** is in D4.4.
+- **The interaction face**: only when something must **write to a live process** (send keys to a shell,
+  post a message to an agent) and get a real-time bidirectional stream back is `process`'s bidirectional
+  stream needed. Purely viewing history or state opens no stream at all.
 
-一个推论:**engine 对内容一无所知。** agent 自带的会话日志(JSONL)天然落在 Overlay 工件里,
-于是"持久化 / `--resume` / 前端读取(轮询 read+stat)"复用同一份文件,engine **不需再造**
-"会话日志"机制或变更推送。还原 sidechain 树、画 swarm 拓扑——全在 engine 外/产品层。
+One corollary: **the engine knows nothing about content.** An agent's own session log (JSONL) naturally
+lands in the Overlay artifact, so "persistence / `--resume` / frontend reads (polling read+stat)" all
+reuse the same file, and the engine **need not build** a "session log" mechanism or change
+notifications. Reconstructing a sidechain tree, drawing a swarm topology — all outside the engine, in
+the product layer.
 
-> **PTY 保持最简,不落 scrollback 文件。** PTY 是 ephemeral 字节流,输出走 process 流即可;
-> 为凑齐"读文件即渲染"的对称性而给它人造落盘 SoT,是给最简单的东西加复杂度。两条路径各自最简、
-> 互不拉平:会写日志的 agent 有自带落盘会话可渲染(SoT 是它自己的文件),裸 pty shell 只有在线
-> 流、无落盘 SoT。这忠实反映两种东西的语义差异,engine 不替任一方发明它本不具备的语义。
-
----
-
-## D3. 要守住的 seam:保证 session 是纯加法
-
-session 在 engine 外,加它**不回头改 engine**。这要求 engine 守住三个 seam:
-
-- **process 的双向流足够通用**:能承载任意字节/帧,使 session adapter 可在其上跑 ACP 的
-  JSON-RPC(prompt/update 等),engine 不需要理解流里的内容。
-- **process 支持 `Connect` 重连**:session 的"恢复"语义建立在 **agent 原生 `--resume` + `fs` 读历史**
-  之上——重连接回一条仍在跑的流,或从落盘的历史重放。**不建立在进程态 checkpoint 之上**:内存态冻结
-  整族(全 VM 镜像与单进程 checkpoint 一样)已被 §1.4 永久排除,理由是可移植性(内存态锁 CPU-feature,
-  §2.5)。这条路不要求 engine 懂 session。
-- **fs 能从沙箱外读到 agent 自带日志的字节与大小**(read+offset / stat):使 session 层/前端
-  能渲染历史,engine 不提供也不需要"会话日志"这种概念。
-
-只要这三个 seam 在,session 就能作为 engine 外的纯加法落地。**本文不设计 session 的内部,
-只确保地基不挡它的路。**
-
-> **三个"借 ACP 但要改"的边界**(留给将来真正做 session 时处理,此处仅登记):
-> ① ACP 的 fs 是 agent **反向**调 client(方向 agent→client),本项目 fs 是**宿主→沙箱**——
-> session adapter 要做方向适配;② ACP **无审计**,本项目要 durable event(在 session 层旁挂,
-> 不在 engine);③ ACP 靠**重放**恢复,本项目也一样——resume 是冷启(§4.2 不存内存),故恢复走
-> `--resume` + `fs` 读历史,没有进程态恢复这条路。
+> **A PTY stays minimal and gets no scrollback file.** A PTY is an ephemeral byte stream and its output
+> travels on the process stream; giving it a manufactured on-disk SoT for the sake of symmetry with
+> "render by reading a file" adds complexity to the simplest thing there is. The two paths stay minimal
+> separately rather than being levelled: an agent that writes logs has its own on-disk session to render
+> (the SoT is its own file), while a bare pty shell has only a live stream and no on-disk SoT. That
+> faithfully reflects a semantic difference between two things, and the engine invents for neither a
+> semantics it does not have.
 
 ---
 
-## D4. wire 协议
+## D3. The seams to hold, so that a session stays a pure addition
 
-### D4.1 载体:netns 内 TCP(见 spec §5.E)
+A session lives outside the engine, and adding it **does not come back and change the engine**. That
+requires the engine to hold three seams:
 
-载体已定(spec §5.E):`sandboxd` 在 guest netns 里监听 TCP 端口,连接由 sentry 的 userspace netstack
-终结,宿主经该 netns 的 veth IP 直连——unary 走 HTTP、双向流走 h2c 流式(server-stream/client-stream)+
-即时 flush,不用 vsock;框架是 Connect-RPC over h2c(D4.2),非裸 WebSocket duplex。
+- **`process`'s bidirectional stream is general enough**: it can carry arbitrary bytes/frames, letting a
+  session adapter run ACP's JSON-RPC (prompt/update and the rest) over it without the engine needing to
+  understand the stream's content.
+- **`process` supports `Connect` reattachment**: a session's "resumption" semantics rest on **the
+  agent's native `--resume` + reading history through `fs`** — reattaching to a stream that is still
+  running, or replaying from history on disk. **They do not rest on a process-state checkpoint**: the
+  whole memory-state-freezing family (a full VM image and a single-process checkpoint alike) is
+  permanently excluded by §1.4 for portability (memory state pins CPU features, §2.5). This road does
+  not require the engine to understand a session.
+- **`fs` can read the bytes and size of the agent's own log from outside the sandbox** (read+offset /
+  stat): letting the session layer / a frontend render history, with the engine neither providing nor
+  needing the concept of a "session log".
 
-transport 只依赖 placement 给出的结果——**netns 由谁建、veth IP 由谁分配、sentry 如何 adopt netns 都归
-§5.A**,不在本层重述。对 wire 协议只有一条约束落地:重连拿的是**当前** netns veth IP(冷启即变),不缓存
-固定地址(§3.3)。
+As long as those three seams exist, a session can land as a pure addition outside the engine. **This
+document does not design a session's internals, only ensures the foundation does not stand in its way.**
 
-**进程级共享一份连接池是正确性要求(§5.E)。** `ReadIdleTimeout` 也以此为前提:一条只服务过一次 unary
-调用就被弃置的连接,活不到 PING 到期;退役端点那条按连接池的 idle 超时老化掉。
+> **Three boundaries where ACP is borrowed but must be adapted** (left for whoever actually builds the
+> session layer; registered here only): ① ACP's fs is the agent calling **back** into the client
+> (direction agent→client) while this project's fs is **host→sandbox**, so a session adapter must adapt
+> the direction; ② ACP has **no audit**, while this project wants durable events (hung beside the
+> session layer, not in the engine); ③ ACP recovers by **replay**, and so does this project — a resume
+> is a cold start (§4.2 stores no memory), so recovery goes through `--resume` + reading history through
+> `fs`, and there is no process-state recovery road.
 
-> **反面论证:若不共享池,而是每次拨号各建一个。** 客户端按契约就是被丢弃的,于是没有任何一方会去关那个
-> 池,每条建立过的连接连同其读写 goroutine 都常驻到进程结束。而拨号既在每次数据面 RPC 上、也在 reaper
-> 每轮对每个 running 沙箱的探活上,故增长**与负载无关**、只随沙箱数与 tick 周期走(实测:对同一端点
-> 50 次调用 = 50 条连接、约 150 个常驻 goroutine),终点是 fd 耗尽。
+---
 
-**通道信任模型:为什么 transport 不带通道内 auth(明确论证,非遗漏)。** `sandboxd` 在 guest netns 内
-**明文**监听、宿主经 veth IP 直连,通道本身不带 token / mTLS。这是攻击面分析的**结论**,不是漏项。逐一
-过一遍谁够得到这个端口:
+## D4. The wire protocol
 
-- **guest 自己**:够得到,但**拿不到新能力**。guest 内已是 root(§2.2),通道允许的一切(起进程、读写
-  **本沙箱** FS、发信号)它作为 root 本就全能做;通道上也**没有什么可偷的**——`sandboxd` 只做 process/fs,
-  而引擎里根本不存在凭证这个概念(§1.4 永久排除),故通道上不可能流过它。故"guest 可达控制通道"不提权。
-- **sibling 沙箱**:**按设计够不到**——跨沙箱网络隔离把它挡死(§2.3 / network.md D5 ①:sibling IP 进 L0
-  地板;点对点 veth 是纵深的一层、不是物化方)。
-- **外部**:除非**显式 publish**(§5.D)否则不可达。**publish 自身不带鉴权字段**——引擎交付一个
-  `host ip:port`,任何调用方校验都在引擎外(§5.D),故它不为本条提供任何额外保护。
+### D4.1 The carrier: TCP inside the netns (see spec §5.E)
 
-**对照**:一个挂在**公网可达 URL** 上的 guest daemon 必须带 access token;本项目 `sandboxd` 只在
-netns 内、宿主经 veth 直连,攻击面小一个量级,**通道内 auth 在当前载体下是冗余的**。但这条**取决于载体
-形态**:若将来某 provider(§5.A)把 transport 暴露到不可信网络,通道内 auth 就从冗余变成必需——届时按该
-provider 补,属 §5.A provider 的网络义务,不改本 wire 协议。
+The carrier is settled (spec §5.E): `sandboxd` listens on a TCP port inside the guest netns, connections
+are terminated by the sentry's userspace netstack, and the host connects directly through that netns's
+veth IP — unary over HTTP, bidirectional streams over h2c streaming (server-stream/client-stream) with
+immediate flush, no vsock; the framework is Connect-RPC over h2c (D4.2) rather than a bare WebSocket
+duplex.
 
-### D4.2 框架与流式分工
+The transport depends only on what the placement produced — **who builds the netns, who allocates the
+veth IP, and how the sentry adopts the netns all belong to §5.A** and are not restated at this layer. Only
+one constraint lands on the wire protocol: a reattachment takes the **current** netns veth IP (which
+changes on a cold start) and does not cache a fixed address (§3.3).
 
-- **RPC 框架 = Connect-RPC over h2c。** 一套 IDL 同时讲 Connect / gRPC / gRPC-web,unary 与 stream
-  同源,可走纯 HTTP(契合 D4.1 载体)。
-- **流式分工 = 非对称三分,不做全 duplex。**
+**One process-wide shared connection pool is a correctness requirement (§5.E).** `ReadIdleTimeout`
+presumes it too: a connection that served exactly one unary call and was then abandoned does not live long
+enough for a PING to come due; the one to a retired endpoint ages out by the pool's idle timeout.
 
-  | 方向 | 形态 | RPC |
+> **The argument from the other side: if the pool were not shared, but built fresh per dial.** The client
+> is by contract discarded, so nobody would ever close that pool, and every connection ever established
+> — along with its read and write goroutines — would stay resident until the process exits. And dialing
+> happens both on every data-plane RPC and on the reaper's probe of every running sandbox each round, so
+> the growth is **independent of load** and tracks only the sandbox count and the tick period (measured:
+> 50 calls to the same endpoint = 50 connections and about 150 resident goroutines), ending in fd
+> exhaustion.
+
+**The channel's trust model: why the transport carries no in-channel auth (an explicit argument, not an
+omission).** `sandboxd` listens **in the clear** inside the guest netns and the host connects directly
+through the veth IP, with no token or mTLS on the channel itself. That is the **conclusion** of an
+attack-surface analysis rather than a missing item. Taking each party who can reach that port in turn:
+
+- **The guest itself**: it can reach it, but **gains no new capability**. Inside the guest it is already
+  root (§2.2), and everything the channel permits (starting processes, reading and writing **this
+  sandbox's** FS, sending signals) it can already do as root; there is also **nothing on the channel to
+  steal** — `sandboxd` does only process/fs, and the concept of a credential does not exist in the engine
+  at all (§1.4 excludes it permanently), so nothing of the sort can flow over the channel. So "the guest
+  can reach the control channel" is not a privilege escalation.
+- **A sibling sandbox**: **it cannot reach it, by design** — cross-sandbox network isolation blocks it
+  (§2.3 / network.md D5 ①: a sibling IP is in the L0 floor; the point-to-point veth is a layer of depth
+  rather than the materializer).
+- **From outside**: unreachable unless **explicitly published** (§5.D). **publish itself carries no
+  authentication field** — the engine delivers a `host ip:port` and any caller validation happens outside
+  the engine (§5.D) — so it provides no additional protection here.
+
+**By contrast**: a guest daemon hanging off a **publicly reachable URL** must carry an access token; this
+project's `sandboxd` is only inside the netns with the host dialing over the veth, an attack surface an
+order of magnitude smaller, so **in-channel auth is redundant under the current carrier**. But that
+**depends on the carrier's shape**: should some provider (§5.A) ever expose the transport to an untrusted
+network, in-channel auth turns from redundant into necessary — added by that provider at that point, as
+part of a §5.A provider's network obligations, without changing this wire protocol.
+
+### D4.2 The framework and the division of streaming
+
+- **The RPC framework = Connect-RPC over h2c.** One IDL speaks Connect / gRPC / gRPC-web at once, unary
+  and streaming share an origin, and it can run over plain HTTP (which fits D4.1's carrier).
+- **The streaming division = an asymmetric three-way split, with no full duplex.**
+
+  | Direction | Shape | RPC |
   | --- | --- | --- |
-  | **输出**(stdout/stderr/pty-out + 进程事件) | **server-stream** | `Start` / `Connect` |
-  | **输入**(stdin/pty-in,保序) | **client-stream** | `StreamInput` |
-  | **控制**(信号/resize/列举/一次性写) | **unary** | `SendInput` / `SendSignal` / `Update` / `List` / `CloseStdin` |
+  | **Output** (stdout/stderr/pty-out + process events) | **server-stream** | `Start` / `Connect` |
+  | **Input** (stdin/pty-in, order-preserving) | **client-stream** | `StreamInput` |
+  | **Control** (signals/resize/listing/one-shot writes) | **unary** | `SendInput` / `SendSignal` / `Update` / `List` / `CloseStdin` |
 
-  多个独立实现都收敛到这个三分——**输出是 fan-out 多订阅(server-stream
-  天然),输入是保序单写(client-stream 天然),控制是点操作(unary 天然)**。硬塞进一条 duplex 流会
-  把三种不同的背压 / 保序 / 扇出语义揉成一根。D3 要守的 seam(流足够通用以承载 ACP JSON-RPC)由
-  `Start`/`StreamInput` 这对双向能力满足,不需要 duplex。
-- **长流禁用 idle 读写超时,靠 `keepalive` 维系。** 输出 server-stream 是长驻的(空闲终端可挂几小时),
-  服务端**不得**对它施加默认 idle read/write deadline——那会静默杀掉空闲 shell(已知的稳定坑)。事件
-  `oneof` 里的 `keepalive`(D4.3)就是为此:服务端周期性发 `keepalive` 帧,让中间层 / 前端知道连接活着、
-  不因静默被回收。这属实现级约束,登记在此、不进核心 spec。
+  Several independent implementations converge on this split — **output is fan-out to many subscribers
+  (natural for a server-stream), input is an order-preserving single writer (natural for a
+  client-stream), and control is a point operation (natural for unary)**. Forcing them into one duplex
+  stream would knead three different backpressure / ordering / fan-out semantics into one strand. The seam
+  D3 must hold (a stream general enough to carry ACP's JSON-RPC) is satisfied by the `Start`/`StreamInput`
+  pair's bidirectional capability, with no duplex required.
+- **Long streams disable idle read/write timeouts and are kept alive by `keepalive`.** An output
+  server-stream is long-lived (an idle terminal can hang for hours), and the server **must not** impose a
+  default idle read/write deadline on it — that would silently kill an idle shell (a known, reproducible
+  pit). The `keepalive` in the event `oneof` (D4.3) exists for this: the server periodically sends a
+  `keepalive` frame so intermediaries and frontends know the connection is alive and do not reclaim it for
+  going quiet. This is an implementation-level constraint, registered here rather than entering the core
+  spec.
 
-### D4.3 process 服务面
+### D4.3 The process service surface
 
-RPC 清单(按 pid 寻址,tag 不进模型见 D4.6):
+The RPC list (addressed by pid; why tags do not enter the model is in D4.6):
 
-| RPC | 形态 | 语义 |
+| RPC | Shape | Semantics |
 | --- | --- | --- |
-| `Start{cmd,args,env,cwd,pty?}` | server-stream | 起进程,流回 `oneof{start,data,end,keepalive}` 事件 |
-| `Connect{pid}` | server-stream | 重连已有进程,接上输出流(§3.2 多连接) |
-| `StreamInput{pid, stream<bytes>}` | client-stream | 保序写 stdin / pty-in |
-| `SendInput{pid, oneof{stdin,pty}}` | unary | 一次性写(不需保持流时) |
-| `SendSignal{pid, signal}` | unary | 见下 |
-| `Update{pid, pty.size}` | unary | PTY resize(不单开服务,是 process 的字段) |
-| `List{}` | unary | 实时枚举(**无注册表**,§5.E) |
-| `CloseStdin{pid}` | unary | 关 stdin(pty 下等价发 Ctrl-D) |
+| `Start{cmd,args,env,cwd,pty?}` | server-stream | Start a process, streaming back `oneof{start,data,end,keepalive}` events |
+| `Connect{pid}` | server-stream | Reattach to an existing process and pick up its output stream (§3.2 multi-connection) |
+| `StreamInput{pid, stream<bytes>}` | client-stream | Order-preserving writes to stdin / pty-in |
+| `SendInput{pid, oneof{stdin,pty}}` | unary | A one-shot write (when no stream need be held) |
+| `SendSignal{pid, signal}` | unary | See below |
+| `Update{pid, pty.size}` | unary | PTY resize (not a separate service — a field of process) |
+| `List{}` | unary | Live enumeration (**no registry**, §5.E) |
+| `CloseStdin{pid}` | unary | Close stdin (equivalent to sending Ctrl-D under a pty) |
 
-事件 `oneof{start(pid), data(stdout|stderr|pty), end(exit_code), keepalive}`。**PTY 不
-单独成服务**:`Start` 带 `pty.size` 即 pty 特例,resize=`Update`,输入走 input 的 pty 分支。
+The event `oneof{start(pid), data(stdout|stderr|pty), end(exit_code), keepalive}`. **A PTY is not its own
+service**: `Start` carrying `pty.size` is the pty special case, resize is `Update`, and input travels on
+input's pty branch.
 
-- **多连接扇出:输出广播,输入不仲裁。** §3.2「多路并发挂同一沙箱」落到单进程即"多个 `Connect` 挂
-  同一 pid"。**输出**:每个 attach 者各自拿到一份输出流拷贝(一个源 fan-out 到 N 个订阅者,退订
-  不影响其余)。**输入**:engine **不**给多写者做仲裁 /
-  加锁——多个连接同时写一个 pty = 多人 `screen` 同一终端,字节交错是 Unix 本身的语义(§3.2「多人
-  ssh 同一台机」);要不要协调是**产品层**的事,engine 只如实转发。这守住「engine 不为连接维护状态」
-  (§5.E 无状态)。
+- **Multi-connection fan-out: output is broadcast, input is not arbitrated.** §3.2's "several connections
+  attached to one sandbox concurrently" applied to a single process means "several `Connect`s on the same
+  pid". **Output**: every attacher gets its own copy of the output stream (one source fanning out to N
+  subscribers, and one unsubscribing does not affect the rest). **Input**: the engine does **not**
+  arbitrate or lock among several writers — several connections writing one pty at once = several people
+  `screen`-ing the same terminal, and interleaved bytes are Unix's own semantics (§3.2's "several people
+  ssh'd into one machine"); whether to coordinate is the **product layer's** business, and the engine
+  forwards faithfully. This holds "the engine maintains no state for connections" (§5.E statelessness).
 
-- **扇出的两条正确性 invariant:源永不因订阅者阻塞 + 有界回放。** 「退订不影响其余」只说 disconnect;
-  扇出还有两条必须显式钉死的规则,否则一个卡住的前端能冻结 guest 里的真实进程:
-  1. **慢订阅者非阻塞丢弃,源 `write` 永不阻塞。** 每个 live 订阅者有独立**有界**发送窗口;窗口溢出
-     即对**该订阅者**非阻塞处置,**背压绝不回传到源**(PTY/进程)。这把 D1.3「裸
-     pty lossy」从模糊表述钉成可验收规则:lossy 的是**慢订阅者那一份拷贝**,不是源。
-     - **溢出处置 = 断开该订阅者。** 理由:窗口一旦溢出,
-       这份拷贝的字节流已有空洞、后续无从无缝续上;与其留一条**残缺**的 live 流让上层误以为完整,
-       不如断开,由 client 重新 `Connect`——重连会先回放有界环形缓冲的近期 tail(invariant 2),
-       比一条带洞的流干净。断开是**该订阅者**的事,源与其余订阅者不受影响。这不给源加任何"保证送达"
-       语义(D1.3 lossy 边界不变)。
-     - **"你被断开了"对该订阅者是可观测的**,且必须是:否则"进程正常结束"与"你那份拷贝被丢了"都表现为
-       流关闭,而这两件事的正确反应相反(接受退出码 / 重连再读)。故溢出关闭报 `resource_exhausted`,
-       宿主侧客户端把它投影成一条终止事件交给消费方。**但它不是健康信号**:§4.3 只从 L2 `Health` 探针
-       与 guest 侧活动时钟判健康,绝不从"某个订阅者跟不上"判——对调用方可见,对 reaper 不可见。
-  2. **`Connect` 先回放有界环形缓冲、再接 live。** 每进程维护一个 **per-process、in-guest、按字节上界**
-     的输出环形缓冲(旧字节静默丢弃);`Connect{pid}` **先把缓冲内近期
-     字节回放给新订阅者、再切入 live 流**。于是重连 / 刷新页面 / 多端挂载**立刻见最近状态而非空屏**——
-     这正是 REPL / 交互式终端体验的刚需。
-  - (§5.E 已把这个环形缓冲列在"无状态"约束之外——它是进程内瞬时、非权威的加速结构,丢了只损失回放近况。)
-  - **边界:engine 只保证 best-effort 字节 tail,不保证屏幕重建。** 裸字节回放可能落在 ANSI 转义序列
-    中段;**完整屏幕状态重建(tmux/screen 式 reflow)是 engine 外 client/adapter 的活**,engine 不理解
-    流内容(D3 seam),不替终端发明它本不具备的语义(呼应 D2「PTY 不落 scrollback 文件」)。
-- **信号默认发进程组,可寻址单进程。** `SendSignal` 默认对**进程目标的进程组**发(先 `kill(-pid)`、
-  fallback `kill(pid)`;guest-runtime D4.5 C1 那条非对称是它成立的前提),因为 `apt`/build/
-  dev-server 都 fork 子树,只杀父会留一堆孤儿。这是 spec §4.2「向 guest 内进程发定向信号」的落点(注意
-  pause 的静止点本身不走这条路:它是 host 侧 drain-barrier,不给负载发协作信号,guest-runtime D4.4)。
-  **故 `pid` 必须 > 0,否则 `invalid_argument`**:`pid <= 0` 在 POSIX 里就是扇出形式,归 PID 1 那侧
-  ——那条分工(定向信号归 transport / 容器级扇出归 PID 1)、校验点、实测后果与"沙箱级宽限期已否决"同在
-  guest-runtime.md D4.3(§5.E.1),本表不复制。
+- **Fan-out's two correctness invariants: the source never blocks on a subscriber + replay is bounded.**
+  "One unsubscribing does not affect the rest" speaks only of disconnection; fan-out has two more rules
+  that must be pinned explicitly, or one stuck frontend could freeze a real process inside the guest:
+  1. **A slow subscriber is dropped without blocking, and the source's `write` never blocks.** Every live
+     subscriber has an independent **bounded** send window; on overflow **that subscriber** is dealt with
+     without blocking, and **backpressure is never propagated back to the source** (the PTY/process). This
+     turns D1.3's "a bare pty is lossy" from a vague statement into an acceptance-testable rule: what is
+     lossy is **that slow subscriber's copy**, not the source.
+     - **The overflow disposition = disconnect that subscriber.** The reason: once the window overflows,
+       that copy's byte stream already has a hole and cannot be seamlessly continued; rather than leaving a
+       **mutilated** live stream for an upper layer to mistake for a complete one, disconnect and let the
+       client `Connect` again — a reattachment first replays the bounded ring buffer's recent tail
+       (invariant 2), which is cleaner than a stream with a hole. The disconnection is **that subscriber's**
+       affair, and the source and other subscribers are unaffected. This adds no "guaranteed delivery"
+       semantics to the source (D1.3's lossy boundary is unchanged).
+     - **"You were disconnected" is observable to that subscriber**, and must be: otherwise "the process
+       ended normally" and "your copy was dropped" both present as the stream closing, while the correct
+       reactions to the two are opposite (accept the exit code / reattach and read again). So an overflow
+       close reports `resource_exhausted`, and the host-side client projects it into a termination event for
+       the consumer. **But it is not a health signal**: §4.3 judges health only from the L2 `Health` probe
+       and the guest-side activity clock, never from "some subscriber cannot keep up" — visible to the
+       caller, invisible to the reaper.
+  2. **`Connect` replays the bounded ring buffer first, then joins the live stream.** Each process
+     maintains a **per-process, in-guest, byte-bounded** output ring buffer (oldest bytes are dropped
+     silently); `Connect{pid}` **replays the buffer's recent bytes to the new subscriber first and then
+     cuts over to the live stream**. So a reattachment / a page refresh / attaching from several places
+     **immediately shows recent state rather than a blank screen** — which is exactly what a REPL or an
+     interactive terminal requires.
+  - (§5.E has already placed this ring buffer outside the "stateless" constraint — it is an in-process,
+    transient, non-authoritative acceleration structure, and losing it costs only the replay of recent
+    activity.)
+  - **The boundary: the engine guarantees a best-effort byte tail, not screen reconstruction.** A raw byte
+    replay may land in the middle of an ANSI escape sequence; **full screen-state reconstruction
+    (tmux/screen-style reflow) is the job of a client/adapter outside the engine**, which does not
+    understand the stream's content (the D3 seam) and does not invent for a terminal a semantics it does
+    not have (echoing D2's "a PTY gets no scrollback file").
+- **A signal goes to the process group by default and can address a single process.** `SendSignal` sends by
+  default to **the process group of the target process** (first `kill(-pid)`, falling back to `kill(pid)`;
+  the asymmetry in guest-runtime D4.5 C1 is the precondition for that working), because `apt`/build/
+  dev-server all fork subtrees and killing only the parent leaves a pile of orphans. This is where spec
+  §4.2's "send a directed signal to a process inside the guest" lands (note that the pause quiescent point
+  itself does not take this road: it is a host-side drain barrier and sends the workload no cooperative
+  signal, guest-runtime D4.4).
+  **So `pid` must be > 0, otherwise `invalid_argument`**: in POSIX `pid <= 0` is the fan-out form and
+  belongs to PID 1's side — that division (directed signals to the transport / container-level fan-out to
+  PID 1), the validation point, the measured consequences, and "a sandbox-level grace period is rejected"
+  are all in guest-runtime.md D4.3 (§5.E.1) and not duplicated in this table.
 
-### D4.4 fs 服务面
+### D4.4 The fs service surface
 
-RPC 清单:全 unary + 大文件 HTTP 流式旁路,不做 watch。
+The RPC list: all unary + an HTTP streaming bypass for large files, with no watch.
 
-`Read{path,offset,len}` / `Write` / `List{path,depth}` / `Stat` / `MakeDir` / `Remove` / `Move`
-全 unary;`Stat` 返回 `EntryInfo{name,path,type,size,mode,mtime,symlink_target?}`。
+`Read{path,offset,len}` / `Write` / `List{path,depth}` / `Stat` / `MakeDir` / `Remove` / `Move` are all
+unary; `Stat` returns `EntryInfo{name,path,type,size,mode,mtime,symlink_target?}`.
 
-**语义取最宽容的一档**(与成熟实现同):`MakeDir` 建父目录(`mkdir -p`),已存在报
-`already_exists`(不静默成功);`Remove` **递归且幂等**(删不存在的东西算成功;唯一例外是 guest 根 `/`,
-判 `invalid_argument`——一次误传的空路径不该等于擦掉整个沙箱),不给 `recursive` 开关
-——对可信调用方,严格档只是个陷阱,还多一条每个调用方都得处理的错误分支;`Move` 建目标父目录并**覆盖**
-目标(拒绝会让"替换这个文件"整类用法失效);`Stat` 是 **lstat**(符号链接报成它自己,`symlink_target`
-按链接自身所在目录绝对化——相对路径对 guest 外的调用方没有意义,且没有 `Readlink` RPC 可事后补救);
-`List` 的 `depth` 必须 ≥ 1,**0 是 `invalid_argument` 而非"无限"**,否则一次误传的零值会走遍整个文件系统。
+**The semantics take the most forgiving option** (as mature implementations do): `MakeDir` creates parent
+directories (`mkdir -p`) and reports `already_exists` when it exists (rather than silently succeeding);
+`Remove` is **recursive and idempotent** (deleting something absent counts as success; the sole exception
+is the guest root `/`, judged `invalid_argument` — one mistakenly passed empty path should not equal wiping
+the entire sandbox) and offers no `recursive` switch — for a trusted caller the strict option is just a
+trap plus one more error branch every caller must handle; `Move` creates the destination's parent and
+**overwrites** the destination (refusing would break the whole "replace this file" class of usage); `Stat`
+is **lstat** (a symlink is reported as itself, with `symlink_target` absolutized against the directory the
+link itself is in — a relative path is meaningless to a caller outside the guest, and there is no
+`Readlink` RPC to repair it afterwards); and `List`'s `depth` must be ≥ 1, with **0 being
+`invalid_argument` rather than "unlimited"**, or one mistakenly passed zero would walk the entire
+filesystem.
 
-`EntryInfo` 不带 owner/group(引擎不建模 guest 用户,§2.2/§3.2.1),`EntryType` 的零值是
-`UNSPECIFIED`——客户端遇到不认识的类型应跳过而非猜,这才使"以后加一种类型"是加法。
+`EntryInfo` carries no owner/group (the engine does not model guest users, §2.2/§3.2.1), and `EntryType`'s
+zero value is `UNSPECIFIED` — a client meeting a type it does not recognize should skip rather than guess,
+which is what makes "add a type later" an addition.
 
-**`Stat` 与 `List` 共用同一个 `EntryInfo` 构造点**,不是风格问题:一个参考实现两条路径分开写,结果
-`List` 不填符号链接目标而 `Stat` 填,同一个条目取决于你怎么问它就长得不一样。
+**`Stat` and `List` share one `EntryInfo` construction point**, which is not a style question: one
+reference implementation wrote the two paths separately, and the result was that `List` did not fill in the
+symlink target while `Stat` did — the same entry looking different depending on how you asked.
 
-**大文件走 HTTP 流式旁路**(`/files?path=`,`GET` 下载 / `PUT`|`POST` 上传,与三个 Connect handler 共用
-guest 的同一个监听端口),
-不挤 RPC。**阈值由调用方定,引擎不猜**:小载荷走 RPC 更省一次往返,大的必须流式。旁路买到的**不是尺寸
-上限**(RPC 也能收下很大的消息),而是**两端都不整份持有**——实测同一个 64 MiB 载荷,guest 侧
-`sandboxd` 的 VmRSS:旁路 +9 MB、RPC +338 MB(约 37×,且比值随文件增大)。这条是**安全性而非效率**:
-沙箱有 RAM 帽且超限即被终止(§3.4),用 RPC 推大文件等于拿写入目标的沙箱去撞自己的帽。上传在 guest 侧
-先写同目录临时文件再 `rename`,故传输中断不会留下半个文件(也因此这条路径没有 `Write` 的 truncate 窗口)。
+**Large files take an HTTP streaming bypass** (`/files?path=`, `GET` to download / `PUT`|`POST` to upload,
+sharing the guest's single listening port with the three Connect handlers) rather than crowding the RPCs.
+**The threshold is the caller's to set and the engine does not guess**: a small payload saves a round trip
+over RPC, while a large one must stream. What the bypass buys is **not a size ceiling** (an RPC can accept
+a very large message too) but that **neither end holds the whole thing** — measured on the same 64 MiB
+payload, the guest-side `sandboxd`'s VmRSS: +9 MB via the bypass, +338 MB via RPC (about 37×, with the
+ratio growing with file size). This is **a matter of security rather than efficiency**: a sandbox has a RAM
+cap and is terminated when it exceeds it (§3.4), so pushing a large file over RPC means using the sandbox
+being written to to break its own cap. An upload writes a temporary file in the same directory on the guest
+side and then `rename`s, so an interrupted transfer leaves no half file (and for the same reason this path
+has none of `Write`'s truncate window).
 
-- **不提供 `watch`**:无论 server-stream 推送还是轮询式 watcher,**两套都
-  不要**。**承重的理由只有一条**:watch 要 engine 持订阅/合并/重连状态,破 §5.E 无状态。(另有一条
-  **未测的**顾虑——gVisor overlay upperdir 上 inotify 的可靠性;它没有实测依据,故只作旁注,不承重。)
-  消费方用 `Stat`+`Read(offset)` 自行轮询拉增量(D2 渲染 vs 交互非对称)。
-- **resume 后读无 offset 续传契约**:`fs.Read` 读的是 Overlay 工件**当前**字节;resume 换新容器后
-  engine **不**保证跨 resume 的 offset 连续性(它无状态、不记读游标)。消费方跨 resume 要「从头整份
-  读一遍」或自持游标按 `Stat.size` 变化决定增量。与"输入不仲裁"同源:engine 不替连接记状态。
+- **No `watch` is provided**: neither a server-stream push nor a polling watcher — **neither**. **There is
+  only one load-bearing reason**: watch would require the engine to hold subscription/merge/reconnect
+  state, breaking §5.E statelessness. (There is a second, **unmeasured** concern — the reliability of
+  inotify on a gVisor overlay upperdir; it has no measured basis, so it is a side note and carries no
+  weight.) Consumers poll for increments with `Stat`+`Read(offset)` (D2's rendering-vs-interaction
+  asymmetry).
+- **After a resume there is no offset-continuation contract for reads**: `fs.Read` reads the Overlay
+  artifact's **current** bytes, and after a resume onto a new container the engine does **not** guarantee
+  offset continuity across the resume (it is stateless and keeps no read cursor). A consumer crossing a
+  resume must either "read the whole thing again from the start" or hold its own cursor and decide the
+  increment from changes in `Stat.size`. Same origin as "input is not arbitrated": the engine does not keep
+  state for connections.
 
-### D4.5 liveness / readiness:一个 `Health` 探针
+### D4.5 liveness / readiness: one `Health` probe
 
-`sandboxd` transport 模式暴露一个 unary `HealthService.Check{}`→`{ok, idle_millis}`(proto 里它是与
-`ProcessService`/`FsService` **平级的第三个服务**,不是挂在两者上的一个方法)。它**一处三用**,不另造协议:
-transport 探活探针(spec §4.3 两层探活的 transport 层)、resume readiness 门(guest-runtime D5.2 要点①:
-首次 `Health` 成功即翻 `running`,不信裸 TCP accept),以及**连接活动探针**(§4.3 idle 健康态:`idle_millis` =
-`now - 沙箱全局上次 I/O 时戳`,transport 在 `broadcast`/`writeInput` 打戳)。**用专门的 `Health` 而非
-`process.List` 兜底**——`Health` 恒定开销、不列进程,探活与活动读取都不随进程数偏移;idle 与 L2「通不通」
-一次 RPC 拿全,不分两次往返。信号为何在 guest 侧量(而非 host 侧数据面代理)见
-[`reaper-health.md`](./reaper-health.md) D1。
+`sandboxd` in transport mode exposes one unary `HealthService.Check{}`→`{ok, idle_millis}` (in the proto it
+is **a third service, peer to** `ProcessService`/`FsService`, rather than a method hung on either). It
+serves **one purpose three ways** and invents no second protocol: the transport probe (§4.3's transport
+layer of the two probe layers), the resume readiness gate (guest-runtime D5.2 point ①: the first successful
+`Health` flips it to `running`, without trusting a bare TCP accept), and the **connection-activity probe**
+(§4.3's idle health state: `idle_millis` = `now - the sandbox-global last-I/O timestamp`, stamped by the
+transport in `broadcast`/`writeInput`). **A dedicated `Health` is used rather than falling back on
+`process.List`** — `Health` has constant cost and lists no processes, so neither the probe nor the activity
+reading is biased by the number of processes, and idle plus L2's reachable-or-not come back in one RPC
+rather than two round trips. Why the signal is measured on the guest side (rather than at a host-side
+data-plane proxy) is in [`reaper-health.md`](./reaper-health.md) D1.
 
-### D4.6 三条刻意偏离
+### D4.6 Three deliberate deviations
 
-- **不引入 tag 寻址**:E2B `ProcessSelector{pid|tag}` 有 tag,我们**只 pid**(guest 原生)。tag 是
-  引擎之上的命名空间,属产品层数据、不进模型(§1.1;§3.2.1 名字是数据不是引擎原语)。
-- **不引入 session/control payload**:`control`(agent 会话)是 engine 外 session 层的协议,不是 engine 的
-  payload(全论证见 D1.2)。
-- **不引入 payload 类型系统**:jupyter/file/cli 都是 process/fs 上拼出来的,engine 侧无 payload
-  registry(D1.3)。
+- **No tag addressing**: E2B's `ProcessSelector{pid|tag}` has tags, and we have **only pid** (guest-native).
+  A tag is a namespace above the engine and is product-layer data that does not enter the model (§1.1;
+  §3.2.1: a name is data, not an engine primitive).
+- **No session/control payload**: `control` (an agent session) is a protocol of the session layer outside
+  the engine, not a payload of the engine (the full argument is in D1.2).
+- **No payload type system**: jupyter/file/cli are all assembled on process/fs, and the engine side has no
+  payload registry (D1.3).
 
 ---
 
-## D5. 外沿投影:控制面 REST + 数据面 Connect(client↔orchestrator)
+## D5. The outer-edge projection: control-plane REST + data-plane Connect (client↔orchestrator)
 
-D4 定**内沿** wire(host↔`sandboxd`);本节定**外沿** wire(client〔前端/CLI/SDK〕↔`orchestrator`),
-两沿的协议分工不同。
+D4 fixes the **inner-edge** wire (host↔`sandboxd`); this section fixes the **outer-edge** wire (a client
+[frontend/CLI/SDK]↔`orchestrator`), and the two edges divide protocols differently.
 
-### D5.1 一个不可绕过的前提:client 永远不直连 `sandboxd`
+### D5.1 One unbypassable premise: a client never connects to `sandboxd` directly
 
-E2B 的 SDK **直连** envd(经路由代理,`E2b-Sandbox-Id/Port` 头寻址)。本项目**不能照抄这条**,
-原因是载体 + 纪律双重决定的:
+E2B's SDK **connects directly** to envd (through a routing proxy, addressed by an `E2b-Sandbox-Id/Port`
+header). This project **cannot copy that**, for reasons the carrier and the discipline jointly determine:
 
-- **载体(D4.1)**:`sandboxd` 只在 guest netns 内明文监听,只有宿主够得到那个 veth IP;client
-  在引擎外,物理上到不了。
-- **§4 mediator 纪律**:一切沙箱动词经 `orchestrator` 居中(它按 `sandbox_id` 解析当前端点,
-  placement 永不外泄,§6.2)。client 直连 `sandboxd` 会把 placement 泄到引擎外,破 §3.3。
+- **The carrier (D4.1)**: `sandboxd` listens in the clear only inside the guest netns, and only the host
+  can reach that veth IP; a client is outside the engine and physically cannot.
+- **§4's mediator discipline**: every sandbox verb goes through `orchestrator` in the middle (which resolves
+  the current endpoint by `sandbox_id`, and a placement never leaks outward, §6.2). A client connecting to
+  `sandboxd` directly would leak the placement outside the engine, breaking §3.3.
 
-所以外沿数据面**必须终结在 `orchestrator`、再由它 re-proxy 到内沿 `sandboxd`**。E2B「数据面直连」
-那份好处本项目拿不到(载体决定),但**typed-contract + 多语言 codegen 那份好处能拿**——这是 D5.2
-的全部动机。
+So the outer-edge data plane **must terminate at `orchestrator`, which re-proxies to the inner-edge
+`sandboxd`**. This project cannot have E2B's "direct data-plane connection" benefit (the carrier decides
+that), **but it can have the typed-contract + multi-language codegen benefit** — which is the entire
+motivation for D5.2.
 
-### D5.2 分工:控制面 REST/OpenAPI,数据面 Connect-RPC
+### D5.2 The division: control plane REST/OpenAPI, data plane Connect-RPC
 
-| 面 | 协议 | 端点(§6.1) | 为什么 |
+| Face | Protocol | Endpoints (§6.1) | Why |
 | --- | --- | --- | --- |
-| **控制面**(沙箱/template/volume/network 生命周期) | **REST + JSON**(OpenAPI 事后描述) | `POST /v1/sandboxes`、`pause`/`resume`、`DELETE`、`GET`、volume/template/publish… | 低频 CRUD,手调 / curl / 文档化友好;无强类型流 |
-| **数据面**(process / fs) | **Connect-RPC over h2c**,proto 契约先行 | `engine.transport.v1.ProcessService` / `FsService`(D4.3/D4.4) | 有 server-stream + 强类型帧;proto 是**唯一契约源**,前端(TS)/ 未来多语言 SDK 全从它 `buf` 生成 client stub |
+| **Control plane** (sandbox/template/volume/network lifecycle) | **REST + JSON** (OpenAPI describing it after the fact) | `POST /v1/sandboxes`, `pause`/`resume`, `DELETE`, `GET`, volume/template/publish … | Low-frequency CRUD, friendly to hand-invocation / curl / documentation; no strongly-typed streams |
+| **Data plane** (process / fs) | **Connect-RPC over h2c**, proto contract first | `engine.transport.v1.ProcessService` / `FsService` (D4.3/D4.4) | Has server-streams + strongly-typed frames; the proto is **the single contract source**, and the frontend (TS) plus any future multi-language SDK all generate client stubs from it with `buf` |
 
-**关键收益:内沿那份 proto 契约直接投影到外沿。** `orchestrator` 对外**复用同一份**
-`transport.proto`(而非另立外沿 schema),数据面外沿就是**Connect 再代理 + 按 `sandbox_id` 解析端点**
-——无翻译层,内外沿只有一份 wire 表示。**"再代理"是 RPC 层的,不是 HTTP 层的**:orchestrator 自己挂同
-一组 Connect handler,再经解析出的 `transport.Client` 重新发起该调用,**不是**一个转发字节的 HTTP 反向
-代理。这条区别承重:错误必须在这一层被**重铸**而非原样转发,否则内沿的拨号错误会把 netns IP 带出去
-(§6.2 / D5.1 placement 永不外泄)。这兑现 §6「CLI/前端是同一套 API 的平级 client」:两端共用
-proto 生成的同一份 client。
+**The key gain: the inner edge's proto contract projects straight onto the outer edge.** `orchestrator`
+**reuses the same** `transport.proto` outward (rather than erecting a separate outer-edge schema), so the
+outer-edge data plane is just **Connect re-proxying + resolving the endpoint by `sandbox_id`** — no
+translation layer, and one wire representation across both edges. **The "re-proxy" is at the RPC layer, not
+the HTTP layer**: the orchestrator mounts the same set of Connect handlers itself and re-issues the call
+through the resolved `transport.Client`; it is **not** an HTTP reverse proxy forwarding bytes. That
+distinction is load-bearing: errors must be **recast** at this layer rather than forwarded verbatim, or an
+inner-edge dial error would carry the netns IP outward (§6.2 / D5.1: a placement never leaks outward). This
+delivers §6's "the CLI and the frontend are peer clients of one API": both ends share the same
+proto-generated client.
 
-### D5.3 为什么数据面外沿走 Connect,而非 REST facade
+### D5.3 Why the outer-edge data plane uses Connect rather than a REST facade
 
-数据面外沿的另一条候选是**手写 REST facade + NDJSON chunked 流**(orchestrator 逐帧把内沿 Connect
-stream 翻成 NDJSON)。它被否决,三条理由:
+The other candidate for the outer-edge data plane is a **hand-written REST facade + NDJSON chunked
+streaming** (the orchestrator translating the inner-edge Connect stream into NDJSON frame by frame). It is
+rejected, for three reasons:
 
-- **凭空造第三种流表示**:内沿 Connect server-stream、外沿 NDJSON、(将来前端可能还要的)另一套——
-  三份并存靠 orchestrator 手工翻译,正是 §1.3「成本判据」要防的加法;Connect 直投只剩一份。
-- **在最需要契约的边界丢类型**:数据面进程/文件帧(`oneof{start,data,end}`、`DataEvent.stream`)正是
-  强类型受益最大处;NDJSON 拍平成无 schema 的 JSON,前端/SDK 得手写解析。Connect 直投让前端 `buf`
-  生成、编译期对齐。
-- **不换来简单**:REST facade 的手写 handler(query-param `?path=`、NDJSON encoder、flush 循环)不比
-  Connect 反代少写代码,反而多一层要维护的映射。
+- **It invents a third stream representation out of nothing**: an inner-edge Connect server-stream, an
+  outer-edge NDJSON, and (possibly another one the frontend later wants) — three coexisting and held
+  together by hand-written translation in the orchestrator, which is exactly the kind of addition §1.3's
+  "cost criterion" guards against; projecting Connect directly leaves one.
+- **It loses types at the boundary that needs a contract most**: the data plane's process/file frames
+  (`oneof{start,data,end}`, `DataEvent.stream`) are where strong typing pays off most, and NDJSON flattens
+  them into schemaless JSON that a frontend/SDK must parse by hand. Projecting Connect directly lets the
+  frontend generate with `buf` and align at compile time.
+- **It does not buy simplicity**: a REST facade's hand-written handlers (the `?path=` query param, an NDJSON
+  encoder, a flush loop) are no less code than Connect re-proxying, and add a mapping layer to maintain.
 
-**控制面为什么不一起上 Connect**:控制面是 CRUD,无流、无强类型帧红利,REST/OpenAPI 的手调与文档
-化价值更高;强上 proto 是负收益。分界线落在「有没有 stream / 强类型帧」上——数据面有,控制面没有。
+**Why the control plane does not move to Connect as well**: the control plane is CRUD, with no streams and
+no strongly-typed-frame dividend, so REST/OpenAPI's hand-invocation and documentation value is higher, and
+forcing proto onto it is negative. The dividing line falls on "are there streams / strongly-typed frames" —
+the data plane has them, the control plane does not.
 
-### D5.4 边界与残留
+### D5.4 Boundaries and residuals
 
-- **鉴权对齐 D4.1 的分层结论**:外沿(client↔orchestrator)是否加 auth 由 `orchestrator` 的部署
-  形态决定(它可能挂公网),**与内沿 `sandboxd` 无通道内 auth 的结论正交**——别把内沿"通道内 auth
-  冗余"错用到外沿。外沿 auth 属 orchestrator 的接入层义务,不在本 wire 协议。
-- **session 仍不进外沿 API**:D1.2 的划界不因投影而变——外沿只投影 process/fs,session adapter 在
-  engine 外自带它的协议面(ACP 形态)。
-- **前端多语言 stub 是纯加法**:外沿复用同一份 `transport.proto`,前端(TS)/ 未来 SDK 从它 `buf`
-  生成 client;新增一门语言的 client = 加一个 `buf` 生成目标,不改本投影形状(§6 契约的当前面在
-  [`api-contract.md`](../api-contract.md),生长时加端点、不改这条投影)。
-- **`sandbox_id` 走带外请求头,不进 wire。** D4.6 把 `sandbox_id` 挡在 proto 外(进程只按 guest-native
-  pid 寻址),D5.2 又强制外沿复用**同一份** `transport.proto`——两者合起来**逼出**一个带外载体:外沿
-  Connect 请求用请求头 `Engine-Sandbox-Id` 携带 id,反代 strip 掉它、经 mediator 解析当前端点后透传到
-  内沿(placement 永不外泄,§6.2 / D5.1)。头名是实现约定,不改 wire 形状。
-- **实现级取值**:环形缓冲上界、慢订阅者发送窗口、`keepalive` 周期都是可随经验调的**数值旋钮**,不是
-  设计问题(形状由 D4.3/D5 定死)。故取值只在代码里(`cmd/sandboxd/process.go` 的常量块),不登记为开放
-  决策、也不在此复制——一个旋钮有两个家就会有两个值。**溢出处置(断开)不在此列**——那是已在 D4.3
-  invariant 1 拍定的设计选择,不是旋钮。
+- **Authentication aligns with D4.1's layered conclusion**: whether the outer edge (client↔orchestrator)
+  adds auth is decided by `orchestrator`'s deployment shape (it may be exposed publicly), and that is
+  **orthogonal to the inner edge's conclusion that `sandboxd` needs no in-channel auth** — do not misapply
+  the inner edge's "in-channel auth is redundant" to the outer edge. Outer-edge auth is an obligation of the
+  orchestrator's access layer and is not part of this wire protocol.
+- **A session still does not enter the outer-edge API**: D1.2's line does not move because of the
+  projection — the outer edge projects only process/fs, and a session adapter outside the engine brings its
+  own protocol face (ACP-shaped).
+- **Multi-language frontend stubs are a pure addition**: the outer edge reuses the same `transport.proto`,
+  and the frontend (TS) plus future SDKs generate clients from it with `buf`; adding a language's client =
+  adding one `buf` output target, without changing this projection's shape (§6's contract face today is
+  in [`api-contract.md`](../api-contract.md), which grows by adding endpoints rather than changing this
+  projection).
+- **`sandbox_id` travels in an out-of-band request header and does not enter the wire.** D4.6 keeps
+  `sandbox_id` out of the proto (processes are addressed only by guest-native pid) and D5.2 forces the outer
+  edge to reuse **the same** `transport.proto` — together those **force** an out-of-band carrier: an
+  outer-edge Connect request carries the id in the request header `Engine-Sandbox-Id`, and the re-proxy
+  strips it, resolves the current endpoint through the mediator, and passes the call through to the inner
+  edge (a placement never leaks outward, §6.2 / D5.1). The header name is an implementation convention and
+  does not change the wire's shape.
+- **Implementation-level values**: the ring buffer's upper bound, a slow subscriber's send window, and the
+  `keepalive` period are **numeric knobs** adjustable with experience rather than design questions (the
+  shapes are fixed by D4.3/D5). So the values live only in the code (the constant block in
+  `cmd/sandboxd/process.go`) and are neither registered as open decisions nor duplicated here — a knob with
+  two homes ends up with two values. **The overflow disposition (disconnect) is not in this category** —
+  that is a design choice already settled in D4.3 invariant 1, not a knob.

@@ -127,7 +127,8 @@ func newProc(pid int, stdin io.WriteCloser) *proc {
 }
 
 // ringBuffer holds recent output frames up to a byte cap, dropping the oldest
-// bytes silently (D4.3 invariant 2: "旧字节静默丢弃"). Frames keep their stream
+// bytes silently (D4.3 invariant 2: "oldest bytes are dropped silently"). Frames
+// keep their stream
 // tag so replay preserves stdout/stderr/pty attribution.
 type ringBuffer struct {
 	cap    int
