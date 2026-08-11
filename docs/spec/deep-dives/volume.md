@@ -209,6 +209,14 @@ The core actions:
   - **`limit` may be used only for diagnostics and never for validation, and the authority is always the
     volume record** — the reason (the `none ↔ 0` mapping makes "the cap was never set" and "deliberately
     uncapped" read back byte-identically, so after-the-fact reconciliation is unimplementable) is in D7.3.
+  - **`used` must be the backend's *current* statement, and must never *under*-report.** The two halves of
+    this call therefore pull in opposite directions, and both are load-bearing: `limit` is diagnostic-only,
+    while `used` is the number a write point **decides on**. Because that decision is a strict inequality, a
+    stale or optimistic `used` does not degrade it gracefully — it makes the engine **accept exactly the cap
+    the check exists to refuse**. A backend that cannot answer currently must **return an error**, which the
+    write point already treats as fatal (refuse rather than cap blind), rather than an old number. Stated
+    because it is invisible on the local arm — a quota row read is always current — and becomes the live
+    hazard on a remote arm whose usage may be eventually consistent.
 - `Snapshot(ctx, srcID, newID, capBytes)` / `Clone(...)` — they belong to this seam, but **the new volume's ID
   is allocated by the mediator** (the same rule as Promote). The decisive reason: an ID the backend minted
   itself **cannot be registered into the in-flight set before the bytes exist**, so a crash midway would leave
@@ -679,6 +687,23 @@ Two direct consequences are recorded here first:
   on that fs, and OrbStack uses them too; nested subvolumes were measured to coexist without trouble) — which is
   the premise for §5.C's "quota rows are located by the id recorded at deletion time and **never by scanning
   rows**".
+- **The cap's mechanism belongs to the backend, but the capability bit is not negotiable — and there is no third,
+  "advisory" state.** `Capabilities().Quota` asserts exactly one observable thing: **a write past the cap fails**.
+  A remote arm can deliver that either through a backend quota API or through accounting inside its **own** FUSE
+  frontend — which is sound because that frontend is the sole write path for *both* ways bytes enter a volume (the
+  guest's writes arrive through the gofer onto that mount point, and the engine's own direct access is `openat2` on
+  that same mount point, D5.1) — and either is `Quota: true`. A backend that merely **records** the number without
+  ever refusing a write is `Quota: false`, which is already completely modelled (a typed refusal of any non-zero
+  cap, no side effect). Inventing a middle capability would legalize "a cap that does not stop a write", which is
+  precisely what §3.4 refuses to let any §2.3 assertion believe in.
+  - **One consequence follows from two existing gates composing, and is worth stating outright because a backend
+    author would otherwise meet it as a 400 on every create: on a node that meters disk, a `Quota: false` backend
+    can create no volumes at all.** A non-zero `size` is refused for want of the capability, and a zero `size` is
+    refused because a metered axis requires a cap (§3.4). Such a backend is deployable **only with the disk axis
+    unmetered** — which is the honest reading of the object-store reality, where a per-prefix byte ceiling does not
+    exist and external CSI drivers carry the size field as decoration while the only limits with teeth are local
+    cache bounds. A network-FS arm is the opposite case and maps onto `Quota: true`, its enforcement being the
+    exporting filesystem's own quota.
 
 ### D7.1 The new problem Volume brings: squota's quota rows leak, and it is a correctness bug
 
@@ -871,6 +896,25 @@ The following are boundary items whose design is settled but whose **concrete va
     **keep the bytes unreachable until the ownership claim is committed, and never let two epochs share one key.**
     A CAS placed after the write cannot stop two writers computing byte-identical keys; and "a checksum stored in
     the payload" does not save it, because the same writer will make both sides self-consistent with each other.
+  - **What "the seam has room for it" does and does not claim.** It is a claim about the seam's **shape**, member by
+    member — every `Backend` member's contract is satisfiable by a FUSE-fronted remote arm as written, with no
+    signature change — and **not** a claim about its **cost**. The distinction matters because the only falsifier
+    this seam has is a second **local** arm (the test-only plain-directory backend, D2): it proves the
+    three-actions shape rule and the capability-negative path, and it can prove **nothing** about latency, partial
+    failure, handle-holding materialization or refcounted release. So nothing in the repository can catch a caller
+    that assumes a backend call is cheap — and **two such callers exist today**. They are the remote arm's real
+    entry cost, and they are §4 concurrency work rather than §5.C shape work:
+    - **The node-global admission mutex is held across `CreateVolume`, `SetCapacity`, `Snapshot`/`Clone` and
+      `UncappedBytes`**, justified in the mediator by "the middle step is bounded metadata work" — true of a btrfs
+      ioctl (a snapshot is ~16 KiB of metadata, D6.1), false of a network round trip, and on a non-CoW object store
+      a snapshot is a **full object copy**. The fix is already precedented and needs no new invention: it is
+      Promote's reservation shape (§3.4's in-flight term), adopted for exactly this reason — holding a node-global
+      lock across a byte copy would serialize every create on the node behind one operation.
+    - **The boot sweeps and every reaper-tick pass call the backend on an unbounded context**, so a wedged remote
+      store makes the orchestrator hang at boot **ahead of serving** rather than failing; and `RepairVolumeCaps`
+      calls `Usage` once per volume per tick, against a reaper interval sized for a local full scan. Both are
+      additive fixes (a deadline, a bound); naming them here is what keeps them from being discovered **by** a
+      remote arm instead.
 
 (The seam ownership of direct import/export is **not in this table**: it is settled, see D5.1.)
 

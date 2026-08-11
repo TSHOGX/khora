@@ -78,6 +78,15 @@ var ErrVolumeCapUnsupported = errors.New("lifecycle: backend cannot enforce a ca
 // copy the middle step here is bounded metadata work (allocate the unit, write the
 // cap), so holding the node-global gate across it does not serialize the node behind
 // a long operation.
+//
+// THAT PREMISE IS ARM-SPECIFIC, and it is the local arm's (volume.md D8): "bounded
+// metadata work" is true of a btrfs ioctl and false of a network round trip. A remote
+// backend falsifies it here and at SetCapacity / Snapshot / Clone / UncappedBytes,
+// where the same node-global gate is held across a backend call — on a non-CoW object
+// store a snapshot is a full object copy. The fix is not a new invention: it is
+// Promote's reservation shape (admission.go), adopted for exactly this reason. Not
+// changed today because no remote arm exists, and changing it now would be
+// speculative — but this comment is the reason it must not be read as arm-neutral.
 func (m *Mediator) CreateVolume(ctx context.Context, capBytes int64) (model.VolumeID, error) {
 	if capBytes < 0 {
 		return "", fmt.Errorf("create volume: cap must be non-negative (0 = uncapped), got %d", capBytes)
