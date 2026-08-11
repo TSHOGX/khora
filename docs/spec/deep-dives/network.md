@@ -488,6 +488,56 @@ discipline covers only the refusals it evaluates itself; diagnostic quality for 
 refusal is that external layer's responsibility, not an inherited guarantee from this section.**
 This is not a new mechanism, only stating a boundary this document's reasoning already implies.
 
+**Fail-closed emits no §4.1 audit event, and the reason is observability rather than taste.** The
+question was registered as open with a leaning toward yes; it is settled as **no**, and what settles
+it is that the engine has no per-refusal signal to put in one.
+
+- **The two refusals §2.4's fail-closed names are observable to *different* degrees, and one is not
+  observable at all.** A destination the declaration does not allow is refused by a terminal
+  nftables verdict whose only readable trace is the rule's **packet counter** — an aggregate, with
+  no tuple, no timestamp and no connection identity, so a retry loop and one long flow are
+  indistinguishable. The other half — the one connection affected when `via[].endpoint` is
+  unreachable — is **structurally unobservable**: the DNAT rule matches and its counter increments
+  whether or not anything is listening behind that endpoint, so the engine cannot distinguish
+  "steered and served" from "steered into a void". The refusal happens one hop out, per the
+  paragraph above. **A per-refusal event would therefore be fabricated for half of what the promise
+  covers.**
+- **Genuine per-connection records would need §5.D to acquire a process.** The vocabulary has no log
+  verdict, and consuming a netlink log group means a daemon inside the engine — refused outright by
+  §5.D's "moves no bytes, terminates no connection, and contributes no process". The substrate would
+  support it, which makes this an architectural boundary rather than a substrate limit.
+- **A refusal is not a state transition, so it does not belong on that stream even if it could be
+  produced.** §4.1's rule is "every event = one transition", asserted in three places including a
+  schema `CHECK` over the closed set of six kinds. The sandbox stays `running` throughout a refusal,
+  so a seventh kind would have to write `state: running` — asserting a transition to the state it was
+  already in, which destroys the reconcile property §4.4-C names as the reason for the rule. The
+  store has **no method that appends an event without a state change**, and that is a deliberate
+  semantic statement rather than an omission, so emitting refusals means changing existing structure
+  rather than adding a subscriber (§1.3's litmus fails at the first step).
+- **And the rate is the guest's to set.** All six existing kinds are control-plane- or
+  reaper-initiated; a refusal is the one signal an adversary drives directly, at whatever rate it
+  retries. §4.4-C keeps head-of-line blocking on purpose and latches its poison exit for an operator,
+  so a refusal flood on that stream is a path from guest behaviour to a halted **billing** stream.
+  §4.4-C already refused capacity-pressure events for a neighbouring reason (a sample of a continuous
+  quantity, whose frequency jitters with load); a refusal is worse on that same second clause, since
+  its frequency is not merely load-dependent but adversary-chosen.
+- **Where the consumer need goes instead**: the per-rule counter already carried on every `allow[]` /
+  `via[]` entry, exposed through §6.1's `GET …/network` (registered separately). Same consumer — the
+  allow-list rollout that needs to attribute a guest-side failure to the declaration — same content,
+  and pull-shaped, so no commit path, no total order, no head-of-line blocking, and a fixed-size
+  response an adversary cannot inflate. **This is the same disposition §4.4-C reached for capacity
+  pressure**: attach externally as a gauge, not as an engine primitive.
+  **The mature-system consensus is the same and is unanimous**: nobody emits one record per denied
+  packet. Flow logs aggregate per flow over minute-scale windows and shed under load with an in-band
+  marker; a cloud firewall coalesces denies per 5-tuple with hard per-VM caps and drops best-effort
+  below them; the closest CNI rate-limits its cluster-visible drop signal to one event per second
+  with a two-minute dedup window; and upstream Kubernetes closed the equivalent request with the note
+  that it would have to be seriously down-sampled.
+- **What would reopen it**: a subscriber genuinely needing per-connection tuples. Even then the answer
+  is not §4.1 but a **separate** stream with its own sink and its own declared loss discipline, which
+  is what every precedent built (flow logs are not the audit trail; a Kubernetes audit log is not the
+  object-event API).
+
 ---
 
 ## D5. Cross-sandbox network isolation, and the measurements that must be inherited
@@ -1082,14 +1132,20 @@ coverage are in D5 ⑩⑪; `iif`'s fail-open is in D5 ⑫. **"Whether the declar
 also emitted on `input`" is settled** (yes, and that side carries its own sibling drop — D4.2).
 **The internal deny-safe tier's membership is settled** (RFC1918 plus mechanical v6 derivation,
 §2.4; this section leaves open only whether to widen it). **The second hop's hook and predicate
-are also settled** (`output` plus `skuid`, D5 ㉔). **So §5.D has no pre-work measurement left to
-do.** Three items remain open:
+are also settled** (`output` plus `skuid`, D5 ㉔). **Whether fail-closed emits a §4.1 audit event is
+now settled too** (no — D4.3's closing block, which also says where the consumer need goes instead).
+**So §5.D has no pre-work measurement left to do.** Three items remain open:
 
 - **Whether the internal deny-safe tier is widened beyond RFC1918 in the future** (**the membership
   list itself is already settled into §2.4**: the three RFC1918 ranges plus mechanical v6
   derivation. What is open is only whether to widen it, and widening is purely additive).
-- **Whether fail-closed emits a §4.1 audit event.**
-- **`SteeringSpec`'s exact fields.**
+- **Which §5.D obligations a non-nft enforcer cannot carry** — not `SteeringSpec`'s *fields*, which
+  are settled, but `Reject` as distinct from `Drop`, rule **order** (hence the liftable deny-safe
+  tier), and `via[]` steering. Registered under the §5.A provider row, since the seam is where it
+  lands.
+- **Whether `GET …/network` exposes the per-rule hit counter** (D4.2/D4.1 already read it as the only
+  liveness signal; what is open is the read surface, and D4.3's closing block explains why this is
+  now the home for the audit-consumer need).
 
 > The measured evidence, candidates, and costs for each item are in [`open-decisions.md`](../open-decisions.md)'s
 > "Design points still to be refined" section, not duplicated here. The normative statement for
