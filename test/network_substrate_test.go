@@ -208,19 +208,40 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
 
-// probe <addr> [udp] — dial, read a banner, print OUTCOME=<verdict> MS=<elapsed>.
+// probe <addr> [udp] [dial-timeout-seconds] — dial, read a banner, print
+// OUTCOME=<verdict> MS=<elapsed>.
+//
+// The dial timeout is a PARAMETER because it is the entire cost of a deny probe: a
+// dropped SYN is only shown unreachable by the dial expiring, so every deny assertion
+// pays it in full. Most of them carry their claim on "did not connect" AND a moved
+// counter (harness.NftCounter's contract), and there a few seconds is exactly as
+// conclusive as half a minute. The two arms that assert on the ELAPSED TIME instead
+// pass a long one explicitly — under a short timeout a dropped SYN would report the
+// timeout rather than the hang, and those two would pass vacuously.
+//
+// (No backticks anywhere in this comment: it lives inside a raw string literal, and one
+// would end the literal here rather than at the fixture's end.)
 func main() {
 	addr := os.Args[1]
 	netw := "tcp"
-	if len(os.Args) > 2 && os.Args[2] == "udp" {
-		netw = "udp"
+	dial := 25 * time.Second
+	// Order-independent, so a caller cannot silently transpose the two optional args.
+	for _, a := range os.Args[2:] {
+		if a == "udp" {
+			netw = "udp"
+			continue
+		}
+		if n, err := strconv.Atoi(a); err == nil {
+			dial = time.Duration(n) * time.Second
+		}
 	}
 	start := time.Now()
-	c, err := net.DialTimeout(netw, addr, 25*time.Second)
+	c, err := net.DialTimeout(netw, addr, dial)
 	if err != nil {
 		fmt.Printf("OUTCOME=refused MS=%d ERR=%v\n", time.Since(start).Milliseconds(), err)
 		return
@@ -273,11 +294,38 @@ func (p probeResult) reachable() bool { return p.outcome == "connected" }
 // caller would use and proves the transport survives the floor at the same time.
 func runGuestProbe(t *testing.T, cl transport.Client, addr string, udp bool) probeResult {
 	t.Helper()
+	return runGuestProbeDialing(t, cl, addr, udp, denyDialTimeout)
+}
+
+// denyDialTimeout is what a probe waits for a dial that is expected NOT to complete.
+//
+// Short on purpose. A dropped SYN is only shown unreachable by this expiring, so the
+// deny assertions pay it in full and it was the single largest cost in this file
+// (measured: four tests spent 8-26 s each against a ~0.6 s per-sandbox baseline). What
+// makes the short value sound is that the elapsed time is NOT what carries a deny here
+// — "unreachable" AND "the counter moved" is (harness.NftCounter), and a legitimate
+// connect on these paths measures ~25 ms, so this is a ~100x margin over the outcome
+// this timeout has to stay distinguishable from.
+const denyDialTimeout = 3 * time.Second
+
+// hangDialTimeout is for the two arms whose claim IS the elapsed time: `reject` refuses
+// in milliseconds where `drop` hangs (D5 ⑨, ~20 s). They must be able to OBSERVE the
+// hang, so the timeout has to sit well above the bound they assert — with
+// denyDialTimeout they would report 3 s, read as "fast", and pass without testing
+// anything.
+const hangDialTimeout = 25 * time.Second
+
+func runGuestProbeDialing(t *testing.T, cl transport.Client, addr string, udp bool, dial time.Duration) probeResult {
+	t.Helper()
 	args := []string{addr}
 	if udp {
 		args = append(args, "udp")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	args = append(args, strconv.Itoa(int(dial/time.Second)))
+	// The outer bound is the dial plus slack for the probe's own 5 s read deadline and
+	// the exec round-trip — derived from the dial rather than fixed, so a caller raising
+	// the dial cannot have it cut off by a stale constant.
+	ctx, cancel := context.WithTimeout(context.Background(), dial+20*time.Second)
 	defer cancel()
 	evs, err := cl.Start(ctx, transport.StartSpec{Cmd: "/usr/bin/probe", Args: args})
 	if err != nil {
@@ -890,7 +938,9 @@ func TestGuestFacingRefusalsFailFastRatherThanHanging(t *testing.T) {
 	// four verdicts looked alike). The counter is what separates "the engine refused
 	// this, fast" from "nothing happened at all".
 	before := harness.NftCounter(t, id, "fwd_floor_v4")
-	res := runGuestProbe(t, cl, "169.254.169.254:80", false)
+	// hangDialTimeout, not the default: the assertion below is on the ELAPSED TIME, so a
+	// short dial would report itself instead of the hang it exists to rule out.
+	res := runGuestProbeDialing(t, cl, "169.254.169.254:80", false, hangDialTimeout)
 	after := harness.NftCounter(t, id, "fwd_floor_v4")
 	if res.reachable() {
 		t.Fatalf("the probe REACHED a floor address: %s", res.raw)
@@ -1555,7 +1605,8 @@ func TestADeadViaEndpointRefusesTheConnectionRatherThanLettingItOut(t *testing.T
 	time.Sleep(300 * time.Millisecond)
 
 	accBefore := harness.NftCounter(t, id, "via0_0_accept")
-	res := runGuestProbe(t, cl, "1.1.1.1:443", false)
+	// hangDialTimeout, not the default: (a) below asserts on the ELAPSED TIME.
+	res := runGuestProbeDialing(t, cl, "1.1.1.1:443", false, hangDialTimeout)
 	accAfter := harness.NftCounter(t, id, "via0_0_accept")
 
 	// (a) refused, and FAST. The mechanism differs from the floor's `reject` and must
