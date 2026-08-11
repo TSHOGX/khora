@@ -633,6 +633,15 @@ whose freeze half is a net negative):
   if already thawed while the snapshot lands anyway (reproduced 4/4). Stepping on it makes a measuring tool's
   manufactured failure ("the snapshot failed + the thaw failed") read as a substrate failure.
 
+**Why this stays prose and never becomes a response field** (the falsification, since the alternative is the
+obvious thing to propose): the annotation would be **constant** — the engine has exactly one recipe, so every
+snapshot on every capable backend is crash-consistent — and in the one case where it would carry information it
+would be **wrong**. A caller who pauses the holder and *then* snapshots has an app-consistent snapshot, and the
+engine cannot know that: the two are separate requests and no linkage is recorded, so a field would report
+"crash-consistent" on exactly the snapshots taken most carefully. Making it right would mean inferring
+app-consistency from request adjacency, which is product semantics §1.3 rejects. The wording therefore lands at
+§6.1's snapshot/clone endpoints, where the neighbouring semantic notes already live.
+
 ### D6.3 Falsification: a two-phase checkpoint
 
 Taking a consistent snapshot of a mounted volume with a two-phase "block new operations + drain in-flight
@@ -850,9 +859,6 @@ definitely does not** — that is not an unmade promise but a known falsehood.
 The following are boundary items whose design is settled but whose **concrete value / landing shape is not**
 (product-layer policy, or to be fixed when §6 lands):
 
-- **How a snapshot's consistency annotation enters the §6 contract** (D6): whether the API explicitly annotates
-  "this snapshot is crash-consistent" — to be fixed when §6 lands. (Only the annotation's wording is left;
-  "inheriting the quota" is not an open item, and `size` being required is in D6.1a / D7.3.)
 - **The landing shape of a remote backend** (D1/D2/D6): when and in what shape an S3 / NFS backend lands; its
   internals (a host-FUSE frontend, a complete FUSE session's POSIX interface, and — if it fronts an object store —
   the whole WAL/manifest/segment/content-addressing/encryption/GC machine) are **all sealed inside that backend**

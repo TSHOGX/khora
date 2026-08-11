@@ -215,6 +215,25 @@ POST   /v1/volumes/{id}/clone        {size?}                                  �
 #   source. The new volume's cap passes the admission gate as well (may 507). Backend does not
 #   support it → 400, and the capability must be asked **before** an ID is allocated or a byte
 #   is moved.
+#   **A snapshot is crash-consistent, and no response field says so.** It is the backend's
+#   atomic capture of the bytes on disk and **does not quiesce writers** (§5.C), so the result
+#   is what a power cut would leave: measured, every capture is a complete prefix, and a file
+#   just emptied by `O_TRUNC` and not yet rewritten can be captured **empty** — which is what
+#   crash-consistency should give, not corruption. **So do not read a snapshot as a restorable
+#   backup of a database inside the volume**: it is restorable exactly insofar as that
+#   application recovers from a crash. For app-consistency the caller **composes** — pause the
+#   holding sandbox, then snapshot (an exclusive volume only; `shared-rw` offers none, §5.C).
+#   **Why no field annotates it**, so this is not re-proposed: it would be **constant** across
+#   every snapshot the engine takes (there is one recipe — `Snapshot`/`Clone` never quiesce), and
+#   in the one case that matters it would be **wrong** — the engine cannot know a caller paused
+#   first, since the pause is a separate request and no linkage is recorded, so the field would
+#   read "crash-consistent" on precisely the snapshots a careful caller took most care over.
+#   A field the engine must sometimes lie in is worse than prose. It also has no home in §6.1's
+#   omission rule, which governs **facts that cannot be read** — consistency is not unreadable,
+#   it is not a fact about this volume at all. (The industry norm is the same: the block-layer
+#   precedent puts "crash-consistent" in the *operation's* description with no consistency member
+#   on the snapshot resource, and where a cloud does accept a consistency **request** it is
+#   marked input-only and nothing is recorded about whether it worked.)
 POST|PUT /v1/volumes/{id}/import     ?path=  (direct write, the body IS the byte stream;
                                               allowed only when there is no live-rw mount)
                                              → {volume_id, path, bytes_written}
