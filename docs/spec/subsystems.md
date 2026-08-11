@@ -426,7 +426,8 @@ boundaries; internal mechanisms still to be refined are registered in
     in-flight marker for direct writes are **two halves of the same volume-keyed mutex table**, not two
     separately maintained checks (which would leave a human to keep the two consistent). The same shape
     as the existing in-flight build keep-set, and it **introduces no new lock class** — in particular no
-    per-volume lock: D3 measured that this closes into a cycle and deadlocks.
+    per-volume lock: D3 **derives from the lock order** that this closes into a cycle and deadlocks
+    (derived, with no reproduction vehicle in the repo, unlike D3's first two findings).
   - **The cold-start side refuses rather than waits.** By contract, a direct write's marker is held for
     **the whole stream**, whose duration is unbounded in the payload; and a cold start holds that
     sandbox's transition lock throughout (§4.4-B), so waiting would jam destroy / pause / evict behind

@@ -56,9 +56,10 @@ import (
 // THE TWO SIDES DECIDE OVER ONE TABLE, keyed by volume and guarded by the ONE existing
 // m.mu: the live-rw holder set and the in-flight direct-write markers are two halves of
 // a single mutual-exclusion table, not two checks somebody has to keep consistent by
-// hand. Deliberately NOT a per-volume lock class: volume.md D3 records a MEASURED
-// deadlock from keying locks by volume (a volume-dimension verb reaching back for its
-// holders closes sbx→vol→sbx into a cycle), which is why this stays one flat map under
+// hand. Deliberately NOT a per-volume lock class: volume.md D3 DERIVES a deadlock from
+// the lock order for keying locks by volume (a volume-dimension verb reaching back for
+// its holders closes sbx→vol→sbx into a cycle) — derived, with no reproduction vehicle in
+// the repo, unlike D3's first two findings — which is why this stays one flat map under
 // the mediator's existing mutex.
 //
 // THE COLD-START SIDE REFUSES, IT DOES NOT WAIT. The direct-write marker is held for
