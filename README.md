@@ -24,10 +24,10 @@ snapshot — persistence is the overlay on disk, which is why a sandbox is porta
 across hosts, CPUs and runsc versions rather than pinned to a set of CPU features.
 
 > **Status: pre-release.** The engine is complete and verified against the real
-> substrate (92 end-to-end acceptance tests on actual runsc/overlayfs/btrfs/nftables),
-> and [`deploy/`](deploy/) now carries the authenticating TLS boundary that goes in
-> front of it. Still missing before you deploy this: there is no client library or CLI,
-> and no production Template ships in this repo.
+> substrate (908 end-to-end acceptance tests on actual runsc/overlayfs/btrfs/nftables),
+> and [`deploy/`](deploy/) carries the authenticating TLS boundary that goes in front of
+> it. Still missing before you deploy this: there is no client library or CLI, and no
+> production Template ships in this repo.
 > See [What is missing](#what-is-missing-before-you-deploy-this).
 
 ## Why this instead of a managed sandbox service
