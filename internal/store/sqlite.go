@@ -90,7 +90,8 @@ CREATE TABLE IF NOT EXISTS sandboxes (
 	created_at   INTEGER NOT NULL, -- unix nanos
 	updated_at   INTEGER NOT NULL
 );
--- KNOWN LIMITATION (open-decisions §2, "§4.4-C 事件流可重放窗口大小"):
+-- KNOWN LIMITATION (open-decisions §2, "The size of the replayable event-stream
+-- window (§4.4-C)"):
 -- published rows are marked (published_at set), NEVER deleted, so this table
 -- grows monotonically. The partial index below keeps the publisher's
 -- unpublished-scan from degrading, but at-rest size is unbounded. This is

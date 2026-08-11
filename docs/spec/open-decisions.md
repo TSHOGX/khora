@@ -1,52 +1,59 @@
-# 开放决策登记(Open Decisions)
+# Open Decisions register
 
-> spec 只描述已收敛的架构;未拍板的选型、待细化的设计点、落地前要验证的假设登记在本文。
+> The spec describes only the converged architecture; choices not yet settled, design points still
+> to be refined, and assumptions to verify before landing are registered in this document.
+
+> **Numbering convention**: a bare `§X.Y` always refers to a spec global section, located via
+> SPEC.md's "document map" at the top; `Dx` refers to a section of the corresponding deep-dive
+> document; this document's own sections are written as "this document's §N".
 >
-> **编号约定**:裸 `§X.Y` 一律指 spec 全局章节,按 SPEC.md 顶部「文档地图」定位;`Dx` 指相应深挖文档的
-> 节;指本文自己的节时写「本文 §N」。
->
-> **本文 §1** 阻塞子系统的 spike · **本文 §2** 架构已定、内部机制未展开 · **本文 §3** 有候选未定论 ·
-> **本文 §4** 实现缺口(设计已定、代码未兑现)。每条标注归属 + 当前倾向 + 谁消费;已在深挖文档详述的
-> 只给一行摘要 + 指针,**不复制正文**。
+> **This document's §1** blocks the relevant subsystem's spike · **§2** architecture settled,
+> internal mechanism not yet developed · **§3** has candidates but no conclusion · **§4**
+> implementation gap (design settled, code not yet delivered). Each item is annotated with what it
+> belongs to, its current leaning, and who consumes it; items already detailed in a deep-dive get
+> only a one-line summary plus a pointer, **not a copy of the body**.
 
 ---
 
-## 1. 落地前验证(spike,阻塞相关子系统)
+## 1. Verification needed before landing (spike, blocking the relevant subsystem)
 
-> 无。
+> None.
 
 ---
 
-## 2. 待细化的设计点(架构已定,内部机制未展开)
+## 2. Design points still to be refined (architecture settled, internal mechanism not yet developed)
 
-| 归属(spec §) | 待细化内容 | 备注 / 当前倾向 |
+| Belongs to (spec §) | What's still to be refined | Notes / current leaning |
 | --- | --- | --- |
-| **§5.C Volume(契约边界外)** | 契约在 §5.C;待细化的边界项:独占卷抢占策略 / 直连变更 vs live-ro reader 准入 / snapshot **一致性标注**进 §6 / 远端 backend 落地形态 | **详见 [`deep-dives/volume.md`](./deep-dives/volume.md) D8**,本表不复制。多为产品层策略或落 §6 时定。抢占那条另有一条**锁序**论据(同文 D3:卷维度反查持有者会闭合成环,实测死锁) |
-| **§4.4-C 事件流可重放窗口大小** | 事件流的对外形状已定(pull + `seq` 游标,§4.4-C / §6.1)。**仍开放的只有一项:可重放窗口取多大**,即何时开始裁剪 outbox。**详见 §4.4-C 末段**(为何是被推迟而非被回答、连带的 at-rest KNOWN LIMITATION),本表不复制 | 谁消费:未来外部 subscriber——取值须由"承诺给它的重连时长"论证,而今天没有这样的订阅者 |
-| **§5.D fail-closed 是否发 §4.1 审计事件** | 倾向发。§5.D 其余各项均已收口,**清单见 [`deep-dives/network.md`](./deep-dives/network.md) D8**,本表不复制。**容量压力事件不在此列**——软阈已定为不发(§4.4-C) | 谁消费:将来接 §4.1 审计流的订阅者 |
-| **§5.D 内网 deny-safe 档是否放宽到 RFC1918 之外** | **成员清单已收口进 §2.4**(RFC1918 三段 + v6 机械派生),故本行不问"取哪个集合",只问将来是否放宽——落在其外的私有用途段(`0.0.0.0/8` 里的本机解析器、CGNAT `100.64/10` 等)今天按公网处置。**放宽的代价已量,故这不是一次调研**:更宽的候选是 IANA 特殊用途登记表 Globally-Reachable=False 列的钉死快照,它要带上五项 GR=True 的反向放行、还会撞上 D5 ⑱ 的嵌套成员——**两项代价的具体形状见 §2.4**,本表不复制。**形状上是纯加法**(给一份静态清单加行,D7 litmus),故不为它预留任何机制 | 谁消费:将来的部署方——要由"该部署的内网里有什么"论证,而不是由清单的完备性论证 |
-| **§5.A provider 接口(远端形态入参)** | **待细化的是远端形态的入参形状**:`RootfsSource`(本地 `MergedPath` vs 远端句柄)、`SteeringSpec` 的**精确字段**(§5.D 派生出的可达性要求;签名里不得出现宿主原语,§5.A ❌ 清单)、`ResourceLimits` 在非 cgroup 调度层的等价物——用"被调度的远端隔离单元"作纸面参照反推,**不实现任何远端 provider** | 谁消费:未来远端 provider |
-| **§5.B Overlay 物化** | 待细化:content-addressed diff 层、multi-node 经 rootfs provider 跨 node 寻址(**应用层协作安全点不在此列——已否决**,见 [`deep-dives/guest-runtime.md`](./deep-dives/guest-runtime.md) D4.4) | **详见 [`deep-dives/rootfs-overlay.md`](./deep-dives/rootfs-overlay.md) D5**,本表不复制 |
-| **§3.4 第二项在配额读失败时该往哪边错** | **不是"要不要 fallback",是 fallback 的方向没被论证过**。`LocalBtrfs.UncappedBytes` 在某个单元的配额行读不出来时落到 `allocbytes.Tree`,注释论据是"漏计真实字节会让节点超发,故测量是保守方向"——但那句话把误差方向当成了单向的,实测两向都有:走行走**只数常规文件**,而配额行**另计 metadata extent**(空单元实测 16384 B vs 走行走 0),故它对稀疏/小文件多的单元**低计**(超发方向);同时它把与源**物理共享**的 extent 全额计入,而配额行只计一次,故它对快照/克隆密集的单元**高计**(误拒方向)。**哪边占优取决于该节点的构成,不取决于代码**。触发条件不是罕见:该文件系统上**任何**位置的并发删除都会让配额行的读取整体失败,而 substrate 的 cleaner 是异步的,调用方无法与之串行化(成因、频率实测与"把空输出当成行已消失"的连带陷阱见 [`deep-dives/volume.md`](./deep-dives/volume.md) D7.1,本表不复制)。**per-volume 的那一半已收口**(`Backend.Usage` 把不可读的行返成 error 而非 `(walk, 0, nil)`);本行只问**聚合项**该怎么办——`UncappedBytes` 没有 per-unit 的错误出口,一个单元读失败要么污染整个节点的数字、要么让整次准入读失败 | 倾向:先把两向误差量到"够不够大到会改变准入判决"再定形状,不预留机制;谁消费:§3.4 准入门——取值须由"这个节点上卷的实际构成"论证 |
-| **§5.C per-volume 容量帽在 remote 后端的物化** | local 臂是 subvolume + squota(§5.B/§5.C 共享原语)。**待细化的是 remote 后端**:一个对象存储 / 网络 FS backend 用什么手段兑现"这个卷最多多大"(后端配额 API / 客户端侧核算),以及它与 `Capabilities()` 的关系 | 封在该 backend 内(volume.md D1/D7),不进核心;谁消费:未来 remote volume backend |
-| **§6.1 沙箱读面是否报 `used_byte`** | 卷侧 `GET /v1/volumes/{id}` 有它,理由是"调用方要拿它选一个**严格大于**它的新帽";`PATCH /v1/sandboxes/{id}` 现在也有那条严格不等式(§3.4),故同一条理由对沙箱成立。**机制已就位、无需任何加法**:`rootfs.Provider.Usage` 已经报出这个数,故这纯粹是读面要不要多一个键。**倾向报**,并沿用卷侧那条省略规则(**规则原文在 §6.1 的 `GET /v1/volumes/{id}` 注**,本表不复制)。今天的替代是 400 的文案里带上当前用量,够用但要调用方解析错误串 | 谁消费:改帽的调用方——取值须由"读面要不要为每次单读多付一次后端往返"论证(list 上乘以沙箱数的顾虑与卷侧逐字相同) |
-| **§5.A / 模板(内容目录)** | **内置 Template 的内容清单**:一个 bare base(uv/pip/git/build-essential;可选 sudo,仅作 guest 内便利、非引擎语义),各 agent 栈(claude-code/opencode/pi)叠在 bare base 之上。**这是产品/模板层的内容选型**,仍开放(Template 的一等行化 / boot seed / multi-lowerdir 叠层机制是 §4.3 / §5.B 的既定架构,不在本行) | guest 默认 root(§2.2),装包是一次性 exec、不引入 init 依赖,见 [`deep-dives/guest-runtime.md`](./deep-dives/guest-runtime.md) D3.1 |
+| **§5.C Volume (outside the contract boundary)** | The contract is in §5.C; the boundary items still to be refined: an exclusive volume's preemption policy / admitting a direct mutation vs a live-ro reader / a snapshot's **consistency label** landing in §6 / the remote backend's materialization shape | **See [`deep-dives/volume.md`](./deep-dives/volume.md) D8** for detail, not duplicated in this table. Mostly product-layer policy, or settled once it lands in §6. Preemption also has a **lock-ordering** argument (same document's D3: reverse-looking up a lock holder by volume dimension closes into a cycle, measured deadlock) |
+| **The size of the replayable event-stream window (§4.4-C)** | The event stream's outward shape is settled (pull + a `seq` cursor, §4.4-C / §6.1). **The only thing still open is one item: how large the replayable window should be** — i.e. when to start trimming the outbox. **See §4.4-C's closing paragraph for detail** (why this is deferred rather than answered, plus the associated at-rest KNOWN LIMITATION), not duplicated here | Who consumes it: a future external subscriber — the value must be argued from "the reconnect duration promised to it", and no such subscriber exists today |
+| **Whether §5.D's fail-closed emits a §4.1 audit event** | Leaning toward yes. Every other item of §5.D is already settled, **see [`deep-dives/network.md`](./deep-dives/network.md) D8** for the list, not duplicated here. **Capacity-pressure events are not in this list** — the soft threshold is already settled as not emitting one (§4.4-C) | Who consumes it: a future subscriber to the §4.1 audit stream |
+| **Whether §5.D's internal deny-safe tier is widened beyond RFC1918** | **The membership list is already settled into §2.4** (the three RFC1918 ranges plus mechanical v6 derivation), so this row does not ask "which set to take" — only whether to widen it in the future. Private-use ranges falling outside it (a resolver on the local machine inside `0.0.0.0/8`, CGNAT `100.64/10`, etc.) are treated as public internet today. **The cost of widening has already been measured, so this is not a new investigation**: the wider candidate is a pinned snapshot of the IANA special-purpose registry's Globally-Reachable=False column, which would need five GR=True reverse allowances and would also collide with D5 ⑱'s nested-member problem — **the exact shape of both costs is in §2.4**, not duplicated here. **The shape is purely additive** (adding a line to a static list, D7 litmus), so no mechanism is reserved for it | Who consumes it: a future deployer — the value must be argued from "what this deployment's internal network actually contains", not from the list's completeness |
+| **The §5.A provider interface (the remote form's input shape)** | **What's still to be refined is the remote form's input shape**: `RootfsSource` (a local `MergedPath` vs a remote handle), `SteeringSpec`'s **exact fields** (the reachability requirements §5.D derives; no host primitive may appear in the signature, per §5.A's ❌ list), and `ResourceLimits`'s equivalent on a non-cgroup scheduling layer — worked out on paper against "an isolation unit scheduled remotely" as the reference, **implementing no remote provider** | Who consumes it: a future remote provider |
+| **§5.B Overlay materialization** | Still to be refined: a content-addressed diff layer, multi-node addressing across nodes via the rootfs provider (**an application-layer collaboration safety point is NOT in this list — already rejected**, see [`deep-dives/guest-runtime.md`](./deep-dives/guest-runtime.md) D4.4) | **See [`deep-dives/rootfs-overlay.md`](./deep-dives/rootfs-overlay.md) D5** for detail, not duplicated here |
+| **Which way §3.4's second term should err when a quota read fails** | **This is not "whether to fall back" — it is that the fallback's direction has never been argued.** `LocalBtrfs.UncappedBytes` falls back to `allocbytes.Tree` when a unit's quota row cannot be read, and the comment's rationale is "undercounting real bytes lets the node overcommit, so the fallback is the conservative direction" — but that statement treats the error direction as one-sided, and measured, it goes both ways: a directory walk **counts only regular files**, while the quota row **also counts metadata extents** (an empty unit measures 16384 B via the quota row vs 0 via the walk), so the walk **undercounts** units that are sparse or have many small files (the overcommit direction); at the same time it counts an extent **physically shared** with its source in full, while the quota row counts it only once, so the walk **overcounts** units heavy with snapshots/clones (the wrongful-refusal direction). **Which side dominates depends on that node's composition, not on the code.** The trigger condition is not rare: a concurrent delete **anywhere** on that filesystem makes the quota row's read fail wholesale, and the substrate's cleaner is asynchronous, so the caller has no way to serialize against it (the cause, its measured frequency, and the attached trap of mistaking an empty output for "the row is gone" are in [`deep-dives/volume.md`](./deep-dives/volume.md) D7.1, not duplicated here). **The per-volume half is already settled** (`Backend.Usage` returns an unreadable row as an error rather than `(walk, 0, nil)`); this row asks only what the **aggregate term** should do — `UncappedBytes` has no per-unit error exit, so one unit's failed read either pollutes the whole node's number or fails the entire admission read | Leaning: measure both error directions until it is clear whether either is large enough to actually flip an admission verdict, before settling a shape; reserve no mechanism yet. Who consumes it: §3.4's admission gate — the value must be argued from "what volumes on this node actually look like" |
+| **§5.C's per-volume capacity cap materialized on a remote backend** | The local arm is subvolume plus squota (a primitive §5.B/§5.C share). **What's still to be refined is the remote backend**: by what means an object-store / network-FS backend delivers "this volume may grow no larger than X" (a backend quota API, or client-side accounting), and its relationship to `Capabilities()` | Sealed inside that backend (volume.md D1/D7), not entering the core; who consumes it: a future remote volume backend |
+| **Whether the §6.1 sandbox read surface reports `used_byte`** | The volume side's `GET /v1/volumes/{id}` already has it, on the grounds that "the caller needs it to pick a new cap **strictly greater than** it"; `PATCH /v1/sandboxes/{id}` now carries that same strict inequality too (§3.4), so the same rationale holds for a sandbox. **The mechanism is already in place, no addition needed**: `rootfs.Provider.Usage` already reports this number, so this is purely a question of whether the read surface adds one more key. **Leaning toward yes**, following the same omission rule as the volume side (**the rule's exact text is in §6.1's `GET /v1/volumes/{id}` note**, not duplicated here). Today's substitute is carrying the current usage in the 400's message text, which works but requires the caller to parse an error string | Who consumes it: a caller changing a cap — the value must be argued from "should the read surface pay one more backend round trip per single read" (the concern about a list multiplying that cost by the sandbox count is word for word the same as on the volume side) |
+| **§5.A / the Template (content catalog)** | **The built-in Template's content list**: a bare base (uv/pip/git/build-essential; sudo optional, purely a guest-side convenience, not engine semantics), with each agent stack (claude-code/opencode/pi) layered on top of the bare base. **This is a product/template-layer content choice**, still open (the Template's first-class row-ification / boot seed / multi-lowerdir layering mechanism is §4.3 / §5.B's already-settled architecture, not part of this row) | guest defaults to root (§2.2), and installing packages is a one-shot exec with no init dependency introduced, see [`deep-dives/guest-runtime.md`](./deep-dives/guest-runtime.md) D3.1 |
 
 ---
 
-## 3. 待拍板的选型(有候选,未定论)
+## 3. Choices awaiting a decision (candidates exist, no conclusion)
 
-> 无。
-
----
-
-## 4. 实现缺口(设计已定,代码未落地 / 待收口)
-
-> 无。
+> None.
 
 ---
 
-> **纪律:** 任何一项拍板后,先更新对应深挖文档或 spec § 的相应章节,**再从本登记移除**——保证
-> "已定"进 spec、"未定"留本文,两边不重叠。本文 §4 的缺口同理:代码落地即移除。
+## 4. Implementation gaps (design settled, code not yet landed / still to be closed out)
+
+> None.
+
+---
+
+> **Discipline:** once an item is decided, first update the corresponding deep-dive document or
+> spec § section, **then remove it from this register** — this keeps "settled" in the spec and
+> "unsettled" in this document, with the two never overlapping. The same holds for this document's
+> §4 gaps: once the code lands, remove the row.
 >
-> **引用本表的行按其加粗标题,不按位置**(理由与 network.md D5 顶部拒绝按位置编号的那条逐字相同)。
+> **A row in this table is cited by its bold title, never by position** (the reason is word for
+> word the same as the one at the top of network.md D5 that refuses citation by position).

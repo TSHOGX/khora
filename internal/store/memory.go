@@ -41,7 +41,8 @@ type Memory struct {
 	mounts []model.Mount
 	// outbox is append-only, ordered — the publisher reads oldest-first. Like the
 	// SQLite backend, published rows are marked, never removed (same unbounded-
-	// growth known limitation; open-decisions §2, "§4.4-C 事件流可重放窗口大小").
+	// growth known limitation; open-decisions §2, "The size of the replayable
+	// event-stream window (§4.4-C)").
 	// Bounded in practice only by process lifetime since Memory is non-durable.
 	outbox []outboxRow
 	// nextSeq is the monotonic sequence counter (Store's sequence contract). It

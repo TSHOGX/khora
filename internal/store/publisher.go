@@ -450,7 +450,7 @@ func (p *Publisher) Monitor(ctx context.Context, interval, stallThreshold time.D
 // outside the engine and dedup however they like (§1.3 add a subscriber).
 //
 // KNOWN LIMITATION (by design, not a defect — open-decisions §2,
-// "§4.4-C 事件流可重放窗口大小"):
+// "The size of the replayable event-stream window (§4.4-C)"):
 // `seen` is in-process, UNBOUNDED, and NON-PERSISTENT. It grows with distinct
 // event IDs and is empty after a restart, so it will NOT absorb a redelivery
 // that straddles a process restart. That is fine precisely because it is a
