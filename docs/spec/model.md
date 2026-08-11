@@ -1063,11 +1063,50 @@ samples, and nobody emits pressure as an event.
 
 **The retention window (trimming)**: **no trimming today; rows are only marked, never deleted.** The
 cost, stated plainly: the outbox's at-rest size grows without bound, which is **a known limitation**
-rather than a virtue of this decision. The window's value must be argued from "the reconnect duration
-promised to external subscribers", and the engine's own sink is a logging reference implementation
-whose "delivered" is very nearly always true, so **there is no arguable value**; picking a number out
-of the air is the speculative reservation §1.3 refuses. This is the only item in this section still
-open — see the event-stream row in [`open-decisions.md`](./open-decisions.md) §2. **A consequence**:
-`earliest` is always the smallest sequence number, so §6.1's 410 is unreachable today — the response
-still carries `{earliest, latest}` and the 410 is written as reserved semantics, so that when trimming
-is genuinely added the caller contract needs no change.
+rather than a virtue of this decision. **A consequence**: `earliest` is always the smallest sequence
+number, so §6.1's 410 is unreachable today — the response still carries `{earliest, latest}` and the
+410 is written as reserved semantics, so that when trimming is genuinely added the caller contract
+needs no change.
+
+**The mechanism is settled; only its value is not, and the two must not be conflated.** The window's
+value must be argued from "the reconnect duration promised to external subscribers", and the engine's
+own sink is a logging reference implementation whose "delivered" is very nearly always true, so **there
+is no arguable value** — picking a number out of the air is the speculative reservation §1.3 refuses,
+and it stays open (the event-stream row in [`open-decisions.md`](./open-decisions.md) §2). But **an
+absent mechanism is itself a decision, and it is the one that cannot be revisited at deploy time**, so
+the mechanism's shape is fixed here. Five properties, each of which has a wrong answer available:
+
+- **Trim by the age of DELIVERY, never of occurrence.** The poison-envelope exit above does not release
+  itself, so a halted stream can be resumed days later and deliver its backlog with fresh delivery
+  timestamps but ancient `occurred_at`. Ageing on the latter would make that backlog **instantly
+  trimmable at the moment of first delivery** — deleting events no subscriber ever had the chance to
+  fetch, which is the one failure at-least-once exists to prevent.
+- **Delivered rows only — and that floor is STRUCTURAL rather than a check to remember.** The publisher
+  drains in `seq` order and stops at the first failure, so the delivered set is always a **prefix** of
+  the sequence; adding the delivery predicate makes the trimmable set a prefix of a prefix. Trim
+  therefore **cannot** outrun the publisher, and it must **not** consult the publisher's halt latch to
+  achieve that: the halted head is by definition undelivered, so the natural predicate already stops
+  below it, while a latch check would let a long halt silently void the configured bound and would put
+  a runtime dependency on the publisher where no invariant needs one.
+- **Never trim the newest row.** Trimming a table *empty* makes `earliest` and `latest` both read 0 —
+  **indistinguishable from "nothing ever happened"** — so a stale cursor is neither served nor refused,
+  and the caller reads "I am caught up" and silently skips everything trimmed. That is precisely the
+  silent short page §6.1's 410 exists to prevent, arriving through the mechanism meant to activate it.
+  Retaining one row keeps the window's boundaries truthful at negligible cost, and is what a
+  segment-based log does structurally by never deleting its active segment.
+- **`after=0` must never 410.** Zero is contractually "from the start of the retention window", i.e. an
+  explicit request for whatever is retained; a naive `after < earliest` test fires on it for every
+  trimmed outbox and breaks the documented cold-start cursor.
+- **`seq` must not go backwards, and emptying the table is the case that tests it.** The sequence's
+  high-water mark must survive a table emptied by trimming, or a subscriber's cursor is pointed past
+  freshly-issued numbers (the schema already defends this deliberately; the defence now has a reachable
+  case and must be asserted, not assumed).
+
+**The default is OFF, and that follows an existing house rule rather than timidity**: the same refusal
+as the node capacity budgets, which are deliberately not defaulted because the engine must not invent a
+number and start acting on a guess. Stated without softening, the choice is between two failures — off
+ships the unbounded at-rest growth above, while a finite default ships **deletion of billing-relevant
+history on a number nobody chose**. The first is visible, bounded and recoverable; the second is none of
+those. External precedent splits the same way: the systems with an opinionated time default are
+general-purpose logs whose disk is the operator's problem, while a replication mechanism whose consumer
+matters ships *unlimited* retention and makes bounding it opt-in.
