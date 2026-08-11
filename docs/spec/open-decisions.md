@@ -42,8 +42,7 @@
 
 ## 4. Implementation gaps (design settled, code not yet landed / still to be closed out)
 
-| Belongs to (spec §) | The gap | Notes |
-| --- | --- | --- |
+> None.
 
 ---
 
