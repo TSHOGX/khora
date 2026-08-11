@@ -157,20 +157,23 @@ GET    /v1/events?after=<seq>&limit=<n>     → {events:[{seq,id,sandbox_id,kind
 #   `limit` has a **server-side hard ceiling** (default 100, ceiling 1000), and exceeding it
 #   **truncates to the ceiling** rather than being refused. A hard ceiling rather than only a
 #   default, because the parameter is caller-controlled and giving only a default is giving
-#   nothing. And **no trimming today ⟹ the window = all of history**, so the rows `after=0`
-#   must page through only ever grow — not trimming **aggravates** the unbounded-backlog risk
-#   rather than relieving it, which is the real reason the hard ceiling is mandatory. (How
-#   large the window should be is still open: see §4.4-C /
-#   [`open-decisions.md`](./open-decisions.md) §2 there, "§4.4-C the size of the replayable
-#   event-stream window". Once trimming is added, the caller contract does not change — see
-#   the 410 note below.)
+#   nothing. And **with trimming off (the default) the window = all of history**, so the rows
+#   `after=0` must page through only ever grow — which is why the hard ceiling is mandatory
+#   rather than merely tidy. (How large the window should be is still open: see §4.4-C /
+#   [`open-decisions.md`](./open-decisions.md) §2, "the size of the replayable event-stream
+#   window". The MECHANISM is settled and built; only the value is a deployment's.)
 #   `{earliest, latest}` are the retention window's boundaries (0/0 when the outbox is empty).
-#   **410 is reserved semantics, unreachable today and not implemented**: no trimming ⟹
-#   `earliest` never advances, so the state "`after` is earlier than the window" cannot be
-#   constructed. It is written into the contract so that **when trimming is genuinely added
-#   the caller contract needs no change** — at that point `after < earliest` is a 410 and the
-#   caller must restart from `earliest`. **No code is written for an unreachable state**
-#   (§1.3).
+#   **410 = `after` is below the retained window**, i.e. the events between that cursor and
+#   `earliest` have been trimmed and cannot be served. The body still carries
+#   `{earliest, latest}` so the caller **restarts from `earliest`** deliberately. It is a
+#   **refusal rather than a short page** because §4.4-C's "losing one loses an invoice" means a
+#   silently-truncated page would let a subscriber conclude it is caught up having skipped
+#   events — the field's common alternative (skip silently to the end) is exactly what this
+#   declines. **Reachable only when a retention window is configured**: with trimming off
+#   `earliest` never advances, so a deployment that sets nothing never sees a 410.
+#   **`after=0` NEVER 410s**, and that is contract rather than an edge case: 0 means "from the
+#   start of the retained window", an explicit request for whatever is retained, so a bare
+#   `after < earliest` test would refuse every cold-start cursor on a trimmed outbox.
 #   Replay is **by the retention window, not by delivery state**: whether the engine's own
 #   sink has seen some row is not a fact an external subscriber should depend on.
 #   **Why it is in the control plane**: a cursor-paginated GET is just CRUD, and an
@@ -666,8 +669,9 @@ endpoints** — for the real wire, read the proto:
   **`GET /v1/events`**: normal (an empty window and an empty page included) → **200**; `after` or
   `limit` not an integer / `after` negative / `limit` ≤ 0 → **400** (`limit` **exceeding** the
   ceiling is not an error — it truncates to the ceiling and is still 200); non-GET → **405**;
-  **410 = `after` earlier than the retention window**: **reserved semantics**, unreachable today and
-  not implemented (reasoning in §6.1).
+  **410 = `after` is below the retained window** (trimmed away), carrying `{earliest, latest}` so the
+  caller restarts from `earliest`; **`after=0` is never a 410**, and the whole path is reachable only
+  once a retention window is configured (reasoning in §6.1).
 - **store / runtime provider go through interfaces**: swapping a backend or adding a provider means
   registering a new implementation, not changing the model above it (§1.3 additive only; a provider
   is always an abstract contract, see §1.1 / §5.A).

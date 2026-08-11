@@ -156,6 +156,22 @@ func (r *Reaper) tick(ctx context.Context) {
 	if err := r.m.RepairVolumeCaps(ctx); err != nil {
 		r.m.deps.Logf("reaper: volume-cap repair (retried next tick): %v", err)
 	}
+	// §4.4-C's retention window. LAST in the tick, and on the reaper rather than the
+	// publisher goroutine, both deliberately:
+	//
+	//   - The reaper already IS the engine's periodic-reclamation loop, and this is the
+	//     same shape as every sweep above it: idempotent, non-fatal, retried next tick.
+	//   - Not the publisher's goroutine, because that goroutine's wedging must stay
+	//     DETECTABLE (§4.4-C ③): its heartbeat means "the drain completed a pass", and
+	//     adding an unrelated store operation to it would give that signal a second way
+	//     to stall, so "the drain is stuck" and "the trim is stuck" would be
+	//     indistinguishable — the exact confusion ③ exists to prevent.
+	//
+	// It has no ordering dependency on the sweeps (nothing else touches the outbox), so
+	// it sits after the reconcile that may APPEND events rather than before it.
+	if err := r.m.TrimOutbox(ctx); err != nil {
+		r.m.deps.Logf("reaper: outbox trim (retried next tick): %v", err)
+	}
 }
 
 // Sweep is one full pass: classify every sandbox and dispatch per health state /

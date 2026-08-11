@@ -849,3 +849,88 @@ func readRaw(t *testing.T, srv *httptest.Server, path string) string {
 	}
 	return string(b)
 }
+
+// TestEventsGoneWhenCursorFallsBelowTheWindow exercises §6.1's 410, which was written as
+// reserved semantics and was UNREACHABLE until trimming existed: with nothing ever
+// deleted, `earliest` never advances, so the state "the cursor is below the window"
+// could not be constructed.
+//
+// What it protects is the promise §4.4-C rests on — "losing one loses an invoice". The
+// tempting implementation returns a short page instead, which lets a subscriber conclude
+// it is caught up while having silently skipped everything trimmed. That is the failure
+// this refusal exists to convert into something the caller cannot miss.
+func TestEventsGoneWhenCursorFallsBelowTheWindow(t *testing.T) {
+	ctx := context.Background()
+	mem := store.NewMemory()
+	seedTemplate(t, mem, "bare", "", true)
+	med := lifecycle.New(lifecycle.Deps{
+		Store: mem,
+		// A window that has already elapsed, so every delivered row qualifies at once.
+		EventRetention: time.Nanosecond,
+		Logf:           func(string, ...any) {},
+	})
+	eng := &Engine{Mediator: med, Store: mem}
+	srv := httptest.NewServer(eng.HTTPHandler())
+	t.Cleanup(srv.Close)
+
+	if err := mem.CreateSandbox(ctx, model.Sandbox{ID: "sbx_e", Template: "bare", Overlay: "ov_e", State: model.Creating}, nil); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	for i, k := range []struct {
+		from, to model.Lifecycle
+		kind     model.EventKind
+	}{
+		{model.Creating, model.Running, "created"},
+		{model.Running, model.Paused, "paused"},
+		{model.Paused, model.Running, "resumed"},
+		{model.Running, model.Paused, "paused"},
+	} {
+		e := &store.Event{ID: fmt.Sprintf("evt_%d", i), Sandbox: "sbx_e", Kind: k.kind, State: k.to, OccurredAt: time.Now()}
+		if err := mem.CompareAndSetState(ctx, "sbx_e", k.from, k.to, e, nil); err != nil {
+			t.Fatalf("transition %d: %v", i, err)
+		}
+	}
+	// Deliver them all, since only DELIVERED rows are trimmable.
+	un, _ := mem.UnpublishedEvents(ctx, 100)
+	for _, e := range un {
+		if err := mem.MarkPublished(ctx, e.ID); err != nil {
+			t.Fatalf("mark: %v", err)
+		}
+	}
+
+	if err := med.TrimOutbox(ctx); err != nil {
+		t.Fatalf("trim: %v", err)
+	}
+
+	// The window has advanced. A cursor below it must be REFUSED, not served short.
+	resp := do(t, http.MethodGet, srv.URL+"/v1/events?after=1")
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusGone {
+		t.Fatalf("after=1 against a trimmed window = %d, want 410 — a short page here lets a subscriber conclude it is caught up while silently skipping every trimmed event, which is the one outcome §4.4-C's ordering guarantee exists to prevent. Body: %s", resp.StatusCode, body)
+	}
+	// And it must carry the window so the caller can restart deliberately.
+	var out eventsResp
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatalf("decode 410 body: %v (%s)", err, body)
+	}
+	if out.Earliest == 0 {
+		t.Errorf("the 410 does not report `earliest`, so the caller has nothing to restart from: %s", body)
+	}
+
+	// after=0 must NEVER 410: it is contractually "from the start of the retained
+	// window", i.e. an explicit request for whatever is retained. A bare
+	// `after < earliest` test would break every cold-start cursor on a trimmed outbox.
+	resp = do(t, http.MethodGet, srv.URL+"/v1/events?after=0")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("after=0 against a trimmed window = %d, want 200 — 0 means 'from the start of the retained window', so refusing it breaks the documented way to begin reading", resp.StatusCode)
+	}
+
+	// A cursor INSIDE the window is served normally.
+	resp = do(t, http.MethodGet, srv.URL+fmt.Sprintf("/v1/events?after=%d", out.Earliest))
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("a cursor at `earliest` = %d, want 200", resp.StatusCode)
+	}
+}

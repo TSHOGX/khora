@@ -610,11 +610,12 @@ type eventItem struct {
 type eventsResp struct {
 	Events []eventItem `json:"events"`
 	// Earliest / Latest bound the retained window (0/0 when the outbox is empty).
-	// They are reported even though nothing is trimmed today — the cost is zero
-	// and it fixes the response SHAPE now, so introducing trimming later needs no
-	// change to the caller contract. With no trimming `earliest` never advances,
-	// which is exactly why 410 is unreachable today and deliberately not
-	// implemented (documented as reserved semantics in api-contract.md §6.1).
+	//
+	// They are what makes the 410 actionable: a caller whose cursor fell below the
+	// window restarts from `earliest` rather than guessing. Reachable only when a
+	// retention window is configured (§4.4-C) — with trimming off `earliest` never
+	// advances, so a deployment that sets nothing never sees a 410 and the shape
+	// costs it nothing.
 	Earliest int64 `json:"earliest"`
 	Latest   int64 `json:"latest"`
 }
@@ -666,6 +667,30 @@ func (e *Engine) handleEvents(w http.ResponseWriter, r *http.Request) {
 	evs, earliest, latest, err := e.Mediator.Events(r.Context(), after, limit)
 	if err != nil {
 		statusFor(w, err)
+		return
+	}
+	// 410: the cursor is BELOW the retained window, so the events between it and
+	// `earliest` are gone and cannot be served. Reachable only once trimming is
+	// configured (§4.4-C) — with no trimming `earliest` never advances, which is why this
+	// was written as reserved semantics and left unimplemented.
+	//
+	// It is a REFUSAL rather than a short page on purpose: §4.4-C's "losing one loses an
+	// invoice" means a silently-truncated page would let a subscriber conclude it is
+	// caught up while having skipped events. The response carries {earliest, latest} so
+	// the caller can restart deliberately at the window's real lower bound. (The field
+	// approach elsewhere is to skip to the end silently; that is exactly what this
+	// refuses to do.)
+	//
+	// `after > 0` is load-bearing, not defensive: 0 is contractually "from the start of
+	// the retained window", i.e. an explicit request for whatever is retained, so a bare
+	// `after < earliest` would 410 every cold-start cursor on any trimmed outbox and
+	// break the documented way to begin reading.
+	if after > 0 && earliest > 0 && after < earliest {
+		writeJSON(w, http.StatusGone, eventsResp{
+			Events:   []eventItem{},
+			Earliest: earliest,
+			Latest:   latest,
+		})
 		return
 	}
 	out := eventsResp{Events: make([]eventItem, 0, len(evs)), Earliest: earliest, Latest: latest}

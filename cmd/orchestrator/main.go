@@ -30,6 +30,7 @@ func main() {
 		idleTO    = flag.Duration("idle-timeout", 30*time.Minute, "default idle TTL: running idle past this → auto-pause (§4.3)")
 		retention = flag.Duration("retention", 24*time.Hour, "default retention TTL: paused past this → evict (§4.3)")
 		sweep     = flag.Duration("reaper-interval", 30*time.Second, "reaper sweep cadence (§4.3)")
+		evtRetain = flag.Duration("event-retention", 0, "§4.4-C replayable event-stream window: DELIVERED outbox rows older than this are trimmed, which advances `earliest` in GET /v1/events and makes its 410 reachable. 0 = never trim (the default), keeping all history replayable at the cost of unbounded at-rest growth. Argue the value from the reconnect window you promise your SUBSCRIBERS, never from disk: a subscriber whose cursor falls below `earliest` gets 410 and must restart from there, losing every event in between. Age is measured from DELIVERY, not occurrence, so a publisher halted for a week does not make its backlog instantly trimmable. Undelivered rows are never trimmed at any setting")
 		tdBudget  = flag.Duration("transport-down-budget", 2*time.Minute, "transport-down restart budget before escalate→resume (D4b)")
 		nodeDisk  = flag.Int64("node-disk-byte", 0, "§3.4 no-oversubscribe disk budget: bytes for sandbox Overlay upper+work plus Template/layer bytes; 0 = unmetered (axis not gated). Set BELOW the raw device size — the budget counts only what the engine may PROMISE guests, so per-sandbox substrate overhead (runsc state on disk) lives outside it. While metered, a create must specify a disk cap or it is refused")
 		nodeMem   = flag.Int64("node-memory-byte", 0, "§3.4 no-oversubscribe memory budget: total host RAM the engine may promise to sandboxes; 0 = unmetered (axis not gated). Set BELOW physical RAM — the budget counts only what the engine may PROMISE guests, so per-sandbox substrate overhead (sentry/gofer footprint) lives outside it. While metered, a create must specify a memory cap or it is refused")
@@ -61,6 +62,7 @@ func main() {
 		HealthTimeout:       *health,
 		DefaultIdleTimeout:  *idleTO,
 		DefaultRetention:    *retention,
+		EventRetention:      *evtRetain,
 		SweepInterval:       *sweep,
 		TransportDownBudget: *tdBudget,
 		NodeDiskByte:        *nodeDisk,

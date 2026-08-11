@@ -59,6 +59,12 @@ type Memory struct {
 type outboxRow struct {
 	ev        Event
 	published bool
+	// publishedAt is WHEN delivery was marked, and it exists because §4.4-C's retention
+	// window ages rows by DELIVERY rather than by occurrence — see Store.TrimOutbox for
+	// why that distinction is load-bearing rather than cosmetic. A bool alone cannot
+	// answer "delivered before this cutoff", so this arm would silently fail the shared
+	// contract without it.
+	publishedAt time.Time
 }
 
 func NewMemory() *Memory {
@@ -561,6 +567,39 @@ func (m *Memory) UnpublishedEvents(_ context.Context, limit int) ([]Event, error
 	return out, nil
 }
 
+// TrimOutbox implements Store.TrimOutbox (§4.4-C's retention mechanism). Read that
+// contract for why each clause matters; this arm mirrors it exactly, because the two
+// backends' outbox semantics are held identical by the shared contract suite.
+func (m *Memory) TrimOutbox(_ context.Context, cutoff time.Time, limit int) (int, error) {
+	if limit <= 0 {
+		return 0, fmt.Errorf("store: TrimOutbox limit must be positive, got %d", limit)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.outbox) == 0 {
+		return 0, nil
+	}
+	// The newest row is never eligible, so the window's bounds cannot collapse to 0/0
+	// and be mistaken for "nothing ever happened" (see the contract).
+	newest := m.outbox[len(m.outbox)-1].ev.Seq
+	cut := cutoff.UnixNano()
+	kept := make([]outboxRow, 0, len(m.outbox))
+	deleted := 0
+	for _, r := range m.outbox {
+		eligible := deleted < limit &&
+			r.published &&
+			!r.publishedAt.IsZero() && r.publishedAt.UnixNano() < cut &&
+			r.ev.Seq < newest
+		if eligible {
+			deleted++
+			continue
+		}
+		kept = append(kept, r)
+	}
+	m.outbox = kept
+	return deleted, nil
+}
+
 // CountUnpublished implements Store.CountUnpublished (§4.4-C ③: the gauge's source is
 // independent of the drain read). This arm walks, which is honest at its scale — the
 // in-memory outbox is bounded by the process's own lifetime.
@@ -605,6 +644,13 @@ func (m *Memory) MarkPublished(_ context.Context, eventID string) error {
 	for i := range m.outbox {
 		if m.outbox[i].ev.ID == eventID {
 			m.outbox[i].published = true // idempotent: re-marking is harmless
+			// First mark wins. Re-marking must not push the delivery time forward, or a
+			// row's retention age would reset every time an idempotent re-mark happened
+			// to occur — which is the same "the window never advances" failure as not
+			// trimming at all.
+			if m.outbox[i].publishedAt.IsZero() {
+				m.outbox[i].publishedAt = time.Now()
+			}
 			return nil
 		}
 	}

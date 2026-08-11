@@ -395,6 +395,44 @@ type Store interface {
 	// already-marked ID is a no-op.
 	MarkPublished(ctx context.Context, eventID string) error
 
+	// TrimOutbox deletes at most limit DELIVERED outbox rows whose delivery is older
+	// than cutoff, oldest first, and returns how many it deleted. It is the mechanism
+	// behind §4.4-C's retention window; the WINDOW'S VALUE belongs to the deployment
+	// and 0 (never trim) is the engine's default, so a deployment that sets nothing
+	// never reaches this.
+	//
+	// Four properties, each of which has a wrong answer that looks reasonable:
+	//
+	//   - AGE IS MEASURED FROM DELIVERY (published_at), never from occurrence. The
+	//     publisher's poison exit does not release itself, so a halted stream can be
+	//     resumed days later and deliver its backlog with fresh delivery times but
+	//     ancient occurred_at. Ageing on the latter would make that backlog instantly
+	//     trimmable at the moment of first delivery — deleting events no subscriber
+	//     ever had the chance to fetch, the one failure at-least-once exists to
+	//     prevent.
+	//   - DELIVERED ROWS ONLY, and that floor is STRUCTURAL rather than a check to
+	//     remember: the publisher drains in Seq order and stops at the first failure,
+	//     so the delivered set is always a PREFIX of the sequence, and adding the
+	//     delivery predicate makes the trimmable set a prefix of a prefix. Trim
+	//     therefore cannot outrun the publisher, and it must NOT consult the halt
+	//     latch to achieve that — the halted head is by definition undelivered, so
+	//     the natural predicate already stops below it.
+	//   - THE NEWEST ROW IS NEVER TRIMMED, even when it qualifies. Emptying the table
+	//     makes the window bounds read 0/0, which is INDISTINGUISHABLE from "nothing
+	//     ever happened" — so a stale cursor would be neither served nor refused, and
+	//     a caller would read "I am caught up" and silently skip everything trimmed.
+	//     That is precisely the silent short page §6.1's 410 exists to prevent,
+	//     arriving through the mechanism meant to activate it. Retaining one row keeps
+	//     the bounds truthful for the price of one row.
+	//   - BOUNDED BY limit, for the same reason the drain read is: the delete runs on
+	//     a backend whose write path may be serialized, so an unbounded delete holds
+	//     that path for its whole duration and every state transition waits behind it.
+	//     The caller re-runs on its next tick; there is no need to catch up at once.
+	//
+	// Trimming advances the window's lower bound, which is what makes §6.1's 410
+	// reachable — it is unreachable while nothing is ever deleted.
+	TrimOutbox(ctx context.Context, cutoff time.Time, limit int) (int, error)
+
 	// UpdateBinding rewrites a sandbox's Binding fields (§3.4) — the create-time
 	// write point's only sibling, backing §6.1 PATCH. It is CONDITIONAL on the
 	// current lifecycle-state, the same shape as CompareAndSetState (§4.4-B): the

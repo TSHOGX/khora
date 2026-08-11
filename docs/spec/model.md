@@ -1077,12 +1077,12 @@ externally as a gauge / by sampling (§1.3 add a subscriber, the Consumption sea
 primitive. External evidence points the same way: both reference implementations expose only gauges /
 samples, and nobody emits pressure as an event.
 
-**The retention window (trimming)**: **no trimming today; rows are only marked, never deleted.** The
-cost, stated plainly: the outbox's at-rest size grows without bound, which is **a known limitation**
-rather than a virtue of this decision. **A consequence**: `earliest` is always the smallest sequence
-number, so §6.1's 410 is unreachable today — the response still carries `{earliest, latest}` and the
-410 is written as reserved semantics, so that when trimming is genuinely added the caller contract
-needs no change.
+**The retention window (trimming)**: **the mechanism exists and is OFF by default.** With no window
+configured nothing is ever deleted, so the outbox's at-rest size grows without bound — **a known
+limitation** of that default rather than a virtue of it, and the reason the mechanism had to exist at
+all is that an absent one is the only part of this that cannot be revisited at deploy time. **A
+consequence of the default**: `earliest` never advances, so §6.1's 410 is unreachable until a window
+is set; it becomes reachable the moment one is, with no change to the caller contract.
 
 **The mechanism is settled; only its value is not, and the two must not be conflated.** The window's
 value must be argued from "the reconnect duration promised to external subscribers", and the engine's

@@ -52,6 +52,12 @@ type Config struct {
 	DefaultIdleTimeout time.Duration
 	DefaultRetention   time.Duration
 
+	// EventRetention is §4.4-C's replayable-window size. Zero = NEVER TRIM, and that
+	// zero is the shipped behavior rather than a "fill in a default" sentinel — the
+	// opposite of the two TTLs above. See lifecycle.Deps.EventRetention for why the
+	// engine must not invent this number.
+	EventRetention time.Duration
+
 	// SweepInterval / TransportDownBudget are the reaper's tuning knobs
 	// (reaper-health D5). Zero → NewReaper's conservative defaults.
 	SweepInterval       time.Duration
@@ -189,6 +195,7 @@ func New(cfg Config) (*Engine, error) {
 		DrainGrace:            cfg.DrainGrace,
 		DefaultIdleTimeout:    cfg.DefaultIdleTimeout,
 		DefaultRetention:      cfg.DefaultRetention,
+		EventRetention:        cfg.EventRetention,
 		FaultAfterColdStart:   cfg.FaultAfterColdStart,
 		FaultAfterVolumeBytes: cfg.FaultAfterVolumeBytes,
 		NodeCapacity: lifecycle.NodeCapacity{

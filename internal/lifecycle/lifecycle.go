@@ -181,6 +181,19 @@ type Deps struct {
 	DefaultIdleTimeout time.Duration
 	DefaultRetention   time.Duration
 
+	// EventRetention is §4.4-C's replayable-window size: a DELIVERED outbox row older
+	// than this is trimmed. 0 = NEVER TRIM, and unlike the two TTLs above that zero is
+	// NOT replaced with a package default — it is the shipped behavior.
+	//
+	// Not defaulted deliberately, and this follows the same rule as NodeCapacity rather
+	// than being timidity: the correct value is "the reconnect duration promised to
+	// external subscribers", which the engine cannot know and must not invent. The cost
+	// of 0 is stated rather than hidden — the outbox grows without bound at rest
+	// (§4.4-C's known limitation) — but the cost of a wrong non-zero default is deletion
+	// of billing-relevant history on a number nobody chose, and only the first of those
+	// is visible, bounded, and recoverable.
+	EventRetention time.Duration
+
 	// Logf reports per-item reconciliation outcomes that are skipped rather than
 	// fatal (§4.4-A startup reconcile is skip-and-log: one un-adoptable sandbox
 	// must not abort recovery of the rest). Defaults to log.Printf; tests inject a
@@ -1353,6 +1366,39 @@ func (m *Mediator) SeedBuiltinTemplates(ctx context.Context) error {
 // deployment-shipped TemplatesDir, a different root the provider never scans, so
 // they are structurally out of the candidate set — a builtin row's absence
 // could never orphan a builtin dir.
+// trimBatch bounds one trim pass. Deliberately not a knob: what it protects is the
+// store's write path, not anything a deployment reasons about, and a pass that falls
+// behind simply continues next tick.
+const trimBatch = 1000
+
+// TrimOutbox applies §4.4-C's retention window: delivered outbox rows older than
+// Deps.EventRetention are deleted, oldest first, bounded per pass.
+//
+// A no-op when EventRetention is 0, which is the default — so a deployment that has not
+// chosen a window keeps every event replayable, and this method costs it one comparison
+// per reaper tick rather than a store round trip.
+//
+// The store enforces every safety property (delivered-only, age-from-delivery,
+// never-empty, bounded); this decides only WHETHER to ask and with what cutoff. That
+// split is why the dangerous clauses are covered by the shared contract suite rather
+// than by a test of this method.
+func (m *Mediator) TrimOutbox(ctx context.Context) error {
+	if m.deps.EventRetention <= 0 {
+		return nil
+	}
+	n, err := m.deps.Store.TrimOutbox(ctx, time.Now().Add(-m.deps.EventRetention), trimBatch)
+	if err != nil {
+		return fmt.Errorf("trim outbox: %w", err)
+	}
+	if n > 0 {
+		// Logged because it moves the replay window, which is externally visible: a
+		// subscriber whose cursor falls below the new lower bound starts getting 410s, and
+		// an operator diagnosing that needs to see that trimming is what moved it.
+		m.deps.Logf("outbox trim: deleted %d delivered event(s) older than %s", n, m.deps.EventRetention)
+	}
+	return nil
+}
+
 func (m *Mediator) SweepOrphanLayers(ctx context.Context) error {
 	tmpls, err := m.deps.Store.ListTemplates(ctx)
 	if err != nil {

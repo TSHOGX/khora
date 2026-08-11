@@ -90,15 +90,19 @@ CREATE TABLE IF NOT EXISTS sandboxes (
 	created_at   INTEGER NOT NULL, -- unix nanos
 	updated_at   INTEGER NOT NULL
 );
--- KNOWN LIMITATION (open-decisions §2, "The size of the replayable event-stream
--- window (§4.4-C)"):
--- published rows are marked (published_at set), NEVER deleted, so this table
--- grows monotonically. The partial index below keeps the publisher's
--- unpublished-scan from degrading, but at-rest size is unbounded. This is
--- DEFERRED, not answered: the trim window has to be set from the reconnect
--- window promised to external subscribers, and there are none yet, so there is
--- no arguable value to pick. It remains a limitation and did NOT become a virtue
--- by being decided upon.
+-- RETENTION (§4.4-C, and open-decisions §2 for the one part still open):
+-- TrimOutbox deletes DELIVERED rows older than a configured window, so this table
+-- is bounded when a deployment sets one. The DEFAULT is off, and with it off rows
+-- are marked (published_at set) and never deleted, so at-rest size is unbounded —
+-- a KNOWN LIMITATION of that default, which did not become a virtue by being
+-- chosen. What is deferred now is only the VALUE: it has to come from the
+-- reconnect window promised to external subscribers, and the engine must not
+-- invent that number (the same refusal as node capacity). The mechanism is not
+-- deferred, because an absent mechanism is the one part that could not be
+-- supplied at deploy time.
+-- auto_vacuum=INCREMENTAL (set in the DSN, before this table exists — measured:
+-- afterwards it is a silent no-op) is what lets a trim return space to the
+-- filesystem rather than only inside the file.
 CREATE TABLE IF NOT EXISTS outbox (
 	-- seq is the §4.4-C cursor: the monotonic total order both the publisher and
 	-- the §6.1 GET /v1/events replay page on. It is the PRIMARY KEY (the rowid)
@@ -247,7 +251,18 @@ func OpenSQLite(path string) (*SQLite, error) {
 	// read-modify-write CAS transaction can't deadlock against another writer
 	// mid-transaction. Correct for the §4.4-C commit path where every transition
 	// is a write.
-	dsn := path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)&_txlock=immediate"
+	// auto_vacuum=INCREMENTAL is what lets TrimOutbox actually return space to the
+	// filesystem: without it a delete frees pages only inside the file, so the at-rest
+	// growth §4.4-C names as a known limitation would never fall even with a retention
+	// window configured.
+	//
+	// IT MUST BE SET BEFORE THE FIRST TABLE EXISTS — measured: on a database that
+	// already has tables the pragma is a silent no-op (it reports back 0/none), and
+	// converting afterwards needs a full VACUUM. So its home is the DSN, applied on
+	// every open, which is what makes it true for every database this constant creates.
+	// It is free to add now only because there are no live instances to migrate
+	// (CLAUDE.md "No compatibility burden"); after a deployment it would not be.
+	dsn := path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)&_pragma=auto_vacuum(incremental)&_txlock=immediate"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("store/sqlite: open: %w", err)
@@ -493,6 +508,52 @@ func (s *SQLite) UnpublishedEvents(ctx context.Context, limit int) ([]Event, err
 	}
 	defer rows.Close()
 	return scanEvents(rows)
+}
+
+// TrimOutbox implements Store.TrimOutbox (§4.4-C's retention mechanism). Read that
+// contract for why each clause of this predicate is load-bearing.
+func (s *SQLite) TrimOutbox(ctx context.Context, cutoff time.Time, limit int) (int, error) {
+	if limit <= 0 {
+		return 0, fmt.Errorf("store: TrimOutbox limit must be positive, got %d", limit)
+	}
+	// The subquery is what bounds the delete: SQLite's DELETE … LIMIT is a compile-time
+	// option that cannot be relied on, so the rows are selected explicitly.
+	//
+	// `seq < (SELECT MAX(seq) …)` is the never-trim-the-newest clause. It is not an
+	// off-by-one nicety: without it a fully-caught-up outbox trims EMPTY, MIN/MAX go
+	// NULL, the window reports 0/0, and a stale cursor gets a silent empty page instead
+	// of the 410 the contract promises.
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM outbox WHERE seq IN (
+			SELECT seq FROM outbox
+			 WHERE published_at IS NOT NULL
+			   AND published_at < ?
+			   AND seq < (SELECT MAX(seq) FROM outbox)
+			 ORDER BY seq
+			 LIMIT ?
+		 )`, cutoff.UnixNano(), limit)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if n > 0 {
+		// Reclaim the freed pages into the filesystem. Without this the delete frees
+		// space only INSIDE the file, so the at-rest size the retention window exists to
+		// bound never actually falls, and an operator watching the file concludes the
+		// flag does nothing.
+		//
+		// DELIBERATELY NOT PROPAGATED, and this is the one place in this method where
+		// swallowing an error is right: the rows ARE deleted and the window HAS advanced
+		// by the time this runs, so reporting the trim as failed would be a lie that
+		// makes the caller re-attempt work already done. What a failure costs is only
+		// that the file stays large — visible to the operator directly, and self-correcting
+		// on the next trim. Bounded at 64 pages so this cannot become the long pole.
+		_, _ = s.db.ExecContext(ctx, `PRAGMA incremental_vacuum(64)`)
+	}
+	return int(n), nil
 }
 
 // CountUnpublished implements Store.CountUnpublished: the backlog gauge's own source,

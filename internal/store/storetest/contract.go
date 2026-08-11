@@ -74,6 +74,14 @@ func RunContract(t *testing.T, mk Factory) {
 	// alone, and only in production, where the backlog is large enough to notice.
 	t.Run("UnpublishedEventsHonorsItsLimit", func(t *testing.T) { testUnpublishedLimit(t, mk) })
 	t.Run("CountUnpublishedIsIndependentOfTheDrainBound", func(t *testing.T) { testCountUnpublished(t, mk) })
+
+	// §4.4-C's retention MECHANISM. In the shared suite because every clause of the
+	// predicate protects a subscriber-visible promise, so a backend that got one wrong
+	// would break replay on that backend alone, in production, silently.
+	t.Run("TrimOutboxDeliveredOnly", func(t *testing.T) { testTrimDeliveredOnly(t, mk) })
+	t.Run("TrimOutboxAgesByDeliveryNotOccurrence", func(t *testing.T) { testTrimAgesByDelivery(t, mk) })
+	t.Run("TrimOutboxNeverEmptiesTheTable", func(t *testing.T) { testTrimKeepsNewest(t, mk) })
+	t.Run("TrimOutboxAdvancesTheWindowAndPreservesSeq", func(t *testing.T) { testTrimWindowAndSeq(t, mk) })
 	t.Run("OutboxRowOutlivesRecord", func(t *testing.T) { testOutboxOutlivesRecord(t, mk) })
 	t.Run("Durability", func(t *testing.T) { testDurability(t, mk) })
 
@@ -952,6 +960,197 @@ func testMarkPublished(t *testing.T, mk Factory) {
 	}
 	if un, _ := s.UnpublishedEvents(ctx, allUnpublished); len(un) != 1 {
 		t.Fatalf("idempotent mark changed count: %d", len(un))
+	}
+}
+
+// testTrimDeliveredOnly: an UNDELIVERED row is never trimmed, at any cutoff.
+//
+// This is the floor the at-least-once contract rests on: trimming an undelivered row
+// drops an event silently, which is the one failure the whole outbox design exists to
+// prevent. Note it is also structurally guaranteed — the publisher drains in Seq order
+// and stops at the first failure, so the delivered set is a prefix — but a backend that
+// dropped the predicate would break it, hence the assertion.
+func testTrimDeliveredOnly(t *testing.T, mk Factory) {
+	ctx := context.Background()
+	s, _ := mk(t)
+	seedTmpl(t, s, "bare")
+	_ = s.CreateSandbox(ctx, mkRec("a"), nil)
+	seedUnpublished(t, s, "a", 3)
+
+	// Nothing delivered yet: a cutoff far in the future must still trim nothing.
+	n, err := s.TrimOutbox(ctx, time.Now().Add(time.Hour), 100)
+	if err != nil {
+		t.Fatalf("TrimOutbox: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("trimmed %d UNDELIVERED rows — an undelivered row is an undelivered event, and deleting it loses it silently (the at-least-once contract's one prohibition)", n)
+	}
+	if un, _ := s.UnpublishedEvents(ctx, allUnpublished); len(un) != 3 {
+		t.Fatalf("%d rows remain unpublished, want 3", len(un))
+	}
+}
+
+// testTrimAgesByDelivery: the cutoff applies to DELIVERY time, not occurrence time.
+//
+// The distinction is load-bearing because the publisher's poison exit does not release
+// itself: a halted stream resumed days later delivers rows whose occurred_at is ancient
+// but whose delivery is NOW. Ageing on occurrence would make that entire backlog
+// trimmable the instant it was first delivered — deleting events no subscriber ever had
+// a chance to fetch.
+//
+// THE FIXTURE HAS TO SEPARATE THE TWO TIMESTAMPS OR IT ASSERTS NOTHING. Rows occurring
+// and delivered at the same moment are excluded by a past cutoff on either field, so
+// such a test passes against both implementations (found by falsifying it: swapping
+// published_at for occurred_at left it green). So: occurrence is backdated two hours,
+// delivery is now, and the cutoff sits BETWEEN them — where the two readings disagree.
+func testTrimAgesByDelivery(t *testing.T, mk Factory) {
+	ctx := context.Background()
+	s, _ := mk(t)
+	seedTmpl(t, s, "bare")
+	_ = s.CreateSandbox(ctx, mkRec("a"), nil)
+
+	// Backdated OCCURRENCE, the way a long-halted stream's backlog looks.
+	old := time.Now().Add(-2 * time.Hour)
+	for i := 0; i < 3; i++ {
+		from, to := model.Paused, model.Running
+		kind := model.EventKind("resumed")
+		switch {
+		case i == 0:
+			from, to, kind = model.Creating, model.Running, model.EventKind("created")
+		case i%2 == 1:
+			from, to, kind = model.Running, model.Paused, model.EventKind("paused")
+		}
+		e := ev("a", fmt.Sprintf("evt_%d", i), kind, to)
+		e.OccurredAt = old
+		if err := s.CompareAndSetState(ctx, "a", from, to, e, nil); err != nil {
+			t.Fatalf("seed %d: %v", i, err)
+		}
+	}
+
+	// Delivered NOW.
+	un, _ := s.UnpublishedEvents(ctx, allUnpublished)
+	for _, e := range un {
+		if err := s.MarkPublished(ctx, e.ID); err != nil {
+			t.Fatalf("mark %s: %v", e.ID, err)
+		}
+	}
+
+	// A cutoff BETWEEN occurrence and delivery. Correct (published_at): nothing is old
+	// enough, so nothing is trimmed. Wrong (occurred_at): everything looks ancient.
+	cutoff := time.Now().Add(-time.Hour)
+	n, err := s.TrimOutbox(ctx, cutoff, 100)
+	if err != nil {
+		t.Fatalf("TrimOutbox: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("trimmed %d rows that OCCURRED before the cutoff but were DELIVERED after it — the age is being measured from occurrence, so a backlog delivered late (a resumed poison halt is the real case) becomes instantly trimmable and subscribers lose events they never had the chance to read", n)
+	}
+
+	// And the positive control: once delivery itself is old enough, they do go — or the
+	// assertion above would also pass on an implementation that trims nothing at all.
+	if n, err = s.TrimOutbox(ctx, time.Now().Add(time.Hour), 100); err != nil {
+		t.Fatalf("TrimOutbox (past-delivery cutoff): %v", err)
+	}
+	if n == 0 {
+		t.Fatalf("a cutoff after delivery trimmed nothing — the window would never advance, so §6.1's 410 stays unreachable and the retention flag does nothing")
+	}
+}
+
+// testTrimKeepsNewest: trimming never empties the table, even when every row qualifies.
+//
+// An empty outbox reports its window as 0/0, which is indistinguishable from "nothing
+// ever happened". A subscriber holding a stale cursor would then be neither served nor
+// refused: it reads an empty page, concludes it is caught up, and silently skips
+// everything that was trimmed — precisely the silent short page §6.1's 410 exists to
+// prevent, arriving through the mechanism meant to make the 410 reachable.
+func testTrimKeepsNewest(t *testing.T, mk Factory) {
+	ctx := context.Background()
+	s, _ := mk(t)
+	seedTmpl(t, s, "bare")
+	_ = s.CreateSandbox(ctx, mkRec("a"), nil)
+	seedUnpublished(t, s, "a", 4)
+	un, _ := s.UnpublishedEvents(ctx, allUnpublished)
+	for _, ev := range un {
+		_ = s.MarkPublished(ctx, ev.ID)
+	}
+
+	// Every row is delivered and older than this cutoff, so all four "qualify".
+	cutoff := time.Now().Add(time.Hour)
+	if _, err := s.TrimOutbox(ctx, cutoff, 100); err != nil {
+		t.Fatalf("TrimOutbox: %v", err)
+	}
+	// Trim again to be sure a second pass cannot finish the job either.
+	if _, err := s.TrimOutbox(ctx, cutoff, 100); err != nil {
+		t.Fatalf("TrimOutbox (second pass): %v", err)
+	}
+
+	_, earliest, latest, err := s.Events(ctx, 0, 100)
+	if err != nil {
+		t.Fatalf("Events: %v", err)
+	}
+	if earliest == 0 || latest == 0 {
+		t.Fatalf("after trimming everything the window reads earliest=%d latest=%d — 0/0 is what an outbox that never held anything reports, so a stale cursor gets a silent empty page instead of a 410 (§6.1)", earliest, latest)
+	}
+	if earliest != latest {
+		t.Errorf("window is %d..%d; want exactly one row retained", earliest, latest)
+	}
+}
+
+// testTrimWindowAndSeq: trimming advances the window's lower bound (which is what makes
+// §6.1's 410 reachable at all) and does NOT roll the sequence back.
+//
+// The sequence half is the subtler one. If the counter were derived from the rows still
+// present, emptying or shrinking the table would re-issue numbers a subscriber has
+// already consumed, pointing its cursor past fresh events — a silent gap with no error
+// anywhere. The SQLite arm defends this with AUTOINCREMENT (whose high-water mark lives
+// outside the table); this asserts the PROPERTY, so any backend must deliver it however
+// it likes.
+func testTrimWindowAndSeq(t *testing.T, mk Factory) {
+	ctx := context.Background()
+	s, _ := mk(t)
+	seedTmpl(t, s, "bare")
+	_ = s.CreateSandbox(ctx, mkRec("a"), nil)
+	seedUnpublished(t, s, "a", 5)
+	un, _ := s.UnpublishedEvents(ctx, allUnpublished)
+	for _, ev := range un {
+		_ = s.MarkPublished(ctx, ev.ID)
+	}
+	_, before, highest, err := s.Events(ctx, 0, 100)
+	if err != nil {
+		t.Fatalf("Events: %v", err)
+	}
+
+	n, err := s.TrimOutbox(ctx, time.Now().Add(time.Hour), 2)
+	if err != nil {
+		t.Fatalf("TrimOutbox: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("trimmed %d with limit=2 — the bound is ignored, so a large backlog is deleted in one statement and every transition waits behind it", n)
+	}
+	_, after, _, err := s.Events(ctx, 0, 100)
+	if err != nil {
+		t.Fatalf("Events after trim: %v", err)
+	}
+	if after <= before {
+		t.Fatalf("earliest did not advance (%d → %d) — §6.1's 410 is reachable only once the window's lower bound moves, so without this trimming activates nothing", before, after)
+	}
+
+	// A new event must take a sequence ABOVE everything ever issued, not reuse a
+	// trimmed one.
+	if err := s.CompareAndSetState(ctx, "a", model.Running, model.Paused, ev("a", "evt_after_trim", model.EventKind("paused"), model.Paused), nil); err != nil {
+		t.Fatalf("post-trim transition: %v", err)
+	}
+	evs, _, latest, err := s.Events(ctx, 0, 100)
+	if err != nil {
+		t.Fatalf("Events: %v", err)
+	}
+	if latest <= highest {
+		t.Fatalf("a post-trim event took seq %d, at or below the pre-trim high-water mark %d — a subscriber's cursor is now past freshly-issued sequences and will silently skip them", latest, highest)
+	}
+	for _, e := range evs {
+		if e.ID == "evt_after_trim" && e.Seq <= highest {
+			t.Errorf("evt_after_trim reused seq %d", e.Seq)
+		}
 	}
 }
 
