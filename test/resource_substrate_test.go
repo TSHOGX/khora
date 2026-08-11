@@ -929,6 +929,25 @@ func TestResourceRAMAxis(t *testing.T) {
 	// --- blow through the cap -------------------------------------------------
 	// Allocate well past the cap. The whole group must be killed; the probe never
 	// gets to report ALLOC_COMPLETE.
+	//
+	// THIS TEST'S ~43 s IS THE ENGINE'S DEATH-DETECTION PATH, not slack, and the
+	// distinction is worth recording because the number invites trimming. Measured
+	// breakdown: engine+template 0.7 s, the guest's mmap+touch 0.10 s, the
+	// oom_group_kill read 0.00 s, the reaper sweep 2.1 s — and 40.1 s spent in the
+	// range-over-ch below, which ends in `error: http2: client connection lost`
+	// rather than an end frame.
+	//
+	// That 40 s is sharedTransport's ReadIdleTimeout (30 s) + PingTimeout (10 s).
+	// A group killed by its RAM cap never closes its streams — the process is simply
+	// gone — so the h2 PING is what discovers it, and internal/transport/client.go
+	// chose those values deliberately over waiting out the kernel's ~150 s TCP
+	// retransmit. So this test IS the acceptance for that configuration.
+	//
+	// Confirmed not to be allocation cost: the total is flat at ~43 s across memCap
+	// 192/96/64 MiB and memhog steps of 16/32/64 MiB. Lowering the cap or the step
+	// changes nothing, because the wait is a fixed timeout. The only way to make it
+	// meaningfully faster is to lower those transport constants, which would change
+	// production behaviour to speed up a test — the wrong trade.
 	ch, err := cl.Start(ctx, transport.StartSpec{Cmd: "/usr/bin/memhog", Args: []string{"32", "512"}})
 	if err != nil {
 		t.Fatalf("start memhog: %v", err)
