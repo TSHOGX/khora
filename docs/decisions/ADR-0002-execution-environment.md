@@ -78,4 +78,13 @@ environment must grant those caps.
 
 **Arch scope.** `sbx` is arm64; the matrix above records which facts are
 additionally confirmed on amd64. Full amd64 re-validation before production is an
-environment check (Go cross-compiles cleanly), not an engine change.
+environment check (Go cross-compiles cleanly), not an engine change — and it needs a
+second machine, because **this one cannot host it even in principle.** `sbx` runs amd64
+*user space* on an unchanged arm64 kernel: Rosetta's binfmt handler is registered, so an
+amd64 binary runs and `uname` reports `machine=x86_64` while `release` stays
+`7.0.14-orbstack` — the arch is spoofed, the kernel is not. `orb create -a amd64` is that
+same arrangement, not an amd64 kernel, and nested KVM is unavailable on Apple Silicon.
+Every row above is a **kernel** fact — systrap's syscall interception, overlayfs CoW,
+cgroup v2 leaf ownership, squota's ENOSPC path through the gofer chain, nft counters — so
+user-space translation cannot confirm one; the two amd64 rows were taken on a separate
+ECS host, and upgrading any other row needs one too.
