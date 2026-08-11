@@ -352,6 +352,71 @@ boundaries; internal mechanisms still to be refined are registered in
   this placement** — the same rule as "never silently degrade to running uncapped". Why the sandbox
   side is worse than the volume side, and why this side refuses while §5.C's side skips, are in
   [`deep-dives/rootfs-overlay.md`](./deep-dives/rootfs-overlay.md) D6.6.
+- **The built-in Template's contents are a deployment-replaceable choice carrying no engine
+  semantics.** It is listed here because a deployment needs *some* answer, not because the engine
+  depends on any of it: the engine's contract with a Template is only "an immutable ID-addressed
+  read-only lower layer" (§3.1), so replacing the list breaks nothing above this subsystem, and
+  nothing in §5.A/§5.B branches on what a Template contains. **One bare, general-purpose base, and
+  nothing agent-shaped** — an agent stack is a product-layer concern that needs no engine concept at
+  all: create from the base, install with a one-shot exec (which introduces no init dependency,
+  [`deep-dives/guest-runtime.md`](./deep-dives/guest-runtime.md) D3.1), and **Promote**, which yields
+  an ordinary Template whose lower stack is `[the new layer, …the base's stack]`. That path already
+  exists and is the whole reason the engine needs no agent vocabulary here.
+  - **Four items are correctness rather than convenience** — without them a sandbox cannot do the
+    things a sandbox is for, and their absence presents as a confusing failure rather than a missing
+    tool: **a CA certificate bundle** (without it every HTTPS request fails at verification, so no
+    `pip install`, no `npm install`, no `git clone` over HTTPS); **`/etc/nsswitch.conf`** (glibc's
+    name-service switch consults it, so name resolution can fail even with a valid resolver
+    configured); **coreutils** (package post-install hooks and build scripts shell out to
+    `ls`/`install`/`mkdir`, so their absence breaks package installation rather than merely
+    inconveniencing a human); and **a non-trivial `/etc/passwd` plus `/etc/group`** (a root-only
+    single line breaks `getpwuid` for tools that look themselves up). Guest identity is still root
+    and the engine still models no guest users (§2.2) — this is hygiene *inside* the guest, not an
+    identity model.
+  - **The rest is convenience, freely re-decidable**: `python3` + `pip` + `uv`, `git`,
+    `build-essential`, `nodejs` + `npm`, `curl`, and optionally `sudo` (purely a guest-side
+    convenience for a workload that assumes it, never engine semantics). Each is a one-shot exec
+    away, so shipping them trades cold-start size for convenience and commits to nothing.
+  - **Preinstall the common Volume mount points**, which is a measured design by-product rather than
+    taste: a mount destination **already present in the lower does not trigger copy-up**, while a
+    missing one dirties the upper — so preinstalling the common paths keeps Promoted layers clean and
+    degrades the exclusion entries to a correctness backstop rather than a routine mechanism
+    ([`deep-dives/rootfs-overlay.md`](./deep-dives/rootfs-overlay.md) D5). It cannot cover a caller's
+    own choice of destination, which is why the exclusion mechanism still exists.
+  - **DNS: the Template ships no `/etc/resolv.conf`, and the engine injects none.** This is the one
+    genuine design decision in the list, and both alternatives are worse. **Baking one in** pins a
+    build-machine resolver address into a supposedly portable artifact, and it is actively harmful
+    rather than merely wrong elsewhere: a resolver address the deployment's `egress.allow[]` does not
+    name produces the 10–20 second hang then `Could not resolve host` that network.md D5 ⑦ measured —
+    the worst diagnostic shape in the system — **by default**, on every deployment that does not
+    happen to match the build machine. **Engine injection** breaks §1.1 (the engine would hold a
+    deployment-specific network fact, the same coupling that keeps domain names out of §5.D) and
+    lands in the upper: `/etc/resolv.conf` is not under a tmpfs — unlike `sandboxd`'s portal files,
+    which are *inert* exclusion entries precisely because `/tmp` is a tmpfs — so an injected file
+    would be captured by every Promote unless a new permanent entry were added to the
+    manually-synchronized exclusion list. **So the resolver is the deployment's to supply**, by
+    writing the file through §5.E's `fs` service after create or by baking it into its own Promoted
+    Template, alongside the `allow[]` entry it must write anyway.
+    **State the consequence plainly rather than discovering it: out of the box a sandbox resolves no
+    names, and under `default: deny` that is by design.** Resolution needs UDP/53 to reach a
+    resolver, the resolver does not fall back to TCP on its own (measured: with only TCP/53 allowed
+    the allow rule takes 0 packets while the UDP drop counter climbs), and the engine deliberately
+    does **not** add that entry on the caller's behalf — doing so would require it to know what a
+    "resolver" is and to hold an address, which is the same refusal as domain names (§5.D /
+    network.md D5 ⑦). Whether the deployment's resolver is even declarable is a property of that
+    deployment: a loopback resolver is unreachable for a gVisor guest, a link-local one sits in the
+    unliftable floor, and the one stably-declarable host-local address is the sandbox's own `/30`
+    gateway — which is exactly why the floor's sibling item is excluded from `FloorLiftableNever`
+    (§6.2).
+  - **Build it from a digest-pinned base image export rather than by copying the host.** The current
+    builder is a **test fixture** and says so — it copies this machine's userland and ships a
+    `/bin/sh` with no coreutils — and a host copy cannot be reproducible by construction, since its
+    output is a function of whatever the build machine happens to have. A digest-pinned export
+    requires no build-time package resolution, which a distro bootstrapper needs a pinned snapshot
+    mirror to match; and §5.B's carrier is already shaped for it (a Template is a read-only lower
+    directory, a layered one is already multi-lowerdir "like an OCI image"). Neither approach makes
+    the *result* bit-identical without further work; both make the *inputs* deterministic, which is
+    what a reproducible build actually requires.
 - **Not included**: a Volume's lifecycle and mount policy (→ C), and which process context the
   Overlay runs in (→ A).
 

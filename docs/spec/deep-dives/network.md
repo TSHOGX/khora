@@ -671,9 +671,12 @@ anywhere in the repo mounts or generates one (measured, `grep -rn resolv interna
 hits). So today, inside the guest, `curl` reports `Could not resolve host` directly, and Go
 programs fall back to `[::1]:53` and get refused — **DNS simply does not work inside the guest
 today, and that predates any §5.D policy question**. Who writes that `resolv.conf` is a
-**product/template-layer content choice** (the same class as open-decisions' "§5.A / Template
-(content catalog)"), not engine semantics; but **it is a precondition for the act of "declaring
-DNS"**, so it is recorded here.
+**product/template-layer content choice, and it is now settled in §5.B**: the built-in Template ships
+none and the engine injects none — the deployment supplies it, because baking one in pins a
+build-machine address into a portable artifact and engine injection would both hold a
+deployment-specific network fact (§1.1) and land in the upper for every Promote to capture. Not engine
+semantics either way; but **it is a precondition for the act of "declaring DNS"**, so it is recorded
+here.
 
 Three more items on the relationship with the floor need recording precisely: **a loopback
 resolver (`127.0.0.53`) is "structurally unreachable" rather than "blocked by policy" for a gVisor

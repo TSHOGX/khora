@@ -440,6 +440,7 @@ separate PID 1, "the port is unreachable" would have only one possible explanati
   discipline as transport D5.4 it is **not registered as an open decision** — a knob with two homes ends
   up with two values.
 - **Whether a template preinstalls a resident process**: not needed; should one appear, it is managed as a
-  peer and not stuffed into `sandboxd`. **The content list of the built-in Template** is a product/template
-  layer choice, still open, and registered in [`open-decisions.md`](../open-decisions.md) (that row points
-  back at D3.1).
+  peer and not stuffed into `sandboxd`. **The content list of the built-in Template** is a
+  product/template layer choice and is **settled in §5.B** (one bare base, nothing agent-shaped; an agent
+  stack layers on it outside the engine by exec-then-Promote, which is D3.1's one-shot exec with no init
+  dependency).
