@@ -89,17 +89,43 @@ func TestC4SlowSubscriberDoesNotFreezeSource(t *testing.T) {
 	}
 }
 
+// peekDialBudget bounds ONLY the Connect RPC, and is deliberately separate from
+// the read window below. The two used to be one 400 ms budget, which made the dial
+// share a deadline sized for the read: under suite load the dial alone could
+// exhaust it and fail as `peek Connect: deadline_exceeded` — a harness magic
+// number presenting as "the source froze", which is this test's actual subject.
+// Sizing is generous on purpose; nothing here is measuring dial latency.
+const peekDialBudget = 5 * time.Second
+
+// peekReadWindow bounds how long a peek stays ATTACHED, and this is the
+// load-bearing half: a peeker that lingers overflows its own per-subscriber window
+// and is dropped as a slow subscriber — turning the instrument into the thing under
+// test. It must stay short even though the dial budget is long.
+const peekReadWindow = 400 * time.Millisecond
+
 // peekMaxLine does a fresh Connect, reads frames for a short window (ring replay
 // + a little live), returns the highest LINE<n> seen, and closes. Short enough
 // that this peeker never overflows its own window.
 func peekMaxLine(t *testing.T, cl transport.Client, pid int) int {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+	// One context: peekDialBudget is the outer bound, and the read window below ends
+	// the read by cancelling it (the stream is bound to this ctx).
+	ctx, cancel := context.WithTimeout(context.Background(), peekDialBudget)
 	defer cancel()
+	// The dial gets one retry. Losing a scheduling race to the flood this test
+	// deliberately generates is not a failure of the property under test, and the
+	// retry is what actually removes the flake; a dial failing TWICE still fails the
+	// test, so a genuinely unreachable guest is not papered over.
 	ch, err := cl.Connect(ctx, pid)
 	if err != nil {
-		t.Fatalf("peek Connect: %v", err)
+		ch, err = cl.Connect(ctx, pid)
+		if err != nil {
+			t.Fatalf("peek Connect (2 attempts within %s): %v", peekDialBudget, err)
+		}
 	}
+	// Start the read window only once the dial has returned, so a slow dial cannot
+	// eat the reading time.
+	defer time.AfterFunc(peekReadWindow, cancel).Stop()
 	max := 0
 	for ev := range ch {
 		if ev.Kind == "data" {

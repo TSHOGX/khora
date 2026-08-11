@@ -39,12 +39,33 @@ func TestMain(m *testing.M) {
 // Exit 0 = reaped. Exit 1 = the leak: still present in /proc after the timeout,
 // i.e. a permanent zombie.
 func subtreeReaperHelper() int {
-	startSubtreeReaper() // prctl + the drain loop; nothing else waits in here
+	r := startSubtreeReaper() // prctl + the drain loop; nothing else waits in here
 
+	// The orphaner's own status comes from the reap table, NOT from cmd.Wait().
+	// startSubtreeReaper has installed a wildcard Wait4(-1) drain, and §5.E.1 states
+	// that wildcard reaping and per-child waiting cannot coexist: whichever waiter
+	// receives the status first takes it. cmd.Output() calls cmd.Wait() internally, so
+	// under load the drain wins and Wait returns ECHILD ("waitid: no child processes")
+	// — the helper then exits 2 and the test reports a reaping failure that never
+	// happened. Registering through r.start is the same handoff the production code
+	// uses, so this helper now obeys the rule it exists to prove.
 	cmd := exec.Command("/bin/sh", "-c", "sleep 0.2 & echo $!")
-	out, err := cmd.Output() // Output waits for the CHILD only, never the grandchild
+	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "helper: StdoutPipe: %v\n", err)
+		return 2
+	}
+	if _, _, err := r.start(cmd); err != nil {
 		fmt.Fprintf(os.Stderr, "helper: run orphaner: %v\n", err)
+		return 2
+	}
+	// r.start released the process handle, so nothing else closes this pipe's parent
+	// end (see reapTable.start): read to EOF, which the child's exit delivers, then
+	// close it here.
+	out, err := io.ReadAll(stdout)
+	_ = stdout.Close()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "helper: read grandchild pid: %v\n", err)
 		return 2
 	}
 	gpid, err := strconv.Atoi(strings.TrimSpace(string(out)))
