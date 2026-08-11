@@ -478,6 +478,16 @@ know what sits behind `via[].endpoint`, still less who it turns around and queri
 here because it is the **only** coupling between the floor and that layer that bites, and its
 symptom (that process itself being unreachable) looks nothing like something the floor caused.
 
+**The `reject`/`drop` discipline above has a scope, and `via[]` sits partly outside it.** For a
+refusal the engine evaluates itself, the choice above is exhaustive. But under `via[]`, the
+guest's local handshake completes against the engine's own DNAT target **before** the
+engine-external process has looked at anything — from the guest's side that connection already
+succeeded, and any refusal now happens one hop further out, inside a process this document already
+established the engine neither runs nor can see into (D1, D4.2). So **the engine's `reject`/`drop`
+discipline covers only the refusals it evaluates itself; diagnostic quality for a `via[]`-scoped
+refusal is that external layer's responsibility, not an inherited guarantee from this section.**
+This is not a new mechanism, only stating a boundary this document's reasoning already implies.
+
 ---
 
 ## D5. Cross-sandbox network isolation, and the measurements that must be inherited
