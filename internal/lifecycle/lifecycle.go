@@ -1010,7 +1010,7 @@ func (m *Mediator) destroyLocked(ctx context.Context, rec model.Sandbox) error {
 //     bound that a concurrent guest write can outgrow (bounded by the sandbox's own
 //     remaining headroom, and PromoteCostBytes overstates on the other axes). This
 //     is the same "true at the instant of admission" residual the whole measured
-//     term carries (D6.5 残留) — not a new weakness.
+//     term carries (D6.5's residual) — not a new weakness.
 //
 // A refused Promote therefore leaves the sandbox in its ENTRY state (running stays
 // running, paused stays paused), no layer bytes on disk, and no `templates` row.

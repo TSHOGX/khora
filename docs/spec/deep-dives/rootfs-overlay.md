@@ -1,336 +1,455 @@
-# Rootfs / Overlay 载体:持久层怎么真正落地
+# The rootfs / Overlay carrier: how the persistence layer actually lands
 
-> **定位:[`§5.B`](../subsystems.md)(spec,导航见 [`SPEC.md`](../SPEC.md))与 [`§3.1.1`](../model.md)、
-> [`§4.2`](../model.md) 的持久层深挖文档。** 载体经真实 substrate 实测定案,结论在 spec §2.5 / §5.B;
-> 本文保留结论背后的**证伪过程、实测证据、被排除的备选、要守住的 seam,以及仍待细化的议程**(D5)。
+> **Position: the persistence-layer deep dive for [`§5.B`](../subsystems.md) (spec; navigation in
+> [`SPEC.md`](../SPEC.md)) together with [`§3.1.1`](../model.md) and [`§4.2`](../model.md).** The carrier
+> was settled by measurement on the real substrate, with the conclusions in spec §2.5 / §5.B; this
+> document keeps what lies behind them: **the falsification process, the measured evidence, the
+> alternatives ruled out, the seams to hold, and the agenda still to be refined** (D5).
 >
-> **验证依据:** 在真实 runsc + 内核 overlayfs 上端到端实测(D0 的三条属性、D1 的三条假设逐条对照)。
+> **Basis of verification:** measured end to end on real runsc + kernel overlayfs (D0's three properties,
+> and D1's three assumptions checked one by one).
 
 ---
 
-## D0. 一句话结论
+## D0. The conclusion in one sentence
 
-**持久层不用 runsc 自管的 overlay**(`--overlay2` 全族 `memory`/`self`/`dir=` 均不跨容器生命周期
-持久——实测 `dir=` 启动即 `unlink` filestore,干净停 = 数据蒸发,D1)。**载体改为 engine 在 runsc
-外自管的宿主内核 overlayfs**(物化方式见 D3)——此时 upper 是宿主上真正的普通目录树:tar 得动、
-可 diff、冷启挂得回、字节一致,兑现 §5.B 的全部附加能力。**持久单元 = 留驻 upper 目录**
-(content-addressed diff 层是演进项,定案与代价见 D3)。
+**The persistence layer does not use runsc's self-managed overlay** (the whole `--overlay2` family
+`memory`/`self`/`dir=` is non-persistent across a container's lifetime — measured, `dir=` `unlink`s the
+filestore at startup, so a clean stop means the data evaporates, D1). **The carrier is instead a host
+kernel overlayfs the engine manages itself outside runsc** (the materialization is in D3) — at which
+point the upper is a genuinely ordinary directory tree on the host: tar-able, diffable, remountable on a
+cold start, and byte-identical, delivering all of §5.B's additional capabilities. **The persistent unit =
+the resident upper directory** (a content-addressed diff layer is an evolution item, whose settlement and
+cost are in D3).
 
-这条结论**不动模型层**:§3.1.1「Overlay 是 ID 寻址、与宿主路径解耦的冻结层」、§4.2「pause 零
-捕获、resume 冷启重挂」原样成立。runsc 的 overlay flag 不提供跨容器生命周期持久的 upper
-(§2.5 事实核查),那个 upper 必须由 engine 在 runsc 外自管。
+This conclusion **does not move the model layer**: §3.1.1's "an Overlay is an ID-addressed frozen layer
+decoupled from host paths" and §4.2's "pause captures nothing, resume cold-starts by remounting" hold as
+written. runsc's overlay flags do not provide an upper that persists across a container's lifetime (§2.5's
+fact check), so that upper must be managed by the engine outside runsc.
 
-**实测的三条属性**:CoW 正确(改 lower 只落 upper,lower 字节未污染)、干净停后
-upper 是宿主普通目录树且 tar 出完整 diff 层、容器内 sha256 与停机后宿主直读逐字节一致;冷启重挂
-同一 upper、以及从 tar 出的 diff 解到全新 upper 重建,内容均逐字节一致(后者顺带证明 diff 层可
-提取/搬运/重建,即 D3 演进项的可行性证据)。
+**The three measured properties**: CoW is correct (modifying a lower lands only in the upper, with lower
+bytes uncontaminated); after a clean stop the upper is an ordinary host directory tree and tars out as a
+complete diff layer; and the in-container sha256 is byte-identical to a host-side direct read after the
+stop. Remounting the same upper on a cold start, and rebuilding into a brand-new upper by unpacking the
+tarred diff, both yield byte-identical content (the latter incidentally proving a diff layer can be
+extracted / moved / rebuilt, that is, feasibility evidence for D3's evolution item).
 
 ---
 
-## D1. 为什么不用 runsc 自管 overlay(证伪过程)
+## D1. Why not runsc's self-managed overlay (the falsification)
 
-一个看似可行的路径是直接押 runsc `--overlay2` 的 `self` / `dir=/path`:假设它把可写层落成宿主上
-的普通目录树,`dir=` 的 upper 冷启能重新挂回且字节一致。**这条假设实测全不成立**,逐条对照:
+A seemingly viable path was to bet directly on runsc `--overlay2`'s `self` / `dir=/path`, assuming it
+lands the writable layer as an ordinary directory tree on the host and that a `dir=` upper can be
+remounted on a cold start byte-identically. **None of those assumptions survived measurement**, item by
+item:
 
-| 假设 | 实测结果 |
+| Assumption | Measured result |
 | --- | --- |
-| upper 是宿主普通目录树 | 是单个 `runsc-filestore-*` 文件,且**启动瞬间就被 `unlink`** |
-| 干净停掉后能冷启重新挂回 | 数据随进程退出蒸发,同一 upper 冷启是空的 |
-| 字节一致 | 文件根本不在了,无从谈起 |
+| The upper is an ordinary host directory tree | It is a single `runsc-filestore-*` file, **`unlink`ed the instant it starts** |
+| After a clean stop it can be remounted on a cold start | The data evaporates when the process exits, and a cold start on the same upper is empty |
+| Byte-identical | The file is simply gone, so there is nothing to compare |
 
-**机制**:gVisor 的 `--overlay2` 不是内核 overlayfs,是 sentry 自有的 overlay 格式。`dir=` 的语义
-是「filestore **落在这个目录所在的磁盘上**」(用磁盘而非 RAM 做 overlay 后备存储,控制大小),
-**不是**「把 upper 以普通目录树持久化到宿主」。flag 文档原文是 "filestore will be created",
-一开就 `unlink`,只靠 sentry 的 open FD 撑着,最后一个 FD 随进程关闭即回收。
+**The mechanism**: gVisor's `--overlay2` is not kernel overlayfs but the sentry's own overlay format. The
+semantics of `dir=` are "the filestore **lands on the disk this directory is on**" (using disk rather than
+RAM as the overlay's backing store, to control size), **not** "persist the upper to the host as an
+ordinary directory tree". The flag documentation reads "filestore will be created", it is `unlink`ed as
+soon as it is opened, and it survives only on the sentry's open FD — reclaimed when the last FD closes
+with the process.
 
-这也一并排除了「sentry-owned overlay」这条看似的退路——它**就是** `--overlay2` 这一族,同一个机制,
-不是另一条路。所以要换范式(D0:engine 在 runsc 外自管 overlayfs),而不是在 runsc 自管 overlay 里
-换档位。
+This also rules out the apparent fallback of a "sentry-owned overlay" — that **is** the `--overlay2`
+family, the same mechanism rather than another road. So the paradigm had to change (D0: the engine manages
+overlayfs itself outside runsc) rather than shifting gear within runsc's self-managed overlay.
 
 ---
 
-## D2. 载体形状与演进目标:外层 overlayfs + content-addressed diff
+## D2. The carrier's shape and its evolution target: an outer overlayfs + a content-addressed diff
 
-外层 overlayfs 载体(①②,物化见 D3)天然容纳一条成熟的演进路径(③),它决定了 §3.1.1 的抽象形状。
-三步的持久化**完全不碰 runsc 的 overlay**:
+The outer overlayfs carrier (①②, materialized in D3) naturally accommodates one mature evolution path
+(③), and that is what determines §3.1.1's abstract shape. All three steps' persistence **never touches
+runsc's overlay**:
 
-**① runsc overlay 关掉**(`--overlay2=none --file-access=shared`):runsc 拿到的 rootfs 是**引擎在
-外面已经挂好的宿主内核 overlayfs 的 merged 目录**,经 gofer(`file-access=shared`)代理进 guest。
+**① runsc's overlay is switched off** (`--overlay2=none --file-access=shared`): the rootfs runsc receives
+is **the merged directory of a host kernel overlayfs the engine has already mounted outside**, proxied
+into the guest by the gofer (`file-access=shared`).
 
-**② upper 是内核 overlayfs 的普通目录树**:merged mount 的 `upperdir=` 就是宿主上一个真实路径,可
-直接 `filepath.Walk` 遍历——与 gVisor 那个启动即 `unlink` 的 filestore 是两个世界(D1)。
+**② The upper is an ordinary directory tree of a kernel overlayfs**: the merged mount's `upperdir=` is a
+real path on the host, walkable directly with `filepath.Walk` — a different world from that gVisor
+filestore `unlink`ed at startup (D1).
 
-**③ 这个载体容得下一条 content-addressed diff 的演进路径**(持久单元本身是**留驻 upper**,已定,见 D3;
-③ 说的不是"持久单元其实是别的东西",而是"同一个抽象之下**还能**多长出这条路径"):
-- 把 upper 提取成 OCI diff tar + `{MediaType, Digest, Size}` descriptor,推到 object store。
-- resume/claim 时把 diff apply 回**新容器**的 live rootfs bind mount 上。
-- 相对某 baseline 层做**增量** diff——天然分层。
+**③ This carrier has room for a content-addressed diff evolution path** (the persistent unit itself is
+**the resident upper**, already settled, see D3; ③ does not say "the persistent unit is really something
+else" but "under the same abstraction, this path **can also** grow"):
+- Extract the upper into an OCI diff tar + a `{MediaType, Digest, Size}` descriptor and push it to an
+  object store.
+- On resume/claim, apply the diff back onto a **new container's** live rootfs bind mount.
+- Take an **incremental** diff against some baseline layer — naturally layered.
 
-**关键洞察**:持久单元**不必**是「一个一直躺在盘上的 upper 目录」——今天它就是,但抽象不靠这一点成立。
-**这正是 §3.1.1 的赌注**——把 Overlay 定义成「ID 寻址、与宿主路径解耦的冻结层」而非「一直在
-本地盘的 upper」,于是换持久单元不动模型。这套能力与模型逐条对上(演进项的定案与代价见 D3):
+**The key insight**: the persistent unit **need not** be "an upper directory lying on disk the whole
+time" — today it is, but the abstraction does not depend on that.
+**This is precisely §3.1.1's bet** — defining an Overlay as "an ID-addressed frozen layer decoupled from
+host paths" rather than "an upper permanently on a local disk", so that changing the persistent unit does
+not move the model. This capability set maps onto the model item by item (the evolution item's settlement
+and cost are in D3):
 
-| diff 层能力 | 怎么给 | 对应我们的 § |
+| Diff-layer capability | How it is given | Our corresponding § |
 | --- | --- | --- |
-| pause / resume | 最新 diff = latest checkpoint,resume 时 apply 回新容器 | §4.2 |
-| Promote → 分层 Template | 相对 baseline 做增量,层层叠 | §5.B Promote / 分层 Template |
-| 跨 host 可移 | diff 是 object store 里的 OCI blob,不锁本地路径 | §5.B「纯文件层可移」+ §3.1.1 |
-| fork / clone | 从同一 diff/snapshot claim 多个沙箱 | §3.1 fork |
-| snapshot / restore | 命名 diff 记录,可 list/restore/delete | (无对应 §,纯演进期能力) |
+| pause / resume | The latest diff = the latest checkpoint, applied back into a new container on resume | §4.2 |
+| Promote → a layered Template | Take an increment against a baseline and stack layer on layer | §5.B Promote / layered Templates |
+| Portability across hosts | A diff is an OCI blob in an object store, not pinned to a local path | §5.B's "plain file layers are portable" + §3.1.1 |
+| fork / clone | Claim several sandboxes from the same diff/snapshot | §3.1 fork |
+| snapshot / restore | Named diff records that can be listed/restored/deleted | (no corresponding §; a purely evolution-stage capability) |
 
 ---
 
-## D3. 物化方式
+## D3. The materialization
 
-**engine 在 runsc 外用宿主内核 overlayfs 拼 lower(Template)/upper/work,merged 交给 `--overlay2=
-none --file-access=shared` 的 runsc。** 这守住了三条既定属性:§3.1 三态(Template 只读共享 +
-Overlay 增量)、§5.B 底层存储附带能力(CoW 落 reflink)、§3.1.1 载体无关。overlayfs 的 mount/umount 生命
-周期归 Rootfs 子系统(§5.B)。
+**The engine assembles lower (the Template) / upper / work with the host kernel's overlayfs outside runsc
+and hands the merged result to runsc with `--overlay2=none --file-access=shared`.** This holds three
+established properties: §3.1's three states (a read-only shared Template + an Overlay increment), §5.B's
+incidental capabilities of the underlying storage (CoW landing on reflink), and §3.1.1's
+carrier-independence. The overlayfs mount/umount lifecycle belongs to the Rootfs subsystem (§5.B).
 
-**持久单元 = 留驻 upper 目录。** upper 就地留在后端,pause 零捕获、resume 重挂同一 upper 冷启——
-最贴近 §4.2 的语义,兑现 pause/resume 与 Promote 的 at-rest 读已足够。**content-addressed diff 层
-(提取成 OCI tar + digest)是演进项**:它换来分层 Template / fork / 跨 host 白送,代价是 tar 提取 +
-baseline 增量 + object store 接口。二者共用同一个 Overlay 抽象,上层无感,由 D4 的 seam 担保。
+**The persistent unit = the resident upper directory.** The upper stays in place on the backend, pause
+captures nothing, and resume remounts the same upper for a cold start — closest to §4.2's semantics, and
+already sufficient to deliver pause/resume plus Promote's at-rest read. **A content-addressed diff layer
+(extracted as an OCI tar + digest) is an evolution item**: it buys layered Templates / fork /
+cross-host portability for free, at the cost of tar extraction + baseline increments + an object-store
+interface. Both share one Overlay abstraction, layers above notice nothing, and D4's seam guarantees it.
 
-**被排除的备选——bind mount 作可写层**(给容器一个宿主 bind 目录当可写 rootfs,同样 `overlay2=
-none`):最简单,但**丢了 CoW 分层**——Template 不再是只读共享底座,每个沙箱得完整拷一份 rootfs;
-Promote/fork 要靠外部 CoW FS(reflink/btrfs/zfs)另做。与 §3.1 三态模型不契合;若底层 FS 支持
-reflink 来补分层,那其实又滑回上面的 overlayfs 底层存储附带能力,不如直接用 overlayfs。故不采用。
-
----
-
-## D4. 归属与要守住的 seam
-
-**归属(§4「动词归 §4,机制归 §5」+ 子系统不互调)**:overlayfs 的 mount/umount 是 **§5.B Rootfs
-子系统**的机制,由 §4 生命周期在 create/resume 时**调用**——不是让 §5.A Runtime 去拼 overlay,
-也不是 Rootfs 去戳 runtime provider。runsc 只收一个**已经 merged 好的 rootfs 路径**作为
-`(rootfs 来源)`,这正好落在 §5.A provider 契约的 `(rootfs 来源, …) → (placement 句柄, …)`
-入参里——**provider 不关心 rootfs 怎么拼出来的**,拼装是 Rootfs 子系统的事。
-
-**要守住的 seam(留驻 upper 不得堵死 diff 层演进和未来 provider)**:
-
-1. **Overlay 抽象对上层只暴露「ID + 引用的 Template + at-rest 可读」,不暴露「它是一个宿主
-   upper 路径」**——这样从留驻 upper 演进到 content-addressed diff,§4.2 的 resume、§3.1 的
-   Promote/fork 代码**一行不改**。宿主路径必须锁死在 Rootfs 子系统内部(§3.1.1「对内也 ID 寻址」)。
-2. **物化经 rootfs provider seam**(§5.B):唯一实现是 single-node 的「本机内核 overlayfs +
-   本地目录」;diff 层(演进项,见 D3)/ multi-node(PV / 对象存储)是**注册另一个 rootfs provider 或换
-   持久单元**,不改模型——抽象须容得下它。
-3. **不引入 containerd**(与 §1.1「单二进制、无重型外部依赖」冲突):复用 containerd overlayfs
-   snapshotter 只在已经跑在 containerd 上时才划算。我们**在引擎内薄薄实现**「组装 overlayfs
-   +(演进期)提取 diff」这一层,不拉整个 containerd 栈。这层薄实现本身就是上面 seam 2 的
-   single-node provider。
+**The alternative ruled out — a bind mount as the writable layer** (giving the container a host bind
+directory as its writable rootfs, likewise with `overlay2=none`): the simplest option, but **it loses CoW
+layering** — a Template is no longer a read-only shared base and every sandbox must copy a whole rootfs;
+Promote/fork would have to be built separately on an external CoW FS (reflink/btrfs/zfs). It does not fit
+§3.1's three-state model; and if the underlying FS supports reflink to restore layering, that slides back
+into the overlayfs incidental capabilities above, so overlayfs may as well be used directly. Hence not
+adopted.
 
 ---
 
-## D5. 这条载体自带的机制约束(附一条演进项)
+## D4. Ownership and the seams to hold
 
-> 载体与持久单元(留驻 upper)之上,本节记这条载体自带的约束。**除最后一条(content-addressed diff)以外
-> 都已定**——已否决的按已否决记,不留成待办。
+**Ownership (§4's "verbs belong to §4, mechanisms to §5" + subsystems do not call each other)**: the
+overlayfs mount/umount is a mechanism of the **§5.B Rootfs subsystem**, **called** by the §4 lifecycle at
+create/resume — it is neither §5.A Runtime assembling the overlay nor Rootfs poking the runtime provider.
+runsc receives only an **already-merged rootfs path** as its `(rootfs source)`, which lands exactly in
+§5.A's provider contract input `(rootfs source, …) → (placement handle, …)` — **the provider does not care
+how the rootfs was assembled**, and assembly is the Rootfs subsystem's business.
 
-- **work dir 与 upper 的清理/回收**:overlayfs 需要一个 workdir(约束:与 upper 同一个支持 overlayfs
-  的 FS)。**resume 重挂用同一 upper,但 workdir 必须新建一个空目录**——不可复用上次的 work(内核会
-  拒/坏)。分两半挂:**destroy 时的清理**挂 §4.3 reaper 的对象回收不变量(upper 是留驻持久单元);
-  **崩溃后的孤儿回收**——overlay mount 是 placement-local 资源,orchestrator 崩在转换中途留下的半建
-  mount 是 §4.4-A 崩溃变体(重启对账)的一个**特例**,不靠 refcount GC。overlay mount 由 engine 在
-  runsc 外建立/卸载,卸载时序与 §4.2 pause 对齐。
-- **mount 是特权操作**:overlayfs mount/umount 须 root(CAP_SYS_ADMIN),copy-up 落进 upper 的文件因此
-  **root-owned**——destroy 删 upper 也须特权。这正是「宿主路径 + mount 生命周期锁死在 §5.B 子系统内、
-  不外露给调用方」(§3.1.1)的又一条落地理由:特权 mount 是子系统机制,不是 mediator 的活。
-- **容量配额(disk 容量轴,§3.4)**:per-sandbox 的 upper+work 容量帽怎么物化,见 D6。
-- **pause flush 一致点**:**substrate 半已定并被依赖**——干净停(kill+delete)后 sentry/gofer 的写
-  flush 到 upper 的 at-rest 一致性已验(D0/D3),Promote 读的正是这个抢占式停后的 at-rest upper
-  (guest-runtime D4.4:不依赖进程配合)。**应用层协作安全点不是开放项,是已否决项**(guest-runtime
-  D4.4:engine 不认识 agent,既不能要求负载停到安全点、也无法验证它停对了;超时/强杀语义与崩溃一致,
-  而崩溃是 §4.2 已接受的底线),故这条载体上**没有仍开放的一致点问题**。
-- **excluded paths / portal paths**:提取 Promote/snapshot 时要过滤掉引擎自身注入的运行时路径
-  (如 guest 内 daemon 的工作目录)。
-  - **sandboxd 的两个 portal 文件(transport pidfile / crash-loop sentinel)是清单里的惰性项**:`/tmp` 由
-    OCI spec 挂成 **tmpfs**,故它们**根本不进 upper**——排除它们针对的是一个物化上不可达的状态(其守卫
-    测试因此在 assert 一个基底造不出来的局面,读起来像覆盖、实际为空)。留着无害(一条 list 项比一个
-    "每个沙箱生来不能服务的 Template"便宜),但**它们不是这条机制存在的理由**。
-  - **真正落进 upper 的引擎注入物是大文件旁路的上传临时文件**(按 base-name 前缀排除,因为确切路径事前
-    不可知——它落在调用方自己指定的目录里)。这才是排除机制的活消费者。
-  - **空占位不需要排除项。** 实测:dest 在 lower 与 upper 都不存在时,`runsc create` 之后(任何 guest 代码
-    之前)upper 里就已出现一个**普通空目录、mode 0755 root:root、零 overlayfs xattr**——不是 whiteout、
-    不是 opaque、无 origin/redirect,且不继承源目录的权限。故**是"放置"物化了它,不是 payload**。
-    §5.B 已写的结果("挂载点在固化结果里只是一个空目录占位")默认就成立。反向 hazard 也干净:guest 在
-    bind 下的写**全部**落到 Volume 宿主目录、upper 一无所得(有正向对照:同一次 launch 里另一个控制文件
-    确实进了 upper),即 **Volume 写入正确地落在沙箱 disk 帽之外、也在 Promote 捕获之外**。
-  - **尖锐的不对称:dest 缺失会脏 upper,Template 提供 dest 则 upper 纯净。** lower 里已有的 dest **不触发
-    copy-up**(实测后 upper 逐字节为空)。**设计副产品**:在内置 Template 里预置常用挂载点能让常见路径保持
-    干净,排除项则退化为正确性 backstop 而非常规机制。对用户自选 dest 不可依赖。
-  - **排除项真正要干的是剪掉被挂载点遮蔽的既有字节。** 实测:先在 upper 里种下 `dest/stale`、再用 bind
-    遮住它,guest **完全看不到**那些字节(只见 Volume 的条目),而它们仍在盘上、仍在 upper 里——于是会被
-    完整拷进冻结层,**并同时计进该沙箱的容量帽与代价预报**。既有机制已能正确做到剪除(排除项匹配到目录即
-    跳过整棵子树),**缺的不是匹配逻辑**。
-  - **因此挂载点集合必须是 per-Promote 入参,不能是静态包级清单**:Volume dest 是 per-sandbox 的挂载行,
-    静态清单无从得知。作为参数传入也是架构上更干净的路——§4 mediator 本来就持挂载表、本来就调 Promote,
-    故 **§5.B 永远不必去问 §5.C**(不产生子系统互调)。**代价预报走同一个集合**,否则它会继续把不会被拷的
-    遮蔽字节算进去(方向安全,但已知是错的)。路径按既有约定:**upper 相对、去掉前导斜杠**。
-  - **嵌套 dest 需要一个显式决定,已定**:嵌套 dest 的**整条链**都会进 upper(三级皆不存在时三级都被创建),
-    故只排叶子会在层里留下幽灵中间目录,而排顶层组件在一般情形下是错的(guest 可能合法地写了该目录下的
-    别的东西)。**定为:剪叶子子树、接受空的中间链**——它与 §5.B 已认可的空占位同形、只是多一级,
-    且**永不丢真实 guest 数据**。
-- **content-addressed diff 层**:这条载体上**唯一真正仍开放**的一项。定案与代价见 D3,能力映射见 D2。
+**The seams to hold (a resident upper must not wall off either the diff-layer evolution or a future
+provider):**
+
+1. **The Overlay abstraction exposes upward only "an ID + the Template it references + readable at
+   rest", and never "it is a host upper path"** — so that evolving from a resident upper to a
+   content-addressed diff changes **not one line** of §4.2's resume or §3.1's Promote/fork. Host paths
+   must be locked inside the Rootfs subsystem (§3.1.1's "ID addressing applies internally too").
+2. **Materialization goes through the rootfs provider seam** (§5.B): the sole implementation is the
+   single-node "local kernel overlayfs + local directories"; a diff layer (the evolution item, D3) and
+   multi-node (a PV / object storage) are **registering another rootfs provider or changing the
+   persistent unit**, with the model unchanged — the abstraction must have room for them.
+3. **Do not introduce containerd** (which conflicts with §1.1's "a single binary, no heavyweight external
+   dependencies"): reusing containerd's overlayfs snapshotter only pays off when already running on
+   containerd. We **implement thinly inside the engine** the layer of "assemble overlayfs + (at the
+   evolution stage) extract a diff", without pulling in the whole containerd stack. That thin
+   implementation is itself seam 2's single-node provider.
 
 ---
 
-## D6. 容量配额:per-sandbox upper 帽怎么物化
+## D5. Mechanical constraints this carrier brings with it (plus one evolution item)
 
-> **定位:[`§3.4`](../model.md) disk 容量轴 + [`§5.B`](../subsystems.md) 容量配额职责的深挖。**
-> 载体(外层内核 overlayfs,D0)决定了 upper 是宿主普通目录树,这恰好让最轻的配额手段可用。
+> On top of the carrier and the persistent unit (a resident upper), this section records the constraints
+> the carrier brings with it. **All but the last (the content-addressed diff) are settled** — what was
+> rejected is recorded as rejected rather than left as a to-do.
 
-### D6.1 问题:内核 overlayfs 无内置尺寸上限
+- **Cleaning up / reclaiming the work dir and the upper**: overlayfs needs a workdir (constrained to the
+  same overlayfs-capable FS as the upper). **A resume remounts the same upper, but the workdir must be a
+  newly created empty directory** — the previous work cannot be reused (the kernel refuses it or it
+  breaks). It is mounted in two halves: **cleanup at destroy** hangs on §4.3's reaper object-reclamation
+  invariant (the upper being a resident persistent unit); **orphan reclamation after a crash** — an
+  overlay mount is a placement-local resource, and a half-built mount left by the orchestrator crashing
+  mid-transition is a **special case** of §4.4-A's crash variant (startup reconciliation) rather than
+  something resting on refcount GC. The overlay mount is created and unmounted by the engine outside
+  runsc, with the unmount timing aligned to §4.2's pause.
+- **Mounting is a privileged operation**: overlayfs mount/umount requires root (CAP_SYS_ADMIN), and files
+  copied up into the upper are therefore **root-owned** — so deleting the upper at destroy needs privilege
+  too. This is one more concrete reason for "host paths + the mount lifecycle are locked inside the §5.B
+  subsystem and not exposed to callers" (§3.1.1): a privileged mount is a subsystem mechanism, not the
+  mediator's job.
+- **The capacity quota (the disk capacity axis, §3.4)**: how the per-sandbox upper+work cap is
+  materialized is in D6.
+- **The pause flush consistency point**: **the substrate half is settled and depended upon** — after a
+  clean stop (kill+delete), the at-rest consistency of the sentry's/gofer's writes flushed into the upper
+  is verified (D0/D3), and what Promote reads is exactly that at-rest upper after a preemptive stop
+  (guest-runtime D4.4: depending on no process cooperation). **An application-layer cooperative safe point
+  is not an open item but a rejected one** (guest-runtime D4.4: the engine does not know about agents, so
+  it can neither require a workload to stop at a safe point nor verify that it stopped at the right one;
+  the semantics of a timeout / hard kill match those of a crash, and a crash is the bottom line §4.2
+  already accepts), so **there is no still-open consistency-point question on this carrier**.
+- **Excluded paths / portal paths**: extracting a Promote/snapshot must filter out runtime paths the
+  engine injected itself (such as the working directory of the in-guest daemon).
+  - **sandboxd's two portal files (the transport pidfile / the crash-loop sentinel) are inert entries on
+    that list**: `/tmp` is mounted as **tmpfs** by the OCI spec, so they **never enter the upper at all** —
+    excluding them targets a state unreachable in materialization (which is why their guard test asserts a
+    situation the substrate cannot produce, reading like coverage while being empty). Keeping them is
+    harmless (one list entry is cheaper than "a Template every sandbox is born unable to serve"), but
+    **they are not the reason this mechanism exists**.
+  - **What the engine injects that genuinely lands in the upper is the large-file bypass's upload
+    temporary file** (excluded by base-name prefix, because the exact path is unknowable in advance — it
+    lands in a directory the caller chose). That is the live consumer of the exclusion mechanism.
+  - **An empty placeholder needs no exclusion entry.** Measured: when the dest exists in neither lower nor
+    upper, an **ordinary empty directory, mode 0755 root:root, with zero overlayfs xattrs** already appears
+    in the upper after `runsc create` (before any guest code) — not a whiteout, not opaque, with no
+    origin/redirect, and not inheriting the source directory's permissions. So **the placement materialized
+    it, not the payload**. The result §5.B already states ("a mount point in the frozen result is just an
+    empty placeholder directory") holds by default. The reverse hazard is clean too: the guest's writes
+    under the bind land **entirely** in the Volume's host directory and the upper gets nothing (with a
+    positive control: another control file in the same launch did enter the upper), that is, **Volume
+    writes correctly land outside the sandbox's disk cap and outside a Promote's capture**.
+  - **A sharp asymmetry: a missing dest dirties the upper, while a Template that provides the dest keeps
+    it pristine.** A dest already present in lower **does not trigger copy-up** (measured: the upper is
+    byte-for-byte empty afterwards). **A design by-product**: preinstalling common mount points in the
+    built-in Template keeps the common paths clean, degrading the exclusion entries to a correctness
+    backstop rather than a routine mechanism. It cannot be relied on for a caller's own choice of dest.
+  - **What the exclusion entries genuinely have to do is prune pre-existing bytes shadowed by a mount
+    point.** Measured: seeding `dest/stale` into the upper first and then shadowing it with a bind, the
+    guest **cannot see** those bytes at all (seeing only the Volume's entries) while they remain on disk
+    and in the upper — so they would be copied whole into the frozen layer, **and counted into that
+    sandbox's capacity cap and cost forecast at the same time**. The existing mechanism can already prune
+    correctly (an exclusion matching a directory skips the whole subtree), so **what is missing is not the
+    matching logic**.
+  - **Hence the set of mount points must be a per-Promote input and must not be a static package-level
+    list**: a Volume dest is a per-sandbox mount row, which a static list has no way to know. Passing it as
+    a parameter is also the architecturally cleaner road — the §4 mediator holds the mount table already
+    and calls Promote already, so **§5.B never has to ask §5.C** (producing no cross-subsystem call). **The
+    cost forecast uses the same set**, or it would keep counting shadowed bytes that will not be copied
+    (a safe direction, but knowably wrong). Paths follow the existing convention: **relative to the upper,
+    with the leading slash removed**.
+  - **A nested dest needs an explicit decision, and it is settled**: the **whole chain** of a nested dest
+    enters the upper (when all three levels are absent, all three are created), so excluding only the leaf
+    would leave ghost intermediate directories in the layer, while excluding the top component is wrong in
+    the general case (the guest may legitimately have written something else under that directory).
+    **Settled as: prune the leaf subtree and accept an empty intermediate chain** — the same shape as the
+    empty placeholder §5.B already sanctions, only one level deeper, and it **never loses real guest
+    data**.
+- **The content-addressed diff layer**: the **only genuinely still-open** item on this carrier. Its
+  settlement and cost are in D3, and the capability mapping is in D2.
 
-外层内核 overlayfs(D0)只解决"持久 + 可移 + 可 diff",**不带容量上限**:upper 是普通目录树,能写
-多少取决于它所在 FS 的剩余空间。缺配额时,单个沙箱 `dd if=/dev/zero of=big` 就能吃光 upper 所在盘,
-让**同盘所有沙箱**的 upper 写失败——击穿 §2.3「放大只发生在本沙箱数据面内」。容量上限因此必须由
-rootfs provider 显式施加(§5.B),这与 D0 载体正交:载体给"普通目录树",配额给"这棵树最多多大"。
+---
 
-### D6.2 物化手段(single-node):btrfs subvolume + squota 为首选
+## D6. The capacity quota: how the per-sandbox upper cap is materialized
 
-| 手段 | 隔离强度 | 代价 | 适配 |
+> **Position: the deep dive on [`§3.4`](../model.md)'s disk capacity axis + [`§5.B`](../subsystems.md)'s
+> capacity-quota responsibility.** The carrier (an outer kernel overlayfs, D0) makes the upper an ordinary
+> host directory tree, which is exactly what makes the lightest quota mechanism available.
+
+### D6.1 The problem: kernel overlayfs has no built-in size ceiling
+
+The outer kernel overlayfs (D0) solves only "persistent + portable + diffable" and **carries no capacity
+ceiling**: the upper is an ordinary directory tree, and how much can be written into it depends on the
+free space of the FS it sits on. Without a quota, a single sandbox's `dd if=/dev/zero of=big` can consume
+the whole disk the upper is on, making the upper writes of **every sandbox on that disk** fail — breaking
+§2.3's "the amplification happens only inside this sandbox's data plane". The capacity ceiling must
+therefore be applied explicitly by the rootfs provider (§5.B), orthogonally to D0's carrier: the carrier
+gives "an ordinary directory tree", the quota gives "how big that tree may get".
+
+### D6.2 The materialization mechanism (single-node): a btrfs subvolume + squota is the first choice
+
+| Mechanism | Isolation strength | Cost | Fits |
 | --- | --- | --- | --- |
-| **btrfs subvolume + squota limit**(给 upper+work 所在 subvolume 打一个配额硬限) | 中,硬 `ENOSPC` 到帽 | 最轻:配额在本 substrate 已 fs-wide 启用,两条 `btrfs` 子命令,无额外挂载;subvolume 同时兑现廉价原子快照 | **single-node 首选** |
-| **loop 设备**(每沙箱一个定长 image 文件,内建 FS 后挂载,upper/work 落其中) | 强,物理定长隔离 | per-sandbox loop dev + mount 生命周期管理,资源更重 | 需要强物理隔离时 |
-| **独立 FS / thin LV**(每沙箱一个 thin volume 或独立分区) | 最强 | 最重,依赖 LVM/卷管理 | 特殊高隔离场景 |
+| **A btrfs subvolume + an squota limit** (a hard quota limit on the subvolume holding upper+work) | Medium, a hard `ENOSPC` at the cap | Lightest: quotas are already enabled fs-wide on this substrate, two `btrfs` subcommands, no extra mount; a subvolume also delivers cheap atomic snapshots | **The single-node first choice** |
+| **A loop device** (one fixed-length image file per sandbox, with an FS inside it mounted, upper/work landing there) | Strong, physically fixed-length isolation | A per-sandbox loop dev + mount lifecycle to manage, heavier on resources | When strong physical isolation is needed |
+| **A separate FS / thin LV** (one thin volume or separate partition per sandbox) | Strongest | Heaviest, depending on LVM/volume management | Special high-isolation scenarios |
 
-三者是**同一个存储 substrate 原语的不同实现分支**,抽象对上层一字不变:上层只见"这个 Overlay 有个容量帽
-(Binding)",不见帽是 squota 还是 loop image。
+The three are **different implementation branches of the same storage substrate primitive**, and the
+abstraction upward does not change by one word: layers above see only "this Overlay has a capacity cap (a
+Binding)", never whether the cap is squota or a loop image.
 
-> **首选 = btrfs subvolume + squota(实测,全栈)。** substrate(ADR-0002)是 **btrfs**,它**无 project
-> quota**,故 project-quota 类手段(xfs/ext4)在本盘不适用。实测穿透
-> `subvolume → overlayfs upper/work → gofer → sentry → guest` 整条链:写满触发**精确到帽的硬 `ENOSPC`**
-> (errno 28 在 `write()` 上报,`fsync`/`close` 返 0,落点紧贴帽——一次性实测 ~0.05%,**但这个数字只能引作
-> 量级证据、不可引作可复现的精度指标**:没有脚本打印它,而唯一断言 ENOSPC 精度的
-> `spike-volume-cap-snapshot.sh` 用的容差远宽于它,8 MiB 帽上 ±2 MiB),**容器照常存活**(可再 exec),
-> 稀疏文件 / `fallocate` / hardlink / 从 lower rename 均未找到绕过账目的路径。选它还有一个结构收益——把
-> 存储单元定为 subvolume,同时给 Volume(§5.C)兑现廉价原子快照(volume.md D6/D7)。
+> **The first choice = a btrfs subvolume + squota (measured, full stack).** The substrate (ADR-0002) is
+> **btrfs**, which has **no project quota**, so project-quota mechanisms (xfs/ext4) do not apply on this
+> disk. Measured through the whole chain
+> `subvolume → overlayfs upper/work → gofer → sentry → guest`: filling it triggers a **hard `ENOSPC`
+> precise to the cap** (errno 28 reported on `write()`, with `fsync`/`close` returning 0, landing right
+> against the cap — measured once at ~0.05%, **but that number may be cited only as evidence of magnitude
+> and never as a reproducible precision figure**: no script prints it, and the only test asserting ENOSPC
+> precision, `spike-volume-cap-snapshot.sh`, uses a tolerance far wider than it, ±2 MiB on an 8 MiB cap),
+> and **the container lives on as usual** (it can be exec'd again). No bypass of the accounting was found
+> through sparse files, `fallocate`, hardlinks, or renaming out of lower. Choosing it also brings a
+> structural gain — fixing the storage unit as a subvolume simultaneously delivers cheap atomic snapshots
+> for Volumes (§5.C) (volume.md D6/D7).
 
-**为何是 squota 而非完整 qgroup。** 三条:① squota 就是为"每工作负载一个 subvolume"设计的
-(低开销、无 rescan 风暴);② **语义才对得上要管的东西**——沙箱**新写的**字节。完整 qgroup 下 copy-up 的
-reflink 会把 `referenced` 顶过帽(实测 98 MiB / 64 MiB 帽),事后才靠拒新写回落,**付了代价仍拿不到硬顶**;
-而向一个沙箱收取它从 Template reflink 来的字节(内容不是它写的)本身就存疑;③ 开发/测试基底(`sbx`)
-**改不了模式**(`BTRFS_IOC_QUOTA_CTL` 即便 root 带全 `CAP_SYS_ADMIN` 也 EPERM),选完整 qgroup 等于让
-spec 与基底长期分叉(CLAUDE.md 警告的漂移)。
+**Why squota rather than full qgroups.** Three reasons: ① squota is designed for exactly "one subvolume per
+workload" (low overhead, no rescan storms); ② **the semantics are what actually match the thing being
+governed** — the bytes a sandbox **newly writes**. Under full qgroups, copy-up's reflink pushes
+`referenced` past the cap (measured: 98 MiB against a 64 MiB cap), falling back only afterwards by
+refusing new writes, so **the cost is paid and a hard ceiling still not obtained**; and charging a sandbox
+for bytes it reflinked from a Template (content it did not write) is questionable in itself; ③ the
+development/test substrate (`sbx`) **cannot change modes** (`BTRFS_IOC_QUOTA_CTL` returns EPERM even as
+root with all of `CAP_SYS_ADMIN`), so choosing full qgroups would mean the spec and the substrate
+diverging long-term (the drift CLAUDE.md warns about).
 
-> **代价,必须连带处理**:squota 下沙箱撑不破自己的帽,但 **Template / layer 字节仍占真实磁盘且无帽
-> 覆盖**。**这就是节点核算式第二项存在的理由**——只算帽的总和会漏掉这些字节,式子本身在 §3.4。
-> **注意第二项的判据是"无帽覆盖",不是"是不是 layer"**:有帽的 Overlay upper 已被第一项计过,不重复计;
-> 无帽的字节(layer,以及被允许存在时的无帽 upper)才进第二项。
+> **A cost that must be handled along with it**: under squota a sandbox cannot burst its own cap, but
+> **Template / layer bytes still occupy real disk and are covered by no cap**. **This is the reason the
+> node accounting inequality's second term exists** — summing caps alone would miss those bytes, and the
+> inequality itself is in §3.4.
+> **Note that the second term's criterion is "covered by no cap", not "is it a layer"**: a capped Overlay
+> upper has already been counted by the first term and is not counted twice; only uncapped bytes (layers,
+> and an uncapped upper where one is permitted) enter the second term.
 
-**copy-up 撞帽不会损坏 merged 视图(实测)。** 跨 fs 强制真拷贝时,`open(O_WRONLY)` 干净地返 errno 28,
-文件在 merged 里**尺寸正确、与 lower 原件逐字节一致**,upper/work 无残留半成品——overlayfs 拷进 workdir
-临时文件、成功才 link 进 upper,失败完整回滚。**但同 fs 上 copy-up 是 reflink**,不受帽约束地被接纳,
-故帽对 copy-up 不是硬顶(见上,squota 下 reflink 永久免费,这恰是选它的理由之一)。
+**A copy-up hitting the cap does not damage the merged view (measured).** When a real copy is forced
+across filesystems, `open(O_WRONLY)` cleanly returns errno 28, the file is **the correct size in merged
+and byte-identical to the lower original**, and there is no half-finished residue in upper/work —
+overlayfs copies into a temporary file in the workdir and links it into the upper only on success, rolling
+back completely on failure. **But copy-up on the same fs is a reflink**, accepted without being subject to
+the cap, so the cap is not a hard ceiling for copy-up (see above: under squota a reflink is permanently
+free, which is one of the reasons for choosing it).
 
-**`btrfs-progs` 是显式依赖**(`sbx` 上已装,实测 v6.17.1)。另一条实现时会撞的坑:**sentry 伪造
-`st_blocks`**——guest 对 512 MiB 稀疏文件报 `536870912`,宿主真实值为 `0`。**容量核算只信配额,永不信
-guest 侧数字**(§5.B)。
+**`btrfs-progs` is an explicit dependency** (installed on `sbx`, measured v6.17.1). Another pit that will
+be hit at implementation time: **the sentry fabricates `st_blocks`** — the guest reports `536870912` for a
+512 MiB sparse file where the host's true value is `0`. **Capacity accounting trusts only the quota and
+never a guest-side number** (§5.B).
 
-### D6.3 关键约束:work 必须与 upper 同配额(subvolume 天然满足)
+### D6.3 A key constraint: work must share the quota with upper (a subvolume satisfies this naturally)
 
-overlayfs 的 copy-up(改 lower 文件时把它整份拷到可写层)**先落 workdir、再 rename 进 upper**。
-若只给 upper 打配额、漏掉 work,copy-up 期间的写就是一条**绕过帽**的路径。D5 的实测约束"work 与
-upper 必须同一个支持 overlayfs 的 FS"在这里进一步收紧为:**work 与 upper 必须记进同一个配额单元 /
-同一个 loop image / 同一个 thin volume**——容量核算把两者当一体。**btrfs subvolume 天然满足**:upper 与
-work 同处一个 subvolume → 一个配额覆盖两者,无绕过路径(实测:`work`/`upper` 在 merged 视图里不可见,
-copy-up 流量全计入)。
+overlayfs's copy-up (copying a lower file whole into the writable layer when it is modified) **lands in the
+workdir first and is renamed into the upper afterwards**. Quota-ing only the upper and missing work would
+make writes during copy-up a path that **bypasses the cap**. D5's measured constraint that "work and upper
+must be on the same overlayfs-capable FS" tightens here into: **work and upper must be accounted into the
+same quota unit / the same loop image / the same thin volume** — capacity accounting treats the two as one.
+**A btrfs subvolume satisfies this naturally**: upper and work live in one subvolume → one quota covers
+both, with no bypass path (measured: `work`/`upper` are invisible in the merged view, and all copy-up
+traffic is accounted).
 
-### D6.4 归属:一个跨 §5.B/§5.C 共享的 substrate 原语,不产生子系统互调
+### D6.4 Ownership: one storage substrate primitive shared across §5.B/§5.C, producing no cross-subsystem call
 
-容量帽的物化机制(create-subvolume + set-quota-limit + delete-subvolume)对 **§5.B 的 Overlay upper+work
-子树**与 **§5.C 的 per-volume 单元**是**同一套**——它是一个**共享存储 substrate 原语**,跨两个子系统复用。
+The capacity cap's materialization mechanism (create-subvolume + set-quota-limit + delete-subvolume) is
+**the same one** for **§5.B's Overlay upper+work subtree** and **§5.C's per-volume unit** — it is a
+**shared storage substrate primitive** reused across two subsystems.
 
-> **共享的是代码,不是 seam。** 它落成一个**叶子包**(`internal/btrfs`),只包 subvolume
-> create/delete/snapshot + quota limit,**不认识 Overlay / Volume / SandboxID**;§5.B 与 §5.C 各自
-> import 它,如同各自 import `os`。**不做一个 `QuotaProvider` 横切接口**——远端 rootfs provider 会用完全
-> 不同的手段兑现容量帽(对象存储配额 / 配额 API),横切接口只会把 btrfs 假设焊进所有实现。两者都不调
-> **对方**,只是共用一个 substrate 工具,故不违反"子系统间不互调"。**Overlay upper 是首个消费者**
-> (§5.B),Volume 复用同一个包。
+> **What is shared is code, not a seam.** It lands as a **leaf package** (`internal/btrfs`) wrapping only
+> subvolume create/delete/snapshot + quota limit and **knowing nothing about Overlay / Volume /
+> SandboxID**; §5.B and §5.C each import it as they each import `os`. **No cross-cutting `QuotaProvider`
+> interface is built** — a remote rootfs provider would deliver a capacity cap by completely different
+> means (an object-storage quota / a quota API), and a cross-cutting interface would only weld btrfs
+> assumptions into every implementation. Neither calls **the other**; they merely share one substrate tool,
+> so "subsystems do not call each other" is not violated. **The Overlay upper is the first consumer**
+> (§5.B), and Volume reuses the same package.
 
-施加动作全程在存储物化侧完成,不调用别的子系统;帽的
-**取值**(Binding)由 §4 mediator 在 create/resume 编排时连同 rootfs 来源 / 挂载表一起下发——这本就是
-mediator 的职责,不违反"子系统间不互调"(§4 开头)。multi-node 形态下,PV-backed 单元的容量帽 = PV 的
-size request,仍是那一侧后端的活,抽象不变(§3.1.1)。
+The applying action happens entirely on the storage materialization side and calls no other subsystem; the
+cap's **value** (a Binding) is handed down by the §4 mediator during create/resume orchestration together
+with the rootfs source / the mount table — which is the mediator's job anyway and does not violate
+"subsystems do not call each other" (top of §4). Under a multi-node shape, a PV-backed unit's capacity cap
+= the PV's size request, still that backend's business, with the abstraction unchanged (§3.1.1).
 
-### D6.5 边界:帽之外还有两层行为
+### D6.5 Boundaries: there are two more layers of behavior beyond the cap
 
-D6 只解决**per-sandbox 帽怎么物化**——把"撑满整机"降级成"撑满自己"。另两层:
+D6 solves only **how the per-sandbox cap is materialized** — downgrading "fill the whole machine" to "fill
+your own share". Two other layers:
 
-- **打满时的标准行为**:guest 见普通 `ENOSPC`、**沙箱照常存活**(§3.4:容量超限是数据面内的事件,
-  控制面不介入)。**只做硬阈拒写**——不发容量压力事件、不触发 auto-pause。**软阈已定:不发事件、
-  不新增 event kind**(§4.4-C)——压力是连续量的采样,§4.1 事件流是离散状态转换的流;要监控在引擎外
-  按 gauge/采样接(§1.3 add a subscriber)。
-- **节点级不超卖**:不等式在 §3.4,第二项为何必须存在见 D6.2。此处只定**谁在何时核算**:create / resume
-  物化 upper 前由 §4 mediator 过一遍;不足则 create 失败 / resume 留 `paused`(§4.4-A 原子退回源态)。
-  **有限超卖 + 磁盘压力监控不在此形态内**(后续增量)。
+- **The standard behavior when it fills**: the guest sees an ordinary `ENOSPC` and **the sandbox lives on
+  as usual** (§3.4: exceeding capacity is an event inside the data plane and the control plane does not get
+  involved). **Only the hard threshold refuses writes** — no capacity-pressure event is emitted and no
+  auto-pause is triggered. **The soft threshold is settled: emit no event and add no event kind** (§4.4-C)
+  — pressure is a sample of a continuous quantity while §4.1's event stream is a stream of discrete state
+  transitions; to monitor it, attach outside the engine as a gauge/sampling (§1.3 add a subscriber).
+- **No node-level oversubscription**: the inequality is in §3.4, and why the second term must exist is in
+  D6.2. Only **who computes it when** is fixed here: the §4 mediator runs it before create / resume
+  materializes the upper; if it does not fit, create fails / resume stays `paused` (§4.4-A's atomic
+  rollback to the source state).
+  **Bounded oversubscription + disk-pressure monitoring are not in this shape** (a later increment).
 
-  两项**互斥**的判据("对每个对象取最强的可得陈述"、有帽的 Overlay upper 在实测项里计 0)归
-  §3.4;本文只补它成立的机制根据:squota 下 reflink 的 copy-up 不向沙箱单元计费、该 extent 在 layer
-  一侧计过——**迫使第二项存在的性质(D6.2),恰好也让两项天然不重叠**。该轴被计量后每个沙箱必须有帽
-  (否则不等式不再描述那块盘)的推理同在 §3.4。
+  The criterion for the two terms being **mutually exclusive** ("take the strongest available statement
+  about each object"; a capped Overlay upper counts 0 in the measured term) belongs to §3.4; this document
+  only adds the mechanical grounds on which it holds: under squota a copy-up's reflink is not charged to
+  the sandbox unit and that extent has been counted on the layer side — **the property that forces the
+  second term to exist (D6.2) is exactly what also makes the two terms naturally non-overlapping**. The
+  reasoning that every sandbox must have a cap once the axis is metered (or the inequality stops describing
+  that disk) is likewise in §3.4.
 
-  **残留(诚实说)**:第二项是实测,故不等式在**准入那一刻**成立、之后可被破坏。layer 字节只在
-  Promote / seed / sweep 时增长——都是控制面事件,**故可门控**;而 §4.3 的对象回收 sweep 会让它减少。
-  任何增加无帽字节的控制面动作都过同一道不等式。**Promote 是其中唯一已有动词的一个**,seed / sweep
-  待其动词出现时同办;它的三个判据:
+  **The residual (stated honestly)**: the second term is measured, so the inequality holds **at the instant
+  of admission** and can be broken afterwards. Layer bytes grow only at Promote / seed / sweep — all
+  control-plane events, and **therefore gateable** — while §4.3's object-reclamation sweep makes them
+  shrink. Any control-plane action that increases uncapped bytes passes the same inequality. **Promote is
+  the only one of these that has a verb today**, and seed / sweep follow suit when their verbs appear; its
+  three criteria:
 
-  - **门在 quiesce 之前**:`Promote` 先只开 Overlay 取句柄(不动帽)、问 provider 要一个代价预报,不足即拒
-    (§6 映 507)。此时**源沙箱仍在它的入口态**、不曾被冻结,故一次被拒的 Promote 不是一次可观测的转换
-    (§4.4-A 原子退回的同一条纪律)。
-  - **这一项是预报,不是实测**:代价由 `rootfs.Provider.PromoteCostBytes` 给出,契约是**上界**——它必须在
-    动作之前回答,而第二项别处都是实测。保守方向是刻意的:高估拒掉一个本可放下的 Promote,低估则把
-    ENOSPC 摊给无关沙箱(§2.3)。一个 reflink / snapshot 实现可以诚实地答约 0。
-  - **在飞预留不是第三项**:字节要等拷贝推进才被 `UncappedBytes` 看见,而拷贝太长、不能全程持节点级
-    锁,故 mediator 在放锁前登记一笔预留,充当 Promote 的"提交"(等价于 create 那一刻的插行),落地后
-    释放。它与第二项**同项**,只是让并发的门看见在飞的那部分;拷贝落地期间短暂**双算**,方向同样保守。
+  - **The gate comes before the quiesce**: `Promote` first only opens the Overlay to get a handle (without
+    touching the cap) and asks the provider for a cost forecast, refusing if it does not fit (mapped to a
+    507 by §6). At that moment **the source sandbox is still in its entry state** and has not been frozen,
+    so a refused Promote is not an observable transition (the same discipline as §4.4-A's atomic rollback).
+  - **This term is a forecast, not a measurement**: the cost is given by
+    `rootfs.Provider.PromoteCostBytes`, whose contract is an **upper bound** — it must answer before the
+    action, whereas the second term is measured everywhere else. The conservative direction is deliberate:
+    overestimating refuses a Promote that could have fitted, while underestimating spreads ENOSPC onto
+    unrelated sandboxes (§2.3). A reflink / snapshot implementation may honestly answer about 0.
+  - **An in-flight reservation is not a third term**: bytes become visible to `UncappedBytes` only as the
+    copy progresses, and the copy is too long to hold a node-level lock throughout, so the mediator records
+    a reservation before releasing the lock, serving as Promote's "commit" (equivalent to the row insert at
+    create time) and released once it lands. It is **the same term** as the second, merely making the
+    in-flight portion visible to a concurrent gate; during the copy's landing it briefly **double-counts**,
+    in the same conservative direction.
 
-### D6.6 帽的 limit 侧:降到用量之下会把单元卡死,且沙箱侧比卷侧更重
+### D6.6 The limit side of the cap: lowering below usage wedges the unit, and the sandbox side is worse than the volume side
 
-D6.1–D6.5 讲的是**帽怎么物化**与**节点怎么核算**。limit 侧的写入判据是另一半:**一个不高于单元当前
-用量的帽,基底照收、随后单元不可逆卡死**。§5.C 早已为卷收口了这条(volume.md D7.3),本节只记
-**§5.B 的单元形状上重测的结果**与**三条只在沙箱侧成立的推论**——单元形状不同(一个 subvolume 同时装
-`upper`+`work`,其内还有 `merged` 这个活 overlayfs 挂点),故不能直接引用卷侧结论。
+D6.1–D6.5 are about **how a cap is materialized** and **how a node accounts**. The write criterion on the
+limit side is the other half: **a cap not above the unit's current usage is accepted by the substrate, after
+which the unit is irreversibly wedged**. §5.C settled this for volumes long ago (volume.md D7.3), and this
+section records only **the results of re-measuring on §5.B's unit shape** and **three corollaries that hold
+only on the sandbox side** — the unit shape differs (one subvolume holds both `upper` and `work`, with
+`merged`, a live overlayfs mount point, inside it), so the volume-side conclusions cannot be cited directly.
 
-**与 D7.3 同形的部分**(不复制其推理):空单元的配额行已计 16384 B;降到用量之下基底**零校验**接受;
-其后建文件 / `mkdir` / **truncate 成 0** 全返 `ENOSPC`,**配额 ioctl 自己也返 `ENOSPC`**(既不能抬也不能
-撤),只有 unlink 还活着;删到用量落回帽下后配额 ioctl 复活。
+**The parts identical in shape to D7.3** (whose reasoning is not duplicated): an empty unit's quota row
+already accounts 16384 B; lowering below usage is accepted by the substrate with **zero validation**;
+afterwards creating a file / `mkdir` / **truncating to 0** all return `ENOSPC`, and **the quota ioctl itself
+returns `ENOSPC`** (so the cap can be neither raised nor removed), with only unlink still working; and once
+deletions bring usage back below the cap the quota ioctl revives.
 
-**三条沙箱侧独有的:**
+**Three that are unique to the sandbox side:**
 
-1. **卡死的单元连 placement 都过不去,故沙箱变砖。** `applyCap` 在**每次** placement 重放记录里的帽,而
-   对已卡死的单元重放同一个帽同样 `ENOSPC`。卷没有自己的 placement,故卷侧卡死只是"写不进去";沙箱侧是
-   **再也 resume 不起来**——与 `0 → N` 那条已被拒的写**同一个后果**(§3.4:一次 200 的 PATCH 把沙箱变砖)。
-2. **`limit == 用量` 也是卡死态。** 设成正好等于 `referenced`:第一次接受并存下,但**重放它 `ENOSPC`、
-   抬帽也 `ENOSPC`**。故判据必须是**严格**不等式,与卷侧逐字相同。
-3. **`Mount` 自己的"新 workdir"步骤也被卡死挡住**,故即便跳过配额写 resume 仍过不去。这一条另有一个
-   独立后果,见下。
+1. **A wedged unit cannot even get through a placement, so the sandbox becomes a brick.** `applyCap`
+   replays the cap from the record at **every** placement, and replaying the same cap on an
+   already-wedged unit likewise returns `ENOSPC`. A volume has no placement of its own, so a wedged volume
+   is merely "cannot be written to"; on the sandbox side it **can never resume again** — **the same
+   consequence** as the already-refused `0 → N` write (§3.4: one 200 PATCH turns the sandbox into a brick).
+2. **`limit == usage` is a wedged state too.** Set exactly equal to `referenced`: it is accepted and stored
+   the first time, but **replaying it returns `ENOSPC` and raising it returns `ENOSPC`**. So the criterion
+   must be a **strict** inequality, word for word the same as the volume side's.
+3. **`Mount`'s own "new workdir" step is blocked by the wedge too**, so even skipping the quota write would
+   not get a resume through. This one has a separate consequence of its own, below.
 
-**由此定下两处写点形状:**
+**From which two write-point shapes follow:**
 
-- **§6.1 的 `PATCH` 拒绝(400,`lifecycle.ErrDiskCapBelowUsage`)**,判据 `cap > 当前用量`。它需要
-  §5.B 新增一个**沙箱级用量查询**(`Provider.Usage(ctx, overlayID) (used, limit, err)`),因为
-  `UncappedBytes` 对有帽单元**按契约计 0**(§3.4 两项互斥),而那正是改帽针对的单元。**按 ID 入参、
-  不按 `*Overlay` 句柄**:句柄只能经 `OpenOverlay` 取得,而那是个**会写配额**的调用,为读一个数跑一次
-  placement 形状的调用会把"查询"变成副作用。
-- **物化侧同判据(`rootfs.ErrCapBelowUsage`)**,因为 §3.4.5 要求写点的判据在下一次 placement /
-  崩溃对账的重装 / 修复性重扫上再走一遍,而这条判据读的**正是"不持久"的东西**(单元的当前用量):
-  一次外部改动清掉配额行 ⇒ guest 长过记录里的帽 ⇒ 下一次 placement 就会把帽写到用量之下。
-  - **这里不能照抄 §5.C 的答案。** `RepairVolumeCaps` 对这种卷**跳过**、让它暂时无帽,安全性由
-    §3.4 第二项接住;placement 没有这个选项——§5.B 的规则是"帽兑现不了就拒绝这次 placement,绝不静默
-    降级成不设帽跑"。故这一侧**拒绝**而非跳过,而拒绝是可逆方向(沙箱停在 `paused`,出口是 PATCH 抬帽/
-    撤帽或 Promote 后重建),施加才是不可逆方向。
-  - **状态码分两路**:create **携带** `disk_byte` ⇒ 中介层包成 `ErrDiskCapBelowUsage`(400);
-    resume / adopt **不携带** ⇒ 保持 409(remedy 改的是别处的状态)。与 §5.D 第二跳 uid 的
-    「写点 400 / placement 409」是同一条分法。
-- **判据不会误伤"填满了自己帽"的沙箱**:squota 在用量**严格小于** limit 时就把 guest 挡住(实测一个
-  16 MiB 帽填到 16728064 B,余 49152 B),故那种单元重放帽与抬帽都成功。这条是反向守卫,有自己的验收。
+- **§6.1's `PATCH` refuses (400, `lifecycle.ErrDiskCapBelowUsage`)**, with the criterion
+  `cap > current usage`. It requires §5.B to add a **sandbox-level usage query**
+  (`Provider.Usage(ctx, overlayID) (used, limit, err)`), because `UncappedBytes` **counts capped units as 0
+  by contract** (§3.4's mutual exclusion) and that is precisely the unit a cap change targets. **Taking an
+  ID rather than an `*Overlay` handle**: a handle can be obtained only through `OpenOverlay`, and that is a
+  call that **writes the quota**, so running a placement-shaped call to read one number would turn a
+  "query" into a side effect.
+- **The materialization side uses the same criterion (`rootfs.ErrCapBelowUsage`)**, because §3.4.5 requires
+  the write point's criteria to be walked again at the next placement / a crash reconciliation's reinstall /
+  a repair rescan, and this criterion reads **exactly the thing that is not durable** (the unit's current
+  usage): one external change clearing the quota row ⇒ the guest grows past the cap in the record ⇒ the
+  next placement would write the cap below usage.
+  - **The §5.C answer cannot be copied here.** `RepairVolumeCaps` **skips** such a volume, leaving it
+    temporarily uncapped, with safety caught by §3.4's second term; a placement has no such option — §5.B's
+    rule is "if the cap cannot be delivered, refuse this placement, and never silently degrade to running
+    uncapped". So this side **refuses** rather than skipping, and refusing is the reversible direction (the
+    sandbox stays `paused`, with exits being a PATCH that raises/removes the cap, or rebuilding after a
+    Promote), whereas applying is the irreversible one.
+  - **The status code splits two ways**: create **carries** `disk_byte` ⇒ the mediator wraps it as
+    `ErrDiskCapBelowUsage` (400); resume / adopt **do not carry it** ⇒ it stays 409 (the remedy changes
+    state elsewhere). The same split as §5.D's second-hop uid pair, "400 at the write point / 409 at
+    placement".
+- **The criterion does not wrongly hit a sandbox that "filled its own cap"**: squota stops the guest while
+  usage is **strictly below** the limit (measured: a 16 MiB cap filled to 16728064 B, leaving 49152 B), so
+  such a unit both replays its cap and raises it successfully. This is a reverse guard with an acceptance
+  test of its own.
 
-**③ 的独立后果:`Mount` 必须"清空 work 的内容",不能"删掉再重建 work"。** 换成
-`RemoveAll(work)` + `MkdirAll(work)`,一个填满自己帽的沙箱(§3.4 的**正常**结局)就
-**永远 resume 不起来**:`mkdir` 要一个 metadata extent,而满单元只剩
-几十 KiB 余量(实测 ENOSPC);而删掉那个**本就空的**目录**一个字节都不释放,故这套序列是花掉它没有的余量去
-到达它已经在的状态**。这违反 §4.2「pause 是**可逆**的门」——§3.4.4 为这条承诺付了一整条预算。
-**清空内容**保留原 inode,kernel 随后自己建 `work/work`,在同一个 49 KiB 余量上实测挂载成功。
-overlayfs 要求的是 workdir **为空**(D5:复用会被拒或损坏),不是它必须是个新 inode。
+**③'s separate consequence: `Mount` must "empty work's contents" rather than "delete and recreate work".**
+Switched to `RemoveAll(work)` + `MkdirAll(work)`, a sandbox that filled its own cap (§3.4's **normal**
+outcome) would **never resume again**: `mkdir` wants a metadata extent while a full unit has only tens of
+KiB left (measured ENOSPC); and deleting that **already-empty** directory frees **not one byte, so the
+sequence spends headroom it does not have to arrive at the state it is already in**. That violates §4.2's
+"pause is a **reversible** gate" — §3.4.4 paid a whole budget for that promise.
+**Emptying the contents** keeps the original inode, the kernel then creates `work/work` itself, and mounting
+was measured to succeed on that same 49 KiB of headroom. What overlayfs requires is that the workdir **be
+empty** (D5: reuse is refused or corrupts), not that it be a new inode.

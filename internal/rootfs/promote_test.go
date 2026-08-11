@@ -335,8 +335,9 @@ func TestPromotePrunesShadowedBytes(t *testing.T) {
 	// (CLAUDE.md: a divergence is a signal to STOP, not to fix in passing).
 	//
 	//	§5.B says the mount point survives in a frozen layer as an EMPTY DIRECTORY
-	//	PLACEHOLDER ("挂载点在固化结果里只是一个空目录占位"), by analogy with `tar` of a
-	//	directory that has something mounted on it.
+	//	PLACEHOLDER ("a mount point in the frozen result is just an empty placeholder
+	//	directory"), by analogy with `tar` of a directory that has something mounted
+	//	on it.
 	//
 	//	copyTree ACTUALLY PRUNES IT ENTIRELY. The exclusion check runs BEFORE the
 	//	MkdirAll that would create the target, and returns filepath.SkipDir — so no

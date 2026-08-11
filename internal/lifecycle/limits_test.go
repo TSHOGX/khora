@@ -439,7 +439,7 @@ func TestAdmissionGateEnforcesTheAccountingFormula(t *testing.T) {
 }
 
 // Promote must clear the SAME inequality as create (§3.4: any control-plane action
-// that increases uncapped bytes; rootfs-overlay D6.5 残留). A frozen layer is
+// that increases uncapped bytes; rootfs-overlay D6.5's residual). A frozen layer is
 // charged to no sandbox cap, so it lands in the MEASURED term — the harm of not
 // gating it is not a failed Promote but an UNRELATED sandbox meeting ENOSPC nowhere
 // near its own cap, §2.3 containment broken from the other side.

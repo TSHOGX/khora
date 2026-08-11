@@ -117,7 +117,7 @@ type NodeCapacity struct {
 // admitUncappedGrowth is the SECOND entry point to the same inequality, for a
 // control-plane action that adds bytes to the MEASURED term instead of making a
 // new promise (§3.4: "any control-plane action that increases uncapped bytes
-// should clear the same inequality"; rootfs-overlay D6.5 残留). Promote is the
+// should clear the same inequality"; rootfs-overlay D6.5's residual). Promote is the
 // first such action — a frozen layer is charged to no sandbox cap, so it lands
 // entirely in the second term.
 //

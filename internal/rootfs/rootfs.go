@@ -229,7 +229,7 @@ type Provider interface {
 	// A caller that has not yet quiesced the sandbox must treat the result as stale
 	// the moment it returns: the guest can keep writing. That residual is bounded by
 	// the sandbox's own remaining capacity headroom and is the same "true at the
-	// instant of admission" property the whole second term has (D6.5 残留).
+	// instant of admission" property the whole second term has (D6.5's residual).
 	// excludedMounts MUST BE THE SAME SET PromoteToTemplate is given. Not a
 	// consistency nicety — a forecast that counts shadowed bytes the freeze will not
 	// copy is conservative in DIRECTION but KNOWN WRONG in value, so it refuses
