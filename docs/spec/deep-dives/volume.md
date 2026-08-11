@@ -405,7 +405,7 @@ decide-and-act pair). On the Memory side it is one method under its existing mut
 > and while held it waits on the store's single-writer lock. The two still compose, because **no store or backend
 > path takes either lock in the reverse direction** and they do not nest within each other.
 > **This is also an independent argument for keeping preemption outside the door**: a volume-dimension verb that
-> looks up its holder (force-detach / lease preemption, exactly what D8 defers deliberately) would need a
+> looks up its holder (force-detach / lease preemption, which §5.C prohibits rather than defers) would need a
 > vol→sbx-direction lock, closing a cycle with `transitionLock → …`. **This one is derived from the lock order and
 > has no reproduction vehicle in the repo** (unlike D3's first two, whose numbers are in
 > `store.Store.CreateMounts`'s comments). Should it ever be implemented, it must resolve the holder from the
@@ -442,9 +442,23 @@ This engine is single-node with one orchestrator, and the store is the authority
 vanishes", and a crash is a local fact the L1 probe can decide immediately. So **keep the reaper TTL backstop and
 drop the periodic heartbeat loop** (there is no other node to hand off to). Heartbeat-based reclamation is a
 future multi-node provider's obligation (node death being caught by its scheduling layer) and does not enter the
-core. **The one genuine residual**: a long-paused or stuck sandbox holding an exclusive volume that someone else
-wants now — the engine holds exclusivity by default until destroy/evict and does not preempt; whether to
-force-detach or preempt is policy (most likely the product layer's) and is registered in open-decisions (D8).
+core.
+
+**The one apparent residual closes without a mechanism**: a long-paused or stuck sandbox holding an exclusive
+volume that someone else wants now. Every release path already terminates — destroy, a **`running`-legal detach
+that releases the lease immediately**, and `retention`-evict for a holder §4.3 has already crash-paused — so what
+is left is not "unreclaimable" but **"not reclaimable from the volume dimension"**, which is the same fact the
+lock order needs (D3). §5.C states both the paths and the prohibition on a volume-dimension verb; **this is not
+policy awaiting a product layer.** The external precedent points the same way and sharpens why: force-detach
+exists at the block layer and carries an explicit corruption warning (AWS EBS: a last-resort option, with file
+system check and repair pushed onto the caller), while the safe path in a distributed system requires a **human
+attestation that the holder is dead** — Kubernetes' `out-of-service` taint, whose documented precondition is that
+the node is already shut down, because force-detach otherwise breaks the CSI ordering requirement. That
+attestation is the thing a force-detach API cannot supply from inside, and it is exactly the problem this engine
+does not have: single-node with an authoritative store makes "is the holder dead" a local fact the L1 probe
+decides immediately, so crash-pause → `retention` → evict covers it with no attestation and no new verb.
+Sandbox platforms converge on the same answer from the other end — the common shape is that no such operation
+exists, and destroying the holder *is* the mechanism.
 
 ---
 
@@ -829,9 +843,6 @@ definitely does not** — that is not an unmade promise but a known falsehood.
 The following are boundary items whose design is settled but whose **concrete value / landing shape is not**
 (product-layer policy, or to be fixed when §6 lands):
 
-- **A preemption / force-detach policy for an exclusive volume** (D4): exclusivity is held by default until
-  destroy/evict; whether an admin force-detach or a preemption priority should exist is policy, most likely the
-  product layer's.
 - **The admission detail for a direct mutation vs a live-ro reader** (D5's boundary): allowing a direct write while
   a live-**ro** mount exists leaves the ro reader's gofer cache incoherent with the backend; whether to add a
   warning / a version stamp / a refusal is a question of precision.

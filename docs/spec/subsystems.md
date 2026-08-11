@@ -582,6 +582,28 @@ boundaries; internal mechanisms still to be refined are registered in
     for "nobody released it"**, with no heartbeat introduced; heartbeat-based reclamation is a
     multi-node provider's obligation and does not enter the core (the falsification is in
     [`deep-dives/volume.md`](./deep-dives/volume.md) D4).
+  - **There is no preemption verb and no force-detach, and that is settled rather than deferred**:
+    every release path already terminates without one. `DELETE /v1/sandboxes/{id}` tears the mount
+    rows down and is legal from `running` **and** `paused`; a **detach through
+    `PATCH /v1/sandboxes/{id}` is legal on a `running` holder and releases the lease immediately**
+    (§6.1's `lease_released: true` — the guest's mount topology still changes only at the next
+    resume, which is precisely why those two effect times are reported separately); and the reaper's
+    `retention` evict closes the case where nobody acts, on a clock a `PATCH` can shorten after the
+    fact. **A *stuck* holder needs no verb either**: §4.3 crash-pauses it without operator action and
+    `retention` then runs from that demoting CAS, which §4.3 states plainly is not exempt from
+    reclamation. So the residual is not "the volume cannot be reclaimed" but **"it cannot be
+    reclaimed without addressing the holder"** — and that is the property the lock order rests on,
+    since every release point goes through the holder's own record under the holder's own transition
+    lock.
+    - **A volume-dimension verb that looks up its holder is therefore prohibited, not merely
+      unbuilt.** It would acquire in the `vol → sbx` direction while every existing verb acquires
+      `sbx → mu` / `sbx → admission mutex`, closing a cycle (derived from the lock order, no
+      reproduction in the repo — [`deep-dives/volume.md`](./deep-dives/volume.md) D3). Were one ever
+      built it must resolve the holder from the store, **release first, and re-acquire in the global
+      order** — which forces it to re-validate and retry, so it could **not** carry the
+      decide-and-act pair in one store statement the way `ReplaceMounts` already does. The lock order
+      does not merely make preemption awkward; it makes a worse-shaped mechanism the price of a
+      capability the engine already has.
 - **Mount-topology changes happen at the resume boundary and are not hot mounts**: runsc takes mounts
   from the OCI spec **at startup** and **does not support** hot-adding or hot-removing while running
   (there is only an EROFS debug bypass, which is not used). So "mount a new Volume into a running
