@@ -223,8 +223,27 @@ func (m *Mediator) SetVolumeCapacity(ctx context.Context, id model.VolumeID, cap
 		return fmt.Errorf("patch volume: %w: backend %q reports no capacity-cap capability", ErrVolumeCapUnsupported, be.Name())
 	}
 
+	// REMOVING the cap is refused while the disk axis is METERED, and this is §3.4's
+	// rule rather than a new one: create refuses an uncapped volume on a metered node
+	// (admitVolume's ErrCapRequired) because it "would contribute nothing to the budget
+	// while being free to consume all of it". PATCH is the same promise written at a
+	// different time, so accepting 0 here manufactures exactly the volume create just
+	// refused — and it is the only route by which the btrfs arm's §3.4 second term can
+	// become non-zero on a metered node.
+	//
+	// "Removing a cap is always safe" was true of the WEDGE (0 only widens what the unit
+	// may hold, so it can never strand bytes above the ceiling) and false of the BUDGET.
+	// Both halves matter, so the wedge check below still skips 0 while this one does not.
+	//
+	// Gated on the axis being metered, not applied unconditionally: on an unmetered node
+	// an uncapped volume is legal by §3.4's own terms, so refusing there would revoke a
+	// capability the spec grants.
+	if capBytes == 0 && m.deps.NodeCapacity.DiskByte > 0 {
+		return fmt.Errorf("patch volume: %w: this node meters the disk axis (§3.4), so a volume may not be left uncapped — an uncapped volume contributes nothing to the budget while being free to consume all of it, which is the same reason create refuses one", ErrCapRequired)
+	}
+
 	// The strict-inequality check, only when a cap is actually being imposed. Removing
-	// the cap (0) is always safe — it can only widen what the unit may hold.
+	// the cap (0) can only widen what the unit may hold, so it cannot wedge anything.
 	if capBytes > 0 {
 		used, _, err := be.Usage(ctx, string(id))
 		if err != nil {

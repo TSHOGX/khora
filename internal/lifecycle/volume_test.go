@@ -183,10 +183,13 @@ func TestVolumeCapWritePointRefusesLoweringBelowUsage(t *testing.T) {
 		})
 	}
 
-	// Removing the cap entirely is always allowed: it can only widen what the unit may
-	// hold, so the wedge argument does not apply.
+	// Removing the cap clears the WEDGE check unconditionally — 0 only widens what the
+	// unit may hold, so no bytes can be stranded above the ceiling. (It is refused for a
+	// different reason when the disk axis is METERED, which is §3.4's budget rather than
+	// the wedge; this fixture is unmetered, and both directions are pinned by
+	// TestAdmissionCountsVolumeCaps.)
 	if err := m.SetVolumeCapacity(ctx, id, 0); err != nil {
-		t.Errorf("clearing the cap = %v; want success — 0 only widens the ceiling", err)
+		t.Errorf("clearing the cap = %v; want success — 0 only widens the ceiling, and this node does not meter disk", err)
 	}
 }
 
@@ -261,6 +264,62 @@ func TestAdmissionCountsVolumeCaps(t *testing.T) {
 		// And it is NOT the capacity verdict: nothing is full.
 		if errors.Is(err, ErrInsufficientCapacity) {
 			t.Errorf("the refusal conflates 'you must declare a cap' with 'the node is full'")
+		}
+	})
+
+	// PATCH is the same promise written at a different time, so it must refuse the same
+	// thing create does. Accepting size=0 here manufactured exactly the volume the
+	// subtest above refuses: create the volume capped (admitted, counted in the budget),
+	// then PATCH it to 0 and it contributes nothing while free to consume everything.
+	// It was also the only route by which the btrfs arm's §3.4 second term can become
+	// non-zero on a metered node.
+	//
+	// The old comment at that branch said "removing the cap is always safe", which was
+	// true of the WEDGE and false of the BUDGET — two different invariants sharing one
+	// `capBytes > 0` test.
+	t.Run("a metered disk axis refuses removing a volume's cap", func(t *testing.T) {
+		st := store.NewMemory()
+		m := New(Deps{
+			Store: st, Runtime: &fakeRuntime{}, Rootfs: &fakeRootfs{}, Volume: newFakeVolume(),
+			NodeCapacity: NodeCapacity{DiskByte: 100 << 20},
+			Logf:         func(string, ...any) {},
+		})
+		vid, err := m.CreateVolume(ctx, 40<<20)
+		if err != nil {
+			t.Fatalf("create capped volume: %v", err)
+		}
+		err = m.SetVolumeCapacity(ctx, vid, 0)
+		if !errors.Is(err, ErrCapRequired) {
+			t.Fatalf("PATCH size=0 on a metered node = %v; want ErrCapRequired — otherwise the cap create insisted on can be dropped one request later, and the budget describes a different device than the one in use", err)
+		}
+		if errors.Is(err, ErrInsufficientCapacity) {
+			t.Errorf("the refusal conflates 'you must declare a cap' with 'the node is full'")
+		}
+		// The record must be untouched: a refused write leaves no half-applied state.
+		rec, err := st.GetVolume(ctx, vid)
+		if err != nil {
+			t.Fatalf("get volume: %v", err)
+		}
+		if rec.CapByte != 40<<20 {
+			t.Errorf("cap is %d after a REFUSED uncap; want it unchanged at %d", rec.CapByte, 40<<20)
+		}
+	})
+
+	// The other side of the same branch, or the fix above would revoke a capability §3.4
+	// grants: on an UNMETERED node an uncapped volume is legal, so removing a cap must
+	// still work. Without this, "refuse size=0" could be satisfied unconditionally.
+	t.Run("an unmetered disk axis still allows removing a volume's cap", func(t *testing.T) {
+		st := store.NewMemory()
+		m := New(Deps{
+			Store: st, Runtime: &fakeRuntime{}, Rootfs: &fakeRootfs{}, Volume: newFakeVolume(),
+			Logf: func(string, ...any) {},
+		})
+		vid, err := m.CreateVolume(ctx, 40<<20)
+		if err != nil {
+			t.Fatalf("create capped volume: %v", err)
+		}
+		if err := m.SetVolumeCapacity(ctx, vid, 0); err != nil {
+			t.Fatalf("PATCH size=0 on an UNMETERED node = %v; want success — §3.4 permits an uncapped volume when the axis is not gated, so refusing here would revoke that", err)
 		}
 	})
 
