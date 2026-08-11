@@ -73,29 +73,6 @@ slims to boundary + open agenda — nothing lives in full in both places.
    That is the start of a dependency cycle. **Verbs belong to the §4 mediator,
    mechanisms to §5 subsystems; subsystems NEVER call each other.**
 
-## Language
-
-**English for everything the code carries:** identifiers, comments, error strings,
-log messages, commit messages, and every **new** document. This is the repo's own
-original convention restored, not a new imposition — 178 of its 230 commits are
-pure ASCII, and the drift to Chinese subjects started only 2026-08-06.
-
-`docs/spec/` prose is Chinese today. **It is not translated as a side effect of
-anything.** A wholesale translation of ~5k lines of load-bearing argument is the
-largest possible casual spec edit, and the Relationship rule above forbids exactly
-that. Translate it — if at all — as its own deliberate work with its own plan.
-
-Two consequences of that split:
-
-- **Canonical terms are already English on both sides** (`sandbox` / `placement` /
-  `Binding` / `provider` / `seam` / `squota` / `fail-closed` / `outbox` …). That is
-  what makes "code matches spec vocabulary" checkable at all — keep it true. What is
-  Chinese in the spec is the connective argument, never the vocabulary.
-- **A comment citing the Chinese spec quotes it VERBATIM**, Chinese included (~60
-  such lines today). A verbatim citation keeps drift detectable; a paraphrase
-  silently manufactures a second statement of the same rule. Quote, don't translate
-  in place.
-
 ## Code conventions
 
 - **Package names = the §5 canonical short-names:** `runtime` / `rootfs` /
@@ -162,7 +139,16 @@ Two consequences of that split:
   anything outside the engine, product layer included ("agent sandbox engine" is the
   engine's own positioning).
 - **Code matches spec vocabulary.** If code and spec disagree on a name, fix one
-  in the same change.
+  in the same change. Canonical terms (`sandbox` / `placement` / `Binding` / `provider` /
+  `seam` / `squota` / `fail-closed` / `outbox` …) are what makes this checkable at all —
+  don't coin a synonym for one that is already fixed.
+- **A comment citing the spec quotes it VERBATIM.** A paraphrase silently manufactures a
+  second statement of the same rule, which is the drift the spec discipline exists to
+  prevent — and it is easy to do by accident, since restating a sentence in your own words
+  reads like an improvement. Quote instead. **Deep-dive rows are cited by bold title,
+  never by position** (their own headers refuse positional numbering), so re-wording a
+  title is a pointer edit across every `.go` file citing it — `network.md` alone carries
+  over a hundred such pointers.
 
 ## Execution & verification
 
@@ -235,3 +221,8 @@ file. This rule lifts when we deploy.
 
 Conventional Commits, scoped to the engine (`feat(runtime):`, `docs(spec):`,
 `test(lifecycle):`…). Detailed messages — say what changed and why.
+
+**English, like everything else the repo carries** — identifiers, comments, error
+strings, log messages, documents. Worth stating only because a commit message is the
+one artifact written *about* a conversation: chat may be in any language, the repo is
+English.
