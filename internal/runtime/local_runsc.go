@@ -762,6 +762,16 @@ func contains(xs []string, x string) bool {
 // endpoint moving because someone else published something. A control-plane restart is
 // the one case where a live placement arrives here with an empty handle, and Adopt
 // closes it by reading the endpoints back off the installed table first.
+// RuleHits implements Provider.RuleHits: this placement's §5.D counters, keyed by the
+// abstract name §5.D minted. Read-only — it lists counters and installs nothing.
+func (p *LocalRunsc) RuleHits(ctx context.Context, pl *Placement) (map[string]uint64, error) {
+	h, ok := pl.Handle().(*placementHandle)
+	if !ok || h == nil {
+		return nil, fmt.Errorf("runtime: RuleHits on a placement with no handle")
+	}
+	return p.ruleHits(ctx, h.nftTable)
+}
+
 func (p *LocalRunsc) ReinstallRuleSet(ctx context.Context, pl *Placement, spec SteeringSpec) error {
 	h, ok := pl.Handle().(*placementHandle)
 	if !ok || h == nil {

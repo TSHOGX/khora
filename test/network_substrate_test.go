@@ -2049,7 +2049,8 @@ func TestPublishIsReachableFromOutsideAndFromTheHostAndSurvivesResume(t *testing
 	time.Sleep(700 * time.Millisecond)
 
 	// The engine's delivered address (§5.D: the engine delivers a `host ip:port`).
-	_, _, endpoints, err := eng.Mediator.Network(ctx, id)
+	netInfo, err := eng.Mediator.Network(ctx, id)
+	endpoints := netInfo.PublishEndpoints
 	if err != nil {
 		t.Fatalf("read network: %v", err)
 	}
@@ -2168,7 +2169,8 @@ func TestPublishIsReachableFromOutsideAndFromTheHostAndSurvivesResume(t *testing
 			t.Fatalf("start the loopback-bound guest service: %v", err)
 		}
 		time.Sleep(700 * time.Millisecond)
-		_, _, eps, nerr := eng.Mediator.Network(ctx, id2)
+		ni2, nerr := eng.Mediator.Network(ctx, id2)
+		eps := ni2.PublishEndpoints
 		if nerr != nil || len(eps) == 0 || eps[0] == "" {
 			t.Fatalf("no endpoint for the loopback case: %v %v", eps, nerr)
 		}
@@ -2231,7 +2233,8 @@ func TestPublishIsReachableFromOutsideAndFromTheHostAndSurvivesResume(t *testing
 		}
 		// While paused there is NO endpoint to report — §6.1 omits the key rather than
 		// reporting an empty string, because the endpoint is a placement product.
-		_, state, eps, _ := eng.Mediator.Network(ctx, id)
+		niS, _ := eng.Mediator.Network(ctx, id)
+		state, eps := niS.State, niS.PublishEndpoints
 		if state != model.Paused {
 			t.Errorf("state = %s, want paused", state)
 		}
@@ -2244,7 +2247,8 @@ func TestPublishIsReachableFromOutsideAndFromTheHostAndSurvivesResume(t *testing
 		if err := eng.Mediator.Resume(ctx, id); err != nil {
 			t.Fatalf("resume: %v", err)
 		}
-		_, _, eps2, _ := eng.Mediator.Network(ctx, id)
+		ni2b, _ := eng.Mediator.Network(ctx, id)
+		eps2 := ni2b.PublishEndpoints
 		if len(eps2) != 1 || eps2[0] == "" {
 			t.Fatalf("after resume there is no host endpoint: %v — the declaration is a Binding, so "+
 				"the next placement must regenerate its rules from the record (§3.4 / §5.D)", eps2)
@@ -2333,7 +2337,8 @@ func TestPublishOnAPausedSandboxRecordsWithoutInstallingRules(t *testing.T) {
 		t.Errorf("after resume the publish has no DNAT rule — the declaration is a Binding and the "+
 			"next placement regenerates from it (§5.D)\n%s", harness.DumpRuleSet(id))
 	}
-	_, _, eps, _ := eng.Mediator.Network(ctx, id)
+	niE, _ := eng.Mediator.Network(ctx, id)
+	eps := niE.PublishEndpoints
 	if len(eps) != 1 || eps[0] == "" {
 		t.Errorf("no endpoint after resume: %v", eps)
 	}
@@ -2425,7 +2430,8 @@ func TestHotAddingAPublishDoesNotMoveTheEndpointsAlreadyBound(t *testing.T) {
 	if epB == epA {
 		t.Fatalf("two publishes share the host endpoint %s", epA)
 	}
-	_, _, eps, err := eng.Mediator.Network(ctx, id)
+	niX, err := eng.Mediator.Network(ctx, id)
+	eps := niX.PublishEndpoints
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2506,7 +2512,8 @@ func TestTCPAndUDPOnOneGuestPortAreTwoPublishesOnTheSubstrate(t *testing.T) {
 		t.Fatalf("resume with `[{8080,tcp},{8080,udp}]` recorded: %v — the declaration is durable and "+
 			"every placement regenerates from it, so this sandbox would fail EVERY resume forever", err)
 	}
-	_, _, eps, err := eng.Mediator.Network(ctx, id)
+	niX, err := eng.Mediator.Network(ctx, id)
+	eps := niX.PublishEndpoints
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2553,7 +2560,8 @@ func TestAdoptKeepsEachSurvivorsPublishEndpoints(t *testing.T) {
 
 	epOf := func(t *testing.T, e *orchestrator.Engine, id model.SandboxID) string {
 		t.Helper()
-		_, _, eps, err := e.Mediator.Network(ctx, id)
+		niX, err := e.Mediator.Network(ctx, id)
+		eps := niX.PublishEndpoints
 		if err != nil {
 			t.Fatalf("read network %s: %v", id, err)
 		}
@@ -2634,7 +2642,8 @@ func TestAStalePatchSilentlyDropsAHotAddedPublish(t *testing.T) {
 	}
 
 	// (1) The caller reads the declaration.
-	stale, _, _, err := eng.Mediator.Network(ctx, id)
+	niStale, err := eng.Mediator.Network(ctx, id)
+	stale := niStale.Decl
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2668,12 +2677,14 @@ func TestAStalePatchSilentlyDropsAHotAddedPublish(t *testing.T) {
 	// declaration that still CONTAINS an already-removed publish would REOPEN an inbound
 	// port. Same mechanism, opposite sign — and the engine cannot tell the two apart,
 	// which is the whole reason the cycle is the caller's responsibility.
-	withPub, _, _, _ := eng.Mediator.Network(ctx, id)
+	niPub, _ := eng.Mediator.Network(ctx, id)
+	withPub := niPub.Decl
 	withPub.Ingress.Publish = []model.NetPublish{{GuestPort: 9099, Proto: model.NetTCP}}
 	if err := patchDecl(eng, ctx, id, withPub); err != nil {
 		t.Fatalf("patch: %v", err)
 	}
-	trimmed, _, _, _ := eng.Mediator.Network(ctx, id)
+	niTrim, _ := eng.Mediator.Network(ctx, id)
+	trimmed := niTrim.Decl
 	trimmed.Ingress.Publish = nil
 	if err := patchDecl(eng, ctx, id, trimmed); err != nil {
 		t.Fatalf("patch: %v", err)
@@ -2912,7 +2923,8 @@ func TestPublishDoesNotOpenAnEgressPathOnTheSubstrate(t *testing.T) {
 	time.Sleep(700 * time.Millisecond)
 
 	// The publish works — otherwise the negative below would be vacuous.
-	_, _, eps, err := eng.Mediator.Network(ctx, id)
+	niX, err := eng.Mediator.Network(ctx, id)
+	eps := niX.PublishEndpoints
 	if err != nil || len(eps) == 0 || eps[0] == "" {
 		t.Fatalf("no published endpoint: %v %v", eps, err)
 	}
@@ -2989,7 +3001,8 @@ func TestRevokingAPublishClosesThePortAtTheNextPlacement(t *testing.T) {
 	d.Ingress.Publish = []model.NetPublish{{GuestPort: 8080, Proto: model.NetTCP}}
 	id, _ := createRunning(t, eng, d)
 
-	_, _, eps, err := eng.Mediator.Network(ctx, id)
+	niX, err := eng.Mediator.Network(ctx, id)
+	eps := niX.PublishEndpoints
 	if err != nil || len(eps) == 0 {
 		t.Fatalf("no endpoint: %v %v", eps, err)
 	}
@@ -3137,4 +3150,91 @@ func main() {
 func patchDecl(eng *orchestrator.Engine, ctx context.Context, id model.SandboxID, d model.NetworkDecl) error {
 	_, err := eng.Mediator.Rebind(ctx, id, lifecycle.RebindSpec{Binding: store.Binding{Network: &d}})
 	return err
+}
+
+// TestRuleHitsAreReadableThroughTheReadFace is the acceptance half of §6.1's per-entry
+// `hit_packet`: the number a caller reads must be the number the KERNEL is counting,
+// attributed to the entry the caller actually wrote.
+//
+// What it pins that no unit test can: THE ATTRIBUTION JOIN. Unit tests prove the generator
+// names counters it emitted and that the encoder sums them — but only a real placement
+// proves those names are what nft installed. That is the half a rename breaks silently,
+// because an unmatched name reports no hits, which reads exactly like a rule never hit.
+func TestRuleHitsAreReadableThroughTheReadFace(t *testing.T) {
+	eng, _ := harness.Engine(t, netEngineOpts(t))
+	host := hostIPv4(t)
+	addr, stop := hostListener(t, "hello-from-COUNTED")
+	defer stop()
+	port, portStr := portOf(t, addr)
+
+	// The same shape as the declared-tuple test above: a real host listener the guest can
+	// actually reach, so the counter has something to count.
+	d := declDeny()
+	d.Egress.Allow = []model.NetTuple{tupleOf(t, host+"/32", port, model.NetTCP)}
+	id, cl := createRunning(t, eng, d)
+
+	info, err := eng.Mediator.Network(context.Background(), id)
+	if err != nil {
+		t.Fatalf("read network: %v", err)
+	}
+	if info.Hits == nil {
+		t.Fatalf("a RUNNING sandbox reports no counters at all — the read surface then cannot attribute a guest-side failure to the declaration, which is this key's entire consumer")
+	}
+	if len(info.Attribution.Allow) != 1 {
+		t.Fatalf("attribution covers %d allow entries, declaration has 1", len(info.Attribution.Allow))
+	}
+
+	// EVERY attributed name must exist in what is installed. This is the join: a name the
+	// generator invented but nft never rendered would report an absent key forever.
+	for _, n := range info.Attribution.Allow[0] {
+		if _, ok := info.Hits[n]; !ok {
+			t.Errorf("counter %q is attributed to allow[0] but absent from the INSTALLED table — attribution and rendering have diverged, and a caller sees a permanently absent key rather than an error.\n%s", n, harness.DumpRuleSet(id))
+		}
+	}
+	if info.Attribution.Default == "" {
+		t.Errorf("no counter is attributed to egress.default")
+	} else if _, ok := info.Hits[info.Attribution.Default]; !ok {
+		t.Errorf("the counter attributed to egress.default (%q) is absent from the installed table", info.Attribution.Default)
+	}
+
+	// Cross-checked against the harness's INDEPENDENT read of the same counters, which is
+	// what makes this more than an internally-consistent fiction: the API's number and
+	// nft's must agree.
+	for _, n := range info.Attribution.Allow[0] {
+		viaNft := harness.NftCounter(t, id, n)
+		if viaNft < 0 {
+			continue // already reported above
+		}
+		if uint64(viaNft) != info.Hits[n] {
+			t.Errorf("counter %q reads %d through the read surface and %d through nft — the API is not reporting the kernel's number", n, info.Hits[n], viaNft)
+		}
+	}
+
+	// And it MOVES. A static number is worse than an absent one: §5.D's only signal for
+	// "is this rule live" is that this count changes under a deliberate probe (§2.4's
+	// acceptance discipline / D4.1).
+	before := allowHits(t, eng, id)
+	got := runGuestProbe(t, cl, net.JoinHostPort(host, portStr), false)
+	if !got.reachable() {
+		t.Fatalf("the DECLARED tuple was not reachable (%s), so this test cannot distinguish a dead counter from a dead rule: %s", got.outcome, harness.DumpRuleSet(id))
+	}
+	after := allowHits(t, eng, id)
+	if after <= before {
+		t.Errorf("allow[0]'s hit_packet did not move across a probe that DID get through (%d → %d) — the number is decorative, and the allow-list rollout this key exists for cannot attribute anything with it.\n%s", before, after, harness.DumpRuleSet(id))
+	}
+}
+
+// allowHits sums what §6.1 reports for allow[0], through the same path the read surface
+// uses.
+func allowHits(t *testing.T, eng *orchestrator.Engine, id model.SandboxID) uint64 {
+	t.Helper()
+	info, err := eng.Mediator.Network(context.Background(), id)
+	if err != nil {
+		t.Fatalf("read network: %v", err)
+	}
+	var total uint64
+	for _, n := range info.Attribution.Allow[0] {
+		total += info.Hits[n]
+	}
+	return total
 }

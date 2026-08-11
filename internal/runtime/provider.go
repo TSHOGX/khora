@@ -384,6 +384,29 @@ type Provider interface {
 	// diff against what is already installed.
 	ReinstallRuleSet(ctx context.Context, p *Placement, spec SteeringSpec) error
 
+	// RuleHits reports how many packets each of this placement's §5.D rules has acted
+	// on, keyed by the ABSTRACT counter name §5.D put on the rule (ruleset.Rule.Counter).
+	// It backs §6.1's per-entry `hit_packet`.
+	//
+	// The key is the seam-clean part: a counter NAME is the vocabulary §5.D generates and
+	// §5.A renders, so nothing host-shaped crosses — the same class of value as
+	// Placement.PublishEndpoints, which §5.A permits for the same reason (a remote
+	// provider has its enforcement layer's per-rule counters too, whereas it could not
+	// produce a cgroup path at all). A member named after nft would NOT be seam-clean,
+	// since that is one renderer's mechanism.
+	//
+	// TAKES A PLACEMENT, not a SandboxID: counters are placement-local state, so the
+	// caller must already hold one to be asking, and the absence of a placement is the
+	// answer rather than an error (§6.1 omits the key). A missing KEY in the returned map
+	// means that counter is not present in what is installed — which is a DIFFERENT fact
+	// from zero and must not be reported as zero (§2.4's acceptance discipline: a
+	// bypassed rule's only symptom is a counter that reads 0, so manufacturing zeros
+	// destroys the signal).
+	//
+	// Read-only and best-effort by nature: it must not install, re-render, or otherwise
+	// touch the rule set, and a failure to read is not a placement failure.
+	RuleHits(ctx context.Context, p *Placement) (map[string]uint64, error)
+
 	// InstallSecondHop installs the ENGINE-LEVEL rule set pinning the second hop
 	// (§2.4 invariant 2's second half): the egress of the host-local process behind
 	// `via[].endpoint`, narrowed by the deployment-supplied uid.

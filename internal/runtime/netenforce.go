@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -330,4 +331,43 @@ func numberLines(s string) string {
 		b.WriteString(strconv.Itoa(i+1) + "\t" + line + "\n")
 	}
 	return b.String()
+}
+
+// ruleHits reads this table's named counters, keyed by the abstract counter name §5.D
+// minted (see runtime.Provider.RuleHits).
+//
+// A MISSING KEY IS NOT A ZERO, and that distinction is the whole reason this returns a
+// map rather than a slice of values: "the rule is installed and matched nothing" and "the
+// rule is not there at all" are different facts, and §2.4's acceptance discipline rests on
+// telling them apart — a bypassed rule's only symptom is a counter reading 0, so
+// manufacturing a zero for an absent counter destroys the one signal §5.D has.
+//
+// Read-only: it lists, never loads. A failure returns the error rather than an empty map,
+// so a caller cannot mistake "could not read" for "everything is at zero".
+func (p *LocalRunsc) ruleHits(ctx context.Context, table string) (map[string]uint64, error) {
+	if table == "" {
+		return nil, fmt.Errorf("runtime: no rule-set table for this placement")
+	}
+	out, err := p.runOut(ctx, []string{"nft", "-j", "list", "counters", "table", "inet", table})
+	if err != nil {
+		return nil, fmt.Errorf("runtime: read rule counters for %s: %w", table, err)
+	}
+	var doc struct {
+		Nftables []struct {
+			Counter *struct {
+				Name    string `json:"name"`
+				Packets uint64 `json:"packets"`
+			} `json:"counter"`
+		} `json:"nftables"`
+	}
+	if err := json.Unmarshal([]byte(out), &doc); err != nil {
+		return nil, fmt.Errorf("runtime: parse rule counters for %s: %w", table, err)
+	}
+	hits := make(map[string]uint64, len(doc.Nftables))
+	for _, o := range doc.Nftables {
+		if o.Counter != nil {
+			hits[o.Counter.Name] = o.Counter.Packets
+		}
+	}
+	return hits, nil
 }

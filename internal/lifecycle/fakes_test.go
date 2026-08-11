@@ -639,6 +639,12 @@ type fakeRuntime struct {
 	// from the state transition).
 	failStop    bool
 	failDestroy bool
+	// ruleHits / ruleHitsErr back RuleHits (§6.1's per-entry counters). A nil map with a
+	// nil error is a legitimate "no counters", distinct from ruleHitsErr's "unreadable" —
+	// the two must stay separable, since §6.1 omits the key for both but a test asserting
+	// the omission rule needs to drive each independently.
+	ruleHits    map[string]uint64
+	ruleHitsErr error
 	// launchGate, if non-nil, blocks Launch until closed (to hold the lock).
 	launchGate chan struct{}
 	seq        int
@@ -929,4 +935,17 @@ func (c *fakeClient) WriteStream(_ context.Context, _ string, src io.Reader) (in
 	// Drain src so a caller that streams into this fake sees its reader consumed,
 	// as the real client would.
 	return io.Copy(io.Discard, src)
+}
+
+// RuleHits backs §6.1's per-entry hit counters. The fake returns whatever the test
+// planted, and nil means "unreadable" — which is a distinct case from an empty map (see
+// runtime.Provider.RuleHits), so tests can exercise the omission rule.
+func (f *fakeRuntime) RuleHits(context.Context, *runtime.Placement) (map[string]uint64, error) {
+	f.log("RuleHits")
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.ruleHitsErr != nil {
+		return nil, f.ruleHitsErr
+	}
+	return f.ruleHits, nil
 }

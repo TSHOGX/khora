@@ -42,10 +42,11 @@ func pubRunning(t *testing.T, m *Mediator) model.SandboxID {
 // pubEndpoint reads back the endpoint §6.1 reports for one publish item.
 func pubEndpoint(t *testing.T, m *Mediator, id model.SandboxID, port uint16, proto model.NetProto) string {
 	t.Helper()
-	decl, _, eps, err := m.Network(context.Background(), id)
+	info, err := m.Network(context.Background(), id)
 	if err != nil {
 		t.Fatalf("read network: %v", err)
 	}
+	decl, eps := info.Decl, info.PublishEndpoints
 	for i, item := range decl.Ingress.Publish {
 		if item.GuestPort == port && item.Proto == proto && i < len(eps) {
 			return eps[i]

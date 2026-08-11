@@ -59,9 +59,22 @@ type egressWire struct {
 	// class. A pointer so "absent" is distinguishable from "empty string": both are
 	// refused, but only the absent case is the class-1 message, and a caller who typed
 	// `"default": ""` deserves to be told that rather than told the field is missing.
-	Default *string     `json:"default"`
-	Allow   []tupleWire `json:"allow"`
-	Via     []viaWire   `json:"via"`
+	Default *string `json:"default"`
+	// DefaultHitPacket is ACCEPTED AND IGNORED, for the same reason `state` and
+	// `host_endpoint` are: §6.1 requires the read face's output to be a legal write body,
+	// because read-modify-write is a CONTRACT REQUIREMENT for editing a declaration (a
+	// lost update here is a lost update on a security-relevant field). The read face emits
+	// this key whenever counters are readable, so without it a caller writing back what it
+	// read gets a 400 on a field the engine itself produced.
+	//
+	// Verified by TestAFullReadResponseIsALegalWriteBody rather than by inspection — the
+	// counters were in fact caught breaking that round trip when they first landed.
+	//
+	// `hit_packet` inside allow[] / via[].match[] needs no equivalent here: tupleWire is
+	// SHARED by both faces, so it is accepted automatically.
+	DefaultHitPacket *uint64     `json:"default_hit_packet"`
+	Allow            []tupleWire `json:"allow"`
+	Via              []viaWire   `json:"via"`
 }
 
 type ingressWire struct {
@@ -102,6 +115,22 @@ type tupleWire struct {
 	// not survive — the read face renders the wildcard exactly one way, as the omission.
 	Port  uint16 `json:"port,omitempty"`
 	Proto string `json:"proto"`
+	// HitPacket is how many packets this ENTRY's rules have acted on since the current
+	// rule set was installed (§6.1). Absent when the engine holds no live placement, when
+	// the counters could not be read, or when this entry emitted no rule — pause DESTROYS
+	// the table rather than zeroing it, so a `paused` sandbox genuinely has nothing to
+	// report.
+	//
+	// A POINTER so a real 0 SURVIVES: "installed and matched nothing" is a different fact
+	// from "not measured", and §2.4's acceptance discipline rests on telling them apart
+	// (a bypassed rule's only symptom is a counter reading 0). With a value type plus
+	// omitempty the two would serialize identically.
+	//
+	// ACCEPTED AND IGNORED on the write path, like `state` and `host_endpoint`: §6.1
+	// requires the read face's output to be a legal write body, and unknown-key rejection
+	// applies recursively, so without this a caller writing back what it read would get a
+	// 400 one level down inside `allow[]`.
+	HitPacket *uint64 `json:"hit_packet,omitempty"`
 }
 
 type viaWire struct {
@@ -197,19 +226,69 @@ func (t tupleWire) decode() (model.NetTuple, error) {
 // They are DEFINITE values in the record; the omit-when-unreadable rule
 // (`death_cause`, `used_byte`) governs facts that cannot be READ, and a declaration
 // has none of those. Two spellings of absence would be one more than needed.
-func encodeNetwork(d model.NetworkDecl, endpoints []string) networkReadResp {
+// sumHits totals the named counters, returning nil when NONE of them is present.
+//
+// Nil-when-absent is the §6.1 omission rule, and the distinction it preserves is the
+// load-bearing one: a counter that reads 0 is "installed, matched nothing", while an
+// absent counter is "not measured" (no placement, unreadable, or never rendered). A
+// zero-valued return for the second case would manufacture exactly the false zero §2.4's
+// acceptance discipline refuses to treat as a pass.
+func sumHits(hits map[string]uint64, names ...string) *uint64 {
+	if hits == nil || len(names) == 0 {
+		return nil
+	}
+	var total uint64
+	var found bool
+	for _, n := range names {
+		if n == "" {
+			continue
+		}
+		if v, ok := hits[n]; ok {
+			total += v
+			found = true
+		}
+	}
+	if !found {
+		return nil
+	}
+	return &total
+}
+
+func encodeNetwork(d model.NetworkDecl, endpoints []string, hits map[string]uint64, attr network.CounterAttribution) networkReadResp {
 	d = d.Normalize()
 	out := networkReadResp{}
 	out.Egress.Default = string(d.Egress.Default)
+	// The DECLARATION's own catch-all, and nothing else. The floor and the deny-safe tier
+	// are deliberately excluded: neither is liftable by any declaration (§2.4), so
+	// attributing their hits here would send a caller to widen an allow-list that cannot
+	// possibly help.
+	out.Egress.DefaultHitPacket = sumHits(hits, attr.Default)
 	out.Egress.Allow = make([]tupleWire, 0, len(d.Egress.Allow))
-	for _, t := range d.Egress.Allow {
-		out.Egress.Allow = append(out.Egress.Allow, encodeTuple(t))
+	for i, t := range d.Egress.Allow {
+		tw := encodeTuple(t)
+		// SUMMED over this entry's rules, which are mutually exclusive per packet: a
+		// packet takes one hook, and within `input` an accept ends the chain. The
+		// self-gateway accept MUST be in the sum — it is the only delivery path for a
+		// declared host-local resolver, so omitting it makes that entry read 0 while
+		// plainly working (network.md D5 ⑦).
+		if i < len(attr.Allow) {
+			tw.HitPacket = sumHits(hits, attr.Allow[i]...)
+		}
+		out.Egress.Allow = append(out.Egress.Allow, tw)
 	}
 	out.Egress.Via = make([]viaReadWire, 0, len(d.Egress.Via))
-	for _, v := range d.Egress.Via {
+	for i, v := range d.Egress.Via {
 		item := viaReadWire{Endpoint: v.Endpoint, Match: make([]tupleWire, 0, len(v.Match))}
-		for _, t := range v.Match {
-			item.Match = append(item.Match, encodeTuple(t))
+		for j, t := range v.Match {
+			tw := encodeTuple(t)
+			// ONE counter, the prerouting DNAT, because that rule IS the match. Adding the
+			// companion accept would count one flow twice (they act on the same flow at
+			// different hooks), and their divergence is an engine-defect signature rather
+			// than a caller-actionable number (D5 ⑩).
+			if i < len(attr.Via) && j < len(attr.Via[i]) {
+				tw.HitPacket = sumHits(hits, attr.Via[i][j])
+			}
+			item.Match = append(item.Match, tw)
 		}
 		out.Egress.Via = append(out.Egress.Via, item)
 	}
@@ -268,9 +347,17 @@ type networkReadResp struct {
 }
 
 type egressReadWire struct {
-	Default string        `json:"default"`
-	Allow   []tupleWire   `json:"allow"`
-	Via     []viaReadWire `json:"via"`
+	Default string `json:"default"`
+	// DefaultHitPacket counts the rule `egress.default` itself generates — the catch-all
+	// refusal under `deny`, the catch-all accept under `allow` — and NOTHING else. The L0
+	// floor and the internal deny-safe tier are excluded because neither is liftable by
+	// any declaration (§2.4): reporting their hits here would send a caller to widen an
+	// allow-list that cannot help.
+	//
+	// Same omission rule and same pointer reasoning as tupleWire.HitPacket.
+	DefaultHitPacket *uint64       `json:"default_hit_packet,omitempty"`
+	Allow            []tupleWire   `json:"allow"`
+	Via              []viaReadWire `json:"via"`
 }
 
 type viaReadWire struct {
@@ -291,13 +378,13 @@ type publishReadWire struct {
 
 // handleNetworkGet serves `GET /v1/sandboxes/{id}/network` (§6.1).
 func (e *Engine) handleNetworkGet(w http.ResponseWriter, r *http.Request, id model.SandboxID) {
-	decl, state, endpoints, err := e.Mediator.Network(r.Context(), id)
+	info, err := e.Mediator.Network(r.Context(), id)
 	if err != nil {
 		statusFor(w, err)
 		return
 	}
-	resp := encodeNetwork(decl, endpoints)
-	resp.State = string(state)
+	resp := encodeNetwork(info.Decl, info.PublishEndpoints, info.Hits, info.Attribution)
+	resp.State = string(info.State)
 	writeJSON(w, http.StatusOK, resp)
 }
 

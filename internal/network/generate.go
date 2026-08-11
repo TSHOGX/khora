@@ -27,6 +27,53 @@ type Spec struct {
 	// steered flow is DNAT'd to a host-local endpoint and never leaves), while any
 	// `allow[]` entry or `default: allow` does.
 	RoutedEgress bool
+
+	// Counters maps each DECLARATION ENTRY to the counter names its rules carry, so a
+	// caller reading counters back off a placement can attribute them to the entry the
+	// user wrote (§6.1's per-entry `hit_packet`).
+	//
+	// It is produced HERE, by the same expressions that mint the names, and that is the
+	// whole point: the alternative — re-deriving `fmt.Sprintf("allow%d_fwd", i)` at the
+	// read site — is a second copy of a naming convention that lives in this file. It
+	// would drift on the first rename and fail SILENTLY, since an unmatched name simply
+	// reports no hits, which reads exactly like a rule that was never hit.
+	Counters CounterAttribution
+}
+
+// CounterAttribution maps declaration entries to the abstract counter names carrying
+// their hit counts. Indices are declaration order, so Allow[i] belongs to
+// `egress.allow[i]` and Via[i][j] to `egress.via[i].match[j]`.
+type CounterAttribution struct {
+	// Allow[i] are ALL the counters for `egress.allow[i]`, which a reader must SUM.
+	// One entry legitimately emits up to three rules on different hooks — `input`,
+	// `forward`, and the self-gateway accept — and they are mutually exclusive per
+	// packet (a packet takes one hook, and within `input` an accept ends the chain), so
+	// summing double-counts nothing.
+	//
+	// DROPPING THE SELF-GATEWAY ONE IS THE TEMPTING MISTAKE: it is the only delivery
+	// path for a declared host-local resolver (§5.D semantics ③ / network.md D5 ⑦), so
+	// an entry that works entirely through it would report 0 hits while plainly
+	// working — the "is this rule live" signal inverted on exactly the case operators
+	// reach for first.
+	Allow [][]string
+
+	// Via[i][j] are the counters for `egress.via[i].match[j]`, and this is ONE name
+	// rather than a set: the `prerouting` DNAT, which IS the match. The companion
+	// accept on another hook acts on the same flow, so including it would count one
+	// flow twice.
+	//
+	// The divergence dnat > 0 with accept == 0 is a known ENGINE defect signature
+	// (network.md D5 ⑩'s floor-kills-`via[]` case), not a number a caller can act on,
+	// which is the other reason it stays out of this.
+	Via [][]string
+
+	// Default is the counter on the rule `egress.default` itself generates: the
+	// catch-all refusal under `deny`, the catch-all accept under `allow`.
+	//
+	// The L0 floor and the deny-safe tier are deliberately NOT here. A floor refusal is
+	// liftable by no declaration (§2.4), so attributing it to `egress.default` would
+	// send a caller to widen an allow-list that cannot help.
+	Default string
 }
 
 // Generate is §5.D's pure function: `(declaration, L0 floor) → abstract rule
@@ -109,7 +156,7 @@ func Generate(d Declaration) (Spec, error) {
 	if err := ruleset.Validate(g.rs); err != nil {
 		return Spec{}, fmt.Errorf("network: generated rule set is invalid: %w", err)
 	}
-	return Spec{Rules: g.rs, Publish: d.Ingress.Publish, RoutedEgress: routed}, nil
+	return Spec{Rules: g.rs, Publish: d.Ingress.Publish, RoutedEgress: routed, Counters: g.attr}, nil
 }
 
 // routedEgress reports whether the declaration can send anything through the
@@ -217,6 +264,48 @@ func SecondHopRules() (ruleset.RuleSet, error) {
 // gen accumulates rules in emission order.
 type gen struct {
 	rs ruleset.RuleSet
+	// attr accumulates which declaration entry each counter belongs to. Filled by the
+	// allowCounter / viaCounter / defaultCounter helpers below rather than by the emit
+	// sites, so the name and its attribution are produced by ONE expression and a
+	// rename cannot separate them (see Spec.Counters).
+	attr CounterAttribution
+}
+
+// defaultCounter records the counter on the rule `egress.default` itself generates. A
+// pass-through that exists so the attribution is written where the name is chosen, the
+// same discipline as the two helpers below.
+func (g *gen) defaultCounter(name string) string {
+	g.attr.Default = name
+	return name
+}
+
+// allowCounter mints a counter name for `egress.allow[i]` and records it against that
+// entry in the same step. Every allow-side name goes through here.
+func (g *gen) allowCounter(i int, suffix string) string {
+	name := fmt.Sprintf("allow%d_%s", i, suffix)
+	for len(g.attr.Allow) <= i {
+		g.attr.Allow = append(g.attr.Allow, nil)
+	}
+	g.attr.Allow[i] = append(g.attr.Allow[i], name)
+	return name
+}
+
+// viaCounter mints a counter name for `egress.via[i].match[j]`. Only the DNAT name is
+// recorded as attribution (see CounterAttribution.Via for why the companion accept is
+// excluded), so `record` is explicit rather than implied by the call.
+func (g *gen) viaCounter(i, j int, suffix string, record bool) string {
+	name := fmt.Sprintf("via%d_%d_%s", i, j, suffix)
+	if !record {
+		return name
+	}
+	for len(g.attr.Via) <= i {
+		g.attr.Via = append(g.attr.Via, nil)
+	}
+	for len(g.attr.Via[i]) <= j {
+		g.attr.Via[i] = append(g.attr.Via[i], "")
+	}
+	g.attr.Via[i][j] = name
+	return name
 }
 
 func (g *gen) emit(r ruleset.Rule) {
@@ -258,7 +347,7 @@ func (g *gen) steering(d Declaration) {
 				Verdict:    ruleset.DNAT,
 				Match:      m,
 				ToEndpoint: v.Endpoint,
-				Counter:    fmt.Sprintf("via%d_%d_dnat", i, j),
+				Counter:    g.viaCounter(i, j, "dnat", true),
 				Why:        fmt.Sprintf("egress.via[%d].match[%d] → %s (first-match-wins, §6.2)", i, j, v.Endpoint),
 			})
 		}
@@ -409,7 +498,7 @@ func (g *gen) inputChain(d Declaration) error {
 				Scope:   ruleset.ScopeGuestIn,
 				Verdict: ruleset.Accept,
 				Match:   m,
-				Counter: fmt.Sprintf("via%d_%d_accept", i, j),
+				Counter: g.viaCounter(i, j, "accept", false),
 				Why:     fmt.Sprintf("egress.via[%d].match[%d]: the approved floor exception — pre-NAT tuple ∧ post-NAT port ∧ interface, all three load-bearing (D5 ⑩), and in THIS chain because a cross-chain accept counts while the flow still dies", i, j),
 			})
 		}
@@ -454,7 +543,7 @@ func (g *gen) inputChain(d Declaration) error {
 				Proto:                 protoOf(t.Proto),
 				DestPort:              t.Port,
 			},
-			Counter: fmt.Sprintf("allow%d_selfgw", i),
+			Counter: g.allowCounter(i, "selfgw"),
 			Why:     fmt.Sprintf("egress.allow[%d] ∩ this sandbox's own /30 gateway — §5.D semantics ③'s only delivery path, and it must sit above the sibling drop (D5 ⑦)", i),
 		})
 	}
@@ -490,7 +579,7 @@ func (g *gen) inputChain(d Declaration) error {
 			Scope:   ruleset.ScopeGuestIn,
 			Verdict: ruleset.Accept,
 			Match:   m,
-			Counter: fmt.Sprintf("allow%d_in", i),
+			Counter: g.allowCounter(i, "in"),
 			Why:     fmt.Sprintf("egress.allow[%d] on the input hook — a forward-only allow cannot reach a host-local destination (D4.2)", i),
 		})
 	}
@@ -592,7 +681,7 @@ func (g *gen) forwardChain(d Declaration) error {
 			Scope:   ruleset.ScopeGuestIn,
 			Verdict: ruleset.Accept,
 			Match:   m,
-			Counter: fmt.Sprintf("allow%d_fwd", i),
+			Counter: g.allowCounter(i, "fwd"),
 			Why:     fmt.Sprintf("egress.allow[%d] — below the floor, above the deny-safe tier", i),
 		})
 	}
@@ -654,7 +743,7 @@ func (g *gen) forwardChain(d Declaration) error {
 			Hook:    ruleset.HookForward,
 			Scope:   ruleset.ScopeGuestIn,
 			Verdict: ruleset.Accept,
-			Counter: "fwd_default_allow",
+			Counter: g.defaultCounter("fwd_default_allow"),
 			Why:     "egress.default: allow — public egress, i.e. everything the floor above and the deny-safe tier above did not refuse (§2.4)",
 		})
 	} else {
@@ -662,7 +751,7 @@ func (g *gen) forwardChain(d Declaration) error {
 			Hook:    ruleset.HookForward,
 			Scope:   ruleset.ScopeGuestIn,
 			Verdict: ruleset.Reject,
-			Counter: "fwd_default_deny",
+			Counter: g.defaultCounter("fwd_default_deny"),
 			Why:     "egress.default: deny — the forward side needs its OWN default-deny: a destination that is not on the host and was not steered never traverses `input` at all (D5 ⑩)",
 		})
 	}

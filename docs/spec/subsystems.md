@@ -1040,9 +1040,11 @@ boundaries; internal mechanisms still to be refined are registered in
      until timeout). **The contract stops there and does not promise "the error is attributable"**: measured,
      this case and "there is no listener in the guest at all" are **word-for-word identical** on the caller's
      side (both are an RST from the gVisor netstack, that is, `connection refused`, both sub-millisecond), so
-     an external caller **cannot** tell the two apart (network.md D5 ⑯). Attribution is possible only on the
-     engine's side — the engine knows which rules it installed for this port and can read their counters,
-     while the caller has only an RST.
+     an external caller **cannot** tell the two apart (network.md D5 ⑯). Attribution needs the engine's
+     side — it knows which rules it installed for this port and can read their counters, while the
+     party holding only an RST cannot. **That party is the external TCP client, not the API caller**:
+     §6.1's `GET …/network` now reports those counters per declaration entry, so an API caller *can*
+     attribute, and what stays unattributable is a refusal seen from outside the engine.
   2. **Unallowed UDP is refused (not dropped), so QUIC does not work under `default:deny` rather than
      degrading.** The refusal shares its origin with TCP's: refusals facing the guest are always `reject`,
      and on UDP only `icmpx port-unreachable` is honored by gVisor (`admin-prohibited` is ignored and it

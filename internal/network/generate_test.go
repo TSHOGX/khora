@@ -1255,3 +1255,141 @@ func TestTheSelfGatewayAllowFollowsTheDeclaredSandboxSpaceOverlap(t *testing.T) 
 		})
 	}
 }
+
+// TestCounterAttributionCoversEveryDeclarationEntry is what makes §6.1's per-entry
+// `hit_packet` trustworthy: every entry the caller wrote must map to counter names that
+// actually EXIST in the emitted set.
+//
+// The alternative design is why this test has this shape. Re-deriving
+// fmt.Sprintf("allow%d_fwd", i) at the read site would be a second copy of a naming
+// convention living in generate.go, and it would drift on the first rename while failing
+// SILENTLY: an unmatched name reports no hits, which is indistinguishable from a rule
+// that was never hit. So attribution is produced where the names are minted, and this
+// asserts the join.
+func TestCounterAttributionCoversEveryDeclarationEntry(t *testing.T) {
+	d := Zero()
+	d.Egress.Allow = []Tuple{
+		{CIDR: mustCIDR(t, "1.1.1.1/32"), Port: 443, Proto: model.NetTCP},
+		{CIDR: mustCIDR(t, "8.8.8.8/32"), Port: 53, Proto: model.NetUDP},
+	}
+	d.Egress.Via = []Via{{
+		Endpoint: "10.0.0.5:15443",
+		Match: []Tuple{
+			{CIDR: mustCIDR(t, "2.2.2.2/32"), Port: 80, Proto: model.NetTCP},
+			{CIDR: mustCIDR(t, "3.3.3.3/32"), Port: 8443, Proto: model.NetTCP},
+		},
+	}}
+	spec := mustGenerate(t, d)
+
+	live := map[string]bool{}
+	for _, c := range spec.Rules.Counters {
+		live[c] = true
+	}
+
+	if got := len(spec.Counters.Allow); got != len(d.Egress.Allow) {
+		t.Fatalf("attribution covers %d allow entries, declaration has %d — an entry with no counters reports 0 hits forever, which reads as \"never matched\" rather than \"not measured\"", got, len(d.Egress.Allow))
+	}
+	for i, names := range spec.Counters.Allow {
+		if len(names) == 0 {
+			t.Errorf("allow[%d] has no attributed counters", i)
+		}
+		for _, n := range names {
+			if !live[n] {
+				t.Errorf("allow[%d] is attributed counter %q, absent from the emitted rule set — attribution and names have diverged, and the symptom is a permanent 0", i, n)
+			}
+		}
+	}
+	for i, row := range spec.Counters.Via {
+		for j, n := range row {
+			if n == "" {
+				t.Errorf("via[%d].match[%d] has no attributed counter", i, j)
+				continue
+			}
+			if !live[n] {
+				t.Errorf("via[%d].match[%d] is attributed %q, absent from the emitted set", i, j, n)
+			}
+		}
+	}
+	if spec.Counters.Default == "" || !live[spec.Counters.Default] {
+		t.Errorf("the default catch-all counter is %q — empty or absent from the emitted set", spec.Counters.Default)
+	}
+}
+
+// TestAllowAttributionIncludesTheSelfGatewayRule pins the aggregation mistake that would
+// break the case operators reach for FIRST.
+//
+// An `allow[]` entry inside the sandbox address space also emits a self-gateway accept,
+// and that rule is the ONLY delivery path for a declared host-local resolver (§5.D
+// semantics ③ / network.md D5 ⑦). Summing only the input/forward counters would report 0
+// hits for an entry that is plainly working — inverting the one signal §5.D has for "is
+// this rule live".
+func TestAllowAttributionIncludesTheSelfGatewayRule(t *testing.T) {
+	d := Zero()
+	d.Egress.Allow = []Tuple{{CIDR: ruleset.SandboxCIDR, Port: 53, Proto: model.NetUDP}}
+	spec := mustGenerate(t, d)
+
+	var sawSelfGw bool
+	for _, n := range spec.Counters.Allow[0] {
+		if strings.HasSuffix(n, "_selfgw") {
+			sawSelfGw = true
+		}
+	}
+	if !sawSelfGw {
+		t.Errorf("allow[0] attribution is %v, with no self-gateway counter — for a declared host-local resolver that rule is the only delivery path, so this entry would report 0 hits while working (network.md D5 ⑦)", spec.Counters.Allow[0])
+	}
+}
+
+// TestViaAttributionExcludesTheCompanionAccept pins the opposite mistake: counting both
+// of a `via[]` entry's rules double-counts, because the DNAT and its companion accept act
+// on the SAME flow at different hooks.
+//
+// The DNAT is the rule that IS the match, which is the semantics §6.1 fixes for this
+// number. dnat > 0 with accept == 0 is additionally a known engine defect signature
+// (D5 ⑩'s floor-kills-via case) rather than something a caller can act on.
+func TestViaAttributionExcludesTheCompanionAccept(t *testing.T) {
+	spec := mustGenerate(t, denyWithVia(t))
+	got := spec.Counters.Via[0][0]
+	if !strings.HasSuffix(got, "_dnat") {
+		t.Errorf("via[0].match[0] is attributed %q; want the DNAT counter — that rule IS the match, and the companion accept acts on the same flow, so counting both reports one flow twice", got)
+	}
+	// The accept IS emitted; it is simply not what this entry reports. Without this the
+	// test would pass on a fixture that never produced the shape it is about.
+	var acceptEmitted bool
+	for _, c := range spec.Rules.Counters {
+		if strings.HasPrefix(c, "via0_0_") && strings.HasSuffix(c, "_accept") {
+			acceptEmitted = true
+		}
+	}
+	if !acceptEmitted {
+		t.Fatalf("no via0_0_*_accept counter was emitted, so this test is not distinguishing the two cases")
+	}
+}
+
+// TestDefaultAttributionExcludesTheFloorAndTheTier: the aggregate reports the
+// DECLARATION's own catch-all and nothing else.
+//
+// Folding the L0 floor or the deny-safe tier in would be actively misleading rather than
+// merely imprecise: a floor refusal is liftable by no declaration (§2.4), so a caller
+// seeing those hits attributed to `egress.default` would widen an allow-list that cannot
+// help.
+func TestDefaultAttributionExcludesTheFloorAndTheTier(t *testing.T) {
+	for name, tc := range map[string]struct {
+		d    Declaration
+		want string
+	}{
+		"deny":  {denyEmpty(), "fwd_default_deny"},
+		"allow": {allowPublic(), "fwd_default_allow"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			spec := mustGenerate(t, tc.d)
+			if spec.Counters.Default != tc.want {
+				t.Errorf("default attribution = %q, want %q", spec.Counters.Default, tc.want)
+			}
+			for _, bad := range []string{"floor", "tier", "sibling", "established"} {
+				if strings.Contains(spec.Counters.Default, bad) {
+					t.Errorf("the default aggregate names a %s counter (%q) — not liftable by any declaration, so attributing it here sends a caller to widen an allow-list that cannot help (§2.4)", bad, spec.Counters.Default)
+				}
+			}
+		})
+	}
+}

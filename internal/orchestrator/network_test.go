@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -148,7 +149,7 @@ func TestAnOmittedCidrDecodesToAnyDestination(t *testing.T) {
 // They are definite values in the record; the omit-when-unreadable rule governs facts
 // that cannot be READ, of which a declaration has none.
 func TestTheReadFaceAlwaysRendersTheThreeArrays(t *testing.T) {
-	body, err := json.Marshal(encodeNetwork(network.Zero(), nil))
+	body, err := json.Marshal(encodeNetwork(network.Zero(), nil, nil, network.CounterAttribution{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,7 +175,7 @@ func TestHostEndpointIsOmittedWithoutAPlacement(t *testing.T) {
 	d := network.Zero()
 	d.Ingress.Publish = []model.NetPublish{{GuestPort: 8080, Proto: model.NetTCP}}
 
-	noPlacement, err := json.Marshal(encodeNetwork(d, nil))
+	noPlacement, err := json.Marshal(encodeNetwork(d, nil, nil, network.CounterAttribution{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +184,7 @@ func TestHostEndpointIsOmittedWithoutAPlacement(t *testing.T) {
 			"falsy-but-present field invites reading it as `is this publish in effect`, which is not "+
 			"a question this field can answer (§6.1):\n%s", noPlacement)
 	}
-	withPlacement, err := json.Marshal(encodeNetwork(d, []string{"127.0.0.1:21000"}))
+	withPlacement, err := json.Marshal(encodeNetwork(d, []string{"127.0.0.1:21000"}, nil, network.CounterAttribution{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -340,7 +341,7 @@ func TestThePortWildcardIsSpelledAsAnOmissionOnBothFaces(t *testing.T) {
 		t.Fatalf("an omitted `port` did not decode to the any-port wildcard: %+v", decl)
 	}
 
-	out, err := json.Marshal(encodeNetwork(decl, nil))
+	out, err := json.Marshal(encodeNetwork(decl, nil, nil, network.CounterAttribution{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -379,7 +380,7 @@ func TestThePortWildcardIsSpelledAsAnOmissionOnBothFaces(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	body, err := json.Marshal(encodeNetwork(pinned, nil))
+	body, err := json.Marshal(encodeNetwork(pinned, nil, nil, network.CounterAttribution{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -450,7 +451,7 @@ func TestTheReadFaceOutputIsALegalWriteBody(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Encode through the read face, then decode THAT as a write body.
-	out, err := json.Marshal(encodeNetwork(decl, nil))
+	out, err := json.Marshal(encodeNetwork(decl, nil, nil, network.CounterAttribution{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -509,16 +510,33 @@ func TestAFullReadResponseIsALegalWriteBody(t *testing.T) {
 	decl.Egress.Default = model.NetDeny
 	decl.Ingress.Publish = []model.NetPublish{{GuestPort: 8080, Proto: model.NetTCP}}
 
+	// An `allow[]` entry too, so the body carries a per-entry `hit_packet` alongside the
+	// aggregate — both are read-only members and both must round-trip.
+	decl.Egress.Allow = []model.NetTuple{{CIDR: netip.MustParsePrefix("1.1.1.1/32"), Port: 443, Proto: model.NetTCP}}
+
+	// Counters as a live placement would report them. THIS IS THE HALF THAT ACTUALLY BIT:
+	// when the counter keys first landed, `default_hit_packet` was missing from the write
+	// face and this round trip failed on a field the engine itself emits. Passing nil
+	// hits here would make the assertion below vacuous for those keys.
+	spec, err := network.Generate(decl.Normalize())
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	hits := map[string]uint64{}
+	for _, c := range spec.Rules.Counters {
+		hits[c] = 7
+	}
+
 	// A live placement: encodeNetwork renders `host_endpoint` for publish[0], and the
 	// handler stamps `state`. Together this is byte-for-byte what a caller GETs from a
 	// `running` sandbox that has published a port.
-	resp := encodeNetwork(decl, []string{"10.66.0.1:33445"})
+	resp := encodeNetwork(decl, []string{"10.66.0.1:33445"}, hits, spec.Counters)
 	resp.State = string(model.Running)
 	out, err := json.Marshal(resp)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{`"state"`, `"host_endpoint"`} {
+	for _, want := range []string{`"state"`, `"host_endpoint"`, `"hit_packet"`, `"default_hit_packet"`} {
 		if !strings.Contains(string(out), want) {
 			t.Fatalf("this test is only meaningful if the body carries %s — it does not, so the "+
 				"read face changed and the assertion below is vacuous:\n%s", want, out)
@@ -578,7 +596,7 @@ func TestAReadBackPublishItemIsALegalPublishBody(t *testing.T) {
 		d.Egress.Default = model.NetDeny
 		d.Ingress.Publish = []model.NetPublish{{GuestPort: 8080, Proto: model.NetTCP}}
 		return d
-	}(), []string{"10.66.0.1:33445"})
+	}(), []string{"10.66.0.1:33445"}, nil, network.CounterAttribution{})
 	item, err := json.Marshal(resp.Ingress.Publish[0])
 	if err != nil {
 		t.Fatal(err)
@@ -604,4 +622,63 @@ func TestAReadBackPublishItemIsALegalPublishBody(t *testing.T) {
 		t.Error("a misspelled `host_endpiont` was accepted at the publish endpoint — accepting the " +
 			"read face's own read-only member is not a general exemption (§6.1)")
 	}
+}
+
+// TestHitPacketFollowsTheOmissionRule pins the three cases §6.1 distinguishes, and the
+// distinction is not stylistic: §2.4's acceptance discipline rests on a counter reading 0
+// meaning "installed, matched nothing". If "not measured" also serialized as 0, the one
+// signal §5.D has for "is this rule live" would be destroyed at the read surface.
+func TestHitPacketFollowsTheOmissionRule(t *testing.T) {
+	decl := model.NetworkDecl{}
+	decl.Egress.Default = model.NetDeny
+	decl.Egress.Allow = []model.NetTuple{{CIDR: netip.MustParsePrefix("1.1.1.1/32"), Port: 443, Proto: model.NetTCP}}
+	spec, err := network.Generate(decl.Normalize())
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+
+	t.Run("no placement omits every counter key", func(t *testing.T) {
+		// nil hits is what the mediator returns with no live placement — and pause
+		// DESTROYS the rule-set table rather than zeroing it, so this is the truth rather
+		// than a convention papering over a zero.
+		out, _ := json.Marshal(encodeNetwork(decl, nil, nil, spec.Counters))
+		if strings.Contains(string(out), "hit_packet") {
+			t.Errorf("a response with no placement carries a counter key: %s", out)
+		}
+	})
+
+	t.Run("a real zero is PRESENT", func(t *testing.T) {
+		hits := map[string]uint64{}
+		for _, c := range spec.Rules.Counters {
+			hits[c] = 0
+		}
+		out, _ := json.Marshal(encodeNetwork(decl, nil, hits, spec.Counters))
+		if !strings.Contains(string(out), `"hit_packet":0`) {
+			t.Errorf("a counter READ AS 0 is not reported — 'installed and matched nothing' is a different fact from 'not measured', and collapsing them destroys §2.4's only liveness signal: %s", out)
+		}
+		if !strings.Contains(string(out), `"default_hit_packet":0`) {
+			t.Errorf("the default aggregate read as 0 is not reported: %s", out)
+		}
+	})
+
+	t.Run("a counter absent from the table is omitted, not zeroed", func(t *testing.T) {
+		// A non-empty map that simply lacks this entry's counters: the rule was never
+		// rendered. Reporting 0 would claim it is installed and idle.
+		out, _ := json.Marshal(encodeNetwork(decl, nil, map[string]uint64{"unrelated": 5}, spec.Counters))
+		if strings.Contains(string(out), "hit_packet") {
+			t.Errorf("a counter MISSING from the installed set was reported rather than omitted, which claims the rule is installed and idle when it was never rendered: %s", out)
+		}
+	})
+
+	t.Run("an allow entry SUMS its rules", func(t *testing.T) {
+		hits := map[string]uint64{}
+		for _, n := range spec.Counters.Allow[0] {
+			hits[n] = 3
+		}
+		out, _ := json.Marshal(encodeNetwork(decl, nil, hits, spec.Counters))
+		want := fmt.Sprintf(`"hit_packet":%d`, 3*len(spec.Counters.Allow[0]))
+		if !strings.Contains(string(out), want) {
+			t.Errorf("allow[0] did not sum its %d counters (wanted %s) — the rules are mutually exclusive per packet, so summing double-counts nothing and reporting only one hook undercounts: %s", len(spec.Counters.Allow[0]), want, out)
+		}
+	})
 }

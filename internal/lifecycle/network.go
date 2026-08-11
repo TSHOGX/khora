@@ -136,12 +136,77 @@ func (m *Mediator) InstallSecondHopTable(ctx context.Context) error {
 // string — a falsy-but-present field invites reading it as "is this publish in
 // effect", and that judgment is doubly wrong (the rule set is installed whole and
 // atomically, so there is no per-publish install state to report).
-func (m *Mediator) Network(ctx context.Context, id model.SandboxID) (model.NetworkDecl, model.Lifecycle, []string, error) {
+// NetworkInfo is the §6.1 `GET …/network` read shape.
+//
+// A STRUCT rather than more return values: this read already carried four, and the
+// per-entry hit counters would make six — at which point a caller reading
+// `_, _, x, _, _, err :=` is one reordering away from a silent mix-up between the
+// declaration's endpoints and its counters.
+type NetworkInfo struct {
+	Decl  model.NetworkDecl
+	State model.Lifecycle
+	// PublishEndpoints are the current placement's bound host endpoints, nil when the
+	// engine holds no placement (§3.3: an endpoint is a placement product).
+	PublishEndpoints []string
+	// Hits maps abstract §5.D counter names to packet counts for the CURRENT placement,
+	// and is NIL when there is no placement or the counters could not be read.
+	//
+	// Nil rather than an empty map, because §6.1 omits the key in exactly those cases and
+	// an empty map would let a caller distinguish neither. Note that pause DESTROYS the
+	// rule-set table rather than zeroing it, so "paused" genuinely has no counters to
+	// report — this is not an omission convention papering over a zero.
+	Hits map[string]uint64
+	// Attribution maps declaration entries to the counter names above (per-entry
+	// `hit_packet`). Regenerated from the record on read, which is sound because §6.1's
+	// own biconditional holds: a `running` record cannot diverge from its live rule set.
+	Attribution network.CounterAttribution
+}
+
+func (m *Mediator) Network(ctx context.Context, id model.SandboxID) (NetworkInfo, error) {
 	rec, err := m.deps.Store.GetSandbox(ctx, id)
 	if err != nil {
-		return model.NetworkDecl{}, "", nil, err
+		return NetworkInfo{}, err
 	}
-	return rec.Network.Normalize(), rec.State, m.publishEndpoints(id), nil
+	info := NetworkInfo{
+		Decl:             rec.Network.Normalize(),
+		State:            rec.State,
+		PublishEndpoints: m.publishEndpoints(id),
+	}
+	// Attribution is a pure function of the declaration, so it is available regardless of
+	// whether a placement exists — which is what lets §6.1 report the entries with their
+	// keys omitted rather than reporting nothing at all.
+	if spec, gerr := network.Generate(info.Decl); gerr == nil {
+		info.Attribution = spec.Counters
+	}
+	info.Hits = m.ruleHits(ctx, id)
+	return info, nil
+}
+
+// ruleHits reads the current placement's §5.D counters, or nil when there is no
+// placement or the read fails.
+//
+// DEGRADES rather than failing the read, the same rule inspect-shaped readers follow
+// everywhere else: a counter is observation, and §6.1 omits what it cannot read. It must
+// never fail `GET …/network`, because that endpoint is a CONTRACT REQUIREMENT of the
+// read-modify-write cycle for editing a declaration — a counter read breaking it would
+// make an unreadable counter block a security-relevant edit.
+func (m *Mediator) ruleHits(ctx context.Context, id model.SandboxID) map[string]uint64 {
+	m.mu.Lock()
+	ls := m.live[id]
+	var pl *runtime.Placement
+	if ls != nil {
+		pl = ls.placement
+	}
+	m.mu.Unlock()
+	if pl == nil || m.deps.Runtime == nil {
+		return nil
+	}
+	hits, err := m.deps.Runtime.RuleHits(ctx, pl)
+	if err != nil {
+		m.deps.Logf("read rule counters for %s: %v", id, err)
+		return nil
+	}
+	return hits
 }
 
 // publishEndpoints returns the current placement's bound publish endpoints, or nil

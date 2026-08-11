@@ -97,6 +97,10 @@ func (barrierFakeRuntime) Adopt(context.Context, string) (*runtime.Placement, bo
 	return nil, false, runtime.CauseUnknown, nil
 }
 func (barrierFakeRuntime) ReclaimOrphans(context.Context, []string) error { return nil }
+func (barrierFakeRuntime) RuleHits(context.Context, *runtime.Placement) (map[string]uint64, error) {
+	return nil, nil
+}
+
 func (barrierFakeRuntime) ReinstallRuleSet(context.Context, *runtime.Placement, runtime.SteeringSpec) error {
 	return nil
 }
