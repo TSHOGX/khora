@@ -66,15 +66,34 @@ boundaries; internal mechanisms still to be refined are registered in
     produce a whole-disk device number at all.
     That prohibition is pinned structurally by the token guard in
     `internal/runtime/seam_test.go` (`major`/`minor`/`majmin`/`devno`).
-    - **Which seam the axis lands on is itself open, and the assumption that it is this one should not
-      be inherited silently.** The external shapes point the other way: a microVM's rate limiter
-      (bandwidth and ops token buckets) hangs off the **drive** handle beside its host path, and cloud
-      block storage attaches IOPS **per volume** — i.e. the cap may belong on §5.C's seam rather than
-      on `ResourceLimits`. Nothing changes today (there is still no consumer, so adding the field
-      either place is the reservation §1.3 refuses), and **the device-number prohibition above holds
-      regardless of which seam wins** — but a rate limiter is a property of a storage attachment at
-      least as naturally as of a scheduling layer, and one such shape cannot render it universally
-      either (it must be omitted where the block backend enforces instead).
+    - **Which seam the axis lands on is settled, and it is this one — but the reason is not "the other
+      axes are here", and the external shapes that appear to disagree are answering a different
+      question.** A microVM's rate limiter hangs off the **drive** handle, and cloud block storage
+      attaches IOPS **per volume**, so it looks as though the cap belongs on §5.C. It does not,
+      because those are not this axis: a per-volume IOPS figure is a property **the storage unit
+      promises**, whereas §3.4's rate axis is a ceiling **one sandbox's consumption** may not exceed.
+      A sandbox reads and writes its Overlay upper *and* every volume mounted into it, so a
+      per-sandbox ceiling is not expressible as a property of any one unit — and putting it on §5.C
+      would silently redefine it as "each volume separately gets N", which is a different promise
+      that N volumes multiply. Both features can exist; only the second is §3.4's.
+      **The materialization needs no new contract member and no cross-subsystem call**, which is what
+      makes this seam the right home rather than merely the traditional one: `io.max` is per-device,
+      and the provider already receives every path whose device it must cover — the merged rootfs
+      handle and each `MountSource.SourcePath` — so it `stat`s them, derives each backing whole disk
+      itself, and writes one `io.max` line per distinct device. §5.B and §5.C are never asked
+      anything; the device numbers stay inside the provider exactly as the state-dir lookup above
+      does; and the ❌-list prohibition is untouched.
+    - **One consequence is a real limit and must be stated rather than discovered: a remote volume
+      backend's I/O cannot be capped by this axis at all.** Measured on a live FUSE mount, its
+      `st_dev` major is **0** — an anonymous filesystem, not a block device — so `io.max`, which keys
+      on a block-device MAJ:MIN, has nothing to address. The I/O also physically happens in the
+      backend's own userspace daemon, so it is charged to that daemon's cgroup rather than the
+      guest's. The honest disposition when the axis lands is therefore: **the cap covers what the
+      guest's cgroup owns (the Overlay upper and local volume units), and a remote backend must
+      enforce its own rate internally or report the capability absent** — never accept a rate it does
+      not apply, which is the same refuse-rather-than-degrade rule §3.4 applies to a capacity cap
+      that cannot be enforced. This is the same shape as the second hop in §2.4: the engine cannot
+      hold down a path whose I/O it does not own.
 - **How the RAM cap is apportioned is a provider-internal detail**: the interface says only
   `MemoryByte = N` (§3.4 Binding), and the provider decides for itself how to materialize "N bytes
   of RAM". Internally `local_runsc` sets the guest-visible RAM to N and the host ceiling to

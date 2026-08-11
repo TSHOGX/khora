@@ -175,13 +175,22 @@ still enters the first term of the node accounting inequality (§3.4.2):
 
 | Dimension | Mechanism | Consequence of exceeding | Role |
 | --- | --- | --- | --- |
-| **CPU** (a rate; disk I/O is the same axis and joins in the same shape once it has a consumer) | §5.A lands it on cgroup: **both a ceiling and a share are written** (`cpu.max` caps the peak, `cpu.weight` sets the relative share under contention) | The guest slows down, with no error | Resource ceiling: fair allocation |
+| **CPU** (a rate; disk I/O is the same axis and joins as one more §5.A knob once it has a consumer — with one coverage caveat, §5.A) | §5.A lands it on cgroup: **both a ceiling and a share are written** (`cpu.max` caps the peak, `cpu.weight` sets the relative share under contention) | The guest slows down, with no error | Resource ceiling: fair allocation |
 | **disk capacity** (at-rest bytes) | A filesystem-level quota, applied by §5.B to the Overlay upper+work | `write()` returns `ENOSPC` and **the sandbox lives on as usual** | Resource ceiling: fair allocation |
 | **RAM** | The host memcg (+ `oom.group=1`) | **The sandbox is terminated** | **A security limit: bounding the blast radius** |
 
 **Disk capacity and disk I/O are two orthogonal axes** — do not conflate them: cgroup cannot
 govern how many bytes are occupied at rest, and a quota cannot govern read/write rate. The
 capacity axis is the enforcement point for §2.3's blast radius on the disk dimension.
+
+**And a per-sandbox I/O rate is not the same thing as a per-volume one**, which is worth stating
+because the storage industry's shape invites the confusion: a volume that advertises N IOPS is
+promising something about **that unit**, while this axis caps what **one sandbox** may consume
+across everything it touches — its Overlay upper *and* every volume mounted into it. So the rate
+axis cannot be recorded on a volume the way the capacity cap is (above): doing that would turn one
+ceiling into N independent ones that multiply. Both features could exist; only the per-sandbox one
+is this axis, and its materialization is §5.A's (which is also where the coverage limit against a
+remote volume backend is recorded).
 
 **Writing both a ceiling and a share on the CPU axis is a necessary condition for the "fair
 allocation" role.** The contract still has only **one** knob (`cpu_millis`), from which both

@@ -149,11 +149,32 @@ type PublishPort struct {
 // missing — so adding the field before one exists is the speculative reservation
 // §1.3 rejects. It joins additively when a consumer appears, and what joins is a
 // RATE alone: io.max needs a WHOLE-DISK MAJ:MIN, and that number is the
-// PROVIDER'S to derive from its own state dir (§5.A) — it is not a contract
-// member, because a per-sandbox Binding carries no host topology and a device
-// number is a host primitive no remote provider could produce. Hence the token
-// guard in seam_test.go bans `major`/`minor`/`majmin`/`devno` outright: this
-// field would be the natural place to smuggle one in.
+// PROVIDER'S to derive (§5.A) — it is not a contract member, because a
+// per-sandbox Binding carries no host topology and a device number is a host
+// primitive no remote provider could produce. Hence the token guard in
+// seam_test.go bans `major`/`minor`/`majmin`/`devno` outright: this field would
+// be the natural place to smuggle one in.
+//
+// THIS SEAM IS THE RIGHT HOME FOR IT, AND NOT BY DEFAULT (§5.A / §3.4.1). The
+// external shapes look like they disagree — a microVM hangs its rate limiter off
+// the DRIVE handle, cloud block storage attaches IOPS PER VOLUME — but those
+// answer a different question: a per-volume IOPS figure is what a storage unit
+// PROMISES, while this axis caps what ONE SANDBOX may consume across its Overlay
+// upper AND every volume mounted into it. Recording it per volume would turn one
+// ceiling into N that multiply.
+//
+// io.max being per-device does not force a contract change either: the provider
+// already receives every path whose device it must cover (Rootfs.MergedPath and
+// each Mounts[].SourcePath), so it stats them, derives each backing whole disk,
+// and writes one io.max line per distinct device — asking §5.B and §5.C nothing.
+//
+// ONE COVERAGE LIMIT TO IMPLEMENT HONESTLY, measured rather than assumed: a
+// remote volume backend's mount point is an ANONYMOUS filesystem whose st_dev
+// major is 0 (measured on a live FUSE mount), so io.max — keyed on a block-device
+// MAJ:MIN — cannot address it, and the I/O is charged to the backend daemon's own
+// cgroup regardless. So the cap covers what the guest's cgroup owns; a remote
+// backend enforces its own rate or reports the capability absent. Accepting a
+// rate it does not apply is the silent-degradation §3.4 refuses.
 type ResourceLimits struct {
 	CPUMillis  int64 // 1000 = one full CPU
 	MemoryByte int64
