@@ -13,6 +13,9 @@ import (
 	"flag"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"warren/internal/orchestrator"
@@ -21,23 +24,24 @@ import (
 
 func main() {
 	var (
-		addr      = flag.String("addr", "127.0.0.1:8080", "listen address for the §6.1 API. MUST be loopback unless --insecure-listen is passed, and that is REFUSED AT STARTUP rather than documented (ADR-0007): the API has no authentication and no TLS — by design, since §1.4 excludes the credential family from the engine permanently — so a routable listener publishes a control plane able to create root-capable sandboxes. A default is not a boundary; pinning this to loopback is what makes a TLS-terminating, authenticating gateway in front of it the only outward-facing surface BY CONSTRUCTION rather than by an operator remembering. Every loopback spelling is accepted (127/8, ::1, the v4-mapped form); an empty host is not, since it binds every interface, and a NAME is accepted only when every address it resolves to is loopback")
-		insecure  = flag.Bool("insecure-listen", false, "permit a NON-loopback --addr, publishing the unauthenticated §6.1 API (ADR-0007). It buys exactly one thing: the loopback check is not consulted — no authentication appears either way, so anything that can route to this host can create, read and destroy sandboxes and read every file in them. Pass it only where the network itself is the boundary (a private namespace, a host firewall). It exists so that publishing the API is a DECISION on the record — in `ps` output and in the startup log — rather than an omission; refusing outright would only push an operator to patch the source, which takes the decision out of the record entirely")
-		templates = flag.String("templates", "/var/lib/warren/templates", "BUILT Template directory root: each subdirectory is a builtin Template whose directory name IS its TemplateID, and the boot seed registers every one it finds. The repo holds Template DEFINITIONS (templates/bare/), and `templates/bare/build.sh` writes the built artifact here — so this must NOT point at the definitions directory, or the seed registers source files as a runnable Template. Defaults to an ABSOLUTE path outside any Go module, unlike --state/--store, and that asymmetry is deliberate: a Template contains mode-0700 root-owned directories (Debian's /etc/ssl/private), so one built inside a module tree makes `go build ./...` fail for a non-root user. build.sh refuses an in-module destination for the same reason")
-		state     = flag.String("state", "./scratch/state", "state root (overlays + runsc state/bundles)")
-		storePath = flag.String("store", "./scratch/store.db", "SQLite store file (ADR-0004)")
-		volumes   = flag.String("volumes-dir", "", "§5.C volume storage root, one unit per volume; empty = <state>/volumes. A SIBLING of the overlay root, never nested inside it — each subsystem's orphan sweep enumerates its own root, so nesting would put one subsystem's units inside the other's enumeration")
-		health    = flag.Duration("health-timeout", 30*time.Second, "cold-start readiness gate timeout (⑦)")
-		idleTO    = flag.Duration("idle-timeout", 30*time.Minute, "default idle TTL: running idle past this → auto-pause (§4.3)")
-		retention = flag.Duration("retention", 24*time.Hour, "default retention TTL: paused past this → evict (§4.3)")
-		sweep     = flag.Duration("reaper-interval", 30*time.Second, "reaper sweep cadence (§4.3)")
-		evtRetain = flag.Duration("event-retention", 0, "§4.4-C replayable event-stream window: DELIVERED outbox rows older than this are trimmed, which advances `earliest` in GET /v1/events and makes its 410 reachable. 0 = never trim (the default), keeping all history replayable at the cost of unbounded at-rest growth. Argue the value from the reconnect window you promise your SUBSCRIBERS, never from disk: a subscriber whose cursor falls below `earliest` gets 410 and must restart from there, losing every event in between. Age is measured from DELIVERY, not occurrence, so a publisher halted for a week does not make its backlog instantly trimmable. Undelivered rows are never trimmed at any setting")
-		tdBudget  = flag.Duration("transport-down-budget", 2*time.Minute, "transport-down restart budget before escalate→resume (D4b)")
-		nodeDisk  = flag.Int64("node-disk-byte", 0, "§3.4 no-oversubscribe disk budget: bytes for sandbox Overlay upper+work plus Template/layer bytes; 0 = unmetered (axis not gated). Set BELOW the raw device size — the budget counts only what the engine may PROMISE guests, so per-sandbox substrate overhead (runsc state on disk) lives outside it. While metered, a create must specify a disk cap or it is refused")
-		nodeMem   = flag.Int64("node-memory-byte", 0, "§3.4 no-oversubscribe memory budget: total host RAM the engine may promise to sandboxes; 0 = unmetered (axis not gated). Set BELOW physical RAM — the budget counts only what the engine may PROMISE guests, so per-sandbox substrate overhead (sentry/gofer footprint) lives outside it. While metered, a create must specify a memory cap or it is refused")
-		sudo      = flag.Bool("sudo", false, "prefix runsc/ip with sudo (dev; prod runs as root)")
-		viaUID    = flag.Int("via-uid", -1, "§2.4 invariant 2: the uid of the host-local process behind `egress.via[].endpoint`, whose OWN egress the engine pins under the same L0 floor. A DEPLOYMENT input, never a declaration field — the engine does not know or ask what is behind that endpoint, only which local uid to pin. Unset (-1) ⇒ no second-hop table is installed AND `egress.via[]` declarations are REFUSED (400): accepting one would record a declaration whose invariant the engine cannot enforce, leaving a confused deputy live while every first-hop assertion still passes. Must NOT be this process's own uid — that value puts the engine's own guest dials under the second-hop floor and is refused at startup (it would break transport for every sandbox, intermittently)")
-		pubIP     = flag.String("publish-ip", "", "host address §5.D `ingress.publish[]` endpoints bind to; empty = 127.0.0.1. The conservative default is deliberate: publish is an EXPLICIT inbound exception (§2.1 ③), so reachability from outside this host must come from a decision rather than from omitting a flag")
+		addr       = flag.String("addr", "127.0.0.1:8080", "listen address for the §6.1 API. MUST be loopback unless --insecure-listen is passed, and that is REFUSED AT STARTUP rather than documented (ADR-0007): the API has no authentication and no TLS — by design, since §1.4 excludes the credential family from the engine permanently — so a routable listener publishes a control plane able to create root-capable sandboxes. A default is not a boundary; pinning this to loopback is what makes a TLS-terminating, authenticating gateway in front of it the only outward-facing surface BY CONSTRUCTION rather than by an operator remembering. Every loopback spelling is accepted (127/8, ::1, the v4-mapped form); an empty host is not, since it binds every interface, and a NAME is accepted only when every address it resolves to is loopback")
+		insecure   = flag.Bool("insecure-listen", false, "permit a NON-loopback --addr, publishing the unauthenticated §6.1 API (ADR-0007). It buys exactly one thing: the loopback check is not consulted — no authentication appears either way, so anything that can route to this host can create, read and destroy sandboxes and read every file in them. Pass it only where the network itself is the boundary (a private namespace, a host firewall). It exists so that publishing the API is a DECISION on the record — in `ps` output and in the startup log — rather than an omission; refusing outright would only push an operator to patch the source, which takes the decision out of the record entirely")
+		templates  = flag.String("templates", "/var/lib/warren/templates", "BUILT Template directory root: each subdirectory is a builtin Template whose directory name IS its TemplateID, and the boot seed registers every one it finds. The repo holds Template DEFINITIONS (templates/bare/), and `templates/bare/build.sh` writes the built artifact here — so this must NOT point at the definitions directory, or the seed registers source files as a runnable Template. Defaults to an ABSOLUTE path outside any Go module, unlike --state/--store, and that asymmetry is deliberate: a Template contains mode-0700 root-owned directories (Debian's /etc/ssl/private), so one built inside a module tree makes `go build ./...` fail for a non-root user. build.sh refuses an in-module destination for the same reason")
+		state      = flag.String("state", "./scratch/state", "state root (overlays + runsc state/bundles)")
+		storePath  = flag.String("store", "./scratch/store.db", "SQLite store file (ADR-0004)")
+		volumes    = flag.String("volumes-dir", "", "§5.C volume storage root, one unit per volume; empty = <state>/volumes. A SIBLING of the overlay root, never nested inside it — each subsystem's orphan sweep enumerates its own root, so nesting would put one subsystem's units inside the other's enumeration")
+		health     = flag.Duration("health-timeout", 30*time.Second, "cold-start readiness gate timeout (⑦)")
+		idleTO     = flag.Duration("idle-timeout", 30*time.Minute, "default idle TTL: running idle past this → auto-pause (§4.3)")
+		retention  = flag.Duration("retention", 24*time.Hour, "default retention TTL: paused past this → evict (§4.3)")
+		sweep      = flag.Duration("reaper-interval", 30*time.Second, "reaper sweep cadence (§4.3)")
+		evtRetain  = flag.Duration("event-retention", 0, "§4.4-C replayable event-stream window: DELIVERED outbox rows older than this are trimmed, which advances `earliest` in GET /v1/events and makes its 410 reachable. 0 = never trim (the default), keeping all history replayable at the cost of unbounded at-rest growth. Argue the value from the reconnect window you promise your SUBSCRIBERS, never from disk: a subscriber whose cursor falls below `earliest` gets 410 and must restart from there, losing every event in between. Age is measured from DELIVERY, not occurrence, so a publisher halted for a week does not make its backlog instantly trimmable. Undelivered rows are never trimmed at any setting")
+		tdBudget   = flag.Duration("transport-down-budget", 2*time.Minute, "transport-down restart budget before escalate→resume (D4b)")
+		nodeDisk   = flag.Int64("node-disk-byte", 0, "§3.4 no-oversubscribe disk budget: bytes for sandbox Overlay upper+work plus Template/layer bytes; 0 = unmetered (axis not gated). Set BELOW the raw device size — the budget counts only what the engine may PROMISE guests, so per-sandbox substrate overhead (runsc state on disk) lives outside it. While metered, a create must specify a disk cap or it is refused")
+		nodeMem    = flag.Int64("node-memory-byte", 0, "§3.4 no-oversubscribe memory budget: total host RAM the engine may promise to sandboxes; 0 = unmetered (axis not gated). Set BELOW physical RAM — the budget counts only what the engine may PROMISE guests, so per-sandbox substrate overhead (sentry/gofer footprint) lives outside it. While metered, a create must specify a memory cap or it is refused")
+		sudo       = flag.Bool("sudo", false, "prefix runsc/ip with sudo (dev; prod runs as root)")
+		viaUID     = flag.Int("via-uid", -1, "§2.4 invariant 2: the uid of the host-local process behind `egress.via[].endpoint`, whose OWN egress the engine pins under the same L0 floor. A DEPLOYMENT input, never a declaration field — the engine does not know or ask what is behind that endpoint, only which local uid to pin. Unset (-1) ⇒ no second-hop table is installed AND `egress.via[]` declarations are REFUSED (400): accepting one would record a declaration whose invariant the engine cannot enforce, leaving a confused deputy live while every first-hop assertion still passes. Must NOT be this process's own uid — that value puts the engine's own guest dials under the second-hop floor and is refused at startup (it would break transport for every sandbox, intermittently)")
+		pubIP      = flag.String("publish-ip", "", "host address §5.D `ingress.publish[]` endpoints bind to; empty = 127.0.0.1. The conservative default is deliberate: publish is an EXPLICIT inbound exception (§2.1 ③), so reachability from outside this host must come from a decision rather than from omitting a flag")
+		shutdownTO = flag.Duration("shutdown-timeout", 30*time.Second, "how long a SIGTERM/SIGINT drain waits for in-flight requests before closing them. RUNNING SANDBOXES ARE NOT TOUCHED at any value: they keep running and the next boot re-adopts them (§4.4-A takeover — same placement, same IP, no new epoch), because a pause would discard guest memory (§4.2 stores none) and make a routine restart destroy every guest's in-memory work. A DEADLINE IS REQUIRED rather than optional: the data plane's normal shape is a long-lived stream (an attached shell at a prompt), and a drain waiting on one would never return — measured. When it expires those streams are closed, which is reconnectable (§5.E Connect); a shutdown that never completes is not. Set it above your longest unary request, not above your longest stream")
 	)
 	flag.Parse()
 
@@ -161,9 +165,20 @@ func main() {
 		log.Printf("orchestrator: boot orphan-unit sweep (retried by reaper): %v", err)
 	}
 
+	// ONE CONTEXT OWNING EVERY BACKGROUND LOOP, cancelled by the signal handler
+	// below. The loops (publisher, monitor, reaper) each exit on ctx.Done, so
+	// cancelling this is how they stop — and they must stop BEFORE the store closes,
+	// or a tick landing afterwards logs a spurious "store closed" error that reads
+	// like a defect.
+	//
+	// Previously context.Background() per loop, which made them unstoppable: the
+	// process only ever ended by SIGKILL or log.Fatalf.
+	runCtx, stopLoops := context.WithCancel(context.Background())
+	defer stopLoops()
+
 	// async outbox publisher (§4.4-C): drain the durable outbox to the event sink.
 	const publishInterval = time.Second
-	go eng.Publisher.Run(context.Background(), publishInterval)
+	go eng.Publisher.Run(runCtx, publishInterval)
 
 	// Publisher health, sampled on an INDEPENDENT goroutine (§4.4-C operability).
 	// This repo has no metrics dependency and this does not introduce one — the
@@ -177,7 +192,7 @@ func main() {
 	// STOPPED, which for a billing subscriber means charges stop accruing — it is
 	// not a degraded mode that heals itself, and clearing it is an operator action
 	// (Publisher.Resume).
-	go eng.Publisher.Monitor(context.Background(), 10*time.Second, 30*publishInterval, func(s store.Stats) {
+	go eng.Publisher.Monitor(runCtx, 10*time.Second, 30*publishInterval, func(s store.Stats) {
 		if s.Halted {
 			log.Printf("ALERT: outbox publisher HALTED on event %s (seq %d) after %d attempts: %s — "+
 				"the event stream has stopped; %d rows are undelivered and nothing behind this event will be published until an operator intervenes",
@@ -192,7 +207,7 @@ func main() {
 	// §4.3 reaper: the autonomous control loop (auto-pause / crash-pause / evict
 	// + periodic reconcile). Started AFTER startup reconcile so it never races
 	// the boot-time orphan reclaim / re-adoption.
-	go eng.Reaper.Run(context.Background())
+	go eng.Reaper.Run(runCtx)
 
 	// The published case is logged as a WARNING at the moment of serving, not merely
 	// permitted by the flag (ADR-0007): the flag records the decision in `ps` output,
@@ -203,8 +218,63 @@ func main() {
 			"The API has NO authentication and NO TLS, so anything that can route to this host can "+
 			"create, read and destroy sandboxes and read every file in them (ADR-0007)", *addr)
 	}
+
+	srv := &http.Server{Addr: *addr, Handler: eng.HTTPHandler()}
+
+	// SIGTERM / SIGINT → graceful shutdown. `cmd/sandboxd` is the in-repo precedent
+	// for the shape (signal.Notify in the init path); what differs is what the signal
+	// MEANS here, and that difference is the design:
+	//
+	// A SANDBOX IS NOT A REQUEST, so this does NOT pause running sandboxes. They keep
+	// running, and the next boot re-adopts them (§4.4-A takeover: the same placement,
+	// the same IP, no new epoch). Pausing on the way out would be the larger blast
+	// radius, not the safer one — a pause discards guest memory (§4.2 stores none,
+	// permanently), so restarting the orchestrator to change a flag would destroy
+	// every guest's in-memory work. Engine.Shutdown's comment carries the full
+	// argument.
+	sigCh := make(chan os.Signal, 2)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	go func() {
+		sig := <-sigCh
+		log.Printf("orchestrator: %v — draining. Running sandboxes are LEFT RUNNING and re-adopted at "+
+			"the next boot (§4.4-A); in-flight requests have %s to finish", sig, *shutdownTO)
+
+		// A SECOND signal stops immediately. An operator who sends TERM twice means
+		// it, and a hard stop is survivable by construction (§4.4-A) — so refusing to
+		// honor it would just push them to SIGKILL, which is the same exit with the
+		// store closed less cleanly.
+		go func() {
+			s2 := <-sigCh
+			log.Printf("orchestrator: second %v — exiting now without waiting for the drain", s2)
+			os.Exit(1)
+		}()
+
+		ctx, cancel := context.WithTimeout(context.Background(), *shutdownTO)
+		defer cancel()
+		// The order matters: drain HTTP first (in-flight requests keep working, and a
+		// mid-flight resume completes its chain intact — Shutdown does not cancel a
+		// handler's context), then stop the loops, then close the store.
+		err := eng.Shutdown(ctx, srv)
+		stopLoops()
+		if err != nil {
+			log.Printf("orchestrator: shutdown: %v", err)
+			os.Exit(1)
+		}
+		log.Printf("orchestrator: stopped cleanly")
+		os.Exit(0)
+	}()
+
+	// READY only now: everything above — the seed, the sweeps, the second-hop table,
+	// §4.4-A reconciliation — had to finish first, because /readyz answering "ok"
+	// before reconciliation would tell a load balancer to send traffic to a process
+	// that has not yet re-adopted its running sandboxes.
+	eng.MarkReady()
+
 	log.Printf("orchestrator: serving §6.1 API on %s (templates=%s state=%s store=%s)", *addr, *templates, *state, *storePath)
-	if err := http.ListenAndServe(*addr, eng.HTTPHandler()); err != nil {
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("orchestrator: serve: %v", err)
 	}
+	// ListenAndServe returned ErrServerClosed: the signal goroutine owns the exit.
+	// Block so the process does not race past it.
+	select {}
 }

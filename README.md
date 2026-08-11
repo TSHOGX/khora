@@ -27,7 +27,7 @@ across hosts, CPUs and runsc versions rather than pinned to a set of CPU feature
 > substrate (92 end-to-end acceptance tests on actual runsc/overlayfs/btrfs/nftables),
 > and [`deploy/`](deploy/) now carries the authenticating TLS boundary that goes in
 > front of it. Still missing before you deploy this: there is no client library or CLI,
-> no `/healthz`/`/readyz` or metrics, and no production Template ships in this repo.
+> and no production Template ships in this repo.
 > See [What is missing](#what-is-missing-before-you-deploy-this).
 
 ## Why this instead of a managed sandbox service
@@ -107,7 +107,21 @@ stated out loud (`--insecure-listen`) rather than a flag value nobody noticed. P
 authenticating TLS gateway in front of it — [`deploy/`](deploy/) has both options.
 Notable flags — `--node-disk-byte` / `--node-memory-byte` turn on no-oversubscribe admission,
 `--idle-timeout` / `--retention` set the reaping TTLs, `--publish-ip` sets the host
-address published guest ports bind to. `--help` lists all of them with their reasoning.
+address published guest ports bind to, `--shutdown-timeout` bounds the drain.
+`--help` lists all of them with their reasoning.
+
+```sh
+curl -s localhost:8080/healthz   # liveness: is this the right process to keep running
+curl -s localhost:8080/readyz    # readiness: should traffic come here now
+curl -s localhost:8080/metrics   # Prometheus text: publisher health, outbox depth, state counts
+```
+
+**SIGTERM leaves running sandboxes running.** It stops the listener, lets in-flight
+requests finish, and exits; the next boot re-adopts the live sandboxes with the same
+placement and IP (§4.4-A takeover). It deliberately does *not* pause them — a pause
+discards guest memory, so restarting the orchestrator to change a flag would destroy
+every guest's in-memory work. Streams still open when `--shutdown-timeout` expires are
+closed, and callers reconnect. A second SIGTERM exits immediately.
 
 ## Test
 
@@ -160,8 +174,13 @@ Known and deliberate, not oversights:
   and the two alternatives that are worse, are in
   [`templates/bare/README.md`](templates/bare/README.md). Note also that the repo holds
   the Template's *definition*, not the built tree — you build it once.
-- **No `/healthz`, `/readyz`, or metrics**, and no graceful shutdown yet. Operational
-  signal is logs.
+- **Operational signal is deliberately process-level.** `/healthz`, `/readyz` and
+  `/metrics` (Prometheus text, no dependency) report publisher health, outbox depth,
+  and sandbox counts by state; per-object numbers stay on the §6.1 read surfaces
+  rather than being exported twice. The two probes diverge on purpose: a halted outbox
+  publisher makes the instance **not ready but still alive**, because a restart cannot
+  clear a poison envelope in a durable outbox. What is missing is anything richer —
+  there are no traces, and no per-sandbox metrics.
 - **The event outbox does not trim by default.** `--event-retention` bounds it, but the
   default is 0 (never trim), because the right window is the reconnect duration you
   promise your subscribers and the engine must not invent that number. Left unset, the

@@ -143,6 +143,9 @@ type Engine struct {
 	Mediator  *lifecycle.Mediator
 	Store     store.Store
 	Publisher *store.Publisher
+	// health backs /healthz, /readyz and /metrics (see health.go). A field rather
+	// than package state so two Engines in one test process do not share counters.
+	health health
 	// Reaper is the §4.3 autonomous control loop (auto-pause / crash-pause /
 	// evict + periodic reconcile). Built here; started by the caller AFTER
 	// startup Reconcile, via Reaper.Run in its own goroutine.
@@ -249,7 +252,9 @@ func New(cfg Config) (*Engine, error) {
 
 	reaper := lifecycle.NewReaper(med, cfg.SweepInterval, cfg.TransportDownBudget)
 
-	return &Engine{Mediator: med, Store: st, Publisher: pub, Reaper: reaper}, nil
+	eng := &Engine{Mediator: med, Store: st, Publisher: pub, Reaper: reaper}
+	eng.health.startedAt = time.Now()
+	return eng, nil
 }
 
 // SeedTemplates runs the boot seed (§4.3 + §4.4-A: ensure a builtin `templates` row per

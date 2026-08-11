@@ -45,6 +45,11 @@ func (e *Engine) HTTPHandler() http.Handler {
 	mux.Handle(transportv1connect.NewProcessServiceHandler(&processProxy{e: e}))
 	mux.Handle(transportv1connect.NewFsServiceHandler(&fsProxy{e: e}))
 
+	// --- operational surface: /healthz, /readyz, /metrics (health.go) ---
+	// Deliberately NOT under /v1: the §6.1 contract is the sandbox-centric API, and
+	// an operational endpoint is not part of it.
+	e.registerHealthRoutes(mux)
+
 	// --- control plane: §6.1 REST/JSON ---
 	// POST /v1/sandboxes ; GET /v1/sandboxes
 	mux.HandleFunc("/v1/sandboxes", func(w http.ResponseWriter, r *http.Request) {
