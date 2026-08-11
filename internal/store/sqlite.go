@@ -472,16 +472,37 @@ func (s *SQLite) DeleteSandbox(ctx context.Context, id model.SandboxID, ev *Even
 	})
 }
 
-func (s *SQLite) UnpublishedEvents(ctx context.Context) ([]Event, error) {
+func (s *SQLite) UnpublishedEvents(ctx context.Context, limit int) ([]Event, error) {
+	if limit <= 0 {
+		// Refused rather than treated as unbounded: "0 means everything" is how the
+		// unbounded scan this parameter exists to prevent would come back, and it would
+		// come back silently on a caller that simply forgot the argument.
+		return nil, fmt.Errorf("store: UnpublishedEvents limit must be positive, got %d", limit)
+	}
 	// ORDER BY seq, not occurred_at: the sequence is the total order the Store
 	// contract promises (equal-nanosecond timestamps have no tie-break).
+	//
+	// LIMIT is load-bearing rather than an optimization: this runs on the publisher's
+	// per-second loop against a pool pinned to ONE connection, so materializing the
+	// whole backlog here both allocates it and holds that connection for the length of
+	// the scan — which every state transition then waits behind.
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT seq, id, sandbox, kind, state, occurred_at FROM outbox WHERE published_at IS NULL ORDER BY seq`)
+		`SELECT seq, id, sandbox, kind, state, occurred_at FROM outbox WHERE published_at IS NULL ORDER BY seq LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	return scanEvents(rows)
+}
+
+// CountUnpublished implements Store.CountUnpublished: the backlog gauge's own source,
+// independent of the drain read (§4.4-C ③).
+func (s *SQLite) CountUnpublished(ctx context.Context) (int64, error) {
+	var n int64
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE published_at IS NULL`).Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
 }
 
 // Events implements the §6.1 replay read (Store.Events). Delivery state is not a

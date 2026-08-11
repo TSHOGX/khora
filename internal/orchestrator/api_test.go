@@ -576,7 +576,7 @@ func TestAPIEventsReplayIgnoresDeliveryState(t *testing.T) {
 	if n, err := p.PublishOnce(context.Background()); err != nil || n != 3 {
 		t.Fatalf("drain n=%d err=%v; want 3,nil", n, err)
 	}
-	if un, _ := mem.UnpublishedEvents(context.Background()); len(un) != 0 {
+	if un, _ := mem.UnpublishedEvents(context.Background(), 100 /* any bound; this asserts on ZERO events */); len(un) != 0 {
 		t.Fatalf("%d rows still unpublished after the drain", len(un))
 	}
 	got := getEvents(t, srv, "?after=0")

@@ -76,7 +76,7 @@ func TestPublisherDeliversAndMarks(t *testing.T) {
 		t.Fatalf("PublishOnce n=%d err=%v; want 2,nil", n, err)
 	}
 	// nothing left unpublished.
-	un, _ := st.UnpublishedEvents(ctx)
+	un, _ := st.UnpublishedEvents(ctx, allUnpublished)
 	if len(un) != 0 {
 		t.Fatalf("%d rows still unpublished", len(un))
 	}
@@ -104,7 +104,7 @@ func TestPublisherRetriesOnSinkFailure(t *testing.T) {
 	if _, err := p.PublishOnce(ctx); err == nil {
 		t.Fatal("want delivery error on first pass")
 	}
-	if un, _ := st.UnpublishedEvents(ctx); len(un) != 1 {
+	if un, _ := st.UnpublishedEvents(ctx, allUnpublished); len(un) != 1 {
 		t.Fatalf("failed delivery should stay unpublished; got %d", len(un))
 	}
 	// sink recovered → retry delivers it.
@@ -147,7 +147,7 @@ func TestPublisherAtLeastOnceDedupOnRestart(t *testing.T) {
 	// --- pre-crash: deliver e1 (dedup counts it), then CRASH before marking it.
 	// Simulate by delivering through the dedup sink directly, WITHOUT calling
 	// MarkPublished — exactly the "delivered, not yet marked" window.
-	un, _ := st.UnpublishedEvents(ctx)
+	un, _ := st.UnpublishedEvents(ctx, allUnpublished)
 	if len(un) != 2 {
 		t.Fatalf("want 2 unpublished pre-crash; got %d", len(un))
 	}
@@ -163,7 +163,7 @@ func TestPublisherAtLeastOnceDedupOnRestart(t *testing.T) {
 	t.Cleanup(func() { _ = st2.Close() })
 
 	// after restart both e1 and e2 are STILL unpublished (durable, not dropped).
-	un2, _ := st2.UnpublishedEvents(ctx)
+	un2, _ := st2.UnpublishedEvents(ctx, allUnpublished)
 	if len(un2) != 2 {
 		t.Fatalf("want 2 unpublished after restart (nothing dropped); got %d", len(un2))
 	}
@@ -255,7 +255,7 @@ func TestPublisherHeadOfLineBlocksLaterEvents(t *testing.T) {
 	if got := sink.attempts(); got != 1 {
 		t.Fatalf("sink saw %d attempts (%v); want 1 — later events must NOT be attempted past a failing head", got, sink.calls)
 	}
-	if un, _ := st.UnpublishedEvents(ctx); len(un) != 3 {
+	if un, _ := st.UnpublishedEvents(ctx, allUnpublished); len(un) != 3 {
 		t.Fatalf("%d rows unpublished; want all 3 (nothing may be marked while the head is stuck)", len(un))
 	}
 
@@ -326,7 +326,7 @@ func TestPublisherPoisonEnvelopeHaltsAfterMaxAttempts(t *testing.T) {
 		t.Fatal("Stats().LastError is empty; the halt must carry WHY")
 	}
 	// At-least-once is intact throughout: nothing was dropped or marked.
-	if un, _ := st.UnpublishedEvents(ctx); len(un) != 2 {
+	if un, _ := st.UnpublishedEvents(ctx, allUnpublished); len(un) != 2 {
 		t.Fatalf("%d rows unpublished; want 2 — a halt must not drop or mark anything", len(un))
 	}
 
@@ -556,5 +556,61 @@ func TestDedupSinkIdempotent(t *testing.T) {
 	_ = d.Deliver(ctx, e)
 	if n != 1 {
 		t.Fatalf("handler fired %d times; want 1", n)
+	}
+}
+
+// allUnpublished: see the note in internal/lifecycle — UnpublishedEvents requires a
+// positive bound, and these tests want every row they wrote.
+const allUnpublished = 1000
+
+// alwaysFailingSink never delivers. countingSink's failNext clears itself after one
+// failure, which would let the drain proceed and close the backlog this test needs open.
+type alwaysFailingSink struct{}
+
+func (alwaysFailingSink) Deliver(context.Context, store.Event) error {
+	return errors.New("sink is down")
+}
+
+// TestBacklogGaugeReportsTheTotalNotTheDrainBatch is §4.4-C ③ at the publisher: the
+// gauge must not share a source with the loop it observes.
+//
+// The drain read is bounded (store.DrainBatch) so that a per-second pass cannot
+// materialize an unbounded backlog on a single-connection pool. That bound makes
+// len(the batch) useless as a gauge: it saturates, so a backlog of any size above the
+// bound reports as exactly the bound — a small constant at precisely the moment the
+// number matters, making "badly behind" indistinguishable from "healthy".
+//
+// The sink here FAILS, which is what holds the backlog open: delivery stops at the first
+// failure by design (head-of-line blocking is kept, §4.4-C), so nothing drains and the
+// rows stay unpublished across the pass.
+func TestBacklogGaugeReportsTheTotalNotTheDrainBatch(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	seedPubTmpl(t, st)
+	_ = st.CreateSandbox(ctx, model.Sandbox{ID: "a", Template: "bare", State: model.Creating}, nil)
+
+	// More rows than one drain pass reads.
+	total := store.DrainBatch + 7
+	for i := 0; i < total; i++ {
+		from, to := model.Paused, model.Running
+		kind := model.EventKind("resumed")
+		switch {
+		case i == 0:
+			from, to, kind = model.Creating, model.Running, model.EventKind("created")
+		case i%2 == 1:
+			from, to, kind = model.Running, model.Paused, model.EventKind("paused")
+		}
+		if err := st.CompareAndSetState(ctx, "a", from, to, ev("a", fmt.Sprintf("e%d", i), kind, to), nil); err != nil {
+			t.Fatalf("seed %d: %v", i, err)
+		}
+	}
+
+	p := store.NewPublisherWithConfig(st, alwaysFailingSink{}, store.PublisherConfig{MaxAttempts: 100})
+	if _, err := p.PublishOnce(ctx); err == nil {
+		t.Fatalf("PublishOnce with a failing sink returned nil error — the backlog would not stay open")
+	}
+
+	if got := p.Stats().Backlog; got != int64(total) {
+		t.Errorf("Backlog = %d with %d rows unpublished and a drain bound of %d — the gauge is reading the drain batch's length, so it saturates at the bound and a large backlog reports as a small constant (§4.4-C ③: observability must not share a source with the loop being observed)", got, total, store.DrainBatch)
 	}
 }

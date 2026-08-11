@@ -25,7 +25,7 @@ import (
 // kindsFor returns the outbox event Kinds for one sandbox, in commit order.
 func kindsFor(t *testing.T, st *store.Memory, id model.SandboxID) []string {
 	t.Helper()
-	evs, err := st.UnpublishedEvents(context.Background())
+	evs, err := st.UnpublishedEvents(context.Background(), allUnpublished)
 	if err != nil {
 		t.Fatalf("UnpublishedEvents: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestLifecycleEmitsExactlyOneEventPerTransition(t *testing.T) {
 
 	// Distinct transition IDs. Subscribers dedup on this ID (§4.4-C), so two
 	// transitions sharing one would silently collapse into a single delivery.
-	evs, _ := st.UnpublishedEvents(ctx)
+	evs, _ := st.UnpublishedEvents(ctx, allUnpublished)
 	seen := map[string]string{}
 	for _, e := range evs {
 		if e.Sandbox != sid {
@@ -114,7 +114,7 @@ func TestFailedCreatePublishesNothing(t *testing.T) {
 	if _, err := m.Create(ctx, CreateSpec{Template: "bare"}); err == nil {
 		t.Fatal("Create should have failed at launch")
 	}
-	evs, _ := st.UnpublishedEvents(ctx)
+	evs, _ := st.UnpublishedEvents(ctx, allUnpublished)
 	if len(evs) != 0 {
 		var kinds []string
 		for _, e := range evs {
@@ -154,7 +154,7 @@ func TestDestroyFromCreatingPublishesNothing(t *testing.T) {
 		t.Error("record survived Destroy")
 	}
 	// ...and it published nothing.
-	evs, _ := st.UnpublishedEvents(ctx)
+	evs, _ := st.UnpublishedEvents(ctx, allUnpublished)
 	for _, e := range evs {
 		if e.Sandbox == sid {
 			t.Errorf("destroying a `creating` record published %q — unpaired terminal: "+
@@ -238,3 +238,10 @@ func TestPromoteFromPausedPublishesNothing(t *testing.T) {
 		t.Fatalf("promote of an already-paused sandbox published %v; want nothing (no state changed)", got)
 	}
 }
+
+// allUnpublished is the bound these tests pass to Store.UnpublishedEvents. That method
+// REQUIRES a positive limit — it used to take none and scan the whole backlog on a
+// per-second loop, which is the defect the parameter exists to prevent — so a test
+// asking for "everything it produced" states a number instead. Well above anything here
+// creates, and a truncated read would show up as a missing event rather than silently.
+const allUnpublished = 1000

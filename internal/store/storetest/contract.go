@@ -66,6 +66,14 @@ func RunContract(t *testing.T, mk Factory) {
 
 	t.Run("OutboxNilPublishesNothing", func(t *testing.T) { testOutboxNil(t, mk) })
 	t.Run("MarkPublishedIdempotent", func(t *testing.T) { testMarkPublished(t, mk) })
+
+	// The drain read's bound and the gauge's independence from it are ONE contract, not
+	// a SQLite detail: the publisher runs one algorithm against this interface (§4.4-C's
+	// "the algorithm is written exactly once"), so a backend that ignored the limit — or
+	// whose count saturated at it — would break §4.4-C ③ observability on that backend
+	// alone, and only in production, where the backlog is large enough to notice.
+	t.Run("UnpublishedEventsHonorsItsLimit", func(t *testing.T) { testUnpublishedLimit(t, mk) })
+	t.Run("CountUnpublishedIsIndependentOfTheDrainBound", func(t *testing.T) { testCountUnpublished(t, mk) })
 	t.Run("OutboxRowOutlivesRecord", func(t *testing.T) { testOutboxOutlivesRecord(t, mk) })
 	t.Run("Durability", func(t *testing.T) { testDurability(t, mk) })
 
@@ -151,7 +159,7 @@ func testSequenceTotalOrder(t *testing.T, mk Factory) {
 		state = next
 	}
 
-	un, err := s.UnpublishedEvents(ctx)
+	un, err := s.UnpublishedEvents(ctx, allUnpublished)
 	if err != nil {
 		t.Fatalf("unpublished: %v", err)
 	}
@@ -518,7 +526,7 @@ func testConcurrentCAS(t *testing.T, mk Factory) {
 		}
 		// Exactly ONE outbox row for this sandbox. N rows would bill one transition
 		// N times, and their IDs differ so subscriber dedup could not collapse them.
-		un, err := s.UnpublishedEvents(ctx)
+		un, err := s.UnpublishedEvents(ctx, allUnpublished)
 		if err != nil {
 			t.Fatalf("trial %d: unpublished: %v", i, err)
 		}
@@ -739,7 +747,7 @@ func testCASPersistsDeathCause(t *testing.T, mk Factory) {
 		t.Fatalf("DeathCause = %q; want %q", got.DeathCause, model.CauseGone)
 	}
 	// the event landed in the same commit too (§4.4-C).
-	if un, _ := s.UnpublishedEvents(ctx); len(un) != 1 || un[0].ID != "evt_crash" {
+	if un, _ := s.UnpublishedEvents(ctx, allUnpublished); len(un) != 1 || un[0].ID != "evt_crash" {
 		t.Fatalf("crash-paused event missing from outbox: %+v", un)
 	}
 	// resource-exceeded is the other disposition (§4.3: do NOT resume) and must
@@ -848,7 +856,7 @@ func testOutboxAtomic(t *testing.T, mk Factory) {
 		t.Fatalf("state = %s; want running", got.State)
 	}
 	// event committed in the same call.
-	un, err := s.UnpublishedEvents(ctx)
+	un, err := s.UnpublishedEvents(ctx, allUnpublished)
 	if err != nil {
 		t.Fatalf("unpublished: %v", err)
 	}
@@ -868,7 +876,7 @@ func testOutboxAtomic(t *testing.T, mk Factory) {
 		ev("a", "evt_bad", "destroyed", model.Destroyed), &badCause); err != store.ErrConflict {
 		t.Fatalf("expected ErrConflict, got %v", err)
 	}
-	un, _ = s.UnpublishedEvents(ctx)
+	un, _ = s.UnpublishedEvents(ctx, allUnpublished)
 	if len(un) != 1 {
 		t.Fatalf("failed CAS leaked an outbox row: %d rows", len(un))
 	}
@@ -907,7 +915,7 @@ func testOutboxNil(t *testing.T, mk Factory) {
 	_ = s.CreateSandbox(ctx, mkRec("a"), nil)
 	_ = s.CompareAndSetState(ctx, "a", model.Creating, model.Running, nil, nil)
 	_ = s.DeleteSandbox(ctx, "a", nil)
-	un, err := s.UnpublishedEvents(ctx)
+	un, err := s.UnpublishedEvents(ctx, allUnpublished)
 	if err != nil {
 		t.Fatalf("unpublished: %v", err)
 	}
@@ -924,14 +932,14 @@ func testMarkPublished(t *testing.T, mk Factory) {
 	_ = s.CompareAndSetState(ctx, "a", model.Creating, model.Running, ev("a", "evt_1", "created", model.Running), nil)
 	_ = s.CompareAndSetState(ctx, "a", model.Running, model.Paused, ev("a", "evt_2", "paused", model.Paused), nil)
 
-	if un, _ := s.UnpublishedEvents(ctx); len(un) != 2 {
+	if un, _ := s.UnpublishedEvents(ctx, allUnpublished); len(un) != 2 {
 		t.Fatalf("want 2 unpublished, got %d", len(un))
 	}
 	// mark one → it drops out, the other remains.
 	if err := s.MarkPublished(ctx, "evt_1"); err != nil {
 		t.Fatalf("mark: %v", err)
 	}
-	un, _ := s.UnpublishedEvents(ctx)
+	un, _ := s.UnpublishedEvents(ctx, allUnpublished)
 	if len(un) != 1 || un[0].ID != "evt_2" {
 		t.Fatalf("after mark: %+v; want only evt_2", un)
 	}
@@ -942,8 +950,112 @@ func testMarkPublished(t *testing.T, mk Factory) {
 	if err := s.MarkPublished(ctx, "does_not_exist"); err != nil {
 		t.Fatalf("mark unknown: %v", err)
 	}
-	if un, _ := s.UnpublishedEvents(ctx); len(un) != 1 {
+	if un, _ := s.UnpublishedEvents(ctx, allUnpublished); len(un) != 1 {
 		t.Fatalf("idempotent mark changed count: %d", len(un))
+	}
+}
+
+// seedUnpublished writes n unpublished outbox rows for one sandbox by walking the §4.1
+// machine, so every row comes from a LEGAL transition (the store enforces the
+// precondition, so a shortcut would just fail the CAS). Rows are named evt_0..evt_n-1 in
+// sequence order, which is what lets a caller assert a bounded read returned the OLDEST.
+func seedUnpublished(t *testing.T, s store.Store, id string, n int) {
+	t.Helper()
+	ctx := context.Background()
+	for i := 0; i < n; i++ {
+		from, to := model.Paused, model.Running
+		kind := model.EventKind("resumed")
+		switch {
+		case i == 0:
+			from, to, kind = model.Creating, model.Running, model.EventKind("created")
+		case i%2 == 1:
+			from, to, kind = model.Running, model.Paused, model.EventKind("paused")
+		}
+		if err := s.CompareAndSetState(ctx, model.SandboxID(id), from, to, ev(id, fmt.Sprintf("evt_%d", i), kind, to), nil); err != nil {
+			t.Fatalf("seed transition %d (%s→%s): %v", i, from, to, err)
+		}
+	}
+}
+
+// testUnpublishedLimit: the drain read must HONOR its bound, and must refuse a
+// non-positive one rather than reading it as "everything".
+//
+// Both halves guard the same regression. UnpublishedEvents used to take no limit and
+// select the entire unpublished backlog, on a loop that runs every second against a pool
+// pinned to one connection — so it both allocated the backlog and held that connection
+// for the scan, with every state transition queued behind it. A backend that accepted the
+// parameter and ignored it would restore that silently, and a "0 means unbounded" reading
+// would restore it on any caller that simply omitted the argument.
+func testUnpublishedLimit(t *testing.T, mk Factory) {
+	ctx := context.Background()
+	s, _ := mk(t)
+	seedTmpl(t, s, "bare")
+	_ = s.CreateSandbox(ctx, mkRec("a"), nil)
+	// Five unpublished rows, alternating so each transition is legal.
+	seedUnpublished(t, s, "a", 5)
+
+	un, err := s.UnpublishedEvents(ctx, 2)
+	if err != nil {
+		t.Fatalf("UnpublishedEvents(limit=2): %v", err)
+	}
+	if len(un) != 2 {
+		t.Fatalf("limit=2 returned %d rows — the bound is ignored, so the per-second drain read materializes the whole backlog on a single-connection pool and every transition waits behind it", len(un))
+	}
+	// And it must be the OLDEST rows: delivery is in Seq order and stops at the first
+	// failure, so a bound that returned an arbitrary window would skip ahead.
+	if un[0].ID != "evt_0" || un[1].ID != "evt_1" {
+		t.Errorf("limit=2 returned %s,%s; want the two OLDEST (evt_0,evt_1) — a bounded read must still be a prefix, or the drain skips events", un[0].ID, un[1].ID)
+	}
+
+	for _, bad := range []int{0, -1} {
+		if _, err := s.UnpublishedEvents(ctx, bad); err == nil {
+			t.Errorf("UnpublishedEvents(limit=%d) succeeded — a non-positive bound must be refused, not read as unbounded, which is how the whole-backlog scan comes back on a caller that forgot the argument", bad)
+		}
+	}
+}
+
+// testCountUnpublished: the backlog gauge's source must be independent of the drain
+// bound (§4.4-C ③).
+//
+// This is the half that makes the bound above safe to add. §4.4-C requires that
+// observability not share a source with the loop being observed; if the gauge were
+// len(UnpublishedEvents(ctx, DrainBatch)) it would saturate at that constant, reporting a
+// small fixed number at precisely the moment the backlog is large — turning "badly
+// behind" into something indistinguishable from "healthy".
+func testCountUnpublished(t *testing.T, mk Factory) {
+	ctx := context.Background()
+	s, _ := mk(t)
+	seedTmpl(t, s, "bare")
+	_ = s.CreateSandbox(ctx, mkRec("a"), nil)
+
+	n, err := s.CountUnpublished(ctx)
+	if err != nil {
+		t.Fatalf("CountUnpublished on an empty outbox: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("empty outbox counts %d, want 0", n)
+	}
+
+	seedUnpublished(t, s, "a", 5)
+
+	// The count sees all five even though a drain read of 2 sees two.
+	if _, err := s.UnpublishedEvents(ctx, 2); err != nil {
+		t.Fatalf("bounded read: %v", err)
+	}
+	n, err = s.CountUnpublished(ctx)
+	if err != nil {
+		t.Fatalf("CountUnpublished: %v", err)
+	}
+	if n != 5 {
+		t.Fatalf("CountUnpublished = %d with 5 unpublished rows and a drain bound of 2 — the gauge is saturating at the drain bound, so a large backlog reports as a small constant and a wedged drain looks idle (§4.4-C ③)", n)
+	}
+
+	// Marking one delivered decrements it: the count tracks delivery, not arrival.
+	if err := s.MarkPublished(ctx, "evt_0"); err != nil {
+		t.Fatalf("mark: %v", err)
+	}
+	if n, _ := s.CountUnpublished(ctx); n != 4 {
+		t.Errorf("after marking one delivered the count is %d, want 4", n)
 	}
 }
 
@@ -960,7 +1072,7 @@ func testOutboxOutlivesRecord(t *testing.T, mk Factory) {
 	if _, err := s.GetSandbox(ctx, "a"); err != store.ErrNotFound {
 		t.Fatalf("record should be gone: %v", err)
 	}
-	un, _ := s.UnpublishedEvents(ctx)
+	un, _ := s.UnpublishedEvents(ctx, allUnpublished)
 	if len(un) != 1 || un[0].ID != "evt_d" {
 		t.Fatalf("destroyed event missing from outbox: %+v", un)
 	}
@@ -987,14 +1099,14 @@ func testDurability(t *testing.T, mk Factory) {
 	if got.State != model.Running {
 		t.Fatalf("state lost across reopen: %s", got.State)
 	}
-	un, _ := s2.UnpublishedEvents(ctx)
+	un, _ := s2.UnpublishedEvents(ctx, allUnpublished)
 	if len(un) != 1 || un[0].ID != "evt_1" {
 		t.Fatalf("unpublished event lost across reopen: %+v", un)
 	}
 	// marking published also survives.
 	_ = s2.MarkPublished(ctx, "evt_1")
 	s3 := reopen(t)
-	if un, _ := s3.UnpublishedEvents(ctx); len(un) != 0 {
+	if un, _ := s3.UnpublishedEvents(ctx, allUnpublished); len(un) != 0 {
 		t.Fatalf("published mark lost across reopen: %d rows", len(un))
 	}
 }
@@ -2538,3 +2650,8 @@ func testVolumeLineage(t *testing.T, mk Factory) {
 		t.Errorf("create with a missing parent = %v; want ErrVolumeNotFound", err)
 	}
 }
+
+// allUnpublished is the bound the contract suite passes to UnpublishedEvents, which
+// requires a positive one (a zero-means-everything reading is how the unbounded scan it
+// replaced would return). Far above what any contract case writes.
+const allUnpublished = 1000

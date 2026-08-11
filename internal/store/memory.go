@@ -540,17 +540,40 @@ func (m *Memory) DeleteSandbox(_ context.Context, id model.SandboxID, ev *Event)
 	return nil
 }
 
-func (m *Memory) UnpublishedEvents(_ context.Context) ([]Event, error) {
+func (m *Memory) UnpublishedEvents(_ context.Context, limit int) ([]Event, error) {
+	if limit <= 0 {
+		// Same refusal as the SQLite arm, and the contract suite pins both: a
+		// zero-means-everything reading is how the unbounded scan comes back.
+		return nil, fmt.Errorf("store: UnpublishedEvents limit must be positive, got %d", limit)
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	out := make([]Event, 0)
+	out := make([]Event, 0, limit)
 	// the slice is append-ordered, so this is already Seq order.
 	for _, r := range m.outbox {
 		if !r.published {
 			out = append(out, r.ev)
+			if len(out) == limit {
+				break
+			}
 		}
 	}
 	return out, nil
+}
+
+// CountUnpublished implements Store.CountUnpublished (§4.4-C ③: the gauge's source is
+// independent of the drain read). This arm walks, which is honest at its scale — the
+// in-memory outbox is bounded by the process's own lifetime.
+func (m *Memory) CountUnpublished(_ context.Context) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var n int64
+	for _, r := range m.outbox {
+		if !r.published {
+			n++
+		}
+	}
+	return n, nil
 }
 
 // Events implements the §6.1 replay read (Store.Events). Delivery state is not a

@@ -1049,6 +1049,22 @@ at the same expiry instant; ③ **observability does not share a source with the
 wedges, so "a wedged worker" and "idle" export the same stale value and are indistinguishable;
 therefore the sampling point is independent of that loop, and **stuck in the loop** versus **stuck in
 the sink's delivery call** must be separately visible.
+> **③ constrains the drain's READ as well as its sampling, and the two interact.** The drain read is
+> **bounded** — it takes a batch, not the whole unpublished backlog. That bound is not a performance
+> preference: the read runs on a per-second loop, and on a backend whose write path is serialized (the
+> SQLite arm pins its pool to one connection, precisely so "whoever took the lower number commits
+> later" cannot arise) an unbounded read both materializes the backlog and holds that connection for
+> the length of the scan, with **every state transition queued behind it**. A bound is safe for the
+> drain because delivery is strictly in `seq` order and stops at the first failure, so one pass can
+> never usefully act on more than a batch; the remainder is still there next tick.
+> **The consequence for ③ is that the backlog gauge must have its OWN source.** Derived from the
+> bounded read's length it would saturate at the bound, reporting a small constant at exactly the
+> moment the backlog is large — "badly behind" made indistinguishable from "healthy", which is the
+> same defect ③ already forbids in its other form. So the store contract carries a **count** of
+> unpublished rows separately from the batch read, and counting is also the shape that materializes
+> nothing, so sampling the gauge does not pay for the backlog it measures. A count failure must not
+> fail the drain: the drain is the job and the gauge is observation, so a stale gauge is the better
+> loss.
 
 **Capacity-pressure events (a soft threshold): not emitted, and no event kind is added.** §2.3 /
 rootfs-overlay D6.5's hard-threshold behavior is unchanged (the guest sees an ordinary `ENOSPC` and

@@ -344,12 +344,35 @@ type Store interface {
 	// survives the record's deletion — it is a separate table/slice.
 	DeleteSandbox(ctx context.Context, id model.SandboxID, ev *Event) error
 
-	// UnpublishedEvents returns outbox rows not yet marked published, in Seq
-	// order (oldest first). This is the PUBLISHER read side (§4.4-C) — it is
-	// deliberately NOT part of the atomic-commit contract (not in the transition
-	// commit); the publisher reads async, delivers, then marks. at-least-once: a
-	// crash after deliver but before MarkPublished re-returns the same rows.
-	UnpublishedEvents(ctx context.Context) ([]Event, error)
+	// UnpublishedEvents returns at most limit outbox rows not yet marked
+	// published, in Seq order (oldest first). This is the PUBLISHER read side
+	// (§4.4-C) — it is deliberately NOT part of the atomic-commit contract (not in
+	// the transition commit); the publisher reads async, delivers, then marks.
+	// at-least-once: a crash after deliver but before MarkPublished re-returns the
+	// same rows.
+	//
+	// limit is REQUIRED and bounded by the caller, for the same reason Events'
+	// is — and this method is why that reason is not hypothetical. It used to take
+	// no limit and select the WHOLE unpublished backlog, on a loop that runs every
+	// second: exactly the "one of which materialized the entire backlog" defect the
+	// note on Events describes, sitting in the seam beside it. A bound is safe for
+	// the drain because delivery is strictly in Seq order and stops at the first
+	// failure, so a pass can never usefully act on more than one batch anyway;
+	// whatever is left is still there next tick.
+	//
+	// A caller that needs the backlog's SIZE must use CountUnpublished, never
+	// len() of this result — see the ③ argument there.
+	UnpublishedEvents(ctx context.Context, limit int) ([]Event, error)
+
+	// CountUnpublished reports how many outbox rows are not yet marked published.
+	//
+	// It exists because §4.4-C's operability requirement ③ says observability must
+	// not share a source with the loop being observed, and a bounded drain read
+	// cannot answer this question: len(UnpublishedEvents(ctx, limit)) saturates at
+	// limit, so the backlog gauge would report a small constant at precisely the
+	// moment the backlog is large. Counting is also the shape that materializes
+	// nothing, so a caller sampling this never pays for the backlog it is measuring.
+	CountUnpublished(ctx context.Context) (int64, error)
 
 	// Events is the REPLAY read side backing §6.1 GET /v1/events: return at most
 	// limit events with Seq > after, in Seq order, plus the window bounds

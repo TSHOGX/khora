@@ -218,7 +218,7 @@ func TestAdoptDemotesALiveSandboxThisDeploymentCannotPin(t *testing.T) {
 			"(§2.4 forbids guessing a cause)", rec.DeathCause)
 	}
 	// The §4.2 involuntary pause emits `crash-paused`, never `paused`.
-	evs, _ := st.UnpublishedEvents(ctx)
+	evs, _ := st.UnpublishedEvents(ctx, allUnpublished)
 	found := false
 	for _, e := range evs {
 		if e.Sandbox == "sbx_adopt" && e.Kind == "crash-paused" && e.State == model.Paused {

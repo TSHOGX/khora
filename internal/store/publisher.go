@@ -97,9 +97,21 @@ type Publisher struct {
 	heartbeat    atomic.Int64 // unix nanos: last time the drain loop completed a pass
 	deliverStart atomic.Int64 // unix nanos: current in-flight Deliver started (0 = none)
 	published    atomic.Int64 // cumulative events delivered+marked
-	backlog      atomic.Int64 // unpublished rows seen on the last pass
+	backlog      atomic.Int64 // TOTAL unpublished rows (counted, not the drain batch's length)
 	headSeq      atomic.Int64 // sequence of the blocked head (0 = nothing blocked)
 }
+
+// DrainBatch is how many unpublished rows one drain pass reads.
+//
+// It is a constant rather than a knob because no deployment has a reason to tune it:
+// delivery is strictly in Seq order and stops at the first failure, so a pass can
+// never usefully act on more than one batch, and whatever is left is still there on
+// the next tick. What the bound buys is that the per-second read cannot materialize an
+// unbounded backlog on a connection pool of one — see Store.UnpublishedEvents.
+//
+// It is NOT a cap on the backlog gauge: that comes from Store.CountUnpublished, whose
+// whole reason for existing is that this bound would otherwise hide the number.
+const DrainBatch = 256
 
 // PublisherConfig tunes the retry and deadline behavior. The zero value is
 // meaningful: NewPublisher fills every field with the default beside it.
@@ -185,11 +197,18 @@ func (p *Publisher) PublishOnce(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("%w: %s", ErrHalted, p.haltedEventID())
 	}
 
-	evs, err := p.store.UnpublishedEvents(ctx)
+	evs, err := p.store.UnpublishedEvents(ctx, DrainBatch)
 	if err != nil {
 		return 0, err
 	}
-	p.backlog.Store(int64(len(evs)))
+	// The gauge comes from its OWN source, not from len(evs) — §4.4-C ③. A bounded
+	// drain read saturates at DrainBatch, so len() would report that constant at
+	// precisely the moment the backlog is large and the number matters. A count
+	// failure must not fail the pass either: the drain is the job, the gauge is
+	// observation, so a stale gauge is preferable to a stalled stream.
+	if n, cerr := p.store.CountUnpublished(ctx); cerr == nil {
+		p.backlog.Store(n)
+	}
 	if len(evs) == 0 {
 		p.clearRetryState()
 		return 0, nil

@@ -102,7 +102,7 @@ func (e *reaperEnv) state(t *testing.T, id string) model.Lifecycle {
 }
 
 func (e *reaperEnv) lastKind(id string) string {
-	evs, _ := e.st.UnpublishedEvents(context.Background())
+	evs, _ := e.st.UnpublishedEvents(context.Background(), allUnpublished)
 	kind := ""
 	for _, ev := range evs {
 		if ev.Sandbox == model.SandboxID(id) {
@@ -244,7 +244,7 @@ func TestReaperEscalatesTransportDownPastBudget(t *testing.T) {
 	}
 	// the escalation went through crash-pause then resume: the last event is
 	// "resumed", and a "crash-paused" preceded it.
-	evs, _ := e.st.UnpublishedEvents(context.Background())
+	evs, _ := e.st.UnpublishedEvents(context.Background(), allUnpublished)
 	var kinds []string
 	for _, ev := range evs {
 		if ev.Sandbox == "loop" {

@@ -47,7 +47,7 @@ func main(){
 // disposition Kind — auto-paused / crash-paused / destroyed).
 func lastKind(t *testing.T, eng *orchestrator.Engine, sid model.SandboxID) string {
 	t.Helper()
-	evs, err := eng.Store.UnpublishedEvents(context.Background())
+	evs, err := eng.Store.UnpublishedEvents(context.Background(), 100 /* a bound is required; well above what this test emits */)
 	if err != nil {
 		t.Fatalf("outbox: %v", err)
 	}
@@ -394,7 +394,7 @@ func TestReaperTransportCrashLoopEscalationRealRunsc(t *testing.T) {
 		t.Fatalf("escalation reused IP %s; want NEW IP/epoch (§3.3 / D4b cold-start)", epBefore)
 	}
 	// escalation went through crash-pause then resume.
-	evs, _ := eng.Store.UnpublishedEvents(ctx)
+	evs, _ := eng.Store.UnpublishedEvents(ctx, 100 /* a bound is required; well above what this test emits */)
 	sawCrashPause, sawResume := false, false
 	for _, ev := range evs {
 		if ev.Sandbox != sid {
@@ -537,7 +537,7 @@ func TestReaperSkipsVerbHeldLockRealRunsc(t *testing.T) {
 // eventKindsFor returns every outbox event Kind for a sandbox, in commit order.
 func eventKindsFor(t *testing.T, eng *orchestrator.Engine, sid model.SandboxID) []string {
 	t.Helper()
-	evs, err := eng.Store.UnpublishedEvents(context.Background())
+	evs, err := eng.Store.UnpublishedEvents(context.Background(), 100 /* a bound is required; well above what this test emits */)
 	if err != nil {
 		t.Fatalf("outbox: %v", err)
 	}

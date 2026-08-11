@@ -78,7 +78,7 @@ func TestReconcileDualDispatch(t *testing.T) {
 	if _, err := st.GetSandbox(ctx, "creat_x"); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("creating record not deleted: %v", err)
 	}
-	if evs, _ := st.UnpublishedEvents(ctx); len(evs) > 0 {
+	if evs, _ := st.UnpublishedEvents(ctx, allUnpublished); len(evs) > 0 {
 		for _, e := range evs {
 			if e.Sandbox == "creat_x" {
 				t.Errorf("creating→delete published event %q; want none (never was visible)", e.Kind)
@@ -132,7 +132,7 @@ func TestReconcileDemoteEmitsEvent(t *testing.T) {
 	if err := m.Reconcile(ctx); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
-	evs, _ := st.UnpublishedEvents(ctx)
+	evs, _ := st.UnpublishedEvents(ctx, allUnpublished)
 	found := false
 	for _, e := range evs {
 		// involuntary demote emits "crash-paused", distinct from user "paused"
@@ -495,7 +495,7 @@ func TestReconcileIdempotent(t *testing.T) {
 	}
 	before, _ := st.ListSandboxes(ctx)
 	beforeStates := statesOf(before)
-	beforeEvents, _ := st.UnpublishedEvents(ctx)
+	beforeEvents, _ := st.UnpublishedEvents(ctx, allUnpublished)
 	beforeKeep := lastReclaimCall(rt.Calls())
 
 	if err := m.Reconcile(ctx); err != nil {
@@ -503,7 +503,7 @@ func TestReconcileIdempotent(t *testing.T) {
 	}
 	after, _ := st.ListSandboxes(ctx)
 	afterStates := statesOf(after)
-	afterEvents, _ := st.UnpublishedEvents(ctx)
+	afterEvents, _ := st.UnpublishedEvents(ctx, allUnpublished)
 	afterKeep := lastReclaimCall(rt.Calls())
 
 	// (1) every record identical — not merely the same NUMBER of records.
