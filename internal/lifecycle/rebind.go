@@ -195,6 +195,30 @@ func (m *Mediator) Rebind(ctx context.Context, id model.SandboxID, spec RebindSp
 			ErrUncappedDiskNotCappable, id, newLimits.DiskByte)
 	}
 
+	// REMOVING the disk cap is refused while the axis is METERED — the sandbox-side
+	// sibling of the volume rule in SetVolumeCapacity, and §3.4's rule rather than a new
+	// one: `admit` refuses an uncapped create on a metered axis (ErrCapRequired) because
+	// such a unit "contributes 0 to the inequality's left side while being able to occupy
+	// all of the right". A PATCH is the same promise written at a different time, so
+	// accepting 0 here manufactures exactly the create that would have been refused.
+	//
+	// It is strictly worse than the volume case because of the refusal ABOVE. Once this
+	// record reads 0, re-capping is refused permanently by ErrUncappedDiskNotCappable —
+	// whose message would then be factually WRONG about this sandbox ("was created
+	// uncapped on disk, so its Overlay storage unit carries no quota row"): it was created
+	// capped and its unit does carry a quota row. So one accepted 0 strands the sandbox
+	// uncapped forever, on a false explanation.
+	//
+	// Gated on the axis being metered, not unconditional: on an unmetered node an uncapped
+	// sandbox is legal by §3.4's own terms, so refusing there would revoke a capability the
+	// spec grants. Placed BEFORE the admission gate for the same reason as the arms around
+	// it — the request is invalid regardless of the node's free space, and gating first
+	// would let a full node answer 507 about a request no amount of capacity makes legal.
+	if b.DiskByte != nil && newLimits.DiskByte == 0 && m.deps.NodeCapacity.DiskByte > 0 {
+		return false, fmt.Errorf("rebind: %w: disk — this node meters the disk axis (§3.4), so sandbox %s may not be left uncapped: it would contribute nothing to the budget while free to consume all of it, which is the same reason create refuses an uncapped sandbox. Note that re-capping later is NOT available as a remedy (`0 → N` is refused, ErrUncappedDiskNotCappable), so this edit would be irreversible",
+			ErrCapRequired, id)
+	}
+
 	// §3.4: an `N → M` disk edit must leave the cap STRICTLY above what the storage unit
 	// already holds. See ErrDiskCapBelowUsage for the measured wedge and for why the
 	// sandbox side is worse than the volume side. This is the §5.B half of the criterion

@@ -685,7 +685,14 @@ func (e *Engine) handleEvents(w http.ResponseWriter, r *http.Request) {
 	// the retained window", i.e. an explicit request for whatever is retained, so a bare
 	// `after < earliest` would 410 every cold-start cursor on any trimmed outbox and
 	// break the documented way to begin reading.
-	if after > 0 && earliest > 0 && after < earliest {
+	//
+	// The comparison is `after+1 < earliest`, NOT `after < earliest`, because `after` is
+	// EXCLUSIVE — the page is `seq > after`, so the first event this cursor still needs is
+	// `after+1`. A cursor at exactly `earliest-1` has therefore consumed the trimmed prefix
+	// and nothing else; refusing it would tell a caught-up subscriber it lost data, and the
+	// remedy this response documents ("restart from `earliest`") would then skip the event
+	// AT `earliest` — manufacturing the gap this refusal exists to prevent.
+	if after > 0 && earliest > 0 && after+1 < earliest {
 		writeJSON(w, http.StatusGone, eventsResp{
 			Events:   []eventItem{},
 			Earliest: earliest,

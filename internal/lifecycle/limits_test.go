@@ -906,6 +906,60 @@ func TestUpdateBindingRewritesTheBinding(t *testing.T) {
 			}
 		})
 
+		// The metered node is the case the subtest above does NOT cover: it runs on
+		// NodeCapacity{}, where an uncapped sandbox is legal by §3.4's own terms, so
+		// dropping a cap there is correct and must stay allowed. Once the axis is METERED
+		// the same edit means something else entirely — §3.4 requires every sandbox on a
+		// metered axis to carry a cap, and `admit` refuses an uncapped create for exactly
+		// that reason (ErrCapRequired). A PATCH is the same promise written at a different
+		// time, so accepting 0 here manufactures the create that was just refused: the
+		// sandbox drops off the budget's left side while staying free to consume all of the
+		// right.
+		//
+		// The aggravating half is the interaction with the `0 → N` refusal above. Once the
+		// record reads 0, re-capping is refused permanently with ErrUncappedDiskNotCappable
+		// — whose message asserts the sandbox "was created uncapped on disk, so its Overlay
+		// storage unit carries no quota row", which would be false here: it was created
+		// CAPPED and the unit does carry one. So one accepted PATCH strands the sandbox
+		// uncapped forever, on a false explanation.
+		t.Run("N → 0 is refused while the disk axis is METERED", func(t *testing.T) {
+			rp, rt := &fakeRootfs{}, &fakeRuntime{}
+			m, st := newLimitsMediator(t, rp, rt, NodeCapacity{DiskByte: 10 * gib})
+			sid, err := m.Create(ctx, CreateSpec{Template: "bare", Limits: model.Limits{DiskByte: 4 * gib, MemoryByte: 128 << 20}})
+			if err != nil {
+				t.Fatalf("create: %v", err)
+			}
+			if err := m.Pause(ctx, sid); err != nil {
+				t.Fatalf("pause: %v", err)
+			}
+			before, _ := st.GetSandbox(ctx, sid)
+			zero := int64(0)
+			err = patchBinding(m, ctx, sid, store.Binding{DiskByte: &zero})
+			if !errors.Is(err, ErrCapRequired) {
+				t.Fatalf("PATCH disk %d → 0 on a node metering disk = %v; want ErrCapRequired. Accepting it drops %d bytes off the budget's left side while the sandbox stays free to consume the whole node — the same state §3.4 refuses at create — and the sandbox can then never be re-capped, because `0 → N` is refused with a message that would be factually wrong about it",
+					before.Limits.DiskByte, err, before.Limits.DiskByte)
+			}
+			// A refusal changes nothing, as with the `0 → N` arm.
+			after, _ := st.GetSandbox(ctx, sid)
+			if after.Limits != before.Limits {
+				t.Fatalf("refused PATCH changed the limits: %+v → %+v", before.Limits, after.Limits)
+			}
+			// And an unmetered node still allows the same edit — the refusal is gated on the
+			// axis being metered, not applied unconditionally, or it would revoke a
+			// capability §3.4 grants.
+			mu, _ := newLimitsMediator(t, &fakeRootfs{}, &fakeRuntime{}, NodeCapacity{})
+			sid2, err := mu.Create(ctx, CreateSpec{Template: "bare", Limits: model.Limits{DiskByte: gib}})
+			if err != nil {
+				t.Fatalf("create on unmetered: %v", err)
+			}
+			if err := mu.Pause(ctx, sid2); err != nil {
+				t.Fatalf("pause: %v", err)
+			}
+			if err := patchBinding(mu, ctx, sid2, store.Binding{DiskByte: &zero}); err != nil {
+				t.Fatalf("PATCH disk N → 0 on an UNMETERED node = %v; want it admitted — §3.4 makes an uncapped sandbox legal there, so refusing would revoke a granted capability", err)
+			}
+		})
+
 		t.Run("N → M changes the cap", func(t *testing.T) {
 			rp, rt := &fakeRootfs{}, &fakeRuntime{}
 			m, st := newLimitsMediator(t, rp, rt, NodeCapacity{})

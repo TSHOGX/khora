@@ -614,3 +614,59 @@ func TestBacklogGaugeReportsTheTotalNotTheDrainBatch(t *testing.T) {
 		t.Errorf("Backlog = %d with %d rows unpublished and a drain bound of %d — the gauge is reading the drain batch's length, so it saturates at the bound and a large backlog reports as a small constant (§4.4-C ③: observability must not share a source with the loop being observed)", got, total, store.DrainBatch)
 	}
 }
+
+// TestBacklogGaugeSurvivesASuccessfulPass covers the other arm of §4.4-C ③, which a
+// failing sink cannot reach: the pass that DELIVERS everything it read.
+//
+// The sibling test above stops at the first delivery failure, so it returns before the
+// end of the drain loop. That leaves the successful path — the one a healthy deployment
+// takes every second — unasserted, and it is the path where a false zero is most
+// harmful: "caught up" is exactly what a monitor is looking for. With the drain read
+// bounded, finishing the loop means "one batch of DrainBatch drained", never "the outbox
+// is empty", so the gauge must still reflect what remains.
+func TestBacklogGaugeSurvivesASuccessfulPass(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	seedPubTmpl(t, st)
+	_ = st.CreateSandbox(ctx, model.Sandbox{ID: "a", Template: "bare", State: model.Creating}, nil)
+
+	// More rows than one pass can drain, so a completed pass leaves a real remainder.
+	total := store.DrainBatch + 7
+	for i := 0; i < total; i++ {
+		from, to := model.Paused, model.Running
+		kind := model.EventKind("resumed")
+		switch {
+		case i == 0:
+			from, to, kind = model.Creating, model.Running, model.EventKind("created")
+		case i%2 == 1:
+			from, to, kind = model.Running, model.Paused, model.EventKind("paused")
+		}
+		if err := st.CompareAndSetState(ctx, "a", from, to, ev("a", fmt.Sprintf("e%d", i), kind, to), nil); err != nil {
+			t.Fatalf("seed %d: %v", i, err)
+		}
+	}
+
+	p := store.NewPublisherWithConfig(st, &countingSink{}, store.PublisherConfig{MaxAttempts: 100})
+	n, err := p.PublishOnce(ctx)
+	if err != nil {
+		t.Fatalf("PublishOnce with a succeeding sink: %v", err)
+	}
+	if n != store.DrainBatch {
+		t.Fatalf("delivered %d, want exactly the drain bound %d — the premise of this test is a pass that succeeds AND leaves a remainder", n, store.DrainBatch)
+	}
+
+	// The assertion is a LOWER bound, not equality, and the distinction is the point.
+	// The gauge is sampled once per pass from its own source, so after a pass it is one
+	// interval stale — it reports what was outstanding when the pass began. That is
+	// honest gauge behaviour and it errs HIGH, which is the safe direction: a monitor
+	// may see a backlog that has just been drained, but it can never be told it is
+	// caught up while rows wait. Pinning equality here would instead demand a second
+	// count per pass, buying precision the observation does not need.
+	//
+	// What must never happen is the opposite: a value BELOW what is outstanding, of
+	// which 0 is the worst case.
+	remaining := int64(total - store.DrainBatch)
+	if got := p.Stats().Backlog; got < remaining {
+		t.Errorf("Backlog = %d after a fully successful pass that left %d rows unpublished — the gauge under-reports. A completed pass does NOT mean the outbox is empty, because the drain read is bounded at %d, so anything below %d (0 most of all) tells a monitor 'caught up' while a backlog persists and grows: §4.4-C ③'s failure in its most dangerous form", got, remaining, store.DrainBatch, remaining)
+	}
+}

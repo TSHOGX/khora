@@ -257,7 +257,13 @@ func (p *Publisher) PublishOnce(ctx context.Context) (int, error) {
 		p.published.Add(1)
 		n++
 	}
-	p.backlog.Store(0)
+	// Deliberately NO `p.backlog.Store(0)` here. Reaching the end of the loop means
+	// "this batch drained", not "the outbox is empty" — the drain read is bounded at
+	// DrainBatch, so a larger backlog leaves a remainder that is still unpublished.
+	// Storing 0 would reintroduce the §4.4-C ③ false zero that CountUnpublished exists
+	// to prevent, in its worst form: a monitor reading "caught up" while a backlog
+	// persists and grows. The gauge needs no update on this path at all — the next
+	// pass re-reads it from its own source above.
 	return n, nil
 }
 

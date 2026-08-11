@@ -933,4 +933,32 @@ func TestEventsGoneWhenCursorFallsBelowTheWindow(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("a cursor at `earliest` = %d, want 200", resp.StatusCode)
 	}
+
+	// THE BOUNDARY, and the reason this is asserted separately from the two cases
+	// above: `after` is EXCLUSIVE (the page is `seq > after`), so a cursor at
+	// `earliest-1` has consumed exactly the trimmed prefix and nothing retained.
+	// Every event it still needs is present, starting with `earliest` itself.
+	//
+	// 410-ing it is worse than a false alarm. The documented remedy is "restart from
+	// `earliest`", and a caller that follows it skips the event AT `earliest` — so a
+	// spurious refusal here MANUFACTURES the very gap this endpoint exists to prevent,
+	// in the one place that promises it cannot happen. `after=1` against `earliest=4`
+	// cannot catch it: it is two below the boundary, where both the correct and the
+	// off-by-one predicate agree.
+	resp = do(t, http.MethodGet, srv.URL+fmt.Sprintf("/v1/events?after=%d", out.Earliest-1))
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("a cursor at `earliest`-1 (=%d, with earliest=%d) = %d, want 200: `after` is exclusive, so this cursor has consumed precisely the trimmed rows and lost nothing. Refusing it tells a caught-up subscriber it lost data, and the remedy it documents then skips seq %d. Body: %s",
+			out.Earliest-1, out.Earliest, resp.StatusCode, out.Earliest, body)
+	}
+	// …and it must actually serve the event at `earliest`, not merely 200 with an
+	// empty page — that would be the silent short page under a different status.
+	var page eventsResp
+	if err := json.Unmarshal(body, &page); err != nil {
+		t.Fatalf("decode boundary page: %v (%s)", err, body)
+	}
+	if len(page.Events) == 0 || page.Events[0].Seq != out.Earliest {
+		t.Errorf("a cursor at `earliest`-1 must serve seq %d first, got %+v — an empty 200 here is the silent gap wearing a success code", out.Earliest, page.Events)
+	}
 }
