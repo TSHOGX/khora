@@ -70,10 +70,14 @@ type pkg struct {
 //   - substrate   the root-only tests against real runsc/overlay/btrfs.
 //   - drainrace   the minute-scale tests, tagged separately so the routine gate
 //     stays fast; they also carry `substrate`, hence the pair.
+//   - quotachurn  the same bargain for the quota-row churn test, whose cost is the
+//     substrate's `--sync` on a filesystem the dev box shares with other tenants.
+//     It sits in `btrfs`, a LISTED LEAF, so leaving the tag out would take the leaf
+//     guard off exactly the file most able to break leaf-ness unseen.
 //   - testguest   the in-guest fault-injection seam, which must not exist in a
 //     production sandboxd — a guard that never ran with it on would not see an
 //     edge introduced by that seam.
-var tagMatrix = []string{"", "substrate", "drainrace", "testguest", "substrate,drainrace", "substrate,testguest"}
+var tagMatrix = []string{"", "substrate", "drainrace", "quotachurn", "testguest", "substrate,drainrace", "substrate,quotachurn", "substrate,testguest"}
 
 // listPackages runs `go list -json` for the given tags. Build tags matter: the
 // substrate tests are behind `//go:build substrate` and are invisible to a

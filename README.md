@@ -117,6 +117,12 @@ sudo env "PATH=$PATH" "HOME=$HOME" go test -tags substrate -count=1 -p 1 ./...
 # overlaps a 64 MiB write with a pause. Run it deliberately.
 sudo env "PATH=$PATH" "HOME=$HOME" \
   go test -tags 'substrate drainrace' -count=1 -timeout 30m ./test/ -run TestPauseDrain
+
+# Quota-row reclamation across churn, tagged separately for the same reason: its cost
+# is btrfs `--sync` settling a qgroup tree this box shares with other tenants, so it
+# swings 3.5-26.5s and was 87% of internal/btrfs's runtime.
+sudo env "PATH=$PATH" "HOME=$HOME" \
+  go test -tags 'substrate quotachurn' -count=1 ./internal/btrfs/
 ```
 
 A third tag, `testguest`, compiles an in-guest fault-injection seam into `sandboxd`
