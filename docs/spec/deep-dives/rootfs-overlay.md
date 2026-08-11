@@ -91,13 +91,19 @@ host paths" rather than "an upper permanently on a local disk", so that changing
 not move the model. This capability set maps onto the model item by item (the evolution item's settlement
 and cost are in D3):
 
-| Diff-layer capability | How it is given | Our corresponding § |
+| Diff-layer capability | How it is given | Status against the shipped carrier |
 | --- | --- | --- |
-| pause / resume | The latest diff = the latest checkpoint, applied back into a new container on resume | §4.2 |
-| Promote → a layered Template | Take an increment against a baseline and stack layer on layer | §5.B Promote / layered Templates |
-| Portability across hosts | A diff is an OCI blob in an object store, not pinned to a local path | §5.B's "plain file layers are portable" + §3.1.1 |
-| fork / clone | Claim several sandboxes from the same diff/snapshot | §3.1 fork |
-| snapshot / restore | Named diff records that can be listed/restored/deleted | (no corresponding §; a purely evolution-stage capability) |
+| pause / resume | The latest diff = the latest checkpoint, applied back into a new container on resume | **Already delivered** without it — resume remounts the same upper, and pause captures nothing (§4.2) |
+| Promote → a layered Template | Take an increment against a baseline and stack layer on layer | **Already delivered** — multi-lowerdir layering ships (§5.B Promote / layered Templates) |
+| fork / clone | Claim several sandboxes from the same diff/snapshot | **Already delivered** — create-from-Template, a Promote layer and a fork are all **one kind of reference** (§4.3 / §3.1 fork) |
+| Portability across hosts | A diff is an OCI blob in an object store, not pinned to a local path | **Already true, and measured** — after a clean stop the upper tars out as a complete diff layer, and a fresh upper rebuilt from that tar is byte-identical (D0) |
+| snapshot / restore | Named diff records that can be listed/restored/deleted | The one genuinely absent capability (no corresponding §) |
+
+> **So the evolution item is dedup and integrity, not capability.** Four of the five rows above are
+> delivered by the shipped carrier through other means, which is why this item reads larger than it is.
+> What a content-addressed layer would actually buy is that identical bytes stop being stored once per
+> layer — Promote copies byte-for-byte today, so N layers sharing a base hold N copies — plus a digest
+> to verify a layer against. Both are real wants; neither is a capability the model currently lacks.
 
 ---
 
@@ -112,9 +118,10 @@ carrier-independence. The overlayfs mount/umount lifecycle belongs to the Rootfs
 **The persistent unit = the resident upper directory.** The upper stays in place on the backend, pause
 captures nothing, and resume remounts the same upper for a cold start — closest to §4.2's semantics, and
 already sufficient to deliver pause/resume plus Promote's at-rest read. **A content-addressed diff layer
-(extracted as an OCI tar + digest) is an evolution item**: it buys layered Templates / fork /
-cross-host portability for free, at the cost of tar extraction + baseline increments + an object-store
-interface. Both share one Overlay abstraction, layers above notice nothing, and D4's seam guarantees it.
+(extracted as an OCI tar + digest) is an evolution item**, and what it buys is **dedup plus integrity** —
+not layered Templates, fork or cross-host portability, all three of which the shipped carrier already
+delivers (the table in D2). Its cost is tar extraction + baseline increments + an object-store interface.
+Both share one Overlay abstraction, layers above notice nothing, and D4's seam guarantees it.
 
 **The alternative ruled out — a bind mount as the writable layer** (giving the container a host bind
 directory as its writable rootfs, likewise with `overlay2=none`): the simplest option, but **it loses CoW
@@ -231,7 +238,86 @@ provider):**
     empty placeholder §5.B already sanctions, only one level deeper, and it **never loses real guest
     data**.
 - **The content-addressed diff layer**: the **only genuinely still-open** item on this carrier. Its
-  settlement and cost are in D3, and the capability mapping is in D2.
+  settlement and cost are in D3, and the capability mapping is in D2 — which also records that four of
+  the five capabilities usually attributed to it already ship, so what is open is **dedup and
+  integrity**.
+
+### D5.1 The properties this seam must keep for a future arm to stay additive
+
+A content-addressed arm registers behind `rootfs.Provider` **unchanged** — walking the interface member
+by member found one strain point and it is not this document's (`Merged.MergedPath` is a host path, which
+is the same value `runtime.RootfsSource` carries, and open-decisions' §5.A provider row already owns the
+remote-handle question). So **no surface is added here**: §1.3 forbids reserving it, and the repo already
+litigated this on the sibling seam — `volume.Backend` has a `Capabilities()` because a **second
+implementation shipped**, and refused a `DirectIO` bit because none had; §5.B has one implementation and
+so has no such debt.
+
+What is worth writing down instead is the list of properties a future arm must inherit. Each is measured
+or structural, and each has a defect behind it that a fresh implementation would otherwise repeat:
+
+1. **Reflink *outward* leaks one quota row per Promote, and the leak outlives the layer.** The predicate
+   is *extent sharing*, not "a snapshot was taken": reflink **inward** (copy-up's shape) does not leak,
+   outward does. Because a leaked row reserves no subvolume id, a remount can hand that id **and its
+   stale cap** to a brand-new unit (volume.md D7.1's measured `ENOSPC` at 3.3 MB on a unit nobody
+   capped). Any dedup arm creates outward sharing **by construction**, so the sweep-side reclamation
+   path must exist before it does.
+2. **The best-effort quota-row cleanup at subvolume deletion is safe today only because the engine never
+   snapshots an upper.** That precondition is stated as the reason; a diff layer invalidates it, so both
+   it and its failure policy must be revisited in the same change.
+3. **The quota mode is not negotiable, and a network *filesystem* can never host the upper.** squota
+   because this substrate physically cannot change modes, and squota charges an extent to **whoever
+   first allocated it**, the charge surviving that allocator's deletion — so a shared content store
+   cannot be charged "fairly", only once, to its first writer. Separately, the kernel refuses a network
+   filesystem as `upperdir` on two independent grounds (missing `d_type`/xattr support, and durability).
+   The viable remote shape is therefore a network-attached **block** device carrying a local filesystem.
+4. **`UncappedBytes`'s "shared bytes count at most once" does not survive cross-layer sharing as
+   written.** The walk dedups by dev+ino **within one call**, and it is called once per layer directory —
+   sound today only because nothing creates cross-layer sharing. A dedup arm creates it, at which point
+   shared bytes are counted once per referencing layer and §3.4's admission gate over-refuses. The set
+   must be hoisted across the whole enumeration.
+5. **The workdir must be *emptied*, never recreated** (D6.6 ③): `mkdir` needs a metadata extent, and a
+   unit at its cap has none — measured, recreating made a sandbox that hit ordinary `ENOSPC`
+   **permanently unresumable**, breaking §4.2's reversible-pause promise.
+6. **Exclusions are a per-Promote input, and the freeze and the cost forecast must share one set** (D5
+   above), or the forecast counts bytes that will never be copied. A content-addressed arm must apply
+   exclusions **before hashing**, or it addresses content it must not ship.
+7. **The cost forecast must not under-report** — over-reporting refuses a Promote that would have fit,
+   under-reporting spreads `ENOSPC` onto unrelated sandboxes (§2.3). An arm answering "≈0, those bytes
+   are already in the store" is contractually anticipated, provided it is true.
+8. **Bytes-first ordering and the in-flight keep-sets stay** (§4.3 existence-is-state). Note the recorded
+   asymmetry: §5.C had to split into "backend enumerates, mediator decides" after this shape destroyed
+   committed data, while §5.B keeps the simpler shape deliberately because its row precedes its bytes. A
+   **shared** store changes that calculus — a shared blob has no single owning row — so it likely needs
+   the §5.C split.
+9. **An addressable layer format must not use `index=` or `metacopy=`.** With `index=on` the kernel
+   stamps the lower root's file handle into `trusted.overlay.origin` and verifies it on every later
+   mount, so a layer copied to another tree or machine fails `ESTALE` — precisely the portability such an
+   arm wants, broken by the feature. `metacopy` is worse in kind: **no mount-time verification at all**,
+   so a wrong lower set mounts clean and misbehaves later.
+10. **Lineage depth is bounded well below the kernel's limit, and it fails opaquely.** The lower stack is
+    passed as one colon-separated `lowerdir=` string, and the classic mount path caps its options at a
+    single page — so with this repo's Template ID width the ceiling is on the order of **~77 layers**,
+    not the kernel's `OVL_MAX_STACK` of 500, and lineage resolution carries a cycle check but **no depth
+    bound**. Escaping it means the per-layer `lowerdir+=` configuration API (trading one aggregate limit
+    for a per-path one) or passing descriptors.
+
+### D5.2 Multi-node addressing: settled — the writable upper does not travel
+
+Registered previously as an open item ("multi-node addressing across nodes via the rootfs provider"), and
+it resolves rather than staying open, because the premise was wrong: **no mature system moves a live
+writable layer between nodes.** The evidence is consistent across four of them — a pod is bound to its
+node and never rescheduled elsewhere with its writable layer; the kernel refuses a network filesystem as
+`upperdir` (③ above) and fails closed on a copied `index=` layer (⑨); one container manager attempted live
+migration and retreated to stop-move-start; and a microVM treats resuming one snapshot twice as unsafe.
+What crosses a node boundary is always a **quiesced artifact** — an image layer, or a frozen delta plus a
+deletion list — or nothing at all, with the writable disk declared the caller's problem.
+
+So the shape is: **the upper is promoted into an immutable layer, and only that layer crosses nodes.** One
+correction to the obvious reading — the artifact **need not be content-addressed** to travel, because
+Promote already produces it and D0 already measured that it tars out and rebuilds byte-identically. Dedup
+(D2/D3) is therefore an **independent** question from portability, not its precondition. The only residual
+that touches the engine is the **handle shape** a remote provider would receive, which
+open-decisions' §5.A provider row owns.
 
 ---
 
