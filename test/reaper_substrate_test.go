@@ -24,6 +24,7 @@ import (
 	"warren/internal/model"
 	"warren/internal/orchestrator"
 	"warren/internal/transport"
+	"warren/internal/waitfor"
 	"warren/test/harness"
 )
 
@@ -105,17 +106,16 @@ func TestReaperIdleAutoPauseRealRunsc(t *testing.T) {
 	// packages' substrate tests launch their own runsc containers concurrently, and
 	// that contention starves the probe for longer than any threshold set here.
 	r := lifecycle.NewReaper(m, time.Hour, time.Hour)
-	deadline := time.Now().Add(30 * time.Second)
 	var stt model.Lifecycle
-	for {
+	// Until rather than Must: the failure has to report the state actually observed,
+	// which a generic timeout message would bury.
+	ok := waitfor.Until(30*time.Second, 500*time.Millisecond, func() bool {
 		r.Sweep(ctx)
-		if stt, _ = m.State(ctx, sid); stt == model.Paused {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("idle sandbox state=%s; want paused (auto-pause) within 30s of a 2s idle_timeout", stt)
-		}
-		time.Sleep(500 * time.Millisecond)
+		stt, _ = m.State(ctx, sid)
+		return stt == model.Paused
+	})
+	if !ok {
+		t.Fatalf("idle sandbox state=%s; want paused (auto-pause) within 30s of a 2s idle_timeout", stt)
 	}
 	if k := lastKind(t, eng, sid); k != "auto-paused" {
 		t.Fatalf("idle disposition Kind=%q; want auto-paused", k)
@@ -220,15 +220,11 @@ func TestReaperMultiConnectionIdleRealRunsc(t *testing.T) {
 		}
 	}()
 	// wait for B to finish (~8s of output) + idle_timeout, sweeping.
-	paused := false
-	for i := 0; i < 40; i++ {
-		time.Sleep(500 * time.Millisecond)
+	paused := waitfor.Until(20*time.Second, 500*time.Millisecond, func() bool {
 		r.Sweep(ctx)
-		if stt, _ := m.State(ctx, sid); stt == model.Paused {
-			paused = true
-			break
-		}
-	}
+		stt, _ := m.State(ctx, sid)
+		return stt == model.Paused
+	})
 	if !paused {
 		t.Fatalf("sandbox did not auto-pause after ALL connections went quiet (§3.2)")
 	}
@@ -275,11 +271,20 @@ func TestReaperLiveCrashPauseRealRunsc(t *testing.T) {
 	// the live handle) until the reaper classifies it.
 	killContainer(t, base, sid)
 
-	// give the kill a moment, then sweep.
-	time.Sleep(500 * time.Millisecond)
-	lifecycle.NewReaper(m, time.Hour, time.Hour).Sweep(ctx)
-
-	if stt, _ := m.State(ctx, sid); stt != model.Paused {
+	// Sweep until the classification lands, rather than sleeping a guessed 500ms and
+	// sweeping once. `runsc kill` returns before the sandbox is fully gone, so the
+	// single-sweep version was betting that 500ms is always enough — a bet that fails as
+	// a "the engine did not crash-pause" verdict, which is indistinguishable from the
+	// defect this test hunts. Sweep is idempotent, so repeating it is free; the
+	// assertion below still requires paused, only now it is not racing the substrate.
+	r := lifecycle.NewReaper(m, time.Hour, time.Hour)
+	var stt model.Lifecycle
+	ok := waitfor.Until(20*time.Second, 200*time.Millisecond, func() bool {
+		r.Sweep(ctx)
+		stt, _ = m.State(ctx, sid)
+		return stt == model.Paused
+	})
+	if !ok {
 		t.Fatalf("killed running state=%s; want paused (live crash-pause)", stt)
 	}
 	if k := lastKind(t, eng, sid); k != "crash-paused" {
@@ -369,18 +374,18 @@ func TestReaperTransportCrashLoopEscalationRealRunsc(t *testing.T) {
 	// until the sandbox comes back running at a NEW IP (escalation resumed it).
 	r := lifecycle.NewReaper(m, time.Hour, 2*time.Second)
 	var epAfter string
-	escalated := false
-	for i := 0; i < 40; i++ {
+	escalated := waitfor.Until(20*time.Second, 500*time.Millisecond, func() bool {
 		r.Sweep(ctx)
-		if stt, _ := m.State(ctx, sid); stt == model.Running {
-			if ep, err := m.Endpoint(sid); err == nil && ep != epBefore {
-				epAfter = ep
-				escalated = true
-				break
-			}
+		if stt, _ := m.State(ctx, sid); stt != model.Running {
+			return false
 		}
-		time.Sleep(500 * time.Millisecond)
-	}
+		ep, err := m.Endpoint(sid)
+		if err != nil || ep == epBefore {
+			return false
+		}
+		epAfter = ep
+		return true
+	})
 	if !escalated {
 		stt, _ := m.State(ctx, sid)
 		t.Fatalf("crash-loop transport not escalated to resume within window (state=%s); want running at NEW IP (D4b)", stt)
@@ -428,10 +433,18 @@ func TestReaperEvictPastRetentionRealRunsc(t *testing.T) {
 		t.Fatalf("pause: %v", err)
 	}
 
-	time.Sleep(3 * time.Second) // exceed retention
-	lifecycle.NewReaper(m, time.Hour, time.Hour).Sweep(ctx)
-
-	if _, err := m.State(ctx, sid); err == nil {
+	// The 2s retention has to genuinely elapse — this wait is the test's subject, not a
+	// guess about substrate latency, so it stays a wait. What changes is that the sweep
+	// polls instead of firing once at a hardcoded 3s: the eviction becomes observable the
+	// moment retention passes, and a slow box no longer reports "still present" for a
+	// record that was merely a few ms short.
+	r := lifecycle.NewReaper(m, time.Hour, time.Hour)
+	evicted := waitfor.Until(20*time.Second, 200*time.Millisecond, func() bool {
+		r.Sweep(ctx)
+		_, err := m.State(ctx, sid)
+		return err != nil
+	})
+	if !evicted {
 		t.Fatalf("paused-past-retention record still present; want destroyed (evict)")
 	}
 	if k := lastKind(t, eng, sid); k != "destroyed" {

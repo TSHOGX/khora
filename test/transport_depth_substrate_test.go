@@ -15,12 +15,14 @@ package test
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"connectrpc.com/connect"
 
 	"warren/internal/transport"
+	"warren/internal/waitfor"
 	"warren/test/harness"
 )
 
@@ -90,17 +92,30 @@ func TestTransportPtyInteractiveLoop(t *testing.T) {
 		t.Fatal("no start event with pid")
 	}
 
-	// collect output concurrently.
-	out := make(chan string, 1)
+	// Collect output concurrently, into a buffer the test can READ WHILE IT FILLS.
+	// Guarded by a mutex rather than handed over at the end, because the wait below has
+	// to inspect it in flight — the previous version could only sleep a guessed 500 ms
+	// and hope the marker had arrived.
+	var (
+		mu   sync.Mutex
+		buf  strings.Builder
+		done = make(chan struct{})
+	)
 	go func() {
-		var b strings.Builder
+		defer close(done)
 		for ev := range ch {
 			if ev.Kind == "data" {
-				b.Write(ev.Data)
+				mu.Lock()
+				buf.Write(ev.Data)
+				mu.Unlock()
 			}
 		}
-		out <- b.String()
 	}()
+	seen := func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		return buf.String()
+	}
 
 	in, err := cl.StreamInput(ctx, pid)
 	if err != nil {
@@ -110,18 +125,35 @@ func TestTransportPtyInteractiveLoop(t *testing.T) {
 	if err := cl.Update(ctx, pid, transport.PtySize{Rows: 40, Cols: 120}); err != nil {
 		t.Fatalf("Update resize: %v", err)
 	}
+	// This one STAYS A SLEEP, deliberately. Update returning does not mean the shell has
+	// observed the new size, and the protocol exposes no signal that it has — the only
+	// evidence is the winsize output that the very next Send provokes, so there is no
+	// condition to poll that is not already the thing being tested. Making it a wait
+	// would just be a poll whose predicate is "true".
+	//
+	// If the resize has NOT landed by then, winsize prints SIZE 24 80 and the assertion
+	// below fails loudly rather than flaking silently, which is the right failure shape
+	// for a race that cannot be closed from this side.
 	time.Sleep(200 * time.Millisecond)
 	if err := in.Send([]byte("winsize; echo PTY_MARKER_$((6*7))\n"), true); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
-	time.Sleep(500 * time.Millisecond)
+	// Wait for the OUTPUT rather than for a duration: both lines are what the assertions
+	// read, so their arrival is exactly the condition, and CloseStdin must not race them.
+	if !waitfor.Until(20*time.Second, 20*time.Millisecond, func() bool {
+		s := seen()
+		return strings.Contains(s, "PTY_MARKER_42") && strings.Contains(s, "SIZE ")
+	}) {
+		t.Logf("pty output did not contain both lines within 20s; asserting on what arrived:\n%s", seen())
+	}
 	// CloseStdin (Ctrl-D) ends the interactive shell.
 	if err := cl.CloseStdin(ctx, pid); err != nil {
 		t.Fatalf("CloseStdin: %v", err)
 	}
 	_ = in.Close()
 
-	got := <-out
+	<-done
+	got := seen()
 	if !strings.Contains(got, "PTY_MARKER_42") {
 		t.Errorf("pty output missing echoed marker; got:\n%s", got)
 	}
@@ -259,27 +291,83 @@ func TestTransportConnectReplaysRing(t *testing.T) {
 	if pid <= 0 {
 		t.Fatal("no pid")
 	}
+	// The Start stream is WATCHED rather than discarded, because what it carries is the
+	// precondition this test needs: EARLY_OUTPUT must already be in the ring before
+	// Connect, or "Connect replayed it" proves nothing. Seeing the line on this stream is
+	// direct evidence of that; the 500ms sleep it replaces was a bet on it.
+	var (
+		srcMu  sync.Mutex
+		srcBuf strings.Builder
+	)
 	go func() {
-		for range ch { // drain the Start stream; keeps the source flowing
+		for ev := range ch { // keeps the source flowing
+			if ev.Kind == "data" {
+				srcMu.Lock()
+				srcBuf.Write(ev.Data)
+				srcMu.Unlock()
+			}
 		}
 	}()
+	earlyInRing := func() bool {
+		srcMu.Lock()
+		defer srcMu.Unlock()
+		return strings.Contains(srcBuf.String(), "EARLY_OUTPUT")
+	}
+	if !waitfor.Until(20*time.Second, 20*time.Millisecond, earlyInRing) {
+		t.Fatal("EARLY_OUTPUT never reached the Start stream, so it was never in the ring — " +
+			"the replay assertion below would be vacuous")
+	}
 
-	// EARLY_OUTPUT lands in the ring, then the process blocks on read. Connect
-	// fresh: it must replay EARLY before anything live.
-	time.Sleep(500 * time.Millisecond)
+	// Connect fresh: it must replay EARLY before anything live.
 	sub, err := cl.Connect(ctx, pid)
 	if err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
-	done := make(chan collected, 1)
-	go func() { done <- collectUntilEnd(sub) }()
+	// Collected incrementally so the send below can wait for the REPLAY to arrive rather
+	// than sleeping: the replay landing is what proves the subscriber is attached, and an
+	// unattached subscriber would miss LATE_OUTPUT and fail the live half for the wrong
+	// reason.
+	var (
+		subMu  sync.Mutex
+		subBuf strings.Builder
+		subRes = make(chan collected, 1)
+	)
+	go func() {
+		var c collected
+		c.exit = -1
+		for ev := range sub {
+			switch ev.Kind {
+			case "data":
+				subMu.Lock()
+				subBuf.Write(ev.Data)
+				subMu.Unlock()
+				c.data.Write(ev.Data)
+			case "end":
+				c.exit = ev.ExitCode
+				c.gotEnd = true
+			case "error":
+				c.streamErr = ev.Err
+			}
+		}
+		subRes <- c
+	}()
+
+	if !waitfor.Until(20*time.Second, 20*time.Millisecond, func() bool {
+		subMu.Lock()
+		defer subMu.Unlock()
+		return strings.Contains(subBuf.String(), "EARLY_OUTPUT")
+	}) {
+		// Not fatal: the replay assertion below is this test's subject and must be the
+		// thing that reports it, with the full stream contents.
+		t.Logf("the new subscriber had not replayed EARLY_OUTPUT within 20s; " +
+			"sending input anyway so the assertions report the real contents")
+	}
 
 	// unblock `read` so the process emits LATE_OUTPUT live to both subscribers.
-	time.Sleep(300 * time.Millisecond)
 	if err := cl.SendInput(ctx, pid, []byte("go\n"), false); err != nil {
 		t.Fatalf("SendInput: %v", err)
 	}
-	c := <-done
+	c := <-subRes
 	if !strings.Contains(c.data.String(), "EARLY_OUTPUT") {
 		t.Errorf("Connect did not replay EARLY_OUTPUT (blank-screen bug); got:\n%s", c.data.String())
 	}
@@ -323,10 +411,39 @@ func TestTransportSignalProcessGroup(t *testing.T) {
 		t.Fatal("no start pid")
 	}
 
-	ended := make(chan int, 1)
-	go func() { ended <- collectUntilEnd(ch).exit }()
-
-	time.Sleep(500 * time.Millisecond) // let the fork happen
+	// FORKED is watched rather than slept past. The fixture echoes it immediately after
+	// backgrounding `blocker`, so its arrival is direct evidence the fork happened — which
+	// is the precondition for the whole test: signal the parent before the child exists
+	// and the stream ends for the trivial reason, passing without exercising kill(-pgid).
+	var (
+		mu     sync.Mutex
+		buf    strings.Builder
+		ended  = make(chan int, 1)
+		forked = func() bool {
+			mu.Lock()
+			defer mu.Unlock()
+			return strings.Contains(buf.String(), "FORKED")
+		}
+	)
+	go func() {
+		var c collected
+		c.exit = -1
+		for ev := range ch {
+			switch ev.Kind {
+			case "data":
+				mu.Lock()
+				buf.Write(ev.Data)
+				mu.Unlock()
+			case "end":
+				c.exit = ev.ExitCode
+			}
+		}
+		ended <- c.exit
+	}()
+	if !waitfor.Until(20*time.Second, 20*time.Millisecond, forked) {
+		t.Fatal("the guest never echoed FORKED, so the backgrounded child never started — " +
+			"signalling now would test kill(pid) against a single process, not kill(-pgid)")
+	}
 	// SIGTERM (15) — the server defaults to kill(-pgid) so the whole group dies.
 	if err := cl.SendSignal(ctx, pid, 15); err != nil {
 		t.Fatalf("SendSignal: %v", err)
@@ -481,9 +598,43 @@ func TestTransportSignalRefusesNonPositivePid(t *testing.T) {
 			if pid <= 0 {
 				t.Fatal("no start pid")
 			}
-			ended := make(chan collected, 1)
-			go func() { ended <- collectUntilEnd(ch) }()
-			time.Sleep(300 * time.Millisecond)
+			// READY is watched rather than slept past: the fixture echoes it before
+			// blocking on `read`, so its arrival is evidence the workload is actually
+			// live. That is this test's precondition — the refusal must be proved against
+			// a RUNNING sandbox, or "still alive afterwards" is trivially true of a
+			// sandbox that had not started yet.
+			var (
+				mu    sync.Mutex
+				buf   strings.Builder
+				ended = make(chan collected, 1)
+			)
+			go func() {
+				var c collected
+				c.exit = -1
+				for ev := range ch {
+					switch ev.Kind {
+					case "data":
+						mu.Lock()
+						buf.Write(ev.Data)
+						mu.Unlock()
+						c.data.Write(ev.Data)
+					case "end":
+						c.exit = ev.ExitCode
+						c.gotEnd = true
+					case "error":
+						c.streamErr = ev.Err
+					}
+				}
+				ended <- c
+			}()
+			if !waitfor.Until(20*time.Second, 20*time.Millisecond, func() bool {
+				mu.Lock()
+				defer mu.Unlock()
+				return strings.Contains(buf.String(), "READY")
+			}) {
+				t.Fatal("the guest never echoed READY, so the workload was not live — a refusal " +
+					"asserted against a sandbox that had not started proves nothing")
+			}
 
 			// 15 = SIGTERM, the signal that is actually lethal here: PID 1 handles
 			// it, broadcasts, and exits.
