@@ -5,8 +5,10 @@
 # enforced BY THE KERNEL, not by the via-process's own discipline. D4.2 works out
 # the predicate (uid/gid, not mark) and the two relative positions (a RETURN above
 # the steering rules so the process does not re-match its own rule; the L0 floor
-# ABOVE that, so it stays subject to the floor). But D4.2 also asserts the whole
-# predicate "只活在 forward" — and that claim is unmeasured.
+# ABOVE that, so it stays subject to the floor). But D4.2 also asserted, at the time
+# this ran, that the whole predicate "lives entirely in `forward`" — and that claim
+# was unmeasured. It is the claim this script falsified; D4.2 now says the uid
+# predicate lands on `output`, and D5 ㉔ carries the measurement.
 #
 # It looks mechanically wrong: hop 2 is a HOST-LOCAL process opening a NEW
 # connection (§5.D requires via[].endpoint to be host-local, §6.2 400s anything

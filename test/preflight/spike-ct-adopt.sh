@@ -2,8 +2,8 @@
 # spike-ct-adopt.sh — measures whether an established flow survives what an
 # Adopt (§4.4-A) may do to a sandbox's rule set after a control-plane restart.
 #
-# This was registered in network.md D5 as blocked-unmeasured ("`sbx` 上没装
-# `conntrack` CLI"); conntrack-tools 1.4.9 is now installed, the measurement is
+# This was registered in network.md D5 as blocked-unmeasured ("no `conntrack` CLI
+# installed on `sbx`"); conntrack-tools 1.4.9 is now installed, the measurement is
 # done, and the result is D5 ㉒ — so this script is the reproduction, not the
 # open question. Re-run it if the Adopt implementation changes.
 # NOTE this machine has NO `/proc/net/nf_conntrack` (CONFIG_NF_CONNTRACK_PROCFS

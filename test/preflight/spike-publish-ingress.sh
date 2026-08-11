@@ -4,13 +4,16 @@
 #
 # It exists to falsify one spec claim and answer two unmeasured shape questions:
 #
-#  Q1 (spec-changing) — §5.D user-visible semantics ① promises that a guest
-#     service bound to 127.0.0.1 yields "连接被拒且错误可归因,不是挂住".
-#     "可归因" requires that this case be DISTINGUISHABLE from "nothing is
+#  Q1 (spec-changing) — §5.D user-visible semantics ① promised, at the time this
+#     ran, that a guest service bound to 127.0.0.1 yields "the connection is
+#     refused and the error is attributable, rather than hanging".
+#     "Attributable" requires that this case be DISTINGUISHABLE from "nothing is
 #     listening at all". If gVisor's netstack answers both with an RST, the
 #     caller sees `refused` either way and the promise is unfalsifiable from
-#     outside — the contract then has to be reworded to promise only "被拒".
-#     Case B vs case C is that comparison.
+#     outside — the contract then has to be reworded to promise only "refused".
+#     Case B vs case C is that comparison. It is: the measurement below confirmed
+#     the two are indistinguishable, and §5.D ① now stops at "refused and fails
+#     fast", stating plainly that it does not promise attributability (D5 ⑯).
 #
 #  Q2 — which chain must carry the companion accept. D5 ⑧ measured the hook
 #     split for EGRESS (guest→host lands in `input`, guest→routed lands in
@@ -266,7 +269,7 @@ install_pub none
 rB="$(dial_from_caller)"; echo "  caller: $rB"
 outB="$(field OUTCOME "$rB")"; msB="$(field ELAPSED_MS "$rB")"
 [[ "$outB" != timeout ]] \
-  && ok "B not hung (outcome=$outB, ${msB}ms) — the 'not 挂住' half holds" \
+  && ok "B not hung (outcome=$outB, ${msB}ms) — the 'does not hang' half holds" \
   || bad "B HUNG (${msB}ms) — contract says it must be refused, not hang"
 
 echo
@@ -281,11 +284,11 @@ outC="$(field OUTCOME "$rC")"; msC="$(field ELAPSED_MS "$rC")"
 echo
 echo "-- Q1 VERDICT: is B distinguishable from C? --"
 if [[ "$outB" == "$outC" ]]; then
-  bad "Q1: B and C are INDISTINGUISHABLE (both $outB) — '错误可归因' is NOT"
-  bad "    observable by the caller. §5.D semantics ① must be reworded to"
-  bad "    promise only '被拒', dropping the attributability claim."
+  bad "Q1: B and C are INDISTINGUISHABLE (both $outB) — 'the error is attributable'"
+  bad "    is NOT observable by the caller. §5.D semantics ① must be reworded to"
+  bad "    promise only 'refused', dropping the attributability claim."
 else
-  ok "Q1: distinguishable (B=$outB, C=$outC) — '可归因' holds as written"
+  ok "Q1: distinguishable (B=$outB, C=$outC) — 'attributable' holds as written"
 fi
 
 echo

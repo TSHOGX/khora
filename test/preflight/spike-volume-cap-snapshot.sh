@@ -11,12 +11,13 @@
 # is re-measured here.
 #
 # The LIMIT side (`max_referenced`) has never been tested, and §5.C is about to
-# depend on it: volume.md D6.1 makes "卷 = subvolume" precisely so that cheap
-# snapshots and the hard cap land on the SAME object, D8 still lists "clone 出的卷
-# 是否继承 quota/策略" as undecided, and model.md §3.4 already commits the node
-# accounting inequality to "snapshot / clone 出的卷按**声明帽**计,不按其元数据级的
-# 实际字节计". That sentence is only sound if the DECLARED cap is what the disk
-# actually enforces. Five questions decide it:
+# depend on it: volume.md D6.1 makes "a volume = a subvolume" precisely so that cheap
+# snapshots and the hard cap land on the SAME object, D8 still lists "whether a
+# clone's volume inherits quota / policy" as undecided, and model.md §3.4 already
+# commits the node accounting inequality to "snapshot / clone volumes are counted by
+# their **declared cap** rather than by metadata-level actual bytes". That sentence is
+# only sound if the DECLARED cap is what the disk actually enforces. Five questions
+# decide it:
 #   Q1  INHERITANCE. Does the new subvolume's qgroup row carry the source's
 #       `max_referenced`, or `none`? rw snapshot, `-r` snapshot, uncapped source,
 #       and one transitive hop.
@@ -207,8 +208,9 @@ echo "=================================================================="
 # WHAT WRONG BEHAVIOUR THIS CATCHES. If the answer is "inherits", then §5.C's
 # Snapshot/Clone gets a cap for free and the danger is a control-plane record that
 # says "no cap" over a disk that enforces one. If the answer is "none", then every
-# snapshot lands UNCAPPED and §3.4's "按声明帽计" is a claim about a number nobody
-# wrote to disk. Both are defects; they are opposite defects, and the fix differs.
+# snapshot lands UNCAPPED and §3.4's "counted by the declared cap" is a claim about a
+# number nobody wrote to disk. Both are defects; they are opposite defects, and the fix
+# differs.
 # Four shapes, because a rule that only holds for the rw case is not a rule.
 mk "$WFS/src"; btrfs qgroup limit "$SRC_CAP" "$WFS/src"
 pour "$WFS/src/seed" 8 >/dev/null
@@ -431,21 +433,23 @@ echo " Q5. THE MISMATCH HAZARD: a record that says 'cap N' over a disk that says
 echo "=================================================================="
 # WHAT WRONG BEHAVIOUR THIS CATCHES — and it is the point of the whole spike.
 # model.md §3.4 requires `size` on POST /v1/volumes when the disk axis is metered
-# ("该轴被计量 ⟹ 卷也必须有帽"), and states that snapshot/clone volumes count
-# 按声明帽. The control-plane record therefore ALWAYS carries a number. Q1 says the
-# disk carries `none`. So an engine whose Snapshot/Clone forgets the explicit
-# SetQuotaLimit produces a volume that the admission gate counts as N bytes and the
-# filesystem lets grow without bound — silent over-commit of the node budget, no
-# errno anywhere, and `Usage()` returning limit=0 which is INDISTINGUISHABLE from a
-# deliberately uncapped volume. This is D7.1's defect class from the other side:
-# there, a cap nobody set; here, a cap everybody believes in that does not exist.
+# ("the axis being metered ⟹ volumes must have caps too"), and states that
+# snapshot/clone volumes are counted by their declared cap. The control-plane record
+# therefore ALWAYS carries a number. Q1 says the disk carries `none`. So an engine
+# whose Snapshot/Clone forgets the explicit SetQuotaLimit produces a volume that the
+# admission gate counts as N bytes and the filesystem lets grow without bound — silent
+# over-commit of the node budget, no errno anywhere, and `Usage()` returning limit=0
+# which is INDISTINGUISHABLE from a deliberately uncapped volume. This is D7.1's defect
+# class from the other side: there, a cap nobody set; here, a cap everybody believes in
+# that does not exist.
 DECLARED=$SRC_CAP
 mk "$WFS/vrec"; btrfs qgroup limit "$DECLARED" "$WFS/vrec"
 pour "$WFS/vrec/data" 8 >/dev/null
 # the engine snapshots it and allocates a new volume ID. It records size=$DECLARED
-# (§3.4: 按声明帽计). It does NOT call SetQuotaLimit — the bug under test.
+# (§3.4: counted by the declared cap). It does NOT call SetQuotaLimit — the bug under
+# test.
 snap "$WFS/vrec" "$WFS/vclone"; settle
-echo "  control plane believes:  volume 'vclone' size = $(mib $DECLARED)  (§3.4 按声明帽计)"
+echo "  control plane believes:  volume 'vclone' size = $(mib $DECLARED)  (§3.4: by declared cap)"
 echo "  Usage() would read back:  $(rowof "$WFS/vclone")"
 echo "                            limit=0 — the SAME value an intentionally uncapped"
 echo "                            volume reports. The engine cannot tell them apart."
@@ -476,15 +480,16 @@ echo "=================================================================== Q6"
 echo " Q6. LOWERING a cap BELOW current usage: what can the endpoint promise?"
 echo "=================================================================="
 # WHAT WRONG BEHAVIOUR THIS CATCHES. `PATCH /v1/volumes/{id}` carries only `size`,
-# and §3.4 already says any write to a cap column changes Σ AT ONCE ("抬高上限须重过
-# 准入门…降帽不需要") — i.e. the spec assumes LOWERING is always safe and needs no
-# admission re-check. That assumption is untested against a volume that has ALREADY
-# written past the new number. Three distinguishable outcomes, and the endpoint's
-# contract differs for each: (i) btrfs REFUSES -> the endpoint gets its 400 from the
-# substrate for free; (ii) btrfs ACCEPTS and existing bytes are safe -> the endpoint
-# can document "existing bytes kept, further growth refused"; (iii) btrfs ACCEPTS and
-# existing data is truncated/lost/corrupted -> a `size` PATCH is a DESTRUCTIVE
-# operation, which is the one outcome nothing in the spec currently allows for.
+# and §3.4 already says any write to a cap column changes Σ AT ONCE ("a raise must
+# re-run admission … while a lowering need not") — i.e. the spec assumes LOWERING is
+# always safe and needs no admission re-check. That assumption is untested against a
+# volume that has ALREADY written past the new number. Three distinguishable outcomes,
+# and the endpoint's contract differs for each: (i) btrfs REFUSES -> the endpoint gets
+# its 400 from the substrate for free; (ii) btrfs ACCEPTS and existing bytes are safe ->
+# the endpoint can document "existing bytes kept, further growth refused"; (iii) btrfs
+# ACCEPTS and existing data is truncated/lost/corrupted -> a `size` PATCH is a
+# DESTRUCTIVE operation, which is the one outcome nothing in the spec currently allows
+# for.
 # (iii) is ruled out by MEASUREMENT, not hope, so the readback in (c) rehashes the
 # file rather than trusting a stat().
 #
@@ -568,13 +573,13 @@ chk "original data still intact after the refused write" "$SUM_W" "$SUM_BEFORE"
 
 echo "  (e) *** THE ONE THAT MATTERS: is it REVERSIBLE? ***"
 # THIS IS WHERE THE FIRST DRAFT OF THIS SPIKE WAS WRONG. It asserted that `limit
-# none` restores writability — the obvious repair path, and the one §3.4's "降帽不需要
-# 重过准入门" quietly assumes is always available. It is NOT. Measured below: while
-# `referenced > max_referenced`, the quota-limit ioctl ITSELF returns ENOSPC, so the
-# cap cannot be removed OR raised. A `size` PATCH that lands below current usage is
-# therefore NOT undoable through the same endpoint that caused it, which upgrades
-# this from "a semantic to document" to "a state the endpoint must not create by
-# accident".
+# none` restores writability — the obvious repair path, and the one §3.4's "a lowering
+# need not re-run admission" quietly assumes is always available. It is NOT. Measured
+# below: while `referenced > max_referenced`, the quota-limit ioctl ITSELF returns
+# ENOSPC, so the cap cannot be removed OR raised. A `size` PATCH that lands below
+# current usage is therefore NOT undoable through the same endpoint that caused it,
+# which upgrades this from "a semantic to document" to "a state the endpoint must not
+# create by accident".
 echo "        (e1) limit none:"
 E1="$(limit none "$WFS/low")"
 printf '             %s\n' "$E1"
@@ -733,7 +738,8 @@ echo "                     perfectly safe — but because accepting it produces 
 echo "                     the CONTROL PLANE CAN NO LONGER RE-CAP: the repair for a"
 echo "                     mis-typed size runs through deleting the guest's bytes, and"
 echo "                     nothing in §6 lets the engine do that on the caller's behalf."
-echo "                     This also puts a caveat on §3.4's \"降帽不需要\" (重过准入门):"
+echo "                     This also puts a caveat on §3.4's \"a lowering need not\""
+echo "                     (re-run the admission gate):"
 echo "                     the Σ claim is right (lowering only reduces the left-hand"
 echo "                     side, so no admission re-check is needed), but \"lowering is"
 echo "                     the safe direction\" does not follow — it is the direction"
@@ -749,7 +755,8 @@ echo "  declared-cap accounting and an unbounded silent over-commit. And because
 echo "  cap is a SEPARATE step from the snapshot ioctl (Q1) while the bytes exist from"
 echo "  the first instant, the window between them is a real crash window: a snapshot"
 echo "  that survives a crash before its limit call is a live uncapped volume."
-echo "  §3.4's \"snapshot / clone 出的卷按声明帽计\" is therefore a REQUIREMENT ON THE"
+echo "  §3.4's \"snapshot / clone volumes are counted by their declared cap\" is"
+echo "  therefore a REQUIREMENT ON THE"
 echo "  ENGINE, not a description of the substrate."
 echo
 echo "environment: work fs isolated=$ISOLATED, quota mode=${W_MODE:-$HOST_MODE},"

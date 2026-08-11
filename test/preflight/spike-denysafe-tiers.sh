@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# spike-denysafe-tiers.sh — membership of the §2.4 "内网 deny-safe" tier, for
+# spike-denysafe-tiers.sh — membership of the §2.4 "deny-safe private" tier, for
 # BOTH address families. No pre-existing D5 fact covers it: they fix the L0
 # floor's members and rule text, and D5 ⑦ notes in passing that this
 # host's resolver (0.250.250.200) is outside every floor item — but nobody has

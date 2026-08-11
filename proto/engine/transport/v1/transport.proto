@@ -23,7 +23,7 @@ option go_package = "warren/internal/transport/gen/engine/transport/v1;transport
 
 // Health is the unary readiness/liveness probe (§4.3 L2 / transport D4.5). Its
 // first success is the resume readiness gate that flips a sandbox to running
-// (guest-runtime D5.2 要点①) — the engine never trusts a bare TCP accept. It is
+// (guest-runtime D5.2 Point ①) — the engine never trusts a bare TCP accept. It is
 // also the ACTIVITY probe (§4.3 / reaper-health D2): one RPC carries L2
 // liveness AND the sandbox-global idle duration, so the reaper never needs a
 // second round-trip to tell healthy from idle.
