@@ -66,6 +66,15 @@ boundaries; internal mechanisms still to be refined are registered in
     produce a whole-disk device number at all.
     That prohibition is pinned structurally by the token guard in
     `internal/runtime/seam_test.go` (`major`/`minor`/`majmin`/`devno`).
+    - **Which seam the axis lands on is itself open, and the assumption that it is this one should not
+      be inherited silently.** The external shapes point the other way: a microVM's rate limiter
+      (bandwidth and ops token buckets) hangs off the **drive** handle beside its host path, and cloud
+      block storage attaches IOPS **per volume** — i.e. the cap may belong on §5.C's seam rather than
+      on `ResourceLimits`. Nothing changes today (there is still no consumer, so adding the field
+      either place is the reservation §1.3 refuses), and **the device-number prohibition above holds
+      regardless of which seam wins** — but a rate limiter is a property of a storage attachment at
+      least as naturally as of a scheduling layer, and one such shape cannot render it universally
+      either (it must be omitted where the block backend enforces instead).
 - **How the RAM cap is apportioned is a provider-internal detail**: the interface says only
   `MemoryByte = N` (§3.4 Binding), and the provider decides for itself how to materialize "N bytes
   of RAM". Internally `local_runsc` sets the guest-visible RAM to N and the host ceiling to

@@ -123,6 +123,16 @@ evidence is worth recording**: the implementation that took the working road abo
 set that is **port-independent** (the address is in the set, and any port to it is allowed) —
 looser than ours. We take the stricter side, at the cost of a more verbose declaration.
 
+**Two independent platforms have since converged on the same two-layer split, which strengthens this
+section's argument rather than weakening it.** Surveying public sandbox APIs for how they express
+egress, the two with a real egress vocabulary each concluded they needed **two** fields — a CIDR
+allow-list *and* a separate domain allow-list — rather than one field carrying both kinds of value.
+That is exactly the boundary this section draws: IP literals are the engine's layer, and domain
+judgment is a **different** mechanism living outside it (here, behind `via[]`). So the decision not to
+admit domain names into the declaration is corroborated by convergence and not merely by "someone has
+made the working road work" — while remaining, as above, a cost decision rather than a claim that
+domain control is worthless.
+
 ---
 
 ## D3. Three mechanical constraints on the declaration's shape (why the four fields are shaped this way)
