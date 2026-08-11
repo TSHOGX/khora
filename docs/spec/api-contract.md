@@ -52,7 +52,7 @@ POST   /v1/sandboxes                 {template_id, network?, volumes?, idle_time
 #   shared-rw} — it is a property of the **mount row** (§5.C), so it is given here rather
 #   than on the volume record. Colliding with an exclusive lease → 409 (§6.2's third of four
 #   409s).
-GET    /v1/sandboxes/{id}                                     → {sandbox_id, state, death_cause?}
+GET    /v1/sandboxes/{id}                        → {sandbox_id, state, death_cause?, used_byte?}
 #   Read-only lifecycle state + cause of death (§4.3). `death_cause` ∈ {`gone`,
 #   `resource-exceeded`, `unknown`}, and **the key is absent when no death was observed**
 #   (not an empty string, not null): `CauseNone` is "there is no cause of death" rather than
@@ -64,6 +64,23 @@ GET    /v1/sandboxes/{id}                                     → {sandbox_id, s
 #   certain to be refused and inferring backwards from a 409 error string.
 #   The value is §4.3's **abstract enumeration**, never an errno / cgroup path — a remote
 #   provider cannot produce host primitives (§5.A).
+#   `used_byte` is the bytes this sandbox's Overlay storage unit consumes as the **rootfs
+#   provider's own backend reports them** (upper + work — never the Template stack, and never
+#   the `merged` view), and **the key is absent when it cannot be read**, not reported as 0:
+#   word for word the `GET /v1/volumes/{id}` rule, because it answers the same question for the
+#   same consumer — `PATCH disk_byte` refuses a cap that is not **strictly greater** than it
+#   (§3.4), and the only other route to the number is parsing it out of that 400's message text.
+#   **It is readable at rest, so unlike `host_endpoint` this key does NOT depend on a live
+#   placement**: the unit is an ID-addressed artifact (§3.1.1), so `paused` reports it exactly as
+#   `running` does — and `paused` is the **only** state a disk cap may be edited from (§3.4), so
+#   omitting it there would omit it from the one state its consumer works in.
+#   **Reported for an uncapped sandbox too, and this is NOT the `UncappedBytes` asymmetry**: that
+#   term reports ZERO for a capped unit by contract (§3.4's two terms are disjoint), whereas this
+#   one reports the backend's real number either way. What an uncapped sandbox cannot do is USE
+#   it — `disk_byte: 0 → N` is refused (see PATCH) — so there the value is diagnostic only.
+#   `GET /v1/sandboxes` (list) does **not** carry it: one backend round trip per sandbox,
+#   multiplied by the sandbox count (word for word the `GET /v1/volumes` note). A caller needing
+#   usage reads the one sandbox.
 PATCH  /v1/sandboxes/{id}            {cpu_millis?, memory_byte?, disk_byte?, idle_timeout?, retention?,
                                       volumes?, network?}
                                      → {sandbox_id, state, applies_at, lease_released?}
@@ -248,7 +265,8 @@ GET    /v1/volumes/{id}/export       ?path=  (direct read)
 
 # Network (the declaration is bound at create; changing it goes through the resume boundary;
 # publish is the explicit ingress exception and can be hot-added)
-GET    /v1/sandboxes/{id}/network    → {state, egress:{default, allow[], via[]}, ingress:{publish[]}}
+GET    /v1/sandboxes/{id}/network    → {state, egress:{default, default_hit_packet?, allow[], via[]},
+                                        ingress:{publish[]}}
 #   Reads that declaration back (§5.D's four fields). **All three arrays are always present,
 #   written as `[]` when empty — never omitted, never null**: they are determined values in the
 #   record, whereas the omission rule for `death_cause` / `used_byte` governs **facts that
@@ -262,6 +280,42 @@ GET    /v1/sandboxes/{id}/network    → {state, egress:{default, allow[], via[]
 #   placement (§2.4), there is no per-publish installation state, so per-item presence would
 #   just restate the same bit N times. An endpoint changes with the placement and must not be
 #   cached as a stable identifier (§3.3).
+#   Each `egress.allow[]` item and each `egress.via[].match[]` item carries **`hit_packet?`** — the
+#   packets this engine's rules for THAT entry have acted on since the current rule set was
+#   installed. It is the signal §5.D already treats as the only evidence a rule is live (network.md
+#   D4.1's silent pass-through, D4.2's `iifname` trap), and what it is FOR is **attribution**:
+#   without it, a first-cut allow-list that is inevitably incomplete gives a guest-side failure no
+#   way to be traced back to the declaration. `egress.default_hit_packet` is the same number for the
+#   rule `egress.default` itself generates — under `deny` the catch-all refusal, under `allow` the
+#   catch-all accept. **It counts the DECLARATION's own catch-all and nothing else**: the L0 floor
+#   and the internal deny-safe tier are deliberately not summed into it, since a floor refusal is
+#   liftable by no declaration (§2.4) and reporting it here would send a caller to widen an
+#   allow-list that can never help.
+#   **PACKETS, not connections, and not comparable across entry kinds.** An `allow[]` entry's number
+#   counts every packet its accepts admitted (one flow contributes many); a `via[]` entry's number
+#   is its `prerouting` DNAT, which the kernel evaluates on the FIRST packet of a flow only, so it
+#   is nearer a count of flows steered. Read each as "did this entry act, and roughly how much",
+#   never as traffic accounting.
+#   **The key is absent when the engine holds no live placement** — the same rule as `host_endpoint`,
+#   and here it is stronger than a convention: pause **destroys** the rule-set table (a placement
+#   resource, §2.4), so a `paused` sandbox has no counter to report rather than a zero one. Absent
+#   also covers "could not be read" and "that rule was never rendered". **0 IS reported when it is
+#   read as 0** — a rule that matched nothing is a different fact from an absent key, and collapsing
+#   the two manufactures exactly the false zero §2.4's acceptance discipline refuses to accept.
+#   ⚠ **Placement-local, so a 0 NEVER means "never hit".** It resets at every pause/resume, at a
+#   control-plane restart (`Adopt` re-installs the whole table atomically, recreating every counter
+#   at 0 — network.md D5 ㉒), **and at every `POST …/publish` on a running sandbox** (a hot-add
+#   re-renders and re-installs the whole table, §5.D). It is a liveness signal, not a durable
+#   metric, and **the implication runs one way only: non-zero proves the rule is live, zero proves
+#   nothing** — which is also why it does not reopen the `in_effect` refusal below.
+#   ⚠ **A `via[]` entry's number says MATCHED, never ALLOWED.** The steered flow is DNAT'd to a
+#   host-local endpoint and whatever refuses it does so one hop further out, inside a process the
+#   engine neither runs nor sees into (network.md D4.3). A rising number alongside a failing guest
+#   connection is the normal appearance of a refusal by that external layer. **The second hop's own
+#   floor is not reported here at all**: it lives in one engine-level table covering every `via[]` in
+#   the deployment (§2.4 / D5 ㉔), so its counter is not attributable to any one sandbox.
+#   **`ingress.publish[]` carries no `hit_packet`**: its rules split across three hooks and one of
+#   them matches other sandboxes' egress, so a per-publish number is not cleanly attributable.
 #   **`state` is a member of this response**, taking the same value from the same store read as
 #   `GET /v1/sandboxes/{id}`, sparing the caller a round of "having read it back, I must fetch
 #   the state to interpret it" (the same N+1-saving criterion as list carrying `death_cause`):
@@ -283,7 +337,8 @@ GET    /v1/sandboxes/{id}/network    → {state, egress:{default, allow[], via[]
 #   response, the read surface has no such edit, and forcing one in would only make it a
 #   function of `state` while giving the same key different meanings at two endpoints.
 #   **This response's body IS a legal `PATCH` request body** — the read-only members the read
-#   surface emits (`state`, and `host_endpoint` in each `publish[]` item) are **accepted and
+#   surface emits (`state`, `host_endpoint` in each `publish[]` item, and `hit_packet` in each
+#   `allow[]` / `via[].match[]` item plus `egress.default_hit_packet`) are **accepted and
 #   ignored** on the write surface. The reason is not convenience: the PATCH note above makes
 #   read-modify-write a **contract requirement** (a lost update on a security-relevant field),
 #   and all three write points reject unknown keys, so without this a caller writing the GET
@@ -292,8 +347,8 @@ GET    /v1/sandboxes/{id}/network    → {state, egress:{default, allow[], via[]
 #   the road §5.D names as dangerous.
 #   The rule is "**every read-only member the read surface emits**" rather than "`state`
 #   alone": unknown-key rejection **applies recursively**, so missing the `host_endpoint`
-#   nested inside `publish[]` would get a `running` sandbox-with-publish response body rejected
-#   one level down.
+#   nested inside `publish[]` — or a `hit_packet` nested inside an `allow[]` / `via[].match[]`
+#   item — would get a `running` sandbox's response body rejected one level down.
 #   **And that 400 must not be kept as an ordering guardrail either**: it appears only on the
 #   ordering §5.D names as dangerous (in the safe order `pause → GET → PATCH → resume` the GET
 #   comes after the pause, so with no placement no endpoint is emitted), which would amount to
