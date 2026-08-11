@@ -443,6 +443,39 @@ boundaries; internal mechanisms still to be refined are registered in
     **the fact being tested does not live in the store**. So the adjudication reads the mediator's
     live-map rather than that state column (and it sits in the same mutex table as the direct-write
     in-flight marker from the previous bullet).
+  - **A live read-only mount does not gate a direct mutation, and what its reader may observe is
+    stated rather than left to inference.** The invariant above is about **tearing**, and tearing needs
+    **two writers**; a reader is not one. So a `shared-ro` holder — live or not — never refuses an
+    `import`, and symmetrically a cold start that would mount the volume **read-only** is never refused
+    for a direct write in flight. This is not an exception carved out of the gate above: refusing here
+    would be a *different* rule with no hazard behind it, and it would delete a capability the engine
+    deliberately has (booting a sandbox that only **reads** a volume being seeded).
+    **What the ro reader may see is bounded, and the bound is measured**: a holder that already has the
+    file open keeps reading the **complete previous inode** (the gofer follows the inode — D7.2
+    measured zero errors, with reads and writes through the old descriptor continuing); a **fresh**
+    lookup landing mid-replacement gets a momentary **`ENOENT`** (not EIO, not ESTALE), because an
+    import **replaces rather than overwrites in place** — it unlinks first, which §5.C already requires
+    for an independent reason (a shorter payload written over a longer file would otherwise leave the
+    old tail attached, producing a file that is neither the old nor the new content); and an open
+    mid-stream gets a **prefix** of the new content, the same consistency class a snapshot already has.
+    **It never sees a torn file mixing the two versions**, because the one mechanism that could produce
+    that — an in-place overwrite — is already excluded.
+    **Freshness beyond that is not promised, and that is this section's EXISTING coherence position
+    rather than a new one**: the gofer and sentry cache separately, so cross-sandbox rw coherence is
+    already undefined by the engine (above), and a direct write is simply a second writer on the host
+    side of that same boundary. **No warning, version stamp, or refusal is added.** A warning has no
+    channel — §6 is request/response, and §4.1's event kinds are lifecycle transitions whose closed set
+    the schema asserts, so inventing an outward channel fails §1.3's litmus at the first step. A
+    version stamp is barred twice: `generation` is the one §1.1 row barred **outright**, and §4.3
+    already assigns staleness detection to the placement as the epoch — and it would have **no reader**,
+    since the consumer is a guest and §4.2 rejects application-layer cooperation outright. A refusal
+    would delete the capability named above, on **both** sides of a symmetric gate.
+    (The industry position is the same and is reached by every comparable system: NFS states plainly
+    that its protocol "is not designed to support true cluster file system cache coherence" and pushes
+    the escape to the application; a FUSE-fronted object store documents that an out-of-band overwrite
+    during a read yields "either the old data or the new data, but never partial or corrupt data".
+    Where a validator exists at all it is used to **revalidate or fail the reader**, never to refuse the
+    writer's operation.)
 - **Snapshot / clone = a per-backend capability, crash-consistent by default**: the local backend
   delivers it with `btrfs subvolume snapshot` (whole-tree, atomic, instantaneous), and whether it is
   supported is decided by the backend's capability query (a plain directory / some remote backends may

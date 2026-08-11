@@ -99,9 +99,10 @@ func TestPausedSandboxIsNotALiveWriter(t *testing.T) {
 }
 
 // TestLiveReadOnlyMountDoesNotBlockDirectWrite: a live READER is not a writer, so it
-// cannot tear anything. Whether to warn about its gofer cache going stale is a
-// PRECISION question left deliberately open (volume.md D8) — and settling it by
-// quietly refusing here would again trade a capability for convenience.
+// cannot tear anything. SETTLED in §5.C — no warning, no version stamp, no refusal:
+// the reader's exposure is bounded (stale-but-whole / a momentary ENOENT / a prefix,
+// never torn) and freshness beyond that is §5.C's existing non-promise. Refusing here
+// would trade a capability for convenience.
 func TestLiveReadOnlyMountDoesNotBlockDirectWrite(t *testing.T) {
 	ctx := context.Background()
 	m, _, _, _ := mountFixture(t)

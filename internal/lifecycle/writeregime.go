@@ -111,11 +111,14 @@ func (m *Mediator) admitDirectWrite(ctx context.Context, id model.VolumeID) (fun
 	defer m.mu.Unlock()
 	for _, mt := range rows {
 		if mt.Access.ReadOnly() {
-			// A live READ-ONLY reader is not a writer, so it cannot tear anything. Whether
-			// to warn about its gofer cache going stale relative to a direct write is a
-			// PRECISION question deliberately left open (volume.md D8) — not something to
-			// settle by quietly refusing here, which would again trade a capability for
-			// convenience.
+			// A live READ-ONLY reader is not a writer, so it cannot tear anything, and
+			// SETTLED (§5.C): no warning, no version stamp, no refusal. The reader's
+			// exposure is bounded to stale-but-whole / a momentary ENOENT / a prefix —
+			// never a torn file, because an import unlinks rather than overwriting in
+			// place — and freshness beyond that is §5.C's EXISTING non-promise, the same
+			// one that makes cross-sandbox rw coherence undefined. Refusing here would
+			// trade a capability (booting a sandbox that only READS a volume being
+			// seeded) for convenience.
 			continue
 		}
 		ls := m.live[mt.Sandbox]

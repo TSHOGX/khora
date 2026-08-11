@@ -470,6 +470,13 @@ not coherent with a direct write. §5.C blocks it with one **invariant** — the
 invariant (a live-rw mount held ⟹ direct mutations are refused outright; the gate is on a **live** writer and
 `paused` does not count as one) belongs to §5.C, and this document gives only its boundary and falsification.
 
+**The `ro` direction is not part of that invariant and is no longer a boundary item**: a reader is not a writer, so
+nothing tears. The reader's exposure (the complete previous inode for a holder that already has it open, a momentary
+`ENOENT` on a fresh lookup, or a prefix — **never** a torn file, since an import unlinks rather than overwriting in
+place) and its unpromised freshness are stated normatively in §5.C. **That non-promise is D4's, not a new one**: it
+shares **one origin** with D1.2's refusal of FUSE-unified caching, and D1 already refuses to pin today's gofer cache
+behavior as an invariant — which is the same reason no version stamp is introduced here.
+
 **Direct operations while unmounted** (create/delete/list/inspect/import/export): the local backend operates
 directly on the host directory/subvolume, which is simple in a single-node setting and needs no "lazy attach". The
 whole "open a temporary backend session to serve direct access when nothing is mounted, and reclaim it when idle"
@@ -843,9 +850,6 @@ definitely does not** — that is not an unmade promise but a known falsehood.
 The following are boundary items whose design is settled but whose **concrete value / landing shape is not**
 (product-layer policy, or to be fixed when §6 lands):
 
-- **The admission detail for a direct mutation vs a live-ro reader** (D5's boundary): allowing a direct write while
-  a live-**ro** mount exists leaves the ro reader's gofer cache incoherent with the backend; whether to add a
-  warning / a version stamp / a refusal is a question of precision.
 - **How a snapshot's consistency annotation enters the §6 contract** (D6): whether the API explicitly annotates
   "this snapshot is crash-consistent" — to be fixed when §6 lands. (Only the annotation's wording is left;
   "inheriting the quota" is not an open item, and `size` being required is in D6.1a / D7.3.)
