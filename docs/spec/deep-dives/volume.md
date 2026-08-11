@@ -1,274 +1,368 @@
-# Volume:后端 seam / 写入 / 快照 / 租约的推导与证伪
+# Volume: the derivation and falsification of the backend seam / writes / snapshots / leases
 
-> **定位:[`§5.C`](../subsystems.md)(spec,导航见 [`SPEC.md`](../SPEC.md))与 [`§3.4`](../model.md)、
-> [`§4.2`](../model.md)、[`§4.3`](../model.md) 的 Volume 深挖。** §5.C 载 Volume 的模型与已定契约;本文
-> 留深挖该留的三件事:每条契约**为什么是这个形状**、**排除了哪些备选(证伪)**、**契约边界外待办**
-> (登记 [`open-decisions.md`](../open-decisions.md))。
+> **Position: the Volume deep dive for [`§5.C`](../subsystems.md) (spec; navigation in
+> [`SPEC.md`](../SPEC.md)) together with [`§3.4`](../model.md), [`§4.2`](../model.md) and
+> [`§4.3`](../model.md).** §5.C carries Volume's model and its settled contracts; this document keeps
+> the three things a deep dive should: **why each contract has the shape it has**, **which alternatives
+> were ruled out (the falsifications)**, and **what remains outside the contract boundary** (registered
+> in [`open-decisions.md`](../open-decisions.md)).
 >
-> **本文反复排除的一整族机制**(WAL→对象存储物化、内容寻址层、跨 node 心跳回收、head CAS、应用层加密)
-> 都是 **"POSIX over 一个远端、非 CoW、不可信对象存储"**的产物——解决单机引擎**根本没有的问题**。判据:凡属
-> **远端后端实现义务**的,封进"那个 backend"、不进核心;核心只认"Volume 经 backend seam 物化成一个
-> 宿主挂载点"。
+> **A whole family of mechanisms this document repeatedly rules out** (WAL→object-store materialization,
+> content-addressed layers, cross-node heartbeat reclamation, head CAS, application-layer encryption)
+> are all products of **"POSIX over a remote, non-CoW, untrusted object store"** — solving problems a
+> single-node engine **simply does not have**. The criterion: anything that is a **remote backend's
+> implementation obligation** is sealed inside "that backend" and does not enter the core; the core
+> knows only "a Volume is materialized through the backend seam into one host mount point".
 >
-> **两条 substrate 事实(实测)**:① runsc `--overlay2=none --file-access=shared` 会把一个**额外的 rw
-> 宿主目录 bind mount** 经 gofer 双向代理进 guest(local 后端地基);② 一个**宿主侧 FUSE 挂载点**同样能
-> 经 gofer 代理进 guest(remote 后端地基)。下文的 seam 形状建立在这两条事实上。
+> **Two substrate facts (measured)**: ① runsc with `--overlay2=none --file-access=shared` proxies an
+> **additional rw host directory bind mount** into the guest bidirectionally through the gofer (the
+> foundation for the local backend); ② a **host-side FUSE mount point** can likewise be proxied into the
+> guest through the gofer (the foundation for a remote backend). The seam shapes below rest on those two
+> facts.
 
 ---
 
-## D0. 结论:一条 backend seam,两条物化臂
+## D0. The conclusion: one backend seam, two materialization arms
 
-Volume 相对 §5.B 的 Overlay 只多几个属性,每个属性对应一条契约(正文在 §5.C)和一处证伪。**统摄全篇
-的形状**:Volume 经一个可插拔 **backend seam** 物化,seam 只吐**一样东西——一个宿主挂载点**;runsc 把
-它写进 OCI mount spec、gofer 代理进 guest,与 §5.B 的 merged rootfs 完全同构。backend 有两条臂:
+A Volume has only a few more properties than §5.B's Overlay, and each corresponds to one contract (whose
+text is in §5.C) and one falsification. **The shape that governs the whole document**: a Volume is
+materialized through a pluggable **backend seam**, and the seam yields **exactly one thing — a host mount
+point**; runsc writes it into the OCI mount spec and the gofer proxies it into the guest, entirely
+isomorphic to §5.B's merged rootfs. The backend has two arms:
 
-| 臂 | 物化 | 谁兑现 POSIX | 实测 |
+| Arm | Materialization | Who delivers POSIX | Measured |
 | --- | --- | --- | --- |
-| **local(默认)** | 宿主上一个目录(btrfs subvolume) | 宿主内核(gofer 代理普通目录) | 已验 |
-| **remote**(S3 / NFS / …) | 宿主侧 **FUSE** 挂载点,backend 维护、译成对后端的操作 | backend 自己在 FUSE 里兑现 | 部分已验(读/枚举路径实测;写路径与真实后端未测,见 D8) |
+| **local (the default)** | A directory on the host (a btrfs subvolume) | The host kernel (the gofer proxying an ordinary directory) | Verified |
+| **remote** (S3 / NFS / …) | A host-side **FUSE** mount point, maintained by the backend and translated into operations against the backend | The backend itself, inside FUSE | Partly verified (the read/enumerate path is measured; the write path and a real backend are not, see D8) |
 
-两臂**在 guest 侧零差异**(都是一条 gofer 代理的 OCI mount);差异只在"挂载点背后是普通目录还是 FUSE
-挂点"。
+The two arms have **zero difference on the guest side** (both are one gofer-proxied OCI mount); the
+difference is only whether an ordinary directory or a FUSE mount point sits behind the mount point.
 
-**remote 臂那半未测不构成 seam 形状的未验前提,故不进 open-decisions。** seam 形状只依赖**穿透性**
-——gofer 会 descend 进宿主侧 FUSE 挂点、POSIX 语义穿透——读/枚举已证足以立住这条;写路径的行为是**该
-backend 自己的验收项**(D8),不是核心模型的前提。Volume 相对 Overlay 的新属性与其契约 / 证伪:
+**The unmeasured half of the remote arm is not an unverified premise of the seam's shape, so it does not
+enter open-decisions.** The seam's shape depends only on **penetrability** — that the gofer descends into
+a host-side FUSE mount point and POSIX semantics pass through — and the read/enumerate measurements are
+enough to establish that; the write path's behaviour is **that backend's own acceptance item** (D8) rather
+than a premise of the core model. Volume's new properties relative to Overlay, with their contracts and
+falsifications:
 
-| 新属性 | 契约(详见 §5.C) | 排除的备选 |
+| New property | Contract (detail in §5.C) | Alternatives ruled out |
 | --- | --- | --- |
-| **多后端**(local / 远端对象存储 / 网络 FS) | backend seam 吐宿主挂载点(D1/D2) | FUSE-for-everything(D1)· 把用户态 segment 引擎搬进核心(D6) |
-| **多写入路径**(挂载 + 直连 API) | 写入 regime 唯一(D5) | 反向代理直连写(D5) |
-| **可被多沙箱并发挂** | 跨沙箱 rw coherence undefined(D4) | —(本质如此) |
-| **独立快照 / 克隆** | 默认 crash-consistent、per-backend capability;产出**普通可写卷 + `parent` lineage**,帽必须显式声明(D6/D6.1a/D7.3) | 二段式 checkpoint(D6)· 用户态 segment 引擎(D6)· 只读快照类型(D6.1a)· 继承源的帽(D6.1a) |
-| **独占** | 租约 = §4.3 挂载行(D3/D4) | 心跳双回收(D4) |
-| **容量帽** | btrfs subvolume + squota,跨 §5.B/§5.C 共享原语(D7) | project quota(D7,substrate 不支持) |
+| **Several backends** (local / a remote object store / a network FS) | The backend seam yields a host mount point (D1/D2) | FUSE-for-everything (D1) · moving a userspace segment engine into the core (D6) |
+| **Several write paths** (mounts + the direct API) | A single write regime (D5) | A reverse proxy for direct writes (D5) |
+| **Concurrently mountable by several sandboxes** | Cross-sandbox rw coherence is undefined (D4) | — (it is inherently so) |
+| **Independent snapshots / clones** | crash-consistent by default, a per-backend capability; producing **an ordinary writable volume + a `parent` lineage**, with the cap necessarily declared explicitly (D6/D6.1a/D7.3) | A two-phase checkpoint (D6) · a userspace segment engine (D6) · a read-only snapshot type (D6.1a) · inheriting the source's cap (D6.1a) |
+| **Exclusivity** | The lease = §4.3's mount row (D3/D4) | Dual reclamation by heartbeat (D4) |
+| **A capacity cap** | A btrfs subvolume + squota, a primitive shared across §5.B/§5.C (D7) | Project quota (D7; the substrate does not support it) |
 
 ---
 
-## D1. 物化:统一"宿主挂载点"抽象,local=目录 / remote=host-FUSE
+## D1. Materialization: one unified "host mount point" abstraction, local = a directory / remote = host-FUSE
 
-单机 local 后端就是宿主上一个目录,进 guest 的路径与 §5.B 的 merged rootfs **完全同构**——写进 runsc
-OCI mount spec、由 gofer 在 `--overlay2=none --file-access=shared` 下代理。exclusive / shared-ro /
-shared-rw 都只是"同一宿主目录进一到 N 个 guest",**无特殊机制**。实测覆盖(单挂载与**并发**多挂载两半):
+A single-node local backend is just a directory on the host, and its path into the guest is **entirely
+isomorphic** to §5.B's merged rootfs — written into runsc's OCI mount spec and proxied by the gofer under
+`--overlay2=none --file-access=shared`. exclusive / shared-ro / shared-rw are all merely "the same host
+directory entering one to N guests", with **no special mechanism**. The measured coverage (both halves: a
+single mount and **concurrent** multiple mounts):
 
-- 单挂载:rw 双向、目录枚举、嵌套子目录均正确。
-- **两个沙箱并发 rw 挂同一个 source 都成功**——无 EBUSY、无"source in use",两个 gofer 都不抱怨,且第二个
-  挂载**真的可写**、不是被静默降级。**这是 seam 之下最关键的那半地基**:第二个 gofer 若无法 attach,
-  SharedReadOnly 的读扇出与 SharedReadWrite 就不可实现,AccessMode 枚举会塌缩成只剩 Exclusive。
-- ro 臂可与两个活 rw 臂并存、guest 内 `statfs` 报只读、写入失败于 `EROFS`(干净的 POSIX 拒绝,不是 EIO、
-  不是 fault),且**不静默成功**(宿主始终看不到那次写)。
-  - **但这条只对"可写单元 + ro 挂载"成立;反向不是运行时错误,是启动失败。** 拿一个**只读** btrfs 快照
-    配 rw 挂载规格,`runsc create` 直接失败在 gofer 挂载阶段(`creating gofer mounts: … EROFS`),容器
-    没被创建、guest 从未运行。分类上这是**控制面失败**,不是数据面 `EROFS`——比静默成功好,但它是**另一种**
-    失败模式:冷启会把一个"本该在准入期以 4xx 拒掉"的配置错误,表现成一个不透明的 mount 失败。
-    所以 ro 的方向性得写进 §5.C,不能靠"ro 由运行时强制"一句话覆盖两向。
-  - 顺带否掉一个可能的实现路径依赖:只读快照可用 `btrfs property set … ro false` 解冻,解冻后客户端写入
-    成功、**帽穿过 ro→rw 转换存活**(与 D7.3 的 Q3 独立同向)。故 `Clone` **可以**实现成 snapshot-then-unfreeze
-    ——基底不强迫我们一开始就产出非只读快照,snapshot 与 clone 因此能共用一条后端路径(D2)。
-- **挂载互相独立**:kill + 强制 delete 掉其中一个沙箱后,另一个仍能读**和写**,ro 臂仍可读——一个沙箱的
-  拆除不扰动对端 gofer 对同一 source 的视图,故 destroy 不是跨沙箱副作用。
-- **跨沙箱 coherence 观测到了,但不进契约**:每次跨读都成功、ro guest 在半秒轮询内看到了 later rw 写入,
-  机制上也说得通(此模式下每个 gofer 代理同一批宿主 dentry、sentry 侧无页缓存),故它**很可能**继续这样。
-  但那是关于某个 runsc build 的事实,不是承诺(D4);把今天的 gofer 缓存行为钉进测试恰好会制造一条
-  **假不变量**,而诚实的立场是 undefined。
+- A single mount: rw in both directions, directory enumeration, and nested subdirectories are all correct.
+- **Two sandboxes rw-mounting the same source concurrently both succeed** — no EBUSY, no "source in use",
+  neither gofer complains, and the second mount is **genuinely writable** rather than silently downgraded.
+  **This is the most critical half of the foundation beneath the seam**: if a second gofer could not
+  attach, SharedReadOnly's read fan-out and SharedReadWrite would be unimplementable and the AccessMode
+  enumeration would collapse to Exclusive alone.
+- The ro arm can coexist with two live rw arms, `statfs` inside the guest reports read-only, and writes
+  fail with `EROFS` (a clean POSIX refusal rather than EIO or a fault), and it **does not silently
+  succeed** (the host never sees that write).
+  - **But this holds only for "a writable unit + a ro mount"; the reverse is not a runtime error but a
+    startup failure.** Pair a **read-only** btrfs snapshot with a rw mount spec and `runsc create` fails
+    outright at the gofer mount stage (`creating gofer mounts: … EROFS`); the container is never created
+    and the guest never runs. Classified, that is a **control-plane failure** rather than a data-plane
+    `EROFS` — better than silently succeeding, but it is **a different** failure mode: a cold start turns a
+    configuration error that "should have been refused with a 4xx at admission" into an opaque mount
+    failure. So ro's directionality must be written into §5.C and cannot be covered in both directions by
+    the single sentence "ro is enforced at runtime".
+  - It also rules out a possible implementation-path dependency: a read-only snapshot can be thawed with
+    `btrfs property set … ro false`, after which client writes succeed and **the cap survives the ro→rw
+    transition** (independent of, and pointing the same way as, D7.3's Q3). So `Clone` **can** be
+    implemented as snapshot-then-unfreeze — the substrate does not force us to produce a non-read-only
+    snapshot from the start, which is why snapshot and clone can share one backend path (D2).
+- **The mounts are independent of each other**: after killing and force-deleting one of the sandboxes, the
+  other can still read **and write**, and the ro arm can still read — tearing down one sandbox does not
+  disturb the other gofer's view of the same source, so destroy is not a cross-sandbox side effect.
+- **Cross-sandbox coherence was observed but does not enter the contract**: every cross-read succeeded and
+  the ro guest saw a later rw write within a half-second poll, and it is mechanically explicable (in this
+  mode each gofer proxies the same host dentries and there is no page cache on the sentry side), so it
+  **very likely** continues to behave this way. But that is a fact about one runsc build rather than a
+  promise (D4); pinning today's gofer cache behaviour into a test would manufacture exactly one **false
+  invariant**, and the honest position is undefined.
 
-### D1.1 FUSE 的正确位置:宿主侧,不进 guest;是 remote 后端的物化,不是核心机制
+### D1.1 FUSE's correct place: host-side, never in the guest; a remote backend's materialization, not a core mechanism
 
-FUSE 不进核心、不上单机 local 路径;它是 **remote 后端**的物化手段。远端后端(对象存储 / 网络 FS)天然
-需要一层"把远端译成可挂 POSIX FS",这层就是 FUSE——但它有一个不可动摇的位置约束:
+FUSE does not enter the core and is not on the single-node local path; it is the **materialization means
+of a remote backend**. A remote backend (an object store / a network FS) inherently needs a layer that
+"translates the remote into a mountable POSIX FS", and that layer is FUSE — but it comes with one
+immovable positional constraint:
 
-> **FUSE 挂在宿主侧(backend 进程里),经 gofer 代理进 guest;绝不在 guest 内跑 FUSE。** gVisor 对
-> guest 内 FUSE 的支持有限/演进中;而"宿主 FUSE 挂点 → gofer 代理"这条路已实测:gofer 会
-> descend 进 FUSE 挂点、把 FUSE-backed 文件与嵌套目录当普通 POSIX 代理进 guest。(成熟的 FUSE-portal
-> 实现同样挂在**宿主**侧、直接对 `/dev/fuse` 说协议,不在沙箱内。)
+> **FUSE is mounted host-side (inside the backend process) and proxied into the guest by the gofer; never
+> run FUSE inside the guest.** gVisor's support for in-guest FUSE is limited/evolving, whereas the path
+> "a host FUSE mount point → gofer proxying" is measured: the gofer descends into the FUSE mount point and
+> proxies FUSE-backed files and nested directories into the guest as ordinary POSIX. (Mature FUSE-portal
+> implementations likewise mount on the **host** side and speak the protocol to `/dev/fuse` directly,
+> rather than inside the sandbox.)
 
-所以 FUSE 不是"要不要进引擎"的问题,而是"**封在哪个 backend 实现里**"的问题:它是 remote backend 的
-内部物化手段,与 local backend(普通目录)在 seam 之上一字不差(§3.1.1「对内也 ID 寻址」:核心只认
-"Volume 经 backend 物化成一个宿主挂载点",不认背后是目录还是 FUSE 挂点)。
+So FUSE is not a question of "should it enter the engine" but of "**which backend implementation is it
+sealed inside**": it is a remote backend's internal materialization means, identical above the seam to the
+local backend's ordinary directory (§3.1.1's "ID addressing applies internally too": the core knows only
+"a Volume is materialized by a backend into one host mount point" and not whether a directory or a FUSE
+mount point is behind it).
 
-### D1.2 证伪:为什么不"FUSE-for-everything"(连 local 也走 FUSE)
+### D1.2 Falsification: why not "FUSE-for-everything" (local going through FUSE too)
 
-一个诱人的统一是:**所有** Volume(含 local)都走同一个宿主 FUSE 前端 + 可插拔 `Backend{Read/Write/
-List/Stat…}`,好处是缓存 / 加密 / 配额 / 审计能在 FUSE 层统一做。**不采用**,理由是成本判据:
+A tempting unification: route **every** Volume (local included) through the same host FUSE frontend plus a
+pluggable `Backend{Read/Write/List/Stat…}`, whose benefit is that caching / encryption / quotas / auditing
+could all be done uniformly in the FUSE layer. **Not adopted**, on the cost criterion:
 
-- **local 路径的 POSIX 是白拿的**:gofer 代理一个普通宿主目录,rename / 目录 / 权限 / 锁 / mmap 全部由
-  **宿主内核**兑现。走 FUSE 则要在用户态**自己重新兑现 POSIX 语义**——一个完整的 FUSE 会话接口是
-  **数十个方法**(Lookup/Rename/Flock/CopyFileRange/xattr/…),而对象存储后端对 Rename/锁/Fallocate/xattr
-  只能返 `EOPNOTSUPP`:这就是"自己实现 POSIX"的工程量与语义损失。
-- **统一缓存 / 加密 / 配额 / 审计是分布式诉求**:加密只在数据离开信任边界(进 S3 / 共享缓存)时才必要;
-  统一缓存是"对象存储无 POSIX 缓存"的补偿。单机可信节点上,配额有 btrfs squota(D7)、审计有 §4.1 事件流,
-  都不必挤进 FUSE 层。
-- **结论**:一个完整的 FUSE `Session` 接口**只为"合成型 backend"(把非 FS 的后端合成成 FS)保留**;
-  local backend(真实宿主 FS)根本不需要它。所以引擎的 seam 可以很窄(D2)——统一发生在 seam(都吐宿主
-  挂载点),而不是在"所有东西都走 FUSE"。
-
----
-
-## D2. backend seam 形状:窄接口,吐宿主挂载点
-
-Volume 是独立子系统、有自己的 seam `volume.Backend`,**与 §5.B 的 `rootfs.Provider` 是两个不同形状、
-各自注册的接口**:§5.B 物化**分层合成**(沿 Template lineage 解析 multi-lowerdir 下层栈 + 可写 upper/work,
-经内核 overlayfs 合成 merged,并支持 Promote 冻结);§5.C 物化**一个自足的独立存储单元**(直接 bind、无
-合成、无下层栈、无 lineage)。二者只共享底层 substrate 原语(btrfs subvolume + 配额 + reflink/snapshot,
-见 D7),不共用一个物化接口。
-
-seam 沿用 §5.A `runtime.Provider` / §5.B `rootfs.Provider` 的既定约定:**ID 过 seam,宿主路径留 seam 内;
-策略 + 句柄,不泄漏宿主原语**。
-
-> **一条贯穿本节的形状规则:「分配」「设帽」「放置」是三个动作,不能压进一个调用。** 把它们合并会让创建、
-> 容量、准入项三者都无处安放——`DestroyVolume` 找不到创建的对手方、"别动配额"需要一个哨兵值、无帽卷的字节
-> 无人报告。这条规则是**用第二个 backend 验出来的**:一个 test-only 的 plain-directory 臂与 btrfs 臂跑同一份
-> 共享契约用例(双臂全过),而合并形状在这三处各响一次。故 seam 里始终**保留一个 test-only 的第二臂** ——
-> 它不是凑数,它是这个 seam 唯一的证伪手段。
-
-核心动作:
-
-- `Materialize(ctx, volumeID) → Materialized` —— 备好一个可挂的宿主挂载点(local:确保存储单元存在;
-  remote:拉起 FUSE 挂点)。返回一个**不透明句柄**,只携带两样:一个 backend 私有的宿主路径
-  (`SourcePath`,仅 `local_runsc` 消费,如同 `Merged.MergedPath`),以及 `Volume`——后者不是装饰,
-  否则 `Release` 无从解析这次物化属于哪个卷。
-  - **句柄上没有 backend 私有 handle 字段**,这与下面 `Capabilities` 不留 `DirectIO` 位是同一次判断
-    (§1.3 禁止预留):今天没有 backend 需要它,local 臂物化成一个路径、别的什么都不持。**加回的条件是
-    精确的**:当第一个 remote/合成 backend 存在、它要起/停一个 per-物化的进程时,才按 §1.3 additive 补上
-    非导出字段 + `SetHandle`/`Handle`——`runtime.Placement.handle`(那边有活的消费者)是**到那时**要照抄的
-    先例,不是此处已经沿用的先例。**而它到时候必须落在句柄上、不能落在侧表里**:一张按 `volumeID` 键入的
-    进程内侧表正是 D3.1 拒掉的那个"进程内 handle registry"。
-  - **不收 `accessMode`**:它既不改变 backend 做的任何事(三种模式下宿主目录完全相同),基数也错了
-    (`AccessMode` 是 per-挂载行的,`Materialize` 是 per-卷的),故它搭 `MountSource.ReadOnly`——两者的
-    规范陈述归 §5.C。
-  - **契约是 create-if-absent**,不是 open-only(理由见 §5.C:源缺失时 runsc 硬失败,open-only 会让被误
-    sweep 的沙箱永久无法 resume)。**并发性必须写进契约**——整个共享扇出设计依赖"同一个卷被多次并发
-    物化"成立(已验)。
-- `Release(m)` —— 释放这一次物化(local:no-op;remote:umount FUSE)。**名字不叫 `Unmount`**:那个词命名了
-  默认臂**没有**的机制,而那正是一个 seam 长成某一个实现形状的方式。契约四条:这次物化的源不再有效、
-  **字节存续**、幂等、容忍目标已消失——故 local 臂的 no-op 是对明确承诺的正确实现,不是坏味道
-  (同 `runtime.Stop`);坏味道是"no-op 或 detach"那种一个名字配两份未定义契约。
-- `AdoptMaterialized(volumeID) → Materialized` —— 崩溃后重认一个仍挂着的挂载点(§4.4-A,`AdoptMerged`
-  的孪生)。
-- `CreateVolume(ctx, volumeID, capBytes)` / `SetCapacity(ctx, volumeID, capBytes)` —— **容量属于创建 + 它
-  自己的方法**,不搭在放置入口上。`rootfs.Provider` 需要一个 `CapUnchanged` 哨兵,是因为帽的意图搭在
-  `OpenOverlay` 上(一个还兼着别的活的调用);这里**调用本身就是意图**,故不需要那个哨兵。且这是唯一
-  正确的放法:**一个卷的帽在它没被任何地方挂载时也必须可编辑**,而只有放置入口表达不了这件事——
-  `DestroyVolume` 本来也没有创建的对手方。
-- `DestroyVolume(volumeID)` —— 回收该 Volume 的后端字节(terminal)。**幂等**(§4.4-A 从多条路径到达它)。
-- `UncappedBytes(ctx) → int64` —— 本 backend 持有、且无任何已声明帽覆盖的字节(§3.4 第二项的 §5.C 半,
-  与 §5.B 同形)。**这是真缺口不是装饰**:没有它,每一个无帽卷的字节对准入门都不可见。
-- `Usage(ctx, volumeID) → (used, limit int64)` —— 单个卷的后端自述用量。**它是卷帽写点逼出来的,不是自选**:
-  §5.C 要求拒绝"降到低于当前用量",判据是**严格不等式**,故引擎必须能读到当前用量;`inspect` 想报用量也走它。
-  - **`limit` 只能用于诊断,不能用于校验,权威永远是卷记录**——理由(`none ↔ 0` 映射让"漏设帽"与"故意
-    无帽"读回来逐字节相同,故事后核对不可实现)见 D7.3。
-- `Snapshot(ctx, srcID, newID, capBytes)` / `Clone(...)` —— 归这个 seam,但**新卷的 ID 由 mediator 分配**
-  (与 Promote 同规矩)。决定性理由:backend 自铸的 ID **无法在字节存在之前被登记进在飞集合**,故一次
-  中途崩溃会留下一个任何 sweep 都无法归类的名字下的字节。
-  - **两者收 `capBytes` 而不是"继承源的帽",因为没有可继承之物**,故契约里**设帽是不可省的第二次调用**
-    ——非继承、必然是第二次调用、以及由此产生的那个承重窗口,全在 D7.3。
-  - **两者可以是同一条 backend 代码路径**(实测:`property set ro false` 在本基底成功,`-r` 快照在仍只读时
-    即可设帽,且帽完整穿过 ro→rw 转换)。差别只在 §5.C 的语义标注,不在机制。
-- `OpenRoot(ctx, volumeID) → Root` —— 直连内容访问器,**未挂载也能用**(§5.C 的那条承诺,D5.1 定形)。
-  `Root` 是一个**根限定**的文件访问句柄(`Stat` / `List` / `ReadAt` / `WriteAt` / `Mkdir` / `Remove` /
-  `Rename` / `Close`),路径**相对该卷根**,越界不可达。local 臂 = `openat2(RESOLVE_IN_ROOT)`。
-  - **它比 `Materialize` 更严,不更松**:句柄里**没有 `SourcePath`**、不吐任何宿主路径,故它是 seam 上
-    唯一一个连豁免都不需要的物化类方法。
-  - **它不是 `Materialize` 的替代**:那一条要交给 runsc 一个可 bind 的宿主路径,这一条只在引擎进程内读写
-    字节。两个消费者不同(`local_runsc` vs orchestrator 的 import/export 端点),故是两个方法。
-- `Name()` —— backend 标识(注册/诊断用)。
-- `ListUnitIDs(ctx) → []string` —— **只枚举,不判定**。backend 报出它自己存储根下的全部存储单元 id;
-  "哪些是孤儿"由 mediator 判定、并逐个 `DestroyVolume`。**这个切法是实测逼出来的,不是风格选择**——
-  **否决"把判定也推给 backend"**(`SweepOrphanVolumes(live, building)`,mediator 算两个集合喂进来、
-  backend 删差集):它**会删掉已提交卷的字节**。mediator 分两次读 `live` 与 `building`,一个**整个创建
-  过程**落在两次读之间的卷两个集合都不在,backend 于是删了一个完整提交的卷。**实测:458 次并发 sweep 下
-  6 个快照被删了 3 个;枚举-判定分离下 913 次 sweep / 6 个快照,零误回收。**
-  - **它靠次序闭合窗口,不靠加锁**:每个候选的字节都早于全部检查;而一个已不在在飞集合里的候选,其行
-    **必然已经插完**(标记只在插入之后才摘),故随后一次 per-candidate 的 store 读一定看得见它。不引新锁、
-    不在锁内调 store。
-  - **Overlay 侧故意保持合并形状**:那边的行**先于**单元插入,暴露的只有快照 skew,其注释把这段残留记为
-    可接受;**卷是 bytes-first,暴露的是整个创建过程**——同一个形状,风险量级不同。两侧留了交叉引用。
-  - **中途失败是继续、不是中止**(尽力回收路径,一个单元卡住不该让其余全部留着)。
-  - **为何按单元而非按引用**:layer 是被 lineage 与 refcount **共享**的只读底座(判据是"还有没有行引用
-    它"),而 Volume 和 Overlay 单元都是**自足的存储单元**(判据是"这个单元自己还有没有活的拥有者")。
-  - **在飞集合在这里比 Overlay 那侧更必要**:Overlay 那边它只防**过期 keep-set**(行先插),而**卷的
-    创建是 bytes-first**(ID 必须先命名那个单元),故一次健康的在飞创建**即便 keep-set 是新鲜的**也表现为
-    "有字节、无行";`Snapshot`/`Clone` 又是同一窗口的另两个生产者。
-- `ReclaimQuotaRows(ctx, ids) → (n int, err)` —— 回收**早先的删除泄漏掉的**配额行(D7.1 的那条路径的
-  backend 半)。**收 id、不自己扫行**:扫描的失败形态是一个无帽的活卷 + 零信号(D7.2)。未到可回收态的行
-  **留给下一轮**,不是错误——一个 `<squota space holder>` 可以在一个活克隆的整个生命期里合法地拒绝销毁。
-- `DeletedRowIDs(ctx) → []uint64` —— 上一条要吃的那份输入:本 backend 在**删除那一刻**记下、尚未回收的
-  配额行 id。**它落在 backend 而不是控制面上,是形状论据不是方便**:泄漏行是**该 substrate 的残留,不是引擎
-  状态**——一个没有配额行的 backend 返空,整条路径对它零成本,故调用方不需要一个能力分支(§1.3)。
-- `Capabilities() → {Snapshot, Clone, Quota}` —— **per-backend 能力查询**(D6):local(btrfs)报支持
-  snapshot/clone/quota;纯目录或某些 remote 后端可不支持,调用即 400,而非静默。**成员必须是 `bool`**:
-  一个 `map[string]string` 的特性表会把机制名当作**值**带过 seam,而任何扫标识符的结构守卫都看不见它。
-  **成员只列有消费者的能力**(§1.3 禁止预留):`Quota` 有一个(§3.4 的帽兑现不了就拒 placement),
-  而一个 `DirectIO` 之类的位没有——它会以"将来可能要"的名义永久留在契约面上。
-  **作用域是 per-backend**,不是 per-volume。
-
-**结构守卫**:`seam_test.go` 的孪生保留 §5.A 那份宿主原语清单原样,另加 `reflink` / `fuse` / `loopdev` /
-`mountopt`;唯一豁免是句柄上的 `SourcePath`(照 `MergedPath` 的先例,连理由一起写在豁免表里)。
-
-挂载进 guest 的机制:mediator 在 `coldStart` 里把每个 `Materialized` 句柄组装成 `LaunchSpec.Mounts
-[]MountSource{SourcePath, Dest, ReadOnly}`(与 `RootfsSource` 平级的契约成员),`local_runsc` 在
-`buildOCISpec` 里把每个 `MountSource` 追加成一条 `ociMount{Type:"bind", Source, Destination, Options}`
-——正是实测过的形状。Volume **身份**在 seam 之上恒为 ID;宿主目录在 backend 内解析,只以不透明
-`SourcePath` 浮出(§6.2 对外只认 Volume ID,不暴露宿主路径)。
+- **The local path's POSIX is free**: the gofer proxies an ordinary host directory, and rename / directories
+  / permissions / locks / mmap are all delivered by the **host kernel**. Going through FUSE would mean
+  **re-delivering POSIX semantics ourselves in userspace** — a complete FUSE session interface is **dozens
+  of methods** (Lookup/Rename/Flock/CopyFileRange/xattr/…), and an object-store backend can only return
+  `EOPNOTSUPP` for Rename/locks/Fallocate/xattr: that is the engineering volume and the semantic loss of
+  "implementing POSIX yourself".
+- **Uniform caching / encryption / quotas / auditing are distributed concerns**: encryption is necessary
+  only when data leaves the trust boundary (into S3 / a shared cache), and uniform caching compensates for
+  "an object store has no POSIX cache". On a single trusted node, quotas have btrfs squota (D7) and auditing
+  has §4.1's event stream, and neither needs to be crowded into a FUSE layer.
+- **The conclusion**: a complete FUSE `Session` interface is **reserved for "synthesizing" backends alone**
+  (those that synthesize a non-FS backend into an FS); a local backend (a real host FS) simply does not need
+  it. So the engine's seam can be narrow (D2) — the unification happens at the seam (both yield a host mount
+  point) rather than by "everything goes through FUSE".
 
 ---
 
-## D3. 挂载表 = 一等 store 对象,复用既有对象模型(不重造)
+## D2. The backend seam's shape: a narrow interface yielding a host mount point
 
-挂载关系是 Binding(§3.4):"挂了哪些、挂到哪、什么策略"记在控制面挂载表,resume 时按表重挂。挂载表的
-每一行是一个**一等持久对象**(§4.3 挂载行),它就是 **`sandboxes.template` 引用的翻倍**:
+Volume is its own subsystem with its own seam `volume.Backend`, and it is **a differently shaped,
+separately registered interface from §5.B's `rootfs.Provider`**: §5.B materializes **layered composition**
+(resolving the multi-lowerdir lower stack along the Template lineage + a writable upper/work, composed into
+a merged view by kernel overlayfs, with Promote freezing supported); §5.C materializes **one self-sufficient
+independent storage unit** (bound directly, with no composition, no lower stack, and no lineage). The two
+share only the underlying substrate primitives (a btrfs subvolume + quotas + reflink/snapshot, see D7) and
+do not share one materialization interface.
 
-- **结构 = 双向 FK RESTRICT**:一条挂载行 `Mount{Sandbox, Volume, Path, Access}`,`sandbox` 与 `volume`
-  两列各 `REFERENCES … ON DELETE RESTRICT`。这一条给了"卷有活挂载行则不可删"与"沙箱有活挂载行则删不动"
-  两个不变量——SQLite 靠 FK、Memory 靠 Go 扫描,同一套断言(§4.3 seam)。
-  - **"白拿"要分清哪一半**(实测):**检测谓词**可原样复用——既有的 FK-违反判定是表无关、列无关的字符串
-    匹配,对新增的每条 FK 路径**两个方向**都为真(缺父插入 / RESTRICT 删除,三条 FK 共六向),对唯一违反
-    为假(`isFKViolation`,八个调用点共用同一个谓词)。**但翻译点继承不了——它是 per-call-site 的**:少了
-    `DeleteSandbox` 里那条 FK 分支,RESTRICT 就会以裸驱动错误冒到 API 的 `default` 分支变成 **500 而不是
-    409**;而既有的 `ErrInUse` 文案字面写着 "template in use",复用它则是一个说错对象的 409。故形状是
-    **每个结局一个 sentinel**,落点是独立的 `ErrSandboxHasMounts`(两个 backend 各有那条分支,契约用例把
-    "未翻译的驱动错误会变成 500"这条理由连失败消息一起钉住了);而**哪个 sentinel 映到哪个结局类别、以及
-    "数的是调用方要分辨的语义种类而非错误值个数"这条计数规则,归 §6.2**——本文只主张"不是复用一个"。
-    Memory 后端连谓词都白拿不到:它没有 FK 引擎,沙箱侧与卷侧两处引用扫描是手写的——"白拿"只覆盖 SQLite
-    那一半,这就是它的边界。
-  - **删除次序是必需的,不是风格选择**(实测):RESTRICT **立即**生效,把两条删除包进一个事务**买不到**
-    次序无关性,故必须先删挂载行、再删沙箱。**`defer_foreign_keys` 是个陷阱,实测拒绝它**:它确实让次序
-    无关,但违反在 `Commit()` 才浮现,而 Go 的 `Tx.Commit()` 返错时 SQLite **并未回滚** —— 在被钉死的单
-    连接上事务保持打开,其后经连接池的查询**跑在该事务内部**、看见别的 handle 看不到的未提交状态。这是
-    store 级正确性风险,不是风格问题。
-  - **FK 强制本身是一条承重前提,且失去它是静默的**(实测:关掉 `foreign_keys` pragma 后删被引用的行
-    直接成功、零错误)。故它值得一条契约测试守住,而不是靠 DSN 字符串的存在。
-- **存在即状态、derived refcount、无 outbox 事件**:挂载行无 state 列、无 count 列;"卷是否被独占"由挂载行
-  的存在+access 派生(不物化计数)。挂载行不是 §4.1 生命周期转换,故 create/delete 挂载行**不发事件**(与
-  Template CRUD 同,区别于沙箱转换)。
-- **bytes-first、转换锁内**:挂载行在**每沙箱转换锁**内、随 create/resume 冷启链写入;失败被 `unwind` 回滚。
-  **`unwind` 必须显式删挂载行 —— 这是设计要求,不是实现细节**:挂载行写在冷启**之前**,故冷启之后的每个
-  unwind 分支都会在删沙箱记录时撞上 RESTRICT;而一个丢弃该错误的 unwind 分支留下的是**一条删不掉的僵尸
-  沙箱记录**。
+The seam follows the convention already established by §5.A's `runtime.Provider` and §5.B's
+`rootfs.Provider`: **IDs cross the seam, host paths stay inside it; policy + handles, with no host
+primitive leaking**.
 
-**mediator 里的挂钩点**(动词归 §4,机制归 §5 backend;子系统间不互调):
+> **One shape rule running through this section: "allocate", "set the cap", and "place" are three actions
+> and cannot be compressed into one call.** Merging them leaves creation, capacity, and the admission term
+> all with nowhere to go — `DestroyVolume` finds no counterpart for creation, "leave the quota alone" needs
+> a sentinel value, and nobody reports an uncapped volume's bytes. This rule was **found with a second
+> backend**: a test-only plain-directory arm runs the same shared contract cases as the btrfs arm (both
+> arms pass), and a merged shape rings at each of those three points. So the seam always **keeps a
+> test-only second arm** — not as filler, but as this seam's only means of falsification.
 
-| 钩子 | 动作 |
+The core actions:
+
+- `Materialize(ctx, volumeID) → Materialized` — prepare a mountable host mount point (local: ensure the
+  storage unit exists; remote: bring up a FUSE mount point). It returns an **opaque handle** carrying only
+  two things: a backend-private host path (`SourcePath`, consumed only by `local_runsc`, exactly like
+  `Merged.MergedPath`), and `Volume` — the latter is not decoration, since otherwise `Release` could not
+  resolve which volume this materialization belongs to.
+  - **The handle carries no backend-private handle field**, which is the same judgment as `Capabilities`
+    reserving no `DirectIO` bit below (§1.3 forbids reservations): no backend needs it today, and the local
+    arm materializes into a path and holds nothing else. **The condition for adding it back is precise**:
+    once the first remote/synthesizing backend exists and needs to start/stop a per-materialization process,
+    then an unexported field + `SetHandle`/`Handle` is added additively per §1.3 — `runtime.Placement.handle`
+    (which has a live consumer) is the precedent to copy **at that point**, not a precedent already followed
+    here. **And it must then land on the handle rather than in a side table**: an in-process side table keyed
+    by `volumeID` is precisely the "in-process handle registry" D3.1 rejects.
+  - **It does not take `accessMode`**: that changes nothing the backend does (the host directory is identical
+    under all three modes) and its cardinality is wrong (`AccessMode` is per mount row while `Materialize` is
+    per volume), so it rides `MountSource.ReadOnly` — the normative statement of both belongs to §5.C.
+  - **The contract is create-if-absent** rather than open-only (the reason is in §5.C: runsc fails hard when
+    the source is missing, and open-only would make a wrongly swept sandbox unable to resume forever).
+    **Concurrency must be written into the contract** — the entire shared fan-out design depends on "the same
+    volume being materialized several times concurrently" holding (verified).
+- `Release(m)` — release this materialization (local: a no-op; remote: umount the FUSE). **The name is not
+  `Unmount`**: that word names a mechanism the default arm **does not have**, and that is exactly how a seam
+  grows into the shape of one implementation. Four contract points: this materialization's source is no longer
+  valid, **the bytes persist**, it is idempotent, and it tolerates the target having already disappeared — so
+  the local arm's no-op is a correct implementation of an explicit promise rather than a bad smell (as with
+  `runtime.Stop`); the bad smell would be "a no-op or a detach", one name with two undefined contracts.
+- `AdoptMaterialized(volumeID) → Materialized` — re-recognize a still-mounted mount point after a crash
+  (§4.4-A, the twin of `AdoptMerged`).
+- `CreateVolume(ctx, volumeID, capBytes)` / `SetCapacity(ctx, volumeID, capBytes)` — **capacity belongs to
+  creation plus a method of its own**, not attached to the placement entry point. `rootfs.Provider` needs a
+  `CapUnchanged` sentinel because the cap's intent rides `OpenOverlay` (a call already doing another job);
+  here **the call itself is the intent**, so no such sentinel is needed. And this is the only correct
+  placement: **a volume's cap must be editable even when it is mounted nowhere**, which the placement entry
+  point cannot express — and `DestroyVolume` had no counterpart for creation anyway.
+- `DestroyVolume(volumeID)` — reclaim that Volume's backend bytes (terminal). **Idempotent** (§4.4-A reaches
+  it by several paths).
+- `UncappedBytes(ctx) → int64` — the bytes this backend holds that are covered by no declared cap (the §5.C
+  half of §3.4's second term, in the same shape as §5.B's). **This is a real gap rather than decoration**:
+  without it, every uncapped volume's bytes are invisible to the admission gate.
+- `Usage(ctx, volumeID) → (used, limit int64)` — one volume's backend-reported usage. **It is forced by the
+  volume cap's write point rather than chosen**: §5.C requires refusing "a lowering below current usage" with
+  a **strict inequality** as the criterion, so the engine must be able to read current usage; `inspect`
+  reporting usage goes through it too.
+  - **`limit` may be used only for diagnostics and never for validation, and the authority is always the
+    volume record** — the reason (the `none ↔ 0` mapping makes "the cap was never set" and "deliberately
+    uncapped" read back byte-identically, so after-the-fact reconciliation is unimplementable) is in D7.3.
+- `Snapshot(ctx, srcID, newID, capBytes)` / `Clone(...)` — they belong to this seam, but **the new volume's ID
+  is allocated by the mediator** (the same rule as Promote). The decisive reason: an ID the backend minted
+  itself **cannot be registered into the in-flight set before the bytes exist**, so a crash midway would leave
+  bytes under a name no sweep could classify.
+  - **Both take `capBytes` rather than "inheriting the source's cap", because there is nothing to inherit**,
+    so in the contract **setting the cap is an unskippable second call** — the non-inheritance, the necessity
+    of a second call, and the load-bearing window that follows are all in D7.3.
+  - **Both can be the same backend code path** (measured: `property set ro false` succeeds on this substrate,
+    a `-r` snapshot can have its cap set while still read-only, and the cap survives the ro→rw transition
+    intact). The difference is only §5.C's semantic annotation, not the mechanism.
+- `OpenRoot(ctx, volumeID) → Root` — the direct content accessor, **usable while unmounted** (§5.C's promise,
+  shaped in D5.1). `Root` is a **root-confined** file access handle (`Stat` / `List` / `ReadAt` / `WriteAt` /
+  `Mkdir` / `Remove` / `Rename` / `Close`) whose paths are **relative to that volume's root**, with escaping
+  unreachable. The local arm = `openat2(RESOLVE_IN_ROOT)`.
+  - **It is stricter than `Materialize`, not looser**: the handle has **no `SourcePath`** and yields no host
+    path at all, making it the one materialization-class method on the seam that needs no exemption.
+  - **It is not a replacement for `Materialize`**: that one must hand runsc a bindable host path, while this
+    one only reads and writes bytes inside the engine process. Their consumers differ (`local_runsc` vs the
+    orchestrator's import/export endpoints), so they are two methods.
+- `Name()` — the backend's identity (for registration/diagnostics).
+- `ListUnitIDs(ctx) → []string` — **enumerate only, do not decide**. The backend reports every storage-unit id
+  under its own storage root; "which are orphans" is decided by the mediator, which then calls `DestroyVolume`
+  one by one. **This split was forced by measurement rather than chosen for style** — **"push the decision to
+  the backend too" is rejected** (`SweepOrphanVolumes(live, building)`, with the mediator computing two sets,
+  feeding them in, and the backend deleting the difference): it **deletes the bytes of committed volumes**.
+  The mediator reads `live` and `building` in two separate reads, and a volume whose **entire creation** falls
+  between those two reads is in neither set, so the backend deletes a fully committed volume. **Measured: under
+  458 concurrent sweeps, 3 of 6 snapshots were deleted; with enumeration and decision separated, 913 sweeps /
+  6 snapshots, zero wrongful reclamation.**
+  - **It closes the window by ordering rather than by locking**: every candidate's bytes precede all of the
+    checks; and a candidate no longer in the in-flight set **necessarily has its row already inserted** (the
+    marker is removed only after the insert), so a subsequent per-candidate store read is certain to see it.
+    No new lock, and no store call inside a lock.
+  - **The Overlay side deliberately keeps the merged shape**: there the row precedes the unit insert, so all
+    that is exposed is snapshot skew, and its comment records that residual as acceptable; **a volume is
+    bytes-first, so what is exposed is the entire creation** — the same shape at a different order of risk.
+    Cross-references are left on both sides.
+  - **A failure midway continues rather than aborting** (a best-effort reclamation path: one stuck unit should
+    not leave all the others behind).
+  - **Why by unit rather than by reference**: a layer is a read-only base **shared** by lineage and refcount
+    (the criterion being "is any row still referencing it"), whereas a Volume and an Overlay unit are both
+    **self-sufficient storage units** (the criterion being "does this unit itself still have a live owner").
+  - **The in-flight set is more necessary here than on the Overlay side**: there it only guards against a
+    **stale keep-set** (the row is inserted first), whereas **a volume's creation is bytes-first** (the ID must
+    name that unit first), so a healthy in-flight creation presents as "bytes present, no row" **even with a
+    fresh keep-set**; and `Snapshot`/`Clone` are two more producers in the same window.
+- `ReclaimQuotaRows(ctx, ids) → (n int, err)` — reclaim the quota rows **an earlier deletion leaked** (the
+  backend half of D7.1's path). **It takes ids and does not scan rows itself**: the failure mode of scanning is
+  an uncapped live volume plus zero signal (D7.2). A row not yet reclaimable is **left for the next round**
+  rather than being an error — a `<squota space holder>` may legitimately refuse destruction for the entire
+  lifetime of a live clone.
+- `DeletedRowIDs(ctx) → []uint64` — the input the previous method consumes: the quota-row ids this backend
+  recorded **at the moment of deletion** and has not yet reclaimed. **That it lands on the backend rather than
+  the control plane is a shape argument rather than a convenience**: a leaked row is **that substrate's residue,
+  not engine state** — a backend with no quota rows returns empty and the whole path costs it nothing, so the
+  caller needs no capability branch (§1.3).
+- `Capabilities() → {Snapshot, Clone, Quota}` — **a per-backend capability query** (D6): local (btrfs) reports
+  snapshot/clone/quota supported; a plain directory or some remote backends may not support them, and a call is
+  then a 400 rather than silent. **The members must be `bool`**: a `map[string]string` feature table would carry
+  mechanism names across the seam **as values**, where no structural guard scanning identifiers can see them.
+  **Only capabilities with a consumer are listed** (§1.3 forbids reservations): `Quota` has one (§3.4's "if the
+  cap cannot be delivered, refuse the placement"), whereas a bit like `DirectIO` does not — it would stay on the
+  contract surface forever in the name of "we might need it later".
+  **The scope is per backend**, not per volume.
+
+**The structural guard**: `seam_test.go`'s twin keeps §5.A's host-primitive list verbatim and adds `reflink` /
+`fuse` / `loopdev` / `mountopt`; the sole exemption is `SourcePath` on the handle (following `MergedPath`'s
+precedent, with the reason written into the exemption table alongside it).
+
+The mechanism for mounting into the guest: in `coldStart` the mediator assembles each `Materialized` handle into
+`LaunchSpec.Mounts []MountSource{SourcePath, Dest, ReadOnly}` (a contract member peer to `RootfsSource`), and
+`local_runsc` appends each `MountSource` in `buildOCISpec` as one `ociMount{Type:"bind", Source, Destination,
+Options}` — exactly the shape that was measured. A Volume's **identity** above the seam is always an ID; the host
+directory is resolved inside the backend and surfaces only as an opaque `SourcePath` (§6.2: outwardly only Volume
+IDs are recognized and no host path is exposed).
+
+---
+
+## D3. The mount table = a first-class store object, reusing the existing object model (not rebuilt)
+
+The mount relation is a Binding (§3.4): "which are mounted, where, and under what policy" is recorded in the
+control-plane mount table, and resume remounts from the table. Every row of the mount table is a **first-class
+persistent object** (§4.3's mount row), and it is simply **`sandboxes.template`'s reference doubled**:
+
+- **The structure = bidirectional FK RESTRICT**: one mount row `Mount{Sandbox, Volume, Path, Access}`, with the
+  `sandbox` and `volume` columns each `REFERENCES … ON DELETE RESTRICT`. That alone gives both invariants "a
+  volume with a live mount row cannot be deleted" and "a sandbox with a live mount row cannot be deleted" —
+  SQLite through FKs, Memory through a Go scan, one set of assertions (§4.3's seam).
+  - **Be clear about which half is "free"** (measured): the **detection predicate** is reusable as is — the
+    existing FK-violation check is table-agnostic and column-agnostic string matching, true for **both
+    directions** of every new FK path (a missing-parent insert / a RESTRICT delete, six directions across three
+    FKs) and false for a uniqueness violation (`isFKViolation`, one predicate shared by eight call sites).
+    **But the translation point cannot be inherited — it is per call site**: without that FK branch in
+    `DeleteSandbox`, a RESTRICT surfaces as a bare driver error in the API's `default` branch and becomes a
+    **500 instead of a 409**; and the existing `ErrInUse` message reads literally "template in use", so reusing
+    it yields a 409 naming the wrong object. So the shape is **one sentinel per outcome**, landing as a separate
+    `ErrSandboxHasMounts` (each backend has its own branch, and the contract case pins the reason — "an
+    untranslated driver error becomes a 500" — into its failure message); while **which sentinel maps to which
+    outcome category, and the counting rule that what is counted is the kinds of semantics a caller must tell
+    apart rather than the number of error values, belong to §6.2** — this document claims only "do not reuse
+    one". The Memory backend does not even get the predicate free: it has no FK engine, and the reference scans
+    on the sandbox side and the volume side are hand-written — "free" covers only the SQLite half, and that is
+    its boundary.
+  - **The deletion order is necessary rather than a matter of style** (measured): RESTRICT takes effect
+    **immediately**, and wrapping the two deletes in one transaction **does not buy** order-independence, so the
+    mount row must be deleted before the sandbox. **`defer_foreign_keys` is a trap and was rejected on
+    measurement**: it does make the order irrelevant, but the violation surfaces only at `Commit()`, and when
+    Go's `Tx.Commit()` returns an error SQLite **has not rolled back** — on the pinned single connection the
+    transaction stays open, and subsequent queries through the pool **run inside that transaction**, seeing
+    uncommitted state no other handle can. That is a store-level correctness risk rather than a style question.
+  - **FK enforcement is itself a load-bearing premise, and losing it is silent** (measured: with the
+    `foreign_keys` pragma off, deleting a referenced row simply succeeds with zero errors). So it deserves a
+    contract test guarding it rather than resting on the presence of a DSN string.
+- **Existence is the state, refcount is derived, and there is no outbox event**: a mount row has no state column
+  and no count column; "is this volume exclusively held" is derived from a mount row's existence plus its access
+  (no materialized count). A mount row is not a §4.1 lifecycle transition, so creating/deleting one **emits no
+  event** (as with Template CRUD, unlike a sandbox transition).
+- **bytes-first, inside the transition lock**: mount rows are written inside the **per-sandbox transition lock**
+  along the create/resume cold-start chain, and a failure is rolled back by `unwind`.
+  **`unwind` must delete the mount rows explicitly — that is a design requirement rather than an implementation
+  detail**: mount rows are written **before** the cold start, so every unwind branch after it would hit RESTRICT
+  when deleting the sandbox record; and an unwind branch that discards that error leaves **an undeletable zombie
+  sandbox record**.
+
+**The hook points in the mediator** (verbs belong to §4, mechanisms to the §5 backend; subsystems do not call
+each other):
+
+| Hook | Action |
 | --- | --- |
-| `Create` | 记录插入后、`coldStart` 前写挂载行(纳入 `unwind` 回滚);`CreateSpec` 增 volume-binding 入参 |
-| `coldStart`(create+resume 共用) | `Launch` 前:`Backend.Materialize` 每个卷 → 把句柄组进 `LaunchSpec.Mounts`;`liveState` 增 `mounts` 字段供 pause/destroy 释放 |
-| `resumeLocked` | 从 store **读回**挂载表(挂载行跨 pause 持久)、重新 `Materialize`——与 `resolveLower` 每次重解析血缘同理,卷是同一真身、拿新的宿主物化 |
-| `pauseLocked` | CAS 后:`Backend.Release` 每个卷(**挂载行保留**,租约不释放),对称于 Overlay「零捕获」 |
-| `destroyLocked` | 卸载活卷 → **先删挂载行、再 `DeleteSandbox`**(否则 `mounts.sandbox` FK 挡住沙箱删除);这是租约释放点 |
-| `RebindVolumes`(`PATCH /v1/sandboxes/{id}` 的 `volumes` 键) | 整份挂载绑定的替换:一次 `store.ReplaceMounts` 在**同一个提交**里删旧行 + 插新行,新行走**同一条租约谓词**;拒绝时旧绑定原样留下(原子性是 §5.C 写明的 store 契约) |
-| 启动/周期对账 | **三个独立入口**,同一个启动位置与同一次 reaper tick 上依次调用:`SweepOrphanVolumes`(`Backend.ListUnitIDs` 枚举 → mediator 判定 → 逐个 `DestroyVolume`;**不**镜像 `SweepOrphanOverlays` 的合并形状,理由与实测见 D2)· `RepairVolumeCaps`(D7.3 的修复态)· `ReclaimQuotaRows`(D7.1 的泄漏行) |
+| `Create` | Write the mount rows after the record insert and before `coldStart` (included in `unwind`'s rollback); `CreateSpec` gains a volume-binding input |
+| `coldStart` (shared by create+resume) | Before `Launch`: `Backend.Materialize` each volume → group the handles into `LaunchSpec.Mounts`; `liveState` gains a `mounts` field for pause/destroy to release |
+| `resumeLocked` | **Read** the mount table back from the store (mount rows are durable across pause) and re-`Materialize` — the same reasoning as `resolveLower` re-resolving lineage each time: the volume is the same real thing, taking a new host materialization |
+| `pauseLocked` | After the CAS: `Backend.Release` each volume (**the mount rows are kept** and the lease is not released), symmetric to the Overlay's "zero-capture" |
+| `destroyLocked` | Unmount live volumes → **delete the mount rows first, then `DeleteSandbox`** (otherwise the `mounts.sandbox` FK blocks the sandbox delete); this is the lease release point |
+| `RebindVolumes` (the `volumes` key of `PATCH /v1/sandboxes/{id}`) | Replacing the whole mount binding: one `store.ReplaceMounts` deleting the old rows and inserting the new ones **in the same commit**, with the new rows going through **the same lease predicate**; on refusal the old binding is left exactly as it was (the atomicity is a store contract stated in §5.C) |
+| Startup/periodic reconciliation | **Three independent entry points**, called one after another at the same startup position and in the same reaper tick: `SweepOrphanVolumes` (`Backend.ListUnitIDs` enumerates → the mediator decides → `DestroyVolume` one by one; it does **not** mirror `SweepOrphanOverlays`'s merged shape, for the reason and measurement in D2) · `RepairVolumeCaps` (D7.3's repair state) · `ReclaimQuotaRows` (D7.1's leaked rows) |
 
-**唯一的新不变量:独占租约**(规范陈述在 §5.C:至多一条 `exclusive` 行,且它不与该卷任何其他挂载行并存)。
-这是 Volume 引入的唯一一条新 store 断言。**两个读起来自然、实测都不成立的陈述**,各值一条证伪:
+**The only new invariant: the exclusive lease** (stated normatively in §5.C: at most one `exclusive` row, and it
+does not coexist with any other mount row on that volume). This is the only new store assertion Volume
+introduces. **Two statements that read naturally and are both false on measurement**, each worth a falsification:
 
-1. **不是"一个卷至多一条 rw 挂载行"** —— 那与 SharedReadWrite 的扇出(§5.C)直接矛盾:shared-rw 同样是 rw。
-2. **不是"控制面前置校验 + 插入,由单写者 store 序列化"** —— 单写者 store 串行化的是
-   **每一次调用**,不是**跨两次调用的判定-动作**;而两个并发 `Create` 各自新铸 SandboxID、因此持两把**不
-   相交**的转换锁,那一刻唯一被持有的锁是本沙箱的。§3.4 准入门是同一形状的另一例:门的不变量是节点
-   全局的,而转换锁是 per-sandbox 的,故并发 create 之间根本不互相序列化,门因此另需一把独立互斥。
-   实测:8 个 racer、无调度钩子、4000 次迭代里 2 次打破租约,加显式调度点则稳定复现。
+1. **It is not "at most one rw mount row per volume"** — that would directly contradict SharedReadWrite's fan-out
+   (§5.C): shared-rw is rw too.
+2. **It is not "a control-plane precondition check plus an insert, serialized by the single-writer store"** — a
+   single-writer store serializes **each individual call**, not **a decide-then-act pair spanning two calls**; and
+   two concurrent `Create`s each mint a new SandboxID and therefore hold two **disjoint** transition locks, the
+   only lock held at that moment being their own sandbox's. §3.4's admission gate is another instance of the same
+   shape: the gate's invariant is node-global while the transition lock is per sandbox, so concurrent creates do
+   not serialize against each other at all and the gate needs a separate mutex of its own.
+   Measured: 8 racers with no scheduling hooks broke the lease 2 times in 4000 iterations, and with an explicit
+   scheduling point it reproduces reliably.
 
-**兑现方式:让 store 原子地做,不加应用层锁。** 一条语句表达完整的跨行谓词(含偏索引盲的全部四种组合):
+**How it is delivered: let the store do it atomically, with no application-layer lock.** One statement expresses
+the complete cross-row predicate (including all four combinations the partial index is blind to):
 
 ```sql
 INSERT INTO mounts(sandbox, volume, path, access)
@@ -280,390 +374,533 @@ WHERE NOT EXISTS (
 )
 ```
 
-`RowsAffected()==0` ⟹ 租约冲突(→ 409)。实测 24 个 racer、不加任何应用锁:rows=1 / exclusive=1 / 零驱动
-错误;多卷 all-or-nothing 用一个事务(单连接使其天然串行)测得 winners=1/16、partial=0。**推荐它而不是新加
-一个 per-volume 锁类**,理由是不引入新机制:它就是 `store.Store` 本来就要求每个后端交付的事,且与 §4.3
-引用-回收**同形**(同一个权威 store 串行仲裁判定-动作)。Memory 侧是其既有互斥下的一个方法。偏索引与
-`CHECK (access IN (...))` 退为 schema 级断言(它们各自只覆盖一半,见 §5.C)。
+`RowsAffected()==0` ⟹ a lease conflict (→ 409). Measured with 24 racers and no application lock at all: rows=1 /
+exclusive=1 / zero driver errors; multi-volume all-or-nothing uses one transaction (a single connection makes it
+naturally serial) and measured winners=1/16, partial=0. **It is recommended over adding a new per-volume lock
+class** because it introduces no new mechanism: it is exactly what `store.Store` already requires every backend to
+deliver, and it is **isomorphic** to §4.3's reference-reclamation (the same authoritative store serializing a
+decide-and-act pair). On the Memory side it is one method under its existing mutex. The partial index and
+`CHECK (access IN (...))` fall back to being schema-level assertions (each covers only half, see §5.C).
 
-> **竞态写者只有两个,且都是挂载行的写**:`Create` 冷启链上的 INSERT,与 `RebindVolumes` 经
-> `store.ReplaceMounts` 的删+插(同一个提交、同一条租约谓词,故它不是第二套仲裁,是同一条谓词的第二个
-> 调用点)。这把修法收窄了很多:resume 只**读**该表,destroy 只删自己沙箱的行且 FK RESTRICT 覆盖次序,
-> pause 不写行。
+> **There are only two racing writers, and both are writes of mount rows**: the INSERT on `Create`'s cold-start
+> chain, and `RebindVolumes`'s delete+insert through `store.ReplaceMounts` (in the same commit, through the same
+> lease predicate, so it is not a second arbitration but a second call site of the same predicate). That narrows
+> the fix considerably: resume only **reads** the table, destroy only deletes its own sandbox's rows with FK
+> RESTRICT covering the order, and pause writes no rows.
 >
-> **谓词必须是行内不可变的属性**(§5.C 的禁令)有一个具体的外部反面教材:某实现的 live-owner 偏唯一索引
-> 建在一个软删时间戳上(`UNIQUE(...) WHERE
-> cleanup_requested_at IS NULL`),写入它的路径存在、而**全代码库没有任何路径把它清回 NULL**——于是一次误标
-> 既永久判死该卷,又腾出唯一性槽位让第二个持有者插进来。我们的谓词是 `access`(行内不可变),这正是躲开该
-> 失败模式的原因;**它是一个选择,不是巧合**,故写下来,否则下一个人很容易把它改成某个 `detached_at`。
+> **"The predicate must be a row-immutable attribute"** (§5.C's prohibition) has a concrete external cautionary
+> example: one implementation built its live-owner partial unique index on a soft-delete timestamp
+> (`UNIQUE(...) WHERE cleanup_requested_at IS NULL`), and the path that writes it exists while **no path anywhere
+> in the codebase clears it back to NULL** — so one mistaken marking both permanently condemns that volume and
+> frees the uniqueness slot for a second holder to insert into. Our predicate is `access` (row-immutable), which
+> is exactly why that failure mode is avoided; **it is a choice rather than a coincidence**, so it is written
+> down, or the next person could easily change it to some `detached_at`.
 >
-> **锁序(全序)**:`transitionLock(sandbox) → mediator 的 `mu`(live-map 与直连写的 in-flight 标记同住)`,
-> 以及 `transitionLock(sandbox) → 准入互斥`。**没有 per-volume 锁类,这是刻意的**:卷维度的互斥由上面那条
-> store 语句承担(D3 的整个论点),而写入 regime 的两半共用 live-map 那把 `mu`,故 Volume **不新增锁层**。
-> `mu` 严格是叶子(取了就放,其间不调 store、不调 backend、不等别的锁);**准入互斥不是**——它按契约横跨
-> {求和 → 物化 → 提交},持有期间会等 store 的单写者锁。两者仍可组合,因为**没有任何 store / backend 路径
-> 反向去取这两把锁**,且它们彼此不嵌套。
-> **这同时是把抢占留在门外的一条独立论据**:一个卷维度的动词要去反查它的持有者(force-detach / 租约抢占,
-> 正是 D8 刻意推迟的那条)就得引入一把 vol→sbx 方向的锁,与 `transitionLock → …` 闭合成环。**这一条是从
-> 锁序推出的,repo 里没有它的复现载体**(与 D3 前两条不同——那两条的数字在 `store.Store.CreateMounts`
-> 的注释里)。若它将来要落地,必须从 store 解析出持有者、**先释放、再按全局序重新获取**。
+> **The lock order (a total order)**: `transitionLock(sandbox) → the mediator's `mu` (home to both the live-map
+> and the direct-write in-flight marker)`, and `transitionLock(sandbox) → the admission mutex`. **There is no
+> per-volume lock class, deliberately**: volume-dimension mutual exclusion is carried by the store statement above
+> (the whole point of D3), and the write regime's two halves share the live-map's `mu`, so Volume **adds no lock
+> layer**. `mu` is strictly a leaf (taken and released, with no store call, no backend call, and no waiting on
+> another lock in between); **the admission mutex is not** — by contract it spans {sum → materialize → commit},
+> and while held it waits on the store's single-writer lock. The two still compose, because **no store or backend
+> path takes either lock in the reverse direction** and they do not nest within each other.
+> **This is also an independent argument for keeping preemption outside the door**: a volume-dimension verb that
+> looks up its holder (force-detach / lease preemption, exactly what D8 defers deliberately) would need a
+> vol→sbx-direction lock, closing a cycle with `transitionLock → …`. **This one is derived from the lock order and
+> has no reproduction vehicle in the repo** (unlike D3's first two, whose numbers are in
+> `store.Store.CreateMounts`'s comments). Should it ever be implemented, it must resolve the holder from the
+> store, **release first, and re-acquire in the global order**.
 
-### D3.1 证伪:store-级独占 token vs 进程内 open-handle refcount,不可混
+### D3.1 Falsification: a store-level exclusivity token vs an in-process open-handle refcount, not to be conflated
 
-一个诱人的备选是保留**两层** refcount:① DB 挂载行(谁独占、跨进程)② 一个进程内计数(本 node 上多少个
-挂载共享**同一个已打开的 backend 会话**)。第②层只在"一个 FUSE 会话服务 N 个沙箱"时才有意义——它数的是
-**打开的合成 FS 句柄**的引用数。本引擎 local 后端是"gofer 各自代理一个宿主目录",**没有共享的 open
-handle**,故第②层退化掉,只剩第①层(挂载行)。第②层因此是 **remote/合成 backend 的内部实现细节**,不进核心
-挂载表模型——记此以免把分布式的双层 refcount 误当核心需求。
+A tempting alternative keeps **two layers** of refcount: ① the DB mount row (who holds it exclusively, across
+processes) and ② an in-process count (how many mounts on this node share **the same open backend session**). Layer
+② is meaningful only when "one FUSE session serves N sandboxes" — it counts references to an **open synthesized-FS
+handle**. This engine's local backend is "each gofer proxying a host directory of its own", with **no shared open
+handle**, so layer ② degenerates away and only layer ① (the mount row) remains. Layer ② is therefore **a
+remote/synthesizing backend's internal implementation detail** and does not enter the core mount-table model —
+recorded here so that a distributed two-layer refcount is not mistaken for a core requirement.
 
 ---
 
-## D4. 访问模式与独占租约
+## D4. Access modes and the exclusive lease
 
-三种访问模式的定义与语义、以及"独占租约 = 那条 Exclusive 挂载行的存在本身"(不引入 `Lease` 类型、
-不加归属字段;含"崩溃保持租约是正确行为"与 reaper TTL 兜底)的规范陈述归 §5.C。这里只留两点:
-命名取"共享 + 可写性"的**可观测属性**(§1.1 词汇边界禁用归属义的实体名),以及 SharedReadWrite 的
-"跨沙箱 rw coherence 不定义"与 D1.2 拒 FUSE-统一缓存**同源**——跨边界共享可变状态是难题,回应是
-**不承诺**,而非造脆弱机制假装承诺。本节其余篇幅给它排除掉的那条备选。
+The definitions and semantics of the three access modes, and "the exclusive lease = the existence of that
+Exclusive mount row itself" (introducing no `Lease` type and no belonging field; including "keeping the lease
+across a crash is the correct behaviour" and the reaper TTL backstop) are stated normatively in §5.C. Only two
+points are left here: the naming takes the **observable properties** of sharing and writability (§1.1's vocabulary
+boundary bars entity names in the belonging sense), and SharedReadWrite's "cross-sandbox rw coherence is
+undefined" shares **one origin** with D1.2's refusal of FUSE-unified caching — sharing mutable state across a
+boundary is a hard problem, and the response is **not to promise** rather than to build a fragile mechanism that
+pretends to. The rest of this section gives the alternative it ruled out.
 
-**证伪:心跳失效 + Pod 销毁双回收。** 它是**分布式无单一权威 store、node 会凭空消失**的产物(node 死了没人
-知道,只能靠心跳超时推断):注册-心跳 + "按心跳超时查活挂载"是它的标准形状。
-本引擎单机单 orchestrator、store 即权威(§1.1):没有"凭空消失的 node",崩溃是 L1 探活立即可判的本地事实。
-故**留 reaper TTL 兜底、去掉周期心跳循环**(没有可交接的另一 node)。心跳式回收是未来 multi-node provider
-的义务(node 死亡由其调度层接),不进核心。**唯一真残留**:长期 paused / 卡住的沙箱占着独占卷、他方现在
-就想要——引擎默认独占直到 destroy/evict,不主动抢占;要不要强制 detach / 抢占是策略(大概率产品层),
-登记 open-decisions(D8)。
-
----
-
-## D5. 写入 regime:一条不变量,不要反向代理
-
-hazard 是真的:卷可能同时被运行中沙箱经 gofer rw 写、被直连 API 从宿主侧写同一后端 → 撕裂,且 gofer/sentry
-页缓存与直连写不 coherent。§5.C 用一条**不变量**堵掉它——该不变量(live-rw 挂载在持 ⟹ 直连变更一律拒;
-门开在"**活的**"写入方,`paused` 不算 live writer)的规范陈述归 §5.C;本文只给它的边界与证伪。
-
-**未挂载时的直连操作**(create/delete/list/inspect/import/export):local 后端直接对宿主目录/subvolume 操作,
-单机场景简单,无需"惰性 attach"。"无挂载时临时开一个 backend 会话服务直连、闲置回收"这套是**合成型
-backend 才需要的**(要一个打开的 FS 会话去服务),local 目录用不上——封在 remote backend 内。
-
-### D5.1 直连访问器的形状:`openat2(RESOLVE_IN_ROOT)`,不经 guest、不用 chroot
-
-直连 import/export 是一个**窄访问器**,落在 `volume.Backend` 上(`OpenRoot`,D2),不经 §5.E `fs`。
-两条论据:
-
-1. **经 §5.E 结构上不可行**(已核对代码):`fs` 只存在于 guest 内、只能经一个**活 placement** 到达,
-   而未挂载的卷没有 guest;且把卷内容路由经 §5.E 会产生一条 `volume → transport` 的子系统边,
-   `internal/arch` 的空 allowlist 当场失败。
-2. **窄访问器的安全边界只要一个 syscall。** `openat2(dirfd, path, RESOLVE_IN_ROOT)` 给出与 chroot
-   **逐条相同**的路径语义,且无特权、无 mount namespace、无线程钉定。(实现同时带 `RESOLVE_NO_MAGICLINKS`
-   ——它独立堵掉经 `/proc/*/fd` 魔法链接的逃逸,**不改变**下面这四条路径语义,故是加固而非另一条边界。)
-   实测四条(本机 6.x 内核):
-   `..` 在根处**夹住**(不是报错,是解析成根本身)· 绝对路径**按该根重新解释** · 指向根外的 symlink
-   (相对与绝对都试过)解析回根内 · symlink 环报 `ELOOP`。写侧同验:经一条 `../../../d/f` 形状的路径
-   create+write,字节落在卷内;一条指向宿主文件的 symlink 上的写**没有**碰到宿主文件。
-   - **量级**:`openat2(RESOLVE_IN_ROOT)` **0.52 µs/op**;一个参考实现为同一个保证付的
-     "每请求一个新 mount namespace + bind + `pivot_root`" 是 **178 µs/op**(同机实测,后者还要 root)。
-     **342×**,且省掉整套 namespace 生命周期与 `runtime.LockOSThread` 的线程所有权协议。
-   - 故"直连访问"不是一个需要新数据面的能力,而是**一个 dirfd 加一族 `*at` 调用**。它连
-     `SourcePath` 都不必吐:句柄不暴露任何宿主路径,比既有 `Materialized` 更严,`seam_test.go`
-     的结构守卫自动通过。
-   - **remote 臂容得下**:FUSE 挂点是目录,`openat2` 在它上面逐字相同;真正的对象存储后端则自己实现同一
-     组路径+字节语义(接口是路径与字节,不是宿主原语)。
-
-访问器**是写入 regime 不变量与它的 in-flight 标记唯一的触发者**,故三者同门落地——单独实现后两者就是
-§1.3 禁止的无消费者契约成员。
-
-**写入 regime 的门不能退化成"挂载表里有行就拒"。** 那样更保守、不会撕裂,但会毁掉 §5.C 明写的承诺——
-`paused` 沙箱不算 live writer,此时直连写安全且 resume 后自然见到新内容。而 live-map **确实是**忠实的
-gofer 谓词:已核对代码,placement 在**物理存在的那一刻**就被 `put` 进 live-map(在健康门**之前**,
-`lifecycle.go` 的 `coldStart` ⑦ 前一步),正是为了让并发 reconcile 不把它当孤儿。故谓词读 live-map
-是对的,`sandboxes.state` 是错的(§5.C 已记两向不忠实),而"只读挂载表"是**第三种**错——它把一个已定的
-能力换成了实现的方便。
-
-**证伪:直连反向代理到挂载沙箱**(卷挂着时把直连写反代进持有沙箱,以允许"挂着也能从外面写")。**不采用**:
-①这是**产品便利**、不是引擎正确性需求——引擎只要"别撕裂",§5.C 的**拒绝**就够,成本远低于造一条反向代理
-数据面;②反向代理要引擎理解"谁在挂、如何穿进它的 gofer 写它的 FS",把**跨对象写入编排**拉进引擎(§1.3
-litmus:非 register-impl / add-join-table / add-subscriber,而是改现有结构 → 该问"是不是不该进引擎")。
-答案:要这个便利就叠一层引擎外 adapter(读挂载表 → 经 §5.E `fs` 写进持有沙箱),引擎不做。产品平台把这层
-便利算进自己职责是合理的;引擎划在边界外,这是**定位差异,不是对错**。
+**Falsification: heartbeat expiry + Pod destruction as dual reclamation.** It is a product of **being distributed
+with no single authoritative store, where a node can vanish into thin air** (nobody knows the node died, so it can
+only be inferred from a heartbeat timeout): registration-plus-heartbeat and "find live mounts by heartbeat
+timeout" is its standard shape.
+This engine is single-node with one orchestrator, and the store is the authority (§1.1): there is no "node that
+vanishes", and a crash is a local fact the L1 probe can decide immediately. So **keep the reaper TTL backstop and
+drop the periodic heartbeat loop** (there is no other node to hand off to). Heartbeat-based reclamation is a
+future multi-node provider's obligation (node death being caught by its scheduling layer) and does not enter the
+core. **The one genuine residual**: a long-paused or stuck sandbox holding an exclusive volume that someone else
+wants now — the engine holds exclusivity by default until destroy/evict and does not preempt; whether to
+force-detach or preempt is policy (most likely the product layer's) and is registered in open-decisions (D8).
 
 ---
 
-## D6. 快照 / 克隆:btrfs 原生 CoW,per-backend capability
+## D5. The write regime: one invariant, and no reverse proxy
 
-### D6.1 单机用 btrfs,不造用户态 segment 引擎
+The hazard is real: a volume may be written rw through the gofer by a running sandbox and written to the same
+backend from the host side by the direct API at the same time → tearing, and the gofer's/sentry's page cache is
+not coherent with a direct write. §5.C blocks it with one **invariant** — the normative statement of that
+invariant (a live-rw mount held ⟹ direct mutations are refused outright; the gate is on a **live** writer and
+`paused` does not count as one) belongs to §5.C, and this document gives only its boundary and falsification.
 
-"POSIX over 对象存储"要一整台机器:WAL(node-local 变更日志)→ 周期物化成不可变
-manifest + 内容寻址 segment → head 指针 CAS,快照=引用同一批不可变 segment、fork=改写 segment 引用做 CoW。
-**这台机器整体属 remote backend 的内部义务,不进核心**:它存在的唯一理由是"对象存储不是 POSIX、
-无 durability-on-write、无 reflink、不可信"。单机 btrfs 上,**文件系统本身就给了 CoW**——`cp --reflink=always` 已验证共享
-extent(同一物理 offset、`shared` 标志,即便 `nodatacow` 挂载下显式 reflink 仍生效),而 `btrfs subvolume
-snapshot` 更是**整树、原子、瞬时**(实测新快照仅 16KiB exclusive 元数据、零数据拷贝)。
+**Direct operations while unmounted** (create/delete/list/inspect/import/export): the local backend operates
+directly on the host directory/subvolume, which is simple in a single-node setting and needs no "lazy attach". The
+whole "open a temporary backend session to serve direct access when nothing is mounted, and reclaim it when idle"
+pattern is **needed only by a synthesizing backend** (which needs an open FS session to serve from) and is
+unnecessary for a local directory — sealed inside the remote backend.
 
-所以:**采纳语义模型**(快照=不可变时间点、fork=CoW 子卷、二者元数据级廉价)与**能力矩阵**(快照/fork 是
-per-backend capability),**丢弃 segment/manifest 实现**——让 btrfs 当"materializer"。若把 Volume 建模成一个
-**btrfs subvolume**,快照/克隆 = `btrfs subvolume snapshot`,与 D7 的容量帽(配额打在 subvolume 上)
-落在**同一个对象**上:同一个存储单元同时得到廉价快照与硬容量帽,这是"卷=subvolume"的强理由。**但别把它读成
-"一步到位"**:那个 ioctl 搬的是**字节**、不搬**帽**(D7.3),所以这个合并是两次操作而非一次。
+### D5.1 The direct accessor's shape: `openat2(RESOLVE_IN_ROOT)`, not through the guest and not using chroot
 
-### D6.1a 快照 / 克隆的对象形状:同一种对象,带 lineage,帽必须显式声明
+Direct import/export is a **narrow accessor** landing on `volume.Backend` (`OpenRoot`, D2) rather than going
+through §5.E's `fs`. Two arguments:
 
-三个子决定,合起来定义"快照是什么":
+1. **Going through §5.E is structurally impossible** (checked against the code): `fs` exists only inside the guest
+   and is reachable only through a **live placement**, whereas an unmounted volume has no guest; and routing
+   volume content through §5.E would create a `volume → transport` subsystem edge, failing `internal/arch`'s empty
+   allowlist on the spot.
+2. **A narrow accessor's security boundary needs exactly one syscall.** `openat2(dirfd, path, RESOLVE_IN_ROOT)`
+   gives path semantics **identical item by item** to chroot's, with no privilege, no mount namespace, and no
+   thread pinning. (The implementation also passes `RESOLVE_NO_MAGICLINKS` — which independently blocks escapes
+   through `/proc/*/fd` magic links and **does not change** the four path semantics below, so it is hardening
+   rather than a second boundary.) Four measured properties (on this machine's 6.x kernel):
+   `..` is **clamped** at the root (not an error — it resolves to the root itself) · an absolute path is
+   **reinterpreted against that root** · a symlink pointing outside the root (tried both relative and absolute)
+   resolves back inside it · a symlink loop reports `ELOOP`. The write side is verified too: creating and writing
+   through a path shaped like `../../../d/f` lands the bytes inside the volume, and a write through a symlink
+   pointing at a host file **does not** touch the host file.
+   - **The magnitude**: `openat2(RESOLVE_IN_ROOT)` is **0.52 µs/op**; what one reference implementation pays for
+     the same guarantee — "a fresh mount namespace + a bind + `pivot_root` per request" — is **178 µs/op**
+     (measured on the same machine, and the latter also requires root). **342×**, and it saves the whole
+     namespace lifecycle plus `runtime.LockOSThread`'s thread-ownership protocol.
+   - So "direct access" is not a capability needing a new data plane but **one dirfd plus a family of `*at`
+     calls**. It need not even yield a `SourcePath`: the handle exposes no host path at all, is stricter than the
+     existing `Materialized`, and passes `seam_test.go`'s structural guard automatically.
+   - **The remote arm accommodates it**: a FUSE mount point is a directory and `openat2` behaves identically on
+     it; a true object-store backend implements the same set of path and byte semantics itself (the interface is
+     paths and bytes, not host primitives).
 
-- **快照卷是一个普通的、可写的 Volume,不加只读标记。** 理由与 §5.C 拒掉"per-卷 `access` 字段"逐字同构:
-  **基数错了**(可写性是 per-挂载的裁决,一个卷可同时对 A 是 shared-rw、对 C 是 shared-ro)。更硬的一条是
-  §5.C 已实测并写下的性质——"快照不破坏 per-volume 帽语义:**写入方付账**,两个方向都是",覆写快照只记快照账、
-  源不动。那条实测**只在快照可写时才有意义**;把快照定为只读等于把已验证的性质丢掉,还要给挂载行 `access`
-  加一条跨对象校验(§1.3 litmus 上过不去:既非注册实现、也非加联表,而是加字段 + 加跨对象检查)。要不可变
-  就用 `shared-ro` 挂载行表达,或留给产品层策略。
-  - 连带**收束了机制**:若快照是独立的只读类型,就要两个 seam 方法、两套 API 形状、两条拆除规则,去对应
-    btrfs 用**一条**相同 ioctl 实现的东西。同一形状让 `Snapshot` 与 `Clone` 共用一条路径(D2)。
-- **卷记录带 `parent`,`REFERENCES volumes(id) ON DELETE RESTRICT`**,与 `templates.parent`(§4.3 lineage)
-  一模一样。这是**正确性论据、不是整洁**:D7.1 实测出"先删共享者、再删源,一行不漏",而 FK 是让那个次序成为
-  **唯一可达的次序**的东西——删一个有活快照的源变成 409,配额行泄漏**根本不产生**(预防,免费,不引新机制)。
-  按本引擎自己的判据它干净通过:它就是 §1.3 的"加一张联表"(此处是自引用)、复用既有的 FK-违反判定谓词
-  (D3 实测其表无关列无关)、无 state 列无物化计数("这个卷是不是源"由有没有行指向它派生)。
-  - **外部反面教材把这条钉死了**(已核对源码):某实现选了**有指针、无约束**(`ADD COLUMN ... TEXT` + 索引,
-    无 `REFERENCES`),于是不得不在三个独立位置手写 children 检查——而那三处**全是回收守卫、没有一处是删除
-    守卫**。后果是控制面行先消失、字节还得留着,而所有回收判据都键在源卷自己那条记录上,于是源行一删,
-    **任何后来的 pass 都再也找不到那些字节**(它的"若有子代则跳过回收"函数只在同步删除路径上被调用一次,
-    没有任何周期性 sweep 回访)。我们的 `SweepOrphanVolumes` 能覆盖这种情形,但**不该需要它**:RESTRICT
-    让这个局面根本不出现。
-  - **需要自己的 sentinel**:被活快照挡住的卷删除与被挂载行挡住的卷删除是**两个不同的对象关系**,而既有
-    `ErrInUse` 的文案写着 "template in use"。这是 D3 已经点出的同一个陷阱在第四条 FK 路径上的复现。
-- **`size` 在 disk 被计量时必填、不继承**,故 `POST /v1/volumes/{id}/snapshot` 与 `.../clone` 都长出请求体
-  `{size}`。**基底侧的选择权已经没有了**(D7.3:没有可继承之物);而在策略侧,继承看着免费其实不是——帽是
-  **声明的准入主张**,不是字节的属性,§3.4 正因为快照的元数据级实际字节约 16 KiB 才规定"按声明帽计"。继承会
-  在每次快照时静默把节点的已声明磁盘主张翻一倍,而调用方从没提出过;且 §5.C 已写明 squota 的帽是"**终身写入
-  预算**",一个还没写过任何东西的单元继承一个数字毫无意义。要它必填也让规则数不变:§6.2 已有"按轴条件必填",
-  这只是同一条规则出现在第二、第三个端点。源无帽且该轴未计量时 `size` 照旧可省,由既有规则自然覆盖。
+The accessor **is the only trigger of the write-regime invariant and its in-flight marker**, so all three land
+together — implementing the latter two alone would be a contract member with no consumer, which §1.3 forbids.
 
-### D6.2 快照默认 crash-consistent,与 Overlay 不对称
+**The write regime's gate must not degenerate into "refuse if there is any row in the mount table".** That would
+be more conservative and would not tear, but it would destroy a promise §5.C states explicitly — a `paused`
+sandbox does not count as a live writer, direct writes are safe then, and the new content is naturally seen after
+a resume. And the live-map **genuinely is** a faithful gofer predicate: checked against the code, a placement is
+`put` into the live-map **at the moment it physically exists** (before the health gate, one step before
+`coldStart`'s ⑦ in `lifecycle.go`), precisely so that a concurrent reconcile does not take it for an orphan. So
+reading the live-map is right, `sandboxes.state` is wrong (§5.C already records both directions of its
+unfaithfulness), and "read the mount table only" is a **third** kind of wrong — it trades a settled capability for
+an implementation's convenience.
 
-Volume 快照默认 **crash-consistent**、与 Overlay 不对称的完整陈述在 §5.C(含 app-consistent 的组合路径:
-独占卷由调用方先 pause 再快照,shared-rw 不提供)。此处只补两条本文该留的:不对称的**根源**是 Overlay
-**单一写入方**、可 pause 到 at-rest 读(§5.B),而 Volume 打破此前提(shared-rw 多写入方、挂载中不想停);
-以及**为什么快照前既不 `fsync` 也不 freeze**(一个诱人的"稳妥起见"前置动作:sync 那半无用、freeze 那半净负):
-
-- **sync 无可测差别**:sync 后的快照与裸快照落在同一个一致性类(每次捕获都是完整前缀),裸快照本就
-  **不卡 guest**(零写入错误、写入速率不变)。
-- **`fsfreeze` 与快照根本无法组合。** 创建一个快照本身就是对你刚静止的那个文件系统的**写**,故快照在整个
-  frozen 窗口内**不可中断地阻塞**、只在 thaw 之后才落地——它因此排到了它本想利用的那次静止**之后**,捕获
-  的是 thaw 后的状态,相对裸快照**零一致性收益**;唯一的实际效果是把 guest 卡住,外加冻住整个节点的根
-  文件系统(单机上卷与引擎状态常在同一个 btrfs 上)。
-- **连带的 harness 约束**:不要用 `timeout` 包住 frozen 窗口里的快照——一个被信号打断的阻塞快照会**破坏
-  freeze 计数**,其后的 thaw 返回 `EINVAL` 像是已解冻而快照照样落地(4/4 复现)。踩上它会把测量工具制造的
-  假失败("快照失败 + thaw 失败")读成基底失败。
-
-### D6.3 证伪:二段式 checkpoint
-
-用"阻止新操作 + 排空飞行事务 + 强制刷盘"的二段式给挂载中卷拍一致快照——**不采用**,两头不落好:①对独占卷
-冗余(二段式本质就是 §4.2 的 pause 静止点,已被"pause 持有沙箱再快照"覆盖,再造一份会让 §5.C 反向依赖
-§4.2,违反子系统间不互调);②对 shared-rw 不够(N 个独立沙箱的 gofer 无共同协调者,强造一个就是把 swarm
-编排塞进引擎,§1.3 否决)。
+**Falsification: reverse-proxying direct writes into the mounting sandbox** (while a volume is mounted, reverse-
+proxying a direct write into the holding sandbox, to allow "writing from outside while mounted"). **Not adopted**:
+① this is **product convenience** rather than an engine correctness need — the engine only needs "do not tear",
+and §5.C's **refusal** suffices at a cost far below building a reverse-proxy data plane; ② a reverse proxy would
+require the engine to understand "who is mounting it, and how to reach through their gofer to write their FS",
+pulling **cross-object write orchestration** into the engine (§1.3's litmus: not register-impl / add-join-table /
+add-subscriber but changing existing structure → which should prompt "should this be in the engine at all").
+The answer: whoever wants that convenience stacks an adapter outside the engine (read the mount table → write into
+the holding sandbox through §5.E's `fs`), and the engine does not. A product platform counting that convenience
+among its own responsibilities is reasonable; the engine draws it outside the boundary, and that is **a difference
+in positioning rather than in correctness**.
 
 ---
 
-## D7. 容量配额:btrfs subvolume + squota,跨 §5.B/§5.C 共享原语
+## D6. Snapshots / clones: btrfs-native CoW, a per-backend capability
 
-机制(btrfs subvolume + squota limit)、模式选择(squota 而非完整 qgroup,及本基底改不了模式)、全栈实测
-与归属(叶子包 `internal/btrfs`,**共享的是代码不是 seam**)**都在 rootfs-overlay D6 讲清,本文不复制**
-——§5.C 的 per-volume 帽与 §5.B 的 per-sandbox upper 帽是同一个物化问题的两处应用(§3.4 容量轴),Volume
-**复用同一个包,不重造、不改其形状**。
+### D6.1 Single-node uses btrfs and does not build a userspace segment engine
 
-本节只留 Volume **自己引入**的三件事(Overlay 侧不存在,因为引擎从不快照 upper):**配额行会泄漏且是正确性
-bug**(D7.1)· **一次误 sweep 的爆炸半径**——它解释了 §5.C 每条 sweep 要求为何都是硬要求(D7.2)·
-**limit 侧:没有继承、漏设不可检出、降帽不可逆**,它定了两处契约形状(D7.3)。
+"POSIX over an object store" takes a whole machine: a WAL (a node-local change log) → periodically materialized
+into immutable manifests + content-addressed segments → a head pointer CAS, where a snapshot = referencing the same
+batch of immutable segments and a fork = rewriting segment references for CoW.
+**That entire machine is a remote backend's internal obligation and does not enter the core**: the only reason it
+exists is "an object store is not POSIX, has no durability-on-write, no reflink, and is untrusted". On single-node
+btrfs, **the filesystem itself already gives CoW** — `cp --reflink=always` has been verified to share extents (the
+same physical offset with the `shared` flag, and an explicit reflink still works even under a `nodatacow` mount) —
+and `btrfs subvolume snapshot` is moreover **whole-tree, atomic, and instantaneous** (measured: a new snapshot has
+only 16KiB of exclusive metadata and copies zero data).
 
-两条直接后果先记在此:
+So: **adopt the semantic model** (a snapshot = an immutable point in time, a fork = a CoW subvolume, both cheap at
+the metadata level) and the **capability matrix** (snapshot/fork are a per-backend capability), and **discard the
+segment/manifest implementation** — letting btrfs be the "materializer". Modelling a Volume as a **btrfs
+subvolume** makes snapshot/clone = `btrfs subvolume snapshot`, landing on **the same object** as D7's capacity cap
+(the quota being applied to the subvolume): one storage unit gets both cheap snapshots and a hard capacity cap,
+which is the strong argument for "a volume = a subvolume". **But do not read that as "one step"**: that ioctl moves
+**bytes** and does not move the **cap** (D7.3), so the merger is two operations rather than one.
 
-- **snapshot/clone 出来的卷,其 reflink 字节在 squota 下不向新卷计费**——快照廉价这一性质因此在配额语义上
-  也成立;但"一个卷占多少真实磁盘"要从节点级核算看、不能只看单卷配额(与 rootfs-overlay D6.2 里 Template
-  layer 字节同源的问题)。
-- **本引擎不是该盘配额命名空间的唯一所有者**(实测该 fs 上有 11 行外部 qgroup,OrbStack 也用;嵌套 subvol
-  实测共存无碍)——这正是 §5.C「配额行按删除时记下的 id 定位,**绝不扫行**」的前提。
+### D6.1a A snapshot's / clone's object shape: the same kind of object, with lineage, and the cap necessarily declared
 
-### D7.1 Volume 带来的新问题:squota 的配额行会泄漏,且它是正确性 bug
+Three sub-decisions which together define "what a snapshot is":
 
-§5.B 的 Overlay upper **今天不泄漏**,原因是引擎从不快照它;§5.C 要快照卷,故这是 Volume 引入的新问题。
-**泄漏的谓词不是"被快照过"**,而是:**一行泄漏 ⟺ 该单元 (i) 拥有 extent 且 (ii) 在仍有活共享者引用这些
-extent 时被删除**。实测矩阵的两条推论:
+- **A snapshot volume is an ordinary, writable Volume with no read-only marker.** The reason is word-for-word
+  isomorphic to §5.C's rejection of a "per-volume `access` field": **the cardinality is wrong** (writability is a
+  per-mount adjudication, and one volume can be shared-rw for A and shared-ro for C at once). The harder reason is
+  the property §5.C has already measured and written down — "a snapshot does not break per-volume cap semantics:
+  **the writer pays**, in both directions", where overwriting the snapshot charges only the snapshot's account and
+  leaves the source alone. That measurement **is meaningful only when a snapshot is writable**; defining a snapshot
+  as read-only would throw away a verified property and additionally require a cross-object validation on the mount
+  row's `access` (which fails §1.3's litmus: neither registering an implementation nor adding a join table, but
+  adding a field plus a cross-object check). For immutability, express it with a `shared-ro` mount row, or leave it
+  to product-layer policy.
+  - It also **contracts the mechanism**: were a snapshot an independent read-only type, there would be two seam
+    methods, two API shapes, and two teardown rules for something btrfs implements with **one** identical ioctl.
+    One shape lets `Snapshot` and `Clone` share a path (D2).
+- **The volume record carries `parent`, `REFERENCES volumes(id) ON DELETE RESTRICT`**, exactly like
+  `templates.parent` (§4.3's lineage). This is a **correctness argument rather than tidiness**: D7.1 measured that
+  "delete the sharers first, then the source, and not one row leaks", and the FK is what makes that order the
+  **only reachable** one — deleting a source with a live snapshot becomes a 409, and the quota-row leak **does not
+  arise at all** (prevention, free, introducing no new mechanism). By this engine's own criteria it passes
+  cleanly: it is §1.3's "add a join table" (self-referential here), it reuses the existing FK-violation predicate
+  (measured table- and column-agnostic in D3), and it has no state column and no materialized count ("is this
+  volume a source" is derived from whether any row points at it).
+  - **An external cautionary example pins this down** (source checked): one implementation chose **a pointer with
+    no constraint** (`ADD COLUMN ... TEXT` plus an index, no `REFERENCES`), and consequently had to hand-write
+    children checks in three separate places — and **all three are reclamation guards, with not one a deletion
+    guard**. The consequence is that the control-plane row disappears first while the bytes must remain, and since
+    every reclamation criterion is keyed on the source volume's own record, once the source row is deleted **no
+    later pass can ever find those bytes again** (its "skip reclamation if there are children" function is called
+    exactly once on the synchronous deletion path, with no periodic sweep revisiting it). Our
+    `SweepOrphanVolumes` could cover such a situation, but **it should not have to**: RESTRICT keeps it from
+    arising.
+  - **It needs a sentinel of its own**: a volume deletion blocked by a live snapshot and one blocked by a mount row
+    are **two different object relations**, and the existing `ErrInUse` message reads "template in use". This is the
+    same trap D3 already identified, recurring on a fourth FK path.
+- **`size` is required when disk is metered and is not inherited**, so both `POST /v1/volumes/{id}/snapshot` and
+  `.../clone` grow a `{size}` request body. **The substrate side has no choice left** (D7.3: there is nothing to
+  inherit); and on the policy side, inheritance looks free but is not — a cap is **a declared admission claim**
+  rather than a property of the bytes, and §3.4 stipulates "count by the declared cap" precisely because a
+  snapshot's actual bytes are about 16 KiB of metadata. Inheritance would silently double the node's declared disk
+  claim at every snapshot, something the caller never asked for; and §5.C already states that an squota cap is a
+  "**lifetime write budget**", so a unit that has written nothing yet inheriting a number is meaningless. Requiring
+  it also keeps the rule count unchanged: §6.2 already has "conditionally required per axis", and this is the same
+  rule appearing at a second and third endpoint. When the source is uncapped and the axis is unmetered, `size`
+  remains omissible, covered naturally by the existing rule.
 
-- **有没有帽与泄漏无关**(无帽的源同样漏);**被快照过但为空的源不漏**(它不拥有 extent);链中的**中间**
-  节点写过数据、且先删它,也漏(它不是链根)。
-- **先删共享者、再删源,一行都不漏。** 故**拆除次序是一条真的杠杆**,不只是缓解手段——它把回收从"清理"
-  变成"预防",且免费。
+### D6.2 A snapshot is crash-consistent by default, asymmetric with the Overlay
 
-**为什么是正确性 bug 而不是不整洁**:泄漏行本身无性能后果(60 行时枚举仍是毫秒级、无行数上限),但
-**next-free subvolume id 在挂载时从 root tree 重算,而配额树没有发言权——一行泄漏不为自己的 id 占位**。
-故一次 remount(节点重启)可以把某个泄漏行的 id 连着**它的帽**发给一个全新的存储单元:实测一个从未被设过
-任何 limit 的新单元在 3.3 MB 处撞 `ENOSPC`(另一形状:20 MiB 写入死在 11.8 MiB)。方向也可能相反(泄漏行
-带着更大的帽 ⇒ 静默超额供给),且**引擎内部无法察觉**——它读回的 limit 看起来就是这个单元自己的。
-可达性依形状而定、不普适,但既然没有任何东西为那个 id 占位,**它不能被论证掉**。
+The full statement that a Volume snapshot is **crash-consistent** by default and asymmetric with the Overlay is in
+§5.C (including the composition path to app-consistency: for an exclusive volume the caller pauses first and then
+snapshots, and shared-rw offers none). Only two things this document should keep are added here: the **root** of the
+asymmetry is that the Overlay has a **single writer** and can be paused for an at-rest read (§5.B), while a Volume
+breaks that premise (shared-rw has several writers, and one does not want to stop while mounted); and **why there is
+neither an `fsync` nor a freeze before a snapshot** (a tempting "to be safe" prelude, whose sync half is useless and
+whose freeze half is a net negative):
 
-> **`parent` + FK RESTRICT(D6.1a)把这条路从"常规"降为"backstop"。** 泄漏的必要条件是"删源时仍有活共享者",
-> 而 RESTRICT 让那次删除**在 API 上根本不可达**(→ 409)。剩下的可达路径只有两条,都不经用户意图:一次
-> **崩溃**卡在删共享者与删源之间,以及 sweep 自己按单元回收时的次序。故下面这个程序仍然必须存在、必须正确,
-> 但它守的是残余而不是主线——这也是为什么它的错误处置是"跳过并留到下轮",而不是"阻塞"。
+- **sync makes no measurable difference**: a snapshot after a sync and a bare snapshot fall in the same consistency
+  class (every capture is a complete prefix), and a bare snapshot **does not stall the guest** anyway (zero write
+  errors, unchanged write rate).
+- **`fsfreeze` and a snapshot simply cannot be composed.** Creating a snapshot is itself a **write** to the very
+  filesystem just quiesced, so the snapshot blocks **uninterruptibly** for the entire frozen window and lands only
+  after the thaw — placing it **after** the very quiesce it meant to exploit, capturing post-thaw state, for **zero
+  consistency gain** over a bare snapshot; the only actual effect is stalling the guest, plus freezing the whole
+  node's root filesystem (on a single node, volumes and engine state are often on the same btrfs).
+- **A harness constraint that comes with it**: do not wrap a snapshot inside a frozen window with `timeout` — a
+  blocking snapshot interrupted by a signal **corrupts the freeze count**, after which the thaw returns `EINVAL` as
+  if already thawed while the snapshot lands anyway (reproduced 4/4). Stepping on it makes a measuring tool's
+  manufactured failure ("the snapshot failed + the thaw failed") read as a substrate failure.
 
-**回收程序**(§5.C 要求的那条路径,mediator 侧归 `ReclaimQuotaRows`)。它与 `SweepOrphanVolumes`(回收
-孤儿字节)、`RepairVolumeCaps`(修 D7.3 的那个修复态)是**三个互相独立的入口**,只是在同一个启动位置与
-同一次 reaper tick 上被依次调用——**别把它们读成一个 sweep 的三个阶段**,三条残留的谓词、失败处置与
-可达路径都不同。每轮:
+### D6.3 Falsification: a two-phase checkpoint
 
-1. **先删共享者(快照/克隆)、再删源** —— 按上面的矩阵,该次序一行不漏。
-2. **每轮一次** `filesystem sync` 然后 `subvolume sync`(不是每单元一次)。次序是实用发现:
-   `subvolume sync` 单独用会**睡到下一次周期性 commit**,故它的耗时随 commit 周期与负载浮动、**不是一个固定属性**
-   (多次实测落在数秒到十几秒:7–16 s、19.1 s);前面先 `filesystem sync` 强制那次 commit,两者合起来在**几十毫秒**
-   量级返回(实测 14–29 ms、53 ms)。**承重的是这个量级差(约三个数量级),不是任一具体区间**:效果相同,而从
-   "等一次 commit"变成"有界"。
-3. 对本轮删掉的每个 id 读它的配额行,**先查退出码**:读失败 → **未知**,不得据此下结论;无行 → 完成;
-   **`<stale>` → destroy**(轮询谓词就是"标签恰为 `<stale>`");`<under deletion>` → 再 settle 后重试;
-   `<squota space holder>`(有活共享者)→ **留着**、下轮再说。
-4. **轮内重试上界 3 轮**,超界则留行 + warn(带 id 与标签)、下轮重试。**绝不在 EBUSY 上死转** ——
-   一个 `<squota space holder>` 可以在一个活克隆的**整个生命期**里合法地无法 destroy,故该上界不是错误路径。
+Taking a consistent snapshot of a mounted volume with a two-phase "block new operations + drain in-flight
+transactions + force a flush" — **not adopted**, since it fails at both ends: ① it is redundant for an exclusive
+volume (a two-phase protocol is in essence §4.2's pause quiescent point, already covered by "pause the holding
+sandbox then snapshot", and building a second one would make §5.C depend backwards on §4.2, violating "subsystems
+do not call each other"); ② it is insufficient for shared-rw (N independent sandboxes' gofers have no common
+coordinator, and forcing one into existence would be stuffing swarm orchestration into the engine, which §1.3
+rejects).
 
-> **转变是被条件触发的,不是被时间触发的**:共享者一死、删除一 settle,**第一次**尝试即成功;故必须轮询
-> 谓词,不能 sleep 后祈祷。活单元的标签是它的路径、每个可回收态都是 `<...>` 标记,故该谓词**不可能在运行中
-> 的单元上误触发**(另测确认:destroy 一个活单元的行返 EBUSY,且其帽强制与用量可读性不受影响)。
+---
+
+## D7. The capacity quota: a btrfs subvolume + squota, a primitive shared across §5.B/§5.C
+
+The mechanism (a btrfs subvolume + an squota limit), the choice of mode (squota rather than full qgroups, and that
+this substrate cannot change modes), the full-stack measurements, and the ownership (the leaf package
+`internal/btrfs`, where **what is shared is code rather than a seam**) **are all settled in rootfs-overlay D6 and
+are not duplicated here** — §5.C's per-volume cap and §5.B's per-sandbox upper cap are two applications of the same
+materialization problem (§3.4's capacity axis), and Volume **reuses the same package without rebuilding it or
+changing its shape**.
+
+This section keeps only the three things Volume **itself introduces** (absent on the Overlay side, because the
+engine never snapshots an upper): **quota rows leak and that is a correctness bug** (D7.1) · **the blast radius of
+one wrongful sweep** — which explains why every §5.C sweep requirement is a hard one (D7.2) · **the limit side:
+there is no inheritance, a missed cap is undetectable, and a lowering is irreversible**, which fixes two contract
+shapes (D7.3).
+
+Two direct consequences are recorded here first:
+
+- **The reflinked bytes of a volume produced by snapshot/clone are not charged to the new volume under squota** —
+  so the property that snapshots are cheap holds in quota semantics too; but "how much real disk a volume occupies"
+  must be seen from node-level accounting rather than from a single volume's quota (the same problem as Template
+  layer bytes in rootfs-overlay D6.2).
+- **This engine is not the sole owner of that disk's quota namespace** (measured: there are 11 external qgroup rows
+  on that fs, and OrbStack uses them too; nested subvolumes were measured to coexist without trouble) — which is
+  the premise for §5.C's "quota rows are located by the id recorded at deletion time and **never by scanning
+  rows**".
+
+### D7.1 The new problem Volume brings: squota's quota rows leak, and it is a correctness bug
+
+§5.B's Overlay upper **does not leak today**, because the engine never snapshots it; §5.C wants to snapshot
+volumes, so this is a new problem Volume introduces. **The predicate for a leak is not "it was snapshotted"** but:
+**a row leaks ⟺ that unit (i) owns extents and (ii) is deleted while live sharers still reference those extents**.
+Two corollaries from the measured matrix:
+
+- **Whether it has a cap is irrelevant to leaking** (an uncapped source leaks too); **a source that was snapshotted
+  but is empty does not leak** (it owns no extents); and an **intermediate** node in a chain that wrote data and is
+  deleted first also leaks (it is not the chain's root).
+- **Delete the sharers first, then the source, and not one row leaks.** So **the teardown order is a real lever**
+  rather than merely a mitigation — it turns reclamation from "cleanup" into "prevention", for free.
+
+**Why it is a correctness bug rather than untidiness**: a leaked row has no performance consequence in itself
+(enumeration is still milliseconds at 60 rows, with no row-count ceiling), but **the next-free subvolume id is
+recomputed from the root tree at mount time and the quota tree has no say — a leaked row does not reserve its own
+id**. So one remount (a node restart) can hand some leaked row's id, **together with its cap**, to a brand-new
+storage unit: measured, a new unit that never had any limit set hit `ENOSPC` at 3.3 MB (another shape: a 20 MiB
+write died at 11.8 MiB). The direction can also be the opposite (a leaked row carrying a larger cap ⇒ silent
+over-provisioning), and **the engine cannot detect it internally** — the limit it reads back looks exactly like
+this unit's own. Reachability depends on the shape and is not universal, but since nothing reserves that id, **it
+cannot be argued away**.
+
+> **`parent` + FK RESTRICT (D6.1a) demotes this path from "routine" to "backstop".** The necessary condition for a
+> leak is "deleting the source while live sharers remain", and RESTRICT makes that deletion **unreachable through
+> the API** (→ 409). The only remaining reachable paths are two, neither passing through user intent: a **crash**
+> stuck between deleting the sharers and deleting the source, and the ordering when a sweep itself reclaims by
+> unit. So the procedure below must still exist and must still be correct, but what it guards is the residue rather
+> than the main line — which is also why its failure disposition is "skip and leave it for the next round" rather
+> than "block".
+
+**The reclamation procedure** (the path §5.C requires, `ReclaimQuotaRows` on the mediator side). It and
+`SweepOrphanVolumes` (reclaiming orphan bytes) and `RepairVolumeCaps` (repairing D7.3's state) are **three mutually
+independent entry points**, merely called one after another at the same startup position and in the same reaper
+tick — **do not read them as three phases of one sweep**, since the three residues' predicates, failure
+dispositions, and reachable paths all differ. Each round:
+
+1. **Delete the sharers (snapshots/clones) first, then the source** — per the matrix above, that order leaks not
+   one row.
+2. **Once per round** run a `filesystem sync` and then a `subvolume sync` (not once per unit). The order is a
+   practical finding: `subvolume sync` used alone **sleeps until the next periodic commit**, so its duration floats
+   with the commit period and load and **is not a fixed property** (measured repeatedly at anywhere from seconds to
+   a dozen-plus: 7–16 s, 19.1 s); doing a `filesystem sync` first forces that commit, and the two together return
+   on the order of **tens of milliseconds** (measured 14–29 ms, 53 ms). **What is load-bearing is that magnitude
+   difference (about three orders), not any particular interval**: the effect is the same, but "wait for a commit"
+   becomes "bounded".
+3. For each id deleted this round, read its quota row and **check the exit code first**: a failed read → **unknown**,
+   and no conclusion may be drawn from it; no row → done; **`<stale>` → destroy** (the polling predicate is exactly
+   "the label is precisely `<stale>`"); `<under deletion>` → settle again and retry; `<squota space holder>` (live
+   sharers exist) → **leave it** for a later round.
+4. **A retry bound of 3 rounds within a round**, past which the row is left with a warning (carrying the id and the
+   label) and retried next round. **Never spin on EBUSY** — a `<squota space holder>` may legitimately be
+   undestroyable for **the entire lifetime** of a live clone, so that bound is not an error path.
+
+> **The transition is condition-triggered rather than time-triggered**: the moment the sharers die and the deletion
+> settles, the **first** attempt succeeds; so the predicate must be polled rather than slept on and prayed for. A
+> live unit's label is its path and every reclaimable state is marked `<...>`, so that predicate **cannot possibly
+> misfire on a running unit** (separately confirmed: destroying a live unit's row returns EBUSY, and its cap
+> enforcement and usage readability are unaffected).
 >
-> **一个会咬人的读取陷阱**:配额行的批量读取在并发 churn 下会**整体失败、一行都不返回**(它为每一行解析
-> 路径,而其中一个在脚下消失了;单路径形式同样会,实测频率约 1/150 —— 而那正是 sweep 运行时的条件)。
-> **把空输出当成"行已消失"的读取方会静默跳过一次 destroy,那是永久泄漏。**
+> **A read trap that will bite**: a batch read of quota rows under concurrent churn **fails wholesale and returns
+> not one row** (it resolves a path for every row, and one of them vanished underfoot; the single-path form does it
+> too, measured at about 1/150 — and that is precisely the condition while a sweep is running).
+> **A reader treating empty output as "the row is gone" silently skips a destroy, which is a permanent leak.**
 >
-> **频率随 churn 并发度上升,故 1/150 是下界而非典型值**:三路并发 churn 下实测 157/2142 ≈ **7.3%**。
-> 报错还会**指名别人的行**(`cannot find the qgroup 0/21680`),故错误串里的 id 不能用来判断是哪个单元出了
-> 问题。这条频率是 §3.4 聚合项那个开放问题的输入之一(见 [`../open-decisions.md`](../open-decisions.md)
-> "§3.4 第二项在配额读失败时该往哪边错"):它决定"读失败"是罕见到可以忽略、还是常见到必须有确定的方向。
+> **The frequency rises with churn concurrency, so 1/150 is a lower bound rather than a typical value**: under
+> three-way concurrent churn, measured 157/2142 ≈ **7.3%**. The error also **names somebody else's row**
+> (`cannot find the qgroup 0/21680`), so the id in the error string cannot be used to judge which unit had the
+> problem. This frequency is one of the inputs to that open question about §3.4's aggregate term (see
+> [`../open-decisions.md`](../open-decisions.md), "which way should §3.4's second term err when a quota read
+> fails"): it decides whether "a failed read" is rare enough to ignore or common enough to require a definite
+> direction.
 >
-> **一条同族的未来陷阱(值得在 §5.B 侧留注释)**:真正的触发条件是 **extent 共享**,不是"做过 snapshot"。
-> 实测 reflink **进来**(copy-up 的形状)不泄漏,reflink **出去**会泄漏。故一个显而易见的未来优化——让
-> Promote 用 `cp --reflink` 替换逐字节拷贝——会**每次 Promote 漏一行**,且该泄漏比那个 layer 活得更久。
+> **A future trap of the same family (worth a comment on the §5.B side)**: the real trigger is **extent sharing**,
+> not "a snapshot was taken". Measured, a reflink **inward** (copy-up's shape) does not leak while a reflink
+> **outward** does. So an obvious future optimization — having Promote use `cp --reflink` instead of a byte-by-byte
+> copy — would **leak one row per Promote**, and that leak would outlive the layer itself.
 
-### D7.2 一次误 sweep 的爆炸半径:为什么 §5.C 的每条 sweep 要求都是硬要求
+### D7.2 The blast radius of one wrongful sweep: why every §5.C sweep requirement is a hard one
 
-实测在一个**持续读写**的活 guest 底下用五种手法拿掉它的卷:**五种全部只是数据面事件**——沙箱一次都没死
-(容器仍 running、新起的 exec rc=0、runtime 无错误),故**控制面什么都看不到**,与已测的 ENOSPC 情形结构
-同形。但推论比"guest 会见 I/O 错误"这个假想的坏情况**更糟**:
+Measured by taking a volume out from under a live guest that was **continuously reading and writing**, five
+different ways: **all five are merely data-plane events** — the sandbox never died once (the container stayed
+running, a newly started exec returned rc=0, and the runtime reported no error), so **the control plane sees
+nothing**, structurally the same as the already-measured ENOSPC case. But the corollary is **worse** than the
+hypothetical bad case of "the guest sees I/O errors":
 
-| 手法 | guest 见到 | 数据结局 |
+| Method | What the guest sees | Data outcome |
 | --- | --- | --- |
-| 删掉存储单元 | 已解析过的路径**永久照用**;只有新的 lookup 报 `ENOENT`(不是 EIO、不是 ESTALE) | 写进 unlinked inode,**静默丢失** |
-| 删掉单元内容 | **零错误**;guest 立刻重建自己的文件 | **静默丢失,毫无信号** |
-| unlink 一个打开的文件 | **零错误**;经旧 fd 的读写照旧 | 经 gofer 兑现了 POSIX;fsync 不复活宿主路径 |
-| 清掉配额行的 limit | **帽被静默解除**:先在帽上撞 ENOSPC,随后写入恢复并到达 2.5 倍帽 | §3.4 记账被破,**无任何信号** |
-| 把单元 `mv` 走 | **零错误**;从不看见留在老路径上的诱饵 | gofer **跟着 inode 走**,其后的写落进被挪走的目录 |
+| Delete the storage unit | Already-resolved paths **keep working forever**; only a new lookup reports `ENOENT` (not EIO, not ESTALE) | Writes go into an unlinked inode and are **silently lost** |
+| Delete the unit's contents | **Zero errors**; the guest immediately rebuilds its own files | **Silently lost, with no signal whatsoever** |
+| unlink an open file | **Zero errors**; reads and writes through the old fd continue | The gofer delivered POSIX; fsync does not resurrect the host path |
+| Clear the quota row's limit | **The cap is silently removed**: it first hits ENOSPC at the cap, then writes resume and reach 2.5× the cap | §3.4's accounting is broken, **with no signal at all** |
+| `mv` the unit away | **Zero errors**; it never sees the decoy left at the old path | The gofer **follows the inode**, and subsequent writes land in the moved-away directory |
 
-**五臂中有三臂一个 errno 都不产生**,故"guest 会报错"不是检测路径。三条连带的硬事实:
+**Three of the five arms produce not one errno**, so "the guest will report an error" is not a detection path. Three
+hard facts come with it:
 
-- **`limit none` 是唯一一个破坏了数据完整性以外的引擎承诺的操作**,而它**没有 EBUSY 自保**(destroy 在活
-  单元上有:返 EBUSY)。这正是 §5.C 要求"配额行按删除时记下的 id 定位、绝不扫行"的原因——扫行的失败形态
-  是一个无帽的活卷 + 零信号。
-- **误 sweep 一个活单元连它想回收的空间都拿不到**:删除只是**排队**(gofer 持着 fd,btrfs 就回收不了
-  extent),而**配额行立即消失**——即记账先消失、字节还在,故"sweep 回收了 N 字节"在 sweep 时不可观测。
-- **同一个沙箱里两个进程会对"卷还能不能用"给出不同答案**:新进程没有缓存的 dentry,故在老进程仍写得通的
-  地方得 `ENOENT`。
-- **恢复是"可恢复但数据全失"**,且这个结论**依赖 `Materialize` 是 create-if-absent**:源不存在时 runsc
-  硬失败、不会静默建目录;把单元重新建成空的则干净重启。
+- **`limit none` is the only one of these that breaks an engine promise beyond data integrity**, and it **has no
+  EBUSY self-protection** (destroy does, on a live unit: it returns EBUSY). That is exactly why §5.C requires
+  "quota rows are located by the id recorded at deletion time and never by scanning rows" — the failure mode of
+  scanning is an uncapped live volume plus zero signal.
+- **Wrongly sweeping a live unit does not even reclaim the space it wanted**: the deletion is only **queued** (the
+  gofer holds fds, so btrfs cannot reclaim the extents) while **the quota row disappears immediately** — that is,
+  the accounting goes first and the bytes remain, so "the sweep reclaimed N bytes" is unobservable at sweep time.
+- **Two processes in the same sandbox will give different answers about whether the volume still works**: a new
+  process has no cached dentry and gets `ENOENT` where an old process can still write.
+- **Recovery is "recoverable but all data lost"**, and that conclusion **depends on `Materialize` being
+  create-if-absent**: when the source does not exist runsc fails hard rather than silently creating a directory,
+  and recreating the unit empty gives a clean restart.
 
-### D7.3 帽的 limit 侧:没有继承,漏设不可检出,降帽不可逆
+### D7.3 The limit side of the cap: no inheritance, a missed cap is undetectable, and a lowering is irreversible
 
-D7 以上各节讲的都是**用量**侧(哪些字节记给谁)。**limit 侧是另一半,且它的结论决定了两处契约形状**
-(D2 的 `Snapshot`/`Clone` 签名、§5.C 的卷帽写点)。三条实测:
+Everything above in D7 concerns the **usage** side (which bytes are charged to whom). **The limit side is the other
+half, and its conclusions fix two contract shapes** (D2's `Snapshot`/`Clone` signatures and §5.C's volume-cap write
+point). Three measurements:
 
-- **没有任何继承。** 快照得到一条**全新的、`max_referenced = none`** 的配额行,四种形状皆然(rw 快照 /
-  `-r` 只读快照 / 无帽源的快照 / 给快照设帽后再快照它)。且是**写入验证过的**,不是读数:往无帽快照灌
-  96 MiB(源帽的 3 倍)全部落盘,而同一形状下显式设了帽的负向对照在帽上精确失败——故 `none` 是真的没有帽,
-  不是读错。两个方向的隔离也确认:往快照灌 96 MiB 期间源的 `referenced` 一动没动;源钉死在帽上时往快照写照旧成功。
-  - **`btrfs subvolume snapshot -i <qgroupid>` 看着像答案,不是。** squota 下它被接受,但它设的是**成员关系**
-    不是帽:新单元自己的行仍是 `none`,而 level-1 父上的 limit **确实强制**。也就是说它是**所有成员共享的
-    天花板**,表达不了"这个卷得 N",且一个成员耗尽会让**兄弟卷**一起 `ENOSPC`。它在单卷测试里会像能用,
-    在生产里炸邻居——故明确排除。
-- **漏设帽是静默的、事后不可检出的。** 一个"快照了、记录也写了 `size=N`、但忘了设帽"的引擎:写入方可以灌
-  远超 N 的字节,零错误、无生命周期事件、控制面一无所知。更糟的是 `Usage()` 读回的 `limit=0` 与**故意无帽**
-  的卷**逐字节相同**(`internal/btrfs` 两个方向上都把 `none` ↔ `0` 映射),所以没有任何对账、sweep 或
-  inspect 能在事后发现这个分歧。**这把不变量逼到写时**:设帽必须是创建字节的那次 backend 操作的一部分。
-  - 它是 D7.1 的**镜像,且严格更坏**:D7.1 要靠 remount 落在特定 id 上才触发(形状依赖),而漏设帽
-    **每次快照都触发、无前置条件**。
-  - 由此产生一个**承重的崩溃窗口**:帽必然是快照 ioctl 之后的第二次调用,故"快照已存在、帽还没设"是一个
-    真实中间态。在飞集合(`building`)必须覆盖它,且 `RepairVolumeCaps`(以及 adopt 路径)要把"卷记录存在、
-    配额行是 `none`"当作**修复态**而不是合法态——否则一次崩溃留下的就是一个已登记、活着、无帽的卷。
-    它是**自己的入口**,不是 `SweepOrphanVolumes` 里的一个分支(D7.1 的三入口)。
-- **降帽到低于当前用量会把单元卡死,且不可逆。** 基底接受这次降帽且**零校验**;既有字节安然无恙(读回逐字节
-  相同);但其后 `mkdir` / 建文件 / **把已有文件 truncate 成 0** 全返 `ENOSPC`(只有 unlink 还活着),而且
-  **配额 ioctl 自己也返 ENOSPC**——帽既不能撤、也不能抬,**连抬到高于当前用量都不行**。唯一出路是删字节删到
-  用量落回帽下(条件触发,不是时间触发:逐级降低用量验证过,只要还在帽上就一直拒)。边界情形:`limit == 用量`
-  被接受并存下,但随后一次写就 `ENOSPC`——故它意思是**满**,不是"刚好够"。
-  - **故卷帽的写点必须拒绝这种降帽(400),判据是严格不等式 `size > 当前用量`。** 理由不是基底禁止(它乐于
-    接受),而是**接受会造出一个控制面出不来的状态**:修复要经由删 guest 的字节,而 §6 里没有任何东西允许
-    引擎代调用方做这件事。§3.4 的"降帽不需要重过准入门"因此配了一条 caveat。
+- **There is no inheritance whatsoever.** A snapshot gets a **brand-new quota row with `max_referenced = none`**, in
+  all four shapes (a rw snapshot / a `-r` read-only snapshot / a snapshot of an uncapped source / snapshotting a
+  snapshot after giving it a cap). And that is **verified by writing** rather than read off: pouring 96 MiB (3× the
+  source's cap) into an uncapped snapshot all landed, while the negative control with an explicitly set cap failed
+  precisely at the cap in the same shape — so `none` really is no cap rather than a misread. Isolation in both
+  directions is confirmed too: while pouring 96 MiB into the snapshot the source's `referenced` did not move at all,
+  and with the source pinned at its cap, writes to the snapshot still succeeded.
+  - **`btrfs subvolume snapshot -i <qgroupid>` looks like the answer and is not.** Under squota it is accepted, but
+    what it sets is **membership** rather than a cap: the new unit's own row is still `none`, while a limit on the
+    level-1 parent **is** enforced. That is, it is **a ceiling shared by all members**, cannot express "this volume
+    gets N", and one member exhausting it makes its **sibling volumes** hit `ENOSPC` too. It would look usable in a
+    single-volume test and blow up the neighbours in production — hence explicitly excluded.
+- **A missed cap is silent and undetectable after the fact.** An engine that "snapshotted, wrote the record with
+  `size=N`, and forgot to set the cap": the writer can pour in far more than N bytes, with zero errors, no lifecycle
+  event, and the control plane none the wiser. Worse, the `limit=0` that `Usage()` reads back is **byte-identical**
+  to a **deliberately uncapped** volume (`internal/btrfs` maps `none` ↔ `0` in both directions), so no
+  reconciliation, sweep, or inspect can discover the discrepancy afterwards. **That forces the invariant to write
+  time**: setting the cap must be part of the same backend operation that creates the bytes.
+  - It is D7.1's **mirror image, and strictly worse**: D7.1 needs a remount to land on a particular id to trigger
+    (shape-dependent), whereas a missed cap **triggers at every snapshot, with no precondition**.
+  - It produces a **load-bearing crash window**: the cap is necessarily a second call after the snapshot ioctl, so
+    "the snapshot exists, the cap is not yet set" is a real intermediate state. The in-flight set (`building`) must
+    cover it, and `RepairVolumeCaps` (and the adopt path) must treat "the volume record exists, the quota row is
+    `none`" as a **repair state** rather than a legal one — otherwise what a crash leaves behind is a registered,
+    live, uncapped volume. It is **its own entry point** rather than a branch inside `SweepOrphanVolumes` (D7.1's
+    three entry points).
+- **Lowering the cap below current usage wedges the unit, irreversibly.** The substrate accepts the lowering with
+  **zero validation**; the existing bytes are unharmed (they read back byte-identical); but afterwards `mkdir` /
+  creating a file / **truncating an existing file to 0** all return `ENOSPC` (only unlink still works), and **the
+  quota ioctl itself returns ENOSPC** — so the cap can neither be removed nor raised, **not even raised above
+  current usage**. The only way out is deleting bytes until usage falls back below the cap (condition-triggered
+  rather than time-triggered: verified by lowering usage step by step, and it keeps refusing as long as it is at
+  the cap). The boundary case: `limit == usage` is accepted and stored, but the very next write returns `ENOSPC` —
+  so it means **full**, not "just enough".
+  - **So a volume cap's write point must refuse such a lowering (400), with the strict inequality
+    `size > current usage` as the criterion.** The reason is not that the substrate forbids it (it accepts it
+    happily) but that **accepting it manufactures a state the control plane cannot get out of**: repair would have
+    to go through deleting the guest's bytes, and nothing in §6 permits the engine to do that on a caller's behalf.
+    §3.4's "a lowering need not re-run the admission gate" therefore carries a caveat.
 
-### D7.4 guest 侧 statfs 为什么不反映帽
+### D7.4 Why guest-side statfs does not reflect the cap
 
-用户可见语义(含实测数字与"能诚实投影的后端"那条义务)在 §5.C;本节只留它的根因与外部佐证。
+The user-visible semantics (including the measured figures and the obligation on "a backend able to project it
+honestly") are in §5.C; this section keeps only the root cause and the external corroboration.
 
-**根因**:btrfs squota **没有 statfs 投影**,故 guest 看到的是宿主整盘数字的**忠实透传**——不是 sentry
-fabrication(`f_type` 是 gofer 的而非 btrfs 的,即这条数字根本没经过帽)。这与 §5.B 的"guest 侧数字不可用于
-容量核算"是同一条规则的另一个方向,但它是 **guest 可观测的意外**。**一个独立的外部实现踩了同一个坑**
-(其挂载卷上报约 4.6 EB 可用,成因不同——疑似网络 FS 代理——症状同类),故这不是本基底的偶然。
+**The root cause**: btrfs squota has **no statfs projection**, so what the guest sees is a **faithful pass-through**
+of the host's whole-disk numbers — not a sentry fabrication (`f_type` is the gofer's rather than btrfs's, i.e. that
+number never passed through the cap at all). This is the other direction of the same rule as §5.B's "guest-side
+numbers may not be used for capacity accounting", but it is **an observable surprise for the guest**. **An
+independent external implementation stepped on the same thing** (its mounted volume reporting about 4.6 EB
+available, for a different cause — apparently a network-FS proxy — with a symptom of the same class), so this is not
+an accident of this substrate.
 
-故本节挣到一条比"不承诺 statfs 反映帽"更强的陈述:**在 squota 上它确定不反映**——这不是未承诺,是已知为假。
+So this section earns a statement stronger than "we do not promise statfs reflects the cap": **on squota it
+definitely does not** — that is not an unmade promise but a known falsehood.
 
 ---
 
-## D8. 契约边界外待办(登记 [`open-decisions.md`](../open-decisions.md),不在本文拍板)
+## D8. Open items outside the contract boundary (registered in [`open-decisions.md`](../open-decisions.md), not settled here)
 
-以下是设计已定、但**具体取值 / 落地形态未定**的边界项(产品层策略,或落 §6 时定):
+The following are boundary items whose design is settled but whose **concrete value / landing shape is not**
+(product-layer policy, or to be fixed when §6 lands):
 
-- **独占卷的抢占 / 强制 detach 策略**(D4):默认独占直到 destroy/evict;要不要 admin 强制 detach、抢占
-  优先级——策略,大概率产品层。
-- **直连变更 vs live-ro reader 的准入细节**(D5 边界):有 live-**ro** 挂载时允许直连写会让 ro reader 的
-  gofer 缓存与后端不 coherent;要不要加告警 / 版本戳 / 拒绝,精度问题。
-- **snapshot 的一致性标注如何进 §6 契约**(D6):API 是否显式标注"本快照 crash-consistent"——落 §6 时定。
-  (只剩标注的措辞;"继承 quota"不是开放项,`size` 必填见 D6.1a / D7.3。)
-- **远端 backend 的落地形态**(D1/D2/D6):S3 / NFS backend 何时、以何形状落;其内部(host-FUSE 前端、
-  完整 FUSE 会话的 POSIX 接口、以及若接对象存储则 WAL/manifest/segment/内容寻址/加密/GC 那一整套)
-  **全封在该 backend 内**,不进核心——本文只确保 seam 形状容得下它。**D2 的 handle 形状是按"宿主 FUSE
-  挂点能经 gofer 代理"这一条已验事实推理得出的,FUSE 臂只实测了读/枚举穿透(D0),写路径与真实远端
-  后端未测**。
-  - 一条对**任何**未来 remote 臂成立的教训(来自一个分布式参考实现的失效,机制不用抄——我们单机、store
-    即权威、无 split-brain):**让字节在所有权声明提交之前不可达,且绝不让两个 epoch 共用一个 key**。
-    放在写之后的 CAS 拦不住两个写者算出逐字节相同的 key;而"payload 里存了校验和"救不了它,因为同一个
-    写者会把两边都改成互相自洽。
+- **A preemption / force-detach policy for an exclusive volume** (D4): exclusivity is held by default until
+  destroy/evict; whether an admin force-detach or a preemption priority should exist is policy, most likely the
+  product layer's.
+- **The admission detail for a direct mutation vs a live-ro reader** (D5's boundary): allowing a direct write while
+  a live-**ro** mount exists leaves the ro reader's gofer cache incoherent with the backend; whether to add a
+  warning / a version stamp / a refusal is a question of precision.
+- **How a snapshot's consistency annotation enters the §6 contract** (D6): whether the API explicitly annotates
+  "this snapshot is crash-consistent" — to be fixed when §6 lands. (Only the annotation's wording is left;
+  "inheriting the quota" is not an open item, and `size` being required is in D6.1a / D7.3.)
+- **The landing shape of a remote backend** (D1/D2/D6): when and in what shape an S3 / NFS backend lands; its
+  internals (a host-FUSE frontend, a complete FUSE session's POSIX interface, and — if it fronts an object store —
+  the whole WAL/manifest/segment/content-addressing/encryption/GC machine) are **all sealed inside that backend**
+  and do not enter the core; this document only ensures the seam's shape has room for it. **D2's handle shape was
+  reasoned from the one verified fact that a host FUSE mount point can be proxied through the gofer, and the FUSE
+  arm has only its read/enumerate penetration measured (D0), with the write path and a real remote backend
+  unmeasured.**
+  - One lesson that holds for **any** future remote arm (from a distributed reference implementation's failure —
+    the mechanism need not be copied, since we are single-node with the store as the authority and no split-brain):
+    **keep the bytes unreachable until the ownership claim is committed, and never let two epochs share one key.**
+    A CAS placed after the write cannot stop two writers computing byte-identical keys; and "a checksum stored in
+    the payload" does not save it, because the same writer will make both sides self-consistent with each other.
 
-(直连 import/export 的 seam 归属**不在本表**:它已定形,见 D5.1。)
+(The seam ownership of direct import/export is **not in this table**: it is settled, see D5.1.)
 
 ---
 
-## D9. 三条与参考实现的分歧
+## D9. Three divergences from the reference implementations
 
-1. **按 ID 寻址,不按 name。** 一个参考实现的挂载项**按卷 name 寻址**,且其 SDK 手里握着完整卷对象(含 ID)
-   时仍然只发 name。这与 §6.2「对外一律 Volume ID 寻址」正面相左,而我们有独立理由(§3.1.1 对内也 ID 寻址
-   是同一条规则的内部延伸)。**保持 ID 寻址。**
-2. **我们有而两个参考实现都没有的三项**:只读挂载 / 任何形式的独占或租约 / per-volume 容量帽。特别是容量帽
-   ——两个实现都没有任何字节上限字段,其中一个的容量甚至是**虚拟的**(`statfs` 硬编码 4 TiB,文档明说那"不是
-   存储分配、不是硬配额、也不是节点文件系统容量"),配额只在 team 级、且是**事后测量**;而我们实测 btrfs
-   squota 兑现的是**精确到帽的硬 `ENOSPC`**(精度 ~0.05%,rootfs-overlay D6.2)。故 D8 的这几条**没有外部压力
-   要求砍掉**——承重的是"硬配额 vs team 级事后测量"这个性质差,不是精度的具体值。
-   (那个精度数字**只是量级证据、不是可复现指标**,效力见 D6.2 该处。)
-   - **快照/克隆不在这张缺口清单上**:其中一个实现两者都有真实实现(snapshot 是独立表、clone 是同类型 +
-     源指针),而那两处实现细节反过来成了 D6.1a 最有力的两条论据(快照该不该是独立类型、`parent` 该不该
-     带 FK),见该节。
-   - 一个**值得记下的形状**(若将来要委托直连访问):给每个卷发一个独立作用域的 token,作为其内容数据面
-     唯一接受的凭证,且列表接口**故意不返回它**——这把"可以枚举卷"与"可以读写这个卷的字节"干净分开。
-     那个实现缺轮转/过期(token 在卷的整个生命期内静态、不销毁卷无法吊销),**缺的这半不值得一起抄**。
-3. **第三条方向相反:直连内容访问的**能力**上两者与我们一致,机制上不一致。**(源码已核对。)
-   两者都提供**不需要任何沙箱**的宿主侧卷内容读写:一个是 orchestrator 上 9 个 RPC 的独立服务(create/delete
-   + dir/file/path 两类,文件走 1 MiB 分块**流式**双向,请求只带 `{volume_id, volume_type, team_id}` + 路径,
-   签名里根本没有沙箱);另一个把同一套能力做成 HTTP 文件 API,并在代码里明说它**必须**能在没有活沙箱时工作
-   ——它的卷记录带一对默认 POSIX uid/gid 字段,**存在的理由就是"没有活沙箱可以提供身份"**。这条汇合不是巧合:
-   一个生命周期独立于沙箱的对象,内容进出却依赖沙箱,那它的独立性只在记录层面(D5.1)。
-   - **但机制上我们不抄。** 其中一个为路径限定付的是**每请求一个新 mount namespace + bind + `pivot_root`**
-     (还要 root、要 `LockOSThread` 的线程所有权协议),同机实测比 `openat2(RESOLVE_IN_ROOT)` 贵 **342×**
-     (两个数字见 D5.1),且要特权。它们的形状不是"安全需要这么贵",是那份代码早于(或忽略了)
-     `RESOLVE_IN_ROOT`。**抄能力,不抄机制。**
-   - **两者的另一半我们明确不抄:它们都没有在这条路径上放任何与挂载的协调。** 一个的宿主侧写与 guest 的活
-     NFS 挂载各自独立打开同一棵树、无锁无租约无版本戳(两处调用点都已核对);另一个的删除是"删行 + 返 204 +
-     一个游离 goroutine 去删字节,注释写着『失败了以后再清』",而**那个『以后』的清理程序在整个仓库里不存在**
-     (已按 cron / 周期任务 / sweeper 逐类搜过)。我们在同一处放**写入 regime 不变量 + in-flight 标记**
-     (D5)与**两个 sweep 面**(D7)。这是同一个能力上两种完全不同的完成度,**差别正是引擎该守的那部分**。
+1. **Addressed by ID, not by name.** One reference implementation's mount entries are **addressed by volume name**,
+   and its SDK sends only the name even while holding the complete volume object (ID included). That is directly at
+   odds with §6.2's "outwardly everything is addressed by Volume ID", and we have an independent reason (§3.1.1's
+   internal ID addressing is the same rule extended inward). **Keep ID addressing.**
+2. **Three things we have that both reference implementations lack**: read-only mounts / exclusivity or leases in
+   any form / a per-volume capacity cap. The capacity cap especially — neither implementation has any byte-ceiling
+   field, and one's capacity is even **virtual** (`statfs` hardcoded to 4 TiB, with its documentation stating plainly
+   that this is "not a storage allocation, not a hard quota, and not the node filesystem's capacity"), with quotas
+   only at team level and **measured after the fact**; whereas we measured btrfs squota delivering a **hard `ENOSPC`
+   precise to the cap** (precision ~0.05%, rootfs-overlay D6.2). So D8's items are **under no external pressure to
+   be cut** — what is load-bearing is the qualitative difference between "a hard quota" and "team-level
+   after-the-fact measurement", not the precision's particular value.
+   (That precision figure is **evidence of magnitude only and not a reproducible indicator**; its force is
+   described at that point in D6.2.)
+   - **Snapshot/clone is not on this gap list**: one implementation has real implementations of both (a snapshot is
+     a separate table, a clone is the same type plus a source pointer), and those two implementation details became
+     D6.1a's two strongest arguments in reverse (whether a snapshot should be an independent type, and whether
+     `parent` should carry an FK) — see that section.
+   - One **shape worth recording** (should delegated direct access ever be wanted): issue each volume an
+     independently scoped token as the only credential its content data plane accepts, with the list interface
+     **deliberately not returning it** — which cleanly separates "may enumerate volumes" from "may read and write
+     this volume's bytes". That implementation lacks rotation/expiry (the token is static for the volume's whole
+     lifetime and cannot be revoked without destroying the volume), and **that missing half is not worth copying
+     along with it**.
+3. **The third points the other way: on the direct content access *capability* both agree with us, and on the
+   mechanism they do not.** (Sources checked.)
+   Both provide host-side reading and writing of volume content **requiring no sandbox at all**: one is a separate
+   service of 9 RPCs on the orchestrator (create/delete + two families for dir/file/path, with files streaming
+   bidirectionally in 1 MiB chunks, and requests carrying only `{volume_id, volume_type, team_id}` plus a path, with
+   no sandbox in the signature at all); the other makes the same capability an HTTP file API and states in its code
+   that it **must** work when no sandbox is live — its volume record carries a pair of default POSIX uid/gid fields
+   **whose reason for existing is precisely that "there is no live sandbox to supply an identity"**. This convergence
+   is no coincidence: for an object whose lifecycle is independent of a sandbox, if content can only enter and leave
+   through a sandbox then its independence is only at the record level (D5.1).
+   - **But we do not copy the mechanism.** One of them pays for path confinement with **a fresh mount namespace + a
+     bind + `pivot_root` per request** (which also requires root and `LockOSThread`'s thread-ownership protocol),
+     measured on the same machine at **342×** the cost of `openat2(RESOLVE_IN_ROOT)` (both figures in D5.1), and
+     privileged. Their shape is not "security has to cost this much" but code that predates (or overlooked)
+     `RESOLVE_IN_ROOT`. **Copy the capability, not the mechanism.**
+   - **We explicitly do not copy their other half either: neither puts any coordination with mounts on this path.**
+     One's host-side writes and the guest's live NFS mount independently open the same tree with no lock, no lease,
+     and no version stamp (both call sites checked); the other's deletion is "delete the row, return 204, and let a
+     detached goroutine delete the bytes, with a comment saying 'clean it up later if it fails'" — and **that
+     'later' cleanup program does not exist anywhere in the repository** (searched by category: cron, periodic
+     tasks, sweepers). At the same place we put **the write-regime invariant + an in-flight marker** (D5) and **two
+     sweep faces** (D7). This is the same capability at two completely different degrees of completion, **and the
+     difference is exactly the part the engine should hold**.
