@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  # The cheap gate: builds and unit tests, no substrate required
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - name: Build all packages
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Cross-compile check (amd64)
+        run: GOARCH=amd64 go build ./...
+
+      - name: Run unit tests
+        run: go test ./...
+
+      - name: Verify reproducible builds
+        run: make verify-reproducible
+
+  # The substrate suite: needs root, runsc, btrfs, and real kernel features.
+  # Runs on self-hosted runner with the prerequisites installed.
+  substrate:
+    runs-on: [ self-hosted, linux, btrfs, runsc ]
+    needs: build-and-test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - name: Run substrate suite
+        run: sudo env "PATH=$PATH" "HOME=$HOME" go test -tags substrate -count=1 -p 1 ./...
+
+      - name: Run drainrace tests
+        run: sudo env "PATH=$PATH" "HOME=$HOME" go test -tags 'substrate,drainrace' -count=1 -p 1 ./internal/lifecycle
+
+      - name: Run quotachurn tests
+        run: sudo env "PATH=$PATH" "HOME=$HOME" go test -tags 'substrate,quotachurn' -count=1 -p 1 ./internal/btrfs
