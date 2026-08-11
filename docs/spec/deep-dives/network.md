@@ -1,754 +1,1087 @@
-# Network 深挖:为什么强制只能在引擎内,而收窄之外的一切都在引擎外
+# Network deep dive: why enforcement can only live inside the engine, and everything outside narrowing lives outside it
 
-> **定位:[`§5.D`](../subsystems.md)(spec,导航见 [`SPEC.md`](../SPEC.md))的网络深挖文档,并涉及
-> [`§2.1`/`§2.4`](../SPEC.md) 安全支柱、[`§5.A`](../subsystems.md) provider 契约、[`§4`](../model.md)
-> mediator 归属。** spec §5.D 定边界(Network 持声明 + 生成抽象规则集,渲染与安装归 §5.A,应用层
-> 行为不在引擎内);本文展开那条边界**为什么落在这里**——判据是 enforceability locus(哪一侧在物理上
-> 才能强制)——并给出声明形状的机制约束、要守的 invariant,以及必须继承的实测。
+> **Position: the network deep dive for [`§5.D`](../subsystems.md) (spec; navigation in
+> [`SPEC.md`](../SPEC.md)), and it touches [`§2.1`/`§2.4`](../SPEC.md)'s security pillars,
+> [`§5.A`](../subsystems.md)'s provider contract, and [`§4`](../model.md)'s mediator ownership.**
+> Spec §5.D fixes the boundary (Network holds the declaration + generates an abstract rule set;
+> rendering and installation belong to §5.A; application-layer behavior is not inside the
+> engine); this document develops **why the boundary falls exactly there** — the criterion is
+> enforceability locus (which side can physically enforce) — and gives the mechanical constraints
+> on the declaration's shape, the invariants that must be held, and the measurements that must be
+> inherited.
 >
-> **编号约定:** 本文自己的节用 `D` 前缀(D1、D4.2…);`§` 一律指 spec 的全局章节(§5.D 等),两套不混。
+> **Numbering convention:** this document's own sections carry a `D` prefix (D1, D4.2…); a bare
+> `§` always refers to a spec global section (§5.D etc.); the two are never mixed.
 
 ---
 
-## D0. 一句话结论
+## D0. The conclusion in one sentence
 
-一个网络关卡看起来是一件事,实际是**两件失败后果、词汇表、部署位置全都不同的事**:**做决定并搬字节的
-那个进程**,和**创建 namespace 因而唯一能强制的那一侧**。引擎**只是后者**:
+A network checkpoint looks like one thing, but is actually **two things whose failure
+consequences, vocabulary, and deployment position are all different**: **the process that
+decides and moves bytes**, and **the side that creates the namespace and is therefore the only
+one that can enforce**. The engine **is only the latter**:
 
-| | 引擎(本 spec) | 引擎外 |
+| | The engine (this spec) | Outside the engine |
 | --- | --- | --- |
-| 是什么 | 创建 netns 的那一侧:持有声明 + 生成抽象规则集 | 终结连接、按应用层信息决定去哪、搬字节的进程 |
-| 词汇表 | ID、IP、CIDR、port、proto、netns、veth、`iifname`、DNAT | 字节、SNI、Host、上游地址、不透明字符串 |
-| 失败后果 | **边界失效**(不可绕过性破产) | 该连接 fail-closed |
-| 进程基数 | **引擎贡献零个进程** | 由那一层自己决定 |
+| What it is | The side that creates the netns: holds the declaration + generates the abstract rule set | The process that terminates the connection, decides where to go from application-layer information, and moves bytes |
+| Vocabulary | ID, IP, CIDR, port, proto, netns, veth, `iifname`, DNAT | Bytes, SNI, Host, upstream address, opaque strings |
+| Failure consequence | **The boundary fails** (unbypassability is bankrupt) | That one connection fails closed |
+| Process count | **The engine contributes zero processes** | Decided by that layer itself |
 
-**分界判据是 enforceability locus,不是"引擎想管什么"**:一条控制**只有创建 placement 的那一侧能强制**
-吗?是 → 必须在引擎内(D1 的四条);否 → 不在引擎内。这条判据同时答完了"代理 / 凭证 / 鉴权 / 多租户
-归谁"——四样都不在引擎内,因为四样都不需要创建 namespace 的那一侧来做。
+**The dividing criterion is enforceability locus, not "what the engine wants to manage"**: does a
+control **only the side that creates the placement have the power to enforce**? Yes → it must be
+inside the engine (D1's four items); no → it is not inside the engine. This one criterion also
+answers "who owns proxying / credentials / auth / multi-tenancy" — all four are outside the
+engine, because none of the four needs the side that creates the namespace to do it.
 
-引擎因此**不给引擎外那一层命名**。spec 里它只以一个地址的形式出现(`egress.via[].endpoint`)——这不是
-回避,是"引擎只看到一条到某端点的 TCP 流"的直接后果。(§6 已有的"控制面 / 数据面"是**另一对**词,指
-REST vs Connect-RPC 的外沿投影,与本文无关,勿混。)
-
----
-
-## D1. 四件事只有引擎能做(enforceability locus 的逐条应用)
-
-这四条不是"引擎挑走的职责",是**外部进程在物理上做不到**的事:
-
-1. **规则集的渲染与安装必须与 placement 原子。** 规则要插在"建 netns/veth 之后、隔离单元跑起来之前"。
-   外部进程**没有这个钩子点**——它最早只能在"沙箱已经在跑"之后观察到它,而那之间的任何窗口都是
-   fail-open 窗口。`Adopt` / `ReclaimOrphans`(§5.A)同理:netns 是崩溃幸存的宿主态,规则集也是。
-2. **入接口(`iifname`)绑定**(按**名字**,不是 ifindex —— `iif` 的 fail-open 见 D5 ⑫)**。** 只有建 netns
-   的那一侧知道**哪个 veth 属于哪个沙箱**。这是支柱④ 的物化,
-   而它不可外迁:一个外部进程看到的是包,而包里的源地址是 guest 可写的(D5 ③ 实测)。
-3. **L0 地板,两跳都钉。** 只有引擎知道沙箱地址空间的 CIDR 与自己所在宿主的地址。若引擎只**公布**一份
-   清单让外部进程自己遵守,那个进程当场成为被信任方——也就成 confused deputy(D4.2)。
-4. **规则顺序。** publish 的反向流不得成为出站路径;deny 必须最后兜底;"免于被自己的规则再次命中"的
-   放行必须在引流规则之前、而地板 drop 必须在它之上(D4.2)。**只有写整个规则集的一方能保证顺序**,
-   而顺序写错的症状是"能通",不报错。
-
-> **准确表述**:**声明**从引擎外来,**强制机制**在引擎内且不可外迁。引擎不是在"管理网络"(产品义),
-> 它是唯一**能强制**的那一方——因为它是创建 namespace 的那一方。
-
-**反面同样要说清:收窄之外的一切都不在引擎内。** 按 SNI 选后端、换凭证、终结 TLS 并重新发起、按调用方
-校验一个 token——这些都不需要上面任何一条能力,故它们不在引擎内,引擎里也**不存在承载它们的 seam**。
-这不是"暂缓实现",是边界(§1.4 凭证整族永久排除)。
-
-**连带一条,免得把"引擎不认识凭证"读成缺口**:§1.4 已给出"引擎的存储语义与保管秘密矛盾"这条结论,它的
-可操作面是——模板里放引擎外那个端点的地址 + 一个能让 SDK 的凭证探测通过的值,两样对引擎都不是秘密,
-也就无所谓被它存下来。**真凭证是靠构造挡在模板外的,不是靠引擎保管**。
+The engine therefore **does not name the layer outside it**. In the spec it appears only as an
+address (`egress.via[].endpoint`) — not evasion, but the direct consequence of "the engine sees
+only one TCP flow to some endpoint". (§6's existing "control plane / data plane" is **a different
+pair of terms**, denoting the REST vs Connect-RPC outer-edge projection — unrelated to this
+document, don't conflate the two.)
 
 ---
 
-## D2. 承重墙是 IP 层,域名不进引擎
+## D1. Four things only the engine can do (enforceability locus applied item by item)
 
-引擎的强制只用 IP / 端口 / 协议求值。域名层的控制**不在引擎内**,理由是**代价**,不是不可行——这一点
-必须说准,因为"不可行"是错的:
+These four are not "responsibilities the engine chose to take" — they are things an **external
+process is physically unable to do**:
 
-- **域名 churn 是可解的,而且有人解了。** 一条走通的路是:一个 DNS 代理拦下解析、把结果写进一个动态
-  放行集,条目按 DNS TTL 加一点余量过期,再叠一个连接活性刷新器(有活跃连接的地址定期重新盖章)。
-  机制成立。
-- **但它要求引擎内长出三样东西**:一个 DNS 代理、一个与连接跟踪耦合的 TTL 刷新器、一份会 churn 的
-  产品域名清单。第三样直接破 §1.1(引擎持有一份产品清单),前两样让引擎变成 DNS 客户端。**破的是
-  §1.1,不是可行性。**
-- 顺带一条那条路自带的语义瑕疵:活性刷新让**一个授权活得比赋予它的那个名字更久**。
-- **同一面墙的另一侧**:成熟的可移植网络策略层同样无法表达 hostname,要域名收窄必须外挂一个平台特异的
-  机制。这是"域名不属于可移植层"的独立确认。
+1. **Rendering and installing the rule set must be atomic with placement.** The rules must be
+   inserted in the window between "the netns/veth is built" and "the isolation unit starts
+   running". An external process **has no hook point there** — the earliest it can observe
+   anything is after "the sandbox is already running", and any window in between is a fail-open
+   window. `Adopt` / `ReclaimOrphans` (§5.A) are the same case: the netns is crash-surviving host
+   state, and so is the rule set.
+2. **Binding the ingress interface (`iifname`)** (by **name**, not ifindex — `iif`'s fail-open is
+   in D5 ⑫). Only the side that creates the netns knows **which veth belongs to which sandbox**.
+   This is the materialization of pillar ④, and it cannot be moved outside: an external process
+   sees only packets, and the source address in a packet is guest-writable (measured, D5 ③).
+3. **The L0 floor, with both hops pinned.** Only the engine knows the sandbox address space's CIDR
+   and its own host's address. If the engine merely **published** a list for an external process
+   to obey on its own, that process would instantly become a trusted party — a confused deputy
+   (D4.2).
+4. **Rule ordering.** A publish's reverse flow must not become an egress path; deny must be the
+   final catch-all; the allowance for "exempt from being hit again by one's own rules" must sit
+   before the steering rules, and the floor's drop must sit above it (D4.2). **Only the party that
+   writes the whole rule set can guarantee the ordering**, and the symptom of a wrong ordering is
+   "it works" — no error.
 
-要"只准某个域名"这种收窄,用 `via[]` 把流量送给引擎外的进程按应用层信息判(§5.D)。
+> **The precise statement**: the **declaration** comes from outside the engine; the **enforcement
+> mechanism** lives inside the engine and cannot be moved out. The engine is not "managing the
+> network" (a product-layer sense); it is the only party that **can** enforce — because it is the
+> party that creates the namespace.
 
-**域名层的强度随声明取值变,故 spec 按取值陈述、不写成全局结论。** `default:deny` + 单一
-`egress.via[]` 下,guest 可达集≈一个地址,DoH 与 IP 直连**都被 default-deny 拦住**;`default:allow`
-下这两条逃逸**全部复活**(guest 把查询藏进 TLS,或干脆直连 IP 字面量,引擎两样都看不见也不该看)。
+**The converse needs stating just as clearly: everything outside narrowing lives outside the
+engine.** Choosing a backend by SNI, swapping credentials, terminating TLS and re-originating,
+validating a token by caller — none of these needs any of the capabilities above, so none of them
+is inside the engine, and the engine holds **no seam that could carry them**. This is not "not
+implemented yet" — it is the boundary (§1.4 permanently excludes the whole credential family).
 
-**元组 vs 端口无关**:我们的放行是 `{cidr, port, proto}` 三元组。**反向证据要记下**:走通那条路的实现
-其放行集是**端口无关**的(地址在集合里,到它的任何端口都放行),比我们更松。我们取更严的一侧,代价是
-声明更啰嗦。
-
----
-
-## D3. 声明形状的三条机制约束(为什么四字段长这样)
-
-### D3.1 `proto` 是格式要求,不是可选维度
-
-调研到的每一条引流规则上**都有协议匹配,无一例外**。原因是机制性的:端口匹配在 iptables 里是 `tcp`/`udp`
-match extension 的选项(不写 `-p tcp` 直接 `unknown option "--dport"`,且次序敏感);nftables 的
-`tcp dport` 会**自动生成隐式协议依赖**(列规则时不显示);透明代理那类目标的选项也明确要求规则同时
-指定 `-p tcp` 或 `-p udp`。
-
-故 `{cidr, port}` 不是良构元组,`{cidr, port, proto}` 才是。附带的好处:"端口与 80/443 不叠加、要两者
-就得写两条"这类踩过的坑在我们这里**结构上不存在**,因为端口与协议恒显式。
-
-**这条只锁死 `proto`,不锁死 `port`,而两者的区别正是这个机制给的。** 少了 `proto` 的元组**渲染不出来**
-(上面那些接口连 `--dport` 都不接受);而少了 `port` 的元组渲染得出来,只是**少发一条 `dport` 子句**——即
-"该目的上的任意端口",与 `cidr` 省略给出"任意目的"是同一个机制的两次应用。故 `port` 省略是**合法的通配**
-(§5.D),而 `proto` 没有通配可言。
-
-### D3.2 UDP 不引流,且这不是疏漏
-
-`via[]` 的匹配对 UDP 不成立,原因是机制性的:**取回"原始目标"这件事在 UDP 上没有可用接口**。这句话
-必须指名接口才准确,**实测**(D5 ⑥):`getsockopt(SOL_IP, SO_ORIGINAL_DST)` 在 UDP socket 上恒失败
-(`ENOPROTOOPT`,收包前后一致)——这一半是"不支持"。但**另一个接口存在且更坏**:
-`IP_RECVORIGDSTADDR` / `IP_ORIGDSTADDR` cmsg 在重定向下**成功返回,且返回的是转换后的本地端点**
-(guest 发往 `1.2.3.4:443`,cmsg 报 `10.199.7.1:18443`),与"根本没发生 NAT"的情形**不可区分**。
-调研到的实现一致:mesh 类实现零条 UDP 引流规则(仅在 opt-in 的 DNS 场景下有);另一类实现的 UDP 干脆
-不进连接跟踪。
-
-**安全论证落在哪一条上,要说准。** 不是"接口不存在所以安全"——上面那个 cmsg 接口存在、会**静默给出错
-地址**,一个照它写的 UDP 截获器分不清"没 NAT"与"NAT 了但目标已丢"。真正挡住它的是**我们 default-deny:
-未被引流的 UDP 直接被丢,故根本到不了那个接口**。方向与 mesh 相反且更安全(mesh 里未被引流的 UDP
-**照旧到达目的地**,fail-open),代价是 **QUIC 会静默失败而非降级**(客户端通常回落 TCP,**但不保证**;
-HTTP/3-only 的上游会彻底失败)。这条要进对外文档,否则表现为"某些站点莫名不通"。
-
-**同一个代价落在 DNS 上更咬人,而 DNS 几乎全是 UDP。** 实测(D5 ⑦):`default:deny` 下只放行 TCP/53
-时,该放行规则**收到 0 个包**而 UDP/53 丢包计数持续上升——解析器**不会自己回落 TCP**,于是普通工具
-(`curl`/`git`)先挂到解析超时再报一个**名字解析失败**,而非策略拒绝(与 D4.3 的诊断错位同源)。故
-**要在 `default:deny` 下有可用 DNS,调用方必须自己把解析器地址连同 `proto: udp` 写进 `egress.allow[]`**
-——这是引擎**刻意不代劳**的一件事:代劳就要引擎认识"解析器"这个概念、并持有一份部署特异的地址,破 §1.1
-(与 D2 拒绝域名同一条判据)。它因此是一条**用户可见语义**,归 §5.D「四条用户可见语义」那一组,不是缺口。
-
-**一条未能证实的**:那两个 mesh 项目都**没有**给出排除非 DNS UDP 的书面理由。行为已在源码确认,
-"UDP 不适配这套引流语义"是推断,不是引用。
-
-### D3.3 两种截获形态是同一字段的两个取值,但意图信号不等价
-
-"显式端点"与"透明截获"不是两种引擎模式,是 `via[].match` 的两个取值:显式端点是
-`match:[{cidr:<某地址>, port:443, proto:tcp}]`,透明截获是 `match:[{cidr:any, port:443, proto:tcp}]`。
-**引擎一行不改**,不需要知道哪个叫什么名字,也不需要新 seam。
-
-但它们在**意图信号**上不等价,而这一点决定了倾向顺序:
-
-- **只按端口匹配的规则不丢失原始目标——已实测**(D5 ⑥)。机制是 hook 次序:连接跟踪注册的优先级**早于**
-  地址转换,故它直接从报文原始头部建立 original-direction 条目——此时任何转换规则还没被求值。规则的
-  match 子句只决定转换要不要触发,**不参与建那个条目**;转换之后只记录反方向的改写,**从不覆写
-  original**。这正是所有通用透明代理赖以工作的机制(它们都不按目标地址匹配)。
-- **推论:透明截获在意图信号上严格优于显式端点。** 透明截获下,引擎外那一层拿到的是**真实目标**;显式
-  端点下它只拿到 guest **自报的一个别名**(SNI/Host)。旁证:成熟的截获代理其证书名优先级**不是 SNI
-  优先**——它先连上游、嗅真实证书取名字作基准,客户端 SNI 只是**追加**。即上游真实身份是主、SNI 是辅。
-  故透明截获下那一层能**校验** guest 的声明,显式端点下它只有那句声明。
-
-> **实测数据(D5 ⑥)。** 端口-only 规则下 100 条流(40 顺序 + 60 并发)取回的原始目标**全部正确、零
-> 失配**,带目标地址的变体结果**逐字节相同**(另有反向对照证明 match 子句确被求值:不匹配的目标根本
-> 没被重定向)。**故倾向顺序按上面这条推论定,不翻转。** 一条并存的、未量化的风险:内核文档自己说 TCP 下
-> 经重定向取原始目标 **"is racy"**——本次 100 条流零失配、未观察到异常,但没有量化它的发生率,故记作
-> "已文档化、未量化",不写成数字。
-
-**两个取值都保留**,但倾向顺序有了依据:显式端点先行(引擎外那层不需要终结 TLS),透明截获为更强档。
-
-**那一层的能力边界是别人量过的,记在此处免得把 `via[]` 当万能**(全部落在引擎外,引擎不受影响):
-透明截获那种形态**不支持 UDP**;QUIC/HTTP3 在该形态下不可用;TCP 直通**检测不到 STARTTLS 升级**
-(这是最接近"协议内握手类"如数据库连接的书面警告);h2c 不支持;DoT/DoH/DoQ 未开始。**TLS 客户端证书 /
-pinning 未能证实**——文档未涉及,标为未知而非"支持"。
+**One thing to add so "the engine does not know credentials" is not misread as a gap**: §1.4
+already gives the conclusion "the engine's storage semantics contradict keeping a secret", and its
+actionable side is — the template holds the address of the endpoint outside the engine plus a
+value that satisfies the SDK's credential probe, and neither is a secret to the engine, so there is
+nothing wrong with the engine storing it. **A real credential is kept out of the template by
+construction, not kept safe by the engine.**
 
 ---
 
-## D4. 要守的 invariant(规范陈述在 §2.3 / §2.4 / §5.D)
+## D2. The load-bearing wall is the IP layer; domain names do not enter the engine
 
-**先把与 §2.4 三条的对应写明,别留给读者自己拼。** §2.4 列的是 **L0 地板 / 两跳 / fail-closed**:第一条的
-推理不在本节,它已分散在 **D1 ③**(为什么只有创建 placement 的那一侧能钉)、**D2**(为什么承重墙是 IP 层
-而地板只收 IP 词汇能命名的东西)与 **D5 ④**(为什么 sibling 项是一条静态 CIDR);本节展开其余两条
-(D4.2 / D4.3),外加一条**那三条共用的前提**(D4.1)。
+The engine's enforcement evaluates only in IP / port / protocol. Control at the domain-name layer
+**is not inside the engine**, and the reason is **cost**, not infeasibility — this must be stated
+precisely, because "infeasible" would be wrong:
 
-### D4.1 收窄不可绕过(必须 exhaustive)
+- **Domain churn is solvable, and someone has solved it.** One working approach: a DNS proxy
+  intercepts resolution and writes the result into a dynamic allow set, whose entries expire per
+  the DNS TTL plus some margin, layered with a liveness refresher for active connections
+  (addresses with a live connection get re-stamped periodically). The mechanism works.
+- **But it requires growing three things inside the engine**: a DNS proxy, a TTL refresher coupled
+  to conntrack, and a product-layer domain list that churns. The third breaks §1.1 outright (the
+  engine holding a product-layer list); the first two turn the engine into a DNS client. **What
+  breaks is §1.1, not feasibility.**
+- One incidental semantic flaw that road carries: liveness refresh lets **an authorization outlive
+  the name it was granted under**.
+- **The other side of the same wall**: mature portable network-policy layers likewise cannot
+  express a hostname — narrowing by domain requires bolting on a platform-specific mechanism. This
+  is an independent confirmation that "domain names do not belong to the portable layer".
 
-义务**不是**"能到声明放行的端点",而是**默认拒绝 + 只放行声明的那一组**。不守这条,声明形同虚设:
-guest 里一条绕过设置的直连、或走一个没被规则覆盖的协议/端口,就绕过了整个 §5.D 声明面。**这条是那三条
-各自的前提,不是与它们并列的第四条**:地板要 exhaustive 收窄才谈得上"恒 deny"(否则一条未覆盖的端口
-就是绕过它的侧门),两跳与 fail-closed 同理——一个非穷尽的规则集里,它们守的都只是自己覆盖到的那部分
-流量。故它是可验收的安全义务(§2.4):
+For narrowing like "only this one domain", use `via[]` to hand the traffic to a process outside the
+engine that judges by application-layer information (§5.D).
 
-> 把隔离单元的可达集 exhaustive 地收窄成引擎声明的那一组端点,默认拒绝其余出站。**逃逸即失败**,
-> 不是降级。
+**The strength of domain-layer control varies with the declaration's value, so the spec states it
+by value rather than as a global conclusion.** Under `default:deny` plus a single `egress.via[]`,
+the guest's reachable set is approximately one address, and both DoH and a direct IP connection
+**are blocked by default-deny**; under `default:allow` both escapes **fully revive** (the guest
+hides its query inside TLS, or dials an IP literal directly — the engine sees neither and should
+not).
 
-**"能通"是一个不足的验收断言**:一条被写错顺序的规则集在正常流量上完全正常,只在被绕过时才不同。故
-验收要断言的是那些**会静默通过**的性质(与 §5.C 误 sweep 那条验收纪律同源)。
+**Tuple vs port-independent**: our allowance is the `{cidr, port, proto}` triple. **The counter-
+evidence is worth recording**: the implementation that took the working road above has an allow
+set that is **port-independent** (the address is in the set, and any port to it is allowed) —
+looser than ours. We take the stricter side, at the cost of a more verbose declaration.
 
-### D4.2 两跳都钉,且第二跳必须由内核执行
+---
 
-出站有两跳,少钉一跳就漏:
+## D3. Three mechanical constraints on the declaration's shape (why the four fields are shaped this way)
 
-1. **guest 的出站**:default-deny + 只放行声明的那一组。拦的是 guest **绕过汇合点的直连**(含直连
-   sibling、直连 link-local)。
-2. **坐在 `via[].endpoint` 后面那个引擎外进程自己的出站**。它替 guest 发起连接,故它是第二跳。
+### D3.1 `proto` is a formatting requirement, not an optional dimension
 
-**第一跳自己又分两个钩子,而两侧的谓词形状相反——这是实测出来的结构事实(D5 ⑧),不是实现细节。**
-"guest 的出站"在内核里落进**两条互斥的路径**,规则生成器必须按钩子分别产出:
+Every steering rule surveyed **has a protocol match, without exception**. The reason is
+mechanical: in iptables, port matching is an option of the `tcp`/`udp` match extension (writing
+`--dport` without `-p tcp` gives `unknown option "--dport"` directly, and order matters); in
+nftables, `tcp dport` **automatically generates an implicit protocol dependency** (not shown when
+listing rules); the options for transparent-proxy-style targets likewise explicitly require the
+rule to also specify `-p tcp` or `-p udp`.
 
-| 目的地类别 | 落哪个钩子 | 该侧的地板谓词 |
+So `{cidr, port}` is not a well-formed tuple; `{cidr, port, proto}` is. A side benefit: the
+pitfall of "port doesn't stack over 80/443, you need two rules for both" is **structurally absent
+here**, because port and protocol are always explicit.
+
+**This locks down only `proto`, not `port` — and the difference between the two comes directly
+from this mechanism.** A tuple missing `proto` **cannot be rendered** (the interfaces above don't
+even accept `--dport` without it); a tuple missing `port` renders fine, it just **emits one fewer
+`dport` clause** — meaning "any port to that destination", the same mechanism's second application
+as omitting `cidr` giving "any destination". So omitting `port` is **a legitimate wildcard**
+(§5.D), while `proto` has no wildcard to speak of.
+
+### D3.2 UDP is not steered, and that is not an oversight
+
+`via[]`'s matching does not hold for UDP, and the reason is mechanical: **retrieving the "original
+destination" has no usable interface on UDP.** This must name the interface to be precise —
+**measured** (D5 ⑥): `getsockopt(SOL_IP, SO_ORIGINAL_DST)` fails on a UDP socket unconditionally
+(`ENOPROTOOPT`, consistent before and after receiving packets) — that half is "unsupported". But
+**another interface exists, and it is worse**: the `IP_RECVORIGDSTADDR` / `IP_ORIGDSTADDR` cmsg
+**succeeds under redirection, and what it returns is the post-translation local endpoint** (the
+guest sends to `1.2.3.4:443`, the cmsg reports `10.199.7.1:18443`) — **indistinguishable** from "no
+NAT happened at all". The implementations surveyed agree: mesh-style implementations ship zero UDP
+steering rules (only in an opt-in DNS scenario); the other implementation surveyed simply keeps
+UDP out of conntrack.
+
+**Where the security argument actually rests must be stated precisely.** It is not "the interface
+doesn't exist, therefore safe" — that cmsg interface above exists and **silently returns the wrong
+address**; a UDP interceptor written against it cannot tell "no NAT" apart from "NAT'd but the
+destination is already lost". What actually blocks it is **our default-deny: UDP that was not
+steered is dropped outright, so it never reaches that interface at all**. The direction is the
+opposite of mesh, and safer (in mesh, UDP that was not steered **still reaches its destination**,
+fail-open), at the cost that **QUIC fails silently instead of degrading** (clients usually fall
+back to TCP, **but this is not guaranteed**; an HTTP/3-only upstream fails outright). This must go
+into the outward-facing docs, or it presents as "some sites are mysteriously unreachable".
+
+**The same cost bites harder on DNS, because DNS is almost entirely UDP.** Measured (D5 ⑦): under
+`default:deny`, when only TCP/53 is allowed, that allow rule **receives 0 packets** while the
+UDP/53 drop counter keeps climbing — the resolver **does not fall back to TCP on its own**, so
+ordinary tools (`curl`/`git`) first hang until resolution times out, then report **name resolution
+failure**, not a policy refusal (the same root cause as D4.3's diagnostic dislocation). So **to
+have usable DNS under `default:deny`, the caller must explicitly write the resolver's address, with
+`proto: udp`, into `egress.allow[]`** — this is something the engine **deliberately does not do on
+the caller's behalf**: doing it would require the engine to know the concept of "resolver" and hold
+a deployment-specific address, breaking §1.1 (the same criterion as D2's refusal of domain names).
+It is therefore a **user-visible semantic**, belonging to §5.D's "four user-visible semantics"
+group — not a gap.
+
+**One thing that could not be confirmed**: neither of the two mesh projects surveyed gives a
+written rationale for excluding non-DNS UDP. The behavior is confirmed from source; "this steering
+semantic does not fit UDP" is an inference, not a citation.
+
+### D3.3 The two interception shapes are two values of the same field, but their intent signal is not equivalent
+
+"Explicit endpoint" and "transparent interception" are not two engine modes — they are two values
+of `via[].match`: an explicit endpoint is `match:[{cidr:<some address>, port:443, proto:tcp}]`,
+transparent interception is `match:[{cidr:any, port:443, proto:tcp}]`. **The engine changes not a
+single line** — it needs to know neither name, and needs no new seam.
+
+But they are not equivalent in **intent signal**, and that is what determines the leaning order:
+
+- **A port-only rule does not lose the original destination — measured** (D5 ⑥). The mechanism is
+  hook ordering: conntrack registration's priority runs **earlier than** address translation, so
+  it establishes the original-direction entry straight from the packet's raw header — at that
+  point no translation rule has been evaluated yet. A rule's match clause only decides whether the
+  translation fires, **it plays no part in building that entry**; after translation only the
+  reverse-direction rewrite is recorded, **the original is never overwritten**. This is exactly the
+  mechanism every general-purpose transparent proxy relies on (none of them match on destination
+  address).
+- **Corollary: transparent interception is strictly superior to an explicit endpoint in intent
+  signal.** Under transparent interception, the layer outside the engine gets the **real
+  destination**; under an explicit endpoint it gets only an alias the guest **self-reported**
+  (SNI/Host). Corroborating evidence: a mature interception proxy's certificate-name priority is
+  **not SNI-first** — it connects upstream first, sniffs the real certificate to take the name as
+  the baseline, and the client's SNI is only **appended**. That is, the upstream's real identity is
+  primary and SNI is secondary. So under transparent interception that layer can **verify** the
+  guest's declaration; under an explicit endpoint it only has that declaration's word.
+
+> **Measured data (D5 ⑥).** Under a port-only rule, the original destination recovered across 100
+> flows (40 sequential + 60 concurrent) was **entirely correct, zero mismatches**; the variant with
+> a destination-address clause produced **byte-for-byte identical** results (a reverse control also
+> proved the match clause is actually evaluated: an unmatched destination is not redirected at
+> all). **So the leaning order is set by the corollary above, and does not flip.** One co-existing,
+> unquantified risk: the kernel's own documentation says that recovering the original destination
+> across a redirect on TCP **"is racy"** — this run saw zero mismatches across 100 flows with no
+> anomaly observed, but its occurrence rate was not quantified, so it is recorded as "documented,
+> not quantified", not written down as a number.
+
+**Both values are kept**, but the leaning order now has grounds: explicit endpoint goes first (the
+layer outside the engine does not need to terminate TLS), transparent interception is the stronger
+tier.
+
+**The capability boundary of that layer has been measured by others, and is recorded here so
+`via[]` is not mistaken for a cure-all** (all of it lands outside the engine and does not affect
+it): the transparent-interception shape **does not support UDP**; QUIC/HTTP3 is unavailable in that
+shape; a plain TCP pass-through **cannot detect a STARTTLS upgrade** (the closest documented
+warning to "in-protocol handshake" cases like database connections); h2c is unsupported; DoT/DoH/DoQ
+have not been started. **TLS client certificates / pinning could not be confirmed** — undocumented,
+marked unknown rather than "supported".
+
+---
+
+## D4. Invariants that must be held (the normative statement is in §2.3 / §2.4 / §5.D)
+
+**Map onto §2.4's three items first, rather than leaving it to the reader to piece together.**
+§2.4 lists **the L0 floor / both hops / fail-closed**: the first item's reasoning is not in this
+section, it is spread across **D1 ③** (why only the side that creates the placement can pin it),
+**D2** (why the load-bearing wall is the IP layer, and the floor only admits things nameable in IP
+vocabulary), and **D5 ④** (why the sibling item is a static CIDR); this section develops the
+other two (D4.2 / D4.3), plus one item that is **the precondition shared by all three** (D4.1).
+
+### D4.1 Narrowing must be unbypassable (must be exhaustive)
+
+The obligation is **not** "can reach the endpoints the declaration allows" — it is **default-deny
+plus allow only the declared set**. Fail to hold this and the declaration is empty in effect: a
+direct connection inside the guest that routes around the meeting point, or a protocol/port the
+rules do not cover, bypasses the whole §5.D declaration surface. **This is the precondition each
+of the other three rests on, not a fourth item alongside them**: the floor can only be "always
+deny" if narrowing is exhaustive (otherwise one uncovered port is a side door around it), and the
+same holds for both hops and fail-closed — in a non-exhaustive rule set, each of them guards only
+the traffic it happens to cover. It is therefore an acceptance-testable security obligation
+(§2.4):
+
+> Narrow the isolation unit's reachable set exhaustively down to the set of endpoints the engine
+> declares, and default-deny everything else outbound. **An escape is a failure**, not a
+> degradation.
+
+**"It works" is an insufficient acceptance assertion**: a rule set with the wrong ordering behaves
+completely normally under ordinary traffic, and differs only once it is bypassed. So acceptance
+must assert the property that **would pass through silently** (the same acceptance discipline as
+§5.C's mis-sweep item).
+
+### D4.2 Both hops are pinned, and the second hop must be enforced by the kernel
+
+Egress has two hops, and missing either one is a leak:
+
+1. **The guest's own egress**: default-deny plus allow only the declared set. What this blocks is
+   the guest **bypassing the meeting point with a direct connection** (a direct dial to a sibling,
+   a direct dial to link-local included).
+2. **The egress of the engine-external process sitting behind `via[].endpoint`**. It originates
+   the connection on the guest's behalf, so it is the second hop.
+
+**The first hop itself splits into two hooks, and the predicate shapes on the two sides are
+opposite — this is a measured structural fact (D5 ⑧), not an implementation detail.** "The
+guest's egress" lands in **two mutually exclusive paths** in the kernel, and the rule generator
+must produce output per hook separately:
+
+| Destination category | Which hook it lands on | The floor predicate on that side |
 | --- | --- | --- |
-| 宿主**自身**的任一地址(veth IP / eth0 IP / 宿主本地的 link-local) | `input` | `iifname` + **纯 ct-state,不带任何 daddr 清单** |
-| 宿主会**路由**出去的东西(sibling / 中转 link-local / 内网 / 公网) | `forward` | ct-state + **显式 daddr 地板清单** |
+| Any address of the host **itself** (veth IP / eth0 IP / the host's own link-local) | `input` | `iifname` + **pure ct-state, with no daddr list at all** |
+| Something the host will **route** onward (sibling / transit link-local / private internal / public internet) | `forward` | ct-state + **an explicit daddr floor list** |
 
-**已定:声明的放行也发在 `input`,并在该侧自带一条 sibling drop。** 生成器把声明的放行**同时发在 `input`
-与 `forward`**;`input` 侧**必须同时**配一条 sibling drop,否则一条 `allow 10.0.0.0/8` 会让沙箱 A 连上
-sibling B 的**网关**(实测读回 banner,而 `forward` 侧那条 sibling drop 对这条路径**计数 0**——它不在
-`forward` 上)。**理由**:§5.D 语义 ③ 承诺调用方自己声明解析器,而唯一稳定可用的宿主本地解析器地址是本
-沙箱自己的 `/30` 网关(D5 ⑦),它落 `input`;只发 `forward` 的放行**到不了它**,那条承诺就没有兑现路径。
-**与 ⑧ 不冲突**:⑧ 说的是**地板**在 `input` 侧不需要 daddr 清单(纯 ct-state 对宿主地址已穷尽);这条
-sibling drop 是**另一条规则**、谓词是 sibling CIDR,不是往地板上挂一份 daddr 清单。两条规则,不是一条。
+**Settled: the declaration's allowance is also emitted on `input`, and that side carries its own
+sibling drop.** The generator emits the declaration's allowance **on both `input` and
+`forward`**; the `input` side **must also** carry a sibling drop, or an `allow 10.0.0.0/8` would
+let sandbox A reach sibling B's **gateway** (measured: banner read back, while the sibling drop on
+the `forward` side **counts 0** for this path — it does not sit on `forward`). **Reason**: §5.D
+semantics ③ promises the caller can declare its own resolver, and the only stably-reachable
+host-local resolver address is this sandbox's own `/30` gateway (D5 ⑦), which lands on `input`; an
+allowance emitted only on `forward` **cannot reach it**, and that promise would have no delivery
+path. **This does not conflict with ⑧**: ⑧ says the **floor** needs no daddr list on the `input`
+side (a pure ct-state rule already exhausts the host's own addresses); this sibling drop is
+**a different rule**, predicated on the sibling CIDR, not hanging a daddr list on the floor. Two
+rules, not one.
 
-**这张表与 `via[]` 有一条真实张力,两个方向都实测过,窄放行的形状已收口(D5 ⑩)。**
-`via[].endpoint` 契约上**必须宿主本地**(否则内核压不住第二跳,§6.2 那张 400 清单之一),而被引流的流量经
-`prerouting` 转换后**落进 `input`**、且在那里是 `ct state new` —— 正是上表 `input` 行那条纯 ct-state
-地板要 drop 的东西(实测:`input` 侧 dnat 观测计 8 包,`forward` 侧计 0)。故**纯 ct-state 地板会把
-`via[]` 整条功能杀掉**,规则生成器**必须**有一条放行置于地板 drop 之上;而那条放行**必须钉住三样**才既
-不杀功能也不重开地板 —— **形状、逐条反例、以及"`forward` 侧必须有自己的 default-deny"都在 D5 ⑩**。
+**This table has a real tension with `via[]`, measured in both directions, and the shape of the
+narrow allowance has been settled (D5 ⑩).** `via[].endpoint` is contractually **required to be
+host-local** (otherwise the kernel cannot hold down the second hop — one of the entries in §6.2's
+400 list), and steered traffic, after `prerouting` translation, **lands on `input`** and is `ct
+state new` there — exactly what the `input` row's pure ct-state floor above would drop (measured:
+the `input`-side dnat observation counts 8 packets, `forward` counts 0). So **a pure ct-state
+floor would kill the entire `via[]` feature**, and the rule generator **must** place one allowance
+above the floor drop; and that allowance **must pin three things at once** to avoid both killing
+the feature and reopening the floor — **the shape, the counter-examples item by item, and "the
+`forward` side needs its own default-deny" are all in D5 ⑩.**
 
-**上表 `input` 行的"覆盖宿主全部地址"已在 IPv6 上独立量过,结论是覆盖(D5 ⑪)。** 一条**不带任何
-family 限定**的纯 ct-state `inet` 规则**同样匹配 IPv6** 并 drop,`established,related` 那条臂也**一条共用
-即可**承载 v6 回程;显式 `meta nfproto ipv6` 第二臂是**冗余的**(实测:它计到的包与家族无关那条 drop
-已经抓到的**逐包相同**)。**最强的一次**:guest 自己造一个全局前缀(`fd00:dead:beef::2`)再拨,仍被拦、
-计数增长——即这条规则在**orchestrator 根本无从枚举**的地址空间上照样成立,正是它要的那个性质。
-故 L0 地板清单里的 `fe80::/10` 保持为 `forward` 侧的 daddr 项即可,`input` 侧不需要它。
+**The `input` row's "covers every host address" has been independently measured on IPv6, and the
+conclusion is that it covers it (D5 ⑪).** A pure ct-state `inet` rule **with no family
+qualifier** **also matches IPv6** and drops it, and the `established,related` return arm needs
+**only one shared rule** to carry v6 return traffic too; an explicit second `meta nfproto ipv6`
+arm is **redundant** (measured: the packets it would count are **byte-for-byte identical** to what
+the family-blind drop already caught). **The strongest form of the test**: the guest crafts its
+own global prefix (`fd00:dead:beef::2`) and dials it — still blocked, counter still climbs — that
+is, this rule holds even on an address space the **orchestrator has no way to enumerate**, exactly
+the property it needs. So `fe80::/10` in the L0 floor list only needs to remain a `forward`-side
+daddr item; the `input` side does not need it.
 
-> **但"引擎今天对 IPv6 的暴露"是另一件事**:引擎从不碰 IPv6(`local_runsc.go` /
-> `oci.go` 里 ipv6/inet6 零命中)、`disable_ipv6` 默认 0 ⟹ 内核给每条沙箱 veth 自动配宿主侧
-> `fe80::/64`,而实测**无地板时 guest 不仅可达宿主侧 veth 的链路本地,还可达 `eth0` 的全局 IPv6**。
-> (反面也量了:`eth0` 的**链路本地**从沙箱**不可达**——链路本地只在自己那条链路上可达,故真正的暴露面是
-> 那个全局地址,而它恰好是 `input` 侧那条无清单规则覆盖的东西。)**地板落地后这两格的兑现方式不同,按
-> D5 ⑳ 的纪律分开记**:宿主侧 veth 的**链路本地**那格以**地板计数器移动**通过(`TestIPv6IsCoveredByTheSameFloor`);而
-> `eth0` 的**全局 v6** 那格今天是**不可达且计数为 0**——引擎从不给 guest 侧配 v6 地址,故那个包**根本没
-> 离开沙箱**,拦住它的不是地板。**它因此不是一条可断言的强制**,只是当前配置的一个后果:哪天 guest 侧
-> 有了 v6 地址,同一条不带 family 限定的 ct-state 规则就会接住它(D5 ⑪),而在那之前"计数为 0"与
-> "地板被绕过"在这一格上不可区分——故验收只按结构断言那一半(渲染输出里无 `nfproto ipv6` 臂)。
+> **But "the engine's IPv6 exposure today" is a separate matter**: the engine never touches IPv6
+> (zero hits on ipv6/inet6 in `local_runsc.go` / `oci.go`), and `disable_ipv6` defaults to 0 ⟹ the
+> kernel auto-configures a host-side `fe80::/64` on every sandbox veth, and measured, **with no
+> floor installed, the guest can reach not only the host-side veth's link-local address but also
+> `eth0`'s global IPv6**. (The negative case was also measured: `eth0`'s **link-local** address is
+> **unreachable** from the sandbox — link-local is only reachable on its own link — so the real
+> exposure surface is that global address, which happens to be exactly what the `input` side's
+> list-free rule covers.) **Once the floor is in place, these two cells are delivered differently,
+> and per D5 ⑳'s discipline they must be recorded separately**: the host-side veth's **link-local**
+> cell passes by **the floor's counter moving** (`TestIPv6IsCoveredByTheSameFloor`); `eth0`'s
+> **global v6** cell is today **unreachable with a zero count** — the engine never configures a v6
+> address on the guest side, so that packet **never leaves the sandbox in the first place**, and
+> what blocks it is not the floor. **It is therefore not an assertable enforcement**, only a
+> consequence of the current configuration: the day the guest side gets a v6 address, the same
+> family-unqualified ct-state rule will catch it (D5 ⑪), and until then "count is 0" and "the floor
+> was bypassed" are **indistinguishable** on this cell — so acceptance only asserts the structural
+> half (no `nfproto ipv6` arm in the rendered output).
 >
-> **"干脆把 veth 的 IPv6 关掉"是可实现的纵深防御,但只有宿主侧那一半站得住(实测 D5 ⑪)。**
-> 一端即足、**建好之后再设也生效**(不需要 `default` 作用域的 sysctl,故引擎不必改全局状态)、且扛住
-> link flap;**但 guest root 一条命令就能把 guest 侧那半改回来**并恢复全部 v6 可达性,而宿主侧那半在
-> netns 里**看不见也写不到**。故它是可选的加固,**永远不是机制**——机制是那条 `inet` 地板。
+> **"Just turn off the veth's IPv6" is a viable defense in depth, but only its host-side half holds
+> up (measured, D5 ⑪).** One end suffices, **taking effect even when set after the interface is
+> already up** (no need for a `default`-scoped sysctl, so the engine need not touch global host
+> state), and it survives a link flap; **but guest root can flip its own half back with one
+> command** and restore full v6 reachability, while the host-side half is **invisible and
+> unwritable** from inside the netns. So it is optional hardening, **never the mechanism** — the
+> mechanism is that `inet` floor.
 
-⟹ **宿主自身端点从不被算出**,连带整类"宿主地址变了要不要重渲染"的问题一起消失(实测 D5 ⑧)。
-**而本节下面那个 uid/gid 谓词落 `output`,不落 `forward`**:第二跳由宿主本地进程发起,故它既不经过 guest 的
-`iifname`、**也根本不经过 `forward`**(本地生成的包走 `output`/`postrouting`)。实测三种形状在 `forward` 上
-**一律计 0**,而同一条流在 `output` 上全见(D5 ㉔)。⟹ **上面那张两钩子的表只覆盖第一跳,第二跳是第三个
-钩子上的第三条基链**;把它读成"`forward` 那一行顺带管住了第二跳"会得到一份看着完整、而第二跳完全没有被
-求值的规则集——且症状是**地板计数器不动**,即 D4.1 点名的那种静默通过。
+⟹ **The host's own endpoints are never computed**, and with them the whole class of "did the host
+address change, must we re-render?" questions disappears (measured, D5 ⑧). **And the uid/gid
+predicate discussed below in this section lands on `output`, not `forward`**: the second hop is
+originated by a host-local process, so it traverses neither the guest's `iifname` **nor `forward`
+at all** (locally-generated packets travel `output`/`postrouting`). Measured, all three shapes
+**count uniformly 0** on `forward`, while the same flow is fully visible on `output` (D5 ㉔). ⟹
+**The two-hook table above covers only the first hop; the second hop is a third base chain on a
+third hook.** Reading it as "the `forward` row incidentally covers the second hop too" yields a
+rule set that looks complete while the second hop is never evaluated at all — and the symptom is
+**the floor's counter not moving**, exactly the silent pass-through D4.1 named.
 
-**第二跳的做法是把它压在同一份宿主规则集后面,不是下发一份清单让它自律。** 差别是承重的:下发即意味着
-那个进程成为被信任方,于是往它塞一个指向 sibling 或 link-local 的"上游"就从侧门穿过了地板
-(confused deputy)。因沙箱地址空间是一个**固定 CIDR**(D5 ④),这是一条**静态**规则,不是需要维护的
-动态成员集。
+**The way to hold the second hop down is to pin it behind the same host rule set, not to hand it a
+list to obey on its own.** The difference is load-bearing: handing it down means that process
+becomes a trusted party, and stuffing an "upstream" pointing at a sibling or link-local address
+into it would then walk straight through the floor's side door (a confused deputy). Because the
+sandbox address space is a **fixed CIDR** (D5 ④), this is a **static** rule, not a dynamic
+membership set that needs maintaining.
 
-**这个身份谓词服务于两个彼此独立的需求,位置与动作相反 —— 写错顺序会静默失效:**
+**This identity predicate serves two mutually independent needs, at opposite positions with
+opposite actions — writing the order wrong fails silently:**
 
-| 需求 | 为什么 | 规则动作 |
+| Need | Why | Rule action |
 | --- | --- | --- |
-| **免于被自己的规则再次命中** | 那个进程的出站若再命中引流规则就**成环** | 放行 / `RETURN`,置于引流规则**之前** |
-| **仍受 L0 地板约束** | confused deputy(上一段) | 落在地板规则**之内**,不得豁免 |
+| **Exempt from being hit again by its own rules** | If that process's egress hits the steering rules again it **forms a loop** | Allow / `RETURN`, placed **before** the steering rules |
+| **Still bound by the L0 floor** | Confused deputy (previous paragraph) | Sits **inside** the floor rules, not exempted |
 
-同一个谓词,两个相反的位置:把"免引流"的放行放到地板**之上**,就等于把地板一起豁免掉,而症状只是
-"能通"。故两者都必须有断言。
+Same predicate, two opposite positions: placing the "exempt from steering" allowance **above** the
+floor is equivalent to exempting the floor along with it, and the symptom is only "it works". So
+both must be asserted.
 
-**但这两行的动作不对称,而实测的理由不在设计层:`skuid` 不可靠地匹配一条流的每个包。** 直接的反向测量读到
-"5 个包全部有主",而同一条流在另两次运行里读到 `skuid` 只匹配 4/5 —— 即偶有一个包不带 socket owner
-(进程退出后发出的 FIN 是可信的候选,未钉死;D5 ㉔)。**后果只落在 accept/`RETURN` 那一侧**:一条
-`skuid` 收窄的 **drop** 是安全的(SYN 被丢即整条流死),而一条 `skuid` 收窄的 **`RETURN`/accept 压在地板
-drop 之上**则不是——`skuid` 漏匹配的那些包会**穿过它落到下面**。⟹ **上表第一行不能只靠 `skuid` 写成放行**:
-要么让它同时钉住那条流的其他不变量(目标元组),要么接受"免环"靠别的机制。**这一条由渲染守卫强制**:
-`ruleset.Validate` 拒绝一条 uid 收窄的 accept,只许它 drop(`internal/runtime/nftables_test.go` 的第二跳守卫
-断言两向)。
+**But the two rows' actions are not symmetric, and the measured reason is not at the design level:
+`skuid` unreliably matches every packet of a flow.** A direct reverse measurement read "all 5
+packets had an owner", while the same flow, across two other runs, read `skuid` matching only 4/5
+— that is, occasionally one packet arrives without a socket owner (a FIN sent after the process has
+exited is a plausible candidate, not pinned down; D5 ㉔). **The consequence lands only on the
+accept/`RETURN` side**: a `skuid`-narrowed **drop** is safe (dropping the SYN kills the whole
+flow), but a `skuid`-narrowed **`RETURN`/accept placed above the floor drop** is not — the packets
+`skuid` fails to match **pass straight through it and land below**. ⟹ **The first row of the table
+above cannot be written as an allow relying on `skuid` alone**: either pin some other invariant of
+that flow at the same time (the destination tuple), or accept that "loop exemption" must rest on a
+different mechanism. **This is enforced by a render guard**: `ruleset.Validate` refuses a
+uid-narrowed accept, permitting only drop (`internal/runtime/nftables_test.go`'s second-hop guard
+asserts both directions).
 
-**谓词取 `uid`/`gid`,不取 mark。** 判据:uid 是**那个进程改不动的宿主侧事实**,而 mark 是我们自己写
-上去的、多一个可写错的环节。(旁证:成熟的 mesh 实现主谓词都是 owner-uid;有的完全不用 mark,用 mark
-的也只用于防环。)
+**The predicate is `uid`/`gid`, not mark.** The criterion: uid is **a host-side fact that process
+cannot change**, while mark is something we write ourselves — one more step that can be written
+wrong. (Corroborating: mature mesh implementations' primary predicate is uniformly owner-uid; some
+use no mark at all, and those that do use it only for loop prevention.)
 
-**这里有一条前提上面没说,补明——它不是新机制,是把已经在依赖的东西写出来。** 一个 `uid`/`gid` 谓词
-只在**被求值的那个进程就在这台宿主上、且它的 uid/gid 是引擎知道的**时才成立。而四字段声明里只有一个
-地址,§5.D 又坚持 `via[].endpoint` 后面是什么引擎不知道也不问——两件事叠起来,上面的论证给出的东西
-比它看起来的少。补法有两半:
+**There is one precondition above that was left unstated — spelling it out here is not a new
+mechanism, just writing down something already being relied on.** A `uid`/`gid` predicate only
+holds when **the process being evaluated is on this same host, and its uid/gid is known to the
+engine**. But the four-field declaration carries only one address, and §5.D insists the engine
+neither knows nor asks what sits behind `via[].endpoint` — put the two together, and the argument
+above delivers less than it appears to. The fix has two halves:
 
-- **uid 是一项部署义务**:由部署方交给引擎,不由声明携带(引擎照旧不给那一层命名,只是知道"本机
-  哪个 uid 的出站要被压在地板后面")。**本节上文一路写 `uid`/`gid`,而落到钩子上只剩 `uid`** ——
-  D5 ㉔ 量出 `output` 上唯一可用的收窄谓词是 `skuid`,没有 `skgid` 的对应子句,故 gid 那一半在这个机制里
-  没有物化面(硬要渲染只能 AND 进地板 drop、把地板收得更窄)。⟹ **部署入参只有 uid**。
-  **且它不得等于引擎自身的 uid**:引擎的 transport 端点是 guest veth 地址、由宿主侧发起,而该地址落在
-  地板的 sibling 项(`10.66.0.0/16`)内,故那个取值会让引擎自己拨通 guest 的每一条 SYN 命中第二跳地板
-  ——`hop2_established` 那条返回臂**按设计**不接它(SYN 是 `ct state new`)。后果是全部沙箱的 readiness /
-  探活 / 全部 RPC 一起断,且因 `skuid` 只匹配约 4/5 的包而表现为**间歇故障**。⟹ **装表之前、起步时拒**。
-- **非宿主本地的 `via[].endpoint` 被拒**:它在内核的射程之外,压不住;收下它就等于把地板架在那个进程
-  自己的自律上——正是本 invariant 要拒的 confused deputy。故这类声明**直接拒绝**(400;错误码归
-  [`§6.2`](../api-contract.md) 那张清单,此处不复制)。
+- **uid is a deployment obligation**: handed to the engine by the deployer, not carried by the
+  declaration (the engine still does not name that layer — it only knows "the egress of this uid
+  on this machine must be held behind the floor"). **This section has been writing `uid`/`gid`
+  throughout, but only `uid` survives at the hook** — D5 ㉔ measured that the only usable
+  narrowing predicate on `output` is `skuid`, with no corresponding `skgid` clause, so the gid half
+  has no materialization surface in this mechanism (rendering it would only be possible by ANDing
+  it onto the floor drop, narrowing the floor further). ⟹ **The deployment input is uid only.**
+  **And it must not equal the engine's own uid**: the engine's transport endpoint is a guest veth
+  address, dialed from the host side, and that address falls inside the floor's sibling item
+  (`10.66.0.0/16`), so that value would make every one of the engine's own SYNs to a guest hit the
+  second-hop floor — the `hop2_established` return arm **by design** does not accept it (a SYN is
+  `ct state new`). The consequence is that readiness / liveness probing / all RPC break for every
+  sandbox at once, presenting as an **intermittent fault** because `skuid` matches only about 4/5
+  of packets. ⟹ **Refused at startup, before the table is installed.**
+- **A `via[].endpoint` that is not host-local is refused**: it is out of the kernel's reach and
+  cannot be held down; accepting it would rest the floor on that process's own self-discipline —
+  exactly the confused deputy this invariant exists to refuse. So this class of declaration is
+  **refused outright** (400; the error code belongs to [`§6.2`](../api-contract.md)'s list, not
+  duplicated here).
 
-### D4.3 fail-closed(作用域 per-connection)
+### D4.3 Fail-closed (scoped per-connection)
 
-规范陈述在 §2.4(拒那一条、不落到下一条规则被放行出网,作用域 per-connection)。本节只加三条它自己
-带不出来的:
+The normative statement is in §2.4 (refuse that one connection rather than falling through to the
+next rule and being let out, scoped per-connection). This section adds only three things that
+statement does not carry on its own:
 
-**它必须是测试,不是读代码确信。** 一条写错的规则集在这一点上的症状恰好是"更通",不报错——与 D4.1
-末尾同一条验收纪律。
+**It must be a test, not confidence from reading the code.** The symptom of a wrongly-written
+rule set on exactly this point is "it works more" — no error — the same acceptance discipline as
+the end of D4.1.
 
-**诊断信号错位,引擎侧要能讲清楚**:端点不可用时 guest 侧看到的症状可能是**解析失败**而非策略拒绝
-(名字解析本身要出网)。故"端点不可达"要能被归因,否则它表现为一个域名问题。**实测数字在 D5 ⑦**
-(先挂十几到二十秒、再报 `Could not resolve host`,本条不复制那两个秒数)——**这条错位不是理论风险**。
+**Diagnostic signal dislocation, which the engine side needs to be able to explain clearly**: when
+an endpoint is unavailable, what the guest side sees may be a **resolution failure** rather than a
+policy refusal (name resolution itself needs egress). So "endpoint unreachable" must be
+attributable, or it presents as a domain-name problem. **The measured numbers are in D5 ⑦** (a hang
+of ten-odd to twenty seconds, then `Could not resolve host` — the two figures are not duplicated
+here) — **this dislocation is not a theoretical risk**.
 
-**"干净的连接失败"这半承诺只有 `reject` 兑现,`drop` 不兑现**(D5 ⑨)。gVisor netstack **认 ICMP 差错**,
-故同一条"拒绝"写成两种动作,guest 侧体验相差四个数量级:
+**Only `reject` delivers the "clean connection failure" half of the promise; `drop` does not**
+(D5 ⑨). The gVisor netstack **honors ICMP errors**, so the same "refusal" written as two different
+actions gives the guest an experience that differs by orders of magnitude:
 
-| 规则动作 | guest 看到什么 |
+| Rule action | What the guest sees |
 | --- | --- |
-| `drop` | **20.0 s** 后 `i/o timeout` |
-| `reject with icmp admin-prohibited` | **0.002 s** `connect: no route to host` |
-| `reject with tcp reset` | **0.001 s** `connect: connection refused` |
+| `drop` | `i/o timeout` after **20.0 s** |
+| `reject with icmp admin-prohibited` | `connect: no route to host` in **0.002 s** |
+| `reject with tcp reset` | `connect: connection refused` in **0.001 s** |
 
-故一份纯 `drop` 的地板**满足 fail-closed 的安全那一半,却违反它自己写下的 guest 体验那一半**;两半都要,
-故**面向 guest 的拒绝用 `reject`**(安全性不受影响:两者都不放行),`drop` 留给不需要给 guest 反馈的场合。
-**UDP 上另一套**:`reject with icmp admin-prohibited` 对 UDP 被 gVisor 忽略(仍挂 5 s),只有
-`icmp port-unreachable` 被认(0.001 s `connection refused`)。
+So a floor made entirely of `drop` **satisfies the safety half of fail-closed but violates the
+guest-experience half it wrote down itself**; both halves are needed, so **refusals facing the
+guest use `reject`** (security is unaffected: neither one lets anything through), and `drop` is
+reserved for cases that owe the guest no feedback. **A separate rule on UDP**: `reject with icmp
+admin-prohibited` is ignored by gVisor on UDP (still hangs 5 s); only `icmp port-unreachable` is
+honored (0.001 s `connection refused`).
 
-> **两臂都已在 runsc 上复现**,其余条件逐项钉死(同一目标 `169.254.169.254:80`、同一个跑着的
-> guest,只改动作):`reject` 臂 **0 ms**——由
-> `TestGuestFacingRefusalsFailFastRatherThanHanging` 常态断言;`drop` 臂 **≥ 25 s**(探针自己的
-> `DialTimeout` 先到期,故那是下界而非测得的挂起时长)。上表的 20.0 s 出自另一次用不同 dialer 超时的测量,
-> 与此一致。**验收仍按"亚秒 vs 数十秒"这个量级差断言,不要把毫秒数写进断言**——钉死一个具体数字换不到任何
-> 东西,只让测试变脆。`drop` 臂**刻意不留成常态测试**:它每跑一次白挂 25 s,而它支撑的唯一结论(用 `reject`
-> 不用 `drop`)已经落在 `ruleset.Verdict` 里。
+> **Both arms have now been reproduced on runsc**, with every other condition pinned identically
+> (the same target `169.254.169.254:80`, the same running guest, only the action changed): the
+> `reject` arm is **0 ms** — asserted as a standing test by
+> `TestGuestFacingRefusalsFailFastRatherThanHanging`; the `drop` arm is **≥ 25 s** (the probe's own
+> `DialTimeout` expires first, so that is a lower bound rather than the measured hang duration).
+> The 20.0 s in the table above comes from a separate measurement using a different dialer timeout,
+> and is consistent with this. **Acceptance still asserts by the order-of-magnitude gap
+> ("sub-second vs tens of seconds"), never pin a millisecond figure into the assertion** — pinning a
+> specific number buys nothing and only makes the test brittle. The `drop` arm is **deliberately
+> not kept as a standing test**: every run wastes 25 s hanging, and the only conclusion it supports
+> (use `reject`, not `drop`) is already encoded in `ruleset.Verdict`.
 
-**一条部署约束,引擎不校验它**:那个引擎外进程若要回问什么(它通常要),而它的出站已被 D4.2 第二跳压在
-地板后面——则它回问的那个端点**不能落在 L0 地板里**,否则第二跳当场把它自锁。这是**部署那一层的人要守
-的约束,不是引擎能检查的东西**:引擎不知道 `via[].endpoint` 后面是什么,更不知道它回头找谁(§5.D)。
-记在此处,因为它是地板与那一层之间**唯一**一条会咬人的耦合,而症状(那个进程自己不通)长得完全不像
-是地板造成的。
+**One deployment constraint the engine does not validate**: if the engine-external process needs
+to make its own outbound query (which it usually does), and its own egress has already been pinned
+behind the floor by D4.2's second hop — then whatever endpoint it queries **must not fall inside
+the L0 floor**, or the second hop would lock it out of itself instantly. This is **a constraint the
+deployment-layer operator must hold, not something the engine can check**: the engine does not
+know what sits behind `via[].endpoint`, still less who it turns around and queries (§5.D). Recorded
+here because it is the **only** coupling between the floor and that layer that bites, and its
+symptom (that process itself being unreachable) looks nothing like something the floor caused.
 
 ---
 
-## D5. 跨沙箱网络隔离,以及必须继承的实测
+## D5. Cross-sandbox network isolation, and the measurements that must be inherited
 
-跨沙箱**网络**隔离是一条**独立的 control-plane invariant**,不搭支柱① 的车——为什么支柱① 守不住它,
-结论与理由都在 §2.3(一句话:它虚拟化 syscall、不拦网络包)。本节要给的是那句结论的**另一半**:
-既然它只能由 §5.D 的规则集物化,那**规则集必须落在哪、谓词必须绑什么、地板必须收哪些成员**就都成了
-可被实测证伪的问题——下面各条正是这些问题在 `sbx` 上量出来的答案,它们是这条 invariant 的物化依据,
-不是一串旁证。**别重新发现一遍。**
+Cross-sandbox **network** isolation is an **independent control-plane invariant** that does not
+ride on pillar ①'s back — why pillar ① cannot hold it, conclusion and reasoning both, is in §2.3
+(one sentence: it virtualizes syscalls, it does not intercept network packets). What this section
+gives is **the other half** of that conclusion: since it can only be materialized by §5.D's rule
+set, then **where the rule set must land, what the predicates must bind to, and which members the
+floor must hold** all become questions falsifiable by measurement — the items below are exactly
+those questions' answers, measured on `sbx`. They are this invariant's materialization evidence,
+not a string of corroborating anecdotes. **Do not rediscover them a second time.**
 
-> **编号是一条全局序列,分节只为导航。** 引用一律写 `D5 ⑦` 这种编号、不写节号——一条事实换了分节
-> 归属时,按编号的引用不会失配。**方向分节是承重的**:出站的钩子归属结论**推不到**入站(⑮ 就是那条
-> 反例),故两组不能混读。
+> **The numbering is one global sequence; the subsections exist only for navigation.** A citation
+> always writes a numeral like `D5 ⑦`, never a subsection number — when a fact's subsection
+> ownership changes, a citation by numeral does not go stale. **The direction split is
+> load-bearing**: an egress hook-ownership conclusion **does not carry over** to ingress (⑮ is
+> exactly that counter-example), so the two groups must not be read interchangeably.
 >
-> **编号按量到的先后给,分节按主题放,故节内的编号不连续也不单调——这是刻意的,不是缺页。** 反过来做
-> (让编号跟着文档顺序)要求每次新增都重排既有编号,而别处按编号的引用**不会报错、只会无声改指另一条**
-> ——与 open-decisions 末尾拒绝按位置引用的理由逐字相同。
+> **Numerals are assigned in the order each fact was measured; subsections are organized by topic
+> — so numerals within a subsection are neither contiguous nor monotonic, and that is deliberate,
+> not a missing page.** Doing it the other way (numbering to follow document order) would require
+> renumbering every existing item on each addition, and a citation elsewhere by numeral **would
+> not error, it would silently point at a different item** — word for word the same reason
+> open-decisions' closing note refuses citation by position.
 
-**先给复现归属,因为"别重新发现一遍"只对能重跑的那些成立。** 标 `未入库` 的条目其测量床是一次性 fixture,
-**已经不存在**——它们的结论仍然承重(下面各条自带机制解释),但要再确认一次只能重新搭床量,不能重跑:
+**Reproduction provenance comes first, because "do not rediscover" only holds for the items that
+can actually be rerun.** Items marked `not checked in` were measured on a one-shot fixture that
+**no longer exists** — their conclusions still hold (each item below carries its own mechanical
+explanation), but re-confirming them requires rebuilding the measurement rig from scratch, not
+rerunning a script:
 
-| 编号 | 一句话 | 复现脚本 |
+| Numerals | One line | Reproduction script |
 | --- | --- | --- |
-| ⑬⑭⑮⑯ | publish 要伴随 SNAT · 宿主自身拨测要 `output` 侧 DNAT · 转换后落 `forward` · 绑 loopback 与无监听者不可区分 | `test/preflight/spike-publish-ingress.sh`(⑬ 的 DNAT-only 对照除外,见该条 ⚠) |
-| ㉒ | 接管时对规则集的三种改动里,只有"整份原子重装"不断流;清 ct 表是活连接杀手 | `test/preflight/spike-ct-adopt.sh` |
-| ㉔ | 第二跳只在 `output` 上可见、`forward` 上三种形状全计 0;那个钩子唯一的收窄谓词是 `skuid`,且它漏匹配 | `test/preflight/spike-hop2-hook.sh` |
-| ⑲⑳㉓、㉑ 第三组、⑤ 的档位那一段 | v4-mapped 不必作规则成员(危险换到校验层)· `forwarding=0` 不是守宿主 v6 地址的机制 · NAT64 前缀对 v4 词汇家族盲、但整段 drop 会拒掉公网出站 · 地板与档位的部分重叠靠次序解对 · `default:allow` 下宿主 LAN 只有档位接得住 | `test/preflight/spike-denysafe-tiers.sh`(㉓ 的端到端绕过除外,见该条 ⚠;⑤ 的可达性那一半仍是它自己的 runsc 测量,见该条 ⚠) |
-| ⑥⑩⑪⑫⑰⑱、㉑ 前两组 | 端口-only 保留原始目标 · `via[]` 窄放行的三个 clause · 一条无 family 限定的 `inet` 规则覆盖 IPv6 · `iif` 的 fail-open · interval set 拒嵌套 · 地板内目标经 `allow[]` 死 / 经 `via[]` 活 | **(一次性 fixture,未入库)** |
-| ①–⑤⑦⑧⑨ | sibling 可达 · netns 内钩子计 0 · `saddr` 可伪造而 `iif` 不可 · 沙箱地址空间是固定 CIDR · 出网三件 · `default:deny` 下的 DNS · 第一跳的钩子分裂 · `drop` vs `reject` | **(一次性 fixture,未入库)**——⑤ 的档位那一段例外,见上一行 |
+| ⑬⑭⑮⑯ | publish needs an accompanying SNAT · the host's own dial test needs an `output`-side DNAT · post-translation traffic lands on `forward` · binding loopback is indistinguishable from no listener | `test/preflight/spike-publish-ingress.sh` (except ⑬'s DNAT-only control, see that item's ⚠) |
+| ㉒ | Of the three things a control-plane restart's rule-set handling might do, only "a whole atomic reinstall" keeps flows alive; flushing the ct table is a live-connection killer | `test/preflight/spike-ct-adopt.sh` |
+| ㉔ | The second hop is visible only on `output`; all three shapes count 0 on `forward`; the only narrowing predicate on that hook is `skuid`, and it misses matches | `test/preflight/spike-hop2-hook.sh` |
+| ⑲⑳㉓, ㉑'s third group, ⑤'s tier paragraph | v4-mapped need not be a rule member (the danger moves to the validation layer) · `forwarding=0` is not the mechanism that guards the host's own v6 addresses · the NAT64 prefix is family-blind to v4 vocabulary, but dropping the whole range refuses public egress · a partial overlap between the floor and the tier is resolved by ordering · under `default:allow` only the tier catches the host LAN | `test/preflight/spike-denysafe-tiers.sh` (except ㉓'s end-to-end bypass, see that item's ⚠; ⑤'s reachability half is still its own runsc measurement, see that item's ⚠) |
+| ⑥⑩⑪⑫⑰⑱, ㉑'s first two groups | Port-only retains the original destination · `via[]`'s narrow allowance's three clauses · one family-unqualified `inet` rule covers IPv6 · `iif`'s fail-open · an interval set refuses nested members · a destination inside the floor dies via `allow[]` / lives via `via[]` | **(one-shot fixture, not checked in)** |
+| ①–⑤⑦⑧⑨ | sibling reachable · netns-internal hooks count 0 · `saddr` forgeable while `iif` is not · the sandbox address space is a fixed CIDR · the three egress mechanisms · DNS under `default:deny` · the first hop's hook split · `drop` vs `reject` | **(one-shot fixture, not checked in)** — except ⑤'s tier paragraph, see the row above |
 
-### D5.a 出站
+### D5.a Outbound
 
-**① 点对点 `/30` veth 不隔离 sibling。** **消除二层邻接并不消除可达性**——宿主在两个 `/30` 之间
-**路由**(`ip_forward=1`),东西向根本不需要 L2 邻接。实测:两个真 runsc 沙箱各自一对 `/30`、无共享网桥
-(即 `local_runsc` 今天的形态),sandbox A **完成了到 sibling B guest IP 的 TCP 握手并读到其载荷**。
-故把 sibling 地址空间纳入 L0 地板是这条 invariant **唯一的物化方,不是兜底**;点对点 veth 是**纵深防御
-的一层**(它关掉"同网段直连"这一条路径),不是物化方。
+**① A point-to-point `/30` veth does not isolate a sibling.** **Removing L2 adjacency does not
+remove reachability** — the host **routes** between two `/30`s (`ip_forward=1`), and east-west
+traffic needs no L2 adjacency at all. Measured: two real runsc sandboxes, each with its own `/30`
+pair, no shared bridge (i.e. `local_runsc`'s shape today) — sandbox A **completed a TCP handshake
+to sibling B's guest IP and read back its payload**. So folding the sibling address space into
+the L0 floor is this invariant's **only materialization, not a backstop**; the point-to-point veth
+is **one layer of depth defense** (it closes off "direct connection on the same L2 segment" as one
+path), not the materialization.
 
-**② 沙箱 netns 内的规则看不到 guest 报文。** gVisor netstack 经 L2(`fdbased`/`SOCK_RAW`)注入,guest
-报文**不遍历该 netns 的 L3 钩子**:实测 5 个包在 netns `inet output`/`postrouting` 计数为 **+0**,在
-`netdev egress` 为 +5,在**宿主侧** `prerouting` 全见。故 enforcement 只能挂**宿主端 veth**或
-`netdev`/`egress` 钩子,**放在沙箱 netns 内的透明截获不成立**。
+**② Rules inside the sandbox netns never see guest packets.** The gVisor netstack injects at L2
+(`fdbased`/`SOCK_RAW`), so guest packets **never traverse that netns's L3 hooks**: measured, 5
+packets count **+0** on the netns's `inet output`/`postrouting`, +5 on `netdev egress`, and are
+fully visible on the **host-side** `prerouting`. So enforcement can only hang on the **host-side
+veth** or the `netdev`/`egress` hook — **transparent interception placed inside the sandbox netns
+does not hold**.
 
-> **这一条同时解释了为什么最完整的那类开源实现对我们不可移植。** 那类实现把整条链挂在**沙箱自己的
-> netns 内**(sidecar 共享 netns)。那对普通容器成立(进程真在那个 netns 里),对 gVisor guest
-> **计数为 0**。所以"宿主端 veth"不是风格偏好,是这条实测的直接后果——落位抄不了它。
+> **This also explains why the most complete open-source implementation surveyed is not portable
+> to us.** That implementation hangs its whole chain **inside the sandbox's own netns** (a sidecar
+> sharing the netns). That holds for an ordinary container (the process really is in that netns);
+> for a gVisor guest it **counts 0**. So "host-side veth" is not a style preference — it is the
+> direct consequence of this measurement; that implementation's placement cannot be copied.
 
-**③ 源地址谓词可被 guest 伪造,入接口谓词不可。** guest root 能给自己网卡加地址(实测 `ip addr add`
-rc=0),**`saddr` 谓词被绕过**(3 个包命中"已绕过"计数器);`iif` 谓词在同一攻击下**全数拦住**。这是
-支柱④ 的实测依据。
+**③ The source-address predicate can be forged by the guest; the ingress-interface predicate
+cannot.** Guest root can add an address to its own NIC (measured `ip addr add` rc=0), which
+**bypasses the `saddr` predicate** (3 packets hit the "bypassed" counter); the `iif` predicate
+**blocks it entirely** under the same attack. This is the measured basis for pillar ④.
 
-**④ 沙箱地址空间是单个固定 CIDR。** 所有沙箱的 `/30` 都出自 `local_runsc` 里一个固定的 `/16`,故 L0 的
-sibling 项是一条**静态 CIDR**,不是运行时维护的成员集——它因此可以住在一个无依赖的 leaf 包里,两跳共用
-同一份,不需要任何跨进程分发机制。
+**④ The sandbox address space is a single fixed CIDR.** Every sandbox's `/30` is carved out of one
+fixed `/16` in `local_runsc`, so the L0 floor's sibling item is a **static CIDR**, not a
+runtime-maintained membership set — it can therefore live in a dependency-free leaf package,
+shared identically by both hops, with no cross-process distribution mechanism needed.
 
-**⑤ 不装规则时的"不通"没有一条是强制,逃逸步数按目标而异。** 到宿主 LAN 与 sibling:guest 里一条
-`ip route add default via <host> dev <veth>` 就够(**要带 `dev`**,不带则 rc=0 但不通)。真正出网还差
-宿主侧 SNAT——裸底座上不通是"没有默认路由"**且**"没有 SNAT"两件事一起,两件都只是**缺省**,
-故**规则是唯一的强制面**:这是 D4.1「收窄不可绕过」在出站侧的具体来源。
-**出网所需的宿主侧机制恰好三件、一件不多**(实测,真 runsc guest 完成了 TLS 与 `git ls-remote`):
-`ip_forward=1`(全局)· guest 侧带 `dev` 的默认路由 · 宿主侧对该 `/30` 的 masquerade。**反面也量了**:
-`rp_filter` 收严到 1 **不影响**(回程路由本就走该 veth),`proxy_arp` / `accept_local` / per-interface
-`forwarding` 三样**都不需要**——别往引擎里加。
+**⑤ None of the "unreachability" with no rules installed is enforcement; the number of escape
+steps varies by target.** To the host LAN and to a sibling: one `ip route add default via <host>
+dev <veth>` inside the guest suffices (**it must carry `dev`** — without it, rc=0 but it does not
+work). True egress needs one more thing, host-side SNAT — unreachability on the bare base is "no
+default route" **and** "no SNAT" together, and both are only **defaults**, so **rules are the only
+enforcement surface**: this is the concrete source of D4.1's "narrowing must be unbypassable" on
+the egress side. **Egress needs exactly three host-side mechanisms, not one more** (measured, a
+real runsc guest completed TLS and `git ls-remote`): `ip_forward=1` (global) · a guest-side default
+route carrying `dev` · host-side masquerade for that `/30`. **The negative case was also measured**:
+tightening `rp_filter` to 1 **has no effect** (the return route already goes out that veth), and
+`proxy_arp` / `accept_local` / per-interface `forwarding` are **all unneeded** — don't add them to
+the engine.
 
-**这三件装齐之后,`egress.default: allow` 就真的把宿主 LAN 交出去了,故内网 deny-safe 档不是便利、是那句
-承诺的交付面。** 补测(`spike-denysafe-tiers.sh` 的对照臂):三件齐备、只有地板没有档位时,沙箱到宿主 LAN
-上另一台机器的 sshd(一个 RFC1918 地址 + tcp/22)的流量**离开 netns、被宿主路由,在 `forward` 钩子上只有
-一条 RFC1918 词汇的规则接得住它**——地板的四项(link-local / loopback / 宿主自身的任一地址 / sibling
-沙箱地址空间,次序按 §2.4)没有一项覆盖那个地址。⟹ **少了这一档,`default: allow` 等于把宿主 LAN 整个交给沙箱**;这一档**是否存在**
-因此不是开放问题(成员判据才是,见 D8)。
+**Once these three are in place, `egress.default: allow` really does hand over the host LAN, so
+the internal deny-safe tier is not a convenience — it is the delivery surface of that promise.** A
+supplementary measurement (`spike-denysafe-tiers.sh`'s control arm): with all three mechanisms in
+place, the floor installed and no tier, traffic from a sandbox to another host-LAN machine's sshd
+(an RFC1918 address plus tcp/22) **leaves the netns, gets routed by the host, and on the `forward`
+hook only a rule written in RFC1918 vocabulary catches it** — none of the floor's four items
+(link-local / loopback / any address of the host itself / the sibling sandbox address space,
+ordered per §2.4) covers that address. ⟹ **Without this tier, `default: allow` hands the entire
+host LAN over to the sandbox**; whether this tier **exists** is therefore not an open question
+(only its membership criteria are, see D8).
 
-> **⚠ 补测那一臂是可见性对照,不是"宿主 LAN 可达"的独立证明。** 它断言的是**档位规则看见了那条流量**
-> (RFC1918 计数器动了),拨测结局只作 note;**可达性那一半的效力来自 ⑤ 本体的 runsc 测量**(一条带 `dev`
-> 的默认路由就够到宿主 LAN)。**强制那一半另有配对断言**:同一份规则集里装上 `ip daddr 192.168.0.0/16 drop`
-> 后,同一台 LAN peer **拨不通且计数器上涨**,故"档位能接住它"是量到的、不是推的。测量床是普通 netns peer
-> (与 ⑩⑪⑫ 同一条允许理由)。
+> **⚠ That supplementary measurement is a visibility control, not an independent proof that "the
+> host LAN is reachable".** What it asserts is that **the tier rule saw that traffic** (the
+> RFC1918 counter moved); the dial-test's outcome is recorded only as a note. **The reachability
+> half's evidence comes from ⑤'s own runsc measurement** (a default route carrying `dev` is
+> already enough to reach the host LAN). **The enforcement half has its own paired assertion**:
+> after adding `ip daddr 192.168.0.0/16 drop` to the same rule set, the same LAN peer **cannot be
+> dialed and the counter climbs**, so "the tier catches it" is measured, not inferred. The
+> measurement rig is an ordinary netns peer (the same permitted reason as ⑩⑪⑫).
 
-**⑥ 端口-only 重定向保留原始目标;UDP 的危险在另一个接口上。** 两半的证据与推论都在 D3.3 / D3.2,
-此处不复制。
+**⑥ Port-only redirection retains the original destination; UDP's danger lives on a different
+interface.** Both halves' evidence and reasoning are in D3.3 / D3.2, not duplicated here.
 
-**⑦ `default:deny` 下 DNS 必须由调用方显式声明 UDP,否则先挂再报错名。** 只放行 TCP/53 时该规则收到
-**0 包**、UDP/53 丢包计数上升:解析器**不回落 TCP**。观测到的症状是 `getent` 挂 **20.06 s**、
-`curl`/`git` 挂 **10.08 s** 后报 **`Could not resolve host`**——**不是**策略拒绝(D4.3 诊断错位的实例)。
-**但在谈策略之前先记一条更靠前的事实:guest 今天根本没有解析器配置。** `build-rootfs.sh` 只写
-`/etc/passwd` / `/etc/group` / `/etc/hostname`,**不写 `resolv.conf`**,全仓也没有任何一处挂载或生成它
-(实测 `grep -rn resolv internal/ cmd/` 零命中)。故今天 guest 里 `curl` 直接报 `Could not resolve host`、
-Go 程序回落到 `[::1]:53` 被拒——**DNS 在 guest 里今天完全不工作,这早于任何 §5.D 策略问题**。谁来写那份
-`resolv.conf` 是**模板/产品层的内容选型**(与 open-decisions「§5.A / 模板(内容目录)」同类),不是引擎
-语义;但**它是"声明 DNS"这件事的前置条件**,故记在此处。
+**⑦ Under `default:deny`, DNS must be explicitly declared UDP by the caller, or it hangs first
+and only then reports a resolution error.** With only TCP/53 allowed, that allow rule receives
+**0 packets** while the UDP/53 drop counter climbs — the resolver **does not fall back to TCP**.
+The observed symptom is `getent` hanging **20.06 s**, `curl`/`git` hanging **10.08 s** before
+reporting **`Could not resolve host`** — **not** a policy refusal (an instance of D4.3's
+diagnostic dislocation). **But before discussing policy, one more basic fact needs recording
+first: the guest today has no resolver configuration at all.** `build-rootfs.sh` writes only
+`/etc/passwd` / `/etc/group` / `/etc/hostname`, **never writes `resolv.conf`**, and nothing
+anywhere in the repo mounts or generates one (measured, `grep -rn resolv internal/ cmd/` gives zero
+hits). So today, inside the guest, `curl` reports `Could not resolve host` directly, and Go
+programs fall back to `[::1]:53` and get refused — **DNS simply does not work inside the guest
+today, and that predates any §5.D policy question**. Who writes that `resolv.conf` is a
+**product/template-layer content choice** (the same class as open-decisions' "§5.A / Template
+(content catalog)"), not engine semantics; but **it is a precondition for the act of "declaring
+DNS"**, so it is recorded here.
 
-另外三条与地板的关系要记准:**loopback 解析器(`127.0.0.53`)对 gVisor guest 是"构造上不可达"而非被策略
-拦**(零规则时它就打在 guest 自己 netstack 的 loopback 上、根本不出沙箱,宿主侧 `daddr 127.0.0.0/8` 计数
-**0**,而同期 link-local 计数 5),故地板的 loopback 项对 gVisor guest 是**冗余的纵深防御**;
-**唯一稳定可用的宿主本地解析器地址恰好是该沙箱自己的 `/30` 网关**,它**落在 sibling CIDR 里**——一条朴素的
-`drop 10.66.0.0/16` 会把它一起杀掉(实测),故地板必须在 sibling drop **之前**放行"本沙箱自己的网关";
-该网关落 `input`,故 **§5.D 语义 ③ 的兑现路径是 `input` 侧的声明放行**(钩子问题已定,见 D4.2;在此之前
-它没有兑现路径);
-而**"解析器地址是否落在地板内"是部署特异的**:本机解析器是 `0.250.250.200`(在 `0.0.0.0/8` 内,既非
-loopback 也非 link-local),**不在**地板任何一项里,故**此机上它可声明**——但在一台解析器为 `127.0.0.53`
-或链路本地的宿主上就不可声明。**这是部署环境的性质,不是本引擎的缺陷**,该结论不能反过来当成"地板设计有
-问题"。
+Three more items on the relationship with the floor need recording precisely: **a loopback
+resolver (`127.0.0.53`) is "structurally unreachable" rather than "blocked by policy" for a gVisor
+guest** (with zero rules installed it lands on the guest's own netstack loopback and never leaves
+the sandbox at all — the host-side `daddr 127.0.0.0/8` counts **0** while link-local counts 5 in
+the same window), so the floor's loopback item is **redundant defense in depth** for a gVisor
+guest; **the only stably-reachable host-local resolver address happens to be that sandbox's own
+`/30` gateway**, which **falls inside the sibling CIDR** — a naive `drop 10.66.0.0/16` would kill
+it too (measured), so the floor must allow "this sandbox's own gateway" **before** the sibling
+drop; that gateway lands on `input`, so **§5.D semantics ③'s delivery path is the `input`-side
+declaration allowance** (the hook question is already settled, see D4.2; before that it had no
+delivery path); and **whether the resolver address falls inside the floor is deployment-specific**:
+on this machine the resolver is `0.250.250.200` (inside `0.0.0.0/8`, neither loopback nor
+link-local), **not** in any floor item, so **on this machine it is declarable** — but it would not
+be declarable on a host whose resolver is `127.0.0.53` or a link-local address. **This is a
+property of the deployment environment, not a defect of this engine**, and the conclusion cannot
+be turned around into "the floor's design has a problem".
 
-**⑧ 第一跳分裂成 `input` / `forward` 两个钩子,且 `input` 侧不需要地址清单。** 到宿主**自身**任一地址
-(veth IP、eth0 IP、宿主本地 link-local)落 `input`;到宿主会**路由**的东西(sibling、中转 link-local)落
-`forward`。据此一条 `iifname` 收窄的**纯 ct-state** `input` 地板静态覆盖宿主全部地址(`iifname` 是它成为
-**每沙箱**规则的全部理由——去掉它就不是地板而是一个宿主级入站杀伤开关,连 orchestrator 自己的
-`127.0.0.1` 监听与 sshd 一并拦掉,因为 loopback 也过 `input`):装上后 guest 经**任何**宿主地址
-都到不了一个 `0.0.0.0` 通配监听者,而**规则装好之后**新加的宿主地址**同样被拦**。⟹ **宿主自身端点从不被
-枚举**。仅 `forward` 的地板会**整个漏掉 guest→宿主**(实测:sibling 被拦
-而 guest→宿主 `CONNECTED`)。**两个反面症状相反**:朴素 daddr 地板压在 established accept 之上 →
-transport **彻底死**(响得很大声);宽 accept 压在地板之上 → **完全静默**,全部可达性测试照过,唯一信号是
-**地板计数器为 0**。故验收必须断言"netns 内不可达" **+** "刻意探测后地板计数非 0"。
+**⑧ The first hop splits into two hooks, `input` / `forward`, and the `input` side needs no address
+list.** Anything to the host **itself** (veth IP, eth0 IP, host-local link-local) lands on `input`;
+anything the host will **route** (sibling, transit link-local) lands on `forward`. On this basis, an
+`iifname`-narrowed **pure ct-state** `input` floor statically covers every host address
+(`iifname` is the entire reason it can be a **per-sandbox** rule — remove it and it stops being a
+floor and becomes a host-level ingress kill switch, blocking the orchestrator's own `127.0.0.1`
+listener and sshd along with it, because loopback also traverses `input`): once installed, the
+guest cannot reach a `0.0.0.0` wildcard listener via **any** host address, and a host address added
+**after the rule is already installed** is **equally blocked**. ⟹ **The host's own endpoints are
+never enumerated.** A floor covering only `forward` **misses guest→host entirely** (measured: the
+sibling is blocked while guest→host is `CONNECTED`). **The two failure symptoms are opposite**: a
+naive daddr floor placed above an established accept → transport **dies outright** (loud); a wide
+accept placed above the floor → **completely silent**, every reachability test still passes, and
+the only signal is **the floor's counter reading 0**. So acceptance must assert both "unreachable
+from inside the netns" **and** "the floor's counter is non-zero after a deliberate probe".
 
-**⑨ gVisor 认 ICMP 差错,故 `drop` 与 `reject` 的 guest 体验差数个数量级**(20.0 s timeout vs
-0.002 s `no route to host`;**两臂都已在 runsc 上复现**——`reject` 0 ms、`drop` ≥ 25 s,复现条件与"为何仍按
-量级断言"见 D4.3 末尾那个块,本条不复制)。连带结论"面向 guest 的拒绝用 `reject`"在 D4.3。同一批测量确认
-**gVisor 不改变 conntrack 与 original-dst 的任何结论**:一条 gVisor 发起的 HTTP 流其回程在
-`established,related` 上计 7 个包(`invalid`=0、`untracked`=0),且去掉 ct-state 放行后**被放行的流也断**
-(证明它承重);端口-only 重定向对 gVisor 发起的连接同样取回真实目标(`1.1.1.1:443` /
-`93.184.215.14:443` / `8.8.4.4:443` 三个不同目标各自正确)。**⑥ 因此在 gVisor 上独立复现,不只是 netns 上的
-结论。**
+**⑨ gVisor honors ICMP errors, so `drop` and `reject` differ by orders of magnitude in the guest's
+experience** (20.0 s timeout vs 0.002 s `no route to host`; **both arms have now been reproduced on
+runsc** — `reject` 0 ms, `drop` ≥ 25 s; the reproduction conditions and why the assertion still goes
+by magnitude are in the block at the end of D4.3, not duplicated here). The associated conclusion
+"refusals facing the guest use `reject`" is in D4.3. The same round of measurement confirms
+**gVisor changes nothing about conntrack or original-dst**: a gVisor-originated HTTP flow's return
+traffic counts 7 packets on `established,related` (`invalid`=0, `untracked`=0), and removing the
+ct-state allowance **breaks even an allowed flow** (proving it load-bearing); port-only redirection
+recovers the real destination for a gVisor-originated connection just as well (three different
+targets — `1.1.1.1:443` / `93.184.215.14:443` / `8.8.4.4:443` — each correct). **⑥ is therefore
+independently reproduced on gVisor, not only a netns-level conclusion.**
 
-**⑩ `via[]` 那条窄放行必须同时钉住三样,少一样就有一条实测的反例。** 三样是:被声明授权的
-**pre-NAT 目标**(`ct original ip daddr` + `ct original proto-dst`)、被引流到的**post-NAT 端口**
-(`tcp dport <listener>`)、以及 `iifname`。显式 endpoint 形态的最终形状:
+**⑩ `via[]`'s narrow allowance must pin three things at once; miss one and there is a measured
+counter-example.** The three: the declaration-authorized **pre-NAT destination**
+(`ct original ip daddr` + `ct original proto-dst`), the **post-NAT port** it steers to
+(`tcp dport <listener>`), and `iifname`. The final shape for the explicit-endpoint form:
 
 ```
 iifname "<vh>" ct original ip daddr <declared_cidr> ct original proto-dst <declared_port> \
     tcp dport <listener_port> ct state new counter name <cnt> accept
 ```
 
-透明截获形态(`match` 为 `cidr:any, port:N`)**恰好少一个 clause**:去掉 `ct original ip daddr`——它必须
-去掉,因为该声明授权的就是"那个端口上的任意目标",留着 cidr clause 会拦掉合法流量。⟹ **生成器当且仅当
-声明钉了 cidr 时发那个 clause。**
+The transparent-interception form (`match` is `cidr:any, port:N`) is **missing exactly one
+clause**: `ct original ip daddr` is dropped — it must be dropped, because that declaration
+authorizes "any destination on that port", and keeping the cidr clause would block legitimate
+traffic. ⟹ **The generator emits that clause if and only if the declaration pins a cidr.**
 
-**四条实测反例,说明为什么三样都承重**(每条都是"某个更简的写法"被一条具体流量击穿):
+**Four measured counter-examples showing why all three are load-bearing** (each one is "some
+simpler way to write it", broken by one concrete flow):
 
-| 更简的写法 | 被什么击穿 | 后果 |
+| Simpler way to write it | Broken by what | Consequence |
 | --- | --- | --- |
-| `ct status dnat tcp dport <listener>` | 一条**未声明的原始端口**重定向到**已声明的 listener**(9200 → :18443) | 放行,地板计 0;监听者读到 `ORIGDST=…:9200` |
-| 只钉 `ct original proto-dst`(不钉 cidr) | 另一个目标地址的同端口 | 显式 endpoint 形态下越权 |
-| 钉 cidr + proto-dst,**不钉 listener 端口** | 已声明的原始端口重定向到**未声明的 listener**(`9.9.9.9:443` → :19999) | guest 到达一个**声明从未命名**的监听者(读回 banner `hello-from-UNDECLARED`) |
-| 省掉 `iifname` | **另一个沙箱**的同样流量 | 沙箱 2 的连接被沙箱 1 的 accept 放行(两边地板计数均 0)——**每沙箱一张 `policy accept` 基链共用同一钩子,故一张表里未加 `iifname` 的 accept 是所有沙箱地板上的洞** |
+| `ct status dnat tcp dport <listener>` | An **undeclared original port** redirected to a **declared listener** (9200 → :18443) | Allowed, floor counts 0; the listener reads `ORIGDST=…:9200` |
+| Pin only `ct original proto-dst` (no cidr) | The same port on a different destination address | Exceeds authorization under the explicit-endpoint form |
+| Pin cidr + proto-dst, **no listener port** | A declared original port redirected to an **undeclared listener** (`9.9.9.9:443` → :19999) | The guest reaches a listener **the declaration never named** (banner read back: `hello-from-UNDECLARED`) |
+| Drop `iifname` | The same traffic from **a different sandbox** | Sandbox 2's connection is allowed by sandbox 1's accept (both sides' floor counters stay 0) — **each sandbox's own `policy accept` base chain shares the same hook, so an accept with no `iifname` in one table is a hole in every sandbox's floor** |
 
-**`tcp dport <listener>` 单用正是"直连 listener 端口绕过引流"那条旁路(`TestViaSteersAndDoesNotReopenTheFloor`
-覆盖),而作为第三个 clause 它恰是堵住上表第三行的那一个**——同一个
-表达式既危险又必需,区别在于 `ct original` 已经先钉住了 pre-NAT 元组(而直连 listener 的流量没有可满足它的
-conntrack original 条目)。**别让任何人"简化"掉它。**
+**Used alone, `tcp dport <listener>` is exactly the "dial the listener port directly, bypassing
+steering" side channel (covered by `TestViaSteersAndDoesNotReopenTheFloor`), and as the third clause
+it is precisely what plugs the third row of the table above** — the same expression is both
+dangerous and necessary, and the difference is that `ct original` has already pinned the pre-NAT
+tuple (whereas traffic dialing the listener directly has no conntrack original entry that could
+satisfy it). **Do not let anyone "simplify" it away.**
 
-**这条同时量到一个新陷阱,它会让计数器断言读成健康:** 那条 accept **必须与地板 drop 同链**。放进
-**同钩子、更低 priority 的另一条基链**时,它**匹配了、accept 计数器涨了,而流量仍被地板 drop、连接仍失败**
-——因为基链的 `accept` 只结束**那条链**,包继续进下一条基链;**只有终结型 verdict(`drop` / `reject`,后者
-发完差错报文后同样返 `NF_DROP`)跨链终止**。⟹ **"accept 计数器
-非 0"不足以证明放行生效**,working 那一侧必须同时断言可达。
+**This item also measured a new trap that would make a counter assertion read as healthy:** that
+accept **must be in the same chain as the floor drop**. Placed in **a different base chain on the
+same hook at a lower priority**, it **matches — the accept counter climbs — while the traffic is
+still dropped by the floor and the connection still fails** — because a base chain's `accept` only
+ends **that chain**; the packet continues into the next base chain. **Only a terminal verdict**
+(`drop` / `reject`, the latter also returning `NF_DROP` after emitting its error packet)
+**terminates across chains.** ⟹ **"the accept counter is non-zero" does not prove the allowance is
+effective** — the working side must also assert reachability at the same time.
 
-**⑪ 一条不带 family 限定的纯 ct-state `inet` `input` 规则连 IPv6 一起覆盖。** 结论、"guest 自造全局前缀
-仍被拦"这一最强形式、以及"关掉 veth IPv6 只有宿主侧那半站得住(guest root 能改回自己那半)"全在 D4.2,
-本条不复制。附带两条量法上的事实:本机 **IPv6 conntrack 编进内核而非模块**(故 `lsmod` 是错的探针,
-`nf_conntrack_count` 在跑测期间 0 → 8),而 v6/v4 的 SYN 尺寸(80 B / 60 B)与家族标记观测计数器一起
-**把每一次 drop 归因到确定的家族**,不靠总数推断。**另一条附带**:宿主侧链路本地由 MAC 经 EUI-64 导出,
-**是确定的、guest 可预测的**,不是随机值。
+**⑪ A family-unqualified pure ct-state `inet` `input` rule covers IPv6 along with everything
+else.** The conclusion, the strongest form ("the guest crafts its own global prefix and is still
+blocked"), and "turning off the veth's IPv6 only has its host-side half hold up (guest root can
+flip its own half back)" are all in D4.2, not duplicated here. Two incidental measurement facts:
+this machine's **IPv6 conntrack is built into the kernel rather than a module** (so `lsmod` is the
+wrong probe; `nf_conntrack_count` went 0 → 8 during the test run), and v6/v4 SYN sizes (80 B / 60
+B) together with a family-tagged observation counter **attribute every drop to a definite family**,
+rather than inferring from the total. **One more incidental fact**: the host-side link-local
+address is derived from the MAC via EUI-64, so it is **deterministic and guest-predictable**, not
+a random value.
 
-**⑫ `iif` 会在 veth 同名重建后静默 fail-open,`iifname` 不会——机制在字节码里,不是推断。** `iif`
-编译成 `cmp eq reg 1 0x00000008`(一个**冻结的整数**),`iifname` 编译成名字的字符串字节;同名重建后
-`iif` 的字节码**逐字节不变**,仍指向那个已死的 ifindex。实测端到端:`iif`-only 地板下 guest 的 `HELLO`
-**被投递**,而 drop 计数器为 **0**。`iifname` 在同一次重建循环里照常匹配。竞争解释被排除了:一次路由
-冲突产生的是**对称**挂起(两个计数器相等),而 stale ifindex 的签名是 `iif`=0 / `iifname`>0 这种**不对称**。
+**⑫ `iif` fails open silently after a veth is rebuilt under the same name; `iifname` does not — the
+mechanism is in the bytecode, not an inference.** `iif` compiles to `cmp eq reg 1 0x00000008` (a
+**frozen integer**); `iifname` compiles to the string bytes of the name. After a rebuild under the
+same name, `iif`'s bytecode is **byte-for-byte unchanged**, still pointing at the now-dead ifindex.
+Measured end to end: under an `iif`-only floor, the guest's `HELLO` **was delivered**, with the
+drop counter at **0**. `iifname` kept matching normally across the same rebuild cycle. The race
+explanation was ruled out: a routing conflict produces a **symmetric** hang (both counters equal),
+while a stale ifindex's signature is the **asymmetric** `iif`=0 / `iifname`>0 pattern.
 
-> **量它的时候有一个会毁掉测量的陷阱,记在这里**:测试床若在重建 netns/veth 时**没有卸掉自己那张表**,
-> 规则里的 ifindex 就是对**上一次**的解析——从测试的视角看根本没发生重建,`iif` 于是表现成"从来不匹配"
-> 而不是"重建后不匹配"。`TestTheFloorStillHoldsAfterAVethRebuild` 要断言在"重建之后"这个时点上,故它必须真的
-重装表。
+> **There is a trap here that ruins the measurement if missed, recorded for the record**: if the
+> test rig does not **unload its own table** while rebuilding the netns/veth, the ifindex in the
+> rule still resolves to the **previous** one — from the test's point of view no rebuild happened
+> at all, and `iif` then presents as "never matches" instead of "does not match after a rebuild".
+> `TestTheFloorStillHoldsAfterAVethRebuild` must assert at the point in time "after a rebuild", so
+> it must genuinely reinstall the table.
 
-**两条附带,都影响写法**:① `nft list` 平时会把那个冻结整数**反解回名字**,故两种写法在列表里**看起来
-一样**——只有当没有接口持有该 index 时才露出裸的 `iif 12`,**故评审看列表看不出来**;② `iif` 对
-**不存在的接口无法装载**(rc=1 `Interface does not exist`),且一个 `-f` 文件里混进一条这样的规则会
-**整份原子失败**(不留半张表)——方向是安全的,但它拿走了"规则装在 guest 起跑之前"那条次序上的一个自由度。
-**一条未量但更坏的风险**:本次 ifindex 只增不减(8→10→12→16),从未观测到复用;若将来某个**别的**沙箱的
-veth 拿到一个退役的 index,一条 stale `iif` 规则会开始匹配**那个沙箱的流量**——不是漏洞而是**静默的跨沙箱
-错配**。未量,但它只增强这条守卫的理由。
+**Two incidental facts, both affecting how this is written**: ① `nft list` normally **resolves
+that frozen integer back to a name**, so the two spellings **look the same** in a listing — only
+when no interface holds that index does the bare `iif 12` show through, **so review by reading the
+listing cannot catch it**; ② `iif` **fails to load against a nonexistent interface** (rc=1
+`Interface does not exist`), and mixing one such rule into an `-f` file makes the **whole atomic
+load fail** (leaving no partial table) — the direction is safe, but it removes one degree of
+freedom in the ordering of "rules installed before the guest starts running". **One risk that is
+unmeasured but worse**: in this run ifindex only increased, never decreased (8→10→12→16), and
+reuse was never observed; if, in the future, some **other** sandbox's veth is assigned a retired
+index, a stale `iif` rule would start matching **that sandbox's traffic** — not a vulnerability but
+a **silent cross-sandbox misattribution**. Unmeasured, but it only strengthens the case for this
+guard.
 
-**⑱ nft interval set 拒绝嵌套成员,而 `auto-merge` 会静默把子网并进父网。** 把一份含嵌套项的地址清单
-(如 IANA 特殊用途登记表)逐字写进一个 `flags interval` 的 set,**加载失败**:`Error: conflicting
-intervals specified`(`192.0.0.0/29` 在 `192.0.0.0/24` 内)。加 `auto-merge` 则**装得上**,代价是子网
-被并掉——`{10.0.0.0/8, 10.66.0.0/16}` 变成一项。⟹ **L0 地板与内网 deny-safe 档不能共用一个 set**:
-sibling `/16` 落在 `10/8` 内,共用要么装不上、要么把地板并没(而"并没"是静默的)。两者只能是**两条按
-次序排的规则**。方向是安全的(装不上比装错好),但它拿走了"一张 set 放完"这个自由度。
+**⑱ An nft interval set refuses nested members, and `auto-merge` silently folds a subnet into its
+parent.** Writing a list of addresses containing nested entries (such as the IANA special-purpose
+registry) verbatim into a `flags interval` set **fails to load**: `Error: conflicting intervals
+specified` (`192.0.0.0/29` is inside `192.0.0.0/24`). Adding `auto-merge` **makes it load**, at the
+cost of the subnet being folded away — `{10.0.0.0/8, 10.66.0.0/16}` becomes one entry. ⟹ **The L0
+floor and the internal deny-safe tier cannot share one set**: the sibling `/16` falls inside `10/8`,
+and sharing would either fail to load or silently fold the floor away (and "folded away" happens
+silently). The two can only be **two rules, ordered**. The direction is safe (failing to load beats
+loading wrong), but it removes the degree of freedom of "fit everything into one set".
 
-**⑲ v4-mapped 目标在线上就是 IPv4 包,故一条 `ip6 daddr ::ffff:0:0/96` 的臂恒计零。** 量法要点:必须用
-**裸 `AF_INET6` socket**,不能用 `net.Dial`——库会在内核看到之前就把家族归一化掉。实测拨
-`::ffff:<v4>`:`ip daddr <v4>` 计数照涨,而 `meta nfproto ipv6` 计 **0**;把 `::ffff:0:0/96` 单独立一条
-臂,同一次拨测下它计 **0** 而 v4 臂计满。⟹ **匹配层不需要这个成员**。**但危险没有消失,它换了层**:
-`netip.Prefix.Contains` **不**做 v4-mapped 解包(`169.254.0.0/16` 对 `::ffff:169.254.169.254` 返回
-**false**,只有 `.Unmap()` 之后才 true;而旧的 `net.IPNet.Contains` 经 `To4()` **会**解包并直接返回
-true)。故一个按家族分支的校验谓词会把 `::ffff:169.254.169.254/128` 判成 v6、只与 v6 成员比、**放它过**
-——然后这个包以 IPv4 离开、死在 v4 地板上。**API 收下而线上静默拒绝**,正是 D4.3 那类诊断错位。
-⟹ 声明校验必须**在任何包含判定之前就拒掉 v4-mapped / v4-compatible 字面量**(而不是"归一化后再比"):
-§5.D 说声明只收 IP 字面量,`::ffff:192.168.1.1` 是一个已有拼法的**第二种拼法**,收下它就意味着落库的
-Binding 与调用方的文本不同,而两种拼法在后续每一次 read-modify-write 里都比不相等。**同时**在谓词内部
-照样 `.Unmap()`,这样将来若有人撤掉那条拒绝,包含判定不会静默地变成家族盲。
+**⑲ A v4-mapped destination is a plain IPv4 packet on the wire, so an `ip6 daddr ::ffff:0:0/96` arm
+always counts zero.** A measurement subtlety: a **raw `AF_INET6` socket** must be used, not
+`net.Dial` — the standard library normalizes the family away before the kernel ever sees it.
+Measured, dialing `::ffff:<v4>`: the `ip daddr <v4>` counter climbs as expected while `meta
+nfproto ipv6` counts **0**; putting `::ffff:0:0/96` on its own arm, the same dial counts **0** on
+it while the v4 arm counts the full total. ⟹ **The matching layer does not need this member.** **But
+the danger has not gone away, it has moved to a different layer**: `netip.Prefix.Contains` does
+**not** unmap a v4-mapped address (`169.254.0.0/16` against `::ffff:169.254.169.254` returns
+**false**, only true after `.Unmap()`; the older `net.IPNet.Contains`, via `To4()`, **does** unmap
+and returns true directly). So a validation predicate that branches on family would judge
+`::ffff:169.254.169.254/128` to be v6, compare it only against v6 members, and **let it through** —
+and the packet then leaves as IPv4 and dies on the v4 floor. **Accepted by the API while silently
+refused on the wire** — exactly D4.3's class of diagnostic dislocation. ⟹ Declaration validation
+must **reject v4-mapped / v4-compatible literals before any containment test at all** (not
+"normalize, then compare"): §5.D says the declaration only accepts IP literals, and
+`::ffff:192.168.1.1` is a **second spelling** of an address that already has a spelling; accepting
+it would mean the Binding stored differs from the caller's text, and the two spellings would then
+compare unequal on every subsequent read-modify-write. **At the same time**, the predicate itself
+still `.Unmap()`s internally, so that if someone ever lifts that refusal, the containment test does
+not silently become family-blind.
 
-**⑳ 宿主自身的 ULA 在 `forwarding=0` 下照样可达,因为那是本机投递;而该 sysctl 真正管到的那一侧
-会让计数器骗人。** 本机 `eth0` 有一个 `fc00::/7` 内的 ULA;`net.ipv6.conf.all.forwarding=0` 时沙箱
-**仍连得上它并读到载荷**,计数落在 **`input`**。⟹ **那个 sysctl 从来不是守宿主自身 v6 地址的机制**
-(⑧ 那条纯 ct-state `input` 地板才是)。**需要被路由**的 ULA(别的机器上的)才受它管,而那一侧的症状
-必须记准:`forwarding=0` 时包**在到达 `forward` 钩子之前**就被丢,故**地板与档位的计数器一动不动**
-——按 D4.1 的纪律,"计数为 0 + 拨不通"在这里**不是一次通过**,它与"规则根本没装"逐字不可区分。
-**故 IPv6 的验收断言不能只看"不可达"**:要么先把 `forwarding` 设为 1 再断言规则拦住了它,要么显式承认
-这一格测的是 sysctl 而不是引擎。**连带一条设计结论**:`forwarding=0` 不能被当作机制写进任何义务
-——它是引擎不拥有的全局宿主态,而任何想要 v6 出网的部署都必须把它设成 1,故"保护"与"功能"互斥。
+**⑳ The host's own ULA is still reachable under `forwarding=0`, because that is local delivery to
+the host; and the side that sysctl actually governs makes the counters lie.** This machine's
+`eth0` has a ULA inside `fc00::/7`; with `net.ipv6.conf.all.forwarding=0` the sandbox **can still
+connect to it and read back the payload**, counted on **`input`**. ⟹ **That sysctl was never the
+mechanism guarding the host's own v6 addresses** (⑧'s pure ct-state `input` floor is). Only a ULA
+that **needs to be routed** (one on another machine) is governed by it, and that side's symptom
+must be recorded precisely: with `forwarding=0`, the packet is dropped **before it ever reaches the
+`forward` hook**, so **neither the floor's nor the tier's counters move at all** — per D4.1's
+discipline, "count 0 plus unreachable" here is **not a pass**, it is byte-for-byte indistinguishable
+from "the rule was never installed". **So IPv6's acceptance assertion cannot rest on
+"unreachable" alone**: either set `forwarding` to 1 first and then assert the rule blocked it, or
+explicitly acknowledge that this cell is testing the sysctl, not the engine. **One design
+conclusion attached**: `forwarding=0` must never be written into any obligation as a mechanism — it
+is global host state the engine does not own, and any deployment that wants v6 egress at all must
+set it to 1, so "protection" and "the feature working" are mutually exclusive here.
 
-**㉓ NAT64 `64:ff9b::/96` 在线上是纯 IPv6,故 v4 词汇的档位对它家族盲;但整段 drop 同样不行。** 实测
-(与 ⑳ 同一个 `forwarding=1` 窗口内——⑳ 的机制说了 `forwarding=0` 时包到不了 `forward` 钩子,故这一格
-只能在窗口里量):同一台 LAN peer 的 NAT64 形式在一份**活着且在计数**的 `ip daddr 192.168.0.0/16 drop`
-之下,**那条 v4 drop 从未见到它**,而一条 `ip6 daddr 64:ff9b::/96` 的臂计到了它。⟹ **v4 集合机械派生
-v6 侧时,NAT64 映像那一半有了实测依据**。**但它推不出"整段 `64:ff9b::/96` drop"**:按 RFC 6052 该前缀
-映射的是**整个 v4 地址空间**、公网目标一并在内,故在真做 NAT64 的部署上整段 drop 会拒掉
-`egress.default: allow` 承诺的那部分公网出站。⟹ 只能派**各成员的映像**,不能派前缀本身。
+**㉓ NAT64's `64:ff9b::/96` is pure IPv6 on the wire, so a v4-vocabulary tier is family-blind to it;
+but dropping the whole range is equally wrong.** Measured (inside the same `forwarding=1` window as
+⑳ — ⑳'s mechanism established that with `forwarding=0` packets never reach the `forward` hook, so
+this cell can only be measured inside that window): the same LAN peer's NAT64 form, under a
+**live, counting** `ip daddr 192.168.0.0/16 drop`, is **never seen by that v4 drop**, while an
+`ip6 daddr 64:ff9b::/96` arm does count it. ⟹ **When the v4 set is derived mechanically for the v6
+side, the NAT64-image half of that derivation has measured grounds.** **But it does not license
+"drop the whole `64:ff9b::/96`"**: per RFC 6052, that prefix maps **the entire v4 address space**,
+public destinations included, so on a deployment genuinely doing NAT64, dropping the whole range
+would refuse the public egress that `egress.default: allow` promises. ⟹ Only the **image of each
+member** may be derived, never the prefix itself.
 
-> **⚠ 这一格的效力止于"家族与可见性",端到端绕过未在本机证成。** 强制的对照(同一前缀内一个**无监听者**
-> 的地址)**同样报 `connected`**:本机 `64:ff9b::/96` 的下一跳替前缀内任意地址应答握手,故"连上了"证不了
-> 真的到达了那台 LAN peer,脚本按 D4.1 把这一格记为 INVALID 而非通过。**成立的那半由计数器给**:流量是
-> on-wire IPv6、被 `ip6 daddr 64:ff9b::/96` 匹配,而同期那条活的 v4 drop 计数不动——但**这两个读数在该分支
-> 里只以 note 印出、未被断言门控**(脚本还把 v6 侧读数回填成旧值,免得它喂给下游那条 drop 断言),故复现时
-> 要读跑测输出里的数字。
+> **⚠ This cell's effect stops at "family and visibility"; an end-to-end bypass was not established
+> on this machine.** The enforcement control (an address inside the same prefix with **no
+> listener**) **also reports `connected`**: on this machine, `64:ff9b::/96`'s next hop answers the
+> handshake on behalf of any address inside the prefix, so "connected" does not prove the LAN peer
+> was actually reached, and the script marks this cell INVALID rather than passing, per D4.1. **The
+> half that does hold is given by the counter**: the traffic is on-wire IPv6, matched by
+> `ip6 daddr 64:ff9b::/96`, while the live v4 drop's count does not move at the same time — but
+> **these two readings are printed only as a note in that branch and are not gated by any
+> assertion** (the script even backfills the v6-side reading with a stale value so it does not feed
+> the downstream drop assertion), so reproducing this means reading the numbers in the run's output
+> directly.
 
-**㉑ 地板内目标经 `allow[]` 是死规则,经 `via[]` 却是活的——同一个地址,两个相反结局;而部分重叠靠
-次序解对。** 三组实测:
-- 地板持 `169.254.0.0/16`,声明 `allow 169.254.169.254:80` 压在其下 → **不可达,地板计数 0→3,而这条
-  声明自己的计数器恒 0**。⟹ 它是一条**永不被求值的死规则**。
-- 同一份声明改用 `via[]`(一条 `prerouting` DNAT 到宿主本地 listener)→ **1–2 ms 连通、读回真实 banner、
-  ⑩ 那条窄放行计数 0→1,而 forward 侧地板计数不动**。机制:DNAT 在 `prerouting`,**早于** filter 地板,
-  转换后落进 `input`。⟹ **`via[]` 不是"抬地板"**——guest 从未到达那个地板内地址,是一个**宿主本地进程**
-  到达的。故"地板内即拒"这类校验**不能推广到 `via[].match[]`**,否则会杀掉"把地板内目标交给引擎外进程
-  判"这个用法(metadata 代理正是它)。**两个字段在此处校验不对称是机制事实,不是遗漏。**
-- **部分重叠**:地板持 `10.66.0.0/16`、声明 `allow 10.0.0.0/8` 在其下 → 内网 `10.77.250.2` **可达**
-  (声明计数 0→1)、sibling `10.66.251.2` **被拦**(地板计数 3→6、声明计数不动)、sibling 网关**被拦**。
-  ⟹ 次序把超网解对,**故任何"落在地板内即拒"的判定必须按整段包含写、不能按相交**——按相交会让合法的
-  内网超网无法声明。
+**㉑ A destination inside the floor is a dead rule via `allow[]` but live via `via[]` — the same
+address, two opposite outcomes; and a partial overlap is resolved by ordering.** Three measured
+groups:
+- The floor holds `169.254.0.0/16`; a declaration `allow 169.254.169.254:80` placed below it →
+  **unreachable, the floor's count goes 0→3, while that declaration's own counter stays at 0.** ⟹
+  It is a rule that is **never evaluated at all**.
+- The same declaration, using `via[]` instead (a `prerouting` DNAT to a host-local listener) →
+  **connected in 1–2 ms, real banner read back, ⑩'s narrow allowance counts 0→1, and the
+  `forward`-side floor's count does not move.** Mechanism: DNAT is on `prerouting`, **earlier than**
+  the filter floor, and post-translation traffic lands on `input`. ⟹ **`via[]` does not "lift the
+  floor"** — the guest never reaches that in-floor address; what reaches it is a **host-local
+  process**. So a "refused because inside the floor" validation **cannot be generalized to
+  `via[].match[]`**, or it would kill the exact use case of "hand a destination inside the floor to
+  a process outside the engine to judge" (a metadata proxy is exactly that). **These two fields
+  being validated asymmetrically here is a mechanical fact, not an oversight.**
+- **Partial overlap**: the floor holds `10.66.0.0/16`; a declaration `allow 10.0.0.0/8` placed below
+  it → an internal address `10.77.250.2` is **reachable** (declaration's count 0→1), sibling
+  `10.66.251.2` is **blocked** (floor's count 3→6, declaration's count unchanged), and the sibling's
+  gateway is **blocked**. ⟹ Ordering resolves the overlapping supernet, **so any "refused because
+  inside the floor" judgment must be written as whole-range containment, never as intersection** —
+  using intersection would make a legitimate internal supernet undeclarable.
 
-> **⑩⑪⑫ 的测量床是普通 netns peer,不是真 runsc guest**(⑨ 已独立证明 gVisor 不改变 conntrack 与
-> original-dst 的任何结论,故这是被允许的省略)。⑩ 那两条新发现——**跨链 accept 的陷阱**与
-> **`forward` 侧需要自己的 default-deny**——已在 runsc 下复跑
-> (`TestOneSandboxsRuleSetDoesNotAffectAnothers` / `TestDenyEmptyIsUnreachableEverywhereWithFloorCountersMoving`)。
+> **⑩⑪⑫'s measurement rig is an ordinary netns peer, not a real runsc guest** (⑨ already
+> independently proved gVisor changes nothing about conntrack or original-dst, so this omission is
+> permitted). ⑩'s two new findings — **the cross-chain accept trap** and **"the `forward` side
+> needs its own default-deny"** — have already been rerun under runsc
+> (`TestOneSandboxsRuleSetDoesNotAffectAnothers` /
+> `TestDenyEmptyIsUnreachableEverywhereWithFloorCountersMoving`).
 
-**㉔ 第二跳落 `output`,不落 `forward`;而 `output` 上的收窄谓词只能是 `skuid`,故那个钩子需要自己的
-渲染守卫。** 实测(`test/preflight/spike-hop2-hook.sh`,普通 netns peer 作目标):一个宿主本地进程的出站在
-`forward` 上**三种形状一律计 0**(`skuid` / 裸 daddr / `iifname` 各 0),而同一条流在 `output` 上全见
-(`out_any=5`)。`postrouting` 也计 0(nat 钩子只求值一条流的第一个包,且该表没装 NAT)。
-⟹ **D4.2 那张两钩子表只覆盖第一跳**;按它写出来的地板(`input` + `forward`,`iifname` 收窄)**看不到第二跳
-的任何一个包**,而这个漏法的症状是**地板计数器不动** —— D4.1 点名的静默通过。**三条连带结论,都影响写法**:
+**㉔ The second hop lands on `output`, not on `forward`; and the only narrowing predicate `output`
+offers is `skuid`, so that hook needs its own render guard.** Measured
+(`test/preflight/spike-hop2-hook.sh`, an ordinary netns peer as the target): a host-local process's
+egress **counts uniformly 0 in all three shapes on `forward`** (`skuid` / bare daddr / `iifname`
+each 0), while the same flow is fully visible on `output` (`out_any=5`). `postrouting` also counts
+0 (the nat hook only evaluates a flow's first packet, and that table has no NAT installed). ⟹
+**D4.2's two-hook table covers only the first hop**; a floor written from it (`input` + `forward`,
+`iifname`-narrowed) **sees not a single packet of the second hop**, and this leak's symptom is
+**the floor's counter not moving** — the silent pass-through D4.1 named. **Three attached
+conclusions, all affecting how this is written**:
 
-| 量到的 | 对写法的约束 |
+| What was measured | Constraint on how it is written |
 | --- | --- |
-| `meta skuid` 在 `output` 上可求值并**确实拦得住**:该 uid 的探测失败、计数 3,而同一探测**以 root 跑拿到 banner** | 第二跳的强制点是 `output` 上一条 `skuid` 收窄的 drop |
-| **未收窄的 drop 在 `output` 上是宿主级出网杀伤开关**:root 的探测同样失败(计数 6) | 这是守卫 ② 的危险**在第二个钩子上的复现**,而**这里 `iifname` 当不了那个收窄**(流量不从任何接口进来)⟹ `output` 钩子要有**自己**的收窄守卫,谓词是 `skuid` |
-| `skuid` **不可靠匹配整条流**:直接反向测量读 `noown=0/5`,而 Q1 在 3 次运行的 2 次里读到 `skuid` 只匹配 4/5 | **drop 侧安全、accept/`RETURN` 侧不安全**(见 D4.2 那张表下面那段);漏匹配的包会穿过一条压在地板之上的放行 |
+| `meta skuid` is evaluable on `output` and **genuinely blocks**: a probe by that uid fails, count 3, while the same probe **run as root gets the banner** | The second hop's enforcement point is a `skuid`-narrowed drop on `output` |
+| **An un-narrowed drop on `output` is a host-level egress kill switch**: root's probe fails too (count 6) | This is guard ②'s danger **reproduced on the second hook**, and **here `iifname` cannot serve as that narrowing** (the traffic does not arrive on any interface) ⟹ the `output` hook needs **its own** narrowing guard, predicated on `skuid` |
+| `skuid` **does not reliably match a whole flow**: a direct reverse measurement read `noown=0/5`, while Q1 read `skuid` matching only 4/5 in 2 of 3 runs | **Safe on the drop side, unsafe on the accept/`RETURN` side** (see the paragraph below D4.2's table); packets `skuid` fails to match pass straight through an allowance placed above the floor |
 
-**一条控制臂**:`output` 基链上的 `policy drop` **可以**被一条 `skuid !=` 的 accept 压住(root 拿到 banner)
-—— 与守卫 ② 量到的"`iifname` 收窄不了链 policy"**相反**。**别把它读成"这里可以用 `policy drop`"**:它成立
-只因为本地包几乎总带 owner,而上一行恰好说了那个"几乎"不是"全部"。
+**One control arm**: an `output` base chain's `policy drop` **can** be held open by a `skuid !=`
+accept (root gets the banner) — the **opposite** of what guard ② measured ("`iifname` cannot
+narrow a chain's policy"). **Do not read this as "`policy drop` is fine to use here"**: it only
+holds because a local packet almost always carries an owner, and the row above just said that
+"almost" is not "always".
 
-**顺带两条纯渲染事实**,都会把故障现场指错地方:① 一个 `-f` 文件里**命名计数器必须声明在引用它的链之前**;
-② **`fwd` 是 nft 1.1.6 的保留词、不能作链名**,而报错会让**其后每条链**各报一个假语法错 —— 即一次链名撞车
-表现成"我的规则语法写错了",且现场在几条链之外。
+**Two incidental pure-rendering facts, in passing, both of which point the failure at the wrong
+place**: ① in an `-f` file, **a named counter must be declared before the chain that references
+it**; ② **`fwd` is a reserved word in nft 1.1.6 and cannot be used as a chain name**, and the
+resulting error makes **every chain after it** each report a spurious syntax error — that is, one
+chain-name collision presents as "my rule's syntax is wrong", with the real site several chains
+away.
 
-**测量床是普通 netns peer**(与 ⑩⑪⑫ 同一条允许理由:这里量的是 nft 的钩子归属与谓词语义,与发起方是不是
-gVisor 无关 —— 第二跳的发起方**本来就是宿主进程**,不是 guest)。
+**The measurement rig is an ordinary netns peer** (the same permitted reason as ⑩⑪⑫: what is being
+measured here is nft's hook ownership and predicate semantics, unrelated to whether the originator
+is gVisor — the second hop's originator **is always a host process**, never the guest).
 
-### D5.b 入站 / `publish`
+### D5.b Inbound / `publish`
 
-**这五条推不出自上面任何一条**——入站走 `prerouting` → 转换 → 某个钩子,而上面的钩子分裂结论(⑧)是对
-guest **发起**的流量量的。**⑬–⑯** 在真 runsc guest + 一个独立 netns 充当"外部调用方"上量过
-(`test/preflight/spike-publish-ingress.sh`);**⑰ 另一床**,见该条。
+**None of these five items follow from any item above** — inbound goes `prerouting` → translation
+→ some hook, while the hook-split conclusion above (⑧) was measured for traffic **originated** by
+the guest. **⑬–⑯** were measured on a real runsc guest plus a separate netns acting as "the
+external caller" (`test/preflight/spike-publish-ingress.sh`); **⑰ used a different rig**, see that
+item.
 
-**⑬ publish 的回程需要宿主侧 SNAT,否则它悄悄依赖 guest 有一条默认路由。** 只装 DNAT 时,来自
-**本沙箱 `/30` 之外**的调用方能把 SYN 送到 guest,但 guest 的回包在 netstack 里**无路可走**——实测
-`to_guest=2 / from_guest=0`,调用方读到 timeout。补一条 `oifname <hveth> ip daddr <guest> snat to <网关>`
-后,guest 看到的源地址变成**它自己的 `/30` 网关**(on-link),回程不再需要任何 guest 侧路由,同一条
-流立刻 `connected`。⟹ **`publish` 要真的是"纯宿主侧规则"(§5.D 的原话),生成器必须连这条 SNAT 一起发**;
-只发 DNAT 会得到一个"在有默认路由的沙箱上能用、在没有的沙箱上超时"的功能。
+**⑬ publish's return path needs host-side SNAT, or it quietly depends on the guest having a
+default route.** With only DNAT installed, a caller from **outside this sandbox's own `/30`** can
+get a SYN to the guest, but the guest's reply packet **has nowhere to go** inside the netstack —
+measured `to_guest=2 / from_guest=0`, the caller reads a timeout. After adding
+`oifname <hveth> ip daddr <guest> snat to <gateway>`, the source address the guest sees becomes
+**its own `/30` gateway** (on-link), the return path no longer needs any guest-side route, and the
+same flow immediately becomes `connected`. ⟹ **For `publish` to really be "a purely host-side
+rule"** (§5.D's own wording), the generator must emit this SNAT along with the DNAT; emitting only
+the DNAT produces a feature that "works on a sandbox with a default route, times out on one
+without".
 
-> **⚠ 这一条的效力分两半,别当整条都可复现。** **有 SNAT 的那一半**是入库脚本每次都跑的路径(它无条件
-> 装那条 SNAT,计数器叫 `pre_dnat` / `post_snat` / `fw_*`)。**"只装 DNAT"那个对照**是在一次性 fixture 上
-> 量的(`to_guest` / `from_guest` 这两个名字即出自它),**入库脚本并不跑这一格**——那里它只以一条代码注释
-> 存在。故**结论方向可信**(没有 SNAT 时回程在 netstack 里无路可走,这有独立的机制依据),而**那两个具体
-> 计数无法由入库脚本重跑**。要把它变成可复现的,得让脚本把 DNAT-only 排成真正的一格。
+> **⚠ This item's effect splits into two halves; do not treat the whole item as reproducible.**
+> **The half with SNAT** is the path the checked-in script runs every time (it unconditionally
+> installs that SNAT; the counters are named `pre_dnat` / `post_snat` / `fw_*`). **The "DNAT-only"
+> control** was measured on a one-shot fixture (the names `to_guest` / `from_guest` come from it),
+> and **the checked-in script does not run that cell** — there it exists only as a code comment.
+> So **the direction of the conclusion is credible** (with no SNAT the return path has nowhere to
+> go inside the netstack, and this has independent mechanical grounds), but **those two specific
+> counts cannot be rerun by the checked-in script**. Making it reproducible requires the script to
+> promote DNAT-only into a real cell.
 
-> **同一次测量带出一条更基础的 substrate 事实:sentry 在 boot 时把 L3 地址从内核侧 veth 上收走。**
-> boot 后在该 netns 里 `ip addr` **只剩 `lo`**(veth link 仍在、仍 UP),故 `ip route add default via …`
-> 报 `Nexthop has invalid gateway` ——**guest 侧的路由只能在 boot 之前配,boot 之后配不上**。这与
-> "IP 由引擎自己分配、不做 boot 后探测"是同一个机制的两面,但后者约束的是**读**,这条约束的是**写**:
-> 出网三件机制里"guest 侧带 `dev` 的默认路由"因此**必须在 `runsc run` 之前**装好,不能等拉起后补——
-> 它落在与规则集同一个原子窗口里(§2.4)。
+> **The same measurement surfaced a more basic substrate fact: the sentry withdraws the L3 address
+> from the kernel-side veth at boot.** After boot, `ip addr` inside that netns shows **only `lo`**
+> (the veth link is still present and still UP), so `ip route add default via …` fails with
+> `Nexthop has invalid gateway` — **the guest-side route can only be configured before boot, never
+> after**. This is the other face of the same mechanism as "the engine assigns the IP itself, with
+> no post-boot probing" — but that constrains **reads**, while this one constrains **writes**: of
+> the three host-side egress mechanisms, "the guest-side default route carrying `dev`" must
+> therefore be installed **before `runsc run`**, and cannot be patched in after the guest comes up
+> — it falls inside the same atomic window as the rule set (§2.4).
 
-**⑭ 宿主自身发起的 publish 流量不经 `prerouting`,需要 `output` 钩子上自己一条 DNAT。** 同一份只装了
-`prerouting` DNAT 的规则集下,从**调用方 netns** 拨通(`pre_dnat` 计 1),从**宿主**拨同一个
-`ip:port` 则完全不被转换(`pre_dnat` 不动);补一条 `output`/`dstnat` 规则后宿主侧也通(`out_dnat` 计 1)。
-⟹ **"宿主上的调试拨测能通"不是 publish 生效的证据,反之亦然**:两条路径由两条不同的规则承载,验收要
-分别断言,而 `TestPublishIsReachableFromOutsideAndFromTheHostAndSurvivesResume` 按此拆成两问。
+**⑭ Publish traffic originated by the host itself does not traverse `prerouting`, and needs its
+own DNAT on the `output` hook.** Under the same rule set with only a `prerouting` DNAT installed,
+dialing from **the caller's netns** connects (`pre_dnat` counts 1); dialing the same `ip:port` from
+**the host** is not translated at all (`pre_dnat` unchanged); after adding an `output`/`dstnat`
+rule, the host side connects too (`out_dnat` counts 1). ⟹ **"A debug dial from the host works" is
+not evidence that publish is effective, and neither is the reverse**: the two paths are carried by
+two different rules, and acceptance must assert them separately —
+`TestPublishIsReachableFromOutsideAndFromTheHostAndSurvivesResume` is split into two questions on
+this basis.
 
-**⑮ 转换后的 publish 流量落 `forward`,不落 `input`。** 实测 `fw_*` 计数随每条 publish 流增长而
-`in_*` 恒 0。⟹ **D5 ⑧⑩ 那个"被引流的流量落 `input`"的结论不可搬到入站**:`via[]` 的目标是**宿主本地
-端点**(故转换后仍在本机,落 `input`),而 publish 的目标是**guest IP**(故转换后要被路由出去,落
-`forward`)。**同一个 `prerouting` DNAT,两个不同的下游钩子,区别只在转换后的目标是不是本机地址。**
-生成器必须按这一点决定伴随 accept 挂哪条链。
+**⑮ Translated publish traffic lands on `forward`, not on `input`.** Measured, the `fw_*` count
+grows with every publish flow while `in_*` stays at 0. ⟹ **D5 ⑧⑩'s conclusion that "steered
+traffic lands on `input`" does not carry over to inbound**: `via[]`'s target is a **host-local
+endpoint** (so post-translation traffic is still local to this machine, landing on `input`), while
+publish's target is **the guest IP** (so post-translation traffic must be routed onward, landing
+on `forward`). **The same `prerouting` DNAT, two different downstream hooks — the difference is
+only whether the post-translation destination is a local address.** The generator must decide
+which chain carries the companion accept based on this.
 
-**⑯ guest 绑 `127.0.0.1` 与"根本没有监听者"在调用方侧不可区分——两者都是 `refused`。** 实测
-B(guest 绑 loopback)= `refused` @1 ms,C(guest 里没有任何监听者)= `refused` @0 ms,**逐字相同**:
-gVisor netstack 对两种情形都回 RST。⟹ **§5.D 用户可见语义 ① 因此只承诺"被拒且快速失败",不承诺
-可归因。** **方向是好的**——两者都**不挂住**,故那条语义真正承重的那半
-(不是超时)成立且已复现;不成立的只是"可归因"。**归因只能在引擎侧做**:引擎知道自己装了哪条 publish
-规则、也能读那条规则的计数器,而调用方只有一个 RST。
+**⑯ A guest bound to `127.0.0.1` and "no listener at all" are indistinguishable from the caller's
+side — both are `refused`.** Measured, case B (guest bound to loopback) = `refused` @1 ms, case C
+(no listener at all inside the guest) = `refused` @0 ms, **byte-for-byte identical**: the gVisor
+netstack returns RST for both cases. ⟹ **§5.D's user-visible semantic ① therefore only promises
+"refused and fails fast", never attributability.** **The direction is good** — neither case
+**hangs**, so the half of that semantic that is actually load-bearing (not a timeout) holds and has
+been reproduced; only "attributable" does not hold. **Attribution can only happen on the engine
+side**: the engine knows which publish rule it installed and can read that rule's counter, while
+the caller only ever sees one RST.
 
-> **一条本次未能有效断言的**:D 那一格想顺带证"publish 的伴随 accept 没有变成一条出站路径"(D1 ④),
-> 但该 guest 没有默认路由,故它的出站在**离开沙箱之前**就 `net is unreachable` 了,地板 drop 计数为
-> **0** ——按 D4.1 的纪律这是**无效断言**,不是一次通过。它由
-> `TestPublishDoesNotOpenAnEgressPathOnTheSubstrate` 覆盖(那里的沙箱**有**默认路由,故同一条探测会真的
-> 打到地板上)。
+> **One thing this run could not effectively assert**: cell D wanted to also prove "publish's
+> companion accept did not turn into an egress path" (D1 ④), but that guest had no default route,
+> so its egress already got `net is unreachable` **before ever leaving the sandbox**, and the
+> floor drop's count stayed at **0** — per D4.1's discipline this is an **invalid assertion**, not
+> a pass. It is covered by `TestPublishDoesNotOpenAnEgressPathOnTheSubstrate` (whose sandbox **does**
+> have a default route, so the same probe genuinely reaches the floor).
 
-**⑰ 删掉 publish 的 DNAT 只关新连接,已建立的流照旧传数据;而只删伴随 SNAT 的失败签名完全不同。**
-两半都是实测(netns peer 床,一次性 fixture,**未入库**):
-- **删两条 DNAT**(`prerouting` + `output`)之后,新连接 `refused`,而**同一条已建立的流 8/8 条消息
-  全部往返成功、逐条读回校验**,ct 条目数删前删后都是 1。⟹ **conntrack 持着那份 NAT 绑定,规则删除对
-  它不求值**(与 ㉒ 的机制同源,那里是从"重装"一侧看同一件事)。**这条必须用读回来量,不能用写返回值**:
-  往一条对端已消失的 socket 上 `write()` 通常会成功一次才拿到 `EPIPE`,故"写成功"证不了投递。
-- **只删伴随 SNAT**(DNAT 留着)之后,已建立的流照样 6/6 往返,而**新连接的症状是"连上了但读超时"**
-  (`connected_no_payload`,2 s),**不是 `refused`**:DNAT 仍把 SYN 引到 guest、握手完成,但没有 SNAT
-  回程不可路由(⑬ 的机制),故调用方挂在等一份永远不来的数据上。
+**⑰ Removing publish's DNAT only closes new connections; an already-established flow keeps moving
+data as before — and removing only the companion SNAT produces a completely different failure
+signature.** Both halves measured (netns peer rig, one-shot fixture, **not checked in**):
+- **After removing both DNAT rules** (`prerouting` + `output`), a new connection is `refused`,
+  while **the same already-established flow completes all 8 of 8 round-trip messages, each read
+  back and verified**, with the ct entry count identical before and after removal. ⟹ **conntrack
+  holds that NAT binding, and rule removal is never evaluated against it** (the same mechanism as
+  ㉒'s, viewed from the "reinstall" side there). **This must be measured by reading data back, not
+  by a write's return value**: a `write()` to a socket whose peer is already gone usually succeeds
+  once before returning `EPIPE`, so "the write succeeded" proves nothing about delivery.
+- **After removing only the companion SNAT** (DNAT left in place), an already-established flow
+  still completes 6/6 round trips, while **the symptom for a new connection is "connects but reads
+  time out"** (`connected_no_payload`, 2 s), **not `refused`**: the DNAT still steers the SYN to the
+  guest and the handshake completes, but with no SNAT the return path cannot be routed (⑬'s
+  mechanism), so the caller hangs waiting on data that will never arrive.
 
-⟹ 两条可操作结论。**一,`publish` 的撤销在 `running` 上撤不干净**——只能承诺"不再收新连接",不能承诺
-"这个端口关了",而两者的差别正是调用方撤一个入站口时想要的东西(故**没有 un-publish 专用端点**,理由是
-机制而非工期:撤销走 `PATCH` 整份声明,在下一次 placement 上才真的关掉那个口——
-`TestRevokingAPublishClosesThePortAtTheNextPlacement`)。**二,一份半拆的 publish 规则集会以最难诊断的方式坏掉**:少了 SNAT 表现为
-连上后挂住,极易被误读成 guest 侧应用故障。故"publish 不通"有**两个不同签名**,验收要分别断言、
-不能合并成"不可达"。
+⟹ Two actionable conclusions. **One, revoking `publish` cannot be cleanly undone on a `running`
+sandbox** — it can only promise "no new connections accepted", never "this port is closed", and the
+gap between the two is exactly what a caller wants when revoking an inbound port (hence **there is
+no dedicated un-publish endpoint**, and the reason is mechanical, not scheduling: revocation goes
+through a `PATCH` of the whole declaration, and the port is only actually closed at the next
+placement — `TestRevokingAPublishClosesThePortAtTheNextPlacement`). **Two, a half-torn-down publish
+rule set breaks in the hardest-to-diagnose way possible**: missing the SNAT presents as "connects
+then hangs", and is very easily misread as a guest-side application fault. So "publish does not
+work" has **two distinct signatures**, and acceptance must assert them separately, never merged
+into one "unreachable".
 
-### D5.c 对账 / `Adopt`
+### D5.c Reconciliation / `Adopt`
 
-**㉒ 控制面重启不断流,但只有"整份原子重装"这一种写法安全;清 ct 表是活连接杀手。** 装上
-`conntrack`(1.4.9)后完成了这次测量。**本机没有 `/proc/net/nf_conntrack`**
-(`CONFIG_NF_CONNTRACK_PROCFS` 未开),故 netlink CLI 是唯一观测口。三种"接管时可能对规则集做的事",
-结论互不相同(真 runsc guest + 对端 netns,`test/preflight/spike-ct-adopt.sh`):
+**㉒ A control-plane restart does not break flows, but only "a whole atomic reinstall" is a safe
+way to do it; flushing the ct table is a live-connection killer.** This measurement was completed
+after installing `conntrack` (1.4.9). **This machine has no `/proc/net/nf_conntrack`**
+(`CONFIG_NF_CONNTRACK_PROCFS` not enabled), so the netlink CLI is the only observation channel.
+Three things a takeover "might do" to the rule set, with mutually different outcomes (a real runsc
+guest plus a peer netns, `test/preflight/spike-ct-adopt.sh`):
 
-| 做法 | 结果 | 机制与实测数 |
+| Approach | Result | Mechanism and measured numbers |
 | --- | --- | --- |
-| 一个 `nft -f` 文件里 bare-`table`+`delete`+定义(⑤ 那个幂等三连)**原子重装** | **流存活 5/5** | ct 条目 **id 逐次不变**;`post_masq` 恒 **0** 而字节仍在走 ⟹ 流走的是**旧条目里存着的转换**,nat 钩子不再求值;秒龄的新表上 `fw_est>0`,`established` 臂立刻接住活流 |
-| `delete` 后再 `install`(中间有可观测间隙) | **流必死 5/5** | ct 条目**分毫未变**(同 id、`ESTABLISHED`)⟹ **死因不是 ct 丢失**。间隙中发出的包以**裸沙箱源地址**到达对端(`p_raw +1`),对端不认这条连接、回 **RST**(`p_rst +1`) |
-| `conntrack -F` | **`tcp_loose=0` 下流死** | `fw_gdrop +6`、`fw_rdrop +1` ⟹ **⑨ 那个机制打在一条活流上**:回程不再满足 `established,related`,落地板 drop |
+| **Atomic reinstall** inside one `nft -f` file with bare-`table`+`delete`+definition (⑤'s idempotent three-step) | **Flows survive 5/5** | The ct entry's **id is unchanged across the operation**; `post_masq` stays **0** while bytes keep moving ⟹ the flow rides **the translation already stored in the old entry**, and the nat hook is never evaluated again; on the second-old table, `fw_est>0` and the `established` arm catches the live flow immediately |
+| `delete`, then `install` (with an observable gap in between) | **Flows die 5/5** | The ct entry is **unchanged down to the byte** (same id, `ESTABLISHED`) ⟹ **the cause of death is not a lost ct entry**. A packet sent during the gap arrives at the peer with the **bare sandbox source address** (`p_raw +1`), the peer does not recognize this connection, and replies **RST** (`p_rst +1`) |
+| `conntrack -F` | **The flow dies under `tcp_loose=0`** | `fw_gdrop +6`, `fw_rdrop +1` ⟹ **⑨'s mechanism hits a live flow**: the return traffic no longer satisfies `established,related`, and lands on the floor drop |
 
-**两条把结论钉死的对照**:① **只删 filter 链、不动 nat 链**,同样的删-间隙-重装**流不死**
-⟹ **危险的是 nat 链的缺失,不是地板的缺失**;② `delete` 与 `install` **背靠背**(中间无 sleep)则
-**3/3 存活**、`p_raw +0` ⟹ 间隙必须长到"流恰好在其间发了包"才致命。**故这是一条竞态,不是确定性失败
-——但坏那侧在秒级间隙上稳定可达,且 guest 何时发包不由引擎决定**,不能当作"间隙够小就行"的免责。
+**Two controls that pin the conclusion down**: ① **deleting only the filter chain, leaving the nat
+chain untouched**, the same delete-gap-reinstall sequence leaves **the flow alive** ⟹ **the danger
+is the nat chain's absence, not the floor's absence**; ② `delete` and `install` **back to back**
+(no sleep in between) gives **3/3 survival**, `p_raw +0` ⟹ the gap must be long enough for the flow
+to happen to send a packet during it before it becomes fatal. **So this is a race, not a
+deterministic failure — but the losing side is stably reachable at a second-scale gap, and when
+the guest sends a packet is not something the engine controls**, so it cannot be excused as "small
+enough gap is fine".
 
-**`conntrack -F` 那格必须连 sysctl 一起读,否则会量出一个假结论**:本机 `nf_conntrack_tcp_loose=1`
-(默认)让 conntrack **中途认领**一条自己没见过开头的流——故 flush 后观测到的是**一条新 ct 条目**
-(id 变、`post_masq +1` 即重新 NAT)而流照活;把它关成 0 再 flush,同一条流立刻死。⟹ **"flush 之后流
-还活着"是那个 sysctl 的性质,不是本设计的性质**,引擎不拥有它、不许依赖它。
+**The `conntrack -F` cell must be read together with a sysctl, or it measures a false
+conclusion**: this machine's `nf_conntrack_tcp_loose=1` (the default) lets conntrack **adopt a flow
+mid-stream even though it never saw the start** — so what is observed after a flush is **a new ct
+entry** (id changed, `post_masq +1`, i.e. re-NAT'd) with the flow still alive; turning it off to 0
+and then flushing kills the same flow immediately. ⟹ **"The flow is still alive after a flush" is a
+property of that sysctl, not a property of this design** — the engine does not own it and must not
+rely on it.
 
-**观测侧在哪一半**:流的 guest 端活在 sentry 的 netstack 里,在任何宿主 ct 表里都没有表示;实测**宿主**
-ct 表持有该流(按 guest IP + 端口成键、`[ASSURED]`),而**沙箱 netns 自己的 ct 表条目数恒 0**(与 ② 同源)。
-⟹ **承载这条流的是宿主侧那个 ct 条目,唯一份。**
+**Where the observation side actually sits**: the flow's guest-side half lives inside the sentry's
+netstack and has no representation in any host ct table; measured, **the host's** ct table holds
+this flow (keyed by guest IP plus port, `[ASSURED]`), while **the sandbox netns's own ct table
+entry count stays at 0** (the same root cause as ②). ⟹ **The single ct entry carrying this flow
+lives on the host side, and there is only one copy.**
 
-> **⟹ 对 §4.4-A `Adopt` 的三条硬约束**:**绝不清 ct 表**(任何形式)· **绝不"先 `delete` 表再装"** ·
-> **要重装就整份原子重装**。第三条反而是个有用的许可:`Adopt` 可以对捡到的表**不做任何推理**、直接重新
-> 渲染整份装上,比 diff 简单得多。**连带约束 `ReclaimOrphans`**:它按表名前缀枚举,若在同一次对账里排在
-> `Adopt` 之前而顺手删掉了活沙箱的表,那**逐字是上表第二行**——故 keep 集必须在任何删除**之前**算好。
+> **⟹ Three hard constraints on §4.4-A `Adopt`**: **never flush the ct table** (in any form) ·
+> **never "`delete` the table, then install"** · **if reinstalling at all, reinstall the whole
+> table atomically.** The third is in fact a useful permission: `Adopt` can do **no reasoning at
+> all** about a table it finds — it can just re-render the whole thing and install it, which is
+> simpler than diffing. **A constraint attached to `ReclaimOrphans`**: it enumerates by table-name
+> prefix, and if it runs before `Adopt` in the same reconciliation pass and ends up deleting a live
+> sandbox's table in passing, that is **word for word** the second row of the table above — so the
+> keep set must be computed **before** any deletion.
 >
-> **已复现,连同 `Adopt` 一起**:`TestALiveFlowSurvivesAControlPlaneRestartAndItsAdopt` 让一条 guest 侧的
-> 回显流跑在半途,期间起第二个引擎跑生产的 boot 次序、由它的 `Adopt` 重装规则集,断言**跨重启读回的往返
-> 次数**(不是 socket 还在——对死对端 `write()` 通常先成功一次才 EPIPE)。上面量的是一次 `Adopt`
-> **可能做的三种宿主态改动**,故该结论**条件于 `Adopt` 只做第一种**,而那正是这条断言守的东西。
-> **一处残留**:第二个引擎在同一进程内起(同一个 store 与 state 目录、生产的 boot 次序),OS 进程没有真被
-> 杀掉——差别落在进程级状态上,而这条结论承重的宿主态(ct 表、nft 表)都在进程之外。
+> **Already reproduced, `Adopt` included**: `TestALiveFlowSurvivesAControlPlaneRestartAndItsAdopt`
+> runs a guest-side echo flow halfway through, then starts a second engine following the production
+> boot sequence partway through, whose `Adopt` reinstalls the rule set, and asserts **the round-trip
+> count read back across the restart** (not that the socket is still open — a `write()` to a dead
+> peer usually succeeds once before EPIPE). What was measured above is the **three host-state
+> changes `Adopt` might make**, so that conclusion is **conditional on `Adopt` doing only the
+> first one**, which is exactly what this assertion guards. **One residual**: the second engine is
+> started inside the same OS process (the same store and state directory, the production boot
+> sequence), so the OS process itself was never actually killed — the difference lands on
+> process-level state, while the host state this conclusion rests on (the ct table, the nft table)
+> is all outside the process.
 
 ---
 
-## D6. 接口形状 vs registry plumbing:哪一半现在就该存在
+## D6. Interface shape vs registry plumbing: which half deserves to exist right now
 
-对 §1.3 判据最诚实的一刀:**"规则生成是纯函数" + "provider 收派生结果、不持声明权威"这两个形状现在
-就建**——它们是 single-node 实现本就该有的好设计,顺便成为未来的落点。**具体的多实现注册槽随第二个实现
-出现才建**:一块只有一个实现时,注册机制本身就是 reservation(§1.3 成本判据)。
+The most honest cut against §1.3's criterion: **build the two shapes "rule generation is a pure
+function" plus "the provider receives derived output and holds no authority over the declaration"
+right now** — they are good design a single-node implementation should have anyway, and they
+happen to become the future landing point too. **The concrete multi-implementation registration
+slot is built only once a second implementation shows up**: when a slot has only one
+implementation, the registration mechanism itself is a reservation (§1.3's cost criterion).
 
-**切在哪里由 D1 ② 定**:引擎侧那半只从声明与地板推出**抽象规则集**(placement-free、免 root、可单测);
-nft 文本的渲染、以及 `iif` / guest IP / publish 宿主端点的绑定**都在 provider 里、在 placement 时发生**
-——因为那三样是只有它才持有的宿主原语,抬上跨 provider 契约面就成了一次泄漏。**两半经 §5.A 那条已有的
-provider 契约相遇,`SteeringSpec` 是承载这一半的那个成员,不新增 seam 类型。**
+**Where the cut falls is fixed by D1 ②**: the engine-side half derives only an **abstract rule
+set** from the declaration and the floor (placement-free, root-free, unit-testable); rendering the
+nft text, and binding `iif` / the guest IP / publish's host endpoint, **all happen inside the
+provider, at placement time** — because those three are host primitives only the provider holds,
+and lifting them onto the cross-provider contract surface would be a leak. **The two halves meet
+through §5.A's existing provider contract; `SteeringSpec` is the member carrying this half — no
+new seam type is added.**
 
 ---
 
-## D7. litmus 自查(§1.3):全部落回三种加法之一
+## D7. Litmus self-check (§1.3): everything reduces to one of the three kinds of addition
 
-| 未来需求 | 归到哪类加法 | 需要新 seam 类型? |
+| Future need | Which kind of addition | Needs a new seam type? |
 | --- | --- | --- |
-| 扩到别的调度后端(K8s…) | register a runtime provider(behavior) | 否 |
-| 多租户 | add a join table(引擎**外**) | 否 |
-| 声明里新增一种放行 | add rows(Data;声明是 Binding) | 否 |
-| 出站审计喂计费 / observability | add a subscriber(Consumption,§4.1 event stream) | 否 |
-| 按 SNI 选后端 / 换凭证 / 终结 TLS | **不进引擎**(引擎外 adapter,§1.3 正交的引擎外轴) | 否 |
-| publish 前面加访问控制 | **不进引擎**(同上);引擎能强制的那半(按源 CIDR 放行)是一条规则谓词 | 否 |
+| Extend to another scheduling backend (K8s…) | register a runtime provider (behavior) | No |
+| Multi-tenancy | add a join table (**outside** the engine) | No |
+| Add a new kind of allowance to the declaration | add rows (Data; the declaration is a Binding) | No |
+| Egress audit feeding billing / observability | add a subscriber (Consumption, §4.1 event stream) | No |
+| Choose a backend by SNI / swap credentials / terminate TLS | **not inside the engine** (an adapter outside it, §1.3's orthogonal outside-the-engine axis) | No |
+| Access control in front of publish | **not inside the engine** (same as above); the half the engine can enforce (allow by source CIDR) is one rule predicate | No |
 
-**全 additive,不发明新 seam 类型**——这正是 §1.3 要的形状。注意最后两行落在**引擎外轴**上:它们连
-"引擎内要留一个 seam"都不需要,故引擎侧的加法数为零。
+**All purely additive, inventing no new seam type** — exactly the shape §1.3 wants. Note that the
+last two rows fall on the **outside-the-engine axis**: they do not even need "a seam reserved
+inside the engine", so the engine side's count of additions is zero for them.
 
 ---
 
-## D8. 仍待细化的议程(登记 open-decisions)
+## D8. The agenda still to be refined (registered in open-decisions)
 
-**地板的成员清单与规则文本都已收口,不在本节**:清单四项全静态(D5 ④⑧)、`via[]` 那条窄放行的形状与
-IPv6 覆盖见 D5 ⑩⑪、`iif` 的 fail-open 见 D5 ⑫。**"声明的放行是否也发在 `input`"已定**(发,且该侧自带
-sibling drop——D4.2)。**内网 deny-safe 档的成员已收口**(RFC1918 + v6 机械派生,§2.4;本节只留"是否
-放宽")。**第二跳的钩子与谓词也已收口**(`output` + `skuid`,D5 ㉔)。**故 §5.D 没有任何前置测量待做。**
-仍开放的三项:
+**The floor's membership list and rule text are already settled, and are not in this section**:
+all four list items are static (D5 ④⑧); the shape of `via[]`'s narrow allowance and its IPv6
+coverage are in D5 ⑩⑪; `iif`'s fail-open is in D5 ⑫. **"Whether the declaration's allowance is
+also emitted on `input`" is settled** (yes, and that side carries its own sibling drop — D4.2).
+**The internal deny-safe tier's membership is settled** (RFC1918 plus mechanical v6 derivation,
+§2.4; this section leaves open only whether to widen it). **The second hop's hook and predicate
+are also settled** (`output` plus `skuid`, D5 ㉔). **So §5.D has no pre-work measurement left to
+do.** Three items remain open:
 
-- **内网 deny-safe 档将来是否放宽到 RFC1918 之外**(**成员清单本身已收口进 §2.4**:RFC1918 三段 + v6
-  机械派生。开放的只是放宽,而放宽是纯加法)。
-- **fail-closed 是否发 §4.1 审计事件。**
-- **`SteeringSpec` 的精确字段。**
+- **Whether the internal deny-safe tier is widened beyond RFC1918 in the future** (**the membership
+  list itself is already settled into §2.4**: the three RFC1918 ranges plus mechanical v6
+  derivation. What is open is only whether to widen it, and widening is purely additive).
+- **Whether fail-closed emits a §4.1 audit event.**
+- **`SteeringSpec`'s exact fields.**
 
-> 逐条的实测依据、候选与代价在 [`open-decisions.md`](../open-decisions.md)「待细化的设计点」一节,本节
-> 不复制。D0–D7 的规范陈述在 §2.1/§2.3/§2.4/§5.D;本文只展开推理与要守的 invariant。
+> The measured evidence, candidates, and costs for each item are in [`open-decisions.md`](../open-decisions.md)'s
+> "Design points still to be refined" section, not duplicated here. The normative statement for
+> D0–D7 is in §2.1/§2.3/§2.4/§5.D; this document only develops the reasoning and the invariants
+> that must be held.
