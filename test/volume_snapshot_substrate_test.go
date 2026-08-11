@@ -24,6 +24,7 @@ import (
 	"warren/internal/model"
 	"warren/internal/store"
 	"warren/internal/transport"
+	"warren/internal/waitfor"
 	"warren/test/harness"
 )
 
@@ -46,9 +47,26 @@ func qgroupRowCount(t *testing.T, path string) int {
 	if err != nil {
 		t.Fatalf("resolve mount point: %v", err)
 	}
-	out, err := runCmd("btrfs", "qgroup", "show", "-re", "--raw", "--sync", mnt)
-	if err != nil {
-		t.Fatalf("qgroup show: %v", err)
+	// RETRIED, because `--sync` fails while a quota rescan is running and this suite's own
+	// churn is what starts one: creating and deleting storage units in a loop leaves the
+	// qgroup tree inconsistent, the kernel rescans, and `qgroup show --sync` exits 1 until
+	// it finishes. Observed on this box (8799 rows on the dev filesystem, most of them
+	// external and stale) as a one-off failure of the source-delete arm that passed on the
+	// very next run.
+	//
+	// A t.Fatalf on the first error made a substrate hiccup indistinguishable from a quota
+	// leak — the harness impersonating an engine defect, which is the one test bug this
+	// suite cannot afford. The retry does not weaken the assertion: the caller compares two
+	// counts, so a reading that never arrives fails below on its own.
+	var out string
+	var lastErr error
+	ok := waitfor.Until(20*time.Second, 500*time.Millisecond, func() bool {
+		out, lastErr = runCmd("btrfs", "qgroup", "show", "-re", "--raw", "--sync", mnt)
+		return lastErr == nil
+	})
+	if !ok {
+		t.Fatalf("qgroup show never succeeded within 20s (a rescan that never settles is a real "+
+			"substrate problem, not a hiccup): %v", lastErr)
 	}
 	n := 0
 	for _, line := range strings.Split(out, "\n") {
