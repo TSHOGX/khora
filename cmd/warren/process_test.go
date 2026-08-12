@@ -1,26 +1,53 @@
 package main
 
-import "testing"
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"testing"
 
-func TestProcessTransportURLPreservesAPISchemeAndPrefix(t *testing.T) {
-	old := apiURL
-	t.Cleanup(func() { apiURL = old })
+	"connectrpc.com/connect"
 
-	for _, tc := range []struct {
-		api  string
-		want string
-	}{
-		{"https://gateway.example", "https://gateway.example/v1/sandboxes/sb-1/connect"},
-		{"https://gateway.example/engine/v1/", "https://gateway.example/engine/v1/sandboxes/sb-1/connect"},
-		{"http://127.0.0.1:8080", "http://127.0.0.1:8080/v1/sandboxes/sb-1/connect"},
-	} {
-		apiURL = tc.api
-		got, err := processTransportURL("sb-1")
-		if err != nil {
-			t.Fatalf("processTransportURL(%q): %v", tc.api, err)
-		}
-		if got != tc.want {
-			t.Errorf("processTransportURL(%q) = %q, want %q", tc.api, got, tc.want)
-		}
+	transportv1 "warren/internal/transport/gen/engine/transport/v1"
+	"warren/internal/transport/gen/engine/transport/v1/transportv1connect"
+)
+
+func TestProcessClientUsesConnectMountAndSandboxHeader(t *testing.T) {
+	oldAPI, oldClient := apiURL, httpClient
+	t.Cleanup(func() { apiURL, httpClient = oldAPI, oldClient })
+
+	var gotPath, gotSandbox string
+	mux := http.NewServeMux()
+	mux.Handle(transportv1connect.NewProcessServiceHandler(&listProcessServer{
+		inspect: func(r *connect.Request[transportv1.ListRequest]) {
+			gotSandbox = r.Header().Get(processSandboxIDHeader)
+		},
+	}))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		mux.ServeHTTP(w, r)
+	}))
+	defer server.Close()
+	apiURL, httpClient = server.URL+"/v1", server.Client()
+
+	_, err := processClient().List(context.Background(), processRequest("sb-1", &transportv1.ListRequest{}))
+	if err != nil {
+		t.Fatalf("List: %v", err)
 	}
+	if want := transportv1connect.ProcessServiceListProcedure; gotPath != want {
+		t.Errorf("request path = %q, want %q", gotPath, want)
+	}
+	if gotSandbox != "sb-1" {
+		t.Errorf("%s = %q, want %q", processSandboxIDHeader, gotSandbox, "sb-1")
+	}
+}
+
+type listProcessServer struct {
+	transportv1connect.UnimplementedProcessServiceHandler
+	inspect func(*connect.Request[transportv1.ListRequest])
+}
+
+func (s *listProcessServer) List(_ context.Context, req *connect.Request[transportv1.ListRequest]) (*connect.Response[transportv1.ListResponse], error) {
+	s.inspect(req)
+	return connect.NewResponse(&transportv1.ListResponse{}), nil
 }

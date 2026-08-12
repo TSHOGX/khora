@@ -70,10 +70,10 @@ KillSignal=SIGTERM
 # drain finishes and exits on its own terms rather than being SIGKILLed mid-drain.
 # Raise BOTH together if you raise either.
 TimeoutStopSec=45
-# Only the main process gets the signal: sending SIGTERM to the whole cgroup would
-# also hit every runsc sentry the engine started, killing the guests this shutdown
-# is specifically designed not to touch.
-KillMode=mixed
+# Signal and, at TimeoutStopSec, kill only the orchestrator process. In contrast,
+# KillMode=mixed escalates to SIGKILL for every remaining process in the service
+# cgroup and would kill runsc sentries for guests meant to survive a restart.
+KillMode=process
 
 Restart=on-failure
 RestartSec=5s

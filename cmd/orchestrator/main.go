@@ -265,9 +265,12 @@ func main() {
 		// handler's context), then stop the loops, then close the store.
 		stopLoops()
 		err := eng.Drain(ctx, srv)
-		// A background loop may be blocked in a substrate operation; waiting for it
-		// before the bounded HTTP drain would bypass --shutdown-timeout entirely.
-		loops.Wait()
+		// A background loop may be blocked in a substrate operation even after its
+		// context is cancelled. Keep that wait inside the same advertised shutdown
+		// budget as the HTTP drain.
+		if waitErr := waitForLoops(ctx, &loops); err == nil {
+			err = waitErr
+		}
 		if closeErr := eng.CloseStore(); closeErr != nil && err == nil {
 			err = closeErr
 		}
@@ -292,4 +295,18 @@ func main() {
 	// ListenAndServe returned ErrServerClosed: the signal goroutine owns the exit.
 	// Block so the process does not race past it.
 	select {}
+}
+
+func waitForLoops(ctx context.Context, loops *sync.WaitGroup) error {
+	done := make(chan struct{})
+	go func() {
+		loops.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }

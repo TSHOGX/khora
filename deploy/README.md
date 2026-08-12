@@ -121,10 +121,12 @@ engine's drain is bounded and exits on its own terms; if systemd's patience were
 shorter of the two, the drain would be SIGKILLed partway. Raise both together, never
 one.
 
-**`KillMode=mixed` — only the main process is signalled.** Signalling the whole cgroup
-would also hit every runsc sentry the engine started, killing the guests this shutdown
-is specifically designed to leave running. Measured: `systemctl stop` drains and exits
-with `Result=success`, `ExecMainStatus=0`, in about 0.2s on an idle node.
+**`KillMode=process` — only the orchestrator is signalled or forcibly killed.**
+`KillMode=mixed` initially signals only the main process, but at `TimeoutStopSec` it
+SIGKILLs every remaining process in the service cgroup. That would kill runsc sentries
+for guests this shutdown is specifically designed to leave running. Measured:
+`systemctl stop` drains and exits with `Result=success`, `ExecMainStatus=0`, in about
+0.2s on an idle node.
 
 The unit deliberately does **not** set `PrivateTmp`, `PrivateDevices`,
 `NoNewPrivileges`, or `ProtectSystem=full`. runsc needs device access and the ability

@@ -3,11 +3,8 @@ package main
 import (
 	"fmt"
 	"io"
-	"net/url"
 	"os"
-	"path"
 	"strconv"
-	"strings"
 
 	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
@@ -15,6 +12,18 @@ import (
 	transportv1 "warren/internal/transport/gen/engine/transport/v1"
 	"warren/internal/transport/gen/engine/transport/v1/transportv1connect"
 )
+
+const processSandboxIDHeader = "Engine-Sandbox-Id"
+
+func processClient() transportv1connect.ProcessServiceClient {
+	return transportv1connect.NewProcessServiceClient(httpClient, apiBase())
+}
+
+func processRequest[T any](sandboxID string, msg *T) *connect.Request[T] {
+	req := connect.NewRequest(msg)
+	req.Header().Set(processSandboxIDHeader, sandboxID)
+	return req
+}
 
 func newProcessStartCmd() *cobra.Command {
 	var (
@@ -31,15 +40,7 @@ func newProcessStartCmd() *cobra.Command {
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, cmdArgs []string) error {
 			ctx := cmd.Context()
-			transportURL, err := processTransportURL(sandboxID)
-			if err != nil {
-				return err
-			}
-
-			client := transportv1connect.NewProcessServiceClient(
-				httpClient,
-				transportURL,
-			)
+			client := processClient()
 
 			req := &transportv1.StartRequest{
 				Cmd:  cmdArgs[0],
@@ -55,7 +56,7 @@ func newProcessStartCmd() *cobra.Command {
 				}
 			}
 
-			stream, err := client.Start(ctx, connect.NewRequest(req))
+			stream, err := client.Start(ctx, processRequest(sandboxID, req))
 			if err != nil {
 				return fmt.Errorf("start: %w", err)
 			}
@@ -113,17 +114,9 @@ func newProcessListCmd() *cobra.Command {
 		Short: "List processes in a sandbox",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
-			transportURL, err := processTransportURL(sandboxID)
-			if err != nil {
-				return err
-			}
+			client := processClient()
 
-			client := transportv1connect.NewProcessServiceClient(
-				httpClient,
-				transportURL,
-			)
-
-			resp, err := client.List(ctx, connect.NewRequest(&transportv1.ListRequest{}))
+			resp, err := client.List(ctx, processRequest(sandboxID, &transportv1.ListRequest{}))
 			if err != nil {
 				return fmt.Errorf("list: %w", err)
 			}
@@ -170,22 +163,14 @@ func newProcessSignalCmd() *cobra.Command {
 				return fmt.Errorf("pid must be > 0")
 			}
 
-			transportURL, err := processTransportURL(sandboxID)
-			if err != nil {
-				return err
-			}
-
-			client := transportv1connect.NewProcessServiceClient(
-				httpClient,
-				transportURL,
-			)
+			client := processClient()
 
 			req := &transportv1.SendSignalRequest{
 				Pid:    pid,
 				Signal: signal,
 			}
 
-			_, err = client.SendSignal(ctx, connect.NewRequest(req))
+			_, err = client.SendSignal(ctx, processRequest(sandboxID, req))
 			if err != nil {
 				return fmt.Errorf("signal: %w", err)
 			}
@@ -217,18 +202,10 @@ func newProcessConnectCmd() *cobra.Command {
 			}
 			pid := int32(pid64)
 
-			transportURL, err := processTransportURL(sandboxID)
-			if err != nil {
-				return err
-			}
-
-			client := transportv1connect.NewProcessServiceClient(
-				httpClient,
-				transportURL,
-			)
+			client := processClient()
 
 			req := &transportv1.ConnectRequest{Pid: pid}
-			stream, err := client.Connect(ctx, connect.NewRequest(req))
+			stream, err := client.Connect(ctx, processRequest(sandboxID, req))
 			if err != nil {
 				return fmt.Errorf("connect: %w", err)
 			}
@@ -290,15 +267,7 @@ func newProcessInputCmd() *cobra.Command {
 				return fmt.Errorf("read stdin: %w", err)
 			}
 
-			transportURL, err := processTransportURL(sandboxID)
-			if err != nil {
-				return err
-			}
-
-			client := transportv1connect.NewProcessServiceClient(
-				httpClient,
-				transportURL,
-			)
+			client := processClient()
 
 			req := &transportv1.SendInputRequest{
 				Pid:   pid,
@@ -306,7 +275,7 @@ func newProcessInputCmd() *cobra.Command {
 				PtyIn: ptyIn,
 			}
 
-			_, err = client.SendInput(ctx, connect.NewRequest(req))
+			_, err = client.SendInput(ctx, processRequest(sandboxID, req))
 			if err != nil {
 				return fmt.Errorf("send input: %w", err)
 			}
@@ -320,26 +289,4 @@ func newProcessInputCmd() *cobra.Command {
 	cmd.MarkFlagRequired("sandbox")
 
 	return cmd
-}
-
-// processTransportURL builds the gateway's sandbox-scoped Connect mount while
-// preserving the configured API scheme (notably https) and any path prefix.
-func processTransportURL(sandboxID string) (string, error) {
-	u, err := url.Parse(apiURL)
-	if err != nil {
-		return "", fmt.Errorf("invalid --api URL: %w", err)
-	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return "", fmt.Errorf("invalid --api URL: scheme must be http or https")
-	}
-	if u.Host == "" {
-		return "", fmt.Errorf("invalid --api URL: host is required")
-	}
-
-	u.RawQuery = ""
-	u.Fragment = ""
-	basePath := strings.TrimSuffix(strings.TrimRight(u.Path, "/"), "/v1")
-	u.Path = path.Join(basePath, "v1", "sandboxes", sandboxID, "connect")
-	u.RawPath = ""
-	return u.String(), nil
 }

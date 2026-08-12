@@ -153,9 +153,10 @@ than this stage needs and belongs to whoever wants it.
 **Stop behavior is the graceful-shutdown decision made concrete.** `KillSignal=SIGTERM`
 with `TimeoutStopSec=45` sitting *above* the engine's own `--shutdown-timeout` of 30 s,
 so the engine's bounded drain completes on its own terms instead of being SIGKILLed
-partway; the two are raised together or not at all. `KillMode=mixed` signals only the
-main process — signalling the whole cgroup would also hit every runsc sentry the engine
-started, killing precisely the guests this shutdown is designed to leave running.
+partway; the two are raised together or not at all. `KillMode=process` ensures both the
+initial signal and any `TimeoutStopSec` escalation target only the orchestrator.
+`KillMode=mixed` would SIGKILL the whole service cgroup on escalation, including runsc
+sentries for guests this shutdown is designed to leave running.
 Measured on a real box: `systemctl stop` drains and exits with `Result=success` and
 `ExecMainStatus=0` in about 0.2 s on an idle node.
 
