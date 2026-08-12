@@ -36,9 +36,11 @@ omission.
 
 ### A reverse proxy — the recommended path
 
-[`nginx-gateway.conf`](nginx-gateway.conf) is a complete, tested nginx server block:
-TLS termination, client-certificate authentication, and `grpc_pass` to the engine's
-loopback listener with the timeouts long-lived process streams need.
+[`nginx-gateway.conf`](nginx-gateway.conf) is a complete nginx server block:
+TLS termination, client-certificate authentication, and protocol-aware proxying to the
+engine's loopback listener. REST and Connect requests use `proxy_pass`; native gRPC
+requests use `grpc_pass` to retain an HTTP/2-capable h2c upstream. Both paths carry the
+long timeouts that long-lived process streams need.
 
 Recommended for the plain reason that most operators already run a reverse proxy:
 configuring a component you already trust beats trusting a new binary of ours on the
