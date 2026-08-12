@@ -268,7 +268,8 @@ func main() {
 		// A background loop may be blocked in a substrate operation even after its
 		// context is cancelled. Keep that wait inside the same advertised shutdown
 		// budget as the HTTP drain.
-		if waitErr := waitForLoops(ctx, &loops); err == nil {
+		waitErr := waitForLoops(ctx, &loops)
+		if err == nil {
 			err = waitErr
 		}
 		if closeErr := eng.CloseStore(); closeErr != nil && err == nil {

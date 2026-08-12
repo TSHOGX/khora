@@ -7,12 +7,12 @@ unprivileged process, a CI runner, inside a container.
 
 ```sh
 # create a sandbox
-warren sandbox create --template base --disk 2G
-# → sbx_b2aaead92a907e0d
+sandbox_id=$(warren sandbox create --template base --disk-byte 2147483648)
 
-# write a file into it, read it back
-echo 'warren works' | warren files write sbx_b2aaead92a907e0d /tmp/hello
-warren files read sbx_b2aaead92a907e0d /tmp/hello
+# upload a file into it, download it to stdout
+printf 'warren works\n' > /tmp/warren-hello
+warren files upload "$sandbox_id" /tmp/warren-hello /tmp/hello
+warren files download "$sandbox_id" /tmp/hello
 # → warren works
 
 # or use the API directly
