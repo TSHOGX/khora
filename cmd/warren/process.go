@@ -43,7 +43,7 @@ func newProcessStartCmd() *cobra.Command {
 
 			req := &transportv1.StartRequest{
 				Cmd:  cmdArgs[0],
-				Args: cmdArgs[1:],
+				Args: append(args, cmdArgs[1:]...),
 				Env:  env,
 				Cwd:  cwd,
 			}

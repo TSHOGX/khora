@@ -5,10 +5,29 @@ package main
 import (
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
+	"path"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
+
+// apiBase returns the configured API origin/prefix without a duplicate /v1.
+// Both https://host/prefix and https://host/prefix/v1 are supported forms.
+func apiBase() string {
+	u, err := url.Parse(apiURL)
+	if err != nil {
+		return strings.TrimRight(apiURL, "/")
+	}
+	u.Path = strings.TrimSuffix(strings.TrimRight(u.Path, "/"), "/v1")
+	u.RawQuery, u.Fragment, u.RawPath = "", "", ""
+	return strings.TrimRight(u.String(), "/")
+}
+
+func apiEndpoint(parts ...string) string {
+	return apiBase() + "/" + path.Join(parts...)
+}
 
 var (
 	// Global flags
@@ -35,6 +54,9 @@ file operations, volumes, templates, network configuration, and event streaming.
 				return err
 			}
 			httpClient = client
+			// Canonicalize the configured prefix once so every REST command using
+			// apiURL + "/v1/..." works whether --api ended at the origin or /v1.
+			apiURL = apiBase()
 			return nil
 		},
 	}
@@ -46,8 +68,8 @@ file operations, volumes, templates, network configuration, and event streaming.
 
 	// Sandbox commands
 	sandboxCmd := &cobra.Command{
-		Use:   "sandbox",
-		Short: "Manage sandboxes",
+		Use:     "sandbox",
+		Short:   "Manage sandboxes",
 		Aliases: []string{"sb"},
 	}
 	sandboxCmd.AddCommand(
@@ -72,8 +94,8 @@ file operations, volumes, templates, network configuration, and event streaming.
 
 	// Volume commands
 	volumeCmd := &cobra.Command{
-		Use:   "volume",
-		Short: "Manage volumes",
+		Use:     "volume",
+		Short:   "Manage volumes",
 		Aliases: []string{"vol"},
 	}
 	volumeCmd.AddCommand(
@@ -90,8 +112,8 @@ file operations, volumes, templates, network configuration, and event streaming.
 
 	// Template commands
 	templateCmd := &cobra.Command{
-		Use:   "template",
-		Short: "Manage templates",
+		Use:     "template",
+		Short:   "Manage templates",
 		Aliases: []string{"tpl"},
 	}
 	templateCmd.AddCommand(
@@ -102,8 +124,8 @@ file operations, volumes, templates, network configuration, and event streaming.
 
 	// Network commands
 	networkCmd := &cobra.Command{
-		Use:   "network",
-		Short: "Manage network configuration",
+		Use:     "network",
+		Short:   "Manage network configuration",
 		Aliases: []string{"net"},
 	}
 	networkCmd.AddCommand(
@@ -124,8 +146,8 @@ file operations, volumes, templates, network configuration, and event streaming.
 
 	// Process commands (Connect-RPC)
 	processCmd := &cobra.Command{
-		Use:   "process",
-		Short: "Manage sandbox processes",
+		Use:     "process",
+		Short:   "Manage sandbox processes",
 		Aliases: []string{"proc", "ps"},
 	}
 	processCmd.AddCommand(

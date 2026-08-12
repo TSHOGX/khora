@@ -356,8 +356,8 @@ func (e *Engine) Shutdown(ctx context.Context, srv shutdownServer) error {
 	// --shutdown-timeout.
 	if srv != nil {
 		if err := srv.Shutdown(ctx); err != nil {
-			// Not fatal and not silent: this is the expected outcome when a stream is
-			// attached, and it says which condition ended the wait.
+			// Report the bounded drain timeout while still force-closing streams; the
+			// CLI distinguishes this expected condition from cleanup failures.
 			keep(fmt.Errorf("http drain did not finish within the deadline (%w) — in-flight streams were "+
 				"closed; they are reconnectable (§5.E Connect), whereas a shutdown that never returns is not", err))
 			// Shutdown does not close active connections when its context expires.

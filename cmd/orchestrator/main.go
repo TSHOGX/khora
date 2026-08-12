@@ -10,11 +10,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -175,10 +177,12 @@ func main() {
 	// process only ever ended by SIGKILL or log.Fatalf.
 	runCtx, stopLoops := context.WithCancel(context.Background())
 	defer stopLoops()
+	var loops sync.WaitGroup
 
 	// async outbox publisher (§4.4-C): drain the durable outbox to the event sink.
 	const publishInterval = time.Second
-	go eng.Publisher.Run(runCtx, publishInterval)
+	loops.Add(1)
+	go func() { defer loops.Done(); eng.Publisher.Run(runCtx, publishInterval) }()
 
 	// Publisher health, sampled on an INDEPENDENT goroutine (§4.4-C operability).
 	// This repo has no metrics dependency and this does not introduce one — the
@@ -192,22 +196,27 @@ func main() {
 	// STOPPED, which for a billing subscriber means charges stop accruing — it is
 	// not a degraded mode that heals itself, and clearing it is an operator action
 	// (Publisher.Resume).
-	go eng.Publisher.Monitor(runCtx, 10*time.Second, 30*publishInterval, func(s store.Stats) {
-		if s.Halted {
-			log.Printf("ALERT: outbox publisher HALTED on event %s (seq %d) after %d attempts: %s — "+
-				"the event stream has stopped; %d rows are undelivered and nothing behind this event will be published until an operator intervenes",
-				s.HeadEventID, s.HeadSeq, s.Attempts, s.LastError, s.Backlog)
-			return
-		}
-		log.Printf("WARN: outbox publisher unhealthy: head=%s seq=%d attempts=%d backlog=%d published=%d since_heartbeat=%s in_flight_for=%s last_err=%q",
-			s.HeadEventID, s.HeadSeq, s.Attempts, s.Backlog, s.Published,
-			s.SinceHeartbeat.Round(time.Millisecond), s.InFlightFor.Round(time.Millisecond), s.LastError)
-	})
+	loops.Add(1)
+	go func() {
+		defer loops.Done()
+		eng.Publisher.Monitor(runCtx, 10*time.Second, 30*publishInterval, func(s store.Stats) {
+			if s.Halted {
+				log.Printf("ALERT: outbox publisher HALTED on event %s (seq %d) after %d attempts: %s — "+
+					"the event stream has stopped; %d rows are undelivered and nothing behind this event will be published until an operator intervenes",
+					s.HeadEventID, s.HeadSeq, s.Attempts, s.LastError, s.Backlog)
+				return
+			}
+			log.Printf("WARN: outbox publisher unhealthy: head=%s seq=%d attempts=%d backlog=%d published=%d since_heartbeat=%s in_flight_for=%s last_err=%q",
+				s.HeadEventID, s.HeadSeq, s.Attempts, s.Backlog, s.Published,
+				s.SinceHeartbeat.Round(time.Millisecond), s.InFlightFor.Round(time.Millisecond), s.LastError)
+		})
+	}()
 
 	// §4.3 reaper: the autonomous control loop (auto-pause / crash-pause / evict
 	// + periodic reconcile). Started AFTER startup reconcile so it never races
 	// the boot-time orphan reclaim / re-adoption.
-	go eng.Reaper.Run(runCtx)
+	loops.Add(1)
+	go func() { defer loops.Done(); eng.Reaper.Run(runCtx) }()
 
 	// The published case is logged as a WARNING at the moment of serving, not merely
 	// permitted by the flag (ADR-0007): the flag records the decision in `ps` output,
@@ -255,8 +264,9 @@ func main() {
 		// mid-flight resume completes its chain intact — Shutdown does not cancel a
 		// handler's context), then stop the loops, then close the store.
 		stopLoops()
+		loops.Wait()
 		err := eng.Shutdown(ctx, srv)
-		if err != nil {
+		if err != nil && !errors.Is(err, context.DeadlineExceeded) {
 			log.Printf("orchestrator: shutdown: %v", err)
 			os.Exit(1)
 		}
