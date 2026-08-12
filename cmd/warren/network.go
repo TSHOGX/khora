@@ -140,13 +140,13 @@ func newNetworkPublishCmd() *cobra.Command {
 			}
 
 			var result struct {
-				HostPort int `json:"host_port"`
+				HostEndpoint string `json:"host_endpoint"`
 			}
 			if err := json.Unmarshal(respBody, &result); err != nil {
 				return fmt.Errorf("unmarshal response: %w", err)
 			}
 
-			fmt.Printf("Published %s port %d -> host port %d\n", proto, guestPort, result.HostPort)
+			fmt.Fprintf(cmd.OutOrStdout(), "Published %s port %d -> host endpoint %s\n", proto, guestPort, result.HostEndpoint)
 			return nil
 		},
 	}

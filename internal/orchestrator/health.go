@@ -377,7 +377,10 @@ func (e *Engine) Drain(ctx context.Context, srv shutdownServer) error {
 			keep(srv.Close())
 		}
 	}
-	e.httpHandlers.wait()
+	// Close should make handlers return, but substrate calls are not guaranteed to
+	// honor request cancellation. Do not let such a call extend shutdown beyond the
+	// same deadline that bounds Server.Shutdown.
+	keep(e.httpHandlers.wait(ctx))
 
 	return firstErr
 }

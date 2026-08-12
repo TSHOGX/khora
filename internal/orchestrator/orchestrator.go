@@ -159,9 +159,9 @@ type Engine struct {
 
 type handlerTracker struct {
 	mu       sync.Mutex
-	cond     *sync.Cond
 	draining bool
 	active   int
+	drained  chan struct{}
 }
 
 func (t *handlerTracker) enter() bool {
@@ -177,8 +177,8 @@ func (t *handlerTracker) enter() bool {
 func (t *handlerTracker) leave() {
 	t.mu.Lock()
 	t.active--
-	if t.active == 0 && t.cond != nil {
-		t.cond.Broadcast()
+	if t.draining && t.active == 0 {
+		close(t.drained)
 	}
 	t.mu.Unlock()
 }
@@ -186,18 +186,24 @@ func (t *handlerTracker) leave() {
 func (t *handlerTracker) beginDrain() {
 	t.mu.Lock()
 	t.draining = true
+	t.drained = make(chan struct{})
+	if t.active == 0 {
+		close(t.drained)
+	}
 	t.mu.Unlock()
 }
 
-func (t *handlerTracker) wait() {
+func (t *handlerTracker) wait(ctx context.Context) error {
 	t.mu.Lock()
-	if t.cond == nil {
-		t.cond = sync.NewCond(&t.mu)
-	}
-	for t.active > 0 {
-		t.cond.Wait()
-	}
+	drained := t.drained
 	t.mu.Unlock()
+
+	select {
+	case <-drained:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // New wires the assembly. It does not start any server, and it does NOT run

@@ -374,6 +374,42 @@ func TestTimedOutDrainWaitsForHandlersBeforeClosingStore(t *testing.T) {
 	}
 }
 
+// A handler may be stuck below the HTTP layer and ignore cancellation. Waiting
+// for the tracker must not turn the configured shutdown deadline into an
+// unbounded wait after Server.Close has cancelled the request context.
+func TestTimedOutDrainDoesNotWaitForeverForStuckHandler(t *testing.T) {
+	eng := healthEngine(t)
+	if !eng.httpHandlers.enter() {
+		t.Fatal("handler tracker unexpectedly draining")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- eng.Drain(ctx, shutdownCloseStub{
+			shutdown: func(ctx context.Context) error {
+				<-ctx.Done()
+				return ctx.Err()
+			},
+			close: func() error { return nil },
+		})
+	}()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Drain error = %v, want deadline exceeded", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Drain waited forever for a handler that ignored cancellation")
+	}
+
+	// Balance the tracker after Drain has returned; this also exercises leaving
+	// after the deadline-bound waiter is gone.
+	eng.httpHandlers.leave()
+}
+
 type shutdownFunc func(context.Context) error
 
 func (f shutdownFunc) Shutdown(ctx context.Context) error { return f(ctx) }
