@@ -14,14 +14,12 @@
 //     disagree about it: the allocator hands out /30s from this /16, and the
 //     floor's sibling item IS this /16.
 //
-//  2. THE ABSTRACT RULE VOCABULARY. §5.D generates `(declaration, L0 floor) →
-//     abstract rule set` as a PURE FUNCTION — placement-free, root-free, unit
-//     testable — and §5.A renders that into nft text and installs it at
-//     placement time, binding the three things only it holds: the host-side
-//     veth name, the guest IP, and the publish host endpoint (§5.A ❌ list /
-//     network.md D1 ② / D6). Both halves need the same vocabulary. It cannot
-//     live in either subsystem: `network` importing `runtime` or the reverse is
-//     the dependency edge `internal/arch` fails on.
+//  2. THE ABSTRACT RULE VOCABULARY. §5.D generates `(declaration, L0 floor) → abstract rule
+//     set` as a PURE FUNCTION — placement-free, root-free, unit testable — and §5.A renders it
+//     into nft text at placement time, binding the three things only it holds: the host-side
+//     veth name, the guest IP, and the publish host endpoint (§5.A ❌ list / network.md D1 ② /
+//     D6). Both halves need the vocabulary, and it can live in neither: `network` importing
+//     `runtime` or the reverse is the edge `internal/arch` fails on.
 //
 // NOTHING HERE MAY NAME A PLACEMENT PRODUCT. A rule that must reach "this
 // sandbox's host veth" or "this sandbox's own /30 gateway" says so with a Scope
@@ -183,22 +181,18 @@ const (
 	// priority than HookForward, carrying the inbound half: the publish companion
 	// accepts and the ingress default-deny.
 	//
-	// TWO CHAINS RATHER THAN ONE, and the split is a measured cross-sandbox ordering
-	// requirement rather than organization. Every per-sandbox table puts its chains on
-	// the SAME shared hook, so with one chain per sandbox at one priority, traffic from
-	// sandbox A to sandbox B's guest IP matches BOTH A's floor (`iifname A-veth`,
-	// sibling daddr) and B's ingress default-deny (`oifname B-veth`) — and which chain
-	// is evaluated first is not defined by anything the engine controls.
+	// TWO CHAINS RATHER THAN ONE, a measured cross-sandbox ordering requirement. Every
+	// per-sandbox table puts its chains on the SAME shared hook, so at one priority traffic
+	// from sandbox A to B's guest IP matches BOTH A's floor (`iifname A-veth`, sibling daddr)
+	// and B's ingress default-deny (`oifname B-veth`), and evaluation order is not defined by
+	// anything the engine controls.
 	//
-	// Measured: B's chain won, so its `drop` terminated traversal (only a terminal
-	// verdict crosses chains) and A's floor counted ZERO. The security outcome is the
-	// same either way, but two things are not: the guest gets a 25-SECOND HANG instead
-	// of the clean connection failure §2.4's fail-closed promises in its second half,
-	// and WHICH counter moves depends on table creation order — so the one signal every
-	// deny assertion reads becomes non-deterministic (§2.4 / D4.1).
-	//
-	// Putting the floor strictly earlier makes the sibling case deterministic: A's
-	// floor rejects first, the guest fails fast, and A's counter is the one that moves.
+	// Measured: B's chain won, its `drop` terminated traversal (only a terminal verdict
+	// crosses chains) and A's floor counted ZERO. The security outcome is the same, but the
+	// guest gets a 25-SECOND HANG instead of the clean failure §2.4 promises, and WHICH
+	// counter moves depends on table creation order — so the one signal every deny assertion
+	// reads becomes non-deterministic (§2.4 / D4.1). A strictly earlier floor makes the
+	// sibling case deterministic: A rejects first, the guest fails fast, A's counter moves.
 	HookForwardIngress
 	// HookPrerouting is the per-sandbox nat prerouting chain: `via[]` steering and
 	// the inbound half of a publish.
@@ -358,18 +352,16 @@ const (
 	// and there is no `skgid` clause to pair with it. A gid narrowing could only be
 	// ANDed onto the floor drop, i.e. make the floor match LESS.
 	//
-	// The uid must not be the ENGINE'S OWN: the transport endpoint is a guest veth
-	// address inside SandboxCIDR — the floor's sibling item — dialed from the host, so
-	// that value drops the engine's own dial to every guest, and the return arm below
-	// deliberately does not catch a SYN. Refused at assembly, not here
-	// (network.ValidateSecondHopUID): a rule set cannot see whose uid it carries.
+	// The uid must not be the ENGINE'S OWN: the transport endpoint is a guest veth address
+	// inside SandboxCIDR — the floor's sibling item — dialed from the host, so that value drops
+	// the engine's own dial to every guest, and the return arm below does not catch a SYN.
+	// Refused at assembly rather than here (network.ValidateSecondHopUID), a rule set not being
+	// able to see whose uid it carries.
 	//
-	// It may narrow a DROP and never an ACCEPT, and that asymmetry is measured
-	// rather than stylistic: skuid does not reliably match every packet of a flow
-	// (one packet occasionally carries no socket owner), so a skuid-narrowed drop
-	// is safe — losing the SYN kills the flow — while a skuid-narrowed accept
-	// above a floor drop leaks whatever it fails to match (network.md D5 ㉔).
-	// Validate enforces it.
+	// It may narrow a DROP and never an ACCEPT, measured: skuid does not reliably match every
+	// packet of a flow (one occasionally carries no socket owner), so a skuid-narrowed drop is
+	// safe — losing the SYN kills the flow — while a skuid-narrowed accept above a floor drop
+	// leaks whatever it fails to match (network.md D5 ㉔). Validate enforces it.
 	ScopeSecondHopUID
 	// ScopeSecondHopReturn narrows to the REPLY half of an already-established flow on
 	// the engine-level output chain → `ct state established,related` with no identity
@@ -381,17 +373,15 @@ const (
 	// floor's sibling item. Measured — with the floor alone, a steered flow was accepted
 	// at the endpoint while this table dropped 9 reply packets and the guest hung 25 s.
 	//
-	// WHY THIS IS NOT A HOLE IN §2.4 INVARIANT 2. The confused deputy that invariant
-	// names is the endpoint process opening a NEW connection to an in-floor address, and
-	// `ct state new` is exactly what this scope does not match — so a new connection
-	// still meets the floor. What it admits is only the reverse direction of a flow the
-	// GUEST initiated, which conntrack has already attributed.
+	// NOT A HOLE IN §2.4 INVARIANT 2: the confused deputy that invariant names is the endpoint
+	// process opening a NEW connection to an in-floor address, and `ct state new` is exactly
+	// what this scope does not match. What it admits is only the reverse direction of a flow
+	// the GUEST initiated, which conntrack has already attributed.
 	//
-	// It is also why this is a CT-STATE narrowing rather than a uid one. The measured
-	// asymmetry that forbids a uid-narrowed accept (skuid does not match every packet of
-	// a flow, so an accept narrowed by it leaks what it misses — D5 ㉔) is a property of
-	// `skuid`; a ct-state predicate has no such gap. Validate therefore permits an accept
-	// here and continues to refuse one narrowed by uid.
+	// Hence a CT-STATE narrowing rather than a uid one: the measured asymmetry forbidding a
+	// uid-narrowed accept (skuid does not match every packet of a flow, so such an accept leaks
+	// what it misses — D5 ㉔) is a property of `skuid`, and a ct-state predicate has no such
+	// gap. Validate permits an accept here and still refuses one narrowed by uid.
 	ScopeSecondHopReturn
 )
 
@@ -578,11 +568,10 @@ func (rs RuleSet) Hooks() []Hook {
 // Validate is the ABSTRACT half of the render guards — the half that runs
 // root-free, in a unit test, over the generator's output.
 //
-// These are not defensive programming. Each one is a property that ONE WORD OF
-// EDITING breaks with no test firing and no visible difference in `nft list`
-// (network.md D5 ⑧ ⑩ ⑫ ㉔), which is the same standing the §5.A seam token guard
-// has. The text half — no `policy drop`, no ifindex spelling — lives in the
-// provider's renderer, because those are properties of the rendered file.
+// Each property here is one ONE WORD OF EDITING breaks with no test firing and no visible
+// difference in `nft list` (network.md D5 ⑧ ⑩ ⑫ ㉔) — the same standing the §5.A seam token
+// guard has. The text half (no `policy drop`, no ifindex spelling) lives in the provider's
+// renderer, those being properties of the rendered file.
 func Validate(rs RuleSet) error {
 	declared := map[string]bool{}
 	for _, c := range rs.Counters {

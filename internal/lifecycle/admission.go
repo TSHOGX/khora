@@ -9,14 +9,11 @@ import (
 
 // Admission — the §3.4 / rootfs-overlay D6.5 no-oversubscribe gate.
 //
-// WHY THIS EXISTS AT ALL. The per-sandbox caps (§3.4) only downgrade "one sandbox
-// fills the whole disk" into "one sandbox fills its own quota". They say nothing
-// about the SUM: promise 100 sandboxes 10 GiB each on a 200 GiB node and every
-// individual cap is honored right up to the moment the node runs dry, at which
-// point writes start failing for sandboxes that are nowhere near their own cap.
-// That breaks §2.3's containment promise from the other direction — a sandbox's
-// write failing because of OTHER sandboxes' usage. So a cap the node cannot honor
-// must be refused at PROMISE time, which is here.
+// WHY THIS EXISTS: per-sandbox caps (§3.4) say nothing about the SUM. Promise 100 sandboxes
+// 10 GiB each on a 200 GiB node and every individual cap is honored right up to the moment the
+// node runs dry, at which point writes fail for sandboxes nowhere near their own cap — §2.3's
+// containment promise broken from the other direction. So a cap the node cannot honor is
+// refused at PROMISE time, here.
 //
 // The formula is stated by §3.4 / rootfs-overlay D6.5, and its shape is forced by
 // the choice of squota:
@@ -29,11 +26,10 @@ import (
 // accounting silently overcommits by the whole Template library.
 //
 // The two terms are DISJOINT on the predicate "is it covered by a declared cap", not "is it a
-// layer": a CAPPED upper contributes zero to the measured term, since charging its usage on top
-// of its own cap bills the same bytes twice. Physically shared bytes count at most once. Mixing
-// a promise with a measurement is sound because the measured bytes are ALREADY ON DISK — the
-// gate subtracts consumed capacity before comparing promises against the remainder, one rule
-// uniformly applied: the cap where one exists, the measurement where none does (§3.4).
+// layer": a CAPPED upper contributes zero to the measured term, charging its usage on top of its
+// own cap billing the same bytes twice. Mixing a promise with a measurement is sound because the
+// measured bytes are ALREADY ON DISK — the cap where one exists, the measurement where none does
+// (§3.4).
 //
 // RAM is admitted on the same principle against a SEPARATE budget: memory and disk are not
 // fungible, so two ceilings, never one blended "resources" number.
@@ -49,13 +45,12 @@ import (
 // volume has no placement of its own. Omitting them is not "counting a little low" — a node can
 // be filled by a pile of uncapped volumes while the gate refuses nothing.
 //
-// THREE ENTRY POINTS, one inequality: `admit` for a new/raised per-SANDBOX promise (first
-// term), `admitUncappedGrowth` for bytes joining the SECOND term uncapped (Promote), and
-// `admitVolume` for a new volume cap (first term). Not one function, because which term an
-// action lands in is the whole content of the argument above and the call site must say it.
-// `admitVolume` specifically must not reuse `admit`: that one's metered-axis check is about a
-// SANDBOX (all three axes, RAM included), and passing a volume through it would demand a memory
-// cap from an object that cannot have one.
+// THREE ENTRY POINTS, one inequality: `admit` for a new/raised per-SANDBOX promise (first term),
+// `admitUncappedGrowth` for bytes joining the SECOND term uncapped (Promote), and `admitVolume`
+// for a new volume cap (first term). Separate because which term an action lands in is the call
+// site's to state. `admitVolume` specifically must not reuse `admit`, whose metered-axis check
+// covers all three SANDBOX axes and would demand a memory cap from an object that cannot have
+// one.
 //
 // In the §4 structure: admission reads the AUTHORITATIVE store and asks the provider to measure
 // its own bytes — both mediator actions, the provider never consulting the store.
@@ -237,7 +232,7 @@ func (m *Mediator) admitVolume(ctx context.Context, capBytes int64) error {
 		return nil // disk unmetered → this inequality does not describe this node
 	}
 	if capBytes <= 0 {
-		return fmt.Errorf("admission: %w: volume size — the node meters disk, so an uncapped volume would contribute nothing to the budget while free to consume all of it (§3.4 / §5.C)", ErrCapRequired)
+		return fmt.Errorf("admission: %w: volume size — this node meters disk, and an uncapped volume contributes nothing to the budget while free to consume all of it (§3.4 / §5.C)", ErrCapRequired)
 	}
 	committed, err := m.committedDisk(ctx, "", "")
 	if err != nil {

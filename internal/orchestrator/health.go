@@ -297,20 +297,13 @@ func boolGauge(v bool) int {
 
 // Shutdown drains this engine and stops its background loops (M10 item 2).
 //
-// WHAT A SIGTERM DOES TO RUNNING SANDBOXES: NOTHING. They keep running, and the
-// engine's next boot re-adopts them. This is the decision, and it is argued rather
-// than assumed, because "drain, then exit" sounds safer:
-//
-//   - PAUSING EVERY SANDBOX ON THE WAY OUT WOULD BE WORSE, not safer. A pause discards guest
-//     memory (§4.2 stores none, permanently — §1.4), so restarting to change a flag would
-//     destroy every guest's in-memory work: a far larger blast radius than the restart asked
-//     for. It also takes a per-sandbox lock each (§4.4-B), so a busy node could not finish
-//     inside any sane TimeoutStopSec — leaving SIGKILL to land halfway, the hard stop it was
-//     avoiding, now with half the sandboxes paused.
-//   - A HARD STOP IS ALREADY SURVIVABLE. §4.4-A exists for this: startup reconciliation
-//     reclaims orphan placements and RETAKES surviving `running` ones — "a takeover is not a
-//     resume — the same placement, the same IP, and no new epoch". The cost of exiting on a
-//     running sandbox is a gap in contact, not a loss of state.
+// WHAT A SIGTERM DOES TO RUNNING SANDBOXES: NOTHING. They keep running and the next boot
+// re-adopts them (§4.4-A: "a takeover is not a resume — the same placement, the same IP, and no
+// new epoch"), so the cost of exiting on a running sandbox is a gap in contact, not lost state.
+// Pausing them on the way out would be WORSE: a pause discards guest memory (§4.2 / §1.4), so
+// restarting to change a flag would destroy every guest's in-memory work, and taking a
+// per-sandbox lock each (§4.4-B) means a busy node cannot finish inside any sane
+// TimeoutStopSec — SIGKILL lands halfway anyway, now with half the sandboxes paused.
 //
 // So what this drains is the ENGINE'S OWN in-flight work, not the guests:
 //
@@ -326,28 +319,22 @@ func boolGauge(v bool) int {
 //     Server.Shutdown forces connections closed;
 //  5. close the store, behind every user of it.
 //
-// THIS FUNCTION PERFORMS ALL FIVE, as a correctness property: step 2 sits in the middle, so an
-// owner of only 1/3/4/5 forces its caller to split this open and re-implement the order —
-// leaving the sequence stated here and executed there, free to drift. Every wait is bounded by
-// the single ctx, or one unbounded wait makes --shutdown-timeout meaningless.
+// THIS FUNCTION PERFORMS ALL FIVE: step 2 sits in the middle, so an owner of only 1/3/4/5
+// forces its caller to re-implement the order, leaving the sequence stated here and executed
+// there. Every wait is bounded by the single ctx, or one unbounded wait makes
+// --shutdown-timeout meaningless.
 //
-// WHY THE LOOPS STOP BEFORE THE HTTP DRAIN (2 before 3) — the one ordering that is a trade
-// rather than a dependency:
+// 2 BEFORE 3 is the one ordering that is a trade rather than a dependency: the reaper is an
+// AUTONOMOUS MUTATOR that can begin a fresh transition one tick before the deadline, taking a
+// per-sandbox lock (§4.4-B) and starting substrate work that outlives the budget. Stopping it
+// first means in-flight transitions can only shrink, and the cost is DELAY rather than loss —
+// a handler finishing in step 3 writes its events to the durable at-least-once outbox, which
+// goes out next boot (§4.4-C).
 //
-//   - The reaper is an AUTONOMOUS MUTATOR: left running it can begin a fresh transition (an
-//     auto-pause, an evict) one tick before the deadline, taking a per-sandbox lock (§4.4-B)
-//     and starting substrate work that outlives the budget, so SIGKILL lands mid-transition.
-//     Stopping it first means in-flight transitions can only shrink.
-//   - The cost is DELAY, never loss: a handler finishing in step 3 writes its events to the
-//     outbox, and with the publisher stopped those rows go out next boot. The outbox is durable
-//     and at-least-once (§4.4-C), whereas a transition cut in half is work §4.4-A must clean up.
-//
-// So the order follows the asymmetry: stop what can START work, let what only DELIVERS finish late.
-//
-// ONE BUDGET FOR ALL FIVE, not one each, and the consequence is deliberate: a step consuming the
-// whole deadline leaves the rest to fail immediately on the expired ctx and fall through to step
-// 5. The operator set ONE number, and per-step budgets would make the total silently five times
-// larger. Every step is skippable in that sense except 5, which is why 5 is unconditional.
+// ONE BUDGET FOR ALL FIVE, not one each: a step consuming the whole deadline leaves the rest to
+// fail immediately on the expired ctx and fall through to step 5, which is why 5 is
+// unconditional. Per-step budgets would make the operator's one number silently five times
+// larger.
 //
 // THE DEADLINE IS NOT OPTIONAL, measured: Shutdown waits for open connections and the data
 // plane's normal shape is a LONG-LIVED STREAM (an attached shell at a prompt) — a 2 s deadline
@@ -361,9 +348,8 @@ type shutdownServer interface {
 }
 
 func (e *Engine) Shutdown(ctx context.Context, srv shutdownServer) error {
-	// Step 1 BEFORE anything else. Readiness has to flip while this instance can
-	// still serve, so the drain window is when traffic is being steered away rather
-	// than after it has already been refused.
+	// Readiness has to flip while this instance can still serve, so the drain window is when
+	// traffic is being steered away rather than after it has already been refused.
 	e.BeginDraining()
 	e.httpHandlers.beginDrain()
 
@@ -374,12 +360,9 @@ func (e *Engine) Shutdown(ctx context.Context, srv shutdownServer) error {
 		}
 	}
 
-	// Step 2. Bounded by the same ctx as every other wait here; see the header for why
-	// the autonomous mutator stops before the drain rather than after it.
 	keep(e.stopLoops(ctx))
 
-	// Step 3. The deadline lives in ctx, supplied by the caller from
-	// --shutdown-timeout.
+	// The deadline lives in ctx, supplied by the caller from --shutdown-timeout.
 	if srv != nil {
 		if err := srv.Shutdown(ctx); err != nil {
 			// Report the bounded drain timeout while still force-closing streams; the
@@ -392,16 +375,14 @@ func (e *Engine) Shutdown(ctx context.Context, srv shutdownServer) error {
 			keep(srv.Close())
 		}
 	}
-	// Step 4. Close should make handlers return, but substrate calls are not guaranteed
-	// to honor request cancellation. Do not let such a call extend shutdown beyond the
-	// same deadline that bounds Server.Shutdown.
+	// Close should make handlers return, but substrate calls are not guaranteed to honor
+	// request cancellation, and such a call must not extend shutdown beyond the same deadline
+	// that bounds Server.Shutdown.
 	keep(e.httpHandlers.wait(ctx))
 
-	// Step 5, LAST and unconditional: every user of the store above has now either
-	// returned or been abandoned to the deadline. Unconditional because a store left
-	// open is a held file lock, and the errors above are all conditions a next boot
-	// recovers from — refusing to close on one of them would turn a reported overrun
-	// into a resource leak.
+	// UNCONDITIONAL: a store left open is a held file lock, and the errors above are all
+	// conditions a next boot recovers from — refusing to close on one would turn a reported
+	// overrun into a resource leak.
 	keep(e.closeStore())
 
 	return firstErr

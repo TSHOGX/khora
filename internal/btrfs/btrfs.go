@@ -7,20 +7,16 @@
 // way they import `os` (rootfs-overlay D6.4).
 //
 // A PACKAGE AND NOT A SEAM: the capacity cap is shared CODE, not a shared INTERFACE. A remote
-// provider satisfies "this unit is at most N bytes" by entirely different means, so a
-// cross-cutting QuotaProvider would only weld the btrfs assumption into every implementation. Two
-// subsystems importing one substrate tool do not violate "subsystems never call each other" (§4)
-// — neither calls the OTHER.
+// provider satisfies "this unit is at most N bytes" by other means, so a cross-cutting
+// QuotaProvider would weld the btrfs assumption into every implementation. Two subsystems
+// importing one substrate tool do not violate §4 — neither calls the OTHER.
 //
-// MECHANISM CHOICE: squota, not full qgroups (rootfs-overlay D6.2). Three
-// reasons, the third decisive: (1) squota is designed for exactly this shape, one
-// subvolume per workload, with no rescan storms; (2) its semantics match what we
-// mean to charge for — bytes the sandbox WROTE — whereas under full qgroups a
-// copy-up reflink pushes `referenced` past the cap and only falls back after
-// refusing new writes, paying a cost for still no hard ceiling; (3) the dev/test
-// substrate CANNOT change mode (BTRFS_IOC_QUOTA_CTL returns EPERM even as root
-// with CAP_SYS_ADMIN), so choosing full qgroups would fork spec from substrate
-// permanently.
+// MECHANISM CHOICE: squota, not full qgroups (rootfs-overlay D6.2), the decisive reason being
+// that the dev/test substrate CANNOT change mode — BTRFS_IOC_QUOTA_CTL returns EPERM even as
+// root with CAP_SYS_ADMIN, so full qgroups would fork spec from substrate permanently. squota
+// also fits the shape (one subvolume per workload, no rescan storms) and charges what we mean
+// to charge for: under full qgroups a copy-up reflink pushes `referenced` past the cap and only
+// falls back after refusing new writes, paying a cost for still no hard ceiling.
 //
 // The consequence that must be handled OUTSIDE this package: under squota a
 // reflinked copy-up is free, so the cap governs newly-written bytes and is not a
@@ -227,26 +223,21 @@ func (c Client) Usage(ctx context.Context, path string) (used, limit int64, err 
 	// numbers reflect writes that have not yet been committed by a background
 	// transaction (without it a just-written file can read as 0).
 	//
-	// RETRIED, AND THE RETRY IS LOAD-BEARING RATHER THAN DEFENSIVE. `-f` filters AFTER
-	// enumerating every row on the filesystem, so a subvolume deleted concurrently
-	// ANYWHERE on that fs fails this read WHOLESALE — the error even names a row that is
-	// not ours. Measured under three-way churn: 10/300 reads failed, and on failure our
-	// own row was printed 0/10 times, so there is nothing to parse around; the read
-	// either answers or it does not. The engine's own destroy path generates exactly that
-	// churn and the substrate's cleaner is asynchronous, so no caller can serialize
-	// against it.
+	// RETRIED, because `-f` filters AFTER enumerating every row on the filesystem, so a
+	// subvolume deleted concurrently ANYWHERE on that fs fails this read WHOLESALE — the error
+	// even names a row that is not ours. Measured under three-way churn: 10/300 reads failed,
+	// and on failure our own row was printed 0/10 times, so there is nothing to parse around.
+	// The engine's own destroy path generates that churn against an asynchronous cleaner, so no
+	// caller can serialize against it.
 	//
-	// The failure is TRANSIENT, which is what makes a retry the right shape rather than a
-	// papering-over: under the same churn, three attempts turned 8 first-attempt failures
-	// into 0 final failures (300 reads). That matters beyond tidiness — the callers that
-	// must FAIL CLOSED on an unreadable row (the §6.1 cap write points, and §5.B's
-	// materialization guard, which sits on the create/resume hot path) pay for this read's
-	// reliability directly in refused requests and refused placements.
+	// The failure is TRANSIENT: under the same churn, three attempts turned 8 first-attempt
+	// failures into 0 final failures (300 reads). The callers that must FAIL CLOSED on an
+	// unreadable row (the §6.1 cap write points, §5.B's materialization guard on the
+	// create/resume hot path) pay for this read's reliability in refused requests.
 	//
-	// The error contract is UNCHANGED: an error still means "unreadable, draw no
-	// conclusion" — it is simply much rarer. Nothing here retries a SEMANTIC failure
-	// (quotas disabled, no such row): those come back from the parse below, not from a
-	// non-zero exit.
+	// The error contract is UNCHANGED — "unreadable, draw no conclusion", just rarer. Nothing
+	// retries a SEMANTIC failure (quotas disabled, no such row): those come back from the parse
+	// below, not from a non-zero exit.
 	var out []byte
 	for attempt := 1; ; attempt++ {
 		out, err = c.run(ctx, "qgroup", "show", "-re", "--raw", "--sync", "-f", path)

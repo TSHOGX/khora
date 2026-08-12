@@ -52,49 +52,40 @@ var ErrCapRequired = errors.New("lifecycle: node meters this axis, so a cap is r
 // ErrUncappedDiskNotCappable is the §3.4 refusal of a `0 → N` write on a sandbox's
 // disk axis: an uncapped sandbox cannot be GIVEN a cap by a PATCH.
 //
-// 400, and refused at the WRITE POINT rather than at the next placement, because the
-// promise is unmaterializable and the alternative is a brick. The per-sandbox capacity
-// cap materializes as a quota on the Overlay's storage unit, and that unit is only
-// built as a btrfs subvolume when a cap was already present AT CREATE
-// (§5.B: `CreateOverlay` makes the subvolume only for `capByte > 0`); an uncapped
-// sandbox's upper is a plain directory tree with no quota row to write. §5.B's rule for
-// an unenforceable cap is "refuse the placement, never silently run uncapped" — so
-// accepting this PATCH would record a cap that EVERY future placement refuses, and the
-// sandbox could never resume again. A 200 would turn the sandbox into a brick.
+// 400 at the WRITE POINT rather than at the next placement, because accepting it bricks the
+// sandbox: the cap materializes as a quota on the Overlay's storage unit, which §5.B builds as
+// a btrfs subvolume only when a cap was present AT CREATE (`CreateOverlay` for `capByte > 0`),
+// so an uncapped sandbox's upper is a plain directory tree with no quota row to write. §5.B
+// refuses a placement it cannot enforce a cap for, so a 200 here records a cap every future
+// placement refuses.
 //
-// DIRECTIONAL: `N → 0` (drop the cap) and `N → M` (change it) stay legal. Only the
-// from-uncapped direction is refused, and only on disk — memory and CPU do not
-// materialize as storage units.
+// DIRECTIONAL: `N → 0` and `N → M` stay legal, and only disk is affected — memory and CPU do
+// not materialize as storage units.
 var ErrUncappedDiskNotCappable = errors.New("lifecycle: an uncapped sandbox's disk axis cannot be capped by a PATCH")
 
 // ErrDiskCapBelowUsage is the §3.4 refusal of a disk cap that is not STRICTLY above the
 // sandbox's current Overlay usage — the §5.B-side twin of ErrVolumeCapBelowUsage, and the
 // same 400.
 //
-// The criterion is a STRICT inequality and `cap == usage` means FULL rather than "exactly
-// enough": measured, a limit set exactly equal to the unit's `referenced` is accepted and
-// stored, and re-applying it or raising it afterwards both return ENOSPC. Below usage is
-// the same wedge one step worse — creating a file, `mkdir`, and truncating an existing
-// file to zero all return ENOSPC, and so does the quota write itself, so the cap can be
-// neither raised nor removed. The only substrate exit is deleting the guest's bytes, which
-// §6 gives the engine no way to do for the caller.
+// STRICT inequality, because `cap == usage` means FULL rather than "exactly enough":
+// measured, a limit set exactly equal to the unit's `referenced` is accepted and stored, and
+// re-applying or raising it afterwards both return ENOSPC. At or below usage the unit is
+// wedged — file creation, `mkdir`, truncate-to-zero and the quota write itself all return
+// ENOSPC, so the cap can be neither raised nor removed, and the only substrate exit is
+// deleting the guest's bytes, which §6 gives the engine no way to do.
 //
-// ON THE SANDBOX SIDE THE CONSEQUENCE IS STRICTLY WORSE THAN ON A VOLUME, which is why
-// this refusal is not merely symmetry: §5.B re-applies the record's cap at EVERY placement,
-// and re-applying it to a wedged unit fails the same way — so a 200 here does not just
-// wedge the bytes, it makes the sandbox permanently unresumable, exactly the brick that
-// ErrUncappedDiskNotCappable exists to prevent from the other direction. (`Mount`'s own
-// fresh-workdir step fails with ENOSPC too, so even skipping the quota write would not
-// resume it.)
+// WORSE HERE THAN ON A VOLUME: §5.B re-applies the record's cap at EVERY placement and fails
+// the same way on a wedged unit, so a 200 makes the sandbox permanently unresumable — the
+// brick ErrUncappedDiskNotCappable prevents from the other direction. (`Mount`'s fresh-workdir
+// step fails with ENOSPC too, so skipping the quota write would not resume it either.)
 //
-// It fires on ANY positive cap this request writes, not only on a lowering. A raise can
-// land under usage too: if the unit's quota row was lost to an external change — the case
-// §5.B's per-placement re-application exists for — the guest can grow past the recorded
-// cap, and then even a cap ABOVE the recorded one can be at or below what the unit holds.
+// It fires on ANY positive cap this request writes, not only a lowering: if the unit's quota
+// row was lost to an external change — the case §5.B's per-placement re-application exists for
+// — the guest can grow past the recorded cap, so even a raise can land at or below usage.
 //
-// It does NOT fire for a sandbox that filled its own cap the ordinary §3.4 way: squota
-// stops the guest with ENOSPC while usage is still strictly below the limit, so such a
-// sandbox's cap can be re-asserted and raised (§4.3's resource-terminated remedy).
+// It does NOT fire for a sandbox that filled its own cap the ordinary §3.4 way: squota stops
+// the guest with ENOSPC while usage is still strictly below the limit, so that cap can be
+// re-asserted and raised (§4.3's resource-terminated remedy).
 var ErrDiskCapBelowUsage = errors.New("lifecycle: sandbox disk cap must be strictly greater than current Overlay usage")
 
 // deathCauseOf translates the §5.A provider enum into the persisted model enum.
@@ -237,22 +228,18 @@ type Mediator struct {
 	// work, which never takes the transition lock at all.
 	barrier *barrier
 
-	// admitMu serializes the §3.4 no-oversubscribe gate. The per-sandbox
-	// transition lock (§4.4-B) CANNOT do this job: the gate's invariant is
-	// node-GLOBAL (a sum over every record), while those locks are per-sandbox —
-	// and `Create` mints a fresh SandboxID, so two concurrent creates take two
-	// different locks and never serialize against each other at all. Each would
-	// read the store before either inserts, both would pass, and the node ends up
-	// over its declared budget with every individual cap honored.
+	// admitMu serializes the §3.4 no-oversubscribe gate, which the per-sandbox transition lock
+	// (§4.4-B) cannot do: the invariant is node-GLOBAL (a sum over every record) and `Create`
+	// mints a fresh SandboxID, so two concurrent creates take different locks, both read the
+	// store before either inserts, both pass, and the node lands over its declared budget with
+	// every individual cap honored.
 	//
-	// So the sum-then-commit sequence needs one arbiter. This is the same shape as
-	// §4.3's reference-reclaim invariant, which resolves the analogous
-	// read-then-decide-vs-concurrent-insert race by requiring a single serializing
-	// authority — there the store's atomic commit, here this mutex, because the
-	// decision spans a provider measurement the store cannot see.
+	// Same shape as §4.3's reference-reclaim invariant — one serializing authority for a
+	// read-then-decide-vs-concurrent-insert race — but a mutex rather than the store's atomic
+	// commit, because the decision spans a provider measurement the store cannot see.
 	//
-	// Held only across {read records → measure → compare → commit}, never across a
-	// cold start, so it does not couple unrelated sandboxes' launch latency.
+	// Held only across {read records → measure → compare → commit}, never across a cold start,
+	// so it does not couple unrelated sandboxes' launch latency.
 	admitMu sync.Mutex
 
 	// live holds the per-sandbox liveState (placement handle + mounted merged
@@ -371,21 +358,16 @@ func New(deps Deps) *Mediator {
 // transitionLock is one sandbox's transition mutex (§4.4-B) plus the refcount
 // that decides when its map entry may be dropped.
 //
-// The naive reclamation — delete the entry when a verb finishes, or on destroy —
-// is a CORRECTNESS BUG, not a tidy-up: a verb already blocked in mu.Lock() holds
-// a pointer to this mutex, so deleting the entry lets the NEXT verb mint a fresh
-// mutex and the two then serialize on DIFFERENT mutexes. Both would be "holding
-// the sandbox's transition lock" while running concurrently, which is exactly
-// what §4.4-B forbids (and what a destroy racing an in-flight resume needs).
+// The naive reclamation — delete the entry when a verb finishes, or on destroy — is a
+// CORRECTNESS BUG: a verb already blocked in mu.Lock() holds a pointer to this mutex, so
+// deleting the entry lets the NEXT verb mint a fresh one and the two then serialize on
+// DIFFERENT mutexes, both "holding the sandbox's transition lock" concurrently (§4.4-B).
 //
-// refs is what closes that: it counts outstanding lock() handouts, not holders.
-// It is incremented under m.mu in the SAME critical section that finds-or-creates
-// the entry, so a caller cannot be handed a pointer to an entry that is
-// concurrently being deleted; and it is decremented only after the mutex is
-// released, so a blocked waiter always keeps refs > 0. An entry therefore reaches
-// refs == 0 only when nobody holds it, nobody is blocked on it, and nobody is
-// between lock() and Lock() — at which point deleting it is unobservable: the
-// next verb creates a fresh mutex with no contender to disagree with.
+// refs counts outstanding lock() handouts, not holders. Incremented under m.mu in the SAME
+// critical section that finds-or-creates the entry, so no caller is handed a pointer to an
+// entry being concurrently deleted; decremented only after the mutex is released, so a blocked
+// waiter always keeps refs > 0. refs == 0 therefore means nobody holds it, nobody is blocked on
+// it, and nobody is between lock() and Lock() — at which point deleting it is unobservable.
 type transitionLock struct {
 	mu sync.Mutex
 
@@ -722,32 +704,24 @@ func (m *Mediator) Pause(ctx context.Context, id model.SandboxID) error {
 	return nil
 }
 
-// pauseLocked commits a running→paused transition with the given event Kind and
-// releases the sandbox's placement. CALLER MUST HOLD the transition lock
-// (§4.4-B). Shared by the user Pause verb ("paused") and the reaper's
-// auto-pause ("auto-paused") / crash-pause ("crash-paused"): identical state
-// transition + placement release, the Kind carries WHY (§4.1: three pause-like
-// Kinds, all state=paused). Pause always lands a legal `paused` (§4.4: no middle
-// dirty state), so we CAS the state first, then release placement-local
-// resources; the Overlay artifact is already on the backend and captured NOTHING
-// (§4.2: pause captures nothing). Stop is best-effort and idempotent, so it is also
-// correct for a crash-pause whose container is already dead (it reclaims the
-// lingering netns).
-// cause carries the §4.3 death cause for the INVOLUNTARY variants (crash-pause):
-// it is committed in the SAME store call as the demotion CAS (§4.3 / §4.4-C; see
-// store.CompareAndSetState). nil for the voluntary variants (user pause /
-// auto-pause), which are not deaths and must leave any previously recorded cause
-// alone.
+// pauseLocked commits a running→paused transition with the given event Kind and releases the
+// sandbox's placement. CALLER MUST HOLD the transition lock (§4.4-B). Shared by the user Pause
+// verb ("paused") and the reaper's auto-pause / crash-pause: identical transition + placement
+// release, the Kind carrying WHY (§4.1). Pause always lands a legal `paused` (§4.4: no middle
+// dirty state), so the CAS comes first and placement-local resources are released after — the
+// Overlay is already on the backend and captured NOTHING (§4.2). Stop is best-effort and
+// idempotent, so it also fits a crash-pause whose container is already dead, reclaiming the
+// lingering netns.
+//
+// cause carries the §4.3 death cause for the INVOLUNTARY variants, committed in the SAME store
+// call as the demotion CAS (§4.3 / §4.4-C). nil for the voluntary ones, which are not deaths
+// and must leave any previously recorded cause alone.
 func (m *Mediator) pauseLocked(ctx context.Context, id model.SandboxID, kind model.EventKind, cause *model.DeathCause) error {
-	// Drain engine-issued mutating fs RPCs before freezing, for the VOLUNTARY
-	// variants only (§4.2 / D4.4). A crash-pause skips it, and that holds for BOTH
-	// paths carrying this Kind even though only one of them is a death: what they
-	// share is that L2 is down, so no mutating fs RPC can still complete through it.
-	// Draining would buy nothing and cost the full grace — for a dead unit (nothing
-	// left to truncate) it would only delay recording a death already observed; for
-	// the D4b transport-down escalation (L1 alive, transport wedged) it would stall
-	// the sweep waiting on RPCs that cannot finish, which is the very wedge the
-	// escalation exists to break.
+	// Drain engine-issued mutating fs RPCs before freezing, for the VOLUNTARY variants only
+	// (§4.2 / D4.4). Both crash-pause paths skip it because both have L2 down, so no mutating
+	// fs RPC can still complete: draining a dead unit only delays recording a death already
+	// observed, and draining the D4b transport-down escalation (L1 alive, transport wedged)
+	// stalls the sweep on RPCs that cannot finish — the wedge the escalation exists to break.
 	//
 	// Before the CAS, not after: once the record says `paused`, a still-running
 	// write would be landing bytes into a sandbox the control plane already
@@ -906,31 +880,25 @@ func (m *Mediator) Destroy(ctx context.Context, id model.SandboxID) error {
 	return m.destroyLocked(ctx, rec, model.CauseRequested)
 }
 
-// destroyLocked marks a sandbox `destroyed` and reclaims its bytes + placement.
-// CALLER MUST HOLD the transition lock (§4.4-B). Shared by the user Destroy verb
-// (valid from running or paused) and the reaper's evict (a paused sandbox past
-// retention). Marking the record destroyed is decoupled from byte reclamation:
-// the Overlay is deleted synchronously here, and a crash between the two leaves
-// the Overlay as an orphan the orphan-UNIT sweep reclaims (SweepOrphanOverlays,
-// §4.3/§4.4-A).
-// Emitting Kind "destroyed" matches §4.1 — evict is "the reaper's automatic
-// destroy", the SAME terminal, not a distinct Kind. Because the lock is held for
-// the whole chain, destroy/evict CANNOT delete an Overlay mid-cold-start
-// (§4.4-B: destroy-vs-resume race).
+// destroyLocked marks a sandbox `destroyed` and reclaims its bytes + placement. CALLER MUST HOLD
+// the transition lock (§4.4-B). Shared by the user Destroy verb (valid from running or paused)
+// and the reaper's evict (a paused sandbox past retention). Marking the record destroyed is
+// decoupled from byte reclamation: the Overlay is deleted synchronously here, and a crash between
+// the two leaves it an orphan for SweepOrphanOverlays (§4.3/§4.4-A).
 //
-// NOTE — no source-state CAS here (unlike pause/resume). destroy is deliberately
-// valid from BOTH `running` and `paused` (§4.1 / §4.4-A decouples it) and is
-// idempotent, so there is no single "expected" source state to compare-and-set
-// against. The invariant is LOCK-enforced, not CAS-enforced: the held transition
-// lock serializes destroy against every other verb. The terminal DeleteSandbox is
-// idempotent (ErrNotFound → already gone).
+// Kind "destroyed" matches §4.1 — evict is "the reaper's automatic destroy", the SAME terminal.
+// Holding the lock for the whole chain is what stops destroy/evict deleting an Overlay
+// mid-cold-start (§4.4-B destroy-vs-resume).
 //
-// A `creating` record IS reachable here, contrary to what "Create holds the lock
-// for its whole chain" would suggest: that holds only within one process lifetime.
-// A crash mid-create leaves a `creating` row, and if reconcile's cleanup delete
-// then fails it survives to be destroyed by an operator later. Such a record never
-// emitted `created`, so it must not emit `destroyed` — see the Kind selection
-// below.
+// NO SOURCE-STATE CAS here, unlike pause/resume: destroy is valid from BOTH `running` and
+// `paused` (§4.1 / §4.4-A) and idempotent, so there is no single "expected" source state. The
+// invariant is LOCK-enforced instead — the held transition lock serializes destroy against
+// every other verb, and the terminal DeleteSandbox is idempotent (ErrNotFound → already gone).
+//
+// A `creating` record IS reachable here: "Create holds the lock for its whole chain" holds
+// only within one process lifetime, so a crash mid-create leaves a `creating` row that
+// survives if reconcile's cleanup delete also fails. Such a record never emitted `created`, so
+// it must not emit `destroyed` — see the Kind selection below.
 func (m *Mediator) destroyLocked(ctx context.Context, rec model.Sandbox, cause model.EventCause) error {
 	id := rec.ID
 	// tear down any live placement + mount (running case).
@@ -1011,18 +979,15 @@ func (m *Mediator) destroyLocked(ctx context.Context, rec model.Sandbox, cause m
 // (§5.B multi-lowerdir).
 //
 // ADMISSION (§3.4 / rootfs-overlay D6.5): a frozen layer is charged to no sandbox cap, so it
-// grows the MEASURED term and must clear the same inequality as a create. Refusal is
-// ErrInsufficientCapacity (507), and the harm prevented is not "this Promote fails" but an
-// UNRELATED sandbox meeting ENOSPC nowhere near its own cap — §2.3 containment broken from the
-// other side. Gated through admitUncappedGrowth, never `admit`: these bytes join the measured
-// term, not the promise term (admission.go).
+// grows the MEASURED term and must clear the same inequality as a create — refused with
+// ErrInsufficientCapacity (507), the harm being an UNRELATED sandbox meeting ENOSPC nowhere
+// near its own cap. Gated through admitUncappedGrowth, never `admit` (admission.go).
 //
 // The gate runs BEFORE the quiesce, paying in forecast accuracy rather than in the state
-// machine: gating after it would buy an exact count at the price of A REFUSAL THAT MUTATED
-// STATE — a running sandbox left `paused`, with a `paused` event published, because the node
-// was full. So the source is still live when measured and the number is an upper bound a
-// concurrent write can outgrow, bounded by that sandbox's own headroom — the same residual the
-// whole measured term carries (D6.5), not a new weakness.
+// machine: gating after it buys an exact count at the price of A REFUSAL THAT MUTATED STATE —
+// a running sandbox left `paused`, with a `paused` event published, because the node was full.
+// The source is therefore still live when measured, so the number is an upper bound bounded by
+// that sandbox's own headroom (the residual the whole measured term carries, D6.5).
 //
 // A refused Promote leaves the sandbox in its ENTRY state, no layer bytes, no `templates` row.
 func (m *Mediator) Promote(ctx context.Context, id model.SandboxID) (model.TemplateID, error) {
@@ -1275,19 +1240,14 @@ func (m *Mediator) awaitHealthy(ctx context.Context, pl *runtime.Placement) erro
 // unwind reclaims a half-built placement (§4.4-A: failure recycles placement,
 // persistent Overlay artifact untouched). isCreate additionally destroys the
 // just-built empty Overlay (create has no fallback state; resume keeps it).
-// UNWIND MUST DELETE THE MOUNT ROWS ON THE CREATE PATH, and this is a DESIGN
-// REQUIREMENT rather than an implementation detail (§5.C / volume.md D3).
+// UNWIND MUST DELETE THE MOUNT ROWS ON THE CREATE PATH (§5.C / volume.md D3). They are written
+// BEFORE the cold start, so every post-cold-start unwind branch is followed by a DeleteSandbox
+// that hits mounts.sandbox RESTRICT — and discarding that error leaves A ZOMBIE SANDBOX RECORD
+// THAT CANNOT BE DELETED by anyone, ever: the record blocks on rows nothing else knows to remove,
+// and the sandbox never ran so no later verb revisits it.
 //
-// The mount rows are written BEFORE the cold start, so every post-cold-start unwind
-// branch is followed by a DeleteSandbox that will hit mounts.sandbox RESTRICT. An
-// unwind that discarded that error would leave A ZOMBIE SANDBOX RECORD THAT CANNOT BE
-// DELETED — by anyone, ever: the record blocks on rows nothing else knows to remove,
-// and the sandbox never ran so no later verb will revisit it.
-//
-// That is why the deletion is here and not left to the caller's `_ =` DeleteSandbox:
-// those calls legitimately ignore their error (the create was already failing and
-// there is nothing better to do), which is exactly the shape that would swallow this
-// one silently.
+// Hence the deletion is here rather than in the caller's `_ =` DeleteSandbox, which legitimately
+// ignores its error and is exactly the shape that would swallow this one.
 //
 // isCreate gates it because RESUME MUST NOT delete them: a failed resume stays
 // `paused` (§4.4-A atomic return to the source state), and its binding is persistent
@@ -1523,38 +1483,28 @@ func (m *Mediator) buildingLayerIDs() []string {
 	return out
 }
 
-// Reconcile is the §4.4-A startup crash-reconciliation: one local scan diffing
-// host placement × store records, run ONCE at orchestrator boot before serving
-// (§4.4-A). The process just (re)started, so the live-map is empty and
-// all transition locks are fresh — every in-flight resume that was running is
-// dead, so half-built placements need NO lock to identify (lock-based
-// identification is only for the periodic reconcile against a LIVE
-// orchestrator — see ReconcilePeriodic). It is a dual operation, NOT
-// reclaim-all:
+// Reconcile is the §4.4-A startup crash-reconciliation: one local scan diffing host placement
+// × store records, run ONCE at orchestrator boot before serving. The process just (re)started,
+// so the live-map is empty and all transition locks are fresh — every in-flight resume is dead,
+// and half-built placements need NO lock to identify (that is ReconcilePeriodic's problem,
+// against a LIVE orchestrator). A dual operation, NOT reclaim-all:
 //
-//   - `creating` record → the create crashed mid-chain, never reached running,
-//     has no at-rest resting state → delete the record (→ destroyed); its
-//     half-built placement is an orphan, reclaimed below.
-//   - `paused` record → keep; any half-built placement (crashed mid-resume) is
-//     an orphan, reclaimed below. The upper is intact and resumable (§4.2).
-//   - `running` record → PROBE liveness via Adopt: alive → rebuild the live-map
-//     handle at the SAME IP (not a resume, no new epoch — the isolation unit
-//     never restarted, §4.4-A's other half — the takeover half); dead → CAS-demote to
-//     `paused` (§4.2
-//     involuntary pause), emitting an event (ties §4.4-A to §4.4-C).
+//   - `creating` record → the create crashed mid-chain and has no at-rest resting state →
+//     delete the record (→ destroyed); its half-built placement is an orphan, reclaimed below.
+//   - `paused` record → keep; any half-built placement (crashed mid-resume) is an orphan,
+//     reclaimed below. The upper is intact and resumable (§4.2).
+//   - `running` record → PROBE liveness via Adopt: alive → rebuild the live-map handle at the
+//     SAME IP (the takeover half of §4.4-A: no new epoch, the isolation unit never restarted);
+//     dead → CAS-demote to `paused` (§4.2 involuntary pause) with an event (§4.4-C).
 //
-// Any placement backing none of the kept sandboxes is an orphan → ReclaimOrphans
-// tears it down (reverse-dep order, persistent upper untouched, §4.4-A).
+// Any placement backing none of the kept sandboxes is an orphan → ReclaimOrphans tears it down
+// (reverse-dep order, persistent upper untouched, §4.4-A).
 //
-// Failure policy is SKIP-AND-LOG, not fail-fast: a single un-reconcilable
-// sandbox must not abort recovery of every other one (that would turn one bad
-// overlay handle into a boot outage). Only a failure that makes the whole scan
-// impossible (listing the records) is fatal. The overriding safety rule when a
-// `running` sandbox cannot be cleanly resolved is CONSERVATIVE: protect its
-// placement from reclamation (add it to keep) rather than risk tearing down a
-// container that may still be live — leaking a placement is recoverable on the
-// next boot; killing a live survivor is not. Reconcile is idempotent, so a
-// skipped item is simply retried next start.
+// Failure policy is SKIP-AND-LOG: one un-reconcilable sandbox must not turn a bad overlay
+// handle into a boot outage, and only a failure making the whole scan impossible (listing the
+// records) is fatal. An unresolvable `running` sandbox is handled CONSERVATIVELY — protect its
+// placement from reclamation by adding it to keep, since leaking a placement is recoverable
+// next boot and killing a live survivor is not. Reconcile is idempotent.
 func (m *Mediator) Reconcile(ctx context.Context) error {
 	return m.reconcile(ctx, false)
 }
@@ -1819,15 +1769,12 @@ func (m *Mediator) reclaimOrphanOverlay(ctx context.Context, rec model.Sandbox, 
 //     handle). Caller PROTECTS the placement (does not reclaim) and retries next
 //     boot — never tears down a possibly-live container on uncertainty.
 //
-// Readiness is a two-layer judgement matching cold-start's ⑦ gate, not just the
-// runtime's L1 liveness (§4.3 two-layer probe). Adopt gives L1 (the isolation
-// unit is up) + the endpoint; we then fire ONE Health RPC (L2) before trusting
-// the survivor. This closes the crack where a `created`-but-not-listening
-// container would be optimistically adopted with an un-serving endpoint: if L2
-// does not answer, we demote to paused (recoverable via a fresh cold-start on the
-// next resume) rather than record a dead handle. It is a SINGLE boot-time probe,
-// deliberately NOT the continuous health classifier (that is classify plus the
-// reaper's sweep, §4.3).
+// Readiness is a two-layer judgement matching cold-start's ⑦ gate, not just the runtime's L1
+// liveness (§4.3 two-layer probe): Adopt gives L1 plus the endpoint, then ONE Health RPC (L2)
+// before trusting the survivor. Otherwise a `created`-but-not-listening container is
+// optimistically adopted with an un-serving endpoint; no L2 answer demotes to paused, recoverable
+// via a fresh cold-start on the next resume. A SINGLE boot-time probe, NOT the continuous health
+// classifier (that is classify plus the reaper's sweep, §4.3).
 func (m *Mediator) adoptOrDemote(ctx context.Context, rec model.Sandbox) (bool, error) {
 	l := m.lock(rec.ID)
 	l.Lock()
@@ -1889,31 +1836,25 @@ func (m *Mediator) adoptOrDemoteLocked(ctx context.Context, rec model.Sandbox) (
 	// engine-level `output` table pinning the endpoint process is not installed
 	// (network.ValidatePlacement — the mechanism and the measurement are there).
 	//
-	// This arm exists because adopt is the ONE placement path where the alternatives
-	// are not equivalent, and the two obvious ones are both wrong:
+	// Neither of the two obvious dispositions works here:
 	//
-	//   - PROTECT (return an error, the default disposition of every uncertainty below)
-	//     would leave the sandbox `running` with its placement in the keep-set — i.e.
-	//     leave the unenforced deputy running, and re-decide identically on every
-	//     subsequent pass. Protect-on-uncertainty is for facts the engine could not
-	//     DETERMINE; this one is fully determined, and it is determined to be unsafe.
-	//   - ADOPT-THEN-REFUSE-THE-RULES is not available either: the rule set installs
-	//     fine (the second-hop pin is not part of it — see steeringFor), so there is no
-	//     install failure to lean on.
+	//   - PROTECT (the default for every uncertainty below) would leave the sandbox
+	//     `running` with its placement in the keep-set — the unenforced deputy still
+	//     running, re-decided identically every pass. Protect-on-uncertainty is for facts
+	//     the engine could not DETERMINE; this one is determined, and determined unsafe.
+	//   - ADOPT-THEN-REFUSE-THE-RULES has nothing to lean on: the rule set installs fine,
+	//     the second-hop pin not being part of it (see steeringFor).
 	//
-	// So it demotes, and the demotion is a §4.2 involuntary pause with `alive` deliberately
-	// left true up to this point: NOTHING DIED. Passing no death cause is the same
-	// judgment the not-serving arm above makes for the same reason — a cause would be a
-	// false statement about a unit L1 just reported alive (§2.4 forbids guessing).
+	// So it demotes as a §4.2 involuntary pause, with `alive` deliberately still true:
+	// NOTHING DIED, so no death cause is passed — that would be a false statement about a
+	// unit L1 just reported alive (§2.4 forbids guessing), the same judgment the not-serving
+	// arm makes.
 	//
-	// Demoting a live unit is destructive, which is exactly why it is right here and not
-	// in the uncertainty arms: `paused` is the fail-CLOSED resting state (a paused
-	// sandbox has no placement and therefore not one rule installed), it is fully
-	// recoverable — the upper is untouched, and a resume succeeds the moment either
-	// remedy is applied — and the operator gets a `crash-paused` event plus this log line
-	// naming both remedies. The alternative preserves reachability the engine has just
-	// determined it cannot pin, which §2.4 classifies as a failure rather than a
-	// degradation.
+	// Demoting a live unit is destructive but recoverable: `paused` is the fail-CLOSED
+	// resting state (no placement, so not one rule installed), the upper is untouched, a
+	// resume succeeds the moment either remedy is applied, and the operator gets a
+	// `crash-paused` event plus this log line naming both. The alternative preserves
+	// reachability the engine has just determined it cannot pin (§2.4).
 	if verr := network.ValidatePlacement(rec.Network, m.deps.Deployment); verr != nil {
 		m.deps.Logf("reconcile: demoting live sandbox %s to paused — it is alive and serving, but "+
 			"this deployment cannot enforce its recorded declaration: %v", rec.ID, verr)

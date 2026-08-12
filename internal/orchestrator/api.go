@@ -186,18 +186,14 @@ func parseVolumeBinding(items []volumeBindingItem) ([]model.Mount, error) {
 // without a sign check while PATCH refused a negative, so the SAME field was legal on
 // one and a 400 on the other.
 //
-// A NEGATIVE DURATION IS REFUSED, and the reason is that its effect is SILENT rather
-// than wrong-but-visible. Both consumers read a non-positive TTL as an OPT-OUT — the
-// reaper returns early on `Retention <= 0`, and idle classification only fires on
-// `IdleTimeout > 0` — so `-5m` does not produce an early deadline or an error; it
-// produces NEVER EVICT / NEVER IDLE-PAUSE. A caller who typed a duration they believed
-// was a deadline gets a sandbox that outlives every deadline, with nothing anywhere
-// reporting that their value was not honored. Refusing at the boundary is the only
-// place the mistake stays visible.
+// A NEGATIVE DURATION IS REFUSED because its effect is SILENT rather than wrong-but-visible:
+// both consumers read a non-positive TTL as an OPT-OUT (the reaper returns early on
+// `Retention <= 0`, idle classification fires only on `IdleTimeout > 0`), so `-5m` produces
+// NEVER EVICT / NEVER IDLE-PAUSE with nothing reporting that the value was not honored. The
+// boundary is the only place the mistake stays visible.
 //
-// `0` remains legal on both, and that is not an inconsistency: zero is the DOCUMENTED
-// opt-out spelling (§6.1 `retention: 0` = never evict), i.e. a chosen value, whereas a
-// negative is a value nothing in the engine can mean.
+// `0` remains legal: it is the DOCUMENTED opt-out spelling (§6.1 `retention: 0` = never evict),
+// a chosen value, whereas a negative is one nothing in the engine can mean.
 //
 // Returns a POINTER because both call sites need one — create's CreateSpec and PATCH's
 // store.Binding both distinguish "not given" from "given".
@@ -698,16 +694,15 @@ type eventsResp struct {
 // engine-level lifecycle event stream, replayed by cursor. PULL ONLY — the engine
 // tracks no subscribers (§1.3), so there is no state here to leak or clean up.
 //
-// A cursor-paged GET is ordinary CRUD, which is why this belongs on the control
-// plane: the stream is engine-level, neither per-sandbox nor per-pid, so the data
-// plane has nowhere to address it from.
-// readEvents is the §6.1 replay read plus the optional `wait` hold. With wait == 0 it
-// is one read, i.e. exactly the previous behavior.
+// A cursor-paged GET is ordinary CRUD, which is why this belongs on the control plane: the
+// stream is engine-level, neither per-sandbox nor per-pid, so the data plane has nowhere to
+// address it from.
 //
-// The loop re-runs THE SAME query rather than waiting on a notification, which is
-// §4.4-C's own prescription ("a presentation-layer adapter that server-polls the same
-// pull query, sharing the same `seq`"): the engine keeps no subscriber table, no eviction
-// policy, and no cleanup path, and every store backend keeps its contract unchanged.
+// readEvents is that replay read plus the optional `wait` hold; wait == 0 is one read. The loop
+// re-runs THE SAME query rather than waiting on a notification, which is §4.4-C's own
+// prescription ("a presentation-layer adapter that server-polls the same pull query, sharing
+// the same `seq`"): no subscriber table, no eviction policy, no cleanup path, and every store
+// backend keeps its contract unchanged.
 //
 // Two properties the shape has to preserve:
 //
@@ -871,28 +866,24 @@ func (e *Engine) handleEvents(w http.ResponseWriter, r *http.Request) {
 // sandboxResp is the §6.1 read shape for GET /v1/sandboxes/{id} and each element
 // of GET /v1/sandboxes.
 //
-// ONE TYPE, TWO SURFACES THAT DIFFER DELIBERATELY: the single read populates UsedByte,
-// the LIST leaves it nil so it is omitted. That is not an oversight to tidy up — usage
-// costs a backend round trip, and the list would pay it once per sandbox (§6.1, the same
-// rule the volume list follows). If you find yourself filling it in handleList, that is
-// the decision being reversed, not a gap being closed.
+// ONE TYPE, TWO SURFACES THAT DIFFER DELIBERATELY: the single read populates UsedByte, the
+// LIST leaves it nil so it is omitted — usage costs a backend round trip the list would pay
+// once per sandbox (§6.1, the same rule the volume list follows). Filling it in handleList
+// reverses that decision rather than closing a gap.
 //
-// DeathCause shape, argued here because neither reference implementation offers a
-// precedent to copy (one models no terminal state at all, the other has a failed
-// state but no cause field anywhere):
+// DeathCause shape (no reference implementation offers a precedent — one models no terminal
+// state, the other a failed state with no cause field):
 //
 //   - On the READ PATH because §4.3 puts the recovery decision on the caller:
-//     dead-recoverable → resume, resource-terminated → do NOT (resuming re-runs the same
-//     workload into the same cap — a crash loop). Otherwise it is reachable only as the text of
-//     a 409, forcing the caller to attempt the wrong thing to learn it should not.
-//   - `death_cause`, matching the model field and store column exactly, and a property of the
-//     sandbox atom rather than a product concept (§1.1). Values are the abstract §4.3 enum,
-//     never an errno or cgroup path — a host primitive on the wire would not survive a remote
+//     dead-recoverable → resume, resource-terminated → do NOT. Otherwise it is reachable only
+//     as the text of a 409, forcing the caller to attempt the wrong thing to learn it should
+//     not.
+//   - `death_cause`, matching the model field and store column exactly (§1.1). Values are the
+//     abstract §4.3 enum, never an errno or cgroup path, which would not survive a remote
 //     provider.
-//   - OMITTED WHEN EMPTY. CauseNone is the ABSENCE of a death, not a kind of it, so
-//     `"death_cause": ""` would put a falsy-but-present field on the common healthy response and
-//     invite `if (resp.death_cause)` as the liveness test. No `null` either: two spellings of
-//     absence is one too many.
+//   - OMITTED WHEN EMPTY: CauseNone is the ABSENCE of a death, so `"death_cause": ""` would
+//     put a falsy-but-present field on the healthy response and invite `if (resp.death_cause)`
+//     as the liveness test. No `null` either — two spellings of absence is one too many.
 //   - List gets it too, not merely for symmetry: without it a caller seeing several `paused`
 //     sandboxes must fan out one GET per ID to learn which are resumable, turning one list into
 //     N+1 requests for a question the list already answers.
@@ -967,11 +958,10 @@ type activityResp struct {
 // "keep this sandbox from being swept" to whatever protocol the guest program
 // speaks (reaper-health D2, "An external caller may stamp it explicitly").
 //
-// THE STAMP HAPPENS IN THE GUEST, never here. That is reaper-health D1 (the signal
-// is measured guest-side) and D2's ordering depends on it: a host-side timestamp
-// would be a second, differently-clocked source for the one signal the classifier
-// reads. Three consequences follow, and all three are CONTRACT rather than
-// implementation detail:
+// THE STAMP HAPPENS IN THE GUEST, never here (reaper-health D1: the signal is measured
+// guest-side, and D2's ordering depends on it) — a host-side timestamp would be a second,
+// differently-clocked source for the one signal the classifier reads. Three consequences,
+// all CONTRACT rather than implementation detail:
 //
 //   - running only. A paused sandbox has no clock to stamp, so this is 409 rather
 //     than a resume-by-side-effect — the engine will not start a sandbox because

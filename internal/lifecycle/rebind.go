@@ -64,17 +64,15 @@ func (s RebindSpec) isEmpty() bool { return s.Binding.IsEmpty() && s.Mounts == n
 //
 // Three consumers, three materialization times (§3.4), so three gates:
 //
-//   - RESOURCE CAPS are consumed by the providers, which materialize only at placement
-//     → editable ONLY from `paused`, effective at the next resume. Accepting a cap edit
-//     on a `running` sandbox would leave the record and the live isolation unit
-//     disagreeing for an unbounded period — the fake invariant CLAUDE.md calls a
-//     negative asset. One extra pause buys zero ambiguity.
-//   - THE DECLARATION is consumed by the provider at placement too → same gate, and for
-//     a sharper version of the same reason: §6.1's read face rests on the
-//     biconditional "`running` ⟺ what is installed IS this declaration", and a
-//     `running` edit would break it on a security-relevant field. (`ingress.publish[]`
-//     has its own hot-add write point, AddPublish, which IS legal on `running` because
-//     it is purely additive and touches no isolation unit.)
+//   - RESOURCE CAPS are consumed by the providers, which materialize only at placement →
+//     editable ONLY from `paused`, effective at the next resume. A cap edit on a `running`
+//     sandbox would leave the record and the live isolation unit disagreeing for an unbounded
+//     period.
+//   - THE DECLARATION is consumed by the provider at placement too → same gate, for a sharper
+//     version of the same reason: §6.1's read face rests on the biconditional "`running` ⟺
+//     what is installed IS this declaration". (`ingress.publish[]` has its own hot-add write
+//     point, AddPublish, legal on `running` because it is purely additive and touches no
+//     isolation unit.)
 //   - TTLs are consumed by the reaper, which re-reads the record every sweep with no
 //     placement involved → editable from either state, effective immediately.
 //   - THE MOUNT BINDING splits: the guest topology changes at the next resume (runsc
@@ -84,11 +82,9 @@ func (s RebindSpec) isEmpty() bool { return s.Binding.IsEmpty() && s.Mounts == n
 //     separately from the caller's `applies_at`.
 //
 // EVALUATING THE WHOLE UNION FIRST IS THE POINT: a per-class gate checked just before that
-// class's write is the three-commit shape again, the second refusal arriving after the first
-// class committed. It also closes a second-order divergence the split shape carried —
-// `UpdateBinding` barred caps on `running` but not the declaration, while `SetNetwork` barred
-// it. Nothing was reachable, but "one field, two write points, two criteria" is how a reachable
-// version arrives later.
+// class's write means the second refusal arrives after the first class committed. It also
+// closes the divergence the split shape carried — `UpdateBinding` barred caps on `running` but
+// not the declaration, while `SetNetwork` barred it.
 //
 // # Why the writes are ordered mounts-first, binding-second
 //
@@ -103,12 +99,11 @@ func (s RebindSpec) isEmpty() bool { return s.Binding.IsEmpty() && s.Mounts == n
 //
 // # Known residue, stated rather than papered over
 //
-// The mount table and the sandbox row are still TWO commits, so a store I/O failure
-// between them can leave "new mounts, old caps". Making it one commit needs a new store
-// seam spanning both tables, which is its own decision and is deliberately not taken
-// here. There is no reachable defect today: the admission gate sums sandbox caps and
-// volume caps and never reads mount rows, and a resume re-materializes from whatever
-// the table says — but that is a judgment about today's consumers, not a proof.
+// The mount table and the sandbox row are still TWO commits, so a store I/O failure between
+// them can leave "new mounts, old caps". One commit needs a new store seam spanning both
+// tables, deliberately not taken here. No reachable defect today — the admission gate sums
+// sandbox and volume caps and never reads mount rows, and a resume re-materializes from
+// whatever the table says — but that is a judgment about today's consumers, not a proof.
 func (m *Mediator) Rebind(ctx context.Context, id model.SandboxID, spec RebindSpec) (bool, error) {
 	l := m.lock(id)
 	l.Lock()
@@ -185,7 +180,7 @@ func (m *Mediator) Rebind(ctx context.Context, id model.SandboxID, spec RebindSp
 	// answer 507 — telling the caller to wait for capacity that would never make this
 	// legal.
 	if rec.Limits.DiskByte == 0 && newLimits.DiskByte > 0 {
-		return false, fmt.Errorf("rebind: %w: sandbox %s was created uncapped on disk, so its Overlay storage unit carries no quota row and a %d-byte cap could never be enforced — §5.B refuses an unenforceable cap at every placement, so accepting this would leave the sandbox permanently unresumable. Create a new sandbox with disk_byte set (Promote this one first to carry its bytes over); `N → 0` and `N → M` remain legal",
+		return false, fmt.Errorf("rebind: %w: sandbox %s was created uncapped on disk, so its Overlay unit carries no quota row and a %d-byte cap is unenforceable — accepting it would leave the sandbox permanently unresumable (§5.B). Create a new sandbox with disk_byte set, Promoting this one first to carry its bytes over",
 			ErrUncappedDiskNotCappable, id, newLimits.DiskByte)
 	}
 
@@ -209,7 +204,7 @@ func (m *Mediator) Rebind(ctx context.Context, id model.SandboxID, spec RebindSp
 	// it — the request is invalid regardless of the node's free space, and gating first
 	// would let a full node answer 507 about a request no amount of capacity makes legal.
 	if b.DiskByte != nil && newLimits.DiskByte == 0 && m.deps.NodeCapacity.DiskByte > 0 {
-		return false, fmt.Errorf("rebind: %w: disk — this node meters the disk axis (§3.4), so sandbox %s may not be left uncapped: it would contribute nothing to the budget while free to consume all of it, which is the same reason create refuses an uncapped sandbox. Note that re-capping later is NOT available as a remedy (`0 → N` is refused, ErrUncappedDiskNotCappable), so this edit would be irreversible",
+		return false, fmt.Errorf("rebind: %w: disk — this node meters the disk axis, so sandbox %s may not be left uncapped, and the edit is irreversible because re-capping later is refused (§3.4 / ErrUncappedDiskNotCappable)",
 			ErrCapRequired, id)
 	}
 
@@ -250,10 +245,10 @@ func (m *Mediator) Rebind(ctx context.Context, id model.SandboxID, spec RebindSp
 			// wedge above, and that state has no exit through the API at all. The provider
 			// already retries the transient wholesale-read failure, so this is a real
 			// "cannot tell", not churn.
-			return false, fmt.Errorf("rebind: cannot read current Overlay usage of %s, refusing to set a %d-byte disk cap blind (a cap at or below usage wedges the storage unit irreversibly and leaves the sandbox unresumable, §3.4/§5.B): %w", id, newLimits.DiskByte, err)
+			return false, fmt.Errorf("rebind: cannot read current Overlay usage of %s, refusing to set a %d-byte disk cap blind — a cap at or below usage wedges the unit irreversibly (§3.4/§5.B): %w", id, newLimits.DiskByte, err)
 		}
 		if newLimits.DiskByte <= used {
-			return false, fmt.Errorf("rebind: %w: requested %d, current usage %d — a cap at or below usage wedges the Overlay storage unit irreversibly (afterwards even truncate-to-zero and the quota write itself return ENOSPC, so the cap can be neither raised nor removed, and every future placement fails, so the sandbox could never resume), and `cap == usage` means FULL rather than exactly enough. Choose a disk_byte strictly greater than %d, or 0 to drop the cap (§3.4 / §5.B)",
+			return false, fmt.Errorf("rebind: %w: requested %d, current usage %d — use a disk_byte strictly greater than %d, or 0 to drop the cap (§3.4 / §5.B)",
 				ErrDiskCapBelowUsage, newLimits.DiskByte, used, used)
 		}
 	}

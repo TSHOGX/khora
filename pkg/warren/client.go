@@ -14,11 +14,10 @@
 //   - §1.1's vocabulary boundary applies verbatim. This is engine-facing code in the
 //     engine repo, so the banned entity names are banned here too.
 //
-// What that buys the caller is the part worth stating positively: every method is a
-// single request with a single answer, so the failure model is HTTP's and nothing is
-// hidden. What it costs is that a caller who wants an ergonomic SDK — waiters,
-// retries, streaming helpers, per-language idiom — writes it OUTSIDE, in the
-// consuming repo, on top of this. ADR-0008 "What is explicitly NOT ours".
+// What that buys the caller: every method is a single request with a single answer, so the
+// failure model is HTTP's and nothing is hidden. What it costs: a caller wanting an ergonomic SDK
+// — waiters, retries, streaming helpers, per-language idiom — writes it OUTSIDE, in the consuming
+// repo, on top of this. ADR-0008 "What is explicitly NOT ours".
 //
 // AUTHENTICATION IS NOT HERE, and its absence is a decision: ADR-0007 puts auth and
 // TLS outside the engine, and the orchestrator's listener refuses anything but

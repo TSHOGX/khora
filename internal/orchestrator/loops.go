@@ -2,14 +2,12 @@ package orchestrator
 
 // Background-loop OWNERSHIP (§1.1 the assembly).
 //
-// The three autonomous loops — the outbox publisher, its health monitor, and the §4.3
-// reaper — live here rather than in cmd/, and that is the whole point of this file.
-// Their lifetime is a MIDDLE STEP of the teardown sequence Engine.Shutdown documents
-// and performs: the loops must be stopped after readiness flips and before the store
-// closes. A caller that owned them could not participate in that sequence without
-// splitting Shutdown open and re-implementing the order at the call site — which is
-// exactly what cmd/orchestrator did, and it left the sequence stated in one place and
-// executed in another, with the two free to disagree (they did).
+// The three autonomous loops — the outbox publisher, its health monitor, and the §4.3 reaper —
+// live here rather than in cmd/ because their lifetime is a MIDDLE STEP of the teardown sequence
+// Engine.Shutdown documents and performs: stopped after readiness flips, before the store
+// closes. A caller that owned them would have to split Shutdown open and re-implement the order
+// at the call site, which is what cmd/orchestrator did — leaving the sequence stated in one
+// place and executed in another, and the two did disagree.
 //
 // So the rule this file exists to enforce: EVERY WAIT IN THE TEARDOWN GRAPH IS BOUNDED
 // BY THE ONE DEADLINE ITS CALLER SUPPLIES. A loop that ignores cancellation cannot

@@ -361,21 +361,18 @@ func (dep Deployment) SecondHopPinned() bool { return dep.SecondHopUID != nil }
 // established,related` while the engine's dial is the SYN — exactly what that arm excludes so a
 // new connection to an in-floor address still meets the floor (§2.4 invariant 2).
 //
-// REFUSED RATHER THAN WORKED AROUND: a `skuid` accept above the floor is unavailable, since
-// skuid misses packets and such an accept leaks whatever it misses (measured, network.md D5 ㉔;
-// ruleset.Validate refuses one outright). And there is nothing to narrow the engine's own dial
-// by — it arrives on no interface and its destination is the in-floor address itself. The two
-// obligations are irreconcilable under one uid, so the input is illegal, not awkward.
+// REFUSED RATHER THAN WORKED AROUND: a `skuid` accept above the floor leaks whatever skuid
+// misses (measured, network.md D5 ㉔; ruleset.Validate refuses one outright), and there is
+// nothing else to narrow the engine's own dial by — it arrives on no interface and its
+// destination is the in-floor address itself.
 //
 // AT STARTUP rather than the write point: the table is engine-level, so the damage lands on
-// every sandbox at once, including ones with no `via[]`. By the time a `via[]` arrives the table
-// has been installed for a while and the engine is already dialing through a floor that drops
-// it — and the failure is INTERMITTENT, skuid matching ~4/5 packets of a flow (D5 ㉔), so it
-// presents as flaky sandboxes rather than a broken deployment.
+// every sandbox at once, including ones with no `via[]`. The failure is also INTERMITTENT, skuid
+// matching ~4/5 packets of a flow (D5 ㉔), so it presents as flaky sandboxes rather than a
+// broken deployment.
 //
-// NOT ValidateDeployment's ninth class: that judges "a declaration meets a deployment that gave
-// NO uid", a per-request 400 whose occasion is a request. This needs no declaration to be wrong
-// and must not wait for one.
+// NOT ValidateDeployment's ninth class, which judges "a declaration meets a deployment that gave
+// NO uid" as a per-request 400. This needs no declaration to be wrong.
 //
 // euid is a PARAMETER rather than an os.Geteuid() call, like HostLocal: the assertion is then
 // pinned in a root-free unit test against a fixture rather than the test process's own uid.

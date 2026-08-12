@@ -37,19 +37,16 @@ import (
 // anywhere: the write points are now correctly closed, and the row admitted by the
 // previous run is still in the store, still regenerated at every placement.
 //
-// Re-checking here rather than in Generate is deliberate, and the division is the one
-// §5.D already draws: the second-hop pin is NOT part of a sandbox's rule set (one
-// engine-level `output` table narrowed by uid covers the whole deployment, installed
-// once at startup — see network.Generate's `filter output` comment), so its absence
-// cannot show up as a missing rule. It can only be a PRECONDITION on placing a
-// sandbox whose declaration needs it. network.ValidatePlacement holds the mechanism
-// and the measurement; this is the funnel that makes it structural — all three
-// placement paths (create's coldStart, resume's coldStart, adopt) derive their spec
-// here, exactly as all three write points go through ValidateDeclaration.
+// Here rather than in Generate, on the division §5.D already draws: the second-hop pin is NOT
+// part of a sandbox's rule set (one engine-level `output` table narrowed by uid covers the whole
+// deployment, installed once at startup), so its absence cannot show up as a missing rule — only
+// as a PRECONDITION on placing a sandbox whose declaration needs it. network.ValidatePlacement
+// holds the mechanism and the measurement; this is the funnel that makes it structural, all
+// three placement paths (create's coldStart, resume's coldStart, adopt) deriving their spec here
+// exactly as all three write points go through ValidateDeclaration.
 //
-// The general shape, which is the reason to look for the pattern elsewhere: an
-// invariant a write point guards must be RE-EVALUATED wherever the state it guarded is
-// re-materialized.
+// The general shape: an invariant a write point guards must be RE-EVALUATED wherever the state
+// it guarded is re-materialized.
 func (m *Mediator) steeringFor(rec model.Sandbox) (runtime.SteeringSpec, error) {
 	if err := network.ValidatePlacement(rec.Network, m.deps.Deployment); err != nil {
 		return runtime.SteeringSpec{}, fmt.Errorf("network: place %s: %w", rec.ID, err)

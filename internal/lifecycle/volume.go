@@ -44,10 +44,9 @@ import (
 // caller's behalf. So accepting would manufacture a state the control plane cannot
 // leave.
 //
-// The boundary case is included deliberately: `cap == usage` is ACCEPTED by the
-// substrate and stored, but the very next write gets ENOSPC — so it means FULL, not
-// "exactly enough". Hence a strict inequality, not >=. A `>=` check would hand the
-// caller a 200 and a volume that can never take another byte.
+// The boundary case is included deliberately: `cap == usage` is ACCEPTED by the substrate and
+// stored, but the very next write gets ENOSPC — so it means FULL, not "exactly enough", and a
+// `>=` check would hand the caller a 200 and a volume that can never take another byte.
 var ErrVolumeCapBelowUsage = errors.New("lifecycle: volume cap must be strictly greater than current usage")
 
 // ErrVolumeCapUnsupported is the §6.2 400 for a cap the chosen backend cannot
@@ -59,19 +58,17 @@ var ErrVolumeCapUnsupported = errors.New("lifecycle: backend cannot enforce a ca
 // CreateVolume allocates a volume: gate, then BYTES, then the row (§5.C
 // bytes-first / §4.3 existence-is-state).
 //
-// The ORDER is forced by existence-is-state. A `volumes` row has no not-ready
-// value, so it may only be inserted once the storage truly exists; a crash before
-// the insert therefore leaves orphan BYTES, which the sweep reclaims, instead of a
-// row naming storage that is not there. The in-flight keep-set covers exactly that
-// window — and it matters MORE here than for an Overlay unit, because there the row
-// is inserted first, whereas here a perfectly healthy in-flight create presents as
-// "bytes, no row" even to a completely fresh keep-set.
+// The ORDER is forced by existence-is-state: a `volumes` row has no not-ready value, so it may
+// only be inserted once the storage exists, and a crash before the insert leaves orphan BYTES
+// for the sweep instead of a row naming storage that is not there. The in-flight keep-set
+// covers that window, and it matters MORE here than for an Overlay unit, where the row is
+// inserted first — here a healthy in-flight create presents as "bytes, no row" even to a
+// completely fresh keep-set.
 //
-// CAPABILITIES ARE ASKED BEFORE AN ID IS MINTED OR A BYTE MOVES. That ordering is
-// load-bearing rather than tidy (volume.md D2): an external implementation maps
-// "backend does not support this" at its HTTP boundary while the error is born deep
-// inside, so the 400 arrives only after bytes have already moved — a window whose
-// residue no sweep can classify.
+// CAPABILITIES ARE ASKED BEFORE AN ID IS MINTED OR A BYTE MOVES (volume.md D2): an external
+// implementation maps "backend does not support this" at its HTTP boundary while the error is
+// born deep inside, so the 400 arrives only after bytes have moved — a window whose residue no
+// sweep can classify.
 //
 // admitMu spans {gate → allocate → insert}, which is the same
 // {gate → make the promise visible} discipline create uses. Unlike Promote's byte
@@ -79,14 +76,11 @@ var ErrVolumeCapUnsupported = errors.New("lifecycle: backend cannot enforce a ca
 // cap), so holding the node-global gate across it does not serialize the node behind
 // a long operation.
 //
-// THAT PREMISE IS ARM-SPECIFIC, and it is the local arm's (volume.md D8): "bounded
-// metadata work" is true of a btrfs ioctl and false of a network round trip. A remote
-// backend falsifies it here and at SetCapacity / Snapshot / Clone / UncappedBytes,
-// where the same node-global gate is held across a backend call — on a non-CoW object
-// store a snapshot is a full object copy. The fix is not a new invention: it is
-// Promote's reservation shape (admission.go), adopted for exactly this reason. Not
-// changed today because no remote arm exists, and changing it now would be
-// speculative — but this comment is the reason it must not be read as arm-neutral.
+// THAT PREMISE IS THE LOCAL ARM'S (volume.md D8): "bounded metadata work" is true of a btrfs
+// ioctl and false of a network round trip. A remote backend falsifies it here and at
+// SetCapacity / Snapshot / Clone / UncappedBytes, where the same node-global gate is held
+// across a backend call — on a non-CoW object store a snapshot is a full object copy. The fix
+// when that arm lands is Promote's reservation shape (admission.go).
 func (m *Mediator) CreateVolume(ctx context.Context, capBytes int64) (model.VolumeID, error) {
 	if capBytes < 0 {
 		return "", fmt.Errorf("create volume: cap must be non-negative (0 = uncapped), got %d", capBytes)
@@ -97,8 +91,8 @@ func (m *Mediator) CreateVolume(ctx context.Context, capBytes int64) (model.Volu
 	}
 	// Capability check FIRST — before the ID, before the gate, before any bytes.
 	if capBytes > 0 && !be.Capabilities().Quota {
-		return "", fmt.Errorf("create volume: %w: backend %q reports no capacity-cap capability, and a cap that cannot be enforced is refused rather than silently dropped (§3.4)",
-			ErrVolumeCapUnsupported, be.Name())
+		// Refused rather than silently dropped (§3.4).
+		return "", fmt.Errorf("create volume: %w: backend %q reports no capacity-cap capability", ErrVolumeCapUnsupported, be.Name())
 	}
 
 	vid := model.VolumeID("vol_" + randToken())
@@ -239,7 +233,7 @@ func (m *Mediator) SetVolumeCapacity(ctx context.Context, id model.VolumeID, cap
 	// an uncapped volume is legal by §3.4's own terms, so refusing there would revoke a
 	// capability the spec grants.
 	if capBytes == 0 && m.deps.NodeCapacity.DiskByte > 0 {
-		return fmt.Errorf("patch volume: %w: this node meters the disk axis (§3.4), so a volume may not be left uncapped — an uncapped volume contributes nothing to the budget while being free to consume all of it, which is the same reason create refuses one", ErrCapRequired)
+		return fmt.Errorf("patch volume: %w: this node meters the disk axis, so a volume may not be left uncapped (§3.4, the same reason create refuses one)", ErrCapRequired)
 	}
 
 	// The strict-inequality check, only when a cap is actually being imposed. Removing
@@ -253,7 +247,7 @@ func (m *Mediator) SetVolumeCapacity(ctx context.Context, id model.VolumeID, cap
 			return fmt.Errorf("patch volume: cannot read current usage of %s, refusing to set a cap blind (an under-usage cap wedges the volume irreversibly, §5.C): %w", id, err)
 		}
 		if capBytes <= used {
-			return fmt.Errorf("patch volume: %w: requested %d, current usage %d — a cap at or below usage wedges the volume irreversibly (even truncate-to-zero and the quota write itself then fail), and `cap == usage` means FULL rather than exactly enough (§5.C / volume.md D7.3)",
+			return fmt.Errorf("patch volume: %w: requested %d, current usage %d — a cap at or below usage wedges the volume irreversibly (§5.C / volume.md D7.3)",
 				ErrVolumeCapBelowUsage, capBytes, used)
 		}
 	}
@@ -1005,7 +999,7 @@ func (m *Mediator) RepairVolumeCaps(ctx context.Context) error {
 		// raise that re-asserts a cap immediately (it re-clears admission, so it can be
 		// refused with 507, but it is never refused as a wedge).
 		if v.CapByte <= used {
-			m.deps.Logf("repair volume caps: %s: NOT re-asserting the recorded cap %d — the unit already holds %d byte(s), and a cap at or below usage wedges it irreversibly (§5.C / volume.md D7.3). It stays UNCAPPED and its bytes are counted by the §3.4 uncapped term; the exits are the guest freeing bytes (a later pass then repairs it) or PATCH /v1/volumes/%s with a size strictly greater than %d",
+			m.deps.Logf("repair volume caps: %s: NOT re-asserting the recorded cap %d — the unit holds %d byte(s) and a cap at or below usage wedges it irreversibly (§5.C / volume.md D7.3). It stays UNCAPPED, counted by the §3.4 uncapped term; exits are the guest freeing bytes or PATCH /v1/volumes/%s above %d",
 				v.ID, v.CapByte, used, v.ID, used)
 			continue
 		}

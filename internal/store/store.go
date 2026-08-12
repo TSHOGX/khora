@@ -56,15 +56,11 @@ var ErrInUse = errors.New("store: template in use")
 // below.
 var ErrVolumeNotFound = errors.New("store: volume not found")
 
-// The Volume reference verdicts (§6.2's four 409s). They are FOUR SEPARATE
-// SENTINELS, not one, and that is a requirement rather than tidiness: each names a
-// DIFFERENT object relationship, and ErrInUse's text says "template in use"
-// verbatim — reusing it returns a 409 that names the wrong object, sending the
-// caller to look at something unrelated.
-//
-// A storetest case asserts they stay mutually distinguishable, because the way this
-// degrades is by someone later collapsing two of them that happen to map to the same
-// status code.
+// The Volume reference verdicts (§6.2's four 409s). FOUR SEPARATE SENTINELS because each
+// names a DIFFERENT object relationship and the caller's remedy differs; ErrInUse's text says
+// "template in use" verbatim, so reusing it returns a 409 naming the wrong object. A storetest
+// case asserts they stay mutually distinguishable — the degradation is someone later
+// collapsing two that map to the same status code.
 var (
 	// ErrVolumeInUse is verdict ①: deleting a volume that a live mount row holds
 	// (mounts.volume RESTRICT). The Template-shaped case, on a different object.
@@ -73,39 +69,30 @@ var (
 	// ErrSandboxHasMounts is verdict ②'s sandbox side: deleting a sandbox that a live
 	// mount row holds (mounts.sandbox RESTRICT).
 	//
-	// A sentinel is required even though the FK-violation PREDICATE is generic
+	// A sentinel is required even though the FK-violation predicate is generic
 	// (isFKViolation is table- and column-agnostic): without a translation point in
-	// DeleteSandbox the raw driver error reaches the API's default arm as a 500 rather
-	// than a 409. The predicate is reusable; the translation is per-call-site.
+	// DeleteSandbox the raw driver error reaches the API's default arm as a 500. The
+	// predicate is reusable; the translation is per-call-site.
 	ErrSandboxHasMounts = errors.New("store: sandbox has live mounts")
 
-	// ErrMountLeaseConflict is verdict ③: an attach lost the exclusive lease. It needs
-	// its OWN predicate as well as its own sentinel — the FK-violation string match
-	// correctly reports FALSE for a uniqueness or predicate failure, so one match
-	// cannot cover all four verdicts.
+	// ErrMountLeaseConflict is verdict ③: an attach lost the exclusive lease. It needs its
+	// OWN predicate as well as its own sentinel — the FK-violation string match correctly
+	// reports FALSE for a uniqueness or predicate failure.
 	//
-	// Unlike ①②④ this is a RETRYABLE state conflict: the caller may succeed later,
-	// once the holder releases.
+	// Unlike ①②④ this is a RETRYABLE state conflict: the caller may succeed once the
+	// holder releases.
 	ErrMountLeaseConflict = errors.New("store: volume already exclusively mounted")
 
-	// ErrMountBindingInvalid is the §6.2 400 (NOT a 409): a single submitted binding
-	// that CONTRADICTS ITSELF — the same destination twice, the same volume twice, or
-	// one volume nested inside another's subtree.
-	//
-	// 400 because it is decidable WITHOUT reading any other row, and no retry or state
-	// change can ever make it legal — which is exactly §6.2's 400 criterion. A sandbox
-	// holds one complete binding at any moment and PATCH swaps whole binding for whole
-	// binding, so there is no "add one mount to an existing set" operation for a
-	// duplicate to be relative to. §6.2's four 409s do not grow.
+	// ErrMountBindingInvalid is the §6.2 400 (NOT a 409): a single submitted binding that
+	// CONTRADICTS ITSELF — the same destination twice, the same volume twice, or one volume
+	// nested inside another's subtree. 400 because it is decidable without reading any other
+	// row and no retry can make it legal, which is §6.2's 400 criterion.
 	ErrMountBindingInvalid = errors.New("store: mount binding is self-contradictory")
 
 	// ErrVolumeHasDescendants is verdict ②'s volume side: deleting a volume that a live
-	// snapshot or clone names as its parent (volumes.parent RESTRICT).
-	//
-	// It is a DIFFERENT object relationship from ErrVolumeInUse (held by a mount row),
-	// so it needs its own sentinel and its own text — this is D3's trap recurring on the
-	// fourth FK path, and §6.1 requires the two to be distinguishable because the
-	// caller's remedy differs: detach a mount vs delete a descendant.
+	// snapshot or clone names as its parent (volumes.parent RESTRICT) — D3's trap recurring
+	// on the fourth FK path, distinguishable from ErrVolumeInUse because the remedy differs
+	// (delete a descendant vs detach a mount).
 	ErrVolumeHasDescendants = errors.New("store: volume has live snapshots or clones")
 )
 
@@ -126,10 +113,8 @@ type Event struct {
 	// number, the store does). Zero on an Event being handed TO the store, and
 	// always > 0 on one read back out.
 	//
-	// It exists because OccurredAt cannot serve: unix nanos have no tie-break at
-	// equal nanos and the wall clock can be stepped backwards by NTP, so a
-	// timestamp is not a total order and a timestamp cursor cannot be resumed
-	// from unambiguously.
+	// OccurredAt cannot serve instead: unix nanos have no tie-break at equal nanos and NTP
+	// can step the wall clock backwards, so a timestamp is not a total order.
 	Seq int64
 	// ID is the transition-unique key subscribers dedup on (§4.4-C
 	// at-least-once: a redelivered event carries the SAME ID). Backends key the
@@ -147,29 +132,24 @@ type Event struct {
 	// still ALIVE and so no cause is stamped. Whether a cause is present is what
 	// separates them. All land state=paused, the Kind carries WHY.
 	//
-	// A TYPE rather than a bare string, and the schema asserts the same set. §4.1
-	// states a CLOSED set of exactly six kinds, and six string literals scattered
-	// across two packages is precisely the drift the vocabulary rules exist to
-	// prevent: a typo'd `crash_paused` would compile, persist, and reach subscribers
-	// as a seventh kind nothing declares. The external event schema stays a
-	// subscriber-side concern (§4.4-C) — that is about the WIRE shape, and does not
-	// mean the engine may write a kind it never named.
+	// A TYPE rather than a bare string, and the schema asserts the same set: §4.1 states a
+	// CLOSED set of exactly six kinds, and a typo'd `crash_paused` in one of six scattered
+	// string literals would compile, persist, and reach subscribers as a seventh kind
+	// nothing declares. §4.4-C's "the event schema is a subscriber-side concern" is about
+	// the WIRE shape and does not license writing a kind the engine never named.
 	Kind model.EventKind
 	// State is the resulting lifecycle-state after the transition.
 	State model.Lifecycle
-	// Cause is WHY, for the Kinds a subscriber cannot otherwise tell apart (§4.4-C).
-	// Empty on every Kind with a single route, and that is the common case — the field
-	// is additive, so a subscriber ignoring it reads the stream as before.
+	// Cause is WHY, for the Kinds a subscriber cannot otherwise tell apart (§4.4-C). Empty on
+	// every Kind with a single route.
 	//
 	// Today it separates `destroyed`'s two routes: `requested` (the Destroy verb) from
-	// `retention-expired` (the reaper's evict of a paused sandbox past `retention`).
-	// Exactly two, not three: §4.4-A's protect-on-uncertainty means no health verdict
-	// ever destroys, so "died unrecoverably" is not a route here.
+	// `retention-expired` (the reaper's evict of a paused sandbox past `retention`). Exactly
+	// two, not three — §4.4-A's protect-on-uncertainty means no health verdict ever destroys.
 	//
-	// Why it must be on the event for THIS Kind specifically: destroy DELETES the
-	// record, so unlike the pause-like Kinds there is no row left to ask afterwards —
-	// a subscriber that sees `destroyed` and issues a GET gets 404 by contract. The
-	// payload is the fact's only carrier, so an omitted cause is unrecoverable.
+	// It must ride the event for THIS Kind because destroy DELETES the record: unlike the
+	// pause-like Kinds there is no row left to ask afterwards (a GET after `destroyed` is 404
+	// by contract), so an omitted cause is unrecoverable.
 	Cause model.EventCause
 	// OccurredAt is when the mediator constructed the transition.
 	OccurredAt time.Time
@@ -195,19 +175,15 @@ type Binding struct {
 	// complete binding for another; there is no field-level merge and no
 	// "pending/unresolved" value).
 	//
-	// A POINTER for the same reason as the others — "not given" must be
-	// distinguishable from "given" — but note what the distinction protects here.
-	// The zero declaration is not a no-op, it is `{deny, [], [], []}`: the most
-	// restrictive declaration there is. So a value type would make every unrelated
-	// PATCH (raising a RAM cap, changing a TTL) silently reset the sandbox's network
-	// to deny-everything.
+	// A POINTER carries more weight here than on the others: the zero declaration is not a
+	// no-op but `{deny, [], [], []}`, the most restrictive there is, so a value type would
+	// make every unrelated PATCH (raising a RAM cap, changing a TTL) silently reset the
+	// sandbox's network to deny-everything.
 	//
-	// This is ALSO the field the `POST …/publish` hot-add writes through, carrying a
-	// declaration the mediator produced by read-append under the transition lock. The
-	// store does not know which of the two write points it is serving — both replace
-	// the whole value — which is why the append has to happen above it (§5.D: two
-	// concurrent publishes would otherwise lose one, and that is an engine bug rather
-	// than the caller-side sharp edge §6.1 documents).
+	// Also the field `POST …/publish` writes through, carrying a declaration the mediator
+	// produced by read-append under the transition lock. The store cannot tell the two write
+	// points apart — both replace the whole value — so the append happens above it, two
+	// concurrent publishes otherwise losing one (§5.D).
 	Network *model.NetworkDecl
 }
 
@@ -248,15 +224,10 @@ func (b Binding) Apply(cur model.Sandbox) (model.Limits, time.Duration, time.Dur
 
 // marshalNetwork / unmarshalNetwork are the §5.D declaration's at-rest form.
 //
-// A FAILURE HERE IS RETURNED, NEVER SWALLOWED, and that is the point of having them
-// as named helpers rather than inline calls. The declaration is a security-relevant
-// field: reading it back as a zero value on a decode error would silently present a
-// sandbox as `{deny, [], [], []}` — which looks safe, and is catastrophic in the one
-// direction that matters, because the next placement would then generate a rule set
-// from that empty declaration and QUIETLY REVOKE a publish the caller is relying on
-// (or, on the read face, report a reachable set that is not the installed one).
-// Failing the read is the honest outcome: the record is unreadable, so no answer is
-// better than a plausible wrong one.
+// A FAILURE HERE IS RETURNED, NEVER SWALLOWED: zero-valuing a decode error presents the
+// sandbox as `{deny, [], [], []}`, which looks safe and is catastrophic in the one direction
+// that matters — the next placement generates a rule set from that empty declaration and
+// quietly revokes a publish the caller relies on.
 func marshalNetwork(d model.NetworkDecl) (string, error) {
 	b, err := json.Marshal(d.Normalize())
 	if err != nil {
@@ -267,15 +238,10 @@ func marshalNetwork(d model.NetworkDecl) (string, error) {
 
 func unmarshalNetwork(s string) (model.NetworkDecl, error) {
 	if s == "" {
-		// Only reachable for a row this schema could not have written (the column is
-		// NOT NULL with no default). Treated as corruption rather than as "no
-		// declaration": an omitted `network` is normalized to an explicit
-		// `{deny, [], [], []}` at the write point (§5.D), so an empty column means the
-		// row was written by something that bypassed that normalization.
-		return model.NetworkDecl{}, fmt.Errorf("store: sandbox row carries an EMPTY network declaration — " +
-			"an omitted `network` is normalized to an explicit {deny, [], [], []} at the write point " +
-			"(§5.D), so this row bypassed it. Refusing to read it as deny-everything, which would " +
-			"silently revoke any publish the caller is relying on")
+		// Corruption, not "no declaration": the column is NOT NULL with no default and an
+		// omitted `network` is normalized to an explicit `{deny, [], [], []}` at the write
+		// point (§5.D), so an empty column means the row bypassed that normalization.
+		return model.NetworkDecl{}, errors.New("store: sandbox row carries an empty network declaration, bypassing the §5.D write-point normalization; refusing to read it as deny-everything")
 	}
 	var d model.NetworkDecl
 	if err := json.Unmarshal([]byte(s), &d); err != nil {
@@ -301,17 +267,15 @@ func unmarshalNetwork(s string) (model.NetworkDecl, error) {
 //  2. NO VISIBILITY GAP. Once Seq = N is visible to a reader, no event with Seq < N may become
 //     visible afterwards — the entire basis on which a cursor is safe to persist.
 //
-// Promise 2 is the non-obvious one and a real defect class: assign the sequence at INSERT but
-// make the row visible at COMMIT, and two producers interleave — tx1 takes 5, tx2 takes 6, tx2
-// commits first, a reader consumes 6 and advances, and 5 appears behind an already-delivered
-// event and is never seen. Serializing the READERS does not help; the break is on the producer
-// side.
+// Promise 2 is the non-obvious one: assign the sequence at INSERT but make the row visible at
+// COMMIT and two producers interleave — tx1 takes 5, tx2 takes 6, tx2 commits first, a reader
+// consumes 6 and advances, and 5 appears behind an already-delivered event and is never seen.
+// Serializing the READERS does not help; the break is on the producer side.
 //
 // SQLite delivers it by serializing write transactions outright, Memory by appending under the
-// mutex that assigns the number. Neither makes it a backend quirk: a backend permitting
-// genuinely concurrent write transactions (Postgres with BIGSERIAL) MUST add a watermark gate
-// — a sequence becomes visible only once every lower one has committed — or it does not
-// satisfy this interface. storetest asserts it.
+// mutex that assigns the number. A backend permitting genuinely concurrent write transactions
+// (Postgres with BIGSERIAL) MUST add a watermark gate — a sequence becomes visible only once
+// every lower one has committed — or it does not satisfy this interface. storetest asserts it.
 type Store interface {
 	// CreateSandbox inserts a new sandbox record in state `creating`, appending
 	// ev in the same commit if non-nil (§4.4-C). Returns ErrConflict on a
@@ -354,27 +318,21 @@ type Store interface {
 	// at-least-once: a crash after deliver but before MarkPublished re-returns the
 	// same rows.
 	//
-	// limit is REQUIRED and bounded by the caller, for the same reason Events'
-	// is — and this method is why that reason is not hypothetical. It used to take
-	// no limit and select the WHOLE unpublished backlog, on a loop that runs every
-	// second: exactly the "one of which materialized the entire backlog" defect the
-	// note on Events describes, sitting in the seam beside it. A bound is safe for
-	// the drain because delivery is strictly in Seq order and stops at the first
-	// failure, so a pass can never usefully act on more than one batch anyway;
-	// whatever is left is still there next tick.
+	// limit is REQUIRED and bounded by the caller, for the same reason Events' is. A bound is
+	// safe for the drain because delivery is strictly in Seq order and stops at the first
+	// failure, so a pass can never usefully act on more than one batch; whatever is left is
+	// still there next tick.
 	//
-	// A caller that needs the backlog's SIZE must use CountUnpublished, never
-	// len() of this result — see the ③ argument there.
+	// A caller that needs the backlog's SIZE must use CountUnpublished, never len() of this
+	// result.
 	UnpublishedEvents(ctx context.Context, limit int) ([]Event, error)
 
 	// CountUnpublished reports how many outbox rows are not yet marked published.
 	//
-	// It exists because §4.4-C's operability requirement ③ says observability must
-	// not share a source with the loop being observed, and a bounded drain read
-	// cannot answer this question: len(UnpublishedEvents(ctx, limit)) saturates at
-	// limit, so the backlog gauge would report a small constant at precisely the
-	// moment the backlog is large. Counting is also the shape that materializes
-	// nothing, so a caller sampling this never pays for the backlog it is measuring.
+	// Separate from the drain read per §4.4-C's operability requirement ③ (observability must
+	// not share a source with the loop being observed), and because a bounded read cannot
+	// answer it: len(UnpublishedEvents(ctx, limit)) saturates at limit, reporting a small
+	// constant at precisely the moment the backlog is large.
 	CountUnpublished(ctx context.Context) (int64, error)
 
 	// Events is the REPLAY read side backing §6.1 GET /v1/events: return at most
@@ -386,11 +344,10 @@ type Store interface {
 	// deliberately invisible here: "has the in-process sink seen it" is not a fact
 	// an external subscriber's replay should depend on.
 	//
-	// limit is REQUIRED to be bounded by the caller AND capped again server-side
-	// at the API layer. The store honors what it is given; it does not invent a
-	// cap, because a second caller of the seam would then inherit a different one
-	// — the audited defect was exactly two read paths with mismatched caps, one of
-	// which materialized the entire backlog.
+	// limit is REQUIRED to be bounded by the caller AND capped again server-side at the API
+	// layer. The store honors what it is given and does not invent a cap: a second caller of
+	// the seam would inherit a different one, and the audited defect was two read paths with
+	// mismatched caps, one materializing the entire backlog.
 	Events(ctx context.Context, after int64, limit int) (evs []Event, earliest, latest int64, err error)
 
 	// MarkPublished marks one outbox row (by event ID) as delivered so it stops
@@ -418,14 +375,12 @@ type Store interface {
 	//   - THE NEWEST ROW IS NEVER TRIMMED, even when it qualifies: an empty table reads 0/0,
 	//     indistinguishable from "nothing ever happened", so a stale cursor is neither served
 	//     nor refused and the caller reads "caught up" while silently skipping everything
-	//     trimmed — the silent short page §6.1's 410 exists to prevent, arriving through the
-	//     mechanism meant to activate it. One retained row keeps the bounds truthful.
+	//     trimmed — the silent short page §6.1's 410 exists to prevent. One retained row keeps
+	//     the bounds truthful.
 	//   - BOUNDED BY limit, like the drain read: the delete runs on a possibly-serialized write
-	//     path, and an unbounded one holds it while every state transition waits. The caller
-	//     re-runs next tick.
+	//     path, and an unbounded one holds it while every state transition waits.
 	//
-	// Trimming advances the window's lower bound, which is what makes §6.1's 410
-	// reachable — it is unreachable while nothing is ever deleted.
+	// Trimming advances the window's lower bound, which is what makes §6.1's 410 reachable.
 	TrimOutbox(ctx context.Context, cutoff time.Time, limit int) (int, error)
 
 	// UpdateBinding rewrites a sandbox's Binding fields (§3.4) — the create-time
@@ -440,12 +395,11 @@ type Store interface {
 	// bumping it here would silently extend an eviction deadline as a side effect of
 	// editing an unrelated cap.
 	//
-	// cause follows CompareAndSetState's convention exactly (nil = leave untouched,
-	// non-nil CauseNone = clear). A raise of the RAM cap passes &CauseNone so the
-	// §4.3 resource-terminated refusal is lifted in the SAME commit as the cap that
-	// lifts it — otherwise the documented remedy deadlocks: the guard reads
-	// death_cause, and nothing else clears it before a successful resume, which the
-	// guard itself prevents.
+	// cause follows CompareAndSetState's convention (nil = leave untouched, non-nil CauseNone
+	// = clear). A raise of the RAM cap passes &CauseNone so the §4.3 resource-terminated
+	// refusal is lifted in the SAME commit as the cap lifting it; otherwise the documented
+	// remedy deadlocks, the guard reading a death_cause that only a successful resume — which
+	// the guard itself prevents — would clear.
 	UpdateBinding(ctx context.Context, id model.SandboxID, expected model.Lifecycle, b Binding, cause *model.DeathCause) error
 
 	// --- Template CRUD (§4.3 uniform object model) ---------------------------
@@ -492,11 +446,10 @@ type Store interface {
 
 	// CreateVolume inserts a Volume row. Returns ErrConflict on a duplicate ID.
 	//
-	// BYTES-FIRST (§5.C / §4.3): the caller has ALREADY allocated the backend storage
-	// and written its cap before this insert. Existence-is-state offers no not-ready
-	// state to park a half-built volume in, so a crash before this call leaves
-	// ORPHAN BYTES (which the sweep reclaims) rather than a row naming storage that
-	// does not exist.
+	// BYTES-FIRST (§5.C / §4.3): the caller has ALREADY allocated the backend storage and
+	// written its cap before this insert. Existence-is-state offers no not-ready state to park
+	// a half-built volume in, so a crash before this call leaves ORPHAN BYTES for the sweep
+	// rather than a row naming storage that does not exist.
 	CreateVolume(ctx context.Context, v model.Volume) error
 
 	// GetVolume reads a Volume row; ErrVolumeNotFound if absent.
@@ -511,13 +464,10 @@ type Store interface {
 	// SetVolumeCapacity rewrites one volume's cap — the §6.1 PATCH write point, and
 	// the only sibling of the create-time write.
 	//
-	// UNLIKE UpdateBinding IT IS NOT CONDITIONAL ON ANY LIFECYCLE STATE, and the
-	// reason is mechanical, not a relaxation: a sandbox cap is re-materialized at the
-	// next placement, so editing one on a `running` sandbox would leave the record
-	// and the live unit disagreeing — whereas a VOLUME HAS NO PLACEMENT OF ITS OWN,
-	// so "re-materialize next placement" would mean NEVER for an unmounted volume.
-	// The cap therefore lands on the storage directly, there is nothing to defer, and
-	// so there is no "pause it first" conflict to express (§5.C / §6.1 PATCH).
+	// NOT CONDITIONAL ON ANY LIFECYCLE STATE, unlike UpdateBinding, for a mechanical reason:
+	// a volume has no placement of its own, so "re-materialize at the next placement" would
+	// mean NEVER for an unmounted volume. The cap lands on the storage directly, leaving no
+	// deferral and so no "pause it first" conflict to express (§5.C / §6.1 PATCH).
 	//
 	// The STRICT-inequality refusal ("lower below current usage") is NOT enforced
 	// here: it needs the backend's usage reading, which the store cannot and must not
@@ -529,15 +479,12 @@ type Store interface {
 
 	// DeleteVolume removes a Volume row. A missing row → ErrVolumeNotFound.
 	//
-	// IDEMPOTENT DELETE MUST NOT SWALLOW THAT (§6.2): the not-found verdict is
-	// reported rather than folded into success. An external implementation folded
-	// three distinct not-founds into `200 {"deleted": true}`, which makes a delete
-	// that a guard REFUSED indistinguishable from one that succeeded — and the
-	// reference-protection refusals that land on this same path are the whole
-	// external signal those guards have.
+	// IDEMPOTENT DELETE MUST NOT SWALLOW THAT (§6.2): an external implementation folded three
+	// distinct not-founds into `200 {"deleted": true}`, making a delete a guard REFUSED
+	// indistinguishable from one that succeeded — and the reference-protection refusals landing
+	// on this path are the whole external signal those guards have.
 	//
-	// Byte reclamation is DECOUPLED from this row delete (§4.4 / §5.C orphan sweep):
-	// this removes only the row, and the now-orphaned bytes are the sweep's job.
+	// Byte reclamation is DECOUPLED from this row delete (§4.4 / §5.C orphan sweep).
 	//
 	// Two distinct RESTRICT verdicts, and they must stay distinguishable (§6.1):
 	// ErrVolumeInUse when a live mount row holds it, ErrVolumeHasDescendants when a live
@@ -557,21 +504,19 @@ type Store interface {
 	// CreateMounts inserts a sandbox's COMPLETE binding atomically, enforcing the
 	// exclusive lease — the ONE new store invariant Volume introduces (§5.C).
 	//
-	// THE JUDGMENT AND THE INSERT MUST NOT BE SEPARABLE — a measured TOCTOU, not a theoretical
-	// one: two concurrent creates mint two fresh SandboxIDs and so hold two DISJOINT transition
-	// locks, with nothing serializing them against each other. Measured: 8 racers, no scheduling
-	// hooks, broke the lease 2 times in 4000 iterations, and every time with an explicit
-	// scheduling point. Same reason the admission gate needs its own mutex — a node-global
-	// invariant cannot be enforced by per-sandbox locks.
+	// THE JUDGMENT AND THE INSERT MUST NOT BE SEPARABLE — a measured TOCTOU: two concurrent
+	// creates mint two fresh SandboxIDs and so hold two DISJOINT transition locks, with nothing
+	// serializing them. Measured: 8 racers, no scheduling hooks, broke the lease 2 times in
+	// 4000 iterations. A node-global invariant cannot be enforced by per-sandbox locks, the same
+	// reason the admission gate needs its own mutex.
 	//
-	// So the BACKEND arbitrates: one statement expressing the whole cross-row predicate,
-	// serialized by the single authoritative store. Not a new mechanism — §4.3's
-	// reference-reclaim shape applied to a second invariant, delivered by SQLite with
+	// So the BACKEND arbitrates: one statement expressing the whole cross-row predicate —
+	// §4.3's reference-reclaim shape on a second invariant, delivered by SQLite with
 	// INSERT…SELECT…WHERE NOT EXISTS in one transaction and by Memory under its existing mutex.
 	//
 	// The INVARIANT (§5.C): a volume has AT MOST ONE `exclusive` mount row, and that row does
-	// not coexist with ANY other row for that volume. Note what it is not — "at most one rw row"
-	// would contradict SharedReadWrite's whole fanout.
+	// not coexist with ANY other row for that volume. Not "at most one rw row", which would
+	// contradict SharedReadWrite's fanout.
 	//
 	// ALL-OR-NOTHING across the binding: if one mount loses the lease, none is inserted, since a
 	// partially-applied binding is not a state the model has.
@@ -595,22 +540,18 @@ type Store interface {
 	// re-submitted identical binding collides with the rows it is replacing on both the lease
 	// predicate and UNIQUE(sandbox, path). One commit is the answer.
 	//
-	// Three real defects of the two-commit shape:
+	// Two live defects of the two-commit shape, beyond the observable no-binding instant:
 	//
-	//  1. A REFUSED replacement leaves the sandbox on its OLD binding. There is no "new binding
-	//     rejected AND old one gone" outcome, so no compensating re-insert — and a compensation
-	//     path for a state the model denies is code whose comment and behavior drift apart.
-	//  2. THE EXCLUSIVE LEASE IS NEVER TRANSIENTLY RELEASED. The lease IS the row (§5.C), so a
-	//     window with no rows is a window with no lease: a concurrent create could take a volume
-	//     this replacement meant to keep, and the caller would get a 409 for a lease it never
+	//  1. THE EXCLUSIVE LEASE WOULD BE TRANSIENTLY RELEASED. The lease IS the row (§5.C), so a
+	//     window with no rows is a window with no lease: a concurrent create takes a volume
+	//     this replacement meant to keep, and the caller gets a 409 for a lease it never
 	//     gave up.
-	//  3. A CONCURRENT ListMountsByVolume NEVER OBSERVES ZERO ROWS. That query is the
-	//     write-regime predicate (§5.C): "no mount rows" means a direct host-side write is safe,
-	//     so the intermediate state would admit one against a volume a live sandbox holds.
+	//  2. A CONCURRENT ListMountsByVolume WOULD OBSERVE ZERO ROWS. That query is the
+	//     write-regime predicate (§5.C): "no mount rows" means a direct host-side write is
+	//     safe, so the intermediate state admits one against a volume a live sandbox holds.
 	//
-	// NOT A TRANSACTION ON THE SEAM — §4.4-C's discipline a second time: the method promises
-	// atomicity, each backend honors it by its own means, and the one algorithm never branches
-	// on "does this backend support transactions".
+	// NOT A TRANSACTION ON THE SEAM — §4.4-C's discipline again: the method promises atomicity
+	// and each backend honors it by its own means.
 	//
 	// Verdicts are exactly CreateMounts's, mapping to the same status codes:
 	// ErrMountLeaseConflict (409), ErrMountBindingInvalid (400) — including a row whose Sandbox
@@ -638,11 +579,10 @@ type Store interface {
 	//
 	// Idempotent (no rows → nil): destroy, unwind and evict all reach it.
 	//
-	// IT SURVIVES ReplaceMounts RATHER THAN COLLAPSING INTO IT, semantically: every caller is a
-	// TEARDOWN (destroy, create's unwind, evict, reconcile's cleanup) with no "next" binding, so
-	// `ReplaceMounts(id, nil)` would misdescribe them as a rebind to the empty binding and drag
-	// in endpoint-existence verdicts a teardown must not care about. Conversely a rebind must
-	// NEVER be this call plus CreateMounts — the two-commit shape ReplaceMounts forbids.
+	// SEPARATE FROM ReplaceMounts: every caller is a TEARDOWN (destroy, create's unwind, evict,
+	// reconcile's cleanup) with no "next" binding, so `ReplaceMounts(id, nil)` would drag in
+	// endpoint-existence verdicts a teardown must not care about. Conversely a rebind must NEVER
+	// be this call plus CreateMounts — the two-commit shape ReplaceMounts forbids.
 	//
 	// CALLERS MUST CALL THIS BEFORE DeleteSandbox, and the order is required (measured): RESTRICT
 	// fires IMMEDIATELY, so wrapping both deletes in one transaction buys no order-independence.

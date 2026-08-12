@@ -17,15 +17,13 @@ import (
 //
 // # Why the wire types are separate from the record types
 //
-// `cidr` is a STRING here while the record holds a parsed netip.Prefix, and that is
-// not incidental duplication. netip.Prefix's own text unmarshaling ACCEPTS a
-// v4-mapped literal (verified), which would route straight past §6.2's eighth 400
-// class — whose entire point is to refuse those BEFORE any containment test, because
-// `Contains` does not unmap and a family-branching check would judge
-// `::ffff:169.254.169.254` to be v6, compare it only against v6 members, let it
-// through, and then watch the packet die on the v4 floor as IPv4 (network.md D5 ⑲).
-// Decoding untrusted input directly into the record type would make that class
-// unenforceable by construction.
+// `cidr` is a STRING here while the record holds a parsed netip.Prefix, because
+// netip.Prefix's own text unmarshaling ACCEPTS a v4-mapped literal (verified) and would route
+// straight past §6.2's eighth 400 class. That class refuses those BEFORE any containment test:
+// `Contains` does not unmap, so a family-branching check judges `::ffff:169.254.169.254` to be
+// v6, compares it only against v6 members, lets it through, and the packet then dies on the v4
+// floor as IPv4 (network.md D5 ⑲). Decoding untrusted input straight into the record type would
+// make the class unenforceable by construction.
 
 // networkWire is §5.D's four-field declaration as it appears on the wire (§6.1).
 type networkWire struct {
@@ -35,12 +33,10 @@ type networkWire struct {
 	// State is ACCEPTED AND IGNORED on the write path. It is not a declaration field;
 	// it is the read-only member `GET …/network` carries (§6.1).
 	//
-	// It exists here because §6.1 makes the read-modify-write cycle a CONTRACT
-	// REQUIREMENT rather than advice — a PATCH built from a stale read silently drops
-	// a publish added in between, on a security-relevant field — and with unknown
-	// fields refused, a caller who pastes the GET response back would be rejected for
-	// echoing a field the engine itself emitted. Any friction on that path pushes the
-	// caller toward the mistake §6.1 exists to prevent.
+	// It is accepted because §6.1 makes the read-modify-write cycle a CONTRACT REQUIREMENT —
+	// a PATCH built from a stale read silently drops a publish added in between, on a
+	// security-relevant field — and with unknown fields refused, a caller pasting the GET
+	// response back would be rejected for echoing a field the engine itself emitted.
 	//
 	// THIS IS NOT A GENERAL EXEMPTION from DisallowUnknownFields: only a read-only
 	// member the read face itself produced belongs here. A misspelled `netwrok` is

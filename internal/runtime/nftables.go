@@ -565,11 +565,10 @@ func joinHostPort(a netip.Addr, port uint16) string {
 
 // --- the render guards --------------------------------------------------------
 
-// renderGuards is the TEXT half of the render guards (the abstract half is
-// ruleset.Validate). It runs on the rendered file, immediately before install, and
-// it is not defensive programming: each property below is broken by ONE WORD of
-// editing, with no test firing and no visible difference in `nft list`. That is the
-// same standing the §5.A seam token guard has.
+// renderGuards is the TEXT half of the render guards (the abstract half is ruleset.Validate),
+// run on the rendered file immediately before install. Each property below is broken by ONE
+// WORD of editing, with no test firing and no visible difference in `nft list` — the same
+// standing the §5.A seam token guard has.
 //
 // Three properties, each with a measured counter-example:
 //

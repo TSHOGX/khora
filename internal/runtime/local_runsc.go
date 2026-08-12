@@ -724,12 +724,11 @@ func contains(xs []string, x string) bool {
 // ReinstallRuleSet re-renders and re-installs a surviving sandbox's rule set as ONE
 // atomic file — the §4.4-A Adopt face of §5.D enforcement.
 //
-// IT MAY RE-INSTALL BLINDLY, WITH NO DIFF, and the measurement that constrains this is also the
-// PERMISSION (network.md D5 ㉒): one atomic `nft -f` file does not disturb a live flow (5/5
-// survived, ct id unchanged, the masquerade counter at zero while bytes moved — the flow runs on
-// the transform already in the ct entry and the nat hook is not re-evaluated). So the whole set
-// can be re-rendered without reasoning about what is there, which is simpler than diffing and
-// the only safe shape. Two prohibitions from the same measurement:
+// IT MAY RE-INSTALL BLINDLY, WITH NO DIFF — the constraining measurement is also the PERMISSION
+// (network.md D5 ㉒): one atomic `nft -f` file does not disturb a live flow (5/5 survived, ct id
+// unchanged, the masquerade counter at zero while bytes moved — the flow runs on the transform
+// already in the ct entry and the nat hook is not re-evaluated). Two prohibitions from the same
+// measurement:
 //   - NEVER `delete` the table and then install (5/5 flows died — packets in the gap left with
 //     the raw sandbox source address and the peer RST them). The atomic file's leading
 //     bare-`table` + `delete` + definition is ONE transaction, which is not the same thing.
@@ -738,8 +737,8 @@ func contains(xs []string, x string) bool {
 //     depend on.
 //
 // ENDPOINTS ARE PRESERVED, only new items getting one: the TABLE is re-rendered blindly, the
-// BINDINGS are not re-drawn. Both callers hold a LIVE placement, and for each, re-binding what is
-// already bound breaks a promise:
+// BINDINGS are not. Both callers hold a LIVE placement, and for each, re-binding what is already
+// bound breaks a promise:
 //   - hot-add: §5.D endorses it because it is PURELY ADDITIVE. Adding B while re-drawing A's
 //     endpoint is not additive, and §6.1's "a repeated publish is idempotent — return the
 //     existing one" would answer a second identical POST with a different endpoint (AddPublish

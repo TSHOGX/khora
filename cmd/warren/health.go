@@ -8,12 +8,10 @@ package main
 // supervisor, a load balancer, and a scraper use, addressed to the PROCESS rather than
 // to the sandbox model.
 //
-// One exception, and the line is worth stating because it is not arbitrary: `readyz`
-// does go through the client, because "should I send traffic" is a question an API
-// CONSUMER acts on — it is the check before the first call. `healthz` ("is the process
-// alive") and `metrics` (a Prometheus scrape) are for something outside the API's
-// audience entirely, so putting them on a §6.1 client would widen it past what it
-// claims to be.
+// One exception: `readyz` does go through the client, "should I send traffic" being a question an
+// API CONSUMER acts on — the check before the first call. `healthz` ("is the process alive") and
+// `metrics` (a Prometheus scrape) address an audience outside the API entirely, so putting them
+// on a §6.1 client would widen it past what it claims to be.
 
 import (
 	"context"

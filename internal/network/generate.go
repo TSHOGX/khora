@@ -81,10 +81,9 @@ type CounterAttribution struct {
 //
 // # Order is the security property
 //
-// Every position below is an assertion, not a style choice, because a rule set
-// with the right rules in the wrong order behaves perfectly on ordinary traffic
-// and differs only when it is being bypassed (network.md D1 ④ / D4.1). The three
-// that carry the most weight:
+// Every position below is an assertion: a rule set with the right rules in the wrong order
+// behaves perfectly on ordinary traffic and differs only when it is being bypassed (network.md
+// D1 ④ / D4.1). The three that carry the most weight:
 //
 //   - The FLOOR sits ABOVE the declaration's allows (no declaration lifts it), and
 //     the internal deny-safe tier sits BELOW them (being liftable by declaration is
@@ -179,27 +178,24 @@ func routedEgress(d Declaration) bool {
 // set regardless of sandbox count.
 //
 // NO LOOP-AVOIDANCE ACCEPT. D4.2 lists two needs for this predicate at opposite positions —
-// exempt the process from re-matching its own steering rule (an accept ABOVE them) and keep it
-// under the L0 floor (a drop). The first is structurally unnecessary here: every steering DNAT
-// this generator emits is narrowed by `iifname <that sandbox's veth>` and hop 2 arrives on no
-// interface, so it cannot match one. Which matters because the alternative is unsafe — `skuid`
-// does not reliably match every packet, so a skuid-narrowed accept above a floor drop leaks
-// whatever it misses (D5 ㉔). ruleset.Validate refuses one outright; this set contains ONLY drops.
+// exempt the process from re-matching its own steering rule (an accept ABOVE them), and keep it
+// under the L0 floor (a drop). The first is structurally unnecessary: every steering DNAT this
+// generator emits is narrowed by `iifname <that sandbox's veth>`, and hop 2 arrives on no
+// interface. That matters because the accept would be unsafe — `skuid` does not reliably match
+// every packet, so one above a floor drop leaks whatever it misses (D5 ㉔). ruleset.Validate
+// refuses one outright; this set contains ONLY drops.
 //
 // IT PINS THE L0 FLOOR against hop 2 — the confused deputy §2.4's second invariant names, where
 // an "upstream" pointed at a sibling or link-local address walks in the side door. It does NOT
-// apply the internal deny-safe tier: that tier is liftable BY DECLARATION and hop 2 carries none,
-// with no sandbox to attribute it to (one uid serves every `via[]`). §2.4's obligation for this
-// hop is stated over the floor.
+// apply the internal deny-safe tier, which is liftable BY DECLARATION while hop 2 carries none
+// and has no sandbox to attribute it to (one uid serves every `via[]`).
 func SecondHopRules() (ruleset.RuleSet, error) {
 	g := &gen{}
-	// THE RETURN ARM, ABOVE THE FLOOR AND IN THE SAME CHAIN.
-	//
-	// Without it this table kills `via[]` outright, and the mechanism is worth stating
-	// because it is not obvious: the endpoint's REPLY to the guest is host-originated
-	// (so it traverses `output`) and its destination is the GUEST IP — which lies in the
-	// sandbox address space, i.e. exactly the floor's sibling item. So the floor below
-	// matches the reply to the very flow the declaration authorized.
+	// THE RETURN ARM, ABOVE THE FLOOR AND IN THE SAME CHAIN. Without it this table kills
+	// `via[]` outright: the endpoint's REPLY to the guest is host-originated (so it traverses
+	// `output`) and its destination is the GUEST IP, which lies in the sandbox address space —
+	// exactly the floor's sibling item. So the floor below matches the reply to the very flow
+	// the declaration authorized.
 	//
 	// Measured: with the floor alone, a steered flow reached the endpoint and was
 	// accepted (`via0_0_dnat=1`, `via0_0_accept=1`, conntrack SYN_RECV) while
@@ -403,13 +399,12 @@ func (g *gen) publishReturn(d Declaration) {
 // proxy_arp, accept_local and per-interface forwarding are all measured
 // unnecessary, so the provider adds none of them).
 //
-// IT WIDENS NOTHING, and that is worth stating because a masquerade looks like a
-// permission: only packets that a FILTER chain already accepted ever reach
-// postrouting, so this rewrites the source of traffic whose reachability was
-// already decided by the floor, the allows, the tier and the default. What it
-// buys is that the reply can find its way back. Narrowed by the input interface —
-// the unforgeable predicate — rather than by source address, which guest root
-// rewrites with one `ip addr add` (measured, network.md D5 ③).
+// IT WIDENS NOTHING, though a masquerade looks like a permission: only packets a FILTER chain
+// already accepted ever reach postrouting, so this rewrites the source of traffic whose
+// reachability the floor, the allows, the tier and the default already decided. What it buys is
+// a reply that can find its way back. Narrowed by the input interface — the unforgeable
+// predicate — never by source address, which guest root rewrites with one `ip addr add`
+// (measured, network.md D5 ③).
 func (g *gen) masquerade() {
 	g.emit(ruleset.Rule{
 		Hook:    ruleset.HookPostrouting,

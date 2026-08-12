@@ -30,11 +30,10 @@ type Sink interface {
 //  2. Deliver to the sink
 //  3. ONLY on success, MarkPublished
 //
-// A crash between (2) and (3) re-delivers the same event (same transition-unique
-// ID) after restart — never drops it. "Redeliver rather than drop" is the
-// at-least-once contract; subscribers dedup on the ID (see DedupSink). This is
-// why the outbox must be durable (SQLite): after a crash the unpublished rows
-// are still there to re-drain.
+// A crash between (2) and (3) re-delivers the same event (same transition-unique ID) rather than
+// dropping it — the at-least-once contract, with subscribers dedupping on the ID (see
+// DedupSink). Hence the outbox must be durable (SQLite): after a crash the unpublished rows are
+// still there to re-drain.
 //
 // # Head-of-line blocking is KEPT, deliberately
 //
@@ -44,11 +43,10 @@ type Sink interface {
 //     CARRIES MEANING — "paused then resumed" and "resumed then paused" are different bills —
 //     and skipping ahead trades a visible stall for a silent mis-reconciliation.
 //   - No shock absorber downstream: skip-ahead is survivable when the sink is idempotent AND
-//     versioned by logical time, so a late arrival loses a merge instead of resurrecting stale
-//     state. Ours is neither.
+//     versioned by logical time. Ours is neither.
 //
 // The three mechanisms below bound the stall's OPERABILITY — the stall is the trade, an
-// unbounded, unalerted, invisible one is a defect:
+// unbounded unalerted one is a defect:
 //
 //  1. A POISON-ENVELOPE EXIT (MaxAttempts + Halted): after bounded attempts the publisher
 //     HALTS with a signal that has to be noticed. Retrying an undecodable payload forever

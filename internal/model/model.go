@@ -77,26 +77,22 @@ type VolumeID string
 // Volume is a first-class persistent object (§4.3), and its field list is
 // SHORTER than it looks like it should be — each absence is a decision:
 //
-//   - No State field. Existence IS the state (§4.3), exactly as with Template:
-//     the row existing = ready, deleting it = destroyed, no intermediate. That is
-//     what FORCES bytes-first materialization (§5.C): with no not-ready escape
-//     hatch the backend storage MUST be fully allocated before this row is
-//     inserted, or a crash leaves a row naming storage that does not exist.
-//   - No refcount field. "Is it deletable" is DERIVED (§4.3): no mount row
-//     references it, no child volume names it as parent.
-//   - NO AccessMode. It is a property of the MOUNT ROW, not of the volume, and
-//     the reason is cardinality rather than taste: one volume can be shared-rw to
-//     sandbox A and shared-ro to sandbox C AT THE SAME TIME (measured), so a
-//     per-volume field could not carry it honestly (§5.C).
-//   - No lease/owner field. An exclusive lease is not an object — it IS the
-//     existence of an `exclusive` mount row (§5.C / volume.md D3/D4).
+//   - No State field. Existence IS the state (§4.3), as with Template: the row existing =
+//     ready, deleting it = destroyed, no intermediate. That is what FORCES bytes-first
+//     materialization (§5.C) — with no not-ready escape hatch the storage MUST be allocated
+//     before this row is inserted.
+//   - No refcount field. "Is it deletable" is DERIVED (§4.3): no mount row references it, no
+//     child volume names it as parent.
+//   - NO AccessMode, on cardinality grounds: one volume can be shared-rw to sandbox A and
+//     shared-ro to sandbox C AT THE SAME TIME (measured), so a per-volume field could not
+//     carry it honestly. It belongs to the MOUNT ROW (§5.C).
+//   - No lease/owner field. An exclusive lease is not an object — it IS the existence of an
+//     `exclusive` mount row (§5.C / volume.md D3/D4).
 //
-// The cap deliberately does NOT live in model.Limits: the three Limits axes are
-// per-sandbox Binding materialized at each placement, while a volume cap is a
-// property of the volume recorded here — a volume has no placement of its own
-// (§3.4 / §5.C). It nonetheless counts in the FIRST term of the §3.4 node
-// inequality, alongside sandbox caps: both are "upper bounds the engine has
-// declared", so no third term is added.
+// The cap does NOT live in model.Limits: those three axes are per-sandbox Binding materialized
+// at each placement, while a volume has no placement of its own (§3.4 / §5.C). It still counts
+// in the FIRST term of the §3.4 node inequality alongside sandbox caps — both are "upper bounds
+// the engine has declared" — so no third term is added.
 type Volume struct {
 	// ID is the opaque identity ("vol_<token>").
 	ID VolumeID
@@ -474,21 +470,17 @@ var EventKinds = []EventKind{
 // events carry nothing here: the field is populated only where one kind has more than
 // one route to it, so a subscriber that ignores it reads the stream exactly as before.
 //
-// A FIELD rather than more kinds, because EventKind states a closed set of six and a
-// seventh spelling (`evicted`) would make every existing subscriber's exhaustive match
-// wrong. This is also the shape `crash-paused` already uses — its two routes are
-// separated by whether a cause of death was recorded alongside — so this makes the
-// payload consistent rather than extending it.
+// A FIELD rather than more kinds: EventKind states a closed set of six, and a seventh spelling
+// (`evicted`) would make every existing subscriber's exhaustive match wrong. `crash-paused`
+// already uses this shape, its two routes separated by whether a cause of death was recorded.
 //
-// NOT DeathCause, and the two must never be merged: DeathCause is why an isolation
-// UNIT was found gone (a runtime's exit), this is why a RECORD reached a terminal (which
-// route got there). Different questions on different kinds; a shared enum would hold
-// members meaningless to each side.
+// NOT DeathCause, and the two must never be merged: DeathCause is why an isolation UNIT was
+// found gone, this is why a RECORD reached a terminal. A shared enum would hold members
+// meaningless to each side.
 //
-// For `destroyed` this field is the ONLY carrier the fact ever has. Destroy deletes the
-// record, so a subscriber that sees `destroyed` and issues a GET gets 404 by contract —
-// there is no row left to ask, at any later time. Every other kind leaves a readable
-// record, which makes their causes a shortcut; this one's is irreplaceable.
+// For `destroyed` this field is the ONLY carrier the fact ever has — destroy deletes the record,
+// so a GET after that event is 404 by contract, at any later time. Every other kind leaves a
+// readable record, making their causes a shortcut; this one's is irreplaceable.
 type EventCause string
 
 const (
@@ -553,13 +545,10 @@ func (k EventKind) Valid() bool {
 //
 // Zero on any dimension = unlimited (that dimension is not materialized).
 //
-// The disk-IO rate cap has NO field here on purpose — a settled deferral, not an open
-// question: the mechanism is proven, the CONSUMER is missing, and adding the field now is the
-// speculative reservation §1.3 rejects. It joins additively when one appears (one field, one
-// OCI section, no shape change), and what joins is a RATE alone: the whole-disk MAJ:MIN
-// `io.max` needs is DERIVED BY THE PROVIDER, never carried in this record. A device number is
-// irreducibly host-local, so putting it in the Binding would lift a host primitive into a
-// cross-provider contract (§5.A); a remote provider uses its scheduler's equivalent.
+// The disk-IO rate cap has NO field here: a settled deferral, the mechanism being proven and
+// the CONSUMER missing (§1.3). It joins additively as a RATE alone — the whole-disk MAJ:MIN
+// `io.max` needs is DERIVED BY THE PROVIDER, a device number being irreducibly host-local, so
+// carrying one here would lift a host primitive into a cross-provider contract (§5.A).
 type Limits struct {
 	CPUMillis  int64 // 1000 = one full CPU
 	MemoryByte int64
@@ -655,14 +644,12 @@ type Sandbox struct {
 	// takes effect at the next resume and a crash-surviving rule set can be rebuilt
 	// from here (§3.4 / §4.4-A).
 	//
-	// It is stored as an OPAQUE JSON DOCUMENT rather than normalized into columns or
-	// side tables, and the reason is what the field IS: a whole-value Binding with
-	// exactly two write points, both of which replace or append to the whole
-	// document (§6.1 `PATCH` swaps whole binding for whole binding; `POST …/publish`
-	// appends one item). Nothing queries INTO it — the generator receives the whole
-	// declaration — so columns would buy no query and cost a table per repeated
-	// field. Contrast the mount table, which is normalized precisely because the
-	// exclusive lease is a CROSS-ROW predicate the store must arbitrate (§5.C).
+	// An OPAQUE JSON DOCUMENT rather than normalized columns, because that is what the field
+	// IS: a whole-value Binding with two write points that each replace or append to the whole
+	// document (§6.1 PATCH swaps whole binding for whole binding, `POST …/publish` appends one
+	// item). Nothing queries INTO it, so columns would buy no query and cost a table per
+	// repeated field. Contrast the mount table, normalized because the exclusive lease is a
+	// CROSS-ROW predicate the store must arbitrate (§5.C).
 	//
 	// THE ZERO VALUE IS NOT A VALID DECLARATION. An omitted `network` normalizes to
 	// an explicit `{deny, [], [], []}` AT THE WRITE POINT (§5.D), so every record

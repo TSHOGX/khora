@@ -21,18 +21,15 @@ import (
 // handed to runsc (rootfs-overlay D0/D3). runsc runs --overlay2=none
 // --file-access=shared and never manages the write layer.
 //
-// Host paths are LOCKED inside this subsystem (§3.1.1 "ID addressing applies
-// internally too"): the
-// Overlay's upper/work/merged all derive deterministically from the OverlayID
-// under StateDir, so the handle is reconstructable from a store record on
-// resume (OpenOverlay) without keeping it in memory. Above this subsystem an
-// Overlay is only {ID, Template}.
+// Host paths are LOCKED inside this subsystem (§3.1.1 "ID addressing applies internally too"):
+// upper/work/merged all derive deterministically from the OverlayID under StateDir, so the
+// handle is reconstructable from a store record on resume (OpenOverlay) without keeping it in
+// memory. Above this subsystem an Overlay is only {ID, Template}.
 //
-// mount/umount are privileged (CAP_SYS_ADMIN) and copy-up files are root-owned
-// (rootfs-overlay D5); the orchestrator therefore runs as root (ADR-0002).
-// That privilege, and the host paths, stay sealed here — never in the mediator.
-// The disk-CAPACITY cap (§3.4 capacity axis / §5.B) is materialized here as a btrfs
-// subvolume carrying an squota limit, via the internal/btrfs leaf package
+// mount/umount are privileged (CAP_SYS_ADMIN) and copy-up files are root-owned (rootfs-overlay
+// D5), so the orchestrator runs as root (ADR-0002). That privilege and the host paths stay
+// sealed here, never in the mediator. The disk-CAPACITY cap (§3.4 / §5.B) is materialized here
+// as a btrfs subvolume carrying an squota limit, via the internal/btrfs leaf package
 // (rootfs-overlay D6.2/D6.4).
 //
 // The unit is StateDir/<id>, holding BOTH upper and work — one subvolume, hence
@@ -74,23 +71,19 @@ func (p *HostOverlayFS) unitPath(id string) string { return filepath.Join(p.Stat
 // downgrade to "run uncapped": ignoring it would leave every §2.3 blast-radius
 // assertion believing in a cap that does not exist. capByte 0 removes any
 // lingering cap, keeping the record the single authority.
-// THE STRICT-INEQUALITY GUARD BELOW IS THE MATERIALIZATION-SIDE HALF of the criterion
-// the §6.1 write point applies (lifecycle.ErrDiskCapBelowUsage). §3.4.5 requires it in
-// both places and says why: a Binding is durable while the facts its criterion reads are
-// NOT — this one reads the storage unit's CURRENT usage — so "commit → the environment
-// changes → re-materialize" is a legal path around a refusal with no write in between,
-// and it is insensitive to every assertion made about the write point. Concretely: a
-// quota row lost to an external change (the case OpenOverlay's cap re-application exists
-// for) lets the guest grow past the recorded cap, and the next placement would then write
-// that cap UNDER the unit's usage.
+// THE STRICT-INEQUALITY GUARD BELOW IS THE MATERIALIZATION-SIDE HALF of the criterion the §6.1
+// write point applies (lifecycle.ErrDiskCapBelowUsage). §3.4.5 requires it in both places
+// because a Binding is durable while the facts its criterion reads are not — this one reads the
+// unit's CURRENT usage — so "commit → the environment changes → re-materialize" reaches here
+// with no write in between. Concretely: a quota row lost to an external change (the case
+// OpenOverlay's cap re-application exists for) lets the guest grow past the recorded cap, and
+// the next placement would write that cap UNDER the unit's usage.
 //
-// §5.B ALSO CANNOT TAKE §5.C's ANSWER HERE. RepairVolumeCaps skips such a volume and
-// leaves it uncapped, which is safe there because the §3.4 second term then measures its
-// bytes. A placement has no such option: "if the cap cannot be delivered, refuse this
-// placement, and never silently degrade to running uncapped" is §5.B's rule, because
-// running uncapped makes every §2.3 assertion believe in
-// a cap that is not there. So this side REFUSES instead of skipping — and refusing is the
-// reversible direction (see ErrCapBelowUsage).
+// §5.B CANNOT TAKE §5.C's ANSWER HERE: RepairVolumeCaps skips such a volume and leaves it
+// uncapped, safe there because the §3.4 second term then measures its bytes. A placement has no
+// such option — §5.B's rule is "refuse the placement, never silently degrade to running
+// uncapped" — so this side REFUSES rather than skips, which is also the reversible direction
+// (see ErrCapBelowUsage).
 func (p *HostOverlayFS) applyCap(ctx context.Context, id string, capByte int64) error {
 	if capByte == CapUnchanged {
 		return nil // handle-only rebuild: touch no quota (see OpenOverlay)
@@ -402,16 +395,13 @@ func (p *HostOverlayFS) DestroyOverlay(ctx context.Context, o *Overlay) error {
 //
 // Two subtleties, both load-bearing:
 //
-// "Capped" is keyed on the qgroup LIMIT, not on IsSubvolume: applyCap can clear a
-// limit to 0 and leave the subvolume in place, so a subvolume is not a reliable
-// proxy for a cap.
+// "Capped" is keyed on the qgroup LIMIT, not on IsSubvolume: applyCap can clear a limit to 0 and
+// leave the subvolume in place, so a subvolume is not a reliable proxy for a cap.
 //
-// The uncapped branch enumerates upper and work BY NAME rather than walking the
-// unit dir. `merged` lives inside the unit, and for a running sandbox that is the
-// live overlayfs mount exposing lower ∪ upper — walking the unit would descend
-// into it and count the whole Template stack a second time (it is already counted
-// from TemplatesDir). Enumerate-what-you-mean is correct by construction;
-// walk-and-filter is correct only while nothing else is ever placed in the unit.
+// The uncapped branch enumerates upper and work BY NAME rather than walking the unit dir.
+// `merged` lives inside the unit, and for a running sandbox that is the live overlayfs mount
+// exposing lower ∪ upper — walking the unit would descend into it and count the whole Template
+// stack a second time, already counted from TemplatesDir.
 //
 // Bytes come from the BACKEND: the qgroup for capped units, allocated blocks for
 // everything else — never apparent size, never guest-side numbers (see
