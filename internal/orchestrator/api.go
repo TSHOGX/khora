@@ -1209,6 +1209,19 @@ func statusCodeFor(err error) int {
 		// cannot be honored as asked), NOT 507 (nothing is full) and NOT 409 (no
 		// retry or state change makes it legal — the remedy is a new sandbox).
 		return http.StatusBadRequest
+	case errors.Is(err, lifecycle.ErrLineageTooDeep):
+		// §5.B: the Template's lower stack is deeper than the rootfs provider can mount
+		// (rootfs-overlay D5.1 ⑩). 400 — the caller named this Template (create) or this
+		// sandbox's Template (Promote), and no retry or state change makes it mountable;
+		// the remedy is a shallower parent. NOT 507 (nothing is full) and NOT 409 (there is
+		// no state to wait for — lineage is immutable once built).
+		//
+		// The one path that reaches this WITHOUT naming a Template is resume, and only after
+		// a deployment moved its state/layer roots to longer paths, shrinking the ceiling
+		// under an existing lineage. That is a deployment change rather than a caller error,
+		// so the 400 misattributes it; it gets no separate sentinel because §1.3 refuses a
+		// speculative one, and the response body names depth and limit either way.
+		return http.StatusBadRequest
 	case errors.Is(err, lifecycle.ErrDiskCapBelowUsage):
 		// §3.4 `N → M` on the disk axis, where M ≤ current Overlay usage. 400 for the same
 		// reasons as the volume twin (ErrVolumeCapBelowUsage): the request is well-formed

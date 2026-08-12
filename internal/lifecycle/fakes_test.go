@@ -58,7 +58,12 @@ type fakeRootfs struct {
 	failPromote        bool
 	failDestroyOverlay bool
 	failUnmount        bool
-	builtins           []string // boot-seed list returned by ListBuiltinTemplates
+	// maxLowerDepth is the §5.B mount ceiling MaxLowerDepth reports. 0 = no limit,
+	// the default every test that is not about lineage depth wants;
+	// failMaxLowerDepth makes the query itself fail.
+	maxLowerDepth     int
+	failMaxLowerDepth bool
+	builtins          []string // boot-seed list returned by ListBuiltinTemplates
 	// uncappedBytes is what UncappedBytes reports (the §3.4 admission gate's
 	// second term); measureErr makes it fail, so the fail-closed path can be
 	// asserted.
@@ -187,6 +192,15 @@ func (f *fakeRootfs) PromoteToTemplate(ctx context.Context, o *rootfs.Overlay, n
 		return fmt.Errorf("injected PromoteToTemplate failure")
 	}
 	return nil
+}
+
+// maxLowerDepth is the injected §5.B mount ceiling; 0 = no limit, which is what every
+// test that is not about depth wants.
+func (f *fakeRootfs) MaxLowerDepth(context.Context) (int, error) {
+	if f.failMaxLowerDepth {
+		return 0, fmt.Errorf("injected MaxLowerDepth failure")
+	}
+	return f.maxLowerDepth, nil
 }
 func (f *fakeRootfs) Mount(_ context.Context, o *rootfs.Overlay) (*rootfs.Merged, error) {
 	f.log("Mount:" + o.ID)
@@ -892,6 +906,7 @@ func (c *fakeClient) Health(context.Context) (transport.HealthStatus, error) {
 	}
 	return transport.HealthStatus{Idle: idle}, nil
 }
+
 // RecordActivity is present to satisfy transport.Client. The mediator never calls
 // it — the write half of the activity signal belongs to §6.1's activity endpoint,
 // and the classifier reading it here must never stamp it (reaper-health D3).

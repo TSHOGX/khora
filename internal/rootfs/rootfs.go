@@ -91,6 +91,19 @@ type Provider interface {
 	// artifact — pause captured nothing (§4.2).
 	Mount(ctx context.Context, o *Overlay) (*Merged, error)
 
+	// MaxLowerDepth reports the longest lower STACK this provider can actually mount, so the
+	// mediator can refuse a too-deep lineage BEFORE acting on it. Mount enforces the real
+	// limit itself; this is the number that lets a refusal happen at the gate instead.
+	//
+	// It crosses the seam as a PLAIN COUNT for the same reason capByte does: the ceiling is a
+	// function of host path lengths and ID width, both private to this subsystem (§3.1.1), so
+	// the mediator cannot compute it and must not learn its inputs.
+	//
+	// The value is an UNDER-ESTIMATE where a stack's real cost varies (mixed ID widths, two
+	// layer roots of different lengths): a provider reports the depth it can guarantee for a
+	// worst-case stack, so a stack at or under it always mounts. 0 = no limit.
+	MaxLowerDepth(ctx context.Context) (int, error)
+
 	// Unmount tears down the merged overlay (pause / destroy). The upper persists across pause.
 	Unmount(ctx context.Context, m *Merged) error
 

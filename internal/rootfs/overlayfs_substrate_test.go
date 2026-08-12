@@ -10,8 +10,10 @@ package rootfs
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 )
@@ -175,5 +177,55 @@ func TestMountClearsStaleWorkWithoutRecreatingIt(t *testing.T) {
 	}
 	if after.Ino != before.Ino {
 		t.Fatalf("work dir inode changed %d → %d — it was RECREATED, not emptied. On a unit at its capacity cap the mkdir returns ENOSPC (measured, tens of KiB of headroom), which makes a sandbox that hit the ordinary §3.4 ENOSPC permanently unresumable and breaks §4.2's reversible-gate promise (rootfs-overlay D6.6)", before.Ino, after.Ino)
+	}
+}
+
+// A stack past the options cap is REFUSED with a diagnosable error, not handed to the
+// kernel. This is the one that needs a real mount: the failure being guarded against is
+// that the classic mount path TRUNCATES options past a page instead of rejecting them
+// (rootfs-overlay D5.1 ⑩), so without the check the kernel either mounts a stack missing
+// its tail — silent, and indistinguishable from mass file loss — or fails naming nothing.
+//
+// MaxLowerDepth's number cannot be what this test drives, because a builtin's TemplateID is
+// a deployment-chosen directory name that no constant bounds; long names are exactly how a
+// stack under the reported depth still overruns the cap. So this drives the real path.
+func TestMountRefusesALowerStackOverTheOptionsCap(t *testing.T) {
+	mustRoot(t)
+	ctx := context.Background()
+
+	base := t.TempDir()
+	tmplDir := filepath.Join(base, "templates")
+	stateDir := filepath.Join(base, "state")
+
+	// Long builtin names, so few layers overrun the cap: 40 × ~120 bytes > 4096.
+	const nLayers = 40
+	longName := strings.Repeat("t", 100)
+	lower := make([]string, 0, nLayers)
+	for i := 0; i < nLayers; i++ {
+		id := fmt.Sprintf("%s%02d", longName, i)
+		makeTemplate(t, filepath.Join(tmplDir, id))
+		lower = append(lower, id)
+	}
+
+	p, err := NewHostOverlayFS(stateDir, tmplDir, filepath.Join(base, "layers"))
+	if err != nil {
+		t.Fatalf("NewHostOverlayFS: %v", err)
+	}
+	o, err := p.CreateOverlay(ctx, "ov-deep", lower, 0)
+	if err != nil {
+		t.Fatalf("CreateOverlay: %v", err)
+	}
+
+	m, err := p.Mount(ctx, o)
+	if err == nil {
+		_ = p.Unmount(ctx, m)
+		t.Fatal("Mount of an over-cap lower stack SUCCEEDED; want a refusal — the kernel truncates the options instead of failing, so this mounts a stack missing its tail (D5.1 ⑩)")
+	}
+	// The error must name the cause, since the whole point is that the kernel's own
+	// failure names nothing.
+	for _, want := range []string{"lower stack", "mount options"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %v; want it to mention %q so the cause is diagnosable", err, want)
+		}
 	}
 }

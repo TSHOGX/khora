@@ -708,6 +708,11 @@ endpoints** — for the real wire, read the proto:
   **400** (§5.C: decidable without reading another row, and no retry can make it legal); the backend
   not supporting snapshot/clone → **400** (the result of a capability query, not silent, and it must
   be asked before a byte is moved).
+  A **Template lineage deeper than the rootfs provider can mount → 400** (§5.B / rootfs-overlay
+  D5.1 ⑩), on create and on Promote alike: no retry or state change makes it mountable, and the
+  remedy is a shallower parent. **On Promote the check comes before the quiesce**, with the capacity
+  gate — the layer bytes are frozen and the row inserted before anything mounts the result, so an
+  unrefused Promote would report 201 and leave a Template that can never start a sandbox.
   **`GET /v1/events`**: normal (an empty window and an empty page included) → **200**; `after` or
   `limit` not an integer / `after` negative / `limit` ≤ 0 → **400** (`limit` **exceeding** the
   ceiling is not an error — it truncates to the ceiling and is still 200); non-GET → **405**;

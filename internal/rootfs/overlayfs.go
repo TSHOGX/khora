@@ -210,6 +210,57 @@ func dirExists(path string) bool {
 	return err == nil && fi.IsDir()
 }
 
+// mountOptionsCap is the byte ceiling on ONE mount(2) options string. The classic mount
+// path copies the options into a single page and TRUNCATES past it rather than refusing, so
+// overrunning it does not fail cleanly — it mounts a lower stack that is missing its tail,
+// or fails with an unrelated-looking error (rootfs-overlay D5.1 ⑩: "the classic mount path
+// caps its options at a single page"). Escaping it needs the per-layer `lowerdir+=` API or
+// passed descriptors, neither of which this provider uses.
+//
+// 4096 is the page size on every platform this engine supports (ADR-0002 fixes it to Linux
+// on x86-64/arm64, both 4 KiB); reading it at runtime would buy nothing checkable.
+const mountOptionsCap = 4096
+
+// maxIDLen is the lower-stack ID width the depth guarantee assumes: "tmpl_" + 16 hex chars,
+// which is what a Promote's ID generator produces.
+//
+// It bounds a PROMOTED layer's ID exactly and a BUILTIN's not at all — a builtin TemplateID
+// is a directory name the deployment chose (ListBuiltinTemplates), so no constant here can
+// bound it. That is precisely why Mount keeps its own exact check on the assembled string:
+// this number makes the common case refusable at the gate, and Mount is what remains
+// correct when a deployment ships a 200-character builtin name.
+const maxIDLen = len("tmpl_") + 16
+
+// MaxLowerDepth reports the deepest lower stack this provider can guarantee to mount.
+//
+// Worst case per entry: the longer of the two layer roots, a separator, and a full-width ID.
+// The fixed overhead is the options string's other two paths plus its literal keys, both
+// derived from StateDir. A stack at or under the returned depth therefore always fits
+// mountOptionsCap, whichever root each layer resolves under.
+func (p *HostOverlayFS) MaxLowerDepth(context.Context) (int, error) {
+	root := p.LayersDir
+	if len(p.TemplatesDir) > len(root) {
+		root = p.TemplatesDir
+	}
+	// The widest an entry can be: root + "/" + ID, plus the ":" joining it to the next.
+	perEntry := len(root) + 1 + maxIDLen + 1
+	// upperPath and workPath are the longest StateDir-derived paths in the string.
+	fixed := len("lowerdir=,upperdir=,workdir=") +
+		len(filepath.Join(p.StateDir, strings.Repeat("x", maxIDLen), "upper")) +
+		len(filepath.Join(p.StateDir, strings.Repeat("x", maxIDLen), "work"))
+	if fixed >= mountOptionsCap {
+		return 0, fmt.Errorf("rootfs: state dir is too long to mount any lower stack "+
+			"(%d bytes of fixed mount options against a %d-byte cap)", fixed, mountOptionsCap)
+	}
+	depth := (mountOptionsCap - fixed) / perEntry
+	if depth <= 0 {
+		return 0, fmt.Errorf("rootfs: layer dir is too long to mount even one lower layer "+
+			"(%d bytes per entry, %d bytes left of a %d-byte cap)",
+			perEntry, mountOptionsCap-fixed, mountOptionsCap)
+	}
+	return depth, nil
+}
+
 // handle builds the above-subsystem Overlay view ({ID, Template, Lower}); host
 // paths are derived on demand from the IDs, not stored (see rootfs.go).
 func (p *HostOverlayFS) handle(overlayID string, lower []string) *Overlay {
@@ -322,6 +373,15 @@ func (p *HostOverlayFS) Mount(_ context.Context, o *Overlay) (*Merged, error) {
 	}
 
 	opts := fmt.Sprintf("lowerdir=%s,upperdir=%s,workdir=%s", strings.Join(lowerDirs, ":"), upper, work)
+	// The EXACT limit, checked on the assembled string — MaxLowerDepth's number is a
+	// worst-case guarantee, and this is what the kernel actually gets. Past the cap the
+	// classic mount path truncates instead of refusing (mountOptionsCap), so without this
+	// the failure is either a silently short lower stack or an error naming nothing.
+	if len(opts) > mountOptionsCap {
+		return nil, fmt.Errorf("rootfs: mount overlay %s: lower stack of %d layers needs %d "+
+			"bytes of mount options, over the %d-byte limit (rootfs-overlay D5.1 ⑩)",
+			id, len(lowerDirs), len(opts), mountOptionsCap)
+	}
 	if err := syscall.Mount("overlay", merged, "overlay", 0, opts); err != nil {
 		return nil, fmt.Errorf("rootfs: mount overlay at %s (%s): %w", merged, opts, err)
 	}

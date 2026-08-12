@@ -1005,6 +1005,19 @@ func (m *Mediator) Promote(ctx context.Context, id model.SandboxID) (model.Templ
 		return "", fmt.Errorf("promote: %w (state=%s, want running or paused)", store.ErrConflict, rec.State)
 	}
 
+	// Depth gate, BEFORE the quiesce and before any bytes — for the same reason the
+	// capacity gate below comes first (§3.1: a refused Promote is not an observable
+	// transition). The new layer's parent is the source's Template, so the stack it
+	// produces is one deeper than the source's; refusing here is what stops a Promote
+	// from succeeding into a Template that can never be mounted (checkLowerDepth).
+	srcLower, err := m.resolveLower(ctx, rec.Template)
+	if err != nil {
+		return "", fmt.Errorf("promote: %w", err)
+	}
+	if err := m.checkLowerDepth(ctx, len(srcLower)+1); err != nil {
+		return "", fmt.Errorf("promote: %w", err)
+	}
+
 	// open the source Overlay by ID (byte read only, no mount). Needed by the gate
 	// below as well as the freeze, so it is opened before either.
 	ov, err := m.deps.Rootfs.OpenOverlay(ctx, string(rec.Overlay), []string{string(rec.Template)}, rootfs.CapUnchanged)
@@ -1423,7 +1436,8 @@ func (m *Mediator) SweepOrphanOverlays(ctx context.Context) error {
 // because lineage lives in the store (§4.3) and the rootfs provider must not read it
 // (§4 subsystems don't call the store) — the resolved ID stack crosses the seam,
 // host paths stay inside (§3.1.1). A cycle is impossible (lineage is a DAG built
-// child→existing-parent, §4.3), but we bound the walk defensively.
+// child→existing-parent, §4.3); the walk carries the check anyway, and additionally
+// bounds DEPTH against what the provider can mount (see checkLowerDepth).
 func (m *Mediator) resolveLower(ctx context.Context, template model.TemplateID) ([]string, error) {
 	lower := make([]string, 0, 4)
 	seen := make(map[model.TemplateID]bool)
@@ -1442,7 +1456,34 @@ func (m *Mediator) resolveLower(ctx context.Context, template model.TemplateID) 
 	if len(lower) == 0 {
 		return nil, fmt.Errorf("resolve lineage: empty for %q", template)
 	}
+	if err := m.checkLowerDepth(ctx, len(lower)); err != nil {
+		return nil, err
+	}
 	return lower, nil
+}
+
+// ErrLineageTooDeep is a lineage whose lower stack is deeper than the rootfs provider can
+// mount. §6.2 maps it to a 400: no retry and no state change makes it legal, only a
+// shallower parent (the same reasoning as volume.ErrUnsupported).
+var ErrLineageTooDeep = errors.New("lifecycle: template lineage is deeper than the rootfs provider can mount")
+
+// checkLowerDepth refuses a lower stack the provider cannot mount, at the gate rather than
+// at mount time. It matters most for Promote: the layer bytes are frozen BEFORE anything
+// mounts the result, so without this check a Promote reports success and leaves a sandbox
+// that can never start again — a silent failure whose only symptom arrives one create later
+// (rootfs-overlay D5.1 ⑩: lineage resolution "carries a cycle check but no depth bound").
+//
+// The provider owns the number because the ceiling derives from host path lengths (§3.1.1).
+// A provider reporting 0 declares no limit.
+func (m *Mediator) checkLowerDepth(ctx context.Context, depth int) error {
+	maxDepth, err := m.deps.Rootfs.MaxLowerDepth(ctx)
+	if err != nil {
+		return fmt.Errorf("resolve lineage: max depth: %w", err)
+	}
+	if maxDepth > 0 && depth > maxDepth {
+		return fmt.Errorf("%w: %d layers against a limit of %d", ErrLineageTooDeep, depth, maxDepth)
+	}
+	return nil
 }
 
 // markBuildingOverlay / unmarkBuildingOverlay bracket the window in which an

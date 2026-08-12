@@ -294,12 +294,21 @@ or structural, and each has a defect behind it that a fresh implementation would
    mount, so a layer copied to another tree or machine fails `ESTALE` — precisely the portability such an
    arm wants, broken by the feature. `metacopy` is worse in kind: **no mount-time verification at all**,
    so a wrong lower set mounts clean and misbehaves later.
-10. **Lineage depth is bounded well below the kernel's limit, and it fails opaquely.** The lower stack is
-    passed as one colon-separated `lowerdir=` string, and the classic mount path caps its options at a
-    single page — so with this repo's Template ID width the ceiling is on the order of **~77 layers**,
-    not the kernel's `OVL_MAX_STACK` of 500, and lineage resolution carries a cycle check but **no depth
-    bound**. Escaping it means the per-layer `lowerdir+=` configuration API (trading one aggregate limit
-    for a per-path one) or passing descriptors.
+10. **Lineage depth is bounded well below the kernel's limit, and the substrate fails opaquely at it —
+    so the engine refuses first.** The lower stack is passed as one colon-separated `lowerdir=` string,
+    and the classic mount path caps its options at a single page and **truncates past it rather than
+    refusing** — so with this repo's Template ID width the ceiling is on the order of **~77 layers**
+    (82 for `/var/lib/warren` paths; the exact number is a function of path length), not the kernel's
+    `OVL_MAX_STACK` of 500. Escaping the limit itself means the per-layer `lowerdir+=` configuration API
+    (trading one aggregate limit for a per-path one) or passing descriptors; neither is used.
+    **Two checks, because one cannot cover the other.** `Provider.MaxLowerDepth` reports the depth the
+    provider can guarantee, and the mediator refuses past it at the gate — for a **Promote before the
+    quiesce**, since the layer bytes are frozen and the row inserted before anything mounts the result,
+    so an unrefused Promote reports success and leaves a Template that can never start a sandbox. That
+    number bounds a promoted ID exactly and a **builtin's not at all** (its ID is a deployment-chosen
+    directory name), so `Mount` additionally checks the assembled options string and returns an error
+    naming depth and limit. Lineage resolution carries a cycle check as well; **the earlier statement
+    that it carried no depth bound described the code before that gate existed.**
 
 ### D5.2 Multi-node addressing: settled — the writable upper does not travel
 

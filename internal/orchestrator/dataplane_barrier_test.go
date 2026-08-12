@@ -60,6 +60,7 @@ func (barrierFakeRootfs) OpenOverlay(_ context.Context, id string, lower []strin
 func (barrierFakeRootfs) Mount(_ context.Context, o *rootfs.Overlay) (*rootfs.Merged, error) {
 	return &rootfs.Merged{MergedPath: "/fake/" + o.ID}, nil
 }
+func (barrierFakeRootfs) MaxLowerDepth(context.Context) (int, error)            { return 0, nil }
 func (barrierFakeRootfs) Unmount(context.Context, *rootfs.Merged) error         { return nil }
 func (barrierFakeRootfs) DestroyOverlay(context.Context, *rootfs.Overlay) error { return nil }
 func (barrierFakeRootfs) AdoptMerged(_ context.Context, o *rootfs.Overlay) (*rootfs.Merged, error) {
