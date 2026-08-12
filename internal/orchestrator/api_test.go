@@ -453,6 +453,160 @@ func getEvents(t *testing.T, srv *httptest.Server, query string) eventsResp {
 	return out
 }
 
+// TestAPIEventsCarryCauseOnlyWhereAKindHasTwoRoutes pins the wire shape of §4.4-C's
+// cause: present on `destroyed` (two routes, and the record is GONE so the payload is
+// the only carrier), absent on a kind whose identity already says why.
+//
+// The omission half is half the contract: `omitempty` is what lets a subscriber read
+// "a cause is present" as a signal rather than as noise.
+func TestAPIEventsCarryCauseOnlyWhereAKindHasTwoRoutes(t *testing.T) {
+	srv, mem := apiFixture(t)
+	ctx := context.Background()
+	seedTemplate(t, mem, "bare", "", true)
+	if err := mem.CreateSandbox(ctx, model.Sandbox{
+		ID: "sb", Template: "bare", State: model.Creating, CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	}, &store.Event{ID: "evt_c", Sandbox: "sb", Kind: model.EventCreated, State: model.Creating, OccurredAt: time.Now()}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := mem.DeleteSandbox(ctx, "sb", &store.Event{
+		ID: "evt_d", Sandbox: "sb", Kind: model.EventDestroyed, State: model.Destroyed,
+		Cause: model.CauseRetentionExpired, OccurredAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("destroy: %v", err)
+	}
+
+	got := getEvents(t, srv, "")
+	if len(got.Events) != 2 {
+		t.Fatalf("got %d events; want 2: %+v", len(got.Events), got.Events)
+	}
+	if got.Events[0].Cause != "" {
+		t.Errorf("`created` carried cause %q; want none — the kind is already the whole why, and a "+
+			"cause on every event makes its presence meaningless", got.Events[0].Cause)
+	}
+	if got.Events[1].Cause != string(model.CauseRetentionExpired) {
+		t.Errorf("`destroyed` cause=%q; want %q", got.Events[1].Cause, model.CauseRetentionExpired)
+	}
+
+	// The record is gone, which is exactly why the cause had to ride the event: this 404
+	// is the contract, so a subscriber cannot ask afterwards.
+	resp := do(t, http.MethodGet, srv.URL+"/v1/sandboxes/sb")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("GET a destroyed sandbox = %d; want 404 (the premise of carrying the cause on "+
+			"the event)", resp.StatusCode)
+	}
+
+	// And absent must be OMITTED from the JSON, not serialized as "cause":"".
+	rawResp := do(t, http.MethodGet, srv.URL+"/v1/events")
+	raw, _ := io.ReadAll(rawResp.Body)
+	rawResp.Body.Close()
+	if strings.Contains(string(raw), `"cause":""`) {
+		t.Errorf("an absent cause was serialized as an empty string: %s", raw)
+	}
+}
+
+// TestAPIEventsWaitReturnsWhenAnEventArrives: `wait` collapses a subscriber's detection
+// latency from its poll interval to the event itself. The assertion is that the response
+// arrives WELL BEFORE the requested wait — a handler that ignored the parameter and one
+// that slept the whole duration would both return an event, so only the timing separates
+// the working case from the two broken ones.
+func TestAPIEventsWaitReturnsWhenAnEventArrives(t *testing.T) {
+	srv, mem := apiFixture(t)
+	seedSandboxEvents(t, mem, 1)
+	head := getEvents(t, srv, "")
+	cursor := head.Events[len(head.Events)-1].Seq
+
+	// Commit one transition shortly after the request is in its wait.
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		_ = mem.CompareAndSetState(context.Background(), "sb", model.Running, model.Paused,
+			&store.Event{ID: "evt_late", Sandbox: "sb", Kind: model.EventPaused, State: model.Paused, OccurredAt: time.Now()}, nil)
+	}()
+
+	start := time.Now()
+	got := getEvents(t, srv, fmt.Sprintf("?after=%d&wait=10s", cursor))
+	elapsed := time.Since(start)
+
+	if len(got.Events) != 1 || got.Events[0].ID != "evt_late" {
+		t.Fatalf("wait returned %+v; want the one event committed during the hold", got.Events)
+	}
+	if elapsed > 5*time.Second {
+		t.Errorf("wait took %v to deliver an event committed at ~150ms — it is sleeping out the "+
+			"whole duration instead of returning on arrival", elapsed)
+	}
+	// …and it did hold rather than returning the empty page instantly.
+	if elapsed < 100*time.Millisecond {
+		t.Errorf("returned after %v, before the event existed — `wait` was ignored", elapsed)
+	}
+}
+
+// An expired wait is the SAME empty 200 an immediate call returns, and the cursor is
+// unmoved. This is the property that makes the parameter additive: a caller that sets it
+// cannot end up in a state a caller that omits it could not reach.
+func TestAPIEventsWaitExpiresAsAnOrdinaryEmptyPage(t *testing.T) {
+	srv, mem := apiFixture(t)
+	seedSandboxEvents(t, mem, 2)
+	head := getEvents(t, srv, "")
+	cursor := head.Events[len(head.Events)-1].Seq
+
+	start := time.Now()
+	waited := getEvents(t, srv, fmt.Sprintf("?after=%d&wait=400ms", cursor))
+	if elapsed := time.Since(start); elapsed < 300*time.Millisecond {
+		t.Errorf("returned after %v; want a hold of about 400ms", elapsed)
+	}
+	immediate := getEvents(t, srv, fmt.Sprintf("?after=%d", cursor))
+
+	if len(waited.Events) != 0 {
+		t.Fatalf("expired wait returned %d events; want none", len(waited.Events))
+	}
+	if waited.Earliest != immediate.Earliest || waited.Latest != immediate.Latest {
+		t.Errorf("expired wait window %d/%d differs from the immediate call's %d/%d — the bounds "+
+			"must come from the same read as the page",
+			waited.Earliest, waited.Latest, immediate.Earliest, immediate.Latest)
+	}
+}
+
+// A non-empty first read must NOT wait: waiting after the answer is already in hand adds
+// latency to the common case.
+func TestAPIEventsWaitDoesNotDelayANonEmptyPage(t *testing.T) {
+	srv, mem := apiFixture(t)
+	seedSandboxEvents(t, mem, 3)
+
+	start := time.Now()
+	got := getEvents(t, srv, "?wait=10s")
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Errorf("a page with %d events took %v — the wait ran despite having results",
+			len(got.Events), elapsed)
+	}
+	if len(got.Events) != 3 {
+		t.Fatalf("got %d events; want 3", len(got.Events))
+	}
+}
+
+// `wait` is validated and CLAMPED, the same treatment `limit` gets: a caller-controlled
+// parameter given only a default is given nothing, and a clamp keeps a caller who asks
+// for too much working instead of breaking them for asking.
+func TestAPIEventsWaitValidationAndCeiling(t *testing.T) {
+	srv, mem := apiFixture(t)
+	seedSandboxEvents(t, mem, 1)
+
+	for _, bad := range []string{"?wait=abc", "?wait=-5s", "?wait=10"} {
+		resp := do(t, http.MethodGet, srv.URL+"/v1/events"+bad)
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("GET /v1/events%s = %d (%s); want 400", bad, resp.StatusCode, body)
+		}
+	}
+
+	// Above the ceiling → accepted and clamped, never refused. Asserted on a page that
+	// has results, so the clamp is observable without waiting out the ceiling.
+	got := getEvents(t, srv, "?wait=48h")
+	if len(got.Events) == 0 {
+		t.Error("a wait above the ceiling was not served")
+	}
+}
+
 // The cursor contract: page forward with `after`, receive each event exactly
 // once, in sequence order, with the window bounds attached.
 func TestAPIEventsCursorPaging(t *testing.T) {

@@ -22,8 +22,8 @@ import (
 	"warren/internal/runtime"
 	"warren/internal/store"
 	"warren/internal/transport"
-	v1 "warren/internal/transport/gen/engine/transport/v1"
-	"warren/internal/transport/gen/engine/transport/v1/transportv1connect"
+	v1 "warren/pkg/transport/gen/engine/transport/v1"
+	"warren/pkg/transport/gen/engine/transport/v1/transportv1connect"
 )
 
 // The §4.2 drain barrier AT THE EDGE THAT TAKES IT. barrier_test.go proves the
@@ -122,6 +122,9 @@ type barrierFakeClient struct {
 }
 
 func (c *barrierFakeClient) Health(context.Context) (transport.HealthStatus, error) {
+	return transport.HealthStatus{}, nil
+}
+func (c *barrierFakeClient) RecordActivity(context.Context) (transport.HealthStatus, error) {
 	return transport.HealthStatus{}, nil
 }
 func (c *barrierFakeClient) Write(_ context.Context, _ string, _ []byte) error {

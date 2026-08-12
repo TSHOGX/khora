@@ -32,8 +32,8 @@ import (
 	"warren/internal/lifecycle"
 	"warren/internal/orchestrator"
 	"warren/internal/transport"
-	v1 "warren/internal/transport/gen/engine/transport/v1"
-	"warren/internal/transport/gen/engine/transport/v1/transportv1connect"
+	v1 "warren/pkg/transport/gen/engine/transport/v1"
+	"warren/pkg/transport/gen/engine/transport/v1/transportv1connect"
 	"warren/internal/waitfor"
 	"warren/test/harness"
 )

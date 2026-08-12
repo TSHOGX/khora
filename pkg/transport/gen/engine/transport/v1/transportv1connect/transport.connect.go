@@ -25,10 +25,10 @@ package transportv1connect
 import (
 	connect "connectrpc.com/connect"
 	context "context"
-	v1 "warren/internal/transport/gen/engine/transport/v1"
 	errors "errors"
 	http "net/http"
 	strings "strings"
+	v1 "warren/pkg/transport/gen/engine/transport/v1"
 )
 
 // This is a compile-time assertion to ensure that this generated file and the connect package are
@@ -57,6 +57,9 @@ const (
 const (
 	// HealthServiceCheckProcedure is the fully-qualified name of the HealthService's Check RPC.
 	HealthServiceCheckProcedure = "/engine.transport.v1.HealthService/Check"
+	// HealthServiceRecordActivityProcedure is the fully-qualified name of the HealthService's
+	// RecordActivity RPC.
+	HealthServiceRecordActivityProcedure = "/engine.transport.v1.HealthService/RecordActivity"
 	// ProcessServiceStartProcedure is the fully-qualified name of the ProcessService's Start RPC.
 	ProcessServiceStartProcedure = "/engine.transport.v1.ProcessService/Start"
 	// ProcessServiceConnectProcedure is the fully-qualified name of the ProcessService's Connect RPC.
@@ -95,30 +98,55 @@ const (
 
 // These variables are the protoreflect.Descriptor objects for the RPCs defined in this package.
 var (
-	healthServiceServiceDescriptor            = v1.File_engine_transport_v1_transport_proto.Services().ByName("HealthService")
-	healthServiceCheckMethodDescriptor        = healthServiceServiceDescriptor.Methods().ByName("Check")
-	processServiceServiceDescriptor           = v1.File_engine_transport_v1_transport_proto.Services().ByName("ProcessService")
-	processServiceStartMethodDescriptor       = processServiceServiceDescriptor.Methods().ByName("Start")
-	processServiceConnectMethodDescriptor     = processServiceServiceDescriptor.Methods().ByName("Connect")
-	processServiceStreamInputMethodDescriptor = processServiceServiceDescriptor.Methods().ByName("StreamInput")
-	processServiceSendInputMethodDescriptor   = processServiceServiceDescriptor.Methods().ByName("SendInput")
-	processServiceSendSignalMethodDescriptor  = processServiceServiceDescriptor.Methods().ByName("SendSignal")
-	processServiceUpdateMethodDescriptor      = processServiceServiceDescriptor.Methods().ByName("Update")
-	processServiceCloseStdinMethodDescriptor  = processServiceServiceDescriptor.Methods().ByName("CloseStdin")
-	processServiceListMethodDescriptor        = processServiceServiceDescriptor.Methods().ByName("List")
-	fsServiceServiceDescriptor                = v1.File_engine_transport_v1_transport_proto.Services().ByName("FsService")
-	fsServiceReadMethodDescriptor             = fsServiceServiceDescriptor.Methods().ByName("Read")
-	fsServiceWriteMethodDescriptor            = fsServiceServiceDescriptor.Methods().ByName("Write")
-	fsServiceStatMethodDescriptor             = fsServiceServiceDescriptor.Methods().ByName("Stat")
-	fsServiceListMethodDescriptor             = fsServiceServiceDescriptor.Methods().ByName("List")
-	fsServiceMakeDirMethodDescriptor          = fsServiceServiceDescriptor.Methods().ByName("MakeDir")
-	fsServiceRemoveMethodDescriptor           = fsServiceServiceDescriptor.Methods().ByName("Remove")
-	fsServiceMoveMethodDescriptor             = fsServiceServiceDescriptor.Methods().ByName("Move")
+	healthServiceServiceDescriptor              = v1.File_engine_transport_v1_transport_proto.Services().ByName("HealthService")
+	healthServiceCheckMethodDescriptor          = healthServiceServiceDescriptor.Methods().ByName("Check")
+	healthServiceRecordActivityMethodDescriptor = healthServiceServiceDescriptor.Methods().ByName("RecordActivity")
+	processServiceServiceDescriptor             = v1.File_engine_transport_v1_transport_proto.Services().ByName("ProcessService")
+	processServiceStartMethodDescriptor         = processServiceServiceDescriptor.Methods().ByName("Start")
+	processServiceConnectMethodDescriptor       = processServiceServiceDescriptor.Methods().ByName("Connect")
+	processServiceStreamInputMethodDescriptor   = processServiceServiceDescriptor.Methods().ByName("StreamInput")
+	processServiceSendInputMethodDescriptor     = processServiceServiceDescriptor.Methods().ByName("SendInput")
+	processServiceSendSignalMethodDescriptor    = processServiceServiceDescriptor.Methods().ByName("SendSignal")
+	processServiceUpdateMethodDescriptor        = processServiceServiceDescriptor.Methods().ByName("Update")
+	processServiceCloseStdinMethodDescriptor    = processServiceServiceDescriptor.Methods().ByName("CloseStdin")
+	processServiceListMethodDescriptor          = processServiceServiceDescriptor.Methods().ByName("List")
+	fsServiceServiceDescriptor                  = v1.File_engine_transport_v1_transport_proto.Services().ByName("FsService")
+	fsServiceReadMethodDescriptor               = fsServiceServiceDescriptor.Methods().ByName("Read")
+	fsServiceWriteMethodDescriptor              = fsServiceServiceDescriptor.Methods().ByName("Write")
+	fsServiceStatMethodDescriptor               = fsServiceServiceDescriptor.Methods().ByName("Stat")
+	fsServiceListMethodDescriptor               = fsServiceServiceDescriptor.Methods().ByName("List")
+	fsServiceMakeDirMethodDescriptor            = fsServiceServiceDescriptor.Methods().ByName("MakeDir")
+	fsServiceRemoveMethodDescriptor             = fsServiceServiceDescriptor.Methods().ByName("Remove")
+	fsServiceMoveMethodDescriptor               = fsServiceServiceDescriptor.Methods().ByName("Move")
 )
 
 // HealthServiceClient is a client for the engine.transport.v1.HealthService service.
 type HealthServiceClient interface {
 	Check(context.Context, *connect.Request[v1.CheckRequest]) (*connect.Response[v1.CheckResponse], error)
+	// RecordActivity stamps the sandbox-global activity clock Check reports
+	// (§4.3 / reaper-health D2) — "this sandbox is doing something right now",
+	// carrying NO duration. It is the write half of the same one signal, which is
+	// why it lives on this service rather than inventing one.
+	//
+	// It exists because the clock is otherwise reachable from outside only by
+	// writing to a process's stdin, i.e. the pipe a guest reads its own protocol
+	// on — which would couple the reaper's idle criterion to EVERY guest protocol
+	// ("must tolerate arbitrary ignorable input"). The other stamp points cannot
+	// serve: the two stdin-close paths are one-shot and irreversible, and output
+	// is not a caller's to trigger (and the case that needs this is a stretch
+	// producing no output).
+	//
+	// NOT a lease / keepalive / pause-inhibit: those all carry a protected
+	// PERIOD, and a period is what forces per-caller state, overlap arbitration,
+	// and expiry — the obligations that put those shapes outside §1.3. Stamping
+	// one timestamp the engine already owns has none of them, and afterwards is
+	// indistinguishable from a keystroke.
+	//
+	// Being an in-GUEST RPC is load-bearing (reaper-health D1/D2): a host-side
+	// timestamp would manufacture an activity reading for a sandbox nobody can
+	// reach, breaking the property that keeps "activity could not be probed" from
+	// ever reading as idle. So this is unavailable exactly when Check is.
+	RecordActivity(context.Context, *connect.Request[v1.RecordActivityRequest]) (*connect.Response[v1.RecordActivityResponse], error)
 }
 
 // NewHealthServiceClient constructs a client for the engine.transport.v1.HealthService service. By
@@ -137,12 +165,19 @@ func NewHealthServiceClient(httpClient connect.HTTPClient, baseURL string, opts 
 			connect.WithSchema(healthServiceCheckMethodDescriptor),
 			connect.WithClientOptions(opts...),
 		),
+		recordActivity: connect.NewClient[v1.RecordActivityRequest, v1.RecordActivityResponse](
+			httpClient,
+			baseURL+HealthServiceRecordActivityProcedure,
+			connect.WithSchema(healthServiceRecordActivityMethodDescriptor),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
 // healthServiceClient implements HealthServiceClient.
 type healthServiceClient struct {
-	check *connect.Client[v1.CheckRequest, v1.CheckResponse]
+	check          *connect.Client[v1.CheckRequest, v1.CheckResponse]
+	recordActivity *connect.Client[v1.RecordActivityRequest, v1.RecordActivityResponse]
 }
 
 // Check calls engine.transport.v1.HealthService.Check.
@@ -150,9 +185,38 @@ func (c *healthServiceClient) Check(ctx context.Context, req *connect.Request[v1
 	return c.check.CallUnary(ctx, req)
 }
 
+// RecordActivity calls engine.transport.v1.HealthService.RecordActivity.
+func (c *healthServiceClient) RecordActivity(ctx context.Context, req *connect.Request[v1.RecordActivityRequest]) (*connect.Response[v1.RecordActivityResponse], error) {
+	return c.recordActivity.CallUnary(ctx, req)
+}
+
 // HealthServiceHandler is an implementation of the engine.transport.v1.HealthService service.
 type HealthServiceHandler interface {
 	Check(context.Context, *connect.Request[v1.CheckRequest]) (*connect.Response[v1.CheckResponse], error)
+	// RecordActivity stamps the sandbox-global activity clock Check reports
+	// (§4.3 / reaper-health D2) — "this sandbox is doing something right now",
+	// carrying NO duration. It is the write half of the same one signal, which is
+	// why it lives on this service rather than inventing one.
+	//
+	// It exists because the clock is otherwise reachable from outside only by
+	// writing to a process's stdin, i.e. the pipe a guest reads its own protocol
+	// on — which would couple the reaper's idle criterion to EVERY guest protocol
+	// ("must tolerate arbitrary ignorable input"). The other stamp points cannot
+	// serve: the two stdin-close paths are one-shot and irreversible, and output
+	// is not a caller's to trigger (and the case that needs this is a stretch
+	// producing no output).
+	//
+	// NOT a lease / keepalive / pause-inhibit: those all carry a protected
+	// PERIOD, and a period is what forces per-caller state, overlap arbitration,
+	// and expiry — the obligations that put those shapes outside §1.3. Stamping
+	// one timestamp the engine already owns has none of them, and afterwards is
+	// indistinguishable from a keystroke.
+	//
+	// Being an in-GUEST RPC is load-bearing (reaper-health D1/D2): a host-side
+	// timestamp would manufacture an activity reading for a sandbox nobody can
+	// reach, breaking the property that keeps "activity could not be probed" from
+	// ever reading as idle. So this is unavailable exactly when Check is.
+	RecordActivity(context.Context, *connect.Request[v1.RecordActivityRequest]) (*connect.Response[v1.RecordActivityResponse], error)
 }
 
 // NewHealthServiceHandler builds an HTTP handler from the service implementation. It returns the
@@ -167,10 +231,18 @@ func NewHealthServiceHandler(svc HealthServiceHandler, opts ...connect.HandlerOp
 		connect.WithSchema(healthServiceCheckMethodDescriptor),
 		connect.WithHandlerOptions(opts...),
 	)
+	healthServiceRecordActivityHandler := connect.NewUnaryHandler(
+		HealthServiceRecordActivityProcedure,
+		svc.RecordActivity,
+		connect.WithSchema(healthServiceRecordActivityMethodDescriptor),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/engine.transport.v1.HealthService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case HealthServiceCheckProcedure:
 			healthServiceCheckHandler.ServeHTTP(w, r)
+		case HealthServiceRecordActivityProcedure:
+			healthServiceRecordActivityHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -182,6 +254,10 @@ type UnimplementedHealthServiceHandler struct{}
 
 func (UnimplementedHealthServiceHandler) Check(context.Context, *connect.Request[v1.CheckRequest]) (*connect.Response[v1.CheckResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("engine.transport.v1.HealthService.Check is not implemented"))
+}
+
+func (UnimplementedHealthServiceHandler) RecordActivity(context.Context, *connect.Request[v1.RecordActivityRequest]) (*connect.Response[v1.RecordActivityResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("engine.transport.v1.HealthService.RecordActivity is not implemented"))
 }
 
 // ProcessServiceClient is a client for the engine.transport.v1.ProcessService service.

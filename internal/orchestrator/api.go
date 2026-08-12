@@ -21,7 +21,7 @@ import (
 	"warren/internal/model"
 	"warren/internal/rootfs"
 	"warren/internal/store"
-	"warren/internal/transport/gen/engine/transport/v1/transportv1connect"
+	"warren/pkg/transport/gen/engine/transport/v1/transportv1connect"
 )
 
 // HTTPHandler exposes the minimal §6.1 sandbox-centric API — ID-addressed, no
@@ -343,15 +343,26 @@ func (e *Engine) handleListTemplates(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	out := make([]map[string]any, 0, len(list))
+	out := make([]templateResp, 0, len(list))
 	for _, t := range list {
-		out = append(out, map[string]any{
-			"template_id": string(t.ID),
-			"parent":      string(t.Parent),
-			"builtin":     t.Builtin,
+		out = append(out, templateResp{
+			TemplateID: string(t.ID),
+			Parent:     string(t.Parent),
+			Builtin:    t.Builtin,
 		})
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// templateResp is one entry of GET /v1/templates (§6.1). A NAMED type rather than
+// the inline map it replaced, because the generated OpenAPI document derives this
+// operation's schema by reflection (openapi.go) — a map is invisible to that, so an
+// inline response is a response the published contract cannot describe.
+type templateResp struct {
+	TemplateID string `json:"template_id"`
+	// Parent is the sandbox this Template was promoted from, "" for a builtin.
+	Parent  string `json:"parent"`
+	Builtin bool   `json:"builtin"`
 }
 
 func (e *Engine) handleTemplateSub(w http.ResponseWriter, r *http.Request) {
@@ -414,6 +425,10 @@ func (e *Engine) handleSandboxSub(w http.ResponseWriter, r *http.Request) {
 	case sub == "publish" && r.Method == http.MethodPost:
 		e.handlePublish(w, r, id)
 	case sub == "publish":
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	case sub == "activity" && r.Method == http.MethodPost:
+		e.handleActivity(w, r, id)
+	case sub == "activity":
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	// The same §6.2 general rule for the older routes. They landed in `default` as 404,
 	// which contradicts §6.2 ("a wrong method on ANY collection/object route → 405")
@@ -606,17 +621,63 @@ const (
 	// rather than relieving it, which is what makes this cap mandatory rather than
 	// a nicety.
 	eventsMaxLimit = 1000
+
+	// eventsMaxWait is the HARD ceiling on `wait`, for the same reason eventsMaxLimit
+	// is one: the parameter is caller-controlled, so giving only a default gives
+	// nothing. Clamped rather than refused (a caller asking for longer gets the
+	// longest allowed, and re-polls), matching `limit`'s treatment.
+	//
+	// 20s, and the binding constraint is THIS PROCESS'S OWN DRAIN, not a proxy in front
+	// of it. --shutdown-timeout defaults to 30s and bounds the whole teardown graph;
+	// Server.Shutdown deliberately does NOT cancel an in-flight handler's context (so a
+	// mid-flight resume finishes its cold-start chain), so a hold longer than that
+	// deadline is guaranteed to reach the force-close path and report the drain as
+	// having timed out — on a request that was doing nothing but waiting. Keeping the
+	// ceiling under the default drain makes a waiting poll finish on its own instead,
+	// and needs no new shutdown machinery to arrange it.
+	//
+	// It also stays clear of the idle-read timeouts common in proxies (65-75s), which
+	// would otherwise turn a longer hold into a 504 the subscriber must interpret —
+	// strictly worse than the empty 200 it would have received.
+	//
+	// A deployment that lowers --shutdown-timeout below this reintroduces the overlap;
+	// the cost is one force-closed idle poll per drain, which is reconnectable (the
+	// cursor did not advance) and is why this is a constant rather than a knob.
+	eventsMaxWait = 20 * time.Second
+
+	// eventsWaitPoll is the re-read cadence while waiting. §4.4-C settles the
+	// mechanism — "a presentation-layer adapter that server-polls the same pull
+	// query", which holds no state and shares the same `seq` — so this deliberately
+	// does NOT add an append-notification channel to the store contract: that would
+	// be per-subscriber state in the one place the section rules it out, and every
+	// backend would owe the same wakeup semantics.
+	//
+	// The cost is bounded and worth naming: one COUNT-free indexed read per waiting
+	// request per tick, against a read the subscriber was already making — at a
+	// higher rate than most poll loops, but only while a subscriber is genuinely
+	// waiting, and it replaces a poll that ran whether or not anything had happened.
+	eventsWaitPoll = 250 * time.Millisecond
 )
 
 type eventItem struct {
 	// Seq is the cursor: pass the last one back as `after` to resume. It is the
 	// ordering key — clients must not order by occurred_at, which has no tie-break
 	// at equal nanos and can move backwards if the wall clock is stepped.
-	Seq        int64  `json:"seq"`
-	ID         string `json:"id"`
-	SandboxID  string `json:"sandbox_id"`
-	Kind       string `json:"kind"`
-	State      string `json:"state"`
+	Seq       int64  `json:"seq"`
+	ID        string `json:"id"`
+	SandboxID string `json:"sandbox_id"`
+	Kind      string `json:"kind"`
+	State     string `json:"state"`
+	// Cause is WHY, present only on a Kind reachable by more than one route (§4.4-C),
+	// omitted otherwise — additive, so a subscriber ignoring it reads the stream as
+	// before. Today: `destroyed` carries `requested` (the Destroy verb) or
+	// `retention-expired` (the reaper's evict of a paused sandbox past `retention`).
+	//
+	// For `destroyed` this is the fact's ONLY carrier: the record is deleted in the same
+	// commit, so a follow-up GET is a contractual 404 and the route is unrecoverable
+	// afterwards. NOT the same field as a sandbox read's `death_cause` (why an isolation
+	// UNIT was found gone) — different question, deliberately not merged.
+	Cause      string `json:"cause,omitempty"`
 	OccurredAt string `json:"occurred_at"`
 }
 
@@ -640,6 +701,54 @@ type eventsResp struct {
 // A cursor-paged GET is ordinary CRUD, which is why this belongs on the control
 // plane: the stream is engine-level, neither per-sandbox nor per-pid, so the data
 // plane has nowhere to address it from.
+// readEvents is the §6.1 replay read plus the optional `wait` hold. With wait == 0 it
+// is one read, i.e. exactly the previous behavior.
+//
+// The loop re-runs THE SAME query rather than waiting on a notification, which is
+// §4.4-C's own prescription ("a presentation-layer adapter that server-polls the same
+// pull query, sharing the same `seq`"): the engine keeps no subscriber table, no eviction
+// policy, and no cleanup path, and every store backend keeps its contract unchanged.
+//
+// Two properties the shape has to preserve:
+//
+//   - A NON-EMPTY first read never waits. Waiting after finding something would add
+//     latency to the case that already has its answer.
+//   - The window bounds come from the SAME read as the page, every iteration — never
+//     from the first one. `earliest` can advance mid-wait (a trim), and pairing a fresh
+//     page with stale bounds is what would let a caller compute a 410 against a window
+//     that no longer exists.
+func (e *Engine) readEvents(ctx context.Context, after int64, limit int, wait time.Duration) ([]store.Event, int64, int64, error) {
+	evs, earliest, latest, err := e.Mediator.Events(ctx, after, limit)
+	if err != nil || len(evs) > 0 || wait <= 0 {
+		return evs, earliest, latest, err
+	}
+
+	deadline := time.NewTimer(wait)
+	defer deadline.Stop()
+	tick := time.NewTicker(eventsWaitPoll)
+	defer tick.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			// The client hung up, or a shutdown began. Return the ERROR rather than the
+			// empty page: a 200 written into a dead connection is not an answer, and on
+			// the drain path an empty page would falsely tell a subscriber it is
+			// caught up.
+			return nil, 0, 0, ctx.Err()
+		case <-deadline.C:
+			// Expired with nothing new: the same empty 200 an immediate call returns.
+			// Bounds are re-read so they are not stale by the length of the wait.
+			return e.Mediator.Events(ctx, after, limit)
+		case <-tick.C:
+			evs, earliest, latest, err = e.Mediator.Events(ctx, after, limit)
+			if err != nil || len(evs) > 0 {
+				return evs, earliest, latest, err
+			}
+		}
+	}
+}
+
 func (e *Engine) handleEvents(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 
@@ -677,8 +786,39 @@ func (e *Engine) handleEvents(w http.ResponseWriter, r *http.Request) {
 		limit = eventsMaxLimit
 	}
 
-	evs, earliest, latest, err := e.Mediator.Events(r.Context(), after, limit)
+	// `wait` (optional): hold an EMPTY page open for up to this long, so a subscriber's
+	// detection latency stops being its poll interval and an idle deployment stops
+	// paying for polls that find nothing. Clamped like `limit`, and for the same reason.
+	//
+	// It changes NO cursor semantics: the page is still `seq > after` in `seq` order,
+	// and an expired wait returns the identical empty 200 the caller would have received
+	// immediately. Omitting the parameter is exactly the previous behavior.
+	var wait time.Duration
+	if raw := q.Get("wait"); raw != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil {
+			http.Error(w, "wait: must be a duration (e.g. 30s)", http.StatusBadRequest)
+			return
+		}
+		if d < 0 {
+			http.Error(w, "wait must be non-negative (omit it, or 0, to return immediately)", http.StatusBadRequest)
+			return
+		}
+		if d > eventsMaxWait {
+			d = eventsMaxWait
+		}
+		wait = d
+	}
+
+	evs, earliest, latest, err := e.readEvents(r.Context(), after, limit, wait)
 	if err != nil {
+		// A canceled request is the client hanging up mid-wait, which is the NORMAL end
+		// of a long poll rather than a fault: there is nobody to write a status to, and
+		// mapping it through statusFor would log an error per disconnect. A partial page
+		// is never returned — the cursor only advances on events actually delivered.
+		if errors.Is(err, context.Canceled) && r.Context().Err() != nil {
+			return
+		}
 		statusFor(w, err)
 		return
 	}
@@ -721,6 +861,7 @@ func (e *Engine) handleEvents(w http.ResponseWriter, r *http.Request) {
 			SandboxID:  string(ev.Sandbox),
 			Kind:       string(ev.Kind),
 			State:      string(ev.State),
+			Cause:      string(ev.Cause),
 			OccurredAt: ev.OccurredAt.UTC().Format(time.RFC3339Nano),
 		})
 	}
@@ -812,7 +953,77 @@ func (e *Engine) doVerb(w http.ResponseWriter, r *http.Request, id model.Sandbox
 		return
 	}
 	stt, _ := e.Mediator.State(r.Context(), id)
-	writeJSON(w, http.StatusOK, map[string]string{"sandbox_id": string(id), "state": string(stt)})
+	writeJSON(w, http.StatusOK, verbResp{SandboxID: string(id), State: string(stt)})
+}
+
+// verbResp is what pause and resume answer with (§6.1). Named for the same reason as
+// templateResp: an inline map cannot be reflected into the published contract.
+type verbResp struct {
+	SandboxID string `json:"sandbox_id"`
+	// State is read back AFTER the verb, so the caller sees the achieved state rather
+	// than the one it asked for.
+	State string `json:"state"`
+}
+
+// activityResp is §6.1's POST /v1/sandboxes/{id}/activity body. One field, and it
+// is a READING rather than an acknowledgement: the idle duration measured in the
+// guest AFTER the stamp landed, so a caller gets positive confirmation the clock
+// moved instead of an opaque 204.
+type activityResp struct {
+	IdleMillis int64 `json:"idle_millis"`
+}
+
+// handleActivity records one activity now (§6.1). It exists because the only other
+// repeatable way to move the clock is writing to a process's stdin, which couples
+// "keep this sandbox from being swept" to whatever protocol the guest program
+// speaks (reaper-health D2, "An external caller may stamp it explicitly").
+//
+// THE STAMP HAPPENS IN THE GUEST, never here. That is reaper-health D1 (the signal
+// is measured guest-side) and D2's ordering depends on it: a host-side timestamp
+// would be a second, differently-clocked source for the one signal the classifier
+// reads. Three consequences follow, and all three are CONTRACT rather than
+// implementation detail:
+//
+//   - running only. A paused sandbox has no clock to stamp, so this is 409 rather
+//     than a resume-by-side-effect — the engine will not start a sandbox because
+//     somebody said "still busy" about it.
+//   - 503 when L2 is unreachable, exactly like any probe of a transport-down
+//     sandbox. A caller cannot hold a sandbox looking active while the very
+//     channel that would prove it is dead.
+//   - no drain barrier (§4.2). A stamp truncates nothing, and gating it on a
+//     pause-in-progress would only turn a 409-or-nothing answer into a slower one:
+//     pause is preemptive, so the freeze does not wait for a claim of activity.
+func (e *Engine) handleActivity(w http.ResponseWriter, r *http.Request, id model.SandboxID) {
+	stt, err := e.Mediator.State(r.Context(), id)
+	if err != nil {
+		// 404 for an unknown id, through the funnel like every other lookup.
+		statusFor(w, err)
+		return
+	}
+	if stt != model.Running {
+		// Through the funnel rather than http.Error, because the message NAMES THE STATE
+		// so the caller knows whether to resume or give up — and a composed message is
+		// exactly what §6.2 requires to be sanitized, even when (as here) the only
+		// interpolated value is one of four §4.1 spellings.
+		writeErr(w, http.StatusConflict,
+			fmt.Errorf("sandbox is not running (state %s); activity can only be recorded on a running sandbox", stt))
+		return
+	}
+	cl, err := e.Mediator.Client(id)
+	if err != nil {
+		// Running per the record but no live placement: this process does not hold the
+		// channel. 503, not 404 — the sandbox exists and the answer may differ later.
+		writeErr(w, http.StatusServiceUnavailable, err)
+		return
+	}
+	st, err := cl.RecordActivity(r.Context())
+	if err != nil {
+		// bypassCode maps the guest's own classification; an unreachable L2 arrives as
+		// CodeUnavailable → 503, which is the case this endpoint most has to get right.
+		writeErr(w, bypassCode(err), fmt.Errorf("record activity: %w", err))
+		return
+	}
+	writeJSON(w, http.StatusOK, activityResp{IdleMillis: st.Idle.Milliseconds()})
 }
 
 func (e *Engine) handleDestroy(w http.ResponseWriter, r *http.Request, id model.SandboxID) {

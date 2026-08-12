@@ -12,7 +12,7 @@ import (
 
 	"connectrpc.com/connect"
 
-	v1 "warren/internal/transport/gen/engine/transport/v1"
+	v1 "warren/pkg/transport/gen/engine/transport/v1"
 )
 
 // --- fs service (§5.E fs primitive, transport D4.4) --------------------------
@@ -28,7 +28,38 @@ import (
 // than from the caller (an archive entry name, a template import). That is not
 // this surface.
 
-type fsServer struct{}
+type fsServer struct {
+	// activity is the SAME sandbox-global clock the process service and Health share
+	// (reaper-health D2). Present because fs traffic IS I/O by that section's criterion
+	// — "every operation the engine mediates for the guest, not only process frames" —
+	// and the engine mediates two data planes, not one.
+	//
+	// Without it a sandbox being actively written to looks idle for as long as nobody
+	// types, and the disposition that follows (auto-pause) discards the very work in
+	// flight. Stamped in the handlers rather than by each caller, on the same argument
+	// that put the stamp inside proc.broadcast: it belongs in the path the I/O already
+	// flows through, so nothing has to remember.
+	activity *activityClock
+}
+
+// stampIO records fs traffic on the shared activity clock (reaper-health D2). Called by
+// the DATA operations — Read / Write / MakeDir / Remove / Move — and deliberately NOT by
+// Stat / List.
+//
+// That exclusion is the load-bearing half. Stat and List are the calls an external
+// watcher makes in a loop, so stamping them would let an observer keep a sandbox
+// permanently "active" — the same defect D2 and §4.4-C ③ both refuse in their own terms
+// (an observation must not be indistinguishable from the thing observed), and it would
+// silently delete the idle disposition rather than fail visibly.
+//
+// Read DOES stamp: it moves file contents, which is a guest being used, not a poll of its
+// metadata. A caller that wants to keep a sandbox alive has the explicit RecordActivity
+// RPC and does not need to fake a read.
+func (s *fsServer) stampIO() {
+	if s != nil {
+		s.activity.stamp()
+	}
+}
 
 // fsErr is the ONE errno → Connect code mapping for this service. Centralized on
 // purpose: a per-handler mapping drifts, and the drift is invisible because each
@@ -100,7 +131,12 @@ func entryInfo(path string, fi os.FileInfo) *v1.EntryInfo {
 	return e
 }
 
-func (*fsServer) Read(_ context.Context, req *connect.Request[v1.ReadRequest]) (*connect.Response[v1.ReadResponse], error) {
+func (s *fsServer) Read(_ context.Context, req *connect.Request[v1.ReadRequest]) (*connect.Response[v1.ReadResponse], error) {
+	// Stamped on ARRIVAL, before the (possibly slow) syscall and regardless of whether
+	// it succeeds — the request arriving IS the activity, exactly as writeInput stamps
+	// before its blocking Write. A stamp only on success would let a run of EACCES look
+	// like an idle sandbox.
+	s.stampIO()
 	m := req.Msg
 	f, err := os.Open(m.Path)
 	if err != nil {
@@ -145,7 +181,8 @@ func (*fsServer) Read(_ context.Context, req *connect.Request[v1.ReadRequest]) (
 	return connect.NewResponse(&v1.ReadResponse{Data: data}), nil
 }
 
-func (*fsServer) Write(_ context.Context, req *connect.Request[v1.WriteRequest]) (*connect.Response[v1.WriteResponse], error) {
+func (s *fsServer) Write(_ context.Context, req *connect.Request[v1.WriteRequest]) (*connect.Response[v1.WriteResponse], error) {
+	s.stampIO() // arrival, not success (see Read)
 	m := req.Msg
 	if err := os.WriteFile(m.Path, m.Data, 0o644); err != nil {
 		return nil, fsErr("write", m.Path, err)
@@ -219,7 +256,8 @@ func listDir(root string, depth int) ([]*v1.EntryInfo, error) {
 	return out, nil
 }
 
-func (*fsServer) MakeDir(_ context.Context, req *connect.Request[v1.MakeDirRequest]) (*connect.Response[v1.MakeDirResponse], error) {
+func (s *fsServer) MakeDir(_ context.Context, req *connect.Request[v1.MakeDirRequest]) (*connect.Response[v1.MakeDirResponse], error) {
+	s.stampIO() // arrival, not success (see Read)
 	p := req.Msg.Path
 	// Report an existing path rather than succeeding silently — the caller may
 	// treat already_exists as benign, but the server does not erase the fact.
@@ -242,7 +280,8 @@ func (*fsServer) MakeDir(_ context.Context, req *connect.Request[v1.MakeDirReque
 	return connect.NewResponse(&v1.MakeDirResponse{Entry: entryInfo(p, fi)}), nil
 }
 
-func (*fsServer) Remove(_ context.Context, req *connect.Request[v1.RemoveRequest]) (*connect.Response[v1.RemoveResponse], error) {
+func (s *fsServer) Remove(_ context.Context, req *connect.Request[v1.RemoveRequest]) (*connect.Response[v1.RemoveResponse], error) {
+	s.stampIO() // arrival, not success (see Read)
 	p := req.Msg.Path
 	// Refuse "/" outright. The caller is trusted but not infallible, and a
 	// recursive delete of the guest root is not a request anyone means.
@@ -258,7 +297,8 @@ func (*fsServer) Remove(_ context.Context, req *connect.Request[v1.RemoveRequest
 	return connect.NewResponse(&v1.RemoveResponse{}), nil
 }
 
-func (*fsServer) Move(_ context.Context, req *connect.Request[v1.MoveRequest]) (*connect.Response[v1.MoveResponse], error) {
+func (s *fsServer) Move(_ context.Context, req *connect.Request[v1.MoveRequest]) (*connect.Response[v1.MoveResponse], error) {
+	s.stampIO() // arrival, not success (see Read)
 	m := req.Msg
 	if err := os.MkdirAll(filepath.Dir(m.Destination), 0o755); err != nil {
 		return nil, fsErr("move", m.Destination, err)

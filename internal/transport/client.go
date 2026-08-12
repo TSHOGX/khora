@@ -14,8 +14,8 @@ import (
 	"connectrpc.com/connect"
 	"golang.org/x/net/http2"
 
-	v1 "warren/internal/transport/gen/engine/transport/v1"
-	"warren/internal/transport/gen/engine/transport/v1/transportv1connect"
+	v1 "warren/pkg/transport/gen/engine/transport/v1"
+	"warren/pkg/transport/gen/engine/transport/v1/transportv1connect"
 )
 
 // connectClient is the host-side implementation of Client backed by the
@@ -115,6 +115,17 @@ func (c *connectClient) Health(ctx context.Context) (HealthStatus, error) {
 	}
 	if !resp.Msg.Ok {
 		return HealthStatus{}, errors.New("transport: health not ok")
+	}
+	return HealthStatus{Idle: time.Duration(resp.Msg.IdleMillis) * time.Millisecond}, nil
+}
+
+// RecordActivity has no Ok field to check, unlike Check: a stamp either happened
+// (the RPC returned) or the transport failed. The reading it returns is taken
+// after the stamp, so a success is expected to be near-zero idle.
+func (c *connectClient) RecordActivity(ctx context.Context) (HealthStatus, error) {
+	resp, err := c.health.RecordActivity(ctx, connect.NewRequest(&v1.RecordActivityRequest{}))
+	if err != nil {
+		return HealthStatus{}, err
 	}
 	return HealthStatus{Idle: time.Duration(resp.Msg.IdleMillis) * time.Millisecond}, nil
 }

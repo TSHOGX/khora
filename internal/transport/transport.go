@@ -29,7 +29,8 @@ package transport
 // Wire stubs are generated from proto/engine/transport/v1/transport.proto via
 // buf (schema-first). Regenerate with: cd proto && buf generate.
 // Requires buf + protoc-gen-go + protoc-gen-connect-go on PATH. The generated
-// code lives in internal/transport/gen/... and is committed (buf/protoc are not
+// code lives in pkg/transport/gen/... — OUTSIDE internal/ so a Go consumer can
+// import the protocol (ADR-0008) — and is committed (buf/protoc are not
 // guaranteed present on every checkout). This Client interface is the host-side
 // DOMAIN seam; the concrete Connect client translates domain↔proto so
 // the mediator never sees generated types.
@@ -155,6 +156,28 @@ type HealthProber interface {
 	Health(ctx context.Context) (HealthStatus, error)
 }
 
+// ActivityRecorder is the WRITE half of the same one activity signal HealthProber
+// reads (reaper-health D2). Split off rather than folded into HealthProber for the
+// reason stated above the split: the §4 mediator only ever READS the signal — its
+// classifier must never stamp it, or every probed sandbox would look permanently
+// active (reaper-health D3: an observation must never be indistinguishable from
+// the thing observed). The only consumer is §6.1's POST /v1/sandboxes/{id}/activity.
+type ActivityRecorder interface {
+	// RecordActivity stamps the guest's activity clock NOW and reads it back. The
+	// returned HealthStatus.Idle is the reading AFTER the stamp — positive
+	// confirmation the clock moved, not a pre-stamp value.
+	//
+	// It is an in-guest RPC and that is load-bearing (reaper-health D1: the signal
+	// is measured guest-side, never host-side), so it is unavailable in exactly the
+	// cases a Health probe is — a caller cannot use it to keep a sandbox whose L2 is
+	// down looking alive.
+	//
+	// NOT a lease / keepalive / pause-inhibit: it carries no duration and grants no
+	// protected period, so it needs no per-caller state, no overlap arbitration and
+	// no expiry. Those shapes stay rejected (reaper-health D2).
+	RecordActivity(ctx context.Context) (HealthStatus, error)
+}
+
 // ProcessClient is the §5.E process primitive (transport D4.3): run, reattach,
 // input, signal, resize, list. Addressed by guest-native pid throughout.
 type ProcessClient interface {
@@ -255,6 +278,7 @@ type FsClient interface {
 // does, since it re-exports the full surface).
 type Client interface {
 	HealthProber
+	ActivityRecorder
 	ProcessClient
 	FsClient
 }

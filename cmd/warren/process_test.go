@@ -8,8 +8,8 @@ import (
 
 	"connectrpc.com/connect"
 
-	transportv1 "warren/internal/transport/gen/engine/transport/v1"
-	"warren/internal/transport/gen/engine/transport/v1/transportv1connect"
+	transportv1 "warren/pkg/transport/gen/engine/transport/v1"
+	"warren/pkg/transport/gen/engine/transport/v1/transportv1connect"
 )
 
 func TestProcessClientUsesConnectMountAndSandboxHeader(t *testing.T) {

@@ -19,7 +19,7 @@ syntax = "proto3";
 
 package engine.transport.v1;
 
-option go_package = "warren/internal/transport/gen/engine/transport/v1;transportv1";
+option go_package = "warren/pkg/transport/gen/engine/transport/v1;transportv1";
 
 // Health is the unary readiness/liveness probe (§4.3 L2 / transport D4.5). Its
 // first success is the resume readiness gate that flips a sandbox to running
@@ -29,9 +29,43 @@ option go_package = "warren/internal/transport/gen/engine/transport/v1;transport
 // second round-trip to tell healthy from idle.
 service HealthService {
   rpc Check(CheckRequest) returns (CheckResponse) {}
+
+  // RecordActivity stamps the sandbox-global activity clock Check reports
+  // (§4.3 / reaper-health D2) — "this sandbox is doing something right now",
+  // carrying NO duration. It is the write half of the same one signal, which is
+  // why it lives on this service rather than inventing one.
+  //
+  // It exists because the clock is otherwise reachable from outside only by
+  // writing to a process's stdin, i.e. the pipe a guest reads its own protocol
+  // on — which would couple the reaper's idle criterion to EVERY guest protocol
+  // ("must tolerate arbitrary ignorable input"). The other stamp points cannot
+  // serve: the two stdin-close paths are one-shot and irreversible, and output
+  // is not a caller's to trigger (and the case that needs this is a stretch
+  // producing no output).
+  //
+  // NOT a lease / keepalive / pause-inhibit: those all carry a protected
+  // PERIOD, and a period is what forces per-caller state, overlap arbitration,
+  // and expiry — the obligations that put those shapes outside §1.3. Stamping
+  // one timestamp the engine already owns has none of them, and afterwards is
+  // indistinguishable from a keystroke.
+  //
+  // Being an in-GUEST RPC is load-bearing (reaper-health D1/D2): a host-side
+  // timestamp would manufacture an activity reading for a sandbox nobody can
+  // reach, breaking the property that keeps "activity could not be probed" from
+  // ever reading as idle. So this is unavailable exactly when Check is.
+  rpc RecordActivity(RecordActivityRequest) returns (RecordActivityResponse) {}
 }
 
 message CheckRequest {}
+
+message RecordActivityRequest {}
+message RecordActivityResponse {
+  // idle_millis AFTER the stamp, which is ~0 by construction. Returned rather
+  // than left empty so a caller gets a positive confirmation the clock it
+  // intended to reset is the one that moved — the same field Check reports, and
+  // the only thing this RPC can honestly say about its effect.
+  int64 idle_millis = 1;
+}
 message CheckResponse {
   bool ok = 1;
   // idle_millis is how long (in ms) since the sandbox's LAST I/O across ALL

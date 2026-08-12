@@ -15,8 +15,8 @@ import (
 	"warren/internal/model"
 	"warren/internal/store"
 	"warren/internal/transport"
-	v1 "warren/internal/transport/gen/engine/transport/v1"
-	"warren/internal/transport/gen/engine/transport/v1/transportv1connect"
+	v1 "warren/pkg/transport/gen/engine/transport/v1"
+	"warren/pkg/transport/gen/engine/transport/v1/transportv1connect"
 )
 
 // The two halves of proxyErr's contract, which pull in opposite directions and so

@@ -134,6 +134,28 @@ PATCH  /v1/sandboxes/{id}            {cpu_millis?, memory_byte?, disk_byte?, idl
 POST   /v1/sandboxes/{id}/pause
 POST   /v1/sandboxes/{id}/resume
 #   A resource-terminated sandbox refuses resume → 409 (§4.3; PATCH the cap up first)
+POST   /v1/sandboxes/{id}/activity          → {idle_millis}          (record activity now)
+#   "This sandbox is doing something right now." Stamps the §4.3 activity signal, so the idle
+#   clock the reaper reads restarts from here — nothing more. **It carries NO duration and adds
+#   no vocabulary**: it cannot protect a sandbox for a period, cannot be held, and expires
+#   nothing, so there is no lease, no keepalive, and no per-caller state anywhere (the
+#   pause-inhibit / lease shapes stay REJECTED — reaper-health D2; the refusal was always about
+#   "a protected duration", which this has none of). Its whole effect is the one `idle_timeout`
+#   already has a word for.
+#   **It goes through the transport to the GUEST's clock, never a host-side timestamp**, because
+#   reaper-health D1 puts the signal on the guest side and D2's ordering depends on it: an
+#   unreachable L2 must never read as idle, so a host-side stamp would manufacture an activity
+#   reading for a sandbox the engine cannot even reach. Consequence, and it is contract rather
+#   than an implementation detail: this **fails when L2 is unreachable** (503, same as any probe
+#   of a transport-down sandbox) and is valid only on `running` — a `paused` sandbox has no clock
+#   to stamp (409), which is also why this is not a resume-by-side-effect.
+#   Why it exists: the reaper's idle criterion is guest I/O, and the only externally repeatable,
+#   side-effect-free touch point otherwise available is writing to a process's stdin — the same
+#   pipe a guest reads its own protocol on. That forces a caller to inject bytes every workload
+#   must be designed to ignore, i.e. it couples the reaper's criterion to every guest protocol.
+#   (The alternatives are worse, not merely uglier: the two stdin-close paths are one-shot and
+#   irreversible, and the output path is not the caller's to trigger — while the case that needs
+#   this is precisely a stretch that produces no output.)
 DELETE /v1/sandboxes/{id}                                                          (destroy)
 GET    /v1/sandboxes                        (list; each item has the same shape as the
                                              single read, `death_cause?` included)
@@ -148,7 +170,9 @@ PUT|POST  /v1/sandboxes/{id}/files?path=                       → {path, bytes_
 #   REST; small payloads still go through `FsService.Read/Write`. See below.
 
 # Event-stream replay (§4.1 transition events / §4.4-C outbox); **pull only, no push surface**
-GET    /v1/events?after=<seq>&limit=<n>     → {events:[{seq,id,sandbox_id,kind,state,occurred_at}],
+GET    /v1/events?after=<seq>&limit=<n>&wait=<duration>
+                                            → {events:[{seq,id,sandbox_id,kind,state,occurred_at,
+                                                         cause?}],
                                                earliest, latest}
 #   `seq` is the **cursor**: pass the last `seq` you received back verbatim as the next
 #   `after` to continue where you left off. `after` omitted/0 = from the start of the
@@ -162,6 +186,24 @@ GET    /v1/events?after=<seq>&limit=<n>     → {events:[{seq,id,sandbox_id,kind
 #   rather than merely tidy. (How large the window should be is still open: see §4.4-C /
 #   [`open-decisions.md`](./open-decisions.md) §2, "the size of the replayable event-stream
 #   window". The MECHANISM is settled and built; only the value is a deployment's.)
+#   **`cause` is present only where a kind has more than one route to it** (§4.4-C), and absent
+#   otherwise — a subscriber that ignores the field reads the stream exactly as before. Today that is
+#   `destroyed`: `requested` = the Destroy verb, `retention-expired` = the reaper's evict of a paused
+#   sandbox past `retention` (§4.3). **For `destroyed` this field is the fact's only carrier**: the
+#   record is gone, so a follow-up GET is a contractual 404 and the route cannot be re-derived at any
+#   later time. It is NOT §4.3's `death_cause` (why an isolation UNIT was found gone) — different
+#   question, different vocabulary, deliberately not merged.
+#   `wait=<duration>` (optional, e.g. `30s`) makes an otherwise-EMPTY page **wait** for the first
+#   event past `after` instead of returning immediately: a subscriber's detection latency for
+#   auto-pause or a crash stops being its poll interval, and an idle deployment stops paying for polls
+#   that find nothing. **It changes no cursor semantics** — the page is still `seq > after` in `seq`
+#   order, and a wait that expires returns the same empty 200 the caller would have gotten at once, so
+#   omitting the parameter is exactly today's behavior. It is **still pull**: the engine holds a
+#   connection, never a subscriber (§4.4-C's dividing line — "push as an adapter holds no state").
+#   A **server-side ceiling** applies for the same reason `limit` has one (a caller-controlled
+#   parameter given only a default is given nothing), and exceeding it **clamps** rather than refuses.
+#   A non-empty first read never waits, and a canceled request returns nothing rather than a partial
+#   page.
 #   `{earliest, latest}` are the retention window's boundaries (0/0 when the outbox is empty).
 #   **410 = `after` is below the retained window**, i.e. the events between that cursor and
 #   `earliest` have been trimmed and cannot be served. The body still carries

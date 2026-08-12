@@ -9,7 +9,7 @@ import (
 
 	"warren/internal/model"
 	"warren/internal/transport"
-	v1 "warren/internal/transport/gen/engine/transport/v1"
+	v1 "warren/pkg/transport/gen/engine/transport/v1"
 )
 
 // The outer-edge data plane (transport D5): the orchestrator mounts the SAME

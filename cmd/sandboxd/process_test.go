@@ -9,7 +9,7 @@ import (
 
 	"connectrpc.com/connect"
 
-	v1 "warren/internal/transport/gen/engine/transport/v1"
+	v1 "warren/pkg/transport/gen/engine/transport/v1"
 )
 
 // Unit (no substrate): the D4.3 fan-out invariants as pure logic. The real

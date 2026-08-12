@@ -106,10 +106,11 @@ func listPackages(t *testing.T, tags string) []pkg {
 }
 
 // owner returns the subsystem that owns an import path, or "" if none does. A
-// package's OWN subtree does not count as another subsystem: internal/transport
-// importing internal/transport/gen/... is one subsystem using its own generated
-// wire stubs, not an edge. Getting this wrong is the guard's obvious false
-// positive, so it is handled here rather than in each caller.
+// package's OWN subtree does not count as another subsystem — the case this was
+// written for. The generated stubs now live at pkg/transport/gen/... (ADR-0008 part
+// 3), owned by no subsystem, so importing them is not an edge for the simpler
+// reason: `owner` returns "" for them. The own-subtree rule stays because it is a
+// property of the guard, not of where `gen` happens to sit.
 func owner(importPath string) string {
 	for _, s := range subsystems {
 		if importPath == s || strings.HasPrefix(importPath, s+"/") {
@@ -257,11 +258,27 @@ func TestSubsystemsDoNotReadTheControlPlane(t *testing.T) {
 //   - btrfs — the substrate tool, model-ignorant, shared by §5.B (rootfs/overlayfs.go)
 //     and §5.C (volume/local_btrfs.go).
 //   - allocbytes — shared by §5.B and §5.C for the same reason.
+//   - pkg/transport/gen/... — the generated wire stubs. Not a leaf by CLAUDE.md's
+//     "shared fact" motive; listed because it lives OUTSIDE internal/ (ADR-0008 part
+//     3, so a Go consumer can import the protocol) and the property that made that
+//     move safe is exactly the one this guard checks: the generated tree imports
+//     nothing from the engine, so §5.E and the orchestrator reaching it is the same
+//     shape as before the move. Left unchecked, a hand-edit adding an engine import
+//     there would put an engine type in the published surface and hand every
+//     importer a transitive edge.
+// generatedTree is the root of the committed wire stubs (ADR-0008 part 3). Named
+// rather than spelled inline because the leaf guard's exemption below has to mean
+// exactly this prefix: a literal that drifted from the `leaves` entries would turn
+// the exemption into a hole nobody could see.
+const generatedTree = "warren/pkg/transport/gen/"
+
 var leaves = []string{
 	"warren/internal/guestport",
 	"warren/internal/ruleset",
 	"warren/internal/btrfs",
 	"warren/internal/allocbytes",
+	"warren/pkg/transport/gen/engine/transport/v1",
+	"warren/pkg/transport/gen/engine/transport/v1/transportv1connect",
 }
 
 // inertLeaves are the leaves CLAUDE.md's second half binds: "a leaf may DECIDE
@@ -355,6 +372,15 @@ func TestLeavesImportNothingFromTheEngine(t *testing.T) {
 			for _, group := range [][]string{p.Imports, p.TestImports, p.XTestImports} {
 				for _, imp := range group {
 					if !strings.HasPrefix(imp, "warren/") {
+						continue
+					}
+					// The generated tree is two packages by protoc's construction — the
+					// connect stubs necessarily import the message types — so an import
+					// that stays INSIDE it is not the thing this guard is about. What is
+					// checked there is the property that made ADR-0008's move safe:
+					// nothing from the ENGINE, and every engine package is under
+					// warren/internal/, so this exemption cannot widen to one.
+					if strings.HasPrefix(p.ImportPath, generatedTree) && strings.HasPrefix(imp, generatedTree) {
 						continue
 					}
 					t.Errorf("leaf %s imports %s (tags=%q) — a leaf exists so two subsystems can "+

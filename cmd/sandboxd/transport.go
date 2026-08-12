@@ -13,8 +13,8 @@ import (
 	"golang.org/x/net/http2/h2c"
 
 	"warren/internal/guestport"
-	v1 "warren/internal/transport/gen/engine/transport/v1"
-	"warren/internal/transport/gen/engine/transport/v1/transportv1connect"
+	v1 "warren/pkg/transport/gen/engine/transport/v1"
+	"warren/pkg/transport/gen/engine/transport/v1/transportv1connect"
 )
 
 // transportMode is the §5.E process/fs endpoint (the child of PID 1). It becomes
@@ -45,7 +45,7 @@ func transportMode() {
 	mux := http.NewServeMux()
 	mux.Handle(transportv1connect.NewHealthServiceHandler(&healthServer{activity: activity}))
 	mux.Handle(transportv1connect.NewProcessServiceHandler(&processServer{activity: activity, reaper: reaper}))
-	mux.Handle(transportv1connect.NewFsServiceHandler(&fsServer{}))
+	mux.Handle(transportv1connect.NewFsServiceHandler(&fsServer{activity: activity}))
 	// The large-file bypass shares this mux, listener and port — a plain HTTP
 	// route beside the Connect handlers (files.go / transport D4.4).
 	registerFileRoutes(mux)
@@ -92,6 +92,28 @@ type healthServer struct {
 func (h *healthServer) Check(_ context.Context, _ *connect.Request[v1.CheckRequest]) (*connect.Response[v1.CheckResponse], error) {
 	return connect.NewResponse(&v1.CheckResponse{
 		Ok:         true,
+		IdleMillis: h.activity.idleMillis(),
+	}), nil
+}
+
+// RecordActivity stamps the clock Check reports (§4.3 / reaper-health D2) — the write
+// half of the same one signal, which is why it shares this service and this clock rather
+// than introducing either.
+//
+// It is deliberately the ONLY thing that happens here: no duration is accepted, nothing
+// is held, and nothing expires, so afterwards this is indistinguishable from a keystroke
+// (the pause-inhibit / keepalive / lease shapes stay rejected — each carries a protected
+// PERIOD, and the period is what would force per-caller state).
+//
+// Note the probe itself does NOT stamp: an observation must not be indistinguishable
+// from the thing observed, and a Check that stamped would make every sandbox
+// permanently active and silently delete the whole idle disposition. This RPC is a
+// caller ASSERTING activity, which is a different act.
+func (h *healthServer) RecordActivity(_ context.Context, _ *connect.Request[v1.RecordActivityRequest]) (*connect.Response[v1.RecordActivityResponse], error) {
+	h.activity.stamp()
+	// Read back AFTER the stamp (~0), so the caller gets positive confirmation that the
+	// clock the reaper reads is the one that moved.
+	return connect.NewResponse(&v1.RecordActivityResponse{
 		IdleMillis: h.activity.idleMillis(),
 	}), nil
 }
