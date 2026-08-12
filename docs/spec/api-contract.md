@@ -361,6 +361,18 @@ GET    /v1/sandboxes/{id}/network    → {state, egress:{default, default_hit_pa
 #   the deployment (§2.4 / D5 ㉔), so its counter is not attributable to any one sandbox.
 #   **`ingress.publish[]` carries no `hit_packet`**: its rules split across three hooks and one of
 #   them matches other sandboxes' egress, so a per-publish number is not cleanly attributable.
+#   **But the direction is not unobservable, and one number is reported: `ingress.closed_hit_packet`**,
+#   the ingress default-deny's drop counter — inbound traffic to this guest that no `publish[]` entry
+#   opened (§2.1 ③). It answers what per-entry attribution is not needed for and what nothing outside
+#   the engine can answer at all: **whether anything was REFUSED toward this guest, as against nothing
+#   having arrived.** There is no vantage point outside the engine from which a dropped inbound packet
+#   is visible, so without it that half of the surface is dark rather than merely coarse. Three
+#   properties, all carried by the same rules as the egress counters: it follows the omission rule
+#   (**absent, not 0, with no placement** — pause destroys the table rather than zeroing it), **0 never
+#   means "never refused"** (placement-local, reset on pause/resume and on a control-plane restart),
+#   and **it does not identify the sender** — this is the one rule in a per-sandbox table that can match
+#   another sandbox's egress (why it sits at its own `forward` priority, D5 ⑮), so nonzero means
+#   "something was refused on the way to this guest", never who sent it.
 #   **`state` is a member of this response**, taking the same value from the same store read as
 #   `GET /v1/sandboxes/{id}`, sparing the caller a round of "having read it back, I must fetch
 #   the state to interpret it" (the same N+1-saving criterion as list carrying `death_cause`):

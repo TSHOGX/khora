@@ -1004,7 +1004,10 @@ netstack returns RST for both cases. ⟹ **§5.D's user-visible semantic ① the
 **hangs**, so the half of that semantic that is actually load-bearing (not a timeout) holds and has
 been reproduced; only "attributable" does not hold. **Attribution can only happen on the engine
 side**: the engine knows which publish rule it installed and can read that rule's counter, while
-the caller only ever sees one RST.
+the caller only ever sees one RST. **What the read surface actually reports of that is the
+direction-level ingress default-deny counter** (`ingress.closed_hit_packet`, §6.1) — not per
+publish entry, since ⑮'s hook split is exactly what makes a per-entry number unattributable, but
+enough to separate "refused" from "nothing arrived", which no caller-side observation can do.
 
 > **One thing this run could not effectively assert**: cell D wanted to also prove "publish's
 > companion accept did not turn into an egress path" (D1 ④), but that guest had no default route,

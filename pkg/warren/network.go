@@ -53,6 +53,19 @@ type Egress struct {
 // Ingress is the inbound half.
 type Ingress struct {
 	Publish []Publish `json:"publish,omitempty"`
+	// ClosedHitPacket counts inbound traffic to this guest that no Publish entry opened.
+	// It is what distinguishes "something was refused on the way in" from "nothing ever
+	// arrived" — two states with no other observable difference from outside the engine.
+	//
+	// DIRECTION-LEVEL, not per-publish: a publish entry's rules span three hooks and one
+	// of them matches other sandboxes' egress, so no per-entry number is attributable. It
+	// does not identify the sender either.
+	//
+	// nil when there is no placement to read counters from (a paused sandbox has none), so
+	// absent stays distinguishable from zero. And 0 does not mean "never refused":
+	// counters are placement-local and reset on pause/resume and on a control-plane
+	// restart. READ-ONLY.
+	ClosedHitPacket *uint64 `json:"closed_hit_packet,omitempty"`
 }
 
 // Tuple is `{cidr, port, proto}`. TWO of the three are wildcardable BY OMISSION —

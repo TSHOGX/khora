@@ -74,6 +74,23 @@ type CounterAttribution struct {
 	// liftable by no declaration (§2.4), so attributing it to `egress.default` would
 	// send a caller to widen an allow-list that cannot help.
 	Default string
+
+	// IngressClosed is the counter on the ingress default-deny — the rule that drops
+	// inbound traffic to this guest which no `ingress.publish[]` entry opened (§2.1 ③).
+	//
+	// DIRECTION-LEVEL, and that is the whole shape: it is NOT per-publish, because a
+	// publish entry's rules span three hooks and the `forward` one matches other
+	// sandboxes' egress, so no per-entry number is cleanly attributable. What this one
+	// answers is the question a per-entry counter is not needed for — whether anything
+	// was refused toward this guest at all, as opposed to nothing having arrived. Those
+	// two are otherwise indistinguishable from outside the engine, since there is no
+	// vantage point from which a dropped inbound packet is visible.
+	//
+	// It does NOT identify the sender: this is the one rule in a per-sandbox table that
+	// can match another sandbox's egress (the reason it sits at its own
+	// HookForwardIngress priority), so a nonzero value means "something was refused on
+	// the way to this guest", never "who sent it".
+	IngressClosed string
 }
 
 // Generate is §5.D's pure function: `(declaration, L0 floor) → abstract rule
@@ -770,13 +787,18 @@ func (g *gen) forwardChain(d Declaration) error {
 	// nothing, and an ICMP error would confirm the sandbox exists. The guest-facing
 	// half of fail-closed (§2.4: "the guest gets a clean connection failure") is
 	// about the guest, and this refusal is not aimed at it.
+	const ingressClosedCounter = "fwd_ingress_closed"
 	g.emit(ruleset.Rule{
 		Hook:    ruleset.HookForwardIngress,
 		Scope:   ruleset.ScopeGuestOut,
 		Verdict: ruleset.Drop,
-		Counter: "fwd_ingress_closed",
+		Counter: ingressClosedCounter,
 		Why:     "ingress default-deny (§2.1 ③): inbound is closed unless published. Without it, anything the host routes could reach the guest IP directly",
 	})
+	// Attributed so the read surface can report it without naming an nft counter itself
+	// (§6.1 reads the declaration's view, and a member named after nft would not be
+	// seam-clean). Direction-level, never per-publish — see CounterAttribution.
+	g.attr.IngressClosed = ingressClosedCounter
 	return nil
 }
 

@@ -75,6 +75,11 @@ type egressWire struct {
 
 type ingressWire struct {
 	Publish []publishWire `json:"publish"`
+	// ClosedHitPacket is ACCEPTED AND IGNORED on the write path, for the same reason
+	// egressWire.DefaultHitPacket is: §6.1 requires the read face's output to be a legal
+	// write body, so a caller writing back what it read must not get a 400 on a field the
+	// engine itself produced.
+	ClosedHitPacket *uint64 `json:"closed_hit_packet"`
 }
 
 // tupleWire is `{cidr, port, proto}`. TWO of the three members are WILDCARDABLE BY
@@ -288,6 +293,11 @@ func encodeNetwork(d model.NetworkDecl, endpoints []string, hits map[string]uint
 		}
 		out.Egress.Via = append(out.Egress.Via, item)
 	}
+	// The ingress default-deny's drop counter, direction-level. Emitted regardless of
+	// whether anything is published: "closed and nothing tried" and "closed and something
+	// was refused" are exactly the two states this distinguishes, and a sandbox publishing
+	// nothing is the case where the distinction matters most.
+	out.Ingress.ClosedHitPacket = sumHits(hits, attr.IngressClosed)
 	out.Ingress.Publish = make([]publishReadWire, 0, len(d.Ingress.Publish))
 	for i, p := range d.Ingress.Publish {
 		item := publishReadWire{GuestPort: p.GuestPort, Proto: string(p.Proto)}
@@ -363,6 +373,25 @@ type viaReadWire struct {
 
 type ingressReadWire struct {
 	Publish []publishReadWire `json:"publish"`
+	// ClosedHitPacket counts the ingress default-deny — inbound traffic to this guest that
+	// no `publish[]` entry opened (§2.1 ③). It answers the one question the egress side's
+	// per-entry counters answer for their direction and nothing here could: whether
+	// anything was REFUSED toward this guest, as against nothing having arrived. Outside
+	// the engine those two are indistinguishable, there being no vantage point from which
+	// a dropped inbound packet is visible at all.
+	//
+	// DIRECTION-LEVEL, and deliberately not per-publish: a publish entry's rules span
+	// three hooks and the `forward` one matches other sandboxes' egress, so no per-entry
+	// number is cleanly attributable (§6.1). It likewise does NOT identify the sender —
+	// this is the one rule in a per-sandbox table that can match another sandbox's egress,
+	// so nonzero means "something was refused on the way to this guest", never who sent it.
+	//
+	// Same omission rule and same pointer reasoning as egressReadWire.DefaultHitPacket:
+	// OMITTED, not 0, when there is no placement to read counters from — a paused sandbox
+	// has none, and absent must stay distinguishable from zero (§6.1). And 0 never means
+	// "never refused": counters are placement-local and reset on pause/resume and on a
+	// control-plane restart.
+	ClosedHitPacket *uint64 `json:"closed_hit_packet,omitempty"`
 }
 
 type publishReadWire struct {

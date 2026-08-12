@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -536,7 +537,7 @@ func TestAFullReadResponseIsALegalWriteBody(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{`"state"`, `"host_endpoint"`, `"hit_packet"`, `"default_hit_packet"`} {
+	for _, want := range []string{`"state"`, `"host_endpoint"`, `"hit_packet"`, `"default_hit_packet"`, `"closed_hit_packet"`} {
 		if !strings.Contains(string(out), want) {
 			t.Fatalf("this test is only meaningful if the body carries %s — it does not, so the "+
 				"read face changed and the assertion below is vacuous:\n%s", want, out)
@@ -679,6 +680,57 @@ func TestHitPacketFollowsTheOmissionRule(t *testing.T) {
 		want := fmt.Sprintf(`"hit_packet":%d`, 3*len(spec.Counters.Allow[0]))
 		if !strings.Contains(string(out), want) {
 			t.Errorf("allow[0] did not sum its %d counters (wanted %s) — the rules are mutually exclusive per packet, so summing double-counts nothing and reporting only one hook undercounts: %s", len(spec.Counters.Allow[0]), want, out)
+		}
+	})
+}
+
+// The ingress default-deny's counter answers the question the egress side answers per
+// entry and the inbound side structurally cannot: was anything REFUSED on the way to this
+// guest, as against nothing having arrived. Outside the engine those two are
+// indistinguishable — there is no vantage point from which a dropped inbound packet is
+// visible — so without this the whole inbound half of the diagnostic surface is dark.
+func TestIngressClosedCounterIsReportedDirectionLevel(t *testing.T) {
+	decl := model.NetworkDecl{}
+	decl.Egress.Default = model.NetDeny
+	spec, err := network.Generate(decl.Normalize())
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+
+	// The counter must be ATTRIBUTED even with nothing published: a sandbox that publishes
+	// nothing is exactly where "closed and something tried" versus "closed and nothing
+	// tried" carries the most information.
+	if spec.Counters.IngressClosed == "" {
+		t.Fatal("no ingress-closed counter was attributed for a declaration with no publish entries — that is the case where the refused/never-arrived distinction matters most")
+	}
+	if !slices.Contains(spec.Rules.Counters, spec.Counters.IngressClosed) {
+		t.Fatalf("attributed ingress counter %q is not among the generated rule set's counters %v — the read surface would omit it forever",
+			spec.Counters.IngressClosed, spec.Rules.Counters)
+	}
+
+	t.Run("a real zero is present", func(t *testing.T) {
+		hits := map[string]uint64{spec.Counters.IngressClosed: 0}
+		out, _ := json.Marshal(encodeNetwork(decl, nil, hits, spec.Counters))
+		if !strings.Contains(string(out), `"closed_hit_packet":0`) {
+			t.Errorf("an ingress counter read as 0 is not reported; 'installed and nothing refused' is a different fact from 'not measured': %s", out)
+		}
+	})
+
+	t.Run("a nonzero value is reported", func(t *testing.T) {
+		hits := map[string]uint64{spec.Counters.IngressClosed: 7}
+		out, _ := json.Marshal(encodeNetwork(decl, nil, hits, spec.Counters))
+		if !strings.Contains(string(out), `"closed_hit_packet":7`) {
+			t.Errorf("ingress refusals were not reported: %s", out)
+		}
+	})
+
+	t.Run("no placement omits it", func(t *testing.T) {
+		// Pause DESTROYS the table rather than zeroing it, so absent is the truth here —
+		// and absent must stay distinguishable from 0, or a paused sandbox reads as one
+		// that refused nothing.
+		out, _ := json.Marshal(encodeNetwork(decl, nil, nil, spec.Counters))
+		if strings.Contains(string(out), "closed_hit_packet") {
+			t.Errorf("a response with no placement carries the ingress counter key: %s", out)
 		}
 	})
 }
