@@ -79,6 +79,41 @@ itself; should it ever prove necessary, upgrading to "CPU+I/O sampling" is an ad
   only at err==nil and may ignore it.
 - **It is still stateless (§5.E).** This timestamp and the output ring buffer are the same class of
   transient signal, and §5.E lists all five properties already; not restated.
+- **"I/O" means every operation the engine mediates for the guest, not only process frames.** The
+  criterion is "this sandbox is doing something", and the engine mediates two data planes, not one:
+  `ProcessService` frames *and* `FsService` reads/writes/uploads. Stamping only the first makes a
+  sandbox that is being actively written to look idle for as long as nobody types — a real
+  misclassification, and its remedy (auto-pause) discards the very work in flight. So **`fs` writes
+  stamp the same clock**, on the same argument that put the stamp in `broadcast()`: it is the path all
+  such I/O already flows through, so no caller has to remember. **Reads stamp, `Stat`/`List` do
+  not**, and that line is where the criterion actually gets decided: a read moves file contents, which
+  is a guest being *used*, whereas stat-and-list are the calls an external watcher makes **in a loop**
+  — stamping those would let an observer hold a sandbox active forever. Same reason the `Health` probe
+  and the reaper's own reconciliation do not stamp: **an observation must never be indistinguishable
+  from the thing observed** (D3's rule here, ③'s in §4.4-C), and a probe that stamped would make every
+  sandbox permanently active, silently deleting the whole idle disposition rather than failing
+  visibly. **Stamped on arrival, not on success** — the request arriving is the activity, exactly as
+  `writeInput` stamps before its blocking write; stamping only successes would make a run of `EACCES`
+  look like an idle sandbox.
+- **An external caller may stamp it explicitly, and that is not the rejected keepalive.** §6.1's
+  `POST /v1/sandboxes/{id}/activity` records activity **now**, with no duration attached. The
+  distinction is not a technicality — every rejected shape (pause-inhibit, keepalive, lease) carries
+  **a protected period**, and a period is what forces the engine to hold per-caller state, arbitrate
+  overlapping holds, and expire them; those obligations, not the intent, are what put those shapes
+  outside §1.3. A bare stamp has none: it writes one timestamp the engine already owns, in the
+  vocabulary `idle_timeout` already defines, and is indistinguishable afterwards from a keystroke.
+  **What it does not do is make the signal host-side.** It goes over the transport and stamps the
+  guest's clock, so D1 holds unchanged and so does this section's ordering rule: it is unavailable
+  exactly when a `Health` probe would be, which is the property that keeps "activity could not be
+  probed" from ever becoming "idle". A host-side stamp would break precisely that, by producing an
+  activity reading for a sandbox nobody can reach.
+  **Why an endpoint at all, given a caller could write to stdin.** Because that is the only other
+  externally repeatable, side-effect-free stamp point (the two stdin-close paths are one-shot and
+  irreversible; the output path is not the caller's to trigger, and the case that needs this — a
+  sandbox waiting on something slow — is by definition producing no output). Reaching it means
+  injecting bytes into the pipe the guest reads its own protocol on, so the reaper's idle criterion
+  becomes a constraint on **every guest protocol** ("must tolerate arbitrary ignorable input"). That
+  is a coupling this document's D1 already refuses in its other direction, and one endpoint removes it.
 - **`idle_millis` is meaningful only when L2 is reachable — an unreachable L2 must never be read as
   idle.** The activity timestamp rides the `Health` response, so `idle_millis` is obtainable only when
   the probe **returns successfully**; when L2 is unreachable (transport-down / mid-cold-start / dead)
@@ -305,6 +340,25 @@ just fixed the workload, something the engine has no way to know).
   (D4b) are both numeric knobs rather than open items: per the same discipline as
   [`transport.md`](./transport.md) D5.4, take a conservative default, annotate it at the configuration
   point, and leave it adjustable — landing in code, not registered as an open decision.
+  **`retention`'s default deserves one paragraph, because "conservative" points in two directions
+  here and the comparison with `--event-retention` (default 0, on the rule that the engine must not
+  invent a number) does not settle it.** The two defaults are not the same kind of number. `retention:
+  0` is not "no policy" — it has a *meaning* in this engine, "never evict" (§6.1 PATCH) — so
+  defaulting to it is not declining to invent a number, it is choosing the one that never reclaims:
+  every paused sandbox's Overlay is retained forever, and the failure mode is §3.4's disk budget
+  filling until unrelated creates take a 507. So both settings destroy something by default; the
+  question is only whether it is a stale sandbox or an unrelated caller's ability to start one. A TTL
+  is also the sole reclamation path here (§4.3's evict is the only route from `paused` to reclaimed),
+  where the event window has an operator with a delete statement.
+  **So the default stays a finite 24h, and the honest part is that the failure it accepts is
+  irreversible**: a deployment that treats pause/resume as durable continuation loses that
+  continuation when a sandbox sits paused for a day, and the symptom is silent — the fuel is simply
+  gone. Hence the obligation this bullet's own discipline already states, *annotate it at the
+  configuration point*, applied at the standard `--event-retention` sets: the flag says what expiry
+  destroys, that it cannot be undone, and how to argue the value — from how long a paused sandbox must
+  stay resumable, never from disk. A deployment that depends on long continuation sets it explicitly
+  (`0` for never, which is the setting that means it), and the engine's job is to make that a decision
+  someone makes rather than a default nobody read.
 - **Enumerating and rebuilding §5.D's rule sets** is already folded into periodic reconciliation:
   `Adopt` reinstalls the whole set atomically and `ReclaimOrphans` reclaims by table-name prefix, with
   the ordering constraints on both in this document's D4 closing paragraph and network.md D5 ㉒.

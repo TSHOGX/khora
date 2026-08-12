@@ -126,12 +126,23 @@ func (e *Engine) healthzHandler(w http.ResponseWriter, r *http.Request) {
 // than sending it elsewhere (or, on a single node, worse than a clear refusal):
 //
 //  1. DRAINING — a shutdown has begun. New work must not arrive.
+//
 //  2. BOOTING — the listener is open but the boot sequence has not finished.
-//  3. THE OUTBOX PUBLISHER IS HALTED — the event stream has stopped, so lifecycle
-//     transitions are no longer reaching subscribers. The API still works, and that
-//     is exactly why this must show up somewhere: a caller creating sandboxes
-//     against a halted stream gets correct API answers while everything downstream
+//
+//  3. THE OUTBOX PUBLISHER IS HALTED — PUSH delivery has stopped, so lifecycle
+//     transitions are no longer reaching store.Sink subscribers. The API still works,
+//     and that is exactly why this must show up somewhere: a caller creating sandboxes
+//     against a halted publisher gets correct API answers while a Sink subscriber
 //     silently stops seeing them.
+//
+//     SCOPE, and it is narrower than "everything downstream": this says nothing about
+//     the PULL read surface. `GET /v1/events` pages the outbox by the retention window
+//     and NOT by delivery state (SQLite.Events carries no `published_at` predicate,
+//     §4.4-C: "whether the engine's own sink has seen some row is not a fact an
+//     external subscriber should depend on"), so while the publisher is halted a pull
+//     subscriber still reads every event, losing none. Stating it the other way round
+//     invites a caller to treat a 503 here as "the engine is unusable" and trip a
+//     breaker — a self-inflicted outage with the engine intact and zero events lost.
 //
 // Case 3 is the one that earns this endpoint, and its remedy is an operator calling
 // Publisher.Resume after fixing the sink — not a restart, which is why it is here and
@@ -162,7 +173,9 @@ func (e *Engine) readyzHandler(w http.ResponseWriter, r *http.Request) {
 				"attempts: %s. %d row(s) are undelivered and nothing behind that event will be published "+
 				"until an operator intervenes (Publisher.Resume) — the API itself still works, which is "+
 				"why this is a readiness failure rather than a liveness one, and a restart will NOT clear "+
-				"it: the blocked row is in the durable outbox",
+				"it: the blocked row is in the durable outbox. This halt is PUSH-side only: GET /v1/events "+
+				"pages the outbox by the retention window and not by delivery state, so a pull subscriber "+
+				"loses no event while this is failing and must not treat it as the engine being unusable",
 				s.HeadEventID, s.HeadSeq, s.Attempts, s.LastError, s.Backlog),
 			Uptime: e.uptime().String(),
 		})
