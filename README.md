@@ -217,7 +217,12 @@ Known and deliberate, not oversights:
   rather than being exported twice. The two probes diverge on purpose: a halted outbox
   publisher makes the instance **not ready but still alive**, because a restart cannot
   clear a poison envelope in a durable outbox. What is missing is anything richer —
-  there are no traces, and no per-sandbox metrics.
+  there are no traces, and no per-sandbox metrics. **Per-sandbox series are refused on
+  label cardinality**: a sandbox is short-lived and there may be thousands, so one series
+  per sandbox per metric grows the scrape without bound and outlives the object it
+  describes. Sandbox-level numbers stay where a caller asks about one object by ID. Traces
+  are a different question and an open one (`open-decisions.md`): their cost does not scale
+  with object count, so the cardinality argument does not reach them.
 - **The event outbox does not trim by default.** `--event-retention` bounds it, but the
   default is 0 (never trim), because the right window is the reconnect duration you
   promise your subscribers and the engine must not invent that number. Left unset, the
