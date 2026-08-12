@@ -264,8 +264,13 @@ func main() {
 		// mid-flight resume completes its chain intact — Shutdown does not cancel a
 		// handler's context), then stop the loops, then close the store.
 		stopLoops()
+		err := eng.Drain(ctx, srv)
+		// A background loop may be blocked in a substrate operation; waiting for it
+		// before the bounded HTTP drain would bypass --shutdown-timeout entirely.
 		loops.Wait()
-		err := eng.Shutdown(ctx, srv)
+		if closeErr := eng.CloseStore(); closeErr != nil && err == nil {
+			err = closeErr
+		}
 		if err != nil && !errors.Is(err, context.DeadlineExceeded) {
 			log.Printf("orchestrator: shutdown: %v", err)
 			os.Exit(1)

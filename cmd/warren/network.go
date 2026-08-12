@@ -59,13 +59,15 @@ func newNetworkPatchCmd() *cobra.Command {
 				return fmt.Errorf("parse network JSON: %w", err)
 			}
 
-			body, err := json.Marshal(networkDecl)
+			body, err := json.Marshal(struct {
+				Network NetworkDecl `json:"network"`
+			}{Network: networkDecl})
 			if err != nil {
 				return fmt.Errorf("marshal request: %w", err)
 			}
 
 			client := httpClient
-			httpReq, err := http.NewRequest(http.MethodPatch, apiURL+"/v1/sandboxes/"+sandboxID+"/network", bytes.NewReader(body))
+			httpReq, err := http.NewRequest(http.MethodPatch, apiURL+"/v1/sandboxes/"+sandboxID, bytes.NewReader(body))
 			if err != nil {
 				return fmt.Errorf("create request: %w", err)
 			}
@@ -73,7 +75,7 @@ func newNetworkPatchCmd() *cobra.Command {
 
 			resp, err := client.Do(httpReq)
 			if err != nil {
-				return fmt.Errorf("PATCH /v1/sandboxes/%s/network: %w", sandboxID, err)
+				return fmt.Errorf("PATCH /v1/sandboxes/%s: %w", sandboxID, err)
 			}
 			defer resp.Body.Close()
 
@@ -122,9 +124,9 @@ func newNetworkPublishCmd() *cobra.Command {
 				return fmt.Errorf("marshal request: %w", err)
 			}
 
-			resp, err := httpClient.Post(apiURL+"/v1/sandboxes/"+sandboxID+"/network/publish", "application/json", bytes.NewReader(body))
+			resp, err := httpClient.Post(apiURL+"/v1/sandboxes/"+sandboxID+"/publish", "application/json", bytes.NewReader(body))
 			if err != nil {
-				return fmt.Errorf("POST /v1/sandboxes/%s/network/publish: %w", sandboxID, err)
+				return fmt.Errorf("POST /v1/sandboxes/%s/publish: %w", sandboxID, err)
 			}
 			defer resp.Body.Close()
 

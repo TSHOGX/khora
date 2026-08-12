@@ -14,8 +14,8 @@ import (
 
 type Template struct {
 	TemplateID string `json:"template_id"`
-	Kind       string `json:"kind"`
-	SourceID   string `json:"source_id"`
+	Parent     string `json:"parent"`
+	Builtin    bool   `json:"builtin"`
 }
 
 func newTemplateListCmd() *cobra.Command {
@@ -45,9 +45,9 @@ func newTemplateListCmd() *cobra.Command {
 			}
 
 			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(w, "TEMPLATE_ID\tKIND\tSOURCE_ID")
+			fmt.Fprintln(w, "TEMPLATE_ID\tPARENT\tBUILTIN")
 			for _, tpl := range templates {
-				fmt.Fprintf(w, "%s\t%s\t%s\n", tpl.TemplateID, tpl.Kind, tpl.SourceID)
+				fmt.Fprintf(w, "%s\t%s\t%t\n", tpl.TemplateID, tpl.Parent, tpl.Builtin)
 			}
 			w.Flush()
 
@@ -63,16 +63,18 @@ func newTemplatePromoteCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			sandboxID := args[0]
-			req := struct{}{}
+			req := struct {
+				FromSandboxID string `json:"from_sandbox_id"`
+			}{FromSandboxID: sandboxID}
 
 			body, err := json.Marshal(req)
 			if err != nil {
 				return fmt.Errorf("marshal request: %w", err)
 			}
 
-			resp, err := httpClient.Post(apiURL+"/v1/sandboxes/"+sandboxID+"/promote", "application/json", bytes.NewReader(body))
+			resp, err := httpClient.Post(apiURL+"/v1/templates", "application/json", bytes.NewReader(body))
 			if err != nil {
-				return fmt.Errorf("POST /v1/sandboxes/%s/promote: %w", sandboxID, err)
+				return fmt.Errorf("POST /v1/templates: %w", err)
 			}
 			defer resp.Body.Close()
 

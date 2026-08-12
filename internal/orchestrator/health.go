@@ -339,6 +339,17 @@ type shutdownServer interface {
 }
 
 func (e *Engine) Shutdown(ctx context.Context, srv shutdownServer) error {
+	firstErr := e.Drain(ctx, srv)
+	if err := e.closeStore(); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	return firstErr
+}
+
+// Drain marks the engine unavailable and performs the bounded HTTP drain. It
+// intentionally does not close the store, allowing callers with background
+// loops to wait for them before final store teardown.
+func (e *Engine) Drain(ctx context.Context, srv shutdownServer) error {
 	// Step 1 BEFORE anything else. Readiness has to flip while this instance can
 	// still serve, so the drain window is when traffic is being steered away rather
 	// than after it has already been refused.
@@ -368,24 +379,18 @@ func (e *Engine) Shutdown(ctx context.Context, srv shutdownServer) error {
 	}
 	e.httpHandlers.wait()
 
-	// Step 3. The loops take a context from the caller and exit on cancellation, so
-	// stopping them is the caller cancelling the context it passed to Run. Noted here
-	// because the ORDER matters: they must stop before the store closes, or a tick
-	// landing afterwards logs a spurious "store closed" error that reads like a defect.
-	//
-	// Step 4. Close the store last, after the loops that use it.
-	//
-	// A TYPE ASSERTION RATHER THAN A SEAM METHOD, deliberately. `store.Store` has no
-	// Close and does not gain one for this: the seam is about control-plane records
-	// (§1.3 register-an-implementation), and only a backend holding an OS handle has
-	// anything to close — the in-memory arm has nothing, and requiring every future
-	// implementation to carry an empty method would be exactly the useless structure
-	// §1.3's cost criterion refuses. So the arms that need it announce it.
-	if c, ok := e.Store.(interface{ Close() error }); ok {
-		keep(c.Close())
-	}
 	return firstErr
 }
+
+func (e *Engine) closeStore() error {
+	if c, ok := e.Store.(interface{ Close() error }); ok {
+		return c.Close()
+	}
+	return nil
+}
+
+// CloseStore closes the backing store after callers have stopped users of it.
+func (e *Engine) CloseStore() error { return e.closeStore() }
 
 // registerHealthRoutes mounts the three operational endpoints.
 //
