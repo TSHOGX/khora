@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"warren/internal/btrfs"
+	"github.com/TSHOGX/warren/internal/btrfs"
 )
 
 // THE LOAD-BEARING PROPERTY IS THE `merged` TRAP, and it is the one an obvious

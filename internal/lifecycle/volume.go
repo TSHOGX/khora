@@ -9,10 +9,10 @@ import (
 	"strings"
 	"time"
 
-	"warren/internal/model"
-	"warren/internal/runtime"
-	"warren/internal/store"
-	"warren/internal/volume"
+	"github.com/TSHOGX/warren/internal/model"
+	"github.com/TSHOGX/warren/internal/runtime"
+	"github.com/TSHOGX/warren/internal/store"
+	"github.com/TSHOGX/warren/internal/volume"
 )
 
 // Volume verbs (§5.C), owned by the §4 mediator like every other verb: the

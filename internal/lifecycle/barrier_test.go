@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"warren/internal/model"
+	"github.com/TSHOGX/warren/internal/model"
 )
 
 // Nothing in flight is the common case, and it must not cost the pause anything —

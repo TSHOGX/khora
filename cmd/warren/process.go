@@ -9,8 +9,8 @@ import (
 	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
 
-	transportv1 "warren/pkg/transport/gen/engine/transport/v1"
-	"warren/pkg/transport/gen/engine/transport/v1/transportv1connect"
+	transportv1 "github.com/TSHOGX/warren/pkg/transport/gen/engine/transport/v1"
+	"github.com/TSHOGX/warren/pkg/transport/gen/engine/transport/v1/transportv1connect"
 )
 
 const processSandboxIDHeader = "Engine-Sandbox-Id"

@@ -14,7 +14,7 @@ import (
 	"strings"
 	"testing"
 
-	"warren/internal/ruleset"
+	"github.com/TSHOGX/warren/internal/ruleset"
 )
 
 // A launch that fails AFTER the rule set is installed must take the table with it.

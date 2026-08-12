@@ -7,9 +7,9 @@ import (
 
 	"connectrpc.com/connect"
 
-	"warren/internal/model"
-	"warren/internal/transport"
-	v1 "warren/pkg/transport/gen/engine/transport/v1"
+	"github.com/TSHOGX/warren/internal/model"
+	"github.com/TSHOGX/warren/internal/transport"
+	v1 "github.com/TSHOGX/warren/pkg/transport/gen/engine/transport/v1"
 )
 
 // The outer-edge data plane (transport D5): the orchestrator mounts the SAME

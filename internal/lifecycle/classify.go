@@ -4,9 +4,9 @@ import (
 	"context"
 	"time"
 
-	"warren/internal/model"
-	"warren/internal/runtime"
-	"warren/internal/transport"
+	"github.com/TSHOGX/warren/internal/model"
+	"github.com/TSHOGX/warren/internal/runtime"
+	"github.com/TSHOGX/warren/internal/transport"
 )
 
 // Health is the §4.3 health classification (five states) of a `running`

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"warren/internal/ruleset"
+	"github.com/TSHOGX/warren/internal/ruleset"
 )
 
 // This file is the §5.A half of the §5.D split (network.md D1 ② / D6): render the

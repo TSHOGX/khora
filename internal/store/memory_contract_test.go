@@ -3,8 +3,8 @@ package store_test
 import (
 	"testing"
 
-	"warren/internal/store"
-	"warren/internal/store/storetest"
+	"github.com/TSHOGX/warren/internal/store"
+	"github.com/TSHOGX/warren/internal/store/storetest"
 )
 
 // Memory runs the shared §4.4-C contract suite. It is not durable, so reopen is

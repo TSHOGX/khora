@@ -29,13 +29,13 @@ import (
 
 	"connectrpc.com/connect"
 
-	"warren/internal/lifecycle"
-	"warren/internal/orchestrator"
-	"warren/internal/transport"
-	v1 "warren/pkg/transport/gen/engine/transport/v1"
-	"warren/pkg/transport/gen/engine/transport/v1/transportv1connect"
-	"warren/internal/waitfor"
-	"warren/test/harness"
+	"github.com/TSHOGX/warren/internal/lifecycle"
+	"github.com/TSHOGX/warren/internal/orchestrator"
+	"github.com/TSHOGX/warren/internal/transport"
+	v1 "github.com/TSHOGX/warren/pkg/transport/gen/engine/transport/v1"
+	"github.com/TSHOGX/warren/pkg/transport/gen/engine/transport/v1/transportv1connect"
+	"github.com/TSHOGX/warren/internal/waitfor"
+	"github.com/TSHOGX/warren/test/harness"
 )
 
 // THE hazard this barrier exists for. The guest's fs.Write is truncate-then-write

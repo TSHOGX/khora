@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"warren/internal/model"
-	"warren/internal/network"
-	"warren/internal/store"
-	"warren/internal/transport"
+	"github.com/TSHOGX/warren/internal/model"
+	"github.com/TSHOGX/warren/internal/network"
+	"github.com/TSHOGX/warren/internal/store"
+	"github.com/TSHOGX/warren/internal/transport"
 )
 
 // The premise a `via[]` declaration rests on is re-evaluated AT EVERY PLACEMENT, not

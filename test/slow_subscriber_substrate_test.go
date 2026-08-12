@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	"warren/internal/transport"
+	"github.com/TSHOGX/warren/internal/transport"
 )
 
 func TestC4SlowSubscriberDoesNotFreezeSource(t *testing.T) {

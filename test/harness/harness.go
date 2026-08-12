@@ -19,11 +19,11 @@ import (
 	"testing"
 	"time"
 
-	"warren/internal/btrfs"
-	"warren/internal/model"
-	"warren/internal/orchestrator"
-	"warren/internal/rootfs"
-	"warren/internal/runtime"
+	"github.com/TSHOGX/warren/internal/btrfs"
+	"github.com/TSHOGX/warren/internal/model"
+	"github.com/TSHOGX/warren/internal/orchestrator"
+	"github.com/TSHOGX/warren/internal/rootfs"
+	"github.com/TSHOGX/warren/internal/runtime"
 )
 
 // RepoRoot resolves the engine repo root from this file's location.

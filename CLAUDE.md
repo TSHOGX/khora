@@ -1,6 +1,10 @@
 # warren — working conventions
 
-> **Naming.** `warren` = the project and the Go module path. `engine` = the sandbox
+> **Naming.** `warren` = the project; the Go module path is
+> `github.com/TSHOGX/warren`, which is the same name made **remotely resolvable** — a
+> bare `warren` cannot be fetched by `go get`, so a consumer could only reach it through
+> a `replace` pointing at a local checkout. The project name did not change.
+> `engine` = the sandbox
 > abstraction itself, and that is what `docs/spec/` means by the word throughout
 > (§1.1 terminology: *engine* = the abstraction, *orchestrator* = the binary hosting
 > it). Different layers, not synonyms — so "the engine" below still reads exactly as

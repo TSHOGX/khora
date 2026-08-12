@@ -1,4 +1,4 @@
-module warren
+module github.com/TSHOGX/warren
 
 go 1.23.0
 

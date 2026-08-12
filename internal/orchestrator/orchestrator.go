@@ -16,14 +16,14 @@ import (
 	"sync"
 	"time"
 
-	"warren/internal/lifecycle"
-	"warren/internal/model"
-	"warren/internal/network"
-	"warren/internal/rootfs"
-	"warren/internal/runtime"
-	"warren/internal/store"
-	"warren/internal/transport"
-	"warren/internal/volume"
+	"github.com/TSHOGX/warren/internal/lifecycle"
+	"github.com/TSHOGX/warren/internal/model"
+	"github.com/TSHOGX/warren/internal/network"
+	"github.com/TSHOGX/warren/internal/rootfs"
+	"github.com/TSHOGX/warren/internal/runtime"
+	"github.com/TSHOGX/warren/internal/store"
+	"github.com/TSHOGX/warren/internal/transport"
+	"github.com/TSHOGX/warren/internal/volume"
 )
 
 // Config is the orchestrator's local configuration (§1.1 one config).

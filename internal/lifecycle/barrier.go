@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"warren/internal/model"
+	"github.com/TSHOGX/warren/internal/model"
 )
 
 // --- pause drain barrier (§4.2 quiescent point / guest-runtime D4.4) ----------

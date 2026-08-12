@@ -12,12 +12,12 @@ import (
 	"testing"
 	"time"
 
-	"warren/internal/lifecycle"
-	"warren/internal/model"
-	"warren/internal/network"
-	"warren/internal/rootfs"
-	"warren/internal/store"
-	"warren/internal/transport"
+	"github.com/TSHOGX/warren/internal/lifecycle"
+	"github.com/TSHOGX/warren/internal/model"
+	"github.com/TSHOGX/warren/internal/network"
+	"github.com/TSHOGX/warren/internal/rootfs"
+	"github.com/TSHOGX/warren/internal/store"
+	"github.com/TSHOGX/warren/internal/transport"
 )
 
 // apiFixture assembles an Engine over a Memory store with no real providers —

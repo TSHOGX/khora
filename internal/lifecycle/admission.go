@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"warren/internal/model"
+	"github.com/TSHOGX/warren/internal/model"
 )
 
 // Admission — the §3.4 / rootfs-overlay D6.5 no-oversubscribe gate.

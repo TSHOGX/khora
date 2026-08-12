@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"warren/internal/model"
-	"warren/internal/runtime"
-	"warren/internal/store"
-	"warren/internal/transport"
+	"github.com/TSHOGX/warren/internal/model"
+	"github.com/TSHOGX/warren/internal/runtime"
+	"github.com/TSHOGX/warren/internal/store"
+	"github.com/TSHOGX/warren/internal/transport"
 )
 
 // storeFactory builds a fresh Store for a stress subtest. Both backends run the

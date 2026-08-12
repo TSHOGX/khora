@@ -15,15 +15,15 @@ import (
 	"connectrpc.com/connect"
 	"golang.org/x/net/http2"
 
-	"warren/internal/lifecycle"
-	"warren/internal/model"
-	"warren/internal/rootfs"
-	"warren/internal/ruleset"
-	"warren/internal/runtime"
-	"warren/internal/store"
-	"warren/internal/transport"
-	v1 "warren/pkg/transport/gen/engine/transport/v1"
-	"warren/pkg/transport/gen/engine/transport/v1/transportv1connect"
+	"github.com/TSHOGX/warren/internal/lifecycle"
+	"github.com/TSHOGX/warren/internal/model"
+	"github.com/TSHOGX/warren/internal/rootfs"
+	"github.com/TSHOGX/warren/internal/ruleset"
+	"github.com/TSHOGX/warren/internal/runtime"
+	"github.com/TSHOGX/warren/internal/store"
+	"github.com/TSHOGX/warren/internal/transport"
+	v1 "github.com/TSHOGX/warren/pkg/transport/gen/engine/transport/v1"
+	"github.com/TSHOGX/warren/pkg/transport/gen/engine/transport/v1/transportv1connect"
 )
 
 // The §4.2 drain barrier AT THE EDGE THAT TAKES IT. barrier_test.go proves the

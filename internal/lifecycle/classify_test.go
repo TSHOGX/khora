@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"warren/internal/model"
-	"warren/internal/runtime"
-	"warren/internal/store"
-	"warren/internal/transport"
+	"github.com/TSHOGX/warren/internal/model"
+	"github.com/TSHOGX/warren/internal/runtime"
+	"github.com/TSHOGX/warren/internal/store"
+	"github.com/TSHOGX/warren/internal/transport"
 )
 
 // classifier truth table (§4.3 health states) as pure logic against fakes:

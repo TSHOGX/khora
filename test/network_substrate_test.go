@@ -15,14 +15,14 @@ import (
 	"testing"
 	"time"
 
-	"warren/internal/lifecycle"
-	"warren/internal/model"
-	"warren/internal/orchestrator"
-	"warren/internal/ruleset"
-	"warren/internal/runtime"
-	"warren/internal/store"
-	"warren/internal/transport"
-	"warren/test/harness"
+	"github.com/TSHOGX/warren/internal/lifecycle"
+	"github.com/TSHOGX/warren/internal/model"
+	"github.com/TSHOGX/warren/internal/orchestrator"
+	"github.com/TSHOGX/warren/internal/ruleset"
+	"github.com/TSHOGX/warren/internal/runtime"
+	"github.com/TSHOGX/warren/internal/store"
+	"github.com/TSHOGX/warren/internal/transport"
+	"github.com/TSHOGX/warren/test/harness"
 )
 
 // §5.D enforcement on the real substrate.

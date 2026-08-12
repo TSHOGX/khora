@@ -17,8 +17,8 @@ import (
 	"strings"
 	"sync"
 
-	"warren/internal/guestport"
-	"warren/internal/ruleset"
+	"github.com/TSHOGX/warren/internal/guestport"
+	"github.com/TSHOGX/warren/internal/ruleset"
 )
 
 // LocalRunsc is the single-node runtime provider (§5.A). It materializes

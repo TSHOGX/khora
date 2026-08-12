@@ -15,7 +15,7 @@ import (
 
 	"connectrpc.com/connect"
 
-	v1 "warren/pkg/transport/gen/engine/transport/v1"
+	v1 "github.com/TSHOGX/warren/pkg/transport/gen/engine/transport/v1"
 )
 
 // processServer implements the §5.E process primitive (transport D4.3). It fans

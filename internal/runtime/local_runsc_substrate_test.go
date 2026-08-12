@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	"warren/internal/waitfor"
+	"github.com/TSHOGX/warren/internal/waitfor"
 )
 
 func mustRoot(t *testing.T) {

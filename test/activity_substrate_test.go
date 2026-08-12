@@ -20,9 +20,9 @@ import (
 	"testing"
 	"time"
 
-	"warren/internal/lifecycle"
-	"warren/internal/model"
-	"warren/internal/waitfor"
+	"github.com/TSHOGX/warren/internal/lifecycle"
+	"github.com/TSHOGX/warren/internal/model"
+	"github.com/TSHOGX/warren/internal/waitfor"
 )
 
 // TestActivityEndpointHoldsOffTheIdleSweepRealRunsc drives the REST surface rather

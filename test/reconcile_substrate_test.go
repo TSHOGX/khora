@@ -16,11 +16,11 @@ import (
 	"testing"
 	"time"
 
-	"warren/internal/lifecycle"
-	"warren/internal/model"
-	"warren/internal/orchestrator"
-	"warren/internal/store"
-	"warren/test/harness"
+	"github.com/TSHOGX/warren/internal/lifecycle"
+	"github.com/TSHOGX/warren/internal/model"
+	"github.com/TSHOGX/warren/internal/orchestrator"
+	"github.com/TSHOGX/warren/internal/store"
+	"github.com/TSHOGX/warren/test/harness"
 )
 
 // crashSentinel is what the fault hook panics with; recoverCrash swallows

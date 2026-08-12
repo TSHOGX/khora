@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"warren/internal/btrfs"
-	"warren/internal/volume"
+	"github.com/TSHOGX/warren/internal/btrfs"
+	"github.com/TSHOGX/warren/internal/volume"
 )
 
 // TestUsageRefusesToInventALimitWhenTheQuotaRowIsUnreadable is the fault-injection

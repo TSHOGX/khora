@@ -14,7 +14,7 @@ import (
 	"syscall"
 	"time"
 
-	"warren/internal/orchestrator"
+	"github.com/TSHOGX/warren/internal/orchestrator"
 )
 
 func main() {

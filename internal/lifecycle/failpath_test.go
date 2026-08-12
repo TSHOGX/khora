@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"warren/internal/model"
-	"warren/internal/runtime"
-	"warren/internal/store"
-	"warren/internal/transport"
+	"github.com/TSHOGX/warren/internal/model"
+	"github.com/TSHOGX/warren/internal/runtime"
+	"github.com/TSHOGX/warren/internal/store"
+	"github.com/TSHOGX/warren/internal/transport"
 )
 
 // Provider-failure paths across the cold-start / teardown chain (§4.4-A). The

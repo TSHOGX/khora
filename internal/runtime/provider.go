@@ -10,7 +10,7 @@ package runtime
 import (
 	"context"
 
-	"warren/internal/ruleset"
+	"github.com/TSHOGX/warren/internal/ruleset"
 )
 
 // RootfsSource is the handle to an already-merged rootfs produced by §5.B: "run this rootfs",

@@ -14,7 +14,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"warren/pkg/warren"
+	"github.com/TSHOGX/warren/pkg/warren"
 )
 
 // useServer points the CLI's globals at srv for the duration of the test, restoring them

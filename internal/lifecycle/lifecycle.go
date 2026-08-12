@@ -21,13 +21,13 @@ import (
 	"sync"
 	"time"
 
-	"warren/internal/model"
-	"warren/internal/network"
-	"warren/internal/rootfs"
-	"warren/internal/runtime"
-	"warren/internal/store"
-	"warren/internal/transport"
-	"warren/internal/volume"
+	"github.com/TSHOGX/warren/internal/model"
+	"github.com/TSHOGX/warren/internal/network"
+	"github.com/TSHOGX/warren/internal/rootfs"
+	"github.com/TSHOGX/warren/internal/runtime"
+	"github.com/TSHOGX/warren/internal/store"
+	"github.com/TSHOGX/warren/internal/transport"
+	"github.com/TSHOGX/warren/internal/volume"
 )
 
 // ErrResourceTerminated is the §4.3 resource-terminated verdict surfaced as a

@@ -11,12 +11,12 @@ import (
 
 	"connectrpc.com/connect"
 
-	"warren/internal/lifecycle"
-	"warren/internal/model"
-	"warren/internal/store"
-	"warren/internal/transport"
-	v1 "warren/pkg/transport/gen/engine/transport/v1"
-	"warren/pkg/transport/gen/engine/transport/v1/transportv1connect"
+	"github.com/TSHOGX/warren/internal/lifecycle"
+	"github.com/TSHOGX/warren/internal/model"
+	"github.com/TSHOGX/warren/internal/store"
+	"github.com/TSHOGX/warren/internal/transport"
+	v1 "github.com/TSHOGX/warren/pkg/transport/gen/engine/transport/v1"
+	"github.com/TSHOGX/warren/pkg/transport/gen/engine/transport/v1/transportv1connect"
 )
 
 // The two halves of proxyErr's contract, which pull in opposite directions and so

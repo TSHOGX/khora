@@ -8,11 +8,11 @@ import (
 	"testing"
 	"time"
 
-	"warren/internal/model"
-	"warren/internal/rootfs"
-	"warren/internal/runtime"
-	"warren/internal/store"
-	"warren/internal/transport"
+	"github.com/TSHOGX/warren/internal/model"
+	"github.com/TSHOGX/warren/internal/rootfs"
+	"github.com/TSHOGX/warren/internal/runtime"
+	"github.com/TSHOGX/warren/internal/store"
+	"github.com/TSHOGX/warren/internal/transport"
 )
 
 // Unit tests for the §3.4 resource-limit Binding and the §4.3 death-cause

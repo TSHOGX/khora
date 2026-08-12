@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"warren/internal/store"
+	"github.com/TSHOGX/warren/internal/store"
 )
 
 // THE ORDERING TEST, and the reason this file exists. Steps 2 and 5 of Shutdown's

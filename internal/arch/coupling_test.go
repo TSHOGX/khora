@@ -26,11 +26,11 @@ import (
 // at review time: routing volume content through §5.E `fs` was ruled out for §5.C
 // partly because this guard would have failed on it (volume.md D5.1).
 var subsystems = []string{
-	"warren/internal/runtime",   // §5.A
-	"warren/internal/rootfs",    // §5.B
-	"warren/internal/volume",    // §5.C
-	"warren/internal/network",   // §5.D
-	"warren/internal/transport", // §5.E
+	"github.com/TSHOGX/warren/internal/runtime",   // §5.A
+	"github.com/TSHOGX/warren/internal/rootfs",    // §5.B
+	"github.com/TSHOGX/warren/internal/volume",    // §5.C
+	"github.com/TSHOGX/warren/internal/network",   // §5.D
+	"github.com/TSHOGX/warren/internal/transport", // §5.E
 }
 
 // mediatorOnly are packages a §5 subsystem must never import. A subsystem that
@@ -38,8 +38,8 @@ var subsystems = []string{
 // (the keep-set pattern), precisely so the subsystem cannot form its own opinion
 // about authoritative state.
 var mediatorOnly = []string{
-	"warren/internal/lifecycle",
-	"warren/internal/store",
+	"github.com/TSHOGX/warren/internal/lifecycle",
+	"github.com/TSHOGX/warren/internal/store",
 }
 
 // allowedEdges are cross-subsystem imports permitted with the reason they are
@@ -88,7 +88,7 @@ func listPackages(t *testing.T, tags string) []pkg {
 	if tags != "" {
 		args = append(args, "-tags", tags)
 	}
-	args = append(args, "warren/...")
+	args = append(args, "github.com/TSHOGX/warren/...")
 	out, err := exec.Command("go", args...).Output()
 	if err != nil {
 		t.Fatalf("go list -tags %q: %v", tags, err)
@@ -270,15 +270,15 @@ func TestSubsystemsDoNotReadTheControlPlane(t *testing.T) {
 // rather than spelled inline because the leaf guard's exemption below has to mean
 // exactly this prefix: a literal that drifted from the `leaves` entries would turn
 // the exemption into a hole nobody could see.
-const generatedTree = "warren/pkg/transport/gen/"
+const generatedTree = "github.com/TSHOGX/warren/pkg/transport/gen/"
 
 var leaves = []string{
-	"warren/internal/guestport",
-	"warren/internal/ruleset",
-	"warren/internal/btrfs",
-	"warren/internal/allocbytes",
-	"warren/pkg/transport/gen/engine/transport/v1",
-	"warren/pkg/transport/gen/engine/transport/v1/transportv1connect",
+	"github.com/TSHOGX/warren/internal/guestport",
+	"github.com/TSHOGX/warren/internal/ruleset",
+	"github.com/TSHOGX/warren/internal/btrfs",
+	"github.com/TSHOGX/warren/internal/allocbytes",
+	"github.com/TSHOGX/warren/pkg/transport/gen/engine/transport/v1",
+	"github.com/TSHOGX/warren/pkg/transport/gen/engine/transport/v1/transportv1connect",
 }
 
 // inertLeaves are the leaves CLAUDE.md's second half binds: "a leaf may DECIDE
@@ -300,8 +300,8 @@ var leaves = []string{
 // generate side (root-free unit tests) and the install side, which is only true
 // while it decides and never acts.
 var inertLeaves = []string{
-	"warren/internal/guestport",
-	"warren/internal/ruleset",
+	"github.com/TSHOGX/warren/internal/guestport",
+	"github.com/TSHOGX/warren/internal/ruleset",
 }
 
 // actsOnTheWorld are stdlib packages a leaf cannot reach without doing the thing
@@ -371,15 +371,15 @@ func TestLeavesImportNothingFromTheEngine(t *testing.T) {
 			delete(want, p.ImportPath)
 			for _, group := range [][]string{p.Imports, p.TestImports, p.XTestImports} {
 				for _, imp := range group {
-					if !strings.HasPrefix(imp, "warren/") {
+					if !strings.HasPrefix(imp, "github.com/TSHOGX/warren/") {
 						continue
 					}
 					// The generated tree is two packages by protoc's construction — the
 					// connect stubs necessarily import the message types — so an import
 					// that stays INSIDE it is not the thing this guard is about. What is
 					// checked there is the property that made ADR-0008's move safe:
-					// nothing from the ENGINE, and every engine package is under
-					// warren/internal/, so this exemption cannot widen to one.
+					// nothing from the ENGINE, and every engine package is under the
+					// module's internal/, so this exemption cannot widen to one.
 					if strings.HasPrefix(p.ImportPath, generatedTree) && strings.HasPrefix(imp, generatedTree) {
 						continue
 					}

@@ -17,7 +17,7 @@ import (
 	"fmt"
 	"os"
 
-	"warren/internal/orchestrator"
+	"github.com/TSHOGX/warren/internal/orchestrator"
 )
 
 func main() {

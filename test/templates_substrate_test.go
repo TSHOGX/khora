@@ -20,9 +20,9 @@ import (
 	"testing"
 	"time"
 
-	"warren/internal/lifecycle"
-	"warren/internal/model"
-	"warren/internal/store"
+	"github.com/TSHOGX/warren/internal/lifecycle"
+	"github.com/TSHOGX/warren/internal/model"
+	"github.com/TSHOGX/warren/internal/store"
 )
 
 // create-from-Template → DeleteTemplate is refused (ErrInUse, → 409);

@@ -21,9 +21,9 @@ import (
 
 	"connectrpc.com/connect"
 
-	"warren/internal/transport"
-	"warren/internal/waitfor"
-	"warren/test/harness"
+	"github.com/TSHOGX/warren/internal/transport"
+	"github.com/TSHOGX/warren/internal/waitfor"
+	"github.com/TSHOGX/warren/test/harness"
 )
 
 // collect drains a process event channel until end, returning accumulated data

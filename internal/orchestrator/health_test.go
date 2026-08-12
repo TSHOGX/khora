@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"warren/internal/model"
-	"warren/internal/store"
+	"github.com/TSHOGX/warren/internal/model"
+	"github.com/TSHOGX/warren/internal/store"
 )
 
 // healthEngine assembles a root-free Engine over the in-memory store arm, marked

@@ -22,11 +22,11 @@ import (
 	"testing"
 	"time"
 
-	"warren/internal/lifecycle"
-	"warren/internal/model"
-	"warren/internal/orchestrator"
-	"warren/internal/transport"
-	"warren/test/harness"
+	"github.com/TSHOGX/warren/internal/lifecycle"
+	"github.com/TSHOGX/warren/internal/model"
+	"github.com/TSHOGX/warren/internal/orchestrator"
+	"github.com/TSHOGX/warren/internal/transport"
+	"github.com/TSHOGX/warren/test/harness"
 )
 
 // guestSh runs one shell command in a sandbox and returns its combined output.

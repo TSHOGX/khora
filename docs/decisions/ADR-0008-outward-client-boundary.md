@@ -17,7 +17,7 @@ The obvious fix — move those files to an importable path — is **not** the wh
 and the reason is structural rather than stylistic:
 
 - **The generated wire stubs are behind `internal/`.** `cmd/warren`'s process and
-  health commands imported `warren/internal/transport/gen/...` directly, and Go's
+  health commands imported the module's `internal/transport/gen/...` directly, and Go's
   internal rule means an external module cannot. Relocating the CLI's files without
   relocating the stubs produces a package that is still unimportable for exactly the
   two subsystems (process, fs) a consumer most needs.
@@ -95,8 +95,8 @@ than absorbed:
   One exemption was needed and it is narrow: protoc emits the tree as **two**
   packages, so the connect stubs necessarily import the message types. The leaf guard
   therefore ignores an import that stays inside the generated tree, scoped by a named
-  prefix constant so it cannot widen — every engine package is under
-  `warren/internal/`, which is precisely what the guard still refuses there.
+  prefix constant so it cannot widen — every engine package is under the module's
+  `internal/`, which is precisely what the guard still refuses there.
 - **`buf.gen.yaml`'s output path moves with it**, in the same change as the import
   rewrite, so a regeneration cannot resurrect the old tree (the regeneration rule is
   in the `proto-regeneration` convention: regenerate in the same change as the edit).

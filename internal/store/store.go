@@ -22,7 +22,7 @@ import (
 	"fmt"
 	"time"
 
-	"warren/internal/model"
+	"github.com/TSHOGX/warren/internal/model"
 )
 
 // ErrConflict is returned by CompareAndSetState when the current state is not

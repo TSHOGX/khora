@@ -27,7 +27,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"warren/pkg/warren"
+	"github.com/TSHOGX/warren/pkg/warren"
 )
 
 // probe issues a bare GET and prints status plus body. Used only by the two endpoints

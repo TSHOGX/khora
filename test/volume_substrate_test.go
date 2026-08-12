@@ -26,12 +26,12 @@ import (
 	"testing"
 	"time"
 
-	"warren/internal/btrfs"
-	"warren/internal/lifecycle"
-	"warren/internal/model"
-	"warren/internal/orchestrator"
-	"warren/internal/store"
-	"warren/test/harness"
+	"github.com/TSHOGX/warren/internal/btrfs"
+	"github.com/TSHOGX/warren/internal/lifecycle"
+	"github.com/TSHOGX/warren/internal/model"
+	"github.com/TSHOGX/warren/internal/orchestrator"
+	"github.com/TSHOGX/warren/internal/store"
+	"github.com/TSHOGX/warren/test/harness"
 )
 
 // volumeEngine builds an engine whose state — and therefore its volume storage —

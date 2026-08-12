@@ -38,7 +38,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"warren/internal/model"
+	"github.com/TSHOGX/warren/internal/model"
 )
 
 // health is the operational state the three endpoints read. It is a field on Engine

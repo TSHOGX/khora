@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"warren/internal/model"
-	"warren/internal/store"
-	"warren/internal/transport"
+	"github.com/TSHOGX/warren/internal/model"
+	"github.com/TSHOGX/warren/internal/store"
+	"github.com/TSHOGX/warren/internal/transport"
 )
 
 // newSeedMediator builds a mediator whose fakeRootfs reports the given builtin

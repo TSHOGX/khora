@@ -8,8 +8,8 @@ import (
 	"strings"
 	"sync"
 
-	"warren/internal/allocbytes"
-	"warren/internal/btrfs"
+	"github.com/TSHOGX/warren/internal/allocbytes"
+	"github.com/TSHOGX/warren/internal/btrfs"
 )
 
 // LocalBtrfs is the DEFAULT §5.C backend arm: one volume = one storage unit on the

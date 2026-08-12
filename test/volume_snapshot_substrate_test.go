@@ -19,13 +19,13 @@ import (
 	"testing"
 	"time"
 
-	"warren/internal/btrfs"
-	"warren/internal/lifecycle"
-	"warren/internal/model"
-	"warren/internal/store"
-	"warren/internal/transport"
-	"warren/internal/waitfor"
-	"warren/test/harness"
+	"github.com/TSHOGX/warren/internal/btrfs"
+	"github.com/TSHOGX/warren/internal/lifecycle"
+	"github.com/TSHOGX/warren/internal/model"
+	"github.com/TSHOGX/warren/internal/store"
+	"github.com/TSHOGX/warren/internal/transport"
+	"github.com/TSHOGX/warren/internal/waitfor"
+	"github.com/TSHOGX/warren/test/harness"
 )
 
 // runCmd runs a host command and returns its combined output. Local to this file: the

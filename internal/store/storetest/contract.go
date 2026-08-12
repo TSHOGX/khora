@@ -22,8 +22,8 @@ import (
 	"testing"
 	"time"
 
-	"warren/internal/model"
-	"warren/internal/store"
+	"github.com/TSHOGX/warren/internal/model"
+	"github.com/TSHOGX/warren/internal/store"
 )
 
 // Factory builds a fresh, empty Store for one subtest. The bool return says

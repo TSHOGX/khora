@@ -5,11 +5,11 @@ import (
 	"errors"
 	"fmt"
 
-	"warren/internal/model"
-	"warren/internal/network"
-	"warren/internal/ruleset"
-	"warren/internal/runtime"
-	"warren/internal/store"
+	"github.com/TSHOGX/warren/internal/model"
+	"github.com/TSHOGX/warren/internal/network"
+	"github.com/TSHOGX/warren/internal/ruleset"
+	"github.com/TSHOGX/warren/internal/runtime"
+	"github.com/TSHOGX/warren/internal/store"
 )
 
 // This file is the §4 mediator's network face: it threads §5.D's generator output

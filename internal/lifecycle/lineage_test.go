@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"warren/internal/model"
-	"warren/internal/store"
-	"warren/internal/transport"
+	"github.com/TSHOGX/warren/internal/model"
+	"github.com/TSHOGX/warren/internal/store"
+	"github.com/TSHOGX/warren/internal/transport"
 )
 
 // resolveLower's ORDER (§5.B multi-lowerdir). Every other test in the suite uses a

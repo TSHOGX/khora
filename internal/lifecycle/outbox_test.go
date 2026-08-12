@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"warren/internal/model"
-	"warren/internal/store"
-	"warren/internal/transport"
+	"github.com/TSHOGX/warren/internal/model"
+	"github.com/TSHOGX/warren/internal/store"
+	"github.com/TSHOGX/warren/internal/transport"
 )
 
 // §4.4-C at the MEDIATOR layer. The store contract suite (storetest) proves each

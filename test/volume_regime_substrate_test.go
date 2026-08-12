@@ -24,9 +24,9 @@ import (
 	"sync"
 	"testing"
 
-	"warren/internal/btrfs"
-	"warren/internal/lifecycle"
-	"warren/internal/model"
+	"github.com/TSHOGX/warren/internal/btrfs"
+	"github.com/TSHOGX/warren/internal/lifecycle"
+	"github.com/TSHOGX/warren/internal/model"
 )
 
 // TestVolumeRegimeRefusesDirectWriteUnderALiveHolderAndAllowsItWhenPaused pins the write regime in BOTH directions.

@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"warren/internal/model"
-	"warren/internal/ruleset"
+	"github.com/TSHOGX/warren/internal/model"
+	"github.com/TSHOGX/warren/internal/ruleset"
 )
 
 // --- helpers ------------------------------------------------------------------

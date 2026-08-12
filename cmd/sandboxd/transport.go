@@ -12,9 +12,9 @@ import (
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
 
-	"warren/internal/guestport"
-	v1 "warren/pkg/transport/gen/engine/transport/v1"
-	"warren/pkg/transport/gen/engine/transport/v1/transportv1connect"
+	"github.com/TSHOGX/warren/internal/guestport"
+	v1 "github.com/TSHOGX/warren/pkg/transport/gen/engine/transport/v1"
+	"github.com/TSHOGX/warren/pkg/transport/gen/engine/transport/v1/transportv1connect"
 )
 
 // transportMode is the §5.E process/fs endpoint (the child of PID 1). It becomes

@@ -8,9 +8,9 @@ import (
 	"net/http"
 	"strings"
 
-	"warren/internal/lifecycle"
-	"warren/internal/model"
-	"warren/internal/store"
+	"github.com/TSHOGX/warren/internal/lifecycle"
+	"github.com/TSHOGX/warren/internal/model"
+	"github.com/TSHOGX/warren/internal/store"
 )
 
 // The §6.1 Volume block: create / list / inspect / patch / delete + the two direct

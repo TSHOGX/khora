@@ -195,7 +195,10 @@ Known and deliberate, not oversights:
   certificate and the CA that issues caller certificates.
 - **One Go client and a machine-readable contract, and no SDK beyond that** —
   deliberately, and the boundary is [`ADR-0008`](docs/decisions/ADR-0008-outward-client-boundary.md).
-  What ships: [`pkg/warren`](pkg/warren/), a thin client over the §6.1 surface, with
+  What ships: [`pkg/warren`](pkg/warren/) — imported as
+  `github.com/TSHOGX/warren/pkg/warren`, an ordinary `go get`-able path, which is the
+  whole reason the module is named that way rather than a bare `warren` — a thin client
+  over the §6.1 surface, with
   `cmd/warren` (the CLI) as a shell over it — which is what keeps it honest rather than
   merely present, since a client call no command can reach shows up immediately. Plus
   the contract itself in two forms: `proto/` with stubs at `pkg/transport/gen/` for the

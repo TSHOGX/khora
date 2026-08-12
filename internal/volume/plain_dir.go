@@ -6,7 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"warren/internal/allocbytes"
+	"github.com/TSHOGX/warren/internal/allocbytes"
 )
 
 // PlainDir is the seam's SECOND ARM, and it is TEST-ONLY: nothing in the

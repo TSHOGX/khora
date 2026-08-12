@@ -17,11 +17,11 @@ import (
 	"testing"
 	"time"
 
-	"warren/internal/lifecycle"
-	"warren/internal/model"
-	"warren/internal/orchestrator"
-	"warren/internal/transport"
-	"warren/test/harness"
+	"github.com/TSHOGX/warren/internal/lifecycle"
+	"github.com/TSHOGX/warren/internal/model"
+	"github.com/TSHOGX/warren/internal/orchestrator"
+	"github.com/TSHOGX/warren/internal/transport"
+	"github.com/TSHOGX/warren/test/harness"
 )
 
 // setupEngine builds an engine with the overlay read-through marker the vertical

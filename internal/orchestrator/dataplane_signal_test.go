@@ -7,7 +7,7 @@ import (
 
 	"connectrpc.com/connect"
 
-	v1 "warren/pkg/transport/gen/engine/transport/v1"
+	v1 "github.com/TSHOGX/warren/pkg/transport/gen/engine/transport/v1"
 )
 
 // The orchestrator-side half of the D4.3 directed-signal boundary. The

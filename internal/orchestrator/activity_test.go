@@ -13,10 +13,10 @@ import (
 
 	"connectrpc.com/connect"
 
-	"warren/internal/lifecycle"
-	"warren/internal/model"
-	"warren/internal/store"
-	"warren/internal/transport"
+	"github.com/TSHOGX/warren/internal/lifecycle"
+	"github.com/TSHOGX/warren/internal/model"
+	"github.com/TSHOGX/warren/internal/store"
+	"github.com/TSHOGX/warren/internal/transport"
 )
 
 // activityFakeClient records the stamp and answers with a canned reading, or fails

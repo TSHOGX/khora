@@ -39,8 +39,8 @@ import (
 	"strconv"
 	"strings"
 
-	"warren/internal/model"
-	"warren/internal/ruleset"
+	"github.com/TSHOGX/warren/internal/model"
+	"github.com/TSHOGX/warren/internal/ruleset"
 )
 
 // The DECLARATION TYPES live in `model`, not here, and that placement follows the

@@ -12,7 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"warren/pkg/warren"
+	"github.com/TSHOGX/warren/pkg/warren"
 )
 
 // apiBase returns the configured API origin/prefix without a duplicate /v1.

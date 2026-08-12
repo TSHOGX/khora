@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"warren/internal/model"
-	"warren/internal/store"
-	"warren/internal/volume"
+	"github.com/TSHOGX/warren/internal/model"
+	"github.com/TSHOGX/warren/internal/store"
+	"github.com/TSHOGX/warren/internal/volume"
 )
 
 // volFixture builds a mediator with a volume backend and no metered budget (the

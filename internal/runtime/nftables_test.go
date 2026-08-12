@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"warren/internal/ruleset"
+	"github.com/TSHOGX/warren/internal/ruleset"
 )
 
 // testCtx is a rendering context with every placement product bound, so a test can
