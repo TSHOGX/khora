@@ -1,10 +1,16 @@
 package main
 
+// The file transfer commands, as a shell over pkg/warren. See sandbox.go's header.
+//
+// Both directions STREAM — the local file is handed to the client as an io.Reader and
+// the download is copied straight out of the response. Nothing here reads a file into
+// memory first, which is the same property that makes these two routes REST rather than
+// RPC on the engine side: a file must not become one message.
+
 import (
-	"encoding/json"
+	"context"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -13,12 +19,10 @@ import (
 func newFilesUploadCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "upload <sandbox-id> <local-path> <remote-path>",
-		Short: "Upload a file to a sandbox",
+		Short: "Upload a file to a running sandbox",
 		Args:  cobra.ExactArgs(3),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			sandboxID := args[0]
-			localPath := args[1]
-			remotePath := args[2]
+			sandboxID, localPath, remotePath := args[0], args[1], args[2]
 
 			file, err := os.Open(localPath)
 			if err != nil {
@@ -26,34 +30,10 @@ func newFilesUploadCmd() *cobra.Command {
 			}
 			defer file.Close()
 
-			url, err := transferURL(fmt.Sprintf("%s/v1/sandboxes/%s/files", apiURL, sandboxID), remotePath)
-			if err != nil {
+			if err := api.WriteFile(context.Background(), sandboxID, remotePath, file); err != nil {
 				return err
 			}
-			resp, err := httpClient.Post(url, "application/octet-stream", file)
-			if err != nil {
-				return fmt.Errorf("POST %s: %w", url, err)
-			}
-			defer resp.Body.Close()
-
-			body, err := io.ReadAll(resp.Body)
-			if err != nil {
-				return fmt.Errorf("read response: %w", err)
-			}
-
-			if resp.StatusCode != http.StatusOK {
-				return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
-			}
-
-			var result struct {
-				Path         string `json:"path"`
-				BytesWritten int64  `json:"bytes_written"`
-			}
-			if err := json.Unmarshal(body, &result); err != nil {
-				return fmt.Errorf("unmarshal response: %w", err)
-			}
-
-			fmt.Printf("Uploaded %d bytes to %s\n", result.BytesWritten, result.Path)
+			fmt.Fprintf(cmd.OutOrStdout(), "Uploaded %s to %s:%s\n", localPath, sandboxID, remotePath)
 			return nil
 		},
 	}
@@ -61,51 +41,36 @@ func newFilesUploadCmd() *cobra.Command {
 
 func newFilesDownloadCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "download <sandbox-id> <remote-path> [local-path]",
-		Short: "Download a file from a sandbox (prints to stdout if local-path omitted)",
-		Args:  cobra.RangeArgs(2, 3),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			sandboxID := args[0]
-			remotePath := args[1]
-			var localPath string
-			if len(args) == 3 {
-				localPath = args[2]
-			}
+		Use:   "download <sandbox-id> <remote-path> <local-path>",
+		Short: "Download a file from a running sandbox",
+		Long: `Download a file from a running sandbox.
 
-			url, err := transferURL(fmt.Sprintf("%s/v1/sandboxes/%s/files", apiURL, sandboxID), remotePath)
+Pass - as the local path to write to stdout.`,
+		Args: cobra.ExactArgs(3),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			sandboxID, remotePath, localPath := args[0], args[1], args[2]
+
+			rc, err := api.ReadFile(context.Background(), sandboxID, remotePath)
 			if err != nil {
 				return err
 			}
-			resp, err := httpClient.Get(url)
-			if err != nil {
-				return fmt.Errorf("GET %s: %w", url, err)
-			}
-			defer resp.Body.Close()
+			defer rc.Close()
 
-			if resp.StatusCode != http.StatusOK {
-				body, _ := io.ReadAll(resp.Body)
-				return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
-			}
-
-			var out io.Writer
-			if localPath == "" {
-				out = os.Stdout
-			} else {
-				file, err := os.Create(localPath)
+			out := io.Writer(cmd.OutOrStdout())
+			if localPath != "-" {
+				f, err := os.Create(localPath)
 				if err != nil {
 					return fmt.Errorf("create %s: %w", localPath, err)
 				}
-				defer file.Close()
-				out = file
+				defer f.Close()
+				out = f
 			}
-
-			n, err := io.Copy(out, resp.Body)
+			n, err := io.Copy(out, rc)
 			if err != nil {
-				return fmt.Errorf("copy: %w", err)
+				return fmt.Errorf("download %s: %w", remotePath, err)
 			}
-
-			if localPath != "" {
-				fmt.Fprintf(os.Stderr, "Downloaded %d bytes to %s\n", n, localPath)
+			if localPath != "-" {
+				fmt.Fprintf(cmd.ErrOrStderr(), "Downloaded %d bytes to %s\n", n, localPath)
 			}
 			return nil
 		},

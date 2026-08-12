@@ -1,33 +1,22 @@
 package main
 
+// The event commands, as a shell over pkg/warren. See sandbox.go's header.
+//
+// `follow` is the one command that holds a LOOP, and the loop stays here rather than
+// moving into the client on purpose: cursor advance, page draining, and the poll interval
+// are policy — promises about time — and ADR-0008 keeps those on the caller's side of the
+// boundary. What the client contributes is the long poll, which is the engine's own
+// `wait=` parameter, so the waiting happens where the events are.
+
 import (
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
-	"net/url"
-	"os"
-	"strconv"
-	"strings"
 	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"warren/pkg/warren"
 )
-
-type Event struct {
-	Seq        int64     `json:"seq"`
-	OccurredAt time.Time `json:"occurred_at"`
-	SandboxID  string    `json:"sandbox_id"`
-	Kind       string    `json:"kind"`
-	State      string    `json:"state"`
-}
-
-type eventsResponse struct {
-	Events   []Event `json:"events"`
-	Earliest int64   `json:"earliest"`
-	Latest   int64   `json:"latest"`
-}
 
 func newEventsListCmd() *cobra.Command {
 	var (
@@ -39,52 +28,21 @@ func newEventsListCmd() *cobra.Command {
 		Use:   "list",
 		Short: "List lifecycle events",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			endpoint, err := eventsURL()
+			page, err := api.Events(cmd.Context(), warren.EventsOptions{After: after, Limit: limit})
 			if err != nil {
 				return err
 			}
-			params := endpoint.Query()
-			if after > 0 {
-				params.Set("after", strconv.FormatInt(after, 10))
+			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
+			fmt.Fprintln(w, "SEQ\tTIMESTAMP\tSANDBOX_ID\tEVENT\tSTATE\tCAUSE")
+			for _, e := range page.Events {
+				cause := e.Cause
+				if cause == "" {
+					cause = "-"
+				}
+				fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\n",
+					e.Seq, e.OccurredAt, e.SandboxID, e.Kind, e.State, cause)
 			}
-			if limit > 0 {
-				params.Set("limit", strconv.Itoa(limit))
-			}
-			endpoint.RawQuery = params.Encode()
-
-			resp, err := httpClient.Get(endpoint.String())
-			if err != nil {
-				return fmt.Errorf("GET /v1/events: %w", err)
-			}
-			defer resp.Body.Close()
-
-			body, err := io.ReadAll(resp.Body)
-			if err != nil {
-				return fmt.Errorf("read response: %w", err)
-			}
-
-			if resp.StatusCode != http.StatusOK {
-				return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
-			}
-
-			var result eventsResponse
-			if err := json.Unmarshal(body, &result); err != nil {
-				return fmt.Errorf("unmarshal response: %w", err)
-			}
-
-			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(w, "SEQ\tTIMESTAMP\tSANDBOX_ID\tEVENT\tSTATE")
-			for _, evt := range result.Events {
-				fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\n",
-					evt.Seq,
-					evt.OccurredAt.Format(time.RFC3339),
-					evt.SandboxID,
-					evt.Kind,
-					evt.State)
-			}
-			w.Flush()
-
-			return nil
+			return w.Flush()
 		},
 	}
 
@@ -97,55 +55,49 @@ func newEventsFollowCmd() *cobra.Command {
 	var (
 		after    int64
 		interval time.Duration
+		wait     time.Duration
 	)
 
 	cmd := &cobra.Command{
 		Use:     "follow",
 		Short:   "Follow lifecycle events by polling cursor replay",
 		Aliases: []string{"tail", "watch"},
-		RunE: func(cmd *cobra.Command, args []string) error {
-			client := httpClient
-			for {
-				endpoint, err := eventsURL()
-				if err != nil {
-					return err
-				}
-				q := endpoint.Query()
-				q.Set("after", strconv.FormatInt(after, 10))
-				q.Set("limit", "1000")
-				endpoint.RawQuery = q.Encode()
+		Long: `Follow lifecycle events.
 
-				req, err := http.NewRequestWithContext(cmd.Context(), http.MethodGet, endpoint.String(), nil)
+Replay is by cursor, and delivery is at-least-once: an event can be reported twice, so
+anything consuming this programmatically should dedup on the event ID rather than trust
+the sequence alone.
+
+--wait hands the waiting to the engine, which returns the moment an event lands. That is
+why --interval is not the detection latency: it is only reached after a wait expires with
+nothing new.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			for {
+				page, err := api.Events(cmd.Context(), warren.EventsOptions{
+					After: after,
+					Limit: 1000,
+					Wait:  wait,
+				})
 				if err != nil {
-					return fmt.Errorf("build GET /v1/events: %w", err)
-				}
-				resp, err := client.Do(req)
-				if err != nil {
+					// A cancelled context is how this command ends normally — Ctrl-C — so it
+					// is not an error to report.
 					if cmd.Context().Err() != nil {
 						return nil
 					}
-					return fmt.Errorf("GET /v1/events: %w", err)
+					return err
 				}
-				body, readErr := io.ReadAll(resp.Body)
-				resp.Body.Close()
-				if readErr != nil {
-					return fmt.Errorf("read response: %w", readErr)
-				}
-				if resp.StatusCode != http.StatusOK {
-					return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
-				}
-
-				var result eventsResponse
-				if err := json.Unmarshal(body, &result); err != nil {
-					return fmt.Errorf("unmarshal response: %w", err)
-				}
-				for _, evt := range result.Events {
-					fmt.Printf("%s [%s] %s %s\n", evt.OccurredAt.Format("15:04:05"), evt.SandboxID, evt.Kind, evt.State)
-					if evt.Seq > after {
-						after = evt.Seq
+				for _, e := range page.Events {
+					cause := ""
+					if e.Cause != "" {
+						cause = " (" + e.Cause + ")"
+					}
+					fmt.Fprintf(cmd.OutOrStdout(), "%s [%s] %s %s%s\n",
+						e.OccurredAt, e.SandboxID, e.Kind, e.State, cause)
+					if e.Seq > after {
+						after = e.Seq
 					}
 				}
-				if len(result.Events) > 0 {
+				if len(page.Events) > 0 {
 					continue // drain the next page without adding polling latency
 				}
 
@@ -161,24 +113,10 @@ func newEventsFollowCmd() *cobra.Command {
 	}
 
 	cmd.Flags().Int64Var(&after, "after", 0, "sequence number to start after")
-	cmd.Flags().DurationVar(&interval, "interval", time.Second, "poll interval when caught up")
+	cmd.Flags().DurationVar(&interval, "interval", time.Second,
+		"poll interval when caught up (only reached after --wait expires with nothing new)")
+	cmd.Flags().DurationVar(&wait, "wait", 20*time.Second,
+		"hold each request open this long when caught up, so an event is reported as it lands "+
+			"rather than at the next --interval tick. The engine clamps its own ceiling; 0 = pure polling")
 	return cmd
-}
-
-func eventsURL() (*url.URL, error) {
-	u, err := url.Parse(apiURL)
-	if err != nil {
-		return nil, fmt.Errorf("invalid --api URL: %w", err)
-	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return nil, fmt.Errorf("invalid --api URL: scheme must be http or https")
-	}
-	if u.Host == "" {
-		return nil, fmt.Errorf("invalid --api URL: host is required")
-	}
-	basePath := strings.TrimSuffix(strings.TrimRight(u.Path, "/"), "/v1")
-	u.Path = basePath + "/v1/events"
-	u.RawPath = ""
-	u.Fragment = ""
-	return u, nil
 }

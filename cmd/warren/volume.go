@@ -1,223 +1,108 @@
 package main
 
+// The volume commands, as a shell over pkg/warren. See sandbox.go's header.
+
 import (
-	"bytes"
-	"encoding/json"
+	"context"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
 )
 
-type CreateVolumeRequest struct {
-	Size *int64 `json:"size,omitempty"`
-}
-
-type CreateVolumeResponse struct {
-	VolumeID string `json:"volume_id"`
-	Size     int64  `json:"size"`
-}
-
-type Volume struct {
-	VolumeID string  `json:"volume_id"`
-	Size     int64   `json:"size"`
-	Backend  *string `json:"backend,omitempty"`
-	UsedByte *int64  `json:"used_byte,omitempty"`
-}
-
-type PatchVolumeRequest struct {
-	Size int64 `json:"size"`
-}
-
-type PatchVolumeResponse struct {
-	VolumeID string `json:"volume_id"`
-	Size     int64  `json:"size"`
-}
-
 func newVolumeCreateCmd() *cobra.Command {
 	var size int64
-
 	cmd := &cobra.Command{
 		Use:   "create",
-		Short: "Create a new volume",
+		Short: "Create a volume",
+		Long: `Create a volume.
+
+A volume's lifetime is independent of any sandbox's — that is the point of the
+subsystem. Attach it by naming it in a sandbox's volume binding at create time or on a
+patch.
+
+--size 0 means uncapped.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			req := CreateVolumeRequest{}
-			if size > 0 {
-				req.Size = &size
-			}
-
-			body, err := json.Marshal(req)
+			v, err := api.CreateVolume(context.Background(), size)
 			if err != nil {
-				return fmt.Errorf("marshal request: %w", err)
+				return err
 			}
-
-			resp, err := httpClient.Post(apiURL+"/v1/volumes", "application/json", bytes.NewReader(body))
-			if err != nil {
-				return fmt.Errorf("POST /v1/volumes: %w", err)
-			}
-			defer resp.Body.Close()
-
-			respBody, err := io.ReadAll(resp.Body)
-			if err != nil {
-				return fmt.Errorf("read response: %w", err)
-			}
-
-			if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-				return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
-			}
-
-			var result CreateVolumeResponse
-			if err := json.Unmarshal(respBody, &result); err != nil {
-				return fmt.Errorf("unmarshal response: %w", err)
-			}
-
-			fmt.Println(result.VolumeID)
+			fmt.Fprintln(cmd.OutOrStdout(), v.VolumeID)
 			return nil
 		},
 	}
-
-	cmd.Flags().Int64Var(&size, "size", 0, "volume size in bytes")
+	cmd.Flags().Int64Var(&size, "size", 0, "volume size in bytes (0 = uncapped)")
 	return cmd
 }
 
 func newVolumeListCmd() *cobra.Command {
-	return &cobra.Command{
+	var asJSON bool
+	cmd := &cobra.Command{
 		Use:     "list",
-		Short:   "List all volumes",
+		Short:   "List volumes",
 		Aliases: []string{"ls"},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			resp, err := httpClient.Get(apiURL + "/v1/volumes")
+			list, err := api.Volumes(context.Background())
 			if err != nil {
-				return fmt.Errorf("GET /v1/volumes: %w", err)
+				return err
 			}
-			defer resp.Body.Close()
-
-			body, err := io.ReadAll(resp.Body)
-			if err != nil {
-				return fmt.Errorf("read response: %w", err)
+			if asJSON {
+				return printJSON(cmd.OutOrStdout(), list)
 			}
-
-			if resp.StatusCode != http.StatusOK {
-				return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
-			}
-
-			var volumes []Volume
-			if err := json.Unmarshal(body, &volumes); err != nil {
-				return fmt.Errorf("unmarshal response: %w", err)
-			}
-
-			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(w, "VOLUME_ID\tSIZE\tBACKEND")
-			for _, vol := range volumes {
-				backend := "-"
-				if vol.Backend != nil {
-					backend = *vol.Backend
+			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
+			fmt.Fprintln(w, "VOLUME ID\tSIZE\tBACKEND")
+			for _, v := range list {
+				backend := v.Backend
+				if backend == "" {
+					backend = "-"
 				}
-				fmt.Fprintf(w, "%s\t%d\t%s\n", vol.VolumeID, vol.Size, backend)
+				fmt.Fprintf(w, "%s\t%d\t%s\n", v.VolumeID, v.Size, backend)
 			}
-			w.Flush()
-
-			return nil
+			return w.Flush()
 		},
 	}
+	cmd.Flags().BoolVar(&asJSON, "json", false, "emit JSON")
+	return cmd
 }
 
 func newVolumeGetCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "get <volume-id>",
-		Short: "Get volume details",
+		Short: "Show one volume, including its usage",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			volumeID := args[0]
-			resp, err := httpClient.Get(apiURL + "/v1/volumes/" + volumeID)
+			v, err := api.Volume(context.Background(), args[0])
 			if err != nil {
-				return fmt.Errorf("GET /v1/volumes/%s: %w", volumeID, err)
+				return err
 			}
-			defer resp.Body.Close()
-
-			body, err := io.ReadAll(resp.Body)
-			if err != nil {
-				return fmt.Errorf("read response: %w", err)
-			}
-
-			if resp.StatusCode != http.StatusOK {
-				return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
-			}
-
-			var vol Volume
-			if err := json.Unmarshal(body, &vol); err != nil {
-				return fmt.Errorf("unmarshal response: %w", err)
-			}
-
-			fmt.Printf("volume_id: %s\n", vol.VolumeID)
-			fmt.Printf("size:      %d\n", vol.Size)
-			if vol.Backend != nil {
-				fmt.Printf("backend:   %s\n", *vol.Backend)
-			}
-			if vol.UsedByte != nil {
-				fmt.Printf("used_byte: %d\n", *vol.UsedByte)
-			}
-
-			return nil
+			return printJSON(cmd.OutOrStdout(), v)
 		},
 	}
 }
 
 func newVolumePatchCmd() *cobra.Command {
 	var size int64
-
 	cmd := &cobra.Command{
 		Use:   "patch <volume-id>",
-		Short: "Update volume size",
-		Args:  cobra.ExactArgs(1),
+		Short: "Resize a volume",
+		Long: `Resize a volume.
+
+A cap that is not strictly greater than current usage is refused rather than applied —
+shrinking below what is stored would make the quota unenforceable rather than free any
+space. Run 'volume get' first if you need to know the floor.`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			volumeID := args[0]
-			req := PatchVolumeRequest{Size: size}
-
-			body, err := json.Marshal(req)
+			v, err := api.ResizeVolume(context.Background(), args[0], size)
 			if err != nil {
-				return fmt.Errorf("marshal request: %w", err)
+				return err
 			}
-
-			client := httpClient
-			httpReq, err := http.NewRequest(http.MethodPatch, apiURL+"/v1/volumes/"+volumeID, bytes.NewReader(body))
-			if err != nil {
-				return fmt.Errorf("create request: %w", err)
-			}
-			httpReq.Header.Set("Content-Type", "application/json")
-
-			resp, err := client.Do(httpReq)
-			if err != nil {
-				return fmt.Errorf("PATCH /v1/volumes/%s: %w", volumeID, err)
-			}
-			defer resp.Body.Close()
-
-			respBody, err := io.ReadAll(resp.Body)
-			if err != nil {
-				return fmt.Errorf("read response: %w", err)
-			}
-
-			if resp.StatusCode != http.StatusOK {
-				return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
-			}
-
-			var result PatchVolumeResponse
-			if err := json.Unmarshal(respBody, &result); err != nil {
-				return fmt.Errorf("unmarshal response: %w", err)
-			}
-
-			fmt.Printf("volume_id: %s\n", result.VolumeID)
-			fmt.Printf("size:      %d\n", result.Size)
-
-			return nil
+			return printJSON(cmd.OutOrStdout(), v)
 		},
 	}
-
 	cmd.Flags().Int64Var(&size, "size", 0, "new volume size in bytes (required)")
-	cmd.MarkFlagRequired("size")
+	_ = cmd.MarkFlagRequired("size")
 	return cmd
 }
 
@@ -226,31 +111,16 @@ func newVolumeDeleteCmd() *cobra.Command {
 		Use:     "delete <volume-id>",
 		Short:   "Delete a volume",
 		Aliases: []string{"rm"},
-		Args:    cobra.ExactArgs(1),
+		Long: `Delete a volume.
+
+A volume some sandbox still binds is refused as a conflict — detach it first by patching
+that sandbox's volume binding.`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			volumeID := args[0]
-			client := httpClient
-			req, err := http.NewRequest(http.MethodDelete, apiURL+"/v1/volumes/"+volumeID, nil)
-			if err != nil {
-				return fmt.Errorf("create request: %w", err)
+			if err := api.DeleteVolume(context.Background(), args[0]); err != nil {
+				return err
 			}
-
-			resp, err := client.Do(req)
-			if err != nil {
-				return fmt.Errorf("DELETE /v1/volumes/%s: %w", volumeID, err)
-			}
-			defer resp.Body.Close()
-
-			body, err := io.ReadAll(resp.Body)
-			if err != nil {
-				return fmt.Errorf("read response: %w", err)
-			}
-
-			if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-				return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
-			}
-
-			fmt.Printf("Deleted %s\n", volumeID)
+			fmt.Fprintf(cmd.OutOrStdout(), "Deleted %s\n", args[0])
 			return nil
 		},
 	}
@@ -258,109 +128,55 @@ func newVolumeDeleteCmd() *cobra.Command {
 
 func newVolumeSnapshotCmd() *cobra.Command {
 	var size int64
-
 	cmd := &cobra.Command{
 		Use:   "snapshot <volume-id>",
-		Short: "Create a snapshot of a volume",
+		Short: "Derive a new volume from this one's current content",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			volumeID := args[0]
-			req := CreateVolumeRequest{}
-			if size > 0 {
-				req.Size = &size
-			}
-
-			body, err := json.Marshal(req)
+			id, err := api.SnapshotVolume(context.Background(), args[0], size)
 			if err != nil {
-				return fmt.Errorf("marshal request: %w", err)
+				return err
 			}
-
-			resp, err := httpClient.Post(apiURL+"/v1/volumes/"+volumeID+"/snapshot", "application/json", bytes.NewReader(body))
-			if err != nil {
-				return fmt.Errorf("POST /v1/volumes/%s/snapshot: %w", volumeID, err)
-			}
-			defer resp.Body.Close()
-
-			respBody, err := io.ReadAll(resp.Body)
-			if err != nil {
-				return fmt.Errorf("read response: %w", err)
-			}
-
-			if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-				return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
-			}
-
-			var result CreateVolumeResponse
-			if err := json.Unmarshal(respBody, &result); err != nil {
-				return fmt.Errorf("unmarshal response: %w", err)
-			}
-
-			fmt.Println(result.VolumeID)
+			fmt.Fprintln(cmd.OutOrStdout(), id)
 			return nil
 		},
 	}
-
-	cmd.Flags().Int64Var(&size, "size", 0, "snapshot size in bytes")
+	cmd.Flags().Int64Var(&size, "size", 0, "snapshot size in bytes (0 = uncapped)")
 	return cmd
 }
 
 func newVolumeCloneCmd() *cobra.Command {
 	var size int64
-
 	cmd := &cobra.Command{
 		Use:   "clone <volume-id>",
-		Short: "Create a clone of a volume",
+		Short: "Derive a new independent volume from this one",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			volumeID := args[0]
-			req := CreateVolumeRequest{}
-			if size > 0 {
-				req.Size = &size
-			}
-
-			body, err := json.Marshal(req)
+			id, err := api.CloneVolume(context.Background(), args[0], size)
 			if err != nil {
-				return fmt.Errorf("marshal request: %w", err)
+				return err
 			}
-
-			resp, err := httpClient.Post(apiURL+"/v1/volumes/"+volumeID+"/clone", "application/json", bytes.NewReader(body))
-			if err != nil {
-				return fmt.Errorf("POST /v1/volumes/%s/clone: %w", volumeID, err)
-			}
-			defer resp.Body.Close()
-
-			respBody, err := io.ReadAll(resp.Body)
-			if err != nil {
-				return fmt.Errorf("read response: %w", err)
-			}
-
-			if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-				return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
-			}
-
-			var result CreateVolumeResponse
-			if err := json.Unmarshal(respBody, &result); err != nil {
-				return fmt.Errorf("unmarshal response: %w", err)
-			}
-
-			fmt.Println(result.VolumeID)
+			fmt.Fprintln(cmd.OutOrStdout(), id)
 			return nil
 		},
 	}
-
-	cmd.Flags().Int64Var(&size, "size", 0, "clone size in bytes")
+	cmd.Flags().Int64Var(&size, "size", 0, "clone size in bytes (0 = uncapped)")
 	return cmd
 }
 
 func newVolumeImportCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "import <volume-id> <local-path> <remote-path>",
-		Short: "Import a file into a volume",
-		Args:  cobra.ExactArgs(3),
+		Short: "Write a file into a volume, with no sandbox involved",
+		Long: `Write a file into a volume directly.
+
+No running sandbox is needed: the host reaches the volume through a root-confined
+accessor, so a volume can be seeded before anything mounts it. The remote path is
+relative to the volume root, and a traversal clamps inside the volume rather than
+erroring.`,
+		Args: cobra.ExactArgs(3),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			volumeID := args[0]
-			localPath := args[1]
-			remotePath := args[2]
+			volumeID, localPath, remotePath := args[0], args[1], args[2]
 
 			file, err := os.Open(localPath)
 			if err != nil {
@@ -368,35 +184,12 @@ func newVolumeImportCmd() *cobra.Command {
 			}
 			defer file.Close()
 
-			url, err := transferURL(fmt.Sprintf("%s/v1/volumes/%s/import", apiURL, volumeID), remotePath)
+			res, err := api.ImportVolume(context.Background(), volumeID, remotePath, file)
 			if err != nil {
 				return err
 			}
-			resp, err := httpClient.Post(url, "application/octet-stream", file)
-			if err != nil {
-				return fmt.Errorf("POST %s: %w", url, err)
-			}
-			defer resp.Body.Close()
-
-			body, err := io.ReadAll(resp.Body)
-			if err != nil {
-				return fmt.Errorf("read response: %w", err)
-			}
-
-			if resp.StatusCode != http.StatusOK {
-				return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
-			}
-
-			var result struct {
-				VolumeID     string `json:"volume_id"`
-				Path         string `json:"path"`
-				BytesWritten int64  `json:"bytes_written"`
-			}
-			if err := json.Unmarshal(body, &result); err != nil {
-				return fmt.Errorf("unmarshal response: %w", err)
-			}
-
-			fmt.Printf("Imported %d bytes to %s\n", result.BytesWritten, result.Path)
+			fmt.Fprintf(cmd.OutOrStdout(), "Wrote %d bytes to %s:%s\n",
+				res.BytesWritten, volumeID, res.Path)
 			return nil
 		},
 	}
@@ -405,50 +198,36 @@ func newVolumeImportCmd() *cobra.Command {
 func newVolumeExportCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "export <volume-id> <remote-path> [local-path]",
-		Short: "Export a file from a volume (prints to stdout if local-path omitted)",
+		Short: "Read a file from a volume, with no sandbox involved (stdout if local-path omitted)",
 		Args:  cobra.RangeArgs(2, 3),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			volumeID := args[0]
-			remotePath := args[1]
-			var localPath string
+			volumeID, remotePath := args[0], args[1]
+			localPath := ""
 			if len(args) == 3 {
 				localPath = args[2]
 			}
 
-			url, err := transferURL(fmt.Sprintf("%s/v1/volumes/%s/export", apiURL, volumeID), remotePath)
+			rc, err := api.ExportVolume(context.Background(), volumeID, remotePath)
 			if err != nil {
 				return err
 			}
-			resp, err := httpClient.Get(url)
-			if err != nil {
-				return fmt.Errorf("GET %s: %w", url, err)
-			}
-			defer resp.Body.Close()
+			defer rc.Close()
 
-			if resp.StatusCode != http.StatusOK {
-				body, _ := io.ReadAll(resp.Body)
-				return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
-			}
-
-			var out io.Writer
-			if localPath == "" {
-				out = os.Stdout
-			} else {
-				file, err := os.Create(localPath)
+			out := io.Writer(cmd.OutOrStdout())
+			if localPath != "" && localPath != "-" {
+				f, err := os.Create(localPath)
 				if err != nil {
 					return fmt.Errorf("create %s: %w", localPath, err)
 				}
-				defer file.Close()
-				out = file
+				defer f.Close()
+				out = f
 			}
-
-			n, err := io.Copy(out, resp.Body)
+			n, err := io.Copy(out, rc)
 			if err != nil {
-				return fmt.Errorf("copy: %w", err)
+				return fmt.Errorf("export %s: %w", remotePath, err)
 			}
-
-			if localPath != "" {
-				fmt.Fprintf(os.Stderr, "Exported %d bytes to %s\n", n, localPath)
+			if localPath != "" && localPath != "-" {
+				fmt.Fprintf(cmd.ErrOrStderr(), "Exported %d bytes to %s\n", n, localPath)
 			}
 			return nil
 		},

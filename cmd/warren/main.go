@@ -11,6 +11,8 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+
+	"warren/pkg/warren"
 )
 
 // apiBase returns the configured API origin/prefix without a duplicate /v1.
@@ -36,6 +38,15 @@ var (
 	clientKeyFile  string
 	caCertFile     string
 	httpClient     = http.DefaultClient
+	// api is the thin client every command goes through (ADR-0008 part 2: the CLI is a
+	// shell over pkg/warren). Built once in PersistentPreRunE, after the flags are
+	// parsed and before any command runs.
+	//
+	// This is what keeps the client package honest rather than merely present: the CLI
+	// exercises every call, so a client method no command can use is visible
+	// immediately — and conversely a command that reaches around it into raw HTTP is a
+	// capability the published client does not offer.
+	api *warren.Client
 )
 
 func main() {
@@ -57,6 +68,13 @@ file operations, volumes, templates, network configuration, and event streaming.
 			// Canonicalize the configured prefix once so every REST command using
 			// apiURL + "/v1/..." works whether --api ended at the origin or /v1.
 			apiURL = apiBase()
+			// The thin client shares the CLI's configured transport rather than building
+			// a second one: --client-cert / --ca-cert must mean the same thing on every
+			// path out of this process, including the Connect data plane.
+			api, err = warren.New(apiURL, warren.WithHTTPClient(client))
+			if err != nil {
+				return err
+			}
 			return nil
 		},
 	}
@@ -79,6 +97,7 @@ file operations, volumes, templates, network configuration, and event streaming.
 		newSandboxPatchCmd(),
 		newSandboxPauseCmd(),
 		newSandboxResumeCmd(),
+		newSandboxActivityCmd(),
 		newSandboxDeleteCmd(),
 	)
 

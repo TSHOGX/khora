@@ -1,103 +1,68 @@
 package main
 
+// The template commands, as a shell over pkg/warren. See sandbox.go's header.
+
 import (
-	"bytes"
-	"encoding/json"
+	"context"
 	"fmt"
-	"io"
-	"net/http"
-	"os"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
 )
 
-type Template struct {
-	TemplateID string `json:"template_id"`
-	Parent     string `json:"parent"`
-	Builtin    bool   `json:"builtin"`
-}
-
 func newTemplateListCmd() *cobra.Command {
-	return &cobra.Command{
+	var asJSON bool
+	cmd := &cobra.Command{
 		Use:     "list",
-		Short:   "List all templates",
+		Short:   "List templates",
 		Aliases: []string{"ls"},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			resp, err := httpClient.Get(apiURL + "/v1/templates")
+			list, err := api.Templates(context.Background())
 			if err != nil {
-				return fmt.Errorf("GET /v1/templates: %w", err)
+				return err
 			}
-			defer resp.Body.Close()
-
-			body, err := io.ReadAll(resp.Body)
-			if err != nil {
-				return fmt.Errorf("read response: %w", err)
+			if asJSON {
+				return printJSON(cmd.OutOrStdout(), list)
 			}
-
-			if resp.StatusCode != http.StatusOK {
-				return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
+			fmt.Fprintln(w, "TEMPLATE ID\tBUILTIN\tPROMOTED FROM")
+			for _, t := range list {
+				parent := t.Parent
+				if parent == "" {
+					parent = "-"
+				}
+				fmt.Fprintf(w, "%s\t%t\t%s\n", t.TemplateID, t.Builtin, parent)
 			}
-
-			var templates []Template
-			if err := json.Unmarshal(body, &templates); err != nil {
-				return fmt.Errorf("unmarshal response: %w", err)
-			}
-
-			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(w, "TEMPLATE_ID\tPARENT\tBUILTIN")
-			for _, tpl := range templates {
-				fmt.Fprintf(w, "%s\t%s\t%t\n", tpl.TemplateID, tpl.Parent, tpl.Builtin)
-			}
-			w.Flush()
-
-			return nil
+			return w.Flush()
 		},
 	}
+	cmd.Flags().BoolVar(&asJSON, "json", false, "emit JSON")
+	return cmd
 }
 
 func newTemplatePromoteCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "promote <sandbox-id>",
-		Short: "Promote a sandbox to a template",
-		Args:  cobra.ExactArgs(1),
+	var fromSandbox string
+
+	cmd := &cobra.Command{
+		Use:   "promote",
+		Short: "Promote a sandbox's filesystem into a reusable template",
+		Long: `Promote a sandbox's filesystem into a reusable template.
+
+The template ID is minted by the engine and printed on success — it is not yours to
+choose, because the engine's IDs are the only names it guarantees.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			sandboxID := args[0]
-			req := struct {
-				FromSandboxID string `json:"from_sandbox_id"`
-			}{FromSandboxID: sandboxID}
-
-			body, err := json.Marshal(req)
+			id, err := api.Promote(context.Background(), fromSandbox)
 			if err != nil {
-				return fmt.Errorf("marshal request: %w", err)
+				return err
 			}
-
-			resp, err := httpClient.Post(apiURL+"/v1/templates", "application/json", bytes.NewReader(body))
-			if err != nil {
-				return fmt.Errorf("POST /v1/templates: %w", err)
-			}
-			defer resp.Body.Close()
-
-			respBody, err := io.ReadAll(resp.Body)
-			if err != nil {
-				return fmt.Errorf("read response: %w", err)
-			}
-
-			if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-				return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
-			}
-
-			var result struct {
-				TemplateID string `json:"template_id"`
-			}
-			if err := json.Unmarshal(respBody, &result); err != nil {
-				return fmt.Errorf("unmarshal response: %w", err)
-			}
-
-			fmt.Println(result.TemplateID)
+			fmt.Fprintln(cmd.OutOrStdout(), id)
 			return nil
 		},
 	}
+
+	cmd.Flags().StringVar(&fromSandbox, "from", "", "the sandbox to promote (required)")
+	_ = cmd.MarkFlagRequired("from")
+	return cmd
 }
 
 func newTemplateDeleteCmd() *cobra.Command {
@@ -105,31 +70,16 @@ func newTemplateDeleteCmd() *cobra.Command {
 		Use:     "delete <template-id>",
 		Short:   "Delete a template",
 		Aliases: []string{"rm"},
-		Args:    cobra.ExactArgs(1),
+		Long: `Delete a template.
+
+A template some sandbox was built from is refused as a conflict: its layers are still in
+use underneath those sandboxes.`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			templateID := args[0]
-			client := httpClient
-			req, err := http.NewRequest(http.MethodDelete, apiURL+"/v1/templates/"+templateID, nil)
-			if err != nil {
-				return fmt.Errorf("create request: %w", err)
+			if err := api.DeleteTemplate(context.Background(), args[0]); err != nil {
+				return err
 			}
-
-			resp, err := client.Do(req)
-			if err != nil {
-				return fmt.Errorf("DELETE /v1/templates/%s: %w", templateID, err)
-			}
-			defer resp.Body.Close()
-
-			body, err := io.ReadAll(resp.Body)
-			if err != nil {
-				return fmt.Errorf("read response: %w", err)
-			}
-
-			if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-				return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
-			}
-
-			fmt.Printf("Deleted %s\n", templateID)
+			fmt.Fprintf(cmd.OutOrStdout(), "Deleted %s\n", args[0])
 			return nil
 		},
 	}

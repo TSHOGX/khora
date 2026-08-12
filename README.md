@@ -59,7 +59,8 @@ across hosts, CPUs and runsc versions rather than pinned to a set of CPU feature
 | Resource caps | CPU, memory, and disk, enforced via cgroup v2 and btrfs quotas |
 | Networking | deny-by-default egress declarations; `publish` a guest port to the host |
 | Autonomous reaping | idle sandboxes auto-pause; paused ones expire on a retention TTL |
-| Event stream | a durable, replayable outbox of lifecycle transitions with a cursor |
+| Activity | `POST /v1/sandboxes/{id}/activity` stamps the guest's idle clock, for work the engine cannot see |
+| Event stream | a durable, replayable outbox of lifecycle transitions with a cursor, long-pollable via `wait=` |
 
 Nothing about *agents* is in the engine — no session, tenant, or credential concept.
 Credentials in particular are permanently out of scope: anything the engine handed a
@@ -191,7 +192,18 @@ Known and deliberate, not oversights:
   `--insecure-listen` says otherwise out loud — so the gateway is the only
   outward-facing surface by construction. What you still supply is the PKI: a server
   certificate and the CA that issues caller certificates.
-- **A CLI wraps the API** (`cmd/warren`), covering the main workflows: sandbox lifecycle, files, volumes, templates, network, and events. It's a thin HTTP/JSON client over the §6.1 surface. No client library ships yet for other languages.
+- **One Go client and a machine-readable contract, and no SDK beyond that** —
+  deliberately, and the boundary is [`ADR-0008`](docs/decisions/ADR-0008-outward-client-boundary.md).
+  What ships: [`pkg/warren`](pkg/warren/), a thin client over the §6.1 surface, with
+  `cmd/warren` (the CLI) as a shell over it — which is what keeps it honest rather than
+  merely present, since a client call no command can reach shows up immediately. Plus
+  the contract itself in two forms: `proto/` with stubs at `pkg/transport/gen/` for the
+  guest transport, and [`docs/spec/openapi.json`](docs/spec/openapi.json) — generated
+  from the handler types by `cmd/openapigen`, and guarded against going stale — for the
+  REST surface. An ergonomic SDK in any language belongs in the repo that consumes it:
+  "thin" here is a *rule* (every field 1:1 with a §6.1 field, no invented verb, no state
+  across calls), and retry, backoff, and wait-until-running are each a promise about
+  time the engine never made.
 - **The bare Template resolves no names out of the box**, and that is by design rather
   than an omission: it ships no `/etc/resolv.conf` and the engine injects none, so a
   deployment supplies both the file and a UDP/53 `egress.allow[]` entry. The reasoning,

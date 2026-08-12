@@ -1,91 +1,28 @@
 package main
 
+// The sandbox commands, as a SHELL over pkg/warren (ADR-0008 part 2).
+//
+// This file used to hold its own copies of the §6.1 wire types plus a hand-rolled
+// request/decode/status-check cycle per command — a THIRD statement of the same
+// protocol, after the handlers and the contract document. It is now flags in, client
+// call, print: every type here is pkg/warren's, and there is no net/http import.
+//
+// That direction of dependency is also the test ADR-0008 wanted from this arrangement:
+// the CLI covers every §6.1 operation, so a client method no command can use is visible
+// immediately, and a command that needed to reach around the client into raw HTTP would
+// be a capability the published client fails to offer.
+
 import (
-	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/http"
-	"os"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
+
+	"warren/pkg/warren"
 )
-
-// Sandbox API types matching §6.1
-type CreateSandboxRequest struct {
-	TemplateID    string            `json:"template_id"`
-	Network       *NetworkDecl      `json:"network,omitempty"`
-	Volumes       []VolumeMount     `json:"volumes,omitempty"`
-	IdleTimeout   *string           `json:"idle_timeout,omitempty"`
-	Retention     *string           `json:"retention,omitempty"`
-	CPUMillis     *int64            `json:"cpu_millis,omitempty"`
-	MemoryByte    *int64            `json:"memory_byte,omitempty"`
-	DiskByte      *int64            `json:"disk_byte,omitempty"`
-}
-
-type NetworkDecl struct {
-	Egress  EgressDecl  `json:"egress"`
-	Ingress IngressDecl `json:"ingress"`
-}
-
-type EgressDecl struct {
-	Default string        `json:"default"`
-	Allow   []AllowRule   `json:"allow"`
-	Via     []ViaRule     `json:"via"`
-}
-
-type IngressDecl struct {
-	Publish []PublishRule `json:"publish"`
-}
-
-type AllowRule struct {
-	Target string `json:"target"`
-}
-
-type ViaRule struct {
-	Endpoint string      `json:"endpoint"`
-	Match    []AllowRule `json:"match"`
-}
-
-type PublishRule struct {
-	GuestPort int    `json:"guest_port"`
-	Proto     string `json:"proto"`
-}
-
-type VolumeMount struct {
-	VolumeID string `json:"volume_id"`
-	Path     string `json:"path"`
-	Access   string `json:"access"`
-}
-
-type CreateSandboxResponse struct {
-	SandboxID string `json:"sandbox_id"`
-}
-
-type Sandbox struct {
-	SandboxID  string  `json:"sandbox_id"`
-	State      string  `json:"state"`
-	DeathCause *string `json:"death_cause,omitempty"`
-	UsedByte   *int64  `json:"used_byte,omitempty"`
-}
-
-type PatchSandboxRequest struct {
-	CPUMillis   *int64         `json:"cpu_millis,omitempty"`
-	MemoryByte  *int64         `json:"memory_byte,omitempty"`
-	DiskByte    *int64         `json:"disk_byte,omitempty"`
-	IdleTimeout *string        `json:"idle_timeout,omitempty"`
-	Retention   *string        `json:"retention,omitempty"`
-	Volumes     *[]VolumeMount `json:"volumes,omitempty"`
-	Network     *NetworkDecl   `json:"network,omitempty"`
-}
-
-type PatchSandboxResponse struct {
-	SandboxID      string `json:"sandbox_id"`
-	State          string `json:"state"`
-	AppliesAt      string `json:"applies_at"`
-	LeaseReleased  *bool  `json:"lease_released,omitempty"`
-}
 
 func newSandboxCreateCmd() *cobra.Command {
 	var (
@@ -102,65 +39,28 @@ func newSandboxCreateCmd() *cobra.Command {
 		Use:   "create",
 		Short: "Create a new sandbox",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			req := CreateSandboxRequest{
-				TemplateID: templateID,
+			req := warren.CreateRequest{
+				TemplateID:  templateID,
+				CPUMillis:   cpuMillis,
+				MemoryByte:  memoryByte,
+				DiskByte:    diskByte,
+				IdleTimeout: idleTimeout,
+				Retention:   retention,
 			}
-
+			// An --egress-default given at all means a network declaration is sent, and
+			// `default` is the one field that must be present inside it. Omitting the flag
+			// omits the whole object, which the engine normalizes to deny-all — those are
+			// two different requests and the flag's presence is what picks between them.
 			if egressDefault != "" {
-				req.Network = &NetworkDecl{
-					Egress: EgressDecl{
-						Default: egressDefault,
-						Allow:   []AllowRule{},
-						Via:     []ViaRule{},
-					},
-					Ingress: IngressDecl{
-						Publish: []PublishRule{},
-					},
+				req.Network = &warren.Network{
+					Egress: warren.Egress{Default: &egressDefault},
 				}
 			}
-
-			if cpuMillis > 0 {
-				req.CPUMillis = &cpuMillis
-			}
-			if memoryByte > 0 {
-				req.MemoryByte = &memoryByte
-			}
-			if diskByte > 0 {
-				req.DiskByte = &diskByte
-			}
-			if idleTimeout != "" {
-				req.IdleTimeout = &idleTimeout
-			}
-			if retention != "" {
-				req.Retention = &retention
-			}
-
-			body, err := json.Marshal(req)
+			sb, err := api.Create(context.Background(), req)
 			if err != nil {
-				return fmt.Errorf("marshal request: %w", err)
+				return err
 			}
-
-			resp, err := httpClient.Post(apiURL+"/v1/sandboxes", "application/json", bytes.NewReader(body))
-			if err != nil {
-				return fmt.Errorf("POST /v1/sandboxes: %w", err)
-			}
-			defer resp.Body.Close()
-
-			respBody, err := io.ReadAll(resp.Body)
-			if err != nil {
-				return fmt.Errorf("read response: %w", err)
-			}
-
-			if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-				return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
-			}
-
-			var result CreateSandboxResponse
-			if err := json.Unmarshal(respBody, &result); err != nil {
-				return fmt.Errorf("unmarshal response: %w", err)
-			}
-
-			fmt.Println(result.SandboxID)
+			fmt.Fprintln(cmd.OutOrStdout(), sb.SandboxID)
 			return nil
 		},
 	}
@@ -172,195 +72,111 @@ func newSandboxCreateCmd() *cobra.Command {
 	cmd.Flags().Int64Var(&diskByte, "disk-byte", 0, "disk cap in bytes")
 	cmd.Flags().StringVar(&idleTimeout, "idle-timeout", "", "idle timeout duration (e.g. 30m)")
 	cmd.Flags().StringVar(&retention, "retention", "", "retention duration (e.g. 24h)")
-	cmd.MarkFlagRequired("template")
+	_ = cmd.MarkFlagRequired("template")
 
 	return cmd
 }
 
 func newSandboxListCmd() *cobra.Command {
-	return &cobra.Command{
+	var asJSON bool
+	cmd := &cobra.Command{
 		Use:     "list",
-		Short:   "List all sandboxes",
+		Short:   "List sandboxes",
 		Aliases: []string{"ls"},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			resp, err := httpClient.Get(apiURL + "/v1/sandboxes")
+			list, err := api.List(context.Background())
 			if err != nil {
-				return fmt.Errorf("GET /v1/sandboxes: %w", err)
+				return err
 			}
-			defer resp.Body.Close()
-
-			body, err := io.ReadAll(resp.Body)
-			if err != nil {
-				return fmt.Errorf("read response: %w", err)
+			if asJSON {
+				return printJSON(cmd.OutOrStdout(), list)
 			}
-
-			if resp.StatusCode != http.StatusOK {
-				return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
-			}
-
-			var sandboxes []Sandbox
-			if err := json.Unmarshal(body, &sandboxes); err != nil {
-				return fmt.Errorf("unmarshal response: %w", err)
-			}
-
-			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(w, "SANDBOX_ID\tSTATE\tDEATH_CAUSE\tUSED_BYTE")
-			for _, sb := range sandboxes {
-				deathCause := "-"
-				if sb.DeathCause != nil {
-					deathCause = *sb.DeathCause
+			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
+			fmt.Fprintln(w, "SANDBOX ID\tSTATE\tDEATH CAUSE")
+			for _, sb := range list {
+				cause := sb.DeathCause
+				if cause == "" {
+					cause = "-"
 				}
-				usedByte := "-"
-				if sb.UsedByte != nil {
-					usedByte = fmt.Sprintf("%d", *sb.UsedByte)
-				}
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", sb.SandboxID, sb.State, deathCause, usedByte)
+				fmt.Fprintf(w, "%s\t%s\t%s\n", sb.SandboxID, sb.State, cause)
 			}
-			w.Flush()
-
-			return nil
+			return w.Flush()
 		},
 	}
+	cmd.Flags().BoolVar(&asJSON, "json", false, "emit JSON")
+	return cmd
 }
 
 func newSandboxGetCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "get <sandbox-id>",
-		Short: "Get sandbox details",
+		Short: "Show one sandbox",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			sandboxID := args[0]
-			resp, err := httpClient.Get(apiURL + "/v1/sandboxes/" + sandboxID)
+			sb, err := api.Get(context.Background(), args[0])
 			if err != nil {
-				return fmt.Errorf("GET /v1/sandboxes/%s: %w", sandboxID, err)
+				return err
 			}
-			defer resp.Body.Close()
-
-			body, err := io.ReadAll(resp.Body)
-			if err != nil {
-				return fmt.Errorf("read response: %w", err)
-			}
-
-			if resp.StatusCode != http.StatusOK {
-				return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
-			}
-
-			var sb Sandbox
-			if err := json.Unmarshal(body, &sb); err != nil {
-				return fmt.Errorf("unmarshal response: %w", err)
-			}
-
-			fmt.Printf("sandbox_id:  %s\n", sb.SandboxID)
-			fmt.Printf("state:       %s\n", sb.State)
-			if sb.DeathCause != nil {
-				fmt.Printf("death_cause: %s\n", *sb.DeathCause)
-			}
-			if sb.UsedByte != nil {
-				fmt.Printf("used_byte:   %d\n", *sb.UsedByte)
-			}
-
-			return nil
+			return printJSON(cmd.OutOrStdout(), sb)
 		},
 	}
+	return cmd
 }
 
 func newSandboxPatchCmd() *cobra.Command {
 	var (
-		cpuMillis   *int64
-		memoryByte  *int64
-		diskByte    *int64
-		idleTimeout *string
-		retention   *string
+		cpuMillis   int64
+		memoryByte  int64
+		diskByte    int64
+		idleTimeout string
+		retention   string
 	)
 
 	cmd := &cobra.Command{
 		Use:   "patch <sandbox-id>",
-		Short: "Update sandbox binding",
-		Args:  cobra.ExactArgs(1),
+		Short: "Rewrite parts of a sandbox's binding",
+		Long: `Rewrite parts of a sandbox's binding.
+
+Only the flags you pass are sent, which is what makes "leave this axis alone"
+distinguishable from "set it to 0" — and 0 is itself meaningful here (0 = unlimited for
+a cap, retention 0 = never evict).
+
+Resource caps are editable while paused; see the API contract for which axes a running
+sandbox refuses.`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			sandboxID := args[0]
-			req := PatchSandboxRequest{
-				CPUMillis:   cpuMillis,
-				MemoryByte:  memoryByte,
-				DiskByte:    diskByte,
-				IdleTimeout: idleTimeout,
-				Retention:   retention,
+			var req warren.PatchRequest
+			// Flags().Changed rather than a zero check, for the reason in the Long help:
+			// --cpu-millis 0 means "uncap this axis" and must reach the engine, where a
+			// zero test would silently drop it.
+			if cmd.Flags().Changed("cpu-millis") {
+				req.CPUMillis = &cpuMillis
 			}
-
-			body, err := json.Marshal(req)
+			if cmd.Flags().Changed("memory-byte") {
+				req.MemoryByte = &memoryByte
+			}
+			if cmd.Flags().Changed("disk-byte") {
+				req.DiskByte = &diskByte
+			}
+			if cmd.Flags().Changed("idle-timeout") {
+				req.IdleTimeout = &idleTimeout
+			}
+			if cmd.Flags().Changed("retention") {
+				req.Retention = &retention
+			}
+			sb, err := api.Patch(context.Background(), args[0], req)
 			if err != nil {
-				return fmt.Errorf("marshal request: %w", err)
+				return err
 			}
-
-			client := httpClient
-			httpReq, err := http.NewRequest(http.MethodPatch, apiURL+"/v1/sandboxes/"+sandboxID, bytes.NewReader(body))
-			if err != nil {
-				return fmt.Errorf("create request: %w", err)
-			}
-			httpReq.Header.Set("Content-Type", "application/json")
-
-			resp, err := client.Do(httpReq)
-			if err != nil {
-				return fmt.Errorf("PATCH /v1/sandboxes/%s: %w", sandboxID, err)
-			}
-			defer resp.Body.Close()
-
-			respBody, err := io.ReadAll(resp.Body)
-			if err != nil {
-				return fmt.Errorf("read response: %w", err)
-			}
-
-			if resp.StatusCode != http.StatusOK {
-				return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
-			}
-
-			var result PatchSandboxResponse
-			if err := json.Unmarshal(respBody, &result); err != nil {
-				return fmt.Errorf("unmarshal response: %w", err)
-			}
-
-			fmt.Printf("sandbox_id:  %s\n", result.SandboxID)
-			fmt.Printf("state:       %s\n", result.State)
-			fmt.Printf("applies_at:  %s\n", result.AppliesAt)
-			if result.LeaseReleased != nil && *result.LeaseReleased {
-				fmt.Println("lease_released: true")
-			}
-
-			return nil
+			return printJSON(cmd.OutOrStdout(), sb)
 		},
 	}
 
-	var cpuMillisVal int64
-	var memoryByteVal int64
-	var diskByteVal int64
-	var idleTimeoutVal string
-	var retentionVal string
-
-	cmd.Flags().Int64Var(&cpuMillisVal, "cpu-millis", 0, "CPU millicores cap")
-	cmd.Flags().Int64Var(&memoryByteVal, "memory-byte", 0, "memory cap in bytes")
-	cmd.Flags().Int64Var(&diskByteVal, "disk-byte", 0, "disk cap in bytes")
-	cmd.Flags().StringVar(&idleTimeoutVal, "idle-timeout", "", "idle timeout duration")
-	cmd.Flags().StringVar(&retentionVal, "retention", "", "retention duration")
-
-	// Bind flag values to the pointers used in the request
-	cmd.PreRunE = func(cmd *cobra.Command, args []string) error {
-		if cmd.Flags().Changed("cpu-millis") {
-			cpuMillis = &cpuMillisVal
-		}
-		if cmd.Flags().Changed("memory-byte") {
-			memoryByte = &memoryByteVal
-		}
-		if cmd.Flags().Changed("disk-byte") {
-			diskByte = &diskByteVal
-		}
-		if cmd.Flags().Changed("idle-timeout") {
-			idleTimeout = &idleTimeoutVal
-		}
-		if cmd.Flags().Changed("retention") {
-			retention = &retentionVal
-		}
-		return nil
-	}
+	cmd.Flags().Int64Var(&cpuMillis, "cpu-millis", 0, "CPU millicores cap (0 = unlimited)")
+	cmd.Flags().Int64Var(&memoryByte, "memory-byte", 0, "memory cap in bytes (0 = unlimited)")
+	cmd.Flags().Int64Var(&diskByte, "disk-byte", 0, "disk cap in bytes (0 = unlimited)")
+	cmd.Flags().StringVar(&idleTimeout, "idle-timeout", "", "idle timeout duration (e.g. 30m)")
+	cmd.Flags().StringVar(&retention, "retention", "", "retention duration (0 = never evict)")
 
 	return cmd
 }
@@ -368,26 +184,19 @@ func newSandboxPatchCmd() *cobra.Command {
 func newSandboxPauseCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "pause <sandbox-id>",
-		Short: "Pause a running sandbox",
-		Args:  cobra.ExactArgs(1),
+		Short: "Pause a sandbox",
+		Long: `Pause a sandbox.
+
+In-flight engine writes are drained first, then the sandbox is frozen. The reported
+state is read back after the verb, so it is the achieved state rather than the requested
+one.`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			sandboxID := args[0]
-			resp, err := httpClient.Post(apiURL+"/v1/sandboxes/"+sandboxID+"/pause", "application/json", nil)
+			res, err := api.Pause(context.Background(), args[0])
 			if err != nil {
-				return fmt.Errorf("POST /v1/sandboxes/%s/pause: %w", sandboxID, err)
+				return err
 			}
-			defer resp.Body.Close()
-
-			body, err := io.ReadAll(resp.Body)
-			if err != nil {
-				return fmt.Errorf("read response: %w", err)
-			}
-
-			if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-				return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
-			}
-
-			fmt.Printf("Paused %s\n", sandboxID)
+			fmt.Fprintf(cmd.OutOrStdout(), "%s is now %s\n", res.SandboxID, res.State)
 			return nil
 		},
 	}
@@ -397,25 +206,48 @@ func newSandboxResumeCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "resume <sandbox-id>",
 		Short: "Resume a paused sandbox",
-		Args:  cobra.ExactArgs(1),
+		Long: `Resume a paused sandbox.
+
+The sandbox comes back on a FRESH placement, so its host endpoint and any published
+port endpoints are new. Re-read them rather than reusing what you held before the
+pause.`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			sandboxID := args[0]
-			resp, err := httpClient.Post(apiURL+"/v1/sandboxes/"+sandboxID+"/resume", "application/json", nil)
+			res, err := api.Resume(context.Background(), args[0])
 			if err != nil {
-				return fmt.Errorf("POST /v1/sandboxes/%s/resume: %w", sandboxID, err)
+				return err
 			}
-			defer resp.Body.Close()
+			fmt.Fprintf(cmd.OutOrStdout(), "%s is now %s\n", res.SandboxID, res.State)
+			return nil
+		},
+	}
+}
 
-			body, err := io.ReadAll(resp.Body)
+func newSandboxActivityCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "activity <sandbox-id>",
+		Short: "Record one activity now, holding off the idle sweep",
+		Long: `Record one activity on a running sandbox.
+
+For work the engine cannot see: a long computation that does no I/O through the
+engine's own paths still looks idle to it, and this says otherwise.
+
+It carries NO DURATION. It records one activity now — it is not a lease, not a
+keepalive, and not a pause-inhibit, because each of those would have the engine promise
+to protect the sandbox for a period. To hold a sandbox open, call this on an interval
+shorter than its idle timeout; the interval is yours.
+
+A paused sandbox is a conflict, not a resume: the clock lives in the guest, so there is
+nothing to stamp while frozen. An unreachable guest reports unavailable, for the same
+reason — there is deliberately no host-side fallback, since a host timestamp would keep
+a wedged sandbox alive forever.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			res, err := api.RecordActivity(context.Background(), args[0])
 			if err != nil {
-				return fmt.Errorf("read response: %w", err)
+				return err
 			}
-
-			if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-				return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
-			}
-
-			fmt.Printf("Resumed %s\n", sandboxID)
+			fmt.Fprintf(cmd.OutOrStdout(), "Recorded activity on %s (idle now %dms)\n", args[0], res.IdleMillis)
 			return nil
 		},
 	}
@@ -424,34 +256,33 @@ func newSandboxResumeCmd() *cobra.Command {
 func newSandboxDeleteCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:     "delete <sandbox-id>",
-		Short:   "Delete a sandbox",
+		Short:   "Destroy a sandbox",
 		Aliases: []string{"rm"},
-		Args:    cobra.ExactArgs(1),
+		Long: `Destroy a sandbox and its record.
+
+IRREVERSIBLE, and the record goes with it: afterwards a get is a not-found and the
+death cause is gone. If you need to know why a sandbox ended, read it before destroying,
+or take it from the destroyed event's cause — there is no post-hoc query, because there
+is no row left to query.`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			sandboxID := args[0]
-			client := httpClient
-			req, err := http.NewRequest(http.MethodDelete, apiURL+"/v1/sandboxes/"+sandboxID, nil)
-			if err != nil {
-				return fmt.Errorf("create request: %w", err)
+			if err := api.Destroy(context.Background(), args[0]); err != nil {
+				return err
 			}
-
-			resp, err := client.Do(req)
-			if err != nil {
-				return fmt.Errorf("DELETE /v1/sandboxes/%s: %w", sandboxID, err)
-			}
-			defer resp.Body.Close()
-
-			body, err := io.ReadAll(resp.Body)
-			if err != nil {
-				return fmt.Errorf("read response: %w", err)
-			}
-
-			if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-				return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
-			}
-
-			fmt.Printf("Deleted %s\n", sandboxID)
+			fmt.Fprintf(cmd.OutOrStdout(), "Destroyed %s\n", args[0])
 			return nil
 		},
 	}
+}
+
+// printJSON is the one output helper the commands share. Indented, because a CLI's JSON
+// is read by a human at least as often as it is piped.
+//
+// It takes the WRITER rather than reaching for os.Stdout, so that cobra's SetOut governs
+// where output lands. That is what makes a command's output assertable in a test at all —
+// os.Stdout would be invisible to it.
+func printJSON(w io.Writer, v any) error {
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(v)
 }

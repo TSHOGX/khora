@@ -20,9 +20,7 @@ func TestNetworkPublishDisplaysHostEndpoint(t *testing.T) {
 	}))
 	defer server.Close()
 
-	oldAPIURL, oldClient := apiURL, httpClient
-	apiURL, httpClient = server.URL, server.Client()
-	t.Cleanup(func() { apiURL, httpClient = oldAPIURL, oldClient })
+	useServer(t, server)
 
 	var out bytes.Buffer
 	cmd := newNetworkPublishCmd()
@@ -31,7 +29,10 @@ func TestNetworkPublishDisplaysHostEndpoint(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatal(err)
 	}
-	if got := out.String(); !strings.Contains(got, "host endpoint 127.0.0.1:21000") {
-		t.Fatalf("output = %q, want published host endpoint", got)
+	// The command prints the publish result as JSON now, so the endpoint is asserted as
+	// the field it is rather than as a sentence — the same value, one layer less
+	// formatting between the engine and the check.
+	if got := out.String(); !strings.Contains(got, "127.0.0.1:21000") {
+		t.Fatalf("output = %q, want the published host endpoint", got)
 	}
 }

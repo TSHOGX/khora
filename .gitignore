@@ -15,9 +15,13 @@
 # editor / OS
 .DS_Store
 
-# build artifacts from `go build ./cmd/...` without -o
+# build artifacts from `go build ./cmd/...` without -o — one line per cmd/, because
+# the name is the package name and an unlisted one lands untracked at the repo root
 /sandboxd
 /orchestrator
+/warren
+/gateway
+/openapigen
 
 # substrate run logs
 /.substrate-run.log

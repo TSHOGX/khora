@@ -1,45 +1,36 @@
 package main
 
+// The network commands, as a shell over pkg/warren. See sandbox.go's header.
+
 import (
-	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 
 	"github.com/spf13/cobra"
+
+	"warren/pkg/warren"
 )
 
 func newNetworkGetCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "get <sandbox-id>",
-		Short: "Get network configuration for a sandbox",
-		Args:  cobra.ExactArgs(1),
+		Short: "Show a sandbox's network declaration",
+		Long: `Show a sandbox's network declaration.
+
+The output is a legal input to 'network patch' — that is a contract requirement, not a
+convenience: editing a declaration is a read-modify-write, and a patch built from a
+stale read silently drops a publish added in between, on a security-relevant field.
+
+Read it while PAUSED. Reading before the pause pulls the whole pause window into the
+window where that lost update can happen.`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			sandboxID := args[0]
-			resp, err := httpClient.Get(apiURL + "/v1/sandboxes/" + sandboxID + "/network")
+			n, err := api.Network(context.Background(), args[0])
 			if err != nil {
-				return fmt.Errorf("GET /v1/sandboxes/%s/network: %w", sandboxID, err)
+				return err
 			}
-			defer resp.Body.Close()
-
-			body, err := io.ReadAll(resp.Body)
-			if err != nil {
-				return fmt.Errorf("read response: %w", err)
-			}
-
-			if resp.StatusCode != http.StatusOK {
-				return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
-			}
-
-			// Pretty-print the JSON
-			var prettyJSON bytes.Buffer
-			if err := json.Indent(&prettyJSON, body, "", "  "); err != nil {
-				return fmt.Errorf("format JSON: %w", err)
-			}
-
-			fmt.Println(prettyJSON.String())
-			return nil
+			return printJSON(cmd.OutOrStdout(), n)
 		},
 	}
 }
@@ -49,110 +40,60 @@ func newNetworkPatchCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "patch <sandbox-id>",
-		Short: "Update network configuration",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			sandboxID := args[0]
+		Short: "Replace a sandbox's network declaration",
+		Long: `Replace a sandbox's network declaration, whole.
 
-			var networkDecl NetworkDecl
-			if err := json.Unmarshal([]byte(networkJSON), &networkDecl); err != nil {
+WHOLESALE IS THE CONTRACT: there is no field-level edit of a declaration, because merge
+semantics on an allow-list is how a rule gets dropped without anyone deciding to drop
+it. Whatever you pass here becomes the entire declaration.
+
+The safe sequence is: pause, network get, edit, network patch, resume. Editing the
+egress fields on a running sandbox is a conflict.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var n warren.Network
+			if err := json.Unmarshal([]byte(networkJSON), &n); err != nil {
 				return fmt.Errorf("parse network JSON: %w", err)
 			}
-
-			body, err := json.Marshal(struct {
-				Network NetworkDecl `json:"network"`
-			}{Network: networkDecl})
-			if err != nil {
-				return fmt.Errorf("marshal request: %w", err)
+			if err := api.SetNetwork(context.Background(), args[0], n); err != nil {
+				return err
 			}
-
-			client := httpClient
-			httpReq, err := http.NewRequest(http.MethodPatch, apiURL+"/v1/sandboxes/"+sandboxID, bytes.NewReader(body))
-			if err != nil {
-				return fmt.Errorf("create request: %w", err)
-			}
-			httpReq.Header.Set("Content-Type", "application/json")
-
-			resp, err := client.Do(httpReq)
-			if err != nil {
-				return fmt.Errorf("PATCH /v1/sandboxes/%s: %w", sandboxID, err)
-			}
-			defer resp.Body.Close()
-
-			respBody, err := io.ReadAll(resp.Body)
-			if err != nil {
-				return fmt.Errorf("read response: %w", err)
-			}
-
-			if resp.StatusCode != http.StatusOK {
-				return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
-			}
-
-			fmt.Println("Network configuration updated")
+			fmt.Fprintln(cmd.OutOrStdout(), "Network declaration replaced")
 			return nil
 		},
 	}
 
-	cmd.Flags().StringVar(&networkJSON, "json", "", "network configuration as JSON (required)")
-	cmd.MarkFlagRequired("json")
+	cmd.Flags().StringVar(&networkJSON, "json", "", "the complete network declaration as JSON (required)")
+	_ = cmd.MarkFlagRequired("json")
 	return cmd
 }
 
 func newNetworkPublishCmd() *cobra.Command {
 	var (
-		guestPort int
+		guestPort uint16
 		proto     string
 	)
 
 	cmd := &cobra.Command{
 		Use:   "publish <sandbox-id>",
 		Short: "Publish a guest port",
-		Args:  cobra.ExactArgs(1),
+		Long: `Publish a guest port.
+
+Legal on a running sandbox, unlike an egress edit — the record and the kernel rules are
+one un-halvable write. On a paused sandbox it is recorded and takes effect at the next
+placement, which the reported 'applies_at' distinguishes; both are a success.`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			sandboxID := args[0]
-
-			req := struct {
-				GuestPort int    `json:"guest_port"`
-				Proto     string `json:"proto"`
-			}{
-				GuestPort: guestPort,
-				Proto:     proto,
-			}
-
-			body, err := json.Marshal(req)
+			res, err := api.PublishPort(context.Background(), args[0], guestPort, proto)
 			if err != nil {
-				return fmt.Errorf("marshal request: %w", err)
+				return err
 			}
-
-			resp, err := httpClient.Post(apiURL+"/v1/sandboxes/"+sandboxID+"/publish", "application/json", bytes.NewReader(body))
-			if err != nil {
-				return fmt.Errorf("POST /v1/sandboxes/%s/publish: %w", sandboxID, err)
-			}
-			defer resp.Body.Close()
-
-			respBody, err := io.ReadAll(resp.Body)
-			if err != nil {
-				return fmt.Errorf("read response: %w", err)
-			}
-
-			if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-				return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
-			}
-
-			var result struct {
-				HostEndpoint string `json:"host_endpoint"`
-			}
-			if err := json.Unmarshal(respBody, &result); err != nil {
-				return fmt.Errorf("unmarshal response: %w", err)
-			}
-
-			fmt.Fprintf(cmd.OutOrStdout(), "Published %s port %d -> host endpoint %s\n", proto, guestPort, result.HostEndpoint)
-			return nil
+			return printJSON(cmd.OutOrStdout(), res)
 		},
 	}
 
-	cmd.Flags().IntVar(&guestPort, "guest-port", 0, "guest port to publish (required)")
-	cmd.Flags().StringVar(&proto, "proto", "tcp", "protocol: tcp or udp")
-	cmd.MarkFlagRequired("guest-port")
+	cmd.Flags().Uint16Var(&guestPort, "guest-port", 0, "the guest port to publish (required)")
+	cmd.Flags().StringVar(&proto, "proto", "tcp", "tcp or udp")
+	_ = cmd.MarkFlagRequired("guest-port")
 	return cmd
 }
