@@ -316,14 +316,49 @@ func boolGauge(v bool) int {
 // So what this drains is the ENGINE'S OWN in-flight work, not the guests:
 //
 //  1. mark not-ready first, so a load balancer stops sending here while the rest
-//     proceeds;
-//  2. stop the HTTP listener and let in-flight requests finish. Measured:
+//     proceeds, and close the handler gate so no new request enters;
+//  2. stop the reaper and the publisher, and wait for them to exit;
+//  3. stop the HTTP listener and let in-flight requests finish. Measured:
 //     http.Server.Shutdown waits for an in-flight handler WITHOUT cancelling its
 //     context (a handler that ran through a Shutdown saw r.Context().Err() == nil),
 //     which is what lets a mid-flight `resume` complete its cold-start chain
 //     intact rather than being torn in half and left for reconciliation;
-//  3. stop the reaper and the publisher;
-//  4. close the store.
+//  4. wait for every ENTERED handler to return, including after a timed-out
+//     Server.Shutdown forces connections closed;
+//  5. close the store, behind every user of it.
+//
+// THIS FUNCTION PERFORMS ALL FIVE, and that is a correctness property rather than
+// tidiness. Step 2 sits in the middle, so an owner of only steps 1/3/4/5 forces its
+// caller to split this open and re-implement the order — which leaves the sequence
+// stated here and executed there, free to drift apart. Every wait above is bounded by
+// the single ctx, for the same reason: one unbounded wait anywhere makes the whole
+// shutdown unbounded and the operator's --shutdown-timeout meaningless.
+//
+// WHY THE LOOPS STOP BEFORE THE HTTP DRAIN (step 2 before step 3), which is the one
+// ordering here that is a real trade rather than a dependency:
+//
+//   - The reaper is an AUTONOMOUS MUTATOR. Left running through the drain it can begin
+//     a fresh lifecycle transition — an auto-pause, an evict — at any point, including
+//     one tick before the deadline. That transition takes a per-sandbox lock (§4.4-B)
+//     and starts substrate work that outlives the budget, so the SIGKILL lands in the
+//     middle of it. Stopping it first means the set of in-flight transitions can only
+//     shrink from here.
+//   - The cost is only DELAY, never loss. A handler still finishing in step 3 writes
+//     its events to the outbox, and with the publisher already stopped those rows go
+//     out on the next boot instead of this one. The outbox is durable and its delivery
+//     is at-least-once by design (§4.4-C), so nothing is dropped — whereas a
+//     transition cut in half by SIGKILL is work §4.4-A reconciliation must clean up.
+//
+// Asymmetric costs, so the order follows the asymmetry: stop the thing that can START
+// new work first, and let the thing that only DELIVERS finish late.
+//
+// ONE BUDGET FOR ALL FIVE STEPS, NOT ONE EACH, and the consequence is deliberate: a
+// step that consumes the whole deadline leaves nothing for the ones after it, which then
+// fail immediately on the expired ctx and fall through to step 5. That is the correct
+// behavior — the operator set ONE number, and per-step budgets would make the total
+// silently five times larger than what --shutdown-timeout says, which is the property
+// that number exists to guarantee. Every step is skippable in this sense except step 5,
+// which is why step 5 is unconditional.
 //
 // THE DEADLINE IS NOT OPTIONAL, and this is the measured reason: Shutdown waits for
 // open connections, and the data plane's normal shape is a LONG-LIVED STREAM (an
@@ -339,17 +374,6 @@ type shutdownServer interface {
 }
 
 func (e *Engine) Shutdown(ctx context.Context, srv shutdownServer) error {
-	firstErr := e.Drain(ctx, srv)
-	if err := e.closeStore(); err != nil && firstErr == nil {
-		firstErr = err
-	}
-	return firstErr
-}
-
-// Drain marks the engine unavailable and performs the bounded HTTP drain. It
-// intentionally does not close the store, allowing callers with background
-// loops to wait for them before final store teardown.
-func (e *Engine) Drain(ctx context.Context, srv shutdownServer) error {
 	// Step 1 BEFORE anything else. Readiness has to flip while this instance can
 	// still serve, so the drain window is when traffic is being steered away rather
 	// than after it has already been refused.
@@ -363,7 +387,11 @@ func (e *Engine) Drain(ctx context.Context, srv shutdownServer) error {
 		}
 	}
 
-	// Step 2. The deadline lives in ctx, supplied by the caller from
+	// Step 2. Bounded by the same ctx as every other wait here; see the header for why
+	// the autonomous mutator stops before the drain rather than after it.
+	keep(e.stopLoops(ctx))
+
+	// Step 3. The deadline lives in ctx, supplied by the caller from
 	// --shutdown-timeout.
 	if srv != nil {
 		if err := srv.Shutdown(ctx); err != nil {
@@ -377,10 +405,17 @@ func (e *Engine) Drain(ctx context.Context, srv shutdownServer) error {
 			keep(srv.Close())
 		}
 	}
-	// Close should make handlers return, but substrate calls are not guaranteed to
-	// honor request cancellation. Do not let such a call extend shutdown beyond the
+	// Step 4. Close should make handlers return, but substrate calls are not guaranteed
+	// to honor request cancellation. Do not let such a call extend shutdown beyond the
 	// same deadline that bounds Server.Shutdown.
 	keep(e.httpHandlers.wait(ctx))
+
+	// Step 5, LAST and unconditional: every user of the store above has now either
+	// returned or been abandoned to the deadline. Unconditional because a store left
+	// open is a held file lock, and the errors above are all conditions a next boot
+	// recovers from — refusing to close on one of them would turn a reported overrun
+	// into a resource leak.
+	keep(e.closeStore())
 
 	return firstErr
 }
@@ -391,9 +426,6 @@ func (e *Engine) closeStore() error {
 	}
 	return nil
 }
-
-// CloseStore closes the backing store after callers have stopped users of it.
-func (e *Engine) CloseStore() error { return e.closeStore() }
 
 // registerHealthRoutes mounts the three operational endpoints.
 //

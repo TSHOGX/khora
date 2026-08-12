@@ -387,7 +387,7 @@ func TestTimedOutDrainDoesNotWaitForeverForStuckHandler(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		done <- eng.Drain(ctx, shutdownCloseStub{
+		done <- eng.Shutdown(ctx, shutdownCloseStub{
 			shutdown: func(ctx context.Context) error {
 				<-ctx.Done()
 				return ctx.Err()
@@ -399,13 +399,13 @@ func TestTimedOutDrainDoesNotWaitForeverForStuckHandler(t *testing.T) {
 	select {
 	case err := <-done:
 		if !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("Drain error = %v, want deadline exceeded", err)
+			t.Fatalf("Shutdown error = %v, want deadline exceeded", err)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("Drain waited forever for a handler that ignored cancellation")
+		t.Fatal("Shutdown waited forever for a handler that ignored cancellation")
 	}
 
-	// Balance the tracker after Drain has returned; this also exercises leaving
+	// Balance the tracker after Shutdown has returned; this also exercises leaving
 	// after the deadline-bound waiter is gone.
 	eng.httpHandlers.leave()
 }

@@ -141,6 +141,12 @@ discards guest memory, so restarting the orchestrator to change a flag would des
 every guest's in-memory work. Streams still open when `--shutdown-timeout` expires are
 closed, and callers reconnect. A second SIGTERM exits immediately.
 
+The reaper and the outbox publisher stop *before* the request drain, so a TTL sweep
+cannot start a fresh transition on the way out. Events written by requests still
+finishing during the drain are therefore published on the **next** boot rather than this
+one — the outbox is durable and delivery is at-least-once (§4.4-C), so a pull subscriber
+on `GET /v1/events` loses nothing either way.
+
 ## Test
 
 ```sh

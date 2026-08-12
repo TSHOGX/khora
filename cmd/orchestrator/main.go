@@ -16,12 +16,10 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"sync"
 	"syscall"
 	"time"
 
 	"warren/internal/orchestrator"
-	"warren/internal/store"
 )
 
 func main() {
@@ -167,56 +165,17 @@ func main() {
 		log.Printf("orchestrator: boot orphan-unit sweep (retried by reaper): %v", err)
 	}
 
-	// ONE CONTEXT OWNING EVERY BACKGROUND LOOP, cancelled by the signal handler
-	// below. The loops (publisher, monitor, reaper) each exit on ctx.Done, so
-	// cancelling this is how they stop — and they must stop BEFORE the store closes,
-	// or a tick landing afterwards logs a spurious "store closed" error that reads
-	// like a defect.
-	//
-	// Previously context.Background() per loop, which made them unstoppable: the
-	// process only ever ended by SIGKILL or log.Fatalf.
-	runCtx, stopLoops := context.WithCancel(context.Background())
-	defer stopLoops()
-	var loops sync.WaitGroup
-
-	// async outbox publisher (§4.4-C): drain the durable outbox to the event sink.
-	const publishInterval = time.Second
-	loops.Add(1)
-	go func() { defer loops.Done(); eng.Publisher.Run(runCtx, publishInterval) }()
-
-	// Publisher health, sampled on an INDEPENDENT goroutine (§4.4-C operability).
-	// This repo has no metrics dependency and this does not introduce one — the
-	// requirement is that a wedged drain be DISTINGUISHABLE from an idle one, and
-	// the log is what this codebase already uses for that class of fact. What
-	// makes it work is the goroutine, not the exporter: sampling on the drain
-	// itself would freeze the numbers exactly when the drain blocks, so silence
-	// would mean both "healthy" and "wedged".
-	//
-	// A halted publisher is the line that must be noticed: the event stream has
-	// STOPPED, which for a billing subscriber means charges stop accruing — it is
-	// not a degraded mode that heals itself, and clearing it is an operator action
-	// (Publisher.Resume).
-	loops.Add(1)
-	go func() {
-		defer loops.Done()
-		eng.Publisher.Monitor(runCtx, 10*time.Second, 30*publishInterval, func(s store.Stats) {
-			if s.Halted {
-				log.Printf("ALERT: outbox publisher HALTED on event %s (seq %d) after %d attempts: %s — "+
-					"the event stream has stopped; %d rows are undelivered and nothing behind this event will be published until an operator intervenes",
-					s.HeadEventID, s.HeadSeq, s.Attempts, s.LastError, s.Backlog)
-				return
-			}
-			log.Printf("WARN: outbox publisher unhealthy: head=%s seq=%d attempts=%d backlog=%d published=%d since_heartbeat=%s in_flight_for=%s last_err=%q",
-				s.HeadEventID, s.HeadSeq, s.Attempts, s.Backlog, s.Published,
-				s.SinceHeartbeat.Round(time.Millisecond), s.InFlightFor.Round(time.Millisecond), s.LastError)
-		})
-	}()
-
-	// §4.3 reaper: the autonomous control loop (auto-pause / crash-pause / evict
-	// + periodic reconcile). Started AFTER startup reconcile so it never races
+	// The three background loops — outbox publisher (§4.4-C), its health monitor, and
+	// the §4.3 reaper — are started here, AFTER startup reconcile so none of them races
 	// the boot-time orphan reclaim / re-adoption.
-	loops.Add(1)
-	go func() { defer loops.Done(); eng.Reaper.Run(runCtx) }()
+	//
+	// THE ASSEMBLY OWNS THEIR LIFETIME, not this file, and that is deliberate: stopping
+	// them is a middle step of Engine.Shutdown's five-step sequence (after readiness
+	// flips, before the store closes). Holding them here would mean splitting Shutdown
+	// open to inject that step, which is how the teardown order came to be stated in one
+	// place and executed in another. Tuning lives in orchestrator.LoopConfig; the zero
+	// value is the production cadence.
+	eng.StartLoops(orchestrator.LoopConfig{})
 
 	// The published case is logged as a WARNING at the moment of serving, not merely
 	// permitted by the flag (ADR-0007): the flag records the decision in `ps` output,
@@ -260,21 +219,11 @@ func main() {
 
 		ctx, cancel := context.WithTimeout(context.Background(), *shutdownTO)
 		defer cancel()
-		// The order matters: drain HTTP first (in-flight requests keep working, and a
-		// mid-flight resume completes its chain intact — Shutdown does not cancel a
-		// handler's context), then stop the loops, then close the store.
-		stopLoops()
-		err := eng.Drain(ctx, srv)
-		// A background loop may be blocked in a substrate operation even after its
-		// context is cancelled. Keep that wait inside the same advertised shutdown
-		// budget as the HTTP drain.
-		waitErr := waitForLoops(ctx, &loops)
-		if err == nil {
-			err = waitErr
-		}
-		if closeErr := eng.CloseStore(); closeErr != nil && err == nil {
-			err = closeErr
-		}
+		// ONE CALL, ONE DEADLINE. Every step of the teardown and every wait inside it
+		// belongs to Engine.Shutdown, which is what keeps the order in a single place and
+		// keeps --shutdown-timeout bounding all of it. See its comment for the sequence
+		// and for why the loops stop before the HTTP drain.
+		err := eng.Shutdown(ctx, srv)
 		if err != nil && !errors.Is(err, context.DeadlineExceeded) {
 			log.Printf("orchestrator: shutdown: %v", err)
 			os.Exit(1)
@@ -296,18 +245,4 @@ func main() {
 	// ListenAndServe returned ErrServerClosed: the signal goroutine owns the exit.
 	// Block so the process does not race past it.
 	select {}
-}
-
-func waitForLoops(ctx context.Context, loops *sync.WaitGroup) error {
-	done := make(chan struct{})
-	go func() {
-		loops.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
 }

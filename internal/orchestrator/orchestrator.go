@@ -152,9 +152,14 @@ type Engine struct {
 	// closes, including after forcing timed-out connections closed.
 	httpHandlers handlerTracker
 	// Reaper is the §4.3 autonomous control loop (auto-pause / crash-pause /
-	// evict + periodic reconcile). Built here; started by the caller AFTER
-	// startup Reconcile, via Reaper.Run in its own goroutine.
+	// evict + periodic reconcile). Built here; started by StartLoops AFTER startup
+	// Reconcile, and stopped by Shutdown as a middle step of the teardown sequence.
 	Reaper *lifecycle.Reaper
+	// loops is the lifetime of the three background loops (loops.go). The assembly owns
+	// it because stopping them is a MIDDLE step of Shutdown's sequence — after
+	// readiness flips, before the store closes — and a caller holding it would have to
+	// re-implement that order at the call site.
+	loops loopSet
 }
 
 type handlerTracker struct {
