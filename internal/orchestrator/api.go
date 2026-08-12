@@ -96,7 +96,15 @@ func (e *Engine) HTTPHandler() http.Handler {
 	e.registerVolumeRoutes(mux)
 
 	// h2c so Connect server-streams work over cleartext HTTP/2 (D4.2).
-	return h2c.NewHandler(mux, &http2.Server{})
+	h := h2c.NewHandler(mux, &http2.Server{})
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !e.httpHandlers.enter() {
+			http.Error(w, "server is draining", http.StatusServiceUnavailable)
+			return
+		}
+		defer e.httpHandlers.leave()
+		h.ServeHTTP(w, r)
+	})
 }
 
 type createReq struct {

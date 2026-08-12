@@ -333,11 +333,17 @@ func boolGauge(v bool) int {
 // When the deadline expires, the streams are closed and the drain proceeds: a severed
 // stream is a reconnectable condition (the data plane has `Connect` for exactly
 // that), while a shutdown that never completes is not.
-func (e *Engine) Shutdown(ctx context.Context, srv interface{ Shutdown(context.Context) error }) error {
+type shutdownServer interface {
+	Shutdown(context.Context) error
+	Close() error
+}
+
+func (e *Engine) Shutdown(ctx context.Context, srv shutdownServer) error {
 	// Step 1 BEFORE anything else. Readiness has to flip while this instance can
 	// still serve, so the drain window is when traffic is being steered away rather
 	// than after it has already been refused.
 	e.BeginDraining()
+	e.httpHandlers.beginDrain()
 
 	var firstErr error
 	keep := func(err error) {
@@ -354,8 +360,13 @@ func (e *Engine) Shutdown(ctx context.Context, srv interface{ Shutdown(context.C
 			// attached, and it says which condition ended the wait.
 			keep(fmt.Errorf("http drain did not finish within the deadline (%w) — in-flight streams were "+
 				"closed; they are reconnectable (§5.E Connect), whereas a shutdown that never returns is not", err))
+			// Shutdown does not close active connections when its context expires.
+			// Force them closed so their request contexts are cancelled, then wait for
+			// every entered handler to return before Store is closed below.
+			keep(srv.Close())
 		}
 	}
+	e.httpHandlers.wait()
 
 	// Step 3. The loops take a context from the caller and exit on cancellation, so
 	// stopping them is the caller cancelling the context it passed to Run. Noted here

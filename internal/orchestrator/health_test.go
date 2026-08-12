@@ -345,6 +345,57 @@ func TestADrainThatExceedsItsDeadlineSaysSo(t *testing.T) {
 	}
 }
 
+// A timed-out http.Server.Shutdown leaves active connections open. The forced
+// Close must therefore make their handlers return before the store is closed.
+func TestTimedOutDrainWaitsForHandlersBeforeClosingStore(t *testing.T) {
+	eng := healthEngine(t)
+	var storeClosed bool
+	eng.Store = &closeTrackingStore{Store: eng.Store, close: func() { storeClosed = true }}
+
+	if !eng.httpHandlers.enter() {
+		t.Fatal("handler tracker unexpectedly draining")
+	}
+	srv := shutdownCloseStub{
+		shutdown: func(context.Context) error { return context.DeadlineExceeded },
+		close: func() error {
+			if storeClosed {
+				t.Error("store closed before the active handler was forced to return")
+			}
+			eng.httpHandlers.leave()
+			return nil
+		},
+	}
+
+	if err := eng.Shutdown(context.Background(), srv); err == nil {
+		t.Fatal("timed-out drain was not reported")
+	}
+	if !storeClosed {
+		t.Error("store was not closed after the active handler returned")
+	}
+}
+
 type shutdownFunc func(context.Context) error
 
 func (f shutdownFunc) Shutdown(ctx context.Context) error { return f(ctx) }
+func (f shutdownFunc) Close() error                       { return nil }
+
+type shutdownCloseStub struct {
+	shutdown func(context.Context) error
+	close    func() error
+}
+
+func (s shutdownCloseStub) Shutdown(ctx context.Context) error { return s.shutdown(ctx) }
+func (s shutdownCloseStub) Close() error                       { return s.close() }
+
+type closeTrackingStore struct {
+	store.Store
+	close func()
+}
+
+func (s *closeTrackingStore) Close() error {
+	s.close()
+	if c, ok := s.Store.(interface{ Close() error }); ok {
+		return c.Close()
+	}
+	return nil
+}

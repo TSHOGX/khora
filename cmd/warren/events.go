@@ -1,12 +1,13 @@
 package main
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -15,40 +16,43 @@ import (
 )
 
 type Event struct {
-	SequenceNum int64     `json:"sequence_num"`
-	Timestamp   time.Time `json:"timestamp"`
-	SandboxID   string    `json:"sandbox_id"`
-	Event       string    `json:"event"`
-	State       string    `json:"state"`
+	Seq        int64     `json:"seq"`
+	OccurredAt time.Time `json:"occurred_at"`
+	SandboxID  string    `json:"sandbox_id"`
+	Kind       string    `json:"kind"`
+	State      string    `json:"state"`
+}
+
+type eventsResponse struct {
+	Events   []Event `json:"events"`
+	Earliest int64   `json:"earliest"`
+	Latest   int64   `json:"latest"`
 }
 
 func newEventsListCmd() *cobra.Command {
 	var (
-		after  int64
-		limit  int
-		cursor string
+		after int64
+		limit int
 	)
 
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List lifecycle events",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			url := apiURL + "/v1/events"
-			params := []string{}
+			endpoint, err := eventsURL()
+			if err != nil {
+				return err
+			}
+			params := endpoint.Query()
 			if after > 0 {
-				params = append(params, fmt.Sprintf("after=%d", after))
+				params.Set("after", strconv.FormatInt(after, 10))
 			}
 			if limit > 0 {
-				params = append(params, fmt.Sprintf("limit=%d", limit))
+				params.Set("limit", strconv.Itoa(limit))
 			}
-			if cursor != "" {
-				params = append(params, fmt.Sprintf("cursor=%s", cursor))
-			}
-			if len(params) > 0 {
-				url += "?" + strings.Join(params, "&")
-			}
+			endpoint.RawQuery = params.Encode()
 
-			resp, err := http.Get(url)
+			resp, err := http.Get(endpoint.String())
 			if err != nil {
 				return fmt.Errorf("GET /v1/events: %w", err)
 			}
@@ -63,10 +67,7 @@ func newEventsListCmd() *cobra.Command {
 				return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
 			}
 
-			var result struct {
-				Events []Event `json:"events"`
-				Cursor *string `json:"cursor,omitempty"`
-			}
+			var result eventsResponse
 			if err := json.Unmarshal(body, &result); err != nil {
 				return fmt.Errorf("unmarshal response: %w", err)
 			}
@@ -75,17 +76,13 @@ func newEventsListCmd() *cobra.Command {
 			fmt.Fprintln(w, "SEQ\tTIMESTAMP\tSANDBOX_ID\tEVENT\tSTATE")
 			for _, evt := range result.Events {
 				fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\n",
-					evt.SequenceNum,
-					evt.Timestamp.Format(time.RFC3339),
+					evt.Seq,
+					evt.OccurredAt.Format(time.RFC3339),
 					evt.SandboxID,
-					evt.Event,
+					evt.Kind,
 					evt.State)
 			}
 			w.Flush()
-
-			if result.Cursor != nil {
-				fmt.Fprintf(os.Stderr, "\nNext cursor: %s\n", *result.Cursor)
-			}
 
 			return nil
 		},
@@ -93,66 +90,95 @@ func newEventsListCmd() *cobra.Command {
 
 	cmd.Flags().Int64Var(&after, "after", 0, "sequence number to start after")
 	cmd.Flags().IntVar(&limit, "limit", 0, "maximum events to return")
-	cmd.Flags().StringVar(&cursor, "cursor", "", "pagination cursor from previous response")
 	return cmd
 }
 
 func newEventsFollowCmd() *cobra.Command {
-	var after int64
+	var (
+		after    int64
+		interval time.Duration
+	)
 
 	cmd := &cobra.Command{
 		Use:     "follow",
-		Short:   "Follow lifecycle events in real-time",
+		Short:   "Follow lifecycle events by polling cursor replay",
 		Aliases: []string{"tail", "watch"},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			url := apiURL + "/v1/events/stream"
-			if after > 0 {
-				url += fmt.Sprintf("?after=%d", after)
-			}
-
-			resp, err := http.Get(url)
-			if err != nil {
-				return fmt.Errorf("GET /v1/events/stream: %w", err)
-			}
-			defer resp.Body.Close()
-
-			if resp.StatusCode != http.StatusOK {
-				body, _ := io.ReadAll(resp.Body)
-				return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
-			}
-
-			scanner := bufio.NewScanner(resp.Body)
-			for scanner.Scan() {
-				line := scanner.Text()
-				if line == "" {
-					continue
+			client := &http.Client{}
+			for {
+				endpoint, err := eventsURL()
+				if err != nil {
+					return err
 				}
+				q := endpoint.Query()
+				q.Set("after", strconv.FormatInt(after, 10))
+				q.Set("limit", "1000")
+				endpoint.RawQuery = q.Encode()
 
-				// SSE format: "data: {...}"
-				if strings.HasPrefix(line, "data: ") {
-					jsonData := strings.TrimPrefix(line, "data: ")
-					var evt Event
-					if err := json.Unmarshal([]byte(jsonData), &evt); err != nil {
-						fmt.Fprintf(os.Stderr, "Failed to parse event: %v\n", err)
-						continue
+				req, err := http.NewRequestWithContext(cmd.Context(), http.MethodGet, endpoint.String(), nil)
+				if err != nil {
+					return fmt.Errorf("build GET /v1/events: %w", err)
+				}
+				resp, err := client.Do(req)
+				if err != nil {
+					if cmd.Context().Err() != nil {
+						return nil
 					}
+					return fmt.Errorf("GET /v1/events: %w", err)
+				}
+				body, readErr := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				if readErr != nil {
+					return fmt.Errorf("read response: %w", readErr)
+				}
+				if resp.StatusCode != http.StatusOK {
+					return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+				}
 
-					fmt.Printf("%s [%s] %s %s\n",
-						evt.Timestamp.Format("15:04:05"),
-						evt.SandboxID,
-						evt.Event,
-						evt.State)
+				var result eventsResponse
+				if err := json.Unmarshal(body, &result); err != nil {
+					return fmt.Errorf("unmarshal response: %w", err)
+				}
+				for _, evt := range result.Events {
+					fmt.Printf("%s [%s] %s %s\n", evt.OccurredAt.Format("15:04:05"), evt.SandboxID, evt.Kind, evt.State)
+					if evt.Seq > after {
+						after = evt.Seq
+					}
+				}
+				if len(result.Events) > 0 {
+					continue // drain the next page without adding polling latency
+				}
+
+				timer := time.NewTimer(interval)
+				select {
+				case <-cmd.Context().Done():
+					timer.Stop()
+					return nil
+				case <-timer.C:
 				}
 			}
-
-			if err := scanner.Err(); err != nil {
-				return fmt.Errorf("read stream: %w", err)
-			}
-
-			return nil
 		},
 	}
 
 	cmd.Flags().Int64Var(&after, "after", 0, "sequence number to start after")
+	cmd.Flags().DurationVar(&interval, "interval", time.Second, "poll interval when caught up")
 	return cmd
+}
+
+func eventsURL() (*url.URL, error) {
+	u, err := url.Parse(apiURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid --api URL: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return nil, fmt.Errorf("invalid --api URL: scheme must be http or https")
+	}
+	if u.Host == "" {
+		return nil, fmt.Errorf("invalid --api URL: host is required")
+	}
+	basePath := strings.TrimSuffix(strings.TrimRight(u.Path, "/"), "/v1")
+	u.Path = basePath + "/v1/events"
+	u.RawPath = ""
+	u.Fragment = ""
+	return u, nil
 }

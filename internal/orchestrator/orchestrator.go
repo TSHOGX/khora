@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sync"
 	"time"
 
 	"warren/internal/lifecycle"
@@ -146,10 +147,57 @@ type Engine struct {
 	// health backs /healthz, /readyz and /metrics (see health.go). A field rather
 	// than package state so two Engines in one test process do not share counters.
 	health health
+	// httpHandlers gates and tracks handlers entering the engine mux. Shutdown closes
+	// the gate before draining, then waits for the active set to empty before Store
+	// closes, including after forcing timed-out connections closed.
+	httpHandlers handlerTracker
 	// Reaper is the §4.3 autonomous control loop (auto-pause / crash-pause /
 	// evict + periodic reconcile). Built here; started by the caller AFTER
 	// startup Reconcile, via Reaper.Run in its own goroutine.
 	Reaper *lifecycle.Reaper
+}
+
+type handlerTracker struct {
+	mu       sync.Mutex
+	cond     *sync.Cond
+	draining bool
+	active   int
+}
+
+func (t *handlerTracker) enter() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.draining {
+		return false
+	}
+	t.active++
+	return true
+}
+
+func (t *handlerTracker) leave() {
+	t.mu.Lock()
+	t.active--
+	if t.active == 0 && t.cond != nil {
+		t.cond.Broadcast()
+	}
+	t.mu.Unlock()
+}
+
+func (t *handlerTracker) beginDrain() {
+	t.mu.Lock()
+	t.draining = true
+	t.mu.Unlock()
+}
+
+func (t *handlerTracker) wait() {
+	t.mu.Lock()
+	if t.cond == nil {
+		t.cond = sync.NewCond(&t.mu)
+	}
+	for t.active > 0 {
+		t.cond.Wait()
+	}
+	t.mu.Unlock()
 }
 
 // New wires the assembly. It does not start any server, and it does NOT run
