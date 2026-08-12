@@ -54,7 +54,7 @@ func newVolumeCreateCmd() *cobra.Command {
 				return fmt.Errorf("marshal request: %w", err)
 			}
 
-			resp, err := http.Post(apiURL+"/v1/volumes", "application/json", bytes.NewReader(body))
+			resp, err := httpClient.Post(apiURL+"/v1/volumes", "application/json", bytes.NewReader(body))
 			if err != nil {
 				return fmt.Errorf("POST /v1/volumes: %w", err)
 			}
@@ -89,7 +89,7 @@ func newVolumeListCmd() *cobra.Command {
 		Short:   "List all volumes",
 		Aliases: []string{"ls"},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			resp, err := http.Get(apiURL + "/v1/volumes")
+			resp, err := httpClient.Get(apiURL + "/v1/volumes")
 			if err != nil {
 				return fmt.Errorf("GET /v1/volumes: %w", err)
 			}
@@ -132,7 +132,7 @@ func newVolumeGetCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			volumeID := args[0]
-			resp, err := http.Get(apiURL + "/v1/volumes/" + volumeID)
+			resp, err := httpClient.Get(apiURL + "/v1/volumes/" + volumeID)
 			if err != nil {
 				return fmt.Errorf("GET /v1/volumes/%s: %w", volumeID, err)
 			}
@@ -182,7 +182,7 @@ func newVolumePatchCmd() *cobra.Command {
 				return fmt.Errorf("marshal request: %w", err)
 			}
 
-			client := &http.Client{}
+			client := httpClient
 			httpReq, err := http.NewRequest(http.MethodPatch, apiURL+"/v1/volumes/"+volumeID, bytes.NewReader(body))
 			if err != nil {
 				return fmt.Errorf("create request: %w", err)
@@ -229,7 +229,7 @@ func newVolumeDeleteCmd() *cobra.Command {
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			volumeID := args[0]
-			client := &http.Client{}
+			client := httpClient
 			req, err := http.NewRequest(http.MethodDelete, apiURL+"/v1/volumes/"+volumeID, nil)
 			if err != nil {
 				return fmt.Errorf("create request: %w", err)
@@ -275,7 +275,7 @@ func newVolumeSnapshotCmd() *cobra.Command {
 				return fmt.Errorf("marshal request: %w", err)
 			}
 
-			resp, err := http.Post(apiURL+"/v1/volumes/"+volumeID+"/snapshot", "application/json", bytes.NewReader(body))
+			resp, err := httpClient.Post(apiURL+"/v1/volumes/"+volumeID+"/snapshot", "application/json", bytes.NewReader(body))
 			if err != nil {
 				return fmt.Errorf("POST /v1/volumes/%s/snapshot: %w", volumeID, err)
 			}
@@ -323,7 +323,7 @@ func newVolumeCloneCmd() *cobra.Command {
 				return fmt.Errorf("marshal request: %w", err)
 			}
 
-			resp, err := http.Post(apiURL+"/v1/volumes/"+volumeID+"/clone", "application/json", bytes.NewReader(body))
+			resp, err := httpClient.Post(apiURL+"/v1/volumes/"+volumeID+"/clone", "application/json", bytes.NewReader(body))
 			if err != nil {
 				return fmt.Errorf("POST /v1/volumes/%s/clone: %w", volumeID, err)
 			}
@@ -368,8 +368,11 @@ func newVolumeImportCmd() *cobra.Command {
 			}
 			defer file.Close()
 
-			url := fmt.Sprintf("%s/v1/volumes/%s/import?path=%s", apiURL, volumeID, remotePath)
-			resp, err := http.Post(url, "application/octet-stream", file)
+			url, err := transferURL(fmt.Sprintf("%s/v1/volumes/%s/import", apiURL, volumeID), remotePath)
+			if err != nil {
+				return err
+			}
+			resp, err := httpClient.Post(url, "application/octet-stream", file)
 			if err != nil {
 				return fmt.Errorf("POST %s: %w", url, err)
 			}
@@ -412,8 +415,11 @@ func newVolumeExportCmd() *cobra.Command {
 				localPath = args[2]
 			}
 
-			url := fmt.Sprintf("%s/v1/volumes/%s/export?path=%s", apiURL, volumeID, remotePath)
-			resp, err := http.Get(url)
+			url, err := transferURL(fmt.Sprintf("%s/v1/volumes/%s/export", apiURL, volumeID), remotePath)
+			if err != nil {
+				return err
+			}
+			resp, err := httpClient.Get(url)
 			if err != nil {
 				return fmt.Errorf("GET %s: %w", url, err)
 			}

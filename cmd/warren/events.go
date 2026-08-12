@@ -52,7 +52,7 @@ func newEventsListCmd() *cobra.Command {
 			}
 			endpoint.RawQuery = params.Encode()
 
-			resp, err := http.Get(endpoint.String())
+			resp, err := httpClient.Get(endpoint.String())
 			if err != nil {
 				return fmt.Errorf("GET /v1/events: %w", err)
 			}
@@ -104,7 +104,7 @@ func newEventsFollowCmd() *cobra.Command {
 		Short:   "Follow lifecycle events by polling cursor replay",
 		Aliases: []string{"tail", "watch"},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			client := &http.Client{}
+			client := httpClient
 			for {
 				endpoint, err := eventsURL()
 				if err != nil {

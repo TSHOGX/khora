@@ -24,7 +24,7 @@ func newTemplateListCmd() *cobra.Command {
 		Short:   "List all templates",
 		Aliases: []string{"ls"},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			resp, err := http.Get(apiURL + "/v1/templates")
+			resp, err := httpClient.Get(apiURL + "/v1/templates")
 			if err != nil {
 				return fmt.Errorf("GET /v1/templates: %w", err)
 			}
@@ -70,7 +70,7 @@ func newTemplatePromoteCmd() *cobra.Command {
 				return fmt.Errorf("marshal request: %w", err)
 			}
 
-			resp, err := http.Post(apiURL+"/v1/sandboxes/"+sandboxID+"/promote", "application/json", bytes.NewReader(body))
+			resp, err := httpClient.Post(apiURL+"/v1/sandboxes/"+sandboxID+"/promote", "application/json", bytes.NewReader(body))
 			if err != nil {
 				return fmt.Errorf("POST /v1/sandboxes/%s/promote: %w", sandboxID, err)
 			}
@@ -106,7 +106,7 @@ func newTemplateDeleteCmd() *cobra.Command {
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			templateID := args[0]
-			client := &http.Client{}
+			client := httpClient
 			req, err := http.NewRequest(http.MethodDelete, apiURL+"/v1/templates/"+templateID, nil)
 			if err != nil {
 				return fmt.Errorf("create request: %w", err)

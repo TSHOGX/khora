@@ -140,7 +140,7 @@ func newSandboxCreateCmd() *cobra.Command {
 				return fmt.Errorf("marshal request: %w", err)
 			}
 
-			resp, err := http.Post(apiURL+"/v1/sandboxes", "application/json", bytes.NewReader(body))
+			resp, err := httpClient.Post(apiURL+"/v1/sandboxes", "application/json", bytes.NewReader(body))
 			if err != nil {
 				return fmt.Errorf("POST /v1/sandboxes: %w", err)
 			}
@@ -183,7 +183,7 @@ func newSandboxListCmd() *cobra.Command {
 		Short:   "List all sandboxes",
 		Aliases: []string{"ls"},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			resp, err := http.Get(apiURL + "/v1/sandboxes")
+			resp, err := httpClient.Get(apiURL + "/v1/sandboxes")
 			if err != nil {
 				return fmt.Errorf("GET /v1/sandboxes: %w", err)
 			}
@@ -230,7 +230,7 @@ func newSandboxGetCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			sandboxID := args[0]
-			resp, err := http.Get(apiURL + "/v1/sandboxes/" + sandboxID)
+			resp, err := httpClient.Get(apiURL + "/v1/sandboxes/" + sandboxID)
 			if err != nil {
 				return fmt.Errorf("GET /v1/sandboxes/%s: %w", sandboxID, err)
 			}
@@ -292,7 +292,7 @@ func newSandboxPatchCmd() *cobra.Command {
 				return fmt.Errorf("marshal request: %w", err)
 			}
 
-			client := &http.Client{}
+			client := httpClient
 			httpReq, err := http.NewRequest(http.MethodPatch, apiURL+"/v1/sandboxes/"+sandboxID, bytes.NewReader(body))
 			if err != nil {
 				return fmt.Errorf("create request: %w", err)
@@ -372,7 +372,7 @@ func newSandboxPauseCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			sandboxID := args[0]
-			resp, err := http.Post(apiURL+"/v1/sandboxes/"+sandboxID+"/pause", "application/json", nil)
+			resp, err := httpClient.Post(apiURL+"/v1/sandboxes/"+sandboxID+"/pause", "application/json", nil)
 			if err != nil {
 				return fmt.Errorf("POST /v1/sandboxes/%s/pause: %w", sandboxID, err)
 			}
@@ -400,7 +400,7 @@ func newSandboxResumeCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			sandboxID := args[0]
-			resp, err := http.Post(apiURL+"/v1/sandboxes/"+sandboxID+"/resume", "application/json", nil)
+			resp, err := httpClient.Post(apiURL+"/v1/sandboxes/"+sandboxID+"/resume", "application/json", nil)
 			if err != nil {
 				return fmt.Errorf("POST /v1/sandboxes/%s/resume: %w", sandboxID, err)
 			}
@@ -429,7 +429,7 @@ func newSandboxDeleteCmd() *cobra.Command {
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			sandboxID := args[0]
-			client := &http.Client{}
+			client := httpClient
 			req, err := http.NewRequest(http.MethodDelete, apiURL+"/v1/sandboxes/"+sandboxID, nil)
 			if err != nil {
 				return fmt.Errorf("create request: %w", err)

@@ -26,8 +26,11 @@ func newFilesUploadCmd() *cobra.Command {
 			}
 			defer file.Close()
 
-			url := fmt.Sprintf("%s/v1/sandboxes/%s/files?path=%s", apiURL, sandboxID, remotePath)
-			resp, err := http.Post(url, "application/octet-stream", file)
+			url, err := transferURL(fmt.Sprintf("%s/v1/sandboxes/%s/files", apiURL, sandboxID), remotePath)
+			if err != nil {
+				return err
+			}
+			resp, err := httpClient.Post(url, "application/octet-stream", file)
 			if err != nil {
 				return fmt.Errorf("POST %s: %w", url, err)
 			}
@@ -69,8 +72,11 @@ func newFilesDownloadCmd() *cobra.Command {
 				localPath = args[2]
 			}
 
-			url := fmt.Sprintf("%s/v1/sandboxes/%s/files?path=%s", apiURL, sandboxID, remotePath)
-			resp, err := http.Get(url)
+			url, err := transferURL(fmt.Sprintf("%s/v1/sandboxes/%s/files", apiURL, sandboxID), remotePath)
+			if err != nil {
+				return err
+			}
+			resp, err := httpClient.Get(url)
 			if err != nil {
 				return fmt.Errorf("GET %s: %w", url, err)
 			}

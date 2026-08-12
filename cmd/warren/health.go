@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,7 +16,7 @@ func newHealthzCmd() *cobra.Command {
 		Use:   "healthz",
 		Short: "Check liveness",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			resp, err := http.Get(apiURL + "/healthz")
+			resp, err := httpClient.Get(apiURL + "/healthz")
 			if err != nil {
 				return fmt.Errorf("GET /healthz: %w", err)
 			}
@@ -43,7 +44,7 @@ func newReadyzCmd() *cobra.Command {
 		Use:   "readyz",
 		Short: "Check readiness",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			resp, err := http.Get(apiURL + "/readyz")
+			resp, err := httpClient.Get(apiURL + "/readyz")
 			if err != nil {
 				return fmt.Errorf("GET /readyz: %w", err)
 			}
@@ -73,7 +74,7 @@ func newMetricsCmd() *cobra.Command {
 		Use:   "metrics",
 		Short: "Fetch process metrics",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			resp, err := http.Get(apiURL + "/metrics")
+			resp, err := httpClient.Get(apiURL + "/metrics")
 			if err != nil {
 				return fmt.Errorf("GET /metrics: %w", err)
 			}
@@ -89,8 +90,9 @@ func newMetricsCmd() *cobra.Command {
 			}
 
 			if format == "json" {
-				// Parse Prometheus text format and convert to JSON (basic)
-				fmt.Println(string(body))
+				if err := json.NewEncoder(os.Stdout).Encode(parsePrometheusMetrics(body)); err != nil {
+					return fmt.Errorf("encode metrics as JSON: %w", err)
+				}
 			} else if format == "table" {
 				// Parse and format as table
 				lines := parsePrometheusMetrics(body)
@@ -100,9 +102,11 @@ func newMetricsCmd() *cobra.Command {
 					fmt.Fprintf(w, "%s\t%s\n", metric, value)
 				}
 				w.Flush()
-			} else {
+			} else if format == "raw" {
 				// Raw prometheus format
 				fmt.Println(string(body))
+			} else {
+				return fmt.Errorf("unsupported format %q (expected raw, table, or json)", format)
 			}
 
 			return nil

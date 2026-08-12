@@ -17,7 +17,7 @@ func newNetworkGetCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			sandboxID := args[0]
-			resp, err := http.Get(apiURL + "/v1/sandboxes/" + sandboxID + "/network")
+			resp, err := httpClient.Get(apiURL + "/v1/sandboxes/" + sandboxID + "/network")
 			if err != nil {
 				return fmt.Errorf("GET /v1/sandboxes/%s/network: %w", sandboxID, err)
 			}
@@ -64,7 +64,7 @@ func newNetworkPatchCmd() *cobra.Command {
 				return fmt.Errorf("marshal request: %w", err)
 			}
 
-			client := &http.Client{}
+			client := httpClient
 			httpReq, err := http.NewRequest(http.MethodPatch, apiURL+"/v1/sandboxes/"+sandboxID+"/network", bytes.NewReader(body))
 			if err != nil {
 				return fmt.Errorf("create request: %w", err)
@@ -122,7 +122,7 @@ func newNetworkPublishCmd() *cobra.Command {
 				return fmt.Errorf("marshal request: %w", err)
 			}
 
-			resp, err := http.Post(apiURL+"/v1/sandboxes/"+sandboxID+"/network/publish", "application/json", bytes.NewReader(body))
+			resp, err := httpClient.Post(apiURL+"/v1/sandboxes/"+sandboxID+"/network/publish", "application/json", bytes.NewReader(body))
 			if err != nil {
 				return fmt.Errorf("POST /v1/sandboxes/%s/network/publish: %w", sandboxID, err)
 			}

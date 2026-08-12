@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"io"
-	"net/http"
 	"net/url"
 	"os"
 	"path"
@@ -38,7 +37,7 @@ func newProcessStartCmd() *cobra.Command {
 			}
 
 			client := transportv1connect.NewProcessServiceClient(
-				&http.Client{},
+				httpClient,
 				transportURL,
 			)
 
@@ -120,7 +119,7 @@ func newProcessListCmd() *cobra.Command {
 			}
 
 			client := transportv1connect.NewProcessServiceClient(
-				&http.Client{},
+				httpClient,
 				transportURL,
 			)
 
@@ -177,7 +176,7 @@ func newProcessSignalCmd() *cobra.Command {
 			}
 
 			client := transportv1connect.NewProcessServiceClient(
-				&http.Client{},
+				httpClient,
 				transportURL,
 			)
 
@@ -224,7 +223,7 @@ func newProcessConnectCmd() *cobra.Command {
 			}
 
 			client := transportv1connect.NewProcessServiceClient(
-				&http.Client{},
+				httpClient,
 				transportURL,
 			)
 
@@ -297,7 +296,7 @@ func newProcessInputCmd() *cobra.Command {
 			}
 
 			client := transportv1connect.NewProcessServiceClient(
-				&http.Client{},
+				httpClient,
 				transportURL,
 			)
 

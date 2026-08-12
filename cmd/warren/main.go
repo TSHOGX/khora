@@ -4,6 +4,7 @@ package main
 
 import (
 	"fmt"
+	"net/http"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -11,7 +12,11 @@ import (
 
 var (
 	// Global flags
-	apiURL string
+	apiURL         string
+	clientCertFile string
+	clientKeyFile  string
+	caCertFile     string
+	httpClient     = http.DefaultClient
 )
 
 func main() {
@@ -24,9 +29,20 @@ It wraps the §6.1 REST + Connect-RPC API, providing commands for sandbox lifecy
 file operations, volumes, templates, network configuration, and event streaming.`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			client, err := newHTTPClient(clientCertFile, clientKeyFile, caCertFile)
+			if err != nil {
+				return err
+			}
+			httpClient = client
+			return nil
+		},
 	}
 
 	rootCmd.PersistentFlags().StringVar(&apiURL, "api", "http://127.0.0.1:8080", "API base URL")
+	rootCmd.PersistentFlags().StringVar(&clientCertFile, "client-cert", "", "PEM client certificate for mTLS")
+	rootCmd.PersistentFlags().StringVar(&clientKeyFile, "client-key", "", "PEM private key for the mTLS client certificate")
+	rootCmd.PersistentFlags().StringVar(&caCertFile, "ca-cert", "", "PEM CA bundle used to verify the API server")
 
 	// Sandbox commands
 	sandboxCmd := &cobra.Command{
