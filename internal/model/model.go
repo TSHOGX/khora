@@ -553,17 +553,13 @@ func (k EventKind) Valid() bool {
 //
 // Zero on any dimension = unlimited (that dimension is not materialized).
 //
-// The disk-IO rate cap (§3.4's other rate-axis half) has NO field here on
-// purpose, and that is a settled deferral rather than an open question: the
-// mechanism is proven, the CONSUMER is what's missing, so adding the field now
-// would be the speculative reservation §1.3 rejects. It joins additively when a
-// consumer appears (one field here + one OCI section, no shape change) — and
-// what joins is a RATE and nothing more: the whole-disk MAJ:MIN that `io.max`
-// needs is DERIVED BY THE PROVIDER from its own state dir, never carried in this
-// record and never crossing the §5.A seam. A device number is an irreducibly
-// host-local fact, so putting it in the Binding would lift a host primitive into
-// a cross-provider contract (§5.A); a remote provider expresses the same cap
-// through its scheduler's equivalent instead.
+// The disk-IO rate cap has NO field here on purpose — a settled deferral, not an open
+// question: the mechanism is proven, the CONSUMER is missing, and adding the field now is the
+// speculative reservation §1.3 rejects. It joins additively when one appears (one field, one
+// OCI section, no shape change), and what joins is a RATE alone: the whole-disk MAJ:MIN
+// `io.max` needs is DERIVED BY THE PROVIDER, never carried in this record. A device number is
+// irreducibly host-local, so putting it in the Binding would lift a host primitive into a
+// cross-provider contract (§5.A); a remote provider uses its scheduler's equivalent.
 type Limits struct {
 	CPUMillis  int64 // 1000 = one full CPU
 	MemoryByte int64

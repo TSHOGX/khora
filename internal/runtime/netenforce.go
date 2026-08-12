@@ -41,26 +41,18 @@ import (
 // masquerade is part of the generated rule set (it is a rule, and only emitted for a
 // routed-egress declaration); this function does the other two.
 //
-// # THE GUEST DEFAULT ROUTE IS INSTALLED UNCONDITIONALLY, INCLUDING UNDER `deny`
+// THE GUEST DEFAULT ROUTE IS INSTALLED UNCONDITIONALLY, INCLUDING UNDER `deny`, which looks
+// backwards and is what makes the deny ENFORCED rather than incidental.
 //
-// That looks backwards and is the opposite: it is what makes the deny ENFORCED rather
-// than incidental.
+// Without it a `deny` sandbox's packet never leaves its netns — it dies at `net unreachable`
+// inside gVisor's netstack, the host's rules are never evaluated, and every floor counter reads
+// 0: the coincidence-not-invariant state §2.4 names, since guest root can add the route with ONE
+// command (measured, D5 ⑤). It is also unassertable, "unreachable with a zero counter" being
+// indistinguishable from a bypassed floor (D4.1).
 //
-// Without a default route, a `deny` sandbox's packet never leaves its netns — it dies
-// at `net unreachable` inside gVisor's netstack, the host's rules are never evaluated,
-// and every floor counter reads 0. That is precisely the state §2.4 calls a
-// coincidence rather than an invariant: guest root can add the route itself with ONE
-// command (measured, D5 ⑤ — `ip route add default via <host> dev <veth>`), so an
-// engine that relies on its absence has enforced nothing. It is also unassertable —
-// "unreachable with a zero counter" is indistinguishable from a bypassed floor
-// (D4.1), so the acceptance discipline could not tell the two apart.
-//
-// With the route present, the guest's packet reaches the host, meets the floor, and is
-// REJECTED by a rule that counts it. Same observable outcome for the guest, opposite
-// epistemic status: a refusal the engine performs and can prove, rather than an
-// accident it inherited. This is also what makes D5 ⑯'s failed assertion assertable
-// at last (there, the guest had no default route, so its egress died before reaching
-// the floor and the measurement was invalid rather than passing).
+// With the route present the packet reaches the host, meets the floor, and is REJECTED by a rule
+// that counts it: same outcome for the guest, opposite epistemic status — a refusal the engine
+// performs and can prove. This is also what finally makes D5 ⑯'s assertion assertable.
 //
 // THE MEASURED NEGATIVES MATTER AS MUCH, because each is a plausible thing to add:
 // `rp_filter` tightened to 1 does NOT affect this (the return route already goes out

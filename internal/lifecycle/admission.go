@@ -23,68 +23,42 @@ import (
 //
 //	Σ(declared caps) + Σ(bytes under no cap) ≤ configured node capacity
 //
-// The second term is SEPARATE and non-negotiable: squota charges a sandbox only
-// for bytes IT wrote, and copy-up from a Template on the same fs is a reflink,
-// which is free under squota (a reason we chose it — D6.2). So Template and layer
-// bytes occupy real disk that NO sandbox cap covers. Omit that term and the
-// accounting silently overcommits by the entire size of the Template library.
+// The second term is SEPARATE and non-negotiable: squota charges a sandbox only for bytes IT
+// wrote, and copy-up from a Template on the same fs is a free reflink (a reason we chose it —
+// D6.2), so Template and layer bytes occupy real disk no sandbox cap covers. Omit it and the
+// accounting silently overcommits by the whole Template library.
 //
-// The two terms are DISJOINT, and the predicate is "is it covered by a declared
-// cap", not "is it a layer": a CAPPED Overlay upper is counted by the cap term and
-// so contributes zero to the measured one (charging its current usage on top of
-// its own cap bills the same bytes twice, and usage is a forecast where the cap is
-// already a bound). Physically shared bytes count at most once — squota does not
-// charge a reflinked copy-up to the sandbox, and the layer side counts that extent
-// once. The property that forces the second term to exist is the same one that
-// keeps the two from overlapping.
+// The two terms are DISJOINT on the predicate "is it covered by a declared cap", not "is it a
+// layer": a CAPPED upper contributes zero to the measured term, since charging its usage on top
+// of its own cap bills the same bytes twice. Physically shared bytes count at most once. Mixing
+// a promise with a measurement is sound because the measured bytes are ALREADY ON DISK — the
+// gate subtracts consumed capacity before comparing promises against the remainder, one rule
+// uniformly applied: the cap where one exists, the measurement where none does (§3.4).
 //
-// Mixing a promise with a measurement is sound because the measured bytes are
-// ALREADY ON DISK: the gate is not forecasting them, it is subtracting consumed
-// capacity before comparing promises against the remainder. One rule, uniformly
-// applied — take the strongest available statement about each object: the cap where
-// one exists, the measurement where none does (§3.4).
+// RAM is admitted on the same principle against a SEPARATE budget: memory and disk are not
+// fungible, so two ceilings, never one blended "resources" number.
 //
-// RAM is admitted on the same principle but against a separate budget: memory and
-// disk are not fungible, so they are two independent ceilings, never one blended
-// "resources" number.
+// A METERED AXIS REQUIRES A CAP (§3.4): an uncapped sandbox on a metered axis contributes 0 to
+// the left side while free to consume all of the right, which does not undercount — it makes
+// the inequality describe a different device than the one being written to. Enforced here
+// rather than assumed. `0 = unlimited` stays legal on an UNMETERED axis.
 //
-// A METERED AXIS REQUIRES A CAP (§3.4). A sandbox with no cap on a metered axis
-// contributes 0 to the left side while free to consume all of the right — it does
-// not undercount, it makes the inequality describe a device that is not the one
-// being written to. So the formula is sound only under the premise that every
-// admitted sandbox is capped on every metered axis, and that premise is enforced
-// here rather than assumed. `0 = unlimited` stays legal on an UNMETERED axis,
-// where it is an honest resting value.
+// BOTH TERMS SUM ACROSS §5.B AND §5.C, not just sandboxes (§3.4), each subsystem reporting
+// through the same-shaped seam method. No third term: a volume cap and a sandbox cap are LIKE
+// TERMS on the same left-hand side, even though a volume cap is recorded on the volume and a
+// volume has no placement of its own. Omitting them is not "counting a little low" — a node can
+// be filled by a pile of uncapped volumes while the gate refuses nothing.
 //
-// BOTH TERMS SUM ACROSS §5.B AND §5.C, NOT JUST SANDBOXES (§3.4). The first term is
-// Σ(sandbox disk caps) + Σ(VOLUME caps); the second is
-// Σ(§5.B uncapped bytes) + Σ(§5.C uncapped bytes), each reported by its own
-// subsystem through the same-shaped seam method. There is NO third term: a volume
-// cap and a sandbox cap are LIKE TERMS on the same left-hand side — both are upper
-// bounds the engine has declared — even though a volume cap is recorded on the
-// volume rather than in some sandbox's Binding (§5.C: a volume has no placement of
-// its own). Omitting them is not "counting a little low": a node can be filled by a
-// pile of uncapped volumes while the gate refuses nothing at all.
+// THREE ENTRY POINTS, one inequality: `admit` for a new/raised per-SANDBOX promise (first
+// term), `admitUncappedGrowth` for bytes joining the SECOND term uncapped (Promote), and
+// `admitVolume` for a new volume cap (first term). Not one function, because which term an
+// action lands in is the whole content of the argument above and the call site must say it.
+// `admitVolume` specifically must not reuse `admit`: that one's metered-axis check is about a
+// SANDBOX (all three axes, RAM included), and passing a volume through it would demand a memory
+// cap from an object that cannot have one.
 //
-// THREE ENTRY POINTS, one inequality. `admit` gates a new/raised per-SANDBOX
-// promise (create, resume, a cap raise) and adds to the FIRST term.
-// `admitUncappedGrowth` gates a control-plane action that adds bytes to the SECOND
-// term with no cap over them (Promote freezing a layer). `admitVolume` gates a new
-// VOLUME cap, which also lands in the first term.
-//
-// They are deliberately not one function: which term an action lands in is the whole
-// content of the accounting argument above, so the call site has to say it. And
-// `admitVolume` specifically must NOT reuse `admit` — that function's
-// metered-axis-requires-a-cap check is a statement about a SANDBOX (all three axes,
-// including RAM), while a volume has exactly one axis and no Binding at all. Passing
-// a volume through `admit` would demand a memory cap from an object that cannot have
-// one.
-//
-// Where this sits in the §4 structure: admission reads the AUTHORITATIVE store
-// (committed promises) and asks the Rootfs provider to measure its own bytes.
-// Both are mediator actions — the mediator reads the store and calls subsystem
-// mechanisms; the provider is never asked to consult the store (§4 subsystems
-// don't call each other).
+// In the §4 structure: admission reads the AUTHORITATIVE store and asks the provider to measure
+// its own bytes — both mediator actions, the provider never consulting the store.
 
 // NodeCapacity is the operator-configured budget the gate admits against (§1.1
 // single-binary config). Zero on a dimension = UNMETERED: that axis is not

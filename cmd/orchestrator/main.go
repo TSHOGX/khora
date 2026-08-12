@@ -1,11 +1,6 @@
-// Command orchestrator is the single engine-host binary (§1.1): it holds the
-// control plane, the §4 lifecycle mediator, and the five subsystems' mechanisms.
-// Deployment target is "single orchestrator binary + one config + local store"
-// with no heavy external dependency (§1.1).
-//
-// The assembly lives in internal/orchestrator (importable + testable); this is
-// the thin entrypoint that reads flags, builds the Engine, and serves the §6.1
-// API. Runs as root (ADR-0002: --network=sandbox + overlay mount need root).
+// Command orchestrator is the single engine-host binary (§1.1). The assembly lives in
+// internal/orchestrator (importable + testable); this is the thin entrypoint that reads
+// flags, builds the Engine, and serves the §6.1 API. Runs as root (ADR-0002).
 package main
 
 import (
@@ -24,36 +19,31 @@ import (
 
 func main() {
 	var (
-		addr       = flag.String("addr", "127.0.0.1:8080", "listen address for the §6.1 API. MUST be loopback unless --insecure-listen is passed, and that is REFUSED AT STARTUP rather than documented (ADR-0007): the API has no authentication and no TLS — by design, since §1.4 excludes the credential family from the engine permanently — so a routable listener publishes a control plane able to create root-capable sandboxes. A default is not a boundary; pinning this to loopback is what makes a TLS-terminating, authenticating gateway in front of it the only outward-facing surface BY CONSTRUCTION rather than by an operator remembering. Every loopback spelling is accepted (127/8, ::1, the v4-mapped form); an empty host is not, since it binds every interface, and a NAME is accepted only when every address it resolves to is loopback")
-		insecure   = flag.Bool("insecure-listen", false, "permit a NON-loopback --addr, publishing the unauthenticated §6.1 API (ADR-0007). It buys exactly one thing: the loopback check is not consulted — no authentication appears either way, so anything that can route to this host can create, read and destroy sandboxes and read every file in them. Pass it only where the network itself is the boundary (a private namespace, a host firewall). It exists so that publishing the API is a DECISION on the record — in `ps` output and in the startup log — rather than an omission; refusing outright would only push an operator to patch the source, which takes the decision out of the record entirely")
-		templates  = flag.String("templates", "/var/lib/warren/templates", "BUILT Template directory root: each subdirectory is a builtin Template whose directory name IS its TemplateID, and the boot seed registers every one it finds. The repo holds Template DEFINITIONS (templates/bare/), and `templates/bare/build.sh` writes the built artifact here — so this must NOT point at the definitions directory, or the seed registers source files as a runnable Template. Defaults to an ABSOLUTE path outside any Go module, unlike --state/--store, and that asymmetry is deliberate: a Template contains mode-0700 root-owned directories (Debian's /etc/ssl/private), so one built inside a module tree makes `go build ./...` fail for a non-root user. build.sh refuses an in-module destination for the same reason")
+		addr       = flag.String("addr", "127.0.0.1:8080", "listen address for the §6.1 API; must be loopback unless -insecure-listen (refused at startup, ADR-0007)")
+		insecure   = flag.Bool("insecure-listen", false, "permit a non-loopback -addr, publishing the API with no authentication and no TLS (ADR-0007)")
+		templates  = flag.String("templates", "/var/lib/warren/templates", "BUILT Template root, one subdirectory per builtin whose name is its TemplateID; not the definitions in templates/")
 		state      = flag.String("state", "./scratch/state", "state root (overlays + runsc state/bundles)")
 		storePath  = flag.String("store", "./scratch/store.db", "SQLite store file (ADR-0004)")
-		volumes    = flag.String("volumes-dir", "", "§5.C volume storage root, one unit per volume; empty = <state>/volumes. A SIBLING of the overlay root, never nested inside it — each subsystem's orphan sweep enumerates its own root, so nesting would put one subsystem's units inside the other's enumeration")
+		volumes    = flag.String("volumes-dir", "", "§5.C volume storage root; empty = <state>/volumes, a sibling of the overlay root, never nested in it")
 		health     = flag.Duration("health-timeout", 30*time.Second, "cold-start readiness gate timeout (⑦)")
 		idleTO     = flag.Duration("idle-timeout", 30*time.Minute, "default idle TTL: running idle past this → auto-pause (§4.3)")
-		retention  = flag.Duration("retention", 24*time.Hour, "default retention TTL: a sandbox left `paused` longer than this is EVICTED (§4.3) — the reaper's automatic destroy, which deletes the record and its Overlay bytes. DESTRUCTIVE AND IRREVERSIBLE: eviction is the only reclamation path out of `paused`, and what it discards is the sole fuel for resume, so a deployment that treats pause/resume as durable continuation loses that continuation silently once a sandbox sits paused this long. Argue the value from HOW LONG A PAUSED SANDBOX MUST STAY RESUMABLE, never from disk pressure; 0 = never evict, which is the setting that means it. The default is finite rather than 0 because 0 is not \"no policy\" here — it retains every paused sandbox's Overlay forever, and §3.4's disk budget then fills until UNRELATED creates take a 507. Both directions destroy something, so this default is a stated choice (reaper-health D5), not an unexamined number: a per-sandbox value is a create/PATCH field, and this flag only supplies the default when one is omitted")
+		retention  = flag.Duration("retention", 24*time.Hour, "default retention TTL: paused longer than this is evicted — record and Overlay bytes deleted, irreversible, and the only way out of `paused`. Argue it from how long a paused sandbox must stay resumable, not from disk; 0 = never evict (§4.3, reaper-health D5)")
 		sweep      = flag.Duration("reaper-interval", 30*time.Second, "reaper sweep cadence (§4.3)")
-		evtRetain  = flag.Duration("event-retention", 0, "§4.4-C replayable event-stream window: DELIVERED outbox rows older than this are trimmed, which advances `earliest` in GET /v1/events and makes its 410 reachable. 0 = never trim (the default), keeping all history replayable at the cost of unbounded at-rest growth. Argue the value from the reconnect window you promise your SUBSCRIBERS, never from disk: a subscriber whose cursor falls below `earliest` gets 410 and must restart from there, losing every event in between. Age is measured from DELIVERY, not occurrence, so a publisher halted for a week does not make its backlog instantly trimmable. Undelivered rows are never trimmed at any setting")
+		evtRetain  = flag.Duration("event-retention", 0, "§4.4-C replay window: delivered outbox rows older than this are trimmed, advancing `earliest` and making GET /v1/events' 410 reachable. Argue it from the reconnect window you promise subscribers; 0 = never trim")
 		tdBudget   = flag.Duration("transport-down-budget", 2*time.Minute, "transport-down restart budget before escalate→resume (D4b)")
-		nodeDisk   = flag.Int64("node-disk-byte", 0, "§3.4 no-oversubscribe disk budget: bytes for sandbox Overlay upper+work plus Template/layer bytes; 0 = unmetered (axis not gated). Set BELOW the raw device size — the budget counts only what the engine may PROMISE guests, so per-sandbox substrate overhead (runsc state on disk) lives outside it. While metered, a create must specify a disk cap or it is refused")
-		nodeMem    = flag.Int64("node-memory-byte", 0, "§3.4 no-oversubscribe memory budget: total host RAM the engine may promise to sandboxes; 0 = unmetered (axis not gated). Set BELOW physical RAM — the budget counts only what the engine may PROMISE guests, so per-sandbox substrate overhead (sentry/gofer footprint) lives outside it. While metered, a create must specify a memory cap or it is refused")
+		nodeDisk   = flag.Int64("node-disk-byte", 0, "§3.4 disk budget: bytes the engine may promise guests, so set it below the device size; 0 = unmetered. While metered a create must cap disk")
+		nodeMem    = flag.Int64("node-memory-byte", 0, "§3.4 memory budget: bytes the engine may promise guests, so set it below physical RAM; 0 = unmetered. While metered a create must cap memory")
 		sudo       = flag.Bool("sudo", false, "prefix runsc/ip with sudo (dev; prod runs as root)")
-		viaUID     = flag.Int("via-uid", -1, "§2.4 invariant 2: the uid of the host-local process behind `egress.via[].endpoint`, whose OWN egress the engine pins under the same L0 floor. A DEPLOYMENT input, never a declaration field — the engine does not know or ask what is behind that endpoint, only which local uid to pin. Unset (-1) ⇒ no second-hop table is installed AND `egress.via[]` declarations are REFUSED (400): accepting one would record a declaration whose invariant the engine cannot enforce, leaving a confused deputy live while every first-hop assertion still passes. Must NOT be this process's own uid — that value puts the engine's own guest dials under the second-hop floor and is refused at startup (it would break transport for every sandbox, intermittently)")
-		pubIP      = flag.String("publish-ip", "", "host address §5.D `ingress.publish[]` endpoints bind to; empty = 127.0.0.1. The conservative default is deliberate: publish is an EXPLICIT inbound exception (§2.1 ③), so reachability from outside this host must come from a decision rather than from omitting a flag")
-		shutdownTO = flag.Duration("shutdown-timeout", 30*time.Second, "how long a SIGTERM/SIGINT drain waits for in-flight requests before closing them. RUNNING SANDBOXES ARE NOT TOUCHED at any value: they keep running and the next boot re-adopts them (§4.4-A takeover — same placement, same IP, no new epoch), because a pause would discard guest memory (§4.2 stores none) and make a routine restart destroy every guest's in-memory work. A DEADLINE IS REQUIRED rather than optional: the data plane's normal shape is a long-lived stream (an attached shell at a prompt), and a drain waiting on one would never return — measured. When it expires those streams are closed, which is reconnectable (§5.E Connect); a shutdown that never completes is not. Set it above your longest unary request, not above your longest stream")
+		viaUID     = flag.Int("via-uid", -1, "§2.4 invariant 2: uid of the local process behind `egress.via[].endpoint`, whose own egress is pinned under the L0 floor. Unset ⇒ no second-hop table and `via[]` refused; may not be this process's uid")
+		pubIP      = flag.String("publish-ip", "", "host address §5.D `ingress.publish[]` binds to; empty = 127.0.0.1, so reaching a published port from off-host takes a decision (§2.1 ③)")
+		shutdownTO = flag.Duration("shutdown-timeout", 30*time.Second, "how long a SIGTERM drain waits for in-flight requests, then closes them. Running sandboxes are never touched; set it above your longest unary request, not your longest stream")
 	)
 	flag.Parse()
 
-	// -1 is the "unset" sentinel because uid 0 is a REAL uid: a plain int flag could
-	// not tell "the operator said root" from "the operator said nothing", and those
-	// must behave oppositely (install the table and permit `via[]` vs neither).
-	//
-	// "uid 0 is a real uid" says nothing about whether it is a LEGAL one here: it is
-	// this process's own uid (ADR-0002 — the engine runs as root), and that value would
-	// put the engine's own dials to guest addresses under the second-hop floor.
-	// orchestrator.New refuses it — in the assembly rather than here, so the substrate
-	// harness (which builds an Engine directly) cannot bypass the check.
+	// -1 is the unset sentinel because uid 0 is a real uid, and "the operator said root"
+	// must behave oppositely from "the operator said nothing". Root is nonetheless refused
+	// here (it is this process's own uid), in orchestrator.New rather than in this file so
+	// the substrate harness — which builds an Engine directly — cannot bypass the check.
 	var secondHopUID *int
 	if *viaUID >= 0 {
 		secondHopUID = viaUID
@@ -82,105 +72,73 @@ func main() {
 		log.Fatalf("orchestrator: assemble: %v", err)
 	}
 
-	// boot seed (§4.3 + §4.4-A) BEFORE anything else: ensure a builtin
-	// `templates` row per static Template directory, so a create's
-	// sandboxes.template FK (§4.3)
-	// resolves. Idempotent across restarts.
+	// The boot sequence below is ORDERED, not a list. Everything through the second-hop
+	// table runs before anything can create a storage unit or adopt a record; Reconcile
+	// then decides which records survive, and the two byte-sweeps run after it because
+	// they need that answer. The sweeps are non-fatal — the reaper repeats each one —
+	// and at boot their in-flight keep-set is empty, so an unrecorded unit is a true
+	// orphan. Serving comes last (MarkReady).
+
+	// §4.3 + §4.4-A: a builtin `templates` row per Template directory, so a create's
+	// sandboxes.template FK resolves. Idempotent across restarts.
 	if err := eng.SeedTemplates(context.Background()); err != nil {
 		log.Fatalf("orchestrator: seed builtin templates: %v", err)
 	}
 
-	// §5.C / §4.4-A orphan-VOLUME sweep, and its position here is LOAD-BEARING rather
-	// than a matter of taste: it runs BEFORE anything can create a storage unit.
-	//
-	// A leaked quota row does not reserve its own unit id, so a restart can hand that
-	// id — ALONG WITH ITS CAP — to a brand-new volume, which then meets ENOSPC on a
-	// limit nobody set for it, or is silently over-provisioned. The engine cannot
-	// detect either from the inside: the cap it reads back looks exactly like the
-	// volume's own (§5.C / volume.md D7.1). Deferring this to the reaper's first tick
-	// would leave a window in which precisely that inheritance happens, so it is
-	// ordered ahead of Reconcile (which can materialize storage while re-adopting) and
-	// ahead of serving.
-	//
-	// Non-fatal: the reaper repeats it. At boot the in-flight keep-set is empty, so
-	// every unit without a record is a true orphan.
+	// §5.C / volume.md D7.1: a leaked quota row does not reserve its own unit id, so a
+	// restart can hand that id — along with its cap — to a brand-new volume, which then
+	// meets ENOSPC on a limit nobody set for it. Undetectable from the inside afterwards:
+	// the cap reads back looking exactly like the volume's own. Hence before any create.
 	if err := eng.SweepOrphanVolumes(context.Background()); err != nil {
 		log.Printf("orchestrator: boot orphan-volume sweep (retried by reaper): %v", err)
 	}
 
-	// §5.C / volume.md D7.3 CAP REPAIR, in the same pre-creation position and for a
-	// related reason: writing a snapshot's cap is necessarily the second substrate call,
-	// so a crash in between leaves a registered, live, UNCAPPED volume — and that is
-	// invisible afterwards on its own, because the limit read cannot tell "never capped"
-	// from "deliberately uncapped". The record is re-asserted onto the storage; the
-	// reverse direction would ratify the crash residue.
+	// §5.C / volume.md D7.3: writing a snapshot's cap is necessarily the second substrate
+	// call, so a crash between them leaves a live UNCAPPED volume that no later read can
+	// distinguish from a deliberately uncapped one. The record is re-asserted onto the
+	// storage — the reverse direction would ratify the crash residue.
 	if err := eng.RepairVolumeCaps(context.Background()); err != nil {
 		log.Printf("orchestrator: boot volume-cap repair (retried by reaper): %v", err)
 	}
 
-	// §5.C / volume.md D7 LEAKED QUOTA ROWS. A leaked row does not reserve its own unit
-	// id, so a remount can hand that id — along with its cap — to a brand-new volume.
-	// Runs here, before anything creates a unit, for exactly that reason.
+	// §5.C / volume.md D7: the same id-plus-cap inheritance, from the quota-row side.
 	if err := eng.ReclaimQuotaRows(context.Background()); err != nil {
 		log.Printf("orchestrator: boot quota-row reclamation (retried by reaper): %v", err)
 	}
 
-	// §2.4 invariant 2's second half: the ENGINE-LEVEL table pinning the second hop,
-	// installed once here. BEFORE serving, and before Reconcile adopts anything, for
-	// the same reason the per-sandbox rules go on before the isolated unit runs — a
-	// `via[]` declaration live while that table is absent is an unpinned confused
-	// deputy, and the symptom is a floor counter that does not move rather than an
-	// error (network.md D5 ㉔).
-	//
-	// FATAL rather than logged, unlike the sweeps above: those are retried by the
-	// reaper, while this one has no retry and its absence is a silent security gap.
-	// With no --via-uid it installs nothing (and removes a stale table from a previous
-	// run), which is not a gap — `via[]` is refused at the write point instead.
+	// §2.4 invariant 2's second half: the engine-level table pinning the second hop. A
+	// live `via[]` declaration without it is an unpinned confused deputy whose symptom is
+	// a floor counter that does not move rather than an error (network.md D5 ㉔) — so this
+	// one is fatal, having no retry. With no --via-uid it installs nothing and removes a
+	// stale table from a previous run; `via[]` is refused at the write point instead.
 	if err := eng.InstallSecondHopTable(context.Background()); err != nil {
 		log.Fatalf("orchestrator: install the second-hop table (§2.4 invariant 2): %v", err)
 	}
 
-	// §4.4-A startup reconciliation BEFORE serving: reclaim orphan placements
-	// left by a prior crash + re-adopt survivors so they are addressable again.
+	// §4.4-A: reclaim orphan placements left by a prior crash, re-adopt survivors.
 	if err := eng.Reconcile(context.Background()); err != nil {
 		log.Fatalf("orchestrator: startup reconciliation: %v", err)
 	}
 
-	// §5.B / §4.4-A orphan-layer sweep at boot: reclaim any Promote-built layer bytes with
-	// no live templates row (e.g. a Promote that crashed after writing the layer
-	// but before inserting the row — bytes-first, §5.B). Non-fatal; the reaper
-	// repeats it. buildingLayers is empty at boot, so a crashed-Promote staging
-	// layer is correctly a true orphan.
+	// §5.B: layer bytes with no live templates row — a Promote that crashed after writing
+	// the layer and before inserting the row (bytes-first).
 	if err := eng.SweepOrphanLayers(context.Background()); err != nil {
 		log.Printf("orchestrator: boot orphan-layer sweep (retried by reaper): %v", err)
 	}
 
-	// §4.4-A orphan-UNIT sweep at boot: reclaim Overlay storage units backing no
-	// sandbox row — the residue of any destroy whose byte reclamation failed in a
-	// previous run (§4.4 licenses the deferral; this is the retry). Boot is where it
-	// pays off most: the in-flight keep-set is empty, so every unrecorded unit is a
-	// true orphan. Runs after Reconcile, which decides which records survive.
-	// Non-fatal; the reaper repeats it each tick.
+	// §4.4-A: Overlay units backing no sandbox row — residue of a destroy whose byte
+	// reclamation failed in a previous run (§4.4 licenses the deferral; this is the retry).
 	if err := eng.SweepOrphanOverlays(context.Background()); err != nil {
 		log.Printf("orchestrator: boot orphan-unit sweep (retried by reaper): %v", err)
 	}
 
-	// The three background loops — outbox publisher (§4.4-C), its health monitor, and
-	// the §4.3 reaper — are started here, AFTER startup reconcile so none of them races
-	// the boot-time orphan reclaim / re-adoption.
-	//
-	// THE ASSEMBLY OWNS THEIR LIFETIME, not this file, and that is deliberate: stopping
-	// them is a middle step of Engine.Shutdown's five-step sequence (after readiness
-	// flips, before the store closes). Holding them here would mean splitting Shutdown
-	// open to inject that step, which is how the teardown order came to be stated in one
-	// place and executed in another. Tuning lives in orchestrator.LoopConfig; the zero
-	// value is the production cadence.
+	// Publisher (§4.4-C), its health monitor, and the §4.3 reaper. THE ASSEMBLY OWNS THEIR
+	// LIFETIME: stopping them is a middle step of Engine.Shutdown, so holding them here
+	// would state the teardown order in one place and execute it in another.
 	eng.StartLoops(orchestrator.LoopConfig{})
 
-	// The published case is logged as a WARNING at the moment of serving, not merely
-	// permitted by the flag (ADR-0007): the flag records the decision in `ps` output,
-	// and this records it in the log an operator reads afterwards when asking why an
-	// unauthenticated control plane is reachable.
+	// Logged as well as flagged (ADR-0007): the flag records the decision in `ps`, this
+	// records it where an operator looks when asking why the control plane is reachable.
 	if *insecure {
 		log.Printf("WARNING: --insecure-listen: serving the §6.1 API on %s, which is NOT loopback. "+
 			"The API has NO authentication and NO TLS, so anything that can route to this host can "+
@@ -189,17 +147,10 @@ func main() {
 
 	srv := &http.Server{Addr: *addr, Handler: eng.HTTPHandler()}
 
-	// SIGTERM / SIGINT → graceful shutdown. `cmd/sandboxd` is the in-repo precedent
-	// for the shape (signal.Notify in the init path); what differs is what the signal
-	// MEANS here, and that difference is the design:
-	//
-	// A SANDBOX IS NOT A REQUEST, so this does NOT pause running sandboxes. They keep
-	// running, and the next boot re-adopts them (§4.4-A takeover: the same placement,
-	// the same IP, no new epoch). Pausing on the way out would be the larger blast
-	// radius, not the safer one — a pause discards guest memory (§4.2 stores none,
-	// permanently), so restarting the orchestrator to change a flag would destroy
-	// every guest's in-memory work. Engine.Shutdown's comment carries the full
-	// argument.
+	// A SANDBOX IS NOT A REQUEST: the drain does not pause running sandboxes, it leaves
+	// them running for the next boot to re-adopt (§4.4-A takeover). Pausing would be the
+	// larger blast radius — a pause discards guest memory (§4.2 stores none), so a restart
+	// to change a flag would destroy every guest's in-memory work. Engine.Shutdown argues it.
 	sigCh := make(chan os.Signal, 2)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 	go func() {
@@ -207,10 +158,9 @@ func main() {
 		log.Printf("orchestrator: %v — draining. Running sandboxes are LEFT RUNNING and re-adopted at "+
 			"the next boot (§4.4-A); in-flight requests have %s to finish", sig, *shutdownTO)
 
-		// A SECOND signal stops immediately. An operator who sends TERM twice means
-		// it, and a hard stop is survivable by construction (§4.4-A) — so refusing to
-		// honor it would just push them to SIGKILL, which is the same exit with the
-		// store closed less cleanly.
+		// A second signal stops immediately: a hard stop is survivable by construction
+		// (§4.4-A), so refusing would only push the operator to SIGKILL — the same exit
+		// with the store closed less cleanly.
 		go func() {
 			s2 := <-sigCh
 			log.Printf("orchestrator: second %v — exiting now without waiting for the drain", s2)
@@ -219,10 +169,8 @@ func main() {
 
 		ctx, cancel := context.WithTimeout(context.Background(), *shutdownTO)
 		defer cancel()
-		// ONE CALL, ONE DEADLINE. Every step of the teardown and every wait inside it
-		// belongs to Engine.Shutdown, which is what keeps the order in a single place and
-		// keeps --shutdown-timeout bounding all of it. See its comment for the sequence
-		// and for why the loops stop before the HTTP drain.
+		// One call, one deadline: every step and every wait belongs to Engine.Shutdown, so
+		// -shutdown-timeout bounds all of it. Its comment has the sequence.
 		err := eng.Shutdown(ctx, srv)
 		if err != nil && !errors.Is(err, context.DeadlineExceeded) {
 			log.Printf("orchestrator: shutdown: %v", err)
@@ -232,10 +180,8 @@ func main() {
 		os.Exit(0)
 	}()
 
-	// READY only now: everything above — the seed, the sweeps, the second-hop table,
-	// §4.4-A reconciliation — had to finish first, because /readyz answering "ok"
-	// before reconciliation would tell a load balancer to send traffic to a process
-	// that has not yet re-adopted its running sandboxes.
+	// Ready only now: /readyz answering ok before reconciliation would send a load
+	// balancer's traffic to a process that has not yet re-adopted its running sandboxes.
 	eng.MarkReady()
 
 	log.Printf("orchestrator: serving §6.1 API on %s (templates=%s state=%s store=%s)", *addr, *templates, *state, *storePath)

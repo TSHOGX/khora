@@ -284,45 +284,34 @@ func unmarshalNetwork(s string) (model.NetworkDecl, error) {
 	return d.Normalize(), nil
 }
 
-// Store is the authoritative control-plane record backend (§1.1 / §4.4-C). It is
-// a Behavior seam (§1.3): the transition methods PROMISE "lifecycle-state change
-// + outbox append = single atomic commit" and each backend DELIVERS it — SQLite
-// via BEGIN/COMMIT, Memory via a single mutex over map+slice. The
-// no-capability-branch rule in this file's package doc applies to every method
-// below.
+// Store is the authoritative control-plane record backend (§1.1 / §4.4-C) and a Behavior seam
+// (§1.3): the transition methods PROMISE "lifecycle-state change + outbox append = single
+// atomic commit" and each backend DELIVERS it — SQLite via BEGIN/COMMIT, Memory via one mutex
+// over map+slice. The package doc's no-capability-branch rule applies to every method below.
 //
-// # The outbox sequence contract (§4.4-C), which every backend must deliver
+// # The outbox sequence contract (§4.4-C)
 //
-// Two promises, stated HERE rather than left to whatever the backend happens to
-// do, because the whole point of invariant C is that the interface promises and
-// the backend delivers — never that the algorithm asks the backend what it
-// supports and branches:
+// Two promises stated HERE rather than left to the backend, because invariant C is exactly
+// "the interface promises, the backend delivers" — never "the algorithm asks what the backend
+// supports and branches":
 //
-//  1. TOTAL ORDER. Every appended Event gets a Seq that is unique and strictly
-//     increasing in append order. Reads that return events return them in Seq
-//     order.
+//  1. TOTAL ORDER. Every appended Event gets a unique Seq, strictly increasing in append
+//     order, and reads return events in Seq order.
 //
-//  2. NO VISIBILITY GAP. Once an event with Seq = N is VISIBLE to a reader, no
-//     event with Seq < N may become visible afterwards. A subscriber that has
-//     consumed through N and resumes from after=N has therefore not skipped
-//     anything, which is the entire basis on which a cursor is safe to persist.
+//  2. NO VISIBILITY GAP. Once Seq = N is visible to a reader, no event with Seq < N may become
+//     visible afterwards — the entire basis on which a cursor is safe to persist.
 //
-// Promise 2 is the non-obvious one, and it is a real defect class rather than a
-// hypothetical: assign the sequence at INSERT but make the row visible at
-// COMMIT, and two concurrent producers interleave — tx1 takes 5, tx2 takes 6,
-// tx2 commits first, a reader consumes 6 and advances its cursor, and 5 then
-// appears BEHIND an already-delivered later event and is never seen. Serializing
-// the READERS (a lock around the drain) does not help; the ordering is broken on
-// the PRODUCER side.
+// Promise 2 is the non-obvious one and a real defect class: assign the sequence at INSERT but
+// make the row visible at COMMIT, and two producers interleave — tx1 takes 5, tx2 takes 6, tx2
+// commits first, a reader consumes 6 and advances, and 5 appears behind an already-delivered
+// event and is never seen. Serializing the READERS does not help; the break is on the producer
+// side.
 //
-// SQLite delivers promise 2 by serializing write transactions outright (a second
-// INSERT while another write transaction is open is refused with SQLITE_BUSY, so
-// "took a lower sequence, committed later" cannot arise) and Memory by appending
-// under the one mutex that also assigns the number. Neither is a licence to
-// treat this as a backend quirk: a backend that permits genuinely concurrent
-// write transactions (Postgres with a BIGSERIAL default) MUST add a watermark
-// gate — publish a sequence as visible only once every lower sequence has
-// committed — or it does not satisfy this interface. storetest asserts it.
+// SQLite delivers it by serializing write transactions outright, Memory by appending under the
+// mutex that assigns the number. Neither makes it a backend quirk: a backend permitting
+// genuinely concurrent write transactions (Postgres with BIGSERIAL) MUST add a watermark gate
+// — a sequence becomes visible only once every lower one has committed — or it does not
+// satisfy this interface. storetest asserts it.
 type Store interface {
 	// CreateSandbox inserts a new sandbox record in state `creating`, appending
 	// ev in the same commit if non-nil (§4.4-C). Returns ErrConflict on a
@@ -415,33 +404,25 @@ type Store interface {
 	// and 0 (never trim) is the engine's default, so a deployment that sets nothing
 	// never reaches this.
 	//
-	// Four properties, each of which has a wrong answer that looks reasonable:
+	// Four properties, each with a wrong answer that looks reasonable:
 	//
-	//   - AGE IS MEASURED FROM DELIVERY (published_at), never from occurrence. The
-	//     publisher's poison exit does not release itself, so a halted stream can be
-	//     resumed days later and deliver its backlog with fresh delivery times but
-	//     ancient occurred_at. Ageing on the latter would make that backlog instantly
-	//     trimmable at the moment of first delivery — deleting events no subscriber
-	//     ever had the chance to fetch, the one failure at-least-once exists to
-	//     prevent.
-	//   - DELIVERED ROWS ONLY, and that floor is STRUCTURAL rather than a check to
-	//     remember: the publisher drains in Seq order and stops at the first failure,
-	//     so the delivered set is always a PREFIX of the sequence, and adding the
-	//     delivery predicate makes the trimmable set a prefix of a prefix. Trim
-	//     therefore cannot outrun the publisher, and it must NOT consult the halt
-	//     latch to achieve that — the halted head is by definition undelivered, so
-	//     the natural predicate already stops below it.
-	//   - THE NEWEST ROW IS NEVER TRIMMED, even when it qualifies. Emptying the table
-	//     makes the window bounds read 0/0, which is INDISTINGUISHABLE from "nothing
-	//     ever happened" — so a stale cursor would be neither served nor refused, and
-	//     a caller would read "I am caught up" and silently skip everything trimmed.
-	//     That is precisely the silent short page §6.1's 410 exists to prevent,
-	//     arriving through the mechanism meant to activate it. Retaining one row keeps
-	//     the bounds truthful for the price of one row.
-	//   - BOUNDED BY limit, for the same reason the drain read is: the delete runs on
-	//     a backend whose write path may be serialized, so an unbounded delete holds
-	//     that path for its whole duration and every state transition waits behind it.
-	//     The caller re-runs on its next tick; there is no need to catch up at once.
+	//   - AGE IS MEASURED FROM DELIVERY (published_at), never occurrence. A halted stream can
+	//     be resumed days later and deliver its backlog with fresh delivery times but ancient
+	//     occurred_at; ageing on the latter would make that backlog instantly trimmable at
+	//     first delivery, deleting events no subscriber ever had a chance to fetch.
+	//   - DELIVERED ROWS ONLY, and structurally so: the publisher drains in Seq order and
+	//     stops at the first failure, so the delivered set is a PREFIX and the trimmable set a
+	//     prefix of a prefix. Trim cannot outrun the publisher, and must NOT consult the halt
+	//     latch to achieve it — the halted head is undelivered, so the predicate already stops
+	//     below it.
+	//   - THE NEWEST ROW IS NEVER TRIMMED, even when it qualifies: an empty table reads 0/0,
+	//     indistinguishable from "nothing ever happened", so a stale cursor is neither served
+	//     nor refused and the caller reads "caught up" while silently skipping everything
+	//     trimmed — the silent short page §6.1's 410 exists to prevent, arriving through the
+	//     mechanism meant to activate it. One retained row keeps the bounds truthful.
+	//   - BOUNDED BY limit, like the drain read: the delete runs on a possibly-serialized write
+	//     path, and an unbounded one holds it while every state transition waits. The caller
+	//     re-runs next tick.
 	//
 	// Trimming advances the window's lower bound, which is what makes §6.1's 410
 	// reachable — it is unreachable while nothing is ever deleted.
@@ -576,39 +557,30 @@ type Store interface {
 	// CreateMounts inserts a sandbox's COMPLETE binding atomically, enforcing the
 	// exclusive lease — the ONE new store invariant Volume introduces (§5.C).
 	//
-	// THE JUDGMENT AND THE INSERT MUST NOT BE SEPARABLE. A mediator-side pre-check
-	// followed by an insert does NOT work, and this is a real measured TOCTOU rather
-	// than a theoretical one: two concurrent creates mint two fresh SandboxIDs and so
-	// hold two DISJOINT transition locks, meaning nothing serializes them against each
-	// other — the only lock held at that instant is each sandbox's own. Measured: 8
-	// racers, no scheduling hooks, broke the lease 2 times in 4000 iterations, and it
-	// reproduces every time with an explicit scheduling point. This is the same reason
-	// the admission gate needs its own mutex (a node-global invariant cannot be
-	// enforced by per-sandbox locks).
+	// THE JUDGMENT AND THE INSERT MUST NOT BE SEPARABLE — a measured TOCTOU, not a theoretical
+	// one: two concurrent creates mint two fresh SandboxIDs and so hold two DISJOINT transition
+	// locks, with nothing serializing them against each other. Measured: 8 racers, no scheduling
+	// hooks, broke the lease 2 times in 4000 iterations, and every time with an explicit
+	// scheduling point. Same reason the admission gate needs its own mutex — a node-global
+	// invariant cannot be enforced by per-sandbox locks.
 	//
-	// So the BACKEND arbitrates: one statement expressing the whole cross-row
-	// predicate, serialized by the single authoritative store. This is NOT a new
-	// mechanism — it is §4.3's reference-reclaim shape (one authoritative store
-	// serializing judgment-and-action) applied to a second invariant. SQLite delivers
-	// it with INSERT…SELECT…WHERE NOT EXISTS inside one transaction; Memory under the
-	// one mutex it already holds. No new lock class on either side.
+	// So the BACKEND arbitrates: one statement expressing the whole cross-row predicate,
+	// serialized by the single authoritative store. Not a new mechanism — §4.3's
+	// reference-reclaim shape applied to a second invariant, delivered by SQLite with
+	// INSERT…SELECT…WHERE NOT EXISTS in one transaction and by Memory under its existing mutex.
 	//
-	// The INVARIANT, stated precisely (§5.C): a volume has AT MOST ONE `exclusive`
-	// mount row, AND that row does not coexist with ANY other mount row for that
-	// volume. Note what it is NOT: "at most one rw row" would contradict
-	// SharedReadWrite's whole fanout.
+	// The INVARIANT (§5.C): a volume has AT MOST ONE `exclusive` mount row, and that row does
+	// not coexist with ANY other row for that volume. Note what it is not — "at most one rw row"
+	// would contradict SharedReadWrite's whole fanout.
 	//
-	// ALL-OR-NOTHING across the whole binding: if any one mount loses the lease, NONE
-	// is inserted. A sandbox holds one complete binding, so a partially-applied
-	// binding is not a state the model has.
+	// ALL-OR-NOTHING across the binding: if one mount loses the lease, none is inserted, since a
+	// partially-applied binding is not a state the model has.
 	//
-	// Verdicts: ErrMountLeaseConflict when the lease is contended;
-	// ErrMountBindingInvalid when the submitted binding contradicts itself (duplicate
-	// destination, duplicate volume, or nesting); ErrNotFound / ErrVolumeNotFound when
-	// a referenced sandbox or volume does not exist (the reference side of §4.3
-	// atomicity). Paths MUST already be normalized by the caller — the uniqueness
-	// assertions are literal string comparisons, so an un-normalized path makes them
-	// silently not apply.
+	// Verdicts: ErrMountLeaseConflict for a contended lease; ErrMountBindingInvalid for a
+	// binding contradicting itself (duplicate destination, duplicate volume, nesting);
+	// ErrNotFound / ErrVolumeNotFound for an absent endpoint (§4.3's reference side). Paths MUST
+	// arrive normalized — the uniqueness assertions are literal string comparisons, so an
+	// un-normalized path makes them silently not apply.
 	CreateMounts(ctx context.Context, mounts []model.Mount) error
 
 	// ReplaceMounts swaps one sandbox's COMPLETE binding for another — the write point
@@ -616,44 +588,34 @@ type Store interface {
 	// "detach everything" (§6.2: PATCH swaps whole bindings, there is no attach-one /
 	// detach-one operation), so it is not a special case and not a no-op.
 	//
-	// THE REPLACEMENT IS ONE ATOMIC COMMIT, AND THAT IS A CONTRACT PROMISE, not an
-	// implementation detail of one backend. §6.2 says a sandbox holds one complete
-	// binding at EVERY INSTANT; two independent commits (delete, then insert) contradict
-	// that literally, because between them the sandbox holds NO binding and that state is
-	// observable. Note what the order cannot fix: the delete MUST precede the insert — a
-	// re-submitted IDENTICAL binding would otherwise collide with the very rows it is
-	// replacing, on both the lease predicate and UNIQUE(sandbox, path) — so the answer is
-	// not to reorder the two statements but to put them in ONE commit.
+	// THE REPLACEMENT IS ONE ATOMIC COMMIT, as a contract promise rather than one backend's
+	// detail: §6.2 says a sandbox holds one complete binding at EVERY INSTANT, and two commits
+	// (delete, then insert) contradict that literally, since between them it holds none and that
+	// state is observable. Reordering cannot fix it — the delete MUST precede the insert, or a
+	// re-submitted identical binding collides with the rows it is replacing on both the lease
+	// predicate and UNIQUE(sandbox, path). One commit is the answer.
 	//
-	// Three consequences, each a real defect of the two-commit shape rather than a
-	// theoretical one:
+	// Three real defects of the two-commit shape:
 	//
-	//  1. A REFUSED replacement leaves the sandbox on its OLD binding. There is no
-	//     "the new binding was rejected AND the old one is gone" outcome, so no
-	//     compensating re-insert is needed — and a compensation path for a state the
-	//     model denies is exactly the kind of code whose comment and behavior drift apart.
-	//  2. THE EXCLUSIVE LEASE IS NEVER TRANSIENTLY RELEASED. The lease IS the row (§5.C),
-	//     so a window with no rows is a window with no lease: a concurrent create could
-	//     take a volume THIS replacement intended to keep, and the caller who asked to
-	//     keep it would get a 409 for a lease it never gave up.
+	//  1. A REFUSED replacement leaves the sandbox on its OLD binding. There is no "new binding
+	//     rejected AND old one gone" outcome, so no compensating re-insert — and a compensation
+	//     path for a state the model denies is code whose comment and behavior drift apart.
+	//  2. THE EXCLUSIVE LEASE IS NEVER TRANSIENTLY RELEASED. The lease IS the row (§5.C), so a
+	//     window with no rows is a window with no lease: a concurrent create could take a volume
+	//     this replacement meant to keep, and the caller would get a 409 for a lease it never
+	//     gave up.
 	//  3. A CONCURRENT ListMountsByVolume NEVER OBSERVES ZERO ROWS. That query is the
-	//     write-regime predicate (§5.C direct write): "no mount rows" means "nobody has
-	//     it mounted, a direct host-side write is safe", so the intermediate state would
-	//     wrongly ADMIT a direct write against a volume a live sandbox is holding.
+	//     write-regime predicate (§5.C): "no mount rows" means a direct host-side write is safe,
+	//     so the intermediate state would admit one against a volume a live sandbox holds.
 	//
-	// THIS IS NOT A TRANSACTION ON THE SEAM. It is §4.4-C's discipline applied a second
-	// time: the INTERFACE METHOD promises the atomicity and each backend honors it BY ITS
-	// OWN MEANS (SQLite with one local transaction, Memory by replacing the rows under
-	// the one mutex it already holds). There is ONE algorithm, and it must never branch
-	// on "does this backend support transactions" — that would leak backend differences
-	// into correctness, which §4.4-C rejects outright.
+	// NOT A TRANSACTION ON THE SEAM — §4.4-C's discipline a second time: the method promises
+	// atomicity, each backend honors it by its own means, and the one algorithm never branches
+	// on "does this backend support transactions".
 	//
-	// Verdicts are exactly CreateMounts's, because the API maps them to the same status
-	// codes: ErrMountLeaseConflict for a contended lease (409), ErrMountBindingInvalid
-	// for a binding that contradicts itself (400) — including a row whose Sandbox is not
-	// the `sandbox` being rebound, which would otherwise delete one sandbox's rows and
-	// insert another's — ErrNotFound / ErrVolumeNotFound when an endpoint is absent.
-	// Paths MUST already be normalized by the caller, same as CreateMounts.
+	// Verdicts are exactly CreateMounts's, mapping to the same status codes:
+	// ErrMountLeaseConflict (409), ErrMountBindingInvalid (400) — including a row whose Sandbox
+	// is not the one being rebound, which would delete one sandbox's rows and insert another's —
+	// ErrNotFound / ErrVolumeNotFound for an absent endpoint. Paths arrive normalized.
 	ReplaceMounts(ctx context.Context, sandbox model.SandboxID, next []model.Mount) error
 
 	// ListMounts returns one sandbox's mount rows, ordered by path. This is what a
@@ -676,23 +638,17 @@ type Store interface {
 	//
 	// Idempotent (no rows → nil): destroy, unwind and evict all reach it.
 	//
-	// IT SURVIVES ReplaceMounts RATHER THAN COLLAPSING INTO IT, and the distinction is
-	// semantic, not stylistic. Every remaining caller is a TEARDOWN: destroy, create's
-	// unwind, evict, reconcile's cleanup. Those have no "next" binding — the sandbox
-	// itself is going away — so `ReplaceMounts(id, nil)` would misdescribe them as a
-	// rebind to the empty binding and would drag in the endpoint-existence verdicts a
-	// teardown must not care about (it runs precisely when the row is about to vanish).
-	// A rebind, conversely, must NEVER be expressed as this call plus CreateMounts: that
-	// is the two-commit shape ReplaceMounts exists to forbid.
+	// IT SURVIVES ReplaceMounts RATHER THAN COLLAPSING INTO IT, semantically: every caller is a
+	// TEARDOWN (destroy, create's unwind, evict, reconcile's cleanup) with no "next" binding, so
+	// `ReplaceMounts(id, nil)` would misdescribe them as a rebind to the empty binding and drag
+	// in endpoint-existence verdicts a teardown must not care about. Conversely a rebind must
+	// NEVER be this call plus CreateMounts — the two-commit shape ReplaceMounts forbids.
 	//
-	// CALLERS MUST CALL THIS BEFORE DeleteSandbox, and the ORDER IS REQUIRED rather
-	// than stylistic (measured): RESTRICT fires IMMEDIATELY, so wrapping both deletes
-	// in one transaction buys NO order-independence. And `defer_foreign_keys` is
-	// REJECTED rather than untried: it does make the order irrelevant, but the
-	// violation then surfaces at Commit() — and when Go's Tx.Commit() returns an error
-	// SQLite has NOT rolled back, so on the pinned single connection the transaction
-	// stays open and subsequent pooled queries run INSIDE it, seeing uncommitted state
-	// no other handle can see. That is a store-level correctness risk, not a style
-	// preference.
+	// CALLERS MUST CALL THIS BEFORE DeleteSandbox, and the order is required (measured): RESTRICT
+	// fires IMMEDIATELY, so wrapping both deletes in one transaction buys no order-independence.
+	// `defer_foreign_keys` is REJECTED rather than untried — it does make the order irrelevant,
+	// but the violation then surfaces at Commit(), and when Go's Tx.Commit() returns an error
+	// SQLite has NOT rolled back: on the pinned single connection the transaction stays open and
+	// subsequent pooled queries run INSIDE it, seeing uncommitted state no other handle can see.
 	DeleteMounts(ctx context.Context, sandbox model.SandboxID) error
 }

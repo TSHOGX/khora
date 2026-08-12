@@ -127,7 +127,8 @@ authenticating TLS gateway in front of it — [`deploy/`](deploy/) has both opti
 Notable flags — `--node-disk-byte` / `--node-memory-byte` turn on no-oversubscribe admission,
 `--idle-timeout` / `--retention` set the reaping TTLs, `--publish-ip` sets the host
 address published guest ports bind to, `--shutdown-timeout` bounds the drain.
-`--help` lists all of them with their reasoning.
+`--help` lists all of them; the reasoning behind each value lives in the § or deep-dive
+the help line cites.
 
 ```sh
 curl -s localhost:8080/healthz   # liveness: is this the right process to keep running

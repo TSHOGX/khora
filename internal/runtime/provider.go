@@ -1,14 +1,12 @@
-// Package runtime is subsystem §5.A (execution substrate): runsc process
-// lifecycle and placement. Its core seam is the runtime Provider — "where and
-// with what to run an isolated process context" (§5.A).
+// Package runtime is subsystem §5.A (execution substrate): runsc process lifecycle and
+// placement. Its core seam is the runtime Provider — "where and with what to run an isolated
+// process context" (§5.A).
 //
-// The contract is deliberately expressed in POLICY + HANDLES, never host
-// primitives (§5.A ❌ list). A provider must NOT be handed "a cgroup path / a
-// netns fd / the Overlay's absolute host path" — a unit scheduled onto a remote
-// node cannot produce those, and leaking them binds the interface to a
-// host-local assumption that no non-local provider could ever satisfy. There is
-// exactly one implementation, local_runsc; the interface exists to keep the
-// abstraction boundary clean, not to support other backends today (§1.1).
+// The contract is POLICY + HANDLES, never host primitives (§5.A ❌ list): no cgroup path, no
+// netns fd, no absolute host path. A unit scheduled onto a remote node cannot produce those,
+// so leaking one binds the interface to a host-local assumption no non-local provider could
+// satisfy. There is exactly one implementation, local_runsc; the interface exists to keep the
+// boundary clean, not to support other backends today (§1.1).
 package runtime
 
 import (
@@ -17,66 +15,47 @@ import (
 	"warren/internal/ruleset"
 )
 
-// RootfsSource is the handle to an already-merged rootfs, produced by the Rootfs
-// subsystem (§5.B). The provider receives a merged rootfs to run and does NOT
-// know how it was assembled (§5.B / rootfs-overlay D4): it does not see "upper
-// path" or "lower is a Template" — only "run this rootfs".
+// RootfsSource is the handle to an already-merged rootfs produced by §5.B. The provider runs
+// it without knowing how it was assembled (rootfs-overlay D4) — no "upper path", no "lower is
+// a Template", only "run this rootfs".
 //
-// The handle shape is provider-specific: local_runsc, the sole impl, needs a
-// host path, so that is what the field carries. This is NOT the interface
-// leaking a host primitive — MergedPath is populated and consumed only by
-// local_runsc and never enters a cross-provider decision. A remote provider
-// would define a different handle shape (open-decisions §5.A: RootfsSource
-// remote form); the seam stays clean because callers never inspect it.
+// The handle shape is provider-specific: local_runsc needs a host path, so that is what the
+// field carries. Not a leak — MergedPath is populated and consumed only by local_runsc and
+// never enters a cross-provider decision, and a remote provider would define its own shape
+// (open-decisions §5.A). The seam stays clean because callers never inspect it.
 type RootfsSource struct {
 	// MergedPath is the merged overlay directory to hand to runsc as its root.
 	MergedPath string
 }
 
-// SteeringSpec is §5.D's "reachability requirement": what the provider must enforce so that
-// the sandbox's reachable set is exactly the declared one — the allow set and
-// publish endpoints derived from the declaration, plus the L0 floor and
-// default-deny. It carries the DERIVED result, not the declaration itself: §5.D
-// holds the declaration and generates rules, the provider installs them and
-// holds no authority (§5.A / §2.1 ③).
+// SteeringSpec is §5.D's "reachability requirement": what the provider must enforce so the
+// sandbox's reachable set is exactly the declared one. It carries the DERIVED result, never
+// the declaration — §5.D generates rules, the provider installs them and holds no authority
+// (§5.A / §2.1 ③).
 //
-// Two obligations ride on this field and are easy to miss because neither shows
-// up in its shape (§2.4):
-//   - Installation must be ATOMIC with placement — rules go on after the
-//     netns/veth exist and before the isolated unit runs. Any window where the
-//     network is up but the rules are not is a fail-open window, and only the
-//     side creating the placement has that hook point. Adopt/ReclaimOrphans
-//     inherit this: a rule set is crash-surviving host state, like the netns.
-//   - The predicate must bind to a fact the guest cannot change — the host-side
-//     veth's input interface, NOT the source address, which guest root can
-//     forge with `ip addr add` (measured; network.md D5 ③). That is pillar ④.
-//     Spell it `iifname` (by NAME): `iif` freezes an ifindex at load time and
-//     silently fails open after a same-name veth rebuild (network.md D5 ⑫), and
-//     the two render identically in `nft list` — §5.A makes this a guard, not a
-//     review item.
+// Two obligations ride on this field and show up nowhere in its shape (§2.4):
+//   - Installation is ATOMIC with placement: rules go on after the netns/veth exist and
+//     before the isolated unit runs, since any window where the network is up and the rules
+//     are not is fail-open, and only the placing side has that hook point. Adopt and
+//     ReclaimOrphans inherit it — a rule set is crash-surviving host state, like the netns.
+//   - The predicate binds to a fact the guest cannot change: the host-side veth's input
+//     interface, NOT the source address, which guest root forges with `ip addr add`
+//     (measured; network.md D5 ③) — pillar ④. Spelled `iifname`, by NAME: `iif` freezes an
+//     ifindex at load time and silently fails open after a same-name veth rebuild (D5 ⑫),
+//     and the two render identically in `nft list`, so §5.A makes it a guard.
 //
-// # Why the payload is an ABSTRACT rule set rather than nft text
+// The payload is an ABSTRACT rule set rather than nft text because three things the rules must
+// name are placement products only the provider holds — the host-side veth name, the guest IP,
+// and the publish host endpoint (network.md D1 ② / D6). Rendering above the seam would both
+// fail to run and lift a host primitive onto the contract, so §5.D emits placement-free rules
+// carrying Scope/Match flags where a placement product belongs. The payoff is testability:
+// declaration differences are pinned in root-free unit tests, leaving the substrate suite to
+// prove only "installed, in the right order, reconciled after a crash".
 //
-// The split is fixed by network.md D1 ② / D6: three things the rules must
-// eventually name are placement products only the provider holds — the host-side
-// veth name, the guest IP, and the publish host endpoint. Rendering here, above
-// the seam, would both fail to run (no placement exists when the rules are
-// generated) and lift a host primitive onto the cross-provider contract (the ❌
-// list above). So §5.D emits placement-FREE rules carrying Scope/Match flags
-// where a placement product belongs, and the provider substitutes the concrete
-// value at install time.
+// The vocabulary lives in `internal/ruleset`, a LEAF both sides depend on — `network`
+// importing `runtime` or the reverse is the edge internal/arch fails on.
 //
-// The payoff is testability: every difference between declaration values is
-// pinned in root-free unit tests, and the substrate suite only has to prove
-// "installed, in the right order, and reconciled after a crash".
-//
-// The rule vocabulary lives in `internal/ruleset`, a LEAF both §5.D and §5.A
-// depend on — not in either subsystem, since `network` importing `runtime` (or the
-// reverse) is exactly the edge internal/arch fails on (CLAUDE.md: shared fact →
-// leaf, never an exemption).
-//
-// (Guest identity is NOT a member: the sandbox runs as guest root and the engine
-// does not model guest users, §2.2 / §3.2.1.)
+// (Guest identity is not a member: the sandbox runs as guest root, §2.2 / §3.2.1.)
 type SteeringSpec struct {
 	// Rules is the abstract, placement-free rule set (§5.D's pure function output).
 	// Empty = install nothing, which is NOT the same as "deny nothing": a
@@ -91,29 +70,25 @@ type SteeringSpec struct {
 	// placement products either way).
 	PublishPorts []PublishPort
 
-	// RoutedEgress tells the provider whether this declaration can send anything
-	// through the host's router, i.e. whether the three host-side egress mechanisms
-	// must be put in place (network.md D5 ⑤: ip_forward, a guest default route
-	// carrying `dev`, and a masquerade for this /30 — measured necessary AND
-	// sufficient; rp_filter / proxy_arp / accept_local / per-interface forwarding
-	// are all measured unnecessary, so a provider must not add them).
+	// RoutedEgress says whether this declaration can send anything through the host's router,
+	// i.e. whether the three host-side egress mechanisms are needed (network.md D5 ⑤:
+	// ip_forward, a guest default route carrying `dev`, and a masquerade for this /30 —
+	// measured necessary AND sufficient, so a provider must not add rp_filter, proxy_arp,
+	// accept_local or per-interface forwarding, all measured unnecessary).
 	//
-	// A derived FACT rather than a knob: `via[]` alone does not need it, because a
-	// steered flow is DNAT'd to a host-local endpoint and delivered locally.
+	// A derived FACT, not a knob: `via[]` alone does not need it, since a steered flow is
+	// DNAT'd to a host-local endpoint and delivered locally.
 	RoutedEgress bool
 
-	// SecondHopUID identifies the host-local process behind `via[].endpoint`, when the
-	// DEPLOYMENT supplied it (§2.4 / §6.2: a deployment input, never a declaration
-	// field — the engine still does not know what sits behind that endpoint, only
-	// which local uid's egress must be pinned under the same floor).
+	// SecondHopUID identifies the host-local process behind `via[].endpoint` when the DEPLOYMENT
+	// supplied it — never a declaration field, the engine knowing only which local uid's egress
+	// to pin under the same floor (§2.4 / §6.2).
 	//
 	// It rides the spec rather than a separate call because the second-hop table is
-	// engine-level: one uid means one rule set regardless of sandbox count, so the
-	// provider installs it once at startup and not per placement. A pointer because
-	// uid 0 is a real uid — a value type could not tell "the operator said root"
-	// from "the operator said nothing", and those must behave oppositely. (It being
-	// a real uid does not make it a legal one: it is the engine's own, refused at
-	// assembly — network.ValidateSecondHopUID.)
+	// engine-level: one uid means one rule set regardless of sandbox count, installed once at
+	// startup. A pointer because uid 0 is a real uid, and "the operator said root" must behave
+	// oppositely from "said nothing". Real does not mean legal — it is the engine's own uid,
+	// refused at assembly (network.ValidateSecondHopUID).
 	SecondHopUID *int
 }
 
@@ -123,58 +98,40 @@ type PublishPort struct {
 	Proto     ruleset.Proto
 }
 
-// ResourceLimits is the Binding the provider materializes at placement time
-// (§3.4 / §5.A): CPU rate + RAM → cgroup for local_runsc. Disk CAPACITY is NOT
-// here — that is an FS-layer quota owned by §5.B/§5.C (§3.4), because cgroup
-// cannot cap at-rest bytes and a quota cannot cap a rate. Adding a DiskByte
-// field here would weld two orthogonal axes onto one mechanism.
+// ResourceLimits is the Binding the provider materializes at placement time (§3.4 / §5.A):
+// CPU rate + RAM → cgroup for local_runsc. PURE POLICY, numeric intent only — no cgroup path
+// appears here or anywhere in the interface (§5.A ❌ list); local_runsc synthesizes its own
+// from the cid, and a remote provider could not produce one at all.
 //
-// This carries PURE POLICY — numeric intent only. No cgroup path appears here or
-// anywhere in the Provider interface (§5.A ❌ list): local_runsc synthesizes its
-// own cgroup path internally from the cid, the same way it synthesizes netns and
-// container names. A remote provider cannot produce a cgroup path at all, and
-// accepting one would bind this contract to a host-local assumption.
+// Disk CAPACITY is deliberately elsewhere, an FS-layer quota owned by §5.B/§5.C (§3.4): cgroup
+// cannot cap at-rest bytes and a quota cannot cap a rate, so a DiskByte field here would weld
+// two orthogonal axes onto one mechanism.
 //
-// RAM is a SAFETY limit, not a resource limit (§3.4): exceeding it terminates
-// the sandbox (a lifecycle event) rather than failing one operation, because the
-// substrate offers no "guest process gets ENOMEM while the sandbox survives"
-// path. How the provider splits one MemoryByte into guest-visible RAM vs a host
-// ceiling is ITS OWN internal detail — the interface states only N (§5.A):
-// local_runsc adds a sentry/gofer overhead constant, while a remote provider's
-// overhead may be a VM balloon or a scheduler memory request. Zero = unlimited.
+// RAM is a SAFETY limit, not a resource limit (§3.4): exceeding it terminates the sandbox
+// rather than failing one operation, the substrate offering no "guest process gets ENOMEM
+// while the sandbox survives" path. How a provider splits N into guest-visible RAM vs a host
+// ceiling is its own detail — local_runsc adds a sentry/gofer constant where a remote one
+// might use a balloon or a scheduler request. Zero = unlimited.
 //
-// The disk-IO RATE cap (§3.4's other rate-axis half) is deliberately absent, and
-// that is a settled deferral, not an open question: the mechanism is proven
-// (runsc writes OCI blockIO into its leaf's io.max), the CONSUMER is what's
-// missing — so adding the field before one exists is the speculative reservation
-// §1.3 rejects. It joins additively when a consumer appears, and what joins is a
-// RATE alone: io.max needs a WHOLE-DISK MAJ:MIN, and that number is the
-// PROVIDER'S to derive (§5.A) — it is not a contract member, because a
-// per-sandbox Binding carries no host topology and a device number is a host
-// primitive no remote provider could produce. Hence the token guard in
-// seam_test.go bans `major`/`minor`/`majmin`/`devno` outright: this field would
-// be the natural place to smuggle one in.
+// The disk-IO RATE cap is a settled DEFERRAL, not an open question: the mechanism is proven
+// (runsc writes OCI blockIO into its leaf's io.max), the consumer is what's missing, and
+// adding the field first is the speculative reservation §1.3 rejects. What joins later is a
+// RATE alone — io.max needs a whole-disk MAJ:MIN, which is the PROVIDER'S to derive from the
+// paths it already holds (Rootfs.MergedPath, each Mounts[].SourcePath), never a contract
+// member. Hence seam_test.go's token guard on `major`/`minor`/`majmin`/`devno`: this struct is
+// where one would naturally be smuggled in.
 //
-// THIS SEAM IS THE RIGHT HOME FOR IT, AND NOT BY DEFAULT (§5.A / §3.4.1). The
-// external shapes look like they disagree — a microVM hangs its rate limiter off
-// the DRIVE handle, cloud block storage attaches IOPS PER VOLUME — but those
-// answer a different question: a per-volume IOPS figure is what a storage unit
-// PROMISES, while this axis caps what ONE SANDBOX may consume across its Overlay
-// upper AND every volume mounted into it. Recording it per volume would turn one
-// ceiling into N that multiply.
+// This seam is the right home for that axis, and not by default (§5.A / §3.4.1): external
+// shapes hang a rate limiter off the DRIVE handle or attach IOPS per volume, but those answer
+// what a storage unit PROMISES, while this axis caps what ONE SANDBOX consumes across its
+// Overlay upper and every volume mounted into it. Per-volume would turn one ceiling into N
+// that multiply.
 //
-// io.max being per-device does not force a contract change either: the provider
-// already receives every path whose device it must cover (Rootfs.MergedPath and
-// each Mounts[].SourcePath), so it stats them, derives each backing whole disk,
-// and writes one io.max line per distinct device — asking §5.B and §5.C nothing.
-//
-// ONE COVERAGE LIMIT TO IMPLEMENT HONESTLY, measured rather than assumed: a
-// remote volume backend's mount point is an ANONYMOUS filesystem whose st_dev
-// major is 0 (measured on a live FUSE mount), so io.max — keyed on a block-device
-// MAJ:MIN — cannot address it, and the I/O is charged to the backend daemon's own
-// cgroup regardless. So the cap covers what the guest's cgroup owns; a remote
-// backend enforces its own rate or reports the capability absent. Accepting a
-// rate it does not apply is the silent-degradation §3.4 refuses.
+// ONE COVERAGE LIMIT TO IMPLEMENT HONESTLY, measured: a remote backend's mount point is an
+// anonymous filesystem whose st_dev major is 0 (measured on a live FUSE mount), so io.max
+// cannot address it and the I/O is charged to the backend daemon's own cgroup anyway. The cap
+// covers what the guest's cgroup owns; a remote backend enforces its own rate or reports the
+// capability absent, since accepting a rate it does not apply is the degradation §3.4 refuses.
 type ResourceLimits struct {
 	CPUMillis  int64 // 1000 = one full CPU
 	MemoryByte int64
@@ -293,21 +250,16 @@ type Placement struct {
 	// signal (§4.3 placement/IP-as-epoch) — the engine does not add a counter.
 	TransportEndpoint string
 
-	// PublishEndpoints are the host `ip:port` each published guest port was bound
-	// to at this placement, in the SteeringSpec.PublishPorts order. They are what
-	// §6.1's `GET …/network` reports as `host_endpoint`.
+	// PublishEndpoints are the host `ip:port` each published guest port was bound to at this
+	// placement, in SteeringSpec.PublishPorts order — §6.1's `host_endpoint`.
 	//
-	// It is on Placement rather than in the record because that is what it IS: a
-	// placement product (§3.3), rebound every resume and invalidated with the old
-	// placement. Hence §6.1 omits the key entirely when the engine holds no live
-	// placement — a `paused` sandbox has no endpoint to report, and a falsy-but-
-	// present field would invite callers to read it as "is this publish in effect"
-	// (the same argument death_cause's omission rests on).
+	// On Placement rather than in the record because that is what it IS: a placement product
+	// (§3.3), rebound every resume and invalidated with the old placement. Hence §6.1 omits the
+	// key entirely with no live placement — a falsy-but-present field would invite callers to
+	// read it as "is this publish in effect" (death_cause's omission rests on the same argument).
 	//
-	// Not a host primitive in the ❌-list sense: it is the address the engine
-	// DELIVERS to the caller as the whole point of publish (§5.D), so a remote
-	// provider produces one too — unlike a cgroup path or a netns fd, which such a
-	// provider could not produce at all.
+	// Not a host primitive in the ❌-list sense: it is the address the engine DELIVERS as the
+	// whole point of publish (§5.D), so a remote provider produces one too.
 	PublishEndpoints []string
 
 	// handle is provider-private state for stop/start (local_runsc: the
@@ -361,19 +313,16 @@ type Provider interface {
 	//     tearing down a maybe-live container is irreversible). A provider MUST NOT
 	//     collapse this case into alive=false.
 	//
-	// The DEATH CAUSE rides the alive=false return for a hard reason (§4.3 /
-	// reaper-health D4c): the signal is placement-local and VOLATILE — for
-	// local_runsc it is the memcg leaf's oom_group_kill, destroyed by the
-	// `runsc delete` inside teardown — so this "unit is dead, placement still
-	// intact" instant is the LAST moment it is readable. There is no
-	// ask-again-later: a provider that tears down before reading has destroyed the
-	// evidence. Hence the provider MUST read it before returning, not the caller
-	// afterwards. Undeterminable → CauseUnknown, never a guess (§2.4).
+	// The DEATH CAUSE rides the alive=false return because the signal is placement-local and
+	// VOLATILE (§4.3 / reaper-health D4c): for local_runsc it is the memcg leaf's
+	// oom_group_kill, destroyed by the `runsc delete` inside teardown, so "unit dead, placement
+	// still intact" is the LAST moment it is readable. There is no ask-again-later — a provider
+	// that tears down first has destroyed the evidence. Undeterminable → CauseUnknown, never a
+	// guess (§2.4).
 	//
-	// Left-hand side is engine vocabulary (SandboxID); right-hand side is an OPAQUE
-	// handle + an ABSTRACT enum — no host primitive leaks (§5.A ❌ list). This is why
-	// placement-local resources must carry a SandboxID label — the §3.3 reverse,
-	// allowed (§4.4-A).
+	// Left-hand side is engine vocabulary (SandboxID), right-hand side an opaque handle and an
+	// abstract enum — no host primitive leaks. This is why placement-local resources carry a
+	// SandboxID label: the §3.3 reverse, allowed by §4.4-A.
 	Adopt(ctx context.Context, sandboxID string) (p *Placement, alive bool, cause DeathCause, err error)
 
 	// ReclaimOrphans tears down every engine placement whose SandboxID is NOT in
@@ -409,43 +358,36 @@ type Provider interface {
 	// on, keyed by the ABSTRACT counter name §5.D put on the rule (ruleset.Rule.Counter).
 	// It backs §6.1's per-entry `hit_packet`.
 	//
-	// The key is the seam-clean part: a counter NAME is the vocabulary §5.D generates and
-	// §5.A renders, so nothing host-shaped crosses — the same class of value as
-	// Placement.PublishEndpoints, which §5.A permits for the same reason (a remote
-	// provider has its enforcement layer's per-rule counters too, whereas it could not
-	// produce a cgroup path at all). A member named after nft would NOT be seam-clean,
-	// since that is one renderer's mechanism.
+	// A counter NAME is the vocabulary §5.D generates and §5.A renders, so nothing host-shaped
+	// crosses — the same class of value as Placement.PublishEndpoints, and permitted for the
+	// same reason. A member named after nft would NOT be seam-clean: that is one renderer's
+	// mechanism.
 	//
-	// TAKES A PLACEMENT, not a SandboxID: counters are placement-local state, so the
-	// caller must already hold one to be asking, and the absence of a placement is the
-	// answer rather than an error (§6.1 omits the key). A missing KEY in the returned map
-	// means that counter is not present in what is installed — which is a DIFFERENT fact
-	// from zero and must not be reported as zero (§2.4's acceptance discipline: a
-	// bypassed rule's only symptom is a counter that reads 0, so manufacturing zeros
-	// destroys the signal).
+	// TAKES A PLACEMENT, not a SandboxID: counters are placement-local, so a caller must already
+	// hold one to be asking, and no placement is the answer rather than an error. A MISSING KEY
+	// means that counter is absent from what is installed — a different fact from zero, and it
+	// must not be reported as zero: a bypassed rule's only symptom is a counter reading 0, so
+	// manufacturing zeros destroys the signal (§2.4).
 	//
-	// Read-only and best-effort by nature: it must not install, re-render, or otherwise
-	// touch the rule set, and a failure to read is not a placement failure.
+	// Read-only and best-effort: it must not install or re-render, and a failed read is not a
+	// placement failure.
 	RuleHits(ctx context.Context, p *Placement) (map[string]uint64, error)
 
 	// InstallSecondHop installs the ENGINE-LEVEL rule set pinning the second hop
 	// (§2.4 invariant 2's second half): the egress of the host-local process behind
 	// `via[].endpoint`, narrowed by the deployment-supplied uid.
 	//
-	// UID ONLY: `skuid` is the one narrowing predicate available on the `output` hook
-	// (D5 ㉔), and a gid clause could only be ANDed onto the floor drop — i.e. narrow
-	// the floor further, which is a second way for the pin to come off with the same
-	// invisible symptom.
+	// UID ONLY: `skuid` is the one narrowing predicate available on the `output` hook (D5 ㉔),
+	// and a gid clause could only be ANDed onto the floor drop — narrowing the floor further,
+	// a second way for the pin to come off with the same invisible symptom.
 	//
-	// Called ONCE at startup rather than per placement, because the predicate is not
-	// per-sandbox: one uid covers every `via[]` in the deployment, and hop 2's traffic
-	// arrives on no interface, so there is nothing sandbox-specific to narrow by
-	// (measured: hop 2 counts ZERO in `forward` in all three shapes and is visible
-	// only in `output` — network.md D5 ㉔).
+	// Called ONCE at startup, not per placement: one uid covers every `via[]` in the deployment,
+	// and hop 2's traffic arrives on no interface, so there is nothing sandbox-specific to
+	// narrow by (measured: hop 2 counts ZERO in `forward` in all three shapes, visible only in
+	// `output` — network.md D5 ㉔).
 	//
-	// A nil uid = the deployment supplied none: install nothing. The corresponding
-	// refusal of a `via[]` declaration happens at the write point, because a
-	// declaration whose own invariant the engine cannot enforce must be refused rather
-	// than half-honored.
+	// A nil uid means the deployment supplied none: install nothing. The matching refusal of a
+	// `via[]` declaration happens at the write point, since a declaration whose invariant the
+	// engine cannot enforce must be refused rather than half-honored.
 	InstallSecondHop(ctx context.Context, rs ruleset.RuleSet, uid *int) error
 }

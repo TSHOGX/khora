@@ -170,43 +170,27 @@ func routedEgress(d Declaration) bool {
 // SecondHopRules generates the ENGINE-LEVEL second-hop rule set (§2.4 invariant 2,
 // second half). One table, installed once when the orchestrator starts.
 //
-// # Why this is a separate table rather than a per-sandbox rule
+// A SEPARATE TABLE rather than a per-sandbox rule, because the predicate is `skuid`, not an
+// interface: hop 2 is a host-local process opening its own connection on the guest's behalf, so
+// it arrives on no interface at all. Measured, its egress counts ZERO in `forward` in all three
+// shapes and is visible only in `output` (network.md D5 ㉔) — reading §2.4's two-hook table as
+// "the forward row covers hop 2 too" yields a rule set where hop 2 is never evaluated, whose
+// symptom is a floor counter that does not move (D4.1's silent pass). And one uid means one rule
+// set regardless of sandbox count.
 //
-// The predicate is `skuid`, not an interface: hop 2 is a HOST-LOCAL process
-// opening its own connection on the guest's behalf, so it arrives on no interface
-// at all. Measured, its egress counts ZERO in `forward` in all three shapes and is
-// visible only in `output` (network.md D5 ㉔). Reading §2.4's two-hook table as
-// "the forward row covers hop 2 as well" yields a rule set in which hop 2 is never
-// evaluated — and the symptom is a floor counter that does not move, which is
-// D4.1's silent pass.
+// NO LOOP-AVOIDANCE ACCEPT. D4.2 lists two needs for this predicate at opposite positions —
+// exempt the process from re-matching its own steering rule (an accept ABOVE them) and keep it
+// under the L0 floor (a drop). The first is structurally unnecessary here: every steering DNAT
+// this generator emits is narrowed by `iifname <that sandbox's veth>` and hop 2 arrives on no
+// interface, so it cannot match one. Which matters because the alternative is unsafe — `skuid`
+// does not reliably match every packet, so a skuid-narrowed accept above a floor drop leaks
+// whatever it misses (D5 ㉔). ruleset.Validate refuses one outright; this set contains ONLY drops.
 //
-// One uid means one rule set regardless of how many sandboxes exist, hence one
-// table, installed at startup.
-//
-// # Why there is no loop-avoidance accept
-//
-// D4.2 lists two needs for this predicate with OPPOSITE positions: "exempt the
-// process from re-matching its own steering rule" (an accept ABOVE the steering
-// rules) and "keep it under the L0 floor" (a drop). The first is not needed here
-// at all, and that is a consequence of the shape rather than a shortcut: every
-// steering DNAT this generator emits is narrowed by `iifname <this sandbox's
-// veth>`, and hop 2's traffic arrives on no interface — so it CANNOT match a
-// steering rule, and the loop is structurally impossible.
-//
-// That matters because the alternative is unsafe: `skuid` does not reliably match
-// every packet of a flow, so a skuid-narrowed accept sitting above a floor drop
-// leaks whatever it misses (measured asymmetry, network.md D5 ㉔). ruleset.Validate
-// refuses such a rule outright, and this rule set contains ONLY drops.
-//
-// # What it pins, and what it does not
-//
-// It pins the L0 FLOOR against hop 2 — the confused deputy §2.4's second invariant
-// names: an "upstream" pointed at a sibling or a link-local address would
-// otherwise walk in through the side door. It does NOT apply the internal
-// deny-safe tier, because that tier is liftable BY DECLARATION and hop 2 carries
-// no declaration: there is no declaration to lift it and no sandbox to attribute
-// it to (one uid serves every `via[]` in the deployment). §2.4's obligation for
-// this hop is stated over the floor.
+// IT PINS THE L0 FLOOR against hop 2 — the confused deputy §2.4's second invariant names, where
+// an "upstream" pointed at a sibling or link-local address walks in the side door. It does NOT
+// apply the internal deny-safe tier: that tier is liftable BY DECLARATION and hop 2 carries none,
+// with no sandbox to attribute it to (one uid serves every `via[]`). §2.4's obligation for this
+// hop is stated over the floor.
 func SecondHopRules() (ruleset.RuleSet, error) {
 	g := &gen{}
 	// THE RETURN ARM, ABOVE THE FLOOR AND IN THE SAME CHAIN.

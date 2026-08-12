@@ -6,13 +6,11 @@
 // counts. §5.B (Overlay upper+work) and §5.C (per-volume caps) each import it the
 // way they import `os` (rootfs-overlay D6.4).
 //
-// WHY A PACKAGE AND NOT A SEAM. The capacity cap is shared CODE, not a shared
-// INTERFACE. There is deliberately no cross-cutting QuotaProvider: a remote FS
-// provider satisfies "this unit is at most N bytes" by entirely different means
-// (object-store quota, a quota API, client-side accounting), so a cross-cutting
-// interface would only weld the btrfs assumption into every implementation. Two
-// subsystems importing one substrate tool do NOT violate "subsystems never call
-// each other" (§4) — neither calls the OTHER; they share a utility.
+// A PACKAGE AND NOT A SEAM: the capacity cap is shared CODE, not a shared INTERFACE. A remote
+// provider satisfies "this unit is at most N bytes" by entirely different means, so a
+// cross-cutting QuotaProvider would only weld the btrfs assumption into every implementation. Two
+// subsystems importing one substrate tool do not violate "subsystems never call each other" (§4)
+// — neither calls the OTHER.
 //
 // MECHANISM CHOICE: squota, not full qgroups (rootfs-overlay D6.2). Three
 // reasons, the third decisive: (1) squota is designed for exactly this shape, one
@@ -124,36 +122,27 @@ func (c Client) CreateSubvolume(ctx context.Context, path string) error {
 // Quota-row cleanup differs by quota mode, and BOTH behaviours are handled here
 // because the mode is a deployment property, not something the engine controls:
 //
-//   - squota (the dev/test substrate, ADR-0002), unit owning NO shared extents:
-//     btrfs reclaims the row ITSELF. Measured — right after delete the row lingers
-//     briefly as `<under deletion>` and then disappears once the deletion settles;
-//     across 6 create/fill/delete cycles the filesystem's qgroup count returned to
-//     exactly its starting value. An explicit destroy here fails with ENOENT
-//     (squota owns the row), which is why the call below is best-effort. This is
-//     the ONLY squota case where best-effort suffices, and it is the case §5.B's
-//     Overlay upper is in today: the engine never snapshots an upper.
-//   - squota, unit whose extents are still referenced by a live sharer (§5.C
-//     snapshots/clones a volume, so this case is REACHABLE there): the row LEAKS.
-//     Measured — an immediate destroy returns EBUSY ("Device or resource busy"),
-//     NOT ENOENT, and the row does not self-clean (25s + 6 syncs did not move it).
-//     Its label is `<squota space holder>` while a sharer is alive and only becomes
-//     `<stale>` after the last sharer is gone; destroy succeeds exactly when the
-//     label is `<stale>`. The exact predicate for leaking is: the unit (i) owns
-//     extents AND (ii) is deleted while a live sharer still references them —
-//     "was snapshotted" is not the predicate, and having a cap is irrelevant.
-//     Reclaiming these rows is NOT cosmetic: nothing reserves a leaked row's
-//     subvolume id, so a remount can hand that id — and its cap — to a brand-new
-//     unit, which then hits ENOSPC on a limit nobody set for it (or gets silently
-//     over-provisioned), and Usage() cannot tell the difference. That reclamation
-//     belongs to the volume orphan sweep, which polls the label and destroys on
-//     `<stale>` (deleting sharers BEFORE sources leaks nothing at all); see
-//     docs/spec/deep-dives/volume.md D7.
-//   - full qgroup mode: the row does NOT go away on its own and must be destroyed,
-//     or rows accumulate one per destroyed sandbox.
+//   - squota (ADR-0002), unit owning NO shared extents: btrfs reclaims the row ITSELF.
+//     Measured — the row lingers briefly as `<under deletion>` then disappears, and across 6
+//     create/fill/delete cycles the qgroup count returned to exactly its starting value. An
+//     explicit destroy fails ENOENT, which is why the call below is best-effort. The ONLY squota
+//     case where that suffices, and the case §5.B's Overlay upper is in: the engine never
+//     snapshots an upper.
+//   - squota, unit whose extents a live sharer still references (REACHABLE via §5.C
+//     snapshot/clone): the row LEAKS. Measured — an immediate destroy returns EBUSY, not ENOENT,
+//     and the row does not self-clean (25 s + 6 syncs did not move it). Its label is `<squota
+//     space holder>` while a sharer lives and `<stale>` after the last one goes; destroy
+//     succeeds exactly on `<stale>`. The predicate for leaking is (i) owns extents AND (ii)
+//     deleted while a live sharer references them — not "was snapshotted", and a cap is
+//     irrelevant. Reclaiming is not cosmetic: nothing reserves a leaked row's subvolume id, so a
+//     remount can hand that id and its cap to a brand-new unit that then hits ENOSPC on a limit
+//     nobody set, and Usage() cannot tell. Reclamation belongs to the volume orphan sweep, which
+//     polls the label and destroys on `<stale>` (volume.md D7).
+//   - full qgroup mode: the row does NOT self-clean and must be destroyed, or rows accumulate
+//     one per destroyed sandbox.
 //
-// So the destroy is attempted and its error ignored: required in one mode, a
-// harmless ENOENT or a to-be-swept EBUSY in the other. Verifying "no stale row
-// remains" belongs to the caller's acceptance, not to this function's return.
+// So the destroy is attempted and its error ignored: required in one mode, a harmless ENOENT or
+// a to-be-swept EBUSY in the other. Verifying "no stale row remains" is the caller's acceptance.
 //
 // Idempotent: a path that is absent, or not a subvolume, is a no-op — reclamation
 // is retried from several paths (destroy, unwind, orphan sweep) and must never

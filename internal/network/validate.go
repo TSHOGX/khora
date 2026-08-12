@@ -351,49 +351,34 @@ func (dep Deployment) SecondHopPinned() bool { return dep.SecondHopUID != nil }
 // ValidateSecondHopUID refuses a second-hop uid equal to the ENGINE'S OWN effective
 // uid, at assembly time and before any table is installed.
 //
-// # It kills the transport plane, and the mechanism is the engine's own topology
+// IT KILLS THE TRANSPORT PLANE via the engine's own topology: the floor arm is `meta skuid
+// <uid> ip daddr {…, 10.66.0.0/16} drop` on the engine-level `output` chain, whose daddr set
+// contains ruleset.SandboxCIDR — the /16 every guest /30 comes from. The transport endpoint IS
+// a guest veth IP:port dialed BY THIS PROCESS, so under the engine's own uid every engine→guest
+// dial is dropped: the readiness gate, the reaper's liveness probe, every process/fs RPC.
 //
-// The second-hop floor arm is `meta skuid <uid> ip daddr {…, 10.66.0.0/16} drop` on
-// the engine-level `output` chain, and that daddr set contains ruleset.SandboxCIDR —
-// the /16 every guest /30 is carved out of. Meanwhile the transport endpoint IS a
-// guest veth IP:port, dialed BY THIS PROCESS from the host. So with `uid` == the
-// engine's own uid, every engine→guest dial matches the arm and is dropped: the
-// readiness gate, the reaper's liveness probe, every process/fs RPC and `/files`.
+// The `hop2_established` arm does not save it BY DESIGN: it matches `ct state
+// established,related` while the engine's dial is the SYN — exactly what that arm excludes so a
+// new connection to an in-floor address still meets the floor (§2.4 invariant 2).
 //
-// The `hop2_established` return arm does not save it, BY DESIGN: it matches
-// `ct state established,related`, and the engine's dial is the SYN, i.e. `ct state
-// new` — precisely what that arm excludes so a new connection to an in-floor address
-// still meets the floor (§2.4 invariant 2). The one rule that would have to admit
-// this traffic is the one rule this table must never carry.
+// REFUSED RATHER THAN WORKED AROUND: a `skuid` accept above the floor is unavailable, since
+// skuid misses packets and such an accept leaks whatever it misses (measured, network.md D5 ㉔;
+// ruleset.Validate refuses one outright). And there is nothing to narrow the engine's own dial
+// by — it arrives on no interface and its destination is the in-floor address itself. The two
+// obligations are irreconcilable under one uid, so the input is illegal, not awkward.
 //
-// # Why it is refused rather than worked around
+// AT STARTUP rather than the write point: the table is engine-level, so the damage lands on
+// every sandbox at once, including ones with no `via[]`. By the time a `via[]` arrives the table
+// has been installed for a while and the engine is already dialing through a floor that drops
+// it — and the failure is INTERMITTENT, skuid matching ~4/5 packets of a flow (D5 ㉔), so it
+// presents as flaky sandboxes rather than a broken deployment.
 //
-// A `skuid` accept above the floor is not available: skuid misses packets, so such an
-// accept leaks whatever it misses past the floor it sits above (measured, network.md
-// D5 ㉔) — ruleset.Validate refuses one outright. And there is nothing to narrow the
-// engine's own dial by: it arrives on no interface, and its destination is exactly the
-// in-floor address the arm names. The two obligations are genuinely irreconcilable
-// under one uid, so the input is illegal, not merely awkward.
+// NOT ValidateDeployment's ninth class: that judges "a declaration meets a deployment that gave
+// NO uid", a per-request 400 whose occasion is a request. This needs no declaration to be wrong
+// and must not wait for one.
 //
-// # Why STARTUP rather than the write point
-//
-// The table is engine-level, so the damage is not scoped to a declaration or to a
-// sandbox: it lands on every sandbox at once, including ones with no `via[]` at all.
-// By the time a `via[]` declaration arrives the table has been installed for a while
-// and the engine is already dialing through a floor that drops it. Worse, the failure
-// is INTERMITTENT rather than deterministic — skuid matches ~4/5 packets of a flow
-// (D5 ㉔) — so it presents as flaky sandboxes rather than as a broken deployment.
-//
-// # Why it is NOT ValidateDeployment's ninth class
-//
-// ValidateDeployment judges "a declaration meets a deployment that gave NO uid" — a
-// per-request 400 whose remedy is an operator's but whose occasion is a request. This
-// judges "the deployment gave a uid that makes the engine drop its own traffic", which
-// needs no declaration to be wrong and must not wait for one.
-//
-// euid is a PARAMETER rather than an os.Geteuid() call here, the same shape and for
-// the same reason as HostLocal: the assertion is then pinned in a root-free unit test
-// against a fixture instead of against whatever uid the test process happens to run as.
+// euid is a PARAMETER rather than an os.Geteuid() call, like HostLocal: the assertion is then
+// pinned in a root-free unit test against a fixture rather than the test process's own uid.
 func ValidateSecondHopUID(dep Deployment, engineEUID int) error {
 	if dep.SecondHopUID == nil || *dep.SecondHopUID != engineEUID {
 		return nil
@@ -426,40 +411,28 @@ var ErrViaUnenforceableAtPlacement = errors.New("network: the recorded egress.vi
 // ValidatePlacement re-checks, AT EVERY PLACEMENT, the deployment premise that
 // ValidateDeployment checked at the write point.
 //
-// # Why the write point is not enough
+// THE WRITE POINT IS NOT ENOUGH because the two checks read the same facts but not the same fact
+// PAIR over time: a declaration is durable, its record the SoT that every placement regenerates
+// from (§3.4 Binding), while the second-hop uid lives and dies with one orchestrator process. So
+// the pair comes apart with no write at all — deployment A supplies the uid and admits a `via[]`
+// row, the operator restarts WITHOUT the flag, every write point is now correctly closed, and the
+// row that got in under A is still there.
 //
-// The two checks read the same two facts, but they are not the same fact PAIR over
-// time. A declaration is durable — the record is its SoT and every placement
-// regenerates the rule set from it (§3.4 Binding) — while the second-hop uid is a
-// deployment input that lives and dies with one orchestrator process. So the pair can
-// come apart with no write at all: deployment A supplies the uid and admits a `via[]`
-// declaration into the record; the operator restarts WITHOUT the flag; every write
-// point is now correctly closed, and the row that got in under A is still there.
+// Nothing on the placement path notices, mechanically: Generate emits no second-hop rule (the pin
+// is one engine-level `output` table sized by the deployment, not the sandbox count), so its
+// output for a `via[]` declaration is identical whether or not the pin exists. The DNAT and the
+// narrow `input` accept install and work, the steered flow reaches the endpoint process, and that
+// process's own egress is pinned by nothing.
 //
-// Nothing on the placement path noticed, and that is mechanical rather than an
-// oversight anyone could have spotted in a rule set: Generate deliberately emits no
-// second-hop rule (the pin is one engine-level `output` table narrowed by uid, sized
-// by the deployment and not by the sandbox count — see its comment), so the rule set
-// it produces for a `via[]` declaration looks EXACTLY the same whether or not the pin
-// exists. The `prerouting` DNAT and the narrow `input` accept install and work; the
-// steered flow reaches the endpoint process; the endpoint process's own egress is
-// pinned by nothing.
+// A REFUSAL RATHER THAN A DEGRADATION, because it is the confused deputy §2.4's second invariant
+// rejects and NOTHING ELSE REPORTS IT: hop 2 leaves on `output` and counts zero in `forward` in
+// all three shapes (measured, network.md D5 ㉔), so every first-hop assertion, counter and deny
+// test keeps passing over a host where the pin is gone. §2.4 is explicit that escape is a
+// FAILURE, so the placement that would deliver it fails exactly as the write that would record it.
 //
-// # Why that outcome is a refusal rather than a degradation
-//
-// It is the confused deputy §2.4's second invariant exists to reject, and its
-// distinguishing property is that NOTHING ELSE REPORTS IT. Hop 2 leaves on `output`
-// and is counted zero in `forward` in all three shapes (measured, network.md D5 ㉔),
-// so the first-hop floor never evaluates one of its packets: every first-hop
-// assertion, counter and deny test keeps passing over a host where the pin is gone.
-// §2.4 is explicit that escape is a FAILURE, not a degradation — so the placement that
-// would deliver it must fail, exactly as the write point that would record it does.
-//
-// # The general shape, which is the reason this function exists at all
-//
-// An invariant enforced only where state is WRITTEN holds only as long as nothing
-// else changes. This one is re-evaluated where the state is RE-MATERIALIZED, which is
-// the point at which the engine actually promises it.
+// The general shape, and the reason this function exists: an invariant enforced only where state
+// is WRITTEN holds only while nothing else changes. This one is re-evaluated where the state is
+// RE-MATERIALIZED — the point at which the engine actually promises it.
 func ValidatePlacement(d Declaration, dep Deployment) error {
 	if len(d.Egress.Via) == 0 || dep.SecondHopPinned() {
 		return nil

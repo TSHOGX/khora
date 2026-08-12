@@ -83,29 +83,23 @@ func (s RebindSpec) isEmpty() bool { return s.Binding.IsEmpty() && s.Mounts == n
 //     Both states are legal; the two effect times are why `released` is returned
 //     separately from the caller's `applies_at`.
 //
-// EVALUATING THE WHOLE UNION FIRST IS THE POINT, not tidiness: a per-class gate checked
-// just before that class's own write is exactly the three-commit shape again — the
-// second class's refusal would arrive after the first class had committed.
-//
-// A MERGED GATE ALSO CLOSES A SECOND-ORDER DIVERGENCE that the split shape carried:
-// `UpdateBinding` barred caps on `running` but NOT the declaration, while `SetNetwork`
-// barred it. No production caller wrote a declaration through the former, so nothing
-// was reachable — but "one field, two write points, two criteria" is how a reachable
-// version arrives later. With one gate over one spec the agreement is structural.
+// EVALUATING THE WHOLE UNION FIRST IS THE POINT: a per-class gate checked just before that
+// class's write is the three-commit shape again, the second refusal arriving after the first
+// class committed. It also closes a second-order divergence the split shape carried —
+// `UpdateBinding` barred caps on `running` but not the declaration, while `SetNetwork` barred
+// it. Nothing was reachable, but "one field, two write points, two criteria" is how a reachable
+// version arrives later.
 //
 // # Why the writes are ordered mounts-first, binding-second
 //
-// Not style. ReplaceMounts is the LAST remaining write that can still produce a
-// caller-visible VERDICT: the exclusive lease is arbitrated by the store at commit time
-// (409 ErrMountLeaseConflict) and a self-contradictory binding is decided there too
-// (400 ErrMountBindingInvalid) — store.Store.CreateMounts states why that judgment
-// cannot be hoisted into a pre-check. Putting it FIRST means every 4xx this verb can
-// answer, without exception, is a refusal that changed nothing.
+// ReplaceMounts is the LAST write that can still produce a caller-visible VERDICT: the lease is
+// arbitrated by the store at commit time (409) and a self-contradictory binding decided there
+// too (400) — store.Store.CreateMounts states why that judgment cannot be hoisted into a
+// pre-check. First means every 4xx this verb can answer is a refusal that changed nothing.
 //
-// The Store.UpdateBinding that follows cannot fail for a concurrency reason: its CAS
-// expects the state this function read under the transition lock, and every production
-// write to a sandbox's state holds that same lock (§4.4-B). What remains is store I/O,
-// which no ordering can rule out — see the residue note below.
+// The Store.UpdateBinding that follows cannot fail for a concurrency reason: its CAS expects the
+// state read under the transition lock, which every production write to state also holds
+// (§4.4-B). What remains is store I/O — see the residue note.
 //
 // # Known residue, stated rather than papered over
 //

@@ -47,14 +47,12 @@ func initMode() {
 	// side of D4.3: it targets no particular pid/pgid, so it is not a directed
 	// signal — those remain transport's (it holds the pid/pgid handles).
 	//
-	// NO GRACE PERIOD, and that is DECIDED, not pending (guest-runtime D4.3): the
-	// Exit below follows the broadcast immediately, and PID 1 exiting tears down the
-	// namespace, so this TERM cannot be acted on — it is equivalent to KILL. A
-	// sandbox-level grace period is REJECTED because the shape does not fit: what
-	// has state to flush is the WORKLOAD process, and directed per-process signals
-	// already exist (SendSignal); making a sandbox-level TERM "graceful" would
-	// require the engine to decide which guest processes deserve waiting for and how
-	// long — product-layer policy that §1.3's litmus keeps outside.
+	// NO GRACE PERIOD, DECIDED rather than pending (guest-runtime D4.3): Exit follows the
+	// broadcast immediately and PID 1 exiting tears down the namespace, so this TERM cannot be
+	// acted on — equivalent to KILL. A sandbox-level grace period is REJECTED because what has
+	// state to flush is the WORKLOAD process, directed signals already exist (SendSignal), and
+	// making this "graceful" would have the engine decide which guest processes deserve waiting
+	// for and how long — product-layer policy §1.3's litmus keeps outside.
 	//
 	// The engine still never sends this: destroy is `runsc kill KILL` +
 	// `delete --force` (§5.A). What a caller CAN reach is SendSignal, which refuses

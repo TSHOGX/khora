@@ -724,44 +724,33 @@ func contains(xs []string, x string) bool {
 // ReinstallRuleSet re-renders and re-installs a surviving sandbox's rule set as ONE
 // atomic file — the §4.4-A Adopt face of §5.D enforcement.
 //
-// # Why it may re-install blindly, with no diff
+// IT MAY RE-INSTALL BLINDLY, WITH NO DIFF, and the measurement that constrains this is also the
+// PERMISSION (network.md D5 ㉒): one atomic `nft -f` file does not disturb a live flow (5/5
+// survived, ct id unchanged, the masquerade counter at zero while bytes moved — the flow runs on
+// the transform already in the ct entry and the nat hook is not re-evaluated). So the whole set
+// can be re-rendered without reasoning about what is there, which is simpler than diffing and
+// the only safe shape. Two prohibitions from the same measurement:
+//   - NEVER `delete` the table and then install (5/5 flows died — packets in the gap left with
+//     the raw sandbox source address and the peer RST them). The atomic file's leading
+//     bare-`table` + `delete` + definition is ONE transaction, which is not the same thing.
+//   - NEVER flush conntrack, in any form: under `tcp_loose=0` a flush kills live flows outright,
+//     and this host's `tcp_loose=1` merely masks it — a sysctl the engine neither owns nor may
+//     depend on.
 //
-// The atomic-reinstall measurement (network.md D5 ㉒) is not only a constraint, it
-// is also a PERMISSION: because one atomic `nft -f` file does not disturb a live
-// flow (5/5 survived, the ct entry's id unchanged, the masquerade counter at zero
-// while bytes kept moving — the flow runs on the transform already stored in the ct
-// entry and the nat hook is not re-evaluated), Adopt can re-render the whole rule
-// set and load it without reasoning about what is already there. That is far simpler
-// than diffing, and it is the ONLY shape that is safe.
+// ENDPOINTS ARE PRESERVED, only new items getting one: the TABLE is re-rendered blindly, the
+// BINDINGS are not re-drawn. Both callers hold a LIVE placement, and for each, re-binding what is
+// already bound breaks a promise:
+//   - hot-add: §5.D endorses it because it is PURELY ADDITIVE. Adding B while re-drawing A's
+//     endpoint is not additive, and §6.1's "a repeated publish is idempotent — return the
+//     existing one" would answer a second identical POST with a different endpoint (AddPublish
+//     reaches here even when `added` is false).
+//   - Adopt: §5.A promises the same endpoint and no new epoch — the isolation unit never
+//     restarted, so nothing here is new.
 //
-// The two prohibitions from the same measurement:
-//   - NEVER `delete` the table and then install (5/5 flows died — packets sent
-//     during the gap left with the raw sandbox source address and the peer RST them).
-//     The atomic file's leading bare-`table` + `delete` + definition is all in ONE
-//     transaction, which is not the same thing.
-//   - NEVER flush conntrack, in any form. Under `tcp_loose=0` a flush kills live
-//     flows outright; this host's `tcp_loose=1` masks it by mid-stream-adopting the
-//     flow, and that is a sysctl the engine neither owns nor may depend on.
-//
-// # Endpoints are PRESERVED here, and only new items get one
-//
-// The whole TABLE is re-rendered blindly; the BINDINGS are not re-drawn. Both callers
-// of this function operate on a LIVE placement — the publish hot-add and Adopt — and
-// for each, re-binding what is already bound breaks a promise the caller relies on:
-//
-//   - hot-add: §5.D endorses hot-adding a publish because it is PURELY ADDITIVE. Adding
-//     B while re-drawing A's endpoint is not additive, and §6.1's "a repeated publish
-//     is idempotent — return the existing one" would answer a second identical POST
-//     with a different endpoint (the mediator's AddPublish reaches here even when
-//     `added` is false, so the idempotent repeat travels this path too).
-//   - Adopt: §5.A promises the same endpoint and no new epoch. The isolation unit never
-//     restarted, so nothing about this placement is new.
-//
-// §3.3 is not in tension with that: it licenses the endpoint of a NEW placement
-// differing (and warns against caching it for that reason), not a live placement's
-// endpoint moving because someone else published something. A control-plane restart is
-// the one case where a live placement arrives here with an empty handle, and Adopt
-// closes it by reading the endpoints back off the installed table first.
+// §3.3 is not in tension: it licenses a NEW placement's endpoint differing, not a live one's
+// moving because someone else published something. A control-plane restart is the one case where
+// a live placement arrives with an empty handle, and Adopt closes it by reading the endpoints
+// back off the installed table first.
 func (p *LocalRunsc) ReinstallRuleSet(ctx context.Context, pl *Placement, spec SteeringSpec) error {
 	h, ok := pl.Handle().(*placementHandle)
 	if !ok || h == nil {

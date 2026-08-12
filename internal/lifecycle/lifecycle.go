@@ -1010,29 +1010,21 @@ func (m *Mediator) destroyLocked(ctx context.Context, rec model.Sandbox, cause m
 // current Template, so lineage is the source's stack + this frozen layer on top
 // (§5.B multi-lowerdir).
 //
-// ADMISSION (§3.4 / rootfs-overlay D6.5): a frozen layer is charged to no sandbox
-// cap, so it grows the MEASURED term of the node accounting formula and must clear
-// the same inequality as a create. The refusal is ErrInsufficientCapacity (507),
-// and the harm it prevents is not "this Promote fails" — it is an UNRELATED sandbox
-// meeting ENOSPC nowhere near its own cap, i.e. §2.3 containment broken from the
-// other side. Gated through admitUncappedGrowth, never through `admit`: these bytes
-// join the measured term, not the promise term (see admission.go).
+// ADMISSION (§3.4 / rootfs-overlay D6.5): a frozen layer is charged to no sandbox cap, so it
+// grows the MEASURED term and must clear the same inequality as a create. Refusal is
+// ErrInsufficientCapacity (507), and the harm prevented is not "this Promote fails" but an
+// UNRELATED sandbox meeting ENOSPC nowhere near its own cap — §2.3 containment broken from the
+// other side. Gated through admitUncappedGrowth, never `admit`: these bytes join the measured
+// term, not the promise term (admission.go).
 //
-// The gate runs BEFORE the quiesce, deliberately, and the cost is stated in the
-// forecast's accuracy rather than in the state machine:
-//   - Placing it after the quiesce would buy an exact byte count (the upper is
-//     frozen) at the price of a REFUSAL THAT MUTATED STATE — a running sandbox left
-//     `paused`, with a `paused` event already published, because the node was full.
-//     §4.4-A wants a failed transition to return to its source state; "refused, and
-//     by the way your sandbox is stopped" is not that.
-//   - So the source is still live when it is measured, and the number is an upper
-//     bound that a concurrent guest write can outgrow (bounded by the sandbox's own
-//     remaining headroom, and PromoteCostBytes overstates on the other axes). This
-//     is the same "true at the instant of admission" residual the whole measured
-//     term carries (D6.5's residual) — not a new weakness.
+// The gate runs BEFORE the quiesce, paying in forecast accuracy rather than in the state
+// machine: gating after it would buy an exact count at the price of A REFUSAL THAT MUTATED
+// STATE — a running sandbox left `paused`, with a `paused` event published, because the node
+// was full. So the source is still live when measured and the number is an upper bound a
+// concurrent write can outgrow, bounded by that sandbox's own headroom — the same residual the
+// whole measured term carries (D6.5), not a new weakness.
 //
-// A refused Promote therefore leaves the sandbox in its ENTRY state (running stays
-// running, paused stays paused), no layer bytes on disk, and no `templates` row.
+// A refused Promote leaves the sandbox in its ENTRY state, no layer bytes, no `templates` row.
 func (m *Mediator) Promote(ctx context.Context, id model.SandboxID) (model.TemplateID, error) {
 	l := m.lock(id)
 	l.Lock()

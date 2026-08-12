@@ -2,39 +2,30 @@ package orchestrator
 
 // The operational surface: /healthz, /readyz, /metrics (M10 item 2).
 //
-// THE DISTINCTION THAT MAKES THESE TWO ENDPOINTS WORTH HAVING SEPARATELY, and the
-// reason a single /health would be worse than either: liveness answers "is this
-// process still the right process to be running", readiness answers "should traffic
-// come here now". They must diverge on the one failure this engine actually has in
-// this class — a WEDGED OUTBOX DRAIN. The publisher-halt path is already detectable
-// (Publisher.Stats samples atomics on an independent goroutine, so the numbers stay
-// truthful precisely when the drain blocks — §4.4-C operability), and until now it
-// emitted only a log line: exactly a signal with no surface to appear on.
+// TWO ENDPOINTS, NOT ONE /health: liveness answers "is this still the right process to be
+// running", readiness answers "should traffic come here now". They must diverge on the one
+// failure this engine has in this class — a WEDGED OUTBOX DRAIN, already detectable because
+// Publisher.Stats samples atomics on an independent goroutine (§4.4-C operability) but until now
+// surfacing only as a log line.
 //
-// A halted publisher must make this instance NOT READY while leaving it ALIVE:
-//   - not ready, because the event stream has stopped, and for a billing subscriber
-//     that means charges stop accruing. That is not a degraded mode that heals
-//     itself; clearing it is an operator action (Publisher.Resume).
-//   - still alive, because restarting the process does NOT fix it. The halt is a
-//     poison envelope in a DURABLE outbox, so a fresh process re-reads the same row
-//     and halts again. A liveness probe that failed here would produce a restart
-//     loop that destroys the running sandboxes' placements on every cycle while
-//     never addressing the cause.
+// A halted publisher makes this instance NOT READY while leaving it ALIVE:
+//   - not ready, because the event stream has stopped and for a billing subscriber charges stop
+//     accruing. It does not heal itself; clearing it is an operator action (Publisher.Resume).
+//   - still alive, because restarting does NOT fix it: the halt is a poison envelope in a DURABLE
+//     outbox, so a fresh process re-reads the same row and halts again. A failing liveness probe
+//     would produce a restart loop destroying running placements every cycle while never
+//     addressing the cause.
 //
-// That asymmetry is the whole design. Everything else follows from it.
+// That asymmetry is the whole design; everything else follows from it.
 //
-// WHY THE METRICS SURFACE HAS NO DEPENDENCY. Prometheus text format is a handful of
-// lines to render, and §1.1's "no heavyweight external dependencies" is a standing
-// constraint rather than a preference to weigh here. What the format buys is that
-// every scraper already reads it.
+// Prometheus text format is rendered by hand — §1.1's "no heavyweight external dependencies" is a
+// standing constraint, and what the format buys is that every scraper already reads it.
 //
-// WHAT MUST NOT HAPPEN HERE — and it is the easy mistake, because these numbers are
-// already available: metrics must NOT become a second, differently-shaped account of
-// what §6.1 already reports. `used_byte` on the sandbox read and the per-rule hit
-// counters on GET …/network are read surfaces with their own shapes, and re-exporting
-// them here would create two answers to one question that drift apart. So this
-// surface carries PROCESS-level facts only: publisher health, outbox depth, sandbox
-// counts by state, and build/uptime. Per-object numbers stay on §6.1.
+// WHAT MUST NOT HAPPEN HERE, and it is the easy mistake because the numbers are already at hand:
+// metrics must not become a second, differently-shaped account of what §6.1 reports. `used_byte`
+// and the per-rule hit counters are read surfaces with their own shapes, and re-exporting them
+// would create two answers to one question. This surface carries PROCESS-level facts only:
+// publisher health, outbox depth, sandbox counts by state, build/uptime.
 
 import (
 	"context"
@@ -310,21 +301,16 @@ func boolGauge(v bool) int {
 // engine's next boot re-adopts them. This is the decision, and it is argued rather
 // than assumed, because "drain, then exit" sounds safer:
 //
-//   - PAUSING EVERY SANDBOX ON THE WAY OUT WOULD BE WORSE, not safer. A pause is a
-//     real lifecycle transition: it stops the world and discards guest memory (§4.2
-//     stores no memory state, permanently — §1.4), so resume is a seconds-scale cold
-//     start. An operator restarting the orchestrator to change a flag would destroy
-//     every guest's in-memory work, which is a far larger blast radius than the
-//     restart they asked for. And it would take a per-sandbox transition lock for
-//     each one (§4.4-B), so a node with many sandboxes could not finish inside any
-//     sane TimeoutStopSec — leaving a SIGKILL to land halfway through, which is the
-//     hard stop it was trying to avoid, only now with half the sandboxes paused.
-//   - A HARD STOP IS ALREADY SURVIVABLE, by construction. §4.4-A exists precisely for
-//     this: startup reconciliation reclaims orphan placements and RETAKES surviving
-//     `running` ones — "the provider re-recognizes its own resources by SandboxID,
-//     rebuilds the handle, and rediscovers the endpoint", and "a takeover is not a
-//     resume — the same placement, the same IP, and no new epoch". So the cost of
-//     exiting on a running sandbox is a gap in contact, not a loss of state.
+//   - PAUSING EVERY SANDBOX ON THE WAY OUT WOULD BE WORSE, not safer. A pause discards guest
+//     memory (§4.2 stores none, permanently — §1.4), so restarting to change a flag would
+//     destroy every guest's in-memory work: a far larger blast radius than the restart asked
+//     for. It also takes a per-sandbox lock each (§4.4-B), so a busy node could not finish
+//     inside any sane TimeoutStopSec — leaving SIGKILL to land halfway, the hard stop it was
+//     avoiding, now with half the sandboxes paused.
+//   - A HARD STOP IS ALREADY SURVIVABLE. §4.4-A exists for this: startup reconciliation
+//     reclaims orphan placements and RETAKES surviving `running` ones — "a takeover is not a
+//     resume — the same placement, the same IP, and no new epoch". The cost of exiting on a
+//     running sandbox is a gap in contact, not a loss of state.
 //
 // So what this drains is the ENGINE'S OWN in-flight work, not the guests:
 //
@@ -340,47 +326,35 @@ func boolGauge(v bool) int {
 //     Server.Shutdown forces connections closed;
 //  5. close the store, behind every user of it.
 //
-// THIS FUNCTION PERFORMS ALL FIVE, and that is a correctness property rather than
-// tidiness. Step 2 sits in the middle, so an owner of only steps 1/3/4/5 forces its
-// caller to split this open and re-implement the order — which leaves the sequence
-// stated here and executed there, free to drift apart. Every wait above is bounded by
-// the single ctx, for the same reason: one unbounded wait anywhere makes the whole
-// shutdown unbounded and the operator's --shutdown-timeout meaningless.
+// THIS FUNCTION PERFORMS ALL FIVE, as a correctness property: step 2 sits in the middle, so an
+// owner of only 1/3/4/5 forces its caller to split this open and re-implement the order —
+// leaving the sequence stated here and executed there, free to drift. Every wait is bounded by
+// the single ctx, or one unbounded wait makes --shutdown-timeout meaningless.
 //
-// WHY THE LOOPS STOP BEFORE THE HTTP DRAIN (step 2 before step 3), which is the one
-// ordering here that is a real trade rather than a dependency:
+// WHY THE LOOPS STOP BEFORE THE HTTP DRAIN (2 before 3) — the one ordering that is a trade
+// rather than a dependency:
 //
-//   - The reaper is an AUTONOMOUS MUTATOR. Left running through the drain it can begin
-//     a fresh lifecycle transition — an auto-pause, an evict — at any point, including
-//     one tick before the deadline. That transition takes a per-sandbox lock (§4.4-B)
-//     and starts substrate work that outlives the budget, so the SIGKILL lands in the
-//     middle of it. Stopping it first means the set of in-flight transitions can only
-//     shrink from here.
-//   - The cost is only DELAY, never loss. A handler still finishing in step 3 writes
-//     its events to the outbox, and with the publisher already stopped those rows go
-//     out on the next boot instead of this one. The outbox is durable and its delivery
-//     is at-least-once by design (§4.4-C), so nothing is dropped — whereas a
-//     transition cut in half by SIGKILL is work §4.4-A reconciliation must clean up.
+//   - The reaper is an AUTONOMOUS MUTATOR: left running it can begin a fresh transition (an
+//     auto-pause, an evict) one tick before the deadline, taking a per-sandbox lock (§4.4-B)
+//     and starting substrate work that outlives the budget, so SIGKILL lands mid-transition.
+//     Stopping it first means in-flight transitions can only shrink.
+//   - The cost is DELAY, never loss: a handler finishing in step 3 writes its events to the
+//     outbox, and with the publisher stopped those rows go out next boot. The outbox is durable
+//     and at-least-once (§4.4-C), whereas a transition cut in half is work §4.4-A must clean up.
 //
-// Asymmetric costs, so the order follows the asymmetry: stop the thing that can START
-// new work first, and let the thing that only DELIVERS finish late.
+// So the order follows the asymmetry: stop what can START work, let what only DELIVERS finish late.
 //
-// ONE BUDGET FOR ALL FIVE STEPS, NOT ONE EACH, and the consequence is deliberate: a
-// step that consumes the whole deadline leaves nothing for the ones after it, which then
-// fail immediately on the expired ctx and fall through to step 5. That is the correct
-// behavior — the operator set ONE number, and per-step budgets would make the total
-// silently five times larger than what --shutdown-timeout says, which is the property
-// that number exists to guarantee. Every step is skippable in this sense except step 5,
-// which is why step 5 is unconditional.
+// ONE BUDGET FOR ALL FIVE, not one each, and the consequence is deliberate: a step consuming the
+// whole deadline leaves the rest to fail immediately on the expired ctx and fall through to step
+// 5. The operator set ONE number, and per-step budgets would make the total silently five times
+// larger. Every step is skippable in that sense except 5, which is why 5 is unconditional.
 //
-// THE DEADLINE IS NOT OPTIONAL, and this is the measured reason: Shutdown waits for
-// open connections, and the data plane's normal shape is a LONG-LIVED STREAM (an
-// attached shell sitting at a prompt). Measured, a Shutdown with a 2 s deadline
-// against one open stream returned "context deadline exceeded" after the full 2 s —
-// so a deadline-free Shutdown on a node with an attached shell would never return.
-// When the deadline expires, the streams are closed and the drain proceeds: a severed
-// stream is a reconnectable condition (the data plane has `Connect` for exactly
-// that), while a shutdown that never completes is not.
+// THE DEADLINE IS NOT OPTIONAL, measured: Shutdown waits for open connections and the data
+// plane's normal shape is a LONG-LIVED STREAM (an attached shell at a prompt) — a 2 s deadline
+// against one open stream returned "context deadline exceeded" after the full 2 s, so a
+// deadline-free Shutdown on such a node would never return. On expiry the streams are closed
+// and the drain proceeds: a severed stream is reconnectable (`Connect` exists for it), a
+// shutdown that never completes is not.
 type shutdownServer interface {
 	Shutdown(context.Context) error
 	Close() error

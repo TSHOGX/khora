@@ -38,38 +38,27 @@ type Sink interface {
 //
 // # Head-of-line blocking is KEPT, deliberately
 //
-// One undeliverable event blocks every later one. That is the correct side of
-// the trade HERE, and the reasoning is worth stating because the opposite choice
-// is defensible elsewhere:
+// One undeliverable event blocks every later one, on two grounds:
 //
-//   - Invariant C (§4.4-C) says billing subscribers reconcile from this stream
-//     and a missed event is a missed charge. Order therefore CARRIES MEANING —
-//     "paused then resumed" and "resumed then paused" are different bills — so
-//     skipping ahead past a failure trades a visible stall for a silent
-//     mis-reconciliation.
-//   - We have no shock absorber downstream. A skip-ahead design is survivable
-//     when the sink is idempotent AND versioned by logical time, so a late
-//     arrival loses a merge instead of resurrecting stale state. Our sink has no
-//     such property, which independently argues for strict order.
+//   - Invariant C (§4.4-C) has billing subscribers reconciling from this stream, so ORDER
+//     CARRIES MEANING — "paused then resumed" and "resumed then paused" are different bills —
+//     and skipping ahead trades a visible stall for a silent mis-reconciliation.
+//   - No shock absorber downstream: skip-ahead is survivable when the sink is idempotent AND
+//     versioned by logical time, so a late arrival loses a merge instead of resurrecting stale
+//     state. Ours is neither.
 //
-// What the three mechanisms below bound is the stall's OPERABILITY. The stall
-// itself is the deliberate trade; an unbounded, unalerted, invisible one is a
-// defect:
+// The three mechanisms below bound the stall's OPERABILITY — the stall is the trade, an
+// unbounded, unalerted, invisible one is a defect:
 //
-//  1. A POISON-ENVELOPE EXIT (MaxAttempts + Halted). An event that cannot be
-//     delivered after a bounded number of attempts stops being retried forever
-//     and the publisher HALTS with a signal that has to be noticed. Retrying an
-//     undecodable payload every second until someone happens to look at a graph
-//     is not a trade, it is an omission.
-//  2. BOUNDED BACKOFF WITH JITTER. Exponential, capped, and jittered — all
-//     three. Uncapped backoff schedules the next attempt days out and the event
-//     is then neither delivered nor dead-lettered nor alerted; un-jittered
-//     backoff makes multiple drainers synchronize on the same due time and
-//     thunder at the same row.
-//  3. OBSERVABILITY THAT SURVIVES THE WORKER WEDGING (see Stats / Monitor). The
-//     numbers are sampled from an INDEPENDENT goroutine, because a gauge updated
-//     on the drain goroutine freezes at its last healthy value precisely when the
-//     drain blocks — making a wedged worker look identical to an idle one.
+//  1. A POISON-ENVELOPE EXIT (MaxAttempts + Halted): after bounded attempts the publisher
+//     HALTS with a signal that has to be noticed. Retrying an undecodable payload forever
+//     until someone looks at a graph is an omission, not a trade.
+//  2. BOUNDED BACKOFF WITH JITTER, all three: uncapped schedules the next attempt days out,
+//     leaving the event neither delivered nor dead-lettered nor alerted; un-jittered makes
+//     multiple drainers synchronize on one due time and thunder at the same row.
+//  3. OBSERVABILITY THAT SURVIVES THE WORKER WEDGING (Stats / Monitor): sampled from an
+//     INDEPENDENT goroutine, because a gauge updated on the drain goroutine freezes at its last
+//     healthy value exactly when the drain blocks — making a wedged worker look idle.
 type Publisher struct {
 	store Store
 	sink  Sink

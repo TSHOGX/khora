@@ -881,32 +881,21 @@ func (e *Engine) handleEvents(w http.ResponseWriter, r *http.Request) {
 // precedent to copy (one models no terminal state at all, the other has a failed
 // state but no cause field anywhere):
 //
-//   - It is on the READ PATH because §4.3 puts the recovery decision on the
-//     caller: dead-recoverable → resume, resource-terminated → do NOT resume
-//     (resuming re-runs the same workload into the same cap, i.e. a crash loop).
-//     A caller who owns that decision needs the fact it decides on. Today it is
-//     reachable only as the text of a 409 from a resume that was already refused,
-//     which forces the caller to attempt the wrong thing in order to learn it
-//     should not.
-//   - `death_cause`, matching the model field and the store column exactly. It
-//     names a property of the sandbox atom, not a product concept, so it is clear
-//     of the §1.1 vocabulary boundary. The values are the abstract §4.3 enum
-//     (`gone` / `resource-exceeded` / `unknown`), never an errno or a cgroup
-//     path — an errno would be a host primitive on the wire and would not survive
-//     a remote provider.
-//   - OMITTED WHEN EMPTY (`omitempty`). CauseNone is the ABSENCE of a death
-//     rather than a kind of death, so serializing `"death_cause": ""` would put a
-//     falsy-but-present field on the overwhelmingly common healthy response and
-//     invite `if (resp.death_cause)` to be written as the liveness test. Absent
-//     means "not observed dead"; present always means "there is a cause, and it
-//     is this one". No `null`, for the same reason: two spellings of absence is
-//     one more than needed.
-//   - List gets it too, and this is not just symmetry. §6.2 is ID-addressing:
-//     a caller that finds several sandboxes `paused` in a list would otherwise
-//     have to fan out one GET per ID purely to learn which of them are resumable,
-//     turning a single list into N+1 requests to answer a question the list
-//     already holds. Keeping the two shapes identical also removes the chance of
-//     them drifting apart.
+//   - On the READ PATH because §4.3 puts the recovery decision on the caller:
+//     dead-recoverable → resume, resource-terminated → do NOT (resuming re-runs the same
+//     workload into the same cap — a crash loop). Otherwise it is reachable only as the text of
+//     a 409, forcing the caller to attempt the wrong thing to learn it should not.
+//   - `death_cause`, matching the model field and store column exactly, and a property of the
+//     sandbox atom rather than a product concept (§1.1). Values are the abstract §4.3 enum,
+//     never an errno or cgroup path — a host primitive on the wire would not survive a remote
+//     provider.
+//   - OMITTED WHEN EMPTY. CauseNone is the ABSENCE of a death, not a kind of it, so
+//     `"death_cause": ""` would put a falsy-but-present field on the common healthy response and
+//     invite `if (resp.death_cause)` as the liveness test. No `null` either: two spellings of
+//     absence is one too many.
+//   - List gets it too, not merely for symmetry: without it a caller seeing several `paused`
+//     sandboxes must fan out one GET per ID to learn which are resumable, turning one list into
+//     N+1 requests for a question the list already answers.
 type sandboxResp struct {
 	SandboxID string `json:"sandbox_id"`
 	State     string `json:"state"`

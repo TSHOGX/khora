@@ -225,37 +225,24 @@ func (m *Mediator) publishEndpoints(id model.SandboxID) []string {
 // field with a second write point, and the one that may be written on a `running`
 // sandbox.
 //
-// # Why it is allowed on `running` at all
+// ALLOWED ON `running` because a publish is a pure host-side rule set, purely additive, touching
+// no isolation unit — so unlike the egress fields there is no way for the record to say one thing
+// while a live isolation unit says another (§5.D).
 //
-// A publish is a pure HOST-SIDE rule set, purely additive, touching no isolation
-// unit — so unlike the egress fields there is no way for the record to say one thing
-// while a live isolation unit does another (§5.D).
+// `paused` IS EQUALLY LEGAL: the exception is "MAY be written on `running`", not "only on". §3.4's
+// state gate tightens `running`, while the `paused` side is open for every Binding field, so
+// refusing it would make this the one field harder to write paused than running — and would push
+// the caller onto the whole-binding PATCH, the write point §6.1 documents as dangerous.
 //
-// # Why `paused` is equally legal
+// RECORD FIRST, THEN RULES, because the invariant is one-directional ("there is no inbound port
+// the record does not describe"): of the two half-done outcomes, "recorded, not installed" is a
+// fail-CLOSED gap that self-heals at the next placement, while "installed, not recorded" is an
+// open port the engine does not know about. Hence the rollback on install failure, and hence the
+// transition lock covers the whole thing.
 //
-// The exception is "MAY be written on `running`", not "only on `running`". §3.4's
-// state gate is a TIGHTENING of `running`; the `paused` side is open for every
-// Binding field, and a publish endpoint that refused `paused` would be the only
-// field in the engine harder to write while paused than while running. It would also
-// push the caller onto the whole-binding PATCH — the very write point §6.1 documents
-// as dangerous.
-//
-// # The atomic order, which is not a style choice
-//
-// Record FIRST, then rules. The invariant is one-directional — "there is no inbound
-// port the record does not describe" — so of the two half-done outcomes only one is
-// acceptable: "recorded, not installed" is a functional gap that is fail-CLOSED and
-// self-heals at the next placement, while "installed, not recorded" is an open port
-// the engine itself does not know about, surviving until the next placement. Hence
-// the rollback on an install failure, and hence the transition lock is held for the
-// whole thing.
-//
-// # Why the read-append happens HERE
-//
-// Two concurrent publishes must not lose one. The store replaces the whole value —
-// it cannot append — so the append has to happen under this lock. §6.1 documents a
-// caller-side lost-update sharp edge for PATCH; that is a DIFFERENT thing, and it
-// does not excuse an engine-side one.
+// THE READ-APPEND HAPPENS HERE so two concurrent publishes cannot lose one: the store replaces
+// the whole value rather than appending. §6.1's caller-side lost-update edge for PATCH is a
+// different thing and does not excuse an engine-side one.
 //
 // Returns the resulting item, its host endpoint (empty when no placement holds one),
 // and whether it took effect now.

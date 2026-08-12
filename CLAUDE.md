@@ -149,6 +149,23 @@ slims to boundary + open agenda — nothing lives in full in both places.
   never by position** (their own headers refuse positional numbering), so re-wording a
   title is a pointer edit across every `.go` file citing it — `network.md` alone carries
   over a hundred such pointers.
+- **A comment carries the CONSTRAINT, not the argument for it.** State the obligation,
+  the measurement that fixed it, or the counterexample that kills the obvious
+  alternative — one pass, then the pointer (`§`, `ADR`, deep-dive row). The argument
+  itself has a home, and it is not a `.go` file: a comment that re-derives what
+  `volume.md D7` already establishes creates the **second statement of the same rule**
+  the verbatim-citation rule above exists to prevent, arriving by a route that rule does
+  not catch. Symptom to watch for: prose that persuades (*"and that is the whole point"*,
+  *"not a matter of taste"*, a paragraph closing the case a §-doc already closed). The
+  rule does NOT license deleting measurements or non-obvious obligations — those are the
+  irreplaceable part, and a shorter comment that drops one is a worse comment.
+- **Operator-facing strings are one line.** A flag's help text, an error body, a log
+  message: say what it does and what it costs, cite the § that argues it, stop. `--help`
+  is not a document surface — a 780-character `flag.Duration` help string was a real
+  regression here, transcribing a deep-dive paragraph into a place no reader can navigate
+  and no doc discipline governs. If the reasoning matters (and for a destructive default
+  it does), it belongs in the deep-dive, with the flag citing it; `reaper-health` D5's own
+  instruction is *annotate it at the configuration point*, and an annotation is not a copy.
 
 ## Execution & verification
 
