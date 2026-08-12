@@ -397,7 +397,10 @@ func (r *Reaper) sweepPaused(ctx context.Context, rec model.Sandbox) {
 	if time.Since(cur.UpdatedAt) < cur.Retention {
 		return
 	}
-	if err := r.m.destroyLocked(ctx, cur); err != nil {
+	// CauseRetentionExpired, not CauseRequested: nobody asked for this — a TTL fired
+	// while nobody was looking, which is a different fact for a subscriber and one it
+	// can never recover afterwards (the record is gone; §4.4-C).
+	if err := r.m.destroyLocked(ctx, cur, model.CauseRetentionExpired); err != nil {
 		r.m.deps.Logf("reaper: evict %s (retried next tick): %v", cur.ID, err)
 	}
 }

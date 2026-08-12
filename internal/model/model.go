@@ -449,7 +449,9 @@ const (
 //
 // Note there is no `evict` kind: eviction reaches destroyLocked and emits Destroyed.
 // The three PAUSED kinds differ in WHY, which is what a subscriber needs to tell an
-// operator's pause from the reaper's idle sweep from a crash (§4.3).
+// operator's pause from the reaper's idle sweep from a crash (§4.3). `destroyed`'s two
+// routes are separated the OTHER way, by EventCause below — a seventh kind would break
+// the closure this type exists to state, while a field is additive (§4.4-C).
 type EventKind string
 
 const (
@@ -465,6 +467,58 @@ const (
 // enumerate rather than hard-code.
 var EventKinds = []EventKind{
 	EventCreated, EventPaused, EventAutoPaused, EventCrashPaused, EventResumed, EventDestroyed,
+}
+
+// EventCause is WHY a transition of a given EventKind happened, for the kinds a
+// subscriber cannot otherwise tell apart (§4.4-C). Empty = not applicable, and most
+// events carry nothing here: the field is populated only where one kind has more than
+// one route to it, so a subscriber that ignores it reads the stream exactly as before.
+//
+// A FIELD rather than more kinds, because EventKind states a closed set of six and a
+// seventh spelling (`evicted`) would make every existing subscriber's exhaustive match
+// wrong. This is also the shape `crash-paused` already uses — its two routes are
+// separated by whether a cause of death was recorded alongside — so this makes the
+// payload consistent rather than extending it.
+//
+// NOT DeathCause, and the two must never be merged: DeathCause is why an isolation
+// UNIT was found gone (a runtime's exit), this is why a RECORD reached a terminal (which
+// route got there). Different questions on different kinds; a shared enum would hold
+// members meaningless to each side.
+//
+// For `destroyed` this field is the ONLY carrier the fact ever has. Destroy deletes the
+// record, so a subscriber that sees `destroyed` and issues a GET gets 404 by contract —
+// there is no row left to ask, at any later time. Every other kind leaves a readable
+// record, which makes their causes a shortcut; this one's is irreplaceable.
+type EventCause string
+
+const (
+	// CauseNotApplicable is the zero value: this kind has one route, so there is
+	// nothing to disambiguate.
+	CauseNotApplicable EventCause = ""
+	// CauseRequested = an operator asked for this transition (the Destroy verb).
+	// Someone meant it.
+	CauseRequested EventCause = "requested"
+	// CauseRetentionExpired = the reaper evicted a sandbox left `paused` past its
+	// `retention` (§4.3). A TTL fired while nobody was looking, which is a different
+	// fact for a subscriber than a deliberate delete — and the reason it must ride the
+	// event is that the record is gone by the time anyone could ask.
+	CauseRetentionExpired EventCause = "retention-expired"
+)
+
+// EventCauses is the closed set, for the schema check and for any consumer that must
+// enumerate rather than hard-code. CauseNotApplicable is excluded: it is the ABSENCE of
+// a cause, expressed as NULL in the store rather than as a member.
+var EventCauses = []EventCause{CauseRequested, CauseRetentionExpired}
+
+// Valid reports whether c is a real cause. The empty value is NOT valid here — it means
+// "no cause", which callers express by passing nothing at all.
+func (c EventCause) Valid() bool {
+	for _, v := range EventCauses {
+		if c == v {
+			return true
+		}
+	}
+	return false
 }
 
 // Valid reports whether k is one of the six.

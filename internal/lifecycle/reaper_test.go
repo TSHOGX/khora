@@ -112,6 +112,18 @@ func (e *reaperEnv) lastKind(id string) string {
 	return kind
 }
 
+// lastCause is lastKind for the §4.4-C cause field.
+func (e *reaperEnv) lastCause(id string) model.EventCause {
+	evs, _ := e.st.UnpublishedEvents(context.Background(), allUnpublished)
+	cause := model.EventCause("<no event>")
+	for _, ev := range evs {
+		if ev.Sandbox == model.SandboxID(id) {
+			cause = ev.Cause
+		}
+	}
+	return cause
+}
+
 // idle past idle_timeout → auto-pause, emitting Kind "auto-paused" (§4.1: the
 // idle Kind, distinct from user "paused" and reconcile "crash-paused").
 func TestReaperAutoPausesIdle(t *testing.T) {
@@ -361,6 +373,56 @@ func TestReaperEvictsPausedPastRetention(t *testing.T) {
 	}
 	if got := e.state(t, "fresh"); got != model.Paused {
 		t.Fatalf("within-retention paused state=%s; want paused (not evicted)", got)
+	}
+}
+
+// TestEvictAndDestroyAreDistinguishableFromTheEventAlone pins §4.4-C's cause on the
+// kind where it is the ONLY carrier. Both routes emit Kind "destroyed" (there is no
+// `evict` kind, deliberately) and both DELETE the record, so a subscriber that cannot
+// separate them from the payload can never separate them at all: the follow-up GET is a
+// contractual 404. The assertion that matters is the PAIR — either cause alone would
+// pass a test that just checked "some cause is set".
+func TestEvictAndDestroyAreDistinguishableFromTheEventAlone(t *testing.T) {
+	e := newReaperEnv(t, time.Minute)
+	e.seedPaused(t, "ttl", 1*time.Hour, 2*time.Hour) // past retention → the reaper's route
+	e.seedPaused(t, "asked", 0, 1000*time.Hour)      // retention 0 = never evicted
+
+	e.r.Sweep(context.Background())
+	if err := e.m.Destroy(context.Background(), model.SandboxID("asked")); err != nil {
+		t.Fatalf("Destroy: %v", err)
+	}
+
+	if got := e.lastCause("ttl"); got != model.CauseRetentionExpired {
+		t.Fatalf("evict cause=%q; want %q — a TTL fired with nobody looking, and after the "+
+			"record is gone this event is the only place that is readable",
+			got, model.CauseRetentionExpired)
+	}
+	if got := e.lastCause("asked"); got != model.CauseRequested {
+		t.Fatalf("Destroy verb cause=%q; want %q", got, model.CauseRequested)
+	}
+	// Same Kind on both: the closed six-kind set is intact and the cause is what
+	// separates them (a seventh kind would break every subscriber's exhaustive match).
+	if k1, k2 := e.lastKind("ttl"), e.lastKind("asked"); k1 != "destroyed" || k2 != "destroyed" {
+		t.Fatalf("kinds = %q / %q; want destroyed on BOTH routes", k1, k2)
+	}
+}
+
+// A cause is populated only where a kind has more than one route: the pause-like kinds
+// are already three distinct kinds, so they carry none. Checked because the opposite
+// mistake (stamping a cause everywhere "for consistency") would make the field's
+// presence meaningless as a signal.
+func TestSingleRouteKindsCarryNoCause(t *testing.T) {
+	e := newReaperEnv(t, time.Minute)
+	e.seedRunning(t, "idle", 10*time.Second, 0)
+	e.cl.idle = 30 * time.Second // ≥ idle_timeout → auto-pause
+
+	e.r.Sweep(context.Background())
+
+	if k := e.lastKind("idle"); k != "auto-paused" {
+		t.Fatalf("Kind=%q; want auto-paused", k)
+	}
+	if got := e.lastCause("idle"); got != model.CauseNotApplicable {
+		t.Fatalf("auto-paused cause=%q; want empty — the kind IS the why here", got)
 	}
 }
 

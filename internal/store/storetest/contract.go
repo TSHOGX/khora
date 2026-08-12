@@ -63,6 +63,8 @@ func RunContract(t *testing.T, mk Factory) {
 	// §4.1's event kinds are a CLOSED set of six, and that closure is a contract both
 	// backends must hold: a subscriber reading a seventh kind has no way to interpret it.
 	t.Run("EventKindsAreAClosedSet", func(t *testing.T) { testEventKindClosed(t, mk) })
+	t.Run("EventCauseSurvivesTheRecordItDescribes", func(t *testing.T) { testEventCauseOutlivesRecord(t, mk) })
+	t.Run("EventCausesAreAClosedSet", func(t *testing.T) { testEventCauseClosed(t, mk) })
 
 	t.Run("OutboxNilPublishesNothing", func(t *testing.T) { testOutboxNil(t, mk) })
 	t.Run("MarkPublishedIdempotent", func(t *testing.T) { testMarkPublished(t, mk) })
@@ -1274,6 +1276,101 @@ func testOutboxOutlivesRecord(t *testing.T, mk Factory) {
 	un, _ := s.UnpublishedEvents(ctx, allUnpublished)
 	if len(un) != 1 || un[0].ID != "evt_d" {
 		t.Fatalf("destroyed event missing from outbox: %+v", un)
+	}
+}
+
+// testEventCauseOutlivesRecord: the §4.4-C cause survives the record it describes, and
+// reads back unchanged. This is the property the field exists for, and it is testable
+// only in this order — destroy deletes the row, so if the cause did not round-trip
+// through the OUTBOX there would be nowhere left to read it from. (`destroyed` is the
+// one kind whose cause has no fallback: the subscriber's follow-up GET is a 404 by
+// contract.)
+//
+// Both backends run it: the SQLite arm has a CHECK plus a nullable column, Memory copies
+// the struct, and a silent divergence there would mean the tests prove the behaviour on
+// the backend production does not use.
+func testEventCauseOutlivesRecord(t *testing.T, mk Factory) {
+	ctx := context.Background()
+	s, _ := mk(t)
+	seedTmpl(t, s, "bare")
+	_ = s.CreateSandbox(ctx, mkRec("a"), nil)
+
+	e := ev("a", "evt_d", "destroyed", model.Destroyed)
+	e.Cause = model.CauseRetentionExpired
+	if err := s.DeleteSandbox(ctx, "a", e); err != nil {
+		t.Fatalf("delete+event: %v", err)
+	}
+	if _, err := s.GetSandbox(ctx, "a"); err != store.ErrNotFound {
+		t.Fatalf("record should be gone: %v", err)
+	}
+
+	un, _ := s.UnpublishedEvents(ctx, allUnpublished)
+	if len(un) != 1 {
+		t.Fatalf("want 1 outbox row, got %d: %+v", len(un), un)
+	}
+	if un[0].Cause != model.CauseRetentionExpired {
+		t.Errorf("cause read back as %q; want %q — the record is deleted, so this row is the "+
+			"ONLY place the route is readable and a lost cause here is lost permanently",
+			un[0].Cause, model.CauseRetentionExpired)
+	}
+
+	// The replay read (§6.1 GET /v1/events) must carry it too, not only the drain read:
+	// the pull surface is what an external subscriber actually uses.
+	evs, _, _, err := s.Events(ctx, 0, 10)
+	if err != nil {
+		t.Fatalf("Events: %v", err)
+	}
+	if len(evs) != 1 || evs[0].Cause != model.CauseRetentionExpired {
+		t.Errorf("replay read lost the cause: %+v", evs)
+	}
+}
+
+// testEventCauseClosed: the cause vocabulary is closed on BOTH backends, the same
+// obligation model.EventKinds carries. The SQLite arm asserts it with a CHECK, so
+// without this Memory would accept a misspelling — i.e. it would be refused in
+// production and pass in the tests meant to prove the behaviour.
+//
+// Absent is legitimate and must stay so: most kinds have one route and carry no cause,
+// so "" is not a rejected value, it is the common one.
+func testEventCauseClosed(t *testing.T, mk Factory) {
+	ctx := context.Background()
+
+	for i, c := range model.EventCauses {
+		s, _ := mk(t)
+		seedTmpl(t, s, "bare")
+		_ = s.CreateSandbox(ctx, mkRec("c1"), nil)
+		e := ev("c1", fmt.Sprintf("evt_ok_%d", i), "destroyed", model.Destroyed)
+		e.Cause = c
+		if err := s.DeleteSandbox(ctx, "c1", e); err != nil {
+			t.Errorf("the declared cause %q was refused: %v — model.EventCauses and the store "+
+				"must agree", c, err)
+		}
+	}
+
+	// Absent → accepted, and reads back as absent rather than as some placeholder.
+	s, _ := mk(t)
+	seedTmpl(t, s, "bare")
+	_ = s.CreateSandbox(ctx, mkRec("c2"), nil)
+	if err := s.DeleteSandbox(ctx, "c2", ev("c2", "evt_none", "destroyed", model.Destroyed)); err != nil {
+		t.Fatalf("an event with no cause was refused: %v — a cause is populated only where a "+
+			"kind has more than one route, so absent is the COMMON case", err)
+	}
+	un, _ := s.UnpublishedEvents(ctx, allUnpublished)
+	if len(un) != 1 || un[0].Cause != model.CauseNotApplicable {
+		t.Errorf("absent cause read back as %+v; want empty", un)
+	}
+
+	// …and an undeclared one is refused. A hyphen-for-underscore typo, the realistic
+	// mistake and invisible to review — same failure shape testEventKindClosed pins.
+	s2, _ := mk(t)
+	seedTmpl(t, s2, "bare")
+	_ = s2.CreateSandbox(ctx, mkRec("c3"), nil)
+	bad := ev("c3", "evt_bad", "destroyed", model.Destroyed)
+	bad.Cause = model.EventCause("retention_expired")
+	if err := s2.DeleteSandbox(ctx, "c3", bad); err == nil {
+		t.Error("an undeclared event cause was PERSISTED — a value the schema cannot write is a " +
+			"value no reader has to handle, and a subscriber matching on the closed set would " +
+			"silently drop this one")
 	}
 }
 

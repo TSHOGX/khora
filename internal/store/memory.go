@@ -81,14 +81,26 @@ func NewMemory() *Memory {
 // that are supposed to prove the behaviour (§1.3 — one set of assertions, two
 // backends).
 func checkEventKind(ev *Event) error {
-	if ev == nil || ev.Kind.Valid() {
+	if ev == nil {
 		return nil
 	}
-	// A plain error, matching the SQLite arm: a CHECK violation is not one of the
-	// contract's named sentinels, and inventing one here would make the two backends
-	// differ on the error VALUE while agreeing on the refusal.
-	return fmt.Errorf("store: event kind %q is not one of §4.1's six (%v)",
-		ev.Kind, model.EventKinds)
+	if !ev.Kind.Valid() {
+		// A plain error, matching the SQLite arm: a CHECK violation is not one of the
+		// contract's named sentinels, and inventing one here would make the two backends
+		// differ on the error VALUE while agreeing on the refusal.
+		return fmt.Errorf("store: event kind %q is not one of §4.1's six (%v)",
+			ev.Kind, model.EventKinds)
+	}
+	// The SAME agreement obligation applies to Cause, for the same reason: its column
+	// carries a CHECK, so a misspelled cause would be refused by SQLite and accepted by
+	// Memory — i.e. rejected in production and passed in the tests meant to prove the
+	// behaviour. Empty is legitimate (most kinds have one route and carry no cause), so
+	// only a non-empty value is checked.
+	if ev.Cause != model.CauseNotApplicable && !ev.Cause.Valid() {
+		return fmt.Errorf("store: event cause %q is not one of the known causes (%v)",
+			ev.Cause, model.EventCauses)
+	}
+	return nil
 }
 
 // appendEvent records ev in the outbox. MUST be called with m.mu held so it

@@ -138,6 +138,19 @@ CREATE TABLE IF NOT EXISTS outbox (
 	kind         TEXT NOT NULL CHECK (kind IN
 	                 ('created','paused','auto-paused','crash-paused','resumed','destroyed')),
 	state        TEXT NOT NULL,
+	-- cause: WHY, for the kinds with more than one route to them (§4.4-C). NULL = this
+	-- kind has one route, which is the common case — the column is additive and a reader
+	-- ignoring it sees the stream unchanged. Today it separates the two routes to
+	-- 'destroyed': 'requested' (the Destroy verb) from 'retention-expired' (the evict).
+	--
+	-- NULL rather than '' for absent, so the CHECK can assert the closed set without
+	-- carrying a member that means "no member". Kept in step with model.EventCauses.
+	--
+	-- This column is the ONLY place a destroy's cause is ever readable: destroy deletes
+	-- the sandboxes row, so there is no record left to join against afterwards. That is
+	-- also why it cannot be inferred later from sandboxes.death_cause — a different
+	-- fact (why a UNIT was found gone) on a row that no longer exists.
+	cause        TEXT CHECK (cause IS NULL OR cause IN ('requested','retention-expired')),
 	occurred_at  INTEGER NOT NULL,       -- unix nanos; DATA, not the ordering key
 	published_at INTEGER                 -- NULL = unpublished (the query predicate)
 );
@@ -309,8 +322,8 @@ func insertEvent(t *sql.Tx, ev *Event) error {
 	// the caller happened to set is ignored rather than trusted — the store owns
 	// this number.
 	_, err := t.Exec(
-		`INSERT INTO outbox(id, sandbox, kind, state, occurred_at, published_at) VALUES(?,?,?,?,?,NULL)`,
-		ev.ID, string(ev.Sandbox), ev.Kind, string(ev.State), ev.OccurredAt.UnixNano(),
+		`INSERT INTO outbox(id, sandbox, kind, state, cause, occurred_at, published_at) VALUES(?,?,?,?,?,?,NULL)`,
+		ev.ID, string(ev.Sandbox), ev.Kind, string(ev.State), causeArg(ev.Cause), ev.OccurredAt.UnixNano(),
 	)
 	return err
 }
@@ -502,7 +515,7 @@ func (s *SQLite) UnpublishedEvents(ctx context.Context, limit int) ([]Event, err
 	// whole backlog here both allocates it and holds that connection for the length of
 	// the scan — which every state transition then waits behind.
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT seq, id, sandbox, kind, state, occurred_at FROM outbox WHERE published_at IS NULL ORDER BY seq LIMIT ?`, limit)
+		`SELECT seq, id, sandbox, kind, state, cause, occurred_at FROM outbox WHERE published_at IS NULL ORDER BY seq LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -577,7 +590,7 @@ func (s *SQLite) Events(ctx context.Context, after int64, limit int) ([]Event, i
 		return nil, 0, 0, err
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT seq, id, sandbox, kind, state, occurred_at FROM outbox
+		`SELECT seq, id, sandbox, kind, state, cause, occurred_at FROM outbox
 		   WHERE seq > ? ORDER BY seq LIMIT ?`, after, limit)
 	if err != nil {
 		return nil, 0, 0, err
@@ -593,17 +606,31 @@ func (s *SQLite) Events(ctx context.Context, after int64, limit int) ([]Event, i
 // scanEvents drains an outbox row set selecting (seq, id, sandbox, kind, state,
 // occurred_at) in that order. Shared by both read paths so they cannot drift
 // apart in how they materialize an Event.
+// causeArg maps an EventCause onto the column's two-valued domain: a real cause, or
+// NULL for absent. The schema deliberately has no member meaning "no member" (see the
+// outbox CHECK), so "" must not reach it as a string.
+func causeArg(c model.EventCause) any {
+	if c == model.CauseNotApplicable {
+		return nil
+	}
+	return string(c)
+}
+
 func scanEvents(rows *sql.Rows) ([]Event, error) {
 	out := make([]Event, 0)
 	for rows.Next() {
 		var e Event
 		var sandbox, state string
+		// NULL cause = this kind has one route; it scans back as the zero EventCause,
+		// which is the same "not applicable" the writer passed in.
+		var cause sql.NullString
 		var occ int64
-		if err := rows.Scan(&e.Seq, &e.ID, &sandbox, &e.Kind, &state, &occ); err != nil {
+		if err := rows.Scan(&e.Seq, &e.ID, &sandbox, &e.Kind, &state, &cause, &occ); err != nil {
 			return nil, err
 		}
 		e.Sandbox = model.SandboxID(sandbox)
 		e.State = model.Lifecycle(state)
+		e.Cause = model.EventCause(cause.String)
 		e.OccurredAt = time.Unix(0, occ)
 		out = append(out, e)
 	}

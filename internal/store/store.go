@@ -157,6 +157,20 @@ type Event struct {
 	Kind model.EventKind
 	// State is the resulting lifecycle-state after the transition.
 	State model.Lifecycle
+	// Cause is WHY, for the Kinds a subscriber cannot otherwise tell apart (§4.4-C).
+	// Empty on every Kind with a single route, and that is the common case — the field
+	// is additive, so a subscriber ignoring it reads the stream as before.
+	//
+	// Today it separates `destroyed`'s two routes: `requested` (the Destroy verb) from
+	// `retention-expired` (the reaper's evict of a paused sandbox past `retention`).
+	// Exactly two, not three: §4.4-A's protect-on-uncertainty means no health verdict
+	// ever destroys, so "died unrecoverably" is not a route here.
+	//
+	// Why it must be on the event for THIS Kind specifically: destroy DELETES the
+	// record, so unlike the pause-like Kinds there is no row left to ask afterwards —
+	// a subscriber that sees `destroyed` and issues a GET gets 404 by contract. The
+	// payload is the fact's only carrier, so an omitted cause is unrecoverable.
+	Cause model.EventCause
 	// OccurredAt is when the mediator constructed the transition.
 	OccurredAt time.Time
 }

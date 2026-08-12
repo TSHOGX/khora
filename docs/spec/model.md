@@ -1075,6 +1075,38 @@ the sink's delivery call** must be separately visible.
 > fail the drain: the drain is the job and the gauge is observation, so a stale gauge is the better
 > loss.
 
+**The payload carries WHY, not only WHAT, and it does so as a field rather than as a kind.** §4.1's
+kind set is **closed at six** and stays closed; what an event additionally carries is a **`cause`**,
+present only where the same kind is reachable by more than one route. Two rules fix its shape:
+
+- **Every kind with more than one route must be separable from the payload alone.** The three
+  pause-like kinds already are, by being three kinds: a subscriber must tell an operator's pause from
+  the reaper's idle sweep from an involuntary demote, because the three imply different next actions.
+  **`destroyed` has exactly the same property and was not separable**: it is reachable from the
+  operator's Destroy verb and from the reaper's evict of a paused sandbox past `retention`, and the
+  difference is the difference between "someone meant this" and "a TTL expired while nobody was
+  looking". Two routes, not three — §4.4-A's protect-on-uncertainty means **no health verdict ever
+  destroys**, so "died unrecoverably" is not among them.
+- **A field, because a kind would break the closure for no gain.** A seventh kind (`evicted`) would
+  make every existing subscriber's exhaustive match wrong, and §4.1 states the closure for the same
+  reason the schema asserts it. A `cause` beside the kind is additive: a subscriber that ignores it
+  reads the stream exactly as before. This is the shape `crash-paused` already uses — its two routes
+  (a unit found dead, and the transport-down budget escalation) are separated by whether a cause of
+  death was recorded alongside — so the payload is being made *consistent*, not extended.
+
+**And for `destroyed` the field is not a convenience, it is the only place the fact can ever be
+read.** Destroy DELETES the record (that is what terminal means here, §4.1), so unlike every other
+kind there is no row left to ask afterwards: a subscriber that sees `destroyed` and issues a GET gets
+404, by contract. For the pause-like kinds the payload is a shortcut past a read that would still
+work; for this one the payload is the fact's **only** carrier, and an omitted `cause` is
+**unrecoverable** rather than merely inconvenient.
+
+**`cause` is NOT §4.3's cause of death, and the two must not be merged.** §4.3's is why an isolation
+*unit* was found gone (its values are about a runtime's exit); this one is why a *record* was
+destroyed (its values are about which route reached the terminal). They answer different questions,
+appear on different kinds, and a shared enum would have to hold members meaningless to each side.
+Distinct vocabularies, named distinctly.
+
 **Capacity-pressure events (a soft threshold): not emitted, and no event kind is added.** §2.3 /
 rootfs-overlay D6.5's hard-threshold behavior is unchanged (the guest sees an ordinary `ENOSPC` and
 the sandbox survives). A soft threshold is **not emitted as a §4.1 event**: capacity pressure is **a

@@ -900,7 +900,10 @@ func (m *Mediator) Destroy(ctx context.Context, id model.SandboxID) error {
 		}
 		return fmt.Errorf("destroy: %w", err)
 	}
-	return m.destroyLocked(ctx, rec)
+	// CauseRequested: this is the operator's verb. The reaper's evict reaches
+	// destroyLocked with the other cause (§4.3), and those are the only two routes —
+	// §4.4-A's protect-on-uncertainty means no health verdict destroys.
+	return m.destroyLocked(ctx, rec, model.CauseRequested)
 }
 
 // destroyLocked marks a sandbox `destroyed` and reclaims its bytes + placement.
@@ -928,7 +931,7 @@ func (m *Mediator) Destroy(ctx context.Context, id model.SandboxID) error {
 // then fails it survives to be destroyed by an operator later. Such a record never
 // emitted `created`, so it must not emit `destroyed` — see the Kind selection
 // below.
-func (m *Mediator) destroyLocked(ctx context.Context, rec model.Sandbox) error {
+func (m *Mediator) destroyLocked(ctx context.Context, rec model.Sandbox, cause model.EventCause) error {
 	id := rec.ID
 	// tear down any live placement + mount (running case).
 	ls := m.take(id)
@@ -977,7 +980,10 @@ func (m *Mediator) destroyLocked(ctx context.Context, rec model.Sandbox) error {
 	// rule on the operator-driven path, so the two cannot disagree.
 	var ev *store.Event
 	if rec.State != model.Creating {
-		ev = newEvent(id, "destroyed", model.Destroyed)
+		// The cause rides the event because it CANNOT be asked for afterwards: the row
+		// is deleted in this same commit, so a subscriber's follow-up GET is a 404 and
+		// "was this a delete or a TTL?" becomes permanently unanswerable (§4.4-C).
+		ev = newCausedEvent(id, "destroyed", model.Destroyed, cause)
 	}
 	if err := m.deps.Store.DeleteSandbox(ctx, id, ev); err != nil {
 		return fmt.Errorf("destroy: delete record: %w", err)
@@ -2174,6 +2180,16 @@ func newEvent(id model.SandboxID, kind model.EventKind, state model.Lifecycle) *
 		State:      state,
 		OccurredAt: time.Now(),
 	}
+}
+
+// newCausedEvent is newEvent for a Kind reachable by more than one route, where the
+// route is what a subscriber needs and cannot get anywhere else (§4.4-C). Separate
+// constructor rather than a variadic on newEvent so the ~dozen single-route call sites
+// keep saying nothing about a cause they do not have.
+func newCausedEvent(id model.SandboxID, kind model.EventKind, state model.Lifecycle, cause model.EventCause) *store.Event {
+	ev := newEvent(id, kind, state)
+	ev.Cause = cause
+	return ev
 }
 
 // randToken returns a short opaque hex token for sandbox/overlay IDs. Opaque =

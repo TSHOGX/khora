@@ -892,6 +892,12 @@ func (c *fakeClient) Health(context.Context) (transport.HealthStatus, error) {
 	}
 	return transport.HealthStatus{Idle: idle}, nil
 }
+// RecordActivity is present to satisfy transport.Client. The mediator never calls
+// it — the write half of the activity signal belongs to §6.1's activity endpoint,
+// and the classifier reading it here must never stamp it (reaper-health D3).
+func (c *fakeClient) RecordActivity(context.Context) (transport.HealthStatus, error) {
+	return transport.HealthStatus{}, nil
+}
 func (c *fakeClient) Start(context.Context, transport.StartSpec) (<-chan transport.ProcessEvent, error) {
 	return nil, nil
 }
