@@ -54,6 +54,16 @@ in the same change.)
 tests are the record of which is which** — a §-claim with no substrate test behind it
 is the thing to be suspicious of.
 
+**But the balance between those two has shifted, and ADR-0011 is the consequence.**
+Through M1–M8 the spec legitimately led the code. The engine is substantially built
+now ⇒ **a spec change almost always implies a code change**, and "settled, not yet
+built" is a **debt** rather than a normal state, because from the two repos that
+consume this one **a § reads as done**. So: **an issue is closed by a PR** carrying
+spec + code + tests + the ruling; a spec change touching no test must declare
+`Spec-only: <reason>` (the pre-push hook checks it); and a granted-but-not-built
+ruling is **registered under Implementation gaps, naming what the consumer must not
+do yet.**
+
 ## Certainty-state flow (where a topic lives = how settled it is)
 
 ```
