@@ -25,12 +25,27 @@ import (
 	"os"
 )
 
+// version is stamped by the Makefile's -X at build time; "dev" means built by a
+// bare `go build`. It answers what a binary in the field IS, which is the one
+// thing a tag cannot do on its own.
+//
+// A separate var per binary rather than a shared package, because the gateway
+// "imports nothing from internal/" (ADR-0007) and a version package would be the
+// first exception. For THIS binary there is a second reason: an in-guest daemon
+// that imported an engine package would put engine code inside the sandbox.
+var version = "dev"
+
 func main() {
 	mode := "init"
 	if len(os.Args) > 1 {
 		mode = os.Args[1]
 	}
 	switch mode {
+	// --version is a MODE here, not a flag: this binary dispatches on os.Args[1]
+	// before any flag parsing, so a flag would be unreachable behind the default
+	// arm's "unknown mode" exit.
+	case "--version", "-version", "version":
+		fmt.Printf("sandboxd %s\n", version)
 	case "init":
 		initMode()
 	case "transport":
