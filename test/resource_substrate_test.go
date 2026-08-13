@@ -332,9 +332,6 @@ func setupEngineOnBtrfs(t *testing.T, healthTimeout time.Duration) (*orchestrato
 // a lifecycle one — the opposite of the RAM cap), and destroy reclaims the
 // subvolume and its quota.
 func TestResourceCapacityAxis(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("needs root (btrfs ioctls + runsc + overlay mount)")
-	}
 	ctx := context.Background()
 	eng, base := setupEngineOnBtrfs(t, 60*time.Second)
 	m := eng.Mediator
@@ -507,9 +504,6 @@ func TestResourceCapacityAxis(t *testing.T) {
 // row asynchronously, so both paths converge within seconds. Hence the assertion
 // below checks the QUOTA UNIT, not just the directory.
 func TestResourceCapacityOrphanSubvolumeReclaimed(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("needs root (btrfs ioctls + runsc)")
-	}
 	ctx := context.Background()
 	eng, base := setupEngineOnBtrfs(t, 60*time.Second)
 	bc := btrfs.Client{}
@@ -563,9 +557,6 @@ func TestResourceCapacityOrphanSubvolumeReclaimed(t *testing.T) {
 // nothing would leave the §2.3 blast-radius invariant believing in a cap that does
 // not exist. Here the StateDir is on tmpfs, where subvolumes cannot exist.
 func TestResourceCapacityRefusedWhenUnenforceable(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("needs root")
-	}
 	ctx := context.Background()
 	// deliberately on tmpfs (t.TempDir()), i.e. NOT btrfs.
 	eng, _ := setupEngineWithProbe(t, 30*time.Second)
@@ -604,9 +595,6 @@ func TestResourceCapacityRefusedWhenUnenforceable(t *testing.T) {
 // the sandbox resumes and the guest still writes. That is the property a 200 destroys, and
 // no unit test can observe it.
 func TestResourceDiskCapBelowUsageRefused(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("needs root (btrfs ioctls + runsc + overlay mount)")
-	}
 	ctx := context.Background()
 	eng, base := setupEngineOnBtrfs(t, 60*time.Second)
 	m := eng.Mediator
@@ -727,9 +715,6 @@ func TestResourceDiskCapBelowUsageRefused(t *testing.T) {
 // headroom vanished — this is the test that catches it, because the symptom would be a
 // sandbox that filled its disk and could never be resumed again.
 func TestResourceDiskCapFullSandboxStillResumes(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("needs root (btrfs ioctls + runsc + overlay mount)")
-	}
 	ctx := context.Background()
 	eng, base := setupEngineOnBtrfs(t, 60*time.Second)
 	m := eng.Mediator
@@ -803,9 +788,6 @@ func TestResourceDiskCapFullSandboxStillResumes(t *testing.T) {
 // wrote the cap, then failed deeper in the chain with an ENOSPC from `Mount`'s workdir
 // step — an unintelligible error for a request that was decidable up front.
 func TestResourceCreateRefusesCapBelowTheUnitFloor(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("needs root (btrfs ioctls)")
-	}
 	ctx := context.Background()
 	eng, _ := setupEngineOnBtrfs(t, 30*time.Second)
 
@@ -869,9 +851,6 @@ func errorsIsDiskCapBelowUsage(err error) bool {
 // host filled up, which is why memory.oom.group=1 is a §2.4 provider obligation
 // rather than a tuning knob.
 func TestResourceRAMAxis(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("needs root (cgroup writes + runsc)")
-	}
 	ctx := context.Background()
 	eng, _ := setupEngineWithProbe(t, 60*time.Second)
 	m := eng.Mediator
@@ -1055,9 +1034,6 @@ func lastLines(s string, n int) string {
 // at all. That is the case exercised here: kill the container out from under the
 // engine and let the reaper classify it.
 func TestResourceUnknownDeathCauseResumes(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("needs root")
-	}
 	ctx := context.Background()
 	eng, base := setupEngineWithProbe(t, 60*time.Second)
 	m := eng.Mediator
@@ -1110,9 +1086,6 @@ func TestResourceUnknownDeathCauseResumes(t *testing.T) {
 // would oversubscribe the node fails and leaves NO half-built residue, and a paused
 // sandbox that no longer fits fails its resume and STAYS paused.
 func TestResourceAdmissionGateOnSubstrate(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("needs root")
-	}
 	ctx := context.Background()
 	repo := harness.RepoRoot(t)
 	base, stateDir := harness.BtrfsBase(t, "admission-", "admission accounts for Template bytes squota cannot see", cleanupOverlaysOnly)
@@ -1248,9 +1221,6 @@ func dirSize(root string) (int64, error) {
 // TestResourceRateAxis: the CPU quota really throttles, the cap provably bound,
 // and it is re-materialized across resume (§3.4 / §5.A).
 func TestResourceRateAxis(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("needs root (cgroup writes + runsc --network=sandbox + overlay mount)")
-	}
 	ctx := context.Background()
 	eng, _ := setupEngineWithProbe(t, 60*time.Second)
 	m := eng.Mediator
@@ -1434,9 +1404,6 @@ func TestResourceRateAxis(t *testing.T) {
 // This keeps "no limits requested" free of any host cgroup footprint and keeps the
 // engine parent free of empty leaves.
 func TestResourceUnlimitedSandboxHasNoCgroupLeaf(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("needs root")
-	}
 	ctx := context.Background()
 	eng, _ := setupEngineWithProbe(t, 60*time.Second)
 	m := eng.Mediator

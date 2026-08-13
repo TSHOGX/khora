@@ -28,9 +28,6 @@ import (
 // create-from-Template → DeleteTemplate is refused (ErrInUse, → 409);
 // after the sandbox is destroyed the Template is deletable. Real runsc create.
 func TestTemplateDeleteReferencedTemplate(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("needs root (runsc create)")
-	}
 	ctx := context.Background()
 	eng, _ := setupEngine(t, 30*time.Second)
 	m := eng.Mediator
@@ -63,9 +60,6 @@ func TestTemplateDeleteReferencedTemplate(t *testing.T) {
 // RESTRICT sees it and the delete is refused. This is the case an in-memory
 // reference count loses: nothing is running, so only a persisted row can carry it.
 func TestTemplatePausedSandboxProtectsTemplate(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("needs root")
-	}
 	ctx := context.Background()
 	eng, _ := setupEngine(t, 30*time.Second)
 	m := eng.Mediator
@@ -93,9 +87,6 @@ func TestTemplatePausedSandboxProtectsTemplate(t *testing.T) {
 // lost bytes. Runs many rounds against the real SQLite store (single-writer
 // serialization is the arbiter, §4.3).
 func TestTemplateReferenceReclaimAtomicity(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("needs root")
-	}
 	ctx := context.Background()
 	eng, _ := setupEngine(t, 30*time.Second)
 	m := eng.Mediator
@@ -140,9 +131,6 @@ func TestTemplateReferenceReclaimAtomicity(t *testing.T) {
 // the boot seed is idempotent — reconciling twice leaves the builtin row
 // count unchanged. Runs against the real SQLite store via the assembled engine.
 func TestTemplateBootSeedIdempotent(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("needs root")
-	}
 	ctx := context.Background()
 	eng, _ := setupEngine(t, 30*time.Second) // already seeds once
 	before, _ := eng.Store.ListTemplates(ctx)
@@ -163,9 +151,6 @@ func TestTemplateBootSeedIdempotent(t *testing.T) {
 // layer is kept. Simulated by planting layer dirs directly; the full Promote
 // crash path is exercised in TestTemplatePromoteCrashBeforeRowIsReclaimed.
 func TestTemplateOrphanLayerSweep(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("needs root")
-	}
 	ctx := context.Background()
 	eng, base := setupEngine(t, 30*time.Second)
 
@@ -198,9 +183,6 @@ func TestTemplateOrphanLayerSweep(t *testing.T) {
 // NEW sandbox from the new Template → the file is visible (the freeze took
 // effect); and the sandboxd portal path is NOT in the frozen layer (excluded-paths, §5.B).
 func TestTemplatePromoteEndToEnd(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("needs root")
-	}
 	ctx := context.Background()
 	eng, base := setupEngine(t, 30*time.Second)
 	m := eng.Mediator
@@ -266,9 +248,6 @@ func TestTemplatePromoteEndToEnd(t *testing.T) {
 // refused while T2 exists (RESTRICT; references point upward). Delete T2 first,
 // then T1.
 func TestTemplateLineageProtection(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("needs root")
-	}
 	ctx := context.Background()
 	eng, _ := setupEngine(t, 30*time.Second)
 	m := eng.Mediator
@@ -320,9 +299,6 @@ func TestTemplateLineageProtection(t *testing.T) {
 // but crashed before inserting the row (a staging→final layer with no templates
 // row). The boot sweep reclaims it, leaving no broken ready state.
 func TestTemplatePromoteCrashBeforeRowIsReclaimed(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("needs root")
-	}
 	ctx := context.Background()
 	eng, base := setupEngine(t, 30*time.Second)
 

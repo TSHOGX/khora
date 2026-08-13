@@ -16,7 +16,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 	"time"
 
@@ -30,9 +29,6 @@ import (
 // platform caller has — including that the stamp lands in the GUEST's clock
 // (reaper-health D1), which is exactly what the sweep then reads back.
 func TestActivityEndpointHoldsOffTheIdleSweepRealRunsc(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("needs root (runsc --network=sandbox + overlay mount)")
-	}
 	ctx := context.Background()
 	eng, _ := setupEngine(t, 30*time.Second)
 	m := eng.Mediator

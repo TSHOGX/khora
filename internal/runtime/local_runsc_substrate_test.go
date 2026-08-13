@@ -18,13 +18,20 @@ import (
 	"time"
 
 	"github.com/TSHOGX/warren/internal/waitfor"
+	"github.com/TSHOGX/warren/test/substratereq"
 )
 
+// mustRoot FAILS rather than skipping: `ok` from a substrate run must mean the substrate
+// ran. Also states the binaries, because runsc/nft/ip absent from PATH produces a failure
+// deep inside a launch rather than at the precondition.
+//
+// Per-test rather than a TestMain: this package's provider_test.go and seam_test.go carry
+// no build tag and need no root (the seam guard is an AST scan), so a package-level
+// precondition would fail them for needing nothing.
 func mustRoot(t *testing.T) {
 	t.Helper()
-	if os.Geteuid() != 0 {
-		t.Skip("substrate test needs root (runsc --network=sandbox); run under sudo")
-	}
+	substratereq.Root(t)
+	substratereq.Bin(t, "runsc", "nft", "ip")
 }
 
 // buildFixtureRootfs builds a Template dir whose /sbin/sandboxd is the fakeguest
