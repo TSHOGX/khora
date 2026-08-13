@@ -77,6 +77,44 @@ slims to boundary + open agenda — nothing lives in full in both places.
    That is the start of a dependency cycle. **Verbs belong to the §4 mediator,
    mechanisms to §5 subsystems; subsystems NEVER call each other.**
 
+## Inbound asks from downstream consumers
+
+The engine has consumers that are **separate repos with their own maintainers**: the platform
+layered on it (`TSHOGX/meadow`, checkout `~/meadow`) and a Template repo under that
+(`TSHOGX/tpl-pi`). When one of them needs something only the engine can provide, it files a
+**change request as a GitHub issue on this repo**, labelled `ask:inbound`. Read them with
+`/inbox`.
+
+**Nothing about the first principle relaxes here.** A downstream ask carries product vocabulary
+by nature — its author says *session*, *tenant*, *workspace* — and the §1.3 litmus applies to it
+exactly as to our own designs. **The ask states a need, not a design**, which is what makes it
+answerable: reduce the need to engine atoms, or refuse it. An ask asking for a product concept
+in the engine is refused **on that ground, stated**, not silently.
+
+Triage, and what each outcome obliges:
+
+- **`ask:granted`** — the need reduces to engine vocabulary and we will do it. **The spec § moves
+  first**, then close the issue with the ruling. The consumer deletes its register entry against
+  the closed issue, so **the closing comment is the whole hand-off** — a bare "done" leaves them
+  nothing to verify.
+- **`ask:refused`** — with the reason, and the reason is the load-bearing part: they are required
+  to hold a fallback, and a refusal tells them whether it must now be permanent.
+- **`ask:duplicate`** — already live in `open-decisions.md`. Close pointing at **that row by its
+  bold title, never by position**, and note the leaning it already carries. This is the common
+  case, because a consumer hits a boundary at roughly the point we notice it from inside.
+
+**A ruling is a receipt, and its absence is the failure mode this exists to prevent.** An ask
+that sits open while our register independently converges on it means the consumer keeps building
+against a fallback we have already decided to remove — and the same reasoning gets done twice, on
+both sides, which has happened.
+
+**Two things an inbound ask is not.** It is not a question — anything answerable by reading this
+repo should have been read, and an ask that is really a question gets closed as such. And it is
+never a *dependency*: their documents describe the shape they have, so **the engine is never
+scheduled by an ask**. Our own `open-decisions.md` remains the register for what is unsettled
+here; an issue is an address and an inbox, not a second register. **Never edit the consumer's
+repo** — the ruling on the issue is the hand-off.
+
 ## Code conventions
 
 - **Package names = the §5 canonical short-names:** `runtime` / `rootfs` /
