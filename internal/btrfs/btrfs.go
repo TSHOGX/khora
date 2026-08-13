@@ -13,10 +13,8 @@
 //
 // MECHANISM CHOICE: squota, not full qgroups (rootfs-overlay D6.2), the decisive reason being
 // that the dev/test substrate CANNOT change mode — BTRFS_IOC_QUOTA_CTL returns EPERM even as
-// root with CAP_SYS_ADMIN, so full qgroups would fork spec from substrate permanently. squota
-// also fits the shape (one subvolume per workload, no rescan storms) and charges what we mean
-// to charge for: under full qgroups a copy-up reflink pushes `referenced` past the cap and only
-// falls back after refusing new writes, paying a cost for still no hard ceiling.
+// root with CAP_SYS_ADMIN, so full qgroups would fork spec from substrate permanently. It also
+// fits the shape (one subvolume per workload, no rescan storms).
 //
 // The consequence that must be handled OUTSIDE this package: under squota a
 // reflinked copy-up is free, so the cap governs newly-written bytes and is not a
@@ -209,15 +207,14 @@ func (c Client) SetQuotaLimit(ctx context.Context, path string, limitByte int64)
 	return nil
 }
 
-// Usage reports the bytes charged to the subvolume at path and its current limit
-// (limit 0 = none). This is the BACKEND's own accounting — the only trustworthy
-// source for capacity — §5.B requires capacity accounting to come from the
-// backend's own statement, never from guest-side numbers (see
-// rootfs.Provider.UncappedBytes for why those are unusable).
-// usageReadAttempts bounds the retry below. Three, because three is what the
+// usageReadAttempts bounds the retry in Usage. Three, because three is what the
 // measurement needed and no more (see Usage).
 const usageReadAttempts = 3
 
+// Usage reports the bytes charged to the subvolume at path and its current limit
+// (limit 0 = none). This is the BACKEND's own accounting — the only trustworthy
+// source for capacity, which §5.B requires over any guest-side number (see
+// rootfs.Provider.UncappedBytes for why those are unusable).
 func (c Client) Usage(ctx context.Context, path string) (used, limit int64, err error) {
 	// -f filters to just this path's qgroup; --raw for exact bytes; --sync so the
 	// numbers reflect writes that have not yet been committed by a background

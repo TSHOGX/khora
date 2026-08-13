@@ -77,15 +77,12 @@ type VolumeID string
 // Volume is a first-class persistent object (§4.3), and its field list is
 // SHORTER than it looks like it should be — each absence is a decision:
 //
-//   - No State field. Existence IS the state (§4.3), as with Template: the row existing =
-//     ready, deleting it = destroyed, no intermediate. That is what FORCES bytes-first
-//     materialization (§5.C) — with no not-ready escape hatch the storage MUST be allocated
-//     before this row is inserted.
-//   - No refcount field. "Is it deletable" is DERIVED (§4.3): no mount row references it, no
-//     child volume names it as parent.
-//   - NO AccessMode, on cardinality grounds: one volume can be shared-rw to sandbox A and
-//     shared-ro to sandbox C AT THE SAME TIME (measured), so a per-volume field could not
-//     carry it honestly. It belongs to the MOUNT ROW (§5.C).
+//   - No State field, no refcount field: existence-is-state and a derived refcount, the same
+//     shape as Template above and forcing bytes-first materialization for the same reason
+//     (§4.3 / §5.C). "Is it deletable" = no mount row references it, no child volume names
+//     it as parent.
+//   - NO AccessMode, on cardinality grounds — see AccessMode below. It belongs to the MOUNT
+//     ROW (§5.C).
 //   - No lease/owner field. An exclusive lease is not an object — it IS the existence of an
 //     `exclusive` mount row (§5.C / volume.md D3/D4).
 //
@@ -109,18 +106,15 @@ type Volume struct {
 	// THE FK IS A CORRECTNESS ARGUMENT, NOT TIDINESS (volume.md D6.1a / D7.1). A quota
 	// row leaks precisely when a unit that OWNS extents is deleted while a live sharer
 	// still references them — and measured, "delete the sharers first, then the source"
-	// leaks NOTHING. RESTRICT makes that order THE ONLY REACHABLE ONE: deleting a source
-	// with a live descendant becomes a 409, so the leak is PREVENTED rather than
-	// reclaimed. Free, and it introduces no new mechanism — it is §1.3's "add a join
-	// table" (self-referential here) reusing the existing FK-violation predicate.
+	// leaks NOTHING. RESTRICT makes that order THE ONLY REACHABLE ONE, so the leak is
+	// PREVENTED rather than reclaimed.
 	//
 	// An external implementation is the counter-example that pins this: it chose a
 	// POINTER WITH NO CONSTRAINT (ADD COLUMN + index, no REFERENCES), so it had to
 	// hand-write children checks in three places — and all three were RECLAMATION
 	// guards, none a DELETE guard. The control-plane row therefore disappeared while the
 	// bytes had to stay, and since every reclamation predicate was keyed on the source's
-	// own record, deleting that record made the bytes permanently unfindable. Our
-	// SweepOrphanVolumes would cover that case, but it SHOULD NOT HAVE TO.
+	// own record, deleting that record made the bytes permanently unfindable.
 	Parent VolumeID
 
 	// CapByte is the per-volume capacity cap in bytes, 0 = uncapped (§5.C / §3.4).
@@ -128,10 +122,9 @@ type Volume struct {
 	// THIS RECORD IS THE AUTHORITY, always. The backend's read-back cannot serve:
 	// the local substrate maps "no cap" and 0 onto each other in both directions, so
 	// "never capped" and "deliberately uncapped" are byte-for-byte identical when
-	// read from storage (volume.md D7.3). Any design that plans to reconcile the cap
-	// against the backend afterwards is unimplementable on that substrate — which is
-	// why the cap must be written in the same backend operation that creates the
-	// bytes.
+	// read from storage (volume.md D7.3). So no after-the-fact reconciliation against
+	// the backend is implementable, and the cap must be written in the same backend
+	// operation that creates the bytes.
 	CapByte int64
 
 	CreatedAt time.Time
@@ -141,11 +134,9 @@ type Volume struct {
 // materialized with NO special mechanism — the same host directory reaches one or N
 // guests (measured; volume.md D1).
 //
-// IT IS A PROPERTY OF THE MOUNT ROW, NOT OF THE VOLUME, and the reason is
-// cardinality rather than taste: one volume can be shared-rw to sandbox A and
-// shared-ro to sandbox C AT THE SAME TIME (measured), so a per-volume field could not
-// carry it honestly. That is why it appears here and on the mount row, and nowhere on
-// model.Volume.
+// IT IS A PROPERTY OF THE MOUNT ROW, NOT OF THE VOLUME, on cardinality grounds: one
+// volume can be shared-rw to sandbox A and shared-ro to sandbox C AT THE SAME TIME
+// (measured), so a per-volume field could not carry it honestly.
 //
 // The two halves are enforced in DIFFERENT places, and the split is load-bearing:
 // READ-ONLY is enforced AT RUNTIME (a read-only bind ⇒ the guest's write gets EROFS,
@@ -163,10 +154,8 @@ const (
 	SharedReadOnly AccessMode = "shared-ro"
 	// SharedReadWrite is a shared writable mount. It guarantees POSIX semantics only
 	// for multiple connections WITHIN one sandbox; CROSS-SANDBOX rw coherence is
-	// explicitly UNDEFINED (§5.C). Gofer and sentry each cache, so shared mutable
-	// consistency across an isolation boundary is unreliable in principle — the honest
-	// position is to promise nothing rather than to build a fragile mechanism that
-	// pretends to.
+	// explicitly UNDEFINED (§5.C) — gofer and sentry each cache, so shared mutable
+	// consistency across an isolation boundary is unreliable in principle.
 	SharedReadWrite AccessMode = "shared-rw"
 )
 
@@ -196,10 +185,9 @@ func (a AccessMode) Valid() bool {
 // restoring from frozen bytes — a volume is always the one real thing, never forked
 // into a per-sandbox copy.
 //
-// Like Template and Volume it has NO state column and NO count column: existence is
-// the state, and "is this volume exclusively held" is DERIVED from the rows' presence
-// and access (§4.3). It is NOT a §4.1 lifecycle transition, so creating or deleting a
-// mount row publishes NO event.
+// Like Template and Volume: existence-is-state, and "is this volume exclusively held" is
+// DERIVED from the rows' presence and access (§4.3). It is NOT a §4.1 lifecycle
+// transition, so creating or deleting a mount row publishes NO event.
 type Mount struct {
 	// Sandbox is the sandbox this mount belongs to. REFERENCES sandboxes(id) ON
 	// DELETE RESTRICT.
@@ -246,9 +234,8 @@ type NetTuple struct {
 	// network.md D3.3).
 	//
 	// Only IP LITERALS ever become one: no domain names, refused on COST grounds
-	// rather than feasibility — that road needs a DNS proxy, a TTL refresher coupled
-	// to connection tracking, and a churning product list inside the engine, and the
-	// third breaks §1.1 outright (network.md D2).
+	// rather than feasibility (network.md D2).
+	//
 	// NOTE ON THE JSON TAGS ON THIS TYPE: they serialize the RECORD, i.e. what the
 	// store persists. They are NOT the wire schema. The API layer carries its own
 	// wire type with `cidr` as a STRING, because netip.Prefix's own text
@@ -285,13 +272,12 @@ func (t NetTuple) AnyDest() bool { return !t.CIDR.IsValid() || t.CIDR.Bits() == 
 // port (§5.D). It is AnyDest's twin, and a predicate with a NAME states the semantic
 // where a bare `Port == 0` only implies it.
 //
-// Note the asymmetry with AnyDest, which is a property of the two fields rather than
-// an inconsistency: AnyDest exists because the GENERATOR must branch on it (an invalid
-// prefix cannot be handed to a rule's address set at all), while the port wildcard
-// needs no generator branch — 0 already IS the wildcard encoding in ruleset.Match, and
-// the RENDERER emits the `dport` clause if and only if it is non-zero. So no production
-// caller needs it; its readers are the tests that assert the semantic, which is what
-// keeps `Port == 0` from being re-derived by hand at a site that forgets what it means.
+// Note the asymmetry with AnyDest: the generator must branch on AnyDest (an invalid
+// prefix cannot be handed to a rule's address set at all), while the port wildcard needs
+// no generator branch — 0 already IS the wildcard encoding in ruleset.Match, and the
+// RENDERER emits `dport` iff it is non-zero. So no production caller needs this; its
+// readers are the tests asserting the semantic, which keeps `Port == 0` from being
+// re-derived by hand at a site that forgets what it means.
 func (t NetTuple) AnyPort() bool { return t.Port == 0 }
 
 // NetVia is one `egress.via[]` entry: flows matching any of Match go to Endpoint.
@@ -446,8 +432,7 @@ const (
 // Note there is no `evict` kind: eviction reaches destroyLocked and emits Destroyed.
 // The three PAUSED kinds differ in WHY, which is what a subscriber needs to tell an
 // operator's pause from the reaper's idle sweep from a crash (§4.3). `destroyed`'s two
-// routes are separated the OTHER way, by EventCause below — a seventh kind would break
-// the closure this type exists to state, while a field is additive (§4.4-C).
+// routes are separated the OTHER way, by EventCause below.
 type EventKind string
 
 const (
@@ -574,15 +559,14 @@ const (
 	CauseNone DeathCause = ""
 	// CauseUnknown = the unit is gone but WHY could not be determined. A
 	// first-class legal value, NOT an error (§4.3): the disposition is to treat it
-	// as dead-recoverable, which a caller may then resume. Self-correction is
-	// STRUCTURAL rather than counted: if it really was the RAM cap, the same
-	// workload re-triggers termination after that resume — this time in the control
-	// plane's plain view — and THAT observation records the real cause, after which
-	// the persisted fact refuses further resumes. There is no resume-attempt bound
-	// and none is needed: the engine never resumes a dead-recoverable sandbox
-	// itself (§4.1 lists no such automatic transition), so the retry is a caller's
-	// explicit choice, not an engine loop. Providers MUST report this rather than
-	// guess (§2.4: no guessing).
+	// as dead-recoverable, which a caller may then resume. NO resume-attempt bound,
+	// and none is needed — self-correction is STRUCTURAL: if it really was the RAM
+	// cap the same workload re-triggers termination after that resume, this time in
+	// the control plane's plain view, and THAT observation records the real cause,
+	// after which the persisted fact refuses further resumes. The engine never
+	// resumes a dead-recoverable sandbox itself (§4.1 lists no such automatic
+	// transition), so the retry is a caller's choice, not an engine loop. Providers
+	// MUST report this rather than guess (§2.4: no guessing).
 	CauseUnknown DeathCause = "unknown"
 	// CauseGone = the unit died for a reason that is NOT a resource cap (sentry
 	// crash, external kill, clean guest exit). Disposition: dead-recoverable →
@@ -603,10 +587,7 @@ const (
 // carries it. The mount topology is consumed but lives in its own table (§5.C)
 // keyed by sandbox, not as a field here — a sandbox's volume set is many-to-many
 // and mutable independently of the identity record. The network declaration
-// (§5.D) IS carried: it is a Binding (§3.4) recorded on the sandbox's own
-// control-plane record, regenerated into a rule set at every placement from the
-// CURRENT record — which is what makes it stable across resume and rebuildable by
-// §4.4-A reconciliation after a crash.
+// (§5.D) IS carried, as a Binding — see the Network field below.
 type Sandbox struct {
 	ID       SandboxID
 	Template TemplateID

@@ -29,7 +29,6 @@ import (
 // RepoRoot resolves the engine repo root from this file's location.
 func RepoRoot(t *testing.T) string {
 	t.Helper()
-	// test/harness/harness.go → ../.. is the repo root.
 	wd, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
@@ -49,15 +48,12 @@ func RepoRoot(t *testing.T) string {
 // crash-loop sentinel the reaper escalation test needs). That tag is what keeps
 // the fault path OUT of a production guest — see cmd/sandboxd/faultinject.go.
 // Everything else about this binary is the production build.
-// BUILT ONCE PER TEST BINARY, not per call. The inputs are identical at every call
-// site — same package, same tag, same CGO setting — so the ~0.5 s link was paid 30×
-// per run for the same bytes. Memoized here rather than at each caller because the
-// callers are the ones that must not have to think about it.
 //
-// The result is shared, so it must be TREATED AS READ-ONLY: it is copied into each
-// Template by build-rootfs.sh, never executed or modified in place. A test that needs
-// a DIFFERENT binary (the broken-Template arm) has its own builder and does not come
-// through here.
+// BUILT ONCE PER TEST BINARY, not per call: the inputs are identical at every call
+// site, so the ~0.5 s link was paid 30× per run for the same bytes. The result is
+// shared, so it must be TREATED AS READ-ONLY — it is copied into each Template by
+// build-rootfs.sh, never executed or modified in place. A test that needs a
+// DIFFERENT binary (the broken-Template arm) has its own builder.
 func BuildSandboxd(t *testing.T, repoRoot string) string {
 	t.Helper()
 	sandboxdOnce.Do(func() {
@@ -143,8 +139,6 @@ func BuildBrokenTemplate(t *testing.T, repoRoot, templatesDir, name string) {
 // ~2 ms to copy one. Keyed on the source rather than on `name` because the same program
 // is deliberately injected under two names (guestServeSrc as both "serve" and "serve2"),
 // and a name key would rebuild identical bytes while a content key collapses them.
-//
-// The build still happens once per distinct source per test BINARY, not per call.
 func InjectStaticBin(t *testing.T, templatesDir, template, name, mainSrc string) {
 	t.Helper()
 	built := buildStaticProbe(t, mainSrc)
@@ -175,16 +169,13 @@ func buildStaticProbe(t *testing.T, mainSrc string) string {
 	probeCacheMu.Lock()
 	defer probeCacheMu.Unlock()
 	if e, ok := probeCache[key]; ok {
-		// Every caller fails, not only the first: a memoized failure surfaced once would
-		// let later tests run against an empty path and fail somewhere less obvious.
+		// Every caller fails, not only the first — see BuildSandboxd.
 		if e.err != nil {
 			t.Fatalf("%v", e.err)
 		}
 		return e.bin
 	}
-	// Not t.TempDir(): that is removed when the FIRST caller's test ends, which would
-	// leave every later caller holding a path to a deleted file. os.MkdirTemp lives for
-	// the process, which is the lifetime a memoized value needs.
+	// os.MkdirTemp, not t.TempDir(), for the lifetime reason in BuildSandboxd.
 	dir, err := os.MkdirTemp("", "harness-probe")
 	if err != nil {
 		e := probeCacheEntry{err: fmt.Errorf("temp dir for probe: %w", err)}
@@ -337,20 +328,14 @@ func Engine(t *testing.T, opts EngineOpts) (*orchestrator.Engine, string) {
 	if err := eng.SeedTemplates(ctx); err != nil {
 		t.Fatalf("seed builtin templates: %v", err)
 	}
-	// Production parity, and it matters more than parity usually does: the
-	// orphan-VOLUME sweep runs BEFORE anything can create a storage unit (§5.C /
-	// volume.md D7.1). A leaked quota row reserves no unit id, so a restart can hand
-	// that id — along with its cap — to a brand-new volume. Running it here means the
-	// substrate suites exercise the same ordering production boots with, rather than a
-	// convenient one.
+	// All three volume-boot entry points run in production's order and position: BEFORE
+	// anything can create a storage unit (§5.C / volume.md D7.1, D7.3, D7). So the
+	// substrate suites exercise the ordering production boots with rather than a
+	// convenient one — which matters most for the cap repair, whose whole job is to fix
+	// residue a previous run left.
 	if err := eng.SweepOrphanVolumes(ctx); err != nil {
 		t.Logf("boot orphan-volume sweep (non-fatal, reaper retries): %v", err)
 	}
-	// Cap repair and quota-row reclamation, in production's order and position (§5.C /
-	// volume.md D7.3, D7): both run BEFORE anything can create a storage unit. Running
-	// them here means the substrate suites exercise the sequence production boots with
-	// rather than a convenient one — which matters most for the cap repair, whose whole
-	// job is to fix residue a previous run left.
 	if err := eng.RepairVolumeCaps(ctx); err != nil {
 		t.Logf("boot volume-cap repair (non-fatal, reaper retries): %v", err)
 	}
@@ -376,13 +361,10 @@ func Engine(t *testing.T, opts EngineOpts) (*orchestrator.Engine, string) {
 
 // NftCounter reads a named counter out of one sandbox's rule-set table.
 //
-// EVERY DENY ASSERTION IN THIS SUITE NEEDS IT, and that is the acceptance discipline
-// rather than thoroughness: "unreachable" alone is not a valid assertion, because a
-// rule set with the right rules in the wrong order behaves perfectly on ordinary
-// traffic and differs only when it is being bypassed — and a floor whose counter
-// reads 0 is INDISTINGUISHABLE from a floor that was bypassed (§2.4 / network.md
-// D4.1, D5 ⑧). So a deny is proved by "unreachable" AND "the counter moved after a
-// deliberate probe".
+// EVERY DENY ASSERTION IN THIS SUITE NEEDS IT: "unreachable" alone is not a valid
+// assertion, because a counter reading 0 is indistinguishable from a bypassed rule
+// (§2.4 / network.md D4.1, D5 ⑧). A deny is proved by "unreachable" AND "the counter
+// moved after a deliberate probe".
 //
 // Returns -1 when the counter does not exist, which a caller must treat as a failed
 // assertion rather than as zero: a missing counter means the rule was never
@@ -475,13 +457,12 @@ func CountRuleSetTables(t *testing.T) int {
 // control-plane restart looks like from the host's point of view: a new process, an
 // empty live-map, and every placement the previous one built still on the host.
 //
-// It deliberately does NOT rebuild the Template or sandboxd, unlike Engine. That is
-// the whole reason it exists: re-running the rootfs builder rewrites
-// `<base>/templates/bare`, which is the LOWER DIR of every live sandbox's overlay
-// mount — so a survivor's guest loses the files it is running from, and the resulting
-// failure (a guest process that produces no output at all) looks nothing like the
-// reconciliation defect a test using it is trying to detect. Production never rebuilds
-// a Template under a live sandbox; a test that did would be measuring its own harness.
+// It deliberately does NOT rebuild the Template or sandboxd, unlike Engine: re-running
+// the rootfs builder rewrites `<base>/templates/bare`, the LOWER DIR of every live
+// sandbox's overlay mount — so a survivor's guest loses the files it is running from,
+// and the resulting failure (a guest process that produces no output at all) looks
+// nothing like the reconciliation defect a test using it is trying to detect.
+// Production never rebuilds a Template under a live sandbox.
 //
 // It runs the real boot sequence in production's order: second-hop table → reconcile.
 func Restart(t *testing.T, base string, opts EngineOpts) *orchestrator.Engine {
@@ -556,11 +537,10 @@ func BtrfsBase(t *testing.T, prefix, why string, teardown func(stateDir string))
 		t.Fatal(err)
 	}
 	stateDir = filepath.Join(base, "state")
-	// Registered BEFORE the btrfs check, so a SKIP removes the dir too. The code this
-	// helper replaced checked first and leaked on skip; that path does not fire on a
-	// btrfs dev box, but /var/tmp on this machine already carries one leaked fixture dir
-	// from an earlier run, and a scratch dir that silently survives is exactly what costs
-	// the next run the ability to tell "the engine leaks" from "my fixtures leak".
+	// Registered BEFORE the btrfs check, so a SKIP removes the dir too. /var/tmp on this
+	// machine already carries one leaked fixture dir from an earlier run, and a scratch
+	// dir that silently survives costs the next run the ability to tell "the engine
+	// leaks" from "my fixtures leak".
 	t.Cleanup(func() {
 		if teardown != nil {
 			teardown(stateDir)

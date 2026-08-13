@@ -11,33 +11,27 @@ import (
 )
 
 // Memory is the in-memory Store: the second implementation of the §1.3 Behavior
-// seam, serving fast, disk-free L1 unit tests. The SQLite backend (ADR-0004)
-// coexists behind the SAME interface; which one the orchestrator assembles is
-// register-an-implementation (§1.3).
+// seam, serving fast, disk-free L1 unit tests.
 //
 // The single mutex is how Memory DELIVERS the §4.4-C atomic-commit contract:
 // "change the map + append the outbox slice" happen under one Lock, so a
-// transition and its event commit together or not at all — the SAME contract
-// SQLite delivers with BEGIN/COMMIT, and the caller cannot tell which it got.
+// transition and its event commit together or not at all — where SQLite uses
+// BEGIN/COMMIT. Every "X equivalent" comment below is one clause of that.
 type Memory struct {
 	mu  sync.Mutex
 	rec map[model.SandboxID]model.Sandbox
-	// tmpl holds Template rows (§4.3 first-class object). Memory delivers the
-	// SAME §4.3 reference-protection contract SQLite gives via FK RESTRICT, but
-	// with a Go scan under the one mutex (§1.3 seam: one set of assertions, two
-	// backends). Existence-is-state: presence in this map = the Template's ready
-	// state (§4.3), no separate state field.
+	// tmpl holds Template rows (§4.3 first-class object). The §4.3
+	// reference-protection contract arrives here as a Go scan under the one mutex,
+	// where SQLite gets it from FK RESTRICT.
 	tmpl map[model.TemplateID]model.Template
-	// vol holds Volume rows (§5.C first-class object, §4.3). Existence-is-state:
-	// presence in this map IS the volume's ready state, with no separate field.
+	// vol holds Volume rows (§5.C first-class object, §4.3).
 	vol map[model.VolumeID]model.Volume
 	// mounts is the mount table (§5.C). A SLICE rather than a map because no single
 	// column is its key — a row is identified by (sandbox, path) for topology and by
 	// (volume, access) for the lease, and both are scanned rather than looked up.
 	//
 	// Reference protection on this backend is three explicit Go scans — sandbox side,
-	// volume side, and the lease — where SQLite gets them from constraints. Same
-	// contract, different mechanism (§1.3 seam).
+	// volume side, and the lease — where SQLite gets them from constraints.
 	mounts []model.Mount
 	// outbox is append-only, ordered — the publisher reads oldest-first. Like the
 	// SQLite backend, published rows are marked, never removed (same unbounded-
@@ -59,11 +53,9 @@ type Memory struct {
 type outboxRow struct {
 	ev        Event
 	published bool
-	// publishedAt is WHEN delivery was marked, and it exists because §4.4-C's retention
-	// window ages rows by DELIVERY rather than by occurrence — see Store.TrimOutbox for
-	// why that distinction is load-bearing rather than cosmetic. A bool alone cannot
-	// answer "delivered before this cutoff", so this arm would silently fail the shared
-	// contract without it.
+	// publishedAt is WHEN delivery was marked. It exists because the retention window ages
+	// rows by DELIVERY rather than occurrence (Store.TrimOutbox) — a bool alone cannot
+	// answer "delivered before this cutoff".
 	publishedAt time.Time
 }
 
@@ -76,10 +68,8 @@ func NewMemory() *Memory {
 }
 
 // checkEventKind refuses a Kind outside §4.1's closed set, which is what the SQLite
-// arm's CHECK constraint does. Both backends must agree: a closed set enforced on one
-// of them only means a typo'd kind is rejected in production and accepted in the tests
-// that are supposed to prove the behaviour (§1.3 — one set of assertions, two
-// backends).
+// arm's CHECK constraint does. Both backends must agree, or a typo'd kind is rejected in
+// production and accepted in the tests that are supposed to prove the behaviour.
 func checkEventKind(ev *Event) error {
 	if ev == nil {
 		return nil
@@ -91,11 +81,8 @@ func checkEventKind(ev *Event) error {
 		return fmt.Errorf("store: event kind %q is not one of §4.1's six (%v)",
 			ev.Kind, model.EventKinds)
 	}
-	// The SAME agreement obligation applies to Cause, for the same reason: its column
-	// carries a CHECK, so a misspelled cause would be refused by SQLite and accepted by
-	// Memory — i.e. rejected in production and passed in the tests meant to prove the
-	// behaviour. Empty is legitimate (most kinds have one route and carry no cause), so
-	// only a non-empty value is checked.
+	// Cause carries the same obligation (its column has a CHECK too). Empty is legitimate
+	// — most kinds have one route and carry no cause — so only a non-empty value is checked.
 	if ev.Cause != model.CauseNotApplicable && !ev.Cause.Valid() {
 		return fmt.Errorf("store: event cause %q is not one of the known causes (%v)",
 			ev.Cause, model.EventCauses)
@@ -124,18 +111,16 @@ func (m *Memory) CreateSandbox(_ context.Context, s model.Sandbox, ev *Event) er
 	if _, ok := m.rec[s.ID]; ok {
 		return ErrConflict
 	}
-	// FK RESTRICT equivalent (§4.3 reference-side): the referenced Template must
-	// exist. Under the one mutex, a concurrent DeleteTemplate cannot interleave —
-	// the same single-writer serialization SQLite gets, so the atomicity is
-	// identical (§4.3 single-writer serialization).
+	// FK RESTRICT equivalent (§4.3 reference-side): the referenced Template must exist.
+	// Under the one mutex a concurrent DeleteTemplate cannot interleave — the same
+	// single-writer serialization SQLite gets (§4.3).
 	if _, ok := m.tmpl[s.Template]; !ok {
 		return ErrTemplateNotFound
 	}
 	// Normalize the §5.D declaration on the way in, so this backend holds what SQLite
-	// holds: §6.1 requires the three arrays to always read back as `[]` rather than
-	// null, and SQLite gets that from marshalNetwork. Without it the two backends
-	// would disagree on the READ SHAPE of every declaration, and storetest's contract
-	// assertions would be pinning one backend's accident.
+	// holds (it gets the same from marshalNetwork): §6.1 requires the three arrays to read
+	// back as `[]` rather than null. Without it the two backends would disagree on the
+	// READ SHAPE of every declaration, and storetest would be pinning one's accident.
 	s.Network = s.Network.Normalize()
 	m.rec[s.ID] = s
 	m.appendEvent(ev) // same commit as the insert (§4.4-C)
@@ -184,10 +169,9 @@ func (m *Memory) DeleteTemplate(_ context.Context, id model.TemplateID) error {
 	if _, ok := m.tmpl[id]; !ok {
 		return ErrTemplateNotFound
 	}
-	// RESTRICT equivalent: scan for any live referencing row — a sandbox pinning
-	// it, or a child Template naming it as parent. Either → ErrInUse (§4.3
-	// referenced-means-undeletable). This is the Go-check twin of SQLite's FK
-	// RESTRICT; the two run the SAME contract assertions (§1.3 seam).
+	// RESTRICT equivalent: scan for any live referencing row — a sandbox pinning it, or a
+	// child Template naming it as parent. Either → ErrInUse (§4.3
+	// referenced-means-undeletable). The Go-check twin of SQLite's FK RESTRICT.
 	for _, s := range m.rec {
 		if s.Template == id {
 			return ErrInUse
@@ -203,9 +187,6 @@ func (m *Memory) DeleteTemplate(_ context.Context, id model.TemplateID) error {
 }
 
 // --- Volume CRUD (§5.C) ------------------------------------------------------
-//
-// Memory delivers the SAME contract SQLite does, under the one mutex that already
-// serializes everything else here (§1.3 seam: one set of assertions, two backends).
 
 func (m *Memory) CreateVolume(_ context.Context, v model.Volume) error {
 	m.mu.Lock()
@@ -261,8 +242,7 @@ func (m *Memory) DeleteVolume(_ context.Context, id model.VolumeID) error {
 	if _, ok := m.vol[id]; !ok {
 		return ErrVolumeNotFound // reported, never folded into success (§6.2)
 	}
-	// RESTRICT equivalent, VOLUME side: the Go-check twin of SQLite's mounts.volume
-	// FK. Both backends run the same contract assertions (§1.3 seam).
+	// RESTRICT equivalent, VOLUME side: the Go-check twin of SQLite's mounts.volume FK.
 	for _, mt := range m.mounts {
 		if mt.Volume == id {
 			return ErrVolumeInUse
@@ -282,9 +262,8 @@ func (m *Memory) DeleteVolume(_ context.Context, id model.VolumeID) error {
 
 // --- Mount table (§5.C) ------------------------------------------------------
 //
-// Memory delivers the atomic lease under the ONE mutex it already holds — no new lock
-// class, which is the same "not a new mechanism" argument SQLite's single statement
-// makes (§5.C / volume.md D3).
+// The atomic lease arrives under the ONE mutex Memory already holds — no new lock class
+// (§5.C / volume.md D3).
 
 func (m *Memory) CreateMounts(_ context.Context, mounts []model.Mount) error {
 	if len(mounts) == 0 {
@@ -306,10 +285,10 @@ func (m *Memory) CreateMounts(_ context.Context, mounts []model.Mount) error {
 	return nil
 }
 
-// ReplaceMounts swaps the whole binding under the ONE mutex Memory already holds. See
-// Store.ReplaceMounts for why the atomicity is a contract promise; here it is delivered by
-// filtering and appending in a single critical section, so no reader can be scheduled
-// between the two halves and observe the sandbox with no rows.
+// ReplaceMounts swaps the whole binding under the ONE mutex Memory already holds: filter
+// and append in a single critical section, so no reader can be scheduled between the two
+// halves and observe the sandbox with no rows. Why that is a contract promise rather than
+// this backend's detail: Store.ReplaceMounts.
 func (m *Memory) ReplaceMounts(_ context.Context, sandbox model.SandboxID, next []model.Mount) error {
 	if err := validateReplacement(sandbox, next); err != nil {
 		return err
@@ -318,9 +297,8 @@ func (m *Memory) ReplaceMounts(_ context.Context, sandbox model.SandboxID, next 
 	defer m.mu.Unlock()
 
 	// The predicate is evaluated against the rows that SURVIVE the replacement — i.e. with
-	// this sandbox's own rows already dropped. That is the whole reason a rebind cannot be
-	// a delete plus a CreateMounts: judged against the un-filtered set, a re-submitted
-	// IDENTICAL binding contends with the very rows it is replacing.
+	// this sandbox's own rows already dropped. Judged against the un-filtered set, a
+	// re-submitted IDENTICAL binding would contend with the very rows it is replacing.
 	kept := make([]model.Mount, 0, len(m.mounts))
 	for _, mt := range m.mounts {
 		if mt.Sandbox != sandbox {
@@ -344,9 +322,8 @@ func (m *Memory) ReplaceMounts(_ context.Context, sandbox model.SandboxID, next 
 // Callers MUST hold m.mu. Shared by CreateMounts and ReplaceMounts so the lease predicate
 // has ONE spelling on this backend, mirroring SQLite's shared insertBinding.
 func (m *Memory) admitBinding(base, mounts []model.Mount) ([]model.Mount, error) {
-	// Reference side of §4.3 atomicity: both endpoints must exist. Under the one mutex
-	// a concurrent delete cannot interleave, so this is the same atomicity SQLite's FK
-	// gives inside its transaction.
+	// Reference side of §4.3 atomicity: both endpoints must exist. Under the one mutex a
+	// concurrent delete cannot interleave.
 	for _, mt := range mounts {
 		if _, ok := m.rec[mt.Sandbox]; !ok {
 			return nil, ErrNotFound
@@ -437,9 +414,8 @@ func (m *Memory) GetSandbox(_ context.Context, id model.SandboxID) (model.Sandbo
 		return model.Sandbox{}, ErrNotFound
 	}
 	// DEEP-COPY the declaration's slices. SQLite re-decodes JSON on every read and so
-	// cannot alias; handing out the live backing array here would let a caller's
-	// in-place mutation corrupt the store on ONE backend only — the read-shape
-	// divergence CreateSandbox's normalization exists to prevent.
+	// cannot alias; handing out the live backing array here would let a caller's in-place
+	// mutation corrupt the store on ONE backend only (model.NetworkDecl.Clone).
 	s.Network = s.Network.Clone()
 	return s, nil
 }
@@ -471,9 +447,8 @@ func (m *Memory) CompareAndSetState(_ context.Context, id model.SandboxID, expec
 		return ErrConflict
 	}
 	s.State = next
-	// death cause under the SAME lock as the state change — the Go-mutex twin of
-	// SQLite's single transaction, delivering the atomicity
-	// Store.CompareAndSetState promises (§4.3 / §4.4-C). nil = leave untouched.
+	// death cause under the SAME lock as the state change (§4.3 / §4.4-C, and
+	// Store.CompareAndSetState for why no later window exists). nil = leave untouched.
 	if cause != nil {
 		s.DeathCause = *cause
 	}
@@ -580,8 +555,7 @@ func (m *Memory) UnpublishedEvents(_ context.Context, limit int) ([]Event, error
 }
 
 // TrimOutbox implements Store.TrimOutbox (§4.4-C's retention mechanism). Read that
-// contract for why each clause matters; this arm mirrors it exactly, because the two
-// backends' outbox semantics are held identical by the shared contract suite.
+// contract for why each clause matters.
 func (m *Memory) TrimOutbox(_ context.Context, cutoff time.Time, limit int) (int, error) {
 	if limit <= 0 {
 		return 0, fmt.Errorf("store: TrimOutbox limit must be positive, got %d", limit)
@@ -656,10 +630,9 @@ func (m *Memory) MarkPublished(_ context.Context, eventID string) error {
 	for i := range m.outbox {
 		if m.outbox[i].ev.ID == eventID {
 			m.outbox[i].published = true // idempotent: re-marking is harmless
-			// First mark wins. Re-marking must not push the delivery time forward, or a
-			// row's retention age would reset every time an idempotent re-mark happened
-			// to occur — which is the same "the window never advances" failure as not
-			// trimming at all.
+			// First mark wins: re-marking must not push the delivery time forward, or a
+			// row's retention age resets on every idempotent re-mark and the window never
+			// advances.
 			if m.outbox[i].publishedAt.IsZero() {
 				m.outbox[i].publishedAt = time.Now()
 			}

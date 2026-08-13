@@ -69,18 +69,8 @@ CREATE TABLE IF NOT EXISTS sandboxes (
 	-- as the crash-paused CAS (see Store.CompareAndSetState for why that is
 	-- required). '' = never observed dead.
 	death_cause  TEXT NOT NULL DEFAULT '',
-	-- the §5.D reachability declaration (§3.4 Binding), as an OPAQUE JSON document.
-	-- Every placement regenerates its rule set from THIS column, so an edit made
-	-- while paused takes effect at the next resume and §4.4-A can rebuild a
-	-- crash-surviving rule set from it.
-	--
-	-- One column rather than normalized tables, because of what the field IS: a
-	-- whole-value Binding with exactly two write points, both of which replace or
-	-- append to the WHOLE document (§6.1 PATCH swaps whole binding for whole
-	-- binding; POST .../publish appends one item). Nothing queries INTO it -- the
-	-- generator receives the whole declaration — so columns would buy no query and
-	-- cost a table per repeated field. Contrast the mounts table, normalized precisely
-	-- because the exclusive lease is a CROSS-ROW predicate the store arbitrates.
+	-- the §5.D reachability declaration (§3.4 Binding), as an OPAQUE JSON document
+	-- rather than normalized tables — see model.Sandbox.Network for why one column.
 	--
 	-- NOT NULL with no DEFAULT: an omitted network object is normalized to an explicit
 	-- {deny, [], [], []} at the WRITE POINT (§5.D), so a row with no declaration
@@ -94,15 +84,8 @@ CREATE TABLE IF NOT EXISTS sandboxes (
 -- TrimOutbox deletes DELIVERED rows older than a configured window, so this table
 -- is bounded when a deployment sets one. The DEFAULT is off, and with it off rows
 -- are marked (published_at set) and never deleted, so at-rest size is unbounded —
--- a KNOWN LIMITATION of that default, which did not become a virtue by being
--- chosen. What is deferred now is only the VALUE: it has to come from the
--- reconnect window promised to external subscribers, and the engine must not
--- invent that number (the same refusal as node capacity). The mechanism is not
--- deferred, because an absent mechanism is the one part that could not be
--- supplied at deploy time.
--- auto_vacuum=INCREMENTAL (set in the DSN, before this table exists — measured:
--- afterwards it is a silent no-op) is what lets a trim return space to the
--- filesystem rather than only inside the file.
+-- a KNOWN LIMITATION of that default. Only the VALUE is deferred, not the
+-- mechanism (§4.4-C).
 CREATE TABLE IF NOT EXISTS outbox (
 	-- seq is the §4.4-C cursor: the monotonic total order both the publisher and
 	-- the §6.1 GET /v1/events replay page on. It is the PRIMARY KEY (the rowid)
@@ -119,74 +102,50 @@ CREATE TABLE IF NOT EXISTS outbox (
 	-- emptying the table RESTARTS it at 1 (measured) and a subscriber's cursor
 	-- would silently point past freshly-issued sequences — the same
 	-- sequence-rollback class of defect audited in the reference implementation.
-	-- Today we never delete rows, so max(rowid) is monotonic anyway and this is
-	-- DEFENCE IN DEPTH rather than strictly required: it makes the invariant a
-	-- property of the schema instead of a "we promise never to delete rows"
-	-- policy living in a comment. AUTOINCREMENT keeps the high-water mark in
-	-- sqlite_sequence, so it survives the table being emptied.
+	-- AUTOINCREMENT keeps the high-water mark in sqlite_sequence, so it survives
+	-- the table being emptied.
 	seq          INTEGER PRIMARY KEY AUTOINCREMENT,
 	id           TEXT NOT NULL UNIQUE,   -- transition-unique event ID (§4.4-C)
 	sandbox      TEXT NOT NULL,
-	-- The CHECK asserts §4.1's CLOSED set of six kinds, for the reason mounts.access
-	-- carries one: a value the schema cannot write is a value no reader has to handle.
-	-- §4.1 states the closure and nothing enforced it, so a typo'd 'crash_paused' would
-	-- have compiled, persisted, and reached subscribers as a seventh kind. Kept in step
-	-- with model.EventKinds, which the Go side enumerates.
-	--
-	-- There is deliberately no 'evict': eviction reaches destroyLocked and emits
-	-- 'destroyed'. The three paused kinds differ in WHY (§4.3).
+	-- The CHECK asserts §4.1's CLOSED set of six kinds (model.EventKind states why it is
+	-- enforced rather than documented). Kept in step with model.EventKinds, which the Go
+	-- side enumerates.
 	kind         TEXT NOT NULL CHECK (kind IN
 	                 ('created','paused','auto-paused','crash-paused','resumed','destroyed')),
 	state        TEXT NOT NULL,
-	-- cause: WHY, for the kinds with more than one route to them (§4.4-C). NULL = this
-	-- kind has one route, which is the common case — the column is additive and a reader
-	-- ignoring it sees the stream unchanged. Today it separates the two routes to
-	-- 'destroyed': 'requested' (the Destroy verb) from 'retention-expired' (the evict).
+	-- cause: WHY, for the kinds with more than one route to them (§4.4-C, model.EventCause).
+	-- NULL = this kind has one route, the common case.
 	--
 	-- NULL rather than '' for absent, so the CHECK can assert the closed set without
 	-- carrying a member that means "no member". Kept in step with model.EventCauses.
 	--
-	-- This column is the ONLY place a destroy's cause is ever readable: destroy deletes
-	-- the sandboxes row, so there is no record left to join against afterwards. That is
-	-- also why it cannot be inferred later from sandboxes.death_cause — a different
-	-- fact (why a UNIT was found gone) on a row that no longer exists.
+	-- It cannot be inferred later from sandboxes.death_cause — a different fact (why a
+	-- UNIT was found gone) on a row that a destroy has already deleted.
 	cause        TEXT CHECK (cause IS NULL OR cause IN ('requested','retention-expired')),
 	occurred_at  INTEGER NOT NULL,       -- unix nanos; DATA, not the ordering key
 	published_at INTEGER                 -- NULL = unpublished (the query predicate)
 );
 CREATE INDEX IF NOT EXISTS outbox_unpublished ON outbox(seq) WHERE published_at IS NULL;
 -- volumes: first-class persistent object with a lifecycle DECOUPLED from every
--- sandbox (§5.C / §4.3). Existence-is-state (no state column), derived refcount
--- (no count column) — the same shape as templates.
---
--- What is deliberately NOT a column here, because each absence is a decision
--- (see model.Volume): no access mode (it is a property of the MOUNT ROW — one
--- volume can be shared-rw to one sandbox and shared-ro to another at the same
--- time, so a per-volume column could not carry it honestly), no lease or owner
--- (an exclusive lease IS the existence of an 'exclusive' mount row, not an
--- object), and no state.
+-- sandbox (§5.C / §4.3). Existence-is-state, derived refcount — the same shape as
+-- templates. What is deliberately NOT a column here (access mode, lease/owner, state),
+-- and why each absence is a decision: model.Volume.
 CREATE TABLE IF NOT EXISTS volumes (
 	id         TEXT PRIMARY KEY,           -- opaque "vol_<token>"
 	backend    TEXT NOT NULL,              -- which registered volume.Backend holds the bytes
 	-- lineage: the volume this one was snapshotted/cloned from. NULL = not derived.
-	-- ON DELETE RESTRICT is a CORRECTNESS lever, not tidiness: a quota row leaks exactly
-	-- when a unit owning extents is deleted while a live sharer references them, and
-	-- measured, deleting sharers BEFORE the source leaks nothing. RESTRICT makes that
-	-- order the only reachable one, so the leak is PREVENTED rather than reclaimed.
+	-- ON DELETE RESTRICT is a CORRECTNESS lever, not tidiness — the measured quota-leak
+	-- argument is on model.Volume.Parent.
 	parent     TEXT REFERENCES volumes(id) ON DELETE RESTRICT,
-	-- per-volume capacity cap, 0 = uncapped (§5.C / §3.4). THIS COLUMN IS THE
-	-- AUTHORITY: the substrate maps "no cap" and 0 onto each other in both
-	-- directions, so a read-back cannot distinguish "never capped" from
-	-- "deliberately uncapped" and no after-the-fact reconciliation against storage
-	-- is possible (volume.md D7.3).
+	-- per-volume capacity cap, 0 = uncapped (§5.C / §3.4). THIS COLUMN IS THE AUTHORITY;
+	-- a read-back cannot disambiguate it (model.Volume.CapByte / volume.md D7.3).
 	cap_byte   INTEGER NOT NULL DEFAULT 0,
 	created_at INTEGER NOT NULL             -- unix nanos
 );
 -- mounts: the mount table (§5.C), a first-class persistent object and structurally
 -- the DOUBLING of sandboxes.template — two columns, each ON DELETE RESTRICT, which
 -- together give "a volume with a live mount row cannot be deleted" AND "a sandbox
--- with a live mount row cannot be deleted". No state column, no count column:
--- whether a volume is exclusively held is DERIVED from these rows (§4.3).
+-- with a live mount row cannot be deleted" (model.Mount).
 CREATE TABLE IF NOT EXISTS mounts (
 	sandbox TEXT NOT NULL REFERENCES sandboxes(id) ON DELETE RESTRICT,
 	volume  TEXT NOT NULL REFERENCES volumes(id)   ON DELETE RESTRICT,
@@ -195,13 +154,11 @@ CREATE TABLE IF NOT EXISTS mounts (
 	-- '/data/../data' would be three different mount points to it — an un-normalized
 	-- path makes the assertion SILENTLY not apply.
 	path    TEXT NOT NULL,
-	-- how THIS MOUNT views the volume; per-row, never per-volume (one volume can be
-	-- shared-rw to one sandbox and shared-ro to another at the same time).
+	-- how THIS MOUNT views the volume; per-row, never per-volume (model.AccessMode).
 	--
 	-- The CHECK is REQUIRED, not defensive: the lease index below has a LITERAL STRING
 	-- predicate, so a mis-cased 'Exclusive' would make that index simply NOT APPLY and
-	-- let two exclusive rows both insert. That is a silent failure of the one new
-	-- invariant Volume introduces, so the legal set is asserted in the schema.
+	-- let two exclusive rows both insert.
 	access  TEXT NOT NULL CHECK (access IN ('exclusive','shared-ro','shared-rw')),
 	-- Two topology assertions (§5.C), both judged 400 rather than 409 by the API:
 	--   (sandbox, path):   two volumes at one destination means the second BIND SHADOWS
@@ -222,13 +179,12 @@ CREATE TABLE IF NOT EXISTS mounts (
 -- one — it covers half the invariant. The other half is delivered by the atomic
 -- INSERT…SELECT…WHERE NOT EXISTS in CreateMounts, which expresses the full predicate.
 --
--- The predicate keys on 'access', which is IMMUTABLE FOR THE ROW'S LIFETIME, and that
--- is a CHOICE rather than a coincidence. An external implementation keyed its
--- live-owner partial index on a soft-delete TIMESTAMP instead: paths that set the
--- column existed while NOTHING in the entire codebase ever cleared it back to NULL —
--- so one mistaken write both condemned the volume permanently AND freed the
--- uniqueness slot for a second holder to take. Writing the reason down is the point;
--- otherwise the next person moves this onto some 'detached_at'.
+-- The predicate keys on 'access', which is IMMUTABLE FOR THE ROW'S LIFETIME — do not
+-- move it onto some 'detached_at'. An external implementation keyed its live-owner
+-- partial index on a soft-delete TIMESTAMP instead: paths that set the column existed
+-- while NOTHING in the entire codebase ever cleared it back to NULL — so one mistaken
+-- write both condemned the volume permanently AND freed the uniqueness slot for a
+-- second holder to take.
 CREATE UNIQUE INDEX IF NOT EXISTS mounts_exclusive_lease
 	ON mounts(volume) WHERE access = 'exclusive';
 `
@@ -260,21 +216,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS mounts_exclusive_lease
 // file case (crash-safe commits, and a short wait rather than an instant error
 // if an external process ever holds the file lock).
 func OpenSQLite(path string) (*SQLite, error) {
-	// _txlock=immediate: every BEGIN takes its write lock up front, so a
-	// read-modify-write CAS transaction can't deadlock against another writer
-	// mid-transaction. Correct for the §4.4-C commit path where every transition
-	// is a write.
-	// auto_vacuum=INCREMENTAL is what lets TrimOutbox actually return space to the
-	// filesystem: without it a delete frees pages only inside the file, so the at-rest
-	// growth §4.4-C names as a known limitation would never fall even with a retention
-	// window configured.
+	// _txlock=immediate: every BEGIN takes its write lock up front (see item 1 above).
 	//
-	// IT MUST BE SET BEFORE THE FIRST TABLE EXISTS — measured: on a database that
-	// already has tables the pragma is a silent no-op (it reports back 0/none), and
-	// converting afterwards needs a full VACUUM. So its home is the DSN, applied on
-	// every open, which is what makes it true for every database this constant creates.
-	// It is free to add now only because there are no live instances to migrate
-	// (CLAUDE.md "No compatibility burden"); after a deployment it would not be.
+	// auto_vacuum=INCREMENTAL is what lets TrimOutbox return space to the FILESYSTEM
+	// rather than only inside the file. IT MUST BE SET BEFORE THE FIRST TABLE EXISTS —
+	// measured: on a database that already has tables the pragma is a silent no-op (it
+	// reports back 0/none) and converting afterwards needs a full VACUUM. Hence the DSN,
+	// applied on every open. Free to add only because there are no live instances to
+	// migrate (CLAUDE.md "No compatibility burden").
 	dsn := path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)&_pragma=auto_vacuum(incremental)&_txlock=immediate"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -479,10 +428,8 @@ func (s *SQLite) DeleteSandbox(ctx context.Context, id model.SandboxID, ev *Even
 	return s.tx(ctx, func(t *sql.Tx) error {
 		res, err := t.Exec(`DELETE FROM sandboxes WHERE id=?`, string(id))
 		if err != nil {
-			// Without this branch a mounts.sandbox RESTRICT violation would reach the API's
-			// default arm as a 500 instead of a 409 (§6.2). isFKViolation is table- and
-			// column-agnostic, so the predicate is shared; the translation to a sentinel is
-			// per-call-site and cannot be inherited.
+			// The translation point (see ErrSandboxHasMounts): without it a mounts.sandbox
+			// RESTRICT violation reaches the API's default arm as a 500 instead of a 409.
 			if isFKViolation(err) {
 				return ErrSandboxHasMounts
 			}
@@ -510,10 +457,9 @@ func (s *SQLite) UnpublishedEvents(ctx context.Context, limit int) ([]Event, err
 	// ORDER BY seq, not occurred_at: the sequence is the total order the Store
 	// contract promises (equal-nanosecond timestamps have no tie-break).
 	//
-	// LIMIT is load-bearing rather than an optimization: this runs on the publisher's
-	// per-second loop against a pool pinned to ONE connection, so materializing the
-	// whole backlog here both allocates it and holds that connection for the length of
-	// the scan — which every state transition then waits behind.
+	// LIMIT is load-bearing rather than an optimization — on this backend specifically,
+	// because the pool is pinned to ONE connection, so an unbounded scan holds it for
+	// its whole length and every state transition waits behind it (§4.4-C ③).
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT seq, id, sandbox, kind, state, cause, occurred_at FROM outbox WHERE published_at IS NULL ORDER BY seq LIMIT ?`, limit)
 	if err != nil {
@@ -532,10 +478,8 @@ func (s *SQLite) TrimOutbox(ctx context.Context, cutoff time.Time, limit int) (i
 	// The subquery is what bounds the delete: SQLite's DELETE … LIMIT is a compile-time
 	// option that cannot be relied on, so the rows are selected explicitly.
 	//
-	// `seq < (SELECT MAX(seq) …)` is the never-trim-the-newest clause. It is not an
-	// off-by-one nicety: without it a fully-caught-up outbox trims EMPTY, MIN/MAX go
-	// NULL, the window reports 0/0, and a stale cursor gets a silent empty page instead
-	// of the 410 the contract promises.
+	// `seq < (SELECT MAX(seq) …)` is the never-trim-the-newest clause (see the contract):
+	// without it a fully-caught-up outbox trims EMPTY and MIN/MAX go NULL.
 	res, err := s.db.ExecContext(ctx,
 		`DELETE FROM outbox WHERE seq IN (
 			SELECT seq FROM outbox
@@ -553,17 +497,12 @@ func (s *SQLite) TrimOutbox(ctx context.Context, cutoff time.Time, limit int) (i
 		return 0, err
 	}
 	if n > 0 {
-		// Reclaim the freed pages into the filesystem. Without this the delete frees
-		// space only INSIDE the file, so the at-rest size the retention window exists to
-		// bound never actually falls, and an operator watching the file concludes the
-		// flag does nothing.
+		// Reclaim the freed pages into the filesystem (see auto_vacuum in the DSN).
 		//
-		// DELIBERATELY NOT PROPAGATED, and this is the one place in this method where
-		// swallowing an error is right: the rows ARE deleted and the window HAS advanced
-		// by the time this runs, so reporting the trim as failed would be a lie that
-		// makes the caller re-attempt work already done. What a failure costs is only
-		// that the file stays large — visible to the operator directly, and self-correcting
-		// on the next trim. Bounded at 64 pages so this cannot become the long pole.
+		// DELIBERATELY NOT PROPAGATED: the rows ARE deleted and the window HAS advanced by
+		// the time this runs, so reporting the trim as failed would make the caller
+		// re-attempt work already done. A failure costs only that the file stays large —
+		// self-correcting on the next trim. Bounded at 64 pages so it is not the long pole.
 		_, _ = s.db.ExecContext(ctx, `PRAGMA incremental_vacuum(64)`)
 	}
 	return int(n), nil
@@ -603,9 +542,6 @@ func (s *SQLite) Events(ctx context.Context, after int64, limit int) ([]Event, i
 	return evs, earliest.Int64, latest.Int64, nil
 }
 
-// scanEvents drains an outbox row set selecting (seq, id, sandbox, kind, state,
-// occurred_at) in that order. Shared by both read paths so they cannot drift
-// apart in how they materialize an Event.
 // causeArg maps an EventCause onto the column's two-valued domain: a real cause, or
 // NULL for absent. The schema deliberately has no member meaning "no member" (see the
 // outbox CHECK), so "" must not reach it as a string.
@@ -616,6 +552,9 @@ func causeArg(c model.EventCause) any {
 	return string(c)
 }
 
+// scanEvents drains an outbox row set selecting (seq, id, sandbox, kind, state, cause,
+// occurred_at) in that order. Shared by both read paths so they cannot drift apart in
+// how they materialize an Event.
 func scanEvents(rows *sql.Rows) ([]Event, error) {
 	out := make([]Event, 0)
 	for rows.Next() {
@@ -663,9 +602,7 @@ func (s *SQLite) MarkPublished(ctx context.Context, eventID string) error {
 // (the same delete under the default NO ACTION reports 787). Both carry the same
 // message text, which is exactly why one string match covers every path; a
 // `code == 787` rewrite would silently stop recognising every RESTRICT-delete.
-// Unique violations (a second exclusive mount row, a PK collision) are a
-// DIFFERENT verdict and correctly report false here — they need their own
-// predicate and their own sentinel, not this one (§6.2's four distinct 409s).
+// Unique violations correctly report false here — see isUniqueViolation.
 func isFKViolation(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "FOREIGN KEY constraint failed")
 }
@@ -1026,12 +963,10 @@ func validateBinding(mounts []model.Mount) error {
 		// The guest root is normalized BUT ILLEGAL (§5.C: absolute, cleaned, not "/"), and
 		// this is a SEPARATE check rather than a stricter normalizer because "/" is a FIXED
 		// POINT of path.Clean: "//", "/.", "/data/.." and " / " all normalize TO "/" and are
-		// caught above, so only the bare "/" reaches here. Folding the two would mean making
-		// normalizedMountPath return a value that is not normalized — destroying the ONE
-		// definition NormalizeMountPath exists to share with the mediator. Rejected because a
-		// bind at "/" SHADOWS THE ENTIRE GUEST ROOTFS: the overlay is still there and still
-		// mounted, but nothing in it is reachable, and no uniqueness assertion can express
-		// "does not shadow everything".
+		// caught above, so only the bare "/" reaches here. Folding the two would make
+		// normalizedMountPath return a value that is not normalized, destroying the ONE
+		// definition it exists to share with the mediator. No uniqueness assertion can
+		// express "does not shadow everything", so this check is the only place it is caught.
 		if mt.Path == "/" {
 			return fmt.Errorf("%w: path %q is the guest root — a bind there shadows the ENTIRE sandbox rootfs, leaving the overlay mounted but unreachable",
 				ErrMountBindingInvalid, mt.Path)

@@ -29,8 +29,7 @@
 // hooks is itself a security property (a `via[]` accept must sit above the floor drop
 // IN THE SAME CHAIN — D5 ⑩). Hooks are grouped only downstream, by the renderer and
 // by `ruleset.RuleSet.ByHook`, which is what a unit test uses to pin "what came out on
-// each hook" — the thing that matters, since one declaration produces rules on several
-// hooks with OPPOSITE predicate shapes (D5 ⑧ ㉔).
+// each hook".
 package network
 
 import (

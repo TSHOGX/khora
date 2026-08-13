@@ -27,11 +27,10 @@ import (
 //   - the MESSAGE does not, because the inner client dials the netns veth IP, so
 //     the inner text carries placement (§6.2 / D5.1).
 //
-// Collapsing everything to `unavailable` satisfied the second and broke the first:
-// `unavailable` means "transient, retry me", so a nonexistent path or a malformed
-// argument came back as an invitation to retry forever. Returning the inner error
-// verbatim would do the reverse. A test that checked only for the absence of the IP
-// would pass on the old defect, so each case below asserts BOTH.
+// Collapsing everything to `unavailable` satisfied the second and broke the first: it means
+// "transient, retry me", so a nonexistent path came back as an invitation to retry forever.
+// Returning the inner error verbatim does the reverse. A test checking only for the absence of the
+// IP would pass on the old defect, so each case below asserts BOTH.
 
 // codedFailClient is a transport.Client whose calls fail the way the REAL inner
 // client fails: with the Connect code sandboxd chose (transport/client.go maps the

@@ -25,38 +25,30 @@ import (
 func initMode() {
 	logf("init(pid %d): starting", os.Getpid())
 
-	// SINGLE WAITER. PID 1's reaper must own Wait4(-1)
-	// exclusively — it is the global-orphan backstop and cannot exclude a pid
-	// from a wildcard wait. So the supervise loop below does NOT call cmd.Wait():
-	// a second waiter on the same child races the reaper, and the loser gets
-	// ECHILD with the exit status gone. Go 1.23 pidfd does NOT fix this: its
-	// pidfdWait is waitid(P_PIDFD, WEXITED) *without* WNOWAIT, i.e. it reaps too
-	// — pidfd removes the pid-reuse race, not the two-reapers race. Instead the
-	// reaper hands the status to whoever registered that pid.
-	// The table is shared with transport mode (reap.go) — the single-waiter
-	// problem is identical on both sides; only which pids are "ours" differs.
+	// SINGLE WAITER: PID 1's reaper owns Wait4(-1) exclusively, so the supervise loop below
+	// does NOT call cmd.Wait() — a second waiter races the reaper and the loser gets ECHILD
+	// with the exit status gone. Go 1.23 pidfd does NOT fix this: its pidfdWait is
+	// waitid(P_PIDFD, WEXITED) *without* WNOWAIT, i.e. it reaps too — pidfd removes the
+	// pid-reuse race, not the two-reapers race. Instead the reaper hands the status to whoever
+	// registered that pid (reap.go, shared with transport mode).
 	reaper := newReapTable()
 	reaper.drainOnSIGCHLD()
 
-	// Container-level signals → fan out to EVERY other process in the guest,
-	// then exit (PID 1 exiting tears down the container). PID 1 must install
-	// these explicitly. kill(-1, sig) is the container-level broadcast: the
-	// kernel signals every process in our pid namespace except PID 1 itself,
-	// so template-provided long-running siblings and transport's whole subtree
-	// are covered, not just the one child we spawned. This stays on the PID 1
-	// side of D4.3: it targets no particular pid/pgid, so it is not a directed
-	// signal — those remain transport's (it holds the pid/pgid handles).
+	// Container-level signals → fan out to EVERY other process in the guest, then exit (PID 1
+	// exiting tears down the container). PID 1 must install these explicitly. kill(-1, sig)
+	// signals every process in our pid namespace except PID 1 itself, so template-provided
+	// siblings and transport's whole subtree are covered, not just the child we spawned. It
+	// targets no particular pid/pgid, so it stays on the PID 1 side of D4.3 — directed signals
+	// remain transport's.
 	//
 	// NO GRACE PERIOD, DECIDED rather than pending (guest-runtime D4.3): Exit follows the
 	// broadcast immediately and PID 1 exiting tears down the namespace, so this TERM cannot be
 	// acted on — equivalent to KILL. A sandbox-level grace period is REJECTED because what has
 	// state to flush is the WORKLOAD process, directed signals already exist (SendSignal), and
-	// making this "graceful" would have the engine decide which guest processes deserve waiting
-	// for and how long — product-layer policy §1.3's litmus keeps outside.
+	// deciding which guest processes deserve waiting for is product-layer policy §1.3's litmus
+	// keeps outside.
 	//
-	// The engine still never sends this: destroy is `runsc kill KILL` +
-	// `delete --force` (§5.A). What a caller CAN reach is SendSignal, which refuses
-	// pid <= 0 precisely so this PID 1 path stays PID 1's (D4.3).
+	// The engine never sends this: destroy is `runsc kill KILL` + `delete --force` (§5.A).
 	termCh := make(chan os.Signal, 4)
 	signal.Notify(termCh, syscall.SIGTERM, syscall.SIGINT)
 	go func() {

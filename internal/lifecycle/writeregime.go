@@ -43,15 +43,12 @@ import (
 // readiness gate) precisely so a concurrent reconcile does not mistake it for an
 // orphan.
 
-// THE INVARIANT IS SYMMETRIC, AND BOTH SIDES ARE GATED (§5.C). The paragraph above
-// states it from the direct-write side, but the hazard it prevents — two writers on the
-// same backend bytes, with the gofer/sentry caches incoherent against a host-side
-// write — DOES NOT CARE WHO ARRIVED FIRST. So the reverse holds too: while a direct
-// mutating operation is in flight, a cold start that would give that volume an rw mount
-// is refused as well (admitColdStartRW below). Gating one side only is equivalent to
-// gating neither — an import admitted at T0 plus a create/resume completing at T1
-// produces exactly the two concurrent writers, with no `paused` state anywhere in the
-// story.
+// THE INVARIANT IS SYMMETRIC, AND BOTH SIDES ARE GATED (§5.C): the hazard above does
+// not care who arrived first, so while a direct mutating operation is in flight, a cold
+// start that would give that volume an rw mount is refused too (admitColdStartRW below).
+// Gating one side only is equivalent to gating neither — an import admitted at T0 plus a
+// create/resume completing at T1 produces exactly the two concurrent writers, with no
+// `paused` state anywhere in the story.
 //
 // THE TWO SIDES DECIDE OVER ONE TABLE, keyed by volume and guarded by the ONE existing
 // m.mu: the live-rw holder set and the in-flight direct-write markers are two halves of
@@ -65,10 +62,9 @@ import (
 // THE COLD-START SIDE REFUSES, IT DOES NOT WAIT. The direct-write marker is held for
 // the WHOLE stream by contract, so its duration is unbounded in the payload size; a
 // cold start holds the sandbox's transition lock for its entire chain (§4.4-B), so
-// waiting would park destroy / pause / evict behind somebody's 40 GiB upload. A refusal
-// is retryable, explains its own remedy (wait for the import to finish), and lands on
-// §4.4-A's existing atomic return to the source state — resume stays `paused`, create
-// deletes its record — so it adds NO new failure semantics.
+// waiting would park destroy / pause / evict behind somebody's 40 GiB upload. The refusal
+// lands on §4.4-A's existing atomic return to the source state — resume stays `paused`,
+// create deletes its record — so it adds NO new failure semantics.
 
 // ErrVolumeLiveWriter is §6.2's fourth Volume 409: a direct content change was
 // refused because a live read-write mount holds the volume.
@@ -81,10 +77,9 @@ var ErrVolumeLiveWriter = errors.New("lifecycle: volume has a live read-write mo
 // invariant refusing from the other side: a cold start was refused because a direct
 // content write is in flight on a volume it would mount read-write.
 //
-// A DISTINCT sentinel rather than a reuse, because the object being refused and the
-// remedy are both different: this refusal names a SANDBOX verb (create / resume) and is
-// resolved by waiting for the import to finish, whereas ErrVolumeLiveWriter names a
-// volume verb resolved by pausing a sandbox. Folding them would hand the caller the
+// A DISTINCT sentinel rather than a reuse: the REMEDIES differ — this names a SANDBOX
+// verb (create / resume) resolved by waiting for the import to finish, ErrVolumeLiveWriter
+// a volume verb resolved by pausing a sandbox — so folding them would hand the caller the
 // wrong remedy in one of the two directions.
 var ErrVolumeDirectWriteInFlight = errors.New("lifecycle: a direct write is in flight on a volume this sandbox would mount read-write")
 
@@ -147,11 +142,8 @@ func (m *Mediator) admitDirectWrite(ctx context.Context, id model.VolumeID) (fun
 // read them — and re-reading would be worse than redundant: the decision would then
 // be made about a different snapshot than the one being materialized.
 //
-// READ-ONLY MOUNTS PASS. The refusal is about tearing, and a reader tears nothing —
-// the exact mirror of admitDirectWrite letting a live ro holder through. Refusing
-// here too would be more conservative and would tear nothing, and it would delete a
-// capability (booting a sandbox that only READS a volume being seeded), which
-// volume.md D5 calls the third kind of wrong.
+// READ-ONLY MOUNTS PASS — the exact mirror of admitDirectWrite letting a live ro
+// holder through, for the reason stated there.
 //
 // ONE ACQUISITION OF m.mu over the whole row set, not one per row: a write that
 // starts on the second volume after the first was cleared must not slip through the

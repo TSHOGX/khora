@@ -23,12 +23,9 @@ import (
 // volumeFixture assembles an Engine with a REAL volume backend — the test-only
 // plain-directory arm over a temp dir.
 //
-// Real rather than faked deliberately: the endpoints under test move BYTES, and the
-// property that matters most about the path they move them through (root
-// confinement) is a property of the actual accessor. A fake would only prove the
-// fake agrees with itself. The plain-directory arm shares its accessor with the
-// production arm, so this exercises the real mechanism without needing root or a
-// substrate.
+// Real rather than faked: root confinement is a property of the actual accessor, and a fake
+// would only prove the fake agrees with itself. The plain-directory arm shares its accessor
+// with the production arm, so this exercises the real mechanism without root or a substrate.
 //
 // The arm reports NO quota capability, which also makes it the right fixture for the
 // capability-refusal case below.
@@ -312,11 +309,9 @@ func TestVolumeImportExportRoundTrip(t *testing.T) {
 // through the WIRE rather than only at the accessor: a traversal-shaped `path`
 // lands inside the volume and the host file is untouched.
 //
-// It is asserted at this layer as well because confinement here is delegated rather
-// than re-implemented — the endpoint passes the caller's string straight to the
-// root-confined accessor and does NOT validate it. That is the stronger design (a
-// validator has to be right; the accessor cannot be wrong), but it is only true as
-// long as nothing between the two re-resolves the path, which is what this pins.
+// Asserted at this layer too because confinement here is DELEGATED, not re-implemented: the
+// endpoint passes the caller's string straight to the root-confined accessor. That holds only
+// as long as nothing between the two re-resolves the path, which is what this pins.
 func TestVolumeImportIsRootConfinedThroughTheEndpoint(t *testing.T) {
 	srv, _, vb := volumeFixture(t)
 
@@ -400,17 +395,14 @@ func TestVolumeImportIsRootConfinedThroughTheEndpoint(t *testing.T) {
 // pathLeakingBackend wraps a real backend and fails the three write entry points with
 // an error carrying the storage unit's ABSOLUTE HOST PATH.
 //
-// The message is copied from internal/btrfs verbatim in SHAPE — `btrfs: <verb> <path>:
-// <cause>` — because that is what the production arm actually produces: every substrate
-// call there is wrapped that way, and the path is filepath.Join(VolumesDir, volumeID)
-// (internal/volume/local_btrfs.go). So this fake is not inventing a hypothetical leak;
-// it reproduces the one the real backend hands the control plane on any ENOSPC, EPERM
-// or missing-subvolume failure.
+// The message copies internal/btrfs verbatim in SHAPE — `btrfs: <verb> <path>: <cause>` —
+// because that is what the production arm produces: every substrate call there is wrapped that
+// way and the path is filepath.Join(VolumesDir, volumeID) (internal/volume/local_btrfs.go). So
+// this reproduces the leak the real backend hands the control plane on any ENOSPC or EPERM.
 //
-// Faked rather than driven on the real btrfs arm because THE ARRIVING ERROR is the
-// whole input under test, and making the real substrate fail on demand needs root and
-// a substrate tag. What must be real is the ENGINE side of the boundary — the mediator,
-// the router and the funnel — and all three are.
+// Faked rather than driven on real btrfs because THE ARRIVING ERROR is the whole input under
+// test, and failing the real substrate on demand needs root and a substrate tag. What must be
+// real is the ENGINE side — the mediator, the router and the funnel — and all three are.
 type pathLeakingBackend struct {
 	volume.Backend
 	unit string // the absolute host path the errors interpolate
@@ -487,12 +479,10 @@ func leakFixture(t *testing.T) (*httptest.Server, *store.Memory, string) {
 // assertNoHostPath is the §6.2 property, asserted on a response BODY: the caller sees
 // opaque IDs and no host location.
 //
-// It checks the configured dir (the specific leak), then the generic absolute-path
-// prefixes — `/home`, `/tmp`, `/var`, `/srv` — because a sanitizer tuned to one
-// configured root would pass this test while leaking every other path the engine
-// composes. Nothing legitimately in an error body starts with a slash: §6.2 addresses
-// sandboxes, templates and volumes by opaque ID, and a volume's own content paths are
-// root-RELATIVE.
+// It checks the configured dir, then the generic absolute-path prefixes, because a sanitizer
+// tuned to one configured root would pass while leaking every other path the engine composes.
+// Nothing legitimately in an error body starts with a slash: §6.2 addresses objects by opaque
+// ID, and a volume's own content paths are root-RELATIVE.
 func assertNoHostPath(t *testing.T, what string, body []byte, hostDir string) {
 	t.Helper()
 	for _, leak := range append([]string{hostDir}, "/home", "/tmp", "/var", "/srv", "/proc") {
@@ -508,11 +498,10 @@ func assertNoHostPath(t *testing.T, what string, body []byte, hostDir string) {
 // path, and asserts BOTH halves at once — the body names no host location, and it still
 // says which object relationship failed.
 //
-// Both halves are required, and asserting only the first is the trap: flattening every
-// arm to "internal error" satisfies "no host path" perfectly and destroys the §6.2
-// requirement that the four Volume 409s stay distinguishable. The whole reason each has
-// its own sentinel is that a 409 naming the wrong object sends the caller to the wrong
-// remedy — so each case below names the token that must SURVIVE the redaction.
+// Both halves are required, and asserting only the first is the trap: flattening every arm to
+// "internal error" satisfies "no host path" perfectly while destroying §6.2's requirement that
+// the four Volume 409s stay distinguishable. So each case below names the token that must
+// SURVIVE the redaction.
 func TestErrorBodiesCarryTheVerdictWithoutTheHostPath(t *testing.T) {
 	t.Run("volume create: a leaking backend error becomes a 500 without the volumes dir", func(t *testing.T) {
 		srv, _, dir := leakFixture(t)
@@ -620,13 +609,11 @@ func TestErrorBodiesCarryTheVerdictWithoutTheHostPath(t *testing.T) {
 // status-code edge: both directions of the one invariant must reach the caller as the
 // same retryable verdict.
 //
-// The two sentinels are deliberately distinct because the remedies differ (pause the
-// holder vs wait for the import), but a distinct sentinel with no arm in the mapping
-// falls through to the default 500 — reporting a correctly-refused cold start as an
-// engine fault, and telling the caller nothing about the remedy. Asserted on the
-// mapping directly because that is where the defect lives: the refusal logic one layer
-// down is covered in internal/lifecycle, and driving the cold-start side end-to-end
-// needs a real in-flight upload racing a resume.
+// The two sentinels are distinct because the remedies differ (pause the holder vs wait for the
+// import), but a distinct sentinel with no arm in the mapping falls through to the default 500.
+// Asserted on the mapping directly because that is where the defect lives: the refusal logic is
+// covered in internal/lifecycle, and driving the cold-start side end-to-end needs a real
+// in-flight upload racing a resume.
 func TestWriteRegimeBothSidesMapTo409(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -654,11 +641,9 @@ func TestWriteRegimeBothSidesMapTo409(t *testing.T) {
 // TestSanitizerKeepsEverySentinelDistinguishable is the other side of the same fence,
 // asserted on the SENTINEL TEXTS directly rather than through a fixture per verdict.
 //
-// §6.2 requires the four Volume 409s and the two 400s to stay distinguishable, and the
-// sanitizer is a text transform standing between them and the caller — so the property
-// to pin is that it is a no-op on every one of them. If a future tightening starts
-// redacting prose, this fails on the exact sentinel that lost its meaning rather than
-// on whichever endpoint happened to be covered elsewhere.
+// The sanitizer is a text transform standing between the six sentinels and the caller, so the
+// property to pin is that it is a no-op on every one. If a future tightening starts redacting
+// prose, this fails on the exact sentinel that lost its meaning.
 func TestSanitizerKeepsEverySentinelDistinguishable(t *testing.T) {
 	for _, sentinel := range []error{
 		store.ErrVolumeInUse,
@@ -783,10 +768,9 @@ func TestSanitizerRedactsPathsAndPlacement(t *testing.T) {
 // handleVolumeSub's `default` arm as a 404 — the same defect the sandbox sub-routes
 // had, surviving one router longer.
 //
-// The unknown sub-path is asserted in the SAME test on purpose: the fix is only
-// correct if it separates "this route exists, your method does not apply" from "no
-// such route". A blanket 405 on the default arm would pass every case above and
-// still be wrong, so the 404 case is what keeps the two verdicts distinguishable.
+// The unknown sub-path is asserted in the SAME test on purpose: a blanket 405 on the default
+// arm would pass every case above and still be wrong, so the 404 case is what keeps "this route
+// exists, your method does not apply" separate from "no such route".
 func TestAWrongMethodOnEveryVolumeSubRouteIs405ButAnUnknownSubPathIs404(t *testing.T) {
 	mem := store.NewMemory()
 	med := lifecycle.New(lifecycle.Deps{Store: mem})
@@ -873,10 +857,9 @@ func (b *usageFailingBackend) Usage(ctx context.Context, id string) (int64, int6
 // the WIRE, which is the only place it can be checked: the rule says `used_byte` is
 // absent IFF the number could not be read, so a genuine 0 must be PRESENT.
 //
-// This is exactly what `int64` plus `omitempty` could not express — Go drops a zero
-// value, so "an empty volume" and "the backend did not answer" serialized identically
-// and a caller could not tell them apart. That matters because the number's whole
-// purpose is choosing a new cap STRICTLY greater than it: an unreadable usage read as 0
+// Exactly what `int64` plus `omitempty` could not express — Go drops a zero value, so "an empty
+// volume" and "the backend did not answer" serialized identically. That matters because the
+// number's purpose is choosing a cap STRICTLY greater than it: an unreadable usage read as 0
 // looks like a volume with all of its capacity free.
 func TestVolumeInspectDistinguishesZeroUsageFromUnreadable(t *testing.T) {
 	mem := store.NewMemory()

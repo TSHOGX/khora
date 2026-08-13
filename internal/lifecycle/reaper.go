@@ -38,17 +38,15 @@ type Reaper struct {
 
 	// downSince tracks, per sandbox, the CONTINUOUS transport-down streak D4b
 	// measures (continuous transport-down duration) — the simplest measure D4b
-	// picks, no
-	// PID1 restart-count upcall needed. Keyed additionally by placement EPOCH (the
-	// transport endpoint / IP, §4.3 placement-IP-as-epoch): a PID1 in-place restart
-	// keeps the SAME IP (§5.E.1) and so is genuinely the same streak, while any
-	// resume / pause+resume rebinds a NEW IP (§3.3) and MUST start a fresh streak.
-	// Epoch-keying is what makes the streak survive an in-place restart yet reset
-	// across a placement change that happened BETWEEN two sweeps (no intervening
-	// sweep to observe the transition) — the case a "reset on observed non-down
-	// outcome" alone would miss, letting a stale pre-resume timestamp escalate a
-	// fresh transport-down straight past the budget. Reaper-loop-local (single
-	// goroutine drives Sweep), so no lock.
+	// picks, no PID1 restart-count upcall needed. Keyed additionally by placement
+	// EPOCH (the transport endpoint / IP, §4.3 placement-IP-as-epoch): a PID1
+	// in-place restart keeps the SAME IP (§5.E.1) and so is genuinely the same
+	// streak, while any resume / pause+resume rebinds a NEW IP (§3.3) and MUST start
+	// a fresh one. Epoch-keying is what makes the streak reset across a placement
+	// change that happened BETWEEN two sweeps (no intervening sweep to observe the
+	// transition) — the case a "reset on observed non-down outcome" alone would miss,
+	// letting a stale pre-resume timestamp escalate a fresh transport-down straight
+	// past the budget. Reaper-loop-local (single goroutine drives Sweep), so no lock.
 	downSince map[model.SandboxID]downStreak
 }
 
@@ -144,15 +142,11 @@ func (r *Reaper) tick(ctx context.Context) {
 		r.m.deps.Logf("reaper: quota-row reclamation (retried next tick): %v", err)
 	}
 	// §5.C / volume.md D7.3 CAP REPAIR, periodic for the same reason the sweeps above
-	// are: the repair state is created at RUNTIME, not only by a crash before boot.
-	// Writing a snapshot's cap is necessarily the SECOND substrate call after the
-	// snapshot ioctl, so any failure between the two — not just a process death —
-	// leaves a registered, live, UNCAPPED volume whose record still promises N to the
-	// §3.4 gate. Boot-only repair would hold that divergence until the next restart,
-	// and it is INVISIBLE while it lasts: the limit read cannot tell "never capped"
-	// from "deliberately uncapped" (the `none ↔ 0` mapping), so no inspect, sweep or
-	// audit finds it. The RECORD is re-asserted onto the storage; the reverse
-	// direction would ratify the residue as the new truth.
+	// are: the repair state is created at RUNTIME, not only by a crash before boot —
+	// any failure between a snapshot and its cap write leaves a registered, live,
+	// UNCAPPED volume whose record still promises N to the §3.4 gate. Boot-only repair
+	// would hold that divergence until the next restart, and it is INVISIBLE while it
+	// lasts (RepairVolumeCaps states why nothing else can find it).
 	if err := r.m.RepairVolumeCaps(ctx); err != nil {
 		r.m.deps.Logf("reaper: volume-cap repair (retried next tick): %v", err)
 	}
@@ -190,12 +184,12 @@ func (r *Reaper) Sweep(ctx context.Context) {
 	// downThisTick = the sandboxes RE-CONFIRMED continuously transport-down this
 	// sweep. The D4b budget measures a CONTINUOUS streak (reaper-health D4b:
 	// continuous transport-down duration), so any sandbox NOT re-confirmed this
-	// tick — because it went healthy, paused, was skipped (held lock),
-	// classified Unknown, or is simply gone — must have its streak dropped. We
-	// record confirmations here and prune downSince to exactly this set at the
-	// end, rather than deleting on each individual "good" outcome — that shape
-	// misses the paused / Unknown / skipped paths, letting a stale pre-pause
-	// timestamp escalate a fresh transport-down straight past the budget.
+	// tick — because it went healthy, paused, was skipped (held lock), classified
+	// Unknown, or is simply gone — must have its streak dropped. Confirmations are
+	// recorded here and downSince pruned to exactly this set at the end, rather than
+	// deleting on each individual "good" outcome — that shape misses the paused /
+	// Unknown / skipped paths, letting a stale pre-pause timestamp escalate a fresh
+	// transport-down straight past the budget.
 	downThisTick := make(map[model.SandboxID]bool)
 	for _, rec := range recs {
 		switch rec.State {
@@ -223,9 +217,8 @@ func (r *Reaper) Sweep(ctx context.Context) {
 func (r *Reaper) sweepRunning(ctx context.Context, rec model.Sandbox, downThisTick map[model.SandboxID]bool) {
 	l, ok := r.m.tryLock(rec.ID)
 	if !ok {
-		// a verb holds the lock — skip (single-flight guard, D3). NOT re-confirmed
-		// transport-down this tick, so its streak (if any) is pruned at sweep end:
-		// a sandbox a verb just touched is not "continuously" down.
+		// a verb holds the lock — skip (single-flight guard, D3). A sandbox a verb just
+		// touched is not "continuously" down, and Sweep's prune enforces that.
 		return
 	}
 	defer l.Unlock()
@@ -244,16 +237,12 @@ func (r *Reaper) sweepRunning(ctx context.Context, rec model.Sandbox, downThisTi
 	case HealthDeadRecoverable, HealthResourceTerminated:
 		// LIVE crash-pause (§4.2 involuntary pause): the isolation unit died under
 		// a running orchestrator. Same disposition reconcile does at boot, driven
-		// now by the reaper. Not re-confirmed transport-down → streak pruned at
-		// sweep end (this is death, not a transient).
+		// now by the reaper.
 		//
-		// BOTH health states crash-pause — the state is `paused` either way. What differs
-		// is the CAUSE committed alongside it (§4.3): the classifier read it while the
-		// placement was still intact, and pauseLocked persists it in the SAME commit
-		// as the CAS, because a moment later teardown destroys the evidence. That
-		// recorded cause is what makes resume refuse a resource-terminated sandbox
-		// while a dead-recoverable one resumes normally — identical states,
-		// opposite dispositions, separated only by this value.
+		// BOTH health states crash-pause — the state is `paused` either way, and only
+		// the CAUSE committed alongside it separates them (§4.3, HealthResourceTerminated).
+		// pauseLocked must persist it in the SAME commit as the CAS, because a moment
+		// later teardown destroys the evidence the classifier read.
 		dc := deathCauseOf(cause)
 		if err := r.m.pauseLocked(ctx, cur.ID, "crash-paused", &dc); err != nil && err != store.ErrConflict {
 			r.m.deps.Logf("reaper: crash-pause %s (retried next tick): %v", cur.ID, err)
@@ -267,11 +256,11 @@ func (r *Reaper) sweepRunning(ctx context.Context, rec model.Sandbox, downThisTi
 		downThisTick[cur.ID] = true
 		r.handleTransportDownLocked(ctx, cur)
 	case HealthHealthy:
-		// keep running; not re-confirmed → streak pruned at sweep end.
+		// keep running.
 	default:
 		// HealthUnknown (uncertain L1 / no live handle): do nothing, retry next
-		// tick (protect-on-uncertainty, reaper-health D3). Not re-confirmed → a
-		// prior streak is pruned (an Unknown tick breaks continuity, D4b).
+		// tick (protect-on-uncertainty, reaper-health D3). An Unknown tick breaks
+		// continuity, so a prior streak is pruned (D4b).
 	}
 }
 
@@ -282,11 +271,8 @@ func resumeNote(h Health, retention time.Duration) string {
 	if h != HealthResourceTerminated {
 		return ""
 	}
-	// Name the remedy AND the deadline. "Waiting for a human" has a clock: retention
-	// runs from
-	// this demotion's UpdatedAt, and past it the reaper evicts — Overlay artifact
-	// included (§4.3). An operator who is not told that will assume the sandbox
-	// waits indefinitely.
+	// Name the remedy AND the deadline: retention runs from this demotion's UpdatedAt,
+	// and past it the reaper evicts — Overlay artifact included (§4.3).
 	if retention <= 0 {
 		return " (will NOT resume: raise memory_byte via PATCH, or destroy it; retention=0 so it is never evicted, §4.3)"
 	}
@@ -307,8 +293,6 @@ func (r *Reaper) autoPauseLocked(ctx context.Context, rec model.Sandbox) {
 		// became active (or unreachable) in the window → abort, re-judge next tick.
 		return
 	}
-	// idle → not re-confirmed transport-down this tick, so its streak (if any) is
-	// pruned at sweep end; no explicit delete needed here.
 	// nil cause: an idle auto-pause is not a death and must not stamp one.
 	if err := r.m.pauseLocked(ctx, rec.ID, "auto-paused", nil); err != nil && err != store.ErrConflict {
 		r.m.deps.Logf("reaper: auto-pause %s (retried next tick): %v", rec.ID, err)
@@ -324,12 +308,10 @@ func (r *Reaper) autoPauseLocked(ctx context.Context, rec model.Sandbox) {
 // wedge (D4b). Both steps run under the held lock, same path a user
 // pause+resume would take.
 func (r *Reaper) handleTransportDownLocked(ctx context.Context, rec model.Sandbox) {
-	// The streak is tied to the placement epoch (IP). Resolve the sandbox's
-	// CURRENT endpoint: an in-place PID1 restart keeps the same IP (§5.E.1) so the
-	// streak continues; a resume rebound a new IP (§3.3) so any prior streak is
-	// stale and this is a fresh one. A missing endpoint (no live handle) shouldn't
-	// reach here — transport-down means L1 alive + a live-map endpoint that failed
-	// L2 — but treat it defensively as a fresh streak with an empty epoch.
+	// Resolve the sandbox's CURRENT endpoint — the streak's epoch (see downSince). A
+	// missing endpoint (no live handle) shouldn't reach here — transport-down means L1
+	// alive + a live-map endpoint that failed L2 — but treat it defensively as a fresh
+	// streak with an empty epoch.
 	epoch, _ := r.m.Endpoint(rec.ID)
 
 	streak, tracked := r.downSince[rec.ID]

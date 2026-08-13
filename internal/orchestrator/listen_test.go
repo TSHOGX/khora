@@ -94,12 +94,10 @@ func TestValidateListenAddrRequiresEveryResolvedAddressToBeLoopback(t *testing.T
 	}
 }
 
-// Every refusal is wrapped in ErrListenAddrNotLoopback so a caller can tell this
-// refusal from any other assembly failure, and carries the CONSEQUENCE plus the way
-// out. An operator who is refused at startup needs to know what publishing costs and
-// which flag says "I mean it" — a bare "invalid address" sends them to change the
-// value until it is accepted, which here means finding the one spelling that slips
-// through rather than making a decision.
+// Every refusal is wrapped in ErrListenAddrNotLoopback so a caller can tell it from any other
+// assembly failure, and carries the CONSEQUENCE plus the way out: a bare "invalid address" sends
+// an operator to change the value until it is accepted, which here means finding the one spelling
+// that slips through rather than making a decision.
 func TestTheRefusalNamesTheConsequenceAndTheWayOut(t *testing.T) {
 	for _, addr := range []string{"0.0.0.0:8080", ":8080", "192.168.1.10:8080"} {
 		err := ValidateListenAddr(addr, nil)
@@ -119,14 +117,10 @@ func TestTheRefusalNamesTheConsequenceAndTheWayOut(t *testing.T) {
 	}
 }
 
-// THE POSITION, which is the half a pure classifier test does not deliver: New
-// refuses BEFORE materializing anything. Same assertion, and the same reason, as
-// TestTheAssemblyRefusesItsOwnUIDAsTheSecondHopUID — an engine that has already
-// installed the second-hop table and started serving is past the point where
-// learning this helps.
-//
-// Root-free precisely because the check runs first: rootfs/runtime/btrfs are never
-// reached.
+// THE POSITION, the half a pure classifier test does not deliver: New refuses BEFORE
+// materializing anything. Same assertion and reason as
+// TestTheAssemblyRefusesItsOwnUIDAsTheSecondHopUID. Root-free precisely because the check runs
+// first — rootfs/runtime/btrfs are never reached.
 func TestTheAssemblyRefusesAPublishedListenerBeforeMaterializingAnything(t *testing.T) {
 	base := t.TempDir()
 	_, err := New(Config{

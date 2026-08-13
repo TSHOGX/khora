@@ -15,10 +15,9 @@ import (
 //
 // GET|PUT /v1/sandboxes/{id}/files?path=…  streams bytes to/from the guest.
 //
-// This is the one part of the data plane that is REST rather than Connect-RPC, and
-// the reason is the payload, not taste: a large file must not become a single
-// protobuf message, and neither end should hold it in memory. Everything else
-// about the §6.2 constraints still holds — the sandbox is addressed by its opaque
+// The one part of the data plane that is REST rather than Connect-RPC, because of the
+// payload: a large file must not become a single protobuf message, and neither end should
+// hold it in memory. The §6.2 constraints still hold — the sandbox is addressed by its opaque
 // ID in the path, and the guest endpoint (placement) never appears on the wire.
 //
 // The engine picks no size threshold. Small payloads are cheaper as an fs RPC,
@@ -54,13 +53,11 @@ func fileParams(w http.ResponseWriter, r *http.Request) (string, bool) {
 // already normalized the guest's status into a Connect code, so this is the same
 // classification the RPC edge reports — one contract, two encodings.
 //
-// It returns a CODE and writes nothing, mirroring statusCodeFor: the body is the
-// funnel's business (writeErr). That split matters more here than on the control
-// paths, because the errors reaching this one are built by the inner transport
-// client, which dials the netns veth IP — client.go's `hc.Do` failures carry
-// `10.x.y.z:port` in their text, and §6.2 bars placement from the wire exactly as it
-// bars host paths. So this REST half sanitizes through the funnel, the same
-// guarantee the RPC half gets from proxyErr.
+// It returns a CODE and writes nothing, mirroring statusCodeFor: the body is the funnel's
+// business (writeErr). That split matters more here than on the control paths, because these
+// errors are built by the inner transport client, which dials the netns veth IP — client.go's
+// `hc.Do` failures carry `10.x.y.z:port` in their text, which §6.2 bars from the wire. So
+// this REST half sanitizes through the funnel, as the RPC half does through proxyErr.
 func bypassCode(err error) int {
 	switch connect.CodeOf(err) {
 	case connect.CodeNotFound:
@@ -148,9 +145,5 @@ func (e *Engine) handleFileUpload(w http.ResponseWriter, r *http.Request, id mod
 		writeErr(w, bypassCode(err), fmt.Errorf("upload %s: %w", path, err), path)
 		return
 	}
-	// bytes_written is a NUMBER, matching the volume import response's field of the
-	// same name (§6.1). One field name must not carry two wire types across two
-	// endpoints — a client that parses one and not the other is a defect we would be
-	// authoring into the contract.
 	writeJSON(w, http.StatusOK, uploadResp{Path: path, BytesWritten: n})
 }

@@ -18,12 +18,11 @@ import (
 	"github.com/TSHOGX/warren/pkg/transport/gen/engine/transport/v1/transportv1connect"
 )
 
-// connectClient is the host-side implementation of Client backed by the
-// generated Connect-RPC stubs. It translates the DOMAIN types (StartSpec,
-// ProcessEvent, …) to/from proto so the mediator never sees generated types
-// (§5.E seam discipline). Stateless: built against one endpoint, discarded on
-// resume (the endpoint's netns IP changes, §3.3 / §4.3 IP-as-epoch) — it holds
-// nothing to close, because the connection pool it borrows is shared (see Dial).
+// connectClient is the host-side implementation of Client backed by the generated
+// Connect-RPC stubs. It translates the DOMAIN types (StartSpec, ProcessEvent, …) to/from
+// proto so the mediator never sees generated types (§5.E seam discipline). Stateless in
+// the sense Client documents: built against one endpoint, discarded on resume, with
+// nothing of its own to close.
 type connectClient struct {
 	health  transportv1connect.HealthServiceClient
 	process transportv1connect.ProcessServiceClient
@@ -35,22 +34,19 @@ type connectClient struct {
 	base string
 }
 
-// sharedTransport is the ONE h2c transport every Dial hands out, and sharing it is
-// load-bearing rather than an optimization.
+// sharedTransport is the ONE h2c transport every Dial hands out, and sharing it is a
+// correctness requirement rather than an optimization (transport D4.1).
 //
-// A transport OWNS a connection pool, and each pooled HTTP/2 connection runs its own
-// read and write loops. Nothing closes a transport, so building one per Dial leaks
-// every connection it ever opened along with those goroutines: measured, 50 sequential
-// Health calls to one endpoint accepted 50 separate TCP connections (zero reuse) and
-// left ~150 goroutines resident. Dial is called per data-plane RPC and once per
-// running sandbox per reaper tick (every 30s), so the per-call shape grows without
-// bound in a process that is meant to run for weeks — fd exhaustion, not a slow leak.
+// A transport OWNS a connection pool and nothing closes a transport, so building one per
+// Dial leaks every connection it ever opened along with each one's read/write goroutines:
+// measured, 50 sequential Health calls to one endpoint accepted 50 separate TCP
+// connections (zero reuse) and left ~150 goroutines resident. Dial is called per
+// data-plane RPC and once per running sandbox per reaper tick, so the growth is
+// independent of load — fd exhaustion, not a slow leak.
 //
-// Sharing it does NOT weaken the §5.E "stateless, discarded on resume" property: what
-// that governs is the CLIENT (built against one endpoint, thrown away when the netns
-// IP changes, §3.3 / §4.3 IP-as-epoch), and connectClient is still per-endpoint. The
-// pool is keyed by host:port, so a resumed sandbox at a new IP gets a new connection
-// either way — the old endpoint's connection is simply no longer asked for.
+// It does NOT weaken §5.E's "stateless, discarded on resume": that governs the CLIENT,
+// and connectClient is still per-endpoint. The pool is keyed by host:port, so a resumed
+// sandbox at a new IP gets a new connection either way.
 //
 // It also makes ReadIdleTimeout mean what it says: a connection abandoned after one
 // unary RPC is never around long enough for a PING to come due.
@@ -101,8 +97,7 @@ func Dial(ep Endpoint) Client {
 		health:  transportv1connect.NewHealthServiceClient(hc, base),
 		process: transportv1connect.NewProcessServiceClient(hc, base),
 		fs:      transportv1connect.NewFsServiceClient(hc, base),
-		// Retained for the large-file bypass, which is plain HTTP on the same
-		// listener rather than an RPC (D4.4) — same h2c client, same base URL.
+		// Same h2c client and base URL back the large-file bypass (see the fields).
 		hc:   hc,
 		base: base,
 	}
@@ -183,12 +178,12 @@ func drainEvents(stream eventStream) <-chan ProcessEvent {
 				out <- ProcessEvent{Kind: "keepalive"}
 			}
 		}
-		// Surface WHY the stream ended: without it, two opposite outcomes collapse
-		// into one silent channel close — a clean end (the process finished; its exit
-		// code already arrived) and a D4.3 invariant-1 overflow disconnect (this
-		// subscriber could not keep up and its copy was dropped). The guest reports
-		// the latter as resource_exhausted precisely so the consumer can tell them
-		// apart — reconnecting is the right response to one and wrong for the other.
+		// Surface WHY the stream ended: without it, two opposite outcomes collapse into
+		// one silent channel close — a clean end (the process finished; its exit code
+		// already arrived) and a D4.3 invariant-1 overflow disconnect (this subscriber
+		// could not keep up and its copy was dropped). The guest reports the latter as
+		// resource_exhausted precisely so the consumer can tell them apart, reconnecting
+		// being the right response to one and wrong for the other.
 		if err := stream.Err(); err != nil {
 			out <- ProcessEvent{Kind: "error", Err: err}
 		}

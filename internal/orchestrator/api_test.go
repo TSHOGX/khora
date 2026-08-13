@@ -282,28 +282,18 @@ func TestAdmissionVerdictsMapToDistinctStatuses(t *testing.T) {
 		}
 		b, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		// 400, and specifically NOT 507: a 507 would claim the node is full, sending
-		// the caller off to wait for capacity that is not the problem. Checked as one
-		// condition — a separate `== 507` branch after this could never be reached.
 		if resp.StatusCode != http.StatusBadRequest {
 			t.Fatalf("status = %d (%s); want 400 — nothing is full, the request is invalid here (507 would misdirect the caller)", resp.StatusCode, b)
 		}
 	})
 
-	// The OTHER verdict: a genuinely full node → 507. Worth its own subtest because the
-	// mapping at the API edge is one line, and a wrong status code there passes the
-	// entire suite — the refusal logic one layer down is well covered, so a regression
-	// would surface only as a caller told "bad request" about a node that is simply out
-	// of room, or told "full" and made to wait when retrying would never help.
+	// The OTHER verdict: a genuinely full node → 507. Its own subtest because the mapping at
+	// the API edge is one line and a wrong code there passes the entire suite.
 	//
-	// Asserted on statusCodeFor DIRECTLY rather than through a live server, and that is
-	// the honest unit here: the property is a one-line SENTINEL → CODE
-	// mapping at the edge. Driving it end-to-end would need a full-node condition, which
-	// means a runtime+rootfs provider stack (the sandbox axis) or a quota-capable
-	// backend (the volume axis, since §3.4 makes a cap on a backend with no Quota
-	// capability a 400 rather than a silent drop) — neither of which is the property
-	// under test, and both of which are already covered where they belong: the refusal
-	// logic in internal/lifecycle's admission tests, the wire shape here.
+	// Asserted on statusCodeFor DIRECTLY rather than through a live server, which is the
+	// honest unit: driving it end-to-end would need a full-node condition, i.e. a
+	// runtime+rootfs provider stack or a quota-capable backend — neither being the property
+	// under test, and both covered in internal/lifecycle's admission tests.
 	t.Run("a full node → 507", func(t *testing.T) {
 		if got := statusCodeFor(lifecycle.ErrInsufficientCapacity); got != http.StatusInsufficientStorage {
 			t.Fatalf("ErrInsufficientCapacity → %d; want 507 — the request is VALID and the node is out of room (§6.2: 507 means capacity; 409 would imply a retryable state conflict, and 400 would blame a request that is fine)", got)
@@ -315,12 +305,9 @@ func TestAdmissionVerdictsMapToDistinctStatuses(t *testing.T) {
 		}
 	})
 
-	// The third verdict on the same axis, and the one whose default would be worst: a
-	// `0 → N` disk cap PATCH is unmaterializable (§3.4), so it must read as "this
-	// request cannot be honored" and not as a server fault. Unmapped it would fall to
-	// the default arm and surface as 500 — telling the caller to retry something that
-	// can never succeed, and hiding an engine-authored explanation behind a generic
-	// error.
+	// The third verdict on the same axis, and the one whose default would be worst: a `0 → N`
+	// disk cap PATCH is unmaterializable (§3.4), so unmapped it falls to the default arm as
+	// 500 — telling the caller to retry something that can never succeed.
 	t.Run("an unmaterializable 0→N disk cap → 400", func(t *testing.T) {
 		if got := statusCodeFor(lifecycle.ErrUncappedDiskNotCappable); got != http.StatusBadRequest {
 			t.Fatalf("ErrUncappedDiskNotCappable → %d; want 400 — the request is well-formed but the promise cannot be materialized (§3.4). NOT 507 (nothing is full) and NOT 409 (no retry or state change makes it legal; the remedy is a new sandbox)", got)
@@ -347,12 +334,9 @@ func TestAdmissionVerdictsMapToDistinctStatuses(t *testing.T) {
 		}
 	})
 
-	// The PLACEMENT-side network refusal, which fell to the default arm as 500. A resume
-	// or a publish carries no declaration, so 400 would send the caller to edit
-	// something they did not send; and nothing failed, so 500 is a lie that also tells
-	// them to retry. The asymmetry is what makes it unmistakable: the same operator
-	// condition (restart with no `--via-uid`) answers 400 on create and answered 500
-	// here.
+	// The PLACEMENT-side network refusal, which fell to the default arm as 500. The asymmetry
+	// makes it unmistakable: the same operator condition (restart with no `--via-uid`) answers
+	// 400 on create and answered 500 here.
 	t.Run("a recorded via[] this deployment cannot pin → 409", func(t *testing.T) {
 		wrapped := fmt.Errorf("lifecycle: cold start: %w", network.ErrViaUnenforceableAtPlacement)
 		if got := statusCodeFor(wrapped); got != http.StatusConflict {
@@ -453,12 +437,10 @@ func getEvents(t *testing.T, srv *httptest.Server, query string) eventsResp {
 	return out
 }
 
-// TestAPIEventsCarryCauseOnlyWhereAKindHasTwoRoutes pins the wire shape of §4.4-C's
-// cause: present on `destroyed` (two routes, and the record is GONE so the payload is
-// the only carrier), absent on a kind whose identity already says why.
-//
-// The omission half is half the contract: `omitempty` is what lets a subscriber read
-// "a cause is present" as a signal rather than as noise.
+// TestAPIEventsCarryCauseOnlyWhereAKindHasTwoRoutes pins the wire shape of §4.4-C's cause:
+// present on `destroyed` (two routes, and the record is GONE so the payload is the only
+// carrier), absent on a kind whose identity already says why. The omission half is half the
+// contract — `omitempty` is what lets a subscriber read a present cause as a signal.
 func TestAPIEventsCarryCauseOnlyWhereAKindHasTwoRoutes(t *testing.T) {
 	srv, mem := apiFixture(t)
 	ctx := context.Background()
@@ -812,15 +794,13 @@ func TestAPIGetSandboxExposesDeathCause(t *testing.T) {
 
 // --- §6.2 on the REST bypass (the other half of the funnel) -------------------
 
-// placementLeakingClient is a transport.Client whose bypass calls fail the way the
-// REAL inner client fails: transport/client.go returns `hc.Do`'s error verbatim, and
-// that client dials the sandbox's NETNS VETH IP, so the message carries
-// `10.x.y.z:port`. §6.2 bars placement from the wire on the same footing as host
-// paths, and the RPC half of the data plane already sanitizes this (proxyErr) — the
-// REST bypass was the arm that did not.
+// placementLeakingClient is a transport.Client whose bypass calls fail the way the REAL inner
+// client fails: transport/client.go returns `hc.Do`'s error verbatim, and that client dials the
+// sandbox's NETNS VETH IP, so the message carries `10.x.y.z:port`. The RPC half already
+// sanitizes this (proxyErr) — the REST bypass was the arm that did not.
 //
-// It also leaks a HOST overlay path, because the guest's own diagnostic travels back
-// through bypassErr and can name a location inside the merged rootfs.
+// It also leaks a HOST overlay path, since the guest's own diagnostic travels back through
+// bypassErr and can name a location inside the merged rootfs.
 type placementLeakingClient struct {
 	*barrierFakeClient
 	endpoint string // the veth IP:port that must not reach the caller
@@ -836,13 +816,10 @@ func (c *placementLeakingClient) WriteStream(context.Context, string, io.Reader)
 	return 0, fmt.Errorf("upload /etc/x: open %s/etc/x: permission denied", c.hostPath)
 }
 
-// TestFileBypassErrorsHideThePlacement: GET|PUT /v1/sandboxes/{id}/files refuse
-// WITHOUT naming the guest endpoint or a host path, and still say what failed.
-//
-// This route is REST rather than Connect precisely because it streams bytes, which puts
-// it outside proxyErr's reach: it has its own status mapping (bypassCode), so the
-// placement-hiding discipline has to be re-established here rather than inherited —
-// the same class of defect as the control-plane one, one layer over.
+// TestFileBypassErrorsHideThePlacement: GET|PUT /v1/sandboxes/{id}/files refuse WITHOUT naming
+// the guest endpoint or a host path, and still say what failed. This route is REST because it
+// streams bytes, which puts it outside proxyErr's reach — it has its own status mapping
+// (bypassCode), so the placement-hiding discipline is re-established here rather than inherited.
 func TestFileBypassErrorsHideThePlacement(t *testing.T) {
 	const veth = "10.88.0.7:9000"
 	const overlay = "/srv/state/overlays/ov_x/merged"
@@ -916,13 +893,10 @@ func (u usageRootfs) Usage(context.Context, string) (int64, int64, error) {
 	return u.used, 0, nil
 }
 
-// TestSandboxReadSurfaceReportsUsedByte pins §6.1's `used_byte` on the SANDBOX single
-// read, with the three properties that make it usable rather than merely present.
-//
-// Why it is on the read surface at all: PATCH disk_byte refuses a cap that is not
-// STRICTLY greater than current usage (§3.4), so a caller changing a cap needs the
-// number — and its only other route is parsing it out of that 400's message text, which
-// is what §6.2's sanitizer discipline exists to stop callers doing.
+// TestSandboxReadSurfaceReportsUsedByte pins §6.1's `used_byte` on the SANDBOX single read,
+// with the three properties that make it usable rather than merely present. It is on the read
+// surface because PATCH disk_byte refuses a cap not STRICTLY greater than usage (§3.4), so a
+// caller needs the number — its only other route being that 400's message text.
 func TestSandboxReadSurfaceReportsUsedByte(t *testing.T) {
 	seedOne := func(t *testing.T, rp rootfs.Provider, state model.Lifecycle) (*httptest.Server, string) {
 		t.Helper()
@@ -1004,15 +978,13 @@ func readRaw(t *testing.T, srv *httptest.Server, path string) string {
 	return string(b)
 }
 
-// TestEventsGoneWhenCursorFallsBelowTheWindow exercises §6.1's 410, which was written as
-// reserved semantics and was UNREACHABLE until trimming existed: with nothing ever
-// deleted, `earliest` never advances, so the state "the cursor is below the window"
-// could not be constructed.
+// TestEventsGoneWhenCursorFallsBelowTheWindow exercises §6.1's 410, UNREACHABLE until trimming
+// existed: with nothing ever deleted, `earliest` never advances, so "the cursor is below the
+// window" could not be constructed.
 //
-// What it protects is the promise §4.4-C rests on — "losing one loses an invoice". The
-// tempting implementation returns a short page instead, which lets a subscriber conclude
-// it is caught up while having silently skipped everything trimmed. That is the failure
-// this refusal exists to convert into something the caller cannot miss.
+// It protects the promise §4.4-C rests on — "losing one loses an invoice". The tempting
+// implementation returns a short page, which lets a subscriber conclude it is caught up while
+// having silently skipped everything trimmed.
 func TestEventsGoneWhenCursorFallsBelowTheWindow(t *testing.T) {
 	ctx := context.Background()
 	mem := store.NewMemory()
@@ -1088,17 +1060,14 @@ func TestEventsGoneWhenCursorFallsBelowTheWindow(t *testing.T) {
 		t.Errorf("a cursor at `earliest` = %d, want 200", resp.StatusCode)
 	}
 
-	// THE BOUNDARY, and the reason this is asserted separately from the two cases
-	// above: `after` is EXCLUSIVE (the page is `seq > after`), so a cursor at
-	// `earliest-1` has consumed exactly the trimmed prefix and nothing retained.
-	// Every event it still needs is present, starting with `earliest` itself.
+	// THE BOUNDARY, asserted separately from the two cases above: `after` is EXCLUSIVE (the
+	// page is `seq > after`), so a cursor at `earliest-1` has consumed exactly the trimmed
+	// prefix and nothing retained.
 	//
-	// 410-ing it is worse than a false alarm. The documented remedy is "restart from
-	// `earliest`", and a caller that follows it skips the event AT `earliest` — so a
-	// spurious refusal here MANUFACTURES the very gap this endpoint exists to prevent,
-	// in the one place that promises it cannot happen. `after=1` against `earliest=4`
-	// cannot catch it: it is two below the boundary, where both the correct and the
-	// off-by-one predicate agree.
+	// 410-ing it is worse than a false alarm: the documented remedy is "restart from
+	// `earliest`", and a caller that follows it skips the event AT `earliest` — MANUFACTURING
+	// the gap this endpoint exists to prevent. `after=1` against `earliest=4` cannot catch it,
+	// being two below the boundary where the correct and off-by-one predicates agree.
 	resp = do(t, http.MethodGet, srv.URL+fmt.Sprintf("/v1/events?after=%d", out.Earliest-1))
 	body, _ = io.ReadAll(resp.Body)
 	resp.Body.Close()

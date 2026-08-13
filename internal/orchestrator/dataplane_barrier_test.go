@@ -31,8 +31,7 @@ import (
 // dataplane.go — which handlers take it, which deliberately do not, and what a
 // refused call looks like on the wire.
 //
-// Three properties, and each has a distinct failure mode that the isolated
-// barrier tests cannot see:
+// Three properties, each with a failure mode the isolated barrier tests cannot see:
 //
 //  1. WRITES are gated. A mutating fs RPC arriving mid-drain must be REFUSED, not
 //     queued: queueing starves the drain, because the thing it waits for would be
@@ -248,13 +247,11 @@ func barrierFixture(t *testing.T, cl *barrierFakeClient, drain time.Duration) (*
 	return srv, med, sid
 }
 
-// While a pause is draining, a mutating fs RPC is REFUSED with `unavailable`
-// (not queued, not silently succeeding). Refusal is what keeps the drain from
-// being starved by arriving work.
+// While a pause is draining, a mutating fs RPC is REFUSED with `unavailable` (not queued, not
+// silently succeeding) — refusal is what keeps the drain from being starved by arriving work.
 //
-// Also pins the two deliberate NON-gates in the same drain window, because they
-// are only observable while a drain is actually open: a Read must still succeed,
-// and process.Start must still succeed.
+// Also pins the two deliberate NON-gates in the same drain window, since they are only observable
+// while a drain is actually open: Read and process.Start must both still succeed.
 func TestDrainRefusesWritesButNotReadsOrProcessStart(t *testing.T) {
 	ctx := context.Background()
 	cl := &barrierFakeClient{

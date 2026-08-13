@@ -30,23 +30,20 @@ type networkWire struct {
 	Egress  egressWire  `json:"egress"`
 	Ingress ingressWire `json:"ingress"`
 
-	// State is ACCEPTED AND IGNORED on the write path. It is not a declaration field;
-	// it is the read-only member `GET …/network` carries (§6.1).
+	// State is ACCEPTED AND IGNORED on the write path — THE reference case for every
+	// other such field in this file. It is not a declaration field; it is the read-only
+	// member `GET …/network` carries (§6.1).
 	//
-	// It is accepted because §6.1 makes the read-modify-write cycle a CONTRACT REQUIREMENT —
-	// a PATCH built from a stale read silently drops a publish added in between, on a
+	// Accepted because §6.1 makes the read-modify-write cycle a CONTRACT REQUIREMENT — a
+	// PATCH built from a stale read silently drops a publish added in between, on a
 	// security-relevant field — and with unknown fields refused, a caller pasting the GET
 	// response back would be rejected for echoing a field the engine itself emitted.
+	// `DisallowUnknownFields` applies RECURSIVELY, so the rule is "every read-only member
+	// the read face emits" and a new one obliges a matching ignored member here.
 	//
-	// THIS IS NOT A GENERAL EXEMPTION from DisallowUnknownFields: only a read-only
-	// member the read face itself produced belongs here. A misspelled `netwrok` is
-	// still a 400, which is the property that matters (§5.D).
-	//
-	// SETTLED in §6.1 (`GET …/network`): the read face's read-only members — `state`
-	// here and `host_endpoint` on publishWire — are accepted and ignored on the write
-	// path, which is what makes the GET response body a legal PATCH request body. The
-	// rule is "every read-only member the read face emits", so a new one obliges a
-	// matching ignored member here.
+	// NOT A GENERAL EXEMPTION from DisallowUnknownFields: only a read-only member the read
+	// face itself produced belongs here. A misspelled `netwrok` is still a 400, which is
+	// the property that matters (§5.D).
 	State string `json:"state,omitempty"`
 }
 
@@ -56,15 +53,10 @@ type egressWire struct {
 	// refused, but only the absent case is the class-1 message, and a caller who typed
 	// `"default": ""` deserves to be told that rather than told the field is missing.
 	Default *string `json:"default"`
-	// DefaultHitPacket is ACCEPTED AND IGNORED, for the same reason `state` and
-	// `host_endpoint` are: §6.1 requires the read face's output to be a legal write body,
-	// because read-modify-write is a CONTRACT REQUIREMENT for editing a declaration (a
-	// lost update here is a lost update on a security-relevant field). The read face emits
-	// this key whenever counters are readable, so without it a caller writing back what it
-	// read gets a 400 on a field the engine itself produced.
-	//
-	// Verified by TestAFullReadResponseIsALegalWriteBody rather than by inspection — the
-	// counters were in fact caught breaking that round trip when they first landed.
+	// DefaultHitPacket is ACCEPTED AND IGNORED (see networkWire.State) — the read face
+	// emits this key whenever counters are readable. Verified by
+	// TestAFullReadResponseIsALegalWriteBody rather than by inspection: the counters were
+	// caught breaking that round trip when they first landed.
 	//
 	// `hit_packet` inside allow[] / via[].match[] needs no equivalent here: tupleWire is
 	// SHARED by both faces, so it is accepted automatically.
@@ -75,10 +67,7 @@ type egressWire struct {
 
 type ingressWire struct {
 	Publish []publishWire `json:"publish"`
-	// ClosedHitPacket is ACCEPTED AND IGNORED on the write path, for the same reason
-	// egressWire.DefaultHitPacket is: §6.1 requires the read face's output to be a legal
-	// write body, so a caller writing back what it read must not get a 400 on a field the
-	// engine itself produced.
+	// ClosedHitPacket is ACCEPTED AND IGNORED on the write path (see networkWire.State).
 	ClosedHitPacket *uint64 `json:"closed_hit_packet"`
 }
 
@@ -95,25 +84,17 @@ type tupleWire struct {
 	// `"cidr":""` round-trips only because decode() treats it as "any". Emitting the
 	// omission directly says what it means.
 	CIDR string `json:"cidr,omitempty"`
-	// Port carries `omitempty` for the same reason `cidr` above does, and the reason is
-	// NOT tidiness — it is §5.D's own criterion for requiring `egress.default`: if
-	// "unspecified" is read as some default value, the record's empty value can no
-	// longer be told from the caller having chosen it. Without `omitempty` the read face
-	// emits `"port": 0` for a wildcard, which reads as a port number that happens to be
-	// zero; a caller cannot tell that response from a record built before the field
-	// existed, and the wildcard survives only as a zero value's side effect. Omitting it
-	// says what it means, and keeps the GET response a legal PATCH body (§6.1).
+	// Port carries `omitempty` for the reason `cidr` above does, sharpened by §5.D's own
+	// criterion for requiring `egress.default`: without it the read face emits
+	// `"port": 0` for a wildcard, which reads as a port number that happens to be zero,
+	// and the wildcard survives only as a zero value's side effect.
 	//
-	// A VALUE TYPE, not a pointer, and deliberately: `egress.default` is a pointer
-	// because absent and `""` are BOTH REFUSED THERE with different messages, so the
-	// two must stay distinguishable. Here they are both LEGAL and mean the same thing —
-	// `"port": 0` and an omitted `port` decode to ONE record — so there is nothing to
-	// distinguish and a pointer would only invite a distinction the contract does not
-	// make. Two spellings collapsing onto one record is exactly how `cidr` already
-	// behaves (`"cidr": ""` decodes to any-destination), and it is the safe direction of
-	// §6.2's v4-mapped objection: what that class refuses is two spellings that
-	// SURVIVE INTO the record and then compare unequal on read-modify-write. These do
-	// not survive — the read face renders the wildcard exactly one way, as the omission.
+	// A VALUE TYPE, not a pointer, unlike `egress.default` — there absent and `""` are
+	// BOTH REFUSED with different messages, so they must stay distinguishable; here they
+	// are both LEGAL and decode to ONE record. That collapse is the safe direction of
+	// §6.2's v4-mapped objection: what that class refuses is two spellings that SURVIVE
+	// INTO the record and then compare unequal on read-modify-write. These do not survive
+	// — the read face renders the wildcard exactly one way, as the omission.
 	Port  uint16 `json:"port,omitempty"`
 	Proto string `json:"proto"`
 	// HitPacket is how many packets this ENTRY's rules have acted on since the current
@@ -123,14 +104,12 @@ type tupleWire struct {
 	// report.
 	//
 	// A POINTER so a real 0 SURVIVES: "installed and matched nothing" is a different fact
-	// from "not measured", and §2.4's acceptance discipline rests on telling them apart
-	// (a bypassed rule's only symptom is a counter reading 0). With a value type plus
-	// omitempty the two would serialize identically.
+	// from "not measured", and §2.4's acceptance discipline rests on telling them apart —
+	// a bypassed rule's only symptom is a counter reading 0. With a value type plus
+	// omitempty the two would serialize identically. THE reference case for the other
+	// counters in this file.
 	//
-	// ACCEPTED AND IGNORED on the write path, like `state` and `host_endpoint`: §6.1
-	// requires the read face's output to be a legal write body, and unknown-key rejection
-	// applies recursively, so without this a caller writing back what it read would get a
-	// 400 one level down inside `allow[]`.
+	// ACCEPTED AND IGNORED on the write path (see networkWire.State).
 	HitPacket *uint64 `json:"hit_packet,omitempty"`
 }
 
@@ -143,14 +122,9 @@ type publishWire struct {
 	GuestPort uint16 `json:"guest_port"`
 	Proto     string `json:"proto"`
 
-	// HostEndpoint is ACCEPTED AND IGNORED on the write path, for exactly the reason
-	// `networkWire.State` is (see there — same contract requirement, same non-exemption
-	// from DisallowUnknownFields). It is the SECOND read-only member the read face
-	// produces, and the scope of that decision is "every read-only member the read face
-	// emits", not `state` alone: `DisallowUnknownFields` applies RECURSIVELY, so a
-	// `running` sandbox carrying one publish would have its GET response refused with
-	// `json: unknown field "host_endpoint"` — the read-modify-write cycle §6.1 makes a
-	// CONTRACT REQUIREMENT, broken one level down from where `state` lives.
+	// HostEndpoint is ACCEPTED AND IGNORED on the write path (see networkWire.State): a
+	// `running` sandbox carrying one publish would otherwise have its GET response refused
+	// with `json: unknown field "host_endpoint"`, one level down from where `state` lives.
 	//
 	// ⚠ COUNTERINTUITIVE, and it is why no test caught this: the friction appears only
 	// on the WRONG operation order. §5.D's safe sequence is `pause → GET → PATCH →
@@ -203,11 +177,10 @@ func (w networkWire) decode() (model.NetworkDecl, error) {
 }
 
 func (t tupleWire) decode() (model.NetTuple, error) {
-	// `port` needs no branch and that is the point of the shapes chosen above: an
-	// omitted `port` and an explicit `"port": 0` both arrive here as 0 and both mean
-	// ANY PORT (§5.D), so there is exactly one recorded value for the wildcard and
-	// nothing for a later read-modify-write to disagree about. encodeTuple renders it
-	// back as the omission, which is the single spelling the read face produces.
+	// `port` needs no branch, which is the point of the shapes chosen above: an omitted
+	// `port` and an explicit `"port": 0` both arrive as 0 and both mean ANY PORT (§5.D), so
+	// there is one recorded value for the wildcard and nothing for a later
+	// read-modify-write to disagree about.
 	out := model.NetTuple{Port: t.Port, Proto: model.NetProto(t.Proto)}
 	if t.CIDR == "" {
 		// Omitted = any destination. Legal, and only meaningful in `via[].match[]`.
@@ -221,18 +194,9 @@ func (t tupleWire) decode() (model.NetTuple, error) {
 	return out, nil
 }
 
-// encodeNetwork renders a declaration for §6.1's read face.
-//
-// THE THREE ARRAYS ALWAYS APPEAR, empty as `[]` — never omitted, never null (§6.1).
-// They are DEFINITE values in the record; the omit-when-unreadable rule
-// (`death_cause`, `used_byte`) governs facts that cannot be READ, and a declaration
-// has none of those. Two spellings of absence would be one more than needed.
-// sumHits totals the named counters, returning nil when NONE of them is present.
-//
-// Nil-when-absent is the §6.1 omission rule, and the distinction it preserves is the
-// load-bearing one: a counter that reads 0 is "installed, matched nothing", while an
-// absent counter is "not measured" (no placement, unreadable, or never rendered). A
-// zero-valued return for the second case would manufacture exactly the false zero §2.4's
+// sumHits totals the named counters, returning nil when NONE of them is present — the
+// §6.1 omission rule, preserving the 0-vs-absent distinction tupleWire.HitPacket states.
+// A zero-valued return for "not measured" would manufacture exactly the false zero §2.4's
 // acceptance discipline refuses to treat as a pass.
 func sumHits(hits map[string]uint64, names ...string) *uint64 {
 	if hits == nil || len(names) == 0 {
@@ -255,14 +219,16 @@ func sumHits(hits map[string]uint64, names ...string) *uint64 {
 	return &total
 }
 
+// encodeNetwork renders a declaration for §6.1's read face.
+//
+// THE THREE ARRAYS ALWAYS APPEAR, empty as `[]` — never omitted, never null (§6.1). They
+// are DEFINITE values in the record; the omit-when-unreadable rule (`death_cause`,
+// `used_byte`) governs facts that cannot be READ, and a declaration has none of those.
 func encodeNetwork(d model.NetworkDecl, endpoints []string, hits map[string]uint64, attr network.CounterAttribution) networkReadResp {
 	d = d.Normalize()
 	out := networkReadResp{}
 	out.Egress.Default = string(d.Egress.Default)
-	// The DECLARATION's own catch-all, and nothing else. The floor and the deny-safe tier
-	// are deliberately excluded: neither is liftable by any declaration (§2.4), so
-	// attributing their hits here would send a caller to widen an allow-list that cannot
-	// possibly help.
+	// The DECLARATION's own catch-all, and nothing else — see egressReadWire.DefaultHitPacket.
 	out.Egress.DefaultHitPacket = sumHits(hits, attr.Default)
 	out.Egress.Allow = make([]tupleWire, 0, len(d.Egress.Allow))
 	for i, t := range d.Egress.Allow {
@@ -293,20 +259,18 @@ func encodeNetwork(d model.NetworkDecl, endpoints []string, hits map[string]uint
 		}
 		out.Egress.Via = append(out.Egress.Via, item)
 	}
-	// The ingress default-deny's drop counter, direction-level. Emitted regardless of
-	// whether anything is published: "closed and nothing tried" and "closed and something
-	// was refused" are exactly the two states this distinguishes, and a sandbox publishing
-	// nothing is the case where the distinction matters most.
+	// Emitted regardless of whether anything is published: a sandbox publishing nothing is
+	// the case where "closed and nothing tried" vs "closed and something was refused"
+	// matters most. See ingressReadWire.ClosedHitPacket.
 	out.Ingress.ClosedHitPacket = sumHits(hits, attr.IngressClosed)
 	out.Ingress.Publish = make([]publishReadWire, 0, len(d.Ingress.Publish))
 	for i, p := range d.Ingress.Publish {
 		item := publishReadWire{GuestPort: p.GuestPort, Proto: string(p.Proto)}
-		// `host_endpoint` is OMITTED when the engine holds no live placement — not the
-		// empty string, not null (§6.1). The endpoint is a placement product (§3.3), so
-		// a `paused` sandbox has none to report, and a falsy-but-present field would
-		// invite reading it as "is this publish in effect" — a judgment that is doubly
-		// wrong, because the rule set is installed WHOLE and atomically, so there is no
-		// per-publish install state for it to mean.
+		// `host_endpoint` is OMITTED when the engine holds no live placement — not the empty
+		// string, not null (§6.1). The endpoint is a placement product (§3.3), so a `paused`
+		// sandbox has none to report, and a falsy-but-present field would invite reading it
+		// as "is this publish in effect" — which it cannot mean: the rule set is installed
+		// WHOLE and atomically, so there is no per-publish install state.
 		if i < len(endpoints) && endpoints[i] != "" {
 			item.HostEndpoint = endpoints[i]
 		}
@@ -329,24 +293,21 @@ func encodeTuple(t model.NetTuple) tupleWire {
 
 // networkReadResp is `GET /v1/sandboxes/{id}/network` (§6.1).
 type networkReadResp struct {
-	// State is a MEMBER of this response, saving the caller a second round trip to
-	// interpret what they just read (the same N+1 argument that puts `death_cause` on
-	// list). It is meaningful here because of a mechanical biconditional §6.1 states:
-	// `running` ⟺ the rules installed in the kernel ARE this declaration; not
-	// `running` ⟹ nothing is installed.
+	// State is a MEMBER of this response, saving the caller a second round trip (the same
+	// N+1 argument that puts `death_cause` on list). It is meaningful here because of a
+	// mechanical biconditional §6.1 states: `running` ⟺ the rules installed in the kernel
+	// ARE this declaration; not `running` ⟹ nothing is installed.
 	//
-	// That holds because neither write point can make a `running` sandbox's record
-	// diverge from its live rule set: editing the three egress fields on `running` is a
-	// 409, and publish makes "record" and "rules" one un-halvable write. So there is no
-	// persistable difference between "declared" and "in effect", and this response
-	// needs exactly one bit to expose it.
+	// That holds because neither write point can make a `running` sandbox's record diverge
+	// from its live rule set: editing the three egress fields on `running` is a 409, and
+	// publish makes "record" and "rules" one un-halvable write.
 	//
-	// Hence NO `in_effect` / `pending` / `applies_at` here: `in_effect` would be a
-	// second spelling of this field AND an overreach (the engine can honestly say
-	// "I hold a placement", not "the kernel has these rules right now" — a `running`
-	// record whose unit died but has not been demoted yet is the counter-example);
-	// `pending` would need a second declaration in the record, which §6.2 forbids;
-	// `applies_at` is a WRITE response's vocabulary.
+	// Hence NO `in_effect` / `pending` / `applies_at` here: `in_effect` would be a second
+	// spelling of this field AND an overreach (the engine can honestly say "I hold a
+	// placement", not "the kernel has these rules right now" — a `running` record whose
+	// unit died but has not been demoted yet is the counter-example); `pending` would need
+	// a second declaration in the record, which §6.2 forbids; `applies_at` is a WRITE
+	// response's vocabulary.
 	State   string          `json:"state"`
 	Egress  egressReadWire  `json:"egress"`
 	Ingress ingressReadWire `json:"ingress"`
@@ -356,8 +317,8 @@ type egressReadWire struct {
 	Default string `json:"default"`
 	// DefaultHitPacket counts the rule `egress.default` itself generates — the catch-all
 	// refusal under `deny`, the catch-all accept under `allow` — and NOTHING else. The L0
-	// floor and the internal deny-safe tier are excluded because neither is liftable by
-	// any declaration (§2.4): reporting their hits here would send a caller to widen an
+	// floor and the internal deny-safe tier are excluded because neither is liftable by any
+	// declaration (§2.4): reporting their hits here would send a caller to widen an
 	// allow-list that cannot help.
 	//
 	// Same omission rule and same pointer reasoning as tupleWire.HitPacket.
@@ -374,22 +335,18 @@ type viaReadWire struct {
 type ingressReadWire struct {
 	Publish []publishReadWire `json:"publish"`
 	// ClosedHitPacket counts the ingress default-deny — inbound traffic to this guest that
-	// no `publish[]` entry opened (§2.1 ③). It answers the one question the egress side's
-	// per-entry counters answer for their direction and nothing here could: whether
-	// anything was REFUSED toward this guest, as against nothing having arrived. Outside
-	// the engine those two are indistinguishable, there being no vantage point from which
-	// a dropped inbound packet is visible at all.
+	// no `publish[]` entry opened (§2.1 ③). Outside the engine, "refused" and "nothing
+	// arrived" are indistinguishable: there is no vantage point from which a dropped
+	// inbound packet is visible at all.
 	//
-	// DIRECTION-LEVEL, and deliberately not per-publish: a publish entry's rules span
-	// three hooks and the `forward` one matches other sandboxes' egress, so no per-entry
-	// number is cleanly attributable (§6.1). It likewise does NOT identify the sender —
-	// this is the one rule in a per-sandbox table that can match another sandbox's egress,
-	// so nonzero means "something was refused on the way to this guest", never who sent it.
+	// DIRECTION-LEVEL, and deliberately not per-publish: a publish entry's rules span three
+	// hooks and the `forward` one matches other sandboxes' egress, so no per-entry number is
+	// cleanly attributable (§6.1). It likewise does NOT identify the sender — this is the one
+	// rule in a per-sandbox table that can match another sandbox's egress, so nonzero means
+	// "something was refused on the way to this guest", never who sent it.
 	//
-	// Same omission rule and same pointer reasoning as egressReadWire.DefaultHitPacket:
-	// OMITTED, not 0, when there is no placement to read counters from — a paused sandbox
-	// has none, and absent must stay distinguishable from zero (§6.1). And 0 never means
-	// "never refused": counters are placement-local and reset on pause/resume and on a
+	// Same omission rule and pointer reasoning as tupleWire.HitPacket. 0 never means "never
+	// refused": counters are placement-local and reset on pause/resume and on a
 	// control-plane restart.
 	ClosedHitPacket *uint64 `json:"closed_hit_packet,omitempty"`
 }
@@ -417,17 +374,10 @@ func (e *Engine) handleNetworkGet(w http.ResponseWriter, r *http.Request, id mod
 type publishReq struct {
 	GuestPort uint16 `json:"guest_port"`
 	Proto     string `json:"proto"`
-	// HostEndpoint is ACCEPTED AND IGNORED, exactly as `state` is on networkWire and
-	// for the same reason: §6.1's rule is that EVERY read-only member the read face
-	// emits is taken and ignored on the write path, so that a caller can round-trip
-	// what they read. `GET …/network` emits this key on a `running` sandbox's publish
-	// items, so without it here, re-posting one item back is a 400 on a field the
-	// engine itself produced — the friction §6.1 spends a paragraph refusing to
-	// impose, one endpoint over.
-	//
-	// It is not a general exemption from DisallowUnknownFields: a misspelled
-	// `host_endpiont` is still a 400. The engine never reads this value — the endpoint
-	// is a placement product (§3.3), so a caller cannot choose it.
+	// HostEndpoint is ACCEPTED AND IGNORED (see networkWire.State): `GET …/network` emits
+	// this key on a `running` sandbox's publish items, so without it here, re-posting one
+	// item back is a 400 on a field the engine itself produced. The engine never reads the
+	// value — the endpoint is a placement product (§3.3), so a caller cannot choose it.
 	HostEndpoint string `json:"host_endpoint"`
 }
 
@@ -476,16 +426,11 @@ func (e *Engine) handlePublish(w http.ResponseWriter, r *http.Request, id model.
 
 // strictDecode decodes a request body with UNKNOWN FIELDS REFUSED.
 //
-// This is required on every write point that carries a declaration, and the reason
-// is a silent failure rather than tidiness: with unknown keys ignored, a caller who
-// typed `"netwrok"` gets a 201 and believes their declaration took effect, while the
-// engine recorded the OMITTED-network normalization — a `deny` sandbox (§5.D). The
-// two cases are indistinguishable to the caller precisely because both are legal
-// outcomes, which is why the misspelling has to be an error rather than a default.
-//
-// It also makes the create path's `network?` a real field rather than one more
-// ignored key: without it, a misspelled `network` object is dropped by the decoder
-// with no signal at all and the sandbox comes up with the default declaration.
+// Required on every write point that carries a declaration, because the failure is
+// SILENT: with unknown keys ignored, a caller who typed `"netwrok"` gets a 201 while the
+// engine recorded the OMITTED-network normalization — a `deny` sandbox (§5.D). The two
+// cases are indistinguishable to the caller precisely because both are legal outcomes,
+// which is why the misspelling has to be an error rather than a default.
 func strictDecode(body io.Reader, v any) error {
 	dec := json.NewDecoder(body)
 	dec.DisallowUnknownFields()
@@ -495,26 +440,23 @@ func strictDecode(body io.Reader, v any) error {
 	return nil
 }
 
-// networkStatus maps §6.2's declaration refusals to 400 — ONE arm for all ten
-// refusals, because every remedy is "fix the declaration" (or, for the
-// deployment-natured one, "start the engine with a second-hop uid"). The CLASS stays
-// recoverable through
-// network.ClassOf for tests and logs; what §6.2 requires to stay distinguishable is
-// what the caller's REMEDY depends on, and here it does not vary by class.
+// networkStatus maps §6.2's declaration refusals to 400 — ONE arm for all ten refusals,
+// because every remedy is "fix the declaration". The CLASS stays recoverable through
+// network.ClassOf for tests and logs; what §6.2 requires to stay distinguishable is what
+// the caller's REMEDY depends on, and here it does not vary by class.
 func networkStatus(err error) (int, bool) {
 	if lifecycle.IsDeclarationInvalid(err) {
 		return http.StatusBadRequest, true
 	}
-	// The PLACEMENT-side twin, and it is NOT a 400: a resume or a publish carries no
-	// declaration, so 400 would send the caller to edit something they did not send.
-	// A recorded `via[]` meets a deployment that supplies no second-hop uid — the
-	// record and the running deployment conflict, and BOTH documented remedies change
-	// state elsewhere (restart the engine with the uid, or PATCH the `via[]` away).
+	// The PLACEMENT-side twin, and NOT a 400: a resume or a publish carries no declaration,
+	// so 400 would send the caller to edit something they did not send. A recorded `via[]`
+	// meets a deployment that supplies no second-hop uid, and BOTH documented remedies
+	// change state elsewhere (restart the engine with the uid, or PATCH the `via[]` away).
 	//
-	// Without this arm it falls through to 500, which tells the caller "engine fault,
-	// retry" when nothing failed and no retry can help — and the asymmetry makes that
-	// unmistakable: the SAME operator condition would answer 400 on create (where
-	// ValidateDeployment sees the declaration) and 500 on resume.
+	// Without this arm it falls through to 500 — "engine fault, retry" when nothing failed
+	// and no retry can help. The asymmetry makes that unmistakable: the SAME operator
+	// condition would answer 400 on create (where ValidateDeployment sees the declaration)
+	// and 500 on resume.
 	if errors.Is(err, network.ErrViaUnenforceableAtPlacement) {
 		return http.StatusConflict, true
 	}

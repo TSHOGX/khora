@@ -65,9 +65,7 @@ func TestLimitsAreABindingRematerializedEachPlacement(t *testing.T) {
 		t.Fatalf("capacity cap did not reach the rootfs provider at create: %v", rp.Calls())
 	}
 
-	// Now the real assertion. Pause, EDIT the stored caps, resume: a Binding
-	// re-materializes from the current record, so the new values must appear at the
-	// next placement. A frozen-value implementation would replay the old ones.
+	// Now the real assertion: pause, EDIT the stored caps, resume.
 	if err := m.Pause(ctx, sid); err != nil {
 		t.Fatalf("Pause: %v", err)
 	}
@@ -191,10 +189,7 @@ func TestDeathCauseSeparatesTheTwoParallelDeadHealthStates(t *testing.T) {
 				t.Fatalf("stored death cause = %q; want %q", after.DeathCause, tc.wantStored)
 			}
 
-			// The disposition that actually differs. L2 comes up first, so a
-			// PERMITTED resume runs the whole cold start and lands `running` — the
-			// assertion is that it SUCCEEDED, not merely that it failed for some other
-			// reason.
+			// The disposition that actually differs.
 			l2Up = true
 			err := m.Resume(ctx, sid2)
 			if tc.wantResume {
@@ -354,10 +349,7 @@ func TestAdmissionGateEnforcesTheAccountingFormula(t *testing.T) {
 		}
 	})
 
-	// §3.4: once an axis is metered, every admitted sandbox must carry a cap on it.
-	// An uncapped sandbox contributes 0 to the left of the inequality while free to
-	// consume all of the right, which does not merely undercount — it makes the
-	// inequality describe a device that is not the one being written to.
+	// §3.4.3: once an axis is metered, every admitted sandbox must carry a cap on it.
 	t.Run("a metered axis requires a cap", func(t *testing.T) {
 		t.Run("disk metered, disk cap omitted → refused", func(t *testing.T) {
 			m, st := newLimitsMediator(t, &fakeRootfs{}, &fakeRuntime{}, NodeCapacity{DiskByte: 8 * gib})
@@ -577,8 +569,7 @@ func TestPromotePassesTheNodeCapacityGate(t *testing.T) {
 		}
 	})
 
-	// Fail CLOSED: an unforecastable freeze cannot be evaluated, and admitting blind
-	// is how the node ends up overcommitted at an unrelated sandbox's expense (§2.3).
+	// Fail CLOSED: the inequality cannot be evaluated, so the freeze is refused.
 	t.Run("unforecastable freeze fails closed", func(t *testing.T) {
 		rp := &fakeRootfs{promoteCostErr: errors.New("backend unavailable")}
 		m, st := newLimitsMediator(t, rp, &fakeRuntime{}, NodeCapacity{DiskByte: 10 * gib})
@@ -807,12 +798,9 @@ func TestUpdateBindingRewritesTheBinding(t *testing.T) {
 	// the sandbox died — that would re-arm the crash loop the refusal exists to stop.
 	t.Run("unrelated and lowering edits do not clear the cause", func(t *testing.T) {
 		//
-		// The disk case is an `N → M` change, and the record below is created WITH a disk
-		// cap for that reason: `0 → N` on disk is its own refused write (§3.4,
-		// ErrUncappedDiskNotCappable), so an uncapped record would make this subtest fail
-		// on the admission of the edit instead of on the property under test. The property
-		// is unchanged either way — a disk edit is not a memory raise — and now the edit
-		// exercised is a LEGAL one.
+		// The record is created WITH a disk cap so the disk case is an `N → M`: `0 → N` is
+		// its own refused write (ErrUncappedDiskNotCappable), and an uncapped record would
+		// fail this subtest on the edit's admission instead of on the property under test.
 		for _, tc := range []struct {
 			name string
 			b    func() store.Binding
@@ -843,14 +831,9 @@ func TestUpdateBindingRewritesTheBinding(t *testing.T) {
 		}
 	})
 
-	// §3.4 — `0 → N` on the DISK axis is a REFUSED WRITE, not a raise. The cap
-	// materializes as a quota on the Overlay's storage unit, and that unit is only built
-	// as a quota-capable subvolume when a cap existed AT CREATE — so a cap written onto
-	// an uncapped record is one §5.B must refuse at every future placement, and the
-	// sandbox becomes permanently unresumable. A 200 here bricks it.
-	//
-	// THE DIRECTION IS THE WHOLE POINT, so all three are asserted together: only
-	// from-uncapped is refused; dropping and changing a cap stay legal.
+	// §3.4 — `0 → N` on the DISK axis is a REFUSED WRITE, not a raise (why a 200 bricks
+	// the sandbox: ErrUncappedDiskNotCappable). The refusal is DIRECTIONAL, so all three
+	// are asserted together: only from-uncapped is refused; dropping and changing stay legal.
 	t.Run("disk 0 → N is refused; N → 0 and N → M stay legal", func(t *testing.T) {
 		t.Run("0 → N refused, and the STORE IS UNCHANGED", func(t *testing.T) {
 			rp, rt := &fakeRootfs{}, &fakeRuntime{}
@@ -907,21 +890,11 @@ func TestUpdateBindingRewritesTheBinding(t *testing.T) {
 		})
 
 		// The metered node is the case the subtest above does NOT cover: it runs on
-		// NodeCapacity{}, where an uncapped sandbox is legal by §3.4's own terms, so
-		// dropping a cap there is correct and must stay allowed. Once the axis is METERED
-		// the same edit means something else entirely — §3.4 requires every sandbox on a
-		// metered axis to carry a cap, and `admit` refuses an uncapped create for exactly
-		// that reason (ErrCapRequired). A PATCH is the same promise written at a different
-		// time, so accepting 0 here manufactures the create that was just refused: the
-		// sandbox drops off the budget's left side while staying free to consume all of the
-		// right.
-		//
-		// The aggravating half is the interaction with the `0 → N` refusal above. Once the
-		// record reads 0, re-capping is refused permanently with ErrUncappedDiskNotCappable
-		// — whose message asserts the sandbox "was created uncapped on disk, so its Overlay
-		// storage unit carries no quota row", which would be false here: it was created
-		// CAPPED and the unit does carry one. So one accepted PATCH strands the sandbox
-		// uncapped forever, on a false explanation.
+		// NodeCapacity{}, where §3.4 makes an uncapped sandbox legal, so dropping a cap
+		// there must stay allowed. Metered, the same edit is the uncapped create `admit`
+		// refuses (ErrCapRequired) written at a different time, and it is irreversible —
+		// re-capping is then refused by ErrUncappedDiskNotCappable, whose message would be
+		// factually wrong about this record. Both halves are in the failure message below.
 		t.Run("N → 0 is refused while the disk axis is METERED", func(t *testing.T) {
 			rp, rt := &fakeRootfs{}, &fakeRuntime{}
 			m, st := newLimitsMediator(t, rp, rt, NodeCapacity{DiskByte: 10 * gib})
@@ -1006,11 +979,9 @@ func TestUpdateBindingRewritesTheBinding(t *testing.T) {
 	})
 
 	// §3.4 — an `N → M` disk edit must leave the cap STRICTLY above the Overlay unit's
-	// current usage. The substrate accepts a below-usage cap with ZERO validation and is
-	// then wedged permanently (creating a file, `mkdir`, truncate-to-zero and the quota
-	// write ITSELF all return ENOSPC), and on the SANDBOX side that is worse than on a
-	// volume: §5.B re-applies the record's cap at every placement, so the sandbox also
-	// becomes permanently unresumable. See ErrDiskCapBelowUsage.
+	// current usage: the substrate accepts a below-usage cap with ZERO validation and is
+	// then wedged permanently, and on the sandbox side that also makes it unresumable.
+	// The measured wedge and the §5.B half: ErrDiskCapBelowUsage.
 	t.Run("disk N → M below current usage is refused", func(t *testing.T) {
 		const cap0 = 64 << 20
 		// newCapped builds a paused, disk-capped sandbox whose unit reports `used` bytes.
@@ -1031,10 +1002,9 @@ func TestUpdateBindingRewritesTheBinding(t *testing.T) {
 			return m, st, rp, sid
 		}
 
-		// The boundary is what the strict inequality is FOR: `cap == usage` is a wedged
-		// state too (measured — setting limit exactly equal to `referenced` is accepted, and
-		// re-applying or raising it then returns ENOSPC), so it means FULL rather than
-		// "exactly enough" and must be refused alongside anything below it.
+		// The boundary is what the strict inequality is FOR: `cap == usage` is a wedged state
+		// too (measured, ErrDiskCapBelowUsage), so it means FULL rather than "exactly
+		// enough" and must be refused alongside anything below it.
 		for _, tc := range []struct {
 			name string
 			used int64

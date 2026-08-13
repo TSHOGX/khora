@@ -43,10 +43,8 @@ import (
 // as a PRECONDITION on placing a sandbox whose declaration needs it. network.ValidatePlacement
 // holds the mechanism and the measurement; this is the funnel that makes it structural, all
 // three placement paths (create's coldStart, resume's coldStart, adopt) deriving their spec here
-// exactly as all three write points go through ValidateDeclaration.
-//
-// The general shape: an invariant a write point guards must be RE-EVALUATED wherever the state
-// it guarded is re-materialized.
+// exactly as all three write points go through ValidateDeclaration — an invariant a write point
+// guards must be RE-EVALUATED wherever the state it guarded is re-materialized.
 func (m *Mediator) steeringFor(rec model.Sandbox) (runtime.SteeringSpec, error) {
 	if err := network.ValidatePlacement(rec.Network, m.deps.Deployment); err != nil {
 		return runtime.SteeringSpec{}, fmt.Errorf("network: place %s: %w", rec.ID, err)
@@ -87,15 +85,11 @@ func protoFor(p model.NetProto) ruleset.Proto {
 // With NO uid supplied it installs nothing (and the provider drops a stale table left
 // by a previous run — see InstallSecondHop). §2.4's second invariant is then
 // unenforced, so `via[]` is refused at BOTH ends, which is one obligation in two
-// places rather than a belt-and-braces pair:
-//
-//   - the write points keep such a declaration out of the record
-//     (network.ValidateDeployment) — recording it would leave a confused deputy live
-//     while every FIRST-hop assertion still passed;
-//   - every placement re-checks the premise (network.ValidatePlacement, funnelled
-//     through steeringFor) — because a declaration admitted by a deployment that DID
-//     supply the uid outlives it, and "restart without the flag" pulls the two apart
-//     with no write anywhere.
+// places rather than a belt-and-braces pair: the write points keep such a declaration
+// out of the record (network.ValidateDeployment — recording it would leave a confused
+// deputy live while every FIRST-hop assertion still passed), and every placement
+// re-checks the premise (steeringFor, whose doc states why a write-point check is not
+// enough).
 func (m *Mediator) InstallSecondHopTable(ctx context.Context) error {
 	if !m.deps.Deployment.SecondHopPinned() {
 		// The nil uid is handed to the provider rather than short-circuited here: tearing
@@ -114,25 +108,6 @@ func (m *Mediator) InstallSecondHopTable(ctx context.Context) error {
 	return m.deps.Runtime.InstallSecondHop(ctx, rs, m.deps.Deployment.SecondHopUID)
 }
 
-// Network reads a sandbox's declaration together with the two facts §6.1's read face
-// needs alongside it: its lifecycle state, and the host endpoint each publish is
-// bound to at the CURRENT placement.
-//
-// `state` is a member of that response rather than a second request because of a
-// mechanical biconditional §6.1 spells out: `running` ⟺ what is installed in the
-// kernel IS this declaration; not `running` ⟹ nothing is installed. Neither write
-// point can make a `running` sandbox's record diverge from its live rule set —
-// editing the three egress fields on `running` is a 409, and publish makes
-// "record" and "rules" one un-halvable write. So there is no persistable difference
-// between "declared" and "in effect", and the read face has exactly one bit to
-// expose: whether a placement exists.
-//
-// The endpoints come from the PLACEMENT, not the record, because that is what they
-// are (§3.3): rebound every resume, invalidated with the old placement. A `paused`
-// sandbox has none, which is why §6.1 omits the key rather than reporting an empty
-// string — a falsy-but-present field invites reading it as "is this publish in
-// effect", and that judgment is doubly wrong (the rule set is installed whole and
-// atomically, so there is no per-publish install state to report).
 // NetworkInfo is the §6.1 `GET …/network` read shape.
 //
 // A STRUCT rather than more return values: this read already carried four, and the
@@ -154,11 +129,30 @@ type NetworkInfo struct {
 	// report — this is not an omission convention papering over a zero.
 	Hits map[string]uint64
 	// Attribution maps declaration entries to the counter names above (per-entry
-	// `hit_packet`). Regenerated from the record on read, which is sound because §6.1's
-	// own biconditional holds: a `running` record cannot diverge from its live rule set.
+	// `hit_packet`). Regenerated from the record on read, which is sound because of the
+	// biconditional on Network below.
 	Attribution network.CounterAttribution
 }
 
+// Network reads a sandbox's declaration together with the two facts §6.1's read face
+// needs alongside it: its lifecycle state, and the host endpoint each publish is
+// bound to at the CURRENT placement.
+//
+// `state` is a member of that response rather than a second request because of a
+// mechanical biconditional §6.1 spells out: `running` ⟺ what is installed in the
+// kernel IS this declaration; not `running` ⟹ nothing is installed. Neither write
+// point can make a `running` sandbox's record diverge from its live rule set —
+// editing the three egress fields on `running` is a 409, and publish makes
+// "record" and "rules" one un-halvable write. So there is no persistable difference
+// between "declared" and "in effect", and the read face has exactly one bit to
+// expose: whether a placement exists.
+//
+// The endpoints come from the PLACEMENT, not the record, because that is what they
+// are (§3.3): rebound every resume, invalidated with the old placement. A `paused`
+// sandbox has none, which is why §6.1 omits the key rather than reporting an empty
+// string — a falsy-but-present field invites reading it as "is this publish in
+// effect", and that judgment is doubly wrong (the rule set is installed whole and
+// atomically, so there is no per-publish install state to report).
 func (m *Mediator) Network(ctx context.Context, id model.SandboxID) (NetworkInfo, error) {
 	rec, err := m.deps.Store.GetSandbox(ctx, id)
 	if err != nil {
@@ -270,8 +264,7 @@ func (m *Mediator) AddPublish(ctx context.Context, id model.SandboxID, p model.N
 	// directly here skipped ValidateDeployment, so a record already carrying `via[]`
 	// (written under a deployment that DID supply a uid) accepted a publish under one
 	// that does not — committing a declaration whose §2.4 invariant this engine cannot
-	// deliver, which is the very thing the deployment class exists to refuse. Publish
-	// cannot introduce `via[]` itself, so nothing was live; the funnel is the point.
+	// deliver. Publish cannot introduce `via[]` itself, so nothing was live.
 	if err := m.ValidateDeclaration(next, true); err != nil {
 		return p, "", false, err
 	}
@@ -283,9 +276,8 @@ func (m *Mediator) AddPublish(ctx context.Context, id model.SandboxID, p model.N
 
 	live := m.liveState(id)
 	if rec.State != model.Running || live == nil || live.placement == nil {
-		// `paused`: recorded only. The rules appear at the next placement, which is
-		// not a gap in the invariant — a paused sandbox has NO placement, so its whole
-		// declaration (the egress fields included) has not one rule installed. A record
+		// `paused`: recorded only. Not a gap in the invariant — a paused sandbox has NO
+		// placement, so its whole declaration has not one rule installed, and a record
 		// describing MORE than what exists is the definition of `paused`; the reverse is
 		// what §2.4 refuses.
 		return p, "", false, nil
@@ -316,9 +308,8 @@ func (m *Mediator) AddPublish(ctx context.Context, id model.SandboxID, p model.N
 
 // rollbackPublish restores the pre-publish declaration after a failed install.
 //
-// Logged rather than silent on failure: if this fails the record describes an
-// inbound port whose rules are not installed, which is the fail-closed direction —
-// but an operator needs to know, because the next placement WILL install it.
+// Logged rather than silent on failure: the residue is the fail-closed direction (see
+// AddPublish), but an operator needs to know, because the next placement WILL install it.
 func (m *Mediator) rollbackPublish(ctx context.Context, id model.SandboxID, rec model.Sandbox, added bool) {
 	if !added {
 		return // idempotent no-op: nothing was written, nothing to undo

@@ -170,10 +170,8 @@ func TestTheNineHundredClasses(t *testing.T) {
 		},
 	}, {
 		// THE ENDPOINT SIDE OF CLASS 8, whose reason is its own rather than an analogy
-		// with `cidr`: `dnat` is family-typed and `Is4()` is false for the mapped form,
-		// so this renders `dnat ip6 to …` onto an IPv4 flow — the rule installs, matches
-		// nothing, and `via[]` is silently dead with NO counter moving. The containment
-		// checks survive the spelling (they unmap), which is what hid it.
+		// with `cidr` (see ParseEndpoint): the rule installs, matches nothing, and
+		// `via[]` is silently dead with NO counter moving.
 		//
 		// The CLASS is the assertion, not merely the refusal: reporting this as
 		// "endpoint not host-local" would send the caller to check whether the address
@@ -211,13 +209,9 @@ func TestTheNineHundredClasses(t *testing.T) {
 		},
 	}, {
 		// CLASS 9, third shape — and the one whose reason is the FLOOR rather than the
-		// request's shape. The allows are emitted on `input` too (semantics ③), where the
-		// floor carries no address list, so a destination-less accept above it reaches
-		// EVERY address of the host itself: §2.4's one unliftable item, lifted.
-		//
-		// It is invisible from the sibling side — the sibling drop sits above the allows
-		// and keeps holding — so every sibling-focused assertion passes while the
-		// host-itself item is gone. That is why it needs an assertion of its own.
+		// request's shape (see Validate's allow[] arm). It is invisible from the sibling
+		// side, so every sibling-focused assertion passes while the host-itself item is
+		// gone; hence an assertion of its own.
 		name:  "egress.allow names no cidr",
 		class: ClassMalformedShape,
 		run: func() error {
@@ -227,11 +221,9 @@ func TestTheNineHundredClasses(t *testing.T) {
 			}}, true, noHostLocal)
 		},
 	}, {
-		// CLASS 9, fourth shape. §5.D puts deduplication at the DECLARATION layer because
-		// the substrate will not do it: nft accepts two byte-identical DNATs and never
-		// matches the second. The provider refuses the pair at PLACEMENT, but by then the
-		// row is committed — so that refusal repeats at every resume and the sandbox never
-		// starts again.
+		// CLASS 9, fourth shape. Deduplication lives at the DECLARATION layer because the
+		// substrate will not do it (see AddPublish), and because the provider's refusal at
+		// PLACEMENT arrives after the row is committed — so it repeats at every resume.
 		name:  "publish[] repeats one {guest_port, proto}",
 		class: ClassMalformedShape,
 		run: func() error {
@@ -268,14 +260,8 @@ func TestTheNineHundredClasses(t *testing.T) {
 	}
 }
 
-// Class 8's ORDERING half: a v4-mapped literal must be refused
-// BEFORE any containment judgment.
-//
-// The position is the whole point (D5 ⑲): `netip.Prefix.Contains` does NOT unmap,
-// so a family-branching containment test judges `::ffff:169.254.169.254` to be v6,
-// compares it only against v6 members, and LETS IT THROUGH — after which the packet
-// leaves as IPv4 and dies on the v4 floor. Accepted by the API, silently refused on
-// the wire.
+// Class 8's ORDERING half: a v4-mapped literal must be refused BEFORE any containment
+// judgment (measured, D5 ⑲ — see ClassV4Mapped).
 //
 // Asserted by the CLASS, not merely by "it was rejected": if the containment test
 // ran first this would come back as ClassAllowInsideFloor (or as an accept), and
@@ -326,14 +312,10 @@ func TestClassSevenDoesNotOverReach(t *testing.T) {
 		}},
 		why: "whole containment, never intersection (D5 ㉑)",
 	}, {
-		// THE SAME CIDR inside `via[].match[]` is legal where it is fatal in
-		// `allow[]`, and the asymmetry is a MECHANISM fact: a steered flow is DNAT'd
-		// in prerouting, BEFORE the filter floor, so it lands in `input` and is taken
-		// by the narrow accept there (measured: 1–2 ms connect, real banner read
-		// back) — while the same address via `allow[]` is a dead rule. Extending
-		// class 7 here would kill `via[]`'s main use, handing an in-floor
-		// destination to a process outside the engine (a metadata proxy is exactly
-		// that).
+		// THE SAME CIDR inside `via[].match[]` is legal where it is fatal in `allow[]`,
+		// and the asymmetry is a MECHANISM fact (measured: 1–2 ms connect with the real
+		// banner read back, while the same address via `allow[]` is a dead rule — see
+		// Validate's via[] arm). Extending class 7 here would kill `via[]`'s main use.
 		name: "an in-floor CIDR inside via[].match[]",
 		d: Declaration{Egress: Egress{
 			Default: DenyAll,
@@ -383,8 +365,7 @@ func TestClassSevenDoesNotOverReach(t *testing.T) {
 	}, {
 		// THE WILDCARD DESTINATION IS LEGAL HERE and fatal on `allow[]` — the same
 		// mechanism asymmetry class 7 already has between the two fields. This is D3.3's
-		// declared transparent-interception form, and the steering rule still pins the
-		// flow by its post-NAT port and `iifname`; an allow has no other clauses at all.
+		// declared transparent-interception form.
 		name: "a cidr-less tuple inside via[].match[]",
 		d: Declaration{Egress: Egress{
 			Default: DenyAll,
@@ -422,10 +403,8 @@ func TestClassSevenDoesNotOverReach(t *testing.T) {
 //
 // This is the direction that was silently wrong before the class list grew a
 // well-formedness bucket: `{cidr, proto}` was accepted and rendered as "every port on
-// that CIDR" — which is the RIGHT semantic, but it existed only as the zero value's
-// side effect, with nothing in §5.D saying so and nothing here asserting it. Now it is
-// a declared semantic, so it gets the assertion a declared semantic gets, in both
-// directions (the refusal direction is `proto`, asserted in the class table above).
+// that CIDR" — the RIGHT semantic, but existing only as the zero value's side effect,
+// with nothing asserting it. The refusal direction is `proto`, in the class table above.
 func TestAnOmittedPortMeansAnyPortAtEverySite(t *testing.T) {
 	cases := []struct {
 		name string
@@ -478,16 +457,9 @@ func TestAnOmittedPortMeansAnyPortAtEverySite(t *testing.T) {
 	}
 }
 
-// The well-formedness class must be DISTINGUISHABLE from the proto class, and that is
-// the entire reason it exists as a class rather than as two more `invalid(...)` calls
-// under class 3.
-//
-// §6.2's cardinality criterion is the caller's REMEDY, not the implementation's error
-// count (six Volume sentinels, four classes). These remedies are different EDITS:
-// class 3 says "write `proto` in this tuple" — one field, and the error names it —
-// while class 9 says "this array has no entries" or "supply the target port". Reported
-// as `tuple-missing-proto`, an empty `match[]` sends the caller to inspect a `proto`
-// field that does not exist yet, because there is no tuple to hold one.
+// The well-formedness class must be DISTINGUISHABLE from the proto class, which is the
+// entire reason it exists as a class rather than as two more `invalid(...)` calls under
+// class 3 (§6.2's remedy criterion — see ClassMalformedShape).
 func TestMalformedShapeIsDistinguishableFromAMisspelledProto(t *testing.T) {
 	emptyMatch := Validate(Declaration{Egress: Egress{
 		Default: DenyAll,
@@ -566,13 +538,13 @@ func TestPublishAcceptsUDPWhileViaRefusesIt(t *testing.T) {
 	}
 }
 
-// Omitting `network` normalizes to an EXPLICIT {deny, [], [], []},
-// and "given but missing egress.default" is still a 400.
+// Omitting `network` normalizes to an EXPLICIT {deny, [], [], []}, and "given but
+// missing egress.default" is still a 400.
 //
 // BOTH DIRECTIONS, because the two share a code path and whichever is implemented
-// first eats the other: a normalizer that fills in `deny` for a missing field
-// turns class 1 into a silent accept, and a validator that requires the field
-// unconditionally makes the legal omission a 400.
+// first eats the other: a normalizer filling in `deny` turns class 1 into a silent
+// accept, and a validator requiring the field unconditionally makes the legal
+// omission a 400.
 func TestOmittedNetworkNormalizesToDenyAndEmpty(t *testing.T) {
 	z := Zero()
 	if z.Egress.Default != DenyAll {
@@ -625,12 +597,8 @@ func TestNormalizeIsIdempotentAndDoesNotAlias(t *testing.T) {
 }
 
 // The declaration-layer half of publish idempotence: repeated publish of the same
-// `{guest_port, proto}` is idempotent.
-//
-// DEDUPLICATION HAS TO LIVE HERE, because the substrate will not find it: nft
-// accepts two byte-identical DNAT rules and the second simply never matches
-// (measured, §5.D). And with two identical items recorded, a later PATCH removing
-// one leaves the other — "revoked, and the port is still open".
+// `{guest_port, proto}` is idempotent, because the substrate will not find the
+// duplicate for us (see AddPublish).
 func TestAddPublishIsIdempotentOnPortAndProto(t *testing.T) {
 	d := Zero()
 	d, added := AddPublish(d, Publish{GuestPort: 8080, Proto: model.NetTCP})
@@ -663,11 +631,8 @@ func TestAddPublishIsIdempotentOnPortAndProto(t *testing.T) {
 }
 
 // A `via[]` declaration is REFUSED when the deployment supplied no second-hop uid,
-// rather than installing a rule set with no second-hop enforcement.
-//
-// This refusal is NOT one of §6.2's declaration-text classes — it is a property of
-// the DEPLOYMENT, which is why §6.2 states it separately and why it keeps its own
-// sentinel (its remedy is an operator's). See ClassViaWithoutSecondHopUID.
+// rather than installing a rule set with no second-hop enforcement. Not one of §6.2's
+// declaration-text classes — see ClassViaWithoutSecondHopUID.
 func TestViaIsRefusedWhenTheDeploymentPinsNoSecondHop(t *testing.T) {
 	via := Declaration{Egress: Egress{
 		Default: DenyAll,
@@ -706,22 +671,16 @@ func TestViaIsRefusedWhenTheDeploymentPinsNoSecondHop(t *testing.T) {
 	}
 }
 
-// The same premise, at PLACEMENT. The write-point check above is only half of it,
-// because the two facts it compares have different lifetimes: the declaration is durable
-// (record = SoT, regenerated at every placement, §3.4) while the uid is a per-process
-// deployment input. "Restart without the flag" separates them with no write anywhere —
-// the write points are then correctly closed and the row admitted by the previous
-// deployment is still in the store.
+// The same premise, at PLACEMENT — the write-point check above is only half of it,
+// because the two facts it compares have different lifetimes (see ValidatePlacement).
 //
-// It cannot be delegated to Generate, and that is the mechanism rather than a layering
-// preference: the second-hop pin is not part of a sandbox's rule set at all (one
-// engine-level `output` table narrowed by uid covers the deployment), so the generated
-// rule set for a `via[]` declaration is identical whether or not the pin exists. Absence
-// of enforcement is invisible in the artifact — it can only be a precondition on placing.
+// It cannot be delegated to Generate: the generated rule set for a `via[]` declaration
+// is identical whether or not the pin exists, so absence of enforcement is invisible in
+// the artifact and can only be a precondition on placing.
 //
 // The verdict is its OWN sentinel rather than the ninth class's 400: a resume or an adopt
 // carries no declaration, so "the request is invalid" would be a false statement and
-// would send the caller to edit something they never sent. The remedy is an operator's.
+// would send the caller to edit something they never sent.
 func TestPlacementRefusesARecordedViaTheDeploymentCannotPin(t *testing.T) {
 	via := Declaration{Egress: Egress{
 		Default: DenyAll,
@@ -779,16 +738,8 @@ func TestPlacementRefusesARecordedViaTheDeploymentCannotPin(t *testing.T) {
 }
 
 // A second-hop uid EQUAL TO THE ENGINE'S OWN euid is refused, and this is the
-// assertion that did not exist while the defect did.
-//
-// The mechanism, in full, because "reject uid 0" looks like fastidiousness until it is
-// spelled out: the second-hop floor arm is a `meta skuid <uid>` drop whose daddr set
-// contains ruleset.SandboxCIDR (FloorV4's sibling item), and the engine's own transport
-// endpoint is a GUEST veth address inside that /16 dialed from the host. Under a uid
-// equal to the engine's, every engine→guest dial matches that arm. The
-// `established,related` return arm cannot rescue it BY DESIGN — the dial is `ct state
-// new`, exactly what the arm excludes so that a new connection to an in-floor address
-// still meets the floor (§2.4 invariant 2).
+// assertion that did not exist while the defect did. "Reject uid 0" looks like
+// fastidiousness until the mechanism is spelled out, which ValidateSecondHopUID does.
 //
 // Two things make it the worst shape of failure rather than merely a broken one, and
 // both are why this refuses at ASSEMBLY rather than at a write point:

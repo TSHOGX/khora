@@ -26,18 +26,8 @@ func (p tokenPair) String() string {
 // toolchain: an identical token stream, and no change to a comment the toolchain
 // itself acts on.
 //
-// The token stream is the right equivalence because it is exactly what the
-// compiler's front end consumes — go/scanner discards comments and whitespace, so
-// two files with the same token sequence differ only in what the compiler already
-// throws away. That is both stronger and more honest than "comment-only", a
-// property that cannot be stated precisely: a trailing comment shares its line
-// with code, a block comment spans lines, and a string literal may contain "//".
-//
-// Directives are why this is not merely a token comparison. //go:build,
-// //go:embed, //go:generate, //line and the cgo forms are comments the scanner
-// discards and the toolchain still obeys — //go:build decides whether the file
-// compiles at all, //go:embed decides what lands in the binary. A change to one of
-// those is a build change wearing a comment's clothes, so it disqualifies.
+// Why a token stream rather than "comment-only", and why directives are the
+// exception that keeps it honest: ADR-0005 (Rationale).
 //
 // Every failure path returns false: the caller's question is "may the substrate
 // gate be skipped", and the safe answer whenever this cannot be proven is no.
@@ -59,10 +49,10 @@ func sameCode(path string, oldSrc, newSrc []byte) (bool, string) {
 				i+1, oldTok[i], newTok[i])
 		}
 	}
-	// A cgo file's preamble comment is compiled as C source, so no comment in it
-	// can be assumed inert. Detected from the token stream (a "C" string literal)
-	// rather than by grepping the text, and deliberately over-broad: a stray "C"
-	// literal costs one gate run, a missed cgo preamble costs the property.
+	// A cgo file's preamble comment is compiled as C source, so no comment in it can be
+	// assumed inert. Detected from the token stream rather than by grepping the text, and
+	// deliberately over-broad: a stray "C" literal costs one gate run, a missed cgo
+	// preamble costs the property (ADR-0005).
 	if hasCImport(oldTok) || hasCImport(newTok) {
 		return false, `a "C" literal is present: in a cgo file the preamble comment is source`
 	}
@@ -100,18 +90,16 @@ func tokens(path string, src []byte) ([]tokenPair, error) {
 }
 
 // directives returns, IN SOURCE ORDER, the comment lines the toolchain acts on.
-// Detection is liberal on purpose (leading spaces, tabs and block-comment '*'
-// are trimmed first): over-detecting costs one gate run, under-detecting silently
-// licenses a build change.
+// Detection is liberal on purpose — leading spaces, tabs and block-comment '*' are
+// trimmed first (ADR-0005, fail-closed).
 //
 // The ORDER is part of the comparison, and this is the one place where discarding
-// position information would go too far. Unlike a token stream — where positions are
-// exactly what a comment growing above should be free to shift — a directive binds to
-// whatever DECLARATION follows it. So permuting two `//go:embed` lines among their vars
-// leaves the token stream identical AND the set of directives identical while changing
-// which file each var holds: measured on a scratch module, swapping two embeds took the
-// program from printing "AAA BBB" to "BBB AAA" while a sorted-set comparison still
-// reported no change. Sorting here would license exactly that.
+// position information would go too far: a directive binds to whatever DECLARATION
+// follows it. Permuting two `//go:embed` lines among their vars leaves the token stream
+// identical AND the set of directives identical while changing which file each var
+// holds — measured on a scratch module, swapping two embeds took the program from
+// printing "AAA BBB" to "BBB AAA" while a sorted-set comparison still reported no
+// change. Sorting here would license exactly that.
 func directives(path string, src []byte) []string {
 	var fset token.FileSet
 	f := fset.AddFile(path, fset.Base(), len(src))

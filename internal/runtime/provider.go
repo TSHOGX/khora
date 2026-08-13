@@ -256,10 +256,9 @@ type Provider interface {
 	//     collapse this case into alive=false.
 	//
 	// The DEATH CAUSE rides the alive=false return because the signal is placement-local and
-	// VOLATILE (§4.3 / reaper-health D4c): for local_runsc it is the memcg leaf's
-	// oom_group_kill, destroyed by the `runsc delete` inside teardown, so "unit dead,
-	// placement still intact" is the LAST moment it is readable — a provider that tears down
-	// first has destroyed the evidence. Undeterminable → CauseUnknown, never a guess (§2.4).
+	// VOLATILE (§4.3 / reaper-health D4c): "unit dead, placement still intact" is the LAST
+	// moment it is readable, so a provider that tears down first has destroyed the evidence.
+	// Undeterminable → CauseUnknown, never a guess (§2.4).
 	//
 	// Addressing by SandboxID is why placement-local resources carry a SandboxID label: the
 	// §3.3 reverse, allowed by §4.4-A.
@@ -271,10 +270,10 @@ type Provider interface {
 	// authoritative store and passes it in, never the reverse (§4 subsystems don't call each
 	// other). Persistent state (Overlay upper) is never touched — not a placement resource.
 	//
-	// THE KEEP SET ARRIVES COMPLETE, load-bearing rather than a calling convention
-	// (network.md D5 ㉒): reclaiming a live sandbox's rule set and re-installing it during
-	// Adopt is the delete-then-install sequence measured to kill every live flow across the
-	// gap. This shape makes that sequence inexpressible.
+	// THE KEEP SET ARRIVES COMPLETE, load-bearing rather than a calling convention:
+	// reclaiming a live sandbox's rule set and re-installing it during Adopt is the
+	// delete-then-install sequence ReinstallRuleSet below is forbidden from using, and this
+	// shape makes it inexpressible.
 	ReclaimOrphans(ctx context.Context, keep []string) error
 
 	// ReinstallRuleSet re-installs a SURVIVING sandbox's §5.D rule set after a control-plane

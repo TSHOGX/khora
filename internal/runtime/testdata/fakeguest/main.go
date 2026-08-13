@@ -21,8 +21,7 @@ func main() {
 		fmt.Fprintln(w, "OK")
 	})
 	// The port comes from the shared leaf, so this fake cannot drift from the real
-	// daemon. internal/guestport has no imports of its own, which is what keeps
-	// this throwaway dependency-free (see the package doc).
+	// daemon (and guestport imports nothing, keeping this throwaway dependency-free).
 	ln, err := net.Listen("tcp", net.JoinHostPort("0.0.0.0", strconv.Itoa(guestport.Port)))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "fakeguest: listen: %v\n", err)

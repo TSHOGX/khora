@@ -33,37 +33,28 @@ type processProxy struct{ e *Engine }
 // fsProxy re-proxies FsService to the sandbox's sandboxd (D5).
 type fsProxy struct{ e *Engine }
 
-// proxyErr sanitizes an inner transport-client error before it crosses to the
-// external client. The inner client dials the netns veth IP (client.go), so a
-// raw dial/transport error carries that IP:port — returning it verbatim would
-// leak placement to the engine's edge (§6.2 / D5.1: placement never exposed).
-// The real cause is logged engine-side (so it stays debuggable) but never crosses
-// to the wire.
+// proxyErr sanitizes an inner transport-client error before it crosses to the external
+// client. The inner client dials the netns veth IP (client.go), so a raw dial/transport
+// error carries that IP:port — returning it verbatim would leak placement (§6.2 / D5.1).
+// The real cause is logged engine-side but never crosses to the wire.
 //
-// The leak is in the MESSAGE, never in the CODE: a Connect code is one of a fixed
-// enum of ~16 values, so it cannot carry an address, a host path, or any other
-// placement fact. That splits the sanitization in two:
+// The leak is in the MESSAGE, never in the CODE: a Connect code is one of a fixed enum of
+// ~16 values, so it cannot carry an address or a host path. That splits the sanitization:
 //
-//   - The inner error IS a *connect.Error — sandboxd itself classified the failure
-//     and chose the code. Pass that code through with a message composed HERE from
-//     nothing but the code's own name; none of the inner text crosses. A fresh
-//     connect.NewError is built rather than the inner error forwarded, so its
-//     details/metadata do not ride along either.
-//   - The inner error is NOT a connect error — a raw dial/network failure, i.e.
-//     exactly the case that genuinely IS a transient transport outage. CodeUnavailable
-//     with a fixed message, which is also the honest answer for an error of unknown
-//     provenance: the engine cannot classify it, so it claims nothing.
+//   - The inner error IS a *connect.Error — sandboxd itself classified the failure and chose
+//     the code. Pass that code through with a message composed HERE from nothing but the
+//     code's own name. A fresh connect.NewError is built rather than the inner error
+//     forwarded, so its details/metadata do not ride along either.
+//   - NOT a connect error — a raw dial/network failure, the case that genuinely IS a
+//     transient outage. CodeUnavailable with a fixed message, also the honest answer for an
+//     error of unknown provenance.
 //
-// THE CODE IS PASSED THROUGH RATHER THAN COLLAPSED to CodeUnavailable, which means "transient,
-// retry me": collapsing turns a malformed argument or a missing path into an invitation to retry
-// forever and makes four distinct conditions indistinguishable. It also makes the RPC half agree
-// with the REST half, which already reports the guest's classification (files.go bypassCode).
-//
-// This path also carries mid-stream terminations: an overflow disconnect (D4.3 invariant 1)
-// reaches forwardEvents as a ProcessEvent{Kind:"error"} and ends the outer stream here, so the
-// client learns the stream died rather than seeing it close as if the process finished. It needs
-// the code preserved most — the guest reports an overflow as resource_exhausted precisely so a
-// consumer can tell it from a clean end.
+// THE CODE IS PASSED THROUGH RATHER THAN COLLAPSED to CodeUnavailable ("transient, retry
+// me"): collapsing turns a malformed argument or a missing path into an invitation to retry
+// forever. It also makes the RPC half agree with the REST half, which already reports the
+// guest's classification (files.go bypassCode). Mid-stream terminations need it most — the
+// guest reports an overflow as resource_exhausted precisely so a consumer can tell it from a
+// clean end (see forwardEvents).
 func proxyErr(err error) error {
 	log.Printf("dataplane: transport proxy error (code passed through, message sanitized): %v", err)
 	var ce *connect.Error
@@ -192,14 +183,11 @@ func (p *processProxy) SendInput(ctx context.Context, req *connect.Request[v1.Se
 	return connect.NewResponse(&v1.SendInputResponse{}), nil
 }
 
-// signalPidErr mirrors the guest's message verbatim (cmd/sandboxd/transport.go)
-// so a caller gets the same explanation whichever end refuses. It is duplicated
-// rather than shared through a leaf package deliberately: what the two ends must
-// agree on is the RULE, and the rule is one comparison. A leaf existing only to
-// hold an error string would couple the guest binary to the host tree for
-// prose — and guestport's bar is a fact neither side can derive alone (the port,
-// the upload prefix), which this is not. A test pins the copies together instead
-// (dataplane_signal_test.go).
+// signalPidErr mirrors the guest's message verbatim (cmd/sandboxd/transport.go) so a caller
+// gets the same explanation whichever end refuses. DUPLICATED rather than shared through a
+// leaf: what the two ends must agree on is the RULE, and the rule is one comparison — where
+// guestport's bar is a fact neither side can derive alone (the port, the upload prefix). A
+// test pins the copies together instead (dataplane_signal_test.go).
 const signalPidErr = "pid must be > 0: SendSignal carries DIRECTED signals only " +
 	"(one process, defaulting to its group). pid <= 0 is POSIX fan-out — " +
 	"kill(0)/kill(-1) address a whole group or the whole pid namespace — and " +
@@ -294,10 +282,9 @@ func (f *fsProxy) Write(ctx context.Context, req *connect.Request[v1.WriteReques
 	return connect.NewResponse(&v1.WriteResponse{BytesWritten: int64(len(req.Msg.Data))}), nil
 }
 
-// entryToWire re-encodes a domain EntryInfo for the outer edge. The outer wire is
-// the SAME proto as the inner one (D5.2 one-wire), so this is a straight
-// projection — it exists only because the proxy speaks the domain Client
-// interface in between, never because the two edges differ.
+// entryToWire re-encodes a domain EntryInfo for the outer edge. A straight projection: the
+// outer wire is the SAME proto as the inner one (D5.2 one-wire), and this exists only
+// because the proxy speaks the domain Client interface in between.
 func entryToWire(e transport.EntryInfo) *v1.EntryInfo {
 	out := &v1.EntryInfo{
 		Name:          e.Name,
@@ -404,11 +391,9 @@ func forwardEvents(stream *connect.ServerStream[v1.ProcessEvent], ch <-chan tran
 		case "keepalive":
 			pe.Kind = &v1.ProcessEvent_Keepalive{Keepalive: &v1.KeepaliveEvent{}}
 		case "error":
-			// The inner stream ended WITHOUT an end frame — typically the D4.3
-			// invariant-1 overflow disconnect. Terminate the outer stream with the
-			// same error rather than closing it cleanly: a clean close would tell the
-			// external client "the process finished", which is exactly wrong, and it
-			// would undo the distinction the guest went to the trouble of reporting.
+			// The inner stream ended WITHOUT an end frame — typically the D4.3 invariant-1
+			// overflow disconnect. Terminate the outer stream with the same error rather than
+			// closing it cleanly, which would tell the external client "the process finished".
 			return proxyErr(ev.Err)
 		default:
 			continue

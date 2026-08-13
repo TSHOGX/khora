@@ -43,12 +43,9 @@ const (
 	// (the §3.4 RAM safety limit, whole-group termination).
 	//
 	// PARALLEL to HealthDeadRecoverable, not a subtype of it (§4.3): both have L1
-	// dead and intact persistent state, and they are INDISTINGUISHABLE by
-	// observation — only the death cause separates them — yet their dispositions
-	// are OPPOSITE. dead-recoverable must resume; this must NOT, because resuming
-	// re-runs the same workload into the same cap, which is a crash loop. It is
-	// still crash-paused (the state is `paused` either way); what differs is that
-	// the recorded cause then blocks resume.
+	// dead and intact persistent state, INDISTINGUISHABLE by observation — only the
+	// death cause separates them — yet the dispositions are OPPOSITE. This one must
+	// NOT resume, because resuming re-runs the same workload into the same cap.
 	HealthResourceTerminated
 )
 
@@ -91,11 +88,10 @@ const classifyProbeTimeout = 2 * time.Second
 // NEVER be misclassified as idle from a stale last-known activity (D2): no
 // trustworthy idle reading exists without a successful probe.
 // It returns the death cause ALONGSIDE the health state, and that pairing is
-// structural rather than convenient (§4.3 / reaper-health D4c). The classifier is
-// read-only: it discards the placement handle Adopt rebuilt. But the death signal
-// lives IN that placement and dies with it, so a cause read here and not returned
-// is a cause thrown away — and the disposition cannot re-read it, because by then
-// teardown may have destroyed the evidence. Hence the cause travels out with the
+// structural rather than convenient (§4.3 / reaper-health D4c): the death signal lives
+// IN the placement handle this read-only classifier discards, so a cause read here and
+// not returned is a cause thrown away — and the disposition cannot re-read it, because
+// by then teardown may have destroyed the evidence. So it travels out with the
 // classification, to be committed by the disposition in the same CAS.
 //
 // The returned cause is meaningful ONLY for the two dead health states; it is
@@ -151,12 +147,10 @@ func (m *Mediator) classify(ctx context.Context, rec model.Sandbox) (Health, run
 	default:
 		// Dead of something else, or undeterminable. CauseUnknown lands here too, and
 		// that is the deliberate §4.3 fallback: treat it as dead-recoverable, which a
-		// caller may then resume. The self-correction is STRUCTURAL, not counted — if
-		// it really was the cap, the same workload re-triggers termination after that
-		// resume, this time under the control plane's eye, and THAT observation records
-		// the real cause, which then refuses further resumes. No resume-attempt bound
-		// exists or is needed: the engine never resumes a dead-recoverable sandbox
-		// itself, so the retry is the caller's explicit choice (§4.3).
+		// caller may then resume. No resume-attempt bound exists or is needed — the
+		// self-correction is STRUCTURAL rather than counted, and the engine never
+		// resumes a dead-recoverable sandbox itself (§4.3 / reaper-health D4c, which
+		// also states the one residual where convergence is not guaranteed).
 		return HealthDeadRecoverable, cause
 	}
 }

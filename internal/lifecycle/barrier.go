@@ -28,9 +28,8 @@ import (
 // What it is NOT: a correctness premise. §4.4 puts the quiesce on the
 // "optimization" side, so every path must still reach a legal `paused`. Hence the
 // timeout PROCEEDS with the preemptive freeze rather than failing the pause — a
-// stuck RPC must not make a sandbox un-pausable. (A reference implementation
-// aborts its pause on timeout instead; that trade is wrong here, because our
-// timeout path lands exactly where a crash lands, which §4.2 already accepts.)
+// stuck RPC must not make a sandbox un-pausable, and that path lands exactly where
+// a crash lands, which §4.2 already accepts.
 
 // barrier tracks in-flight engine-issued mutating operations per sandbox and lets
 // a pause wait for them to drain.
@@ -44,11 +43,6 @@ import (
 //     empties, not just its own op);
 //   - a draining entry disappears at undrain, which every pause registers with
 //     defer BEFORE its CAS so a failed pause reclaims it too (§4.2 / D4.4).
-//
-// Emptiness is therefore the steady state: between operations a quiet sandbox has
-// no entry in either map, and the transition lock's refcount (§4.4-B) has no
-// analogue to port here — the count that matters IS the in-flight set, and it is
-// already exact.
 //
 // What keeps that true is a discipline at the call sites rather than anything the
 // type can enforce: enter hands back a release closure, and losing it strands an
@@ -197,14 +191,12 @@ func (m *Mediator) Enter(id model.SandboxID, op string) (func(), bool) {
 // failure: it logs the stragglers and lets the caller proceed preemptively, which
 // lands exactly where a crash lands (§4.2) — never leaving a sandbox un-pausable.
 //
-// On reaper sweep latency: this runs while the caller holds the sandbox's
-// transition lock, and the reaper sweeps sequentially, so a drain that waits its
-// full grace delays the rest of that sweep. It is bounded and rare rather than
-// structural — an auto-pause fires only for a sandbox the activity clock calls
-// IDLE, and idle means no in-flight I/O, so drain returns immediately with nothing
-// to wait for. Paying the grace requires a write that starts in the window between
-// the classifier's verdict and the freeze. If that ever shows up as sweep latency,
-// the fix is to drain outside the lock, not to shorten the grace.
+// On reaper sweep latency: this runs under the sandbox's transition lock and the
+// reaper sweeps sequentially, so a full-grace drain delays the rest of that sweep. It
+// is bounded and rare — an auto-pause fires only for a sandbox the activity clock calls
+// IDLE, so drain normally returns with nothing to wait for; paying the grace requires a
+// write starting between the classifier's verdict and the freeze. If it ever shows up as
+// sweep latency, the fix is to drain outside the lock, not to shorten the grace.
 func (m *Mediator) drainForPause(id model.SandboxID) {
 	grace := m.deps.DrainGrace
 	if grace <= 0 {

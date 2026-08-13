@@ -18,24 +18,17 @@ import (
 //
 // WHY THIS AND NOT chroot / A MOUNT NAMESPACE (volume.md D5.1). RESOLVE_IN_ROOT
 // gives path semantics IDENTICAL to chroot's, with no privilege, no mount
-// namespace, and no thread pinning. Measured on this substrate's 6.x kernel, all
-// four of the properties that matter:
-//
-//   - ".." at the root CLAMPS (it resolves to the root itself, it is not an error)
-//   - an ABSOLUTE path is REINTERPRETED against that root
-//   - a symlink pointing outside the root (relative or absolute) resolves BACK
-//     INSIDE it
-//   - a symlink loop reports ELOOP
-//
-// Verified on the write side too: creating and writing through a "../../../d/f"
-// shaped path lands the bytes inside the volume, and a write through a symlink
-// aimed at a host file does NOT touch that host file.
+// namespace, and no thread pinning. Four properties measured on this substrate's
+// 6.x kernel, read and write side both, and the code below depends on all four:
+// ".." at the root CLAMPS (it resolves to the root itself, it is not an error) · an
+// ABSOLUTE path is REINTERPRETED against that root · a symlink pointing outside the
+// root (relative or absolute) resolves BACK INSIDE it · a symlink loop reports ELOOP.
 //
 // The cost comparison is why we do not copy a reference implementation's shape:
-// openat2(RESOLVE_IN_ROOT) measured 0.52 µs/op against 178 µs/op for the
-// "one fresh mount namespace + bind + pivot_root PER REQUEST" that implementation
-// pays for the same guarantee — 342×, and that one also needs root and an
-// OS-thread ownership protocol. Copy the capability, not the mechanism.
+// measured, openat2(RESOLVE_IN_ROOT) is ~342× cheaper (sub-µs vs ~178 µs/op) than the
+// "one fresh mount namespace + bind + pivot_root PER REQUEST" that implementation pays
+// for the same guarantee, which also needs root and an OS-thread ownership protocol.
+// Copy the capability, not the mechanism.
 //
 // FAILURE OF THIS BOUNDARY IS SILENT: a write through an escaping path SUCCEEDS
 // and lands outside. That is why root confinement has its own unit test (a pure
@@ -52,13 +45,11 @@ type localRoot struct {
 
 // NewLocalRoot opens a root-confined accessor for a host directory.
 //
-// EXPORTED BUT NOT A SEAM MEMBER, and the distinction is the point: it is an
-// intra-subsystem helper so that BOTH arms in this package (the local storage arm
-// and the test-only plain-directory arm) share ONE accessor implementation instead
-// of two copies that can drift. Nothing above §5.C calls it — above the seam a
-// volume is an ID, and Backend.OpenRoot is the only way to reach its bytes
-// (§3.1.1 / §6.2). A remote arm would implement Root over its own transport
-// instead; the interface is paths and bytes, not host primitives.
+// EXPORTED BUT NOT A SEAM MEMBER: an intra-subsystem helper, so BOTH arms in this
+// package share ONE accessor implementation rather than two copies that can drift.
+// Nothing above §5.C calls it — above the seam a volume is an ID and Backend.OpenRoot
+// is the only way to reach its bytes (§3.1.1 / §6.2). A remote arm would implement
+// Root over its own transport; the interface is paths and bytes, not host primitives.
 func NewLocalRoot(volumeID, dir string) (Root, error) {
 	// O_PATH: we only ever use this fd as a resolution anchor, never to read or
 	// write through directly, so we ask for no access at all.

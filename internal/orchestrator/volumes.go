@@ -48,17 +48,14 @@ type volumeResp struct {
 	// counts.
 	Size    int64  `json:"size"`
 	Backend string `json:"backend,omitempty"`
-	// UsedByte is the backend's own statement of consumed bytes. Omitted when it
-	// could not be read, rather than reported as 0 — a zero would read as "empty",
-	// and the caller uses this number to choose a new cap that must be strictly
-	// above it.
+	// UsedByte is the backend's own statement of consumed bytes. Omitted when it could not
+	// be read, rather than reported as 0 — a zero would read as "empty", and the caller
+	// uses this number to choose a new cap that must be strictly above it.
 	//
-	// A POINTER, and that is what makes the sentence above TRUE rather than merely
-	// intended: with `int64` plus omitempty, a genuine 0 also serializes as absent,
-	// so "empty" and "unreadable" become one answer — the collision this key's whole
-	// rationale exists to prevent. Not hypothetical: the plain-directory arm reports
-	// exactly 0 for a fresh volume, and on the §6.1 SANDBOX side a fresh uncapped
-	// upper+work walk is 0 in the common case.
+	// A POINTER, which is what makes that TRUE rather than merely intended: with `int64`
+	// plus omitempty a genuine 0 also serializes as absent, collapsing "empty" and
+	// "unreadable" into one answer. Not hypothetical — the plain-directory arm reports
+	// exactly 0 for a fresh volume.
 	UsedByte *int64 `json:"used_byte,omitempty"`
 }
 
@@ -103,9 +100,8 @@ func (e *Engine) handleListVolumes(w http.ResponseWriter, r *http.Request) {
 		statusFor(w, err)
 		return
 	}
-	// List reports the RECORD only, with no per-volume usage read: usage costs one
-	// backend round trip each, and a list is the one place where that multiplies by
-	// the number of volumes. A caller who needs usage inspects the volume.
+	// The RECORD only, no per-volume usage read: usage costs one backend round trip each,
+	// multiplied here by the volume count. A caller who needs it inspects the volume.
 	out := make([]volumeResp, 0, len(list))
 	for _, v := range list {
 		out = append(out, volumeResp{VolumeID: string(v.ID), Size: v.CapByte, Backend: v.Backend})
@@ -142,9 +138,9 @@ func (e *Engine) handleVolumeSub(w http.ResponseWriter, r *http.Request) {
 	case sub == "export" && r.Method == http.MethodGet:
 		e.handleExportVolume(w, r, id)
 	// §6.2's general rule, mirroring handleSandboxSub: a wrong method on a route that
-	// EXISTS is 405. It has to enumerate the known subs rather than blanket the default
-	// arm, because the two verdicts stay distinguishable — an unrecognized sub-path is
-	// still 404 below, and answering it 405 would assert a route the engine does not have.
+	// EXISTS is 405. It enumerates the known subs rather than blanketing the default arm —
+	// an unrecognized sub-path is still 404 below, and answering it 405 would assert a
+	// route the engine does not have.
 	case sub == "", sub == "snapshot", sub == "clone", sub == "import", sub == "export":
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	default:
@@ -176,11 +172,11 @@ type volumePatchReq struct {
 // handlePatchVolume is PATCH /v1/volumes/{id} {size} — the cap's only write point
 // besides create (§6.1).
 //
-// It works whether or not anything has the volume mounted, which is the exact
-// OPPOSITE of a sandbox cap (editable only while `paused`), so there is deliberately
-// no "pause it first" 409 here. The reason is mechanical: a sandbox cap
-// re-materializes at the next placement, while a volume has no placement of its own
-// — "defer to the next placement" would mean never for an unmounted volume (§5.C).
+// It works whether or not anything has the volume mounted — the exact OPPOSITE of a
+// sandbox cap (editable only while `paused`), so no "pause it first" 409 here. The reason
+// is mechanical: a sandbox cap re-materializes at the next placement, while a volume has
+// no placement of its own, so "defer to the next placement" would mean never for an
+// unmounted volume (§5.C).
 //
 // A raise re-clears admission and may be 507; lowering below current usage is 400
 // (strict inequality — see lifecycle.ErrVolumeCapBelowUsage for why the engine
@@ -262,15 +258,13 @@ type importResp struct {
 
 // handleImportVolume is POST /v1/volumes/{id}/import?path= (§6.1 direct write).
 //
-// The body STREAMS to the backend through a fixed buffer — it is never buffered
-// whole. That is the same reason the sandbox large-file route is REST rather than
-// RPC (§6.1): a file must not become one message, nor sit in memory at either end.
+// The body STREAMS to the backend through a fixed buffer, never buffered whole — the same
+// reason the sandbox large-file route is REST rather than RPC (§6.1).
 //
-// `path` is relative to the VOLUME ROOT and out-of-root targets are unreachable —
-// the accessor is root-confined by construction (§5.C / volume.md D5.1), so a
-// traversal clamps inside the volume rather than being rejected by a check here.
-// Validating the string would be the weaker design: it would have to be right, where
-// the accessor cannot be wrong.
+// `path` is relative to the VOLUME ROOT and out-of-root targets are unreachable — the
+// accessor is root-confined by construction (§5.C / volume.md D5.1), so a traversal clamps
+// inside the volume rather than being rejected by a check here. Validating the string would
+// have to be right, where the accessor cannot be wrong.
 func (e *Engine) handleImportVolume(w http.ResponseWriter, r *http.Request, id model.VolumeID) {
 	path := r.URL.Query().Get("path")
 	if path == "" {
@@ -279,11 +273,9 @@ func (e *Engine) handleImportVolume(w http.ResponseWriter, r *http.Request, id m
 	}
 	n, err := e.Mediator.ImportVolume(r.Context(), id, path, r.Body)
 	if err != nil {
-		// `path` is echoed: it is the caller's OWN parameter, so handing it back tells
-		// them nothing about the host. Everything else path-shaped in the error was
-		// authored below the API and is redacted (see sanitizeErr). Note the accessor is
-		// root-confined, so the string the mediator reports here can differ from what
-		// was sent — a traversal clamps — and only the exact token given is echoed.
+		// `path` is echoed: it is the caller's OWN parameter (see sanitizeErr). Only the
+		// exact token given — the accessor is root-confined, so a clamped traversal makes the
+		// mediator's reported string differ from what was sent.
 		statusFor(w, err, path)
 		return
 	}
@@ -298,10 +290,9 @@ func (e *Engine) handleExportVolume(w http.ResponseWriter, r *http.Request, id m
 		http.Error(w, "path is required (relative to the volume root)", http.StatusBadRequest)
 		return
 	}
-	// The status line has to be committed before the first byte, so a mid-stream
-	// failure cannot become a 4xx/5xx — it can only truncate the response. Content-Type
-	// is set accordingly, and the error is logged rather than written into the body,
-	// where it would be indistinguishable from volume content.
+	// The status line is committed before the first byte, so a mid-stream failure cannot
+	// become a 4xx/5xx — only a truncation. The error is logged rather than written into
+	// the body, where it would be indistinguishable from volume content.
 	w.Header().Set("Content-Type", "application/octet-stream")
 	n, err := e.Mediator.ExportVolume(r.Context(), id, path, w)
 	if err != nil && n == 0 {
@@ -311,9 +302,7 @@ func (e *Engine) handleExportVolume(w http.ResponseWriter, r *http.Request, id m
 		return
 	}
 	if err != nil {
-		// Truncated. The response is already 200 with partial bytes, so the only honest
-		// signal left is the log — inventing a trailer the caller does not read, or
-		// appending an error message into the byte stream, would be worse.
+		// Truncated. Already 200 with partial bytes, so the log is the only honest signal left.
 		log.Printf("volumes: export %s from %s truncated after %d bytes: %v", path, id, n, err)
 	}
 }
@@ -321,12 +310,10 @@ func (e *Engine) handleExportVolume(w http.ResponseWriter, r *http.Request, id m
 // volumeStatus maps the §5.C / §6.2 Volume verdicts onto status codes. Called from
 // statusFor so the mapping lives beside the endpoints that produce it.
 //
-// ALL FOUR STORE VERDICTS ARE MAPPED HERE EXPLICITLY, and they must not be folded
-// into a shared "in use" arm: §6.2 requires them to stay distinguishable, and the
-// whole reason each has its own sentinel is that a 409 naming the wrong object sends
-// the caller to look at something unrelated. Before these arms existed, every one of
-// them reached statusFor's default and became a 500 — which is exactly the defect the
-// mounts.sandbox translation point was added to fix, reappearing one layer up.
+// ALL FOUR STORE VERDICTS ARE MAPPED EXPLICITLY and must not be folded into a shared "in
+// use" arm: §6.2 requires them to stay distinguishable, because a 409 naming the wrong
+// object sends the caller to look at something unrelated. Before these arms existed, every
+// one of them reached statusFor's default and became a 500.
 func volumeStatus(err error) (int, bool) {
 	switch {
 	case errors.Is(err, store.ErrVolumeHasDescendants):
@@ -366,12 +353,10 @@ func volumeStatus(err error) (int, bool) {
 		// documented remedy (and a `paused` sandbox is deliberately NOT a live writer).
 		return http.StatusConflict, true
 	case errors.Is(err, lifecycle.ErrVolumeDirectWriteInFlight):
-		// The SAME §6.2 category as ErrVolumeLiveWriter, refused from the other side: a
-		// cold start would mount read-write a volume with a direct write in flight
-		// (§5.C's symmetric write regime). 409 for the same reason — it is retryable,
-		// and the remedy is waiting for that import to finish. Without this arm the
-		// refusal reaches the default arm as a 500, reporting a correctly-refused verb
-		// as an engine fault.
+		// The SAME §6.2 category as ErrVolumeLiveWriter, refused from the other side: a cold
+		// start would mount read-write a volume with a direct write in flight (§5.C's
+		// symmetric write regime). 409 for the same reason — retryable, the remedy being to
+		// wait for that import to finish.
 		return http.StatusConflict, true
 	case errors.Is(err, lifecycle.ErrVolumeCapUnsupported):
 		// 400: the backend genuinely cannot enforce a cap (§6.2 capability query).

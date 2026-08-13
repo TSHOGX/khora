@@ -133,13 +133,9 @@ func TestCreateVolumeChecksCapabilityBeforeMovingBytes(t *testing.T) {
 // TestVolumeCapWritePointRefusesLoweringBelowUsage pins the cap write point at the unit
 // level: the criterion is a STRICT inequality, and `== usage` is refused too.
 //
-// The reason for refusing what the substrate would accept is that accepting creates a
-// state the control plane cannot leave (volume.md D7.3, measured): below-usage caps
-// wedge the unit permanently — afterwards even truncate-to-zero and the quota write
-// ITSELF return ENOSPC, so the cap can neither be removed nor raised. And
-// `cap == usage` is stored happily but the next write fails, so it means FULL rather
-// than "exactly enough" — a `>=` check would return 200 for a volume that can never
-// take another byte.
+// It refuses what the substrate would happily accept, because accepting manufactures a
+// state the control plane cannot leave. The measured wedge, and why `== usage` means FULL
+// rather than "exactly enough": ErrVolumeCapBelowUsage.
 func TestVolumeCapWritePointRefusesLoweringBelowUsage(t *testing.T) {
 	ctx := context.Background()
 	m, st, vb := volFixture(t)
@@ -244,9 +240,8 @@ func TestVolumeCapEditableWhileNothingIsMounted(t *testing.T) {
 // term, so volumes cannot oversubscribe the node, and a metered disk axis REQUIRES a
 // volume cap.
 //
-// The failure this guards is immediate oversell (§3.4): an uncapped volume
-// contributes 0 to the left side while free to consume all of the right, which does
-// not undercount so much as make the inequality describe a different device.
+// The failure this guards is immediate oversell — an uncapped unit contributing 0 to the
+// left side while free to consume all of the right (§3.4.3).
 func TestAdmissionCountsVolumeCaps(t *testing.T) {
 	ctx := context.Background()
 
@@ -268,15 +263,8 @@ func TestAdmissionCountsVolumeCaps(t *testing.T) {
 	})
 
 	// PATCH is the same promise written at a different time, so it must refuse the same
-	// thing create does. Accepting size=0 here manufactured exactly the volume the
-	// subtest above refuses: create the volume capped (admitted, counted in the budget),
-	// then PATCH it to 0 and it contributes nothing while free to consume everything.
-	// It was also the only route by which the btrfs arm's §3.4 second term can become
-	// non-zero on a metered node.
-	//
-	// The old comment at that branch said "removing the cap is always safe", which was
-	// true of the WEDGE and false of the BUDGET — two different invariants sharing one
-	// `capBytes > 0` test.
+	// thing create does: accepting size=0 manufactures exactly the volume the subtest
+	// above refuses. The wedge-vs-budget split this branch turns on is at SetVolumeCapacity.
 	t.Run("a metered disk axis refuses removing a volume's cap", func(t *testing.T) {
 		st := store.NewMemory()
 		m := New(Deps{
@@ -611,13 +599,11 @@ func TestSweepOrphanVolumesFailsClosedOnUnreadableEnumeration(t *testing.T) {
 // recordlessVolumeStore hides ONE volume's record while leaving its mount rows
 // intact — the state an FK is supposed to make impossible.
 //
-// It is the only way to reach the sweep's FK-independent live-mount check, and that
-// is the point rather than a limitation of the fake: both backends enforce RESTRICT
-// (SQLite's `mounts.volume ... ON DELETE RESTRICT`, Memory's ErrVolumeInUse twin), so
-// no sequence of legal API calls can produce "mount row, no record". A check whose
-// whole job is to not trust the FK can only be tested by breaking the FK. The shape
-// stands in for on-disk corruption, a hand-edited store.db, or a future backend whose
-// RESTRICT is weaker than assumed.
+// Breaking the FK is the only way to reach the sweep's FK-independent live-mount check:
+// both backends enforce RESTRICT (SQLite's `mounts.volume ... ON DELETE RESTRICT`,
+// Memory's ErrVolumeInUse twin), so no sequence of legal API calls can produce "mount
+// row, no record". The shape stands in for on-disk corruption, a hand-edited store.db,
+// or a future backend whose RESTRICT is weaker than assumed.
 type recordlessVolumeStore struct {
 	store.Store
 	hidden model.VolumeID
@@ -734,10 +720,9 @@ func TestSweepOrphanVolumesKeepsAUnitHeldOnlyByAMountRow(t *testing.T) {
 }
 
 // TestSweepOrphanVolumesSkipsWhenTheMountTableIsUnreadable: an unreadable mount table
-// SKIPS the candidate. §5.C states it as a hard requirement — on a read error, skip,
-// and never treat an empty result as "no owner" — because the measured failure returns
-// zero rows, making a failed
-// read look exactly like an empty one.
+// SKIPS the candidate. §5.C states it as a hard requirement — on a read error, skip, and
+// never treat an empty result as "no owner" (see mountReadFailingStore for why the two
+// are indistinguishable).
 //
 // The candidate here would otherwise be reclaimed (no record, nothing in flight), so
 // the assertion is load-bearing rather than incidental: only the read error stands

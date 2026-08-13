@@ -50,10 +50,8 @@ type fakeRootfs struct {
 	mu        sync.Mutex
 	calls     []string
 	failMount bool
-	// The remaining failure knobs cover the rest of the cold-start / teardown
-	// chain, so a provider call can be failed at EVERY point the mediator calls
-	// one — not just the two the first tests happened to need. Each is named for
-	// the method it fails.
+	// The remaining failure knobs cover the rest of the cold-start / teardown chain, so
+	// a provider call can be failed at EVERY point the mediator calls one.
 	failCreateOverlay  bool
 	failPromote        bool
 	failDestroyOverlay bool
@@ -194,8 +192,6 @@ func (f *fakeRootfs) PromoteToTemplate(ctx context.Context, o *rootfs.Overlay, n
 	return nil
 }
 
-// maxLowerDepth is the injected §5.B mount ceiling; 0 = no limit, which is what every
-// test that is not about depth wants.
 func (f *fakeRootfs) MaxLowerDepth(context.Context) (int, error) {
 	if f.failMaxLowerDepth {
 		return 0, fmt.Errorf("injected MaxLowerDepth failure")
@@ -259,11 +255,10 @@ func (f *fakeRootfs) SweepOrphanLayers(_ context.Context, live, building []strin
 // unwind when the row loses) can be tested as pure logic. The real backends are
 // covered by internal/volume's shared contract suite, on both arms.
 //
-// EVERY mediator Deps in this package carries one, because the §3.4 disk inequality
-// sums BOTH subsystems' uncapped bytes: with the disk axis metered, a nil backend
-// makes the gate blind to every volume's bytes, and the gate fails CLOSED rather
-// than pretending that means "no volumes". So a test that meters disk and omits this
-// is not testing a leaner configuration — it is testing one production cannot have.
+// EVERY mediator Deps in this package must carry one, because the §3.4 disk inequality
+// sums BOTH subsystems' uncapped bytes: with the disk axis metered, a nil backend makes
+// the gate blind to every volume's bytes and it fails CLOSED — a configuration
+// production cannot have.
 type fakeVolume struct {
 	mu    sync.Mutex
 	calls []string
@@ -469,8 +464,6 @@ func (f *fakeVolume) derive(srcID, newID string, capBytes int64, kind string) er
 		return fmt.Errorf("fake: %s: source %s not present", kind, srcID)
 	}
 	f.units[newID] = true
-	// The cap is recorded per volume, so a test can assert it was applied HERE rather
-	// than assumed from the record.
 	if f.appliedCaps == nil {
 		f.appliedCaps = map[string]int64{}
 	}
@@ -723,9 +716,7 @@ func (f *fakeRuntime) Launch(ctx context.Context, spec runtime.LaunchSpec) (*run
 	f.mu.Lock()
 	f.launchLimits = append(f.launchLimits, spec.Limits)
 	f.launchSteering = spec.Steering
-	// The §5.C mount specs from the LAST launch, asserted from LastMounts rather than
-	// by string-matching the log — for the same reason the limits are: several tests
-	// match "Launch:<id>" exactly as a synchronization predicate.
+	// The §5.C mount specs from the LAST launch, asserted from LastMounts.
 	f.launchMounts = append([]runtime.MountSource(nil), spec.Mounts...)
 	f.mu.Unlock()
 	if f.launchGate != nil {
@@ -821,12 +812,10 @@ func (f *fakeRuntime) ReinstallRuleSet(_ context.Context, pl *runtime.Placement,
 // orchestration to be tested: an endpoint is drawn ONCE per `{guest_port, proto}` per
 // placement and REUSED afterwards, and the list comes back in declaration order.
 //
-// Both properties are contract, not fake convenience. §5.D endorses hot-adding a
-// publish because it is purely additive, and §6.1 makes a repeated publish idempotent —
-// "return the existing one" — so a fake that re-drew on every reinstall would answer a
-// second identical POST with a different endpoint and let a mediator bug through. The
-// pair is the key for the same reason the real provider's is: tcp/8080 and udp/8080 are
-// two publishes (§5.D).
+// Both properties are contract: §6.1 makes a repeated publish idempotent ("return the
+// existing one"), so a fake that re-drew on every reinstall would answer a second
+// identical POST with a different endpoint and let a mediator bug through. The pair is
+// the key because tcp/8080 and udp/8080 are two publishes (§5.D).
 func (f *fakeRuntime) bindPublish(pl *runtime.Placement, spec runtime.SteeringSpec) []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()

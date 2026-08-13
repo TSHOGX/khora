@@ -171,15 +171,11 @@ func TestAnUnauthenticatedCallerNeverReachesTheUpstream(t *testing.T) {
 // arrive in one buffered flush when the process exits is not a working PTY, and a
 // buffering hop passes every "did the bytes arrive" check.
 //
-// WHAT HOLDS THE PROPERTY IS NOT FlushInterval, and this test would mislead if it
-// implied otherwise. Measured, over three chunks 200 ms apart: an upstream response
-// with no Content-Length — which is every Connect stream — keeps its 400 ms spread
-// even with FlushInterval set to 30 s, because ReverseProxy ignores the interval for
-// such responses and flushes immediately. The interval bites only on a response that
-// carries a Content-Length, where it collapses the same spread to 0 s; that case is
-// covered by the companion test below. So this test pins the streaming path's
-// end-to-end behavior THROUGH the TLS front, which is the part no library guarantee
-// covers.
+// WHAT HOLDS THE PROPERTY IS NOT FlushInterval. Measured, over three chunks 200 ms apart: an
+// upstream response with no Content-Length — every Connect stream — keeps its 400 ms spread even
+// with FlushInterval at 30 s, because ReverseProxy ignores the interval for such responses. The
+// interval bites only on a Content-Length-carrying response, covered by the companion test below.
+// So this pins the streaming path THROUGH the TLS front, which no library guarantee covers.
 func TestAnAuthenticatedCallerGetsAStreamThatIsNotBuffered(t *testing.T) {
 	const (
 		chunks = 3

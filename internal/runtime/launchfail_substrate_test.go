@@ -21,18 +21,10 @@ import (
 //
 // # Why this is a separate property from destroy
 //
-// Destroy runs on a COMPLETE placement; this runs on a half-built one, and the two reach
-// the teardown through different states. The distinction is visible in the code that
-// serves them: teardown uses `nft destroy` rather than `delete` precisely because it runs
-// on placements where the table may never have been installed, and it drops the table
-// BEFORE the veth so a half-torn placement never leaves rules pointing at a veth name a
-// later sandbox could reuse. Neither of those is exercised by a destroy path that always
-// finds everything present.
-//
-// A leaked table is worse here than a leaked netns, and quietly so: the table's rules are
-// narrowed by `iifname`, so once the veth name is recycled by a LATER sandbox the stale
-// rules apply to it — a sandbox enforcing a declaration nobody wrote, with no record
-// naming the table and ReclaimOrphans the only thing that could ever find it.
+// Destroy runs on a COMPLETE placement; this runs on a half-built one, so it is the only
+// thing that exercises teardownPlacement's two half-built provisions — `nft destroy` over
+// `delete`, and dropping the table before the veth. A destroy path that always finds
+// everything present exercises neither. What a leak costs is in the failure message.
 //
 // # Why it is driven at this layer
 //

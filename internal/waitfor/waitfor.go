@@ -8,10 +8,9 @@
 //	t.Fatal("timed out")
 //
 // The final sleep can end after the deadline, so a condition that becomes true
-// DURING it is never observed — the loop exits and reports a timeout that did not
-// happen. It is rare and it is a false failure, which is the worst shape for a test
-// bug: it looks like the engine broke. Until re-checks once after the loop, so the
-// answer is "cond was false at the deadline", not "cond was false a tick before it".
+// DURING it is never observed — a rare FALSE failure, which looks like the engine
+// broke. Until re-checks once after the loop, so the answer is "cond was false at the
+// deadline", not "cond was false a tick before it".
 //
 // Not a leaf in CLAUDE.md's sense — a leaf exists so two §5 subsystems can share a
 // FACT, and this is test scaffolding carrying no production edge. It follows the

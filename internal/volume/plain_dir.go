@@ -16,11 +16,9 @@ import (
 // that drives it lives in a sibling package.
 //
 // IT IS NOT FILLER — IT IS THE ONLY FALSIFICATION INSTRUMENT THIS SEAM HAS
-// (volume.md D2). The shape rule "allocate / set the cap / place are three actions
-// and must not be compressed into one call" was DERIVED from running a second
-// backend against the same shared contract: a merged shape fails in three separate
-// places, and with only one arm every one of those failures would have looked like
-// a reasonable simplification.
+// (volume.md D2): the three-actions shape rule stated on Backend was DERIVED from
+// running this arm against the same shared contract, and with only one arm every one
+// of those three failures would have looked like a reasonable simplification.
 //
 // It is also the CAPABILITY-NEGATIVE arm: it reports no Snapshot, no Clone, no
 // Quota, so the contract suite can assert that an unsupported operation is refused
@@ -81,11 +79,9 @@ func (p *PlainDir) SetCapacity(_ context.Context, volumeID string, capBytes int6
 	return nil // 0 = uncapped is the only state this arm can be in
 }
 
-// Usage measures allocation and reports NO cap. The zero limit here is honest
-// rather than a placeholder — this arm never has one — and it is the same value the
-// capped arm returns for an uncapped unit, which is exactly the ambiguity
-// Backend.Usage warns about: the limit result is diagnostic, the record is the
-// authority.
+// Usage measures allocation and reports NO cap. The zero limit is honest rather than a
+// placeholder — this arm never has one — and it is the same value the capped arm returns
+// for an uncapped unit, which is the ambiguity Backend.Usage warns about.
 func (p *PlainDir) Usage(_ context.Context, volumeID string) (int64, int64, error) {
 	if err := validateID(volumeID); err != nil {
 		return 0, 0, err
@@ -122,12 +118,9 @@ func (p *PlainDir) AdoptMaterialized(_ context.Context, volumeID string) (*Mater
 	return &Materialized{Volume: volumeID, SourcePath: unit}, nil
 }
 
-// OpenRoot uses the SAME accessor as the local arm — both are
-// openat2(RESOLVE_IN_ROOT), identically. That is deliberate: root confinement is a
-// property the contract requires of every arm, so sharing one implementation means
-// the shared contract test exercises the real mechanism on both rather than a copy
-// on one of them (volume.md D5.1: a remote arm's FUSE mount point is a directory,
-// so openat2 behaves identically there too).
+// OpenRoot uses the SAME accessor as the local arm, deliberately: root confinement is
+// required of every arm, so sharing one implementation means the shared contract test
+// exercises the real mechanism on both rather than a copy on one (volume.md D5.1).
 func (p *PlainDir) OpenRoot(_ context.Context, volumeID string) (Root, error) {
 	if err := validateID(volumeID); err != nil {
 		return nil, err
@@ -138,11 +131,9 @@ func (p *PlainDir) OpenRoot(_ context.Context, volumeID string) (Root, error) {
 // Snapshot / Clone: NOT SUPPORTED, and refusing them is this arm's job (§5.C requires
 // an unsupported capability to be a clean typed refusal, never a silent no-op).
 //
-// A plain directory has no cheap whole-tree point-in-time copy. It could of course be
-// FAKED with a recursive byte copy — and that is precisely what must not happen: the
-// caller asked for a snapshot, whose contract is atomic and instantaneous, and a tree
-// walk of a live volume satisfies neither while looking like success. It is also what
-// makes this the arm the capability-negative contract case runs against.
+// NOT faked with a recursive byte copy: a snapshot's contract is atomic and
+// instantaneous, and a tree walk of a live volume satisfies neither while looking like
+// success.
 func (p *PlainDir) Snapshot(_ context.Context, srcID, newID string, _ int64) error {
 	return fmt.Errorf("volume: plain_dir cannot snapshot %s → %s: %w", srcID, newID, ErrUnsupported)
 }

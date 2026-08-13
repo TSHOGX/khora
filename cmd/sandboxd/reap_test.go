@@ -97,12 +97,10 @@ func subtreeReaperHelper() int {
 	return 1
 }
 
-// These tests cover the TRANSPORT side of the reap split (§5.E.1 / guest-runtime
-// D4.2): transport mode declares PR_SET_CHILD_SUBREAPER, so its subtree's orphans
-// reparent to it AND MUST BE REAPED BY IT. They run as a plain host process — the
-// reaper is factored out of transportMode precisely so the subreaper contract is
-// testable without a guest, since nothing about it needs pid 1 of a namespace:
-// PR_SET_CHILD_SUBREAPER is per-process and works anywhere.
+// These tests cover the TRANSPORT side of the reap split (§5.E.1 / guest-runtime D4.2): transport
+// mode declares PR_SET_CHILD_SUBREAPER, so its subtree's orphans reparent to it AND MUST BE REAPED
+// BY IT. They run as a plain host process, because PR_SET_CHILD_SUBREAPER is per-process and needs
+// no namespace pid 1.
 //
 // What they CANNOT prove (needs the real guest): that in a live guest transport is
 // the only wildcard waiter besides PID 1, and the restart transient where the

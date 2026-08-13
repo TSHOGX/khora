@@ -20,17 +20,15 @@ import (
 
 // ErrUnsupported is the typed refusal for a capability a backend does not report in
 // Capabilities — a plain-directory backend asked to snapshot, or to enforce a cap it cannot.
-// Typed because §6.2 maps it to a 400, which no retry or state change makes legal. The
-// refusal must be LOUD: running uncapped silently would leave every §2.3 blast-radius
-// assertion believing in a cap that does not exist.
+// Typed because §6.2 maps it to a 400, which no retry or state change makes legal.
 var ErrUnsupported = errors.New("volume: operation not supported by this backend")
 
 // Capabilities is the PER-BACKEND capability query (volume.md D2) — a property of the
 // implementation, never of one unit.
 //
-// EVERY MEMBER IS A bool, AND THAT IS LOAD-BEARING: a map[string]string feature table would
-// carry mechanism names across the seam as VALUES, where no identifier-scanning guard can
-// see them. seam_test.go asserts the bool-ness.
+// EVERY MEMBER IS A bool: a map[string]string feature table would carry mechanism names
+// across the seam as VALUES, where no identifier-scanning guard can see them.
+// seam_test.go asserts the bool-ness.
 //
 // Members need a CONSUMER (§1.3 forbids speculative reservation): Snapshot/Clone gate the
 // §6.1 endpoints, Quota gates "a cap that cannot be enforced is refused" (§3.4).
@@ -61,9 +59,8 @@ type Materialized struct {
 	// interprets it, and §6.2 keeps it off the wire.
 	SourcePath string
 
-	// NO handle FIELD: members need a consumer (§1.3 forbids speculative reservation). A
-	// remote backend's FUSE arm would need somewhere to keep a per-materialization process,
-	// and `runtime.Placement.handle` is then the precedent to copy — not to pre-build now.
+	// NO handle FIELD: members need a consumer (§1.3 forbids speculative reservation).
+	// volume.md D2 states the precise condition for adding one back.
 }
 
 // FileInfo is one entry's metadata as reported through Root — deliberately small and
@@ -83,12 +80,10 @@ type FileInfo struct {
 // member exposes a host path, so it is the one materialization-class part of the seam
 // needing no exemption in the structural guard.
 //
-// Not a replacement for Materialize: that hands runsc a bindable host path, this only moves
-// bytes inside the engine process. Two consumers, two methods.
-//
-// Not routed through §5.E `fs` either: that service exists only inside a guest, reachable
-// only through a live placement, while an unmounted volume has no guest — and it would
-// create a volume → transport edge that internal/arch rejects outright (volume.md D5.1).
+// Not a replacement for Materialize (that hands runsc a bindable host path; this only moves
+// bytes inside the engine process — two consumers, two methods), and not routed through §5.E
+// `fs`: that service is reachable only through a live placement, and the route would create a
+// volume → transport edge internal/arch rejects outright (volume.md D5.1).
 //
 // Concurrency: safe for concurrent use, each operation resolving its own descriptor.
 type Root interface {
@@ -123,10 +118,9 @@ type Root interface {
 //
 // A SHAPE RULE RUNS THROUGH THE WHOLE INTERFACE: "allocate", "set the cap" and "place" are
 // THREE actions and must not be compressed into one call (volume.md D2) — merging them
-// leaves creation, capacity and the admission term all homeless. The rule was FALSIFIED WITH
-// A SECOND BACKEND rather than reasoned about: the test-only plain-directory arm runs the
-// same contract suite, and a merged shape fails in each of those three places. That arm is
-// this seam's only falsification instrument, and it must stay.
+// leaves creation, capacity and the admission term all homeless. FALSIFIED WITH A SECOND
+// BACKEND rather than reasoned about: the test-only plain-directory arm runs the same
+// contract suite, and a merged shape fails in each of those three places (see PlainDir).
 type Backend interface {
 	// Name identifies the backend for registration and diagnostics.
 	Name() string
@@ -217,12 +211,11 @@ type Backend interface {
 	// in all four shapes tested. Verified by WRITING, not by reading a number — 96 MiB (3× the
 	// source's cap) landed in full on an uncapped snapshot.
 	//
-	// So setting the cap is a MANDATORY step of this method, necessarily a SECOND call. An
-	// implementation that records size=N and forgets to set it is silent and undetectable
-	// afterwards, since Usage's limit read maps "never capped" and 0 onto each other. It must
-	// not be left to the caller to PATCH. The window this creates ("bytes exist, cap not yet
-	// set") is real, covered by the mediator holding the keep-set across both calls and by the
-	// sweep treating "record exists, row uncapped" as a REPAIR state rather than a legal one.
+	// So setting the cap is a MANDATORY step of this method, necessarily a SECOND call, never
+	// left to the caller to PATCH: a miss is undetectable afterwards (see Usage). The window it
+	// creates ("bytes exist, cap not yet set") is covered by the mediator holding the keep-set
+	// across both calls and by the sweep treating "record exists, row uncapped" as a REPAIR
+	// state rather than a legal one.
 	//
 	// `snapshot -i <qgroupid>` is EXPLICITLY EXCLUDED as a way to make this one call: it sets
 	// MEMBERSHIP, not a cap — the new unit's row stays uncapped while the parent's limit is
@@ -270,11 +263,10 @@ type Backend interface {
 	DestroyVolume(ctx context.Context, volumeID string) error
 
 	// UncappedBytes reports the bytes this backend holds THAT NO DECLARED CAP COVERS — the §5.C
-	// half of the §3.4 inequality's second term, the same shape as rootfs.Provider's. There is
-	// no third term: volume caps and sandbox caps are like terms on the same left-hand side,
-	// even though a volume cap is recorded on the volume rather than in a sandbox's Binding.
-	// Without it, uncapped volumes are invisible to the admission gate and a node can be filled
-	// by a pile of them without the gate refusing once.
+	// half of the §3.4 inequality's second term, the same shape as rootfs.Provider's. No third
+	// term: volume caps and sandbox caps are like terms on the same left-hand side. Without it,
+	// uncapped volumes are invisible to the admission gate and a node can be filled by a pile
+	// of them without the gate refusing once.
 	//
 	// Two invariants, identical to the §5.B side: a CAPPED volume contributes ZERO, and
 	// physically shared bytes count at most once. The number is the BACKEND's own allocation
@@ -289,11 +281,8 @@ type Backend interface {
 	// set, so the backend deleted a fully committed volume's bytes (3 of 6 snapshots, under 458
 	// overlapping sweeps). The Overlay sweep keeps that shape because its row is inserted
 	// BEFORE the unit, exposing only the snapshot skew; VOLUMES ARE BYTES-FIRST, so the exposed
-	// interval is the entire create.
-	//
-	// Splitting lets the mediator RE-CHECK each candidate after enumeration, closing the window
-	// by ordering rather than locking: a candidate no longer in the in-flight set has had its
-	// row committed already, so a fresh per-candidate read sees it.
+	// interval is the entire create. Splitting closes it by ordering rather than locking, the
+	// mediator re-checking each candidate after enumeration (volume.md D2).
 	//
 	// ENUMERATION MUST BE PER-DIRECTORY-ENTRY (§5.C), never a filesystem-level unit enumeration
 	// — that returns byte-identical results from a sibling directory, including units belonging

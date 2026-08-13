@@ -22,8 +22,7 @@ func mustGenerate(t *testing.T, d Declaration) Spec {
 }
 
 // indexOf returns the position of the rule with the given counter within one
-// hook's rules, or -1. Positions are what the order assertions read: order is a
-// security property here, not a style question (network.md D1 ④).
+// hook's rules, or -1. Positions are what the order assertions read (network.md D1 ④).
 func indexOf(rules []ruleset.Rule, counter string) int {
 	for i, r := range rules {
 		if r.Counter == counter {
@@ -260,9 +259,8 @@ func TestRuleOrderIsTheMechanism(t *testing.T) {
 //
 // This is the trap that reads as healthy while the feature is dead: placed in a
 // DIFFERENT base chain on the same hook, the accept MATCHES and its counter RISES
-// while the flow is still dropped by the floor and the connection still fails —
-// because a base chain's accept ends only THAT chain, and only a terminal verdict
-// ends traversal across chains (measured, D5 ⑩).
+// while the flow is still dropped and the connection still fails (measured, D5 ⑩ —
+// see ruleset.Accept).
 func TestTheViaAcceptSharesTheFloorsChainAndSitsAboveIt(t *testing.T) {
 	spec := mustGenerate(t, denyWithVia(t))
 	in := spec.Rules.ByHook(ruleset.HookInput)
@@ -404,14 +402,11 @@ func findRule(s Spec, counter string) ruleset.Rule {
 // The hole this closes, concretely: a sandbox on 10.66.250.0/30 (gateway
 // 10.66.250.1) declaring `allow 10.66.99.0/24:8080/tcp` OVERLAPS the sandbox
 // address space, so the rule is emitted — but 10.66.250.1 is not in the declared
-// CIDR. With the gateway clause alone, the caller reaches one address they never
-// named, on the declared port. That address is a HOST address, so any host process
-// bound `0.0.0.0:8080` becomes reachable: the floor's "any address of the host
-// itself" item (§2.4, measured D5 ⑧) lifted by a declaration that never named it.
-//
-// §2.4 permits the declared path (§5.D semantics ③) precisely BECAUSE the caller
-// named the gateway; overlap-without-containment is not that. So the rule must pin
-// the intersection, which the renderer materializes as two ANDed daddr clauses.
+// CIDR. With the gateway clause alone the caller reaches one address they never
+// named, on the declared port, and it is a HOST address — so any host process bound
+// `0.0.0.0:8080` becomes reachable (see ruleset.Match.DestSelfGatewayWithin). The
+// rule must pin the intersection, which the renderer materializes as two ANDed
+// daddr clauses.
 func TestTheSelfGatewayAllowCannotReachAGatewayTheDeclarationDidNotContain(t *testing.T) {
 	// The dangerous shape: overlaps the /16, excludes any plausible gateway of the
 	// sandbox that declared it.
@@ -651,13 +646,8 @@ func TestLoopAvoidanceIsNotABareUIDAccept(t *testing.T) {
 	}
 }
 
-// The second-hop table must carry a RETURN arm above its floor, or it kills `via[]`.
-//
-// The mechanism is not obvious and was found on the substrate: the endpoint's REPLY to
-// the guest is host-originated (so it traverses `output`) and its DESTINATION IS THE
-// GUEST IP — which lies inside the sandbox address space, i.e. exactly the floor's
-// sibling item. So the floor matches the reply to the very flow the declaration
-// authorized.
+// The second-hop table must carry a RETURN arm above its floor, or it kills `via[]`
+// (the mechanism is in SecondHopRules; it was found on the substrate).
 //
 // Measured with the floor alone: the steered flow reached the endpoint and was accepted
 // (`via0_0_dnat=1`, `via0_0_accept=1`, conntrack SYN_RECV) while `hop2_floor_v4`
@@ -1006,19 +996,10 @@ func TestIngressIsClosedWhenNothingIsPublished(t *testing.T) {
 }
 
 // The ingress default-deny must live on a LATER-priority chain than the floor, and
-// this is a CROSS-SANDBOX ordering requirement rather than organization.
-//
-// The rule is `oifname <this sandbox's veth>`, so it matches traffic heading TOWARD
-// this guest — including another sandbox's egress to this guest's IP. Every
-// per-sandbox table sits on the same shared hook, so at ONE priority the two chains
-// race: measured, sandbox B's ingress drop won over sandbox A's floor, and because
-// only a terminal verdict crosses chains, A's floor counted ZERO.
-//
-// The security outcome is identical either way — the flow is refused — but two things
-// are not, and both are contract-level: the guest got a 25-SECOND HANG instead of the
-// clean connection failure §2.4's fail-closed promises in its second half, and WHICH
-// counter moves became dependent on table creation order, which makes the one signal
-// every deny assertion reads non-deterministic (§2.4 / D4.1).
+// this is a CROSS-SANDBOX ordering requirement rather than organization: measured,
+// sandbox B's ingress drop won over sandbox A's floor at one shared priority, A's floor
+// counted ZERO, and the guest got a 25-SECOND HANG instead of the clean failure §2.4
+// promises (see ruleset.HookForwardIngress).
 func TestTheIngressDenyIsOnALaterChainThanTheFloor(t *testing.T) {
 	spec := mustGenerate(t, denyEmpty())
 	floorHooks := map[string]ruleset.Hook{}
@@ -1089,13 +1070,8 @@ func TestRoutedEgressIsDerivedFromTheDeclaration(t *testing.T) {
 	}
 }
 
-// Guest-facing refusals use `reject`, external-facing ones use `drop`.
-//
-// gVisor's netstack honors ICMP errors, so the same denial written the two ways
-// differs by orders of magnitude in what the guest experiences: a pure-`drop`
-// floor satisfies §2.4 fail-closed's SECURITY half while violating the half it
-// wrote down itself — "the guest gets a clean connection failure" (D5 ⑨ / D4.3).
-// Security is identical either way; both refuse.
+// Guest-facing refusals use `reject`, external-facing ones use `drop` (the measured
+// magnitude gap is in ruleset.Reject).
 //
 // The inbound default-deny is the deliberate exception: it faces an EXTERNAL
 // caller the engine promises nothing, and an ICMP error would confirm the sandbox
@@ -1258,14 +1234,8 @@ func TestTheSelfGatewayAllowFollowsTheDeclaredSandboxSpaceOverlap(t *testing.T) 
 
 // TestCounterAttributionCoversEveryDeclarationEntry is what makes §6.1's per-entry
 // `hit_packet` trustworthy: every entry the caller wrote must map to counter names that
-// actually EXIST in the emitted set.
-//
-// The alternative design is why this test has this shape. Re-deriving
-// fmt.Sprintf("allow%d_fwd", i) at the read site would be a second copy of a naming
-// convention living in generate.go, and it would drift on the first rename while failing
-// SILENTLY: an unmatched name reports no hits, which is indistinguishable from a rule
-// that was never hit. So attribution is produced where the names are minted, and this
-// asserts the join.
+// actually EXIST in the emitted set. Attribution is produced where the names are minted
+// (see Spec.Counters for why), and this asserts the join.
 func TestCounterAttributionCoversEveryDeclarationEntry(t *testing.T) {
 	d := Zero()
 	d.Egress.Allow = []Tuple{

@@ -23,12 +23,9 @@ import (
 // was told the request was refused while half of it was in the store. With evict in
 // the window it is a 404 plus a write to a record that no longer exists.
 //
-// THE DECIDING ARGUMENT IS IN THE STORE CONTRACT. store.Store.ReplaceMounts pays a
-// real price (one statement expressing a cross-row predicate, in each backend) to
-// avoid TWO independent commits, and justifies it with §6.2's "a sandbox holds one
-// complete binding at every instant". A control plane that tolerates three commits
-// per request above a seam that refuses two below it is contradicting itself, not
-// making a trade.
+// The same conclusion from the other side: store.Store.ReplaceMounts pays a real price
+// (one statement expressing a cross-row predicate, in each backend) to avoid TWO
+// independent commits, on §6.2's "a sandbox holds one complete binding at every instant".
 
 // RebindSpec is one PATCH request's whole payload: the §3.4 Binding fields plus the
 // §5.C mount binding. It exists so the three field classes reach the mediator as ONE
@@ -81,10 +78,8 @@ func (s RebindSpec) isEmpty() bool { return s.Binding.IsEmpty() && s.Mounts == n
 //     Both states are legal; the two effect times are why `released` is returned
 //     separately from the caller's `applies_at`.
 //
-// EVALUATING THE WHOLE UNION FIRST IS THE POINT: a per-class gate checked just before that
-// class's write means the second refusal arrives after the first class committed. It also
-// closes the divergence the split shape carried — `UpdateBinding` barred caps on `running` but
-// not the declaration, while `SetNetwork` barred it.
+// The whole union is evaluated BEFORE any write: a per-class gate checked just before that
+// class's write means the second refusal arrives after the first class committed.
 //
 // # Why the writes are ordered mounts-first, binding-second
 //
@@ -200,9 +195,7 @@ func (m *Mediator) Rebind(ctx context.Context, id model.SandboxID, spec RebindSp
 	//
 	// Gated on the axis being metered, not unconditional: on an unmetered node an uncapped
 	// sandbox is legal by §3.4's own terms, so refusing there would revoke a capability the
-	// spec grants. Placed BEFORE the admission gate for the same reason as the arms around
-	// it — the request is invalid regardless of the node's free space, and gating first
-	// would let a full node answer 507 about a request no amount of capacity makes legal.
+	// spec grants. Placed BEFORE the admission gate for the same reason as the arm above it.
 	if b.DiskByte != nil && newLimits.DiskByte == 0 && m.deps.NodeCapacity.DiskByte > 0 {
 		return false, fmt.Errorf("rebind: %w: disk — this node meters the disk axis, so sandbox %s may not be left uncapped, and the edit is irreversible because re-capping later is refused (§3.4 / ErrUncappedDiskNotCappable)",
 			ErrCapRequired, id)
@@ -222,18 +215,15 @@ func (m *Mediator) Rebind(ctx context.Context, id model.SandboxID, spec RebindSp
 	// positive value is checked, raise and lowering alike (ErrDiskCapBelowUsage says why a
 	// raise is not automatically safe).
 	//
-	// PLACED BEFORE THE ADMISSION GATE for the same reason as the `0 → N` refusal above:
-	// this request is invalid no matter how much room the node has, and gating first would
-	// let a full node answer 507 — telling the caller to wait for capacity that would never
-	// make it legal.
+	// PLACED BEFORE THE ADMISSION GATE for the same reason as the `0 → N` refusal above.
 	//
-	// THE USAGE READ IS SOUND HERE PRECISELY BECAUSE OF THE `paused` GATE ABOVE. Caps are
-	// editable only from `paused`, so the container is stopped, the overlay is unmounted,
-	// and nothing can grow the upper between this read and the placement that applies the
-	// cap — §5.E's fs service needs a live guest, and a volume import writes to a volume,
-	// not to this unit. So unlike the volume side, this number cannot go stale under a
-	// concurrent writer. (The materialization side re-checks anyway, because §3.4.5
-	// requires it against changes that do not come through a write point at all.)
+	// THE USAGE READ IS SOUND HERE PRECISELY BECAUSE OF THE `paused` GATE ABOVE: the
+	// container is stopped and the overlay unmounted, so nothing can grow the upper
+	// between this read and the placement that applies the cap — §5.E's fs service needs
+	// a live guest, and a volume import writes to a volume, not to this unit. So unlike
+	// the volume side, this number cannot go stale under a concurrent writer. (The
+	// materialization side re-checks anyway, because §3.4.5 requires it against changes
+	// that do not come through a write point at all.)
 	if b.DiskByte != nil && newLimits.DiskByte > 0 {
 		if m.deps.Rootfs == nil {
 			return false, fmt.Errorf("rebind: no rootfs provider registered")
@@ -260,14 +250,11 @@ func (m *Mediator) Rebind(ctx context.Context, id model.SandboxID, spec RebindSp
 	// DISK AND MEMORY ONLY — cpu_millis is deliberately absent from the trigger set.
 	// §3.4 keeps CPU out of the node accounting entirely (`cpu_millis: 0` is always
 	// legal, and neither budget mentions it), so a CPU-only raise asks for zero
-	// additional bytes on either axis and the gate has nothing it could correctly
-	// refuse: once the left side has filled for reasons this PATCH does not touch
-	// (other sandboxes' caps, volume caps, or a grown MEASURED uncapped term), the
-	// only thing gating a CPU edit can produce is a FALSE disk- or RAM-flavoured 507
-	// against a request for zero bytes. The metered-axis-requires-a-cap check has
-	// nothing to bite on either — a CPU edit changes neither cap it inspects. "All
-	// raises through one door" buys no invariant when the invariant behind that door
-	// is not about CPU.
+	// additional bytes and the gate has nothing it could correctly refuse: once the
+	// left side has filled for reasons this PATCH does not touch, the only thing
+	// gating a CPU edit can produce is a FALSE disk- or RAM-flavoured 507 against a
+	// request for zero bytes. The metered-axis-requires-a-cap check has nothing to
+	// bite on either — a CPU edit changes neither cap it inspects.
 	//
 	// admitMu spans {gate → commit} as ONE critical section, held by defer through both
 	// writes below — the same shape create uses for {gate → insert} and
@@ -278,11 +265,9 @@ func (m *Mediator) Rebind(ctx context.Context, id model.SandboxID, spec RebindSp
 	// with every individual cap honored. §3.4 is explicit that a write to a cap changes
 	// Σ AT THIS COMMIT.
 	//
-	// It now also spans the ReplaceMounts below, which costs a little contention and
-	// buys ordering the gate does not need (Σ reads sandbox caps and volume caps, never
-	// mount rows). Splitting it to release earlier would mean releasing BEFORE the
-	// binding commit, which is the falsified shape — so the wider section is the cheap
-	// side of the trade.
+	// It also spans the ReplaceMounts below, which buys ordering the gate does not need
+	// (Σ reads sandbox caps and volume caps, never mount rows). Splitting it to release
+	// earlier would mean releasing BEFORE the binding commit, the shape falsified above.
 	if newLimits.DiskByte > rec.Limits.DiskByte || raisesMemory {
 		m.admitMu.Lock()
 		defer m.admitMu.Unlock()
@@ -327,11 +312,9 @@ func (m *Mediator) Rebind(ctx context.Context, id model.SandboxID, spec RebindSp
 // change released an exclusive lease. The CALLER holds the transition lock and has
 // already run the state gate — hence `Locked`.
 //
-// WHOLE BINDING, NOT A DELTA. §6.2 defines PATCH as swapping one complete binding for
-// another, and a sandbox holds one complete binding at every instant — so there is no
-// "attach one more" or "detach that one" operation, and an EMPTY slice legitimately
-// means detach everything. That is also what makes every duplicate a 400: a repeat is a
-// single submission contradicting itself, decidable without reading another row.
+// WHOLE BINDING, NOT A DELTA (§6.2, see RebindSpec.Mounts). That is also what makes
+// every duplicate a 400: a repeat is a single submission contradicting itself, decidable
+// without reading another row.
 func (m *Mediator) replaceMountsLocked(ctx context.Context, id model.SandboxID, binding []model.Mount) (bool, error) {
 	before, err := m.deps.Store.ListMounts(ctx, id)
 	if err != nil {
@@ -357,11 +340,9 @@ func (m *Mediator) replaceMountsLocked(ctx context.Context, id model.SandboxID, 
 	// UNIQUE(sandbox, path) — so the two statements are put in a SINGLE commit rather
 	// than reordered.
 	//
-	// THERE IS NO RESTORE BRANCH HERE, and its absence is the point: a refused
+	// THERE IS NO RESTORE BRANCH HERE, and its absence is deliberate: a refused
 	// replacement leaves the sandbox on its old binding by construction, so there is no
-	// "new binding rejected AND old one gone" state to compensate for. A compensation
-	// path for a state the model denies is a liability — it claims to repair something
-	// unreachable, and the repair itself can fail.
+	// "new binding rejected AND old one gone" state to compensate for.
 	if err := m.deps.Store.ReplaceMounts(ctx, id, next); err != nil {
 		return false, fmt.Errorf("rebind: %w", err)
 	}

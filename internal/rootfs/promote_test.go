@@ -72,11 +72,9 @@ func TestPromoteToTemplateExcludesRuntimePaths(t *testing.T) {
 		"tmp/.sandboxd-transport.pid": "12345",
 		"tmp/.sandboxd-crashloop":     "x",
 		"tmp/user-scratch":            "keepme", // NOT excluded (only the sandboxd paths are)
-		// Upload debris, excluded BY PREFIX rather than by exact path. A streaming
-		// upload's temp file must be created in the caller's own destination
-		// directory (rename(2) cannot cross filesystems), so a crash mid-upload can
-		// strand one ANYWHERE the caller writes — two different directories here, to
-		// pin that the rule is not tied to a location.
+		// Upload debris, excluded BY PREFIX rather than by exact path — two different
+		// directories, to pin that the rule is not tied to a location (see the doc
+		// comment for why it cannot be).
 		"home/work/" + guestport.UploadTempPrefix + "a1b2": "partial upload",
 		"etc/" + guestport.UploadTempPrefix + "deadbeef":   "partial upload",
 		// NEGATIVE CONTROLS for the prefix rule, which is what makes the two lines
@@ -169,11 +167,9 @@ func TestPromotedLayerResolvesAsLower(t *testing.T) {
 // never under-report what its own copy will cost, or the gate's bound points the
 // wrong way and the overshoot lands on an unrelated sandbox as ENOSPC (§2.3).
 //
-// The sharp case is a SPARSE file. blockBytes (used for bytes already on disk)
-// reports allocated blocks, which for a hole-punched file is ~0 — but copyFile is an
-// io.Copy and does not punch holes, so the layer pays the file's full length. The
-// forecast must therefore project apparent size, and this test pins that by
-// comparing the forecast against what the freeze ACTUALLY costs.
+// The sharp case is a SPARSE file, where allocated blocks read ~0 but the io.Copy
+// freeze pays the full length (PromoteCostBytes). Pinned by comparing the forecast
+// against what the freeze ACTUALLY costs.
 func TestPromoteCostBytesDoesNotUnderReportASparseUpper(t *testing.T) {
 	ctx := context.Background()
 	p, _ := newProvider(t)
@@ -289,11 +285,9 @@ func TestPromoteRefusesExistingLayer(t *testing.T) {
 // for (rootfs-overlay D5), and it is NOT "the mount point becomes
 // an empty placeholder" — that is the DEFAULT outcome and needs no exclusion at all.
 //
-// What the exclusions do is prune bytes that were written into the upper BEFORE a
-// volume was bound over that path. Those bytes are invisible to every guest (the guest
-// sees only the volume's entries), yet they are still on disk, still in the upper, and
-// would otherwise be copied into the frozen layer in full AND counted in both the
-// sandbox's capacity cap and the cost forecast.
+// What they do instead is prune bytes written into the upper BEFORE a volume was bound
+// over that path — invisible to every guest, yet still copied into the layer and charged
+// to both the cap and the forecast (promoteExclusions).
 func TestPromotePrunesShadowedBytes(t *testing.T) {
 	ctx := context.Background()
 	p, _ := newProvider(t)
@@ -367,10 +361,10 @@ func TestPromotePrunesShadowedBytes(t *testing.T) {
 	}
 }
 
-// TestPromoteCostUsesTheSameExclusions: the forecast must model exactly what the
-// freeze does. A forecast that counts shadowed bytes is conservative in DIRECTION but
-// known WRONG in value, so it refuses Promotes against capacity that was never going
-// to be consumed — which is why both calls take the same set (rootfs-overlay D5).
+// TestPromoteCostUsesTheSameExclusions: the forecast must model exactly what the freeze
+// does, which is why both calls take the same set (PromoteCostBytes / D5). Asserts the
+// DELTA — that excluding a destination actually moves the forecast — where the tests
+// above assert only the bound.
 func TestPromoteCostUsesTheSameExclusions(t *testing.T) {
 	ctx := context.Background()
 	p, _ := newProvider(t)

@@ -182,15 +182,9 @@ func TestVolumeRegimeSeedWithoutASandboxThenMountThenReadAfterDestroy(t *testing
 // TestVolumeRegimeSweepLeavesALiveGuestUntouched covers three properties in one pass: the sweep keeps a mounted volume, its content
 // is unchanged, and its cap is untouched.
 //
-// The content assertion exists because of a measured trap: asserting "the guest's write returned
-// ok" passes even when the volume has been COMPLETELY DELETED underneath — the guest
-// writes into an unlinked inode and sees zero errors (volume.md D7.2). So the assertion
-// is that the STEADY STATE is byte-for-byte identical across the sweep, read from the
-// HOST.
-//
-// The cap assertion is the sharper one: `limit none` is the ONE operation that breaks an engine
-// promise beyond data integrity, and it has no EBUSY self-protection, so a sweep must
-// leave a live volume's cap exactly where it was.
+// The content assertion reads the STEADY STATE from the HOST, byte for byte, because of
+// the measured trap the file header names; the cap assertion is the sharper one. Both
+// failure messages below carry their own reason (volume.md D7.2).
 func TestVolumeRegimeSweepLeavesALiveGuestUntouched(t *testing.T) {
 	ctx := context.Background()
 	eng, stateDir := mountEngine(t)

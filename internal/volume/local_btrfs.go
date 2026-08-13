@@ -81,12 +81,10 @@ func validateID(volumeID string) error {
 	return nil
 }
 
-// CreateVolume allocates the unit and applies the cap in ONE backend operation.
-//
-// The cap is written HERE rather than left to a follow-up call by the caller,
-// because a missing cap is SILENT AND UNDETECTABLE AFTERWARDS: Usage reads back
-// "no cap" and 0 identically, so no reconcile, sweep or inspect can ever discover
-// the divergence (volume.md D7.3). That forces the invariant to write time.
+// CreateVolume allocates the unit and applies the cap in ONE backend operation,
+// never leaving it to a follow-up call by the caller: a missing cap is silent and
+// undetectable afterwards (Backend.Usage / volume.md D7.3), which forces the
+// invariant to write time.
 func (b *LocalBtrfs) CreateVolume(ctx context.Context, volumeID string, capBytes int64) error {
 	if err := validateID(volumeID); err != nil {
 		return err
@@ -137,9 +135,7 @@ func (b *LocalBtrfs) applyCap(ctx context.Context, volumeID string, capBytes int
 }
 
 // Usage reports the backend's own statement of usage plus the cap currently on the
-// unit. See Backend.Usage: the LIMIT half is DIAGNOSTIC ONLY — the substrate maps
-// "no cap" and 0 onto each other, so it cannot distinguish "never capped" from
-// "deliberately uncapped" and must never be used to validate the record.
+// unit. The LIMIT half is DIAGNOSTIC ONLY — see Backend.Usage.
 //
 // A QUOTA-CAPABLE UNIT WHOSE ROW CANNOT BE READ IS AN ERROR, NEVER AN UNCAPPED ONE.
 // Measured: `qgroup show -f <path>` enumerates EVERY row on the filesystem and
@@ -155,9 +151,9 @@ func (b *LocalBtrfs) applyCap(ctx context.Context, volumeID string, capBytes int
 // on an EMPTY unit), so `used` comes back UNDER the substrate's own number and the
 // cap write point's strict inequality would admit a cap the substrate then wedges the
 // unit on (volume.md D7.3) — while limit 0 is indistinguishable from a deliberately
-// uncapped volume. Every caller already handles the error correctly: inspect degrades
-// its response, the §6.1 PATCH write point FAILS CLOSED, and RepairVolumeCaps draws no
-// conclusion. The fallback is what made those three handlers unreachable.
+// uncapped volume. Returning the error is what keeps inspect's degraded response, the
+// §6.1 PATCH write point's fail-closed, and RepairVolumeCaps' draw-no-conclusion
+// reachable at all.
 //
 // The walk stays for a PLAIN-DIRECTORY unit, which has no row to read and for which
 // "no cap" is the truth rather than a guess.
@@ -198,13 +194,12 @@ func (b *LocalBtrfs) Usage(ctx context.Context, volumeID string) (int64, int64, 
 // whenever CreateSubvolume fails on an absent path (VolumesDir not on a
 // quota-capable filesystem, or a substrate refusal), and a plain directory cannot
 // carry a cap at all — so a volume whose RECORD declares one is re-materialized
-// UNCAPPED, and that divergence is undetectable from storage afterwards, since the
-// limit read maps "never capped" and 0 onto each other (volume.md D7.3). Nothing on
-// this path re-asserts it; Mediator.RepairVolumeCaps is what does, and it can,
-// because a freshly recreated unit is EMPTY — the recorded cap is strictly above its
-// usage, which is the condition that pass requires before writing one. (For a volume
-// whose record says uncapped the fallback is simply correct: a plain directory is
-// exactly what "no cap" looks like on this arm.)
+// UNCAPPED, undetectably (Backend.Usage / volume.md D7.3). Nothing on this path
+// re-asserts it; Mediator.RepairVolumeCaps is what does, and it can, because a
+// freshly recreated unit is EMPTY — the recorded cap is strictly above its usage,
+// which is the condition that pass requires before writing one. (For a volume whose
+// record says uncapped the fallback is simply correct: a plain directory is exactly
+// what "no cap" looks like on this arm.)
 func (b *LocalBtrfs) Materialize(ctx context.Context, volumeID string) (*Materialized, error) {
 	if err := validateID(volumeID); err != nil {
 		return nil, err
@@ -235,21 +230,13 @@ func (b *LocalBtrfs) Clone(ctx context.Context, srcID, newID string, capBytes in
 	return b.snapshotPath(ctx, srcID, newID, capBytes, "clone")
 }
 
-// snapshotPath does the two-call sequence the substrate forces: copy the bytes, then
-// set the cap.
+// snapshotPath does the two-call sequence the substrate forces: copy the bytes, then set
+// the cap. SETTING THE CAP IS PART OF THIS METHOD, not the caller's follow-up — see
+// Backend.Snapshot for the measurement that forces it and for why `-i <qgroupid>` cannot
+// collapse the two calls into one.
 //
-// SETTING THE CAP IS PART OF THIS METHOD, not the caller's follow-up, and that is the
-// whole reason the method exists in this shape. The substrate hands a snapshot a
-// BRAND-NEW UNCAPPED quota row (measured in all four shapes, and verified by writing 3×
-// the source's cap into one), and a missing cap is SILENT AND UNDETECTABLE AFTERWARDS
-// because the limit read maps "never capped" and 0 onto each other. The invariant is
-// therefore forced to write time — here.
-//
-// The window between the two calls is real and cannot be closed: no parameter makes the
-// copy carry a cap, and `-i <qgroupid>` sets MEMBERSHIP rather than a cap (its limit is
-// shared across all members, so one member exhausting it makes SIBLINGS hit ENOSPC —
-// looks fine in a single-volume test, takes out neighbours in production). The window is
-// covered by the mediator's in-flight keep-set plus the sweep's repair-state check.
+// The window between them cannot be closed here; it is covered by the mediator's
+// in-flight keep-set plus the sweep's repair-state check.
 func (b *LocalBtrfs) snapshotPath(ctx context.Context, srcID, newID string, capBytes int64, kind string) error {
 	if err := validateID(srcID); err != nil {
 		return err
@@ -389,12 +376,10 @@ func (b *LocalBtrfs) DeletedRowIDs(context.Context) []uint64 {
 // scanning, because a scan that misidentifies a row yields an uncapped live volume with
 // zero signal.
 //
-// In-memory, so a crash loses the list. That is acceptable and bounded rather than a
-// gap being waved away: the ids only ever drive an idempotent reclaim, and the ROW
-// ITSELF is not lost — it stays on the filesystem. What a restart loses is the
-// knowledge that we were watching it. Persisting the list would mean a new store table
-// whose only consumer is a substrate-specific cleanup, which §1.3 argues against; the
-// residue is the same class of leak the orphan sweeps already exist to catch.
+// In-memory, so a crash loses the knowledge that we were watching a row — never the ROW
+// ITSELF, which stays on the filesystem, and the ids only ever drive an idempotent
+// reclaim. Persisting the list would mean a new store table whose only consumer is a
+// substrate-specific cleanup, which §1.3 argues against.
 func (b *LocalBtrfs) recordDeletedRow(id uint64) {
 	b.mu.Lock()
 	if b.deletedRows == nil {
@@ -493,24 +478,13 @@ func (b *LocalBtrfs) DestroyVolume(ctx context.Context, volumeID string) error {
 // storage unit: SetCapacity can clear a limit to 0 and leave the unit in place, so
 // the unit kind is not a reliable proxy for a cap.
 //
-// An UNREADABLE quota row is an ERROR, never a fallback to measuring, and the
-// walk it used to fall through to was wrong in a way the old rationale missed.
-// That rationale ("omitting real bytes would overcommit, so measuring is the
-// conservative direction") weighed the walk against the quota row as if the only
-// question were which number is closer. But on the failure path the `limit > 0`
-// skip above is UNREACHABLE, so the walk ran for CAPPED units too — and their
-// correct contribution here is ZERO, because the cap term already counts them.
-// So the fallback billed the same bytes twice, which §3.4.2's disjointness rule
-// forbids, at the magnitude of the whole unit rather than a rounding. It is also
-// strictly ONE-directional (the correct value being 0, any positive number
-// inflates the left side), so it cannot be argued as conservative in either
-// direction: it produces wrongful 507s on a live admission path.
-//
-// Returning the error is also what makes this consistent with the rest of the
-// seam: Backend.Usage already refuses to synthesize a number from an unreadable
-// row, §4.4-A refuses to collapse uncertainty into a definite answer, and §6.1
-// omits a usage it cannot read rather than reporting 0. This was the one place
-// that guessed.
+// An UNREADABLE quota row is an ERROR, never a fallback to measuring: on the
+// failure path the `limit > 0` skip below is UNREACHABLE, so the walk ran for
+// CAPPED units too, whose correct contribution here is ZERO — the same bytes
+// billed twice, which §3.4.2's disjointness rule forbids, at the magnitude of the
+// whole unit and strictly ONE-directional, so it produces wrongful 507s on a live
+// admission path (open-decisions, the §3.4 second-term row). Same rule as
+// Backend.Usage and §4.4-A; this was the one place that guessed.
 //
 // The read itself is retried inside the btrfs client (transient failure under
 // concurrent churn), so an error reaching here means it stayed unreadable.
@@ -563,12 +537,9 @@ func (b *LocalBtrfs) UncappedBytes(ctx context.Context) (int64, error) {
 // VolumeID, so enumeration recovers identity without any store read. A filesystem-level
 // unit enumeration is FORBIDDEN here — measured, its scope is the whole filesystem
 // regardless of the directory given, and it returns other software's units on the same
-// node. internal/btrfs is already the right shape for this; the requirement is not to
-// "optimize" it away.
+// node. The requirement is not to "optimize" it away.
 //
-// A read error is RETURNED, never flattened into an empty list: the mediator must be able
-// to tell "no units" from "the read failed", because concluding the former from the
-// latter reclaims everything.
+// A read error is RETURNED, never flattened into an empty list (Backend.ListUnitIDs).
 func (b *LocalBtrfs) ListUnitIDs(_ context.Context) ([]string, error) {
 	ents, err := os.ReadDir(b.VolumesDir)
 	if err != nil {

@@ -3,20 +3,9 @@ package orchestrator
 // The operational surface: /healthz, /readyz, /metrics (M10 item 2).
 //
 // TWO ENDPOINTS, NOT ONE /health: liveness answers "is this still the right process to be
-// running", readiness answers "should traffic come here now". They must diverge on the one
-// failure this engine has in this class — a WEDGED OUTBOX DRAIN, already detectable because
-// Publisher.Stats samples atomics on an independent goroutine (§4.4-C operability) but until now
-// surfacing only as a log line.
-//
-// A halted publisher makes this instance NOT READY while leaving it ALIVE:
-//   - not ready, because the event stream has stopped and for a billing subscriber charges stop
-//     accruing. It does not heal itself; clearing it is an operator action (Publisher.Resume).
-//   - still alive, because restarting does NOT fix it: the halt is a poison envelope in a DURABLE
-//     outbox, so a fresh process re-reads the same row and halts again. A failing liveness probe
-//     would produce a restart loop destroying running placements every cycle while never
-//     addressing the cause.
-//
-// That asymmetry is the whole design; everything else follows from it.
+// running", readiness answers "should traffic come here now". They diverge on the one failure
+// this engine has in this class — a HALTED OUTBOX PUBLISHER, which is NOT READY but still
+// ALIVE. That asymmetry earns the second endpoint; the two handler docs below carry each half.
 //
 // Prometheus text format is rendered by hand — §1.1's "no heavyweight external dependencies" is a
 // standing constraint, and what the format buys is that every scraper already reads it.
@@ -83,22 +72,20 @@ func (e *Engine) Draining() bool { return e.health.draining.Load() }
 // healthzHandler answers LIVENESS: is this process the right process to keep
 // running?
 //
-// It deliberately checks almost nothing, and that restraint is the design. A liveness
-// probe's only remedy is a restart, so anything a restart cannot fix must not appear
-// here. The two candidates worth naming and refusing:
+// It deliberately checks almost nothing: a liveness probe's only remedy is a restart, so
+// anything a restart cannot fix must not appear here. The two candidates refused:
 //
-//   - a HALTED PUBLISHER is not a liveness failure. The poison envelope is in the
-//     durable outbox, so a restarted process re-reads it and halts again; failing
-//     liveness would produce a restart loop that tears down every running sandbox's
-//     placement on each cycle and never touches the cause.
-//   - a STORE ERROR is not a liveness failure either. A corrupt or unwritable store
-//     file survives a restart too, and a restart loop over it destroys the running
-//     sandboxes' contact with the engine (§4.4-A takeover happens per boot) while the
-//     disk stays as full as it was.
+//   - a HALTED PUBLISHER. The poison envelope is in the DURABLE outbox, so a restarted
+//     process re-reads it and halts again; failing liveness would produce a restart loop
+//     that tears down every running sandbox's placement on each cycle and never touches
+//     the cause. (readyzHandler case 3 owns the readiness half.)
+//   - a STORE ERROR. A corrupt or unwritable store file survives a restart too, and a
+//     restart loop over it destroys the running sandboxes' contact with the engine (§4.4-A
+//     takeover happens per boot) while the disk stays as full as it was.
 //
-// So this answers 200 whenever the process is running and has not begun draining.
-// During a drain it reports 503: the process is going away by intent, and a
-// supervisor that would restart it should do so AFTER it exits, not while it drains.
+// So: 200 whenever the process is running and has not begun draining. During a drain, 503 —
+// the process is going away by intent, and a supervisor that would restart it should do so
+// AFTER it exits.
 func (e *Engine) healthzHandler(w http.ResponseWriter, r *http.Request) {
 	if e.health.draining.Load() {
 		writeHealth(w, http.StatusServiceUnavailable, healthBody{
@@ -113,31 +100,27 @@ func (e *Engine) healthzHandler(w http.ResponseWriter, r *http.Request) {
 
 // readyzHandler answers READINESS: should traffic come to this instance now?
 //
-// Three ways to be unready, and each is a state where sending traffic here is worse
-// than sending it elsewhere (or, on a single node, worse than a clear refusal):
+// Three ways to be unready, each a state where sending traffic here is worse than sending
+// it elsewhere (or, on a single node, worse than a clear refusal):
 //
 //  1. DRAINING — a shutdown has begun. New work must not arrive.
 //
 //  2. BOOTING — the listener is open but the boot sequence has not finished.
 //
-//  3. THE OUTBOX PUBLISHER IS HALTED — PUSH delivery has stopped, so lifecycle
-//     transitions are no longer reaching store.Sink subscribers. The API still works,
-//     and that is exactly why this must show up somewhere: a caller creating sandboxes
-//     against a halted publisher gets correct API answers while a Sink subscriber
-//     silently stops seeing them.
+//  3. THE OUTBOX PUBLISHER IS HALTED — PUSH delivery has stopped, so lifecycle transitions
+//     are no longer reaching store.Sink subscribers. The API still works, which is why this
+//     must show up somewhere: a caller creating sandboxes against a halted publisher gets
+//     correct API answers while a Sink subscriber silently stops seeing them. Its remedy is
+//     an operator calling Publisher.Resume after fixing the sink, not a restart — the reason
+//     it is here and not in /healthz.
 //
-//     SCOPE, and it is narrower than "everything downstream": this says nothing about
-//     the PULL read surface. `GET /v1/events` pages the outbox by the retention window
-//     and NOT by delivery state (SQLite.Events carries no `published_at` predicate,
-//     §4.4-C: "whether the engine's own sink has seen some row is not a fact an
-//     external subscriber should depend on"), so while the publisher is halted a pull
-//     subscriber still reads every event, losing none. Stating it the other way round
-//     invites a caller to treat a 503 here as "the engine is unusable" and trip a
-//     breaker — a self-inflicted outage with the engine intact and zero events lost.
-//
-// Case 3 is the one that earns this endpoint, and its remedy is an operator calling
-// Publisher.Resume after fixing the sink — not a restart, which is why it is here and
-// not in /healthz.
+//     SCOPE, narrower than "everything downstream": this says nothing about the PULL read
+//     surface. `GET /v1/events` pages the outbox by the retention window and NOT by delivery
+//     state (SQLite.Events carries no `published_at` predicate, §4.4-C: "whether the engine's
+//     own sink has seen some row is not a fact an external subscriber should depend on"), so
+//     while the publisher is halted a pull subscriber still reads every event, losing none.
+//     Stating it the other way round invites a caller to treat a 503 here as "the engine is
+//     unusable" and trip a breaker — a self-inflicted outage with zero events lost.
 func (e *Engine) readyzHandler(w http.ResponseWriter, r *http.Request) {
 	if e.health.draining.Load() {
 		writeHealth(w, http.StatusServiceUnavailable, healthBody{
@@ -248,11 +231,6 @@ func (e *Engine) metricsHandler(w http.ResponseWriter, r *http.Request) {
 		"gauge", s.InFlightFor.Seconds())
 
 	// --- sandbox counts by lifecycle state ---
-	//
-	// Best-effort: a store read failure exports the counts as absent rather than as
-	// zero, following the §6.1 discipline that an unreadable value is omitted rather
-	// than reported as 0 — a zeroed gauge here would read as "the node is empty",
-	// which is a different and alarming claim.
 	if list, err := e.Mediator.List(r.Context()); err == nil {
 		counts := map[model.Lifecycle]int{}
 		for _, sb := range list {
@@ -268,17 +246,14 @@ func (e *Engine) metricsHandler(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(&b, "warren_sandboxes{state=%q} %d\n", st, counts[model.Lifecycle(st)])
 		}
 	} else {
-		// THE CAUSE IS DELIBERATELY NOT IN THIS COMMENT, and that is the §6.2 rule
-		// rather than terseness: an error's raw text carries absolute host paths
-		// (btrfs wraps every call as `<verb> <path>: %w`), and this comment is a
-		// response body like any other — `edge_test.go`'s funnel guard catches the
-		// attempt, which is how this line came to be written this way. The cause goes
-		// to the log, where host paths belong.
+		// THE CAUSE IS DELIBERATELY NOT IN THE BODY (§6.2): an error's raw text carries
+		// absolute host paths (btrfs wraps every call as `<verb> <path>: %w`), and a metrics
+		// body is a response body like any other — `edge_test.go`'s funnel guard catches the
+		// attempt, which is how this line came to be written this way.
 		//
-		// Omitted rather than exported as 0: a zeroed gauge here would read as "the
-		// node is empty", which is a different and more alarming claim than "this
-		// number could not be read" (the same discipline §6.1 applies to an
-		// unreadable `used_byte`).
+		// Omitted rather than exported as 0: a zeroed gauge would read as "the node is
+		// empty", a different and more alarming claim than "this number could not be read"
+		// (the discipline §6.1 applies to an unreadable `used_byte`).
 		b.WriteString("# warren_sandboxes omitted: the store read failed; see the process log for the cause.\n")
 		log.Printf("metrics: sandbox state counts omitted, store read failed: %v", err)
 	}
@@ -300,29 +275,26 @@ func boolGauge(v bool) int {
 // WHAT A SIGTERM DOES TO RUNNING SANDBOXES: NOTHING. They keep running and the next boot
 // re-adopts them (§4.4-A: "a takeover is not a resume — the same placement, the same IP, and no
 // new epoch"), so the cost of exiting on a running sandbox is a gap in contact, not lost state.
-// Pausing them on the way out would be WORSE: a pause discards guest memory (§4.2 / §1.4), so
-// restarting to change a flag would destroy every guest's in-memory work, and taking a
-// per-sandbox lock each (§4.4-B) means a busy node cannot finish inside any sane
+// Pausing them on the way out would be WORSE: a pause discards guest memory (§4.2 / §1.4), and
+// taking a per-sandbox lock each (§4.4-B) means a busy node cannot finish inside any sane
 // TimeoutStopSec — SIGKILL lands halfway anyway, now with half the sandboxes paused.
 //
 // So what this drains is the ENGINE'S OWN in-flight work, not the guests:
 //
-//  1. mark not-ready first, so a load balancer stops sending here while the rest
-//     proceeds, and close the handler gate so no new request enters;
+//  1. mark not-ready first, so a load balancer stops sending here while the rest proceeds,
+//     and close the handler gate so no new request enters;
 //  2. stop the reaper and the publisher, and wait for them to exit;
-//  3. stop the HTTP listener and let in-flight requests finish. Measured:
-//     http.Server.Shutdown waits for an in-flight handler WITHOUT cancelling its
-//     context (a handler that ran through a Shutdown saw r.Context().Err() == nil),
-//     which is what lets a mid-flight `resume` complete its cold-start chain
-//     intact rather than being torn in half and left for reconciliation;
+//  3. stop the HTTP listener and let in-flight requests finish. Measured: Server.Shutdown
+//     waits for an in-flight handler WITHOUT cancelling its context (a handler that ran
+//     through a Shutdown saw r.Context().Err() == nil), which is what lets a mid-flight
+//     `resume` complete its cold-start chain rather than be torn in half;
 //  4. wait for every ENTERED handler to return, including after a timed-out
 //     Server.Shutdown forces connections closed;
 //  5. close the store, behind every user of it.
 //
 // THIS FUNCTION PERFORMS ALL FIVE: step 2 sits in the middle, so an owner of only 1/3/4/5
-// forces its caller to re-implement the order, leaving the sequence stated here and executed
-// there. Every wait is bounded by the single ctx, or one unbounded wait makes
-// --shutdown-timeout meaningless.
+// forces its caller to re-implement the order. Every wait is bounded by the single ctx, or one
+// unbounded wait makes --shutdown-timeout meaningless.
 //
 // 2 BEFORE 3 is the one ordering that is a trade rather than a dependency: the reaper is an
 // AUTONOMOUS MUTATOR that can begin a fresh transition one tick before the deadline, taking a
@@ -336,12 +308,11 @@ func boolGauge(v bool) int {
 // unconditional. Per-step budgets would make the operator's one number silently five times
 // larger.
 //
-// THE DEADLINE IS NOT OPTIONAL, measured: Shutdown waits for open connections and the data
-// plane's normal shape is a LONG-LIVED STREAM (an attached shell at a prompt) — a 2 s deadline
-// against one open stream returned "context deadline exceeded" after the full 2 s, so a
-// deadline-free Shutdown on such a node would never return. On expiry the streams are closed
-// and the drain proceeds: a severed stream is reconnectable (`Connect` exists for it), a
-// shutdown that never completes is not.
+// THE DEADLINE IS NOT OPTIONAL, measured: the data plane's normal shape is a LONG-LIVED STREAM
+// (an attached shell at a prompt) — a 2 s deadline against one open stream returned "context
+// deadline exceeded" after the full 2 s, so a deadline-free Shutdown on such a node would never
+// return. On expiry the streams are closed and the drain proceeds: a severed stream is
+// reconnectable (`Connect` exists for it), a shutdown that never completes is not.
 type shutdownServer interface {
 	Shutdown(context.Context) error
 	Close() error
@@ -397,11 +368,10 @@ func (e *Engine) closeStore() error {
 
 // registerHealthRoutes mounts the three operational endpoints.
 //
-// They are NOT under /v1: the §6.1 contract is the sandbox-centric API, and an
-// operational endpoint is not part of it. Keeping them off that prefix means a
-// gateway can route or refuse them separately from the API — an operator scraping
-// metrics from a monitoring network is a different caller from one creating
-// sandboxes, and this leaves that a deployment decision rather than a fixed one.
+// NOT under /v1: the §6.1 contract is the sandbox-centric API, and an operational endpoint is
+// not part of it. Keeping them off that prefix lets a gateway route or refuse them separately
+// — an operator scraping metrics from a monitoring network is a different caller from one
+// creating sandboxes, and this leaves that a deployment decision.
 func (e *Engine) registerHealthRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/healthz", e.healthzHandler)
 	mux.HandleFunc("/readyz", e.readyzHandler)

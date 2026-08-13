@@ -198,10 +198,7 @@ func barrierLens(b *barrier) (inFlight, draining int) {
 // proportional to the churn rather than as a race that may not trigger. Reusing
 // one id would hide a leak entirely: the map would hold one entry either way.
 //
-// The two maps fail differently and both are checked. An inFlight leak grows the
-// operation set per sandbox; a draining leak ALSO wedges the sandbox — a stranded
-// draining entry makes enter refuse that sandbox's mutating RPCs forever, so it is
-// a permanent functional break, not merely memory.
+// The two maps fail differently and both are checked (how, in the failure messages).
 func TestBarrierMapsCollectAfterChurn(t *testing.T) {
 	b := newBarrier()
 	const sandboxes = 1000
@@ -239,9 +236,7 @@ func TestBarrierMapsCollectAfterChurn(t *testing.T) {
 // does NOT end with a clean drain:
 //
 //   - a drain that TIMES OUT still holds the entry (correctly — the op is live),
-//     and the late release must then still collect it. Otherwise every pause that
-//     hit its grace would leave permanent residue, i.e. the leak would appear
-//     exactly under the load that causes timeouts.
+//     and the late release must then still collect it.
 //   - a REFUSED enter must not create anything. It returns (nil, false), so there
 //     is no release closure to call and an entry made before the refusal check
 //     could never be reclaimed by anyone.
@@ -283,14 +278,11 @@ func TestBarrierReclaimsOnTimeoutAndRefusalPaths(t *testing.T) {
 // STRUCTURAL guard: every production acquirer of a barrier entry must release it
 // with a defer.
 //
-// This is the assertion the lane exists for. The reclaim invariant above is a
-// property of barrier.go, but it is only REACHED if callers run the closure enter
-// hands back; a caller that drops it strands an entry forever — which is the leak
-// the register row wrongly attributed to barrier.go itself. Nothing else catches
-// that: the closure is legitimately ignorable in Go (bind it, never call it, and
-// the build is clean), the stranded entry is invisible until it accumulates, and
-// the runtime tests above drive the barrier directly, so they cannot see a call
-// site at all.
+// The reclaim invariant above is a property of barrier.go, but it is only REACHED if
+// callers run the closure enter hands back. Nothing else catches a caller that drops
+// it: the closure is legitimately ignorable in Go (bind it, never call it, and the
+// build is clean), the stranded entry is invisible until it accumulates, and the
+// runtime tests above drive the barrier directly, so they see no call site at all.
 //
 // A source scan rather than a runtime check, because the failure is a MISSING
 // statement — there is no execution in which "the defer nobody wrote" can be
@@ -543,14 +535,10 @@ func callsIdent(call *ast.CallExpr, name string) bool {
 // TestCrashPauseDoesNotDrain pins the guard in pauseLocked (`if kind !=
 // "crash-paused"`).
 //
-// WHY ITS REGRESSION IS SILENT AND EXPENSIVE: an involuntary pause happens when L2 is
-// already down, so no mutating fs RPC can still complete — there is nothing to drain.
-// Draining anyway cannot corrupt anything, which is exactly why no test would notice:
-// it just WAITS. For a dead unit it delays recording a death already observed; for the
-// §4.3 D4b transport-down escalation (L1 alive, transport wedged) it stalls for the
-// full grace on RPCs that can never finish — the very wedge the escalation exists to
-// break — and the reaper's sweep is serial, so one wedged sandbox delays every other
-// sandbox behind it.
+// WHY ITS REGRESSION IS SILENT: draining an involuntary pause corrupts nothing, it just
+// WAITS, so no correctness test would notice. The cost is in pauseLocked's own comment,
+// plus one this test adds: the reaper's sweep is serial, so one wedged sandbox delays
+// every other sandbox behind it.
 //
 // Observed through the barrier's own gate rather than a clock: after a drain, `enter`
 // REFUSES new mutating writes (that is what draining means). A crash-pause must leave

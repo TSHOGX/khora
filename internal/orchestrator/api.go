@@ -30,14 +30,13 @@ import (
 // proxied by sandbox ID (the orchestrator resolves the current endpoint
 // internally via the mediator, so placement never leaves the engine).
 //
-// This is a deliberately small net/http router (no framework). The outer-edge
-// protocol split is settled (transport D5): the CONTROL plane (sandbox
-// lifecycle) is REST/JSON on this router; the process/fs DATA plane is
-// Connect-RPC (the SAME transport.proto as the inner edge, re-proxied by
-// sandbox_id — D5.2). The two mount on one mux: Connect services own their
-// /engine.transport.v1.*/ paths, control-plane REST owns /v1/... . The whole
-// thing is wrapped in h2c so the data-plane server-streams work over cleartext
-// HTTP/2 (D4.2). The data plane is Connect-only, no REST/NDJSON facade (D5.3).
+// A deliberately small net/http router (no framework). The outer-edge protocol
+// split is settled (transport D5): the CONTROL plane (sandbox lifecycle) is
+// REST/JSON here; the process/fs DATA plane is Connect-RPC (the SAME
+// transport.proto as the inner edge, re-proxied by sandbox_id — D5.2), and is
+// Connect-only, no REST/NDJSON facade (D5.3). The two mount on one mux: Connect
+// services own their /engine.transport.v1.*/ paths, control-plane REST owns
+// /v1/... .
 func (e *Engine) HTTPHandler() http.Handler {
 	mux := http.NewServeMux()
 
@@ -46,8 +45,6 @@ func (e *Engine) HTTPHandler() http.Handler {
 	mux.Handle(transportv1connect.NewFsServiceHandler(&fsProxy{e: e}))
 
 	// --- operational surface: /healthz, /readyz, /metrics (health.go) ---
-	// Deliberately NOT under /v1: the §6.1 contract is the sandbox-centric API, and
-	// an operational endpoint is not part of it.
 	e.registerHealthRoutes(mux)
 
 	// --- control plane: §6.1 REST/JSON ---
@@ -117,10 +114,8 @@ type createReq struct {
 	Retention   string `json:"retention"`
 	// Resource-limit Binding inputs (§6.1 / §3.4). Omitted / 0 = unlimited on that
 	// axis. Three separate fields, never one blended "size" — the axes and why they
-	// are not interchangeable are documented on model.Limits. There is deliberately
-	// no io_* field: the disk I/O rate axis joins in the same shape once it has a
-	// consumer (§3.4 / §5.A), and its one open question — where the whole-disk
-	// MAJ:MIN comes from — is settled (provider-derived, never on the seam).
+	// are not interchangeable are documented on model.Limits. No io_* field: the disk
+	// I/O rate axis joins in the same shape once it has a consumer (§3.4 / §5.A).
 	CPUMillis  int64 `json:"cpu_millis"`
 	MemoryByte int64 `json:"memory_byte"`
 	DiskByte   int64 `json:"disk_byte"`
@@ -163,9 +158,8 @@ func parseVolumeBinding(items []volumeBindingItem) ([]model.Mount, error) {
 		}
 		access := model.AccessMode(it.Access)
 		if it.Access == "" {
-			// No default is invented. A caller who does not say how a volume is mounted has
-			// not expressed a binding, and guessing would silently pick either an exclusive
-			// lease they did not ask for or a shared writer they did not intend.
+			// No default is invented: guessing would silently pick either an exclusive
+			// lease the caller did not ask for or a shared writer they did not intend.
 			return nil, errors.New("volumes: access is required (exclusive / shared-ro / shared-rw)")
 		}
 		if !access.Valid() {
@@ -180,20 +174,16 @@ func parseVolumeBinding(items []volumeBindingItem) ([]model.Mount, error) {
 	return out, nil
 }
 
-// parseTTL is THE spelling of a wire TTL for both write points — create and PATCH
-// (§3.4 idle_timeout / retention). One function rather than two blocks, because the
-// defect it closes is precisely the two write points disagreeing: create parsed
-// without a sign check while PATCH refused a negative, so the SAME field was legal on
-// one and a 400 on the other.
+// parseTTL is THE spelling of a wire TTL for both write points — create and PATCH (§3.4
+// idle_timeout / retention). One function because the defect it closes is the two write points
+// disagreeing: create parsed without a sign check while PATCH refused a negative, so the SAME
+// field was legal on one and a 400 on the other.
 //
-// A NEGATIVE DURATION IS REFUSED because its effect is SILENT rather than wrong-but-visible:
-// both consumers read a non-positive TTL as an OPT-OUT (the reaper returns early on
-// `Retention <= 0`, idle classification fires only on `IdleTimeout > 0`), so `-5m` produces
-// NEVER EVICT / NEVER IDLE-PAUSE with nothing reporting that the value was not honored. The
-// boundary is the only place the mistake stays visible.
-//
-// `0` remains legal: it is the DOCUMENTED opt-out spelling (§6.1 `retention: 0` = never evict),
-// a chosen value, whereas a negative is one nothing in the engine can mean.
+// A NEGATIVE DURATION IS REFUSED because its effect is SILENT: both consumers read a
+// non-positive TTL as an OPT-OUT (the reaper returns early on `Retention <= 0`, idle
+// classification fires only on `IdleTimeout > 0`), so `-5m` produces NEVER EVICT / NEVER
+// IDLE-PAUSE with nothing reporting that the value was not honored. `0` remains legal —
+// it is the DOCUMENTED opt-out spelling (§6.1 `retention: 0` = never evict).
 //
 // Returns a POINTER because both call sites need one — create's CreateSpec and PATCH's
 // store.Binding both distinguish "not given" from "given".
@@ -217,10 +207,8 @@ type createResp struct {
 
 func (e *Engine) handleCreate(w http.ResponseWriter, r *http.Request) {
 	var req createReq
-	// UNKNOWN FIELDS REFUSED (see strictDecode): without it a caller who typed
-	// `"netwrok"` gets a 201 and believes their declaration took effect, while the
-	// engine recorded the omitted-network normalization — a `deny` sandbox. Both
-	// outcomes are legal, which is exactly why the misspelling must be an error.
+	// UNKNOWN FIELDS REFUSED — a misspelled `network` would otherwise be a silent `deny`
+	// sandbox (see strictDecode).
 	if err := strictDecode(r.Body, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
@@ -350,10 +338,9 @@ func (e *Engine) handleListTemplates(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-// templateResp is one entry of GET /v1/templates (§6.1). A NAMED type rather than
-// the inline map it replaced, because the generated OpenAPI document derives this
-// operation's schema by reflection (openapi.go) — a map is invisible to that, so an
-// inline response is a response the published contract cannot describe.
+// templateResp is one entry of GET /v1/templates (§6.1). A NAMED type rather than an
+// inline map, because the generated OpenAPI document derives this operation's schema by
+// reflection (openapi.go) and a map is invisible to that.
 type templateResp struct {
 	TemplateID string `json:"template_id"`
 	// Parent is the sandbox this Template was promoted from, "" for a builtin.
@@ -449,53 +436,45 @@ type patchReq struct {
 	DiskByte    *int64  `json:"disk_byte"`
 	IdleTimeout *string `json:"idle_timeout"`
 	Retention   *string `json:"retention"`
-	// Volumes is the mount table's COMPLETE binding (§6.1). A POINTER slice so
-	// "omitted" is distinguishable from "given as empty" — and here that distinction
-	// carries real weight: an empty array means DETACH EVERYTHING, which is a legitimate
-	// request and must not be confused with "leave the mounts alone".
-	//
-	// It is on PATCH rather than on separate attach/detach endpoints because §6.2
-	// already defines PATCH as THE rebinding point: a sandbox holds one complete
-	// binding at all times, and PATCH swaps one whole binding for another.
+	// Volumes is the mount table's COMPLETE binding (§6.1) — an empty array means
+	// DETACH EVERYTHING, which is why the pointer's "omitted vs given as empty"
+	// distinction carries weight here. On PATCH rather than separate attach/detach
+	// endpoints because §6.2 defines PATCH as THE rebinding point: a sandbox holds one
+	// complete binding at all times, and PATCH swaps one whole binding for another.
 	Volumes *[]volumeBindingItem `json:"volumes"`
 	// Network is the §5.D declaration, swapped WHOLE for WHOLE (§6.2 — no field-level
-	// merge, no pending value). A pointer for the usual reason, which carries real
-	// weight here: the zero declaration is not "no change", it is
-	// `{deny, [], [], []}` — the most restrictive declaration there is — so a value
-	// type would make every unrelated PATCH silently reset the sandbox to
+	// merge, no pending value). The pointer carries real weight: the zero declaration is
+	// not "no change", it is `{deny, [], [], []}` — the most restrictive there is — so a
+	// value type would make every unrelated PATCH silently reset the sandbox to
 	// deny-everything.
 	//
-	// `applies_at: next-resume`, and editable only from `paused` (the mediator
-	// enforces the state gate): the provider materializes it at placement, so
-	// accepting the edit on `running` would leave the record and the live rule set
-	// disagreeing indefinitely.
+	// `applies_at: next-resume`, and editable only from `paused` (the mediator enforces
+	// the state gate): the provider materializes it at placement, so accepting the edit
+	// on `running` would leave the record and the live rule set disagreeing indefinitely.
 	//
-	// PUBLISH DOES NOT COME THROUGH HERE — it has its own hot-add endpoint — but it
-	// CAN be removed through here, since there is no un-publish endpoint. §6.1 makes
-	// the read-modify-write REQUIRED rather than advisory for exactly that reason: a
-	// binding built from a stale GET silently drops a publish added in between, and
-	// the reverse (writing back an already-removed publish) reopens an inbound port.
+	// PUBLISH DOES NOT COME THROUGH HERE — it has its own hot-add endpoint — but it CAN
+	// be removed through here, since there is no un-publish endpoint. §6.1 makes the
+	// read-modify-write REQUIRED rather than advisory for that reason: a binding built
+	// from a stale GET silently drops a publish added in between, and the reverse
+	// (writing back an already-removed publish) reopens an inbound port.
 	Network *networkWire `json:"network"`
 }
 
 type patchResp struct {
 	SandboxID string `json:"sandbox_id"`
 	State     string `json:"state"`
-	// AppliesAt tells the caller WHEN the change takes effect rather than leaving
-	// them to infer it: "now" for TTL fields (the reaper re-reads the record every
-	// sweep) vs "next-resume" for resource caps (the providers materialize them at
-	// placement, §3.4). Making the deferral explicit is the point.
+	// AppliesAt tells the caller WHEN the change takes effect rather than leaving them to
+	// infer it: "now" for TTL fields (the reaper re-reads the record every sweep) vs
+	// "next-resume" for resource caps (the providers materialize them at placement, §3.4).
 	AppliesAt string `json:"applies_at"`
-	// LeaseReleased reports that a detach took effect IMMEDIATELY, which
-	// `applies_at` alone cannot express (§6.1).
+	// LeaseReleased reports that a detach took effect IMMEDIATELY, which `applies_at`
+	// alone cannot express (§6.1).
 	//
-	// A mount change SPLITS INTO TWO EFFECT TIMES, and that is a design fact rather
-	// than a detail to fold away: the guest TOPOLOGY changes at next-resume (runsc takes
-	// mounts at startup and does not hot-plug), while a DETACH RELEASES THE EXCLUSIVE
-	// LEASE AT ONCE — the lease is the row's existence, so deleting the row releases it
-	// now. A caller waiting to attach that volume elsewhere can proceed immediately even
-	// though the detaching sandbox still shows the old topology until it resumes.
-	// Omitted when nothing was released.
+	// A mount change SPLITS INTO TWO EFFECT TIMES: the guest TOPOLOGY changes at
+	// next-resume (runsc takes mounts at startup and does not hot-plug), while a DETACH
+	// RELEASES THE EXCLUSIVE LEASE AT ONCE — the lease is the row's existence, so deleting
+	// the row releases it now. A caller waiting to attach that volume elsewhere can
+	// proceed immediately even though the detaching sandbox still shows the old topology.
 	LeaseReleased bool `json:"lease_released,omitempty"`
 }
 
@@ -543,14 +522,12 @@ func (e *Engine) handlePatch(w http.ResponseWriter, r *http.Request, id model.Sa
 		mounts = &binding
 	}
 
-	// The declaration, whole for whole (§6.2 — no field-level merge, no pending value).
-	//
-	// DECODED here, VALIDATED below the seam. The split is the §4 ownership line: the
-	// decode is a wire concern (this package owns the JSON shape and its 400s), while
-	// §6.2's declaration classes are a WRITE-POINT obligation the mediator applies for
-	// all three write points — create, PATCH, publish — so that a validation living in
-	// one caller is not a validation the next caller lacks. Rebind runs it first, ahead
-	// of even its state gate, so "validation precedes the admission gate" still holds.
+	// DECODED here, VALIDATED below the seam — the §4 ownership line: the decode is a
+	// wire concern (this package owns the JSON shape and its 400s), while §6.2's
+	// declaration classes are a WRITE-POINT obligation the mediator applies for all three
+	// write points — create, PATCH, publish — so a validation living in one caller is not
+	// a validation the next caller lacks. Rebind runs it ahead of even its state gate, so
+	// "validation precedes the admission gate" still holds.
 	if req.Network != nil {
 		got, derr := req.Network.decode()
 		if derr != nil {
@@ -560,20 +537,17 @@ func (e *Engine) handlePatch(w http.ResponseWriter, r *http.Request, id model.Sa
 		b.Network = &got
 	}
 
-	// ONE mediator call for the WHOLE request, and the shape is load-bearing rather than
-	// tidy. §4.4-B requires PATCH to hold this sandbox's transition lock for its whole
-	// duration, which three separately-locking calls cannot do: between them a resume or
-	// an evict fits entirely, so `{retention, network}` on a `paused` sandbox committed
-	// the retention and then answered 409 `state=running` — the caller told "nothing
-	// changed" while the store disagreed. Rebind evaluates every gate under one lock and
-	// orders the store-arbitrated mount commit first, so every 4xx from here really did
-	// change nothing.
+	// ONE mediator call for the WHOLE request. §4.4-B requires PATCH to hold this
+	// sandbox's transition lock for its whole duration, which three separately-locking
+	// calls cannot do: between them a resume or an evict fits entirely, so
+	// `{retention, network}` on a `paused` sandbox committed the retention and then
+	// answered 409 `state=running` — the caller told "nothing changed" while the store
+	// disagreed. Rebind evaluates every gate under one lock and orders the
+	// store-arbitrated mount commit first, so every 4xx from here really did change
+	// nothing.
 	released, err := e.Mediator.Rebind(r.Context(), id, lifecycle.RebindSpec{
 		Binding: b,
-		// A POINTER, so "detach everything" (`"volumes": []`) stays distinguishable from
-		// "leave the mounts alone" (field omitted) — §6.2 makes the empty array a real
-		// request, not a no-op.
-		Mounts: mounts,
+		Mounts:  mounts,
 	})
 	if err != nil {
 		statusFor(w, err)
@@ -601,57 +575,42 @@ const (
 	// eventsDefaultLimit is the page size for a request that omits `limit`.
 	eventsDefaultLimit = 100
 
-	// eventsMaxLimit is a HARD server-side cap, not merely a default: a `limit`
-	// above it is clamped down, so no caller can ask for a bigger page. A default
-	// alone would be worthless here because the caller controls the parameter.
-	//
-	// There must be exactly ONE cap and every read path must share it. The audited
-	// failure was precisely two paths with mismatched caps — one capped at 10k, a
-	// second uncapped — so `after=0` on the uncapped one materialized the entire
+	// eventsMaxLimit is a HARD server-side cap, not merely a default: a `limit` above it
+	// is clamped down, because the caller controls the parameter. Exactly ONE cap, shared
+	// by every read path — the audited failure was two paths with mismatched caps (one at
+	// 10k, a second uncapped), so `after=0` on the uncapped one materialized the entire
 	// retained backlog (plus a same-sized channel) while holding a lock.
 	//
-	// Note the direction of the argument, which runs opposite to the intuitive
-	// one: because we never trim (see §4.4-C), the retained window is ALL history,
-	// so `after=0` must page through everything that ever happened and the row
-	// count only grows. Not trimming AGGRAVATES the unbounded-backlog hazard
-	// rather than relieving it, which is what makes this cap mandatory rather than
-	// a nicety.
+	// The direction of the argument runs opposite to the intuitive one: because we never
+	// trim (§4.4-C), the retained window is ALL history, so `after=0` must page through
+	// everything that ever happened. Not trimming AGGRAVATES the unbounded-backlog hazard
+	// rather than relieving it.
 	eventsMaxLimit = 1000
 
-	// eventsMaxWait is the HARD ceiling on `wait`, for the same reason eventsMaxLimit
-	// is one: the parameter is caller-controlled, so giving only a default gives
-	// nothing. Clamped rather than refused (a caller asking for longer gets the
-	// longest allowed, and re-polls), matching `limit`'s treatment.
+	// eventsMaxWait is the HARD ceiling on `wait`, caller-controlled like `limit` and
+	// clamped the same way (a caller asking longer gets the longest allowed, and re-polls).
 	//
-	// 20s, and the binding constraint is THIS PROCESS'S OWN DRAIN, not a proxy in front
-	// of it. --shutdown-timeout defaults to 30s and bounds the whole teardown graph;
+	// 20s, and the binding constraint is THIS PROCESS'S OWN DRAIN, not a proxy in front of
+	// it. --shutdown-timeout defaults to 30s and bounds the whole teardown graph;
 	// Server.Shutdown deliberately does NOT cancel an in-flight handler's context (so a
-	// mid-flight resume finishes its cold-start chain), so a hold longer than that
-	// deadline is guaranteed to reach the force-close path and report the drain as
-	// having timed out — on a request that was doing nothing but waiting. Keeping the
-	// ceiling under the default drain makes a waiting poll finish on its own instead,
-	// and needs no new shutdown machinery to arrange it.
+	// mid-flight resume finishes its cold-start chain), so a hold longer than that deadline
+	// is guaranteed to reach the force-close path and report the drain as having timed out —
+	// on a request that was doing nothing but waiting. It also stays clear of the idle-read
+	// timeouts common in proxies (65-75s), which would turn a longer hold into a 504 the
+	// subscriber must interpret rather than the empty 200 it would have received.
 	//
-	// It also stays clear of the idle-read timeouts common in proxies (65-75s), which
-	// would otherwise turn a longer hold into a 504 the subscriber must interpret —
-	// strictly worse than the empty 200 it would have received.
-	//
-	// A deployment that lowers --shutdown-timeout below this reintroduces the overlap;
-	// the cost is one force-closed idle poll per drain, which is reconnectable (the
-	// cursor did not advance) and is why this is a constant rather than a knob.
+	// A deployment that lowers --shutdown-timeout below this reintroduces the overlap; the
+	// cost is one force-closed idle poll per drain, which is reconnectable (the cursor did
+	// not advance) and is why this is a constant rather than a knob.
 	eventsMaxWait = 20 * time.Second
 
-	// eventsWaitPoll is the re-read cadence while waiting. §4.4-C settles the
-	// mechanism — "a presentation-layer adapter that server-polls the same pull
-	// query", which holds no state and shares the same `seq` — so this deliberately
-	// does NOT add an append-notification channel to the store contract: that would
-	// be per-subscriber state in the one place the section rules it out, and every
-	// backend would owe the same wakeup semantics.
-	//
-	// The cost is bounded and worth naming: one COUNT-free indexed read per waiting
-	// request per tick, against a read the subscriber was already making — at a
-	// higher rate than most poll loops, but only while a subscriber is genuinely
-	// waiting, and it replaces a poll that ran whether or not anything had happened.
+	// eventsWaitPoll is the re-read cadence while waiting. §4.4-C settles the mechanism —
+	// "a presentation-layer adapter that server-polls the same pull query", which holds no
+	// state and shares the same `seq` — so this deliberately does NOT add an
+	// append-notification channel to the store contract: that would be per-subscriber state
+	// in the one place the section rules it out, and every backend would owe the same wakeup
+	// semantics. The cost is one COUNT-free indexed read per waiting request per tick,
+	// against a read the subscriber was already making.
 	eventsWaitPoll = 250 * time.Millisecond
 )
 
@@ -665,8 +624,7 @@ type eventItem struct {
 	Kind      string `json:"kind"`
 	State     string `json:"state"`
 	// Cause is WHY, present only on a Kind reachable by more than one route (§4.4-C),
-	// omitted otherwise — additive, so a subscriber ignoring it reads the stream as
-	// before. Today: `destroyed` carries `requested` (the Destroy verb) or
+	// omitted otherwise. Today: `destroyed` carries `requested` (the Destroy verb) or
 	// `retention-expired` (the reaper's evict of a paused sandbox past `retention`).
 	//
 	// For `destroyed` this is the fact's ONLY carrier: the record is deleted in the same
@@ -679,30 +637,19 @@ type eventItem struct {
 
 type eventsResp struct {
 	Events []eventItem `json:"events"`
-	// Earliest / Latest bound the retained window (0/0 when the outbox is empty).
-	//
-	// They are what makes the 410 actionable: a caller whose cursor fell below the
-	// window restarts from `earliest` rather than guessing. Reachable only when a
-	// retention window is configured (§4.4-C) — with trimming off `earliest` never
-	// advances, so a deployment that sets nothing never sees a 410 and the shape
-	// costs it nothing.
+	// Earliest / Latest bound the retained window (0/0 when the outbox is empty). They
+	// are what makes the 410 actionable: a caller whose cursor fell below the window
+	// restarts from `earliest` rather than guessing. Reachable only when a retention
+	// window is configured (§4.4-C) — with trimming off `earliest` never advances.
 	Earliest int64 `json:"earliest"`
 	Latest   int64 `json:"latest"`
 }
 
-// handleEvents is GET /v1/events?after=<seq>&limit=<n> (§6.1 / §4.4-C): the
-// engine-level lifecycle event stream, replayed by cursor. PULL ONLY — the engine
-// tracks no subscribers (§1.3), so there is no state here to leak or clean up.
-//
-// A cursor-paged GET is ordinary CRUD, which is why this belongs on the control plane: the
-// stream is engine-level, neither per-sandbox nor per-pid, so the data plane has nowhere to
-// address it from.
-//
-// readEvents is that replay read plus the optional `wait` hold; wait == 0 is one read. The loop
-// re-runs THE SAME query rather than waiting on a notification, which is §4.4-C's own
-// prescription ("a presentation-layer adapter that server-polls the same pull query, sharing
-// the same `seq`"): no subscriber table, no eviction policy, no cleanup path, and every store
-// backend keeps its contract unchanged.
+// readEvents is the §6.1 / §4.4-C replay read plus the optional `wait` hold; wait == 0 is
+// one read. PULL ONLY — the engine tracks no subscribers (§1.3), so there is no state here
+// to leak or clean up, and the stream is engine-level (neither per-sandbox nor per-pid), so
+// the data plane has nowhere to address it from. The wait loop re-runs THE SAME query
+// rather than waiting on a notification (see eventsWaitPoll).
 //
 // Two properties the shape has to preserve:
 //
@@ -726,10 +673,8 @@ func (e *Engine) readEvents(ctx context.Context, after int64, limit int, wait ti
 	for {
 		select {
 		case <-ctx.Done():
-			// The client hung up, or a shutdown began. Return the ERROR rather than the
-			// empty page: a 200 written into a dead connection is not an answer, and on
-			// the drain path an empty page would falsely tell a subscriber it is
-			// caught up.
+			// The client hung up, or a shutdown began. The ERROR rather than the empty page:
+			// on the drain path an empty page would falsely tell a subscriber it is caught up.
 			return nil, 0, 0, ctx.Err()
 		case <-deadline.C:
 			// Expired with nothing new: the same empty 200 an immediate call returns.
@@ -774,20 +719,14 @@ func (e *Engine) handleEvents(w http.ResponseWriter, r *http.Request) {
 		}
 		limit = v
 	}
-	// The hard cap: clamp rather than reject, so a caller asking for more simply
-	// gets a full page and pages again. Rejecting would give the same protection
-	// but break a caller for asking a reasonable question.
 	if limit > eventsMaxLimit {
 		limit = eventsMaxLimit
 	}
 
 	// `wait` (optional): hold an EMPTY page open for up to this long, so a subscriber's
-	// detection latency stops being its poll interval and an idle deployment stops
-	// paying for polls that find nothing. Clamped like `limit`, and for the same reason.
-	//
-	// It changes NO cursor semantics: the page is still `seq > after` in `seq` order,
-	// and an expired wait returns the identical empty 200 the caller would have received
-	// immediately. Omitting the parameter is exactly the previous behavior.
+	// detection latency stops being its poll interval. It changes NO cursor semantics —
+	// the page is still `seq > after` in `seq` order, and an expired wait returns the
+	// identical empty 200 an immediate call would have.
 	var wait time.Duration
 	if raw := q.Get("wait"); raw != "" {
 		d, err := time.ParseDuration(raw)
@@ -807,10 +746,8 @@ func (e *Engine) handleEvents(w http.ResponseWriter, r *http.Request) {
 
 	evs, earliest, latest, err := e.readEvents(r.Context(), after, limit, wait)
 	if err != nil {
-		// A canceled request is the client hanging up mid-wait, which is the NORMAL end
-		// of a long poll rather than a fault: there is nobody to write a status to, and
-		// mapping it through statusFor would log an error per disconnect. A partial page
-		// is never returned — the cursor only advances on events actually delivered.
+		// A canceled request is the client hanging up mid-wait — the NORMAL end of a long
+		// poll: nobody to write a status to, and statusFor would log an error per disconnect.
 		if errors.Is(err, context.Canceled) && r.Context().Err() != nil {
 			return
 		}
@@ -819,20 +756,16 @@ func (e *Engine) handleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	// 410: the cursor is BELOW the retained window, so the events between it and
 	// `earliest` are gone and cannot be served. Reachable only once trimming is
-	// configured (§4.4-C) — with no trimming `earliest` never advances, which is why this
-	// was written as reserved semantics and left unimplemented.
+	// configured (§4.4-C).
 	//
-	// It is a REFUSAL rather than a short page on purpose: §4.4-C's "losing one loses an
-	// invoice" means a silently-truncated page would let a subscriber conclude it is
-	// caught up while having skipped events. The response carries {earliest, latest} so
-	// the caller can restart deliberately at the window's real lower bound. (The field
-	// approach elsewhere is to skip to the end silently; that is exactly what this
-	// refuses to do.)
+	// A REFUSAL rather than a short page: §4.4-C's "losing one loses an invoice" means a
+	// silently-truncated page would let a subscriber conclude it is caught up while having
+	// skipped events. {earliest, latest} lets the caller restart deliberately at the
+	// window's real lower bound.
 	//
 	// `after > 0` is load-bearing, not defensive: 0 is contractually "from the start of
-	// the retained window", i.e. an explicit request for whatever is retained, so a bare
-	// `after < earliest` would 410 every cold-start cursor on any trimmed outbox and
-	// break the documented way to begin reading.
+	// the retained window", so a bare `after < earliest` would 410 every cold-start cursor
+	// on any trimmed outbox and break the documented way to begin reading.
 	//
 	// The comparison is `after+1 < earliest`, NOT `after < earliest`, because `after` is
 	// EXCLUSIVE — the page is `seq > after`, so the first event this cursor still needs is
@@ -868,11 +801,9 @@ func (e *Engine) handleEvents(w http.ResponseWriter, r *http.Request) {
 //
 // ONE TYPE, TWO SURFACES THAT DIFFER DELIBERATELY: the single read populates UsedByte, the
 // LIST leaves it nil so it is omitted — usage costs a backend round trip the list would pay
-// once per sandbox (§6.1, the same rule the volume list follows). Filling it in handleList
-// reverses that decision rather than closing a gap.
+// once per sandbox (§6.1, the same rule the volume list follows).
 //
-// DeathCause shape (no reference implementation offers a precedent — one models no terminal
-// state, the other a failed state with no cause field):
+// DeathCause shape:
 //
 //   - On the READ PATH because §4.3 puts the recovery decision on the caller:
 //     dead-recoverable → resume, resource-terminated → do NOT. Otherwise it is reachable only
@@ -884,36 +815,32 @@ func (e *Engine) handleEvents(w http.ResponseWriter, r *http.Request) {
 //   - OMITTED WHEN EMPTY: CauseNone is the ABSENCE of a death, so `"death_cause": ""` would
 //     put a falsy-but-present field on the healthy response and invite `if (resp.death_cause)`
 //     as the liveness test. No `null` either — two spellings of absence is one too many.
-//   - List gets it too, not merely for symmetry: without it a caller seeing several `paused`
-//     sandboxes must fan out one GET per ID to learn which are resumable, turning one list into
-//     N+1 requests for a question the list already answers.
+//   - List gets it too: without it a caller seeing several `paused` sandboxes must fan out one
+//     GET per ID to learn which are resumable, turning one list into N+1 requests.
 type sandboxResp struct {
 	SandboxID string `json:"sandbox_id"`
 	State     string `json:"state"`
 	// DeathCause is why the isolation unit was last found dead (§4.3). Absent =
 	// never observed dead. See the type doc for why absent rather than "".
 	DeathCause string `json:"death_cause,omitempty"`
-	// UsedByte is what this sandbox's Overlay unit consumes (upper + work) as the
-	// rootfs provider's backend reports it. Absent when it could not be read, never
-	// reported as 0 — the volume side's rule word for word (§6.1), because it answers
-	// the same question for the same consumer: `PATCH disk_byte` refuses a cap that is
-	// not STRICTLY greater than this, and the only other route to the number is parsing
-	// it out of that 400's message text.
+	// UsedByte is what this sandbox's Overlay unit consumes (upper + work) as the rootfs
+	// provider's backend reports it. Absent when it could not be read, never reported as
+	// 0 — the volume side's rule word for word (§6.1), because it answers the same
+	// question for the same consumer: `PATCH disk_byte` refuses a cap that is not
+	// STRICTLY greater than this, and the only other route to the number is parsing it
+	// out of that 400's message text.
 	//
-	// A POINTER, so a genuine 0 survives: a fresh uncapped sandbox's upper+work IS 0,
-	// so here the collision between "empty" and "unreadable" is the common case rather
-	// than an edge one.
+	// A POINTER, so a genuine 0 survives: a fresh uncapped sandbox's upper+work IS 0, so
+	// the collision between "empty" and "unreadable" is the common case here.
 	//
 	// Present while `paused`, unlike HostEndpoint: the unit is readable AT REST, and
-	// `paused` is the only state a disk cap may be edited from (§3.4) — omitting it
-	// there would omit it from the one state its consumer works in.
+	// `paused` is the only state a disk cap may be edited from (§3.4) — omitting it there
+	// would omit it from the one state its consumer works in.
 	UsedByte *int64 `json:"used_byte,omitempty"`
 }
 
 func (e *Engine) handleGet(w http.ResponseWriter, r *http.Request, id model.SandboxID) {
-	// Inspect rather than Get: the single read carries usage, which costs one backend
-	// round trip. The LIST deliberately does not (see handleList) — one round trip per
-	// sandbox multiplied by the sandbox count, the same reason the volume list omits it.
+	// Inspect rather than Get: the single read carries usage (see sandboxResp).
 	info, err := e.Mediator.Inspect(r.Context(), id)
 	if err != nil {
 		statusFor(w, err)
@@ -958,10 +885,9 @@ type activityResp struct {
 // "keep this sandbox from being swept" to whatever protocol the guest program
 // speaks (reaper-health D2, "An external caller may stamp it explicitly").
 //
-// THE STAMP HAPPENS IN THE GUEST, never here (reaper-health D1: the signal is measured
-// guest-side, and D2's ordering depends on it) — a host-side timestamp would be a second,
-// differently-clocked source for the one signal the classifier reads. Three consequences,
-// all CONTRACT rather than implementation detail:
+// THE STAMP HAPPENS IN THE GUEST, never here (reaper-health D1) — a host-side timestamp
+// would be a second, differently-clocked source for the one signal the classifier reads.
+// Three consequences, all CONTRACT:
 //
 //   - running only. A paused sandbox has no clock to stamp, so this is 409 rather
 //     than a resume-by-side-effect — the engine will not start a sandbox because
@@ -1021,22 +947,21 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 
 // --- the control plane's error edge (§6.2) ------------------------------------
 //
-// THREE FUNCTIONS, AND THE SPLIT IS THE WHOLE POINT: `statusCodeFor` decides WHICH
-// code, `sanitizeErr` decides WHAT TEXT the caller may see, and `writeErr` is the
-// ONLY place in the control plane where an `error` value becomes a response body.
+// THREE FUNCTIONS: `statusCodeFor` decides WHICH code, `sanitizeErr` decides WHAT TEXT
+// the caller may see, and `writeErr` is the ONLY place in the control plane where an
+// `error` value becomes a response body.
 //
 // The alternative shape — `http.Error(w, err.Error(), code)` in every arm — leaks by
 // construction: the backend errors arriving here interpolate ABSOLUTE HOST PATHS
 // (`btrfs: create subvolume /srv/state/volumes/vol_x: …`), so a failing
 // `POST /v1/volumes` would hand the caller the engine's storage layout. §6.2 admits
-// opaque IDs on the wire and NOTHING about host paths or placement. Ten arms each
-// doing their own write is ten chances to forget, and a new arm forgets by default.
+// opaque IDs on the wire and NOTHING about host paths or placement.
 //
-// This is the same move the DATA plane already made (dataplane.go proxyErr): log the
-// real cause engine-side, hand the caller a placement-free message. The control
-// plane cannot copy proxyErr's ONE constant message, because the §5.C verdicts must
-// stay DISTINGUISHABLE — a 409 naming the wrong object sends the caller to the wrong
-// remedy — so it redacts rather than replaces.
+// Same move the DATA plane already made (dataplane.go proxyErr): log the real cause
+// engine-side, hand the caller a placement-free message. The control plane cannot copy
+// proxyErr's ONE constant message, because the §5.C verdicts must stay DISTINGUISHABLE —
+// a 409 naming the wrong object sends the caller to the wrong remedy — so it redacts
+// rather than replaces.
 
 // statusFor classifies err and answers with a sanitized body. `echo` names strings
 // the caller ALREADY KNOWS (their own request parameters), which are therefore safe
@@ -1045,26 +970,22 @@ func statusFor(w http.ResponseWriter, err error, echo ...string) {
 	writeErr(w, statusCodeFor(err), err, echo...)
 }
 
-// writeErr is THE funnel: every error-shaped response in the control plane goes
-// through here, so sanitization is structural rather than remembered. `arch`-style
-// enforcement lives in edge_test.go — it fails if any production file in this
-// package calls `.Error()` outside sanitizeErr, or passes http.Error a message it
-// did not spell out as a literal. A new endpoint therefore cannot leak by omission;
-// it can only leak by editing the guard.
+// writeErr is THE funnel: every error-shaped response in the control plane goes through here,
+// so sanitization is structural rather than remembered. `arch`-style enforcement lives in
+// edge_test.go — it fails if any production file in this package calls `.Error()` outside
+// sanitizeErr, or passes http.Error a message it did not spell out as a literal.
 //
-// The FULL error is logged, unredacted. Operators need the path — it is the only
-// thing that says WHICH unit failed — and the asymmetry is the design: the host
-// detail goes to the log, the verdict goes to the caller.
+// The FULL error is logged, unredacted: operators need the path, it being the only thing that
+// says WHICH unit failed. Host detail to the log, verdict to the caller.
 func writeErr(w http.ResponseWriter, code int, err error, echo ...string) {
 	log.Printf("control plane: responding %d (full error, sanitized on the wire): %v", code, err)
 	http.Error(w, sanitizeErr(err, echo...), code)
 }
 
-// redacted stands in for a removed token. It is deliberately VISIBLE rather than
-// silently dropped: a caller reading "create subvolume [redacted]: permission
-// denied" can tell the engine withheld something and quote the message to an
-// operator who can find it in the log, where an elided token would read as a
-// mangled message.
+// redacted stands in for a removed token. VISIBLE rather than silently dropped: a caller
+// reading "create subvolume [redacted]: permission denied" can tell the engine withheld
+// something and quote the message to an operator who can find it in the log, where an
+// elided token would read as a mangled message.
 const redacted = "[redacted]"
 
 // placementShaped matches an IPv4 address with an optional port — the inner
@@ -1085,14 +1006,12 @@ var placementShaped = regexp.MustCompile(`^\d{1,3}(\.\d{1,3}){3}(:\d+)?$`)
 // SENTINEL MEANING SURVIVES INTACT, which is why redaction beats replacement here:
 // every sentinel's own text ("store: volume in use by a mount", "lifecycle: volume
 // has a live read-write mount") is path-free prose, so the verdict — and the object
-// it names, by opaque ID — passes through untouched while only the substrate's
-// coordinates are dropped.
+// it names, by opaque ID — passes through untouched.
 //
-// It is deliberately INDISCRIMINATE about guest paths it cannot attribute: a mount
-// destination inside somebody else's sandbox reads exactly like a host path from
-// here, so it is redacted too. That costs a little prose in a 409 that still names
-// the holding sandbox by ID, and it is the right direction to fail — the funnel
-// cannot be wrong about a path it never lets through.
+// Deliberately INDISCRIMINATE about guest paths it cannot attribute: a mount destination
+// inside somebody else's sandbox reads exactly like a host path from here, so it is
+// redacted too. That costs a little prose in a 409 that still names the holding sandbox
+// by ID.
 func sanitizeErr(err error, echo ...string) string {
 	fields := strings.Fields(err.Error())
 	for i, f := range fields {
@@ -1117,14 +1036,11 @@ var wireIDPrefixes = []string{"vol_", "sbx_", "tmpl_"}
 // redact replaces a host-shaped token, KEEPING a trailing engine-minted object ID if
 // the token ends in one.
 //
-// This is not a softening of the rule; it is what makes the rule survivable. The
-// engine composes its storage locations as `filepath.Join(<configured root>, <object
-// id>)`, so the ID is very often present in the error ONLY as that path's last
-// segment — `btrfs: set quota limit 4096 on /srv/volumes/vol_x: …` names the volume
-// nowhere else. Redacting the whole token there produces a 409/500 that says a cap
-// write failed on SOMETHING, which is precisely the "sends the caller to the wrong
-// remedy" failure §6.2's per-object sentinels exist to prevent.
-//
+// The engine composes its storage locations as `filepath.Join(<configured root>, <object
+// id>)`, so the ID is very often present in the error ONLY as that path's last segment —
+// `btrfs: set quota limit 4096 on /srv/volumes/vol_x: …` names the volume nowhere else.
+// Redacting the whole token there produces a 409/500 saying a cap write failed on
+// SOMETHING, which is the "wrong remedy" failure §6.2's per-object sentinels prevent.
 // Keeping the last segment discloses nothing: the ID is the wire identity the caller
 // supplied in the URL, and the withheld prefix is what carried the host location.
 func redact(tok string) string {
@@ -1143,18 +1059,15 @@ func redact(tok string) string {
 // hostShaped reports whether tok is an absolute host path, a placement endpoint, or a
 // URL carrying one.
 //
-// "Absolute" is the whole test for the path half, and it is sufficient because the
-// leak is always a filesystem location the engine composed from its own configured
-// roots — `filepath.Join(VolumesDir, volumeID)` and its siblings — and those are
-// absolute by construction. A relative token cannot name a location on the host
-// without the root that is being withheld.
+// "Absolute" is the whole test for the path half, and it is sufficient because the leak is
+// always a location the engine composed from its own configured roots —
+// `filepath.Join(VolumesDir, volumeID)` and its siblings — absolute by construction.
 //
-// THE URL ARM IS NOT DEFENSIVE, IT IS THE DOMINANT REAL CASE on the bypass route: a
-// failed request from net/http reports itself as `Get "http://<host>:<port>/…":
-// dial tcp <host>:<port>: …`, so the endpoint appears TWICE and only the second
-// occurrence looks like a bare address. Matching the bare form alone redacts the
-// visible half and leaves the URL intact, which is the worst outcome — it reads as
-// sanitized while still naming the placement.
+// THE URL ARM IS NOT DEFENSIVE, IT IS THE DOMINANT REAL CASE on the bypass route: a failed
+// request from net/http reports itself as `Get "http://<host>:<port>/…": dial tcp
+// <host>:<port>: …`, so the endpoint appears TWICE and only the second occurrence looks
+// like a bare address. Matching the bare form alone redacts the visible half and leaves
+// the URL intact — it reads as sanitized while still naming the placement.
 func hostShaped(tok string) bool {
 	return (len(tok) > 1 && tok[0] == '/') ||
 		placementShaped.MatchString(tok) ||
@@ -1202,49 +1115,42 @@ func statusCodeFor(err error) int {
 		// that is not the problem.
 		return http.StatusBadRequest
 	case errors.Is(err, lifecycle.ErrUncappedDiskNotCappable):
-		// §3.4 `0 → N` on the disk axis: the request is well-formed and the node may
-		// have plenty of room, but the promise is UNMATERIALIZABLE — an uncapped
-		// sandbox's Overlay unit carries no quota row, so the cap could never be
-		// enforced and §5.B would refuse every future placement. 400 (the request
-		// cannot be honored as asked), NOT 507 (nothing is full) and NOT 409 (no
-		// retry or state change makes it legal — the remedy is a new sandbox).
+		// §3.4 `0 → N` on the disk axis: the request is well-formed and the node may have
+		// plenty of room, but the promise is UNMATERIALIZABLE — an uncapped sandbox's Overlay
+		// unit carries no quota row, so the cap could never be enforced and §5.B would refuse
+		// every future placement. 400, NOT 507 (nothing is full) and NOT 409 (the remedy is a
+		// new sandbox, not a retry).
 		return http.StatusBadRequest
 	case errors.Is(err, lifecycle.ErrLineageTooDeep):
 		// §5.B: the Template's lower stack is deeper than the rootfs provider can mount
-		// (rootfs-overlay D5.1 ⑩). 400 — the caller named this Template (create) or this
-		// sandbox's Template (Promote), and no retry or state change makes it mountable;
-		// the remedy is a shallower parent. NOT 507 (nothing is full) and NOT 409 (there is
-		// no state to wait for — lineage is immutable once built).
+		// (rootfs-overlay D5.1 ⑩). 400 — the remedy is a shallower parent, and lineage is
+		// immutable once built, so there is no state to wait for.
 		//
 		// The one path that reaches this WITHOUT naming a Template is resume, and only after
 		// a deployment moved its state/layer roots to longer paths, shrinking the ceiling
 		// under an existing lineage. That is a deployment change rather than a caller error,
-		// so the 400 misattributes it; it gets no separate sentinel because §1.3 refuses a
+		// so the 400 misattributes it; no separate sentinel because §1.3 refuses a
 		// speculative one, and the response body names depth and limit either way.
 		return http.StatusBadRequest
 	case errors.Is(err, lifecycle.ErrDiskCapBelowUsage):
 		// §3.4 `N → M` on the disk axis, where M ≤ current Overlay usage. 400 for the same
-		// reasons as the volume twin (ErrVolumeCapBelowUsage): the request is well-formed
-		// but cannot be honored, nothing is full (so not 507), and no retry or state change
-		// makes it legal — the caller must pick a larger size, or 0. Checked BEFORE
-		// ErrInsufficientCapacity so a full node cannot turn this into a 507 that tells the
-		// caller to wait for capacity that would not help.
+		// reasons as the volume twin (ErrVolumeCapBelowUsage) — the caller must pick a larger
+		// size, or 0. Checked BEFORE ErrInsufficientCapacity so a full node cannot turn this
+		// into a 507 telling the caller to wait for capacity that would not help.
 		return http.StatusBadRequest
 	case errors.Is(err, rootfs.ErrCapBelowUsage):
 		// §3.4.5's PLACEMENT-side twin of the refusal above: a stored cap that is no longer
 		// strictly above the unit's usage, refused when it would be re-materialized rather
-		// than wedging the unit. 409, NOT 400, and the split is the same one §6.1 already
-		// makes for the second-hop uid: resume/adopt do not CARRY a cap, so a 400 would send
-		// the caller to fix something this request did not send. The remedy is state
+		// than wedging the unit. 409, NOT 400: resume/adopt do not CARRY a cap, so a 400 would
+		// send the caller to fix something this request did not send. The remedy is state
 		// elsewhere — PATCH disk_byte strictly above usage (or to 0), then resume. Create
 		// reaches the same substrate condition while carrying `disk_byte`, and the mediator
 		// translates it there to the 400 sentinel above.
 		return http.StatusConflict
 	case errors.Is(err, lifecycle.ErrInsufficientCapacity):
-		// §3.4 admission refusal: nothing is wrong with the request or the sandbox —
-		// the NODE cannot honor another promise. 507 Insufficient Storage says
-		// "capacity", where 409 would wrongly imply a state conflict the caller could
-		// resolve by retrying.
+		// §3.4 admission refusal: nothing is wrong with the request or the sandbox — the NODE
+		// cannot honor another promise. 507 Insufficient Storage says "capacity", where 409
+		// would wrongly imply a state conflict the caller could resolve by retrying.
 		return http.StatusInsufficientStorage
 	case errors.Is(err, lifecycle.ErrResourceTerminated):
 		// §4.3 resource-terminated: a state conflict the caller resolves by raising

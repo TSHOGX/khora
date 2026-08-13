@@ -37,26 +37,19 @@ type Sink interface {
 //
 // # Head-of-line blocking is KEPT, deliberately
 //
-// One undeliverable event blocks every later one, on two grounds:
+// One undeliverable event blocks every later one: order carries meaning for the billing
+// subscribers reconciling from this stream, and skip-ahead is survivable only when the sink
+// is idempotent AND versioned by logical time, which ours is not (§4.4-C).
 //
-//   - Invariant C (§4.4-C) has billing subscribers reconciling from this stream, so ORDER
-//     CARRIES MEANING — "paused then resumed" and "resumed then paused" are different bills —
-//     and skipping ahead trades a visible stall for a silent mis-reconciliation.
-//   - No shock absorber downstream: skip-ahead is survivable when the sink is idempotent AND
-//     versioned by logical time. Ours is neither.
+// §4.4-C therefore makes three OPERABILITY properties hard requirements — the stall is the
+// trade, an unbounded unalerted one is a defect — and the mechanisms all land here:
 //
-// The three mechanisms below bound the stall's OPERABILITY — the stall is the trade, an
-// unbounded unalerted one is a defect:
-//
-//  1. A POISON-ENVELOPE EXIT (MaxAttempts + Halted): after bounded attempts the publisher
-//     HALTS with a signal that has to be noticed. Retrying an undecodable payload forever
-//     until someone looks at a graph is an omission, not a trade.
-//  2. BOUNDED BACKOFF WITH JITTER, all three: uncapped schedules the next attempt days out,
-//     leaving the event neither delivered nor dead-lettered nor alerted; un-jittered makes
-//     multiple drainers synchronize on one due time and thunder at the same row.
+//  1. A POISON-ENVELOPE EXIT (MaxAttempts + Halted), cleared only by an operator (Resume).
+//  2. BOUNDED BACKOFF WITH JITTER (PublisherConfig, backoffLocked): the ceiling and the
+//     jitter fix different faults.
 //  3. OBSERVABILITY THAT SURVIVES THE WORKER WEDGING (Stats / Monitor): sampled from an
-//     INDEPENDENT goroutine, because a gauge updated on the drain goroutine freezes at its last
-//     healthy value exactly when the drain blocks — making a wedged worker look idle.
+//     INDEPENDENT goroutine, because a gauge updated on the drain goroutine freezes at its
+//     last healthy value exactly when the drain blocks — a wedged worker then looks idle.
 type Publisher struct {
 	store Store
 	sink  Sink
@@ -90,14 +83,12 @@ type Publisher struct {
 
 // DrainBatch is how many unpublished rows one drain pass reads.
 //
-// It is a constant rather than a knob because no deployment has a reason to tune it:
-// delivery is strictly in Seq order and stops at the first failure, so a pass can
-// never usefully act on more than one batch, and whatever is left is still there on
-// the next tick. What the bound buys is that the per-second read cannot materialize an
-// unbounded backlog on a connection pool of one — see Store.UnpublishedEvents.
+// A constant rather than a knob because no deployment has a reason to tune it: delivery is
+// strictly in Seq order and stops at the first failure, so a pass can never usefully act on
+// more than one batch, and the remainder is still there next tick. What the bound buys is
+// on Store.UnpublishedEvents.
 //
-// It is NOT a cap on the backlog gauge: that comes from Store.CountUnpublished, whose
-// whole reason for existing is that this bound would otherwise hide the number.
+// It is NOT a cap on the backlog gauge — that comes from Store.CountUnpublished.
 const DrainBatch = 256
 
 // PublisherConfig tunes the retry and deadline behavior. The zero value is
@@ -117,11 +108,10 @@ type PublisherConfig struct {
 	// JitterFraction spreads each delay by ±this fraction so several drainers do
 	// not synchronize on the same due time. Default 0.2 (±20%). 0 disables it.
 	JitterFraction float64
-	// DeliverTimeout bounds ONE Deliver call. Default 30s. Without it a sink that
-	// blocks forever wedges the drain goroutine with no upper bound — a timeout
-	// converts an indefinite wedge into a bounded failure that the retry and
-	// halt logic can actually act on. It does not help against a sink that
-	// ignores ctx, which is why Monitor reports the in-flight age too.
+	// DeliverTimeout bounds ONE Deliver call. Default 30s. It converts a sink that blocks
+	// forever from an unbounded wedge of the drain goroutine into a bounded failure the
+	// retry and halt logic can act on. It does NOT help against a sink that ignores ctx,
+	// which is why Monitor reports the in-flight age too.
 	DeliverTimeout time.Duration
 }
 
@@ -188,11 +178,9 @@ func (p *Publisher) PublishOnce(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	// The gauge comes from its OWN source, not from len(evs) — §4.4-C ③. A bounded
-	// drain read saturates at DrainBatch, so len() would report that constant at
-	// precisely the moment the backlog is large and the number matters. A count
-	// failure must not fail the pass either: the drain is the job, the gauge is
-	// observation, so a stale gauge is preferable to a stalled stream.
+	// The gauge comes from its OWN source, not from len(evs) — §4.4-C ③, argued on
+	// Store.CountUnpublished. A count failure must not fail the pass either: the drain is
+	// the job and the gauge is observation, so §4.4-C calls a stale gauge the better loss.
 	if n, cerr := p.store.CountUnpublished(ctx); cerr == nil {
 		p.backlog.Store(n)
 	}
@@ -228,9 +216,8 @@ func (p *Publisher) PublishOnce(ctx context.Context) (int, error) {
 			attempts++
 			halted := p.recordFailure(ev, attempts, err)
 			if halted {
-				// Poison-envelope exit: stop retrying and say so loudly. Ordering
-				// is load-bearing (§4.4-C), so we do NOT skip past it — the stream
-				// stops here, visibly, rather than continuing minus one charge.
+				// Poison-envelope exit: the stream stops HERE rather than skipping past
+				// the event and continuing minus one charge (see head-of-line above).
 				return n, fmt.Errorf("%w: event %s (seq %d, %d attempts): %v",
 					ErrHalted, ev.ID, ev.Seq, attempts, err)
 			}
@@ -244,13 +231,11 @@ func (p *Publisher) PublishOnce(ctx context.Context) (int, error) {
 		p.published.Add(1)
 		n++
 	}
-	// Deliberately NO `p.backlog.Store(0)` here. Reaching the end of the loop means
-	// "this batch drained", not "the outbox is empty" — the drain read is bounded at
-	// DrainBatch, so a larger backlog leaves a remainder that is still unpublished.
-	// Storing 0 would reintroduce the §4.4-C ③ false zero that CountUnpublished exists
-	// to prevent, in its worst form: a monitor reading "caught up" while a backlog
-	// persists and grows. The gauge needs no update on this path at all — the next
-	// pass re-reads it from its own source above.
+	// Deliberately NO `p.backlog.Store(0)` here. Reaching the end of the loop means "this
+	// batch drained", not "the outbox is empty" — the read is bounded at DrainBatch, so a
+	// larger backlog leaves a remainder. Storing 0 is the §4.4-C ③ false zero in its worst
+	// form: a monitor reading "caught up" while a backlog grows. The gauge needs no update
+	// on this path — the next pass re-reads it from its own source above.
 	return n, nil
 }
 
@@ -294,10 +279,8 @@ func (p *Publisher) recordFailure(ev Event, attempts int, cause error) bool {
 	return false
 }
 
-// backoffLocked computes Base * 2^(attempt-1), capped at MaxBackoff, then spread
-// by ±JitterFraction. Cap and jitter are both required and fix different things:
-// the cap stops the delay from growing past any useful horizon, the jitter stops
-// several drainers from becoming due at the same instant on the same row.
+// backoffLocked computes Base * 2^(attempt-1), capped at MaxBackoff, then spread by
+// ±JitterFraction (each fixes a different fault — see PublisherConfig).
 // Caller holds p.mu (p.rnd is not concurrency-safe).
 func (p *Publisher) backoffLocked(attempt int) time.Duration {
 	if p.cfg.BaseBackoff <= 0 {
@@ -345,10 +328,9 @@ func (p *Publisher) Resume() {
 	p.clearRetryState()
 }
 
-// Stats is a point-in-time snapshot of publisher health (§4.4-C operability).
+// Stats is a point-in-time snapshot of publisher health (§4.4-C operability ③).
 // Everything here is read from atomics, so a caller sampling it NEVER blocks
-// behind the drain goroutine — which is the whole design requirement: the
-// numbers must stay truthful precisely when the drain is stuck.
+// behind the drain goroutine.
 type Stats struct {
 	// Halted is the poison-envelope exit: one event exhausted its attempt budget
 	// and the stream is stopped at it. This is the condition that must be noticed.
@@ -423,12 +405,9 @@ func (p *Publisher) Run(ctx context.Context, interval time.Duration) {
 	}
 }
 
-// Monitor samples Stats on its OWN goroutine — never the drain's — and calls
-// report for every sample that describes a problem. This placement is the whole
-// mechanism, not an implementation detail: sampling on the drain goroutine means
-// the numbers stop updating at the exact moment the drain blocks, so a wedged
-// worker reports its last healthy value forever and is indistinguishable from an
-// idle one. Sampling independently makes the wedge the thing that SHOWS.
+// Monitor samples Stats on its OWN goroutine — never the drain's — and calls report for
+// every sample that describes a problem. That placement IS the mechanism (§4.4-C ③, and
+// the reasoning is on Publisher).
 //
 // stallThreshold is how stale a heartbeat (or how long an in-flight delivery)
 // must be before it is reported. Pick it well above interval; a few multiples of
@@ -461,15 +440,10 @@ func (p *Publisher) Monitor(ctx context.Context, interval, stallThreshold time.D
 // double-counts. It lives in the engine as a REFERENCE — real subscribers live
 // outside the engine and dedup however they like (§1.3 add a subscriber).
 //
-// KNOWN LIMITATION (by design, not a defect, and SEPARATE from the outbox's retention
-// window — that one now has a mechanism, this one deliberately does not):
-// `seen` is in-process, UNBOUNDED, and NON-PERSISTENT. It grows with distinct
-// event IDs and is empty after a restart, so it will NOT absorb a redelivery
-// that straddles a process restart. That is fine precisely because it is a
-// reference: the engine's contract is only "reliably write to a replayable
-// stream", and a real subscriber does its own durable dedup outside the engine.
-// Do not add persistence here — that would pull subscriber state into the engine
-// (§1.1 vocabulary boundary).
+// KNOWN LIMITATION, by design: `seen` is in-process, UNBOUNDED, and NON-PERSISTENT, so it
+// will NOT absorb a redelivery that straddles a process restart. Acceptable only because
+// this is a reference. DO NOT add persistence here — that pulls subscriber state into the
+// engine (§1.1 vocabulary boundary).
 type DedupSink struct {
 	mu      sync.Mutex
 	seen    map[string]bool

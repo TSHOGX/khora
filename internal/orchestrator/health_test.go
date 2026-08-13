@@ -47,17 +47,14 @@ func get(t *testing.T, srv *httptest.Server, path string) (int, string) {
 // THE LOAD-BEARING CLAIM of having two endpoints instead of one: a halted outbox
 // publisher makes this instance NOT READY while leaving it ALIVE.
 //
-// Both halves must hold, and each protects against a different wrong design:
+// Both halves must hold, each protecting against a different wrong design:
 //
-//   - if /readyz stayed ok, the only signal for a stopped event stream would remain a
-//     log line — a caller would keep creating sandboxes, getting correct API answers,
-//     while every subscriber downstream silently stopped seeing them (for a billing
-//     subscriber, charges stop accruing).
-//   - if /healthz went unhealthy, a supervisor would restart the process — and the
-//     halt is a poison envelope in the DURABLE outbox, so the fresh process re-reads
-//     the same row and halts again. That is a restart loop which tears down every
-//     running sandbox's contact with the engine on each cycle and never touches the
-//     cause.
+//   - if /readyz stayed ok, the only signal for a stopped event stream would remain a log line,
+//     while a caller kept creating sandboxes and every subscriber downstream silently stopped
+//     seeing them.
+//   - if /healthz went unhealthy, a supervisor would restart the process — and the halt is a
+//     poison envelope in the DURABLE outbox, so the fresh process re-reads the same row and halts
+//     again, a restart loop tearing down every running sandbox's contact with the engine.
 func TestAHaltedPublisherIsNotReadyButStaysAlive(t *testing.T) {
 	eng := healthEngine(t)
 	srv := httptest.NewServer(eng.HTTPHandler())
@@ -91,13 +88,10 @@ func TestAHaltedPublisherIsNotReadyButStaysAlive(t *testing.T) {
 	}
 }
 
-// haltPublisher drives the engine's publisher into its halted state through the real
-// poison-envelope path — a sink that always fails, retried until the attempt budget is
-// exhausted — rather than by setting a flag. What /readyz reads must be the state the
-// production mechanism actually produces.
-//
-// It substitutes a publisher over the SAME store, because the engine's own sink is a
-// log writer that never fails, so nothing would ever halt.
+// haltPublisher drives the publisher into its halted state through the real poison-envelope path
+// — a sink that always fails, retried until the attempt budget is exhausted — rather than by
+// setting a flag, so /readyz reads the state the production mechanism produces. It substitutes a
+// publisher over the SAME store, the engine's own sink being a log writer that never fails.
 func haltPublisher(t *testing.T, eng *Engine) {
 	t.Helper()
 	ctx := context.Background()

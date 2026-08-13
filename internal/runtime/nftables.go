@@ -125,16 +125,9 @@ func renderRuleSet(rs ruleset.RuleSet, ctx renderCtx) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		// `policy accept` on every per-sandbox base chain, ALWAYS. A chain policy
-		// cannot be narrowed by an interface predicate, so a `policy drop` here is a
-		// cross-sandbox kill switch — measured, it killed another sandbox's traffic
-		// while its own rule matched not one packet. The default refusal is the last
-		// NARROWED rule instead, which the generator emits.
-		//
-		// Chain names avoid nft's reserved words: `fwd` is reserved in nft 1.1.6 and a
-		// collision desynchronizes the parser so that EVERY LATER CHAIN reports a bogus
-		// syntax error of its own — i.e. a chain-name collision presents as "my rule
-		// syntax is wrong", several chains from the actual cause (measured, D5 ㉔).
+		// `policy accept` ALWAYS (see the file header); the default refusal is the last
+		// NARROWED rule, which the generator emits. Chain names come from chainSpec,
+		// which states why they avoid nft's reserved words.
 		fmt.Fprintf(&b, "  chain %s {\n", spec.name)
 		fmt.Fprintf(&b, "    type %s hook %s priority %s; policy accept;\n", spec.typ, spec.hook, spec.priority)
 		for _, r := range rules {
@@ -265,17 +258,13 @@ func truncateComment(s string) string {
 //   - `iif` compiles the name to a FROZEN INTEGER ifindex at load time. After a
 //     same-name veth rebuild the bytecode is byte-for-byte unchanged and still
 //     points at the dead index, so the rule SILENTLY FAILS OPEN — measured, the
-//     guest's packet was DELIVERED while the drop counter read 0 (network.md D5 ⑫).
-//     And a zero counter is indistinguishable from "no traffic yet", so the symptom
-//     looks like nothing at all.
+//     guest's packet was DELIVERED while the drop counter read 0, and a zero counter
+//     is indistinguishable from "no traffic yet".
 //   - `nft list` normally resolves that frozen integer BACK to a name, so the two
 //     spellings look identical in a listing. Review cannot catch this; only a guard
-//     can. Hence renderGuards below, and hence this is not a style rule.
+//     can — hence renderGuards below.
 //
-// A further un-measured but worse risk points the same way: ifindexes were only
-// observed increasing, but if a RETIRED index were ever reused by ANOTHER
-// sandbox's veth, a stale `iif` rule would start matching THAT sandbox's traffic —
-// silent cross-sandbox misattribution rather than a mere hole.
+// Both mechanisms, down to the bytecode: network.md D5 ⑫.
 func renderScope(r ruleset.Rule, ctx renderCtx) ([]string, error) {
 	switch r.Scope {
 	case ruleset.ScopeGuestIn:
@@ -570,33 +559,20 @@ func joinHostPort(a netip.Addr, port uint16) string {
 // WORD of editing, with no test firing and no visible difference in `nft list` — the same
 // standing the §5.A seam token guard has.
 //
-// Three properties, each with a measured counter-example:
+// Four properties. Each one's danger, and the measurement that pins it, is stated
+// where the renderer makes the choice — 1 in the file header, 2 in renderScope, 3 and
+// 4 in the refusals below — and argued in full in network.md D5 ⑫ / ㉔:
 //
-//  1. NO `policy drop` on a per-sandbox base chain. A chain policy cannot be
-//     narrowed by any interface predicate — a property of the policy position
-//     itself — so it is a CROSS-SANDBOX kill switch: measured, it killed another
-//     sandbox's traffic while its own rule had matched no packet at all.
+//  1. NO `policy drop` on a per-sandbox base chain.
+//  2. NO `iif` / `oif` (index), only `iifname` / `oifname` (name).
+//  3. NO un-narrowed rule in a per-sandbox table, for accept AND drop alike —
+//     nat-type verdicts included, since an un-narrowed DNAT steers other sandboxes.
+//  4. On the second-hop table only: no terminal verdict without `skuid`.
 //
-//  2. NO `iif` / `oif` (index), only `iifname` / `oifname` (name). `iif` freezes an
-//     ifindex at load time and silently fails OPEN after a same-name veth rebuild
-//     — measured, the packet was delivered with the drop counter at 0 — and `nft
-//     list` resolves the frozen index back to a name, so the two spellings look
-//     identical to a reviewer (network.md D5 ⑫).
-//
-//  3. NO un-narrowed rule in a per-sandbox table, for accept AND drop alike. Every
-//     per-sandbox table is a `policy accept` base chain on a SHARED hook, so an
-//     un-narrowed accept is a hole in EVERY sandbox's floor; an un-narrowed drop is
-//     worse, since drops terminate across chains (measured both ways). Nat-type
-//     verdicts are covered too — an un-narrowed DNAT would steer other sandboxes'
-//     traffic.
-//
-// And the FOURTH, on the second-hop table only: no drop without `skuid`. An
-// un-narrowed drop on the output hook is a HOST-LEVEL egress kill switch (measured:
-// root's own probe failed too), and `iifname` cannot serve as that narrowing there
-// because the traffic arrives on no interface. Two tables, two guards, two
-// predicates — the guards are SCOPED BY TABLE rather than one guard with an
-// exemption, because a single "every rule carries iifname" guard would reject the
-// very rule §2.4 invariant 2 requires.
+// THE GUARDS ARE SCOPED BY TABLE, not one guard with an exemption: `iifname` cannot
+// narrow anything on the output hook (that traffic arrives on no interface), so a
+// single "every rule carries iifname" guard would reject the very rule §2.4
+// invariant 2 requires.
 func renderGuards(text string, perSandbox bool, endpoints map[publishKey]string) error {
 	for _, line := range strings.Split(text, "\n") {
 		trimmed := strings.TrimSpace(line)

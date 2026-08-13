@@ -14,12 +14,11 @@
 //     disagree about it: the allocator hands out /30s from this /16, and the
 //     floor's sibling item IS this /16.
 //
-//  2. THE ABSTRACT RULE VOCABULARY. §5.D generates `(declaration, L0 floor) → abstract rule
-//     set` as a PURE FUNCTION — placement-free, root-free, unit testable — and §5.A renders it
-//     into nft text at placement time, binding the three things only it holds: the host-side
-//     veth name, the guest IP, and the publish host endpoint (§5.A ❌ list / network.md D1 ② /
-//     D6). Both halves need the vocabulary, and it can live in neither: `network` importing
-//     `runtime` or the reverse is the edge `internal/arch` fails on.
+//  2. THE ABSTRACT RULE VOCABULARY. §5.D generates the rule set as a pure function and §5.A
+//     renders it into nft text at placement time, binding the three things only it holds
+//     (§5.A ❌ list / network.md D1 ② / D6). Both halves need the vocabulary, and it can live
+//     in neither: `network` importing `runtime` or the reverse is the edge `internal/arch`
+//     fails on.
 //
 // NOTHING HERE MAY NAME A PLACEMENT PRODUCT. A rule that must reach "this
 // sandbox's host veth" or "this sandbox's own /30 gateway" says so with a Scope
@@ -44,9 +43,9 @@ import (
 //     does NOT deliver on its own (the host still ROUTES between two /30s;
 //     measured, network.md D5 ①).
 //
-// Because it is one fixed CIDR the sibling item is a STATIC rule rather than a
-// membership set maintained at runtime, which is why both hops can share one
-// copy with no distribution mechanism at all (§2.4).
+// Because it is one FIXED CIDR the sibling item is a static rule rather than a
+// membership set maintained at runtime — which is what lets both hops share one copy
+// with no distribution mechanism at all (§2.4).
 var SandboxCIDR = netip.MustParsePrefix("10.66.0.0/16")
 
 // FloorV4 / FloorV6 are the L0 floor's ENUMERABLE items — the daddr list (§2.4).
@@ -61,10 +60,9 @@ var SandboxCIDR = netip.MustParsePrefix("10.66.0.0/16")
 //
 // Two lists because nft's grammar is family-typed: `ip daddr` matches only IPv4
 // packets and `ip6 daddr` only IPv6, so a set cannot mix them. This is NOT the
-// generator "forking for IPv6" (which network.md D5 ⑪ measured as redundant for
-// the ct-state floor): the ct-state rule carries no family qualifier and covers
-// both families in one rule, while these are declaration-layer ADDRESS members
-// that nft can only spell per family.
+// generator "forking for IPv6" (network.md D5 ⑪ measured that as redundant for the
+// ct-state floor, which carries no family qualifier): these are declaration-layer
+// ADDRESS members, which nft can only spell per family.
 var (
 	FloorV4 = []netip.Prefix{
 		netip.MustParsePrefix("127.0.0.0/8"),    // loopback
@@ -95,9 +93,9 @@ var FloorLiftableNever = []netip.Prefix{
 }
 
 // TierV4 / TierV6 are the internal deny-safe tier (§2.4): deny by DEFAULT, but
-// LIFTABLE BY DECLARATION — which is the whole difference between this tier and
-// the floor, and it is materialized purely by ORDER (the floor sits above the
-// declaration's allows, this tier below them).
+// LIFTABLE BY DECLARATION — the whole difference between this tier and the floor,
+// materialized purely by ORDER (the floor sits above the declaration's allows, this
+// tier below them).
 //
 // Members are RFC1918's three blocks plus a mechanical v6 derivation (§2.4). It
 // is not optional hardening: with the three host-side egress mechanisms in place,
@@ -165,9 +163,9 @@ const (
 //   - The SECOND hop (a host-local process opening its own connection on the
 //     guest's behalf, §2.4 invariant 2) lands on NEITHER: measured, it counts
 //     zero in `forward` in all three shapes and is visible only in `output`
-//     (network.md D5 ㉔). Reading it as "the forward row covers it too" yields a
-//     rule set in which the second hop is never evaluated, and the symptom is a
-//     floor counter that does not move — D4.1's silent pass.
+//     (network.md D5 ㉔). Reading D4.2's two-hook table as "the forward row covers
+//     it too" yields a rule set in which the second hop is never evaluated, and
+//     the symptom is a floor counter that does not move — D4.1's silent pass.
 type Hook uint8
 
 const (
@@ -191,8 +189,8 @@ const (
 	// crosses chains) and A's floor counted ZERO. The security outcome is the same, but the
 	// guest gets a 25-SECOND HANG instead of the clean failure §2.4 promises, and WHICH
 	// counter moves depends on table creation order — so the one signal every deny assertion
-	// reads becomes non-deterministic (§2.4 / D4.1). A strictly earlier floor makes the
-	// sibling case deterministic: A rejects first, the guest fails fast, A's counter moves.
+	// reads becomes non-deterministic (§2.4 / D4.1). A strictly earlier floor makes it
+	// deterministic: A rejects first, the guest fails fast, A's counter moves.
 	HookForwardIngress
 	// HookPrerouting is the per-sandbox nat prerouting chain: `via[]` steering and
 	// the inbound half of a publish.
@@ -257,10 +255,11 @@ const (
 	Accept Verdict = iota + 1
 	// Reject is the GUEST-FACING refusal. gVisor's netstack honors ICMP errors, so
 	// the same denial written as `drop` versus `reject` differs by orders of
-	// magnitude in what the guest experiences (network.md D5 ⑨ / D4.3). §2.4's
-	// fail-closed has two halves — the security half AND "the guest gets a clean
-	// connection failure" — and a pure-`drop` floor satisfies only the first.
-	// Security is unaffected: neither verdict forwards the packet.
+	// magnitude in what the guest experiences (measured on real runsc: `reject` 0 ms,
+	// `drop` ≥ 25 s — network.md D5 ⑨ / D4.3). §2.4's fail-closed has two halves —
+	// the security half AND "the guest gets a clean connection failure" — and a
+	// pure-`drop` floor satisfies only the first. Security is unaffected: neither
+	// verdict forwards the packet.
 	Reject
 	// Drop is for denials with no guest to inform: the second hop's own egress,
 	// whose originator is a host-local process, and the internal deny-safe tier's
@@ -308,8 +307,7 @@ func (v Verdict) Terminal() bool { return v == Reject || v == Drop }
 // network.md D5 ⑩ / the hop-2 spike Q5).
 //
 // The concrete clause each Scope becomes is the provider's business: these name
-// placement products (§5.A ❌ list), which is precisely why they appear here as
-// an enum rather than as strings.
+// placement products (§5.A ❌ list), hence an enum rather than strings.
 type Scope uint8
 
 const (
@@ -350,7 +348,8 @@ const (
 	//
 	// UID and no gid: `skuid` is the only narrowing predicate `output` offers (D5 ㉔),
 	// and there is no `skgid` clause to pair with it. A gid narrowing could only be
-	// ANDed onto the floor drop, i.e. make the floor match LESS.
+	// ANDed onto the floor drop, i.e. make the floor match LESS — a second way for the
+	// pin to come off, with the same invisible symptom.
 	//
 	// The uid must not be the ENGINE'S OWN: the transport endpoint is a guest veth address
 	// inside SandboxCIDR — the floor's sibling item — dialed from the host, so that value drops
@@ -379,9 +378,9 @@ const (
 	// the GUEST initiated, which conntrack has already attributed.
 	//
 	// Hence a CT-STATE narrowing rather than a uid one: the measured asymmetry forbidding a
-	// uid-narrowed accept (skuid does not match every packet of a flow, so such an accept leaks
-	// what it misses — D5 ㉔) is a property of `skuid`, and a ct-state predicate has no such
-	// gap. Validate permits an accept here and still refuses one narrowed by uid.
+	// uid-narrowed accept is a property of `skuid` (see ScopeSecondHopUID), and a ct-state
+	// predicate has no such gap. Validate permits an accept here and still refuses one
+	// narrowed by uid.
 	ScopeSecondHopReturn
 )
 
@@ -434,8 +433,8 @@ type Match struct {
 	// on the declared port. That address is a HOST address, so any host process
 	// bound 0.0.0.0:8080 becomes reachable: the floor's "any address of the host
 	// itself" item (§2.4, measured D5 ⑧) lifted by a declaration that never named
-	// it. §2.4 permits the declared path (semantics ③) precisely because the
-	// caller NAMED the gateway; overlap-without-containment is not that.
+	// it, which is not the declared path §2.4 permits (semantics ③ rests on the
+	// caller having NAMED the gateway).
 	//
 	// Carrying the prefix rather than having the renderer decide whether to emit
 	// the rule keeps the DECISION in the generator (only the gateway, only on
@@ -457,9 +456,8 @@ type Match struct {
 	// while dropping it on a tuple that named a port would authorize every OTHER port on
 	// that destination. Same shape, same stakes, as Match.CTOriginalDest's nil case.
 	//
-	// It follows that a wildcard rule is NOT expressible as "port 0": port 0 is not a
-	// usable destination port, so no declaration loses the ability to name something by
-	// this encoding.
+	// Port 0 is not a usable destination port, so no declaration loses the ability to
+	// name something by this encoding.
 	Proto    Proto
 	DestPort uint16
 
@@ -467,7 +465,7 @@ type Match struct {
 	// Deliberately family-UNQUALIFIED: one such rule in an `inet` table matches
 	// IPv6 as well, including a global prefix the guest invented for itself, so an
 	// explicit `meta nfproto ipv6` second arm is redundant (measured, network.md
-	// D5 ⑪). The generator therefore does NOT fork for IPv6 here.
+	// D5 ⑪).
 	CTState []string
 
 	// CTOriginalDest / CTOriginalPort pin the PRE-NAT tuple of a steered flow.
@@ -485,12 +483,11 @@ type Match struct {
 	CTOriginalPort uint16
 }
 
-// Rule is one abstract rule. Order within a hook is the order in RuleSet.Rules,
-// and ORDER IS A SECURITY PROPERTY rather than a style question: the floor sits
-// above the declaration's allows, the deny-safe tier below them, and an approved
-// exception in the same chain above the drop it overrides. A rule set with the
-// right rules in the wrong order behaves perfectly on ordinary traffic and
-// differs only when it is being bypassed (network.md D1 ④ / D4.1).
+// Rule is one abstract rule. Order within a hook is the order in RuleSet.Rules, and
+// ORDER IS A SECURITY PROPERTY: a rule set with the right rules in the wrong order
+// behaves perfectly on ordinary traffic and differs only when it is being bypassed
+// (network.md D1 ④ / D4.1). The generator's own positions are argued at each emit
+// site.
 type Rule struct {
 	Hook    Hook
 	Scope   Scope
@@ -516,10 +513,10 @@ type Rule struct {
 	// not (measured, network.md D5 ⑬).
 	ToSelfGateway bool
 
-	// Why documents what this rule delivers, and it is rendered into the nft file
-	// as a comment. Not decoration: several of these rules are one word away from
-	// being a security hole with no test firing, so an operator reading
-	// `nft list` needs to see which promise each line carries.
+	// Why documents what this rule delivers, and it is rendered into the nft file as a
+	// comment. Not decoration: several of these rules are one word away from being a
+	// security hole with no test firing, so an operator reading `nft list` needs to see
+	// which promise each line carries.
 	Why string
 }
 
@@ -569,9 +566,9 @@ func (rs RuleSet) Hooks() []Hook {
 // root-free, in a unit test, over the generator's output.
 //
 // Each property here is one ONE WORD OF EDITING breaks with no test firing and no visible
-// difference in `nft list` (network.md D5 ⑧ ⑩ ⑫ ㉔) — the same standing the §5.A seam token
-// guard has. The text half (no `policy drop`, no ifindex spelling) lives in the provider's
-// renderer, those being properties of the rendered file.
+// difference in `nft list` (network.md D5 ⑧ ⑩ ⑫ ㉔). The text half (no `policy drop`, no
+// ifindex spelling) lives in the provider's renderer, those being properties of the
+// rendered file.
 func Validate(rs RuleSet) error {
 	declared := map[string]bool{}
 	for _, c := range rs.Counters {
@@ -594,27 +591,20 @@ func Validate(rs RuleSet) error {
 				"counter must be declared before the chain referencing it in one `nft -f` file (D5 ㉔)",
 				where, r.Counter)
 		}
-		// GUARD: every rule carries a narrowing. An un-narrowed accept is a hole in
-		// EVERY sandbox's floor (each per-sandbox table is a `policy accept` base
-		// chain on a shared hook); an un-narrowed drop is worse, because drops
-		// terminate across chains — measured as a host-level kill switch on both
-		// the input side (D5 ⑧) and the output side (D5 ㉔).
+		// GUARD: every rule carries a narrowing — see Scope, and the error body.
 		if r.Scope == ScopeNone {
 			return fmt.Errorf("%s: unscoped — every rule must be narrowed to its own "+
 				"placement, or it is evaluated against every sandbox's traffic (D5 ⑩ ㉔)", where)
 		}
-		// GUARD: the two guard SCOPES do not cross. A per-sandbox rule narrowed by
-		// uid would not be per-sandbox at all; a second-hop rule narrowed by
-		// interface is unreachable, because that traffic arrives on no interface
-		// (D5 ㉔). This is the "two tables, two guards, two predicates" split — it
-		// is not an exemption from one guard, it is two guards with disjoint scopes.
+		// GUARD: the two guard SCOPES do not cross — two guards with disjoint scopes,
+		// not one guard with an exemption (see Hook.PerSandbox).
+		//
 		// BOTH second-hop scopes are refused here, not just the uid one. The RETURN
 		// scope is the more dangerous of the two on a per-sandbox hook: it renders NO
 		// clause at all (the narrowing it relies on is the ct-state match), so on a
-		// shared hook it is an entirely un-narrowed accept — a hole in every sandbox's
-		// floor. Guarding only the uid direction left that to the renderer's text
-		// guard, i.e. to install time on the real substrate, when the whole point of
-		// this half is deciding it root-free.
+		// shared hook it is an entirely un-narrowed accept. Guarding only the uid
+		// direction left that to the renderer's text guard, i.e. to install time on the
+		// real substrate, when the whole point of this half is deciding it root-free.
 		if r.Hook.PerSandbox() && (r.Scope == ScopeSecondHopUID || r.Scope == ScopeSecondHopReturn) {
 			return fmt.Errorf("%s: a per-sandbox rule may not carry a second-hop scope — neither "+
 				"predicate narrows to one placement, and the RETURN scope renders no clause at "+
@@ -651,14 +641,9 @@ func Validate(rs RuleSet) error {
 					"exactly the confused deputy §2.4 invariant 2 exists to refuse", where)
 			}
 		}
-		// GUARD: a uid-narrowed rule may only DROP. skuid does not reliably match
-		// every packet of a flow, so an accept narrowed that way leaks whatever it
-		// misses down to the floor it was meant to sit above (D5 ㉔). Dropping is
-		// safe in the same conditions: losing the SYN kills the flow.
-		//
-		// Note the contrast with ScopeSecondHopReturn just above, which IS an accept in
-		// the same table: that one is narrowed by ct-state rather than by identity, and
-		// the measured leak is a property of `skuid` specifically.
+		// GUARD: a uid-narrowed rule may only DROP (the measured asymmetry, see
+		// ScopeSecondHopUID). ScopeSecondHopReturn just above IS an accept in the same
+		// table, and legally so: it is narrowed by ct-state rather than by identity.
 		if r.Scope == ScopeSecondHopUID && r.Verdict != Drop {
 			return fmt.Errorf("%s: a uid-narrowed rule may only DROP — `skuid` misses "+
 				"packets, so an accept/return narrowed by it leaks them past the floor "+
@@ -695,9 +680,8 @@ func Validate(rs RuleSet) error {
 // validateNesting rejects a set whose members nest. An nft interval set REFUSES
 // to load with nested members, and `auto-merge` instead loads it while SILENTLY
 // swallowing the subnet (measured, network.md D5 ⑱) — which is how a floor gets
-// merged away without a word. The floor's sibling /16 nests inside the tier's
-// 10/8, which is exactly why those two are separate ordered rules and never one
-// set; this check is what makes a future attempt to merge them fail loudly.
+// merged away without a word. This check is what makes a future attempt to merge
+// the floor and the tier into one set fail loudly (see TierV4).
 func validateNesting(set []netip.Prefix) error {
 	for i, a := range set {
 		for j, b := range set {

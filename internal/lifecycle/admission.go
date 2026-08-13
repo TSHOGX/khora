@@ -90,16 +90,13 @@ type NodeCapacity struct {
 // first such action — a frozen layer is charged to no sandbox cap, so it lands
 // entirely in the second term.
 //
-// It is a separate function rather than `admit(model.Limits{DiskByte: n})` for a
-// reason that is semantic, not cosmetic. The arithmetic coincides; the meaning does
-// not. `want` is a PROMISE — an upper bound on future growth, which the gate then
-// expects to find in the store as a committed cap and to count in the first term
-// forever after. These bytes are the opposite: they are about to be REAL, no cap
-// will ever cover them, and the next gate run will find them by MEASURING
-// (UncappedBytes), not by summing rows. Feeding them through `want` would also trip
-// the metered-axis-requires-a-cap check, which is a statement about sandboxes and
-// says nothing about a layer. Keeping the two entry points distinct is what stops
-// the two disjoint terms from being conflated (see the header).
+// It is a separate function rather than `admit(model.Limits{DiskByte: n})` because the
+// arithmetic coincides while the meaning does not. `want` is a PROMISE — an upper bound
+// the gate then expects to find in the store as a committed cap and to count in the first
+// term forever after. These bytes are the opposite: they are about to be REAL, no cap will
+// ever cover them, and the next gate run will find them by MEASURING (UncappedBytes), not
+// by summing rows. Feeding them through `want` would also trip the
+// metered-axis-requires-a-cap check, which says nothing about a layer.
 //
 // growth is a FORECAST, unlike the measured term it joins: it is asked before the
 // action runs, so it must be an upper bound (rootfs.Provider.PromoteCostBytes
@@ -125,9 +122,7 @@ func (m *Mediator) admitUncappedGrowth(ctx context.Context, growth int64) error 
 	}
 	uncapped, err := m.uncappedBytes(ctx)
 	if err != nil {
-		// Same fail-closed reasoning as admit: an unmeasurable backend means the
-		// inequality cannot be evaluated, and the cost of admitting blind lands on
-		// unrelated sandboxes (§2.3), not on this caller.
+		// Fail closed, for the reason on uncappedBytes.
 		return fmt.Errorf("admission: %w: %v", ErrInsufficientCapacity, err)
 	}
 	pending := m.pendingUncapped()
@@ -218,10 +213,8 @@ func (m *Mediator) uncappedBytes(ctx context.Context) (int64, error) {
 // header for why routing a volume through `admit` would demand a memory cap from an
 // object that has no Binding.
 //
-// A METERED DISK AXIS REQUIRES A VOLUME CAP, for the reason §3.4 gives verbatim for
-// sandboxes: an uncapped volume contributes 0 to the left side while free to consume
-// all of the right, which does not undercount so much as make the inequality describe
-// a different device. So `size` is REQUIRED (400) while disk is metered, and
+// A METERED DISK AXIS REQUIRES A VOLUME CAP, for the reason §3.4 gives for sandboxes
+// (see the header): so `size` is REQUIRED (400) while disk is metered, and
 // `0 = uncapped` stays legal only on an unmetered axis.
 //
 // The caller holds admitMu across {gate → make the promise visible}, exactly as
@@ -316,12 +309,11 @@ func (m *Mediator) admit(ctx context.Context, want model.Limits, excludeID model
 	}
 	// Σ over COMMITTED promises. Every non-destroyed record counts, including
 	// `paused` ones: a paused sandbox still holds its Overlay bytes on the backend
-	// (§4.2: pause captures nothing) and will expect its cap honored on resume, so
-	// its reservation
-	// is real. RAM is the one axis where a paused sandbox releases the resource
-	// (no container, no memcg) — but we still count it, because admitting new RAM
-	// against memory that a paused sandbox is entitled to reclaim on resume is
-	// exactly the oversubscription this gate exists to prevent.
+	// (§4.2: pause captures nothing) and will expect its cap honored on resume. RAM
+	// is the one axis where a paused sandbox releases the resource (no container, no
+	// memcg) — but we still count it, because admitting new RAM against memory that a
+	// paused sandbox is entitled to reclaim on resume is exactly the oversubscription
+	// this gate exists to prevent.
 	_, committedMem := sumCommitted(recs, excludeID)
 
 	if cap.DiskByte > 0 {
@@ -339,10 +331,7 @@ func (m *Mediator) admit(ctx context.Context, want model.Limits, excludeID model
 		// (§5.B/§5.C, the same shape as SweepOrphanLayers).
 		uncapped, err := m.uncappedBytes(ctx)
 		if err != nil {
-			// Refuse rather than admit blind: an unmeasurable backend means the
-			// inequality cannot be evaluated, and admitting on an unknown total is how
-			// a node gets overcommitted. Failing closed costs a rejected create;
-			// failing open costs write failures across unrelated sandboxes (§2.3).
+			// Refuse rather than admit blind, for the reason on uncappedBytes.
 			return fmt.Errorf("admission: %w: %v", ErrInsufficientCapacity, err)
 		}
 		// In-flight uncapped growth counts too (pendingUncappedBytes): a Promote that

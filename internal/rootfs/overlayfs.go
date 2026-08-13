@@ -59,7 +59,7 @@ type HostOverlayFS struct {
 }
 
 // unitPath is the per-Overlay storage unit holding upper+work — the thing the
-// capacity quota attaches to (one unit ⇒ one quota ⇒ no copy-up bypass, D6.3).
+// capacity quota attaches to (D6.3, see HostOverlayFS).
 func (p *HostOverlayFS) unitPath(id string) string { return filepath.Join(p.StateDir, id) }
 
 // applyCap materializes the capacity Binding on an Overlay's storage unit (§3.4 /
@@ -75,9 +75,8 @@ func (p *HostOverlayFS) unitPath(id string) string { return filepath.Join(p.Stat
 // write point applies (lifecycle.ErrDiskCapBelowUsage). §3.4.5 requires it in both places
 // because a Binding is durable while the facts its criterion reads are not — this one reads the
 // unit's CURRENT usage — so "commit → the environment changes → re-materialize" reaches here
-// with no write in between. Concretely: a quota row lost to an external change (the case
-// OpenOverlay's cap re-application exists for) lets the guest grow past the recorded cap, and
-// the next placement would write that cap UNDER the unit's usage.
+// with no write in between. Concretely: a quota row lost to an external change lets the guest
+// grow past the recorded cap, and the next placement would write that cap UNDER the usage.
 //
 // §5.B CANNOT TAKE §5.C's ANSWER HERE: RepairVolumeCaps skips such a volume and leaves it
 // uncapped, safe there because the §3.4 second term then measures its bytes. A placement has no
@@ -138,13 +137,9 @@ func (p *HostOverlayFS) applyCap(ctx context.Context, id string, capByte int64) 
 //	                          there rather than a guess)
 //
 // The plain-directory arm enumerates `upper` and `work` BY NAME rather than walking the
-// unit, for the same reason UncappedBytes does: `merged` lives inside the unit and for a
-// running sandbox it is the live overlayfs mount exposing lower ∪ upper, so walking the
-// unit would count the whole Template stack as this sandbox's usage. Enumerate-what-you-
-// mean is correct by construction.
-//
-// The subvolume arm needs no such care — `merged` is a mount point, so the extents visible
-// through it belong to the layer dirs, not to this unit's qgroup.
+// unit, for the same reason UncappedBytes does — see there. The subvolume arm needs no
+// such care: `merged` is a mount point, so the extents visible through it belong to the
+// layer dirs, not to this unit's qgroup.
 func (p *HostOverlayFS) Usage(ctx context.Context, overlayID string) (int64, int64, error) {
 	if err := validateSeg("overlayID", overlayID); err != nil {
 		return 0, 0, err
@@ -276,8 +271,7 @@ func (p *HostOverlayFS) handle(overlayID string, lower []string) *Overlay {
 //
 // When a capacity cap is requested the storage unit is created as a btrfs
 // SUBVOLUME so the quota has something to attach to; uncapped Overlays stay plain
-// directories (no subvolume, nothing to reclaim beyond the bytes). upper and work
-// both live inside that one unit, so one quota covers both (D6.3).
+// directories (no subvolume, nothing to reclaim beyond the bytes).
 func (p *HostOverlayFS) CreateOverlay(ctx context.Context, overlayID string, lower []string, capByte int64) (*Overlay, error) {
 	if err := p.validateStack(overlayID, lower); err != nil {
 		return nil, err
@@ -461,7 +455,7 @@ func (p *HostOverlayFS) DestroyOverlay(ctx context.Context, o *Overlay) error {
 // The uncapped branch enumerates upper and work BY NAME rather than walking the unit dir.
 // `merged` lives inside the unit, and for a running sandbox that is the live overlayfs mount
 // exposing lower ∪ upper — walking the unit would descend into it and count the whole Template
-// stack a second time, already counted from TemplatesDir.
+// stack a second time, already counted from TemplatesDir. (Usage's plain-dir arm inherits this.)
 //
 // Bytes come from the BACKEND: the qgroup for capped units, allocated blocks for
 // everything else — never apparent size, never guest-side numbers (see
@@ -553,8 +547,7 @@ func (p *HostOverlayFS) UncappedBytes(ctx context.Context) (int64, error) {
 // One deliberate overstatement, in the SAFE direction (seam contract point 2):
 // hardlinks are counted per link (copyTree does not re-link, so each link really does
 // become an independent file in the layer — this is the one place a per-link count is
-// not a double charge). Excluded paths are NOT counted: the walk below applies the
-// same exclusion set the freeze will, for the reason stated there.
+// not a double charge).
 //
 // The source is at-rest by convention only — the mediator gates BEFORE quiescing —
 // so a concurrent guest write makes this stale on return. That is stated at the
@@ -564,10 +557,9 @@ func (p *HostOverlayFS) PromoteCostBytes(_ context.Context, o *Overlay, excluded
 		return 0, fmt.Errorf("rootfs: promote cost: nil overlay")
 	}
 	upper := p.upperPath(o.ID)
-	// THE SAME exclusion set the freeze will use, built by the same function. Skipping
-	// this would keep the forecast conservative in direction but KNOWN WRONG in value:
-	// it would charge the shadowed bytes the freeze is about to prune, and so refuse
-	// Promotes against capacity that was never going to be consumed.
+	// THE SAME exclusion set the freeze will use, built by the same function — otherwise
+	// the forecast charges shadowed bytes the freeze is about to prune, refusing Promotes
+	// against capacity that was never going to be consumed (promoteExclusions).
 	excluded := promoteExclusions(excludedMounts)
 	var total int64
 	err := filepath.Walk(upper, func(path string, info os.FileInfo, err error) error {
@@ -618,10 +610,9 @@ func (p *HostOverlayFS) PromoteCostBytes(_ context.Context, o *Overlay, excluded
 // GUEST-side numbers (see rootfs.Provider.UncappedBytes). Host-side st_blocks is
 // the backend's own allocation statement, which is the source the rule points at.
 //
-// The measurement itself lives in the internal/allocbytes LEAF because §5.C needs
-// the identical one for its own half of the §3.4 second term, and subsystems must
-// not import each other (§4) — so a shared leaf, not an edge and not two copies
-// that drift (internal/guestport is the precedent). This wrapper stays so the
+// The measurement itself lives in the internal/allocbytes LEAF because §5.C needs the
+// identical one for its own half of the §3.4 second term and subsystems must not import
+// each other (§4; internal/guestport is the precedent). This wrapper stays so the
 // reasoning above sits where §5.B's callers read it.
 func blockBytes(root string) (int64, error) {
 	return allocbytes.Tree(root)
@@ -910,19 +901,15 @@ func (p *HostOverlayFS) PromoteToTemplate(_ context.Context, o *Overlay, newTemp
 // freeze and the forecast cannot be given different sets.
 //
 // The two halves exist for different reasons and neither replaces the other: the
-// static list drops engine-injected runtime debris that must not be captured, while
-// the per-Promote destinations PRUNE THE PRE-EXISTING BYTES A MOUNT SHADOWS. Those
-// shadowed bytes are the whole point — invisible to every guest, yet still on disk,
-// still in the upper, and otherwise copied into the layer in full and charged to both
-// the capacity cap and the forecast (rootfs-overlay D5).
+// static list drops engine-injected runtime debris, while the per-Promote destinations
+// prune the pre-existing bytes a mount shadows (rootfs.Provider.PromoteToTemplate says
+// what for; rootfs-overlay D5 argues it).
 //
 // Destinations arrive as absolute guest paths and are converted to the upper-relative,
-// leading-slash-stripped form the existing convention uses. NESTING is handled by
-// copyTree's own semantics: an excluded entry that names a directory skips that whole
-// subtree, so a nested destination prunes THE LEAF SUBTREE and leaves an empty
-// intermediate chain — which is the settled choice (rootfs-overlay D5), because
-// leaf-only pruning would leave ghost intermediates while excluding a top-level
-// component would discard real guest data living beside the mount.
+// leading-slash-stripped form the existing convention uses. NESTING falls out of
+// copyTree's semantics: an excluded directory skips its whole subtree, so a nested
+// destination prunes THE LEAF SUBTREE and leaves an empty intermediate chain — the
+// settled choice (D5).
 func promoteExclusions(excludedMounts []string) map[string]bool {
 	excluded := make(map[string]bool, len(promoteExcludedPaths)+len(excludedMounts))
 	for _, e := range promoteExcludedPaths {

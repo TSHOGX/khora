@@ -16,11 +16,10 @@ import (
 // path is VolumesDir/<volume-id>). §6.2 admits opaque IDs and bars host paths and
 // placement.
 //
-// This is enforced STRUCTURALLY rather than by review for the same reason
-// internal/arch and runtime/seam_test.go are: the defect was TEN call sites each
-// writing their own body, so the safe shape was one someone had to remember at every
-// new arm. A single funnel (writeErr) plus this scan inverts that — a new endpoint
-// leaks only if someone deletes a test, never by forgetting one.
+// Enforced STRUCTURALLY, like internal/arch and runtime/seam_test.go: the defect was TEN call
+// sites each writing their own body, so the safe shape was one someone had to remember at every
+// new arm. A single funnel (writeErr) plus this scan inverts that — a new endpoint leaks only if
+// someone deletes a test, never by forgetting one.
 //
 // It reads the AST rather than grepping so it constrains CALLS, not comments: the
 // funnel's own doc comment necessarily quotes the leaky shape it replaced, and a
@@ -29,14 +28,11 @@ import (
 // edgeSources returns the production files scanned: EVERY non-test .go file in this
 // package, read from the directory rather than listed by hand.
 //
-// A hand-written list is the one failure mode this guard cannot survive, because it
-// fails in the direction of passing. Measured: `network.go` arrived carrying two §6
-// endpoints, was not added to the list, and a raw
-// `http.Error(w, "leak "+err.Error(), 500)` planted in handleNetworkGet passed BOTH
-// scanners green. That is precisely the "a new endpoint leaks only if someone deletes
-// a test, never by forgetting one" property above — and a per-file list reinstates the
-// forgetting. Enumerating the directory means a new production file is scanned the day
-// it lands, with nothing to remember.
+// A hand-written list is the one failure mode this guard cannot survive, because it fails in the
+// direction of passing. Measured: `network.go` arrived carrying two §6 endpoints, was not added
+// to the list, and a raw `http.Error(w, "leak "+err.Error(), 500)` planted in handleNetworkGet
+// passed BOTH scanners green. Enumerating the directory means a new production file is scanned
+// the day it lands, with nothing to remember.
 //
 // Test files are excluded on purpose — a test asserting on a raw error is doing its job.
 func edgeSources(t *testing.T) []string {
@@ -75,13 +71,12 @@ var errorTextExemptions = map[string]string{
 // rather than inline walks so that the reverse-injection test below drives the SAME code
 // the production scan drives, over source carrying the defect on purpose.
 //
-// The alternative — a second copy of the walk inside that test — checks a copy, not a
-// guard: the real scanner could narrow to nothing and the reverse-injection test would
-// keep passing on its own duplicate, which is precisely the reassurance-without-coverage
-// the volume/seam_test.go precedent exists to avoid.
+// A second copy of the walk inside that test would check a copy, not a guard: the real scanner
+// could narrow to nothing while the reverse-injection test kept passing on its own duplicate
+// (the volume/seam_test.go precedent).
 //
-// `report` receives the position and the enclosing function name; the caller decides
-// whether that is a failure or a count.
+// `report` receives the position and the enclosing function name; the caller decides whether
+// that is a failure or a count.
 func scanErrorTextReads(fset *token.FileSet, f *ast.File, report func(pos token.Position, enclosing string)) {
 	// enclosing tracks which function body the walk is inside, so a violation can name
 	// it and an exemption can be scoped to it.
@@ -193,9 +188,7 @@ func scanHTTPErrorBodies(fset *token.FileSet, f *ast.File, report func(pos token
 // carrying the exact defect, because a guard whose failure path is never exercised is a
 // guard nobody has checked (volume/seam_test.go's reverse-injection precedent).
 //
-// It calls scanErrorTextReads / scanHTTPErrorBodies rather than re-walking the AST: an
-// inline duplicate of the walk would keep passing while the real scanner narrowed to
-// nothing, which is the failure this test exists to rule out.
+// It calls scanErrorTextReads / scanHTTPErrorBodies rather than re-walking the AST (see their doc).
 //
 // The fixture also exercises the EXEMPTIONS in the direction that can go wrong. An
 // exemption is keyed by enclosing function name, so a leak inside a function that happens

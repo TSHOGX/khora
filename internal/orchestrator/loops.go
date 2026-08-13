@@ -4,10 +4,9 @@ package orchestrator
 //
 // The three autonomous loops — the outbox publisher, its health monitor, and the §4.3 reaper —
 // live here rather than in cmd/ because their lifetime is a MIDDLE STEP of the teardown sequence
-// Engine.Shutdown documents and performs: stopped after readiness flips, before the store
-// closes. A caller that owned them would have to split Shutdown open and re-implement the order
-// at the call site, which is what cmd/orchestrator did — leaving the sequence stated in one
-// place and executed in another, and the two did disagree.
+// Engine.Shutdown documents and performs. A caller that owned them would have to split Shutdown
+// open and re-implement the order at the call site, which is what cmd/orchestrator did —
+// leaving the sequence stated in one place and executed in another, and the two did disagree.
 //
 // So the rule this file exists to enforce: EVERY WAIT IN THE TEARDOWN GRAPH IS BOUNDED
 // BY THE ONE DEADLINE ITS CALLER SUPPLIES. A loop that ignores cancellation cannot
@@ -36,10 +35,9 @@ type LoopConfig struct {
 	StallThreshold time.Duration
 	// ReportStats receives each unhealthy sample. nil → logStats below.
 	//
-	// Sampling happens on an INDEPENDENT goroutine (§4.4-C operability) and that is
-	// load-bearing rather than tidy: sampling on the drain itself would freeze the
-	// numbers exactly when the drain blocks, so silence would mean both "healthy" and
-	// "wedged". Publisher.Stats reads atomics for this reason.
+	// Sampling happens on an INDEPENDENT goroutine (§4.4-C operability): sampling on the
+	// drain itself would freeze the numbers exactly when the drain blocks, so silence would
+	// mean both "healthy" and "wedged". Publisher.Stats reads atomics for this reason.
 	ReportStats func(store.Stats)
 }
 
@@ -162,15 +160,10 @@ func (e *Engine) stopLoops(ctx context.Context) error {
 	}
 }
 
-// logStats is the default unhealthy-sample reporter. This repo has no metrics
-// dependency and this does not introduce one (§1.1 no heavyweight external
-// dependencies): the requirement is that a wedged drain be DISTINGUISHABLE from an
-// idle one, and the log is what this codebase already uses for that class of fact.
-// /metrics exposes the same facts for a scraper (health.go).
-//
-// A halted publisher is the line that must be noticed: the event stream has STOPPED,
-// which for a billing subscriber means charges stop accruing — it is not a degraded
-// mode that heals itself, and clearing it is an operator action (Publisher.Resume).
+// logStats is the default unhealthy-sample reporter. No metrics dependency is introduced
+// (§1.1 no heavyweight external dependencies): the requirement is that a wedged drain be
+// DISTINGUISHABLE from an idle one, and the log is what this codebase already uses for that
+// class of fact. /metrics exposes the same facts for a scraper (health.go).
 func logStats(s store.Stats) {
 	if s.Halted {
 		log.Printf("ALERT: outbox publisher HALTED on event %s (seq %d) after %d attempts: %s — "+

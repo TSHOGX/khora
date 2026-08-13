@@ -25,21 +25,16 @@ import (
 func transportMode() {
 	exitIfCrashLoopSentinel()
 
-	// Subreaper declaration + the wildcard drain that collects what it attracts,
-	// in one call (guest-runtime D4.2 / §5.E.1). Declaring without draining would
-	// make every subtree orphan a permanent zombie — see startSubtreeReaper.
-	//
-	// This table is now this process's ONLY waiter, so the per-process monitors
-	// take their exit codes from it instead of cmd.Wait(); the processServer
-	// carries it for that purpose.
+	// Subreaper declaration + the wildcard drain that collects what it attracts, in one call
+	// (guest-runtime D4.2 / §5.E.1 — see startSubtreeReaper). This table is now this process's
+	// ONLY waiter, so the processServer carries it to get its children's exit codes.
 	reaper := startSubtreeReaper()
 
-	// One sandbox-global activity clock (reaper-health D2), shared by the
-	// process server (stamps I/O) and the health server (reports idle). It is
-	// transient/process-local — reborn here on every transport (re)start, which
-	// is correct: a fresh transport child that has served no I/O yet is "idle
-	// since (re)start", and the reaper reads the guest-observable truth, not a
-	// cross-restart memory (§5.E stateless).
+	// One sandbox-global activity clock (reaper-health D2), shared by the process server
+	// (stamps I/O) and the health server (reports idle). Transient/process-local, reborn on
+	// every transport (re)start: a fresh transport child that has served no I/O is "idle since
+	// (re)start", and the reaper reads guest-observable truth, not a cross-restart memory
+	// (§5.E stateless).
 	activity := newActivityClock()
 
 	mux := http.NewServeMux()
@@ -96,18 +91,16 @@ func (h *healthServer) Check(_ context.Context, _ *connect.Request[v1.CheckReque
 	}), nil
 }
 
-// RecordActivity stamps the clock Check reports (§4.3 / reaper-health D2) — the write
-// half of the same one signal, which is why it shares this service and this clock rather
-// than introducing either.
+// RecordActivity stamps the clock Check reports (§4.3 / reaper-health D2) — the write half of
+// the same one signal, which is why it shares this service and this clock.
 //
-// It is deliberately the ONLY thing that happens here: no duration is accepted, nothing
-// is held, and nothing expires, so afterwards this is indistinguishable from a keystroke
-// (the pause-inhibit / keepalive / lease shapes stay rejected — each carries a protected
-// PERIOD, and the period is what would force per-caller state).
+// The stamp is the ONLY thing that happens: no duration is accepted, nothing is held, nothing
+// expires, so afterwards this is indistinguishable from a keystroke. The pause-inhibit /
+// keepalive / lease shapes stay rejected — each carries a protected PERIOD, and the period is
+// what would force per-caller state.
 //
-// Note the probe itself does NOT stamp: an observation must not be indistinguishable
-// from the thing observed, and a Check that stamped would make every sandbox
-// permanently active and silently delete the whole idle disposition. This RPC is a
+// The probe itself does NOT stamp: an observation must not be indistinguishable from the thing
+// observed, and a Check that stamped would make every sandbox permanently active. This RPC is a
 // caller ASSERTING activity, which is a different act.
 func (h *healthServer) RecordActivity(_ context.Context, _ *connect.Request[v1.RecordActivityRequest]) (*connect.Response[v1.RecordActivityResponse], error) {
 	h.activity.stamp()

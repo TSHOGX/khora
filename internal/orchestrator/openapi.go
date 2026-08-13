@@ -2,23 +2,19 @@ package orchestrator
 
 // The machine-readable half of the §6.1 control-plane contract (ADR-0008 part 1).
 //
-// WHY THIS IS GENERATED RATHER THAN WRITTEN. A hand-maintained OpenAPI file is a
-// second, drifting account of the same protocol — the exact failure the spec
-// discipline exists to prevent, one layer out. So the document is built from the
-// table below plus REFLECTION over the very request/response types the handlers
-// decode and encode: a renamed json tag changes the document in the same commit,
-// and openapi_test.go fails if the checked-in file is stale or if a listed
-// operation is not actually routed.
+// WHY THIS IS GENERATED RATHER THAN WRITTEN. A hand-maintained OpenAPI file is a second,
+// drifting account of the same protocol. So the document is built from the table below plus
+// REFLECTION over the very request/response types the handlers decode and encode: a renamed
+// json tag changes the document in the same commit, and openapi_test.go fails if the
+// checked-in file is stale or if a listed operation is not actually routed.
 //
-// api-contract.md STAYS AUTHORITATIVE FOR INTENT. It says what an endpoint means,
-// which refusal is which, and why — none of which a schema can carry. This document
-// says only what is on the wire. When they disagree, the document is wrong by
-// construction (it is derived) unless the divergence is in the handler, which is the
-// CLAUDE.md Relationship-rule case: stop and decide which side moves.
+// api-contract.md STAYS AUTHORITATIVE FOR INTENT. It says what an endpoint means, which
+// refusal is which, and why — none of which a schema can carry. When they disagree, the
+// document is wrong by construction (it is derived) unless the divergence is in the handler,
+// which is the CLAUDE.md Relationship-rule case: stop and decide which side moves.
 //
-// JSON rather than YAML: both are valid OpenAPI and every generator reads JSON,
-// while YAML would add a module dependency to emit a document nothing in the engine
-// consumes. Not a preference — the cheaper of two equivalent encodings.
+// JSON rather than YAML: both are valid OpenAPI and every generator reads JSON, while YAML
+// would add a module dependency to emit a document nothing in the engine consumes.
 //
 // Regenerate with:
 //

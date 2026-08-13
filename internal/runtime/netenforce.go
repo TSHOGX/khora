@@ -51,8 +51,8 @@ import (
 // indistinguishable from a bypassed floor (D4.1).
 //
 // With the route present the packet reaches the host, meets the floor, and is REJECTED by a rule
-// that counts it: same outcome for the guest, opposite epistemic status — a refusal the engine
-// performs and can prove. This is also what finally makes D5 ⑯'s assertion assertable.
+// that counts it: same outcome for the guest, opposite epistemic status, and it is what makes
+// D5 ⑯'s assertion assertable.
 //
 // THE MEASURED NEGATIVES MATTER AS MUCH, because each is a plausible thing to add:
 // `rp_filter` tightened to 1 does NOT affect this (the return route already goes out
@@ -75,12 +75,8 @@ func (p *LocalRunsc) egressSetup(h *placementHandle, gatewayIP string, routed bo
 	// returns rc=0 and the route does not work (measured, D5 ⑤) — a silent failure,
 	// so the flag is load-bearing rather than explicit-for-clarity.
 	//
-	// BEFORE `runsc run`, because the sentry takes the L3 address off the kernel-side
-	// veth at boot and a post-boot add fails with `Nexthop has invalid gateway`
-	// (measured, D5 ⑬).
-	//
-	// Unconditional — see the doc comment for why the `deny` case needs it MORE, not
-	// less.
+	// Before `runsc run` (see the file header) and unconditional (see the doc comment:
+	// the `deny` case needs it MORE, not less).
 	vethGuest := vethGuestName(h.vethHost)
 	if err := p.ipCmd("-n", h.netns, "route", "add", "default", "via", gatewayIP, "dev", vethGuest); err != nil {
 		return fmt.Errorf("runtime: add the guest default route (D5 ⑤: it must carry `dev`, and it "+
@@ -94,7 +90,7 @@ func (p *LocalRunsc) egressSetup(h *placementHandle, gatewayIP string, routed bo
 // `nft -f` file.
 //
 // The atomicity is a hard requirement in three separate senses:
-//   - vs the isolated unit: no fail-open window (§2.4).
+//   - vs the isolated unit: no fail-open window (§2.4, see the file header).
 //   - vs the kernel: a batch containing one illegal rule rolls back ENTIRELY
 //     (measured), so "only part of the rules got installed" is not a state to
 //     handle.
@@ -256,19 +252,14 @@ func writeSysctl(path, val string) error {
 	return os.WriteFile(full, []byte(val), 0o644)
 }
 
-// allocPublishPort hands out a host port for a published guest port.
+// allocPublishPort hands out a host port for a published guest port. The engine chooses
+// it rather than reusing the guest port because two sandboxes may both publish 8080 and
+// the host side must distinguish them.
 //
-// The engine chooses the host port rather than reusing the guest port, and that is
-// forced: two sandboxes may both publish port 8080, and the host side must
-// distinguish them. It is a placement product, rebound every resume — which is
-// exactly why §6.1 reports it as `host_endpoint` only while a placement exists and
-// warns against caching it (§3.3).
-// Returns 0 when the range is EXHAUSTED, and that bound is required rather than
-// cautious: without it the scan spins forever once every port is held, and
-// "publishing thousands of ports" is a reachable deployment shape rather than a
-// hypothetical. A caller turns the 0 into a launch failure, which unwinds the
-// half-built placement (§4.4-A) — the same disposition as any other placement
-// resource that cannot be materialized.
+// Returns 0 when the range is EXHAUSTED — required, not cautious: without the bound the
+// scan spins forever once every port is held, and "publishing thousands of ports" is a
+// reachable deployment shape. A caller turns the 0 into a launch failure, unwinding the
+// half-built placement (§4.4-A) like any other unmaterializable placement resource.
 func (p *LocalRunsc) allocPublishPort() uint16 {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -312,11 +303,9 @@ const (
 	publishPortSpan uint16 = 4000
 )
 
-// numberLines prefixes each line with its number, so an nft parse error's line
-// number can be located. Worth the few lines: a chain-name collision reports a
-// bogus syntax error against a LATER chain, so the reported number is often not
-// where the mistake is, and having the whole numbered file in the error is what
-// makes that diagnosable at all (network.md D5 ㉔).
+// numberLines prefixes each line with its number, so an nft parse error's reported
+// line can be located in the file that produced it (see nftLoad for why the number
+// alone is not enough).
 func numberLines(s string) string {
 	var b strings.Builder
 	for i, line := range strings.Split(s, "\n") {
@@ -328,11 +317,8 @@ func numberLines(s string) string {
 // ruleHits reads this table's named counters, keyed by the abstract counter name §5.D
 // minted (see runtime.Provider.RuleHits).
 //
-// A MISSING KEY IS NOT A ZERO, and that distinction is the whole reason this returns a
-// map rather than a slice of values: "the rule is installed and matched nothing" and "the
-// rule is not there at all" are different facts, and §2.4's acceptance discipline rests on
-// telling them apart — a bypassed rule's only symptom is a counter reading 0, so
-// manufacturing a zero for an absent counter destroys the one signal §5.D has.
+// A MISSING KEY IS NOT A ZERO (Provider.RuleHits) — which is why this returns a map
+// rather than a slice of values.
 //
 // Read-only: it lists, never loads. A failure returns the error rather than an empty map,
 // so a caller cannot mistake "could not read" for "everything is at zero".

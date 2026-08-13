@@ -3,15 +3,12 @@ package orchestrator
 // The outward-facing boundary's enforcement half (ADR-0007): the §6.1 listener is
 // refused anywhere but loopback unless the deployment says otherwise out loud.
 //
-// Authentication and TLS live OUTSIDE the engine — §1.4 excludes the credential
-// family permanently, and §1.1 bars those names as engine-internal entities — so
-// what the engine contributes to its own security posture is not a verifier but
-// this refusal: with the listener pinned to loopback, whatever terminates TLS and
-// authenticates in front of it is the only outward-facing surface BY
-// CONSTRUCTION, rather than by an operator remembering it. A default is not a
-// boundary; `--addr` has defaulted to 127.0.0.1:8080 all along, and an operator who
-// types a routable address for one test publishes an unauthenticated control plane
-// that can create root-capable sandboxes.
+// Authentication and TLS live OUTSIDE the engine (§1.4 / §1.1), so what the engine
+// contributes to its own security posture is not a verifier but this refusal: with the
+// listener pinned to loopback, whatever terminates TLS in front of it is the only
+// outward-facing surface BY CONSTRUCTION. A default is not a boundary — `--addr` has
+// defaulted to 127.0.0.1:8080 all along, and an operator who types a routable address for
+// one test publishes an unauthenticated control plane that can create root-capable sandboxes.
 
 import (
 	"errors"
@@ -40,10 +37,9 @@ type ResolveHost func(host string) ([]string, error)
 // ValidateListenAddr decides whether addr may be served without an explicit
 // insecure-mode override (ADR-0007).
 //
-// It answers on the PARSED address rather than on the string, because the string
-// forms that need catching are exactly the ones a prefix comparison gets wrong.
-// Measured, against whether a listener on each spelling is reachable from this
-// host's routable address:
+// It answers on the PARSED address rather than on the string: the forms that need catching
+// are exactly the ones a prefix comparison gets wrong. Measured, against whether a listener
+// on each spelling is reachable from this host's routable address:
 //
 //	127.0.0.1:8080            IsLoopback=true   binds 127.0.0.1:8080     loopback only
 //	127.0.0.2:8080            IsLoopback=true   binds 127.0.0.2:8080     loopback only

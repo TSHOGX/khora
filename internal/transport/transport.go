@@ -3,14 +3,13 @@
 // probe (§5.E / transport D4). This package is the HOST-SIDE client of those
 // services; the in-guest server lives in cmd/sandboxd (transport mode).
 //
-// Carrier: netns-internal TCP, no vsock (§5.E; validated on both substrate
-// arches per ADR-0002). sandboxd listens
-// on a TCP port inside the guest netns; the host dials the netns veth IP —
-// unary over HTTP, streams over h2c with immediate flush. Framework is
-// Connect-RPC over h2c (transport D4.2). Cold start discovers the current netns
-// IP before dialing (§5.A placement); IP change across resume invalidates the
-// old endpoint (§3.3 / §4.3 IP-as-epoch), and reconnect just re-resolves — the
-// carrier does not encode a fixed address (§3.3).
+// Carrier: netns-internal TCP, no vsock (§5.E; validated on both substrate arches per
+// ADR-0002). sandboxd listens on a TCP port inside the guest netns; the host dials the
+// netns veth IP — unary over HTTP, streams over h2c with immediate flush. Framework is
+// Connect-RPC over h2c (transport D4.2). Cold start discovers the current netns IP
+// before dialing (§5.A placement); the carrier encodes no fixed address, so an IP change
+// across resume invalidates the old endpoint and reconnect just re-resolves (§3.3 / §4.3
+// IP-as-epoch).
 //
 // Stateless (§5.E): the engine keeps no persistent SoT for connections. "What's
 // running now" = a live process.List, never a control-plane registry. Bare pty
@@ -55,15 +54,11 @@ type ProcessEvent struct {
 	Stream   string // "stdout" | "stderr" | "pty" — set on data
 	Data     []byte // set on data
 	ExitCode int    // set on end
-	// Err is set on Kind == "error": the stream ended WITHOUT an end frame. The
-	// common cause is the D4.3 invariant-1 overflow disconnect — a subscriber that
-	// could not keep up is dropped, and the guest reports resource_exhausted to
-	// distinguish that from a clean end.
-	//
-	// This exists because the distinction is otherwise LOST at this seam: the guest
-	// is careful to signal it, and a consumer that only watches for "end" cannot
-	// tell "the process finished" from "your copy of the output was dropped". Those
-	// call for opposite responses — accept the exit code, or reconnect and re-read.
+	// Err is set on Kind == "error": the stream ended WITHOUT an end frame, commonly the
+	// D4.3 invariant-1 overflow disconnect (a subscriber that could not keep up is
+	// dropped, reported as resource_exhausted). Without it a consumer watching only for
+	// "end" cannot tell "the process finished" from "your copy of the output was
+	// dropped", and those call for opposite responses — see drainEvents.
 	Err error
 }
 
@@ -108,11 +103,10 @@ type EntryInfo struct {
 }
 
 // HealthStatus is the domain projection of a successful Health probe (§4.3 L2 +
-// activity signal). It carries the sandbox-global idle duration the reaper's
-// classifier reads to tell healthy from idle (reaper-health D2). Only valid
-// when Health returned a nil error — a failed probe yields no trustworthy
-// activity reading, which is exactly the unreadable-idle guard: the classifier
-// must never read Idle from a failed probe (reaper-health D2).
+// activity signal). It carries the sandbox-global idle duration the reaper's classifier
+// reads to tell healthy from idle. ONLY VALID WHEN Health RETURNED A NIL ERROR: the
+// classifier must never read Idle from a failed probe, which is the unreadable-idle
+// guard (reaper-health D2).
 type HealthStatus struct {
 	// Idle is how long since the sandbox's last I/O across all processes + ptys
 	// (reaper-health D2). Zero for callers/guests that never did I/O since the
@@ -131,18 +125,13 @@ type InputWriter interface {
 	Close() error
 }
 
-// The channel is split by CONCERN into three interfaces, composed into Client.
-// This is not decoration: each consumer should depend on what it actually uses.
-//
-//   - The §4 mediator uses HealthProber and nothing else — both its dial sites
-//     only probe readiness/liveness. Typed as the full 18-method Client, every L1
-//     fake would owe 17 methods it never calls, and one added fs RPC would churn
-//     every lifecycle test file that has no opinion about fs.
-//   - The orchestrator's data plane is the real consumer of ProcessClient and
-//     FsClient — it proxies them to external callers.
-//
-// The concrete client implements all three, so nothing loses capability; only the
-// declared dependencies narrow.
+// The channel is split by CONCERN into three interfaces, composed into Client, so each
+// consumer depends on what it actually uses. The §4 mediator uses HealthProber and
+// nothing else — typed as the full 18-method Client, every L1 fake would owe 17 methods
+// it never calls, and one added fs RPC would churn every lifecycle test file that has no
+// opinion about fs. The orchestrator's data plane is the real consumer of ProcessClient
+// and FsClient. The concrete client implements all three, so nothing loses capability;
+// only the declared dependencies narrow.
 
 // HealthProber is the readiness/liveness half (§4.3 L2 / transport D4.5). It is
 // the ONLY part of the channel the §4 mediator needs.
@@ -156,12 +145,12 @@ type HealthProber interface {
 	Health(ctx context.Context) (HealthStatus, error)
 }
 
-// ActivityRecorder is the WRITE half of the same one activity signal HealthProber
-// reads (reaper-health D2). Split off rather than folded into HealthProber for the
-// reason stated above the split: the §4 mediator only ever READS the signal — its
-// classifier must never stamp it, or every probed sandbox would look permanently
-// active (reaper-health D3: an observation must never be indistinguishable from
-// the thing observed). The only consumer is §6.1's POST /v1/sandboxes/{id}/activity.
+// ActivityRecorder is the WRITE half of the same one activity signal HealthProber reads
+// (reaper-health D2). Split off rather than folded in because the §4 mediator only ever
+// READS the signal: its classifier must never stamp it, or every probed sandbox would
+// look permanently active (reaper-health D3: an observation must never be
+// indistinguishable from the thing observed). The only consumer is §6.1's
+// POST /v1/sandboxes/{id}/activity.
 type ActivityRecorder interface {
 	// RecordActivity stamps the guest's activity clock NOW and reads it back. The
 	// returned HealthStatus.Idle is the reading AFTER the stamp — positive
@@ -268,14 +257,12 @@ type FsClient interface {
 // endpoint, discarded on resume (the endpoint's netns IP changes, §3.3 / §4.3
 // IP-as-epoch).
 //
-// "Stateless" means THIS VALUE carries no state worth keeping — it does not mean
-// dialing is free of process-wide resources. The connection pool underneath is
-// shared and outlives any one Client (see Dial); that is what makes discarding
-// them freely safe, since a Client has nothing to close.
+// "Stateless" means THIS VALUE carries no state worth keeping — not that dialing is free
+// of process-wide resources: the connection pool underneath is shared and outlives any
+// one Client (see sharedTransport), which is what makes discarding them freely safe.
 //
-// Depend on the NARROWEST of the three above that your caller actually uses; take
-// this composed form only if you genuinely need all three (the data-plane proxy
-// does, since it re-exports the full surface).
+// Depend on the NARROWEST of the three above that your caller actually uses; take this
+// composed form only if you genuinely need all three (the data-plane proxy does).
 type Client interface {
 	HealthProber
 	ActivityRecorder

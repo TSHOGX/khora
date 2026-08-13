@@ -32,11 +32,11 @@ type Spec struct {
 	// caller reading counters back off a placement can attribute them to the entry the
 	// user wrote (§6.1's per-entry `hit_packet`).
 	//
-	// It is produced HERE, by the same expressions that mint the names, and that is the
-	// whole point: the alternative — re-deriving `fmt.Sprintf("allow%d_fwd", i)` at the
-	// read site — is a second copy of a naming convention that lives in this file. It
-	// would drift on the first rename and fail SILENTLY, since an unmatched name simply
-	// reports no hits, which reads exactly like a rule that was never hit.
+	// Produced HERE, by the same expressions that mint the names. Re-deriving
+	// `fmt.Sprintf("allow%d_fwd", i)` at the read site would be a second copy of a
+	// naming convention living in this file: it drifts on the first rename and fails
+	// SILENTLY, since an unmatched name reports no hits, which reads exactly like a
+	// rule that was never hit.
 	Counters CounterAttribution
 }
 
@@ -78,13 +78,12 @@ type CounterAttribution struct {
 	// IngressClosed is the counter on the ingress default-deny — the rule that drops
 	// inbound traffic to this guest which no `ingress.publish[]` entry opened (§2.1 ③).
 	//
-	// DIRECTION-LEVEL, and that is the whole shape: it is NOT per-publish, because a
-	// publish entry's rules span three hooks and the `forward` one matches other
-	// sandboxes' egress, so no per-entry number is cleanly attributable. What this one
-	// answers is the question a per-entry counter is not needed for — whether anything
-	// was refused toward this guest at all, as opposed to nothing having arrived. Those
-	// two are otherwise indistinguishable from outside the engine, since there is no
-	// vantage point from which a dropped inbound packet is visible.
+	// DIRECTION-LEVEL, never per-publish: a publish entry's rules span three hooks and
+	// the `forward` one matches other sandboxes' egress, so no per-entry number is
+	// cleanly attributable. What this one answers is whether anything was refused
+	// toward this guest at all, as opposed to nothing having arrived — otherwise
+	// indistinguishable from outside the engine, since a dropped inbound packet is
+	// visible from no vantage point there.
 	//
 	// It does NOT identify the sender: this is the one rule in a per-sandbox table that
 	// can match another sandbox's egress (the reason it sits at its own
@@ -100,32 +99,15 @@ type CounterAttribution struct {
 //
 // Every position below is an assertion: a rule set with the right rules in the wrong order
 // behaves perfectly on ordinary traffic and differs only when it is being bypassed (network.md
-// D1 ④ / D4.1). The three that carry the most weight:
-//
-//   - The FLOOR sits ABOVE the declaration's allows (no declaration lifts it), and
-//     the internal deny-safe tier sits BELOW them (being liftable by declaration is
-//     the entire difference between the tier and the floor, and it is materialized
-//     purely by order — §2.4).
-//   - The `via[]` narrow accept sits above the floor drop IN THE SAME CHAIN. A
-//     cross-chain accept is measured to increment its own counter while the flow is
-//     still dropped and the connection still fails, because a base chain's accept
-//     ends only THAT chain (network.md D5 ⑩).
-//   - On `input`, the sibling drop sits between the self-gateway allow and the
-//     declaration's allows, so an `allow 10.0.0.0/8` reaches this sandbox's OWN
-//     gateway (the declared-resolver path §5.D semantics ③ promises) and not a
-//     SIBLING's (measured: it reads the sibling's banner without that drop —
-//     network.md D4.2).
+// D1 ④ / D4.1). Each position is argued where it is emitted — inputChain and forwardChain,
+// numbered step by step.
 //
 // # Why the first hop is two chains
 //
 // Traffic to an address of the host ITSELF lands on `input`; traffic the host
-// ROUTES lands on `forward` (measured, network.md D5 ⑧). A floor covering only
-// `forward` misses guest→host entirely. The two sides carry OPPOSITE predicate
-// shapes: on `input` the floor is a pure ct-state rule with NO address list (`not
-// established` is exhaustive over every host address, so the engine never has to
-// know its own bind addresses, and the whole "a host address changed, must we
-// re-render" class of question does not exist), while `forward` needs the explicit
-// daddr list AND its own default-deny.
+// ROUTES lands on `forward` (measured, network.md D5 ⑧), and the two sides carry
+// OPPOSITE predicate shapes: see inputChain (6) for the `input` floor and
+// forwardChain (3)(4)(7) for the `forward` daddr list and its own default-deny.
 func Generate(d Declaration) (Spec, error) {
 	d = d.Normalize()
 	g := &gen{}
@@ -135,12 +117,6 @@ func Generate(d Declaration) (Spec, error) {
 	g.publishInbound(d)
 
 	// --- nat output: the host's own path to a published endpoint --------------
-	// A SECOND, independent DNAT, and it is not redundancy: host-originated
-	// traffic never traverses `prerouting`, so the prerouting rule is not
-	// evaluated for it at all (measured, network.md D5 ⑭). Which is also why "I
-	// dialed it from the host and it worked" is not evidence a publish works, and
-	// why the reverse does not follow either — two paths, two rules, two
-	// assertions.
 	g.publishHostPath(d)
 
 	// --- nat postrouting: the publish return SNAT and the egress masquerade ---
@@ -161,13 +137,10 @@ func Generate(d Declaration) (Spec, error) {
 	}
 
 	// --- filter output (ENGINE-LEVEL): the second hop -------------------------
-	// Deliberately absent from this rule set. The predicate is one
-	// deployment-supplied uid, so ONE rule set covers every sandbox regardless of
-	// how many exist — hence one table, installed once at startup rather than per
-	// placement (§2.4 / network.md D5 ㉔). SecondHopRules generates it, and
-	// ValidateDeployment refuses a `via[]` declaration when the deployment did not
-	// supply that uid: a declaration whose own invariant cannot be delivered is
-	// refused rather than half-honored.
+	// Deliberately absent from this rule set — SecondHopRules generates it as one
+	// engine-level table (see there). ValidateDeployment refuses a `via[]`
+	// declaration when the deployment supplied no uid: a declaration whose own
+	// invariant cannot be delivered is refused rather than half-honored.
 
 	if err := ruleset.Validate(g.rs); err != nil {
 		return Spec{}, fmt.Errorf("network: generated rule set is invalid: %w", err)
@@ -176,9 +149,7 @@ func Generate(d Declaration) (Spec, error) {
 }
 
 // routedEgress reports whether the declaration can send anything through the
-// host's router. `via[]` alone cannot: a steered flow is DNAT'd to a HOST-LOCAL
-// endpoint (a contract requirement, §5.D) and is delivered locally, so it needs
-// none of the three host-side egress mechanisms.
+// host's router — see Spec.RoutedEgress for why `via[]` alone cannot.
 func routedEgress(d Declaration) bool {
 	return d.Egress.Default == AllowPublic || len(d.Egress.Allow) > 0
 }
@@ -186,13 +157,10 @@ func routedEgress(d Declaration) bool {
 // SecondHopRules generates the ENGINE-LEVEL second-hop rule set (§2.4 invariant 2,
 // second half). One table, installed once when the orchestrator starts.
 //
-// A SEPARATE TABLE rather than a per-sandbox rule, because the predicate is `skuid`, not an
-// interface: hop 2 is a host-local process opening its own connection on the guest's behalf, so
-// it arrives on no interface at all. Measured, its egress counts ZERO in `forward` in all three
-// shapes and is visible only in `output` (network.md D5 ㉔) — reading §2.4's two-hook table as
-// "the forward row covers hop 2 too" yields a rule set where hop 2 is never evaluated, whose
-// symptom is a floor counter that does not move (D4.1's silent pass). And one uid means one rule
-// set regardless of sandbox count.
+// A SEPARATE TABLE rather than a per-sandbox rule: hop 2 arrives on no interface at all, so the
+// predicate is `skuid` and one uid covers every sandbox (see ruleset.HookOutputFilter for the
+// measurement, and why reading §2.4's two-hook table as "the forward row covers hop 2 too"
+// yields a rule set where hop 2 is never evaluated).
 //
 // NO LOOP-AVOIDANCE ACCEPT. D4.2 lists two needs for this predicate at opposite positions —
 // exempt the process from re-matching its own steering rule (an accept ABOVE them), and keep it
@@ -219,15 +187,8 @@ func SecondHopRules() (ruleset.RuleSet, error) {
 	// `hop2_floor_v4` counted 9 — the reply dropped by this engine, and the guest hung
 	// 25 s on a connection whose request had succeeded.
 	//
-	// It does not weaken the invariant. The confused deputy §2.4 invariant 2 names is
-	// the endpoint process opening a NEW connection to an in-floor address; `ct state
-	// new` is precisely what this arm does not match, so a new connection still meets
-	// the floor. What passes is only the reverse direction of a flow the guest itself
-	// initiated — traffic conntrack already attributes to an established connection.
-	//
-	// It also has to be an ACCEPT rather than a narrower shape, and it is safe here for
-	// the reason a uid-narrowed accept is NOT: it carries no `skuid`. The measured
-	// asymmetry (D5 ㉔) is about skuid missing packets; a ct-state arm has no such gap.
+	// It does not weaken the invariant, and it is safe as an ACCEPT here for the reason a
+	// uid-narrowed one is not — see ruleset.ScopeSecondHopReturn.
 	g.emit(ruleset.Rule{
 		Hook:    ruleset.HookOutputFilter,
 		Scope:   ruleset.ScopeSecondHopReturn,
@@ -324,11 +285,9 @@ func (g *gen) emit(r ruleset.Rule) {
 func (g *gen) steering(d Declaration) {
 	for i, v := range d.Egress.Via {
 		for j, t := range v.Match {
-			// DestPort carries the tuple's port, and t.Port == 0 (AnyPort) is the WILDCARD
-			// the renderer turns into one clause fewer — a `via[]` entry that named no port
-			// steers every port of the matched destination to the endpoint (§5.D). No branch
-			// is needed here because the zero already IS the wildcard encoding in Match; the
-			// assertion that it renders as an absent `dport` lives in the runtime tests.
+			// t.Port == 0 (AnyPort) needs no branch: the zero already IS the wildcard
+			// encoding in Match (see ruleset.Match.DestPort), and the assertion that it
+			// renders as an absent `dport` lives in the runtime tests.
 			m := ruleset.Match{Proto: protoOf(t.Proto), DestPort: t.Port}
 			// The pre-NAT destination clause is emitted IF AND ONLY IF the declaration
 			// pinned a cidr. Transparent interception (`cidr: any`) authorizes "any
@@ -419,9 +378,8 @@ func (g *gen) publishReturn(d Declaration) {
 // IT WIDENS NOTHING, though a masquerade looks like a permission: only packets a FILTER chain
 // already accepted ever reach postrouting, so this rewrites the source of traffic whose
 // reachability the floor, the allows, the tier and the default already decided. What it buys is
-// a reply that can find its way back. Narrowed by the input interface — the unforgeable
-// predicate — never by source address, which guest root rewrites with one `ip addr add`
-// (measured, network.md D5 ③).
+// a reply that can find its way back. Narrowed by the input interface, never by source address
+// (ruleset.ScopeGuestIn).
 func (g *gen) masquerade() {
 	g.emit(ruleset.Rule{
 		Hook:    ruleset.HookPostrouting,
@@ -455,12 +413,9 @@ func (g *gen) inputChain(d Declaration) error {
 	// precisely what the pure ct-state floor below drops (measured: 8 packets on
 	// `input`, 0 on `forward`). So without this the floor kills `via[]` outright.
 	//
-	// Each accept pins THREE things, and every omission has a live measured
-	// counter-example (network.md D5 ⑩): the pre-NAT destination tuple, the
-	// post-NAT listener port, and the interface. Dropping the listener port lets a
-	// declared original port reach a listener the declaration never named; dropping
-	// the pre-NAT tuple lets an UNDECLARED original port reach a declared listener;
-	// dropping the interface makes it a hole in every other sandbox's floor.
+	// Each accept pins THREE things — the pre-NAT destination tuple, the post-NAT
+	// listener port, and the interface — and every omission has a live measured
+	// counter-example (network.md D5 ⑩'s four-row table).
 	for i, v := range d.Egress.Via {
 		_, endpointPort, err := ParseEndpoint(v.Endpoint)
 		if err != nil {
@@ -468,17 +423,12 @@ func (g *gen) inputChain(d Declaration) error {
 		}
 		for j, t := range v.Match {
 			// A PORT WILDCARD (`t.Port == 0`) leaves the pre-NAT PORT clause off, exactly as
-			// `cidr: any` leaves the pre-NAT DESTINATION clause off — and that does not weaken
-			// this accept below what D5 ⑩ requires, because the clause it drops is the one the
-			// declaration itself declined to pin. What that measurement forbids is an accept
-			// admitting MORE than the declaration authorized: dropping the pre-NAT port on a
-			// tuple that NAMED one would let an undeclared original port reach a declared
-			// listener. Here no original port was declared — every port of the matched
-			// destination is steered — so "any original port, arriving on this sandbox's veth,
-			// destined for this endpoint's listener port" IS the authorized set, and the other
-			// two clauses still pin it. The `iifname` narrowing is untouched in every case,
-			// which is the clause whose absence would make this a hole in other sandboxes'
-			// floors.
+			// `cidr: any` leaves the pre-NAT DESTINATION clause off. That does not weaken the
+			// accept below what D5 ⑩ requires: what the measurement forbids is admitting MORE
+			// than the declaration authorized, and the clause dropped here is the one the
+			// declaration itself declined to pin — "any original port, arriving on this
+			// sandbox's veth, destined for this endpoint's listener port" IS the authorized
+			// set. `iifname` is untouched in every case.
 			m := ruleset.Match{
 				Proto:          protoOf(t.Proto),
 				DestPort:       endpointPort, // post-NAT: the listener's port
@@ -512,11 +462,8 @@ func (g *gen) inputChain(d Declaration) error {
 	// Emitted for any allow[] tuple whose cidr INTERSECTS the sandbox address
 	// space, carrying that tuple's port and protocol. The generator cannot test
 	// containment: the gateway address is a placement product it does not know
-	// (§5.D / §5.A ❌ list). The residual imprecision is bounded and stated: a
-	// declaration naming a sandbox-space subnet that does not actually contain this
-	// sandbox's gateway still reaches its own gateway on the declared port. The
-	// alternative — having the provider test containment — would move behavior out
-	// of the unit-testable generator, which is the property that makes every
+	// (§5.D / §5.A ❌ list). Having the provider test it instead would move behavior
+	// out of the unit-testable generator, the property that makes every
 	// declaration-value difference assertable without root.
 	for i, t := range d.Egress.Allow {
 		if !intersectsSandboxSpace(t.CIDR) {
@@ -529,12 +476,9 @@ func (g *gen) inputChain(d Declaration) error {
 			Verdict: ruleset.Accept,
 			Match: ruleset.Match{
 				DestSelfGateway: true,
-				// AND the declared prefix. The emission predicate above can only test
-				// OVERLAP — the gateway address is a placement product the generator does
-				// not know — so without this clause a declaration merely overlapping the
-				// sandbox space (`allow 10.66.99.0/24`) would also reach a gateway it never
-				// contained, i.e. lift the floor's host-itself item on an address the caller
-				// never named. The renderer ANDs the two into the intersection.
+				// AND the declared prefix, which the renderer ANDs into the intersection.
+				// Without it a declaration merely OVERLAPPING the sandbox space reaches a
+				// gateway it never contained — see ruleset.Match.DestSelfGatewayWithin.
 				DestSelfGatewayWithin: &cidr,
 				Proto:                 protoOf(t.Proto),
 				DestPort:              t.Port,
@@ -591,12 +535,7 @@ func (g *gen) inputChain(d Declaration) error {
 	// it, it would take out the orchestrator's own 127.0.0.1 listener and sshd
 	// along with the guest, because loopback traverses `input` as well.
 	//
-	// `reject`, not `drop`: this refusal faces the GUEST, and gVisor's netstack
-	// honors ICMP errors, so the two spellings differ by orders of magnitude in
-	// what the guest experiences. A pure-`drop` floor satisfies §2.4 fail-closed's
-	// security half while violating the half it wrote down itself — "the guest gets
-	// a clean connection failure". Security is identical either way (network.md
-	// D5 ⑨ / D4.3).
+	// `reject`, not `drop`: this refusal faces the GUEST (ruleset.Reject).
 	g.emit(ruleset.Rule{
 		Hook:    ruleset.HookInput,
 		Scope:   ruleset.ScopeGuestIn,
@@ -646,9 +585,7 @@ func (g *gen) forwardChain(d Declaration) error {
 	// (3)(4) THE FLOOR's daddr list, ABOVE the declaration's allows — this is what
 	// "no declaration lifts the floor" IS, materialized purely by order (§2.4).
 	// Two rules because nft's grammar is family-typed, NOT because the generator
-	// forks for IPv6: the ct-state arms above carry no family qualifier and cover
-	// both families in one rule each (D5 ⑪). These are declaration-layer ADDRESS
-	// members, which nft can only spell per family.
+	// forks for IPv6 (see ruleset.FloorV4).
 	g.emit(ruleset.Rule{
 		Hook:    ruleset.HookForward,
 		Scope:   ruleset.ScopeGuestIn,
@@ -705,9 +642,7 @@ func (g *gen) forwardChain(d Declaration) error {
 	// it that the host's own LAN was never part of that, which is the §2.4 boundary
 	// itself rather than a denial within the declared set.
 	//
-	// Separate rules from the floor, never a shared set: the sibling /16 nests
-	// inside 10/8, and an nft interval set either refuses to load or silently
-	// merges the subnet away (measured, D5 ⑱). ruleset.Validate enforces it.
+	// Separate rules from the floor, never a shared set (see ruleset.TierV4).
 	if d.Egress.Default == AllowPublic {
 		g.emit(ruleset.Rule{
 			Hook:    ruleset.HookForward,
@@ -728,12 +663,10 @@ func (g *gen) forwardChain(d Declaration) error {
 	}
 
 	// (7) The default. Under `allow` an explicit accept rather than falling through
-	// to the chain policy: the base chain must be `policy accept` (a `policy drop`
-	// in a per-sandbox table is a CROSS-SANDBOX kill switch — measured, it killed
-	// another sandbox's traffic while its own rule matched not one packet), so
-	// falling through would work, but it would leave the "this declaration permits
-	// public egress" decision with no counter of its own and nothing for an
-	// acceptance test to read.
+	// to the chain policy: every per-sandbox base chain must be `policy accept`
+	// (measured — see the provider's renderer), so falling through would work, but
+	// it would leave the "this declaration permits public egress" decision with no
+	// counter of its own and nothing for an acceptance test to read.
 	if d.Egress.Default == AllowPublic {
 		g.emit(ruleset.Rule{
 			Hook:    ruleset.HookForward,
@@ -775,18 +708,14 @@ func (g *gen) forwardChain(d Declaration) error {
 
 	// (9) The inbound default-deny: ingress is closed unless published (§2.1 ③).
 	//
-	// On a SEPARATE chain at a later priority (HookForwardIngress), because this drop
-	// is the one rule of a per-sandbox table that can match ANOTHER sandbox's egress —
-	// traffic from A to B's guest IP is `oifname B-veth`. At one shared priority, B's
-	// drop raced A's floor and won, which cost the guest a 25-second hang instead of a
-	// clean refusal AND made the counter that moves depend on table creation order
+	// On a SEPARATE chain at a later priority, because this drop is the one rule of a
+	// per-sandbox table that can match ANOTHER sandbox's egress — traffic from A to B's
+	// guest IP is `oifname B-veth`, and at one shared priority the two chains race
 	// (measured; see ruleset.HookForwardIngress).
 	//
 	// `drop`, not `reject`, and the asymmetry with the guest-facing refusals above
 	// is deliberate: this one faces an EXTERNAL caller, to whom the engine promises
-	// nothing, and an ICMP error would confirm the sandbox exists. The guest-facing
-	// half of fail-closed (§2.4: "the guest gets a clean connection failure") is
-	// about the guest, and this refusal is not aimed at it.
+	// nothing, and an ICMP error would confirm the sandbox exists.
 	const ingressClosedCounter = "fwd_ingress_closed"
 	g.emit(ruleset.Rule{
 		Hook:    ruleset.HookForwardIngress,

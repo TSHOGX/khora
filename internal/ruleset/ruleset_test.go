@@ -7,9 +7,8 @@ import (
 )
 
 // The NAT64 derivation is MECHANICAL so the two halves of the v6 tier cannot
-// drift, but a derivation nobody pinned is a derivation that can be silently
-// wrong. These are the literals RFC 6052 §2.2 requires for the three RFC1918
-// members under the well-known prefix.
+// drift, but a derivation nobody pinned can be silently wrong. These are the literals
+// RFC 6052 §2.2 requires for the three RFC1918 members under the well-known prefix.
 //
 // The negative half is the load-bearing one: `64:ff9b::/96` itself must NOT be a
 // member. That prefix maps the ENTIRE IPv4 space — public destinations included —
@@ -43,10 +42,7 @@ func TestNAT64ImagesArePinnedAndThePrefixItselfIsNotAMember(t *testing.T) {
 }
 
 // The floor's fourth item — "any address of the host itself" — must NOT be an
-// address list. It is covered by one `iifname`-narrowed pure ct-state rule,
-// because "not established" is exhaustive over every host address; enumerating
-// them would reintroduce the whole "a host address changed, must we re-render"
-// class of problem (§2.4 / network.md D5 ⑧).
+// address list (§2.4 / network.md D5 ⑧; see FloorV4).
 //
 // Asserted by shape rather than by reading a comment: the floor lists must hold
 // only the three enumerable v4 items and the two v6 ones.
@@ -70,11 +66,8 @@ func TestFloorEnumeratesNoHostAddress(t *testing.T) {
 	}
 }
 
-// The seventh 400 class reads loopback and link-local ONLY. Excluding the sibling
-// CIDR is a decision with two independent reasons (§6.2): an allow inside it is
-// NOT a dead rule (this sandbox's own gateway lives there and is the declared
-// resolver path §5.D semantics ③ requires), and a 400 naming it would put the
-// sandbox address space on the wire, which §6.2's ID-addressing excludes.
+// The seventh 400 class reads loopback and link-local ONLY — the sibling CIDR is
+// excluded for the two reasons FloorLiftableNever gives.
 func TestFloorLiftableNeverExcludesTheSiblingCIDR(t *testing.T) {
 	assertPrefixes(t, "FloorLiftableNever", FloorLiftableNever,
 		[]string{"127.0.0.0/8", "169.254.0.0/16", "::1/128", "fe80::/10"})
@@ -87,9 +80,7 @@ func TestFloorLiftableNeverExcludesTheSiblingCIDR(t *testing.T) {
 	}
 }
 
-// The floor and the tier must never share a set: the sibling /16 nests inside the
-// tier's 10/8, and an nft interval set either refuses to load or — with
-// auto-merge — silently swallows the subnet, merging the floor away (D5 ⑱).
+// The floor and the tier must never share a set (measured, D5 ⑱ — see TierV4).
 //
 // Asserted through Validate, i.e. through the mechanism that would actually stop
 // someone from merging them, rather than as a standalone arithmetic claim.
@@ -148,11 +139,10 @@ func TestValidateCatchesEachSilentlyBrokenShape(t *testing.T) {
 		rs:   base(func(r *Rule) { r.Scope = ScopeSecondHopUID }),
 		want: "second-hop scope",
 	}, {
-		// THE RETURN SCOPE ON A PER-SANDBOX HOOK, which is the worse half of the same
-		// crossing and was accepted while only the uid direction was guarded: this scope
-		// renders NO clause at all, so on a shared hook it is a completely un-narrowed
-		// accept. Only the renderer's text guard caught it, which puts the decision on
-		// the substrate at install time instead of here, root-free.
+		// THE RETURN SCOPE ON A PER-SANDBOX HOOK, the worse half of the same crossing,
+		// and it WAS accepted while only the uid direction was guarded — caught then only
+		// by the renderer's text guard, i.e. on the substrate at install time instead of
+		// here, root-free.
 		name: "second-hop return scope on a per-sandbox rule",
 		rs: base(func(r *Rule) {
 			r.Scope = ScopeSecondHopReturn
@@ -220,10 +210,9 @@ func TestValidateCatchesEachSilentlyBrokenShape(t *testing.T) {
 
 // The positive control for the guard suite above: a legal per-sandbox rule and a
 // legal second-hop rule both pass, and the second-hop one passes WITHOUT an
-// interface narrowing. That last point is the whole reason the guard is scoped by
-// table: a single "every rule carries iifname" rule would reject the one rule
-// §2.4 invariant 2 requires, and whichever check was written first would silently
-// win.
+// interface narrowing — the whole reason the guard is scoped by table, since a single
+// "every rule carries iifname" rule would reject the one rule §2.4 invariant 2
+// requires and whichever check was written first would silently win.
 func TestValidateAcceptsBothTablesLegalShapes(t *testing.T) {
 	rs := RuleSet{
 		Counters: []string{"floor", "hop2"},
@@ -246,12 +235,10 @@ func TestValidateAcceptsBothTablesLegalShapes(t *testing.T) {
 	}
 }
 
-// Only drop and reject end traversal across base chains. This is the abstract
-// form of the trap measured in D5 ⑩: an accept placed in a DIFFERENT base chain
-// on the same hook incremented its counter while the flow was still dropped by
-// the floor and the connection still failed. So "the accept counter moved" is not
-// evidence a rule works, and the generator must place an approved exception in
-// the SAME chain as the drop it overrides.
+// Only drop and reject end traversal across base chains — the abstract form of the
+// trap measured in D5 ⑩ (see Accept). So "the accept counter moved" is not evidence a
+// rule works, and the generator must place an approved exception in the SAME chain as
+// the drop it overrides.
 func TestOnlyTerminalVerdictsEndCrossChainTraversal(t *testing.T) {
 	for v, wantTerminal := range map[Verdict]bool{
 		Accept: false, Reject: true, Drop: true,

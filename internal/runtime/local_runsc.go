@@ -35,10 +35,9 @@ import (
 // restarted process learns which IPs survivors hold (from Adopt) and its
 // allocator skips them.
 //
-// Contract discipline (§5.A): the Provider interface carries only policy +
-// handles. Host primitives — cgroup path, netns fd, the merged host path — live
-// ONLY inside this implementation. A remote provider would carry different handle
-// shapes; nothing here leaks upward.
+// Host primitives — cgroup path, netns fd, the merged host path — live ONLY
+// inside this implementation, never in the interface (§5.A; enforced by
+// seam_test.go).
 type LocalRunsc struct {
 	// RunscRoot is the pinned canonical `runsc --root` (wrong root → `list`
 	// silently empty; §4.4-A reconcile enumerates against this one root).
@@ -68,11 +67,9 @@ type LocalRunsc struct {
 }
 
 // publishDefaultIP is the host address published endpoints bind to when the
-// deployment names none. Loopback by default, deliberately: publishing is an
-// EXPLICIT inbound exception (§2.1 ③), and binding it to every host interface by
-// default would make "the sandbox is reachable from the outside" a consequence of
-// omitting a flag rather than of a decision. A deployment that wants external
-// reachability names the address.
+// deployment names none. Loopback deliberately: publishing is an EXPLICIT inbound
+// exception (§2.1 ③), and defaulting to every host interface would make "reachable
+// from the outside" a consequence of omitting a flag rather than of a decision.
 const publishDefaultIP = "127.0.0.1"
 
 func (p *LocalRunsc) publishIP() string {
@@ -92,19 +89,18 @@ const (
 	cidPrefix = "sbxc_"
 )
 
-// cgroupRoot is the cgroup v2 mount point. A host primitive, sealed inside this
-// implementation — it never appears in the Provider interface (§5.A ❌ list).
+// cgroupRoot is the cgroup v2 mount point — a host primitive, so it stays inside
+// this implementation (§5.A ❌ list).
 const cgroupRoot = "/sys/fs/cgroup"
 
 // cgroupParent is the engine-owned cgroup layer beneath which runsc creates one
 // leaf per sandbox (§5.A cgroup ownership: the engine builds the parent layer, the
 // leaf belongs to runsc).
 //
-// It is a FLAT NAMING CONTAINER, deliberately not a kubelet-style cgroup-driver
-// hierarchy (§5.A): we do not synthesize a per-sandbox intermediate level, since
-// re-creating that layer is precisely the weight §1.1 rejects. One consequence
-// is load-bearing for §4.4-A: because each leaf is named for its cid, an ORPHAN
-// leaf under this parent is itself a scannable orphan-placement signal.
+// A FLAT NAMING CONTAINER, not a kubelet-style cgroup-driver hierarchy (§5.A): no
+// per-sandbox intermediate level, since re-creating that layer is the weight §1.1
+// rejects. One consequence is load-bearing for §4.4-A — each leaf is named for its
+// cid, so an ORPHAN leaf under this parent is a scannable orphan-placement signal.
 const cgroupParent = "engine"
 
 // memOverheadBytes is the host-side memory headroom added ON TOP of the
@@ -114,10 +110,9 @@ const cgroupParent = "engine"
 // a different thing entirely).
 //
 // It covers the sentry + gofer footprint, measured at ~14 MiB idle. 64 MiB is
-// deliberately generous: the failure mode of too LITTLE headroom is the sandbox
-// being terminated below the cap the guest was promised (the §3.4 spec bug this
-// split exists to avoid), whereas the cost of too much is only that the host
-// ceiling sits slightly above N. Asymmetric, so round up.
+// deliberately generous because the error is asymmetric: too LITTLE headroom
+// terminates the sandbox below the cap the guest was promised (the §3.4 spec bug this
+// split exists to avoid), too much only lifts the host ceiling slightly above N.
 const memOverheadBytes int64 = 64 << 20
 
 // placementHandle is provider-private state for stop/start (§5.A: callers
@@ -134,30 +129,21 @@ type placementHandle struct {
 	guestIP   string
 	gatewayIP string
 	bundleDir string
-	// nftTable is this sandbox's rule-set table. ALWAYS set, because it is derived from
-	// the SandboxID rather than discovered — teardown uses `nft destroy`, which succeeds
-	// whether or not a table was ever installed, so there is no need for an "installed?"
-	// signal here and no window where the name is unknown.
-	//
-	// A PLACEMENT RESOURCE like the netns: it is crash-surviving host state, so
-	// teardown must remove it and reconciliation must rebuild or reclaim it — it
-	// cannot be added after the fact (§2.4).
+	// nftTable is this sandbox's rule-set table, ALWAYS set because it is derived from
+	// the SandboxID rather than discovered — so there is no window where the name is
+	// unknown and no need for an "installed?" signal. A PLACEMENT RESOURCE like the
+	// netns: crash-surviving host state teardown must remove and reconciliation must
+	// rebuild or reclaim (§2.4).
 	nftTable string
 	// publishEndpoints maps each published `{guest_port, proto}` to the host `ip:port`
 	// bound for it AT THIS PLACEMENT (§3.3: rebound every resume, old one invalidated —
 	// but STABLE within one placement, see bindPublishEndpoints).
-	//
-	// Keyed on the PAIR because that is a publish's identity at the declaration layer
-	// (§5.D): tcp/8080 and udp/8080 are two items, and a port-only key refuses the
-	// second as a duplicate.
 	publishEndpoints map[publishKey]string
 	// publishHostPorts are the host ports held, so teardown returns them to the
 	// allocator. Derived from publishEndpoints at every bind, never accumulated.
 	publishHostPorts []uint16
 	// cgroupLeaf is the host path of this sandbox's memcg/cpu leaf, or "" when the
-	// sandbox has no limits (no leaf was requested). Provider-private, like every
-	// other field here: it is the host primitive §5.A forbids in the interface, so
-	// it lives only inside the opaque handle.
+	// sandbox has no limits (no leaf was requested).
 	cgroupLeaf string
 }
 
@@ -169,9 +155,8 @@ func cgroupRelPath(cid string) string  { return cgroupParent + "/" + cid }
 func cgroupLeafPath(cid string) string { return filepath.Join(cgroupRoot, cgroupParent, cid) }
 
 // namesFor derives the stable placement-local resource names for a SandboxID
-// (§4.4-A SandboxID labeling). Deterministic: the same SandboxID always maps to
-// the same names, which is exactly what lets Adopt re-find a crashed sandbox's
-// resources.
+// (§4.4-A SandboxID labeling). Deterministic, which is what lets Adopt re-find a
+// crashed sandbox's resources.
 func namesFor(sandbox string) placementHandle {
 	sum := sha256.Sum256([]byte(sandbox))
 	short := hex.EncodeToString(sum[:])[:12] // 12 hex → "vh"+12 = 14 ≤ 15 (IFNAMSIZ)
@@ -180,10 +165,6 @@ func namesFor(sandbox string) placementHandle {
 		cid:      cidPrefix + sandbox,
 		netns:    nsPrefix + sandbox,
 		vethHost: "vh" + short,
-		// The rule-set table carries the SandboxID verbatim, like the netns name, so
-		// enumeration is reversible and reconciliation can both re-adopt a survivor's
-		// rules and identify orphan tables (§4.4-A / §2.4: the rule set is
-		// crash-surviving host state).
 		nftTable: nftTableName(sandbox),
 	}
 }
@@ -220,12 +201,11 @@ func (p *LocalRunsc) Name() string { return "local_runsc" }
 // freshly-restarted process cannot hand a new sandbox an IP a survivor adopted
 // (§4.4-A). <sandbox /16>.<hi>.<lo*4>/30.
 //
-// The /16 comes from `internal/ruleset`, NOT from a literal here, and that is a
-// correctness requirement rather than tidiness: §5.D's L0 floor names the same
-// /16 as its SIBLING item (the materialization of §2.3 cross-sandbox network
-// isolation, which point-to-point veth does not deliver on its own — the host
-// still routes between two /30s, measured D5 ①). Two literals could drift, and
-// the drift would hand out a /30 the floor does not cover — a silently reachable
+// The /16 comes from `internal/ruleset`, NOT a literal here, for correctness rather
+// than tidiness: §5.D's L0 floor names the same /16 in its SIBLING item (§2.3
+// cross-sandbox isolation, which point-to-point veth does not deliver on its own —
+// the host still routes between two /30s, measured D5 ①). Two literals could drift,
+// and the drift hands out a /30 the floor does not cover: a silently reachable
 // sibling. One fact, one leaf (D5 ④).
 func (p *LocalRunsc) allocSubnet() (hostIP, guestIP string) {
 	p.mu.Lock()
@@ -297,9 +277,9 @@ func (p *LocalRunsc) Launch(ctx context.Context, spec LaunchSpec) (_ *Placement,
 	// on AFTER the netns/veth exist and BEFORE the isolated unit runs. Any window in
 	// which the network is up and the rules are not is a fail-open window, and only
 	// the side creating the placement has this hook point at all (network.md D1 ①).
-	// A failure here unwinds the half-built placement via the defer above (§4.4-A) —
-	// there is no "launch it anyway without the rules" path, because that is exactly
-	// the escape-is-failure-not-degradation rule (§2.4).
+	// A failure here unwinds the half-built placement via the defer above (§4.4-A);
+	// there is no "launch it anyway without the rules" path (§2.4: an escape is a
+	// failure, not a degradation).
 	//
 	// The guest default route lands in the SAME pre-launch window, and for an
 	// independent reason: the sentry takes the L3 address off the kernel-side veth
@@ -352,11 +332,9 @@ func (p *LocalRunsc) Launch(ctx context.Context, spec LaunchSpec) (_ *Placement,
 		return nil, fmt.Errorf("runtime: runsc run: %w", err)
 	}
 
-	// ④d: ASSERT the caps actually bound, then apply the two host-side settings
-	// runsc does not write. The assertion is mandatory, not defensive: the
-	// leaf-ownership trap fails OPEN (limits skipped, launch succeeds), so without
-	// a read-back a mis-wired cap looks exactly like a working one (§5.A: assert after
-	// launch that the limits really did take effect).
+	// ④d: ASSERT the caps actually bound, then apply the two host-side settings runsc
+	// does not write. Mandatory, not defensive — the leaf-ownership trap fails OPEN
+	// (§5.A; see bindLimits).
 	if limited {
 		if err = p.bindLimits(&h, spec.Limits); err != nil {
 			return nil, err
@@ -375,31 +353,24 @@ func (p *LocalRunsc) Launch(ctx context.Context, spec LaunchSpec) (_ *Placement,
 // the binding §5.D leaves to the provider because it is a placement product (§5.A ❌
 // list / network.md D1 ②).
 //
-// # It binds only what is NOT already bound, and that distinction is the contract
+// # It binds only what is NOT already bound: WITHIN vs ACROSS a placement
 //
-// §3.3 says a host endpoint is a placement product: it changes from one placement to
-// the next and must not be cached as a stable identifier. That permits exactly one
-// kind of change and forbids two others, and the line between them is WITHIN vs
-// ACROSS a placement:
+// ACROSS placements (pause→resume, any rebuild) the endpoint MAY change — §3.3's
+// placement product. WITHIN one placement it may NOT, and the two callers that reach
+// here on a LIVE placement each lose a different promise if it does:
 //
-//   - ACROSS placements (pause→resume, or any rebuild) the endpoint may change. The
-//     placement is new, the netns and the IP are new, and §6.1 reports `host_endpoint`
-//     only while a placement exists precisely so a caller cannot come to rely on it.
-//   - WITHIN one placement it may NOT. Two callers reach this function on a LIVE
-//     placement: the publish hot-add (§5.D's one Binding field writable on `running`)
-//     and Adopt (§4.4-A). For the first, §5.D's endorsement of hot-adding rests on
-//     publish being PURELY ADDITIVE — re-drawing the endpoint of a publish nobody
-//     touched is not additive, and it also breaks §6.1's "a repeated publish is
-//     idempotent, return the existing one", since a second identical POST would answer
-//     with a DIFFERENT endpoint. For Adopt, §5.A promises the SAME endpoint and no new
-//     epoch: the isolation unit never restarted, so nothing about this placement is new
-//     and re-drawing would hand a caller's cached endpoint to whatever sandbox the
-//     allocator reaches next.
+//   - the publish hot-add (§5.D's one Binding field writable on `running`): re-drawing
+//     the endpoint of a publish nobody touched is not ADDITIVE, which is what §5.D's
+//     endorsement rests on, and it breaks §6.1's idempotent repeated publish — a second
+//     identical POST would answer with a DIFFERENT endpoint.
+//   - Adopt (§4.4-A): §5.A promises the same endpoint and no new epoch, so re-drawing
+//     would hand a caller's cached endpoint to whatever sandbox the allocator reaches
+//     next.
 //
 // So the reuse is keyed on what is already in the handle, and the ONE way a live
-// placement's handle can be missing its bindings — a control-plane restart, where the
-// handle is rebuilt from resource names — is closed on the Adopt side by reading the
-// endpoints back off the installed table (recoverPublishEndpoints).
+// placement's handle can be missing its bindings — a control-plane restart, which
+// rebuilds the handle from resource names — is closed on the Adopt side by
+// recoverPublishEndpoints.
 func (p *LocalRunsc) bindPublishEndpoints(h *placementHandle, spec SteeringSpec) error {
 	if len(spec.PublishPorts) == 0 {
 		// Nothing declared: release whatever this handle held, so the allocator does not
@@ -491,9 +462,8 @@ func (p *LocalRunsc) publishAddr() netip.Addr {
 // for the same reason: a restarted process's allocator starts empty, so without a
 // read-back it re-issues ports in `ListSandboxes` order. Two survivors A@21000 and
 // B@21001 adopted in the other order come back SWAPPED — a caller's cached endpoint
-// then points at a DIFFERENT SANDBOX, which is worse than a stale endpoint and is not
-// what §3.3 licenses (that licenses a NEW placement's endpoint differing, not a live
-// placement's endpoint moving under it).
+// then points at a DIFFERENT SANDBOX, which §3.3 does not license (it licenses a NEW
+// placement's endpoint differing, not a live one's moving under it).
 //
 // Reversible by construction, like the netns name: the DNAT lines this provider
 // renders carry the host endpoint (`daddr` + `dport`) and the guest port (`dnat … to
@@ -564,11 +534,9 @@ func publishEndpointList(h *placementHandle, spec SteeringSpec) []string {
 	return out
 }
 
-// Stop cleanly stops the unit AND releases its placement-local resources
-// (§4.2 pause: release RAM/CPU; a paused sandbox "occupies only disk" — no
-// netns/veth held).
-// The Overlay artifact is untouched (that is the Rootfs subsystem's, §4). resume
-// builds a fresh placement with a new IP (§3.3), so nothing here must survive.
+// Stop cleanly stops the unit AND releases its placement-local resources (§4.2
+// pause: a paused sandbox "occupies only disk" — no netns/veth held). Resume builds
+// a fresh placement with a new IP (§3.3), so nothing here must survive.
 func (p *LocalRunsc) Stop(ctx context.Context, pl *Placement) error {
 	h, ok := pl.Handle().(*placementHandle)
 	if !ok || h == nil {
@@ -579,8 +547,7 @@ func (p *LocalRunsc) Stop(ctx context.Context, pl *Placement) error {
 }
 
 // Destroy tears down placement-local resources (netns/IP/cgroup) — same reclaim
-// as Stop (idempotent). It does NOT delete the Overlay (Rootfs's job, invoked
-// separately by the mediator; §4 subsystems don't call each other).
+// as Stop, idempotent.
 func (p *LocalRunsc) Destroy(ctx context.Context, pl *Placement) error {
 	h, ok := pl.Handle().(*placementHandle)
 	if !ok || h == nil {
@@ -610,41 +577,31 @@ func (p *LocalRunsc) Adopt(ctx context.Context, sandbox string) (*Placement, boo
 		return nil, false, CauseUnknown, err
 	}
 	if !alive {
-		// DEAD, and the placement is still intact — this is the LAST instant the
-		// death cause is readable (§4.3 / reaper-health D4c). The memcg leaf lives
-		// until `runsc delete`, which any teardown of this placement will run, so
-		// there is no asking again later. Read it now and hand it out with the
-		// verdict; the mediator persists it in the same commit as the demotion CAS.
+		// DEAD, and the placement is still intact — the LAST instant the death cause is
+		// readable (§4.3 / reaper-health D4c; the window is readDeathCause's). Read it now
+		// and hand it out with the verdict; the mediator persists it in the same commit as
+		// the demotion CAS.
 		return nil, false, readDeathCause(h.cid), nil
 	}
 
 	// rediscover the endpoint (same IP — the container runs with it; §4.4-A "the
-	// same IP"). runsc's --network=sandbox moves the guest veth into gVisor's netstack,
-	// so the guest IP is no longer visible inside the netns; but the HOST veth
-	// still carries its /30 host address, and our allocation pins guest = host+1.
+	// same IP").
 	ip, err := p.rediscoverGuestIP(&h)
 	if err != nil {
-		// The container is L1-ALIVE but we could not recover its endpoint. This is
-		// UNCERTAINTY, not death — returning alive=false here would make the mediator
-		// CAS-demote and ReclaimOrphans tear down a provably-live container (§4.4-A
-		// failing to tear down a live container is irreversible). Surface an error instead
-		// so the mediator PROTECTS the
-		// placement and retries next boot (§4.4-A protect-on-uncertainty). alive=false
-		// is reserved for a genuinely dead/absent isolation unit (handled above).
+		// The container is L1-ALIVE but its endpoint is unrecoverable: UNCERTAINTY, not
+		// death. alive=false here would make the mediator CAS-demote and ReclaimOrphans
+		// tear down a provably-live container — irreversible — so surface an error and let
+		// the mediator protect the placement and retry next boot (§4.4-A
+		// protect-on-uncertainty). alive=false is for a genuinely dead unit (above).
 		return nil, false, CauseUnknown, fmt.Errorf("runtime: Adopt %s: container alive but endpoint unrecoverable: %w", sandbox, err)
 	}
 	h.guestIP = ip
-	// The gateway is the /30's host side, i.e. guest-1 — recovered here because
-	// re-rendering the rule set needs it (the self-gateway allow and the publish
-	// return SNAT both name it), and because rediscoverGuestIP read it to derive the
-	// guest IP in the first place.
+	// Recovered because re-rendering the rule set needs it: the self-gateway allow and
+	// the publish return SNAT both name the gateway.
 	h.gatewayIP = decLastOctet(ip)
 	p.markInUse(ip) // survivor holds this IP — the allocator must skip it (§4.4-A)
-	// Recover the publish bindings the same way and for the same reason: read them back
-	// off the INSTALLED table rather than re-drawing them. §5.A promises Adopt returns
-	// the SAME endpoint with no new epoch, and a restarted process's port allocator is
-	// empty — so without this, two survivors are re-issued ports in adoption order and
-	// can come back SWAPPED, pointing a caller's cached endpoint at another sandbox.
+	// Recover the publish bindings the same way and for the same reason — read back, not
+	// re-drawn (§5.A: the same endpoint, no new epoch; see recoverPublishEndpoints).
 	p.recoverPublishEndpoints(ctx, &h)
 
 	pl := &Placement{TransportEndpoint: fmt.Sprintf("%s:%d", ip, guestport.Port)}
@@ -663,12 +620,11 @@ func (p *LocalRunsc) Adopt(ctx context.Context, sandbox string) (*Placement, boo
 //
 // # The keep-set must be complete BEFORE anything is deleted
 //
-// That is a hard constraint rather than a natural reading (network.md D5 ㉒). The
-// keep set arrives fully computed here, and this function deletes only what is
-// outside it — so "reclaim first, then adopt" is not expressible through this API,
-// which is deliberate: reclaiming a live sandbox's TABLE and then re-installing it
-// during Adopt is LITERALLY the delete-then-install sequence measured to kill every
-// live flow across the gap (5/5).
+// A hard constraint, not a natural reading (network.md D5 ㉒). The keep set arrives
+// fully computed and this function deletes only what is outside it, so "reclaim
+// first, then adopt" is deliberately not expressible through this API: reclaiming a
+// live sandbox's TABLE and re-installing it during Adopt IS the delete-then-install
+// sequence measured to kill every live flow across the gap.
 //
 // The rule set is enumerated as its own resource class here, not inferred from the
 // netns list, because the two can disagree: a table survives a netns that was
@@ -724,32 +680,14 @@ func contains(xs []string, x string) bool {
 // ReinstallRuleSet re-renders and re-installs a surviving sandbox's rule set as ONE
 // atomic file — the §4.4-A Adopt face of §5.D enforcement.
 //
-// IT MAY RE-INSTALL BLINDLY, WITH NO DIFF — the constraining measurement is also the PERMISSION
-// (network.md D5 ㉒): one atomic `nft -f` file does not disturb a live flow (5/5 survived, ct id
-// unchanged, the masquerade counter at zero while bytes moved — the flow runs on the transform
-// already in the ct entry and the nat hook is not re-evaluated). Two prohibitions from the same
-// measurement:
-//   - NEVER `delete` the table and then install (5/5 flows died — packets in the gap left with
-//     the raw sandbox source address and the peer RST them). The atomic file's leading
-//     bare-`table` + `delete` + definition is ONE transaction, which is not the same thing.
-//   - NEVER flush conntrack, in any form: under `tcp_loose=0` a flush kills live flows outright,
-//     and this host's `tcp_loose=1` merely masks it — a sysctl the engine neither owns nor may
-//     depend on.
+// IT MAY RE-INSTALL BLINDLY, WITH NO DIFF, because the measurement that constrains the
+// file's shape is also the permission: one atomic `nft -f` file does not disturb a live
+// flow, while `delete` then install kills every one (see renderRuleSet, network.md D5 ㉒).
+// The same measurement forbids flushing conntrack in any form.
 //
-// ENDPOINTS ARE PRESERVED, only new items getting one: the TABLE is re-rendered blindly, the
-// BINDINGS are not. Both callers hold a LIVE placement, and for each, re-binding what is already
-// bound breaks a promise:
-//   - hot-add: §5.D endorses it because it is PURELY ADDITIVE. Adding B while re-drawing A's
-//     endpoint is not additive, and §6.1's "a repeated publish is idempotent — return the
-//     existing one" would answer a second identical POST with a different endpoint (AddPublish
-//     reaches here even when `added` is false).
-//   - Adopt: §5.A promises the same endpoint and no new epoch — the isolation unit never
-//     restarted, so nothing here is new.
-//
-// §3.3 is not in tension: it licenses a NEW placement's endpoint differing, not a live one's
-// moving because someone else published something. A control-plane restart is the one case where
-// a live placement arrives with an empty handle, and Adopt closes it by reading the endpoints
-// back off the installed table first.
+// ENDPOINTS ARE PRESERVED, only new items getting one: the TABLE is re-rendered blindly,
+// the BINDINGS are not. Both callers hold a LIVE placement, where re-binding what is
+// already bound breaks a promise — see bindPublishEndpoints for which promise, per caller.
 func (p *LocalRunsc) ReinstallRuleSet(ctx context.Context, pl *Placement, spec SteeringSpec) error {
 	h, ok := pl.Handle().(*placementHandle)
 	if !ok || h == nil {
@@ -759,10 +697,9 @@ func (p *LocalRunsc) ReinstallRuleSet(ctx context.Context, pl *Placement, spec S
 		return err
 	}
 	if spec.RoutedEgress {
-		// The guest default route cannot be re-added after boot (the sentry took the L3
-		// address off the kernel-side veth, D5 ⑬) — but it does not need to be: the
-		// isolation unit never restarted, so the route it booted with is still in its
-		// netstack. Only the host-side halves are re-asserted.
+		// The guest default route cannot be re-added after boot (D5 ⑬, see Launch) — and
+		// need not be: the isolation unit never restarted, so the route it booted with is
+		// still in its netstack. Only the host-side halves are re-asserted.
 		if err := writeSysctl("net/ipv4/ip_forward", "1"); err != nil {
 			return fmt.Errorf("runtime: re-assert ip_forward during adopt: %w", err)
 		}
@@ -881,27 +818,21 @@ func (p *LocalRunsc) teardownPlacement(h *placementHandle) {
 	// !alive branch rather than leaving it to the caller.
 	_ = p.runsc(context.Background(), "kill", h.cid, "KILL")
 	_ = p.runsc(context.Background(), "delete", "--force", h.cid)
-	// Reclaim the cgroup leaf. runsc removes a leaf it OWNS on delete, so this is
-	// normally a no-op; it matters for the paths where runsc never got that far —
-	// a launch that failed before/during `run`, or a leaf that became foreign — and
-	// for those an orphan leaf under the engine parent would otherwise linger as a
-	// stale placement resource (§4.4-A). rmdir of a live/absent cgroup fails
-	// harmlessly, so this stays best-effort and idempotent like every step here.
+	// Reclaim the cgroup leaf. Normally a no-op (runsc removes a leaf it OWNS on
+	// delete); it matters where runsc never got that far — a launch that failed
+	// before/during `run`, or a leaf that became foreign — whose orphan leaf would
+	// otherwise linger as a stale placement resource (§4.4-A). rmdir of a live/absent
+	// cgroup fails harmlessly, so this stays best-effort like every step here.
 	if h.cgroupLeaf != "" {
 		_ = os.Remove(h.cgroupLeaf)
 	} else {
 		_ = os.Remove(cgroupLeafPath(h.cid))
 	}
-	// The §5.D rule set. A PLACEMENT RESOURCE like the netns — crash-surviving host
-	// state (§2.4) — so it goes here rather than being left to leak, and it goes
-	// BEFORE the veth: a rule referencing a veth by NAME survives that veth's
-	// removal harmlessly (which is the whole reason for `iifname` over `iif`), but
-	// dropping the table first means a half-torn-down placement never has rules
-	// pointing at a veth that a later sandbox could recreate under the same name.
+	// The §5.D rule set, BEFORE the veth: dropping the table first means a
+	// half-torn-down placement never has rules pointing at a veth name a later sandbox
+	// could recreate.
 	//
-	// `destroy` rather than `delete`: teardown runs on half-built placements where
-	// the table may never have been installed, and `delete` on a nonexistent table
-	// returns rc=1.
+	// (`destroy` rather than `delete`, for the reason in deleteRuleSet.)
 	p.deleteRuleSet(h.nftTable)
 	// Strict reverse-dependency order (§4.4-A: build was netns → veth → runsc, so
 	// teardown is runsc → veth → netns). Deleting the HOST veth cascades its guest
@@ -951,12 +882,10 @@ func ensureCgroupParent() error {
 // applies the two host-side knobs runsc does not write itself.
 //
 // Why an assertion and not a hope (§5.A): the cgroup leaf-ownership rule fails
-// OPEN. If the leaf turns out to be foreign to runsc (someone pre-created the
-// full path, or a stale leaf survived), runsc writes memory.swap.max=0, leaves
-// memory.max at `max`, and the launch SUCCEEDS. The sandbox then runs with no RAM
-// cap at all while every observable signal says it is capped — a silent breach of
-// the §2.3 blast-radius invariant. So we read the values back and fail the launch
-// if they disagree; the caller unwinds the half-built placement (§4.4-A).
+// OPEN (buildOCISpec carries the measured constraint). A leaf foreign to runsc
+// still LAUNCHES, with no RAM cap and every observable signal saying it is capped —
+// a silent breach of the §2.3 blast radius. So read the values back and fail the
+// launch if they disagree; the caller unwinds the half-built placement (§4.4-A).
 func (p *LocalRunsc) bindLimits(h *placementHandle, limits ResourceLimits) error {
 	leaf := h.cgroupLeaf
 	if _, err := os.Stat(leaf); err != nil {
@@ -1043,11 +972,9 @@ func writeCgroupFile(leaf, name, val string) error {
 // tasks within the group and read 9 for the SAME single termination — a per-task
 // counter cannot answer "was this sandbox killed for its RAM cap".
 //
-// Read-window discipline: this is only callable while the placement is intact.
-// `runsc delete` inside teardownPlacement destroys the leaf and this signal with
-// it, which is why Adopt reads here rather than letting the caller ask later
-// (§4.3: the provider hands the death cause out together with its already-dead
-// verdict, because the signal does not survive teardown).
+// Read-window discipline: only callable while the placement is intact. `runsc
+// delete` inside teardownPlacement destroys the leaf and this signal with it, so
+// §4.3 has the provider hand the cause out together with its already-dead verdict.
 func readDeathCause(cid string) DeathCause {
 	b, err := os.ReadFile(filepath.Join(cgroupLeafPath(cid), "memory.events"))
 	if err != nil {

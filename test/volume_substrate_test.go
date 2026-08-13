@@ -461,9 +461,8 @@ func TestVolumeSeedAndReadBackWithoutAnySandbox(t *testing.T) {
 		t.Fatalf("round trip mismatch: %d bytes back, %d written", out.Len(), len(payload))
 	}
 
-	// Still true after the record's whole round trip through a restart: a second engine
-	// over the SAME store and storage reads the same bytes. This is what makes the
-	// decoupling durable rather than in-process.
+	// The storage unit is on disk, and a SECOND export reads the same bytes — export is
+	// repeatable, not a one-shot drain of the unit.
 	if _, err := os.Stat(volumeUnitPath(stateDir, vid)); err != nil {
 		t.Fatalf("volume storage missing: %v", err)
 	}

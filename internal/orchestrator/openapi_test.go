@@ -3,7 +3,7 @@ package orchestrator
 // The guards that make docs/spec/openapi.json a CONTRACT rather than a file
 // somebody once wrote (ADR-0008 part 1).
 //
-// Three properties, and each one fails in a different way if left unchecked:
+// Three properties, each failing differently if left unchecked:
 //
 //  1. Not stale — the checked-in bytes are what the generator produces now.
 //  2. Every listed operation is actually ROUTED. A document describing an endpoint
@@ -132,11 +132,9 @@ func TestOpenAPIDocIsWellFormedEnoughToGenerateFrom(t *testing.T) {
 // TestEveryDocumentedOperationIsRouted drives each listed operation against a real
 // server and asserts the router RECOGNIZES it: not 404, and not 405.
 //
-// It deliberately does not assert success. Most operations need state this test has
-// no business building (a running sandbox with a live guest), and the property under
-// test is "the engine serves this method at this path" — which the two negative codes
-// answer exactly. A 400 or a 503 here is a PASS: the route ran and the handler
-// objected to something else.
+// It does not assert success: most operations need state this test has no business building (a
+// running sandbox with a live guest), and the property is "the engine serves this method at this
+// path". A 400 or a 503 is a PASS — the route ran and the handler objected to something else.
 func TestEveryDocumentedOperationIsRouted(t *testing.T) {
 	srvURL, _, closeFn := activityFixture(t, &activityFakeClient{barrierFakeClient: &barrierFakeClient{}})
 	defer closeFn()
@@ -185,14 +183,12 @@ func TestEveryDocumentedOperationIsRouted(t *testing.T) {
 	}
 }
 
-// TestEveryRoutedOperationIsDocumented is the direction that actually rots: a new
-// endpoint lands, every test passes, and the published contract silently describes an
-// older engine.
+// TestEveryRoutedOperationIsDocumented is the direction that actually rots: a new endpoint lands,
+// every test passes, and the published contract silently describes an older engine.
 //
-// It reads the ROUTER'S OWN SOURCE rather than probing, because there is no way to
-// enumerate an http.ServeMux's patterns, and a prober cannot invent the paths it does
-// not already know. The AST is the same technique edge_test.go uses for the
-// sanitization guard — a structural fact checked structurally.
+// It reads the ROUTER'S OWN SOURCE rather than probing, because an http.ServeMux's patterns
+// cannot be enumerated and a prober cannot invent paths it does not know — the same AST technique
+// edge_test.go uses for the sanitization guard.
 func TestEveryRoutedOperationIsDocumented(t *testing.T) {
 	documented := map[string]bool{}
 	for _, op := range apiOps {

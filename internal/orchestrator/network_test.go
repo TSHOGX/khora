@@ -20,12 +20,10 @@ import (
 // touching anything — no provider constructed, no state directory materialized, no
 // table installed.
 //
-// Both halves are the assertion. `network.ValidateSecondHopUID` owns the mechanism
-// (see its test); this owns the POSITION, which is the part a flag-level check in
-// cmd/orchestrator would not deliver: the substrate harness builds an Engine directly,
-// so a check that lived in main.go would be bypassed by every test and by any embedder.
-// And placing it after the providers are up would mean discovering the problem from an
-// engine that has already installed the table and begun dialing through it.
+// Both halves are the assertion. `network.ValidateSecondHopUID` owns the mechanism (see its
+// test); this owns the POSITION, which a flag-level check in cmd/orchestrator would not deliver:
+// the substrate harness builds an Engine directly, so a check in main.go would be bypassed by
+// every test and by any embedder.
 //
 // Root-free precisely because the check runs first: rootfs/runtime/btrfs are never
 // reached, so this test does not need the substrate the rest of the assembly does.
@@ -54,16 +52,13 @@ func TestTheAssemblyRefusesItsOwnUIDAsTheSecondHopUID(t *testing.T) {
 			"second-hop table is past the point where learning this helps")
 	}
 
-	// THE CONTROL ARM, asserting success rather than the absence of one error. The same
-	// config with a uid the engine does not run as assembles cleanly (measured: err nil,
-	// state dir materialized — the assembly reaches no substrate, which is why this whole
-	// test is root-free).
+	// THE CONTROL ARM: the same config with a uid the engine does not run as assembles cleanly
+	// (measured: err nil, state dir materialized).
 	//
-	// `err == nil` and not `!errors.Is(err, ErrSecondHopUIDIsTheEngineItself)`: the weaker
-	// form is satisfied by New failing for ANY unrelated reason, so it would keep passing
-	// if the config never reached the uid check at all — and then it would not be a control
-	// on anything. What it has to establish is that the refusal above is specific to the
-	// self-uid rather than to the presence of a second-hop uid.
+	// `err == nil` and not `!errors.Is(err, ErrSecondHopUIDIsTheEngineItself)`: the weaker form
+	// is satisfied by New failing for ANY unrelated reason, so it would keep passing if the
+	// config never reached the uid check. What it has to establish is that the refusal above is
+	// specific to the self-uid rather than to the presence of a second-hop uid.
 	other := euid + 4711
 	eng, cerr := New(Config{
 		TemplatesDir: filepath.Join(base, "templates"),
@@ -494,18 +489,15 @@ func TestTheReadFaceOutputIsALegalWriteBody(t *testing.T) {
 // A FULL read response — one carrying BOTH read-only members the read face can emit,
 // `state` and a per-publish `host_endpoint` — must be a legal write body verbatim.
 //
-// This is the assertion the test above cannot make. It builds its body from
-// `encodeNetwork` alone, which sets neither read-only member (`state` is the handler's,
-// `host_endpoint` needs a live placement), so it round-trips while leaving §6.1's
-// contract requirement untested at both points where the response actually differs
-// from a declaration.
+// The assertion the test above cannot make: it builds its body from `encodeNetwork` alone, which
+// sets neither read-only member (`state` is the handler's, `host_endpoint` needs a live
+// placement), so it round-trips while leaving §6.1's contract untested at both points where the
+// response differs from a declaration.
 //
-// The gap it hid was real: `DisallowUnknownFields` applies RECURSIVELY, so a `running`
-// sandbox with one publish produced a GET response that PATCH refused with
-// `json: unknown field "host_endpoint"` — one level down from where `state` lives. It
-// survived because §5.D's SAFE sequence (`pause → GET → PATCH → resume`) reads after
-// the pause, when there is no placement and hence no endpoint to emit; only the order
-// §5.D names as dangerous hit the 400.
+// The gap it hid was real: `DisallowUnknownFields` applies RECURSIVELY, so a `running` sandbox
+// with one publish produced a GET response PATCH refused with `json: unknown field
+// "host_endpoint"`. It survived because §5.D's SAFE sequence (`pause → GET → PATCH → resume`)
+// reads after the pause, when there is no placement and hence no endpoint to emit.
 func TestAFullReadResponseIsALegalWriteBody(t *testing.T) {
 	decl := model.NetworkDecl{}
 	decl.Egress.Default = model.NetDeny
@@ -586,10 +578,8 @@ func TestAFullReadResponseIsALegalWriteBody(t *testing.T) {
 // field and was the gap: §6.1's rule is "every read-only member the read face emits is
 // accepted and ignored", not "every one on the PATCH path".
 //
-// `GET …/network` emits `host_endpoint` on a running sandbox's publish items, so a
-// caller re-posting one item they just read back hit a 400 on a key the engine itself
-// produced — precisely the friction §6.1 argues must not sit on the read-modify-write
-// path, one endpoint over from where it was fixed.
+// `GET …/network` emits `host_endpoint` on a running sandbox's publish items, so a caller
+// re-posting one item it just read hit a 400 on a key the engine itself produced.
 func TestAReadBackPublishItemIsALegalPublishBody(t *testing.T) {
 	// Exactly what the read face emits for one publish item on a live placement.
 	resp := encodeNetwork(func() model.NetworkDecl {

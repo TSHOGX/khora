@@ -95,21 +95,14 @@ type Config struct {
 	// 2 counts zero in `forward`, so the first-hop floor never evaluates it —
 	// network.md D5 ㉔).
 	//
-	// Set to THIS PROCESS'S OWN euid ⇒ New refuses to assemble. That value would put
-	// the engine's own guest dials under the second-hop floor, whose daddr set contains
-	// the sandbox address space — see network.ValidateSecondHopUID.
+	// Set to THIS PROCESS'S OWN euid ⇒ New refuses to assemble (see the check there).
 	SecondHopUID *int
 
 	// ListenAddr is the §6.1 API listen address, validated at assembly time against
 	// ADR-0007's loopback requirement. EMPTY = not validated, which is what every
-	// in-process caller wants: a test serving through httptest.NewServer never
-	// listens on this address at all, so there is nothing to classify.
-	//
-	// The refusal lives HERE rather than in cmd/ for the reason SecondHopUID's does:
-	// the substrate harness builds an Engine directly, so a flag-level check would be
-	// bypassed by every test and by any embedder. What differs is the empty case —
-	// a uid is either given or not, while a listen address only exists for a caller
-	// that is about to serve on it.
+	// in-process caller wants: a test serving through httptest.NewServer never listens on
+	// this address at all, so there is nothing to classify. The refusal lives in the
+	// assembly rather than in cmd/ for the reason SecondHopUID's does (see New).
 	ListenAddr string
 	// InsecureListen is the deployment saying OUT LOUD that ListenAddr may be
 	// routable (ADR-0007). It buys exactly one thing: ValidateListenAddr is not
@@ -144,21 +137,18 @@ type Engine struct {
 	Mediator  *lifecycle.Mediator
 	Store     store.Store
 	Publisher *store.Publisher
-	// health backs /healthz, /readyz and /metrics (see health.go). A field rather
-	// than package state so two Engines in one test process do not share counters.
+	// health backs /healthz, /readyz and /metrics (see health.go).
 	health health
 	// httpHandlers gates and tracks handlers entering the engine mux. Shutdown closes
 	// the gate before draining, then waits for the active set to empty before Store
 	// closes, including after forcing timed-out connections closed.
 	httpHandlers handlerTracker
-	// Reaper is the §4.3 autonomous control loop (auto-pause / crash-pause /
-	// evict + periodic reconcile). Built here; started by StartLoops AFTER startup
-	// Reconcile, and stopped by Shutdown as a middle step of the teardown sequence.
+	// Reaper is the §4.3 autonomous control loop (auto-pause / crash-pause / evict +
+	// periodic reconcile). Built here; started by StartLoops AFTER startup Reconcile.
 	Reaper *lifecycle.Reaper
-	// loops is the lifetime of the three background loops (loops.go). The assembly owns
-	// it because stopping them is a MIDDLE step of Shutdown's sequence — after
-	// readiness flips, before the store closes — and a caller holding it would have to
-	// re-implement that order at the call site.
+	// loops is the lifetime of the three background loops (loops.go). The assembly owns it
+	// because stopping them is a MIDDLE step of Shutdown's sequence, and a caller holding
+	// it would have to re-implement that order at the call site.
 	loops loopSet
 }
 
@@ -224,23 +214,18 @@ func New(cfg Config) (*Engine, error) {
 	// process's own euid puts the engine's OWN dials to guest veth addresses under the
 	// second-hop floor (its daddr set contains the whole sandbox address space), which
 	// takes out readiness, liveness and every RPC for every sandbox at once — and
-	// intermittently, since skuid misses packets. Refusing here rather than at boot's
-	// InstallSecondHopTable is deliberate: this is the LAST point at which nothing has
-	// been installed and no request has been served, and an engine that has already put
-	// that table in the kernel is past the point where discovering this helps.
+	// intermittently, since skuid misses packets. Here rather than at boot's
+	// InstallSecondHopTable because this is the LAST point at which nothing has been
+	// installed and no request has been served.
 	//
-	// The check lives in the assembly rather than in cmd/ so every path reaches it —
-	// the substrate harness builds an Engine directly and would otherwise bypass a
-	// flag-level check entirely.
+	// In the assembly rather than in cmd/ so every path reaches it — the substrate harness
+	// builds an Engine directly and would otherwise bypass a flag-level check entirely.
 	if err := network.ValidateSecondHopUID(dep, os.Geteuid()); err != nil {
 		return nil, fmt.Errorf("orchestrator: %w", err)
 	}
 
-	// ADR-0007's enforcement half, in the same fail-fast position and for the same
-	// reason: this is the last point at which nothing has been installed and nothing
-	// has been served. An engine that has already put the second-hop table in the
-	// kernel and begun serving is past the point where learning "that listener is
-	// published" helps anyone.
+	// ADR-0007's enforcement half, in the same fail-fast position and for the same reason
+	// as the check above.
 	if cfg.ListenAddr != "" && !cfg.InsecureListen {
 		if err := ValidateListenAddr(cfg.ListenAddr, cfg.ResolveHost); err != nil {
 			return nil, err

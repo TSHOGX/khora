@@ -87,12 +87,9 @@ func TestSameCode(t *testing.T) {
 		new:  "package p\n\n//go:generate buf generate --template x.yaml\nvar X = 1\n",
 		want: false,
 	}, {
-		// PERMUTING two directives, with the same two still present. A directive binds to
-		// whatever declaration FOLLOWS it, so this swaps which file each var holds while
-		// leaving the token stream identical AND the set of directives identical — the two
-		// things this gate compares. Measured on a scratch module: the program went from
-		// printing "AAA BBB" to "BBB AAA" while a sorted-set comparison reported no change.
-		// Hence the sequence, not the set.
+		// PERMUTING two directives, with the same two still present: the token stream AND
+		// the set of directives both stay identical, so only a positional comparison
+		// catches it (the measurement is on `directives`).
 		name: "permuting two //go:embed directives changes the binary",
 		old:  "package p\n\nimport _ \"embed\"\n\n//go:embed a.txt\nvar First string\n\n//go:embed b.txt\nvar Second string\n",
 		new:  "package p\n\nimport _ \"embed\"\n\n//go:embed b.txt\nvar First string\n\n//go:embed a.txt\nvar Second string\n",

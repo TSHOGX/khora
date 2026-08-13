@@ -18,16 +18,14 @@ import (
 	v1 "github.com/TSHOGX/warren/pkg/transport/gen/engine/transport/v1"
 )
 
-// processServer implements the §5.E process primitive (transport D4.3). It fans
-// one process's output out to N subscribers (Start + any Connect), each getting
-// an independent copy, and keeps a per-process bounded output ring buffer so a
-// late Connect replays recent bytes before joining live (D4.3 invariant 2).
+// processServer implements the §5.E process primitive (transport D4.3). It fans one process's
+// output out to N subscribers (Start + any Connect), each getting an independent copy, and
+// keeps a per-process bounded output ring buffer so a late Connect replays recent bytes before
+// joining live (D4.3 invariant 2).
 //
-// procs maps pid→proc. It is transport-process-local, non-authoritative, and
-// dies with the transport process — NOT a control-plane
-// registry (§5.E: List scans /proc live). D4.3 explicitly places the ring buffer
-// inside "no *persistent* SoT": transient, per-process, gone when the process
-// (or transport) dies, never crossing resume.
+// procs maps pid→proc: transport-process-local, non-authoritative, dying with the transport
+// process — NOT a control-plane registry (§5.E: List scans /proc live). D4.3 places the ring
+// buffer inside "no *persistent* SoT" — transient, per-process, never crossing resume.
 type processServer struct {
 	mu    sync.Mutex
 	procs map[int]*proc
@@ -36,19 +34,15 @@ type processServer struct {
 	// idle duration. Every proc created here carries a reference to it and
 	// stamps it on broadcast/writeInput.
 	activity *activityClock
-	// reaper is transport mode's single wildcard waiter (reap.go). REQUIRED: it
-	// is where Start forks children and where their exit statuses come from,
-	// because transport mode owns Wait4(-1) for its own subtree (§5.E.1) and a
-	// per-child cmd.Wait() would race it — the loser gets ECHILD and the exit
-	// code is gone. Set by transportMode; a nil here is a programming error, not
-	// a supported mode.
+	// reaper is transport mode's single wildcard waiter (reap.go). REQUIRED — it is where
+	// Start forks children and where their exit statuses come from (see proc.run for why
+	// cmd.Wait() cannot be used). Set by transportMode; a nil here is a programming error.
 	reaper *reapTable
 }
 
-// Tuning values. Pure numeric knobs, tunable with experience — changing one does
-// NOT change the D4/D5 shape, and this is their only home (they are deliberately
-// not a registered open decision). Sized so: the ring holds enough tail to redraw an interactive
-// screen without unbounded guest memory; the window is deep enough for a healthy
+// Tuning values. Pure numeric knobs — changing one does NOT change the D4/D5 shape, and
+// this is their only home. Sized so the ring holds enough tail to redraw an interactive
+// screen without unbounded guest memory, and the window is deep enough for a healthy
 // consumer but small enough that a stuck one is dropped promptly.
 const (
 	ringCapBytes      = 64 * 1024        // per-process output ring byte cap (invariant 2)
@@ -155,12 +149,10 @@ func (r *ringBuffer) snapshot() []frame {
 // (invariant 1) — the source NEVER blocks here.
 func (p *proc) broadcast(f frame) {
 	if f.kind == 'd' {
-		// Stamp sandbox-global activity on OUTPUT (reaper-health D2). Done here,
-		// in the path EVERY output frame flows through, so a detached process
-		// producing output with no client attached still counts as active
-		// (§3.2 / reaper-health D1 — the whole reason the signal is guest-side).
-		// Off p.mu: the atomic store needs no lock, and keeping it out avoids any
-		// question of holding the fan-out mutex a beat longer.
+		// Stamp sandbox-global activity on OUTPUT (reaper-health D2), here in the path EVERY
+		// output frame flows through, so a detached process producing output with no client
+		// attached still counts as active (§3.2 / reaper-health D1). Off p.mu — the atomic
+		// store needs no lock.
 		p.activity.stamp()
 	}
 	p.mu.Lock()
@@ -183,22 +175,17 @@ func (p *proc) broadcast(f frame) {
 // subscribers, and closes their channels. A subscriber that Connects after this
 // sees ended=true from subscribe and replays the ring + end directly.
 //
-// Lossy-by-design boundary (D4.3 invariant 1 / D1.3): a per-subscriber copy
-// is best-effort. If a subscriber's window is full at exit (too slow to receive
-// even the end frame), that end frame — exit code included — is silently dropped
-// for THAT copy; the channel still closes and serveSubscriber returns a clean
-// end. This is the same "lossy is the slow subscriber's copy, not the source"
-// rule the broadcast path enforces, extended to the exit instant.
+// Lossy-by-design boundary (D4.3 invariant 1 / D1.3): a subscriber whose window is full at
+// exit loses the end frame — exit code included — for THAT copy; the channel still closes
+// and serveSubscriber returns a clean end. The broadcast path's rule, extended to the exit
+// instant.
 //
-// "You were dropped" IS observable end-to-end: serveSubscriber returns
-// resource_exhausted on an overflow close, and the host client surfaces it as a
-// ProcessEvent{Kind:"error"} so a consumer can tell "the process finished" from
-// "your copy was dropped" — opposite situations that would otherwise both look
-// like a channel closing.
+// "You were dropped" IS observable end-to-end: serveSubscriber returns resource_exhausted on
+// an overflow close, which the host surfaces as ProcessEvent{Kind:"error"}, so a consumer can
+// tell it from "the process finished" — otherwise both look like a channel closing.
 //
-// It is still deliberately NOT a health signal: §4.3 classifies a sandbox from the
-// L2 Health probe and its guest-side activity clock, never from one subscriber's
-// copy being too slow. Observable to the caller, invisible to the reaper.
+// Still NOT a health signal: §4.3 classifies a sandbox from the L2 Health probe and its
+// guest-side activity clock, never from one subscriber's copy being too slow.
 func (p *proc) finish(exitCode int) {
 	p.mu.Lock()
 	p.ended = true
@@ -249,12 +236,10 @@ func (p *proc) unsubscribe(sub *subscriber) {
 
 // writeInput writes to the process's pty master (ptyIn) or stdin pipe.
 //
-// The blocking Write MUST happen OUTSIDE p.mu (D4.3 invariant 1: the source
-// never blocks). If we held mu across a Write that blocks on a full pipe (child
-// busy writing stdout, not reading stdin), pumpSource→broadcast would deadlock
-// waiting for mu while the child deadlocks waiting for its stdout to drain. So
-// snapshot the writer handle under mu, release, then write unlocked. io.Writer
-// is safe to use concurrently with the mu-guarded fan-out; only the handle
+// The blocking Write MUST happen OUTSIDE p.mu (D4.3 invariant 1: the source never blocks).
+// Holding mu across a Write that blocks on a full pipe (child busy writing stdout, not
+// reading stdin) deadlocks pumpSource→broadcast on mu while the child waits for its stdout to
+// drain. So: snapshot the writer handle under mu, release, write unlocked — only the handle
 // pointer needs lock protection.
 func (p *proc) writeInput(data []byte, ptyIn bool) error {
 	p.mu.Lock()
@@ -273,9 +258,8 @@ func (p *proc) writeInput(data []byte, ptyIn bool) error {
 		w = p.stdin
 	}
 	p.mu.Unlock()
-	// Stamp sandbox-global activity on INPUT (reaper-health D2): a keystroke /
-	// stdin write is I/O even if the process produces no output in response.
-	// Stamped before the (possibly blocking) Write — the input arriving IS the
+	// Stamp activity on INPUT (reaper-health D2): a keystroke is I/O even if the process
+	// produces no output. BEFORE the possibly-blocking Write — the input arriving IS the
 	// activity, regardless of when the child drains it.
 	p.activity.stamp()
 	_, err := w.Write(data)
@@ -284,9 +268,9 @@ func (p *proc) writeInput(data []byte, ptyIn bool) error {
 
 // resize applies a new PTY size (transport D4.3 Update). Errors if no pty.
 //
-// The TIOCSWINSZ ioctl is non-blocking so it wouldn't deadlock the fan-out, but
-// we follow writeInput's snapshot-then-act-unlocked shape uniformly so no I/O on
-// the pty handle is ever done under p.mu (D4.3 invariant 1).
+// TIOCSWINSZ is non-blocking so it could not deadlock the fan-out, but it follows
+// writeInput's snapshot-then-act-unlocked shape uniformly, so no I/O on the pty handle is
+// ever done under p.mu (D4.3 invariant 1).
 func (p *proc) resize(rows, cols uint16) error {
 	p.mu.Lock()
 	if p.pty == nil {
@@ -301,18 +285,15 @@ func (p *proc) resize(rows, cols uint16) error {
 // closeStdin closes the stdin pipe (non-pty) or writes VEOF (pty Ctrl-D). For a
 // pty the master stays open (still the output source) — only EOF is injected.
 //
-// Like writeInput, the pty ^D Write is done outside p.mu so it can't block the
-// fan-out (D4.3 invariant 1). The stdin Close path nils the handle, so it stays
-// under the lock (a pointer mutation, not a blocking op) — but snapshots and
-// clears before releasing so a racing writeInput sees stdin==nil.
+// Like writeInput, the pty ^D Write is done outside p.mu (D4.3 invariant 1). The stdin path
+// snapshots and clears the handle before releasing, so a racing writeInput sees stdin==nil.
 func (p *proc) closeStdin() error {
 	p.mu.Lock()
 	if p.pty != nil {
 		pty := p.pty
 		p.mu.Unlock()
-		// The ^D keystroke is INPUT I/O — stamp it like writeInput (reaper-health
-		// D2), so closing stdin counts as activity and can't leave a sandbox that
-		// was just interacted with looking idle.
+		// The ^D keystroke is INPUT I/O — stamped like writeInput (reaper-health D2), so a
+		// sandbox that was just interacted with cannot look idle.
 		p.activity.stamp()
 		_, err := pty.Write([]byte{0x04}) // ^D
 		return err
@@ -330,12 +311,11 @@ func (p *proc) closeStdin() error {
 
 // source is one output reader tagged with its stream name.
 //
-// closer is the parent end to close once this source hits EOF, or nil when
-// something else owns it. It exists because the reaper — not cmd.Wait() — waits
-// our children (see proc.run): cmd.Wait is also what closes the parent ends of the
-// StdoutPipe/StderrPipe pipes, so skipping it means we close them here or leak two
-// fds per process. The pty master is deliberately nil: it is both output source and
-// input sink, so finish() owns closing it.
+// closer is the parent end to close once this source hits EOF, or nil when something else owns
+// it. It exists because the reaper — not cmd.Wait() — waits our children (see proc.run), and
+// cmd.Wait is also what closes the StdoutPipe/StderrPipe parent ends: skipping it means
+// closing them here or leaking two fds per process. The pty master is nil because it is both
+// output source and input sink, so finish() owns closing it.
 type source struct {
 	r      io.Reader
 	name   string
@@ -348,20 +328,17 @@ type source struct {
 // INDEPENDENT context (not the Start stream's) so it outlives a Start
 // disconnect — that is what makes Connect reattach possible (§3.2).
 //
-// finish-then-unregister is the exit-status delivery boundary, and it is
-// deliberately sharp: finish broadcasts `end` to whoever is attached now, then
-// the pid stops resolving, so a later Connect gets not-found rather than a
-// retained exit code. Holding the entry to serve late arrivals would mean
-// retaining state keyed by a guest pid the kernel can recycle — the record would
-// start describing a different process once the number is reused. Callers that
-// must not miss exit status stay attached (guest-runtime D4.5 C2).
+// finish-then-unregister is the exit-status delivery boundary, and it is deliberately sharp:
+// finish broadcasts `end` to whoever is attached now, then the pid stops resolving, so a later
+// Connect gets not-found rather than a retained exit code. Holding the entry would retain
+// state keyed by a guest pid the kernel can recycle, so the record would start describing a
+// different process once the number is reused. Callers that must not miss exit status stay
+// attached (guest-runtime D4.5 C2).
 //
-// The exit status arrives over `exited` — the reap table's handoff — NOT from
-// cmd.Wait(). Transport mode owns Wait4(-1) for its subtree (§5.E.1), and a
-// wildcard wait cannot exclude a pid, so a per-child cmd.Wait() here would race
-// the reaper for the same status: whoever lost would see ECHILD and this `end`
-// frame would carry a fabricated exit code. Same single-waiter rule as PID 1's
-// (reap.go), same reason.
+// The exit status arrives over `exited` — the reap table's handoff — NOT from cmd.Wait().
+// Transport mode owns Wait4(-1) for its subtree (§5.E.1) and a wildcard wait cannot exclude a
+// pid, so a per-child cmd.Wait() would race the reaper: whoever lost sees ECHILD and this
+// `end` frame carries a fabricated exit code. Same single-waiter rule as PID 1's (reap.go).
 func (p *proc) run(exited <-chan syscall.WaitStatus, sources []source, onExit func()) {
 	var wg sync.WaitGroup
 	wg.Add(len(sources))
@@ -369,11 +346,9 @@ func (p *proc) run(exited <-chan syscall.WaitStatus, sources []source, onExit fu
 		go p.pumpSource(&wg, s)
 	}
 	wg.Wait()
-	// EOF on every source means the child closed them, which it does by dying —
-	// but "wrote its last byte" and "the kernel published a wait status" are
-	// different instants, so the status still has to be awaited, not assumed. A
-	// grandchild holding the pipes open past the child's exit is the reverse skew
-	// and equally fine: the receive has already completed by the time we get here.
+	// "Wrote its last byte" and "the kernel published a wait status" are different instants,
+	// so the status is awaited rather than assumed. A grandchild holding the pipes open past
+	// the child's exit is the reverse skew and equally fine.
 	p.finish(exitCode(<-exited))
 	onExit()
 }
@@ -397,15 +372,14 @@ func (p *proc) pumpSource(wg *sync.WaitGroup, s source) {
 	}
 }
 
-// eventSender is the one thing Start/Connect do with their stream: send events.
-// Narrowing to it makes the first-frame send FAILURE injectable — connect's
-// *ServerStream has no exported constructor, so with the concrete type the
-// leak-on-Send-failure path below is unreachable from a root-free unit test.
+// eventSender is the one thing Start/Connect do with their stream: send events. Narrowing to
+// it makes the first-frame send FAILURE injectable — connect's *ServerStream has no exported
+// constructor, so with the concrete type the leak-on-Send-failure path below is unreachable
+// from a root-free unit test.
 //
-// A plain in-package interface, deliberately NOT a build tag: nothing here is
-// compiled-out fault injection in the §5.E.1 `testguest` sense (that tag exists
-// for a seam that must be ABSENT from a production sandboxd). Production wiring
-// is unchanged — *connect.ServerStream[v1.ProcessEvent] satisfies this already.
+// A plain in-package interface, NOT a build tag: nothing here is compiled-out fault injection
+// in the §5.E.1 `testguest` sense (that tag is for a seam that must be ABSENT from a
+// production sandboxd), and *connect.ServerStream[v1.ProcessEvent] satisfies this already.
 type eventSender interface {
 	Send(*v1.ProcessEvent) error
 }
@@ -421,14 +395,12 @@ func (s *processServer) start(ctx context.Context, req *connect.Request[v1.Start
 		return connect.NewError(connect.CodeInvalidArgument, errString("empty cmd"))
 	}
 
-	// Independent context: the process must outlive this Start stream so a later
-	// Connect can reattach (§3.2). Signals/exit end it, not a client disconnect.
+	// Independent context: the process must outlive this Start stream so a later Connect can
+	// reattach (§3.2). Signals/exit end it, not a client disconnect.
 	//
-	// Processes run as guest root — the engine defaults to root and does not model
-	// guest users (§2.2: guest identity is not a host-isolation pillar; sentry
-	// virtualizes guest uid 0, so guest-root costs nothing on the isolation axis).
-	// "Run as a different user" is a guest-native concern (su/sudo), not an engine
-	// primitive (§3.2.1).
+	// Processes run as guest root (§2.2: guest identity is not a host-isolation pillar —
+	// sentry virtualizes guest uid 0). "Run as a different user" is a guest-native concern
+	// (su/sudo), not an engine primitive (§3.2.1).
 	cmd := exec.Command(m.Cmd, m.Args...)
 	cmd.Env = m.Env
 	cmd.Dir = m.Cwd
@@ -500,22 +472,17 @@ func (s *processServer) start(ctx context.Context, req *connect.Request[v1.Start
 	// (ring replay is empty for a fresh Start).
 	sub, snap, ended, endF := p.subscribe()
 
-	// UNCONDITIONALLY before the first Send, because run() is the only thing that
-	// ever drains this child, closes its pipe parent ends, and calls unregister —
-	// its onExit is unregister's sole call site. Gated behind a successful Send
-	// (as it was), a first-frame failure left the worst of the three behind: the
-	// pumps never start, so the child fills the 64 KiB pipe buffer on an unread
-	// stdout and blocks THERE forever, unable even to exit. Plus a permanent
-	// s.procs entry and three unclosed fds in a long-lived daemon. Ordering is
-	// safe: subscribe() above already registered this subscriber, so no frame is
-	// missed, and the reaper already owns the child's status either way.
+	// UNCONDITIONALLY before the first Send, because run() is the only thing that drains this
+	// child, closes its pipe parent ends, and calls unregister. Gated behind a successful Send
+	// (as it was), a first-frame failure left the pumps unstarted, so the child filled the
+	// 64 KiB pipe buffer on an unread stdout and blocked THERE forever, unable even to exit —
+	// plus a permanent s.procs entry and three unclosed fds. Ordering is safe: subscribe()
+	// above already registered this subscriber, so no frame is missed.
 	//
-	// The already-forked process is left to run and be reaped, NOT killed. §3.2
-	// gives Start an independent context precisely so a process outlives a client
-	// disconnect (the premise of Connect reattach); "kill on first-frame failure"
-	// cannot be a contract, because the same disconnect one frame later leaves the
-	// process alive — special-casing the first frame would make dead-vs-alive
-	// depend on invisible timing.
+	// The already-forked process is left to run and be reaped, NOT killed. §3.2 gives Start an
+	// independent context precisely so a process outlives a client disconnect; "kill on
+	// first-frame failure" cannot be a contract, because the same disconnect one frame later
+	// leaves the process alive — dead-vs-alive would depend on invisible timing.
 	go p.run(exited, sources, func() { s.unregister(pid) })
 
 	if err := stream.Send(&v1.ProcessEvent{
@@ -667,16 +634,13 @@ func (s *processServer) SendInput(_ context.Context, req *connect.Request[v1.Sen
 // SendSignal delivers a DIRECTED signal — one process target, defaulting to its
 // group (transport D4.3 / §5.E.1).
 //
-// It validates `pid > 0` and nothing more. It deliberately does NOT require
-// registry membership like Connect/SendInput/Update/CloseStdin do: those touch
-// per-process state and so must find the process in s.procs, whereas signalling
-// only needs a legal pid. Demanding a registry hit would break the §6.1
-// List-then-signal pairing, since List scans /proc live and returns pids that
-// were never in s.procs.
+// It validates `pid > 0` and nothing more — NO registry membership, unlike
+// Connect/SendInput/Update/CloseStdin, which touch per-process state. Demanding a registry hit
+// would break the §6.1 List-then-signal pairing, since List scans /proc live and returns pids
+// that were never in s.procs.
 //
-// The check is HERE (guest side) because §5.E.1's premise is that the guest can
-// write its own fs and must therefore validate for itself; the orchestrator
-// carries the same check only as fail-fast.
+// The check is HERE (guest side) because §5.E.1's premise is that the guest can write its own
+// fs and must therefore validate for itself; the orchestrator's copy is only fail-fast.
 func (s *processServer) SendSignal(_ context.Context, req *connect.Request[v1.SendSignalRequest]) (*connect.Response[v1.SendSignalResponse], error) {
 	m := req.Msg
 	if err := validateSignalPid(int(m.Pid)); err != nil {

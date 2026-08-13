@@ -238,17 +238,14 @@ func TestPatchRefusedRebindRestoresThePreviousBinding(t *testing.T) {
 // TestPatch400ChangesNothing: a PATCH that answers 400 left the record EXACTLY as it
 // was — asserted by reading the record back, not by trusting the status code.
 //
-// The defect this pins is the one a status-code-only test cannot see. Were `handlePatch`
-// to commit the binding and only THEN decode and validate the declaration,
-// `{"memory_byte":N, <invalid network>}` would answer 400 with the memory cap ALREADY
-// COMMITTED — the response saying "your request was rejected" while the store says
-// otherwise.
-// §6.2 requires validation to precede the admission gate precisely so a refusal touches
-// nothing, and the field the caller can observe afterwards is the only witness.
+// The defect a status-code-only test cannot see: were `handlePatch` to commit the binding and
+// only THEN decode and validate the declaration, `{"memory_byte":N, <invalid network>}` would
+// answer 400 with the memory cap ALREADY COMMITTED. §6.2 requires validation to precede the
+// admission gate so a refusal touches nothing, and the record is the only witness.
 //
-// Every case pairs a LEGAL first field with an ILLEGAL declaration, and that pairing is
-// the whole design of the test: with only the illegal field present there is nothing to
-// leak, so the test would pass against the defective ordering too.
+// Every case pairs a LEGAL first field with an ILLEGAL declaration, which is the whole design:
+// with only the illegal field present there is nothing to leak, so the test would pass against
+// the defective ordering too.
 func TestPatch400ChangesNothing(t *testing.T) {
 	srv, mem := bindingFixture(t)
 
@@ -330,14 +327,12 @@ func TestPatch400ChangesNothing(t *testing.T) {
 
 // TestPatch409ChangesNothing is TestPatch400ChangesNothing's harder twin, over the wire.
 //
-// The two differ in WHERE the refusal comes from, and that is the whole point. A 400 is
-// decidable from the request, so hoisting the decode and the validation above the writes
-// closed it. This one cannot be hoisted at all: a contended exclusive lease is arbitrated
-// by the store AT COMMIT (store.Store.CreateMounts — judgment and insert are inseparable,
-// measured), so the only way a `{cap, losing volumes}` PATCH can answer 409 having changed
-// nothing is for the mount commit to be ordered FIRST and to share one transition lock
-// with the cap write. Three separately-committing calls could not deliver that at any
-// ordering.
+// The two differ in WHERE the refusal comes from. A 400 is decidable from the request, so
+// hoisting the decode above the writes closed it. This one cannot be hoisted: a contended
+// exclusive lease is arbitrated by the store AT COMMIT (store.Store.CreateMounts — judgment and
+// insert are inseparable, measured), so the only way a `{cap, losing volumes}` PATCH answers 409
+// having changed nothing is for the mount commit to be ordered FIRST and to share one transition
+// lock with the cap write. Three separately-committing calls could not deliver that.
 func TestPatch409ChangesNothing(t *testing.T) {
 	srv, mem := bindingFixture(t)
 	mine := newVolume(t, srv)
@@ -403,12 +398,10 @@ func TestPatch409ChangesNothing(t *testing.T) {
 // TestBothTTLWritePointsAgree: create and PATCH give the SAME verdict for the SAME
 // value, on both TTL axes.
 //
-// This is the assertion the defect needed, and it is not implied by the two tests
-// either side of it. The bug was never "nobody checks" — PATCH checked and create did
-// not — so a per-endpoint test passes on each endpoint's own terms while the two
-// disagree about one field. Asserting the AGREEMENT is what makes the shared
-// `parseTTL` structural rather than a coincidence that survives until the next edit
-// touches one call site.
+// Not implied by the two tests either side of it. The bug was never "nobody checks" — PATCH
+// checked and create did not — so a per-endpoint test passes on each endpoint's own terms while
+// the two disagree about one field. Asserting the AGREEMENT is what makes the shared `parseTTL`
+// structural rather than a coincidence.
 func TestBothTTLWritePointsAgree(t *testing.T) {
 	srv, mem := bindingFixture(t)
 
@@ -460,17 +453,14 @@ func TestBothTTLWritePointsAgree(t *testing.T) {
 
 // TestCreateRefusesNegativeTTL: a negative TTL is a 400 on CREATE, and nothing lands.
 //
-// The value of asserting it here rather than trusting the parse: `time.ParseDuration`
-// ACCEPTS "-5m", so the only thing standing between the caller and a stored negative is
-// the sign check. And a stored negative is not a smaller deadline — every consumer
-// reads a non-positive TTL as an OPT-OUT (reaper: `Retention <= 0` returns early;
-// classification: `IdleTimeout > 0`), so it silently means NEVER EVICT / NEVER
-// IDLE-PAUSE. The caller asked for a deadline and got immortality, with no error
-// anywhere. That is why the refusal has to be at the boundary.
+// Asserted rather than left to the parse because `time.ParseDuration` ACCEPTS "-5m", so the sign
+// check is the only thing between the caller and a stored negative — and a stored negative is not
+// a smaller deadline: every consumer reads a non-positive TTL as an OPT-OUT (reaper:
+// `Retention <= 0` returns early; classification: `IdleTimeout > 0`), so it silently means NEVER
+// EVICT / NEVER IDLE-PAUSE with no error anywhere.
 //
-// `0s` is asserted LEGAL in the same test, because it is the documented opt-out
-// spelling (§6.1) — a guard that also refused zero would break the contract while
-// looking like the same fix.
+// `0s` is asserted LEGAL in the same test, being the documented opt-out spelling (§6.1) — a guard
+// that also refused zero would break the contract while looking like the same fix.
 func TestCreateRefusesNegativeTTL(t *testing.T) {
 	srv, mem := bindingFixture(t)
 

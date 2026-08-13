@@ -2,7 +2,7 @@
 // Behavior seam (§1.3): an interface with pluggable implementations. Two live
 // side by side behind it — an in-memory map (for fast unit tests) and the
 // embedded single-node backend (SQLite, ADR-0004) — chosen by registration,
-// not by reshaping callers; that is the whole point of a seam.
+// not by reshaping callers.
 //
 // The interface itself promises the minimal guarantees the algorithms need
 // (§4.4-C): "lifecycle-state change + outbox append = single atomic commit".
@@ -48,12 +48,9 @@ var ErrTemplateNotFound = errors.New("store: template not found")
 // 409 template in use (§6.1), never a raw 500.
 var ErrInUse = errors.New("store: template in use")
 
-// ErrVolumeNotFound is returned when a Volume record does not exist (§5.C). It is
-// its OWN sentinel rather than a reuse of ErrNotFound ("sandbox not found") for the
-// reason §6.2 states about the Volume verdicts generally: a 404 whose text names
-// the wrong object sends the caller looking in the wrong place. The
-// reference-protection verdicts are separate sentinels for the same reason — see
-// below.
+// ErrVolumeNotFound is returned when a Volume record does not exist (§5.C). Its
+// OWN sentinel rather than a reuse of ErrNotFound ("sandbox not found"): a 404 whose
+// text names the wrong object sends the caller looking in the wrong place (§6.2).
 var ErrVolumeNotFound = errors.New("store: volume not found")
 
 // The Volume reference verdicts (§6.2's four 409s). FOUR SEPARATE SENTINELS because each
@@ -113,8 +110,8 @@ type Event struct {
 	// number, the store does). Zero on an Event being handed TO the store, and
 	// always > 0 on one read back out.
 	//
-	// OccurredAt cannot serve instead: unix nanos have no tie-break at equal nanos and NTP
-	// can step the wall clock backwards, so a timestamp is not a total order.
+	// OccurredAt cannot serve instead: unix nanos are not a total order (no tie-break at
+	// equal nanos, and NTP can step the clock backwards) — see the outbox schema.
 	Seq int64
 	// ID is the transition-unique key subscribers dedup on (§4.4-C
 	// at-least-once: a redelivered event carries the SAME ID). Backends key the
@@ -132,24 +129,18 @@ type Event struct {
 	// still ALIVE and so no cause is stamped. Whether a cause is present is what
 	// separates them. All land state=paused, the Kind carries WHY.
 	//
-	// A TYPE rather than a bare string, and the schema asserts the same set: §4.1 states a
-	// CLOSED set of exactly six kinds, and a typo'd `crash_paused` in one of six scattered
-	// string literals would compile, persist, and reach subscribers as a seventh kind
-	// nothing declares. §4.4-C's "the event schema is a subscriber-side concern" is about
-	// the WIRE shape and does not license writing a kind the engine never named.
+	// A TYPE rather than a bare string, and both backends assert the same closed set of
+	// six — see model.EventKind. §4.4-C's "the event schema is a subscriber-side concern"
+	// is about the WIRE shape and does not license writing a kind the engine never named.
 	Kind model.EventKind
 	// State is the resulting lifecycle-state after the transition.
 	State model.Lifecycle
 	// Cause is WHY, for the Kinds a subscriber cannot otherwise tell apart (§4.4-C). Empty on
-	// every Kind with a single route.
-	//
-	// Today it separates `destroyed`'s two routes: `requested` (the Destroy verb) from
-	// `retention-expired` (the reaper's evict of a paused sandbox past `retention`). Exactly
-	// two, not three — §4.4-A's protect-on-uncertainty means no health verdict ever destroys.
-	//
-	// It must ride the event for THIS Kind because destroy DELETES the record: unlike the
-	// pause-like Kinds there is no row left to ask afterwards (a GET after `destroyed` is 404
-	// by contract), so an omitted cause is unrecoverable.
+	// every Kind with a single route. Today it separates `destroyed`'s two routes:
+	// `requested` (the Destroy verb) from `retention-expired` (the reaper's evict of a paused
+	// sandbox past `retention`). Exactly two, not three — §4.4-A's protect-on-uncertainty
+	// means no health verdict ever destroys. See model.EventCause for why it must ride the
+	// event rather than be read back from the record.
 	Cause model.EventCause
 	// OccurredAt is when the mediator constructed the transition.
 	OccurredAt time.Time
@@ -251,15 +242,11 @@ func unmarshalNetwork(s string) (model.NetworkDecl, error) {
 }
 
 // Store is the authoritative control-plane record backend (§1.1 / §4.4-C) and a Behavior seam
-// (§1.3): the transition methods PROMISE "lifecycle-state change + outbox append = single
-// atomic commit" and each backend DELIVERS it — SQLite via BEGIN/COMMIT, Memory via one mutex
-// over map+slice. The package doc's no-capability-branch rule applies to every method below.
+// (§1.3). The package doc's no-capability-branch rule applies to every method below.
 //
 // # The outbox sequence contract (§4.4-C)
 //
-// Two promises stated HERE rather than left to the backend, because invariant C is exactly
-// "the interface promises, the backend delivers" — never "the algorithm asks what the backend
-// supports and branches":
+// Two promises stated HERE rather than left to the backend:
 //
 //  1. TOTAL ORDER. Every appended Event gets a unique Seq, strictly increasing in append
 //     order, and reads return events in Seq order.
@@ -361,22 +348,16 @@ type Store interface {
 	// and 0 (never trim) is the engine's default, so a deployment that sets nothing
 	// never reaches this.
 	//
-	// Four properties, each with a wrong answer that looks reasonable:
+	// Four properties, each with a wrong answer that looks reasonable (§4.4-C argues each):
 	//
-	//   - AGE IS MEASURED FROM DELIVERY (published_at), never occurrence. A halted stream can
-	//     be resumed days later and deliver its backlog with fresh delivery times but ancient
-	//     occurred_at; ageing on the latter would make that backlog instantly trimmable at
-	//     first delivery, deleting events no subscriber ever had a chance to fetch.
-	//   - DELIVERED ROWS ONLY, and structurally so: the publisher drains in Seq order and
-	//     stops at the first failure, so the delivered set is a PREFIX and the trimmable set a
-	//     prefix of a prefix. Trim cannot outrun the publisher, and must NOT consult the halt
-	//     latch to achieve it — the halted head is undelivered, so the predicate already stops
-	//     below it.
+	//   - AGE IS MEASURED FROM DELIVERY (published_at), never occurrence. Counterexample: a
+	//     halted stream resumed days later delivers its backlog with fresh delivery times but
+	//     ancient occurred_at, so ageing on the latter trims it at first delivery.
+	//   - DELIVERED ROWS ONLY. Must NOT consult the publisher's halt latch to achieve it —
+	//     the halted head is undelivered, so the predicate already stops below it.
 	//   - THE NEWEST ROW IS NEVER TRIMMED, even when it qualifies: an empty table reads 0/0,
-	//     indistinguishable from "nothing ever happened", so a stale cursor is neither served
-	//     nor refused and the caller reads "caught up" while silently skipping everything
-	//     trimmed — the silent short page §6.1's 410 exists to prevent. One retained row keeps
-	//     the bounds truthful.
+	//     indistinguishable from "nothing ever happened", so a stale cursor gets a silent
+	//     short page instead of §6.1's 410. One retained row keeps the bounds truthful.
 	//   - BOUNDED BY limit, like the drain read: the delete runs on a possibly-serialized write
 	//     path, and an unbounded one holds it while every state transition waits.
 	//
@@ -404,11 +385,10 @@ type Store interface {
 
 	// --- Template CRUD (§4.3 uniform object model) ---------------------------
 	//
-	// Template is a first-class persistent object with DERIVED refcount and
-	// existence-is-state (§4.3): no state column, no materialized count. These
-	// methods are the store's slice of the §4.3 reference-reclaim atomicity
-	// contract — the reference-protection promise (a referenced Template cannot be
-	// deleted) is delivered here, identically by both backends (§1.3 seam).
+	// See model.Template for the shape (existence-is-state, derived refcount). These
+	// methods are the store's slice of the §4.3 reference-reclaim atomicity contract —
+	// the reference-protection promise (a referenced Template cannot be deleted) is
+	// delivered here, identically by both backends (§1.3 seam).
 
 	// CreateTemplate inserts a Template row. If Parent is non-empty it must
 	// reference an existing Template (§4.3 lineage, references point upward): a
@@ -434,10 +414,8 @@ type Store interface {
 
 	// --- Volume CRUD (§5.C / §4.3 uniform object model) -----------------------
 	//
-	// Volume is a first-class persistent object with existence-is-state and a
-	// DERIVED refcount, exactly like Template (§4.3) — no state column, no
-	// materialized count. See model.Volume for what is deliberately absent from the
-	// row (access mode, lease, owner) and why.
+	// See model.Volume for the row's shape and for what is deliberately absent from it
+	// (access mode, lease, owner).
 	//
 	// NONE of these methods take an *Event, and that is a semantic statement rather
 	// than an omission: a Volume is not a sandbox, so its CRUD is not a §4.1
@@ -494,12 +472,8 @@ type Store interface {
 
 	// --- Mount table (§5.C / §4.3) --------------------------------------------
 	//
-	// A mount row is a first-class persistent object, structurally the DOUBLING of
-	// `sandboxes.template`: two columns, each ON DELETE RESTRICT. No state column, no
-	// count column — "is this volume exclusively held" is DERIVED from the rows.
-	//
-	// Mount rows publish NO events: they are not §4.1 lifecycle transitions (§4.3, the
-	// rule Template and Volume CRUD already follow).
+	// See model.Mount for the row's shape. Mount rows publish NO events: they are not
+	// §4.1 lifecycle transitions (§4.3, the rule Template and Volume CRUD already follow).
 
 	// CreateMounts inserts a sandbox's COMPLETE binding atomically, enforcing the
 	// exclusive lease — the ONE new store invariant Volume introduces (§5.C).
@@ -534,21 +508,11 @@ type Store interface {
 	// detach-one operation), so it is not a special case and not a no-op.
 	//
 	// THE REPLACEMENT IS ONE ATOMIC COMMIT, as a contract promise rather than one backend's
-	// detail: §6.2 says a sandbox holds one complete binding at EVERY INSTANT, and two commits
-	// (delete, then insert) contradict that literally, since between them it holds none and that
-	// state is observable. Reordering cannot fix it — the delete MUST precede the insert, or a
+	// detail. Reordering cannot substitute — the delete MUST precede the insert, or a
 	// re-submitted identical binding collides with the rows it is replacing on both the lease
-	// predicate and UNIQUE(sandbox, path). One commit is the answer.
-	//
-	// Two live defects of the two-commit shape, beyond the observable no-binding instant:
-	//
-	//  1. THE EXCLUSIVE LEASE WOULD BE TRANSIENTLY RELEASED. The lease IS the row (§5.C), so a
-	//     window with no rows is a window with no lease: a concurrent create takes a volume
-	//     this replacement meant to keep, and the caller gets a 409 for a lease it never
-	//     gave up.
-	//  2. A CONCURRENT ListMountsByVolume WOULD OBSERVE ZERO ROWS. That query is the
-	//     write-regime predicate (§5.C): "no mount rows" means a direct host-side write is
-	//     safe, so the intermediate state admits one against a volume a live sandbox holds.
+	// predicate and UNIQUE(sandbox, path). §5.C states the three consequences two independent
+	// commits cannot hold (the original binding survives a refusal; the lease is not
+	// transiently released; ListMountsByVolume never reads zero rows).
 	//
 	// NOT A TRANSACTION ON THE SEAM — §4.4-C's discipline again: the method promises atomicity
 	// and each backend honors it by its own means.

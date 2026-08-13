@@ -1,8 +1,7 @@
 // Package lifecycle is the §4 mediator — the coordinator ABOVE the five
 // subsystems, not a sixth peer. It owns the state machine and, per state,
 // CALLS each subsystem's mechanism (§4: verbs belong to §4, mechanisms to §5).
-// Subsystems never call each other — that is the start of a dependency cycle.
-// Any "Rootfs pokes Runtime on resume" is rejected in review.
+// Subsystems never call each other (enforced by internal/arch, not by review).
 //
 // The verbs create / pause / resume / destroy are here. Each is a serialized,
 // CAS-guarded transition (§4.4-B: one transition lock per sandbox, verbs
@@ -71,8 +70,7 @@ var ErrUncappedDiskNotCappable = errors.New("lifecycle: an uncapped sandbox's di
 // measured, a limit set exactly equal to the unit's `referenced` is accepted and stored, and
 // re-applying or raising it afterwards both return ENOSPC. At or below usage the unit is
 // wedged — file creation, `mkdir`, truncate-to-zero and the quota write itself all return
-// ENOSPC, so the cap can be neither raised nor removed, and the only substrate exit is
-// deleting the guest's bytes, which §6 gives the engine no way to do.
+// ENOSPC, so the cap can be neither raised nor removed (rootfs-overlay D6.6).
 //
 // WORSE HERE THAN ON A VOLUME: §5.B re-applies the record's cap at EVERY placement and fails
 // the same way on a wedged unit, so a 200 makes the sandbox permanently unresumable — the
@@ -115,23 +113,19 @@ type Deps struct {
 	// subsystems' uncapped bytes, so a nil backend would make the gate blind to every
 	// volume's bytes — and a pile of uncapped volumes could then fill the node
 	// without the gate refusing once. admitVolume therefore fails CLOSED on a nil
-	// backend rather than treating it as "no volumes", which is the same choice the
-	// gate makes for an unmeasurable provider (§2.3: failing open moves the cost onto
-	// unrelated sandboxes).
+	// backend rather than treating it as "no volumes", the same choice the gate makes
+	// for an unmeasurable provider (§2.3).
 	Volume volume.Backend
 	// Dial builds a stateless transport client for a discovered endpoint
 	// (§5.E: constructed per endpoint, discarded on resume).
 	//
 	// Returns the FULL Client, deliberately, even though §4's own logic only ever
 	// probes health (probeHealth / classify both narrow to transport.HealthProber at
-	// the point of use). The width is here because Mediator.Client re-exports this
-	// to the data plane, and THAT is worth the cost: endpoint resolution stays
-	// inside §4, so the orchestrator addresses sandboxes by SandboxID and never
-	// learns a placement (§6.2). Narrowing this field would move that resolution
-	// out and leak placement — a worse trade than one wide field.
-	//
-	// The visible cost is that an L1 fake must satisfy all three halves. Accepted:
-	// it is a test-only cost, and it buys the §6.2 invariant.
+	// the point of use). The width is here because Mediator.Client re-exports this to
+	// the data plane: endpoint resolution stays inside §4, so the orchestrator
+	// addresses sandboxes by SandboxID and never learns a placement (§6.2).
+	// Narrowing it would move that resolution out and leak placement; the cost is
+	// that an L1 fake must satisfy all three halves.
 	Dial func(transport.Endpoint) transport.Client
 
 	// HealthTimeout bounds the ⑦ readiness gate (guest-runtime D5.1).
@@ -164,11 +158,9 @@ type Deps struct {
 
 	// DefaultIdleTimeout / DefaultRetention are the engine-wide TTL defaults
 	// (§4.3 / §1.1 single-binary config) applied when a CreateSpec omits them.
-	// Conservative numeric knobs (reaper-health D5): they bound no invariant's
-	// shape, only detection latency, and stay tunable. Zero here falls back to
-	// the package defaults (defaultIdleTimeout / defaultRetention) so a caller
-	// that leaves Deps unset still gets a sane, non-zero TTL rather than a
-	// sandbox that auto-pauses instantly.
+	// Zero here falls back to the package defaults (defaultIdleTimeout /
+	// defaultRetention) so a caller that leaves Deps unset still gets a sane,
+	// non-zero TTL rather than a sandbox that auto-pauses instantly.
 	DefaultIdleTimeout time.Duration
 	DefaultRetention   time.Duration
 
@@ -176,13 +168,11 @@ type Deps struct {
 	// than this is trimmed. 0 = NEVER TRIM, and unlike the two TTLs above that zero is
 	// NOT replaced with a package default — it is the shipped behavior.
 	//
-	// Not defaulted deliberately, and this follows the same rule as NodeCapacity rather
-	// than being timidity: the correct value is "the reconnect duration promised to
-	// external subscribers", which the engine cannot know and must not invent. The cost
-	// of 0 is stated rather than hidden — the outbox grows without bound at rest
-	// (§4.4-C's known limitation) — but the cost of a wrong non-zero default is deletion
-	// of billing-relevant history on a number nobody chose, and only the first of those
-	// is visible, bounded, and recoverable.
+	// Not defaulted, for the same reason NodeCapacity is not: the correct value is "the
+	// reconnect duration promised to external subscribers", which the engine cannot
+	// know. The cost of 0 is that the outbox grows without bound at rest (§4.4-C's
+	// known limitation); the cost of a wrong non-zero default is deletion of
+	// billing-relevant history on a number nobody chose.
 	EventRetention time.Duration
 
 	// Logf reports per-item reconciliation outcomes that are skipped rather than
@@ -273,13 +263,11 @@ type Mediator struct {
 	// the same lock the live-map uses, so no new lock class enters the order.
 	inFlightWrites map[model.VolumeID]int
 
-	// buildingVolumes is the in-flight-create keep-set for volume storage (§5.C).
-	// It is MORE necessary than its two siblings rather than a third copy of the same
-	// idea: an Overlay's row is inserted BEFORE its unit is allocated, so there
-	// `building` only guards a stale keep-set snapshot — while volume creation is
-	// BYTES-FIRST (the ID must name the storage before any row can exist), so a
-	// perfectly healthy in-flight create presents as "bytes, no row" even to a
-	// completely fresh snapshot. Guarded by mu.
+	// buildingVolumes is the in-flight-create keep-set for volume storage (§5.C). Its
+	// hazard is stronger than buildingOverlays': volume creation is BYTES-FIRST (the ID
+	// must name the storage before any row can exist), so a perfectly healthy in-flight
+	// create presents as "bytes, no row" even to a completely fresh snapshot.
+	// Guarded by mu.
 	buildingVolumes map[model.VolumeID]bool
 
 	// pendingUncappedBytes is in-flight growth of the §3.4 accounting formula's
@@ -383,10 +371,9 @@ type transitionLock struct {
 // Lock acquires the transition lock, blocking until it is free.
 func (l *transitionLock) Lock() { l.mu.Lock() }
 
-// Unlock releases the transition lock AND the ref the matching lock() took. The
-// order matters: the mutex is released first so a blocked waiter can proceed,
-// and only then is the ref dropped — while a waiter exists its own ref keeps the
-// entry alive, so the drop can never collect an entry someone is still using.
+// Unlock releases the transition lock AND the ref the matching lock() took, in
+// that ORDER: the mutex first so a blocked waiter can proceed, and only then the
+// ref (see transitionLock's refs).
 func (l *transitionLock) Unlock() {
 	l.mu.Unlock()
 	l.release()
@@ -423,9 +410,8 @@ func (l *transitionLock) release() {
 //	l := m.lock(id); l.Lock(); defer l.Unlock()
 //
 // is complete: no separate release call, and the deferred Unlock covers every
-// return path. The one shape that leaks is calling lock() and never unlocking;
-// tryLock is the only caller that can reach it, and it releases explicitly on
-// its failure path.
+// return path. The one shape that leaks is calling lock() and never unlocking —
+// see tryLock, the only caller that can reach it.
 func (m *Mediator) lock(id model.SandboxID) *transitionLock {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -471,13 +457,10 @@ type CreateSpec struct {
 	//
 	// A POINTER because the two cases must stay distinguishable all the way down:
 	// "omitted" is legal, while "given but missing `egress.default`" is §6.2's first
-	// 400 class. They share one code path in most implementations, which is exactly
-	// why the distinction is carried rather than collapsed — whichever case is handled
-	// first would otherwise eat the other.
+	// 400 class — collapsing them lets whichever is handled first eat the other.
 	//
-	// Bound at CREATE through this control-plane path, which §6.2 requires as a flow
-	// SHAPE rather than a timing constraint (a later warm pool reuses the same
-	// injection point).
+	// Bound at CREATE through this control-plane path, the flow SHAPE §6.2 requires
+	// (see Volumes below).
 	Network *model.NetworkDecl
 
 	// IdleTimeout / Retention are the OPTIONAL TTL Binding inputs (§3.4 / §4.3;
@@ -551,12 +534,10 @@ func (m *Mediator) Create(ctx context.Context, spec CreateSpec) (model.SandboxID
 		rec.Network = spec.Network.Normalize()
 	}
 	// §6.2's declaration refusals, applied AT THE WRITE POINT rather than only at the
-	// API layer — which is what makes them structural. A validation that lives in one
-	// caller is a validation the next caller does not have, and this one is not
-	// hypothetical: it was found by a substrate test that drove the mediator directly
-	// and successfully created a sandbox whose `via[].endpoint` was inside the L0 floor
-	// — the declaration §6.2 class 6 refuses precisely because every steered flow would
-	// be permanently fail-closed. It then measured that fail-closure as a test failure.
+	// API layer: a validation that lives in one caller is a validation the next caller
+	// does not have. Not hypothetical — a substrate test driving the mediator directly
+	// successfully created a sandbox whose `via[].endpoint` was inside the L0 floor
+	// (§6.2 class 6), and then measured the resulting permanent fail-closure.
 	//
 	// BEFORE the admission gate below, which §6.2 requires: an invalid declaration is
 	// refused before any byte is touched or any budget recorded, so 400 and 507 can
@@ -634,17 +615,14 @@ func (m *Mediator) Create(ctx context.Context, spec CreateSpec) (model.SandboxID
 	// quota on the upper+work storage unit, so it belongs to the Rootfs subsystem's
 	// materialization, not to the runtime provider (§3.4 / §5.B). The mediator only
 	// passes the numeric intent across the seam.
-	// Protect the unit from the orphan-unit sweep for the whole create window
-	// (§4.4-A): the sweep's `live` snapshot may predate this sandbox's row even
-	// though the row was inserted first, so bytes-on-disk-with-no-live-entry is
-	// reachable without any ordering mistake. Held until create settles either way.
+	// Protect the unit from the orphan-unit sweep for the whole create window, held
+	// until create settles either way (§4.4-A; see buildingOverlays for the race).
 	m.markBuildingOverlay(oid)
 	defer m.unmarkBuildingOverlay(oid)
 	ov, err := m.deps.Rootfs.CreateOverlay(ctx, string(oid), lower, rec.Limits.DiskByte)
 	if err != nil {
 		// This branch is BEFORE the cold start, so `unwind` has not run and the mount
-		// rows are still in place — they must go first or RESTRICT blocks the record
-		// delete and leaves an undeletable zombie.
+		// rows are still in place — same required ordering as above.
 		_ = m.deps.Store.DeleteMounts(ctx, sid)
 		_ = m.deps.Store.DeleteSandbox(ctx, sid, nil) // nothing built, never visible
 		// §5.B's strict-inequality guard (rootfs.ErrCapBelowUsage) is reached on THIS path
@@ -686,12 +664,9 @@ func (m *Mediator) Create(ctx context.Context, spec CreateSpec) (model.SandboxID
 	return sid, nil
 }
 
-// Pause = quiesce, then cleanly stop the container (§4.2). The Overlay is
-// already on the backend, so pause captures NOTHING; stopping releases RAM/CPU
-// and the placement — a paused sandbox occupies storage only (§4.2). CAS-guarded:
-// requires `running`. Pause
-// always lands in a legal `paused` (§4.4: no middle dirty state), so we CAS the
-// state first, then release placement-local resources.
+// Pause = quiesce, then cleanly stop the container (§4.2). Stopping releases
+// RAM/CPU and the placement — a paused sandbox occupies storage only (§4.2).
+// CAS-guarded: requires `running`. See pauseLocked for the ordering.
 func (m *Mediator) Pause(ctx context.Context, id model.SandboxID) error {
 	l := m.lock(id)
 	l.Lock()
@@ -741,9 +716,8 @@ func (m *Mediator) pauseLocked(ctx context.Context, id model.SandboxID, kind mod
 		}
 		// Release each volume materialization, and note what is NOT done here: THE MOUNT
 		// ROWS STAY, so the exclusive lease is NOT released by a pause (§5.C — the lease
-		// is the row's existence). That is symmetric with the Overlay's "pause captures
-		// nothing": the placement-local materialization goes, the persistent binding
-		// stays, and the resume re-materializes from the table.
+		// is the row's existence), symmetric to the Overlay's zero-capture. The resume
+		// re-materializes from the table.
 		m.releaseMounts(ctx, ls.mounts)
 		if ls.merged != nil {
 			_ = m.deps.Rootfs.Unmount(ctx, ls.merged)
@@ -790,13 +764,10 @@ func (m *Mediator) resumeLocked(ctx context.Context, rec model.Sandbox) error {
 	// the same commit) or it is destroyed. This is exactly why the death cause has
 	// to be persisted (§4.3): the state alone cannot distinguish the two cases.
 	//
-	// The check lives HERE rather than in the Resume verb so the invariant is
-	// STRUCTURAL — every path that actually performs a resume passes through this
-	// function, including the reaper's D4b transport-down escalation. That
-	// escalation cannot carry this cause (it fires only when L1 is ALIVE, and a
-	// `running` record cannot hold CauseResourceExceeded), so the guard is
-	// unreachable from there — but a guard that depends on call-site convention is
-	// one refactor away from being wrong.
+	// The check lives HERE rather than in the Resume verb so every path that performs a
+	// resume passes it, the reaper's D4b transport-down escalation included — which
+	// cannot itself carry this cause (it fires only when L1 is ALIVE, and a `running`
+	// record cannot hold CauseResourceExceeded).
 	if rec.DeathCause == model.CauseResourceExceeded {
 		return fmt.Errorf("resume: %w: sandbox was resource-terminated (RAM cap %d bytes) — resuming would re-trigger termination. Raise memory_byte via PATCH /v1/sandboxes/%s (re-runs the admission gate; may be refused for node capacity), which clears the death cause and permits resume; or Promote it to keep its bytes under a new sandbox; or destroy it (§4.3)",
 			ErrResourceTerminated, rec.Limits.MemoryByte, id)
@@ -887,8 +858,6 @@ func (m *Mediator) Destroy(ctx context.Context, id model.SandboxID) error {
 // the two leaves it an orphan for SweepOrphanOverlays (§4.3/§4.4-A).
 //
 // Kind "destroyed" matches §4.1 — evict is "the reaper's automatic destroy", the SAME terminal.
-// Holding the lock for the whole chain is what stops destroy/evict deleting an Overlay
-// mid-cold-start (§4.4-B destroy-vs-resume).
 //
 // NO SOURCE-STATE CAS here, unlike pause/resume: destroy is valid from BOTH `running` and
 // `paused` (§4.1 / §4.4-A) and idempotent, so there is no single "expected" source state. The
@@ -943,9 +912,8 @@ func (m *Mediator) destroyLocked(ctx context.Context, rec model.Sandbox, cause m
 	// EXCEPT from `creating`, which publishes nothing: that record never emitted
 	// `created` (Create publishes only once the chain commits), so a `destroyed`
 	// here would be an unpaired terminal — a billing subscriber would be told a
-	// sandbox ended that it never saw begin. Reconcile already suppresses the event
-	// for exactly this case when it cleans up a crashed create; this is the same
-	// rule on the operator-driven path, so the two cannot disagree.
+	// sandbox ended that it never saw begin. Reconcile suppresses it for the same
+	// reason when it cleans up a crashed create.
 	var ev *store.Event
 	if rec.State != model.Creating {
 		// The cause rides the event because it CANNOT be asked for afterwards: the row
@@ -1039,11 +1007,9 @@ func (m *Mediator) Promote(ctx context.Context, id model.SandboxID) (model.Templ
 	}
 
 	// Admission gate, before the quiesce and before any bytes (see the doc above).
-	// Under admitMu for the same reason create is: the inequality is node-GLOBAL
-	// while the transition lock is per-sandbox, so two Promotes of two different
-	// sandboxes hold two different locks and would not serialize at all. The
-	// reservation published inside the critical section is what makes this Promote's
-	// claim visible to the next gate run before its bytes exist.
+	// Under admitMu for the same reason create is (see the field). The reservation
+	// published inside the critical section is what makes this Promote's claim visible
+	// to the next gate run before its bytes exist.
 	cost, err := m.deps.Rootfs.PromoteCostBytes(ctx, ov, excludedMounts)
 	if err != nil {
 		// Unmeasurable → refuse, not admit blind: same fail-closed choice the gate
@@ -1151,8 +1117,7 @@ func (m *Mediator) coldStart(ctx context.Context, rec model.Sandbox, ov *rootfs.
 	// Reading the table here rather than taking it as an argument is what makes the
 	// mount relationship a Binding (§3.4): create and resume run the same code, and a
 	// resume therefore re-mounts per whatever the table says NOW — not per whatever it
-	// said when the sandbox was last running, and not from any frozen byte. The volume
-	// is always the one real thing; it is never forked into a per-sandbox copy.
+	// said when the sandbox was last running, and not from any frozen byte.
 	mounts, specs, err := m.materializeMounts(ctx, id)
 	if err != nil {
 		_ = m.deps.Rootfs.Unmount(ctx, merged)
@@ -1173,12 +1138,9 @@ func (m *Mediator) coldStart(ctx context.Context, rec model.Sandbox, ov *rootfs.
 		return err
 	}
 	// ④ launch runsc (sandboxd entrypoint), ⑤ guest boots, ⑥ IP discovered.
-	// limits come from the RECORD, re-materialized at every placement — that is
-	// what makes them a Binding rather than placement state (§3.4): a resume
-	// re-derives the caps from the current record instead of reading back a frozen
-	// value, so a cap edited while paused takes effect on the next resume. The
-	// capacity axis is NOT here — it is an FS quota applied by the Rootfs
-	// subsystem (§5.B), not a provider concern (§3.4).
+	// limits come from the RECORD, re-materialized at every placement (§3.4 Binding,
+	// like the declaration above). The capacity axis is NOT here — it is an FS quota
+	// applied by the Rootfs subsystem (§5.B), not a provider concern (§3.4).
 	//
 	// The provider installs the rule set INSIDE this call, between building the
 	// netns/veth and starting the isolated unit — the atomicity §2.4 requires, and
@@ -1222,9 +1184,8 @@ func (m *Mediator) coldStart(ctx context.Context, rec model.Sandbox, ov *rootfs.
 // awaitHealthy polls the transport Health RPC until first success or timeout
 // (⑦; the single readiness barrier of the cold-start chain, guest-runtime D5).
 // probeHealth resolves a placement to just the readiness/liveness half of the
-// channel. Returning HealthProber rather than Client is the point: it states in
-// code that §4 never reaches into the process or fs surfaces, so a reader (or a
-// future edit) cannot mistake the mediator for a data-plane consumer.
+// channel: returning HealthProber rather than Client states in code that §4 never
+// reaches into the process or fs surfaces.
 func (m *Mediator) probeHealth(pl *runtime.Placement) transport.HealthProber {
 	return m.deps.Dial(transport.Endpoint(pl.TransportEndpoint))
 }
@@ -1257,10 +1218,8 @@ func (m *Mediator) awaitHealthy(ctx context.Context, pl *runtime.Placement) erro
 // BEFORE the cold start, so every post-cold-start unwind branch is followed by a DeleteSandbox
 // that hits mounts.sandbox RESTRICT — and discarding that error leaves A ZOMBIE SANDBOX RECORD
 // THAT CANNOT BE DELETED by anyone, ever: the record blocks on rows nothing else knows to remove,
-// and the sandbox never ran so no later verb revisits it.
-//
-// Hence the deletion is here rather than in the caller's `_ =` DeleteSandbox, which legitimately
-// ignores its error and is exactly the shape that would swallow this one.
+// and the sandbox never ran so no later verb revisits it. Hence here, and not in the caller's
+// `_ =` DeleteSandbox, which legitimately ignores its error.
 //
 // isCreate gates it because RESUME MUST NOT delete them: a failed resume stays
 // `paused` (§4.4-A atomic return to the source state), and its binding is persistent
@@ -1315,8 +1274,7 @@ func (m *Mediator) SeedBuiltinTemplates(ctx context.Context) error {
 			CreatedAt: now,
 		})
 		if err != nil && err != store.ErrConflict {
-			// skip-and-log: one bad builtin must not abort boot; the seed is
-			// idempotent so it retries next start (§4.4-A skip-and-log).
+			// skip-and-log (§4.4-A); the seed is idempotent so it retries next start.
 			m.deps.Logf("seed templates: skip builtin %s: %v", id, err)
 		}
 	}
@@ -1368,8 +1326,7 @@ func (m *Mediator) TrimOutbox(ctx context.Context) error {
 //
 // Only Promote-built (builtin=false) layers are swept: builtins live under the
 // deployment-shipped TemplatesDir, a different root the provider never scans, so
-// they are structurally out of the candidate set — a builtin row's absence
-// could never orphan a builtin dir.
+// they are structurally out of the candidate set.
 func (m *Mediator) SweepOrphanLayers(ctx context.Context) error {
 	tmpls, err := m.deps.Store.ListTemplates(ctx)
 	if err != nil {
@@ -1377,10 +1334,8 @@ func (m *Mediator) SweepOrphanLayers(ctx context.Context) error {
 	}
 	live := make([]string, 0, len(tmpls))
 	for _, t := range tmpls {
-		// A builtin's dir is under TemplatesDir (not LayersDir), so it is not a
-		// sweep candidate; only Promote-built layers have a LayersDir dir. Passing
-		// only non-builtin IDs keeps `live` tight without affecting correctness
-		// (a builtin id would simply never match a LayersDir entry).
+		// Passing only non-builtin IDs keeps `live` tight without affecting
+		// correctness (a builtin id would never match a LayersDir entry).
 		if !t.Builtin {
 			live = append(live, string(t.ID))
 		}
@@ -1405,9 +1360,8 @@ func (m *Mediator) SweepOrphanLayers(ctx context.Context) error {
 //
 // `live` is every OverlayID the store still has a sandbox row for, in ANY state —
 // a `creating` or `paused` sandbox's unit is emphatically not an orphan. `building`
-// is snapshotted as LATE as possible, immediately before the call, because it
-// guards a stale-snapshot race rather than a write-order one: `live` is read first,
-// so a create committing after that read presents as bytes with no live entry.
+// is snapshotted as LATE as possible, immediately before the call, because it guards
+// a stale-snapshot race (see buildingOverlays).
 func (m *Mediator) SweepOrphanOverlays(ctx context.Context) error {
 	recs, err := m.deps.Store.ListSandboxes(ctx)
 	if err != nil {
@@ -1471,7 +1425,7 @@ var ErrLineageTooDeep = errors.New("lifecycle: template lineage is deeper than t
 // at mount time. It matters most for Promote: the layer bytes are frozen BEFORE anything
 // mounts the result, so without this check a Promote reports success and leaves a sandbox
 // that can never start again — a silent failure whose only symptom arrives one create later
-// (rootfs-overlay D5.1 ⑩: lineage resolution "carries a cycle check but no depth bound").
+// (rootfs-overlay D5.1, **Two checks, because one cannot cover the other.**).
 //
 // The provider owns the number because the ceiling derives from host path lengths (§3.1.1).
 // A provider reporting 0 declares no limit.
@@ -1555,11 +1509,9 @@ func (m *Mediator) Reconcile(ctx context.Context) error {
 // additions that only matter when the orchestrator is alive with a populated
 // live-map and in-flight transitions:
 //
-//  1. TryLock-SKIP a `running` sandbox whose transition lock is HELD — a held
-//     lock means an in-flight resume / user verb is driving it (§4.4-B). At
-//     startup all locks are fresh so this never triggers; live, treating a
-//     held (being-built) placement as an orphan would tear down the resource
-//     out from under an active resume. Skipped items retry next tick.
+//  1. TryLock-SKIP a sandbox whose transition lock is HELD — a verb is driving it
+//     (§4.4-B), so its placement is being built, not orphaned. At startup all locks
+//     are fresh so this never triggers (see the skip in reconcile).
 //  2. PROTECT live-map placements THIS process built: a `running` sandbox we
 //     already hold a live handle for is not an orphan and needs no Adopt
 //     re-recognition (that is the crash-recovery path). Add it straight to keep.
@@ -1587,16 +1539,14 @@ func (m *Mediator) reconcile(ctx context.Context, periodic bool) error {
 
 	for _, rec := range recs {
 		if periodic {
-			// A held transition lock means a verb (in-flight create / resume /
-			// user pause) is driving this sandbox — its placement is being BUILT,
-			// not orphaned. Skip it UNIFORMLY IN ALL STATES (§4.4-A: a lock-held
-			// sandbox is skipped, whatever its state; reaper-health D4 addition 1),
-			// not just `running`: tearing
-			// down a being-built create (destroys overlay + empty upper) or resume
-			// (tears down the netns/container it just launched) out from under the
-			// verb is the exact corruption the skip exists to prevent. Protect its
-			// placement (add to keep) and retry next tick. At startup this never
-			// triggers — locks are all fresh (see Reconcile).
+			// A held transition lock means a verb is driving this sandbox — its
+			// placement is being BUILT, not orphaned. Skip it UNIFORMLY IN ALL
+			// STATES (§4.4-A: a lock-held sandbox is skipped, whatever its state;
+			// reaper-health D4 addition 1), not just `running`: tearing down a
+			// being-built create (destroys overlay + empty upper) or resume (tears
+			// down the netns/container it just launched) out from under the verb is
+			// the exact corruption the skip exists to prevent. Protect its placement
+			// (add to keep) and retry next tick.
 			l, ok := m.tryLock(rec.ID)
 			if !ok {
 				keep = append(keep, string(rec.ID))
@@ -1634,18 +1584,15 @@ func (m *Mediator) reconcile(ctx context.Context, periodic bool) error {
 	// reclaim every engine placement not backing a kept sandbox: orphans from
 	// crashed create/resume + placements of cleanly-demoted-to-paused sandboxes
 	// (§4.4-A leaves persistent state untouched — only placement is reclaimed,
-	// never a kept upper). The mediator has
-	// already force-detached (MNT_DETACH) the orphan Overlay mounts in the loop
-	// above; ReclaimOrphans then does runsc kill → veth → netns. At STARTUP
-	// reconcile this overlay-umount-before-runsc-kill order is deliberate and safe
-	// (§4.4-A reclamation ordering): the mediator has no live placement
-	// handle, only a table
-	// scan, and the orphan is being torn down regardless — a lazy detach just
-	// unhooks the mount, the kernel reclaims it when the container's last ref
-	// drops, and the upper is never touched. (The live Destroy path DOES hold the
-	// handle and uses strict reverse-dep order: runsc destroy → overlay umount.)
-	// Reclaim failure is logged, not fatal — the placement stays leaked and is
-	// retried next boot.
+	// never a kept upper). The mediator has already force-detached (MNT_DETACH) the
+	// orphan Overlay mounts in the loop above; ReclaimOrphans then does runsc kill →
+	// veth → netns. At STARTUP reconcile this overlay-umount-before-runsc-kill order is
+	// safe (§4.4-A reclamation ordering): the mediator holds no live placement handle,
+	// only a table scan, and a lazy detach just unhooks the mount — the kernel reclaims
+	// it when the container's last ref drops, and the upper is never touched. (The live
+	// Destroy path DOES hold the handle and uses strict reverse-dep order: runsc
+	// destroy → overlay umount.) Reclaim failure is logged, not fatal — the placement
+	// stays leaked and is retried next boot.
 	if err := m.deps.Runtime.ReclaimOrphans(ctx, keep); err != nil {
 		m.deps.Logf("reconcile: reclaim orphans (retried next pass): %v", err)
 	}
@@ -1660,17 +1607,12 @@ func (m *Mediator) reconcileRecord(ctx context.Context, rec model.Sandbox, keep 
 		// crashed mid-create: never reached a resting state → delete record. Its
 		// half-built placement (if any) falls to ReclaimOrphans (not in keep); its
 		// empty Overlay upper never held useful state → reclaim it. Publishes
-		// NOTHING (nil Event): a crashed `creating` never reached a running/visible
-		// state, so — exactly like the live create-unwind path — there was no
-		// "created" event and there must be no unpaired "destroyed" (a billing
-		// subscriber must not see a destroyed for a sandbox it never saw created).
+		// NOTHING (nil Event) — the unpaired-terminal rule, see destroyLocked.
 		m.reclaimOrphanOverlay(ctx, rec, true)
-		// Mount rows FIRST. This is the CRASH twin of unwind's requirement, and it is
-		// the path where getting it wrong is permanent: a create that died between
-		// writing its mount rows and completing leaves rows referencing a `creating`
-		// record, so RESTRICT blocks this delete on EVERY subsequent boot — an
-		// undeletable record that no verb will ever revisit. Nothing else in the engine
-		// knows to remove those rows.
+		// Mount rows FIRST — the CRASH twin of unwind's requirement, and the path where
+		// getting it wrong is permanent: a create that died between writing its mount
+		// rows and completing leaves rows referencing a `creating` record, so RESTRICT
+		// blocks this delete on EVERY subsequent boot, and no verb ever revisits it.
 		m.deleteMountsForCleanup(ctx, rec.ID)
 		if err := m.deps.Store.DeleteSandbox(ctx, rec.ID, nil); err != nil && err != store.ErrNotFound {
 			m.deps.Logf("reconcile: skip creating %s: delete record: %v", rec.ID, err)
@@ -1688,12 +1630,8 @@ func (m *Mediator) reconcileRecord(ctx context.Context, rec model.Sandbox, keep 
 
 // reconcileRecordLocked handles one record in the PERIODIC path with the
 // transition lock ALREADY HELD by the caller (tryLock succeeded → no verb is
-// driving this sandbox right now). Same dual as startup, except a `running`
-// sandbox we already hold a live handle for is not an orphan and needs no Adopt
-// re-recognition (that is the crash-recovery path) — keep it straight away
-// (reaper-health D4 addition 2). Only a `running` with NO live handle runs
-// adopt/demote (never built here → shouldn't happen, or first tick after a crash
-// = startup semantics).
+// driving this sandbox right now). Same dual as startup, plus ReconcilePeriodic's
+// addition 2.
 func (m *Mediator) reconcileRecordLocked(ctx context.Context, rec model.Sandbox, keep *[]string) {
 	switch rec.State {
 	case model.Creating:
@@ -1765,11 +1703,8 @@ func (m *Mediator) reconcileRunningOutcome(ctx context.Context, rec model.Sandbo
 		m.deps.Logf("reconcile: skip running %s (protected, not reclaimed): %v", rec.ID, err)
 		*keep = append(*keep, string(rec.ID))
 	case adopted:
-		// alive + ready + handle rebuilt → keep its placement.
 		*keep = append(*keep, string(rec.ID))
 	default:
-		// cleanly determined dead → demoted to paused inside adoptOrDemote; unmount
-		// its orphan Overlay mount, keep the upper.
 		m.reclaimOrphanOverlay(ctx, rec, false)
 	}
 }
@@ -1780,12 +1715,11 @@ func (m *Mediator) reconcileRunningOutcome(ctx context.Context, rec model.Sandbo
 // that survives the orchestrator process; if the record's container is gone the
 // mount is an orphan holding nothing. destroyUpper additionally reclaims the
 // upper bytes (create's empty Overlay → destroyed); for paused/demoted the upper
-// is the persistent SoT and is KEPT (§4.4-A leaves persistent state
-// untouched). Best-effort: a
-// not-mounted overlay (nothing to clean) is not an error.
+// is the persistent SoT and is KEPT (§4.4-A). Best-effort: a not-mounted overlay
+// is not an error.
 func (m *Mediator) reclaimOrphanOverlay(ctx context.Context, rec model.Sandbox, destroyUpper bool) {
-	// ID-only reclamation (AdoptMerged/DestroyOverlay derive paths from the
-	// OverlayID); no mount, so a single-element lower stack suffices.
+	// ID-only reclamation, no mount → a single-element lower stack suffices (as in
+	// destroyLocked).
 	ov, err := m.deps.Rootfs.OpenOverlay(ctx, string(rec.Overlay), []string{string(rec.Template)}, rootfs.CapUnchanged)
 	if err != nil {
 		return // no artifact on disk → nothing to unmount
@@ -1834,10 +1768,8 @@ func (m *Mediator) adoptOrDemoteLocked(ctx context.Context, rec model.Sandbox) (
 	}
 	// L2 readiness: an L1-live unit that does not answer Health right now is not
 	// cleanly adoptable — treat as not-serving and demote (aligns adopt with
-	// cold-start ⑦; §4.3 two-layer probe).
-	// notServing records that we are demoting an L1-ALIVE unit purely because it
-	// does not answer Health. Nothing died, so there is no cause to write — see the
-	// commit below, which passes nil rather than stamping one.
+	// cold-start ⑦; §4.3 two-layer probe). notServing marks that case for the commit
+	// below, which passes nil rather than stamping a cause.
 	notServing := false
 	if alive && !m.probeReady(ctx, pl) {
 		alive = false
@@ -1886,10 +1818,8 @@ func (m *Mediator) adoptOrDemoteLocked(ctx context.Context, rec model.Sandbox) (
 	//   - ADOPT-THEN-REFUSE-THE-RULES has nothing to lean on: the rule set installs fine,
 	//     the second-hop pin not being part of it (see steeringFor).
 	//
-	// So it demotes as a §4.2 involuntary pause, with `alive` deliberately still true:
-	// NOTHING DIED, so no death cause is passed — that would be a false statement about a
-	// unit L1 just reported alive (§2.4 forbids guessing), the same judgment the not-serving
-	// arm makes.
+	// So it demotes as a §4.2 involuntary pause, passing NO death cause for the same
+	// reason the not-serving arm above passes none.
 	//
 	// Demoting a live unit is destructive but recoverable: `paused` is the fail-CLOSED
 	// resting state (no placement, so not one rule installed), the upper is untouched, a
@@ -1915,9 +1845,8 @@ func (m *Mediator) adoptOrDemoteLocked(ctx context.Context, rec model.Sandbox) (
 
 	// alive + serving → re-attach the still-mounted overlay + record the live
 	// handle so destroy/transport work again (§4.4-A: without this the survivor is
-	// un-addressable — destroy would leak the live container). AdoptMerged
-	// recovers the EXISTING kernel mount by OverlayID (no re-mount), so the lower
-	// stack is not needed — a single-element stack satisfies validation.
+	// un-addressable — destroy would leak the live container). AdoptMerged recovers
+	// the EXISTING kernel mount, so a single-element lower stack suffices.
 	ov, err := m.deps.Rootfs.OpenOverlay(ctx, string(rec.Overlay), []string{string(rec.Template)}, rootfs.CapUnchanged)
 	if err != nil {
 		return false, fmt.Errorf("reopen overlay: %w", err) // uncertain → protect
@@ -1956,27 +1885,23 @@ func (m *Mediator) adoptOrDemoteLocked(ctx context.Context, rec model.Sandbox) (
 	// liveState is COMPLETE.
 	//
 	// Without this the adopted survivor carries no volume handles, and the next
-	// pause/destroy Releases nothing. On the local arm that is invisible (Release is a
-	// no-op there by contract), which is exactly what makes it worth doing: on a remote
-	// arm the handle owns a live FUSE process, so a lost handle strands it — the leak the
-	// backend-private handle exists to prevent (volume.md D2/D3.1: no side table keyed by
-	// volume ID). "Invisible on the default arm" is not the same as correct.
+	// pause/destroy Releases nothing. Invisible on the local arm (Release is a no-op
+	// there by contract), but on a remote arm the handle owns a live FUSE process, so a
+	// lost handle strands it — the leak the backend-private handle exists to prevent
+	// (volume.md D2/D3.1: no side table keyed by volume ID).
 	mounts, err := m.adoptMounts(ctx, rec.ID)
 	if err != nil {
-		// UNCERTAIN → PROTECT, the §4.4-A rule for this whole function: refusing to adopt
-		// leaves the sandbox `running` with its placement in the keep-set, so nothing is
-		// torn down and the next pass retries. Recording a half-recovered liveState would
-		// be the worse outcome — a pause would then silently skip a Release it owed.
+		// uncertain → protect. Recording a half-recovered liveState would be the worse
+		// outcome — a pause would then silently skip a Release it owed.
 		return false, fmt.Errorf("adopt volume materializations: %w", err)
 	}
 	m.put(rec.ID, &liveState{placement: pl, merged: merged, mounts: mounts})
 	return true, nil
 }
 
-// probeReady fires a single Health RPC against an adopted placement's endpoint
-// (L2 readiness). Bounded by a short timeout so a booting/hung survivor demotes
-// promptly rather than stalling boot. This is the same readiness signal
-// cold-start's ⑦ gate polls, fired once here (guest-runtime D5.2 point ①).
+// probeReady fires cold-start ⑦'s readiness signal ONCE against an adopted
+// placement's endpoint (L2; guest-runtime D5.2 point ①). Bounded by a short timeout
+// so a booting/hung survivor demotes promptly rather than stalling boot.
 func (m *Mediator) probeReady(ctx context.Context, pl *runtime.Placement) bool {
 	if pl == nil {
 		return false
@@ -2015,9 +1940,7 @@ func (m *Mediator) Endpoint(id model.SandboxID) (string, error) {
 }
 
 // hasLive reports whether the mediator holds a live placement handle for the
-// sandbox (§4.4-A: the periodic reconcile protects live-map placements that
-// THIS process built — they are not orphans and need no Adopt re-recognition,
-// reaper-health D4).
+// sandbox (§4.4-A / reaper-health D4; see ReconcilePeriodic addition 2).
 func (m *Mediator) hasLive(id model.SandboxID) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -2042,10 +1965,9 @@ type SandboxInfo struct {
 	//
 	// A POINTER for the same reason VolumeInfo's is: §6.1 says the key is absent IFF
 	// the number is unreadable, and zero is a legitimate reading — a fresh uncapped
-	// sandbox's upper+work really is 0, which is the COMMON case here rather than an
-	// edge one. A value type would make "nothing written yet" and "the backend did not
-	// answer" the same answer, and the caller's use for this number (choosing a cap
-	// STRICTLY greater than it) needs them apart.
+	// sandbox's upper+work really is 0, the COMMON case here. A value type would make
+	// "nothing written yet" and "the backend did not answer" the same answer, which the
+	// caller's use for it (choosing a cap STRICTLY greater than it) needs apart.
 	UsedByte *int64
 }
 
@@ -2095,13 +2017,9 @@ func (m *Mediator) List(ctx context.Context) ([]model.Sandbox, error) {
 // Events serves the §6.1 GET /v1/events replay: at most limit events after the
 // given sequence cursor, plus the retained window's bounds (§4.4-C).
 //
-// PULL ONLY, and that is the load-bearing choice rather than a first step toward
-// push: the engine holds NO per-subscriber state (§1.3 forbids it) — no
-// subscriber map, no eviction policy, no cleanup path — because a cursor-paged
-// read needs none. Adding a server-side poll over this same query later would be
-// a presentation adapter reusing this same sequence, which is why it costs
-// nothing structurally to omit now. Push as an ADAPTER holds no state; push as
-// real fan-out does. That is the line.
+// PULL ONLY, because the engine must hold NO per-subscriber state (§1.3), which a
+// cursor-paged read needs none of. Why push as an adapter over this same sequence
+// would still cost nothing structurally: §4.4-C's "Outward = pull only" passage.
 //
 // It is a pure store read: no placement, no transition lock. The stream is
 // engine-level rather than per-sandbox, so there is nothing to serialize against.
@@ -2120,9 +2038,8 @@ func (m *Mediator) ListTemplates(ctx context.Context) ([]model.Template, error) 
 // parent) cannot be deleted — which the API layer maps to 409 template in use.
 // The layer's now-orphaned bytes are reclaimed by the §5.B orphan sweep, NOT in
 // this row delete (§4.4: the state transition and byte reclamation are
-// decoupled). This is a pure store operation:
-// no placement, no transition lock — Template is not a state-machine object
-// (§4.3 existence-is-state), so there is no per-sandbox lock to hold.
+// decoupled). No placement and no transition lock — Template is not a
+// state-machine object (§4.3 existence-is-state).
 func (m *Mediator) DeleteTemplate(ctx context.Context, id model.TemplateID) error {
 	return m.deps.Store.DeleteTemplate(ctx, id)
 }

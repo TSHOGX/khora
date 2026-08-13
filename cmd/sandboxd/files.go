@@ -24,10 +24,8 @@ import (
 // reason the RPCs have none: the endpoint is netns-internal and only the host can
 // reach it (transport D4.1 trust model).
 //
-// The threshold is the CALLER's choice, not a number the engine picks: small
-// payloads are cheaper as one RPC, large ones must stream. The engine would have
-// to guess wrong in one direction or the other, so it offers both and lets the
-// caller decide.
+// The threshold is the CALLER's choice, not a number the engine picks: small payloads are
+// cheaper as one RPC, large ones must stream, and only the caller knows which it has.
 
 // filesPath extracts and validates the ?path= query parameter. Guest-absolute and
 // unconfined, exactly like the fs RPCs (see fs.go for why).
@@ -42,17 +40,14 @@ func filesPath(r *http.Request) (string, error) {
 	return p, nil
 }
 
-// httpFsErr maps a filesystem error to an HTTP status using the SAME
-// classification as the RPC path's fsErr — one rule, two encodings, so a caller
-// cannot observe a file as not-found over one path and permission-denied over the
-// other.
+// httpFsErr maps a filesystem error to an HTTP status using the SAME classification as the RPC
+// path's fsErr — one rule, two encodings, so a caller cannot observe a file as not-found over
+// one path and permission-denied over the other.
 //
-// It covers fewer errnos than fsErr, and only because fewer are reachable: this
-// route does open / create / rename-within-a-directory, so ENOTEMPTY, EXDEV and
-// ELOOP cannot arise here. Anything unlisted lands on 500, which the host client
-// turns into `internal` — the same fallback fsErr uses. If this route ever grows a
-// verb that can produce one of those, add the row rather than relying on the
-// fallback, since `internal` reads as an engine bug.
+// Fewer errnos than fsErr, only because fewer are reachable: this route does open / create /
+// rename-within-a-directory, so ENOTEMPTY, EXDEV and ELOOP cannot arise. If it ever grows a verb
+// that can produce one, ADD THE ROW rather than relying on the 500 fallback, which the host
+// turns into `internal` and reads as an engine bug.
 func httpFsErr(w http.ResponseWriter, op, path string, err error) {
 	status := http.StatusInternalServerError
 	switch {
@@ -102,14 +97,12 @@ func handleFilesGet(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleFilesPut streams a request body into a guest file. Accepts either a raw
-// body (Content-Type absent or octet-stream) or one multipart part, because a
-// streaming client and a form-posting client want different framings and both are
-// cheap to support here.
+// handleFilesPut streams a request body into a guest file. Accepts either a raw body
+// (Content-Type absent or octet-stream) or one multipart part, since a streaming client and a
+// form-posting client want different framings.
 //
-// Parent directories are created, matching MakeDir's mkdir -p and the fs RPC
-// Write's tolerance — an upload that fails only because a directory is missing
-// would just force every caller into a two-call dance.
+// Parent directories are created, matching MakeDir's mkdir -p and the fs RPC Write's tolerance —
+// failing only because a directory is missing would force every caller into a two-call dance.
 func handleFilesPut(w http.ResponseWriter, r *http.Request) {
 	p, err := filesPath(r)
 	if err != nil {

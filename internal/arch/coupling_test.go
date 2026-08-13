@@ -15,16 +15,14 @@ import (
 // of these is the start of the dependency cycle the ownership rule exists to
 // prevent.
 //
-// Every entry is REQUIRED to exist (TestGuardIsNotStale). network (§5.D) was listed
-// here before it existed, so the guard would catch a bad edge the day the package
-// landed rather than the day someone remembered to add it; now that it has landed it
-// is required like the rest, because "absent packages are skipped" is a hole the
-// moment the package is real — a rename would leave §5.D unchecked with every test
-// still green.
+// Every entry is REQUIRED to exist (TestGuardIsNotStale): "absent packages are
+// skipped" is a hole the moment the package is real — a rename would leave §5.D
+// unchecked with every test still green.
 //
-// Pre-listing is what gives the empty allowlist its force at DESIGN time, not just
-// at review time: routing volume content through §5.E `fs` was ruled out for §5.C
-// partly because this guard would have failed on it (volume.md D5.1).
+// Pre-listing a package before it exists is what gives the empty allowlist its force
+// at DESIGN time, not just at review time: routing volume content through §5.E `fs`
+// was ruled out for §5.C partly because this guard would have failed on it
+// (volume.md D5.1).
 var subsystems = []string{
 	"github.com/TSHOGX/warren/internal/runtime",   // §5.A
 	"github.com/TSHOGX/warren/internal/rootfs",    // §5.B
@@ -155,19 +153,18 @@ func TestSubsystemsDoNotImportEachOther(t *testing.T) {
 // TestSubsystemsCannotReachEachOther is the TRANSITIVE form of the rule above, and it
 // closes that check's blind spot: it only looks at DIRECT imports, so `network` importing
 // `ruleset` which imports `runtime` is a real network/runtime edge that passes it. The
-// leaf guard below covers that for the four packages named in `leaves`, but membership is
+// leaf guard below covers that only for the packages named in `leaves`, and membership is
 // a manual step — a shared package nobody listed gets neither check. Reachability needs
 // no registration, so coverage stops depending on someone remembering.
 //
 // The failure prints the PATH, not just the endpoints: "runtime reaches volume" is not
 // actionable, and the hops are where the fix is.
 //
-// PRODUCTION IMPORTS ONLY, deliberately. Test-import graphs are far more connected —
-// anything reaching test/harness transitively reaches every subsystem through
-// orchestrator — so a closure over them would report a path for every subsystem on a
-// correct tree. The direct check above keeps scanning test imports, which is where that
-// coverage stays. See ADR-0006, including why deriving `leaves` from "imported by ≥2
-// subsystems" was rejected instead.
+// PRODUCTION IMPORTS ONLY, deliberately: anything reaching test/harness transitively
+// reaches every subsystem through orchestrator, so a closure over test imports would
+// report a path for every subsystem on a correct tree. The direct check above keeps
+// scanning them, which is where that coverage stays. See ADR-0006, including why
+// deriving `leaves` from "imported by ≥2 subsystems" was rejected instead.
 func TestSubsystemsCannotReachEachOther(t *testing.T) {
 	for _, tags := range tagMatrix {
 		imports := map[string][]string{}
@@ -262,8 +259,7 @@ func TestSubsystemsDoNotReadTheControlPlane(t *testing.T) {
 //     "shared fact" motive; listed because it lives OUTSIDE internal/ (ADR-0008 part
 //     3, so a Go consumer can import the protocol) and the property that made that
 //     move safe is exactly the one this guard checks: the generated tree imports
-//     nothing from the engine, so §5.E and the orchestrator reaching it is the same
-//     shape as before the move. Left unchecked, a hand-edit adding an engine import
+//     nothing from the engine. Left unchecked, a hand-edit adding an engine import
 //     there would put an engine type in the published surface and hand every
 //     importer a transitive edge.
 // generatedTree is the root of the committed wire stubs (ADR-0008 part 3). Named
@@ -308,8 +304,8 @@ var inertLeaves = []string{
 // CLAUDE.md forbids. Process execution and raw syscalls are the mechanism-smuggling
 // routes that matter (shelling out to `nft` / `ip`, or an ioctl); the filesystem and
 // network packages are here because "touch no substrate" covers reading it too — a
-// leaf that stats a path has made its answer depend on the host it runs on, which is
-// exactly what makes the generate-side and install-side runs stop agreeing.
+// leaf that stats a path has made its answer depend on the host it runs on, so the
+// generate-side and install-side runs stop agreeing.
 var actsOnTheWorld = []string{
 	"os/exec",
 	"syscall",

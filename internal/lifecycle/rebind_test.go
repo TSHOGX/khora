@@ -44,10 +44,8 @@ func patchMounts(m *Mediator, ctx context.Context, id model.SandboxID, mounts []
 // (store.Store.CreateMounts: judgment and insert are inseparable, measured), so they are
 // exactly the refusals that arrive AFTER the request has been accepted as well-formed.
 //
-// With the old three-call shape the cap or TTL was already committed by the time the
-// mount commit lost, so the caller received a 4xx describing a request that had half
-// happened. Reading the record back is the only witness — the status code alone looks
-// identical either way.
+// Reading the record back is the only witness — with the old three-call shape (the damage
+// is in Rebind's own comment) the status code alone looked identical either way.
 func TestRebind4xxCommitsNothing(t *testing.T) {
 	ctx := context.Background()
 
@@ -266,9 +264,7 @@ func TestRebindStateGateIsTheUnionAndPrecedesEveryWrite(t *testing.T) {
 // TestRebindValidatesTheDeclarationBeforeTheStateGate: an INVALID declaration is refused
 // as a 400 regardless of state — not answered with the 409 "pause first, then PATCH".
 //
-// The ordering matters to the caller, not just to the code: pausing cannot make an
-// invalid declaration legal, so a 409 sends them to do work that changes nothing. It is
-// the same reasoning that puts the disk `0 → N` refusal ahead of the admission gate.
+// (Why that ordering: Rebind's declaration-validation comment.)
 //
 // This also pins WHERE the validation lives: it is a write-point obligation on the
 // mediator, not an API-layer one, so a caller reaching the mediator directly (the

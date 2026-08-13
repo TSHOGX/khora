@@ -204,16 +204,10 @@ func TestRepairVolumeCapsReAssertsTheRecord(t *testing.T) {
 // be WORSE than doing nothing: re-asserting a recorded cap onto a unit that already holds
 // more than that.
 //
-// Measured (volume.md D7.3): such a cap is accepted by the substrate with zero validation
-// and then wedges the unit PERMANENTLY — `mkdir`, creating a file and even truncating an
-// existing file to zero all return ENOSPC, and the quota write itself returns ENOSPC, so
-// the cap can neither be removed nor raised. §6.1's write point refuses exactly this
-// predicate (ErrVolumeCapBelowUsage); this pass reaches the SAME backend call, so without
-// the guard a recovery path is the way around that refusal.
-//
-// The input state is reachable rather than hypothetical: D7.3's bearing-load window leaves
-// "record says cap=N, quota row says none", and `none` means unbounded writes meanwhile —
-// so usage above N needs nothing to misbehave.
+// Such a cap wedges the unit PERMANENTLY (measured, volume.md D7.3), and this pass reaches
+// the same backend call §6.1's write point guards, so without the check a recovery path is
+// the way around ErrVolumeCapBelowUsage. RepairVolumeCaps's own comment has the measurement
+// and why the input state is reachable rather than hypothetical.
 //
 // WHAT IS ASSERTED IS THAT IT SILENTLY PASSES, following D7.2's discipline: the property
 // is "SetCapacity is not called", read from the backend's own call log, NOT "the volume
@@ -254,9 +248,7 @@ func TestRepairVolumeCapsNeverImposesACapBelowUsage(t *testing.T) {
 		t.Errorf("the skip rewrote the RECORD to %d, want the declared %d", rec.CapByte, recordedCap)
 	}
 
-	// EQUALITY IS ALSO SKIPPED. `cap == usage` is accepted by the substrate and stored, but
-	// the very next write gets ENOSPC — so it means FULL, not "exactly enough". Hence the
-	// same strict inequality the write point uses, not >=.
+	// EQUALITY IS ALSO SKIPPED — the write point's strict inequality, not >= (why, below).
 	vb.used = recordedCap
 	before = len(vb.Calls())
 	if err := m.RepairVolumeCaps(ctx); err != nil {
@@ -269,9 +261,8 @@ func TestRepairVolumeCapsNeverImposesACapBelowUsage(t *testing.T) {
 	}
 
 	// AND THE PASS IS NOT DISABLED: once usage drops back under the recorded cap the very
-	// next pass repairs the volume with no operator action. This is what makes the skip a
-	// deferral rather than a dead end, and it is why the volume being temporarily uncapped
-	// is acceptable — its bytes are counted by the §3.4 uncapped term meanwhile.
+	// next pass repairs the volume with no operator action — the skip is a deferral, not a
+	// dead end (RepairVolumeCaps says why the interim uncapped state is acceptable).
 	vb.used = 1 << 20
 	if err := m.RepairVolumeCaps(ctx); err != nil {
 		t.Fatal(err)

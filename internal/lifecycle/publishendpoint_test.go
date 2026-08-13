@@ -17,7 +17,7 @@ import (
 //
 //   - LICENSED: a NEW placement binds new endpoints. Resume gets a new netns, a new IP
 //     and new ports, which is why §6.1 reports `host_endpoint` only while a placement
-//     exists — a caller must re-read it, and TestPublishEndpointsMayChangeAcrossResume
+//     exists — a caller must re-read it, and TestPublishEndpointsAreReboundAtANewPlacement
 //     asserts the engine really does behave this way rather than accidentally being
 //     stable (an assertion that would otherwise silently pass on a frozen value).
 //   - FORBIDDEN: an existing publish's endpoint moving because ANOTHER publish was
@@ -57,11 +57,9 @@ func pubEndpoint(t *testing.T, m *Mediator, id model.SandboxID, port uint16, pro
 
 // Hot-adding a publish does not move the endpoints already bound at that placement.
 //
-// The failure this pins is not a crash: the caller that published 8080 gets a 200 with
-// an endpoint, someone publishes 9090, and 8080's endpoint silently becomes a different
-// port with no record change asking for it. §5.D endorses hot-adding on a `running`
-// sandbox precisely because a publish is a PURELY ADDITIVE host-side rule set, and
-// re-binding an untouched item is not additive.
+// The failure this pins is not a crash: the caller that published 8080 gets a 200 with an
+// endpoint, someone publishes 9090, and 8080's endpoint silently becomes a different port
+// with no record change asking for it (the file header's second class).
 func TestHotAddingAPublishKeepsTheEarlierEndpoints(t *testing.T) {
 	ctx := context.Background()
 	m, _ := newTestMediator(t, &fakeRootfs{}, &fakeRuntime{}, true)
@@ -182,10 +180,8 @@ func TestTCPAndUDPOnOneGuestPortBothGetEndpoints(t *testing.T) {
 
 // ACROSS placements the endpoint MAY change — the other side of the §3.3 boundary.
 //
-// This is not a nice-to-have: the two tests above would also pass if endpoints were
-// globally frozen per sandbox, and a frozen endpoint IS a stable identifier, which is
-// what §3.3 forbids and what §6.1's "no `host_endpoint` key without a placement" exists
-// to stop a caller relying on. So this asserts the rebinding really happens.
+// Non-vacuity for the two tests above: both would also pass if endpoints were globally
+// frozen per sandbox, and a frozen endpoint IS the stable identifier §3.3 forbids.
 func TestPublishEndpointsAreReboundAtANewPlacement(t *testing.T) {
 	ctx := context.Background()
 	m, _ := newTestMediator(t, &fakeRootfs{}, &fakeRuntime{}, true)

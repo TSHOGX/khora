@@ -45,19 +45,10 @@ import (
 // # The `item N` labels
 //
 // THIS FILE'S OWN numbering, declared by the `--- item N: … ---` banners below and
-// used in failure messages so that a failing assertion inside a multi-part test names
-// itself. They are not a reference to anything outside this file. Keep a label stable
+// used in failure messages so a failing assertion names itself. Keep a label stable
 // once written — the sub-letters (7b, 9d, 14e) encode which assertion depends on
 // which, as the paragraph above does for 7.
 
-// guestProbe is a tiny static binary injected into the Template: it dials an
-// address and prints a one-line verdict. The bare rootfs ships no coreutils, so
-// anything the guest must run has to be injected (harness.InjectStaticBin).
-//
-// It reports the OUTCOME and the elapsed time, because two assertions turn on the
-// difference between "refused fast" and "hung": §2.4's fail-closed has a second half
-// — "the guest gets a clean connection failure" — that a pure-`drop` floor breaks
-// while satisfying the security half (network.md D5 ⑨).
 // forgerSrc adds an address to a guest interface using a raw netlink socket.
 //
 // It exists because the guest rootfs has NO `ip` binary — build-rootfs.sh installs
@@ -202,6 +193,10 @@ func main() {
 }
 `
 
+// guestProbeSrc dials an address and prints a one-line verdict. The bare rootfs ships
+// no coreutils, so anything the guest must run has to be injected
+// (harness.InjectStaticBin). It reports the elapsed time because two assertions turn on
+// "refused fast" vs "hung" (D5 ⑨).
 const guestProbeSrc = `package main
 
 import (
@@ -216,13 +211,8 @@ import (
 // probe <addr> [udp] [dial-timeout-seconds] — dial, read a banner, print
 // OUTCOME=<verdict> MS=<elapsed>.
 //
-// The dial timeout is a PARAMETER because it is the entire cost of a deny probe: a
-// dropped SYN is only shown unreachable by the dial expiring, so every deny assertion
-// pays it in full. Most of them carry their claim on "did not connect" AND a moved
-// counter (harness.NftCounter's contract), and there a few seconds is exactly as
-// conclusive as half a minute. The two arms that assert on the ELAPSED TIME instead
-// pass a long one explicitly — under a short timeout a dropped SYN would report the
-// timeout rather than the hang, and those two would pass vacuously.
+// The dial timeout is a PARAMETER because it is the entire cost of a deny probe; which
+// value each caller passes and why is at denyDialTimeout / hangDialTimeout.
 //
 // (No backticks anywhere in this comment: it lives inside a raw string literal, and one
 // would end the literal here rather than at the fixture's end.)
@@ -270,11 +260,8 @@ func main() {
 		fmt.Printf("OUTCOME=connected_no_payload MS=%d ERR=%v\n", el, rerr)
 		return
 	}
-	// PAYLOAD is emitted LAST and read to end-of-line by the harness: a banner
-	// legitimately contains spaces (the via endpoint answers "via-ok ORIGDST=<addr>"),
-	// and a whitespace-split parser would silently truncate it — which is a test-harness
-	// artifact that reads exactly like the engine failing to recover the original
-	// destination.
+	// PAYLOAD is emitted LAST because the harness reads it to end-of-line (see
+	// runGuestProbeDialing).
 	fmt.Printf("OUTCOME=connected MS=%d PAYLOAD=%s\n", el, strings.ReplaceAll(string(buf[:n]), "\n", " "))
 }
 `
@@ -299,20 +286,17 @@ func runGuestProbe(t *testing.T, cl transport.Client, addr string, udp bool) pro
 
 // denyDialTimeout is what a probe waits for a dial that is expected NOT to complete.
 //
-// Short on purpose. A dropped SYN is only shown unreachable by this expiring, so the
-// deny assertions pay it in full and it was the single largest cost in this file
-// (measured: four tests spent 8-26 s each against a ~0.6 s per-sandbox baseline). What
-// makes the short value sound is that the elapsed time is NOT what carries a deny here
-// — "unreachable" AND "the counter moved" is (harness.NftCounter), and a legitimate
-// connect on these paths measures ~25 ms, so this is a ~100x margin over the outcome
-// this timeout has to stay distinguishable from.
+// Short on purpose: it was the single largest cost in this file (measured: four tests
+// spent 8-26 s each against a ~0.6 s per-sandbox baseline). Sound because the elapsed
+// time is not what carries a deny here — "unreachable" AND "the counter moved" is
+// (harness.NftCounter) — and a legitimate connect on these paths measures ~25 ms, a
+// ~100x margin over the outcome this timeout must stay distinguishable from.
 const denyDialTimeout = 3 * time.Second
 
 // hangDialTimeout is for the two arms whose claim IS the elapsed time: `reject` refuses
-// in milliseconds where `drop` hangs (D5 ⑨, ~20 s). They must be able to OBSERVE the
-// hang, so the timeout has to sit well above the bound they assert — with
-// denyDialTimeout they would report 3 s, read as "fast", and pass without testing
-// anything.
+// in milliseconds where `drop` hangs (D5 ⑨). They must be able to OBSERVE the hang, so
+// the timeout has to sit well above the bound they assert — with denyDialTimeout they
+// would report 3 s, read as "fast", and pass without testing anything.
 const hangDialTimeout = 25 * time.Second
 
 func runGuestProbeDialing(t *testing.T, cl transport.Client, addr string, udp bool, dial time.Duration) probeResult {
@@ -341,8 +325,6 @@ func runGuestProbeDialing(t *testing.T, cl transport.Client, addr string, udp bo
 	// banner legitimately contains spaces (the via endpoint answers
 	// "via-ok ORIGDST=<addr>"), and splitting on whitespace truncated it at "via-ok" —
 	// which read exactly like the engine failing to recover the original destination.
-	// A harness artifact impersonating an engine defect is the one kind of test bug
-	// this file cannot afford, since every assertion here is about distinguishing those.
 	if i := strings.Index(raw, "PAYLOAD="); i >= 0 {
 		rest := raw[i+len("PAYLOAD="):]
 		if nl := strings.IndexByte(rest, '\n'); nl >= 0 {
@@ -434,12 +416,8 @@ func hostIPv4(t *testing.T) string {
 	return ""
 }
 
-// mustCounterMoved is the acceptance discipline as a helper: it FAILS when the
-// counter did not move, and distinguishes "did not move" from "does not exist".
-//
-// A missing counter (-1) is the worse of the two and gets its own message: it means
-// the rule was never rendered at all, which is the same silent pass wearing a
-// different disguise.
+// mustCounterMoved is the acceptance discipline as a helper: it FAILS when the counter
+// did not move, and distinguishes "did not move" from "does not exist" (-1).
 func mustCounterMoved(t *testing.T, id model.SandboxID, counter string, before, after int64, what string) {
 	t.Helper()
 	if after < 0 {
@@ -528,49 +506,37 @@ func TestDenyEmptyIsUnreachableEverywhereWithFloorCountersMoving(t *testing.T) {
 		counter string
 		why     string
 	}{{
-		// An address of the host ITSELF → `input`, where the floor is a pure ct-state
-		// rule with no address list at all.
 		name:    "an address of the host itself",
 		target:  net.JoinHostPort(host, port),
 		counter: "in_floor",
 		why:     "the host's own address lands on `input`; the floor there is pure ct-state, so it covers every host address without enumerating one (D5 ⑧)",
 	}, {
-		// Link-local (every cloud metadata endpoint) → the host would ROUTE it, so
-		// `forward`, and it is an explicit daddr member there.
+		// Link-local is every cloud's metadata endpoint.
 		name:    "link-local metadata address",
 		target:  "169.254.169.254:80",
 		counter: "fwd_floor_v4",
 		why:     "link-local is routed, so it lands on `forward` and is an explicit daddr member of the floor there",
 	}, {
-		// An UNALLOCATED address inside the sandbox /16. The sibling item as the floor
-		// itself sees it, with no second sandbox involved — so this isolates A's own
-		// floor from the cross-sandbox ordering question the sibling case raises below.
+		// The sibling item with NO second sandbox involved, which isolates A's own floor
+		// from the cross-sandbox ordering question the sibling case below raises.
 		name:    "an unallocated address in the sandbox address space",
 		target:  "10.66.199.222:9000",
 		counter: "fwd_floor_v4",
 		why:     "the sibling CIDR is a floor daddr member, and with no sandbox holding this address only THIS sandbox's floor can refuse it",
 	}, {
-		// A public address → `forward`, refused by the DEFAULT rather than by the floor.
-		// Different counter on purpose: this proves the default-deny is doing the work,
-		// and that the forward side has its OWN default-deny (a destination neither on
-		// the host nor steered never traverses `input`, D5 ⑩).
+		// A different counter on purpose: refused by the DEFAULT, not by the floor.
 		name:    "a public address",
 		target:  "1.1.1.1:443",
 		counter: "fwd_default_deny",
 		why:     "a public destination is refused by the forward side's OWN default-deny — an input-only default-deny would never see it (D5 ⑩)",
 	}}
 
-	// LOOPBACK IS DELIBERATELY NOT IN THIS TABLE, and the reason is a measured fact
-	// rather than an omission: a gVisor guest dialing 127.0.0.1 hits ITS OWN netstack's
-	// loopback, so the packet never leaves the sandbox and the host's rules are never
-	// evaluated — measured, the host-side `daddr 127.0.0.0/8` counter read 0 while
-	// link-local counted 5 in the same run (D5 ⑦). The floor's loopback item is
-	// therefore REDUNDANT DEPTH for a gVisor guest, not the thing refusing it.
-	//
-	// Asserting a counter here would demand movement from traffic that constructively
-	// cannot arrive — the assertion would be unsatisfiable rather than the engine
-	// broken, which is exactly the "invalid measurement" the discipline exists to
-	// distinguish from a pass.
+	// LOOPBACK IS DELIBERATELY NOT IN THIS TABLE, and it carries NO counter assertion: a
+	// gVisor guest dialing 127.0.0.1 hits ITS OWN netstack's loopback, so the packet never
+	// leaves the sandbox and the host's rules are never evaluated — measured, the
+	// host-side `daddr 127.0.0.0/8` counter read 0 while link-local counted 5 in the same
+	// run (D5 ⑦). Demanding movement from traffic that constructively cannot arrive is an
+	// unsatisfiable assertion, not a finding.
 	if res := runGuestProbe(t, cl, net.JoinHostPort("127.0.0.1", port), false); res.reachable() {
 		t.Errorf("the guest reached the HOST's loopback (%s) — that would mean the packet left the "+
 			"sandbox, contradicting D5 ⑦'s measurement that a gVisor guest's loopback dial stays in "+
@@ -669,10 +635,9 @@ func TestAllowPublicDeliversEgressAndStillRefusesTheInternalTier(t *testing.T) {
 	eng, _ := harness.Engine(t, netEngineOpts(t))
 	host := hostIPv4(t)
 
-	// ITEM 7: public egress actually works. This is what proves the three host-side
-	// mechanisms are materialized (ip_forward, the guest default route carrying `dev`,
-	// and the masquerade — measured necessary AND sufficient, D5 ⑤). Without it, item 6
-	// above would be passing on an engine where nothing works at all.
+	// ITEM 7: public egress actually works, so item 6 above is not passing on an engine
+	// where nothing works at all. The three host-side mechanisms it proves materialized
+	// are named in the failure message (measured necessary AND sufficient, D5 ⑤).
 	id, cl := createRunning(t, eng, declAllowPublic())
 	pub := runGuestProbe(t, cl, "1.1.1.1:443", false)
 	if !pub.reachable() && pub.outcome != "connected_no_payload" {
@@ -919,11 +884,16 @@ func TestADeclaredUDPTupleIsAdmittedAtTheRuleLayer(t *testing.T) {
 // breaking this one. gVisor's netstack honors ICMP errors, so `reject` and `drop`
 // differ by orders of magnitude in what the guest experiences.
 //
-// ASSERTED BY MAGNITUDE, NOT BY MILLISECONDS, on purpose: the source measurement is
-// single-source and its independent reproduction FAILED (the test bed had no guest
-// default route, so nothing left the sandbox and all four verdicts looked alike — an
-// invalid measurement, not a refutation). So the direction is trusted and the numbers
-// are not. This test is also that reproduction's second attempt.
+// ASSERTED BY MAGNITUDE, NEVER BY A MILLISECOND FIGURE: this test IS the standing
+// `reject` arm D5 ⑨ cites (0 ms), and the `drop` arm is deliberately not kept as a
+// standing test — every run would waste 25 s hanging.
+//
+// The source measurement was single-source and its first independent reproduction
+// FAILED: the test bed had no guest default route, so nothing left the sandbox and all
+// four verdicts looked alike — an invalid measurement, not a refutation. This test is
+// that reproduction's second attempt. So the direction is trusted and the numbers are
+// not (recorded here because no §-doc carries it: D5 ⑨ states both arms as reproduced
+// and defers the conditions to D4.3, which does not keep the failed attempt).
 func TestGuestFacingRefusalsFailFastRatherThanHanging(t *testing.T) {
 	eng, _ := harness.Engine(t, netEngineOpts(t))
 	id, cl := createRunning(t, eng, declDeny())
@@ -933,10 +903,8 @@ func TestGuestFacingRefusalsFailFastRatherThanHanging(t *testing.T) {
 	const fastEnough = 5 * time.Second
 	// SAMPLED AROUND THE PROBE, because "refused in 2 ms" is produced identically by the
 	// floor's `reject` and by the packet dying inside the netns before it ever reached a
-	// rule — and this is the one test whose documented first attempt failed for exactly
-	// that reason (the guest had no default route, so nothing left the sandbox and all
-	// four verdicts looked alike). The counter is what separates "the engine refused
-	// this, fast" from "nothing happened at all".
+	// rule — this test's own first attempt failed that way (no guest default route, so
+	// nothing left the sandbox and all four verdicts looked alike).
 	before := harness.NftCounter(t, id, "fwd_floor_v4")
 	// hangDialTimeout, not the default: the assertion below is on the ELAPSED TIME, so a
 	// short dial would report itself instead of the hang it exists to rule out.
@@ -982,10 +950,8 @@ func TestForgingASourceAddressDoesNotBypassTheFloor(t *testing.T) {
 	// below never leaves the netns and every host counter stays 0 — measured, and by
 	// D4.1 that is an INVALID assertion rather than a pass.
 	//
-	// THE FORGERY MUST ACTUALLY HAPPEN, and it is asserted loudly:
-	// a silently-skipped forgery makes this test indistinguishable from the plain floor
-	// probe, so it would pass on an engine whose predicate was forgeable — the single
-	// thing pillar ④'s acceptance exists to rule out.
+	// THE FORGERY MUST ACTUALLY HAPPEN, and both its RUN and its RESULT are asserted
+	// below (see forgerSrc for the ENOENT that made it silently do nothing).
 	evs, err := cl.Start(ctx, transport.StartSpec{
 		Cmd: "/usr/bin/forger", Args: []string{"10.66.99.99"},
 	})
@@ -1006,13 +972,9 @@ func TestForgingASourceAddressDoesNotBypassTheFloor(t *testing.T) {
 			"safe: the whole point is that the forgery works and the floor holds anyway",
 			forgeOut.String())
 	}
-	// THE PROBE TARGET IS A ROUTED FLOOR ADDRESS, not the host's own address, and the
-	// forgery is why. Adding the host's address to the guest's own interface makes that
-	// address LOCALLY OWNED inside the sandbox, so a dial to it never leaves the netns
-	// and every host counter stays 0 — "unreachable with a zero counter", which D4.1
-	// makes an INVALID assertion rather than a pass (it is indistinguishable from a
-	// bypassed floor). Link-local is in the floor's forward daddr list AND still routes,
-	// so the packet reaches the host and a counter moves.
+	// THE PROBE TARGET IS A ROUTED FLOOR ADDRESS, for the same reason the forged address
+	// is not the host's own (above): link-local is in the floor's forward daddr list AND
+	// still routes, so the packet reaches the host and a counter moves.
 	const floorTarget = "169.254.169.254:80"
 	before := harness.NftCounter(t, id, "fwd_floor_v4")
 	res := runGuestProbe(t, cl, floorTarget, false)
@@ -1175,14 +1137,12 @@ func gatewayOf(t *testing.T, eng *orchestrator.Engine, id model.SandboxID) strin
 //     path is this one: the sole stably-available host-local resolver address is this
 //     sandbox's own gateway, it is a host address so it lands on `input`, and a
 //     `forward`-only allow cannot reach it (D4.2 / D5 ⑦).
-//   - Without the counter, "cannot connect" is not an assertion at all. The counter
-//     that must move is `in_sibling`, the sibling drop ON THE INPUT HOOK. The
-//     `forward` side has its own sibling item (`fwd_floor_v4`, whose daddr set holds
-//     the same /16) and it counts ZERO on this path — a sibling's gateway is an
-//     address of the HOST, so only `input` ever sees it. Reading that counter instead
-//     would turn a real leak (measured: the guest reads the sibling's banner) into
-//     "the floor counter is 0", which by this file's discipline is an INVALID
-//     assertion rather than a pass (D4.2).
+//   - Without the counter, "cannot connect" is not an assertion at all. The counter that
+//     must move is `in_sibling`, the sibling drop ON THE INPUT HOOK — the `forward` side's
+//     own sibling item (`fwd_floor_v4`, same /16 in its daddr set) counts ZERO on this
+//     path, because a sibling's gateway is an address of the HOST (D4.2). Reading that
+//     one instead would turn a real leak (measured: the guest reads the sibling's
+//     banner) into "the floor counter is 0".
 func TestAnInputSideAllowReachesItsOwnGatewayButNotASiblings(t *testing.T) {
 	eng, _ := harness.Engine(t, netEngineOpts(t))
 
@@ -1315,10 +1275,8 @@ func TestTheRulesArePresentBeforeTheGuestRunsAndDestroyLeavesNoTable(t *testing.
 // destination of each redirected connection and reporting it — the "process outside
 // the engine" a `via[]` endpoint points at.
 //
-// It runs as secondHopUID because item 9d needs the second hop to be attributable:
-// the engine-level table pins THAT uid's egress, and the paired assertion is that
-// root's own probe still works (an un-narrowed drop there is a host-level egress kill
-// switch — measured, root's probe failed too, D5 ㉔).
+// It runs as secondHopUID because item 9d needs the second hop to be attributable: the
+// engine-level table pins THAT uid's egress (see secondHopUID).
 const viaListenerSrc = `package main
 
 import (
@@ -1365,21 +1323,6 @@ func main() {
 }
 `
 
-// startViaListener builds and starts the via endpoint process as secondHopUID,
-// returning its endpoint and a stop func.
-//
-// IT BINDS A NON-LOOPBACK HOST ADDRESS, and that is a contract requirement rather
-// than a fixture preference — §6.2's SIXTH 400 class refuses a `via[].endpoint`
-// inside the L0 floor, loopback included, because every flow steered there would be
-// permanently fail-closed.
-//
-// That fail-closure was measured on a loopback endpoint before this fixture moved off
-// it: with `route_localnet=0` (this host's default) a 127/8 DNAT target is simply not
-// routable for guest-originated traffic — `ip route get 127.0.0.9 from <guest>` answers
-// "Network is unreachable". So the class is not fastidiousness: it refuses at the write
-// point a declaration the substrate would refuse silently on the wire, which is D4.3's
-// diagnostic dislocation — a second, independent mechanism reaching the same verdict as
-// the spec's stated reason.
 // buildUnprivBin compiles a one-file Go program into a fresh temp dir and makes both
 // the dir and the binary world-executable, so an UNPRIVILEGED uid can exec it out of
 // a root-owned temp dir. The chmods are the point and are easy to omit: without them
@@ -1422,6 +1365,14 @@ func asUID(uid int, bin string, args ...string) *exec.Cmd {
 	return exec.Command("setpriv", full...)
 }
 
+// startViaListener builds and starts the via endpoint process as secondHopUID,
+// returning its endpoint and a stop func.
+//
+// IT BINDS A NON-LOOPBACK HOST ADDRESS because §6.2's SIXTH 400 class refuses a
+// `via[].endpoint` inside the L0 floor, loopback included. Measured on a loopback
+// endpoint before this fixture moved off it: with `route_localnet=0` (this host's
+// default) a 127/8 DNAT target is not routable for guest-originated traffic —
+// `ip route get 127.0.0.9 from <guest>` answers "Network is unreachable".
 func startViaListener(t *testing.T, port int) (string, func()) {
 	t.Helper()
 	bin := buildUnprivBin(t, "vialisten", viaListenerSrc)
@@ -1568,13 +1519,8 @@ func TestViaSteersAndDoesNotReopenTheFloor(t *testing.T) {
 // This is §2.4 fail-closed's second named case, and it is a REQUIREMENT rather than an
 // inherited measurement: D5 has no "the listener died" cell.
 //
-// The counter half is the subtle part. It reads the INPUT-side narrow accept, not the
-// forward default-deny, and the reasoning is hook attribution: the DNAT is in
-// `prerouting` and does not care whether anything is listening, so the packet is still
-// transformed and still lands on `input` — while a destination that is neither on the
-// host nor steered never traverses `input` at all. So that counter still rising is
-// POSITIVE evidence the packet went down the steering path and was consumed locally,
-// which is incompatible with it having been routed out.
+// The counter half is the subtle part: it reads the INPUT-side narrow accept rather than
+// the forward default-deny, for the hook-attribution reason spelled out at (b) below.
 func TestADeadViaEndpointRefusesTheConnectionRatherThanLettingItOut(t *testing.T) {
 	eng, _ := harness.Engine(t, netEngineOpts(t))
 	endpoint, stopListener := startViaListener(t, 15444)
@@ -1695,8 +1641,7 @@ func TestTheSecondHopIsPinnedUnderTheFloor(t *testing.T) {
 	}
 
 	// (b) ALLOW: the SAME process reaching a permitted destination still works. Without
-	// this half, an un-narrowed drop passes (a) while being a HOST-LEVEL egress kill
-	// switch — measured, root's own probe failed too (D5 ㉔).
+	// this half, an un-narrowed drop passes (a) while being a host-level egress kill switch.
 	t.Run("allow: the same process reaches a permitted destination", func(t *testing.T) {
 		addr, stop := hostListener(t, "hello-from-HOST")
 		defer stop()
@@ -1711,9 +1656,7 @@ func TestTheSecondHopIsPinnedUnderTheFloor(t *testing.T) {
 	})
 
 	// (c) ROOT IS UNAFFECTED — the control arm for the kill-switch hazard, and the whole
-	// reason the drop must carry `skuid`: measured, an un-narrowed drop on this hook took
-	// out root's own probe too (D5 ㉔). Without this arm, such a drop passes (b) above
-	// while being a host-level egress kill switch.
+	// reason the drop must carry `skuid`. Without this arm, such a drop passes (b) above.
 	//
 	// ASSERTED POSITIVELY, on the counter rather than on reachability. Root dialing a
 	// sibling guest IP is a HOST-ORIGINATED flow, so whether it connects depends on that
@@ -1773,12 +1716,8 @@ func TestReconciliationReadoptsARuleSetAndReclaimsAnOrphansTable(t *testing.T) {
 	// The restart: a second engine over the SAME store and state, running production's
 	// boot sequence (second-hop install → reconcile).
 	//
-	// harness.Restart rather than harness.Engine, and the difference is load-bearing:
-	// Engine REBUILDS the Template, which is the LOWER DIR of the live sandbox's overlay
-	// mount — so the survivor's guest would lose the files it is running from, and the
-	// symptom (a guest process producing no output) looks nothing like the
-	// reconciliation defect this test exists to catch. Production never rebuilds a
-	// Template under a live sandbox.
+	// harness.Restart rather than harness.Engine, and the difference is load-bearing —
+	// see harness.Restart's doc.
 	eng2 := harness.Restart(t, base, opts)
 
 	// The survivor's table is still there and still enforcing. Re-adoption must not have
@@ -1965,9 +1904,7 @@ func main() {
 	// production's boot sequence. Its Adopt re-installs the rule set — as ONE atomic
 	// file, which is what this test is really measuring.
 	//
-	// harness.Restart, not harness.Engine: the latter rebuilds the Template under the
-	// live sandbox (see harness.Restart's doc), which would break the flow for a reason
-	// that has nothing to do with reconciliation.
+	// harness.Restart, not harness.Engine: see harness.Restart's doc.
 	_ = harness.Restart(t, base, opts)
 
 	res := <-done
@@ -1996,20 +1933,11 @@ func main() {
 			"typically succeeds once before EPIPE (D5 ⑰'s measurement discipline)\nraw: %s",
 			trips, strings.TrimSpace(res.raw))
 	}
-	// THE COUNTER IS NOT COMPARED ACROSS THE RESTART, and that is a consequence of the
-	// very mechanism this test exists to verify rather than a weaker assertion.
-	//
-	// Adopt re-installs the table as ONE ATOMIC FILE — which is what keeps the live flow
-	// alive (measured 5/5 vs 5/5 for delete-then-install, D5 ㉒) — and a freshly loaded
-	// table starts its named counters at ZERO. So the reading legitimately goes 1 → 0
-	// across the restart, and a "must have advanced" comparison would fail on a working
-	// engine while passing on one that never re-installed anything at all: exactly
-	// backwards.
-	//
-	// What carries the assertion instead is the ROUND-TRIP COUNT above, verified by
-	// read-back — bytes that actually moved, which no counter arithmetic can fake. The
-	// counter's job here is only to confirm the re-installed rule set is matching this
-	// flow AFTERWARDS, so it is read as "the new table is counting", not as a delta.
+	// THE COUNTER IS NOT COMPARED ACROSS THE RESTART: a freshly loaded table starts its
+	// named counters at ZERO, so the reading legitimately goes 1 → 0 and a "must have
+	// advanced" comparison would fail on a working engine while passing on one that never
+	// re-installed anything. The round-trip count above carries the assertion; this
+	// counter is read only as "the new table is counting", never as a delta.
 	after := harness.NftCounter(t, id2, "allow0_in")
 	if after < 0 {
 		t.Errorf("after the restart the re-adopted rule set has no input-side allow counter — the "+
@@ -2063,15 +1991,11 @@ func TestPublishIsReachableFromOutsideAndFromTheHostAndSurvivesResume(t *testing
 	// (i) FROM OUTSIDE THE /30 — not merely from the host. Without the companion SNAT
 	// this is precisely the case that times out: the guest's reply has nowhere to go
 	// (measured to_guest=2 / from_guest=0, and adding the SNAT made the same flow
-	// connect immediately — D5 ⑬). The host's own dial in (ii) would NOT have caught it.
-	// The caller must be GENUINELY OUTSIDE the sandbox's /30 — a separate netns, not this
-	// host. Dialing from the host is a DIFFERENT path carried by a DIFFERENT rule: the
-	// output-hook DNAT (D5 ⑭), which is what sub-test (ii) covers. Measured the confusion
-	// directly: a host-side dial succeeded and returned the guest's banner while
-	// `pub0_in_dnat` counted ZERO, because prerouting is not traversed by
-	// host-originated traffic at all. So "it worked from the host" is not evidence the
-	// external path works — which is precisely why these are split into two
-	// questions and forbids using one for the other.
+	// connect immediately — D5 ⑬), and the host's own dial in (ii) would NOT have caught
+	// it. Measured the confusion directly: a host-side dial succeeded and returned the
+	// guest's banner while `pub0_in_dnat` counted ZERO, because host-originated traffic
+	// does not traverse prerouting at all (D5 ⑭). Hence the split into two questions, and
+	// dialFromForeignNetns rather than this host.
 	t.Run("(i) reachable from outside the sandbox's own /30, with the SNAT in place", func(t *testing.T) {
 		out, derr := dialFromForeignNetns(t, endpoint)
 		if derr != nil {
@@ -2111,11 +2035,6 @@ func TestPublishIsReachableFromOutsideAndFromTheHostAndSurvivesResume(t *testing
 				"different downstream hooks (D5 ⑮)", c)
 		}
 		// AND THE INPUT SIDE STAYS ZERO — asserted, since it is half this subtest's claim.
-		// The two hooks are what makes publish and `via[]` distinguishable at all: both are
-		// the same prerouting DNAT, and only the downstream hook tells them apart (D5 ⑮). If
-		// inbound publish traffic showed up on the input floor, the post-DNAT destination
-		// would be host-local rather than the guest — i.e. the DNAT rewrote to the wrong
-		// address, which every forward-side assertion here would pass over.
 		//
 		// Zero is reachable rather than aspirational: this declaration is `deny` with no
 		// `via[]` and no `allow[]`, the guest runs nothing that dials out, and the engine's
@@ -2129,10 +2048,8 @@ func TestPublishIsReachableFromOutsideAndFromTheHostAndSurvivesResume(t *testing
 		}
 	})
 
-	// (ii) FROM THE HOST ITSELF — a SECOND, independent rule. Host-originated traffic
-	// never traverses `prerouting`, so this path is carried by the output-hook DNAT
-	// alone: "it worked from the host" is not evidence a publish works, and the reverse
-	// does not follow either (D5 ⑭).
+	// (ii) FROM THE HOST ITSELF — a SECOND, independent rule, carried by the output-hook
+	// DNAT alone. Neither of (i)/(ii) is evidence for the other (D5 ⑭).
 	t.Run("(ii) reachable from the host itself, via its own output-hook DNAT", func(t *testing.T) {
 		before := harness.NftCounter(t, id, "pub0_out_dnat")
 		conn, derr := net.DialTimeout("tcp", endpoint, 10*time.Second)
@@ -2320,9 +2237,7 @@ func TestPublishOnAPausedSandboxRecordsWithoutInstallingRules(t *testing.T) {
 			"land in the record, or it would not survive to the next placement (§5.D)",
 			len(rec2.Network.Ingress.Publish))
 	}
-	// §3.4 discipline ②: it must NOT bump UpdatedAt, because `retention` is measured
-	// from that column — bumping it would silently extend a paused sandbox's eviction
-	// deadline as a side effect of adding a port.
+	// §3.4 discipline ② — the obligation exists ONLY because `paused` is allowed.
 	if !rec2.UpdatedAt.Equal(updatedBefore) {
 		t.Errorf("the paused publish moved UpdatedAt (%s → %s) — `retention` is measured from that "+
 			"column (§3.4 discipline ②), so this would silently extend the eviction deadline as a "+
@@ -2347,10 +2262,8 @@ func TestPublishOnAPausedSandboxRecordsWithoutInstallingRules(t *testing.T) {
 // Repeated publish of the same `{guest_port, proto}` is idempotent —
 // one item in the declaration and ONE DNAT on the host.
 //
-// The substrate will not find the duplicate for us: nft accepts two byte-identical
-// DNAT rules without complaint and the second simply never matches (measured, §5.D).
-// And two identical recorded items mean a later PATCH removing one leaves the other:
-// "the publish was revoked and the port is still open".
+// Both hazards — nft silently accepting a duplicate DNAT, and a later PATCH removing only
+// one of two recorded items — are in the failure message below (measured, §5.D).
 func TestRepeatedPublishIsIdempotentOnTheHostToo(t *testing.T) {
 	eng, _ := harness.Engine(t, netEngineOpts(t))
 	ctx := context.Background()
@@ -2529,10 +2442,9 @@ func TestTCPAndUDPOnOneGuestPortAreTwoPublishesOnTheSubstrate(t *testing.T) {
 // §5.A promises Adopt yields the same endpoint with no new epoch: the isolation unit never
 // restarted. A restarted process's port allocator starts EMPTY, and (unlike `ipSeq`) the
 // publish cursor is not randomized, so without a read-back both survivors are re-issued
-// the range's first ports in `ListSandboxes` order. A@21000 and B@21001 adopted in the
-// other order come back SWAPPED — and a swap is materially worse than a stale endpoint: a
-// caller's cached address then reaches ANOTHER SANDBOX. §3.3 licenses a NEW placement's
-// endpoint differing, not a live placement's endpoint moving to a different sandbox.
+// the range's first ports in `ListSandboxes` order — and adopted in the other order they
+// come back SWAPPED, which is worse than stale (§3.3 licenses a NEW placement's endpoint
+// differing, not a live placement's moving to a different sandbox).
 func TestAdoptKeepsEachSurvivorsPublishEndpoints(t *testing.T) {
 	base := t.TempDir()
 	opts := netEngineOpts(t)
@@ -2577,8 +2489,7 @@ func TestAdoptKeepsEachSurvivorsPublishEndpoints(t *testing.T) {
 	t.Logf("before the restart: %s → %s, %s → %s", idA, beforeA, idB, beforeB)
 
 	// The restart: a new process over the same store and the same live placements.
-	// harness.Restart rather than Engine — Engine rebuilds the Template, which is the
-	// LOWER DIR of a live sandbox's overlay.
+	// harness.Restart rather than Engine — see harness.Restart's doc.
 	eng2 := harness.Restart(t, base, opts)
 
 	afterA, afterB := epOf(t, eng2, idA), epOf(t, eng2, idB)
@@ -2765,13 +2676,8 @@ func TestIPv6IsCoveredByTheSameFloor(t *testing.T) {
 	// The honest report is that this cell measures the absence of guest v6 configuration,
 	// not the engine's floor.
 	//
-	// WHAT REMAINS ASSERTED, and it is the part that matters: the LINK-LOCAL cell below.
-	// That address the KERNEL assigns automatically (disable_ipv6 defaults to 0) and the
-	// guest CAN reach — it is on-link, needing no route — so it is the real exposure D5 ⑪
-	// measured, and the floor's coverage of it is asserted with a moving counter. Plus
-	// the structural half at the end: the rendered floor carries no `nfproto ipv6` arm,
-	// so v6 is covered by the SAME family-unqualified ct-state rule rather than a
-	// separate mechanism that could rot independently.
+	// The LINK-LOCAL cell below is what carries this item instead: the guest CAN reach
+	// that address (on-link, no route needed), so its counter assertion is satisfiable.
 	if global != "" {
 		probeTarget := "[" + global + "]:" + portStr
 		res := runGuestProbe(t, cl, probeTarget, false)
@@ -2818,10 +2724,8 @@ func TestIPv6IsCoveredByTheSameFloor(t *testing.T) {
 		})
 	}
 
-	// And the structural half: the rendered floor carries NO `meta nfproto ipv6` arm.
-	// One unqualified ct-state rule covers both families, and an explicit second arm is
-	// measured redundant — it counted exactly the packets the family-agnostic rule had
-	// already caught (D5 ⑪).
+	// And the structural half: the rendered floor carries NO `meta nfproto ipv6` arm, so
+	// v6 rides the SAME rule as v4 rather than a mechanism that could rot independently.
 	dump := harness.DumpRuleSet(id)
 	if strings.Contains(dump, "nfproto ipv6") {
 		t.Errorf("the rendered rule set carries a `meta nfproto ipv6` arm — one family-unqualified "+
@@ -2971,19 +2875,12 @@ func TestPublishDoesNotOpenAnEgressPathOnTheSubstrate(t *testing.T) {
 //
 // # Why the title is not "closes new connections but not established ones"
 //
-// That property is UNREACHABLE through any engine API, so a test named for it can only
-// pretend. It describes deleting a DNAT rule under a live placement, and there is no
-// endpoint that does this: the three egress fields plus `publish` are editable only from
-// `paused` (§3.4), because the provider materializes them at placement. A test that
-// PATCHes a `running` sandbox and then narrates the refusal has asserted nothing: an echo
-// service, an established connection and a round-trip check would all be set up and never
-// used, with the failure branch below them unreachable.
-//
-// The conntrack asymmetry itself (a deleted rule is not evaluated against an existing
-// binding, so a live revocation could only ever promise "no NEW connections") is a
-// property of nftables, not of this engine, and it is the MECHANISM REASON there is no
-// un-publish endpoint (§5.D / D5 ⑰). It belongs in that rationale, not in an engine
-// acceptance test whose subject would have to be a rule deletion the engine never issues.
+// That property is UNREACHABLE through any engine API: it describes deleting a DNAT rule
+// under a live placement, and no endpoint does that — `publish` and the three egress
+// fields are editable only from `paused` (§3.4). A test named for it would set up an echo
+// service, an established connection and a round-trip check, never use them, and leave
+// its failure branch unreachable. The conntrack asymmetry behind it is a property of
+// nftables and is the MECHANISM REASON there is no un-publish endpoint (§5.D / D5 ⑰).
 //
 // # What is asserted
 //

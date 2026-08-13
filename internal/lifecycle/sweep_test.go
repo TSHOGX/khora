@@ -132,20 +132,16 @@ func TestInFlightPromoteProtectedFromSweep(t *testing.T) {
 	}
 }
 
-// TestBuildingOverlaysProtectsAnInFlightCreate is the missing third of the
-// keep-set trio. buildingLayers is covered (TestSweepOrphanLayersProtectsInFlight
-// below/above) and buildingVolumes is covered in volume_test.go; buildingOverlays
-// had no test at all.
+// TestBuildingOverlaysProtectsAnInFlightCreate is the missing third of the keep-set
+// trio. buildingLayers is covered by TestInFlightPromoteProtectedFromSweep above and
+// buildingVolumes in volume_test.go; buildingOverlays had no test at all.
 //
-// WHY IT MATTERS AND WHY IT IS SILENT: an Overlay unit is created on the backend
-// BEFORE the sandbox row is visible to a sweep's `live` snapshot, so a healthy
-// in-flight create legitimately presents as "bytes with no row" — the sweep's
-// definition of an orphan. Its own doc (lifecycle.go, buildingOverlays) says the
-// hazard is NOT write-ordering but the sweep reading a STALE `live` set, which means
-// no amount of care in the create path removes it. If the keep-set stops being
-// threaded, the sweep destroys the upper of a sandbox whose row exists and whose
-// create then "succeeds" — and nothing raises an error, because reclaiming bytes is
-// the sweep's job.
+// WHY IT IS SILENT: an Overlay unit is created on the backend BEFORE the sandbox row is
+// visible to a sweep's `live` snapshot, so a healthy in-flight create legitimately
+// presents as "bytes with no row" — the sweep's definition of an orphan (the hazard is
+// the STALE `live` set, not write ordering: see buildingOverlays' own doc). If the
+// keep-set stops being threaded, the sweep destroys the upper of a sandbox whose create
+// then "succeeds", and nothing raises an error because reclaiming bytes is the sweep's job.
 //
 // Asserted from INSIDE the create window via FaultAfterColdStart, which is the only
 // point where the marker is provably still held (markBuildingOverlay is deferred

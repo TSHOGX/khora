@@ -75,17 +75,13 @@ type ociResources struct {
 // `cpu.max` (the CEILING — "at most this much"), Shares becomes `cpu.weight`
 // (the SHARE — "this much relative to whoever else is runnable").
 //
-// Both are required because they answer different questions. §3.4 calls the CPU
-// axis is fair allocation, and a ceiling alone does not deliver that: cgroup's default
-// weight
-// is identical for every leaf, so on a saturated node a 4000-millis sandbox and a
-// 250-millis one get EQUAL time — each capped correctly, sharing nothing like the
-// ratio they were sold (measured). Weight is
-// what makes the oversubscription §3.4 permits (no CPU admission gate, because
-// overrun only slows the guest) degrade proportionally instead of uniformly.
-//
-// Weight only bites when the node is saturated AND both are runnable; at low load
-// it changes nothing. That is the correct shape for a fairness knob.
+// Both are required because they answer different questions. §3.4 calls the CPU axis
+// fair allocation, and a ceiling alone does not deliver it: cgroup's default weight is
+// identical for every leaf, so on a saturated node a 4000-millis sandbox and a
+// 250-millis one get EQUAL time — each capped correctly, sharing nothing like the ratio
+// they were sold (measured). Weight is what makes the oversubscription §3.4 permits (no
+// CPU admission gate, since overrun only slows the guest) degrade proportionally rather
+// than uniformly. It bites only when the node is saturated and both are runnable.
 type ociCPU struct {
 	Quota  int64  `json:"quota,omitempty"`
 	Period uint64 `json:"period,omitempty"`
@@ -129,12 +125,8 @@ type ociNamespace struct {
 // raw/AF_PACKET sockets regardless of what the OCI spec asks for. Asking
 // for a capability that can never be granted is a FAKE INVARIANT — a reader takes
 // it for a deliberate grant — so it is absent here and the real guarantee is
-// PINNED on the runsc side instead (`--net-raw=false` in runscGlobalFlags, §5.A
-// "pins the entire set of runsc flags it depends on and inherits no defaults").
-// That matters beyond tidiness:
-// §5.D's future predicate floor is keyed on the input interface, and a guest that
-// can forge L2 frames is a different threat model — so this must not rest on an
-// unpinned runsc default that can drift across versions.
+// PINNED on the runsc side instead (`--net-raw=false` in runscGlobalFlags, which
+// carries why it is pinned rather than inherited).
 //
 // CAP_NET_ADMIN STAYS. It is guest-internal network work (routes, interfaces),
 // and §2.2 is explicit that guest caps are not an isolation pillar.
@@ -190,15 +182,11 @@ func buildOCISpec(mergedPath, netnsPath, cgroupsPath string, limits ResourceLimi
 			// N + overhead, not N: runsc derives the guest-visible MemTotal from the
 			// OCI limit at boot, so setting both to N tells the guest it has N while
 			// the whole sandbox — sentry and gofer included — is terminated somewhere
-			// BELOW N (measured: killed at ~0.88N). The guest must be told N and the
-			// host must allow N plus the substrate's own footprint.
+			// BELOW N (measured: killed at ~0.88N).
 			//
-			// memOverhead is local_runsc's IMPLEMENTATION CONSTANT, not a contract
-			// member: a remote provider's overhead is a different thing entirely (VM
-			// balloon, scheduler memory request), which is exactly why ResourceLimits
-			// says only N (§5.A). runsc reads this limit at BOOT to derive the
-			// guest's MemTotal, so the spec carries N and bindLimits raises the host
-			// ceiling to N+overhead after launch.
+			// So the spec carries N — runsc reads it at BOOT to derive MemTotal — and
+			// bindLimits raises the host ceiling to N+overhead after launch. memOverhead
+			// is local_runsc's own constant, never a contract member (memOverheadBytes).
 			res.Memory = &ociMemory{
 				Limit: limits.MemoryByte,
 				// Swap == Limit ⇒ memory.swap.max=0: the cap is a hard ceiling rather

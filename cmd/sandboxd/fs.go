@@ -17,12 +17,10 @@ import (
 
 // --- fs service (§5.E fs primitive, transport D4.4) --------------------------
 //
-// All unary, no watch. Paths are GUEST-ABSOLUTE and are NOT confined to a root:
-// the caller is the engine (trusted, §6 assumes an authorized caller) and the
-// guest runs as root by design (§2.2), so the isolation boundary is the sandbox
-// itself — sentry, not a path check. A confinement here would buy nothing the
-// substrate does not already give, and would break the existing contract where
-// callers legitimately touch /etc, /root and /usr.
+// All unary, no watch. Paths are GUEST-ABSOLUTE and NOT confined to a root: the caller is the
+// engine (trusted, §6 assumes an authorized caller) and the guest runs as root by design
+// (§2.2), so the isolation boundary is the sandbox itself — sentry, not a path check. A
+// confinement would break the contract where callers legitimately touch /etc, /root and /usr.
 //
 // Confinement WOULD be required if a path component ever came from data rather
 // than from the caller (an archive entry name, a template import). That is not
@@ -30,15 +28,12 @@ import (
 
 type fsServer struct {
 	// activity is the SAME sandbox-global clock the process service and Health share
-	// (reaper-health D2). Present because fs traffic IS I/O by that section's criterion
-	// — "every operation the engine mediates for the guest, not only process frames" —
-	// and the engine mediates two data planes, not one.
+	// (reaper-health D2). Present because fs traffic IS I/O by that section's criterion —
+	// "every operation the engine mediates for the guest, not only process frames".
 	//
-	// Without it a sandbox being actively written to looks idle for as long as nobody
-	// types, and the disposition that follows (auto-pause) discards the very work in
-	// flight. Stamped in the handlers rather than by each caller, on the same argument
-	// that put the stamp inside proc.broadcast: it belongs in the path the I/O already
-	// flows through, so nothing has to remember.
+	// Without it a sandbox being actively written to looks idle for as long as nobody types,
+	// and the auto-pause that follows discards the very work in flight. Stamped in the
+	// handlers rather than by each caller, like proc.broadcast's stamp.
 	activity *activityClock
 }
 
@@ -46,15 +41,13 @@ type fsServer struct {
 // the DATA operations — Read / Write / MakeDir / Remove / Move — and deliberately NOT by
 // Stat / List.
 //
-// That exclusion is the load-bearing half. Stat and List are the calls an external
-// watcher makes in a loop, so stamping them would let an observer keep a sandbox
-// permanently "active" — the same defect D2 and §4.4-C ③ both refuse in their own terms
-// (an observation must not be indistinguishable from the thing observed), and it would
-// silently delete the idle disposition rather than fail visibly.
+// That exclusion is the load-bearing half. Stat and List are the calls an external watcher
+// makes in a loop, so stamping them would let an observer keep a sandbox permanently "active"
+// — the defect D2 and §4.4-C ③ both refuse (an observation must not be indistinguishable from
+// the thing observed) — and would silently delete the idle disposition rather than fail.
 //
 // Read DOES stamp: it moves file contents, which is a guest being used, not a poll of its
-// metadata. A caller that wants to keep a sandbox alive has the explicit RecordActivity
-// RPC and does not need to fake a read.
+// metadata. A caller wanting to keep a sandbox alive has the explicit RecordActivity RPC.
 func (s *fsServer) stampIO() {
 	if s != nil {
 		s.activity.stamp()

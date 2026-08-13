@@ -4,9 +4,8 @@
 // It exists because the seam has exactly one falsification instrument: a second
 // backend. The local storage arm and the test-only plain-directory arm both call
 // RunContract, so "both arms run the same assertions" is literally true — and the
-// shape rule the seam is built on ("allocate / set the cap / place are three
-// actions") was derived by watching a merged shape fail here in three places
-// rather than by reasoning about it.
+// three-actions shape rule the seam is built on was derived by watching a merged
+// shape fail here in three places rather than by reasoning about it (volume.Backend).
 //
 // It lives in its own package (not volume_test) so a substrate-tagged test file
 // can import and run the same suite against the arm that needs real storage.
@@ -26,15 +25,7 @@ import (
 	"github.com/TSHOGX/warren/internal/volume"
 )
 
-// Factory builds a fresh, empty backend for one subtest, plus the facts the suite
-// needs to know about it.
-//
-// Caps says whether the arm can ENFORCE a capacity cap. It is not a
-// capability-branch in the §4.4-C forbidden sense (the algorithm never asks a
-// backend what it supports and changes its behavior): the CONTRACT itself is
-// different for an arm without the capability — a non-zero cap must be REFUSED with
-// volume.ErrUnsupported — and the suite asserts exactly that difference, from the
-// arm's OWN Capabilities() report rather than from a flag the test author set.
+// Factory builds a fresh, empty backend for one subtest.
 type Factory func(t *testing.T) volume.Backend
 
 // RunContract runs the full shared suite against the backend built by mk.
@@ -148,10 +139,9 @@ func testSnapshotClone(t *testing.T, mk Factory) {
 	}
 }
 
-// testSnapshotCap is the one that guards the SILENT failure (volume.md D7.3): the
-// substrate hands a snapshot a brand-new UNCAPPED quota row, so the cap must be written
-// by the snapshot operation itself — and an implementation that forgets cannot be caught
-// afterwards, because the limit read maps "never capped" and 0 onto each other.
+// testSnapshotCap is the one that guards the SILENT failure (volume.md D7.3): the cap must
+// be written by the snapshot operation itself, and an implementation that forgets cannot be
+// caught afterwards.
 func testSnapshotCap(t *testing.T, mk Factory) {
 	b := mk(t)
 	if !b.Capabilities().Snapshot || !capable(b) {
@@ -194,8 +184,13 @@ func testSnapshotCap(t *testing.T, mk Factory) {
 func ctx() context.Context { return context.Background() }
 
 // capable reports whether the arm under test enforces caps, read from the arm's own
-// Capabilities() rather than from a test-side flag — so the suite cannot disagree
-// with the backend about what it can do.
+// Capabilities() rather than from a test-side flag — so the suite cannot disagree with
+// the backend about what it can do.
+//
+// Branching on it is not the §4.4-C forbidden shape (no algorithm asks a backend what it
+// supports and changes behavior): the CONTRACT itself differs for an arm without the
+// capability — a non-zero cap must be REFUSED with volume.ErrUnsupported — and the suite
+// asserts exactly that difference.
 func capable(b volume.Backend) bool { return b.Capabilities().Quota }
 
 func testCreateInspectDestroy(t *testing.T, mk Factory) {
@@ -329,11 +324,9 @@ func testCapabilityNegative(t *testing.T, mk Factory) {
 	}
 }
 
-// testMaterializeCreateIfAbsent is §5.C's create-if-absent contract, and the reason
-// it is a contract rather than an implementation detail: runsc hard-fails on a
-// missing bind source, so an open-only Materialize would make a MIS-SWEPT sandbox
-// PERMANENTLY unresumable. Create-if-absent restarts it clean — all data lost, but
-// recoverable, which is the recovery conclusion volume.md D7.2 depends on.
+// testMaterializeCreateIfAbsent is §5.C's create-if-absent contract. Why it is a contract
+// rather than an implementation detail: it is the recovery conclusion volume.md D7.2
+// depends on (see Backend.Materialize for the measured reason).
 func testMaterializeCreateIfAbsent(t *testing.T, mk Factory) {
 	b := mk(t)
 	if err := b.CreateVolume(ctx(), "vol_m", 0); err != nil {
@@ -770,13 +763,9 @@ func testRootSymlinkConfinement(t *testing.T, mk Factory) {
 	}
 }
 
-// testUncappedBytesGrows proves the §3.4 second term is REAL and not decoration:
-// bytes written into an UNCAPPED volume must become visible to the accounting term,
-// because nothing else can see them (a pile of uncapped volumes could otherwise
-// fill a node without the admission gate refusing once).
-//
-// It is also the assertion that FAILS on a seam missing the method at all — which
-// is the proof that the method is load-bearing rather than ornamental.
+// testUncappedBytesGrows proves the §3.4 second term is REAL and not decoration: bytes
+// written into an UNCAPPED volume must become visible to the accounting term, because
+// nothing else can see them (Backend.UncappedBytes).
 func testUncappedBytesGrows(t *testing.T, mk Factory) {
 	b := mk(t)
 	before, err := b.UncappedBytes(ctx())
@@ -823,14 +812,10 @@ func testUncappedBytesGrows(t *testing.T, mk Factory) {
 	}
 }
 
-// testSweep covers the backend's half of orphan reclamation: ENUMERATION. The deciding
-// half is the mediator's, and that split is not cosmetic — it was forced by a measured
-// defect in the combined shape, where a volume whose whole creation fell between the
-// mediator's two pre-reads was in neither set and had its bytes deleted while fully
-// committed (see Backend.ListUnitIDs).
-//
-// So what the backend must deliver here is: every unit it holds, and an ERROR rather
-// than an empty list when it cannot tell.
+// testSweep covers the backend's half of orphan reclamation: ENUMERATION, the deciding half
+// being the mediator's (the split was forced by a measured defect — Backend.ListUnitIDs).
+// What the backend must deliver here: every unit it holds, and an ERROR rather than an empty
+// list when it cannot tell.
 func testSweep(t *testing.T, mk Factory) {
 	b := mk(t)
 	for _, id := range []string{"vol_a", "vol_b"} {

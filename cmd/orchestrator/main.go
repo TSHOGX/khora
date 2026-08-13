@@ -41,9 +41,8 @@ func main() {
 	flag.Parse()
 
 	// -1 is the unset sentinel because uid 0 is a real uid, and "the operator said root"
-	// must behave oppositely from "the operator said nothing". Root is nonetheless refused
-	// here (it is this process's own uid), in orchestrator.New rather than in this file so
-	// the substrate harness — which builds an Engine directly — cannot bypass the check.
+	// must behave oppositely from "the operator said nothing". Root is refused in
+	// orchestrator.New rather than here, so the substrate harness cannot bypass the check.
 	var secondHopUID *int
 	if *viaUID >= 0 {
 		secondHopUID = viaUID
@@ -85,18 +84,14 @@ func main() {
 		log.Fatalf("orchestrator: seed builtin templates: %v", err)
 	}
 
-	// §5.C / volume.md D7.1: a leaked quota row does not reserve its own unit id, so a
-	// restart can hand that id — along with its cap — to a brand-new volume, which then
-	// meets ENOSPC on a limit nobody set for it. Undetectable from the inside afterwards:
-	// the cap reads back looking exactly like the volume's own. Hence before any create.
+	// BEFORE ANY CREATE (§5.C / volume.md D7.1): a leaked quota row does not reserve its
+	// unit id, so a restart can hand that id — along with its cap — to a brand-new volume.
 	if err := eng.SweepOrphanVolumes(context.Background()); err != nil {
 		log.Printf("orchestrator: boot orphan-volume sweep (retried by reaper): %v", err)
 	}
 
-	// §5.C / volume.md D7.3: writing a snapshot's cap is necessarily the second substrate
-	// call, so a crash between them leaves a live UNCAPPED volume that no later read can
-	// distinguish from a deliberately uncapped one. The record is re-asserted onto the
-	// storage — the reverse direction would ratify the crash residue.
+	// §5.C / volume.md D7.3: a crash between a snapshot's two substrate calls leaves a live
+	// UNCAPPED volume no later read can distinguish from a deliberately uncapped one.
 	if err := eng.RepairVolumeCaps(context.Background()); err != nil {
 		log.Printf("orchestrator: boot volume-cap repair (retried by reaper): %v", err)
 	}
@@ -147,10 +142,8 @@ func main() {
 
 	srv := &http.Server{Addr: *addr, Handler: eng.HTTPHandler()}
 
-	// A SANDBOX IS NOT A REQUEST: the drain does not pause running sandboxes, it leaves
-	// them running for the next boot to re-adopt (§4.4-A takeover). Pausing would be the
-	// larger blast radius — a pause discards guest memory (§4.2 stores none), so a restart
-	// to change a flag would destroy every guest's in-memory work. Engine.Shutdown argues it.
+	// A SANDBOX IS NOT A REQUEST: the drain leaves running sandboxes running for the next
+	// boot to re-adopt (§4.4-A takeover). Engine.Shutdown argues it.
 	sigCh := make(chan os.Signal, 2)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 	go func() {
@@ -159,8 +152,7 @@ func main() {
 			"the next boot (§4.4-A); in-flight requests have %s to finish", sig, *shutdownTO)
 
 		// A second signal stops immediately: a hard stop is survivable by construction
-		// (§4.4-A), so refusing would only push the operator to SIGKILL — the same exit
-		// with the store closed less cleanly.
+		// (§4.4-A), so refusing would only push the operator to SIGKILL.
 		go func() {
 			s2 := <-sigCh
 			log.Printf("orchestrator: second %v — exiting now without waiting for the drain", s2)

@@ -1,9 +1,6 @@
 // Package storetest holds the store.Store CONTRACT test suite — one set of
 // assertions every backend must pass (§1.3 Behavior seam / §4.4-C). Memory and
-// SQLite both call RunContract, so "the two backends run the SAME assertions"
-// is literally true, and the §4.4-C promise ("state change + outbox append =
-// single atomic commit") is proven identically on both — no per-backend fork
-// of the correctness checks (§4.4-C).
+// SQLite both call RunContract, so no correctness check is ever forked per backend.
 //
 // It lives in its own package (not store_test) so the SQLite backend's test
 // file — in package store_test — can import and run it too without an import
@@ -53,10 +50,8 @@ func RunContract(t *testing.T, mk Factory) {
 	t.Run("UpdateBindingPartialAndConditional", func(t *testing.T) { testUpdateBinding(t, mk) })
 
 	// The §5.D declaration is a Binding column like the caps, so its round-trip is
-	// CONTRACT rather than backend detail — and it had no coverage here at all, which is
-	// how a read-shape divergence between the two backends survived: SQLite re-decodes
-	// JSON per read and cannot alias, while an in-memory map can hand out its live
-	// arrays.
+	// CONTRACT rather than backend detail. It had no coverage here at all, which is how the
+	// read-shape divergence testNetworkNotAliased now pins survived.
 	t.Run("NetworkDeclarationRoundTrip", func(t *testing.T) { testNetworkRoundTrip(t, mk) })
 	t.Run("NetworkDeclarationReadIsNotAliased", func(t *testing.T) { testNetworkNotAliased(t, mk) })
 
@@ -69,11 +64,10 @@ func RunContract(t *testing.T, mk Factory) {
 	t.Run("OutboxNilPublishesNothing", func(t *testing.T) { testOutboxNil(t, mk) })
 	t.Run("MarkPublishedIdempotent", func(t *testing.T) { testMarkPublished(t, mk) })
 
-	// The drain read's bound and the gauge's independence from it are ONE contract, not
-	// a SQLite detail: the publisher runs one algorithm against this interface (§4.4-C's
-	// "the algorithm is written exactly once"), so a backend that ignored the limit — or
-	// whose count saturated at it — would break §4.4-C ③ observability on that backend
-	// alone, and only in production, where the backlog is large enough to notice.
+	// The drain read's bound and the gauge's independence from it are ONE contract: the
+	// publisher runs one algorithm against this interface, so a backend that ignored the
+	// limit — or whose count saturated at it — would break §4.4-C ③ on that backend alone,
+	// and only in production, where the backlog is large enough to notice.
 	t.Run("UnpublishedEventsHonorsItsLimit", func(t *testing.T) { testUnpublishedLimit(t, mk) })
 	t.Run("CountUnpublishedIsIndependentOfTheDrainBound", func(t *testing.T) { testCountUnpublished(t, mk) })
 
@@ -112,9 +106,8 @@ func RunContract(t *testing.T, mk Factory) {
 	t.Run("MountBindingSelfContradiction", func(t *testing.T) { testMountBindingInvalid(t, mk) })
 	t.Run("MountBindingIsAllOrNothing", func(t *testing.T) { testMountAllOrNothing(t, mk) })
 
-	// ReplaceMounts (§5.C): the whole-binding swap is ONE atomic commit, promised by
-	// the contract and honored by each backend its own way — the second application of
-	// §4.4-C's discipline. Two cases, both required by the spec bullet.
+	// ReplaceMounts (§5.C): the whole-binding swap is ONE atomic commit. Two cases, both
+	// required by the spec bullet.
 	t.Run("ReplaceMountsKeepsOldBindingOnRefusal", func(t *testing.T) { testReplaceMountsKeepsOldBindingOnRefusal(t, mk) })
 	t.Run("ReplaceMountsNeverExposesZeroRows", func(t *testing.T) { testReplaceMountsNoZeroRowWindow(t, mk) })
 	t.Run("MountReferenceSideMissingEndpoint", func(t *testing.T) { testMountMissingEndpoint(t, mk) })
@@ -332,22 +325,16 @@ func testEventsReplayPaging(t *testing.T, mk Factory) {
 // sequence contract (see Store): once Seq = N is visible, nothing below N may
 // appear afterwards.
 //
-// The failure it hunts is a real, audited defect and not a hypothetical: a
-// backend that assigns the sequence at INSERT but makes rows visible at COMMIT
-// lets tx1 take 5, tx2 take 6, and tx2 commit first — so a reader consumes 6,
-// advances its cursor, and 5 then materializes behind an already-served event
-// where no cursor will ever look again. Note what does NOT save you: serializing
-// the readers. The ordering breaks on the producer side, so a lock around the
-// drain sees a perfectly ordered stream that is already missing a row.
+// The failure it hunts is a real, audited defect and not a hypothetical — the
+// assign-at-INSERT / visible-at-COMMIT interleaving Store's promise 2 describes. Note what
+// does NOT save you: serializing the readers. The ordering breaks on the producer side, so
+// a lock around the drain sees a perfectly ordered stream that is already missing a row.
 //
 // The check: writers append concurrently while a reader repeatedly polls with a
 // forward-only cursor, exactly as a subscriber would. Any row that appears below
-// the highest sequence the reader has already passed is the defect, and it is
-// caught rather than tolerated. SQLite passes by serializing write transactions
-// outright; Memory by assigning the sequence inside the same critical section
-// that publishes the row. A backend with a BIGSERIAL default and genuinely
-// concurrent write transactions FAILS here until it adds a watermark gate — that
-// failure is the entire point of this test, because the alternative is
+// the highest sequence the reader has already passed is the defect. A backend with a
+// BIGSERIAL default and genuinely concurrent write transactions FAILS here until it adds a
+// watermark gate — that failure is the entire point, because the alternative is
 // discovering it during a billing reconciliation.
 func testSequenceNoVisibilityGap(t *testing.T, mk Factory) {
 	ctx := context.Background()
@@ -472,12 +459,10 @@ func drainCheck(ctx context.Context, t *testing.T, s store.Store, cursor *int64,
 // testConcurrentCAS: N goroutines race the SAME transition. Exactly ONE may win,
 // and exactly ONE outbox row may land.
 //
-// This is the §4.4-B CAS promise ("if the current lifecycle-state ≠ the expected
-// source state it is refused") and the
-// §4.4-C atomic-commit promise met at the same moment: a torn implementation
-// admits several winners, and each winner appends an event — so a single
-// transition would be billed N times, which is precisely the double-count
-// subscriber dedup CANNOT absorb (the events carry DIFFERENT transition IDs).
+// The §4.4-B CAS promise and the §4.4-C atomic-commit promise met at the same moment: a
+// torn implementation admits several winners, and each winner appends an event — so a
+// single transition is billed N times, the double-count subscriber dedup CANNOT absorb
+// (the events carry DIFFERENT transition IDs).
 //
 // The mediator's own transition lock would normally serialize these, which is
 // exactly why the check belongs here: the store must not depend on that lock for
@@ -577,9 +562,8 @@ func mkRec(id string) model.Sandbox {
 		IdleTimeout: 30 * time.Minute, Retention: 12 * time.Hour,
 		// Limits Binding (§3.4): same discipline — non-zero and pairwise distinct
 		// (and distinct from the TTL nanos above) so a cpu/memory/disk column
-		// swapped or dropped is caught on read-back. The three axes are three
-		// mechanisms with three different overrun consequences, never
-		// interchangeable knobs (§3.4), so a silent swap is a real bug class.
+		// swapped or dropped is caught on read-back. The three axes are never
+		// interchangeable knobs (model.Limits), so a silent swap is a real bug class.
 		Limits:    model.Limits{CPUMillis: 1500, MemoryByte: 256 << 20, DiskByte: 512 << 20},
 		CreatedAt: now, UpdatedAt: now,
 	}
@@ -992,13 +976,8 @@ func testTrimDeliveredOnly(t *testing.T, mk Factory) {
 	}
 }
 
-// testTrimAgesByDelivery: the cutoff applies to DELIVERY time, not occurrence time.
-//
-// The distinction is load-bearing because the publisher's poison exit does not release
-// itself: a halted stream resumed days later delivers rows whose occurred_at is ancient
-// but whose delivery is NOW. Ageing on occurrence would make that entire backlog
-// trimmable the instant it was first delivered — deleting events no subscriber ever had
-// a chance to fetch.
+// testTrimAgesByDelivery: the cutoff applies to DELIVERY time, not occurrence time (the
+// halted-stream counterexample is on store.TrimOutbox).
 //
 // THE FIXTURE HAS TO SEPARATE THE TWO TIMESTAMPS OR IT ASSERTS NOTHING. Rows occurring
 // and delivered at the same moment are excluded by a past cutoff on either field, so
@@ -1058,13 +1037,8 @@ func testTrimAgesByDelivery(t *testing.T, mk Factory) {
 	}
 }
 
-// testTrimKeepsNewest: trimming never empties the table, even when every row qualifies.
-//
-// An empty outbox reports its window as 0/0, which is indistinguishable from "nothing
-// ever happened". A subscriber holding a stale cursor would then be neither served nor
-// refused: it reads an empty page, concludes it is caught up, and silently skips
-// everything that was trimmed — precisely the silent short page §6.1's 410 exists to
-// prevent, arriving through the mechanism meant to make the 410 reachable.
+// testTrimKeepsNewest: trimming never empties the table, even when every row qualifies —
+// the 0/0 window a stale cursor cannot be refused from (store.TrimOutbox / §6.1's 410).
 func testTrimKeepsNewest(t *testing.T, mk Factory) {
 	ctx := context.Background()
 	s, _ := mk(t)
@@ -1181,12 +1155,10 @@ func seedUnpublished(t *testing.T, s store.Store, id string, n int) {
 // testUnpublishedLimit: the drain read must HONOR its bound, and must refuse a
 // non-positive one rather than reading it as "everything".
 //
-// Both halves guard the same regression. UnpublishedEvents used to take no limit and
-// select the entire unpublished backlog, on a loop that runs every second against a pool
-// pinned to one connection — so it both allocated the backlog and held that connection
-// for the scan, with every state transition queued behind it. A backend that accepted the
-// parameter and ignored it would restore that silently, and a "0 means unbounded" reading
-// would restore it on any caller that simply omitted the argument.
+// Both halves guard the same REGRESSION, which was real: UnpublishedEvents used to take no
+// limit and select the entire unpublished backlog (cost on store.UnpublishedEvents). A
+// backend that accepted the parameter and ignored it would restore that silently, and a "0
+// means unbounded" reading would restore it on any caller that omitted the argument.
 func testUnpublishedLimit(t *testing.T, mk Factory) {
 	ctx := context.Background()
 	s, _ := mk(t)
@@ -1216,13 +1188,8 @@ func testUnpublishedLimit(t *testing.T, mk Factory) {
 }
 
 // testCountUnpublished: the backlog gauge's source must be independent of the drain
-// bound (§4.4-C ③).
-//
-// This is the half that makes the bound above safe to add. §4.4-C requires that
-// observability not share a source with the loop being observed; if the gauge were
-// len(UnpublishedEvents(ctx, DrainBatch)) it would saturate at that constant, reporting a
-// small fixed number at precisely the moment the backlog is large — turning "badly
-// behind" into something indistinguishable from "healthy".
+// bound (§4.4-C ③). This is the half that makes the bound above safe to add — a gauge of
+// len(UnpublishedEvents(ctx, DrainBatch)) saturates at that constant (store.CountUnpublished).
 func testCountUnpublished(t *testing.T, mk Factory) {
 	ctx := context.Background()
 	s, _ := mk(t)
@@ -1280,11 +1247,9 @@ func testOutboxOutlivesRecord(t *testing.T, mk Factory) {
 }
 
 // testEventCauseOutlivesRecord: the §4.4-C cause survives the record it describes, and
-// reads back unchanged. This is the property the field exists for, and it is testable
-// only in this order — destroy deletes the row, so if the cause did not round-trip
-// through the OUTBOX there would be nowhere left to read it from. (`destroyed` is the
-// one kind whose cause has no fallback: the subscriber's follow-up GET is a 404 by
-// contract.)
+// reads back unchanged. This is the property the field exists for (model.EventCause), and
+// it is testable only in this order — destroy deletes the row, so if the cause did not
+// round-trip through the OUTBOX there would be nowhere left to read it from.
 //
 // Both backends run it: the SQLite arm has a CHECK plus a nullable column, Memory copies
 // the struct, and a silent divergence there would mean the tests prove the behaviour on
@@ -1599,13 +1564,8 @@ func testVolumeCRUD(t *testing.T, mk Factory) {
 }
 
 // testVolumeCapacity: the cap write point, and the thing about it that is NOT
-// symmetric with UpdateBinding — it takes no lifecycle-state precondition.
-//
-// The asymmetry is mechanical rather than a relaxation (§5.C / §6.1 PATCH): a
-// sandbox cap re-materializes at the next placement, so editing one on a running
-// sandbox would leave record and live unit disagreeing — while a VOLUME HAS NO
-// PLACEMENT, so deferring to "next placement" would mean NEVER for an unmounted
-// volume. There is nothing to defer, so there is no state to be in the wrong one of.
+// symmetric with UpdateBinding — it takes no lifecycle-state precondition, for the
+// mechanical reason on store.SetVolumeCapacity.
 func testVolumeCapacity(t *testing.T, mk Factory) {
 	ctx := context.Background()
 	s, _ := mk(t)
@@ -1638,15 +1598,10 @@ func testVolumeCapacity(t *testing.T, mk Factory) {
 	}
 }
 
-// testVolumeDeleteReportsNotFound pins §6.2's "idempotent delete must not swallow
-// the verdicts", on the cheapest verdict. It matters because it shares a path with
-// the reference-protection refusals (ErrVolumeInUse, ErrVolumeHasDescendants): a
-// backend that learned to fold not-found into success would fold those too, making a
-// delete that a guard REFUSED indistinguishable from one that succeeded.
-//
-// That is not hypothetical: an external implementation returns
-// `200 {"deleted": true}` for a volume that does not exist and collapses three
-// distinct not-founds into success.
+// testVolumeDeleteReportsNotFound pins §6.2's "idempotent delete must not swallow the
+// verdicts", on the cheapest verdict — it shares a path with the reference-protection
+// refusals, so a backend that folded not-found into success would fold those too
+// (store.DeleteVolume carries the audited external counter-example).
 func testVolumeDeleteNotFound(t *testing.T, mk Factory) {
 	ctx := context.Background()
 	s, _ := mk(t)
@@ -1691,25 +1646,20 @@ func testVolumeDurability(t *testing.T, mk Factory) {
 	}
 }
 
-// testReferenceReclaimRace is the DYNAMIC half of §4.3 (model.md
-// reference-reclaim atomicity):
-// the static "referenced → cannot delete" judgment is not enough; the spec adds
-// an invariant that closes the reclaim-vs-reference TOCTOU window. This test
-// exercises that window directly — for many trials it races a DeleteTemplate
-// against several CreateSandbox referrers AND a child CreateTemplate, all
-// referencing the SAME Template, launched simultaneously.
+// testReferenceReclaimRace is the DYNAMIC half of §4.3 (model.md reference-reclaim
+// atomicity): the static "referenced → cannot delete" judgment is not enough; the spec adds
+// an invariant closing the reclaim-vs-reference TOCTOU window. This races a DeleteTemplate
+// against several CreateSandbox referrers AND a child CreateTemplate, all referencing the
+// SAME Template, launched simultaneously.
 //
-// The invariant (per §4.3): the authoritative single store serializes reference
-// and reclaim so they NEVER interleave — either
+// The invariant (per §4.3): reference and reclaim NEVER interleave — either
 //   - the DELETE commits first → the template is gone and EVERY referencing
-//     create loses with ErrTemplateNotFound (no sandbox row is left pointing at a
-//     deleted template), OR
+//     create loses with ErrTemplateNotFound, OR
 //   - a reference commits first → the DELETE loses with ErrInUse and the template
 //     survives.
 //
-// Never both, never a torn state. Runs on BOTH backends via RunContract, so the
-// SQLite FK-RESTRICT path and the Memory Go-check path prove the SAME contract
-// (§1.3 seam). Run under -race.
+// Never both, never a torn state. Runs on BOTH backends, so the SQLite FK-RESTRICT path and
+// the Memory Go-check path prove the SAME contract. Run under -race.
 func testReferenceReclaimRace(t *testing.T, mk Factory) {
 	ctx := context.Background()
 	s, _ := mk(t)
@@ -1927,9 +1877,8 @@ func testUpdateBinding(t *testing.T, mk Factory) {
 // a write/read cycle intact, and UpdateBinding replaces it WHOLE (§6.2 — no field-level
 // merge) while leaving the other Binding fields alone.
 //
-// The empty-array shape is part of it: §6.1 requires the three arrays to read back as
-// `[]` and never as null, and that is what makes the read face's output a legal write
-// body. A backend that round-trips them as nil would break that on the wire.
+// The empty-array shape is part of it: §6.1 requires the three arrays to read back as `[]`
+// and never as null (model.NetworkDecl.Normalize).
 func testNetworkRoundTrip(t *testing.T, mk Factory) {
 	ctx := context.Background()
 	s, _ := mk(t)
@@ -1996,13 +1945,12 @@ func testNetworkRoundTrip(t *testing.T, mk Factory) {
 	}
 }
 
-// testNetworkNotAliased is the read-SHAPE half, and it is the one that failed: a caller
+// testNetworkNotAliased is the read-SHAPE half, and it is the one that FAILED: a caller
 // must not be able to mutate the store by writing through a value it read.
 //
 // SQLite cannot alias — it re-decodes JSON on every read — so an in-memory backend that
 // hands out its live backing arrays makes the same mediator bug destructive against one
-// backend and invisible against the other. §1.3 wants one set of assertions over two
-// backends, which requires them to agree here.
+// backend and invisible against the other (model.NetworkDecl.Clone).
 func testNetworkNotAliased(t *testing.T, mk Factory) {
 	ctx := context.Background()
 	s, _ := mk(t)
@@ -2055,10 +2003,8 @@ func testNetworkNotAliased(t *testing.T, mk Factory) {
 // testEventKindClosed pins §4.1's closed set: each of the six is writable, and a kind
 // outside it is REFUSED rather than persisted.
 //
-// The refusal direction is the one that matters and the one nothing asserted before:
-// the six spellings lived as string literals in two packages, so a typo'd
-// `crash_paused` would have compiled, committed, and surfaced to subscribers as a kind
-// no §4.1 reader handles. This is the same reason mounts.access carries a CHECK.
+// The refusal direction is the one that matters and the one nothing asserted before
+// (model.EventKind carries the typo counterexample).
 func testEventKindClosed(t *testing.T, mk Factory) {
 	ctx := context.Background()
 
@@ -2284,11 +2230,9 @@ func testExclusiveLease(t *testing.T, mk Factory) {
 }
 
 // testExclusiveVsShared is the HALF THE PARTIAL INDEX CANNOT COVER, and the reason
-// the invariant needs the atomic statement rather than the index alone (§5.C).
+// the invariant needs the atomic statement rather than the index alone (§5.C, and the
+// mounts_exclusive_lease comment).
 //
-// `UNIQUE(volume) WHERE access='exclusive'` forbids only TWO EXCLUSIVE rows. It does
-// NOT forbid an exclusive row coexisting with a shared one — but the invariant is "at
-// most one exclusive row AND it does not coexist with ANY other row for that volume".
 // Both directions are checked, because a predicate that only looks at the row being
 // inserted covers just one of them.
 func testExclusiveVsShared(t *testing.T, mk Factory) {
@@ -2342,11 +2286,9 @@ func testExclusiveVsShared(t *testing.T, mk Factory) {
 
 // testMountBindingInvalid is the §6.2 400 set: a binding that CONTRADICTS ITSELF.
 //
-// 400 rather than 409 because it is decidable without reading any other row and no
-// retry can make it legal. A sandbox holds one COMPLETE binding and PATCH swaps whole
-// for whole, so there is no "add one mount to an existing set" operation a duplicate
-// could be relative to — every duplicate is a single submission disagreeing with
-// itself. §6.2's four 409s do not grow.
+// 400 rather than 409 because it is decidable without reading any other row and no retry can
+// make it legal. A sandbox holds one COMPLETE binding and PATCH swaps whole for whole, so
+// there is no "add one mount to an existing set" operation a duplicate could be relative to.
 func testMountBindingInvalid(t *testing.T, mk Factory) {
 	ctx := context.Background()
 	s, _ := mk(t)
@@ -2485,16 +2427,14 @@ func testMountAllOrNothing(t *testing.T, mk Factory) {
 
 // testReplaceMountsKeepsOldBindingOnRefusal is the first of §5.C's two required
 // ReplaceMounts cases: a replacement that LOSES leaves the OLD binding intact and
-// observable.
+// observable (§5.C consequence ①).
 //
-// Under the two-commit shape this could not hold — the delete had already committed, so
-// the old binding's survival depended on a best-effort re-insert that could itself fail,
-// and the failure mode was "the new binding was refused AND the old one is gone". The
-// atomic promise removes that state, which is why the compensation code went with it.
+// Under the two-commit shape this could not hold — the delete had already committed, so the
+// old binding's survival depended on a best-effort re-insert that could itself fail, and the
+// failure mode was "the new binding was refused AND the old one is gone". The atomic promise
+// removes that state, which is why the compensation code went with it.
 //
-// It also pins the RE-SUBMITTED IDENTICAL BINDING, which is the reason the delete must
-// come first: judged against the un-filtered rows, an identical binding contends with the
-// very rows it is replacing.
+// It also pins the RE-SUBMITTED IDENTICAL BINDING, the case that forces delete-before-insert.
 func testReplaceMountsKeepsOldBindingOnRefusal(t *testing.T, mk Factory) {
 	ctx := context.Background()
 	s, _ := mk(t)
@@ -2591,13 +2531,9 @@ func testReplaceMountsKeepsOldBindingOnRefusal(t *testing.T, mk Factory) {
 // WHY THIS IS THE ONE THAT FAILED SILENTLY. ListMountsByVolume is the write-regime
 // predicate (§5.C): "no mount rows for this volume" means "nobody has it mounted, so a
 // direct host-side write is safe". A replacement implemented as DeleteMounts followed by
-// CreateMounts opens exactly that window — two independent commits, with the volume
-// looking unmounted in between — and nothing about it is visible to a single-threaded
-// test. Measured against the two-commit shape: 299/31,653 and 9,103/196,029 zero-row
-// observations across two runs — thousands, not a rare race.
-//
-// The same window is consequence ② from the other side: no rows means no lease, so a
-// concurrent create could take a volume this PATCH intended to keep.
+// CreateMounts opens exactly that window, and nothing about it is visible to a
+// single-threaded test. Measured against the two-commit shape: 299/31,653 and 9,103/196,029
+// zero-row observations across two runs — thousands, not a rare race.
 //
 // Rebinding to the IDENTICAL binding is deliberate: it is the case that forces
 // delete-before-insert, so it is the one an implementation is most tempted to serve with
@@ -2713,10 +2649,8 @@ func testMountMissingEndpoint(t *testing.T, mk Factory) {
 // testMountVerdictsDistinct pins §6.2's requirement directly: the four Volume
 // verdicts must stay MUTUALLY DISTINGUISHABLE.
 //
-// It exists because of how this degrades — someone later collapses two sentinels that
-// happen to map to the same status code, and the 409 then names the wrong object. The
-// audited failure is exactly that: reusing an "in use" error whose text says
-// "template".
+// It exists because of HOW this degrades — someone later collapses two sentinels that
+// happen to map to the same status code, and the 409 then names the wrong object.
 func testMountVerdictsDistinct(t *testing.T, mk Factory) {
 	ctx := context.Background()
 	s, _ := mk(t)
@@ -2831,10 +2765,13 @@ func testConcurrentLease(t *testing.T, mk Factory) {
 	}
 }
 
-// testFKEnforcement guards the ENFORCEMENT ITSELF, not just the verdicts, because
-// losing it is SILENT: measured, with the foreign-keys pragma off, deleting a
-// referenced row simply SUCCEEDS and returns nil. So this is asserted behaviorally
-// rather than by checking that a DSN string contains something.
+// testFKEnforcement guards the ENFORCEMENT ITSELF rather than the verdict each violation
+// maps to, because losing it is SILENT: measured, with the foreign-keys pragma off,
+// deleting a referenced row simply SUCCEEDS and returns nil. Asserted BEHAVIORALLY, not by
+// checking that a DSN string contains something.
+//
+// It checks BOTH reference directions plus the rows' survival in one place, so the failure
+// names the cause ("enforcement is off") rather than one arbitrary verdict that regressed.
 func testFKEnforcement(t *testing.T, mk Factory) {
 	ctx := context.Background()
 	s, _ := mk(t)
@@ -2843,8 +2780,7 @@ func testFKEnforcement(t *testing.T, mk Factory) {
 	if err := s.CreateMounts(ctx, []model.Mount{mount("sbx_a", "vol_1", "/data", model.SharedReadWrite)}); err != nil {
 		t.Fatal(err)
 	}
-	// Both directions must REFUSE. A backend with enforcement disabled returns nil for
-	// both, and every verdict test above would still pass while the invariant was gone.
+	// Both directions must REFUSE. A backend with enforcement disabled returns nil for both.
 	if err := s.DeleteVolume(ctx, "vol_1"); err == nil {
 		t.Error("deleting a REFERENCED volume returned nil — reference enforcement is off, which is a silent failure (the verdict tests cannot detect it)")
 	}
@@ -2895,13 +2831,8 @@ func testMountDurability(t *testing.T, mk Factory) {
 // testVolumeLineage is the fourth FK path: a volume with a live snapshot or clone cannot
 // be deleted, and the verdict is DISTINCT from "held by a mount row".
 //
-// The FK is a CORRECTNESS lever rather than tidiness (volume.md D6.1a / D7.1): a quota
-// row leaks exactly when a unit owning extents is deleted while a live sharer still
-// references them, and measured, deleting sharers BEFORE the source leaks nothing.
-// RESTRICT makes that order the only reachable one, so the leak is PREVENTED — which is
-// why the external implementation that chose a pointer with NO constraint had to
-// hand-write children checks in three places and got all three in reclamation guards
-// rather than in a delete guard.
+// The FK is a CORRECTNESS lever rather than tidiness — the measured quota-leak argument and
+// the external counter-example are on model.Volume.Parent (volume.md D6.1a / D7.1).
 func testVolumeLineage(t *testing.T, mk Factory) {
 	ctx := context.Background()
 	s, _ := mk(t)

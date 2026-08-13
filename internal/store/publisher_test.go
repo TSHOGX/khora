@@ -237,9 +237,8 @@ func seedEvents(t *testing.T, n int) store.Store {
 	return st
 }
 
-// Head-of-line blocking is KEPT: a failing head must not let later events pass.
-// This is the semantic the whole design rests on — order carries meaning
-// (§4.4-C), so this test asserts the STALL, not its absence.
+// Head-of-line blocking is KEPT: a failing head must not let later events pass. Note this
+// test asserts the STALL, not its absence (§4.4-C).
 func TestPublisherHeadOfLineBlocksLaterEvents(t *testing.T) {
 	ctx := context.Background()
 	st := seedEvents(t, 3)
@@ -344,9 +343,8 @@ func TestPublisherPoisonEnvelopeHaltsAfterMaxAttempts(t *testing.T) {
 }
 
 // Backoff is respected (a retry inside the window is not attempted), capped, and
-// jittered. Cap and jitter fix different failures: uncapped backoff schedules the
-// next attempt beyond any useful horizon, un-jittered backoff synchronizes
-// multiple drainers onto the same due instant.
+// jittered — the three properties store.PublisherConfig argues, each asserted here through
+// the OBSERVABLE schedule rather than the internal formula.
 func TestPublisherBackoffIsBoundedAndJittered(t *testing.T) {
 	ctx := context.Background()
 	st := seedEvents(t, 1)
@@ -417,11 +415,9 @@ func TestPublisherBackoffIsBoundedAndJittered(t *testing.T) {
 	}
 }
 
-// Observability must survive the worker WEDGING. A sink blocked inside Deliver
-// freezes the drain goroutine; if health were sampled on that same goroutine, the
-// numbers would stop updating at exactly that moment and a wedged publisher would
-// be indistinguishable from an idle one. Stats is read from an independent
-// goroutine and must therefore keep telling the truth.
+// Observability must survive the worker WEDGING (§4.4-C ③, argued on store.Publisher): a
+// sink blocked inside Deliver freezes the drain goroutine, and Stats must keep telling the
+// truth from an independent one.
 func TestPublisherStatsStaySampleableWhileDrainIsWedged(t *testing.T) {
 	ctx := context.Background()
 	st := seedEvents(t, 2)
@@ -572,17 +568,11 @@ func (alwaysFailingSink) Deliver(context.Context, store.Event) error {
 }
 
 // TestBacklogGaugeReportsTheTotalNotTheDrainBatch is §4.4-C ③ at the publisher: the
-// gauge must not share a source with the loop it observes.
-//
-// The drain read is bounded (store.DrainBatch) so that a per-second pass cannot
-// materialize an unbounded backlog on a single-connection pool. That bound makes
-// len(the batch) useless as a gauge: it saturates, so a backlog of any size above the
-// bound reports as exactly the bound — a small constant at precisely the moment the
-// number matters, making "badly behind" indistinguishable from "healthy".
+// gauge must not share a source with the loop it observes, because len(the drain batch)
+// saturates at store.DrainBatch (store.CountUnpublished).
 //
 // The sink here FAILS, which is what holds the backlog open: delivery stops at the first
-// failure by design (head-of-line blocking is kept, §4.4-C), so nothing drains and the
-// rows stay unpublished across the pass.
+// failure by design, so nothing drains and the rows stay unpublished across the pass.
 func TestBacklogGaugeReportsTheTotalNotTheDrainBatch(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemory()
@@ -618,12 +608,10 @@ func TestBacklogGaugeReportsTheTotalNotTheDrainBatch(t *testing.T) {
 // TestBacklogGaugeSurvivesASuccessfulPass covers the other arm of §4.4-C ③, which a
 // failing sink cannot reach: the pass that DELIVERS everything it read.
 //
-// The sibling test above stops at the first delivery failure, so it returns before the
-// end of the drain loop. That leaves the successful path — the one a healthy deployment
-// takes every second — unasserted, and it is the path where a false zero is most
-// harmful: "caught up" is exactly what a monitor is looking for. With the drain read
-// bounded, finishing the loop means "one batch of DrainBatch drained", never "the outbox
-// is empty", so the gauge must still reflect what remains.
+// The sibling test above returns at the first delivery failure, before the end of the drain
+// loop. That leaves the successful path — the one a healthy deployment takes every second —
+// unasserted, and it is where a false zero is most harmful: "caught up" is exactly what a
+// monitor is looking for.
 func TestBacklogGaugeSurvivesASuccessfulPass(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemory()

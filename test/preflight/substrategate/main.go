@@ -3,7 +3,7 @@
 //
 // It answers yes unless every changed file is either documentation (.md, which
 // cannot affect a running sandbox) or a .go file whose TOKEN STREAM is unchanged
-// with no toolchain directive edited (classify.go explains why that is the right
+// with no toolchain directive edited (ADR-0005 argues why that is the right
 // equivalence). Anything else — a new or deleted .go file, go.mod, a .proto, a
 // shell script, a template — is a yes.
 //

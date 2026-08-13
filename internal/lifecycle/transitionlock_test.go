@@ -279,9 +279,8 @@ func TestTransitionLockExclusionHoldsAcrossCollection(t *testing.T) {
 					}
 					plain++
 					// Widen the window so waiters are certainly parked in Lock() while a
-					// holder is inside — the exact state the naive delete corrupts (the
-					// waiter's mutex is evicted from the map, so the next arrival creates
-					// a SECOND mutex for this sandbox and walks straight in).
+					// holder is inside — the exact state the naive delete corrupts (how, in
+					// the file header).
 					runtime.Gosched()
 					inside.Store(0)
 					l.Unlock()

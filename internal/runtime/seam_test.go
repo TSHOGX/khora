@@ -157,8 +157,6 @@ func TestSeamCarriesNoHostPrimitives(t *testing.T) {
 		types []string
 	}{
 		// §5.A: the contract 3-tuple (rootfs / steering / limits), the spec that
-		// carries them, and the placement handle returned.
-		// §5.A: the contract 3-tuple (rootfs / steering / limits), the spec that
 		// carries them, the §5.C mount sources riding beside it, and the placement
 		// handle returned. MountSource is listed because LaunchSpec renders as a bare
 		// identifier in every signature, so a host primitive on it would otherwise be
@@ -367,16 +365,9 @@ var pinnedRunscFlags = []pinnedFlag{
 
 // TestRunscGlobalFlagsArePinned asserts the EXACT §5.A pinned flag set, by value.
 //
-// This is a test rather than a review habit for the same reason the seam guard
-// above is: two of these keys fail SILENTLY.
-//
-//   - `--platform=systrap` matches runsc's current default, so dropping it is
-//     invisible until a runsc version moves that default.
-//   - `--root` is LOAD-BEARING, not a path preference (§5.A): point it at the wrong
-//     directory and `runsc state`/`list` return empty rather than erroring, which
-//     makes §4.4-A reverse reconciliation read EVERY live placement as nonexistent
-//     — and reclaim live sandboxes. A silently-empty enumeration is the worst shape
-//     a failure can take here, since it looks exactly like "nothing is running".
+// This is a test rather than a review habit for the same reason the seam guard above
+// is: two of these keys fail SILENTLY (`--platform=systrap` and `--root` — see
+// runscGlobalFlags, and the per-key `why` strings below).
 //
 // Both halves are asserted: every pinned key is PRESENT (with its § guarantee named
 // in the failure), and no UNKNOWN flag has been added without a recorded reason.
@@ -430,16 +421,13 @@ func TestRunscGlobalFlagsArePinned(t *testing.T) {
 	}
 }
 
-// CAP_NET_RAW must NOT be requested (§5.A / oci.go caps). Measured: the guest's
-// CapEff has the bit clear regardless, because runsc's --net-raw=false strips
-// raw/AF_PACKET sockets — so requesting it is a FAKE INVARIANT, a line that reads
-// as a deliberate grant for something the guest can never hold. The real guarantee
-// is the pinned flag above; this asserts the two halves stay consistent.
+// CAP_NET_RAW must NOT be requested: measured, the guest's CapEff has the bit clear
+// regardless, so requesting it is a FAKE INVARIANT (oci.go caps). The real guarantee is
+// the pinned flag above; this asserts the two halves stay consistent.
 //
-// CAP_NET_ADMIN is asserted PRESENT in the same test, because the tempting
-// "tighten the caps" edit is to drop both — and §2.2 is explicit that guest caps
-// are not an isolation pillar, so removing NET_ADMIN buys no isolation and costs
-// legitimate in-guest network work.
+// CAP_NET_ADMIN is asserted PRESENT in the same test, because the tempting "tighten the
+// caps" edit is to drop both — and §2.2 is explicit that guest caps are not an isolation
+// pillar, so removing NET_ADMIN buys no isolation and costs legitimate in-guest work.
 func TestGuestCapsDoNotRequestNetRaw(t *testing.T) {
 	var hasAdmin bool
 	for _, c := range caps {

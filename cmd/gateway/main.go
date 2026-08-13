@@ -2,26 +2,22 @@
 // (ADR-0007): it terminates TLS, authenticates callers with mTLS, and forwards to
 // the engine's loopback listener.
 //
-// IT IS NOT PART OF THE ENGINE, and that is the point rather than a caveat. §1.4
-// excludes the credential family from the engine permanently — every byte the engine
-// can hand a guest is readable by uid 0 inside it, so the engine cannot be a secrecy
-// boundary for anything — and §1.1 bars those names as engine-internal entities. So
-// this lives under cmd/ as a separate binary, imports nothing from internal/, and the
-// engine neither starts it, health-checks it, nor knows it exists. The precedent is
-// the process behind `egress.via[]` (§1.1's qualifier): the deployment topology gains
-// a process while the engine's dependency list stays the same.
+// IT IS NOT PART OF THE ENGINE. §1.4 excludes the credential family permanently — every byte
+// the engine can hand a guest is readable by uid 0 inside it, so the engine cannot be a
+// secrecy boundary — and §1.1 bars those names as engine-internal entities. So this lives
+// under cmd/ as a separate binary, imports nothing from internal/, and the engine neither
+// starts it, health-checks it, nor knows it exists. The precedent is the process behind
+// `egress.via[]` (§1.1's qualifier): the deployment topology gains a process while the
+// engine's dependency list stays the same.
 //
-// A REVERSE PROXY IS THE PRIMARY DOCUMENTED PATH, not this binary (ADR-0007). Most
-// operators already run nginx or Caddy and should terminate TLS there; deploy/ has a
-// worked config. This exists for deployments that would rather not add one, and it
-// deliberately does one thing: verify a client certificate against a CA bundle, then
-// proxy. It holds no credential material at rest beyond the bundle it verifies
-// against and its own key pair.
+// A REVERSE PROXY IS THE PRIMARY DOCUMENTED PATH, not this binary (ADR-0007). Most operators
+// already run nginx or Caddy and should terminate TLS there; deploy/ has a worked config. This
+// exists for deployments that would rather not add one, and does one thing: verify a client
+// certificate against a CA bundle, then proxy.
 //
-// Why mTLS and not a bearer token: a token would mean this repo ships issuance,
-// storage and revocation — three surfaces whose absence is the point — and the whole
-// family is what §1.4 excludes. mTLS puts caller identity in the TLS layer, where the
-// operator's existing PKI holds it.
+// Why mTLS and not a bearer token: a token would mean this repo ships issuance, storage and
+// revocation, and the whole family is what §1.4 excludes. mTLS puts caller identity in the TLS
+// layer, where the operator's existing PKI holds it.
 package main
 
 import (
@@ -53,10 +49,8 @@ func main() {
 
 	for _, req := range []struct{ flag, val string }{{"--cert", *cert}, {"--key", *key}, {"--client-ca", *ca}} {
 		if req.val == "" {
-			// REFUSED, never defaulted. A gateway that starts without a client CA
-			// would forward every caller to an unauthenticated control plane while
-			// looking like a security boundary — worse than not running at all,
-			// because the operator believes the boundary exists.
+			// REFUSED, never defaulted: a gateway without a client CA would forward every
+			// caller to an unauthenticated control plane while looking like a boundary.
 			fmt.Fprintf(os.Stderr, "gateway: %s is required — this binary exists to authenticate callers, "+
 				"and one that starts without the material to do so would proxy every request to an "+
 				"unauthenticated control plane while looking like a boundary (ADR-0007)\n", req.flag)
@@ -78,10 +72,8 @@ func main() {
 		log.Fatalf("gateway: parse --upstream %q: %v", *up, err)
 	}
 	if upstream.Scheme != "http" {
-		// h2c upstream, so the scheme is http even though the front is TLS. An https
-		// upstream is not a supported shape: the engine serves cleartext h2c on
-		// loopback by design (transport D4.2), and accepting the spelling would
-		// produce a handshake failure at the first request rather than here.
+		// h2c upstream, so the scheme is http even though the front is TLS. Accepting `https`
+		// would produce a handshake failure at the first request rather than here.
 		log.Fatalf("gateway: --upstream must be http:// (the engine serves cleartext h2c on loopback, "+
 			"transport D4.2); got %q", upstream.Scheme)
 	}
@@ -89,13 +81,11 @@ func main() {
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(r *httputil.ProxyRequest) {
 			r.SetURL(upstream)
-			// The engine authorizes nothing and must not start now (§1.4): the
-			// verified client identity is NOT forwarded as a header. Passing one
-			// would invite the engine to read it, which is how an authorization
-			// subject enters a system that has none — and §1.1 bars the names such
-			// a header would need. Authentication is complete here: a request that
-			// reaches the upstream has already been authenticated, and that is the
-			// entire contract between the two processes.
+			// The verified client identity is NOT forwarded as a header (§1.4): passing one
+			// would invite the engine to read it, which is how an authorization subject
+			// enters a system that has none, and §1.1 bars the names such a header would
+			// need. Authentication is complete here — that a request reached the upstream is
+			// the entire contract between the two processes.
 			r.Out.Header.Del("X-Forwarded-For")
 			r.Out.Header.Del("X-Forwarded-Host")
 			r.Out.Header.Del("X-Forwarded-Proto")
@@ -111,24 +101,20 @@ func main() {
 				return (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, network, addr)
 			},
 		},
-		// FlushInterval -1 = flush immediately after each write, which is what the
-		// streaming data plane needs: `Start`/`Connect` are server-streaming, and a
-		// PTY whose events arrive in one flush when the process exits is not an
-		// interactive PTY.
+		// FlushInterval -1 = flush immediately after each write, which is what the streaming
+		// data plane needs: a PTY whose events arrive in one flush when the process exits is
+		// not an interactive PTY.
 		//
-		// It is BELT-AND-BRACES rather than the mechanism, and saying so is the
-		// honest form. Measured: ReverseProxy ignores FlushInterval when the
-		// response has no Content-Length — which is every Connect stream — so the
-		// spread survives at 400 ms over three 200 ms-spaced chunks even with the
-		// interval set to 30 s. It bites only on a response that HAS a
-		// Content-Length, where the same setting collapses the spread to 0 s. So
-		// this is set because a length-carrying response on this path must not be
-		// buffered either, not because the streams depend on it.
+		// BELT-AND-BRACES rather than the mechanism. Measured: ReverseProxy ignores
+		// FlushInterval when the response has no Content-Length — which is every Connect
+		// stream — so the spread survives at 400 ms over three 200 ms-spaced chunks even with
+		// the interval at 30 s. It bites only on a response that HAS a Content-Length, where
+		// the same setting collapses the spread to 0 s. Set so a length-carrying response is
+		// not buffered either, not because the streams depend on it.
 		FlushInterval: -1,
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			// The upstream's address is a host-local fact and does not belong in a
-			// response body (the §6.2 discipline the engine's own edge follows).
-			// Logged here, generic on the wire.
+			// The upstream's address is host-local and does not belong in a response body
+			// (the §6.2 discipline the engine's own edge follows): logged, generic on the wire.
 			log.Printf("gateway: proxy %s %s: %v", r.Method, r.URL.Path, err)
 			http.Error(w, "upstream unavailable", http.StatusBadGateway)
 		},
@@ -163,11 +149,10 @@ func main() {
 
 // clientCAPool reads the CA bundle that may issue client certificates.
 //
-// A bundle that parses to ZERO certificates is refused rather than accepted as an
-// empty pool: an empty ClientCAs with RequireAndVerifyClientCert refuses every
-// caller, so the operator's symptom would be "nothing can connect" with a clean
-// startup log, and the actual fault — a path that pointed at the wrong file, or a
-// file holding a key instead of a certificate — would be invisible.
+// A bundle that parses to ZERO certificates is refused rather than accepted as an empty pool:
+// an empty ClientCAs with RequireAndVerifyClientCert refuses every caller, so the symptom
+// would be "nothing can connect" with a clean startup log and the real fault — a wrong path,
+// or a file holding a key instead of a certificate — invisible.
 func clientCAPool(path string) (*x509.CertPool, error) {
 	pem, err := os.ReadFile(path)
 	if err != nil {

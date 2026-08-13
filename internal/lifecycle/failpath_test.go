@@ -179,11 +179,9 @@ func (s *rowInsertFailingStore) CreateTemplate(ctx context.Context, t model.Temp
 // start's ⑦ gate: L1 alive but L2 not answering is NOT an adoptable survivor — so
 // it demotes to `paused`, recoverable by a later resume.
 //
-// The subtle half, and the reason this needs its own test: the demotion must
-// record NO death cause. Nothing died — L1 just said the unit is alive — so
-// stamping CauseUnknown ("it is gone but why is undeterminable") would be a false
-// statement about a live unit, i.e. exactly the guessing §2.4 forbids. Worse, a
-// stamped cause is durable evidence a later reader would trust.
+// The subtle half, and the reason this needs its own test: the demotion must record NO
+// death cause (why, at the `notServing` branch in adoptOrDemote). A stamped cause is
+// durable evidence a later reader would trust.
 func TestAdoptDemotesL1AliveButNotServingWithoutInventingADeathCause(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemory()
