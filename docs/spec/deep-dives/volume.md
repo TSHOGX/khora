@@ -784,7 +784,7 @@ dispositions, and reachable paths all differ. Each round:
 > caller sees**; cite it as what one attempt sees under deliberate churn, and note that the **batch** read's
 > wholesale failure is not retried away by that change.
 > **This is also why the aggregate question is now narrower than "is a failed read rare or common"** (see
-> [`../open-decisions.md`](../open-decisions.md), "whether §3.4's second term needs a per-unit unknown channel
+> [`../open-decisions.md`](../open-decisions.md), the §3.4 entry "a per-unit unknown channel
 > when a quota read fails"): the direction is settled by the do-not-synthesize rule, and what the residual
 > frequency decides is only whether the aggregate needs a per-unit unknown channel.
 >

@@ -1,59 +1,133 @@
 # Open Decisions register
 
-> The spec describes only the converged architecture; choices not yet settled, design points still
-> to be refined, and assumptions to verify before landing are registered in this document.
-
-> **Numbering convention**: a bare `§X.Y` always refers to a spec global section, located via
-> SPEC.md's "document map" at the top; `Dx` refers to a section of the corresponding deep-dive
-> document; this document's own sections are written as "this document's §N".
+> **One job: let a reader of a spec § discover that it is not settled.** Nothing here is decided —
+> do not cite an entry as a conclusion.
 >
-> **This document's §1** blocks the relevant subsystem's spike · **§2** architecture settled,
-> internal mechanism not yet developed · **§3** has candidates but no conclusion · **§4**
-> implementation gap (design settled, code not yet delivered). Each item is annotated with what it
-> belongs to, its current leaning, and who consumes it; items already detailed in a deep-dive get
-> only a one-line summary plus a pointer, **not a copy of the body**.
+> **Entries are keyed by the § they hang on.** No invented numbering: where a stable address is
+> genuinely needed, the linked issue supplies one (ADR-0009). A bare `§X.Y` is a spec global
+> section, located via SPEC.md's document map; `Dx` is a deep-dive section.
+>
+> **Three lines: what is open · the settlement criterion · what moves with it.** The argument is
+> **not** here — it lives in the deep-dive that owns the topic, or in the linked issue. The
+> criterion is the load-bearing line: it is what stops the next round re-deriving the question.
+>
+> **Once decided:** the deep-dive or spec § is written **first**, the entry is deleted **second**.
+> Settled lives in the spec, unsettled here, and the two never overlap.
 
 ---
 
-## 1. Verification needed before landing (spike, blocking the relevant subsystem)
+## Verification needed before landing (spike, blocking a subsystem)
 
 > None.
 
 ---
 
-## 2. Design points still to be refined (architecture settled, internal mechanism not yet developed)
+## Design points still to be refined
 
-| Belongs to (spec §) | What's still to be refined | Notes / current leaning |
-| --- | --- | --- |
-| **§5.C Volume (the remote backend, outside the contract boundary)** | The contract is in §5.C; **one boundary item is left: when and in what shape an S3 / NFS backend lands** | **See [`deep-dives/volume.md`](./deep-dives/volume.md) D8** for detail, not duplicated in this table. Who consumes it: a future remote volume backend |
-| **The size of the replayable event-stream window (§4.4-C)** | The event stream's outward shape is settled (pull + a `seq` cursor, §4.4-C / §6.1), and **the trimming mechanism's shape is now settled too** — five properties, in §4.4-C's closing block, not duplicated here. **What is open is only the VALUE**, i.e. how large the window should be, which is a deployment's to choose: the engine's default is **off**, following the node-budget rule that the engine must not invent a number and act on a guess. The associated at-rest KNOWN LIMITATION is what "off" ships, and §4.4-C states that cost plainly | Who consumes it: a future external subscriber — the value must be argued from "the reconnect duration promised to it", and no such subscriber exists today. **The mechanism is a §4 gap below, not part of this row** |
-| **Whether §5.D's internal deny-safe tier is widened beyond RFC1918** | **The membership list, and the reason for taking it over the wider IANA GR=False snapshot, are settled in §2.4** — this row asks only whether a future deployment needs more. Ranges outside it (CGNAT `100.64/10`, a resolver inside `0.0.0.0/8`) are treated as public internet, so they follow `egress.default` plus an explicit `allow[]` — **never a silent bypass**, and **`169.254.0.0/16` with every metadata endpoint is in the unliftable L0 floor, not this tier**. **The additivity is verified, so do not re-investigate it**: `ruleset.TierV4` is a static slice, `TierV6` derives from it mechanically, and the only production consumers are the two tier rules in `internal/network/generate.go`, which pass the slice through whole — no schema, no API, no seam. Widening = edit the slice, update the pinned v6 literals in `ruleset_test.go`, and correct §2.4's "exactly the three RFC1918 ranges". A widened set must not nest internally or against the floor (D5 ⑱); `validateNesting` fails loudly if it does, so the direction is safe | Who consumes it: a future deployer — the value must be argued from "what this deployment's internal network actually contains", not from the list's completeness |
-| **The §5.A provider interface (the remote form's input shape)** | Worked out on paper against "an isolation unit scheduled remotely", **implementing no remote provider**; nothing here is breaking, so a remote provider stays a pure registration. **`RootfsSource`**: settled that a remote handle is **additive**, with one constraint — the second field must arrive **together with a discriminator**, since a two-field struct with no tag cannot tell a caller which is populated and the mediator constructs the value. (A bare path forecloses the VM case — a block-device root, a DAX-mapped PMEM device; and the seam guard would not catch a device number under an unbanned spelling, as its own comment concedes.) **`SteeringSpec`: the fields are settled** (four, each with its reason) — what is open is **which obligations a non-nft enforcer cannot carry**: `Reject` as distinct from `Drop` (an allow-only enforcer satisfies fail-closed's safety half and **silently loses §2.4's guest-experience half**), rule **order** and hence the liftable deny-safe tier (expressible where a policy layer has action + priority + fall-through; not on an additive allow-only model), and **`via[]` steering**, which no cloud policy API can express — the original destination is recoverable only from a local socket option, so off-host it must become in-band metadata. **`SecondHopUID` is unsupported-capability, not a different predicate**: a uid names a socket in the **originating kernel** and is already unavailable one forwarding hop away on the same machine; the portable substitute is a *presented credential*, which makes the peer a trusted party — the confused deputy §2.4's second invariant refuses. The existing refuse-`via[]`-without-a-uid path is already the correct behavior; the mechanism for reporting "cannot do uids at all" would be a capability query, with `volume.Capabilities` + `ErrUnsupported` as the precedent to copy **at that point**. **Also open, and not previously in this row**: whether `DeathCause`'s three values survive a remote scheduler's termination-reason model (external enums carry no OOM member while reporting preemption, and separate recoverable from unrecoverable launch failure) — additive, with §4.3's `Unknown` fallback as the safe landing spot; and whether `Stop`'s contract should state "memory is discarded", since a remote provider's native suspend may preserve it (§1.4 excludes that permanently). **`ResourceLimits` has left this row: it is settled** — one knob suffices, the ceiling/share derivation and the RAM-overhead split are provider-internal, and that is what remote platforms do themselves; the one thing a single millicore number cannot express (exclusive core pinning) is already assigned outside the engine by §1.4's co-residency row | Who consumes it: a future remote provider |
-| **§5.B a content-addressed diff layer (dedup, not capability)** | **The capability case is closed**: pause/resume, layered Templates, fork and cross-host portability are **all delivered today** without it (§4.2 · multi-lowerdir · one-kind-of-reference · D0's measured tar-and-rebuild), so the table attributing them to this item was overstating it. What remains is narrower — **whether the engine should dedup identical bytes across layers, and at what granularity** (whole-file, as content-addressed object stores do, vs chunked, as backup tools do) — plus the digest that comes with it. **Reserve no mechanism**: the arm registers behind `rootfs.Provider` unchanged, and the properties that must hold for it to stay additive are the ten-item list in D5.1. (**Multi-node addressing has left this row — it is settled**, D5.2: the writable upper does not cross nodes, the promoted layer does, and the handle shape is the §5.A row's. **An application-layer collaboration safety point is likewise NOT here — already rejected**, [`deep-dives/guest-runtime.md`](./deep-dives/guest-runtime.md) D4.4) | **See [`deep-dives/rootfs-overlay.md`](./deep-dives/rootfs-overlay.md) D2/D3/D5.1** for detail, not duplicated here. Who consumes it: **nobody today** — the value must be argued from *what a node's layer library actually costs*, and there is no reporting surface for that yet, which is the honest reason this cannot be settled now |
-| **§5.B / §4.3 whether the Overlay artifact becomes a first-class object, able to exist independently of the sandbox row** | Today the Overlay is **the degenerate case of the universal refcount rule** (§4.4's object-reclamation invariant): referenced by exactly one sandbox row, so its reclamation predicate is literally "no corresponding sandbox row", caught by the orphan-unit sweep. ⇒ **"release the admission budget" and "keep the Overlay bytes" are mutually exclusive**: stay `Paused` and the budget is held while the bytes are safe; destroy and the budget frees while the bytes are reclaimed, because destroying the row IS the reason the bytes go. The question is whether that special case should be **removed**, making an Overlay an object with its own reclamation semantics like every other first-class persistent object. **Note what this is NOT: it is not flatten and not re-base.** That distinction is load-bearing rather than stylistic — a first-class object **dissolves** the lineage-depth problem, while flatten/re-base only **manages** it, so an entry written as "add flatten" would send a later round starting from the wrong shape. **Direction leans yes**, on two grounds: it deletes a special case rather than adding a concept, and it is **isomorphic to what Volumes already have** (a Volume is already decoupled from any sandbox's lifetime, with its lease carried by the mount row's refcount — the precedent to copy). Both §1.3 litmus and §4 ownership pass cleanly: no product semantics, no new subsystem edge | **What is NOT settled is the mechanism, and the cost is not where it looks.** Storage is the easy half. ① **§3.4 admission accounting is the real one**: a detached Overlay's bytes still occupy the node's disk budget while **no sandbox row carries its cap**, so it becomes an uncapped unit and lands exactly on the `UncappedBytes` row above — the two must be settled together, not in sequence. ② **Exclusivity becomes a lease problem**: at most one sandbox may hold a writable upper at a time (D5.2: the writable upper does not travel), so re-attachment needs the mount-row refcount shape rather than a bare reference. **The fallback in place is Promote**, which is the only existing action that gets both halves (freezing the upper into a Template layer so the bytes outlive the row), and its cost is the detour rather than the storage: `POST /v1/templates` takes only `{from_sandbox_id}`, so **the parent is not selectable** and every archive round stacks one more layer. **The silent half of that is now fixed and is not part of this question** — lineage depth is bounded and a Promote past the ceiling is refused at the gate (rootfs-overlay D5.1 ⑩), so the failure is loud rather than a sandbox that stops starting months later. Who consumes it: a platform-layer consumer wanting to release CPU/RAM and the admission budget while keeping a workspace's disk state — which is where the question was raised from |
-| **Whether §3.4's second term needs a per-unit unknown channel when a quota read fails** | **The DIRECTION is settled and has left this row: do not synthesize a number.** An unreadable row must produce an error, never a substituted measurement — the same rule the per-volume half already follows (`Backend.Usage` returns an error rather than `(walk, 0, nil)`), the same rule §4.4-A applies to uncertainty, and the same rule §6.1's read surface applies by omitting a value it cannot read rather than reporting 0. Two findings forced it, and both survive the walk-vs-quota-row argument this row used to make. ① **The fallback's dominant error is not either direction that argument weighed**: on the failure path the "capped → skip" test is unreachable, so a **capped** unit's bytes are added to the second term by the walk while the first term already counts its cap — the same bytes twice, which §3.4.2's disjointness rule forbids. That is the unit's whole usage rather than a metadata rounding, and it is **strictly one-directional** (the correct contribution is 0, so any positive value inflates the left side → wrongful 507), hence **composition-independent**: no measurement of what volumes look like could inform it. ② **On the only nodes where the number is read, its correct value is already known**: the term is consumed exclusively inside `disk_byte > 0` branches, and a metered disk axis requires every volume *and* every sandbox to be capped — so for the btrfs arm this term is 0 by construction and the fallback can only inject error into a zero. **What remains open is only the aggregate's SHAPE**: `UncappedBytes` has no per-unit error exit, so one unreadable unit fails the whole node's admission read. Decision criterion: the **post-retry** residual failure rate × the unit count — and note the retry already landed and changed the input (`btrfs.Client.Usage` retries 3×, turning 8 first-attempt failures into 0 final failures over 300 reads under three-way churn), so **the 7.3% figure this row used to cite is a per-attempt, pre-retry number**. The `filesystem sync` + `subvolume sync` trick is **not** available here: `--sync` is already on this read, and D7.1 step 2 settles deletions the caller already knows about, whereas this failure's cause is an arbitrary concurrent delete elsewhere on the filesystem | Who consumes it: §3.4's admission gate. Both subsystems must move together — §5.B's `UncappedBytes` has the byte-identical shape, including the same unreachable `limit > 0` test |
+### §5.C · When and in what shape a remote volume backend lands
+
+- **What is open.** The boundary item left by §5.C's contract: the arrival shape of an S3 / NFS
+  backend.
+- **Settlement criterion.** A future remote volume backend actually being built — the contract is
+  settled, so nothing is blocked meanwhile.
+- **Argument.** [`deep-dives/volume.md`](./deep-dives/volume.md) D8.
+
+### §4.4-C · The size of the replayable event-stream window
+
+- **What is open.** **Only the VALUE.** The outward shape (pull + a `seq` cursor) and the trimming
+  mechanism's five properties are settled in §4.4-C / §6.1.
+- **Settlement criterion.** A deployment's choice, argued from **the reconnect duration promised
+  to an external subscriber** — and no such subscriber exists today. The engine's default is
+  **off**, following the node-budget rule that it must not invent a number; §4.4-C states that
+  cost as a known limitation.
+- **Argument.** #5.
+
+### §5.D · Whether the internal deny-safe tier is widened beyond RFC1918
+
+- **What is open.** Only whether a future deployment needs more than the three RFC1918 ranges. The
+  membership list and the reason for it are **settled in §2.4**; `169.254.0.0/16` and every
+  metadata endpoint are in the unliftable L0 floor, not this tier.
+- **Settlement criterion.** A deployer arguing from **what their internal network actually
+  contains** — never from the list's completeness. **The additivity is verified; do not
+  re-investigate it.**
+- **Argument, and how to widen it safely.** #6.
+
+### §5.A · The provider interface, remote form's input shape
+
+- **What is open.** Which obligations a non-nft enforcer cannot carry (`Reject` vs `Drop`, rule
+  order, `via[]` steering); whether `DeathCause`'s three values survive a remote scheduler's
+  termination model; whether `Stop` should state that memory is discarded. **`ResourceLimits` and
+  `SecondHopUID` have left this list — both settled.**
+- **Settlement criterion.** A remote provider actually being registered. Nothing here is breaking,
+  so it stays a pure registration.
+- **Argument.** #7.
+
+### §5.B · A content-addressed diff layer (dedup, not capability)
+
+- **What is open.** Whether to dedup identical bytes across layers, and at what granularity
+  (whole-file vs chunked), plus the digest that comes with it. **The capability case is closed** —
+  pause/resume, layered Templates, fork and cross-host portability are all delivered today without
+  it.
+- **Settlement criterion.** Argued from **what a node's layer library actually costs**, and there
+  is no reporting surface for that yet — the honest reason this cannot be settled now.
+- **Argument.** [`deep-dives/rootfs-overlay.md`](./deep-dives/rootfs-overlay.md) D2/D3/D5.1, whose
+  ten-item list is what keeps the arm additive.
+
+### §5.B / §4.3 · Whether the Overlay becomes a first-class object, independent of the sandbox row
+
+- **What is open.** Whether to remove the special case whereby an Overlay is referenced by exactly
+  one sandbox row. **Not flatten and not re-base** — a first-class object *dissolves* the
+  lineage-depth problem where those only *manage* it. **Direction leans yes**: it deletes a
+  special case and is isomorphic to what Volumes already have.
+- **Settlement criterion.** **Must be settled together with §3.4's admission accounting, not in
+  sequence** — a detached Overlay's bytes occupy the node's disk budget while no sandbox row
+  carries its cap, which lands it on the uncapped-bytes problem. Exclusivity also becomes a lease
+  problem: at most one sandbox may hold a writable upper.
+- **Argument, and the fallback in place (Promote).** #1 — filed as an ask by the platform, which is
+  where the question was raised from.
+
+### §3.4 · A per-unit unknown channel when a quota read fails
+
+- **What is open.** **Only the aggregate's SHAPE**: `UncappedBytes` has no per-unit error exit, so
+  one unreadable unit fails the whole node's admission read.
+- **Settlement criterion.** The **post-retry** residual failure rate × the unit count. **The retry
+  already landed and changed the input** — `btrfs.Client.Usage` retries 3×, turning 8 first-attempt
+  failures into 0 final failures over 300 reads under three-way churn, so the 7.3% figure once
+  cited here is per-attempt and pre-retry.
+- **Also settled and no longer open: do not synthesize a number.** An unreadable row produces an
+  error, never a substituted measurement.
+- **Argument.** #8. **Moves with §5.B's `UncappedBytes`**, which has the byte-identical shape.
 
 ---
 
-## 3. Choices awaiting a decision (candidates exist, no conclusion)
+## Choices awaiting a decision (candidates exist, no conclusion)
 
-| Belongs to (spec §) | The choice | Notes / current leaning |
-| --- | --- | --- |
-| **§3.3 / §6.1 (placement addressing) — resolving a placement address back to a sandbox ID** | **Whether the engine offers a lookup from a guest address to the sandbox that holds that placement.** Note what is asked and what is not: **not exposing the placement outward** (§6.2 keeps the outward surface ID-addressed, and that is not reopened) but making a direction the caller ALREADY observes resolvable to an ID. A component on the steered path sees a connection arrive from some address and cannot name the sandbox behind it, because nothing outside the engine holds that mapping. **Mechanically the engine can answer it**: the mediator's live map holds placement per sandbox (`Mediator.Endpoint` is the internal read), and a `via[]` endpoint is required to be **host-local**, so steered traffic lands on `input` and never reaches postrouting ⇒ **it is not masqueraded and the observer genuinely sees the guest's own /30 address**, not a rewritten one. So this is a read-surface question, not a mechanism one | **The hard part is that a truthful answer needs a TIME, and the caller has one.** Guest IPs are **reused**: `allocSubnet` hands out a fresh /30 per placement from a bounded /16 with a random start, skipping only what is currently held (`inUse`), and **resume deliberately gets a NEW IP** (§3.3 / §4.3 IP-as-epoch). ⇒ an address identifies a sandbox **only within one placement's lifetime**, and a lookup answered "now" against an observation made minutes ago can name a **different, innocent** sandbox — the worst failure shape for the diagnostic use this exists to serve, since it is confidently wrong rather than absent. **Two candidate shapes**: a point-in-time query taking the observation's timestamp and refusing rather than guessing when the placement has since changed (fail-closed, §2.3's discipline), or **making it a fact on the event stream** — the placement address is already an epoch signal, so emitting it with each placement transition lets a consumer resolve retrospectively without the engine holding a history it otherwise has no reason to keep. **The second is the leaning**, and it is the same shape the trace row above leans toward, which is itself a reason to weigh the two together rather than separately. **The register carries no decision because the requirement is under-specified in one respect**: whether the consumer needs to resolve a LIVE observation (a query suffices) or a PAST one (only a stream fact does) — and those are different features. Who consumes it: a platform-layer component on the steered path, wanting to attribute a refusal to a sandbox; distinct from the trace row, which asks for numbers about an object the engine owns rather than the identity behind an observation the caller made |
-| **The operational surface (§6.1's process-level endpoints)** | **Whether the engine emits traces, and if so what a span covers.** The neighbouring half of this question is already SETTLED and is not reopened here: **per-sandbox metric series are refused on label cardinality** — a sandbox is short-lived and there may be thousands, so one series per sandbox per metric grows the scrape without bound and outlives the object it describes; per-object numbers stay on the §6.1 read surface, deliberately not duplicated into a second shape (stated in `README.md`). **That argument does not reach traces**, and this row exists because it was being used as though it did: a trace's cost scales with sampled operations, not with object count, so the reason to refuse the one is not a reason to refuse the other | **What the requirement actually is, stated as the need rather than the shape**: after-the-fact investigation of a per-sandbox anomaly has no substrate today. A polled read surface is a **sampled** view and cannot answer a question about a moment nobody sampled, which is the gap — not "metrics are too coarse". **The leaning is that the event stream is the closer substrate**: it is already durable, ordered and per-object, and what it lacks is resource-usage samples rather than a span tree, so "attach periodic usage to the event stream" and "emit spans" are two candidate answers to one need and should be weighed against each other, not layered. **Three questions from this repo's OWN debugging are the concrete input, and all three are answered by a per-object timestamped fact rather than by a span tree**: ① *what was this unit's usage just before it was refused, and was the refusal right?* — the quota-read fallback shipped a wrongful 507 on a node with room, and it was invisible because the number that decided it was never recorded (see the `UncappedBytes` row above); ② *was this sandbox's probe starved, or was it genuinely idle?* — an auto-pause reads idle only through an in-guest probe, and substrate contention starving that probe is indistinguishable after the fact from a sandbox that really was idle; ③ *did this rule ever match?* — a counter reading 0 is §2.4's only liveness signal and it is placement-local, so pause/resume erases the evidence that a bypass was happening. **What no accumulated case wants is a request-scoped span tree**, which is evidence for the stream shape over spans and is the closest thing to a decision this row holds. Who consumes it: an operator debugging a per-sandbox anomaly after the fact — and a platform-layer consumer, which is where the need was raised from |
+### §3.3 / §6.1 · Resolving a placement address back to a sandbox ID
+
+- **What is open.** Whether the engine offers the lookup at all, and in which of two shapes: a
+  point-in-time query that refuses rather than guessing, or **a fact on the event stream** (the
+  leaning). **Not** exposing the placement outward — §6.2 stays ID-addressed.
+- **Settlement criterion.** Whether the consumer needs to resolve a **live** observation (a query
+  suffices) or a **past** one (only a stream fact does). **Those are different features**, and the
+  requirement is under-specified in exactly this respect. **Guest IPs are reused** and resume
+  deliberately takes a new one, so an answer without a time can confidently name a different,
+  innocent sandbox.
+- **Argument.** #4. **Weigh with #3** — same substrate; granting both separately buys one
+  capability twice.
+
+### §6.1 · Whether the engine emits traces, and what a span covers
+
+- **What is open.** Traces, and if so the span boundary. **Per-sandbox metric series are settled
+  as refused** (label cardinality) and that is not reopened — but that argument does not reach
+  traces, whose cost scales with sampled operations rather than object count.
+- **Settlement criterion.** The requirement is *after-the-fact investigation of a per-sandbox
+  anomaly*, which a polled read surface cannot serve. **Three accumulated cases from this repo's
+  own debugging each want a per-object timestamped fact and none wants a request-scoped span
+  tree** — the closest thing to a decision this entry holds.
+- **Argument.** #3. **Weigh with #4.**
 
 ---
 
-## 4. Implementation gaps (design settled, code not yet landed / still to be closed out)
+## Implementation gaps (design settled, code not yet landed)
 
 > None.
-
----
-
-> **Discipline:** once an item is decided, first update the corresponding deep-dive document or
-> spec § section, **then remove it from this register** — this keeps "settled" in the spec and
-> "unsettled" in this document, with the two never overlapping. The same holds for this document's
-> §4 gaps: once the code lands, remove the row.
->
-> **A row in this table is cited by its bold title, never by position** (the reason is word for
-> word the same as the one at the top of network.md D5 that refuses citation by position).

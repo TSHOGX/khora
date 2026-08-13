@@ -184,8 +184,8 @@ GET    /v1/events?after=<seq>&limit=<n>&wait=<duration>
 #   nothing. And **with trimming off (the default) the window = all of history**, so the rows
 #   `after=0` must page through only ever grow — which is why the hard ceiling is mandatory
 #   rather than merely tidy. (How large the window should be is still open: see §4.4-C /
-#   [`open-decisions.md`](./open-decisions.md) §2, "the size of the replayable event-stream
-#   window". The MECHANISM is settled and built; only the value is a deployment's.)
+#   [`open-decisions.md`](./open-decisions.md), the §4.4-C entry "the size of the replayable
+#   event-stream window". The MECHANISM is settled and built; only the value is a deployment's.)
 #   **`cause` is present only where a kind has more than one route to it** (§4.4-C), and absent
 #   otherwise — a subscriber that ignores the field reads the stream exactly as before. Today that is
 #   `destroyed`: `requested` = the Destroy verb, `retention-expired` = the reaper's evict of a paused

@@ -1129,7 +1129,7 @@ is set; it becomes reachable the moment one is, with no change to the caller con
 value must be argued from "the reconnect duration promised to external subscribers", and the engine's
 own sink is a logging reference implementation whose "delivered" is very nearly always true, so **there
 is no arguable value** — picking a number out of the air is the speculative reservation §1.3 refuses,
-and it stays open (the event-stream row in [`open-decisions.md`](./open-decisions.md) §2). But **an
+and it stays open (the §4.4-C entry in [`open-decisions.md`](./open-decisions.md)). But **an
 absent mechanism is itself a decision, and it is the one that cannot be revisited at deploy time**, so
 the mechanism's shape is fixed here. Five properties, each of which has a wrong answer available:
 
