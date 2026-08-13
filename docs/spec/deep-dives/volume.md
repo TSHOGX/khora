@@ -783,10 +783,11 @@ dispositions, and reachable paths all differ. Each round:
 > §5.B's materialization guard, the latter on the create/resume hot path). **Do not cite 7.3% as the rate a
 > caller sees**; cite it as what one attempt sees under deliberate churn, and note that the **batch** read's
 > wholesale failure is not retried away by that change.
-> **This is also why the aggregate question is now narrower than "is a failed read rare or common"** (see
-> [`../open-decisions.md`](../open-decisions.md), the §3.4 entry "a per-unit unknown channel
-> when a quota read fails"): the direction is settled by the do-not-synthesize rule, and what the residual
-> frequency decides is only whether the aggregate needs a per-unit unknown channel.
+> **The aggregate question this used to point at is now SETTLED, and the retry is not what settled it**
+> (§3.4.2, "one unreadable unit fails the whole node's admission read"): the gate consumes a single scalar, so
+> an unknown can only be synthesized (forbidden) or ignored (silent oversubscription), and **no residual
+> frequency changes that** — which is why this measurement must not be read as an input to it. What the retry
+> buys is fewer refused admissions on a node with room, and that is a real but separate benefit.
 >
 > **A future trap of the same family (worth a comment on the §5.B side)**: the real trigger is **extent sharing**,
 > not "a snapshot was taken". Measured, a reflink **inward** (copy-up's shape) does not leak while a reflink

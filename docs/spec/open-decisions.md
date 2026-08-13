@@ -93,18 +93,6 @@
 - **Argument, and the fallback in place (Promote).** #1 — filed as an ask by the platform, which is
   where the question was raised from.
 
-### §3.4 · A per-unit unknown channel when a quota read fails
-
-- **What is open.** **Only the aggregate's SHAPE**: `UncappedBytes` has no per-unit error exit, so
-  one unreadable unit fails the whole node's admission read.
-- **Settlement criterion.** The **post-retry** residual failure rate × the unit count. **The retry
-  already landed and changed the input** — `btrfs.Client.Usage` retries 3×, turning 8 first-attempt
-  failures into 0 final failures over 300 reads under three-way churn, so the 7.3% figure once
-  cited here is per-attempt and pre-retry.
-- **Also settled and no longer open: do not synthesize a number.** An unreadable row produces an
-  error, never a substituted measurement.
-- **Argument.** #8. **Moves with §5.B's `UncappedBytes`**, which has the byte-identical shape.
-
 ---
 
 ## Choices awaiting a decision (candidates exist, no conclusion)

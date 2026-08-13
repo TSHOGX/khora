@@ -261,6 +261,34 @@ the measured term — adding its current usage would charge a second time on top
 promise, and that usage is a prediction rather than an occupancy. The criterion is uniformly
 **take the strongest available statement about each object**.
 
+**An unreadable unit fails the whole node's admission read, and that is the settled shape — there
+is no per-unit unknown channel.** Two halves, and the second is the one that used to be open:
+
+- **Never synthesize a number.** An unreadable row produces an **error**, never a substituted
+  measurement — the same rule the per-volume half already follows (`Backend.Usage` returns an error
+  rather than `(walk, 0, nil)`), the same rule §4.4-A applies to uncertainty, and the same rule
+  §6.1's read surface applies by omitting a value it cannot read rather than reporting 0.
+- **The aggregate is all-or-nothing.** The gate consumes **one scalar**, so an unknown has exactly
+  two collapses: synthesize it (forbidden, above) or ignore it — and ignoring it admits against an
+  **understated left side**, which is the silent oversubscription this second term exists to
+  prevent. A per-unit unknown channel would not remove that choice, only hide which one was made.
+  ⇒ **refusing the whole read is what keeps the inequality a true statement about this disk.** The
+  cost is named rather than hidden: one unreadable unit can refuse admission on a node that has
+  room, which is a **visible** wrong answer, where the alternative is an invisible one.
+
+**Do not re-argue this from the residual failure rate.** The retry in the §5.C backend
+(`usageReadAttempts = 3`) makes an unreadable row much rarer and is worth having, but **no
+frequency changes the collapse above** — the shape follows from the gate taking a scalar, not from
+how often the read fails. Its before/after figures are **per-attempt and pre-retry**, and rest on
+an unrepeated ad-hoc experiment with no regression test behind it, so they are not evidence for a
+shape in either direction.
+
+**§5.B's `UncappedBytes` carries this ruling too**, having the byte-identical shape. **And the
+second term is NOT "0 by construction" on any arm** — an earlier version of this argument claimed
+that for the btrfs arm and it is false: the §5.B side counts the layers and templates directories
+**unconditionally**, so the term is non-zero on any node holding a Template, and the §5.C side
+still walks plain directories. The disjointness rule above is what this ruling rests on, alone.
+
 **Both budgets count only "bytes the engine can name".** Layer bytes are itemized separately
 because **a Template is a first-class engine object** (§4.3 refcount / §5.B) and the bytes it
 occupies are covered by no sandbox cap, so the engine must account for them. Whereas **the
