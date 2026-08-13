@@ -196,8 +196,13 @@ Known and deliberate, not oversights:
 - **One Go client and a machine-readable contract, and no SDK beyond that** —
   deliberately, and the boundary is [`ADR-0008`](docs/decisions/ADR-0008-outward-client-boundary.md).
   What ships: [`pkg/warren`](pkg/warren/) — imported as
-  `github.com/TSHOGX/warren/pkg/warren`, an ordinary `go get`-able path, which is the
-  whole reason the module is named that way rather than a bare `warren` — a thin client
+  `github.com/TSHOGX/warren/pkg/warren`, a path that names a host and can therefore be
+  resolved, which a bare `warren` could not be. **Resolvable is not the same as fetchable
+  and the difference is not yet closed**: this repository is private, so `go get` needs
+  `GOPRIVATE` plus git credentials, and there are no tags, so a dependent pins a
+  pseudo-version of the default branch rather than a release. A consumer sharing a host
+  with the engine is still better served by `go work use`, and that is a repository
+  visibility and release decision, not a module-path one — a thin client
   over the §6.1 surface, with
   `cmd/warren` (the CLI) as a shell over it — which is what keeps it honest rather than
   merely present, since a client call no command can reach shows up immediately. Plus
