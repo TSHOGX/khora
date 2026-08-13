@@ -14,7 +14,7 @@ cat > .git/hooks/pre-push <<'HOOK'
 set -uo pipefail
 root=$(git rev-parse --show-toplevel)
 fail=0
-for s in check-asks; do
+for s in check-asks check-spec-code-drift; do
   [[ -x "$root/scripts/$s.sh" ]] || continue
   "$root/scripts/$s.sh" || fail=1
 done
