@@ -112,4 +112,23 @@
 
 ## Implementation gaps (design settled, code not yet landed)
 
-> None.
+### §4.3 / §5.B · The detached Overlay is settled in the spec and not built
+
+- **What is settled, and where.** `model.md` §4.3 (reclamation predicate = "no live reference row"),
+  `subsystems.md` (orphan predicate + the exclusivity invariant), §3.4.2 (a detached Overlay is a
+  second-term member), `deep-dives/rootfs-overlay.md` D5.3 + D6.5. Granted to the platform as an
+  inbound ask, **since ruled and closed** — the §§ named above are this entry's address, not that
+  issue, which is no longer a pending one.
+- **What the code does today, which is the opposite.** `Overlay` is a **TEXT column on `sandboxes`**,
+  and `Mediator.SweepOrphanOverlays` builds its live set from `ListSandboxes` — so "live" means
+  *referenced by a sandbox row*, and a detached Overlay would be **reclaimed by the next sweep**.
+  There is no reference table, no exclusivity row, and no detach/attach verb.
+- **What closing it takes.** A reference table + FK (the §1.3 *add-a-join-table* archetype, so the
+  litmus is already passed); the sweep's live set derived from that table instead of from sandbox
+  rows; `INSERT … SELECT … WHERE NOT EXISTS` → 409 for the at-most-one-holder invariant; clearing the
+  cap on detach and re-running the admission gate on re-attach; and the outward verbs. **Plus the one
+  item D5.3 leaves open**: whether a detach racing an in-flight Promote needs a pending-bytes
+  reservation.
+- **Who is waiting, and what they must NOT do yet.** The platform. Its fallback — stay `Paused`,
+  hold the admission budget — **remains the only correct behaviour until this lands**, and the ask's
+  closing comment has been corrected to say so.
