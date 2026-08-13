@@ -27,8 +27,24 @@ REPO="${ASK_GATE_REPO:-TSHOGX/warren}"
 REGISTER="${ASK_GATE_REGISTER:-docs/spec/open-decisions.md}"
 BASE="${ASK_GATE_BASE:-origin/main}"
 
-command -v gh >/dev/null 2>&1 || { echo "check-asks: no gh, skipping"; exit 0; }
-gh auth status >/dev/null 2>&1 || { echo "check-asks: gh not authenticated, skipping"; exit 0; }
+# Offline SKIPS locally and FAILS in CI. The asymmetry is the point: a hook must not be
+# why a push cannot happen on a plane, but a CI job that skips reports green while
+# checking nothing — a gate that cannot fail is worse than no gate, because it is
+# believed. CI is exactly where nobody is watching, so there it must be loud.
+skip_or_fail() {
+  if [[ -n "${CI:-}" ]]; then
+    echo "check-asks: FAIL — $1, and this is CI, where a skip would report green"
+    echo "  Set GH_TOKEN to a token that can read the counterparty repos."
+    exit 1
+  fi
+  echo "check-asks: $1, skipping (local)"
+  exit 0
+}
+
+command -v gh >/dev/null 2>&1 || skip_or_fail "no gh"
+# `gh auth status` ignores GH_TOKEN in some versions; probe the API instead, which is
+# what the checks below actually depend on.
+gh api /rate_limit >/dev/null 2>&1 || skip_or_fail "gh cannot reach the API"
 
 fail=0
 
