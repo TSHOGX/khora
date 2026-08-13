@@ -201,6 +201,21 @@ repo** — the ruling on the issue is the hand-off.
   *"not a matter of taste"*, a paragraph closing the case a §-doc already closed). The
   rule does NOT license deleting measurements or non-obvious obligations — those are the
   irreplaceable part, and a shorter comment that drops one is a worse comment.
+- **And stated ONCE, at the site that makes the choice** — the field, the branch, the seam
+  method. The dominant waste is not comments restating code; it is one correct constraint
+  stated at five or six sites (measured: a streak-pruning rule 5×, `volume.md` D7.3 6×).
+  Every copy is where drift starts, since editing one leaves the rest contradicting it.
+  Elsewhere: the constraint in one line, plus the pointer. A pointer ACROSS a §5 boundary
+  is a liability — the subsystems cannot import each other, so nothing keeps it honest.
+- **A pointer must carry the SENTENCE you are deleting, not its topic.** "The § covers
+  this" is not enough: a row stating a measurement's *conclusion* was read as licence to
+  delete its *provenance*, which lived nowhere else. If the specific claim is not at the
+  target, the `.go` file is the primary source — keep it, and say so.
+- **A constraint that can be checked mechanically must BE a check.** A comment enforces
+  nothing, so it should carry what a reader cannot infer (a measurement, a substrate
+  quirk, a counterexample), never what a test could assert. Hence the guards above, and
+  hence the guards are themselves tested — an unexercised guard is a comment with a
+  `func` keyword.
 - **Operator-facing strings are one line.** A flag's help text, an error body, a log
   message: say what it does and what it costs, cite the § that argues it, stop. `--help`
   is not a document surface — a 780-character `flag.Duration` help string was a real
@@ -208,6 +223,15 @@ repo** — the ruling on the issue is the hand-off.
   and no doc discipline governs. If the reasoning matters (and for a destructive default
   it does), it belongs in the deep-dive, with the flag citing it; `reaper-health` D5's own
   instruction is *annotate it at the configuration point*, and an annotation is not a copy.
+  What it bars is a paragraph transcribed where no reader can navigate — a claim about the
+  surface, **not a licence to compress**. A refusal, a §6.2 response field and a test's
+  failure message each reach the one reader who needs that fact, so the fact stays; one
+  line, but say it. `+`-wrapped Go source is formatting, not a multi-line string. Four
+  independent trim attempts here each deleted a measured failure signature this way
+  (`Nexthop has invalid gateway`; *5/5 died vs 5/5 survived*), and the gate caught all
+  four where review caught none — **a comment is not a token, a string literal is.** So
+  SQL `--` in a schema string and comments inside an embedded program still require the
+  gate, however comment-only the pass.
 
 ## Execution & verification
 
