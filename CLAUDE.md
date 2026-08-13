@@ -58,11 +58,17 @@ is the thing to be suspicious of.
 Through M1–M8 the spec legitimately led the code. The engine is substantially built
 now ⇒ **a spec change almost always implies a code change**, and "settled, not yet
 built" is a **debt** rather than a normal state, because from the two repos that
-consume this one **a § reads as done**. So: **an issue is closed by a PR** carrying
-spec + code + tests + the ruling; a spec change touching no test must declare
-`Spec-only: <reason>` (the pre-push hook checks it); and a granted-but-not-built
-ruling is **registered under Implementation gaps, naming what the consumer must not
-do yet.**
+consume this one **a § reads as done**. So three rules, all instances of one
+principle — **every claim needs a mechanical link to what makes it true, and an absent
+link must be marked**:
+
+1. **`main` moves only through a reviewable unit.** A PR may close several issues or
+   none; a ruling that changes nothing in the tree needs no PR at all. What is
+   forbidden is a change reaching `main` with nothing to look at (the hook refuses it;
+   `ALLOW_MAIN_PUSH=<reason>` to declare an exception).
+2. **A spec change touching no test must declare `Spec-only: <reason>`.**
+3. **A granted-but-not-built ruling is registered under Implementation gaps, naming
+   what the consumer must NOT do yet.**
 
 ## Certainty-state flow (where a topic lives = how settled it is)
 
