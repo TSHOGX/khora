@@ -80,19 +80,6 @@
 - **Argument.** [`deep-dives/rootfs-overlay.md`](./deep-dives/rootfs-overlay.md) D2/D3/D5.1, whose
   ten-item list is what keeps the arm additive.
 
-### §5.B / §4.3 · Whether the Overlay becomes a first-class object, independent of the sandbox row
-
-- **What is open.** Whether to remove the special case whereby an Overlay is referenced by exactly
-  one sandbox row. **Not flatten and not re-base** — a first-class object *dissolves* the
-  lineage-depth problem where those only *manage* it. **Direction leans yes**: it deletes a
-  special case and is isomorphic to what Volumes already have.
-- **Settlement criterion.** **Must be settled together with §3.4's admission accounting, not in
-  sequence** — a detached Overlay's bytes occupy the node's disk budget while no sandbox row
-  carries its cap, which lands it on the uncapped-bytes problem. Exclusivity also becomes a lease
-  problem: at most one sandbox may hold a writable upper.
-- **Argument, and the fallback in place (Promote).** #1 — filed as an ask by the platform, which is
-  where the question was raised from.
-
 ---
 
 ## Choices awaiting a decision (candidates exist, no conclusion)

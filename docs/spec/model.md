@@ -289,6 +289,15 @@ that for the btrfs arm and it is false: the §5.B side counts the layers and tem
 **unconditionally**, so the term is non-zero on any node holding a Template, and the §5.C side
 still walks plain directories. The disjointness rule above is what this ruling rests on, alone.
 
+**A detached Overlay is an uncapped member of the second term, for the same reason a layer is.**
+Once an Overlay may outlive its sandbox row (§4.3's universal refcount), the cap that row carried is
+gone while the bytes remain ⇒ it stops contributing a **declared cap** to the first term and starts
+contributing **measured bytes** to the second, and the disjointness rule above is what keeps that a
+move rather than a double count. Its bytes are **frozen** — nothing is writing to a detached upper,
+since holding it is exclusive — so the measured statement is exact rather than a prediction, which
+makes it a *better*-behaved member of that term than the live capped unit it replaces. **The
+transition happens where the cap is cleared**; see rootfs-overlay D6.5.
+
 **Both budgets count only "bytes the engine can name".** Layer bytes are itemized separately
 because **a Template is a first-class engine object** (§4.3 refcount / §5.B) and the bytes it
 occupies are covered by no sandbox cap, so the engine must account for them. Whereas **the
@@ -788,9 +797,17 @@ activity (reasoning in [`deep-dives/reaper-health.md`](./deep-dives/reaper-healt
     next bullet and §4.4-C). There is no owner column — only refcount/TTL matter, never "who
     possesses it" (§1.4). A connection (process) is not a persistent object and does not
     participate in reclamation.
-    **The Overlay artifact is a degenerate case**: it happens to be referenced by exactly one
-    sandbox row, so its reclamation predicate is simply "no corresponding sandbox row", caught by
-    the orphan-unit sweep (§4.4-A), and needs no count.
+    **The Overlay artifact obeys this rule like every other object, and is no longer a special
+    case.** It was previously described as a degenerate one — referenced by exactly one sandbox row,
+    so its predicate read "no corresponding sandbox row" — and that carve-out is **removed**: an
+    Overlay's reclamation predicate is **"no live reference row"**, the universal form above. What
+    the change buys is that an Overlay may **outlive the sandbox it was created under**, which is
+    what makes releasing CPU/RAM and the admission budget separable from keeping a workspace's disk
+    state. **Not flatten and not re-base** — those *manage* lineage depth where a first-class object
+    *dissolves* the question of what the bytes belong to. Two consequences carry obligations rather
+    than being free: a detached Overlay is an **uncapped** member of §3.4.2's second term (see
+    there), and **at most one sandbox may hold its writable upper at a time**, which is the same
+    exclusivity shape §5.C's mount rows already carry (§5.B, and the invariant in `subsystems.md`).
   - **An explicit lifecycle state machine belongs only to mutable objects that genuinely transition
     (the sandbox, §4.1's four states)**. **Immutable artifacts (Templates, and mount rows later) use
     "existence is the state"**: the row existing = ready, deleting the row = destroyed, with no

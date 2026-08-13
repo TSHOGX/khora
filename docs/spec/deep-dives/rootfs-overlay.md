@@ -328,6 +328,46 @@ Promote already produces it and D0 already measured that it tars out and rebuild
 that touches the engine is the **handle shape** a remote provider would receive, which
 open-decisions' §5.A provider row owns.
 
+### D5.3 The detached Overlay: a first-class object, and why the upper still does not travel
+
+**Settled** (was open as "whether the Overlay artifact becomes a first-class object"). An Overlay's
+reclamation predicate is now the universal **"no live reference row"** rather than "no corresponding
+sandbox row" (`model.md` §4.3, and the orphan sweep in `subsystems.md`), so an Overlay may exist with
+**zero** holders — detached — and its bytes survive the destruction of the sandbox that created them.
+
+**What this dissolves.** Previously "release the admission budget" and "keep the Overlay bytes" were
+**mutually exclusive**: stay `Paused` and the budget is held while the bytes are safe; destroy and the
+budget frees *because* destroying the row is what reclaims the bytes. The two are now independent, which
+is the whole capability. The former fallback — **Promote** — remains available and is now the *narrower*
+tool: it freezes the upper into an immutable layer, which is what you want when the state should become a
+**base for others**, whereas detaching is what you want when it should be **resumed as itself**. Promote's
+`{from_sandbox_id}`-only shape and its one-layer-per-archive-round stacking are no longer the only route,
+so lineage depth stops growing for the archive use case.
+
+**Three properties, and none of them is new machinery:**
+
+① **Exclusivity.** At most one holder of the writable upper at a time, delivered as the existence of a
+reference row and enforced by `INSERT … SELECT … WHERE NOT EXISTS` → 409 (`subsystems.md`, beside the
+volume lease). **This is not bookkeeping**: it follows directly from D5.2 above — the upper does not
+travel, so two holders would be two divergent filesystems claiming one identity.
+
+② **The upper still does not travel, and detaching does not change that.** A detached Overlay is
+node-local: its bytes are a subvolume on **this** node's filesystem, and D5.2's evidence is about the
+writable layer's nature rather than about who currently references it. **A detached Overlay is not a
+portability mechanism** — the promoted layer remains the only thing that crosses a node boundary. Reading
+"first-class" as "movable" is the misreading this paragraph exists to block.
+
+③ **Accounting.** A detached Overlay carries no cap, so it leaves §3.4.2's first term and enters the
+second as measured bytes; see D6.5 for where the cap is cleared. Its bytes are **frozen** while detached
+(nothing holds the upper, so nothing writes to it), which makes the measured statement exact rather than a
+prediction — the reason this is a *better*-behaved member of that term than the live capped unit it
+replaces, not a worse one.
+
+**One question deliberately left open, and it is narrow**: whether detaching while a Promote is in flight
+needs a reservation in the admission gate's pending-bytes path. The reading is no — **detach is not
+growth**, the same bytes change which term they sit in — but not every mutation path was traced, so an
+implementation should verify it rather than inherit this sentence as a settled result.
+
 ---
 
 ## D6. The capacity quota: how the per-sandbox upper cap is materialized
@@ -458,6 +498,16 @@ your own share". Two other layers:
   second term to exist (D6.2) is exactly what also makes the two terms naturally non-overlapping**. The
   reasoning that every sandbox must have a cap once the axis is metered (or the inequality stops describing
   that disk) is likewise in §3.4.
+
+  **Detaching an Overlay (D5.3) is where a unit's bytes cross between the two terms, and the cap is
+  cleared as part of it.** The holder's reference row goes and the declared cap goes with it, so the same
+  bytes stop being a first-term promise and become a second-term measurement — **one move, not an
+  addition**, which is what keeps §3.4.2's disjointness intact. It is also **the only one of these
+  transitions that does not increase the node's total**: detach neither writes nor frees a byte, so unlike
+  Promote / seed / sweep it needs no forecast and cannot fail the inequality. Re-attaching runs the reverse
+  and **does** pass the gate, because it re-declares a cap the node must be able to honour. (Whether an
+  in-flight Promote racing a detach needs a reservation in the pending-bytes path is the one item D5.3
+  leaves for the implementation to verify.)
 
   **The residual (stated honestly)**: the second term is measured, so the inequality holds **at the instant
   of admission** and can be broken afterwards. Layer bytes grow only at Promote / seed / sweep — all

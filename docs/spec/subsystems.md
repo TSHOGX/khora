@@ -307,10 +307,17 @@ boundaries; internal mechanisms still to be refined are registered in
   reconciliation (rather than deleting bytes via FK) and both protected by an **in-flight build
   keep-set** so that something under construction is not wrongly torn down (the same shape as the
   placement live-map): an **orphan layer** = a layer directory with no corresponding live Template
-  row; an **orphan Overlay unit** = a storage unit with no corresponding live sandbox row — which
+  row; an **orphan Overlay unit** = a storage unit with **no live reference row** — which
   catches the half §4.4 left behind with "a failed byte deletion does not block the state transition
   and the sweep retries asynchronously", where the record is already deleted while the bytes remain
   and only a sweep can reclaim them.
+
+  **The Overlay predicate is deliberately "no live reference row" and not "no live sandbox row".**
+  An Overlay is a first-class object that may outlive the sandbox it was created under (`model.md`,
+  the universal derived-refcount rule), so keying the sweep to the sandbox row would reclaim a
+  **detached** Overlay's bytes — exactly the state that exists to be kept. The narrower wording was
+  the one sentence that made a detached Overlay impossible, and it is why the platform could not
+  make those bytes outlive a row it does not own.
 - **A Promote captures only the Overlay tree, and excludes what the engine injected**: freezing a
   sandbox's FS = freezing the Overlay tree, but **runtime files the engine itself injected into the
   guest do not enter the layer** (`sandboxd`'s portal / sentinel files; the list is in rootfs-overlay
@@ -674,6 +681,16 @@ boundaries; internal mechanisms still to be refined are registered in
     exclusives" and **does not forbid an exclusive coexisting with a shared** (covering only half); and
     its predicate is a **literal string comparison**, which is why the `CHECK` is required — a
     misspelled case would make the partial index simply not apply, a class of silent failure.
+- **A detached Overlay's writable upper carries the same shape, and a strictly simpler form of it**:
+  **at most one sandbox may hold the upper at a time**, and that holding is likewise **the existence
+  of a reference row** rather than a separate lease object — so there is no `Lease` type here either.
+  It is simpler in that an Overlay has no exclusive/shared axis: there is one kind of holder, so the
+  invariant is a plain "at most one live reference row", and the half the partial index above cannot
+  cover (an exclusive coexisting with a shared) **does not arise**. Same deliverer, for the same
+  TOCTOU reason: **`INSERT … SELECT … WHERE NOT EXISTS`, with `RowsAffected()==0` ⟹ 409.** The reason
+  the upper cannot be held twice is not bookkeeping — it is that the writable upper **does not
+  travel** (`deep-dives/rootfs-overlay.md` D5.2), so two holders would be two divergent filesystems
+  claiming one identity.
     **The predicate must be a row-immutable attribute** (`access` here) and **must not be built on a
     mutable lifecycle field** (the reasoning and an external cautionary example are in D3).
 - **Two uniqueness assertions on mount topology, judged 400 rather than 409**: `UNIQUE(sandbox, path)`
