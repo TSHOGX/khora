@@ -41,6 +41,14 @@ skip_or_fail() {
   exit 0
 }
 
+# A fresh clone has no hook, and nothing announces that. Branch protection is
+# unavailable on a private repo on this plan, so the hook is the ONLY enforcement —
+# an unhooked clone is a silently ungated one. Warn from CI, where it is visible.
+if [[ -n "${CI:-}" && ! -x "$(git rev-parse --git-dir 2>/dev/null)/hooks/pre-push" ]]; then
+  echo "check-asks: note — no pre-push hook in this checkout (expected in CI)."
+  echo "  In a working clone, run ./scripts/install-hooks.sh once; the hook is the gate."
+fi
+
 command -v gh >/dev/null 2>&1 || skip_or_fail "no gh"
 # `gh auth status` ignores GH_TOKEN in some versions; probe the API instead, which is
 # what the checks below actually depend on.
