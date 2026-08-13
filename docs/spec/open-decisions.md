@@ -37,10 +37,17 @@
 - **What is open.** **Only the VALUE.** The outward shape (pull + a `seq` cursor) and the trimming
   mechanism's five properties are settled in §4.4-C / §6.1.
 - **Settlement criterion.** A deployment's choice, argued from **the reconnect duration promised
-  to an external subscriber** — and no such subscriber exists today. The engine's default is
+  to an external subscriber** — and **no subscriber has promised one yet.** *Corrected: this
+  entry used to read "no such subscriber exists", which is false — the platform claims the role
+  by name ("the platform is the subscriber that decides it") and has built the surrounding
+  machinery, including an expired-cursor error state. What is missing is the NUMBER: it nowhere
+  states the longest disconnect-recovery time it permits, and its adjacent figures are marked as
+  having no precedent behind them. The distinction matters because the old wording would send a
+  later round looking for a subscriber instead of asking for a duration.* The engine's default is
   **off**, following the node-budget rule that it must not invent a number; §4.4-C states that
   cost as a known limitation.
-- **Argument.** #5.
+- **Argument.** #5. **The trimming mechanism has landed** and is not an implementation gap —
+  `Store.TrimOutbox`, where 0 means never trim and is the default.
 
 ### §5.D · Whether the internal deny-safe tier is widened beyond RFC1918
 
