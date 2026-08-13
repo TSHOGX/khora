@@ -33,6 +33,21 @@ jobs:
       - name: Verify reproducible builds
         run: make verify-reproducible
 
+  # Ask/§ consistency (ADR-0009). Cheap, no substrate. This CANNOT block a merge —
+  # branch protection is unavailable on a private repo on this plan — so the pre-push
+  # hook is the actual gate and this is the second opinion.
+  asks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Register against the tracker
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./scripts/check-asks.sh
+
   # The substrate suite: needs root, runsc, btrfs, and real kernel features.
   # Runs on self-hosted runner with the prerequisites installed.
   substrate:
