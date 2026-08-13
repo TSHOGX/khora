@@ -32,7 +32,7 @@ implementation to justify anything.
 | --- | --- |
 | `docs/spec/` | Converged architecture, §1–§6. The best current statement of *what the engine should be* — authoritative for intent, but revisable (see Relationship rule). Slow-moving. |
 | `docs/spec/deep-dives/` | Single-topic design rationale hung under a § (the *why* / falsification / rejected options). |
-| `docs/spec/open-decisions.md` | Register of **unsettled** design questions. |
+| `docs/spec/open-decisions.md` | Register of **unsettled** design questions — **one job: let a reader of a § discover it is not settled.** Keyed by the § it hangs on, three lines each (what is open · settlement criterion · other §§ that move with it). **Not the argument** — that goes in a deep-dive or the issue that raised it. ADR-0009. |
 | `docs/plans/` | **Normally absent, and that is the healthy state.** It held the M1–M8 ladder's per-milestone plans; the ladder shipped and each plan was deleted as it shipped. Create a file here only for work whose scope genuinely needs agreeing in advance, and delete it in the change that lands the milestone's last acceptance test (see Milestone discipline). Prefer an ADR or a deep-dive — those have permanent homes. |
 | `docs/decisions/` | ADRs: one-time **tool / environment / process** choices (why Go, why OrbStack, validation matrix). The **decision** is immutable — reversing it is a *new* superseding ADR; stale prose around an unchanged decision is corrected in place. Full rule: ADR-0003. |
 | `cmd/` `internal/` `test/` | The code, implementing the spec. |
@@ -63,6 +63,13 @@ unsettled / disagreement          → open-decisions.md
 one-time tool/env/process choice  → decisions/ADR
 ```
 
+**Evidence is tiered by whether a reader must have it to avoid a mistake** (ADR-0009). The
+**constraint, the measurement that fixed a number, the counter-example that killed an obvious
+alternative** — tier 1, in the tree, at the site that decides it. The **derivation, option tour
+and review argument** — in the issue or PR, with one line of claim plus a permalink here.
+**The test: if it cannot be stated in one line on the repo side, it stays whole.** Links point
+**repo → issue, never the reverse** — the repo is the durable side, and M11 ships it.
+
 Settled goes in the spec; unsettled stays in open-decisions; **the two never
 overlap**. After deciding, update the deep-dive/spec **first**, then remove the
 register entry. A deep-dive keeps its rationale; once written back to the spec it
@@ -82,8 +89,13 @@ slims to boundary + open agenda — nothing lives in full in both places.
 The engine has consumers that are **separate repos with their own maintainers**: the platform
 layered on it (`TSHOGX/meadow`, checkout `~/meadow`) and a Template repo under that
 (`TSHOGX/tpl-pi`). When one of them needs something only the engine can provide, it files a
-**change request as a GitHub issue on this repo**, labelled `ask:inbound`. Read them with
-`/inbox`.
+**change request as a GitHub issue on this repo**, labelled `ask:inbound`, carrying a
+machine-readable `Hangs on: §<n>` line. **The issue number is the only identifier.** Full rule:
+ADR-0009.
+
+```bash
+gh issue list --repo TSHOGX/warren --label ask:inbound --state open
+```
 
 **Nothing about the first principle relaxes here.** A downstream ask carries product vocabulary
 by nature — its author says *session*, *tenant*, *workspace* — and the §1.3 litmus applies to it
@@ -97,8 +109,8 @@ Triage, and what each outcome obliges:
   first**, then close the issue with the ruling. The consumer deletes its register entry against
   the closed issue, so **the closing comment is the whole hand-off** — a bare "done" leaves them
   nothing to verify.
-- **`ask:refused`** — with the reason, and the reason is the load-bearing part: they are required
-  to hold a fallback, and a refusal tells them whether it must now be permanent.
+- **`ask:refused`** — with the reason, and the reason is the load-bearing part: it tells them
+  whether the fallback they hold must now be permanent.
 - **`ask:duplicate`** — already live in `open-decisions.md`. Close pointing at **that row by its
   bold title, never by position**, and note the leaning it already carries. This is the common
   case, because a consumer hits a boundary at roughly the point we notice it from inside.
@@ -108,12 +120,14 @@ that sits open while our register independently converges on it means the consum
 against a fallback we have already decided to remove — and the same reasoning gets done twice, on
 both sides, which has happened.
 
-**Two things an inbound ask is not.** It is not a question — anything answerable by reading this
-repo should have been read, and an ask that is really a question gets closed as such. And it is
-never a *dependency*: their documents describe the shape they have, so **the engine is never
-scheduled by an ask**. Our own `open-decisions.md` remains the register for what is unsettled
-here; an issue is an address and an inbox, not a second register. **Never edit the consumer's
-repo** — the ruling on the issue is the hand-off.
+**A blocking ask is legitimate, and it still does not schedule the engine.** A consumer may state
+that a need blocks it and stop and wait — pretending otherwise only manufactured fallbacks nobody
+needed. What that buys is **a schedule in the reply**, not priority: milestone order stays ours.
+
+**An inbound ask is not a question** — anything answerable by reading this repo should have been
+read, and one that is really a question gets closed as such. Our own `open-decisions.md` remains
+the register for what is unsettled here; **an issue is an address and an inbox, not a second
+register.** **Never edit the consumer's repo** — the ruling on the issue is the hand-off.
 
 ## Code conventions
 
