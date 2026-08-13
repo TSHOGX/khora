@@ -64,8 +64,16 @@ jobs:
       - name: Run substrate suite
         run: sudo env "PATH=$PATH" "HOME=$HOME" go test -tags substrate -count=1 -p 1 ./...
 
+      # The tagged files live under ./test/, not ./internal/lifecycle — pointing this at
+      # the wrong package returned "[no tests to run]" and a GREEN step, so the §4.2
+      # drain-barrier test goal.md names as the one that must pass was never executed.
+      # `-run` is what makes the mistake loud: a target with no matching test now fails
+      # instead of passing vacuously.
+      - name: Assert the drainrace target is not empty
+        run: test "$(go test -tags 'substrate,drainrace' -list 'TestPauseDrain.*' ./test/ | grep -c '^TestPauseDrain')" -ge 1
+
       - name: Run drainrace tests
-        run: sudo env "PATH=$PATH" "HOME=$HOME" go test -tags 'substrate,drainrace' -count=1 -p 1 ./internal/lifecycle
+        run: sudo env "PATH=$PATH" "HOME=$HOME" go test -tags 'substrate,drainrace' -count=1 -p 1 -run 'TestPauseDrain' ./test/
 
       - name: Run quotachurn tests
         run: sudo env "PATH=$PATH" "HOME=$HOME" go test -tags 'substrate,quotachurn' -count=1 -p 1 ./internal/btrfs
