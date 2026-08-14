@@ -19,23 +19,22 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: '1.23'
 
-      - name: Set up Buf
-        uses: bufbuild/buf-setup-action@v1
-        with:
-          version: '1.47.2'
-
       - name: Verify generated output
         run: |
+          buf_path="${RUNNER_TEMP}/buf"
+          curl -fsSL -o "$buf_path" https://github.com/bufbuild/buf/releases/download/v1.47.2/buf-Linux-x86_64
+          echo "3a0c4da8d46eea8136affa63db202c76a44f8112384160b73c3fffb1cf14b5d8  $buf_path" | sha256sum -c -
+          chmod 0755 "$buf_path"
           go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.35.2
           go install connectrpc.com/connect/cmd/protoc-gen-connect-go@v1.17.0
-          export PATH="$(go env GOPATH)/bin:$PATH"
+          export PATH="${RUNNER_TEMP}:$(go env GOPATH)/bin:$PATH"
           ./scripts/check-generated.sh
 
       - name: Build all packages
