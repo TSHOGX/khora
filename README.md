@@ -26,12 +26,16 @@ Sandboxes survive being paused: `POST /v1/sandboxes/{id}/pause` stops the world 
 snapshot — persistence is the overlay on disk, which is why a sandbox is portable
 across hosts, CPUs and runsc versions rather than pinned to a set of CPU features.
 
-> **Status: pre-release.** The engine is complete and verified against the real
-> substrate (908 end-to-end acceptance tests on actual runsc/overlayfs/btrfs/nftables),
-> and [`deploy/`](deploy/) carries the authenticating TLS boundary that goes in front of
-> it. A CLI ships in `cmd/warren`. Still missing before you deploy this: no production
-> Template ships in this repo, and there are no client libraries for other languages yet.
-> See [What is missing](#what-is-missing-before-you-deploy-this).
+> **Status: `v0.0.1`.** The engine is complete and verified against the real substrate:
+> 1063 acceptance tests on actual runsc/overlayfs/btrfs/nftables, 1056 passed, 7 skipped,
+> 0 failed. The run is recorded — with the commit it ran on — in
+> [`docs/substrate-runs/`](docs/substrate-runs/), which is the number to trust rather than
+> this sentence. [`deploy/`](deploy/) carries the authenticating TLS boundary that goes in
+> front of it, and a CLI ships in `cmd/warren`. Still missing before you deploy this: no
+> production Template ships in this repo, and there are no client libraries for other
+> languages yet. See [What is missing](#what-is-missing-before-you-deploy-this) and
+> [`CHANGELOG.md`](CHANGELOG.md) — through all of `0.0.x` there is no compatibility
+> promise of any kind.
 
 ## Why this instead of a managed sandbox service
 
@@ -197,13 +201,14 @@ Known and deliberate, not oversights:
   deliberately, and the boundary is [`ADR-0008`](docs/decisions/ADR-0008-outward-client-boundary.md).
   What ships: [`pkg/warren`](pkg/warren/) — imported as
   `github.com/TSHOGX/warren/pkg/warren`, a path that names a host and can therefore be
-  resolved, which a bare `warren` could not be. **Resolvable is not the same as fetchable
-  and the difference is not yet closed**: this repository is private, so `go get` needs
-  `GOPRIVATE` plus git credentials, and there are no tags, so a dependent pins a
-  pseudo-version of the default branch rather than a release. A consumer sharing a host
-  with the engine is still better served by `go work use`, and that is a repository
-  visibility and release decision, not a module-path one — a thin client
-  over the §6.1 surface, with
+  resolved, which a bare `warren` could not be. **Resolvable is not the same as fetchable,
+  and half of that gap is now closed and half is closed permanently the other way**: there
+  are tags from `v0.0.1` on, so a dependent pins a release rather than a pseudo-version of
+  the default branch — but **this repository is private and stays private**, so `go get`
+  needs `GOPRIVATE` plus git credentials, and a consumer sharing a host with the engine is
+  still better served by `go work use`. A directory has no version, so an upstream-artifact
+  pin there is a digest; that is the permanent answer, not a stopgap (issue #2) — a thin
+  client over the §6.1 surface, with
   `cmd/warren` (the CLI) as a shell over it — which is what keeps it honest rather than
   merely present, since a client call no command can reach shows up immediately. Plus
   the contract itself in two forms: `proto/` with stubs at `pkg/transport/gen/` for the
