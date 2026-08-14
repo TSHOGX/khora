@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os/exec"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -59,6 +60,11 @@ type pkg struct {
 	XTestImports []string
 }
 
+var packageCache = struct {
+	sync.Mutex
+	byTags map[string][]pkg
+}{byTags: make(map[string][]pkg)}
+
 // tagMatrix is every build configuration these guards must hold under. A tag that
 // is not here is a configuration where a bad edge passes unseen, and the files
 // behind a tag are exactly the ones most likely to reach for a shortcut: they are
@@ -82,6 +88,13 @@ var tagMatrix = []string{"", "substrate", "drainrace", "quotachurn", "testguest"
 // default list, so a bad edge introduced in one of them would go unseen.
 func listPackages(t *testing.T, tags string) []pkg {
 	t.Helper()
+	packageCache.Lock()
+	if cached, ok := packageCache.byTags[tags]; ok {
+		packageCache.Unlock()
+		return cached
+	}
+	packageCache.Unlock()
+
 	args := []string{"list", "-json"}
 	if tags != "" {
 		args = append(args, "-tags", tags)
@@ -100,6 +113,13 @@ func listPackages(t *testing.T, tags string) []pkg {
 		}
 		pkgs = append(pkgs, p)
 	}
+	packageCache.Lock()
+	if cached, ok := packageCache.byTags[tags]; ok {
+		packageCache.Unlock()
+		return cached
+	}
+	packageCache.byTags[tags] = pkgs
+	packageCache.Unlock()
 	return pkgs
 }
 
@@ -262,6 +282,7 @@ func TestSubsystemsDoNotReadTheControlPlane(t *testing.T) {
 //     nothing from the engine. Left unchecked, a hand-edit adding an engine import
 //     there would put an engine type in the published surface and hand every
 //     importer a transitive edge.
+//
 // generatedTree is the root of the committed wire stubs (ADR-0008 part 3). Named
 // rather than spelled inline because the leaf guard's exemption below has to mean
 // exactly this prefix: a literal that drifted from the `leaves` entries would turn

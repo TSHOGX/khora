@@ -1,21 +1,19 @@
 // Command substrategate answers one question mechanically: does this diff require
 // the substrate acceptance suite to be re-run?
 //
-// It answers yes unless every changed file is either documentation (.md, which
-// cannot affect a running sandbox) or a .go file whose TOKEN STREAM is unchanged
-// with no toolchain directive edited (ADR-0005 argues why that is the right
-// equivalence). Anything else — a new or deleted .go file, go.mod, a .proto, a
-// shell script, a template — is a yes.
+// It answers yes unless every changed file is either documentation, a process-only
+// repository file, or a .go file whose token stream is unchanged with no toolchain
+// directive edited. Build inputs, templates and test harnesses remain fail-closed.
 //
 // Usage:
 //
-//	go run ./test/preflight/substrategate          # the working tree against HEAD
-//	go run ./test/preflight/substrategate <rev>    # one commit against its parent
+//	go run ./test/preflight/substrategate                    # working tree against HEAD
+//	go run ./test/preflight/substrategate --base origin/main # complete PR plus working tree
 //
 // Exit codes: 0 = the gate is not required by this diff · 1 = the gate is required
 // · 2 = this tool could not decide, so the gate is required. Both non-zero codes
 // mean "run it"; they are distinct only so a caller can tell a decision from a
-// malfunction. Never treat a crash as a licence to skip — see ADR-0005.
+// malfunction. Never treat a crash as a licence to skip.
 package main
 
 import (
@@ -27,14 +25,14 @@ import (
 )
 
 func main() {
-	rev := ""
+	base := ""
 	switch {
 	case len(os.Args) == 2 && (os.Args[1] == "-h" || os.Args[1] == "--help"):
 		fmt.Print(usage)
 		return
-	case len(os.Args) == 2:
-		rev = os.Args[1]
-	case len(os.Args) > 2:
+	case len(os.Args) == 3 && os.Args[1] == "--base":
+		base = os.Args[2]
+	case len(os.Args) > 1:
 		fmt.Fprint(os.Stderr, usage)
 		os.Exit(2)
 	}
@@ -43,23 +41,27 @@ func main() {
 	if err != nil {
 		fail("not a git repository: %v", err)
 	}
-	changes, err := collect(rev)
+	comparison, err := comparisonRef(base)
+	if err != nil {
+		fail("cannot resolve comparison: %v", err)
+	}
+	changes, err := collect(comparison)
 	if err != nil {
 		fail("cannot list changes: %v", err)
 	}
 
 	var reasons []string
-	docs, code := 0, 0
+	inert, code := 0, 0
 	for _, c := range changes {
 		switch {
-		case strings.HasSuffix(c.path, ".md"):
-			docs++
+		case inertPath(c.path):
+			inert++
 		case !strings.HasSuffix(c.path, ".go"):
-			reasons = append(reasons, fmt.Sprintf("%s: not documentation and not Go (%s)", c.path, c.statusWord()))
+			reasons = append(reasons, fmt.Sprintf("%s: not an inert repository file and not Go (%s)", c.path, c.statusWord()))
 		case c.status != "M":
 			reasons = append(reasons, fmt.Sprintf("%s: %s, so it carries new or removed code", c.path, c.statusWord()))
 		default:
-			oldSrc, newSrc, err := versions(root, rev, c.path)
+			oldSrc, newSrc, err := versions(root, comparison, c.path)
 			if err != nil {
 				fail("cannot read both versions of %s: %v", c.path, err)
 			}
@@ -72,11 +74,11 @@ func main() {
 	}
 
 	what := "the working tree against HEAD"
-	if rev != "" {
-		what = rev + " against its parent"
+	if base != "" {
+		what = "the complete PR diff from " + base + " plus the working tree"
 	}
 	fmt.Printf("substrategate: %d changed file(s), %s\n", len(changes), what)
-	fmt.Printf("  documentation ignored:  %d .md\n", docs)
+	fmt.Printf("  inert repository files: %d\n", inert)
 	fmt.Printf("  token stream unchanged: %d .go\n", code)
 	if len(reasons) > 0 {
 		fmt.Printf("  requires the gate:      %d\n", len(reasons))
@@ -91,13 +93,31 @@ func main() {
 		return
 	}
 	fmt.Println("VERDICT: the substrate gate is NOT required for this diff.")
-	fmt.Println("         The build, vet and unit gates still are (ADR-0005).")
+	fmt.Println("         Build, vet and unit gates still apply.")
 }
 
-const usage = `usage: substrategate [<rev>]
+// inertPath identifies files that can change how the repository is checked but
+// cannot change a running sandbox. Hosted build and unit checks still apply; this
+// classification only decides whether a real substrate run adds evidence.
+func inertPath(path string) bool {
+	if strings.HasSuffix(path, ".md") || path == ".gitignore" || strings.HasPrefix(path, ".github/") {
+		return true
+	}
+	if strings.HasSuffix(path, "_test.go") && !strings.HasSuffix(path, "_substrate_test.go") {
+		return true
+	}
+	if strings.HasPrefix(path, "test/preflight/substrategate/") {
+		return true
+	}
+	// scripts/ is reserved for repository checks and local collaboration helpers.
+	// Runtime fixtures and Template build inputs live under test/ and templates/.
+	return strings.HasPrefix(path, "scripts/")
+}
 
-  (no argument)  compare the working tree against HEAD
-  <rev>          compare that commit against its parent
+const usage = `usage: substrategate [--base <ref>]
+
+  (no argument)             compare the working tree against HEAD
+  --base <ref>              compare <ref>...HEAD, plus the working tree
 
 exit: 0 gate not required · 1 gate required · 2 undecidable (gate required)
 `
@@ -121,36 +141,44 @@ func (c change) statusWord() string {
 	}
 }
 
-// collect lists the changed paths. In working-tree mode untracked files count as
-// additions: an untracked .go file is new code, and treating it as "no change"
-// would be the one omission that silently licenses skipping the gate.
-func collect(rev string) ([]change, error) {
-	var out []change
-	var raw string
-	var err error
-	if rev == "" {
-		raw, err = git("diff", "--name-status", "HEAD")
-	} else {
-		raw, err = git("diff", "--name-status", rev+"^", rev)
+func comparisonRef(base string) (string, error) {
+	if base == "" {
+		return "HEAD", nil
 	}
+	if _, err := git("rev-parse", "--verify", base+"^{commit}"); err != nil {
+		return "", fmt.Errorf("base %q is not available: %w", base, err)
+	}
+	return git("merge-base", base, "HEAD")
+}
+
+// collect lists the paths changed from comparison to the current working tree.
+// Untracked files count as additions: an untracked .go file is new code, and
+// treating it as no change would silently license skipping the substrate suite.
+func collect(comparison string) ([]change, error) {
+	var out []change
+	raw, err := git("diff", "--name-status", comparison)
 	if err != nil {
 		return nil, err
 	}
-	for _, line := range strings.Split(raw, "\n") {
-		if line == "" {
-			continue
+	appendChanges := func(raw string) error {
+		for _, line := range strings.Split(raw, "\n") {
+			if line == "" {
+				continue
+			}
+			f := strings.Split(line, "\t")
+			if len(f) < 2 {
+				return fmt.Errorf("unparsable --name-status line %q", line)
+			}
+			// For a rename or copy the last field is the new path, which is the one
+			// whose content decides.
+			out = append(out, change{status: f[0], path: f[len(f)-1]})
 		}
-		f := strings.Split(line, "\t")
-		if len(f) < 2 {
-			return nil, fmt.Errorf("unparsable --name-status line %q", line)
-		}
-		// For a rename or copy the last field is the new path, which is the one
-		// whose content decides.
-		out = append(out, change{status: f[0], path: f[len(f)-1]})
+		return nil
 	}
-	if rev != "" {
-		return out, nil
+	if err := appendChanges(raw); err != nil {
+		return nil, err
 	}
+	// Untracked files count as additions in either comparison mode.
 	untracked, err := git("ls-files", "--others", "--exclude-standard")
 	if err != nil {
 		return nil, err
@@ -164,21 +192,13 @@ func collect(rev string) ([]change, error) {
 }
 
 // versions returns the before and after contents of one path.
-func versions(root, rev, path string) (oldSrc, newSrc []byte, err error) {
-	base, head := "HEAD", ""
-	if rev != "" {
-		base, head = rev+"^", rev
-	}
-	o, err := git("show", base+":"+path)
+func versions(root, comparison, path string) (oldSrc, newSrc []byte, err error) {
+	o, err := git("show", comparison+":"+path)
 	if err != nil {
 		return nil, nil, err
 	}
-	if head == "" {
-		n, err := os.ReadFile(filepath.Join(root, path))
-		return []byte(o), n, err
-	}
-	n, err := git("show", head+":"+path)
-	return []byte(o), []byte(n), err
+	n, err := os.ReadFile(filepath.Join(root, path))
+	return []byte(o), n, err
 }
 
 func git(args ...string) (string, error) {

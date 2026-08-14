@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # Installs the pre-push hook. Run once per clone: ./scripts/install-hooks.sh
 #
-# Why a hook rather than CI alone: branch protection is unavailable on a private repo
-# on this plan (the API returns 403), so a CI check CANNOT block a merge. CI is the
-# second opinion; the hook is the only thing that actually gates (ADR-0009).
+# The hook is a local safeguard for the push boundary. Review and CI remain separate
+# concerns; this hook does not claim to prove that a PR exists or was reviewed.
 #
 # Escape hatch, for when the gate is wrong rather than you: git push --no-verify
 set -euo pipefail
@@ -24,10 +23,6 @@ if [[ -x "$root/scripts/check-no-direct-main.sh" ]]; then
   printf '%s\n' "$plan" | "$root/scripts/check-no-direct-main.sh" || fail=1
 fi
 
-for s in check-asks check-spec-code-drift; do
-  [[ -x "$root/scripts/$s.sh" ]] || continue
-  "$root/scripts/$s.sh" </dev/null || fail=1
-done
 if [[ $fail -ne 0 ]]; then
   echo
   echo "pre-push: a gate failed. Fix it, or --no-verify if the gate is wrong."

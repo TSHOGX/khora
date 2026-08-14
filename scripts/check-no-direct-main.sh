@@ -6,9 +6,8 @@
 # the tree needs no PR at all. What this forbids is narrower and is the only part that
 # cannot be recovered after the fact: a change reaching main with nothing to look at.
 #
-# Why a hook rather than branch protection: unavailable on a private repo on this plan
-# (403, rulesets too). So this is the only enforcement point, and it is bypassable with
-# --no-verify by design — the goal is that bypassing is a decision, not a default.
+# This is a local safeguard. It is bypassable with --no-verify and cannot determine
+# whether a remote PR exists or was reviewed.
 #
 # Escape, for the cases that genuinely are not reviewable work:
 #   ALLOW_MAIN_PUSH=<reason> git push origin main
@@ -38,11 +37,11 @@ if [[ "$blocked" -eq 1 ]]; then
   cat <<'MSG'
 check-no-direct-main: FAIL — direct push to main.
 
-  main moves only through a reviewable unit (ADR-0011). Instead:
+  main moves only through a reviewable PR. Instead:
 
     git switch -c <topic>
     git push -u origin <topic>
-    gh pr create --fill        # the template asks for §§ touched, substrate, ruling
+    gh pr create --fill        # the template asks for issue and verification details
 
   A PR may close several issues, or none. What it may not do is skip existing.
 
