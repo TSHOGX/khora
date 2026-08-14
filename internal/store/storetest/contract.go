@@ -2538,6 +2538,15 @@ func testReplaceMountsKeepsOldBindingOnRefusal(t *testing.T, mk Factory) {
 // Rebinding to the IDENTICAL binding is deliberate: it is the case that forces
 // delete-before-insert, so it is the one an implementation is most tempted to serve with
 // two calls.
+//
+// A read cannot be caught INSIDE a correct replacement — both take the same exclusive lock,
+// so it serializes before or after. What a torn implementation does differently is DROP that
+// lock mid-way, which is why the reader only has to be live across the replacements rather
+// than land at some instant. The writer therefore waits for one read per replacement (see
+// the handshake below), instead of the earlier `reads >= replacements` asserted after the
+// fact: that number measures sync.Mutex handoff and the host's CPU count, not the store —
+// 115,700,882 observations at GOMAXPROCS=1 against 41,321 at GOMAXPROCS=8 and 86 on a 2-vCPU
+// hosted runner, all on one unchanged tree.
 func testReplaceMountsNoZeroRowWindow(t *testing.T, mk Factory) {
 	ctx := context.Background()
 	s, _ := mk(t)
@@ -2554,13 +2563,14 @@ func testReplaceMountsNoZeroRowWindow(t *testing.T, mk Factory) {
 		reads     atomic.Int64 // total observations the reader made
 		zeroReads atomic.Int64 // observations of ZERO rows — every one is a defect
 		wrongRows atomic.Int64 // observations of a row count that is neither 0 nor 1
+		readErrs  atomic.Int64 // failed reads: they observe nothing, so they cannot gate a turn
 		writeErrs int
 	)
 	// The reader must be RUNNING before the first replacement. Without this barrier the
 	// test is vacuous on a fast backend rather than merely weak: measured on Memory, all
 	// 300 replacements completed in microseconds and the reader goroutine had been
-	// scheduled exactly ONCE — after the writer was done. The counter assertion below
-	// catches that, but the barrier is what makes the check meaningful in the first place.
+	// scheduled exactly ONCE — after the writer was done. The barrier gets it started; the
+	// per-replacement handshake below is what keeps it running.
 	ready := make(chan struct{})
 	done := make(chan struct{})
 	readerDone := make(chan struct{})
@@ -2570,7 +2580,6 @@ func testReplaceMountsNoZeroRowWindow(t *testing.T, mk Factory) {
 		for {
 			rows, err := s.ListMountsByVolume(ctx, "vol_watched")
 			if err == nil {
-				reads.Add(1)
 				switch len(rows) {
 				case 0:
 					zeroReads.Add(1)
@@ -2578,6 +2587,12 @@ func testReplaceMountsNoZeroRowWindow(t *testing.T, mk Factory) {
 				default:
 					wrongRows.Add(1)
 				}
+				// Incremented LAST, after the observation is recorded. The writer treats a
+				// bump as "a read completed", so bumping first would let it proceed on a
+				// read whose verdict is not yet counted.
+				reads.Add(1)
+			} else {
+				readErrs.Add(1)
 			}
 			if first {
 				first = false
@@ -2593,14 +2608,39 @@ func testReplaceMountsNoZeroRowWindow(t *testing.T, mk Factory) {
 	<-ready
 
 	for i := 0; i < replacements; i++ {
+		// Sampled BEFORE the replacement, so the read the writer waits for below is one
+		// that could not have completed before this replacement started.
+		before := reads.Load()
 		if err := s.ReplaceMounts(ctx, "sbx_a", binding); err != nil {
 			writeErrs++
 			t.Errorf("replacement %d = %v; want success (identical binding)", i, err)
 		}
-		// An explicit scheduling point between replacements, so the reader gets a turn even
-		// at GOMAXPROCS=1. It cannot hide a torn implementation — the window a two-commit
-		// replacement opens is INSIDE one iteration, not between them.
-		runtime.Gosched()
+		// THE HANDSHAKE, and the reason this test is not scheduler-dependent. Waiting for
+		// the reader to complete one read per replacement makes `reads >= replacements`
+		// true by CONSTRUCTION on any host, where asserting it afterwards only expressed a
+		// hope the scheduler was free to refuse.
+		//
+		// It does not merely preserve detection, it SHARPENS it, and the reason is worth
+		// keeping: a torn replacement commits its DELETE and drops the lock, so the read
+		// this loop waits for is one that lands in the zero-row window. Measured against
+		// the two-commit shape on SQLite, 6 runs: exactly 300 zero-row observations every
+		// time, one per replacement. The old free-running hunt got 290-294 of 300 under the
+		// same starvation, i.e. it MISSED windows this cannot miss.
+		//
+		// It also makes the test cheaper on SQLite rather than dearer (476ms -> 38ms):
+		// the old unconditional Gosched handed the connection lock away every iteration
+		// and waited ~1.5ms to get it back. Total reads there fall (38k -> ~500) because
+		// the run is shorter, not because the reader is starved — and the floor is what
+		// this assertion needs, not the volume.
+		//
+		// Gosched rather than a sleep or a spin: the writer holds no lock here, and at
+		// GOMAXPROCS=1 yielding is the only way the reader runs at all.
+		for reads.Load() == before {
+			if readErrs.Load() > 0 {
+				break // a reader that cannot read will never bump the counter — reported below
+			}
+			runtime.Gosched()
+		}
 	}
 	close(done)
 	<-readerDone
@@ -2615,10 +2655,18 @@ func testReplaceMountsNoZeroRowWindow(t *testing.T, mk Factory) {
 	if writeErrs > 0 {
 		t.Fatalf("%d replacement(s) failed; the concurrency assertion above is not meaningful", writeErrs)
 	}
-	// NON-VACUITY: the assertion is only worth anything if the reader actually ran
-	// concurrently with the replacements. A reader that never got scheduled would report
-	// zero violations no matter how torn the implementation is — measured, that is exactly
-	// what happens on Memory without the barrier above (1 observation for 300 writes).
+	// A failing read observes nothing, so it can neither catch a zero-row window nor gate a
+	// turn — and the handshake above stops waiting on one, which would otherwise hang. It is
+	// reported rather than tolerated: ListMountsByVolume is not permitted to fail here, and
+	// a run where it did is a run that hunted with fewer observations than it claims.
+	if readErrs.Load() > 0 {
+		t.Errorf("%d concurrent ListMountsByVolume call(s) returned an error; the reader is the whole instrument here, so those replacements went unobserved", readErrs.Load())
+	}
+	// NON-VACUITY, now an invariant rather than a hope: the handshake waits for a read per
+	// replacement, so this can only trip if that loop broke out on a read error. It stays
+	// because it states what the handshake is FOR — a reader that never ran would report
+	// zero violations no matter how torn the implementation is (measured on Memory before
+	// the barrier existed: 1 observation for 300 writes).
 	if reads.Load() < replacements {
 		t.Errorf("the reader made %d observation(s) across %d replacements — too few to have been interleaved, so the zero-row assertion passed vacuously", reads.Load(), replacements)
 	}
