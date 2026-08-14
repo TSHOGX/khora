@@ -237,13 +237,16 @@ one). Never say "FS provider".
 - **If an approach fails twice, root-cause it.** Don't stack patches — name the cause and
   change approach.
 
-## Inbound asks from downstream consumers
+## Inbound asks
 
-The engine has consumers that are **separate repos with their own maintainers**: the platform
-layered on it (`TSHOGX/meadow`, checkout `~/meadow`) and a Template repo under that
-(`TSHOGX/tpl-pi`). When one needs something only the engine can provide, it files a change
-request as a GitHub issue here, labelled `ask:inbound`. **The issue number is the only
-identifier.**
+The engine has consumers outside this repo — a platform layered on it, a Template repo, a
+team running it, someone we have never met. **This repo does not enumerate them and must not
+start.** It holds no list of consumer repos, no checkout paths, no assumption about who is
+downstream: which consumers exist changes, and a rule written around today's set silently
+privileges them. Every ask is judged on the need it states, and the same way.
+
+When a consumer needs something only the engine can provide, they file it as a GitHub issue
+here, labelled `ask:inbound`. **The issue number is the only identifier.**
 
 ```bash
 gh issue list --repo TSHOGX/khora --label ask:inbound --state open
