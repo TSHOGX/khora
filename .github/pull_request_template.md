@@ -29,10 +29,16 @@ code-only change.
 ## Substrate run
 
 <!--
-Ran / not run, and if not, why. `goal.md`: "A green build proves nothing… Acceptance is
-on the real substrate." The cheap gate cannot speak for anything on the substrate path,
-and the only recorded run in the tree predates M10/M11 entirely — so "CI is green" is
-not an answer to this field.
+The SHA of the recorded run in docs/substrate-runs/ that covers this branch — not
+"ran" or "green". A SHA is checkable and a claim is not, which is how the previous
+record rotted into a false claim while looking like evidence.
+
+Record one with scripts/record-substrate-run.sh. If the covering run is an ancestor
+rather than this exact tree, say so: the CI job accepts that only when substrategate
+reports every commit since as not needing the substrate (ADR-0005).
+
+"CI is green" is not an answer. The cheap gate cannot speak for anything on the
+substrate path, and substrate-coverage only checks that evidence exists.
 -->
 
 ## Ruling
