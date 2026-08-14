@@ -27,7 +27,7 @@ snapshot — persistence is the overlay on disk, which is why a sandbox is porta
 across hosts, CPUs and runsc versions rather than pinned to a set of CPU features.
 
 > **Status: `v0.0.1`.** The engine is complete and verified against the real substrate:
-> 1063 acceptance tests on actual runsc/overlayfs/btrfs/nftables, 1056 passed, 7 skipped,
+> 1063 acceptance tests on actual runsc/overlayfs/btrfs/nftables, 1055 passed, 8 skipped,
 > 0 failed. The run is recorded — with the commit it ran on — in
 > [`docs/substrate-runs/`](docs/substrate-runs/), which is the number to trust rather than
 > this sentence. [`deploy/`](deploy/) carries the authenticating TLS boundary that goes in
