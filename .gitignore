@@ -3,7 +3,11 @@
 *.test
 *.out
 
-# local scratch (overlay upper/work, rootfs staging) — never commit
+# local scratch — never commit. Two unrelated kinds of thing live here: substrate
+# artifacts (overlay upper/work, rootfs staging) AND the orchestrator's default state
+# root (--state ./scratch/state, --store ./scratch/store.db), so this tree is routinely
+# deleted to reset local state. Anything under it that took work to produce must be
+# copied OUT before such a reset.
 /scratch/
 /test/rootfs/
 /.spike/
