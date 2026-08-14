@@ -78,6 +78,41 @@ for sha in "${recorded[@]}"; do
   needs=""
   while read -r c; do
     [[ -n "$c" ]] || continue
+    # A MERGE commit is skipped when both its parents are already accounted for, and
+    # this is a correctness fix rather than a convenience. substrategate diffs a rev
+    # against its FIRST parent, which for a merge is the base branch — so it replays
+    # the whole branch as ONE diff and reports every .go file in it, including files
+    # the recorded run already certified commit by commit. Measured: the v0.0.1 merge
+    # was flagged as needing the substrate while every commit inside it was either
+    # covered by the record or individually inert.
+    #
+    # Safe only under the condition checked here: each parent must be reachable from
+    # HEAD and either already covered by the record or itself in the walked range, so
+    # `rev-list` visits the branch's own commits and classifies each on its own. A
+    # merge bringing in a parent from OUTSIDE that set is NOT skipped — those commits
+    # were never walked, so nothing else would ever look at them.
+    # read -ra, not `for p in $parents`: this must not depend on the shell's
+    # word-splitting. Under zsh an unquoted expansion does NOT split on spaces, so the
+    # loop saw both parent SHAs as one string, every ancestry test failed, and the
+    # merge was reported as needing the substrate. The shebang is bash, so CI was
+    # correct while local verification was not — the worse direction to be wrong in,
+    # since it hides in exactly the place a person checks.
+    read -ra parents <<<"$(git rev-list --parents -n1 "$c" | cut -d' ' -f2-)"
+    if (( ${#parents[@]} > 1 )); then
+      unwalked=0
+      for p in "${parents[@]}"; do
+        if ! git merge-base --is-ancestor "$p" "$HEAD_SHA" 2>/dev/null; then
+          unwalked=1; break
+        fi
+        git merge-base --is-ancestor "$p" "$sha" 2>/dev/null && continue
+        if ! git rev-list "$sha..$HEAD_SHA" | grep -qF "$p"; then
+          unwalked=1; break
+        fi
+      done
+      if (( ! unwalked )); then
+        continue
+      fi
+    fi
     if ! go run ./test/preflight/substrategate "$c" >/dev/null 2>&1; then
       needs="$needs ${c:0:12}"
     fi
