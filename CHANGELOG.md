@@ -21,9 +21,9 @@ manufactures invariants the code does not actually hold, which is the silent dri
 spec discipline exists to prevent. **If you pin a `0.0.x` tag, treat an upgrade as a
 redeploy from empty state.**
 
-What this does *not* mean: the tag is not a moving target. A tag is immutable, the binaries
-built from it report it via `--version`, and `docs/substrate-runs/` records the substrate
-evidence for the tree it was cut from.
+What this does *not* mean: the tag is not a moving target. A tag is immutable, and the binaries
+built from it report it via `--version`. Substrate verification is recorded with the reviewing
+PR rather than committed as a document in the product tree.
 
 **`v0.0.1` was re-cut once, deliberately, and that is the only exception.** The first cut
 carried the project's former name; the tag was re-created on the renamed tree, pointing at
@@ -37,9 +37,8 @@ statement above governs from here on, `v0.0.1` included.
 
 First tagged release, and the first release under the name **Khora** — χώρα, the receptacle
 that has no character of its own and takes on the character of what enters it, which is this
-engine's first principle stated in Greek (see `README.md`). The engine is feature-complete
-against `docs/spec/` §1–§6 and verified on the real substrate; see `docs/substrate-runs/`
-for the run this tag was cut from, including its counts and skips.
+engine's first principle stated in Greek (see `README.md`). Substrate verification for release
+work is recorded with the reviewing PR, not as a generated document in the product tree.
 
 The project, the Go module (`github.com/TSHOGX/khora`), the CLI binary, the repository and
 the protobuf wire package (`khora.transport.v1`) all carry that one name. It was renamed
@@ -76,7 +75,7 @@ contains.
 - `orchestrator` — the single engine-host binary, serving the §6.1 REST + Connect API.
 - `sandboxd` — the in-guest daemon: init mode as PID 1, transport mode as its child.
 - `khora` — the CLI, a peer client of the same API a frontend uses.
-- `gateway` — the outward-facing mTLS boundary. **Not part of the engine** (ADR-0007):
+- `gateway` — the outward-facing mTLS boundary. **Not part of the engine**:
   authentication and TLS live in front of it, because every byte the engine can hand a
   guest is readable by uid 0 inside it, so the engine cannot be a secrecy boundary.
 - `pkg/khora` — a Go client. `pkg/transport` — the generated wire stubs.
@@ -91,4 +90,4 @@ contains.
   front of it (`deploy/` carries a worked config).
 - **Single node.** There is no scheduler across hosts.
 - **Linux only**, and the substrate is a hard requirement, not a preference: gVisor/runsc,
-  kernel overlayfs, netns, cgroup v2, btrfs in `squota` mode, `nft`, `ip` (ADR-0002).
+  kernel overlayfs, netns, cgroup v2, btrfs in `squota` mode, `nft`, `ip`.

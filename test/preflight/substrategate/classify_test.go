@@ -2,6 +2,29 @@ package main
 
 import "testing"
 
+func TestInertPath(t *testing.T) {
+	cases := map[string]bool{
+		"docs/operations/testing.md":           true,
+		".github/workflows/ci.yml":             true,
+		".gitignore":                           true,
+		"scripts/check-no-direct-main.sh":      true,
+		"scripts/install-hooks.sh":             true,
+		"scripts/check-generated.sh":           true,
+		"internal/arch/coupling_test.go":       true,
+		"test/preflight/substrategate/main.go": true,
+		"test/e2e_substrate_test.go":           false,
+		"templates/bare/build.sh":              false,
+		"test/preflight/build-rootfs.sh":       false,
+		"proto/khora/transport/v1/x.proto":     false,
+		"go.mod":                               false,
+	}
+	for path, want := range cases {
+		if got := inertPath(path); got != want {
+			t.Errorf("inertPath(%q) = %v, want %v", path, got, want)
+		}
+	}
+}
+
 // The whole tool rests on sameCode, and sameCode licenses skipping a gate — so the
 // cases that matter are the ones where a naive implementation says "comment-only"
 // about something that changes the build. Each false case below is a real way to

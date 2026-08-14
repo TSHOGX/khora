@@ -27,9 +27,6 @@
 /gateway
 /openapigen
 
-# Substrate run records are TRACKED, in docs/substrate-runs/ — an untracked record is
-# one nothing can keep honest, and /.substrate-run.log rotted into a false EXIT=0 claim
-# here precisely because nothing could see it. scripts/check-substrate-coverage.sh has
-# to read the record in a fresh CI checkout, so it cannot be ignored. This line stays
-# only so a stray local run does not land untracked.
+# Keep an obsolete local transcript from being added by accident. Substrate results belong
+# in the reviewing PR; they are not generated product files.
 /.substrate-run.log

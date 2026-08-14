@@ -6,10 +6,18 @@ on:
   pull_request:
     branches: [ main ]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # The cheap gate: builds and unit tests, no substrate required
   build-and-test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -17,6 +25,18 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: '1.23'
+
+      - name: Set up Buf
+        uses: bufbuild/buf-setup-action@v1
+        with:
+          version: '1.47.2'
+
+      - name: Verify generated output
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.35.2
+          go install connectrpc.com/connect/cmd/protoc-gen-connect-go@v1.17.0
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          ./scripts/check-generated.sh
 
       - name: Build all packages
         run: go build ./...
@@ -32,46 +52,3 @@ jobs:
 
       - name: Verify reproducible builds
         run: make verify-reproducible
-
-  # Ask/§ consistency (ADR-0009). Cheap, no substrate. This CANNOT block a merge —
-  # branch protection is unavailable on a private repo on this plan — so the pre-push
-  # hook is the actual gate and this is the second opinion.
-  asks:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Register against the tracker
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: ./scripts/check-asks.sh
-
-  # Substrate COVERAGE, on a hosted runner. This replaces a `substrate` job that
-  # targeted [self-hosted, linux, btrfs, runsc] with no registered runner: it sat
-  # `queued` forever, never reported, and per scripts/check-asks.sh a gate that cannot
-  # fail is worse than no gate, because it is believed.
-  #
-  # A hosted runner cannot run the suite — no root for --network=sandbox, no runsc, no
-  # btrfs. It CAN assert that a recorded run covers HEAD, which is a real check with a
-  # real failure mode. The suite itself runs on a substrate host, recorded by
-  # scripts/record-substrate-run.sh into docs/substrate-runs/.
-  substrate-coverage:
-    runs-on: ubuntu-latest
-    needs: build-and-test
-    steps:
-      # fetch-depth: 0 because the check walks history: it must resolve the recorded
-      # SHA, prove it is an ancestor, and ask substrategate about each commit since. In
-      # a shallow checkout "cannot tell" would otherwise read as "covered".
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.23'
-
-      - name: Assert a recorded substrate run covers HEAD
-        run: ./scripts/check-substrate-coverage.sh

@@ -26,11 +26,10 @@ Sandboxes survive being paused: `POST /v1/sandboxes/{id}/pause` stops the world 
 snapshot — persistence is the overlay on disk, which is why a sandbox is portable
 across hosts, CPUs and runsc versions rather than pinned to a set of CPU features.
 
-> **Status: `v0.0.1`.** The engine is complete and verified against the real substrate:
-> 1063 acceptance tests on actual runsc/overlayfs/btrfs/nftables, 1055 passed, 8 skipped,
-> 0 failed. The run is recorded — with the commit it ran on — in
-> [`docs/substrate-runs/`](docs/substrate-runs/), which is the number to trust rather than
-> this sentence. [`deploy/`](deploy/) carries the authenticating TLS boundary that goes in
+> **Status: `v0.0.1`.** Substrate acceptance is a developer pre-PR requirement for material
+> changes. After the last material change, the PR records the command, host profile and result;
+> no substrate transcript is committed as product documentation. [`deploy/`](deploy/) carries the
+> authenticating TLS boundary that goes in
 > front of it, and a CLI ships in `cmd/khora`. Still missing before you deploy this: no
 > production Template ships in this repo, and there are no client libraries for other
 > languages yet. See [What is missing](#what-is-missing-before-you-deploy-this) and
@@ -85,11 +84,8 @@ A Linux host with:
 - **Go 1.23+** to build
 
 Engine code and all overlay scratch must sit on a native filesystem, never a
-virtiofs shared mount. Why each requirement is hard, with the measurements behind it:
-[`docs/decisions/ADR-0002`](docs/decisions/ADR-0002-execution-environment.md).
-
-Development and testing happen on an OrbStack machine (`sbx`, arm64). The substrate
-facts are additionally confirmed on amd64 where noted in ADR-0002's validation matrix.
+virtiofs shared mount. Development and testing may use `sbx` or any host satisfying
+the requirements above; the amd64 build remains part of routine verification.
 
 ## Build and run
 
@@ -103,7 +99,7 @@ go build -trimpath -ldflags="-buildid= -s -w" -o bin/orchestrator ./cmd/orchestr
 go build -trimpath -ldflags="-buildid= -s -w" -o bin/gateway ./cmd/gateway
 go build -trimpath -ldflags="-buildid= -s -w" -o bin/sandboxd ./cmd/sandboxd
 
-# Verify reproducibility (optional):
+# Verify the reproducibility promise:
 make verify-reproducible
 
 # A Template is a directory holding a guest rootfs, and it needs the sandboxd binary,
@@ -175,6 +171,10 @@ sudo env "PATH=$PATH" "HOME=$HOME" \
   go test -tags 'substrate quotachurn' -count=1 ./internal/btrfs/
 ```
 
+Before marking a PR ready, run `go run ./test/preflight/substrategate --base origin/main` against
+the complete PR diff. Record the result, command, host profile and any skip reason in the PR after
+the last material change.
+
 A third tag, `testguest`, compiles an in-guest fault-injection seam into `sandboxd`
 that is absent from a production guest. The substrate harness applies it itself; you
 never pass it by hand.
@@ -198,8 +198,7 @@ Known and deliberate, not oversights:
   outward-facing surface by construction. What you still supply is the PKI: a server
   certificate and the CA that issues caller certificates.
 - **One Go client and a machine-readable contract, and no SDK beyond that** —
-  deliberately, and the boundary is [`ADR-0008`](docs/decisions/ADR-0008-outward-client-boundary.md).
-  What ships: [`pkg/khora`](pkg/khora/) — imported as
+  deliberately. What ships: [`pkg/khora`](pkg/khora/) — imported as
   `github.com/TSHOGX/khora/pkg/khora`, a path that names a host and can therefore be
   resolved, which a bare `khora` could not be. **Resolvable is not the same as fetchable,
   and half of that gap is now closed and half is closed permanently the other way**: there
