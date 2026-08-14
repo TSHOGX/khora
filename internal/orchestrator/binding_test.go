@@ -8,11 +8,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/TSHOGX/warren/internal/lifecycle"
-	"github.com/TSHOGX/warren/internal/model"
-	"github.com/TSHOGX/warren/internal/store"
-	"github.com/TSHOGX/warren/internal/transport"
-	"github.com/TSHOGX/warren/internal/volume"
+	"github.com/TSHOGX/khora/internal/lifecycle"
+	"github.com/TSHOGX/khora/internal/model"
+	"github.com/TSHOGX/khora/internal/store"
+	"github.com/TSHOGX/khora/internal/transport"
+	"github.com/TSHOGX/khora/internal/volume"
 )
 
 // bindingFixture assembles an Engine with fake runtime/rootfs seams and a REAL

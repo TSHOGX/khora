@@ -6,7 +6,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/TSHOGX/warren/test/substratereq"
+	"github.com/TSHOGX/khora/test/substratereq"
 )
 
 // Every file in this package is `substrate`-tagged, so the preconditions can be stated

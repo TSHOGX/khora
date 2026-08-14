@@ -1,4 +1,4 @@
-# Reproducible build for warren binaries.
+# Reproducible build for khora binaries.
 #
 # The flags:
 #   -trimpath        removes absolute paths from the binary
@@ -21,7 +21,7 @@ LDFLAGS := -buildid= -s -w -X main.version=$(VERSION)
 BUILDFLAGS := -trimpath -ldflags="$(LDFLAGS)"
 
 .PHONY: all
-all: bin/orchestrator bin/gateway bin/sandboxd bin/warren
+all: bin/orchestrator bin/gateway bin/sandboxd bin/khora
 
 bin/orchestrator: $(shell find cmd/orchestrator internal -name '*.go')
 	@mkdir -p bin
@@ -35,9 +35,9 @@ bin/sandboxd: $(shell find cmd/sandboxd internal -name '*.go')
 	@mkdir -p bin
 	go build $(BUILDFLAGS) -o $@ ./cmd/sandboxd
 
-bin/warren: $(shell find cmd/warren -name '*.go')
+bin/khora: $(shell find cmd/khora -name '*.go')
 	@mkdir -p bin
-	go build $(BUILDFLAGS) -o $@ ./cmd/warren
+	go build $(BUILDFLAGS) -o $@ ./cmd/khora
 
 .PHONY: clean
 clean:
@@ -46,38 +46,38 @@ clean:
 .PHONY: verify-reproducible
 verify-reproducible:
 	@echo "=== verifying reproducible builds ==="
-	@mkdir -p /tmp/warren-repro-test
-	@go build $(BUILDFLAGS) -o /tmp/warren-repro-test/orch1 ./cmd/orchestrator
+	@mkdir -p /tmp/khora-repro-test
+	@go build $(BUILDFLAGS) -o /tmp/khora-repro-test/orch1 ./cmd/orchestrator
 	@sleep 1
-	@go build $(BUILDFLAGS) -o /tmp/warren-repro-test/orch2 ./cmd/orchestrator
-	@if [ "$$(sha256sum /tmp/warren-repro-test/orch1 | cut -d' ' -f1)" = "$$(sha256sum /tmp/warren-repro-test/orch2 | cut -d' ' -f1)" ]; then \
+	@go build $(BUILDFLAGS) -o /tmp/khora-repro-test/orch2 ./cmd/orchestrator
+	@if [ "$$(sha256sum /tmp/khora-repro-test/orch1 | cut -d' ' -f1)" = "$$(sha256sum /tmp/khora-repro-test/orch2 | cut -d' ' -f1)" ]; then \
 		echo "✓ orchestrator: reproducible"; \
 	else \
 		echo "✗ orchestrator: NOT reproducible"; exit 1; \
 	fi
-	@go build $(BUILDFLAGS) -o /tmp/warren-repro-test/gw1 ./cmd/gateway
+	@go build $(BUILDFLAGS) -o /tmp/khora-repro-test/gw1 ./cmd/gateway
 	@sleep 1
-	@go build $(BUILDFLAGS) -o /tmp/warren-repro-test/gw2 ./cmd/gateway
-	@if [ "$$(sha256sum /tmp/warren-repro-test/gw1 | cut -d' ' -f1)" = "$$(sha256sum /tmp/warren-repro-test/gw2 | cut -d' ' -f1)" ]; then \
+	@go build $(BUILDFLAGS) -o /tmp/khora-repro-test/gw2 ./cmd/gateway
+	@if [ "$$(sha256sum /tmp/khora-repro-test/gw1 | cut -d' ' -f1)" = "$$(sha256sum /tmp/khora-repro-test/gw2 | cut -d' ' -f1)" ]; then \
 		echo "✓ gateway: reproducible"; \
 	else \
 		echo "✗ gateway: NOT reproducible"; exit 1; \
 	fi
-	@go build $(BUILDFLAGS) -o /tmp/warren-repro-test/sandboxd1 ./cmd/sandboxd
+	@go build $(BUILDFLAGS) -o /tmp/khora-repro-test/sandboxd1 ./cmd/sandboxd
 	@sleep 1
-	@go build $(BUILDFLAGS) -o /tmp/warren-repro-test/sandboxd2 ./cmd/sandboxd
-	@if [ "$$(sha256sum /tmp/warren-repro-test/sandboxd1 | cut -d' ' -f1)" = "$$(sha256sum /tmp/warren-repro-test/sandboxd2 | cut -d' ' -f1)" ]; then \
+	@go build $(BUILDFLAGS) -o /tmp/khora-repro-test/sandboxd2 ./cmd/sandboxd
+	@if [ "$$(sha256sum /tmp/khora-repro-test/sandboxd1 | cut -d' ' -f1)" = "$$(sha256sum /tmp/khora-repro-test/sandboxd2 | cut -d' ' -f1)" ]; then \
 		echo "✓ sandboxd: reproducible"; \
 	else \
 		echo "✗ sandboxd: NOT reproducible"; exit 1; \
 	fi
-	@go build $(BUILDFLAGS) -o /tmp/warren-repro-test/warren1 ./cmd/warren
+	@go build $(BUILDFLAGS) -o /tmp/khora-repro-test/khora1 ./cmd/khora
 	@sleep 1
-	@go build $(BUILDFLAGS) -o /tmp/warren-repro-test/warren2 ./cmd/warren
-	@if [ "$$(sha256sum /tmp/warren-repro-test/warren1 | cut -d' ' -f1)" = "$$(sha256sum /tmp/warren-repro-test/warren2 | cut -d' ' -f1)" ]; then \
-		echo "✓ warren: reproducible"; \
+	@go build $(BUILDFLAGS) -o /tmp/khora-repro-test/khora2 ./cmd/khora
+	@if [ "$$(sha256sum /tmp/khora-repro-test/khora1 | cut -d' ' -f1)" = "$$(sha256sum /tmp/khora-repro-test/khora2 | cut -d' ' -f1)" ]; then \
+		echo "✓ khora: reproducible"; \
 	else \
-		echo "✗ warren: NOT reproducible"; exit 1; \
+		echo "✗ khora: NOT reproducible"; exit 1; \
 	fi
-	@rm -rf /tmp/warren-repro-test
+	@rm -rf /tmp/khora-repro-test
 	@echo "=== all binaries reproducible ==="

@@ -48,8 +48,8 @@ security path. Caddy or Envoy work equally well — the requirements to carry ac
 in the config's comments.
 
 ```sh
-cp deploy/nginx-gateway.conf /etc/nginx/sites-available/warren.conf
-ln -s /etc/nginx/sites-available/warren.conf /etc/nginx/sites-enabled/
+cp deploy/nginx-gateway.conf /etc/nginx/sites-available/khora.conf
+ln -s /etc/nginx/sites-available/khora.conf /etc/nginx/sites-enabled/
 # server.pem/server.key = this gateway's identity
 # client-ca.pem         = the CA that issues CALLER certificates. Scope it to a CA you
 #                         issue from: a public bundle here authenticates the internet.
@@ -91,23 +91,23 @@ down is an unreachable API, not a degraded engine.
 
 ## Bringing the engine itself up
 
-[`warren-orchestrator.service`](warren-orchestrator.service) is a systemd unit that
+[`khora-orchestrator.service`](khora-orchestrator.service) is a systemd unit that
 passes `systemd-analyze verify` clean and was started, probed and stopped on a real
 box before being committed.
 
 ```sh
 # 1. the state root must be btrfs in squota mode — disk caps ARE btrfs quotas
-mount | grep /srv/warren/state
+mount | grep /srv/khora/state
 
 # 2. build a Template FIRST. The boot seed registers what it finds under --templates,
 #    so an empty directory is a running engine with nothing to run.
 go build -o /tmp/sandboxd ./cmd/sandboxd
-sudo ./templates/bare/build.sh /var/lib/warren/templates/bare /tmp/sandboxd
+sudo ./templates/bare/build.sh /var/lib/khora/templates/bare /tmp/sandboxd
 
 # 3. install the binary and the unit
 go build ./cmd/orchestrator && sudo install -m755 orchestrator /usr/local/bin/
-sudo cp deploy/warren-orchestrator.service /etc/systemd/system/
-sudo systemctl daemon-reload && sudo systemctl enable --now warren-orchestrator
+sudo cp deploy/khora-orchestrator.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now khora-orchestrator
 ```
 
 Three things about the unit are decisions rather than boilerplate:

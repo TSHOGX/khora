@@ -15,7 +15,7 @@ clients of the same API** — the CLI is a first-class citizen, not a back door.
 
 > **The outer-edge protocol split**: sandbox/template/volume/network **lifecycle = REST +
 > JSON** (the control-plane block, the authoritative endpoints, with OpenAPI describing them
-> after the fact); the **process / fs data plane = Connect-RPC** (`engine.transport.v1`,
+> after the fact); the **process / fs data plane = Connect-RPC** (`khora.transport.v1`,
 > whose authoritative contract is `transport.proto`, with clients generating stubs via
 > `buf`. That package holds **three** services: the outward-facing `ProcessService` /
 > `FsService`, plus `HealthService` for the engine's own use — the last is not an outward
@@ -475,7 +475,7 @@ POST   /v1/sandboxes/{id}/publish    {guest_port, proto}
 
 **Data plane (Connect-RPC; the authoritative wire is the proto, not the REST lines below)** —
 process / fs have server-streaming plus strongly-typed frames, and **the authoritative contract
-is `engine.transport.v1`'s `ProcessService` / `FsService`** (D4.3/D4.4). Clients generate stubs
+is `khora.transport.v1`'s `ProcessService` / `FsService`** (D4.3/D4.4). Clients generate stubs
 from `transport.proto` via `buf` and are reverse-proxied through `orchestrator` to `sandboxd`
 (D5.1). **Sandbox addressing travels in an out-of-band request header, `Engine-Sandbox-Id`**:
 the proto itself addresses only by guest-native pid (D4.6 vocabulary boundary), and the reverse

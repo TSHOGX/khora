@@ -124,7 +124,7 @@ func streamingUpstream(t *testing.T, n int, gap time.Duration) (string, *int64) 
 // that returned 401 after forwarding would satisfy a status-code check while having
 // already exposed the control plane.
 func TestAnUnauthenticatedCallerNeverReachesTheUpstream(t *testing.T) {
-	ca := newAuthority(t, "warren-test-ca")
+	ca := newAuthority(t, "khora-test-ca")
 	pool := x509.NewCertPool()
 	pool.AddCert(ca.cert)
 	serverCert := issueServer(t, ca)
@@ -181,7 +181,7 @@ func TestAnAuthenticatedCallerGetsAStreamThatIsNotBuffered(t *testing.T) {
 		chunks = 3
 		gap    = 200 * time.Millisecond
 	)
-	ca := newAuthority(t, "warren-test-ca")
+	ca := newAuthority(t, "khora-test-ca")
 	pool := x509.NewCertPool()
 	pool.AddCert(ca.cert)
 	serverCert := issueServer(t, ca)
@@ -348,7 +348,7 @@ func TestFlushIntervalIsPinnedWhereItActuallyBites(t *testing.T) {
 // caller identity invites it to grow one, so the scrub is asserted rather than left
 // to the comment in main().
 func TestTheGatewayForwardsNoCallerIdentityToTheEngine(t *testing.T) {
-	ca := newAuthority(t, "warren-test-ca")
+	ca := newAuthority(t, "khora-test-ca")
 	pool := x509.NewCertPool()
 	pool.AddCert(ca.cert)
 	serverCert := issueServer(t, ca)

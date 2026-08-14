@@ -24,11 +24,11 @@ import (
 // was ruled out for §5.C partly because this guard would have failed on it
 // (volume.md D5.1).
 var subsystems = []string{
-	"github.com/TSHOGX/warren/internal/runtime",   // §5.A
-	"github.com/TSHOGX/warren/internal/rootfs",    // §5.B
-	"github.com/TSHOGX/warren/internal/volume",    // §5.C
-	"github.com/TSHOGX/warren/internal/network",   // §5.D
-	"github.com/TSHOGX/warren/internal/transport", // §5.E
+	"github.com/TSHOGX/khora/internal/runtime",   // §5.A
+	"github.com/TSHOGX/khora/internal/rootfs",    // §5.B
+	"github.com/TSHOGX/khora/internal/volume",    // §5.C
+	"github.com/TSHOGX/khora/internal/network",   // §5.D
+	"github.com/TSHOGX/khora/internal/transport", // §5.E
 }
 
 // mediatorOnly are packages a §5 subsystem must never import. A subsystem that
@@ -36,8 +36,8 @@ var subsystems = []string{
 // (the keep-set pattern), precisely so the subsystem cannot form its own opinion
 // about authoritative state.
 var mediatorOnly = []string{
-	"github.com/TSHOGX/warren/internal/lifecycle",
-	"github.com/TSHOGX/warren/internal/store",
+	"github.com/TSHOGX/khora/internal/lifecycle",
+	"github.com/TSHOGX/khora/internal/store",
 }
 
 // allowedEdges are cross-subsystem imports permitted with the reason they are
@@ -86,7 +86,7 @@ func listPackages(t *testing.T, tags string) []pkg {
 	if tags != "" {
 		args = append(args, "-tags", tags)
 	}
-	args = append(args, "github.com/TSHOGX/warren/...")
+	args = append(args, "github.com/TSHOGX/khora/...")
 	out, err := exec.Command("go", args...).Output()
 	if err != nil {
 		t.Fatalf("go list -tags %q: %v", tags, err)
@@ -266,15 +266,15 @@ func TestSubsystemsDoNotReadTheControlPlane(t *testing.T) {
 // rather than spelled inline because the leaf guard's exemption below has to mean
 // exactly this prefix: a literal that drifted from the `leaves` entries would turn
 // the exemption into a hole nobody could see.
-const generatedTree = "github.com/TSHOGX/warren/pkg/transport/gen/"
+const generatedTree = "github.com/TSHOGX/khora/pkg/transport/gen/"
 
 var leaves = []string{
-	"github.com/TSHOGX/warren/internal/guestport",
-	"github.com/TSHOGX/warren/internal/ruleset",
-	"github.com/TSHOGX/warren/internal/btrfs",
-	"github.com/TSHOGX/warren/internal/allocbytes",
-	"github.com/TSHOGX/warren/pkg/transport/gen/engine/transport/v1",
-	"github.com/TSHOGX/warren/pkg/transport/gen/engine/transport/v1/transportv1connect",
+	"github.com/TSHOGX/khora/internal/guestport",
+	"github.com/TSHOGX/khora/internal/ruleset",
+	"github.com/TSHOGX/khora/internal/btrfs",
+	"github.com/TSHOGX/khora/internal/allocbytes",
+	"github.com/TSHOGX/khora/pkg/transport/gen/khora/transport/v1",
+	"github.com/TSHOGX/khora/pkg/transport/gen/khora/transport/v1/transportv1connect",
 }
 
 // inertLeaves are the leaves CLAUDE.md's second half binds: "a leaf may DECIDE
@@ -296,8 +296,8 @@ var leaves = []string{
 // generate side (root-free unit tests) and the install side, which is only true
 // while it decides and never acts.
 var inertLeaves = []string{
-	"github.com/TSHOGX/warren/internal/guestport",
-	"github.com/TSHOGX/warren/internal/ruleset",
+	"github.com/TSHOGX/khora/internal/guestport",
+	"github.com/TSHOGX/khora/internal/ruleset",
 }
 
 // actsOnTheWorld are stdlib packages a leaf cannot reach without doing the thing
@@ -367,7 +367,7 @@ func TestLeavesImportNothingFromTheEngine(t *testing.T) {
 			delete(want, p.ImportPath)
 			for _, group := range [][]string{p.Imports, p.TestImports, p.XTestImports} {
 				for _, imp := range group {
-					if !strings.HasPrefix(imp, "github.com/TSHOGX/warren/") {
+					if !strings.HasPrefix(imp, "github.com/TSHOGX/khora/") {
 						continue
 					}
 					// The generated tree is two packages by protoc's construction — the

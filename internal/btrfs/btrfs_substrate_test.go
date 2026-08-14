@@ -16,7 +16,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/TSHOGX/warren/test/substratereq"
+	"github.com/TSHOGX/khora/test/substratereq"
 )
 
 // TestMain states this package's substrate preconditions ONCE, and FAILS rather than

@@ -7,9 +7,9 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/TSHOGX/warren/internal/lifecycle"
-	"github.com/TSHOGX/warren/internal/model"
-	"github.com/TSHOGX/warren/internal/network"
+	"github.com/TSHOGX/khora/internal/lifecycle"
+	"github.com/TSHOGX/khora/internal/model"
+	"github.com/TSHOGX/khora/internal/network"
 )
 
 // This file carries §6.1's Network block: the `network?` create input, the whole-for-

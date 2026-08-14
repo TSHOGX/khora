@@ -17,7 +17,7 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/TSHOGX/warren/test/substratereq"
+	"github.com/TSHOGX/khora/test/substratereq"
 )
 
 // mustRoot FAILS rather than skipping: `ok` from a substrate run must mean the substrate

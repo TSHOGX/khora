@@ -13,7 +13,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/TSHOGX/warren/internal/waitfor"
+	"github.com/TSHOGX/khora/internal/waitfor"
 )
 
 // subtreeReaperHelperEnv re-enters this test binary as the helper below.

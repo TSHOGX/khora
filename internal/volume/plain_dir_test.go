@@ -3,8 +3,8 @@ package volume_test
 import (
 	"testing"
 
-	"github.com/TSHOGX/warren/internal/volume"
-	"github.com/TSHOGX/warren/internal/volume/volumetest"
+	"github.com/TSHOGX/khora/internal/volume"
+	"github.com/TSHOGX/khora/internal/volume/volumetest"
 )
 
 // TestPlainDirContract runs the shared seam contract against the TEST-ONLY

@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"syscall"
 
-	"github.com/TSHOGX/warren/internal/guestport"
+	"github.com/TSHOGX/khora/internal/guestport"
 )
 
 // --- large-file bypass (§5.E fs / transport D4.4) ----------------------------

@@ -17,11 +17,11 @@ import (
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
 
-	"github.com/TSHOGX/warren/internal/lifecycle"
-	"github.com/TSHOGX/warren/internal/model"
-	"github.com/TSHOGX/warren/internal/rootfs"
-	"github.com/TSHOGX/warren/internal/store"
-	"github.com/TSHOGX/warren/pkg/transport/gen/engine/transport/v1/transportv1connect"
+	"github.com/TSHOGX/khora/internal/lifecycle"
+	"github.com/TSHOGX/khora/internal/model"
+	"github.com/TSHOGX/khora/internal/rootfs"
+	"github.com/TSHOGX/khora/internal/store"
+	"github.com/TSHOGX/khora/pkg/transport/gen/khora/transport/v1/transportv1connect"
 )
 
 // HTTPHandler exposes the minimal §6.1 sandbox-centric API — ID-addressed, no
@@ -35,7 +35,7 @@ import (
 // REST/JSON here; the process/fs DATA plane is Connect-RPC (the SAME
 // transport.proto as the inner edge, re-proxied by sandbox_id — D5.2), and is
 // Connect-only, no REST/NDJSON facade (D5.3). The two mount on one mux: Connect
-// services own their /engine.transport.v1.*/ paths, control-plane REST owns
+// services own their /khora.transport.v1.*/ paths, control-plane REST owns
 // /v1/... .
 func (e *Engine) HTTPHandler() http.Handler {
 	mux := http.NewServeMux()

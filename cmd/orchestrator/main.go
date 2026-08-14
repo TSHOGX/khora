@@ -15,7 +15,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/TSHOGX/warren/internal/orchestrator"
+	"github.com/TSHOGX/khora/internal/orchestrator"
 )
 
 // version is stamped by the Makefile's -X at build time; "dev" means built by a
@@ -29,7 +29,7 @@ func main() {
 		showVer    = flag.Bool("version", false, "print the version and exit")
 		addr       = flag.String("addr", "127.0.0.1:8080", "listen address for the §6.1 API; must be loopback unless -insecure-listen (refused at startup, ADR-0007)")
 		insecure   = flag.Bool("insecure-listen", false, "permit a non-loopback -addr, publishing the API with no authentication and no TLS (ADR-0007)")
-		templates  = flag.String("templates", "/var/lib/warren/templates", "BUILT Template root, one subdirectory per builtin whose name is its TemplateID; not the definitions in templates/")
+		templates  = flag.String("templates", "/var/lib/khora/templates", "BUILT Template root, one subdirectory per builtin whose name is its TemplateID; not the definitions in templates/")
 		state      = flag.String("state", "./scratch/state", "state root (overlays + runsc state/bundles)")
 		storePath  = flag.String("store", "./scratch/store.db", "SQLite store file (ADR-0004)")
 		volumes    = flag.String("volumes-dir", "", "§5.C volume storage root; empty = <state>/volumes, a sibling of the overlay root, never nested in it")

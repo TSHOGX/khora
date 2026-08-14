@@ -25,11 +25,30 @@ What this does *not* mean: the tag is not a moving target. A tag is immutable, t
 built from it report it via `--version`, and `docs/substrate-runs/` records the substrate
 evidence for the tree it was cut from.
 
+**`v0.0.1` was re-cut once, deliberately, and that is the only exception.** The first cut
+carried the project's former name; the tag was re-created on the renamed tree, pointing at
+a different commit than it first did. What made it safe is a condition that cannot recur:
+**no consumer had fetched it** — the repository is private, the one dependent was told to
+pin it and had not yet, and there was no released artifact to migrate. Re-cutting a tag
+someone holds would be the moving target this section rules out, so the immutability
+statement above governs from here on, `v0.0.1` included.
+
 ## v0.0.1
 
-First tagged release. The engine is feature-complete against `docs/spec/` §1–§6 and
-verified on the real substrate; see `docs/substrate-runs/` for the run this tag was cut
-from, including its counts and skips.
+First tagged release, and the first release under the name **Khora** — χώρα, the receptacle
+that has no character of its own and takes on the character of what enters it, which is this
+engine's first principle stated in Greek (see `README.md`). The engine is feature-complete
+against `docs/spec/` §1–§6 and verified on the real substrate; see `docs/substrate-runs/`
+for the run this tag was cut from, including its counts and skips.
+
+The project, the Go module (`github.com/TSHOGX/khora`), the CLI binary, the repository and
+the protobuf wire package (`khora.transport.v1`) all carry that one name. It was renamed
+here rather than after the release, because the wire package is a compatibility surface
+between the host binary and every Template built before it changes — so this was the only
+moment the change cost nothing. *engine* and *orchestrator* keep their meanings: the sandbox
+abstraction and the binary hosting it, layer names rather than project names. Sandbox-scoped
+runtime identifiers (`sbx*` nftables tables, netns and container names) are unchanged; they
+never named the project.
 
 This is the first tag, so there is no "changed since" — what follows is what the tag
 contains.
@@ -56,11 +75,11 @@ contains.
 
 - `orchestrator` — the single engine-host binary, serving the §6.1 REST + Connect API.
 - `sandboxd` — the in-guest daemon: init mode as PID 1, transport mode as its child.
-- `warren` — the CLI, a peer client of the same API a frontend uses.
+- `khora` — the CLI, a peer client of the same API a frontend uses.
 - `gateway` — the outward-facing mTLS boundary. **Not part of the engine** (ADR-0007):
   authentication and TLS live in front of it, because every byte the engine can hand a
   guest is readable by uid 0 inside it, so the engine cannot be a secrecy boundary.
-- `pkg/warren` — a Go client. `pkg/transport` — the generated wire stubs.
+- `pkg/khora` — a Go client. `pkg/transport` — the generated wire stubs.
 - All four binaries answer `--version`, stamped from `git describe` at build time.
 
 ### Known limits

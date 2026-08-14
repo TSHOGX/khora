@@ -8,11 +8,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/TSHOGX/warren/internal/model"
-	"github.com/TSHOGX/warren/internal/network"
-	"github.com/TSHOGX/warren/internal/store"
-	"github.com/TSHOGX/warren/internal/transport"
-	"github.com/TSHOGX/warren/internal/waitfor"
+	"github.com/TSHOGX/khora/internal/model"
+	"github.com/TSHOGX/khora/internal/network"
+	"github.com/TSHOGX/khora/internal/store"
+	"github.com/TSHOGX/khora/internal/transport"
+	"github.com/TSHOGX/khora/internal/waitfor"
 )
 
 // The Deployment carries ONLY viaHostLocal: no second-hop uid, which is the state the

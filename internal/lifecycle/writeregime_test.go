@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/TSHOGX/warren/internal/model"
+	"github.com/TSHOGX/khora/internal/model"
 )
 
 // TestWriteRegimeRefusesWhileALiveRWMountHolds is the first direction of §5.C's

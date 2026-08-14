@@ -12,7 +12,7 @@ import (
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
 
-	"github.com/TSHOGX/warren/internal/transport"
+	"github.com/TSHOGX/khora/internal/transport"
 )
 
 // h2cEcho starts a throwaway h2c server and returns its endpoint plus a counter of

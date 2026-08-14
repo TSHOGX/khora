@@ -53,7 +53,7 @@ if [ "${ALLOW_IN_MODULE:-0}" != 1 ]; then
 			echo "build.sh: refusing to build into $DEST — it is inside the Go module at $probe," >&2
 			echo "          and a Template contains mode-0700 root-owned directories that make" >&2
 			echo "          \`go build ./...\` fail for a non-root user. Build outside the module" >&2
-			echo "          (e.g. /srv/warren/templates/bare), or set ALLOW_IN_MODULE=1 to override." >&2
+			echo "          (e.g. /srv/khora/templates/bare), or set ALLOW_IN_MODULE=1 to override." >&2
 			exit 1
 		fi
 		probe="$(dirname "$probe")"

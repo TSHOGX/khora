@@ -17,8 +17,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/TSHOGX/warren/internal/waitfor"
-	"github.com/TSHOGX/warren/test/substratereq"
+	"github.com/TSHOGX/khora/internal/waitfor"
+	"github.com/TSHOGX/khora/test/substratereq"
 )
 
 // mustRoot FAILS rather than skipping: `ok` from a substrate run must mean the substrate

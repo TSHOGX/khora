@@ -20,12 +20,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/TSHOGX/warren/internal/lifecycle"
-	"github.com/TSHOGX/warren/internal/model"
-	"github.com/TSHOGX/warren/internal/orchestrator"
-	"github.com/TSHOGX/warren/internal/transport"
-	"github.com/TSHOGX/warren/internal/waitfor"
-	"github.com/TSHOGX/warren/test/harness"
+	"github.com/TSHOGX/khora/internal/lifecycle"
+	"github.com/TSHOGX/khora/internal/model"
+	"github.com/TSHOGX/khora/internal/orchestrator"
+	"github.com/TSHOGX/khora/internal/transport"
+	"github.com/TSHOGX/khora/internal/waitfor"
+	"github.com/TSHOGX/khora/test/harness"
 )
 
 func dur(d time.Duration) *time.Duration { return &d }

@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/TSHOGX/warren/internal/model"
-	"github.com/TSHOGX/warren/internal/store"
-	"github.com/TSHOGX/warren/internal/volume"
+	"github.com/TSHOGX/khora/internal/model"
+	"github.com/TSHOGX/khora/internal/store"
+	"github.com/TSHOGX/khora/internal/volume"
 )
 
 // TestSnapshotWritesTheCapInTheSameBackendCall is the unit-level guard for the failure

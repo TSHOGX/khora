@@ -27,7 +27,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/TSHOGX/warren/internal/model"
+	"github.com/TSHOGX/khora/internal/model"
 )
 
 // health is the operational state the three endpoints read. It is a field on Engine
@@ -201,32 +201,32 @@ func (e *Engine) metricsHandler(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(&b, "%s{%s} %v\n", name, strings.Join(labels, ","), value)
 	}
 
-	metric("warren_up", "1 while the process is serving.", "gauge", 1)
-	metric("warren_uptime_seconds", "Seconds since this process assembled its engine.", "gauge",
+	metric("khora_up", "1 while the process is serving.", "gauge", 1)
+	metric("khora_uptime_seconds", "Seconds since this process assembled its engine.", "gauge",
 		int64(time.Since(e.health.startedAt).Seconds()))
-	metric("warren_ready", "1 when this instance should receive traffic; 0 while booting, draining, or with a halted outbox publisher.", "gauge",
+	metric("khora_ready", "1 when this instance should receive traffic; 0 while booting, draining, or with a halted outbox publisher.", "gauge",
 		boolGauge(e.health.ready.Load() && !e.health.draining.Load() && !s.Halted))
-	metric("warren_draining", "1 once a shutdown has begun.", "gauge", boolGauge(e.health.draining.Load()))
+	metric("khora_draining", "1 once a shutdown has begun.", "gauge", boolGauge(e.health.draining.Load()))
 
 	// --- §4.4-C outbox publisher ---
-	metric("warren_outbox_publisher_halted",
+	metric("khora_outbox_publisher_halted",
 		"1 when the event stream has stopped at a poison envelope. Requires an operator action (Publisher.Resume); a restart does not clear it, since the blocked row is durable.",
 		"gauge", boolGauge(s.Halted))
-	metric("warren_outbox_backlog_rows",
+	metric("khora_outbox_backlog_rows",
 		"Undelivered outbox rows seen on the last completed drain pass. From the store's own gauge, so a scraper reads the number the publisher acted on.",
 		"gauge", s.Backlog)
-	metric("warren_outbox_published_total",
+	metric("khora_outbox_published_total",
 		"Events delivered and marked published since process start.", "counter", s.Published)
-	metric("warren_outbox_head_attempts",
+	metric("khora_outbox_head_attempts",
 		"Failed delivery attempts by the currently blocked event (0 = nothing blocked).", "gauge", s.Attempts)
 	// The two staleness numbers are the wedge detector, and both are exported
 	// because they separate failure modes a single number cannot: a sink blocked
 	// inside Deliver grows in_flight_seconds, while a drain loop wedged elsewhere
 	// grows only since_heartbeat_seconds.
-	metric("warren_outbox_since_heartbeat_seconds",
+	metric("khora_outbox_since_heartbeat_seconds",
 		"Seconds since the drain loop last COMPLETED a pass. Grows without bound if the drain goroutine is wedged; stays near the tick interval when merely idle.",
 		"gauge", s.SinceHeartbeat.Seconds())
-	metric("warren_outbox_deliver_in_flight_seconds",
+	metric("khora_outbox_deliver_in_flight_seconds",
 		"Seconds the current Deliver call has been running (0 = none in flight). Separates a blocked sink from a wedged drain loop.",
 		"gauge", s.InFlightFor.Seconds())
 
@@ -236,14 +236,14 @@ func (e *Engine) metricsHandler(w http.ResponseWriter, r *http.Request) {
 		for _, sb := range list {
 			counts[sb.State]++
 		}
-		metric("warren_sandboxes", "Sandboxes by lifecycle state (§4.1).", "gauge", len(list), `state="any"`)
+		metric("khora_sandboxes", "Sandboxes by lifecycle state (§4.1).", "gauge", len(list), `state="any"`)
 		states := make([]string, 0, len(counts))
 		for st := range counts {
 			states = append(states, string(st))
 		}
 		sort.Strings(states)
 		for _, st := range states {
-			fmt.Fprintf(&b, "warren_sandboxes{state=%q} %d\n", st, counts[model.Lifecycle(st)])
+			fmt.Fprintf(&b, "khora_sandboxes{state=%q} %d\n", st, counts[model.Lifecycle(st)])
 		}
 	} else {
 		// THE CAUSE IS DELIBERATELY NOT IN THE BODY (§6.2): an error's raw text carries
@@ -254,7 +254,7 @@ func (e *Engine) metricsHandler(w http.ResponseWriter, r *http.Request) {
 		// Omitted rather than exported as 0: a zeroed gauge would read as "the node is
 		// empty", a different and more alarming claim than "this number could not be read"
 		// (the discipline §6.1 applies to an unreadable `used_byte`).
-		b.WriteString("# warren_sandboxes omitted: the store read failed; see the process log for the cause.\n")
+		b.WriteString("# khora_sandboxes omitted: the store read failed; see the process log for the cause.\n")
 		log.Printf("metrics: sandbox state counts omitted, store read failed: %v", err)
 	}
 

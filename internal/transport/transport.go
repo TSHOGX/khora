@@ -25,7 +25,7 @@
 // (D4.3's two invariants) live in the guest server (cmd/sandboxd).
 package transport
 
-// Wire stubs are generated from proto/engine/transport/v1/transport.proto via
+// Wire stubs are generated from proto/khora/transport/v1/transport.proto via
 // buf (schema-first). Regenerate with: cd proto && buf generate.
 // Requires buf + protoc-gen-go + protoc-gen-connect-go on PATH. The generated
 // code lives in pkg/transport/gen/... — OUTSIDE internal/ so a Go consumer can

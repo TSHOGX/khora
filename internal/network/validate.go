@@ -7,8 +7,8 @@ import (
 	"net"
 	"net/netip"
 
-	"github.com/TSHOGX/warren/internal/model"
-	"github.com/TSHOGX/warren/internal/ruleset"
+	"github.com/TSHOGX/khora/internal/model"
+	"github.com/TSHOGX/khora/internal/ruleset"
 )
 
 // ErrDeclarationInvalid is the one verdict §6.2's nine declaration 400 classes

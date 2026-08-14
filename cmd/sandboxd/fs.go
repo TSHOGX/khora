@@ -12,7 +12,7 @@ import (
 
 	"connectrpc.com/connect"
 
-	v1 "github.com/TSHOGX/warren/pkg/transport/gen/engine/transport/v1"
+	v1 "github.com/TSHOGX/khora/pkg/transport/gen/khora/transport/v1"
 )
 
 // --- fs service (§5.E fs primitive, transport D4.4) --------------------------

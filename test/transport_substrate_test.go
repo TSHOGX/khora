@@ -14,10 +14,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/TSHOGX/warren/internal/runtime"
-	"github.com/TSHOGX/warren/internal/transport"
-	"github.com/TSHOGX/warren/internal/waitfor"
-	"github.com/TSHOGX/warren/test/harness"
+	"github.com/TSHOGX/khora/internal/runtime"
+	"github.com/TSHOGX/khora/internal/transport"
+	"github.com/TSHOGX/khora/internal/waitfor"
+	"github.com/TSHOGX/khora/test/harness"
 )
 
 func launchOne(t *testing.T) (transport.Client, func()) {

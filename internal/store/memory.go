@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/TSHOGX/warren/internal/model"
+	"github.com/TSHOGX/khora/internal/model"
 )
 
 // Memory is the in-memory Store: the second implementation of the §1.3 Behavior

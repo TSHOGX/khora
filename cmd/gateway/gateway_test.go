@@ -99,7 +99,7 @@ func TestAnEmptyClientCABundleIsRefusedRatherThanAcceptedAsAnEmptyPool(t *testin
 // this, the test above would keep passing if clientCAPool rejected everything.
 func TestARealClientCABundleLoads(t *testing.T) {
 	dir := t.TempDir()
-	ca := newAuthority(t, "warren-test-ca")
+	ca := newAuthority(t, "khora-test-ca")
 	path := ca.writePEM(t, filepath.Join(dir, "ca.pem"))
 
 	pool, err := clientCAPool(path)

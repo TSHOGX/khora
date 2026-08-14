@@ -11,12 +11,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/TSHOGX/warren/internal/model"
-	"github.com/TSHOGX/warren/internal/rootfs"
-	"github.com/TSHOGX/warren/internal/ruleset"
-	"github.com/TSHOGX/warren/internal/runtime"
-	"github.com/TSHOGX/warren/internal/transport"
-	"github.com/TSHOGX/warren/internal/volume"
+	"github.com/TSHOGX/khora/internal/model"
+	"github.com/TSHOGX/khora/internal/rootfs"
+	"github.com/TSHOGX/khora/internal/ruleset"
+	"github.com/TSHOGX/khora/internal/runtime"
+	"github.com/TSHOGX/khora/internal/transport"
+	"github.com/TSHOGX/khora/internal/volume"
 )
 
 // seedBare inserts the "bare" builtin Template into st so a sandbox create /

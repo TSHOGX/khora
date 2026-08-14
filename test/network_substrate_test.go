@@ -15,14 +15,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/TSHOGX/warren/internal/lifecycle"
-	"github.com/TSHOGX/warren/internal/model"
-	"github.com/TSHOGX/warren/internal/orchestrator"
-	"github.com/TSHOGX/warren/internal/ruleset"
-	"github.com/TSHOGX/warren/internal/runtime"
-	"github.com/TSHOGX/warren/internal/store"
-	"github.com/TSHOGX/warren/internal/transport"
-	"github.com/TSHOGX/warren/test/harness"
+	"github.com/TSHOGX/khora/internal/lifecycle"
+	"github.com/TSHOGX/khora/internal/model"
+	"github.com/TSHOGX/khora/internal/orchestrator"
+	"github.com/TSHOGX/khora/internal/ruleset"
+	"github.com/TSHOGX/khora/internal/runtime"
+	"github.com/TSHOGX/khora/internal/store"
+	"github.com/TSHOGX/khora/internal/transport"
+	"github.com/TSHOGX/khora/test/harness"
 )
 
 // §5.D enforcement on the real substrate.

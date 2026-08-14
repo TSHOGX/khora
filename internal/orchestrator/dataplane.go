@@ -7,9 +7,9 @@ import (
 
 	"connectrpc.com/connect"
 
-	"github.com/TSHOGX/warren/internal/model"
-	"github.com/TSHOGX/warren/internal/transport"
-	v1 "github.com/TSHOGX/warren/pkg/transport/gen/engine/transport/v1"
+	"github.com/TSHOGX/khora/internal/model"
+	"github.com/TSHOGX/khora/internal/transport"
+	v1 "github.com/TSHOGX/khora/pkg/transport/gen/khora/transport/v1"
 )
 
 // The outer-edge data plane (transport D5): the orchestrator mounts the SAME

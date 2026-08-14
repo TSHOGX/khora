@@ -23,7 +23,7 @@ Three facts constrain the answer, and the third is the one that decides the shap
   anything. A component that verifies callers therefore cannot be `internal/`.
 - **The API is two protocols on one listener.** Control plane is REST/JSON on
   `/v1/…`; the process/fs data plane is Connect-RPC on
-  `/engine.transport.v1.*/`, wrapped in h2c so server-streams work over cleartext
+  `/khora.transport.v1.*/`, wrapped in h2c so server-streams work over cleartext
   HTTP/2 (transport D4.2). Anything in front of it has to carry streaming in both
   directions — `Start`/`Connect` are server-streaming and `StreamInput` is
   client-streaming — and carry it *incrementally*, because an interactive PTY whose
@@ -134,7 +134,7 @@ substrate-gate exemption is a tool's verdict rather than a committer's claim.
 ## The orchestrator's own deployment shape
 
 The topology above decides how the engine process itself comes up, so it is recorded
-here rather than in a second document. `deploy/warren-orchestrator.service` is the
+here rather than in a second document. `deploy/khora-orchestrator.service` is the
 concrete form; three of its choices are decisions rather than boilerplate.
 
 **The unit pins absolute paths; the flag defaults do not move.** `--state` and

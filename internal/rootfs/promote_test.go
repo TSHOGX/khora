@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/TSHOGX/warren/internal/guestport"
+	"github.com/TSHOGX/khora/internal/guestport"
 )
 
 func newProvider(t *testing.T) (*HostOverlayFS, string) {

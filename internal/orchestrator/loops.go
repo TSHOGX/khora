@@ -20,7 +20,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/TSHOGX/warren/internal/store"
+	"github.com/TSHOGX/khora/internal/store"
 )
 
 // LoopConfig tunes the background loops. Zero values take the defaults below, so a

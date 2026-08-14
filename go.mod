@@ -1,4 +1,4 @@
-module github.com/TSHOGX/warren
+module github.com/TSHOGX/khora
 
 go 1.23.0
 

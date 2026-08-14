@@ -504,8 +504,8 @@
     }
   },
   "info": {
-    "description": "GENERATED from the handlers' own wire types (internal/orchestrator/openapi.go). Do not edit by hand; regenerate with `go generate ./internal/orchestrator`. docs/spec/api-contract.md remains authoritative for INTENT — what an endpoint means and which refusal is which. This document says only what is on the wire.\n\nThe process and fs data plane is NOT here: it is Connect-RPC, and its machine-readable contract is proto/engine/transport/v1/transport.proto.\n\nNo authentication is described because the engine has none by design (ADR-0007): it refuses any listener but loopback, and auth/TLS belong to a layer outside it.",
-    "title": "warren engine — control plane (§6.1)",
+    "description": "GENERATED from the handlers' own wire types (internal/orchestrator/openapi.go). Do not edit by hand; regenerate with `go generate ./internal/orchestrator`. docs/spec/api-contract.md remains authoritative for INTENT — what an endpoint means and which refusal is which. This document says only what is on the wire.\n\nThe process and fs data plane is NOT here: it is Connect-RPC, and its machine-readable contract is proto/khora/transport/v1/transport.proto.\n\nNo authentication is described because the engine has none by design (ADR-0007): it refuses any listener but loopback, and auth/TLS belong to a layer outside it.",
+    "title": "khora engine — control plane (§6.1)",
     "version": "0.1.0"
   },
   "openapi": "3.1.0",
