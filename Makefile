@@ -7,7 +7,17 @@
 #
 # Verification: build twice, sha256sum both — they must match.
 
-LDFLAGS := -buildid= -s -w
+# VERSION is derived from git, NOT from a timestamp: `verify-reproducible` builds
+# twice and compares sha256, so any input that moves between the two builds breaks
+# it. `git describe` is a function of the commit, so two builds of one tree agree
+# while two different commits do not. Override with `make VERSION=x` for a build
+# from an exported tree with no .git.
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+
+# Each binary declares its own `version` var (there is no shared version package:
+# the gateway imports nothing from internal/, ADR-0007), so the -X target is
+# main.version in all four.
+LDFLAGS := -buildid= -s -w -X main.version=$(VERSION)
 BUILDFLAGS := -trimpath -ldflags="$(LDFLAGS)"
 
 .PHONY: all

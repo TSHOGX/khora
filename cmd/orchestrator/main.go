@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -17,8 +18,15 @@ import (
 	"github.com/TSHOGX/warren/internal/orchestrator"
 )
 
+// version is stamped by the Makefile's -X at build time; "dev" means built by a
+// bare `go build`. It answers what a binary in the field IS, which is the one
+// thing a tag cannot do on its own. Per-binary rather than a shared package: the
+// gateway "imports nothing from internal/" (ADR-0007).
+var version = "dev"
+
 func main() {
 	var (
+		showVer    = flag.Bool("version", false, "print the version and exit")
 		addr       = flag.String("addr", "127.0.0.1:8080", "listen address for the §6.1 API; must be loopback unless -insecure-listen (refused at startup, ADR-0007)")
 		insecure   = flag.Bool("insecure-listen", false, "permit a non-loopback -addr, publishing the API with no authentication and no TLS (ADR-0007)")
 		templates  = flag.String("templates", "/var/lib/warren/templates", "BUILT Template root, one subdirectory per builtin whose name is its TemplateID; not the definitions in templates/")
@@ -39,6 +47,13 @@ func main() {
 		shutdownTO = flag.Duration("shutdown-timeout", 30*time.Second, "how long a SIGTERM drain waits for in-flight requests, then closes them. Running sandboxes are never touched; set it above your longest unary request, not your longest stream")
 	)
 	flag.Parse()
+
+	// Before anything is validated or opened: --version must work on a host where
+	// no flag would pass muster, which is where an operator asks it.
+	if *showVer {
+		fmt.Printf("orchestrator %s\n", version)
+		return
+	}
 
 	// -1 is the unset sentinel because uid 0 is a real uid, and "the operator said root"
 	// must behave oppositely from "the operator said nothing". Root is refused in

@@ -83,9 +83,6 @@ func killTransportChild(t *testing.T, cl transport.Client) {
 
 // idle sandbox (no I/O) → auto-paused after idle_timeout (§4.3 idle state).
 func TestReaperIdleAutoPauseRealRunsc(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("needs root")
-	}
 	ctx := context.Background()
 	eng, _ := setupEngine(t, 30*time.Second)
 	m := eng.Mediator
@@ -128,9 +125,6 @@ func TestReaperIdleAutoPauseRealRunsc(t *testing.T) {
 // with no subscriber (§3.2), so idle_millis stays low; host-side stamping would
 // false-idle a working sandbox (reaper-health D1).
 func TestReaperFalseIdleGuardRealRunsc(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("needs root")
-	}
 	ctx := context.Background()
 	eng, base := setupEngine(t, 30*time.Second)
 	m := eng.Mediator
@@ -173,9 +167,6 @@ func TestReaperFalseIdleGuardRealRunsc(t *testing.T) {
 // + ptys. With one process idle and one still producing I/O, the sandbox is NOT
 // idle; it becomes idle only once ALL go quiet past idle_timeout.
 func TestReaperMultiConnectionIdleRealRunsc(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("needs root")
-	}
 	ctx := context.Background()
 	eng, base := setupEngine(t, 30*time.Second)
 	m := eng.Mediator
@@ -253,9 +244,6 @@ func killContainer(t *testing.T, base string, sid model.SandboxID) {
 // involuntary pause). Proves the reaper drives the demote, not only the
 // boot-time reconcile path. L1 dead + L2 down → dead-recoverable → crash-pause.
 func TestReaperLiveCrashPauseRealRunsc(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("needs root")
-	}
 	ctx := context.Background()
 	eng, base := setupEngine(t, 30*time.Second)
 	m := eng.Mediator
@@ -297,9 +285,6 @@ func TestReaperLiveCrashPauseRealRunsc(t *testing.T) {
 // SAME IP; NO crash-pause, no cold-start, no new epoch (§5.E.1). The reaper
 // WAITS within budget.
 func TestReaperTransportDownSameIPRealRunsc(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("needs root")
-	}
 	ctx := context.Background()
 	eng, _ := setupEngine(t, 30*time.Second)
 	m := eng.Mediator
@@ -344,9 +329,6 @@ func TestReaperTransportDownSameIPRealRunsc(t *testing.T) {
 // (crash-loop, via the /tmp sentinel) past the restart budget is escalated to
 // dead-recoverable → resume (new IP, new epoch) — not waited on forever.
 func TestReaperTransportCrashLoopEscalationRealRunsc(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("needs root")
-	}
 	ctx := context.Background()
 	eng, _ := setupEngine(t, 20*time.Second)
 	m := eng.Mediator
@@ -416,9 +398,6 @@ func TestReaperTransportCrashLoopEscalationRealRunsc(t *testing.T) {
 // paused sandbox past retention → evict → destroyed (§4.1 evict = reaper's
 // automatic destroy of a paused sandbox).
 func TestReaperEvictPastRetentionRealRunsc(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("needs root")
-	}
 	ctx := context.Background()
 	eng, base := setupEngine(t, 30*time.Second)
 	m := eng.Mediator
@@ -474,9 +453,6 @@ func TestReaperEvictPastRetentionRealRunsc(t *testing.T) {
 // A retention of 1ns makes the sandbox evict-eligible the instant it pauses, so
 // every sweep in the storm below is a real eviction attempt.
 func TestReaperSkipsVerbHeldLockRealRunsc(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("needs root")
-	}
 	ctx := context.Background()
 	eng, _ := setupEngine(t, 30*time.Second)
 	m := eng.Mediator

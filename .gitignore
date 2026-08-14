@@ -23,5 +23,9 @@
 /gateway
 /openapigen
 
-# substrate run logs
+# Substrate run records are TRACKED, in docs/substrate-runs/ — an untracked record is
+# one nothing can keep honest, and /.substrate-run.log rotted into a false EXIT=0 claim
+# here precisely because nothing could see it. scripts/check-substrate-coverage.sh has
+# to read the record in a fresh CI checkout, so it cannot be ignored. This line stays
+# only so a stray local run does not land untracked.
 /.substrate-run.log

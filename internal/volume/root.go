@@ -24,11 +24,10 @@ import (
 // ABSOLUTE path is REINTERPRETED against that root · a symlink pointing outside the
 // root (relative or absolute) resolves BACK INSIDE it · a symlink loop reports ELOOP.
 //
-// The cost comparison is why we do not copy a reference implementation's shape:
-// measured, openat2(RESOLVE_IN_ROOT) is ~342× cheaper (sub-µs vs ~178 µs/op) than the
-// "one fresh mount namespace + bind + pivot_root PER REQUEST" that implementation pays
-// for the same guarantee, which also needs root and an OS-thread ownership protocol.
-// Copy the capability, not the mechanism.
+// The cost comparison is why we do not copy a reference implementation's shape: this is
+// ONE syscall, against "one fresh mount namespace + bind + pivot_root PER REQUEST" for
+// the same guarantee — orders of magnitude apart by construction, and that shape also
+// needs root and an OS-thread ownership protocol. Copy the capability, not the mechanism.
 //
 // FAILURE OF THIS BOUNDARY IS SILENT: a write through an escaping path SUCCEEDS
 // and lands outside. That is why root confinement has its own unit test (a pure

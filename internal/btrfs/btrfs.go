@@ -16,6 +16,10 @@
 // root with CAP_SYS_ADMIN, so full qgroups would fork spec from substrate permanently. It also
 // fits the shape (one subvolume per workload, no rescan storms).
 //
+// Full qgroups would not have bought the hard ceiling either: copy-up's reflink pushes
+// `referenced` past the cap (measured: 98 MiB against a 64 MiB cap) and refuses only the
+// writes that follow, so the accounting cost is paid and no hard ceiling is obtained.
+//
 // The consequence that must be handled OUTSIDE this package: under squota a
 // reflinked copy-up is free, so the cap governs newly-written bytes and is not a
 // hard ceiling for copy-up, and Template/layer bytes carry no cap at all. That is
@@ -130,7 +134,10 @@ func (c Client) CreateSubvolume(ctx context.Context, path string) error {
 //     deleted while a live sharer references them — not "was snapshotted", and a cap is
 //     irrelevant. Reclaiming is not cosmetic: nothing reserves a leaked row's subvolume id, so a
 //     remount can hand that id and its cap to a brand-new unit that then hits ENOSPC on a limit
-//     nobody set, and Usage() cannot tell. Reclamation belongs to the volume orphan sweep, which
+//     nobody set, and Usage() cannot tell. Measured, on a unit that never had a limit set: ENOSPC
+//     at 3.3 MB, and in another shape a 20 MiB write died at 11.8 MiB. The opposite direction
+//     (a leaked row carrying a LARGER cap ⇒ silent over-provisioning) is equally reachable and
+//     equally undetectable from inside. Reclamation belongs to the volume orphan sweep, which
 //     polls the label and destroys on `<stale>` (volume.md D7).
 //   - full qgroup mode: the row does NOT self-clean and must be destroyed, or rows accumulate
 //     one per destroyed sandbox.

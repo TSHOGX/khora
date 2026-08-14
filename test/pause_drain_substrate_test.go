@@ -23,7 +23,6 @@ import (
 	"context"
 	"fmt"
 	"net/http/httptest"
-	"os"
 	"testing"
 	"time"
 
@@ -32,9 +31,9 @@ import (
 	"github.com/TSHOGX/warren/internal/lifecycle"
 	"github.com/TSHOGX/warren/internal/orchestrator"
 	"github.com/TSHOGX/warren/internal/transport"
+	"github.com/TSHOGX/warren/internal/waitfor"
 	v1 "github.com/TSHOGX/warren/pkg/transport/gen/engine/transport/v1"
 	"github.com/TSHOGX/warren/pkg/transport/gen/engine/transport/v1/transportv1connect"
-	"github.com/TSHOGX/warren/internal/waitfor"
 	"github.com/TSHOGX/warren/test/harness"
 )
 
@@ -48,9 +47,6 @@ import (
 // which the engine cannot promise: the drain has a bounded grace and §4.4 keeps it
 // an optimization, not a correctness premise.
 func TestPauseDrainKeepsWritesWhole(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("needs root")
-	}
 	// 4 rounds, not 10: with the barrier the outcome is DETERMINISTIC (the drain
 	// waits, so the write always completes), and repeating a deterministic result
 	// buys nothing. The rounds that remain exist only to catch a barrier that works
@@ -78,9 +74,6 @@ func TestPauseDrainKeepsWritesWhole(t *testing.T) {
 // It asserts only that the hazard is REACHABLE, not how often — it is a timing
 // race, so demanding a rate would make the test flaky in the other direction.
 func TestPauseDrainWindowIsRealWithoutBarrier(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("needs root")
-	}
 	// This one is a genuine race, so it needs several attempts — but it STOPS at the
 	// first reproduction (runPauseWriteRace returns early once it sees a truncation),
 	// so the common case costs one or two rounds rather than all 6. Only a host that

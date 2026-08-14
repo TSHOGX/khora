@@ -142,6 +142,11 @@ func validateSignalPid(pid int) error {
 // becomes the kill(-1) namespace broadcast at pid=1, and the fallback becomes a
 // directed kill(1) at pid=-1, which lands on PID 1's own TERM handler and tears
 // down the namespace.
+//
+// The pid=1 arm is the worse of the two BECAUSE it looks survivable: Linux's
+// kill(-1) excludes PID 1 and the caller itself, so measured, the sandbox stays up
+// while every worker inside it dies. A caller sees a live sandbox with its work
+// gone, rather than a sandbox that died and can be recreated.
 func killProcessGroup(pid, sig int) error {
 	if err := syscall.Kill(-pid, syscall.Signal(sig)); err == nil {
 		return nil

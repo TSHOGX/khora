@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -113,12 +114,30 @@ func (barrierFakeRuntime) InstallSecondHop(context.Context, ruleset.RuleSet, *in
 // deterministically. It implements the full Client surface because the data-plane
 // proxy re-exports all three halves (HealthProber + ProcessClient + FsClient).
 type barrierFakeClient struct {
-	// writeEntered is signalled when Write is reached; writeRelease unblocks it.
+	// writeEntered is signalled when the FIRST Write is reached; writeRelease
+	// unblocks it. **Only the first Write blocks.** A later one returning promptly is
+	// load-bearing, not a convenience: the poll loop below issues real writes, so a
+	// second one parking here would wait on a channel that only the loop's own
+	// completion closes — measured as a 600s package timeout whose goroutine dump
+	// names connect/http2 frames and reads as an engine fault.
 	writeEntered chan struct{}
 	writeRelease chan struct{}
+	releaseOnce  sync.Once
 	mu           sync.Mutex
+	held         bool
 	reads        int
 	starts       int
+}
+
+// release unblocks the held write. Idempotent, and registered as a t.Cleanup by
+// barrierFixture: a t.Fatal between the hold and the explicit release would
+// otherwise leave the handler goroutine parked forever, so the package times out
+// instead of printing the assertion that actually failed.
+func (c *barrierFakeClient) release() {
+	if c.writeRelease == nil {
+		return
+	}
+	c.releaseOnce.Do(func() { close(c.writeRelease) })
 }
 
 func (c *barrierFakeClient) Health(context.Context) (transport.HealthStatus, error) {
@@ -127,15 +146,28 @@ func (c *barrierFakeClient) Health(context.Context) (transport.HealthStatus, err
 func (c *barrierFakeClient) RecordActivity(context.Context) (transport.HealthStatus, error) {
 	return transport.HealthStatus{}, nil
 }
-func (c *barrierFakeClient) Write(_ context.Context, _ string, _ []byte) error {
-	if c.writeEntered != nil {
-		select {
-		case c.writeEntered <- struct{}{}:
-		default:
-		}
-		<-c.writeRelease
+func (c *barrierFakeClient) Write(ctx context.Context, _ string, _ []byte) error {
+	if c.writeEntered == nil {
+		return nil
 	}
-	return nil
+	// Exactly one write is held. Claiming the hold under the lock is what makes that
+	// true for concurrent callers; every later write returns immediately.
+	c.mu.Lock()
+	first := !c.held
+	c.held = true
+	c.mu.Unlock()
+	if !first {
+		return nil
+	}
+	c.writeEntered <- struct{}{}
+	// Honour ctx: a caller that gives up must not leave this goroutine parked. The
+	// bare receive could only ever be woken by release().
+	select {
+	case <-c.writeRelease:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 func (c *barrierFakeClient) Read(context.Context, string, int64, int64) ([]byte, error) {
 	c.mu.Lock()
@@ -243,7 +275,11 @@ func barrierFixture(t *testing.T, cl *barrierFakeClient, drain time.Duration) (*
 	}
 	eng := &Engine{Mediator: med, Store: mem}
 	srv := httptest.NewServer(eng.HTTPHandler())
+	// Registered AFTER srv.Close so it runs BEFORE it: cleanups are last-in-first-out,
+	// and Close waits for in-flight handlers — closing while a write is still held
+	// would wedge the cleanup itself.
 	t.Cleanup(srv.Close)
+	t.Cleanup(cl.release)
 	return srv, med, sid
 }
 
@@ -286,11 +322,24 @@ func TestDrainRefusesWritesButNotReadsOrProcessStart(t *testing.T) {
 	// interval: the only thing we need is "the drain has been marked", and polling
 	// the observable is what means that in both fast and slow scheduling. A bare
 	// sleep would either race the pause goroutine or pad every run.
+	//
+	// Each probe carries its own timeout so the loop cannot outlive its deadline. A
+	// probe that lands before the drain is marked is ACCEPTED and reaches the fake,
+	// and an unbounded call there parks until something else releases it — which on
+	// this path is the loop's own completion. Measured: a 600s package timeout, about
+	// one run in two, reported as a connect/http2 hang.
 	var refused error
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		_, err := fs.Write(ctx, connect.NewRequest(&v1.WriteRequest{Path: "/root/late", Data: []byte("y")}))
+		probeCtx, cancel := context.WithTimeout(ctx, time.Second)
+		_, err := fs.Write(probeCtx, connect.NewRequest(&v1.WriteRequest{Path: "/root/late", Data: []byte("y")}))
+		cancel()
 		if err != nil {
+			// The probe's own timeout must not be read as the engine refusing: that
+			// would assert the barrier from an error the test itself manufactured.
+			if errors.Is(err, context.DeadlineExceeded) || connect.CodeOf(err) == connect.CodeDeadlineExceeded {
+				t.Fatalf("a probe write neither returned nor was refused within 1s (%v) — it was accepted and then blocked, so this test can no longer tell a wired barrier from an unwired one", err)
+			}
 			refused = err
 			break
 		}
@@ -339,7 +388,7 @@ func TestDrainRefusesWritesButNotReadsOrProcessStart(t *testing.T) {
 	}
 
 	// Release write #1 → the drain completes and the pause lands.
-	close(cl.writeRelease)
+	cl.release()
 	if err := <-w1; err != nil {
 		t.Errorf("the in-flight write failed: %v; the drain should have let it finish", err)
 	}

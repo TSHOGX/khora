@@ -1,6 +1,12 @@
-# ADR-0011 — One PR per issue, now that the spec no longer leads the code
+# ADR-0011 — main moves only through a reviewable unit, now that the spec no longer leads the code
 
 - **Status:** accepted
+- **Note on this document's own history:** a first version of it decided "one
+  PR per issue" and was committed marked `accepted` while the maintainer was still
+  refining the decision — that status was claimed prematurely, by the author rather
+  than the decider. It was rewritten rather than superseded because nothing had been
+  decided yet to supersede. **The one-to-one binding it asserted is withdrawn**; §1
+  carries what replaced it.
 - **Date:** 2026-08-13
 - **Consumers:** everyone working in this repo; the two repos that consume it read its spec as a
   statement of what exists. Supersedes nothing — **ADR-0009 stands**; this ADR changes how a ruling
@@ -34,19 +40,44 @@ stop rather than reconcile in passing, but it relies on a person noticing.
 
 ## Decision
 
-### 1. An issue is closed by a PR, and the PR is the atomic unit
+### 0. The principle the rest of this ADR is an instance of
 
-Spec §§ + code + tests + the ruling, together. Two things follow that a sequence of direct commits
-does not give:
+Every failure this week had **one shape**: a *stated* state and an *actual* state drifting apart with
+nothing forcing them together. The spec granted a capability the code did not have; three rulings
+converged upstream and never returned to the asker; five gates reported green while checking nothing;
+a measurement was cited as settled input with no test producing it; the only recorded substrate run
+predated every milestone it was taken to cover.
 
-- **The change's size follows the issue's size**, rather than whatever felt like enough at the time.
-  That was a real coordination problem: rulings landed at wildly different depths with no signal
-  about which were complete.
-- **A single reviewable object** carries the ruling, so the consumer's receipt and the change that
-  earns it cannot separate.
+⇒ **Every claim needs a mechanical link to the thing that makes it true, and where the link is
+absent, the absence itself must be marked.** The mechanisms already in this repo are all instances of
+that one rule, which is why they should be read together rather than as separate rituals: `Hangs on:`
+links an ask to a §; a test citing a § links the § to the code; the digest pin links our copy of an
+upstream artifact to theirs; **`Spec-only:` marks a link deliberately absent**; **Implementation gaps
+marks a link known-absent**. A PR is not a unit of work in this scheme — it is **the place where the
+links are visible before they land.**
 
-`.github/pull_request_template.md` requires three fields, chosen because **a diff cannot show
-them**: `Closes #`, **the §§ touched** (the dual of an ask's `Hangs on:` line — how a later round
+### 1. The invariant: main moves only through a reviewable unit
+
+**Not "one PR per issue."** An issue is a question and a PR is a change, and the two are genuinely
+**many-to-many**: one PR may close several related issues (two asks landing on the same substrate
+should be ruled together, not twice), and one issue may need several PRs (a milestone-sized
+implementation). Binding them one-to-one confuses the unit of *tracking* with the unit of *work*, and
+it was the wrong half of this decision.
+
+**A ruling that changes nothing in the tree needs no PR.** The test is not granted-versus-refused —
+it is **does this ruling change the tree.** Refusing an ask by writing the reasoning into a § *is* a
+tree change and goes through a PR; closing something as "this is a question, not an ask", or as a
+duplicate of a live register entry, changes nothing and is just a closing comment.
+
+**What is forbidden is narrower than either, and is the only part that cannot be recovered
+afterwards: a change reaching `main` with nothing to look at.** `scripts/check-no-direct-main.sh`
+reads the push plan from stdin and refuses `refs/heads/main`, with `ALLOW_MAIN_PUSH=<reason>` for work
+that genuinely is not reviewable. It deliberately does **not** check that a branch has a PR or that a
+PR was reviewed — a hook cannot know either at push time, and asserting it would build exactly the
+green-but-checking-nothing gate this ADR's Context is about.
+
+`.github/pull_request_template.md` asks for three fields, chosen because **a diff cannot show them**:
+the issues closed (zero or more), **the §§ touched** (the dual of `Hangs on:` — how a later round
 finds the argument from the spec side), and **whether the substrate ran**.
 
 ### 2. A spec change with no test change must declare itself
@@ -88,10 +119,15 @@ convention rather than inventing one.
 
 ## Consequences
 
-- Direct commits to `main` for a ruling stop; `#8` and `#1` were the last, and are **not** being
-  redone as PRs — the rulings are sound and their arguments are on the issues, so re-doing them
-  would manufacture a second history. **The first-class Overlay's implementation PR will reference
-  `#1` as the ruling it implements.**
+- Direct pushes to `main` stop, mechanically. `#8` and `#1` were the last rulings to land that way
+  and are **not** being redone as PRs — the rulings are sound and their arguments are on the issues,
+  so redoing them would manufacture a second history. **The first-class Overlay's implementation PR
+  will reference `#1` as the ruling it implements.**
+- **Not installed in the two spec-only sibling repos.** There the spec *is* the product, so the
+  spec/test gate would fire on every commit, and a gate that always fires is one that gets switched
+  off. Whether `main` should be PR-only in those repos is a separate call with a weaker argument
+  behind it (self-review, single maintainer, no code) and is **left to their maintainer** rather than
+  installed here by inference.
 - A ruling that cannot be implemented in the current milestone is now visibly a debt rather than
   silently a claim.
 - `CLAUDE.md`'s "both are spec" sentence stays true but is no longer the whole story, and now points

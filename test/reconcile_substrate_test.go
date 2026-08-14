@@ -80,9 +80,6 @@ func (f reconcileFixture) engine(t *testing.T, fault func(model.SandboxID)) *orc
 // paused. Also covers the `creating` orphan (→ record deleted, placement
 // reclaimed).
 func TestReconcileOrphanReclaim(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("needs root")
-	}
 	ctx := context.Background()
 	f := newReconcileFixture(t)
 	nsBefore := harness.CountEngineNetns(t)
@@ -152,9 +149,6 @@ func TestReconcileOrphanReclaim(t *testing.T) {
 // (destroy tears the live container down cleanly). Contrast: a `running` whose
 // container is DEAD → CAS-demoted to paused.
 func TestReconcileAdoptSurvivor(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("needs root")
-	}
 	ctx := context.Background()
 	f := newReconcileFixture(t)
 
@@ -221,9 +215,6 @@ func TestReconcileAdoptSurvivor(t *testing.T) {
 // after reconcile there is no engine residue, and a second reconcile is a
 // no-op (idempotent); no `failed` intermediate state ever appears.
 func TestReconcileNoResidueIdempotent(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("needs root")
-	}
 	ctx := context.Background()
 	f := newReconcileFixture(t)
 	nsBefore := harness.CountEngineNetns(t)

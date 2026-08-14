@@ -65,9 +65,6 @@ func setupEngineWithProbe(t *testing.T, healthTimeout time.Duration) (*orchestra
 }
 
 func TestE2EWalkingSkeleton(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("e2e needs root (runsc --network=sandbox + overlay mount)")
-	}
 	ctx := context.Background()
 	eng, base := setupEngine(t, 30*time.Second)
 	m := eng.Mediator
@@ -183,9 +180,6 @@ func TestE2EWalkingSkeleton(t *testing.T) {
 // never comes up → timeout). create must reclaim the half-built placement +
 // empty Overlay, delete the record → destroyed, and leave NO orphan netns.
 func TestE2EColdStartUnwindRealRunsc(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("e2e needs root")
-	}
 	ctx := context.Background()
 	repo := harness.RepoRoot(t)
 	base := t.TempDir()

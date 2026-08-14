@@ -14,9 +14,19 @@ cat > .git/hooks/pre-push <<'HOOK'
 set -uo pipefail
 root=$(git rev-parse --show-toplevel)
 fail=0
+
+# git feeds the push plan on stdin and it can be read ONCE. Capture it here and hand it
+# to the one gate that needs it; the others must not inherit a consumed stdin, hence the
+# </dev/null below.
+plan=$(cat)
+
+if [[ -x "$root/scripts/check-no-direct-main.sh" ]]; then
+  printf '%s\n' "$plan" | "$root/scripts/check-no-direct-main.sh" || fail=1
+fi
+
 for s in check-asks check-spec-code-drift; do
   [[ -x "$root/scripts/$s.sh" ]] || continue
-  "$root/scripts/$s.sh" || fail=1
+  "$root/scripts/$s.sh" </dev/null || fail=1
 done
 if [[ $fail -ne 0 ]]; then
   echo

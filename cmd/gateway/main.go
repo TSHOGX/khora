@@ -37,15 +37,29 @@ import (
 	"golang.org/x/net/http2"
 )
 
+// version is stamped by the Makefile's -X at build time; "dev" means built by a
+// bare `go build`. Declared here rather than imported from a shared package
+// because this binary imports nothing from internal/ (see the package comment),
+// and a version package would be the first exception to that.
+var version = "dev"
+
 func main() {
 	var (
-		addr = flag.String("addr", ":8443", "listen address for the TLS front. Unlike the orchestrator's --addr this one is MEANT to be routable: it is the outward-facing surface, and it authenticates")
-		up   = flag.String("upstream", "http://127.0.0.1:8080", "the orchestrator's §6.1 listener. Loopback, because ADR-0007 pins the engine there — a routable upstream would mean the engine is reachable without passing through this binary, and then this is a door beside an open wall")
-		cert = flag.String("cert", "", "PEM certificate chain this gateway serves (required)")
-		key  = flag.String("key", "", "PEM private key for --cert (required)")
-		ca   = flag.String("client-ca", "", "PEM bundle of certificate authorities that may issue CLIENT certificates (required). Every caller must present a certificate this bundle verifies; there is no unauthenticated path. Scope it to a CA you issue from — a public bundle here authenticates the entire internet")
+		showVer = flag.Bool("version", false, "print the version and exit")
+		addr    = flag.String("addr", ":8443", "listen address for the TLS front. Unlike the orchestrator's --addr this one is MEANT to be routable: it is the outward-facing surface, and it authenticates")
+		up      = flag.String("upstream", "http://127.0.0.1:8080", "the orchestrator's §6.1 listener. Loopback, because ADR-0007 pins the engine there — a routable upstream would mean the engine is reachable without passing through this binary, and then this is a door beside an open wall")
+		cert    = flag.String("cert", "", "PEM certificate chain this gateway serves (required)")
+		key     = flag.String("key", "", "PEM private key for --cert (required)")
+		ca      = flag.String("client-ca", "", "PEM bundle of certificate authorities that may issue CLIENT certificates (required). Every caller must present a certificate this bundle verifies; there is no unauthenticated path. Scope it to a CA you issue from — a public bundle here authenticates the entire internet")
 	)
 	flag.Parse()
+
+	// BEFORE the required-flag refusal below, or asking a binary what it is would
+	// exit 2 for want of a certificate it is not being asked to serve.
+	if *showVer {
+		fmt.Printf("gateway %s\n", version)
+		return
+	}
 
 	for _, req := range []struct{ flag, val string }{{"--cert", *cert}, {"--key", *key}, {"--client-ca", *ca}} {
 		if req.val == "" {

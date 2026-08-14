@@ -16,13 +16,20 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+
+	"github.com/TSHOGX/warren/test/substratereq"
 )
 
+// mustRoot FAILS rather than skipping: `ok` from a substrate run must mean the substrate
+// ran, and a skip made the two indistinguishable.
+//
+// Per-test rather than a TestMain, unlike internal/btrfs: this package's OTHER four test
+// files carry no build tag, so they compile into the substrate binary too and legitimately
+// need no root (MaxLowerDepth is arithmetic, PromoteToTemplate is a plain host copy). A
+// package-level precondition would fail them for needing nothing.
 func mustRoot(t *testing.T) {
 	t.Helper()
-	if os.Geteuid() != 0 {
-		t.Skip("substrate test needs root (overlayfs mount); run under sudo -E")
-	}
+	substratereq.Root(t)
 }
 
 // makeTemplate builds a minimal lower dir with a marker file.

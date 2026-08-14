@@ -15,7 +15,20 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/TSHOGX/warren/test/substratereq"
 )
+
+// TestMain states this package's substrate preconditions ONCE, and FAILS rather than
+// skipping when they are absent: `ok` from a substrate package must mean the substrate
+// ran, and it used to be indistinguishable from "every test skipped" (measured: this
+// package printed `ok` in 0.007s having run nothing). One dev box, root available —
+// a missing precondition is a misconfigured machine, so it is a finding.
+func TestMain(m *testing.M) {
+	substratereq.Root(substratereq.Main)
+	substratereq.Bin(substratereq.Main, "btrfs")
+	os.Exit(m.Run())
+}
 
 // btrfsScratch makes a scratch dir on a real btrfs filesystem. t.TempDir() is
 // NOT usable: TMPDIR is /tmp = tmpfs here, where subvolumes cannot exist. The
@@ -82,9 +95,6 @@ func btrfsScratch(t *testing.T) string {
 }
 
 func TestSubvolumeLifecycleAndQuota(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("needs root (btrfs subvolume + qgroup ioctls)")
-	}
 	ctx := context.Background()
 	c := Client{}
 	root := btrfsScratch(t)
@@ -185,9 +195,6 @@ func TestSubvolumeLifecycleAndQuota(t *testing.T) {
 // silently accepted: accepting it would leave the sandbox running uncapped while
 // the record claims a cap.
 func TestCreateSubvolumeRefusesPlainDirectory(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("needs root")
-	}
 	ctx := context.Background()
 	c := Client{}
 	root := btrfsScratch(t)

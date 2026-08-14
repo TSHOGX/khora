@@ -44,9 +44,6 @@ import (
 // system. So this drives several full cycles and asserts the filesystem's qgroup
 // count returns to where it started.
 func TestQuotaRowsDoNotAccumulateAcrossChurn(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("needs root")
-	}
 	ctx := context.Background()
 	c := Client{}
 	root := btrfsScratch(t)

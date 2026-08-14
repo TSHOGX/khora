@@ -18,6 +18,7 @@ import (
 
 	"github.com/TSHOGX/warren/internal/volume"
 	"github.com/TSHOGX/warren/internal/volume/volumetest"
+	"github.com/TSHOGX/warren/test/substratereq"
 )
 
 // realScratch makes a scratch dir on a real quota-capable filesystem. t.TempDir()
@@ -64,9 +65,7 @@ func realScratch(t *testing.T) string {
 // suite's cap subtests take their capped branch and assert the cap actually reaches
 // the storage rather than being recorded and forgotten.
 func TestLocalBtrfsContract(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("needs root for the storage-unit and quota ioctls")
-	}
+	substratereq.Root(t)
 	volumetest.RunContract(t, func(t *testing.T) volume.Backend {
 		b, err := volume.NewLocalBtrfs(filepath.Join(realScratch(t), "volumes"))
 		if err != nil {
@@ -89,9 +88,7 @@ func TestLocalBtrfsContract(t *testing.T) {
 // would let a writer pour in far more than N with zero errors, and Usage()'s limit
 // read cannot tell that apart from a deliberately uncapped volume.
 func TestCapIsEnforcedNotJustRecorded(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("needs root for the storage-unit and quota ioctls")
-	}
+	substratereq.Root(t)
 	ctx := context.Background()
 	b, err := volume.NewLocalBtrfs(filepath.Join(realScratch(t), "volumes"))
 	if err != nil {

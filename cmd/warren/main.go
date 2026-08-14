@@ -49,10 +49,19 @@ var (
 	api *warren.Client
 )
 
+// version is stamped by the Makefile's -X at build time; "dev" means built by a
+// bare `go build`. Per-binary rather than a shared package, matching the other
+// three: the gateway "imports nothing from internal/" (ADR-0007).
+var version = "dev"
+
 func main() {
 	rootCmd := &cobra.Command{
-		Use:   "warren",
-		Short: "Sandbox engine CLI",
+		Use: "warren",
+		// cobra serves --version from this field, and it does so before
+		// PersistentPreRunE — so asking the CLI what it is does not first try to
+		// build an API client against a --api that may not be listening.
+		Version: version,
+		Short:   "Sandbox engine CLI",
 		Long: `warren is the CLI for the sandbox engine.
 
 It wraps the §6.1 REST + Connect-RPC API, providing commands for sandbox lifecycle,
@@ -78,6 +87,12 @@ file operations, volumes, templates, network configuration, and event streaming.
 			return nil
 		},
 	}
+
+	// cobra's default template prints "warren version X"; the other three binaries
+	// print "<name> X", and an operator collecting all four should not have to
+	// special-case one. Set via the method because this cobra keeps the field
+	// unexported.
+	rootCmd.SetVersionTemplate("warren {{.Version}}\n")
 
 	rootCmd.PersistentFlags().StringVar(&apiURL, "api", "http://127.0.0.1:8080", "API base URL")
 	rootCmd.PersistentFlags().StringVar(&clientCertFile, "client-cert", "", "PEM client certificate for mTLS")
