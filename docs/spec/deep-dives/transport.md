@@ -456,7 +456,7 @@ motivation for D5.2.
 | Face | Protocol | Endpoints (§6.1) | Why |
 | --- | --- | --- | --- |
 | **Control plane** (sandbox/template/volume/network lifecycle) | **REST + JSON** (OpenAPI describing it after the fact) | `POST /v1/sandboxes`, `pause`/`resume`, `DELETE`, `GET`, volume/template/publish … | Low-frequency CRUD, friendly to hand-invocation / curl / documentation; no strongly-typed streams |
-| **Data plane** (process / fs) | **Connect-RPC over h2c**, proto contract first | `engine.transport.v1.ProcessService` / `FsService` (D4.3/D4.4) | Has server-streams + strongly-typed frames; the proto is **the single contract source**, and the frontend (TS) plus any future multi-language SDK all generate client stubs from it with `buf` |
+| **Data plane** (process / fs) | **Connect-RPC over h2c**, proto contract first | `khora.transport.v1.ProcessService` / `FsService` (D4.3/D4.4) | Has server-streams + strongly-typed frames; the proto is **the single contract source**, and the frontend (TS) plus any future multi-language SDK all generate client stubs from it with `buf` |
 
 **The key gain: the inner edge's proto contract projects straight onto the outer edge.** `orchestrator`
 **reuses the same** `transport.proto` outward (rather than erecting a separate outer-edge schema), so the

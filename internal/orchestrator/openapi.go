@@ -72,7 +72,7 @@ type apiOp struct {
 // apiOps is the §6.1 control plane, in the document's order.
 //
 // THE DATA PLANE IS ABSENT ON PURPOSE, and it is not a gap: process and fs are
-// Connect-RPC over `engine.transport.v1` (transport D5), whose machine-readable
+// Connect-RPC over `khora.transport.v1` (transport D5), whose machine-readable
 // contract is the .proto itself. The two REST routes that DO appear here —
 // `/files` and the volume import/export pair — are the streaming bypasses (D4.4),
 // REST precisely because a file must not become one protobuf message.
@@ -391,14 +391,14 @@ func OpenAPIDoc() ([]byte, error) {
 	doc := map[string]any{
 		"openapi": "3.1.0",
 		"info": map[string]any{
-			"title":   "warren engine — control plane (§6.1)",
+			"title":   "khora engine — control plane (§6.1)",
 			"version": openAPIVersion,
 			"description": "GENERATED from the handlers' own wire types (internal/orchestrator/openapi.go). " +
 				"Do not edit by hand; regenerate with `go generate ./internal/orchestrator`. " +
 				"docs/spec/api-contract.md remains authoritative for INTENT — what an endpoint means and " +
 				"which refusal is which. This document says only what is on the wire.\n\n" +
 				"The process and fs data plane is NOT here: it is Connect-RPC, and its machine-readable " +
-				"contract is proto/engine/transport/v1/transport.proto.\n\n" +
+				"contract is proto/khora/transport/v1/transport.proto.\n\n" +
 				"No authentication is described because the engine has none by design (ADR-0007): it " +
 				"refuses any listener but loopback, and auth/TLS belong to a layer outside it.",
 		},

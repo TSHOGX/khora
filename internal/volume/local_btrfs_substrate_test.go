@@ -16,9 +16,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/TSHOGX/warren/internal/volume"
-	"github.com/TSHOGX/warren/internal/volume/volumetest"
-	"github.com/TSHOGX/warren/test/substratereq"
+	"github.com/TSHOGX/khora/internal/volume"
+	"github.com/TSHOGX/khora/internal/volume/volumetest"
+	"github.com/TSHOGX/khora/test/substratereq"
 )
 
 // realScratch makes a scratch dir on a real quota-capable filesystem. t.TempDir()

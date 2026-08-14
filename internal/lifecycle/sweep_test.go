@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/TSHOGX/warren/internal/model"
-	"github.com/TSHOGX/warren/internal/store"
-	"github.com/TSHOGX/warren/internal/transport"
+	"github.com/TSHOGX/khora/internal/model"
+	"github.com/TSHOGX/khora/internal/store"
+	"github.com/TSHOGX/khora/internal/transport"
 )
 
 // The mediator's SweepOrphanLayers reads the authoritative store for live layer

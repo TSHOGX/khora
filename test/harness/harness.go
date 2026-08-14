@@ -19,11 +19,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/TSHOGX/warren/internal/btrfs"
-	"github.com/TSHOGX/warren/internal/model"
-	"github.com/TSHOGX/warren/internal/orchestrator"
-	"github.com/TSHOGX/warren/internal/rootfs"
-	"github.com/TSHOGX/warren/internal/runtime"
+	"github.com/TSHOGX/khora/internal/btrfs"
+	"github.com/TSHOGX/khora/internal/model"
+	"github.com/TSHOGX/khora/internal/orchestrator"
+	"github.com/TSHOGX/khora/internal/rootfs"
+	"github.com/TSHOGX/khora/internal/runtime"
 )
 
 // RepoRoot resolves the engine repo root from this file's location.

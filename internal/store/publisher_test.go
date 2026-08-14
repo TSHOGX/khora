@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/TSHOGX/warren/internal/model"
-	"github.com/TSHOGX/warren/internal/store"
+	"github.com/TSHOGX/khora/internal/model"
+	"github.com/TSHOGX/khora/internal/store"
 )
 
 // kindFor is the §4.1 kind matching a transition INTO state. Tests needing only "a

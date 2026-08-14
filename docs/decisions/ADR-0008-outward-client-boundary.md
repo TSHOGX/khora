@@ -2,12 +2,12 @@
 
 - **Status:** accepted
 - **Date:** 2026-08-12
-- **Consumers:** anyone writing a program against the §6.1 API; `pkg/warren`,
-  `cmd/warren`, `proto/`, and the README's client section carry the result.
+- **Consumers:** anyone writing a program against the §6.1 API; `pkg/khora`,
+  `cmd/khora`, `proto/`, and the README's client section carry the result.
 
 ## Context
 
-`cmd/warren` already covers the §6.1 surface — sandbox lifecycle, files, volumes,
+`cmd/khora` already covers the §6.1 surface — sandbox lifecycle, files, volumes,
 templates, network, events, process, health — but it is `package main`, so **no
 program can import it**. Every Go consumer therefore re-derives the same wire
 protocol, and the README says so plainly ("No client library ships yet for other
@@ -16,13 +16,13 @@ languages").
 The obvious fix — move those files to an importable path — is **not** the whole fix,
 and the reason is structural rather than stylistic:
 
-- **The generated wire stubs are behind `internal/`.** `cmd/warren`'s process and
+- **The generated wire stubs are behind `internal/`.** `cmd/khora`'s process and
   health commands imported the module's `internal/transport/gen/...` directly, and Go's
   internal rule means an external module cannot. Relocating the CLI's files without
   relocating the stubs produces a package that is still unimportable for exactly the
   two subsystems (process, fs) a consumer most needs.
 - **The REST half has no machine-readable contract at all.** `buf.gen.yaml`
-  generates Go stubs for `engine.transport.v1`, which covers the Connect data plane;
+  generates Go stubs for `khora.transport.v1`, which covers the Connect data plane;
   the control plane is REST/JSON described in prose in
   [`api-contract.md`](../spec/api-contract.md). A non-Go consumer has to transcribe
   thirty-odd endpoints by hand from a document — which is the "every consumer
@@ -54,7 +54,7 @@ document is the **transcription** of the shapes it fixes. When they disagree, th
 divergence is resolved by CLAUDE.md's Relationship rule like any other, and the
 generated artifact is never the side that gets to win by default.
 
-### 2. One thin Go client, at `pkg/warren`
+### 2. One thin Go client, at `pkg/khora`
 
 Thin has a precise meaning here, and it is the whole reason this package is allowed
 to exist inside the engine repo:
@@ -69,7 +69,7 @@ to exist inside the engine repo:
 - **§1.1's vocabulary boundary applies to it verbatim.** It is engine-facing code in
   the engine repo, so the banned entity names are banned here too.
 
-`cmd/warren` becomes a shell over it, which is also what keeps the package honest:
+`cmd/khora` becomes a shell over it, which is also what keeps the package honest:
 the CLI exercises every call, so a client method no command can use is visible
 immediately.
 
@@ -78,7 +78,7 @@ immediately.
 `internal/transport/gen/...` → **`pkg/transport/gen/...`**, an importable path,
 because part 2 is otherwise undeliverable for process and fs.
 
-`pkg/transport/gen` rather than `pkg/warren/gen`: the tree is the **protocol**, and
+`pkg/transport/gen` rather than `pkg/khora/gen`: the tree is the **protocol**, and
 part 2's thin client is one consumer of it rather than its owner. A Go consumer that
 wants the Connect data plane and none of the client's opinions imports it directly,
 which is the same relationship `internal/transport` has to it — and nesting it under
@@ -112,12 +112,12 @@ same boundary that keeps authentication outside (ADR-0007) applied to client cod
 
 ## Consequences
 
-- A Go consumer imports `pkg/warren` and writes no wire code. A non-Go consumer
+- A Go consumer imports `pkg/khora` and writes no wire code. A non-Go consumer
   generates stubs from `proto/` plus the OpenAPI document.
 - **Two artifacts now describe §6.1**, and the drift risk is real — mitigated by
   generating the OpenAPI document from the handlers and testing it against the
   router, never by promising to keep two documents in step.
-- **`pkg/warren` is a compatibility surface the rest of the repo is not.** While the
+- **`pkg/khora` is a compatibility surface the rest of the repo is not.** While the
   no-compatibility-burden rule holds (no live instances), that costs nothing; the
   first external consumer is when it starts to.
 - The thinness rules above are prose today. If the package starts accreting

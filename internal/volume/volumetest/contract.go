@@ -22,7 +22,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/TSHOGX/warren/internal/volume"
+	"github.com/TSHOGX/khora/internal/volume"
 )
 
 // Factory builds a fresh, empty backend for one subtest.

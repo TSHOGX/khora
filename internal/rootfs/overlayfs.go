@@ -9,10 +9,10 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/TSHOGX/warren/internal/allocbytes"
-	"github.com/TSHOGX/warren/internal/btrfs"
+	"github.com/TSHOGX/khora/internal/allocbytes"
+	"github.com/TSHOGX/khora/internal/btrfs"
 
-	"github.com/TSHOGX/warren/internal/guestport"
+	"github.com/TSHOGX/khora/internal/guestport"
 )
 
 // HostOverlayFS is the single-node rootfs provider (§5.B): it assembles the

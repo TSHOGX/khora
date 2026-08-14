@@ -38,8 +38,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/TSHOGX/warren/internal/model"
-	"github.com/TSHOGX/warren/internal/ruleset"
+	"github.com/TSHOGX/khora/internal/model"
+	"github.com/TSHOGX/khora/internal/ruleset"
 )
 
 // The DECLARATION TYPES live in `model`, not here, and that placement follows the

@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/TSHOGX/warren/internal/btrfs"
+	"github.com/TSHOGX/khora/internal/btrfs"
 )
 
 // SweepOrphanLayers is pure filesystem bookkeeping (no mount, no root), so it

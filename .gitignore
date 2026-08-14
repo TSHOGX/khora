@@ -19,7 +19,7 @@
 # the name is the package name and an unlisted one lands untracked at the repo root
 /sandboxd
 /orchestrator
-/warren
+/khora
 /gateway
 /openapigen
 

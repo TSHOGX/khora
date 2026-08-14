@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/TSHOGX/warren/internal/model"
-	"github.com/TSHOGX/warren/internal/store"
+	"github.com/TSHOGX/khora/internal/model"
+	"github.com/TSHOGX/khora/internal/store"
 )
 
 // This file holds the ONE write point behind `PATCH /v1/sandboxes/{id}` (§6.1 /

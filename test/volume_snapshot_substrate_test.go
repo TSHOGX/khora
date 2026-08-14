@@ -19,13 +19,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/TSHOGX/warren/internal/btrfs"
-	"github.com/TSHOGX/warren/internal/lifecycle"
-	"github.com/TSHOGX/warren/internal/model"
-	"github.com/TSHOGX/warren/internal/store"
-	"github.com/TSHOGX/warren/internal/transport"
-	"github.com/TSHOGX/warren/internal/waitfor"
-	"github.com/TSHOGX/warren/test/harness"
+	"github.com/TSHOGX/khora/internal/btrfs"
+	"github.com/TSHOGX/khora/internal/lifecycle"
+	"github.com/TSHOGX/khora/internal/model"
+	"github.com/TSHOGX/khora/internal/store"
+	"github.com/TSHOGX/khora/internal/transport"
+	"github.com/TSHOGX/khora/internal/waitfor"
+	"github.com/TSHOGX/khora/test/harness"
 )
 
 // runCmd runs a host command and returns its combined output. Local to this file: the

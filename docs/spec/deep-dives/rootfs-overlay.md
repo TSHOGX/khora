@@ -298,7 +298,7 @@ or structural, and each has a defect behind it that a fresh implementation would
     so the engine refuses first.** The lower stack is passed as one colon-separated `lowerdir=` string,
     and the classic mount path caps its options at a single page and **truncates past it rather than
     refusing** — so with this repo's Template ID width the ceiling is on the order of **~77 layers**
-    (82 for `/var/lib/warren` paths; the exact number is a function of path length), not the kernel's
+    (84 for `/var/lib/khora` paths; the exact number is a function of path length), not the kernel's
     `OVL_MAX_STACK` of 500. Escaping the limit itself means the per-layer `lowerdir+=` configuration API
     (trading one aggregate limit for a per-path one) or passing descriptors; neither is used.
     **Two checks, because one cannot cover the other.** `Provider.MaxLowerDepth` reports the depth the

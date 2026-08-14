@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/TSHOGX/warren/internal/model"
-	"github.com/TSHOGX/warren/internal/store"
+	"github.com/TSHOGX/khora/internal/model"
+	"github.com/TSHOGX/khora/internal/store"
 )
 
 // Reaper is the engine's first autonomous background control loop (§4.3 /

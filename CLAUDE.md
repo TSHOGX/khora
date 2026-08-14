@@ -1,15 +1,16 @@
-# warren — working conventions
+# khora — working conventions
 
-> **Naming.** `warren` = the project; the Go module path is
-> `github.com/TSHOGX/warren`, which is the same name made **remotely resolvable** — a
-> bare `warren` cannot be fetched by `go get`, so a consumer could only reach it through
-> a `replace` pointing at a local checkout. The project name did not change.
+> **Naming.** `khora` = the project, the Go module (`github.com/TSHOGX/khora`), the CLI
+> binary and the repository — one name for one thing. The module path is that name made
+> **remotely resolvable**: a bare `khora` cannot be fetched by `go get`, so a consumer
+> could only reach it through a `replace` pointing at a local checkout.
 > `engine` = the sandbox
 > abstraction itself, and that is what `docs/spec/` means by the word throughout
 > (§1.1 terminology: *engine* = the abstraction, *orchestrator* = the binary hosting
 > it). Different layers, not synonyms — so "the engine" below still reads exactly as
-> the spec intends. The protobuf wire package stays `engine.transport.v1`: it is a
-> protocol identifier, not a project label.
+> the spec intends. The protobuf wire package is `khora.transport.v1`, following the
+> project: it is compiled into every RPC path and resolved by both ends, which makes it a
+> compatibility surface between the host binary and every Template built before it changes.
 
 ## What this is
 
@@ -110,7 +111,7 @@ machine-readable `Hangs on: §<n>` line. **The issue number is the only identifi
 ADR-0009.
 
 ```bash
-gh issue list --repo TSHOGX/warren --label ask:inbound --state open
+gh issue list --repo TSHOGX/khora --label ask:inbound --state open
 ```
 
 **Nothing about the first principle relaxes here.** A downstream ask carries product vocabulary

@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/TSHOGX/warren/internal/model"
+	"github.com/TSHOGX/khora/internal/model"
 )
 
 // The write-regime invariant (§5.C, cross-cutting): a Volume has TWO write paths —

@@ -23,7 +23,7 @@
 # no-network case gets covered.
 set -uo pipefail
 
-REPO="${ASK_GATE_REPO:-TSHOGX/warren}"
+REPO="${ASK_GATE_REPO:-TSHOGX/khora}"
 REGISTER="${ASK_GATE_REGISTER:-docs/spec/open-decisions.md}"
 BASE="${ASK_GATE_BASE:-origin/main}"
 
@@ -58,7 +58,7 @@ fail=0
 
 # ── ① register entries citing a closed issue ─────────────────────────────────
 if [[ -f "$REGISTER" ]]; then
-  # `#12` resolves against this repo; `warren#12` against that one. An ask is filed on
+  # `#12` resolves against this repo; `khora#12` against that one. An ask is filed on
   # the RECEIVING repo, so a register citing one is nearly always cross-repo — resolving
   # every citation locally would check the wrong tracker and pass vacuously.
   cited=$(grep -oE '(\b[a-z][a-z0-9-]*)?#[0-9]+' "$REGISTER" 2>/dev/null | sort -u)

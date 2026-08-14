@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/TSHOGX/warren/internal/model"
+	"github.com/TSHOGX/khora/internal/model"
 )
 
 // noHostLocal / allHostLocal are hostLocal fixtures. The predicate is a PARAMETER

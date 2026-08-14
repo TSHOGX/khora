@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"net/netip"
 
-	"github.com/TSHOGX/warren/internal/ruleset"
+	"github.com/TSHOGX/khora/internal/ruleset"
 )
 
 // Spec is what §5.D hands across the §5.A seam: the abstract rule set plus the

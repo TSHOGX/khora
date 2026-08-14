@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/TSHOGX/warren/internal/ruleset"
+	"github.com/TSHOGX/khora/internal/ruleset"
 )
 
 // A run started with NO second-hop uid must DESTROY the table a previous run installed,

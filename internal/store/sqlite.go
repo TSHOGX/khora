@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/TSHOGX/warren/internal/model"
+	"github.com/TSHOGX/khora/internal/model"
 
 	_ "modernc.org/sqlite" // pure-Go driver, CGO_ENABLED=0 (ADR-0004)
 )

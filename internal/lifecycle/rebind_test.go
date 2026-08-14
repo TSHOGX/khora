@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/TSHOGX/warren/internal/model"
-	"github.com/TSHOGX/warren/internal/store"
+	"github.com/TSHOGX/khora/internal/model"
+	"github.com/TSHOGX/khora/internal/store"
 )
 
 // patchBinding drives the real PATCH verb with a Binding-only spec — what

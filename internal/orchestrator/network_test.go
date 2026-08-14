@@ -12,8 +12,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/TSHOGX/warren/internal/model"
-	"github.com/TSHOGX/warren/internal/network"
+	"github.com/TSHOGX/khora/internal/model"
+	"github.com/TSHOGX/khora/internal/network"
 )
 
 // The assembly REFUSES a second-hop uid equal to its own euid, and it refuses BEFORE

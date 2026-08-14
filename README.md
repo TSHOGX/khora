@@ -1,4 +1,4 @@
-# warren
+# khora
 
 **A self-hostable agent sandbox engine that needs no hypervisor.** Sandboxes are
 persistent, mutable, and root-capable inside; their whole state is plain files on
@@ -7,13 +7,13 @@ unprivileged process, a CI runner, inside a container.
 
 ```sh
 # create a sandbox
-sandbox_id=$(warren sandbox create --template base --disk-byte 2147483648)
+sandbox_id=$(khora sandbox create --template base --disk-byte 2147483648)
 
 # upload a file into it, download it to stdout
-printf 'warren works\n' > /tmp/warren-hello
-warren files upload "$sandbox_id" /tmp/warren-hello /tmp/hello
-warren files download "$sandbox_id" /tmp/hello
-# → warren works
+printf 'khora works\n' > /tmp/khora-hello
+khora files upload "$sandbox_id" /tmp/khora-hello /tmp/hello
+khora files download "$sandbox_id" /tmp/hello
+# → khora works
 
 # or use the API directly
 curl -X POST localhost:8080/v1/sandboxes \
@@ -31,7 +31,7 @@ across hosts, CPUs and runsc versions rather than pinned to a set of CPU feature
 > 0 failed. The run is recorded — with the commit it ran on — in
 > [`docs/substrate-runs/`](docs/substrate-runs/), which is the number to trust rather than
 > this sentence. [`deploy/`](deploy/) carries the authenticating TLS boundary that goes in
-> front of it, and a CLI ships in `cmd/warren`. Still missing before you deploy this: no
+> front of it, and a CLI ships in `cmd/khora`. Still missing before you deploy this: no
 > production Template ships in this repo, and there are no client libraries for other
 > languages yet. See [What is missing](#what-is-missing-before-you-deploy-this) and
 > [`CHANGELOG.md`](CHANGELOG.md) — through all of `0.0.x` there is no compatibility
@@ -110,12 +110,12 @@ make verify-reproducible
 # which becomes the guest's PID 1. The repo ships the bare Template's DEFINITION
 # (templates/bare/) rather than the ~730 MB tree it builds — see that directory's
 # README for why. Needs skopeo + umoci:
-sudo ./templates/bare/build.sh /var/lib/warren/templates/bare ./bin/sandboxd
+sudo ./templates/bare/build.sh /var/lib/khora/templates/bare ./bin/sandboxd
 
 # --state MUST be on a btrfs filesystem: disk caps are btrfs quotas, and the engine
 # refuses to run a capped sandbox uncapped rather than silently ignoring the cap.
-# --templates defaults to /var/lib/warren/templates, so it can be omitted here.
-sudo ./bin/orchestrator --state /srv/warren/state
+# --templates defaults to /var/lib/khora/templates, so it can be omitted here.
+sudo ./bin/orchestrator --state /srv/khora/state
 # serving §6.1 API on 127.0.0.1:8080
 ```
 
@@ -199,9 +199,9 @@ Known and deliberate, not oversights:
   certificate and the CA that issues caller certificates.
 - **One Go client and a machine-readable contract, and no SDK beyond that** —
   deliberately, and the boundary is [`ADR-0008`](docs/decisions/ADR-0008-outward-client-boundary.md).
-  What ships: [`pkg/warren`](pkg/warren/) — imported as
-  `github.com/TSHOGX/warren/pkg/warren`, a path that names a host and can therefore be
-  resolved, which a bare `warren` could not be. **Resolvable is not the same as fetchable,
+  What ships: [`pkg/khora`](pkg/khora/) — imported as
+  `github.com/TSHOGX/khora/pkg/khora`, a path that names a host and can therefore be
+  resolved, which a bare `khora` could not be. **Resolvable is not the same as fetchable,
   and half of that gap is now closed and half is closed permanently the other way**: there
   are tags from `v0.0.1` on, so a dependent pins a release rather than a pseudo-version of
   the default branch — but **this repository is private and stays private**, so `go get`
@@ -209,7 +209,7 @@ Known and deliberate, not oversights:
   still better served by `go work use`. A directory has no version, so an upstream-artifact
   pin there is a digest; that is the permanent answer, not a stopgap (issue #2) — a thin
   client over the §6.1 surface, with
-  `cmd/warren` (the CLI) as a shell over it — which is what keeps it honest rather than
+  `cmd/khora` (the CLI) as a shell over it — which is what keeps it honest rather than
   merely present, since a client call no command can reach shows up immediately. Plus
   the contract itself in two forms: `proto/` with stubs at `pkg/transport/gen/` for the
   guest transport, and [`docs/spec/openapi.json`](docs/spec/openapi.json) — generated
@@ -287,8 +287,17 @@ Subsystems never call each other — that is enforced by a test, not by review. 
 need the same fact it goes in a leaf package, and a leaf may decide things but may not
 do I/O or touch the substrate.
 
-> **On the name.** `warren` is the project and the Go module. Inside
-> [`docs/spec/`](docs/spec/), *engine* means the sandbox abstraction itself and
-> *orchestrator* means the binary hosting it — different layers, not other names for
-> the project, so the spec was not rewritten. The protobuf wire package stays
-> `engine.transport.v1` because that string is a protocol identifier.
+> **On the name.** *Khora* (χώρα) is the *Timaeus*'s third kind: neither the Form nor the
+> copy of it, but the receptacle in which becoming takes place — it has no character of its
+> own and takes on the character of what enters it. That is this engine's first principle
+> stated in Greek. It holds no session, no tenant, no agent and no credential; product
+> concepts stay outside, and what enters gets its character from the layer above. The name
+> is why the §1.3 litmus can refuse things.
+>
+> `khora` is the project, the Go module, the CLI and the repository — one name for one
+> thing. Inside [`docs/spec/`](docs/spec/), *engine* means the sandbox abstraction itself
+> and *orchestrator* the binary hosting it: different layers, not other names for the
+> project. The protobuf wire package is `khora.transport.v1`, following the project — it is
+> compiled into every RPC path and resolved by both ends, so it is a compatibility surface
+> between the host binary and every Template built before a change to it. Renaming it was
+> free only here, before anything consumes `v0.0.1`.

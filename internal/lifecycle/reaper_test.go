@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/TSHOGX/warren/internal/model"
-	"github.com/TSHOGX/warren/internal/runtime"
-	"github.com/TSHOGX/warren/internal/store"
-	"github.com/TSHOGX/warren/internal/transport"
+	"github.com/TSHOGX/khora/internal/model"
+	"github.com/TSHOGX/khora/internal/runtime"
+	"github.com/TSHOGX/khora/internal/store"
+	"github.com/TSHOGX/khora/internal/transport"
 )
 
 // reaper dispatch as pure logic against fakes (§4.3 health states → §4.1

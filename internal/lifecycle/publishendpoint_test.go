@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/TSHOGX/warren/internal/model"
+	"github.com/TSHOGX/khora/internal/model"
 )
 
 // A host endpoint is stable WITHIN a placement and only within one. These tests pin the

@@ -22,12 +22,12 @@ import (
 // Mount's own arithmetic.
 func TestMaxLowerDepthWorstCaseStackFitsTheOptionsCap(t *testing.T) {
 	for _, p := range []*HostOverlayFS{
-		{StateDir: "/var/lib/warren/overlays", LayersDir: "/var/lib/warren/layers", TemplatesDir: "/var/lib/warren/templates"},
+		{StateDir: "/var/lib/khora/overlays", LayersDir: "/var/lib/khora/layers", TemplatesDir: "/var/lib/khora/templates"},
 		// TemplatesDir longer than LayersDir: the guarantee must hold whichever root a
 		// layer resolves under, since layerPath picks per ID.
-		{StateDir: "/s", LayersDir: "/l", TemplatesDir: "/var/lib/warren/deployment/templates/builtin"},
+		{StateDir: "/s", LayersDir: "/l", TemplatesDir: "/var/lib/khora/deployment/templates/builtin"},
 		// A deep StateDir eats the fixed overhead instead of the per-entry budget.
-		{StateDir: "/var/lib/warren/very/deeply/nested/state/directory/for/overlays", LayersDir: "/var/lib/warren/layers", TemplatesDir: "/t"},
+		{StateDir: "/var/lib/khora/very/deeply/nested/state/directory/for/overlays", LayersDir: "/var/lib/khora/layers", TemplatesDir: "/t"},
 	} {
 		depth, err := p.MaxLowerDepth(context.Background())
 		if err != nil {

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/TSHOGX/warren/internal/ruleset"
+	"github.com/TSHOGX/khora/internal/ruleset"
 )
 
 // bannedTokens are substrings that betray a host primitive crossing a seam.

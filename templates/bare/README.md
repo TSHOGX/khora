@@ -26,10 +26,10 @@ Build it with:
 
 ```sh
 go build -o /tmp/sandboxd ./cmd/sandboxd
-sudo ./templates/bare/build.sh /var/lib/warren/templates/bare /tmp/sandboxd
+sudo ./templates/bare/build.sh /var/lib/khora/templates/bare /tmp/sandboxd
 ```
 
-`/var/lib/warren/templates` is where `--templates` points by default. Each subdirectory
+`/var/lib/khora/templates` is where `--templates` points by default. Each subdirectory
 there is a builtin Template whose directory name IS its TemplateID, so the boot seed
 registers `bare` on startup.
 

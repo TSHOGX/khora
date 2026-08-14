@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/TSHOGX/warren/internal/model"
-	"github.com/TSHOGX/warren/internal/store"
+	"github.com/TSHOGX/khora/internal/model"
+	"github.com/TSHOGX/khora/internal/store"
 )
 
 // healthEngine assembles a root-free Engine over the in-memory store arm, marked
@@ -209,22 +209,22 @@ func TestMetricsExportsTheProcessLevelFacts(t *testing.T) {
 		t.Fatalf("/metrics = %d, want 200", code)
 	}
 	for _, want := range []string{
-		"warren_up 1",
-		"warren_ready 1",
-		"warren_draining 0",
-		"warren_outbox_publisher_halted 0",
-		"warren_outbox_backlog_rows",
-		"warren_outbox_published_total",
-		"warren_outbox_since_heartbeat_seconds",
-		"warren_outbox_deliver_in_flight_seconds",
-		`warren_sandboxes{state="any"} 0`,
+		"khora_up 1",
+		"khora_ready 1",
+		"khora_draining 0",
+		"khora_outbox_publisher_halted 0",
+		"khora_outbox_backlog_rows",
+		"khora_outbox_published_total",
+		"khora_outbox_since_heartbeat_seconds",
+		"khora_outbox_deliver_in_flight_seconds",
+		`khora_sandboxes{state="any"} 0`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("/metrics is missing %q:\n%s", want, body)
 		}
 	}
 	// Every metric needs its HELP/TYPE pair, or a scraper treats it as untyped.
-	for _, name := range []string{"warren_up", "warren_ready", "warren_outbox_backlog_rows"} {
+	for _, name := range []string{"khora_up", "khora_ready", "khora_outbox_backlog_rows"} {
 		if !strings.Contains(body, "# HELP "+name+" ") || !strings.Contains(body, "# TYPE "+name+" ") {
 			t.Errorf("/metrics has no HELP/TYPE for %s", name)
 		}
@@ -251,7 +251,7 @@ func TestMetricsDoesNotDuplicateThe61ReadSurfaces(t *testing.T) {
 	}
 }
 
-// Draining flips warren_ready to 0 while warren_up stays 1, so a dashboard can tell a
+// Draining flips khora_ready to 0 while khora_up stays 1, so a dashboard can tell a
 // planned drain from a dead process. The two gauges would be redundant if they moved
 // together.
 func TestTheReadyGaugeFollowsReadinessNotLiveness(t *testing.T) {
@@ -261,15 +261,15 @@ func TestTheReadyGaugeFollowsReadinessNotLiveness(t *testing.T) {
 
 	eng.BeginDraining()
 	_, body := get(t, srv, "/metrics")
-	if !strings.Contains(body, "warren_ready 0") {
-		t.Errorf("warren_ready is not 0 during a drain:\n%s", body)
+	if !strings.Contains(body, "khora_ready 0") {
+		t.Errorf("khora_ready is not 0 during a drain:\n%s", body)
 	}
-	if !strings.Contains(body, "warren_up 1") {
-		t.Errorf("warren_up is not 1 during a drain — a drain is not a dead process, and a dashboard "+
+	if !strings.Contains(body, "khora_up 1") {
+		t.Errorf("khora_up is not 1 during a drain — a drain is not a dead process, and a dashboard "+
 			"needs to tell them apart:\n%s", body)
 	}
-	if !strings.Contains(body, "warren_draining 1") {
-		t.Errorf("warren_draining is not 1 during a drain:\n%s", body)
+	if !strings.Contains(body, "khora_draining 1") {
+		t.Errorf("khora_draining is not 1 during a drain:\n%s", body)
 	}
 }
 
