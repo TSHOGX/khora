@@ -1,9 +1,9 @@
 # Sandbox Engine Architecture
 
-> The maintained architecture reference (not a roadmap) for a standalone, self-hostable
+> The maintained architecture reference for a standalone, self-hostable
 > agent sandbox engine that is freely configurable inside the guest. It describes
-> **what the engine should be, where its boundaries lie, and what it contracts to
-> do**; delivery scheduling (roadmap) is out of this spec's scope.
+> **what the engine is, where its boundaries lie, and what it contracts to do**. Delivery
+> scheduling and product-layer policy are outside this repository.
 
 ## Reading guide
 
@@ -14,8 +14,8 @@ internals pages retain measurements and counterexamples.
 | File | Covers | Role |
 | --- | --- | --- |
 | **architecture.md** (this file) | positioning and boundaries · security model | The charter: most stable, rarely changed |
-| [`model.md`](./model.md) | §3 sandbox model · §4 lifecycle | The core model, evolves at medium speed |
-| [`subsystems.md`](./subsystems.md) | §5 subsystems (A–E target definitions) | Subsystem boundaries |
+| [`model.md`](./model.md) | Sandbox model and lifecycle | The core model, evolves at medium speed |
+| [`subsystems.md`](./subsystems.md) | Runtime, rootfs, volume, network and transport seams | Subsystem boundaries |
 | [`../api/contract.md`](../api/contract.md) | API and CLI contract | Changes most often |
 | [`../internals/`](../internals/) | Single-topic rationale, measurements and counterexamples | Kept current with the implementation |
 
@@ -29,7 +29,7 @@ describe current code, while unresolved needs belong in Issues.
 ### 1.1 Positioning
 
 A **persistent, mutable, root-capable agent sandbox engine**. The isolation substrate
-is a pluggable runtime provider (§5.A); today the only implementation is gVisor
+is a pluggable runtime provider (the runtime subsystem); today the only implementation is gVisor
 (runsc). Once a sandbox is launched from a Template it is an isolated environment: at
 runtime it freely installs dependencies with `apt`/`pip` and modifies its filesystem,
 and those changes **persist**. It can be paused at any time (releasing RAM/CPU,
@@ -45,13 +45,13 @@ dependencies.
 
 > **One qualifier: that sentence describes the engine's OWN deployment shape, not "nothing
 > a sandbox can do requires another process".** A network declaration that narrows egress
-> down to some rendezvous point (§5.D `egress.via[]`) requires a process **outside the
+> down to some rendezvous point (the network subsystem `egress.via[]`) requires a process **outside the
 > engine** listening behind that endpoint. The engine does not start it, does not
 > health-check it, and does not know what it is — it only installs a rule pointing at some
-> address (§5.D). So under a declaration with no `egress.via[]` the sentence holds
+> address (the network subsystem). So under a declaration with no `egress.via[]` the sentence holds
 > literally; under one with `egress.via[]` **the deployment topology gains a process while
 > the engine's dependency list stays the same**: an unreachable endpoint has its
-> consequence on that one connection (§2.4 fail-closed), not on the engine's startup path
+> consequence on that one connection (the network safety invariants fail-closed), not on the engine's startup path
 > and not on the create path.
 
 > **gVisor terminology** (reused throughout): **sentry** = gVisor's userspace kernel,
@@ -59,28 +59,28 @@ dependencies.
 > default interception mode, catching syscalls with a seccomp trap (no KVM needed);
 > **gofer** = the host-side process in gVisor that proxies the guest's file access.
 >
-> **This system's terminology**: **engine** = the sandbox abstraction this spec
+> **This system's terminology**: **engine** = the sandbox abstraction this documentation
 > describes; **orchestrator** = the single binary hosting the engine; **control plane** =
 > the part of the engine that holds the authoritative records; **store** = the durable
 > backend for control-plane records (Bindings, each object's lifecycle-state, and the
 > reference rows a derived refcount needs), abstracted behind an interface and
 > replaceable. There are three kinds of **pluggable-implementation seam**, materializing
-> respectively "what runs the isolated process" (**runtime provider**, §5.A), "which
-> layers compose a sandbox's rootfs and where it lands" (**rootfs provider**, §5.B), and
-> "which backend an independent Volume lands on" (**volume backend**, §5.C). **driver** =
+> respectively "what runs the isolated process" (**runtime provider**, the runtime subsystem), "which
+> layers compose a sandbox's rootfs and where it lands" (**rootfs provider**, the rootfs subsystem), and
+> "which backend an independent Volume lands on" (**volume backend**, the volume subsystem). **driver** =
 > the CLI binary of one specific agent (claude-code / opencode / pi …); **Overlay
-> artifact** = this sandbox's writable delta layer relative to its Template (§3.1).
+> artifact** = this sandbox's writable delta layer relative to its Template (the sandbox model).
 >
-> **Canonical short names of the five subsystems** (§5 — code package names, logs, and
-> review all use these, never a section number as a stand-in): **Runtime** (§5.A, the
-> execution substrate) · **Rootfs** (§5.B, rootfs/Overlay) · **Volume** (§5.C) ·
-> **Network** (§5.D) · **Transport** (§5.E). Four uses of `fs`/`FS`/`Rootfs` are
-> deliberately distinguished — do not merge them: **Rootfs** = subsystem 5.B; **`fs`** =
-> one wire service of §5.E Transport (`read/write/list/stat/mkdir/remove/move`); **rootfs
+> **Canonical short names of the five subsystems** (the subsystem layer — code package names, logs, and
+> review all use these, never a section number as a stand-in): **Runtime** (the runtime subsystem, the
+> execution substrate) · **Rootfs** (the rootfs subsystem, rootfs/Overlay) · **Volume** (the volume subsystem) ·
+> **Network** (the network subsystem) · **Transport** (the transport subsystem). Four uses of `fs`/`FS`/`Rootfs` are
+> deliberately distinguished — do not merge them: **Rootfs** = the Rootfs subsystem; **`fs`** =
+> one wire service of the transport subsystem Transport (`read/write/list/stat/mkdir/remove/move`); **rootfs
 > provider** / **volume backend** = two differently shaped, separately registered storage
 > materialization seams, and not the same thing (why they are separate, and which
-> substrate primitives they share, is in the §5 preamble). Likewise **Runtime**
-> (subsystem 5.A) vs **Sandbox** (§3.2, the top-level persistent unit) mean "what runs
+> substrate primitives they share, is in the subsystem preamble). Likewise **Runtime**
+> (the Runtime subsystem) vs **Sandbox** (the transport model, the top-level persistent unit) mean "what runs
 > it" vs "which sandbox".
 
 **Engine vocabulary boundary.** The first principle (see the engine's root CLAUDE.md)
@@ -92,12 +92,12 @@ engine states clearly what it does **not** do, it naturally has to name these th
 
 | Barred as an engine-internal name | Why / what to use instead | Allowed in ordinary prose? |
 | --- | --- | --- |
-| `generation` | The engine introduces no standalone generation counter; the four things such a counter wants to solve each belong somewhere else: **where it is** → Placement (§3.3) · **staleness** → placement/IP as the epoch (§4.3) · **concurrency arbitration** → per-sandbox transition lock + CAS (§4.4-B) · **failure recovery** → atomic rollback to the source state + startup reconciliation reclaiming orphan placements (§4.4-A, which is also why there is no `failed` state) | No (barred outright, to stop the counter seeping back in from elsewhere) |
-| `principal` / `tenant` | The engine has no authorization subject and no tenancy inside it (§1.4 non-goals); multi-tenancy is an addition made by a join table outside the engine | Only in prose asserting "these live outside the engine" (e.g. §1.4 "multi-tenancy", §3.2.1 "which agent belongs to which tenant"); **never as an engine-internal name** |
-| `owner` (belonging / authorization sense) | A sandbox has no owner column; reclamation looks only at refcount/TTL (§4.3 / §1.4) | Only in the **responsibility** sense (e.g. "the owner of the idle decision is the control plane") — that is "who is responsible for it", not "who possesses it" |
-| `session` / `turn` | Agent session semantics are an addition made by an adapter outside the engine (§5.E); the engine has only process/fs | Yes, and it necessarily appears in prose asserting "these live outside the engine" |
-| `agent` | The engine neither knows about nor addresses agents (§3.2.1); it has only the sandbox/process/fs atoms | Yes (when describing what is outside the engine, the product layer included) |
-| `credential` / `secret` / `token` / `api_key` | The credential family is permanently excluded (§1.4); the engine has no such concept — all it sees is a TCP flow to some endpoint (§5.D). Today this is **vacuously true** (there is no credential material in the engine at all). **This row is held by the table, not by a structural guard**: `token` has plenty of legitimate uses in this repo (the opaque ID `tmpl_<token>`, lexical tokens), so a mechanical token list would produce false positives at scale — unlike the situation at the two `seam_test.go` files in `runtime`/`volume`, where host-primitive spellings are finite and have no legitimate use | Only in prose asserting "these live outside the engine" (e.g. that §1.4 non-goal, §5.D); **never as an engine-internal name** |
+| `generation` | The engine introduces no standalone generation counter; the four things such a counter wants to solve each belong somewhere else: **where it is** → Placement (the placement model) · **staleness** → placement/IP as the epoch (the health and recovery model) · **concurrency arbitration** → per-sandbox transition lock + CAS (reaper locking) · **failure recovery** → atomic rollback to the source state + startup reconciliation reclaiming orphan placements (startup reconciliation, which is also why there is no `failed` state) | No (barred outright, to stop the counter seeping back in from elsewhere) |
+| `principal` / `tenant` | The engine has no authorization subject and no tenancy inside it (the engine boundary non-goals); multi-tenancy is an addition made by a join table outside the engine | Only in prose asserting "these live outside the engine" (e.g. the engine boundary "multi-tenancy", the transport identity rules "which agent belongs to which tenant"); **never as an engine-internal name** |
+| `owner` (belonging / authorization sense) | A sandbox has no owner column; reclamation looks only at refcount/TTL (the health and recovery model / the engine boundary) | Only in the **responsibility** sense (e.g. "the owner of the idle decision is the control plane") — that is "who is responsible for it", not "who possesses it" |
+| `session` / `turn` | Agent session semantics are an addition made by an adapter outside the engine (the transport subsystem); the engine has only process/fs | Yes, and it necessarily appears in prose asserting "these live outside the engine" |
+| `agent` | The engine neither knows about nor addresses agents (the transport identity rules); it has only the sandbox/process/fs atoms | Yes (when describing what is outside the engine, the product layer included) |
+| `credential` / `secret` / `token` / `api_key` | The credential family is permanently excluded (the engine boundary); the engine has no such concept — all it sees is a TCP flow to some endpoint (the network subsystem). Today this is **vacuously true** (there is no credential material in the engine at all). **This row is held by the table, not by a structural guard**: `token` has plenty of legitimate uses in this repo (the opaque ID `tmpl_<token>`, lexical tokens), so a mechanical token list would produce false positives at scale — unlike the situation at the two `seam_test.go` files in `runtime`/`volume`, where host-primitive spellings are finite and have no legitimate use | Only in prose asserting "these live outside the engine" (e.g. that the engine boundary non-goal, the network subsystem); **never as an engine-internal name** |
 
 > **Premise: deployed on a Linux host able to run gVisor** (able to install seccomp
 > filters, handle signals, on a new enough kernel). That is systrap's inherent
@@ -106,34 +106,34 @@ engine states clearly what it does **not** do, it naturally has to name these th
 
 > **Two bottom lines: no-hypervisor and portability, independent of each other.** Any
 > decision that **trades portability for performance is rejected, or hidden behind a
-> provider as pluggable** (§5.A) — platform is one such case: `local_runsc` pins it to
-> `--platform=systrap` and does not inherit the runsc default (reasoning in §5.A), while
+> provider as pluggable** (the runtime subsystem) — platform is one such case: `local_runsc` pins it to
+> `--platform=systrap` and does not inherit the runsc default (reasoning in the runtime subsystem), while
 > another provider may choose otherwise. No-hypervisor governs "no KVM / no nested
-> virtualization"; **not storing memory (§4.2) is a consequence of portability**, not of
+> virtualization"; **not storing memory (the pause/resume lifecycle) is a consequence of portability**, not of
 > no-hypervisor — gVisor under systrap could checkpoint, and we decline to, because
-> memory state pins CPU features (§2.5), which would make the persistent state
-> unmovable across host/CPU (§1.5#3). Hence resume is a seconds-scale cold start.
+> memory state pins CPU features (the runtime portability constraint), which would make the persistent state
+> unmovable across host/CPU (the runtime portability constraint). Hence resume is a seconds-scale cold start.
 
 **"Where, and with what, to run an isolated process context" is exactly what the
 runtime provider abstracts away.** The point of this interface is to **keep the
 abstraction boundary clean**, not to support other backends: the only implementation is
 the single-node host runsc process, and the "scheduled remote isolation unit" (a K8s
 Pod / GKE Sandbox) serves purely as a paper reference for calibrating the interface
-boundary, never entering the delivery path (§5.A).
+boundary, never entering the delivery path (the runtime subsystem).
 
 ### 1.2 In scope
 
 - A persistent, mutable, root-capable single sandbox; dependencies installed freely at runtime, changes landing on disk and staying there.
-- Sandbox lifecycle: create / pause / resume / destroy + automatic idle pause + expiry reclamation (§4).
-- Custom Templates: platform-provided plus user-frozen-from-a-sandbox (Promote — the engine reads at-rest bytes after quiescing internally, §3.1).
+- Sandbox lifecycle: create / pause / resume / destroy + automatic idle pause + expiry reclamation (the lifecycle mediator).
+- Custom Templates: platform-provided plus user-frozen-from-a-sandbox (Promote — the engine reads at-rest bytes after quiescing internally, the sandbox model).
 - Volumes: independent, ID-addressed storage decoupled from any sandbox, which can be created / operated / shared on its own.
-- Declarable networking: every sandbox may declare its own network reachable set at launch, and the engine enforces it (§5.D / pillars ③④).
+- Declarable networking: every sandbox may declare its own network reachable set at launch, and the engine enforces it (the network subsystem / pillars ③④).
 - Multi-connection transport: one sandbox can have several connections attached concurrently (shell / agent / tools), sharing one FS and one network.
-- One clean, sandbox-centric API / CLI contract (§6).
+- One clean, sandbox-centric API / CLI contract (the API contract).
 
 ### 1.3 Extension principle: a duality that guides how we design today
 
-This is a **general methodology** (it applies to any system); §1.4 then treats each
+This is a **general methodology** (it applies to any system); the engine boundary then treats each
 non-goal as one application of it. The bottom line is **one-way dependency**: the core
 never depends on an extension, an extension depends on the core one way only, and there
 is no cycle. On top of that sits a **duality**:
@@ -164,7 +164,7 @@ is no cycle. On top of that sits a **duality**:
 2. **Hold invariants** — an invariant does not "let you add something"; it "guarantees
    some core property stays uncontaminated", which is what lets a seam actually
    accommodate a future implementation. (Which invariants this system must hold, and
-   where each lands, is in §3.3 / §4.3 / §6.2.)
+   where each lands, is in the placement model / the health and recovery model / the API error contract.)
 
 **Cost criterion (the easiest thing to get wrong):**
 
@@ -195,11 +195,11 @@ with zero intrusion later** (deferred items).
 
 - **Permanently excluded — freezing/restoring memory state (the whole family)**:
   pause/resume takes no memory snapshot. This is not a deferral; it is vetoed by the
-  portability constraint (memory state pins CPU features, §2.5). **The scope is the whole
+  portability constraint (memory state pins CPU features, the runtime portability constraint). **The scope is the whole
   family, not just "a memory image of the entire sandbox"**: single-process checkpoint is
   under the same constraint (it pins the same set of CPU features) and so is permanently
   excluded too — the difference is image size, not portability cost. What we provide is
-  **landing on disk + logical continuation across a cold start** (§4.2); session
+  **landing on disk + logical continuation across a cold start** (the pause/resume lifecycle); session
   continuation is done by an adapter outside the engine on top of process/fs (`--resume`
   plus reading the history off disk) — that is **not this non-goal's "future path in"**,
   it is the alternative itself.
@@ -213,38 +213,38 @@ with zero intrusion later** (deferred items).
     the product layer's behalf.** A table of "which credential this sandbox uses" keyed by
     sandbox ID asserts that sandbox↔credential is 1:1 — some product may choose that, but
     the engine has no basis to assert it; keyed by the real scope, it would have to be
-    named `tenant` / `principal` — barred outright by the §1.1 vocabulary boundary. Both
+    named `tenant` / `principal` — barred outright by the architecture boundary vocabulary boundary. Both
     roads are **closed to the engine**, and that is exactly the point: this is not a
     trade-off, this table does not hold inside the engine.
   - **Anything the engine hands the guest is readable by guest root.** Every byte the
-    engine holds and hands into the sandbox is readable by uid 0 inside the guest (§2.2),
+    engine holds and hands into the sandbox is readable by uid 0 inside the guest (the guest identity boundary),
     and whether the carrier is a Template layer, a store column, or a process env changes
-    nothing about it (§5.B / §5.E) — so the engine cannot, by construction, be the secrecy
+    nothing about it (the rootfs subsystem / the transport subsystem) — so the engine cannot, by construction, be the secrecy
     boundary for **any** credential material.
   **This one leaves no path in, because none is needed**: the credential lives in a
-  process outside the engine, sitting behind the endpoint §5.D `egress.via[]` points at.
+  process outside the engine, sitting behind the endpoint the network subsystem `egress.via[]` points at.
   The engine-side addition is zero — all it must provide is "narrow egress down to that
-  endpoint" (the §5.D declaration) and "a sandbox's identity is unforgeable" (pillar ④),
+  endpoint" (the network subsystem declaration) and "a sandbox's identity is unforgeable" (pillar ④),
   both of which it owed anyway. **So the engine also has no need for the "real credential
   vs fake credential" dimension** — it does not know whether some string is a key, and
   therefore need not know whether it is a real one (the operational consequence of this is
   in [`../internals/network.md`](../internals/network.md), end of D1).
 
-Below are the **deferred items**: each states what is not done today, and which §1.3 seam
+Below are the **deferred items**: each states what is not done today, and which the extension rule seam
 / invariant gives it a zero-intrusion path in later — that is the precise meaning of "not
 walled off": it points at a seam that already exists, or an invariant held today.
 
 | Non-goal (not done today) | Future path in | The seam / invariant that guarantees it |
 | --- | --- | --- |
-| **Warm pool**: no fully-ready sandboxes kept around for ms-perceived startup | Reuse the flow shape of "network / Volume bindings injected through the control plane at create time", switched to late binding (§6.2) | The injection flow shape (§6.2) |
+| **Warm pool**: no fully-ready sandboxes kept around for ms-perceived startup | Reuse the flow shape of "network / Volume bindings injected through the control plane at create time", switched to late binding (the API error contract) | The injection flow shape (the API error contract) |
 | **Authorization subject / multi-tenancy**: no owner / principal concept | Add a `sandbox↔principal↔capability` join table | Data join table + the ID-addressing invariant |
-| ↳ which also defers **microarchitectural side channels** (Spectre-class, across tenants) | When multi-tenancy arrives, add a co-residency policy at the placement layer (no shared core / no shared scheduling) | Placement policy outside the engine (activated together with multi-tenancy; §2's five pillars unchanged) |
-| **Multi-node / multi-orchestrator HA / cross-host migration**: focused on single node, single orchestrator | Register a provider facing a "scheduled remote isolation unit" (its scheduling layer carries the cross-node concern) | Behavior registry (runtime provider, §5.A) + identity that does not encode placement |
-| **Cost ceiling (max-lifetime)**: reclaim by idle-TTL + refcount only, with no hard ceiling unrelated to activity | An upper-layer quota adds a table / a subscriber consuming lifecycle events | Data join table / Consumption (§4.1) |
+| ↳ which also defers **microarchitectural side channels** (Spectre-class, across tenants) | When multi-tenancy arrives, add a co-residency policy at the placement layer (no shared core / no shared scheduling) | Placement policy outside the engine (activated together with multi-tenancy; the security model's five pillars unchanged) |
+| **Multi-node / multi-orchestrator HA / cross-host migration**: focused on single node, single orchestrator | Register a provider facing a "scheduled remote isolation unit" (its scheduling layer carries the cross-node concern) | Behavior registry (runtime provider, the runtime subsystem) + identity that does not encode placement |
+| **Cost ceiling (max-lifetime)**: reclaim by idle-TTL + refcount only, with no hard ceiling unrelated to activity | An upper-layer quota adds a table / a subscriber consuming lifecycle events | Data join table / Consumption (the lifecycle event model) |
 
 > What they share: these "paths in" **have not a single line of code written today**;
 > they only ensure the corresponding seam shape exists and the invariant is held
-> (§1.3 cost criterion).
+> (the extension rule cost criterion).
 
 ### 1.5 Differentiating position (a different axis from E2B)
 
@@ -255,16 +255,16 @@ engine. Five footholds:
 1. **No-hypervisor** — runs where E2B physically cannot (gVisor systrap, an unprivileged process, no KVM).
 2. **Self-hosted / data sovereignty** — one binary + a local store; code and data never leave your own infrastructure.
 3. **Transparent, portable state** — the persistent state is a plain-file Overlay
-   artifact (§5.B), movable and auditable across host / CPU / runsc version; not a RAM
+   artifact (the rootfs subsystem), movable and auditable across host / CPU / runsc version; not a RAM
    image that pins CPU features.
 4. **An open interaction model** — the engine has only two general primitives
    (process/fs), and agent / session semantics are an addition made by an adapter outside
-   the engine (§5.E), so the openness lives in the adapter layer rather than being locked
+   the engine (the transport subsystem), so the openness lives in the adapter layer rather than being locked
    into the engine.
-5. **Agent-runtime scope** — concurrent multi-connection is inside the engine (§5.E),
-   while swarm topology and credentials are outside it (§3.2.1 / §1.4), and the engine
+5. **Agent-runtime scope** — concurrent multi-connection is inside the engine (the transport subsystem),
+   while swarm topology and credentials are outside it (the transport identity rules / the engine boundary), and the engine
    provides the ground for the latter: a **reachable set that can be enforced narrow** +
-   an **unforgeable sandbox identity** (§5.D / pillar ④). E2B hands that whole layer to
+   an **unforgeable sandbox identity** (the network subsystem / pillar ④). E2B hands that whole layer to
    the user; what we hand over are the two invariants that let that layer be correct.
 
 A detailed competitive comparison is out of scope here; this section pins only **our own
@@ -288,21 +288,21 @@ delineates "what changing the provider would touch". Two groups: **substrate-bor
 the provider).
 
 > A few words used below are only detailed later: **placement** = the physical resources
-> rebound on every resume (netns/IP / container / cgroup / node, §3.3); **Binding** = the
+> rebound on every resume (netns/IP / container / cgroup / node, the placement model); **Binding** = the
 > class of state recorded in the control plane and rebuilt from the record on resume
-> (§3.4); **runtime provider** = the pluggable implementation of "what runs the isolated
-> process" (§5.A).
+> (the resource-capacity model); **runtime provider** = the pluggable implementation of "what runs the isolated
+> process" (the runtime subsystem).
 
 | # | Pillar | Abstract contract | Single-node materialization | Enforcement locus |
 | --- | --- | --- | --- | --- |
 | ① | **Syscall interception** | Syscalls from any uid inside the guest (0 included) are intercepted and virtualized by a userspace kernel, never passing straight through to the host kernel | gVisor sentry (systrap) | **substrate** |
 | ② | **The substrate's host process is unprivileged + seccomp'd** | The host process running the isolation substrate is itself unprivileged and narrowed by seccomp; what the host sees is always a confined process | The sentry runs unprivileged + seccomp'd | **substrate** |
-| ③ | **Network reachability is enforced narrow** | A sandbox's network reachable set is exactly **the set its declaration allows** (which may be an enumerated set of endpoints, or "the public internet minus the L0 floor and the deny-safe private tier"), and all other egress is refused; ingress is closed by default and opened by an explicit publish | An nft rule set on the host-side veth, installed atomically with the placement (§5.D) | control plane (authority over the declaration) · the enforcement mechanism belongs to placement |
-| ④ | **A sandbox's network identity is unforgeable** | The identity a sandbox presents on the network cannot be altered by any uid inside the guest (0 included) | A separate netns per sandbox + a point-to-point veth; rule predicates bind the **ingress interface** (`iifname`, by name rather than ifindex — D5 ⑫) rather than the source address (§5.D) | **substrate** (the netns boundary) + control plane (choice of predicate) |
-| ⑤ | **A controlled mount surface** | What gets mounted into the guest is adjudicated by the control plane; the guest cannot widen its own mount surface | The mount table is a Binding, and resume remounts from the table (§5.C) | control plane (materialization belongs to placement) |
+| ③ | **Network reachability is enforced narrow** | A sandbox's network reachable set is exactly **the set its declaration allows** (which may be an enumerated set of endpoints, or "the public internet minus the L0 floor and the deny-safe private tier"), and all other egress is refused; ingress is closed by default and opened by an explicit publish | An nft rule set on the host-side veth, installed atomically with the placement (the network subsystem) | control plane (authority over the declaration) · the enforcement mechanism belongs to placement |
+| ④ | **A sandbox's network identity is unforgeable** | The identity a sandbox presents on the network cannot be altered by any uid inside the guest (0 included) | A separate netns per sandbox + a point-to-point veth; rule predicates bind the **ingress interface** (`iifname`, by name rather than ifindex — D5 ⑫) rather than the source address (the network subsystem) | **substrate** (the netns boundary) + control plane (choice of predicate) |
+| ⑤ | **A controlled mount surface** | What gets mounted into the guest is adjudicated by the control plane; the guest cannot widen its own mount surface | The mount table is a Binding, and resume remounts from the table (the volume subsystem) | control plane (materialization belongs to placement) |
 
 **This table is the entire source of the "provider security obligations"** (narrowed into
-one acceptance-testable obligation in §2.4): changing the provider can touch only ①②④
+one acceptance-testable obligation in the network safety invariants): changing the provider can touch only ①②④
 and the **materialization layer** of ③⑤, and **never the declaration/policy layer of
 ③⑤**.
 
@@ -323,7 +323,7 @@ and the **materialization layer** of ③⑤, and **never the declaration/policy 
 > therefore a security assertion, not a matter of style.
 >
 > **④ is also the only place the engine is load-bearing on the "credential boundary".**
-> A credential itself is **not an engine concept** (§1.4 non-goals / §5.D): the engine
+> A credential itself is **not an engine concept** (the engine boundary non-goals / the network subsystem): the engine
 > does not hold it, inject it, or know about it. But anything outside the engine judging
 > "which credential this sandbox may use" has its correctness resting on "a sibling
 > sandbox cannot impersonate this sandbox" — which is this pillar. Hold this one, and
@@ -341,14 +341,14 @@ dependencies freely" needs (`apt` wants root).
 
 Hence: **guest root is the default**, with no non-root default identity introduced and no
 user-switching mechanism preinstalled. Since it is worth nothing on the isolation axis,
-the root default is the most direct expression of §1.1's "root-capable agent sandbox"
-(§5.A; [`../internals/guest-runtime.md`](../internals/guest-runtime.md) D3.1). **The engine
+the root default is the most direct expression of the architecture boundary's "root-capable agent sandbox"
+(the runtime subsystem; [`../internals/guest-runtime.md`](../internals/guest-runtime.md) D3.1). **The engine
 does not model guest users**: "run as some user" is native to the guest (`su`/`sudo`, for
-the product/template layer to handle), not an engine primitive (§3.2.1); the engine has
+the product/template layer to handle), not an engine primitive (the transport identity rules); the engine has
 neither a create-time "default identity" field nor a per-`Start` run-as parameter. The
-cost of allowing root lands on the **data plane inside the guest** (§2.3), an accepted
+cost of allowing root lands on the **data plane inside the guest** (the sandbox security model), an accepted
 product trade-off. If a consumer ever genuinely needs engine-level run-as, it can be
-added back additively per §1.3 — nothing is reserved for it.
+added back additively per the extension rule — nothing is reserved for it.
 
 ### 2.3 The data-plane trade-off: exactly which surfaces are reachable and which are not
 
@@ -358,21 +358,21 @@ one only: this sandbox's data plane**. Pinning the boundary exhaustively:
 **Reachable (the accepted blast radius, all inside this sandbox's data plane):**
 
 - **The entire content of this sandbox's Overlay artifact** — `/usr`, `$HOME`, any package
-  installed at runtime (§3.1.1). **Including filling its own disk capacity cap**: a guest
-  `dd` hitting the per-sandbox capacity cap (§3.4 capacity axis) only makes **its own**
+  installed at runtime (the Overlay model). **Including filling its own disk capacity cap**: a guest
+  `dd` hitting the per-sandbox capacity cap (the resource-capacity model capacity axis) only makes **its own**
   `write()` return `ENOSPC`, which is the expected in-data-plane outcome and does not spill
   outward.
 - The **Volumes** mounted in per the mount policy, each honoring exclusive / shared-ro /
-  shared-rw semantics (§5.C); what root can reach is "those already mounted for this
+  shared-rw semantics (the volume subsystem); what root can reach is "those already mounted for this
   sandbox", not the full set of Volumes.
 - The **egress endpoints the declaration allows** plus the **ingress ports** exposed by
-  publish (§5.D) — that is, the side the network declaration permitted in the first place.
+  publish (the network subsystem) — that is, the side the network declaration permitted in the first place.
   **The width of this side is determined by the declaration's value, not by a fixed
   constant**: under `egress.default: allow` it is the whole public internet (minus the L0
   floor and the deny-safe private tier), and in that case "bytes do not flow out" is not in
   the engine's set of promises; under `default: deny` plus a single `egress.via[]` it is
   approximately one address. Both are correct engine behavior; the difference is what the
-  caller declared (§5.D).
+  caller declared (the network subsystem).
 
 **Not reachable (host-side / cross-sandbox invariants, unmoved by relaxing guest identity):**
 
@@ -381,10 +381,10 @@ one only: this sandbox's data plane**. Pinning the boundary exhaustively:
 - **Other sandboxes' network endpoints** — a sandbox's reachable set is exactly {the
   endpoints the declaration explicitly allows}, **sibling sandboxes are unreachable**, and
   this does **not** relax with the declaration's value: the sibling address space is in the
-  L0 floor and a declaration cannot lift it (§2.4). **This one is not held by pillar ①**:
+  L0 floor and a declaration cannot lift it (the network safety invariants). **This one is not held by pillar ①**:
   ① intercepts syscalls, not network packets (the guest uses the network legitimately), so
   cross-sandbox network isolation is an **independent control-plane invariant**,
-  materialized by §5.D's rule set, standing alongside "cross-sandbox storage isolation
+  materialized by the network subsystem's rule set, standing alongside "cross-sandbox storage isolation
   rests on pillar ①" (see network.md D5). **A point-to-point `/30` veth only removes L2
   adjacency, and the host still routes between the two ends**, so the materializer is that
   nft floor and the veth is one layer of depth.
@@ -392,29 +392,29 @@ one only: this sandbox's data plane**. Pinning the boundary exhaustively:
   NIC and change its routing table, but cannot change the fact of "which veth belongs to
   which sandbox", so the rules the engine writes by ingress interface are unbypassable by
   it. **This one does not include credentials**: a credential is not an engine concept
-  (§1.4), and the engine neither holds nor promises it (why this identity is the only place
-  the engine is load-bearing on the credential boundary is in §2.1 ④'s second note).
-- **The control-plane records themselves** (the authority of the Bindings, §3.4) — the
+  (the engine boundary), and the engine neither holds nor promises it (why this identity is the only place
+  the engine is load-bearing on the credential boundary is in the placement model ④'s second note).
+- **The control-plane records themselves** (the authority of the Bindings, the resource-capacity model) — the
   values of the mount surface, the network declaration, and the resource ceilings are
   adjudicated by the control plane, and root inside the guest cannot change them (pillar ⑤).
 - The **host kernel attack surface** beyond the sentry — confined inside the userspace
   kernel by pillar ①.
 - **The physical capacity of the host disk** — a guest write consumes only the per-sandbox
-  capacity cap of its own Overlay upper (§3.4 capacity axis) and cannot consume the whole
+  capacity cap of its own Overlay upper (the resource-capacity model capacity axis) and cannot consume the whole
   disk, so it can neither fill the machine nor break other sandboxes' writes. **But the
   capacity cap governs only the bytes the guest writes itself, not those the kernel writes
   on its behalf**: which is why "deterministic, whole-group termination" is a component of
   this invariant rather than a tuning knob — the path by which **it bypasses the capacity
-  cap** is in §2.4.
+  cap** is in the network safety invariants.
 
 **The resource-exhaustion dimension is likewise not held by syscall interception (pillar
-①)** — ① virtualizes syscalls, not resource usage: CPU/RAM/IO rate rests on cgroup (§5.A)
-and disk capacity on FS quotas (§5.B/§5.C). Without a capacity cap, `dd` is a perfectly
+①)** — ① virtualizes syscalls, not resource usage: CPU/RAM/IO rate rests on cgroup (the runtime subsystem)
+and disk capacity on FS quotas (the rootfs subsystem/the volume subsystem). Without a capacity cap, `dd` is a perfectly
 legal `write()` that fills the shared disk and breaks this invariant.
 
 ### 2.4 The provider's security obligations (abstract, bound to no specific provider)
 
-§2.1's two-group split, narrowed into one acceptance-testable obligation, for evaluating
+the placement model's two-group split, narrowed into one acceptance-testable obligation, for evaluating
 any future provider:
 
 > **A qualified runtime provider must maintain the substrate-borne ①② (a userspace kernel
@@ -434,30 +434,30 @@ any future provider:
 > that creates the placement has that hook point**. Like the netns, the rule set is
 > crash-surviving host state, so startup reconciliation must rebuild/tear it down along
 > with everything else; it is not something that can be patched in afterwards — the
-> mechanism belongs to §5.A. **And "rebuild" means re-evaluating the write point's
-> admission criteria, not merely re-rendering the content** (§3.4.5's general rule: the
+> mechanism belongs to the runtime subsystem. **And "rebuild" means re-evaluating the write point's
+> admission criteria, not merely re-rendering the content** (the resource-capacity model's general rule: the
 > declaration is durable, the criteria's inputs are not, so a reinstall is a path that can
 > bypass that one refusal at the write point, and every assertion about the first hop is
 > completely insensitive to it). This settles the question of "who enforces" **physically**
 > — it is not that the engine wants to manage the network, but that it is the only party
-> that **can** enforce at the correct moment (§5.D).
+> that **can** enforce at the correct moment (the network subsystem).
 
-**Materializing the RAM ceiling carries two acceptance-testable obligations** (§3.4: RAM
+**Materializing the RAM ceiling carries two acceptance-testable obligations** (the resource-capacity model: RAM
 is a security limit, and the consequence of exceeding it is sandbox termination):
 
 - **Termination must be deterministic and whole-group**, not the substrate picking a
   victim. A victim-picking shape is both nondeterministic (the same configuration gives
   different results across runs) and able to land in a "no killable victim → retry forever"
   state, and the retry path **bypasses the capacity cap** and can fill the host disk
-  (§2.3). `local_runsc` delivers this with `memory.oom.group=1`; a remote provider delivers
+  (the sandbox security model). `local_runsc` delivers this with `memory.oom.group=1`; a remote provider delivers
   it through its scheduling layer's equivalent whole-group termination semantics.
 - **The termination cause must be decidable**, and across a seam it is an **abstract
   enumeration** rather than an errno / cgroup file — otherwise the control plane cannot
   separate it from a crash and will go resume a sandbox that is certain to be terminated
-  again (§4.3 places `resource-terminated` alongside `dead-recoverable`). **A provider must
+  again (the health and recovery model places `resource-terminated` alongside `dead-recoverable`). **A provider must
   hand the cause of death out before tearing down its own placement**, and if it cannot
   decide, it reports `Unknown` and **does not guess** (why the signal is volatile, why it
-  must be persisted on the spot, and how the unknown case is handled, are all in §4.3).
+  must be persisted on the spot, and how the unknown case is handled, are all in the health and recovery model).
 
 **The three invariants of egress enforcement (the load-bearing wall is the IP layer, not
 the domain name).** The engine's enforcement evaluates in a vocabulary of **IP / port /
@@ -478,7 +478,7 @@ at an explicit cost" road, are in [`../internals/network.md`](../internals/netwo
   follows `egress.default`'s value**. **The members of this tier are exactly the three
   RFC1918 ranges** (`10/8` · `172.16/12` · `192.168/16`), with the v6 side derived
   mechanically (`fc00::/7`, plus the NAT64 image **of each member** — derived per RFC 6052
-  §2.2 as **the members' images, never the `64:ff9b::/96` prefix itself**, since the latter
+  the guest identity boundary as **the members' images, never the `64:ff9b::/96` prefix itself**, since the latter
   maps the whole v4 space including the public internet, and dropping the entire range would
   refuse the public egress that `allow` promises; measured in network.md D5 ㉓). **This tier
   is taken rather than the wider IANA GR=False snapshot**: it covers the only exposure
@@ -560,7 +560,7 @@ This obligation list **does not depend on any specific provider shape** — whet
 word; the latter merely moves ①②④'s materialization onto its own isolation mechanism and
 swaps ③'s rule set for an equivalent such as CNI / NetworkPolicy.
 
-> **One spec-level clarification: ③'s obligation does not set up a separate regime for
+> **One implementation clarification: this obligation does not set up a separate regime for
 > IPv6.** A pure ct-state `inet` rule **with no family qualifier** covers IPv6 along with
 > everything else, and stops even a global prefix the guest made up itself (measured in
 > [`../internals/network.md`](../internals/network.md) D5 ⑪), so `fe80::/10` in the floor list
@@ -571,18 +571,18 @@ swaps ③'s rule set for an equivalent such as CNI / NetworkPolicy.
 These are the runsc facts the single-node `local_runsc` materialization depends on, and they
 directly affect the judgments in the sections above. The key supporting fact for the
 persistence model (not storing memory ⟹ persistent state = plain file layers) and its
-downstream extra capabilities are developed in §5.B; only the runsc-side facts are listed
+downstream extra capabilities are developed in the rootfs subsystem; only the runsc-side facts are listed
 here.
 
 | Fact | Consequence for the engine |
 | --- | --- |
-| systrap (the default) intercepts syscalls with `SECCOMP_RET_TRAP` and **needs neither KVM nor nested virtualization** | Establishes the technical premise of no-hypervisor (§1.1) |
-| Memory checkpoint/restore **requires matching CPU features across hosts** | We do not store memory (§4.2), so **this constraint disappears outright** |
-| iptables/nftables inside the guest is **only partially supported**; and guest packets are injected at L2, so they **do not traverse the sandbox netns's L3 hooks** (measured) | Establishes that enforcement can only hang on the **host-side veth** (or a `netdev` hook) (§5.D): do not push it down into a firewall inside the guest, **and do not put it inside the sandbox netns** either — the latter counts 0 (network.md D5 ②) |
-| Mounts are taken from the OCI spec **at startup** and cannot be changed live | A mount-topology change is a resume-boundary operation (§5.C) |
-| The whole runsc `--overlay2` family (`memory`/`self`/`dir=`) **is non-persistent across the container's lifetime** — `dir=` unlinks the filestore at startup, so a clean stop means the data evaporates | The persistence layer **does not use runsc's self-managed overlay**; instead the engine assembles it outside runsc with the host kernel's overlayfs, and runsc gets `--overlay2=none --file-access=shared` (§5.B) |
+| systrap (the default) intercepts syscalls with `SECCOMP_RET_TRAP` and **needs neither KVM nor nested virtualization** | Establishes the technical premise of no-hypervisor (the architecture boundary) |
+| Memory checkpoint/restore **requires matching CPU features across hosts** | We do not store memory (the pause/resume lifecycle), so **this constraint disappears outright** |
+| iptables/nftables inside the guest is **only partially supported**; and guest packets are injected at L2, so they **do not traverse the sandbox netns's L3 hooks** (measured) | Establishes that enforcement can only hang on the **host-side veth** (or a `netdev` hook) (the network subsystem): do not push it down into a firewall inside the guest, **and do not put it inside the sandbox netns** either — the latter counts 0 (network.md D5 ②) |
+| Mounts are taken from the OCI spec **at startup** and cannot be changed live | A mount-topology change is a resume-boundary operation (the volume subsystem) |
+| The whole runsc `--overlay2` family (`memory`/`self`/`dir=`) **is non-persistent across the container's lifetime** — `dir=` unlinks the filestore at startup, so a clean stop means the data evaporates | The persistence layer **does not use runsc's self-managed overlay**; instead the engine assembles it outside runsc with the host kernel's overlayfs, and runsc gets `--overlay2=none --file-access=shared` (the rootfs subsystem) |
 
 > The carrier's full materialization, the CoW/consistency evidence, and the alternative
-> paths belong to §5.B (developed in
+> paths belong to the rootfs subsystem (developed in
 > [`../internals/rootfs-overlay.md`](../internals/rootfs-overlay.md)); this section only
 > anchors the runsc facts it depends on.

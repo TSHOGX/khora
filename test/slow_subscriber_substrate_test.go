@@ -1,7 +1,7 @@
 //go:build substrate
 
 // C4 at L4: a never-reading subscriber must NOT freeze the real
-// guest process on runsc (D4.3 invariant 1 — source never blocks on a slow
+// guest process on runsc (the source never blocks on a slow
 // subscriber; the slow one is dropped). The mechanism is also proven as pure
 // logic under -race in cmd/sandboxd/process_test.go; this pins it end-to-end on
 // the real substrate. Requires root.

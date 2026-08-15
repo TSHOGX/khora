@@ -4,7 +4,7 @@
 //
 // What is being guarded: the lower stack reaches mount(2) as one colon-separated `lowerdir=`
 // string, and the classic mount path TRUNCATES options past a page rather than refusing
-// (rootfs-overlay D5.1 ⑩). A stack at or under the reported depth must therefore always fit,
+// The mount-option budget is measured here. A stack at or under the reported depth must therefore always fit,
 // which makes UNDER-reporting safe and OVER-reporting a silent data-loss bug.
 package rootfs
 
@@ -53,7 +53,7 @@ func TestMaxLowerDepthWorstCaseStackFitsTheOptionsCap(t *testing.T) {
 			filepath.Join(p.StateDir, id, "work"))
 
 		if len(opts) > mountOptionsCap {
-			t.Errorf("MaxLowerDepth(%s) = %d, but a worst-case stack of that depth needs %d bytes of mount options against a %d-byte cap — the kernel would TRUNCATE it and mount a stack missing its tail (D5.1 ⑩)",
+			t.Errorf("MaxLowerDepth(%s) = %d, but a worst-case stack of that depth needs %d bytes of mount options against a %d-byte cap — the kernel would TRUNCATE it and mount a stack missing its tail",
 				p.StateDir, depth, len(opts), mountOptionsCap)
 		}
 	}

@@ -2,9 +2,9 @@
 
 > **Position: the persistence-layer internals reference.** It complements the
 > [architecture](../concepts/architecture.md) and [model](../concepts/model.md) pages. The carrier
-> was settled by measurement on the real substrate, with the conclusions in the architecture reference 2.5 / §5.B; this
+> was settled by measurement on the real substrate, with the conclusions in the architecture reference / the rootfs subsystem; this
 > document keeps what lies behind them: **the falsification process, the measured evidence, the
-> alternatives ruled out, the seams to hold, and the agenda still to be refined** (D5).
+> alternatives ruled out, and the seams that the current implementation must hold.
 >
 > **Basis of verification:** measured end to end on real runsc + kernel overlayfs (D0's three properties,
 > and D1's three assumptions checked one by one).
@@ -18,13 +18,13 @@
 filestore at startup, so a clean stop means the data evaporates, D1). **The carrier is instead a host
 kernel overlayfs the engine manages itself outside runsc** (the materialization is in D3) — at which
 point the upper is a genuinely ordinary directory tree on the host: tar-able, diffable, remountable on a
-cold start, and byte-identical, delivering all of §5.B's additional capabilities. **The persistent unit =
+cold start, and byte-identical, delivering all of the rootfs subsystem's additional capabilities. **The persistent unit =
 the resident upper directory** (a content-addressed diff layer is an evolution item, whose settlement and
 cost are in D3).
 
-This conclusion **does not move the model layer**: §3.1.1's "an Overlay is an ID-addressed frozen layer
-decoupled from host paths" and §4.2's "pause captures nothing, resume cold-starts by remounting" hold as
-written. runsc's overlay flags do not provide an upper that persists across a container's lifetime (§2.5's
+This conclusion **does not move the model layer**: the Overlay model's "an Overlay is an ID-addressed frozen layer
+decoupled from host paths" and the pause/resume lifecycle's "pause captures nothing, resume cold-starts by remounting" hold as
+written. runsc's overlay flags do not provide an upper that persists across a container's lifetime (the runtime portability constraint's
 fact check), so that upper must be managed by the engine outside runsc.
 
 **The three measured properties**: CoW is correct (modifying a lower lands only in the upper, with lower
@@ -65,7 +65,7 @@ overlayfs itself outside runsc) rather than shifting gear within runsc's self-ma
 ## D2. The carrier's shape and its evolution target: an outer overlayfs + a content-addressed diff
 
 The outer overlayfs carrier (①②, materialized in D3) naturally accommodates one mature evolution path
-(③), and that is what determines §3.1.1's abstract shape. All three steps' persistence **never touches
+(③), and that is what determines the Overlay model's abstract shape. All three steps' persistence **never touches
 runsc's overlay**:
 
 **① runsc's overlay is switched off** (`--overlay2=none --file-access=shared`): the rootfs runsc receives
@@ -86,18 +86,18 @@ else" but "under the same abstraction, this path **can also** grow"):
 
 **The key insight**: the persistent unit **need not** be "an upper directory lying on disk the whole
 time" — today it is, but the abstraction does not depend on that.
-**This is precisely §3.1.1's bet** — defining an Overlay as "an ID-addressed frozen layer decoupled from
+**This is precisely the Overlay model's bet** — defining an Overlay as "an ID-addressed frozen layer decoupled from
 host paths" rather than "an upper permanently on a local disk", so that changing the persistent unit does
 not move the model. This capability set maps onto the model item by item (the evolution item's settlement
 and cost are in D3):
 
 | Diff-layer capability | How it is given | Status against the shipped carrier |
 | --- | --- | --- |
-| pause / resume | The latest diff = the latest checkpoint, applied back into a new container on resume | **Already delivered** without it — resume remounts the same upper, and pause captures nothing (§4.2) |
-| Promote → a layered Template | Take an increment against a baseline and stack layer on layer | **Already delivered** — multi-lowerdir layering ships (§5.B Promote / layered Templates) |
-| fork / clone | Claim several sandboxes from the same diff/snapshot | **Already delivered** — create-from-Template, a Promote layer and a fork are all **one kind of reference** (§4.3 / §3.1 fork) |
+| pause / resume | The latest diff = the latest checkpoint, applied back into a new container on resume | **Already delivered** without it — resume remounts the same upper, and pause captures nothing (the pause/resume lifecycle) |
+| Promote → a layered Template | Take an increment against a baseline and stack layer on layer | **Already delivered** — multi-lowerdir layering ships (the rootfs subsystem Promote / layered Templates) |
+| fork / clone | Claim several sandboxes from the same diff/snapshot | **Already delivered** — create-from-Template, a Promote layer and a fork are all **one kind of reference** (the health and recovery model / the sandbox model fork) |
 | Portability across hosts | A diff is an OCI blob in an object store, not pinned to a local path | **Already true, and measured** — after a clean stop the upper tars out as a complete diff layer, and a fresh upper rebuilt from that tar is byte-identical (D0) |
-| snapshot / restore | Named diff records that can be listed/restored/deleted | The one genuinely absent capability (no corresponding §) |
+| snapshot / restore | Named diff records that can be listed/restored/deleted | Not implemented by the current engine |
 
 > **So the evolution item is dedup and integrity, not capability.** Four of the five rows above are
 > delivered by the shipped carrier through other means, which is why this item reads larger than it is.
@@ -111,12 +111,12 @@ and cost are in D3):
 
 **The engine assembles lower (the Template) / upper / work with the host kernel's overlayfs outside runsc
 and hands the merged result to runsc with `--overlay2=none --file-access=shared`.** This holds three
-established properties: §3.1's three states (a read-only shared Template + an Overlay increment), §5.B's
-incidental capabilities of the underlying storage (CoW landing on reflink), and §3.1.1's
-carrier-independence. The overlayfs mount/umount lifecycle belongs to the Rootfs subsystem (§5.B).
+established properties: the sandbox model's three states (a read-only shared Template + an Overlay increment), the rootfs subsystem's
+incidental capabilities of the underlying storage (CoW landing on reflink), and the Overlay model's
+carrier-independence. The overlayfs mount/umount lifecycle belongs to the Rootfs subsystem (the rootfs subsystem).
 
 **The persistent unit = the resident upper directory.** The upper stays in place on the backend, pause
-captures nothing, and resume remounts the same upper for a cold start — closest to §4.2's semantics, and
+captures nothing, and resume remounts the same upper for a cold start — closest to the pause/resume lifecycle's semantics, and
 already sufficient to deliver pause/resume plus Promote's at-rest read. **A content-addressed diff layer
 (extracted as an OCI tar + digest) is an evolution item**, and what it buys is **dedup plus integrity** —
 not layered Templates, fork or cross-host portability, all three of which the shipped carrier already
@@ -127,7 +127,7 @@ Both share one Overlay abstraction, layers above notice nothing, and D4's seam g
 directory as its writable rootfs, likewise with `overlay2=none`): the simplest option, but **it loses CoW
 layering** — a Template is no longer a read-only shared base and every sandbox must copy a whole rootfs;
 Promote/fork would have to be built separately on an external CoW FS (reflink/btrfs/zfs). It does not fit
-§3.1's three-state model; and if the underlying FS supports reflink to restore layering, that slides back
+the sandbox model's three-state model; and if the underlying FS supports reflink to restore layering, that slides back
 into the overlayfs incidental capabilities above, so overlayfs may as well be used directly. Hence not
 adopted.
 
@@ -135,11 +135,11 @@ adopted.
 
 ## D4. Ownership and the seams to hold
 
-**Ownership (§4's "verbs belong to §4, mechanisms to §5" + subsystems do not call each other)**: the
-overlayfs mount/umount is a mechanism of the **§5.B Rootfs subsystem**, **called** by the §4 lifecycle at
-create/resume — it is neither §5.A Runtime assembling the overlay nor Rootfs poking the runtime provider.
+**Ownership (the lifecycle mediator's "verbs belong to the lifecycle mediator, mechanisms to the subsystem layer" + subsystems do not call each other)**: the
+overlayfs mount/umount is a mechanism of the **the Rootfs subsystem**, **called** by the lifecycle mediator at
+create/resume — it is neither the runtime subsystem Runtime assembling the overlay nor Rootfs poking the runtime provider.
 runsc receives only an **already-merged rootfs path** as its `(rootfs source)`, which lands exactly in
-§5.A's provider contract input `(rootfs source, …) → (placement handle, …)` — **the provider does not care
+the runtime subsystem's provider contract input `(rootfs source, …) → (placement handle, …)` — **the provider does not care
 how the rootfs was assembled**, and assembly is the Rootfs subsystem's business.
 
 **The seams to hold (a resident upper must not wall off either the diff-layer evolution or a future
@@ -147,13 +147,13 @@ provider):**
 
 1. **The Overlay abstraction exposes upward only "an ID + the Template it references + readable at
    rest", and never "it is a host upper path"** — so that evolving from a resident upper to a
-   content-addressed diff changes **not one line** of §4.2's resume or §3.1's Promote/fork. Host paths
-   must be locked inside the Rootfs subsystem (§3.1.1's "ID addressing applies internally too").
-2. **Materialization goes through the rootfs provider seam** (§5.B): the sole implementation is the
+   content-addressed diff changes **not one line** of the pause/resume lifecycle's resume or the sandbox model's Promote/fork. Host paths
+   must be locked inside the Rootfs subsystem (the Overlay model's "ID addressing applies internally too").
+2. **Materialization goes through the rootfs provider seam** (the rootfs subsystem): the sole implementation is the
    single-node "local kernel overlayfs + local directories"; a diff layer (the evolution item, D3) and
    multi-node (a PV / object storage) are **registering another rootfs provider or changing the
    persistent unit**, with the model unchanged — the abstraction must have room for them.
-3. **Do not introduce containerd** (which conflicts with §1.1's "a single binary, no heavyweight external
+3. **Do not introduce containerd** (which conflicts with the architecture boundary's "a single binary, no heavyweight external
    dependencies"): reusing containerd's overlayfs snapshotter only pays off when already running on
    containerd. We **implement thinly inside the engine** the layer of "assemble overlayfs + (at the
    evolution stage) extract a diff", without pulling in the whole containerd stack. That thin
@@ -170,18 +170,18 @@ provider):**
 - **Cleaning up / reclaiming the work dir and the upper**: overlayfs needs a workdir (constrained to the
   same overlayfs-capable FS as the upper). **A resume remounts the same upper, but the workdir must be a
   newly created empty directory** — the previous work cannot be reused (the kernel refuses it or it
-  breaks). It is mounted in two halves: **cleanup at destroy** hangs on §4.3's reaper object-reclamation
+  breaks). It is mounted in two halves: **cleanup at destroy** hangs on the health and recovery model's reaper object-reclamation
   invariant (the upper being a resident persistent unit); **orphan reclamation after a crash** — an
   overlay mount is a placement-local resource, and a half-built mount left by the orchestrator crashing
-  mid-transition is a **special case** of §4.4-A's crash variant (startup reconciliation) rather than
+  mid-transition is a **special case** of startup reconciliation's crash variant (startup reconciliation) rather than
   something resting on refcount GC. The overlay mount is created and unmounted by the engine outside
-  runsc, with the unmount timing aligned to §4.2's pause.
+  runsc, with the unmount timing aligned to the pause/resume lifecycle's pause.
 - **Mounting is a privileged operation**: overlayfs mount/umount requires root (CAP_SYS_ADMIN), and files
   copied up into the upper are therefore **root-owned** — so deleting the upper at destroy needs privilege
-  too. This is one more concrete reason for "host paths + the mount lifecycle are locked inside the §5.B
-  subsystem and not exposed to callers" (§3.1.1): a privileged mount is a subsystem mechanism, not the
+  too. This is one more concrete reason for "host paths + the mount lifecycle are locked inside the rootfs subsystem
+  subsystem and not exposed to callers" (the Overlay model): a privileged mount is a subsystem mechanism, not the
   mediator's job.
-- **The capacity quota (the disk capacity axis, §3.4)**: how the per-sandbox upper+work cap is
+- **The capacity quota (the disk capacity axis, the resource-capacity model)**: how the per-sandbox upper+work cap is
   materialized is in D6.
 - **The pause flush consistency point**: **the substrate half is settled and depended upon** — after a
   clean stop (kill+delete), the at-rest consistency of the sentry's/gofer's writes flushed into the upper
@@ -189,7 +189,7 @@ provider):**
   (guest-runtime D4.4: depending on no process cooperation). **An application-layer cooperative safe point
   is not an open item but a rejected one** (guest-runtime D4.4: the engine does not know about agents, so
   it can neither require a workload to stop at a safe point nor verify that it stopped at the right one;
-  the semantics of a timeout / hard kill match those of a crash, and a crash is the bottom line §4.2
+  the semantics of a timeout / hard kill match those of a crash, and a crash is the bottom line the pause/resume lifecycle
   already accepts), so **there is no still-open consistency-point question on this carrier**.
 - **Excluded paths / portal paths**: extracting a Promote/snapshot must filter out runtime paths the
   engine injected itself (such as the working directory of the in-guest daemon).
@@ -206,7 +206,7 @@ provider):**
     upper, an **ordinary empty directory, mode 0755 root:root, with zero overlayfs xattrs** already appears
     in the upper after `runsc create` (before any guest code) — not a whiteout, not opaque, with no
     origin/redirect, and not inheriting the source directory's permissions. So **the placement materialized
-    it, not the payload**. The result §5.B already states ("a mount point in the frozen result is just an
+    it, not the payload**. The result the rootfs subsystem already states ("a mount point in the frozen result is just an
     empty placeholder directory") holds by default. The reverse hazard is clean too: the guest's writes
     under the bind land **entirely** in the Volume's host directory and the upper gets nothing (with a
     positive control: another control file in the same launch did enter the upper), that is, **Volume
@@ -225,8 +225,8 @@ provider):**
     matching logic**.
   - **Hence the set of mount points must be a per-Promote input and must not be a static package-level
     list**: a Volume dest is a per-sandbox mount row, which a static list has no way to know. Passing it as
-    a parameter is also the architecturally cleaner road — the §4 mediator holds the mount table already
-    and calls Promote already, so **§5.B never has to ask §5.C** (producing no cross-subsystem call). **The
+    a parameter is also the architecturally cleaner road — the lifecycle mediator holds the mount table already
+    and calls Promote already, so **the rootfs subsystem never has to ask the volume subsystem** (producing no cross-subsystem call). **The
     cost forecast uses the same set**, or it would keep counting shadowed bytes that will not be copied
     (a safe direction, but knowably wrong). Paths follow the existing convention: **relative to the upper,
     with the leading slash removed**.
@@ -235,7 +235,7 @@ provider):**
     would leave ghost intermediate directories in the layer, while excluding the top component is wrong in
     the general case (the guest may legitimately have written something else under that directory).
     **Settled as: prune the leaf subtree and accept an empty intermediate chain** — the same shape as the
-    empty placeholder §5.B already sanctions, only one level deeper, and it **never loses real guest
+    empty placeholder the rootfs subsystem already sanctions, only one level deeper, and it **never loses real guest
     data**.
 - **The content-addressed diff layer**: the **only genuinely still-open** item on this carrier. Its
   settlement and cost are in D3, and the capability mapping is in D2 — which also records that four of
@@ -246,10 +246,10 @@ provider):**
 
 A content-addressed arm registers behind `rootfs.Provider` **unchanged** — walking the interface member
 by member found one strain point and it is not this document's (`Merged.MergedPath` is a host path, which
-is the same value `runtime.RootfsSource` carries, and GitHub Issues' §5.A provider row already owns the
-remote-handle question). So **no surface is added here**: §1.3 forbids reserving it, and the repo already
+is the same value `runtime.RootfsSource` carries, and GitHub Issues' the runtime provider row already owns the
+remote-handle question). So **no surface is added here**: the extension rule forbids reserving it, and the repo already
 litigated this on the sibling seam — `volume.Backend` has a `Capabilities()` because a **second
-implementation shipped**, and refused a `DirectIO` bit because none had; §5.B has one implementation and
+implementation shipped**, and refused a `DirectIO` bit because none had; the rootfs subsystem has one implementation and
 so has no such debt.
 
 What is worth writing down instead is the list of properties a future arm must inherit. Each is measured
@@ -273,22 +273,22 @@ or structural, and each has a defect behind it that a fresh implementation would
 4. **`UncappedBytes`'s "shared bytes count at most once" does not survive cross-layer sharing as
    written.** The walk dedups by dev+ino **within one call**, and it is called once per layer directory —
    sound today only because nothing creates cross-layer sharing. A dedup arm creates it, at which point
-   shared bytes are counted once per referencing layer and §3.4's admission gate over-refuses. The set
+   shared bytes are counted once per referencing layer and the resource-capacity model's admission gate over-refuses. The set
    must be hoisted across the whole enumeration.
 5. **The workdir must be *emptied*, never recreated** (D6.6 ③): `mkdir` needs a metadata extent, and a
    unit at its cap has none — measured, recreating made a sandbox that hit ordinary `ENOSPC`
-   **permanently unresumable**, breaking §4.2's reversible-pause promise.
+   **permanently unresumable**, breaking the pause/resume lifecycle's reversible-pause promise.
 6. **Exclusions are a per-Promote input, and the freeze and the cost forecast must share one set** (D5
    above), or the forecast counts bytes that will never be copied. A content-addressed arm must apply
    exclusions **before hashing**, or it addresses content it must not ship.
 7. **The cost forecast must not under-report** — over-reporting refuses a Promote that would have fit,
-   under-reporting spreads `ENOSPC` onto unrelated sandboxes (§2.3). An arm answering "≈0, those bytes
+   under-reporting spreads `ENOSPC` onto unrelated sandboxes (the sandbox security model). An arm answering "≈0, those bytes
    are already in the store" is contractually anticipated, provided it is true.
-8. **Bytes-first ordering and the in-flight keep-sets stay** (§4.3 existence-is-state). Note the recorded
-   asymmetry: §5.C had to split into "backend enumerates, mediator decides" after this shape destroyed
-   committed data, while §5.B keeps the simpler shape deliberately because its row precedes its bytes. A
+8. **Bytes-first ordering and the in-flight keep-sets stay** (the health and recovery model existence-is-state). Note the recorded
+   asymmetry: the volume subsystem had to split into "backend enumerates, mediator decides" after this shape destroyed
+   committed data, while the rootfs subsystem keeps the simpler shape deliberately because its row precedes its bytes. A
    **shared** store changes that calculus — a shared blob has no single owning row — so it likely needs
-   the §5.C split.
+   the volume subsystem split.
 9. **An addressable layer format must not use `index=` or `metacopy=`.** With `index=on` the kernel
    stamps the lower root's file handle into `trusted.overlay.origin` and verifies it on every later
    mount, so a layer copied to another tree or machine fails `ESTALE` — precisely the portability such an
@@ -326,13 +326,13 @@ correction to the obvious reading — the artifact **need not be content-address
 Promote already produces it and D0 already measured that it tars out and rebuilds byte-identically. Dedup
 (D2/D3) is therefore an **independent** question from portability, not its precondition. The only residual
 that touches the engine is the **handle shape** a remote provider would receive, which
-GitHub Issues' §5.A provider row owns.
+GitHub Issues' the runtime provider row owns.
 
 ### D5.3 The detached Overlay: a first-class object, and why the upper still does not travel
 
 **Settled** (was open as "whether the Overlay artifact becomes a first-class object"). An Overlay's
 reclamation predicate is now the universal **"no live reference row"** rather than "no corresponding
-sandbox row" (`model.md` §4.3, and the orphan sweep in `subsystems.md`), so an Overlay may exist with
+sandbox row" (`model.md` the health and recovery model, and the orphan sweep in `subsystems.md`), so an Overlay may exist with
 **zero** holders — detached — and its bytes survive the destruction of the sandbox that created them.
 
 **What this dissolves.** Previously "release the admission budget" and "keep the Overlay bytes" were
@@ -357,7 +357,7 @@ writable layer's nature rather than about who currently references it. **A detac
 portability mechanism** — the promoted layer remains the only thing that crosses a node boundary. Reading
 "first-class" as "movable" is the misreading this paragraph exists to block.
 
-③ **Accounting.** A detached Overlay carries no cap, so it leaves §3.4.2's first term and enters the
+③ **Accounting.** A detached Overlay carries no cap, so it leaves the quota-read rule's first term and enters the
 second as measured bytes; see D6.5 for where the cap is cleared. Its bytes are **frozen** while detached
 (nothing holds the upper, so nothing writes to it), which makes the measured statement exact rather than a
 prediction — the reason this is a *better*-behaved member of that term than the live capped unit it
@@ -372,7 +372,7 @@ implementation should verify it rather than inherit this sentence as a settled r
 
 ## D6. The capacity quota: how the per-sandbox upper cap is materialized
 
-> **Position: the deep dive on [`§3.4`](../concepts/model.md)'s disk capacity axis + [`§5.B`](../concepts/subsystems.md)'s
+> **Position: the deep dive on [`the resource-capacity model`](../concepts/model.md)'s disk capacity axis + [`the rootfs subsystem`](../concepts/subsystems.md)'s
 > capacity-quota responsibility.** The carrier (an outer kernel overlayfs, D0) makes the upper an ordinary
 > host directory tree, which is exactly what makes the lightest quota mechanism available.
 
@@ -382,11 +382,11 @@ The outer kernel overlayfs (D0) solves only "persistent + portable + diffable" a
 ceiling**: the upper is an ordinary directory tree, and how much can be written into it depends on the
 free space of the FS it sits on. Without a quota, a single sandbox's `dd if=/dev/zero of=big` can consume
 the whole disk the upper is on, making the upper writes of **every sandbox on that disk** fail — breaking
-§2.3's "the amplification happens only inside this sandbox's data plane". The capacity ceiling must
-therefore be applied explicitly by the rootfs provider (§5.B), orthogonally to D0's carrier: the carrier
+the sandbox security model's "the amplification happens only inside this sandbox's data plane". The capacity ceiling must
+therefore be applied explicitly by the rootfs provider (the rootfs subsystem), orthogonally to D0's carrier: the carrier
 gives "an ordinary directory tree", the quota gives "how big that tree may get".
 
-### D6.2 The materialization mechanism (single-node): a btrfs subvolume + squota is the first choice
+### this section The materialization mechanism (single-node): a btrfs subvolume + squota is the first choice
 
 | Mechanism | Isolation strength | Cost | Fits |
 | --- | --- | --- | --- |
@@ -398,7 +398,7 @@ The three are **different implementation branches of the same storage substrate 
 abstraction upward does not change by one word: layers above see only "this Overlay has a capacity cap (a
 Binding)", never whether the cap is squota or a loop image.
 
-> **The first choice = a btrfs subvolume + squota (measured, full stack).** The substrate (ADR-0002) is
+> **The first choice = a btrfs subvolume + squota (measured, full stack).** The substrate choice is
 > **btrfs**, which has **no project quota**, so project-quota mechanisms (xfs/ext4) do not apply on this
 > disk. Measured through the whole chain
 > `subvolume → overlayfs upper/work → gofer → sentry → guest`: filling it triggers a **hard `ENOSPC`
@@ -409,7 +409,7 @@ Binding)", never whether the cap is squota or a loop image.
 > and **the container lives on as usual** (it can be exec'd again). No bypass of the accounting was found
 > through sparse files, `fallocate`, hardlinks, or renaming out of lower. Choosing it also brings a
 > structural gain — fixing the storage unit as a subvolume simultaneously delivers cheap atomic snapshots
-> for Volumes (§5.C) (volume.md D6/D7).
+> for Volumes (the volume subsystem) (volume.md D6/D7).
 
 **Why squota rather than full qgroups.** Three reasons: ① squota is designed for exactly "one subvolume per
 workload" (low overhead, no rescan storms); ② **the semantics are what actually match the thing being
@@ -424,7 +424,7 @@ diverging long-term (the drift CLAUDE.md warns about).
 > **A cost that must be handled along with it**: under squota a sandbox cannot burst its own cap, but
 > **Template / layer bytes still occupy real disk and are covered by no cap**. **This is the reason the
 > node accounting inequality's second term exists** — summing caps alone would miss those bytes, and the
-> inequality itself is in §3.4.
+> inequality itself is in the resource-capacity model.
 > **Note that the second term's criterion is "covered by no cap", not "is it a layer"**: a capped Overlay
 > upper has already been counted by the first term and is not counted twice; only uncapped bytes (layers,
 > and an uncapped upper where one is permitted) enter the second term.
@@ -440,7 +440,7 @@ free, which is one of the reasons for choosing it).
 **`btrfs-progs` is an explicit dependency** (installed on `sbx`, measured v6.17.1). Another pit that will
 be hit at implementation time: **the sentry fabricates `st_blocks`** — the guest reports `536870912` for a
 512 MiB sparse file where the host's true value is `0`. **Capacity accounting trusts only the quota and
-never a guest-side number** (§5.B).
+never a guest-side number** (the rootfs subsystem).
 
 ### D6.3 A key constraint: work must share the quota with upper (a subvolume satisfies this naturally)
 
@@ -453,26 +453,26 @@ same quota unit / the same loop image / the same thin volume** — capacity acco
 both, with no bypass path (measured: `work`/`upper` are invisible in the merged view, and all copy-up
 traffic is accounted).
 
-### D6.4 Ownership: one storage substrate primitive shared across §5.B/§5.C, producing no cross-subsystem call
+### D6.4 Ownership: one storage substrate primitive shared across the rootfs subsystem/the volume subsystem, producing no cross-subsystem call
 
 The capacity cap's materialization mechanism (create-subvolume + set-quota-limit + delete-subvolume) is
-**the same one** for **§5.B's Overlay upper+work subtree** and **§5.C's per-volume unit** — it is a
+**the same one** for **the rootfs subsystem's Overlay upper+work subtree** and **the volume subsystem's per-volume unit** — it is a
 **shared storage substrate primitive** reused across two subsystems.
 
 > **What is shared is code, not a seam.** It lands as a **leaf package** (`internal/btrfs`) wrapping only
 > subvolume create/delete/snapshot + quota limit and **knowing nothing about Overlay / Volume /
-> SandboxID**; §5.B and §5.C each import it as they each import `os`. **No cross-cutting `QuotaProvider`
+> SandboxID**; the rootfs subsystem and the volume subsystem each import it as they each import `os`. **No cross-cutting `QuotaProvider`
 > interface is built** — a remote rootfs provider would deliver a capacity cap by completely different
 > means (an object-storage quota / a quota API), and a cross-cutting interface would only weld btrfs
 > assumptions into every implementation. Neither calls **the other**; they merely share one substrate tool,
 > so "subsystems do not call each other" is not violated. **The Overlay upper is the first consumer**
-> (§5.B), and Volume reuses the same package.
+> (the rootfs subsystem), and Volume reuses the same package.
 
 The applying action happens entirely on the storage materialization side and calls no other subsystem; the
-cap's **value** (a Binding) is handed down by the §4 mediator during create/resume orchestration together
+cap's **value** (a Binding) is handed down by the lifecycle mediator during create/resume orchestration together
 with the rootfs source / the mount table — which is the mediator's job anyway and does not violate
-"subsystems do not call each other" (top of §4). Under a multi-node shape, a PV-backed unit's capacity cap
-= the PV's size request, still that backend's business, with the abstraction unchanged (§3.1.1).
+"subsystems do not call each other" (top of the lifecycle mediator). Under a multi-node shape, a PV-backed unit's capacity cap
+= the PV's size request, still that backend's business, with the abstraction unchanged (the Overlay model).
 
 ### D6.5 Boundaries: there are two more layers of behavior beyond the cap
 
@@ -480,29 +480,29 @@ D6 solves only **how the per-sandbox cap is materialized** — downgrading "fill
 your own share". Two other layers:
 
 - **The standard behavior when it fills**: the guest sees an ordinary `ENOSPC` and **the sandbox lives on
-  as usual** (§3.4: exceeding capacity is an event inside the data plane and the control plane does not get
+  as usual** (the resource-capacity model: exceeding capacity is an event inside the data plane and the control plane does not get
   involved). **Only the hard threshold refuses writes** — no capacity-pressure event is emitted and no
-  auto-pause is triggered. **The soft threshold is settled: emit no event and add no event kind** (§4.4-C)
-  — pressure is a sample of a continuous quantity while §4.1's event stream is a stream of discrete state
-  transitions; to monitor it, attach outside the engine as a gauge/sampling (§1.3 add a subscriber).
-- **No node-level oversubscription**: the inequality is in §3.4, and why the second term must exist is in
-  D6.2. Only **who computes it when** is fixed here: the §4 mediator runs it before create / resume
-  materializes the upper; if it does not fit, create fails / resume stays `paused` (§4.4-A's atomic
+  auto-pause is triggered. **The soft threshold is settled: emit no event and add no event kind** (outbox delivery)
+  — pressure is a sample of a continuous quantity while the lifecycle event model's event stream is a stream of discrete state
+  transitions; to monitor it, attach outside the engine as a gauge/sampling (the extension rule add a subscriber).
+- **No node-level oversubscription**: the inequality is in the resource-capacity model, and why the second term must exist is in
+  this section. Only **who computes it when** is fixed here: the lifecycle mediator runs it before create / resume
+  materializes the upper; if it does not fit, create fails / resume stays `paused` (startup reconciliation's atomic
   rollback to the source state).
   **Bounded oversubscription + disk-pressure monitoring are not in this shape** (a later increment).
 
   The criterion for the two terms being **mutually exclusive** ("take the strongest available statement
-  about each object"; a capped Overlay upper counts 0 in the measured term) belongs to §3.4; this document
+  about each object"; a capped Overlay upper counts 0 in the measured term) belongs to the resource-capacity model; this document
   only adds the mechanical grounds on which it holds: under squota a copy-up's reflink is not charged to
   the sandbox unit and that extent has been counted on the layer side — **the property that forces the
-  second term to exist (D6.2) is exactly what also makes the two terms naturally non-overlapping**. The
+  second term to exist (this section) is exactly what also makes the two terms naturally non-overlapping**. The
   reasoning that every sandbox must have a cap once the axis is metered (or the inequality stops describing
-  that disk) is likewise in §3.4.
+  that disk) is likewise in the resource-capacity model.
 
   **Detaching an Overlay (D5.3) is where a unit's bytes cross between the two terms, and the cap is
   cleared as part of it.** The holder's reference row goes and the declared cap goes with it, so the same
   bytes stop being a first-term promise and become a second-term measurement — **one move, not an
-  addition**, which is what keeps §3.4.2's disjointness intact. It is also **the only one of these
+  addition**, which is what keeps the quota-read rule's disjointness intact. It is also **the only one of these
   transitions that does not increase the node's total**: detach neither writes nor frees a byte, so unlike
   Promote / seed / sweep it needs no forecast and cannot fail the inequality. Re-attaching runs the reverse
   and **does** pass the gate, because it re-declares a cap the node must be able to honour. (Whether an
@@ -511,20 +511,20 @@ your own share". Two other layers:
 
   **The residual (stated honestly)**: the second term is measured, so the inequality holds **at the instant
   of admission** and can be broken afterwards. Layer bytes grow only at Promote / seed / sweep — all
-  control-plane events, and **therefore gateable** — while §4.3's object-reclamation sweep makes them
+  control-plane events, and **therefore gateable** — while the health and recovery model's object-reclamation sweep makes them
   shrink. Any control-plane action that increases uncapped bytes passes the same inequality. **Promote is
   the only one of these that has a verb today**, and seed / sweep follow suit when their verbs appear; its
   three criteria:
 
   - **The gate comes before the quiesce**: `Promote` first only opens the Overlay to get a handle (without
     touching the cap) and asks the provider for a cost forecast, refusing if it does not fit (mapped to a
-    507 by §6). At that moment **the source sandbox is still in its entry state** and has not been frozen,
-    so a refused Promote is not an observable transition (the same discipline as §4.4-A's atomic rollback).
+    507 by the API contract). At that moment **the source sandbox is still in its entry state** and has not been frozen,
+    so a refused Promote is not an observable transition (the same discipline as startup reconciliation's atomic rollback).
   - **This term is a forecast, not a measurement**: the cost is given by
     `rootfs.Provider.PromoteCostBytes`, whose contract is an **upper bound** — it must answer before the
     action, whereas the second term is measured everywhere else. The conservative direction is deliberate:
     overestimating refuses a Promote that could have fitted, while underestimating spreads ENOSPC onto
-    unrelated sandboxes (§2.3). A reflink / snapshot implementation may honestly answer about 0.
+    unrelated sandboxes (the sandbox security model). A reflink / snapshot implementation may honestly answer about 0.
   - **An in-flight reservation is not a third term**: bytes become visible to `UncappedBytes` only as the
     copy progresses, and the copy is too long to hold a node-level lock throughout, so the mediator records
     a reservation before releasing the lock, serving as Promote's "commit" (equivalent to the row insert at
@@ -536,8 +536,8 @@ your own share". Two other layers:
 
 D6.1–D6.5 are about **how a cap is materialized** and **how a node accounts**. The write criterion on the
 limit side is the other half: **a cap not above the unit's current usage is accepted by the substrate, after
-which the unit is irreversibly wedged**. §5.C settled this for volumes long ago (volume.md D7.3), and this
-section records only **the results of re-measuring on §5.B's unit shape** and **three corollaries that hold
+which the unit is irreversibly wedged**. the volume subsystem settled this for volumes long ago (the volume implementation), and this
+section records only **the results of re-measuring on the rootfs subsystem's unit shape** and **three corollaries that hold
 only on the sandbox side** — the unit shape differs (one subvolume holds both `upper` and `work`, with
 `merged`, a live overlayfs mount point, inside it), so the volume-side conclusions cannot be cited directly.
 
@@ -553,7 +553,7 @@ deletions bring usage back below the cap the quota ioctl revives.
    replays the cap from the record at **every** placement, and replaying the same cap on an
    already-wedged unit likewise returns `ENOSPC`. A volume has no placement of its own, so a wedged volume
    is merely "cannot be written to"; on the sandbox side it **can never resume again** — **the same
-   consequence** as the already-refused `0 → N` write (§3.4: one 200 PATCH turns the sandbox into a brick).
+   consequence** as the already-refused `0 → N` write (the resource-capacity model: one 200 PATCH turns the sandbox into a brick).
 2. **`limit == usage` is a wedged state too.** Set exactly equal to `referenced`: it is accepted and stored
    the first time, but **replaying it returns `ENOSPC` and raising it returns `ENOSPC`**. So the criterion
    must be a **strict** inequality, word for word the same as the volume side's.
@@ -562,27 +562,27 @@ deletions bring usage back below the cap the quota ioctl revives.
 
 **From which two write-point shapes follow:**
 
-- **§6.1's `PATCH` refuses (400, `lifecycle.ErrDiskCapBelowUsage`)**, with the criterion
-  `cap > current usage`. It requires §5.B to add a **sandbox-level usage query**
+- **the API contract's `PATCH` refuses (400, `lifecycle.ErrDiskCapBelowUsage`)**, with the criterion
+  `cap > current usage`. It requires the rootfs subsystem to add a **sandbox-level usage query**
   (`Provider.Usage(ctx, overlayID) (used, limit, err)`), because `UncappedBytes` **counts capped units as 0
-  by contract** (§3.4's mutual exclusion) and that is precisely the unit a cap change targets. **Taking an
+  by contract** (the resource-capacity model's mutual exclusion) and that is precisely the unit a cap change targets. **Taking an
   ID rather than an `*Overlay` handle**: a handle can be obtained only through `OpenOverlay`, and that is a
   call that **writes the quota**, so running a placement-shaped call to read one number would turn a
   "query" into a side effect.
-- **The materialization side uses the same criterion (`rootfs.ErrCapBelowUsage`)**, because §3.4.5 requires
+- **The materialization side uses the same criterion (`rootfs.ErrCapBelowUsage`)**, because the resource-capacity model requires
   the write point's criteria to be walked again at the next placement / a crash reconciliation's reinstall /
   a repair rescan, and this criterion reads **exactly the thing that is not durable** (the unit's current
   usage): one external change clearing the quota row ⇒ the guest grows past the cap in the record ⇒ the
   next placement would write the cap below usage.
-  - **The §5.C answer cannot be copied here.** `RepairVolumeCaps` **skips** such a volume, leaving it
-    temporarily uncapped, with safety caught by §3.4's second term; a placement has no such option — §5.B's
+  - **The volume subsystem answer cannot be copied here.** `RepairVolumeCaps` **skips** such a volume, leaving it
+    temporarily uncapped, with safety caught by the resource-capacity model's second term; a placement has no such option — the rootfs subsystem's
     rule is "if the cap cannot be delivered, refuse this placement, and never silently degrade to running
     uncapped". So this side **refuses** rather than skipping, and refusing is the reversible direction (the
     sandbox stays `paused`, with exits being a PATCH that raises/removes the cap, or rebuilding after a
     Promote), whereas applying is the irreversible one.
   - **The status code splits two ways**: create **carries** `disk_byte` ⇒ the mediator wraps it as
     `ErrDiskCapBelowUsage` (400); resume / adopt **do not carry it** ⇒ it stays 409 (the remedy changes
-    state elsewhere). The same split as §5.D's second-hop uid pair, "400 at the write point / 409 at
+    state elsewhere). The same split as the network subsystem's second-hop uid pair, "400 at the write point / 409 at
     placement".
 - **The criterion does not wrongly hit a sandbox that "filled its own cap"**: squota stops the guest while
   usage is **strictly below** the limit (measured: a 16 MiB cap filled to 16728064 B, leaving 49152 B), so
@@ -590,11 +590,11 @@ deletions bring usage back below the cap the quota ioctl revives.
   test of its own.
 
 **③'s separate consequence: `Mount` must "empty work's contents" rather than "delete and recreate work".**
-Switched to `RemoveAll(work)` + `MkdirAll(work)`, a sandbox that filled its own cap (§3.4's **normal**
+Switched to `RemoveAll(work)` + `MkdirAll(work)`, a sandbox that filled its own cap (the resource-capacity model's **normal**
 outcome) would **never resume again**: `mkdir` wants a metadata extent while a full unit has only tens of
 KiB left (measured ENOSPC); and deleting that **already-empty** directory frees **not one byte, so the
-sequence spends headroom it does not have to arrive at the state it is already in**. That violates §4.2's
-"pause is a **reversible** gate" — §3.4.4 paid a whole budget for that promise.
+sequence spends headroom it does not have to arrive at the state it is already in**. That violates the pause/resume lifecycle's
+"pause is a **reversible** gate" — the resource-capacity model paid a whole budget for that promise.
 **Emptying the contents** keeps the original inode, the kernel then creates `work/work` itself, and mounting
 was measured to succeed on that same 49 KiB of headroom. What overlayfs requires is that the workdir **be
 empty** (D5: reuse is refused or corrupts), not that it be a new inode.

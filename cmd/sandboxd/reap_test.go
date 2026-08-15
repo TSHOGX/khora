@@ -104,7 +104,7 @@ func subtreeReaperHelper() int {
 //
 // What they CANNOT prove (needs the real guest): that in a live guest transport is
 // the only wildcard waiter besides PID 1, and the restart transient where the
-// subtree briefly reparents to PID 1 instead (guest-runtime C2/C3).
+// subtree briefly reparents to PID 1 instead.
 
 // asSubreaper makes the test process a subreaper for the duration of one test, so
 // a grandchild orphaned below it reparents HERE rather than to the machine's init

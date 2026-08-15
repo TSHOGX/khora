@@ -13,7 +13,7 @@ import (
 )
 
 // Unit (no substrate): the the documented invariant fan-out invariants as pure logic. The real
-// runsc round-trip (C2/C3/C4) is in test/transport_substrate_test.go; these
+// runsc round-trip coverage is in test/transport_substrate_test.go; these
 // pin the hub mechanics deterministically and under -race.
 
 // blockingWriter simulates a child whose input pipe is full: Write blocks until
@@ -228,7 +228,7 @@ func TestWriteInputDoesNotBlockFanOut(t *testing.T) {
 }
 
 // The the documented invariant subsystem boundary as pure logic: only pid > 0 is a directed target.
-// The substrate proof that a refused pid cannot destroy a real sandbox is C6 in
+// The substrate proof that a refused pid cannot destroy a real sandbox is in
 // test/transport_depth_substrate_test.go; this pins the predicate itself,
 // including that the message says WHERE fan-out belongs — a caller that only
 // learns "invalid" keeps hunting for a transport-side way to do it.

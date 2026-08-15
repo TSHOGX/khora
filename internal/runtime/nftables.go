@@ -241,7 +241,7 @@ func truncateComment(s string) string {
 		return s
 	}
 	cut := nftCommentMax - len(ellipsis)
-	// Do not slice inside a multi-byte rune: the rationales carry § and D-circle
+	// Do not slice inside a multi-byte rune: rationale text may contain Unicode markers
 	// characters, and a half rune would make the comment invalid UTF-8.
 	for cut > 0 && !utf8.RuneStart(s[cut]) {
 		cut--

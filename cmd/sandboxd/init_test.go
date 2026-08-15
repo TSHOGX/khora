@@ -76,7 +76,7 @@ func TestReapTableDeliversExitCodeToSupervisor(t *testing.T) {
 	}
 }
 
-// 128+signo propagation (D4.1 checklist) through the same handoff, and proof
+// 128+signo propagation through the same handoff, and proof
 // that start releases the os.Process handle (so no pidfd leaks per restart and
 // no second waiter can exist).
 func TestReapTableSignaledChildIs128PlusSigno(t *testing.T) {

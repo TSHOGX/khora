@@ -333,7 +333,7 @@ type source struct {
 // Connect gets not-found rather than a retained exit code. Holding the entry would retain
 // state keyed by a guest pid the kernel can recycle, so the record would start describing a
 // different process once the number is reused. Callers that must not miss exit status stay
-// attached (guest-runtime the documented invariant C2).
+// attached so the parent can reap the process group.
 //
 // The exit status arrives over `exited` — the reap table's handoff — NOT from cmd.Wait().
 // Transport mode owns Wait4(-1) for its subtree (the documented invariant) and a wildcard wait cannot exclude a

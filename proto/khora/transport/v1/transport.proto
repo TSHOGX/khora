@@ -103,7 +103,7 @@ service ProcessService {
   // collection. That follows from addressing by guest-native pid, which the
   // kernel recycles: a retained "pid N exited" record would start describing a
   // different process the moment N is reused. A caller that needs exit status
-  // must be attached when the process ends (guest-runtime the documented invariant C2).
+  // must be attached when the process ends so the parent can reap the process group.
   rpc Connect(ConnectRequest) returns (stream ProcessEvent) {}
 
   // StreamInput writes stdin (or pty-in) as an ordered client-stream — the

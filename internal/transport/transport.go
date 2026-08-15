@@ -210,7 +210,7 @@ type ProcessClient interface {
 type FsClient interface {
 	// Read reads sandbox file bytes at an offset; engine keeps no read cursor,
 	// no cross-resume offset continuity (transport the documented invariant). No watch — consumers
-	// poll Stat+Read (§ render-vs-interact asymmetry, transport the documented invariant).
+	// poll Stat+Read: rendering state is separate from interactive stream state.
 	Read(ctx context.Context, path string, offset, length int64) ([]byte, error)
 
 	// Write writes sandbox file bytes.

@@ -1040,7 +1040,7 @@ func (p *LocalRunsc) buildNetns(h *placementHandle, hostIP, guestIP string) erro
 // `state`/`list` read empty and the documented invariant reverse reconciliation would see every live
 // placement as nonexistent), which is why TestRunscGlobalFlagsArePinned pins the
 // set by value rather than trusting review. Adding or removing a key here means
-// updating that test's table WITH the § guarantee the key carries.
+// updating that test's table with the guarantee the key carries.
 func (p *LocalRunsc) runscGlobalFlags() []string {
 	return []string{
 		p.RunscBin,

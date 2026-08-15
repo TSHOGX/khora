@@ -35,7 +35,7 @@ type collected struct {
 	gotEnd    bool
 	keepalive bool
 	// streamErr is why the stream ended without an end frame, when that happens
-	// (D4.3 invariant-1 overflow disconnect vs a frame lost for no stated reason).
+	// (overflow disconnect vs a frame lost for no stated reason).
 	streamErr error
 }
 
@@ -244,13 +244,13 @@ func TestTransportMultiConnectionFanOut(t *testing.T) {
 	if !ca.gotEnd {
 		// Distinguish the two ways this can happen: they look identical at this
 		// assertion but call for opposite conclusions. If a was DROPPED as a slow
-		// subscriber (D4.3 invariant 1), that is the documented overflow behaviour
+		// subscriber; that is the documented overflow behaviour
 		// under load rather than a fan-out defect — b's abandonment did not break a,
 		// a simply could not keep up. Only a silent close with no reason is the
 		// failure this test is about.
 		if ca.streamErr != nil {
 			t.Skipf("subscriber a was disconnected rather than ending cleanly (%v) — "+
-				"that is D4.3 invariant 1 (overflow → drop) under load, not a fan-out "+
+				"that is overflow → drop under load, not a fan-out "+
 				"failure. The fan-out property is still covered by the other C4 tests.",
 				ca.streamErr)
 		}
@@ -489,7 +489,7 @@ func TestTransportLongStreamKeepalive(t *testing.T) {
 	// an idle shell that produces nothing until we send input (no coreutils
 	// `sleep`; `read` blocks). We hold it idle ACROSS the keepalive interval, so
 	// the server must emit at least one keepalive; the stream must NOT be killed
-	// by any idle deadline (D4.2). Then we unblock it to a clean end.
+	// by any idle deadline. Then we unblock it to a clean end.
 	var pid int
 	ch, err := cl.Start(ctx, transport.StartSpec{
 		Cmd: "/bin/sh", Args: []string{"-c", "read x; echo DONE"},

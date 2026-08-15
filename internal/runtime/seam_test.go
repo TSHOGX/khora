@@ -341,7 +341,7 @@ func TestResourceLimitsCarriesOnlyPolicy(t *testing.T) {
 	}
 }
 
-// pinnedFlag is one runsc global flag together with the § guarantee it carries.
+// pinnedFlag is one runsc global flag together with the guarantee it carries.
 // The `why` is the whole point of the table: a future edit that drops a key gets
 // told what it just gave up, rather than seeing a bare string diff.
 type pinnedFlag struct {
@@ -369,7 +369,7 @@ var pinnedRunscFlags = []pinnedFlag{
 // is: two of these keys fail SILENTLY (`--platform=systrap` and `--root` — see
 // runscGlobalFlags, and the per-key `why` strings below).
 //
-// Both halves are asserted: every pinned key is PRESENT (with its § guarantee named
+// Both halves are asserted: every pinned key is PRESENT (with its guarantee named
 // in the failure), and no UNKNOWN flag has been added without a recorded reason.
 func TestRunscGlobalFlagsArePinned(t *testing.T) {
 	p := &LocalRunsc{RunscBin: "runsc", RunscRoot: "/var/run/engine-runsc", StateDir: "/var/lib/engine/state"}
@@ -400,7 +400,7 @@ func TestRunscGlobalFlagsArePinned(t *testing.T) {
 
 	// The reverse direction: an unrecorded flag. Not a style rule — an unpinned key
 	// that someone adds by hand is one nobody has attached a guarantee to, and the documented invariant's
-	// discipline is per-key ("which keys are load-bearing, and which § guarantee each
+	// discipline is per-key ("which keys are load-bearing, and which guarantee each
 	// answers to").
 	known := map[string]bool{wantRoot: true}
 	for _, pf := range pinnedRunscFlags {
@@ -408,7 +408,7 @@ func TestRunscGlobalFlagsArePinned(t *testing.T) {
 	}
 	for _, f := range flags {
 		if !known[f] {
-			t.Errorf("runscGlobalFlags carries unrecorded flag %q — the documented invariant pins each key to ONE stated guarantee; add it to pinnedRunscFlags with the § it serves (or drop it)", f)
+			t.Errorf("runscGlobalFlags carries unrecorded flag %q — each key needs ONE stated guarantee; add it to pinnedRunscFlags with the guarantee it serves (or drop it)", f)
 		}
 	}
 

@@ -892,7 +892,7 @@ func TestADeclaredUDPTupleIsAdmittedAtTheRuleLayer(t *testing.T) {
 // FAILED: the test bed had no guest default route, so nothing left the sandbox and all
 // four verdicts looked alike — an invalid measurement, not a refutation. This test is
 // that reproduction's second attempt. So the direction is trusted and the numbers are
-// not (recorded here because no §-doc carries it: the documented invariant ⑨ states both arms as reproduced
+// not (recorded here because no maintained page carries it: the documented invariant ⑨ states both arms as reproduced
 // and defers the conditions to the documented invariant, which does not keep the failed attempt).
 func TestGuestFacingRefusalsFailFastRatherThanHanging(t *testing.T) {
 	eng, _ := harness.Engine(t, netEngineOpts(t))

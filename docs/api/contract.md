@@ -1,4 +1,4 @@
-# Sandbox Engine — API and CLI contract (§6)
+# Sandbox Engine — API and CLI contract
 
 > This page defines the public API and CLI contract. See
 > [Architecture](../concepts/architecture.md) for the boundary and security context.
@@ -15,7 +15,7 @@ The backend exposes a **sandbox-centric** API only, **entirely ID-addressed**; p
 concepts (session / mode …) do not enter the backend. **The CLI and the frontend are peer
 clients of the same API** — the CLI is a first-class citizen, not a back door.
 
-### 6.1 Resources and endpoints (control-plane REST + data-plane Connect-RPC; the split is in [`../internals/transport.md`](../internals/transport.md) D5)
+### 6.1 Resources and endpoints
 
 > **The outer-edge protocol split**: sandbox/template/volume/network **lifecycle = REST +
 > JSON** (the control-plane block, the authoritative endpoints, with OpenAPI describing them
@@ -23,12 +23,12 @@ clients of the same API** — the CLI is a first-class citizen, not a back door.
 > whose authoritative contract is `transport.proto`, with clients generating stubs via
 > `buf`. That package holds **three** services: the outward-facing `ProcessService` /
 > `FsService`, plus `HealthService` for the engine's own use — the last is not an outward
-> capability surface, see §5.E). Clients always go through `orchestrator` in the middle and
-> never connect directly to `sandboxd` (§4 mediator / D5.1). The REST lines in the
-> data-plane block are **shape illustrations only**, not authoritative endpoints (D5.3).
+> capability surface. The [transport internals](../internals/transport.md) describe this split.
+> Clients always go through `orchestrator` and never connect directly to `sandboxd`. The REST
+> lines in the data-plane block are **shape illustrations only**, not authoritative endpoints.
 >
 > **This API does no authentication/authorization itself**: there is no authorization
-> subject inside the engine (§1.4 non-goals), so §6 assumes the caller is already trusted.
+> subject inside the engine (the engine boundary non-goals), so the API contract assumes the caller is already trusted.
 > Who may call is decided **outside the engine** (the deployment binds it to localhost / a
 > private network, or puts a gateway in front), which is a join-table addition rather than
 > an engine primitive.
@@ -38,48 +38,48 @@ clients of the same API** — the CLI is a first-class citizen, not a back door.
 request-response, with no long-lived connections and no server push**: every one has
 one-round-trip CRUD semantics, which is why even the event stream is a **cursor-paginated
 GET** (`/v1/events`, below) rather than SSE/websocket — the engine holds no per-subscriber
-state at all (§1.3), and that is exactly why it can stay in the control plane. **"No
+state at all (the extension rule), and that is exactly why it can stay in the control plane. **"No
 streaming" means there is no push surface, not that there is no event surface.**
 
 ```text
 # Sandbox lifecycle
 POST   /v1/sandboxes                 {template_id, network?, volumes?, idle_timeout?, retention?,
                                       cpu_millis?, memory_byte?, disk_byte?}        → {sandbox_id}
-#   `network?` = the §5.D four-field declaration; the schema is in the Network block below
+#   `network?` = the network subsystem's four-field declaration; the schema is in the Network block below
 #   (**if given, it MUST contain `egress.default`**).
 #   **Omitting the whole thing is legal, normalized to `{deny, [], [], []}` and persisted
-#   explicitly** (§5.D): so "network omitted" and "network given but egress.default missing
-#   → 400" are two different things, and only the latter is class 1 of §6.2's list.
-#   The three resource-ceiling axes are in §3.4 (Binding); the per-axis conditional-required
-#   rule is in §6.2. Insufficient admission → 507.
+#   explicitly** (the network subsystem): so "network omitted" and "network given but egress.default missing
+#   → 400" are two different things, and only the latter is class 1 of the API error contract's list.
+#   The three resource-ceiling axes are in the resource-capacity model (Binding); the per-axis conditional-required
+#   rule is in the API error contract. Insufficient admission → 507.
 #   Each `volumes` item = {volume_id, path, access}, with `access` ∈ {exclusive, shared-ro,
-#   shared-rw} — it is a property of the **mount row** (§5.C), so it is given here rather
-#   than on the volume record. Colliding with an exclusive lease → 409 (§6.2's third of four
+#   shared-rw} — it is a property of the **mount row** (the volume subsystem), so it is given here rather
+#   than on the volume record. Colliding with an exclusive lease → 409 (the API error contract's third of four
 #   409s).
 GET    /v1/sandboxes/{id}                        → {sandbox_id, state, death_cause?, used_byte?}
-#   Read-only lifecycle state + cause of death (§4.3). `death_cause` ∈ {`gone`,
+#   Read-only lifecycle state + cause of death (the health and recovery model). `death_cause` ∈ {`gone`,
 #   `resource-exceeded`, `unknown`}, and **the key is absent when no death was observed**
 #   (not an empty string, not null): `CauseNone` is "there is no cause of death" rather than
 #   a kind of cause, and serializing it as `""` would place a falsy-but-present field on a
 #   health response, tempting a caller to use it as a liveness criterion.
-#   **Why it is on the read surface**: §4.3 assigns the recovery decision to the caller
+#   **Why it is on the read surface**: the health and recovery model assigns the recovery decision to the caller
 #   (dead-recoverable → resume; resource-terminated → do not resume), so the caller must be
 #   able to read the fact it decides on directly, rather than sending a resume that is
 #   certain to be refused and inferring backwards from a 409 error string.
-#   The value is §4.3's **abstract enumeration**, never an errno / cgroup path — a remote
-#   provider cannot produce host primitives (§5.A).
+#   The value is the health and recovery model's **abstract enumeration**, never an errno / cgroup path — a remote
+#   provider cannot produce host primitives (the runtime subsystem).
 #   `used_byte` is the bytes this sandbox's Overlay storage unit consumes as the **rootfs
 #   provider's own backend reports them** (upper + work — never the Template stack, and never
 #   the `merged` view), and **the key is absent when it cannot be read**, not reported as 0:
 #   word for word the `GET /v1/volumes/{id}` rule, because it answers the same question for the
 #   same consumer — `PATCH disk_byte` refuses a cap that is not **strictly greater** than it
-#   (§3.4), and the only other route to the number is parsing it out of that 400's message text.
+#   (the resource-capacity model), and the only other route to the number is parsing it out of that 400's message text.
 #   **It is readable at rest, so unlike `host_endpoint` this key does NOT depend on a live
-#   placement**: the unit is an ID-addressed artifact (§3.1.1), so `paused` reports it exactly as
-#   `running` does — and `paused` is the **only** state a disk cap may be edited from (§3.4), so
+#   placement**: the unit is an ID-addressed artifact (the Overlay model), so `paused` reports it exactly as
+#   `running` does — and `paused` is the **only** state a disk cap may be edited from (the resource-capacity model), so
 #   omitting it there would omit it from the one state its consumer works in.
 #   **Reported for an uncapped sandbox too, and this is NOT the `UncappedBytes` asymmetry**: that
-#   term reports ZERO for a capped unit by contract (§3.4's two terms are disjoint), whereas this
+#   term reports ZERO for a capped unit by contract (the resource-capacity model's two terms are disjoint), whereas this
 #   one reports the backend's real number either way. What an uncapped sandbox cannot do is USE
 #   it — `disk_byte: 0 → N` is refused (see PATCH) — so there the value is diagnostic only.
 #   `GET /v1/sandboxes` (list) does **not** carry it: one backend round trip per sandbox,
@@ -88,29 +88,29 @@ GET    /v1/sandboxes/{id}                        → {sandbox_id, state, death_c
 PATCH  /v1/sandboxes/{id}            {cpu_millis?, memory_byte?, disk_byte?, idle_timeout?, retention?,
                                       volumes?, network?}
                                      → {sandbox_id, state, applies_at, lease_released?}
-#   Edits the Binding; the effective point and which states allow the edit are in §3.4.
+#   Edits the Binding; the effective point and which states allow the edit are in the resource-capacity model.
 #   **The wire semantics differ from create's**: here "not given" and "given as 0" must be
 #   distinguishable (a cap's 0 = no ceiling, `retention: 0` = never evict), so request fields
 #   are **nullable** — not given = leave that field alone. TTLs take a duration string
 #   ("48h"). `applies_at` ∈ {"now" (only TTLs changed), "next-resume" (any resource ceiling
 #   **or the mount binding or the network declaration** changed)}.
 #   **`volumes` is the mount table's complete binding** (each item {volume_id, path,
-#   access}); §6.2 already designates PATCH as the rebinding point, so it is listed here
+#   access}); the API error contract already designates PATCH as the rebinding point, so it is listed here
 #   rather than in a separate attach/detach endpoint. **Its effective point splits in two,
 #   and one `applies_at` value cannot answer for both**: a mount-topology change materializes
-#   only at **next-resume** (runsc takes mounts at startup, §5.C does not hot-mount), whereas
+#   only at **next-resume** (runsc takes mounts at startup, the volume subsystem does not hot-mount), whereas
 #   **detach releases the exclusive lease immediately** (the lease IS that mount row, and
 #   deleting the row releases it). So a detach responds with `applies_at: "next-resume"`
 #   **and `lease_released: true`** — the two things being out of step is a design fact, not a
 #   detail that can be folded into one value. Attaching to an already-occupied volume → 409
-#   (§5.C's atomic insert returning `RowsAffected()==0`).
+#   (the volume subsystem's atomic insert returning `RowsAffected()==0`).
 #   Changing a cap on a `running` sandbox → 409 "pause first"; raising a ceiling re-runs the
-#   admission gate (may 507 / 400). No §4.1 event is emitted (this is not a state
+#   admission gate (may 507 / 400). No the lifecycle event is emitted (this is not a state
 #   transition).
 #   **`disk_byte` going `0 → N` is refused (400)**: an uncapped sandbox's upper has no
 #   writable quota row, so this write would declare a cap that no placement can ever deliver,
 #   and accepting it would turn the sandbox into a brick (the full reasoning, and why the
-#   refusal is at the write point, are in §3.4).
+#   refusal is at the write point, are in the resource-capacity model).
 #   `N → 0` (removing the cap) and `N → M` (changing it) are both legal, but **`N → M`
 #   lowered below current usage → 400** (a strict inequality, the same criterion as
 #   `PATCH /v1/volumes/{id}`): the substrate would accept such a cap and the unit would then
@@ -121,8 +121,8 @@ PATCH  /v1/sandboxes/{id}            {cpu_millis?, memory_byte?, disk_byte?, idl
 #   below usage. If usage cannot be read → refuse (fail closed). **The same criterion is a
 #   409 rather than a 400 on the placement side**: resume / adopt carry no cap, so a 400
 #   would send the caller to change something they did not submit this time — the same split
-#   as the `via[]` pair of "400 at the write point / 409 at placement" (§3.4 / §5.B).
-#   **`network` is likewise whole-for-whole** (a §5.D declaration is a Binding), effective at
+#   as the `via[]` pair of "400 at the write point / 409 at placement" (the resource-capacity model / the rootfs subsystem).
+#   **`network` is likewise whole-for-whole** (the network subsystem declaration is a Binding), effective at
 #   `next-resume`, so the same rule as resource ceilings applies: editing it on a `running`
 #   sandbox → 409 "pause first". **publish does not go through here** — it has its own
 #   hot-add endpoint (see the Network block).
@@ -137,9 +137,9 @@ PATCH  /v1/sandboxes/{id}            {cpu_millis?, memory_byte?, disk_byte?, idl
 #   item), effective at `next-resume` per the Binding rule.
 POST   /v1/sandboxes/{id}/pause
 POST   /v1/sandboxes/{id}/resume
-#   A resource-terminated sandbox refuses resume → 409 (§4.3; PATCH the cap up first)
+#   A resource-terminated sandbox refuses resume → 409 (the health and recovery model; PATCH the cap up first)
 POST   /v1/sandboxes/{id}/activity          → {idle_millis}          (record activity now)
-#   "This sandbox is doing something right now." Stamps the §4.3 activity signal, so the idle
+#   "This sandbox is doing something right now." Stamps the health and recovery model activity signal, so the idle
 #   clock the reaper reads restarts from here — nothing more. **It carries NO duration and adds
 #   no vocabulary**: it cannot protect a sandbox for a period, cannot be held, and expires
 #   nothing, so there is no lease, no keepalive, and no per-caller state anywhere (the
@@ -163,17 +163,17 @@ POST   /v1/sandboxes/{id}/activity          → {idle_millis}          (record a
 DELETE /v1/sandboxes/{id}                                                          (destroy)
 GET    /v1/sandboxes                        (list; each item has the same shape as the
                                              single read, `death_cause?` included)
-#   list carrying the cause of death too **saves an N+1 round**: §6.2 is entirely
+#   list carrying the cause of death too **saves an N+1 round**: the API error contract is entirely
 #   ID-addressed, so without it a caller seeing several `paused` sandboxes would have to GET
 #   each one to learn which are resumable — a fact the list already holds.
 GET       /v1/sandboxes/{id}/files?path=                        (large-file download, streaming)
 PUT|POST  /v1/sandboxes/{id}/files?path=                       → {path, bytes_written}(upload)
 #   `POST` and `PUT` are synonymous here (an upload is not a dispute about idempotent-replace
 #   semantics, and accepting both verbs saves the caller one adaptation).
-#   This is §5.E fs's large-file bypass (D4.4), the one data-plane operation that goes over
+#   This is the fs transport service's large-file bypass (D4.4), the one data-plane operation that goes over
 #   REST; small payloads still go through `FsService.Read/Write`. See below.
 
-# Event-stream replay (§4.1 transition events / §4.4-C outbox); **pull only, no push surface**
+# Event-stream replay (the lifecycle transition events / outbox delivery outbox); **pull only, no push surface**
 GET    /v1/events?after=<seq>&limit=<n>&wait=<duration>
                                             → {events:[{seq,id,sandbox_id,kind,state,occurred_at,
                                                          cause?}],
@@ -181,21 +181,21 @@ GET    /v1/events?after=<seq>&limit=<n>&wait=<duration>
 #   `seq` is the **cursor**: pass the last `seq` you received back verbatim as the next
 #   `after` to continue where you left off. `after` omitted/0 = from the start of the
 #   retention window. **The ordering key is `seq`, not `occurred_at`** (the latter is not a
-#   total order; reasoning in §4.4-C).
+#   total order; reasoning in outbox delivery).
 #   `limit` has a **server-side hard ceiling** (default 100, ceiling 1000), and exceeding it
 #   **truncates to the ceiling** rather than being refused. A hard ceiling rather than only a
 #   default, because the parameter is caller-controlled and giving only a default is giving
 #   nothing. And **with trimming off (the default) the window = all of history**, so the rows
 #   `after=0` must page through only ever grow — which is why the hard ceiling is mandatory
-#   rather than merely tidy. (How large the window should be is still open: see §4.4-C /
-#   the relevant GitHub Issue, the §4.4-C entry "the size of the replayable
+#   rather than merely tidy. (How large the window should be is still open: see outbox delivery /
+#   the relevant GitHub Issue, the outbox delivery entry "the size of the replayable
 #   event-stream window". The MECHANISM is settled and built; only the value is a deployment's.)
-#   **`cause` is present only where a kind has more than one route to it** (§4.4-C), and absent
+#   **`cause` is present only where a kind has more than one route to it** (outbox delivery), and absent
 #   otherwise — a subscriber that ignores the field reads the stream exactly as before. Today that is
 #   `destroyed`: `requested` = the Destroy verb, `retention-expired` = the reaper's evict of a paused
-#   sandbox past `retention` (§4.3). **For `destroyed` this field is the fact's only carrier**: the
+#   sandbox past `retention` (the health and recovery model). **For `destroyed` this field is the fact's only carrier**: the
 #   record is gone, so a follow-up GET is a contractual 404 and the route cannot be re-derived at any
-#   later time. It is NOT §4.3's `death_cause` (why an isolation UNIT was found gone) — different
+#   later time. It is NOT the health and recovery model's `death_cause` (why an isolation UNIT was found gone) — different
 #   question, different vocabulary, deliberately not merged.
 #   `wait=<duration>` (optional, e.g. `30s`) makes an otherwise-EMPTY page **wait** for the first
 #   event past `after` instead of returning immediately: a subscriber's detection latency for
@@ -203,7 +203,7 @@ GET    /v1/events?after=<seq>&limit=<n>&wait=<duration>
 #   that find nothing. **It changes no cursor semantics** — the page is still `seq > after` in `seq`
 #   order, and a wait that expires returns the same empty 200 the caller would have gotten at once, so
 #   omitting the parameter is exactly today's behavior. It is **still pull**: the engine holds a
-#   connection, never a subscriber (§4.4-C's dividing line — "push as an adapter holds no state").
+#   connection, never a subscriber (outbox delivery's dividing line — "push as an adapter holds no state").
 #   A **server-side ceiling** applies for the same reason `limit` has one (a caller-controlled
 #   parameter given only a default is given nothing), and exceeding it **clamps** rather than refuses.
 #   A non-empty first read never waits, and a canceled request returns nothing rather than a partial
@@ -212,7 +212,7 @@ GET    /v1/events?after=<seq>&limit=<n>&wait=<duration>
 #   **410 = `after` is below the retained window**, i.e. the events between that cursor and
 #   `earliest` have been trimmed and cannot be served. The body still carries
 #   `{earliest, latest}` so the caller **restarts from `earliest`** deliberately. It is a
-#   **refusal rather than a short page** because §4.4-C's "losing one loses an invoice" means a
+#   **refusal rather than a short page** because outbox delivery's "losing one loses an invoice" means a
 #   silently-truncated page would let a subscriber conclude it is caught up having skipped
 #   events — the field's common alternative (skip silently to the end) is exactly what this
 #   declines. **Reachable only when a retention window is configured**: with trimming off
@@ -224,34 +224,34 @@ GET    /v1/events?after=<seq>&limit=<n>&wait=<duration>
 #   sink has seen some row is not a fact an external subscriber should depend on.
 #   **Why it is in the control plane**: a cursor-paginated GET is just CRUD, and an
 #   engine-level event stream is neither per-sandbox nor per-pid, so the data plane has
-#   nowhere to address it in the first place (§6.2). **Why it is pull-only**, and why push is
-#   a zero-cost adapter: §4.4-C.
+#   nowhere to address it in the first place (the API error contract). **Why it is pull-only**, and why push is
+#   a zero-cost adapter: outbox delivery.
 
 # Template (an immutable artifact: an opaque ID is its identity, and existence is its state,
-# §3.1 / §4.3)
+# the sandbox model / the health and recovery model)
 GET    /v1/templates
-POST   /v1/templates                 {from_sandbox_id}  (Promote, §3.1)         → {template_id}
+POST   /v1/templates                 {from_sandbox_id}  (Promote, the sandbox model)         → {template_id}
 #   The source must be `running` or `paused` (otherwise 409). A `running` source is quiesced
 #   to `paused` and then frozen (emitting an ordinary `paused` event as usual); a `paused`
-#   source is frozen in place. It passes the §3.4 admission gate (an insufficient cost
+#   source is frozen in place. It passes the resource-capacity model admission gate (an insufficient cost
 #   forecast → 507), and the gate is **before** quiescing, so a refused Promote is not an
 #   observable transition.
 DELETE /v1/templates/{id}            (referenced by a sandbox / a child layer → 409 template
-                                      in use; reference-reclamation atomicity in §4.3)
+                                      in use; reference-reclamation atomicity in the health and recovery model)
 
 # Volume (decoupled from any sandbox's lifecycle)
 POST   /v1/volumes                   {size?}                                  → {volume_id, size}
 #   **No `access_mode`**: that is a property of the mount row, not of the volume (one volume
-#   can be shared-rw for A and shared-ro for C at the same time, §5.C), so it appears only in
+#   can be shared-rw for A and shared-ro for C at the same time, the volume subsystem), so it appears only in
 #   the `volumes` items of create/PATCH sandbox. `size` is **required** when the disk axis is
-#   metered (§3.4 / §6.2 per-axis conditional-required), otherwise 400.
+#   metered (the resource-capacity model / the API error contract per-axis conditional-required), otherwise 400.
 #   **No `backend` request field**: the backend is a single implementation injected at
-#   deployment time (the same shape as store / runtime provider — §1.3 registration rather
+#   deployment time (the same shape as store / runtime provider — the extension rule registration rather
 #   than selection), so it appears only in the **response**, never as a request key.
 GET    /v1/volumes                                                                 (list)
 GET    /v1/volumes/{id}              → {volume_id, size, backend?, used_byte?}     (inspect)
 #   `size` is **the cap in the record** (the sole authority: reading back from the backend
-#   cannot distinguish "never capped" from "deliberately uncapped", volume.md D7.3);
+#   cannot distinguish "never capped" from "deliberately uncapped", the volume implementation);
 #   `used_byte` is the used bytes as the backend reports them, and **the key is absent when it
 #   cannot be read** (not reported as 0 — a 0 would be read as "empty", while the caller wants
 #   to use it to pick a new cap strictly greater than it). list does not carry `used_byte` (one
@@ -261,12 +261,12 @@ PATCH  /v1/volumes/{id}              {size}  (**required**; it is the only edita
 #   The only write point for a volume's cap besides create, and `size` is **required**.
 #   **Editable both when unmounted and while mounted**, so there is no "pause first" 409 here
 #   — the opposite of sandbox resource ceilings, which are editable only in `paused`; the
-#   mechanical reason is in §5.C. Raising the cap re-runs the admission gate (may 507);
-#   **lowering it below current usage → 400** (a strict inequality, §5.C / volume.md D7.3).
+#   mechanical reason is in the volume subsystem. Raising the cap re-runs the admission gate (may 507);
+#   **lowering it below current usage → 400** (a strict inequality, the volume subsystem / the volume implementation).
 #   Editing the cap is not governed by the write regime, but editing `access` has its own
-#   rules (§5.C). No event is emitted.
+#   rules (the volume subsystem). No event is emitted.
 DELETE /v1/volumes/{id}
-#   Two kinds of 409 (the volume side of §6.2's ①②): a live mount row exists → 409
+#   Two kinds of 409 (the volume side of the API error contract's ①②): a live mount row exists → 409
 #   (referenced); **a live snapshot/clone (a child volume) exists → 409** (lineage RESTRICT,
 #   the same shape as a Template referenced by a child layer). These are different object
 #   relations, so the sentinel and the message must be distinguishable.
@@ -274,7 +274,7 @@ POST   /v1/volumes/{id}/snapshot     {size?}                                  �
 POST   /v1/volumes/{id}/clone        {size?}                                  → {volume_id, size}
 #   **Both take `size`, required when disk is metered (missing → 400), and neither inherits
 #   the source's cap** — the substrate has nothing to inherit, and inheriting at the policy
-#   layer would silently double the disk claim the node has already declared (§5.C /
+#   layer would silently double the disk claim the node has already declared (the volume subsystem /
 #   volume.md D6.1a).
 #   What they produce is an **ordinary writable volume** (with no read-only marker; for
 #   immutability use a `shared-ro` mount row), whose record carries a `parent` pointing at the
@@ -282,19 +282,19 @@ POST   /v1/volumes/{id}/clone        {size?}                                  �
 #   support it → 400, and the capability must be asked **before** an ID is allocated or a byte
 #   is moved.
 #   **A snapshot is crash-consistent, and no response field says so.** It is the backend's
-#   atomic capture of the bytes on disk and **does not quiesce writers** (§5.C), so the result
+#   atomic capture of the bytes on disk and **does not quiesce writers** (the volume subsystem), so the result
 #   is what a power cut would leave: measured, every capture is a complete prefix, and a file
 #   just emptied by `O_TRUNC` and not yet rewritten can be captured **empty** — which is what
 #   crash-consistency should give, not corruption. **So do not read a snapshot as a restorable
 #   backup of a database inside the volume**: it is restorable exactly insofar as that
 #   application recovers from a crash. For app-consistency the caller **composes** — pause the
-#   holding sandbox, then snapshot (an exclusive volume only; `shared-rw` offers none, §5.C).
+#   holding sandbox, then snapshot (an exclusive volume only; `shared-rw` offers none, the volume subsystem).
 #   **Why no field annotates it**, so this is not re-proposed: it would be **constant** across
 #   every snapshot the engine takes (there is one recipe — `Snapshot`/`Clone` never quiesce), and
 #   in the one case that matters it would be **wrong** — the engine cannot know a caller paused
 #   first, since the pause is a separate request and no linkage is recorded, so the field would
 #   read "crash-consistent" on precisely the snapshots a careful caller took most care over.
-#   A field the engine must sometimes lie in is worse than prose. It also has no home in §6.1's
+#   A field the engine must sometimes lie in is worse than prose. It also has no home in the API contract's
 #   omission rule, which governs **facts that cannot be read** — consistency is not unreadable,
 #   it is not a fact about this volume at all. (The industry norm is the same: the block-layer
 #   precedent puts "crash-consistent" in the *operation's* description with no consistency member
@@ -307,38 +307,38 @@ GET    /v1/volumes/{id}/export       ?path=  (direct read)
 #   **No sandbox needed** — this is where "a volume is decoupled from any sandbox's lifecycle"
 #   is delivered: **seeding from nothing** (no sandbox exists yet) and **reading a volume after
 #   the last sandbox is gone** both go through here. `path` is relative to the volume root, and
-#   escaping it is unreachable (the seam's `OpenRoot` is root-confined, §5.C / D5.1).
+#   escaping it is unreachable (the seam's `OpenRoot` is root-confined, the volume subsystem / D5.1).
 #   A live-rw mount holds the volume → **409** (the write regime; a `paused` sandbox does
 #   **not** count as a live writer, so it is allowed then — the predicate and the critical
-#   section around the in-flight marker are in §5.C). Bytes stream; nothing is buffered whole.
+#   section around the in-flight marker are in the volume subsystem). Bytes stream; nothing is buffered whole.
 
 # Network (the declaration is bound at create; changing it goes through the resume boundary;
 # publish is the explicit ingress exception and can be hot-added)
 GET    /v1/sandboxes/{id}/network    → {state, egress:{default, default_hit_packet?, allow[], via[]},
                                         ingress:{publish[]}}
-#   Reads that declaration back (§5.D's four fields). **All three arrays are always present,
+#   Reads that declaration back (the network subsystem's four fields). **All three arrays are always present,
 #   written as `[]` when empty — never omitted, never null**: they are determined values in the
 #   record, whereas the omission rule for `death_cause` / `used_byte` governs **facts that
 #   cannot be read**, and a declaration has no unreadable case.
 #   Each `ingress.publish[]` item = {guest_port, proto, host_endpoint?}. **The `host_endpoint`
 #   key is absent when the engine holds no live placement** (not an empty string, not null): an
-#   endpoint is a product of the placement (§3.3), and a `paused` sandbox simply has no endpoint
+#   endpoint is a product of the placement (the placement model), and a `paused` sandbox simply has no endpoint
 #   to report. The reason is word for word the `death_cause` one — a falsy-but-present field
 #   would tempt a caller to use it as the criterion for "is this publish in effect"; **and that
 #   criterion is itself misplaced**: the rule set is installed atomically and whole with the
-#   placement (§2.4), there is no per-publish installation state, so per-item presence would
+#   placement (the network safety invariants), there is no per-publish installation state, so per-item presence would
 #   just restate the same bit N times. An endpoint changes with the placement and must not be
-#   cached as a stable identifier (§3.3).
+#   cached as a stable identifier (the placement model).
 #   Each `egress.allow[]` item and each `egress.via[].match[]` item carries **`hit_packet?`** — the
 #   packets this engine's rules for THAT entry have acted on since the current rule set was
-#   installed. It is the signal §5.D already treats as the only evidence a rule is live (network.md
+#   installed. It is the signal the network subsystem already treats as the only evidence a rule is live (network.md
 #   D4.1's silent pass-through, D4.2's `iifname` trap), and what it is FOR is **attribution**:
 #   without it, a first-cut allow-list that is inevitably incomplete gives a guest-side failure no
 #   way to be traced back to the declaration. `egress.default_hit_packet` is the same number for the
 #   rule `egress.default` itself generates — under `deny` the catch-all refusal, under `allow` the
 #   catch-all accept. **It counts the DECLARATION's own catch-all and nothing else**: the L0 floor
 #   and the internal deny-safe tier are deliberately not summed into it, since a floor refusal is
-#   liftable by no declaration (§2.4) and reporting it here would send a caller to widen an
+#   liftable by no declaration (the network safety invariants) and reporting it here would send a caller to widen an
 #   allow-list that can never help.
 #   **PACKETS, not connections, and not comparable across entry kinds.** An `allow[]` entry's number
 #   counts every packet its accepts admitted (one flow contributes many); a `via[]` entry's number
@@ -347,14 +347,14 @@ GET    /v1/sandboxes/{id}/network    → {state, egress:{default, default_hit_pa
 #   never as traffic accounting.
 #   **The key is absent when the engine holds no live placement** — the same rule as `host_endpoint`,
 #   and here it is stronger than a convention: pause **destroys** the rule-set table (a placement
-#   resource, §2.4), so a `paused` sandbox has no counter to report rather than a zero one. Absent
+#   resource, the network safety invariants), so a `paused` sandbox has no counter to report rather than a zero one. Absent
 #   also covers "could not be read" and "that rule was never rendered". **0 IS reported when it is
 #   read as 0** — a rule that matched nothing is a different fact from an absent key, and collapsing
-#   the two manufactures exactly the false zero §2.4's acceptance discipline refuses to accept.
+#   the two manufactures exactly the false zero the network safety invariants's acceptance discipline refuses to accept.
 #   ⚠ **Placement-local, so a 0 NEVER means "never hit".** It resets at every pause/resume, at a
 #   control-plane restart (`Adopt` re-installs the whole table atomically, recreating every counter
 #   at 0 — network.md D5 ㉒), **and at every `POST …/publish` on a running sandbox** (a hot-add
-#   re-renders and re-installs the whole table, §5.D). It is a liveness signal, not a durable
+#   re-renders and re-installs the whole table, the network subsystem). It is a liveness signal, not a durable
 #   metric, and **the implication runs one way only: non-zero proves the rule is live, zero proves
 #   nothing** — which is also why it does not reopen the `in_effect` refusal below.
 #   ⚠ **A `via[]` entry's number says MATCHED, never ALLOWED.** The steered flow is DNAT'd to a
@@ -362,12 +362,12 @@ GET    /v1/sandboxes/{id}/network    → {state, egress:{default, default_hit_pa
 #   engine neither runs nor sees into (network.md D4.3). A rising number alongside a failing guest
 #   connection is the normal appearance of a refusal by that external layer. **The second hop's own
 #   floor is not reported here at all**: it lives in one engine-level table covering every `via[]` in
-#   the deployment (§2.4 / D5 ㉔), so its counter is not attributable to any one sandbox.
+#   the deployment (the network safety invariants / D5 ㉔), so its counter is not attributable to any one sandbox.
 #   **`ingress.publish[]` carries no `hit_packet`**: its rules split across three hooks and one of
 #   them matches other sandboxes' egress, so a per-publish number is not cleanly attributable.
 #   **But the direction is not unobservable, and one number is reported: `ingress.closed_hit_packet`**,
 #   the ingress default-deny's drop counter — inbound traffic to this guest that no `publish[]` entry
-#   opened (§2.1 ③). It answers what per-entry attribution is not needed for and what nothing outside
+#   opened (the placement model ③). It answers what per-entry attribution is not needed for and what nothing outside
 #   the engine can answer at all: **whether anything was REFUSED toward this guest, as against nothing
 #   having arrived.** There is no vantage point outside the engine from which a dropped inbound packet
 #   is visible, so without it that half of the surface is dark rather than merely coarse. Three
@@ -382,7 +382,7 @@ GET    /v1/sandboxes/{id}/network    → {state, egress:{default, default_hit_pa
 #   the state to interpret it" (the same N+1-saving criterion as list carrying `death_cause`):
 #   **`running` ⟺ what is installed in the kernel IS the declaration in this response; not
 #   `running` ⟹ nothing is installed.**
-#   That biconditional is a mechanical consequence of §5.D + §3.4, not a new promise by this
+#   That biconditional is a mechanical consequence of the network subsystem + the resource-capacity model, not a new promise by this
 #   endpoint: the declaration is regenerated from the current record on every placement, and
 #   neither write point can make a `running` sandbox's record diverge from its live rule set
 #   (editing the three egress fields on a `running` sandbox is a 409; publish makes "persist"
@@ -391,8 +391,8 @@ GET    /v1/sandboxes/{id}/network    → {state, egress:{default, default_hit_pa
 #   is "is there a placement". **Hence no `in_effect` / `pending` / `applies_at` is added**: ①
 #   `in_effect` is a second spelling of `state` and **overreaches** — the engine can honestly
 #   report "I hold a placement", not "these rules really are in the kernel right now" (a
-#   `running` record whose isolation unit has died but has not yet been demoted by §4.3 is the
-#   counterexample); ② `pending` would require a second declaration in the record, while §6.2
+#   `running` record whose isolation unit has died but has not yet been demoted by the health and recovery model is the
+#   counterexample); ② `pending` would require a second declaration in the record, while the API error contract
 #   states plainly that a binding has "no pending/unresolved values", and the `paused` one is
 #   not pending — it IS the declaration; ③ `applies_at` is the vocabulary of a **write**
 #   response, the read surface has no such edit, and forcing one in would only make it a
@@ -405,25 +405,25 @@ GET    /v1/sandboxes/{id}/network    → {state, egress:{default, default_hit_pa
 #   and all three write points reject unknown keys, so without this a caller writing the GET
 #   response back verbatim would get a 400 for **echoing back keys the engine itself just
 #   emitted** — putting all the friction on that load-bearing path and pushing callers toward
-#   the road §5.D names as dangerous.
+#   the road the network subsystem names as dangerous.
 #   The rule is "**every read-only member the read surface emits**" rather than "`state`
 #   alone": unknown-key rejection **applies recursively**, so missing the `host_endpoint`
 #   nested inside `publish[]` — or a `hit_packet` nested inside an `allow[]` / `via[].match[]`
 #   item — would get a `running` sandbox's response body rejected one level down.
 #   **And that 400 must not be kept as an ordering guardrail either**: it appears only on the
-#   ordering §5.D names as dangerous (in the safe order `pause → GET → PATCH → resume` the GET
+#   ordering the network subsystem names as dangerous (in the safe order `pause → GET → PATCH → resume` the GET
 #   comes after the pause, so with no placement no endpoint is emitted), which would amount to
 #   reporting a concurrency-ordering requirement through a JSON schema error; that requirement
-#   is carried in §5.D's prose.
+#   is carried in the network subsystem's prose.
 #   **This is not a general exception to "reject unknown keys"**: only read-only members the
 #   read surface produces itself are on the list, and a misspelled `netwrok` (or a misspelled
 #   `host_endpiont` inside a publish item) is still a 400. If the read surface gains a
 #   read-only member later, the write surface gains a correspondingly ignored one.
-#   Non-GET → **405** (§6.2's general rule, not falling through to 404).
+#   Non-GET → **405** (the API error contract's general rule, not falling through to 404).
 POST   /v1/sandboxes/{id}/publish    {guest_port, proto}
 #                        → {guest_port, proto, host_endpoint?, applies_at}
 #   **Hot-addable on a running sandbox** (the opposite of the three egress fields, which go
-#   through the resume boundary; why those three properties endorse hot-add is in §5.D).
+#   through the resume boundary; why those three properties endorse hot-add is in the network subsystem).
 #   **Both `running` and `paused` are legal and both 200**, differing only in the effective
 #   point: `running` installs the rule on the spot (`applies_at: "now"`), while `paused` only
 #   persists it and the rule appears at the next placement (`applies_at: "next-resume"`, with
@@ -431,49 +431,49 @@ POST   /v1/sandboxes/{id}/publish    {guest_port, proto}
 #   **The response follows `GET …/network`'s omission rule** — a write surface and a read
 #   surface diverging on the same field is a contract defect. Why `paused` is legal, and why
 #   "refusing `paused` would instead drive callers onto the less safe whole `PATCH`", are in
-#   §5.D. `creating` / `destroyed` → 409 (the verb's source-state rule); an unknown ID → 404.
+#   the network subsystem. `creating` / `destroyed` → 409 (the verb's source-state rule); an unknown ID → 404.
 #   **Publishing the same `{guest_port, proto}` twice is idempotent**: return the existing item
 #   and do not append a second one (why deduplication can only happen at the declaration layer,
-#   and the consequences of missing it, are in §5.D). **No §4.1 event is emitted** (not a state
+#   and the consequences of missing it, are in the network subsystem). **No the lifecycle event is emitted** (not a state
 #   transition), and **`UpdatedAt` is not touched** (`retention` counts from that column).
 #   `proto` accepts tcp and **udp** — the mechanical reason `via[]` excludes UDP does not hold
-#   in the ingress direction (§6.2).
+#   in the ingress direction (the API error contract).
 #   **It persists**: what is hot-added is a rule, what is written down is a declaration, so this
 #   survives resume (a declaration is a Binding, and every placement reinstalls the rule set
-#   from the current record, §5.D). It is therefore the **second write point** on
+#   from the current record, the network subsystem). It is therefore the **second write point** on
 #   `ingress.publish[]` and interacts with PATCH's whole-for-whole replacement — the
 #   read-modify-write requirement and "there is no un-publish endpoint" are in the PATCH note
 #   above.
 #   **There is no authentication key, and that is not an oversight** — what the response
 #   delivers is a `host ip:port`, and whatever sits in front of it is outside the engine
-#   (reasoning in §5.D).
+#   (reasoning in the network subsystem).
 #   **The guest side is required to bind `0.0.0.0`**: a sandbox has its own netns and its own
 #   loopback, so a service bound to `127.0.0.1` cannot be published to — the contract is that
 #   **the connection is refused and fails fast** (rather than hanging until timeout), and
-#   **attributability is not promised** (why the cases are indistinguishable is in §5.D's first
+#   **attributability is not promised** (why the cases are indistinguishable is in the network subsystem's first
 #   of four user-visible semantics).
 ```
 
-> **`network?`'s schema is exactly §5.D's four fields, all in a vocabulary of IP / port /
+> **`network?`'s schema is exactly the network subsystem's four fields, all in a vocabulary of IP / port /
 > protocol only** — `egress.default` (`deny|allow`, **required**) · `egress.allow[]` ·
 > `egress.via[]` · `ingress.publish[]`. The tuple in all three places is `{cidr, port, proto}`,
 > with `proto` **always required** and `cidr` accepting **IP literals only**. **Both `cidr` and
-> `port` may be omitted, and omission means wildcard** (any destination / any port, §5.D),
+> `port` may be omitted, and omission means wildcard** (any destination / any port, the network subsystem),
 > while **the read surface renders a wildcard as "omitted" rather than `"port": 0`** — that is
 > what "the read surface's output must be a legal write body" (the PATCH note above) requires
-> concretely on this field. The reasons behind the required fields and the narrowing are in §5.D
+> concretely on this field. The reasons behind the required fields and the narrowing are in the network subsystem
 > (the mechanical side in network.md D2 / D3.1), and the **status codes** for violating them
-> belong to §6.2's list. **There is no "posture" enumeration**: a posture is a combination of
-> these four fields' values (§5.D).
-> The declaration is a Binding (§3.4), so like the resource ceilings it is **editable only in
+> belong to the API error contract's list. **There is no "posture" enumeration**: a posture is a combination of
+> these four fields' values (the network subsystem).
+> The declaration is a Binding (the resource-capacity model), so like the resource ceilings it is **editable only in
 > `paused`**, through `PATCH /v1/sandboxes/{id}`, with `applies_at: "next-resume"`; **publish is
 > the sole exception** and has its own hot-add endpoint (above).
 
 > **Why the files bypass uses REST rather than RPC: its entire point is streaming.** A large
 > file should not become one protobuf message, nor be resident whole at either end — the RPC
 > path was measured to occupy about 37× more guest memory (transport D4.4), and a sandbox
-> exceeding its RAM cap is terminated (§3.4), so this is a security rather than an efficiency
-> trade-off. **The threshold is the caller's to set.** §6.2's constraints are unchanged: the
+> exceeding its RAM cap is terminated (the resource-capacity model), so this is a security rather than an efficiency
+> trade-off. **The threshold is the caller's to set.** the API error contract's constraints are unchanged: the
 > sandbox is still addressed by an opaque ID, and the guest endpoint (the placement) never
 > appears on the wire.
 
@@ -484,7 +484,7 @@ from `transport.proto` via `buf` and are reverse-proxied through `orchestrator` 
 (D5.1). **Sandbox addressing travels in an out-of-band request header, `Engine-Sandbox-Id`**:
 the proto itself addresses only by guest-native pid (D4.6 vocabulary boundary), and the reverse
 proxy strips that header and resolves the current endpoint inside the engine (a placement never
-leaks outward, §6.2 / D5.4). The REST lines below are **shape illustrations only** (showing which
+leaks outward, the API error contract / D5.4). The REST lines below are **shape illustrations only** (showing which
 operations exist and how pid/path addressing works) and **are not implementable authoritative
 endpoints** — for the real wire, read the proto:
 
@@ -506,14 +506,14 @@ endpoints** — for the real wire, read the proto:
 (illustrative)  fs?path=                                                       (write)
 (illustrative)  fs/list                       {path, depth}
 # Agent session semantics do not enter the engine API — they are an addition made by an adapter
-# outside the engine on top of process/fs (§5.E / D1.2)
+# outside the engine on top of process/fs (the transport subsystem / D1.2)
 ```
 
 ### 6.2 Design constraints
 
 - **ID addressing**: outwardly only the opaque IDs of sandbox / template / volume and process
   pids are recognized; host paths and placements are never exposed. The same requirement is
-  carried through to the Overlay artifact inside the engine (§3.1.1).
+  carried through to the Overlay artifact inside the engine (the Overlay model).
 - **Bindings are injected at create, and rebinding goes through the same injection point**:
   network and Volume mounts are bound once at create (there is no late binding); but the
   **flow shape** of **injecting through the control-plane channel** is not short-circuited, so
@@ -522,14 +522,14 @@ endpoints** — for the real wire, read the proto:
   binding at every instant** — `PATCH` only replaces one complete binding with another
   (fields not given are unchanged, and there are **no "pending/unresolved" values**), with
   materialization still happening at placement time through the same control-plane injection
-  point. This is **rebinding**, not **late binding** in §1.4's warm-pool sense (late binding =
+  point. This is **rebinding**, not **late binding** in the engine boundary's warm-pool sense (late binding =
   the sandbox exists first while its binding is undetermined), so it does not relax this
   constraint. **Guest identity is not among these**: guest root is the default, the engine does
-  not model guest users, and neither create nor `Start` has a run-as parameter (§2.2 / §3.2.1).
+  not model guest users, and neither create nor `Start` has a run-as parameter (the guest identity boundary / the transport identity rules).
 - **Resource-ceiling fields are conditionally required per axis**: when an axis is metered by
   the node budget, create must give a value on that axis (`0 = no ceiling` is legal only on an
   unmetered axis); missing it is a refusal (400), which is a different thing from "the node is
-  full" (507). This is **one of two** field semantics in §6.1 that depend on deployment
+  full" (507). This is **one of two** field semantics in the API contract that depend on deployment
   configuration (the other is the network declaration's **deployment-natured 400** below:
   `via[]` meeting a deployment that gave no second-hop uid), so both are written out explicitly
   here rather than left to the implementation.
@@ -540,7 +540,7 @@ endpoints** — for the real wire, read the proto:
   illegal source state (changing a cap on a `running` sandbox, resuming a non-`paused` one) →
   **409**; an unknown sandbox / template ID → **404**.
   **Three further general-rule codes**: a write operation while a pause is draining (an
-  fs-mutating RPC / a files upload) → **503** (the §4.2 barrier: refuse rather than queue, since
+  fs-mutating RPC / a files upload) → **503** (the pause/resume lifecycle barrier: refuse rather than queue, since
   queueing would starve the drain; retryable); a files upload exceeding the engine's
   single-request ceiling (8 GiB) → **413**; a wrong method on any collection/object route →
   **405**.
@@ -549,10 +549,10 @@ endpoints** — for the real wire, read the proto:
   **The Volume's four 409s mean different things and must be distinguishable**: ① deleting a
   volume that has a live mount row (referenced, same as the Template one); ② deleting **an
   object blocked by a live reference row** — which has **two sides**, the volume side (deleting
-  a source that has live child volumes, lineage RESTRICT, §5.C snapshots) and the sandbox side
+  a source that has live child volumes, lineage RESTRICT, the volume subsystem snapshots) and the sandbox side
   (deleting a sandbox that has a live mount row, `mounts.sandbox` RESTRICT); ③ an attach
   colliding with an exclusive lease (a retryable state conflict); ④ a direct-access mutation
-  while a live-rw mount exists (§5.C write regime).
+  while a live-rw mount exists (the volume subsystem write regime).
   **The four count "outcome categories", not sentinels**: ②④ each subdivide internally, because
   **the same category can be triggered from two sides and the two sides must name different
   objects** — ②'s two sides are two different FK paths (the volume side's lineage RESTRICT vs
@@ -575,11 +575,11 @@ endpoints** — for the real wire, read the proto:
   RESTRICT triggers, and were they to fall into the "return success even when absent" branch, a
   deletion that failed its guard would be indistinguishable from one that succeeded (an external
   cautionary example is in [`../internals/volume.md`](../internals/volume.md) D9).
-  **The network declaration's nine classes of 400 + one deployment 400** (§5.D. **All nine
+  **The network declaration's nine classes of 400 + one deployment 400** (the network subsystem. **All nine
   declaration 400s** are "decidable without reading another row, and no retry can make it
   legal", the same criterion as the mount binding's; **the first class is evaluated only when
   the `network` object is present — omitting the whole thing is legal and is normalized to
-  `{deny, [], [], []}` and persisted**, §5.D):
+  `{deny, [], [], []}` and persisted**, the network subsystem):
   `egress.default` missing · a domain name given where a `cidr` belongs · a tuple missing
   `proto` · `via[].match` matching UDP · **`via[].endpoint` not host-local** ·
   **`via[].endpoint` falling inside one of the L0 floor's daddr list items** (that is,
@@ -603,36 +603,36 @@ endpoints** — for the real wire, read the proto:
   are the same kind of semantics ("the shape does not stand up") with the same kind of remedy
   (supply a structurally required member), and splitting them would be counting error values in
   the implementation. **What is NOT a well-formedness failure is "the tuple did not write
-  `port`"** — that is **legal and means any port** (§5.D): omission-as-wildcard is a declared
+  `port`"** — that is **legal and means any port** (the network subsystem): omission-as-wildcard is a declared
   semantics rather than a missing member, whereas an empty `match[]` steers no traffic under any
   reading.
   Of the first six, classes five and six clamp the endpoint to "host-local, and not inside one of
   the floor's **daddr list items**" (**"host-local" necessarily falls inside the floor's "any
   address of the host itself" item, and that is not a contradiction**: the hole is opened by
-  ordering and the floor is not narrowed — the boundary passage in §2.4). The two are two faces of
+  ordering and the floor is not narrowed — the boundary passage in the network safety invariants). The two are two faces of
   one criterion: the second hop's rules are held by the kernel behind the same host rule set, and
   the kernel can only hold local processes down — accepting a remote endpoint would stand the floor
-  on that process's own self-discipline (a confused deputy, exactly what §2.4's second obligation
+  on that process's own self-discipline (a confused deputy, exactly what the network safety invariants's second obligation
   refuses); while an endpoint falling inside the floor is a direct consequence of "a declaration
   cannot lift the floor", making every matching flow **permanently fail-closed**. Both are
   **declarations provably unable to ever work**, so they are refused on the spot at the write point
   (reasoning in network.md D4.2 / D4.3). **The sixth class reads only the floor's daddr list items,
   not the "host itself" item**: the latter is **a ct-state rule rather than an address enumeration**,
   and counting it into this decision would let the two classes of 400 together clamp `via[]` down to
-  nothing. That tension is resolved by §5.D's rule generator with a **narrow allowance** — sitting
+  nothing. That tension is resolved by the network subsystem's rule generator with a **narrow allowance** — sitting
   **above the floor's drop in the same chain**, opening the hole by **ordering** and **not narrowing
-  the floor** (the §2.4 boundary passage; the shape and the counterexample for each omission are in
+  the floor** (the network safety invariants boundary passage; the shape and the counterexample for each omission are in
   network.md D5 ⑩) — and is not carried by these two classes of 400.
   **The uid used to hold the second hop down is an input handed to the engine at deployment time,
-  not a declaration field** (§5.D).
+  not a declaration field** (the network subsystem).
 
   **One more network 400 does not belong to the list above: it is a property of the deployment, not
   of the declaration text** — **a declaration carrying `via[]` meeting a deployment that gave no
   second-hop uid is refused (400)**. Every class above is decidable by reading the declaration text
   alone, whereas this one refuses even a declaration that is **legal word for word**.
   **Why it must be refused**: the second hop is held down by an `output` table narrowed by the
-  deployment-time uid (§2.4 / network.md D5 ㉔), and with no uid there is no such table and therefore
-  **no enforcement of §2.4's second invariant**. Accepting it would persist a declaration whose own
+  deployment-time uid (the network safety invariants / network.md D5 ㉔), and with no uid there is no such table and therefore
+  **no enforcement of the network safety invariants's second invariant**. Accepting it would persist a declaration whose own
   invariant the engine cannot deliver, leaving an unheld confused deputy on the host — and **every
   assertion about the first hop is completely insensitive to it** (measured: the second hop counts 0
   on `forward`, and the first hop's floor does not evaluate a single one of its packets). The
@@ -669,14 +669,14 @@ endpoints** — for the real wire, read the proto:
   ① **Entries inside the sibling CIDR** — the generator emits the declaration's allowances on
   **both `input` and `forward`** (network.md D4.2), so an `allow[]` falling inside the sibling CIDR
   is **not a dead rule**: this sandbox's own `/30` gateway is inside that CIDR, and that gateway is
-  exactly the host-local resolver address §5.D requires the caller to declare themselves (the only
+  exactly the host-local resolver address the network subsystem requires the caller to declare themselves (the only
   stably usable one, D5 ⑦) — that is, **this is the sanctioned declaration path, not an escapee**.
   The half that reaches a sibling's **own** gateway is caught by a sibling drop on the `input` side
   (also in D4.2), which is the responsibility of rule ordering, not of this class of 400. **A
   separate, independent reason**: a 400 mentioning the sibling CIDR would put the sandbox address
   space on the wire, which this section's ID addressing explicitly excludes. ② **Entries naming a
   host-local address** — deciding that would require enumerating host addresses, whereas the floor's
-  "any address of the host itself" is **a pure ct-state rule that is never computed** (§2.4 / D5 ⑧);
+  "any address of the host itself" is **a pure ct-state rule that is never computed** (the network safety invariants / D5 ⑧);
   enumerating it would invite back the class of problem D8 has settled, would fail "no retry can
   make it legal" (the host gaining an address afterwards flips it), and would also make **legitimate
   private-network supernets undeclarable**. ③ **Partial overlap** — `10.0.0.0/8` necessarily
@@ -695,14 +695,14 @@ endpoints** — for the real wire, read the proto:
   on the v4 floor (the measured unwrapping behavior and the step-by-step derivation are in
   network.md D5 ⑲, **not duplicated here**). **The API accepting it while the wire silently refuses
   it** is exactly the class of diagnostic mismatch D4.3 describes. So such literals are refused
-  **before any containment decision**, rather than "normalized and then compared": §5.D says a
+  **before any containment decision**, rather than "normalized and then compared": the network subsystem says a
   declaration accepts IP literals only, `::ffff:192.168.1.1` is **a second spelling** of an address
   that already has one, and accepting it would mean the persisted Binding differs from the caller's
   text, while the two spellings compare unequal on every subsequent read-modify-write.
   **At the same time** the predicate still calls `.Unmap()` internally, so that if someone withdraws
   this refusal later, the containment decision does not silently become family-blind.
   **A publish bound to loopback is not on this list** — that is not an illegal request but a legal
-  request under which the guest-side connection is refused (§5.D).
+  request under which the guest-side connection is refused (the network subsystem).
   **`proto: udp` in `ingress.publish[]` is legal and not a 400**: `via[]` excludes UDP because the
   original destination cannot be recovered (network.md D3.2), and an ingress rule that DNATs to a
   fixed guest port needs no such mechanism, so that objection does not apply.
@@ -721,10 +721,10 @@ endpoints** — for the real wire, read the proto:
   `size` missing on a metered disk axis (in all three of create / snapshot / clone) → **400**; a
   volume cap lowered below current usage → **400**; a mount binding self-contradictory internally (a
   duplicate dest within one sandbox / the same volume twice / volumes nested in each other) →
-  **400** (§5.C: decidable without reading another row, and no retry can make it legal); the backend
+  **400** (the volume subsystem: decidable without reading another row, and no retry can make it legal); the backend
   not supporting snapshot/clone → **400** (the result of a capability query, not silent, and it must
   be asked before a byte is moved).
-  A **Template lineage deeper than the rootfs provider can mount → 400** (§5.B / rootfs-overlay
+  A **Template lineage deeper than the rootfs provider can mount → 400** (the rootfs subsystem / rootfs-overlay
   D5.1 ⑩), on create and on Promote alike: no retry or state change makes it mountable, and the
   remedy is a shallower parent. **On Promote the check comes before the quiesce**, with the capacity
   gate — the layer bytes are frozen and the row inserted before anything mounts the result, so an
@@ -734,7 +734,7 @@ endpoints** — for the real wire, read the proto:
   ceiling is not an error — it truncates to the ceiling and is still 200); non-GET → **405**;
   **410 = `after` is below the retained window** (trimmed away), carrying `{earliest, latest}` so the
   caller restarts from `earliest`; **`after=0` is never a 410**, and the whole path is reachable only
-  once a retention window is configured (reasoning in §6.1).
+  once a retention window is configured (reasoning in the API contract).
 - **store / runtime provider go through interfaces**: swapping a backend or adding a provider means
-  registering a new implementation, not changing the model above it (§1.3 additive only; a provider
-  is always an abstract contract, see §1.1 / §5.A).
+  registering a new implementation, not changing the model above it (the extension rule additive only; a provider
+  is always an abstract contract, see the architecture boundary / the runtime subsystem).

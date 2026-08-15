@@ -2,7 +2,7 @@
 
 // L2 transport round-trip against the REAL sandboxd running under real runsc:
 // Start streams stdout, Write+Read round-trips, and PID 1 restarts the transport
-// child in place (D5.3). Requires root.
+// child in place. Requires root.
 //
 //	sudo env PATH=$PATH GOTOOLCHAIN=local GOFLAGS=-mod=mod GOSUMDB=off HOME=$HOME \
 //	  go test -tags substrate -v -count=1 -timeout 180s ./test/ -run Transport
@@ -129,7 +129,7 @@ func TestTransportWriteReadRoundTrip(t *testing.T) {
 	}
 }
 
-// PID 1 restarts the transport child in place (D5.3): kill the transport child
+// PID 1 restarts the transport child in place: kill the transport child
 // (found via the pidfile — its pid is not fixed), then Health must recover on
 // the SAME endpoint (not a resume, no new IP).
 func TestTransportPID1RestartsChild(t *testing.T) {

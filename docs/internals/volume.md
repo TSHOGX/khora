@@ -23,11 +23,11 @@
 
 ## D0. The conclusion: one backend seam, two materialization arms
 
-A Volume has only a few more properties than §5.B's Overlay, and each corresponds to one contract (whose
-text is in §5.C) and one falsification. **The shape that governs the whole document**: a Volume is
+A Volume has only a few more properties than the rootfs subsystem's Overlay, and each corresponds to one contract (whose
+text is in the volume subsystem) and one falsification. **The shape that governs the whole document**: a Volume is
 materialized through a pluggable **backend seam**, and the seam yields **exactly one thing — a host mount
 point**; runsc writes it into the OCI mount spec and the gofer proxies it into the guest, entirely
-isomorphic to §5.B's merged rootfs. The backend has two arms:
+isomorphic to the rootfs subsystem's merged rootfs. The backend has two arms:
 
 | Arm | Materialization | Who delivers POSIX | Measured |
 | --- | --- | --- | --- |
@@ -44,21 +44,21 @@ enough to establish that; the write path's behaviour is **that backend's own acc
 than a premise of the core model. Volume's new properties relative to Overlay, with their contracts and
 falsifications:
 
-| New property | Contract (detail in §5.C) | Alternatives ruled out |
+| New property | Contract (detail in the volume subsystem) | Alternatives ruled out |
 | --- | --- | --- |
 | **Several backends** (local / a remote object store / a network FS) | The backend seam yields a host mount point (D1/D2) | FUSE-for-everything (D1) · moving a userspace segment engine into the core (D6) |
 | **Several write paths** (mounts + the direct API) | A single write regime (D5) | A reverse proxy for direct writes (D5) |
 | **Concurrently mountable by several sandboxes** | Cross-sandbox rw coherence is undefined (D4) | — (it is inherently so) |
 | **Independent snapshots / clones** | crash-consistent by default, a per-backend capability; producing **an ordinary writable volume + a `parent` lineage**, with the cap necessarily declared explicitly (D6/D6.1a/D7.3) | A two-phase checkpoint (D6) · a userspace segment engine (D6) · a read-only snapshot type (D6.1a) · inheriting the source's cap (D6.1a) |
-| **Exclusivity** | The lease = §4.3's mount row (D3/D4) | Dual reclamation by heartbeat (D4) |
-| **A capacity cap** | A btrfs subvolume + squota, a primitive shared across §5.B/§5.C (D7) | Project quota (D7; the substrate does not support it) |
+| **Exclusivity** | The lease = the health and recovery model's mount row (D3/D4) | Dual reclamation by heartbeat (D4) |
+| **A capacity cap** | A btrfs subvolume + squota, a primitive shared across the rootfs subsystem/the volume subsystem (D7) | Project quota (D7; the substrate does not support it) |
 
 ---
 
 ## D1. Materialization: one unified "host mount point" abstraction, local = a directory / remote = host-FUSE
 
 A single-node local backend is just a directory on the host, and its path into the guest is **entirely
-isomorphic** to §5.B's merged rootfs — written into runsc's OCI mount spec and proxied by the gofer under
+isomorphic** to the rootfs subsystem's merged rootfs — written into runsc's OCI mount spec and proxied by the gofer under
 `--overlay2=none --file-access=shared`. exclusive / shared-ro / shared-rw are all merely "the same host
 directory entering one to N guests", with **no special mechanism**. The measured coverage (both halves: a
 single mount and **concurrent** multiple mounts):
@@ -78,7 +78,7 @@ single mount and **concurrent** multiple mounts):
     and the guest never runs. Classified, that is a **control-plane failure** rather than a data-plane
     `EROFS` — better than silently succeeding, but it is **a different** failure mode: a cold start turns a
     configuration error that "should have been refused with a 4xx at admission" into an opaque mount
-    failure. So ro's directionality must be written into §5.C and cannot be covered in both directions by
+    failure. So ro's directionality must be written into the volume subsystem and cannot be covered in both directions by
     the single sentence "ro is enforced at runtime".
   - It also rules out a possible implementation-path dependency: a read-only snapshot can be thawed with
     `btrfs property set … ro false`, after which client writes succeed and **the cap survives the ro→rw
@@ -111,7 +111,7 @@ immovable positional constraint:
 
 So FUSE is not a question of "should it enter the engine" but of "**which backend implementation is it
 sealed inside**": it is a remote backend's internal materialization means, identical above the seam to the
-local backend's ordinary directory (§3.1.1's "ID addressing applies internally too": the core knows only
+local backend's ordinary directory (the Overlay model's "ID addressing applies internally too": the core knows only
 "a Volume is materialized by a backend into one host mount point" and not whether a directory or a FUSE
 mount point is behind it).
 
@@ -130,7 +130,7 @@ could all be done uniformly in the FUSE layer. **Not adopted**, on the cost crit
 - **Uniform caching / encryption / quotas / auditing are distributed concerns**: encryption is necessary
   only when data leaves the trust boundary (into S3 / a shared cache), and uniform caching compensates for
   "an object store has no POSIX cache". On a single trusted node, quotas have btrfs squota (D7) and auditing
-  has §4.1's event stream, and neither needs to be crowded into a FUSE layer.
+  has the lifecycle event model's event stream, and neither needs to be crowded into a FUSE layer.
 - **The conclusion**: a complete FUSE `Session` interface is **reserved for "synthesizing" backends alone**
   (those that synthesize a non-FS backend into an FS); a local backend (a real host FS) simply does not need
   it. So the engine's seam can be narrow (D2) — the unification happens at the seam (both yield a host mount
@@ -141,14 +141,14 @@ could all be done uniformly in the FUSE layer. **Not adopted**, on the cost crit
 ## D2. The backend seam's shape: a narrow interface yielding a host mount point
 
 Volume is its own subsystem with its own seam `volume.Backend`, and it is **a differently shaped,
-separately registered interface from §5.B's `rootfs.Provider`**: §5.B materializes **layered composition**
+separately registered interface from the rootfs subsystem's `rootfs.Provider`**: the rootfs subsystem materializes **layered composition**
 (resolving the multi-lowerdir lower stack along the Template lineage + a writable upper/work, composed into
-a merged view by kernel overlayfs, with Promote freezing supported); §5.C materializes **one self-sufficient
+a merged view by kernel overlayfs, with Promote freezing supported); the volume subsystem materializes **one self-sufficient
 independent storage unit** (bound directly, with no composition, no lower stack, and no lineage). The two
 share only the underlying substrate primitives (a btrfs subvolume + quotas + reflink/snapshot, see D7) and
 do not share one materialization interface.
 
-The seam follows the convention already established by §5.A's `runtime.Provider` and §5.B's
+The seam follows the convention already established by the runtime subsystem's `runtime.Provider` and the rootfs subsystem's
 `rootfs.Provider`: **IDs cross the seam, host paths stay inside it; policy + handles, with no host
 primitive leaking**.
 
@@ -168,17 +168,17 @@ The core actions:
   `Merged.MergedPath`), and `Volume` — the latter is not decoration, since otherwise `Release` could not
   resolve which volume this materialization belongs to.
   - **The handle carries no backend-private handle field**, which is the same judgment as `Capabilities`
-    reserving no `DirectIO` bit below (§1.3 forbids reservations): no backend needs it today, and the local
+    reserving no `DirectIO` bit below (the extension rule forbids reservations): no backend needs it today, and the local
     arm materializes into a path and holds nothing else. **The condition for adding it back is precise**:
     once the first remote/synthesizing backend exists and needs to start/stop a per-materialization process,
-    then an unexported field + `SetHandle`/`Handle` is added additively per §1.3 — `runtime.Placement.handle`
+    then an unexported field + `SetHandle`/`Handle` is added additively per the extension rule — `runtime.Placement.handle`
     (which has a live consumer) is the precedent to copy **at that point**, not a precedent already followed
     here. **And it must then land on the handle rather than in a side table**: an in-process side table keyed
     by `volumeID` is precisely the "in-process handle registry" D3.1 rejects.
   - **It does not take `accessMode`**: that changes nothing the backend does (the host directory is identical
     under all three modes) and its cardinality is wrong (`AccessMode` is per mount row while `Materialize` is
-    per volume), so it rides `MountSource.ReadOnly` — the normative statement of both belongs to §5.C.
-  - **The contract is create-if-absent** rather than open-only (the reason is in §5.C: runsc fails hard when
+    per volume), so it rides `MountSource.ReadOnly`; the volume subsystem owns both constraints.
+  - **The contract is create-if-absent** rather than open-only (the reason is in the volume subsystem: runsc fails hard when
     the source is missing, and open-only would make a wrongly swept sandbox unable to resume forever).
     **Concurrency must be written into the contract** — the entire shared fan-out design depends on "the same
     volume being materialized several times concurrently" holding (verified).
@@ -189,20 +189,20 @@ The core actions:
   the local arm's no-op is a correct implementation of an explicit promise rather than a bad smell (as with
   `runtime.Stop`); the bad smell would be "a no-op or a detach", one name with two undefined contracts.
 - `AdoptMaterialized(volumeID) → Materialized` — re-recognize a still-mounted mount point after a crash
-  (§4.4-A, the twin of `AdoptMerged`).
+  (startup reconciliation, the twin of `AdoptMerged`).
 - `CreateVolume(ctx, volumeID, capBytes)` / `SetCapacity(ctx, volumeID, capBytes)` — **capacity belongs to
   creation plus a method of its own**, not attached to the placement entry point. `rootfs.Provider` needs a
   `CapUnchanged` sentinel because the cap's intent rides `OpenOverlay` (a call already doing another job);
   here **the call itself is the intent**, so no such sentinel is needed. And this is the only correct
   placement: **a volume's cap must be editable even when it is mounted nowhere**, which the placement entry
   point cannot express — and `DestroyVolume` had no counterpart for creation anyway.
-- `DestroyVolume(volumeID)` — reclaim that Volume's backend bytes (terminal). **Idempotent** (§4.4-A reaches
+- `DestroyVolume(volumeID)` — reclaim that Volume's backend bytes (terminal). **Idempotent** (startup reconciliation reaches
   it by several paths).
-- `UncappedBytes(ctx) → int64` — the bytes this backend holds that are covered by no declared cap (the §5.C
-  half of §3.4's second term, in the same shape as §5.B's). **This is a real gap rather than decoration**:
+- `UncappedBytes(ctx) → int64` — the bytes this backend holds that are covered by no declared cap (the volume subsystem
+  half of the resource-capacity model's second term, in the same shape as the rootfs subsystem's). **This is a real gap rather than decoration**:
   without it, every uncapped volume's bytes are invisible to the admission gate.
 - `Usage(ctx, volumeID) → (used, limit int64)` — one volume's backend-reported usage. **It is forced by the
-  volume cap's write point rather than chosen**: §5.C requires refusing "a lowering below current usage" with
+  volume cap's write point rather than chosen**: the volume subsystem requires refusing "a lowering below current usage" with
   a **strict inequality** as the criterion, so the engine must be able to read current usage; `inspect`
   reporting usage goes through it too.
   - **`limit` may be used only for diagnostics and never for validation, and the authority is always the
@@ -225,8 +225,8 @@ The core actions:
     of a second call, and the load-bearing window that follows are all in D7.3.
   - **Both can be the same backend code path** (measured: `property set ro false` succeeds on this substrate,
     a `-r` snapshot can have its cap set while still read-only, and the cap survives the ro→rw transition
-    intact). The difference is only §5.C's semantic annotation, not the mechanism.
-- `OpenRoot(ctx, volumeID) → Root` — the direct content accessor, **usable while unmounted** (§5.C's promise,
+    intact). The difference is only the volume subsystem's semantic annotation, not the mechanism.
+- `OpenRoot(ctx, volumeID) → Root` — the direct content accessor, **usable while unmounted** (the volume subsystem's promise,
   shaped in D5.1). `Root` is a **root-confined** file access handle (`Stat` / `List` / `ReadAt` / `WriteAt` /
   `Mkdir` / `Remove` / `Rename` / `Close`) whose paths are **relative to that volume's root**, with escaping
   unreachable. The local arm = `openat2(RESOLVE_IN_ROOT)`.
@@ -271,17 +271,17 @@ The core actions:
   recorded **at the moment of deletion** and has not yet reclaimed. **That it lands on the backend rather than
   the control plane is a shape argument rather than a convenience**: a leaked row is **that substrate's residue,
   not engine state** — a backend with no quota rows returns empty and the whole path costs it nothing, so the
-  caller needs no capability branch (§1.3).
+  caller needs no capability branch (the extension rule).
 - `Capabilities() → {Snapshot, Clone, Quota}` — **a per-backend capability query** (D6): local (btrfs) reports
   snapshot/clone/quota supported; a plain directory or some remote backends may not support them, and a call is
   then a 400 rather than silent. **The members must be `bool`**: a `map[string]string` feature table would carry
   mechanism names across the seam **as values**, where no structural guard scanning identifiers can see them.
-  **Only capabilities with a consumer are listed** (§1.3 forbids reservations): `Quota` has one (§3.4's "if the
+  **Only capabilities with a consumer are listed** (the extension rule forbids reservations): `Quota` has one (the resource-capacity model's "if the
   cap cannot be delivered, refuse the placement"), whereas a bit like `DirectIO` does not — it would stay on the
   contract surface forever in the name of "we might need it later".
   **The scope is per backend**, not per volume.
 
-**The structural guard**: `seam_test.go`'s twin keeps §5.A's host-primitive list verbatim and adds `reflink` /
+**The structural guard**: `seam_test.go`'s twin keeps the runtime subsystem's host-primitive list verbatim and adds `reflink` /
 `fuse` / `loopdev` / `mountopt`; the sole exemption is `SourcePath` on the handle (following `MergedPath`'s
 precedent, with the reason written into the exemption table alongside it).
 
@@ -289,21 +289,21 @@ The mechanism for mounting into the guest: in `coldStart` the mediator assembles
 `LaunchSpec.Mounts []MountSource{SourcePath, Dest, ReadOnly}` (a contract member peer to `RootfsSource`), and
 `local_runsc` appends each `MountSource` in `buildOCISpec` as one `ociMount{Type:"bind", Source, Destination,
 Options}` — exactly the shape that was measured. A Volume's **identity** above the seam is always an ID; the host
-directory is resolved inside the backend and surfaces only as an opaque `SourcePath` (§6.2: outwardly only Volume
+directory is resolved inside the backend and surfaces only as an opaque `SourcePath` (the API error contract: outwardly only Volume
 IDs are recognized and no host path is exposed).
 
 ---
 
 ## D3. The mount table = a first-class store object, reusing the existing object model (not rebuilt)
 
-The mount relation is a Binding (§3.4): "which are mounted, where, and under what policy" is recorded in the
+The mount relation is a Binding (the resource-capacity model): "which are mounted, where, and under what policy" is recorded in the
 control-plane mount table, and resume remounts from the table. Every row of the mount table is a **first-class
-persistent object** (§4.3's mount row), and it is simply **`sandboxes.template`'s reference doubled**:
+persistent object** (the health and recovery model's mount row), and it is simply **`sandboxes.template`'s reference doubled**:
 
 - **The structure = bidirectional FK RESTRICT**: one mount row `Mount{Sandbox, Volume, Path, Access}`, with the
   `sandbox` and `volume` columns each `REFERENCES … ON DELETE RESTRICT`. That alone gives both invariants "a
   volume with a live mount row cannot be deleted" and "a sandbox with a live mount row cannot be deleted" —
-  SQLite through FKs, Memory through a Go scan, one set of assertions (§4.3's seam).
+  SQLite through FKs, Memory through a Go scan, one set of assertions (the health and recovery model's seam).
   - **Be clear about which half is "free"** (measured): the **detection predicate** is reusable as is — the
     existing FK-violation check is table-agnostic and column-agnostic string matching, true for **both
     directions** of every new FK path (a missing-parent insert / a RESTRICT delete, six directions across three
@@ -315,7 +315,7 @@ persistent object** (§4.3's mount row), and it is simply **`sandboxes.template`
     `ErrSandboxHasMounts` (each backend has its own branch, and the contract case pins the reason — "an
     untranslated driver error becomes a 500" — into its failure message); while **which sentinel maps to which
     outcome category, and the counting rule that what is counted is the kinds of semantics a caller must tell
-    apart rather than the number of error values, belong to §6.2** — this document claims only "do not reuse
+    apart rather than the number of error values, belong to the API error contract** — this document claims only "do not reuse
     one". The Memory backend does not even get the predicate free: it has no FK engine, and the reference scans
     on the sandbox side and the volume side are hand-written — "free" covers only the SQLite half, and that is
     its boundary.
@@ -331,7 +331,7 @@ persistent object** (§4.3's mount row), and it is simply **`sandboxes.template`
     contract test guarding it rather than resting on the presence of a DSN string.
 - **Existence is the state, refcount is derived, and there is no outbox event**: a mount row has no state column
   and no count column; "is this volume exclusively held" is derived from a mount row's existence plus its access
-  (no materialized count). A mount row is not a §4.1 lifecycle transition, so creating/deleting one **emits no
+  (no materialized count). A mount row is not a lifecycle transition, so creating/deleting one **emits no
   event** (as with Template CRUD, unlike a sandbox transition).
 - **bytes-first, inside the transition lock**: mount rows are written inside the **per-sandbox transition lock**
   along the create/resume cold-start chain, and a failure is rolled back by `unwind`.
@@ -340,7 +340,7 @@ persistent object** (§4.3's mount row), and it is simply **`sandboxes.template`
   when deleting the sandbox record; and an unwind branch that discards that error leaves **an undeletable zombie
   sandbox record**.
 
-**The hook points in the mediator** (verbs belong to §4, mechanisms to the §5 backend; subsystems do not call
+**The hook points in the mediator** (verbs belong to the lifecycle mediator, mechanisms to the subsystem backend; subsystems do not call
 each other):
 
 | Hook | Action |
@@ -350,19 +350,19 @@ each other):
 | `resumeLocked` | **Read** the mount table back from the store (mount rows are durable across pause) and re-`Materialize` — the same reasoning as `resolveLower` re-resolving lineage each time: the volume is the same real thing, taking a new host materialization |
 | `pauseLocked` | After the CAS: `Backend.Release` each volume (**the mount rows are kept** and the lease is not released), symmetric to the Overlay's "zero-capture" |
 | `destroyLocked` | Unmount live volumes → **delete the mount rows first, then `DeleteSandbox`** (otherwise the `mounts.sandbox` FK blocks the sandbox delete); this is the lease release point |
-| `RebindVolumes` (the `volumes` key of `PATCH /v1/sandboxes/{id}`) | Replacing the whole mount binding: one `store.ReplaceMounts` deleting the old rows and inserting the new ones **in the same commit**, with the new rows going through **the same lease predicate**; on refusal the old binding is left exactly as it was (the atomicity is a store contract stated in §5.C) |
+| `RebindVolumes` (the `volumes` key of `PATCH /v1/sandboxes/{id}`) | Replacing the whole mount binding: one `store.ReplaceMounts` deleting the old rows and inserting the new ones **in the same commit**, with the new rows going through **the same lease predicate**; on refusal the old binding is left exactly as it was (the atomicity is a store contract stated in the volume subsystem) |
 | Startup/periodic reconciliation | **Three independent entry points**, called one after another at the same startup position and in the same reaper tick: `SweepOrphanVolumes` (`Backend.ListUnitIDs` enumerates → the mediator decides → `DestroyVolume` one by one; it does **not** mirror `SweepOrphanOverlays`'s merged shape, for the reason and measurement in D2) · `RepairVolumeCaps` (D7.3's repair state) · `ReclaimQuotaRows` (D7.1's leaked rows) |
 
-**The only new invariant: the exclusive lease** (stated normatively in §5.C: at most one `exclusive` row, and it
+**The only new invariant: the exclusive lease** (stated normatively in the volume subsystem: at most one `exclusive` row, and it
 does not coexist with any other mount row on that volume). This is the only new store assertion Volume
 introduces. **Two statements that read naturally and are both false on measurement**, each worth a falsification:
 
 1. **It is not "at most one rw mount row per volume"** — that would directly contradict SharedReadWrite's fan-out
-   (§5.C): shared-rw is rw too.
+   (the volume subsystem): shared-rw is rw too.
 2. **It is not "a control-plane precondition check plus an insert, serialized by the single-writer store"** — a
    single-writer store serializes **each individual call**, not **a decide-then-act pair spanning two calls**; and
    two concurrent `Create`s each mint a new SandboxID and therefore hold two **disjoint** transition locks, the
-   only lock held at that moment being their own sandbox's. §3.4's admission gate is another instance of the same
+   only lock held at that moment being their own sandbox's. the resource-capacity model's admission gate is another instance of the same
    shape: the gate's invariant is node-global while the transition lock is per sandbox, so concurrent creates do
    not serialize against each other at all and the gate needs a separate mutex of its own.
    Measured: 8 racers with no scheduling hooks broke the lease 2 times in 4000 iterations, and with an explicit
@@ -385,9 +385,9 @@ WHERE NOT EXISTS (
 exclusive=1 / zero driver errors; multi-volume all-or-nothing uses one transaction (a single connection makes it
 naturally serial) and measured winners=1/16, partial=0. **It is recommended over adding a new per-volume lock
 class** because it introduces no new mechanism: it is exactly what `store.Store` already requires every backend to
-deliver, and it is **isomorphic** to §4.3's reference-reclamation (the same authoritative store serializing a
+deliver, and it is **isomorphic** to the health and recovery model's reference-reclamation (the same authoritative store serializing a
 decide-and-act pair). On the Memory side it is one method under its existing mutex. The partial index and
-`CHECK (access IN (...))` fall back to being schema-level assertions (each covers only half, see §5.C).
+`CHECK (access IN (...))` fall back to being schema-level assertions (each covers only half, see the volume subsystem).
 
 > **There are only two racing writers, and both are writes of mount rows**: the INSERT on `Create`'s cold-start
 > chain, and `RebindVolumes`'s delete+insert through `store.ReplaceMounts` (in the same commit, through the same
@@ -395,7 +395,7 @@ decide-and-act pair). On the Memory side it is one method under its existing mut
 > the fix considerably: resume only **reads** the table, destroy only deletes its own sandbox's rows with FK
 > RESTRICT covering the order, and pause writes no rows.
 >
-> **"The predicate must be a row-immutable attribute"** (§5.C's prohibition) has a concrete external cautionary
+> **"The predicate must be a row-immutable attribute"** (the volume subsystem's prohibition) has a concrete external cautionary
 > example: one implementation built its live-owner partial unique index on a soft-delete timestamp
 > (`UNIQUE(...) WHERE cleanup_requested_at IS NULL`), and the path that writes it exists while **no path anywhere
 > in the codebase clears it back to NULL** — so one mistaken marking both permanently condemns that volume and
@@ -412,7 +412,7 @@ decide-and-act pair). On the Memory side it is one method under its existing mut
 > and while held it waits on the store's single-writer lock. The two still compose, because **no store or backend
 > path takes either lock in the reverse direction** and they do not nest within each other.
 > **This is also an independent argument for keeping preemption outside the door**: a volume-dimension verb that
-> looks up its holder (force-detach / lease preemption, which §5.C prohibits rather than defers) would need a
+> looks up its holder (force-detach / lease preemption, which the volume subsystem prohibits rather than defers) would need a
 > vol→sbx-direction lock, closing a cycle with `transitionLock → …`. **This one is derived from the lock order and
 > has no reproduction vehicle in the repo** (unlike D3's first two, whose numbers are in
 > `store.Store.CreateMounts`'s comments). Should it ever be implemented, it must resolve the holder from the
@@ -434,8 +434,8 @@ recorded here so that a distributed two-layer refcount is not mistaken for a cor
 
 The definitions and semantics of the three access modes, and "the exclusive lease = the existence of that
 Exclusive mount row itself" (introducing no `Lease` type and no belonging field; including "keeping the lease
-across a crash is the correct behaviour" and the reaper TTL backstop) are stated normatively in §5.C. Only two
-points are left here: the naming takes the **observable properties** of sharing and writability (§1.1's vocabulary
+across a crash is the correct behaviour" and the reaper TTL backstop) are stated normatively in the volume subsystem. Only two
+points are left here: the naming takes the **observable properties** of sharing and writability (the architecture boundary's vocabulary
 boundary bars entity names in the belonging sense), and SharedReadWrite's "cross-sandbox rw coherence is
 undefined" shares **one origin** with D1.2's refusal of FUSE-unified caching — sharing mutable state across a
 boundary is a hard problem, and the response is **not to promise** rather than to build a fragile mechanism that
@@ -445,7 +445,7 @@ pretends to. The rest of this section gives the alternative it ruled out.
 with no single authoritative store, where a node can vanish into thin air** (nobody knows the node died, so it can
 only be inferred from a heartbeat timeout): registration-plus-heartbeat and "find live mounts by heartbeat
 timeout" is its standard shape.
-This engine is single-node with one orchestrator, and the store is the authority (§1.1): there is no "node that
+This engine is single-node with one orchestrator, and the store is the authority (the architecture boundary): there is no "node that
 vanishes", and a crash is a local fact the L1 probe can decide immediately. So **keep the reaper TTL backstop and
 drop the periodic heartbeat loop** (there is no other node to hand off to). Heartbeat-based reclamation is a
 future multi-node provider's obligation (node death being caught by its scheduling layer) and does not enter the
@@ -453,9 +453,9 @@ core.
 
 **The one apparent residual closes without a mechanism**: a long-paused or stuck sandbox holding an exclusive
 volume that someone else wants now. Every release path already terminates — destroy, a **`running`-legal detach
-that releases the lease immediately**, and `retention`-evict for a holder §4.3 has already crash-paused — so what
+that releases the lease immediately**, and `retention`-evict for a holder the health and recovery model has already crash-paused — so what
 is left is not "unreclaimable" but **"not reclaimable from the volume dimension"**, which is the same fact the
-lock order needs (D3). §5.C states both the paths and the prohibition on a volume-dimension verb; **this is not
+lock order needs (D3). the volume subsystem states both the paths and the prohibition on a volume-dimension verb; **this is not
 policy awaiting a product layer.** The external precedent points the same way and sharpens why: force-detach
 exists at the block layer and carries an explicit corruption warning (AWS EBS: a last-resort option, with file
 system check and repair pushed onto the caller), while the safe path in a distributed system requires a **human
@@ -473,14 +473,14 @@ exists, and destroying the holder *is* the mechanism.
 
 The hazard is real: a volume may be written rw through the gofer by a running sandbox and written to the same
 backend from the host side by the direct API at the same time → tearing, and the gofer's/sentry's page cache is
-not coherent with a direct write. §5.C blocks it with one **invariant** — the normative statement of that
+not coherent with a direct write. the volume subsystem blocks it with one **invariant** — the implementation enforces that
 invariant (a live-rw mount held ⟹ direct mutations are refused outright; the gate is on a **live** writer and
-`paused` does not count as one) belongs to §5.C, and this document gives only its boundary and falsification.
+`paused` does not count as one) belongs to the volume subsystem, and this document gives only its boundary and falsification.
 
 **The `ro` direction is not part of that invariant and is no longer a boundary item**: a reader is not a writer, so
 nothing tears. The reader's exposure (the complete previous inode for a holder that already has it open, a momentary
 `ENOENT` on a fresh lookup, or a prefix — **never** a torn file, since an import unlinks rather than overwriting in
-place) and its unpromised freshness are stated normatively in §5.C. **That non-promise is D4's, not a new one**: it
+place) and its unpromised freshness are stated normatively in the volume subsystem. **That non-promise is D4's, not a new one**: it
 shares **one origin** with D1.2's refusal of FUSE-unified caching, and D1 already refuses to pin today's gofer cache
 behavior as an invariant — which is the same reason no version stamp is introduced here.
 
@@ -493,11 +493,11 @@ unnecessary for a local directory — sealed inside the remote backend.
 ### D5.1 The direct accessor's shape: `openat2(RESOLVE_IN_ROOT)`, not through the guest and not using chroot
 
 Direct import/export is a **narrow accessor** landing on `volume.Backend` (`OpenRoot`, D2) rather than going
-through §5.E's `fs`. Two arguments:
+through the transport subsystem's `fs`. Two arguments:
 
-1. **Going through §5.E is structurally impossible** (checked against the code): `fs` exists only inside the guest
+1. **Going through the transport subsystem is structurally impossible** (checked against the code): `fs` exists only inside the guest
    and is reachable only through a **live placement**, whereas an unmounted volume has no guest; and routing
-   volume content through §5.E would create a `volume → transport` subsystem edge, failing `internal/arch`'s empty
+   volume content through the transport subsystem would create a `volume → transport` subsystem edge, failing `internal/arch`'s empty
    allowlist on the spot.
 2. **A narrow accessor's security boundary needs exactly one syscall.** `openat2(dirfd, path, RESOLVE_IN_ROOT)`
    gives path semantics **identical item by item** to chroot's, with no privilege, no mount namespace, and no
@@ -521,27 +521,27 @@ through §5.E's `fs`. Two arguments:
      paths and bytes, not host primitives).
 
 The accessor **is the only trigger of the write-regime invariant and its in-flight marker**, so all three land
-together — implementing the latter two alone would be a contract member with no consumer, which §1.3 forbids.
+together — implementing the latter two alone would be a contract member with no consumer, which the extension rule forbids.
 
 **The write regime's gate must not degenerate into "refuse if there is any row in the mount table".** That would
-be more conservative and would not tear, but it would destroy a promise §5.C states explicitly — a `paused`
+be more conservative and would not tear, but it would destroy a promise the volume subsystem states explicitly — a `paused`
 sandbox does not count as a live writer, direct writes are safe then, and the new content is naturally seen after
 a resume. And the live-map **genuinely is** a faithful gofer predicate: checked against the code, a placement is
 `put` into the live-map **at the moment it physically exists** (before the health gate, one step before
 `coldStart`'s ⑦ in `lifecycle.go`), precisely so that a concurrent reconcile does not take it for an orphan. So
-reading the live-map is right, `sandboxes.state` is wrong (§5.C already records both directions of its
+reading the live-map is right, `sandboxes.state` is wrong (the volume subsystem already records both directions of its
 unfaithfulness), and "read the mount table only" is a **third** kind of wrong — it trades a settled capability for
 an implementation's convenience.
 
 **Falsification: reverse-proxying direct writes into the mounting sandbox** (while a volume is mounted, reverse-
 proxying a direct write into the holding sandbox, to allow "writing from outside while mounted"). **Not adopted**:
 ① this is **product convenience** rather than an engine correctness need — the engine only needs "do not tear",
-and §5.C's **refusal** suffices at a cost far below building a reverse-proxy data plane; ② a reverse proxy would
+and the volume subsystem's **refusal** suffices at a cost far below building a reverse-proxy data plane; ② a reverse proxy would
 require the engine to understand "who is mounting it, and how to reach through their gofer to write their FS",
-pulling **cross-object write orchestration** into the engine (§1.3's litmus: not register-impl / add-join-table /
+pulling **cross-object write orchestration** into the engine (the extension rule's litmus: not register-impl / add-join-table /
 add-subscriber but changing existing structure → which should prompt "should this be in the engine at all").
 The answer: whoever wants that convenience stacks an adapter outside the engine (read the mount table → write into
-the holding sandbox through §5.E's `fs`), and the engine does not. A product platform counting that convenience
+the holding sandbox through the transport subsystem's `fs`), and the engine does not. A product platform counting that convenience
 among its own responsibilities is reasonable; the engine draws it outside the boundary, and that is **a difference
 in positioning rather than in correctness**.
 
@@ -574,24 +574,24 @@ which is the strong argument for "a volume = a subvolume". **But do not read tha
 Three sub-decisions which together define "what a snapshot is":
 
 - **A snapshot volume is an ordinary, writable Volume with no read-only marker.** The reason is word-for-word
-  isomorphic to §5.C's rejection of a "per-volume `access` field": **the cardinality is wrong** (writability is a
+  isomorphic to the volume subsystem's rejection of a "per-volume `access` field": **the cardinality is wrong** (writability is a
   per-mount adjudication, and one volume can be shared-rw for A and shared-ro for C at once). The harder reason is
-  the property §5.C has already measured and written down — "a snapshot does not break per-volume cap semantics:
+  the property the volume subsystem has already measured and written down — "a snapshot does not break per-volume cap semantics:
   **the writer pays**, in both directions", where overwriting the snapshot charges only the snapshot's account and
   leaves the source alone. That measurement **is meaningful only when a snapshot is writable**; defining a snapshot
   as read-only would throw away a verified property and additionally require a cross-object validation on the mount
-  row's `access` (which fails §1.3's litmus: neither registering an implementation nor adding a join table, but
+  row's `access` (which fails the extension rule's litmus: neither registering an implementation nor adding a join table, but
   adding a field plus a cross-object check). For immutability, express it with a `shared-ro` mount row, or leave it
   to product-layer policy.
   - It also **contracts the mechanism**: were a snapshot an independent read-only type, there would be two seam
     methods, two API shapes, and two teardown rules for something btrfs implements with **one** identical ioctl.
     One shape lets `Snapshot` and `Clone` share a path (D2).
 - **The volume record carries `parent`, `REFERENCES volumes(id) ON DELETE RESTRICT`**, exactly like
-  `templates.parent` (§4.3's lineage). This is a **correctness argument rather than tidiness**: D7.1 measured that
+  `templates.parent` (the health and recovery model's lineage). This is a **correctness argument rather than tidiness**: D7.1 measured that
   "delete the sharers first, then the source, and not one row leaks", and the FK is what makes that order the
   **only reachable** one — deleting a source with a live snapshot becomes a 409, and the quota-row leak **does not
   arise at all** (prevention, free, introducing no new mechanism). By this engine's own criteria it passes
-  cleanly: it is §1.3's "add a join table" (self-referential here), it reuses the existing FK-violation predicate
+  cleanly: it is the extension rule's "add a join table" (self-referential here), it reuses the existing FK-violation predicate
   (measured table- and column-agnostic in D3), and it has no state column and no materialized count ("is this
   volume a source" is derived from whether any row points at it).
   - **An external cautionary example pins this down** (source checked): one implementation chose **a pointer with
@@ -609,20 +609,20 @@ Three sub-decisions which together define "what a snapshot is":
 - **`size` is required when disk is metered and is not inherited**, so both `POST /v1/volumes/{id}/snapshot` and
   `.../clone` grow a `{size}` request body. **The substrate side has no choice left** (D7.3: there is nothing to
   inherit); and on the policy side, inheritance looks free but is not — a cap is **a declared admission claim**
-  rather than a property of the bytes, and §3.4 stipulates "count by the declared cap" precisely because a
+  rather than a property of the bytes, and the resource-capacity model stipulates "count by the declared cap" precisely because a
   snapshot's actual bytes are about 16 KiB of metadata. Inheritance would silently double the node's declared disk
-  claim at every snapshot, something the caller never asked for; and §5.C already states that an squota cap is a
+  claim at every snapshot, something the caller never asked for; and the volume subsystem already states that an squota cap is a
   "**lifetime write budget**", so a unit that has written nothing yet inheriting a number is meaningless. Requiring
-  it also keeps the rule count unchanged: §6.2 already has "conditionally required per axis", and this is the same
+  it also keeps the rule count unchanged: the API error contract already has "conditionally required per axis", and this is the same
   rule appearing at a second and third endpoint. When the source is uncapped and the axis is unmetered, `size`
   remains omissible, covered naturally by the existing rule.
 
-### D6.2 A snapshot is crash-consistent by default, asymmetric with the Overlay
+### this section A snapshot is crash-consistent by default, asymmetric with the Overlay
 
 The full statement that a Volume snapshot is **crash-consistent** by default and asymmetric with the Overlay is in
-§5.C (including the composition path to app-consistency: for an exclusive volume the caller pauses first and then
+the volume subsystem (including the composition path to app-consistency: for an exclusive volume the caller pauses first and then
 snapshots, and shared-rw offers none). Only two things this document should keep are added here: the **root** of the
-asymmetry is that the Overlay has a **single writer** and can be paused for an at-rest read (§5.B), while a Volume
+asymmetry is that the Overlay has a **single writer** and can be paused for an at-rest read (the rootfs subsystem), while a Volume
 breaks that premise (shared-rw has several writers, and one does not want to stop while mounted); and **why there is
 neither an `fsync` nor a freeze before a snapshot** (a tempting "to be safe" prelude, whose sync half is useless and
 whose freeze half is a net negative):
@@ -646,33 +646,33 @@ snapshot on every capable backend is crash-consistent — and in the one case wh
 would be **wrong**. A caller who pauses the holder and *then* snapshots has an app-consistent snapshot, and the
 engine cannot know that: the two are separate requests and no linkage is recorded, so a field would report
 "crash-consistent" on exactly the snapshots taken most carefully. Making it right would mean inferring
-app-consistency from request adjacency, which is product semantics §1.3 rejects. The wording therefore lands at
-§6.1's snapshot/clone endpoints, where the neighbouring semantic notes already live.
+app-consistency from request adjacency, which is product semantics the extension rule rejects. The wording therefore lands at
+the API contract's snapshot/clone endpoints, where the neighbouring semantic notes already live.
 
 ### D6.3 Falsification: a two-phase checkpoint
 
 Taking a consistent snapshot of a mounted volume with a two-phase "block new operations + drain in-flight
 transactions + force a flush" — **not adopted**, since it fails at both ends: ① it is redundant for an exclusive
-volume (a two-phase protocol is in essence §4.2's pause quiescent point, already covered by "pause the holding
-sandbox then snapshot", and building a second one would make §5.C depend backwards on §4.2, violating "subsystems
+volume (a two-phase protocol is in essence the pause/resume lifecycle's pause quiescent point, already covered by "pause the holding
+sandbox then snapshot", and building a second one would make the volume subsystem depend backwards on the pause/resume lifecycle, violating "subsystems
 do not call each other"); ② it is insufficient for shared-rw (N independent sandboxes' gofers have no common
-coordinator, and forcing one into existence would be stuffing swarm orchestration into the engine, which §1.3
+coordinator, and forcing one into existence would be stuffing swarm orchestration into the engine, which the extension rule
 rejects).
 
 ---
 
-## D7. The capacity quota: a btrfs subvolume + squota, a primitive shared across §5.B/§5.C
+## D7. The capacity quota: a btrfs subvolume + squota, a primitive shared across the rootfs subsystem/the volume subsystem
 
 The mechanism (a btrfs subvolume + an squota limit), the choice of mode (squota rather than full qgroups, and that
 this substrate cannot change modes), the full-stack measurements, and the ownership (the leaf package
 `internal/btrfs`, where **what is shared is code rather than a seam**) **are all settled in rootfs-overlay D6 and
-are not duplicated here** — §5.C's per-volume cap and §5.B's per-sandbox upper cap are two applications of the same
-materialization problem (§3.4's capacity axis), and Volume **reuses the same package without rebuilding it or
+are not duplicated here** — the volume subsystem's per-volume cap and the rootfs subsystem's per-sandbox upper cap are two applications of the same
+materialization problem (the resource-capacity model's capacity axis), and Volume **reuses the same package without rebuilding it or
 changing its shape**.
 
 This section keeps only the three things Volume **itself introduces** (absent on the Overlay side, because the
 engine never snapshots an upper): **quota rows leak and that is a correctness bug** (D7.1) · **the blast radius of
-one wrongful sweep** — which explains why every §5.C sweep requirement is a hard one (D7.2) · **the limit side:
+one wrongful sweep** — which explains why every volume sweep requirement is a hard one (D7.2) · **the limit side:
 there is no inheritance, a missed cap is undetectable, and a lowering is irreversible**, which fixes two contract
 shapes (D7.3).
 
@@ -681,10 +681,10 @@ Two direct consequences are recorded here first:
 - **The reflinked bytes of a volume produced by snapshot/clone are not charged to the new volume under squota** —
   so the property that snapshots are cheap holds in quota semantics too; but "how much real disk a volume occupies"
   must be seen from node-level accounting rather than from a single volume's quota (the same problem as Template
-  layer bytes in rootfs-overlay D6.2).
+  layer bytes in rootfs-overlay this section).
 - **This engine is not the sole owner of that disk's quota namespace** (measured: there are 11 external qgroup rows
   on that fs, and OrbStack uses them too; nested subvolumes were measured to coexist without trouble) — which is
-  the premise for §5.C's "quota rows are located by the id recorded at deletion time and **never by scanning
+  the premise for the volume subsystem's "quota rows are located by the id recorded at deletion time and **never by scanning
   rows**".
 - **The cap's mechanism belongs to the backend, but the capability bit is not negotiable — and there is no third,
   "advisory" state.** `Capabilities().Quota` asserts exactly one observable thing: **a write past the cap fails**.
@@ -694,11 +694,11 @@ Two direct consequences are recorded here first:
   that same mount point, D5.1) — and either is `Quota: true`. A backend that merely **records** the number without
   ever refusing a write is `Quota: false`, which is already completely modelled (a typed refusal of any non-zero
   cap, no side effect). Inventing a middle capability would legalize "a cap that does not stop a write", which is
-  precisely what §3.4 refuses to let any §2.3 assertion believe in.
+  precisely what the resource-capacity model refuses to let any the sandbox security model assertion believe in.
   - **One consequence follows from two existing gates composing, and is worth stating outright because a backend
     author would otherwise meet it as a 400 on every create: on a node that meters disk, a `Quota: false` backend
     can create no volumes at all.** A non-zero `size` is refused for want of the capability, and a zero `size` is
-    refused because a metered axis requires a cap (§3.4). Such a backend is deployable **only with the disk axis
+    refused because a metered axis requires a cap (the resource-capacity model). Such a backend is deployable **only with the disk axis
     unmetered** — which is the honest reading of the object-store reality, where a per-prefix byte ceiling does not
     exist and external CSI drivers carry the size field as decoration while the only limits with teeth are local
     cache bounds. A network-FS arm is the opposite case and maps onto `Quota: true`, its enforcement being the
@@ -706,7 +706,7 @@ Two direct consequences are recorded here first:
 
 ### D7.1 The new problem Volume brings: squota's quota rows leak, and it is a correctness bug
 
-§5.B's Overlay upper **does not leak today**, because the engine never snapshots it; §5.C wants to snapshot
+the rootfs subsystem's Overlay upper **does not leak today**, because the engine never snapshots it; the volume subsystem wants to snapshot
 volumes, so this is a new problem Volume introduces. **The predicate for a leak is not "it was snapshotted"** but:
 **a row leaks ⟺ that unit (i) owns extents and (ii) is deleted while live sharers still reference those extents**.
 Two corollaries from the measured matrix:
@@ -735,7 +735,7 @@ cannot be argued away**.
 > than the main line — which is also why its failure disposition is "skip and leave it for the next round" rather
 > than "block".
 
-**The reclamation procedure** (the path §5.C requires, `ReclaimQuotaRows` on the mediator side). It and
+**The reclamation procedure** (the path the volume subsystem requires, `ReclaimQuotaRows` on the mediator side). It and
 `SweepOrphanVolumes` (reclaiming orphan bytes) and `RepairVolumeCaps` (repairing D7.3's state) are **three mutually
 independent entry points**, merely called one after another at the same startup position and in the same reaper
 tick — **do not read them as three phases of one sweep**, since the three residues' predicates, failure
@@ -778,22 +778,22 @@ dispositions, and reachable paths all differ. Each round:
 > is retried, and the retry changed the picture rather than tidying it.** The failure is transient, so under the
 > same three-way churn three attempts turned **8 first-attempt failures into 0 final failures (300 reads)**. The
 > error contract is unchanged — an error still means "unreadable, draw no conclusion" — it is simply much rarer,
-> which matters directly to the callers that must fail closed on an unreadable row (the §6.1 cap write points and
-> §5.B's materialization guard, the latter on the create/resume hot path). **Do not cite 7.3% as the rate a
+> which matters directly to the callers that must fail closed on an unreadable row (the API contract cap write points and
+> the rootfs subsystem's materialization guard, the latter on the create/resume hot path). **Do not cite 7.3% as the rate a
 > caller sees**; cite it as what one attempt sees under deliberate churn, and note that the **batch** read's
 > wholesale failure is not retried away by that change.
 > **The aggregate question this used to point at is now SETTLED, and the retry is not what settled it**
-> (§3.4.2, "one unreadable unit fails the whole node's admission read"): the gate consumes a single scalar, so
+> (the quota-read rule, "one unreadable unit fails the whole node's admission read"): the gate consumes a single scalar, so
 > an unknown can only be synthesized (forbidden) or ignored (silent oversubscription), and **no residual
 > frequency changes that** — which is why this measurement must not be read as an input to it. What the retry
 > buys is fewer refused admissions on a node with room, and that is a real but separate benefit.
 >
-> **A future trap of the same family (worth a comment on the §5.B side)**: the real trigger is **extent sharing**,
+> **A future trap of the same family (worth a comment on the rootfs subsystem side)**: the real trigger is **extent sharing**,
 > not "a snapshot was taken". Measured, a reflink **inward** (copy-up's shape) does not leak while a reflink
 > **outward** does. So an obvious future optimization — having Promote use `cp --reflink` instead of a byte-by-byte
 > copy — would **leak one row per Promote**, and that leak would outlive the layer itself.
 
-### D7.2 The blast radius of one wrongful sweep: why every §5.C sweep requirement is a hard one
+### D7.2 The blast radius of one wrongful sweep: why every volume sweep requirement is a hard one
 
 Measured by taking a volume out from under a live guest that was **continuously reading and writing**, five
 different ways: **all five are merely data-plane events** — the sandbox never died once (the container stayed
@@ -806,14 +806,14 @@ hypothetical bad case of "the guest sees I/O errors":
 | Delete the storage unit | Already-resolved paths **keep working forever**; only a new lookup reports `ENOENT` (not EIO, not ESTALE) | Writes go into an unlinked inode and are **silently lost** |
 | Delete the unit's contents | **Zero errors**; the guest immediately rebuilds its own files | **Silently lost, with no signal whatsoever** |
 | unlink an open file | **Zero errors**; reads and writes through the old fd continue | The gofer delivered POSIX; fsync does not resurrect the host path |
-| Clear the quota row's limit | **The cap is silently removed**: it first hits ENOSPC at the cap, then writes resume and reach 2.5× the cap | §3.4's accounting is broken, **with no signal at all** |
+| Clear the quota row's limit | **The cap is silently removed**: it first hits ENOSPC at the cap, then writes resume and reach 2.5× the cap | the resource-capacity model's accounting is broken, **with no signal at all** |
 | `mv` the unit away | **Zero errors**; it never sees the decoy left at the old path | The gofer **follows the inode**, and subsequent writes land in the moved-away directory |
 
 **Three of the five arms produce not one errno**, so "the guest will report an error" is not a detection path. Three
 hard facts come with it:
 
 - **`limit none` is the only one of these that breaks an engine promise beyond data integrity**, and it **has no
-  EBUSY self-protection** (destroy does, on a live unit: it returns EBUSY). That is exactly why §5.C requires
+  EBUSY self-protection** (destroy does, on a live unit: it returns EBUSY). That is exactly why the volume subsystem requires
   "quota rows are located by the id recorded at deletion time and never by scanning rows" — the failure mode of
   scanning is an uncapped live volume plus zero signal.
 - **Wrongly sweeping a live unit does not even reclaim the space it wanted**: the deletion is only **queued** (the
@@ -828,7 +828,7 @@ hard facts come with it:
 ### D7.3 The limit side of the cap: no inheritance, a missed cap is undetectable, and a lowering is irreversible
 
 Everything above in D7 concerns the **usage** side (which bytes are charged to whom). **The limit side is the other
-half, and its conclusions fix two contract shapes** (D2's `Snapshot`/`Clone` signatures and §5.C's volume-cap write
+half, and its conclusions fix two contract shapes** (D2's `Snapshot`/`Clone` signatures and the volume subsystem's volume-cap write
 point). Three measurements:
 
 - **There is no inheritance whatsoever.** A snapshot gets a **brand-new quota row with `max_referenced = none`**, in
@@ -868,17 +868,17 @@ point). Three measurements:
   - **So a volume cap's write point must refuse such a lowering (400), with the strict inequality
     `size > current usage` as the criterion.** The reason is not that the substrate forbids it (it accepts it
     happily) but that **accepting it manufactures a state the control plane cannot get out of**: repair would have
-    to go through deleting the guest's bytes, and nothing in §6 permits the engine to do that on a caller's behalf.
-    §3.4's "a lowering need not re-run the admission gate" therefore carries a caveat.
+    to go through deleting the guest's bytes, and nothing in the API contract permits the engine to do that on a caller's behalf.
+    the resource-capacity model's "a lowering need not re-run the admission gate" therefore carries a caveat.
 
 ### D7.4 Why guest-side statfs does not reflect the cap
 
 The user-visible semantics (including the measured figures and the obligation on "a backend able to project it
-honestly") are in §5.C; this section keeps only the root cause and the external corroboration.
+honestly") are in the volume subsystem; this section keeps only the root cause and the external corroboration.
 
 **The root cause**: btrfs squota has **no statfs projection**, so what the guest sees is a **faithful pass-through**
 of the host's whole-disk numbers — not a sentry fabrication (`f_type` is the gofer's rather than btrfs's, i.e. that
-number never passed through the cap at all). This is the other direction of the same rule as §5.B's "guest-side
+number never passed through the cap at all). This is the other direction of the same rule as the rootfs subsystem's "guest-side
 numbers may not be used for capacity accounting", but it is **an observable surprise for the guest**. **An
 independent external implementation stepped on the same thing** (its mounted volume reporting about 4.6 EB
 available, for a different cause — apparently a network-FS proxy — with a symptom of the same class), so this is not
@@ -892,7 +892,7 @@ definitely does not** — that is not an unmade promise but a known falsehood.
 ## D8. Open items outside the contract boundary (tracked in a GitHub Issue, not settled here)
 
 The following are boundary items whose design is settled but whose **concrete value / landing shape is not**
-(product-layer policy, or to be fixed when §6 lands):
+(product-layer policy, or to be fixed when the API contract lands):
 
 - **The landing shape of a remote backend** (D1/D2/D6): when and in what shape an S3 / NFS backend lands; its
   internals (a host-FUSE frontend, a complete FUSE session's POSIX interface, and — if it fronts an object store —
@@ -913,12 +913,12 @@ The following are boundary items whose design is settled but whose **concrete va
     three-actions shape rule and the capability-negative path, and it can prove **nothing** about latency, partial
     failure, handle-holding materialization or refcounted release. So nothing in the repository can catch a caller
     that assumes a backend call is cheap — and **two such callers exist today**. They are the remote arm's real
-    entry cost, and they are §4 concurrency work rather than §5.C shape work:
+    entry cost, and they are the lifecycle mediator concurrency work rather than the volume subsystem shape work:
     - **The node-global admission mutex is held across `CreateVolume`, `SetCapacity`, `Snapshot`/`Clone` and
       `UncappedBytes`**, justified in the mediator by "the middle step is bounded metadata work" — true of a btrfs
       ioctl (a snapshot is ~16 KiB of metadata, D6.1), false of a network round trip, and on a non-CoW object store
       a snapshot is a **full object copy**. The fix is already precedented and needs no new invention: it is
-      Promote's reservation shape (§3.4's in-flight term), adopted for exactly this reason — holding a node-global
+      Promote's reservation shape (the resource-capacity model's in-flight term), adopted for exactly this reason — holding a node-global
       lock across a byte copy would serialize every create on the node behind one operation.
     - **The boot sweeps and every reaper-tick pass call the backend on an unbounded context**, so a wedged remote
       store makes the orchestrator hang at boot **ahead of serving** rather than failing; and `RepairVolumeCaps`
@@ -934,18 +934,18 @@ The following are boundary items whose design is settled but whose **concrete va
 
 1. **Addressed by ID, not by name.** One reference implementation's mount entries are **addressed by volume name**,
    and its SDK sends only the name even while holding the complete volume object (ID included). That is directly at
-   odds with §6.2's "outwardly everything is addressed by Volume ID", and we have an independent reason (§3.1.1's
+   odds with the API error contract's "outwardly everything is addressed by Volume ID", and we have an independent reason (the Overlay model's
    internal ID addressing is the same rule extended inward). **Keep ID addressing.**
 2. **Three things we have that both reference implementations lack**: read-only mounts / exclusivity or leases in
    any form / a per-volume capacity cap. The capacity cap especially — neither implementation has any byte-ceiling
    field, and one's capacity is even **virtual** (`statfs` hardcoded to 4 TiB, with its documentation stating plainly
    that this is "not a storage allocation, not a hard quota, and not the node filesystem's capacity"), with quotas
    only at team level and **measured after the fact**; whereas we measured btrfs squota delivering a **hard `ENOSPC`
-   precise to the cap** (precision ~0.05%, rootfs-overlay D6.2). So D8's items are **under no external pressure to
+   precise to the cap** (precision ~0.05%, rootfs-overlay this section). So D8's items are **under no external pressure to
    be cut** — what is load-bearing is the qualitative difference between "a hard quota" and "team-level
    after-the-fact measurement", not the precision's particular value.
    (That precision figure is **evidence of magnitude only and not a reproducible indicator**; its force is
-   described at that point in D6.2.)
+   described at that point in this section.)
    - **Snapshot/clone is not on this gap list**: one implementation has real implementations of both (a snapshot is
      a separate table, a clone is the same type plus a source pointer), and those two implementation details became
      D6.1a's two strongest arguments in reverse (whether a snapshot should be an independent type, and whether

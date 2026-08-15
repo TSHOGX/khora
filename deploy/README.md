@@ -1,7 +1,7 @@
 # Deployment: the outward-facing boundary
 
 The engine's control-plane API has **no authentication and no TLS**, and that is a
-design decision rather than a gap: §1.4 excludes the credential family from the engine
+design decision rather than a gap: the engine boundary excludes the credential family from the engine
 permanently, because every byte the engine can hand a guest is readable by uid 0
 inside it — so the engine cannot be a secrecy boundary for anything. Authentication
 therefore lives in front of it, in a component outside the engine.
@@ -18,8 +18,8 @@ address, a gateway would be a door standing beside an open wall.
 
 ```
 $ orchestrator --addr 0.0.0.0:8080
-orchestrator: the §6.1 listen address is not loopback: "0.0.0.0:8080" is a routable
-address. The §6.1 API has NO authentication and NO TLS …
+orchestrator: the API listen address is not loopback: "0.0.0.0:8080" is a routable
+address. The API has NO authentication and NO TLS …
 ```
 
 Every loopback spelling is accepted (`127.0.0.1`, anything in `127/8`, `::1`, the
@@ -72,7 +72,7 @@ go build ./cmd/gateway
 ```
 
 mTLS rather than bearer tokens: a token would mean this repo ships issuance, storage
-and revocation, and the whole family is what §1.4 excludes. mTLS puts caller identity
+and revocation, and the whole family is what the engine boundary excludes. mTLS puts caller identity
 in the TLS layer, where your existing PKI holds it. The trade is that you issue and
 rotate client certificates — which is the reason the reverse proxy stays the
 recommended path for anyone who already runs an identity provider.
@@ -81,7 +81,7 @@ recommended path for anyone who already runs an identity provider.
 
 **Neither forwards caller identity to the engine.** nginx can pass the verified
 certificate on and this config does not; `cmd/gateway` strips the `X-Forwarded-*`
-headers. The engine has no authorization subject, and §1.1 bars the names such a
+headers. The engine has no authorization subject, and the architecture boundary bars the names such a
 header would need — authentication is complete at the gateway, and that is the entire
 contract between the two processes.
 

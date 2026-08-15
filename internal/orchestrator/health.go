@@ -1,6 +1,6 @@
 package orchestrator
 
-// The operational surface: /healthz, /readyz, /metrics (M10 item 2).
+// The operational surface: /healthz, /readyz and /metrics.
 //
 // TWO ENDPOINTS, NOT ONE /health: liveness answers "is this still the right process to be
 // running", readiness answers "should traffic come here now". They diverge on the one failure
@@ -270,7 +270,7 @@ func boolGauge(v bool) int {
 	return 0
 }
 
-// Shutdown drains this engine and stops its background loops (M10 item 2).
+// Shutdown drains this engine and stops its background loops.
 //
 // WHAT A SIGTERM DOES TO RUNNING SANDBOXES: NOTHING. They keep running and the next boot
 // re-adopts them (the documented invariant: "a takeover is not a resume — the same placement, the same IP, and no

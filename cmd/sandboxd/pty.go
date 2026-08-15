@@ -47,7 +47,7 @@ func openPTY(rows, cols uint16) (master, slave *os.File, err error) {
 }
 
 // setWinsize applies a terminal size to the pty master (TIOCSWINSZ). resize =
-// Update in the wire (transport D4.3); the kernel signals SIGWINCH to the fg
+// Update in the wire; the kernel signals SIGWINCH to the foreground process group
 // process group so e.g. `stty size` reflects the new dimensions.
 func setWinsize(master *os.File, rows, cols uint16) error {
 	return unix.IoctlSetWinsize(int(master.Fd()), unix.TIOCSWINSZ, &unix.Winsize{

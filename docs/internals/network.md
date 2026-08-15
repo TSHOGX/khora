@@ -2,14 +2,14 @@
 
 > **Position: the network internals reference.** It complements the architecture and concepts
 > pages. The network subsystem fixes the boundary (Network holds the declaration + generates an abstract rule set;
-> rendering and installation belong to §5.A; application-layer behavior is not inside the
+> rendering and installation belong to the runtime subsystem; application-layer behavior is not inside the
 > engine); this document develops **why the boundary falls exactly there** — the criterion is
 > enforceability locus (which side can physically enforce) — and gives the mechanical constraints
 > on the declaration's shape, the invariants that must be held, and the measurements that must be
 > inherited.
 >
-> **Numbering convention:** this document's own sections carry a `D` prefix (D1, D4.2…); a bare
-> `§` always refers to a spec global section (§5.D etc.); the two are never mixed.
+> The `D` headings are local navigation labels, not external identifiers. Link to this page or to
+> the concepts/API pages when a constraint needs a stable home.
 
 ---
 
@@ -20,7 +20,7 @@ consequences, vocabulary, and deployment position are all different**: **the pro
 decides and moves bytes**, and **the side that creates the namespace and is therefore the only
 one that can enforce**. The engine **is only the latter**:
 
-| | The engine (this spec) | Outside the engine |
+| | The engine | Outside the engine |
 | --- | --- | --- |
 | What it is | The side that creates the netns: holds the declaration + generates the abstract rule set | The process that terminates the connection, decides where to go from application-layer information, and moves bytes |
 | Vocabulary | ID, IP, CIDR, port, proto, netns, veth, `iifname`, DNAT | Bytes, SNI, Host, upstream address, opaque strings |
@@ -35,7 +35,7 @@ engine, because none of the four needs the side that creates the namespace to do
 
 The engine therefore **does not name the layer outside it**. In the architecture reference it appears only as an
 address (`egress.via[].endpoint`) — not evasion, but the direct consequence of "the engine sees
-only one TCP flow to some endpoint". (§6's existing "control plane / data plane" is **a different
+only one TCP flow to some endpoint". (the API contract's existing "control plane / data plane" is **a different
 pair of terms**, denoting the REST vs Connect-RPC outer-edge projection — unrelated to this
 document, don't conflate the two.)
 
@@ -50,7 +50,7 @@ process is physically unable to do**:
    inserted in the window between "the netns/veth is built" and "the isolation unit starts
    running". An external process **has no hook point there** — the earliest it can observe
    anything is after "the sandbox is already running", and any window in between is a fail-open
-   window. `Adopt` / `ReclaimOrphans` (§5.A) are the same case: the netns is crash-surviving host
+   window. `Adopt` / `ReclaimOrphans` (the runtime subsystem) are the same case: the netns is crash-surviving host
    state, and so is the rule set.
 2. **Binding the ingress interface (`iifname`)** (by **name**, not ifindex — `iif`'s fail-open is
    in D5 ⑫). Only the side that creates the netns knows **which veth belongs to which sandbox**.
@@ -75,9 +75,9 @@ process is physically unable to do**:
 engine.** Choosing a backend by SNI, swapping credentials, terminating TLS and re-originating,
 validating a token by caller — none of these needs any of the capabilities above, so none of them
 is inside the engine, and the engine holds **no seam that could carry them**. This is not "not
-implemented yet" — it is the boundary (§1.4 permanently excludes the whole credential family).
+implemented yet" — it is the boundary (the engine boundary permanently excludes the whole credential family).
 
-**One thing to add so "the engine does not know credentials" is not misread as a gap**: §1.4
+**One thing to add so "the engine does not know credentials" is not misread as a gap**: the engine boundary
 already gives the conclusion "the engine's storage semantics contradict keeping a secret", and its
 actionable side is — the template holds the address of the endpoint outside the engine plus a
 value that satisfies the SDK's credential probe, and neither is a secret to the engine, so there is
@@ -97,9 +97,9 @@ precisely, because "infeasible" would be wrong:
   the DNS TTL plus some margin, layered with a liveness refresher for active connections
   (addresses with a live connection get re-stamped periodically). The mechanism works.
 - **But it requires growing three things inside the engine**: a DNS proxy, a TTL refresher coupled
-  to conntrack, and a product-layer domain list that churns. The third breaks §1.1 outright (the
+  to conntrack, and a product-layer domain list that churns. The third breaks the architecture boundary outright (the
   engine holding a product-layer list); the first two turn the engine into a DNS client. **What
-  breaks is §1.1, not feasibility.**
+  breaks is the architecture boundary, not feasibility.**
 - One incidental semantic flaw that road carries: liveness refresh lets **an authorization outlive
   the name it was granted under**.
 - **The other side of the same wall**: mature portable network-policy layers likewise cannot
@@ -107,7 +107,7 @@ precisely, because "infeasible" would be wrong:
   is an independent confirmation that "domain names do not belong to the portable layer".
 
 For narrowing like "only this one domain", use `via[]` to hand the traffic to a process outside the
-engine that judges by application-layer information (§5.D).
+engine that judges by application-layer information (the network subsystem).
 
 **The strength of domain-layer control varies with the declaration's value, so the architecture reference states it
 by value rather than as a global conclusion.** Under `default:deny` plus a single `egress.via[]`,
@@ -153,7 +153,7 @@ from this mechanism.** A tuple missing `proto` **cannot be rendered** (the inter
 even accept `--dport` without it); a tuple missing `port` renders fine, it just **emits one fewer
 `dport` clause** — meaning "any port to that destination", the same mechanism's second application
 as omitting `cidr` giving "any destination". So omitting `port` is **a legitimate wildcard**
-(§5.D), while `proto` has no wildcard to speak of.
+(the network subsystem), while `proto` has no wildcard to speak of.
 
 ### D3.2 UDP is not steered, and that is not an oversight
 
@@ -186,8 +186,8 @@ failure**, not a policy refusal (the same root cause as D4.3's diagnostic disloc
 have usable DNS under `default:deny`, the caller must explicitly write the resolver's address, with
 `proto: udp`, into `egress.allow[]`** — this is something the engine **deliberately does not do on
 the caller's behalf**: doing it would require the engine to know the concept of "resolver" and hold
-a deployment-specific address, breaking §1.1 (the same criterion as D2's refusal of domain names).
-It is therefore a **user-visible semantic**, belonging to §5.D's "four user-visible semantics"
+a deployment-specific address, breaking the architecture boundary (the same criterion as D2's refusal of domain names).
+It is therefore a **user-visible semantic**, belonging to the network subsystem's "four user-visible semantics"
 group — not a gap.
 
 **One thing that could not be confirmed**: neither of the two mesh projects surveyed gives a
@@ -244,10 +244,10 @@ marked unknown rather than "supported".
 
 ---
 
-## D4. Invariants that must be held (the normative statement is in §2.3 / §2.4 / §5.D)
+## D4. Invariants that must be held
 
-**Map onto §2.4's three items first, rather than leaving it to the reader to piece together.**
-§2.4 lists **the L0 floor / both hops / fail-closed**: the first item's reasoning is not in this
+**Map onto the network safety invariants's three items first, rather than leaving it to the reader to piece together.**
+the network safety invariants lists **the L0 floor / both hops / fail-closed**: the first item's reasoning is not in this
 section, it is spread across **D1 ③** (why only the side that creates the placement can pin it),
 **D2** (why the load-bearing wall is the IP layer, and the floor only admits things nameable in IP
 vocabulary), and **D5 ④** (why the sibling item is a static CIDR); this section develops the
@@ -258,12 +258,12 @@ other two (D4.2 / D4.3), plus one item that is **the precondition shared by all 
 The obligation is **not** "can reach the endpoints the declaration allows" — it is **default-deny
 plus allow only the declared set**. Fail to hold this and the declaration is empty in effect: a
 direct connection inside the guest that routes around the meeting point, or a protocol/port the
-rules do not cover, bypasses the whole §5.D declaration surface. **This is the precondition each
+rules do not cover, bypasses the whole the network declaration surface. **This is the precondition each
 of the other three rests on, not a fourth item alongside them**: the floor can only be "always
 deny" if narrowing is exhaustive (otherwise one uncovered port is a side door around it), and the
 same holds for both hops and fail-closed — in a non-exhaustive rule set, each of them guards only
 the traffic it happens to cover. It is therefore an acceptance-testable security obligation
-(§2.4):
+(the network safety invariants):
 
 > Narrow the isolation unit's reachable set exhaustively down to the set of endpoints the engine
 > declares, and default-deny everything else outbound. **An escape is a failure**, not a
@@ -272,7 +272,7 @@ the traffic it happens to cover. It is therefore an acceptance-testable security
 **"It works" is an insufficient acceptance assertion**: a rule set with the wrong ordering behaves
 completely normally under ordinary traffic, and differs only once it is bypassed. So acceptance
 must assert the property that **would pass through silently** (the same acceptance discipline as
-§5.C's mis-sweep item).
+the volume subsystem's mis-sweep item).
 
 ### D4.2 Both hops are pinned, and the second hop must be enforced by the kernel
 
@@ -298,7 +298,7 @@ must produce output per hook separately:
 sibling drop.** The generator emits the declaration's allowance **on both `input` and
 `forward`**; the `input` side **must also** carry a sibling drop, or an `allow 10.0.0.0/8` would
 let sandbox A reach sibling B's **gateway** (measured: banner read back, while the sibling drop on
-the `forward` side **counts 0** for this path — it does not sit on `forward`). **Reason**: §5.D
+the `forward` side **counts 0** for this path — it does not sit on `forward`). **Reason**: the network subsystem
 semantics ③ promises the caller can declare its own resolver, and the only stably-reachable
 host-local resolver address is this sandbox's own `/30` gateway (D5 ⑦), which lands on `input`; an
 allowance emitted only on `forward` **cannot reach it**, and that promise would have no delivery
@@ -309,7 +309,7 @@ rules, not one.
 
 **This table has a real tension with `via[]`, measured in both directions, and the shape of the
 narrow allowance has been settled (D5 ⑩).** `via[].endpoint` is contractually **required to be
-host-local** (otherwise the kernel cannot hold down the second hop — one of the entries in §6.2's
+host-local** (otherwise the kernel cannot hold down the second hop — one of the entries in the API error contract's
 400 list), and steered traffic, after `prerouting` translation, **lands on `input`** and is `ct
 state new` there — exactly what the `input` row's pure ct-state floor above would drop (measured:
 the `input`-side dnat observation counts 8 packets, `forward` counts 0). So **a pure ct-state
@@ -407,7 +407,7 @@ use no mark at all, and those that do use it only for loop prevention.)
 **There is one precondition above that was left unstated — spelling it out here is not a new
 mechanism, just writing down something already being relied on.** A `uid`/`gid` predicate only
 holds when **the process being evaluated is on this same host, and its uid/gid is known to the
-engine**. But the four-field declaration carries only one address, and §5.D insists the engine
+engine**. But the four-field declaration carries only one address, and the network subsystem insists the engine
 neither knows nor asks what sits behind `via[].endpoint` — put the two together, and the argument
 above delivers less than it appears to. The fix has two halves:
 
@@ -428,12 +428,12 @@ above delivers less than it appears to. The fix has two halves:
 - **A `via[].endpoint` that is not host-local is refused**: it is out of the kernel's reach and
   cannot be held down; accepting it would rest the floor on that process's own self-discipline —
   exactly the confused deputy this invariant exists to refuse. So this class of declaration is
-  **refused outright** (400; the error code belongs to [`§6.2`](../api/contract.md)'s list, not
+  **refused outright** (400; the error code belongs to [`the API error contract`](../api/contract.md)'s list, not
   duplicated here).
 
 ### D4.3 Fail-closed (scoped per-connection)
 
-The normative statement is in §2.4 (refuse that one connection rather than falling through to the
+The implementation enforces this network safety invariant (refuse that one connection rather than falling through to the
 next rule and being let out, scoped per-connection). This section adds only three things that
 statement does not carry on its own:
 
@@ -482,7 +482,7 @@ to make its own outbound query (which it usually does), and its own egress has a
 behind the floor by D4.2's second hop — then whatever endpoint it queries **must not fall inside
 the L0 floor**, or the second hop would lock it out of itself instantly. This is **a constraint the
 deployment-layer operator must hold, not something the engine can check**: the engine does not
-know what sits behind `via[].endpoint`, still less who it turns around and queries (§5.D). Recorded
+know what sits behind `via[].endpoint`, still less who it turns around and queries (the network subsystem). Recorded
 here because it is the **only** coupling between the floor and that layer that bites, and its
 symptom (that process itself being unreachable) looks nothing like something the floor caused.
 
@@ -496,11 +496,11 @@ discipline covers only the refusals it evaluates itself; diagnostic quality for 
 refusal is that external layer's responsibility, not an inherited guarantee from this section.**
 This is not a new mechanism, only stating a boundary this document's reasoning already implies.
 
-**Fail-closed emits no §4.1 audit event, and the reason is observability rather than taste.** The
+**Fail-closed emits no the lifecycle audit event, and the reason is observability rather than taste.** The
 question was tracked in a GitHub Issue with a leaning toward yes; it is settled as **no**, and what settles
 it is that the engine has no per-refusal signal to put in one.
 
-- **The two refusals §2.4's fail-closed names are observable to *different* degrees, and one is not
+- **The two refusals the network safety invariants's fail-closed names are observable to *different* degrees, and one is not
   observable at all.** A destination the declaration does not allow is refused by a terminal
   nftables verdict whose only readable trace is the rule's **packet counter** — an aggregate, with
   no tuple, no timestamp and no connection identity, so a retry loop and one long flow are
@@ -510,30 +510,30 @@ it is that the engine has no per-refusal signal to put in one.
   "steered and served" from "steered into a void". The refusal happens one hop out, per the
   paragraph above. **A per-refusal event would therefore be fabricated for half of what the promise
   covers.**
-- **Genuine per-connection records would need §5.D to acquire a process.** The vocabulary has no log
+- **Genuine per-connection records would need the network subsystem to acquire a process.** The vocabulary has no log
   verdict, and consuming a netlink log group means a daemon inside the engine — refused outright by
-  §5.D's "moves no bytes, terminates no connection, and contributes no process". The substrate would
+  the network subsystem's "moves no bytes, terminates no connection, and contributes no process". The substrate would
   support it, which makes this an architectural boundary rather than a substrate limit.
 - **A refusal is not a state transition, so it does not belong on that stream even if it could be
-  produced.** §4.1's rule is "every event = one transition", asserted in three places including a
+  produced.** the lifecycle event model's rule is "every event = one transition", asserted in three places including a
   schema `CHECK` over the closed set of six kinds. The sandbox stays `running` throughout a refusal,
   so a seventh kind would have to write `state: running` — asserting a transition to the state it was
-  already in, which destroys the reconcile property §4.4-C names as the reason for the rule. The
+  already in, which destroys the reconcile property outbox delivery names as the reason for the rule. The
   store has **no method that appends an event without a state change**, and that is a deliberate
   semantic statement rather than an omission, so emitting refusals means changing existing structure
-  rather than adding a subscriber (§1.3's litmus fails at the first step).
+  rather than adding a subscriber (the extension rule's litmus fails at the first step).
 - **And the rate is the guest's to set.** All six existing kinds are control-plane- or
   reaper-initiated; a refusal is the one signal an adversary drives directly, at whatever rate it
-  retries. §4.4-C keeps head-of-line blocking on purpose and latches its poison exit for an operator,
+  retries. outbox delivery keeps head-of-line blocking on purpose and latches its poison exit for an operator,
   so a refusal flood on that stream is a path from guest behaviour to a halted **billing** stream.
-  §4.4-C already refused capacity-pressure events for a neighbouring reason (a sample of a continuous
+  outbox delivery already refused capacity-pressure events for a neighbouring reason (a sample of a continuous
   quantity, whose frequency jitters with load); a refusal is worse on that same second clause, since
   its frequency is not merely load-dependent but adversary-chosen.
 - **Where the consumer need goes instead**: the per-rule counter already carried on every `allow[]` /
-  `via[]` entry, exposed through §6.1's `GET …/network` (recorded separately). Same consumer — the
+  `via[]` entry, exposed through the API contract's `GET …/network` (recorded separately). Same consumer — the
   allow-list rollout that needs to attribute a guest-side failure to the declaration — same content,
   and pull-shaped, so no commit path, no total order, no head-of-line blocking, and a fixed-size
-  response an adversary cannot inflate. **This is the same disposition §4.4-C reached for capacity
+  response an adversary cannot inflate. **This is the same disposition outbox delivery reached for capacity
   pressure**: attach externally as a gauge, not as an engine primitive.
   **The mature-system consensus is the same and is unanimous**: nobody emits one record per denied
   packet. Flow logs aggregate per flow over minute-scale windows and shed under load with an in-band
@@ -542,7 +542,7 @@ it is that the engine has no per-refusal signal to put in one.
   with a two-minute dedup window; and upstream Kubernetes closed the equivalent request with the note
   that it would have to be seriously down-sampled.
 - **What would reopen it**: a subscriber genuinely needing per-connection tuples. Even then the answer
-  is not §4.1 but a **separate** stream with its own sink and its own declared loss discipline, which
+  is not the lifecycle event model but a **separate** stream with its own sink and its own declared loss discipline, which
   is what every precedent built (flow logs are not the audit trail; a Kubernetes audit log is not the
   object-event API).
 
@@ -551,9 +551,9 @@ it is that the engine has no per-refusal signal to put in one.
 ## D5. Cross-sandbox network isolation, and the measurements that must be inherited
 
 Cross-sandbox **network** isolation is an **independent control-plane invariant** that does not
-ride on pillar ①'s back — why pillar ① cannot hold it, conclusion and reasoning both, is in §2.3
+ride on pillar ①'s back — why pillar ① cannot hold it, conclusion and reasoning both, is in the sandbox security model
 (one sentence: it virtualizes syscalls, it does not intercept network packets). What this section
-gives is **the other half** of that conclusion: since it can only be materialized by §5.D's rule
+gives is **the other half** of that conclusion: since it can only be materialized by the network subsystem's rule
 set, then **where the rule set must land, what the predicates must bind to, and which members the
 floor must hold** all become questions falsifiable by measurement — the items below are exactly
 those questions' answers, measured on `sbx`. They are this invariant's materialization evidence,
@@ -641,7 +641,7 @@ place, the floor installed and no tier, traffic from a sandbox to another host-L
 (an RFC1918 address plus tcp/22) **leaves the netns, gets routed by the host, and on the `forward`
 hook only a rule written in RFC1918 vocabulary catches it** — none of the floor's four items
 (link-local / loopback / any address of the host itself / the sibling sandbox address space,
-ordered per §2.4) covers that address. ⟹ **Without this tier, `default: allow` hands the entire
+ordered per the network safety invariants) covers that address. ⟹ **Without this tier, `default: allow` hands the entire
 host LAN over to the sandbox**; whether this tier **exists** is therefore not an open question
 (only its membership criteria are, see D8).
 
@@ -668,11 +668,11 @@ first: the guest today has no resolver configuration at all.** `build-rootfs.sh`
 anywhere in the repo mounts or generates one (measured, `grep -rn resolv internal/ cmd/` gives zero
 hits). So today, inside the guest, `curl` reports `Could not resolve host` directly, and Go
 programs fall back to `[::1]:53` and get refused — **DNS simply does not work inside the guest
-today, and that predates any §5.D policy question**. Who writes that `resolv.conf` is a
-**product/template-layer content choice, and it is now settled in §5.B**: the built-in Template ships
+today, and that predates any network policy question**. Who writes that `resolv.conf` is a
+**product/template-layer content choice, and it is now settled in the rootfs subsystem**: the built-in Template ships
 none and the engine injects none — the deployment supplies it, because baking one in pins a
 build-machine address into a portable artifact and engine injection would both hold a
-deployment-specific network fact (§1.1) and land in the upper for every Promote to capture. Not engine
+deployment-specific network fact (the architecture boundary) and land in the upper for every Promote to capture. Not engine
 semantics either way; but **it is a precondition for the act of "declaring DNS"**, so it is recorded
 here.
 
@@ -684,7 +684,7 @@ the same window), so the floor's loopback item is **redundant defense in depth**
 guest; **the only stably-reachable host-local resolver address happens to be that sandbox's own
 `/30` gateway**, which **falls inside the sibling CIDR** — a naive `drop 10.66.0.0/16` would kill
 it too (measured), so the floor must allow "this sandbox's own gateway" **before** the sibling
-drop; that gateway lands on `input`, so **§5.D semantics ③'s delivery path is the `input`-side
+drop; that gateway lands on `input`, so **network subsystem semantics ③'s delivery path is the `input`-side
 declaration allowance** (the hook question is already settled, see D4.2; before that it had no
 delivery path); and **whether the resolver address falls inside the floor is deployment-specific**:
 on this machine the resolver is `0.250.250.200` (inside `0.0.0.0/8`, neither loopback nor
@@ -826,7 +826,7 @@ and returns true directly). So a validation predicate that branches on family wo
 and the packet then leaves as IPv4 and dies on the v4 floor. **Accepted by the API while silently
 refused on the wire** — exactly D4.3's class of diagnostic dislocation. ⟹ Declaration validation
 must **reject v4-mapped / v4-compatible literals before any containment test at all** (not
-"normalize, then compare"): §5.D says the declaration only accepts IP literals, and
+"normalize, then compare"): the network subsystem says the declaration only accepts IP literals, and
 `::ffff:192.168.1.1` is a **second spelling** of an address that already has a spelling; accepting
 it would mean the Binding stored differs from the caller's text, and the two spellings would then
 compare unequal on every subsequent read-modify-write. **At the same time**, the predicate itself
@@ -951,7 +951,7 @@ measured `to_guest=2 / from_guest=0`, the caller reads a timeout. After adding
 `oifname <hveth> ip daddr <guest> snat to <gateway>`, the source address the guest sees becomes
 **its own `/30` gateway** (on-link), the return path no longer needs any guest-side route, and the
 same flow immediately becomes `connected`. ⟹ **For `publish` to really be "a purely host-side
-rule"** (§5.D's own wording), the generator must emit this SNAT along with the DNAT; emitting only
+rule"** (the network subsystem's own wording), the generator must emit this SNAT along with the DNAT; emitting only
 the DNAT produces a feature that "works on a sandbox with a default route, times out on one
 without".
 
@@ -973,7 +973,7 @@ without".
 > no post-boot probing" — but that constrains **reads**, while this one constrains **writes**: of
 > the three host-side egress mechanisms, "the guest-side default route carrying `dev`" must
 > therefore be installed **before `runsc run`**, and cannot be patched in after the guest comes up
-> — it falls inside the same atomic window as the rule set (§2.4).
+> — it falls inside the same atomic window as the rule set (the network safety invariants).
 
 **⑭ Publish traffic originated by the host itself does not traverse `prerouting`, and needs its
 own DNAT on the `output` hook.** Under the same rule set with only a `prerouting` DNAT installed,
@@ -997,13 +997,13 @@ which chain carries the companion accept based on this.
 **⑯ A guest bound to `127.0.0.1` and "no listener at all" are indistinguishable from the caller's
 side — both are `refused`.** Measured, case B (guest bound to loopback) = `refused` @1 ms, case C
 (no listener at all inside the guest) = `refused` @0 ms, **byte-for-byte identical**: the gVisor
-netstack returns RST for both cases. ⟹ **§5.D's user-visible semantic ① therefore only promises
+netstack returns RST for both cases. ⟹ **the network subsystem's user-visible semantic ① therefore only promises
 "refused and fails fast", never attributability.** **The direction is good** — neither case
 **hangs**, so the half of that semantic that is actually load-bearing (not a timeout) holds and has
 been reproduced; only "attributable" does not hold. **Attribution can only happen on the engine
 side**: the engine knows which publish rule it installed and can read that rule's counter, while
 the caller only ever sees one RST. **What the read surface actually reports of that is the
-direction-level ingress default-deny counter** (`ingress.closed_hit_packet`, §6.1) — not per
+direction-level ingress default-deny counter** (`ingress.closed_hit_packet`, the API contract) — not per
 publish entry, since ⑮'s hook split is exactly what makes a per-entry number unattributable, but
 enough to separate "refused" from "nothing arrived", which no caller-side observation can do.
 
@@ -1079,7 +1079,7 @@ this flow (keyed by guest IP plus port, `[ASSURED]`), while **the sandbox netns'
 entry count stays at 0** (the same root cause as ②). ⟹ **The single ct entry carrying this flow
 lives on the host side, and there is only one copy.**
 
-> **⟹ Three hard constraints on §4.4-A `Adopt`**: **never flush the ct table** (in any form) ·
+> **⟹ Three hard constraints on startup reconciliation `Adopt`**: **never flush the ct table** (in any form) ·
 > **never "`delete` the table, then install"** · **if reinstalling at all, reinstall the whole
 > table atomically.** The third is in fact a useful permission: `Adopt` can do **no reasoning at
 > all** about a table it finds — it can just re-render the whole thing and install it, which is
@@ -1104,64 +1104,65 @@ lives on the host side, and there is only one copy.**
 
 ## D6. Interface shape vs registry plumbing: which half deserves to exist right now
 
-The most honest cut against §1.3's criterion: **build the two shapes "rule generation is a pure
+The most honest cut against the extension rule's criterion: **build the two shapes "rule generation is a pure
 function" plus "the provider receives derived output and holds no authority over the declaration"
 right now** — they are good design a single-node implementation should have anyway, and they
 happen to become the future landing point too. **The concrete multi-implementation registration
 slot is built only once a second implementation shows up**: when a slot has only one
-implementation, the registration mechanism itself is a reservation (§1.3's cost criterion).
+implementation, the registration mechanism itself is a reservation (the extension rule's cost criterion).
 
 **Where the cut falls is fixed by D1 ②**: the engine-side half derives only an **abstract rule
 set** from the declaration and the floor (placement-free, root-free, unit-testable); rendering the
 nft text, and binding `iif` / the guest IP / publish's host endpoint, **all happen inside the
 provider, at placement time** — because those three are host primitives only the provider holds,
 and lifting them onto the cross-provider contract surface would be a leak. **The two halves meet
-through §5.A's existing provider contract; `SteeringSpec` is the member carrying this half — no
+through the runtime subsystem's existing provider contract; `SteeringSpec` is the member carrying this half — no
 new seam type is added.**
 
 ---
 
-## D7. Litmus self-check (§1.3): everything reduces to one of the three kinds of addition
+## D7. Litmus self-check (the extension rule): everything reduces to one of the three kinds of addition
 
 | Future need | Which kind of addition | Needs a new seam type? |
 | --- | --- | --- |
 | Extend to another scheduling backend (K8s…) | register a runtime provider (behavior) | No |
 | Multi-tenancy | add a join table (**outside** the engine) | No |
 | Add a new kind of allowance to the declaration | add rows (Data; the declaration is a Binding) | No |
-| Egress audit feeding billing / observability | add a subscriber (Consumption, §4.1 event stream) | No |
-| Choose a backend by SNI / swap credentials / terminate TLS | **not inside the engine** (an adapter outside it, §1.3's orthogonal outside-the-engine axis) | No |
+| Egress audit feeding billing / observability | add a subscriber (Consumption, the lifecycle event stream) | No |
+| Choose a backend by SNI / swap credentials / terminate TLS | **not inside the engine** (an adapter outside it, the extension rule's orthogonal outside-the-engine axis) | No |
 | Access control in front of publish | **not inside the engine** (same as above); the half the engine can enforce (allow by source CIDR) is one rule predicate | No |
 
-**All purely additive, inventing no new seam type** — exactly the shape §1.3 wants. Note that the
+**All purely additive, inventing no new seam type** — exactly the shape the extension rule wants. Note that the
 last two rows fall on the **outside-the-engine axis**: they do not even need "a seam reserved
 inside the engine", so the engine side's count of additions is zero for them.
 
 ---
 
-## D8. The agenda still to be refined (tracked in GitHub Issues)
+## D8. Boundaries outside the current implementation
 
 **The floor's membership list and rule text are already settled, and are not in this section**:
 all four list items are static (D5 ④⑧); the shape of `via[]`'s narrow allowance and its IPv6
 coverage are in D5 ⑩⑪; `iif`'s fail-open is in D5 ⑫. **"Whether the declaration's allowance is
 also emitted on `input`" is settled** (yes, and that side carries its own sibling drop — D4.2).
 **The internal deny-safe tier's membership is settled** (RFC1918 plus mechanical v6 derivation,
-§2.4; this section leaves open only whether to widen it). **The second hop's hook and predicate
-are also settled** (`output` plus `skuid`, D5 ㉔). **Whether fail-closed emits a §4.1 audit event is
+the network safety invariants; this section leaves open only whether to widen it). **The second hop's hook and predicate
+are also settled** (`output` plus `skuid`, D5 ㉔). **Whether fail-closed emits a lifecycle audit event is
 now settled too** (no — D4.3's closing block, which also says where the consumer need goes instead).
-**So §5.D has no pre-work measurement left to do.** Three items remain open:
+**So the network subsystem has no pre-work measurement left to do.** Three items remain open:
 
 - **Whether the internal deny-safe tier is widened beyond RFC1918 in the future** (**the membership
-  list itself is already settled into §2.4**: the three RFC1918 ranges plus mechanical v6
+  list itself is already settled into the network safety invariants**: the three RFC1918 ranges plus mechanical v6
   derivation. What is open is only whether to widen it, and widening is purely additive).
-- **Which §5.D obligations a non-nft enforcer cannot carry** — not `SteeringSpec`'s *fields*, which
+- **Which the network subsystem obligations a non-nft enforcer cannot carry** — not `SteeringSpec`'s *fields*, which
   are settled, but `Reject` as distinct from `Drop`, rule **order** (hence the liftable deny-safe
-  tier), and `via[]` steering. Registered under the §5.A provider row, since the seam is where it
+  tier), and `via[]` steering. Registered under the runtime provider row, since the seam is where it
   lands.
 - **Whether `GET …/network` exposes the per-rule hit counter** (D4.2/D4.1 already read it as the only
   liveness signal; what is open is the read surface, and D4.3's closing block explains why this is
   now the home for the audit-consumer need).
 
 > The measured evidence, candidates, and costs for each item are in the relevant GitHub Issue's
-> "Design points still to be refined" section, not duplicated here. The normative statement for
-> D0–D7 is in §2.1/§2.3/§2.4/§5.D; this document only develops the reasoning and the invariants
+> Keep unresolved product needs in GitHub Issues rather than duplicating them here. The current
+> behavior for
+> D0–D7 is in the placement model/the sandbox security model/the network safety invariants/the network subsystem; this document only develops the reasoning and the invariants
 > that must be held.

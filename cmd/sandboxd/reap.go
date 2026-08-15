@@ -46,7 +46,8 @@ func newReapTable() *reapTable {
 // no exported way to do just that half, the state is unexpressible.
 //
 // A prctl failure is logged, not fatal: the subtree's orphans then fall back to PID 1, which
-// is the already-specified lossy case (guest-runtime C2/C3), not a broken sandbox.
+// already owns the process-reaping fallback and may drop an orphan status; the sandbox itself
+// remains healthy.
 func startSubtreeReaper() *reapTable {
 	if err := unix.Prctl(unix.PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0); err != nil {
 		logf("transport: PR_SET_CHILD_SUBREAPER failed (%v); subtree orphans fall back to PID 1", err)
