@@ -49,6 +49,15 @@ check_source_rejected source-section-address 'See §12 for the rule.'
 check_source_rejected source-old-page 'See concepts/model.md for the object model.'
 check_source_rejected source-retired-path 'See docs/decisions/network.md for the rule.'
 
+ignored="$tmp/ignored-fixture"
+mkdir -p "$ignored/docs" "$ignored/internal"
+printf '%s\n' 'docs/' > "$ignored/.ignore"
+printf '%s\n' 'See §12 for the rule.' > "$ignored/docs/page.md"
+if "$script_dir/check-retired-references.sh" "$ignored" >/dev/null 2>&1; then
+  echo "check-retired-references accepted a prohibited fixture hidden by .ignore" >&2
+  exit 1
+fi
+
 clean="$tmp/clean"
 mkdir -p "$clean/docs" "$clean/internal"
 printf '%s\n' '# Object model' '```sh' '# 1. This is a shell comment.' '```' \

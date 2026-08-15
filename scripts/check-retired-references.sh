@@ -3,13 +3,17 @@ set -euo pipefail
 
 root=${1:-$(git rev-parse --show-toplevel)}
 fail=0
+scan_ignored=()
+if [[ ! -e "$root/.git" ]]; then
+  scan_ignored=(--no-ignore)
+fi
 
 if [[ -e "$root/docs/spec" || -e "$root/docs/decisions" ]]; then
   echo "retired documentation tree is present" >&2
   fail=1
 fi
 
-if rg -n --hidden --glob '!.git/**' --glob '!scripts/check-retired-references.sh' \
+if rg -n --hidden "${scan_ignored[@]}" --glob '!.git/**' --glob '!scripts/check-retired-references.sh' \
   --glob '!scripts/test-check-retired-references.sh' \
   'docs/spec|docs/decisions' "$root"; then
   echo "retired documentation path is referenced" >&2
@@ -18,7 +22,7 @@ fi
 
 # Technical sources must state the constraint where it is enforced. They may not
 # point at a section, ADR or retired documentation path that can move independently.
-if rg -n --hidden --glob '!.git/**' --glob '!*.md' \
+if rg -n --hidden "${scan_ignored[@]}" --glob '!.git/**' --glob '!*.md' \
   --glob '!scripts/check-retired-references.sh' \
   --glob '!scripts/test-check-retired-references.sh' \
   'ADR-[0-9]+|§[0-9]+|[①-⑳㉑-㉟㊱-㊿⓪]|(^|[^[:alnum:]_])D[0-9]+([.][0-9A-Za-z]+)*([^[:alnum:]_]|$)|(^|[/`(])(architecture|model|subsystems|contract|reaper-health|rootfs-overlay)\.md([^[:alnum:]_]|$)|docs/(spec|decisions)/[^[:space:]`\)]+' "$root"; then
@@ -29,7 +33,7 @@ fi
 # Maintained documentation uses descriptive headings and named concepts. D-prefixed
 # spec addresses, numbered headings and the mechanically migrated page names would
 # otherwise recreate the retired section map under new paths.
-if (cd "$root" && rg -n --glob '*.md' --glob '!CLAUDE.md' --glob '!CHANGELOG.md' \
+if (cd "$root" && rg -n "${scan_ignored[@]}" --glob '*.md' --glob '!CLAUDE.md' --glob '!CHANGELOG.md' \
   --glob '!scripts/check-retired-references.sh' --glob '!scripts/test-check-retired-references.sh' \
   'ADR-[0-9]+|§[0-9]+|[①-⑳㉑-㉟㊱-㊿⓪]|(^|[^[:alnum:]_])D[0-9]+([.][0-9A-Za-z]+)*([^[:alnum:]_]|$)|(^|[/`(])(architecture|model|subsystems|contract|reaper-health|rootfs-overlay)\.md([^[:alnum:]_]|$)' \
   .); then
