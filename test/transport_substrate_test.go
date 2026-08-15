@@ -62,7 +62,7 @@ func launchWith(t *testing.T, inject func(templatesDir, template string)) (trans
 	}
 
 	cl := transport.Dial(transport.Endpoint(pl.TransportEndpoint))
-	// readiness gate: poll Health to first success (⑦).
+	// readiness gate: poll Health to first success ().
 	if !waitHealth(cl, 20*time.Second) {
 		cleanup()
 		t.Fatalf("Health never succeeded at %s", pl.TransportEndpoint)

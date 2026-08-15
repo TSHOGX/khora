@@ -1,6 +1,6 @@
 //go:build substrate
 
-// L2 acceptance for the large-file bypass (the documented invariant fs / transport the documented invariant) against the
+// L2 acceptance for the large-file bypass (the transport data plane fs / fs transport) against the
 // REAL sandboxd under real runsc: streaming upload + download of a payload far
 // larger than any sane protobuf message. Requires root.
 //
@@ -30,7 +30,7 @@ import (
 //	RPC      357 MB   (+338 MB — the whole message, buffered)
 //
 // So the bypass is ~37× cheaper in peak guest memory, and that ratio grows with
-// the file. A sandbox has a RAM cap (the documented invariant) whose breach TERMINATES it, so pushing
+// the file. A sandbox has a RAM cap (resource admission) whose breach TERMINATES it, so pushing
 // a large file through the RPC path is a way to kill the sandbox you are writing to.
 const bypassSize = 64 << 20 // 64 MiB
 

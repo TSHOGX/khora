@@ -12,17 +12,17 @@ import (
 	"github.com/TSHOGX/khora/internal/ruleset"
 )
 
-// This file is the INSTALL side of the documented invariant enforcement: put the rendered rule set
+// This file is the INSTALL side of the network declaration enforcement: put the rendered rule set
 // into the kernel, put the three host-side egress mechanisms in place, and tear
-// both down again — all inside the window the documented invariant requires.
+// both down again — all inside the window the provider security contract requires.
 //
 // # The atomicity obligation
 //
 // The rules must be installed AFTER the netns/veth exist and BEFORE the isolated
-// unit runs (the documented invariant). Any window in which the network is up and the rules are not is
+// unit runs (the provider security contract). Any window in which the network is up and the rules are not is
 // a fail-open window, and only the side creating the placement has that hook point
-// at all (the relevant internals page the documented invariant ①). A half-built placement is reclaimed by the same unwind
-// every other launch failure uses (the documented invariant).
+// at all (the network enforcement locus). A half-built placement is reclaimed by the same unwind
+// every other launch failure uses (atomic transition rollback).
 //
 // # One further ordering constraint, from a different direction
 //
@@ -30,13 +30,13 @@ import (
 // is not a preference either: measured, the sentry TAKES THE L3 ADDRESS OFF the
 // kernel-side veth when it boots (afterwards `ip addr` in that netns shows only
 // `lo`, though the link is still up), so a post-boot `ip route add default via …`
-// fails with `Nexthop has invalid gateway` (the relevant internals page the documented invariant ⑬). So it lands in the
+// fails with `Nexthop has invalid gateway` (network substrate measurements). So it lands in the
 // SAME pre-launch window as the rules.
 
 // egressSetup installs the host-side egress mechanisms.
 //
 // EXACTLY THREE, measured necessary AND sufficient for a real runsc guest to
-// complete TLS and a `git ls-remote` (the relevant internals page the documented invariant ⑤): global `ip_forward`, a
+// complete TLS and a `git ls-remote` (network substrate measurements): global `ip_forward`, a
 // guest-side default route carrying `dev`, and a masquerade for this /30. The
 // masquerade is part of the generated rule set (it is a rule, and only emitted for a
 // routed-egress declaration); this function does the other two.
@@ -46,13 +46,13 @@ import (
 //
 // Without it a `deny` sandbox's packet never leaves its netns — it dies at `net unreachable`
 // inside gVisor's netstack, the host's rules are never evaluated, and every floor counter reads
-// 0: the coincidence-not-invariant state the documented invariant names, since guest root can add the route with ONE
-// command (measured, the documented invariant ⑤). It is also unassertable, "unreachable with a zero counter" being
-// indistinguishable from a bypassed floor (the documented invariant).
+// 0: the coincidence-not-invariant state the provider security contract names, since guest root can add the route with ONE
+// command (measured, network enforcement). It is also unassertable, "unreachable with a zero counter" being
+// indistinguishable from a bypassed floor (network enforcement).
 //
 // With the route present the packet reaches the host, meets the floor, and is REJECTED by a rule
 // that counts it: same outcome for the guest, opposite epistemic status, and it is what makes
-// the documented invariant ⑯'s assertion assertable.
+// network enforcement's assertion assertable.
 //
 // THE MEASURED NEGATIVES MATTER AS MUCH, because each is a plausible thing to add:
 // `rp_filter` tightened to 1 does NOT affect this (the return route already goes out
@@ -62,26 +62,26 @@ import (
 func (p *LocalRunsc) egressSetup(h *placementHandle, gatewayIP string, routed bool) error {
 	// (1) global ip_forward, only when this declaration can actually route. Note it is
 	// NOT an engine guarantee: it is already 1 in this environment by default, which is
-	// exactly why the documented invariant ① could measure a sibling handshake succeeding. The engine writes
+	// exactly why network enforcement could measure a sibling handshake succeeding. The engine writes
 	// it because a routed-egress declaration cannot work without it, not because it
 	// discovered it — and it does NOT write it for a `deny` sandbox, since that would
 	// change host-global state for a sandbox that will not use it.
 	if routed {
 		if err := writeSysctl("net/ipv4/ip_forward", "1"); err != nil {
-			return fmt.Errorf("runtime: enable ip_forward (one of the three host-side egress mechanisms, the documented invariant ⑤): %w", err)
+			return fmt.Errorf("runtime: enable ip_forward (one of the three host-side egress mechanisms, network enforcement): %w", err)
 		}
 	}
 	// (2) the guest-side default route, carrying `dev`. WITHOUT `dev` the command
-	// returns rc=0 and the route does not work (measured, the documented invariant ⑤) — a silent failure,
+	// returns rc=0 and the route does not work (measured, network enforcement) — a silent failure,
 	// so the flag is load-bearing rather than explicit-for-clarity.
 	//
 	// Before `runsc run` (see the file header) and unconditional (see the doc comment:
 	// the `deny` case needs it MORE, not less).
 	vethGuest := vethGuestName(h.vethHost)
 	if err := p.ipCmd("-n", h.netns, "route", "add", "default", "via", gatewayIP, "dev", vethGuest); err != nil {
-		return fmt.Errorf("runtime: add the guest default route (the documented invariant ⑤: it must carry `dev`, and it "+
+		return fmt.Errorf("runtime: add the guest default route (network enforcement: it must carry `dev`, and it "+
 			"must be added BEFORE runsc boots — the sentry takes the L3 address off the kernel-side "+
-			"veth at boot, after which the add fails with `Nexthop has invalid gateway`, the documented invariant ⑬): %w", err)
+			"veth at boot, after which the add fails with `Nexthop has invalid gateway`, network enforcement): %w", err)
 	}
 	return nil
 }
@@ -90,13 +90,13 @@ func (p *LocalRunsc) egressSetup(h *placementHandle, gatewayIP string, routed bo
 // `nft -f` file.
 //
 // The atomicity is a hard requirement in three separate senses:
-//   - vs the isolated unit: no fail-open window (the documented invariant, see the file header).
+//   - vs the isolated unit: no fail-open window (the provider security contract, see the file header).
 //   - vs the kernel: a batch containing one illegal rule rolls back ENTIRELY
 //     (measured), so "only part of the rules got installed" is not a state to
 //     handle.
 //   - vs LIVE CONNECTIONS on a re-install: a two-step delete-then-install kills
 //     every live flow across the gap, while one atomic file does not (measured 5/5
-//     both ways, the relevant internals page the documented invariant ㉒ — see renderRuleSet's doc for the mechanism).
+//     both ways, network substrate measurements — see renderRuleSet's doc for the mechanism).
 func (p *LocalRunsc) installRuleSet(ctx context.Context, h *placementHandle, spec SteeringSpec) error {
 	if spec.Rules.Empty() {
 		return nil
@@ -127,21 +127,21 @@ func (p *LocalRunsc) installRuleSet(ctx context.Context, h *placementHandle, spe
 	return nil
 }
 
-// InstallSecondHop installs the ENGINE-LEVEL second-hop table (the documented invariant invariant 2,
+// InstallSecondHop installs the ENGINE-LEVEL second-hop table (the second-hop floor,
 // second half). Called ONCE when the orchestrator starts, not per placement.
 //
 // Not per-sandbox because the predicate is not per-sandbox: one deployment-supplied
 // uid covers every `via[]` in the deployment, and the traffic arrives on no
-// interface, so there is nothing sandbox-specific to narrow by (the relevant internals page the documented invariant ㉔).
+// interface, so there is nothing sandbox-specific to narrow by (network substrate measurements).
 //
 // A nil uid means the deployment did not supply one. Nothing is installed — and the
 // STALE table from a PREVIOUS run is destroyed, which is the half a bare `return nil`
 // silently skipped: an nft table is crash-surviving host state exactly like a netns
-// (the documented invariant), so a run started without the flag would otherwise inherit an engine-level
+// (the provider security contract), so a run started without the flag would otherwise inherit an engine-level
 // `output` table narrowed by a uid it does not know, dropping traffic for a reason
 // absent from the running configuration and impossible for an operator to attribute.
 //
-// With no table installed there is no enforcement of the documented invariant's second invariant, so
+// With no table installed there is no enforcement of the second-hop floor, so
 // `via[]` is refused at both ends: kept out of the record at the write points
 // (network.ValidateDeployment) and refused at placement for a row admitted by an
 // earlier deployment (network.ValidatePlacement).
@@ -162,7 +162,7 @@ func (p *LocalRunsc) InstallSecondHop(ctx context.Context, rs ruleset.RuleSet, u
 		return err
 	}
 	if err := p.nftLoad(ctx, text); err != nil {
-		return fmt.Errorf("runtime: install the second-hop table (the documented invariant invariant 2): %w", err)
+		return fmt.Errorf("runtime: install the second-hop table (the second-hop floor): %w", err)
 	}
 	return nil
 }
@@ -179,7 +179,7 @@ func (p *LocalRunsc) nftLoad(ctx context.Context, text string) error {
 	if err != nil {
 		// Surface the real output AND the file, numbered: nft reports a parse error
 		// against a line number, and a desynchronized parse reports it several chains
-		// from the actual cause (measured, the relevant internals page the documented invariant ㉔), so the numbered file is
+		// from the actual cause (measured, network substrate measurements), so the numbered file is
 		// what makes the message usable at all.
 		return fmt.Errorf("%v: %w: %s\n--- rule set ---\n%s", argv, err, out, numberLines(text))
 	}
@@ -200,7 +200,7 @@ func (p *LocalRunsc) deleteRuleSet(table string) {
 }
 
 // enumerateRuleSetTables lists engine per-sandbox tables present on this host, by
-// name prefix — the the documented invariant reconciliation face of the rule set (the documented invariant: a rule set is
+// name prefix — the atomic transition rollback reconciliation face of the rule set (the provider security contract: a rule set is
 // crash-surviving host state exactly like a netns, so reconciliation must rebuild
 // or tear it down, and it cannot be added afterwards).
 func (p *LocalRunsc) enumerateRuleSetTables(ctx context.Context) ([]string, error) {
@@ -231,7 +231,7 @@ func (p *LocalRunsc) CountRuleSetTables(ctx context.Context) (int, error) {
 }
 
 // sandboxOfTable recovers the SandboxID from a table name. Reversible by
-// construction, the same convention the netns name uses (the documented invariant SandboxID
+// construction, the same convention the netns name uses (atomic transition rollback SandboxID
 // labeling).
 func sandboxOfTable(table string) (string, bool) {
 	if table == SecondHopTable {
@@ -259,7 +259,7 @@ func writeSysctl(path, val string) error {
 // Returns 0 when the range is EXHAUSTED — required, not cautious: without the bound the
 // scan spins forever once every port is held, and "publishing thousands of ports" is a
 // reachable deployment shape. A caller turns the 0 into a launch failure, unwinding the
-// half-built placement (the documented invariant) like any other unmaterializable placement resource.
+// half-built placement (atomic transition rollback) like any other unmaterializable placement resource.
 func (p *LocalRunsc) allocPublishPort() uint16 {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -314,7 +314,7 @@ func numberLines(s string) string {
 	return b.String()
 }
 
-// ruleHits reads this table's named counters, keyed by the abstract counter name the documented invariant
+// ruleHits reads this table's named counters, keyed by the abstract counter name the network declaration
 // minted (see runtime.Provider.RuleHits).
 //
 // A MISSING KEY IS NOT A ZERO (Provider.RuleHits) — which is why this returns a map

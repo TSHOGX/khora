@@ -70,7 +70,7 @@ func TestDialSharesOneConnectionPerEndpoint(t *testing.T) {
 
 	const calls = 50
 	for i := 0; i < calls; i++ {
-		// A fresh Client per call ON PURPOSE: that is exactly how the documented invariant uses it (built per
+		// A fresh Client per call ON PURPOSE: that is exactly how the lifecycle uses it (built per
 		// endpoint, discarded), and it is the usage a per-call transport punishes.
 		if _, err := transport.Dial(ep).Health(context.Background()); err == nil {
 			t.Fatal("expected the stub echo to fail decoding; the probe would prove nothing if it succeeded")
@@ -97,7 +97,7 @@ func TestDialSharesOneConnectionPerEndpoint(t *testing.T) {
 // must not let two sandboxes share a connection.
 //
 // Sharing here would be a placement-isolation bug, not just surprising — each endpoint
-// is a distinct guest netns IP (the documented invariant), and the pool is keyed by host:port precisely so
+// is a distinct guest netns IP (the ID-reference model), and the pool is keyed by host:port precisely so
 // that a resumed sandbox at a new IP transparently gets a new connection while the
 // retired one ages out. If this ever failed, the pool key would have been widened to
 // something that ignores the endpoint.
@@ -112,7 +112,7 @@ func TestDialKeepsEndpointsOnSeparateConnections(t *testing.T) {
 
 	if atomic.LoadInt64(a) == 0 || atomic.LoadInt64(b) == 0 {
 		t.Fatalf("endpoint A accepted %d and B accepted %d; each endpoint must get its own "+
-			"connection (they are different guest netns IPs, the documented invariant)",
+			"connection (they are different guest netns IPs, the ID-reference model)",
 			atomic.LoadInt64(a), atomic.LoadInt64(b))
 	}
 }

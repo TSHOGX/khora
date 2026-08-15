@@ -16,13 +16,13 @@ import (
 // that drives it lives in a sibling package.
 //
 // IT IS NOT FILLER — IT IS THE ONLY FALSIFICATION INSTRUMENT THIS SEAM HAS
-// (the relevant internals page the documented invariant): the three-actions shape rule stated on Backend was DERIVED from
+// (the volume backend seam): the three-actions shape rule stated on Backend was DERIVED from
 // running this arm against the same shared contract, and with only one arm every one
 // of those three failures would have looked like a reasonable simplification.
 //
 // It is also the CAPABILITY-NEGATIVE arm: it reports no Snapshot, no Clone, no
 // Quota, so the contract suite can assert that an unsupported operation is refused
-// with a TYPED error AND NO SIDE EFFECT — the path the documented invariant maps to 400. Without a
+// with a TYPED error AND NO SIDE EFFECT — the path the API error contract maps to 400. Without a
 // backend that genuinely lacks a capability, that whole branch would only ever be
 // exercised by a mock agreeing with itself.
 type PlainDir struct {
@@ -44,7 +44,7 @@ func NewPlainDir(dir string) (*PlainDir, error) {
 func (p *PlainDir) Name() string { return "plain_dir" }
 
 // Capabilities: none of the three. A plain directory can neither snapshot nor
-// enforce a byte ceiling, and saying so honestly is this arm's job — the documented invariant requires
+// enforce a byte ceiling, and saying so honestly is this arm's job — the Volume subsystem requires
 // an unsupported call to be a clean 400 rather than a silent no-op.
 func (p *PlainDir) Capabilities() Capabilities { return Capabilities{} }
 
@@ -57,7 +57,7 @@ func (p *PlainDir) CreateVolume(_ context.Context, volumeID string, capBytes int
 	if capBytes > 0 {
 		// The cap is REFUSED, and refused BEFORE the directory is created, so an
 		// unsupported request leaves nothing behind. Accepting and ignoring it is the
-		// silent failure the documented invariant forbids.
+		// silent failure resource admission forbids.
 		return fmt.Errorf("volume: plain_dir cannot enforce a %d-byte cap on %s: %w", capBytes, volumeID, ErrUnsupported)
 	}
 	if err := os.MkdirAll(p.unitPath(volumeID), 0o755); err != nil {
@@ -93,7 +93,7 @@ func (p *PlainDir) Usage(_ context.Context, volumeID string) (int64, int64, erro
 	return used, 0, nil
 }
 
-// Materialize is create-if-absent, same contract as the other arm (the documented invariant).
+// Materialize is create-if-absent, same contract as the other arm (the Volume subsystem).
 func (p *PlainDir) Materialize(_ context.Context, volumeID string) (*Materialized, error) {
 	if err := validateID(volumeID); err != nil {
 		return nil, err
@@ -120,7 +120,7 @@ func (p *PlainDir) AdoptMaterialized(_ context.Context, volumeID string) (*Mater
 
 // OpenRoot uses the SAME accessor as the local arm, deliberately: root confinement is
 // required of every arm, so sharing one implementation means the shared contract test
-// exercises the real mechanism on both rather than a copy on one (the relevant internals page the documented invariant).
+// exercises the real mechanism on both rather than a copy on one (volume.md constraints).
 func (p *PlainDir) OpenRoot(_ context.Context, volumeID string) (Root, error) {
 	if err := validateID(volumeID); err != nil {
 		return nil, err
@@ -128,7 +128,7 @@ func (p *PlainDir) OpenRoot(_ context.Context, volumeID string) (Root, error) {
 	return NewLocalRoot(volumeID, p.unitPath(volumeID))
 }
 
-// Snapshot / Clone: NOT SUPPORTED, and refusing them is this arm's job (the documented invariant requires
+// Snapshot / Clone: NOT SUPPORTED, and refusing them is this arm's job (the Volume subsystem requires
 // an unsupported capability to be a clean typed refusal, never a silent no-op).
 //
 // NOT faked with a recursive byte copy: a snapshot's contract is atomic and
@@ -146,7 +146,7 @@ func (p *PlainDir) Clone(_ context.Context, srcID, newID string, _ int64) error 
 // rows, so there is no residue and this arm costs the sweep nothing.
 //
 // It returns (0, nil) rather than ErrUnsupported deliberately: the sweep must not have
-// to ASK a backend whether it has rows and branch on the answer (the documented invariant's
+// to ASK a backend whether it has rows and branch on the answer (the transactional outbox's
 // no-capability-branch rule). An empty list and a zero count say the same thing without
 // putting a branch in the caller.
 func (p *PlainDir) ReclaimQuotaRows(context.Context, []uint64) (int, error) { return 0, nil }
@@ -164,7 +164,7 @@ func (p *PlainDir) DestroyVolume(_ context.Context, volumeID string) error {
 }
 
 // UncappedBytes: every volume on this arm is uncapped by construction, so all of
-// its bytes land in the the documented invariant second term. This is the arm that makes the term's
+// its bytes land in the resource admission second term. This is the arm that makes the term's
 // necessity visible — on a capped arm every unit contributes zero and a broken
 // implementation returning a constant 0 would pass.
 func (p *PlainDir) UncappedBytes(context.Context) (int64, error) {

@@ -36,7 +36,7 @@ import (
 //
 // The property is "no accumulation", NOT "the row vanishes the instant delete
 // returns", and the difference is a measured substrate fact rather than a
-// technicality: under squota (this substrate, the recorded design) btrfs owns the row and
+// technicality: under squota (this substrate, the root-required deployment) btrfs owns the row and
 // reclaims it ASYNCHRONOUSLY — immediately after delete it is still listed as
 // `<under deletion>` / `<squota space holder>`, and an explicit `qgroup destroy`
 // returns ENOENT because the row is not the caller's to remove. Asserting instant

@@ -102,7 +102,7 @@ func TestReadOnlyAccessReachesTheBindAsReadOnly(t *testing.T) {
 }
 
 // TestCreateNormalizesMountPaths: the store's uniqueness assertions are literal
-// string comparisons, so the mediator normalizes before insert (the documented invariant). `/data/` and
+// string comparisons, so the mediator normalizes before insert (the Volume subsystem). `/data/` and
 // `/data/../data` are one mount point spelled three ways.
 func TestCreateNormalizesMountPaths(t *testing.T) {
 	ctx := context.Background()
@@ -156,7 +156,7 @@ func TestCreateLosingTheLeaseLeavesNothing(t *testing.T) {
 }
 
 // TestUnwindDeletesMountRows is the ZOMBIE-RECORD path, and the reason unwind's mount
-// deletion is a DESIGN REQUIREMENT rather than an implementation detail (the relevant internals page the documented invariant).
+// deletion is a DESIGN REQUIREMENT rather than an implementation detail (the mount table).
 //
 // Mount rows are written BEFORE the cold start, so every post-cold-start unwind branch
 // is followed by a DeleteSandbox that hits mounts.sandbox RESTRICT. An unwind that
@@ -204,7 +204,7 @@ func TestUnwindDeletesMountRows(t *testing.T) {
 }
 
 // TestResumeReMountsFromTheCurrentTable is what makes the mount relationship a
-// BINDING (the documented invariant / the documented invariant): a resume re-materializes per the table as it stands NOW, not
+// BINDING (resource admission / the Volume subsystem): a resume re-materializes per the table as it stands NOW, not
 // per whatever it said when the sandbox last ran, and not from any frozen byte.
 func TestResumeReMountsFromTheCurrentTable(t *testing.T) {
 	ctx := context.Background()
@@ -223,7 +223,7 @@ func TestResumeReMountsFromTheCurrentTable(t *testing.T) {
 	if err := m.Pause(ctx, sid); err != nil {
 		t.Fatalf("pause: %v", err)
 	}
-	// The ROWS SURVIVE the pause — the lease is not released by pausing (the documented invariant).
+	// The ROWS SURVIVE the pause — the lease is not released by pausing (the Volume subsystem).
 	rows, _ := st.ListMounts(ctx, sid)
 	if len(rows) != 1 {
 		t.Fatalf("mount rows after pause = %d, want 1 — pause must not release the binding", len(rows))
@@ -263,7 +263,7 @@ func TestResumeReMountsFromTheCurrentTable(t *testing.T) {
 }
 
 // TestDestroyDeletesMountRowsFirst: the order is required (RESTRICT fires
-// immediately), and the row deletion IS the lease release (the documented invariant).
+// immediately), and the row deletion IS the lease release (the Volume subsystem).
 func TestDestroyDeletesMountRowsFirst(t *testing.T) {
 	ctx := context.Background()
 	m, st, _, _ := mountFixture(t)
@@ -293,7 +293,7 @@ func TestDestroyDeletesMountRowsFirst(t *testing.T) {
 		t.Fatalf("re-attaching the volume exclusively after destroy: %v — the lease IS the row's existence", err)
 	}
 	_ = sid2
-	// And the volume itself outlived the sandbox (the documented invariant lifecycle decoupling).
+	// And the volume itself outlived the sandbox (the Volume subsystem lifecycle decoupling).
 	if _, err := st.GetVolume(ctx, vid); err != nil {
 		t.Errorf("the volume was destroyed with its sandbox: %v", err)
 	}
@@ -340,8 +340,8 @@ func TestReconcileDeletesMountRowsOfACrashedCreate(t *testing.T) {
 }
 
 // TestPromoteExcludesThisSandboxsMountDests: the mediator threads the mount
-// destinations to BOTH Promote calls, which is what keeps the documented invariant from ever asking the documented invariant
-// (the documented invariant: no subsystem edge) and what keeps the forecast modelling the same freeze.
+// destinations to BOTH Promote calls, which is what keeps the Rootfs subsystem from ever asking the Volume subsystem
+// (the lifecycle: no subsystem edge) and what keeps the forecast modelling the same freeze.
 func TestPromoteExcludesThisSandboxsMountDests(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemory()
@@ -383,12 +383,12 @@ func TestPromoteExcludesThisSandboxsMountDests(t *testing.T) {
 			t.Fatalf("%s was never called", name)
 		}
 		if !strings.Contains(call, "/workspace") {
-			t.Errorf("%s did not receive the mount destination: %q — a static package list cannot know a per-sandbox dest (rootfs-overlay the documented invariant)", name, call)
+			t.Errorf("%s did not receive the mount destination: %q — a static package list cannot know a per-sandbox dest (rootfs mount constraints)", name, call)
 		}
 	}
 }
 
-// TestAdoptRecoversVolumeMaterializations closes the the documented invariant / the documented invariant gap that
+// TestAdoptRecoversVolumeMaterializations closes the extension boundary / atomic transition rollback gap that
 // AdoptMaterialized existed for without a consumer: an adopted survivor's liveState must
 // carry its volume handles, or the next pause/destroy Releases nothing.
 //
@@ -467,12 +467,12 @@ func TestAdoptRecoversVolumeMaterializations(t *testing.T) {
 }
 
 // TestAdoptRefusesWhenAVolumeIsGone: an absent unit makes the adopt FAIL rather than
-// silently succeed, and the sandbox is left alone (the documented invariant uncertain → protect).
+// silently succeed, and the sandbox is left alone (atomic transition rollback uncertain → protect).
 //
 // "Recreate it empty" is not a recovery for a LIVE sandbox: the running guest cannot be
 // re-pointed at a new directory, so it would keep writing into the old unlinked one with
 // zero errors while the control plane reported everything healthy — the measured mis-sweep
-// blast radius (the relevant internals page the documented invariant). A resume later legitimately creates-if-absent, because
+// blast radius (volume sweep safety). A resume later legitimately creates-if-absent, because
 // that restarts the guest.
 func TestAdoptRefusesWhenAVolumeIsGone(t *testing.T) {
 	ctx := context.Background()
@@ -510,7 +510,7 @@ func TestAdoptRefusesWhenAVolumeIsGone(t *testing.T) {
 	vb.mu.Unlock()
 
 	if err := m.Reconcile(ctx); err != nil {
-		t.Fatalf("reconcile returned fatal: %v — one un-adoptable sandbox must be skipped and logged, not abort recovery of the rest (the documented invariant)", err)
+		t.Fatalf("reconcile returned fatal: %v — one un-adoptable sandbox must be skipped and logged, not abort recovery of the rest (atomic transition rollback)", err)
 	}
 	// NOT adopted, and NOT demoted either: the record stays `running` and its placement
 	// stays protected, so nothing was torn down and the next pass retries.
@@ -525,6 +525,6 @@ func TestAdoptRefusesWhenAVolumeIsGone(t *testing.T) {
 		t.Errorf("state = %s; want running left untouched (uncertain → protect: refusing to adopt must not tear anything down)", rec.State)
 	}
 	if len(logged) == 0 {
-		t.Errorf("the refusal was silent — skip-and-log is the the documented invariant discipline, and the log is the only signal")
+		t.Errorf("the refusal was silent — skip-and-log is the atomic transition rollback discipline, and the log is the only signal")
 	}
 }

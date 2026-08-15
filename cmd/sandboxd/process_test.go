@@ -12,13 +12,13 @@ import (
 	v1 "github.com/TSHOGX/khora/pkg/transport/gen/khora/transport/v1"
 )
 
-// Unit (no substrate): the the documented invariant fan-out invariants as pure logic. The real
+// Unit (no substrate): the transport behavior fan-out invariants as pure logic. The real
 // runsc round-trip coverage is in test/transport_substrate_test.go; these
 // pin the hub mechanics deterministically and under -race.
 
 // blockingWriter simulates a child whose input pipe is full: Write blocks until
 // release is closed. Used to prove writeInput does not hold p.mu across a
-// blocking write (which would freeze the fan-out — the documented invariant invariant 1).
+// blocking write (which would freeze the fan-out — nonblocking fan-out).
 type blockingWriter struct {
 	entered chan struct{} // closed-ish: signals Write was reached
 	release chan struct{} // Write returns once this is closed
@@ -57,7 +57,7 @@ func TestRingBufferDropsOldestBytes(t *testing.T) {
 	}
 }
 
-// invariant 2: a subscriber that attaches after output was produced replays the
+// bounded replay: a subscriber that attaches after output was produced replays the
 // ring first, then joins live.
 func TestConnectReplaysRingThenLive(t *testing.T) {
 	p := newProc(1, nil)
@@ -80,7 +80,7 @@ func TestConnectReplaysRingThenLive(t *testing.T) {
 	}
 }
 
-// invariant 2 (multi-connection, the documented invariant): two subscribers each get an independent
+// bounded replay (multi-connection, the sandbox process model): two subscribers each get an independent
 // full copy; dropping one does not disturb the other.
 func TestFanOutIndependentCopies(t *testing.T) {
 	p := newProc(1, nil)
@@ -101,7 +101,7 @@ func TestFanOutIndependentCopies(t *testing.T) {
 	}
 }
 
-// invariant 1: a subscriber that never drains its window is dropped on overflow;
+// nonblocking fan-out: a subscriber that never drains its window is dropped on overflow;
 // the source (broadcast) NEVER blocks, and a subscriber that keeps up is
 // unaffected. The fast reader drains in lockstep with each broadcast so the
 // assertion is deterministic (a concurrently-scheduled reader can be transiently
@@ -143,7 +143,7 @@ func TestSlowSubscriberDroppedSourceNeverBlocks(t *testing.T) {
 	}
 }
 
-// invariant 1 boundary (lossy-by-design, the documented invariant invariant 1 / the documented invariant): a
+// nonblocking fan-out boundary (lossy-by-design, nonblocking fan-out / transport behavior): a
 // subscriber whose window is exactly full at process exit cannot receive the end
 // frame. Per the best-effort-tail contract that dropped end frame — exit code
 // included — is silently lost for THAT copy; the channel still closes cleanly and
@@ -187,7 +187,7 @@ func TestSubscribeAfterEnded(t *testing.T) {
 	}
 }
 
-// invariant 1 (source never blocks): a writeInput that blocks in Write (child not
+// nonblocking fan-out (source never blocks): a writeInput that blocks in Write (child not
 // draining its input) must NOT hold p.mu, so broadcast/subscribe/finish stay live
 // meanwhile. Holding p.mu across the write deadlocks this test — broadcast waits on
 // the mu the stuck write is holding — which is what makes it a real guard.
@@ -216,7 +216,7 @@ func TestWriteInputDoesNotBlockFanOut(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
-		t.Fatal("fan-out blocked while writeInput parked in Write — source blocked, invariant 1 violated")
+		t.Fatal("fan-out blocked while writeInput parked in Write — source blocked, nonblocking fan-out violated")
 	}
 
 	// Let the write finish and confirm it returned cleanly.
@@ -227,7 +227,7 @@ func TestWriteInputDoesNotBlockFanOut(t *testing.T) {
 	_ = sub
 }
 
-// The the documented invariant subsystem boundary as pure logic: only pid > 0 is a directed target.
+// The transport behavior subsystem boundary as pure logic: only pid > 0 is a directed target.
 // The substrate proof that a refused pid cannot destroy a real sandbox is in
 // test/transport_depth_substrate_test.go; this pins the predicate itself,
 // including that the message says WHERE fan-out belongs — a caller that only
@@ -316,7 +316,7 @@ func TestStartSendFailureDoesNotLeakProcOrWedgeChild(t *testing.T) {
 }
 
 // Same seam, the OTHER side of the boundary: a process that was started must not be
-// killed because a client went away. the documented invariant gives Start an independent context so the
+// killed because a client went away. the sandbox process model gives Start an independent context so the
 // process outlives a disconnect (the premise of Connect reattach), and "kill on
 // first-frame failure" cannot be a contract — the same disconnect one frame later
 // leaves it alive, so special-casing the first frame would make dead-vs-alive turn

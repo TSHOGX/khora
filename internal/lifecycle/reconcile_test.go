@@ -15,7 +15,7 @@ import (
 	"github.com/TSHOGX/khora/internal/waitfor"
 )
 
-// reconcile L1: pure logic against fakes. Proves the the documented invariant dual dispatch —
+// reconcile L1: pure logic against fakes. Proves the atomic transition rollback dual dispatch —
 // creating→delete, paused→keep, running-alive→adopt (in keep), running-dead→
 // demote (not in keep) — and that ReclaimOrphans is called with exactly the
 // re-adopted running set.
@@ -24,7 +24,7 @@ func seedRec(t *testing.T, st store.Store, id, ov string, state model.Lifecycle)
 	t.Helper()
 	ctx := context.Background()
 	now := time.Now()
-	// the documented invariant template FK: ensure "bare" exists first (idempotent across records).
+	// health and reclamation template FK: ensure "bare" exists first (idempotent across records).
 	_ = st.CreateTemplate(ctx, model.Template{ID: "bare", Builtin: true, CreatedAt: now})
 	if err := st.CreateSandbox(ctx, model.Sandbox{
 		ID: model.SandboxID(id), Template: "bare", Overlay: model.OverlayID(ov),
@@ -116,7 +116,7 @@ func TestReconcileDualDispatch(t *testing.T) {
 	}
 }
 
-// running→paused demote emits an event (the documented invariant ties to the documented invariant).
+// running→paused demote emits an event (atomic transition rollback ties to the transactional outbox).
 func TestReconcileDemoteEmitsEvent(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemory()
@@ -136,7 +136,7 @@ func TestReconcileDemoteEmitsEvent(t *testing.T) {
 	found := false
 	for _, e := range evs {
 		// involuntary demote emits "crash-paused", distinct from user "paused"
-		// and reaper "auto-paused" (the documented invariant / the documented invariant).
+		// and reaper "auto-paused" (the lifecycle state machine / FS-first pause and resume).
 		if e.Sandbox == "run_dead" && e.Kind == "crash-paused" && e.State == model.Paused {
 			found = true
 		}
@@ -202,7 +202,7 @@ func TestReconcileSkipAndLogOnUncertainSurvivor(t *testing.T) {
 	}
 }
 
-// periodic reconcile (the documented invariant live variant / reaper-health the documented invariant): a `running`
+// periodic reconcile (atomic transition rollback live variant / periodic reconciliation): a `running`
 // sandbox this process built (live-map handle present) is protected — kept from
 // reclaim WITHOUT a redundant Adopt re-recognition (that is the crash-recovery
 // path, unnecessary when the handle is already held). Its placement lands in keep.
@@ -234,7 +234,7 @@ func TestPeriodicReconcileProtectsLiveSurvivor(t *testing.T) {
 	// NOT re-adopted (we already held the handle) — Adopt must not have been called.
 	for _, c := range rt.Calls() {
 		if c == "Adopt:live_run" {
-			t.Fatalf("periodic reconcile re-adopted a live survivor (should skip: the documented invariant)")
+			t.Fatalf("periodic reconcile re-adopted a live survivor (should skip: the lifecycle contract)")
 		}
 	}
 	// protected in keep.
@@ -250,7 +250,7 @@ func TestPeriodicReconcileProtectsLiveSurvivor(t *testing.T) {
 }
 
 // periodic reconcile: a live handle whose record is NOT in the scan snapshot must
-// still be protected (the documented invariant / reaper-health the documented invariant addition 2).
+// still be protected by the live-map keep set.
 //
 // This is a DIFFERENT arm from TestPeriodicReconcileProtectsLiveSurvivor, which
 // has both a record and a handle and so exercises the record-scan path. The
@@ -279,13 +279,13 @@ func TestPeriodicReconcileProtectsLiveHandleMissingFromTheSnapshot(t *testing.T)
 
 	reclaim := lastReclaimCall(rt.Calls())
 	if !strings.Contains(reclaim, "late_build") {
-		t.Fatalf("keep-set = %q; want it to contain late_build — a placement this process holds a live handle for is never an orphan, even when the record scan missed it (the documented invariant / the documented invariant addition 2). Without this the reconcile tears down a sandbox that just finished launching.", reclaim)
+		t.Fatalf("keep-set = %q; want it to contain late_build — a placement this process holds a live handle for is never an orphan, even when the record scan missed it. Without this the reconcile tears down a sandbox that just finished launching.", reclaim)
 	}
 }
 
 // periodic reconcile skips a `running` sandbox whose transition lock is HELD (an
 // in-flight resume/verb) — it must NOT be treated as an orphan or demoted, just
-// protected and retried (the documented invariant live variant addition 1).
+// protected and retried.
 func TestPeriodicReconcileSkipsLockedSandbox(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemory()
@@ -312,7 +312,7 @@ func TestPeriodicReconcileSkipsLockedSandbox(t *testing.T) {
 	}
 	for _, c := range rt.Calls() {
 		if c == "Adopt:held_run" {
-			t.Fatalf("periodic reconcile probed a lock-held sandbox (should skip: the documented invariant)")
+			t.Fatalf("periodic reconcile probed a lock-held sandbox (should skip: atomic transition rollback)")
 		}
 	}
 }
@@ -338,8 +338,8 @@ func waitForCall(t *testing.T, calls func() []string, wantPrefix string) {
 	}
 }
 
-// periodic reconcile must NOT tear down an IN-FLIGHT create (the documented invariant: a lock-held
-// sandbox is skipped in ALL states — reaper-health the documented invariant addition 1). A live Create
+// periodic reconcile must NOT tear down an IN-FLIGHT create. A lock-held sandbox
+// is skipped in ALL states. A live Create
 // holds the
 // transition lock across its whole cold-start with the record reading `creating`;
 // a periodic tick in that window must skip it, NOT delete the record + destroy
@@ -348,7 +348,7 @@ func waitForCall(t *testing.T, calls func() []string, wantPrefix string) {
 func TestPeriodicReconcileSkipsInFlightCreate(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemory()
-	seedBare(t, st) // the documented invariant template FK
+	seedBare(t, st) // health and reclamation template FK
 	rp := &fakeRootfs{}
 	gate := make(chan struct{})
 	rt := &fakeRuntime{launchGate: gate, adoptAlive: map[string]bool{}}
@@ -407,7 +407,7 @@ func TestPeriodicReconcileSkipsInFlightCreate(t *testing.T) {
 	}
 }
 
-// periodic reconcile must NOT tear down an IN-FLIGHT resume (the documented invariant, ALL states).
+// periodic reconcile must NOT tear down an IN-FLIGHT resume (atomic transition rollback, ALL states).
 // A live Resume holds the lock across cold-start with the record reading `paused`;
 // a periodic tick must skip it, NOT unmount the merged overlay it just mounted or
 // reclaim the placement it just launched — the `paused`-arm of the same skip.
@@ -467,11 +467,11 @@ func TestPeriodicReconcileSkipsInFlightResume(t *testing.T) {
 	}
 }
 
-// Reconcile is idempotent (the documented invariant: "a skipped item is simply retried next
+// Reconcile is idempotent (atomic transition rollback: "a skipped item is simply retried next
 // start", so re-running must converge rather than accumulate). Idempotence here
 // means THREE things, and a record count alone catches none of them: the second
 // pass must not change any record, must not emit a second event (a duplicate
-// crash-paused is a double billing entry, the documented invariant), and must hand ReclaimOrphans
+// crash-paused is a double billing entry, the transactional outbox), and must hand ReclaimOrphans
 // the SAME keep-set (a shrunken one on the second pass would tear down a
 // survivor the first pass correctly protected).
 func TestReconcileIdempotent(t *testing.T) {
@@ -520,7 +520,7 @@ func TestReconcileIdempotent(t *testing.T) {
 		}
 	}
 	// (2) no additional event. A re-emitted crash-paused for run_dead would double
-	// count in any subscriber that meters transitions (the documented invariant).
+	// count in any subscriber that meters transitions (the transactional outbox).
 	if len(afterEvents) != len(beforeEvents) {
 		t.Fatalf("second reconcile emitted %d extra event(s) (%d → %d); a re-run must publish nothing new",
 			len(afterEvents)-len(beforeEvents), len(beforeEvents), len(afterEvents))

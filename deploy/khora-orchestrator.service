@@ -1,4 +1,4 @@
-# The orchestrator as a systemd service (the recorded design's topology, made concrete).
+# The orchestrator as a systemd service (the deployment boundary's topology, made concrete).
 #
 # VERIFIED, not sketched: this unit passes `systemd-analyze verify` on systemd 259,
 # and every claim in the comments below is either checked there or measured.
@@ -28,7 +28,7 @@ Documentation=https://github.com/TSHOGX/khora
 RequiresMountsFor=/srv/khora/state
 After=network.target
 
-# A restart is safe by construction — the documented invariant reconciliation runs on every boot and
+# A restart is safe by construction — atomic transition rollback reconciliation runs on every boot and
 # retakes surviving placements — but a rapid restart LOOP is a real signal to stop and
 # look, most likely a poison envelope in the outbox that no restart can clear (which is
 # exactly why /healthz does not fail on it). These two belong in [Unit]: systemd
@@ -49,12 +49,12 @@ ExecStart=/usr/local/bin/orchestrator \
     --state /srv/khora/state \
     --store /var/lib/khora/store.db
 
-# --addr is loopback, and the engine ENFORCES that (the recorded design): the the documented invariant API has no
+# --addr is loopback, and the engine ENFORCES that (the deployment boundary): the control-plane API has no
 # authentication and no TLS, so the outward-facing surface is the gateway in front of
 # it. See the documentation; --insecure-listen is what a deployment that means
 # otherwise has to say out loud.
 
-# ROOT IS REQUIRED, not a convenience (the recorded design Privilege): `runsc --network=sandbox`
+# ROOT IS REQUIRED, not a convenience (the root-required deployment Privilege): `runsc --network=sandbox`
 # refuses --rootless, and the overlay mount needs CAP_SYS_ADMIN. --sudo is the dev
 # affordance and stays off here.
 User=root
@@ -62,8 +62,8 @@ User=root
 # --- shutdown: this is item 2's decision made concrete ---
 #
 # SIGTERM drains and exits, and RUNNING SANDBOXES ARE LEFT RUNNING — the next boot
-# re-adopts them with the same placement and IP (the documented invariant takeover). Pausing them would
-# discard guest memory (the documented invariant stores none), so a routine `systemctl restart` would
+# re-adopts them with the same placement and IP (atomic transition rollback takeover). Pausing them would
+# discard guest memory (FS-first pause and resume stores none), so a routine `systemctl restart` would
 # destroy every guest's in-memory work.
 KillSignal=SIGTERM
 # Above the engine's own --shutdown-timeout (30s default), so the engine's bounded
@@ -110,7 +110,7 @@ LimitNOFILE=65536
 # The engine has its own no-oversubscribe admission (--node-memory-byte); this is the
 # backstop for the ORCHESTRATOR PROCESS only. `continue` rather than `kill`: a systemd
 # OOM kill of the engine would leave every sandbox running with nothing holding their
-# handles, which is survivable (the documented invariant) but strictly worse than the engine reporting
+# handles, which is survivable (atomic transition rollback) but strictly worse than the engine reporting
 # pressure.
 OOMPolicy=continue
 

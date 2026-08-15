@@ -6,14 +6,14 @@
 # USAGE side: a snapshot's referenced bytes are not charged to the new unit, the
 # snapshot is atomic/instant/~16KiB, a live volume can be snapshotted without
 # disturbing a writing guest, and a leaked qgroup row's id can be reused after a
-# remount (the relevant internals page the documented invariant / the documented invariant / the documented invariant, spike-squota-snapshot.sh,
+# remount (spike-squota-snapshot.sh,
 # spike-live-volume-snapshot.sh, spike-qgroup-reclaim.sh). All settled; NONE of it
 # is re-measured here.
 #
-# The LIMIT side (`max_referenced`) has never been tested, and the documented invariant is about to
-# depend on it: the relevant internals page the documented invariant makes "a volume = a subvolume" precisely so that cheap
-# snapshots and the hard cap land on the SAME object, the documented invariant still lists "whether a
-# clone's volume inherits quota / policy" as undecided, and the documentation the documented invariant already
+# The LIMIT side (`max_referenced`) has never been tested, and the Volume subsystem is about to
+# depend on it: btrfs CoW snapshots makes "a volume = a subvolume" precisely so that cheap
+# snapshots and the hard cap land on the SAME object. Whether a clone's volume
+# inherits quota/policy is still undecided, while resource admission already
 # commits the node accounting inequality to "snapshot / clone volumes are counted by
 # their **declared cap** rather than by metadata-level actual bytes". That sentence is
 # only sound if the DECLARED cap is what the disk actually enforces. Five questions
@@ -32,8 +32,8 @@
 #       could be a cap we failed to read; only a write well past the source's cap
 #       that SUCCEEDS proves there is no cap. Plus both isolation directions.
 #   Q5  THE MISMATCH HAZARD. If the engine's record says "cap N" and the disk
-#       enforces nothing, the documented invariant's left-hand side is fiction — the same class of
-#       defect as the documented invariant (a cap nobody set) reached from the opposite direction.
+#       enforces nothing, resource admission's left-hand side is fiction — the same class of
+#       defect as Volume storage (a cap nobody set) reached from the opposite direction.
 #       Shown concretely with an engine that "forgot" to set the cap.
 #   Q6  LOWERING a cap BELOW current usage. `PATCH /v1/volumes/{id}` has exactly
 #       one field, `size`, so the endpoint must state a semantic for "reduce the
@@ -48,8 +48,8 @@ set -euo pipefail
 
 [ "$(id -u)" -eq 0 ] || { echo "must run as root (btrfs ioctls + loop mount)"; exit 1; }
 
-SRC_CAP=$((32 * 1024 * 1024))   # 32 MiB: the cap size the the documented invariant statfs and the documented invariant
-                                # ENOSPC-precision measurements used
+SRC_CAP=$((32 * 1024 * 1024))   # 32 MiB: the cap used by the statfs and
+                                # ENOSPC-precision measurements
 ALT_CAP=$((8 * 1024 * 1024))    # a DIFFERENT value, so "the snapshot's cap moved"
                                 # and "the source's cap moved" are distinguishable
 MID_CAP=$((24 * 1024 * 1024))   # a third value, for the reverse of Q2
@@ -61,7 +61,7 @@ PAST=96                          # MiB to pour when proving "no cap": 3x SRC_CAP
                                  # success cannot be a rounding artifact
 HUGE=128                         # MiB for Q5's forgetful-engine writer: 4x the cap
                                  # its control-plane record claims
-BTRFS_ROOT=/var/tmp             # btrfs, quota fs-wide enabled, squota (the recorded design)
+BTRFS_ROOT=/var/tmp             # btrfs, quota fs-wide enabled, squota (the root-required deployment)
 WORK="$(mktemp -d "$BTRFS_ROOT/spike-capsnap.XXXXXX")"
 FS="$(findmnt -T "$WORK" -no TARGET)"
 FAIL=0
@@ -167,7 +167,7 @@ chk()    { if [ "$2" = "$3" ]; then printf '  ok    %-56s %s\n' "$1" "$2"
 # Q4/Q5 pour hundreds of MiB and must be able to tell "the cap stopped me" from
 # "the filesystem filled up", which a private fs of known size gives for free.
 # Note `mkfs.btrfs -O squota`: `btrfs quota enable --simple` is EPERM on this
-# substrate even as root (the relevant internals page the documented invariant / rootfs-overlay the documented invariant), so the mode has to
+# substrate even as root (Volume quota cleanup / btrfs quota materialization), so the mode has to
 # be baked at mkfs time.
 loopfs(){ local img=$BTRFS_ROOT/spike-capsnap-$1.img mnt=$BTRFS_ROOT/spike-capsnap-$1.mnt
   rm -f "$img"; mkdir -p "$mnt"; truncate -s "$2"G "$img"
@@ -205,10 +205,10 @@ echo
 echo "=================================================================== Q1"
 echo " Q1. INHERITANCE: does a snapshot's row carry the source's max_referenced?"
 echo "=================================================================="
-# WHAT WRONG BEHAVIOUR THIS CATCHES. If the answer is "inherits", then the documented invariant's
+# WHAT WRONG BEHAVIOUR THIS CATCHES. If the answer is "inherits", then the Volume subsystem's
 # Snapshot/Clone gets a cap for free and the danger is a control-plane record that
 # says "no cap" over a disk that enforces one. If the answer is "none", then every
-# snapshot lands UNCAPPED and the documented invariant's "counted by the declared cap" is a claim about a
+# snapshot lands UNCAPPED and resource admission's "counted by the declared cap" is a claim about a
 # number nobody wrote to disk. Both are defects; they are opposite defects, and the fix
 # differs.
 # Four shapes, because a rule that only holds for the rw case is not a rule.
@@ -268,7 +268,7 @@ if btrfs subvolume snapshot -i 1/0 "$WFS/src" "$WFS/snap_i" >/dev/null 2>&1; the
   echo "          ($Q1_I). A limit on the level-1 parent IS $Q1_I_ENF under squota,"
   echo "          but it is a SHARED ceiling over every member, not a per-volume cap:"
   echo "          it cannot express \"this volume gets N\" and one member exhausting it"
-  echo "          ENOSPCs its siblings. Not the answer for the documented invariant."
+  echo "          ENOSPCs its siblings. Not the answer for the Volume subsystem."
 else
   echo "       REFUSED — -i is not usable here at all."; Q1_I=refused; Q1_I_ENF=n/a
 fi
@@ -277,12 +277,12 @@ echo
 echo "=================================================================== Q2"
 echo " Q2. INDEPENDENCE: are the two rows coupled?"
 echo "=================================================================="
-# WHAT WRONG BEHAVIOUR THIS CATCHES. the documented invariant's seam has ONE per-volume method,
-# `SetCapacity(volumeID, capBytes)` (the relevant internals page the documented invariant). If setting a snapshot's limit
+# WHAT WRONG BEHAVIOUR THIS CATCHES. the Volume subsystem's seam has ONE per-volume method,
+# `SetCapacity(volumeID, capBytes)` (the volume backend seam). If setting a snapshot's limit
 # also moved its source's, that method would be a cross-volume write: capping a
-# clone would silently re-cap the volume it came from, breaking the documented invariant's Σ on a
+# clone would silently re-cap the volume it came from, breaking resource admission's Σ on a
 # record nobody edited. And if `limit none` on a clone cleared the SOURCE's cap,
-# destroying a clone's cap would be the the documented invariant "limit none" catastrophe (a silently
+# destroying a clone's cap would be the Volume storage "limit none" catastrophe (a silently
 # uncapped LIVE volume, zero signal) reached from a legitimate API call.
 printf '  %-46s %-20s %s\n' "action" "snapshot cap" "source cap"
 printf '  %-46s %-20s %s\n' "------" "------------" "----------"
@@ -432,24 +432,24 @@ echo "=================================================================== Q5"
 echo " Q5. THE MISMATCH HAZARD: a record that says 'cap N' over a disk that says no"
 echo "=================================================================="
 # WHAT WRONG BEHAVIOUR THIS CATCHES — and it is the point of the whole spike.
-# the documentation the documented invariant requires `size` on POST /v1/volumes when the disk axis is metered
+# Resource admission requires `size` on POST /v1/volumes when the disk axis is metered
 # ("the axis being metered ⟹ volumes must have caps too"), and states that
 # snapshot/clone volumes are counted by their declared cap. The control-plane record
 # therefore ALWAYS carries a number. Q1 says the disk carries `none`. So an engine
 # whose Snapshot/Clone forgets the explicit SetQuotaLimit produces a volume that the
 # admission gate counts as N bytes and the filesystem lets grow without bound — silent
 # over-commit of the node budget, no errno anywhere, and `Usage()` returning limit=0
-# which is INDISTINGUISHABLE from a deliberately uncapped volume. This is the documented invariant's defect
+# which is INDISTINGUISHABLE from a deliberately uncapped volume. This is Volume storage's defect
 # class from the other side: there, a cap nobody set; here, a cap everybody believes in
 # that does not exist.
 DECLARED=$SRC_CAP
 mk "$WFS/vrec"; btrfs qgroup limit "$DECLARED" "$WFS/vrec"
 pour "$WFS/vrec/data" 8 >/dev/null
 # the engine snapshots it and allocates a new volume ID. It records size=$DECLARED
-# (the documented invariant: counted by the declared cap). It does NOT call SetQuotaLimit — the bug under
+# (resource admission: counted by the declared cap). It does NOT call SetQuotaLimit — the bug under
 # test.
 snap "$WFS/vrec" "$WFS/vclone"; settle
-echo "  control plane believes:  volume 'vclone' size = $(mib $DECLARED)  (the documented invariant: by declared cap)"
+echo "  control plane believes:  volume 'vclone' size = $(mib $DECLARED)  (resource admission: by declared cap)"
 echo "  Usage() would read back:  $(rowof "$WFS/vclone")"
 echo "                            limit=0 — the SAME value an intentionally uncapped"
 echo "                            volume reports. The engine cannot tell them apart."
@@ -461,16 +461,16 @@ Q5_BYTES="${Q5##*wrote=}"
 if [ "${Q5%% *}" = "rc=0" ] && [ "$Q5_BYTES" -gt "$DECLARED" ]; then
   Q5_HAZARD=real
   echo "  -> *** $(mib "$Q5_BYTES") on disk against a $(mib $DECLARED) declaration, zero errors,"
-  echo "     no lifecycle event, nothing in the control plane. the documented invariant's left-hand side"
+  echo "     no lifecycle event, nothing in the control plane. resource admission's left-hand side"
   echo "     understated this node by $(mib $((Q5_BYTES - DECLARED))) from ONE forgotten call, and the"
   echo "     over-commit grows without bound because there is no ceiling to hit. ***"
-  echo "     Same class as the documented invariant (a cap nobody set), opposite direction: here it is a"
+  echo "     Same class as Volume storage (a cap nobody set), opposite direction: here it is a"
   echo "     cap the whole control plane believes in and the disk never had."
 else
   Q5_HAZARD=notreproduced
   echo "  -> not reproduced: the write stopped, so something DID cap the clone."; FAIL=1
 fi
-echo "  and the detection question, since the documented invariant showed guests produce no errno:"
+echo "  and the detection question, since Volume storage showed guests produce no errno:"
 echo "     Usage().limit = 0 for both 'forgot to cap' and 'deliberately uncapped'."
 echo "     So the engine cannot READ its way out of this — the invariant has to be"
 echo "     established at WRITE time, inside Snapshot/Clone."
@@ -480,7 +480,7 @@ echo "=================================================================== Q6"
 echo " Q6. LOWERING a cap BELOW current usage: what can the endpoint promise?"
 echo "=================================================================="
 # WHAT WRONG BEHAVIOUR THIS CATCHES. `PATCH /v1/volumes/{id}` carries only `size`,
-# and the documented invariant already says any write to a cap column changes Σ AT ONCE ("a raise must
+# and resource admission already says any write to a cap column changes Σ AT ONCE ("a raise must
 # re-run admission … while a lowering need not") — i.e. the spec assumes LOWERING is
 # always safe and needs no admission re-check. That assumption is untested against a
 # volume that has ALREADY written past the new number. Three distinguishable outcomes,
@@ -551,7 +551,7 @@ Q6_DATA="$([ "$SUM_AFTER" = "$SUM_BEFORE" ] && echo intact || echo DAMAGED)"
 
 echo "  (d) the NEXT write: refused immediately, or does it get a grace margin?"
 # "Immediately" matters: if a lowered cap allowed even one more MiB, the endpoint
-# could not promise "no further growth" and the documented invariant's Σ would still drift after a PATCH.
+# could not promise "no further growth" and resource admission's Σ would still drift after a PATCH.
 Q6_W="$(pour "$WFS/low/more" 4)"; settle
 printf '        pour 4MiB: %s   row: %s\n' "$Q6_W" "$(rowof "$WFS/low")"
 Q6_W_BYTES="${Q6_W##*wrote=}"
@@ -573,7 +573,7 @@ chk "original data still intact after the refused write" "$SUM_W" "$SUM_BEFORE"
 
 echo "  (e) *** THE ONE THAT MATTERS: is it REVERSIBLE? ***"
 # THIS IS WHERE THE FIRST DRAFT OF THIS SPIKE WAS WRONG. It asserted that `limit
-# none` restores writability — the obvious repair path, and the one the documented invariant's "a lowering
+# none` restores writability — the obvious repair path, and the one resource admission's "a lowering
 # need not re-run admission" quietly assumes is always available. It is NOT. Measured
 # below: while `referenced > max_referenced`, the quota-limit ioctl ITSELF returns
 # ENOSPC, so the cap cannot be removed OR raised. A `size` PATCH that lands below
@@ -708,7 +708,7 @@ echo "Q5 mismatch hazard : $Q5_HAZARD. A snapshot with no explicit limit grew to
 echo "                     $(mib "${Q5_BYTES:-0}") while its control-plane record declared $(mib $DECLARED)."
 echo "                     Zero errors, no lifecycle event, and \`Usage()\` reports"
 echo "                     limit=0 — identical to a deliberately uncapped volume. So"
-echo "                     the engine cannot detect it by reading; the documented invariant's Σ is simply"
+echo "                     the engine cannot detect it by reading; resource admission's Σ is simply"
 echo "                     wrong by the overshoot, unboundedly."
 echo "Q6 lowering a cap  : btrfs ${Q6_LOWER^^} a limit below current usage (rc=$Q6_RC), and"
 echo "                     'referenced > max_referenced' is a REPRESENTABLE row state"
@@ -737,25 +737,25 @@ echo "                     forbids it — it accepts it, rc=0, and existing data
 echo "                     perfectly safe — but because accepting it produces a volume"
 echo "                     the CONTROL PLANE CAN NO LONGER RE-CAP: the repair for a"
 echo "                     mis-typed size runs through deleting the guest's bytes, and"
-echo "                     nothing in the documented invariant lets the engine do that on the caller's behalf."
-echo "                     This also puts a caveat on the documented invariant's \"a lowering need not\""
+echo "                     nothing in the external API lets the engine do that on the caller's behalf."
+echo "                     This also puts a caveat on resource admission's \"a lowering need not\""
 echo "                     (re-run the admission gate):"
 echo "                     the Σ claim is right (lowering only reduces the left-hand"
 echo "                     side, so no admission re-check is needed), but \"lowering is"
 echo "                     the safe direction\" does not follow — it is the direction"
-echo "                     that can strand a volume. And per the documented invariant the guest's ENOSPC is"
-echo "                     the only signal, while the documented invariant only calls ENOSPC an EXPECTED"
+echo "                     that can strand a volume. And per Volume storage the guest's ENOSPC is"
+echo "                     the only signal, while the data-plane exposure boundary only calls ENOSPC an EXPECTED"
 echo "                     data-plane result when the boundary was DECLARED — a silently"
 echo "                     accepted shrink declares nothing to the workload."
 echo
 echo "CONSEQUENCE FOR THE SEAM: \`Snapshot\`/\`Clone\` MUST set the new volume's cap"
 echo "  explicitly, as part of the same operation that creates the bytes. It is not an"
-echo "  optimization or a nicety — it is the only thing standing between the documented invariant's"
+echo "  optimization or a nicety — it is the only thing standing between resource admission's"
 echo "  declared-cap accounting and an unbounded silent over-commit. And because the"
 echo "  cap is a SEPARATE step from the snapshot ioctl (Q1) while the bytes exist from"
 echo "  the first instant, the window between them is a real crash window: a snapshot"
 echo "  that survives a crash before its limit call is a live uncapped volume."
-echo "  the documented invariant's \"snapshot / clone volumes are counted by their declared cap\" is"
+echo "  resource admission's \"snapshot / clone volumes are counted by their declared cap\" is"
 echo "  therefore a REQUIREMENT ON THE"
 echo "  ENGINE, not a description of the substrate."
 echo

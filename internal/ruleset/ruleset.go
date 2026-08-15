@@ -1,4 +1,4 @@
-// Package ruleset is a LEAF: the two facts the documented invariant (Network) and the documented invariant (Runtime)
+// Package ruleset is a LEAF: the two facts the network declaration (Network) and the runtime provider contract (Runtime)
 // must agree on, and nothing else. It imports no engine package, holds no
 // mechanism, and abstracts no behavior — it is `guestport`'s precedent applied a
 // second time (the documentation: when two subsystems need the same fact, put it in a
@@ -7,23 +7,23 @@
 // The two facts:
 //
 //  1. THE STATIC ADDRESS FACTS the L0 floor and the internal deny-safe tier are
-//     made of (the documented invariant). All four floor items are static (the relevant internals page the documented invariant ④⑧) and
-//     BOTH HOPS share one copy (the documented invariant second invariant), so there is nothing to
+//     made of (the provider security contract). All four floor items are static (network substrate measurements) and
+//     BOTH HOPS share one copy (the second-hop floor), so there is nothing to
 //     distribute at runtime. The sandbox address space is here rather than in
 //     local_runsc because the generator and the allocator must not be able to
 //     disagree about it: the allocator hands out /30s from this /16, and the
 //     floor's sibling item IS this /16.
 //
-//  2. THE ABSTRACT RULE VOCABULARY. the documented invariant generates the rule set as a pure function and the documented invariant
+//  2. THE ABSTRACT RULE VOCABULARY. the network declaration generates the rule set as a pure function and the runtime provider contract
 //     renders it into nft text at placement time, binding the three things only it holds
-//     (the documented invariant ❌ list / the relevant internals page the documented invariant ② / the documented invariant). Both halves need the vocabulary, and it can live
+//     (the runtime provider contract list / the network enforcement locus / network enforcement). Both halves need the vocabulary, and it can live
 //     in neither: `network` importing `runtime` or the reverse is the edge `internal/arch`
 //     fails on.
 //
 // NOTHING HERE MAY NAME A PLACEMENT PRODUCT. A rule that must reach "this
 // sandbox's host veth" or "this sandbox's own /30 gateway" says so with a Scope
 // or a Match flag, and the provider substitutes the concrete value. That is what
-// keeps the generated rule set placement-free, and therefore what keeps the documented invariant's
+// keeps the generated rule set placement-free, and therefore what keeps the network declaration's
 // generator testable without root.
 package ruleset
 
@@ -34,40 +34,40 @@ import (
 )
 
 // SandboxCIDR is the single fixed CIDR every sandbox /30 is carved out of
-// (the relevant internals page the documented invariant ④). Two consumers, and the point of putting it here is that
+// (network substrate measurements). Two consumers, and the point of putting it here is that
 // they cannot drift apart:
 //
-//   - the documented invariant's allocator hands out /30s from inside it.
-//   - the documented invariant's L0 floor names it as the SIBLING item — the materialization of the
-//     the documented invariant cross-sandbox network isolation invariant, which point-to-point veth
+//   - the runtime provider contract's allocator hands out /30s from inside it.
+//   - the network declaration's L0 floor names it as the SIBLING item — the materialization of the
+//     the data-plane exposure boundary cross-sandbox network isolation invariant, which point-to-point veth
 //     does NOT deliver on its own (the host still ROUTES between two /30s;
-//     measured, the relevant internals page the documented invariant ①).
+//     measured, network substrate measurements).
 //
 // Because it is one FIXED CIDR the sibling item is a static rule rather than a
 // membership set maintained at runtime — which is what lets both hops share one copy
-// with no distribution mechanism at all (the documented invariant).
+// with no distribution mechanism at all (the provider security contract).
 var SandboxCIDR = netip.MustParsePrefix("10.66.0.0/16")
 
-// FloorV4 / FloorV6 are the L0 floor's ENUMERABLE items — the daddr list (the documented invariant).
+// FloorV4 / FloorV6 are the L0 floor's ENUMERABLE items — the daddr list (the provider security contract).
 //
 // THE FOURTH FLOOR ITEM IS DELIBERATELY ABSENT FROM THESE LISTS. "Any address of
 // the host itself" is covered by a single `iifname`-narrowed PURE CT-STATE rule
 // on the `input` hook, never by enumeration: "not established" is exhaustive over
 // every host address, so the engine does not need to know its own bind addresses
 // and the whole class of "a host address changed, must we re-render" questions
-// does not exist (the documented invariant / the relevant internals page the documented invariant ⑧). Putting host addresses in a list here
+// does not exist (the provider security contract / network substrate measurements). Putting host addresses in a list here
 // would reintroduce exactly that problem.
 //
 // Two lists because nft's grammar is family-typed: `ip daddr` matches only IPv4
 // packets and `ip6 daddr` only IPv6, so a set cannot mix them. This is NOT the
-// generator "forking for IPv6" (the relevant internals page the documented invariant ⑪ measured that as redundant for the
+// generator "forking for IPv6" (network substrate measurements measured that as redundant for the
 // ct-state floor, which carries no family qualifier): these are declaration-layer
 // ADDRESS members, which nft can only spell per family.
 var (
 	FloorV4 = []netip.Prefix{
 		netip.MustParsePrefix("127.0.0.0/8"),    // loopback
 		netip.MustParsePrefix("169.254.0.0/16"), // link-local (covers every cloud metadata endpoint)
-		SandboxCIDR,                             // sibling sandbox address space (the documented invariant / the documented invariant ①)
+		SandboxCIDR,                             // sibling sandbox address space (the data-plane exposure boundary / network enforcement)
 	}
 	FloorV6 = []netip.Prefix{
 		netip.MustParsePrefix("::1/128"),   // loopback
@@ -75,15 +75,15 @@ var (
 	}
 )
 
-// FloorLiftableNever is the subset of the floor's daddr items that the documented invariant's seventh
+// FloorLiftableNever is the subset of the floor's daddr items that the API error contract's seventh
 // 400 class reads: loopback and link-local, in both families.
 //
 // It excludes the SIBLING item on purpose, and that exclusion is a decision with
-// two independent reasons (the documented invariant): an `egress.allow[]` entry inside the sibling
+// two independent reasons (the API error contract): an `egress.allow[]` entry inside the sibling
 // CIDR is NOT a dead rule — this sandbox's own /30 gateway sits in there and is
-// the one stably-available host-local resolver address the documented invariant semantics ③ requires
-// a caller to be able to declare (the relevant internals page the documented invariant ⑦) — and a 400 that mentioned the
-// sibling CIDR would put the sandbox address space on the wire, which the documented invariant's
+// the one stably-available host-local resolver address the network declaration semantics  requires
+// a caller to be able to declare (network substrate measurements) — and a 400 that mentioned the
+// sibling CIDR would put the sandbox address space on the wire, which the API error contract's
 // ID-addressing rule excludes.
 var FloorLiftableNever = []netip.Prefix{
 	netip.MustParsePrefix("127.0.0.0/8"),
@@ -92,21 +92,21 @@ var FloorLiftableNever = []netip.Prefix{
 	netip.MustParsePrefix("fe80::/10"),
 }
 
-// TierV4 / TierV6 are the internal deny-safe tier (the documented invariant): deny by DEFAULT, but
+// TierV4 / TierV6 are the internal deny-safe tier (the provider security contract): deny by DEFAULT, but
 // LIFTABLE BY DECLARATION — the whole difference between this tier and the floor,
 // materialized purely by ORDER (the floor sits above the declaration's allows, this
 // tier below them).
 //
-// Members are RFC1918's three blocks plus a mechanical v6 derivation (the documented invariant). It
+// Members are RFC1918's three blocks plus a mechanical v6 derivation (the provider security contract). It
 // is not optional hardening: with the three host-side egress mechanisms in place,
 // `egress.default: allow` without this tier hands the host's entire LAN to the
-// sandbox (measured, the relevant internals page the documented invariant ⑤), i.e. it would deliver an `allow` STRICTLY
-// WIDER than the documented invariant defines.
+// sandbox (measured, network substrate measurements), i.e. it would deliver an `allow` STRICTLY
+// WIDER than the provider security contract defines.
 //
 // It must NOT share a set with the floor: the sibling /16 is nested inside 10/8,
 // and an interval set either refuses to load with nested members or — with
 // auto-merge — SILENTLY swallows the subnet, which would merge the floor away
-// (measured, the relevant internals page the documented invariant ⑱). Two rules, ordered.
+// (measured, network substrate measurements). Two rules, ordered.
 var (
 	TierV4 = []netip.Prefix{
 		netip.MustParsePrefix("10.0.0.0/8"),
@@ -117,7 +117,7 @@ var (
 	// `64:ff9b::/96` prefix itself. Per RFC 6052 that prefix maps the ENTIRE IPv4
 	// space, public destinations included, so dropping the whole /96 would refuse
 	// exactly the public egress `egress.default: allow` promises (measured,
-	// the relevant internals page the documented invariant ㉓). Derived rather than transcribed so the two halves cannot
+	// network substrate measurements). Derived rather than transcribed so the two halves cannot
 	// drift; the literals are pinned by a test.
 	TierV6 = append([]netip.Prefix{netip.MustParsePrefix("fc00::/7")}, nat64Images(TierV4)...)
 )
@@ -126,7 +126,7 @@ var (
 // deriving member images — it is never itself a rule member (see TierV6).
 var NAT64Prefix = netip.MustParsePrefix("64:ff9b::/96")
 
-// nat64Images maps IPv4 prefixes to their RFC 6052 the documented invariant images under the
+// nat64Images maps IPv4 prefixes to their RFC 6052 the guest identity model images under the
 // well-known /96 prefix: the v4 address occupies the low 32 bits, so the image's
 // prefix length is 96 + the v4 prefix length.
 func nat64Images(v4 []netip.Prefix) []netip.Prefix {
@@ -144,8 +144,8 @@ func nat64Images(v4 []netip.Prefix) []netip.Prefix {
 
 // Proto is the transport protocol a tuple names. It is ALWAYS explicit — a
 // format requirement, not an optional dimension: in the kernel mechanism that
-// carries it, port matching itself depends on protocol matching (the documented invariant /
-// the relevant internals page the documented invariant), so `{cidr, port}` is not well-formed.
+// carries it, port matching itself depends on protocol matching (the network declaration /
+// network tuple validation), so `{cidr, port}` is not well-formed.
 type Proto string
 
 const (
@@ -158,14 +158,14 @@ const (
 //
 //   - The first hop (the guest's own egress) splits across TWO hooks with
 //     OPPOSITE predicate shapes: traffic to an address of the host ITSELF lands
-//     on `input`, traffic the host would ROUTE lands on `forward` (the relevant internals page
-//     the documented invariant ⑧). A floor that only covers `forward` misses guest→host entirely.
+//     on `input`, while traffic the host would route lands on `forward`. A floor
+//     that only covers `forward` misses guest-to-host traffic entirely.
 //   - The SECOND hop (a host-local process opening its own connection on the
-//     guest's behalf, the documented invariant invariant 2) lands on NEITHER: measured, it counts
+//     guest's behalf, the second-hop floor) lands on NEITHER: measured, it counts
 //     zero in `forward` in all three shapes and is visible only in `output`
-//     (the relevant internals page the documented invariant ㉔). Reading the documented invariant's two-hook table as "the forward row covers
+//     (network substrate measurements). Reading network enforcement's two-hook table as "the forward row covers
 //     it too" yields a rule set in which the second hop is never evaluated, and
-//     the symptom is a floor counter that does not move — the documented invariant's silent pass.
+//     the symptom is a floor counter that does not move — network enforcement's silent pass.
 type Hook uint8
 
 const (
@@ -187,9 +187,9 @@ const (
 	//
 	// Measured: B's chain won, its `drop` terminated traversal (only a terminal verdict
 	// crosses chains) and A's floor counted ZERO. The security outcome is the same, but the
-	// guest gets a 25-SECOND HANG instead of the clean failure the documented invariant promises, and WHICH
+	// guest gets a 25-SECOND HANG instead of the clean failure the provider security contract promises, and WHICH
 	// counter moves depends on table creation order — so the one signal every deny assertion
-	// reads becomes non-deterministic (the documented invariant / the documented invariant). A strictly earlier floor makes it
+	// reads becomes non-deterministic (the provider security contract / network enforcement). A strictly earlier floor makes it
 	// deterministic: A rejects first, the guest fails fast, A's counter moves.
 	HookForwardIngress
 	// HookPrerouting is the per-sandbox nat prerouting chain: `via[]` steering and
@@ -201,10 +201,10 @@ const (
 	// HookOutputNAT is the per-sandbox nat output chain: the SECOND, independent
 	// DNAT a publish needs so the host can dial its own published endpoint —
 	// host-originated traffic never traverses prerouting, so "it works from the
-	// host" is not evidence a publish works, and vice versa (the relevant internals page the documented invariant ⑭).
+	// host" is not evidence a publish works, and vice versa (network substrate measurements).
 	HookOutputNAT
 	// HookOutputFilter is the ENGINE-LEVEL (not per-sandbox) filter output chain
-	// that pins the second hop (the documented invariant invariant 2 / the relevant internals page the documented invariant ㉔). It is a
+	// that pins the second hop (the second-hop floor / network substrate measurements). It is a
 	// separate table because its predicate is the deployment-supplied uid
 	// rather than an interface: one uid means one rule set, independent of how
 	// many sandboxes exist, so it is installed once at startup and not per
@@ -236,7 +236,7 @@ func (h Hook) String() string {
 // negation is exactly HookOutputFilter, and the distinction is what gives the
 // render guards their SCOPES: the per-sandbox guard demands an interface
 // narrowing, the second-hop guard demands a uid narrowing, and a single "every
-// rule must carry iifname" guard would reject the very rule the documented invariant invariant 2
+// rule must carry iifname" guard would reject the very rule the second-hop floor
 // requires (the second hop arrives on no interface at all).
 func (h Hook) PerSandbox() bool { return h != HookOutputFilter && h != 0 }
 
@@ -248,15 +248,15 @@ const (
 	// here: a base chain's accept does not end the packet's traversal, so the
 	// packet continues into the next base chain on the same hook and can still be
 	// dropped there — measured, an accept placed in a different base chain
-	// incremented its counter while the connection still failed (the relevant internals page the documented invariant
-	// ⑩). Only a terminal verdict (drop / reject) ends traversal across chains.
+	// incremented its counter while the connection still failed (network substrate measurements
+	// ). Only a terminal verdict (drop / reject) ends traversal across chains.
 	// Consequence for the generator: an approved exception must sit in the SAME
 	// chain as the floor drop it overrides, above it.
 	Accept Verdict = iota + 1
 	// Reject is the GUEST-FACING refusal. gVisor's netstack honors ICMP errors, so
 	// the same denial written as `drop` versus `reject` differs by orders of
 	// magnitude in what the guest experiences (measured on real runsc: `reject` 0 ms,
-	// `drop` ≥ 25 s — the relevant internals page the documented invariant ⑨ / the documented invariant). the documented invariant's fail-closed has two halves —
+	// `drop` ≥ 25 s — network substrate measurements / network enforcement). the provider security contract's fail-closed has two halves —
 	// the security half AND "the guest gets a clean connection failure" — and a
 	// pure-`drop` floor satisfies only the first. Security is unaffected: neither
 	// verdict forwards the packet.
@@ -270,7 +270,7 @@ const (
 	// SNAT rewrites the source to this sandbox's own /30 gateway (publish return).
 	SNAT
 	// Masquerade rewrites the source to the outbound interface's address (the
-	// third of the three host-side mechanisms egress needs, the relevant internals page the documented invariant ⑤).
+	// third of the three host-side mechanisms egress needs, network substrate measurements).
 	Masquerade
 )
 
@@ -293,21 +293,21 @@ func (v Verdict) String() string {
 }
 
 // Terminal reports whether this verdict ends traversal across base chains. Only
-// these two do (the relevant internals page the documented invariant ⑩) — see Accept's doc for why that matters.
+// these two do (network substrate measurements) — see Accept's doc for why that matters.
 func (v Verdict) Terminal() bool { return v == Reject || v == Drop }
 
 // Scope is the NARROWING every rule must carry, and it is the abstract form of
-// the render guards (the relevant internals page the documented invariant ⑩ ㉔).
+// the render guards (network substrate measurements ).
 //
 // Why every rule needs one: each per-sandbox table puts a `policy accept` base
 // chain on a SHARED hook, so a rule in one sandbox's table is evaluated against
 // EVERY sandbox's traffic. An un-narrowed accept is therefore a hole in every
 // sandbox's floor, and an un-narrowed drop is worse — drops terminate across
 // chains, so it is a host-level kill switch (measured in both directions,
-// the relevant internals page the documented invariant ⑩ / the hop-2 spike Q5).
+// network substrate measurements / the hop-2 spike Q5).
 //
 // The concrete clause each Scope becomes is the provider's business: these name
-// placement products (the documented invariant ❌ list), hence an enum rather than strings.
+// placement products (the runtime provider contract list), hence an enum rather than strings.
 type Scope uint8
 
 const (
@@ -316,14 +316,14 @@ const (
 	// host-wide rule.
 	ScopeNone Scope = iota
 	// ScopeGuestIn narrows to traffic ARRIVING on this sandbox's host-side veth →
-	// `iifname <veth>`. This is pillar ④'s materialization: the predicate binds to
+	// `iifname <veth>`. This is pillar 's materialization: the predicate binds to
 	// a fact the guest cannot change, unlike a source address, which guest root
-	// forges with one `ip addr add` (measured, the relevant internals page the documented invariant ③).
+	// forges with one `ip addr add` (measured, network substrate measurements).
 	//
 	// BY NAME, never by index. `iif` freezes an ifindex at load time and silently
 	// fails OPEN after a same-name veth rebuild — measured, the guest's packet was
 	// delivered while the drop counter read 0 — and the two spellings render
-	// identically in `nft list`, so review cannot catch it (the relevant internals page the documented invariant ⑫).
+	// identically in `nft list`, so review cannot catch it (network substrate measurements).
 	ScopeGuestIn
 	// ScopeGuestOut narrows to traffic LEAVING toward this sandbox's guest →
 	// `oifname <veth>`. Same veth, same by-name discipline, same unforgeability:
@@ -331,8 +331,8 @@ const (
 	//
 	// It exists because two required rules cannot be spelled with iifname at all:
 	// a publish's companion accept (the traffic arrives on the CALLER's interface,
-	// the relevant internals page the documented invariant ⑮) and the inbound default-deny that makes "ingress closed
-	// unless published" true (the documented invariant ③). A guard that demanded iifname literally
+	// network substrate measurements) and the inbound default-deny that makes "ingress closed
+	// unless published" true (the isolation model). A guard that demanded iifname literally
 	// would reject both.
 	ScopeGuestOut
 	// ScopeHostEndpoint narrows to this sandbox's PUBLISHED host endpoint →
@@ -346,7 +346,7 @@ const (
 	// sitting behind `via[].endpoint` → `meta skuid <uid>`. Legal ONLY in the
 	// engine-level output table.
 	//
-	// UID and no gid: `skuid` is the only narrowing predicate `output` offers (the documented invariant ㉔),
+	// UID and no gid: `skuid` is the only narrowing predicate `output` offers (network enforcement),
 	// and there is no `skgid` clause to pair with it. A gid narrowing could only be
 	// ANDed onto the floor drop, i.e. make the floor match LESS — a second way for the
 	// pin to come off, with the same invisible symptom.
@@ -360,7 +360,7 @@ const (
 	// It may narrow a DROP and never an ACCEPT, measured: skuid does not reliably match every
 	// packet of a flow (one occasionally carries no socket owner), so a skuid-narrowed drop is
 	// safe — losing the SYN kills the flow — while a skuid-narrowed accept above a floor drop
-	// leaks whatever it fails to match (the relevant internals page the documented invariant ㉔). Validate enforces it.
+	// leaks whatever it fails to match (network substrate measurements). Validate enforces it.
 	ScopeSecondHopUID
 	// ScopeSecondHopReturn narrows to the REPLY half of an already-established flow on
 	// the engine-level output chain → `ct state established,related` with no identity
@@ -372,7 +372,7 @@ const (
 	// floor's sibling item. Measured — with the floor alone, a steered flow was accepted
 	// at the endpoint while this table dropped 9 reply packets and the guest hung 25 s.
 	//
-	// NOT A HOLE IN the documented invariant INVARIANT 2: the confused deputy that invariant names is the endpoint
+	// This is not a hole in the second-hop floor: the confused deputy is the endpoint
 	// process opening a NEW connection to an in-floor address, and `ct state new` is exactly
 	// what this scope does not match. What it admits is only the reverse direction of a flow
 	// the GUEST initiated, which conntrack has already attributed.
@@ -402,7 +402,7 @@ func (s Scope) String() string {
 
 // Match is a rule's selector, in IP / port / protocol vocabulary ONLY. The
 // engine's enforcement evaluates nothing else — no domain names, no TLS, no
-// application protocol (the documented invariant / the relevant internals page the documented invariant).
+// application protocol (the provider security contract / the IP-only boundary).
 type Match struct {
 	// DestV4 / DestV6 are destination prefix sets. Family-separated because nft's
 	// grammar is: one set cannot hold both families. Both empty = any destination.
@@ -412,9 +412,9 @@ type Match struct {
 	// DestSelfGateway matches "this sandbox's own /30 gateway address" — a
 	// placement product the provider substitutes.
 	//
-	// It exists for the documented invariant semantics ③: the only stably-available host-local
+	// It exists because the only stably available host-local
 	// resolver address is this sandbox's own gateway, and it sits INSIDE the
-	// sibling CIDR (the relevant internals page the documented invariant ⑦). So the declaration's allow must be able to
+	// sibling CIDR (network substrate measurements). So the declaration's allow must be able to
 	// reach it while the same declaration must NOT reach a sibling's gateway —
 	// which is a question of ORDER, not of set membership, and needs this
 	// placement-bound spelling to express.
@@ -432,8 +432,8 @@ type Match struct {
 	// would ALSO reach 10.66.250.1:8080 — one address its CIDR does not contain,
 	// on the declared port. That address is a HOST address, so any host process
 	// bound 0.0.0.0:8080 becomes reachable: the floor's "any address of the host
-	// itself" item (the documented invariant, measured the documented invariant ⑧) lifted by a declaration that never named
-	// it, which is not the declared path the documented invariant permits (semantics ③ rests on the
+	// itself" item (the provider security contract, measured network enforcement) lifted by a declaration that never named
+	// it, which is not the declared path the provider security contract permits (semantics  rests on the
 	// caller having NAMED the gateway).
 	//
 	// Carrying the prefix rather than having the renderer decide whether to emit
@@ -446,12 +446,12 @@ type Match struct {
 	DestGuest bool
 
 	// Proto / DestPort are the post-NAT L4 selector. DestPort requires Proto (nft
-	// makes port matching depend on protocol matching, the documented invariant).
+	// makes port matching depend on protocol matching, network enforcement).
 	//
 	// A ZERO DestPort IS "ANY PORT", and it is the port-side twin of an empty DestV4 /
 	// DestV6: the renderer emits the `dport` clause if and only if it is non-zero, so a
 	// declaration that named no port renders one clause fewer. That is the mechanism
-	// behind the documented invariant's port wildcard, and BOTH directions carry weight — keeping a dport
+	// behind the network declaration's port wildcard, and BOTH directions carry weight — keeping a dport
 	// clause on a wildcard tuple would refuse the traffic the declaration authorized,
 	// while dropping it on a tuple that named a port would authorize every OTHER port on
 	// that destination. Same shape, same stakes, as Match.CTOriginalDest's nil case.
@@ -464,8 +464,7 @@ type Match struct {
 	// CTState is a connection-tracking state list, e.g. {"established","related"}.
 	// Deliberately family-UNQUALIFIED: one such rule in an `inet` table matches
 	// IPv6 as well, including a global prefix the guest invented for itself, so an
-	// explicit `meta nfproto ipv6` second arm is redundant (measured, the relevant internals page
-	// the documented invariant ⑪).
+	// explicit `meta nfproto ipv6` second arm is redundant in an `inet` table.
 	CTState []string
 
 	// CTOriginalDest / CTOriginalPort pin the PRE-NAT tuple of a steered flow.
@@ -473,12 +472,12 @@ type Match struct {
 	// DestPort, and all three are load-bearing: each omission has a measured
 	// counter-example, from "an undeclared original port reaching a declared
 	// listener" to "a declared port reaching a listener the declaration never
-	// named" (the relevant internals page the documented invariant ⑩).
+	// named" (network substrate measurements).
 	//
 	// A nil CTOriginalDest is the TRANSPARENT-INTERCEPTION shape and emits exactly
 	// one clause fewer. It must be nil there: the declaration authorized "any
 	// destination on that port", so keeping a cidr clause would block the traffic
-	// it authorized (the relevant internals page the documented invariant / the documented invariant ⑩). Both directions are asserted.
+	// it authorized (via intent forms / network enforcement). Both directions are asserted.
 	CTOriginalDest *netip.Prefix
 	CTOriginalPort uint16
 }
@@ -486,7 +485,7 @@ type Match struct {
 // Rule is one abstract rule. Order within a hook is the order in RuleSet.Rules, and
 // ORDER IS A SECURITY PROPERTY: a rule set with the right rules in the wrong order
 // behaves perfectly on ordinary traffic and differs only when it is being bypassed
-// (the relevant internals page the documented invariant ④ / the documented invariant). The generator's own positions are argued at each emit
+// (the network enforcement locus / network enforcement). The generator's own positions are argued at each emit
 // site.
 type Rule struct {
 	Hook    Hook
@@ -498,7 +497,7 @@ type Rule struct {
 	// every rule, because the acceptance discipline for every deny assertion is
 	// "unreachable inside the netns AND the floor counter moved after a
 	// deliberate probe" — a floor whose counter reads 0 is indistinguishable from
-	// a floor that was bypassed (the documented invariant / the relevant internals page the documented invariant ⑧ / the documented invariant).
+	// a floor that was bypassed (the provider security contract / network substrate measurements / network enforcement).
 	Counter string
 
 	// ToGuestPort is the DNAT target port on this sandbox's guest IP (publish).
@@ -510,7 +509,7 @@ type Rule struct {
 	// ToSelfGateway makes an SNAT rewrite the source to this sandbox's own /30
 	// gateway (the publish return path). Without it a publish works only on a
 	// sandbox that happens to have a default route and times out on one that does
-	// not (measured, the relevant internals page the documented invariant ⑬).
+	// not (measured, network substrate measurements).
 	ToSelfGateway bool
 
 	// Why documents what this rule delivers, and it is rendered into the nft file as a
@@ -520,8 +519,8 @@ type Rule struct {
 	Why string
 }
 
-// RuleSet is the abstract rule set — the documented invariant's `SteeringSpec` payload, produced by
-// the documented invariant's pure generator and consumed by the provider's renderer.
+// RuleSet is the abstract rule set — the runtime provider contract's `SteeringSpec` payload, produced by
+// the network declaration's pure generator and consumed by the provider's renderer.
 type RuleSet struct {
 	// Rules is the ORDERED rule list. Rules for different hooks may interleave
 	// here; the renderer groups by hook and preserves relative order within each.
@@ -530,7 +529,7 @@ type RuleSet struct {
 	// Counters is every named counter the rules reference, in declaration order.
 	// It is carried explicitly because a single `nft -f` file must DECLARE a named
 	// counter before the chain that references it, or the load fails in a way that
-	// points at the wrong line (the relevant internals page the documented invariant ㉔).
+	// points at the wrong line (network substrate measurements).
 	Counters []string
 }
 
@@ -566,7 +565,7 @@ func (rs RuleSet) Hooks() []Hook {
 // root-free, in a unit test, over the generator's output.
 //
 // Each property here is one ONE WORD OF EDITING breaks with no test firing and no visible
-// difference in `nft list` (the relevant internals page the documented invariant ⑧ ⑩ ⑫ ㉔). The text half (no `policy drop`, no
+// difference in `nft list` (network substrate measurements   ). The text half (no `policy drop`, no
 // ifindex spelling) lives in the provider's renderer, those being properties of the
 // rendered file.
 func Validate(rs RuleSet) error {
@@ -584,17 +583,17 @@ func Validate(rs RuleSet) error {
 		}
 		if r.Counter == "" {
 			return fmt.Errorf("%s: no named counter — every rule must count, because "+
-				"a deny assertion is only valid when a counter moved (the documented invariant / the documented invariant ⑧)", where)
+				"a deny assertion is only valid when a counter moved (the provider security contract / network enforcement)", where)
 		}
 		if !declared[r.Counter] {
 			return fmt.Errorf("%s: counter %q is not declared in RuleSet.Counters — a named "+
-				"counter must be declared before the chain referencing it in one `nft -f` file (the documented invariant ㉔)",
+				"counter must be declared before the chain referencing it in one `nft -f` file (network enforcement)",
 				where, r.Counter)
 		}
 		// GUARD: every rule carries a narrowing — see Scope, and the error body.
 		if r.Scope == ScopeNone {
 			return fmt.Errorf("%s: unscoped — every rule must be narrowed to its own "+
-				"placement, or it is evaluated against every sandbox's traffic (the documented invariant ⑩ ㉔)", where)
+				"placement, or it is evaluated against every sandbox's traffic (network enforcement )", where)
 		}
 		// GUARD: the two guard SCOPES do not cross — two guards with disjoint scopes,
 		// not one guard with an exemption (see Hook.PerSandbox).
@@ -609,12 +608,12 @@ func Validate(rs RuleSet) error {
 			return fmt.Errorf("%s: a per-sandbox rule may not carry a second-hop scope — neither "+
 				"predicate narrows to one placement, and the RETURN scope renders no clause at "+
 				"all, so on a shared hook it is an un-narrowed accept: a hole in EVERY sandbox's "+
-				"floor (the documented invariant / the documented invariant ⑩ ㉔)", where)
+				"floor (the provider security contract / network enforcement )", where)
 		}
 		if !r.Hook.PerSandbox() && r.Scope != ScopeSecondHopUID && r.Scope != ScopeSecondHopReturn {
 			return fmt.Errorf("%s: the engine-level output chain can only be narrowed by uid "+
 				"(or, for the return arm, by ct-state) — no interface predicate is available there, "+
-				"because the traffic arrives on no interface (the documented invariant ㉔)", where)
+				"because the traffic arrives on no interface (network enforcement)", where)
 		}
 		// The return arm is the ONE accept permitted in that table, and it must really be
 		// a ct-state narrowing: an accept there with no ct-state clause would admit NEW
@@ -631,14 +630,14 @@ func Validate(rs RuleSet) error {
 				}
 				if st == "new" {
 					return fmt.Errorf("%s: the second-hop return arm must NOT match `new` — a new "+
-						"connection to an in-floor address IS the confused deputy the documented invariant invariant 2 "+
-						"refuses (the documented invariant)", where)
+						"connection to an in-floor address IS the confused deputy the second-hop floor "+
+						"refuses (network enforcement)", where)
 				}
 			}
 			if !established {
 				return fmt.Errorf("%s: the second-hop return arm carries no established/related "+
 					"ct-state clause, so it would admit NEW connections to in-floor addresses — "+
-					"exactly the confused deputy the documented invariant invariant 2 exists to refuse", where)
+					"exactly the confused deputy the second-hop floor exists to refuse", where)
 			}
 		}
 		// GUARD: a uid-narrowed rule may only DROP (the measured asymmetry, see
@@ -647,7 +646,7 @@ func Validate(rs RuleSet) error {
 		if r.Scope == ScopeSecondHopUID && r.Verdict != Drop {
 			return fmt.Errorf("%s: a uid-narrowed rule may only DROP — `skuid` misses "+
 				"packets, so an accept/return narrowed by it leaks them past the floor "+
-				"it sits above (the documented invariant ㉔ asymmetry)", where)
+				"it sits above (network enforcement asymmetry)", where)
 		}
 		if len(r.Match.DestV4) > 0 && len(r.Match.DestV6) > 0 {
 			return fmt.Errorf("%s: one rule cannot carry both address families — nft's "+
@@ -665,7 +664,7 @@ func Validate(rs RuleSet) error {
 		}
 		if r.Match.DestPort != 0 && r.Match.Proto == "" {
 			return fmt.Errorf("%s: a port match requires an explicit protocol — nft makes "+
-				"port matching depend on protocol matching (the documented invariant)", where)
+				"port matching depend on protocol matching (network enforcement)", where)
 		}
 		if err := validateNesting(r.Match.DestV4); err != nil {
 			return fmt.Errorf("%s: %w", where, err)
@@ -679,7 +678,7 @@ func Validate(rs RuleSet) error {
 
 // validateNesting rejects a set whose members nest. An nft interval set REFUSES
 // to load with nested members, and `auto-merge` instead loads it while SILENTLY
-// swallowing the subnet (measured, the relevant internals page the documented invariant ⑱) — which is how a floor gets
+// swallowing the subnet (measured, network substrate measurements) — which is how a floor gets
 // merged away without a word. This check is what makes a future attempt to merge
 // the floor and the tier into one set fail loudly (see TierV4).
 func validateNesting(set []netip.Prefix) error {
@@ -690,7 +689,7 @@ func validateNesting(set []netip.Prefix) error {
 			}
 			if a.Bits() <= b.Bits() && a.Contains(b.Addr()) {
 				return fmt.Errorf("set member %s is nested inside %s — an nft interval set "+
-					"either refuses to load or silently merges the subnet away (the documented invariant ⑱); keep "+
+					"either refuses to load or silently merges the subnet away (network enforcement); keep "+
 					"nested members in separate ordered rules", b, a)
 			}
 		}

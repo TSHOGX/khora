@@ -3,15 +3,15 @@
 //
 // It is a LEAF package and deliberately ignorant of the engine's model. It knows
 // nothing of Overlay, Volume, Template, or SandboxID — it takes paths and byte
-// counts. the documented invariant (Overlay upper+work) and the documented invariant (per-volume caps) each import it the
-// way they import `os` (rootfs-overlay the documented invariant).
+// counts. the Rootfs subsystem (Overlay upper+work) and the Volume subsystem (per-volume caps) each import it the
+// way they import `os` (the shared btrfs mechanism).
 //
 // A PACKAGE AND NOT A SEAM: the capacity cap is shared CODE, not a shared INTERFACE. A remote
 // provider satisfies "this unit is at most N bytes" by other means, so a cross-cutting
 // QuotaProvider would weld the btrfs assumption into every implementation. Two subsystems
-// importing one substrate tool do not violate the documented invariant — neither calls the OTHER.
+// importing one substrate tool do not violate the lifecycle — neither calls the OTHER.
 //
-// MECHANISM CHOICE: squota, not full qgroups (rootfs-overlay the documented invariant), the decisive reason being
+// MECHANISM CHOICE: squota, not full qgroups (btrfs quota materialization), the decisive reason being
 // that the dev/test substrate CANNOT change mode — BTRFS_IOC_QUOTA_CTL returns EPERM even as
 // root with CAP_SYS_ADMIN, so full qgroups would fork spec from substrate permanently. It also
 // fits the shape (one subvolume per workload, no rescan storms).
@@ -23,13 +23,13 @@
 // The consequence that must be handled OUTSIDE this package: under squota a
 // reflinked copy-up is free, so the cap governs newly-written bytes and is not a
 // hard ceiling for copy-up, and Template/layer bytes carry no cap at all. That is
-// why node accounting lists measured layer bytes separately (the documented invariant) and why the
-// the documented invariant admission gate cannot be derived from caps alone.
+// why node accounting lists measured layer bytes separately (rootfs storage) and why the
+// resource-admission gate cannot be derived from caps alone.
 //
 // All operations shell out to `btrfs(8)` (btrfs-progs is an explicit deployment
 // dependency, measured v6.17.1 on the dev substrate). They require root, like the
-// overlayfs mounts in the documented invariant (rootfs-overlay the documented invariant) — privilege stays sealed inside
-// the storage subsystems, never in the the documented invariant mediator.
+// overlayfs mounts in the Rootfs subsystem (rootfs mount constraints) — privilege stays sealed inside
+// the storage subsystems, never in the lifecycle mediator.
 package btrfs
 
 import (
@@ -93,8 +93,8 @@ func (c Client) IsSubvolume(ctx context.Context, path string) bool {
 // create (or a resume over an already-materialized unit) is not an error.
 //
 // A subvolume rather than a plain directory because it is the unit BOTH capacity
-// accounting and cheap atomic snapshots attach to — one choice serving the documented invariant's cap
-// today and the documented invariant's snapshot/clone later (rootfs-overlay the documented invariant).
+// accounting and cheap atomic snapshots attach to — one choice serving the Rootfs subsystem's cap
+// today and the Volume subsystem's snapshot/clone later (btrfs quota materialization).
 func (c Client) CreateSubvolume(ctx context.Context, path string) error {
 	if c.IsSubvolume(ctx, path) {
 		return nil
@@ -120,13 +120,13 @@ func (c Client) CreateSubvolume(ctx context.Context, path string) error {
 // Quota-row cleanup differs by quota mode, and BOTH behaviours are handled here
 // because the mode is a deployment property, not something the engine controls:
 //
-//   - squota (the recorded design), unit owning NO shared extents: btrfs reclaims the row ITSELF.
+//   - squota (the root-required deployment), unit owning NO shared extents: btrfs reclaims the row ITSELF.
 //     Measured — the row lingers briefly as `<under deletion>` then disappears, and across 6
 //     create/fill/delete cycles the qgroup count returned to exactly its starting value. An
 //     explicit destroy fails ENOENT, which is why the call below is best-effort. The ONLY squota
-//     case where that suffices, and the case the documented invariant's Overlay upper is in: the engine never
+//     case where that suffices, and the case the Rootfs subsystem's Overlay upper is in: the engine never
 //     snapshots an upper.
-//   - squota, unit whose extents a live sharer still references (REACHABLE via the documented invariant
+//   - squota, unit whose extents a live sharer still references (REACHABLE via the Volume subsystem
 //     snapshot/clone): the row LEAKS. Measured — an immediate destroy returns EBUSY, not ENOENT,
 //     and the row does not self-clean (25 s + 6 syncs did not move it). Its label is `<squota
 //     space holder>` while a sharer lives and `<stale>` after the last one goes; destroy
@@ -138,7 +138,7 @@ func (c Client) CreateSubvolume(ctx context.Context, path string) error {
 //     at 3.3 MB, and in another shape a 20 MiB write died at 11.8 MiB. The opposite direction
 //     (a leaked row carrying a LARGER cap ⇒ silent over-provisioning) is equally reachable and
 //     equally undetectable from inside. Reclamation belongs to the volume orphan sweep, which
-//     polls the label and destroys on `<stale>` (the relevant internals page the documented invariant).
+//     polls the label and destroys on `<stale>` (Volume quota cleanup).
 //   - full qgroup mode: the row does NOT self-clean and must be destroyed, or rows accumulate
 //     one per destroyed sandbox.
 //
@@ -147,7 +147,7 @@ func (c Client) CreateSubvolume(ctx context.Context, path string) error {
 //
 // Idempotent: a path that is absent, or not a subvolume, is a no-op — reclamation
 // is retried from several paths (destroy, unwind, orphan sweep) and must never
-// fail because someone else already cleaned up (the documented invariant).
+// fail because someone else already cleaned up (atomic transition rollback).
 func (c Client) DeleteSubvolume(ctx context.Context, path string) error {
 	if !c.IsSubvolume(ctx, path) {
 		// Not a subvolume: either already gone, or a plain directory whose bytes are
@@ -174,9 +174,9 @@ func (c Client) DeleteSubvolume(ctx context.Context, path string) error {
 // atomic and effectively instantaneous — measured, a new snapshot costs about 16 KiB of
 // exclusive metadata and copies no data.
 //
-// WRITABLE (no `-r`) because that is what the documented invariant's snapshot object is: an ordinary
+// WRITABLE (no `-r`) because that is what the Volume subsystem's snapshot object is: an ordinary
 // writable volume, with immutability expressed by a read-only MOUNT ROW instead
-// (the relevant internals page the documented invariant). It also avoids a substrate wrinkle worth knowing about even though
+// (snapshot lineage). It also avoids a substrate wrinkle worth knowing about even though
 // the design path does not hit it: on this progs version a read-only unit must have its
 // ro property cleared before it can be deleted at all, so any code that creates one —
 // including test fixtures and cleanup traps — has to carry that step unconditionally.
@@ -197,7 +197,7 @@ func (c Client) Snapshot(ctx context.Context, src, dst string) error {
 
 // SetQuotaLimit caps the subvolume at path to limitByte (0 = remove the cap).
 //
-// This is the enforcement point for the the documented invariant capacity axis: past the cap the
+// This is the enforcement point for the resource admission capacity axis: past the cap the
 // guest's write() returns a plain ENOSPC and THE SANDBOX KEEPS RUNNING —
 // deliberately a data-plane event, not a lifecycle one (unlike the RAM cap).
 // Measured through the whole chain (subvolume → overlayfs upper/work → gofer →
@@ -220,7 +220,7 @@ const usageReadAttempts = 3
 
 // Usage reports the bytes charged to the subvolume at path and its current limit
 // (limit 0 = none). This is the BACKEND's own accounting — the only trustworthy
-// source for capacity, which the documented invariant requires over any guest-side number (see
+// source for capacity, which the Rootfs subsystem requires over any guest-side number (see
 // rootfs.Provider.UncappedBytes for why those are unusable).
 func (c Client) Usage(ctx context.Context, path string) (used, limit int64, err error) {
 	// -f filters to just this path's qgroup; --raw for exact bytes; --sync so the
@@ -236,7 +236,7 @@ func (c Client) Usage(ctx context.Context, path string) (used, limit int64, err 
 	//
 	// The failure is TRANSIENT: under the same churn, three attempts turned 8 first-attempt
 	// failures into 0 final failures (300 reads). The callers that must FAIL CLOSED on an
-	// unreadable row (the the documented invariant cap write points, the documented invariant's materialization guard on the
+	// unreadable row (the control-plane API cap write points, the Rootfs subsystem's materialization guard on the
 	// create/resume hot path) pay for this read's reliability in refused requests.
 	//
 	// The error contract is UNCHANGED — "unreadable, draw no conclusion", just rarer. Nothing
@@ -307,7 +307,7 @@ const (
 // BY ID, RECORDED AT DELETE TIME — never by scanning rows for something that looks
 // reclaimable. The failure mode of scanning is an uncapped LIVE volume plus zero
 // signal: a scan that misidentifies a row and clears its limit produces exactly that,
-// and nothing downstream can detect it (the documented invariant requires locating rows by the id recorded
+// and nothing downstream can detect it (the Volume subsystem requires locating rows by the id recorded
 // at deletion for this reason).
 //
 // The state comes from the label because that is the only predicate the substrate

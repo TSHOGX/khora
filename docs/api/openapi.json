@@ -504,8 +504,8 @@
     }
   },
   "info": {
-    "description": "GENERATED from the handlers' own wire types (internal/orchestrator/openapi.go). Do not edit by hand; regenerate with `go generate ./internal/orchestrator`. the documentation remains authoritative for intent — what an endpoint means and which refusal is which. This document says only what is on the wire.\n\nThe process and fs data plane is NOT here: it is Connect-RPC, and its machine-readable contract is proto/khora/transport/v1/transport.proto.\n\nNo authentication is described because the engine has none by design (the recorded design): it refuses any listener but loopback, and auth/TLS belong to a layer outside it.",
-    "title": "khora engine — control plane (the documented invariant)",
+    "description": "GENERATED from the handlers' own wire types (internal/orchestrator/openapi.go). Do not edit by hand; regenerate with `go generate ./internal/orchestrator`. Maintained API documentation remains authoritative for intent: what an endpoint means and which refusal is which. This document says only what is on the wire.\n\nThe process and fs data plane is NOT here: it is Connect-RPC, and its machine-readable contract is proto/khora/transport/v1/transport.proto.\n\nNo authentication is described because the engine has none: it refuses any listener but loopback unless explicitly overridden, and authentication and TLS belong outside it.",
+    "title": "khora engine control plane",
     "version": "0.1.0"
   },
   "openapi": "3.1.0",
@@ -571,10 +571,10 @@
                 }
               }
             },
-            "description": "The route exists; this method does not apply to it (the documented invariant)."
+            "description": "The route exists, but this method does not apply to it."
           }
         },
-        "summary": "Page the transactional outbox in `seq` order. At-least-once: dedupe by event `id` (the documented invariant)."
+        "summary": "Page the transactional outbox in `seq` order. Delivery is at least once; deduplicate by event `id`."
       }
     },
     "/v1/sandboxes": {
@@ -602,7 +602,7 @@
                 }
               }
             },
-            "description": "The route exists; this method does not apply to it (the documented invariant)."
+            "description": "The route exists, but this method does not apply to it."
           }
         },
         "summary": "List all sandboxes."
@@ -658,7 +658,7 @@
                 }
               }
             },
-            "description": "The route exists; this method does not apply to it (the documented invariant)."
+            "description": "The route exists, but this method does not apply to it."
           },
           "409": {
             "content": {
@@ -709,7 +709,7 @@
                 }
               }
             },
-            "description": "The route exists; this method does not apply to it (the documented invariant)."
+            "description": "The route exists, but this method does not apply to it."
           },
           "409": {
             "content": {
@@ -722,7 +722,7 @@
             "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
           }
         },
-        "summary": "Destroy a sandbox. The record is DELETED, so a later GET is 404 and the destroy's cause is readable only on the event (the documented invariant)."
+        "summary": "Destroy a sandbox. The record is deleted, so a later GET is 404 and the event is the durable record of the destroy cause."
       },
       "get": {
         "operationId": "getSandbox",
@@ -755,10 +755,10 @@
                 }
               }
             },
-            "description": "The route exists; this method does not apply to it (the documented invariant)."
+            "description": "The route exists, but this method does not apply to it."
           }
         },
-        "summary": "Inspect one sandbox. Never exposes placement (the documented invariant)."
+        "summary": "Inspect one sandbox without exposing placement details."
       },
       "parameters": [
         {
@@ -822,7 +822,7 @@
                 }
               }
             },
-            "description": "The route exists; this method does not apply to it (the documented invariant)."
+            "description": "The route exists, but this method does not apply to it."
           },
           "409": {
             "content": {
@@ -891,7 +891,7 @@
                 }
               }
             },
-            "description": "The route exists; this method does not apply to it (the documented invariant)."
+            "description": "The route exists, but this method does not apply to it."
           },
           "409": {
             "content": {
@@ -981,7 +981,7 @@
                 }
               }
             },
-            "description": "The route exists; this method does not apply to it (the documented invariant)."
+            "description": "The route exists, but this method does not apply to it."
           },
           "503": {
             "content": {
@@ -994,7 +994,7 @@
             "description": "The sandbox's in-guest transport is unreachable, or a pause is draining. The answer may differ later."
           }
         },
-        "summary": "Stream a file OUT of the sandbox (the the documented invariant large-file bypass; REST rather than RPC because it streams bytes). Returns application/octet-stream, chunked."
+        "summary": "Stream a file out of the sandbox over REST without buffering the whole file. Returns chunked application/octet-stream."
       },
       "parameters": [
         {
@@ -1080,7 +1080,7 @@
                 }
               }
             },
-            "description": "The route exists; this method does not apply to it (the documented invariant)."
+            "description": "The route exists, but this method does not apply to it."
           },
           "413": {
             "content": {
@@ -1148,7 +1148,7 @@
                 }
               }
             },
-            "description": "The route exists; this method does not apply to it (the documented invariant)."
+            "description": "The route exists, but this method does not apply to it."
           }
         },
         "summary": "Read the sandbox's effective network declaration, including per-rule hit counters."
@@ -1208,7 +1208,7 @@
                 }
               }
             },
-            "description": "The route exists; this method does not apply to it (the documented invariant)."
+            "description": "The route exists, but this method does not apply to it."
           },
           "409": {
             "content": {
@@ -1287,7 +1287,7 @@
                 }
               }
             },
-            "description": "The route exists; this method does not apply to it (the documented invariant)."
+            "description": "The route exists, but this method does not apply to it."
           },
           "409": {
             "content": {
@@ -1346,7 +1346,7 @@
                 }
               }
             },
-            "description": "The route exists; this method does not apply to it (the documented invariant)."
+            "description": "The route exists, but this method does not apply to it."
           },
           "409": {
             "content": {
@@ -1397,7 +1397,7 @@
                 }
               }
             },
-            "description": "The route exists; this method does not apply to it (the documented invariant)."
+            "description": "The route exists, but this method does not apply to it."
           }
         },
         "summary": "List all templates."
@@ -1453,7 +1453,7 @@
                 }
               }
             },
-            "description": "The route exists; this method does not apply to it (the documented invariant)."
+            "description": "The route exists, but this method does not apply to it."
           },
           "409": {
             "content": {
@@ -1494,7 +1494,7 @@
                 }
               }
             },
-            "description": "The route exists; this method does not apply to it (the documented invariant)."
+            "description": "The route exists, but this method does not apply to it."
           },
           "409": {
             "content": {
@@ -1507,7 +1507,7 @@
             "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
           }
         },
-        "summary": "Delete a template. Refused while any sandbox references it (the documented invariant reference protection)."
+        "summary": "Delete a template. Refused while any sandbox references it."
       },
       "parameters": [
         {
@@ -1546,7 +1546,7 @@
                 }
               }
             },
-            "description": "The route exists; this method does not apply to it (the documented invariant)."
+            "description": "The route exists, but this method does not apply to it."
           }
         },
         "summary": "List all volumes."
@@ -1592,7 +1592,7 @@
                 }
               }
             },
-            "description": "The route exists; this method does not apply to it (the documented invariant)."
+            "description": "The route exists, but this method does not apply to it."
           },
           "409": {
             "content": {
@@ -1615,7 +1615,7 @@
             "description": "Capacity: nothing is wrong with the request or the sandbox — the node cannot honor another promise."
           }
         },
-        "summary": "Create a volume. Independent of every sandbox (the documented invariant)."
+        "summary": "Create a Volume whose lifetime is independent of every sandbox."
       }
     },
     "/v1/volumes/{id}": {
@@ -1643,7 +1643,7 @@
                 }
               }
             },
-            "description": "The route exists; this method does not apply to it (the documented invariant)."
+            "description": "The route exists, but this method does not apply to it."
           },
           "409": {
             "content": {
@@ -1656,7 +1656,7 @@
             "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
           }
         },
-        "summary": "Delete a volume. Refused while mounted (the documented invariant reference protection)."
+        "summary": "Delete a Volume. Refused while mounted."
       },
       "get": {
         "operationId": "getVolume",
@@ -1689,7 +1689,7 @@
                 }
               }
             },
-            "description": "The route exists; this method does not apply to it (the documented invariant)."
+            "description": "The route exists, but this method does not apply to it."
           }
         },
         "summary": "Inspect one volume."
@@ -1756,7 +1756,7 @@
                 }
               }
             },
-            "description": "The route exists; this method does not apply to it (the documented invariant)."
+            "description": "The route exists, but this method does not apply to it."
           },
           "409": {
             "content": {
@@ -1825,7 +1825,7 @@
                 }
               }
             },
-            "description": "The route exists; this method does not apply to it (the documented invariant)."
+            "description": "The route exists, but this method does not apply to it."
           },
           "409": {
             "content": {
@@ -1905,7 +1905,7 @@
                 }
               }
             },
-            "description": "The route exists; this method does not apply to it (the documented invariant)."
+            "description": "The route exists, but this method does not apply to it."
           },
           "409": {
             "content": {
@@ -2007,7 +2007,7 @@
                 }
               }
             },
-            "description": "The route exists; this method does not apply to it (the documented invariant)."
+            "description": "The route exists, but this method does not apply to it."
           },
           "409": {
             "content": {
@@ -2086,7 +2086,7 @@
                 }
               }
             },
-            "description": "The route exists; this method does not apply to it (the documented invariant)."
+            "description": "The route exists, but this method does not apply to it."
           },
           "409": {
             "content": {

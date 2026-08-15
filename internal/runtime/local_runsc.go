@@ -21,26 +21,26 @@ import (
 	"github.com/TSHOGX/khora/internal/ruleset"
 )
 
-// LocalRunsc is the single-node runtime provider (the documented invariant). It materializes
+// LocalRunsc is the single-node runtime provider (the runtime provider contract). It materializes
 // placement — a pre-built netns + veth pair + allocated guest IP — and
 // cold-starts runsc with sandboxd (init mode) as entrypoint, adopting the netns
-// (the documented invariant: --network=sandbox only adopts, never self-builds). The transport
-// endpoint is the guest veth IP:port; ⑥ IP discovery for local_runsc degenerates
-// to reading back our own allocation (the documented invariant network placement mechanism).
+// (the runtime provider contract: --network=sandbox only adopts, never self-builds). The transport
+// endpoint is the guest veth IP:port;  IP discovery for local_runsc degenerates
+// to reading back our own allocation (the runtime provider contract network placement mechanism).
 //
-// Placement-local resources are NAMED by SandboxID (the documented invariant: labeling placement
-// with its SandboxID is the the documented invariant reverse — allowed. It lets Adopt re-recognize a
+// Placement-local resources are NAMED by SandboxID (atomic transition rollback: labeling placement
+// with its SandboxID is the ID-reference model reverse — allowed. It lets Adopt re-recognize a
 // sandbox's own resources after a control-plane crash and ReclaimOrphans identify
 // which resources back which sandbox). SandboxID-named IPs survive a restart: a
 // restarted process learns which IPs survivors hold (from Adopt) and its
 // allocator skips them.
 //
 // Host primitives — cgroup path, netns fd, the merged host path — live ONLY
-// inside this implementation, never in the interface (the documented invariant; enforced by
+// inside this implementation, never in the interface (the runtime provider contract; enforced by
 // seam_test.go).
 type LocalRunsc struct {
 	// RunscRoot is the pinned canonical `runsc --root` (wrong root → `list`
-	// silently empty; the documented invariant reconcile enumerates against this one root).
+	// silently empty; atomic transition rollback reconcile enumerates against this one root).
 	RunscRoot string
 	// StateDir holds per-launch OCI bundles: StateDir/<cid>/config.json.
 	StateDir string
@@ -51,7 +51,7 @@ type LocalRunsc struct {
 	// orchestrator as root and leaves this false.
 	Sudo bool
 
-	// HostPublishIP is the host address published endpoints are bound on (the documented invariant:
+	// HostPublishIP is the host address published endpoints are bound on (the network declaration:
 	// the engine delivers a `host ip:port` and what sits in front of it is outside
 	// the engine). Empty → publishDefaultIP.
 	HostPublishIP string
@@ -68,7 +68,7 @@ type LocalRunsc struct {
 
 // publishDefaultIP is the host address published endpoints bind to when the
 // deployment names none. Loopback deliberately: publishing is an EXPLICIT inbound
-// exception (the documented invariant ③), and defaulting to every host interface would make "reachable
+// exception (the isolation model), and defaulting to every host interface would make "reachable
 // from the outside" a consequence of omitting a flag rather than of a decision.
 const publishDefaultIP = "127.0.0.1"
 
@@ -90,38 +90,38 @@ const (
 )
 
 // cgroupRoot is the cgroup v2 mount point — a host primitive, so it stays inside
-// this implementation (the documented invariant ❌ list).
+// this implementation (the runtime provider contract list).
 const cgroupRoot = "/sys/fs/cgroup"
 
 // cgroupParent is the engine-owned cgroup layer beneath which runsc creates one
-// leaf per sandbox (the documented invariant cgroup ownership: the engine builds the parent layer, the
+// leaf per sandbox (the runtime provider contract cgroup ownership: the engine builds the parent layer, the
 // leaf belongs to runsc).
 //
-// A FLAT NAMING CONTAINER, not a kubelet-style cgroup-driver hierarchy (the documented invariant): no
-// per-sandbox intermediate level, since re-creating that layer is the weight the documented invariant
-// rejects. One consequence is load-bearing for the documented invariant — each leaf is named for its
+// A FLAT NAMING CONTAINER, not a kubelet-style cgroup-driver hierarchy (the runtime provider contract): no
+// per-sandbox intermediate level, since re-creating that layer is the weight the engine vocabulary boundary
+// rejects. One consequence is load-bearing for atomic transition rollback — each leaf is named for its
 // cid, so an ORPHAN leaf under this parent is a scannable orphan-placement signal.
 const cgroupParent = "engine"
 
 // memOverheadBytes is the host-side memory headroom added ON TOP of the
 // guest-visible RAM cap — local_runsc's IMPLEMENTATION CONSTANT, never a
-// contract member (the documented invariant: the interface says only MemoryByte = N; how a provider
+// contract member (the runtime provider contract: the interface says only MemoryByte = N; how a provider
 // pays for its own substrate is its business, and a remote provider's overhead is
 // a different thing entirely).
 //
 // It covers the sentry + gofer footprint, measured at ~14 MiB idle. 64 MiB is
 // deliberately generous because the error is asymmetric: too LITTLE headroom
-// terminates the sandbox below the cap the guest was promised (the the documented invariant spec bug this
+// terminates the sandbox below the cap the guest was promised (the resource admission spec bug this
 // split exists to avoid), too much only lifts the host ceiling slightly above N.
 const memOverheadBytes int64 = 64 << 20
 
-// placementHandle is provider-private state for stop/start (the documented invariant: callers
+// placementHandle is provider-private state for stop/start (the runtime provider contract: callers
 // address by SandboxID, never by placement internals). Carries exactly what
-// teardown needs — the placement-local resource kinds relevant here (the documented invariant
+// teardown needs — the placement-local resource kinds relevant here (atomic transition rollback
 // reclaim order: runsc → veth → netns).
 type placementHandle struct {
 	// sandbox is the SandboxID this placement serves. Held so teardown and Adopt can
-	// derive the rule-set table name, which carries it verbatim (the documented invariant labeling).
+	// derive the rule-set table name, which carries it verbatim (atomic transition rollback labeling).
 	sandbox   string
 	cid       string
 	netns     string
@@ -133,10 +133,10 @@ type placementHandle struct {
 	// the SandboxID rather than discovered — so there is no window where the name is
 	// unknown and no need for an "installed?" signal. A PLACEMENT RESOURCE like the
 	// netns: crash-surviving host state teardown must remove and reconciliation must
-	// rebuild or reclaim (the documented invariant).
+	// rebuild or reclaim (the provider security contract).
 	nftTable string
 	// publishEndpoints maps each published `{guest_port, proto}` to the host `ip:port`
-	// bound for it AT THIS PLACEMENT (the documented invariant: rebound every resume, old one invalidated —
+	// bound for it AT THIS PLACEMENT (the ID-reference model: rebound every resume, old one invalidated —
 	// but STABLE within one placement, see bindPublishEndpoints).
 	publishEndpoints map[publishKey]string
 	// publishHostPorts are the host ports held, so teardown returns them to the
@@ -150,12 +150,12 @@ type placementHandle struct {
 // cgroupLeafPath is the leaf path for a cid, and cgroupRelPath the same thing
 // relative to the cgroup root (the form OCI cgroupsPath wants). Deterministic
 // from the cid, so Adopt can re-find a crashed sandbox's leaf to read its death
-// cause (the documented invariant) exactly as it re-finds the netns.
+// cause (health and reclamation) exactly as it re-finds the netns.
 func cgroupRelPath(cid string) string  { return cgroupParent + "/" + cid }
 func cgroupLeafPath(cid string) string { return filepath.Join(cgroupRoot, cgroupParent, cid) }
 
 // namesFor derives the stable placement-local resource names for a SandboxID
-// (the documented invariant SandboxID labeling). Deterministic, which is what lets Adopt re-find a
+// (atomic transition rollback SandboxID labeling). Deterministic, which is what lets Adopt re-find a
 // crashed sandbox's resources.
 func namesFor(sandbox string) placementHandle {
 	sum := sha256.Sum256([]byte(sandbox))
@@ -187,7 +187,7 @@ func NewLocalRunsc(runscRoot, stateDir string) (*LocalRunsc, error) {
 		StateDir:  stateDir,
 		RunscBin:  "runsc",
 		// random start reduces subnet collision across restarts; inUse (seeded by
-		// Adopt during the documented invariant reconciliation) makes the guarantee exact.
+		// Adopt during atomic transition rollback reconciliation) makes the guarantee exact.
 		ipSeq:    uint32(rand.Intn(4000)),
 		inUse:    make(map[string]bool),
 		pubInUse: make(map[uint16]bool),
@@ -197,16 +197,16 @@ func NewLocalRunsc(runscRoot, stateDir string) (*LocalRunsc, error) {
 func (p *LocalRunsc) Name() string { return "local_runsc" }
 
 // allocSubnet hands out a fresh /30 (host .1, guest .2) each call — resume gets
-// a NEW IP (the documented invariant / the documented invariant IP-as-epoch). It skips IPs already held (inUse), so a
+// a NEW IP (the ID-reference model / health and reclamation IP-as-epoch). It skips IPs already held (inUse), so a
 // freshly-restarted process cannot hand a new sandbox an IP a survivor adopted
-// (the documented invariant). <sandbox /16>.<hi>.<lo*4>/30.
+// (atomic transition rollback). <sandbox /16>.<hi>.<lo*4>/30.
 //
 // The /16 comes from `internal/ruleset`, NOT a literal here, for correctness rather
-// than tidiness: the documented invariant's L0 floor names the same /16 in its SIBLING item (the documented invariant
-// cross-sandbox isolation, which point-to-point veth does not deliver on its own —
-// the host still routes between two /30s, measured the documented invariant ①). Two literals could drift,
+// than tidiness: the L0 floor names the same /16 in its sibling-address set.
+// Point-to-point veths do not provide cross-sandbox isolation on their own; the
+// host still routes between two /30s, as the network substrate suite measures. Two literals could drift,
 // and the drift hands out a /30 the floor does not cover: a silently reachable
-// sibling. One fact, one leaf (the documented invariant ④).
+// sibling. One fact belongs in one leaf package.
 func (p *LocalRunsc) allocSubnet() (hostIP, guestIP string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -244,17 +244,17 @@ func (p *LocalRunsc) markInUse(guestIP string) {
 	p.mu.Unlock()
 }
 
-// Launch materializes placement and cold-starts the unit (④ of the cold-start
-// chain). Resources are named by spec.Sandbox (the documented invariant SandboxID labeling).
+// Launch materializes placement and cold-starts the unit ( of the cold-start
+// chain). Resources are named by spec.Sandbox (atomic transition rollback SandboxID labeling).
 // Returns the placement with TransportEndpoint = guest veth IP:port. On any
-// error it unwinds whatever it half-built (the documented invariant: failure recycles the
+// error it unwinds whatever it half-built (atomic transition rollback: failure recycles the
 // half-built placement; the caller's persistent state is untouched).
 func (p *LocalRunsc) Launch(ctx context.Context, spec LaunchSpec) (_ *Placement, err error) {
 	if spec.Rootfs.MergedPath == "" {
 		return nil, fmt.Errorf("runtime: LaunchSpec.Rootfs.MergedPath empty")
 	}
 	if spec.Sandbox == "" {
-		return nil, fmt.Errorf("runtime: LaunchSpec.Sandbox empty (needed for placement naming, the documented invariant)")
+		return nil, fmt.Errorf("runtime: LaunchSpec.Sandbox empty (needed for placement naming, atomic transition rollback)")
 	}
 	hostIP, guestIP := p.allocSubnet()
 	h := namesFor(spec.Sandbox)
@@ -268,23 +268,23 @@ func (p *LocalRunsc) Launch(ctx context.Context, spec LaunchSpec) (_ *Placement,
 		}
 	}()
 
-	// ④a: build netns + veth + assign guest IP (engine pre-builds; runsc adopts).
+	// a: build netns + veth + assign guest IP (engine pre-builds; runsc adopts).
 	if err = p.buildNetns(&h, hostIP, guestIP); err != nil {
 		return nil, fmt.Errorf("runtime: build netns: %w", err)
 	}
 
-	// ④a′: the documented invariant ENFORCEMENT, and its POSITION IS THE OBLIGATION (the documented invariant): the rules go
+	// a′: the network declaration ENFORCEMENT, and its POSITION IS THE OBLIGATION (the provider security contract): the rules go
 	// on AFTER the netns/veth exist and BEFORE the isolated unit runs. Any window in
 	// which the network is up and the rules are not is a fail-open window, and only
-	// the side creating the placement has this hook point at all (the relevant internals page the documented invariant ①).
-	// A failure here unwinds the half-built placement via the defer above (the documented invariant);
-	// there is no "launch it anyway without the rules" path (the documented invariant: an escape is a
+	// the side creating the placement has this hook point at all (the network enforcement locus).
+	// A failure here unwinds the half-built placement via the defer above (atomic transition rollback);
+	// there is no "launch it anyway without the rules" path (the provider security contract: an escape is a
 	// failure, not a degradation).
 	//
 	// The guest default route lands in the SAME pre-launch window, and for an
 	// independent reason: the sentry takes the L3 address off the kernel-side veth
 	// when it boots, so a post-boot `ip route add` fails with `Nexthop has invalid
-	// gateway` (measured, the relevant internals page the documented invariant ⑬).
+	// gateway` (measured, network substrate measurements).
 	if err = p.bindPublishEndpoints(&h, spec.Steering); err != nil {
 		return nil, err
 	}
@@ -295,13 +295,13 @@ func (p *LocalRunsc) Launch(ctx context.Context, spec LaunchSpec) (_ *Placement,
 		return nil, err
 	}
 
-	// ④b: write OCI bundle (root.path = merged, entrypoint = sandboxd, adopt netns).
+	// b: write OCI bundle (root.path = merged, entrypoint = sandboxd, adopt netns).
 	h.bundleDir = filepath.Join(p.StateDir, h.cid)
 	if err = os.MkdirAll(h.bundleDir, 0o755); err != nil {
 		return nil, fmt.Errorf("runtime: bundle dir: %w", err)
 	}
 
-	// ④b′: materialize the the documented invariant resource Binding (the documented invariant). The engine creates the
+	// b′: materialize the resource admission resource Binding (the runtime provider contract). The engine creates the
 	// PARENT and delegates the controllers; the LEAF is left for runsc, because
 	// runsc only writes limits to a leaf it created itself (see buildOCISpec).
 	limited := spec.Limits.CPUMillis > 0 || spec.Limits.MemoryByte > 0
@@ -327,14 +327,14 @@ func (p *LocalRunsc) Launch(ctx context.Context, spec LaunchSpec) (_ *Placement,
 		return nil, fmt.Errorf("runtime: write config.json: %w", err)
 	}
 
-	// ④c: launch runsc with pinned flags, detached.
+	// c: launch runsc with pinned flags, detached.
 	if err = p.runscLaunch(ctx, &h); err != nil {
 		return nil, fmt.Errorf("runtime: runsc run: %w", err)
 	}
 
-	// ④d: ASSERT the caps actually bound, then apply the two host-side settings runsc
+	// d: ASSERT the caps actually bound, then apply the two host-side settings runsc
 	// does not write. Mandatory, not defensive — the leaf-ownership trap fails OPEN
-	// (the documented invariant; see bindLimits).
+	// (the runtime provider contract; see bindLimits).
 	if limited {
 		if err = p.bindLimits(&h, spec.Limits); err != nil {
 			return nil, err
@@ -350,20 +350,20 @@ func (p *LocalRunsc) Launch(ctx context.Context, spec LaunchSpec) (_ *Placement,
 }
 
 // bindPublishEndpoints binds one host endpoint per published `{guest_port, proto}` —
-// the binding the documented invariant leaves to the provider because it is a placement product (the documented invariant ❌
-// list / the relevant internals page the documented invariant ②).
+// the binding the network declaration leaves to the provider because it is a placement product (the runtime provider contract
+// list / the network enforcement locus).
 //
 // # It binds only what is NOT already bound: WITHIN vs ACROSS a placement
 //
-// ACROSS placements (pause→resume, any rebuild) the endpoint MAY change — the documented invariant's
+// ACROSS placements (pause→resume, any rebuild) the endpoint MAY change — the ID-reference model's
 // placement product. WITHIN one placement it may NOT, and the two callers that reach
 // here on a LIVE placement each lose a different promise if it does:
 //
-//   - the publish hot-add (the documented invariant's one Binding field writable on `running`): re-drawing
-//     the endpoint of a publish nobody touched is not ADDITIVE, which is what the documented invariant's
-//     endorsement rests on, and it breaks the documented invariant's idempotent repeated publish — a second
+//   - the publish hot-add (the network declaration's one Binding field writable on `running`): re-drawing
+//     the endpoint of a publish nobody touched is not ADDITIVE, which is what the network declaration's
+//     endorsement rests on, and it breaks the control-plane API's idempotent repeated publish — a second
 //     identical POST would answer with a DIFFERENT endpoint.
-//   - Adopt (the documented invariant): the documented invariant promises the same endpoint and no new epoch, so re-drawing
+//   - Adopt (atomic transition rollback): the runtime provider contract promises the same endpoint and no new epoch, so re-drawing
 //     would hand a caller's cached endpoint to whatever sandbox the allocator reaches
 //     next.
 //
@@ -383,15 +383,15 @@ func (p *LocalRunsc) bindPublishEndpoints(h *placementHandle, spec SteeringSpec)
 	for _, pp := range spec.PublishPorts {
 		k := publishKey{port: pp.GuestPort, proto: pp.Proto}
 		if _, dup := bound[k]; dup {
-			// Deduplication is the declaration layer's job (the documented invariant: the substrate will not
+			// Deduplication is the declaration layer's job (the network declaration: the substrate will not
 			// find it — nft accepts two identical DNATs and the second never matches). If
 			// two items reach here for one PAIR, the two DNAT halves would target the same
 			// guest port from two endpoints, so refuse rather than bind a second one.
 			//
 			// The pair, not the port: `[{8080,tcp},{8080,udp}]` is two legal items that
-			// network.AddPublish appends and the documented invariant keys separately (see publishKey).
+			// network.AddPublish appends and the network declaration keys separately (see publishKey).
 			return fmt.Errorf("runtime: published %s appears twice in the steering spec — "+
-				"deduplication belongs to the declaration layer (the documented invariant)", k)
+				"deduplication belongs to the declaration layer (the network declaration)", k)
 		}
 		if ep, ok := h.publishEndpoints[k]; ok {
 			bound[k] = ep // already bound at this placement — see the doc comment
@@ -401,7 +401,7 @@ func (p *LocalRunsc) bindPublishEndpoints(h *placementHandle, spec SteeringSpec)
 		if port == 0 {
 			// The range is exhausted. Fail rather than bind a colliding port: two sandboxes
 			// sharing a host endpoint means one of the two publishes silently never matches
-			// (nft accepts the duplicate DNAT without complaint — the documented invariant's reason
+			// (nft accepts the duplicate DNAT without complaint — the network declaration's reason
 			// deduplication cannot be left to the substrate).
 			return fmt.Errorf("runtime: no host port available for publishing %s "+
 				"(range [%d,%d) exhausted)", k, publishPortBase, publishPortBase+publishPortSpan)
@@ -456,13 +456,13 @@ func (p *LocalRunsc) publishAddr() netip.Addr {
 
 // recoverPublishEndpoints reads a surviving placement's publish bindings back OFF THE
 // INSTALLED TABLE, so Adopt keeps the endpoints the sandbox already has instead of
-// drawing new ones (the documented invariant `Adopt`: the same endpoint, no new epoch).
+// drawing new ones (the runtime provider contract `Adopt`: the same endpoint, no new epoch).
 //
 // This is the publish counterpart of rediscoverGuestIP + markInUse, and it is needed
 // for the same reason: a restarted process's allocator starts empty, so without a
 // read-back it re-issues ports in `ListSandboxes` order. Two survivors A@21000 and
 // B@21001 adopted in the other order come back SWAPPED — a caller's cached endpoint
-// then points at a DIFFERENT SANDBOX, which the documented invariant does not license (it licenses a NEW
+// then points at a DIFFERENT SANDBOX, which the ID-reference model does not license (it licenses a NEW
 // placement's endpoint differing, not a live one's moving under it).
 //
 // Reversible by construction, like the netns name: the DNAT lines this provider
@@ -474,7 +474,7 @@ func (p *LocalRunsc) publishAddr() netip.Addr {
 // Best-effort by design: a table that is absent or unparseable leaves the handle
 // unbound, and ReinstallRuleSet then binds fresh endpoints and re-installs. That is a
 // worse outcome (the endpoint moves) but not an unsafe one, and failing the adopt
-// instead would demote a container L1 just reported alive (the documented invariant protect-on-uncertainty
+// instead would demote a container L1 just reported alive (atomic transition rollback protect-on-uncertainty
 // runs the other way).
 func (p *LocalRunsc) recoverPublishEndpoints(ctx context.Context, h *placementHandle) {
 	out, err := p.runOut(ctx, []string{"nft", "list", "table", "inet", nftTableName(h.sandbox)})
@@ -522,7 +522,7 @@ var publishDNATRe = regexp.MustCompile(
 	`(?:ip|ip6) daddr (\S+) (tcp|udp) dport (\d+) [^\n]*?dnat (?:ip|ip6) to \[?[^\s\[\]]+?\]?:(\d+)`)
 
 // publishEndpointList returns the bound endpoints in the spec's declaration order,
-// which is the order the documented invariant's read face reports them in.
+// which is the order the control-plane API's read face reports them in.
 func publishEndpointList(h *placementHandle, spec SteeringSpec) []string {
 	if len(spec.PublishPorts) == 0 {
 		return nil
@@ -534,9 +534,9 @@ func publishEndpointList(h *placementHandle, spec SteeringSpec) []string {
 	return out
 }
 
-// Stop cleanly stops the unit AND releases its placement-local resources (the documented invariant
+// Stop cleanly stops the unit AND releases its placement-local resources (FS-first pause and resume
 // pause: a paused sandbox "occupies only disk" — no netns/veth held). Resume builds
-// a fresh placement with a new IP (the documented invariant), so nothing here must survive.
+// a fresh placement with a new IP (the ID-reference model), so nothing here must survive.
 func (p *LocalRunsc) Stop(ctx context.Context, pl *Placement) error {
 	h, ok := pl.Handle().(*placementHandle)
 	if !ok || h == nil {
@@ -558,12 +558,12 @@ func (p *LocalRunsc) Destroy(ctx context.Context, pl *Placement) error {
 }
 
 // Adopt re-recognizes a surviving sandbox's placement after a control-plane
-// crash (the documented invariant's other half): rebuild the handle from the SandboxID's stable resource
+// crash (atomic transition rollback's other half): rebuild the handle from the SandboxID's stable resource
 // names, probe liveness, and rediscover the endpoint by reading the SAME IP back
-// from the netns (NOT a new epoch — the isolation unit never restarted, the documented invariant).
+// from the netns (NOT a new epoch — the isolation unit never restarted, the ID-reference model).
 // alive=false means the isolation unit is dead/absent (caller CAS-demotes to
-// paused, the documented invariant involuntary pause). The returned Placement is opaque; no host
-// primitive leaks (the documented invariant).
+// paused, FS-first pause and resume involuntary pause). The returned Placement is opaque; no host
+// primitive leaks (the runtime provider contract).
 func (p *LocalRunsc) Adopt(ctx context.Context, sandbox string) (*Placement, bool, DeathCause, error) {
 	if sandbox == "" {
 		return nil, false, CauseUnknown, fmt.Errorf("runtime: Adopt empty sandbox")
@@ -578,20 +578,20 @@ func (p *LocalRunsc) Adopt(ctx context.Context, sandbox string) (*Placement, boo
 	}
 	if !alive {
 		// DEAD, and the placement is still intact — the LAST instant the death cause is
-		// readable (the documented invariant / reaper-health the documented invariantc; the window is readDeathCause's). Read it now
+		// readable (health and reclamation / death-cause propagation; the window is readDeathCause's). Read it now
 		// and hand it out with the verdict; the mediator persists it in the same commit as
 		// the demotion CAS.
 		return nil, false, readDeathCause(h.cid), nil
 	}
 
-	// rediscover the endpoint (same IP — the container runs with it; the documented invariant "the
+	// rediscover the endpoint (same IP — the container runs with it; atomic transition rollback "the
 	// same IP").
 	ip, err := p.rediscoverGuestIP(&h)
 	if err != nil {
 		// The container is L1-ALIVE but its endpoint is unrecoverable: UNCERTAINTY, not
 		// death. alive=false here would make the mediator CAS-demote and ReclaimOrphans
 		// tear down a provably-live container — irreversible — so surface an error and let
-		// the mediator protect the placement and retry next boot (the documented invariant
+		// the mediator protect the placement and retry next boot (atomic transition rollback
 		// protect-on-uncertainty). alive=false is for a genuinely dead unit (above).
 		return nil, false, CauseUnknown, fmt.Errorf("runtime: Adopt %s: container alive but endpoint unrecoverable: %w", sandbox, err)
 	}
@@ -599,9 +599,9 @@ func (p *LocalRunsc) Adopt(ctx context.Context, sandbox string) (*Placement, boo
 	// Recovered because re-rendering the rule set needs it: the self-gateway allow and
 	// the publish return SNAT both name the gateway.
 	h.gatewayIP = decLastOctet(ip)
-	p.markInUse(ip) // survivor holds this IP — the allocator must skip it (the documented invariant)
+	p.markInUse(ip) // survivor holds this IP — the allocator must skip it (atomic transition rollback)
 	// Recover the publish bindings the same way and for the same reason — read back, not
-	// re-drawn (the documented invariant: the same endpoint, no new epoch; see recoverPublishEndpoints).
+	// re-drawn (the runtime provider contract: the same endpoint, no new epoch; see recoverPublishEndpoints).
 	p.recoverPublishEndpoints(ctx, &h)
 
 	pl := &Placement{TransportEndpoint: fmt.Sprintf("%s:%d", ip, guestport.Port)}
@@ -612,15 +612,15 @@ func (p *LocalRunsc) Adopt(ctx context.Context, sandbox string) (*Placement, boo
 }
 
 // ReclaimOrphans tears down every engine placement whose SandboxID is NOT in
-// keep (the documented invariant: an orphan is a placement backing no sandbox the store says
+// keep (atomic transition rollback: an orphan is a placement backing no sandbox the store says
 // should hold one). keep is the store-derived set the mediator computes; the
 // provider only enumerates its own host resources and reverse-dep-order tears
 // down the rest. Persistent state (Overlay upper) is never touched — that is not
-// a placement resource (the documented invariant does not touch persistent state).
+// a placement resource (atomic transition rollback does not touch persistent state).
 //
 // # The keep-set must be complete BEFORE anything is deleted
 //
-// A hard constraint, not a natural reading (the relevant internals page the documented invariant ㉒). The keep set arrives
+// A hard constraint, not a natural reading (network substrate measurements). The keep set arrives
 // fully computed and this function deletes only what is outside it, so "reclaim
 // first, then adopt" is deliberately not expressible through this API: reclaiming a
 // live sandbox's TABLE and re-installing it during Adopt IS the delete-then-install
@@ -678,11 +678,11 @@ func contains(xs []string, x string) bool {
 }
 
 // ReinstallRuleSet re-renders and re-installs a surviving sandbox's rule set as ONE
-// atomic file — the the documented invariant Adopt face of the documented invariant enforcement.
+// atomic file — the atomic transition rollback Adopt face of the network declaration enforcement.
 //
 // IT MAY RE-INSTALL BLINDLY, WITH NO DIFF, because the measurement that constrains the
 // file's shape is also the permission: one atomic `nft -f` file does not disturb a live
-// flow, while `delete` then install kills every one (see renderRuleSet, the relevant internals page the documented invariant ㉒).
+// flow, while `delete` then install kills every one (see renderRuleSet, network substrate measurements).
 // The same measurement forbids flushing conntrack in any form.
 //
 // ENDPOINTS ARE PRESERVED, only new items getting one: the TABLE is re-rendered blindly,
@@ -697,7 +697,8 @@ func (p *LocalRunsc) ReinstallRuleSet(ctx context.Context, pl *Placement, spec S
 		return err
 	}
 	if spec.RoutedEgress {
-		// The guest default route cannot be re-added after boot (the documented invariant ⑬, see Launch) — and
+		// The guest default route cannot be re-added after boot, as measured by the
+		// network substrate suite, and
 		// need not be: the isolation unit never restarted, so the route it booted with is
 		// still in its netstack. Only the host-side halves are re-asserted.
 		if err := writeSysctl("net/ipv4/ip_forward", "1"); err != nil {
@@ -711,8 +712,8 @@ func (p *LocalRunsc) ReinstallRuleSet(ctx context.Context, pl *Placement, spec S
 	return nil
 }
 
-// RuleHits implements Provider.RuleHits: this placement's the documented invariant counters, keyed by the
-// abstract name the documented invariant minted. Read-only — it lists counters and installs nothing.
+// RuleHits implements Provider.RuleHits: this placement's the network declaration counters, keyed by the
+// abstract name the network declaration minted. Read-only — it lists counters and installs nothing.
 func (p *LocalRunsc) RuleHits(ctx context.Context, pl *Placement) (map[string]uint64, error) {
 	h, ok := pl.Handle().(*placementHandle)
 	if !ok || h == nil {
@@ -722,7 +723,7 @@ func (p *LocalRunsc) RuleHits(ctx context.Context, pl *Placement) (map[string]ui
 }
 
 // enumeratePlacements lists engine placements present on this host by scanning
-// netns names carrying the SandboxID label (the documented invariant: enumerate host placement).
+// netns names carrying the SandboxID label (atomic transition rollback: enumerate host placement).
 // netns is the primary marker — it is built first in the cold-start chain, so it
 // is a superset of live containers (covers half-built placements too).
 func (p *LocalRunsc) enumeratePlacements() ([]string, error) {
@@ -742,7 +743,7 @@ func (p *LocalRunsc) enumeratePlacements() ([]string, error) {
 	return out, nil
 }
 
-// containerRunning probes runsc liveness for a container (the documented invariant liveness
+// containerRunning probes runsc liveness for a container (atomic transition rollback liveness
 // judgement): `runsc state <cid>` → status. Missing container / non-running
 // status → not alive.
 func (p *LocalRunsc) containerRunning(ctx context.Context, cid string) (bool, error) {
@@ -768,8 +769,8 @@ var inetRe = func() *regexp.Regexp {
 	return regexp.MustCompile(fmt.Sprintf(`inet (%d\.%d\.\d+)\.(\d+)/`, oct[0], oct[1]))
 }()
 
-// rediscoverGuestIP recovers the guest endpoint IP of a running placement (⑥ IP
-// rediscovery for Adopt) WITHOUT a new epoch (the documented invariant "the same IP"). runsc's
+// rediscoverGuestIP recovers the guest endpoint IP of a running placement ( IP
+// rediscovery for Adopt) WITHOUT a new epoch (atomic transition rollback "the same IP"). runsc's
 // --network=sandbox moves the guest veth into gVisor's netstack, so the guest IP
 // is invisible inside the netns; but the HOST-side veth (named by SandboxID)
 // still carries its /30 host address, and the launch allocation pins
@@ -804,7 +805,7 @@ func decLastOctet(ip string) string {
 	return ip[:i+1] + strconv.Itoa(n-1)
 }
 
-// teardownPlacement is the idempotent reclaim primitive (the documented invariant): reverse
+// teardownPlacement is the idempotent reclaim primitive (atomic transition rollback): reverse
 // dependency order runsc → overlay(mediator owns) → veth → netns. Every step is
 // best-effort so a partially-built placement (Launch failure) cleans fully.
 func (p *LocalRunsc) teardownPlacement(h *placementHandle) {
@@ -813,7 +814,7 @@ func (p *LocalRunsc) teardownPlacement(h *placementHandle) {
 	}
 	// runsc kill+delete. NOTE this is also the moment the death-cause signal is
 	// DESTROYED: delete removes the memcg leaf runsc owns, taking
-	// memory.events/oom_group_kill with it (the documented invariant). Anything that needs the cause
+	// memory.events/oom_group_kill with it (health and reclamation). Anything that needs the cause
 	// must have read it before reaching here — which is why Adopt reads it on the
 	// !alive branch rather than leaving it to the caller.
 	_ = p.runsc(context.Background(), "kill", h.cid, "KILL")
@@ -821,20 +822,20 @@ func (p *LocalRunsc) teardownPlacement(h *placementHandle) {
 	// Reclaim the cgroup leaf. Normally a no-op (runsc removes a leaf it OWNS on
 	// delete); it matters where runsc never got that far — a launch that failed
 	// before/during `run`, or a leaf that became foreign — whose orphan leaf would
-	// otherwise linger as a stale placement resource (the documented invariant). rmdir of a live/absent
+	// otherwise linger as a stale placement resource (atomic transition rollback). rmdir of a live/absent
 	// cgroup fails harmlessly, so this stays best-effort like every step here.
 	if h.cgroupLeaf != "" {
 		_ = os.Remove(h.cgroupLeaf)
 	} else {
 		_ = os.Remove(cgroupLeafPath(h.cid))
 	}
-	// The the documented invariant rule set, BEFORE the veth: dropping the table first means a
+	// The network declaration rule set, BEFORE the veth: dropping the table first means a
 	// half-torn-down placement never has rules pointing at a veth name a later sandbox
 	// could recreate.
 	//
 	// (`destroy` rather than `delete`, for the reason in deleteRuleSet.)
 	p.deleteRuleSet(h.nftTable)
-	// Strict reverse-dependency order (the documented invariant: build was netns → veth → runsc, so
+	// Strict reverse-dependency order (atomic transition rollback: build was netns → veth → runsc, so
 	// teardown is runsc → veth → netns). Deleting the HOST veth cascades its guest
 	// peer (a veth pair dies with either end), leaving an empty netns to drop last.
 	if h.vethHost != "" {
@@ -853,7 +854,7 @@ func (p *LocalRunsc) teardownPlacement(h *placementHandle) {
 }
 
 // ensureCgroupParent creates the engine-owned parent layer and delegates the
-// controllers the leaf needs (the documented invariant: the engine builds the parent layer). Both halves
+// controllers the leaf needs (the runtime provider contract: the engine builds the parent layer). Both halves
 // are required: runsc
 // refuses to launch if the parent is absent ("open .../memory.swap.max: no such
 // file or directory"), and a leaf cannot carry cpu/memory limits unless the
@@ -863,7 +864,7 @@ func ensureCgroupParent() error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("mkdir %s: %w", dir, err)
 	}
-	// Delegate only what the the documented invariant rate + RAM axes need. `pids` is intentionally
+	// Delegate only what the resource admission rate + RAM axes need. `pids` is intentionally
 	// NOT delegated (see ociResources: it caps host tasks and panics the sentry).
 	// Writing an already-enabled controller is not an error, so this stays
 	// idempotent across restarts.
@@ -881,11 +882,11 @@ func ensureCgroupParent() error {
 // bindLimits verifies the caps runsc was asked to apply ACTUALLY landed, and
 // applies the two host-side knobs runsc does not write itself.
 //
-// Why an assertion and not a hope (the documented invariant): the cgroup leaf-ownership rule fails
+// Why an assertion and not a hope (the runtime provider contract): the cgroup leaf-ownership rule fails
 // OPEN (buildOCISpec carries the measured constraint). A leaf foreign to runsc
 // still LAUNCHES, with no RAM cap and every observable signal saying it is capped —
-// a silent breach of the the documented invariant blast radius. So read the values back and fail the
-// launch if they disagree; the caller unwinds the half-built placement (the documented invariant).
+// a silent breach of the data-plane exposure boundary blast radius. So read the values back and fail the
+// launch if they disagree; the caller unwinds the half-built placement (atomic transition rollback).
 func (p *LocalRunsc) bindLimits(h *placementHandle, limits ResourceLimits) error {
 	leaf := h.cgroupLeaf
 	if _, err := os.Stat(leaf); err != nil {
@@ -899,7 +900,7 @@ func (p *LocalRunsc) bindLimits(h *placementHandle, limits ResourceLimits) error
 			return fmt.Errorf("runtime: read cpu.max: %w", err)
 		}
 		if got != want {
-			return fmt.Errorf("runtime: CPU cap did NOT bind: cpu.max=%q want %q (leaf %s foreign to runsc? the documented invariant leaf ownership)", got, want, leaf)
+			return fmt.Errorf("runtime: CPU cap did NOT bind: cpu.max=%q want %q (leaf %s foreign to runsc? the runtime provider contract leaf ownership)", got, want, leaf)
 		}
 	}
 
@@ -911,10 +912,10 @@ func (p *LocalRunsc) bindLimits(h *placementHandle, limits ResourceLimits) error
 			return fmt.Errorf("runtime: read memory.max: %w", err)
 		}
 		if got != fmt.Sprintf("%d", limits.MemoryByte) {
-			return fmt.Errorf("runtime: RAM cap did NOT bind: memory.max=%q want %d (leaf %s foreign to runsc? the documented invariant leaf ownership — this fails OPEN, hence the assertion)", got, limits.MemoryByte, leaf)
+			return fmt.Errorf("runtime: RAM cap did NOT bind: memory.max=%q want %d (leaf %s foreign to runsc? the runtime provider contract leaf ownership — this fails OPEN, hence the assertion)", got, limits.MemoryByte, leaf)
 		}
 		// swap.max=0 is what makes the cap a hard ceiling instead of a door into
-		// zram (the documented invariant / ociMemory). runsc writes it from OCI swap == limit; assert it
+		// zram (the runtime provider contract / ociMemory). runsc writes it from OCI swap == limit; assert it
 		// rather than assume.
 		if got, err := readCgroupFile(leaf, "memory.swap.max"); err != nil || got != "0" {
 			return fmt.Errorf("runtime: memory.swap.max=%q want 0 (a cap with swap is not a cap, err=%v)", got, err)
@@ -922,18 +923,18 @@ func (p *LocalRunsc) bindLimits(h *placementHandle, limits ResourceLimits) error
 
 		// --- the two host-side knobs runsc does not write ---
 
-		// (1) oom.group=1 — a the documented invariant PROVIDER OBLIGATION, not tuning: termination must
+		// (1) oom.group=1 — a provider security contract PROVIDER OBLIGATION, not tuning: termination must
 		// be deterministic and WHOLE-GROUP. Without it the kernel picks one victim
 		// (nondeterministic across identical runs), and worse, it can land in
 		// "no eligible victim → retry forever", a path that writes kernel log at
 		// ~66 MB/s and fills the host disk — BYPASSING the disk capacity cap
-		// entirely (the documented invariant). It is also what makes oom_group_kill a readable death
-		// signal at all (the documented invariant).
+		// entirely (the data-plane exposure boundary). It is also what makes oom_group_kill a readable death
+		// signal at all (health and reclamation).
 		if err := writeCgroupFile(leaf, "memory.oom.group", "1"); err != nil {
-			return fmt.Errorf("runtime: set memory.oom.group (the documented invariant deterministic whole-group termination): %w", err)
+			return fmt.Errorf("runtime: set memory.oom.group (the provider security contract deterministic whole-group termination): %w", err)
 		}
 
-		// (2) raise the HOST ceiling to N + overhead (the the documented invariant two-values split, see
+		// (2) raise the HOST ceiling to N + overhead (the runtime provider contract two-values split, see
 		// memOverheadBytes). Done AFTER launch on purpose: the guest's MemTotal was
 		// already derived from N at boot, and measurement confirms this bump does not
 		// move it.
@@ -964,7 +965,7 @@ func writeCgroupFile(leaf, name, val string) error {
 }
 
 // readDeathCause concludes WHY a dead sandbox's unit is gone, from its memcg leaf
-// (the documented invariant / the documented invariant Adopt). This is the local_runsc materialization of the abstract
+// (health and reclamation / the runtime provider contract Adopt). This is the local_runsc materialization of the abstract
 // enum — the mediator never learns memcg exists.
 //
 // oom_group_kill, NOT oom_kill: the former counts whole-group kills (exactly the
@@ -974,13 +975,13 @@ func writeCgroupFile(leaf, name, val string) error {
 //
 // Read-window discipline: only callable while the placement is intact. `runsc
 // delete` inside teardownPlacement destroys the leaf and this signal with it, so
-// the documented invariant has the provider hand the cause out together with its already-dead verdict.
+// health and reclamation has the provider hand the cause out together with its already-dead verdict.
 func readDeathCause(cid string) DeathCause {
 	b, err := os.ReadFile(filepath.Join(cgroupLeafPath(cid), "memory.events"))
 	if err != nil {
 		// No leaf (an unlimited sandbox, or already reclaimed) → we cannot tell.
-		// Unknown is a legal verdict and the documented invariant self-corrects it; guessing is not
-		// allowed (the documented invariant "does not guess").
+		// Unknown is a legal verdict and health and reclamation self-corrects it; guessing is not
+		// allowed (the provider security contract "does not guess").
 		return CauseUnknown
 	}
 	for _, line := range strings.Split(string(b), "\n") {
@@ -997,13 +998,13 @@ func readDeathCause(cid string) DeathCause {
 		}
 		// The leaf is readable and reports no whole-group kill → it died of
 		// something else. That IS a determination, so report Gone rather than
-		// Unknown: the documented invariant resumes both, but only Gone means "we actually looked".
+		// Unknown: health and reclamation resumes both, but only Gone means "we actually looked".
 		return CauseGone
 	}
 	return CauseUnknown
 }
 
-// buildNetns creates the netns + veth pair and assigns IPs (the documented invariant mechanism,
+// buildNetns creates the netns + veth pair and assigns IPs (the runtime provider contract mechanism,
 // proven on the real substrate).
 func (p *LocalRunsc) buildNetns(h *placementHandle, hostIP, guestIP string) error {
 	vethGuest := vethGuestName(h.vethHost)
@@ -1032,12 +1033,12 @@ func (p *LocalRunsc) buildNetns(h *placementHandle, hostIP, guestIP string) erro
 // runscGlobalFlags returns `runsc --root=<pinned>` + the global pins (all global,
 // so they go BEFORE the subcommand).
 //
-// the documented invariant pins the WHOLE set local_runsc depends on rather than inheriting runsc's
+// the runtime provider contract pins the WHOLE set local_runsc depends on rather than inheriting runsc's
 // defaults: each key carries one stated guarantee, and runsc's defaults drift
-// across versions while the documented invariant's cross-runsc-version portability may not rest on
+// across versions while the Rootfs subsystem's cross-runsc-version portability may not rest on
 // "the default did not change". Two of these fail SILENTLY if dropped
 // (`--platform=systrap` currently matches the default; a wrong `--root` makes
-// `state`/`list` read empty and the documented invariant reverse reconciliation would see every live
+// `state`/`list` read empty and atomic transition rollback reverse reconciliation would see every live
 // placement as nonexistent), which is why TestRunscGlobalFlagsArePinned pins the
 // set by value rather than trusting review. Adding or removing a key here means
 // updating that test's table with the guarantee the key carries.
@@ -1049,9 +1050,9 @@ func (p *LocalRunsc) runscGlobalFlags() []string {
 		"--network=sandbox",
 		"--overlay2=none",
 		"--file-access=shared",
-		// Explicitly pinned rather than inherited (the documented invariant): runsc's own default
+		// Explicitly pinned rather than inherited (the runtime provider contract): runsc's own default
 		// already strips raw/AF_PACKET sockets, so the guarantee "the guest cannot
-		// forge L2 frames" would otherwise rest on an UNDECLARED default. the documented invariant's
+		// forge L2 frames" would otherwise rest on an UNDECLARED default. the network declaration's
 		// interface-keyed predicate floor depends on it. CAP_NET_RAW is
 		// correspondingly absent from the OCI cap request (see oci.go caps).
 		"--net-raw=false",

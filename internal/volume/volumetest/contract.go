@@ -1,5 +1,5 @@
 // Package volumetest holds the volume.Backend CONTRACT test suite — one set of
-// assertions EVERY arm must pass (the documented invariant Behavior seam / the relevant internals page the documented invariant).
+// assertions EVERY arm must pass (the extension boundary Behavior seam / the volume backend seam).
 //
 // It exists because the seam has exactly one falsification instrument: a second
 // backend. The local storage arm and the test-only plain-directory arm both call
@@ -33,31 +33,31 @@ func RunContract(t *testing.T, mk Factory) {
 	t.Run("CreateInspectDestroy", func(t *testing.T) { testCreateInspectDestroy(t, mk) })
 	t.Run("DestroyIdempotent", func(t *testing.T) { testDestroyIdempotent(t, mk) })
 
-	// The three-actions shape rule (the relevant internals page the documented invariant): allocate / set the cap / place
+	// The three-actions shape rule (the volume backend seam): allocate / set the cap / place
 	// are separate calls, and each one has to work on its own.
 	t.Run("CapacityIsItsOwnWritePoint", func(t *testing.T) { testCapacityWritePoint(t, mk) })
 	t.Run("CapabilityNegativeIsTypedAndClean", func(t *testing.T) { testCapabilityNegative(t, mk) })
 
-	// Materialize / Release / Adopt (the documented invariant): create-if-absent, concurrent, and a
+	// Materialize / Release / Adopt (the Volume subsystem): create-if-absent, concurrent, and a
 	// Release that keeps the bytes.
 	t.Run("MaterializeIsCreateIfAbsent", func(t *testing.T) { testMaterializeCreateIfAbsent(t, mk) })
 	t.Run("MaterializeIsConcurrent", func(t *testing.T) { testMaterializeConcurrent(t, mk) })
 	t.Run("ReleaseKeepsBytesAndIsIdempotent", func(t *testing.T) { testReleaseKeepsBytes(t, mk) })
 	t.Run("AdoptRequiresAPresentUnit", func(t *testing.T) { testAdopt(t, mk) })
 
-	// OpenRoot (the relevant internals page the documented invariant): the content accessor, and its root confinement.
+	// OpenRoot (volume.md constraints): the content accessor, and its root confinement.
 	t.Run("RootReadWriteRoundTrip", func(t *testing.T) { testRootRoundTrip(t, mk) })
 	t.Run("RootListStatRemoveRename", func(t *testing.T) { testRootTreeOps(t, mk) })
 	t.Run("RootConfinesEscapingPaths", func(t *testing.T) { testRootConfinement(t, mk) })
 	t.Run("RootConfinesEscapingSymlinks", func(t *testing.T) { testRootSymlinkConfinement(t, mk) })
 
-	// the documented invariant accounting: the second term, and the sweep that keeps it honest.
+	// resource admission accounting: the second term, and the sweep that keeps it honest.
 	t.Run("UncappedBytesGrowsWithWrites", func(t *testing.T) { testUncappedBytesGrows(t, mk) })
 	t.Run("SweepReclaimsOnlyOrphans", func(t *testing.T) { testSweep(t, mk) })
 	t.Run("SweepSkipsBuilding", func(t *testing.T) { testSweepBuilding(t, mk) })
 	t.Run("UsageReportsWrittenBytes", func(t *testing.T) { testUsage(t, mk) })
 
-	// Snapshot / Clone (the documented invariant / the relevant internals page the documented invariant). On the arm without the capability
+	// Snapshot / Clone (the Volume subsystem / snapshot lineage). On the arm without the capability
 	// these assert the TYPED refusal with no side effect; on the arm with it, that the
 	// cap is actually written — which is the failure that is silent and undetectable
 	// afterwards.
@@ -121,10 +121,10 @@ func testSnapshotClone(t *testing.T, mk Factory) {
 			if string(buf) != marker {
 				t.Errorf("%s content = %q, want the source's %q", tc.name, buf, marker)
 			}
-			// ...and it is WRITABLE, with no read-only marker (the relevant internals page the documented invariant: it is an
+			// ...and it is WRITABLE, with no read-only marker (snapshot lineage: it is an
 			// ordinary volume; immutability is expressed by a shared-ro MOUNT ROW instead).
 			if _, err := nr.WriteAt("written-into-the-copy", []byte("x"), 0); err != nil {
-				t.Errorf("the %s is not writable: %v — the documented invariant produces an ORDINARY WRITABLE volume, and the measured 'the writer pays' property is only meaningful if it is", tc.name, err)
+				t.Errorf("the %s is not writable: %v — the Volume subsystem produces an ORDINARY WRITABLE volume, and the measured 'the writer pays' property is only meaningful if it is", tc.name, err)
 			}
 			// The SOURCE is unaffected by writes to the copy.
 			sr, err := b.OpenRoot(ctx(), "vol_src")
@@ -139,7 +139,7 @@ func testSnapshotClone(t *testing.T, mk Factory) {
 	}
 }
 
-// testSnapshotCap is the one that guards the SILENT failure (the relevant internals page the documented invariant): the cap must
+// testSnapshotCap is the one that guards the SILENT failure (volume cap enforcement): the cap must
 // be written by the snapshot operation itself, and an implementation that forgets cannot be
 // caught afterwards.
 func testSnapshotCap(t *testing.T, mk Factory) {
@@ -162,7 +162,7 @@ func testSnapshotCap(t *testing.T, mk Factory) {
 		t.Fatalf("usage of the snapshot: %v", err)
 	}
 	if limit != newCap {
-		t.Fatalf("the snapshot's cap is %d, want the DECLARED %d (source had %d) — the substrate gives a snapshot an UNCAPPED row, so the cap must be written by the snapshot operation itself, and a miss is undetectable afterwards (the relevant internals page the documented invariant)", limit, newCap, srcCap)
+		t.Fatalf("the snapshot's cap is %d, want the DECLARED %d (source had %d) — the substrate gives a snapshot an UNCAPPED row, so the cap must be written by the snapshot operation itself, and a miss is undetectable afterwards (volume cap enforcement)", limit, newCap, srcCap)
 	}
 	// The source's cap is untouched.
 	if _, srcLimit, err := b.Usage(ctx(), "vol_capsrc"); err != nil {
@@ -187,7 +187,7 @@ func ctx() context.Context { return context.Background() }
 // Capabilities() rather than from a test-side flag — so the suite cannot disagree with
 // the backend about what it can do.
 //
-// Branching on it is not the the documented invariant forbidden shape (no algorithm asks a backend what it
+// Branching on it is not the transactional outbox forbidden shape (no algorithm asks a backend what it
 // supports and changes behavior): the CONTRACT itself differs for an arm without the
 // capability — a non-zero cap must be REFUSED with volume.ErrUnsupported — and the suite
 // asserts exactly that difference.
@@ -198,7 +198,7 @@ func testCreateInspectDestroy(t *testing.T, mk Factory) {
 	if err := b.CreateVolume(ctx(), "vol_a", 0); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	// A created volume is immediately usable — existence IS the state (the documented invariant), so
+	// A created volume is immediately usable — existence IS the state (health and reclamation), so
 	// there is no ready flag to wait for.
 	r, err := b.OpenRoot(ctx(), "vol_a")
 	if err != nil {
@@ -221,7 +221,7 @@ func testCreateInspectDestroy(t *testing.T, mk Factory) {
 	}
 }
 
-// testDestroyIdempotent: the documented invariant reaches DestroyVolume from delete, unwind and the
+// testDestroyIdempotent: atomic transition rollback reaches DestroyVolume from delete, unwind and the
 // sweep, so it must never fail because someone else already cleaned up.
 func testDestroyIdempotent(t *testing.T, mk Factory) {
 	b := mk(t)
@@ -239,14 +239,14 @@ func testDestroyIdempotent(t *testing.T, mk Factory) {
 	}
 }
 
-// testCapacityWritePoint is the shape rule made executable (the relevant internals page the documented invariant): the cap
+// testCapacityWritePoint is the shape rule made executable (the volume backend seam): the cap
 // is settable at create AND editable afterwards through its OWN method, WITHOUT the
 // volume being materialized anywhere.
 //
 // That last clause is the load-bearing one. It is why capacity cannot ride a
 // placement entry point: a volume has no placement of its own, so "re-materialize
 // at the next placement" means NEVER for an unmounted volume, and an unmounted
-// volume's cap must still be editable (the documented invariant).
+// volume's cap must still be editable (the Volume subsystem).
 func testCapacityWritePoint(t *testing.T, mk Factory) {
 	b := mk(t)
 	if !capable(b) {
@@ -283,7 +283,7 @@ func testCapacityWritePoint(t *testing.T, mk Factory) {
 		t.Errorf("cap after SetCapacity = %d, want %d", limit, cap2)
 	}
 	// 0 removes it — the record is the authority, so an edit back to "uncapped" must
-	// actually clear the storage's cap (the documented invariant).
+	// actually clear the storage's cap (resource admission).
 	if err := b.SetCapacity(ctx(), "vol_c", 0); err != nil {
 		t.Fatalf("clear capacity: %v", err)
 	}
@@ -296,12 +296,12 @@ func testCapacityWritePoint(t *testing.T, mk Factory) {
 }
 
 // testCapabilityNegative: an arm that does NOT report a capability must refuse with
-// a TYPED error and leave NO SIDE EFFECT (the documented invariant maps it to 400).
+// a TYPED error and leave NO SIDE EFFECT (the API error contract maps it to 400).
 //
 // The no-side-effect half is the point, and it is why the check is here rather than
 // at the HTTP boundary: an external implementation maps "unsupported" at its edge
 // while the error is born deep inside, so the 400 arrives only AFTER bytes have
-// moved — a window whose residue no sweep can classify (the relevant internals page the documented invariant).
+// moved — a window whose residue no sweep can classify (the volume backend seam).
 func testCapabilityNegative(t *testing.T, mk Factory) {
 	b := mk(t)
 	if capable(b) {
@@ -324,8 +324,8 @@ func testCapabilityNegative(t *testing.T, mk Factory) {
 	}
 }
 
-// testMaterializeCreateIfAbsent is the documented invariant's create-if-absent contract. Why it is a contract
-// rather than an implementation detail: it is the recovery conclusion the relevant internals page the documented invariant
+// testMaterializeCreateIfAbsent is the Volume subsystem's create-if-absent contract. Why it is a contract
+// rather than an implementation detail: it is the recovery conclusion volume sweep safety
 // depends on (see Backend.Materialize for the measured reason).
 func testMaterializeCreateIfAbsent(t *testing.T, mk Factory) {
 	b := mk(t)
@@ -339,7 +339,7 @@ func testMaterializeCreateIfAbsent(t *testing.T, mk Factory) {
 	}
 	m, err := b.Materialize(ctx(), "vol_m")
 	if err != nil {
-		t.Fatalf("Materialize after the unit was removed: %v — an open-only contract would make this sandbox permanently unresumable (the documented invariant)", err)
+		t.Fatalf("Materialize after the unit was removed: %v — an open-only contract would make this sandbox permanently unresumable (the Volume subsystem)", err)
 	}
 	if m.Volume != "vol_m" {
 		t.Errorf("Materialized.Volume = %q, want vol_m — Release cannot resolve a handle without it", m.Volume)
@@ -387,7 +387,7 @@ func testMaterializeConcurrent(t *testing.T, mk Factory) {
 		}
 	}
 	// All materializations name the SAME source: a volume is ONE real thing, never
-	// forked into per-mount copies (the documented invariant: resume re-mounts the same volume, it does
+	// forked into per-mount copies (the Volume subsystem: resume re-mounts the same volume, it does
 	// not restore a copy).
 	first := <-paths
 	for i := 1; i < n; i++ {
@@ -447,7 +447,7 @@ func testReleaseKeepsBytes(t *testing.T, mk Factory) {
 
 // testAdopt: AdoptMaterialized re-recognizes a PRESENT unit and refuses an absent
 // one. The refusal is the useful half — it is what lets the mediator tell "recover
-// the handle" from "materialize afresh" (the documented invariant: a provider must not collapse
+// the handle" from "materialize afresh" (atomic transition rollback: a provider must not collapse
 // "uncertain" into a definite answer).
 func testAdopt(t *testing.T, mk Factory) {
 	b := mk(t)
@@ -562,7 +562,7 @@ func testRootTreeOps(t *testing.T, mk Factory) {
 		t.Fatalf("list returned %d entries, want 2: %+v", len(ents), ents)
 	}
 	// Entry names are BASE names, never host paths: above the seam a volume is
-	// addressed by ID and its contents relative to its root (the documented invariant).
+	// addressed by ID and its contents relative to its root (the API error contract).
 	for _, e := range ents {
 		if strings.Contains(e.Name, "/") {
 			t.Errorf("list entry %q carries a path separator — entries must be base names", e.Name)
@@ -696,7 +696,7 @@ func testRootSymlinkConfinement(t *testing.T, mk Factory) {
 		t.Fatalf("materialize: %v", err)
 	}
 	// The link has to be planted with a host symlink() — Root deliberately offers no
-	// Symlink method (nothing in the documented invariant needs one), so the hostile artifact is created
+	// Symlink method (nothing in the Volume subsystem needs one), so the hostile artifact is created
 	// out of band, which is also the realistic case: a guest with a rw mount can
 	// create it.
 	outside := filepath.Join(t.TempDir(), "canary")
@@ -763,7 +763,7 @@ func testRootSymlinkConfinement(t *testing.T, mk Factory) {
 	}
 }
 
-// testUncappedBytesGrows proves the the documented invariant second term is REAL and not decoration: bytes
+// testUncappedBytesGrows proves the resource admission second term is REAL and not decoration: bytes
 // written into an UNCAPPED volume must become visible to the accounting term, because
 // nothing else can see them (Backend.UncappedBytes).
 func testUncappedBytesGrows(t *testing.T, mk Factory) {
@@ -791,7 +791,7 @@ func testUncappedBytesGrows(t *testing.T, mk Factory) {
 		t.Fatalf("uncapped bytes (written): %v", err)
 	}
 	if after-before < size/2 {
-		t.Errorf("UncappedBytes grew by %d after writing %d bytes into an UNCAPPED volume — those bytes are invisible to the the documented invariant admission gate", after-before, size)
+		t.Errorf("UncappedBytes grew by %d after writing %d bytes into an UNCAPPED volume — those bytes are invisible to the resource-admission gate", after-before, size)
 	}
 
 	if !capable(b) {
@@ -808,7 +808,7 @@ func testUncappedBytesGrows(t *testing.T, mk Factory) {
 		t.Fatalf("uncapped bytes (capped): %v", err)
 	}
 	if capped > before+size/2 {
-		t.Errorf("a CAPPED volume still contributes %d to UncappedBytes (was %d uncapped) — the cap term already counts it (the documented invariant disjointness)", capped, after)
+		t.Errorf("a CAPPED volume still contributes %d to UncappedBytes (was %d uncapped) — the cap term already counts it (resource admission disjointness)", capped, after)
 	}
 }
 
@@ -885,7 +885,7 @@ func testSweepBuilding(t *testing.T, mk Factory) {
 
 // testUsage: the `used` half must reflect bytes actually written, because the cap
 // write point's refusal ("lower below current usage") is a STRICT inequality
-// evaluated against it (the documented invariant / the relevant internals page the documented invariant).
+// evaluated against it (the Volume subsystem / volume cap enforcement).
 func testUsage(t *testing.T, mk Factory) {
 	b := mk(t)
 	if err := b.CreateVolume(ctx(), "vol_us", 0); err != nil {

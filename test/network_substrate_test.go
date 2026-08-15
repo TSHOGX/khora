@@ -25,12 +25,12 @@ import (
 	"github.com/TSHOGX/khora/test/harness"
 )
 
-// the documented invariant enforcement on the real substrate.
+// the network declaration enforcement on the real substrate.
 //
 // # The acceptance discipline, which shapes every assertion in this file
 //
-// "IT IS UNREACHABLE" IS NOT A VALID ASSERTION ON ITS OWN (the documented invariant / the relevant internals page the documented invariant,
-// the documented invariant ⑧). A rule set with the right rules in the WRONG ORDER behaves perfectly on
+// "IT IS UNREACHABLE" IS NOT A VALID ASSERTION ON ITS OWN (the provider security contract / exhaustive narrowing,
+// network enforcement). A rule set with the right rules in the WRONG ORDER behaves perfectly on
 // ordinary traffic and differs only when it is being bypassed; and a floor whose
 // counter reads 0 is INDISTINGUISHABLE from a floor that was bypassed. So every deny
 // here is proved by TWO facts: unreachable from inside the netns, AND the floor
@@ -39,15 +39,14 @@ import (
 //
 // The paired direction matters just as much and for the opposite reason: an engine
 // that could reach NOTHING would pass every deny assertion vacuously. That is why
-// item 7 (public egress actually works under `allow`) has to pass before items 7b/7c
-// mean anything: the order 8 → 7 → 8c → 7b/7c is a real dependency, not a listing.
+// public egress under `allow` has to work before the deny-safe tier checks mean
+// anything: positive reachability must be established before any denial can be
+// trusted as non-vacuous.
 //
-// # The `item N` labels
+// # Behavioral labels
 //
-// THIS FILE'S OWN numbering, declared by the `--- item N: … ---` banners below and
-// used in failure messages so a failing assertion names itself. Keep a label stable
-// once written — the sub-letters (7b, 9d, 14e) encode which assertion depends on
-// which, as the paragraph above does for 7.
+// Failure messages name the behavior they assert so they remain meaningful when a
+// test is run alone and do not depend on an external section-number map.
 
 // forgerSrc adds an address to a guest interface using a raw netlink socket.
 //
@@ -56,10 +55,10 @@ import (
 // for silently did nothing: exec of /sbin/ip failed with ENOENT, the error was
 // swallowed, and the test degenerated into a second copy of the plain floor probe. It
 // would then pass on an engine whose predicate WAS forgeable, which is the one thing
-// pillar ④'s acceptance exists to rule out.
+// pillar 's acceptance exists to rule out.
 //
 // Raw RTM_NEWADDR rather than a vendored iproute2: the guest is root in its own netns
-// (the documented invariant), so the syscall is available and the dependency is zero.
+// (the guest identity model), so the syscall is available and the dependency is zero.
 const forgerSrc = `package main
 
 import (
@@ -72,7 +71,7 @@ import (
 
 func main() {
 	// forger <ipv4>. The target interface is DISCOVERED rather than passed: the guest
-	// side of the veth is named vg<hash-of-SandboxID> (the documented invariant), which no test can know
+	// side of the veth is named vg<hash-of-SandboxID> (the runtime provider contract), which no test can know
 	// statically, and hardcoding a guess is how this step silently did nothing before.
 	ip := net.ParseIP(os.Args[1]).To4()
 	if ip == nil {
@@ -196,7 +195,7 @@ func main() {
 // guestProbeSrc dials an address and prints a one-line verdict. The bare rootfs ships
 // no coreutils, so anything the guest must run has to be injected
 // (harness.InjectStaticBin). It reports the elapsed time because two assertions turn on
-// "refused fast" vs "hung" (the documented invariant ⑨).
+// "refused fast" vs "hung" (network enforcement).
 const guestProbeSrc = `package main
 
 import (
@@ -255,7 +254,7 @@ func main() {
 	el := time.Since(start).Milliseconds()
 	if rerr != nil {
 		// Connected but read nothing. For TCP that is a real distinction the assertions need
-		// (a half-torn publish presents exactly this way, the documented invariant ⑰); for UDP it is how a
+		// (a half-torn publish presents exactly this way, network enforcement); for UDP it is how a
 		// silently-dropped datagram looks.
 		fmt.Printf("OUTCOME=connected_no_payload MS=%d ERR=%v\n", el, rerr)
 		return
@@ -294,7 +293,7 @@ func runGuestProbe(t *testing.T, cl transport.Client, addr string, udp bool) pro
 const denyDialTimeout = 3 * time.Second
 
 // hangDialTimeout is for the two arms whose claim IS the elapsed time: `reject` refuses
-// in milliseconds where `drop` hangs (the documented invariant ⑨). They must be able to OBSERVE the hang, so
+// in milliseconds where `drop` hangs (network enforcement). They must be able to OBSERVE the hang, so
 // the timeout has to sit well above the bound they assert — with denyDialTimeout they
 // would report 3 s, read as "fast", and pass without testing anything.
 const hangDialTimeout = 25 * time.Second
@@ -378,7 +377,7 @@ func hostListener(t *testing.T, banner string) (string, func()) {
 // needs and as the string a probe target needs. Both, because every call site wants
 // one or the other and the inline form is `SplitHostPort` + `Sscanf` with BOTH errors
 // dropped — and a dropped error here is not cosmetic: an unexpected address shape
-// yields port 0, which is the any-port WILDCARD in a tuple (the documented invariant), so a fixture slip
+// yields port 0, which is the any-port WILDCARD in a tuple (the network declaration), so a fixture slip
 // would WIDEN the declaration under test rather than fail it.
 func portOf(t *testing.T, addr string) (uint16, string) {
 	t.Helper()
@@ -429,7 +428,7 @@ func mustCounterMoved(t *testing.T, id model.SandboxID, counter string, before, 
 	if after <= before {
 		t.Errorf("%s: unreachable, but counter %q did not move (%d → %d). Per the acceptance "+
 			"discipline this is an INVALID assertion, not a pass: a floor whose counter reads 0 is "+
-			"indistinguishable from a floor that was bypassed (the documented invariant / the documented invariant / the documented invariant ⑧).\n%s",
+			"indistinguishable from a floor that was bypassed.\n%s",
 			what, counter, before, after, harness.DumpRuleSet(id))
 	}
 }
@@ -447,9 +446,9 @@ func netEngineOpts(t *testing.T) harness.EngineOpts {
 }
 
 // secondHopUID is the uid the `via[]` tests run the endpoint process as. A
-// fixed non-root uid: the whole point of item 9d is that the drop is narrowed to it
+// fixed non-root uid: second-hop enforcement depends on the drop being narrowed to it
 // and does NOT take out the host (measured: an un-narrowed drop on that hook is a
-// host-level egress kill switch — the relevant internals page the documented invariant ㉔).
+// host-level egress kill switch — network substrate measurements).
 const secondHopUID = 12345
 
 // createRunning creates a sandbox with the given declaration and returns its id and
@@ -469,7 +468,7 @@ func createRunning(t *testing.T, eng *orchestrator.Engine, decl model.NetworkDec
 	return id, cl
 }
 
-// declDeny is the minimal declaration: `deny` + empty (the documented invariant's "no network").
+// declDeny is the minimal declaration: `deny` + empty (the network declaration's "no network").
 func declDeny() model.NetworkDecl {
 	return model.NetworkDecl{Egress: model.NetEgress{Default: model.NetDeny}}
 }
@@ -478,12 +477,12 @@ func declAllowPublic() model.NetworkDecl {
 	return model.NetworkDecl{Egress: model.NetEgress{Default: model.NetAllow}}
 }
 
-// --- item 6: `deny` + empty is unreachable EVERYWHERE, with counters moving ------
+// --- deny-empty floor: unreachable EVERYWHERE, with counters moving ---------------
 
 // Four destination classes, and the COUNTERS ARE READ PER HOOK because
 // the two hooks see different traffic: a destination that is an address of the host
 // ITSELF lands on `input`, while something the host would ROUTE lands on `forward`
-// (measured, the relevant internals page the documented invariant ⑧).
+// (measured, network substrate measurements).
 //
 // Reading only the `input` counter would make every routed-destination probe look
 // like "the floor counted 0", which by the discipline is an INVALID assertion rather
@@ -494,7 +493,7 @@ func TestDenyEmptyIsUnreachableEverywhereWithFloorCountersMoving(t *testing.T) {
 	host := hostIPv4(t)
 
 	// A host-side listener on a WILDCARD bind, so "unreachable" cannot be an artifact
-	// of nothing listening. This is the the documented invariant ⑧ shape: with the floor installed, the guest
+	// of nothing listening. This is the network enforcement shape: with the floor installed, the guest
 	// must not reach a 0.0.0.0 listener through ANY host address.
 	addr, stop := hostListener(t, "hello-from-HOST")
 	defer stop()
@@ -509,7 +508,7 @@ func TestDenyEmptyIsUnreachableEverywhereWithFloorCountersMoving(t *testing.T) {
 		name:    "an address of the host itself",
 		target:  net.JoinHostPort(host, port),
 		counter: "in_floor",
-		why:     "the host's own address lands on `input`; the floor there is pure ct-state, so it covers every host address without enumerating one (the documented invariant ⑧)",
+		why:     "the host's own address lands on `input`; the floor there is pure ct-state, so it covers every host address without enumerating one (network enforcement)",
 	}, {
 		// Link-local is every cloud's metadata endpoint.
 		name:    "link-local metadata address",
@@ -528,18 +527,18 @@ func TestDenyEmptyIsUnreachableEverywhereWithFloorCountersMoving(t *testing.T) {
 		name:    "a public address",
 		target:  "1.1.1.1:443",
 		counter: "fwd_default_deny",
-		why:     "a public destination is refused by the forward side's OWN default-deny — an input-only default-deny would never see it (the documented invariant ⑩)",
+		why:     "a public destination is refused by the forward side's OWN default-deny — an input-only default-deny would never see it (network enforcement)",
 	}}
 
 	// LOOPBACK IS DELIBERATELY NOT IN THIS TABLE, and it carries NO counter assertion: a
 	// gVisor guest dialing 127.0.0.1 hits ITS OWN netstack's loopback, so the packet never
 	// leaves the sandbox and the host's rules are never evaluated — measured, the
 	// host-side `daddr 127.0.0.0/8` counter read 0 while link-local counted 5 in the same
-	// run (the documented invariant ⑦). Demanding movement from traffic that constructively cannot arrive is an
+	// run (network enforcement). Demanding movement from traffic that constructively cannot arrive is an
 	// unsatisfiable assertion, not a finding.
 	if res := runGuestProbe(t, cl, net.JoinHostPort("127.0.0.1", port), false); res.reachable() {
 		t.Errorf("the guest reached the HOST's loopback (%s) — that would mean the packet left the "+
-			"sandbox, contradicting the documented invariant ⑦'s measurement that a gVisor guest's loopback dial stays in "+
+			"sandbox, contradicting network enforcement's measurement that a gVisor guest's loopback dial stays in "+
 			"its own netstack", res.raw)
 	}
 
@@ -550,7 +549,7 @@ func TestDenyEmptyIsUnreachableEverywhereWithFloorCountersMoving(t *testing.T) {
 			after := harness.NftCounter(t, id, tc.counter)
 			if res.reachable() {
 				t.Fatalf("REACHED %s under `deny` + empty (payload %s) — the declared reachable set is "+
-					"empty, so this is the the documented invariant ③ exhaustive-narrowing obligation broken: %s\n%s",
+					"empty, so this is the provider security contract exhaustive-narrowing obligation broken: %s\n%s",
 					tc.target, res.payload, tc.why, harness.DumpRuleSet(id))
 			}
 			mustCounterMoved(t, id, tc.counter, before, after, tc.name)
@@ -558,13 +557,13 @@ func TestDenyEmptyIsUnreachableEverywhereWithFloorCountersMoving(t *testing.T) {
 	}
 
 	// The sibling class needs a second sandbox to be a real target, and it is the one
-	// the documented invariant calls an INDEPENDENT invariant: point-to-point veth does not deliver it,
+	// the data-plane exposure boundary calls an INDEPENDENT invariant: point-to-point veth does not deliver it,
 	// because the host still ROUTES between two /30s — measured, sandbox A completed a
-	// TCP handshake to sibling B and read its payload (the documented invariant ①).
+	// TCP handshake to sibling B and read its payload (network enforcement).
 	t.Run("a sibling sandbox's guest IP", func(t *testing.T) {
 		sibID, _ := createRunning(t, eng, declAllowPublic())
 		// THE TARGET IS THE SIBLING'S TRANSPORT ENDPOINT: a real listener (sandboxd) inside
-		// that netns, which is exactly the "sibling endpoint" the documented invariant names. So "unreachable"
+		// that netns, which is exactly the "sibling endpoint" the data-plane exposure boundary names. So "unreachable"
 		// cannot be an artifact of nothing listening — the alternative reading this test has
 		// to rule out.
 		ep, err := eng.Mediator.Endpoint(sibID)
@@ -575,23 +574,23 @@ func TestDenyEmptyIsUnreachableEverywhereWithFloorCountersMoving(t *testing.T) {
 		res := runGuestProbe(t, cl, ep, false)
 		after := harness.NftCounter(t, id, "fwd_floor_v4")
 		if res.reachable() {
-			t.Fatalf("REACHED sibling %s from another sandbox (payload %s) — the documented invariant's cross-sandbox "+
+			t.Fatalf("REACHED sibling %s from another sandbox (payload %s) — the data-plane exposure boundary's cross-sandbox "+
 				"network isolation is an INDEPENDENT control-plane invariant that only this rule set "+
 				"materializes: point-to-point veth does not deliver it, because the host still routes "+
-				"between two /30s (measured, the documented invariant ①)\n%s", ep, res.payload, harness.DumpRuleSet(id))
+				"between two /30s (measured, network enforcement)\n%s", ep, res.payload, harness.DumpRuleSet(id))
 		}
 		mustCounterMoved(t, id, "fwd_floor_v4", before, after, "sibling guest IP")
 	})
 }
 
-// --- item 9: the transport is not killed by the floor ---------------------------
+// --- transport preservation: the floor does not kill the transport ---------------
 
 // The LOUD counterpart to every silent failure in this file:
 // the floor's `input` side must not drop the guest's replies to the host.
 //
 // It is asserted here rather than left implicit in the other tests' use of the
 // transport, because a floor that killed it would fail everything with one confusing
-// symptom (the documented invariant ⑧: a naive daddr floor placed above the established accept kills
+// symptom (network enforcement: a naive daddr floor placed above the established accept kills
 // transport outright).
 func TestTheFloorDoesNotKillTheTransport(t *testing.T) {
 	eng, _ := harness.Engine(t, netEngineOpts(t))
@@ -602,7 +601,7 @@ func TestTheFloorDoesNotKillTheTransport(t *testing.T) {
 	if _, err := cl.Health(ctx); err != nil {
 		t.Fatalf("Health failed with the floor installed: %v — the `input` floor must sit BELOW an "+
 			"established/related accept, or it drops the guest's replies to the host and transport "+
-			"dies outright (the documented invariant ⑧)\n%s", err, harness.DumpRuleSet(id))
+			"dies outright (network enforcement)\n%s", err, harness.DumpRuleSet(id))
 	}
 	// A multi-KB round trip, so this covers a real data-plane flow rather than one
 	// small packet: the return path is what the established arm carries.
@@ -625,35 +624,35 @@ func TestTheFloorDoesNotKillTheTransport(t *testing.T) {
 	}
 }
 
-// --- items 7, 7b, 7c: `allow` delivers public egress, refuses the LAN, and the ---
-// --- tier is liftable while the floor is not ------------------------------------
+// --- public egress: `allow` reaches public addresses and refuses the LAN ----------
+// --- the deny-safe tier is liftable while the floor is not -----------------------
 
-// The order here is a HARD constraint rather than a preference: item 7 must pass
-// BEFORE 7b/7c mean anything, because an engine that could reach nothing would pass
-// every deny assertion vacuously (see the file header).
+// The order here is a HARD constraint rather than a preference: public egress must
+// work before the deny-safe tier checks mean anything, because an engine that could
+// reach nothing would pass every deny assertion vacuously (see the file header).
 func TestAllowPublicDeliversEgressAndStillRefusesTheInternalTier(t *testing.T) {
 	eng, _ := harness.Engine(t, netEngineOpts(t))
 	host := hostIPv4(t)
 
-	// ITEM 7: public egress actually works, so item 6 above is not passing on an engine
+	// Public egress actually works, so the deny-empty checks are not passing on an engine
 	// where nothing works at all. The three host-side mechanisms it proves materialized
-	// are named in the failure message (measured necessary AND sufficient, the documented invariant ⑤).
+	// are named in the failure message (measured necessary AND sufficient, network enforcement).
 	id, cl := createRunning(t, eng, declAllowPublic())
 	pub := runGuestProbe(t, cl, "1.1.1.1:443", false)
 	if !pub.reachable() && pub.outcome != "connected_no_payload" {
 		t.Fatalf("`default: allow` did NOT deliver public egress (%s) — without this the deny "+
 			"assertions elsewhere in this file would be passing vacuously on an engine that cannot "+
 			"reach anything. The three host-side mechanisms are ip_forward, the guest default route "+
-			"WITH `dev`, and the masquerade for this /30 (the documented invariant ⑤)\n%s", pub.raw, harness.DumpRuleSet(id))
+			"WITH `dev`, and the masquerade for this /30 (network enforcement)\n%s", pub.raw, harness.DumpRuleSet(id))
 	}
-	t.Logf("item 7: public egress under `allow` → %s (%d ms)", pub.outcome, pub.ms)
+	t.Logf("public egress under `allow` → %s (%d ms)", pub.outcome, pub.ms)
 
-	// ITEM 7b: the SAME declaration must NOT reach the host's LAN. This is the
-	// deny-safe tier's acceptance, and it only means something now that item 7 passed:
+	// The SAME declaration must NOT reach the host's LAN. This is the deny-safe
+	// tier's acceptance, and it only means something now that public egress passed:
 	// measured, with the three mechanisms in place and no tier, this exact flow leaves
 	// the netns and is routed by the host, and NONE of the floor's four items covers it
-	// (the documented invariant ⑤). Without the tier, `allow` delivers a reachable set strictly WIDER than
-	// the documented invariant defines.
+	// (network enforcement). Without the tier, `allow` delivers a reachable set strictly WIDER than
+	// the provider security contract defines.
 	//
 	// The target is a host-LAN RFC1918 address. This host's own outbound address is
 	// used when it is RFC1918, which is the honest available target: it is routed
@@ -669,14 +668,14 @@ func TestAllowPublicDeliversEgressAndStillRefusesTheInternalTier(t *testing.T) {
 	after := harness.NftCounter(t, id, "fwd_tier_v4")
 	if lan.reachable() {
 		t.Errorf("under `default: allow` the guest REACHED the host's LAN at %s — that is the "+
-			"reachable set being wider than the documented invariant's `allow` (public MINUS the floor MINUS the internal "+
+			"reachable set being wider than the provider security contract's `allow` (public MINUS the floor MINUS the internal "+
 			"deny-safe tier). Measured: with the three egress mechanisms in place and this tier "+
 			"absent, this exact flow leaves the netns and is routed, and no floor item covers it "+
-			"(the documented invariant ⑤)\n%s", lanTarget, harness.DumpRuleSet(id))
+			"(network enforcement)\n%s", lanTarget, harness.DumpRuleSet(id))
 	}
-	mustCounterMoved(t, id, "fwd_tier_v4", before, after, "item 7b: the internal deny-safe tier")
+	mustCounterMoved(t, id, "fwd_tier_v4", before, after, "deny-safe tier: the internal range is refused")
 
-	// ITEM 7c: the tier is DENY-SAFE (liftable by declaration) while the floor is NOT.
+	// The tier is DENY-SAFE (liftable by declaration) while the floor is NOT.
 	// This PAIR is the only proof that the two-tier structure exists at all: without
 	// the first half, an implementation that put the internal ranges in the FLOOR
 	// passes everything; without the second, one that demoted the floor to deny-safe
@@ -696,12 +695,12 @@ func TestAllowPublicDeliversEgressAndStillRefusesTheInternalTier(t *testing.T) {
 	tierAfter := harness.NftCounter(t, liftedID, "fwd_tier_v4")
 	allowAfter := harness.NftCounter(t, liftedID, "allow0_fwd")
 	if allowAfter <= allowBefore {
-		t.Errorf("item 7c(a): the declared allow for %s counted %d → %d — the declaration did NOT "+
+		t.Errorf("deny-safe tier lift: the declared allow for %s counted %d → %d — the declaration did NOT "+
 			"lift the deny-safe tier, so the tier is behaving like a second floor and `deny-safe` "+
-			"means nothing (the documented invariant)\n%s", lanTarget, allowBefore, allowAfter, harness.DumpRuleSet(liftedID))
+			"means nothing (the provider security contract)\n%s", lanTarget, allowBefore, allowAfter, harness.DumpRuleSet(liftedID))
 	}
 	if tierAfter > tierBefore {
-		t.Errorf("item 7c(a): the tier counter moved (%d → %d) for traffic the declaration allowed — "+
+		t.Errorf("deny-safe tier lift: the tier counter moved (%d → %d) for traffic the declaration allowed — "+
 			"the allow must sit ABOVE the tier, or the tier is not liftable", tierBefore, tierAfter)
 	}
 	_ = lanPort
@@ -721,12 +720,12 @@ func TestAllowPublicDeliversEgressAndStillRefusesTheInternalTier(t *testing.T) {
 	sib := runGuestProbe(t, wideCl, sibEP, false)
 	floorAfter := harness.NftCounter(t, wideID, "fwd_floor_v4")
 	if sib.reachable() {
-		t.Errorf("item 7c(b): an `allow 10.0.0.0/8` REACHED sibling %s — the floor sits ABOVE the "+
+		t.Errorf("non-liftable floor: an `allow 10.0.0.0/8` REACHED sibling %s — the floor sits ABOVE the "+
 			"declaration's allows precisely so no declaration can lift it, and that is materialized "+
-			"purely by ORDER (the documented invariant)\n%s", sibEP, harness.DumpRuleSet(wideID))
+			"purely by ORDER (the provider security contract)\n%s", sibEP, harness.DumpRuleSet(wideID))
 	}
 	mustCounterMoved(t, wideID, "fwd_floor_v4", floorBefore, floorAfter,
-		"item 7c(b): the floor is not liftable by a declaration that contains it")
+		"non-liftable floor: a declaration that contains the floor cannot lift it")
 }
 
 // lanNeighbour returns a different address in the same /24 as the given one, for use
@@ -752,7 +751,7 @@ func tupleOf(t *testing.T, cidr string, port uint16, proto model.NetProto) model
 	return model.NetTuple{CIDR: p, Port: port, Proto: proto}
 }
 
-// --- item 8: an allow[] entry admits EXACTLY its tuple --------------------------
+// --- tuple allow: an allow[] entry admits EXACTLY its tuple ----------------------
 
 // The declared `{cidr, port, proto}` works and NOTHING ADJACENT does.
 //
@@ -767,8 +766,8 @@ func TestAnAllowEntryAdmitsExactlyItsTuple(t *testing.T) {
 	port, portStr := portOf(t, addr)
 
 	// The declared target is an address of the HOST, so this also exercises the rule
-	// the documented invariant requires on BOTH hooks: a forward-only allow cannot reach a host-local
-	// destination at all (the documented invariant).
+	// the network declaration requires on BOTH hooks: a forward-only allow cannot reach a host-local
+	// destination at all (network enforcement).
 	d := declDeny()
 	d.Egress.Allow = []model.NetTuple{tupleOf(t, host+"/32", port, model.NetTCP)}
 	id, cl := createRunning(t, eng, d)
@@ -780,7 +779,7 @@ func TestAnAllowEntryAdmitsExactlyItsTuple(t *testing.T) {
 	if !got.reachable() {
 		t.Fatalf("the DECLARED tuple %s:%d/tcp was not reachable (%s) — and note the shape: this "+
 			"destination is an address of the host, so a forward-only allow could not reach it at all "+
-			"(the documented invariant), which is why the documented invariant requires the allow on both hooks\n%s",
+			"(network enforcement), which is why the network declaration requires the allow on both hooks\n%s",
 			host, port, got.raw, harness.DumpRuleSet(id))
 	}
 	if got.payload == "" || !strings.Contains(got.payload, "DECLARED") {
@@ -802,16 +801,16 @@ func TestAnAllowEntryAdmitsExactlyItsTuple(t *testing.T) {
 	if res.reachable() {
 		t.Errorf("an UNDECLARED port on the declared address was reachable (payload %s) — the "+
 			"reachable set must be exactly the declared tuples, so the port dimension has to bite "+
-			"(the documented invariant ③)\n%s", res.payload, harness.DumpRuleSet(id))
+			"(the provider security contract)\n%s", res.payload, harness.DumpRuleSet(id))
 	}
-	mustCounterMoved(t, id, "in_floor", floorBefore, floorAfter, "item 8: an undeclared port on a declared address")
+	mustCounterMoved(t, id, "in_floor", floorBefore, floorAfter, "tuple allow: an undeclared port on a declared address")
 }
 
-// The UDP half, asserted separately because UDP is DNS's only declarable path (the documented invariant
-// semantics ③) and because the assertion deliberately stops at the RULE layer:
+// The UDP half is asserted separately because UDP is DNS's only declarable path
+// and because the assertion deliberately stops at the RULE layer:
 // whether `curl` in the guest can RESOLVE depends on `resolv.conf`, which the engine
 // does not write (the guest has no resolver configuration at all today — measured,
-// the documented invariant ⑦).
+// network enforcement).
 func TestADeclaredUDPTupleIsAdmittedAtTheRuleLayer(t *testing.T) {
 	eng, _ := harness.Engine(t, netEngineOpts(t))
 	host := hostIPv4(t)
@@ -854,7 +853,7 @@ func TestADeclaredUDPTupleIsAdmittedAtTheRuleLayer(t *testing.T) {
 	after := harness.NftCounter(t, id, "allow0_in")
 	if after <= before {
 		t.Errorf("a declared UDP tuple counted %d → %d on the input-side allow — UDP is the ONLY "+
-			"declarable path for DNS under `default: deny` (the documented invariant semantics ③), so this rule has to "+
+			"declarable path for DNS under `default: deny`, so this rule has to "+
 			"bite\n%s", before, after, harness.DumpRuleSet(id))
 	}
 	// THE ROUND TRIP, which is what "observable rather than inferred" above means. The
@@ -864,36 +863,36 @@ func TestADeclaredUDPTupleIsAdmittedAtTheRuleLayer(t *testing.T) {
 	if !got.reachable() {
 		t.Errorf("a declared UDP tuple matched the allow (counter %d → %d) but the datagram did not "+
 			"round-trip: outcome=%q raw=%s\nUDP is the only declarable path for DNS under "+
-			"`default: deny` (the documented invariant semantics ③), so a tuple that counts but does not carry traffic is "+
+			"`default: deny`, so a tuple that counts but does not carry traffic is "+
 			"the feature being dead with its counter moving", before, after, got.outcome, got.raw)
 	}
 	if got.payload != "udp-banner" {
 		t.Errorf("the UDP reply payload was %q, want %q — the banner is what distinguishes "+
 			"\"the host answered\" from \"something answered\"", got.payload, "udp-banner")
 	}
-	t.Logf("item 8 (udp): %s", got.raw)
+	t.Logf("UDP tuple allow: %s", got.raw)
 	// Deliberately NOT asserting name resolution: the guest ships no resolv.conf at
-	// all, so DNS does not work there for reasons that precede any the documented invariant policy — that
+	// all, so DNS does not work there for reasons that precede any the network declaration policy — that
 	// is a template/product-layer content choice, outside the engine.
 }
 
-// --- item 8b: guest-facing refusals FAIL FAST rather than hang -----------------
+// --- fail-fast refusal: guest-facing refusals do not hang ------------------------
 
-// the documented invariant's fail-closed has a SECOND half — "the guest gets a clean
+// the provider security contract's fail-closed has a SECOND half — "the guest gets a clean
 // connection failure" — and a pure-`drop` floor satisfies the security half while
 // breaking this one. gVisor's netstack honors ICMP errors, so `reject` and `drop`
 // differ by orders of magnitude in what the guest experiences.
 //
 // ASSERTED BY MAGNITUDE, NEVER BY A MILLISECOND FIGURE: this test IS the standing
-// `reject` arm the documented invariant ⑨ cites (0 ms), and the `drop` arm is deliberately not kept as a
+// `reject` arm network enforcement cites (0 ms), and the `drop` arm is deliberately not kept as a
 // standing test — every run would waste 25 s hanging.
 //
 // The source measurement was single-source and its first independent reproduction
 // FAILED: the test bed had no guest default route, so nothing left the sandbox and all
 // four verdicts looked alike — an invalid measurement, not a refutation. This test is
 // that reproduction's second attempt. So the direction is trusted and the numbers are
-// not (recorded here because no maintained page carries it: the documented invariant ⑨ states both arms as reproduced
-// and defers the conditions to the documented invariant, which does not keep the failed attempt).
+// not (recorded here because no maintained page carries it: network enforcement states both arms as reproduced
+// and defers the conditions to network enforcement, which does not keep the failed attempt).
 func TestGuestFacingRefusalsFailFastRatherThanHanging(t *testing.T) {
 	eng, _ := harness.Engine(t, netEngineOpts(t))
 	id, cl := createRunning(t, eng, declDeny())
@@ -914,28 +913,28 @@ func TestGuestFacingRefusalsFailFastRatherThanHanging(t *testing.T) {
 		t.Fatalf("the probe REACHED a floor address: %s", res.raw)
 	}
 	mustCounterMoved(t, id, "fwd_floor_v4", before, after,
-		"item 8b: the floor counter must move, or the fast refusal proves nothing about the ENGINE — "+
+		"fail-fast refusal: the floor counter must move, or the fast refusal proves nothing about the ENGINE — "+
 			"a packet dying in the netns is refused just as fast (this test's own first attempt "+
 			"failed that way)")
 	elapsed := time.Duration(res.ms) * time.Millisecond
 	if elapsed >= fastEnough {
-		t.Errorf("a guest-facing refusal took %s — the documented invariant's fail-closed promises the guest a CLEAN "+
+		t.Errorf("a guest-facing refusal took %s — the provider security contract's fail-closed promises the guest a CLEAN "+
 			"connection failure, not a hang. A pure-`drop` floor meets the security half and breaks "+
 			"this one; the fix is `reject`, and security is unaffected because neither forwards "+
-			"(the documented invariant ⑨ / the documented invariant). Asserted by MAGNITUDE because that measurement is single-source and its "+
+			"(network enforcement). Asserted by MAGNITUDE because that measurement is single-source and its "+
 			"first reproduction was invalid\n%s", elapsed, harness.DumpRuleSet(id))
 	}
-	t.Logf("item 8b: refusal at %s (magnitude assertion: < %s). the documented invariant ⑨'s numbers were 20.0 s for "+
+	t.Logf("fail-fast refusal at %s (magnitude assertion: < %s). network enforcement's numbers were 20.0 s for "+
 		"`drop` vs 0.002 s for `reject`; this run reproduces the DIRECTION", elapsed, fastEnough)
 }
 
-// --- item 10 / 11b: pillar ④ — the predicate binds to a fact the guest cannot ---
-// --- change, and survives a veth rebuild ---------------------------------------
+// --- interface binding: the predicate binds to a fact the guest cannot change ---
+// --- and survives a veth rebuild ------------------------------------------------
 
 // Guest root FORGES a source address and the floor still holds.
 //
-// This is pillar ④'s acceptance: guest root can `ip addr add` (measured rc=0), so a
-// SOURCE-address predicate is bypassable while an INPUT-INTERFACE one is not (the documented invariant ③).
+// This is pillar 's acceptance: guest root can `ip addr add` (measured rc=0), so a
+// SOURCE-address predicate is bypassable while an INPUT-INTERFACE one is not (network enforcement).
 // The counter is what proves it was the interface predicate that refused, and not
 // `rp_filter` or a routing artifact.
 func TestForgingASourceAddressDoesNotBypassTheFloor(t *testing.T) {
@@ -948,7 +947,7 @@ func TestForgingASourceAddressDoesNotBypassTheFloor(t *testing.T) {
 	// predicate would be fooled by (it is inside the floor). NOT the host's own
 	// address: adding that makes it locally owned inside the sandbox, so the probe
 	// below never leaves the netns and every host counter stays 0 — measured, and by
-	// the documented invariant that is an INVALID assertion rather than a pass.
+	// network enforcement that is an INVALID assertion rather than a pass.
 	//
 	// THE FORGERY MUST ACTUALLY HAPPEN, and both its RUN and its RESULT are asserted
 	// below (see forgerSrc for the ENOENT that made it silently do nothing).
@@ -958,7 +957,7 @@ func TestForgingASourceAddressDoesNotBypassTheFloor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the forgery step did not RUN (%v) — without it this test cannot distinguish an "+
 			"interface predicate from a source-address one, and would pass on a forgeable engine "+
-			"(pillar ④ / the documented invariant ③)", err)
+			"(pillar  / network enforcement)", err)
 	}
 	var forgeOut strings.Builder
 	for e := range evs {
@@ -967,7 +966,7 @@ func TestForgingASourceAddressDoesNotBypassTheFloor(t *testing.T) {
 		}
 	}
 	if !strings.Contains(forgeOut.String(), "FORGE_OK") {
-		t.Fatalf("guest root could not add the forged address to its interface (%q) — the documented invariant ③ measured "+
+		t.Fatalf("guest root could not add the forged address to its interface (%q) — network enforcement measured "+
 			"this SUCCEEDING, so a failure here means the fixture broke, not that the engine is "+
 			"safe: the whole point is that the forgery works and the floor holds anyway",
 			forgeOut.String())
@@ -981,12 +980,12 @@ func TestForgingASourceAddressDoesNotBypassTheFloor(t *testing.T) {
 	after := harness.NftCounter(t, id, "fwd_floor_v4")
 	if res.reachable() {
 		t.Fatalf("after forging a floor-space source address the guest REACHED %s — the predicate "+
-			"must bind to a fact the guest cannot change (pillar ④): a source-address predicate is "+
-			"measurably forgeable, an input-interface one is not (the documented invariant ③)\n%s",
+			"must bind to a fact the guest cannot change: a source-address predicate is "+
+			"measurably forgeable, an input-interface one is not (network enforcement)\n%s",
 			floorTarget, harness.DumpRuleSet(id))
 	}
 	mustCounterMoved(t, id, "fwd_floor_v4", before, after,
-		"item 10: the floor counter must move, proving it was the INTERFACE predicate that refused "+
+		"interface binding: the floor counter must move, proving it was the INTERFACE predicate that refused "+
 			"rather than rp_filter or a routing artifact — and that the guest's address manipulation "+
 			"did not simply make the packet undeliverable inside the sandbox")
 }
@@ -997,7 +996,7 @@ func TestForgingASourceAddressDoesNotBypassTheFloor(t *testing.T) {
 // This is the behavioral face of the `iifname`-over-`iif` guard, and the TIME POINT
 // is the assertion: `iif` freezes an ifindex at load time and fails OPEN only AFTER a
 // same-name rebuild, with the drop counter reading 0 while the packet is delivered
-// (the documented invariant ⑫). Asserting before the rebuild would pass with either spelling.
+// (network enforcement). Asserting before the rebuild would pass with either spelling.
 func TestTheFloorStillHoldsAfterAVethRebuild(t *testing.T) {
 	eng, _ := harness.Engine(t, netEngineOpts(t))
 	ctx := context.Background()
@@ -1033,19 +1032,19 @@ func TestTheFloorStillHoldsAfterAVethRebuild(t *testing.T) {
 	if res.reachable() {
 		t.Fatalf("AFTER a same-name veth rebuild the guest REACHED %s — this is `iif`'s silent "+
 			"fail-open: it freezes an ifindex at load time, the bytecode is unchanged after the "+
-			"rebuild, and the packet is delivered while the drop counter reads 0 (the documented invariant ⑫). The "+
+			"rebuild, and the packet is delivered while the drop counter reads 0 (network enforcement). The "+
 			"by-NAME spelling does not have this failure\n%s", host, harness.DumpRuleSet(id))
 	}
 	mustCounterMoved(t, id, "in_floor", before, after,
-		"item 11b: after the rebuild the floor must both refuse AND count — a delivered packet with a zero counter is exactly `iif`'s signature")
+		"interface binding after veth rebuild: the floor must both refuse AND count — a delivered packet with a zero counter is exactly `iif`'s signature")
 }
 
-// --- item 11: cross-sandbox independence ---------------------------------------
+// --- cross-sandbox independence -------------------------------------------------
 
 // Two sandboxes hold two tables, and one's rule set does not affect
 // the other's reachable set.
 //
-// This is guard ①'s POSITIVE face: a `policy drop` in a per-sandbox table was
+// This is guard 's POSITIVE face: a `policy drop` in a per-sandbox table was
 // measured killing ANOTHER sandbox's traffic while its own rule matched not one
 // packet, so "my deny works" is not evidence the deny is scoped.
 func TestOneSandboxsRuleSetDoesNotAffectAnothers(t *testing.T) {
@@ -1064,7 +1063,7 @@ func TestOneSandboxsRuleSetDoesNotAffectAnothers(t *testing.T) {
 	// B reaches it…
 	if res := runGuestProbe(t, allowCl, net.JoinHostPort(host, portStr), false); !res.reachable() {
 		t.Fatalf("the sandbox that DECLARED this endpoint cannot reach it (%s) — A's deny is "+
-			"bleeding into B, which is guard ①'s hazard: a per-sandbox table sits on a SHARED hook "+
+			"bleeding into B, which is guard 's hazard: a per-sandbox table sits on a SHARED hook "+
 			"(measured: a `policy drop` there killed another sandbox's traffic while its own rule "+
 			"matched no packet)\n%s", res.raw, harness.DumpRuleSet(allowID))
 	}
@@ -1074,10 +1073,10 @@ func TestOneSandboxsRuleSetDoesNotAffectAnothers(t *testing.T) {
 	after := harness.NftCounter(t, denyID, "in_floor")
 	if res.reachable() {
 		t.Errorf("the DENY sandbox reached an endpoint only the other one declared — an un-narrowed "+
-			"accept in B's table is a hole in EVERY sandbox's floor (measured, the documented invariant ⑩)\n%s",
+			"accept in B's table is a hole in EVERY sandbox's floor (measured, network enforcement)\n%s",
 			harness.DumpRuleSet(allowID))
 	}
-	mustCounterMoved(t, denyID, "in_floor", before, after, "item 11: A's own floor refuses what B declared")
+	mustCounterMoved(t, denyID, "in_floor", before, after, "cross-sandbox independence: A's own floor refuses what B declared")
 
 	// Destroying one must not change the other's reachable set.
 	if err := eng.Mediator.Destroy(context.Background(), denyID); err != nil {
@@ -1133,14 +1132,14 @@ func gatewayOf(t *testing.T, eng *orchestrator.Engine, id model.SandboxID) strin
 // BOTH HALVES ARE REQUIRED, for two different reasons.
 //
 //   - Without the reachable half, a rule set that never emitted the self-gateway allow
-//     at all passes perfectly — and it has broken the documented invariant semantics ③, whose ONLY delivery
+//     at all passes perfectly — and it has broken the network declaration semantics , whose ONLY delivery
 //     path is this one: the sole stably-available host-local resolver address is this
 //     sandbox's own gateway, it is a host address so it lands on `input`, and a
-//     `forward`-only allow cannot reach it (the documented invariant / the documented invariant ⑦).
+//     `forward`-only allow cannot reach it (network enforcement).
 //   - Without the counter, "cannot connect" is not an assertion at all. The counter that
 //     must move is `in_sibling`, the sibling drop ON THE INPUT HOOK — the `forward` side's
 //     own sibling item (`fwd_floor_v4`, same /16 in its daddr set) counts ZERO on this
-//     path, because a sibling's gateway is an address of the HOST (the documented invariant). Reading that
+//     path, because a sibling's gateway is an address of the HOST (network enforcement). Reading that
 //     one instead would turn a real leak (measured: the guest reads the sibling's
 //     banner) into "the floor counter is 0".
 func TestAnInputSideAllowReachesItsOwnGatewayButNotASiblings(t *testing.T) {
@@ -1149,7 +1148,7 @@ func TestAnInputSideAllowReachesItsOwnGatewayButNotASiblings(t *testing.T) {
 	// ONE listener on 0.0.0.0, and that is the point rather than a shortcut: it is bound
 	// on EVERY host address, both gateways included, so at the socket layer the
 	// sibling's gateway is genuinely serving. Nothing but the rule set's order stands
-	// between the guest and that banner — which is exactly the leak the documented invariant measured.
+	// between the guest and that banner — which is exactly the leak network enforcement measured.
 	addr, stop := hostListener(t, "hello-from-GATEWAY")
 	defer stop()
 	port, portStr := portOf(t, addr)
@@ -1180,16 +1179,16 @@ func TestAnInputSideAllowReachesItsOwnGatewayButNotASiblings(t *testing.T) {
 	selfAfter := harness.NftCounter(t, aID, "allow0_selfgw")
 	if !own.reachable() {
 		t.Fatalf("the sandbox could NOT reach a host-local endpoint on its OWN gateway %s:%d (%s) — "+
-			"the documented invariant semantics ③ (a caller declares its own resolver) has no other delivery path: that "+
+			"the network declaration semantics  (a caller declares its own resolver) has no other delivery path: that "+
 			"gateway is an address of the host, so the allow must be on the INPUT hook and it must "+
-			"sit ABOVE the sibling drop (the documented invariant / the documented invariant ⑦)\n%s", aGW, port, own.raw, harness.DumpRuleSet(aID))
+			"sit ABOVE the sibling drop (network enforcement)\n%s", aGW, port, own.raw, harness.DumpRuleSet(aID))
 	}
 	if own.payload == "" || !strings.Contains(own.payload, "GATEWAY") {
 		t.Errorf("reached the own-gateway endpoint but read %q, want the listener's banner", own.payload)
 	}
 	if selfAfter < 0 {
 		t.Errorf("counter %q does not exist, so the self-gateway allow was never rendered — the "+
-			"reachability just observed came from some other rule, and semantics ③ is being served "+
+			"reachability just observed came from some other rule, and semantics  is being served "+
 			"by accident\n%s", "allow0_selfgw", harness.DumpRuleSet(aID))
 	} else if selfAfter <= selfBefore {
 		t.Errorf("reached the own gateway but %q counted %d → %d — the traffic took a path the rule "+
@@ -1208,26 +1207,26 @@ func TestAnInputSideAllowReachesItsOwnGatewayButNotASiblings(t *testing.T) {
 	if sib.reachable() {
 		t.Errorf("the sandbox REACHED the SIBLING's gateway %s:%d and read %q — an `allow 10.0.0.0/8` "+
 			"covers both /30s, so only ORDER separates them: the sibling drop must sit BETWEEN the "+
-			"self-gateway allow and the declaration's own allows. Below them, this is the leak the documented invariant "+
+			"self-gateway allow and the declaration's own allows. Below them, this is the leak network enforcement "+
 			"measured (the guest reads the sibling's banner)\n%s",
 			bGW, port, sib.payload, harness.DumpRuleSet(aID))
 	}
 	mustCounterMoved(t, aID, "in_sibling", sibBefore, sibAfter,
-		"item 11c: a sibling's gateway is an address of the HOST, so the drop that refuses it can only "+
+		"input-side sibling isolation: a sibling's gateway is an address of the HOST, so the drop that refuses it can only "+
 			"be the one on the INPUT hook")
 	if fwdAfter > fwdBefore {
 		t.Errorf("the forward-side floor counted %d → %d on this path — the measurement this "+
 			"assertion rests on is that it counts ZERO here (a sibling's gateway is a host address, "+
-			"so `forward` never sees it, the documented invariant). If it now moves, `in_sibling` may no longer be the "+
+			"so `forward` never sees it, network enforcement). If it now moves, `in_sibling` may no longer be the "+
 			"rule doing the refusing and this test is reading the wrong counter\n%s",
 			fwdBefore, fwdAfter, harness.DumpRuleSet(aID))
 	} else {
 		t.Logf("forward-side floor stayed at %d across the sibling probe — the reason reading IT "+
-			"would be an invalid assertion (the documented invariant)", fwdBefore)
+			"would be an invalid assertion (network enforcement)", fwdBefore)
 	}
 }
 
-// --- item 12: atomicity — the rules are in place before the unit runs ----------
+// --- rule-set atomicity: rules are in place before the unit runs -----------------
 
 // No fail-open window, and destroy leaves NO table.
 //
@@ -1255,11 +1254,11 @@ func TestTheRulesArePresentBeforeTheGuestRunsAndDestroyLeavesNoTable(t *testing.
 	// installed after the fact.
 	if res := runGuestProbe(t, cl, "1.1.1.1:443", false); res.reachable() {
 		t.Errorf("the guest's first probe got out: %s — the rule set must be installed BETWEEN "+
-			"building the netns and starting the unit (the documented invariant), because any window where the network "+
+			"building the netns and starting the unit (the provider security contract), because any window where the network "+
 			"is up and the rules are not is a fail-open window\n%s", res.raw, harness.DumpRuleSet(id))
 	}
 
-	// Teardown leaves nothing: a rule set is crash-surviving host state (the documented invariant), so it
+	// Teardown leaves nothing: a rule set is crash-surviving host state (the provider security contract), so it
 	// leaks exactly the way a netns does.
 	if err := eng.Mediator.Destroy(context.Background(), id); err != nil {
 		t.Fatalf("destroy: %v", err)
@@ -1269,13 +1268,13 @@ func TestTheRulesArePresentBeforeTheGuestRunsAndDestroyLeavesNoTable(t *testing.
 	}
 }
 
-// --- items 9b / 9c / 9d: `via[]` ------------------------------------------------
+// --- `via[]`: steering, failure behavior, and second-hop narrowing ----------------
 
 // viaListener runs a host-local TCP listener AS A GIVEN UID, recovering the ORIGINAL
 // destination of each redirected connection and reporting it — the "process outside
 // the engine" a `via[]` endpoint points at.
 //
-// It runs as secondHopUID because item 9d needs the second hop to be attributable: the
+// It runs as secondHopUID because second-hop pinning must be attributable: the
 // engine-level table pins THAT uid's egress (see secondHopUID).
 const viaListenerSrc = `package main
 
@@ -1289,9 +1288,9 @@ import (
 
 // vialisten <addr:port> — accept, recover SO_ORIGINAL_DST, answer with it.
 //
-// SO_ORIGINAL_DST is the interface that WORKS on TCP; the documented invariant excludes UDP from via[]
+// SO_ORIGINAL_DST is the interface that WORKS on TCP; the network declaration excludes UDP from via[]
 // precisely because the UDP equivalent returns the POST-NAT local endpoint, which is
-// indistinguishable from "no NAT happened" (measured, the documented invariant / the documented invariant ⑥).
+// indistinguishable from "no NAT happened" (measured by the network substrate suite).
 func main() {
 	bind := os.Args[1]
 	ln, err := net.Listen("tcp", bind)
@@ -1368,7 +1367,7 @@ func asUID(uid int, bin string, args ...string) *exec.Cmd {
 // startViaListener builds and starts the via endpoint process as secondHopUID,
 // returning its endpoint and a stop func.
 //
-// IT BINDS A NON-LOOPBACK HOST ADDRESS because the documented invariant's SIXTH 400 class refuses a
+// IT BINDS A NON-LOOPBACK HOST ADDRESS because ClassViaEndpointInFloor refuses a
 // `via[].endpoint` inside the L0 floor, loopback included. Measured on a loopback
 // endpoint before this fixture moved off it: with `route_localnet=0` (this host's
 // default) a 127/8 DNAT target is not routable for guest-originated traffic —
@@ -1403,7 +1402,7 @@ func startViaListener(t *testing.T, port int) (string, func()) {
 
 // `via[]` really steers, AND the narrow accept did not reopen the floor. BOTH halves,
 // because each alone is passed by a broken rule set — and this is the easiest property
-// in this file to silently pass, with TWO failure directions (the documented invariant ⑩): test only (a) and an accept wide enough to void the
+// in this file to silently pass, with TWO failure directions (network enforcement): test only (a) and an accept wide enough to void the
 // floor passes; read only the counter and a CROSS-CHAIN accept counts while the
 // feature is dead.
 func TestViaSteersAndDoesNotReopenTheFloor(t *testing.T) {
@@ -1420,24 +1419,24 @@ func TestViaSteersAndDoesNotReopenTheFloor(t *testing.T) {
 	id, cl := createRunning(t, eng, d)
 
 	// (a) WORKING: reachable AND the accept counted AND the endpoint saw the REAL
-	// original destination (the documented invariant ⑥'s end-to-end payoff).
+	// original destination (network enforcement's end-to-end payoff).
 	accBefore := harness.NftCounter(t, id, "via0_0_accept")
 	got := runGuestProbe(t, cl, "1.1.1.1:443", false)
 	accAfter := harness.NftCounter(t, id, "via0_0_accept")
 	if !got.reachable() {
 		t.Fatalf("the steered flow did not reach the endpoint (%s) — `via[]` is dead. Note the "+
 			"counter alone would not have told us: a CROSS-CHAIN accept increments while the flow is "+
-			"still dropped (the documented invariant ⑩)\n%s", got.raw, harness.DumpRuleSet(id))
+			"still dropped (network enforcement)\n%s", got.raw, harness.DumpRuleSet(id))
 	}
 	if !strings.Contains(got.payload, "via-ok") {
 		t.Errorf("the steered flow reached something that is not the endpoint: %q", got.payload)
 	}
 	// The endpoint recovered the PRE-NAT destination, which is what makes `via[]` useful
 	// at all: the process outside the engine sees the real target rather than a
-	// guest-asserted alias (the documented invariant / the documented invariant ⑥).
+	// guest-asserted alias (network enforcement).
 	if !strings.Contains(got.payload, "ORIGDST=1.1.1.1:443") {
 		t.Errorf("the endpoint did not recover the real original destination: %q — that recovery is "+
-			"the whole point of steering by port (the documented invariant ⑥), and without it the process outside the "+
+			"the whole point of steering by port (network enforcement), and without it the process outside the "+
 			"engine has only the guest's own claim about where it was going", got.payload)
 	}
 	if accAfter <= accBefore {
@@ -1447,7 +1446,7 @@ func TestViaSteersAndDoesNotReopenTheFloor(t *testing.T) {
 
 	// (b) The SAME rule set must still refuse everything the narrow accept was not for.
 	// Each of these four corresponds to a measured counter-example for a simpler
-	// spelling of that accept (the documented invariant ⑩), so they are the proof its three clauses are
+	// spelling of that accept (network enforcement), so they are the proof its three clauses are
 	// load-bearing — not extra coverage.
 	host := hostIPv4(t)
 	_, listenPortStr := portOf(t, endpoint)
@@ -1461,19 +1460,19 @@ func TestViaSteersAndDoesNotReopenTheFloor(t *testing.T) {
 		counter: "in_floor",
 		why: "`tcp dport <listener>` on its own is exactly this bypass; it is safe only as the " +
 			"THIRD clause, because `ct original` has already pinned the pre-NAT tuple and a direct " +
-			"dial has no conntrack original entry that satisfies it (the documented invariant ⑩)",
+			"dial has no conntrack original entry that satisfies it (network enforcement)",
 	}, {
 		name:    "an UNDECLARED original port toward the declared destination",
 		target:  "1.1.1.1:9200",
 		counter: "fwd_default_deny",
 		why: "the measured counter-example for `ct status dnat tcp dport <listener>`: 9200 → :18443 " +
-			"was let through with the floor counting 0, and the listener read ORIGDST=…:9200 (the documented invariant ⑩)",
+			"was let through with the floor counting 0, and the listener read ORIGDST=…:9200 (network enforcement)",
 	}, {
 		name:    "the declared port toward an UNDECLARED destination",
 		target:  "9.9.9.9:443",
 		counter: "fwd_default_deny",
 		why: "the counter-example for pinning only `ct original proto-dst`: another address on the " +
-			"same port would be steered, which is over-reach in the explicit-endpoint form (the documented invariant ⑩)",
+			"same port would be steered, which is over-reach in the explicit-endpoint form (network enforcement)",
 	}, {
 		name:    "an unrelated host port",
 		target:  net.JoinHostPort(host, otherPortStr),
@@ -1494,7 +1493,7 @@ func TestViaSteersAndDoesNotReopenTheFloor(t *testing.T) {
 	}
 
 	// (c) THE `iifname` DIMENSION, separately: a SECOND sandbox's identical flow must
-	// not be admitted by THIS sandbox's accept. Measured as the last row of the documented invariant ⑩ — an
+	// not be admitted by THIS sandbox's accept. Measured as the last row of network enforcement — an
 	// accept without the interface clause is a hole in every sandbox's floor, and both
 	// floors counted 0 when it happened.
 	t.Run("another sandbox's identical flow is not admitted by this accept", func(t *testing.T) {
@@ -1505,19 +1504,19 @@ func TestViaSteersAndDoesNotReopenTheFloor(t *testing.T) {
 		if res.reachable() {
 			t.Errorf("a SECOND sandbox's identical flow was admitted (payload %s) — every per-sandbox "+
 				"table is a `policy accept` base chain on a SHARED hook, so an accept missing its "+
-				"`iifname` is a hole in EVERY sandbox's floor (the documented invariant ⑩, last row)\n%s",
+				"`iifname` is a hole in EVERY sandbox's floor (network enforcement, last row)\n%s",
 				res.payload, harness.DumpRuleSet(id))
 		}
 		mustCounterMoved(t, otherID, "fwd_default_deny", before, after,
-			"item 9b(c): the second sandbox's OWN default-deny must be what refuses it")
+			"via cross-sandbox isolation: the second sandbox's OWN default-deny must be what refuses it")
 	})
 }
 
 // When the `via[]` endpoint is DEAD, the steered connection is refused
 // — it does NOT fall through to the next rule and leave.
 //
-// This is the documented invariant fail-closed's second named case, and it is a REQUIREMENT rather than an
-// inherited measurement: the documented invariant has no "the listener died" cell.
+// This is the provider security contract fail-closed's second named case, and it is a REQUIREMENT rather than an
+// inherited measurement: network enforcement has no "the listener died" cell.
 //
 // The counter half is the subtle part: it reads the INPUT-side narrow accept rather than
 // the forward default-deny, for the hook-attribution reason spelled out at (b) below.
@@ -1562,7 +1561,7 @@ func TestADeadViaEndpointRefusesTheConnectionRatherThanLettingItOut(t *testing.T
 		t.Fatalf("the steered flow succeeded with the endpoint DEAD (%s) — something else answered", res.raw)
 	}
 	if el := time.Duration(res.ms) * time.Millisecond; el >= 5*time.Second {
-		t.Errorf("a steered flow with a dead endpoint took %s — the documented invariant fail-closed promises a clean "+
+		t.Errorf("a steered flow with a dead endpoint took %s — the provider security contract fail-closed promises a clean "+
 			"failure for exactly this case, and the RST here comes from the host stack having no "+
 			"socket rather than from a `reject` rule (do not conflate the two mechanisms)", el)
 	}
@@ -1570,27 +1569,27 @@ func TestADeadViaEndpointRefusesTheConnectionRatherThanLettingItOut(t *testing.T
 	// increment it — positive evidence the packet took the steering path and was
 	// consumed locally.
 	mustCounterMoved(t, id, "via0_0_accept", accBefore, accAfter,
-		"item 9c(b): the DNAT is in `prerouting` and does not check for a listener, so the packet is "+
+		"dead via endpoint steering: the DNAT is in `prerouting` and does not check for a listener, so the packet is "+
 			"still transformed and still lands on `input` — this counter rising proves it went down "+
 			"the steering path rather than being routed out. (The forward default-deny is NOT usable "+
 			"here: it counts zero on this path whether or not steering held, and `always zero` is "+
 			"indistinguishable from `bypassed`)")
 
-	// (c) PER-CONNECTION scope: another declared egress is unaffected. the documented invariant says
+	// (c) PER-CONNECTION scope: another declared egress is unaffected. the provider security contract says
 	// fail-closed applies to the failing connection and does not touch the rest.
 	if res := runGuestProbe(t, cl, net.JoinHostPort(hostIPv4(t), hostPortStr), false); !res.reachable() {
 		t.Errorf("an unrelated ALLOWED egress broke when the via endpoint died (%s) — fail-closed is "+
-			"scoped per-connection (the documented invariant), so a dead endpoint must not touch other permitted "+
+			"scoped per-connection (the provider security contract), so a dead endpoint must not touch other permitted "+
 			"flows\n%s", res.raw, harness.DumpRuleSet(id))
 	}
 }
 
-// The SECOND HOP is really pinned — the confused-deputy line (the documented invariant
-// invariant 2).
+// The SECOND HOP is really pinned — the confused-deputy boundary in the provider
+// security contract.
 //
 // BOTH halves, and the reason is the same discipline as everywhere else: testing only
 // "it cannot connect" would be passed by an engine that never installed the table at
-// all, because hop 2 counts ZERO in `forward` (measured, the documented invariant ㉔) so the first-hop floor
+// all, because hop 2 counts ZERO in `forward` (measured, network enforcement) so the first-hop floor
 // never evaluates it and "cannot connect" may have any other cause.
 //
 // The PAIRED direction is equally required: the same process reaching a permitted
@@ -1611,9 +1610,9 @@ func TestTheSecondHopIsPinnedUnderTheFloor(t *testing.T) {
 	// The engine-level table must exist — it is installed once at boot by the harness,
 	// in production's position.
 	if n := harness.NftCounterIn(t, "sbxnet_hop2", "hop2_floor_v4"); n < 0 {
-		t.Fatalf("the engine-level second-hop table has no v4 floor counter — the documented invariant invariant 2's " +
+		t.Fatalf("the engine-level second-hop table has no v4 floor counter — the second-hop floor's " +
 			"second half is not installed at all, and every FIRST-hop assertion in this file would " +
-			"still pass (the documented invariant ㉔)")
+			"still pass (network enforcement)")
 	}
 
 	// (a) DENY: the endpoint process's own egress to an in-floor target is refused, and
@@ -1627,10 +1626,10 @@ func TestTheSecondHopIsPinnedUnderTheFloor(t *testing.T) {
 			out := probeAsUID(t, secondHopUID, tc.target)
 			after := harness.NftCounterIn(t, "sbxnet_hop2", "hop2_floor_v4")
 			if strings.Contains(out, "CONNECTED") {
-				t.Errorf("the second-hop process REACHED %s (%s) — that is the confused deputy the documented invariant's "+
-					"second invariant names: an `upstream` pointed at a sibling or link-local address "+
+				t.Errorf("the second-hop process REACHED %s (%s) — that is the confused deputy the provider security contract's "+
+					"second-hop floor prevents: an `upstream` pointed at a sibling or link-local address "+
 					"walks straight through the side door, and the FIRST-hop floor never sees it "+
-					"(measured: hop 2 counts zero in `forward`, the documented invariant ㉔)", tc.target, out)
+					"(measured: hop 2 counts zero in `forward`, network enforcement)", tc.target, out)
 			}
 			if after <= before {
 				t.Errorf("%s: refused (%s) but the second-hop counter did not move (%d → %d) — by the "+
@@ -1651,7 +1650,7 @@ func TestTheSecondHopIsPinnedUnderTheFloor(t *testing.T) {
 			t.Errorf("the second-hop process could NOT reach a permitted destination (%s) — the drop "+
 				"must be narrowed to the floor's addresses, not to everything: an un-narrowed drop on "+
 				"the output hook is a host-level egress kill switch (measured: root's probe failed "+
-				"too, the documented invariant ㉔), and it would pass every deny assertion above", out)
+				"too, network enforcement), and it would pass every deny assertion above", out)
 		}
 	})
 
@@ -1671,7 +1670,7 @@ func TestTheSecondHopIsPinnedUnderTheFloor(t *testing.T) {
 		if after != before {
 			t.Errorf("root's probe moved the second-hop counter (%d → %d) — the drop must be narrowed "+
 				"to the deployment's uid (%d), and an un-narrowed one is a HOST-LEVEL egress kill "+
-				"switch: measured, root's own probe failed too (the documented invariant ㉔). It would still pass the deny "+
+				"switch: measured, root's own probe failed too (network enforcement). It would still pass the deny "+
 				"half above, which is why this arm has to assert rather than log. out=%s",
 				before, after, secondHopUID, out)
 		}
@@ -1691,11 +1690,11 @@ c.Close(); fmt.Println("CONNECTED")`, target)
 	return strings.TrimSpace(string(out))
 }
 
-// --- items 13 / 13b: the documented invariant reconciliation --------------------------------------
+// --- atomic transition rollback: re-adoption and orphan reclamation ----------------
 
 // The rule set is crash-surviving host state, so reconciliation must
 // re-adopt a survivor's table and reclaim an orphan's — and the tables must not leak
-// (the documented invariant / the documented invariant).
+// (the provider security contract / atomic transition rollback).
 //
 // Driven by building a SECOND engine on the same store, which is what a control-plane
 // restart is from the host's point of view: the process is new, its live-map is empty,
@@ -1724,7 +1723,7 @@ func TestReconciliationReadoptsARuleSetAndReclaimsAnOrphansTable(t *testing.T) {
 	// gone through a delete-then-install, which is what would have killed live flows.
 	if n := harness.NftCounter(t, survivor, "fwd_floor_v4"); n < 0 {
 		t.Errorf("after a control-plane restart the survivor's rule set is GONE — a rule set is "+
-			"crash-surviving host state exactly like the netns, so Adopt must rebuild it (the documented invariant); "+
+			"crash-surviving host state exactly like the netns, so Adopt must rebuild it (the provider security contract); "+
 			"without it the sandbox runs unenforced while every other adopt assertion passes\n%s",
 			harness.DumpRuleSet(survivor))
 	}
@@ -1742,7 +1741,7 @@ func TestReconciliationReadoptsARuleSetAndReclaimsAnOrphansTable(t *testing.T) {
 			"rule set is not enforcing\n%s", harness.DumpRuleSet(survivor))
 	}
 	mustCounterMoved(t, survivor, "fwd_tier_v4", before, after,
-		"item 13: the re-adopted rule set must be a WORKING one; a table that exists but counts "+
+		"re-adoption: the re-adopted rule set must be a WORKING one; a table that exists but counts "+
 			"nothing is the same silent pass in a new disguise")
 
 	// An ORPHAN table — one with no sandbox record at all — is reclaimed. Written
@@ -1762,24 +1761,24 @@ func TestReconciliationReadoptsARuleSetAndReclaimsAnOrphansTable(t *testing.T) {
 	out, _ := exec.Command("nft", "list", "tables", "inet").Output()
 	if strings.Contains(string(out), orphan) {
 		t.Errorf("reconciliation left an ORPHAN rule-set table (%s) — it backs no sandbox record, and "+
-			"a stale table is host state a later sandbox could inherit (the documented invariant / the documented invariant)", orphan)
+			"a stale table is host state a later sandbox could inherit (atomic transition rollback / the provider security contract)", orphan)
 	}
 	// The survivor's table survived that same pass: the keep-set must be complete
 	// BEFORE anything is deleted, or "reclaim then adopt" is literally the
-	// delete-then-install sequence measured to kill every live flow (the documented invariant ㉒).
+	// delete-then-install sequence measured to kill every live flow (network enforcement).
 	if n := harness.NftCounter(t, survivor, "fwd_floor_v4"); n < 0 {
 		t.Errorf("reconciliation reclaimed the SURVIVOR's table — the keep-set must be computed " +
-			"before any deletion (the documented invariant ㉒)")
+			"before any deletion (network enforcement)")
 	}
 }
 
 // A LIVE FLOW keeps transferring bytes across a control-plane restart
 // and its Adopt.
 //
-// THIS ONE CANNOT BE OMITTED, and the reason is that item 13 is completely insensitive
+// THIS ONE CANNOT BE OMITTED, because table-presence checks are completely insensitive
 // to the failure it catches: an Adopt that quietly killed every live connection would
 // leave the table counts exactly right, so 13 passes while every user's connection
-// died (the documented invariant ㉒).
+// died (network enforcement).
 //
 // Asserted BY BYTES, not by the socket still existing: a `write()` to a socket whose
 // peer is gone typically succeeds once before returning EPIPE, so "the write worked" is
@@ -1922,15 +1921,15 @@ func main() {
 			"An Adopt that re-installs the rule set as one ATOMIC `nft -f` file leaves live flows "+
 			"intact (measured 5/5); a delete-then-install kills them (5/5), because packets sent "+
 			"during the gap leave with the raw sandbox source address and the peer RSTs them. "+
-			"Flushing conntrack does the same wherever tcp_loose=0 (the documented invariant ㉒).\n"+
-			"NOTE item 13's table-count assertions are INSENSITIVE to this failure — they pass "+
+			"Flushing conntrack does the same wherever tcp_loose=0 (network enforcement).\n"+
+			"NOTE the re-adoption table-count assertions are INSENSITIVE to this failure — they pass "+
 			"either way, which is why this assertion exists separately\n%s",
 			strings.TrimSpace(res.raw), harness.DumpRuleSet(id2))
 	}
 	if trips < 5 {
 		t.Errorf("only %d verified round trips across the restart (want ≥5) — asserted by BYTES "+
 			"read back rather than by the socket surviving, because a write() to a dead peer "+
-			"typically succeeds once before EPIPE (the documented invariant ⑰'s measurement discipline)\nraw: %s",
+			"typically succeeds once before EPIPE (network enforcement's measurement discipline)\nraw: %s",
 			trips, strings.TrimSpace(res.raw))
 	}
 	// THE COUNTER IS NOT COMPARED ACROSS THE RESTART: a freshly loaded table starts its
@@ -1942,25 +1941,25 @@ func main() {
 	if after < 0 {
 		t.Errorf("after the restart the re-adopted rule set has no input-side allow counter — the "+
 			"rule set was not re-installed at all, and the surviving flow proves nothing about "+
-			"enforcement (the documented invariant: a rule set is crash-surviving host state)\n%s", harness.DumpRuleSet(id2))
+			"enforcement (the provider security contract: a rule set is crash-surviving host state)\n%s", harness.DumpRuleSet(id2))
 	}
-	t.Logf("item 13b: input-side allow counter reads %d after the restart (it was %d before). A reset "+
+	t.Logf("live-flow re-adoption: input-side allow counter reads %d after the restart (it was %d before). A reset "+
 		"is EXPECTED: the atomic re-install that keeps the flow alive loads a fresh table, so the "+
-		"assertion is the verified round-trip count, not a counter delta (the documented invariant ㉒)", after, progressBefore)
-	t.Logf("item 13b: %d verified round trips across a control-plane restart + Adopt", trips)
+		"assertion is the verified round-trip count, not a counter delta (network enforcement)", after, progressBefore)
+	t.Logf("live-flow re-adoption: %d verified round trips across a control-plane restart + Adopt", trips)
 }
 
-// --- item 14: publish, in five separately-falsifiable questions ------------------
+// --- publish, in five separately-falsifiable questions ---------------------------
 
 // Five questions rather than one "is it reachable", because each has a
-// measured counter-example of its own (the documented invariant ⑬–⑯) and a single reachability check passes
+// measured counter-example of its own (network enforcement–) and a single reachability check passes
 // while four of the five are broken.
 func TestPublishIsReachableFromOutsideAndFromTheHostAndSurvivesResume(t *testing.T) {
 	eng, base := harness.Engine(t, netEngineOpts(t))
 	_ = base
 	ctx := context.Background()
 
-	// A guest-side listener bound 0.0.0.0 — the documented invariant requires that, and semantic ① is
+	// A guest-side listener bound 0.0.0.0 — the network declaration requires that, and semantic  is
 	// explicit that a loopback-bound service is NOT publishable.
 	harness.InjectStaticBin(t, base+"/templates", "bare", "serve", guestServeSrc)
 
@@ -1976,7 +1975,7 @@ func TestPublishIsReachableFromOutsideAndFromTheHostAndSurvivesResume(t *testing
 	}
 	time.Sleep(700 * time.Millisecond)
 
-	// The engine's delivered address (the documented invariant: the engine delivers a `host ip:port`).
+	// The engine's delivered address (the network declaration: the engine delivers a `host ip:port`).
 	netInfo, err := eng.Mediator.Network(ctx, id)
 	endpoints := netInfo.PublishEndpoints
 	if err != nil {
@@ -1986,15 +1985,15 @@ func TestPublishIsReachableFromOutsideAndFromTheHostAndSurvivesResume(t *testing
 		t.Fatalf("no host endpoint reported for a running publish: %v", endpoints)
 	}
 	endpoint := endpoints[0]
-	t.Logf("item 14: published endpoint = %s", endpoint)
+	t.Logf("publish endpoint = %s", endpoint)
 
 	// (i) FROM OUTSIDE THE /30 — not merely from the host. Without the companion SNAT
 	// this is precisely the case that times out: the guest's reply has nowhere to go
 	// (measured to_guest=2 / from_guest=0, and adding the SNAT made the same flow
-	// connect immediately — the documented invariant ⑬), and the host's own dial in (ii) would NOT have caught
+	// connect immediately — network enforcement), and the host's own dial in (ii) would NOT have caught
 	// it. Measured the confusion directly: a host-side dial succeeded and returned the
 	// guest's banner while `pub0_in_dnat` counted ZERO, because host-originated traffic
-	// does not traverse prerouting at all (the documented invariant ⑭). Hence the split into two questions, and
+	// does not traverse prerouting at all (network enforcement). Hence the split into two questions, and
 	// dialFromForeignNetns rather than this host.
 	t.Run("(i) reachable from outside the sandbox's own /30, with the SNAT in place", func(t *testing.T) {
 		out, derr := dialFromForeignNetns(t, endpoint)
@@ -2002,23 +2001,23 @@ func TestPublishIsReachableFromOutsideAndFromTheHostAndSurvivesResume(t *testing
 			t.Fatalf("an outside caller could not reach the published endpoint %s: %v (%s) — WITHOUT "+
 				"the companion SNAT to this sandbox's own /30 gateway, a caller from outside the /30 "+
 				"gets exactly this timeout while the guest's SYN arrives fine (measured to_guest=2 / "+
-				"from_guest=0, the documented invariant ⑬)\n%s", endpoint, derr, out, harness.DumpRuleSet(id))
+				"from_guest=0, network enforcement)\n%s", endpoint, derr, out, harness.DumpRuleSet(id))
 		}
 		if !strings.Contains(out, "hello-from-GUEST") {
 			t.Errorf("an outside caller read %q from the published endpoint, want the guest's banner. "+
 				"`connected` with no payload is the HALF-TORN signature — DNAT present, companion SNAT "+
 				"missing — which is the hardest publish failure to diagnose and is easily misread as a "+
-				"guest application fault (the documented invariant ⑰)", out)
+				"guest application fault (network enforcement)", out)
 		}
 		// NOW the prerouting DNAT is the rule that carried it, which is the whole point of
 		// dialing from a foreign netns.
 		if c := harness.NftCounter(t, id, "pub0_in_dnat"); c <= 0 {
 			t.Errorf("the PREROUTING DNAT counted %d for a call from outside the /30 — that is the "+
-				"rule this path depends on (a host-originated dial would not touch it at all, the documented invariant ⑭)", c)
+				"rule this path depends on (a host-originated dial would not touch it at all, network enforcement)", c)
 		}
 		if c := harness.NftCounter(t, id, "pub_return_snat"); c <= 0 {
 			t.Errorf("the return SNAT counted %d — without it a publish works only on a sandbox that "+
-				"happens to carry a default route, and times out on one that does not (the documented invariant ⑬)", c)
+				"happens to carry a default route, and times out on one that does not (network enforcement)", c)
 		}
 	})
 
@@ -2026,13 +2025,13 @@ func TestPublishIsReachableFromOutsideAndFromTheHostAndSurvivesResume(t *testing
 	// AFTER (i), because only an externally-originated flow is routed to the guest —
 	// a host-originated one is delivered locally and never reaches `forward`.
 	// Read as per-hook counters, because the hook assignment is the OPPOSITE of
-	// `via[]`'s and copying one from the other is the mistake the documented invariant ⑮ warns about.
+	// `via[]`'s and copying one from the other is the mistake network enforcement warns about.
 	t.Run("(iii) the companion accept is on forward, and the input side stays zero", func(t *testing.T) {
 		if c := harness.NftCounter(t, id, "pub0_fwd"); c <= 0 {
 			t.Errorf("the publish companion accept on FORWARD counted %d — post-DNAT the destination "+
 				"is the GUEST IP, so the flow must be routed onward and lands on `forward`; a steered "+
 				"flow's destination is host-local and lands on `input`. Same prerouting DNAT, two "+
-				"different downstream hooks (the documented invariant ⑮)", c)
+				"different downstream hooks (network enforcement)", c)
 		}
 		// AND THE INPUT SIDE STAYS ZERO — asserted, since it is half this subtest's claim.
 		//
@@ -2044,33 +2043,33 @@ func TestPublishIsReachableFromOutsideAndFromTheHostAndSurvivesResume(t *testing
 			t.Errorf("the input-side floor counted %d during an inbound publish flow — post-DNAT the "+
 				"destination must be the GUEST IP and land on `forward`; anything reaching the input "+
 				"floor means the rewrite produced a host-local destination, and the forward-side "+
-				"assertion above cannot see that (the documented invariant ⑮)\n%s", c, harness.DumpRuleSet(id))
+				"assertion above cannot see that (network enforcement)\n%s", c, harness.DumpRuleSet(id))
 		}
 	})
 
 	// (ii) FROM THE HOST ITSELF — a SECOND, independent rule, carried by the output-hook
-	// DNAT alone. Neither of (i)/(ii) is evidence for the other (the documented invariant ⑭).
+	// DNAT alone. Neither of (i)/(ii) is evidence for the other (network enforcement).
 	t.Run("(ii) reachable from the host itself, via its own output-hook DNAT", func(t *testing.T) {
 		before := harness.NftCounter(t, id, "pub0_out_dnat")
 		conn, derr := net.DialTimeout("tcp", endpoint, 10*time.Second)
 		if derr != nil {
 			t.Fatalf("the HOST could not reach the published endpoint %s: %v — host-originated traffic "+
 				"never traverses `prerouting`, so this path needs its OWN DNAT on the output hook "+
-				"(the documented invariant ⑭)\n%s", endpoint, derr, harness.DumpRuleSet(id))
+				"(network enforcement)\n%s", endpoint, derr, harness.DumpRuleSet(id))
 		}
 		conn.Close()
 		after := harness.NftCounter(t, id, "pub0_out_dnat")
 		if after <= before {
 			t.Errorf("the OUTPUT-hook DNAT counted %d → %d for a host-originated dial — if this stays "+
 				"flat while the dial works, the traffic is taking some other path and the two "+
-				"assertions (i) and (ii) are not independent after all (the documented invariant ⑭)", before, after)
+				"assertions (i) and (ii) are not independent after all (network enforcement)", before, after)
 		}
 	})
 
-	// (iv) A guest service bound to LOOPBACK is refused, fast. the documented invariant semantic ① promises
+	// (iv) A guest service bound to LOOPBACK is refused, fast. the network declaration semantic  promises
 	// exactly this much and DELIBERATELY NOT attribution: measured, this case and "no
 	// listener at all" are byte-identical to the caller (both RSTs), so a caller cannot
-	// tell them apart and the contract does not pretend otherwise (the documented invariant ⑯).
+	// tell them apart and the contract does not pretend otherwise (network enforcement).
 	t.Run("(iv) a loopback-bound guest service is refused fast, without claiming attribution", func(t *testing.T) {
 		d2 := declDeny()
 		d2.Ingress.Publish = []model.NetPublish{{GuestPort: 9091, Proto: model.NetTCP}}
@@ -2097,25 +2096,25 @@ func TestPublishIsReachableFromOutsideAndFromTheHostAndSurvivesResume(t *testing
 		if derr == nil {
 			conn.Close()
 			t.Fatalf("a guest service bound to 127.0.0.1 was reachable through publish — the sandbox " +
-				"has its own netns and its own loopback, so the forwarded packet cannot reach it (the documented invariant " +
-				"semantic ①)")
+				"has its own netns and its own loopback, so the forwarded packet cannot reach it (the network declaration " +
+				"semantic )")
 		}
 		if el >= 5*time.Second {
 			t.Errorf("the refusal took %s — the contract is `connection refused, FAST`, not a hang "+
-				"(the documented invariant semantic ①)", el)
+				"(the network declaration semantic )", el)
 		}
 		// Deliberately NOT asserting that the error is attributable: measured, this is
 		// byte-identical to "no listener in the guest at all" (both are gVisor netstack
-		// RSTs, sub-millisecond), so the documented invariant promises refusal and explicitly not attribution.
+		// RSTs, sub-millisecond), so the network declaration promises refusal and explicitly not attribution.
 		// Attribution is only possible ENGINE-side, by reading which rules were installed.
-		t.Logf("item 14(iv): refused in %s (%v) — indistinguishable from `no listener`, which is why "+
-			"the documented invariant promises refusal without attribution (the documented invariant ⑯)", el, derr)
+		t.Logf("publish loopback refusal: refused in %s (%v) — indistinguishable from `no listener`, which is why "+
+			"the network declaration promises refusal without attribution (network enforcement)", el, derr)
 	})
 
 	// (v) The two failure signatures of a broken publish are DIFFERENT and must not be
 	// merged into "unreachable": missing DNAT → refused FAST; missing companion SNAT →
 	// CONNECTED THEN READ TIMEOUT. A half-torn rule set breaks in the second way, which
-	// is the hardest to diagnose (the documented invariant ⑰).
+	// is the hardest to diagnose (network enforcement).
 	//
 	// Asserted structurally rather than by dismantling a live rule set: the generator
 	// emits all four parts as ONE unit, so the "missing SNAT" state is unreachable
@@ -2134,7 +2133,7 @@ func TestPublishIsReachableFromOutsideAndFromTheHostAndSurvivesResume(t *testing
 		if rerr != nil {
 			t.Fatalf("CONNECTED THEN READ TIMEOUT — that is the missing-SNAT signature exactly, and it " +
 				"is the one that gets misread as a guest application fault. The four parts of a " +
-				"publish are emitted as one unit precisely so this state is unreachable (the documented invariant ⑰)")
+				"publish are emitted as one unit precisely so this state is unreachable (network enforcement)")
 		}
 		if n == 0 {
 			t.Error("read zero bytes without an error")
@@ -2143,12 +2142,12 @@ func TestPublishIsReachableFromOutsideAndFromTheHostAndSurvivesResume(t *testing
 
 	// 14: SURVIVES RESUME. The declaration is a Binding, so the next placement
 	// regenerates the rules — with a NEW host endpoint, because that endpoint is a
-	// placement product (the documented invariant).
+	// placement product (the ID-reference model).
 	t.Run("survives pause/resume, with a rebound endpoint", func(t *testing.T) {
 		if err := eng.Mediator.Pause(ctx, id); err != nil {
 			t.Fatalf("pause: %v", err)
 		}
-		// While paused there is NO endpoint to report — the documented invariant omits the key rather than
+		// While paused there is NO endpoint to report — the control-plane API omits the key rather than
 		// reporting an empty string, because the endpoint is a placement product.
 		niS, _ := eng.Mediator.Network(ctx, id)
 		state, eps := niS.State, niS.PublishEndpoints
@@ -2158,7 +2157,7 @@ func TestPublishIsReachableFromOutsideAndFromTheHostAndSurvivesResume(t *testing
 		for _, ep := range eps {
 			if ep != "" {
 				t.Errorf("a paused sandbox reported a host endpoint (%q) — the endpoint is a placement "+
-					"product (the documented invariant) and a paused sandbox has none", ep)
+					"product (the ID-reference model) and a paused sandbox has none", ep)
 			}
 		}
 		if err := eng.Mediator.Resume(ctx, id); err != nil {
@@ -2168,7 +2167,7 @@ func TestPublishIsReachableFromOutsideAndFromTheHostAndSurvivesResume(t *testing
 		eps2 := ni2b.PublishEndpoints
 		if len(eps2) != 1 || eps2[0] == "" {
 			t.Fatalf("after resume there is no host endpoint: %v — the declaration is a Binding, so "+
-				"the next placement must regenerate its rules from the record (the documented invariant / the documented invariant)", eps2)
+				"the next placement must regenerate its rules from the record (resource admission / the network declaration)", eps2)
 		}
 		// Restart the guest service on the new placement and check the NEW endpoint works.
 		rctx, rcancel := context.WithTimeout(ctx, 60*time.Second)
@@ -2186,13 +2185,13 @@ func TestPublishIsReachableFromOutsideAndFromTheHostAndSurvivesResume(t *testing
 			t.Fatalf("the publish did not survive resume: %v at %s\n%s", derr, eps2[0], harness.DumpRuleSet(id))
 		}
 		conn.Close()
-		t.Logf("publish survived resume: %s → %s (the endpoint is rebound, the documented invariant)", endpoint, eps2[0])
+		t.Logf("publish survived resume: %s → %s (the endpoint is rebound, the ID-reference model)", endpoint, eps2[0])
 	})
 }
 
 // A publish on a PAUSED sandbox records only — 200,
 // `applies_at: next-resume`, no `host_endpoint`, NO rules on the host yet — and then
-// appears after resume. Plus the the documented invariant discipline that it must not touch UpdatedAt.
+// appears after resume. Plus the resource admission discipline that it must not touch UpdatedAt.
 func TestPublishOnAPausedSandboxRecordsWithoutInstallingRules(t *testing.T) {
 	eng, _ := harness.Engine(t, netEngineOpts(t))
 	ctx := context.Background()
@@ -2209,19 +2208,19 @@ func TestPublishOnAPausedSandboxRecordsWithoutInstallingRules(t *testing.T) {
 	// A paused sandbox holds NO placement, so it has no rule-set table at all.
 	if n := harness.NftCounter(t, id, "in_floor"); n >= 0 {
 		t.Errorf("a paused sandbox still has a rule-set table — pause releases the placement, and " +
-			"the rule set is placement-local (the documented invariant)")
+			"the rule set is placement-local (FS-first pause and resume)")
 	}
 	item, endpoint, now, perr := eng.Mediator.AddPublish(ctx, id, model.NetPublish{GuestPort: 8080, Proto: model.NetTCP})
 	if perr != nil {
 		t.Fatalf("publish on a paused sandbox was refused: %v — `paused` is legal, and refusing it "+
 			"would make publish the ONLY field harder to write while paused than while running, "+
-			"pushing the caller onto the whole-binding PATCH that the documented invariant documents as dangerous (the documented invariant)", perr)
+			"pushing the caller onto the whole-binding PATCH that the control-plane API documents as dangerous (the network declaration)", perr)
 	}
 	if now {
 		t.Error("a paused publish reported `applies_at: now` — there is no placement to install into")
 	}
 	if endpoint != "" {
-		t.Errorf("a paused publish reported a host endpoint (%q) — the documented invariant omits the key, because the "+
+		t.Errorf("a paused publish reported a host endpoint (%q) — the control-plane API omits the key, because the "+
 			"endpoint is a placement product and there is no placement", endpoint)
 	}
 	if item.GuestPort != 8080 {
@@ -2234,13 +2233,13 @@ func TestPublishOnAPausedSandboxRecordsWithoutInstallingRules(t *testing.T) {
 	}
 	if len(rec2.Network.Ingress.Publish) != 1 {
 		t.Fatalf("the declaration holds %d publish items after a paused publish, want 1 — it must "+
-			"land in the record, or it would not survive to the next placement (the documented invariant)",
+			"land in the record, or it would not survive to the next placement (the network declaration)",
 			len(rec2.Network.Ingress.Publish))
 	}
-	// the documented invariant discipline ② — the obligation exists ONLY because `paused` is allowed.
+	// resource admission discipline  — the obligation exists ONLY because `paused` is allowed.
 	if !rec2.UpdatedAt.Equal(updatedBefore) {
 		t.Errorf("the paused publish moved UpdatedAt (%s → %s) — `retention` is measured from that "+
-			"column (the documented invariant discipline ②), so this would silently extend the eviction deadline as a "+
+			"column (resource admission discipline ), so this would silently extend the eviction deadline as a "+
 			"side effect of adding a port. The obligation exists ONLY because `paused` is allowed",
 			updatedBefore, rec2.UpdatedAt)
 	}
@@ -2250,7 +2249,7 @@ func TestPublishOnAPausedSandboxRecordsWithoutInstallingRules(t *testing.T) {
 	}
 	if n := harness.NftCounter(t, id, "pub0_in_dnat"); n < 0 {
 		t.Errorf("after resume the publish has no DNAT rule — the declaration is a Binding and the "+
-			"next placement regenerates from it (the documented invariant)\n%s", harness.DumpRuleSet(id))
+			"next placement regenerates from it (the network declaration)\n%s", harness.DumpRuleSet(id))
 	}
 	niE, _ := eng.Mediator.Network(ctx, id)
 	eps := niE.PublishEndpoints
@@ -2263,7 +2262,7 @@ func TestPublishOnAPausedSandboxRecordsWithoutInstallingRules(t *testing.T) {
 // one item in the declaration and ONE DNAT on the host.
 //
 // Both hazards — nft silently accepting a duplicate DNAT, and a later PATCH removing only
-// one of two recorded items — are in the failure message below (measured, the documented invariant).
+// one of two recorded items — are in the failure message below (measured, the network declaration).
 func TestRepeatedPublishIsIdempotentOnTheHostToo(t *testing.T) {
 	eng, _ := harness.Engine(t, netEngineOpts(t))
 	ctx := context.Background()
@@ -2282,7 +2281,7 @@ func TestRepeatedPublishIsIdempotentOnTheHostToo(t *testing.T) {
 		t.Errorf("the declaration holds %d items after two identical publishes, want 1 — nft accepts "+
 			"two identical DNATs silently and the second never matches, so the substrate will not "+
 			"find this for us; and with two recorded items a later PATCH removing one leaves the "+
-			"port open (the documented invariant)", n)
+			"port open (the network declaration)", n)
 	}
 	// One DNAT on the host, counted by listing the rules rather than the counters (a
 	// duplicate would be a second rule with its own name).
@@ -2295,11 +2294,12 @@ func TestRepeatedPublishIsIdempotentOnTheHostToo(t *testing.T) {
 	}
 }
 
-// Item 14d, the half a declaration-layer assertion cannot reach: the repeat must return
+// Publish endpoint stability, the half a declaration-layer assertion cannot reach:
+// the repeat must return
 // THE SAME host endpoint, and hot-adding a publish must not move the endpoints already
 // bound at that placement.
 //
-// The idempotency the documented invariant promises is "return the existing item" — and the
+// The idempotency the control-plane API promises is "return the existing item" — and the
 // declaration layer alone cannot deliver it: `AddPublish` reports added=false and writes
 // nothing, but the mediator still runs the install path (record and rules are one
 // un-halvable write), so the provider re-binds. A provider that re-draws the endpoints on
@@ -2329,12 +2329,12 @@ func TestHotAddingAPublishDoesNotMoveTheEndpointsAlreadyBound(t *testing.T) {
 		t.Fatalf("repeat publish: %v", err)
 	}
 	if epRepeat != epA {
-		t.Errorf("the idempotent repeat answered with %s, the first call with %s. the documented invariant makes a repeated "+
+		t.Errorf("the idempotent repeat answered with %s, the first call with %s. the control-plane API makes a repeated "+
 			"`{guest_port, proto}` return THE EXISTING one — a caller retrying a request whose 200 it "+
 			"never saw would otherwise be told its port had moved\n%s", epRepeat, epA, harness.DumpRuleSet(id))
 	}
 
-	// (2) HOT-ADDING a different publish leaves the first one's endpoint alone. the documented invariant
+	// (2) HOT-ADDING a different publish leaves the first one's endpoint alone. the network declaration
 	// endorses the hot-add on `running` precisely because a publish is PURELY ADDITIVE.
 	_, epB, _, err := eng.Mediator.AddPublish(ctx, id, model.NetPublish{GuestPort: 9090, Proto: model.NetTCP})
 	if err != nil {
@@ -2352,7 +2352,7 @@ func TestHotAddingAPublishDoesNotMoveTheEndpointsAlreadyBound(t *testing.T) {
 		t.Fatalf("read back %d endpoints for two publishes: %v", len(eps), eps)
 	}
 	if eps[0] != epA {
-		t.Errorf("hot-adding 9090 moved 8080's endpoint: %s → %s. That breaks the pure-additivity the documented invariant "+
+		t.Errorf("hot-adding 9090 moved 8080's endpoint: %s → %s. That breaks the pure-additivity the network declaration "+
 			"rests on when it allows this write on a `running` sandbox — nothing in the record changed "+
 			"for 8080, so a caller holding the endpoint it was handed must not lose it\n%s",
 			epA, eps[0], harness.DumpRuleSet(id))
@@ -2367,15 +2367,15 @@ func TestHotAddingAPublishDoesNotMoveTheEndpointsAlreadyBound(t *testing.T) {
 		}
 		if !strings.Contains(dump, fmt.Sprintf("dport %d", ap.Port())) {
 			t.Errorf("the reported endpoint %s has no matching dport clause installed — the read face "+
-				"and the kernel disagree, which the documented invariant's biconditional says cannot persist\n%s", ep, dump)
+				"and the kernel disagree, which the control-plane API's biconditional says cannot persist\n%s", ep, dump)
 		}
 	}
 }
 
 // tcp/8080 and udp/8080 are TWO publishes, on the real substrate and across a resume.
 //
-// the documented invariant keys a publish on `{guest_port, proto}`: the declaration layer dedupes on the pair
-// and the documented invariant defines idempotency on it, so this declaration is legal and the generator
+// the network declaration keys a publish on `{guest_port, proto}`: the declaration layer dedupes on the pair
+// and the control-plane API defines idempotency on it, so this declaration is legal and the generator
 // emits four DNATs for it. A provider binding endpoints per GUEST PORT refuses the second
 // item as a duplicate — blaming the declaration layer for a key width only the provider
 // chose. And because the declaration is durable, that refusal then repeats at EVERY
@@ -2393,7 +2393,7 @@ func TestTCPAndUDPOnOneGuestPortAreTwoPublishesOnTheSubstrate(t *testing.T) {
 	_, udpEP, _, err := eng.Mediator.AddPublish(ctx, id, model.NetPublish{GuestPort: 8080, Proto: model.NetUDP})
 	if err != nil {
 		t.Fatalf("publish udp/8080 alongside tcp/8080: %v — both items pass the declaration layer "+
-			"(the documented invariant keys on the PAIR) and Generate emits four DNATs, so a refusal here is the "+
+			"(the network declaration keys on the PAIR) and Generate emits four DNATs, so a refusal here is the "+
 			"provider's key width mistaken for a duplicate\n%s", err, harness.DumpRuleSet(id))
 	}
 	if tcpEP == udpEP {
@@ -2439,11 +2439,11 @@ func TestTCPAndUDPOnOneGuestPortAreTwoPublishesOnTheSubstrate(t *testing.T) {
 // TWO survivors, because a single one cannot distinguish "recovered" from "re-issued in
 // the same order by luck".
 //
-// the documented invariant promises Adopt yields the same endpoint with no new epoch: the isolation unit never
+// the runtime provider contract promises Adopt yields the same endpoint with no new epoch: the isolation unit never
 // restarted. A restarted process's port allocator starts EMPTY, and (unlike `ipSeq`) the
 // publish cursor is not randomized, so without a read-back both survivors are re-issued
 // the range's first ports in `ListSandboxes` order — and adopted in the other order they
-// come back SWAPPED, which is worse than stale (the documented invariant licenses a NEW placement's endpoint
+// come back SWAPPED, which is worse than stale (the ID-reference model licenses a NEW placement's endpoint
 // differing, not a live placement's moving to a different sandbox).
 func TestAdoptKeepsEachSurvivorsPublishEndpoints(t *testing.T) {
 	base := t.TempDir()
@@ -2497,7 +2497,7 @@ func TestAdoptKeepsEachSurvivorsPublishEndpoints(t *testing.T) {
 	if afterA != beforeA || afterB != beforeB {
 		t.Errorf("Adopt re-issued the publish endpoints instead of recovering them:\n"+
 			"  %s: %s → %s\n  %s: %s → %s\n"+
-			"the documented invariant promises Adopt returns the SAME endpoint with no new epoch — the isolation unit "+
+			"the runtime provider contract promises Adopt returns the SAME endpoint with no new epoch — the isolation unit "+
 			"never restarted, so nothing about these placements is new. And the re-issue is not merely "+
 			"stale: with the port cursor starting from the range base in ListSandboxes order, two "+
 			"survivors SWAP, and a caller's cached endpoint then reaches the OTHER SANDBOX",
@@ -2530,19 +2530,19 @@ func TestAdoptKeepsEachSurvivorsPublishEndpoints(t *testing.T) {
 	if epC == afterA || epC == afterB {
 		t.Errorf("a sandbox created after the restart was handed %s, which a SURVIVOR already holds — "+
 			"the recovered ports must be marked in use, the same obligation markInUse discharges for "+
-			"the /30 (the documented invariant)", epC)
+			"the /30 (atomic transition rollback)", epC)
 	}
 }
 
-// --- item 15: the PATCH read-modify-write hazard --------------------------------
+// --- PATCH read-modify-write hazard ----------------------------------------------
 
 // Writing back a STALE declaration silently drops a publish added in
 // between.
 //
-// the documented invariant makes the read-modify-write cycle a CONTRACT REQUIREMENT rather than advice for
+// the control-plane API makes the read-modify-write cycle a CONTRACT REQUIREMENT rather than advice for
 // exactly this reason, and the contract accepts last-writer-wins rather than adding an
-// optimistic-concurrency stamp (a record version would be the generation counter the documented invariant
-// bans outright). So this test pins the HAZARD as real, which is what justifies the
+// optimistic-concurrency stamp (a record revision counter is outside the engine's
+// object model). So this test pins the HAZARD as real, which is what justifies the
 // requirement — it is not asserting a bug.
 func TestAStalePatchSilentlyDropsAHotAddedPublish(t *testing.T) {
 	eng, _ := harness.Engine(t, netEngineOpts(t))
@@ -2574,17 +2574,16 @@ func TestAStalePatchSilentlyDropsAHotAddedPublish(t *testing.T) {
 	}
 	if len(rec.Network.Ingress.Publish) != 0 {
 		t.Fatalf("expected the stale PATCH to drop the publish (that is the documented hazard), but "+
-			"the declaration still holds %d items — if the engine has started merging fields, the documented invariant's "+
+			"the declaration still holds %d items — if the engine has started merging fields, the control-plane API's "+
 			"read-modify-write requirement and this test both need revisiting",
 			len(rec.Network.Ingress.Publish))
 	}
-	t.Log("item 15: a stale PATCH DID drop the hot-added publish, as the documented invariant documents. This is why " +
+	t.Log("PATCH RMW hazard: a stale PATCH DID drop the hot-added publish, as the control-plane API documents. This is why " +
 		"that GET is a contract requirement rather than a suggestion: the engine does not merge " +
-		"fields and does not carry an optimistic-concurrency stamp (a record version would be the " +
-		"generation counter the documented invariant bans). The safe sequence is pause → GET → PATCH → resume, and the " +
+		"fields and does not carry an optimistic-concurrency stamp. The safe sequence is pause → GET → PATCH → resume, and the " +
 		"additive fix is a delete endpoint for publish, which removes the conflict CLASS")
 
-	// The paired direction, which is the more dangerous one the documented invariant names: writing back a
+	// The paired direction, which is the more dangerous one the control-plane API names: writing back a
 	// declaration that still CONTAINS an already-removed publish would REOPEN an inbound
 	// port. Same mechanism, opposite sign — and the engine cannot tell the two apart,
 	// which is the whole reason the cycle is the caller's responsibility.
@@ -2605,14 +2604,14 @@ func TestAStalePatchSilentlyDropsAHotAddedPublish(t *testing.T) {
 		t.Errorf("removing a publish through the whole-binding PATCH did not take effect (%d items) — "+
 			"that PATCH is the ONLY revocation path today, since there is no un-publish endpoint "+
 			"(deliberately: on a running sandbox a revocation could only promise `no new connections`, "+
-			"never `the port is closed`, because conntrack holds the NAT binding — the documented invariant ⑰)",
+			"never `the port is closed`, because conntrack holds the NAT binding — network enforcement)",
 			len(rec2.Network.Ingress.Publish))
 	}
 }
 
-// --- item 10b: IPv6 is covered by the SAME floor ---------------------------------
+// --- IPv6 is covered by the SAME floor -------------------------------------------
 
-// The IPv6 arm, which CANNOT be skipped even though the documented invariant ⑪ already measured an `inet`
+// The IPv6 arm, which CANNOT be skipped even though network enforcement already measured an `inet`
 // ct-state rule covering IPv6: that measurement was
 // taken on a netns peer against a hand-written rule, while what has to be proved here
 // is that THE RULE SET THIS ENGINE RENDERS covers v6 under runsc.
@@ -2625,7 +2624,7 @@ func TestAStalePatchSilentlyDropsAHotAddedPublish(t *testing.T) {
 // Two targets, and the choice of the second is itself an assertion: eth0's GLOBAL
 // address, never its link-local. A link-local on eth0 is unreachable from the sandbox
 // anyway (different link), so asserting on it would assert something vacuously true
-// (the documented invariant ⑪).
+// (network enforcement).
 func TestIPv6IsCoveredByTheSameFloor(t *testing.T) {
 	eng, _ := harness.Engine(t, netEngineOpts(t))
 	id, cl := createRunning(t, eng, declDeny())
@@ -2670,13 +2669,13 @@ func TestIPv6IsCoveredByTheSameFloor(t *testing.T) {
 	// failed instantly with every v6 counter flat at 0, including under
 	// `net.ipv6.conf.all.forwarding=1`.
 	//
-	// the documented invariant ⑳ names exactly this shape and its consequence for acceptance: "unreachable with
+	// network enforcement names exactly this shape and its consequence for acceptance: "unreachable with
 	// a zero counter" is INDISTINGUISHABLE from "the floor was bypassed", so demanding
 	// counter movement here would be an unsatisfiable assertion rather than a finding.
 	// The honest report is that this cell measures the absence of guest v6 configuration,
 	// not the engine's floor.
 	//
-	// The LINK-LOCAL cell below is what carries this item instead: the guest CAN reach
+	// The LINK-LOCAL cell below carries the floor assertion instead: the guest CAN reach
 	// that address (on-link, no route needed), so its counter assertion is satisfiable.
 	if global != "" {
 		probeTarget := "[" + global + "]:" + portStr
@@ -2684,26 +2683,26 @@ func TestIPv6IsCoveredByTheSameFloor(t *testing.T) {
 		if res.reachable() {
 			t.Errorf("the guest REACHED the host's global IPv6 address %s (payload %s) — the engine "+
 				"touches IPv6 nowhere while the kernel configures it anyway, so this would be the "+
-				"whole family open with every IPv4 assertion still passing (the documented invariant ⑪)",
+				"whole family open with every IPv4 assertion still passing (network enforcement)",
 				global, res.payload)
 		}
-		t.Logf("item 10b: global v6 (%s) → %s in %d ms. NOT asserted by counter: the engine assigns "+
+		t.Logf("IPv6 floor, global address (%s) → %s in %d ms. NOT asserted by counter: the engine assigns "+
 			"the guest no v6 address, so the packet never leaves the sandbox and every v6 counter is "+
-			"flat — which the documented invariant ⑳ says is indistinguishable from a bypassed floor and therefore not a "+
-			"valid assertion. The link-local cell below is the one that carries this item",
+			"flat — which network enforcement says is indistinguishable from a bypassed floor and therefore not a "+
+			"valid assertion. The link-local cell below carries the floor assertion",
 			global, res.outcome, res.ms)
 	}
 
 	for _, tc := range []struct{ name, addr, counter, why string }{{
 		// The veth's link-local is an address of the HOST itself, so it lands on `input`
 		// and is covered by the pure ct-state rule — the SAME rule that covers IPv4, with
-		// no family qualifier and no `ip6` arm (the documented invariant ⑪).
+		// no family qualifier and no `ip6` arm (network enforcement).
 		name:    "the host-side veth's kernel-assigned link-local",
 		addr:    vethLL,
 		counter: "in_floor",
 		why: "the engine never configured this address — the kernel did, because disable_ipv6 " +
 			"defaults to 0. It is an address of the host, so the family-UNQUALIFIED ct-state rule " +
-			"on `input` is what must cover it (the documented invariant ⑧ ⑪)",
+			"on `input` is what must cover it (network enforcement )",
 	}} {
 		if tc.addr == "" {
 			t.Logf("skipping %s: not present on this host", tc.name)
@@ -2730,7 +2729,7 @@ func TestIPv6IsCoveredByTheSameFloor(t *testing.T) {
 	if strings.Contains(dump, "nfproto ipv6") {
 		t.Errorf("the rendered rule set carries a `meta nfproto ipv6` arm — one family-unqualified "+
 			"ct-state rule already covers IPv6, and the explicit arm was measured counting exactly "+
-			"the packets the agnostic rule had caught (the documented invariant ⑪)\n%s", dump)
+			"the packets the agnostic rule had caught (network enforcement)\n%s", dump)
 	}
 }
 
@@ -2800,12 +2799,12 @@ func hostGlobalIPv6(t *testing.T) string {
 	return ""
 }
 
-// A publish's reverse flow has NOT become an egress path (the documented invariant ④).
+// A publish's reverse flow has NOT become an egress path (network enforcement).
 //
 // THIS IS THE FIRST TIME THIS ASSERTION CAN BE VALID. The spike that tried it had a
 // guest with no default route, so its egress died with `net unreachable` BEFORE
 // leaving the sandbox and the floor counted 0 — by the acceptance discipline an invalid
-// measurement rather than a pass (the documented invariant ⑯). The engine now installs that route for every
+// measurement rather than a pass (network enforcement). The engine now installs that route for every
 // declaration precisely so the probe reaches the floor, which is what makes this
 // assertion mean something.
 func TestPublishDoesNotOpenAnEgressPathOnTheSubstrate(t *testing.T) {
@@ -2848,12 +2847,12 @@ func TestPublishDoesNotOpenAnEgressPathOnTheSubstrate(t *testing.T) {
 	after := harness.NftCounter(t, id, "fwd_default_deny")
 	if res.reachable() {
 		t.Errorf("with a publish installed the guest reached the public internet (%s) — the publish's "+
-			"reverse flow must not become an egress path (the documented invariant ④)\n%s", res.raw, harness.DumpRuleSet(id))
+			"reverse flow must not become an egress path (network enforcement)\n%s", res.raw, harness.DumpRuleSet(id))
 	}
 	mustCounterMoved(t, id, "fwd_default_deny", before, after,
-		"item 14b: the probe must REACH the floor and be counted. The spike that first tried this "+
+		"publish egress isolation: the probe must REACH the floor and be counted. The spike that first tried this "+
 			"could not assert it — its guest had no default route, so egress died inside the sandbox "+
-			"and the counter read 0, which is an INVALID measurement rather than a pass (the documented invariant ⑯). The "+
+			"and the counter read 0, which is an INVALID measurement rather than a pass (network enforcement). The "+
 			"engine now installs that route for every declaration, which is what makes this valid")
 
 	// The same for a host address (the `input` side), since the two hooks are separate.
@@ -2867,7 +2866,7 @@ func TestPublishDoesNotOpenAnEgressPathOnTheSubstrate(t *testing.T) {
 		t.Errorf("with a publish installed the guest reached a host address (%s)\n%s",
 			res2.raw, harness.DumpRuleSet(id))
 	}
-	mustCounterMoved(t, id, "in_floor", inBefore, inAfter, "item 14b: the input side too")
+	mustCounterMoved(t, id, "in_floor", inBefore, inAfter, "publish egress isolation: the input side too")
 }
 
 // Revocation. What the engine actually offers is ONE path, and this
@@ -2877,14 +2876,14 @@ func TestPublishDoesNotOpenAnEgressPathOnTheSubstrate(t *testing.T) {
 //
 // That property is UNREACHABLE through any engine API: it describes deleting a DNAT rule
 // under a live placement, and no endpoint does that — `publish` and the three egress
-// fields are editable only from `paused` (the documented invariant). A test named for it would set up an echo
+// fields are editable only from `paused` (resource admission). A test named for it would set up an echo
 // service, an established connection and a round-trip check, never use them, and leave
 // its failure branch unreachable. The conntrack asymmetry behind it is a property of
-// nftables and is the MECHANISM REASON there is no un-publish endpoint (the documented invariant / the documented invariant ⑰).
+// nftables and is the MECHANISM REASON there is no un-publish endpoint (the network declaration / network enforcement).
 //
 // # What is asserted
 //
-// (a) The whole-binding PATCH is REFUSED on `running` — positively, as the the documented invariant rule it
+// (a) The whole-binding PATCH is REFUSED on `running` — positively, as the resource admission rule it
 // is, rather than logged as an acceptable outcome.
 // (b) Revocation through the legal path — pause, PATCH, resume — genuinely CLOSES the
 // port: the external caller is refused and the DNAT is gone from the rebuilt rule set.
@@ -2911,7 +2910,7 @@ func TestRevokingAPublishClosesThePortAtTheNextPlacement(t *testing.T) {
 	revoked := declDeny()
 	if err := patchDecl(eng, ctx, id, revoked); err == nil {
 		t.Fatal("the whole-binding PATCH edited the declaration on a RUNNING sandbox — `publish` and " +
-			"the three egress fields are editable only from `paused` (the documented invariant), because the provider " +
+			"the three egress fields are editable only from `paused` (resource admission), because the provider " +
 			"materializes them at placement. Accepting it here would leave the record and the live " +
 			"rule set disagreeing, with the record winning at the next placement")
 	}
@@ -2923,7 +2922,7 @@ func TestRevokingAPublishClosesThePortAtTheNextPlacement(t *testing.T) {
 		t.Fatalf("pause: %v", err)
 	}
 	if err := patchDecl(eng, ctx, id, revoked); err != nil {
-		t.Fatalf("the whole-binding PATCH was refused on a PAUSED sandbox, which the documented invariant permits: %v", err)
+		t.Fatalf("the whole-binding PATCH was refused on a PAUSED sandbox, which resource admission permits: %v", err)
 	}
 	if err := eng.Mediator.Resume(ctx, id); err != nil {
 		t.Fatalf("resume: %v", err)
@@ -2935,7 +2934,7 @@ func TestRevokingAPublishClosesThePortAtTheNextPlacement(t *testing.T) {
 	dump := harness.DumpRuleSet(id)
 	if strings.Contains(dump, "dnat") {
 		t.Errorf("the rebuilt rule set still carries a dnat after the publish was revoked — the "+
-			"placement regenerates from the record (the documented invariant Binding), so this means the record kept the "+
+			"placement regenerates from the record (resource admission Binding), so this means the record kept the "+
 			"item or Generate ignored its absence:\n%s", dump)
 	}
 
@@ -2950,7 +2949,7 @@ func TestRevokingAPublishClosesThePortAtTheNextPlacement(t *testing.T) {
 			"revocation at the next placement is the ONLY revocation this engine offers, so if the "+
 			"rebuild does not close the port there is no way to close it at all", endpoint, out)
 	}
-	t.Logf("item 14e: after pause→PATCH→resume the revoked endpoint %s answers %q (err=%v) and the "+
+	t.Logf("publish revocation: after pause→PATCH→resume the revoked endpoint %s answers %q (err=%v) and the "+
 		"rebuilt rule set carries no dnat", endpoint, out, derr)
 }
 
@@ -2959,9 +2958,9 @@ func TestRevokingAPublishClosesThePortAtTheNextPlacement(t *testing.T) {
 //
 // It exists because dialing from the host is a genuinely different path: host-originated
 // traffic never traverses `prerouting`, so it is carried by the output-hook DNAT instead
-// (measured, the documented invariant ⑭). Using the host as the "outside caller" would silently test that
+// (measured, network enforcement). Using the host as the "outside caller" would silently test that
 // second rule twice and leave the external path unasserted — which is exactly the
-// substitution the documented invariant warns is not evidence.
+// substitution the network declaration warns is not evidence.
 func dialFromForeignNetns(t *testing.T, endpoint string) (string, error) {
 	t.Helper()
 	ns := fmt.Sprintf("pubcaller%d", time.Now().UnixNano()%100000)
@@ -3036,20 +3035,20 @@ func main() {
 	return strings.TrimSpace(string(out)), err
 }
 
-// patchDecl drives the the documented invariant whole-binding PATCH with a declaration-only spec — what
+// patchDecl drives the control-plane API whole-binding PATCH with a declaration-only spec — what
 // `PATCH /v1/sandboxes/{id}` carries when the request names only `network`.
 //
-// It goes through the ONE PATCH verb because that is all there is: the documented invariant requires one
+// It goes through the ONE PATCH verb because that is all there is: per-sandbox transition serialization requires one
 // PATCH to be one acquisition of the transition lock, so the former declaration-only
 // entry point was deleted rather than kept as a wrapper. Driving the mediator directly
-// (rather than the HTTP face) is deliberate in this file — it is what proves the documented invariant's
+// (rather than the HTTP face) is deliberate in this file — it is what proves the API error contract's
 // declaration classes are enforced at the WRITE POINT and not only in the API layer.
 func patchDecl(eng *orchestrator.Engine, ctx context.Context, id model.SandboxID, d model.NetworkDecl) error {
 	_, err := eng.Mediator.Rebind(ctx, id, lifecycle.RebindSpec{Binding: store.Binding{Network: &d}})
 	return err
 }
 
-// TestRuleHitsAreReadableThroughTheReadFace is the acceptance half of the documented invariant's per-entry
+// TestRuleHitsAreReadableThroughTheReadFace is the acceptance half of the control-plane API's per-entry
 // `hit_packet`: the number a caller reads must be the number the KERNEL is counting,
 // attributed to the entry the caller actually wrote.
 //
@@ -3107,9 +3106,9 @@ func TestRuleHitsAreReadableThroughTheReadFace(t *testing.T) {
 		}
 	}
 
-	// And it MOVES. A static number is worse than an absent one: the documented invariant's only signal for
-	// "is this rule live" is that this count changes under a deliberate probe (the documented invariant's
-	// acceptance discipline / the documented invariant).
+	// And it MOVES. A static number is worse than an absent one: the network declaration's only signal for
+	// "is this rule live" is that this count changes under a deliberate probe (the provider security contract's
+	// acceptance discipline / network enforcement).
 	before := allowHits(t, eng, id)
 	got := runGuestProbe(t, cl, net.JoinHostPort(host, portStr), false)
 	if !got.reachable() {
@@ -3121,7 +3120,7 @@ func TestRuleHitsAreReadableThroughTheReadFace(t *testing.T) {
 	}
 }
 
-// allowHits sums what the documented invariant reports for allow[0], through the same path the read surface
+// allowHits sums what the control-plane API reports for allow[0], through the same path the read surface
 // uses.
 func allowHits(t *testing.T, eng *orchestrator.Engine, id model.SandboxID) uint64 {
 	t.Helper()

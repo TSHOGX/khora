@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# spike-hop2-hook.sh — WHERE is the second hop (the documented invariant invariant 2) evaluable?
+# spike-hop2-hook.sh — WHERE is the second hop (the provider security contract invariant 2) evaluable?
 #
-# the documented invariant's second invariant says both hops are pinned and the second one is
-# enforced BY THE KERNEL, not by the via-process's own discipline. the documented invariant works out
+# the provider security contract's second invariant says both hops are pinned and the second one is
+# enforced BY THE KERNEL, not by the via-process's own discipline. Prior measurements established
 # the predicate (uid/gid, not mark) and the two relative positions (a RETURN above
 # the steering rules so the process does not re-match its own rule; the L0 floor
-# ABOVE that, so it stays subject to the floor). But the documented invariant also asserted, at the time
+# ABOVE that, so it stays subject to the floor). The same text also asserted, at the time
 # this ran, that the whole predicate "lives entirely in `forward`" — and that claim
-# was unmeasured. It is the claim this script falsified; the documented invariant now says the uid
-# predicate lands on `output`, and the documented invariant ㉔ carries the measurement.
+# was unmeasured. This script falsified that claim: the uid predicate lands on
+# `output`, as the counters below show.
 #
 # It looks mechanically wrong: hop 2 is a HOST-LOCAL process opening a NEW
-# connection (the documented invariant requires via[].endpoint to be host-local, the documented invariant 400s anything
+# connection (the network declaration requires via[].endpoint to be host-local, the API error contract 400s anything
 # else). Locally-originated packets are routed out via `output`/`postrouting`;
 # they never traverse `forward`, which only sees packets being routed BETWEEN
 # interfaces. And `skuid` needs a socket owner — in `forward` there is no local
@@ -21,12 +21,12 @@
 # for the rule-set shape:
 #   * the L0 floor as designed (input + forward, iifname-narrowed) sees NONE of
 #     hop 2 — the confused-deputy path is wide open, and no floor counter moves,
-#     which is the silent-pass signature the documented invariant warns about;
+#     which is the silent-pass signature described below;
 #   * the hop-2 rules need an `output` base chain, which is NOT per-sandbox
 #     (one uid, one deployment) — so it cannot live in a per-sandbox table, and
 #     the render guard "every rule carries iifname" cannot apply to it;
-#   * that `output` chain needs its own narrowing guard, for exactly guard ②'s
-#     reason: an un-narrowed drop there is a HOST-level egress kill switch.
+#   * that `output` chain needs its own narrowing guard: an un-narrowed drop
+#     there is a HOST-level egress kill switch.
 #
 # So this script measures, for a host-local process's egress:
 #   Q1  which hooks see it: forward / output / postrouting
@@ -36,7 +36,7 @@
 #   Q5  whether an un-narrowed drop in `output` is a host-wide kill switch
 #
 # Target of the probe = a peer netns on a /30, standing in for the sibling
-# address space the floor must cover (the documented invariant ④). Root required.
+# address space the floor must cover. Root required.
 #
 # ── MEASURED (nft 1.1.6, this machine) ────────────────────────────────────────
 #
@@ -59,19 +59,19 @@
 # Q4     A skuid-narrowed drop in `output` enforces: probe as that uid FAILS with
 #        counter=3, while the same probe as root gets the banner. Narrowing holds.
 # Q5     An UN-narrowed drop in `output` is a HOST-WIDE egress kill switch: root's
-#        probe fails too (counter=6). This is guard ②'s hazard on a second hook —
+#        probe fails too (counter=6). This is the narrowing hazard on a second hook —
 #        an output-hook rule missing its skuid narrowing takes out the host, and
 #        `iifname` cannot be that narrowing here (nothing arrives on an interface).
 # Q5b    `policy drop` on an output base chain IS effectively narrowable by a
 #        `skuid !=` accept above it (root got the banner) — unlike `iifname` on a
-#        per-sandbox chain, which guard ② measured as un-narrowable. Do not read
+#        per-sandbox chain, where chain policy is un-narrowable by `iifname`. Do not read
 #        this as permission to use `policy drop`: it works only because skuid is
 #        evaluable for every locally-owned packet, and Q2b shows that is not
 #        universal.
 #
-# ⟹ the documented invariant's "this predicate lives entirely in `forward`" is WRONG as written; the
+# ⟹ "this predicate lives entirely in `forward`" is WRONG as written; the
 #    hook is `output`. Consequences for the rule-set shape are written up in
-#    the relevant internals page the documented invariant ㉔.
+#    network substrate measurements.
 set -u
 
 HOP2_UID=12345
@@ -239,7 +239,7 @@ echo "probe as root        -> $(probe_root)   (want: FAIL — proves it is host-
 cnt
 
 say "Q5b: control — is \`policy drop\` on an \`output\` base chain narrowable at all?"
-# Guard ② measured that chain policy cannot be narrowed by iifname. Same question
+# Chain policy cannot be narrowed by iifname. The same question applies
 # for the output hook: if policy drop there is host-wide regardless of any rule,
 # the hop-2 chain needs the same "policy accept + narrowed last rule" shape.
 nft delete table inet $TABLE

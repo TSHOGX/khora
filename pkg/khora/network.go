@@ -6,12 +6,12 @@ import (
 	"net/http"
 )
 
-// The the documented invariant network declaration, and the one place this client makes a shape decision
+// The network declaration, and the one place this client makes a shape decision
 // rather than copying one.
 //
 // The engine has TWO wire structs for this — a write form and a read form — because
 // they differ in three fields (the read face adds `state` and packet counters, and its
-// `default` is always present). This client has ONE, on purpose: the documented invariant makes
+// `default` is always present). This client has ONE, on purpose: the control-plane API makes
 // read-modify-write a CONTRACT REQUIREMENT for editing a declaration, since a PATCH
 // built from a stale read silently drops a publish added in between, on a
 // security-relevant field. So `GET …/network`'s response body must be a legal PATCH
@@ -23,13 +23,13 @@ import (
 // requirement exists to prevent. One type means Network(ctx, id) returns something
 // SetNetwork(ctx, id, …) accepts, unchanged.
 //
-// This is not a composite convenience type (the recorded design rule 1 bars those): it is one
-// endpoint's one object, and every field below is one the documented invariant field.
+// This is not a composite convenience type: it is one
+// endpoint's one object, and every field below is one the control-plane API field.
 type Network struct {
 	Egress  Egress  `json:"egress"`
 	Ingress Ingress `json:"ingress"`
 	// State is READ-ONLY: the engine emits it and ignores it on write. Meaningful
-	// because of a biconditional the documented invariant states — `running` ⟺ the rules installed in the
+	// because of a biconditional the control-plane API states — `running` ⟺ the rules installed in the
 	// kernel ARE this declaration; not `running` ⟹ nothing is installed.
 	State SandboxState `json:"state,omitempty"`
 }
@@ -121,7 +121,7 @@ func (c *Client) Network(ctx context.Context, sandboxID string) (Network, error)
 // SetNetwork replaces a sandbox's network declaration wholesale (PATCH with a
 // `network` object).
 //
-// WHOLESALE IS THE CONTRACT, not this client's choice: the documented invariant has no partial edit for a
+// WHOLESALE IS THE CONTRACT, not this client's choice: the control-plane API has no partial edit for a
 // declaration, because a merge semantics on an allow-list is how a rule gets dropped
 // without anyone deciding to drop it. The safe sequence is `pause → Network() →
 // SetNetwork() → Resume()`, and reading BEFORE the pause pulls the whole pause window

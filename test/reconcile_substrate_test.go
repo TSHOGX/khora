@@ -1,6 +1,6 @@
 //go:build substrate
 
-// L4 the documented invariant startup crash-reconciliation acceptance against REAL runsc. Each
+// L4 atomic transition rollback startup crash-reconciliation acceptance against REAL runsc. Each
 // test drives the assembled engine to a crash mid-transition (the fault
 // hook), then builds a SECOND engine over the SAME store file + state dir — a
 // faithful process restart — and runs Reconcile. Requires root.
@@ -110,7 +110,7 @@ func TestReconcileOrphanReclaim(t *testing.T) {
 		t.Fatal("resume should have crashed at the fault hook")
 	}()
 
-	// store must still read `paused` (the documented invariant: the commit never happened, no torn
+	// store must still read `paused` (the transactional outbox: the commit never happened, no torn
 	// state) and the orphan netns is leaked (defer couldn't run).
 	func() {
 		eng := f.engine(t, nil)
@@ -130,14 +130,14 @@ func TestReconcileOrphanReclaim(t *testing.T) {
 		// record still paused, orphan reclaimed, upper intact.
 		rec2, _ := eng.Store.GetSandbox(ctx, sid)
 		if rec2.State != model.Paused {
-			t.Fatalf("post-reconcile state=%s; want paused (the documented invariant)", rec2.State)
+			t.Fatalf("post-reconcile state=%s; want paused (atomic transition rollback)", rec2.State)
 		}
 		if harness.CountEngineNetns(t) != nsBefore {
 			t.Fatalf("orphan netns not reclaimed: before=%d after=%d", nsBefore, harness.CountEngineNetns(t))
 		}
 		up := filepath.Join(upper, string(rec2.Overlay), "upper")
 		if _, err := os.Stat(up); err != nil {
-			t.Fatalf("upper reclaimed by reconcile (must persist, the documented invariant): %v", err)
+			t.Fatalf("upper reclaimed by reconcile (must persist, atomic transition rollback): %v", err)
 		}
 		t.Logf("✓ orphan placement reclaimed, record stays paused, upper intact")
 	}()
@@ -182,14 +182,14 @@ func TestReconcileAdoptSurvivor(t *testing.T) {
 	}
 	rec, _ := eng.Store.GetSandbox(ctx, sid)
 	if rec.State != model.Running {
-		t.Fatalf("survivor demoted: state=%s; want running (the documented invariant adopt)", rec.State)
+		t.Fatalf("survivor demoted: state=%s; want running (atomic transition rollback adopt)", rec.State)
 	}
 	epAfter, err := eng.Mediator.Endpoint(sid)
 	if err != nil {
 		t.Fatalf("adopted sandbox not addressable: %v", err)
 	}
 	if epAfter != epBefore {
-		t.Fatalf("adopt changed IP %s → %s; want SAME (not a resume, the documented invariant)", epBefore, epAfter)
+		t.Fatalf("adopt changed IP %s → %s; want SAME (not a resume, atomic transition rollback)", epBefore, epAfter)
 	}
 	// addressable: a fresh client reaches the guest.
 	cl, err := eng.Mediator.Client(sid)
@@ -236,7 +236,7 @@ func TestReconcileNoResidueIdempotent(t *testing.T) {
 	eng := f.engine(t, nil)
 	defer func() { _ = eng.Store.(*store.SQLite).Close() }()
 
-	// pre-reconcile the record is `creating` (torn? no — the documented invariant keeps it clean).
+	// pre-reconcile the record is `creating` (torn? no — the transactional outbox keeps it clean).
 	if rec, _ := eng.Store.GetSandbox(ctx, sid); rec.State != model.Creating {
 		t.Fatalf("crashed-create record state=%s; want creating", rec.State)
 	}
@@ -255,7 +255,7 @@ func TestReconcileNoResidueIdempotent(t *testing.T) {
 	list, _ := eng.Store.ListSandboxes(ctx)
 	for _, r := range list {
 		if r.State != model.Running && r.State != model.Paused {
-			t.Fatalf("record %s in non-resting state %s (no failed state allowed, the documented invariant)", r.ID, r.State)
+			t.Fatalf("record %s in non-resting state %s (no failed state allowed, the transition contract)", r.ID, r.State)
 		}
 	}
 	// second reconcile: no-op.

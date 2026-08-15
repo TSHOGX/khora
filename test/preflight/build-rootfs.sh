@@ -4,12 +4,12 @@
 #
 # It replicates usrmerge (/bin→usr/bin, /lib→usr/lib, /lib64, /sbin) so ELF
 # interpreter resolution works inside the guest; without it, dynamically-linked
-# binaries fail to load (the recorded design). /bin/sh here is dash + libc.so.6 +
+# binaries fail to load (the root-required deployment). /bin/sh here is dash + libc.so.6 +
 # ld-linux-aarch64.so.1 — no coreutils. The e2e assertions use host-side
 # fs.write/read + `sh -c 'echo'`, which do not need guest coreutils.
 #
 # The static sandboxd binary (CGO off) is copied to /sbin/sandboxd as the
-# container entrypoint (the documented invariant init mode = PID 1).
+# container entrypoint (the guest startup topology init mode = PID 1).
 #
 # Usage: build-rootfs.sh <dest-template-dir> <path-to-sandboxd-binary>
 # Idempotent: wipes and rebuilds dest. Runs unprivileged (plain file copy).

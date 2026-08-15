@@ -16,7 +16,7 @@ import (
 // localRoot implements Root over a host directory using ONE syscall for the
 // entire security boundary: openat2(dirfd, path, RESOLVE_IN_ROOT).
 //
-// WHY THIS AND NOT chroot / A MOUNT NAMESPACE (the relevant internals page the documented invariant). RESOLVE_IN_ROOT
+// WHY THIS AND NOT chroot / A MOUNT NAMESPACE (volume.md constraints). RESOLVE_IN_ROOT
 // gives path semantics IDENTICAL to chroot's, with no privilege, no mount
 // namespace, and no thread pinning. Four properties measured on this substrate's
 // 6.x kernel, read and write side both, and the code below depends on all four:
@@ -46,8 +46,8 @@ type localRoot struct {
 //
 // EXPORTED BUT NOT A SEAM MEMBER: an intra-subsystem helper, so BOTH arms in this
 // package share ONE accessor implementation rather than two copies that can drift.
-// Nothing above the documented invariant calls it — above the seam a volume is an ID and Backend.OpenRoot
-// is the only way to reach its bytes (the documented invariant / the documented invariant). A remote arm would implement
+// Nothing above the Volume subsystem calls it — above the seam a volume is an ID and Backend.OpenRoot
+// is the only way to reach its bytes (the ID-addressed Overlay model / the API error contract). A remote arm would implement
 // Root over its own transport; the interface is paths and bytes, not host primitives.
 func NewLocalRoot(volumeID, dir string) (Root, error) {
 	// O_PATH: we only ever use this fd as a resolution anchor, never to read or
@@ -239,7 +239,7 @@ func (r *localRoot) WriteAt(name string, p []byte, off int64) (int, error) {
 	n, err := unix.Pwrite(fd, p, off)
 	if err != nil {
 		// Deliberately NOT wrapped away: a capacity cap surfaces here as ENOSPC and
-		// the caller must be able to see it (the documented invariant: past the cap a write gets a plain
+		// the caller must be able to see it (resource admission: past the cap a write gets a plain
 		// ENOSPC, and that is an expected data-plane result, not an engine failure).
 		return n, &fs.PathError{Op: "pwrite", Path: name, Err: err}
 	}

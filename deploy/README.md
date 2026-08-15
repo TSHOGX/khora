@@ -6,8 +6,9 @@ permanently, because every byte the engine can hand a guest is readable by uid 0
 inside it — so the engine cannot be a secrecy boundary for anything. Authentication
 therefore lives in front of it, in a component outside the engine.
 
-This directory holds the configuration for that component. The decision behind it,
-including the options rejected, is documented in [Configuration](../docs/configuration/README.md).
+This directory holds the configuration for that component. The deployment boundary
+and its requirements are documented in
+[Deployment boundary](../docs/configuration/deployment-boundary.md).
 
 ## The engine enforces its own half
 
@@ -51,8 +52,8 @@ in the config's comments.
 cp deploy/nginx-gateway.conf /etc/nginx/sites-available/khora.conf
 ln -s /etc/nginx/sites-available/khora.conf /etc/nginx/sites-enabled/
 # server.pem/server.key = this gateway's identity
-# client-ca.pem         = the CA that issues CALLER certificates. Scope it to a CA you
-#                         issue from: a public bundle here authenticates the internet.
+# client-ca.pem = the CA that issues CALLER certificates. Scope it to a CA you
+# issue from: a public bundle here authenticates the internet.
 nginx -t && systemctl reload nginx
 ```
 
@@ -66,9 +67,9 @@ looking like a boundary.
 ```sh
 go build ./cmd/gateway
 ./gateway --addr :8443 \
-          --cert server.pem --key server.key \
-          --client-ca client-ca.pem \
-          --upstream http://127.0.0.1:8080
+  --cert server.pem --key server.key \
+  --client-ca client-ca.pem \
+  --upstream http://127.0.0.1:8080
 ```
 
 mTLS rather than bearer tokens: a token would mean this repo ships issuance, storage

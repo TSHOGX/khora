@@ -10,23 +10,23 @@ import (
 	"github.com/TSHOGX/khora/internal/model"
 )
 
-// Memory is the in-memory Store: the second implementation of the the documented invariant Behavior
+// Memory is the in-memory Store: the second implementation of the extension boundary Behavior
 // seam, serving fast, disk-free L1 unit tests.
 //
-// The single mutex is how Memory DELIVERS the the documented invariant atomic-commit contract:
+// The single mutex is how Memory DELIVERS the transactional outbox atomic-commit contract:
 // "change the map + append the outbox slice" happen under one Lock, so a
 // transition and its event commit together or not at all — where SQLite uses
 // BEGIN/COMMIT. Every "X equivalent" comment below is one clause of that.
 type Memory struct {
 	mu  sync.Mutex
 	rec map[model.SandboxID]model.Sandbox
-	// tmpl holds Template rows (the documented invariant first-class object). The the documented invariant
+	// tmpl holds Template rows (health and reclamation first-class object). The health and reclamation
 	// reference-protection contract arrives here as a Go scan under the one mutex,
 	// where SQLite gets it from FK RESTRICT.
 	tmpl map[model.TemplateID]model.Template
-	// vol holds Volume rows (the documented invariant first-class object, the documented invariant).
+	// vol holds Volume rows (the Volume subsystem first-class object, health and reclamation).
 	vol map[model.VolumeID]model.Volume
-	// mounts is the mount table (the documented invariant). A SLICE rather than a map because no single
+	// mounts is the mount table (the Volume subsystem). A SLICE rather than a map because no single
 	// column is its key — a row is identified by (sandbox, path) for topology and by
 	// (volume, access) for the lease, and both are scanned rather than looked up.
 	//
@@ -35,8 +35,8 @@ type Memory struct {
 	mounts []model.Mount
 	// outbox is append-only, ordered — the publisher reads oldest-first. Like the
 	// SQLite backend, published rows are marked, never removed (same unbounded-
-	// growth known limitation; a GitHub Issue the documented invariant, "The size of the replayable
-	// event-stream window (the documented invariant)").
+	// growth known limitation; a GitHub Issue the security model, "The size of the replayable
+	// event-stream window (the transactional outbox)").
 	// Bounded in practice only by process lifetime since Memory is non-durable.
 	outbox []outboxRow
 	// nextSeq is the monotonic sequence counter (Store's sequence contract). It
@@ -49,7 +49,7 @@ type Memory struct {
 	nextSeq int64
 }
 
-// outboxRow is one persisted Event plus its published flag (the documented invariant outbox).
+// outboxRow is one persisted Event plus its published flag (the transactional outbox).
 type outboxRow struct {
 	ev        Event
 	published bool
@@ -67,7 +67,7 @@ func NewMemory() *Memory {
 	}
 }
 
-// checkEventKind refuses a Kind outside the documented invariant's closed set, which is what the SQLite
+// checkEventKind refuses a Kind outside the lifecycle state machine's closed set, which is what the SQLite
 // arm's CHECK constraint does. Both backends must agree, or a typo'd kind is rejected in
 // production and accepted in the tests that are supposed to prove the behaviour.
 func checkEventKind(ev *Event) error {
@@ -78,7 +78,7 @@ func checkEventKind(ev *Event) error {
 		// A plain error, matching the SQLite arm: a CHECK violation is not one of the
 		// contract's named sentinels, and inventing one here would make the two backends
 		// differ on the error VALUE while agreeing on the refusal.
-		return fmt.Errorf("store: event kind %q is not one of the documented invariant's six (%v)",
+		return fmt.Errorf("store: event kind %q is not one of the lifecycle state machine's six (%v)",
 			ev.Kind, model.EventKinds)
 	}
 	// Cause carries the same obligation (its column has a CHECK too). Empty is legitimate
@@ -91,7 +91,7 @@ func checkEventKind(ev *Event) error {
 }
 
 // appendEvent records ev in the outbox. MUST be called with m.mu held so it
-// commits atomically with the state change beside it (the documented invariant).
+// commits atomically with the state change beside it (the transactional outbox).
 func (m *Memory) appendEvent(ev *Event) {
 	if ev == nil {
 		return
@@ -111,19 +111,19 @@ func (m *Memory) CreateSandbox(_ context.Context, s model.Sandbox, ev *Event) er
 	if _, ok := m.rec[s.ID]; ok {
 		return ErrConflict
 	}
-	// FK RESTRICT equivalent (the documented invariant reference-side): the referenced Template must exist.
+	// FK RESTRICT equivalent (health and reclamation reference-side): the referenced Template must exist.
 	// Under the one mutex a concurrent DeleteTemplate cannot interleave — the same
-	// single-writer serialization SQLite gets (the documented invariant).
+	// single-writer serialization SQLite gets (health and reclamation).
 	if _, ok := m.tmpl[s.Template]; !ok {
 		return ErrTemplateNotFound
 	}
-	// Normalize the the documented invariant declaration on the way in, so this backend holds what SQLite
-	// holds (it gets the same from marshalNetwork): the documented invariant requires the three arrays to read
+	// Normalize the network declaration on the way in, so this backend holds what SQLite
+	// holds (it gets the same from marshalNetwork): the control-plane API requires the three arrays to read
 	// back as `[]` rather than null. Without it the two backends would disagree on the
 	// READ SHAPE of every declaration, and storetest would be pinning one's accident.
 	s.Network = s.Network.Normalize()
 	m.rec[s.ID] = s
-	m.appendEvent(ev) // same commit as the insert (the documented invariant)
+	m.appendEvent(ev) // same commit as the insert (the transactional outbox)
 	return nil
 }
 
@@ -133,7 +133,7 @@ func (m *Memory) CreateTemplate(_ context.Context, t model.Template) error {
 	if _, ok := m.tmpl[t.ID]; ok {
 		return ErrConflict
 	}
-	// non-empty parent must exist (lineage FK, the documented invariant: references point upward).
+	// non-empty parent must exist (lineage FK, health and reclamation: references point upward).
 	if t.Parent != "" {
 		if _, ok := m.tmpl[t.Parent]; !ok {
 			return ErrTemplateNotFound
@@ -170,7 +170,7 @@ func (m *Memory) DeleteTemplate(_ context.Context, id model.TemplateID) error {
 		return ErrTemplateNotFound
 	}
 	// RESTRICT equivalent: scan for any live referencing row — a sandbox pinning it, or a
-	// child Template naming it as parent. Either → ErrInUse (the documented invariant
+	// child Template naming it as parent. Either → ErrInUse (health and reclamation
 	// referenced-means-undeletable). The Go-check twin of SQLite's FK RESTRICT.
 	for _, s := range m.rec {
 		if s.Template == id {
@@ -186,7 +186,7 @@ func (m *Memory) DeleteTemplate(_ context.Context, id model.TemplateID) error {
 	return nil
 }
 
-// --- Volume CRUD (the documented invariant) ------------------------------------------------------
+// --- Volume CRUD (the Volume subsystem) ------------------------------------------------------
 
 func (m *Memory) CreateVolume(_ context.Context, v model.Volume) error {
 	m.mu.Lock()
@@ -194,7 +194,7 @@ func (m *Memory) CreateVolume(_ context.Context, v model.Volume) error {
 	if _, ok := m.vol[v.ID]; ok {
 		return ErrConflict
 	}
-	// Lineage FK equivalent (the documented invariant, references point upward): a named parent must exist.
+	// Lineage FK equivalent (health and reclamation, references point upward): a named parent must exist.
 	if v.Parent != "" {
 		if _, ok := m.vol[v.Parent]; !ok {
 			return ErrVolumeNotFound
@@ -240,7 +240,7 @@ func (m *Memory) DeleteVolume(_ context.Context, id model.VolumeID) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, ok := m.vol[id]; !ok {
-		return ErrVolumeNotFound // reported, never folded into success (the documented invariant)
+		return ErrVolumeNotFound // reported, never folded into success (the API error contract)
 	}
 	// RESTRICT equivalent, VOLUME side: the Go-check twin of SQLite's mounts.volume FK.
 	for _, mt := range m.mounts {
@@ -250,7 +250,7 @@ func (m *Memory) DeleteVolume(_ context.Context, id model.VolumeID) error {
 	}
 	// LINEAGE side, a DIFFERENT verdict: a live snapshot/clone names it as parent. The
 	// caller's remedy differs (delete the descendant vs detach a mount), so the two are
-	// never collapsed (the documented invariant).
+	// never collapsed (the control-plane API).
 	for _, other := range m.vol {
 		if other.Parent == id {
 			return ErrVolumeHasDescendants
@@ -260,10 +260,10 @@ func (m *Memory) DeleteVolume(_ context.Context, id model.VolumeID) error {
 	return nil
 }
 
-// --- Mount table (the documented invariant) ------------------------------------------------------
+// --- Mount table (the Volume subsystem) ------------------------------------------------------
 //
 // The atomic lease arrives under the ONE mutex Memory already holds — no new lock class
-// (the documented invariant / the relevant internals page the documented invariant).
+// (the Volume subsystem / the mount table).
 
 func (m *Memory) CreateMounts(_ context.Context, mounts []model.Mount) error {
 	if len(mounts) == 0 {
@@ -308,7 +308,7 @@ func (m *Memory) ReplaceMounts(_ context.Context, sandbox model.SandboxID, next 
 	accepted, err := m.admitBinding(kept, next)
 	if err != nil {
 		// m.mounts is untouched, so a refused replacement leaves the OLD binding intact
-		// (consequence ①) — the same all-or-nothing SQLite gets from rolling back.
+		// (consequence ) — the same all-or-nothing SQLite gets from rolling back.
 		return err
 	}
 	m.mounts = append(kept, accepted...)
@@ -322,7 +322,7 @@ func (m *Memory) ReplaceMounts(_ context.Context, sandbox model.SandboxID, next 
 // Callers MUST hold m.mu. Shared by CreateMounts and ReplaceMounts so the lease predicate
 // has ONE spelling on this backend, mirroring SQLite's shared insertBinding.
 func (m *Memory) admitBinding(base, mounts []model.Mount) ([]model.Mount, error) {
-	// Reference side of the documented invariant atomicity: both endpoints must exist. Under the one mutex a
+	// Reference side of health and reclamation atomicity: both endpoints must exist. Under the one mutex a
 	// concurrent delete cannot interleave.
 	for _, mt := range mounts {
 		if _, ok := m.rec[mt.Sandbox]; !ok {
@@ -433,7 +433,7 @@ func (m *Memory) ListSandboxes(_ context.Context) ([]model.Sandbox, error) {
 
 func (m *Memory) CompareAndSetState(_ context.Context, id model.SandboxID, expected, next model.Lifecycle, ev *Event, cause *model.DeathCause) error {
 	// BEFORE the lock and before any mutation: a refused event must leave the state
-	// untouched, because the transition and its event are one commit (the documented invariant).
+	// untouched, because the transition and its event are one commit (the transactional outbox).
 	if err := checkEventKind(ev); err != nil {
 		return err
 	}
@@ -447,14 +447,14 @@ func (m *Memory) CompareAndSetState(_ context.Context, id model.SandboxID, expec
 		return ErrConflict
 	}
 	s.State = next
-	// death cause under the SAME lock as the state change (the documented invariant / the documented invariant, and
+	// death cause under the SAME lock as the state change (health and reclamation / the transactional outbox, and
 	// Store.CompareAndSetState for why no later window exists). nil = leave untouched.
 	if cause != nil {
 		s.DeathCause = *cause
 	}
 	s.UpdatedAt = time.Now()
 	m.rec[id] = s
-	m.appendEvent(ev) // state change + event append, one commit (the documented invariant)
+	m.appendEvent(ev) // state change + event append, one commit (the transactional outbox)
 	return nil
 }
 
@@ -465,14 +465,14 @@ func (m *Memory) UpdateBinding(_ context.Context, id model.SandboxID, expected m
 	if !ok {
 		return ErrNotFound
 	}
-	// Conditional on the state the caller decided against (the documented invariant), so a resume or
+	// Conditional on the state the caller decided against (per-sandbox transition serialization), so a resume or
 	// evict that landed in between makes this fail rather than write against a
 	// decision that no longer holds.
 	if s.State != expected {
 		return ErrConflict
 	}
 	s.Limits, s.IdleTimeout, s.Retention, s.Network = b.Apply(s)
-	// Same lock as the field writes (the documented invariant): a raise that lifts the the documented invariant refusal
+	// Same lock as the field writes (the transactional outbox): a raise that lifts the health and reclamation refusal
 	// must not be observable without the cap that justifies it.
 	if cause != nil {
 		s.DeathCause = *cause
@@ -499,7 +499,7 @@ func (m *Memory) SetUpdatedAtForTest(id model.SandboxID, t time.Time) {
 // SetLimitsForTest overwrites a record's resource-limit Binding, bypassing the
 // state precondition and admission gate UpdateBinding enforces. TEST-ONLY seam,
 // like SetUpdatedAtForTest: it lets a test prove the caps are a BINDING
-// (re-materialized from the record at every placement, the documented invariant) rather than frozen
+// (re-materialized from the record at every placement, resource admission) rather than frozen
 // placement state — edit the record while paused, resume, and the new values must
 // take effect. No-op for an unknown ID.
 func (m *Memory) SetLimitsForTest(id model.SandboxID, l model.Limits) {
@@ -529,7 +529,7 @@ func (m *Memory) DeleteSandbox(_ context.Context, id model.SandboxID, ev *Event)
 		}
 	}
 	delete(m.rec, id)
-	m.appendEvent(ev) // the outbox row outlives the deleted record (the documented invariant)
+	m.appendEvent(ev) // the outbox row outlives the deleted record (the transactional outbox)
 	return nil
 }
 
@@ -554,7 +554,7 @@ func (m *Memory) UnpublishedEvents(_ context.Context, limit int) ([]Event, error
 	return out, nil
 }
 
-// TrimOutbox implements Store.TrimOutbox (the documented invariant's retention mechanism). Read that
+// TrimOutbox implements Store.TrimOutbox (the transactional outbox's retention mechanism). Read that
 // contract for why each clause matters.
 func (m *Memory) TrimOutbox(_ context.Context, cutoff time.Time, limit int) (int, error) {
 	if limit <= 0 {
@@ -586,7 +586,7 @@ func (m *Memory) TrimOutbox(_ context.Context, cutoff time.Time, limit int) (int
 	return deleted, nil
 }
 
-// CountUnpublished implements Store.CountUnpublished (the documented invariant ③: the gauge's source is
+// CountUnpublished implements Store.CountUnpublished (the transactional outbox: the gauge's source is
 // independent of the drain read). This arm walks, which is honest at its scale — the
 // in-memory outbox is bounded by the process's own lifetime.
 func (m *Memory) CountUnpublished(_ context.Context) (int64, error) {
@@ -601,7 +601,7 @@ func (m *Memory) CountUnpublished(_ context.Context) (int64, error) {
 	return n, nil
 }
 
-// Events implements the the documented invariant replay read (Store.Events). Delivery state is not a
+// Events implements the control-plane API replay read (Store.Events). Delivery state is not a
 // predicate — replay is over the whole retained window.
 func (m *Memory) Events(_ context.Context, after int64, limit int) ([]Event, int64, int64, error) {
 	m.mu.Lock()

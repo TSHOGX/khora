@@ -10,7 +10,7 @@ import (
 	"github.com/TSHOGX/khora/internal/model"
 )
 
-// TestWriteRegimeRefusesWhileALiveRWMountHolds is the first direction of the documented invariant's
+// TestWriteRegimeRefusesWhileALiveRWMountHolds is the first direction of the Volume subsystem's
 // write-regime invariant: a live read-write mount blocks a direct content change.
 func TestWriteRegimeRefusesWhileALiveRWMountHolds(t *testing.T) {
 	ctx := context.Background()
@@ -47,7 +47,7 @@ func TestWriteRegimeRefusesWhileALiveRWMountHolds(t *testing.T) {
 }
 
 // TestPausedSandboxIsNotALiveWriter is the OTHER direction, and it is the half that is
-// an explicit PROMISE rather than a convenience (the documented invariant / the relevant internals page the documented invariant): pausing the
+// an explicit PROMISE rather than a convenience (the Volume subsystem / the volume write regime): pausing the
 // holder must make the same import succeed, and the sandbox sees the new bytes on
 // resume.
 //
@@ -83,7 +83,7 @@ func TestPausedSandboxIsNotALiveWriter(t *testing.T) {
 	}
 	payload := "written while the holder was paused"
 	if _, err := m.ImportVolume(ctx, vid, "f", strings.NewReader(payload)); err != nil {
-		t.Fatalf("import after pausing the holder = %v; want success — `paused` is NOT a live writer, and that is a promise, not an implementation detail (the documented invariant)", err)
+		t.Fatalf("import after pausing the holder = %v; want success — `paused` is NOT a live writer, and that is a promise, not an implementation detail (the Volume subsystem)", err)
 	}
 	var out bytes.Buffer
 	if _, err := m.ExportVolume(ctx, vid, "f", &out); err != nil {
@@ -99,9 +99,9 @@ func TestPausedSandboxIsNotALiveWriter(t *testing.T) {
 }
 
 // TestLiveReadOnlyMountDoesNotBlockDirectWrite: a live READER is not a writer, so it
-// cannot tear anything. SETTLED in the documented invariant — no warning, no version stamp, no refusal:
+// cannot tear anything. SETTLED in the Volume subsystem — no warning, no version stamp, no refusal:
 // the reader's exposure is bounded (stale-but-whole / a momentary ENOENT / a prefix,
-// never torn) and freshness beyond that is the documented invariant's existing non-promise. Refusing here
+// never torn) and freshness beyond that is the Volume subsystem's existing non-promise. Refusing here
 // would trade a capability for convenience.
 func TestLiveReadOnlyMountDoesNotBlockDirectWrite(t *testing.T) {
 	ctx := context.Background()
@@ -121,14 +121,14 @@ func TestLiveReadOnlyMountDoesNotBlockDirectWrite(t *testing.T) {
 	}
 }
 
-// TestColdStartRefusedWhileADirectWriteIsInFlight is the SYMMETRIC half of the documented invariant's
+// TestColdStartRefusedWhileADirectWriteIsInFlight is the SYMMETRIC half of the Volume subsystem's
 // write regime, and the half whose absence left the hazard fully open in one order: an
 // import admitted at T0 plus a resume completing at T1 produces the two concurrent
 // writers the invariant forbids, without passing through any `paused` state that the
 // direct-write side could have caught.
 //
 // The refusal is asserted on BOTH cold-start entry points, because they are different
-// verbs with different fallback states (the documented invariant) and a gate wired into only one of them
+// verbs with different fallback states (atomic transition rollback) and a gate wired into only one of them
 // would be a gate on half the hazard.
 func TestColdStartRefusedWhileADirectWriteIsInFlight(t *testing.T) {
 	ctx := context.Background()
@@ -160,16 +160,16 @@ func TestColdStartRefusedWhileADirectWriteIsInFlight(t *testing.T) {
 		launchesBefore := len(rt.Calls())
 		err = m.Resume(ctx, sid)
 		if !errors.Is(err, ErrVolumeDirectWriteInFlight) {
-			t.Fatalf("resume while a direct write is in flight = %v; want ErrVolumeDirectWriteInFlight — otherwise this resume and that import are the two concurrent writers the documented invariant forbids", err)
+			t.Fatalf("resume while a direct write is in flight = %v; want ErrVolumeDirectWriteInFlight — otherwise this resume and that import are the two concurrent writers the Volume subsystem forbids", err)
 		}
 		// The message must name the volume: the remedy is to wait for THAT import.
 		if !strings.Contains(err.Error(), string(vid)) {
 			t.Errorf("the refusal does not name the volume: %v", err)
 		}
-		// the documented invariant: atomic return to the SOURCE state. The refusal is taken before anything
+		// atomic transition rollback: atomic return to the SOURCE state. The refusal is taken before anything
 		// is materialized, so there is nothing half-built to leave behind either.
 		if rec, _ := st.GetSandbox(ctx, sid); rec.State != model.Paused {
-			t.Fatalf("state = %s; want it to stay paused (the documented invariant source state)", rec.State)
+			t.Fatalf("state = %s; want it to stay paused (atomic transition rollback source state)", rec.State)
 		}
 		if len(rt.Calls()) != launchesBefore {
 			t.Fatalf("the refused resume still touched the runtime: %v", rt.Calls()[launchesBefore:])
@@ -202,10 +202,10 @@ func TestColdStartRefusedWhileADirectWriteIsInFlight(t *testing.T) {
 		if !errors.Is(err, ErrVolumeDirectWriteInFlight) {
 			t.Fatalf("create mounting a volume mid-import = %v; want ErrVolumeDirectWriteInFlight (exclusive is an rw mode)", err)
 		}
-		// create has no fallback state, so the documented invariant means the record goes away entirely —
+		// create has no fallback state, so atomic transition rollback means the record goes away entirely —
 		// including the mount rows, or the record would be an undeletable zombie.
 		if recs, _ := st.ListSandboxes(ctx); len(recs) != 0 {
-			t.Fatalf("refused create left %d sandbox record(s); want none (the documented invariant)", len(recs))
+			t.Fatalf("refused create left %d sandbox record(s); want none (atomic transition rollback)", len(recs))
 		}
 		rows, err := st.ListMountsByVolume(ctx, vid)
 		if err != nil {
@@ -225,7 +225,7 @@ func TestColdStartRefusedWhileADirectWriteIsInFlight(t *testing.T) {
 //
 // Refusing here as well would be more conservative and would tear nothing — and would
 // delete the ability to boot a sandbox that merely READS a volume being seeded, which
-// the relevant internals page the documented invariant calls the third kind of wrong.
+// the volume write regime calls the third kind of wrong.
 func TestColdStartWithAReadOnlyMountIsNotRefused(t *testing.T) {
 	ctx := context.Background()
 	m, st, _, _ := mountFixture(t)
@@ -309,7 +309,7 @@ func TestDirectWriteMarkerProtectsFromTheSweep(t *testing.T) {
 	survived := vb.units[string(vid)]
 	vb.mu.Unlock()
 	if !survived {
-		t.Fatalf("the volume was reclaimed mid-write — the in-flight marker exists precisely to cover a write to a volume nothing has mounted (the documented invariant)")
+		t.Fatalf("the volume was reclaimed mid-write — the in-flight marker exists precisely to cover a write to a volume nothing has mounted (the Volume subsystem)")
 	}
 
 	release()

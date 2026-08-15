@@ -27,7 +27,7 @@ import (
 	"github.com/TSHOGX/khora/pkg/transport/gen/khora/transport/v1/transportv1connect"
 )
 
-// The the documented invariant drain barrier AT THE EDGE THAT TAKES IT. barrier_test.go proves the
+// The FS-first pause and resume drain barrier AT THE EDGE THAT TAKES IT. barrier_test.go proves the
 // barrier mechanism in isolation; what was untested is the wiring in
 // dataplane.go — which handlers take it, which deliberately do not, and what a
 // refused call looks like on the wire.
@@ -241,7 +241,7 @@ func h2cClient() *http.Client {
 }
 
 // sidHeader sets the sandbox-id header on unary calls — the only addressing an
-// outer-edge client uses (the documented invariant: placement stays inside the engine).
+// outer-edge client uses (the API error contract: placement stays inside the engine).
 func sidHeader(sid string) connect.ClientOption {
 	return connect.WithInterceptors(connect.UnaryInterceptorFunc(func(next connect.UnaryFunc) connect.UnaryFunc {
 		return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
@@ -346,15 +346,15 @@ func TestDrainRefusesWritesButNotReadsOrProcessStart(t *testing.T) {
 		time.Sleep(2 * time.Millisecond)
 	}
 	if refused == nil {
-		t.Fatal("a mutating fs.Write was ACCEPTED while a pause was draining — the barrier is not wired into the data-plane proxy, so a pause can be starved by arriving writes (the documented invariant / the documented invariant)")
+		t.Fatal("a mutating fs.Write was ACCEPTED while a pause was draining — the barrier is not wired into the data-plane proxy, so a pause can be starved by arriving writes (FS-first pause and resume / the transport contract)")
 	}
 	// The pause must still be WAITING here: write #1 is registered in the barrier
 	// and has not released. This is the load-bearing half — if fs.Write never took
 	// the barrier, the pause would have sailed straight past the in-flight write
-	// and frozen the sandbox mid-call, which is the truncation the documented invariant exists to stop.
+	// and frozen the sandbox mid-call, which is the truncation the transport contract exists to stop.
 	select {
 	case err := <-pauseDone:
-		t.Fatalf("Pause COMPLETED (err=%v) while a write was still in flight — the drain did not wait for it, so a pause can land mid-write and truncate the file (the documented invariant / the documented invariant)", err)
+		t.Fatalf("Pause COMPLETED (err=%v) while a write was still in flight — the drain did not wait for it, so a pause can land mid-write and truncate the file (FS-first pause and resume / the transport contract)", err)
 	default:
 	}
 	if got := connect.CodeOf(refused); got != connect.CodeUnavailable {
@@ -364,7 +364,7 @@ func TestDrainRefusesWritesButNotReadsOrProcessStart(t *testing.T) {
 	// (2) READS are deliberately NOT gated: observability must survive a pause.
 	readsBefore := cl.readCount()
 	if _, err := fs.Read(ctx, connect.NewRequest(&v1.ReadRequest{Path: "/root/held"})); err != nil {
-		t.Errorf("fs.Read was refused during a drain: %v — reads cannot truncate anything, and blocking them stalls observability exactly when an operator most wants to look (the documented invariant)", err)
+		t.Errorf("fs.Read was refused during a drain: %v — reads cannot truncate anything, and blocking them stalls observability exactly when an operator most wants to look (the transport contract)", err)
 	}
 	if cl.readCount() == readsBefore {
 		t.Error("fs.Read never reached the guest during a drain — it was gated somewhere before the client")
@@ -377,14 +377,14 @@ func TestDrainRefusesWritesButNotReadsOrProcessStart(t *testing.T) {
 	req.Header().Set(sandboxIDHeader, string(sid))
 	stream, err := proc.Start(ctx, req)
 	if err != nil {
-		t.Errorf("process.Start was refused during a drain: %v — a long-lived Start gated on the drain deadlocks the barrier against itself (the documented invariant)", err)
+		t.Errorf("process.Start was refused during a drain: %v — a long-lived Start gated on the drain deadlocks the barrier against itself (the transport contract)", err)
 	} else {
 		for stream.Receive() {
 		}
 		_ = stream.Close()
 	}
 	if cl.startCount() == startsBefore {
-		t.Error("process.Start never reached the guest during a drain — it was gated, which is the self-deadlock the documented invariant warns about")
+		t.Error("process.Start never reached the guest during a drain — it was gated, which is the self-deadlock the transport contract warns about")
 	}
 
 	// Release write #1 → the drain completes and the pause lands.
@@ -418,6 +418,6 @@ func TestWritesAcceptedAgainAfterPauseSettles(t *testing.T) {
 
 	fs := transportv1connect.NewFsServiceClient(h2cClient(), srv.URL, sidHeader(string(sid)))
 	if _, err := fs.Write(ctx, connect.NewRequest(&v1.WriteRequest{Path: "/root/after", Data: []byte("z")})); err != nil {
-		t.Fatalf("fs.Write refused after the pause settled: %v — the barrier was left closed, so the sandbox is permanently read-only (the documented invariant: undrain must always run)", err)
+		t.Fatalf("fs.Write refused after the pause settled: %v — the barrier was left closed, so the sandbox is permanently read-only (FS-first pause and resume: undrain must always run)", err)
 	}
 }

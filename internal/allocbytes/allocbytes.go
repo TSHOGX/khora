@@ -2,15 +2,15 @@
 // from the host's own allocation statement.
 //
 // It is a LEAF package and deliberately ignorant of the engine's model — it takes
-// a path and returns a byte count. the documented invariant (uncapped Overlay/layer bytes) and the documented invariant
+// a path and returns a byte count. the Rootfs subsystem (uncapped Overlay/layer bytes) and the Volume subsystem
 // (uncapped Volume bytes) both need the SAME measurement for the second term of
-// the the documented invariant node-capacity inequality, and "subsystems never call each other" (the documented invariant)
+// the resource admission node-capacity inequality, and "subsystems never call each other" (the lifecycle)
 // makes a shared leaf the sanctioned answer rather than an import edge or two
 // drifting copies (the documentation: internal/guestport is the precedent).
 //
 // WHY ALLOCATED BLOCKS AND NOT APPARENT SIZE. A sparse file's length is not what
 // it costs: a 512 MiB hole-punched file occupies zero blocks, and charging its
-// length would refuse creates the node could comfortably hold (the documented invariant forbids that
+// length would refuse creates the node could comfortably hold (resource admission forbids that
 // direction explicitly). Conversely the number must come from the HOST, never from
 // a guest: the sentry fabricates st_blocks, so a guest-side read of the same file
 // reports blocks derived from its length while the host's true allocation is 0.
@@ -27,7 +27,7 @@ import (
 //
 // Hardlinked files are counted ONCE (dedup by dev+ino): a shipped Template tree
 // can carry them, and the same physical bytes must not be charged twice (the
-// the documented invariant "at most once for physically shared bytes" invariant). A file that
+// resource admission "at most once for physically shared bytes" invariant). A file that
 // disappears mid-walk (a concurrent destroy) is skipped rather than failing the
 // caller — this runs against live storage by design. A missing root is zero, not
 // an error, for the same reason.

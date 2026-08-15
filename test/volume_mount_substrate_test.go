@@ -6,7 +6,7 @@
 //	sudo env PATH=$PATH GOTOOLCHAIN=local GOFLAGS=-mod=mod GOSUMDB=off HOME=$HOME \
 //	  go test -tags substrate -v -count=1 -p 1 -timeout 900s ./test/ -run VolumeMount
 //
-// THE DISCIPLINE FROM the documented invariant / the relevant internals page the documented invariant APPLIES THROUGHOUT: never assert "the
+// THE DISCIPLINE FROM the Volume subsystem / volume sweep safety APPLIES THROUGHOUT: never assert "the
 // sandbox is still alive". Measured, five separate ways of yanking a volume out from
 // under a live guest killed NO sandbox — container still running, fresh exec rc=0,
 // runtime silent. That assertion is vacuously true and worthless as a guard. What is
@@ -71,7 +71,7 @@ func mountEngine(t *testing.T) (*orchestrator.Engine, string) {
 }
 
 // TestVolumeMountTwoConcurrentWritersBothReallyWrite is the
-// LOAD-BEARING FOUNDATION of the whole AccessMode enum (the relevant internals page the documented invariant): if a second
+// LOAD-BEARING FOUNDATION of the whole AccessMode enum (Volume materialization): if a second
 // gofer could not attach the same source, SharedReadOnly's read fanout and
 // SharedReadWrite would both be unimplementable and the enum would collapse to
 // Exclusive alone.
@@ -122,7 +122,7 @@ func TestVolumeMountTwoConcurrentWritersBothReallyWrite(t *testing.T) {
 	}
 
 	// Kill one side hard, then force-destroy it: the survivor must still read AND write.
-	// Teardown of one sandbox is not a cross-sandbox side effect (the relevant internals page the documented invariant).
+	// Teardown of one sandbox is not a cross-sandbox side effect (Volume materialization).
 	if err := eng.Mediator.Destroy(ctx, sids[0]); err != nil {
 		t.Fatalf("destroy the first holder: %v", err)
 	}
@@ -130,7 +130,7 @@ func TestVolumeMountTwoConcurrentWritersBothReallyWrite(t *testing.T) {
 	if !strings.Contains(got, "STILL:AFTER") {
 		t.Errorf("the survivor cannot write after the other holder was destroyed: %q — one sandbox's teardown must not disturb the other gofer's view of the same source", got)
 	}
-	// And the volume itself outlived both records (the documented invariant).
+	// And the volume itself outlived both records (the Volume subsystem).
 	if _, err := eng.Store.GetVolume(ctx, vid); err != nil {
 		t.Errorf("the volume was reclaimed with its holder: %v", err)
 	}
@@ -149,7 +149,7 @@ func TestVolumeMountReadOnlyArmGetsEROFS(t *testing.T) {
 		t.Fatalf("create volume: %v", err)
 	}
 	// Seed through the direct accessor, so the reader has something to read and no
-	// sandbox is needed to put it there (the documented invariant).
+	// sandbox is needed to put it there (the Volume subsystem).
 	if _, err := eng.Mediator.ImportVolume(ctx, vid, "seed", strings.NewReader("SEEDED")); err != nil {
 		t.Fatalf("seed volume: %v", err)
 	}
@@ -209,7 +209,7 @@ func TestVolumeMountReadOnlyArmGetsEROFS(t *testing.T) {
 }
 
 // TestVolumeMountTopologyPersistsAcrossPause pins the mount topology as
-// a BINDING (the documented invariant), so a resume re-mounts per the CURRENT table — a NEW host
+// a BINDING (resource admission), so a resume re-mounts per the CURRENT table — a NEW host
 // materialization of the SAME real volume, never a restored copy.
 func TestVolumeMountTopologyPersistsAcrossPause(t *testing.T) {
 	ctx := context.Background()
@@ -235,7 +235,7 @@ func TestVolumeMountTopologyPersistsAcrossPause(t *testing.T) {
 		t.Fatalf("pause: %v", err)
 	}
 	// Written from the HOST while the holder is paused — which is legal precisely
-	// because `paused` is not a live writer (the documented invariant), and which proves the resume reads
+	// because `paused` is not a live writer (the Volume subsystem), and which proves the resume reads
 	// the real volume rather than anything captured at pause time.
 	if _, err := eng.Mediator.ImportVolume(ctx, vid, "host-added", strings.NewReader("FROM-HOST")); err != nil {
 		t.Fatalf("direct write while the holder is paused: %v", err)
@@ -246,12 +246,12 @@ func TestVolumeMountTopologyPersistsAcrossPause(t *testing.T) {
 	// Same mount point, same volume, INCLUDING the bytes added from outside.
 	out := guestSh(t, eng, sid, "read A < /data/f; read B < /data/host-added; echo GOT:$A:$B")
 	if !strings.Contains(out, "GOT:BEFORE:FROM-HOST") {
-		t.Fatalf("after resume the guest sees %q; want its own bytes AND the host's — the topology re-materializes from the CURRENT table onto the SAME volume (the documented invariant)", out)
+		t.Fatalf("after resume the guest sees %q; want its own bytes AND the host's — the topology re-materializes from the CURRENT table onto the SAME volume (resource admission)", out)
 	}
 }
 
 // TestVolumeMountDetachReleasesTheLeaseBeforeTheTopologyChanges pins that THE TWO EFFECT TIMES ARE NOT SYNCHRONIZED — that is a design fact,
-// not a detail to fold into one value (the documented invariant).
+// not a detail to fold into one value (the control-plane API).
 func TestVolumeMountDetachReleasesTheLeaseBeforeTheTopologyChanges(t *testing.T) {
 	ctx := context.Background()
 	eng, _ := mountEngine(t)
@@ -274,7 +274,7 @@ func TestVolumeMountDetachReleasesTheLeaseBeforeTheTopologyChanges(t *testing.T)
 
 	// Detach by rebinding to an empty binding.
 	// The one PATCH verb, with a mounts-only spec: a non-nil pointer to a nil slice is
-	// "detach everything" (the documented invariant), which is what this step asks for.
+	// "detach everything" (the API error contract), which is what this step asks for.
 	var detachAll []model.Mount
 	released, err := eng.Mediator.Rebind(ctx, holder, lifecycle.RebindSpec{Mounts: &detachAll})
 	if err != nil {
@@ -291,7 +291,7 @@ func TestVolumeMountDetachReleasesTheLeaseBeforeTheTopologyChanges(t *testing.T)
 		Volumes:  []model.Mount{{Volume: vid, Path: "/data", Access: model.Exclusive}},
 	})
 	if err != nil {
-		t.Fatalf("a second sandbox could not take the released lease: %v — the lease releases when the ROW is deleted, not at the next resume (the documented invariant)", err)
+		t.Fatalf("a second sandbox could not take the released lease: %v — the lease releases when the ROW is deleted, not at the next resume (the control-plane API)", err)
 	}
 	t.Cleanup(func() { _ = eng.Mediator.Destroy(ctx, taker) })
 

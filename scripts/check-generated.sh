@@ -10,5 +10,10 @@ command -v protoc-gen-go >/dev/null || { echo "check-generated: protoc-gen-go is
 command -v protoc-gen-connect-go >/dev/null || { echo "check-generated: protoc-gen-connect-go is required" >&2; exit 2; }
 
 go test ./internal/orchestrator -run '^TestOpenAPIDocIsNotStale$'
-(cd proto && buf generate)
-git diff --exit-code -- pkg/transport/gen
+go test ./cmd/orchestrator -run '^TestOrchestratorDocIsNotStale$'
+go test ./cmd/khora -run '^TestCLIDocIsNotStale$'
+
+generated_tmp=$(mktemp -d)
+trap 'rm -rf "$generated_tmp"' EXIT
+(cd proto && buf generate -o "$generated_tmp/proto")
+diff -ru pkg/transport/gen "$generated_tmp/pkg/transport/gen"

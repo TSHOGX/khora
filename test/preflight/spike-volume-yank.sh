@@ -2,23 +2,23 @@
 # spike-volume-yank.sh — BLAST RADIUS of a mis-sweep: what happens when a
 # Volume's backing bytes are removed from under a LIVE guest?
 #
-# WHY THIS MEASUREMENT EXISTS. the documented invariant's mount table protects a mounted Volume with a
+# WHY THIS MEASUREMENT EXISTS. The mount table protects a mounted Volume with a
 # bidirectional FK RESTRICT: a volume with a live mount row cannot be deleted.
-# But `SweepOrphanVolumes` (the documented invariant) is a DIFFERENT path — it reasons from
-# ENUMERATION of backend units, not from the FK — and the documented invariant's sweep safety rule
+# But `SweepOrphanVolumes` is a DIFFERENT path — it reasons from enumeration of
+# backend units, not from the FK — and the sweep safety rule
 # exists because the obvious enumeration primitive is a loaded gun:
 # `btrfs subvolume list <dir>` returns the WHOLE FILESYSTEM (37 rows, including
 # docker, k8s and 9 OrbStack container subvolumes) no matter which path you hand
-# it. the documentation the documented invariant makes reclamation protect-on-uncertainty precisely because
+# it. Reclamation must protect on uncertainty precisely because
 # it is irreversible. So the open question is not "can a sweep be wrong" — it is
 # HOW BAD a wrong sweep is:
 #
-#   * if the sandbox DIES, a mis-sweep is a LIFECYCLE event: the documented invariant crash
+#   * if the sandbox DIES, a mis-sweep is a LIFECYCLE event: FS-first pause and resume crash
 #     semantics catch it, the control plane sees a state transition, an operator
 #     sees an event.
 #   * if the guest merely takes I/O errors, it is a DATA-PLANE event: nothing
-#     reaches the control plane at all (same shape as the measured ENOSPC in
-#     deep-dives/the relevant internals page the documented invariant), and a silent mis-sweep can destroy a customer's
+#     reaches the control plane at all (the same shape as a measured ENOSPC), and
+#     a silent mis-sweep can destroy a customer's
 #     bytes while every engine-side signal stays green.
 #
 # That difference decides how paranoid the sweep must be and what the M7
@@ -69,7 +69,7 @@ ROOTFS="$WORK/rootfs"; RUNSC_ROOT="$WORK/runsc-root"
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 TAG="spike-yank-$$"
 # Volumes MUST be on real btrfs (/var/tmp) — subvolume/qgroup mutations are the
-# whole point. Bundles/rootfs live on /tmp (native fs, the recorded design).
+# whole point. Bundles/rootfs live on /tmp (native fs, the root-required deployment).
 V1="/var/tmp/$TAG-1"   # arm 1: btrfs subvolume delete
 V2="/var/tmp/$TAG-2"   # arm 5a: rm -rf contents, subvolume survives
 V3="/var/tmp/$TAG-3"   # arm 5b: unlink one file the guest holds open
@@ -93,7 +93,7 @@ cleanup() {
     sudo btrfs subvolume delete "$v" 2>/dev/null
   done
   # squota leaks a qgroup row per storage unit that outlived a snapshot or a
-  # racing delete (deep-dives/the relevant internals page the documented invariant) — sweep OUR ids explicitly.
+  # racing delete — sweep OUR ids explicitly.
   sync; sudo btrfs subvolume sync /var/tmp >/dev/null 2>&1
   while read -r qid; do
     [ -n "$qid" ] && sudo btrfs qgroup destroy "0/$qid" /var/tmp 2>/dev/null
@@ -374,13 +374,13 @@ CGO_ENABLED=0 GO111MODULE=off go build -o "$ROOTFS/usr/bin/yankprobe" "$WORK/pro
 chmod 0755 "$ROOTFS/usr/bin/yankprobe"
 mkdir -p "$ROOTFS/vol"
 
-echo "== create five btrfs subvolumes, seeded (a Volume = a subvolume, the documented invariant) =="
+echo "== create five btrfs subvolumes, seeded (a Volume = a subvolume, the Volume subsystem) =="
 for v in $V1 $V2 $V3 $V4 $V5; do
   sudo btrfs subvolume create "$v" >/dev/null
   printf SEEDED | sudo tee "$v/seed" >/dev/null
   sudo chmod 0777 "$v"
   # Record the subvol id so cleanup can destroy a leaked squota row BY ID even
-  # after the subvolume path is gone (deep-dives/the relevant internals page the documented invariant).
+  # after the subvolume path is gone.
   sudo btrfs subvolume show "$v" | awk '/Subvolume ID:/{print $3}' >> "$QIDS"
 done
 sudo btrfs qgroup limit "$CAP_BYTE" "$V4"   # arm (c) needs a cap to remove
@@ -595,10 +595,10 @@ hostCheck "$C"
 
 # ============================ ARM 5c: qgroup row only ==========================
 # A sweep that reclaims the QUOTA ROW but not the subvolume — plausible because
-# deep-dives/the relevant internals page the documented invariant found squota LEAKS a qgroup row per snapshotted unit,
+# Prior reclamation measurements found that squota leaks a qgroup row per snapshotted unit,
 # so the sweep will have a "destroy stale qgroup rows" duty and could mis-target
 # a live one. The question is whether that silently UNCAPS a live volume: a
-# capacity-cap breach is a the documented invariant accounting failure, not merely data loss.
+# capacity-cap breach is a resource admission accounting failure, not merely data loss.
 echo
 echo "=============== ARM 5c: destroy the QGROUP ROW only (subvolume intact) ========="
 V4ID="$(sudo btrfs subvolume show "$V4" | awk '/Subvolume ID:/{print $3}')"
@@ -664,7 +664,7 @@ hostCheck "$E"
 # permanent lifecycle failure requiring operator surgery on the mount table. If
 # it silently creates an empty dir, the loss is data-only.
 # (Note: this measures the RELAUNCH shape — a cold-start replay of the mount
-# config, which is exactly what the documented invariant resume does. It is not runsc C/R.)
+# config, which is exactly what the transition contract resume does. It is not runsc C/R.)
 echo
 echo "=============== ARM 6: relaunch with the bind SOURCE now ABSENT ================"
 SHORT_ARGS="[\"/usr/bin/yankprobe\",\"loop\",\"/vol\",\"100\",\"2\"]"

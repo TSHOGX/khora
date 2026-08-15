@@ -24,30 +24,30 @@ import (
 	"github.com/TSHOGX/khora/pkg/transport/gen/khora/transport/v1/transportv1connect"
 )
 
-// HTTPHandler exposes the minimal the documented invariant sandbox-centric API — ID-addressed, no
-// host paths / placement exposed (the documented invariant): sandbox lifecycle
+// HTTPHandler exposes the sandbox-centric control-plane API: ID-addressed, with no
+// host paths / placement exposed (the API error contract): sandbox lifecycle
 // (create/get/pause/resume/destroy/list) + process.Start + fs read/write, all
 // proxied by sandbox ID (the orchestrator resolves the current endpoint
 // internally via the mediator, so placement never leaves the engine).
 //
 // A deliberately small net/http router (no framework). The outer-edge protocol
-// split is settled (transport the documented invariant): the CONTROL plane (sandbox lifecycle) is
+// split is settled (the outer-edge transport split): the CONTROL plane (sandbox lifecycle) is
 // REST/JSON here; the process/fs DATA plane is Connect-RPC (the SAME
-// transport.proto as the inner edge, re-proxied by sandbox_id — the documented invariant), and is
-// Connect-only, no REST/NDJSON facade (the documented invariant). The two mount on one mux: Connect
+// transport.proto as the inner edge, re-proxied by sandbox ID), with no REST or
+// NDJSON facade. The two surfaces mount on one mux: Connect
 // services own their /khora.transport.v1.*/ paths, control-plane REST owns
 // /v1/... .
 func (e *Engine) HTTPHandler() http.Handler {
 	mux := http.NewServeMux()
 
-	// --- data plane: Connect-RPC re-proxy (transport the documented invariant) ---
+	// --- data plane: Connect-RPC re-proxy (the outer-edge transport split) ---
 	mux.Handle(transportv1connect.NewProcessServiceHandler(&processProxy{e: e}))
 	mux.Handle(transportv1connect.NewFsServiceHandler(&fsProxy{e: e}))
 
 	// --- operational surface: /healthz, /readyz, /metrics (health.go) ---
 	e.registerHealthRoutes(mux)
 
-	// --- control plane: the documented invariant REST/JSON ---
+	// --- control plane: the control-plane API REST/JSON ---
 	// POST /v1/sandboxes ; GET /v1/sandboxes
 	mux.HandleFunc("/v1/sandboxes", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
@@ -63,7 +63,7 @@ func (e *Engine) HTTPHandler() http.Handler {
 	// /v1/sandboxes/{id}[/pause|/resume]  (data-plane verbs are Connect, above)
 	mux.HandleFunc("/v1/sandboxes/", e.handleSandboxSub)
 
-	// GET /v1/events?after=&limit= — the the documented invariant event-stream replay (pull only).
+	// GET /v1/events?after=&limit= — the transactional outbox event-stream replay (pull only).
 	mux.HandleFunc("/v1/events", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -72,7 +72,7 @@ func (e *Engine) HTTPHandler() http.Handler {
 		e.handleEvents(w, r)
 	})
 
-	// --- Template lifecycle: the documented invariant REST/JSON (immutable object, the documented invariant/the documented invariant) ---
+	// --- Template lifecycle: the control-plane API REST/JSON (immutable object, the Template and Overlay model/health and reclamation) ---
 	// GET /v1/templates (list) ; POST /v1/templates (Promote).
 	mux.HandleFunc("/v1/templates", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
@@ -84,15 +84,15 @@ func (e *Engine) HTTPHandler() http.Handler {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
 	})
-	// DELETE /v1/templates/{id} (referenced → 409 template in use, the documented invariant).
+	// DELETE /v1/templates/{id} (referenced → 409 template in use, health and reclamation).
 	mux.HandleFunc("/v1/templates/", e.handleTemplateSub)
 
-	// --- Volume lifecycle: the documented invariant REST/JSON (the documented invariant, decoupled from every sandbox) ---
+	// --- Volume lifecycle: the control-plane API REST/JSON (the Volume subsystem, decoupled from every sandbox) ---
 	// create/list/inspect/patch/delete + the two direct content endpoints, which
 	// need no sandbox at all (see volumes.go).
 	e.registerVolumeRoutes(mux)
 
-	// h2c so Connect server-streams work over cleartext HTTP/2 (the documented invariant).
+	// h2c so Connect server-streams work over cleartext HTTP/2 (the transport contract).
 	h := h2c.NewHandler(mux, &http2.Server{})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !e.httpHandlers.enter() {
@@ -106,34 +106,34 @@ func (e *Engine) HTTPHandler() http.Handler {
 
 type createReq struct {
 	TemplateID string `json:"template_id"`
-	// IdleTimeout / Retention are the optional TTL Binding inputs (the documented invariant
+	// IdleTimeout / Retention are the optional TTL Binding inputs (the control-plane API
 	// idle_timeout?/retention?). Accepted as Go duration strings ("30m", "24h")
 	// so the unit is explicit on the wire; omitted/"" → engine-wide default
 	// (materialized by the mediator at create).
 	IdleTimeout string `json:"idle_timeout"`
 	Retention   string `json:"retention"`
-	// Resource-limit Binding inputs (the documented invariant / the documented invariant). Omitted / 0 = unlimited on that
+	// Resource-limit Binding inputs (the control-plane API / resource admission). Omitted / 0 = unlimited on that
 	// axis. Three separate fields, never one blended "size" — the axes and why they
 	// are not interchangeable are documented on model.Limits. No io_* field: the disk
-	// I/O rate axis joins in the same shape once it has a consumer (the documented invariant / the documented invariant).
+	// I/O rate axis joins in the same shape once it has a consumer (resource admission / the runtime provider contract).
 	CPUMillis  int64 `json:"cpu_millis"`
 	MemoryByte int64 `json:"memory_byte"`
 	DiskByte   int64 `json:"disk_byte"`
-	// Volumes is the the documented invariant `volumes?` binding: the COMPLETE set of volume mounts this
+	// Volumes is the control-plane API `volumes?` binding: the COMPLETE set of volume mounts this
 	// sandbox is created with. `access` is given HERE and not on the volume record,
-	// because it is a property of the MOUNT (the documented invariant).
+	// because it is a property of the MOUNT (the Volume subsystem).
 	Volumes []volumeBindingItem `json:"volumes"`
-	// Network is the the documented invariant `network?` declaration (the documented invariant). A POINTER because omitting
+	// Network is the control-plane API `network?` declaration (the network declaration). A POINTER because omitting
 	// the whole object is LEGAL — it normalizes to an explicit {deny, [], [], []} at
 	// the write point — while giving the object and leaving out `egress.default` is
-	// the documented invariant's first 400 class. The two share a code path in most implementations, and
+	// ClassDefaultMissing. The two share a code path in most implementations, and
 	// whichever is handled first eats the other, so the distinction is carried rather
 	// than collapsed.
 	Network *networkWire `json:"network"`
 }
 
 // volumeBindingItem is one entry of a `volumes` binding, on create and on PATCH
-// (the documented invariant). One type for both, because the documented invariant makes PATCH swap a whole binding for a whole
+// (the control-plane API). One type for both, because the API error contract makes PATCH swap a whole binding for a whole
 // binding — the two carry the identical shape, and a second type would let them drift.
 type volumeBindingItem struct {
 	VolumeID string `json:"volume_id"`
@@ -174,7 +174,7 @@ func parseVolumeBinding(items []volumeBindingItem) ([]model.Mount, error) {
 	return out, nil
 }
 
-// parseTTL is THE spelling of a wire TTL for both write points — create and PATCH (the documented invariant
+// parseTTL is THE spelling of a wire TTL for both write points — create and PATCH (resource admission
 // idle_timeout / retention). One function because the defect it closes is the two write points
 // disagreeing: create parsed without a sign check while PATCH refused a negative, so the SAME
 // field was legal on one and a 400 on the other.
@@ -183,7 +183,7 @@ func parseVolumeBinding(items []volumeBindingItem) ([]model.Mount, error) {
 // non-positive TTL as an OPT-OUT (the reaper returns early on `Retention <= 0`, idle
 // classification fires only on `IdleTimeout > 0`), so `-5m` produces NEVER EVICT / NEVER
 // IDLE-PAUSE with nothing reporting that the value was not honored. `0` remains legal —
-// it is the DOCUMENTED opt-out spelling (the documented invariant `retention: 0` = never evict).
+// it is the DOCUMENTED opt-out spelling (the control-plane API `retention: 0` = never evict).
 //
 // Returns a POINTER because both call sites need one — create's CreateSpec and PATCH's
 // store.Binding both distinguish "not given" from "given".
@@ -194,7 +194,7 @@ func parseTTL(field, raw string) (*time.Duration, error) {
 	}
 	if d < 0 {
 		// Through the funnel even though `field` is one of two engine-authored literals:
-		// the the documented invariant guard cannot see that, and an exemption for "this one is obviously
+		// the API error contract guard cannot see that, and an exemption for "this one is obviously
 		// fine" is how the rule stops being structural.
 		return nil, fmt.Errorf("%s must be non-negative (0 = no deadline; a negative value would read as never-evict / never-idle-pause at every consumer)", field)
 	}
@@ -222,7 +222,7 @@ func (e *Engine) handleCreate(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	// The declaration is parsed and VALIDATED before the create verb runs, so the documented invariant's
+	// The declaration is parsed and VALIDATED before the create verb runs, so the API error contract's
 	// "validation precedes the admission gate" holds: an invalid declaration is
 	// refused before any byte is touched or any budget recorded, and 400 and 507 are
 	// therefore never both true.
@@ -268,7 +268,7 @@ func (e *Engine) handleCreate(w http.ResponseWriter, r *http.Request) {
 	sid, err := e.Mediator.Create(r.Context(), spec)
 	if err != nil {
 		// route through statusFor so a bad template_id (store.ErrTemplateNotFound,
-		// the the documented invariant reference side) surfaces as 404, not a raw 500.
+		// the health and reclamation reference side) surfaces as 404, not a raw 500.
 		statusFor(w, err)
 		return
 	}
@@ -301,8 +301,8 @@ type promoteResp struct {
 	TemplateID string `json:"template_id"`
 }
 
-// handlePromote is POST /v1/templates {from_sandbox_id} → {template_id} (the documented invariant
-// Promote): freeze the sandbox's current Overlay into a new Template (the documented invariant).
+// handlePromote is POST /v1/templates {from_sandbox_id} → {template_id} (the control-plane API
+// Promote): freeze the sandbox's current Overlay into a new Template (the Template and Overlay model).
 func (e *Engine) handlePromote(w http.ResponseWriter, r *http.Request) {
 	var req promoteReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
@@ -338,7 +338,7 @@ func (e *Engine) handleListTemplates(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-// templateResp is one entry of GET /v1/templates (the documented invariant). A NAMED type rather than an
+// templateResp is one entry of GET /v1/templates (the control-plane API). A NAMED type rather than an
 // inline map, because the generated OpenAPI document derives this operation's schema by
 // reflection (openapi.go) and a map is invisible to that.
 type templateResp struct {
@@ -391,15 +391,15 @@ func (e *Engine) handleSandboxSub(w http.ResponseWriter, r *http.Request) {
 		e.doVerb(w, r, id, e.Mediator.Pause)
 	case sub == "resume" && r.Method == http.MethodPost:
 		e.doVerb(w, r, id, e.Mediator.Resume)
-	// The large-file bypass (the documented invariant fs / transport the documented invariant). REST rather than
+	// The large-file bypass (the transport data plane fs / fs transport). REST rather than
 	// Connect-RPC because its whole purpose is to STREAM bytes: a file must not
 	// become one protobuf message, nor sit in memory at either end.
 	case sub == "files" && r.Method == http.MethodGet:
 		e.handleFileDownload(w, r, id)
 	case sub == "files" && (r.Method == http.MethodPut || r.Method == http.MethodPost):
 		e.handleFileUpload(w, r, id)
-	// the documented invariant's Network block. `network` is GET-only and a wrong method there is a 405
-	// by the the documented invariant general rule, NOT a 404 landing in the default arm below: the
+	// the control-plane API's Network block. `network` is GET-only and a wrong method there is a 405
+	// by the API error contract general rule, NOT a 404 landing in the default arm below: the
 	// collection exists, the method does not apply to it.
 	case sub == "network" && r.Method == http.MethodGet:
 		e.handleNetworkGet(w, r, id)
@@ -413,19 +413,19 @@ func (e *Engine) handleSandboxSub(w http.ResponseWriter, r *http.Request) {
 		e.handleActivity(w, r, id)
 	case sub == "activity":
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-	// The same the documented invariant general rule for the older routes. They landed in `default` as 404,
-	// which contradicts the documented invariant ("a wrong method on ANY collection/object route → 405")
+	// The same the API error contract general rule for the older routes. They landed in `default` as 404,
+	// which contradicts the API error contract ("a wrong method on ANY collection/object route → 405")
 	// and was inconsistent with the two arms above for no reason anyone chose: the
 	// route exists, the method does not apply to it.
 	case sub == "files", sub == "pause", sub == "resume":
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	default:
-		// process/fs data plane is Connect-RPC (transport the documented invariant), not REST here.
+		// process/fs data plane is Connect-RPC (the outer-edge transport split), not REST here.
 		http.Error(w, "not found", http.StatusNotFound)
 	}
 }
 
-// patchReq is the the documented invariant PATCH body — rewrite a sandbox's Binding (the documented invariant). Every
+// patchReq is the control-plane API PATCH body — rewrite a sandbox's Binding (resource admission). Every
 // field is a POINTER so "omitted" is distinguishable from "set to zero", which
 // matters because zero is itself meaningful on these axes (`0 = unlimited` for a
 // cap, `retention: 0` = never evict). A value type could not express "leave this
@@ -436,13 +436,13 @@ type patchReq struct {
 	DiskByte    *int64  `json:"disk_byte"`
 	IdleTimeout *string `json:"idle_timeout"`
 	Retention   *string `json:"retention"`
-	// Volumes is the mount table's COMPLETE binding (the documented invariant) — an empty array means
+	// Volumes is the mount table's COMPLETE binding (the control-plane API) — an empty array means
 	// DETACH EVERYTHING, which is why the pointer's "omitted vs given as empty"
 	// distinction carries weight here. On PATCH rather than separate attach/detach
-	// endpoints because the documented invariant defines PATCH as THE rebinding point: a sandbox holds one
+	// endpoints because the API error contract defines PATCH as THE rebinding point: a sandbox holds one
 	// complete binding at all times, and PATCH swaps one whole binding for another.
 	Volumes *[]volumeBindingItem `json:"volumes"`
-	// Network is the the documented invariant declaration, swapped WHOLE for WHOLE (the documented invariant — no field-level
+	// Network is the network declaration, swapped WHOLE for WHOLE (the API error contract — no field-level
 	// merge, no pending value). The pointer carries real weight: the zero declaration is
 	// not "no change", it is `{deny, [], [], []}` — the most restrictive there is — so a
 	// value type would make every unrelated PATCH silently reset the sandbox to
@@ -453,7 +453,7 @@ type patchReq struct {
 	// on `running` would leave the record and the live rule set disagreeing indefinitely.
 	//
 	// PUBLISH DOES NOT COME THROUGH HERE — it has its own hot-add endpoint — but it CAN
-	// be removed through here, since there is no un-publish endpoint. the documented invariant makes the
+	// be removed through here, since there is no un-publish endpoint. the control-plane API makes the
 	// read-modify-write REQUIRED rather than advisory for that reason: a binding built
 	// from a stale GET silently drops a publish added in between, and the reverse
 	// (writing back an already-removed publish) reopens an inbound port.
@@ -465,10 +465,10 @@ type patchResp struct {
 	State     string `json:"state"`
 	// AppliesAt tells the caller WHEN the change takes effect rather than leaving them to
 	// infer it: "now" for TTL fields (the reaper re-reads the record every sweep) vs
-	// "next-resume" for resource caps (the providers materialize them at placement, the documented invariant).
+	// "next-resume" for resource caps (the providers materialize them at placement, resource admission).
 	AppliesAt string `json:"applies_at"`
 	// LeaseReleased reports that a detach took effect IMMEDIATELY, which `applies_at`
-	// alone cannot express (the documented invariant).
+	// alone cannot express (the control-plane API).
 	//
 	// A mount change SPLITS INTO TWO EFFECT TIMES: the guest TOPOLOGY changes at
 	// next-resume (runsc takes mounts at startup and does not hot-plug), while a DETACH
@@ -522,8 +522,8 @@ func (e *Engine) handlePatch(w http.ResponseWriter, r *http.Request, id model.Sa
 		mounts = &binding
 	}
 
-	// DECODED here, VALIDATED below the seam — the the documented invariant ownership line: the decode is a
-	// wire concern (this package owns the JSON shape and its 400s), while the documented invariant's
+	// DECODED here, VALIDATED below the seam — the lifecycle ownership line: the decode is a
+	// wire concern (this package owns the JSON shape and its 400s), while the API error contract's
 	// declaration classes are a WRITE-POINT obligation the mediator applies for all three
 	// write points — create, PATCH, publish — so a validation living in one caller is not
 	// a validation the next caller lacks. Rebind runs it ahead of even its state gate, so
@@ -537,7 +537,7 @@ func (e *Engine) handlePatch(w http.ResponseWriter, r *http.Request, id model.Sa
 		b.Network = &got
 	}
 
-	// ONE mediator call for the WHOLE request. the documented invariant requires PATCH to hold this
+	// ONE mediator call for the WHOLE request. per-sandbox transition serialization requires PATCH to hold this
 	// sandbox's transition lock for its whole duration, which three separately-locking
 	// calls cannot do: between them a resume or an evict fits entirely, so
 	// `{retention, network}` on a `paused` sandbox committed the retention and then
@@ -561,7 +561,7 @@ func (e *Engine) handlePatch(w http.ResponseWriter, r *http.Request, id model.Sa
 	appliesAt := "now"
 	if b.CPUMillis != nil || b.MemoryByte != nil || b.DiskByte != nil || req.Volumes != nil || req.Network != nil {
 		// A mount change materializes at the next placement, exactly like a resource cap
-		// — runsc takes mounts at startup, so there is no hot-plug path (the documented invariant).
+		// — runsc takes mounts at startup, so there is no hot-plug path (the Volume subsystem).
 		appliesAt = "next-resume"
 	}
 	writeJSON(w, http.StatusOK, patchResp{
@@ -570,7 +570,7 @@ func (e *Engine) handlePatch(w http.ResponseWriter, r *http.Request, id model.Sa
 	})
 }
 
-// Event-stream replay limits (the documented invariant GET /v1/events).
+// Event-stream replay limits (the control-plane API GET /v1/events).
 const (
 	// eventsDefaultLimit is the page size for a request that omits `limit`.
 	eventsDefaultLimit = 100
@@ -582,7 +582,7 @@ const (
 	// retained backlog (plus a same-sized channel) while holding a lock.
 	//
 	// The direction of the argument runs opposite to the intuitive one: because we never
-	// trim (the documented invariant), the retained window is ALL history, so `after=0` must page through
+	// trim (the transactional outbox), the retained window is ALL history, so `after=0` must page through
 	// everything that ever happened. Not trimming AGGRAVATES the unbounded-backlog hazard
 	// rather than relieving it.
 	eventsMaxLimit = 1000
@@ -604,7 +604,7 @@ const (
 	// not advance) and is why this is a constant rather than a knob.
 	eventsMaxWait = 20 * time.Second
 
-	// eventsWaitPoll is the re-read cadence while waiting. the documented invariant settles the mechanism —
+	// eventsWaitPoll is the re-read cadence while waiting. the transactional outbox settles the mechanism —
 	// "a presentation-layer adapter that server-polls the same pull query", which holds no
 	// state and shares the same `seq` — so this deliberately does NOT add an
 	// append-notification channel to the store contract: that would be per-subscriber state
@@ -623,7 +623,7 @@ type eventItem struct {
 	SandboxID string `json:"sandbox_id"`
 	Kind      string `json:"kind"`
 	State     string `json:"state"`
-	// Cause is WHY, present only on a Kind reachable by more than one route (the documented invariant),
+	// Cause is WHY, present only on a Kind reachable by more than one route (the transactional outbox),
 	// omitted otherwise. Today: `destroyed` carries `requested` (the Destroy verb) or
 	// `retention-expired` (the reaper's evict of a paused sandbox past `retention`).
 	//
@@ -640,13 +640,13 @@ type eventsResp struct {
 	// Earliest / Latest bound the retained window (0/0 when the outbox is empty). They
 	// are what makes the 410 actionable: a caller whose cursor fell below the window
 	// restarts from `earliest` rather than guessing. Reachable only when a retention
-	// window is configured (the documented invariant) — with trimming off `earliest` never advances.
+	// window is configured (the transactional outbox) — with trimming off `earliest` never advances.
 	Earliest int64 `json:"earliest"`
 	Latest   int64 `json:"latest"`
 }
 
-// readEvents is the the documented invariant / the documented invariant replay read plus the optional `wait` hold; wait == 0 is
-// one read. PULL ONLY — the engine tracks no subscribers (the documented invariant), so there is no state here
+// readEvents is the control-plane API / the transactional outbox replay read plus the optional `wait` hold; wait == 0 is
+// one read. PULL ONLY — the engine tracks no subscribers (the extension boundary), so there is no state here
 // to leak or clean up, and the stream is engine-level (neither per-sandbox nor per-pid), so
 // the data plane has nowhere to address it from. The wait loop re-runs THE SAME query
 // rather than waiting on a notification (see eventsWaitPoll).
@@ -756,9 +756,9 @@ func (e *Engine) handleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	// 410: the cursor is BELOW the retained window, so the events between it and
 	// `earliest` are gone and cannot be served. Reachable only once trimming is
-	// configured (the documented invariant).
+	// configured (the transactional outbox).
 	//
-	// A REFUSAL rather than a short page: the documented invariant's "losing one loses an invoice" means a
+	// A REFUSAL rather than a short page: the transactional outbox's "losing one loses an invoice" means a
 	// silently-truncated page would let a subscriber conclude it is caught up while having
 	// skipped events. {earliest, latest} lets the caller restart deliberately at the
 	// window's real lower bound.
@@ -796,21 +796,21 @@ func (e *Engine) handleEvents(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-// sandboxResp is the the documented invariant read shape for GET /v1/sandboxes/{id} and each element
+// sandboxResp is the control-plane API read shape for GET /v1/sandboxes/{id} and each element
 // of GET /v1/sandboxes.
 //
 // ONE TYPE, TWO SURFACES THAT DIFFER DELIBERATELY: the single read populates UsedByte, the
 // LIST leaves it nil so it is omitted — usage costs a backend round trip the list would pay
-// once per sandbox (the documented invariant, the same rule the volume list follows).
+// once per sandbox (the control-plane API, the same rule the volume list follows).
 //
 // DeathCause shape:
 //
-//   - On the READ PATH because the documented invariant puts the recovery decision on the caller:
+//   - On the READ PATH because health and reclamation puts the recovery decision on the caller:
 //     dead-recoverable → resume, resource-terminated → do NOT. Otherwise it is reachable only
 //     as the text of a 409, forcing the caller to attempt the wrong thing to learn it should
 //     not.
-//   - `death_cause`, matching the model field and store column exactly (the documented invariant). Values are the
-//     abstract the documented invariant enum, never an errno or cgroup path, which would not survive a remote
+//   - `death_cause`, matching the model field and store column exactly (the engine vocabulary boundary). Values are the
+//     abstract health and reclamation enum, never an errno or cgroup path, which would not survive a remote
 //     provider.
 //   - OMITTED WHEN EMPTY: CauseNone is the ABSENCE of a death, so `"death_cause": ""` would
 //     put a falsy-but-present field on the healthy response and invite `if (resp.death_cause)`
@@ -820,12 +820,12 @@ func (e *Engine) handleEvents(w http.ResponseWriter, r *http.Request) {
 type sandboxResp struct {
 	SandboxID string `json:"sandbox_id"`
 	State     string `json:"state"`
-	// DeathCause is why the isolation unit was last found dead (the documented invariant). Absent =
+	// DeathCause is why the isolation unit was last found dead (health and reclamation). Absent =
 	// never observed dead. See the type doc for why absent rather than "".
 	DeathCause string `json:"death_cause,omitempty"`
 	// UsedByte is what this sandbox's Overlay unit consumes (upper + work) as the rootfs
 	// provider's backend reports it. Absent when it could not be read, never reported as
-	// 0 — the volume side's rule word for word (the documented invariant), because it answers the same
+	// 0 — the volume side's rule word for word (the control-plane API), because it answers the same
 	// question for the same consumer: `PATCH disk_byte` refuses a cap that is not
 	// STRICTLY greater than this, and the only other route to the number is parsing it
 	// out of that 400's message text.
@@ -834,7 +834,7 @@ type sandboxResp struct {
 	// the collision between "empty" and "unreadable" is the common case here.
 	//
 	// Present while `paused`, unlike HostEndpoint: the unit is readable AT REST, and
-	// `paused` is the only state a disk cap may be edited from (the documented invariant) — omitting it there
+	// `paused` is the only state a disk cap may be edited from (resource admission) — omitting it there
 	// would omit it from the one state its consumer works in.
 	UsedByte *int64 `json:"used_byte,omitempty"`
 }
@@ -863,7 +863,7 @@ func (e *Engine) doVerb(w http.ResponseWriter, r *http.Request, id model.Sandbox
 	writeJSON(w, http.StatusOK, verbResp{SandboxID: string(id), State: string(stt)})
 }
 
-// verbResp is what pause and resume answer with (the documented invariant). Named for the same reason as
+// verbResp is what pause and resume answer with (the control-plane API). Named for the same reason as
 // templateResp: an inline map cannot be reflected into the published contract.
 type verbResp struct {
 	SandboxID string `json:"sandbox_id"`
@@ -872,7 +872,7 @@ type verbResp struct {
 	State string `json:"state"`
 }
 
-// activityResp is the documented invariant's POST /v1/sandboxes/{id}/activity body. One field, and it
+// activityResp is the control-plane API's POST /v1/sandboxes/{id}/activity body. One field, and it
 // is a READING rather than an acknowledgement: the idle duration measured in the
 // guest AFTER the stamp landed, so a caller gets positive confirmation the clock
 // moved instead of an opaque 204.
@@ -880,12 +880,12 @@ type activityResp struct {
 	IdleMillis int64 `json:"idle_millis"`
 }
 
-// handleActivity records one activity now (the documented invariant). It exists because the only other
+// handleActivity records one activity now (the control-plane API). It exists because the only other
 // repeatable way to move the clock is writing to a process's stdin, which couples
 // "keep this sandbox from being swept" to whatever protocol the guest program
-// speaks (reaper-health the documented invariant, "An external caller may stamp it explicitly").
+// speaks (the activity signal, "An external caller may stamp it explicitly").
 //
-// THE STAMP HAPPENS IN THE GUEST, never here (reaper-health the documented invariant) — a host-side timestamp
+// THE STAMP HAPPENS IN THE GUEST, never here (guest-side activity measurement) — a host-side timestamp
 // would be a second, differently-clocked source for the one signal the classifier reads.
 // Three consequences, all CONTRACT:
 //
@@ -895,7 +895,7 @@ type activityResp struct {
 //   - 503 when L2 is unreachable, exactly like any probe of a transport-down
 //     sandbox. A caller cannot hold a sandbox looking active while the very
 //     channel that would prove it is dead.
-//   - no drain barrier (the documented invariant). A stamp truncates nothing, and gating it on a
+//   - no drain barrier (FS-first pause and resume). A stamp truncates nothing, and gating it on a
 //     pause-in-progress would only turn a 409-or-nothing answer into a slower one:
 //     pause is preemptive, so the freeze does not wait for a claim of activity.
 func (e *Engine) handleActivity(w http.ResponseWriter, r *http.Request, id model.SandboxID) {
@@ -908,8 +908,8 @@ func (e *Engine) handleActivity(w http.ResponseWriter, r *http.Request, id model
 	if stt != model.Running {
 		// Through the funnel rather than http.Error, because the message NAMES THE STATE
 		// so the caller knows whether to resume or give up — and a composed message is
-		// exactly what the documented invariant requires to be sanitized, even when (as here) the only
-		// interpolated value is one of four the documented invariant spellings.
+		// exactly what the API error contract requires to be sanitized, even when (as here) the only
+		// interpolated value is one of four the lifecycle state machine spellings.
 		writeErr(w, http.StatusConflict,
 			fmt.Errorf("sandbox is not running (state %s); activity can only be recorded on a running sandbox", stt))
 		return
@@ -945,7 +945,7 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-// --- the control plane's error edge (the documented invariant) ------------------------------------
+// --- the control plane's error edge (the API error contract) ------------------------------------
 //
 // THREE FUNCTIONS: `statusCodeFor` decides WHICH code, `sanitizeErr` decides WHAT TEXT
 // the caller may see, and `writeErr` is the ONLY place in the control plane where an
@@ -954,12 +954,12 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 // The alternative shape — `http.Error(w, err.Error(), code)` in every arm — leaks by
 // construction: the backend errors arriving here interpolate ABSOLUTE HOST PATHS
 // (`btrfs: create subvolume /srv/state/volumes/vol_x: …`), so a failing
-// `POST /v1/volumes` would hand the caller the engine's storage layout. the documented invariant admits
+// `POST /v1/volumes` would hand the caller the engine's storage layout. the API error contract admits
 // opaque IDs on the wire and NOTHING about host paths or placement.
 //
 // Same move the DATA plane already made (dataplane.go proxyErr): log the real cause
 // engine-side, hand the caller a placement-free message. The control plane cannot copy
-// proxyErr's ONE constant message, because the the documented invariant verdicts must stay DISTINGUISHABLE —
+// proxyErr's ONE constant message, because the Volume subsystem verdicts must stay DISTINGUISHABLE —
 // a 409 naming the wrong object sends the caller to the wrong remedy — so it redacts
 // rather than replaces.
 
@@ -989,8 +989,8 @@ func writeErr(w http.ResponseWriter, code int, err error, echo ...string) {
 const redacted = "[redacted]"
 
 // placementShaped matches an IPv4 address with an optional port — the inner
-// transport endpoint's shape (a netns veth IP, the documented invariant / the documented invariant). the documented invariant bars placement
-// from the wire on the same footing as host paths, so the funnel strips both.
+// transport endpoint's shape: a netns veth IP. Placement is as private as a host
+// path, so the error funnel strips both.
 var placementShaped = regexp.MustCompile(`^\d{1,3}(\.\d{1,3}){3}(:\d+)?$`)
 
 // sanitizeErr renders err for the wire with host-shaped detail removed.
@@ -1001,7 +1001,7 @@ var placementShaped = regexp.MustCompile(`^\d{1,3}(\.\d{1,3}){3}(:\d+)?$`)
 // value this request itself carried in (the `?path=` of a files download, say).
 // Echoing a caller's own parameter back tells them nothing they did not type; every
 // other path-shaped token was authored somewhere below the API and is exactly the
-// class the documented invariant excludes.
+// class the API error contract excludes.
 //
 // SENTINEL MEANING SURVIVES INTACT, which is why redaction beats replacement here:
 // every sentinel's own text ("store: volume in use by a mount", "lifecycle: volume
@@ -1027,8 +1027,8 @@ func sanitizeErr(err error, echo ...string) string {
 	return strings.Join(fields, " ")
 }
 
-// wireIDPrefixes are the object-ID prefixes the documented invariant ADMITS on the wire: sandbox,
-// template and volume. Overlay (`ov_`) is deliberately absent — the documented invariant keeps the
+// wireIDPrefixes are the object-ID prefixes the API error contract ADMITS on the wire: sandbox,
+// template and volume. Overlay (`ov_`) is deliberately absent — the ID-addressed Overlay model keeps the
 // Overlay artifact ID-addressed INTERNALLY, and a caller can act on neither the ID
 // nor its location, so it is redacted with the rest of the path.
 var wireIDPrefixes = []string{"vol_", "sbx_", "tmpl_"}
@@ -1040,7 +1040,7 @@ var wireIDPrefixes = []string{"vol_", "sbx_", "tmpl_"}
 // id>)`, so the ID is very often present in the error ONLY as that path's last segment —
 // `btrfs: set quota limit 4096 on /srv/volumes/vol_x: …` names the volume nowhere else.
 // Redacting the whole token there produces a 409/500 saying a cap write failed on
-// SOMETHING, which is the "wrong remedy" failure the documented invariant's per-object sentinels prevent.
+// SOMETHING, which is the "wrong remedy" failure the API error contract's per-object sentinels prevent.
 // Keeping the last segment discloses nothing: the ID is the wire identity the caller
 // supplied in the URL, and the withheld prefix is what carried the host location.
 func redact(tok string) string {
@@ -1092,15 +1092,15 @@ func trimPunct(f string) (lead, tok, trail string) {
 	return f[:i], f[i:j], f[j:]
 }
 
-// statusCodeFor is the the documented invariant verdict → status mapping, and NOTHING ELSE: it writes
+// statusCodeFor is the API error contract verdict → status mapping, and NOTHING ELSE: it writes
 // no response, so it cannot smuggle a body past the funnel.
 func statusCodeFor(err error) int {
-	// The the documented invariant Volume verdicts first: they are 400s that would otherwise be caught by
+	// The Volume subsystem verdicts first: they are 400s that would otherwise be caught by
 	// a broader arm below and reported as something the caller could retry.
 	if code, ok := volumeStatus(err); ok {
 		return code
 	}
-	// the documented invariant's declaration refusals, likewise ahead of the broader arms: every one is a
+	// the API error contract's declaration refusals, likewise ahead of the broader arms: every one is a
 	// property of the request that no retry can change, so a 409 or 507 here would
 	// send the caller to wait for something that will never happen.
 	if code, ok := networkStatus(err); ok {
@@ -1108,38 +1108,38 @@ func statusCodeFor(err error) int {
 	}
 	switch {
 	case errors.Is(err, lifecycle.ErrCapRequired):
-		// the documented invariant: the node meters this axis, so a cap is required. 400, NOT 507 —
+		// resource admission: the node meters this axis, so a cap is required. 400, NOT 507 —
 		// nothing is full; the request is invalid for this engine's configuration.
 		// Checked before ErrInsufficientCapacity below because the two are distinct
 		// verdicts and conflating them would tell the caller to wait for capacity
 		// that is not the problem.
 		return http.StatusBadRequest
 	case errors.Is(err, lifecycle.ErrUncappedDiskNotCappable):
-		// the documented invariant `0 → N` on the disk axis: the request is well-formed and the node may have
+		// resource admission `0 → N` on the disk axis: the request is well-formed and the node may have
 		// plenty of room, but the promise is UNMATERIALIZABLE — an uncapped sandbox's Overlay
-		// unit carries no quota row, so the cap could never be enforced and the documented invariant would refuse
+		// unit carries no quota row, so the cap could never be enforced and the Rootfs subsystem would refuse
 		// every future placement. 400, NOT 507 (nothing is full) and NOT 409 (the remedy is a
 		// new sandbox, not a retry).
 		return http.StatusBadRequest
 	case errors.Is(err, lifecycle.ErrLineageTooDeep):
-		// the documented invariant: the Template's lower stack is deeper than the rootfs provider can mount
-		// (rootfs-overlay the documented invariant ⑩). 400 — the remedy is a shallower parent, and lineage is
+		// the Rootfs subsystem: the Template's lower stack is deeper than the rootfs provider can mount
+		// (rootfs provider portability). 400 — the remedy is a shallower parent, and lineage is
 		// immutable once built, so there is no state to wait for.
 		//
 		// The one path that reaches this WITHOUT naming a Template is resume, and only after
 		// a deployment moved its state/layer roots to longer paths, shrinking the ceiling
 		// under an existing lineage. That is a deployment change rather than a caller error,
-		// so the 400 misattributes it; no separate sentinel because the documented invariant refuses a
+		// so the 400 misattributes it; no separate sentinel because the extension boundary refuses a
 		// speculative one, and the response body names depth and limit either way.
 		return http.StatusBadRequest
 	case errors.Is(err, lifecycle.ErrDiskCapBelowUsage):
-		// the documented invariant `N → M` on the disk axis, where M ≤ current Overlay usage. 400 for the same
+		// resource admission `N → M` on the disk axis, where M ≤ current Overlay usage. 400 for the same
 		// reasons as the volume twin (ErrVolumeCapBelowUsage) — the caller must pick a larger
 		// size, or 0. Checked BEFORE ErrInsufficientCapacity so a full node cannot turn this
 		// into a 507 telling the caller to wait for capacity that would not help.
 		return http.StatusBadRequest
 	case errors.Is(err, rootfs.ErrCapBelowUsage):
-		// the documented invariant's PLACEMENT-side twin of the refusal above: a stored cap that is no longer
+		// Binding effective points's PLACEMENT-side twin of the refusal above: a stored cap that is no longer
 		// strictly above the unit's usage, refused when it would be re-materialized rather
 		// than wedging the unit. 409, NOT 400: resume/adopt do not CARRY a cap, so a 400 would
 		// send the caller to fix something this request did not send. The remedy is state
@@ -1148,25 +1148,25 @@ func statusCodeFor(err error) int {
 		// translates it there to the 400 sentinel above.
 		return http.StatusConflict
 	case errors.Is(err, lifecycle.ErrInsufficientCapacity):
-		// the documented invariant admission refusal: nothing is wrong with the request or the sandbox — the NODE
+		// resource-admission refusal: nothing is wrong with the request or the sandbox — the NODE
 		// cannot honor another promise. 507 Insufficient Storage says "capacity", where 409
 		// would wrongly imply a state conflict the caller could resolve by retrying.
 		return http.StatusInsufficientStorage
 	case errors.Is(err, lifecycle.ErrResourceTerminated):
-		// the documented invariant resource-terminated: a state conflict the caller resolves by raising
+		// health and reclamation resource-terminated: a state conflict the caller resolves by raising
 		// the cap or destroying the sandbox — 409, never a raw 500.
 		return http.StatusConflict
 	case errors.Is(err, store.ErrNotFound), errors.Is(err, store.ErrTemplateNotFound),
 		errors.Is(err, store.ErrVolumeNotFound):
 		// Volume not-found has its own sentinel so the 404 names the right object; a
 		// 404 mentioning the wrong one sends the caller looking in the wrong place.
-		// Note it is NOT folded into success on delete (the documented invariant): the reference-protection
+		// Note it is NOT folded into success on delete (the API error contract): the reference-protection
 		// refusals arrive on that same path, and a delete that swallows not-found
 		// would swallow those too.
 		return http.StatusNotFound
 	case errors.Is(err, store.ErrInUse):
-		// the documented invariant reference protection: a referenced Template cannot be deleted →
-		// 409 template in use (the documented invariant DELETE), never a raw 500.
+		// health and reclamation reference protection: a referenced Template cannot be deleted →
+		// 409 template in use (the control-plane API DELETE), never a raw 500.
 		return http.StatusConflict
 	case errors.Is(err, store.ErrConflict):
 		return http.StatusConflict

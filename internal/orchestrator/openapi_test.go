@@ -1,7 +1,7 @@
 package orchestrator
 
 // The guards that make docs/api/openapi.json a CONTRACT rather than a file
-// somebody once wrote (the recorded design part 1).
+// somebody once wrote.
 //
 // Three properties, each failing differently if left unchecked:
 //
@@ -60,7 +60,7 @@ func TestOpenAPIDocIsNotStale(t *testing.T) {
 		t.Fatalf("read %s: %v (regenerate: go run ./cmd/openapigen -out %s)", path, err, openAPIDocPath)
 	}
 	if !bytes.Equal(got, want) {
-		t.Errorf("%s is STALE — the the documented invariant surface changed and the published contract did not.\n"+
+		t.Errorf("%s is STALE — the control-plane API surface changed and the published contract did not.\n"+
 			"Regenerate in THIS change, not as a follow-up:\n"+
 			"    go run ./cmd/openapigen -out %s\n"+
 			"(checked-in %d bytes, generated %d bytes)",
@@ -160,7 +160,7 @@ func TestEveryDocumentedOperationIsRouted(t *testing.T) {
 			}
 			defer resp.Body.Close()
 			// Discriminating "no such route" from "a handler ran and objected" cannot use
-			// the content type: the documented invariant error bodies go through writeErr → http.Error, so
+			// the content type: the API error contract error bodies go through writeErr → http.Error, so
 			// EVERY error on this surface is text/plain, routed or not. What separates
 			// them is the body: an unrouted path yields one of exactly two sentinels —
 			// the mux's own "404 page not found" or the sub-switch's `default` arm — and
@@ -229,7 +229,7 @@ func TestEveryRoutedOperationIsDocumented(t *testing.T) {
 				for _, expr := range cc.List {
 					sub, method, ok := subAndMethod(expr)
 					if !ok || method == "" {
-						// An arm with no method is the the documented invariant catch-all that answers 405 for
+						// An arm with no method is the API error contract catch-all that answers 405 for
 						// every other method on a real route — not an operation.
 						continue
 					}
@@ -260,7 +260,7 @@ func TestEveryRoutedOperationIsDocumented(t *testing.T) {
 // http.MethodPatch`. Returns ok=false for anything else.
 //
 // A `(r.Method == A || r.Method == B)` arm yields the FIRST method only, and that is
-// deliberate: the alias arms in the documented invariant (`PUT`-or-`POST` on the streaming routes) are one
+// deliberate: the alias arms in the control-plane API (`PUT`-or-`POST` on the streaming routes) are one
 // operation with two spellings, and the document describes the canonical one.
 func subAndMethod(e ast.Expr) (sub, method string, ok bool) {
 	bin, isBin := e.(*ast.BinaryExpr)

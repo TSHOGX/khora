@@ -1,22 +1,22 @@
 // Command gateway is the outward-facing boundary in front of the orchestrator
-// (the recorded design): it terminates TLS, authenticates callers with mTLS, and forwards to
+// (the deployment boundary): it terminates TLS, authenticates callers with mTLS, and forwards to
 // the engine's loopback listener.
 //
-// IT IS NOT PART OF THE ENGINE. the documented invariant excludes the credential family permanently — every byte
+// IT IS NOT PART OF THE ENGINE. the engine non-goals excludes the credential family permanently — every byte
 // the engine can hand a guest is readable by uid 0 inside it, so the engine cannot be a
-// secrecy boundary — and the documented invariant bars those names as engine-internal entities. So this lives
+// secrecy boundary — and the engine vocabulary boundary bars those names as engine-internal entities. So this lives
 // under cmd/ as a separate binary, imports nothing from internal/, and the engine neither
 // starts it, health-checks it, nor knows it exists. The precedent is the process behind
-// `egress.via[]` (the documented invariant's qualifier): the deployment topology gains a process while the
+// `egress.via[]` (the engine vocabulary boundary's qualifier): the deployment topology gains a process while the
 // engine's dependency list stays the same.
 //
-// A REVERSE PROXY IS THE PRIMARY DOCUMENTED PATH, not this binary (the recorded design). Most operators
+// A REVERSE PROXY IS THE PRIMARY DOCUMENTED PATH, not this binary (the deployment boundary). Most operators
 // already run nginx or Caddy and should terminate TLS there; deploy/ has a worked config. This
 // exists for deployments that would rather not add one, and does one thing: verify a client
 // certificate against a CA bundle, then proxy.
 //
 // Why mTLS and not a bearer token: a token would mean this repo ships issuance, storage and
-// revocation, and the whole family is what the documented invariant excludes. mTLS puts caller identity in the TLS
+// revocation, and the whole family is what the engine non-goals excludes. mTLS puts caller identity in the TLS
 // layer, where the operator's existing PKI holds it.
 package main
 
@@ -47,7 +47,7 @@ func main() {
 	var (
 		showVer = flag.Bool("version", false, "print the version and exit")
 		addr    = flag.String("addr", ":8443", "listen address for the TLS front. Unlike the orchestrator's --addr this one is MEANT to be routable: it is the outward-facing surface, and it authenticates")
-		up      = flag.String("upstream", "http://127.0.0.1:8080", "the orchestrator's the documented invariant listener. Loopback, because the recorded design pins the engine there — a routable upstream would mean the engine is reachable without passing through this binary, and then this is a door beside an open wall")
+		up      = flag.String("upstream", "http://127.0.0.1:8080", "loopback URL of the orchestrator control-plane listener")
 		cert    = flag.String("cert", "", "PEM certificate chain this gateway serves (required)")
 		key     = flag.String("key", "", "PEM private key for --cert (required)")
 		ca      = flag.String("client-ca", "", "PEM bundle of certificate authorities that may issue CLIENT certificates (required). Every caller must present a certificate this bundle verifies; there is no unauthenticated path. Scope it to a CA you issue from — a public bundle here authenticates the entire internet")
@@ -67,7 +67,7 @@ func main() {
 			// caller to an unauthenticated control plane while looking like a boundary.
 			fmt.Fprintf(os.Stderr, "gateway: %s is required — this binary exists to authenticate callers, "+
 				"and one that starts without the material to do so would proxy every request to an "+
-				"unauthenticated control plane while looking like a boundary (the recorded design)\n", req.flag)
+				"unauthenticated control plane while looking like a boundary\n", req.flag)
 			os.Exit(2)
 		}
 	}
@@ -89,15 +89,15 @@ func main() {
 		// h2c upstream, so the scheme is http even though the front is TLS. Accepting `https`
 		// would produce a handshake failure at the first request rather than here.
 		log.Fatalf("gateway: --upstream must be http:// (the engine serves cleartext h2c on loopback, "+
-			"transport the documented invariant); got %q", upstream.Scheme)
+			"streaming transport); got %q", upstream.Scheme)
 	}
 
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(r *httputil.ProxyRequest) {
 			r.SetURL(upstream)
-			// The verified client identity is NOT forwarded as a header (the documented invariant): passing one
+			// The verified client identity is NOT forwarded as a header (the engine non-goals): passing one
 			// would invite the engine to read it, which is how an authorization subject
-			// enters a system that has none, and the documented invariant bars the names such a header would
+			// enters a system that has none, and the engine vocabulary boundary bars the names such a header would
 			// need. Authentication is complete here — that a request reached the upstream is
 			// the entire contract between the two processes.
 			r.Out.Header.Del("X-Forwarded-For")
@@ -128,7 +128,7 @@ func main() {
 		FlushInterval: -1,
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			// The upstream's address is host-local and does not belong in a response body
-			// (the the documented invariant discipline the engine's own edge follows): logged, generic on the wire.
+			// (the API error contract discipline the engine's own edge follows): logged, generic on the wire.
 			log.Printf("gateway: proxy %s %s: %v", r.Method, r.URL.Path, err)
 			http.Error(w, "upstream unavailable", http.StatusBadGateway)
 		},

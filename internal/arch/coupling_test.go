@@ -11,29 +11,29 @@ import (
 	"testing"
 )
 
-// subsystems are the the documented invariant packages. Each owns a mechanism; the the documented invariant mediator owns the
+// subsystems are the subsystem boundaries packages. Each owns a mechanism; the lifecycle mediator owns the
 // verbs. the documentation: "subsystems NEVER call each other" — an edge between any two
 // of these is the start of the dependency cycle the ownership rule exists to
 // prevent.
 //
 // Every entry is REQUIRED to exist (TestGuardIsNotStale): "absent packages are
-// skipped" is a hole the moment the package is real — a rename would leave the documented invariant
+// skipped" is a hole the moment the package is real — a rename would leave the network declaration
 // unchecked with every test still green.
 //
 // Pre-listing a package before it exists is what gives the empty allowlist its force
-// at DESIGN time, not just at review time: routing volume content through the documented invariant `fs`
-// was ruled out for the documented invariant partly because this guard would have failed on it
-// (the relevant internals page the documented invariant).
+// at DESIGN time, not just at review time: routing volume content through the transport data plane `fs`
+// was ruled out for the Volume subsystem partly because this guard would have failed on it
+// (volume.md constraints).
 var subsystems = []string{
-	"github.com/TSHOGX/khora/internal/runtime",   // the documented invariant
-	"github.com/TSHOGX/khora/internal/rootfs",    // the documented invariant
-	"github.com/TSHOGX/khora/internal/volume",    // the documented invariant
-	"github.com/TSHOGX/khora/internal/network",   // the documented invariant
-	"github.com/TSHOGX/khora/internal/transport", // the documented invariant
+	"github.com/TSHOGX/khora/internal/runtime",   // the runtime provider contract
+	"github.com/TSHOGX/khora/internal/rootfs",    // the Rootfs subsystem
+	"github.com/TSHOGX/khora/internal/volume",    // the Volume subsystem
+	"github.com/TSHOGX/khora/internal/network",   // the network declaration
+	"github.com/TSHOGX/khora/internal/transport", // the transport data plane
 }
 
-// mediatorOnly are packages a the documented invariant subsystem must never import. A subsystem that
-// reads the store has stopped being a mechanism: the documented invariant hands it the facts it needs
+// mediatorOnly are packages a subsystem must never import. A subsystem that
+// reads the store has stopped being a mechanism: the lifecycle hands it the facts it needs
 // (the keep-set pattern), precisely so the subsystem cannot form its own opinion
 // about authoritative state.
 var mediatorOnly = []string{
@@ -48,7 +48,7 @@ var mediatorOnly = []string{
 //
 // Empty, and worth keeping empty. When two subsystems need the same fact, the
 // answer is a leaf package they both depend on (internal/guestport, holding the
-// guest netns port shared by the documented invariant and the documented invariant, is the precedent), never an entry
+// guest netns port shared by the runtime provider contract and the transport data plane, is the precedent), never an entry
 // here. A shared constant is a leaf, not a reason for a subsystem edge.
 var allowedEdges = map[string]string{}
 
@@ -125,7 +125,7 @@ func listPackages(t *testing.T, tags string) []pkg {
 
 // owner returns the subsystem that owns an import path, or "" if none does. A
 // package's OWN subtree does not count as another subsystem — the case this was
-// written for. The generated stubs now live at pkg/transport/gen/... (the recorded design part
+// written for. The generated stubs now live at pkg/transport/gen/... (the thin-client contract part
 // 3), owned by no subsystem, so importing them is not an edge for the simpler
 // reason: `owner` returns "" for them. The own-subtree rule stays because it is a
 // property of the guard, not of where `gen` happens to sit.
@@ -138,7 +138,7 @@ func owner(importPath string) string {
 	return ""
 }
 
-// TestSubsystemsDoNotImportEachOther is the structural form of the the documented invariant ownership
+// TestSubsystemsDoNotImportEachOther is the structural form of the lifecycle ownership
 // rule. It checks production, test, and external-test imports, under both the
 // default and substrate build tags.
 func TestSubsystemsDoNotImportEachOther(t *testing.T) {
@@ -160,9 +160,9 @@ func TestSubsystemsDoNotImportEachOther(t *testing.T) {
 						continue
 					}
 					t.Errorf("subsystem %s imports subsystem %s (via %q, tags=%q) — "+
-						"the documented invariant subsystems must not call each other (the documentation / the documented invariant ownership). "+
+						"subsystems must not call each other; lifecycle owns their coordination. "+
 						"If they need a shared fact, put it in a leaf package; if one needs the "+
-						"other's behavior, the the documented invariant mediator should be threading it.",
+						"other's behavior, the lifecycle mediator should be threading it.",
 						self, got, imp, tags)
 				}
 			}
@@ -183,7 +183,7 @@ func TestSubsystemsDoNotImportEachOther(t *testing.T) {
 // PRODUCTION IMPORTS ONLY, deliberately: anything reaching test/harness transitively
 // reaches every subsystem through orchestrator, so a closure over test imports would
 // report a path for every subsystem on a correct tree. The direct check above keeps
-// scanning them, which is where that coverage stays. See the recorded design, including why
+// scanning them, which is where that coverage stays. See the subsystem reachability rule, including why
 // deriving `leaves` from "imported by ≥2 subsystems" was rejected instead.
 func TestSubsystemsCannotReachEachOther(t *testing.T) {
 	for _, tags := range tagMatrix {
@@ -212,10 +212,10 @@ func TestSubsystemsCannotReachEachOther(t *testing.T) {
 					// matching the direct check's rule.
 					if got := owner(imp); got != "" && got != start {
 						t.Errorf("subsystem %s can REACH subsystem %s (tags=%q) via:\n    %s\n"+
-							"the documented invariant subsystems must not call each other, transitively included: every "+
+							"subsystems must not call each other, transitively included: every "+
 							"package on that path inherits the edge while the direct-import guard "+
 							"stays green. Put the shared fact in a leaf that imports nothing from "+
-							"the engine (the recorded design).",
+							"the engine (the subsystem reachability rule).",
 							start, got, tags, strings.Join(path, " -> "))
 						continue
 					}
@@ -229,7 +229,7 @@ func TestSubsystemsCannotReachEachOther(t *testing.T) {
 // TestSubsystemsDoNotReadTheControlPlane pins the dependency DIRECTION: the
 // mediator drives subsystems, never the reverse. A subsystem reaching into
 // lifecycle or store would let it read authoritative state directly instead of
-// being handed it (the documented invariant: subsystems don't read the store).
+// being handed it (the lifecycle: subsystems don't read the store).
 func TestSubsystemsDoNotReadTheControlPlane(t *testing.T) {
 	for _, tags := range tagMatrix {
 		for _, p := range listPackages(t, tags) {
@@ -243,8 +243,8 @@ func TestSubsystemsDoNotReadTheControlPlane(t *testing.T) {
 						if imp != banned && !strings.HasPrefix(imp, banned+"/") {
 							continue
 						}
-						t.Errorf("subsystem %s imports %s (tags=%q) — a the documented invariant subsystem must not "+
-							"read the control plane; the documented invariant hands it what it needs (the keep-set pattern)",
+						t.Errorf("subsystem %s imports %s (tags=%q) — a subsystem must not "+
+							"read the control plane; the lifecycle hands it what it needs (the keep-set pattern)",
 							self, imp, tags)
 					}
 				}
@@ -259,7 +259,7 @@ func TestSubsystemsDoNotReadTheControlPlane(t *testing.T) {
 //
 // A leaf is only a leaf while it imports NOTHING from the engine. The failure mode
 // is quiet and it defeats the whole construction: the moment `ruleset` imports
-// `runtime` (say, to reach a placement type), every the documented invariant package that depends on
+// `runtime` (say, to reach a placement type), every the network declaration package that depends on
 // it inherits that edge TRANSITIVELY, and the guard above still passes — it only
 // looks at direct imports. So this is checked here rather than trusted to the
 // package comment.
@@ -268,22 +268,22 @@ func TestSubsystemsDoNotReadTheControlPlane(t *testing.T) {
 // doc comments say "leaf" — the transitive-edge argument is a property of being
 // depended on by two subsystems, and it holds VERBATIM for all four:
 //
-//   - guestport — the precedent: the guest netns port, shared by the documented invariant and the documented invariant.
-//   - ruleset — the documented invariant's static address facts plus the abstract rule vocabulary the documented invariant
-//     generates and the documented invariant renders. Also the reason its Validate must live outside
+//   - guestport — the precedent: the guest netns port, shared by the runtime provider contract and the transport data plane.
+//   - ruleset — the provider security contract's static address facts plus the abstract rule vocabulary the network declaration
+//     generates and the runtime provider contract renders. Also the reason its Validate must live outside
 //     both: it runs on the generate side and again before install.
-//   - btrfs — the substrate tool, model-ignorant, shared by the documented invariant (rootfs/overlayfs.go)
-//     and the documented invariant (volume/local_btrfs.go).
-//   - allocbytes — shared by the documented invariant and the documented invariant for the same reason.
+//   - btrfs — the substrate tool, model-ignorant, shared by the Rootfs subsystem (rootfs/overlayfs.go)
+//     and the Volume subsystem (volume/local_btrfs.go).
+//   - allocbytes — shared by the Rootfs subsystem and the Volume subsystem for the same reason.
 //   - pkg/transport/gen/... — the generated wire stubs. Not a leaf by the documentation's
-//     "shared fact" motive; listed because it lives OUTSIDE internal/ (the recorded design part
+//     "shared fact" motive; listed because it lives OUTSIDE internal/ (the thin-client contract part
 //     3, so a Go consumer can import the protocol) and the property that made that
 //     move safe is exactly the one this guard checks: the generated tree imports
 //     nothing from the engine. Left unchecked, a hand-edit adding an engine import
 //     there would put an engine type in the published surface and hand every
 //     importer a transitive edge.
 //
-// generatedTree is the root of the committed wire stubs (the recorded design part 3). Named
+// generatedTree is the root of the committed wire stubs. Named
 // rather than spelled inline because the leaf guard's exemption below has to mean
 // exactly this prefix: a literal that drifted from the `leaves` entries would turn
 // the exemption into a hole nobody could see.
@@ -304,14 +304,14 @@ var leaves = []string{
 //
 // This is a SEPARATE guard from the import check above, because that one only looks
 // for `engine/` imports — a leaf that imported `os/exec` and shelled out to `nft`
-// would pass it, and every other check here, while re-coupling the documented invariant to the documented invariant through
+// would pass it, and every other check here, while re-coupling the network declaration to the runtime provider contract through
 // the back door the empty allowlist exists to keep shut. That is the whole loophole,
 // so it is checked rather than left to the package comment.
 //
 // NOT every leaf: `btrfs` and `allocbytes` are the OTHER kind. the documentation names
 // `btrfs` "a substrate tool, model-ignorant" — acting on the substrate is its
 // purpose, and `allocbytes` walks a tree to count bytes. What makes them safe is not
-// inertness but model-ignorance: neither knows a the documented invariant type, so neither can carry a
+// inertness but model-ignorance: neither knows a subsystem boundaries type, so neither can carry a
 // mechanism between two subsystems. The leaves listed here are the ones whose safety
 // argument IS inertness — `ruleset` in particular must run identically on the
 // generate side (root-free unit tests) and the install side, which is only true
@@ -394,7 +394,7 @@ func TestLeavesImportNothingFromTheEngine(t *testing.T) {
 					// The generated tree is two packages by protoc's construction — the
 					// connect stubs necessarily import the message types — so an import
 					// that stays INSIDE it is not the thing this guard is about. What is
-					// checked there is the property that made the recorded design's move safe:
+					// checked there is the property that made the thin-client contract's move safe:
 					// nothing from the ENGINE, and every engine package is under the
 					// module's internal/, so this exemption cannot widen to one.
 					if strings.HasPrefix(p.ImportPath, generatedTree) && strings.HasPrefix(imp, generatedTree) {
@@ -423,7 +423,7 @@ func TestGuardIsNotStale(t *testing.T) {
 	}
 	// EVERY listed subsystem must exist — the list is read straight from `subsystems`
 	// rather than restated, so the two cannot drift apart. A second hand-written copy
-	// is how the documented invariant came to be exempt here after its package had already landed: the
+	// is how the network declaration came to be exempt here after its package had already landed: the
 	// checks above key off `subsystems`, and a package missing from `present` is simply
 	// skipped by `owner`, so a rename disables them while this test still passes.
 	for _, s := range subsystems {

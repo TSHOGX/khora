@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# spike-publish-ingress.sh — the documented invariant ingress (`publish`): measure the INBOUND path,
-# which none of the relevant internals page's twelve the documented invariant facts covers (all twelve are egress).
+# spike-publish-ingress.sh — the network declaration ingress (`publish`): measure the INBOUND path,
+# which the existing egress measurements do not cover.
 #
 # It exists to falsify one spec claim and answer two unmeasured shape questions:
 #
-#  Q1 (spec-changing) — the documented invariant user-visible semantics ① promised, at the time this
+#  Q1 (spec-changing) — the network declaration promised, at the time this
 #     ran, that a guest service bound to 127.0.0.1 yields "the connection is
 #     refused and the error is attributable, rather than hanging".
 #     "Attributable" requires that this case be DISTINGUISHABLE from "nothing is
@@ -12,17 +12,17 @@
 #     caller sees `refused` either way and the promise is unfalsifiable from
 #     outside — the contract then has to be reworded to promise only "refused".
 #     Case B vs case C is that comparison. It is: the measurement below confirmed
-#     the two are indistinguishable, and the documented invariant ① now stops at "refused and fails
-#     fast", stating plainly that it does not promise attributability (the documented invariant ⑯).
+#     the two are indistinguishable, and the network declaration now stops at "refused and fails
+#     fast", stating plainly that it does not promise attributability.
 #
-#  Q2 — which chain must carry the companion accept. the documented invariant ⑧ measured the hook
+#  Q2 — which chain must carry the companion accept. Existing measurements cover the hook
 #     split for EGRESS (guest→host lands in `input`, guest→routed lands in
 #     `forward`). Publish is a different path: it arrives at `prerouting`, is
 #     DNAT'd, and then lands somewhere the egress measurement does not predict.
 #     Cases A/A-host measure where, by reading per-hook counters.
 #
 #  Q3 — whether the reverse flow (guest→caller reply) is carried by the shared
-#     `established,related` arm, or needs a rule of its own. the documented invariant ④ requires that
+#     `established,related` arm, or needs a rule of its own. The network policy requires that
 #     publish's reverse flow must NOT become an egress path, so the generator
 #     needs the measured shape before it encodes one. Cases D/E are the pair:
 #     same floor, with and without the established arm.
@@ -42,7 +42,7 @@ REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 CID="spikepub$$"
 TABLE="spikepub$$"
 
-# Sandbox side: the /30 shape local_runsc uses today (10.66.0.0/16, the documented invariant ④).
+# Sandbox side: the /30 shape local_runsc uses today within 10.66.0.0/16.
 GNS="spikepub-g$$"; GVETH_H="spgh$$"; GVETH_G="spgg$$"
 GHOST_IP="10.66.9.1"; GUEST_IP="10.66.9.2"
 # Caller side: a distinct /30 outside the sandbox CIDR, so it stands in for
@@ -162,7 +162,7 @@ EOF
 #   none        DNAT + forward accept only (isolates the ingress path)
 #   ct          floor WITH the shared `established,related` arm (Q3 positive)
 #   noct        same floor WITHOUT that arm (Q3 negative — must break the reply)
-# Counters are named so each hook can be read independently (the documented invariant ⑧/⑩ discipline:
+# Counters are named so each hook can be read independently (measurement discipline:
 # "it works" is not an assertion; a counter that stays 0 is the real signal).
 install_pub() {
   local floor="$1"
@@ -195,7 +195,7 @@ table inet $TABLE {
     # unroutable from inside the netstack). SNAT rewrites the source to the
     # sandbox's own /30 gateway, so the reply is on-link and needs no guest
     # route at all — which is what makes publish a PURELY host-side rule, as
-    # the documented invariant claims. Verified both ways: DNAT-only + no guest route = timeout;
+    # the network declaration claims. Verified both ways: DNAT-only + no guest route = timeout;
     # DNAT + this rule + no guest route = connected.
     oifname "$GVETH_H" ip daddr $GUEST_IP counter name post_snat snat ip to $GHOST_IP
   }
@@ -285,7 +285,7 @@ echo
 echo "-- Q1 VERDICT: is B distinguishable from C? --"
 if [[ "$outB" == "$outC" ]]; then
   bad "Q1: B and C are INDISTINGUISHABLE (both $outB) — 'the error is attributable'"
-  bad "    is NOT observable by the caller. the documented invariant semantics ① must be reworded to"
+  bad "    is NOT observable by the caller. The network declaration must be reworded to"
   bad "    promise only 'refused', dropping the attributability claim."
 else
   ok "Q1: distinguishable (B=$outB, C=$outC) — 'attributable' holds as written"
@@ -307,7 +307,7 @@ r="$(ip netns exec "$GNS" "$WORK/pubprobe" dial "$CALLER_IP:9999" 2000 || true)"
 echo "  guest→caller: $r"
 [[ "$(field OUTCOME "$r")" != connected ]] \
   && ok "D floor still denies guest egress (drop=$(ctr fw_floor_drop))" \
-  || bad "D floor did NOT deny guest egress — publish's arm became an egress path (the documented invariant ④)"
+  || bad "D floor did NOT deny guest egress — publish's arm became an egress path"
 
 echo
 echo "===== CASE E: same floor WITHOUT the established arm (Q3 negative) ====="
@@ -329,7 +329,7 @@ echo
 echo "===== SUMMARY ====="
 echo "  pass=$pass fail=$fail"
 echo
-echo "  Q1 (the documented invariant semantics ①, loopback-bind attributability): B=$outB vs C=$outC"
+echo "  Q1 (loopback-bind attributability): B=$outB vs C=$outC"
 echo "  Q2 (which hook carries DNAT'd publish): see CASE A counters above"
 echo "  Q3 (reverse flow / established arm): see CASE D vs E above"
 [[ "$fail" -eq 0 ]] || echo "  (a FAIL above is a measurement result, not a script error — read it)"

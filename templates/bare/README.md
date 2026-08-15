@@ -55,8 +55,8 @@ than obviously missing:
   `ls`/`install`/`mkdir`, so their absence breaks package installation.
 - **A non-trivial `/etc/passwd`** (from the base). A root-only single line breaks
   `getpwuid` for tools that look themselves up. The guest is still root and the engine
-  models no guest users (the guest identity boundary) — this is hygiene *inside* the guest, not an identity
-  model.
+  models no guest users (the guest identity boundary) — this is hygiene *inside* the guest,
+  not an identity model.
 
 **Convenience**, freely re-decidable: `python3` + `pip` + `venv`, `git`,
 `build-essential`, `nodejs` + `npm`, `curl`, and `sudo`. Each is one exec away, so
@@ -65,7 +65,7 @@ shipping them trades cold-start size for convenience and commits to nothing.
 **Preinstalled mount points**, which is a measured by-product rather than taste: a bind
 destination already present in the lower does **not** trigger copy-up, while a missing one
 dirties the upper — so this keeps Promoted layers clean and demotes the rootfs subsystem's exclusion
-entries to a correctness backstop (`rootfs-overlay.md` D5).
+entries to a correctness backstop.
 
 ## No `/etc/resolv.conf`, deliberately
 
@@ -85,12 +85,12 @@ or baked into its own Promoted Template) and the matching `egress.allow[]` entry
 resolver is even declarable is a property of that deployment — a loopback resolver is
 structurally unreachable for a gVisor guest, a link-local one sits in the unliftable
 floor, and the one stably-declarable host-local address is the sandbox's own `/30` gateway
-(`network.md` D5 ⑦).
+(the runtime-provided address on the guest's point-to-point link).
 
 ## Agent stacks layer on this, outside the engine
 
 No engine concept is needed: create a sandbox from `bare`, install with a one-shot exec
-(no init dependency — `guest-runtime.md` D3.1), and **Promote**. The result is an ordinary
+(the guest can start it directly without an init service), and **Promote**. The result is an ordinary
 Template whose lower stack is `[the new layer, …bare's stack]`.
 
 ## Two traps in the builder

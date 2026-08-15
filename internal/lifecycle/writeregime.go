@@ -8,7 +8,7 @@ import (
 	"github.com/TSHOGX/khora/internal/model"
 )
 
-// The write-regime invariant (the documented invariant, cross-cutting): a Volume has TWO write paths —
+// The write-regime invariant (the Volume subsystem, cross-cutting): a Volume has TWO write paths —
 // through a mount, and through the direct content API — and the engine holds ONE
 // invariant to stop them tearing each other.
 //
@@ -20,12 +20,12 @@ import (
 // gofer/sentry page caches are not coherent with a host-side write.
 //
 // THE GATE OPENS ON A *LIVE* WRITER, NOT ON "APPEARS IN THE MOUNT TABLE", and that
-// distinction is a PROMISE rather than an implementation convenience (the documented invariant): a
+// distinction is a PROMISE rather than an implementation convenience (the Volume subsystem): a
 // `paused` sandbox is NOT a live writer — its container is stopped and no gofer is
 // alive — so a direct write is safe then, and the sandbox naturally sees the new
 // content when it resumes. Tightening this to "any row in the table" would be more
 // conservative and would not tear anything, but it would DELETE a documented
-// capability, which the relevant internals page the documented invariant calls the third kind of wrong (trading a settled
+// capability, which the volume write regime calls the third kind of wrong (trading a settled
 // ability for implementation convenience).
 //
 // THE PREDICATE READS THE LIVE-MAP, NOT `sandboxes.state`, and that column is
@@ -43,7 +43,7 @@ import (
 // readiness gate) precisely so a concurrent reconcile does not mistake it for an
 // orphan.
 
-// THE INVARIANT IS SYMMETRIC, AND BOTH SIDES ARE GATED (the documented invariant): the hazard above does
+// THE INVARIANT IS SYMMETRIC, AND BOTH SIDES ARE GATED (the Volume subsystem): the hazard above does
 // not care who arrived first, so while a direct mutating operation is in flight, a cold
 // start that would give that volume an rw mount is refused too (admitColdStartRW below).
 // Gating one side only is equivalent to gating neither — an import admitted at T0 plus a
@@ -53,27 +53,27 @@ import (
 // THE TWO SIDES DECIDE OVER ONE TABLE, keyed by volume and guarded by the ONE existing
 // m.mu: the live-rw holder set and the in-flight direct-write markers are two halves of
 // a single mutual-exclusion table, not two checks somebody has to keep consistent by
-// hand. Deliberately NOT a per-volume lock class: the relevant internals page the documented invariant DERIVES a deadlock from
+// hand. Deliberately NOT a per-volume lock class: the mount table DERIVES a deadlock from
 // the lock order for keying locks by volume (a volume-dimension verb reaching back for
 // its holders closes sbx→vol→sbx into a cycle) — derived, with no reproduction vehicle in
-// the repo, unlike the documented invariant's first two findings — which is why this stays one flat map under
+// the repo, unlike the lifecycle contract's first two findings — which is why this stays one flat map under
 // the mediator's existing mutex.
 //
 // THE COLD-START SIDE REFUSES, IT DOES NOT WAIT. The direct-write marker is held for
 // the WHOLE stream by contract, so its duration is unbounded in the payload size; a
-// cold start holds the sandbox's transition lock for its entire chain (the documented invariant), so
+// cold start holds the sandbox's transition lock for its entire chain (per-sandbox transition serialization), so
 // waiting would park destroy / pause / evict behind somebody's 40 GiB upload. The refusal
-// lands on the documented invariant's existing atomic return to the source state — resume stays `paused`,
+// lands on atomic transition rollback's existing atomic return to the source state — resume stays `paused`,
 // create deletes its record — so it adds NO new failure semantics.
 
-// ErrVolumeLiveWriter is the documented invariant's fourth Volume 409: a direct content change was
+// ErrVolumeLiveWriter is the API error contract's fourth Volume 409: a direct content change was
 // refused because a live read-write mount holds the volume.
 //
 // 409 rather than 400 because it is a RETRYABLE state conflict — pausing the holder
 // (or destroying it) makes the same request succeed, which is the documented remedy.
 var ErrVolumeLiveWriter = errors.New("lifecycle: volume has a live read-write mount")
 
-// ErrVolumeDirectWriteInFlight is ErrVolumeLiveWriter's MIRROR — the same the documented invariant
+// ErrVolumeDirectWriteInFlight is ErrVolumeLiveWriter's MIRROR — the same the Volume subsystem
 // invariant refusing from the other side: a cold start was refused because a direct
 // content write is in flight on a volume it would mount read-write.
 //
@@ -86,7 +86,7 @@ var ErrVolumeDirectWriteInFlight = errors.New("lifecycle: a direct write is in f
 // admitDirectWrite decides "no live rw holder" AND publishes this write's in-flight
 // marker INSIDE THE SAME CRITICAL SECTION.
 //
-// The two cannot be separated (the documented invariant). If the marker were published after the lock was
+// The two cannot be separated (the Volume subsystem). If the marker were published after the lock was
 // released, a sweep running in between would see backend bytes belonging to a volume
 // it cannot prove is in use and could reclaim them under an in-flight write. Same
 // shape as the in-flight build keep-set, and deliberately the SAME LOCK — no new lock
@@ -107,10 +107,10 @@ func (m *Mediator) admitDirectWrite(ctx context.Context, id model.VolumeID) (fun
 	for _, mt := range rows {
 		if mt.Access.ReadOnly() {
 			// A live READ-ONLY reader is not a writer, so it cannot tear anything, and
-			// SETTLED (the documented invariant): no warning, no version stamp, no refusal. The reader's
+			// SETTLED (the Volume subsystem): no warning, no version stamp, no refusal. The reader's
 			// exposure is bounded to stale-but-whole / a momentary ENOENT / a prefix —
 			// never a torn file, because an import unlinks rather than overwriting in
-			// place — and freshness beyond that is the documented invariant's EXISTING non-promise, the same
+			// place — and freshness beyond that is the Volume subsystem's EXISTING non-promise, the same
 			// one that makes cross-sandbox rw coherence undefined. Refusing here would
 			// trade a capability (booting a sandbox that only READS a volume being
 			// seeded) for convenience.
@@ -118,7 +118,7 @@ func (m *Mediator) admitDirectWrite(ctx context.Context, id model.VolumeID) (fun
 		}
 		ls := m.live[mt.Sandbox]
 		if ls != nil && ls.placement != nil {
-			return nil, fmt.Errorf("direct write to %s: %w: sandbox %s holds it read-write at %s and its container is live — pause that sandbox and retry (a `paused` sandbox is NOT a live writer, the documented invariant)",
+			return nil, fmt.Errorf("direct write to %s: %w: sandbox %s holds it read-write at %s and its container is live — pause that sandbox and retry (a `paused` sandbox is NOT a live writer, the Volume subsystem)",
 				id, ErrVolumeLiveWriter, mt.Sandbox, mt.Path)
 		}
 	}
@@ -136,7 +136,7 @@ func (m *Mediator) admitDirectWrite(ctx context.Context, id model.VolumeID) (fun
 
 // admitColdStartRW is the write regime's OTHER side: it refuses a cold start that
 // would give a volume an rw mount while a direct write is in flight on that volume
-// (the documented invariant). Called by coldStart with the mount rows it is about to materialize.
+// (the Volume subsystem). Called by coldStart with the mount rows it is about to materialize.
 //
 // It takes the ROWS rather than reading them itself, because coldStart has already
 // read them — and re-reading would be worse than redundant: the decision would then
@@ -159,7 +159,7 @@ func (m *Mediator) admitColdStartRW(id model.SandboxID, rows []model.Mount) erro
 			continue
 		}
 		if m.inFlightWrites[mt.Volume] > 0 {
-			return fmt.Errorf("%w: sandbox %s would mount volume %s read-write at %s while a direct content write is streaming into it — wait for that import to finish and retry (the documented invariant: the invariant is symmetric, and the cold start refuses rather than waits because it holds the sandbox's transition lock throughout)",
+			return fmt.Errorf("%w: sandbox %s would mount volume %s read-write at %s while a direct content write is streaming into it — wait for that import to finish and retry (the Volume subsystem: the invariant is symmetric, and the cold start refuses rather than waits because it holds the sandbox's transition lock throughout)",
 				ErrVolumeDirectWriteInFlight, id, mt.Volume, mt.Path)
 		}
 	}

@@ -13,22 +13,22 @@ import (
 	"github.com/TSHOGX/khora/internal/store"
 )
 
-// The the documented invariant Volume block: create / list / inspect / patch / delete + the two direct
+// The control-plane API Volume block: create / list / inspect / patch / delete + the two direct
 // content endpoints.
 //
-// Volumes are addressed by opaque ID and NOTHING here exposes a host path (the documented invariant):
+// Volumes are addressed by opaque ID and NOTHING here exposes a host path (the API error contract):
 // the backend resolves storage internally, so the wire carries an ID, a byte count
 // and a root-relative path, never a location on the host.
 //
 // import/export need NO sandbox, and that is the point rather than a convenience:
 // together with create they are how "a volume's lifecycle is decoupled from any
-// sandbox" (the documented invariant) becomes true in substance rather than only in the record layer —
+// sandbox" (the Volume subsystem) becomes true in substance rather than only in the record layer —
 // seeding a volume before any sandbox exists, and reading one after the last sandbox
 // is gone, have no other route.
 
 type volumeCreateReq struct {
 	// Size is the capacity cap in bytes. REQUIRED while the disk axis is metered
-	// (the documented invariant / the documented invariant conditionally-required-per-axis): an uncapped volume would
+	// (resource admission / the API error contract conditionally-required-per-axis): an uncapped volume would
 	// contribute nothing to the node budget while free to consume all of it, so a
 	// missing size is a 400 rather than a silently-defaulted value. Omitted / 0 =
 	// uncapped, legal only on an unmetered axis.
@@ -36,14 +36,14 @@ type volumeCreateReq struct {
 	// There is deliberately NO access_mode field. It is a property of the MOUNT ROW,
 	// not of the volume — one volume can be shared-rw to one sandbox and shared-ro to
 	// another at the same time — so it appears only in a sandbox's `volumes` binding
-	// (the documented invariant / the documented invariant).
+	// (the Volume subsystem / the control-plane API).
 }
 
 type volumeResp struct {
 	VolumeID string `json:"volume_id"`
 	// Size is the cap FROM THE RECORD, which is its only authority: the storage
 	// layer's read-back cannot distinguish "never capped" from "deliberately
-	// uncapped" (the relevant internals page the documented invariant), so reporting the record is what keeps inspect
+	// uncapped" (volume cap enforcement), so reporting the record is what keeps inspect
 	// honest about what the engine PROMISED — the same number the admission gate
 	// counts.
 	Size    int64  `json:"size"`
@@ -137,7 +137,7 @@ func (e *Engine) handleVolumeSub(w http.ResponseWriter, r *http.Request) {
 		e.handleImportVolume(w, r, id)
 	case sub == "export" && r.Method == http.MethodGet:
 		e.handleExportVolume(w, r, id)
-	// the documented invariant's general rule, mirroring handleSandboxSub: a wrong method on a route that
+	// the API error contract's general rule, mirroring handleSandboxSub: a wrong method on a route that
 	// EXISTS is 405. It enumerates the known subs rather than blanketing the default arm —
 	// an unrecognized sub-path is still 404 below, and answering it 405 would assert a
 	// route the engine does not have.
@@ -162,7 +162,7 @@ func (e *Engine) handleInspectVolume(w http.ResponseWriter, r *http.Request, id 
 	})
 }
 
-// volumePatchReq is the the documented invariant PATCH body. Size is a POINTER so "omitted" is
+// volumePatchReq is the control-plane API PATCH body. Size is a POINTER so "omitted" is
 // distinguishable from "set to 0", which matters because 0 is itself an instruction
 // here (remove the cap) rather than an absence.
 type volumePatchReq struct {
@@ -170,17 +170,17 @@ type volumePatchReq struct {
 }
 
 // handlePatchVolume is PATCH /v1/volumes/{id} {size} — the cap's only write point
-// besides create (the documented invariant).
+// besides create (the control-plane API).
 //
 // It works whether or not anything has the volume mounted — the exact OPPOSITE of a
 // sandbox cap (editable only while `paused`), so no "pause it first" 409 here. The reason
 // is mechanical: a sandbox cap re-materializes at the next placement, while a volume has
 // no placement of its own, so "defer to the next placement" would mean never for an
-// unmounted volume (the documented invariant).
+// unmounted volume (the Volume subsystem).
 //
 // A raise re-clears admission and may be 507; lowering below current usage is 400
 // (strict inequality — see lifecycle.ErrVolumeCapBelowUsage for why the engine
-// refuses what the substrate would accept). It emits no event: this is not a the documented invariant
+// refuses what the substrate would accept). It emits no event: this is not a lifecycle state machine
 // transition.
 func (e *Engine) handlePatchVolume(w http.ResponseWriter, r *http.Request, id model.VolumeID) {
 	var req volumePatchReq
@@ -211,20 +211,20 @@ func (e *Engine) handleDeleteVolume(w http.ResponseWriter, r *http.Request, id m
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// handleDeriveVolume is POST /v1/volumes/{id}/snapshot and .../clone (the documented invariant).
+// handleDeriveVolume is POST /v1/volumes/{id}/snapshot and .../clone (the control-plane API).
 //
 // BOTH TAKE `size` AND NEITHER INHERITS, for two independent reasons: the substrate has
 // nothing to inherit (a snapshot gets a brand-new UNCAPPED quota row — measured, and
 // verified by writing 3× the source's cap into one), and inheriting would silently
 // DOUBLE the node's declared disk claim at every snapshot without the caller asking.
-// the documented invariant counts the DECLARED cap precisely because the real bytes are metadata-level.
+// resource admission counts the DECLARED cap precisely because the real bytes are metadata-level.
 //
-// So `size` is conditionally required exactly as on create — the same the documented invariant rule
+// So `size` is conditionally required exactly as on create — the same the API error contract rule
 // appearing at its second and third endpoint, not a new rule. A backend that does not
 // support the operation is 400, and the capability is asked BEFORE any bytes move.
 //
 // The result is an ORDINARY WRITABLE volume carrying `parent`; there is no read-only
-// snapshot type (the documented invariant / the relevant internals page the documented invariant). Immutability is expressed by a shared-ro
+// snapshot type (the Volume subsystem / snapshot lineage). Immutability is expressed by a shared-ro
 // mount row.
 func (e *Engine) handleDeriveVolume(w http.ResponseWriter, r *http.Request, id model.VolumeID, isClone bool) {
 	var req volumeCreateReq
@@ -256,13 +256,13 @@ type importResp struct {
 	BytesWritten int64  `json:"bytes_written"`
 }
 
-// handleImportVolume is POST /v1/volumes/{id}/import?path= (the documented invariant direct write).
+// handleImportVolume is POST /v1/volumes/{id}/import?path= (the control-plane API direct write).
 //
 // The body STREAMS to the backend through a fixed buffer, never buffered whole — the same
-// reason the sandbox large-file route is REST rather than RPC (the documented invariant).
+// reason the sandbox large-file route is REST rather than RPC (the control-plane API).
 //
 // `path` is relative to the VOLUME ROOT and out-of-root targets are unreachable — the
-// accessor is root-confined by construction (the documented invariant / the relevant internals page the documented invariant), so a traversal clamps
+// accessor is root-confined by construction (the Volume subsystem / volume.md constraints), so a traversal clamps
 // inside the volume rather than being rejected by a check here. Validating the string would
 // have to be right, where the accessor cannot be wrong.
 func (e *Engine) handleImportVolume(w http.ResponseWriter, r *http.Request, id model.VolumeID) {
@@ -282,7 +282,7 @@ func (e *Engine) handleImportVolume(w http.ResponseWriter, r *http.Request, id m
 	writeJSON(w, http.StatusOK, importResp{VolumeID: string(id), Path: path, BytesWritten: n})
 }
 
-// handleExportVolume is GET /v1/volumes/{id}/export?path= (the documented invariant direct read),
+// handleExportVolume is GET /v1/volumes/{id}/export?path= (the control-plane API direct read),
 // streaming for the same reason import does.
 func (e *Engine) handleExportVolume(w http.ResponseWriter, r *http.Request, id model.VolumeID) {
 	path := r.URL.Query().Get("path")
@@ -307,11 +307,11 @@ func (e *Engine) handleExportVolume(w http.ResponseWriter, r *http.Request, id m
 	}
 }
 
-// volumeStatus maps the the documented invariant / the documented invariant Volume verdicts onto status codes. Called from
+// volumeStatus maps the Volume subsystem / the API error contract Volume verdicts onto status codes. Called from
 // statusFor so the mapping lives beside the endpoints that produce it.
 //
 // ALL FOUR STORE VERDICTS ARE MAPPED EXPLICITLY and must not be folded into a shared "in
-// use" arm: the documented invariant requires them to stay distinguishable, because a 409 naming the wrong
+// use" arm: the API error contract requires them to stay distinguishable, because a 409 naming the wrong
 // object sends the caller to look at something unrelated. Before these arms existed, every
 // one of them reached statusFor's default and became a 500.
 func volumeStatus(err error) (int, bool) {
@@ -319,48 +319,48 @@ func volumeStatus(err error) (int, bool) {
 	case errors.Is(err, store.ErrVolumeHasDescendants):
 		// The FOURTH FK path: a live snapshot or clone names this volume as its parent.
 		// 409, and DISTINCT from ErrVolumeInUse because the remedy differs — delete the
-		// descendant rather than detach a mount (the documented invariant).
+		// descendant rather than detach a mount (the control-plane API).
 		return http.StatusConflict, true
 	case errors.Is(err, store.ErrVolumeInUse):
-		// ① delete a volume a live mount row holds. A state conflict the caller resolves
+		//  delete a volume a live mount row holds. A state conflict the caller resolves
 		// by detaching or destroying the holder.
 		return http.StatusConflict, true
 	case errors.Is(err, store.ErrSandboxHasMounts):
-		// ② delete a sandbox a live mount row holds. Reachable only if a caller bypasses
+		//  delete a sandbox a live mount row holds. Reachable only if a caller bypasses
 		// the mediator's destroy (which deletes the rows first), so it is a genuine
 		// 409 rather than an internal error.
 		return http.StatusConflict, true
 	case errors.Is(err, store.ErrMountLeaseConflict):
-		// ③ attach lost the exclusive lease — RETRYABLE once the holder releases.
+		//  attach lost the exclusive lease — RETRYABLE once the holder releases.
 		return http.StatusConflict, true
 	case errors.Is(err, store.ErrMountBindingInvalid):
-		// 400, NOT one of the four 409s (the documented invariant): a single submitted binding contradicting
+		// 400, NOT one of the four 409s (the API error contract): a single submitted binding contradicting
 		// itself is decidable without reading another row, and no retry or state change
-		// can make it legal. the documented invariant's four 409s do not grow.
+		// can make it legal. the API error contract's four 409s do not grow.
 		return http.StatusBadRequest, true
 	}
 	switch {
 	case errors.Is(err, lifecycle.ErrVolumeCapBelowUsage):
 		// 400, NOT 507: nothing is full, and no retry or state change makes this legal.
 		// The engine refuses it even though the substrate would accept it, because
-		// accepting manufactures a state the control plane cannot leave (the documented invariant /
-		// the relevant internals page the documented invariant).
+		// accepting manufactures a state the control plane cannot leave (the Volume subsystem /
+		// volume cap enforcement).
 		return http.StatusBadRequest, true
 	case errors.Is(err, lifecycle.ErrVolumeLiveWriter):
-		// the documented invariant's FOURTH Volume 409: the write regime refused a direct change because a
+		// the API error contract's FOURTH Volume 409: the write regime refused a direct change because a
 		// live read-write mount holds the volume. 409 rather than 400 because it is
 		// RETRYABLE — pausing the holder makes the same request succeed, which is the
 		// documented remedy (and a `paused` sandbox is deliberately NOT a live writer).
 		return http.StatusConflict, true
 	case errors.Is(err, lifecycle.ErrVolumeDirectWriteInFlight):
-		// The SAME the documented invariant category as ErrVolumeLiveWriter, refused from the other side: a cold
-		// start would mount read-write a volume with a direct write in flight (the documented invariant's
+		// The SAME the API error contract category as ErrVolumeLiveWriter, refused from the other side: a cold
+		// start would mount read-write a volume with a direct write in flight (the Volume subsystem's
 		// symmetric write regime). 409 for the same reason — retryable, the remedy being to
 		// wait for that import to finish.
 		return http.StatusConflict, true
 	case errors.Is(err, lifecycle.ErrVolumeCapUnsupported):
-		// 400: the backend genuinely cannot enforce a cap (the documented invariant capability query).
-		// Refused rather than silently run uncapped, which would leave every the documented invariant
+		// 400: the backend genuinely cannot enforce a cap (the API error contract capability query).
+		// Refused rather than silently run uncapped, which would leave every the data-plane exposure boundary
 		// blast-radius assertion trusting a limit that is not there.
 		return http.StatusBadRequest, true
 	}

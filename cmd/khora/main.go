@@ -1,4 +1,4 @@
-// Command khora is the CLI for the sandbox engine's the documented invariant API. It is a peer client of
+// Command khora is the CLI for the sandbox engine's control-plane API. It is a peer client of
 // the same API that a frontend uses — the CLI is a first-class citizen, not a back door.
 package main
 
@@ -38,7 +38,7 @@ var (
 	clientKeyFile  string
 	caCertFile     string
 	httpClient     = http.DefaultClient
-	// api is the thin client every command goes through (the recorded design part 2: the CLI is a
+	// api is the thin client every command goes through (the thin-client contract: the CLI is a
 	// shell over pkg/khora). Built once in PersistentPreRunE, after the flags are
 	// parsed and before any command runs.
 	//
@@ -51,10 +51,10 @@ var (
 
 // version is stamped by the Makefile's -X at build time; "dev" means built by a
 // bare `go build`. Per-binary rather than a shared package, matching the other
-// three: the gateway "imports nothing from internal/" (the recorded design).
+// three: the gateway "imports nothing from internal/" (the deployment boundary).
 var version = "dev"
 
-func main() {
+func newRootCommand() *cobra.Command {
 	rootCmd := &cobra.Command{
 		Use: "khora",
 		// cobra serves --version from this field, and it does so before
@@ -64,7 +64,7 @@ func main() {
 		Short:   "Sandbox engine CLI",
 		Long: `khora is the CLI for the sandbox engine.
 
-It wraps the the documented invariant REST + Connect-RPC API, providing commands for sandbox lifecycle,
+It wraps the control-plane REST and Connect-RPC APIs, providing commands for sandbox lifecycle,
 file operations, volumes, templates, network configuration, and event streaming.`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -213,8 +213,13 @@ file operations, volumes, templates, network configuration, and event streaming.
 		processCmd,
 		healthCmd,
 	)
+	rootCmd.AddCommand(newGenerateDocsCommand(rootCmd))
 
-	if err := rootCmd.Execute(); err != nil {
+	return rootCmd
+}
+
+func main() {
+	if err := newRootCommand().Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}

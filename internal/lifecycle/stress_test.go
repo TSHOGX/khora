@@ -17,8 +17,8 @@ import (
 )
 
 // storeFactory builds a fresh Store for a stress subtest. Both backends run the
-// SAME the documented invariant assertions — the transition lock + CAS are the mediator's
-// orchestration obligation (the documented invariant: verbs belong to the mediator), so they must hold
+// SAME per-sandbox transition serialization assertions — the transition lock + CAS are the mediator's
+// orchestration obligation (the lifecycle: verbs belong to the mediator), so they must hold
 // identically no matter
 // which store backs them.
 type storeFactory struct {
@@ -57,7 +57,7 @@ func seedPausedStore(t *testing.T, st store.Store, sid, oid, tmpl string) {
 	t.Helper()
 	ctx := context.Background()
 	now := time.Now()
-	// the documented invariant template FK: ensure the referenced Template exists (idempotent).
+	// health and reclamation template FK: ensure the referenced Template exists (idempotent).
 	_ = st.CreateTemplate(ctx, model.Template{ID: model.TemplateID(tmpl), Builtin: true, CreatedAt: now})
 	if err := st.CreateSandbox(ctx, model.Sandbox{
 		ID: model.SandboxID(sid), Template: model.TemplateID(tmpl),
@@ -77,7 +77,7 @@ func seedPausedStore(t *testing.T, st store.Store, sid, oid, tmpl string) {
 // N goroutines race resume/pause/destroy on the SAME paused sandbox under
 // -race. The transition lock serializes them and CAS rejects the ones facing an
 // already-changed state — exactly one verb advances the sandbox, no data race,
-// no torn state. Runs on both store backends (the documented invariant is mediator-layer, backend
+// no torn state. Runs on both store backends (per-sandbox transition serialization is mediator-layer, backend
 // independent).
 func TestStressConcurrentVerbsOneSandbox(t *testing.T) {
 	for _, bk := range stressBackends() {
@@ -143,7 +143,7 @@ func TestStressConcurrentVerbsOneSandbox(t *testing.T) {
 // the lock is held for the WHOLE resume cold-start, so a concurrent destroy
 // cannot acquire the lock and therefore cannot delete the Overlay in-flight
 // resume is mounting. Only after resume lands (or unwinds) does destroy proceed.
-// This is the data-race the documented invariant closes; run on the persistent store too.
+// This is the data-race per-sandbox transition serialization closes; run on the persistent store too.
 func TestStressDestroyBlockedDuringResume(t *testing.T) {
 	for _, bk := range stressBackends() {
 		t.Run(bk.name, func(t *testing.T) {
@@ -203,7 +203,7 @@ func seedRunningStore(t *testing.T, m *Mediator, st store.Store, sid, oid, tmpl 
 	t.Helper()
 	ctx := context.Background()
 	now := time.Now()
-	// the documented invariant template FK: ensure the referenced Template exists (idempotent).
+	// health and reclamation template FK: ensure the referenced Template exists (idempotent).
 	_ = st.CreateTemplate(ctx, model.Template{ID: model.TemplateID(tmpl), Builtin: true, CreatedAt: now})
 	if err := st.CreateSandbox(ctx, model.Sandbox{
 		ID: model.SandboxID(sid), Template: model.TemplateID(tmpl),
@@ -221,7 +221,7 @@ func seedRunningStore(t *testing.T, m *Mediator, st store.Store, sid, oid, tmpl 
 // The reaper-WINS-the-lock direction (symmetric to TestStressConcurrentVerbsOneSandbox,
 // which races only user verbs). A reaper Sweep loop runs concurrently with user
 // pause/resume/destroy on the SAME sandbox: the reaper can auto-pause (idle) or
-// evict (paused past retention) while user verbs race it. the documented invariant's per-sandbox
+// evict (paused past retention) while user verbs race it. per-sandbox transition serialization's per-sandbox
 // lock serializes reaper dispositions against user verbs, and CAS rejects the
 // loser facing an already-changed state — so no data race (under -race), no torn
 // state, exactly one verb advances the sandbox at a time. Both backends.
@@ -341,10 +341,10 @@ func TestStressPauseRejectedOnPaused(t *testing.T) {
 	}
 }
 
-// the documented invariant no-oversubscribe under TRUE CONCURRENCY — the crack the per-sandbox
+// resource admission no-oversubscribe under TRUE CONCURRENCY — the crack the per-sandbox
 // transition lock cannot cover.
 //
-// Every other the documented invariant race in this file is about ONE sandbox, so the per-sandbox
+// Every other per-sandbox transition serialization race in this file is about ONE sandbox, so the per-sandbox
 // lock serializes it. The admission gate is different in kind: its invariant is
 // node-GLOBAL (a sum over every record), while `Create` mints a FRESH SandboxID
 // and therefore takes a brand-new, uncontended lock. So N concurrent creates hold
@@ -352,7 +352,7 @@ func TestStressPauseRejectedOnPaused(t *testing.T) {
 //
 // The failure this pins down is silent: each create is individually admissible,
 // every per-sandbox cap is honored, and the node still ends up over its declared
-// budget — precisely the oversubscription the gate exists to prevent (the documented invariant from
+// budget — precisely the oversubscription the gate exists to prevent (the data-plane exposure boundary from
 // the other direction: a sandbox's write failing because of OTHER sandboxes).
 // Without admitMu spanning {gate → insert}, all N read the store before any of
 // them inserts, all N pass, and the sum overshoots.
@@ -403,7 +403,7 @@ func TestConcurrentCreatesCannotOversubscribeTheNode(t *testing.T) {
 			}
 			// The invariant, stated as the gate states it: admitted promises must fit.
 			if int64(admitted)*gib > 4*gib {
-				t.Fatalf("admitted %d sandboxes × 1 GiB against a 4 GiB budget — the node is oversubscribed (the documented invariant)", admitted)
+				t.Fatalf("admitted %d sandboxes × 1 GiB against a 4 GiB budget — the node is oversubscribed (resource admission)", admitted)
 			}
 			// And the gate must not be needlessly stingy: the budget fits 4, so all 4
 			// slots should be taken. (A gate that refuses everything would satisfy the
@@ -445,7 +445,7 @@ func TestConcurrentCreatesCannotOversubscribeTheNode(t *testing.T) {
 //
 // The delay is deliberately on the COMMIT and not on the gate: it is the interval
 // between "this raise passed" and "this raise is visible to the next gate run"
-// that admitMu has to cover, per the documented invariant's "a write to a cap changes Σ at that
+// that admitMu has to cover, per resource admission's "a write to a cap changes Σ at that
 // commit".
 type slowCommitStore struct {
 	store.Store
@@ -457,15 +457,15 @@ func (s slowCommitStore) UpdateBinding(ctx context.Context, id model.SandboxID, 
 	return s.Store.UpdateBinding(ctx, id, expected, b, cause)
 }
 
-// The same the documented invariant crack reached by the OTHER route: a cap RAISE via PATCH.
+// The same resource admission crack reached by the OTHER route: a cap RAISE via PATCH.
 //
 // TestConcurrentCreatesCannotOversubscribeTheNode covers create, where the fresh
 // SandboxID makes the disjoint-lock argument obvious. A raise looks safer at a
 // glance because the sandbox already exists and holds a transition lock — but that
-// lock is PER-SANDBOX (the documented invariant), so N raises on N DIFFERENT sandboxes hold N
+// lock is PER-SANDBOX (per-sandbox transition serialization), so N raises on N DIFFERENT sandboxes hold N
 // disjoint locks and serialize against each other exactly as little as N creates
 // do. The node-global sum has one arbiter, admitMu, and it must span
-// {gate → commit}: the documented invariant states that any write to a cap changes Σ AT THAT COMMIT,
+// {gate → commit}: resource admission states that any write to a cap changes Σ AT THAT COMMIT,
 // so a gate that returns before committing has measured a Σ that is already stale.
 //
 // FALSIFIED, measured. Narrowing UpdateBinding's critical section back to the gate
@@ -515,7 +515,7 @@ func TestConcurrentCapRaisesCannotOversubscribeTheNode(t *testing.T) {
 				NodeCapacity: NodeCapacity{DiskByte: budget, MemoryByte: 0},
 			})
 
-			// Caps are editable only from `paused` (the documented invariant), which is also the state a
+			// Caps are editable only from `paused` (resource admission), which is also the state a
 			// raise is expected to arrive in — so seed paused records directly rather
 			// than driving create, keeping the test about the gate and not cold start.
 			ids := make([]model.SandboxID, N)
@@ -577,7 +577,7 @@ func TestConcurrentCapRaisesCannotOversubscribeTheNode(t *testing.T) {
 				}
 			}
 			if committed > budget {
-				t.Fatalf("committed disk caps sum to %d > node budget %d (%d of %d raises admitted) — the node is oversubscribed (the documented invariant)",
+				t.Fatalf("committed disk caps sum to %d > node budget %d (%d of %d raises admitted) — the node is oversubscribed (resource admission)",
 					committed, budget, admitted, N)
 			}
 

@@ -8,7 +8,7 @@
 // The engine's own fault hooks (FaultAfterColdStart) live host-side in the
 // mediator and can stay in the normal build because the engine controls when
 // they fire. This one is different: it triggers on state INSIDE a guest whose
-// filesystem the guest itself can write (the documented invariant root-capable), so shipping it in
+// filesystem the guest itself can write (the engine vocabulary boundary root-capable), so shipping it in
 // production would let a sandbox disable its own transport by touching a path.
 
 package main
@@ -20,8 +20,8 @@ import "os"
 // starts, the child exits BEFORE serving. A test writes it, then kills the
 // transport child — PID1 re-execs it, it sees the sentinel and exits, and it
 // keeps crash-looping (L1 container alive, L2 never comes up = transport-down
-// forever). That manufactures the the documented invariant transport-down crash-loop the reaper must
-// escalate past the restart budget (reaper-health the documented invariantb). Because /tmp is tmpfs
+// forever). That manufactures the health and reclamation transport-down crash-loop the reaper must
+// escalate past the restart budget (the transport-down restart budget). Because /tmp is tmpfs
 // (not the Overlay) it is CLEARED on resume, so the reaper's escalation
 // cold-start comes up healthy on a fresh /tmp.
 //

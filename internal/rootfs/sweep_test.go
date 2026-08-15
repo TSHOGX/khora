@@ -50,7 +50,7 @@ func noBtrfs() btrfs.Client {
 }
 
 // mkUnit plants an uncapped Overlay storage unit (StateDir/<id> holding
-// upper+work, the documented invariant) with a file in it, and returns the unit path.
+// upper+work, rootfs storage) with a file in it, and returns the unit path.
 func mkUnit(t *testing.T, p *HostOverlayFS, id string) string {
 	t.Helper()
 	for _, sub := range []string{p.upperPath(id), p.workPath(id)} {
@@ -64,9 +64,9 @@ func mkUnit(t *testing.T, p *HostOverlayFS, id string) string {
 	return p.unitPath(id)
 }
 
-// the documented invariant / the documented invariant: a layer dir with no live row and not building is an orphan →
+// the Rootfs subsystem / atomic transition rollback: a layer dir with no live row and not building is an orphan →
 // reclaimed; a live one is kept; an in-flight-Promote one (building) is protected
-// even though it has no live row yet (bytes-first, the documented invariant).
+// even though it has no live row yet (bytes-first, the Rootfs subsystem).
 func TestSweepOrphanLayers(t *testing.T) {
 	ctx := context.Background()
 	base := t.TempDir()
@@ -98,7 +98,7 @@ func TestSweepOrphanLayers(t *testing.T) {
 }
 
 // At boot the building keep-set is empty, so a crashed-Promote staging layer
-// (bytes on disk, no row) is a TRUE orphan and is reclaimed (the documented invariant / the documented invariant).
+// (bytes on disk, no row) is a TRUE orphan and is reclaimed (the Rootfs subsystem / atomic transition rollback).
 func TestSweepReclaimsCrashedPromoteStagingAtBoot(t *testing.T) {
 	ctx := context.Background()
 	base := t.TempDir()
@@ -136,13 +136,13 @@ func TestSweepMissingLayersDir(t *testing.T) {
 	}
 }
 
-// --- SweepOrphanOverlays: the the documented invariant unit sweep (the documented invariant's licensed retry) ---
+// --- SweepOrphanOverlays: the atomic transition rollback unit sweep (the transition contract's licensed retry) ---
 
 // The three properties in one pass, because they must hold SIMULTANEOUSLY — a
 // sweep that reclaimed the orphan by reclaiming everything would pass three
 // separate single-unit tests:
 //
-//	orphan  (no row, not in flight) → RECLAIMED. This is the residue the documented invariant
+//	orphan  (no row, not in flight) → RECLAIMED. This is the residue the transition contract
 //	                                 licenses: destroy drops DestroyOverlay's
 //	                                 error, then deletes the row.
 //	live    (row present)           → KEPT. Reclaiming it would delete a running
@@ -174,7 +174,7 @@ func TestSweepOrphanOverlays(t *testing.T) {
 		t.Error("live Overlay unit was reclaimed (has a live sandbox row → must be kept)")
 	}
 	if exists(t, orphanUnit) {
-		t.Error("orphan Overlay unit survived the sweep (no live row → must be reclaimed; this is the the documented invariant licensed retry)")
+		t.Error("orphan Overlay unit survived the sweep (no live row → must be reclaimed; this is the transition contract licensed retry)")
 	}
 	if !exists(t, buildingUnit) {
 		t.Error("in-flight-create Overlay unit was reclaimed (building keep-set → must be protected)")
@@ -183,7 +183,7 @@ func TestSweepOrphanOverlays(t *testing.T) {
 
 // At boot the in-flight keep-set is empty, so a unit whose record is already gone
 // is a TRUE orphan and is reclaimed — the post-deletion residue no record survives
-// to hang reclamation off (the documented invariant). Also pins that the uncapped path is genuinely
+// to hang reclamation off (atomic transition rollback). Also pins that the uncapped path is genuinely
 // btrfs-independent: with every btrfs query failing the unit still goes away.
 func TestSweepOrphanOverlaysReclaimsPostDeletionResidueAtBoot(t *testing.T) {
 	ctx := context.Background()

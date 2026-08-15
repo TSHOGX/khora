@@ -31,7 +31,7 @@ func volFixture(t *testing.T) (*Mediator, *store.Memory, *fakeVolume) {
 }
 
 // TestCreateVolumeIsBytesFirst pins the ORDER, which existence-is-state forces
-// (the documented invariant / the documented invariant): a `volumes` row has no not-ready value, so the storage must be
+// (the Volume subsystem / health and reclamation): a `volumes` row has no not-ready value, so the storage must be
 // fully allocated before the row is inserted. A crash before the insert therefore
 // leaves orphan BYTES (the sweep's job) rather than a row naming storage that is not
 // there.
@@ -48,7 +48,7 @@ func TestCreateVolumeIsBytesFirst(t *testing.T) {
 	}
 	// The backend was asked to allocate, and the cap crossed the seam WITH the
 	// allocation — one operation, because a missing cap is silent and undetectable
-	// afterwards (the relevant internals page the documented invariant).
+	// afterwards (volume cap enforcement).
 	calls := vb.Calls()
 	if len(calls) == 0 || !strings.HasPrefix(calls[0], "CreateVolume:") {
 		t.Fatalf("backend calls = %v; want CreateVolume first", calls)
@@ -106,8 +106,8 @@ func TestCreateVolumeUnwindsBytesWhenTheRowLoses(t *testing.T) {
 	}
 }
 
-// TestCreateVolumeChecksCapabilityBeforeMovingBytes pins the TIMING that the relevant internals page
-// the documented invariant calls load-bearing. An external implementation maps "backend does not support
+// TestCreateVolumeChecksCapabilityBeforeMovingBytes pins the TIMING that the lifecycle contract
+// Volume storage calls load-bearing. An external implementation maps "backend does not support
 // this" at its HTTP boundary while the error is born deep inside, so the 400 arrives
 // only after bytes have already moved — and combined with mediator-minted IDs that
 // leaves a window whose residue no sweep can classify.
@@ -181,7 +181,7 @@ func TestVolumeCapWritePointRefusesLoweringBelowUsage(t *testing.T) {
 
 	// Removing the cap clears the WEDGE check unconditionally — 0 only widens what the
 	// unit may hold, so no bytes can be stranded above the ceiling. (It is refused for a
-	// different reason when the disk axis is METERED, which is the documented invariant's budget rather than
+	// different reason when the disk axis is METERED, which is resource admission's budget rather than
 	// the wedge; this fixture is unmetered, and both directions are pinned by
 	// TestAdmissionCountsVolumeCaps.)
 	if err := m.SetVolumeCapacity(ctx, id, 0); err != nil {
@@ -209,7 +209,7 @@ func TestVolumeCapWritePointFailsClosedOnUnreadableUsage(t *testing.T) {
 	}
 }
 
-// TestVolumeCapEditableWhileNothingIsMounted is the the documented invariant asymmetry with sandbox caps,
+// TestVolumeCapEditableWhileNothingIsMounted is the Volume subsystem asymmetry with sandbox caps,
 // asserted rather than assumed: a volume cap is editable with no placement anywhere,
 // which is the exact opposite of "resource caps are editable only from paused".
 //
@@ -228,7 +228,7 @@ func TestVolumeCapEditableWhileNothingIsMounted(t *testing.T) {
 		t.Fatalf("fixture unexpectedly has %d sandbox(es)", len(recs))
 	}
 	if err := m.SetVolumeCapacity(ctx, id, 16<<20); err != nil {
-		t.Fatalf("cap edit with nothing mounted = %v; want success (the documented invariant: no placement to defer to)", err)
+		t.Fatalf("cap edit with nothing mounted = %v; want success (the Volume subsystem: no placement to defer to)", err)
 	}
 	rec, _ := st.GetVolume(ctx, id)
 	if rec.CapByte != 16<<20 {
@@ -241,7 +241,7 @@ func TestVolumeCapEditableWhileNothingIsMounted(t *testing.T) {
 // volume cap.
 //
 // The failure this guards is immediate oversell — an uncapped unit contributing 0 to the
-// left side while free to consume all of the right (the documented invariant).
+// left side while free to consume all of the right (the resource-cap write rules).
 func TestAdmissionCountsVolumeCaps(t *testing.T) {
 	ctx := context.Background()
 
@@ -293,7 +293,7 @@ func TestAdmissionCountsVolumeCaps(t *testing.T) {
 		}
 	})
 
-	// The other side of the same branch, or the fix above would revoke a capability the documented invariant
+	// The other side of the same branch, or the fix above would revoke a capability resource admission
 	// grants: on an UNMETERED node an uncapped volume is legal, so removing a cap must
 	// still work. Without this, "refuse size=0" could be satisfied unconditionally.
 	t.Run("an unmetered disk axis still allows removing a volume's cap", func(t *testing.T) {
@@ -307,7 +307,7 @@ func TestAdmissionCountsVolumeCaps(t *testing.T) {
 			t.Fatalf("create capped volume: %v", err)
 		}
 		if err := m.SetVolumeCapacity(ctx, vid, 0); err != nil {
-			t.Fatalf("PATCH size=0 on an UNMETERED node = %v; want success — the documented invariant permits an uncapped volume when the axis is not gated, so refusing here would revoke that", err)
+			t.Fatalf("PATCH size=0 on an UNMETERED node = %v; want success — resource admission permits an uncapped volume when the axis is not gated, so refusing here would revoke that", err)
 		}
 	})
 
@@ -327,7 +327,7 @@ func TestAdmissionCountsVolumeCaps(t *testing.T) {
 		}
 		_, err := m.CreateVolume(ctx, 40<<20)
 		if !errors.Is(err, ErrInsufficientCapacity) {
-			t.Fatalf("third 40 MiB volume against a 100 MiB budget = %v; want ErrInsufficientCapacity — omitting Σ(volume caps) oversells the node on the spot (the documented invariant)", err)
+			t.Fatalf("third 40 MiB volume against a 100 MiB budget = %v; want ErrInsufficientCapacity — omitting Σ(volume caps) oversells the node on the spot (resource admission)", err)
 		}
 	})
 
@@ -351,7 +351,7 @@ func TestAdmissionCountsVolumeCaps(t *testing.T) {
 		// 70 MiB of sandbox cap is already committed, so a 40 MiB volume must not fit —
 		// the two are like terms on ONE left-hand side, not two independent budgets.
 		if _, err := m.CreateVolume(ctx, 40<<20); !errors.Is(err, ErrInsufficientCapacity) {
-			t.Fatalf("volume admitted beside a 70 MiB sandbox cap on a 100 MiB budget = %v; want refusal — no third term (the documented invariant)", err)
+			t.Fatalf("volume admitted beside a 70 MiB sandbox cap on a 100 MiB budget = %v; want refusal — no third term (resource admission)", err)
 		}
 		// 20 MiB does fit.
 		if _, err := m.CreateVolume(ctx, 20<<20); err != nil {
@@ -362,7 +362,7 @@ func TestAdmissionCountsVolumeCaps(t *testing.T) {
 	t.Run("uncapped VOLUME bytes count in the second term", func(t *testing.T) {
 		st := store.NewMemory()
 		vb := newFakeVolume()
-		// Bytes the volume backend holds under no declared cap. Without the documented invariant's half of
+		// Bytes the volume backend holds under no declared cap. Without the Volume subsystem's half of
 		// the second term these are invisible and the node is silently overcommitted.
 		vb.uncappedBytes = 90 << 20
 		m := New(Deps{
@@ -371,7 +371,7 @@ func TestAdmissionCountsVolumeCaps(t *testing.T) {
 			Logf:         func(string, ...any) {},
 		})
 		if _, err := m.CreateVolume(ctx, 20<<20); !errors.Is(err, ErrInsufficientCapacity) {
-			t.Fatalf("create against 90 MiB of UNCAPPED volume bytes on a 100 MiB budget = %v; want refusal — the second term sums the documented invariant AND the documented invariant (the documented invariant)", err)
+			t.Fatalf("create against 90 MiB of UNCAPPED volume bytes on a 100 MiB budget = %v; want refusal — the second term sums the Rootfs subsystem AND the Volume subsystem (resource admission)", err)
 		}
 	})
 
@@ -385,7 +385,7 @@ func TestAdmissionCountsVolumeCaps(t *testing.T) {
 			Logf:         func(string, ...any) {},
 		})
 		if _, err := m.CreateVolume(ctx, 1<<20); !errors.Is(err, ErrInsufficientCapacity) {
-			t.Fatalf("create with an unmeasurable volume backend = %v; want a fail-closed refusal (the documented invariant: failing open moves the cost onto unrelated sandboxes)", err)
+			t.Fatalf("create with an unmeasurable volume backend = %v; want a fail-closed refusal (the data-plane exposure boundary: failing open moves the cost onto unrelated sandboxes)", err)
 		}
 	})
 
@@ -420,7 +420,7 @@ func TestAdmissionCountsVolumeCaps(t *testing.T) {
 
 // TestDeleteVolumeIsRowFirst pins the order, which is load-bearing rather than
 // incidental: the row delete is where every reference-protection refusal surfaces
-// (the documented invariant's Volume 409s), so destroying bytes first would mean a delete the store then
+// (the API error contract's Volume 409s), so destroying bytes first would mean a delete the store then
 // REFUSES has already destroyed the data it was refusing to release.
 func TestDeleteVolumeIsRowFirst(t *testing.T) {
 	ctx := context.Background()
@@ -439,34 +439,34 @@ func TestDeleteVolumeIsRowFirst(t *testing.T) {
 		t.Errorf("backend still holds the unit after delete")
 	}
 	// Byte reclamation FAILING does not fail the verb: the record is already gone, so
-	// the sweep is the retry (the documented invariant licenses exactly this deferral).
+	// the sweep is the retry (the transition contract licenses exactly this deferral).
 	id2, err := m.CreateVolume(ctx, 0)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	vb.failDestroy = true
 	if err := m.DeleteVolume(ctx, id2); err != nil {
-		t.Errorf("delete with failing byte reclamation = %v; want success (the sweep retries, the documented invariant)", err)
+		t.Errorf("delete with failing byte reclamation = %v; want success (the sweep retries, the transition contract)", err)
 	}
 	if _, err := st.GetVolume(ctx, id2); err != store.ErrVolumeNotFound {
 		t.Errorf("record survived a delete whose byte reclamation failed")
 	}
 }
 
-// TestDeleteVolumeReportsNotFound: the documented invariant — idempotent delete must not swallow the
+// TestDeleteVolumeReportsNotFound: the API error contract — idempotent delete must not swallow the
 // verdicts, because the RESTRICT refusals land on this same path.
 func TestDeleteVolumeReportsNotFound(t *testing.T) {
 	ctx := context.Background()
 	m, _, _ := volFixture(t)
 	if err := m.DeleteVolume(ctx, "vol_never"); !errors.Is(err, store.ErrVolumeNotFound) {
-		t.Fatalf("delete of an absent volume = %v; want store.ErrVolumeNotFound (the documented invariant: folding this into success makes a REFUSED delete indistinguishable from a successful one)", err)
+		t.Fatalf("delete of an absent volume = %v; want store.ErrVolumeNotFound (the API error contract: folding this into success makes a REFUSED delete indistinguishable from a successful one)", err)
 	}
 }
 
 // TestImportExportNeedsNoSandbox is the record-and-verb half of import → export:
 // bytes go in and come back out on a node that has NEVER had a sandbox. That is what
 // makes "the volume's lifecycle is decoupled from any sandbox" true in substance
-// rather than only in the record layer (the documented invariant).
+// rather than only in the record layer (the Volume subsystem).
 func TestImportExportNeedsNoSandbox(t *testing.T) {
 	ctx := context.Background()
 	m, st, _ := volFixture(t)
@@ -592,7 +592,7 @@ func TestSweepOrphanVolumesFailsClosedOnUnreadableEnumeration(t *testing.T) {
 	survived := vb.units[string(orphan)]
 	vb.mu.Unlock()
 	if !survived {
-		t.Errorf("the sweep reclaimed something despite an unreadable enumeration — an error is not evidence that anything is an orphan (the documented invariant)")
+		t.Errorf("the sweep reclaimed something despite an unreadable enumeration — an error is not evidence that anything is an orphan (the Volume subsystem)")
 	}
 }
 
@@ -631,7 +631,7 @@ func (s *recordlessVolumeStore) ListVolumes(ctx context.Context) ([]model.Volume
 }
 
 // mountReadFailingStore fails ListMountsByVolume wholesale, which is the MEASURED
-// failure mode (the documented invariant): under the concurrent churn a sweep runs in, a bulk read fails
+// failure mode (the Volume subsystem): under the concurrent churn a sweep runs in, a bulk read fails
 // as a whole and returns zero rows. "The read failed" and "nothing owns it" must
 // never be the same answer.
 type mountReadFailingStore struct {
@@ -643,7 +643,7 @@ func (s *mountReadFailingStore) ListMountsByVolume(context.Context, model.Volume
 }
 
 // TestSweepOrphanVolumesKeepsAUnitHeldOnlyByAMountRow is the FK-INDEPENDENT half of
-// the the documented invariant live-mount requirement: skip any unit whose id appears in ANY mount row,
+// the Volume subsystem live-mount requirement: skip any unit whose id appears in ANY mount row,
 // live or not.
 //
 // The requirement is about the CANDIDATE UNIT IDS, not about the volumes that have
@@ -656,7 +656,7 @@ func (s *mountReadFailingStore) ListMountsByVolume(context.Context, model.Volume
 // reasoned about: measured, five ways of pulling a live volume out from under a
 // writing guest killed the sandbox zero times, and three of the five produced no
 // errno at all — the guest's writes keep returning success into an unlinked inode
-// (the relevant internals page the documented invariant).
+// (volume sweep safety).
 func TestSweepOrphanVolumesKeepsAUnitHeldOnlyByAMountRow(t *testing.T) {
 	ctx := context.Background()
 	m, st, vb := volFixture(t)
@@ -700,7 +700,7 @@ func TestSweepOrphanVolumesKeepsAUnitHeldOnlyByAMountRow(t *testing.T) {
 	stillOrphan := vb.units[string(orphan)]
 	vb.mu.Unlock()
 	if !stillHeld {
-		t.Errorf("a unit named by a live MOUNT ROW was reclaimed on the strength of its record being absent — FK RESTRICT protects the ROW, the the documented invariant mount check is what protects the BYTES, and the bytes are what a mis-sweep destroys silently (the relevant internals page the documented invariant)")
+		t.Errorf("a unit named by a live MOUNT ROW was reclaimed on the strength of its record being absent — FK RESTRICT protects the ROW, the Volume subsystem mount check is what protects the BYTES, and the bytes are what a mis-sweep destroys silently (volume sweep safety)")
 	}
 	if stillOrphan {
 		t.Errorf("the true orphan survived — without this the assertion above passes for a sweep that reclaims nothing")
@@ -720,7 +720,7 @@ func TestSweepOrphanVolumesKeepsAUnitHeldOnlyByAMountRow(t *testing.T) {
 }
 
 // TestSweepOrphanVolumesSkipsWhenTheMountTableIsUnreadable: an unreadable mount table
-// SKIPS the candidate. the documented invariant states it as a hard requirement — on a read error, skip, and
+// SKIPS the candidate. the Volume subsystem states it as a hard requirement — on a read error, skip, and
 // never treat an empty result as "no owner" (see mountReadFailingStore for why the two
 // are indistinguishable).
 //
@@ -741,15 +741,15 @@ func TestSweepOrphanVolumesSkipsWhenTheMountTableIsUnreadable(t *testing.T) {
 	m.deps.Store = &mountReadFailingStore{Store: st}
 
 	// Skip-and-log, not abort: a sweep failure is not fatal and retries next pass
-	// (the documented invariant), so the sweep still reports success.
+	// (atomic transition rollback), so the sweep still reports success.
 	if err := m.SweepOrphanVolumes(ctx); err != nil {
-		t.Fatalf("sweep: %v — an unreadable mount table skips the candidate; it does not fail the pass (the documented invariant)", err)
+		t.Fatalf("sweep: %v — an unreadable mount table skips the candidate; it does not fail the pass (atomic transition rollback)", err)
 	}
 	vb.mu.Lock()
 	survived := vb.units[string(orphan)]
 	vb.mu.Unlock()
 	if !survived {
-		t.Errorf("a candidate was reclaimed while the mount table was UNREADABLE — measured, that read fails wholesale and returns zero rows, so treating the error as 'no owner' destroys the bytes of a mounted volume (the documented invariant)")
+		t.Errorf("a candidate was reclaimed while the mount table was UNREADABLE — measured, that read fails wholesale and returns zero rows, so treating the error as 'no owner' destroys the bytes of a mounted volume (the Volume subsystem)")
 	}
 }
 
@@ -845,14 +845,14 @@ func TestRebindIsOneStoreCommit(t *testing.T) {
 	}
 
 	// And the SUCCEEDING path is one call too — including the detach-everything case,
-	// which is a replacement with an empty binding rather than a delete (the documented invariant).
+	// which is a replacement with an empty binding rather than a delete (the API error contract).
 	spy.replaces = 0
 	released, err := patchMounts(m, ctx, "sbx_r", nil)
 	if err != nil {
 		t.Fatalf("detach-everything rebind: %v", err)
 	}
 	if !released {
-		t.Error("detaching an exclusively-held volume reported no lease release; the caller waiting to attach it elsewhere depends on that flag (the documented invariant)")
+		t.Error("detaching an exclusively-held volume reported no lease release; the caller waiting to attach it elsewhere depends on that flag (the control-plane API)")
 	}
 	if spy.deletes != 0 || spy.creates != 0 || spy.replaces != 1 {
 		t.Errorf("a detach-everything rebind made %d deletes + %d creates + %d replaces; want 0/0/1 — an empty binding is a replacement, not a DeleteMounts", spy.deletes, spy.creates, spy.replaces)

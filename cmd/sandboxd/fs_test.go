@@ -31,7 +31,7 @@ func TestFsErrMapsEveryErrno(t *testing.T) {
 		{"fs.ErrExist", fs.ErrExist, connect.CodeAlreadyExists},
 		{"EACCES", syscall.EACCES, connect.CodePermissionDenied},
 		{"EPERM", syscall.EPERM, connect.CodePermissionDenied},
-		// The the documented invariant capacity cap reaches the caller through this row: a full quota
+		// The resource admission capacity cap reaches the caller through this row: a full quota
 		// must read as resource-exhausted, not as an engine fault.
 		{"ENOSPC", syscall.ENOSPC, connect.CodeResourceExhausted},
 		{"EDQUOT", syscall.EDQUOT, connect.CodeResourceExhausted},
@@ -186,8 +186,8 @@ func TestEntryInfoSymlinkIsLstatAndAbsolutized(t *testing.T) {
 
 // `length` off the wire is an UPPER BOUND, not an allocation size. Pre-sizing a
 // buffer from it let one number drive a guest-side allocation of arbitrary size,
-// and the sandbox is TERMINATED on exceeding its RAM cap (the documented invariant) — so this is the
-// the documented invariant "neither end holds the whole thing" security property, at the RPC.
+// and the sandbox is TERMINATED on exceeding its RAM cap (resource admission) — so this is the
+// transport behavior "neither end holds the whole thing" security property, at the RPC.
 //
 // Asserted two ways because either alone is passable by a wrong fix: the returned
 // length (a size-clamp would also satisfy this) AND total bytes allocated, which

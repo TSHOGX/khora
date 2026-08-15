@@ -1,5 +1,5 @@
-// Command openapigen writes the the documented invariant control-plane OpenAPI document (the recorded design
-// part 1) from the orchestrator's own wire types.
+// Command openapigen writes the control-plane OpenAPI document from the
+// orchestrator's own wire types.
 //
 //	go run ./cmd/openapigen -out docs/api/openapi.json
 //

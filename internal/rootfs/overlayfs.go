@@ -15,26 +15,26 @@ import (
 	"github.com/TSHOGX/khora/internal/guestport"
 )
 
-// HostOverlayFS is the single-node rootfs provider (the documented invariant): it assembles the
+// HostOverlayFS is the single-node rootfs provider (the Rootfs subsystem): it assembles the
 // sandbox's writable Overlay artifact as a host kernel overlayfs — lower =
 // Template, upper+work = the resident Overlay directory, merged = the rootfs
-// handed to runsc (rootfs-overlay the documented invariant/the documented invariant). runsc runs --overlay2=none
+// handed to runsc (overlayfs constraints/rootfs storage). runsc runs --overlay2=none
 // --file-access=shared and never manages the write layer.
 //
-// Host paths are LOCKED inside this subsystem (the documented invariant "ID addressing applies internally too"):
+// Host paths are LOCKED inside this subsystem (the ID-addressed Overlay model "ID addressing applies internally too"):
 // upper/work/merged all derive deterministically from the OverlayID under StateDir, so the
 // handle is reconstructable from a store record on resume (OpenOverlay) without keeping it in
 // memory. Above this subsystem an Overlay is only {ID, Template}.
 //
-// mount/umount are privileged (CAP_SYS_ADMIN) and copy-up files are root-owned (rootfs-overlay
-// the documented invariant), so the orchestrator runs as root (the recorded design). That privilege and the host paths stay
-// sealed here, never in the mediator. The disk-CAPACITY cap (the documented invariant / the documented invariant) is materialized here
+// mount/umount are privileged (CAP_SYS_ADMIN) and copy-up files are root-owned,
+// so the orchestrator runs as root. That privilege and the host paths stay
+// sealed here, never in the mediator. The disk-CAPACITY cap (resource admission / the Rootfs subsystem) is materialized here
 // as a btrfs subvolume carrying an squota limit, via the internal/btrfs leaf package
-// (rootfs-overlay the documented invariant/the documented invariant).
+// (btrfs quota materialization/rootfs storage).
 //
 // The unit is StateDir/<id>, holding BOTH upper and work — one subvolume, hence
 // ONE quota covering both. That is a correctness requirement, not tidiness
-// (the documented invariant): overlayfs copy-up writes into workdir FIRST and only then renames into
+// (rootfs storage): overlayfs copy-up writes into workdir FIRST and only then renames into
 // upper, so a quota on upper alone leaves copy-up as a path straight around the
 // cap. Measured with both in the one subvolume: work/upper are invisible in the
 // merged view and all copy-up traffic is charged.
@@ -43,44 +43,44 @@ type HostOverlayFS struct {
 	StateDir string
 	// TemplatesDir resolves a BUILTIN TemplateID to its read-only lower dir:
 	// TemplatesDir/<template>. Builtin templates are static directories shipped
-	// with the deployment (boot seed, the documented invariant); they are deployment assets, never swept.
+	// with the deployment (boot seed, health and reclamation); they are deployment assets, never swept.
 	TemplatesDir string
 	// LayersDir holds Promote-built layer directories: LayersDir/<templateID>.
-	// These are the immutable read-only layers a Promote freezes (the documented invariant) — the
+	// These are the immutable read-only layers a Promote freezes (the Rootfs subsystem) — the
 	// bytes-first artifact whose orphans (no live templates row) the sweep
-	// reclaims (the documented invariant / the documented invariant). Distinct from TemplatesDir so the sweep never touches a
+	// reclaims (the Rootfs subsystem / atomic transition rollback). Distinct from TemplatesDir so the sweep never touches a
 	// deployment-shipped builtin.
 	LayersDir string
 
-	// Btrfs materializes the the documented invariant capacity cap (subvolume + squota). A shared
-	// substrate TOOL, not a seam — the documented invariant imports the same package for per-volume
-	// caps (rootfs-overlay the documented invariant).
+	// Btrfs materializes the resource admission capacity cap (subvolume + squota). A shared
+	// substrate TOOL, not a seam — the Volume subsystem imports the same package for per-volume
+	// caps (the shared btrfs mechanism).
 	Btrfs btrfs.Client
 }
 
 // unitPath is the per-Overlay storage unit holding upper+work — the thing the
-// capacity quota attaches to (the documented invariant, see HostOverlayFS).
+// capacity quota attaches to (rootfs storage, see HostOverlayFS).
 func (p *HostOverlayFS) unitPath(id string) string { return filepath.Join(p.StateDir, id) }
 
-// applyCap materializes the capacity Binding on an Overlay's storage unit (the documented invariant /
-// the documented invariant). Called from BOTH create and open, because the cap is re-applied at every
+// applyCap materializes the capacity Binding on an Overlay's storage unit (resource admission /
+// the Rootfs subsystem). Called from BOTH create and open, because the cap is re-applied at every
 // placement from the current record rather than trusted to whatever the unit was
-// left carrying (the documented invariant Binding).
+// left carrying (resource admission Binding).
 //
 // A requested cap that CANNOT be enforced is a hard error, never a silent
-// downgrade to "run uncapped": ignoring it would leave every the documented invariant blast-radius
+// downgrade to "run uncapped": ignoring it would leave every the data-plane exposure boundary blast-radius
 // assertion believing in a cap that does not exist. capByte 0 removes any
 // lingering cap, keeping the record the single authority.
-// THE STRICT-INEQUALITY GUARD BELOW IS THE MATERIALIZATION-SIDE HALF of the criterion the the documented invariant
-// write point applies (lifecycle.ErrDiskCapBelowUsage). the documented invariant requires it in both places
+// THE STRICT-INEQUALITY GUARD BELOW IS THE MATERIALIZATION-SIDE HALF of the criterion the control-plane API
+// write point applies (lifecycle.ErrDiskCapBelowUsage). Binding effective points requires it in both places
 // because a Binding is durable while the facts its criterion reads are not — this one reads the
 // unit's CURRENT usage — so "commit → the environment changes → re-materialize" reaches here
 // with no write in between. Concretely: a quota row lost to an external change lets the guest
 // grow past the recorded cap, and the next placement would write that cap UNDER the usage.
 //
-// the documented invariant CANNOT TAKE the documented invariant's ANSWER HERE: RepairVolumeCaps skips such a volume and leaves it
-// uncapped, safe there because the the documented invariant second term then measures its bytes. A placement has no
-// such option — the documented invariant's rule is "refuse the placement, never silently degrade to running
+// the Rootfs subsystem CANNOT TAKE the Volume subsystem's ANSWER HERE: RepairVolumeCaps skips such a volume and leaves it
+// uncapped, safe there because the resource admission second term then measures its bytes. A placement has no
+// such option — the Rootfs subsystem's rule is "refuse the placement, never silently degrade to running
 // uncapped" — so this side REFUSES rather than skips, which is also the reversible direction
 // (see ErrCapBelowUsage).
 func (p *HostOverlayFS) applyCap(ctx context.Context, id string, capByte int64) error {
@@ -104,7 +104,7 @@ func (p *HostOverlayFS) applyCap(ctx context.Context, id string, capByte int64) 
 		return nil
 	}
 	if !p.Btrfs.IsSubvolume(ctx, unit) {
-		return fmt.Errorf("rootfs: overlay %s storage unit %s is not a btrfs subvolume — refusing to run with an unenforceable %d-byte cap (the documented invariant)", id, unit, capByte)
+		return fmt.Errorf("rootfs: overlay %s storage unit %s is not a btrfs subvolume — refusing to run with an unenforceable %d-byte cap (resource admission)", id, unit, capByte)
 	}
 	// FAIL CLOSED on an unreadable row. Writing the cap blind is the IRREVERSIBLE
 	// direction, and a refused placement leaves the sandbox `paused` and retryable — so
@@ -115,7 +115,7 @@ func (p *HostOverlayFS) applyCap(ctx context.Context, id string, capByte int64) 
 	// parse-around: the read either answers or it does not.
 	used, _, err := p.Btrfs.Usage(ctx, unit)
 	if err != nil {
-		return fmt.Errorf("rootfs: cannot read current usage of overlay %s, refusing to apply a %d-byte cap blind (a cap at or below usage wedges the unit irreversibly, the documented invariant): %w", id, capByte, err)
+		return fmt.Errorf("rootfs: cannot read current usage of overlay %s, refusing to apply a %d-byte cap blind (a cap at or below usage wedges the unit irreversibly, the Rootfs subsystem): %w", id, capByte, err)
 	}
 	if capByte <= used {
 		return fmt.Errorf("rootfs: %w: overlay %s holds %d byte(s) and the record's cap is %d — applying it would wedge the storage unit permanently (afterwards even truncate-to-zero and the quota write itself return ENOSPC, so the cap could be neither raised nor removed, and every future placement would fail). The sandbox stays recoverable: PATCH disk_byte strictly above %d (or to 0) and the next resume applies it, or Promote it and create a fresh sandbox",
@@ -188,7 +188,7 @@ func (p *HostOverlayFS) mergedPath(id string) string { return filepath.Join(p.St
 // layerPath resolves a lower-stack ID to its on-disk read-only layer dir. A
 // layer is EITHER a Promote-built layer under LayersDir OR a deployment-shipped
 // builtin under TemplatesDir; we prefer LayersDir (Promote layers) and fall back
-// to TemplatesDir (builtins). Both roots are private to this subsystem (the documented invariant);
+// to TemplatesDir (builtins). Both roots are private to this subsystem (the ID-addressed Overlay model);
 // the caller only ever sees the opaque ID.
 func (p *HostOverlayFS) layerPath(id string) (string, error) {
 	if lp := filepath.Join(p.LayersDir, id); dirExists(lp) {
@@ -208,11 +208,11 @@ func dirExists(path string) bool {
 // mountOptionsCap is the byte ceiling on ONE mount(2) options string. The classic mount
 // path copies the options into a single page and TRUNCATES past it rather than refusing, so
 // overrunning it does not fail cleanly — it mounts a lower stack that is missing its tail,
-// or fails with an unrelated-looking error (rootfs-overlay the documented invariant ⑩: "the classic mount path
+// or fails with an unrelated-looking error (rootfs provider portability: "the classic mount path
 // caps its options at a single page"). Escaping it needs the per-layer `lowerdir+=` API or
 // passed descriptors, neither of which this provider uses.
 //
-// 4096 is the page size on every platform this engine supports (the recorded design fixes it to Linux
+// 4096 is the page size on every platform this engine supports (the root-required deployment fixes it to Linux
 // on x86-64/arm64, both 4 KiB); reading it at runtime would buy nothing checkable.
 const mountOptionsCap = 4096
 
@@ -266,7 +266,7 @@ func (p *HostOverlayFS) handle(overlayID string, lower []string) *Overlay {
 	return &Overlay{ID: overlayID, Template: tmpl, Lower: append([]string(nil), lower...)}
 }
 
-// CreateOverlay allocates an empty upper over a read-only lower stack (① create
+// CreateOverlay allocates an empty upper over a read-only lower stack ( create
 // prefix). It does NOT mount.
 //
 // When a capacity cap is requested the storage unit is created as a btrfs
@@ -283,7 +283,7 @@ func (p *HostOverlayFS) CreateOverlay(ctx context.Context, overlayID string, low
 	}
 	if capByte > 0 {
 		if !p.Btrfs.Available(ctx, p.StateDir) {
-			return nil, fmt.Errorf("rootfs: overlay %s requests a %d-byte capacity cap but StateDir is not on btrfs — refusing to run uncapped (the documented invariant)", overlayID, capByte)
+			return nil, fmt.Errorf("rootfs: overlay %s requests a %d-byte capacity cap but StateDir is not on btrfs — refusing to run uncapped (resource admission)", overlayID, capByte)
 		}
 		if err := p.Btrfs.CreateSubvolume(ctx, p.unitPath(overlayID)); err != nil {
 			return nil, fmt.Errorf("rootfs: create capacity unit: %w", err)
@@ -299,7 +299,7 @@ func (p *HostOverlayFS) CreateOverlay(ctx context.Context, overlayID string, low
 }
 
 // OpenOverlay reconstructs a handle for an existing artifact (resume prefix) and
-// RE-APPLIES the capacity cap from the current record (the documented invariant Binding: every
+// RE-APPLIES the capacity cap from the current record (resource admission Binding: every
 // placement re-materializes the cap rather than reading back a frozen value).
 func (p *HostOverlayFS) OpenOverlay(ctx context.Context, overlayID string, lower []string, capByte int64) (*Overlay, error) {
 	if err := p.validateStack(overlayID, lower); err != nil {
@@ -314,10 +314,10 @@ func (p *HostOverlayFS) OpenOverlay(ctx context.Context, overlayID string, lower
 	return p.handle(overlayID, lower), nil
 }
 
-// Mount assembles lower(Template)/upper/work → merged (① of the cold-start
+// Mount assembles lower(Template)/upper/work → merged ( of the cold-start
 // chain). A FRESH empty workdir is required per (re)mount — the kernel rejects
-// or corrupts a reused work (rootfs-overlay the documented invariant). resume re-mounts the SAME
-// upper (pause captured nothing, the documented invariant).
+// or corrupts a reused work (rootfs mount constraints). resume re-mounts the SAME
+// upper (pause captured nothing, FS-first pause and resume).
 func (p *HostOverlayFS) Mount(_ context.Context, o *Overlay) (*Merged, error) {
 	id := o.ID
 	upper := p.upperPath(id)
@@ -326,7 +326,7 @@ func (p *HostOverlayFS) Mount(_ context.Context, o *Overlay) (*Merged, error) {
 
 	// Resolve the lower stack to host dirs. overlayfs lowerdir is COLON-separated,
 	// leaf-first (lowerdir=leaf:...:base) — the SAME leaf-first order as o.Lower
-	// (the documented invariant multi-lowerdir: the new Template's lower stack = [the new layer, ...the
+	// (the Rootfs subsystem multi-lowerdir: the new Template's lower stack = [the new layer, ...the
 	// parent stack]).
 	lowerDirs := make([]string, 0, len(o.Lower))
 	for _, lid := range o.Lower {
@@ -348,14 +348,14 @@ func (p *HostOverlayFS) Mount(_ context.Context, o *Overlay) (*Merged, error) {
 	// tens of KiB of headroom (measured: a 16 MiB cap fills to 16728064 B, leaving 49152 B,
 	// and the mkdir returns ENOSPC). Removing the directory frees nothing, because it was
 	// already empty — so the sequence spends headroom it does not have to reach a state it
-	// was already in. That made a sandbox which merely hit the ordinary the documented invariant ENOSPC
-	// PERMANENTLY UNRESUMABLE, breaking the documented invariant's promise that pause is a REVERSIBLE gate (the
-	// same promise the documented invariant pays a whole budget to keep). Emptying the CONTENTS keeps the
+	// was already in. That made a sandbox which merely hit the ordinary resource admission ENOSPC
+	// PERMANENTLY UNRESUMABLE, breaking FS-first pause and resume's promise that pause is a REVERSIBLE gate (the
+	// same promise paused-sandbox admission accounting pays a whole budget to keep). Emptying the CONTENTS keeps the
 	// directory's existing inode, and the kernel then creates `work/work` itself — measured
 	// to mount cleanly on a unit with that same 49 KiB of headroom.
 	//
 	// The overlayfs requirement is that workdir be EMPTY (the kernel rejects or corrupts a
-	// reused one, rootfs-overlay the documented invariant); it is not that the directory be a new inode. Emptying
+	// reused one, rootfs mount constraints); it is not that the directory be a new inode. Emptying
 	// satisfies it exactly.
 	for _, d := range []string{upper, work, merged} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
@@ -373,7 +373,7 @@ func (p *HostOverlayFS) Mount(_ context.Context, o *Overlay) (*Merged, error) {
 	// the failure is either a silently short lower stack or an error naming nothing.
 	if len(opts) > mountOptionsCap {
 		return nil, fmt.Errorf("rootfs: mount overlay %s: lower stack of %d layers needs %d "+
-			"bytes of mount options, over the %d-byte limit (rootfs-overlay the documented invariant ⑩)",
+			"bytes of mount options, over the %d-byte limit (rootfs provider portability)",
 			id, len(lowerDirs), len(opts), mountOptionsCap)
 	}
 	if err := syscall.Mount("overlay", merged, "overlay", 0, opts); err != nil {
@@ -383,7 +383,7 @@ func (p *HostOverlayFS) Mount(_ context.Context, o *Overlay) (*Merged, error) {
 }
 
 // Unmount tears down the merged overlay (pause / destroy). upper persists
-// across pause (the documented invariant zero-capture).
+// across pause (FS-first pause and resume zero-capture).
 func (p *HostOverlayFS) Unmount(_ context.Context, m *Merged) error {
 	if m == nil || m.MergedPath == "" {
 		return nil
@@ -397,16 +397,16 @@ func (p *HostOverlayFS) Unmount(_ context.Context, m *Merged) error {
 	return nil
 }
 
-// DestroyOverlay reclaims upper+work bytes (terminal destroy, the documented invariant),
+// DestroyOverlay reclaims upper+work bytes (terminal destroy, the lifecycle state machine),
 // synchronously. A failure here is retried by SweepOrphanOverlays, whose
 // predicate is "no live sandbox row" — not refcount GC (the documentation: the Overlay
 // artifact is the degenerate case, referenced by exactly one sandbox row).
-// Separate from placement teardown; the mediator invokes each (the documented invariant subsystems
+// Separate from placement teardown; the mediator invokes each (the lifecycle subsystems
 // don't call each other).
 // The capacity unit is reclaimed along with the bytes: the subvolume AND its
 // qgroup (a deleted subvolume otherwise leaves a stale `<under deletion>` qgroup
 // row carrying the old limit — measured), so destroy leaves no quota residue
-// behind (the documented invariant reclamation discipline).
+// behind (atomic transition rollback reclamation discipline).
 func (p *HostOverlayFS) DestroyOverlay(ctx context.Context, o *Overlay) error {
 	dir := p.unitPath(o.ID)
 	// best-effort unmount first in case merged is still mounted.
@@ -437,7 +437,7 @@ func (p *HostOverlayFS) DestroyOverlay(ctx context.Context, o *Overlay) error {
 }
 
 // UncappedBytes reports the bytes this provider holds that NO declared capacity
-// cap covers — the second term of the the documented invariant inequality (rootfs-overlay the documented invariant).
+// cap covers — the second term of the resource admission inequality (uncapped rootfs accounting).
 // See the seam doc on rootfs.Provider for the contract; this is how the local
 // btrfs adapter honors it:
 //
@@ -463,7 +463,7 @@ func (p *HostOverlayFS) DestroyOverlay(ctx context.Context, o *Overlay) error {
 func (p *HostOverlayFS) UncappedBytes(ctx context.Context) (int64, error) {
 	var total int64
 
-	// BOTH layer roots count. Omitting TemplatesDir is the exact undercount the documented invariant
+	// BOTH layer roots count. Omitting TemplatesDir is the exact undercount rootfs storage
 	// warns about: it would overcommit the node by the whole Template library,
 	// which on a fresh deployment is ALL of it.
 	for _, root := range []string{p.LayersDir, p.TemplatesDir} {
@@ -503,18 +503,18 @@ func (p *HostOverlayFS) UncappedBytes(ctx context.Context) (int64, error) {
 			if err != nil {
 				// Unreadable qgroup is an ERROR, not "assume uncapped". Enumerating here
 				// billed a CAPPED unit's bytes on top of its own cap — the `limit > 0` skip
-				// below is unreachable on this path — which the documented invariant's disjointness rule
+				// below is unreachable on this path — which the node admission budgets's disjointness rule
 				// forbids and which inflates the admission gate's left side into a wrongful
-				// 507. The the documented invariant arm carries the same reasoning at length; the two must stay
+				// 507. The Volume subsystem arm carries the same reasoning at length; the two must stay
 				// identical, since one term's shape is the other's.
 				return 0, fmt.Errorf("rootfs: measure overlay %s: %w", e.Name(), err)
 			}
 			if limit > 0 {
-				continue // capped → the cap term already counts it (invariant 1)
+				continue // capped units are already represented by the cap term
 			}
 			// Subvolume with no limit: the qgroup is still the backend's own statement
 			// about these bytes, and it excludes reflinked extents shared with the layer
-			// (invariant 2), so prefer it over a walk.
+			// and excludes reflinked extents shared with the layer, so prefer it over a walk.
 			total += used
 			continue
 		}
@@ -532,7 +532,7 @@ func (p *HostOverlayFS) UncappedBytes(ctx context.Context) (int64, error) {
 }
 
 // PromoteCostBytes forecasts what freezing this Overlay would add to the uncapped
-// term (the documented invariant / the documented invariant). See the seam doc on rootfs.Provider for the contract; this
+// term (resource admission / rootfs storage). See the seam doc on rootfs.Provider for the contract; this
 // is how the local adapter honors it: PromoteToTemplate is a byte-for-byte copy of
 // the upper into LayersDir, so the cost is the upper's projected size on disk.
 //
@@ -544,7 +544,7 @@ func (p *HostOverlayFS) UncappedBytes(ctx context.Context) (int64, error) {
 // regular file is projected at max(allocated, apparent) — apparent covers the
 // sparse case, allocated covers a file whose blocks exceed its length.
 //
-// One deliberate overstatement, in the SAFE direction (seam contract point 2):
+// One deliberate overstatement, in the safe direction required by the seam:
 // hardlinks are counted per link (copyTree does not re-link, so each link really does
 // become an independent file in the layer — this is the one place a per-link count is
 // not a double charge).
@@ -606,20 +606,20 @@ func (p *HostOverlayFS) PromoteCostBytes(_ context.Context, o *Overlay, excluded
 // that would have fit. Allocated blocks are equal-or-better in every case — exact
 // for ordinary files, correct for holes, and they reflect compression.
 //
-// This does NOT contradict the documented invariant's "never trust st_blocks": that rule bans
+// This does NOT contradict the Rootfs subsystem's "never trust st_blocks": that rule bans
 // GUEST-side numbers (see rootfs.Provider.UncappedBytes). Host-side st_blocks is
 // the backend's own allocation statement, which is the source the rule points at.
 //
-// The measurement itself lives in the internal/allocbytes LEAF because the documented invariant needs the
-// identical one for its own half of the the documented invariant second term and subsystems must not import
-// each other (the documented invariant; internal/guestport is the precedent). This wrapper stays so the
-// reasoning above sits where the documented invariant's callers read it.
+// The measurement itself lives in the internal/allocbytes LEAF because the Volume subsystem needs the
+// identical one for its own half of the resource admission second term and subsystems must not import
+// each other (the lifecycle; internal/guestport is the precedent). This wrapper stays so the
+// reasoning above sits where the Rootfs subsystem's callers read it.
 func blockBytes(root string) (int64, error) {
 	return allocbytes.Tree(root)
 }
 
 // AdoptMerged reconstructs the merged handle for an Overlay still mounted after
-// a crash (the documented invariant). The merged dir is deterministic from the ID; we confirm it
+// a crash (atomic transition rollback). The merged dir is deterministic from the ID; we confirm it
 // is actually an overlay mount (kernel state held by the surviving container)
 // before handing back the handle — a not-mounted merged means the container is
 // not really live, so the caller should not adopt it.
@@ -636,10 +636,10 @@ func (p *HostOverlayFS) AdoptMerged(_ context.Context, o *Overlay) (*Merged, err
 }
 
 // ListBuiltinTemplates enumerates the static Template directories under
-// TemplatesDir (boot seed, the documented invariant). Each subdirectory name is a builtin TemplateID;
+// TemplatesDir (boot seed, health and reclamation). Each subdirectory name is a builtin TemplateID;
 // its bytes are the read-only lower shipped with the deployment (bytes-first is
 // inherent — the dir exists before any row). The host TemplatesDir path never
-// leaves this subsystem — only the opaque IDs (the documented invariant). A missing TemplatesDir
+// leaves this subsystem — only the opaque IDs (the ID-addressed Overlay model). A missing TemplatesDir
 // is treated as "no builtins" (empty), not an error: a deployment may ship only
 // Promote-built Templates.
 func (p *HostOverlayFS) ListBuiltinTemplates(_ context.Context) ([]string, error) {
@@ -660,7 +660,7 @@ func (p *HostOverlayFS) ListBuiltinTemplates(_ context.Context) ([]string, error
 }
 
 // SweepOrphanOverlays reclaims Overlay storage units under StateDir with no live
-// `sandboxes` row (the documented invariant reclamation discipline). See the seam doc on
+// `sandboxes` row (atomic transition rollback reclamation discipline). See the seam doc on
 // rootfs.Provider for the contract and for why `building` is a separate keep-set
 // from `live`; this is how the local adapter honors it:
 //
@@ -668,7 +668,7 @@ func (p *HostOverlayFS) ListBuiltinTemplates(_ context.Context) ([]string, error
 //	derived from the ID, so enumeration recovers the identity without a store
 //	read), and one not in either keep-set goes through DestroyOverlay.
 //
-// Failure policy is SKIP-AND-LOG-SHAPED (the documented invariant): a unit that will not delete
+// Failure policy is SKIP-AND-LOG-SHAPED (atomic transition rollback): a unit that will not delete
 // does not abort the pass over the others — the error is returned after the loop
 // completes, along with the count actually reclaimed, so one wedged subvolume
 // cannot indefinitely shadow every other leak. The sweep is idempotent, so
@@ -695,7 +695,7 @@ func (p *HostOverlayFS) SweepOrphanOverlays(ctx context.Context, live, building 
 			continue
 		}
 		// Orphan: bytes with no live row and no create in flight. Either destroy
-		// deleted the record after DestroyOverlay failed (the documented invariant licenses exactly
+		// deleted the record after DestroyOverlay failed (the transition contract licenses exactly
 		// that, deferring the retry to a sweep — this one), or the process died
 		// between the two. Either way the row is gone for good, so nothing above
 		// will ever ask about these bytes again and they are safe to drop.
@@ -716,11 +716,11 @@ func (p *HostOverlayFS) SweepOrphanOverlays(ctx context.Context, live, building 
 }
 
 // SweepOrphanLayers reclaims Promote-built layer dirs under LayersDir with no
-// live `templates` row (the documented invariant / the documented invariant). It reuses the the documented invariant reverse-reconcile shape: the
+// live `templates` row (the Rootfs subsystem / atomic transition rollback). It reuses the atomic transition rollback reverse-reconcile shape: the
 // authoritative set (`live` + `building`) is passed in, the provider diffs it
 // against what is on disk and deletes the difference. `building` protects an
 // in-flight Promote whose bytes are down but whose row is not yet inserted
-// (bytes-first, the documented invariant) — without it a concurrent sweep would tear the layer out
+// (bytes-first, the Rootfs subsystem) — without it a concurrent sweep would tear the layer out
 // from under the Promote. A missing LayersDir → nothing to sweep.
 func (p *HostOverlayFS) SweepOrphanLayers(_ context.Context, live, building []string) (int, error) {
 	keep := make(map[string]bool, len(live)+len(building))
@@ -743,7 +743,7 @@ func (p *HostOverlayFS) SweepOrphanLayers(_ context.Context, live, building []st
 			continue
 		}
 		// orphan: a layer dir with no live row and not being built → reclaim its
-		// bytes (the documented invariant / the documented invariant). The row-vs-bytes decoupling means the row is already gone
+		// bytes (the Rootfs subsystem / atomic transition rollback). The row-vs-bytes decoupling means the row is already gone
 		// (DELETE template) or never landed (crashed Promote); either way the
 		// bytes are safe to drop.
 		if err := os.RemoveAll(filepath.Join(p.LayersDir, e.Name())); err != nil {
@@ -821,8 +821,8 @@ func validateSeg(name, v string) error {
 	return nil
 }
 
-// promoteExcludedPaths is the minimal excluded-path set (the documented invariant / the documented invariant Promote;
-// rootfs-overlay the documented invariant): engine-injected guest-runtime paths that must NOT be
+// promoteExcludedPaths is the minimal excluded-path set (the Rootfs subsystem / the Template and Overlay model Promote;
+// rootfs mount constraints): engine-injected guest-runtime paths that must NOT be
 // captured into a Promoted layer. Today these are the sandboxd transport portal
 // files, written upper-relative (the guest daemon writes them under /tmp, which
 // is the upper's tmp/). These MUST track the guest daemon's own paths in
@@ -831,7 +831,7 @@ func validateSeg(name, v string) error {
 // (separate binaries). It is the STATIC half of the exclusion set; a Promote's
 // volume mount destinations are merged in per-call by promoteExclusions.
 var promoteExcludedPaths = []string{
-	"tmp/.sandboxd-transport.pid", // transport child pidfile (the documented invariant)
+	"tmp/.sandboxd-transport.pid", // transport child pidfile (the guest startup topology)
 	// Crash-loop sentinel: only a `testguest` build reads it
 	// (cmd/sandboxd/faultinject_testguest.go), but the exclusion is
 	// unconditional — capturing it would mint a Template whose every sandbox is
@@ -855,19 +855,19 @@ var promoteExcludedPrefixes = []string{
 }
 
 // PromoteToTemplate freezes the source Overlay's at-rest upper into a new
-// read-only layer dir under LayersDir (the documented invariant Promote). bytes-first: this writes
-// ONLY bytes — the caller inserts the templates row afterward (the documented invariant INV-3). The
-// copy excludes the engine-injected runtime paths (the documented invariant / the documented invariant; rootfs-overlay the documented invariant).
+// read-only layer dir under LayersDir (the Rootfs subsystem Promote). bytes-first: this writes
+// ONLY bytes — the caller inserts the templates row afterward (health and reclamation INV-3). The
+// copy excludes the engine-injected runtime paths (the Rootfs subsystem / the Template and Overlay model; rootfs mount constraints).
 // The caller must have quiesced + unmounted the sandbox first, so upper is a stable
 // plain dir tree
-// (the documented invariant). The layer is built at a staging path then atomically renamed into
+// (the substrate requirements). The layer is built at a staging path then atomically renamed into
 // place, so a crash mid-copy never leaves a half-written layer at the final ID
 // (a staging dir is a plain orphan the sweep reclaims).
 //
-// Freezing a layer INCREASES the "bytes under no cap" term of the the documented invariant node
-// inequality (rootfs-overlay the documented invariant), so the mediator gates a Promote on
+// Freezing a layer INCREASES the "bytes under no cap" term of the resource admission node
+// inequality (uncapped rootfs accounting), so the mediator gates a Promote on
 // PromoteCostBytes before calling this — the forecast of what this copy will add.
-// This function does not gate anything itself: it is a mechanism (the documented invariant).
+// This function does not gate anything itself: it is a mechanism (the lifecycle).
 func (p *HostOverlayFS) PromoteToTemplate(_ context.Context, o *Overlay, newTemplateID string, excludedMounts []string) error {
 	if err := validateSeg("newTemplateID", newTemplateID); err != nil {
 		return err
@@ -903,13 +903,13 @@ func (p *HostOverlayFS) PromoteToTemplate(_ context.Context, o *Overlay, newTemp
 // The two halves exist for different reasons and neither replaces the other: the
 // static list drops engine-injected runtime debris, while the per-Promote destinations
 // prune the pre-existing bytes a mount shadows (rootfs.Provider.PromoteToTemplate says
-// what for; rootfs-overlay the documented invariant argues it).
+// what for; rootfs mount constraints argues it).
 //
 // Destinations arrive as absolute guest paths and are converted to the upper-relative,
 // leading-slash-stripped form the existing convention uses. NESTING falls out of
 // copyTree's semantics: an excluded directory skips its whole subtree, so a nested
 // destination prunes THE LEAF SUBTREE and leaves an empty intermediate chain — the
-// settled choice (the documented invariant).
+// settled choice (rootfs storage).
 func promoteExclusions(excludedMounts []string) map[string]bool {
 	excluded := make(map[string]bool, len(promoteExcludedPaths)+len(excludedMounts))
 	for _, e := range promoteExcludedPaths {
@@ -930,7 +930,7 @@ func promoteExclusions(excludedMounts []string) map[string]bool {
 
 // copyTree recursively copies src into dst, skipping paths (relative to src,
 // cleaned) present in excluded. Preserves mode bits and symlinks. dst is created.
-// Files are copied byte-for-byte (the layer is a plain read-only dir tree, the documented invariant).
+// Files are copied byte-for-byte (the layer is a plain read-only dir tree, the Rootfs subsystem).
 //
 // Byte-for-byte is deliberate, and `cp --reflink` is a TRAP here — the obvious
 // "make Promote cheap" optimisation leaks a btrfs qgroup row on EVERY Promote,
@@ -940,7 +940,7 @@ func promoteExclusions(excludedMounts []string) map[string]bool {
 // leaves a `<squota space holder>` row that never self-cleans, and a leaked row
 // does not reserve its own subvolume id, so a later remount can hand that id and
 // its stale cap to a brand-new unit (see internal/btrfs.DeleteSubvolume and
-// the documentation the documented invariant). Reflink here would need the sweep-side
+// the documentation Volume quota cleanup). Reflink here would need the sweep-side
 // reclamation path built first.
 func copyTree(src, dst string, excluded map[string]bool) error {
 	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {

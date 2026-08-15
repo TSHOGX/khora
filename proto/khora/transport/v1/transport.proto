@@ -1,38 +1,37 @@
-// Package khora.transport.v1 is the the documented invariant wire contract: the two stateless RPC
+// Package khora.transport.v1 defines the transport data plane: two stateless RPC
 // services the engine exposes (process / fs) plus a Health probe. It is the
 // schema-first source of truth; host client stub + guest server stub generate
-// from it. Connect-RPC over h2c (transport the documented invariant).
+// from it. The carrier is Connect-RPC over h2c.
 //
-// process data plane (transport the documented invariant): Start / Connect (server-stream) /
+// Process data plane: Start / Connect (server-stream) /
 // StreamInput (client-stream) / SendInput / SendSignal / Update / CloseStdin /
-// List. keepalive is a ProcessEvent variant on long output streams (the documented invariant).
+// List. keepalive is a ProcessEvent variant on long output streams.
 //
-// fs data plane (transport the documented invariant): Read (offset) / Write / Stat / List (depth) /
+// Fs data plane: Read (offset) / Write / Stat / List (depth) /
 // MakeDir / Remove / Move, all unary and no watch. Large files do NOT grow a
 // chunked RPC — they use the streaming HTTP bypass on the guest's same listener
 // (GET|PUT /files?path=), because what matters is that neither end holds the whole
 // file, not the message size.
 //
-// Vocabulary boundary (the documented invariant): NO agent / session / turn / tag — process is
-// addressed by guest-native pid only (transport the documented invariant).
+// Product vocabulary does not enter the wire contract: processes are addressed by
+// guest-native pid, with no agent, session, turn, or tag fields.
 syntax = "proto3";
 
 package khora.transport.v1;
 
 option go_package = "github.com/TSHOGX/khora/pkg/transport/gen/khora/transport/v1;transportv1";
 
-// Health is the unary readiness/liveness probe (the documented invariant L2 / transport the documented invariant). Its
-// first success is the resume readiness gate that flips a sandbox to running
-// (guest-runtime the documented invariant Point ①) — the engine never trusts a bare TCP accept. It is
-// also the ACTIVITY probe (the documented invariant / reaper-health the documented invariant): one RPC carries L2
+// Health is the unary readiness and liveness probe. Its first success is the
+// resume readiness gate that flips a sandbox to running; the engine never trusts
+// a bare TCP accept. It is also the activity probe: one RPC carries guest
 // liveness AND the sandbox-global idle duration, so the reaper never needs a
 // second round-trip to tell healthy from idle.
 service HealthService {
   rpc Check(CheckRequest) returns (CheckResponse) {}
 
-  // RecordActivity stamps the sandbox-global activity clock Check reports
-  // (the documented invariant / reaper-health the documented invariant) — "this sandbox is doing something right now",
-  // carrying NO duration. It is the write half of the same one signal, which is
+  // RecordActivity stamps the sandbox-global activity clock Check reports,
+  // meaning "this sandbox is doing something right now" while carrying no
+  // duration. It is the write half of the same signal, which is
   // why it lives on this service rather than inventing one.
   //
   // It exists because the clock is otherwise reachable from outside only by
@@ -45,11 +44,11 @@ service HealthService {
   //
   // NOT a lease / keepalive / pause-inhibit: those all carry a protected
   // PERIOD, and a period is what forces per-caller state, overlap arbitration,
-  // and expiry — the obligations that put those shapes outside the documented invariant. Stamping
+  // and expiry — the obligations that put those shapes outside the extension boundary. Stamping
   // one timestamp the engine already owns has none of them, and afterwards is
   // indistinguishable from a keystroke.
   //
-  // Being an in-GUEST RPC is load-bearing (reaper-health the documented invariant/the documented invariant): a host-side
+  // Being an in-guest RPC is load-bearing: a host-side
   // timestamp would manufacture an activity reading for a sandbox nobody can
   // reach, breaking the property that keeps "activity could not be probed" from
   // ever reading as idle. So this is unavailable exactly when Check is.
@@ -71,31 +70,30 @@ message CheckResponse {
   // idle_millis is how long (in ms) since the sandbox's LAST I/O across ALL
   // processes + ptys — sandboxd stamps a single sandbox-global "last I/O" time
   // in the paths I/O already flows through (proc.broadcast output, writeInput
-  // input) and reports now-lastIO here (reaper-health the documented invariant / the documented invariant activity
-  // signal). Measured GUEST-side on purpose: a detached process still producing
-  // output with NO client attached (the documented invariant) is invisible to any host-side proxy,
-  // which would false-idle a working sandbox (reaper-health the documented invariant).
+  // input) and reports now-lastIO here. It is measured guest-side on purpose: a
+  // detached process still producing output with no client attached is invisible
+  // to any host-side proxy, which would false-idle a working sandbox.
   //
   // ONLY meaningful when ok=true: it rides a SUCCESSFUL Health response, so a
   // transport-down / booting / dead guest yields no reading at all. The
   // classifier must therefore never read idle from a failed probe → never
-  // misclassify an unreachable sandbox as idle (reaper-health the documented invariant unreadable-
-  // idle guard). A guest with no I/O since boot reports the ms since boot.
+  // misclassify an unreachable sandbox as idle. A guest with no I/O since boot
+  // reports the ms since boot.
   int64 idle_millis = 2;
 }
 
-// ProcessService is the the documented invariant process primitive: start / connect / input /
-// signal / resize / list. PTY is the pty-field special case of Start (transport
-// the documented invariant), not a service. Output is fan-out multi-subscribe: many Connect can
-// attach one pid, each gets an independent copy (the documented invariant multi-connection).
+// ProcessService is the process primitive: start / connect / input / signal /
+// resize / list. PTY is a field-level special case of Start, not a service.
+// Output is fan-out multi-subscribe: many Connect calls can attach one pid, each
+// receiving an independent copy.
 service ProcessService {
   // Start launches a process and server-streams its output events
   // (start / data / end / keepalive). Addressed by the returned pid thereafter.
   rpc Start(StartRequest) returns (stream ProcessEvent) {}
 
   // Connect reattaches to an already-RUNNING process, replaying the bounded
-  // output ring buffer first, then joining the live stream (transport the documented invariant
-  // invariant 2). Multiple Connect can attach one pid (the documented invariant multi-connection).
+  // output ring buffer first, then joining the live stream. Multiple Connect
+  // calls can attach one pid.
   //
   // Only a live pid is addressable: once a process exits, its `end` event goes to
   // the subscribers attached AT THAT MOMENT and the pid stops resolving —
@@ -108,25 +106,25 @@ service ProcessService {
 
   // StreamInput writes stdin (or pty-in) as an ordered client-stream — the
   // interactive input path (keystrokes to a pty). Ordering is guaranteed by the
-  // single stream (transport the documented invariant).
+  // single stream.
   rpc StreamInput(stream StreamInputRequest) returns (StreamInputResponse) {}
 
   // SendInput writes stdin (or pty-in) once — unary, for when no stream is held.
   rpc SendInput(SendInputRequest) returns (SendInputResponse) {}
 
   // SendSignal signals a process; server defaults to the process group
-  // (kill(-pgid)) falling back to kill(pid) (transport the documented invariant / the documented invariant). Directed
-  // only — see SendSignalRequest.pid on why pid <= 0 is refused.
+  // (kill(-pgid)) falling back to kill(pid). Directed only; see
+  // SendSignalRequest.pid for why pid <= 0 is refused.
   rpc SendSignal(SendSignalRequest) returns (SendSignalResponse) {}
 
   // Update resizes a process's PTY (unary; not a separate service, a process
-  // field — transport the documented invariant).
+  // field).
   rpc Update(UpdateRequest) returns (UpdateResponse) {}
 
   // CloseStdin closes a process's stdin (under a pty, equivalent to Ctrl-D).
   rpc CloseStdin(CloseStdinRequest) returns (CloseStdinResponse) {}
 
-  // List enumerates live processes — no registry, scanned in real time (the documented invariant).
+  // List enumerates live processes — no registry, scanned in real time.
   rpc List(ListRequest) returns (ListResponse) {}
 }
 
@@ -137,8 +135,8 @@ message StartRequest {
   string cwd = 4;
   // No run-as field: the engine defaults to guest root and does not model guest
   // users — "run as user X" is a guest-native concern (su/sudo), not an engine
-  // primitive (the documented invariant / the documented invariant). Field 5 is unused.
-  // pty, when set, allocates a PTY of the given size (transport the documented invariant).
+  // primitive. Field 5 is unused.
+  // pty, when set, allocates a PTY of the given size.
   PtySize pty = 6;
 }
 
@@ -148,9 +146,9 @@ message PtySize {
 }
 
 // ProcessEvent is one item of the output stream: oneof{start,data,end,
-// keepalive} (transport the documented invariant). keepalive is emitted periodically on long idle
+// keepalive}. keepalive is emitted periodically on long idle
 // streams so intermediaries/clients know the connection is alive and don't
-// reap it on silence (transport the documented invariant — no idle read/write deadline).
+// reap it on silence; the stream has no idle read/write deadline.
 message ProcessEvent {
   oneof kind {
     StartEvent start = 1;
@@ -214,9 +212,8 @@ message SendSignalRequest {
   // pid MUST be > 0 — a single directed process target. pid <= 0 is
   // `invalid_argument`, because in POSIX it is the fan-out form (kill(0) hits a
   // whole process group, kill(-1) the whole pid namespace) and container-level
-  // fan-out belongs to guest PID 1, not this channel (guest-runtime the documented invariant /
-  // the documented invariant). So it is not merely a dangerous value: it is addressed to the wrong
-  // subsystem.
+  // fan-out belongs to guest PID 1, not this channel. So it is not merely a
+  // dangerous value: it is addressed to the wrong subsystem.
   //
   // Kept `int32`, NOT `uint32`, on purpose: unsigned would silently reinterpret a
   // wire negative as a huge positive pid, trading an explicit 400 for a subtler
@@ -231,18 +228,17 @@ message ListResponse {
   repeated int32 pids = 1;
 }
 
-// FsService is the the documented invariant fs primitive (transport the documented invariant): all unary, no watch.
+// FsService is the fs primitive: all RPCs are unary and there is no watch.
 //
 // No watch, deliberately: a subscription would make the engine hold merge /
-// reconnect state and break the documented invariant statelessness, and inotify on a gVisor overlay
-// upperdir is unreliable anyway (the documented invariant). Consumers poll Stat+Read instead — the
-// render-vs-interact asymmetry (the documented invariant).
+// reconnect state and break transport statelessness, and inotify on a gVisor
+// overlay upperdir is unreliable. Consumers poll Stat+Read instead.
 //
 // Byte-carrying calls are bounded by the RPC message size on purpose; large
-// files use the HTTP multipart bypass (the documented invariant) rather than growing a chunked RPC.
+// files use the HTTP multipart bypass rather than growing a chunked RPC.
 service FsService {
   // Read reads sandbox file bytes at an offset. The engine keeps no read
-  // cursor and no cross-resume offset continuity (transport the documented invariant).
+  // cursor and no cross-resume offset continuity.
   rpc Read(ReadRequest) returns (ReadResponse) {}
 
   // Write writes sandbox file bytes (whole-file, offset 0).
@@ -256,7 +252,7 @@ service FsService {
 
   // List enumerates a directory, up to depth levels deep, FLATTENED into one
   // list. Every entry carries its absolute path, so a flat result is
-  // unambiguous. No pagination: the engine does not hold a cursor (the documented invariant).
+  // unambiguous. No pagination: the engine does not hold a cursor.
   rpc List(FsServiceListRequest) returns (FsServiceListResponse) {}
 
   // MakeDir creates a directory, CREATING PARENTS (mkdir -p). An existing
@@ -291,8 +287,8 @@ enum EntryType {
 // Stat and List, so the two can never disagree about the same path.
 //
 // No owner / group / permission-string fields: the engine does not model guest
-// users (the documented invariant / the documented invariant — "run as user X" is guest-native), and a display string
-// is derivable from mode by the caller.
+// users; "run as user X" is guest-native. A display string is derivable from
+// mode by the caller.
 message EntryInfo {
   // name is the base name; path is absolute in the GUEST's namespace.
   string name = 1;

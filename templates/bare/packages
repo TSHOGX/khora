@@ -1,12 +1,12 @@
 # Packages installed into the bare base, one per line, `#` comments ignored.
 #
 # CORRECTNESS — without these a sandbox cannot do what a sandbox is for, and the
-# failure is confusing rather than obviously missing (the documented invariant):
+# failure is confusing rather than obviously missing (the Rootfs subsystem):
 ca-certificates      # else EVERY https request fails verification: no pip/npm install, no git clone
 coreutils            # package post-install hooks and build scripts shell out to ls/install/mkdir
 #
 # CONVENIENCE — a general-purpose base. Each is one exec away, so this trades
-# cold-start size for convenience and commits to nothing (the documented invariant):
+# cold-start size for convenience and commits to nothing (the Rootfs subsystem):
 python3
 python3-pip
 python3-venv
@@ -15,4 +15,4 @@ build-essential
 nodejs
 npm
 curl
-sudo                 # purely guest-side; the guest is already root (the documented invariant), nothing depends on it
+sudo                 # purely guest-side; the guest is already root (the guest identity model), nothing depends on it

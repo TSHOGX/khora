@@ -20,7 +20,7 @@ import (
 
 // connectClient is the host-side implementation of Client backed by the generated
 // Connect-RPC stubs. It translates the DOMAIN types (StartSpec, ProcessEvent, …) to/from
-// proto so the mediator never sees generated types (the documented invariant seam discipline). Stateless in
+// proto so the mediator never sees generated types (the transport data plane seam discipline). Stateless in
 // the sense Client documents: built against one endpoint, discarded on resume, with
 // nothing of its own to close.
 type connectClient struct {
@@ -29,13 +29,13 @@ type connectClient struct {
 	fs      transportv1connect.FsServiceClient
 
 	// hc/base back the large-file bypass (OpenRead / WriteStream), which is plain
-	// streaming HTTP on the same guest listener rather than an RPC (the documented invariant).
+	// streaming HTTP on the same guest listener rather than an RPC (transport behavior).
 	hc   *http.Client
 	base string
 }
 
 // sharedTransport is the ONE h2c transport every Dial hands out, and sharing it is a
-// correctness requirement rather than an optimization (transport the documented invariant).
+// correctness requirement rather than an optimization (guest TCP transport).
 //
 // A transport OWNS a connection pool and nothing closes a transport, so building one per
 // Dial leaks every connection it ever opened along with each one's read/write goroutines:
@@ -44,7 +44,7 @@ type connectClient struct {
 // data-plane RPC and once per running sandbox per reaper tick, so the growth is
 // independent of load — fd exhaustion, not a slow leak.
 //
-// It does NOT weaken the documented invariant's "stateless, discarded on resume": that governs the CLIENT,
+// It does NOT weaken the transport data plane's "stateless, discarded on resume": that governs the CLIENT,
 // and connectClient is still per-endpoint. The pool is keyed by host:port, so a resumed
 // sandbox at a new IP gets a new connection either way.
 //
@@ -58,20 +58,20 @@ var sharedTransport = &http2.Transport{
 		return d.DialContext(ctx, network, addr)
 	},
 	// Detect a guest that died mid-stream in SECONDS, not minutes. A sandbox
-	// terminated by its RAM cap (the documented invariant) never closes its streams — the process is
+	// terminated by its RAM cap (resource admission) never closes its streams — the process is
 	// simply gone — so without this the host waits out the kernel's TCP
 	// retransmit timeout, measured at ~150s, before the read fails. That is long
 	// enough to look like a hang rather than a death.
 	//
 	// h2 PING is the right layer: it works even when the stream is legitimately
 	// silent, so it cannot be confused with an idle-but-healthy long stream. The
-	// guest's own 20s application keepalive (the documented invariant) already establishes that
+	// guest's own 20s application keepalive (transport behavior) already establishes that
 	// silence this long is abnormal, so probing at 30s adds no false positives.
 	ReadIdleTimeout: 30 * time.Second,
 	PingTimeout:     10 * time.Second,
 	// REQUIRED once the pool is shared, and it is the half that bounds the pool by
 	// SANDBOX CHURN rather than by request volume. Endpoints are per-placement: every
-	// destroy and every resume retires one for good (the documented invariant), and without an idle
+	// destroy and every resume retires one for good (the ID-reference model), and without an idle
 	// timeout its connection would sit in the pool for the life of the process —
 	// trading a per-call leak for a per-dead-sandbox one. Comfortably longer than the
 	// PING interval above, so a healthy-but-quiet stream is probed, never reaped.
@@ -84,7 +84,7 @@ var sharedClient = &http.Client{Transport: sharedTransport}
 
 // Dial builds a stateless Client for one sandbox's current endpoint. h2c
 // (cleartext HTTP/2) so streams work without TLS — the netns channel needs no
-// in-channel auth (transport the documented invariant trust model).
+// in-channel auth (guest TCP transport trust model).
 //
 // Cheap by construction: it allocates the per-endpoint stubs and shares the
 // connection pool (see sharedTransport). No timeout is set on the http.Client —
@@ -153,13 +153,13 @@ type eventStream interface {
 	Msg() *v1.ProcessEvent
 	// Err reports why Receive stopped. Part of the interface because the reason is
 	// load-bearing: an overflow disconnect and a clean end both stop Receive, and
-	// only this tells them apart (the documented invariant invariant 1).
+	// only this tells them apart (nonblocking fan-out).
 	Err() error
 	Close() error
 }
 
 // drainEvents translates a proto ProcessEvent server-stream into the domain
-// channel, mapping oneof variants to domain Kind strings (the documented invariant seam: the
+// channel, mapping oneof variants to domain Kind strings (the transport data plane seam: the
 // mediator never sees generated types).
 func drainEvents(stream eventStream) <-chan ProcessEvent {
 	out := make(chan ProcessEvent, 16)
@@ -180,7 +180,7 @@ func drainEvents(stream eventStream) <-chan ProcessEvent {
 		}
 		// Surface WHY the stream ended: without it, two opposite outcomes collapse into
 		// one silent channel close — a clean end (the process finished; its exit code
-		// already arrived) and a the documented invariant invariant-1 overflow disconnect (this subscriber
+		// already arrived) and a overflow disconnect (this subscriber
 		// could not keep up and its copy was dropped). The guest reports the latter as
 		// resource_exhausted precisely so the consumer can tell them apart, reconnecting
 		// being the right response to one and wrong for the other.

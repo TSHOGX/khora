@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # spike-ct-adopt.sh — measures whether an established flow survives what an
-# Adopt (the documented invariant) may do to a sandbox's rule set after a control-plane restart.
+# Adopt (atomic transition rollback) may do to a sandbox's rule set after a control-plane restart.
 #
-# This was registered in the relevant internals page the documented invariant as blocked-unmeasured ("no `conntrack` CLI
+# This was registered in network substrate measurements as blocked-unmeasured ("no `conntrack` CLI
 # installed on `sbx`"); conntrack-tools 1.4.9 is now installed, the measurement is
-# done, and the result is the documented invariant ㉒ — so this script is the reproduction, not the
+# done, and the result is recorded here — so this script is the reproduction, not the
 # open question. Re-run it if the Adopt implementation changes.
 # NOTE this machine has NO `/proc/net/nf_conntrack` (CONFIG_NF_CONNTRACK_PROCFS
 # is unset — the file does not exist even for root), so the netlink CLI was the
@@ -12,20 +12,20 @@
 #
 # ── The question, split into the mechanisms that can actually break a flow ─────
 #
-# the documented invariant's Adopt takes a LIVE placement back over after an orchestrator restart.
+# Adopt takes a LIVE placement back over after an orchestrator restart.
 # A sandbox's nft table is crash-surviving host state, exactly like its netns, so
 # Adopt has to decide what to do with the table it finds. Three candidate actions,
 # and the worry is whether any of them kills a flow that is mid-transfer:
 #
 #   B  reinstall the same table atomically (the idempotent bare-`table` +
-#      `delete` + define triple in one `nft -f`, the documented invariant ⑤) — the obvious
+#      `delete` + define triple in one `nft -f`) — the obvious
 #      "re-render and re-apply, don't reason about what's there" Adopt.
 #   C  delete the table, then install (a non-atomic Adopt, or a
 #      ReclaimOrphans/Adopt race: the table is briefly absent).
 #   D  clear conntrack state (`conntrack -F`) — which nothing in the spec asks
 #      for, but which a "clean slate on restart" reflex would reach for.
 #
-# the documented invariant ⑨ measured that removing the `established,related` arm breaks even a
+# Prior egress measurements showed that removing the `established,related` arm breaks even a
 # permitted flow: the reverse direction of an egress flow is carried by ct state
 # and nothing else. So if ct state is lost, a live connection becomes a dropped
 # one — case D is the sharp form of the question, and B/C are the two mechanisms
@@ -37,7 +37,7 @@
 #      guest→peer TCP that keeps transferring, asserted by BYTES MOVING (the
 #      peer's per-message RX counter grows), not by a socket merely existing.
 #      A "still alive" claim read off a socket would pass on a dead flow.
-# (a2) Paired negative, per the the documented invariant acceptance discipline (the documented invariant ⑧): a floor whose drop
+# (a2) Paired negative: a floor whose drop
 #      counter is 0 is indistinguishable from a floor that is bypassed. So the
 #      same rule set must be shown to DENY something (guest→peer on an
 #      undeclared port) with the drop counter moving. Without (a2), every
@@ -69,17 +69,17 @@
 # attribute it (no floor counter moved). Per-case flows are the fix, and the
 # reason is recorded here so nobody re-chains them.
 # (e)  Which side carries the flow. The guest end lives in the sentry's netstack
-#      (`--network=sandbox`), and the documented invariant ② measured that guest packets do not
+#      (`--network=sandbox`), and prior hook measurements showed that guest packets do not
 #      traverse the sandbox netns's L3 hooks. So the assertion is: the HOST ct
 #      table holds an entry keyed by the guest IP, and the sandbox netns's own ct
 #      table holds nothing.
 #
 # ── Fixture ───────────────────────────────────────────────────────────────────
 #
-# A real runsc guest (--network=sandbox, the the documented invariant pinned argv) doing EGRESS to a
-# peer in a second netns, with the three host mechanisms the documented invariant ⑤ measured as
+# A real runsc guest (--network=sandbox, the runtime provider contract pinned argv) doing EGRESS to a
+# peer in a second netns, with the three host mechanisms required for egress:
 # necessary and sufficient: ip_forward=1, a guest-side default route WITH `dev`
-# installed BEFORE `runsc run` (the documented invariant ⑬: the sentry takes the L3 address off the
+# installed BEFORE `runsc run` (the sentry takes the L3 address off the
 # kernel-side veth at boot, so afterwards `ip route add` reports
 # `Nexthop has invalid gateway`), and host-side masquerade for that /30.
 #
@@ -108,7 +108,7 @@ ROOTFS="$WORK/rootfs"; BUNDLE="$WORK/bundle"; RUNSC_ROOT="$WORK/runsc-root"
 CID="spikect$$"
 TABLE="spikect$$"
 
-# Sandbox side: the /30 shape local_runsc uses today (10.66.0.0/16, the documented invariant ④).
+# Sandbox side: the /30 shape local_runsc uses today within 10.66.0.0/16.
 GNS="spikect-g$$"; GVETH_H="sctgh$$"; GVETH_G="sctgg$$"
 GHOST_IP="10.66.9.1"; GUEST_IP="10.66.9.2"; SBX_CIDR="10.66.9.0/30"
 # Peer side: a distinct /30 standing in for "something the host routes to".
@@ -371,15 +371,15 @@ note "peer: $(grep -m1 ECHO_LISTENING "$PEERLOG")"
 
 # ── rule set ──────────────────────────────────────────────────────────────────
 # install_table  — the idempotent bare-`table` + `delete` + define triple in ONE
-# `nft -f` file (the documented invariant ⑤: a bare `delete table` on a missing table is rc=1 and
+# `nft -f` file (a bare `delete table` on a missing table is rc=1 and
 # aborts the whole file). This is exactly the shape an Adopt would re-apply, so
 # case (b) uses it verbatim rather than a hand-rolled variant.
 #
 # Counters are per hook and per arm, because "it works" is not an assertion
-# (the documented invariant ⑧/⑩): every claim below is paired with the counter that justifies it.
+# without a counter): every claim below is paired with the counter that justifies it.
 #   post_masq  nat hook, so it counts NEW ct entries, not packets
 #   fw_est     reverse direction accepted by `established,related` — the arm
-#              the documented invariant ⑨ measured as load-bearing
+#              shown below to be load-bearing
 #   fw_new     the declared egress flow's opening packet
 #   fw_gdrop   floor drop, guest side (the (a2) control's counter)
 #   fw_rdrop   floor drop, peer side — makes fw_est the ONLY way in
@@ -467,7 +467,7 @@ pcounters() { echo "p_snat=$(pctr p_snat) p_raw=$(pctr p_raw) p_rst=$(pctr p_rst
 
 # ── guest ─────────────────────────────────────────────────────────────────────
 # make_netns: netns + veth + guest-side default route. The route MUST go in here,
-# before `runsc run` — the documented invariant ⑬ measured that after boot the sentry has taken the L3
+# before `runsc run` — after boot the sentry has taken the L3
 # address off the kernel-side veth and `ip route add` fails with
 # `Nexthop has invalid gateway`.
 make_netns() {
@@ -588,7 +588,7 @@ if [[ "$outA2" != connected && "$gdropA2" -gt "$gdropA" ]]; then
   ok "    ⟹ the floor under test is real, not bypassed"
 elif [[ "$outA2" != connected ]]; then
   inv "A2 unreachable ($outA2) but fw_gdrop did NOT move ($gdropA → $gdropA2) — per"
-  inv "    the documented invariant this is an invalid assertion: the floor may be bypassed entirely"
+  inv "    this is an invalid assertion: the floor may be bypassed entirely"
 else
   bad "A2 the undeclared port was REACHABLE — the floor is not enforcing"
 fi
@@ -804,13 +804,13 @@ if (( survD == 1 )); then
   if [[ -n "$idD1" && "$idD1" != "$idD0" ]]; then
     note "D mechanism: a NEW ct entry (id $idD0 → $idD1) was created mid-stream and the"
     note "    flow rode it. That is nf_conntrack_tcp_loose=$LOOSE_ORIG picking up a flow it"
-    note "    never saw open — measured again with it OFF in the documented invariant, since survival here is a"
+    note "    never saw open — repeated below with it OFF, since survival here is a"
     note "    fact about that sysctl, not about Adopt."
   fi
 else
   # Two candidate mechanisms for a post-flush death, and they are separable:
   #   floor  — the reverse packet no longer matches `established,related` and
-  #            hits a drop arm (the documented invariant ⑨'s mechanism, now on a LIVE flow)
+  #            hits a drop arm (the same mechanism as for a fresh flow, now on a LIVE flow)
   #   nat    — the guest's packet lost its transform and reached the peer raw
   if (( $(ctr fw_rdrop) > rdropD0 || $(ctr fw_gdrop) > gdropD0 )); then
     ok "D ATTRIBUTED to the FLOOR: a drop arm moved (fw_gdrop +$(( $(ctr fw_gdrop) - gdropD0 )),"
@@ -824,44 +824,44 @@ else
   fi
 fi
 
-# ── CASE the documented invariant: same flush with tcp_loose off ────────────────────────────────────
+# ── CASE conntrack-loose-off: same flush with tcp_loose off ───────────────────
 echo
-echo "===== CASE the documented invariant: conntrack flush with nf_conntrack_tcp_loose=0 ====="
+echo "===== CASE conntrack-loose-off: conntrack flush with nf_conntrack_tcp_loose=0 ====="
 make_netns
 install_table
 run_guest 60000
 rxD20="$(rx)"
-if ! moved "$rxD20" 3 "the documented invariant-pre"; then
-  inv "the documented invariant flow never transferred before the flush — invalid measurement"
+if ! moved "$rxD20" 3 "conntrack-loose-off-pre"; then
+  inv "conntrack-loose-off flow never transferred before the flush — invalid measurement"
 else
   sysctl -qw net.netfilter.nf_conntrack_tcp_loose=0
-  note "the documented invariant tcp_loose=$(cat /proc/sys/net/netfilter/nf_conntrack_tcp_loose)"
+  note "conntrack-loose-off tcp_loose=$(cat /proc/sys/net/netfilter/nf_conntrack_tcp_loose)"
   idD20="$(ct_id)"; rdropD20="$(ctr fw_rdrop)"; gdropD20="$(ctr fw_gdrop)"
   masqD20="$(ctr post_masq)"; rxD21="$(rx)"; prawD20="$(pctr p_raw)"
-  note "the documented invariant before: ct $(ct_of) ; peer RX=$rxD21 ; $(pcounters)"
+  note "conntrack-loose-off before: ct $(ct_of) ; peer RX=$rxD21 ; $(pcounters)"
   conntrack -F 2>&1 | sed 's/^/     /'
-  note "the documented invariant flushed; entry now: $(ct_of)"
-  if moved "$rxD21" 5 "the documented invariant"; then
-    note "the documented invariant the flow SURVIVED even with tcp_loose=0"
+  note "conntrack-loose-off flushed; entry now: $(ct_of)"
+  if moved "$rxD21" 5 "conntrack-loose-off"; then
+    note "conntrack-loose-off flow SURVIVED even with tcp_loose=0"
     survD2=1
   else
-    ok "the documented invariant the flow DIED on the flush with tcp_loose=0"
+    ok "conntrack-loose-off flow DIED on the flush with tcp_loose=0"
     survD2=0
   fi
-  note "the documented invariant after: ct $(ct_of) ; $(counters) ; $(pcounters)"
-  note "the documented invariant deltas: post_masq +$(( $(ctr post_masq) - masqD20 ))" \
+  note "conntrack-loose-off after: ct $(ct_of) ; $(counters) ; $(pcounters)"
+  note "conntrack-loose-off deltas: post_masq +$(( $(ctr post_masq) - masqD20 ))" \
        "fw_gdrop +$(( $(ctr fw_gdrop) - gdropD20 )) fw_rdrop +$(( $(ctr fw_rdrop) - rdropD20 ))" \
        "p_raw +$(( $(pctr p_raw) - prawD20 ))"
-  note "the documented invariant guest: $(guest_broken)"
+  note "conntrack-loose-off guest: $(guest_broken)"
   if (( survD2 == 0 )); then
     if (( $(ctr fw_gdrop) > gdropD20 || $(ctr fw_rdrop) > rdropD20 )); then
-      ok "the documented invariant ATTRIBUTED to the FLOOR: a drop counter moved (fw_gdrop +$(( $(ctr fw_gdrop) - gdropD20 )),"
+      ok "conntrack-loose-off ATTRIBUTED to the FLOOR: a drop counter moved (fw_gdrop +$(( $(ctr fw_gdrop) - gdropD20 )),"
       ok "    fw_rdrop +$(( $(ctr fw_rdrop) - rdropD20 ))) ⟹ packets dropped for want of ct state,"
-      ok "    which is the documented invariant ⑨'s mechanism firing on a LIVE flow rather than a fresh one"
+      ok "    which is the floor firing on a LIVE flow rather than a fresh one"
     elif (( $(pctr p_raw) > prawD20 )); then
-      ok "the documented invariant ATTRIBUTED to lost NAT: p_raw +$(( $(pctr p_raw) - prawD20 )) — the transform went with the entry"
+      ok "conntrack-loose-off ATTRIBUTED to lost NAT: p_raw +$(( $(pctr p_raw) - prawD20 )) — the transform went with the entry"
     else
-      inv "the documented invariant died with no floor and no peer counter movement — cause unattributed"
+      inv "conntrack-loose-off died with no floor and no peer counter movement — cause unattributed"
     fi
   fi
   sysctl -qw net.netfilter.nf_conntrack_tcp_loose="$LOOSE_ORIG"
@@ -888,7 +888,7 @@ else
     bad "E no host ct entry for the flow"
   fi
   if [[ "$nsct" == "0" || "$nsl" == "0" ]]; then
-    ok "E the SANDBOX netns's own ct table holds nothing (the documented invariant ②: guest packets do not"
+    ok "E the SANDBOX netns's own ct table holds nothing (guest packets do not"
     ok "    traverse that netns's L3 hooks) ⟹ the host entry is the sole carrier"
   else
     note "E the sandbox netns ct table is NOT empty ($nsct) — read the listing above"
@@ -907,7 +907,7 @@ echo "  A2 paired negative (unreachable ∧ floor counter moved)"
 echo "  B  atomic rule-set REPLACE under load"
 echo "  C  DELETE + gap + reinstall (nat + floor)   C2 floor-only control"
 echo "  D  conntrack -F, tcp_loose as found ($LOOSE_ORIG)"
-echo "  the documented invariant conntrack -F, tcp_loose=0"
+echo "  conntrack-loose-off  conntrack -F, tcp_loose=0"
 echo "  E  which side carries the ct entry"
 echo
 echo "  Every case built its OWN flow — B/C/D/E are independent, not chained."

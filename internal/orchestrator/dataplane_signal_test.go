@@ -10,8 +10,8 @@ import (
 	v1 "github.com/TSHOGX/khora/pkg/transport/gen/khora/transport/v1"
 )
 
-// The orchestrator-side half of the the documented invariant directed-signal boundary. The
-// AUTHORITATIVE check is the guest's (the documented invariant: the guest can write its own fs, so
+// The orchestrator-side half of the transport contract directed-signal boundary. The
+// AUTHORITATIVE check is the guest's (the guest startup topology: the guest can write its own fs, so
 // it must validate for itself); this one is fail-fast, saving a round trip.
 //
 // What makes it testable with a zero Engine is exactly the property under test:
@@ -29,7 +29,7 @@ func TestSendSignalFailsFastOnNonPositivePid(t *testing.T) {
 		resp, err := p.SendSignal(context.Background(), req)
 		if err == nil {
 			t.Errorf("SendSignal(pid=%d) accepted (resp %v), want invalid_argument — "+
-				"pid <= 0 is POSIX fan-out and belongs to guest PID 1 (the documented invariant)", pid, resp)
+				"pid <= 0 is POSIX fan-out and belongs to guest PID 1 (the transport contract)", pid, resp)
 			continue
 		}
 		if code := connect.CodeOf(err); code != connect.CodeInvalidArgument {
@@ -50,7 +50,7 @@ func TestSignalPidErrMatchesGuestWording(t *testing.T) {
 		"(one process, defaulting to its group). pid <= 0 is POSIX fan-out — " +
 		"kill(0)/kill(-1) address a whole group or the whole pid namespace — and " +
 		"container-level fan-out belongs to guest PID 1, not the transport channel " +
-		"(guest-runtime the documented invariant / the documented invariant)"
+		"(guest supervision / the guest startup topology)"
 	if signalPidErr != guest {
 		t.Errorf("host and guest refusal messages have drifted\n host:  %q\n guest: %q\n"+
 			"(the guest copy lives in cmd/sandboxd/transport.go)", signalPidErr, guest)

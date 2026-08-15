@@ -25,7 +25,7 @@ import (
 //   - the CODE crosses, because sandboxd's classification is what tells a caller
 //     whether to fix the request or retry it;
 //   - the MESSAGE does not, because the inner client dials the netns veth IP, so
-//     the inner text carries placement (the documented invariant / the documented invariant).
+//     the inner text carries placement (the API error contract / the transport contract).
 //
 // Collapsing everything to `unavailable` satisfied the second and broke the first: it means
 // "transient, retry me", so a nonexistent path came back as an invitation to retry forever.
@@ -62,7 +62,7 @@ func (c *codedFailClient) Read(context.Context, string, int64, int64) ([]byte, e
 	return nil, c.fail("read")
 }
 
-// Start hands back a channel that ends with Kind:"error" — the the documented invariant invariant-1
+// Start hands back a channel that ends with Kind:"error" — an overflow disconnect
 // overflow disconnect's shape. The stream must terminate with that error rather
 // than closing cleanly (a clean close says "the process finished").
 func (c *codedFailClient) Start(context.Context, transport.StartSpec) (<-chan transport.ProcessEvent, error) {
@@ -113,7 +113,7 @@ func assertNoLeak(t *testing.T, err error) {
 	for _, leak := range []string{leakVeth, "10.88.0.7", leakOverlay, "/srv", innerDetail, "dial tcp"} {
 		if strings.Contains(err.Error(), leak) {
 			t.Errorf("proxied error leaks %q — only the CODE crosses, never the inner text "+
-				"(the documented invariant / the documented invariant): %v", leak, err)
+				"(the API error contract / the transport contract): %v", leak, err)
 		}
 	}
 }
@@ -134,7 +134,7 @@ func TestProxiedUnaryPreservesTheInnerCode(t *testing.T) {
 		connect.CodeNotFound,          // fs.Read of a path that is not there
 		connect.CodeInvalidArgument,   // a malformed argument: retrying cannot help
 		connect.CodePermissionDenied,  // the guest refused
-		connect.CodeResourceExhausted, // the documented invariant disk cap: valid request, no room
+		connect.CodeResourceExhausted, // resource admission disk cap: valid request, no room
 	} {
 		t.Run(code.String(), func(t *testing.T) {
 			srv, sid := codedFixture(t, failingClient(code, false))
@@ -173,7 +173,7 @@ func TestProxiedRawDialFailureStaysUnavailable(t *testing.T) {
 	assertNoLeak(t, err)
 }
 
-// The mid-stream half. An overflow disconnect (the documented invariant invariant 1) arrives as
+// The mid-stream half. An overflow disconnect (the overflow-disconnect contract) arrives as
 // ProcessEvent{Kind:"error"} carrying resource_exhausted — the guest reports it that
 // way precisely so a consumer can tell it from a clean end. The outer stream must
 // still TERMINATE with an error (never close as if the process finished), and now
@@ -200,7 +200,7 @@ func TestProxiedStreamTerminationPreservesTheInnerCode(t *testing.T) {
 	err = stream.Err()
 	if err == nil {
 		t.Fatal("the outer stream closed CLEANLY after a mid-stream error — that tells the client " +
-			"the process finished, which is exactly wrong (the documented invariant invariant 1)")
+			"the process finished, which is exactly wrong (the overflow-disconnect contract)")
 	}
 	if got := connect.CodeOf(err); got != connect.CodeResourceExhausted {
 		t.Errorf("stream termination code = %v, want resource_exhausted — reconnecting is the "+

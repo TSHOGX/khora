@@ -1,5 +1,5 @@
 // Package storetest holds the store.Store CONTRACT test suite — one set of
-// assertions every backend must pass (the documented invariant Behavior seam / the documented invariant). Memory and
+// assertions every backend must pass (the extension boundary Behavior seam / the transactional outbox). Memory and
 // SQLite both call RunContract, so no correctness check is ever forked per backend.
 //
 // It lives in its own package (not store_test) so the SQLite backend's test
@@ -37,25 +37,25 @@ func RunContract(t *testing.T, mk Factory) {
 	t.Run("List", func(t *testing.T) { testList(t, mk) })
 	t.Run("OutboxAtomicWithState", func(t *testing.T) { testOutboxAtomic(t, mk) })
 
-	// Death cause rides the CAS (the documented invariant / the documented invariant): the demotion and the cause are
+	// Death cause rides the CAS (health and reclamation / the transactional outbox): the demotion and the cause are
 	// ONE commit, so the cause write is part of the SAME contract both backends
 	// must honor — not a SQLite detail.
 	t.Run("CASPersistsDeathCause", func(t *testing.T) { testCASPersistsDeathCause(t, mk) })
 	t.Run("CASNilCauseLeavesDeathCause", func(t *testing.T) { testCASNilCauseLeavesDeathCause(t, mk) })
 	t.Run("CASCauseNoneClearsDeathCause", func(t *testing.T) { testCASCauseNoneClears(t, mk) })
 
-	// UpdateBinding (the documented invariant / the documented invariant PATCH): the create-time write point's only
+	// UpdateBinding (resource admission / the control-plane API PATCH): the create-time write point's only
 	// sibling. Its semantics are contract, not backend detail — omitted-means-
 	// unchanged, conditional on state, and it must NOT move updated_at.
 	t.Run("UpdateBindingPartialAndConditional", func(t *testing.T) { testUpdateBinding(t, mk) })
 
-	// The the documented invariant declaration is a Binding column like the caps, so its round-trip is
+	// The network declaration is a Binding column like the caps, so its round-trip is
 	// CONTRACT rather than backend detail. It had no coverage here at all, which is how the
 	// read-shape divergence testNetworkNotAliased now pins survived.
 	t.Run("NetworkDeclarationRoundTrip", func(t *testing.T) { testNetworkRoundTrip(t, mk) })
 	t.Run("NetworkDeclarationReadIsNotAliased", func(t *testing.T) { testNetworkNotAliased(t, mk) })
 
-	// the documented invariant's event kinds are a CLOSED set of six, and that closure is a contract both
+	// the lifecycle state machine's event kinds are a CLOSED set of six, and that closure is a contract both
 	// backends must hold: a subscriber reading a seventh kind has no way to interpret it.
 	t.Run("EventKindsAreAClosedSet", func(t *testing.T) { testEventKindClosed(t, mk) })
 	t.Run("EventCauseSurvivesTheRecordItDescribes", func(t *testing.T) { testEventCauseOutlivesRecord(t, mk) })
@@ -66,12 +66,12 @@ func RunContract(t *testing.T, mk Factory) {
 
 	// The drain read's bound and the gauge's independence from it are ONE contract: the
 	// publisher runs one algorithm against this interface, so a backend that ignored the
-	// limit — or whose count saturated at it — would break the documented invariant ③ on that backend alone,
+	// limit — or whose count saturated at it — would break the transactional outbox on that backend alone,
 	// and only in production, where the backlog is large enough to notice.
 	t.Run("UnpublishedEventsHonorsItsLimit", func(t *testing.T) { testUnpublishedLimit(t, mk) })
 	t.Run("CountUnpublishedIsIndependentOfTheDrainBound", func(t *testing.T) { testCountUnpublished(t, mk) })
 
-	// the documented invariant's retention MECHANISM. In the shared suite because every clause of the
+	// the transactional outbox's retention MECHANISM. In the shared suite because every clause of the
 	// predicate protects a subscriber-visible promise, so a backend that got one wrong
 	// would break replay on that backend alone, in production, silently.
 	t.Run("TrimOutboxDeliveredOnly", func(t *testing.T) { testTrimDeliveredOnly(t, mk) })
@@ -81,7 +81,7 @@ func RunContract(t *testing.T, mk Factory) {
 	t.Run("OutboxRowOutlivesRecord", func(t *testing.T) { testOutboxOutlivesRecord(t, mk) })
 	t.Run("Durability", func(t *testing.T) { testDurability(t, mk) })
 
-	// Template object model (the documented invariant): same assertions both backends.
+	// Template object model (health and reclamation): same assertions both backends.
 	t.Run("TemplateCRUD", func(t *testing.T) { testTemplateCRUD(t, mk) })
 	t.Run("TemplateReferenceProtection", func(t *testing.T) { testTemplateRefProtection(t, mk) })
 	t.Run("TemplateLineageProtection", func(t *testing.T) { testTemplateLineage(t, mk) })
@@ -89,13 +89,13 @@ func RunContract(t *testing.T, mk Factory) {
 	t.Run("TemplateDurability", func(t *testing.T) { testTemplateDurability(t, mk) })
 	t.Run("ReferenceReclaimRace", func(t *testing.T) { testReferenceReclaimRace(t, mk) })
 
-	// Volume object model (the documented invariant / the documented invariant): same assertions both backends.
+	// Volume object model (the Volume subsystem / health and reclamation): same assertions both backends.
 	t.Run("VolumeCRUD", func(t *testing.T) { testVolumeCRUD(t, mk) })
 	t.Run("VolumeCapacityWritePoint", func(t *testing.T) { testVolumeCapacity(t, mk) })
 	t.Run("VolumeDeleteReportsNotFound", func(t *testing.T) { testVolumeDeleteNotFound(t, mk) })
 	t.Run("VolumeDurability", func(t *testing.T) { testVolumeDurability(t, mk) })
 
-	// Mount table (the documented invariant / the documented invariant). These matter equally on both sides (the documented invariant seam):
+	// Mount table (the Volume subsystem / health and reclamation). These matter equally on both sides (the extension boundary seam):
 	// SQLite gets reference protection from constraints, Memory from explicit scans,
 	// and only a shared suite proves the two agree.
 	t.Run("MountCRUD", func(t *testing.T) { testMountCRUD(t, mk) })
@@ -106,7 +106,7 @@ func RunContract(t *testing.T, mk Factory) {
 	t.Run("MountBindingSelfContradiction", func(t *testing.T) { testMountBindingInvalid(t, mk) })
 	t.Run("MountBindingIsAllOrNothing", func(t *testing.T) { testMountAllOrNothing(t, mk) })
 
-	// ReplaceMounts (the documented invariant): the whole-binding swap is ONE atomic commit. Two cases, both
+	// ReplaceMounts (the Volume subsystem): the whole-binding swap is ONE atomic commit. Two cases, both
 	// required by the spec bullet.
 	t.Run("ReplaceMountsKeepsOldBindingOnRefusal", func(t *testing.T) { testReplaceMountsKeepsOldBindingOnRefusal(t, mk) })
 	t.Run("ReplaceMountsNeverExposesZeroRows", func(t *testing.T) { testReplaceMountsNoZeroRowWindow(t, mk) })
@@ -116,14 +116,14 @@ func RunContract(t *testing.T, mk Factory) {
 	t.Run("ForeignKeyEnforcementItself", func(t *testing.T) { testFKEnforcement(t, mk) })
 	t.Run("MountDurability", func(t *testing.T) { testMountDurability(t, mk) })
 
-	// Volume lineage (the documented invariant / the relevant internals page the documented invariant): the FOURTH FK path, and the fourth
+	// Volume lineage (the Volume subsystem / snapshot lineage): the FOURTH FK path, and the fourth
 	// distinct verdict.
 	t.Run("VolumeLineageProtection", func(t *testing.T) { testVolumeLineage(t, mk) })
 
-	// the documented invariant under CONCURRENT writers. Every other subtest here is
+	// the transactional outbox under CONCURRENT writers. Every other subtest here is
 	// single-threaded, so a backend whose CAS is not genuinely atomic — read,
 	// then write, without holding anything across the two — would pass all of
-	// them. Both backends must deliver this identically (the documented invariant seam).
+	// them. Both backends must deliver this identically (the extension boundary seam).
 	t.Run("ConcurrentCASSingleWinner", func(t *testing.T) { testConcurrentCAS(t, mk) })
 
 	// The outbox sequence contract (see Store): total order, replay paging, and
@@ -459,7 +459,7 @@ func drainCheck(ctx context.Context, t *testing.T, s store.Store, cursor *int64,
 // testConcurrentCAS: N goroutines race the SAME transition. Exactly ONE may win,
 // and exactly ONE outbox row may land.
 //
-// The the documented invariant CAS promise and the the documented invariant atomic-commit promise met at the same moment: a
+// The per-sandbox transition serialization CAS promise and the transactional outbox atomic-commit promise met at the same moment: a
 // torn implementation admits several winners, and each winner appends an event — so a
 // single transition is billed N times, the double-count subscriber dedup CANNOT absorb
 // (the events carry DIFFERENT transition IDs).
@@ -511,7 +511,7 @@ func testConcurrentCAS(t *testing.T, mk Factory) {
 		wg.Wait()
 
 		if wins != 1 {
-			t.Fatalf("trial %d: %d of %d racers won the SAME creating→running CAS; want exactly 1 — a non-atomic CAS lets several callers each believe they performed the transition (the documented invariant)", i, wins, racers)
+			t.Fatalf("trial %d: %d of %d racers won the SAME creating→running CAS; want exactly 1 — a non-atomic CAS lets several callers each believe they performed the transition (per-sandbox transition serialization)", i, wins, racers)
 		}
 		// Every loser must lose CLEANLY, with the contract's sentinel.
 		for _, err := range errs {
@@ -532,7 +532,7 @@ func testConcurrentCAS(t *testing.T, mk Factory) {
 			}
 		}
 		if rows != 1 {
-			t.Fatalf("trial %d: %d outbox rows for one transition; want exactly 1 — the losing CAS must append NOTHING (the documented invariant: state change + outbox append are one commit, so a rejected transition writes neither)", i, rows)
+			t.Fatalf("trial %d: %d outbox rows for one transition; want exactly 1 — the losing CAS must append NOTHING (the transactional outbox: state change + outbox append are one commit, so a rejected transition writes neither)", i, rows)
 		}
 		if got, _ := s.GetSandbox(ctx, model.SandboxID(id)); got.State != model.Running {
 			t.Fatalf("trial %d: state = %s; want running", i, got.State)
@@ -541,8 +541,8 @@ func testConcurrentCAS(t *testing.T, mk Factory) {
 }
 
 // seedTmpl inserts a base (parent-less) Template so a sandbox referencing it
-// satisfies the the documented invariant FK. Every sandbox-creating subtest calls it first: the
-// sandboxes.template FK REQUIRES the row to pre-exist (the documented invariant premise / boot seed).
+// satisfies the health and reclamation FK. Every sandbox-creating subtest calls it first: the
+// sandboxes.template FK REQUIRES the row to pre-exist (the external API premise / boot seed).
 func seedTmpl(t *testing.T, s store.Store, id string) {
 	t.Helper()
 	if err := s.CreateTemplate(context.Background(), model.Template{
@@ -557,10 +557,10 @@ func mkRec(id string) model.Sandbox {
 	return model.Sandbox{
 		ID: model.SandboxID(id), Template: "bare", Overlay: model.OverlayID("ov_" + id),
 		State: model.Creating,
-		// TTL Binding (the documented invariant / the documented invariant): non-zero, distinct values so the round-trip
+		// TTL Binding (resource admission / health and reclamation): non-zero, distinct values so the round-trip
 		// assertion catches a column swapped or dropped.
 		IdleTimeout: 30 * time.Minute, Retention: 12 * time.Hour,
-		// Limits Binding (the documented invariant): same discipline — non-zero and pairwise distinct
+		// Limits Binding (resource admission): same discipline — non-zero and pairwise distinct
 		// (and distinct from the TTL nanos above) so a cpu/memory/disk column
 		// swapped or dropped is caught on read-back. The three axes are never
 		// interchangeable knobs (model.Limits), so a silent swap is a real bug class.
@@ -573,7 +573,7 @@ func mkRec(id string) model.Sandbox {
 // values live, so GetSandbox and ListSandboxes assert against one source.
 var wantLimits = model.Limits{CPUMillis: 1500, MemoryByte: 256 << 20, DiskByte: 512 << 20}
 
-// assertLimits checks the the documented invariant Limits Binding survived a round-trip intact.
+// assertLimits checks the resource admission Limits Binding survived a round-trip intact.
 // Compared as a whole struct: a swap between two axes leaves each field
 // individually "plausible", so only the joint value is a real guard.
 func assertLimits(t *testing.T, where string, got model.Limits) {
@@ -583,8 +583,8 @@ func assertLimits(t *testing.T, where string, got model.Limits) {
 	}
 }
 
-// kindFor is the the documented invariant kind matching a transition INTO state. Tests that only need
-// "some valid event" must still name a real kind: the outbox schema asserts the documented invariant's
+// kindFor is the lifecycle state machine kind matching a transition INTO state. Tests that only need
+// "some valid event" must still name a real kind: the outbox schema asserts the lifecycle state machine's
 // closed set, so a placeholder like "flip" is rejected — which is the point of the
 // constraint, not an obstacle to it.
 func kindFor(state model.Lifecycle) model.EventKind {
@@ -612,15 +612,15 @@ func testCreateGetConflict(t *testing.T, mk Factory) {
 	if got.ID != "a" || got.State != model.Creating || got.Overlay != "ov_a" {
 		t.Fatalf("roundtrip mismatch: %+v", got)
 	}
-	// TTL Binding survives the round-trip (the documented invariant: stored as the concrete Binding).
+	// TTL Binding survives the round-trip (resource admission: stored as the concrete Binding).
 	if got.IdleTimeout != 30*time.Minute || got.Retention != 12*time.Hour {
 		t.Fatalf("TTL Binding roundtrip mismatch: idle=%s retention=%s; want 30m/12h", got.IdleTimeout, got.Retention)
 	}
-	// Limits Binding likewise (the documented invariant): re-applied at every placement FROM this
+	// Limits Binding likewise (resource admission): re-applied at every placement FROM this
 	// record, so a wrong read-back silently mis-caps the sandbox.
 	assertLimits(t, "GetSandbox", got.Limits)
 	// A fresh record has no death cause — CauseNone is the resting value, the
-	// absence of a death rather than a death (the documented invariant).
+	// absence of a death rather than a death (health and reclamation).
 	if got.DeathCause != model.CauseNone {
 		t.Fatalf("fresh record DeathCause = %q; want CauseNone", got.DeathCause)
 	}
@@ -697,7 +697,7 @@ func testList(t *testing.T, mk Factory) {
 	for _, r := range l {
 		seen[r.ID] = true
 		// The list read path carries the SAME Binding as the single-record read
-		// (the documented invariant): reconcile lists records at boot and re-materializes caps from
+		// (resource admission): reconcile lists records at boot and re-materializes caps from
 		// them, so a column dropped only from the list SELECT would mis-cap every
 		// sandbox after a restart.
 		assertLimits(t, "ListSandboxes "+string(r.ID), r.Limits)
@@ -714,7 +714,7 @@ func testList(t *testing.T, mk Factory) {
 }
 
 // testCASPersistsDeathCause: a non-nil cause is written by the SAME
-// CompareAndSetState call that changes state (the documented invariant / the documented invariant) — see that method's
+// CompareAndSetState call that changes state (health and reclamation / the transactional outbox) — see that method's
 // contract for why no later window exists.
 func testCASPersistsDeathCause(t *testing.T, mk Factory) {
 	ctx := context.Background()
@@ -723,7 +723,7 @@ func testCASPersistsDeathCause(t *testing.T, mk Factory) {
 	_ = s.CreateSandbox(ctx, mkRec("a"), nil)
 	_ = s.CompareAndSetState(ctx, "a", model.Creating, model.Running, nil, nil)
 
-	// the crash-paused demotion: running → paused carrying WHY (the documented invariant / the documented invariant).
+	// the crash-paused demotion: running → paused carrying WHY (the lifecycle state machine / health and reclamation).
 	cause := model.CauseGone
 	if err := s.CompareAndSetState(ctx, "a", model.Running, model.Paused,
 		ev("a", "evt_crash", "crash-paused", model.Paused), &cause); err != nil {
@@ -740,11 +740,11 @@ func testCASPersistsDeathCause(t *testing.T, mk Factory) {
 	if got.DeathCause != model.CauseGone {
 		t.Fatalf("DeathCause = %q; want %q", got.DeathCause, model.CauseGone)
 	}
-	// the event landed in the same commit too (the documented invariant).
+	// the event landed in the same commit too (the transactional outbox).
 	if un, _ := s.UnpublishedEvents(ctx, allUnpublished); len(un) != 1 || un[0].ID != "evt_crash" {
 		t.Fatalf("crash-paused event missing from outbox: %+v", un)
 	}
-	// resource-exceeded is the other disposition (the documented invariant: do NOT resume) and must
+	// resource-exceeded is the other disposition (health and reclamation: do NOT resume) and must
 	// round-trip as its own distinct value, not collapse into "gone".
 	rex := model.CauseResourceExceeded
 	if err := s.CompareAndSetState(ctx, "a", model.Paused, model.Running, nil, &rex); err != nil {
@@ -754,14 +754,14 @@ func testCASPersistsDeathCause(t *testing.T, mk Factory) {
 		t.Fatalf("DeathCause = %q; want %q", got.DeathCause, model.CauseResourceExceeded)
 	}
 	// the Limits Binding is untouched by a cause-carrying CAS — the UPDATE must
-	// not clobber neighbouring columns (the documented invariant: caps are stable across resume).
+	// not clobber neighbouring columns (resource admission: caps are stable across resume).
 	if got, _ := s.GetSandbox(ctx, "a"); got.Limits != wantLimits {
 		t.Fatalf("CAS clobbered the Limits Binding: %+v; want %+v", got.Limits, wantLimits)
 	}
 }
 
 // testCASNilCauseLeavesDeathCause: nil cause = leave death_cause UNTOUCHED
-// (store.CompareAndSetState doc / the documented invariant). Every non-death transition passes nil,
+// (store.CompareAndSetState doc / health and reclamation). Every non-death transition passes nil,
 // so a nil that silently cleared would erase recorded evidence: a user pause or
 // an auto-pause landing on a sandbox already known dead would destroy the fact
 // that separates dead-recoverable from resource-terminated.
@@ -798,7 +798,7 @@ func testCASNilCauseLeavesDeathCause(t *testing.T, mk Factory) {
 }
 
 // testCASCauseNoneClears: a non-nil CauseNone CLEARS death_cause — the
-// successful-resume path (the documented invariant: a sandbox that came back up is no longer
+// successful-resume path (health and reclamation: a sandbox that came back up is no longer
 // explained by its previous death). CauseNone is the empty string, so "nil
 // leaves untouched" vs "&CauseNone clears" is a pointer-vs-value distinction the
 // contract depends on and a backend could easily collapse.
@@ -833,7 +833,7 @@ func testCASCauseNoneClears(t *testing.T, mk Factory) {
 	}
 }
 
-// testOutboxAtomic is the the documented invariant heart: a state change carrying an Event lands
+// testOutboxAtomic is the transactional outbox heart: a state change carrying an Event lands
 // BOTH the new state and the outbox row; the row is queryable via
 // UnpublishedEvents with the exact fields the mediator wrote.
 func testOutboxAtomic(t *testing.T, mk Factory) {
@@ -860,7 +860,7 @@ func testOutboxAtomic(t *testing.T, mk Factory) {
 	if un[0].ID != "evt_1" || un[0].Kind != "resumed" || un[0].Sandbox != "a" || un[0].State != model.Running {
 		t.Fatalf("event fields mismatch: %+v", un[0])
 	}
-	// A FAILED CAS must write NOTHING — this is the the documented invariant property in its
+	// A FAILED CAS must write NOTHING — this is the transactional outbox property in its
 	// strongest form: the call carries an event AND a death cause, and losing the
 	// precondition must leave all three (state, cause, outbox) exactly as they
 	// were. A backend that writes the cause before checking the precondition
@@ -1033,12 +1033,12 @@ func testTrimAgesByDelivery(t *testing.T, mk Factory) {
 		t.Fatalf("TrimOutbox (past-delivery cutoff): %v", err)
 	}
 	if n == 0 {
-		t.Fatalf("a cutoff after delivery trimmed nothing — the window would never advance, so the documented invariant's 410 stays unreachable and the retention flag does nothing")
+		t.Fatalf("a cutoff after delivery trimmed nothing — the window would never advance, so the control-plane API's 410 stays unreachable and the retention flag does nothing")
 	}
 }
 
 // testTrimKeepsNewest: trimming never empties the table, even when every row qualifies —
-// the 0/0 window a stale cursor cannot be refused from (store.TrimOutbox / the documented invariant's 410).
+// the 0/0 window a stale cursor cannot be refused from (store.TrimOutbox / the control-plane API's 410).
 func testTrimKeepsNewest(t *testing.T, mk Factory) {
 	ctx := context.Background()
 	s, _ := mk(t)
@@ -1065,7 +1065,7 @@ func testTrimKeepsNewest(t *testing.T, mk Factory) {
 		t.Fatalf("Events: %v", err)
 	}
 	if earliest == 0 || latest == 0 {
-		t.Fatalf("after trimming everything the window reads earliest=%d latest=%d — 0/0 is what an outbox that never held anything reports, so a stale cursor gets a silent empty page instead of a 410 (the documented invariant)", earliest, latest)
+		t.Fatalf("after trimming everything the window reads earliest=%d latest=%d — 0/0 is what an outbox that never held anything reports, so a stale cursor gets a silent empty page instead of a 410 (the control-plane API)", earliest, latest)
 	}
 	if earliest != latest {
 		t.Errorf("window is %d..%d; want exactly one row retained", earliest, latest)
@@ -1073,7 +1073,7 @@ func testTrimKeepsNewest(t *testing.T, mk Factory) {
 }
 
 // testTrimWindowAndSeq: trimming advances the window's lower bound (which is what makes
-// the documented invariant's 410 reachable at all) and does NOT roll the sequence back.
+// the control-plane API's 410 reachable at all) and does NOT roll the sequence back.
 //
 // The sequence half is the subtler one. If the counter were derived from the rows still
 // present, emptying or shrinking the table would re-issue numbers a subscriber has
@@ -1108,7 +1108,7 @@ func testTrimWindowAndSeq(t *testing.T, mk Factory) {
 		t.Fatalf("Events after trim: %v", err)
 	}
 	if after <= before {
-		t.Fatalf("earliest did not advance (%d → %d) — the documented invariant's 410 is reachable only once the window's lower bound moves, so without this trimming activates nothing", before, after)
+		t.Fatalf("earliest did not advance (%d → %d) — the control-plane API's 410 is reachable only once the window's lower bound moves, so without this trimming activates nothing", before, after)
 	}
 
 	// A new event must take a sequence ABOVE everything ever issued, not reuse a
@@ -1130,7 +1130,7 @@ func testTrimWindowAndSeq(t *testing.T, mk Factory) {
 	}
 }
 
-// seedUnpublished writes n unpublished outbox rows for one sandbox by walking the the documented invariant
+// seedUnpublished writes n unpublished outbox rows for one sandbox by walking the lifecycle state machine
 // machine, so every row comes from a LEGAL transition (the store enforces the
 // precondition, so a shortcut would just fail the CAS). Rows are named evt_0..evt_n-1 in
 // sequence order, which is what lets a caller assert a bounded read returned the OLDEST.
@@ -1188,7 +1188,7 @@ func testUnpublishedLimit(t *testing.T, mk Factory) {
 }
 
 // testCountUnpublished: the backlog gauge's source must be independent of the drain
-// bound (the documented invariant ③). This is the half that makes the bound above safe to add — a gauge of
+// bound (the transactional outbox). This is the half that makes the bound above safe to add — a gauge of
 // len(UnpublishedEvents(ctx, DrainBatch)) saturates at that constant (store.CountUnpublished).
 func testCountUnpublished(t *testing.T, mk Factory) {
 	ctx := context.Background()
@@ -1215,7 +1215,7 @@ func testCountUnpublished(t *testing.T, mk Factory) {
 		t.Fatalf("CountUnpublished: %v", err)
 	}
 	if n != 5 {
-		t.Fatalf("CountUnpublished = %d with 5 unpublished rows and a drain bound of 2 — the gauge is saturating at the drain bound, so a large backlog reports as a small constant and a wedged drain looks idle (the documented invariant ③)", n)
+		t.Fatalf("CountUnpublished = %d with 5 unpublished rows and a drain bound of 2 — the gauge is saturating at the drain bound, so a large backlog reports as a small constant and a wedged drain looks idle (the transactional outbox)", n)
 	}
 
 	// Marking one delivered decrements it: the count tracks delivery, not arrival.
@@ -1228,7 +1228,7 @@ func testCountUnpublished(t *testing.T, mk Factory) {
 }
 
 // testOutboxOutlivesRecord: destroy deletes the record but its "destroyed"
-// event must remain in the outbox for the publisher (the documented invariant).
+// event must remain in the outbox for the publisher (the transactional outbox).
 func testOutboxOutlivesRecord(t *testing.T, mk Factory) {
 	ctx := context.Background()
 	s, _ := mk(t)
@@ -1246,7 +1246,7 @@ func testOutboxOutlivesRecord(t *testing.T, mk Factory) {
 	}
 }
 
-// testEventCauseOutlivesRecord: the the documented invariant cause survives the record it describes, and
+// testEventCauseOutlivesRecord: the transactional outbox cause survives the record it describes, and
 // reads back unchanged. This is the property the field exists for (model.EventCause), and
 // it is testable only in this order — destroy deletes the row, so if the cause did not
 // round-trip through the OUTBOX there would be nowhere left to read it from.
@@ -1279,7 +1279,7 @@ func testEventCauseOutlivesRecord(t *testing.T, mk Factory) {
 			un[0].Cause, model.CauseRetentionExpired)
 	}
 
-	// The replay read (the documented invariant GET /v1/events) must carry it too, not only the drain read:
+	// The replay read (the control-plane API GET /v1/events) must carry it too, not only the drain read:
 	// the pull surface is what an external subscriber actually uses.
 	evs, _, _, err := s.Events(ctx, 0, 10)
 	if err != nil {
@@ -1340,7 +1340,7 @@ func testEventCauseClosed(t *testing.T, mk Factory) {
 }
 
 // testDurability: for durable backends, records AND unpublished outbox rows
-// survive a reopen (process restart) — the substrate for the documented invariant reconciliation
+// survive a reopen (process restart) — the substrate for atomic transition rollback reconciliation
 // and redelivery. Memory (reopen == nil) skips.
 func testDurability(t *testing.T, mk Factory) {
 	ctx := context.Background()
@@ -1374,7 +1374,7 @@ func testDurability(t *testing.T, mk Factory) {
 
 // testTemplateCRUD: round-trip a Template + its fields, duplicate → ErrConflict,
 // missing → ErrTemplateNotFound, delete an unreferenced row succeeds and is then
-// gone (the documented invariant existence-is-state).
+// gone (health and reclamation existence-is-state).
 func testTemplateCRUD(t *testing.T, mk Factory) {
 	ctx := context.Background()
 	s, _ := mk(t)
@@ -1414,9 +1414,9 @@ func testTemplateCRUD(t *testing.T, mk Factory) {
 }
 
 // testTemplateRefProtection: a Template referenced by a sandbox cannot be
-// deleted (the documented invariant referenced-means-undeletable → ErrInUse); once the sandbox is
+// deleted (health and reclamation referenced-means-undeletable → ErrInUse); once the sandbox is
 // gone, the delete succeeds. The reference is a persistent row, seen by RESTRICT
-// — the E2B-bug immunity (the documented invariant).
+// — the E2B-bug immunity (health and reclamation).
 func testTemplateRefProtection(t *testing.T, mk Factory) {
 	ctx := context.Background()
 	s, _ := mk(t)
@@ -1442,7 +1442,7 @@ func testTemplateRefProtection(t *testing.T, mk Factory) {
 }
 
 // testTemplateLineage: a parent Template referenced by a child (parent = id)
-// cannot be deleted (the documented invariant, references point upward → ErrInUse); delete the child
+// cannot be deleted (health and reclamation, references point upward → ErrInUse); delete the child
 // first,
 // then the parent. Also: a child with a MISSING parent cannot be created
 // (reference-side atomicity).
@@ -1475,9 +1475,9 @@ func testTemplateLineage(t *testing.T, mk Factory) {
 }
 
 // testSandboxRefMissingTemplate: creating a sandbox that references a
-// nonexistent Template fails (the documented invariant reference-side atomicity: create loses when
-// the parent Template is absent). The boot seed (the documented invariant existence-as-state /
-// the documented invariant idempotent reconcile) exists precisely to make the builtin rows present
+// nonexistent Template fails (health and reclamation reference-side atomicity: create loses when
+// the parent Template is absent). The boot seed (health and reclamation existence-as-state /
+// atomic transition rollback idempotent reconcile) exists precisely to make the builtin rows present
 // before any create.
 func testSandboxRefMissingTemplate(t *testing.T, mk Factory) {
 	ctx := context.Background()
@@ -1489,7 +1489,7 @@ func testSandboxRefMissingTemplate(t *testing.T, mk Factory) {
 }
 
 // testTemplateDurability: Template rows survive a reopen (durable backends);
-// existence-is-state means the row IS the persistent object (the documented invariant).
+// existence-is-state means the row IS the persistent object (health and reclamation).
 func testTemplateDurability(t *testing.T, mk Factory) {
 	ctx := context.Background()
 	s, reopen := mk(t)
@@ -1512,17 +1512,17 @@ func testTemplateDurability(t *testing.T, mk Factory) {
 	}
 }
 
-// --- Volume (the documented invariant / the documented invariant) ----------------------------------------------------
+// --- Volume (the Volume subsystem / health and reclamation) ----------------------------------------------------
 
 // testVolumeCRUD: a Volume round-trips intact and is addressed by its own
-// sentinel. Existence IS the state (the documented invariant) — there is no state column to check, so
+// sentinel. Existence IS the state (health and reclamation) — there is no state column to check, so
 // what the assertions cover instead is that presence/absence is the whole answer.
 func testVolumeCRUD(t *testing.T, mk Factory) {
 	ctx := context.Background()
 	s, _ := mk(t)
 
 	// Absent → the VOLUME sentinel, not the sandbox one. A 404 naming the wrong
-	// object sends the caller looking in the wrong place (the documented invariant's reasoning about the
+	// object sends the caller looking in the wrong place (the API error contract's reasoning about the
 	// Volume verdicts, applied to not-found).
 	if _, err := s.GetVolume(ctx, "nope"); err != store.ErrVolumeNotFound {
 		t.Fatalf("GetVolume(absent) = %v; want ErrVolumeNotFound", err)
@@ -1545,7 +1545,7 @@ func testVolumeCRUD(t *testing.T, mk Factory) {
 		t.Errorf("duplicate create = %v; want ErrConflict", err)
 	}
 
-	// List is what the the documented invariant admission gate sums Σ(volume caps) from, so it must
+	// List is what the resource-admission gate sums Σ(volume caps) from, so it must
 	// return the cap, not just the identity.
 	list, err := s.ListVolumes(ctx)
 	if err != nil {
@@ -1583,8 +1583,8 @@ func testVolumeCapacity(t *testing.T, mk Factory) {
 		t.Errorf("cap after write = %d, want %d", got.CapByte, 64<<20)
 	}
 	// 0 is a MEANINGFUL value here (uncapped), not "unset": the record is the
-	// authority for the cap, so writing 0 must actually record 0 (the documented invariant / the relevant internals page
-	// the documented invariant — the backend cannot be consulted to disambiguate, since it maps "no cap"
+	// authority for the cap, so writing 0 must actually record 0 (resource admission / the storage invariant
+	// the storage invariant — the backend cannot be consulted to disambiguate, since it maps "no cap"
 	// and 0 onto each other).
 	if err := s.SetVolumeCapacity(ctx, "vol_c", 0); err != nil {
 		t.Fatalf("clear capacity: %v", err)
@@ -1598,7 +1598,7 @@ func testVolumeCapacity(t *testing.T, mk Factory) {
 	}
 }
 
-// testVolumeDeleteReportsNotFound pins the documented invariant's "idempotent delete must not swallow the
+// testVolumeDeleteReportsNotFound pins the API error contract's "idempotent delete must not swallow the
 // verdicts", on the cheapest verdict — it shares a path with the reference-protection
 // refusals, so a backend that folded not-found into success would fold those too
 // (store.DeleteVolume carries the audited external counter-example).
@@ -1606,7 +1606,7 @@ func testVolumeDeleteNotFound(t *testing.T, mk Factory) {
 	ctx := context.Background()
 	s, _ := mk(t)
 	if err := s.DeleteVolume(ctx, "never"); err != store.ErrVolumeNotFound {
-		t.Fatalf("DeleteVolume(absent) = %v; want ErrVolumeNotFound — a delete that folds this into success cannot report a REFUSED delete either (the documented invariant)", err)
+		t.Fatalf("DeleteVolume(absent) = %v; want ErrVolumeNotFound — a delete that folds this into success cannot report a REFUSED delete either (the API error contract)", err)
 	}
 	if err := s.CreateVolume(ctx, model.Volume{ID: "vol_d", Backend: "local_btrfs", CreatedAt: time.Now()}); err != nil {
 		t.Fatalf("create: %v", err)
@@ -1621,7 +1621,7 @@ func testVolumeDeleteNotFound(t *testing.T, mk Factory) {
 
 // testVolumeDurability: a volume outlives a process restart, and so does its cap.
 // This is the record-layer half of "a volume's lifecycle is decoupled from any
-// sandbox" (the documented invariant) — the byte-layer half is the backend's, asserted in volumetest.
+// sandbox" (the Volume subsystem) — the byte-layer half is the backend's, asserted in volumetest.
 func testVolumeDurability(t *testing.T, mk Factory) {
 	ctx := context.Background()
 	s, reopen := mk(t)
@@ -1639,20 +1639,20 @@ func testVolumeDurability(t *testing.T, mk Factory) {
 		t.Fatalf("volume lost across reopen: %v", err)
 	}
 	if got.CapByte != 16<<20 {
-		t.Errorf("cap lost across reopen: %d, want %d — the record is the cap's only authority (the relevant internals page the documented invariant)", got.CapByte, 16<<20)
+		t.Errorf("cap lost across reopen: %d, want %d — the record is the cap's only authority (volume cap enforcement)", got.CapByte, 16<<20)
 	}
 	if got.Backend != "local_btrfs" {
 		t.Errorf("backend lost across reopen: %q — a later operation must route to the SAME backend that allocated the bytes", got.Backend)
 	}
 }
 
-// testReferenceReclaimRace is the DYNAMIC half of the documented invariant (the documentation reference-reclaim
+// testReferenceReclaimRace is the DYNAMIC half of health and reclamation (the documentation reference-reclaim
 // atomicity): the static "referenced → cannot delete" judgment is not enough; the spec adds
 // an invariant closing the reclaim-vs-reference TOCTOU window. This races a DeleteTemplate
 // against several CreateSandbox referrers AND a child CreateTemplate, all referencing the
 // SAME Template, launched simultaneously.
 //
-// The invariant (per the documented invariant): reference and reclaim NEVER interleave — either
+// The invariant (per health and reclamation): reference and reclaim NEVER interleave — either
 //   - the DELETE commits first → the template is gone and EVERY referencing
 //     create loses with ErrTemplateNotFound, OR
 //   - a reference commits first → the DELETE loses with ErrInUse and the template
@@ -1712,7 +1712,7 @@ func testReferenceReclaimRace(t *testing.T, mk Factory) {
 					sbOK = append(sbOK, sbID)
 					mu.Unlock()
 				case err == store.ErrTemplateNotFound:
-					// clean loss: the reclaim won this reference (the documented invariant).
+					// clean loss: the reclaim won this reference (health and reclamation).
 				default:
 					t.Errorf("trial %d: sandbox create = %v; want nil or ErrTemplateNotFound", i, err)
 				}
@@ -1791,7 +1791,7 @@ func testReferenceReclaimRace(t *testing.T, mk Factory) {
 	}
 }
 
-// testUpdateBinding pins the the documented invariant PATCH write point's contract (the documented invariant). Four
+// testUpdateBinding pins the control-plane API PATCH write point's contract (resource admission). Four
 // properties, all of which a backend could plausibly get wrong on its own:
 // partial application, the state precondition, the updated_at prohibition, and
 // the death-cause convention it shares with CompareAndSetState.
@@ -1835,14 +1835,14 @@ func testUpdateBinding(t *testing.T, mk Factory) {
 		t.Fatalf("death cause = %q; want it untouched by a nil-cause update", got.DeathCause)
 	}
 
-	// (2) UPDATED_AT MUST NOT MOVE. `retention` is measured from it (the documented invariant), so a
+	// (2) UPDATED_AT MUST NOT MOVE. `retention` is measured from it (health and reclamation), so a
 	// backend that refreshes it here would silently extend eviction deadlines.
 	if !got.UpdatedAt.Equal(before.UpdatedAt) {
-		t.Fatalf("UpdatedAt moved (%s → %s); PATCH must not touch it (the documented invariant retention clock)",
+		t.Fatalf("UpdatedAt moved (%s → %s); PATCH must not touch it (health and reclamation retention clock)",
 			before.UpdatedAt, got.UpdatedAt)
 	}
 
-	// (3) CONDITIONAL ON STATE (the documented invariant): a caller that decided against one state
+	// (3) CONDITIONAL ON STATE (per-sandbox transition serialization): a caller that decided against one state
 	// must not have its write land after a concurrent transition moved it.
 	other := int64(1)
 	if err := s.UpdateBinding(ctx, "u1", model.Running, store.Binding{MemoryByte: &other}, nil); err != store.ErrConflict {
@@ -1853,7 +1853,7 @@ func testUpdateBinding(t *testing.T, mk Factory) {
 	}
 
 	// (4) A non-nil CauseNone CLEARS the cause, in the SAME commit as the caps —
-	// this is what makes the documented invariant's raise-the-cap remedy able to complete at all.
+	// this is what makes health and reclamation's raise-the-cap remedy able to complete at all.
 	cleared := model.CauseNone
 	bigger := int64(999 << 20)
 	if err := s.UpdateBinding(ctx, "u1", model.Creating, store.Binding{MemoryByte: &bigger}, &cleared); err != nil {
@@ -1873,11 +1873,11 @@ func testUpdateBinding(t *testing.T, mk Factory) {
 	}
 }
 
-// testNetworkRoundTrip pins the the documented invariant declaration's column-level contract: it survives
-// a write/read cycle intact, and UpdateBinding replaces it WHOLE (the documented invariant — no field-level
+// testNetworkRoundTrip pins the network declaration's column-level contract: it survives
+// a write/read cycle intact, and UpdateBinding replaces it WHOLE (the API error contract — no field-level
 // merge) while leaving the other Binding fields alone.
 //
-// The empty-array shape is part of it: the documented invariant requires the three arrays to read back as `[]`
+// The empty-array shape is part of it: the control-plane API requires the three arrays to read back as `[]`
 // and never as null (model.NetworkDecl.Normalize).
 func testNetworkRoundTrip(t *testing.T, mk Factory) {
 	ctx := context.Background()
@@ -1931,12 +1931,12 @@ func testNetworkRoundTrip(t *testing.T, mk Factory) {
 	}
 	if len(after.Network.Egress.Allow) != 0 || len(after.Network.Egress.Via) != 0 ||
 		len(after.Network.Ingress.Publish) != 0 {
-		t.Errorf("the declaration was MERGED rather than replaced whole (the documented invariant): %+v", after.Network)
+		t.Errorf("the declaration was MERGED rather than replaced whole (the API error contract): %+v", after.Network)
 	}
-	// …and the arrays must be `[]`, not nil: the documented invariant's read face never emits null.
+	// …and the arrays must be `[]`, not nil: the control-plane API's read face never emits null.
 	if after.Network.Egress.Allow == nil || after.Network.Egress.Via == nil ||
 		after.Network.Ingress.Publish == nil {
-		t.Errorf("an array read back as nil; the documented invariant requires `[]` so the read face's output stays a "+
+		t.Errorf("an array read back as nil; the control-plane API requires `[]` so the read face's output stays a "+
 			"legal write body: %+v", after.Network)
 	}
 	if after.Limits != got.Limits || after.IdleTimeout != got.IdleTimeout {
@@ -2000,7 +2000,7 @@ func testNetworkNotAliased(t *testing.T, mk Factory) {
 	}
 }
 
-// testEventKindClosed pins the documented invariant's closed set: each of the six is writable, and a kind
+// testEventKindClosed pins the lifecycle state machine's closed set: each of the six is writable, and a kind
 // outside it is REFUSED rather than persisted.
 //
 // The refusal direction is the one that matters and the one nothing asserted before
@@ -2020,7 +2020,7 @@ func testEventKindClosed(t *testing.T, mk Factory) {
 		if err := s.CompareAndSetState(ctx, "k1", model.Creating, model.Running,
 			ev("k1", fmt.Sprintf("evt_ok_%d", i), k, model.Running), nil); err != nil {
 			t.Errorf("the declared kind %q was refused: %v — model.EventKinds and the store must "+
-				"agree on the documented invariant's set", k, err)
+				"agree on the lifecycle state machine's set", k, err)
 		}
 	}
 
@@ -2034,20 +2034,20 @@ func testEventKindClosed(t *testing.T, mk Factory) {
 	err := s.CompareAndSetState(ctx, "k2", model.Creating, model.Running,
 		ev("k2", "evt_bad", model.EventKind("crash_paused"), model.Running), nil)
 	if err == nil {
-		t.Error("an undeclared event kind was PERSISTED — the documented invariant states a closed set of six, and a " +
+		t.Error("an undeclared event kind was PERSISTED — the lifecycle state machine states a closed set of six, and a " +
 			"seventh reaches subscribers as something no reader handles. The whole point of naming " +
 			"the set is that the store cannot write outside it")
 	}
 	// …and the refusal must not have committed the state change either: the event and
-	// the transition are ONE commit (the documented invariant), so a rejected event means a rejected
+	// the transition are ONE commit (the transactional outbox), so a rejected event means a rejected
 	// transition.
 	if rec, gerr := s.GetSandbox(ctx, "k2"); gerr == nil && rec.State != model.Creating {
 		t.Errorf("the state moved to %q despite the event being refused — the transition and its "+
-			"event are one atomic commit (the documented invariant)", rec.State)
+			"event are one atomic commit (the transactional outbox)", rec.State)
 	}
 }
 
-// --- Mount table (the documented invariant / the documented invariant) -----------------------------------------------
+// --- Mount table (the Volume subsystem / health and reclamation) -----------------------------------------------
 
 // seedVol inserts a Volume row so a mount referencing it satisfies the FK.
 func seedVol(t *testing.T, s store.Store, id string) {
@@ -2086,7 +2086,7 @@ func mount(sbx, vol, path string, access model.AccessMode) model.Mount {
 }
 
 // testMountCRUD: rows round-trip, both list views work, and delete is idempotent.
-// No event is published for any of it — a mount row is not a the documented invariant transition (the documented invariant).
+// No event is published for any of it — a mount row is not a lifecycle state machine transition (health and reclamation).
 func testMountCRUD(t *testing.T, mk Factory) {
 	ctx := context.Background()
 	s, _ := mk(t)
@@ -2125,14 +2125,14 @@ func testMountCRUD(t *testing.T, mk Factory) {
 		t.Errorf("list by volume = %+v, want one row for sbx_a", byVol)
 	}
 
-	// NO event was published by any of this (the documented invariant: mount rows are not transitions).
+	// NO event was published by any of this (health and reclamation: mount rows are not transitions).
 	evs, _, _, err := s.Events(ctx, 0, 100)
 	if err != nil {
 		t.Fatalf("events: %v", err)
 	}
 	for _, ev := range evs {
 		if strings.Contains(string(ev.Kind), "mount") {
-			t.Errorf("a mount row published an event (%q) — mount rows are not the documented invariant transitions", ev.Kind)
+			t.Errorf("a mount row published an event (%q) — mount rows are not the lifecycle state machine transitions", ev.Kind)
 		}
 	}
 
@@ -2148,7 +2148,7 @@ func testMountCRUD(t *testing.T, mk Factory) {
 	}
 }
 
-// testMountRestrictsVolume is the documented invariant verdict ①: a volume held by a live mount row
+// testMountRestrictsVolume checks the volume-held-by-a-live-mount verdict: the volume
 // cannot be deleted, and the verdict is ErrVolumeInUse — NOT ErrInUse, whose text
 // names a Template and would misdirect the caller.
 func testMountRestrictsVolume(t *testing.T, mk Factory) {
@@ -2164,7 +2164,7 @@ func testMountRestrictsVolume(t *testing.T, mk Factory) {
 		t.Fatalf("delete a mounted volume = %v; want ErrVolumeInUse", err)
 	}
 	if errors.Is(err, store.ErrInUse) {
-		t.Errorf("the verdict reuses ErrInUse, whose text says \"template in use\" — a 409 naming the wrong object sends the caller to look at something unrelated (the documented invariant)")
+		t.Errorf("the verdict reuses ErrInUse, whose text says \"template in use\" — a 409 naming the wrong object sends the caller to look at something unrelated (the API error contract)")
 	}
 	// Released once the row is gone.
 	if err := s.DeleteMounts(ctx, "sbx_a"); err != nil {
@@ -2175,7 +2175,7 @@ func testMountRestrictsVolume(t *testing.T, mk Factory) {
 	}
 }
 
-// testMountRestrictsSandbox is the documented invariant verdict ②: a sandbox held by a live mount row
+// testMountRestrictsSandbox checks the sandbox-held-by-a-live-mount verdict: the sandbox
 // cannot be deleted.
 //
 // The point of the case is the TRANSLATION: without a sentinel, DeleteSandbox returns
@@ -2203,7 +2203,7 @@ func testMountRestrictsSandbox(t *testing.T, mk Factory) {
 	}
 }
 
-// testExclusiveLease is the ONE new store invariant Volume introduces (the documented invariant): a
+// testExclusiveLease is the ONE new store invariant Volume introduces (the Volume subsystem): a
 // volume has at most one `exclusive` mount row.
 func testExclusiveLease(t *testing.T, mk Factory) {
 	ctx := context.Background()
@@ -2220,7 +2220,7 @@ func testExclusiveLease(t *testing.T, mk Factory) {
 		t.Fatalf("second exclusive attach = %v; want ErrMountLeaseConflict", err)
 	}
 	// The lease is RELEASED by the row going away — there is no lease object to release
-	// separately (the documented invariant).
+	// separately (the Volume subsystem).
 	if err := s.DeleteMounts(ctx, "sbx_a"); err != nil {
 		t.Fatal(err)
 	}
@@ -2230,7 +2230,7 @@ func testExclusiveLease(t *testing.T, mk Factory) {
 }
 
 // testExclusiveVsShared is the HALF THE PARTIAL INDEX CANNOT COVER, and the reason
-// the invariant needs the atomic statement rather than the index alone (the documented invariant, and the
+// the invariant needs the atomic statement rather than the index alone (the Volume subsystem, and the
 // mounts_exclusive_lease comment).
 //
 // Both directions are checked, because a predicate that only looks at the row being
@@ -2271,7 +2271,7 @@ func testExclusiveVsShared(t *testing.T, mk Factory) {
 		seedVol(t, s, "vol_1")
 		for _, sbx := range []string{"sbx_a", "sbx_b"} {
 			if err := s.CreateMounts(ctx, []model.Mount{mount(sbx, "vol_1", "/data", model.SharedReadWrite)}); err != nil {
-				t.Fatalf("shared attach for %s: %v — \"at most one rw row\" would contradict SharedReadWrite's whole fanout (the documented invariant)", sbx, err)
+				t.Fatalf("shared attach for %s: %v — \"at most one rw row\" would contradict SharedReadWrite's whole fanout (the Volume subsystem)", sbx, err)
 			}
 		}
 		rows, err := s.ListMountsByVolume(ctx, "vol_1")
@@ -2284,7 +2284,7 @@ func testExclusiveVsShared(t *testing.T, mk Factory) {
 	})
 }
 
-// testMountBindingInvalid is the the documented invariant 400 set: a binding that CONTRADICTS ITSELF.
+// testMountBindingInvalid is the API error contract 400 set: a binding that CONTRADICTS ITSELF.
 //
 // 400 rather than 409 because it is decidable without reading any other row and no retry can
 // make it legal. A sandbox holds one COMPLETE binding and PATCH swaps whole for whole, so
@@ -2307,7 +2307,7 @@ func testMountBindingInvalid(t *testing.T, mk Factory) {
 			mount("sbx_a", "vol_1", "/data", model.SharedReadWrite),
 			mount("sbx_a", "vol_2", "/data", model.SharedReadWrite),
 		},
-		why: "the second bind SHADOWS the first, so one volume is invisible in the guest while still counting in the documented invariant and still holding its lease",
+		why: "the second bind SHADOWS the first, so one volume is invisible in the guest while still counting in resource admission and still holding its lease",
 	}, {
 		name: "same volume twice",
 		binding: []model.Mount{
@@ -2333,7 +2333,7 @@ func testMountBindingInvalid(t *testing.T, mk Factory) {
 		binding: []model.Mount{
 			mount("sbx_a", "vol_1", "/", model.SharedReadWrite),
 		},
-		why: `"/" is the one illegal destination that is ALREADY NORMALIZED — path.Clean's fixed point — so the normalization check cannot catch it, and a bind there shadows the WHOLE guest rootfs (the documented invariant: absolute, cleaned, NOT "/")`,
+		why: `"/" is the one illegal destination that is ALREADY NORMALIZED — path.Clean's fixed point — so the normalization check cannot catch it, and a bind there shadows the WHOLE guest rootfs (the Volume subsystem: absolute, cleaned, NOT "/")`,
 	}, {
 		// The spellings that normalize TO "/". They are refused by the normalization check
 		// rather than the root check, and both verdicts are the same 400 — asserted so the
@@ -2371,7 +2371,7 @@ func testMountBindingInvalid(t *testing.T, mk Factory) {
 	}
 
 	// The guest root survives the MEDIATOR'S PATH too, which is the shape a real request
-	// takes: the mediator normalizes every path before insert (the documented invariant), so a check that only
+	// takes: the mediator normalizes every path before insert (the Volume subsystem), so a check that only
 	// caught the un-normalized spellings would pass every case above and still let
 	// NormalizeMountPath("/data/..") through as a legal "/". Asserted as a property over
 	// the whole family rather than one string, because a bind over the guest rootfs is
@@ -2425,9 +2425,9 @@ func testMountAllOrNothing(t *testing.T, mk Factory) {
 	}
 }
 
-// testReplaceMountsKeepsOldBindingOnRefusal is the first of the documented invariant's two required
+// testReplaceMountsKeepsOldBindingOnRefusal is the first of the Volume subsystem's two required
 // ReplaceMounts cases: a replacement that LOSES leaves the OLD binding intact and
-// observable (the documented invariant consequence ①).
+// observable (the Volume subsystem consequence ).
 //
 // Under the two-commit shape this could not hold — the delete had already committed, so the
 // old binding's survival depended on a best-effort re-insert that could itself fail, and the
@@ -2459,7 +2459,7 @@ func testReplaceMountsKeepsOldBindingOnRefusal(t *testing.T, mk Factory) {
 			t.Fatalf("%s: list mounts: %v", what, err)
 		}
 		if len(rows) != 1 || rows[0].Volume != "vol_1" || rows[0].Path != "/data" || rows[0].Access != model.Exclusive {
-			t.Fatalf("%s left sbx_a with %+v; want the ORIGINAL exclusive vol_1@/data binding — a refused replacement must not detach anything (the documented invariant consequence ①)", what, rows)
+			t.Fatalf("%s left sbx_a with %+v; want the ORIGINAL exclusive vol_1@/data binding — a refused replacement must not detach anything (the Volume subsystem consequence )", what, rows)
 		}
 		// And the lease was never released: the row that IS the lease is still there.
 		byVol, err := s.ListMountsByVolume(ctx, "vol_1")
@@ -2467,11 +2467,11 @@ func testReplaceMountsKeepsOldBindingOnRefusal(t *testing.T, mk Factory) {
 			t.Fatalf("%s: list by volume: %v", what, err)
 		}
 		if len(byVol) != 1 || byVol[0].Sandbox != "sbx_a" {
-			t.Fatalf("%s: vol_1 is held by %+v; want sbx_a's single exclusive row (consequence ②: the lease is never transiently released)", what, byVol)
+			t.Fatalf("%s: vol_1 is held by %+v; want sbx_a's single exclusive row (consequence : the lease is never transiently released)", what, byVol)
 		}
 	}
 
-	// ① The replacement loses a lease. Note it KEEPS vol_1 and adds a contended volume,
+	//  The replacement loses a lease. Note it KEEPS vol_1 and adds a contended volume,
 	// which is the realistic PATCH: "keep what I have, add this one".
 	err := s.ReplaceMounts(ctx, "sbx_a", []model.Mount{
 		mount("sbx_a", "vol_1", "/data", model.Exclusive),
@@ -2482,7 +2482,7 @@ func testReplaceMountsKeepsOldBindingOnRefusal(t *testing.T, mk Factory) {
 	}
 	assertOriginal("a lease-contended replacement")
 
-	// ② The replacement contradicts ITSELF (two volumes at one destination). A 400, and
+	//  The replacement contradicts ITSELF (two volumes at one destination). A 400, and
 	// the old binding must be just as intact — the verdict differs, the guarantee does not.
 	err = s.ReplaceMounts(ctx, "sbx_a", []model.Mount{
 		mount("sbx_a", "vol_1", "/data", model.SharedReadWrite),
@@ -2493,7 +2493,7 @@ func testReplaceMountsKeepsOldBindingOnRefusal(t *testing.T, mk Factory) {
 	}
 	assertOriginal("a self-contradictory replacement")
 
-	// ③ A row naming a DIFFERENT sandbox is refused too, and this one matters because the
+	//  A row naming a DIFFERENT sandbox is refused too, and this one matters because the
 	// alternative is destructive: the delete targets sbx_a, so accepting it would detach
 	// sbx_a and attach sbx_holder in a commit the caller thinks touched one sandbox.
 	err = s.ReplaceMounts(ctx, "sbx_a", []model.Mount{mount("sbx_holder", "vol_1", "/data", model.Exclusive)})
@@ -2502,7 +2502,7 @@ func testReplaceMountsKeepsOldBindingOnRefusal(t *testing.T, mk Factory) {
 	}
 	assertOriginal("a replacement naming another sandbox")
 
-	// ④ The RE-SUBMITTED IDENTICAL binding SUCCEEDS. This is the case that forces
+	//  The RE-SUBMITTED IDENTICAL binding SUCCEEDS. This is the case that forces
 	// delete-before-insert: against the un-filtered rows it would self-contend on both the
 	// lease and UNIQUE(sandbox, path).
 	if err := s.ReplaceMounts(ctx, "sbx_a", []model.Mount{mount("sbx_a", "vol_1", "/data", model.Exclusive)}); err != nil {
@@ -2510,8 +2510,8 @@ func testReplaceMountsKeepsOldBindingOnRefusal(t *testing.T, mk Factory) {
 	}
 	assertOriginal("an identical re-submission")
 
-	// ⑤ And a successful replacement really does replace: empty means detach everything
-	// (the documented invariant — PATCH swaps whole bindings, so this is not a special case).
+	//  And a successful replacement really does replace: empty means detach everything
+	// (the API error contract — PATCH swaps whole bindings, so this is not a special case).
 	if err := s.ReplaceMounts(ctx, "sbx_a", nil); err != nil {
 		t.Fatalf("replacement with an EMPTY binding = %v; want success (detach everything)", err)
 	}
@@ -2529,7 +2529,7 @@ func testReplaceMountsKeepsOldBindingOnRefusal(t *testing.T, mk Factory) {
 // rows while a binding is being replaced.
 //
 // WHY THIS IS THE ONE THAT FAILED SILENTLY. ListMountsByVolume is the write-regime
-// predicate (the documented invariant): "no mount rows for this volume" means "nobody has it mounted, so a
+// predicate (the Volume subsystem): "no mount rows for this volume" means "nobody has it mounted, so a
 // direct host-side write is safe". A replacement implemented as DeleteMounts followed by
 // CreateMounts opens exactly that window, and nothing about it is visible to a
 // single-threaded test. Measured against the two-commit shape: 299/31,653 and 9,103/196,029
@@ -2646,7 +2646,7 @@ func testReplaceMountsNoZeroRowWindow(t *testing.T, mk Factory) {
 	<-readerDone
 
 	if zeroReads.Load() > 0 {
-		t.Fatalf("the write-regime predicate observed ZERO mount rows %d time(s) out of %d reads across %d replacements — the volume looked UNMOUNTED mid-replacement, which would wrongly admit a direct host-side write against a volume a live sandbox holds (the documented invariant consequence ③). A replacement must be ONE commit.",
+		t.Fatalf("the write-regime predicate observed ZERO mount rows %d time(s) out of %d reads across %d replacements — the volume looked UNMOUNTED mid-replacement, which would wrongly admit a direct host-side write against a volume a live sandbox holds (the Volume subsystem consequence ). A replacement must be ONE commit.",
 			zeroReads.Load(), reads.Load(), replacements)
 	}
 	if wrongRows.Load() > 0 {
@@ -2677,7 +2677,7 @@ func testReplaceMountsNoZeroRowWindow(t *testing.T, mk Factory) {
 	t.Logf("%d replacements, %d concurrent ListMountsByVolume observations, %d saw zero rows", replacements, reads.Load(), zeroReads.Load())
 }
 
-// testMountMissingEndpoint is the reference side of the documented invariant atomicity: a mount whose
+// testMountMissingEndpoint is the reference side of health and reclamation atomicity: a mount whose
 // sandbox or volume a concurrent delete already removed loses cleanly, with the
 // verdict naming WHICH endpoint is missing.
 func testMountMissingEndpoint(t *testing.T, mk Factory) {
@@ -2694,7 +2694,7 @@ func testMountMissingEndpoint(t *testing.T, mk Factory) {
 	}
 }
 
-// testMountVerdictsDistinct pins the documented invariant's requirement directly: the four Volume
+// testMountVerdictsDistinct pins the API error contract's requirement directly: the four Volume
 // verdicts must stay MUTUALLY DISTINGUISHABLE.
 //
 // It exists because of HOW this degrades — someone later collapses two sentinels that
@@ -2744,12 +2744,12 @@ func testMountVerdictsDistinct(t *testing.T, mk Factory) {
 			}
 		}
 		if matches != 1 {
-			t.Errorf("%s matches %d sentinels, want exactly 1 — the four the documented invariant verdicts must be mutually distinguishable, and a 409 naming the wrong object misdirects the caller", name, matches)
+			t.Errorf("%s matches %d sentinels, want exactly 1 — the four the API error contract verdicts must be mutually distinguishable, and a 409 naming the wrong object misdirects the caller", name, matches)
 		}
 	}
 }
 
-// testConcurrentLease is the ADVERSARIAL case for the documented invariant's lease, and the reason the
+// testConcurrentLease is the ADVERSARIAL case for the Volume subsystem's lease, and the reason the
 // judgment and the insert cannot be separated.
 //
 // A mediator-side pre-check plus an insert is a REAL cross-sandbox TOCTOU: two
@@ -2798,7 +2798,7 @@ func testConcurrentLease(t *testing.T, mk Factory) {
 		}
 	}
 	if winners != 1 {
-		t.Fatalf("%d racers won the exclusive lease, want exactly 1 (conflicts=%d other=%d) — the lease is the ONE new invariant Volume introduces (the documented invariant)", winners, conflicts, other)
+		t.Fatalf("%d racers won the exclusive lease, want exactly 1 (conflicts=%d other=%d) — the lease is the ONE new invariant Volume introduces (the Volume subsystem)", winners, conflicts, other)
 	}
 	if other != 0 {
 		t.Errorf("%d racers got a driver error rather than a clean verdict; the measured run had ZERO", other)
@@ -2846,7 +2846,7 @@ func testFKEnforcement(t *testing.T, mk Factory) {
 
 // testMountDurability: the mount topology survives a restart, which is what makes it
 // a Binding rather than placement state — a resume re-mounts from the CURRENT table
-// (the documented invariant / the documented invariant).
+// (resource admission / the Volume subsystem).
 func testMountDurability(t *testing.T, mk Factory) {
 	ctx := context.Background()
 	s, reopen := mk(t)
@@ -2867,12 +2867,12 @@ func testMountDurability(t *testing.T, mk Factory) {
 		t.Fatalf("mount row did not survive intact: %+v", rows)
 	}
 	// The LEASE survives too, and that is correct rather than incidental: a crash is
-	// dead-recoverable (the documented invariant), the sandbox will resume onto the same volume, and
+	// dead-recoverable (health and reclamation), the sandbox will resume onto the same volume, and
 	// releasing on crash would make that resume collide. The lease releases only when
-	// the row is torn down (the documented invariant).
+	// the row is torn down (the Volume subsystem).
 	seedSbx(t, s2, "sbx_b")
 	if err := s2.CreateMounts(ctx, []model.Mount{mount("sbx_b", "vol_1", "/data", model.Exclusive)}); !errors.Is(err, store.ErrMountLeaseConflict) {
-		t.Errorf("the exclusive lease did not survive the restart (got %v) — a crash KEEPING the lease is correct behavior (the documented invariant)", err)
+		t.Errorf("the exclusive lease did not survive the restart (got %v) — a crash KEEPING the lease is correct behavior (the Volume subsystem)", err)
 	}
 }
 
@@ -2880,7 +2880,7 @@ func testMountDurability(t *testing.T, mk Factory) {
 // be deleted, and the verdict is DISTINCT from "held by a mount row".
 //
 // The FK is a CORRECTNESS lever rather than tidiness — the measured quota-leak argument and
-// the external counter-example are on model.Volume.Parent (the relevant internals page the documented invariant / the documented invariant).
+// the external counter-example are on model.Volume.Parent (snapshot lineage / the storage invariant).
 func testVolumeLineage(t *testing.T, mk Factory) {
 	ctx := context.Background()
 	s, _ := mk(t)
@@ -2905,7 +2905,7 @@ func testVolumeLineage(t *testing.T, mk Factory) {
 		t.Fatalf("delete a volume with a live snapshot = %v; want ErrVolumeHasDescendants", err)
 	}
 	if errors.Is(err, store.ErrVolumeInUse) {
-		t.Errorf("the lineage verdict is indistinguishable from the mount verdict — the caller's remedy differs (delete the descendant vs detach a mount), so they must not be collapsed (the documented invariant)")
+		t.Errorf("the lineage verdict is indistinguishable from the mount verdict — the caller's remedy differs (delete the descendant vs detach a mount), so they must not be collapsed (the control-plane API)")
 	}
 
 	// DELETE THE DESCENDANT FIRST, then the source: the order the FK forces, and the
@@ -2918,7 +2918,7 @@ func testVolumeLineage(t *testing.T, mk Factory) {
 	}
 
 	// A snapshot naming a parent that does not exist loses cleanly (reference side of
-	// the documented invariant atomicity).
+	// health and reclamation atomicity).
 	if err := s.CreateVolume(ctx, model.Volume{
 		ID: "vol_orphan", Backend: "test", Parent: "vol_gone", CreatedAt: time.Now(),
 	}); !errors.Is(err, store.ErrVolumeNotFound) {

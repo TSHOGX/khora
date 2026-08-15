@@ -1,9 +1,9 @@
 package khora
 
-// The the documented invariant wire types.
+// The control-plane API wire types.
 //
-// EVERY FIELD HERE IS ONE the documented invariant FIELD, in the same shape, with the same json tag —
-// the recorded design's first rule for what "thin" means. That is a duplication of
+// EVERY FIELD HERE IS ONE the control-plane API FIELD, in the same shape, with the same json tag —
+// the thin-client contract's first rule for what "thin" means. That is a duplication of
 // internal/orchestrator's own request/response structs, and it is deliberate rather
 // than an oversight: those types are unexported inside `internal/`, so a consumer
 // cannot name them at all, and exporting them would make the engine's internal
@@ -22,12 +22,12 @@ package khora
 //   - A duration crosses the wire as a Go duration STRING ("30m", "24h"), so the unit
 //     is explicit. Use Duration() to build one.
 
-// SandboxState is one of the documented invariant's five spellings. A string, not an enum: the engine is
+// SandboxState is one of the lifecycle state machine's five spellings. A string, not an enum: the engine is
 // authoritative for the set, and a Go constant that fell behind it would be worse than
 // no constant. Compare against the exported values below.
 type SandboxState = string
 
-// The the documented invariant states. Present as constants because a caller branching on state is the
+// The lifecycle state machine states. Present as constants because a caller branching on state is the
 // common case and a typo'd literal is silent.
 const (
 	StateCreating SandboxState = "creating"
@@ -37,7 +37,7 @@ const (
 	StateDead     SandboxState = "dead"
 )
 
-// EventKind is one of the documented invariant's SIX kinds. The set is CLOSED (the documented invariant, and a SQLite CHECK
+// EventKind is one of the lifecycle state machine's SIX kinds. The set is CLOSED (the lifecycle state machine, and a SQLite CHECK
 // enforces it), so these six are exhaustive — a seventh spelling means the engine was
 // changed, not that this list is short.
 type EventKind = string
@@ -107,7 +107,7 @@ type PatchRequest struct {
 	// Volumes is a pointer to a SLICE for the same reason: nil leaves the binding
 	// alone, while a non-nil empty slice removes every mount.
 	Volumes *[]VolumeBinding `json:"volumes,omitempty"`
-	// Network swaps the the documented invariant declaration WHOLE for WHOLE — there is no field-level edit
+	// Network swaps the network declaration WHOLE for WHOLE — there is no field-level edit
 	// of a declaration, because merge semantics on an allow-list is how a rule gets
 	// dropped without anyone deciding to. Prefer SetNetwork, which is this field with
 	// the required-field check attached.
@@ -136,7 +136,7 @@ type Template struct {
 	Builtin bool   `json:"builtin"`
 }
 
-// Event is one the documented invariant outbox entry.
+// Event is one the transactional outbox entry.
 //
 // Delivery is AT-LEAST-ONCE, so a caller MUST dedup by ID — Seq is the cursor, ID is
 // the identity, and they are different fields for that reason.

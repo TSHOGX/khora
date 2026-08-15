@@ -13,7 +13,7 @@ import (
 	"github.com/TSHOGX/khora/internal/store"
 )
 
-// The the documented invariant transition-lock map must be BOUNDED and its exclusion must hold
+// The per-sandbox transition serialization transition-lock map must be BOUNDED and its exclusion must hold
 // ACROSS reclamation. Those two pull in opposite directions, which is why the
 // naive reclamation (delete the entry when a verb finishes / on destroy) is a
 // correctness bug rather than a tidy-up: a verb already blocked in Lock() still
@@ -176,7 +176,7 @@ func TestTransitionLockReleasedByPromote(t *testing.T) {
 // above fails on the same scaffold for a more consequential reason — the reaper's
 // tryLock deletes the entry while Create still holds it, so a later sweep drives
 // the record out from under the in-flight create ("commit running: sandbox not
-// found"). the documented invariant breakage as damage, not just as a counter.
+// found"). per-sandbox transition serialization breakage as damage, not just as a counter.
 func TestTransitionLockExclusionHoldsAcrossCollection(t *testing.T) {
 	st := store.NewMemory()
 	seedBare(t, st)
@@ -323,7 +323,7 @@ func TestTransitionLockExclusionHoldsAcrossCollection(t *testing.T) {
 
 	if n := overlaps.Load(); n != 0 {
 		t.Fatalf("%d overlapping critical sections for one SandboxID — two holders of "+
-			"DIFFERENT mutexes for the same sandbox (the documented invariant violated: an entry was "+
+			"DIFFERENT mutexes for the same sandbox (per-sandbox transition serialization violated: an entry was "+
 			"collected while a waiter still pointed at it)", n)
 	}
 	if plain != hammerers*rounds {

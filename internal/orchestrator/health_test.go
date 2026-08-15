@@ -73,7 +73,7 @@ func TestAHaltedPublisherIsNotReadyButStaysAlive(t *testing.T) {
 
 	code, body := get(t, srv, "/readyz")
 	if code != http.StatusServiceUnavailable {
-		t.Errorf("/readyz with a HALTED publisher = %d (%s), want 503 — the the documented invariant event stream has "+
+		t.Errorf("/readyz with a HALTED publisher = %d (%s), want 503 — the transactional outbox event stream has "+
 			"stopped, and the API answering normally is exactly why this needs a surface", code, body)
 	}
 	if !strings.Contains(body, "halted") {
@@ -97,7 +97,7 @@ func haltPublisher(t *testing.T, eng *Engine) {
 	ctx := context.Background()
 
 	// A halt needs an undelivered row to halt ON: a real transition through the
-	// store's own commit path, which is what puts an event in the outbox (the documented invariant).
+	// store's own commit path, which is what puts an event in the outbox (the transactional outbox).
 	if err := eng.Store.CreateTemplate(ctx, model.Template{ID: "bare", Builtin: true}); err != nil {
 		t.Fatalf("seed template: %v", err)
 	}
@@ -156,7 +156,7 @@ func TestDrainingIsReportedOnBothEndpoints(t *testing.T) {
 	}
 }
 
-// An engine that has not finished booting is NOT ready. the documented invariant reconciliation decides
+// An engine that has not finished booting is NOT ready. atomic transition rollback reconciliation decides
 // which placements survive, so answering ready before it completes tells a load
 // balancer to send traffic to a process that has not re-adopted its running sandboxes
 // — those requests would get "no live placement" for sandboxes that are in fact alive.
@@ -231,7 +231,7 @@ func TestMetricsExportsTheProcessLevelFacts(t *testing.T) {
 	}
 }
 
-// The metrics surface must NOT become a second account of what the documented invariant already reports.
+// The metrics surface must NOT become a second account of what the control-plane API already reports.
 // `used_byte` on the sandbox read and the per-rule hit counters on GET …/network are
 // existing read surfaces with their own shapes; re-exporting them here would give one
 // question two answers that drift. This is the guard on that, and it is mechanical
@@ -244,8 +244,8 @@ func TestMetricsDoesNotDuplicateThe61ReadSurfaces(t *testing.T) {
 	_, body := get(t, srv, "/metrics")
 	for _, banned := range []string{"used_byte", "hit_count", "rule_hits", "per_rule"} {
 		if strings.Contains(body, banned) {
-			t.Errorf("/metrics exports %q, which the documented invariant already reports on its own read surfaces — two "+
-				"differently-shaped accounts of one number drift apart, and the the documented invariant one is the "+
+			t.Errorf("/metrics exports %q, which the control-plane API already reports on its own read surfaces — two "+
+				"differently-shaped accounts of one number drift apart, and the control-plane API one is the "+
 				"contract", banned)
 		}
 	}
@@ -273,7 +273,7 @@ func TestTheReadyGaugeFollowsReadinessNotLiveness(t *testing.T) {
 	}
 }
 
-// The operational endpoints are NOT under /v1: the the documented invariant contract is the
+// The operational endpoints are NOT under /v1: the control-plane API contract is the
 // sandbox-centric API, and keeping them off that prefix leaves "who may scrape
 // metrics" a routing decision a gateway can make separately from "who may create
 // sandboxes".
@@ -285,7 +285,7 @@ func TestTheOperationalEndpointsAreNotPartOfTheV1Contract(t *testing.T) {
 	for _, path := range []string{"/v1/healthz", "/v1/readyz", "/v1/metrics"} {
 		code, _ := get(t, srv, path)
 		if code == http.StatusOK {
-			t.Errorf("%s answered 200 — the operational surface must not appear under the the documented invariant prefix, "+
+			t.Errorf("%s answered 200 — the operational surface must not appear under the control-plane API prefix, "+
 				"so a deployment can route or refuse it separately from the API", path)
 		}
 	}

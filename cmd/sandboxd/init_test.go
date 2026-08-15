@@ -61,7 +61,7 @@ func pendingWaiters(r *reapTable) int {
 	return len(r.waiters)
 }
 
-// The core of ②: the reaper is the sole waiter and the supervisor still gets the
+// The core of : the reaper is the sole waiter and the supervisor still gets the
 // exit code. A second waiter (cmd.Wait) would race Wait4(-1) and one side would get
 // ECHILD with the status gone.
 func TestReapTableDeliversExitCodeToSupervisor(t *testing.T) {

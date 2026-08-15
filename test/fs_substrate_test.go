@@ -1,6 +1,6 @@
 //go:build substrate
 
-// L2 acceptance for the the documented invariant fs surface (transport the documented invariant) against the REAL
+// L2 acceptance for the transport data plane fs surface (fs transport) against the REAL
 // sandboxd under real runsc: Stat / List / MakeDir / Remove / Move on a live
 // guest filesystem. Requires root.
 //

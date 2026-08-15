@@ -102,8 +102,8 @@ install -m 0644 "$HERE/files/nsswitch.conf" "$ROOT/etc/nsswitch.conf"
 
 # Mount points preinstalled, which is a MEASURED by-product rather than tidiness: a bind
 # destination already present in the lower does NOT trigger copy-up, while a missing one
-# dirties the upper — so this keeps Promoted layers clean and demotes the documented invariant's exclusion
-# entries to a backstop (rootfs-overlay the documented invariant). It cannot cover a caller's own choice of
+# dirties the upper — so this keeps Promoted layers clean and demotes the Rootfs subsystem's exclusion
+# entries to a backstop (rootfs mount constraints). It cannot cover a caller's own choice of
 # dest, which is why that mechanism still exists.
 for d in proc sys dev tmp run home root etc/ssl workspace data; do
 	mkdir -p "$ROOT/$d"
@@ -117,11 +117,11 @@ chroot "$ROOT" sh -c 'apt-get clean' || true
 rm -rf "$ROOT"/var/lib/apt/lists/* "$ROOT"/var/cache/apt/* \
 	"$ROOT"/usr/share/doc "$ROOT"/usr/share/man "$ROOT"/usr/share/locale
 
-# NO /etc/resolv.conf IN THE ARTIFACT, and the engine injects none either (the documented invariant, settled).
+# NO /etc/resolv.conf IN THE ARTIFACT, and the engine injects none either (the Rootfs subsystem, settled).
 # Baking one in pins a BUILD-MACHINE resolver into a supposedly portable artifact, and it
 # is actively harmful rather than merely wrong elsewhere: an address the deployment's
 # egress.allow[] does not name produces a 10–20 s hang then `Could not resolve host`
-# (the relevant internals page the documented invariant ⑦) — the worst diagnostic shape in the system — BY DEFAULT, on every
+# (network substrate measurements) — the worst diagnostic shape in the system — BY DEFAULT, on every
 # deployment that does not happen to match this machine.
 rm -f "$ROOT/etc/resolv.conf"
 

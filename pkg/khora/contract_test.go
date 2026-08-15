@@ -1,7 +1,7 @@
 package khora
 
-// The guard that makes pkg/khora's duplicated wire types safe (the recorded design part 2, rule
-// 1: every field maps 1:1 onto a the documented invariant field).
+// This guard keeps pkg/khora's duplicated wire types aligned: every field maps
+// 1:1 onto a control-plane API field.
 //
 // THE DUPLICATION IS UNAVOIDABLE. internal/orchestrator's request/response structs are
 // unexported inside `internal/`, so a consumer cannot name them; exporting them would
@@ -120,7 +120,7 @@ func TestClientTypesMatchThePublishedContract(t *testing.T) {
 		typ    any
 		// readOnly are fields the READ face emits and the write face accepts-and-ignores.
 		// They are legitimately absent from a write-side schema, and carrying them is
-		// what makes the read response a legal write body (the documented invariant's read-modify-write
+		// what makes the read response a legal write body (the control-plane API's read-modify-write
 		// requirement) — so their absence there is not drift.
 		readOnly []string
 	}{
@@ -191,7 +191,7 @@ func TestClientTypesMatchThePublishedContract(t *testing.T) {
 
 // TestEveryContractOperationHasAClientMethod: the CLI-shell rule from the other side.
 //
-// the recorded design makes cmd/khora a shell over this package precisely so a client method no
+// the thin-client contract makes cmd/khora a shell over this package precisely so a client method no
 // command can use is visible — but that only catches methods this package HAS. The
 // opposite gap, an operation the engine serves and this client cannot reach, is
 // invisible from inside the CLI. So it is checked against the contract's own operation
@@ -264,7 +264,7 @@ func TestEveryContractOperationHasAClientMethod(t *testing.T) {
 	}
 }
 
-// TestClientHoldsNoStateBetweenCalls is the recorded design's third rule, checked structurally.
+// TestClientHoldsNoStateBetweenCalls is the thin-client contract's third rule, checked structurally.
 //
 // "No state that outlives a call" is the rule that decides whether this is a client or
 // a product layer wearing a client's name, and it is the easiest of the four to break
@@ -277,7 +277,7 @@ func TestClientHoldsNoStateBetweenCalls(t *testing.T) {
 	for i := range rt.NumField() {
 		name := rt.Field(i).Name
 		if !allowed[name] {
-			t.Errorf("Client has a field %q. the recorded design rule 3: no state that outlives a call — "+
+			t.Errorf("Client has a field %q. No state may outlive a call — "+
 				"a cache, a lease, a cursor, or a subscriber registry here makes this a product "+
 				"layer with a client's name. If the field is genuinely connection-level, add it "+
 				"to this guard's allowlist WITH the reason.", name)
@@ -285,13 +285,13 @@ func TestClientHoldsNoStateBetweenCalls(t *testing.T) {
 	}
 }
 
-// TestNoBannedVocabulary applies the documented invariant's vocabulary boundary to this package, which
-// the recorded design requires verbatim: it is engine-facing code in the engine repo.
+// TestNoBannedVocabulary applies the engine vocabulary boundary to this package, which
+// the thin-client contract requires verbatim: it is engine-facing code in the engine repo.
 //
 // Checked on the exported API surface — type names, method names, and field names — the
 // places where a product concept would become part of the published contract.
 func TestNoBannedVocabulary(t *testing.T) {
-	// the documented invariant's banned engine-internal entity names. `generation` is barred outright;
+	// the engine vocabulary boundary's banned engine-internal entity names. `generation` is barred outright;
 	// the rest are barred as NAMES here.
 	banned := []string{
 		"generation", "principal", "tenant", "session", "turn", "agent",
@@ -301,7 +301,7 @@ func TestNoBannedVocabulary(t *testing.T) {
 		low := strings.ToLower(strings.ReplaceAll(name, "_", ""))
 		for _, b := range banned {
 			if strings.Contains(low, b) {
-				t.Errorf("%s %q carries the banned engine name %q (the documented invariant). Product-layer "+
+				t.Errorf("%s %q carries the banned engine name %q (the engine vocabulary boundary). Product-layer "+
 					"concepts do not enter the engine, and this package is engine-facing code "+
 					"in the engine repo.", where, name, b)
 			}
