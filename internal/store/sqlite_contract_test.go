@@ -8,10 +8,10 @@ import (
 	"github.com/TSHOGX/khora/internal/store/storetest"
 )
 
-// SQLite runs the SAME §4.4-C contract suite as Memory (§1.3 seam: the two
+// SQLite runs the SAME the documented invariant contract suite as Memory (the documented invariant seam: the two
 // backends run one set of assertions). It uses a real on-disk file so the
 // Durability subtest can reopen it — proving records AND unpublished outbox rows
-// survive a process restart, the substrate for §4.4-A reconciliation and
+// survive a process restart, the substrate for the documented invariant reconciliation and
 // redelivery.
 func TestSQLiteContract(t *testing.T) {
 	storetest.RunContract(t, func(t *testing.T) (store.Store, func(t *testing.T) store.Store) {

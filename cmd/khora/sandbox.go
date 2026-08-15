@@ -1,14 +1,14 @@
 package main
 
-// The sandbox commands, as a SHELL over pkg/khora (ADR-0008 part 2).
+// The sandbox commands, as a SHELL over pkg/khora (the recorded design part 2).
 //
-// This file used to hold its own copies of the §6.1 wire types plus a hand-rolled
+// This file used to hold its own copies of the the documented invariant wire types plus a hand-rolled
 // request/decode/status-check cycle per command — a THIRD statement of the same
 // protocol, after the handlers and the contract document. It is now flags in, client
 // call, print: every type here is pkg/khora's, and there is no net/http import.
 //
-// That direction of dependency is also the test ADR-0008 wanted from this arrangement:
-// the CLI covers every §6.1 operation, so a client method no command can use is visible
+// That direction of dependency is also the test the recorded design wanted from this arrangement:
+// the CLI covers every the documented invariant operation, so a client method no command can use is visible
 // immediately, and a command that needed to reach around the client into raw HTTP would
 // be a capability the published client fails to offer.
 

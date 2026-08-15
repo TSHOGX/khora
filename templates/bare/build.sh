@@ -5,14 +5,14 @@
 # measures ~716 MB (measured, after cleanup, on arm64), and git would store that
 # permanently — with a full second copy on every re-pin of BASE, since compressed
 # binaries have no useful delta. So the small, diffable, reviewable inputs live here and
-# the artifact is built on demand or published as a release asset. See README.md.
+# the artifact is built on demand or published as a release asset. See the documentation.
 #
 # Usage: build.sh <dest-template-dir> <path-to-sandboxd-binary>
 #
 # Reproducibility comes from the INPUTS being pinned, not from a bit-identical output:
 # BASE names an image by DIGEST, so the starting tree is fixed. Package versions still
 # float with the Debian mirror; pinning those too means a snapshot mirror, which is a
-# separate decision (see README.md).
+# separate decision (see the documentation).
 set -euo pipefail
 
 DEST="${1:?usage: build.sh <dest-template-dir> <sandboxd-binary>}"
@@ -89,7 +89,7 @@ mknod -m 666 "$ROOT/dev/zero" c 1 5
 mknod -m 644 "$ROOT/dev/urandom" c 1 9
 
 # A resolver for the BUILD only, so apt can reach the mirror. It is removed below: the
-# artifact deliberately ships none (see README.md).
+# artifact deliberately ships none (see the documentation).
 cp /etc/resolv.conf "$ROOT/etc/resolv.conf"
 
 mapfile -t PKGS < <(sed 's/#.*//' "$HERE/packages" | tr -s '[:space:]' '\n' | grep -v '^$')
@@ -102,8 +102,8 @@ install -m 0644 "$HERE/files/nsswitch.conf" "$ROOT/etc/nsswitch.conf"
 
 # Mount points preinstalled, which is a MEASURED by-product rather than tidiness: a bind
 # destination already present in the lower does NOT trigger copy-up, while a missing one
-# dirties the upper — so this keeps Promoted layers clean and demotes §5.B's exclusion
-# entries to a backstop (rootfs-overlay D5). It cannot cover a caller's own choice of
+# dirties the upper — so this keeps Promoted layers clean and demotes the documented invariant's exclusion
+# entries to a backstop (rootfs-overlay the documented invariant). It cannot cover a caller's own choice of
 # dest, which is why that mechanism still exists.
 for d in proc sys dev tmp run home root etc/ssl workspace data; do
 	mkdir -p "$ROOT/$d"
@@ -117,11 +117,11 @@ chroot "$ROOT" sh -c 'apt-get clean' || true
 rm -rf "$ROOT"/var/lib/apt/lists/* "$ROOT"/var/cache/apt/* \
 	"$ROOT"/usr/share/doc "$ROOT"/usr/share/man "$ROOT"/usr/share/locale
 
-# NO /etc/resolv.conf IN THE ARTIFACT, and the engine injects none either (§5.B, settled).
+# NO /etc/resolv.conf IN THE ARTIFACT, and the engine injects none either (the documented invariant, settled).
 # Baking one in pins a BUILD-MACHINE resolver into a supposedly portable artifact, and it
 # is actively harmful rather than merely wrong elsewhere: an address the deployment's
 # egress.allow[] does not name produces a 10–20 s hang then `Could not resolve host`
-# (network.md D5 ⑦) — the worst diagnostic shape in the system — BY DEFAULT, on every
+# (the relevant internals page the documented invariant ⑦) — the worst diagnostic shape in the system — BY DEFAULT, on every
 # deployment that does not happen to match this machine.
 rm -f "$ROOT/etc/resolv.conf"
 
@@ -132,4 +132,4 @@ mv "$ROOT" "$DEST"
 
 echo "build.sh: built $DEST ($(du -sh "$DEST" | cut -f1))"
 echo "build.sh: NOTE — this sandbox resolves no names until the deployment supplies both"
-echo "          /etc/resolv.conf and a UDP/53 egress.allow[] entry (README.md)."
+echo "          /etc/resolv.conf and a UDP/53 egress.allow[] entry (the documentation)."

@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# spike-hop2-hook.sh — WHERE is the second hop (§2.4 invariant 2) evaluable?
+# spike-hop2-hook.sh — WHERE is the second hop (the documented invariant invariant 2) evaluable?
 #
-# §2.4's second invariant says both hops are pinned and the second one is
-# enforced BY THE KERNEL, not by the via-process's own discipline. D4.2 works out
+# the documented invariant's second invariant says both hops are pinned and the second one is
+# enforced BY THE KERNEL, not by the via-process's own discipline. the documented invariant works out
 # the predicate (uid/gid, not mark) and the two relative positions (a RETURN above
 # the steering rules so the process does not re-match its own rule; the L0 floor
-# ABOVE that, so it stays subject to the floor). But D4.2 also asserted, at the time
+# ABOVE that, so it stays subject to the floor). But the documented invariant also asserted, at the time
 # this ran, that the whole predicate "lives entirely in `forward`" — and that claim
-# was unmeasured. It is the claim this script falsified; D4.2 now says the uid
-# predicate lands on `output`, and D5 ㉔ carries the measurement.
+# was unmeasured. It is the claim this script falsified; the documented invariant now says the uid
+# predicate lands on `output`, and the documented invariant ㉔ carries the measurement.
 #
 # It looks mechanically wrong: hop 2 is a HOST-LOCAL process opening a NEW
-# connection (§5.D requires via[].endpoint to be host-local, §6.2 400s anything
+# connection (the documented invariant requires via[].endpoint to be host-local, the documented invariant 400s anything
 # else). Locally-originated packets are routed out via `output`/`postrouting`;
 # they never traverse `forward`, which only sees packets being routed BETWEEN
 # interfaces. And `skuid` needs a socket owner — in `forward` there is no local
@@ -21,7 +21,7 @@
 # for the rule-set shape:
 #   * the L0 floor as designed (input + forward, iifname-narrowed) sees NONE of
 #     hop 2 — the confused-deputy path is wide open, and no floor counter moves,
-#     which is the silent-pass signature D4.1 warns about;
+#     which is the silent-pass signature the documented invariant warns about;
 #   * the hop-2 rules need an `output` base chain, which is NOT per-sandbox
 #     (one uid, one deployment) — so it cannot live in a per-sandbox table, and
 #     the render guard "every rule carries iifname" cannot apply to it;
@@ -36,7 +36,7 @@
 #   Q5  whether an un-narrowed drop in `output` is a host-wide kill switch
 #
 # Target of the probe = a peer netns on a /30, standing in for the sibling
-# address space the floor must cover (D5 ④). Root required.
+# address space the floor must cover (the documented invariant ④). Root required.
 #
 # ── MEASURED (nft 1.1.6, this machine) ────────────────────────────────────────
 #
@@ -69,9 +69,9 @@
 #        evaluable for every locally-owned packet, and Q2b shows that is not
 #        universal.
 #
-# ⟹ D4.2's "this predicate lives entirely in `forward`" is WRONG as written; the
+# ⟹ the documented invariant's "this predicate lives entirely in `forward`" is WRONG as written; the
 #    hook is `output`. Consequences for the rule-set shape are written up in
-#    network.md D5 ㉔.
+#    the relevant internals page the documented invariant ㉔.
 set -u
 
 HOP2_UID=12345

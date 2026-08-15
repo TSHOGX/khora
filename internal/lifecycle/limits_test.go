@@ -15,7 +15,7 @@ import (
 	"github.com/TSHOGX/khora/internal/transport"
 )
 
-// Unit tests for the §3.4 resource-limit Binding and the §4.3 death-cause
+// Unit tests for the the documented invariant resource-limit Binding and the the documented invariant death-cause
 // disposition — the mediator-side logic, as pure logic. The substrate behaviour
 // (does cpu.max really throttle, does the RAM cap really terminate) is asserted
 // on real runsc in test/resource_substrate_test.go; these cover the parts that
@@ -51,13 +51,13 @@ func TestLimitsAreABindingRematerializedEachPlacement(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	// materialized into the record (§3.4: SoT is the control-plane record).
+	// materialized into the record (the documented invariant: SoT is the control-plane record).
 	rec, _ := st.GetSandbox(ctx, sid)
 	if rec.Limits != want {
 		t.Fatalf("record limits = %+v; want %+v", rec.Limits, want)
 	}
-	// ...and pushed across the §5.A seam on the create placement. The capacity axis
-	// must NOT be in the runtime spec — it goes to the rootfs provider (§3.4).
+	// ...and pushed across the the documented invariant seam on the create placement. The capacity axis
+	// must NOT be in the runtime spec — it goes to the rootfs provider (the documented invariant).
 	if got := rt.launchLimits[0]; got.CPUMillis != 500 || got.MemoryByte != 192<<20 {
 		t.Fatalf("launch limits = %+v; want cpu=500 mem=%d", got, 192<<20)
 	}
@@ -76,7 +76,7 @@ func TestLimitsAreABindingRematerializedEachPlacement(t *testing.T) {
 		t.Fatalf("Resume: %v", err)
 	}
 	if got := rt.launchLimits[len(rt.launchLimits)-1]; got.CPUMillis != 1500 || got.MemoryByte != 512<<20 {
-		t.Fatalf("resume replayed stale limits %+v; want the EDITED cpu=1500 mem=%d (§3.4 Binding, not frozen state)", got, 512<<20)
+		t.Fatalf("resume replayed stale limits %+v; want the EDITED cpu=1500 mem=%d (the documented invariant Binding, not frozen state)", got, 512<<20)
 	}
 	rec2, _ := st.GetSandbox(ctx, sid)
 	if !contains(rp.Calls(), fmt.Sprintf("OpenOverlay:%s;lower=bare;cap=%d", rec2.Overlay, 128<<20)) {
@@ -109,7 +109,7 @@ func TestHandleOnlyRebuildsDoNotTouchTheCap(t *testing.T) {
 	}
 }
 
-// §4.3 — the two dead HEALTH STATES are parallel, not nested: identical
+// the documented invariant — the two dead HEALTH STATES are parallel, not nested: identical
 // observations (L1 dead, persistent state intact), OPPOSITE dispositions,
 // separated only by the death cause. Both crash-pause; only resource-terminated
 // refuses to resume, and a dead-recoverable one really does come back up.
@@ -166,14 +166,14 @@ func TestDeathCauseSeparatesTheTwoParallelDeadHealthStates(t *testing.T) {
 			rt.adoptAlive[string(sid2)] = false
 			rt.adoptCause[string(sid2)] = tc.cause
 
-			// classify must carry the cause OUT with the health state (D4c).
+			// classify must carry the cause OUT with the health state (the documented invariantc).
 			rec, _ := st.GetSandbox(ctx, sid2)
 			h, gotCause := m.classify(ctx, rec)
 			if h != tc.wantHealth {
 				t.Fatalf("health = %s; want %s", h, tc.wantHealth)
 			}
 			if gotCause != tc.cause {
-				t.Fatalf("classify dropped the cause: got %v want %v (D4c: read-and-discard loses it forever)", gotCause, tc.cause)
+				t.Fatalf("classify dropped the cause: got %v want %v (the documented invariantc: read-and-discard loses it forever)", gotCause, tc.cause)
 			}
 
 			// disposition: crash-pause, persisting the cause in the SAME commit.
@@ -194,7 +194,7 @@ func TestDeathCauseSeparatesTheTwoParallelDeadHealthStates(t *testing.T) {
 			err := m.Resume(ctx, sid2)
 			if tc.wantResume {
 				if err != nil {
-					t.Fatalf("resume of a %s death = %v; want it to SUCCEED (§4.3 dead-recoverable resumes)", tc.cause, err)
+					t.Fatalf("resume of a %s death = %v; want it to SUCCEED (the documented invariant dead-recoverable resumes)", tc.cause, err)
 				}
 				back, _ := st.GetSandbox(ctx, sid2)
 				if back.State != model.Running {
@@ -203,7 +203,7 @@ func TestDeathCauseSeparatesTheTwoParallelDeadHealthStates(t *testing.T) {
 			}
 			if !tc.wantResume {
 				if !errors.Is(err, ErrResourceTerminated) {
-					t.Fatalf("resume err = %v; want ErrResourceTerminated (§4.3: resuming re-triggers the cap = crash loop)", err)
+					t.Fatalf("resume err = %v; want ErrResourceTerminated (the documented invariant: resuming re-triggers the cap = crash loop)", err)
 				}
 				stayed, _ := st.GetSandbox(ctx, sid2)
 				if stayed.State != model.Paused {
@@ -214,7 +214,7 @@ func TestDeathCauseSeparatesTheTwoParallelDeadHealthStates(t *testing.T) {
 	}
 }
 
-// §4.3 bounded self-correction: an Unknown death resumes, and a SUCCESSFUL resume
+// the documented invariant bounded self-correction: an Unknown death resumes, and a SUCCESSFUL resume
 // CLEARS the recorded cause. Without the clear, a stale cause would accumulate and
 // the "second termination is observed in the control plane's plain view" argument
 // would rest on a value from the previous life.
@@ -226,7 +226,7 @@ func TestSuccessfulResumeClearsTheDeathCause(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	// crash-pause it with an Unknown cause (the §4.3 fallback case).
+	// crash-pause it with an Unknown cause (the the documented invariant fallback case).
 	dc := model.CauseUnknown
 	if err := m.pauseLocked(ctx, sid, "crash-paused", &dc); err != nil {
 		t.Fatalf("crash-pause: %v", err)
@@ -243,9 +243,9 @@ func TestSuccessfulResumeClearsTheDeathCause(t *testing.T) {
 	}
 }
 
-// The §3.4 admission gate. Asserts the FORMULA,
+// The the documented invariant admission gate. Asserts the FORMULA,
 // including the term that is easy to omit: measured layer bytes, which no
-// per-sandbox cap covers under squota (rootfs-overlay D6.5).
+// per-sandbox cap covers under squota (rootfs-overlay the documented invariant).
 func TestAdmissionGateEnforcesTheAccountingFormula(t *testing.T) {
 	ctx := context.Background()
 	const gib = 1 << 30
@@ -261,7 +261,7 @@ func TestAdmissionGateEnforcesTheAccountingFormula(t *testing.T) {
 		if !errors.Is(err, ErrInsufficientCapacity) {
 			t.Fatalf("create err = %v; want ErrInsufficientCapacity (6 GiB layers + 5 GiB cap > 10 GiB)", err)
 		}
-		// and NOTHING was built: no overlay, no placement (§4.4-A no half-build).
+		// and NOTHING was built: no overlay, no placement (the documented invariant no half-build).
 		for _, c := range rp.Calls() {
 			if len(c) >= 13 && c[:13] == "CreateOverlay" {
 				t.Fatalf("refused create still allocated an Overlay: %v", rp.Calls())
@@ -325,9 +325,9 @@ func TestAdmissionGateEnforcesTheAccountingFormula(t *testing.T) {
 		if err := m.Resume(ctx, sid); !errors.Is(err, ErrInsufficientCapacity) {
 			t.Fatalf("resume err = %v; want ErrInsufficientCapacity", err)
 		}
-		// §4.4-A: atomic return to the SOURCE state.
+		// the documented invariant: atomic return to the SOURCE state.
 		if rec, _ := st.GetSandbox(ctx, sid); rec.State != model.Paused {
-			t.Fatalf("state = %s; want it to stay paused (§4.4-A)", rec.State)
+			t.Fatalf("state = %s; want it to stay paused (the documented invariant)", rec.State)
 		}
 	})
 
@@ -340,16 +340,16 @@ func TestAdmissionGateEnforcesTheAccountingFormula(t *testing.T) {
 		if _, err := m.Create(ctx, CreateSpec{Template: "bare", Limits: model.Limits{MemoryByte: 2 * gib}}); !errors.Is(err, ErrInsufficientCapacity) {
 			t.Fatalf("err = %v; want ErrInsufficientCapacity (3+2 > 4 GiB RAM)", err)
 		}
-		// A huge DISK request is unaffected: the axes are not fungible (§3.4), and
+		// A huge DISK request is unaffected: the axes are not fungible (the documented invariant), and
 		// disk is UNMETERED here so its size is nobody's business. The memory cap is
 		// present because memory IS metered on this node, and a metered axis requires
-		// a cap (§3.4) — that premise is what the next subtest pins down.
+		// a cap (the documented invariant) — that premise is what the next subtest pins down.
 		if _, err := m.Create(ctx, CreateSpec{Template: "bare", Limits: model.Limits{DiskByte: 900 * gib, MemoryByte: gib}}); err != nil {
 			t.Fatalf("disk request refused against a RAM-only budget: %v", err)
 		}
 	})
 
-	// §3.4.3: once an axis is metered, every admitted sandbox must carry a cap on it.
+	// the documented invariant: once an axis is metered, every admitted sandbox must carry a cap on it.
 	t.Run("a metered axis requires a cap", func(t *testing.T) {
 		t.Run("disk metered, disk cap omitted → refused", func(t *testing.T) {
 			m, st := newLimitsMediator(t, &fakeRootfs{}, &fakeRuntime{}, NodeCapacity{DiskByte: 8 * gib})
@@ -363,7 +363,7 @@ func TestAdmissionGateEnforcesTheAccountingFormula(t *testing.T) {
 			if !errors.Is(err, ErrCapRequired) || errors.Is(err, ErrInsufficientCapacity) {
 				t.Fatalf("err = %v; want ErrCapRequired and NOT ErrInsufficientCapacity", err)
 			}
-			// refused at PROMISE time → no record, nothing half-built (§4.4-A).
+			// refused at PROMISE time → no record, nothing half-built (the documented invariant).
 			if recs, _ := st.ListSandboxes(ctx); len(recs) != 0 {
 				t.Fatalf("refused create left %d record(s); want none", len(recs))
 			}
@@ -386,7 +386,7 @@ func TestAdmissionGateEnforcesTheAccountingFormula(t *testing.T) {
 		})
 
 		// resume is gated too, so turning a budget ON while uncapped records exist
-		// wedges them at `paused` (§4.4-A source state). The known residual of this
+		// wedges them at `paused` (the documented invariant source state). The known residual of this
 		// rule; the remedy is "PATCH a cap onto the record, then resume".
 		t.Run("resume of an uncapped record on a now-metered node → refused, stays paused", func(t *testing.T) {
 			rp, rt := &fakeRootfs{}, &fakeRuntime{}
@@ -403,7 +403,7 @@ func TestAdmissionGateEnforcesTheAccountingFormula(t *testing.T) {
 				t.Fatalf("resume err = %v; want ErrCapRequired", err)
 			}
 			if rec, _ := st.GetSandbox(ctx, sid); rec.State != model.Paused {
-				t.Fatalf("state = %s; want paused (§4.4-A)", rec.State)
+				t.Fatalf("state = %s; want paused (the documented invariant)", rec.State)
 			}
 		})
 	})
@@ -430,11 +430,11 @@ func TestAdmissionGateEnforcesTheAccountingFormula(t *testing.T) {
 	})
 }
 
-// Promote must clear the SAME inequality as create (§3.4: any control-plane action
-// that increases uncapped bytes; rootfs-overlay D6.5's residual). A frozen layer is
+// Promote must clear the SAME inequality as create (the documented invariant: any control-plane action
+// that increases uncapped bytes; rootfs-overlay the documented invariant's residual). A frozen layer is
 // charged to no sandbox cap, so it lands in the MEASURED term — the harm of not
 // gating it is not a failed Promote but an UNRELATED sandbox meeting ENOSPC nowhere
-// near its own cap, §2.3 containment broken from the other side.
+// near its own cap, the documented invariant containment broken from the other side.
 func TestPromotePassesTheNodeCapacityGate(t *testing.T) {
 	ctx := context.Background()
 	const gib = 1 << 30
@@ -481,7 +481,7 @@ func TestPromotePassesTheNodeCapacityGate(t *testing.T) {
 				t.Fatalf("refused promote inserted a templates row: %+v", tm)
 			}
 		}
-		// legal resting state: the source is untouched (§4.4-A source state).
+		// legal resting state: the source is untouched (the documented invariant source state).
 		if rec, _ := st.GetSandbox(ctx, sid); rec.State != model.Paused {
 			t.Fatalf("state = %s; want paused (unchanged by a refusal)", rec.State)
 		}
@@ -517,7 +517,7 @@ func TestPromotePassesTheNodeCapacityGate(t *testing.T) {
 
 	// The gate runs BEFORE the quiesce, on purpose: placing it after would buy an
 	// exact byte count at the price of a refusal that MUTATED state — a running
-	// sandbox left `paused` because the node was full. §4.4-A wants a failed
+	// sandbox left `paused` because the node was full. the documented invariant wants a failed
 	// transition to return to its source state.
 	t.Run("refused promote of a RUNNING source leaves it running", func(t *testing.T) {
 		m, st, rp := setup(t, 10*gib, 5*gib, gib)
@@ -556,7 +556,7 @@ func TestPromotePassesTheNodeCapacityGate(t *testing.T) {
 	})
 
 	// A RAM-only budget must not gate a Promote: uncapped bytes are disk by
-	// construction and the two budgets are not fungible (§3.4).
+	// construction and the two budgets are not fungible (the documented invariant).
 	t.Run("memory-only budget does not gate promote", func(t *testing.T) {
 		rp := &fakeRootfs{promoteCost: 900 * gib}
 		m, _ := newLimitsMediator(t, rp, &fakeRuntime{}, NodeCapacity{MemoryByte: 4 * gib})
@@ -701,7 +701,7 @@ var (
 	_ runtime.Provider = (*fakeRuntime)(nil)
 )
 
-// §3.4 / §6.1 PATCH — the Binding is WRITABLE, and the write point behaves per
+// the documented invariant / the documented invariant PATCH — the Binding is WRITABLE, and the write point behaves per
 // consumer: caps re-materialize at the next placement (so `paused` only), TTLs are
 // re-read by the reaper every sweep (so either state, immediately).
 func TestUpdateBindingRewritesTheBinding(t *testing.T) {
@@ -727,12 +727,12 @@ func TestUpdateBindingRewritesTheBinding(t *testing.T) {
 			t.Fatalf("memory = %d; want %d", rec.Limits.MemoryByte, want)
 		}
 		// omitted fields unchanged — PATCH swaps one COMPLETE binding for another
-		// (§6.2: never leaves a field unresolved).
+		// (the documented invariant: never leaves a field unresolved).
 		if rec.Limits.DiskByte != 64<<20 {
 			t.Fatalf("disk = %d; want it untouched at %d", rec.Limits.DiskByte, 64<<20)
 		}
 		// ...and the edited cap really reaches the seam on the NEXT placement, which
-		// is what makes it a Binding rather than a stored-but-inert number (§3.4).
+		// is what makes it a Binding rather than a stored-but-inert number (the documented invariant).
 		if err := m.Resume(ctx, sid); err != nil {
 			t.Fatalf("resume: %v", err)
 		}
@@ -750,7 +750,7 @@ func TestUpdateBindingRewritesTheBinding(t *testing.T) {
 		}
 		bigger := int64(256 << 20)
 		if err := patchBinding(m, ctx, sid, store.Binding{MemoryByte: &bigger}); !errors.Is(err, store.ErrConflict) {
-			t.Fatalf("cap edit while running = %v; want ErrConflict (pause first, §3.4)", err)
+			t.Fatalf("cap edit while running = %v; want ErrConflict (pause first, the documented invariant)", err)
 		}
 		// TTL has no placement-local materialization, so it is editable live.
 		ttl := 5 * time.Minute
@@ -762,7 +762,7 @@ func TestUpdateBindingRewritesTheBinding(t *testing.T) {
 		}
 	})
 
-	// §4.3 offers "raise the cap" as the resource-terminated remedy, but the resume
+	// the documented invariant offers "raise the cap" as the resource-terminated remedy, but the resume
 	// guard reads death_cause and NOTHING else clears it —
 	// only a successful resume does, which the guard itself prevents. So without
 	// clearing it here the documented remedy cannot complete, ever.
@@ -787,7 +787,7 @@ func TestUpdateBindingRewritesTheBinding(t *testing.T) {
 			t.Fatalf("raise: %v", err)
 		}
 		if rec, _ := st.GetSandbox(ctx, sid); rec.DeathCause != model.CauseNone {
-			t.Fatalf("death cause = %q; want it CLEARED by the raise (§4.3)", rec.DeathCause)
+			t.Fatalf("death cause = %q; want it CLEARED by the raise (the documented invariant)", rec.DeathCause)
 		}
 		if err := m.Resume(ctx, sid); err != nil {
 			t.Fatalf("resume after raise: %v — the raise-the-cap remedy must actually complete", err)
@@ -831,7 +831,7 @@ func TestUpdateBindingRewritesTheBinding(t *testing.T) {
 		}
 	})
 
-	// §3.4 — `0 → N` on the DISK axis is a REFUSED WRITE, not a raise (why a 200 bricks
+	// the documented invariant — `0 → N` on the DISK axis is a REFUSED WRITE, not a raise (why a 200 bricks
 	// the sandbox: ErrUncappedDiskNotCappable). The refusal is DIRECTIONAL, so all three
 	// are asserted together: only from-uncapped is refused; dropping and changing stay legal.
 	t.Run("disk 0 → N is refused; N → 0 and N → M stay legal", func(t *testing.T) {
@@ -850,10 +850,10 @@ func TestUpdateBindingRewritesTheBinding(t *testing.T) {
 			want := int64(gib)
 			err = patchBinding(m, ctx, sid, store.Binding{DiskByte: &want})
 			if !errors.Is(err, ErrUncappedDiskNotCappable) {
-				t.Fatalf("PATCH disk 0 → %d = %v; want ErrUncappedDiskNotCappable (§3.4: the cap is unmaterializable, so accepting it leaves the sandbox unresumable)", want, err)
+				t.Fatalf("PATCH disk 0 → %d = %v; want ErrUncappedDiskNotCappable (the documented invariant: the cap is unmaterializable, so accepting it leaves the sandbox unresumable)", want, err)
 			}
 			// The refusal must be visible AT THE WRITE POINT with ZERO side effects — that
-			// is the reason it is here and not at the next placement (§3.4). Asserted on
+			// is the reason it is here and not at the next placement (the documented invariant). Asserted on
 			// the whole record, not just the disk field: a refusal that committed the
 			// binding's OTHER fields would be a partial write nobody asked for.
 			after, _ := st.GetSandbox(ctx, sid)
@@ -882,7 +882,7 @@ func TestUpdateBindingRewritesTheBinding(t *testing.T) {
 			}
 			zero := int64(0)
 			if err := patchBinding(m, ctx, sid, store.Binding{DiskByte: &zero}); err != nil {
-				t.Fatalf("PATCH disk N → 0 = %v; want it ADMITTED (dropping a cap only clears it, §3.4)", err)
+				t.Fatalf("PATCH disk N → 0 = %v; want it ADMITTED (dropping a cap only clears it, the documented invariant)", err)
 			}
 			if rec, _ := st.GetSandbox(ctx, sid); rec.Limits.DiskByte != 0 {
 				t.Fatalf("disk = %d; want 0 (the cap was dropped)", rec.Limits.DiskByte)
@@ -890,7 +890,7 @@ func TestUpdateBindingRewritesTheBinding(t *testing.T) {
 		})
 
 		// The metered node is the case the subtest above does NOT cover: it runs on
-		// NodeCapacity{}, where §3.4 makes an uncapped sandbox legal, so dropping a cap
+		// NodeCapacity{}, where the documented invariant makes an uncapped sandbox legal, so dropping a cap
 		// there must stay allowed. Metered, the same edit is the uncapped create `admit`
 		// refuses (ErrCapRequired) written at a different time, and it is irreversible —
 		// re-capping is then refused by ErrUncappedDiskNotCappable, whose message would be
@@ -909,7 +909,7 @@ func TestUpdateBindingRewritesTheBinding(t *testing.T) {
 			zero := int64(0)
 			err = patchBinding(m, ctx, sid, store.Binding{DiskByte: &zero})
 			if !errors.Is(err, ErrCapRequired) {
-				t.Fatalf("PATCH disk %d → 0 on a node metering disk = %v; want ErrCapRequired. Accepting it drops %d bytes off the budget's left side while the sandbox stays free to consume the whole node — the same state §3.4 refuses at create — and the sandbox can then never be re-capped, because `0 → N` is refused with a message that would be factually wrong about it",
+				t.Fatalf("PATCH disk %d → 0 on a node metering disk = %v; want ErrCapRequired. Accepting it drops %d bytes off the budget's left side while the sandbox stays free to consume the whole node — the same state the documented invariant refuses at create — and the sandbox can then never be re-capped, because `0 → N` is refused with a message that would be factually wrong about it",
 					before.Limits.DiskByte, err, before.Limits.DiskByte)
 			}
 			// A refusal changes nothing, as with the `0 → N` arm.
@@ -919,7 +919,7 @@ func TestUpdateBindingRewritesTheBinding(t *testing.T) {
 			}
 			// And an unmetered node still allows the same edit — the refusal is gated on the
 			// axis being metered, not applied unconditionally, or it would revoke a
-			// capability §3.4 grants.
+			// capability the documented invariant grants.
 			mu, _ := newLimitsMediator(t, &fakeRootfs{}, &fakeRuntime{}, NodeCapacity{})
 			sid2, err := mu.Create(ctx, CreateSpec{Template: "bare", Limits: model.Limits{DiskByte: gib}})
 			if err != nil {
@@ -929,7 +929,7 @@ func TestUpdateBindingRewritesTheBinding(t *testing.T) {
 				t.Fatalf("pause: %v", err)
 			}
 			if err := patchBinding(mu, ctx, sid2, store.Binding{DiskByte: &zero}); err != nil {
-				t.Fatalf("PATCH disk N → 0 on an UNMETERED node = %v; want it admitted — §3.4 makes an uncapped sandbox legal there, so refusing would revoke a granted capability", err)
+				t.Fatalf("PATCH disk N → 0 on an UNMETERED node = %v; want it admitted — the documented invariant makes an uncapped sandbox legal there, so refusing would revoke a granted capability", err)
 			}
 		})
 
@@ -978,10 +978,10 @@ func TestUpdateBindingRewritesTheBinding(t *testing.T) {
 		})
 	})
 
-	// §3.4 — an `N → M` disk edit must leave the cap STRICTLY above the Overlay unit's
+	// the documented invariant — an `N → M` disk edit must leave the cap STRICTLY above the Overlay unit's
 	// current usage: the substrate accepts a below-usage cap with ZERO validation and is
 	// then wedged permanently, and on the sandbox side that also makes it unresumable.
-	// The measured wedge and the §5.B half: ErrDiskCapBelowUsage.
+	// The measured wedge and the the documented invariant half: ErrDiskCapBelowUsage.
 	t.Run("disk N → M below current usage is refused", func(t *testing.T) {
 		const cap0 = 64 << 20
 		// newCapped builds a paused, disk-capped sandbox whose unit reports `used` bytes.
@@ -1041,7 +1041,7 @@ func TestUpdateBindingRewritesTheBinding(t *testing.T) {
 		}
 
 		// A RAISE is checked too, and this is not redundant: if the unit's quota row was
-		// lost to an external change (the case §5.B's per-placement re-application exists
+		// lost to an external change (the case the documented invariant's per-placement re-application exists
 		// for) the guest can grow past the recorded cap, and then even a cap ABOVE the
 		// recorded one can be at or below what the unit holds.
 		t.Run("a RAISE that still lands under usage is refused", func(t *testing.T) {
@@ -1087,7 +1087,7 @@ func TestUpdateBindingRewritesTheBinding(t *testing.T) {
 			want := int64(32 << 20)
 			err := patchBinding(m, ctx, sid, store.Binding{DiskByte: &want})
 			if err == nil {
-				t.Fatal("PATCH with an unreadable usage was ADMITTED; §3.4 requires failing closed — a blind cap can wedge the unit irreversibly")
+				t.Fatal("PATCH with an unreadable usage was ADMITTED; the documented invariant requires failing closed — a blind cap can wedge the unit irreversibly")
 			}
 			if after, _ := st.GetSandbox(ctx, sid); after.Limits != before.Limits {
 				t.Fatalf("fail-closed PATCH still wrote: %+v → %+v", before.Limits, after.Limits)
@@ -1111,7 +1111,7 @@ func TestUpdateBindingRewritesTheBinding(t *testing.T) {
 		})
 	})
 
-	// A raise is a new promise, so it must clear admission (§3.4). The gate sums
+	// A raise is a new promise, so it must clear admission (the documented invariant). The gate sums
 	// from the store including paused records, so Σ changes at THIS commit — not at
 	// the eventual resume.
 	t.Run("a raise re-runs the admission gate", func(t *testing.T) {
@@ -1139,7 +1139,7 @@ func TestUpdateBindingRewritesTheBinding(t *testing.T) {
 		}
 	})
 
-	// ...but a CPU-only raise is NOT a raise the gate can speak about. §3.4 keeps CPU
+	// ...but a CPU-only raise is NOT a raise the gate can speak about. the documented invariant keeps CPU
 	// out of the node accounting (`cpu_millis: 0` is always legal; neither budget
 	// mentions it), so running admit for it can only produce a FALSE refusal: the node
 	// below is full on BOTH budgets from another sandbox, and a PATCH asking for zero
@@ -1168,7 +1168,7 @@ func TestUpdateBindingRewritesTheBinding(t *testing.T) {
 		}
 		cpu := int64(2000)
 		if err := patchBinding(m, ctx, sid, store.Binding{CPUMillis: &cpu}); err != nil {
-			t.Fatalf("cpu-only raise = %v; want it ADMITTED — CPU is in neither node inequality (§3.4), so gating it can only yield a false 507", err)
+			t.Fatalf("cpu-only raise = %v; want it ADMITTED — CPU is in neither node inequality (the documented invariant), so gating it can only yield a false 507", err)
 		}
 		rec, _ := st.GetSandbox(ctx, sid)
 		if rec.Limits.CPUMillis != cpu {
@@ -1180,7 +1180,7 @@ func TestUpdateBindingRewritesTheBinding(t *testing.T) {
 		}
 	})
 
-	// `retention` is measured from UpdatedAt (§4.3), so PATCH must not bump it —
+	// `retention` is measured from UpdatedAt (the documented invariant), so PATCH must not bump it —
 	// otherwise editing an unrelated cap silently extends an eviction deadline.
 	t.Run("PATCH does not touch UpdatedAt", func(t *testing.T) {
 		rp, rt := &fakeRootfs{}, &fakeRuntime{}
@@ -1199,7 +1199,7 @@ func TestUpdateBindingRewritesTheBinding(t *testing.T) {
 		}
 		after, _ := st.GetSandbox(ctx, sid)
 		if !after.UpdatedAt.Equal(before.UpdatedAt) {
-			t.Fatalf("UpdatedAt moved (%s → %s): a cap edit would silently extend the eviction deadline (§4.3)",
+			t.Fatalf("UpdatedAt moved (%s → %s): a cap edit would silently extend the eviction deadline (the documented invariant)",
 				before.UpdatedAt, after.UpdatedAt)
 		}
 	})

@@ -1,9 +1,9 @@
 package runtime
 
 // Minimal OCI runtime-spec (config.json) builder. We emit only the fields runsc
-// needs (§5.A / rootfs-overlay), not the full runtime-spec — pulling the whole
+// needs (the documented invariant / rootfs-overlay), not the full runtime-spec — pulling the whole
 // opencontainers/runtime-spec module in for a handful of fields would be weight
-// §1.1 rejects.
+// the documented invariant rejects.
 
 type ociSpec struct {
 	OCIVersion string     `json:"ociVersion"`
@@ -51,13 +51,13 @@ type ociLinux struct {
 	// CgroupsPath MUST be set explicitly whenever we emit resources: omit it and
 	// runsc builds its leaf at the cgroup v2 ROOT, polluting the host namespace.
 	CgroupsPath string `json:"cgroupsPath,omitempty"`
-	// Resources carries the §3.4 rate + RAM Binding translated into OCI form.
+	// Resources carries the the documented invariant rate + RAM Binding translated into OCI form.
 	// omitempty: a sandbox with no limits emits no resources block at all, so
 	// runsc creates no cgroup leaf and leaves no host cgroup footprint.
 	Resources *ociResources `json:"resources,omitempty"`
 }
 
-// ociResources is the §3.4 resource-ceiling → cgroup translation (§5.A: the provider
+// ociResources is the the documented invariant resource-ceiling → cgroup translation (the documented invariant: the provider
 // materializes the Binding via OCI linux.resources; runsc lands it on the
 // cgroupfs driver).
 //
@@ -65,7 +65,7 @@ type ociLinux struct {
 // permanently rejected: measured, a pids cap limits HOST tasks (~2.3 per guest
 // process under systrap), and setting it low makes the sentry panic outright
 // ("failed to get clone") and the sandbox vanish. That makes it an availability
-// landmine rather than a resource cap, and §3.4's limits are only CPU/RAM/disk.
+// landmine rather than a resource cap, and the documented invariant's limits are only CPU/RAM/disk.
 type ociResources struct {
 	CPU    *ociCPU    `json:"cpu,omitempty"`
 	Memory *ociMemory `json:"memory,omitempty"`
@@ -75,11 +75,11 @@ type ociResources struct {
 // `cpu.max` (the CEILING — "at most this much"), Shares becomes `cpu.weight`
 // (the SHARE — "this much relative to whoever else is runnable").
 //
-// Both are required because they answer different questions. §3.4 calls the CPU axis
+// Both are required because they answer different questions. the documented invariant calls the CPU axis
 // fair allocation, and a ceiling alone does not deliver it: cgroup's default weight is
 // identical for every leaf, so on a saturated node a 4000-millis sandbox and a
 // 250-millis one get EQUAL time — each capped correctly, sharing nothing like the ratio
-// they were sold (measured). Weight is what makes the oversubscription §3.4 permits (no
+// they were sold (measured). Weight is what makes the oversubscription the documented invariant permits (no
 // CPU admission gate, since overrun only slows the guest) degrade proportionally rather
 // than uniformly. It bites only when the node is saturated and both are runnable.
 type ociCPU struct {
@@ -114,10 +114,10 @@ type ociNamespace struct {
 
 // caps is the guest capability set. It is deliberately BROAD, not minimal: the
 // guest runs as root by design and guest capabilities are not a host-isolation
-// pillar (§2.2 — sentry virtualizes them all, and sentry itself is unprivileged
-// on the host, §2.1 ①②). So this list is guest-internal hygiene only: enough for
+// pillar (the documented invariant — sentry virtualizes them all, and sentry itself is unprivileged
+// on the host, the documented invariant ①②). So this list is guest-internal hygiene only: enough for
 // sandboxd to bind its netns TCP port, exec processes, and let `apt`/`pip`
-// chown/chmod as they install (§1.1 root-capable sandbox).
+// chown/chmod as they install (the documented invariant root-capable sandbox).
 //
 // CAP_NET_RAW is DELIBERATELY ABSENT, and its absence is the interesting entry.
 // Requesting it here would not grant it: measured, the guest's CapEff has the
@@ -129,7 +129,7 @@ type ociNamespace struct {
 // carries why it is pinned rather than inherited).
 //
 // CAP_NET_ADMIN STAYS. It is guest-internal network work (routes, interfaces),
-// and §2.2 is explicit that guest caps are not an isolation pillar.
+// and the documented invariant is explicit that guest caps are not an isolation pillar.
 var caps = []string{
 	"CAP_NET_BIND_SERVICE", "CAP_NET_ADMIN",
 	"CAP_SYS_ADMIN", "CAP_CHOWN", "CAP_DAC_OVERRIDE",
@@ -143,12 +143,12 @@ var caps = []string{
 const cpuPeriodMicros = 100_000
 
 // buildOCISpec returns the config.json for a merged rootfs + adopted netns.
-// entrypoint is sandboxd (init mode → PID 1, §5.E.1). netnsPath is the
-// engine-pre-built netns runsc adopts (§5.A: --network=sandbox only adopts).
+// entrypoint is sandboxd (init mode → PID 1, the documented invariant). netnsPath is the
+// engine-pre-built netns runsc adopts (the documented invariant: --network=sandbox only adopts).
 //
 // cgroupsPath is the LEAF path relative to the cgroup v2 root, synthesized by
 // local_runsc from the cid. The ownership split it encodes is a MEASURED hard
-// constraint, and getting it backwards makes the cap silently not apply (§5.A):
+// constraint, and getting it backwards makes the cap silently not apply (the documented invariant):
 // runsc creates only the FINAL segment and only if the parent already exists,
 // and it writes limits ONLY to a leaf it created itself. If the engine
 // pre-creates the full path, runsc writes memory.swap.max=0 but leaves
@@ -163,7 +163,7 @@ func buildOCISpec(mergedPath, netnsPath, cgroupsPath string, limits ResourceLimi
 		res = &ociResources{}
 		if limits.CPUMillis > 0 {
 			// Ceiling and share are DERIVED FROM THE SAME CPUMillis, so this stays
-			// one knob in the contract (§1.3: no new field, no seam change) — the
+			// one knob in the contract (the documented invariant: no new field, no seam change) — the
 			// caller states "how much CPU", and the provider decides that this means
 			// both a cap and a proportional share. Shares floors at 2, the minimum
 			// the OCI runtime will map into a valid cpu.weight.
@@ -178,7 +178,7 @@ func buildOCISpec(mergedPath, netnsPath, cgroupsPath string, limits ResourceLimi
 			}
 		}
 		if limits.MemoryByte > 0 {
-			// The RAM "one knob / two values" split (§5.A / §3.4). The HOST ceiling is
+			// The RAM "one knob / two values" split (the documented invariant / the documented invariant). The HOST ceiling is
 			// N + overhead, not N: runsc derives the guest-visible MemTotal from the
 			// OCI limit at boot, so setting both to N tells the guest it has N while
 			// the whole sandbox — sentry and gofer included — is terminated somewhere
@@ -198,7 +198,7 @@ func buildOCISpec(mergedPath, netnsPath, cgroupsPath string, limits ResourceLimi
 	if res == nil {
 		cgroupsPath = "" // no limits → no leaf, no cgroup namespace footprint
 	}
-	// The pseudo-filesystems the guest always gets, then the §5.C Volume binds.
+	// The pseudo-filesystems the guest always gets, then the the documented invariant Volume binds.
 	//
 	// VOLUMES GO LAST, deliberately: appending after the fixed set means a volume
 	// destination can never displace /proc, /dev, /sys or /tmp — with runsc taking
@@ -217,7 +217,7 @@ func buildOCISpec(mergedPath, netnsPath, cgroupsPath string, limits ResourceLimi
 	for _, mt := range mounts {
 		// A plain bind, which is exactly the shape measured to work: with
 		// --overlay2=none --file-access=shared, runsc proxies an extra rw host directory
-		// through the gofer into the guest bidirectionally (volume.md D0 — the local
+		// through the gofer into the guest bidirectionally (the relevant internals page the documented invariant — the local
 		// backend's whole foundation), and a host FUSE mount point proxies identically
 		// (the future remote arm's foundation). Nothing here distinguishes the two.
 		opts := []string{"rbind", "rprivate"}
@@ -240,11 +240,11 @@ func buildOCISpec(mergedPath, netnsPath, cgroupsPath string, limits ResourceLimi
 		Process: ociProcess{
 			Terminal: false,
 			// Guest root (uid/gid 0). This is the engine default, not a stub: guest
-			// identity is not a host-isolation pillar (§2.2 — sentry virtualizes guest
+			// identity is not a host-isolation pillar (the documented invariant — sentry virtualizes guest
 			// uid 0, sentry is unprivileged on the host), so guest-root costs nothing
-			// on the isolation axis and is the most direct expression of §1.1's
+			// on the isolation axis and is the most direct expression of the documented invariant's
 			// "root-capable agent sandbox". PID 1 is sandboxd init; it stays root so
-			// it can hold CAP_NET_* for the netns transport port (§5.A).
+			// it can hold CAP_NET_* for the netns transport port (the documented invariant).
 			User: ociUser{UID: 0, GID: 0},
 			Args: []string{"/sbin/sandboxd", "init"},
 			Env:  []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "HOME=/root"},

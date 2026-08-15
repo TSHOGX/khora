@@ -152,13 +152,13 @@ func TestAnUnauthenticatedCallerNeverReachesTheUpstream(t *testing.T) {
 			if err == nil {
 				resp.Body.Close()
 				t.Fatalf("the gateway served an unauthenticated caller (%s) — it answered %s instead of "+
-					"refusing at the handshake (ADR-0007: there is no unauthenticated path through this "+
+					"refusing at the handshake (the recorded design: there is no unauthenticated path through this "+
 					"binary)", resp.Status, resp.Status)
 			}
 			if n := atomic.LoadInt64(reached); n != 0 {
 				t.Errorf("%d request(s) reached the upstream from an unauthenticated caller — the "+
 					"refusal must happen BEFORE the engine sees anything, since the engine has no "+
-					"authentication of its own to fall back on (§1.4)", n)
+					"authentication of its own to fall back on (the documented invariant)", n)
 			}
 		})
 	}
@@ -344,7 +344,7 @@ func TestFlushIntervalIsPinnedWhereItActuallyBites(t *testing.T) {
 }
 
 // The verified client identity is NOT forwarded to the engine. The engine has no
-// authorization subject and §1.1 bars the names one would need; a header carrying
+// authorization subject and the documented invariant bars the names one would need; a header carrying
 // caller identity invites it to grow one, so the scrub is asserted rather than left
 // to the comment in main().
 func TestTheGatewayForwardsNoCallerIdentityToTheEngine(t *testing.T) {
@@ -389,7 +389,7 @@ func TestTheGatewayForwardsNoCallerIdentityToTheEngine(t *testing.T) {
 		if v := hdr.Get(banned); v != "" {
 			t.Errorf("the gateway forwarded %s=%q to the engine — caller identity must stop at the "+
 				"gateway, since the engine has no authorization subject and the names such a header "+
-				"would need are barred as engine-internal entities (§1.1 / §1.4)", banned, v)
+				"would need are barred as engine-internal entities (the documented invariant / the documented invariant)", banned, v)
 		}
 	}
 }

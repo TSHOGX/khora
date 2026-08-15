@@ -12,7 +12,7 @@
 // broke. Until re-checks once after the loop, so the answer is "cond was false at the
 // deadline", not "cond was false a tick before it".
 //
-// Not a leaf in CLAUDE.md's sense — a leaf exists so two §5 subsystems can share a
+// Not a leaf in the documentation's sense — a leaf exists so two the documented invariant subsystems can share a
 // FACT, and this is test scaffolding carrying no production edge. It follows the
 // internal/store/storetest and internal/volume/volumetest precedent instead: a
 // test-support package under internal/, imported only from _test.go files.

@@ -82,13 +82,13 @@ func TestTheAssemblyRefusesItsOwnUIDAsTheSecondHopUID(t *testing.T) {
 // --- the wire decode / encode contract ----------------------------------------
 
 // The `cidr` field is a STRING on the wire and is parsed through ParseCIDR, which is
-// what makes §6.2's eighth 400 class enforceable at all.
+// what makes the documented invariant's eighth 400 class enforceable at all.
 //
 // Decoding into the RECORD type instead would route past it: netip.Prefix's own text
 // unmarshaling ACCEPTS `::ffff:169.254.169.254/128` (verified), and `Contains` does
 // not unmap — so a family-branching containment check would judge it v6, compare it
 // only against v6 members, let it through, and the packet would then die on the v4
-// floor as IPv4. Accepted by the API, silently refused on the wire (network.md D5 ⑲).
+// floor as IPv4. Accepted by the API, silently refused on the wire (the relevant internals page the documented invariant ⑲).
 func TestTheWireCIDRIsParsedRatherThanUnmarshaled(t *testing.T) {
 	// The bare fact this test exists because of: the record type WOULD accept it.
 	var probe model.NetTuple
@@ -107,8 +107,8 @@ func TestTheWireCIDRIsParsedRatherThanUnmarshaled(t *testing.T) {
 	}}
 	_, err := w.decode()
 	if err == nil {
-		t.Fatal("the wire decode accepted a v4-mapped literal — that is §6.2's eighth 400 class, and " +
-			"it must be refused BEFORE any containment test (D5 ⑲)")
+		t.Fatal("the wire decode accepted a v4-mapped literal — that is the documented invariant's eighth 400 class, and " +
+			"it must be refused BEFORE any containment test (the documented invariant ⑲)")
 	}
 	if class, _ := network.ClassOf(err); class != network.ClassV4Mapped {
 		t.Errorf("class = %q, want %q", class, network.ClassV4Mapped)
@@ -116,7 +116,7 @@ func TestTheWireCIDRIsParsedRatherThanUnmarshaled(t *testing.T) {
 }
 
 // An omitted `cidr` means ANY destination — the transparent-interception value, which
-// makes the generator emit exactly one clause fewer (§5.D / network.md D3.3).
+// makes the generator emit exactly one clause fewer (the documented invariant / the relevant internals page the documented invariant).
 func TestAnOmittedCidrDecodesToAnyDestination(t *testing.T) {
 	w := networkWire{Egress: egressWire{
 		Via: []viaWire{{Match: []tupleWire{{Port: 443, Proto: "tcp"}}, Endpoint: "127.0.0.9:15443"}},
@@ -141,7 +141,7 @@ func TestAnOmittedCidrDecodesToAnyDestination(t *testing.T) {
 	}
 }
 
-// §6.1: the three arrays ALWAYS appear, empty as `[]` — never omitted, never null.
+// the documented invariant: the three arrays ALWAYS appear, empty as `[]` — never omitted, never null.
 // They are definite values in the record; the omit-when-unreadable rule governs facts
 // that cannot be READ, of which a declaration has none.
 func TestTheReadFaceAlwaysRendersTheThreeArrays(t *testing.T) {
@@ -156,14 +156,14 @@ func TestTheReadFaceAlwaysRendersTheThreeArrays(t *testing.T) {
 		}
 	}
 	if strings.Contains(got, "null") {
-		t.Errorf("the read face rendered a null — §6.1 requires `[]`, and two spellings of absence "+
+		t.Errorf("the read face rendered a null — the documented invariant requires `[]`, and two spellings of absence "+
 			"is one more than needed:\n%s", got)
 	}
 }
 
 // `host_endpoint` is OMITTED when the engine holds no placement — not "", not null.
 //
-// The endpoint is a placement product (§3.3), so a `paused` sandbox has none. A
+// The endpoint is a placement product (the documented invariant), so a `paused` sandbox has none. A
 // falsy-but-present field would invite reading it as "is this publish in effect",
 // and that judgment is doubly wrong: the rule set is installed WHOLE and atomically,
 // so there is no per-publish install state for the field to report.
@@ -178,7 +178,7 @@ func TestHostEndpointIsOmittedWithoutAPlacement(t *testing.T) {
 	if strings.Contains(string(noPlacement), "host_endpoint") {
 		t.Errorf("`host_endpoint` is present with no placement — it must be OMITTED, because a "+
 			"falsy-but-present field invites reading it as `is this publish in effect`, which is not "+
-			"a question this field can answer (§6.1):\n%s", noPlacement)
+			"a question this field can answer (the documented invariant):\n%s", noPlacement)
 	}
 	withPlacement, err := json.Marshal(encodeNetwork(d, []string{"127.0.0.1:21000"}, nil, network.CounterAttribution{}))
 	if err != nil {
@@ -190,7 +190,7 @@ func TestHostEndpointIsOmittedWithoutAPlacement(t *testing.T) {
 }
 
 // The write face and the read face must not diverge on the same field: `POST
-// …/publish` follows `GET …/network`'s omission rule exactly (§6.1 — a divergence
+// …/publish` follows `GET …/network`'s omission rule exactly (the documented invariant — a divergence
 // there is a contract defect).
 func TestThePublishResponseFollowsTheReadFacesOmissionRule(t *testing.T) {
 	paused, err := json.Marshal(publishResp{GuestPort: 8080, Proto: "tcp", AppliesAt: "next-resume"})
@@ -199,7 +199,7 @@ func TestThePublishResponseFollowsTheReadFacesOmissionRule(t *testing.T) {
 	}
 	if strings.Contains(string(paused), "host_endpoint") {
 		t.Errorf("the publish response carries `host_endpoint` with no endpoint bound — the write "+
-			"face and the read face diverging on one field is a contract defect (§6.1):\n%s", paused)
+			"face and the read face diverging on one field is a contract defect (the documented invariant):\n%s", paused)
 	}
 	running, err := json.Marshal(publishResp{GuestPort: 8080, Proto: "tcp", HostEndpoint: "127.0.0.1:21000", AppliesAt: "now"})
 	if err != nil {
@@ -214,7 +214,7 @@ func TestThePublishResponseFollowsTheReadFacesOmissionRule(t *testing.T) {
 //
 // With unknown keys ignored, a caller who typed `"netwrok"` gets a 201 and believes
 // their declaration took effect, while the engine recorded the omitted-network
-// normalization — a `deny` sandbox (§5.D). Both are LEGAL outcomes, which is exactly
+// normalization — a `deny` sandbox (the documented invariant). Both are LEGAL outcomes, which is exactly
 // why the misspelling must be an error rather than silently one of them.
 func TestStrictDecodeRefusesAMisspelledDeclarationKey(t *testing.T) {
 	var req createReq
@@ -222,7 +222,7 @@ func TestStrictDecodeRefusesAMisspelledDeclarationKey(t *testing.T) {
 	if err == nil {
 		t.Fatal("a misspelled `netwrok` key was accepted — the caller would get a 201 and believe " +
 			"their declaration took effect, while the engine recorded the omitted-network " +
-			"normalization: a DENY sandbox (§5.D). Both outcomes are legal, so the typo has to be " +
+			"normalization: a DENY sandbox (the documented invariant). Both outcomes are legal, so the typo has to be " +
 			"an error")
 	}
 	if !strings.Contains(err.Error(), "netwrok") {
@@ -247,13 +247,13 @@ func TestStrictDecodeRefusesAMisspelledDeclarationKey(t *testing.T) {
 	var nested createReq
 	if err := strictDecode(strings.NewReader(`{"network":{"egress":{"defualt":"allow"}}}`), &nested); err == nil {
 		t.Error("a misspelling INSIDE the declaration was accepted — `egress.defualt` would leave " +
-			"`egress.default` absent, which is §6.2's first 400 class, but the caller would be told " +
+			"`egress.default` absent, which is the documented invariant's first 400 class, but the caller would be told " +
 			"nothing about the typo")
 	}
 }
 
 // `network` omitted from create is LEGAL and normalizes to an explicit
-// `{deny, [], [], []}`; `network` GIVEN but missing `egress.default` is §6.2's first
+// `{deny, [], [], []}`; `network` GIVEN but missing `egress.default` is the documented invariant's first
 // 400 class. BOTH DIRECTIONS, because they share one code path and whichever is
 // implemented first eats the other.
 func TestOmittedNetworkIsLegalWhileAMissingDefaultIs400(t *testing.T) {
@@ -308,12 +308,12 @@ func TestAnExplicitEmptyDefaultIsDistinguishedFromAnAbsentOne(t *testing.T) {
 	}
 }
 
-// §5.D's PORT WILDCARD on the wire: a declaration carrying a wildcard tuple must come
+// the documented invariant's PORT WILDCARD on the wire: a declaration carrying a wildcard tuple must come
 // back out of the read face as a legal write body that still MEANS the same thing.
 //
 // This is the property `cidr` already had and `port` did not. With `port` rendered as
 // `"port": 0`, the wildcard survived only as a zero value's side effect — the read face
-// emitted a port number that happens to be zero, which is §5.D's own objection to a
+// emitted a port number that happens to be zero, which is the documented invariant's own objection to a
 // defaultable `egress.default`: the record's empty value stops being distinguishable
 // from the caller having chosen it. So the assertion is not "it round-trips" but "the
 // wildcard is SPELLED as the omission, on both faces".
@@ -327,7 +327,7 @@ func TestThePortWildcardIsSpelledAsAnOmissionOnBothFaces(t *testing.T) {
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&w); err != nil {
 		t.Fatalf("a tuple with no `port` was refused by the decoder: %v — omitting it is legal "+
-			"and means any port (§5.D)", err)
+			"and means any port (the documented invariant)", err)
 	}
 	decl, err := w.decode()
 	if err != nil {
@@ -346,7 +346,7 @@ func TestThePortWildcardIsSpelledAsAnOmissionOnBothFaces(t *testing.T) {
 	if strings.Contains(string(out), `"port":0`) {
 		t.Errorf("the read face rendered the wildcard as `\"port\":0` — it must render it as the "+
 			"OMISSION, or the recorded wildcard is indistinguishable from a caller who chose port "+
-			"zero (§5.D's criterion for requiring `egress.default`):\n%s", out)
+			"zero (the documented invariant's criterion for requiring `egress.default`):\n%s", out)
 	}
 	if strings.Contains(string(out), `"port"`) {
 		t.Errorf("the read face emitted a `port` member for a wildcard tuple:\n%s", out)
@@ -390,7 +390,7 @@ func TestThePortWildcardIsSpelledAsAnOmissionOnBothFaces(t *testing.T) {
 // face must render that value exactly one way.
 //
 // Two spellings of one meaning is only a defect when both SURVIVE INTO the record and
-// then compare unequal on a later read-modify-write — that is what §6.2's v4-mapped class
+// then compare unequal on a later read-modify-write — that is what the documented invariant's v4-mapped class
 // refuses. Here they collapse at the decoder, which is how `cidr` already behaves
 // (`"cidr": ""` decodes to any-destination). This asserts the collapse rather than
 // leaving it to be re-derived, because the alternative — admitting both and recording
@@ -415,7 +415,7 @@ func TestAnExplicitZeroPortRecordsAsTheWildcardItself(t *testing.T) {
 	if omitted != explicit {
 		t.Errorf("`\"port\": 0` and an omitted `port` recorded DIFFERENT values (%+v vs %+v) — "+
 			"two spellings that survive into the record compare unequal on every subsequent "+
-			"read-modify-write, which is §6.2's v4-mapped objection", omitted, explicit)
+			"read-modify-write, which is the documented invariant's v4-mapped objection", omitted, explicit)
 	}
 	if !explicit.AnyPort() {
 		t.Error("an explicit `\"port\": 0` did not record as the any-port wildcard — the decided " +
@@ -432,7 +432,7 @@ func TestAnExplicitZeroPortRecordsAsTheWildcardItself(t *testing.T) {
 }
 
 // Round-trip: what the caller writes must come back out of the read face in a form
-// they can PATCH straight back (§6.1 makes the read-modify-write a contract
+// they can PATCH straight back (the documented invariant makes the read-modify-write a contract
 // requirement, so the read face's output has to be a legal write body).
 func TestTheReadFaceOutputIsALegalWriteBody(t *testing.T) {
 	const in = `{"egress":{"default":"deny","allow":[{"cidr":"10.0.0.0/8","port":53,"proto":"udp"}],` +
@@ -455,7 +455,7 @@ func TestTheReadFaceOutputIsALegalWriteBody(t *testing.T) {
 	dec := json.NewDecoder(bytes.NewReader(out))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&back); err != nil {
-		t.Fatalf("the read face's own output is not a legal write body (%v) — §6.1 requires a "+
+		t.Fatalf("the read face's own output is not a legal write body (%v) — the documented invariant requires a "+
 			"read-modify-write cycle, so the GET response has to be PATCH-able verbatim:\n%s", err, out)
 	}
 	// …and it means the same thing.
@@ -491,12 +491,12 @@ func TestTheReadFaceOutputIsALegalWriteBody(t *testing.T) {
 //
 // The assertion the test above cannot make: it builds its body from `encodeNetwork` alone, which
 // sets neither read-only member (`state` is the handler's, `host_endpoint` needs a live
-// placement), so it round-trips while leaving §6.1's contract untested at both points where the
+// placement), so it round-trips while leaving the documented invariant's contract untested at both points where the
 // response differs from a declaration.
 //
 // The gap it hid was real: `DisallowUnknownFields` applies RECURSIVELY, so a `running` sandbox
 // with one publish produced a GET response PATCH refused with `json: unknown field
-// "host_endpoint"`. It survived because §5.D's SAFE sequence (`pause → GET → PATCH → resume`)
+// "host_endpoint"`. It survived because the documented invariant's SAFE sequence (`pause → GET → PATCH → resume`)
 // reads after the pause, when there is no placement and hence no endpoint to emit.
 func TestAFullReadResponseIsALegalWriteBody(t *testing.T) {
 	decl := model.NetworkDecl{}
@@ -540,7 +540,7 @@ func TestAFullReadResponseIsALegalWriteBody(t *testing.T) {
 	dec := json.NewDecoder(bytes.NewReader(out))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&back); err != nil {
-		t.Fatalf("a full read response is not a legal write body (%v) — §6.1 makes the "+
+		t.Fatalf("a full read response is not a legal write body (%v) — the documented invariant makes the "+
 			"read-modify-write a CONTRACT REQUIREMENT, so every read-only member the read face "+
 			"emits must be accepted and ignored on the write path, `host_endpoint` included:\n%s",
 			err, out)
@@ -570,12 +570,12 @@ func TestAFullReadResponseIsALegalWriteBody(t *testing.T) {
 	strict.DisallowUnknownFields()
 	if err := strict.Decode(&networkWire{}); err == nil {
 		t.Error("a misspelled key inside a publish item was accepted — accepting the read face's " +
-			"own read-only members is not a general exemption from DisallowUnknownFields (§6.1)")
+			"own read-only members is not a general exemption from DisallowUnknownFields (the documented invariant)")
 	}
 }
 
 // …and the SAME rule at the publish endpoint, which is the other write face for this
-// field and was the gap: §6.1's rule is "every read-only member the read face emits is
+// field and was the gap: the documented invariant's rule is "every read-only member the read face emits is
 // accepted and ignored", not "every one on the PATCH path".
 //
 // `GET …/network` emits `host_endpoint` on a running sandbox's publish items, so a caller
@@ -599,7 +599,7 @@ func TestAReadBackPublishItemIsALegalPublishBody(t *testing.T) {
 
 	var req publishReq
 	if err := strictDecode(bytes.NewReader(item), &req); err != nil {
-		t.Fatalf("a read-back publish item is not a legal publish body (%v) — §6.1 requires every "+
+		t.Fatalf("a read-back publish item is not a legal publish body (%v) — the documented invariant requires every "+
 			"read-only member the read face emits to be accepted and ignored on the write path, and "+
 			"this endpoint is a write path for the same field: %s", err, item)
 	}
@@ -611,14 +611,14 @@ func TestAReadBackPublishItemIsALegalPublishBody(t *testing.T) {
 	if err := strictDecode(strings.NewReader(
 		`{"guest_port":8080,"proto":"tcp","host_endpiont":"x"}`), &publishReq{}); err == nil {
 		t.Error("a misspelled `host_endpiont` was accepted at the publish endpoint — accepting the " +
-			"read face's own read-only member is not a general exemption (§6.1)")
+			"read face's own read-only member is not a general exemption (the documented invariant)")
 	}
 }
 
-// TestHitPacketFollowsTheOmissionRule pins the three cases §6.1 distinguishes, and the
-// distinction is not stylistic: §2.4's acceptance discipline rests on a counter reading 0
+// TestHitPacketFollowsTheOmissionRule pins the three cases the documented invariant distinguishes, and the
+// distinction is not stylistic: the documented invariant's acceptance discipline rests on a counter reading 0
 // meaning "installed, matched nothing". If "not measured" also serialized as 0, the one
-// signal §5.D has for "is this rule live" would be destroyed at the read surface.
+// signal the documented invariant has for "is this rule live" would be destroyed at the read surface.
 func TestHitPacketFollowsTheOmissionRule(t *testing.T) {
 	decl := model.NetworkDecl{}
 	decl.Egress.Default = model.NetDeny
@@ -645,7 +645,7 @@ func TestHitPacketFollowsTheOmissionRule(t *testing.T) {
 		}
 		out, _ := json.Marshal(encodeNetwork(decl, nil, hits, spec.Counters))
 		if !strings.Contains(string(out), `"hit_packet":0`) {
-			t.Errorf("a counter READ AS 0 is not reported — 'installed and matched nothing' is a different fact from 'not measured', and collapsing them destroys §2.4's only liveness signal: %s", out)
+			t.Errorf("a counter READ AS 0 is not reported — 'installed and matched nothing' is a different fact from 'not measured', and collapsing them destroys the documented invariant's only liveness signal: %s", out)
 		}
 		if !strings.Contains(string(out), `"default_hit_packet":0`) {
 			t.Errorf("the default aggregate read as 0 is not reported: %s", out)

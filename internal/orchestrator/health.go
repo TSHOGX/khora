@@ -7,11 +7,11 @@ package orchestrator
 // this engine has in this class — a HALTED OUTBOX PUBLISHER, which is NOT READY but still
 // ALIVE. That asymmetry earns the second endpoint; the two handler docs below carry each half.
 //
-// Prometheus text format is rendered by hand — §1.1's "no heavyweight external dependencies" is a
+// Prometheus text format is rendered by hand — the documented invariant's "no heavyweight external dependencies" is a
 // standing constraint, and what the format buys is that every scraper already reads it.
 //
 // WHAT MUST NOT HAPPEN HERE, and it is the easy mistake because the numbers are already at hand:
-// metrics must not become a second, differently-shaped account of what §6.1 reports. `used_byte`
+// metrics must not become a second, differently-shaped account of what the documented invariant reports. `used_byte`
 // and the per-rule hit counters are read surfaces with their own shapes, and re-exporting them
 // would create two answers to one question. This surface carries PROCESS-level facts only:
 // publisher health, outbox depth, sandbox counts by state, build/uptime.
@@ -50,7 +50,7 @@ type health struct {
 	ready atomic.Bool
 }
 
-// MarkReady declares the boot sequence complete (§4.4-A reconcile has run, the
+// MarkReady declares the boot sequence complete (the documented invariant reconcile has run, the
 // second-hop table is installed, the sweeps have had their first pass). Call it
 // immediately before serving.
 //
@@ -80,7 +80,7 @@ func (e *Engine) Draining() bool { return e.health.draining.Load() }
 //     that tears down every running sandbox's placement on each cycle and never touches
 //     the cause. (readyzHandler case 3 owns the readiness half.)
 //   - a STORE ERROR. A corrupt or unwritable store file survives a restart too, and a
-//     restart loop over it destroys the running sandboxes' contact with the engine (§4.4-A
+//     restart loop over it destroys the running sandboxes' contact with the engine (the documented invariant
 //     takeover happens per boot) while the disk stays as full as it was.
 //
 // So: 200 whenever the process is running and has not begun draining. During a drain, 503 —
@@ -116,7 +116,7 @@ func (e *Engine) healthzHandler(w http.ResponseWriter, r *http.Request) {
 //
 //     SCOPE, narrower than "everything downstream": this says nothing about the PULL read
 //     surface. `GET /v1/events` pages the outbox by the retention window and NOT by delivery
-//     state (SQLite.Events carries no `published_at` predicate, §4.4-C: "whether the engine's
+//     state (SQLite.Events carries no `published_at` predicate, the documented invariant: "whether the engine's
 //     own sink has seen some row is not a fact an external subscriber should depend on"), so
 //     while the publisher is halted a pull subscriber still reads every event, losing none.
 //     Stating it the other way round invites a caller to treat a 503 here as "the engine is
@@ -133,7 +133,7 @@ func (e *Engine) readyzHandler(w http.ResponseWriter, r *http.Request) {
 	if !e.health.ready.Load() {
 		writeHealth(w, http.StatusServiceUnavailable, healthBody{
 			Status: "booting",
-			Detail: "the boot sequence has not completed: startup reconciliation (§4.4-A) decides which " +
+			Detail: "the boot sequence has not completed: startup reconciliation (the documented invariant) decides which " +
 				"placements survive, and serving before it finishes would answer for sandboxes this " +
 				"process has not yet re-adopted",
 			Uptime: e.uptime().String(),
@@ -143,7 +143,7 @@ func (e *Engine) readyzHandler(w http.ResponseWriter, r *http.Request) {
 	if s := e.Publisher.Stats(); s.Halted {
 		writeHealth(w, http.StatusServiceUnavailable, healthBody{
 			Status: "outbox publisher halted",
-			Detail: fmt.Sprintf("the §4.4-C event stream has STOPPED at event %s (seq %d) after %d failed "+
+			Detail: fmt.Sprintf("the the documented invariant event stream has STOPPED at event %s (seq %d) after %d failed "+
 				"attempts: %s. %d row(s) are undelivered and nothing behind that event will be published "+
 				"until an operator intervenes (Publisher.Resume) — the API itself still works, which is "+
 				"why this is a readiness failure rather than a liveness one, and a restart will NOT clear "+
@@ -187,7 +187,7 @@ func (e *Engine) uptime() time.Duration {
 //
 // The sandbox counts are a state histogram, which is the shape that answers the
 // operational questions ("is everything paused?", "is anything stuck creating?")
-// without duplicating any per-sandbox §6.1 field.
+// without duplicating any per-sandbox the documented invariant field.
 func (e *Engine) metricsHandler(w http.ResponseWriter, r *http.Request) {
 	s := e.Publisher.Stats()
 
@@ -208,7 +208,7 @@ func (e *Engine) metricsHandler(w http.ResponseWriter, r *http.Request) {
 		boolGauge(e.health.ready.Load() && !e.health.draining.Load() && !s.Halted))
 	metric("khora_draining", "1 once a shutdown has begun.", "gauge", boolGauge(e.health.draining.Load()))
 
-	// --- §4.4-C outbox publisher ---
+	// --- the documented invariant outbox publisher ---
 	metric("khora_outbox_publisher_halted",
 		"1 when the event stream has stopped at a poison envelope. Requires an operator action (Publisher.Resume); a restart does not clear it, since the blocked row is durable.",
 		"gauge", boolGauge(s.Halted))
@@ -236,7 +236,7 @@ func (e *Engine) metricsHandler(w http.ResponseWriter, r *http.Request) {
 		for _, sb := range list {
 			counts[sb.State]++
 		}
-		metric("khora_sandboxes", "Sandboxes by lifecycle state (§4.1).", "gauge", len(list), `state="any"`)
+		metric("khora_sandboxes", "Sandboxes by lifecycle state (the documented invariant).", "gauge", len(list), `state="any"`)
 		states := make([]string, 0, len(counts))
 		for st := range counts {
 			states = append(states, string(st))
@@ -246,14 +246,14 @@ func (e *Engine) metricsHandler(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(&b, "khora_sandboxes{state=%q} %d\n", st, counts[model.Lifecycle(st)])
 		}
 	} else {
-		// THE CAUSE IS DELIBERATELY NOT IN THE BODY (§6.2): an error's raw text carries
+		// THE CAUSE IS DELIBERATELY NOT IN THE BODY (the documented invariant): an error's raw text carries
 		// absolute host paths (btrfs wraps every call as `<verb> <path>: %w`), and a metrics
 		// body is a response body like any other — `edge_test.go`'s funnel guard catches the
 		// attempt, which is how this line came to be written this way.
 		//
 		// Omitted rather than exported as 0: a zeroed gauge would read as "the node is
 		// empty", a different and more alarming claim than "this number could not be read"
-		// (the discipline §6.1 applies to an unreadable `used_byte`).
+		// (the discipline the documented invariant applies to an unreadable `used_byte`).
 		b.WriteString("# khora_sandboxes omitted: the store read failed; see the process log for the cause.\n")
 		log.Printf("metrics: sandbox state counts omitted, store read failed: %v", err)
 	}
@@ -273,10 +273,10 @@ func boolGauge(v bool) int {
 // Shutdown drains this engine and stops its background loops (M10 item 2).
 //
 // WHAT A SIGTERM DOES TO RUNNING SANDBOXES: NOTHING. They keep running and the next boot
-// re-adopts them (§4.4-A: "a takeover is not a resume — the same placement, the same IP, and no
+// re-adopts them (the documented invariant: "a takeover is not a resume — the same placement, the same IP, and no
 // new epoch"), so the cost of exiting on a running sandbox is a gap in contact, not lost state.
-// Pausing them on the way out would be WORSE: a pause discards guest memory (§4.2 / §1.4), and
-// taking a per-sandbox lock each (§4.4-B) means a busy node cannot finish inside any sane
+// Pausing them on the way out would be WORSE: a pause discards guest memory (the documented invariant / the documented invariant), and
+// taking a per-sandbox lock each (the documented invariant) means a busy node cannot finish inside any sane
 // TimeoutStopSec — SIGKILL lands halfway anyway, now with half the sandboxes paused.
 //
 // So what this drains is the ENGINE'S OWN in-flight work, not the guests:
@@ -298,10 +298,10 @@ func boolGauge(v bool) int {
 //
 // 2 BEFORE 3 is the one ordering that is a trade rather than a dependency: the reaper is an
 // AUTONOMOUS MUTATOR that can begin a fresh transition one tick before the deadline, taking a
-// per-sandbox lock (§4.4-B) and starting substrate work that outlives the budget. Stopping it
+// per-sandbox lock (the documented invariant) and starting substrate work that outlives the budget. Stopping it
 // first means in-flight transitions can only shrink, and the cost is DELAY rather than loss —
 // a handler finishing in step 3 writes its events to the durable at-least-once outbox, which
-// goes out next boot (§4.4-C).
+// goes out next boot (the documented invariant).
 //
 // ONE BUDGET FOR ALL FIVE, not one each: a step consuming the whole deadline leaves the rest to
 // fail immediately on the expired ctx and fall through to step 5, which is why 5 is
@@ -339,7 +339,7 @@ func (e *Engine) Shutdown(ctx context.Context, srv shutdownServer) error {
 			// Report the bounded drain timeout while still force-closing streams; the
 			// CLI distinguishes this expected condition from cleanup failures.
 			keep(fmt.Errorf("http drain did not finish within the deadline (%w) — in-flight streams were "+
-				"closed; they are reconnectable (§5.E Connect), whereas a shutdown that never returns is not", err))
+				"closed; they are reconnectable (the documented invariant Connect), whereas a shutdown that never returns is not", err))
 			// Shutdown does not close active connections when its context expires.
 			// Force them closed so their request contexts are cancelled, then wait for
 			// every entered handler to return before Store is closed below.
@@ -368,7 +368,7 @@ func (e *Engine) closeStore() error {
 
 // registerHealthRoutes mounts the three operational endpoints.
 //
-// NOT under /v1: the §6.1 contract is the sandbox-centric API, and an operational endpoint is
+// NOT under /v1: the the documented invariant contract is the sandbox-centric API, and an operational endpoint is
 // not part of it. Keeping them off that prefix lets a gateway route or refuse them separately
 // — an operator scraping metrics from a monitoring network is a different caller from one
 // creating sandboxes, and this leaves that a deployment decision.

@@ -33,7 +33,7 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-// subtreeReaperHelper is the whole §5.E.1 transport-mode contract in one process:
+// subtreeReaperHelper is the whole the documented invariant transport-mode contract in one process:
 // call startSubtreeReaper (exactly what transportMode does), orphan a grandchild
 // into our subtree, and require that it is reaped with NO explicit drain() call
 // anywhere — only the SIGCHLD-driven reaper that startSubtreeReaper installed.
@@ -44,7 +44,7 @@ func subtreeReaperHelper() int {
 	r := startSubtreeReaper() // prctl + the drain loop; nothing else waits in here
 
 	// The orphaner's own status comes from the reap table, NOT from cmd.Wait().
-	// startSubtreeReaper has installed a wildcard Wait4(-1) drain, and §5.E.1 states
+	// startSubtreeReaper has installed a wildcard Wait4(-1) drain, and the documented invariant states
 	// that wildcard reaping and per-child waiting cannot coexist: whichever waiter
 	// receives the status first takes it. cmd.Output() calls cmd.Wait() internally, so
 	// under load the drain wins and Wait returns ECHILD ("waitid: no child processes")
@@ -97,7 +97,7 @@ func subtreeReaperHelper() int {
 	return 1
 }
 
-// These tests cover the TRANSPORT side of the reap split (§5.E.1 / guest-runtime D4.2): transport
+// These tests cover the TRANSPORT side of the reap split (the documented invariant / guest-runtime the documented invariant): transport
 // mode declares PR_SET_CHILD_SUBREAPER, so its subtree's orphans reparent to it AND MUST BE REAPED
 // BY IT. They run as a plain host process, because PR_SET_CHILD_SUBREAPER is per-process and needs
 // no namespace pid 1.
@@ -190,7 +190,7 @@ func startOrphaner(t *testing.T, r *reapTable) (<-chan syscall.WaitStatus, int) 
 // is reparented to us and sits as a permanent zombie 'Z'. Declaring the subreaper
 // ATTRACTS orphans, so without a Wait4(-1) drain they accumulate. This is also why
 // the answer is not "drop the prctl" — phase 1 asserts the reparent itself, which is
-// the behaviour §5.E.1 wants; only the collection has to accompany it.
+// the behaviour the documented invariant wants; only the collection has to accompany it.
 //
 // Phase 2 asserts drain() collects it: the /proc entry disappears, which for an
 // exited process means reaped. Without the drain this loop never terminates.
@@ -280,7 +280,7 @@ func TestProcRunEndFrameSurvivesConcurrentDrain(t *testing.T) {
 }
 
 // 128+signo through the same path: proc.run maps the wait status the reaper hands it,
-// so a killed process reports 128+signo in its end frame (D4.1 checklist / D4.3
+// so a killed process reports 128+signo in its end frame (the documented invariant checklist / the documented invariant
 // per-process monitor).
 func TestProcRunEndFrameIs128PlusSignoOnSignal(t *testing.T) {
 	asSubreaper(t)

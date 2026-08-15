@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# spike-live-volume-snapshot.sh — §5.C "snapshot / clone" promise, live arm:
+# spike-live-volume-snapshot.sh — the documented invariant "snapshot / clone" promise, live arm:
 # can a Volume be `btrfs subvolume snapshot`-ed WHILE a running sandbox's gofer
 # holds it open and is actively writing to it, and is the result
-# crash-consistent? And is deep-dives/volume.md D6.2's advice ("before
+# crash-consistent? And is deep-dives/the relevant internals page the documented invariant's advice ("before
 # snapshotting a live mounted volume you should fsync / freeze the mount point")
 # load-bearing, or cargo cult?
 #
@@ -12,7 +12,7 @@
 # detach releasing the lease, and the exclusive lease under concurrent attach).
 # Against that floor it changes exactly two things:
 #   - the Volume is a real **btrfs subvolume** under /var/tmp, not a plain dir,
-#     because that is what the local volume backend materializes (§5.C);
+#     because that is what the local volume backend materializes (the documented invariant);
 #   - the guest is **long-running and continuously writing**, not a one-shot
 #     probe, because a snapshot of an idle volume proves nothing about
 #     consistency under a live writer.
@@ -161,10 +161,10 @@ echo "guest is writing: counter $R0 -> $R1 in ~1s (rate ~$((R1-R0))/s), runsc pi
 
 # ---------------------------------------------------------------------------
 # PROBE A — the bare question: snapshot a live, gofer-held, actively-written
-# subvolume with NO sync, NO freeze, NO pause. §5.C's promise stands or falls
+# subvolume with NO sync, NO freeze, NO pause. the documented invariant's promise stands or falls
 # here. The [before,after] window brackets the point in time it may capture.
 # ---------------------------------------------------------------------------
-hr "PROBE A: snapshot with NO sync / NO freeze (the §5.C promise, bare)"
+hr "PROBE A: snapshot with NO sync / NO freeze (the the documented invariant promise, bare)"
 A_BEFORE="$(lastlog "$VOL")"
 set +e
 A_OUT="$(btrfs subvolume snapshot "$VOL" "$WORK/snap_nosync" 2>&1)"; A_RC=$?
@@ -195,10 +195,10 @@ echo "  write into snap_ro: rc=$RO_RC msg=[$RO_W]  (expect non-zero / EROFS)"
 echo "  ro flag: $(btrfs property get "$WORK/snap_ro" ro 2>&1)"
 
 # ---------------------------------------------------------------------------
-# PROBE C — D6.2's fsync half: does a host `sync` before the snapshot change
+# PROBE C — the documented invariant's fsync half: does a host `sync` before the snapshot change
 # what gets captured? If A and C are equally coherent, the advice buys nothing.
 # ---------------------------------------------------------------------------
-hr "PROBE C: snapshot immediately after host \`sync\` (D6.2 fsync advice)"
+hr "PROBE C: snapshot immediately after host \`sync\` (the documented invariant fsync advice)"
 C_BEFORE="$(lastlog "$VOL")"
 sync
 set +e
@@ -210,16 +210,16 @@ echo "  host-observed live window: before=$C_BEFORE after=$C_AFTER"
 analyze "snap_sync" "$WORK/snap_sync"
 
 # ---------------------------------------------------------------------------
-# PROBE D — D6.2's freeze half. "freeze, then snapshot" may not even be
+# PROBE D — the documented invariant's freeze half. "freeze, then snapshot" may not even be
 # EXPRESSIBLE: creating a subvolume is itself a write to the fs that fsfreeze
 # just quiesced. Measured sub-questions:
-#   D1: does `fsfreeze -f` return at all while a gofer holds files open, and
+#   the documented invariant: does `fsfreeze -f` return at all while a gofer holds files open, and
 #       does the frozen window stall the guest's writes?
-#   D2: what happens to a snapshot issued INSIDE the frozen window — does it
+#   the documented invariant: what happens to a snapshot issued INSIDE the frozen window — does it
 #       fail, or block? And does the freeze survive it?
-#   D3: snapshot right after thaw — the degenerate "quiesce, then shoot".
+#   the documented invariant: snapshot right after thaw — the degenerate "quiesce, then shoot".
 #
-# D2 runs the snapshot in the BACKGROUND and polls, because a foreground
+# the documented invariant runs the snapshot in the BACKGROUND and polls, because a foreground
 # `timeout N btrfs ...` cannot distinguish "failed" from "blocked in the kernel":
 # the timeout kills the wrapper while the kernel keeps the ioctl running, so the
 # snapshot lands anyway and rc=124 is an artifact of the harness, not a result.
@@ -234,7 +234,7 @@ analyze "snap_sync" "$WORK/snap_sync"
 # fstate() reads freeze state WITHOUT blocking: `fsfreeze -f` on an
 # already-frozen sb returns EBUSY immediately. If it returns 0 the sb had been
 # thawed and we have now re-frozen it — the caller must account for that, which
-# is exactly the signal D2 needs.
+# is exactly the signal the documented invariant needs.
 # A watchdog thaws unconditionally so a hang cannot leave the node's fs wedged.
 # ---------------------------------------------------------------------------
 if [ "$FREEZE" = 1 ]; then
@@ -260,12 +260,12 @@ D_BEFORE="$(lastlog "$VOL")"
 set +e
 FZ_OUT="$(timeout 10 fsfreeze -f "$MP" 2>&1)"; FZ_RC=$?
 set -e
-echo "  D1 fsfreeze -f rc=$FZ_RC out=[$FZ_OUT]  (rc=124 would mean it hung)"
+echo "  the documented invariant fsfreeze -f rc=$FZ_RC out=[$FZ_OUT]  (rc=124 would mean it hung)"
 sleep 2
 D_FROZEN="$(lastlog "$VOL")"
-echo "  D1 guest advanced $((D_FROZEN - D_BEFORE)) writes during the ~2s frozen window"
+echo "  the documented invariant guest advanced $((D_FROZEN - D_BEFORE)) writes during the ~2s frozen window"
 
-# D2: issue the snapshot inside the frozen window, in the background, and watch.
+# the documented invariant: issue the snapshot inside the frozen window, in the background, and watch.
 btrfs subvolume snapshot "$VOL" "$WORK/snap_frozen" >"$WORK/snapfrozen.out" 2>&1 &
 SNAP_PID=$!
 # Poll well past any plausible completion time (an unfrozen snapshot of this
@@ -275,27 +275,27 @@ D2_SELF_COMPLETED=no
 for t in $(seq 1 8); do
   sleep 1
   st="$(ps -o stat= -p "$SNAP_PID" 2>/dev/null | tr -d ' ')"; [ -n "$st" ] || st=exited
-  echo "  D2 t+${t}s inside frozen window: fs=$(fstate) snapdir=$([ -d "$WORK/snap_frozen" ] && echo EXISTS || echo not-yet) btrfs_proc_state=$st"
+  echo "  the documented invariant t+${t}s inside frozen window: fs=$(fstate) snapdir=$([ -d "$WORK/snap_frozen" ] && echo EXISTS || echo not-yet) btrfs_proc_state=$st"
   if [ "$st" = exited ]; then D2_SELF_COMPLETED=yes; break; fi
 done
-echo "  D2 snapshot completed on its own while still frozen? $D2_SELF_COMPLETED (no = it is blocked on the freeze)"
+echo "  the documented invariant snapshot completed on its own while still frozen? $D2_SELF_COMPLETED (no = it is blocked on the freeze)"
 set +e
 UF_OUT="$(timeout 10 fsfreeze -u "$MP" 2>&1)"; UF_RC=$?
 set -e
-echo "  D2 fsfreeze -u rc=$UF_RC out=[$UF_OUT]"
+echo "  the documented invariant fsfreeze -u rc=$UF_RC out=[$UF_OUT]"
 set +e
 wait "$SNAP_PID"; D_RC=$?
 set -e
 D_OUT="$(cat "$WORK/snapfrozen.out")"
-echo "  D2 snapshot issued-while-frozen: final rc=$D_RC out=[$D_OUT]"
+echo "  the documented invariant snapshot issued-while-frozen: final rc=$D_RC out=[$D_OUT]"
 kill "$WD" 2>/dev/null || true
 sleep 1
 D_AFTER="$(lastlog "$VOL")"
-echo "  D1/D2 guest write progress: before=$D_BEFORE frozen(+2s)=$D_FROZEN thawed(+1s)=$D_AFTER"
+echo "  the documented invariant/the documented invariant guest write progress: before=$D_BEFORE frozen(+2s)=$D_FROZEN thawed(+1s)=$D_AFTER"
 echo "  -> during freeze +$((D_FROZEN - D_BEFORE)); after thaw +$((D_AFTER - D_FROZEN))"
 [ -d "$WORK/snap_frozen" ] && analyze "snap_frozen" "$WORK/snap_frozen" || echo "  snap_frozen: NOT CREATED"
 
-hr "PROBE D3: snapshot immediately after thaw"
+hr "PROBE the documented invariant: snapshot immediately after thaw"
 E_BEFORE="$(lastlog "$VOL")"
 set +e
 E_OUT="$(timeout 10 btrfs subvolume snapshot "$VOL" "$WORK/snap_thawed" 2>&1)"; E_RC=$?
@@ -327,7 +327,7 @@ echo "  host file written to V after the snapshot present in snapshot? $([ -e "$
 # ---------------------------------------------------------------------------
 # PROBE F — was the guest disturbed by ANY of the above? Stop it and read its
 # own report: iterations reached, write errors seen, whether it still sees the
-# host's files. A dead or errored guest fails §5.C regardless of snapshot rc.
+# host's files. A dead or errored guest fails the documented invariant regardless of snapshot rc.
 # ---------------------------------------------------------------------------
 hr "PROBE F: guest liveness / disturbance"
 echo "  runsc process still alive before stop? $(kill -0 "$RUNSC_PID" 2>/dev/null && echo yes || echo NO)"
@@ -376,7 +376,7 @@ if [ "$FREEZE" = 1 ]; then
                      || note "Q5b fsfreeze -f rc=$FZ_RC — see raw output above"
   [ "$D2_SELF_COMPLETED" = no ] \
     && ok "Q5b snapshot issued INSIDE the frozen window does not fail and does not complete — it BLOCKS for the whole frozen window (snapdir absent throughout) and materializes only after the thaw (final rc=$D_RC)" \
-    || bad "Q5b snapshot completed while the fs was still frozen — contradicts the blocking model; re-read the raw D2 poll lines"
+    || bad "Q5b snapshot completed while the fs was still frozen — contradicts the blocking model; re-read the raw the documented invariant poll lines"
   if [ "$UF_RC" -eq 0 ]; then
     note "Q5b the freeze SURVIVES the blocked snapshot (fsfreeze -u rc=0 = sb was still frozen when we thawed it)"
   else

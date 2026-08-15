@@ -1,8 +1,7 @@
 # The guest runtime boundary: what runs, who is PID 1, and how resume cold-starts
 
-> **Position: a deep dive on [`§5.E.1`](../subsystems.md) (the guest startup topology), also touching
-> [`§4.2`](../model.md) (the pause quiescent point) and [`§4.3`](../model.md) (the two probe layers);
-> navigation is in [`SPEC.md`](../SPEC.md).** It develops the reasoning behind two things the spec
+> **Position: the guest-runtime internals reference.** It develops the reasoning behind
+> the guest startup topology, pause quiescence and probe layers described by the concepts pages.
 > states only as conclusions: ① **scope** — the engine supports only "processes exec'd on demand" and
 > does not target system daemon services (D1, D3); ② **the guest startup topology + the pause quiescent
 > point + the resume cold-start timing** (D4, D5). The normative conclusions are in §5.E.1 / §4.2 /
@@ -52,7 +51,7 @@ The criterion lands on two classes of thing:
 Installing a toolchain (Python / npm / Node / Rust …) and deploying a resident DB are two different
 things. `apt`/`npm`/`pip`/cargo are all **one-shot commands** — exec, run, exit — rather than
 `service xxx start` daemons, and they **do not touch init at all**. Entering the sandbox gives root by
-default (spec §2.2: the engine defaults the guest to root and **does not model guest users**, with "run
+default (the architecture reference 2.2: the engine defaults the guest to root and **does not model guest users**, with "run
 as some user" being the guest's native `su`/`sudo`), so the privileges for installing dependencies are
 satisfied naturally; and root inside the guest is intercepted in userspace by the sentry and cannot
 escape to the host, so "let installs that need root run in there without worry" is exactly the gVisor
@@ -68,8 +67,8 @@ in the §5.D declaration (`egress.default: allow`, or one `allow[]` covering the
 An artifact server is two steps, both on existing capabilities:
 
 ```
-process.Start("python -m http.server 8000")     ← spec §5.E's process capability
-POST /v1/sandboxes/{id}/publish {guest_port:8000, proto:"tcp"}   ← spec §5.D's inbound publish (the
+process.Start("python -m http.server 8000")     ← the architecture reference 5.E's process capability
+POST /v1/sandboxes/{id}/publish {guest_port:8000, proto:"tcp"}   ← the architecture reference 5.D's inbound publish (the
                                                                    engine delivers only a host ip:port,
                                                                    and the declaration has no
                                                                    authentication field)
@@ -78,7 +77,7 @@ POST /v1/sandboxes/{id}/publish {guest_port:8000, proto:"tcp"}   ← spec §5.D'
 listen/accept plus reading a file and sending a response are all within the gVisor netstack's support
 (throughput is below host networking, which is fine for serving artifacts). The engine does not know
 "this is an artifact server"; it sees only "a process + a published port". "Being an artifact" is
-product-layer semantics and does not enter the engine (spec §3.2.1).
+product-layer semantics and does not enter the engine (the architecture reference 3.2.1).
 
 One detail: an artifact server **may be long-lived** (staying up while things are being viewed), which
 does not conflict with "on demand" — "on demand" refers to **who starts it and how** (explicitly and
@@ -105,7 +104,7 @@ and the checklist is:
   be installed explicitly;
 - propagating exit code `128+signo`, `SA_RESTART` semantics, and subreaper interactions.
 
-Writing our own rather than bundling: for spec §1.1's deployment shape of "one binary + a config + a
+Writing our own rather than bundling: for the architecture reference 1.1's deployment shape of "one binary + a config + a
 local store", **not stuffing a tini binary into every base rootfs** is a concrete gain — one fewer
 moving part to version, track CVEs for, and bake into templates. The cost is that PID 1 correctness has
 ugly failure modes (zombies piling up, signals lost, shutdown hanging), but it is a **bounded** problem
@@ -120,7 +119,7 @@ init and `sandboxd` are **not merged into one process**, for two engineering rea
    pty, fs ops). Were it PID 1, one crash would **take the entire guest with it** — the user's running
    `apt` / dev server / build all gone. A separate ~300-line init that almost never changes can
    **restart `sandboxd` in place** without crashing the sandbox, downgrading a `sandboxd` crash to
-   **in-process recoverable** (aligned with spec §4.2's "a crash = an involuntary pause") rather than
+   **in-process recoverable** (aligned with the architecture reference 4.2's "a crash = an involuntary pause") rather than
    promoting it to a substrate death. **That restart is crash recovery only and is not a path for
    changing versions**: `/proc/self/exe` is a handle on the inode PID 1 already opened rather than a
    path re-resolved at exec time, so the supervision loop brings up **the same bytes** every time —
@@ -137,7 +136,7 @@ being PID 1. PID 1 then acts purely as **a backstop**, reaping genuinely global 
 set under an "on-demand processes only" model).
 
 **The implementation shape: one binary, two modes** (init mode as PID 1 re-execing a transport-mode
-child through `/proc/self/exe`), with the full topology diagram in spec §5.E.1.
+child through `/proc/self/exe`), with the full topology diagram in the architecture reference 5.E.1.
 
 ### D4.3 What transport mode must implement, how signal targets divide, and two shapes to refuse
 
@@ -173,12 +172,12 @@ patterns, shaped as follows:
 
 **The shape to refuse is the "standalone counter" identity model** (common in distributed
 init/supervisors: tagging each run with an `epoch`/`generation` label to recognize a stale instance).
-The engine does not introduce it, using spec §3.3/§4.3's placement/IP-as-epoch instead (the spec's
+The engine does not introduce it, using the architecture reference 3.3/§4.3's placement/IP-as-epoch instead (the architecture reference's
 "engine vocabulary boundary" names `generation` as the concept most likely to be brought back). A banned
 word list stops the word, not the concept — the drain barrier's **draining logic** is wanted, and any
 practice of hanging **a counter label** on it is not.
 
-**Signal targets divide naturally**: directed signals (to one process / a process group, spec §4.2's
+**Signal targets divide naturally**: directed signals (to one process / a process group, the architecture reference 4.2's
 quiescent point, §5.E's signal channel) belong to **transport mode** (which holds the pid/pgid handles);
 container-level signal fan-out belongs to **PID 1** — its `kill(-1, sig)` broadcasts to **every process
 in this pid namespace except itself**, so a long-running sibling the template ships is covered along
@@ -236,7 +235,7 @@ what has something to flush — and process-directed signals already exist (that
 so a caller who wants something shut down gracefully knows which pid to hit; ② for a sandbox-level TERM
 to be "graceful", the engine would have to judge "which processes in the guest are worth waiting for, and
 for how long", which is **product-layer policy** that §1.3's litmus keeps outside the engine (the engine
-does not know about agents, spec §3.2.1). So §4's verb table stays at pause/destroy, with destroy taking
+does not know about agents, the architecture reference 3.2.1). So §4's verb table stays at pause/destroy, with destroy taking
 effect immediately.
 External evidence points the same way: e2b's `DELETE /sandboxes/{id}` summary reads literally "Kill
 sandbox" with no grace field; sandbox0's sandbox PodSpec does not set
@@ -244,7 +243,7 @@ sandbox" with no grace field; sandbox0's sandbox PodSpec does not set
 while the grace periods it **did** decide on are all at process/session granularity and none on the host
 side.
 
-### D4.4 The pause quiescent-point protocol (the mechanism for spec §4.2)
+### D4.4 The pause quiescent-point protocol (the mechanism for the architecture reference 4.2)
 
 The shape and its two premises are in §4.2: the protocol is **only one host-side drain barrier** — stop
 accepting new mutating fs writes, wait for in-flight ones to drain, then hand over to §5.B's flush
@@ -266,11 +265,11 @@ stream that only ends when the drain does.
 **No cooperative freeze inside the guest (`SIGTSTP` + observing `/proc` for `T` + degrading to `SIGSTOP`
 past a grace period) — rejected.** Two reasons: ① it requires the workload to **voluntarily** stop at a
 safe point on a signal, which the engine can neither require nor verify (it does not know about agents,
-spec §3.2.1); ② two mature implementations both chose an **unmaskable** freeze (one `SIGSTOP`ping the
+the architecture reference 3.2.1); ② two mature implementations both chose an **unmaskable** freeze (one `SIGSTOP`ping the
 process group, one using the cgroup freezer) and neither offers an application-layer safe-point protocol
 — the evidence points the same way. **The reverse channel (a process proactively reporting "I have
 reached a safe point") is likewise rejected**, for reason ①: it would require long-running processes to
-change their own code for pause (violating spec §3.2.1). So an application-layer safe point **does not
+change their own code for pause (violating the architecture reference 3.2.1). So an application-layer safe point **does not
 enter the engine** and the engine introduces no application-layer handshake: it falls on §4.4's
 "cooperation is only an optimization, not a correctness precondition" side, where the semantics of a
 timeout / hard kill match those of a crash — and a crash is the bottom line §4.2 already accepts.
@@ -350,7 +349,7 @@ statelessness, and the placement discovering the IP (§5.A).
 > resume remounts an **existing** Overlay artifact, while create first builds an **empty** Overlay + binds
 > the Volume/Network records for the first time; (b) the failure exit — resume has a quiescent state to
 > fall back to (→ `paused`, point ④) while create does not, so on failure it must clean up half-built
-> resources (the empty Overlay + the placement) and then delete the record / go to `destroyed` (spec §4.4
+> resources (the empty Overlay + the placement) and then delete the record / go to `destroyed` (the architecture reference 4.4
 > invariant A).
 > create's readiness window and half-dead disposition reuse ⑦'s Health RPC gate, with a timeout / failed
 > bring-up landing on its own failure exit. Below, resume is the main line and create's differences are
@@ -388,11 +387,11 @@ up → `running`:
                     sentry netstack and cannot be read back, §5.A)
 ⑦ §4 probe gate   : send a Health RPC to IP:port, polling until the first success or a timeout
       ├─ first success → state=running, emit the resumed/created event (atomic in one commit with the
-      │                  state commit, spec §4.4-C) → the API returns
+      │                  state commit, the architecture reference 4.4-C) → the API returns
       └─ timeout / failed bring-up → after reclaiming the half-built placement: resume→stay paused and
                          retryable; create→delete the record / →destroyed
 ⑧ (outside the    : the client re-resolves the placement and reconnects process/fs to the current IP;
-   engine)          a session adapter calls driver --resume (the engine does not participate, spec §5.E)
+   engine)          a session adapter calls driver --resume (the engine does not participate, the architecture reference 5.E)
 ```
 
 **Ordering constraints**: ⓪ must precede ① (a refused cold start should not have mounted the overlay
@@ -417,7 +416,7 @@ or cold-started.
   holding a stale IP handle that fails to connect **re-resolves the current placement** (a cold start
   voids the old IP) — the only timing requirement is that the client not cache an old IP.
 - **Point ④ — a failed cold start rolls back atomically to the source state (⑦'s failure arm), adding no
-  failed state and introducing no compensating transaction** (spec §4.4-A): a failure is only "this
+  failed state and introducing no compensating transaction** (the architecture reference 4.4-A): a failure is only "this
   placement was not built", and the persistent state is intact on the backend.
 - **Point ⑤ — PID 1's internal readiness is absorbed by the transport port's readiness**: PID 1 can only
   spawn the transport child after installing its handlers (⑤), so ⑦'s gate already gates the one
@@ -437,7 +436,7 @@ separate PID 1, "the port is unreachable" would have only one possible explanati
 - **The pause quiescent point**: the structure is settled (a single drain barrier, D4.4); **an
   application-layer cooperative safe point is rejected** rather than pending. The grace duration is a
   numeric knob whose home is the code (`internal/lifecycle`'s `defaultDrainGrace`), and per the same
-  discipline as transport D5.4 it is **not registered as an open decision** — a knob with two homes ends
+  discipline as transport D5.4 it is **not registered as an GitHub Issue** — a knob with two homes ends
   up with two values.
 - **Whether a template preinstalls a resident process**: not needed; should one appear, it is managed as a
   peer and not stuffed into `sandboxd`. **The content list of the built-in Template** is a

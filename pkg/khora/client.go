@@ -1,25 +1,25 @@
-// Package khora is the thin Go client for a khora engine's §6.1 control plane and
-// §5.E data plane (ADR-0008 part 2).
+// Package khora is the thin Go client for a khora engine's the documented invariant control plane and
+// the documented invariant data plane (the recorded design part 2).
 //
 // THIN IS A CONSTRAINT, NOT A DESCRIPTION. It is the whole reason this package is
-// allowed to live in the engine repo, and ADR-0008 states it as four rules:
+// allowed to live in the engine repo, and the recorded design states it as four rules:
 //
-//   - Every field maps 1:1 onto a §6.1 field. No composite convenience type fusing
+//   - Every field maps 1:1 onto a the documented invariant field. No composite convenience type fusing
 //     two responses.
 //   - No invented verb. There is no WaitUntilRunning here because there is none in
 //     the API — polling, retry, and backoff are the CALLER's, since each is a promise
 //     about time the engine never made.
 //   - No state that outlives a call. The moment this client cached, leased, or
 //     tracked a subscriber it would be a product layer wearing a client's name.
-//   - §1.1's vocabulary boundary applies verbatim. This is engine-facing code in the
+//   - the documented invariant's vocabulary boundary applies verbatim. This is engine-facing code in the
 //     engine repo, so the banned entity names are banned here too.
 //
 // What that buys the caller: every method is a single request with a single answer, so the
 // failure model is HTTP's and nothing is hidden. What it costs: a caller wanting an ergonomic SDK
 // — waiters, retries, streaming helpers, per-language idiom — writes it OUTSIDE, in the consuming
-// repo, on top of this. ADR-0008 "What is explicitly NOT ours".
+// repo, on top of this. the recorded design "What is explicitly NOT ours".
 //
-// AUTHENTICATION IS NOT HERE, and its absence is a decision: ADR-0007 puts auth and
+// AUTHENTICATION IS NOT HERE, and its absence is a decision: the recorded design puts auth and
 // TLS outside the engine, and the orchestrator's listener refuses anything but
 // loopback. This client therefore speaks plain HTTP to a local endpoint by default.
 // The TLS knobs exist for the case where something else terminates in front of it —
@@ -43,14 +43,14 @@ import (
 	"time"
 )
 
-// DefaultEndpoint is the orchestrator's loopback control plane (ADR-0007: the
+// DefaultEndpoint is the orchestrator's loopback control plane (the recorded design: the
 // listener refuses anything else).
 const DefaultEndpoint = "http://127.0.0.1:8080"
 
 // Client talks to one engine.
 //
 // It holds no per-sandbox state — no cache, no lease, no subscriber registry — which
-// is ADR-0008's third rule and the reason a Client is safe to share across
+// is the recorded design's third rule and the reason a Client is safe to share across
 // goroutines: there is nothing in it for two callers to race over but the *http.Client,
 // which is itself concurrent-safe.
 type Client struct {
@@ -60,7 +60,7 @@ type Client struct {
 
 // Option configures a Client at construction. There is no setter: a Client whose
 // endpoint or transport could change under a caller mid-flight is the kind of hidden
-// state ADR-0008 rule 3 excludes.
+// state the recorded design rule 3 excludes.
 type Option func(*Client) error
 
 // New builds a client for endpoint (e.g. "http://127.0.0.1:8080"). An empty endpoint
@@ -86,7 +86,7 @@ func New(endpoint string, opts ...Option) (*Client, error) {
 
 // WithHTTPClient supplies the *http.Client to use. The caller owns its timeout: this
 // package sets none, because a deadline is a promise about time and those are the
-// caller's (ADR-0008 rule 2). Long-lived calls — an event long-poll, a file transfer,
+// caller's (the recorded design rule 2). Long-lived calls — an event long-poll, a file transfer,
 // a process stream — are the reason a blanket client timeout would be wrong here.
 func WithHTTPClient(h *http.Client) Option {
 	return func(c *Client) error {
@@ -100,7 +100,7 @@ func WithHTTPClient(h *http.Client) Option {
 
 // WithTLS configures client certificates and/or a CA for the case where something
 // external terminates TLS in front of the engine. It does NOT make the engine
-// authenticate: ADR-0007 keeps that outside, and the engine's own listener is
+// authenticate: the recorded design keeps that outside, and the engine's own listener is
 // loopback-only. Pass empty strings for the halves you do not need; cert and key must
 // be given together.
 func WithTLS(certFile, keyFile, caFile string) Option {
@@ -142,17 +142,17 @@ func WithTLS(certFile, keyFile, caFile string) Option {
 }
 
 // Endpoint reports the base URL this client was built for. Useful for the data plane,
-// which a caller reaches with pkg/transport/gen directly (ADR-0008 part 3: the
+// which a caller reaches with pkg/transport/gen directly (the recorded design part 3: the
 // generated tree is the protocol, and this client is one consumer of it, not its
 // owner).
 func (c *Client) Endpoint() string { return c.endpoint }
 
-// Error is a non-2xx answer from the engine, carrying §6.2's status code and body.
+// Error is a non-2xx answer from the engine, carrying the documented invariant's status code and body.
 //
-// The code is the useful half and §6.2 gives each one exactly one meaning surface-wide
+// The code is the useful half and the documented invariant gives each one exactly one meaning surface-wide
 // (404 absent, 409 wrong state, 422 unsatisfiable request, 503 a subsystem or the
 // guest is unreachable, 507 admission refused). The MESSAGE is deliberately not
-// parsed: §6.2 sanitizes it (host paths and placement are stripped), so it is text for
+// parsed: the documented invariant sanitizes it (host paths and placement are stripped), so it is text for
 // a human, never a value to branch on.
 type Error struct {
 	Code    int
@@ -174,12 +174,12 @@ func (e *Error) Error() string {
 func IsNotFound(err error) bool { return codeIs(err, http.StatusNotFound) }
 
 // IsConflict reports whether err is a 409 — the object exists but is in the wrong
-// state for this verb (§6.2).
+// state for this verb (the documented invariant).
 func IsConflict(err error) bool { return codeIs(err, http.StatusConflict) }
 
 // IsUnavailable reports whether err is a 503 — a subsystem or the guest could not be
 // reached. NOT retryable by this package: a retry policy is a promise about time
-// (ADR-0008 rule 2), so it is the caller's to write.
+// (the recorded design rule 2), so it is the caller's to write.
 func IsUnavailable(err error) bool { return codeIs(err, http.StatusServiceUnavailable) }
 
 func codeIs(err error, code int) bool {
@@ -227,7 +227,7 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 }
 
 // errorFrom builds an *Error from a non-2xx response. The body is read whole and
-// capped: §6.2 bodies are one sanitized line, so anything larger is not a message this
+// capped: the documented invariant bodies are one sanitized line, so anything larger is not a message this
 // client should hold in memory on a caller's behalf.
 func errorFrom(resp *http.Response, method, path string) error {
 	msg, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
@@ -239,6 +239,6 @@ func errorFrom(resp *http.Response, method, path string) error {
 	}
 }
 
-// durationString renders a duration the way §6.1 accepts one: Go's own syntax, which
+// durationString renders a duration the way the documented invariant accepts one: Go's own syntax, which
 // is what the engine's flags and JSON fields already parse.
 func durationString(d time.Duration) string { return d.String() }

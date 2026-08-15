@@ -1,11 +1,10 @@
 # Volume: the derivation and falsification of the backend seam / writes / snapshots / leases
 
-> **Position: the Volume deep dive for [`§5.C`](../subsystems.md) (spec; navigation in
-> [`SPEC.md`](../SPEC.md)) together with [`§3.4`](../model.md), [`§4.2`](../model.md) and
-> [`§4.3`](../model.md).** §5.C carries Volume's model and its settled contracts; this document keeps
+> **Position: the Volume internals reference.** It complements the
+> [architecture](../concepts/architecture.md) and [model](../concepts/model.md) pages and keeps
 > the three things a deep dive should: **why each contract has the shape it has**, **which alternatives
 > were ruled out (the falsifications)**, and **what remains outside the contract boundary** (registered
-> in [`open-decisions.md`](../open-decisions.md)).
+> in the relevant GitHub Issue).
 >
 > **A whole family of mechanisms this document repeatedly rules out** (WAL→object-store materialization,
 > content-addressed layers, cross-node heartbeat reclamation, head CAS, application-layer encryption)
@@ -39,7 +38,7 @@ The two arms have **zero difference on the guest side** (both are one gofer-prox
 difference is only whether an ordinary directory or a FUSE mount point sits behind the mount point.
 
 **The unmeasured half of the remote arm is not an unverified premise of the seam's shape, so it does not
-enter open-decisions.** The seam's shape depends only on **penetrability** — that the gofer descends into
+enter GitHub Issues.** The seam's shape depends only on **penetrability** — that the gofer descends into
 a host-side FUSE mount point and POSIX semantics pass through — and the read/enumerate measurements are
 enough to establish that; the write path's behaviour is **that backend's own acceptance item** (D8) rather
 than a premise of the core model. Volume's new properties relative to Overlay, with their contracts and
@@ -890,7 +889,7 @@ definitely does not** — that is not an unmade promise but a known falsehood.
 
 ---
 
-## D8. Open items outside the contract boundary (registered in [`open-decisions.md`](../open-decisions.md), not settled here)
+## D8. Open items outside the contract boundary (tracked in a GitHub Issue, not settled here)
 
 The following are boundary items whose design is settled but whose **concrete value / landing shape is not**
 (product-layer policy, or to be fixed when §6 lands):

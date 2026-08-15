@@ -12,30 +12,30 @@ import (
 	"github.com/TSHOGX/khora/internal/btrfs"
 )
 
-// LocalBtrfs is the DEFAULT §5.C backend arm: one volume = one storage unit on the
+// LocalBtrfs is the DEFAULT the documented invariant backend arm: one volume = one storage unit on the
 // host, which the gofer proxies into a guest as an ordinary directory so POSIX
-// comes free from the host kernel (§5.C / volume.md D0). It carries both a hard
+// comes free from the host kernel (the documented invariant / the relevant internals page the documented invariant). It carries both a hard
 // capacity cap and cheap atomic snapshots because the substrate attaches both to
 // the SAME object — the strongest argument for modelling a volume as one unit.
 //
 // It reuses internal/btrfs UNCHANGED. That package is a shared substrate TOOL, not
-// a seam: §5.B (Overlay upper+work caps) was its first consumer and §5.C is the
+// a seam: the documented invariant (Overlay upper+work caps) was its first consumer and the documented invariant is the
 // second. Two subsystems importing one leaf is not "subsystems calling each other"
-// (§4) — neither calls the OTHER.
+// (the documented invariant) — neither calls the OTHER.
 type LocalBtrfs struct {
 	// VolumesDir holds one storage unit per volume: VolumesDir/<volumeID>. A
 	// sibling of the Overlay state root, never nested inside it, so each sweep
 	// enumerates only its own subsystem's units.
 	VolumesDir string
 
-	// Btrfs materializes the per-volume capacity cap. Shared CODE with §5.B
-	// (rootfs-overlay D6.4), not a shared interface.
+	// Btrfs materializes the per-volume capacity cap. Shared CODE with the documented invariant
+	// (rootfs-overlay the documented invariant), not a shared interface.
 	Btrfs btrfs.Client
 
 	// mu guards deletedRows.
 	mu sync.Mutex
 	// deletedRows are quota-row ids recorded AT DELETE TIME, whose rows a deletion may
-	// have leaked (§5.C / volume.md D7). Recorded there because that is the last moment
+	// have leaked (the documented invariant / the relevant internals page the documented invariant). Recorded there because that is the last moment
 	// the id is obtainable — see recordDeletedRow.
 	deletedRows map[uint64]bool
 }
@@ -54,15 +54,15 @@ func NewLocalBtrfs(volumesDir string) (*LocalBtrfs, error) {
 func (b *LocalBtrfs) Name() string { return "local_btrfs" }
 
 // Capabilities: this arm supports all three. Snapshot and Clone are one substrate
-// path (they differ in the semantic label, not the mechanism — volume.md D6.1a),
-// and Quota is what lets §3.4 refuse a cap it cannot enforce instead of running
+// path (they differ in the semantic label, not the mechanism — the relevant internals page the documented invariant),
+// and Quota is what lets the documented invariant refuse a cap it cannot enforce instead of running
 // uncapped.
 func (b *LocalBtrfs) Capabilities() Capabilities {
 	return Capabilities{Snapshot: true, Clone: true, Quota: true}
 }
 
 // unitPath is the storage unit for one volume. Derived from the ID, so enumeration
-// recovers identity without any store read (§4: the backend never reads the store).
+// recovers identity without any store read (the documented invariant: the backend never reads the store).
 func (b *LocalBtrfs) unitPath(volumeID string) string {
 	return filepath.Join(b.VolumesDir, volumeID)
 }
@@ -83,7 +83,7 @@ func validateID(volumeID string) error {
 
 // CreateVolume allocates the unit and applies the cap in ONE backend operation,
 // never leaving it to a follow-up call by the caller: a missing cap is silent and
-// undetectable afterwards (Backend.Usage / volume.md D7.3), which forces the
+// undetectable afterwards (Backend.Usage / the relevant internals page the documented invariant), which forces the
 // invariant to write time.
 func (b *LocalBtrfs) CreateVolume(ctx context.Context, volumeID string, capBytes int64) error {
 	if err := validateID(volumeID); err != nil {
@@ -91,9 +91,9 @@ func (b *LocalBtrfs) CreateVolume(ctx context.Context, volumeID string, capBytes
 	}
 	unit := b.unitPath(volumeID)
 	if capBytes > 0 && !b.Btrfs.Available(ctx, b.VolumesDir) {
-		// Refusing beats running uncapped (§3.4): a silently dropped cap leaves every
-		// §2.3 blast-radius assertion trusting a limit that is not there.
-		return fmt.Errorf("volume: %s requests a %d-byte cap but VolumesDir is not on a quota-capable filesystem — refusing to run uncapped (§3.4): %w",
+		// Refusing beats running uncapped (the documented invariant): a silently dropped cap leaves every
+		// the documented invariant blast-radius assertion trusting a limit that is not there.
+		return fmt.Errorf("volume: %s requests a %d-byte cap but VolumesDir is not on a quota-capable filesystem — refusing to run uncapped (the documented invariant): %w",
 			volumeID, capBytes, ErrUnsupported)
 	}
 	if err := b.Btrfs.CreateSubvolume(ctx, unit); err != nil {
@@ -105,8 +105,8 @@ func (b *LocalBtrfs) CreateVolume(ctx context.Context, volumeID string, capBytes
 	return nil
 }
 
-// SetCapacity re-applies the cap on an existing unit (§6.1 PATCH write point). 0
-// removes it, keeping the volume RECORD the single authority (§3.4).
+// SetCapacity re-applies the cap on an existing unit (the documented invariant PATCH write point). 0
+// removes it, keeping the volume RECORD the single authority (the documented invariant).
 func (b *LocalBtrfs) SetCapacity(ctx context.Context, volumeID string, capBytes int64) error {
 	if err := validateID(volumeID); err != nil {
 		return err
@@ -146,13 +146,13 @@ func (b *LocalBtrfs) applyCap(ctx context.Context, volumeID string, capBytes int
 // against it.
 //
 // Answering `(walk, 0, nil)` there is a DEFINITE answer synthesized from a failure,
-// which §4.4-A forbids a provider from producing, and it is wrong in BOTH halves:
+// which the documented invariant forbids a provider from producing, and it is wrong in BOTH halves:
 // the walk counts file data only while the row also charges metadata extents (16 KiB
 // on an EMPTY unit), so `used` comes back UNDER the substrate's own number and the
 // cap write point's strict inequality would admit a cap the substrate then wedges the
-// unit on (volume.md D7.3) — while limit 0 is indistinguishable from a deliberately
+// unit on (the relevant internals page the documented invariant) — while limit 0 is indistinguishable from a deliberately
 // uncapped volume. Returning the error is what keeps inspect's degraded response, the
-// §6.1 PATCH write point's fail-closed, and RepairVolumeCaps' draw-no-conclusion
+// the documented invariant PATCH write point's fail-closed, and RepairVolumeCaps' draw-no-conclusion
 // reachable at all.
 //
 // The walk stays for a PLAIN-DIRECTORY unit, which has no row to read and for which
@@ -177,7 +177,7 @@ func (b *LocalBtrfs) Usage(ctx context.Context, volumeID string) (int64, int64, 
 }
 
 // Materialize prepares the host mount point. CREATE-IF-ABSENT by contract
-// (§5.C): runsc hard-fails on a missing bind source, so an open-only version would
+// (the documented invariant): runsc hard-fails on a missing bind source, so an open-only version would
 // make a mis-swept sandbox permanently unresumable, whereas recreating the unit
 // empty restarts cleanly (data lost, but recoverable). Safe to call concurrently
 // for the same volume — CreateSubvolume is idempotent, which is what the whole
@@ -186,7 +186,7 @@ func (b *LocalBtrfs) Usage(ctx context.Context, volumeID string) (int64, int64, 
 // It does NOT re-apply a cap: the cap's authority is the volume record and its
 // write points are create and PATCH, both of which reach the backend directly. A
 // volume has no placement of its own, so there is no "re-materialize at next
-// placement" moment to hang it on (§5.C — the mechanical reason volume caps are
+// placement" moment to hang it on (the documented invariant — the mechanical reason volume caps are
 // editable while unmounted, unlike sandbox caps).
 //
 // THAT LEAVES ONE GAP THE MEDIATOR CLOSES, named here because the dependency is
@@ -194,7 +194,7 @@ func (b *LocalBtrfs) Usage(ctx context.Context, volumeID string) (int64, int64, 
 // whenever CreateSubvolume fails on an absent path (VolumesDir not on a
 // quota-capable filesystem, or a substrate refusal), and a plain directory cannot
 // carry a cap at all — so a volume whose RECORD declares one is re-materialized
-// UNCAPPED, undetectably (Backend.Usage / volume.md D7.3). Nothing on this path
+// UNCAPPED, undetectably (Backend.Usage / the relevant internals page the documented invariant). Nothing on this path
 // re-asserts it; Mediator.RepairVolumeCaps is what does, and it can, because a
 // freshly recreated unit is EMPTY — the recorded cap is strictly above its usage,
 // which is the condition that pass requires before writing one. (For a volume whose
@@ -217,7 +217,7 @@ func (b *LocalBtrfs) Materialize(ctx context.Context, volumeID string) (*Materia
 	return &Materialized{Volume: volumeID, SourcePath: unit}, nil
 }
 
-// Snapshot and Clone are ONE code path on this arm, which is what volume.md D6.1a
+// Snapshot and Clone are ONE code path on this arm, which is what the relevant internals page the documented invariant
 // concluded: the substrate implements both with the same whole-tree operation, and the
 // difference is the semantic label a caller attaches, not the mechanism. Keeping them
 // as two seam methods over one implementation is what lets a backend that supports only
@@ -255,7 +255,7 @@ func (b *LocalBtrfs) snapshotPath(ctx context.Context, srcID, newID string, capB
 	if _, err := os.Stat(dst); err == nil {
 		return fmt.Errorf("volume: %s: %s already exists", kind, newID)
 	}
-	// A WRITABLE snapshot: no `-r`. That is the design path (§5.C — a snapshot yields an
+	// A WRITABLE snapshot: no `-r`. That is the design path (the documented invariant — a snapshot yields an
 	// ordinary writable volume), and it also sidesteps a substrate wrinkle: a read-only
 	// unit on this progs version needs `property set ro false` before it can be deleted
 	// at all, so test and cleanup code that ever creates one must carry that step
@@ -273,7 +273,7 @@ func (b *LocalBtrfs) snapshotPath(ctx context.Context, srcID, newID string, capB
 	return nil
 }
 
-// ReclaimQuotaRows implements the §5.C / D7 recovery procedure for rows an earlier
+// ReclaimQuotaRows implements the the documented invariant / the documented invariant recovery procedure for rows an earlier
 // delete leaked. See Backend.ReclaimQuotaRows for why it is a correctness path.
 //
 // The procedure, in the measured order:
@@ -372,14 +372,14 @@ func (b *LocalBtrfs) DeletedRowIDs(context.Context) []uint64 {
 //
 // RECORDED AT DELETE TIME, because that is the last moment the id is obtainable: after
 // the delete the path is unresolvable, and the id is the only handle on a row the
-// delete may have left behind. §5.C requires locating rows this way rather than by
+// delete may have left behind. the documented invariant requires locating rows this way rather than by
 // scanning, because a scan that misidentifies a row yields an uncapped live volume with
 // zero signal.
 //
 // In-memory, so a crash loses the knowledge that we were watching a row — never the ROW
 // ITSELF, which stays on the filesystem, and the ids only ever drive an idempotent
 // reclaim. Persisting the list would mean a new store table whose only consumer is a
-// substrate-specific cleanup, which §1.3 argues against.
+// substrate-specific cleanup, which the documented invariant argues against.
 func (b *LocalBtrfs) recordDeletedRow(id uint64) {
 	b.mu.Lock()
 	if b.deletedRows == nil {
@@ -400,7 +400,7 @@ func (b *LocalBtrfs) forgetDeletedRow(id uint64) {
 // there for the promise and for why the method is not called Unmount.
 func (b *LocalBtrfs) Release(context.Context, *Materialized) error { return nil }
 
-// AdoptMaterialized re-recognizes a still-present unit after a crash (§4.4-A). It
+// AdoptMaterialized re-recognizes a still-present unit after a crash (the documented invariant). It
 // does NOT create — an absent unit means there is nothing to adopt, and reporting
 // that is what lets the mediator tell "recover the handle" from "materialize
 // afresh".
@@ -415,7 +415,7 @@ func (b *LocalBtrfs) AdoptMaterialized(_ context.Context, volumeID string) (*Mat
 	return &Materialized{Volume: volumeID, SourcePath: unit}, nil
 }
 
-// OpenRoot returns the root-confined accessor over the unit (volume.md D5.1). The
+// OpenRoot returns the root-confined accessor over the unit (the relevant internals page the documented invariant). The
 // handle exposes no host path at all, which makes this the one materialization-class
 // method needing no exemption in the structural guard.
 func (b *LocalBtrfs) OpenRoot(_ context.Context, volumeID string) (Root, error) {
@@ -425,7 +425,7 @@ func (b *LocalBtrfs) OpenRoot(_ context.Context, volumeID string) (Root, error) 
 	return NewLocalRoot(volumeID, b.unitPath(volumeID))
 }
 
-// DestroyVolume reclaims the unit's bytes. Idempotent (§4.4-A: reached from
+// DestroyVolume reclaims the unit's bytes. Idempotent (the documented invariant: reached from
 // delete, unwind and the sweep).
 //
 // The contents are emptied FIRST because a unit delete addresses the unit itself
@@ -452,7 +452,7 @@ func (b *LocalBtrfs) DestroyVolume(ctx context.Context, volumeID string) error {
 		}
 	}
 	// Capture the quota-row id BEFORE the delete: afterwards the path is unresolvable
-	// and this id is the only handle on a row the delete may leak (§5.C — rows are
+	// and this id is the only handle on a row the delete may leak (the documented invariant — rows are
 	// located by the id recorded at deletion, never by scanning). A failure to read it
 	// is not fatal to the delete; it only means the reclaim path cannot watch this row.
 	if id, idErr := b.Btrfs.SubvolumeID(ctx, unit); idErr == nil {
@@ -467,7 +467,7 @@ func (b *LocalBtrfs) DestroyVolume(ctx context.Context, volumeID string) error {
 	return nil
 }
 
-// UncappedBytes reports bytes under no declared cap — the §5.C half of the §3.4
+// UncappedBytes reports bytes under no declared cap — the the documented invariant half of the the documented invariant
 // second term (see Backend.UncappedBytes for the contract). How this arm honors it:
 //
 //	unit WITH a cap   → ZERO: its cap is already a committed promise the mediator
@@ -481,10 +481,10 @@ func (b *LocalBtrfs) DestroyVolume(ctx context.Context, volumeID string) error {
 // An UNREADABLE quota row is an ERROR, never a fallback to measuring: on the
 // failure path the `limit > 0` skip below is UNREACHABLE, so the walk ran for
 // CAPPED units too, whose correct contribution here is ZERO — the same bytes
-// billed twice, which §3.4.2's disjointness rule forbids, at the magnitude of the
+// billed twice, which the documented invariant's disjointness rule forbids, at the magnitude of the
 // whole unit and strictly ONE-directional, so it produces wrongful 507s on a live
-// admission path (open-decisions, the §3.4 second-term row). Same rule as
-// Backend.Usage and §4.4-A; this was the one place that guessed.
+// admission path (a GitHub Issue, the the documented invariant second-term row). Same rule as
+// Backend.Usage and the documented invariant; this was the one place that guessed.
 //
 // The read itself is retried inside the btrfs client (transient failure under
 // concurrent churn), so an error reaching here means it stayed unreadable.

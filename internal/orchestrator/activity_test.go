@@ -64,8 +64,8 @@ func activityFixture(t *testing.T, cl transport.Client) (base string, id model.S
 }
 
 // TestActivityStampsTheGuestClockAndReportsItBack: the happy path, and it asserts
-// the two things that make this endpoint what §6.1 says it is — the stamp reached
-// the GUEST (reaper-health D1: the clock is guest-side, never a host timestamp),
+// the two things that make this endpoint what the documented invariant says it is — the stamp reached
+// the GUEST (reaper-health the documented invariant: the clock is guest-side, never a host timestamp),
 // and the body carries the reading taken after it rather than a bare 204.
 func TestActivityStampsTheGuestClockAndReportsItBack(t *testing.T) {
 	cl := &activityFakeClient{barrierFakeClient: &barrierFakeClient{}, idle: 7 * time.Millisecond}
@@ -108,7 +108,7 @@ func TestActivityIsUnavailableWhenL2Is(t *testing.T) {
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("want 503, got %d: %s", resp.StatusCode, body)
 	}
-	// §6.2: the veth address must not reach the caller, same rule as the file bypass.
+	// the documented invariant: the veth address must not reach the caller, same rule as the file bypass.
 	if strings.Contains(string(body), "10.88.0.7") {
 		t.Errorf("response leaks the placement: %s", body)
 	}
@@ -154,7 +154,7 @@ func TestActivityOnAPausedSandboxIsAConflict(t *testing.T) {
 
 // TestActivityRejectsUnknownIDsAndWrongMethods: 404 for an id that does not exist
 // (never a 409 that implies it does), and 405 for a wrong method on a route that
-// exists (§6.2's general rule, not the default 404 arm).
+// exists (the documented invariant's general rule, not the default 404 arm).
 func TestActivityRejectsUnknownIDsAndWrongMethods(t *testing.T) {
 	cl := &activityFakeClient{barrierFakeClient: &barrierFakeClient{}}
 	base, sid, closeFn := activityFixture(t, cl)

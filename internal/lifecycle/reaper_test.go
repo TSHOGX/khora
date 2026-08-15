@@ -13,11 +13,11 @@ import (
 	"github.com/TSHOGX/khora/internal/transport"
 )
 
-// reaper dispatch as pure logic against fakes (§4.3 health states → §4.1
+// reaper dispatch as pure logic against fakes (the documented invariant health states → the documented invariant
 // transitions). The real runsc round-trip (auto-pause after idle, live
 // crash-pause, transport-down same-IP, crash-loop escalation, evict) lives in
 // the substrate e2e (test/reaper_substrate_test.go); these pin the dispatch +
-// the D3 activity-race guard + the D4b budget + the TryLock-skip
+// the the documented invariant activity-race guard + the the documented invariantb budget + the TryLock-skip
 // deterministically.
 
 // reaperEnv wires a mediator + reaper with a controllable Health client and
@@ -34,7 +34,7 @@ type reaperEnv struct {
 func newReaperEnv(t *testing.T, budget time.Duration) *reaperEnv {
 	t.Helper()
 	st := store.NewMemory()
-	seedBare(t, st) // §4.3 template FK: both seedRunning/seedPaused reference "bare"
+	seedBare(t, st) // the documented invariant template FK: both seedRunning/seedPaused reference "bare"
 	rt := &fakeRuntime{adoptAlive: map[string]bool{}}
 	cl := &fakeClient{healthy: true}
 	m := New(Deps{
@@ -112,7 +112,7 @@ func (e *reaperEnv) lastKind(id string) string {
 	return kind
 }
 
-// lastCause is lastKind for the §4.4-C cause field.
+// lastCause is lastKind for the the documented invariant cause field.
 func (e *reaperEnv) lastCause(id string) model.EventCause {
 	evs, _ := e.st.UnpublishedEvents(context.Background(), allUnpublished)
 	cause := model.EventCause("<no event>")
@@ -124,7 +124,7 @@ func (e *reaperEnv) lastCause(id string) model.EventCause {
 	return cause
 }
 
-// idle past idle_timeout → auto-pause, emitting Kind "auto-paused" (§4.1: the
+// idle past idle_timeout → auto-pause, emitting Kind "auto-paused" (the documented invariant: the
 // idle Kind, distinct from user "paused" and reconcile "crash-paused").
 func TestReaperAutoPausesIdle(t *testing.T) {
 	e := newReaperEnv(t, time.Minute)
@@ -154,7 +154,7 @@ func TestReaperLeavesHealthyRunning(t *testing.T) {
 	}
 }
 
-// D3 activity-race guard: a sandbox classified idle at sweep, but active again
+// the documented invariant activity-race guard: a sandbox classified idle at sweep, but active again
 // by the lock-held re-read, is NOT auto-paused. CAS on lifecycle-state alone
 // would not catch it (state is still running); the lock-held activity re-read
 // does. We simulate it with an idleFn that returns idle on the first probe (the
@@ -174,7 +174,7 @@ func TestReaperActivityRaceGuardAbortsAutoPause(t *testing.T) {
 	e.r.Sweep(context.Background())
 
 	if got := e.state(t, "racy"); got != model.Running {
-		t.Fatalf("sandbox active-in-window was auto-paused: state=%s; want running (D3 guard)", got)
+		t.Fatalf("sandbox active-in-window was auto-paused: state=%s; want running (the documented invariant guard)", got)
 	}
 	if call < 2 {
 		t.Fatalf("auto-pause did not re-read activity under the lock (probes=%d; want ≥2)", call)
@@ -182,7 +182,7 @@ func TestReaperActivityRaceGuardAbortsAutoPause(t *testing.T) {
 }
 
 // dead-recoverable (L2 down + L1 dead) under a LIVE orchestrator → crash-pause
-// (§4.2 involuntary pause), Kind "crash-paused". Proves the live reaper drives
+// (the documented invariant involuntary pause), Kind "crash-paused". Proves the live reaper drives
 // the same demote reconcile does at boot.
 func TestReaperCrashPausesDeadRecoverable(t *testing.T) {
 	e := newReaperEnv(t, time.Minute)
@@ -201,7 +201,7 @@ func TestReaperCrashPausesDeadRecoverable(t *testing.T) {
 }
 
 // transport-down (L2 down + L1 alive) → WAIT, not crash-pause. Stays running;
-// PID1 restarts the transport child in place (§5.E.1). No escalation within
+// PID1 restarts the transport child in place (the documented invariant). No escalation within
 // budget.
 func TestReaperWaitsOnTransportDownWithinBudget(t *testing.T) {
 	e := newReaperEnv(t, time.Hour) // generous budget
@@ -216,11 +216,11 @@ func TestReaperWaitsOnTransportDownWithinBudget(t *testing.T) {
 		t.Fatalf("transport-down state=%s; want running (wait for in-place restart, not crash-pause)", got)
 	}
 	if _, tracked := e.r.downSince["td"]; !tracked {
-		t.Fatal("transport-down streak not tracked for budget accounting (D4b)")
+		t.Fatal("transport-down streak not tracked for budget accounting (the documented invariantb)")
 	}
 }
 
-// D4b escalation: transport-down PAST the restart budget → escalate to
+// the documented invariantb escalation: transport-down PAST the restart budget → escalate to
 // dead-recoverable = crash-pause then resume (new epoch), so a crash-looping
 // transport child cannot wedge the sandbox forever. Ends running again.
 func TestReaperEscalatesTransportDownPastBudget(t *testing.T) {
@@ -236,7 +236,7 @@ func TestReaperEscalatesTransportDownPastBudget(t *testing.T) {
 	}
 	// backdate the streak start past the budget, on the SAME placement epoch the
 	// live handle carries (10.0.0.1:9000) so it is a continuous same-IP streak →
-	// next sweep escalates (D4b).
+	// next sweep escalates (the documented invariantb).
 	e.r.downSince["loop"] = downStreak{since: time.Now().Add(-2 * time.Hour), epoch: "10.0.0.1:9000"}
 
 	// The escalating sweep probes Health twice: once in classify (must be DOWN so
@@ -252,7 +252,7 @@ func TestReaperEscalatesTransportDownPastBudget(t *testing.T) {
 	e.r.Sweep(context.Background())
 
 	if got := e.state(t, "loop"); got != model.Running {
-		t.Fatalf("after escalation state=%s; want running (crash-pause→resume, D4b)", got)
+		t.Fatalf("after escalation state=%s; want running (crash-pause→resume, the documented invariantb)", got)
 	}
 	// the escalation went through crash-pause then resume: the last event is
 	// "resumed", and a "crash-paused" preceded it.
@@ -273,7 +273,7 @@ func TestReaperEscalatesTransportDownPastBudget(t *testing.T) {
 		}
 	}
 	if !sawCrashPause || !sawResume {
-		t.Fatalf("escalation events=%v; want both crash-paused and resumed (D4b)", kinds)
+		t.Fatalf("escalation events=%v; want both crash-paused and resumed (the documented invariantb)", kinds)
 	}
 	if _, tracked := e.r.downSince["loop"]; tracked {
 		t.Fatal("transport-down streak not cleared after escalation")
@@ -299,8 +299,8 @@ func TestReaperHealthyClearsTransportDownStreak(t *testing.T) {
 	}
 }
 
-// D4b regression: a transport-down streak must NOT survive a between-tick
-// placement change (pause+resume rebinds a new IP, §3.3). Without epoch-keying, a
+// the documented invariantb regression: a transport-down streak must NOT survive a between-tick
+// placement change (pause+resume rebinds a new IP, the documented invariant). Without epoch-keying, a
 // stale pre-resume start time would let a FRESH transport-down escalate straight
 // past the budget on the very next tick — bypassing the restart budget the whole
 // mechanism exists to grant. Here we simulate the streak having begun on an OLD
@@ -321,7 +321,7 @@ func TestReaperTransportDownStreakResetsAcrossEpochChange(t *testing.T) {
 	// must NOT have escalated (that would have crash-paused→resumed); still running
 	// and waiting, with a FRESH streak on the current epoch.
 	if got := e.state(t, "moved"); got != model.Running {
-		t.Fatalf("state=%s; want running — a stale-epoch streak must not escalate a fresh down (D4b)", got)
+		t.Fatalf("state=%s; want running — a stale-epoch streak must not escalate a fresh down (the documented invariantb)", got)
 	}
 	streak, tracked := e.r.downSince["moved"]
 	if !tracked {
@@ -335,7 +335,7 @@ func TestReaperTransportDownStreakResetsAcrossEpochChange(t *testing.T) {
 	}
 }
 
-// D4b regression: a HealthUnknown tick (uncertain L1 / momentarily absent live
+// the documented invariantb regression: a HealthUnknown tick (uncertain L1 / momentarily absent live
 // handle) breaks continuity — the streak must be pruned, so a subsequent
 // transport-down starts a fresh budget rather than inheriting the old start time.
 func TestReaperTransportDownStreakClearedByUnknownTick(t *testing.T) {
@@ -352,11 +352,11 @@ func TestReaperTransportDownStreakClearedByUnknownTick(t *testing.T) {
 	e.rt.adoptErr = map[string]error{"u": context.DeadlineExceeded}
 	e.r.Sweep(context.Background())
 	if _, tracked := e.r.downSince["u"]; tracked {
-		t.Fatal("Unknown tick did not clear the transport-down streak (breaks D4b continuity)")
+		t.Fatal("Unknown tick did not clear the transport-down streak (breaks the documented invariantb continuity)")
 	}
 }
 
-// evict: a paused sandbox past retention → destroyed (§4.1 evict = reaper's
+// evict: a paused sandbox past retention → destroyed (the documented invariant evict = reaper's
 // automatic destroy). A paused sandbox within retention is left alone.
 func TestReaperEvictsPausedPastRetention(t *testing.T) {
 	e := newReaperEnv(t, time.Minute)
@@ -376,7 +376,7 @@ func TestReaperEvictsPausedPastRetention(t *testing.T) {
 	}
 }
 
-// TestEvictAndDestroyAreDistinguishableFromTheEventAlone pins §4.4-C's cause on the
+// TestEvictAndDestroyAreDistinguishableFromTheEventAlone pins the documented invariant's cause on the
 // kind where it is the ONLY carrier. Both routes emit Kind "destroyed" (there is no
 // `evict` kind, deliberately) and both DELETE the record, so a subscriber that cannot
 // separate them from the payload can never separate them at all: the follow-up GET is a
@@ -464,7 +464,7 @@ func TestReaperSkipsLockedSandbox(t *testing.T) {
 // skip-and-log, so a missing one produces no error, no failed test and no log line —
 // the only symptom is a divergence that persists until the next process restart. For
 // the cap-repair round specifically the divergence is itself undetectable while it
-// lasts (volume.md D7.3: the limit read maps "never capped" and 0 onto each other),
+// lasts (the relevant internals page the documented invariant: the limit read maps "never capped" and 0 onto each other),
 // so "it will be caught later" is false.
 //
 // Asserted by OBSERVED BACKEND CALLS rather than by reading the source, so it fails
@@ -489,7 +489,7 @@ func TestReaperTickRunsEveryMaintenanceRound(t *testing.T) {
 	}
 	vol.mu.Lock()
 	vol.deletedRows[4242] = true        // a leaked quota row for the reclamation round
-	delete(vol.appliedCaps, string(id)) // storage "forgets" the cap → the D7.3 repair state
+	delete(vol.appliedCaps, string(id)) // storage "forgets" the cap → the the documented invariant repair state
 	vol.mu.Unlock()
 
 	before := strings.Join(vol.Calls(), ",")
@@ -497,9 +497,9 @@ func TestReaperTickRunsEveryMaintenanceRound(t *testing.T) {
 	got := strings.Join(vol.Calls(), ",")
 
 	for call, why := range map[string]string{
-		"ListUnitIDs":      "§5.C orphan-volume sweep",
-		"ReclaimQuotaRows": "§5.C/D7 leaked quota-row reclamation",
-		"SetCapacity":      "§5.C/D7.3 volume-cap repair",
+		"ListUnitIDs":      "the documented invariant orphan-volume sweep",
+		"ReclaimQuotaRows": "the documented invariant/the documented invariant leaked quota-row reclamation",
+		"SetCapacity":      "the documented invariant/the documented invariant volume-cap repair",
 	} {
 		if !strings.Contains(strings.TrimPrefix(got, before), call) {
 			t.Errorf("one tick never called %s (%s) — a periodic maintenance round is missing, and every round here is best-effort skip-and-log, so its absence raises NOTHING at runtime. Calls during the tick: %s", call, why, strings.TrimPrefix(got, before))

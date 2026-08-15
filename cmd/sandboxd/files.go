@@ -12,7 +12,7 @@ import (
 	"github.com/TSHOGX/khora/internal/guestport"
 )
 
-// --- large-file bypass (§5.E fs / transport D4.4) ----------------------------
+// --- large-file bypass (the documented invariant fs / transport the documented invariant) ----------------------------
 //
 // Byte-carrying fs calls have two paths on purpose. The RPC (FsService.Read /
 // Write) is bounded by the message size and buffers the whole payload; this HTTP
@@ -22,7 +22,7 @@ import (
 // It rides the same listener and port as the Connect handlers — sandboxd already
 // serves a plain ServeMux, so nothing new is exposed. No auth here for the same
 // reason the RPCs have none: the endpoint is netns-internal and only the host can
-// reach it (transport D4.1 trust model).
+// reach it (transport the documented invariant trust model).
 //
 // The threshold is the CALLER's choice, not a number the engine picks: small payloads are
 // cheaper as one RPC, large ones must stream, and only the caller knows which it has.
@@ -56,8 +56,8 @@ func httpFsErr(w http.ResponseWriter, op, path string, err error) {
 	case errors.Is(err, os.ErrPermission), errors.Is(err, syscall.EACCES), errors.Is(err, syscall.EPERM):
 		status = http.StatusForbidden
 	case errors.Is(err, syscall.ENOSPC), errors.Is(err, syscall.EDQUOT):
-		// The §3.4 capacity cap. 507 rather than 500: the request was valid, the
-		// sandbox simply has no room, and the sandbox itself stays alive (§2.3).
+		// The the documented invariant capacity cap. 507 rather than 500: the request was valid, the
+		// sandbox simply has no room, and the sandbox itself stays alive (the documented invariant).
 		status = http.StatusInsufficientStorage
 	case errors.Is(err, syscall.EISDIR), errors.Is(err, syscall.ENOTDIR):
 		status = http.StatusBadRequest

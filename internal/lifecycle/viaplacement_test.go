@@ -19,7 +19,7 @@ import (
 // only where the declaration is written.
 //
 // The defect these tests pin: a declaration is durable (the record is its SoT and every
-// placement regenerates the rule set from it, §3.4) while the second-hop uid is a
+// placement regenerates the rule set from it, the documented invariant) while the second-hop uid is a
 // per-process deployment input. Deployment A supplies the uid and admits `via[]` into
 // the record; the operator restarts WITHOUT the flag. Every write point is now
 // correctly closed and the row is still there — so the sandbox could resume or be
@@ -28,7 +28,7 @@ import (
 //
 // It is silent by construction, which is why it needs its own assertions rather than
 // riding on an existing one: hop 2 leaves on `output` and counts ZERO in `forward`
-// (network.md D5 ㉔), so no first-hop assertion, counter or deny test observes it. And
+// (the relevant internals page the documented invariant ㉔), so no first-hop assertion, counter or deny test observes it. And
 // the rule set is not the tell either — network.Generate deliberately emits no
 // second-hop rule (the pin is one engine-level table sized by the deployment), so the
 // rule set for a `via[]` declaration is byte-identical whether or not the pin exists.
@@ -42,7 +42,7 @@ import (
 // predicate that makes it host-local.
 //
 // EVERY mediator in this file must be built with viaHostLocal, or the fixture is not
-// the fixture it claims to be. §6.2's fifth class (endpoint-not-host-local) is checked
+// the fixture it claims to be. the documented invariant's fifth class (endpoint-not-host-local) is checked
 // AHEAD of the deployment class, so under the real interface table a test aiming at the
 // deployment class refuses one step earlier and an assertion phrased as
 // IsDeclarationInvalid passes on the wrong refusal — including when the deployment DOES
@@ -88,7 +88,7 @@ func seedPausedWithVia(t *testing.T, st *store.Memory, id string) {
 // PATH 2 of 3 — resume's coldStart. A `paused` sandbox whose record carries `via[]`
 // must NOT resume under a deployment that pins no second hop.
 //
-// The two assertions are the §4.4-A shape for a resume failure: the placement is
+// The two assertions are the the documented invariant shape for a resume failure: the placement is
 // refused, and the record returns atomically to its source state (`paused`). It also
 // checks the refusal happens BEFORE the isolation unit is launched — the point of
 // putting it on the derivation funnel rather than after the fact is that no confused
@@ -104,18 +104,18 @@ func TestResumeIsRefusedWhenTheDeploymentCannotEnforceTheRecordedVia(t *testing.
 		t.Fatal("resume placed a sandbox whose recorded egress.via[] this deployment cannot pin — " +
 			"that installs the DNAT and the narrow input accept with NO second-hop enforcement " +
 			"behind them, i.e. a confused deputy live on the host, and every first-hop assertion " +
-			"keeps passing over it (network.md D5 ㉔)")
+			"keeps passing over it (the relevant internals page the documented invariant ㉔)")
 	}
 	if !errors.Is(err, network.ErrViaUnenforceableAtPlacement) {
 		t.Errorf("resume failed for some other reason than the unenforceable-via refusal: %v", err)
 	}
-	// §4.4-A: a failed transition returns atomically to the source state.
+	// the documented invariant: a failed transition returns atomically to the source state.
 	rec, gerr := st.GetSandbox(ctx, "sbx_via")
 	if gerr != nil {
 		t.Fatal(gerr)
 	}
 	if rec.State != model.Paused {
-		t.Errorf("state = %s; want paused (a refused resume returns to its source state, §4.4-A)", rec.State)
+		t.Errorf("state = %s; want paused (a refused resume returns to its source state, the documented invariant)", rec.State)
 	}
 	// Nothing was launched: the refusal is on the derivation funnel, ahead of the
 	// provider, so the deputy is never even briefly reachable.
@@ -163,7 +163,7 @@ func TestResumeSucceedsForTheSameViaRecordWhenTheDeploymentPinsTheSecondHop(t *t
 // still refuses to take it over.
 //
 // The disposition asserted here is DEMOTE, not protect, and the distinction is the
-// point of the test. §4.4-A's protect-on-uncertainty covers facts the engine could not
+// point of the test. the documented invariant's protect-on-uncertainty covers facts the engine could not
 // DETERMINE — a probe error, an un-rebuildable handle — and protecting means leaving
 // the sandbox `running` in the keep-set. Here the fact is fully determined and it is
 // determined to be unsafe, so protecting would mean deliberately keeping an unenforced
@@ -172,9 +172,9 @@ func TestResumeSucceedsForTheSameViaRecordWhenTheDeploymentPinsTheSecondHop(t *t
 // is untouched and a resume works the moment either remedy is applied.
 //
 // Four assertions, each a way the fix could be wrong: the record lands `paused`; the
-// event is `crash-paused` (the §4.2 involuntary pause, so a subscriber can tell it from
+// event is `crash-paused` (the the documented invariant involuntary pause, so a subscriber can tell it from
 // a user pause); NO death cause is stamped (nothing died — the unit was L1-alive and
-// serving, and §2.4 forbids guessing); and the placement is NOT in the keep-set, since
+// serving, and the documented invariant forbids guessing); and the placement is NOT in the keep-set, since
 // reclaiming it is what actually removes the deputy's reachability.
 func TestAdoptDemotesALiveSandboxThisDeploymentCannotPin(t *testing.T) {
 	ctx := context.Background()
@@ -215,9 +215,9 @@ func TestAdoptDemotesALiveSandboxThisDeploymentCannotPin(t *testing.T) {
 	// a false statement about it, the same judgment the not-serving arm makes.
 	if rec.DeathCause != model.CauseNone {
 		t.Errorf("death_cause = %q; want none — nothing died here, the unit was alive and serving "+
-			"(§2.4 forbids guessing a cause)", rec.DeathCause)
+			"(the documented invariant forbids guessing a cause)", rec.DeathCause)
 	}
-	// The §4.2 involuntary pause emits `crash-paused`, never `paused`.
+	// The the documented invariant involuntary pause emits `crash-paused`, never `paused`.
 	evs, _ := st.UnpublishedEvents(ctx, allUnpublished)
 	found := false
 	for _, e := range evs {
@@ -285,7 +285,7 @@ func TestAdoptTakesOverAViaSurvivorWhenTheDeploymentPinsTheSecondHop(t *testing.
 // provider with a nil one rather than skipping the call.
 //
 // That is the only way the stale engine-level table from the previous run gets torn down
-// (the destroy is a mechanism and lives in §5.A's InstallSecondHop). Short-circuiting on
+// (the destroy is a mechanism and lives in the documented invariant's InstallSecondHop). Short-circuiting on
 // `!SecondHopPinned()` would leave a host-level `output` table narrowed by a uid this
 // deployment does not know, dropping traffic for a reason absent from the running
 // configuration — and nothing else in the engine enumerates that table.
@@ -308,7 +308,7 @@ func TestBootTellsTheProviderThereIsNoSecondHopUIDRatherThanStayingSilent(t *tes
 // PATH 1 of 3 — create's coldStart, for completeness of the funnel. Create ALSO passes
 // through the write-point check (ValidateDeclaration), so this asserts the funnel is
 // wired rather than a distinct hole: the refusal arrives from the write point, and the
-// create leaves no record behind (§4.4-A: create has no fallback state).
+// create leaves no record behind (the documented invariant: create has no fallback state).
 func TestCreateWithViaIsRefusedWhenTheDeploymentPinsNoSecondHop(t *testing.T) {
 	ctx := context.Background()
 	rt := &fakeRuntime{}
@@ -345,7 +345,7 @@ func TestCreateWithViaIsRefusedWhenTheDeploymentPinsNoSecondHop(t *testing.T) {
 //
 // Reachable without any via[] in the request: the record already carries one (written
 // under a deployment that DID supply a uid), and a publish under a deployment that does
-// not would commit a declaration whose §2.4 invariant this engine cannot deliver. That
+// not would commit a declaration whose the documented invariant invariant this engine cannot deliver. That
 // is exactly the state the deployment class refuses at the other two write points.
 func TestPublishIsRefusedWhenTheRecordedViaOutlivesTheDeploymentsUID(t *testing.T) {
 	ctx := context.Background()
@@ -368,7 +368,7 @@ func TestPublishIsRefusedWhenTheRecordedViaOutlivesTheDeploymentsUID(t *testing.
 	_, _, _, err := m.AddPublish(ctx, "sbx_via", model.NetPublish{GuestPort: 8080, Proto: model.NetTCP})
 	if err == nil {
 		t.Fatal("publish was accepted while the recorded via[] cannot be pinned by this deployment " +
-			"— committing it records a declaration whose §2.4 invariant the engine cannot deliver, " +
+			"— committing it records a declaration whose the documented invariant invariant the engine cannot deliver, " +
 			"which is exactly what the deployment class refuses at create and PATCH. AddPublish " +
 			"called network.Validate directly and so skipped ValidateDeployment")
 	}

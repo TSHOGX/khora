@@ -125,7 +125,7 @@ func TestLaunchResumeGetsNewIP(t *testing.T) {
 	// is the test's ACT (pl1 must be down BEFORE pl2 launches, or "resume got a new
 	// IP" proves nothing), while this Cleanup is the failure-path guarantee — a
 	// t.Fatalf between here and that Stop would otherwise leak pl1's container,
-	// netns and veth into the dev environment, exactly the reclamation hole §4.4-A
+	// netns and veth into the dev environment, exactly the reclamation hole the documented invariant
 	// makes this suite's own subject. teardownPlacement is idempotent and
 	// best-effort, so running after the explicit Stop is a no-op.
 	t.Cleanup(func() { _ = p.Destroy(ctx, pl1) })
@@ -138,7 +138,7 @@ func TestLaunchResumeGetsNewIP(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = p.Destroy(ctx, pl2) })
 	if pl2.TransportEndpoint == ep1 {
-		t.Fatalf("resume reused IP %s; want new (§3.3 IP-as-epoch)", ep1)
+		t.Fatalf("resume reused IP %s; want new (the documented invariant IP-as-epoch)", ep1)
 	}
 	t.Logf("ep1=%s ep2=%s (new IP on resume)", ep1, pl2.TransportEndpoint)
 }
@@ -192,7 +192,7 @@ func TestAdoptRunningContainerSameIP(t *testing.T) {
 		t.Fatal("Adopt judged a running container dead")
 	}
 	if adopted.TransportEndpoint != ep {
-		t.Fatalf("Adopt got endpoint %s; want the SAME %s — adopt is not a resume, so the epoch must not change (§4.4-A)", adopted.TransportEndpoint, ep)
+		t.Fatalf("Adopt got endpoint %s; want the SAME %s — adopt is not a resume, so the epoch must not change (the documented invariant)", adopted.TransportEndpoint, ep)
 	}
 	// adopted endpoint is reachable.
 	if !pollHealth(t, url, 5*time.Second) {

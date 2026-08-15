@@ -1,8 +1,8 @@
 package orchestrator
 
-// Background-loop OWNERSHIP (§1.1 the assembly).
+// Background-loop OWNERSHIP (the documented invariant the assembly).
 //
-// The three autonomous loops — the outbox publisher, its health monitor, and the §4.3 reaper —
+// The three autonomous loops — the outbox publisher, its health monitor, and the the documented invariant reaper —
 // live here rather than in cmd/ because their lifetime is a MIDDLE STEP of the teardown sequence
 // Engine.Shutdown documents and performs. A caller that owned them would have to split Shutdown
 // open and re-implement the order at the call site, which is what cmd/orchestrator did —
@@ -26,7 +26,7 @@ import (
 // LoopConfig tunes the background loops. Zero values take the defaults below, so a
 // caller that has no opinion passes the zero struct.
 type LoopConfig struct {
-	// PublishInterval is the outbox drain cadence (§4.4-C). Zero → 1s.
+	// PublishInterval is the outbox drain cadence (the documented invariant). Zero → 1s.
 	PublishInterval time.Duration
 	// MonitorInterval is how often publisher health is SAMPLED. Zero → 10s.
 	MonitorInterval time.Duration
@@ -35,7 +35,7 @@ type LoopConfig struct {
 	StallThreshold time.Duration
 	// ReportStats receives each unhealthy sample. nil → logStats below.
 	//
-	// Sampling happens on an INDEPENDENT goroutine (§4.4-C operability): sampling on the
+	// Sampling happens on an INDEPENDENT goroutine (the documented invariant operability): sampling on the
 	// drain itself would freeze the numbers exactly when the drain blocks, so silence would
 	// mean both "healthy" and "wedged". Publisher.Stats reads atomics for this reason.
 	ReportStats func(store.Stats)
@@ -94,7 +94,7 @@ func (l *loopSet) exited() bool {
 	}
 }
 
-// StartLoops starts the three §4.3/§4.4-C background loops. Call it once, AFTER the
+// StartLoops starts the three the documented invariant/the documented invariant background loops. Call it once, AFTER the
 // boot sequence (Reconcile and the sweeps) so no loop races the boot-time orphan
 // reclaim and re-adoption, and before serving.
 //
@@ -142,7 +142,7 @@ func (e *Engine) StartLoops(cfg LoopConfig) {
 // whose next call then fails. That is the deliberate trade and it is the safe half: a
 // failed store call on the way out is logged and retried by the NEXT boot's loop,
 // whereas a shutdown that overruns its TimeoutStopSec is SIGKILLed mid-transition,
-// which is the outcome §4.4-A reconciliation then has to clean up.
+// which is the outcome the documented invariant reconciliation then has to clean up.
 func (e *Engine) stopLoops(ctx context.Context) error {
 	e.loops.mu.Lock()
 	cancel, allDone, started := e.loops.cancel, e.loops.allDone, e.loops.started
@@ -161,7 +161,7 @@ func (e *Engine) stopLoops(ctx context.Context) error {
 }
 
 // logStats is the default unhealthy-sample reporter. No metrics dependency is introduced
-// (§1.1 no heavyweight external dependencies): the requirement is that a wedged drain be
+// (the documented invariant no heavyweight external dependencies): the requirement is that a wedged drain be
 // DISTINGUISHABLE from an idle one, and the log is what this codebase already uses for that
 // class of fact. /metrics exposes the same facts for a scraper (health.go).
 func logStats(s store.Stats) {

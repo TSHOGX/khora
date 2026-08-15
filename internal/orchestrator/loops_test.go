@@ -84,8 +84,8 @@ func TestStopLoopsWithoutStartIsANoOp(t *testing.T) {
 	}
 }
 
-// StartLoops twice must not start a second reaper. Two reapers would run the §4.3
-// sweeps concurrently, and the per-sandbox transition lock (§4.4-B) is what would then
+// StartLoops twice must not start a second reaper. Two reapers would run the the documented invariant
+// sweeps concurrently, and the per-sandbox transition lock (the documented invariant) is what would then
 // be carrying the concurrency rather than the design.
 func TestStartLoopsIsIdempotent(t *testing.T) {
 	eng := healthEngine(t)

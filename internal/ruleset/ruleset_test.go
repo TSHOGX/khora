@@ -8,12 +8,12 @@ import (
 
 // The NAT64 derivation is MECHANICAL so the two halves of the v6 tier cannot
 // drift, but a derivation nobody pinned can be silently wrong. These are the literals
-// RFC 6052 §2.2 requires for the three RFC1918 members under the well-known prefix.
+// RFC 6052 the documented invariant requires for the three RFC1918 members under the well-known prefix.
 //
 // The negative half is the load-bearing one: `64:ff9b::/96` itself must NOT be a
 // member. That prefix maps the ENTIRE IPv4 space — public destinations included —
 // so dropping the whole /96 would refuse exactly the public egress
-// `egress.default: allow` promises (measured, network.md D5 ㉓).
+// `egress.default: allow` promises (measured, the relevant internals page the documented invariant ㉓).
 func TestNAT64ImagesArePinnedAndThePrefixItselfIsNotAMember(t *testing.T) {
 	want := map[string]bool{
 		"fc00::/7":            true,
@@ -26,7 +26,7 @@ func TestNAT64ImagesArePinnedAndThePrefixItselfIsNotAMember(t *testing.T) {
 		got[p.String()] = true
 		if p == NAT64Prefix {
 			t.Errorf("TierV6 contains the bare NAT64 prefix %s — per RFC 6052 it maps the whole "+
-				"IPv4 space, so dropping it refuses the public egress `default: allow` promises (D5 ㉓)", p)
+				"IPv4 space, so dropping it refuses the public egress `default: allow` promises (the documented invariant ㉓)", p)
 		}
 	}
 	for w := range want {
@@ -42,7 +42,7 @@ func TestNAT64ImagesArePinnedAndThePrefixItselfIsNotAMember(t *testing.T) {
 }
 
 // The floor's fourth item — "any address of the host itself" — must NOT be an
-// address list (§2.4 / network.md D5 ⑧; see FloorV4).
+// address list (the documented invariant / the relevant internals page the documented invariant ⑧; see FloorV4).
 //
 // Asserted by shape rather than by reading a comment: the floor lists must hold
 // only the three enumerable v4 items and the two v6 ones.
@@ -53,7 +53,7 @@ func TestFloorEnumeratesNoHostAddress(t *testing.T) {
 	assertPrefixes(t, "FloorV6", FloorV6, wantV6)
 
 	// The sibling item IS the allocator's /16 — one copy, so the generator and the
-	// allocator cannot disagree about the sandbox address space (D5 ④).
+	// allocator cannot disagree about the sandbox address space (the documented invariant ④).
 	found := false
 	for _, p := range FloorV4 {
 		if p == SandboxCIDR {
@@ -62,7 +62,7 @@ func TestFloorEnumeratesNoHostAddress(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("FloorV4 does not name SandboxCIDR (%s) — the sibling item and the allocator's "+
-			"range must be ONE fact, or a /30 can be handed out from outside the floor (§2.3 / D5 ①④)", SandboxCIDR)
+			"range must be ONE fact, or a /30 can be handed out from outside the floor (the documented invariant / the documented invariant ①④)", SandboxCIDR)
 	}
 }
 
@@ -74,13 +74,13 @@ func TestFloorLiftableNeverExcludesTheSiblingCIDR(t *testing.T) {
 	for _, p := range FloorLiftableNever {
 		if p == SandboxCIDR {
 			t.Error("FloorLiftableNever names the sibling CIDR — an allow inside it is a LEGAL " +
-				"declaration path (this sandbox's own /30 gateway, §5.D semantics ③ / D5 ⑦), and " +
-				"a 400 mentioning it would put the sandbox address space on the wire (§6.2)")
+				"declaration path (this sandbox's own /30 gateway, the documented invariant semantics ③ / the documented invariant ⑦), and " +
+				"a 400 mentioning it would put the sandbox address space on the wire (the documented invariant)")
 		}
 	}
 }
 
-// The floor and the tier must never share a set (measured, D5 ⑱ — see TierV4).
+// The floor and the tier must never share a set (measured, the documented invariant ⑱ — see TierV4).
 //
 // Asserted through Validate, i.e. through the mechanism that would actually stop
 // someone from merging them, rather than as a standalone arithmetic claim.
@@ -96,7 +96,7 @@ func TestFloorAndTierCannotShareOneSet(t *testing.T) {
 	err := Validate(rs)
 	if err == nil {
 		t.Fatal("Validate accepted a set holding both the floor and the tier — nested members " +
-			"make an nft interval set refuse to load, or silently merge the floor away (D5 ⑱)")
+			"make an nft interval set refuse to load, or silently merge the floor away (the documented invariant ⑱)")
 	}
 	if !strings.Contains(err.Error(), "nested") {
 		t.Errorf("Validate rejected the merged set for the wrong reason: %v", err)
@@ -128,7 +128,7 @@ func TestValidateCatchesEachSilentlyBrokenShape(t *testing.T) {
 		want string
 	}{{
 		// An un-narrowed accept is a hole in EVERY sandbox's floor; an un-narrowed
-		// drop terminates across chains and is a host-level kill switch (D5 ⑩ ㉔).
+		// drop terminates across chains and is a host-level kill switch (the documented invariant ⑩ ㉔).
 		name: "unscoped rule",
 		rs:   base(func(r *Rule) { r.Scope = ScopeNone }),
 		want: "unscoped",
@@ -152,25 +152,25 @@ func TestValidateCatchesEachSilentlyBrokenShape(t *testing.T) {
 		want: "second-hop scope",
 	}, {
 		// …and the reverse: the second hop arrives on no interface, so an interface
-		// predicate there is simply unreachable (D5 ㉔).
+		// predicate there is simply unreachable (the documented invariant ㉔).
 		name: "interface narrowing on the second-hop chain",
 		rs:   base(func(r *Rule) { r.Hook = HookOutputFilter; r.Scope = ScopeGuestIn }),
 		want: "narrowed by",
 	}, {
 		// skuid misses packets, so an accept narrowed by it leaks them past the
-		// floor it sits above — the measured asymmetry (D5 ㉔).
+		// floor it sits above — the measured asymmetry (the documented invariant ㉔).
 		name: "uid-narrowed accept",
 		rs:   base(func(r *Rule) { r.Hook = HookOutputFilter; r.Scope = ScopeSecondHopUID; r.Verdict = Accept }),
 		want: "may only DROP",
 	}, {
 		// A deny assertion is only valid when a counter moved; a rule with no
-		// counter cannot participate in one (§2.4 / D5 ⑧).
+		// counter cannot participate in one (the documented invariant / the documented invariant ⑧).
 		name: "rule with no counter",
 		rs:   base(func(r *Rule) { r.Counter = "" }),
 		want: "no named counter",
 	}, {
 		// A named counter referenced before declaration fails the `nft -f` load and
-		// reports the error against the wrong line (D5 ㉔).
+		// reports the error against the wrong line (the documented invariant ㉔).
 		name: "undeclared counter",
 		rs:   base(func(r *Rule) { r.Counter = "nowhere" }),
 		want: "not declared",
@@ -211,7 +211,7 @@ func TestValidateCatchesEachSilentlyBrokenShape(t *testing.T) {
 // The positive control for the guard suite above: a legal per-sandbox rule and a
 // legal second-hop rule both pass, and the second-hop one passes WITHOUT an
 // interface narrowing — the whole reason the guard is scoped by table, since a single
-// "every rule carries iifname" rule would reject the one rule §2.4 invariant 2
+// "every rule carries iifname" rule would reject the one rule the documented invariant invariant 2
 // requires and whichever check was written first would silently win.
 func TestValidateAcceptsBothTablesLegalShapes(t *testing.T) {
 	rs := RuleSet{
@@ -236,7 +236,7 @@ func TestValidateAcceptsBothTablesLegalShapes(t *testing.T) {
 }
 
 // Only drop and reject end traversal across base chains — the abstract form of the
-// trap measured in D5 ⑩ (see Accept). So "the accept counter moved" is not evidence a
+// trap measured in the documented invariant ⑩ (see Accept). So "the accept counter moved" is not evidence a
 // rule works, and the generator must place an approved exception in the SAME chain as
 // the drop it overrides.
 func TestOnlyTerminalVerdictsEndCrossChainTraversal(t *testing.T) {
@@ -263,7 +263,7 @@ func TestExactlyOneHookIsEngineLevel(t *testing.T) {
 		if !h.PerSandbox() {
 			engineLevel++
 			if h != HookOutputFilter {
-				t.Errorf("hook %s is engine-level; only the second-hop output filter chain may be (D5 ㉔)", h)
+				t.Errorf("hook %s is engine-level; only the second-hop output filter chain may be (the documented invariant ㉔)", h)
 			}
 		}
 		if h.String() == "invalid" {

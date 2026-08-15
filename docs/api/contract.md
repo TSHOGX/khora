@@ -1,7 +1,11 @@
 # Sandbox Engine — API and CLI contract (§6)
 
-> Belongs to [SPEC.md](./SPEC.md); § numbers run continuously across files, and the
-> navigation is the "Document map" at the top of SPEC.md.
+> This page defines the public API and CLI contract. See
+> [Architecture](../concepts/architecture.md) for the boundary and security context.
+>
+> `openapi.json` is generated from the orchestrator handler types by
+> `go run ./cmd/openapigen -out docs/api/openapi.json`; `scripts/check-generated.sh`
+> checks that the committed output is current.
 
 ---
 
@@ -11,7 +15,7 @@ The backend exposes a **sandbox-centric** API only, **entirely ID-addressed**; p
 concepts (session / mode …) do not enter the backend. **The CLI and the frontend are peer
 clients of the same API** — the CLI is a first-class citizen, not a back door.
 
-### 6.1 Resources and endpoints (control-plane REST + data-plane Connect-RPC; the split is in [`deep-dives/transport.md`](./deep-dives/transport.md) D5)
+### 6.1 Resources and endpoints (control-plane REST + data-plane Connect-RPC; the split is in [`../internals/transport.md`](../internals/transport.md) D5)
 
 > **The outer-edge protocol split**: sandbox/template/volume/network **lifecycle = REST +
 > JSON** (the control-plane block, the authoritative endpoints, with OpenAPI describing them
@@ -184,7 +188,7 @@ GET    /v1/events?after=<seq>&limit=<n>&wait=<duration>
 #   nothing. And **with trimming off (the default) the window = all of history**, so the rows
 #   `after=0` must page through only ever grow — which is why the hard ceiling is mandatory
 #   rather than merely tidy. (How large the window should be is still open: see §4.4-C /
-#   [`open-decisions.md`](./open-decisions.md), the §4.4-C entry "the size of the replayable
+#   the relevant GitHub Issue, the §4.4-C entry "the size of the replayable
 #   event-stream window". The MECHANISM is settled and built; only the value is a deployment's.)
 #   **`cause` is present only where a kind has more than one route to it** (§4.4-C), and absent
 #   otherwise — a subscriber that ignores the field reads the stream exactly as before. Today that is
@@ -570,7 +574,7 @@ endpoints** — for the real wire, read the proto:
   **Idempotent deletion must not swallow these 409s**: they are the **entire** outward signal a
   RESTRICT triggers, and were they to fall into the "return success even when absent" branch, a
   deletion that failed its guard would be indistinguishable from one that succeeded (an external
-  cautionary example is in [`deep-dives/volume.md`](./deep-dives/volume.md) D9).
+  cautionary example is in [`../internals/volume.md`](../internals/volume.md) D9).
   **The network declaration's nine classes of 400 + one deployment 400** (§5.D. **All nine
   declaration 400s** are "decidable without reading another row, and no retry can make it
   legal", the same criterion as the mount binding's; **the first class is evaluated only when

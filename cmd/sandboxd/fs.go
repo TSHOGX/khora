@@ -15,11 +15,11 @@ import (
 	v1 "github.com/TSHOGX/khora/pkg/transport/gen/khora/transport/v1"
 )
 
-// --- fs service (§5.E fs primitive, transport D4.4) --------------------------
+// --- fs service (the documented invariant fs primitive, transport the documented invariant) --------------------------
 //
 // All unary, no watch. Paths are GUEST-ABSOLUTE and NOT confined to a root: the caller is the
-// engine (trusted, §6 assumes an authorized caller) and the guest runs as root by design
-// (§2.2), so the isolation boundary is the sandbox itself — sentry, not a path check. A
+// engine (trusted, the documented invariant assumes an authorized caller) and the guest runs as root by design
+// (the documented invariant), so the isolation boundary is the sandbox itself — sentry, not a path check. A
 // confinement would break the contract where callers legitimately touch /etc, /root and /usr.
 //
 // Confinement WOULD be required if a path component ever came from data rather
@@ -28,7 +28,7 @@ import (
 
 type fsServer struct {
 	// activity is the SAME sandbox-global clock the process service and Health share
-	// (reaper-health D2). Present because fs traffic IS I/O by that section's criterion —
+	// (reaper-health the documented invariant). Present because fs traffic IS I/O by that section's criterion —
 	// "every operation the engine mediates for the guest, not only process frames".
 	//
 	// Without it a sandbox being actively written to looks idle for as long as nobody types,
@@ -37,13 +37,13 @@ type fsServer struct {
 	activity *activityClock
 }
 
-// stampIO records fs traffic on the shared activity clock (reaper-health D2). Called by
+// stampIO records fs traffic on the shared activity clock (reaper-health the documented invariant). Called by
 // the DATA operations — Read / Write / MakeDir / Remove / Move — and deliberately NOT by
 // Stat / List.
 //
 // That exclusion is the load-bearing half. Stat and List are the calls an external watcher
 // makes in a loop, so stamping them would let an observer keep a sandbox permanently "active"
-// — the defect D2 and §4.4-C ③ both refuse (an observation must not be indistinguishable from
+// — the defect the documented invariant and the documented invariant ③ both refuse (an observation must not be indistinguishable from
 // the thing observed) — and would silently delete the idle disposition rather than fail.
 //
 // Read DOES stamp: it moves file contents, which is a guest being used, not a poll of its
@@ -81,8 +81,8 @@ func fsErr(op, path string, err error) error {
 	case errors.Is(err, syscall.EINVAL), errors.Is(err, syscall.ENAMETOOLONG), errors.Is(err, syscall.ENOTDIR), errors.Is(err, syscall.ELOOP):
 		code = connect.CodeInvalidArgument
 	case errors.Is(err, syscall.ENOSPC), errors.Is(err, syscall.EDQUOT):
-		// The §3.4 capacity cap surfacing as an ordinary write failure: the
-		// sandbox stays alive and only its own write fails (§2.3).
+		// The the documented invariant capacity cap surfacing as an ordinary write failure: the
+		// sandbox stays alive and only its own write fails (the documented invariant).
 		code = connect.CodeResourceExhausted
 	case errors.Is(err, fs.ErrNotExist), errors.Is(err, syscall.ENOENT):
 		code = connect.CodeNotFound
@@ -150,7 +150,7 @@ func (s *fsServer) Read(_ context.Context, req *connect.Request[v1.ReadRequest])
 		// number size a guest-side allocation: measured on a 10-byte file, 1<<34
 		// allocated 16 GiB, and 1<<50 was an outright `makeslice: len out of range`
 		// panic. The sandbox has a RAM cap and is TERMINATED on exceeding it
-		// (§3.4), so that is a remote kill switch, which is why D4.4 calls "neither
+		// (the documented invariant), so that is a remote kill switch, which is why the documented invariant calls "neither
 		// end holds the whole thing" a SECURITY property and not an efficiency one.
 		// LimitReader + a buffer that grows with ARRIVING bytes costs what the file
 		// actually yields.

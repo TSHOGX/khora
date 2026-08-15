@@ -5,9 +5,9 @@
 # WHY THIS EXISTS. `spike-squota-snapshot.sh` 8b found that
 # `internal/btrfs.DeleteSubvolume`'s doc comment is wrong for one case: with a
 # LIVE SNAPSHOT the immediate `qgroup destroy` returns EBUSY (not the ENOENT the
-# comment claims) and the row then persists as `<stale>`. deep-dives/volume.md D7.1
+# comment claims) and the row then persists as `<stale>`. deep-dives/the relevant internals page the documented invariant
 # records that contradiction and hands the reclaim path to `SweepOrphanVolumes`
-# (§5.C snapshots Volumes, so the engine will hit this on every clone).
+# (the documented invariant snapshots Volumes, so the engine will hit this on every clone).
 # A sweep needs three things the prior spike did not pin down:
 #   Q2  an OBSERVABLE PREDICATE for "destroy will succeed now" — it must poll on
 #       something, and guessing wrong means either a spin on EBUSY or a leak.
@@ -23,8 +23,8 @@ set -euo pipefail
 
 [ "$(id -u)" -eq 0 ] || { echo "must run as root (btrfs ioctls + loop mount)"; exit 1; }
 
-CAP=$((64 * 1024 * 1024))    # same 64 MiB the rootfs-overlay D6.2 measurements used
-BTRFS_ROOT=/var/tmp          # btrfs with quota fs-wide enabled, squota (ADR-0002)
+CAP=$((64 * 1024 * 1024))    # same 64 MiB the rootfs-overlay the documented invariant measurements used
+BTRFS_ROOT=/var/tmp          # btrfs with quota fs-wide enabled, squota (the recorded design)
 WORK="$(mktemp -d "$BTRFS_ROOT/spike-reclaim.XXXXXX")"
 FS="$(findmnt -T "$WORK" -no TARGET)"
 ACCUM=60                     # Q5 accumulation cycles: enough to show the slope is
@@ -55,7 +55,7 @@ cleanup() {
   done < "$LOOPS"
   # host fs: walk deepest-first and `subvolume delete` (rm -rf cannot remove a
   # subvolume). readdir+st_ino probe, not `subvolume list` — that is fs-wide and
-  # would reach a live sandbox's upper (§5.C sweep safety requirements).
+  # would reach a live sandbox's upper (the documented invariant sweep safety requirements).
   find "$WORK" -depth -mindepth 1 -type d -print0 2>/dev/null \
     | while IFS= read -r -d '' p; do
         [ "$(stat -c %i "$p" 2>/dev/null)" = "256" ] || continue
@@ -131,7 +131,7 @@ destroy(){ local o rc; set +e; o="$(btrfs qgroup destroy "0/$1" "${2:-$FS}" 2>&1
 # loopfs <tag> <sizeG> — a private squota filesystem. Needed because Q5's id-reuse
 # probe must UNMOUNT/REMOUNT the fs, which is impossible on the host root fs. Note
 # `mkfs.btrfs -O squota`: `btrfs quota enable --simple` is EPERM on this substrate
-# even as root (D6.2), so the mode has to be baked at mkfs time.
+# even as root (the documented invariant), so the mode has to be baked at mkfs time.
 loopfs(){ local img=$BTRFS_ROOT/spike-reclaim-$1.img mnt=$BTRFS_ROOT/spike-reclaim-$1.mnt
   rm -f "$img"; mkdir -p "$mnt"; truncate -s "$2"G "$img"
   mkfs.btrfs -q -O squota "$img" >/dev/null 2>&1 || return 1
@@ -154,7 +154,7 @@ echo
 echo "=================================================================== Q1"
 echo " Q1. reproduce the core claim, and time the transition"
 echo "=================================================================="
-# The exact sequence deep-dives/volume.md D7.1 describes: capped source, filled,
+# The exact sequence deep-dives/the relevant internals page the documented invariant describes: capped source, filled,
 # snapshotted, source deleted, destroy attempted IMMEDIATELY. Then poll, first
 # with the snapshot ALIVE (is the wait time-based?) and then after killing it (is
 # the transition conditioned on the sharer instead?). The answer decides whether a
@@ -334,7 +334,7 @@ verdict(){ local tag="$1"; shift
 i1="$(mk "$WORK/a")"; btrfs qgroup limit "$CAP" "$WORK/a"; fill "$WORK/a/d" 8; del "$WORK/a"
 verdict "(a) capped, filled, NEVER snapshotted" "$i1"
 
-# (b) the §4.3 case: source deleted while the snapshot lives.
+# (b) the the documented invariant case: source deleted while the snapshot lives.
 i1="$(mk "$WORK/b")"; btrfs qgroup limit "$CAP" "$WORK/b"; fill "$WORK/b/d" 8
 i2="$(snap "$WORK/b" "$WORK/bs")"; del "$WORK/b"; settle; del "$WORK/bs"
 verdict "(b) snapshot, delete SOURCE first" "$i1" "$i2"
@@ -480,7 +480,7 @@ fi
 
 echo
 echo "=================================================================== Q7"
-echo " Q7. does today's Overlay-upper path already leak? (§5.B vs §5.C)"
+echo " Q7. does today's Overlay-upper path already leak? (the documented invariant vs the documented invariant)"
 echo "=================================================================="
 # The engine never snapshots an Overlay upper, so Q4 says it cannot leak. But
 # EXTENT SHARING, not `subvolume snapshot`, is the real trigger — and overlayfs
@@ -509,9 +509,9 @@ if cp --reflink=always "$WORK/rout/f" "$WORK/plain/promoted" 2>/dev/null; then
     REFLINK_OUT=leaks
   else REFLINK_OUT=clean; fi
 fi
-echo "  -> today's copy-up direction does NOT leak. §5.B is clean because it"
+echo "  -> today's copy-up direction does NOT leak. the documented invariant is clean because it"
 echo "     neither snapshots the upper nor reflinks OUT of it (copyTree is a"
-echo "     byte-for-byte copy). This is a NEW §5.C problem — and a latent trap for"
+echo "     byte-for-byte copy). This is a NEW the documented invariant problem — and a latent trap for"
 echo "     any future 'make Promote use reflink' optimization."
 
 echo
@@ -584,10 +584,10 @@ echo "                                                           leave it, next 
 echo "                                 4. bound the in-pass retries (~3 rounds); past"
 echo "                                    that leave the row and log it — the next sweep"
 echo "                                    retries. Never spin on EBUSY."
-echo "Q7 Overlay upper (§5.B)      : does NOT leak today. Uppers are never snapshotted"
+echo "Q7 Overlay upper (the documented invariant)      : does NOT leak today. Uppers are never snapshotted"
 echo "                               and Promote's copyTree is a byte-for-byte copy;"
 echo "                               copy-up reflinks INTO the upper, which the measured"
-echo "                               matrix shows is leak-free. So this is a NEW §5.C"
+echo "                               matrix shows is leak-free. So this is a NEW the documented invariant"
 echo "                               problem, not a pre-existing sandbox leak."
 [ "${REFLINK_OUT:-?}" = leaks ] && \
 echo "                               CAVEAT: reflinking OUT of the upper DOES leak, so a"

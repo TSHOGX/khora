@@ -9,7 +9,7 @@
 //	  go test -tags substrate -v -count=1 -p 1 -timeout 600s ./test/ -run Volume
 //
 // Each assertion states the property it proves inline. ONE DISCIPLINE UP FRONT
-// (§5.C / volume.md D7.2): never assert "the sandbox is still alive". Measured, five
+// (the documented invariant / the relevant internals page the documented invariant): never assert "the sandbox is still alive". Measured, five
 // separate ways of yanking a volume out from under a live guest killed NO sandbox —
 // the container stayed running, a fresh exec returned 0, the runtime reported
 // nothing. So that assertion is vacuously true, can never fail, and is worthless as
@@ -37,7 +37,7 @@ import (
 // volumeEngine builds an engine whose state — and therefore its volume storage —
 // lives on REAL btrfs. t.TempDir() is unusable: TMPDIR is /tmp = tmpfs here, where
 // the storage units a capped volume needs cannot exist. Production has the same
-// constraint (ADR-0002), so a tmpfs run would exercise a configuration the engine
+// constraint (the recorded design), so a tmpfs run would exercise a configuration the engine
 // does not support.
 func volumeEngine(t *testing.T, diskBudget int64) (*orchestrator.Engine, string) {
 	t.Helper()
@@ -86,7 +86,7 @@ func cleanupVolumeUnits(bc btrfs.Client, stateDir string) {
 	}
 }
 
-// volumeUnitPath is a test-only peek past the §5.C seam (which keeps host paths
+// volumeUnitPath is a test-only peek past the the documented invariant seam (which keeps host paths
 // private) so the assertions can inspect real storage. Deriving it here rather than
 // asking the backend is deliberate: it means the test knows the layout
 // independently, so a backend that silently stopped materializing anything would be
@@ -95,7 +95,7 @@ func volumeUnitPath(stateDir string, id model.VolumeID) string {
 	return filepath.Join(stateDir, "volumes", string(id))
 }
 
-// TestVolumeOutlivesItsSandbox pins the LIFECYCLE claim alone (§5.C: a volume is
+// TestVolumeOutlivesItsSandbox pins the LIFECYCLE claim alone (the documented invariant: a volume is
 // created before a sandbox and survives after one is destroyed, with its content
 // byte-for-byte intact). Nothing is bound into the sandbox here on purpose — the
 // mounted variant of the same claim is
@@ -185,7 +185,7 @@ func TestVolumeSweepReclaimsOnlyOrphans(t *testing.T) {
 		t.Fatalf("orphan storage missing before the sweep: %v", err)
 	}
 
-	// A sandbox, so the SIBLING tree (§5.B overlay units) is populated: the volume
+	// A sandbox, so the SIBLING tree (the documented invariant overlay units) is populated: the volume
 	// sweep must not touch it.
 	sid, err := eng.Mediator.Create(ctx, lifecycle.CreateSpec{Template: "bare"})
 	if err != nil {
@@ -248,7 +248,7 @@ func TestVolumeSweepReclaimsOnlyOrphans(t *testing.T) {
 		t.Fatalf("read sibling overlay root after sweep: %v", err)
 	}
 	if len(siblingsAfter) != len(siblingsBefore) {
-		t.Errorf("the volume sweep changed the sibling overlay tree: %d units before, %d after — enumeration must be per-directory, never filesystem-wide (§5.C)",
+		t.Errorf("the volume sweep changed the sibling overlay tree: %d units before, %d after — enumeration must be per-directory, never filesystem-wide (the documented invariant)",
 			len(siblingsBefore), len(siblingsAfter))
 	}
 
@@ -268,7 +268,7 @@ func TestVolumeSweepReclaimsOnlyOrphans(t *testing.T) {
 // The `== usage` case is the one worth the substrate run. Measured, the substrate
 // ACCEPTS that cap and stores it, and the next write then fails — so it means FULL
 // rather than "exactly enough", and a `>=` check would hand the caller a 200 plus a
-// volume that can never take another byte (volume.md D7.3).
+// volume that can never take another byte (the relevant internals page the documented invariant).
 func TestVolumeCapWritePointOnRealStorage(t *testing.T) {
 	ctx := context.Background()
 	// A budget large enough that the gate is not what refuses anything here except in
@@ -288,7 +288,7 @@ func TestVolumeCapWritePointOnRealStorage(t *testing.T) {
 		t.Fatalf("read quota on the volume unit: %v", err)
 	}
 	if limit != 64<<20 {
-		t.Fatalf("cap on real storage = %d, want %d — a cap that is recorded but not applied cannot be detected after the fact (volume.md D7.3)", limit, 64<<20)
+		t.Fatalf("cap on real storage = %d, want %d — a cap that is recorded but not applied cannot be detected after the fact (the relevant internals page the documented invariant)", limit, 64<<20)
 	}
 
 	// Write ~8 MiB, so "current usage" is a real number rather than zero.
@@ -301,7 +301,7 @@ func TestVolumeCapWritePointOnRealStorage(t *testing.T) {
 		t.Fatalf("inspect: %v", err)
 	}
 	// UsedByte is a POINTER so that "unreadable" and "genuinely 0" stay distinct on the
-	// §6.1 surface. Here nil is a real failure rather than an absent key: the volume was
+	// the documented invariant surface. Here nil is a real failure rather than an absent key: the volume was
 	// just written to on a quota-capable arm, and the strict-inequality check this test
 	// goes on to exercise cannot run at all without the number.
 	if info.UsedByte == nil {
@@ -315,7 +315,7 @@ func TestVolumeCapWritePointOnRealStorage(t *testing.T) {
 
 	// Lower to BELOW usage → refused.
 	if err := eng.Mediator.SetVolumeCapacity(ctx, vid, used/2); err == nil {
-		t.Errorf("lowering the cap below usage was accepted — the substrate accepts it too, and the result is an irreversibly wedged volume (§5.C / volume.md D7.3)")
+		t.Errorf("lowering the cap below usage was accepted — the substrate accepts it too, and the result is an irreversibly wedged volume (the documented invariant / the relevant internals page the documented invariant)")
 	} else if !strings.Contains(err.Error(), "strictly greater") {
 		t.Errorf("refusal did not name the strict-inequality criterion: %v", err)
 	}
@@ -346,10 +346,10 @@ func TestVolumeCapWritePointOnRealStorage(t *testing.T) {
 		t.Errorf("cap after raise = %d, want %d", limit, 128<<20)
 	}
 
-	// A raise PAST the node budget is refused by the gate (§3.4: a write to a cap
+	// A raise PAST the node budget is refused by the gate (the documented invariant: a write to a cap
 	// changes Σ at this commit, so a raise re-clears admission).
 	if err := eng.Mediator.SetVolumeCapacity(ctx, vid, 4<<30); err == nil {
-		t.Errorf("a raise past the node budget was admitted — §3.4 requires a raise to re-clear the gate")
+		t.Errorf("a raise past the node budget was admitted — the documented invariant requires a raise to re-clear the gate")
 	}
 
 	// A lowering to strictly above usage is fine, and needs no gate (Σ shrinks).
@@ -362,7 +362,7 @@ func TestVolumeCapWritePointOnRealStorage(t *testing.T) {
 // of volumes cannot fill the node while the gate refuses nothing, and a metered disk
 // axis makes a volume cap mandatory.
 //
-// The failure it guards is IMMEDIATE oversell (§3.4): an uncapped volume contributes
+// The failure it guards is IMMEDIATE oversell (the documented invariant): an uncapped volume contributes
 // 0 to the left side of the inequality while free to consume all of the right, so
 // omitting Σ(volume caps) does not undercount slightly — it makes the inequality
 // describe a device other than the one being written to.
@@ -373,7 +373,7 @@ func TestVolumeCapsCountAgainstTheNodeBudget(t *testing.T) {
 
 	// A metered axis requires a cap: 400, not a silently substituted default.
 	if _, err := eng.Mediator.CreateVolume(ctx, 0); err == nil {
-		t.Errorf("an uncapped volume was admitted on a metered node — §3.4 requires the cap")
+		t.Errorf("an uncapped volume was admitted on a metered node — the documented invariant requires the cap")
 	} else if !strings.Contains(err.Error(), "cap is required") {
 		t.Errorf("refusal did not name the missing cap: %v", err)
 	}
@@ -388,7 +388,7 @@ func TestVolumeCapsCountAgainstTheNodeBudget(t *testing.T) {
 		admitted++
 	}
 	if admitted == 8 {
-		t.Fatalf("all 8 × 40 MiB volumes were admitted against a %d-byte budget — Σ(volume caps) is not in the first term, which oversells the node on the spot (§3.4)", int64(budget))
+		t.Fatalf("all 8 × 40 MiB volumes were admitted against a %d-byte budget — Σ(volume caps) is not in the first term, which oversells the node on the spot (the documented invariant)", int64(budget))
 	}
 	t.Logf("admitted %d × 40 MiB volumes against a %d MiB budget", admitted, budget>>20)
 
@@ -402,13 +402,13 @@ func TestVolumeCapsCountAgainstTheNodeBudget(t *testing.T) {
 	}
 
 	// A SANDBOX now has to see the volumes' caps too: they are like terms on one
-	// left-hand side, not two independent budgets (§3.4, no third term).
+	// left-hand side, not two independent budgets (the documented invariant, no third term).
 	_, err = eng.Mediator.Create(ctx, lifecycle.CreateSpec{
 		Template: "bare",
 		Limits:   model.Limits{DiskByte: 100 << 20},
 	})
 	if err == nil {
-		t.Errorf("a 100 MiB sandbox was admitted while volumes already hold %d MiB of the %d MiB budget — volume caps and sandbox caps are like terms (§3.4)",
+		t.Errorf("a 100 MiB sandbox was admitted while volumes already hold %d MiB of the %d MiB budget — volume caps and sandbox caps are like terms (the documented invariant)",
 			int64(admitted)*40, int64(budget>>20))
 	} else {
 		t.Logf("sandbox correctly refused against volume-held budget: %v", err)
@@ -420,7 +420,7 @@ func TestVolumeCapsCountAgainstTheNodeBudget(t *testing.T) {
 // byte-for-byte.
 //
 // This is the SUBSTANCE of "the volume's lifecycle is decoupled from any sandbox"
-// (§5.C) rather than the record-layer version of it: an object whose content can only
+// (the documented invariant) rather than the record-layer version of it: an object whose content can only
 // move through a sandbox is only independent on paper. The other half — a sandbox
 // mounting the seeded volume and seeing the same bytes — is
 // TestVolumeRegimeSeedWithoutASandboxThenMountThenReadAfterDestroy.
@@ -475,11 +475,11 @@ func TestVolumeSeedAndReadBackWithoutAnySandbox(t *testing.T) {
 	}
 }
 
-// TestVolumeSweepAtBootPrecedesStorageCreation pins the ORDERING §5.C calls
+// TestVolumeSweepAtBootPrecedesStorageCreation pins the ORDERING the documented invariant calls
 // load-bearing rather than housekeeping: the orphan-volume sweep runs before anything
 // creates a storage unit.
 //
-// The hazard is specific (volume.md D7.1): a leaked quota row reserves no unit id, so
+// The hazard is specific (the relevant internals page the documented invariant): a leaked quota row reserves no unit id, so
 // a restart can hand that id — ALONG WITH ITS CAP — to a brand-new volume, which then
 // meets ENOSPC on a limit nobody set for it, or is silently over-provisioned, with the
 // engine unable to tell from the inside. Sweeping only on the periodic tick leaves a
@@ -514,7 +514,7 @@ func TestVolumeSweepAtBootPrecedesStorageCreation(t *testing.T) {
 		BaseDir: base, StorePath: storePath, HealthTimeout: 60 * time.Second,
 	})
 	if _, err := os.Stat(unit); !os.IsNotExist(err) {
-		t.Errorf("the orphan volume unit survived boot (stat err = %v) — the sweep must run BEFORE anything can create a storage unit, or a restart can hand its id and cap to a new volume (§5.C / volume.md D7.1)", err)
+		t.Errorf("the orphan volume unit survived boot (stat err = %v) — the sweep must run BEFORE anything can create a storage unit, or a restart can hand its id and cap to a new volume (the documented invariant / the relevant internals page the documented invariant)", err)
 	}
 
 	// The freshly booted engine can still create a capped volume, and its cap is its

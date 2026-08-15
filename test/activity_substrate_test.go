@@ -1,6 +1,6 @@
 //go:build substrate
 
-// L3 acceptance for §6.1's POST /v1/sandboxes/{id}/activity against the REAL
+// L3 acceptance for the documented invariant's POST /v1/sandboxes/{id}/activity against the REAL
 // substrate. Requires root.
 //
 // The property under test is the one the endpoint exists for and the only one a
@@ -25,9 +25,9 @@ import (
 )
 
 // TestActivityEndpointHoldsOffTheIdleSweepRealRunsc drives the REST surface rather
-// than the transport client, because the endpoint's contract (§6.1) is what a
+// than the transport client, because the endpoint's contract (the documented invariant) is what a
 // platform caller has — including that the stamp lands in the GUEST's clock
-// (reaper-health D1), which is exactly what the sweep then reads back.
+// (reaper-health the documented invariant), which is exactly what the sweep then reads back.
 func TestActivityEndpointHoldsOffTheIdleSweepRealRunsc(t *testing.T) {
 	ctx := context.Background()
 	eng, _ := setupEngine(t, 30*time.Second)
@@ -85,7 +85,7 @@ func TestActivityEndpointHoldsOffTheIdleSweepRealRunsc(t *testing.T) {
 	t.Logf("✓ stamps stopped → auto-paused (the hold-off is deferral, not disablement)")
 
 	// And on the paused sandbox the endpoint refuses with 409 rather than resuming
-	// it (§6.1: this is not resume-by-side-effect).
+	// it (the documented invariant: this is not resume-by-side-effect).
 	resp, err := http.Post(srv.URL+"/v1/sandboxes/"+string(sid)+"/activity", "application/json", nil)
 	if err != nil {
 		t.Fatalf("POST activity on paused: %v", err)

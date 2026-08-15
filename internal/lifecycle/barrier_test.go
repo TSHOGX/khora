@@ -66,7 +66,7 @@ func TestBarrierDrainWaitsForInFlight(t *testing.T) {
 	}
 }
 
-// A stuck operation must not make a sandbox un-pausable: §4.4 puts the drain on the
+// A stuck operation must not make a sandbox un-pausable: the documented invariant puts the drain on the
 // "optimization" side, so the timeout proceeds and only reports what it left behind.
 func TestBarrierDrainTimesOutAndNamesStragglers(t *testing.T) {
 	b := newBarrier()
@@ -553,7 +553,7 @@ func TestCrashPauseDoesNotDrain(t *testing.T) {
 		wantDrained bool
 	}{
 		// The voluntary kinds drain: the engine issued those writes and can stop issuing
-		// more, which is what makes the barrier deterministic (§4.2).
+		// more, which is what makes the barrier deterministic (the documented invariant).
 		{"paused", true},
 		{"auto-paused", true},
 		// The involuntary one does not.
@@ -601,10 +601,10 @@ func TestCrashPauseDoesNotDrain(t *testing.T) {
 				t.Errorf("%s finished in %s WITHOUT paying the %s grace, though the in-flight write is still held — then the crash-pause assertion below cannot distinguish drain from no-drain", tc.kind, elapsed, grace)
 			}
 			if !tc.wantDrained && elapsed >= grace/2 {
-				t.Errorf("crash-pause took %s against a %s grace — it DRAINED. It must not: for a dead unit that delays recording a death already observed, and for the D4b transport-down escalation it stalls the serial sweep on RPCs that can never complete (§4.2 / guest-runtime D4.4)", elapsed, grace)
+				t.Errorf("crash-pause took %s against a %s grace — it DRAINED. It must not: for a dead unit that delays recording a death already observed, and for the the documented invariantb transport-down escalation it stalls the serial sweep on RPCs that can never complete (the documented invariant / guest-runtime the documented invariant)", elapsed, grace)
 			}
 
-			// Either way the sandbox must land in a legal `paused` (§4.4-A: every path
+			// Either way the sandbox must land in a legal `paused` (the documented invariant: every path
 			// reaches a legal state — the drain is an optimization, never a precondition).
 			rec, err := st.GetSandbox(ctx, id)
 			if err != nil {

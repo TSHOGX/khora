@@ -11,13 +11,13 @@ import (
 	"github.com/TSHOGX/khora/internal/model"
 )
 
-// --- large-file bypass, outer edge (§5.E fs / transport D4.4) -----------------
+// --- large-file bypass, outer edge (the documented invariant fs / transport the documented invariant) -----------------
 //
 // GET|PUT /v1/sandboxes/{id}/files?path=…  streams bytes to/from the guest.
 //
 // The one part of the data plane that is REST rather than Connect-RPC, because of the
 // payload: a large file must not become a single protobuf message, and neither end should
-// hold it in memory. The §6.2 constraints still hold — the sandbox is addressed by its opaque
+// hold it in memory. The the documented invariant constraints still hold — the sandbox is addressed by its opaque
 // ID in the path, and the guest endpoint (placement) never appears on the wire.
 //
 // The engine picks no size threshold. Small payloads are cheaper as an fs RPC,
@@ -26,12 +26,12 @@ import (
 
 // maxUploadBytes bounds a single upload. It is a DEFENSIVE cap on the outer edge,
 // not a capacity decision: the real limit on how much a sandbox can store is the
-// §3.4 disk cap, enforced by the filesystem quota, and a full quota surfaces as
+// the documented invariant disk cap, enforced by the filesystem quota, and a full quota surfaces as
 // 507 from the guest. This exists so a runaway or malformed request cannot stream
 // unbounded bytes through the engine before the quota notices.
 const maxUploadBytes = 8 << 30 // 8 GiB
 
-// uploadResp is the §6.1 upload response. `bytes_written` is typed to match the
+// uploadResp is the the documented invariant upload response. `bytes_written` is typed to match the
 // volume import response's field of the same name, so one name means one wire type.
 type uploadResp struct {
 	Path         string `json:"path"`
@@ -56,7 +56,7 @@ func fileParams(w http.ResponseWriter, r *http.Request) (string, bool) {
 // It returns a CODE and writes nothing, mirroring statusCodeFor: the body is the funnel's
 // business (writeErr). That split matters more here than on the control paths, because these
 // errors are built by the inner transport client, which dials the netns veth IP — client.go's
-// `hc.Do` failures carry `10.x.y.z:port` in their text, which §6.2 bars from the wire. So
+// `hc.Do` failures carry `10.x.y.z:port` in their text, which the documented invariant bars from the wire. So
 // this REST half sanitizes through the funnel, as the RPC half does through proxyErr.
 func bypassCode(err error) int {
 	switch connect.CodeOf(err) {
@@ -65,7 +65,7 @@ func bypassCode(err error) int {
 	case connect.CodePermissionDenied:
 		return http.StatusForbidden
 	case connect.CodeResourceExhausted:
-		// The §3.4 disk cap: valid request, no room. The sandbox stays alive (§2.3).
+		// The the documented invariant disk cap: valid request, no room. The sandbox stays alive (the documented invariant).
 		return http.StatusInsufficientStorage
 	case connect.CodeInvalidArgument:
 		return http.StatusBadRequest
@@ -126,7 +126,7 @@ func (e *Engine) handleFileUpload(w http.ResponseWriter, r *http.Request, id mod
 		writeErr(w, http.StatusNotFound, err)
 		return
 	}
-	// Barrier-gated like the mutating fs RPCs (§4.2 / D4.4): a streaming upload is
+	// Barrier-gated like the mutating fs RPCs (the documented invariant / the documented invariant): a streaming upload is
 	// the LONGEST engine-issued write there is, so it is the one a pause is most
 	// likely to interrupt. The guest's temp-file-then-rename means an interrupted
 	// upload cannot leave a partial file, but the drain still matters — it lets the

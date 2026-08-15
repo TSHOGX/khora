@@ -8,23 +8,23 @@ import (
 )
 
 // A host endpoint is stable WITHIN a placement and only within one. These tests pin the
-// §3.3 boundary from the mediator's side — the side a caller of `POST …/publish`
+// the documented invariant boundary from the mediator's side — the side a caller of `POST …/publish`
 // actually observes.
 //
-// §3.3 says an endpoint is a placement product: it changes from one placement to the
+// the documented invariant says an endpoint is a placement product: it changes from one placement to the
 // next, and must not be cached as a stable identifier. That licenses exactly one kind of
 // change and forbids two others:
 //
 //   - LICENSED: a NEW placement binds new endpoints. Resume gets a new netns, a new IP
-//     and new ports, which is why §6.1 reports `host_endpoint` only while a placement
+//     and new ports, which is why the documented invariant reports `host_endpoint` only while a placement
 //     exists — a caller must re-read it, and TestPublishEndpointsAreReboundAtANewPlacement
 //     asserts the engine really does behave this way rather than accidentally being
 //     stable (an assertion that would otherwise silently pass on a frozen value).
 //   - FORBIDDEN: an existing publish's endpoint moving because ANOTHER publish was
-//     hot-added to the same live placement. §5.D's endorsement of hot-adding rests on
+//     hot-added to the same live placement. the documented invariant's endorsement of hot-adding rests on
 //     publish being PURELY ADDITIVE.
 //   - FORBIDDEN: a repeated identical publish answering with a DIFFERENT endpoint.
-//     §6.1 makes it idempotent — "return the existing one".
+//     the documented invariant makes it idempotent — "return the existing one".
 //
 // The second and third are one mechanism in the provider (the binding is reused rather
 // than re-drawn) and two separate promises to a caller, so each gets its own assertion.
@@ -39,7 +39,7 @@ func pubRunning(t *testing.T, m *Mediator) model.SandboxID {
 	return id
 }
 
-// pubEndpoint reads back the endpoint §6.1 reports for one publish item.
+// pubEndpoint reads back the endpoint the documented invariant reports for one publish item.
 func pubEndpoint(t *testing.T, m *Mediator, id model.SandboxID, port uint16, proto model.NetProto) string {
 	t.Helper()
 	info, err := m.Network(context.Background(), id)
@@ -80,7 +80,7 @@ func TestHotAddingAPublishKeepsTheEarlierEndpoints(t *testing.T) {
 	}
 
 	if got := pubEndpoint(t, m, id, 8080, model.NetTCP); got != first {
-		t.Errorf("hot-adding 9090 moved 8080's endpoint: %s → %s. A publish is purely additive (§5.D) — "+
+		t.Errorf("hot-adding 9090 moved 8080's endpoint: %s → %s. A publish is purely additive (the documented invariant) — "+
 			"that is the property the hot-add exception rests on, so a caller holding the endpoint it "+
 			"was just handed must not lose it because somebody else published a different port", first, got)
 	}
@@ -88,7 +88,7 @@ func TestHotAddingAPublishKeepsTheEarlierEndpoints(t *testing.T) {
 
 // A repeated identical publish returns the SAME endpoint.
 //
-// §6.1: "Publishing the same `{guest_port, proto}` twice is idempotent: return the
+// the documented invariant: "Publishing the same `{guest_port, proto}` twice is idempotent: return the
 // existing item". The declaration layer
 // already handles this (network.AddPublish reports added=false and nothing is written),
 // but the mediator still runs the install path in that case — the record and the rules
@@ -109,7 +109,7 @@ func TestARepeatedPublishReturnsTheSameEndpoint(t *testing.T) {
 		t.Fatalf("repeat publish: %v", err)
 	}
 	if again != first {
-		t.Errorf("the idempotent repeat answered with %q, the first call with %q. §6.1 makes a repeated "+
+		t.Errorf("the idempotent repeat answered with %q, the first call with %q. the documented invariant makes a repeated "+
 			"`{guest_port, proto}` return THE EXISTING item — a caller retrying a 200 it never saw (or "+
 			"simply re-asserting its desired state) would otherwise be told its port moved", again, first)
 	}
@@ -129,7 +129,7 @@ func TestARepeatedPublishReturnsTheSameEndpoint(t *testing.T) {
 
 // tcp/8080 and udp/8080 are TWO publishes, and both get an endpoint.
 //
-// The declaration layer keys on the pair (network.AddPublish dedupes on it, §5.D defines
+// The declaration layer keys on the pair (network.AddPublish dedupes on it, the documented invariant defines
 // idempotency on it), so both items are legal and Generate emits four DNATs. A provider
 // keying its binding on the guest port alone refuses the second as a duplicate whose
 // deduplication "belongs to the declaration layer" — which had in fact done its job.
@@ -164,7 +164,7 @@ func TestTCPAndUDPOnOneGuestPortBothGetEndpoints(t *testing.T) {
 		t.Fatal(err)
 	}
 	if n := len(rec.Network.Ingress.Publish); n != 2 {
-		t.Fatalf("the declaration holds %d items; want 2 — tcp/8080 and udp/8080 are distinct (§5.D)", n)
+		t.Fatalf("the declaration holds %d items; want 2 — tcp/8080 and udp/8080 are distinct (the documented invariant)", n)
 	}
 	// The whole record must also survive a REPLACEMENT of the placement, which is where
 	// the port-only key turned a legal declaration into a permanently unresumable
@@ -178,10 +178,10 @@ func TestTCPAndUDPOnOneGuestPortBothGetEndpoints(t *testing.T) {
 	}
 }
 
-// ACROSS placements the endpoint MAY change — the other side of the §3.3 boundary.
+// ACROSS placements the endpoint MAY change — the other side of the the documented invariant boundary.
 //
 // Non-vacuity for the two tests above: both would also pass if endpoints were globally
-// frozen per sandbox, and a frozen endpoint IS the stable identifier §3.3 forbids.
+// frozen per sandbox, and a frozen endpoint IS the stable identifier the documented invariant forbids.
 func TestPublishEndpointsAreReboundAtANewPlacement(t *testing.T) {
 	ctx := context.Background()
 	m, _ := newTestMediator(t, &fakeRootfs{}, &fakeRuntime{}, true)
@@ -195,11 +195,11 @@ func TestPublishEndpointsAreReboundAtANewPlacement(t *testing.T) {
 	if err := m.Pause(ctx, id); err != nil {
 		t.Fatalf("pause: %v", err)
 	}
-	// While paused there is NO placement, so there is no endpoint to report (§6.1 omits
+	// While paused there is NO placement, so there is no endpoint to report (the documented invariant omits
 	// the key rather than reporting a falsy one).
 	if got := pubEndpoint(t, m, id, 8080, model.NetTCP); got != "" {
 		t.Errorf("a paused sandbox reported the host endpoint %q; want none — the endpoint is a "+
-			"placement product and a paused sandbox has no placement (§3.3/§6.1)", got)
+			"placement product and a paused sandbox has no placement (the documented invariant/the documented invariant)", got)
 	}
 	if err := m.Resume(ctx, id); err != nil {
 		t.Fatalf("resume: %v", err)
@@ -207,10 +207,10 @@ func TestPublishEndpointsAreReboundAtANewPlacement(t *testing.T) {
 	after := pubEndpoint(t, m, id, 8080, model.NetTCP)
 	if after == "" {
 		t.Fatal("the publish lost its endpoint across resume — the declaration is durable and every " +
-			"placement regenerates the rule set from it (§5.D)")
+			"placement regenerates the rule set from it (the documented invariant)")
 	}
 	if after == before {
-		t.Errorf("the endpoint survived a placement REPLACEMENT unchanged (%s). §3.3 makes it a "+
+		t.Errorf("the endpoint survived a placement REPLACEMENT unchanged (%s). the documented invariant makes it a "+
 			"placement product precisely so it cannot be cached as a stable identifier; a value that "+
 			"never moves invites exactly that", before)
 	}

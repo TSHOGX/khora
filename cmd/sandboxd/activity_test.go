@@ -5,12 +5,12 @@ import (
 	"time"
 )
 
-// The activity clock is the guest side of the §4.3 signal (reaper-health D2):
+// The activity clock is the guest side of the the documented invariant signal (reaper-health the documented invariant):
 // stamped on I/O, read as idle duration. These pin its mechanics deterministically
 // without the runsc round-trip (that lands in the substrate e2e).
 
 // A fresh clock reports "idle since construction", not a bogus huge duration
-// from a zero timestamp (reaper-health D2: no-I/O-since-boot = idle since boot).
+// from a zero timestamp (reaper-health the documented invariant: no-I/O-since-boot = idle since boot).
 func TestActivityClockSeededToNow(t *testing.T) {
 	c := newActivityClock()
 	if idle := c.idleMillis(); idle < 0 || idle > 1000 {
@@ -32,8 +32,8 @@ func TestActivityClockStampResetsIdle(t *testing.T) {
 }
 
 // proc.broadcast of a DATA frame stamps activity — this is the detached-process
-// path (§3.2): output flows through broadcast with no client attached, and it
-// must still count as active (reaper-health D1, the whole reason for guest-side).
+// path (the documented invariant): output flows through broadcast with no client attached, and it
+// must still count as active (reaper-health the documented invariant, the whole reason for guest-side).
 func TestBroadcastStampsActivity(t *testing.T) {
 	c := newActivityClock()
 	c.lastIOUnixMilli.Store(time.Now().Add(-5 * time.Second).UnixMilli())
@@ -42,7 +42,7 @@ func TestBroadcastStampsActivity(t *testing.T) {
 
 	p.broadcast(frame{kind: 'd', stream: "stdout", data: []byte("output")})
 	if idle := c.idleMillis(); idle > 1000 {
-		t.Fatalf("broadcast did not stamp activity: idle=%dms (detached output must count, D1)", idle)
+		t.Fatalf("broadcast did not stamp activity: idle=%dms (detached output must count, the documented invariant)", idle)
 	}
 }
 

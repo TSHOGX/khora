@@ -1,7 +1,7 @@
 # Sandbox Engine — the model layer (§3 sandbox model · §4 lifecycle)
 
-> Belongs to [SPEC.md](./SPEC.md); § numbers run continuously across files, and the
-> navigation is the "Document map" at the top of SPEC.md.
+> This page defines the sandbox model and lifecycle. See
+> [Architecture](./architecture.md) for the boundary and security context.
 
 ---
 
@@ -251,7 +251,7 @@ capacity (an innocent sandbox taking `ENOSPC`) and RAM (a sandbox being terminat
     statement about this node only when **the engine goes and writes that cap itself**, and
     failing to write it is silent and undetectable after the fact — the mechanism, the crash
     window, and why it cannot be reconciled after the fact are in
-    [`deep-dives/volume.md`](./deep-dives/volume.md) D7.3.
+    [`../internals/volume.md`](../internals/volume.md) D7.3.
 - `Σ(declared RAM caps) ≤ the configured RAM budget`
 
 **The two terms are mutually exclusive, and the same physical byte is counted once.** One term
@@ -341,7 +341,7 @@ bytes** (such as Promote freezing a new layer) must pass the same inequality.
 > validation, after which every byte-growing operation returns `ENOSPC`, **including removing or
 > raising the cap itself**, and the only way out is deleting the guest's bytes (the measured
 > detail, the boundary case `limit == usage`, and three derived constraints are in
-> [`deep-dives/volume.md`](./deep-dives/volume.md) D7.3, not duplicated here).
+> [`../internals/volume.md`](../internals/volume.md) D7.3, not duplicated here).
 > So the engine **must not accept such a lowering**, and the criterion is a strict inequality; it
 > is also the converse of "the boundary must be declared explicitly" above — a silently accepted
 > shrink declares nothing to a running workload. **Each side has its own write point**: the volume
@@ -353,7 +353,7 @@ bytes** (such as Promote freezing a new layer) must pass the same inequality.
 > the refused `0 → N` write below. Three measurements that hold only on the sandbox side
 > (including `limit == usage` wedging equally, and a constraint it imposes on `Mount`'s "new
 > workdir" step) are in
-> [`deep-dives/rootfs-overlay.md`](./deep-dives/rootfs-overlay.md) D6.6.
+> [`../internals/rootfs-overlay.md`](../internals/rootfs-overlay.md) D6.6.
 
 > **On the sandbox disk axis, `0 → N` (uncapped becoming capped) is a refused write (400), not a
 > raise.** The criterion is "can the materialization layer deliver what this write promises?":
@@ -589,7 +589,7 @@ point **splits into two primitives by process behavior, not by agent/turn semant
   the right one; the substrate flush (§5.B) already guarantees what is needed, so this layer of
   cooperation is not a correctness precondition (§4.4). The falsification and corroborating
   evidence from two mature implementations are in
-  [`deep-dives/guest-runtime.md`](./deep-dives/guest-runtime.md) D4.4.
+  [`../internals/guest-runtime.md`](../internals/guest-runtime.md) D4.4.
 
 Why this choice is right:
 
@@ -699,7 +699,7 @@ this table" rather than a health judgment.
 > consuming `crash-paused` events (§1.3 Consumption). The full falsification (a count has no
 > derivable reset point; refusing by count differs in nature from refusing by a persisted fact; and
 > it is equivalent to the counter §1.1 bars) is in
-> [`deep-dives/reaper-health.md`](./deep-dives/reaper-health.md) D4c.
+> [`../internals/reaper-health.md`](../internals/reaper-health.md) D4c.
 >
 > **One honest residual**: structural self-correction holds only for exhaustion that is **capped
 > and reproducible**. If a capped sandbox has its placement already torn down at each death (racing
@@ -718,7 +718,7 @@ this table" rather than a health judgment.
 > rather than CPU occupancy (a purely CPU-bound process with zero I/O does not count, which is the
 > definition of idle itself). The full reasoning and the implementation of the classifier /
 > single-flight / periodic reconciliation are in
-> [`deep-dives/reaper-health.md`](./deep-dives/reaper-health.md).
+> [`../internals/reaper-health.md`](../internals/reaper-health.md).
 
 Three key distinctions, each decided by crossing all three of "two probe layers + connection
 activity"; drop one and it misclassifies:
@@ -740,7 +740,7 @@ listening, so L2 is necessarily unreachable; health classification is itself **o
 probe that changes no state**, but running it anyway would misclassify as dead-recoverable, spend a
 resume attempt certain to fail, and emit a false alarm. So health classification for that sandbox is
 suspended while the resume is held, until the first successful L2 probe flips it to `running` (the
-timing is in [`deep-dives/guest-runtime.md`](./deep-dives/guest-runtime.md) D5). **This guard lands
+timing is in [`../internals/guest-runtime.md`](../internals/guest-runtime.md) D5). **This guard lands
 on the existing transition lock and is not a second mechanism standing alongside it**: two sentences
 are all of it — a resume **holds that lock throughout** (§4.4-B), and the reaper's classification
 disposition **skips the round when its try-lock fails** on a locked sandbox (§4.4-B), so no
@@ -762,7 +762,7 @@ of the sandbox's control-plane record, given at create or falling back to the en
 (§1.1's single-binary configuration), so the record always holds a concrete duration the reaper can
 read directly. **A value of 0 = that threshold has no deadline** (`idle_timeout: 0` never
 auto-pauses, `retention: 0` never evicts). The default values are pure tuning (see
-[`deep-dives/reaper-health.md`](./deep-dives/reaper-health.md) D5).
+[`../internals/reaper-health.md`](../internals/reaper-health.md) D5).
 > **"Waiting for a human" has a deadline; it is not an indefinite suspension.** `resource-terminated`
 > is **not** an exception to reclamation: `retention`'s clock starts at **the instant of death** (the
 > `UpdatedAt` written by the demoting CAS), and past the deadline it is `evict`ed as usual, Overlay
@@ -786,7 +786,7 @@ active — and auto-pause's CAS would still pass. So as not to wrongly freeze a 
 `auto-pause` **re-reads the activity signal once more** inside the lock in addition to the CAS (the
 current `idle_millis`), freezing only if it is still past the threshold and abandoning the round
 otherwise. The disposition therefore rests on the freshest in-lock snapshot of both state and
-activity (reasoning in [`deep-dives/reaper-health.md`](./deep-dives/reaper-health.md) D3).
+activity (reasoning in [`../internals/reaper-health.md`](../internals/reaper-health.md) D3).
 - **Object reclamation (the uniform object model invariant)**: every first-class persistent object
   (sandbox / Overlay artifact / Volume / Template / mount row) carries **decidable reclamation
   semantics** (not the reaper's private implementation). Cut into two halves, **universal** and
@@ -826,7 +826,7 @@ activity (reasoning in [`deep-dives/reaper-health.md`](./deep-dives/reaper-healt
   references point upward and the referenced cannot be deleted — but it holds one more thing:
   deleting a source while live children exist would **leak a backend quota row**, so that RESTRICT
   is not merely policy, it is what makes "delete the sharers first, then the source" the only
-  reachable order (see [`deep-dives/volume.md`](./deep-dives/volume.md) D6.1a / D7.1).
+  reachable order (see [`../internals/volume.md`](../internals/volume.md) D6.1a / D7.1).
 - **Reference-reclamation atomicity (one dynamic invariant)**: "refcount > 0 must never be deleted"
   above is only a static criterion, and one more invariant is needed to close the
   **reclaim-vs-reference race** — otherwise there is the classic TOCTOU window: GC reads some
@@ -863,7 +863,7 @@ omission.** Transition by transition, not one of them can get stuck in a "cross-
 intermediate state":
 
 - **A resume / create cold start failing**: the canonical cold-start chain (§5.E.1, see
-  [`deep-dives/guest-runtime.md`](./deep-dives/guest-runtime.md) D5) materializes
+  [`../internals/guest-runtime.md`](../internals/guest-runtime.md) D5) materializes
   Rootfs/Volume/Network first (①②③) and then brings runsc up (④) — and **mounts are taken from the
   OCI spec when runsc starts and cannot be changed live** (§2.5), so a Volume is not "mounted after
   the process starts" but a component of the bring-up action, and **there is no intermediate state
@@ -920,7 +920,7 @@ half-built workdir/upper orphan is one special case of it (rootfs-overlay D5). T
 
 The live placements of surviving `running` sandboxes are never orphans; they belong to the takeover
 half below. The trigger timing, lock coordination, host resource enumeration, and batching strategy
-are in [`deep-dives/reaper-health.md`](./deep-dives/reaper-health.md) D4.
+are in [`../internals/reaper-health.md`](../internals/reaper-health.md) D4.
 
 **Reclamation ordering: the live path uses strict reverse dependency order, startup reconciliation
 puts a forced teardown first.** A live `destroy`/`pause` holds in-process placement handles and tears
@@ -965,7 +965,7 @@ direction under §3.3, the two-layer liveness decision) lands in §5.A and is no
 single readiness probe during takeover, the **continuous health classification** while the
 orchestrator is alive (see §4.3, distinguishing the transport-down transient), and the
 implementation of **periodic reconciliation** (with §4.4-B's lock coordination) are in
-[`deep-dives/reaper-health.md`](./deep-dives/reaper-health.md) D3/D4.
+[`../internals/reaper-health.md`](../internals/reaper-health.md) D3/D4.
 
 #### 4.4-B Invariant B — one transition lock per sandbox: verbs serialize, with a CAS precondition check
 
@@ -1174,7 +1174,7 @@ is set; it becomes reachable the moment one is, with no change to the caller con
 value must be argued from "the reconnect duration promised to external subscribers", and the engine's
 own sink is a logging reference implementation whose "delivered" is very nearly always true, so **there
 is no arguable value** — picking a number out of the air is the speculative reservation §1.3 refuses,
-and it stays open (the §4.4-C entry in [`open-decisions.md`](./open-decisions.md)). But **an
+and it stays open (the §4.4-C entry in the relevant GitHub Issue). But **an
 absent mechanism is itself a decision, and it is the one that cannot be revisited at deploy time**, so
 the mechanism's shape is fixed here. Five properties, each of which has a wrong answer available:
 

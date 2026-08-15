@@ -37,7 +37,7 @@ func TestTemplateDeleteReferencedTemplate(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 
-	// referenced → ErrInUse (§4.3: referenced-means-undeletable).
+	// referenced → ErrInUse (the documented invariant: referenced-means-undeletable).
 	if err := m.DeleteTemplate(ctx, "bare"); !errors.Is(err, store.ErrInUse) {
 		t.Fatalf("delete referenced template = %v; want ErrInUse", err)
 	}
@@ -85,7 +85,7 @@ func TestTemplatePausedSandboxProtectsTemplate(t *testing.T) {
 // create-from-Template racing DeleteTemplate under real concurrency —
 // exactly one side wins, the other fails cleanly, never a dangling reference or
 // lost bytes. Runs many rounds against the real SQLite store (single-writer
-// serialization is the arbiter, §4.3).
+// serialization is the arbiter, the documented invariant).
 func TestTemplateReferenceReclaimAtomicity(t *testing.T) {
 	ctx := context.Background()
 	eng, _ := setupEngine(t, 30*time.Second)
@@ -146,7 +146,7 @@ func TestTemplateBootSeedIdempotent(t *testing.T) {
 	t.Logf("✓ boot seed idempotent (%d builtin rows unchanged across re-seed)", len(after))
 }
 
-// bytes-first sweep (§5.B / §4.4-A): a Promote-built layer dir with no live
+// bytes-first sweep (the documented invariant / the documented invariant): a Promote-built layer dir with no live
 // templates row is a crashed-Promote orphan → the boot sweep reclaims it; a live
 // layer is kept. Simulated by planting layer dirs directly; the full Promote
 // crash path is exercised in TestTemplatePromoteCrashBeforeRowIsReclaimed.
@@ -179,9 +179,9 @@ func TestTemplateOrphanLayerSweep(t *testing.T) {
 	t.Logf("✓ orphan layer reclaimed, live layer kept")
 }
 
-// Promote end-to-end (§3.1 / §5.B): write a file into a sandbox → Promote → create a
+// Promote end-to-end (the documented invariant / the documented invariant): write a file into a sandbox → Promote → create a
 // NEW sandbox from the new Template → the file is visible (the freeze took
-// effect); and the sandboxd portal path is NOT in the frozen layer (excluded-paths, §5.B).
+// effect); and the sandboxd portal path is NOT in the frozen layer (excluded-paths, the documented invariant).
 func TestTemplatePromoteEndToEnd(t *testing.T) {
 	ctx := context.Background()
 	eng, base := setupEngine(t, 30*time.Second)
@@ -202,7 +202,7 @@ func TestTemplatePromoteEndToEnd(t *testing.T) {
 		t.Fatalf("write marker: %v", err)
 	}
 
-	// Promote → new Template; source is left paused (§3.1 / §5.B).
+	// Promote → new Template; source is left paused (the documented invariant / the documented invariant).
 	newTmpl, err := m.Promote(ctx, src)
 	if err != nil {
 		t.Fatalf("promote: %v", err)
@@ -236,7 +236,7 @@ func TestTemplatePromoteEndToEnd(t *testing.T) {
 	}
 	t.Logf("✓ child from promoted Template sees the frozen change (%s)", marker)
 
-	// excluded-paths (§5.B): the sandboxd portal pidfile must NOT be in the frozen layer.
+	// excluded-paths (the documented invariant): the sandboxd portal pidfile must NOT be in the frozen layer.
 	layerDir := filepath.Join(base, "state", "layers", string(newTmpl))
 	if _, err := os.Stat(filepath.Join(layerDir, "tmp", ".sandboxd-transport.pid")); !os.IsNotExist(err) {
 		t.Fatalf("sandboxd portal path leaked into promoted layer: %v", err)
@@ -244,7 +244,7 @@ func TestTemplatePromoteEndToEnd(t *testing.T) {
 	t.Logf("✓ sandboxd portal path excluded from the frozen layer")
 }
 
-// lineage protection (§4.3): Promote a child layer T2 over T1 → deleting T1 is
+// lineage protection (the documented invariant): Promote a child layer T2 over T1 → deleting T1 is
 // refused while T2 exists (RESTRICT; references point upward). Delete T2 first,
 // then T1.
 func TestTemplateLineageProtection(t *testing.T) {
@@ -295,7 +295,7 @@ func TestTemplateLineageProtection(t *testing.T) {
 	t.Logf("✓ lineage protection: parent undeletable while child exists")
 }
 
-// bytes-first crash, full (§5.B / §4.4-A): simulate a Promote that wrote the layer bytes
+// bytes-first crash, full (the documented invariant / the documented invariant): simulate a Promote that wrote the layer bytes
 // but crashed before inserting the row (a staging→final layer with no templates
 // row). The boot sweep reclaims it, leaving no broken ready state.
 func TestTemplatePromoteCrashBeforeRowIsReclaimed(t *testing.T) {
@@ -303,7 +303,7 @@ func TestTemplatePromoteCrashBeforeRowIsReclaimed(t *testing.T) {
 	eng, base := setupEngine(t, 30*time.Second)
 
 	// a finalized layer dir with NO templates row = the "crashed after bytes,
-	// before row" state (bytes-first, §5.B). buildingLayers is empty at boot.
+	// before row" state (bytes-first, the documented invariant). buildingLayers is empty at boot.
 	crashed := filepath.Join(base, "state", "layers", "tmpl_crashed_promote")
 	if err := os.MkdirAll(filepath.Join(crashed, "etc"), 0o755); err != nil {
 		t.Fatal(err)

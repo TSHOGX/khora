@@ -1,8 +1,8 @@
 //go:build substrate
 
-// L2 for the §5.C local arm against REAL storage. Requires root (unit + quota
-// ioctls). The engine scratch fs is btrfs in squota mode (ADR-0002 /
-// rootfs-overlay D6.2).
+// L2 for the the documented invariant local arm against REAL storage. Requires root (unit + quota
+// ioctls). The engine scratch fs is btrfs in squota mode (the recorded design /
+// rootfs-overlay the documented invariant).
 //
 //	sudo env PATH=$PATH GOTOOLCHAIN=local GOFLAGS=-mod=mod GOSUMDB=off HOME=$HOME \
 //	  go test -tags substrate -v -count=1 -p 1 ./internal/volume/
@@ -23,7 +23,7 @@ import (
 
 // realScratch makes a scratch dir on a real quota-capable filesystem. t.TempDir()
 // is NOT usable: TMPDIR is /tmp = tmpfs here, where the storage units this arm
-// needs cannot exist. The engine has the same constraint in production (ADR-0002:
+// needs cannot exist. The engine has the same constraint in production (the recorded design:
 // scratch must be on native btrfs), so testing on tmpfs would test a configuration
 // the engine does not support.
 func realScratch(t *testing.T) string {
@@ -60,7 +60,7 @@ func realScratch(t *testing.T) string {
 }
 
 // TestLocalBtrfsContract runs the SAME shared seam contract the plain-directory arm
-// runs (volume.md D2: both arms, one set of assertions). This is the half that
+// runs (the relevant internals page the documented invariant: both arms, one set of assertions). This is the half that
 // exercises real capacity enforcement — Capabilities().Quota is true here, so the
 // suite's cap subtests take their capped branch and assert the cap actually reaches
 // the storage rather than being recorded and forgotten.
@@ -80,10 +80,10 @@ func TestLocalBtrfsContract(t *testing.T) {
 
 // TestCapIsEnforcedNotJustRecorded pins the property the whole capacity axis rests
 // on, and it cannot be checked on the plain arm: past the cap a write gets a PLAIN
-// ENOSPC (§3.4), rather than the cap being a number in a record that nothing
+// ENOSPC (the documented invariant), rather than the cap being a number in a record that nothing
 // enforces.
 //
-// This is the negative control for the failure mode volume.md D7.3 calls silent and
+// This is the negative control for the failure mode the relevant internals page the documented invariant calls silent and
 // undetectable-after-the-fact: an engine that recorded size=N but never set the cap
 // would let a writer pour in far more than N with zero errors, and Usage()'s limit
 // read cannot tell that apart from a deliberately uncapped volume.
@@ -105,7 +105,7 @@ func TestCapIsEnforcedNotJustRecorded(t *testing.T) {
 	defer r.Close()
 
 	// Write well past the cap in chunks. The cap must bite; where exactly it bites is
-	// not asserted, because ENOSPC is NOT A STICKY WALL on this substrate (§5.C: the
+	// not asserted, because ENOSPC is NOT A STICKY WALL on this substrate (the documented invariant: the
 	// next small write after hitting it sometimes still succeeds). What is asserted is
 	// that a write eventually fails, and that the total landed is bounded near the cap.
 	chunk := make([]byte, 1<<20)
@@ -120,7 +120,7 @@ func TestCapIsEnforcedNotJustRecorded(t *testing.T) {
 		}
 	}
 	if !sawENOSPC {
-		t.Fatalf("wrote %d bytes into an %d-byte capped volume with no error — the cap was recorded but NOT ENFORCED, which is silent and undetectable afterwards (volume.md D7.3)", landed, cap)
+		t.Fatalf("wrote %d bytes into an %d-byte capped volume with no error — the cap was recorded but NOT ENFORCED, which is silent and undetectable afterwards (the relevant internals page the documented invariant)", landed, cap)
 	}
 	if landed > 2*cap {
 		t.Errorf("landed %d bytes under an %d-byte cap — enforcement is far looser than the declared bound", landed, cap)

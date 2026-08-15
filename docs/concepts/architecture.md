@@ -1,27 +1,26 @@
-# Sandbox Engine — SPEC
+# Sandbox Engine Architecture
 
-> The **architecture spec** (a spec, not a roadmap) of a standalone, self-hostable
+> The maintained architecture reference (not a roadmap) for a standalone, self-hostable
 > agent sandbox engine that is freely configurable inside the guest. It describes
 > **what the engine should be, where its boundaries lie, and what it contracts to
 > do**; delivery scheduling (roadmap) is out of this spec's scope.
 
-## Document map (§ numbers are globally unique and run continuously across files)
+## Reading guide
 
-This spec is split by *rate of change × reader*. `§` numbers are globally unique and
-continuous across files, which makes them a stable addressing anchor — a reference
-writes just `§3.3` and need not care which file it lands in.
+The reference is split by reader and rate of change. The concepts pages describe the
+model and subsystem boundaries; the API page describes the public wire contract; and
+internals pages retain measurements and counterexamples.
 
 | File | Covers | Role |
 | --- | --- | --- |
-| **SPEC.md** (this file) | §1 positioning and boundaries · §2 security model | The charter: most stable, rarely changed |
+| **architecture.md** (this file) | positioning and boundaries · security model | The charter: most stable, rarely changed |
 | [`model.md`](./model.md) | §3 sandbox model · §4 lifecycle | The core model, evolves at medium speed |
 | [`subsystems.md`](./subsystems.md) | §5 subsystems (A–E target definitions) | Subsystem boundaries |
-| [`api-contract.md`](./api-contract.md) | §6 API and CLI contract | Changes most often |
-| [`open-decisions.md`](./open-decisions.md) | Register of unsettled items | Choices not yet decided / assumptions still to verify |
-| [`deep-dives/`](./deep-dives/) | Single-topic deep dives hung under a § (proposals) | Written back into the owning § once the conclusion is stable |
+| [`../api/contract.md`](../api/contract.md) | API and CLI contract | Changes most often |
+| [`../internals/`](../internals/) | Single-topic rationale, measurements and counterexamples | Kept current with the implementation |
 
-For the discipline, see [`CLAUDE.md`](../../CLAUDE.md): settled goes into this spec,
-unsettled stays in `open-decisions.md`, and the two never overlap.
+For the documentation discipline, see [`CLAUDE.md`](../../CLAUDE.md): maintained pages
+describe current code, while unresolved needs belong in Issues.
 
 ---
 
@@ -229,7 +228,7 @@ with zero intrusion later** (deferred items).
   both of which it owed anyway. **So the engine also has no need for the "real credential
   vs fake credential" dimension** — it does not know whether some string is a key, and
   therefore need not know whether it is a real one (the operational consequence of this is
-  in [`deep-dives/network.md`](./deep-dives/network.md), end of D1).
+  in [`../internals/network.md`](../internals/network.md), end of D1).
 
 Below are the **deferred items**: each states what is not done today, and which §1.3 seam
 / invariant gives it a zero-intrusion path in later — that is the precise meaning of "not
@@ -320,7 +319,7 @@ and the **materialization layer** of ③⑤, and **never the declaration/policy 
 > authority is entirely in the control plane). This has been measured: guest root can `ip
 > addr add` an address to itself, so **a predicate matching on source address is bypassed
 > and one matching on ingress interface is not** (reasoning and measurement in
-> [`deep-dives/network.md`](./deep-dives/network.md) D5 ③). The choice of predicate is
+> [`../internals/network.md`](../internals/network.md) D5 ③). The choice of predicate is
 > therefore a security assertion, not a matter of style.
 >
 > **④ is also the only place the engine is load-bearing on the "credential boundary".**
@@ -343,7 +342,7 @@ dependencies freely" needs (`apt` wants root).
 Hence: **guest root is the default**, with no non-root default identity introduced and no
 user-switching mechanism preinstalled. Since it is worth nothing on the isolation axis,
 the root default is the most direct expression of §1.1's "root-capable agent sandbox"
-(§5.A; [`deep-dives/guest-runtime.md`](./deep-dives/guest-runtime.md) D3.1). **The engine
+(§5.A; [`../internals/guest-runtime.md`](../internals/guest-runtime.md) D3.1). **The engine
 does not model guest users**: "run as some user" is native to the guest (`su`/`sudo`, for
 the product/template layer to handle), not an engine primitive (§3.2.1); the engine has
 neither a create-time "default identity" field nor a per-`Start` run-as parameter. The
@@ -464,7 +463,7 @@ is a security limit, and the consequence of exceeding it is sandbox termination)
 the domain name).** The engine's enforcement evaluates in a vocabulary of **IP / port /
 protocol** only — it does not resolve domain names, does not look at TLS, and knows no
 application-layer protocol (why domain names do not enter the engine, and the "solvable but
-at an explicit cost" road, are in [`deep-dives/network.md`](./deep-dives/network.md) D2):
+at an explicit cost" road, are in [`../internals/network.md`](../internals/network.md) D2):
 
 - **The L0 floor is always deny and a declaration cannot lift it** (enforced in code) =
   link-local (IPv6 included, which naturally covers every cloud metadata address) /
@@ -554,7 +553,7 @@ at an explicit cost" road, are in [`deep-dives/network.md`](./deep-dives/network
   > tier** · **ingress default-deny** (facing an external caller the engine promised nothing
   > to, where an ICMP error would confirm outward that this sandbox exists). Security-wise the
   > two are identical: neither lets anything through. The criteria and the measured magnitudes
-  > are in [`deep-dives/network.md`](./deep-dives/network.md) D4.3 / D5 ⑨.
+  > are in [`../internals/network.md`](../internals/network.md) D4.3 / D5 ⑨.
 
 This obligation list **does not depend on any specific provider shape** — whether a
 "host-local process" or "an isolation unit scheduled onto a remote node", it holds word for
@@ -564,7 +563,7 @@ swaps ③'s rule set for an equivalent such as CNI / NetworkPolicy.
 > **One spec-level clarification: ③'s obligation does not set up a separate regime for
 > IPv6.** A pure ct-state `inet` rule **with no family qualifier** covers IPv6 along with
 > everything else, and stops even a global prefix the guest made up itself (measured in
-> [`deep-dives/network.md`](./deep-dives/network.md) D5 ⑪), so `fe80::/10` in the floor list
+> [`../internals/network.md`](../internals/network.md) D5 ⑪), so `fe80::/10` in the floor list
 > is **a member at the declaration layer**, not an independent v6 mechanism.
 
 ### 2.5 Substrate fact check
@@ -585,5 +584,5 @@ here.
 
 > The carrier's full materialization, the CoW/consistency evidence, and the alternative
 > paths belong to §5.B (developed in
-> [`deep-dives/rootfs-overlay.md`](./deep-dives/rootfs-overlay.md)); this section only
+> [`../internals/rootfs-overlay.md`](../internals/rootfs-overlay.md)); this section only
 > anchors the runsc facts it depends on.

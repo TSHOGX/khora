@@ -1,10 +1,10 @@
-// Package runtime is subsystem §5.A (execution substrate): runsc process lifecycle and
+// Package runtime is subsystem the documented invariant (execution substrate): runsc process lifecycle and
 // placement. Its core seam is the runtime Provider — "where and with what to run an isolated
-// process context" (§5.A).
+// process context" (the documented invariant).
 //
-// The contract is POLICY + HANDLES, never host primitives (§5.A ❌ list): no cgroup path, no
+// The contract is POLICY + HANDLES, never host primitives (the documented invariant ❌ list): no cgroup path, no
 // netns fd, no absolute host path — a unit scheduled onto a remote node cannot produce those.
-// One implementation today, local_runsc (§1.1).
+// One implementation today, local_runsc (the documented invariant).
 package runtime
 
 import (
@@ -13,39 +13,39 @@ import (
 	"github.com/TSHOGX/khora/internal/ruleset"
 )
 
-// RootfsSource is the handle to an already-merged rootfs produced by §5.B: "run this rootfs",
-// with no "upper path" and no "lower is a Template" (rootfs-overlay D4).
+// RootfsSource is the handle to an already-merged rootfs produced by the documented invariant: "run this rootfs",
+// with no "upper path" and no "lower is a Template" (rootfs-overlay the documented invariant).
 //
 // The handle shape is provider-specific. MergedPath stays seam-clean because it is populated
 // and consumed only by local_runsc and never enters a cross-provider decision; a remote
-// provider defines its own shape (open-decisions §5.A).
+// provider defines its own shape (a GitHub Issue the documented invariant).
 type RootfsSource struct {
 	// MergedPath is the merged overlay directory to hand to runsc as its root.
 	MergedPath string
 }
 
-// SteeringSpec is §5.D's "reachability requirement": what the provider must enforce so the
+// SteeringSpec is the documented invariant's "reachability requirement": what the provider must enforce so the
 // sandbox's reachable set is exactly the declared one. It carries the DERIVED result, never
-// the declaration (§5.A / §2.1 ③).
+// the declaration (the documented invariant / the documented invariant ③).
 //
-// Two obligations ride on this field and show up nowhere in its shape (§2.4):
+// Two obligations ride on this field and show up nowhere in its shape (the documented invariant):
 //   - Installation is ATOMIC with placement: after the netns/veth exist, before the isolated
 //     unit runs — any window where the network is up and the rules are not is fail-open. Adopt
 //     and ReclaimOrphans inherit it; a rule set is crash-surviving host state, like the netns.
 //   - The predicate binds to the host-side veth's input interface, NOT the source address,
-//     which guest root forges with `ip addr add` (measured; network.md D5 ③) — pillar ④.
+//     which guest root forges with `ip addr add` (measured; the relevant internals page the documented invariant ③) — pillar ④.
 //     Spelled `iifname`, by NAME: `iif` freezes an ifindex at load time and silently fails
-//     open after a same-name veth rebuild (D5 ⑫), and the two render identically in
-//     `nft list`, so §5.A makes it a guard.
+//     open after a same-name veth rebuild (the documented invariant ⑫), and the two render identically in
+//     `nft list`, so the documented invariant makes it a guard.
 //
 // The payload is placement-free and abstract rather than nft text because three values the
-// rules must name are placement products only the provider holds (network.md D1 ② / D6). The
+// rules must name are placement products only the provider holds (the relevant internals page the documented invariant ② / the documented invariant). The
 // vocabulary lives in `internal/ruleset`, a LEAF: either subsystem owning it is the
 // `network`↔`runtime` edge internal/arch fails on.
 //
-// (Guest identity is not a member: the sandbox runs as guest root, §2.2 / §3.2.1.)
+// (Guest identity is not a member: the sandbox runs as guest root, the documented invariant / the documented invariant.)
 type SteeringSpec struct {
-	// Rules is the abstract, placement-free rule set (§5.D's pure function output).
+	// Rules is the abstract, placement-free rule set (the documented invariant's pure function output).
 	// Empty = install nothing, which is NOT the same as "deny nothing": a
 	// declaration of `deny` + empty still generates the floor and a default-deny.
 	// Genuinely empty only where no declaration was produced at all.
@@ -62,7 +62,7 @@ type SteeringSpec struct {
 	// i.e. whether the three host-side egress mechanisms are needed: ip_forward, a guest
 	// default route carrying `dev`, and a masquerade for this /30 — measured necessary AND
 	// sufficient, so a provider must not add rp_filter, proxy_arp, accept_local or
-	// per-interface forwarding, all measured unnecessary (network.md D5 ⑤).
+	// per-interface forwarding, all measured unnecessary (the relevant internals page the documented invariant ⑤).
 	//
 	// A derived FACT, not a knob: `via[]` alone does not need it, a steered flow being DNAT'd
 	// to a host-local endpoint and delivered locally.
@@ -70,7 +70,7 @@ type SteeringSpec struct {
 
 	// SecondHopUID identifies the host-local process behind `via[].endpoint` when the
 	// DEPLOYMENT supplied it — never a declaration field, the engine knowing only which local
-	// uid's egress to pin under the same floor (§2.4 / §6.2).
+	// uid's egress to pin under the same floor (the documented invariant / the documented invariant).
 	//
 	// It rides the spec rather than a separate call because the second-hop table is
 	// engine-level: one uid means one rule set regardless of sandbox count, installed once at
@@ -86,18 +86,18 @@ type PublishPort struct {
 	Proto     ruleset.Proto
 }
 
-// ResourceLimits is the Binding the provider materializes at placement time (§3.4 / §5.A):
+// ResourceLimits is the Binding the provider materializes at placement time (the documented invariant / the documented invariant):
 // CPU rate + RAM → cgroup for local_runsc. PURE POLICY, numeric intent only — no cgroup path
-// here or anywhere in the interface (§5.A ❌ list). Zero = unlimited.
+// here or anywhere in the interface (the documented invariant ❌ list). Zero = unlimited.
 //
-// Disk CAPACITY is deliberately elsewhere, an FS-layer quota owned by §5.B/§5.C (§3.4):
+// Disk CAPACITY is deliberately elsewhere, an FS-layer quota owned by the documented invariant/the documented invariant (the documented invariant):
 // cgroup cannot cap at-rest bytes and a quota cannot cap a rate.
 //
-// RAM is a SAFETY limit (§3.4): exceeding it terminates the sandbox rather than failing one
+// RAM is a SAFETY limit (the documented invariant): exceeding it terminates the sandbox rather than failing one
 // operation, the substrate offering no "guest process gets ENOMEM while the sandbox survives"
 // path. How a provider splits N into guest-visible RAM vs a host ceiling is its own detail.
 //
-// The disk-IO RATE cap is a settled DEFERRAL (§3.4.1), the consumer being what is missing.
+// The disk-IO RATE cap is a settled DEFERRAL (the documented invariant), the consumer being what is missing.
 // What joins later is a RATE alone: io.max needs a whole-disk MAJ:MIN, which is the PROVIDER'S
 // to derive from the paths it already holds, never a contract member — hence seam_test.go's
 // token guard on `major`/`minor`/`majmin`/`devno`. Measured coverage limit for whoever lands
@@ -110,26 +110,26 @@ type ResourceLimits struct {
 }
 
 // DeathCause is the ABSTRACT enum a provider reports when it finds an isolation unit dead
-// (§4.3 / §2.4). It crosses the §5.A seam as an enum and NEVER as an errno or a cgroup file
-// path, so the §4 mediator dispatches on these three values without learning that memcg
+// (the documented invariant / the documented invariant). It crosses the the documented invariant seam as an enum and NEVER as an errno or a cgroup file
+// path, so the the documented invariant mediator dispatches on these three values without learning that memcg
 // exists.
 //
-// Separate type from model.DeathCause on purpose — this is the §5.A wire form, that one the
+// Separate type from model.DeathCause on purpose — this is the the documented invariant wire form, that one the
 // persisted form — so the provider seam does not depend on the control-plane record shape.
 type DeathCause int
 
 const (
 	// CauseUnknown = the unit is gone but WHY is undeterminable. A LEGAL verdict, not a
-	// failure: a provider MUST report it rather than guess (§2.4 "does not guess"). §4.3
+	// failure: a provider MUST report it rather than guess (the documented invariant "does not guess"). the documented invariant
 	// treats it as dead-recoverable, self-correcting structurally when a re-triggered
 	// termination after the caller's resume records the real cause.
 	CauseUnknown DeathCause = iota
 	// CauseGone = dead for a non-resource reason (sentry crash, external kill, clean exit).
-	// Disposition: dead-recoverable → resume (§4.3).
+	// Disposition: dead-recoverable → resume (the documented invariant).
 	CauseGone
 	// CauseResourceExceeded = terminated for exceeding a resource cap (today the RAM safety
 	// limit, whole-group via oom.group=1). Disposition: resource-terminated → do NOT resume
-	// (§4.3), since the same workload re-triggers the same termination.
+	// (the documented invariant), since the same workload re-triggers the same termination.
 	CauseResourceExceeded
 )
 
@@ -153,23 +153,23 @@ type LaunchSpec struct {
 	Rootfs   RootfsSource
 	Steering SteeringSpec
 	Limits   ResourceLimits
-	// Mounts are the §5.C Volume mount points to bind into the guest, PEER to Rootfs rather
+	// Mounts are the the documented invariant Volume mount points to bind into the guest, PEER to Rootfs rather
 	// than nested inside it: the rootfs is ONE assembled composition, these are N
-	// self-sufficient host mount points from a different subsystem (§5 preamble). Each is an
+	// self-sufficient host mount points from a different subsystem (the documented invariant preamble). Each is an
 	// opaque source to bind — a local storage unit and a remote backend's FUSE mount point
 	// are indistinguishable here.
 	Mounts []MountSource
 	// No guest-identity field: the sandbox runs as guest root and the engine does not model
-	// guest users (§2.2). "Run as user X" is guest-native (su/sudo), not an engine
-	// primitive (§3.2.1).
+	// guest users (the documented invariant). "Run as user X" is guest-native (su/sudo), not an engine
+	// primitive (the documented invariant).
 }
 
-// MountSource is one Volume mount to bind into the guest (§5.C): the host mount point and
+// MountSource is one Volume mount to bind into the guest (the documented invariant): the host mount point and
 // where it goes, deliberately NOT the volume's ID or its access mode. Identity is the
 // mediator's concern, and the mode's other half (exclusivity) is a control-plane fact already
 // decided before this call.
 type MountSource struct {
-	// SourcePath is the host mount point, produced by the §5.C backend and opaque here — the
+	// SourcePath is the host mount point, produced by the the documented invariant backend and opaque here — the
 	// same kind of handle RootfsSource.MergedPath is, exempted in the seam guard alike.
 	SourcePath string
 	// Dest is the absolute guest path to bind at.
@@ -182,27 +182,27 @@ type MountSource struct {
 	// — is not a runtime error at all: `runsc create` hard-fails in the gofer mount stage,
 	// turning what should be a 4xx at admission into an opaque cold-start failure. The
 	// engine never produces a read-only unit, so that path is unreachable today
-	// (volume.md D1).
+	// (the relevant internals page the documented invariant).
 	ReadOnly bool
 }
 
 // Placement is the opaque handle to this launch's physical resources — rebound
-// every resume, old one invalidated (§3.3). The engine addresses the sandbox by
+// every resume, old one invalidated (the documented invariant). The engine addresses the sandbox by
 // SandboxID, never by anything in here.
 type Placement struct {
-	// TransportEndpoint is where the host dials sandboxd (§5.E). For
+	// TransportEndpoint is where the host dials sandboxd (the documented invariant). For
 	// local_runsc it is the current netns veth IP:port, discovered at ⑥
-	// (§5.A placement discovery). IP change across resume is itself the epoch
-	// signal (§4.3 placement/IP-as-epoch) — the engine does not add a counter.
+	// (the documented invariant placement discovery). IP change across resume is itself the epoch
+	// signal (the documented invariant placement/IP-as-epoch) — the engine does not add a counter.
 	TransportEndpoint string
 
 	// PublishEndpoints are the host `ip:port` each published guest port was bound to at this
-	// placement, in SteeringSpec.PublishPorts order — §6.1's `host_endpoint`.
+	// placement, in SteeringSpec.PublishPorts order — the documented invariant's `host_endpoint`.
 	//
-	// A placement product (§3.3), rebound every resume: hence §6.1 omits the key entirely
+	// A placement product (the documented invariant), rebound every resume: hence the documented invariant omits the key entirely
 	// with no live placement, a falsy-but-present field inviting callers to read it as "is
 	// this publish in effect". Not a ❌-list host primitive — it is the address the engine
-	// DELIVERS as the whole point of publish (§5.D), so a remote provider produces one too.
+	// DELIVERS as the whole point of publish (the documented invariant), so a remote provider produces one too.
 	PublishEndpoints []string
 
 	// handle is provider-private state for stop/start (local_runsc: the
@@ -216,58 +216,58 @@ type Placement struct {
 func (p *Placement) SetHandle(h any) { p.handle = h }
 func (p *Placement) Handle() any     { return p.handle }
 
-// Provider is the §5.A core seam. Verbs belong to §4 (the lifecycle mediator);
-// this interface only provides mechanism (top of §4: verbs belong to §4, mechanisms
-// to §5).
+// Provider is the the documented invariant core seam. Verbs belong to the documented invariant (the lifecycle mediator);
+// this interface only provides mechanism (top of the documented invariant: verbs belong to the documented invariant, mechanisms
+// to the documented invariant).
 type Provider interface {
 	// Name identifies the provider (e.g. "local_runsc").
 	Name() string
 
 	// Launch materializes placement and cold-starts the isolated unit with
 	// sandboxd (init mode) as entrypoint — the ④ step of the cold-start chain
-	// (guest-runtime D5.1). Returns the placement handle including the
+	// (guest-runtime the documented invariant). Returns the placement handle including the
 	// transport endpoint once the netns IP is discovered (⑥).
 	Launch(ctx context.Context, spec LaunchSpec) (*Placement, error)
 
-	// Stop cleanly stops the isolated unit, releasing RAM/CPU (§4.2 pause: the
+	// Stop cleanly stops the isolated unit, releasing RAM/CPU (the documented invariant pause: the
 	// Overlay is already on the backend, so stop is all pause needs to do).
 	// The Overlay artifact is untouched.
 	Stop(ctx context.Context, p *Placement) error
 
 	// Destroy tears down placement-local resources (netns/IP/cgroup). It does
 	// NOT delete the Overlay artifact — that is the Rootfs subsystem's job,
-	// invoked separately by the mediator (§4 subsystems don't call each other).
+	// invoked separately by the mediator (the documented invariant subsystems don't call each other).
 	Destroy(ctx context.Context, p *Placement) error
 
 	// Adopt re-recognizes a SURVIVING sandbox's placement after a control-plane crash
-	// (§4.4-A's other half / startup reconciliation). Given the SandboxID it rebuilds the
+	// (the documented invariant's other half / startup reconciliation). Given the SandboxID it rebuilds the
 	// opaque placement handle from the sandbox's own labeled resources, probes L1 liveness,
 	// and rediscovers the transport endpoint — the SAME endpoint, NOT a new epoch, since the
-	// isolation unit never restarted (§3.3). The return is a THREE-way outcome:
+	// isolation unit never restarted (the documented invariant). The return is a THREE-way outcome:
 	//   - (placement, true, _, nil)  → L1-alive and endpoint recovered; caller runs
 	//     its L2 Health probe, then adopts. The cause is meaningless here.
 	//   - (nil, false, cause, nil)   → isolation unit genuinely DEAD/absent; caller
-	//     CAS-demotes the record to paused (§4.2 involuntary pause) AND persists
-	//     cause in that same commit (§4.3).
+	//     CAS-demotes the record to paused (the documented invariant involuntary pause) AND persists
+	//     cause in that same commit (the documented invariant).
 	//   - (nil, false, _, err)       → UNCERTAIN: L1-alive but the endpoint could not
 	//     be recovered. This is NOT death — the caller must PROTECT the placement
-	//     (not reclaim it) and retry next boot (§4.4-A protect-on-uncertainty:
+	//     (not reclaim it) and retry next boot (the documented invariant protect-on-uncertainty:
 	//     tearing down a maybe-live container is irreversible). A provider MUST NOT
 	//     collapse this case into alive=false.
 	//
 	// The DEATH CAUSE rides the alive=false return because the signal is placement-local and
-	// VOLATILE (§4.3 / reaper-health D4c): "unit dead, placement still intact" is the LAST
+	// VOLATILE (the documented invariant / reaper-health the documented invariantc): "unit dead, placement still intact" is the LAST
 	// moment it is readable, so a provider that tears down first has destroyed the evidence.
-	// Undeterminable → CauseUnknown, never a guess (§2.4).
+	// Undeterminable → CauseUnknown, never a guess (the documented invariant).
 	//
 	// Addressing by SandboxID is why placement-local resources carry a SandboxID label: the
-	// §3.3 reverse, allowed by §4.4-A.
+	// the documented invariant reverse, allowed by the documented invariant.
 	Adopt(ctx context.Context, sandboxID string) (p *Placement, alive bool, cause DeathCause, err error)
 
-	// ReclaimOrphans tears down every engine placement whose SandboxID is NOT in keep (§4.4-A:
+	// ReclaimOrphans tears down every engine placement whose SandboxID is NOT in keep (the documented invariant:
 	// an orphan is a placement backing no sandbox the store says should hold one). The
 	// provider enumerates only its OWN host resources; the mediator computes keep from the
-	// authoritative store and passes it in, never the reverse (§4 subsystems don't call each
+	// authoritative store and passes it in, never the reverse (the documented invariant subsystems don't call each
 	// other). Persistent state (Overlay upper) is never touched — not a placement resource.
 	//
 	// THE KEEP SET ARRIVES COMPLETE, load-bearing rather than a calling convention:
@@ -276,42 +276,42 @@ type Provider interface {
 	// shape makes it inexpressible.
 	ReclaimOrphans(ctx context.Context, keep []string) error
 
-	// ReinstallRuleSet re-installs a SURVIVING sandbox's §5.D rule set after a control-plane
-	// restart — the second half of Adopt's obligation (§2.4: a rule set is crash-surviving
+	// ReinstallRuleSet re-installs a SURVIVING sandbox's the documented invariant rule set after a control-plane
+	// restart — the second half of Adopt's obligation (the documented invariant: a rule set is crash-surviving
 	// host state exactly like the netns).
 	//
 	// It MUST install as ONE atomic operation and MUST NOT flush connection tracking, both
-	// measured (network.md D5 ㉒): one atomic file leaves live flows intact 5/5, a
+	// measured (the relevant internals page the documented invariant ㉒): one atomic file leaves live flows intact 5/5, a
 	// delete-then-install kills them 5/5, and a conntrack flush kills them outright wherever
 	// `tcp_loose=0`. The same measurement permits re-rendering blindly, with no diff against
 	// what is already installed.
 	ReinstallRuleSet(ctx context.Context, p *Placement, spec SteeringSpec) error
 
-	// RuleHits reports how many packets each of this placement's §5.D rules has acted on,
-	// keyed by the ABSTRACT counter name §5.D put on the rule (ruleset.Rule.Counter). It backs
-	// §6.1's per-entry `hit_packet`. A member named after nft would not be seam-clean: that is
+	// RuleHits reports how many packets each of this placement's the documented invariant rules has acted on,
+	// keyed by the ABSTRACT counter name the documented invariant put on the rule (ruleset.Rule.Counter). It backs
+	// the documented invariant's per-entry `hit_packet`. A member named after nft would not be seam-clean: that is
 	// one renderer's mechanism.
 	//
 	// TAKES A PLACEMENT, not a SandboxID: counters are placement-local, so a caller must
 	// already hold one to be asking, and no placement is the answer rather than an error. A
 	// MISSING KEY means that counter is absent from what is installed and MUST NOT be reported
 	// as zero — a bypassed rule's only symptom is a counter reading 0, so manufacturing zeros
-	// destroys the signal (§2.4).
+	// destroys the signal (the documented invariant).
 	//
 	// Read-only and best-effort: it must not install or re-render, and a failed read is not a
 	// placement failure.
 	RuleHits(ctx context.Context, p *Placement) (map[string]uint64, error)
 
-	// InstallSecondHop installs the ENGINE-LEVEL rule set pinning the second hop (§2.4
+	// InstallSecondHop installs the ENGINE-LEVEL rule set pinning the second hop (the documented invariant
 	// invariant 2's second half): the egress of the host-local process behind `via[].endpoint`,
 	// narrowed by the deployment-supplied uid.
 	//
 	// UID ONLY: `skuid` is the one narrowing predicate available on the `output` hook, and a
-	// gid clause could only be ANDed onto the floor drop, narrowing the floor further (D5 ㉔).
+	// gid clause could only be ANDed onto the floor drop, narrowing the floor further (the documented invariant ㉔).
 	//
 	// Called ONCE at startup, not per placement: one uid covers every `via[]` in the
 	// deployment, and hop 2's traffic arrives on no interface (measured: hop 2 counts ZERO in
-	// `forward` in all three shapes, visible only in `output` — network.md D5 ㉔).
+	// `forward` in all three shapes, visible only in `output` — the relevant internals page the documented invariant ㉔).
 	//
 	// A nil uid means the deployment supplied none: install nothing. A `via[]` declaration is
 	// refused at the write point instead, an unenforceable invariant not being half-honored.

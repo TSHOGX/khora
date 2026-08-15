@@ -1,4 +1,4 @@
-// Command khora is the CLI for the sandbox engine's §6.1 API. It is a peer client of
+// Command khora is the CLI for the sandbox engine's the documented invariant API. It is a peer client of
 // the same API that a frontend uses — the CLI is a first-class citizen, not a back door.
 package main
 
@@ -38,7 +38,7 @@ var (
 	clientKeyFile  string
 	caCertFile     string
 	httpClient     = http.DefaultClient
-	// api is the thin client every command goes through (ADR-0008 part 2: the CLI is a
+	// api is the thin client every command goes through (the recorded design part 2: the CLI is a
 	// shell over pkg/khora). Built once in PersistentPreRunE, after the flags are
 	// parsed and before any command runs.
 	//
@@ -51,7 +51,7 @@ var (
 
 // version is stamped by the Makefile's -X at build time; "dev" means built by a
 // bare `go build`. Per-binary rather than a shared package, matching the other
-// three: the gateway "imports nothing from internal/" (ADR-0007).
+// three: the gateway "imports nothing from internal/" (the recorded design).
 var version = "dev"
 
 func main() {
@@ -64,7 +64,7 @@ func main() {
 		Short:   "Sandbox engine CLI",
 		Long: `khora is the CLI for the sandbox engine.
 
-It wraps the §6.1 REST + Connect-RPC API, providing commands for sandbox lifecycle,
+It wraps the the documented invariant REST + Connect-RPC API, providing commands for sandbox lifecycle,
 file operations, volumes, templates, network configuration, and event streaming.`,
 		SilenceUsage:  true,
 		SilenceErrors: true,

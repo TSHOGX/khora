@@ -7,7 +7,7 @@ inside it — so the engine cannot be a secrecy boundary for anything. Authentic
 therefore lives in front of it, in a component outside the engine.
 
 This directory holds the configuration for that component. The decision behind it,
-including the options rejected, is [`ADR-0007`](../docs/decisions/ADR-0007-outward-facing-boundary.md).
+including the options rejected, is documented in [Configuration](../docs/configuration/README.md).
 
 ## The engine enforces its own half
 

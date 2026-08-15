@@ -30,7 +30,7 @@ import (
 
 // runCmd runs a host command and returns its combined output. Local to this file: the
 // only thing it is used for is counting quota rows, which has no engine API by design
-// (the engine locates rows by id, never by scanning — §5.C).
+// (the engine locates rows by id, never by scanning — the documented invariant).
 func runCmd(name string, args ...string) (string, error) {
 	out, err := exec.Command(name, args...).CombinedOutput()
 	return string(out), err
@@ -81,7 +81,7 @@ func qgroupRowCount(t *testing.T, path string) int {
 // a guest is actively writing must not disturb the writer, and the captured content must
 // be a COMPLETE PREFIX of an append-only log.
 //
-// Crash-consistent is the promised level (§5.C) and it needs no fsync or freeze
+// Crash-consistent is the promised level (the documented invariant) and it needs no fsync or freeze
 // beforehand: sync makes no measurable difference, and freeze CANNOT COMBINE with a
 // snapshot at all — creating a snapshot is itself a write to the filesystem just frozen,
 // so it blocks uninterruptibly for the whole frozen window and lands only after thaw,
@@ -158,7 +158,7 @@ func TestVolumeSnapshotOfALiveWrittenVolume(t *testing.T) {
 		}
 	}
 	if !progressed {
-		t.Errorf("the guest's writes stopped making progress after the snapshot — a snapshot must not disturb the writer (§5.C, measured: zero write errors and unchanged throughput)")
+		t.Errorf("the guest's writes stopped making progress after the snapshot — a snapshot must not disturb the writer (the documented invariant, measured: zero write errors and unchanged throughput)")
 	}
 
 	// THE CAPTURE IS A COMPLETE PREFIX: every line 0..N-1 in order, with nothing missing
@@ -181,7 +181,7 @@ func TestVolumeSnapshotOfALiveWrittenVolume(t *testing.T) {
 }
 
 // TestVolumeSnapshotCapIsEnforcedOnTheNewVolume is the one
-// that catches the failure volume.md D7.3 calls silent and undetectable afterwards.
+// that catches the failure the relevant internals page the documented invariant calls silent and undetectable afterwards.
 //
 // The substrate gives a snapshot a BRAND-NEW UNCAPPED quota row (measured in four shapes
 // and verified by writing 3× the source's cap into one), so an engine that recorded
@@ -215,7 +215,7 @@ func TestVolumeSnapshotCapIsEnforcedOnTheNewVolume(t *testing.T) {
 		t.Fatalf("read the snapshot's quota row: %v", err)
 	}
 	if limit != snapCap {
-		t.Fatalf("the snapshot's cap on storage = %d, want the DECLARED %d (the source had %d) — the substrate hands a snapshot an UNCAPPED row, so a missed cap here is invisible afterwards (volume.md D7.3)", limit, snapCap, 64<<20)
+		t.Fatalf("the snapshot's cap on storage = %d, want the DECLARED %d (the source had %d) — the substrate hands a snapshot an UNCAPPED row, so a missed cap here is invisible afterwards (the relevant internals page the documented invariant)", limit, snapCap, 64<<20)
 	}
 
 	// AND IT IS ENFORCED: writing past the declared size fails. This is the behavioral
@@ -240,7 +240,7 @@ func TestVolumeSnapshotCapIsEnforcedOnTheNewVolume(t *testing.T) {
 	}
 	t.Logf("snapshot cap %d: writes failed after %d bytes landed", snapCap, landed)
 
-	// The SOURCE is unaffected: the writer pays, in both directions (§5.C measured).
+	// The SOURCE is unaffected: the writer pays, in both directions (the documented invariant measured).
 	if _, srcLimit, err := bc.Usage(ctx, volumeUnitPath(stateDir, src)); err != nil {
 		t.Fatal(err)
 	} else if srcLimit != 64<<20 {
@@ -258,7 +258,7 @@ func TestVolumeSnapshotCapIsEnforcedOnTheNewVolume(t *testing.T) {
 // a source with a live descendant is a 409, AND the filesystem's quota-row count returns
 // to baseline once things are deleted in the order the FK forces.
 //
-// That is the point of the FK (volume.md D6.1a): a leak needs "delete the source while a
+// That is the point of the FK (the relevant internals page the documented invariant): a leak needs "delete the source while a
 // live sharer references its extents", and RESTRICT makes that order UNREACHABLE through
 // the API — so the leak is PREVENTED rather than reclaimed.
 func TestVolumeSnapshotSourceDeleteIsRefusedAndLeaksNoQuotaRow(t *testing.T) {
@@ -285,7 +285,7 @@ func TestVolumeSnapshotSourceDeleteIsRefusedAndLeaksNoQuotaRow(t *testing.T) {
 	// THE REFUSAL. Without it, this is exactly the deletion order that leaks.
 	err = eng.Mediator.DeleteVolume(ctx, src)
 	if err == nil {
-		t.Fatal("deleting a source with a live snapshot SUCCEEDED — that is the order measured to leak a quota row, and RESTRICT is what makes it unreachable (volume.md D6.1a)")
+		t.Fatal("deleting a source with a live snapshot SUCCEEDED — that is the order measured to leak a quota row, and RESTRICT is what makes it unreachable (the relevant internals page the documented invariant)")
 	}
 	if !strings.Contains(err.Error(), "snapshots or clones") {
 		t.Errorf("the refusal does not name the lineage relationship: %v", err)
@@ -375,7 +375,7 @@ func TestVolumeSnapshotCrashBetweenBytesAndRowIsRepaired(t *testing.T) {
 		t.Fatalf("read the crashed snapshot's quota row: %v", err)
 	}
 	if limit != snapCap {
-		t.Fatalf("the crashed snapshot's storage carries cap %d, want %d — the cap must ride the operation that makes the bytes (volume.md D7.3)", limit, snapCap)
+		t.Fatalf("the crashed snapshot's storage carries cap %d, want %d — the cap must ride the operation that makes the bytes (the relevant internals page the documented invariant)", limit, snapCap)
 	}
 	// And NO row was inserted.
 	if _, err := eng1.Store.GetVolume(ctx, crashed); err != store.ErrVolumeNotFound {
@@ -413,7 +413,7 @@ func TestVolumeSnapshotCrashBetweenBytesAndRowIsRepaired(t *testing.T) {
 		t.Fatal(err)
 	}
 	if limit != 32<<20 {
-		t.Fatalf("after the repair pass the storage carries %d, want the RECORD's %d — 'record capped, storage uncapped' is a REPAIR state, not a legal one (volume.md D7.3)", limit, 32<<20)
+		t.Fatalf("after the repair pass the storage carries %d, want the RECORD's %d — 'record capped, storage uncapped' is a REPAIR state, not a legal one (the relevant internals page the documented invariant)", limit, 32<<20)
 	}
 	// And the repair moved the STORAGE, not the record: adopting the storage's value
 	// would silently ratify the residue.
@@ -422,7 +422,7 @@ func TestVolumeSnapshotCrashBetweenBytesAndRowIsRepaired(t *testing.T) {
 		t.Fatal(err)
 	}
 	if rec.CapByte != 32<<20 {
-		t.Errorf("the repair rewrote the RECORD to %d — the record is the only authority (§3.4), so the storage is what moves", rec.CapByte)
+		t.Errorf("the repair rewrote the RECORD to %d — the record is the only authority (the documented invariant), so the storage is what moves", rec.CapByte)
 	}
 }
 

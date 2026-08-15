@@ -1,9 +1,7 @@
 # Network deep dive: why enforcement can only live inside the engine, and everything outside narrowing lives outside it
 
-> **Position: the network deep dive for [`§5.D`](../subsystems.md) (spec; navigation in
-> [`SPEC.md`](../SPEC.md)), and it touches [`§2.1`/`§2.4`](../SPEC.md)'s security pillars,
-> [`§5.A`](../subsystems.md)'s provider contract, and [`§4`](../model.md)'s mediator ownership.**
-> Spec §5.D fixes the boundary (Network holds the declaration + generates an abstract rule set;
+> **Position: the network internals reference.** It complements the architecture and concepts
+> pages. The network subsystem fixes the boundary (Network holds the declaration + generates an abstract rule set;
 > rendering and installation belong to §5.A; application-layer behavior is not inside the
 > engine); this document develops **why the boundary falls exactly there** — the criterion is
 > enforceability locus (which side can physically enforce) — and gives the mechanical constraints
@@ -35,7 +33,7 @@ inside the engine (D1's four items); no → it is not inside the engine. This on
 answers "who owns proxying / credentials / auth / multi-tenancy" — all four are outside the
 engine, because none of the four needs the side that creates the namespace to do it.
 
-The engine therefore **does not name the layer outside it**. In the spec it appears only as an
+The engine therefore **does not name the layer outside it**. In the architecture reference it appears only as an
 address (`egress.via[].endpoint`) — not evasion, but the direct consequence of "the engine sees
 only one TCP flow to some endpoint". (§6's existing "control plane / data plane" is **a different
 pair of terms**, denoting the REST vs Connect-RPC outer-edge projection — unrelated to this
@@ -111,7 +109,7 @@ precisely, because "infeasible" would be wrong:
 For narrowing like "only this one domain", use `via[]` to hand the traffic to a process outside the
 engine that judges by application-layer information (§5.D).
 
-**The strength of domain-layer control varies with the declaration's value, so the spec states it
+**The strength of domain-layer control varies with the declaration's value, so the architecture reference states it
 by value rather than as a global conclusion.** Under `default:deny` plus a single `egress.via[]`,
 the guest's reachable set is approximately one address, and both DoH and a direct IP connection
 **are blocked by default-deny**; under `default:allow` both escapes **fully revive** (the guest
@@ -430,7 +428,7 @@ above delivers less than it appears to. The fix has two halves:
 - **A `via[].endpoint` that is not host-local is refused**: it is out of the kernel's reach and
   cannot be held down; accepting it would rest the floor on that process's own self-discipline —
   exactly the confused deputy this invariant exists to refuse. So this class of declaration is
-  **refused outright** (400; the error code belongs to [`§6.2`](../api-contract.md)'s list, not
+  **refused outright** (400; the error code belongs to [`§6.2`](../api/contract.md)'s list, not
   duplicated here).
 
 ### D4.3 Fail-closed (scoped per-connection)
@@ -499,7 +497,7 @@ refusal is that external layer's responsibility, not an inherited guarantee from
 This is not a new mechanism, only stating a boundary this document's reasoning already implies.
 
 **Fail-closed emits no §4.1 audit event, and the reason is observability rather than taste.** The
-question was registered as open with a leaning toward yes; it is settled as **no**, and what settles
+question was tracked in a GitHub Issue with a leaning toward yes; it is settled as **no**, and what settles
 it is that the engine has no per-refusal signal to put in one.
 
 - **The two refusals §2.4's fail-closed names are observable to *different* degrees, and one is not
@@ -532,7 +530,7 @@ it is that the engine has no per-refusal signal to put in one.
   quantity, whose frequency jitters with load); a refusal is worse on that same second clause, since
   its frequency is not merely load-dependent but adversary-chosen.
 - **Where the consumer need goes instead**: the per-rule counter already carried on every `allow[]` /
-  `via[]` entry, exposed through §6.1's `GET …/network` (registered separately). Same consumer — the
+  `via[]` entry, exposed through §6.1's `GET …/network` (recorded separately). Same consumer — the
   allow-list rollout that needs to attribute a guest-side failure to the declaration — same content,
   and pull-shaped, so no commit path, no total order, no head-of-line blocking, and a fixed-size
   response an adversary cannot inflate. **This is the same disposition §4.4-C reached for capacity
@@ -572,7 +570,7 @@ not a string of corroborating anecdotes. **Do not rediscover them a second time.
 > not a missing page.** Doing it the other way (numbering to follow document order) would require
 > renumbering every existing item on each addition, and a citation elsewhere by numeral **would
 > not error, it would silently point at a different item** — word for word the same reason
-> open-decisions' closing note refuses citation by position.
+> GitHub Issues' closing note refuses citation by position.
 
 **Reproduction provenance comes first, because "do not rediscover" only holds for the items that
 can actually be rerun.** Items marked `not checked in` were measured on a one-shot fixture that
@@ -1140,7 +1138,7 @@ inside the engine", so the engine side's count of additions is zero for them.
 
 ---
 
-## D8. The agenda still to be refined (registered in open-decisions)
+## D8. The agenda still to be refined (tracked in GitHub Issues)
 
 **The floor's membership list and rule text are already settled, and are not in this section**:
 all four list items are static (D5 ④⑧); the shape of `via[]`'s narrow allowance and its IPv6
@@ -1163,7 +1161,7 @@ now settled too** (no — D4.3's closing block, which also says where the consum
   liveness signal; what is open is the read surface, and D4.3's closing block explains why this is
   now the home for the audit-consumer need).
 
-> The measured evidence, candidates, and costs for each item are in [`open-decisions.md`](../open-decisions.md)'s
+> The measured evidence, candidates, and costs for each item are in the relevant GitHub Issue's
 > "Design points still to be refined" section, not duplicated here. The normative statement for
 > D0–D7 is in §2.1/§2.3/§2.4/§5.D; this document only develops the reasoning and the invariants
 > that must be held.

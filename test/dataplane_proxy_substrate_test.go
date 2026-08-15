@@ -3,7 +3,7 @@
 // C6: the outer-edge Connect data plane through the orchestrator.
 // A Connect client speaks the SAME transport.proto to the orchestrator, using
 // ONLY sandbox_id (a header) — the orchestrator re-proxies to the sandbox's
-// sandboxd (D6). Asserts: Start/Connect/fs work end-to-end; placement (netns IP
+// sandboxd (the documented invariant). Asserts: Start/Connect/fs work end-to-end; placement (netns IP
 // / container id / host path) never appears at the outer edge; there is no
 // REST/NDJSON data-plane facade (those routes 404). Requires root (real runsc).
 //
@@ -149,7 +149,7 @@ func TestC6OuterEdgeConnectProxy(t *testing.T) {
 
 	// --- error path never leaks placement: pause the sandbox so its placement is
 	// gone, then a unary proxy op must error WITHOUT the netns IP in the message
-	// (proxyErr sanitizes inner dial errors — §6.2 / D6.1).
+	// (proxyErr sanitizes inner dial errors — the documented invariant / the documented invariant).
 	if err := m.Pause(ctx, sid); err != nil {
 		t.Fatalf("pause for error-path check: %v", err)
 	}

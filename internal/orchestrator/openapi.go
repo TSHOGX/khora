@@ -1,6 +1,6 @@
 package orchestrator
 
-// The machine-readable half of the §6.1 control-plane contract (ADR-0008 part 1).
+// The machine-readable half of the the documented invariant control-plane contract (the recorded design part 1).
 //
 // WHY THIS IS GENERATED RATHER THAN WRITTEN. A hand-maintained OpenAPI file is a second,
 // drifting account of the same protocol. So the document is built from the table below plus
@@ -8,19 +8,19 @@ package orchestrator
 // json tag changes the document in the same commit, and openapi_test.go fails if the
 // checked-in file is stale or if a listed operation is not actually routed.
 //
-// api-contract.md STAYS AUTHORITATIVE FOR INTENT. It says what an endpoint means, which
+// the documentation STAYS AUTHORITATIVE FOR INTENT. It says what an endpoint means, which
 // refusal is which, and why — none of which a schema can carry. When they disagree, the
 // document is wrong by construction (it is derived) unless the divergence is in the handler,
-// which is the CLAUDE.md Relationship-rule case: stop and decide which side moves.
+// which is the the documentation Relationship-rule case: stop and decide which side moves.
 //
 // JSON rather than YAML: both are valid OpenAPI and every generator reads JSON, while YAML
 // would add a module dependency to emit a document nothing in the engine consumes.
 //
 // Regenerate with:
 //
-//	go run ./cmd/openapigen -out docs/spec/openapi.json
+//	go run ./cmd/openapigen -out docs/api/openapi.json
 
-//go:generate go run ../../cmd/openapigen -out ../../docs/spec/openapi.json
+//go:generate go run ../../cmd/openapigen -out ../../docs/api/openapi.json
 
 import (
 	"bytes"
@@ -32,18 +32,18 @@ import (
 )
 
 // openAPIVersion is the document's own version, NOT the engine's. It moves when the
-// §6.1 surface changes shape, which a consumer's generated client cares about; the
+// the documented invariant surface changes shape, which a consumer's generated client cares about; the
 // engine ships no version negotiation (there are no live instances to negotiate
-// with — CLAUDE.md "no compatibility burden").
+// with — the documentation "no compatibility burden").
 const openAPIVersion = "0.1.0"
 
 // openAPIDocPath is where the generated document is checked in, relative to the
 // module root. Named here rather than only in cmd/openapigen's flag default because
 // the staleness guard has to read the same file the generator writes — two literals
 // would let the guard pass while checking a path nobody publishes.
-const openAPIDocPath = "docs/spec/openapi.json"
+const openAPIDocPath = "docs/api/openapi.json"
 
-// apiParam is one query parameter. Required is false throughout §6.1's control
+// apiParam is one query parameter. Required is false throughout the documented invariant's control
 // plane: every query parameter it defines has a documented default.
 type apiParam struct {
 	Name string
@@ -51,7 +51,7 @@ type apiParam struct {
 	Desc string
 }
 
-// apiOp is one §6.1 operation. Req/Resp hold a ZERO VALUE of the wire type, not a
+// apiOp is one the documented invariant operation. Req/Resp hold a ZERO VALUE of the wire type, not a
 // hand-written schema — that is what ties the document to the handlers rather than
 // to somebody's memory of them.
 type apiOp struct {
@@ -63,22 +63,22 @@ type apiOp struct {
 	Req     any
 	Resp    any
 	Status  int
-	// Errors are the status codes §6.2 defines for this operation. Listed rather
+	// Errors are the status codes the documented invariant defines for this operation. Listed rather
 	// than derived: which refusal an endpoint can produce is a design fact stated in
-	// api-contract.md, and no amount of reflection recovers it from a struct.
+	// the documentation, and no amount of reflection recovers it from a struct.
 	Errors []int
 }
 
-// apiOps is the §6.1 control plane, in the document's order.
+// apiOps is the the documented invariant control plane, in the document's order.
 //
 // THE DATA PLANE IS ABSENT ON PURPOSE, and it is not a gap: process and fs are
-// Connect-RPC over `khora.transport.v1` (transport D5), whose machine-readable
+// Connect-RPC over `khora.transport.v1` (transport the documented invariant), whose machine-readable
 // contract is the .proto itself. The two REST routes that DO appear here —
-// `/files` and the volume import/export pair — are the streaming bypasses (D4.4),
+// `/files` and the volume import/export pair — are the streaming bypasses (the documented invariant),
 // REST precisely because a file must not become one protobuf message.
 //
 // `/healthz`, `/readyz` and `/metrics` are absent for a different reason: they are
-// the operational surface, not §6.1. A consumer builds against the API; an operator
+// the operational surface, not the documented invariant. A consumer builds against the API; an operator
 // scrapes those.
 var apiOps = []apiOp{
 	{
@@ -94,7 +94,7 @@ var apiOps = []apiOp{
 	},
 	{
 		Method: "GET", Path: "/v1/sandboxes/{id}", OpID: "getSandbox",
-		Summary: "Inspect one sandbox. Never exposes placement (§6.2).",
+		Summary: "Inspect one sandbox. Never exposes placement (the documented invariant).",
 		Resp:    sandboxResp{}, Status: 200, Errors: []int{404},
 	},
 	{
@@ -105,7 +105,7 @@ var apiOps = []apiOp{
 	},
 	{
 		Method: "DELETE", Path: "/v1/sandboxes/{id}", OpID: "destroySandbox",
-		Summary: "Destroy a sandbox. The record is DELETED, so a later GET is 404 and the destroy's cause is readable only on the event (§4.4-C).",
+		Summary: "Destroy a sandbox. The record is DELETED, so a later GET is 404 and the destroy's cause is readable only on the event (the documented invariant).",
 		Status:  204, Errors: []int{404, 409},
 	},
 	{
@@ -136,7 +136,7 @@ var apiOps = []apiOp{
 	},
 	{
 		Method: "GET", Path: "/v1/sandboxes/{id}/files", OpID: "downloadFile",
-		Summary: "Stream a file OUT of the sandbox (the §5.E large-file bypass; REST rather than RPC because it streams bytes). Returns application/octet-stream, chunked.",
+		Summary: "Stream a file OUT of the sandbox (the the documented invariant large-file bypass; REST rather than RPC because it streams bytes). Returns application/octet-stream, chunked.",
 		Query:   []apiParam{{Name: "path", Type: "string", Desc: "Absolute path inside the guest."}},
 		Status:  200, Errors: []int{400, 403, 404, 503},
 	},
@@ -149,7 +149,7 @@ var apiOps = []apiOp{
 	},
 	{
 		Method: "GET", Path: "/v1/events", OpID: "listEvents",
-		Summary: "Page the transactional outbox in `seq` order. At-least-once: dedupe by event `id` (§4.4-C).",
+		Summary: "Page the transactional outbox in `seq` order. At-least-once: dedupe by event `id` (the documented invariant).",
 		Query: []apiParam{
 			{Name: "after", Type: "integer", Desc: "Cursor: return events with seq > this. 0 or omitted starts at the earliest retained event."},
 			{Name: "limit", Type: "integer", Desc: "Maximum events in this page."},
@@ -170,12 +170,12 @@ var apiOps = []apiOp{
 	},
 	{
 		Method: "DELETE", Path: "/v1/templates/{id}", OpID: "deleteTemplate",
-		Summary: "Delete a template. Refused while any sandbox references it (§4.3 reference protection).",
+		Summary: "Delete a template. Refused while any sandbox references it (the documented invariant reference protection).",
 		Status:  204, Errors: []int{404, 409},
 	},
 	{
 		Method: "POST", Path: "/v1/volumes", OpID: "createVolume",
-		Summary: "Create a volume. Independent of every sandbox (§5.C).",
+		Summary: "Create a volume. Independent of every sandbox (the documented invariant).",
 		Req:     volumeCreateReq{}, Resp: volumeResp{}, Status: 201,
 		Errors: []int{400, 409, 507},
 	},
@@ -197,7 +197,7 @@ var apiOps = []apiOp{
 	},
 	{
 		Method: "DELETE", Path: "/v1/volumes/{id}", OpID: "deleteVolume",
-		Summary: "Delete a volume. Refused while mounted (§4.3 reference protection).",
+		Summary: "Delete a volume. Refused while mounted (the documented invariant reference protection).",
 		Status:  204, Errors: []int{404, 409},
 	},
 	{
@@ -235,7 +235,7 @@ var apiOps = []apiOp{
 func schemaFor(t reflect.Type, defs map[string]any) map[string]any {
 	switch t.Kind() {
 	case reflect.Pointer:
-		// A pointer field is how §6.1 spells "omitting the whole object is legal"
+		// A pointer field is how the documented invariant spells "omitting the whole object is legal"
 		// (createReq.Network is the case). The schema is the pointee's; optionality is
 		// carried by absence from `required`, which this document does not emit —
 		// see the note on requiredness in openAPIDoc.
@@ -260,7 +260,7 @@ func schemaFor(t reflect.Type, defs map[string]any) map[string]any {
 	case reflect.Struct:
 		name := t.Name()
 		if name == "" {
-			// Anonymous struct: inline it. Nothing in §6.1 uses one, but a future
+			// Anonymous struct: inline it. Nothing in the documented invariant uses one, but a future
 			// inline literal must not silently produce a $ref to "".
 			return structSchema(t, defs)
 		}
@@ -310,8 +310,8 @@ func structSchema(t reflect.Type, defs map[string]any) map[string]any {
 	return map[string]any{"type": "object", "properties": props}
 }
 
-// errorDescriptions are §6.2's status codes in the engine's own words. Central
-// rather than per-operation because §6.2 assigns each code ONE meaning across the
+// errorDescriptions are the documented invariant's status codes in the engine's own words. Central
+// rather than per-operation because the documented invariant assigns each code ONE meaning across the
 // whole surface — a 507 means "capacity" everywhere, never "state conflict" — and
 // restating that per endpoint is how the meanings drift apart.
 var errorDescriptions = map[int]string{
@@ -324,7 +324,7 @@ var errorDescriptions = map[int]string{
 	507: "Capacity: nothing is wrong with the request or the sandbox — the node cannot honor another promise.",
 }
 
-// OpenAPIDoc renders the §6.1 control plane as an OpenAPI 3.1 document.
+// OpenAPIDoc renders the the documented invariant control plane as an OpenAPI 3.1 document.
 //
 // Indented, key-sorted JSON with a trailing newline, because the checked-in copy is
 // diffed against this output byte-for-byte (openapi_test.go): a map iterating in a
@@ -391,15 +391,15 @@ func OpenAPIDoc() ([]byte, error) {
 	doc := map[string]any{
 		"openapi": "3.1.0",
 		"info": map[string]any{
-			"title":   "khora engine — control plane (§6.1)",
+			"title":   "khora engine — control plane (the documented invariant)",
 			"version": openAPIVersion,
 			"description": "GENERATED from the handlers' own wire types (internal/orchestrator/openapi.go). " +
 				"Do not edit by hand; regenerate with `go generate ./internal/orchestrator`. " +
-				"docs/spec/api-contract.md remains authoritative for INTENT — what an endpoint means and " +
+				"the documentation remains authoritative for intent — what an endpoint means and " +
 				"which refusal is which. This document says only what is on the wire.\n\n" +
 				"The process and fs data plane is NOT here: it is Connect-RPC, and its machine-readable " +
 				"contract is proto/khora/transport/v1/transport.proto.\n\n" +
-				"No authentication is described because the engine has none by design (ADR-0007): it " +
+				"No authentication is described because the engine has none by design (the recorded design): it " +
 				"refuses any listener but loopback, and auth/TLS belong to a layer outside it.",
 		},
 		"paths": paths,
@@ -418,7 +418,7 @@ func OpenAPIDoc() ([]byte, error) {
 }
 
 // responsesFor builds an operation's response map: the success entry plus one per
-// §6.2 code it can produce.
+// the documented invariant code it can produce.
 func responsesFor(op apiOp, defs map[string]any) map[string]any {
 	out := map[string]any{}
 	success := map[string]any{"description": "Success."}
@@ -442,7 +442,7 @@ func responsesFor(op apiOp, defs map[string]any) map[string]any {
 	out[fmt.Sprint(op.Status)] = success
 
 	codes := append([]int{}, op.Errors...)
-	// 405 is on EVERY route in the table by §6.2's general rule ("a wrong method on
+	// 405 is on EVERY route in the table by the documented invariant's general rule ("a wrong method on
 	// any collection/object route → 405"), so it is added here rather than repeated
 	// on 26 entries — repetition being how one of them would come to be missing.
 	codes = append(codes, 405)
@@ -450,7 +450,7 @@ func responsesFor(op apiOp, defs map[string]any) map[string]any {
 	for _, c := range codes {
 		desc := errorDescriptions[c]
 		if c == 405 {
-			desc = "The route exists; this method does not apply to it (§6.2)."
+			desc = "The route exists; this method does not apply to it (the documented invariant)."
 		}
 		out[fmt.Sprint(c)] = map[string]any{
 			"description": desc,

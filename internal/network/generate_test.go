@@ -22,7 +22,7 @@ func mustGenerate(t *testing.T, d Declaration) Spec {
 }
 
 // indexOf returns the position of the rule with the given counter within one
-// hook's rules, or -1. Positions are what the order assertions read (network.md D1 ④).
+// hook's rules, or -1. Positions are what the order assertions read (the relevant internals page the documented invariant ④).
 func indexOf(rules []ruleset.Rule, counter string) int {
 	for i, r := range rules {
 		if r.Counter == counter {
@@ -78,7 +78,7 @@ func allowPublic() Declaration {
 // Each combination pins the rules it must produce AND the ones it must not. The
 // negatives matter as much: the deny-safe tier appearing under `default: deny`
 // would be a rule that never matches, i.e. one more legitimate zero in the
-// counter signal every deny assertion reads (D4.1).
+// counter signal every deny assertion reads (the documented invariant).
 func TestTheFourDeclarationCombinations(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -105,7 +105,7 @@ func TestTheFourDeclarationCombinations(t *testing.T) {
 		d:    denyWithAllow(t),
 		wantHave: []string{
 			// The allow is emitted on BOTH hooks — a forward-only allow cannot reach a
-			// host-local destination at all (D4.2).
+			// host-local destination at all (the documented invariant).
 			"allow0_in", "allow0_fwd",
 			// …and any allow means routed egress, so the masquerade goes on.
 			"egress_masq",
@@ -133,7 +133,7 @@ func TestTheFourDeclarationCombinations(t *testing.T) {
 		wantHave: []string{
 			"fwd_default_allow",
 			// The tier is the DELIVERY FACE of `allow`, not optional hardening: without
-			// it this value hands the host's whole LAN to the sandbox (D5 ⑤).
+			// it this value hands the host's whole LAN to the sandbox (the documented invariant ⑤).
 			"fwd_tier_v4", "fwd_tier_v6",
 			"egress_masq",
 			"in_floor", "fwd_floor_v4", "fwd_floor_v6",
@@ -173,17 +173,17 @@ func TestRuleOrderIsTheMechanism(t *testing.T) {
 		fwd := mustGenerate(t, d).Rules.ByHook(ruleset.HookForward)
 
 		mustBefore(t, fwd, "fwd_floor_v4", "allow0_fwd",
-			"no declaration lifts the floor, and that is materialized purely by ORDER (§2.4). "+
+			"no declaration lifts the floor, and that is materialized purely by ORDER (the documented invariant). "+
 				"Below the allows, an `allow 10.0.0.0/8` would lift the floor's sibling item with it")
 		mustBefore(t, fwd, "allow0_fwd", "fwd_tier_v4",
 			"the deny-safe tier is LIFTABLE BY DECLARATION, which is the whole difference between "+
-				"it and the floor — above the allows it would just be a second floor (§2.4)")
+				"it and the floor — above the allows it would just be a second floor (the documented invariant)")
 		mustBefore(t, fwd, "fwd_tier_v4", "fwd_default_allow",
-			"the tier must refuse before the default admits, or `allow` hands over the host's LAN (D5 ⑤)")
+			"the tier must refuse before the default admits, or `allow` hands over the host's LAN (the documented invariant ⑤)")
 	})
 
 	t.Run("via[] wins over allow[]", func(t *testing.T) {
-		// §6.2 fixes this: a flow matching both is STEERED. The two are observably
+		// the documented invariant fixes this: a flow matching both is STEERED. The two are observably
 		// different outcomes, and the contract pins the choice so one declaration
 		// yields one reachable set under any implementation.
 		d := Zero()
@@ -202,7 +202,7 @@ func TestRuleOrderIsTheMechanism(t *testing.T) {
 		in := spec.Rules.ByHook(ruleset.HookInput)
 		mustBefore(t, in, "via0_0_accept", "allow0_in",
 			"the steered flow's narrow accept must be reached before the plain allow, so the "+
-				"observable outcome for a flow matching both is STEERED (§6.2)")
+				"observable outcome for a flow matching both is STEERED (the documented invariant)")
 	})
 
 	t.Run("multiple via[] entries are first-match-wins in declaration order", func(t *testing.T) {
@@ -217,7 +217,7 @@ func TestRuleOrderIsTheMechanism(t *testing.T) {
 		pre := mustGenerate(t, d).Rules.ByHook(ruleset.HookPrerouting)
 		mustBefore(t, pre, "via0_0_dnat", "via1_0_dnat",
 			"overlapping via[] entries are FIRST-MATCH-WINS in declaration order and later ones "+
-				"are not evaluated — §6.2 pins it so one declaration means one reachable set")
+				"are not evaluated — the documented invariant pins it so one declaration means one reachable set")
 		// And the endpoints are not swapped, which the ordering alone would not catch.
 		if pre[0].ToEndpoint != "10.0.0.5:15443" || pre[1].ToEndpoint != "10.0.0.5:15444" {
 			t.Errorf("steering endpoints in the wrong order: %q then %q", pre[0].ToEndpoint, pre[1].ToEndpoint)
@@ -225,8 +225,8 @@ func TestRuleOrderIsTheMechanism(t *testing.T) {
 	})
 
 	t.Run("the input side: self-gateway allow, sibling drop, then the allows", func(t *testing.T) {
-		// The measured pair (D4.2): an `allow 10.0.0.0/8` must reach THIS sandbox's own
-		// gateway (§5.D semantics ③'s only delivery path) and NOT a sibling's — which
+		// The measured pair (the documented invariant): an `allow 10.0.0.0/8` must reach THIS sandbox's own
+		// gateway (the documented invariant semantics ③'s only delivery path) and NOT a sibling's — which
 		// is a question of order, and the `forward` side's sibling drop counts ZERO on
 		// this path, so reading only that counter turns a real leak into "the floor
 		// counter is 0" (an INVALID assertion, not a pass).
@@ -237,10 +237,10 @@ func TestRuleOrderIsTheMechanism(t *testing.T) {
 		mustBefore(t, in, "allow0_selfgw", "in_sibling",
 			"a plain sibling-CIDR drop would kill this sandbox's OWN /30 gateway along with the "+
 				"siblings — that gateway is the only stably-available host-local resolver address, "+
-				"which §5.D semantics ③ requires a caller to be able to declare (D5 ⑦)")
+				"which the documented invariant semantics ③ requires a caller to be able to declare (the documented invariant ⑦)")
 		mustBefore(t, in, "in_sibling", "allow0_in",
 			"without the sibling drop between them, an `allow 10.0.0.0/8` connects to a SIBLING's "+
-				"gateway — measured, it reads the sibling's banner (D4.2)")
+				"gateway — measured, it reads the sibling's banner (the documented invariant)")
 		mustBefore(t, in, "allow0_in", "in_floor",
 			"the declaration's allows sit above the ct-state floor, or nothing declared could "+
 				"reach a host-local address at all")
@@ -250,7 +250,7 @@ func TestRuleOrderIsTheMechanism(t *testing.T) {
 		in := mustGenerate(t, denyEmpty()).Rules.ByHook(ruleset.HookInput)
 		mustBefore(t, in, "in_established", "in_floor",
 			"below the floor, the guest's replies to the host are dropped and transport dies "+
-				"outright — the one LOUD failure in this design (D5 ⑧)")
+				"outright — the one LOUD failure in this design (the documented invariant ⑧)")
 	})
 }
 
@@ -259,13 +259,13 @@ func TestRuleOrderIsTheMechanism(t *testing.T) {
 //
 // This is the trap that reads as healthy while the feature is dead: placed in a
 // DIFFERENT base chain on the same hook, the accept MATCHES and its counter RISES
-// while the flow is still dropped and the connection still fails (measured, D5 ⑩ —
+// while the flow is still dropped and the connection still fails (measured, the documented invariant ⑩ —
 // see ruleset.Accept).
 func TestTheViaAcceptSharesTheFloorsChainAndSitsAboveIt(t *testing.T) {
 	spec := mustGenerate(t, denyWithVia(t))
 	in := spec.Rules.ByHook(ruleset.HookInput)
 	mustBefore(t, in, "via0_0_accept", "in_floor",
-		"the approved floor exception works by ORDER within one chain (§2.4)")
+		"the approved floor exception works by ORDER within one chain (the documented invariant)")
 
 	// Same chain, asserted by hook identity rather than by position alone.
 	var acc, floor *ruleset.Rule
@@ -283,7 +283,7 @@ func TestTheViaAcceptSharesTheFloorsChainAndSitsAboveIt(t *testing.T) {
 	if acc.Hook != floor.Hook {
 		t.Errorf("the via accept is on %s while the floor drop is on %s — a CROSS-CHAIN accept "+
 			"increments its own counter while the flow is still dropped and the connection still "+
-			"fails, so the counter reads healthy while the feature is dead (D5 ⑩)", acc.Hook, floor.Hook)
+			"fails, so the counter reads healthy while the feature is dead (the documented invariant ⑩)", acc.Hook, floor.Hook)
 	}
 	if !floor.Verdict.Terminal() {
 		t.Error("the floor rule's verdict is not terminal — only drop/reject end traversal across chains")
@@ -291,7 +291,7 @@ func TestTheViaAcceptSharesTheFloorsChainAndSitsAboveIt(t *testing.T) {
 }
 
 // The narrow accept must pin THREE things. Each omission has a live measured
-// counter-example (D5 ⑩), so each is asserted separately rather than as "the rule
+// counter-example (the documented invariant ⑩), so each is asserted separately rather than as "the rule
 // looks about right".
 func TestTheViaAcceptPinsAllThreeClauses(t *testing.T) {
 	spec := mustGenerate(t, denyWithVia(t))
@@ -309,7 +309,7 @@ func TestTheViaAcceptPinsAllThreeClauses(t *testing.T) {
 	// authorizes every OTHER address on that port.
 	if acc.Match.CTOriginalDest == nil {
 		t.Error("no pre-NAT destination clause — the declaration named a cidr, so without it any " +
-			"other address on that port is authorized (D5 ⑩)")
+			"other address on that port is authorized (the documented invariant ⑩)")
 	} else if got := acc.Match.CTOriginalDest.String(); got != "1.1.1.1/32" {
 		t.Errorf("pre-NAT destination = %s, want the declared 1.1.1.1/32", got)
 	}
@@ -317,24 +317,24 @@ func TestTheViaAcceptPinsAllThreeClauses(t *testing.T) {
 	// listener the declaration never named (measured: 9.9.9.9:443 → :19999, and
 	// the guest read a banner from `hello-from-UNDECLARED`).
 	if acc.Match.CTOriginalPort != 443 {
-		t.Errorf("pre-NAT port = %d, want the declared 443 (D5 ⑩)", acc.Match.CTOriginalPort)
+		t.Errorf("pre-NAT port = %d, want the declared 443 (the documented invariant ⑩)", acc.Match.CTOriginalPort)
 	}
 	// (3) The POST-NAT listener port. Without it — using only `ct status dnat` +
 	// dport — an UNDECLARED original port redirected to a DECLARED listener is
 	// allowed through with the floor counting 0 (measured: 9200 → :18443).
 	if acc.Match.DestPort != 15443 {
-		t.Errorf("post-NAT port = %d, want the endpoint's 15443 (D5 ⑩)", acc.Match.DestPort)
+		t.Errorf("post-NAT port = %d, want the endpoint's 15443 (the documented invariant ⑩)", acc.Match.DestPort)
 	}
 	// (4) The interface. Without it, ANOTHER sandbox's identical flow is let
 	// through by THIS sandbox's accept — each per-sandbox table is a `policy
 	// accept` base chain on a shared hook, so an un-narrowed accept is a hole in
-	// EVERY sandbox's floor (measured, D5 ⑩ last row).
+	// EVERY sandbox's floor (measured, the documented invariant ⑩ last row).
 	if acc.Scope != ruleset.ScopeGuestIn {
 		t.Errorf("scope = %s, want guest-in: an accept without the interface narrowing is a hole "+
-			"in every OTHER sandbox's floor (D5 ⑩)", acc.Scope)
+			"in every OTHER sandbox's floor (the documented invariant ⑩)", acc.Scope)
 	}
 	if acc.Match.Proto != ruleset.TCP {
-		t.Errorf("proto = %q, want tcp (a port match requires it, D3.1)", acc.Match.Proto)
+		t.Errorf("proto = %q, want tcp (a port match requires it, the documented invariant)", acc.Match.Proto)
 	}
 }
 
@@ -342,7 +342,7 @@ func TestTheViaAcceptPinsAllThreeClauses(t *testing.T) {
 // directions are asserted — which is the point: keeping the cidr clause on a
 // `cidr: any` declaration blocks the traffic the declaration authorized, while
 // dropping it on an explicit-endpoint declaration authorizes every other address
-// on that port (D3.3 / D5 ⑩).
+// on that port (the documented invariant / the documented invariant ⑩).
 func TestTheCidrClauseIsEmittedIffTheDeclarationPinnedOne(t *testing.T) {
 	// Explicit endpoint → the clause is present (covered above, restated here so
 	// the pair reads as one property).
@@ -364,7 +364,7 @@ func TestTheCidrClauseIsEmittedIffTheDeclarationPinnedOne(t *testing.T) {
 	if got := findRule(transparent, "via0_0_accept").Match.CTOriginalDest; got != nil {
 		t.Errorf("transparent form: a pre-NAT cidr clause (%s) was emitted — the declaration "+
 			"authorized ANY destination on that port, so this clause would block exactly the "+
-			"traffic it allowed (D3.3 / D5 ⑩)", got)
+			"traffic it allowed (the documented invariant / the documented invariant ⑩)", got)
 	}
 	if got := findRule(transparent, "via0_0_dnat").Match.DestV4; len(got) != 0 {
 		t.Errorf("transparent form: the steering DNAT still carries a destination clause %v", got)
@@ -420,8 +420,8 @@ func TestTheSelfGatewayAllowCannotReachAGatewayTheDeclarationDidNotContain(t *te
 	if within == nil {
 		t.Fatal("the self-gateway rule carries no declared-prefix clause — a sandbox on " +
 			"10.66.250.0/30 would then reach 10.66.250.1:8080, an address this declaration does " +
-			"NOT contain, and with it any host process bound 0.0.0.0:8080 (§2.4's host-itself floor " +
-			"item, measured D5 ⑧)")
+			"NOT contain, and with it any host process bound 0.0.0.0:8080 (the documented invariant's host-itself floor " +
+			"item, measured the documented invariant ⑧)")
 	}
 	// The prefix is the DECLARED one, verbatim — not the sandbox space, and not
 	// widened. Widening it to 10.66.0.0/16 would restore the whole hole.
@@ -437,7 +437,7 @@ func TestTheSelfGatewayAllowCannotReachAGatewayTheDeclarationDidNotContain(t *te
 	}
 	// The converse, so this is not just "a clause is present": a declaration that
 	// genuinely CONTAINS the gateway still reaches it — otherwise the fix would have
-	// broken §5.D semantics ③, which is the whole reason the rule exists.
+	// broken the documented invariant semantics ③, which is the whole reason the rule exists.
 	d2 := Zero()
 	d2.Egress.Allow = []Tuple{{CIDR: mustCIDR(t, "10.0.0.0/8"), Port: 53, Proto: model.NetUDP}}
 	gw2 := findRule(mustGenerate(t, d2), "allow0_selfgw")
@@ -445,7 +445,7 @@ func TestTheSelfGatewayAllowCannotReachAGatewayTheDeclarationDidNotContain(t *te
 		t.Fatal("the containing declaration lost its self-gateway rule")
 	}
 	if !gw2.Match.DestSelfGatewayWithin.Contains(gwAddr) {
-		t.Errorf("%s does not contain the gateway %s — §5.D semantics ③ has no delivery path left, "+
+		t.Errorf("%s does not contain the gateway %s — the documented invariant semantics ③ has no delivery path left, "+
 			"which is the failure the fix must not introduce", gw2.Match.DestSelfGatewayWithin, gwAddr)
 	}
 }
@@ -477,7 +477,7 @@ func TestEveryGeneratedRuleSetPassesTheGuards(t *testing.T) {
 			}
 			// Every rule carries a counter, because a deny assertion is only valid when
 			// a counter moved — a floor whose counter reads 0 is indistinguishable from
-			// a floor that was bypassed (§2.4 / D5 ⑧).
+			// a floor that was bypassed (the documented invariant / the documented invariant ⑧).
 			for _, r := range spec.Rules.Rules {
 				if r.Counter == "" {
 					t.Errorf("rule %s/%s has no counter", r.Hook, r.Verdict)
@@ -507,7 +507,7 @@ func TestEveryGeneratedRuleSetPassesTheGuards(t *testing.T) {
 // The two guards' SCOPES must not cross: a legal second-hop rule (uid-narrowed, NO
 // interface narrowing) must not be rejected by the per-sandbox interface guard.
 //
-// Otherwise the guard and §2.4 invariant 2 are mutually exclusive and whichever
+// Otherwise the guard and the documented invariant invariant 2 are mutually exclusive and whichever
 // was written first wins silently.
 func TestTheTwoGuardScopesDoNotCross(t *testing.T) {
 	rs, err := SecondHopRules()
@@ -517,16 +517,16 @@ func TestTheTwoGuardScopesDoNotCross(t *testing.T) {
 	if err := ruleset.Validate(rs); err != nil {
 		t.Fatalf("the second-hop rule set — uid-narrowed and deliberately carrying no interface "+
 			"predicate — was rejected by the guards: %v. The guard must be scoped BY TABLE, or it is "+
-			"mutually exclusive with §2.4 invariant 2", err)
+			"mutually exclusive with the documented invariant invariant 2", err)
 	}
 	for _, r := range rs.Rules {
 		switch r.Scope {
 		case ruleset.ScopeSecondHopUID:
 			// A uid-narrowed rule may only DROP: skuid misses packets, so an accept narrowed
-			// by it leaks them past the floor it sits above (the measured asymmetry, D5 ㉔).
+			// by it leaks them past the floor it sits above (the measured asymmetry, the documented invariant ㉔).
 			if r.Verdict != ruleset.Drop {
 				t.Errorf("second-hop rule %q is a uid-narrowed %s — only DROP is safe under a "+
-					"predicate that misses packets (D5 ㉔)", r.Counter, r.Verdict)
+					"predicate that misses packets (the documented invariant ㉔)", r.Counter, r.Verdict)
 			}
 		case ruleset.ScopeSecondHopReturn:
 			// The ONE accept this table may carry, and the distinction from the case above is
@@ -538,7 +538,7 @@ func TestTheTwoGuardScopesDoNotCross(t *testing.T) {
 			}
 		default:
 			t.Errorf("second-hop rule %q is narrowed by %s — on that hook the only predicates are "+
-				"the deployment uid and, for the return arm, ct-state (D5 ㉔)", r.Counter, r.Scope)
+				"the deployment uid and, for the return arm, ct-state (the documented invariant ㉔)", r.Counter, r.Scope)
 		}
 	}
 }
@@ -548,22 +548,22 @@ func TestTheTwoGuardScopesDoNotCross(t *testing.T) {
 // The second hop must be emitted on `output` and NOWHERE ELSE.
 //
 // Measured, hop 2's egress counts ZERO in `forward` in all three shapes and is
-// visible only in `output` (D5 ㉔). So a rule set that puts it on the wrong hook
+// visible only in `output` (the documented invariant ㉔). So a rule set that puts it on the wrong hook
 // passes every FIRST-hop assertion while the second hop is never evaluated at all
-// — and the symptom is a floor counter that does not move, D4.1's silent pass.
+// — and the symptom is a floor counter that does not move, the documented invariant's silent pass.
 func TestTheSecondHopLandsOnOutputAndNotOnForward(t *testing.T) {
 	rs, err := SecondHopRules()
 	if err != nil {
 		t.Fatalf("SecondHopRules: %v", err)
 	}
 	if len(rs.Rules) == 0 {
-		t.Fatal("no second-hop rules — §2.4 invariant 2's second half would be undelivered")
+		t.Fatal("no second-hop rules — the documented invariant invariant 2's second half would be undelivered")
 	}
 	for _, r := range rs.Rules {
 		if r.Hook != ruleset.HookOutputFilter {
 			t.Errorf("second-hop rule %q is on %s: measured, a host-local process's egress counts "+
 				"ZERO in forward in all three shapes and is visible only in output — a rule on the "+
-				"wrong hook passes every first-hop assertion while hop 2 is never evaluated (D5 ㉔)",
+				"wrong hook passes every first-hop assertion while hop 2 is never evaluated (the documented invariant ㉔)",
 				r.Counter, r.Hook)
 		}
 	}
@@ -582,7 +582,7 @@ func TestTheSecondHopLandsOnOutputAndNotOnForward(t *testing.T) {
 		t.Errorf("second-hop floor covers v4=%v v6=%v — both are needed: the deputy is pointed at "+
 			"an address, and either family reaches a sibling", haveV4, haveV6)
 	}
-	// The sibling CIDR specifically: that is the confused-deputy target §2.4 names.
+	// The sibling CIDR specifically: that is the confused-deputy target the documented invariant names.
 	found := false
 	for _, r := range rs.Rules {
 		for _, p := range r.Match.DestV4 {
@@ -593,16 +593,16 @@ func TestTheSecondHopLandsOnOutputAndNotOnForward(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("the second-hop floor does not cover the sandbox address space (%s) — that is "+
-			"exactly the confused deputy §2.4 invariant 2 names: an `upstream` pointed at a sibling "+
+			"exactly the confused deputy the documented invariant invariant 2 names: an `upstream` pointed at a sibling "+
 			"walks in through the side door", ruleset.SandboxCIDR)
 	}
 }
 
 // The loop-avoidance rule must NOT be a bare uid-narrowed accept.
 //
-// D4.2 lists two needs for this predicate with opposite positions, and the accept
+// the documented invariant lists two needs for this predicate with opposite positions, and the accept
 // half is unsafe: `skuid` misses packets, so an accept sitting above a floor drop
-// leaks whatever it fails to match (D5 ㉔). This generator avoids the loop
+// leaks whatever it fails to match (the documented invariant ㉔). This generator avoids the loop
 // STRUCTURALLY instead — every steering DNAT is narrowed by the sandbox's input
 // interface, and hop 2 arrives on no interface, so it cannot match one.
 func TestLoopAvoidanceIsNotABareUIDAccept(t *testing.T) {
@@ -615,22 +615,22 @@ func TestLoopAvoidanceIsNotABareUIDAccept(t *testing.T) {
 			continue
 		}
 		// The return arm is the one legal accept (ct-state narrowed). Anything else —
-		// especially a uid-narrowed one — is the unsafe shape D4.2's first row would have
-		// needed and D5 ㉔ measured leaking.
+		// especially a uid-narrowed one — is the unsafe shape the documented invariant's first row would have
+		// needed and the documented invariant ㉔ measured leaking.
 		if r.Scope != ruleset.ScopeSecondHopReturn {
 			t.Errorf("second-hop rule %q is an accept narrowed by %s: a uid-narrowed accept above a "+
-				"floor drop leaks the packets skuid misses (D5 ㉔). Loop avoidance here is STRUCTURAL "+
+				"floor drop leaks the packets skuid misses (the documented invariant ㉔). Loop avoidance here is STRUCTURAL "+
 				"— every steering rule is interface-narrowed and hop 2 arrives on no interface",
 				r.Counter, r.Scope)
 		}
 		if len(r.Match.CTState) == 0 {
 			t.Errorf("the second-hop accept %q carries no ct-state clause — it would then admit NEW "+
-				"connections to in-floor addresses, which IS the confused deputy (D4.2)", r.Counter)
+				"connections to in-floor addresses, which IS the confused deputy (the documented invariant)", r.Counter)
 		}
 		for _, st := range r.Match.CTState {
 			if st == "new" {
 				t.Errorf("the second-hop accept %q matches `new` — a new connection to an in-floor "+
-					"address is exactly what §2.4 invariant 2 refuses", r.Counter)
+					"address is exactly what the documented invariant invariant 2 refuses", r.Counter)
 			}
 		}
 	}
@@ -654,7 +654,7 @@ func TestLoopAvoidanceIsNotABareUIDAccept(t *testing.T) {
 // counted 9 — the reply dropped by this engine, and the guest hung 25 s on a connection
 // whose request had succeeded.
 //
-// The arm does not weaken §2.4 invariant 2, and the assertion below is what pins that:
+// The arm does not weaken the documented invariant invariant 2, and the assertion below is what pins that:
 // it must NOT match `new`, so a new connection to an in-floor address — the confused
 // deputy itself — still meets the floor.
 func TestTheSecondHopCarriesAReturnArmAboveItsFloor(t *testing.T) {
@@ -673,7 +673,7 @@ func TestTheSecondHopCarriesAReturnArmAboveItsFloor(t *testing.T) {
 	if ret > v4 || ret > v6 {
 		t.Errorf("the return arm is at %d but the floor drops are at %d/%d — it must sit ABOVE them "+
 			"IN THIS CHAIN: an accept ends only its own chain, so below the drop it would count "+
-			"while the reply still died (D5 ⑩'s cross-chain trap, same shape)", ret, v4, v6)
+			"while the reply still died (the documented invariant ⑩'s cross-chain trap, same shape)", ret, v4, v6)
 	}
 	arm := rs.Rules[ret]
 	// It admits only ALREADY-ESTABLISHED flows. This is the line between "the reply to
@@ -682,8 +682,8 @@ func TestTheSecondHopCarriesAReturnArmAboveItsFloor(t *testing.T) {
 	for _, st := range arm.Match.CTState {
 		if st == "new" {
 			t.Error("the return arm matches `new` — that admits the endpoint process opening a NEW " +
-				"connection to an in-floor address, which is precisely the confused deputy §2.4 " +
-				"invariant 2 exists to refuse (D4.2)")
+				"connection to an in-floor address, which is precisely the confused deputy the documented invariant " +
+				"invariant 2 exists to refuse (the documented invariant)")
 		}
 		if st == "established" || st == "related" {
 			established = true
@@ -713,14 +713,14 @@ func TestTheDenySafeTierIsLiftableAndSeparateFromTheFloor(t *testing.T) {
 	// Liftable: the declaration sits ABOVE it.
 	mustBefore(t, fwd, "allow0_fwd", "fwd_tier_v4",
 		"deny-SAFE means liftable by declaration, and that is materialized purely by the "+
-			"declaration sitting above it (§2.4)")
+			"declaration sitting above it (the documented invariant)")
 	// …but the floor is NOT liftable: it sits above the same declaration.
 	mustBefore(t, fwd, "fwd_floor_v4", "allow0_fwd",
-		"an `allow 10.0.0.0/8` must not lift the floor's sibling item with it (§2.4)")
+		"an `allow 10.0.0.0/8` must not lift the floor's sibling item with it (the documented invariant)")
 
 	// Separate rules, never one shared set: the sibling /16 nests inside 10/8, and
 	// an nft interval set either refuses to load or silently merges the subnet away
-	// (D5 ⑱). Asserted as "no single rule holds members of both", which is the form
+	// (the documented invariant ⑱). Asserted as "no single rule holds members of both", which is the form
 	// a merge would take.
 	for _, r := range fwd {
 		hasFloorItem, hasTierItem := false, false
@@ -738,14 +738,14 @@ func TestTheDenySafeTierIsLiftableAndSeparateFromTheFloor(t *testing.T) {
 		}
 		if hasFloorItem && hasTierItem {
 			t.Errorf("rule %q holds BOTH floor and tier members in one set — the sibling /16 nests "+
-				"inside 10/8, so the set either fails to load or SILENTLY merges the floor away (D5 ⑱)",
+				"inside 10/8, so the set either fails to load or SILENTLY merges the floor away (the documented invariant ⑱)",
 				r.Counter)
 		}
 	}
 
 	// v6 membership: fc00::/7 plus each member's NAT64 IMAGE, never the
 	// `64:ff9b::/96` prefix itself (which maps the whole v4 space and would refuse
-	// exactly the public egress `allow` promises — D5 ㉓).
+	// exactly the public egress `allow` promises — the documented invariant ㉓).
 	var tier6 ruleset.Rule
 	for _, r := range fwd {
 		if r.Counter == "fwd_tier_v6" {
@@ -759,7 +759,7 @@ func TestTheDenySafeTierIsLiftableAndSeparateFromTheFloor(t *testing.T) {
 		if p == ruleset.NAT64Prefix {
 			t.Error("the v6 tier includes the bare 64:ff9b::/96 prefix — per RFC 6052 that maps the " +
 				"ENTIRE v4 space, public destinations included, so dropping it refuses the public " +
-				"egress `default: allow` promises (D5 ㉓). Only each MEMBER's image may be derived")
+				"egress `default: allow` promises (the documented invariant ㉓). Only each MEMBER's image may be derived")
 		}
 	}
 	if len(tier6.Match.DestV6) != len(ruleset.TierV6) {
@@ -769,7 +769,7 @@ func TestTheDenySafeTierIsLiftableAndSeparateFromTheFloor(t *testing.T) {
 
 // --- the floor's four items, and no IPv6 fork ---------------------------------
 
-// The floor's four items must all be delivered, each in the shape §2.4 gives it.
+// The floor's four items must all be delivered, each in the shape the documented invariant gives it.
 func TestAllFourFloorItemsAreDelivered(t *testing.T) {
 	spec := mustGenerate(t, denyEmpty())
 	fwd := spec.Rules.ByHook(ruleset.HookForward)
@@ -813,7 +813,7 @@ func TestAllFourFloorItemsAreDelivered(t *testing.T) {
 	// Item 4 — "any address of the host itself" — must be a PURE CT-STATE rule with
 	// NO address list. That is what makes host addresses never enumerated, so the
 	// engine need not know its bind addresses and a host address added AFTER
-	// installation is still covered (D5 ⑧).
+	// installation is still covered (the documented invariant ⑧).
 	var floor ruleset.Rule
 	for _, r := range in {
 		if r.Counter == "in_floor" {
@@ -821,12 +821,12 @@ func TestAllFourFloorItemsAreDelivered(t *testing.T) {
 		}
 	}
 	if floor.Counter == "" {
-		t.Fatal("no input-side floor rule — a forward-only floor misses guest→host entirely (D5 ⑧)")
+		t.Fatal("no input-side floor rule — a forward-only floor misses guest→host entirely (the documented invariant ⑧)")
 	}
 	if len(floor.Match.DestV4) > 0 || len(floor.Match.DestV6) > 0 {
 		t.Errorf("the input-side floor carries an address list (%v / %v) — it must be PURE ct-state, "+
 			"or the engine has to know its own bind addresses and the whole `a host address changed, "+
-			"must we re-render` class of question comes back (§2.4 / D5 ⑧)",
+			"must we re-render` class of question comes back (the documented invariant / the documented invariant ⑧)",
 			floor.Match.DestV4, floor.Match.DestV6)
 	}
 	if len(floor.Match.CTState) == 0 {
@@ -835,24 +835,24 @@ func TestAllFourFloorItemsAreDelivered(t *testing.T) {
 	// The `iifname` narrowing is the ENTIRE reason this is a per-sandbox rule
 	// rather than a host-level inbound kill switch: without it it takes out the
 	// orchestrator's own 127.0.0.1 listener and sshd too, because loopback also
-	// traverses `input` (D5 ⑧).
+	// traverses `input` (the documented invariant ⑧).
 	if floor.Scope != ruleset.ScopeGuestIn {
 		t.Errorf("the input-side floor is narrowed by %s — without the interface narrowing this "+
 			"same rule is a HOST-level inbound kill switch that takes out the orchestrator's own "+
-			"listener and sshd (D5 ⑧)", floor.Scope)
+			"listener and sshd (the documented invariant ⑧)", floor.Scope)
 	}
 	// The forward side needs its OWN default-deny: a destination not on the host
-	// and not steered never traverses `input` at all (D5 ⑩).
+	// and not steered never traverses `input` at all (the documented invariant ⑩).
 	if indexOf(fwd, "fwd_default_deny") < 0 {
 		t.Error("the forward chain has no default-deny — a destination that is neither on the host " +
-			"nor steered never traverses `input`, so an input-only default-deny does not cover it (D5 ⑩)")
+			"nor steered never traverses `input`, so an input-only default-deny does not cover it (the documented invariant ⑩)")
 	}
 }
 
 // The generator must NOT fork for IPv6: a single family-UNQUALIFIED ct-state rule
 // covers both families, and an explicit `meta nfproto ipv6` second arm is
 // redundant — measured, it counted exactly the packets the family-agnostic drop
-// had already caught (D5 ⑪).
+// had already caught (the documented invariant ⑪).
 //
 // Asserted structurally: every ct-state rule must be family-unqualified, i.e.
 // carry no address list at all.
@@ -869,7 +869,7 @@ func TestTheGeneratorDoesNotForkForIPv6(t *testing.T) {
 				// the fork: it forces a second arm for the other family.
 				if len(r.Match.DestV4) > 0 || len(r.Match.DestV6) > 0 {
 					t.Errorf("ct-state rule %q also carries a family-typed address list — that is the "+
-						"IPv6 fork D5 ⑪ measured as redundant: one unqualified ct-state rule covers "+
+						"IPv6 fork the documented invariant ⑪ measured as redundant: one unqualified ct-state rule covers "+
 						"both families, including a global prefix the guest invented for itself", r.Counter)
 				}
 			}
@@ -893,7 +893,7 @@ func TestTheGeneratorDoesNotForkForIPv6(t *testing.T) {
 // --- publish: the four-part unit, and the hook assignment ---------------------
 
 // A publish is a RULE SET, not a rule: four parts, and each missing part is a
-// BROKEN publish rather than a smaller feature (§5.D).
+// BROKEN publish rather than a smaller feature (the documented invariant).
 func TestOnePublishEmitsAllFourParts(t *testing.T) {
 	d := Zero()
 	d.Ingress.Publish = []Publish{{GuestPort: 8080, Proto: model.NetTCP}}
@@ -906,19 +906,19 @@ func TestOnePublishEmitsAllFourParts(t *testing.T) {
 	}
 	// (2) output-hook DNAT — the HOST's own path. A second, independent rule:
 	// host-originated traffic never traverses prerouting, so "it worked from the
-	// host" is not evidence, and neither is the reverse (D5 ⑭).
+	// host" is not evidence, and neither is the reverse (the documented invariant ⑭).
 	out := findRule(spec, "pub0_out_dnat")
 	if out.Hook != ruleset.HookOutputNAT || out.Verdict != ruleset.DNAT {
 		t.Errorf("the host-path DNAT is %s/%s — host-originated traffic never traverses prerouting, "+
-			"so it needs its OWN rule on the output hook (D5 ⑭)", out.Hook, out.Verdict)
+			"so it needs its OWN rule on the output hook (the documented invariant ⑭)", out.Hook, out.Verdict)
 	}
 	// (3) the return SNAT to this sandbox's own /30 gateway. Without it a publish
 	// works only on a sandbox that happens to carry a default route and TIMES OUT
-	// on one that does not (measured to_guest=2 / from_guest=0, D5 ⑬).
+	// on one that does not (measured to_guest=2 / from_guest=0, the documented invariant ⑬).
 	snat := findRule(spec, "pub_return_snat")
 	if snat.Verdict != ruleset.SNAT || !snat.ToSelfGateway {
 		t.Errorf("the return SNAT is %s (toSelfGateway=%v) — without it the guest's reply has "+
-			"nowhere to go and an outside caller reads a timeout (D5 ⑬)", snat.Verdict, snat.ToSelfGateway)
+			"nowhere to go and an outside caller reads a timeout (the documented invariant ⑬)", snat.Verdict, snat.ToSelfGateway)
 	}
 	if snat.Hook != ruleset.HookPostrouting {
 		t.Errorf("the return SNAT is on %s, want postrouting", snat.Hook)
@@ -926,7 +926,7 @@ func TestOnePublishEmitsAllFourParts(t *testing.T) {
 	// (4) the companion accept, on the FORWARD hook — the OPPOSITE hook from `via[]`'s.
 	// After the DNAT a published flow's destination is the GUEST IP, so it must be
 	// routed onward and lands on `forward`; a steered flow's destination is
-	// host-local and lands on `input`. Measured both ways (D5 ⑮).
+	// host-local and lands on `input`. Measured both ways (the documented invariant ⑮).
 	//
 	// On that hook's INGRESS chain specifically — a later priority, so every sandbox's
 	// floor is evaluated before any sandbox's inbound rules (see
@@ -935,7 +935,7 @@ func TestOnePublishEmitsAllFourParts(t *testing.T) {
 	if acc.Hook != ruleset.HookForwardIngress {
 		t.Errorf("the publish companion accept is on %s, want the forward hook's ingress chain: "+
 			"post-DNAT the destination is the guest IP so it is ROUTED onward — the opposite of "+
-			"via[]'s hook assignment, and the two must not be copied from each other (D5 ⑮)", acc.Hook)
+			"via[]'s hook assignment, and the two must not be copied from each other (the documented invariant ⑮)", acc.Hook)
 	}
 	if acc.Verdict != ruleset.Accept || !acc.Match.DestGuest || acc.Match.DestPort != 8080 {
 		t.Errorf("the companion accept does not pin the guest destination and port: %+v", acc.Match)
@@ -978,7 +978,7 @@ func TestThePublishReturnSNATIsOnePerSandbox(t *testing.T) {
 	}
 }
 
-// Ingress is closed by default (§2.1 ③): without an inbound default-deny anything
+// Ingress is closed by default (the documented invariant ③): without an inbound default-deny anything
 // the host routes could reach the guest IP directly.
 func TestIngressIsClosedWhenNothingIsPublished(t *testing.T) {
 	ing := mustGenerate(t, denyEmpty()).Rules.ByHook(ruleset.HookForwardIngress)
@@ -998,7 +998,7 @@ func TestIngressIsClosedWhenNothingIsPublished(t *testing.T) {
 // The ingress default-deny must live on a LATER-priority chain than the floor, and
 // this is a CROSS-SANDBOX ordering requirement rather than organization: measured,
 // sandbox B's ingress drop won over sandbox A's floor at one shared priority, A's floor
-// counted ZERO, and the guest got a 25-SECOND HANG instead of the clean failure §2.4
+// counted ZERO, and the guest got a 25-SECOND HANG instead of the clean failure the documented invariant
 // promises (see ruleset.HookForwardIngress).
 func TestTheIngressDenyIsOnALaterChainThanTheFloor(t *testing.T) {
 	spec := mustGenerate(t, denyEmpty())
@@ -1013,7 +1013,7 @@ func TestTheIngressDenyIsOnALaterChainThanTheFloor(t *testing.T) {
 		t.Errorf("the ingress default-deny is on %s, want the LATER forward-ingress chain — at one "+
 			"shared priority another sandbox's ingress drop races this sandbox's floor, and measured, "+
 			"the ingress drop won: the guest hung 25 s instead of failing fast, and the floor counted "+
-			"zero (§2.4 fail-closed's second half / D4.1's counter signal)", got)
+			"zero (the documented invariant fail-closed's second half / the documented invariant's counter signal)", got)
 	}
 	// The two must be different hooks, which is what produces two chains and therefore
 	// the deterministic priority ordering.
@@ -1024,7 +1024,7 @@ func TestTheIngressDenyIsOnALaterChainThanTheFloor(t *testing.T) {
 	}
 }
 
-// The publish return path is not an EGRESS path (D1 ④): a declaration that
+// The publish return path is not an EGRESS path (the documented invariant ④): a declaration that
 // publishes a port but declares no egress must still have its floor and its
 // default-deny intact.
 func TestPublishDoesNotBecomeAnEgressPath(t *testing.T) {
@@ -1049,7 +1049,7 @@ func TestPublishDoesNotBecomeAnEgressPath(t *testing.T) {
 }
 
 // RoutedEgress is a derived FACT, not a knob: it decides whether the provider must
-// put the three host-side egress mechanisms in place (D5 ⑤). `via[]` alone does
+// put the three host-side egress mechanisms in place (the documented invariant ⑤). `via[]` alone does
 // not need them — a steered flow is DNAT'd to a host-local endpoint and delivered
 // locally.
 func TestRoutedEgressIsDerivedFromTheDeclaration(t *testing.T) {
@@ -1085,7 +1085,7 @@ func TestGuestFacingRefusalsRejectWhileInboundDrops(t *testing.T) {
 			if r.Verdict != ruleset.Reject {
 				t.Errorf("%q uses %s, want reject: this refusal faces the GUEST, and gVisor honors "+
 					"ICMP errors — a pure-drop floor meets fail-closed's security half while breaking "+
-					"the `clean connection failure` half it wrote down itself (D5 ⑨)", r.Counter, r.Verdict)
+					"the `clean connection failure` half it wrote down itself (the documented invariant ⑨)", r.Counter, r.Verdict)
 			}
 		case "fwd_ingress_closed":
 			if r.Verdict != ruleset.Drop {
@@ -1094,7 +1094,7 @@ func TestGuestFacingRefusalsRejectWhileInboundDrops(t *testing.T) {
 			}
 		case "fwd_tier_v4", "fwd_tier_v6":
 			// The tier faces the guest but is a policy refusal rather than a floor
-			// breach; drop is what §2.4 describes for it, and either verdict is
+			// breach; drop is what the documented invariant describes for it, and either verdict is
 			// security-equivalent. Pinned so a change is deliberate.
 			if r.Verdict != ruleset.Drop {
 				t.Errorf("%q uses %s, want drop", r.Counter, r.Verdict)
@@ -1122,7 +1122,7 @@ func TestEveryRuleCitesTheSectionItDelivers(t *testing.T) {
 	// The second-hop rules too.
 	rs, _ := SecondHopRules()
 	for _, r := range rs.Rules {
-		if !strings.Contains(r.Why, "§2.4") {
+		if !strings.Contains(r.Why, "the documented invariant") {
 			t.Errorf("second-hop rule %q does not name the invariant it delivers: %q", r.Counter, r.Why)
 		}
 	}
@@ -1130,7 +1130,7 @@ func TestEveryRuleCitesTheSectionItDelivers(t *testing.T) {
 
 // A declaration must produce a DETERMINISTIC rule set: the same input twice yields
 // the same rules in the same order. Otherwise "the rules are equivalent" replaces
-// "the rules are the same", and §6.2's promise that one declaration means one
+// "the rules are the same", and the documented invariant's promise that one declaration means one
 // reachable set stops being checkable.
 func TestGenerationIsDeterministic(t *testing.T) {
 	d := allowPublic()
@@ -1151,7 +1151,7 @@ func TestGenerationIsDeterministic(t *testing.T) {
 	}
 	// Counters are declared before use, in a stable order — a named counter
 	// referenced before its declaration fails the `nft -f` load and reports the
-	// error against the wrong line (D5 ㉔).
+	// error against the wrong line (the documented invariant ㉔).
 	if len(a.Rules.Counters) != len(b.Rules.Counters) {
 		t.Error("counter declaration order is not deterministic")
 	}
@@ -1174,14 +1174,14 @@ func TestGenerateRefusesAnEndpointItCannotPin(t *testing.T) {
 	}}
 	if _, err := Generate(d); err == nil {
 		t.Error("generated a rule set for an endpoint with no port — the narrow accept must pin the " +
-			"POST-NAT port (D5 ⑩), so without one the steering DNAT would be installed with nothing " +
+			"POST-NAT port (the documented invariant ⑩), so without one the steering DNAT would be installed with nothing " +
 			"above the floor to admit the steered flow: via[] silently dead")
 	}
 }
 
 // The self-gateway allow is emitted for any allow[] entry overlapping the sandbox
 // address space, in EITHER direction of overlap — a supernet like 10.0.0.0/8 and a
-// narrow subnet inside the space both occur (§5.D semantics ③ / D5 ⑦).
+// narrow subnet inside the space both occur (the documented invariant semantics ③ / the documented invariant ⑦).
 func TestTheSelfGatewayAllowFollowsTheDeclaredSandboxSpaceOverlap(t *testing.T) {
 	for name, tc := range map[string]struct {
 		cidr string
@@ -1200,9 +1200,9 @@ func TestTheSelfGatewayAllowFollowsTheDeclaredSandboxSpaceOverlap(t *testing.T) 
 			in := mustGenerate(t, d).Rules.ByHook(ruleset.HookInput)
 			got := indexOf(in, "allow0_selfgw") >= 0
 			if got != tc.want {
-				t.Errorf("self-gateway allow emitted = %v, want %v for %s. It is §5.D semantics ③'s "+
+				t.Errorf("self-gateway allow emitted = %v, want %v for %s. It is the documented invariant semantics ③'s "+
 					"ONLY delivery path: the sole stably-available host-local resolver address is this "+
-					"sandbox's own /30 gateway, which lives inside the sibling CIDR (D5 ⑦)",
+					"sandbox's own /30 gateway, which lives inside the sibling CIDR (the documented invariant ⑦)",
 					got, tc.want, tc.cidr)
 			}
 			if got {
@@ -1232,7 +1232,7 @@ func TestTheSelfGatewayAllowFollowsTheDeclaredSandboxSpaceOverlap(t *testing.T) 
 	}
 }
 
-// TestCounterAttributionCoversEveryDeclarationEntry is what makes §6.1's per-entry
+// TestCounterAttributionCoversEveryDeclarationEntry is what makes the documented invariant's per-entry
 // `hit_packet` trustworthy: every entry the caller wrote must map to counter names that
 // actually EXIST in the emitted set. Attribution is produced where the names are minted
 // (see Spec.Counters for why), and this asserts the join.
@@ -1289,9 +1289,9 @@ func TestCounterAttributionCoversEveryDeclarationEntry(t *testing.T) {
 // break the case operators reach for FIRST.
 //
 // An `allow[]` entry inside the sandbox address space also emits a self-gateway accept,
-// and that rule is the ONLY delivery path for a declared host-local resolver (§5.D
-// semantics ③ / network.md D5 ⑦). Summing only the input/forward counters would report 0
-// hits for an entry that is plainly working — inverting the one signal §5.D has for "is
+// and that rule is the ONLY delivery path for a declared host-local resolver (the documented invariant
+// semantics ③ / the relevant internals page the documented invariant ⑦). Summing only the input/forward counters would report 0
+// hits for an entry that is plainly working — inverting the one signal the documented invariant has for "is
 // this rule live".
 func TestAllowAttributionIncludesTheSelfGatewayRule(t *testing.T) {
 	d := Zero()
@@ -1305,7 +1305,7 @@ func TestAllowAttributionIncludesTheSelfGatewayRule(t *testing.T) {
 		}
 	}
 	if !sawSelfGw {
-		t.Errorf("allow[0] attribution is %v, with no self-gateway counter — for a declared host-local resolver that rule is the only delivery path, so this entry would report 0 hits while working (network.md D5 ⑦)", spec.Counters.Allow[0])
+		t.Errorf("allow[0] attribution is %v, with no self-gateway counter — for a declared host-local resolver that rule is the only delivery path, so this entry would report 0 hits while working (the relevant internals page the documented invariant ⑦)", spec.Counters.Allow[0])
 	}
 }
 
@@ -1313,9 +1313,9 @@ func TestAllowAttributionIncludesTheSelfGatewayRule(t *testing.T) {
 // of a `via[]` entry's rules double-counts, because the DNAT and its companion accept act
 // on the SAME flow at different hooks.
 //
-// The DNAT is the rule that IS the match, which is the semantics §6.1 fixes for this
+// The DNAT is the rule that IS the match, which is the semantics the documented invariant fixes for this
 // number. dnat > 0 with accept == 0 is additionally a known engine defect signature
-// (D5 ⑩'s floor-kills-via case) rather than something a caller can act on.
+// (the documented invariant ⑩'s floor-kills-via case) rather than something a caller can act on.
 func TestViaAttributionExcludesTheCompanionAccept(t *testing.T) {
 	spec := mustGenerate(t, denyWithVia(t))
 	got := spec.Counters.Via[0][0]
@@ -1339,7 +1339,7 @@ func TestViaAttributionExcludesTheCompanionAccept(t *testing.T) {
 // DECLARATION's own catch-all and nothing else.
 //
 // Folding the L0 floor or the deny-safe tier in would be actively misleading rather than
-// merely imprecise: a floor refusal is liftable by no declaration (§2.4), so a caller
+// merely imprecise: a floor refusal is liftable by no declaration (the documented invariant), so a caller
 // seeing those hits attributed to `egress.default` would widen an allow-list that cannot
 // help.
 func TestDefaultAttributionExcludesTheFloorAndTheTier(t *testing.T) {
@@ -1357,7 +1357,7 @@ func TestDefaultAttributionExcludesTheFloorAndTheTier(t *testing.T) {
 			}
 			for _, bad := range []string{"floor", "tier", "sibling", "established"} {
 				if strings.Contains(spec.Counters.Default, bad) {
-					t.Errorf("the default aggregate names a %s counter (%q) — not liftable by any declaration, so attributing it here sends a caller to widen an allow-list that cannot help (§2.4)", bad, spec.Counters.Default)
+					t.Errorf("the default aggregate names a %s counter (%q) — not liftable by any declaration, so attributing it here sends a caller to widen an allow-list that cannot help (the documented invariant)", bad, spec.Counters.Default)
 				}
 			}
 		})

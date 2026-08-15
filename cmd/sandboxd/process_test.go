@@ -12,13 +12,13 @@ import (
 	v1 "github.com/TSHOGX/khora/pkg/transport/gen/khora/transport/v1"
 )
 
-// Unit (no substrate): the D4.3 fan-out invariants as pure logic. The real
+// Unit (no substrate): the the documented invariant fan-out invariants as pure logic. The real
 // runsc round-trip (C2/C3/C4) is in test/transport_substrate_test.go; these
 // pin the hub mechanics deterministically and under -race.
 
 // blockingWriter simulates a child whose input pipe is full: Write blocks until
 // release is closed. Used to prove writeInput does not hold p.mu across a
-// blocking write (which would freeze the fan-out — D4.3 invariant 1).
+// blocking write (which would freeze the fan-out — the documented invariant invariant 1).
 type blockingWriter struct {
 	entered chan struct{} // closed-ish: signals Write was reached
 	release chan struct{} // Write returns once this is closed
@@ -80,7 +80,7 @@ func TestConnectReplaysRingThenLive(t *testing.T) {
 	}
 }
 
-// invariant 2 (multi-connection, §3.2): two subscribers each get an independent
+// invariant 2 (multi-connection, the documented invariant): two subscribers each get an independent
 // full copy; dropping one does not disturb the other.
 func TestFanOutIndependentCopies(t *testing.T) {
 	p := newProc(1, nil)
@@ -143,13 +143,13 @@ func TestSlowSubscriberDroppedSourceNeverBlocks(t *testing.T) {
 	}
 }
 
-// invariant 1 boundary (lossy-by-design, D4.3 invariant 1 / D1.3): a
+// invariant 1 boundary (lossy-by-design, the documented invariant invariant 1 / the documented invariant): a
 // subscriber whose window is exactly full at process exit cannot receive the end
 // frame. Per the best-effort-tail contract that dropped end frame — exit code
 // included — is silently lost for THAT copy; the channel still closes cleanly and
 // finish must NOT block or panic. (Making the drop observable end-to-end is an
 // health-state/connection-activity decision — see finish() NOTE and
-// open-decisions.)
+// a GitHub Issue.)
 func TestFinishOnFullWindowIsSilentlyLossy(t *testing.T) {
 	p := newProc(1, nil)
 	sub, _, _, _ := p.subscribe()
@@ -227,7 +227,7 @@ func TestWriteInputDoesNotBlockFanOut(t *testing.T) {
 	_ = sub
 }
 
-// The D4.3 subsystem boundary as pure logic: only pid > 0 is a directed target.
+// The the documented invariant subsystem boundary as pure logic: only pid > 0 is a directed target.
 // The substrate proof that a refused pid cannot destroy a real sandbox is C6 in
 // test/transport_depth_substrate_test.go; this pins the predicate itself,
 // including that the message says WHERE fan-out belongs — a caller that only
@@ -316,7 +316,7 @@ func TestStartSendFailureDoesNotLeakProcOrWedgeChild(t *testing.T) {
 }
 
 // Same seam, the OTHER side of the boundary: a process that was started must not be
-// killed because a client went away. §3.2 gives Start an independent context so the
+// killed because a client went away. the documented invariant gives Start an independent context so the
 // process outlives a disconnect (the premise of Connect reattach), and "kill on
 // first-frame failure" cannot be a contract — the same disconnect one frame later
 // leaves it alive, so special-casing the first frame would make dead-vs-alive turn

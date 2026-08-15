@@ -12,11 +12,11 @@ import (
 	"github.com/TSHOGX/khora/internal/transport"
 )
 
-// classifier truth table (§4.3 health states) as pure logic against fakes:
+// classifier truth table (the documented invariant health states) as pure logic against fakes:
 // each health state from its L1 × L2 × activity inputs, plus the two "skip" cases
 // (no live handle, uncertain L1).
 //
-// L1 / L2 here are the §4.3 PROBE LAYERS (substrate liveness / transport Health),
+// L1 / L2 here are the the documented invariant PROBE LAYERS (substrate liveness / transport Health),
 // not a test-tier label.
 
 // classifyFixture builds a mediator whose L2 (Health) and L1 (Adopt) verdicts
@@ -33,7 +33,7 @@ func newClassifyFixture(t *testing.T, id string, idleTimeout time.Duration, l2He
 	t.Helper()
 	ctx := context.Background()
 	st := store.NewMemory()
-	seedBare(t, st) // §4.3 template FK
+	seedBare(t, st) // the documented invariant template FK
 	rt := &fakeRuntime{
 		adoptAlive: map[string]bool{id: adoptAlive},
 	}
@@ -65,7 +65,7 @@ func newClassifyFixture(t *testing.T, id string, idleTimeout time.Duration, l2He
 
 // classifyOf returns just the health state — these tests are the L1×L2×activity
 // truth table. The death cause the classifier carries out ALONGSIDE the state
-// (§4.3 / reaper-health D4c) is asserted in limits_test.go's
+// (the documented invariant / reaper-health the documented invariantc) is asserted in limits_test.go's
 // TestDeathCauseSeparatesTheTwoParallelDeadHealthStates, which is where the cause
 // actually matters.
 func classifyOf(t *testing.T, f classifyFixture, id string) Health {
@@ -110,7 +110,7 @@ func TestClassifyDeadRecoverable(t *testing.T) {
 	}
 }
 
-// D2 unreadable-idle guard: when L2 is DOWN there is no trustworthy idle reading,
+// the documented invariant unreadable-idle guard: when L2 is DOWN there is no trustworthy idle reading,
 // so the sandbox must classify by L1 alone and NEVER into idle.
 //
 // WHAT THIS PINS, PRECISELY: `classify` reads idle only on the L2-up branch, so with
@@ -124,7 +124,7 @@ func TestClassifyUnreadableIdleGuard(t *testing.T) {
 	// a naive classifier tempted to read stale activity would say idle).
 	f := newClassifyFixture(t, "sbx", 1*time.Millisecond, false, 0, true, nil, false)
 	if got := classifyOf(t, f, "sbx"); got == HealthIdle {
-		t.Fatalf("classify = idle on an L2-down sandbox (D2 violation: read idle from a failed probe)")
+		t.Fatalf("classify = idle on an L2-down sandbox (the documented invariant violation: read idle from a failed probe)")
 	} else if got != HealthTransportDown {
 		t.Fatalf("classify = %s; want transport-down (L2 down + L1 alive)", got)
 	}
@@ -132,13 +132,13 @@ func TestClassifyUnreadableIdleGuard(t *testing.T) {
 	// L2 down, L1 dead → dead-recoverable, still never idle.
 	f2 := newClassifyFixture(t, "sbx2", 1*time.Millisecond, false, 0, false, nil, false)
 	if got := classifyOf(t, f2, "sbx2"); got == HealthIdle {
-		t.Fatalf("classify = idle on a dead sandbox (D2 violation)")
+		t.Fatalf("classify = idle on a dead sandbox (the documented invariant violation)")
 	} else if got != HealthDeadRecoverable {
 		t.Fatalf("classify = %s; want dead-recoverable", got)
 	}
 }
 
-// uncertain L1 (Adopt errors: L1-alive but endpoint unrecoverable, §4.4-A) →
+// uncertain L1 (Adopt errors: L1-alive but endpoint unrecoverable, the documented invariant) →
 // Unknown, never a disposition (protect-on-uncertainty).
 func TestClassifyUncertainL1IsUnknown(t *testing.T) {
 	f := newClassifyFixture(t, "sbx", 10*time.Second, false, 0, false, errors.New("state probe transient"), false)
@@ -148,7 +148,7 @@ func TestClassifyUncertainL1IsUnknown(t *testing.T) {
 }
 
 // a store-`running` sandbox with NO live-map handle is reconcile's takeover
-// concern (D4), not a health state → Unknown (reaper skips it).
+// concern (the documented invariant), not a health state → Unknown (reaper skips it).
 func TestClassifyNoLiveHandleIsUnknown(t *testing.T) {
 	f := newClassifyFixture(t, "sbx", 10*time.Second, true, 1*time.Second, true, nil, true /*noHandle*/)
 	if got := classifyOf(t, f, "sbx"); got != HealthUnknown {

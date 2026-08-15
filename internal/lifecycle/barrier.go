@@ -10,7 +10,7 @@ import (
 	"github.com/TSHOGX/khora/internal/model"
 )
 
-// --- pause drain barrier (§4.2 quiescent point / guest-runtime D4.4) ----------
+// --- pause drain barrier (the documented invariant quiescent point / guest-runtime the documented invariant) ----------
 //
 // The barrier closes ONE specific window, and it is the engine's own: a mutating
 // fs RPC is in flight when pause freezes the sandbox. The guest's fs.Write is
@@ -23,13 +23,13 @@ import (
 // those RPCs, so it can simply stop issuing more and wait for the ones it knows
 // about. No guest cooperation, no ack channel, nothing to ask of the workload.
 // The in-guest cooperative freeze (SIGTSTP + observing /proc) is a separate,
-// REJECTED idea — see D4.4 for why.
+// REJECTED idea — see the documented invariant for why.
 //
-// What it is NOT: a correctness premise. §4.4 puts the quiesce on the
+// What it is NOT: a correctness premise. the documented invariant puts the quiesce on the
 // "optimization" side, so every path must still reach a legal `paused`. Hence the
 // timeout PROCEEDS with the preemptive freeze rather than failing the pause — a
 // stuck RPC must not make a sandbox un-pausable, and that path lands exactly where
-// a crash lands, which §4.2 already accepts.
+// a crash lands, which the documented invariant already accepts.
 
 // barrier tracks in-flight engine-issued mutating operations per sandbox and lets
 // a pause wait for them to drain.
@@ -42,7 +42,7 @@ import (
 //     sandbox releases (enter's returned closure deletes the whole set once it
 //     empties, not just its own op);
 //   - a draining entry disappears at undrain, which every pause registers with
-//     defer BEFORE its CAS so a failed pause reclaims it too (§4.2 / D4.4).
+//     defer BEFORE its CAS so a failed pause reclaims it too (the documented invariant / the documented invariant).
 //
 // What keeps that true is a discipline at the call sites rather than anything the
 // type can enforce: enter hands back a release closure, and losing it strands an
@@ -189,7 +189,7 @@ func (m *Mediator) Enter(id model.SandboxID, op string) (func(), bool) {
 
 // drainForPause runs the barrier before a voluntary freeze. Timeout is not a
 // failure: it logs the stragglers and lets the caller proceed preemptively, which
-// lands exactly where a crash lands (§4.2) — never leaving a sandbox un-pausable.
+// lands exactly where a crash lands (the documented invariant) — never leaving a sandbox un-pausable.
 //
 // On reaper sweep latency: this runs under the sandbox's transition lock and the
 // reaper sweeps sequentially, so a full-grace drain delays the rest of that sweep. It

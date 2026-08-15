@@ -20,7 +20,7 @@ import (
 // reach it (see viaHostLocal). Tests that want a pinned uid build their own Deps.
 func newTestMediator(t *testing.T, rp *fakeRootfs, rt *fakeRuntime, healthy bool) (*Mediator, *store.Memory) {
 	st := store.NewMemory()
-	seedBare(t, st) // §4.3 template FK: the "bare" builtin row must pre-exist (boot seed)
+	seedBare(t, st) // the documented invariant template FK: the "bare" builtin row must pre-exist (boot seed)
 	m := New(Deps{
 		Store:         st,
 		Runtime:       rt,
@@ -50,14 +50,14 @@ func TestCreateHappyPath(t *testing.T) {
 	}
 }
 
-// TTL Binding materialization (§3.4 / §4.3): a create that OMITS idle_timeout /
+// TTL Binding materialization (the documented invariant / the documented invariant): a create that OMITS idle_timeout /
 // retention stores the engine-wide default; a create that provides them stores
 // the given values verbatim (including an explicit zero). The stored record
 // always carries a concrete duration the reaper reads — never a sentinel.
 func TestCreateMaterializesTTLBinding(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemory()
-	seedBare(t, st) // §4.3 template FK
+	seedBare(t, st) // the documented invariant template FK
 	m := New(Deps{
 		Store: st, Runtime: &fakeRuntime{}, Rootfs: &fakeRootfs{},
 		Volume:             newFakeVolume(),
@@ -219,7 +219,7 @@ func TestPauseRequiresRunning(t *testing.T) {
 // fails Resume's READ-side precondition check (state is `running` by then, not
 // `paused`) — which is why the rejection reads "want paused" rather than coming
 // from the store's CAS. Both spellings wrap store.ErrConflict; the property is
-// that the loser never proceeds and never corrupts the state (§4.4-B).
+// that the loser never proceeds and never corrupts the state (the documented invariant).
 func TestResumeResumeCASShape(t *testing.T) {
 	rp, rt := &fakeRootfs{}, &fakeRuntime{}
 	m, st := newTestMediator(t, rp, rt, true)
@@ -253,7 +253,7 @@ func TestResumeResumeCASShape(t *testing.T) {
 	}
 }
 
-// NOTE — the destroy-vs-resume lock race (§4.4-B) lives in
+// NOTE — the destroy-vs-resume lock race (the documented invariant) lives in
 // stress_test.go's TestStressDestroyBlockedDuringResume, which is this same
 // scenario run against BOTH store backends. It is deliberately not duplicated
 // here.
@@ -264,7 +264,7 @@ func seedPaused(t *testing.T, st *store.Memory, sid, oid, tmpl string) {
 	t.Helper()
 	ctx := context.Background()
 	now := time.Now()
-	// §4.3 template FK: ensure the referenced Template row exists first. Idempotent
+	// the documented invariant template FK: ensure the referenced Template row exists first. Idempotent
 	// across repeat calls with the same tmpl (ErrConflict is fine → ignore).
 	_ = st.CreateTemplate(ctx, model.Template{ID: model.TemplateID(tmpl), Builtin: true, CreatedAt: now})
 	if err := st.CreateSandbox(ctx, model.Sandbox{

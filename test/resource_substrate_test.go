@@ -1,6 +1,6 @@
 //go:build substrate
 
-// Resource-governance acceptance on the REAL substrate: the §3.4 resource limits
+// Resource-governance acceptance on the REAL substrate: the the documented invariant resource limits
 // are real enforcement. Requires root (cgroup writes + runsc + overlay mount).
 //
 //	sudo env PATH=$PATH GOTOOLCHAIN=local GOFLAGS=-mod=mod GOSUMDB=off HOME=$HOME \
@@ -217,7 +217,7 @@ func main() {
 }
 `
 
-// hostLogBytes is the total size of the kernel/syslog files whose growth the §2.3 bypass
+// hostLogBytes is the total size of the kernel/syslog files whose growth the the documented invariant bypass
 // would show up in — the runaway described at TestResourceRAMAxis.
 func hostLogBytes(t *testing.T) int64 {
 	t.Helper()
@@ -250,7 +250,7 @@ func readCg(t *testing.T, sid model.SandboxID, file string) string {
 // cpuUsecOf sums the CPU time of EVERY task in the sandbox's cgroup, read from
 // cpu.stat's usage_usec.
 //
-// Summing over the whole cgroup is required, not incidental (§5.A: CPU usage must
+// Summing over the whole cgroup is required, not incidental (the documented invariant: CPU usage must
 // be summed over all of `cgroup.procs`):
 // systrap runs each guest thread as its OWN host thread group, so sampling the
 // sentry's /proc/<pid>/stat alone reports a fictitious ~0.01 CPU while the sandbox
@@ -305,7 +305,7 @@ func cleanupOverlaySubvolumes(bc btrfs.Client, stateDir string) {
 
 // setupEngineOnBtrfs is setupEngineWithProbe with the engine StateDir forced onto
 // a REAL btrfs filesystem, which the capacity axis requires (subvolume + squota,
-// ADR-0002). t.TempDir() cannot be used for it: TMPDIR is /tmp = tmpfs here, where
+// the recorded design). t.TempDir() cannot be used for it: TMPDIR is /tmp = tmpfs here, where
 // subvolumes do not exist — and production has the same constraint (overlay
 // scratch must be native btrfs), so testing on tmpfs would exercise a
 // configuration the engine does not support.
@@ -359,7 +359,7 @@ func TestResourceCapacityAxis(t *testing.T) {
 	unit := filepath.Join(base, "state", "overlays", string(rec.Overlay))
 
 	// the cap is materialized as a subvolume + squota limit on the ONE unit holding
-	// upper AND work (D6.3: a quota on upper alone leaves copy-up as a bypass).
+	// upper AND work (the documented invariant: a quota on upper alone leaves copy-up as a bypass).
 	if !bc.IsSubvolume(ctx, unit) {
 		t.Fatalf("overlay unit %s is not a btrfs subvolume — the cap has nothing to bind to", unit)
 	}
@@ -412,10 +412,10 @@ func TestResourceCapacityAxis(t *testing.T) {
 	t.Logf("✓ guest got errno 28 at the cap; charged %d of %d bytes (%.2f%%)",
 		usedAfter, diskCap, 100*float64(usedAfter)/float64(diskCap))
 
-	// STILL RUNNING and still usable — the §3.4 distinction that makes capacity a
+	// STILL RUNNING and still usable — the the documented invariant distinction that makes capacity a
 	// data-plane event: no lifecycle transition, control plane not involved.
 	if stt, _ := m.State(ctx, sid); stt != model.Running {
-		t.Fatalf("state = %s after hitting the disk cap; want running (§3.4: capacity overrun is NOT a lifecycle event)", stt)
+		t.Fatalf("state = %s after hitting the disk cap; want running (the documented invariant: capacity overrun is NOT a lifecycle event)", stt)
 	}
 	ch2, err := cl.Start(ctx, transport.StartSpec{Cmd: "/bin/sh", Args: []string{"-c", "echo ALIVE_AFTER_ENOSPC"}})
 	if err != nil {
@@ -492,7 +492,7 @@ func TestResourceCapacityAxis(t *testing.T) {
 }
 
 // A sandbox whose create crashed mid-chain leaves an orphan Overlay unit, and
-// startup reconcile must reclaim it as a SUBVOLUME plus its quota unit (§4.4-A
+// startup reconcile must reclaim it as a SUBVOLUME plus its quota unit (the documented invariant
 // reclamation discipline).
 //
 // Measured caveat on what this test can and cannot prove: `rm -rf` DOES remove a
@@ -510,7 +510,7 @@ func TestResourceCapacityOrphanSubvolumeReclaimed(t *testing.T) {
 
 	// Manufacture the crashed-create state directly: a `creating` record plus a
 	// materialized capped Overlay unit. That is exactly what a crash between "build
-	// the Overlay" and "commit running" leaves behind (§4.4-A create variant).
+	// the Overlay" and "commit running" leaves behind (the documented invariant create variant).
 	oid := "ov_orphan_cap"
 	unit := filepath.Join(base, "state", "overlays", oid)
 	if err := bc.CreateSubvolume(ctx, unit); err != nil {
@@ -554,7 +554,7 @@ func TestResourceCapacityOrphanSubvolumeReclaimed(t *testing.T) {
 
 // A capacity cap that CANNOT be enforced must be refused, never silently
 // downgraded to "run uncapped": a create that reports success while enforcing
-// nothing would leave the §2.3 blast-radius invariant believing in a cap that does
+// nothing would leave the the documented invariant blast-radius invariant believing in a cap that does
 // not exist. Here the StateDir is on tmpfs, where subvolumes cannot exist.
 func TestResourceCapacityRefusedWhenUnenforceable(t *testing.T) {
 	ctx := context.Background()
@@ -565,28 +565,28 @@ func TestResourceCapacityRefusedWhenUnenforceable(t *testing.T) {
 		Limits:   model.Limits{DiskByte: 64 << 20},
 	})
 	if err == nil {
-		t.Fatal("create with a disk cap SUCCEEDED on a non-btrfs StateDir — the cap would enforce nothing (§3.4)")
+		t.Fatal("create with a disk cap SUCCEEDED on a non-btrfs StateDir — the cap would enforce nothing (the documented invariant)")
 	}
 	if !strings.Contains(err.Error(), "btrfs") {
 		t.Fatalf("want a refusal naming the unenforceable cap; got %v", err)
 	}
 	t.Logf("✓ unenforceable capacity cap refused rather than silently ignored: %v", err)
-	// and no record was left behind (§4.4-A: nothing half-built).
+	// and no record was left behind (the documented invariant: nothing half-built).
 	list, _ := eng.Mediator.List(ctx)
 	if len(list) != 0 {
 		t.Fatalf("%d records left after a refused create; want 0", len(list))
 	}
 }
 
-// TestResourceDiskCapBelowUsageRefused: the §3.4 strict inequality on the SANDBOX disk
-// axis, end to end on real btrfs — the §5.B twin of the volume cap's write point.
+// TestResourceDiskCapBelowUsageRefused: the the documented invariant strict inequality on the SANDBOX disk
+// axis, end to end on real btrfs — the the documented invariant twin of the volume cap's write point.
 //
 // WHAT MAKES THIS WORTH A SUBSTRATE TEST rather than only the unit-level refusal: the harm
 // being prevented is a substrate state, and it is irreversible. Measured on this shape, a
 // cap at or below the unit's usage is accepted by btrfs with ZERO validation, and
 // afterwards creating a file, `mkdir`, and even truncating an existing file to zero all
 // return ENOSPC — while the quota write ITSELF returns ENOSPC, so the cap can then be
-// neither raised nor removed. On a sandbox that is worse than on a volume: §5.B re-applies
+// neither raised nor removed. On a sandbox that is worse than on a volume: the documented invariant re-applies
 // the record's cap at EVERY placement, so re-applying the wedged cap fails the same way
 // and the sandbox is permanently unresumable (`Mount`'s own fresh-workdir step fails with
 // ENOSPC too, so even skipping the quota write would not resume it).
@@ -629,7 +629,7 @@ func TestResourceDiskCapBelowUsageRefused(t *testing.T) {
 	}
 	unit := filepath.Join(base, "state", "overlays", string(rec.Overlay))
 
-	// Caps are editable only from `paused` (§3.4), which is also what makes the usage
+	// Caps are editable only from `paused` (the documented invariant), which is also what makes the usage
 	// number stable: the container is stopped and nothing can grow the upper between the
 	// write point's read and the placement that would apply the cap.
 	if err := m.Pause(ctx, sid); err != nil {
@@ -657,7 +657,7 @@ func TestResourceDiskCapBelowUsageRefused(t *testing.T) {
 	for _, want := range []int64{used / 2, used} {
 		err := patchDisk(t, m, sid, want)
 		if !errorsIsDiskCapBelowUsage(err) {
-			t.Fatalf("PATCH disk_byte → %d with usage %d = %v; want lifecycle.ErrDiskCapBelowUsage (§3.4 strict inequality — the substrate accepts such a cap and is then wedged irreversibly)", want, used, err)
+			t.Fatalf("PATCH disk_byte → %d with usage %d = %v; want lifecycle.ErrDiskCapBelowUsage (the documented invariant strict inequality — the substrate accepts such a cap and is then wedged irreversibly)", want, used, err)
 		}
 		t.Logf("✓ refused a below-usage cap (%d ≤ %d): %v", want, used, err)
 	}
@@ -700,7 +700,7 @@ func TestResourceDiskCapBelowUsageRefused(t *testing.T) {
 		t.Fatalf("resume after the raise: %v", err)
 	}
 	if _, l3, err := bc.Usage(ctx, unit); err != nil || l3 != raise {
-		t.Fatalf("after the raise the unit's limit = %d (err %v); want %d — a cap edit takes effect at the next placement (§3.4)", l3, err, raise)
+		t.Fatalf("after the raise the unit's limit = %d (err %v); want %d — a cap edit takes effect at the next placement (the documented invariant)", l3, err, raise)
 	}
 	t.Logf("✓ a raise strictly above usage is admitted and materialized at the next placement (limit now %d)", raise)
 }
@@ -708,7 +708,7 @@ func TestResourceDiskCapBelowUsageRefused(t *testing.T) {
 // TestResourceDiskCapFullSandboxStillResumes is the REVERSE guard on the predicate above,
 // and it is the reason the criterion is `cap <= used` rather than something looser.
 //
-// A sandbox that fills its own cap the ordinary §3.4 way (guest gets ENOSPC, sandbox
+// A sandbox that fills its own cap the ordinary the documented invariant way (guest gets ENOSPC, sandbox
 // survives) must still pause and resume. Measured, that works because squota stops the
 // guest while usage is still STRICTLY below the limit (32 KiB of headroom in the spike), so
 // re-applying the cap succeeds. If the guard were ever widened — or if the substrate's
@@ -762,16 +762,16 @@ func TestResourceDiskCapFullSandboxStillResumes(t *testing.T) {
 		t.Fatalf("pause of a full sandbox: %v", err)
 	}
 	if err := m.Resume(ctx, sid); err != nil {
-		t.Fatalf("resume of a FULL sandbox = %v; want success — filling your own cap is an ordinary §3.4 outcome, not a wedge, and the placement guard must not refuse it", err)
+		t.Fatalf("resume of a FULL sandbox = %v; want success — filling your own cap is an ordinary the documented invariant outcome, not a wedge, and the placement guard must not refuse it", err)
 	}
 	t.Logf("✓ a sandbox that filled its own cap still pauses and resumes")
 
-	// And the §4.3 remedy still works on it: raise the cap, resume, room again.
+	// And the the documented invariant remedy still works on it: raise the cap, resume, room again.
 	if err := m.Pause(ctx, sid); err != nil {
 		t.Fatalf("pause before raise: %v", err)
 	}
 	if err := patchDisk(t, m, sid, diskCap*4); err != nil {
-		t.Fatalf("PATCH raising a FULL sandbox's cap = %v; want it ADMITTED (this is §4.3's remedy)", err)
+		t.Fatalf("PATCH raising a FULL sandbox's cap = %v; want it ADMITTED (this is the documented invariant's remedy)", err)
 	}
 	if err := m.Resume(ctx, sid); err != nil {
 		t.Fatalf("resume after raising a full sandbox's cap: %v", err)
@@ -780,7 +780,7 @@ func TestResourceDiskCapFullSandboxStillResumes(t *testing.T) {
 }
 
 // TestResourceCreateRefusesCapBelowTheUnitFloor: a cap below what the storage unit costs
-// EMPTY is unenforceable from the sandbox's first instant, and §5.B refuses it rather than
+// EMPTY is unenforceable from the sandbox's first instant, and the documented invariant refuses it rather than
 // producing a unit that is wedged at birth.
 //
 // The floor is a measured substrate fact, not a constant the engine names: a fresh
@@ -800,7 +800,7 @@ func TestResourceCreateRefusesCapBelowTheUnitFloor(t *testing.T) {
 	}
 	t.Logf("✓ create refused a cap below the unit's own floor: %v", err)
 
-	// Nothing half-built (§4.4-A): no record, and the create's unwind left no row behind.
+	// Nothing half-built (the documented invariant): no record, and the create's unwind left no row behind.
 	list, _ := eng.Mediator.List(ctx)
 	if len(list) != 0 {
 		t.Fatalf("%d record(s) left after a refused create; want 0", len(list))
@@ -825,7 +825,7 @@ func guestRun(t *testing.T, ctx context.Context, cl transport.Client, cmd string
 	return strings.TrimSpace(out.String())
 }
 
-// patchDisk drives the §6.1 PATCH write point with a disk_byte-only binding.
+// patchDisk drives the the documented invariant PATCH write point with a disk_byte-only binding.
 func patchDisk(t *testing.T, m *lifecycle.Mediator, id model.SandboxID, capByte int64) error {
 	t.Helper()
 	_, err := m.Rebind(context.Background(), id, lifecycle.RebindSpec{
@@ -844,11 +844,11 @@ func errorsIsDiskCapBelowUsage(err error) bool {
 // crash-paused demotion — after which resume is REFUSED.
 //
 // The bounded-log assertion is not decoration. It is the only check that catches
-// the §2.3 bypass: if the cap is configured such that the kernel finds no eligible
+// the the documented invariant bypass: if the cap is configured such that the kernel finds no eligible
 // victim, it retries the OOM forever and writes kernel log at ~66 MB/s until the
 // host disk is full — a path that goes straight AROUND the per-sandbox disk
 // capacity cap. A test that only asserted "the sandbox died" would pass while the
-// host filled up, which is why memory.oom.group=1 is a §2.4 provider obligation
+// host filled up, which is why memory.oom.group=1 is a the documented invariant provider obligation
 // rather than a tuning knob.
 func TestResourceRAMAxis(t *testing.T) {
 	ctx := context.Background()
@@ -869,7 +869,7 @@ func TestResourceRAMAxis(t *testing.T) {
 
 	// The guest must be told N, not N+overhead: runsc derives MemTotal from the OCI
 	// limit at boot, and the point of the two-value split is that the guest sees
-	// exactly the cap it was promised (§5.A).
+	// exactly the cap it was promised (the documented invariant).
 	cl, err := m.Client(sid)
 	if err != nil {
 		t.Fatalf("client: %v", err)
@@ -892,7 +892,7 @@ func TestResourceRAMAxis(t *testing.T) {
 	}
 	// exactly N (192 MiB = 196608 KiB), NOT N+overhead.
 	if guestTotalKB != memCap/1024 {
-		t.Fatalf("guest MemTotal = %d KiB; want %d KiB (= N). The guest must be told N while the HOST ceiling is N+overhead (§5.A two values)",
+		t.Fatalf("guest MemTotal = %d KiB; want %d KiB (= N). The guest must be told N while the HOST ceiling is N+overhead (the documented invariant two values)",
 			guestTotalKB, memCap/1024)
 	}
 	hostCeil, _ := strconv.ParseInt(readCg(t, sid, "memory.max"), 10, 64)
@@ -942,7 +942,7 @@ func TestResourceRAMAxis(t *testing.T) {
 
 	// --- whole-group, deterministic termination ------------------------------
 	// memory.events records the whole-group kill. Read it BEFORE any teardown: the
-	// leaf (and this evidence) dies with `runsc delete` (§4.3).
+	// leaf (and this evidence) dies with `runsc delete` (the documented invariant).
 	deadline := time.Now().Add(20 * time.Second)
 	var groupKills int64
 	for time.Now().Before(deadline) {
@@ -958,19 +958,19 @@ func TestResourceRAMAxis(t *testing.T) {
 		time.Sleep(200 * time.Millisecond)
 	}
 	if groupKills == 0 {
-		t.Fatalf("memory.events shows oom_group_kill=0 — termination was not whole-group (§2.4 requires deterministic, whole-group termination)")
+		t.Fatalf("memory.events shows oom_group_kill=0 — termination was not whole-group (the documented invariant requires deterministic, whole-group termination)")
 	}
 	peak := readCg(t, sid, "memory.peak")
 	t.Logf("✓ whole-group termination (oom_group_kill=%d, memory.peak=%s vs host ceiling %d)", groupKills, peak, hostCeil)
 
-	// bounded host log growth — the §2.3 bypass check.
+	// bounded host log growth — the the documented invariant bypass check.
 	logGrowth := hostLogBytes(t) - logBefore
 	const logBudget = 64 << 20 // generous; the runaway failure mode writes ~66 MB/s
 	if logGrowth > logBudget {
-		t.Fatalf("host kernel/syslog grew %d bytes during one RAM-cap termination (budget %d) — this is the §2.3 bypass: an OOM retry storm fills the HOST disk, going around the per-sandbox capacity cap",
+		t.Fatalf("host kernel/syslog grew %d bytes during one RAM-cap termination (budget %d) — this is the the documented invariant bypass: an OOM retry storm fills the HOST disk, going around the per-sandbox capacity cap",
 			logGrowth, logBudget)
 	}
-	t.Logf("✓ host log growth bounded (%d bytes ≤ %d budget) — no OOM retry storm (§2.3 not bypassed)", logGrowth, logBudget)
+	t.Logf("✓ host log growth bounded (%d bytes ≤ %d budget) — no OOM retry storm (the documented invariant not bypassed)", logGrowth, logBudget)
 
 	// --- death cause committed WITH the crash-paused demotion ----------------
 	// The reaper's sweep classifies the dead unit and disposes of it. This is the
@@ -982,15 +982,15 @@ func TestResourceRAMAxis(t *testing.T) {
 		t.Fatalf("GetSandbox after termination: %v", err)
 	}
 	if rec.State != model.Paused {
-		t.Fatalf("state = %s after RAM termination; want paused (§4.2 involuntary pause)", rec.State)
+		t.Fatalf("state = %s after RAM termination; want paused (the documented invariant involuntary pause)", rec.State)
 	}
 	if rec.DeathCause != model.CauseResourceExceeded {
-		t.Fatalf("death cause = %q; want %q — without it the control plane cannot tell this from an ordinary crash and would resume into the same cap (§4.3)",
+		t.Fatalf("death cause = %q; want %q — without it the control plane cannot tell this from an ordinary crash and would resume into the same cap (the documented invariant)",
 			rec.DeathCause, model.CauseResourceExceeded)
 	}
 	// the event Kind must say crash-paused, not paused: subscribers distinguish WHY.
 	if k := lastKind(t, eng, sid); k != "crash-paused" {
-		t.Fatalf("event Kind = %q; want crash-paused (§4.1: the state is paused either way, the Kind carries why)", k)
+		t.Fatalf("event Kind = %q; want crash-paused (the documented invariant: the state is paused either way, the Kind carries why)", k)
 	}
 	t.Logf("✓ crash-paused with death_cause=%s persisted, event Kind=crash-paused", rec.DeathCause)
 
@@ -999,7 +999,7 @@ func TestResourceRAMAxis(t *testing.T) {
 	// not, and the two are indistinguishable without it.
 	err = m.Resume(ctx, sid)
 	if err == nil {
-		t.Fatal("resume SUCCEEDED for a resource-terminated sandbox — it would re-run the same workload into the same cap (crash loop, §4.3)")
+		t.Fatal("resume SUCCEEDED for a resource-terminated sandbox — it would re-run the same workload into the same cap (crash loop, the documented invariant)")
 	}
 	if !strings.Contains(err.Error(), "resource-terminated") {
 		t.Fatalf("resume error = %v; want a resource-terminated refusal", err)
@@ -1061,14 +1061,14 @@ func TestResourceUnknownDeathCauseResumes(t *testing.T) {
 	// legal verdict here; what must NOT happen is a false ResourceExceeded, which
 	// would wrongly block resume forever.
 	if rec.DeathCause == model.CauseResourceExceeded {
-		t.Fatalf("death cause = %q for an external kill — a false resource-terminated verdict permanently blocks resume (§2.4: report Unknown, never guess)", rec.DeathCause)
+		t.Fatalf("death cause = %q for an external kill — a false resource-terminated verdict permanently blocks resume (the documented invariant: report Unknown, never guess)", rec.DeathCause)
 	}
 	t.Logf("✓ non-resource death recorded as %q (not a guessed resource-exceeded)", rec.DeathCause)
 
-	// ...and it RESUMES (the §4.3 fallback: treat as dead-recoverable, let bounded
+	// ...and it RESUMES (the the documented invariant fallback: treat as dead-recoverable, let bounded
 	// retry self-correct if the guess was wrong).
 	if err := m.Resume(ctx, sid); err != nil {
-		t.Fatalf("resume of a %q death was refused: %v — §4.3 requires the Unknown/Gone path to resume", rec.DeathCause, err)
+		t.Fatalf("resume of a %q death was refused: %v — the documented invariant requires the Unknown/Gone path to resume", rec.DeathCause, err)
 	}
 	if stt, _ := m.State(ctx, sid); stt != model.Running {
 		t.Fatalf("state = %s after resume; want running", stt)
@@ -1079,7 +1079,7 @@ func TestResourceUnknownDeathCauseResumes(t *testing.T) {
 	if after.DeathCause != model.CauseNone {
 		t.Fatalf("death cause = %q after a successful resume; want cleared", after.DeathCause)
 	}
-	t.Logf("✓ resumed to running and the death cause was cleared (bounded self-correction, §4.3)")
+	t.Logf("✓ resumed to running and the death cause was cleared (bounded self-correction, the documented invariant)")
 }
 
 // TestResourceAdmissionGateOnSubstrate: a create whose caps
@@ -1095,7 +1095,7 @@ func TestResourceAdmissionGateOnSubstrate(t *testing.T) {
 
 	// A node budget just big enough for ONE 64 MiB sandbox plus the Template bytes.
 	// The Template is a real rootfs (tens of MiB), which is exactly the term squota
-	// cannot see and the accounting must include (D6.5).
+	// cannot see and the accounting must include (the documented invariant).
 	layerish, err := dirSize(tmpl)
 	if err != nil {
 		t.Fatal(err)
@@ -1129,7 +1129,7 @@ func TestResourceAdmissionGateOnSubstrate(t *testing.T) {
 	nsBefore := harness.CountEngineNetns(t)
 	_, err = m.Create(ctx, lifecycle.CreateSpec{Template: "bare", Limits: model.Limits{DiskByte: capPer}})
 	if err == nil {
-		t.Fatal("second create succeeded — the node budget is being oversubscribed (§3.4)")
+		t.Fatal("second create succeeded — the node budget is being oversubscribed (the documented invariant)")
 	}
 	if !strings.Contains(err.Error(), "capacity") {
 		t.Fatalf("want an insufficient-capacity refusal; got %v", err)
@@ -1138,7 +1138,7 @@ func TestResourceAdmissionGateOnSubstrate(t *testing.T) {
 
 	// The refusal must be accounting for the TEMPLATE bytes, not just the caps.
 	// Asserting the reported layer term is on the order of the real Template library
-	// is what catches the undercount D6.2 warns about: counting only Promote-built
+	// is what catches the undercount the documented invariant warns about: counting only Promote-built
 	// layers (and omitting deployment-shipped builtins) silently overcommits the
 	// node by the whole Template library, which on a fresh deployment is all of it.
 	// Measured here: 16 KiB (wrong, subvolume metadata only) vs ~14 MB (right).
@@ -1150,7 +1150,7 @@ func TestResourceAdmissionGateOnSubstrate(t *testing.T) {
 		t.Fatalf("could not parse the uncapped-bytes term from %q: %v", err, serr)
 	}
 	if reported < layerish/2 {
-		t.Fatalf("uncapped bytes reported as %d but the Template library alone is ~%d — deployment-shipped Template bytes are being omitted from node accounting (§5.B / D6.2 undercount)",
+		t.Fatalf("uncapped bytes reported as %d but the Template library alone is ~%d — deployment-shipped Template bytes are being omitted from node accounting (the documented invariant / the documented invariant undercount)",
 			reported, layerish)
 	}
 	t.Logf("✓ the uncapped term (%d) accounts for the real Template bytes (~%d), not just Promote-built layers", reported, layerish)
@@ -1158,7 +1158,7 @@ func TestResourceAdmissionGateOnSubstrate(t *testing.T) {
 	// NO half-built residue: no extra record, no netns, no extra overlay unit.
 	list, _ := m.List(ctx)
 	if len(list) != 1 {
-		t.Fatalf("%d sandbox records after a refused create; want 1 (no half-build, §4.4-A)", len(list))
+		t.Fatalf("%d sandbox records after a refused create; want 1 (no half-build, the documented invariant)", len(list))
 	}
 	if n := harness.CountEngineNetns(t); n > nsBefore {
 		t.Fatalf("refused create leaked a netns (before=%d after=%d)", nsBefore, n)
@@ -1190,13 +1190,13 @@ func TestResourceAdmissionGateOnSubstrate(t *testing.T) {
 	} else {
 		t.Logf("✓ over-budget resume refused: %v", err)
 	}
-	// §4.4-A: atomic return to the SOURCE state.
+	// the documented invariant: atomic return to the SOURCE state.
 	rec, err := eng2.Store.GetSandbox(ctx, sid1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if rec.State != model.Paused {
-		t.Fatalf("state = %s after a refused resume; want it to STAY paused (§4.4-A atomic return to source state)", rec.State)
+		t.Fatalf("state = %s after a refused resume; want it to STAY paused (the documented invariant atomic return to source state)", rec.State)
 	}
 	t.Logf("✓ refused resume left the sandbox in `paused`")
 }
@@ -1219,7 +1219,7 @@ func dirSize(root string) (int64, error) {
 }
 
 // TestResourceRateAxis: the CPU quota really throttles, the cap provably bound,
-// and it is re-materialized across resume (§3.4 / §5.A).
+// and it is re-materialized across resume (the documented invariant / the documented invariant).
 func TestResourceRateAxis(t *testing.T) {
 	ctx := context.Background()
 	eng, _ := setupEngineWithProbe(t, 60*time.Second)
@@ -1250,7 +1250,7 @@ func TestResourceRateAxis(t *testing.T) {
 	t.Cleanup(func() { _ = m.Destroy(ctx, neighbor) })
 
 	// --- the caps ACTUALLY BOUND --------------------------------------------
-	// This is the assertion that catches the §5.A leaf-ownership trap, whose
+	// This is the assertion that catches the the documented invariant leaf-ownership trap, whose
 	// failure mode is SILENT: if the engine pre-created the full cgroup path,
 	// runsc would write memory.swap.max=0, leave memory.max=max, and the launch
 	// would still SUCCEED. Every engine-side signal would look identical to a
@@ -1263,22 +1263,22 @@ func TestResourceRateAxis(t *testing.T) {
 		// The SHARE half of the axis, not just the ceiling. cpu.max alone leaves
 		// every leaf on cgroup's identical default weight, so on a saturated node
 		// sandboxes would split time EQUALLY regardless of the CPU they were sold —
-		// §3.4 calls this axis FAIR SHARING, and a ceiling does not deliver that. Assert
+		// the documented invariant calls this axis FAIR SHARING, and a ceiling does not deliver that. Assert
 		// a non-default weight actually landed (both sandboxes here carry the same
 		// capMillis, so the proportionality itself is a ratio between DIFFERENT
 		// millis values; what this pins is that the knob is written at all).
 		gotW := readCg(t, sid, "cpu.weight")
 		if gotW == "" || gotW == "100" {
 			t.Fatalf("cpu.weight = %q for %s; want a derived weight, not the cgroup default — "+
-				"without it oversubscription degrades uniformly instead of proportionally (§3.4)", gotW, sid)
+				"without it oversubscription degrades uniformly instead of proportionally (the documented invariant)", gotW, sid)
 		}
-		// memory.max is the HOST ceiling = N + provider overhead (§5.A two values):
+		// memory.max is the HOST ceiling = N + provider overhead (the documented invariant two values):
 		// the guest is told N, the host tolerates N plus the sentry/gofer footprint,
 		// so the sandbox is never terminated below the N it was promised. Assert it is
 		// a real number ≥ N and NOT the unlimited sentinel.
 		gotMem := readCg(t, sid, "memory.max")
 		if gotMem == "max" {
-			t.Fatalf("memory.max = max for %s — the RAM cap did NOT bind (leaf-ownership trap fails OPEN, §5.A)", sid)
+			t.Fatalf("memory.max = max for %s — the RAM cap did NOT bind (leaf-ownership trap fails OPEN, the documented invariant)", sid)
 		}
 		hostCeil, err := strconv.ParseInt(gotMem, 10, 64)
 		if err != nil {
@@ -1292,12 +1292,12 @@ func TestResourceRateAxis(t *testing.T) {
 		if got := readCg(t, sid, "memory.swap.max"); got != "0" {
 			t.Fatalf("memory.swap.max = %q for %s; want 0 (else the cap is not a hard ceiling)", got, sid)
 		}
-		// §2.4 provider obligation: whole-group, deterministic termination — and the
+		// the documented invariant provider obligation: whole-group, deterministic termination — and the
 		// thing that makes oom_group_kill readable as a death cause at all.
 		if got := readCg(t, sid, "memory.oom.group"); got != "1" {
-			t.Fatalf("memory.oom.group = %q for %s; want 1 (§2.4: deterministic whole-group termination)", got, sid)
+			t.Fatalf("memory.oom.group = %q for %s; want 1 (the documented invariant: deterministic whole-group termination)", got, sid)
 		}
-		// memory.high must be UNSET ("max") — §5.A forbids it; the failure message below
+		// memory.high must be UNSET ("max") — the documented invariant forbids it; the failure message below
 		// carries the measurement.
 		//
 		// READ OFF THE REAL CGROUPFS rather than inferred from ociMemory having no High
@@ -1307,7 +1307,7 @@ func TestResourceRateAxis(t *testing.T) {
 		// version deriving one from the OCI limit, or a cgroup-driver default landing on
 		// the parent. None of those touch a Go struct.
 		if got := readCg(t, sid, "memory.high"); got != "max" {
-			t.Fatalf("memory.high = %q for %s; want \"max\" (unset). §5.A forbids memory.high: with swap.max=0 and unreclaimable anon, throttling becomes a HANG instead of a limit (measured: 1282 throttle events, guest stalled past 45 s) — the cap must be the hard limit + oom.group=1", got, sid)
+			t.Fatalf("memory.high = %q for %s; want \"max\" (unset). the documented invariant forbids memory.high: with swap.max=0 and unreclaimable anon, throttling becomes a HANG instead of a limit (measured: 1282 throttle events, guest stalled past 45 s) — the cap must be the hard limit + oom.group=1", got, sid)
 		}
 		t.Logf("✓ %s caps bound on the real cgroup: cpu.max=%s memory.max=%d (N=%d + overhead) swap.max=0 oom.group=1 high=max(unset)",
 			sid, wantCPU, hostCeil, memCap)
@@ -1367,19 +1367,19 @@ func TestResourceRateAxis(t *testing.T) {
 	if err := m.Pause(ctx, busy); err != nil {
 		t.Fatalf("pause: %v", err)
 	}
-	// the leaf is placement-local: it must be GONE after pause (§4.2 releases
+	// the leaf is placement-local: it must be GONE after pause (the documented invariant releases
 	// RAM/CPU, and a leftover leaf would be an orphan placement resource).
 	if _, err := os.Stat(cgLeaf(busy)); !os.IsNotExist(err) {
 		t.Fatalf("cgroup leaf survived pause (orphan placement resource): %v", err)
 	}
-	t.Logf("✓ cgroup leaf reclaimed on pause (placement-local, §3.3)")
+	t.Logf("✓ cgroup leaf reclaimed on pause (placement-local, the documented invariant)")
 
 	if err := m.Resume(ctx, busy); err != nil {
 		t.Fatalf("resume: %v", err)
 	}
 	wantCPU := fmt.Sprintf("%d %d", 100_000*capMillis/1000, 100_000)
 	if got := readCg(t, busy, "cpu.max"); got != wantCPU {
-		t.Fatalf("after resume cpu.max = %q; want %q — the Binding was not re-materialized (§3.4)", got, wantCPU)
+		t.Fatalf("after resume cpu.max = %q; want %q — the Binding was not re-materialized (the documented invariant)", got, wantCPU)
 	}
 	if got := readCg(t, busy, "memory.swap.max"); got != "0" {
 		t.Fatalf("after resume memory.swap.max = %q; want 0", got)
@@ -1389,7 +1389,7 @@ func TestResourceRateAxis(t *testing.T) {
 	}
 	t.Logf("✓ caps re-materialized on the NEW placement after resume (cpu.max=%s, swap.max=0, oom.group=1)", wantCPU)
 
-	// destroy → the leaf must be gone (reclamation discipline, §4.4-A).
+	// destroy → the leaf must be gone (reclamation discipline, the documented invariant).
 	if err := m.Destroy(ctx, busy); err != nil {
 		t.Fatalf("destroy: %v", err)
 	}

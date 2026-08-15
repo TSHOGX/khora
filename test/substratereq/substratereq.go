@@ -50,7 +50,7 @@ func (mainReporter) Fatalf(format string, args ...any) {
 }
 
 // Root fails unless the process is root. Every substrate capability this repo uses
-// needs it: runsc --network=sandbox refuses --rootless (ADR-0002 Privilege), an
+// needs it: runsc --network=sandbox refuses --rootless (the recorded design Privilege), an
 // overlayfs mount needs CAP_SYS_ADMIN, and the btrfs quota ioctls need it too.
 func Root(t testing.TB) {
 	t.Helper()
@@ -73,7 +73,7 @@ func Btrfs(t testing.TB, dir string) {
 		t.Fatalf("substrate test needs %s on btrfs; statfs failed: %v", dir, err)
 	}
 	if int64(st.Type) != btrfsSuperMagic {
-		t.Fatalf("substrate test needs %s on btrfs (disk caps are btrfs quotas, ADR-0002); "+
+		t.Fatalf("substrate test needs %s on btrfs (disk caps are btrfs quotas, the recorded design); "+
 			"its f_type is %#x, not btrfs's %#x", dir, st.Type, btrfsSuperMagic)
 	}
 }
@@ -90,6 +90,6 @@ func Bin(t testing.TB, names ...string) {
 		}
 	}
 	if len(missing) > 0 {
-		t.Fatalf("substrate test needs these on PATH and they are absent: %v (ADR-0002 lists why each is hard)", missing)
+		t.Fatalf("substrate test needs these on PATH and they are absent: %v (the recorded design lists why each is hard)", missing)
 	}
 }

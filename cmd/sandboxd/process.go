@@ -18,19 +18,19 @@ import (
 	v1 "github.com/TSHOGX/khora/pkg/transport/gen/khora/transport/v1"
 )
 
-// processServer implements the §5.E process primitive (transport D4.3). It fans one process's
+// processServer implements the the documented invariant process primitive (transport the documented invariant). It fans one process's
 // output out to N subscribers (Start + any Connect), each getting an independent copy, and
 // keeps a per-process bounded output ring buffer so a late Connect replays recent bytes before
-// joining live (D4.3 invariant 2).
+// joining live (the documented invariant invariant 2).
 //
 // procs maps pid→proc: transport-process-local, non-authoritative, dying with the transport
-// process — NOT a control-plane registry (§5.E: List scans /proc live). D4.3 places the ring
+// process — NOT a control-plane registry (the documented invariant: List scans /proc live). the documented invariant places the ring
 // buffer inside "no *persistent* SoT" — transient, per-process, never crossing resume.
 type processServer struct {
 	mu    sync.Mutex
 	procs map[int]*proc
-	// activity is the sandbox-global last-I/O clock (§4.3 activity signal,
-	// reaper-health D2). Shared with the healthServer so Health.Check reports
+	// activity is the sandbox-global last-I/O clock (the documented invariant activity signal,
+	// reaper-health the documented invariant). Shared with the healthServer so Health.Check reports
 	// idle duration. Every proc created here carries a reference to it and
 	// stamps it on broadcast/writeInput.
 	activity *activityClock
@@ -40,14 +40,14 @@ type processServer struct {
 	reaper *reapTable
 }
 
-// Tuning values. Pure numeric knobs — changing one does NOT change the D4/D5 shape, and
+// Tuning values. Pure numeric knobs — changing one does NOT change the the documented invariant/the documented invariant shape, and
 // this is their only home. Sized so the ring holds enough tail to redraw an interactive
 // screen without unbounded guest memory, and the window is deep enough for a healthy
 // consumer but small enough that a stuck one is dropped promptly.
 const (
 	ringCapBytes      = 64 * 1024        // per-process output ring byte cap (invariant 2)
 	subWindowFrames   = 256              // per-subscriber send window (invariant 1)
-	keepaliveInterval = 20 * time.Second // long-stream liveness (D4.2)
+	keepaliveInterval = 20 * time.Second // long-stream liveness (the documented invariant)
 )
 
 func (s *processServer) register(p *proc) {
@@ -55,7 +55,7 @@ func (s *processServer) register(p *proc) {
 	if s.procs == nil {
 		s.procs = make(map[int]*proc)
 	}
-	p.activity = s.activity // share the sandbox-global I/O clock (reaper-health D2)
+	p.activity = s.activity // share the sandbox-global I/O clock (reaper-health the documented invariant)
 	s.procs[p.pid] = p
 	s.mu.Unlock()
 }
@@ -96,7 +96,7 @@ type subscriber struct {
 type proc struct {
 	pid int
 
-	// activity is the shared sandbox-global last-I/O clock (reaper-health D2),
+	// activity is the shared sandbox-global last-I/O clock (reaper-health the documented invariant),
 	// set by processServer.register. Stamped on every output (broadcast) and
 	// input (writeInput). nil when a proc is built outside the server (unit
 	// tests) — activityClock methods are nil-safe.
@@ -121,7 +121,7 @@ func newProc(pid int, stdin io.WriteCloser) *proc {
 }
 
 // ringBuffer holds recent output frames up to a byte cap, dropping the oldest
-// bytes silently (D4.3 invariant 2: "oldest bytes are dropped silently"). Frames
+// bytes silently (the documented invariant invariant 2: "oldest bytes are dropped silently"). Frames
 // keep their stream
 // tag so replay preserves stdout/stderr/pty attribution.
 type ringBuffer struct {
@@ -149,9 +149,9 @@ func (r *ringBuffer) snapshot() []frame {
 // (invariant 1) — the source NEVER blocks here.
 func (p *proc) broadcast(f frame) {
 	if f.kind == 'd' {
-		// Stamp sandbox-global activity on OUTPUT (reaper-health D2), here in the path EVERY
+		// Stamp sandbox-global activity on OUTPUT (reaper-health the documented invariant), here in the path EVERY
 		// output frame flows through, so a detached process producing output with no client
-		// attached still counts as active (§3.2 / reaper-health D1). Off p.mu — the atomic
+		// attached still counts as active (the documented invariant / reaper-health the documented invariant). Off p.mu — the atomic
 		// store needs no lock.
 		p.activity.stamp()
 	}
@@ -175,7 +175,7 @@ func (p *proc) broadcast(f frame) {
 // subscribers, and closes their channels. A subscriber that Connects after this
 // sees ended=true from subscribe and replays the ring + end directly.
 //
-// Lossy-by-design boundary (D4.3 invariant 1 / D1.3): a subscriber whose window is full at
+// Lossy-by-design boundary (the documented invariant invariant 1 / the documented invariant): a subscriber whose window is full at
 // exit loses the end frame — exit code included — for THAT copy; the channel still closes
 // and serveSubscriber returns a clean end. The broadcast path's rule, extended to the exit
 // instant.
@@ -184,7 +184,7 @@ func (p *proc) broadcast(f frame) {
 // an overflow close, which the host surfaces as ProcessEvent{Kind:"error"}, so a consumer can
 // tell it from "the process finished" — otherwise both look like a channel closing.
 //
-// Still NOT a health signal: §4.3 classifies a sandbox from the L2 Health probe and its
+// Still NOT a health signal: the documented invariant classifies a sandbox from the L2 Health probe and its
 // guest-side activity clock, never from one subscriber's copy being too slow.
 func (p *proc) finish(exitCode int) {
 	p.mu.Lock()
@@ -236,7 +236,7 @@ func (p *proc) unsubscribe(sub *subscriber) {
 
 // writeInput writes to the process's pty master (ptyIn) or stdin pipe.
 //
-// The blocking Write MUST happen OUTSIDE p.mu (D4.3 invariant 1: the source never blocks).
+// The blocking Write MUST happen OUTSIDE p.mu (the documented invariant invariant 1: the source never blocks).
 // Holding mu across a Write that blocks on a full pipe (child busy writing stdout, not
 // reading stdin) deadlocks pumpSource→broadcast on mu while the child waits for its stdout to
 // drain. So: snapshot the writer handle under mu, release, write unlocked — only the handle
@@ -258,7 +258,7 @@ func (p *proc) writeInput(data []byte, ptyIn bool) error {
 		w = p.stdin
 	}
 	p.mu.Unlock()
-	// Stamp activity on INPUT (reaper-health D2): a keystroke is I/O even if the process
+	// Stamp activity on INPUT (reaper-health the documented invariant): a keystroke is I/O even if the process
 	// produces no output. BEFORE the possibly-blocking Write — the input arriving IS the
 	// activity, regardless of when the child drains it.
 	p.activity.stamp()
@@ -266,11 +266,11 @@ func (p *proc) writeInput(data []byte, ptyIn bool) error {
 	return err
 }
 
-// resize applies a new PTY size (transport D4.3 Update). Errors if no pty.
+// resize applies a new PTY size (transport the documented invariant Update). Errors if no pty.
 //
 // TIOCSWINSZ is non-blocking so it could not deadlock the fan-out, but it follows
 // writeInput's snapshot-then-act-unlocked shape uniformly, so no I/O on the pty handle is
-// ever done under p.mu (D4.3 invariant 1).
+// ever done under p.mu (the documented invariant invariant 1).
 func (p *proc) resize(rows, cols uint16) error {
 	p.mu.Lock()
 	if p.pty == nil {
@@ -285,14 +285,14 @@ func (p *proc) resize(rows, cols uint16) error {
 // closeStdin closes the stdin pipe (non-pty) or writes VEOF (pty Ctrl-D). For a
 // pty the master stays open (still the output source) — only EOF is injected.
 //
-// Like writeInput, the pty ^D Write is done outside p.mu (D4.3 invariant 1). The stdin path
+// Like writeInput, the pty ^D Write is done outside p.mu (the documented invariant invariant 1). The stdin path
 // snapshots and clears the handle before releasing, so a racing writeInput sees stdin==nil.
 func (p *proc) closeStdin() error {
 	p.mu.Lock()
 	if p.pty != nil {
 		pty := p.pty
 		p.mu.Unlock()
-		// The ^D keystroke is INPUT I/O — stamped like writeInput (reaper-health D2), so a
+		// The ^D keystroke is INPUT I/O — stamped like writeInput (reaper-health the documented invariant), so a
 		// sandbox that was just interacted with cannot look idle.
 		p.activity.stamp()
 		_, err := pty.Write([]byte{0x04}) // ^D
@@ -302,7 +302,7 @@ func (p *proc) closeStdin() error {
 		w := p.stdin
 		p.stdin = nil
 		p.mu.Unlock()
-		p.activity.stamp() // stdin close is input-side I/O too (reaper-health D2)
+		p.activity.stamp() // stdin close is input-side I/O too (reaper-health the documented invariant)
 		return w.Close()
 	}
 	p.mu.Unlock()
@@ -326,17 +326,17 @@ type source struct {
 // finishes the hub and unregisters. Non-pty has two sources (stdout/stderr);
 // pty has one ("pty" — the master merges both). The process is launched with an
 // INDEPENDENT context (not the Start stream's) so it outlives a Start
-// disconnect — that is what makes Connect reattach possible (§3.2).
+// disconnect — that is what makes Connect reattach possible (the documented invariant).
 //
 // finish-then-unregister is the exit-status delivery boundary, and it is deliberately sharp:
 // finish broadcasts `end` to whoever is attached now, then the pid stops resolving, so a later
 // Connect gets not-found rather than a retained exit code. Holding the entry would retain
 // state keyed by a guest pid the kernel can recycle, so the record would start describing a
 // different process once the number is reused. Callers that must not miss exit status stay
-// attached (guest-runtime D4.5 C2).
+// attached (guest-runtime the documented invariant C2).
 //
 // The exit status arrives over `exited` — the reap table's handoff — NOT from cmd.Wait().
-// Transport mode owns Wait4(-1) for its subtree (§5.E.1) and a wildcard wait cannot exclude a
+// Transport mode owns Wait4(-1) for its subtree (the documented invariant) and a wildcard wait cannot exclude a
 // pid, so a per-child cmd.Wait() would race the reaper: whoever lost sees ECHILD and this
 // `end` frame carries a fabricated exit code. Same single-waiter rule as PID 1's (reap.go).
 func (p *proc) run(exited <-chan syscall.WaitStatus, sources []source, onExit func()) {
@@ -378,7 +378,7 @@ func (p *proc) pumpSource(wg *sync.WaitGroup, s source) {
 // from a root-free unit test.
 //
 // A plain in-package interface, NOT a build tag: nothing here is compiled-out fault injection
-// in the §5.E.1 `testguest` sense (that tag is for a seam that must be ABSENT from a
+// in the the documented invariant `testguest` sense (that tag is for a seam that must be ABSENT from a
 // production sandboxd), and *connect.ServerStream[v1.ProcessEvent] satisfies this already.
 type eventSender interface {
 	Send(*v1.ProcessEvent) error
@@ -396,25 +396,25 @@ func (s *processServer) start(ctx context.Context, req *connect.Request[v1.Start
 	}
 
 	// Independent context: the process must outlive this Start stream so a later Connect can
-	// reattach (§3.2). Signals/exit end it, not a client disconnect.
+	// reattach (the documented invariant). Signals/exit end it, not a client disconnect.
 	//
-	// Processes run as guest root (§2.2: guest identity is not a host-isolation pillar —
+	// Processes run as guest root (the documented invariant: guest identity is not a host-isolation pillar —
 	// sentry virtualizes guest uid 0). "Run as a different user" is a guest-native concern
-	// (su/sudo), not an engine primitive (§3.2.1).
+	// (su/sudo), not an engine primitive (the documented invariant).
 	cmd := exec.Command(m.Cmd, m.Args...)
 	cmd.Env = m.Env
 	cmd.Dir = m.Cwd
 
 	// Every fork goes through the reap table: it registers the waiter under the
 	// same lock as the fork, so the reaper cannot collect this child before we
-	// are entitled to its status (§5.E.1 single waiter — see reapTable.start).
+	// are entitled to its status (the documented invariant single waiter — see reapTable.start).
 	// It also Releases the os.Process handle, so cmd.Process.Pid is cleared and
 	// the returned pid is the only handle; SendSignal targets it by number.
 	var p *proc
 	var sources []source
 	var exited <-chan syscall.WaitStatus
 	if m.Pty != nil {
-		// PTY branch (transport D4.3): pure-Go pty pair. The slave is the
+		// PTY branch (transport the documented invariant): pure-Go pty pair. The slave is the
 		// child's controlling terminal; the master is the single merged output
 		// source AND the keyboard-input sink. Setsid makes the child a session
 		// leader; Setctty binds the slave (fd 0) as its controlling tty.
@@ -437,7 +437,7 @@ func (s *processServer) start(ctx context.Context, req *connect.Request[v1.Start
 		sources = []source{{r: master, name: "pty"}}
 		exited = ch
 	} else {
-		// Own pgid so SendSignal can target the whole tree (transport D4.3).
+		// Own pgid so SendSignal can target the whole tree (transport the documented invariant).
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		stdout, err := cmd.StdoutPipe()
 		if err != nil {
@@ -479,7 +479,7 @@ func (s *processServer) start(ctx context.Context, req *connect.Request[v1.Start
 	// plus a permanent s.procs entry and three unclosed fds. Ordering is safe: subscribe()
 	// above already registered this subscriber, so no frame is missed.
 	//
-	// The already-forked process is left to run and be reaped, NOT killed. §3.2 gives Start an
+	// The already-forked process is left to run and be reaped, NOT killed. the documented invariant gives Start an
 	// independent context precisely so a process outlives a client disconnect; "kill on
 	// first-frame failure" cannot be a contract, because the same disconnect one frame later
 	// leaves the process alive — dead-vs-alive would depend on invisible timing.
@@ -501,7 +501,7 @@ func (s *processServer) start(ctx context.Context, req *connect.Request[v1.Start
 }
 
 // Connect reattaches to a running process: replay the bounded ring, then live
-// (D4.3 invariant 2). Independent per-subscriber copy (§3.2 fan-out).
+// (the documented invariant invariant 2). Independent per-subscriber copy (the documented invariant fan-out).
 func (s *processServer) Connect(ctx context.Context, req *connect.Request[v1.ConnectRequest], stream *connect.ServerStream[v1.ProcessEvent]) error {
 	p, ok := s.get(int(req.Msg.Pid))
 	if !ok {
@@ -516,7 +516,7 @@ func (s *processServer) Connect(ctx context.Context, req *connect.Request[v1.Con
 
 // serveSubscriber replays the ring snapshot, then either sends the end frame (if
 // the process already ended) or pumps the live window, emitting keepalives on
-// idle (D4.2 — no idle deadline on the long output stream).
+// idle (the documented invariant — no idle deadline on the long output stream).
 func serveSubscriber(ctx context.Context, stream eventSender, sub *subscriber, snap []frame, ended bool, endF frame) error {
 	for _, f := range snap {
 		if err := sendFrame(stream, f); err != nil {
@@ -568,8 +568,8 @@ func sendFrame(stream eventSender, f frame) error {
 
 // StreamInput writes an ordered client-stream of input frames to one process
 // (keystrokes to a pty). pid is taken from the first frame; ordering is the
-// single stream's (transport D4.3). engine does NOT arbitrate multiple writers
-// (D4.3: bytes interleave, Unix semantics — that is the product layer's call).
+// single stream's (transport the documented invariant). engine does NOT arbitrate multiple writers
+// (the documented invariant: bytes interleave, Unix semantics — that is the product layer's call).
 func (s *processServer) StreamInput(_ context.Context, stream *connect.ClientStream[v1.StreamInputRequest]) (*connect.Response[v1.StreamInputResponse], error) {
 	var p *proc
 	for stream.Receive() {
@@ -590,7 +590,7 @@ func (s *processServer) StreamInput(_ context.Context, stream *connect.ClientStr
 	return connect.NewResponse(&v1.StreamInputResponse{}), nil
 }
 
-// Update resizes a process's PTY (transport D4.3). No-op-erroring on a non-pty
+// Update resizes a process's PTY (transport the documented invariant). No-op-erroring on a non-pty
 // process (nothing to resize).
 func (s *processServer) Update(_ context.Context, req *connect.Request[v1.UpdateRequest]) (*connect.Response[v1.UpdateResponse], error) {
 	m := req.Msg
@@ -632,14 +632,14 @@ func (s *processServer) SendInput(_ context.Context, req *connect.Request[v1.Sen
 }
 
 // SendSignal delivers a DIRECTED signal — one process target, defaulting to its
-// group (transport D4.3 / §5.E.1).
+// group (transport the documented invariant / the documented invariant).
 //
 // It validates `pid > 0` and nothing more — NO registry membership, unlike
 // Connect/SendInput/Update/CloseStdin, which touch per-process state. Demanding a registry hit
-// would break the §6.1 List-then-signal pairing, since List scans /proc live and returns pids
+// would break the the documented invariant List-then-signal pairing, since List scans /proc live and returns pids
 // that were never in s.procs.
 //
-// The check is HERE (guest side) because §5.E.1's premise is that the guest can write its own
+// The check is HERE (guest side) because the documented invariant's premise is that the guest can write its own
 // fs and must therefore validate for itself; the orchestrator's copy is only fail-fast.
 func (s *processServer) SendSignal(_ context.Context, req *connect.Request[v1.SendSignalRequest]) (*connect.Response[v1.SendSignalResponse], error) {
 	m := req.Msg
@@ -652,7 +652,7 @@ func (s *processServer) SendSignal(_ context.Context, req *connect.Request[v1.Se
 	return connect.NewResponse(&v1.SendSignalResponse{}), nil
 }
 
-// List scans /proc for live pids (no registry, §5.E).
+// List scans /proc for live pids (no registry, the documented invariant).
 func (*processServer) List(_ context.Context, _ *connect.Request[v1.ListRequest]) (*connect.Response[v1.ListResponse], error) {
 	entries, err := os.ReadDir("/proc")
 	if err != nil {

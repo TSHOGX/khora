@@ -1,6 +1,6 @@
 //go:build substrate && drainrace
 
-// L3 acceptance for the §4.2 pause drain barrier (guest-runtime D4.4) against the
+// L3 acceptance for the the documented invariant pause drain barrier (guest-runtime the documented invariant) against the
 // REAL substrate: a pause racing an engine-issued fs.Write must not leave the file
 // truncated. Requires root.
 //
@@ -44,7 +44,7 @@ import (
 //
 // The assertion is deliberately "whole or untouched, never empty". That is the
 // property a caller depends on, and it is weaker than "the write always wins",
-// which the engine cannot promise: the drain has a bounded grace and §4.4 keeps it
+// which the engine cannot promise: the drain has a bounded grace and the documented invariant keeps it
 // an optimization, not a correctness premise.
 func TestPauseDrainKeepsWritesWhole(t *testing.T) {
 	// 4 rounds, not 10: with the barrier the outcome is DETERMINISTIC (the drain
@@ -56,7 +56,7 @@ func TestPauseDrainKeepsWritesWhole(t *testing.T) {
 	res := runPauseWriteRace(t, 0 /* engine default grace */, rounds)
 	if res.empty > 0 {
 		t.Errorf("%d/%d rounds left the file EMPTY despite the drain barrier — "+
-			"a pause truncated an engine-issued write (§4.2 / D4.4)", res.empty, rounds)
+			"a pause truncated an engine-issued write (the documented invariant / the documented invariant)", res.empty, rounds)
 	}
 	if res.partial > 0 {
 		t.Errorf("%d/%d rounds left a PARTIAL file — the drain did not let the write finish",

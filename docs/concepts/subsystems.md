@@ -1,18 +1,17 @@
 # Sandbox Engine — subsystems (§5 target definitions)
 
-> Belongs to [SPEC.md](./SPEC.md); § numbers run continuously across files, and the
-> navigation is the "Document map" at the top of SPEC.md.
-> The five subsystems are peers depending only on §3's shared model and not on each other —
-> hence one document for all of them.
+> This page defines subsystem boundaries and seams. See
+> [Architecture](./architecture.md) for the boundary and security context.
+> The five subsystems are peers depending only on the shared model and not on each other;
+> this page keeps their seams together.
 
 ---
 
 ## 5. Subsystems (target definitions)
 
-The five subsystems are **peers**, depending only on §3's shared model (sandbox identity + the
-store) and **not on each other** (which prevents cycles). This section fixes their targets and
-boundaries; internal mechanisms still to be refined are registered in
-[`open-decisions.md`](./open-decisions.md).
+The five subsystems are **peers**, depending only on the shared model (sandbox identity + the
+store) and **not on each other** (which prevents cycles). This page fixes their targets and
+boundaries; mechanisms still to be refined are tracked in GitHub Issues.
 
 - **5.A Runtime** — the runsc process lifecycle and materializing the three states (*how* a
   sandbox runs).
@@ -268,7 +267,7 @@ boundaries; internal mechanisms still to be refined are registered in
   restricted by this rule. Keep the two reads apart: content must be at rest, metering may be asked
   of the backend at any time.
 - **The carrier: an outer kernel overlayfs, with runsc not involved in the write layer** (§2.5;
-  derivation in [`deep-dives/rootfs-overlay.md`](./deep-dives/rootfs-overlay.md)): the engine
+  derivation in [`../internals/rootfs-overlay.md`](../internals/rootfs-overlay.md)): the engine
   assembles lower (the Template) / upper / work outside runsc and hands the merged result to runsc
   with `--overlay2=none --file-access=shared`. **Assembling and unmounting the merged result belongs
   to this subsystem** (runsc receives only an already-merged rootfs path, that is, the `rootfs
@@ -278,7 +277,7 @@ boundaries; internal mechanisms still to be refined are registered in
   - Single-node materialization: the Overlay lands as a host overlayfs upperdir and the Template as a
     lowerdir, on the same machine, with pause capturing nothing and resume remounting the same
     upperdir for a cold start (§4.2). The persistent unit is the resident upperdir; see
-    [`deep-dives/rootfs-overlay.md`](./deep-dives/rootfs-overlay.md) D3.
+    [`../internals/rootfs-overlay.md`](../internals/rootfs-overlay.md) D3.
   - Multi-node materialization: the Overlay lands as a layer addressable across nodes (a PV / object
     storage), and a resume remounts the same artifact on any node. At the model layer an Overlay is
     always "an ID-addressed frozen layer referencing some Template", and a host path is merely a
@@ -347,7 +346,7 @@ boundaries; internal mechanisms still to be refined are registered in
   value of 0 (no ceiling) means any residual cap on the unit must be **cleared**, since the record is
   always the sole authority (§3.4). Why squota rather than full qgroups, and the "Template bytes are
   not covered by the cap" cost it brings, are in
-  [`deep-dives/rootfs-overlay.md`](./deep-dives/rootfs-overlay.md) D6.
+  [`../internals/rootfs-overlay.md`](../internals/rootfs-overlay.md) D6.
   **A Template is read-only, is not written by a sandbox, and gets no per-sandbox cap** — its growth
   is governed by Promote + refcount GC (§4.3) and it serves only as an input to node capacity
   accounting, which is a global accounting problem rather than an isolation problem.
@@ -377,7 +376,7 @@ boundaries; internal mechanisms still to be refined are registered in
   rescan, and the current usage it reads is **not durable**), and if it cannot be delivered, **refuse
   this placement** — the same rule as "never silently degrade to running uncapped". Why the sandbox
   side is worse than the volume side, and why this side refuses while §5.C's side skips, are in
-  [`deep-dives/rootfs-overlay.md`](./deep-dives/rootfs-overlay.md) D6.6.
+  [`../internals/rootfs-overlay.md`](../internals/rootfs-overlay.md) D6.6.
 - **The built-in Template's contents are a deployment-replaceable choice carrying no engine
   semantics, and the repo holds its DEFINITION rather than the artifact** (`templates/bare/`:
   a digest-pinned base, the package list, config overlays, and the builder). The built tree
@@ -393,7 +392,7 @@ boundaries; internal mechanisms still to be refined are registered in
   nothing in §5.A/§5.B branches on what a Template contains. **One bare, general-purpose base, and
   nothing agent-shaped** — an agent stack is a product-layer concern that needs no engine concept at
   all: create from the base, install with a one-shot exec (which introduces no init dependency,
-  [`deep-dives/guest-runtime.md`](./deep-dives/guest-runtime.md) D3.1), and **Promote**, which yields
+  [`../internals/guest-runtime.md`](../internals/guest-runtime.md) D3.1), and **Promote**, which yields
   an ordinary Template whose lower stack is `[the new layer, …the base's stack]`. That path already
   exists and is the whole reason the engine needs no agent vocabulary here.
   - **Four items are correctness rather than convenience** — without them a sandbox cannot do the
@@ -415,7 +414,7 @@ boundaries; internal mechanisms still to be refined are registered in
     taste: a mount destination **already present in the lower does not trigger copy-up**, while a
     missing one dirties the upper — so preinstalling the common paths keeps Promoted layers clean and
     degrades the exclusion entries to a correctness backstop rather than a routine mechanism
-    ([`deep-dives/rootfs-overlay.md`](./deep-dives/rootfs-overlay.md) D5). It cannot cover a caller's
+    ([`../internals/rootfs-overlay.md`](../internals/rootfs-overlay.md) D5). It cannot cover a caller's
     own choice of destination, which is why the exclusion mechanism still exists.
   - **DNS: the Template ships no `/etc/resolv.conf`, and the engine injects none.** This is the one
     genuine design decision in the list, and both alternatives are worse. **Baking one in** pins a
@@ -466,7 +465,7 @@ boundaries; internal mechanisms still to be refined are registered in
   into the OCI mount spec and the gofer proxies into the guest, isomorphic to the merged rootfs).
   It holds §5.A's **policy + handles, no host-primitive leakage** seam rule too (inheriting the ❌
   list verbatim, with the reasoning not restated; the structural guard and the exemption table are in
-  [`deep-dives/volume.md`](./deep-dives/volume.md) D2).
+  [`../internals/volume.md`](../internals/volume.md) D2).
 - **Sharing/exclusivity policy**: `AccessMode ∈ {Exclusive, SharedReadOnly, SharedReadWrite}`
   (exclusive / read-only fan-out / shared read-write; the last guarantees POSIX semantics only among
   several connections (processes) within one sandbox, while **cross-sandbox rw coherence is undefined
@@ -482,7 +481,7 @@ boundaries; internal mechanisms still to be refined are registered in
     POSIX refusal rather than a silent success) and **exclusivity is enforced in the control plane**
     (the mount row), both adjudicated before the call happens, so neither requires the backend to
     know (the independent seam-side argument is in
-    [`deep-dives/volume.md`](./deep-dives/volume.md) D2).
+    [`../internals/volume.md`](../internals/volume.md) D2).
     - **"Enforced at runtime" holds only in the direction "a writable unit + a ro mount".** The
       reverse — **an immutable unit + a rw mount** — is not a runtime `EROFS` but a **hard failure of
       `runsc create` at the gofer mount** (the container is never created and the guest never ran). So
@@ -491,9 +490,9 @@ boundaries; internal mechanisms still to be refined are registered in
       degrades into an opaque mount failure at cold start. By design this cannot be hit (a snapshot
       produces **an ordinary writable volume**, below), but it is a fact about the substrate rather
       than an assumption about our code (measured in
-      [`deep-dives/volume.md`](./deep-dives/volume.md) D1).
+      [`../internals/volume.md`](../internals/volume.md) D1).
   - All three modes need **no special mechanism**, concurrent cases included (the measured list is in
-    [`deep-dives/volume.md`](./deep-dives/volume.md) D1).
+    [`../internals/volume.md`](../internals/volume.md) D1).
 - **The backend has two arms, with zero difference on the gofer side**: **local (the default)** = a
   **btrfs subvolume** on the host (bringing its own quota cap + cheap atomic snapshots), with the
   gofer proxying an ordinary directory and POSIX coming free from the host kernel; **remote** (S3 /
@@ -501,13 +500,13 @@ boundaries; internal mechanisms still to be refined are registered in
   guest by the gofer. **FUSE lives on the host side only and never inside the guest** (in-gVisor FUSE
   support is limited), and it is sealed inside that remote backend rather than entering the core model
   (why not "FUSE for everything", and where FUSE belongs, are in
-  [`deep-dives/volume.md`](./deep-dives/volume.md) D1).
+  [`../internals/volume.md`](../internals/volume.md) D1).
 - **Operable while unmounted**: create/delete/list/inspect/snapshot/clone + importing/exporting
   content directly. Outwardly **everything is addressed by Volume ID and no host path is exposed**.
   - **This is delivered by a root-confined content accessor on the seam** (`OpenRoot`), **not through
     §5.E's `fs`**: paths are relative to the volume root, escaping it is unreachable, and the local
     arm = `openat2(RESOLVE_IN_ROOT)`. Why it does not go through the guest, and the measured detail of
-    the mechanism, are in [`deep-dives/volume.md`](./deep-dives/volume.md) D2 / D5.1.
+    the mechanism, are in [`../internals/volume.md`](../internals/volume.md) D2 / D5.1.
   - **This promise also answers two otherwise unsolvable scenarios, which is why it is not
     optional**: **seeding a volume from nothing** (when no sandbox exists yet) and **reading a volume
     after every sandbox is gone**. Both are in the direct consequence set of "a Volume's lifecycle is
@@ -521,7 +520,7 @@ boundaries; internal mechanisms still to be refined are registered in
   "present in the mount table": **a paused sandbox does not count as a live writer** (its container is
   stopped and there is no live gofer), so a direct write is safe then and the new content is naturally
   seen after a resume. No reverse proxy is introduced (the falsification is in
-  [`deep-dives/volume.md`](./deep-dives/volume.md) D5).
+  [`../internals/volume.md`](../internals/volume.md) D5).
   - **This invariant is symmetric in both directions, and both sides must be gated.** The sentence
     above states it from the direct-write side, but the danger it guards against (two writers writing
     the same backend bytes while the gofer's and sentry's caches disagree with host-side writes) **does
@@ -593,7 +592,7 @@ boundaries; internal mechanisms still to be refined are registered in
   holding sandbox first and then snapshot — a **composition** of existing primitives, with the engine
   adding no mechanism; **shared-rw offers no** app-consistency (coordinating N sandboxes is product
   semantics, rejected by §1.3). Why this is asymmetric with the Overlay's Promote is derived in
-  [`deep-dives/volume.md`](./deep-dives/volume.md) D6.
+  [`../internals/volume.md`](../internals/volume.md) D6.
   - **A live mounted volume can be snapshotted directly, with no degradation and no disturbance to the
     guest** (measured: under continuous writes the guest's write rate is unaffected with zero write
     errors, every capture point lands inside the host-observed live window, and an append-only log is a
@@ -612,7 +611,7 @@ boundaries; internal mechanisms still to be refined are registered in
     is a per-mount adjudication (the same cardinality argument as `access`), and immutability is
     expressed with a `shared-ro` mount row. The two are therefore **the same kind of object on the same
     backend path**, differing only in semantic annotation (the derivation and falsification are in
-    [`deep-dives/volume.md`](./deep-dives/volume.md) D6.1a).
+    [`../internals/volume.md`](../internals/volume.md) D6.1a).
   - **The new volume's cap must be written explicitly by the engine within the same backend operation,
     with `size` required and not inherited**: measured, what the substrate gives a snapshot is **a
     brand-new uncapped** quota row, with nothing to inherit; and failing to write it is **silent and
@@ -675,7 +674,7 @@ boundaries; internal mechanisms still to be refined are registered in
     disjoint transition locks), the same reasoning as why the admission gate needs a mutex of its own.
     This is not a new mechanism: the same authoritative store serializes the **decide-and-act** pair,
     isomorphic to §4.3's reference-reclamation. The statement, the measured reproduction, and the lock
-    order are in [`deep-dives/volume.md`](./deep-dives/volume.md) D3.
+    order are in [`../internals/volume.md`](../internals/volume.md) D3.
   - **The `UNIQUE(volume) WHERE access='exclusive'` partial index + `CHECK (access IN (...))` are
     schema-level assertions rather than the invariant's deliverer**: the partial index only forbids "two
     exclusives" and **does not forbid an exclusive coexisting with a shared** (covering only half); and
@@ -689,7 +688,7 @@ boundaries; internal mechanisms still to be refined are registered in
   cover (an exclusive coexisting with a shared) **does not arise**. Same deliverer, for the same
   TOCTOU reason: **`INSERT … SELECT … WHERE NOT EXISTS`, with `RowsAffected()==0` ⟹ 409.** The reason
   the upper cannot be held twice is not bookkeeping — it is that the writable upper **does not
-  travel** (`deep-dives/rootfs-overlay.md` D5.2), so two holders would be two divergent filesystems
+  travel** (`../internals/rootfs-overlay.md` D5.2), so two holders would be two divergent filesystems
   claiming one identity.
     **The predicate must be a row-immutable attribute** (`access` here) and **must not be built on a
     mutable lifecycle field** (the reasoning and an external cautionary example are in D3).
@@ -732,7 +731,7 @@ boundaries; internal mechanisms still to be refined are registered in
     reaper's evict of a paused sandbox past its TTL included), and **the reaper's TTL IS the backstop
     for "nobody released it"**, with no heartbeat introduced; heartbeat-based reclamation is a
     multi-node provider's obligation and does not enter the core (the falsification is in
-    [`deep-dives/volume.md`](./deep-dives/volume.md) D4).
+    [`../internals/volume.md`](../internals/volume.md) D4).
   - **There is no preemption verb and no force-detach, and that is settled rather than deferred**:
     every release path already terminates without one. `DELETE /v1/sandboxes/{id}` tears the mount
     rows down and is legal from `running` **and** `paused`; a **detach through
@@ -749,7 +748,7 @@ boundaries; internal mechanisms still to be refined are registered in
     - **A volume-dimension verb that looks up its holder is therefore prohibited, not merely
       unbuilt.** It would acquire in the `vol → sbx` direction while every existing verb acquires
       `sbx → mu` / `sbx → admission mutex`, closing a cycle (derived from the lock order, no
-      reproduction in the repo — [`deep-dives/volume.md`](./deep-dives/volume.md) D3). Were one ever
+      reproduction in the repo — [`../internals/volume.md`](../internals/volume.md) D3). Were one ever
       built it must resolve the holder from the store, **release first, and re-acquire in the global
       order** — which forces it to re-validate and retry, so it could **not** carry the
       decide-and-act pair in one store statement the way `ReplaceMounts` already does. The lock order
@@ -770,8 +769,8 @@ boundaries; internal mechanisms still to be refined are registered in
   sandboxes and its occupancy cannot be split onto any single one. This and §5.B's Overlay upper cap
   (per-sandbox) are two independent capacity caps, enforced separately but **sharing the same underlying
   substrate primitive** (a btrfs subvolume + an squota limit) — that primitive is reused across
-  §5.B/§5.C, see [`deep-dives/rootfs-overlay.md`](./deep-dives/rootfs-overlay.md) D6 and
-  [`deep-dives/volume.md`](./deep-dives/volume.md) D7.
+  §5.B/§5.C, see [`../internals/rootfs-overlay.md`](../internals/rootfs-overlay.md) D6 and
+  [`../internals/volume.md`](../internals/volume.md) D7.
   - **Behavior when it fills is the same as §5.B's per-sandbox cap** (the guest sees an ordinary
     `ENOSPC`, the sandbox lives on as usual, and the control plane does not get involved, §3.4),
     **and it is insensitive to the number of writers**: when several sandboxes write a full volume
@@ -787,7 +786,7 @@ boundaries; internal mechanisms still to be refined are registered in
        available moments before `write()` fails, and decide wrongly. **The engine does not promise that
        guest-side statfs reflects the cap**; a backend able to project it honestly can do better, and
        that is that backend's obligation rather than a core promise (the cause and external corroboration
-       are in [`deep-dives/volume.md`](./deep-dives/volume.md) D7.4).
+       are in [`../internals/volume.md`](../internals/volume.md) D7.4).
     2. **Under squota the cap is a "lifetime write budget", not a "ceiling on live volume".** It **does
        not refund overwritten** extents (rewriting the same 32 MiB file in place twice charges 64 MiB),
        but it **does refund deleted** ones (settled immediately after an unlink, refunding exactly the
@@ -809,7 +808,7 @@ boundaries; internal mechanisms still to be refined are registered in
   **The division of responsibility has two layers**: **the decision and the scheduling belong to the
   mediator** — only it holds the live set, and pushing the decision to the backend (having it take the
   live set and delete the difference) was measured to **delete the bytes of committed volumes**; the
-  derivation and both sets of measured numbers are in [`deep-dives/volume.md`](./deep-dives/volume.md)
+  derivation and both sets of measured numbers are in [`../internals/volume.md`](../internals/volume.md)
   D2. **Accounting for and enumerating residue belong to the backend** — only it knows whether it has
   quota rows at all: `Backend.ListUnitIDs` enumerates the storage units it holds and
   `Backend.DeletedRowIDs` reports the row ids it recorded at deletion time — and a backend with no quota
@@ -822,7 +821,7 @@ boundaries; internal mechanisms still to be refined are registered in
     volume, and the engine cannot detect the mismatch internally. So the sweep must genuinely reclaim
     these rows, and **must run once at startup before any storage unit is created** — otherwise a
     restart can hand out the inherited cap before the first sweep tick. The leak predicate, the polling
-    predicate, and the reclamation procedure are in [`deep-dives/volume.md`](./deep-dives/volume.md) D7.
+    predicate, and the reclamation procedure are in [`../internals/volume.md`](../internals/volume.md) D7.
   - **Enumeration must probe directory by directory and must not use filesystem-level subvolume
     enumeration**: the latter's scope is **the whole filesystem / the containing storage unit** rather
     than the given directory (measured: running it in the volumes directory and in the sibling overlay
@@ -837,7 +836,7 @@ boundaries; internal mechanisms still to be refined are registered in
   - **A mistaken sweep has no detection path whatsoever, which is why every requirement above is a hard
     one.** It is a pure data-plane event — the sandbox lives on as usual, **the guest's writes still
     return success**, and the control plane sees nothing (the measured distribution of five approaches
-    and their consequences are in [`deep-dives/volume.md`](./deep-dives/volume.md) D7.2). One
+    and their consequences are in [`../internals/volume.md`](../internals/volume.md) D7.2). One
     **acceptance-testing discipline** follows: "is the sandbox alive" is always true here, so as an
     assertion it can never fail and has no guarding value; what must be asserted are the properties that
     **would pass silently**.
@@ -853,7 +852,7 @@ boundaries; internal mechanisms still to be refined are registered in
   installation belong to §5.A, below).
 
 > This section's design derivation, its measurements item by item, and the falsified options are in
-> [`deep-dives/network.md`](./deep-dives/network.md) D5, and **are not duplicated here**.
+> [`../internals/network.md`](../internals/network.md) D5, and **are not duplicated here**.
 
 - **This subsystem does exactly two things: hold the declaration, generate the rules.** It **moves no
   bytes, terminates no connection, and contributes no process.** The criterion is a direct application
@@ -884,7 +883,7 @@ boundaries; internal mechanisms still to be refined are registered in
     it is already exhaustive over any address of the host itself and never enumerates), and the sibling
     drop is **another** rule whose predicate is the sibling CIDR — two rules, not a daddr list hung onto
     the floor (the derivation and measurement are in
-    [`deep-dives/network.md`](./deep-dives/network.md) D4.2).
+    [`../internals/network.md`](../internals/network.md) D4.2).
   - **Rendering and installation belong to §5.A**: rendering the nft text, and binding `iifname` / the
     guest IP / the publish host endpoint, all happen inside the provider at placement time — those three
     are products of the placement and host primitives only it holds, so putting them into this
@@ -908,7 +907,7 @@ boundaries; internal mechanisms still to be refined are registered in
   - **`{cidr, port, proto}` is one tuple, not three optional items.** `proto` is always explicit because
     it is a **format requirement** rather than an optional dimension: in the kernel mechanism that carries
     it, port matching itself depends on protocol matching (reasoning in
-    [`deep-dives/network.md`](./deep-dives/network.md) D3.1). So `{cidr, port}` is not well-formed.
+    [`../internals/network.md`](../internals/network.md) D3.1). So `{cidr, port}` is not well-formed.
     - **`cidr` and `port` each have one wildcard value, both expressed by "omission"; `proto` has
       none.** Omitting `cidr` = **any destination** (that is, `via[].match[]`'s transparent-intercept
       shape, D3.3), and omitting `port` = **any port**. In the rules the two are the same mechanism: the
@@ -974,7 +973,7 @@ boundaries; internal mechanisms still to be refined are registered in
     "slightly less functionality" but a broken publish**: without the SNAT it works only on sandboxes that
     happen to have a default route, and without the `output`-side DNAT the host itself cannot dial it (and
     vice versa, which is why "it dials from the host" is not evidence that publish works). The
-    measurements item by item are in [`deep-dives/network.md`](./deep-dives/network.md) D5 ⑬⑭⑮, and **the
+    measurements item by item are in [`../internals/network.md`](../internals/network.md) D5 ⑬⑭⑮, and **the
     numbers are not duplicated here**. The obligation is here: **the generator produces the four as one
     unit and the provider installs them atomically** — there is no observable state in between of "only
     the DNAT went on". **The rule set being wider does not change the three properties above**: it is
@@ -1169,7 +1168,7 @@ boundaries; internal mechanisms still to be refined are registered in
   netns IP (the old one void) reconnects with zero changes, **directly delivering §3.3's "the carrier does
   not encode the placement"**. That veth IP is allocated by the placement (§5.A) and is not a runsc product;
   how the host obtains the IP belongs to §5.A and does not enter this subsystem. Details in
-  [`deep-dives/transport.md`](./deep-dives/transport.md) D4.
+  [`../internals/transport.md`](../internals/transport.md) D4.
   **The endpoint's two halves belong to two subsystems: the IP to §5.A (which allocates it), the port to
   §5.E (`sandboxd` listens on it)**. For §5.A to assemble `IP:port` it must know the port, but **that must
   not become a §5.A → §5.E dependency** (§4: subsystems do not call each other) — the port is a shared
@@ -1184,29 +1183,29 @@ boundaries; internal mechanisms still to be refined are registered in
   resume onto a new IP naturally gets new connections and connections to retired endpoints are reclaimed by
   idle timeout. **Sharing one pool is a correctness requirement rather than an efficiency optimization** —
   the leak reasoning and measurement for building a pool per dial are in
-  [`deep-dives/transport.md`](./deep-dives/transport.md) D4.1.
+  [`../internals/transport.md`](../internals/transport.md) D4.1.
   Restartability is not the engine's burden: a raw pty byte stream is explicitly lossy (a shell has no
   durable SoT of its own), and any "lose nothing" guarantee is for a layer above to handle. The transport's
   in-process, transient, non-authoritative output ring buffer (for `Connect` replay + non-blocking discard
   for slow subscribers) is not within this constraint, and its mechanism is in
-  [`deep-dives/transport.md`](./deep-dives/transport.md) D4.3.
+  [`../internals/transport.md`](../internals/transport.md) D4.3.
   A transient signal of the same class: the **sandbox-global "last I/O" timestamp** the `Health` probe
   carries back (§4.3's connection-activity signal for the idle health state), which is in-process, dies with
   the transport, does not survive resume, and does not enter the control plane — it measures "how long since
   I/O, right now", not a connection registry. Why it is measured on the guest side is in
-  [`deep-dives/reaper-health.md`](./deep-dives/reaper-health.md) D1.
+  [`../internals/reaper-health.md`](../internals/reaper-health.md) D1.
 - **A session is a purely additive thing outside the engine**: agent session semantics (turns / history /
   resumption) are **not implemented inside the engine** but by an adapter outside it, layered on
   `process`/`fs`: the turn loop is recognized on the process stream, history is persisted driver-natively
   (inside the Overlay artifact, readable through `fs`), and resumption calls the agent's native `--resume`.
   The engine adds not one new concept — **the openness is in the adapter layer, and the engine stays small
   and stable** (§1.3 / §1.5#4; the ACP shape mapping and the seam to hold are in
-  [`deep-dives/transport.md`](./deep-dives/transport.md) D1.2 / D3).
+  [`../internals/transport.md`](../internals/transport.md) D1.2 / D3).
 - **The engine supports exactly one class of "running things": processes brought up through exec** (a
   monitor / a build / an `apt`|`pip` install / a dev server / an artifact server), and **system daemon
   services (the `service`/`systemctl` world) are not a target**. This moves the whole class of needs that
   "require a complete init mechanism" out of scope (detail in
-  [`deep-dives/guest-runtime.md`](./deep-dives/guest-runtime.md)).
+  [`../internals/guest-runtime.md`](../internals/guest-runtime.md)).
 - **Not included**: agent / session / turn semantics (→ an adapter outside the engine), and the network
   declaration and its enforcement (→ D).
 
@@ -1238,7 +1237,7 @@ PID 1 = sandboxd (init mode: reaper + signal forwarding + subreaper backstop + s
     orphans reparent to PID 1 and are drained by it, whereas with the declaration and no waiter every
     orphan piles up under the transport as a **permanent zombie**. And wildcard reaping and per-child
     waiting **cannot coexist** (the measured detail and the shape of the handoff table are in
-    [`deep-dives/guest-runtime.md`](./deep-dives/guest-runtime.md) D4.3).
+    [`../internals/guest-runtime.md`](../internals/guest-runtime.md) D4.3).
 - **Transport mode (the child)**: it is this section's process/fs endpoint, **staying purely general**
   and knowing nothing about agents/turns/sessions. **Directed signals** (to one process / a process
   group) belong to it (it holds the pid/pgid handles); **container-level signal fan-out** belongs to
@@ -1252,7 +1251,7 @@ PID 1 = sandboxd (init mode: reaper + signal forwarding + subreaper backstop + s
   describing a different process once the pid is reused). Both share their origin with the raw pty
   byte stream's lossiness: the engine is stateless, a "lose nothing" guarantee is for a layer above,
   and no internal state is added for it. The mechanism and the seam are in
-  [`deep-dives/guest-runtime.md`](./deep-dives/guest-runtime.md) D4.5 (C2 / C3).
+  [`../internals/guest-runtime.md`](../internals/guest-runtime.md) D4.5 (C2 / C3).
 - **Guest-side fault injection does not enter the production binary.** Producing a "the transport
   cannot come up" crash loop for tests rests on a sentinel file inside the guest; it is **compiled only
   under the `testguest` build tag**, and that code simply does not exist in a production `sandboxd`.
@@ -1264,10 +1263,10 @@ PID 1 = sandboxd (init mode: reaper + signal forwarding + subreaper backstop + s
   PID 1, rather than being stuffed into `sandboxd` (§3.2.1: the engine treats every process alike).
 - **The resume cold-start timing** (the exact order of init→re-exec→listen→reconnect, and at which step
   the probe judges healthy) is in
-  [`deep-dives/guest-runtime.md`](./deep-dives/guest-runtime.md) D5.
+  [`../internals/guest-runtime.md`](../internals/guest-runtime.md) D5.
 
-> **Further detail is in [`deep-dives/transport.md`](./deep-dives/transport.md)**: the Connect-RPC
+> **Further detail is in [`../internals/transport.md`](../internals/transport.md)**: the Connect-RPC
 > choice, the process/fs wire protocol, where a session is delimited and by which seam, and the
 > outer-edge projection (control-plane REST + data-plane Connect, D5); **the full reasoning for the
 > guest startup topology is in
-> [`deep-dives/guest-runtime.md`](./deep-dives/guest-runtime.md) D4**.
+> [`../internals/guest-runtime.md`](../internals/guest-runtime.md) D4**.

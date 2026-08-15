@@ -1,8 +1,8 @@
 # The rootfs / Overlay carrier: how the persistence layer actually lands
 
-> **Position: the persistence-layer deep dive for [`§5.B`](../subsystems.md) (spec; navigation in
-> [`SPEC.md`](../SPEC.md)) together with [`§3.1.1`](../model.md) and [`§4.2`](../model.md).** The carrier
-> was settled by measurement on the real substrate, with the conclusions in spec §2.5 / §5.B; this
+> **Position: the persistence-layer internals reference.** It complements the
+> [architecture](../concepts/architecture.md) and [model](../concepts/model.md) pages. The carrier
+> was settled by measurement on the real substrate, with the conclusions in the architecture reference 2.5 / §5.B; this
 > document keeps what lies behind them: **the falsification process, the measured evidence, the
 > alternatives ruled out, the seams to hold, and the agenda still to be refined** (D5).
 >
@@ -246,7 +246,7 @@ provider):**
 
 A content-addressed arm registers behind `rootfs.Provider` **unchanged** — walking the interface member
 by member found one strain point and it is not this document's (`Merged.MergedPath` is a host path, which
-is the same value `runtime.RootfsSource` carries, and open-decisions' §5.A provider row already owns the
+is the same value `runtime.RootfsSource` carries, and GitHub Issues' §5.A provider row already owns the
 remote-handle question). So **no surface is added here**: §1.3 forbids reserving it, and the repo already
 litigated this on the sibling seam — `volume.Backend` has a `Capabilities()` because a **second
 implementation shipped**, and refused a `DirectIO` bit because none had; §5.B has one implementation and
@@ -326,7 +326,7 @@ correction to the obvious reading — the artifact **need not be content-address
 Promote already produces it and D0 already measured that it tars out and rebuilds byte-identically. Dedup
 (D2/D3) is therefore an **independent** question from portability, not its precondition. The only residual
 that touches the engine is the **handle shape** a remote provider would receive, which
-open-decisions' §5.A provider row owns.
+GitHub Issues' §5.A provider row owns.
 
 ### D5.3 The detached Overlay: a first-class object, and why the upper still does not travel
 
@@ -372,7 +372,7 @@ implementation should verify it rather than inherit this sentence as a settled r
 
 ## D6. The capacity quota: how the per-sandbox upper cap is materialized
 
-> **Position: the deep dive on [`§3.4`](../model.md)'s disk capacity axis + [`§5.B`](../subsystems.md)'s
+> **Position: the deep dive on [`§3.4`](../concepts/model.md)'s disk capacity axis + [`§5.B`](../concepts/subsystems.md)'s
 > capacity-quota responsibility.** The carrier (an outer kernel overlayfs, D0) makes the upper an ordinary
 > host directory tree, which is exactly what makes the lightest quota mechanism available.
 
@@ -418,7 +418,7 @@ governed** — the bytes a sandbox **newly writes**. Under full qgroups, copy-up
 refusing new writes, so **the cost is paid and a hard ceiling still not obtained**; and charging a sandbox
 for bytes it reflinked from a Template (content it did not write) is questionable in itself; ③ the
 development/test substrate (`sbx`) **cannot change modes** (`BTRFS_IOC_QUOTA_CTL` returns EPERM even as
-root with all of `CAP_SYS_ADMIN`), so choosing full qgroups would mean the spec and the substrate
+root with all of `CAP_SYS_ADMIN`), so choosing full qgroups would mean the architecture reference and the substrate
 diverging long-term (the drift CLAUDE.md warns about).
 
 > **A cost that must be handled along with it**: under squota a sandbox cannot burst its own cap, but

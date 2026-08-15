@@ -12,21 +12,21 @@ import (
 	"github.com/TSHOGX/khora/internal/store"
 )
 
-// This file is the §4 mediator's network face: it threads §5.D's generator output
-// to §5.A's installer, and owns the two write points for the declaration
-// (§3.4/§5.D). It is the ONLY place that calls both subsystems, which is exactly
-// what §4 exists for — `network` and `runtime` never call each other.
+// This file is the the documented invariant mediator's network face: it threads the documented invariant's generator output
+// to the documented invariant's installer, and owns the two write points for the declaration
+// (the documented invariant/the documented invariant). It is the ONLY place that calls both subsystems, which is exactly
+// what the documented invariant exists for — `network` and `runtime` never call each other.
 
-// steeringFor derives the §5.A steering spec from a sandbox's CURRENT record.
+// steeringFor derives the the documented invariant steering spec from a sandbox's CURRENT record.
 //
 // Called at every placement rather than cached, and that is the definition of a
-// Binding (§3.4): the declaration's SoT is the record, so a resume regenerates the
+// Binding (the documented invariant): the declaration's SoT is the record, so a resume regenerates the
 // rule set from whatever the record says NOW — not from anything frozen with the
 // previous placement.
 //
 // The deployment's second-hop uid rides along because the provider installs the
 // engine-level table once at startup and needs to know whether one was supplied at
-// all; the DECLARATION never carries it (§2.4 / §6.2).
+// all; the DECLARATION never carries it (the documented invariant / the documented invariant).
 //
 // # Why the deployment premise is RE-CHECKED here and not only at the write points
 //
@@ -37,7 +37,7 @@ import (
 // anywhere: the write points are now correctly closed, and the row admitted by the
 // previous run is still in the store, still regenerated at every placement.
 //
-// Here rather than in Generate, on the division §5.D already draws: the second-hop pin is NOT
+// Here rather than in Generate, on the division the documented invariant already draws: the second-hop pin is NOT
 // part of a sandbox's rule set (one engine-level `output` table narrowed by uid covers the whole
 // deployment, installed once at startup), so its absence cannot show up as a missing rule — only
 // as a PRECONDITION on placing a sandbox whose declaration needs it. network.ValidatePlacement
@@ -74,16 +74,16 @@ func protoFor(p model.NetProto) ruleset.Proto {
 	return ruleset.TCP
 }
 
-// InstallSecondHopTable installs the ENGINE-LEVEL second-hop table (§2.4 invariant
+// InstallSecondHopTable installs the ENGINE-LEVEL second-hop table (the documented invariant invariant
 // 2's second half). Called ONCE at orchestrator boot, before serving.
 //
 // Not per placement because the predicate is not per-sandbox: one
 // deployment-supplied uid covers every `via[]` in the deployment, and hop 2's
 // traffic arrives on no interface at all (measured: it counts ZERO in `forward` in
-// all three shapes and is visible only in `output` — network.md D5 ㉔).
+// all three shapes and is visible only in `output` — the relevant internals page the documented invariant ㉔).
 //
 // With NO uid supplied it installs nothing (and the provider drops a stale table left
-// by a previous run — see InstallSecondHop). §2.4's second invariant is then
+// by a previous run — see InstallSecondHop). the documented invariant's second invariant is then
 // unenforced, so `via[]` is refused at BOTH ends, which is one obligation in two
 // places rather than a belt-and-braces pair: the write points keep such a declaration
 // out of the record (network.ValidateDeployment — recording it would leave a confused
@@ -94,7 +94,7 @@ func (m *Mediator) InstallSecondHopTable(ctx context.Context) error {
 	if !m.deps.Deployment.SecondHopPinned() {
 		// The nil uid is handed to the provider rather than short-circuited here: tearing
 		// down the stale table is a MECHANISM (an nft table on this host), so it belongs to
-		// §5.A. The mediator's part is knowing that "no uid" is a state the provider must
+		// the documented invariant. The mediator's part is knowing that "no uid" is a state the provider must
 		// be TOLD about, not one it can be left to infer from never being called.
 		if err := m.deps.Runtime.InstallSecondHop(ctx, ruleset.RuleSet{}, nil); err != nil {
 			return err
@@ -108,7 +108,7 @@ func (m *Mediator) InstallSecondHopTable(ctx context.Context) error {
 	return m.deps.Runtime.InstallSecondHop(ctx, rs, m.deps.Deployment.SecondHopUID)
 }
 
-// NetworkInfo is the §6.1 `GET …/network` read shape.
+// NetworkInfo is the the documented invariant `GET …/network` read shape.
 //
 // A STRUCT rather than more return values: this read already carried four, and the
 // per-entry hit counters would make six — at which point a caller reading
@@ -118,12 +118,12 @@ type NetworkInfo struct {
 	Decl  model.NetworkDecl
 	State model.Lifecycle
 	// PublishEndpoints are the current placement's bound host endpoints, nil when the
-	// engine holds no placement (§3.3: an endpoint is a placement product).
+	// engine holds no placement (the documented invariant: an endpoint is a placement product).
 	PublishEndpoints []string
-	// Hits maps abstract §5.D counter names to packet counts for the CURRENT placement,
+	// Hits maps abstract the documented invariant counter names to packet counts for the CURRENT placement,
 	// and is NIL when there is no placement or the counters could not be read.
 	//
-	// Nil rather than an empty map, because §6.1 omits the key in exactly those cases and
+	// Nil rather than an empty map, because the documented invariant omits the key in exactly those cases and
 	// an empty map would let a caller distinguish neither. Note that pause DESTROYS the
 	// rule-set table rather than zeroing it, so "paused" genuinely has no counters to
 	// report — this is not an omission convention papering over a zero.
@@ -134,12 +134,12 @@ type NetworkInfo struct {
 	Attribution network.CounterAttribution
 }
 
-// Network reads a sandbox's declaration together with the two facts §6.1's read face
+// Network reads a sandbox's declaration together with the two facts the documented invariant's read face
 // needs alongside it: its lifecycle state, and the host endpoint each publish is
 // bound to at the CURRENT placement.
 //
 // `state` is a member of that response rather than a second request because of a
-// mechanical biconditional §6.1 spells out: `running` ⟺ what is installed in the
+// mechanical biconditional the documented invariant spells out: `running` ⟺ what is installed in the
 // kernel IS this declaration; not `running` ⟹ nothing is installed. Neither write
 // point can make a `running` sandbox's record diverge from its live rule set —
 // editing the three egress fields on `running` is a 409, and publish makes
@@ -148,8 +148,8 @@ type NetworkInfo struct {
 // expose: whether a placement exists.
 //
 // The endpoints come from the PLACEMENT, not the record, because that is what they
-// are (§3.3): rebound every resume, invalidated with the old placement. A `paused`
-// sandbox has none, which is why §6.1 omits the key rather than reporting an empty
+// are (the documented invariant): rebound every resume, invalidated with the old placement. A `paused`
+// sandbox has none, which is why the documented invariant omits the key rather than reporting an empty
 // string — a falsy-but-present field invites reading it as "is this publish in
 // effect", and that judgment is doubly wrong (the rule set is installed whole and
 // atomically, so there is no per-publish install state to report).
@@ -164,7 +164,7 @@ func (m *Mediator) Network(ctx context.Context, id model.SandboxID) (NetworkInfo
 		PublishEndpoints: m.publishEndpoints(id),
 	}
 	// Attribution is a pure function of the declaration, so it is available regardless of
-	// whether a placement exists — which is what lets §6.1 report the entries with their
+	// whether a placement exists — which is what lets the documented invariant report the entries with their
 	// keys omitted rather than reporting nothing at all.
 	if spec, gerr := network.Generate(info.Decl); gerr == nil {
 		info.Attribution = spec.Counters
@@ -173,11 +173,11 @@ func (m *Mediator) Network(ctx context.Context, id model.SandboxID) (NetworkInfo
 	return info, nil
 }
 
-// ruleHits reads the current placement's §5.D counters, or nil when there is no
+// ruleHits reads the current placement's the documented invariant counters, or nil when there is no
 // placement or the read fails.
 //
 // DEGRADES rather than failing the read, the same rule inspect-shaped readers follow
-// everywhere else: a counter is observation, and §6.1 omits what it cannot read. It must
+// everywhere else: a counter is observation, and the documented invariant omits what it cannot read. It must
 // never fail `GET …/network`, because that endpoint is a CONTRACT REQUIREMENT of the
 // read-modify-write cycle for editing a declaration — a counter read breaking it would
 // make an unreadable counter block a security-relevant edit.
@@ -212,18 +212,18 @@ func (m *Mediator) publishEndpoints(id model.SandboxID) []string {
 	return append([]string(nil), ls.placement.PublishEndpoints...)
 }
 
-// AddPublish is `POST /v1/sandboxes/{id}/publish` (§5.D / §6.1): the one Binding
+// AddPublish is `POST /v1/sandboxes/{id}/publish` (the documented invariant / the documented invariant): the one Binding
 // field with a second write point, and the one that may be written on a `running`
 // sandbox.
 //
 // ALLOWED ON `running` because a publish is a pure host-side rule set, purely additive, touching
 // no isolation unit — so unlike the egress fields there is no way for the record to say one thing
-// while a live isolation unit says another (§5.D).
+// while a live isolation unit says another (the documented invariant).
 //
-// `paused` IS EQUALLY LEGAL: the exception is "MAY be written on `running`", not "only on". §3.4's
+// `paused` IS EQUALLY LEGAL: the exception is "MAY be written on `running`", not "only on". the documented invariant's
 // state gate tightens `running`, while the `paused` side is open for every Binding field, so
 // refusing it would make this the one field harder to write paused than running — and would push
-// the caller onto the whole-binding PATCH, the write point §6.1 documents as dangerous.
+// the caller onto the whole-binding PATCH, the write point the documented invariant documents as dangerous.
 //
 // RECORD FIRST, THEN RULES, because the invariant is one-directional ("there is no inbound port
 // the record does not describe"): of the two half-done outcomes, "recorded, not installed" is a
@@ -232,7 +232,7 @@ func (m *Mediator) publishEndpoints(id model.SandboxID) []string {
 // transition lock covers the whole thing.
 //
 // THE READ-APPEND HAPPENS HERE so two concurrent publishes cannot lose one: the store replaces
-// the whole value rather than appending. §6.1's caller-side lost-update edge for PATCH is a
+// the whole value rather than appending. the documented invariant's caller-side lost-update edge for PATCH is a
 // different thing and does not excuse an engine-side one.
 //
 // Returns the resulting item, its host endpoint (empty when no placement holds one),
@@ -248,7 +248,7 @@ func (m *Mediator) AddPublish(ctx context.Context, id model.SandboxID, p model.N
 	}
 	switch rec.State {
 	case model.Running, model.Paused:
-		// both legal, differing only in when the rules appear (§6.1)
+		// both legal, differing only in when the rules appear (the documented invariant)
 	default:
 		return p, "", false, fmt.Errorf("publish: %w (state=%s: publish is valid on running or paused)",
 			store.ErrConflict, rec.State)
@@ -256,14 +256,14 @@ func (m *Mediator) AddPublish(ctx context.Context, id model.SandboxID, p model.N
 
 	next, added := network.AddPublish(rec.Network, p)
 	// Validate the RESULT, not the item: a declaration is validated as a whole, and
-	// this one must still be legal after the append (§6.2 — the checks run before
+	// this one must still be legal after the append (the documented invariant — the checks run before
 	// anything is materialized).
 	//
 	// Through ValidateDeclaration, which is what makes "all three write points go
 	// through one funnel" true rather than nearly true: calling network.Validate
 	// directly here skipped ValidateDeployment, so a record already carrying `via[]`
 	// (written under a deployment that DID supply a uid) accepted a publish under one
-	// that does not — committing a declaration whose §2.4 invariant this engine cannot
+	// that does not — committing a declaration whose the documented invariant invariant this engine cannot
 	// deliver. Publish cannot introduce `via[]` itself, so nothing was live.
 	if err := m.ValidateDeclaration(next, true); err != nil {
 		return p, "", false, err
@@ -279,13 +279,13 @@ func (m *Mediator) AddPublish(ctx context.Context, id model.SandboxID, p model.N
 		// `paused`: recorded only. Not a gap in the invariant — a paused sandbox has NO
 		// placement, so its whole declaration has not one rule installed, and a record
 		// describing MORE than what exists is the definition of `paused`; the reverse is
-		// what §2.4 refuses.
+		// what the documented invariant refuses.
 		return p, "", false, nil
 	}
 
 	// `running`: install now. The whole table is re-rendered and re-installed as ONE
 	// atomic file, which is both required and sufficient — measured, that leaves live
-	// flows intact 5/5, while a delete-then-install kills them 5/5 (network.md D5 ㉒).
+	// flows intact 5/5, while a delete-then-install kills them 5/5 (the relevant internals page the documented invariant ㉒).
 	// It also makes the four rules of a publish appear as one unit with no
 	// "only the DNAT is installed" state observable.
 	steering, gerr := m.steeringFor(model.Sandbox{ID: id, Network: next})
@@ -299,7 +299,7 @@ func (m *Mediator) AddPublish(ctx context.Context, id model.SandboxID, p model.N
 		// see the doc comment. The rollback is a whole-table re-render too, so unlike a
 		// per-rule teardown it cannot leave a HALF-torn rule set — the shape whose
 		// failure signature is "connects, then reads hang", the hardest to diagnose
-		// (network.md D5 ⑰).
+		// (the relevant internals page the documented invariant ⑰).
 		m.rollbackPublish(ctx, id, rec, added)
 		return p, "", false, fmt.Errorf("publish: install rules: %w", err)
 	}
@@ -345,8 +345,8 @@ func (m *Mediator) liveState(id model.SandboxID) *liveState {
 	return m.live[id]
 }
 
-// ValidateDeclaration applies §6.2's nine 400 classes plus the deployment refusal,
-// BEFORE the admission gate (§6.2: an invalid declaration is refused before any byte
+// ValidateDeclaration applies the documented invariant's nine 400 classes plus the deployment refusal,
+// BEFORE the admission gate (the documented invariant: an invalid declaration is refused before any byte
 // is touched or any budget recorded, so 400 and 507 are never both true).
 //
 // It lives on the mediator so every write point passes through it structurally —
@@ -358,7 +358,7 @@ func (m *Mediator) ValidateDeclaration(d model.NetworkDecl, given bool) error {
 	return network.ValidateDeployment(d, m.deps.Deployment)
 }
 
-// hostLocal returns the host-locality predicate §6.2's fifth class needs, from the
+// hostLocal returns the host-locality predicate the documented invariant's fifth class needs, from the
 // deployment (tests inject a fixture; production reads the interface table).
 func (m *Mediator) hostLocal() network.HostLocal {
 	if m.deps.Deployment.HostLocal != nil {
@@ -367,6 +367,6 @@ func (m *Mediator) hostLocal() network.HostLocal {
 	return network.SystemHostLocal
 }
 
-// IsDeclarationInvalid reports whether err is one of §6.2's declaration refusals, so
+// IsDeclarationInvalid reports whether err is one of the documented invariant's declaration refusals, so
 // the API layer maps it to 400 through one arm rather than nine.
 func IsDeclarationInvalid(err error) bool { return errors.Is(err, network.ErrDeclarationInvalid) }

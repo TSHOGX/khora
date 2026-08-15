@@ -1,10 +1,10 @@
 //go:build substrate
 
-// L3/L4 §4.3 reaper acceptance against REAL runsc. Drives the assembled engine
+// L3/L4 the documented invariant reaper acceptance against REAL runsc. Drives the assembled engine
 // + reaper through each health state and TTL disposition on live containers:
-// false-idle guard (D2), multi-connection idle (§3.2), idle→auto-pause,
+// false-idle guard (the documented invariant), multi-connection idle (the documented invariant), idle→auto-pause,
 // live killed-container→crash-pause, transport-down same-IP restart,
-// transport crash-loop escalation (D4b), paused→evict, and the reaper-vs-verb
+// transport crash-loop escalation (the documented invariantb), paused→evict, and the reaper-vs-verb
 // lock seam. Each assertion states its property inline. Requires root.
 //
 //	sudo env PATH=$PATH GOTOOLCHAIN=local GOFLAGS=-mod=mod GOSUMDB=off HOME=$HOME \
@@ -33,7 +33,7 @@ func dur(d time.Duration) *time.Duration { return &d }
 // tickerSrc is a tiny static guest binary that prints a line every 100ms for N
 // seconds, then exits. The bare rootfs is dash + libc only (no coreutils, no
 // `sleep`), so a shell producer loop cannot pace itself — this injects real
-// paced output to drive the activity signal deterministically (§4.3 / D2).
+// paced output to drive the activity signal deterministically (the documented invariant / the documented invariant).
 const tickerSrc = `package main
 import ("fmt";"os";"strconv";"time")
 func main(){
@@ -42,7 +42,7 @@ func main(){
   for time.Now().Before(end){ fmt.Println("tick"); time.Sleep(100*time.Millisecond) }
 }`
 
-// lastKind returns the most recent outbox event Kind for a sandbox (§4.4-C:
+// lastKind returns the most recent outbox event Kind for a sandbox (the documented invariant:
 // transitions are published to the outbox; a test reads it to assert the
 // disposition Kind — auto-paused / crash-paused / destroyed).
 func lastKind(t *testing.T, eng *orchestrator.Engine, sid model.SandboxID) string {
@@ -81,7 +81,7 @@ func killTransportChild(t *testing.T, cl transport.Client) {
 	}
 }
 
-// idle sandbox (no I/O) → auto-paused after idle_timeout (§4.3 idle state).
+// idle sandbox (no I/O) → auto-paused after idle_timeout (the documented invariant idle state).
 func TestReaperIdleAutoPauseRealRunsc(t *testing.T) {
 	ctx := context.Background()
 	eng, _ := setupEngine(t, 30*time.Second)
@@ -95,7 +95,7 @@ func TestReaperIdleAutoPauseRealRunsc(t *testing.T) {
 
 	// Poll rather than sleep-once: the disposition needs BOTH the guest's last-I/O
 	// stamp aged past idle_timeout AND an L2 probe that succeeds, because idle is
-	// read only on the L2-up branch (the D2 unreadable-idle guard). A probe that
+	// read only on the L2-up branch (the the documented invariant unreadable-idle guard). A probe that
 	// times out under load classifies transport-down, not idle, so a single fixed
 	// sleep can assert against a sandbox the classifier never called idle.
 	//
@@ -120,10 +120,10 @@ func TestReaperIdleAutoPauseRealRunsc(t *testing.T) {
 	t.Logf("✓ idle (no I/O) → auto-paused after idle_timeout")
 }
 
-// D2 false-idle guard: a DETACHED process still producing output with NO client
+// the documented invariant false-idle guard: a DETACHED process still producing output with NO client
 // draining it is NOT auto-paused. The guest stamps activity on broadcast even
-// with no subscriber (§3.2), so idle_millis stays low; host-side stamping would
-// false-idle a working sandbox (reaper-health D1).
+// with no subscriber (the documented invariant), so idle_millis stays low; host-side stamping would
+// false-idle a working sandbox (reaper-health the documented invariant).
 func TestReaperFalseIdleGuardRealRunsc(t *testing.T) {
 	ctx := context.Background()
 	eng, base := setupEngine(t, 30*time.Second)
@@ -142,7 +142,7 @@ func TestReaperFalseIdleGuardRealRunsc(t *testing.T) {
 
 	// A process that keeps producing output for ~8s. We consume the Start event,
 	// then STOP reading — the process keeps pumping into its ring guest-side with
-	// no client draining, which is the exact §3.2 detached case.
+	// no client draining, which is the exact the documented invariant detached case.
 	ch, err := cl.Start(ctx, transport.StartSpec{Cmd: "/usr/bin/ticker", Args: []string{"8"}})
 	if err != nil {
 		t.Fatalf("start: %v", err)
@@ -156,14 +156,14 @@ func TestReaperFalseIdleGuardRealRunsc(t *testing.T) {
 	for time.Now().Before(deadline) {
 		r.Sweep(ctx)
 		if stt, _ := m.State(ctx, sid); stt != model.Running {
-			t.Fatalf("detached producing process was auto-paused (D2 false-idle): state=%s", stt)
+			t.Fatalf("detached producing process was auto-paused (the documented invariant false-idle): state=%s", stt)
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	t.Logf("✓ detached process still producing output → NOT auto-paused (D2 guest-side activity)")
+	t.Logf("✓ detached process still producing output → NOT auto-paused (the documented invariant guest-side activity)")
 }
 
-// multi-connection idle (§3.2): activity is sandbox-global = max over all procs
+// multi-connection idle (the documented invariant): activity is sandbox-global = max over all procs
 // + ptys. With one process idle and one still producing I/O, the sandbox is NOT
 // idle; it becomes idle only once ALL go quiet past idle_timeout.
 func TestReaperMultiConnectionIdleRealRunsc(t *testing.T) {
@@ -199,11 +199,11 @@ func TestReaperMultiConnectionIdleRealRunsc(t *testing.T) {
 	for time.Now().Before(deadline) {
 		r.Sweep(ctx)
 		if stt, _ := m.State(ctx, sid); stt != model.Running {
-			t.Fatalf("sandbox auto-paused while one connection still active (§3.2 max): state=%s", stt)
+			t.Fatalf("sandbox auto-paused while one connection still active (the documented invariant max): state=%s", stt)
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	t.Logf("✓ one connection active keeps the sandbox non-idle (§3.2 activity = max over all)")
+	t.Logf("✓ one connection active keeps the sandbox non-idle (the documented invariant activity = max over all)")
 
 	// drain B to completion so ALL connections go quiet, then it must auto-pause.
 	go func() {
@@ -217,7 +217,7 @@ func TestReaperMultiConnectionIdleRealRunsc(t *testing.T) {
 		return stt == model.Paused
 	})
 	if !paused {
-		t.Fatalf("sandbox did not auto-pause after ALL connections went quiet (§3.2)")
+		t.Fatalf("sandbox did not auto-pause after ALL connections went quiet (the documented invariant)")
 	}
 	t.Logf("✓ once ALL connections idle past idle_timeout → auto-paused")
 }
@@ -240,7 +240,7 @@ func killContainer(t *testing.T, base string, sid model.SandboxID) {
 	}
 }
 
-// a killed `running` container → crash-paused by the LIVE reaper (§4.2
+// a killed `running` container → crash-paused by the LIVE reaper (the documented invariant
 // involuntary pause). Proves the reaper drives the demote, not only the
 // boot-time reconcile path. L1 dead + L2 down → dead-recoverable → crash-pause.
 func TestReaperLiveCrashPauseRealRunsc(t *testing.T) {
@@ -276,13 +276,13 @@ func TestReaperLiveCrashPauseRealRunsc(t *testing.T) {
 		t.Fatalf("killed running state=%s; want paused (live crash-pause)", stt)
 	}
 	if k := lastKind(t, eng, sid); k != "crash-paused" {
-		t.Fatalf("dead-recoverable Kind=%q; want crash-paused (§4.2 involuntary)", k)
+		t.Fatalf("dead-recoverable Kind=%q; want crash-paused (the documented invariant involuntary)", k)
 	}
 	t.Logf("✓ killed running container → crash-paused by the LIVE reaper")
 }
 
 // transport child killed → classified transport-down; PID1 restarts it on the
-// SAME IP; NO crash-pause, no cold-start, no new epoch (§5.E.1). The reaper
+// SAME IP; NO crash-pause, no cold-start, no new epoch (the documented invariant). The reaper
 // WAITS within budget.
 func TestReaperTransportDownSameIPRealRunsc(t *testing.T) {
 	ctx := context.Background()
@@ -316,7 +316,7 @@ func TestReaperTransportDownSameIPRealRunsc(t *testing.T) {
 	// endpoint unchanged (same IP — not a resume).
 	epAfter, err := m.Endpoint(sid)
 	if err != nil || epAfter != epBefore {
-		t.Fatalf("endpoint changed %s → %s (err=%v); want SAME IP (§5.E.1, not a resume)", epBefore, epAfter, err)
+		t.Fatalf("endpoint changed %s → %s (err=%v); want SAME IP (the documented invariant, not a resume)", epBefore, epAfter, err)
 	}
 	// and it serves again after the in-place restart.
 	if _, err := m.Client(sid); err != nil {
@@ -325,7 +325,7 @@ func TestReaperTransportDownSameIPRealRunsc(t *testing.T) {
 	t.Logf("✓ transport child killed → transport-down, PID1 restarts SAME IP %s, no crash-pause", epAfter)
 }
 
-// D4b crash-loop escalation: a transport child that NEVER comes healthy
+// the documented invariantb crash-loop escalation: a transport child that NEVER comes healthy
 // (crash-loop, via the /tmp sentinel) past the restart budget is escalated to
 // dead-recoverable → resume (new IP, new epoch) — not waited on forever.
 func TestReaperTransportCrashLoopEscalationRealRunsc(t *testing.T) {
@@ -370,10 +370,10 @@ func TestReaperTransportCrashLoopEscalationRealRunsc(t *testing.T) {
 	})
 	if !escalated {
 		stt, _ := m.State(ctx, sid)
-		t.Fatalf("crash-loop transport not escalated to resume within window (state=%s); want running at NEW IP (D4b)", stt)
+		t.Fatalf("crash-loop transport not escalated to resume within window (state=%s); want running at NEW IP (the documented invariantb)", stt)
 	}
 	if epAfter == epBefore {
-		t.Fatalf("escalation reused IP %s; want NEW IP/epoch (§3.3 / D4b cold-start)", epBefore)
+		t.Fatalf("escalation reused IP %s; want NEW IP/epoch (the documented invariant / the documented invariantb cold-start)", epBefore)
 	}
 	// escalation went through crash-pause then resume.
 	evs, _ := eng.Store.UnpublishedEvents(ctx, 100 /* a bound is required; well above what this test emits */)
@@ -390,12 +390,12 @@ func TestReaperTransportCrashLoopEscalationRealRunsc(t *testing.T) {
 		}
 	}
 	if !sawCrashPause || !sawResume {
-		t.Fatalf("escalation did not emit crash-paused+resumed (D4b)")
+		t.Fatalf("escalation did not emit crash-paused+resumed (the documented invariantb)")
 	}
-	t.Logf("✓ crash-loop transport escalated past budget → resume at NEW IP %s → %s (D4b)", epBefore, epAfter)
+	t.Logf("✓ crash-loop transport escalated past budget → resume at NEW IP %s → %s (the documented invariantb)", epBefore, epAfter)
 }
 
-// paused sandbox past retention → evict → destroyed (§4.1 evict = reaper's
+// paused sandbox past retention → evict → destroyed (the documented invariant evict = reaper's
 // automatic destroy of a paused sandbox).
 func TestReaperEvictPastRetentionRealRunsc(t *testing.T) {
 	ctx := context.Background()
@@ -427,7 +427,7 @@ func TestReaperEvictPastRetentionRealRunsc(t *testing.T) {
 		t.Fatalf("paused-past-retention record still present; want destroyed (evict)")
 	}
 	if k := lastKind(t, eng, sid); k != "destroyed" {
-		t.Fatalf("evict Kind=%q; want destroyed (§4.1)", k)
+		t.Fatalf("evict Kind=%q; want destroyed (the documented invariant)", k)
 	}
 	if _, err := os.Stat(up); !os.IsNotExist(err) {
 		t.Fatalf("upper survived evict (want reclaimed via synchronous Destroy): %v", err)
@@ -436,7 +436,7 @@ func TestReaperEvictPastRetentionRealRunsc(t *testing.T) {
 }
 
 // reaper-vs-verb seam: a sandbox whose transition lock is HELD by an in-flight
-// verb must be SKIPPED by a concurrent sweep (TryLock-skip, §4.4-B).
+// verb must be SKIPPED by a concurrent sweep (TryLock-skip, the documented invariant).
 //
 // The scenario is chosen so the skip is actually REACHABLE, which took some care.
 // An in-flight resume leaves the record `paused` for its whole cold start, so a
@@ -448,7 +448,7 @@ func TestReaperEvictPastRetentionRealRunsc(t *testing.T) {
 // That race is the severe one. Without the skip the reaper would evict — destroy
 // the record and DELETE the Overlay bytes — out from under a resume that is
 // mounting exactly those bytes. refcount cannot save it, because an in-flight
-// mount is not a persistent reference row (§4.4-B states this precisely).
+// mount is not a persistent reference row (the documented invariant states this precisely).
 //
 // A retention of 1ns makes the sandbox evict-eligible the instant it pauses, so
 // every sweep in the storm below is a real eviction attempt.
@@ -494,20 +494,20 @@ func TestReaperSkipsVerbHeldLockRealRunsc(t *testing.T) {
 	// The resume must have SUCCEEDED. If a sweep evicted mid-cold-start, the record
 	// and its Overlay vanish underneath it and this fails — which is the whole point.
 	if err != nil {
-		t.Fatalf("resume failed while concurrent sweeps ran: %v — a sweep evicted the sandbox out from under an in-flight resume, deleting the Overlay it was mounting (§4.4-B TryLock-skip)", err)
+		t.Fatalf("resume failed while concurrent sweeps ran: %v — a sweep evicted the sandbox out from under an in-flight resume, deleting the Overlay it was mounting (the documented invariant TryLock-skip)", err)
 	}
 	if stt, _ := m.State(ctx, sid); stt != model.Running {
-		t.Fatalf("state=%s; want running — the resume completed, so no sweep may have disposed of it (§4.4-B)", stt)
+		t.Fatalf("state=%s; want running — the resume completed, so no sweep may have disposed of it (the documented invariant)", stt)
 	}
 	// And it was never destroyed behind the resume's back: a `destroyed` event would
 	// be the durable trace of an eviction that raced the verb.
 	for _, k := range eventKindsFor(t, eng, sid) {
 		if k == "destroyed" {
-			t.Fatalf("a concurrent sweep EVICTED a lock-held sandbox (events=%v) — the reaper must TryLock-skip a sandbox a verb is driving (§4.4-B / reaper-health D3)",
+			t.Fatalf("a concurrent sweep EVICTED a lock-held sandbox (events=%v) — the reaper must TryLock-skip a sandbox a verb is driving (the documented invariant / reaper-health the documented invariant)",
 				eventKindsFor(t, eng, sid))
 		}
 	}
-	t.Logf("✓ reaper TryLock-skips an evict-eligible sandbox held by an in-flight resume (§4.4-B)")
+	t.Logf("✓ reaper TryLock-skips an evict-eligible sandbox held by an in-flight resume (the documented invariant)")
 }
 
 // eventKindsFor returns every outbox event Kind for a sandbox, in commit order.

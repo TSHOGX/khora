@@ -1,7 +1,6 @@
 # Transport deep dive: the two-service foundation (process / fs) + session semantics as an addition
 
-> **Position: the transport-layer deep dive for [`§5.E`](../subsystems.md) (spec; navigation in
-> [`SPEC.md`](../SPEC.md)).** The spec fixes only §5.E's boundary (the engine exposes just the two
+> **Position: the transport-layer internals reference.** The engine exposes just the two
 > stateless services process / fs, with session semantics outside the engine); this document develops
 > what lies behind that boundary — **the choice of framework, the ACP session mapping, and the seams to
 > hold** — and gives the **wire protocol (D4)** plus the outer-edge projection (D5, whose boundaries and
@@ -188,7 +187,7 @@ As long as those three seams exist, a session can land as a pure addition outsid
 document does not design a session's internals, only ensures the foundation does not stand in its way.**
 
 > **Three boundaries where ACP is borrowed but must be adapted** (left for whoever actually builds the
-> session layer; registered here only): ① ACP's fs is the agent calling **back** into the client
+> session layer; recorded here only): ① ACP's fs is the agent calling **back** into the client
 > (direction agent→client) while this project's fs is **host→sandbox**, so a session adapter must adapt
 > the direction; ② ACP has **no audit**, while this project wants durable events (hung beside the
 > session layer, not in the engine); ③ ACP recovers by **replay**, and so does this project — a resume
@@ -199,9 +198,9 @@ document does not design a session's internals, only ensures the foundation does
 
 ## D4. The wire protocol
 
-### D4.1 The carrier: TCP inside the netns (see spec §5.E)
+### D4.1 The carrier: TCP inside the netns (see the architecture reference 5.E)
 
-The carrier is settled (spec §5.E): `sandboxd` listens on a TCP port inside the guest netns, connections
+The carrier is settled (the architecture reference 5.E): `sandboxd` listens on a TCP port inside the guest netns, connections
 are terminated by the sentry's userspace netstack, and the host connects directly through that netns's
 veth IP — unary over HTTP, bidirectional streams over h2c streaming (server-stream/client-stream) with
 immediate flush, no vsock; the framework is Connect-RPC over h2c (D4.2) rather than a bare WebSocket
@@ -272,7 +271,7 @@ part of a §5.A provider's network obligations, without changing this wire proto
   default idle read/write deadline on it — that would silently kill an idle shell (a known, reproducible
   pit). The `keepalive` in the event `oneof` (D4.3) exists for this: the server periodically sends a
   `keepalive` frame so intermediaries and frontends know the connection is alive and do not reclaim it for
-  going quiet. This is an implementation-level constraint, registered here rather than entering the core
+  going quiet. This is an implementation-level constraint, recorded here rather than entering the core
   spec.
 
 ### D4.3 The process service surface
@@ -504,7 +503,7 @@ the data plane has them, the control plane does not.
 - **Multi-language frontend stubs are a pure addition**: the outer edge reuses the same `transport.proto`,
   and the frontend (TS) plus future SDKs generate clients from it with `buf`; adding a language's client =
   adding one `buf` output target, without changing this projection's shape (§6's contract face today is
-  in [`api-contract.md`](../api-contract.md), which grows by adding endpoints rather than changing this
+  in the [API contract](../api/contract.md), which grows by adding endpoints rather than changing this
   projection).
 - **`sandbox_id` travels in an out-of-band request header and does not enter the wire.** D4.6 keeps
   `sandbox_id` out of the proto (processes are addressed only by guest-native pid) and D5.2 forces the outer
@@ -516,6 +515,6 @@ the data plane has them, the control plane does not.
 - **Implementation-level values**: the ring buffer's upper bound, a slow subscriber's send window, and the
   `keepalive` period are **numeric knobs** adjustable with experience rather than design questions (the
   shapes are fixed by D4.3/D5). So the values live only in the code (the constant block in
-  `cmd/sandboxd/process.go`) and are neither registered as open decisions nor duplicated here — a knob with
+  `cmd/sandboxd/process.go`) and are neither registered as GitHub Issues nor duplicated here — a knob with
   two homes ends up with two values. **The overflow disposition (disconnect) is not in this category** —
   that is a design choice already settled in D4.3 invariant 1, not a knob.

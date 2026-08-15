@@ -25,7 +25,7 @@ func mustCIDR(t *testing.T, s string) netip.Prefix {
 	return p
 }
 
-// §6.2's nine declaration 400 classes, one by one.
+// the documented invariant's nine declaration 400 classes, one by one.
 func TestTheNineHundredClasses(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -46,7 +46,7 @@ func TestTheNineHundredClasses(t *testing.T) {
 			return Validate(Declaration{Egress: Egress{Default: "permit"}}, true, noHostLocal)
 		},
 	}, {
-		// CLASS 2. Refused on COST grounds, not feasibility (network.md D2).
+		// CLASS 2. Refused on COST grounds, not feasibility (the relevant internals page the documented invariant).
 		name:  "cidr is a domain name",
 		class: ClassCIDRNotLiteral,
 		run: func() error {
@@ -54,7 +54,7 @@ func TestTheNineHundredClasses(t *testing.T) {
 			return err
 		},
 	}, {
-		// CLASS 3. `{cidr, port}` is not a well-formed tuple (D3.1).
+		// CLASS 3. `{cidr, port}` is not a well-formed tuple (the documented invariant).
 		name:  "tuple has no proto",
 		class: ClassProtoMissing,
 		run: func() error {
@@ -79,7 +79,7 @@ func TestTheNineHundredClasses(t *testing.T) {
 	}, {
 		// CLASS 5. The kernel's reach stops at this host, so a remote endpoint
 		// cannot be pinned; accepting one rests the floor on that process's own
-		// discipline (D4.2).
+		// discipline (the documented invariant).
 		name:  "via[].endpoint is not host-local",
 		class: ClassViaEndpointNotHostLocal,
 		run: func() error {
@@ -106,7 +106,7 @@ func TestTheNineHundredClasses(t *testing.T) {
 		},
 	}, {
 		// CLASS 7. A dead rule, and the cost is a second population of legitimate
-		// zeros in the one signal every deny assertion reads (D5 ㉑).
+		// zeros in the one signal every deny assertion reads (the documented invariant ㉑).
 		name:  "egress.allow lies wholly inside a never-liftable floor item",
 		class: ClassAllowInsideFloor,
 		run: func() error {
@@ -147,7 +147,7 @@ func TestTheNineHundredClasses(t *testing.T) {
 			}}, true, noHostLocal)
 		},
 	}, {
-		// CLASS 8, and it is class 7's NECESSARY PREREQUISITE (D5 ⑲).
+		// CLASS 8, and it is class 7's NECESSARY PREREQUISITE (the documented invariant ⑲).
 		name:  "cidr is a v4-mapped v6 literal",
 		class: ClassV4Mapped,
 		run: func() error {
@@ -243,7 +243,7 @@ func TestTheNineHundredClasses(t *testing.T) {
 			if err == nil {
 				t.Fatalf("accepted %s", tc.name)
 			}
-			// ONE sentinel drives the status code — §6.2 maps all of these to 400.
+			// ONE sentinel drives the status code — the documented invariant maps all of these to 400.
 			if !errors.Is(err, ErrDeclarationInvalid) {
 				t.Errorf("error does not satisfy errors.Is(_, ErrDeclarationInvalid): %v", err)
 			}
@@ -261,7 +261,7 @@ func TestTheNineHundredClasses(t *testing.T) {
 }
 
 // Class 8's ORDERING half: a v4-mapped literal must be refused BEFORE any containment
-// judgment (measured, D5 ⑲ — see ClassV4Mapped).
+// judgment (measured, the documented invariant ⑲ — see ClassV4Mapped).
 //
 // Asserted by the CLASS, not merely by "it was rejected": if the containment test
 // ran first this would come back as ClassAllowInsideFloor (or as an accept), and
@@ -273,7 +273,7 @@ func TestV4MappedIsRefusedBeforeAnyContainmentTest(t *testing.T) {
 	linkLocal := netip.MustParsePrefix("169.254.0.0/16")
 	mapped := netip.MustParseAddr("::ffff:169.254.169.254")
 	if linkLocal.Contains(mapped) {
-		t.Error("netip.Prefix.Contains now unmaps v4-mapped addresses — D5 ⑲'s premise changed; " +
+		t.Error("netip.Prefix.Contains now unmaps v4-mapped addresses — the documented invariant ⑲'s premise changed; " +
 			"re-check whether class 8 still needs to precede the containment test")
 	}
 	if !linkLocal.Contains(mapped.Unmap()) {
@@ -287,7 +287,7 @@ func TestV4MappedIsRefusedBeforeAnyContainmentTest(t *testing.T) {
 	class, _ := ClassOf(err)
 	if class != ClassV4Mapped {
 		t.Errorf("class = %q, want %q — anything else means the containment test ran FIRST, "+
-			"which is the family-blind path D5 ⑲ measured: judged v6, compared only against v6 "+
+			"which is the family-blind path the documented invariant ⑲ measured: judged v6, compared only against v6 "+
 			"members, let through, then killed on the v4 floor", class, ClassV4Mapped)
 	}
 }
@@ -303,14 +303,14 @@ func TestClassSevenDoesNotOverReach(t *testing.T) {
 		// A PARTIALLY overlapping supernet. Ordering resolves it correctly —
 		// measured: under a floor holding 10.66.0.0/16, an `allow 10.0.0.0/8` reaches
 		// the internal 10.77.x host while the sibling stays blocked, each with its own
-		// counter moving (D5 ㉑). An intersection-based test would make this
+		// counter moving (the documented invariant ㉑). An intersection-based test would make this
 		// legitimate declaration impossible.
 		name: "supernet partially overlapping the floor",
 		d: Declaration{Egress: Egress{
 			Default: DenyAll,
 			Allow:   []Tuple{{CIDR: mustCIDR(t, "10.0.0.0/8"), Port: 53, Proto: model.NetUDP}},
 		}},
-		why: "whole containment, never intersection (D5 ㉑)",
+		why: "whole containment, never intersection (the documented invariant ㉑)",
 	}, {
 		// THE SAME CIDR inside `via[].match[]` is legal where it is fatal in `allow[]`,
 		// and the asymmetry is a MECHANISM fact (measured: 1–2 ms connect with the real
@@ -324,24 +324,24 @@ func TestClassSevenDoesNotOverReach(t *testing.T) {
 				Endpoint: "10.0.0.5:15080",
 			}},
 		}},
-		why: "via[] does not lift the floor: the guest never reaches that address, a host-local process does (D5 ㉑)",
+		why: "via[] does not lift the floor: the guest never reaches that address, a host-local process does (the documented invariant ㉑)",
 	}, {
 		// Inside the SIBLING CIDR, including this sandbox's own gateway /32. It is
-		// the DECLARED path §5.D semantics ③ requires — the only stably-available
-		// host-local resolver address — not a dead rule (D4.2 / D5 ⑦).
+		// the DECLARED path the documented invariant semantics ③ requires — the only stably-available
+		// host-local resolver address — not a dead rule (the documented invariant / the documented invariant ⑦).
 		name: "an allow inside the sibling CIDR",
 		d: Declaration{Egress: Egress{
 			Default: DenyAll,
 			Allow:   []Tuple{{CIDR: mustCIDR(t, "10.66.0.0/16"), Port: 53, Proto: model.NetUDP}},
 		}},
-		why: "the sibling CIDR is excluded from class 7 (§6.2): this sandbox's own gateway lives there",
+		why: "the sibling CIDR is excluded from class 7 (the documented invariant): this sandbox's own gateway lives there",
 	}, {
 		name: "an allow naming a single /32 gateway inside the sibling CIDR",
 		d: Declaration{Egress: Egress{
 			Default: DenyAll,
 			Allow:   []Tuple{{CIDR: mustCIDR(t, "10.66.250.1/32"), Port: 53, Proto: model.NetUDP}},
 		}},
-		why: "§5.D semantics ③'s declared resolver path",
+		why: "the documented invariant semantics ③'s declared resolver path",
 	}, {
 		// A supernet of a floor item is not contained BY it.
 		name: "a supernet of link-local",
@@ -364,7 +364,7 @@ func TestClassSevenDoesNotOverReach(t *testing.T) {
 		why: "an ordinary global v6 prefix is not a v4 spelling of anything",
 	}, {
 		// THE WILDCARD DESTINATION IS LEGAL HERE and fatal on `allow[]` — the same
-		// mechanism asymmetry class 7 already has between the two fields. This is D3.3's
+		// mechanism asymmetry class 7 already has between the two fields. This is the documented invariant's
 		// declared transparent-interception form.
 		name: "a cidr-less tuple inside via[].match[]",
 		d: Declaration{Egress: Egress{
@@ -374,7 +374,7 @@ func TestClassSevenDoesNotOverReach(t *testing.T) {
 				Endpoint: "10.0.0.5:15443",
 			}},
 		}},
-		why: "an omitted cidr in via[].match[] is the transparent-interception form (D3.3)",
+		why: "an omitted cidr in via[].match[] is the transparent-interception form (the documented invariant)",
 	}, {
 		// Two publishes on ONE guest port are DISTINCT items: the key is
 		// {guest_port, proto}, so tcp and udp there are two rules, not a duplicate.
@@ -398,7 +398,7 @@ func TestClassSevenDoesNotOverReach(t *testing.T) {
 	}
 }
 
-// A tuple with NO `port` is LEGAL and means ANY PORT (§5.D), at all three sites that
+// A tuple with NO `port` is LEGAL and means ANY PORT (the documented invariant), at all three sites that
 // carry a tuple.
 //
 // This is the direction that was silently wrong before the class list grew a
@@ -440,8 +440,8 @@ func TestAnOmittedPortMeansAnyPortAtEverySite(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := Validate(tc.d, true, allHostLocal); err != nil {
 				t.Errorf("refused a tuple with no port: %v — an omitted `port` means ANY PORT "+
-					"(§5.D); only `proto` is mandatory, because port matching depends on protocol "+
-					"matching in the kernel (D3.1)", err)
+					"(the documented invariant); only `proto` is mandatory, because port matching depends on protocol "+
+					"matching in the kernel (the documented invariant)", err)
 			}
 		})
 	}
@@ -459,7 +459,7 @@ func TestAnOmittedPortMeansAnyPortAtEverySite(t *testing.T) {
 
 // The well-formedness class must be DISTINGUISHABLE from the proto class, which is the
 // entire reason it exists as a class rather than as two more `invalid(...)` calls under
-// class 3 (§6.2's remedy criterion — see ClassMalformedShape).
+// class 3 (the documented invariant's remedy criterion — see ClassMalformedShape).
 func TestMalformedShapeIsDistinguishableFromAMisspelledProto(t *testing.T) {
 	emptyMatch := Validate(Declaration{Egress: Egress{
 		Default: DenyAll,
@@ -481,7 +481,7 @@ func TestMalformedShapeIsDistinguishableFromAMisspelledProto(t *testing.T) {
 	if shapeClass == protoClass {
 		t.Errorf("both report class %q — an empty `match[]` and a misspelled `proto` need "+
 			"DIFFERENT edits, so collapsing them sends the caller to inspect a `proto` field "+
-			"that does not exist yet (§6.2's remedy criterion)", shapeClass)
+			"that does not exist yet (the documented invariant's remedy criterion)", shapeClass)
 	}
 	if shapeClass != ClassMalformedShape {
 		t.Errorf("empty match[] reports class %q, want %q", shapeClass, ClassMalformedShape)
@@ -512,7 +512,7 @@ func TestMalformedShapeIsDistinguishableFromAMisspelledProto(t *testing.T) {
 	}
 }
 
-// `ingress.publish[]` with `proto: udp` is legal. §6.2 is explicit: `via[]`
+// `ingress.publish[]` with `proto: udp` is legal. the documented invariant is explicit: `via[]`
 // excludes UDP because the original destination cannot be recovered, and a DNAT to
 // a FIXED guest port needs no such recovery — so that objection does not reach
 // inbound at all.
@@ -523,7 +523,7 @@ func TestPublishAcceptsUDPWhileViaRefusesIt(t *testing.T) {
 	}
 	if err := Validate(d, true, noHostLocal); err != nil {
 		t.Errorf("publish with proto udp was refused: %v — a DNAT to a fixed guest port does not "+
-			"need the original destination, so via[]'s UDP objection does not apply (§6.2)", err)
+			"need the original destination, so via[]'s UDP objection does not apply (the documented invariant)", err)
 	}
 	// The paired direction, so this is not just "udp appears somewhere and passes".
 	viaUDP := Declaration{Egress: Egress{
@@ -549,13 +549,13 @@ func TestOmittedNetworkNormalizesToDenyAndEmpty(t *testing.T) {
 	z := Zero()
 	if z.Egress.Default != DenyAll {
 		t.Errorf("Zero().Egress.Default = %q, want %q — the fail-closed side, and exactly the "+
-			"minimal declaration (§5.D)", z.Egress.Default, DenyAll)
+			"minimal declaration (the documented invariant)", z.Egress.Default, DenyAll)
 	}
-	// Non-nil empties: §6.1 requires the three arrays to always appear as `[]`,
+	// Non-nil empties: the documented invariant requires the three arrays to always appear as `[]`,
 	// never null and never omitted — they are DEFINITE values in the record, and
 	// the omit-when-unreadable rule governs facts that cannot be read.
 	if z.Egress.Allow == nil || z.Egress.Via == nil || z.Ingress.Publish == nil {
-		t.Error("Zero() leaves a nil slice — §6.1: the three arrays always appear, empty is `[]`")
+		t.Error("Zero() leaves a nil slice — the documented invariant: the three arrays always appear, empty is `[]`")
 	}
 	if len(z.Egress.Allow) != 0 || len(z.Egress.Via) != 0 || len(z.Ingress.Publish) != 0 {
 		t.Error("Zero() is not empty")
@@ -611,7 +611,7 @@ func TestAddPublishIsIdempotentOnPortAndProto(t *testing.T) {
 	}
 	if len(d.Ingress.Publish) != 1 {
 		t.Errorf("declaration holds %d publish items after a repeat, want 1 — nft would accept two "+
-			"identical DNATs silently, and a later PATCH removing one would leave the port open (§5.D)",
+			"identical DNATs silently, and a later PATCH removing one would leave the port open (the documented invariant)",
 			len(d.Ingress.Publish))
 	}
 	// Same port, DIFFERENT proto is a different item — the key is the pair.
@@ -631,7 +631,7 @@ func TestAddPublishIsIdempotentOnPortAndProto(t *testing.T) {
 }
 
 // A `via[]` declaration is REFUSED when the deployment supplied no second-hop uid,
-// rather than installing a rule set with no second-hop enforcement. Not one of §6.2's
+// rather than installing a rule set with no second-hop enforcement. Not one of the documented invariant's
 // declaration-text classes — see ClassViaWithoutSecondHopUID.
 func TestViaIsRefusedWhenTheDeploymentPinsNoSecondHop(t *testing.T) {
 	via := Declaration{Egress: Egress{
@@ -644,8 +644,8 @@ func TestViaIsRefusedWhenTheDeploymentPinsNoSecondHop(t *testing.T) {
 	err := ValidateDeployment(via, Deployment{})
 	if err == nil {
 		t.Fatal("a via[] declaration was accepted with no second-hop uid — that records a " +
-			"declaration whose §2.4 invariant 2 the engine cannot enforce, leaving a confused deputy " +
-			"live while every FIRST-hop assertion still passes (D5 ㉔)")
+			"declaration whose the documented invariant invariant 2 the engine cannot enforce, leaving a confused deputy " +
+			"live while every FIRST-hop assertion still passes (the documented invariant ㉔)")
 	}
 	if class, _ := ClassOf(err); class != ClassViaWithoutSecondHopUID {
 		t.Errorf("class = %q, want %q", class, ClassViaWithoutSecondHopUID)
@@ -693,8 +693,8 @@ func TestPlacementRefusesARecordedViaTheDeploymentCannotPin(t *testing.T) {
 	if err == nil {
 		t.Fatal("a recorded via[] was placed under a deployment that pins no second hop — the rule " +
 			"set installs and the steered flow reaches the endpoint process, whose own egress is " +
-			"then pinned by nothing: the confused deputy §2.4 invariant 2 rejects, and invisible " +
-			"because hop 2 counts zero in `forward` (D5 ㉔)")
+			"then pinned by nothing: the confused deputy the documented invariant invariant 2 rejects, and invisible " +
+			"because hop 2 counts zero in `forward` (the documented invariant ㉔)")
 	}
 	if !errors.Is(err, ErrViaUnenforceableAtPlacement) {
 		t.Errorf("the placement refusal carries no recoverable sentinel: %v", err)
@@ -706,7 +706,7 @@ func TestPlacementRefusesARecordedViaTheDeploymentCannotPin(t *testing.T) {
 			"carries no declaration, so 400 would send the caller to fix a payload they did not send")
 	}
 	if class, ok := ClassOf(err); ok {
-		t.Errorf("the placement refusal reports a §6.2 declaration class (%q); it is a property of "+
+		t.Errorf("the placement refusal reports a the documented invariant declaration class (%q); it is a property of "+
 			"the deployment meeting a RECORD, not of any request text", class)
 	}
 	// The message must name the mechanism and both remedies — an operator reading it has
@@ -745,13 +745,13 @@ func TestPlacementRefusesARecordedViaTheDeploymentCannotPin(t *testing.T) {
 // both are why this refuses at ASSEMBLY rather than at a write point:
 //   - the table is ENGINE-LEVEL, so every sandbox loses transport at once, including
 //     ones with no `via[]` at all;
-//   - `skuid` matches only ~4/5 packets of a flow (D5 ㉔), so the symptom is
+//   - `skuid` matches only ~4/5 packets of a flow (the documented invariant ㉔), so the symptom is
 //     intermittent sandbox failure, not a clean break.
 //
 // The euid is a PARAMETER, which is what lets this run root-free: the refusal is
 // asserted against a fixture rather than against whatever uid the test process is.
 func TestASecondHopUIDEqualToTheEnginesOwnIsRefused(t *testing.T) {
-	// The production shape: the engine runs as root (ADR-0002) and the operator passes
+	// The production shape: the engine runs as root (the recorded design) and the operator passes
 	// --via-uid 0.
 	root := 0
 	err := ValidateSecondHopUID(Deployment{SecondHopUID: &root}, 0)
@@ -760,7 +760,7 @@ func TestASecondHopUIDEqualToTheEnginesOwnIsRefused(t *testing.T) {
 			"engine-level `output` drop matching the engine's OWN dials to guest addresses (the " +
 			"floor's daddr set contains the sandbox /16, and the transport endpoint is a guest veth " +
 			"address), which kills readiness, liveness and every process/fs RPC for every sandbox — " +
-			"intermittently, since skuid misses packets (D5 ㉔)")
+			"intermittently, since skuid misses packets (the documented invariant ㉔)")
 	}
 	if !errors.Is(err, ErrSecondHopUIDIsTheEngineItself) {
 		t.Errorf("the refusal does not carry its sentinel: %v", err)
@@ -810,7 +810,7 @@ func TestASecondHopUIDEqualToTheEnginesOwnIsRefused(t *testing.T) {
 
 // ParseEndpoint must require a port: the narrow accept keeping `via[]` from
 // reopening the floor pins the POST-NAT port, which is this endpoint's port
-// (D5 ⑩), so an endpoint without one cannot be enforced at all.
+// (the documented invariant ⑩), so an endpoint without one cannot be enforced at all.
 func TestParseEndpointRequiresAPortAndAnIPLiteral(t *testing.T) {
 	for _, bad := range []string{"", "10.0.0.5", "proxy.local:8080", "10.0.0.5:0", "10.0.0.5:notaport", "[::1]"} {
 		if _, _, err := ParseEndpoint(bad); err == nil {

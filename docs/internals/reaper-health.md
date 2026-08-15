@@ -1,10 +1,8 @@
 # Reaper deep dive: how health is judged, how the reaper acts on it, and how periodic reconciliation coexists with the transition lock
 
-> **Position: a deep dive on [`§4.3`](../model.md) (the health and reclamation model) and
-> [`§4.4-A`](../model.md) (the crash variant / periodic reconciliation), also touching
-> [`§5.E`](../subsystems.md) (the activity signal's carrier) and [`§4.4-B`](../model.md) (the
-> transition lock).**
-> Spec §4.3 fixes the shape "two probe layers + connection activity → a health state → dispositions
+> **Position: the reaper and health internals reference.** It covers the health and
+> reclamation model, periodic reconciliation and the activity signal's carrier.
+> The architecture reference 4.3 fixes the shape "two probe layers + connection activity → a health state → dispositions
 > that all differ", and §4.4-A fixes "reverse reconciliation = one local scan diffed against one local
 > table + dual reclaim/takeover"; this document is the **mechanism layer** for both — six mechanisms,
 > each with one correct home (the six rows below): **where the activity signal comes from (D1/D2) · how
@@ -55,7 +53,7 @@ activity is precisely visible on the guest side — every output frame passes `p
 input passes `writeInput()` — where a timestamp is very cheap on paths that **already exist**. So the
 signal is measured on the guest side.
 
-**Why I/O and not CPU.** Spec §4.3 words its criterion as I/O activity (`process.List has process
+**Why I/O and not CPU.** The architecture reference 4.3 words its criterion as I/O activity (`process.List has process
 activity / the pty has I/O`), not "there is CPU occupancy". A purely CPU-bound process with zero I/O
 (very rare in agent workloads) does not count as activity — that is a choice of §4.3's idle definition
 itself; should it ever prove necessary, upgrading to "CPU+I/O sampling" is an additive change in §5.E
@@ -144,9 +142,9 @@ Two rules follow:
 - **`TryLock`-skip locked sandboxes.** An in-flight resume **holds the transition lock throughout**
   (§4.4-B): the guest is not yet listening, L2 is necessarily unreachable, and a classifier running
   anyway would misjudge it as `dead-recoverable`, spend a resume attempt certain to fail, and raise a
-  false alarm (spec §4.3 names this pit explicitly). So the sweep `TryLock`s each sandbox first: failing
+  false alarm (the architecture reference 4.3 names this pit explicitly). So the sweep `TryLock`s each sandbox first: failing
   to get it = some verb is advancing it (being built / being transitioned) = **skip this round**,
-  judging and acting on nothing. This is the spec's single-flight guard, landed as "a non-blocking
+  judging and acting on nothing. This is the architecture reference's single-flight guard, landed as "a non-blocking
   try-lock + skip", and it **adds no §4.1 state** (still four).
 - **The lock is load-bearing for correctness, but what it guards is engine-side transitions, not the
   guest's I/O.** Two races: one is closed completely by the lock, the other is only narrowed:
@@ -159,7 +157,7 @@ Two rules follow:
      the lock cannot close and a CAS cannot catch** — activity is a fact inside the guest rather than
      lifecycle-state, and holding an engine-side lock does not stop the guest from working. And between
      the classifying probe and the pre-disposition probe lies **one RPC round trip**, in which the
-     sandbox can become active. So the spec requires `auto-pause` to **re-read the activity signal once
+     sandbox can become active. So the architecture reference requires `auto-pause` to **re-read the activity signal once
      more inside the lock** (freezing only if it is still idle), as stated in §4.3; the window starts
      from "one round trip", and this section only adds what remains after that.
   - The residual sub-microsecond window (the user sending input exactly after the in-lock re-read and
@@ -335,11 +333,11 @@ just fixed the workload, something the engine has no way to know).
   **synchronous Overlay deletion** and **does not delete bytes asynchronously by refcount** — the reaper
   here only advances **lifecycle state**; bytes left behind by a failure are caught by the orphan-unit
   sweep in the same tick. The seam between the two (evict marking destroyed being decoupled from
-  asynchronous byte deletion) is already fixed by spec §4.4.
+  asynchronous byte deletion) is already fixed by the architecture reference 4.4.
 - **The TTL values** (the default `idle_timeout` / `retention`) and **the restart budget's value**
   (D4b) are both numeric knobs rather than open items: per the same discipline as
   [`transport.md`](./transport.md) D5.4, take a conservative default, annotate it at the configuration
-  point, and leave it adjustable — landing in code, not registered as an open decision.
+  point, and leave it adjustable — landing in code, not registered as an GitHub Issue.
   **`retention`'s default deserves one paragraph, because "conservative" points in two directions
   here and the comparison with `--event-retention` (default 0, on the rule that the engine must not
   invent a number) does not settle it.** The two defaults are not the same kind of number. `retention:
