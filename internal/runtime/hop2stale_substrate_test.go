@@ -18,7 +18,7 @@ import (
 // A run started with NO second-hop uid must DESTROY the table a previous run installed,
 // not merely decline to install one.
 //
-// An nft table is crash-surviving host state exactly like a netns (§2.4), and the
+// An nft table is crash-surviving host state exactly like a netns (the provider security contract), and the
 // engine-level one is the only table no sandbox owns: ReclaimOrphans skips it by
 // construction (sandboxOfTable does not match it), so if this call does not remove it,
 // nothing in the engine ever will. What survives is an `output` table narrowed by a uid
@@ -30,7 +30,7 @@ import (
 // assertion — no unit test can tell that shape from a real teardown, because the
 // difference exists only in the kernel.
 //
-// The rule set here is a hand-built stand-in rather than network.SecondHopRules: §5
+// The rule set here is a hand-built stand-in rather than network.SecondHopRules: the subsystem boundaries
 // subsystems never import each other (internal/arch enforces it), and the assertion is
 // about the TABLE's existence, so any installable table serves.
 func TestASecondHopTableIsNotInheritedByARunWithoutTheUID(t *testing.T) {

@@ -12,7 +12,7 @@ import (
 )
 
 // The mediator's SweepOrphanLayers reads the authoritative store for live layer
-// IDs and hands the rootfs provider (live, building). §5.B / §4.4-A: only Promote-built
+// IDs and hands the rootfs provider (live, building). the Rootfs subsystem / atomic transition rollback: only Promote-built
 // (non-builtin) rows are live candidates — a builtin's dir is under TemplatesDir,
 // never a sweep candidate — and the in-flight-Promote keep-set is included.
 func TestMediatorSweepPassesLiveAndBuilding(t *testing.T) {
@@ -193,7 +193,7 @@ func TestBuildingOverlaysProtectsAnInFlightCreate(t *testing.T) {
 	if !building[ov] && !live[ov] {
 		t.Fatalf("Overlay %s was in NEITHER keep-set during its own create: %s\n"+
 			"the provider reads that as an orphan and destroys the upper of a sandbox whose row exists — "+
-			"and reclaiming bytes is the sweep's JOB, so nothing errors (§4.4-A in-flight build keep-set)", ov, sweptDuring)
+			"and reclaiming bytes is the sweep's JOB, so nothing errors (atomic transition rollback in-flight build keep-set)", ov, sweptDuring)
 	}
 	if !building[ov] {
 		t.Errorf("Overlay %s was protected only by `live`, not by `building`: %s\n"+

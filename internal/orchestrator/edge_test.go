@@ -10,10 +10,10 @@ import (
 	"testing"
 )
 
-// The §6.2 error-edge guard: the control plane must not put a raw error's text into
+// The API error contract edge guard: the control plane must not put a raw error's text into
 // a response body, because the errors arriving there interpolate ABSOLUTE HOST PATHS
 // (internal/btrfs wraps every substrate call as `btrfs: <verb> <path>: %w`, and that
-// path is VolumesDir/<volume-id>). §6.2 admits opaque IDs and bars host paths and
+// path is VolumesDir/<volume-id>). the API error contract admits opaque IDs and bars host paths and
 // placement.
 //
 // Enforced STRUCTURALLY, like internal/arch and runtime/seam_test.go: the defect was TEN call
@@ -29,7 +29,7 @@ import (
 // package, read from the directory rather than listed by hand.
 //
 // A hand-written list is the one failure mode this guard cannot survive, because it fails in the
-// direction of passing. Measured: `network.go` arrived carrying two §6 endpoints, was not added
+// direction of passing. Measured: `network.go` arrived carrying two the external API endpoints, was not added
 // to the list, and a raw `http.Error(w, "leak "+err.Error(), 500)` planted in handleNetworkGet
 // passed BOTH scanners green. Enumerating the directory means a new production file is scanned
 // the day it lands, with nothing to remember.
@@ -50,7 +50,7 @@ func edgeSources(t *testing.T) []string {
 		srcs = append(srcs, name)
 	}
 	// A glob that silently matches nothing is a guard that passes vacuously — the same
-	// defect as the stale list, reached by a different route. api.go holds the §6 router
+	// defect as the stale list, reached by a different route. api.go holds the external API router
 	// and cannot legitimately disappear, so it doubles as the liveness anchor.
 	if !slices.Contains(srcs, "api.go") {
 		t.Fatalf("enumeration found no api.go (got %v) — this scan is not reading the package", srcs)
@@ -64,7 +64,7 @@ func edgeSources(t *testing.T) []string {
 // same door citing the precedent.
 var errorTextExemptions = map[string]string{
 	"sanitizeErr": "IS the sanitizer — reading the text is the whole job; it redacts host-shaped tokens before returning",
-	"proxyErr":    "data-plane sanitizer (D5.1): logs the real cause engine-side and returns a placement-free message composed from the CODE alone — the inner text never crosses",
+	"proxyErr":    "data-plane sanitizer (the transport contract): logs the real cause engine-side and returns a placement-free message composed from the CODE alone — the inner text never crosses",
 }
 
 // scanErrorTextReads and scanHTTPErrorBodies ARE the two guards. They are functions
@@ -120,7 +120,7 @@ func TestControlPlaneErrorsGoThroughTheFunnel(t *testing.T) {
 		scanErrorTextReads(fset, f, func(pos token.Position, enclosing string) {
 			t.Errorf("%s: %s calls .Error() outside the sanitizer — an error's raw text "+
 				"carries absolute host paths (btrfs wraps every call as `<verb> <path>: %%w`) "+
-				"and §6.2 keeps those off the wire. Route it through writeErr/statusFor instead.",
+				"and the API error contract keeps those off the wire. Route it through writeErr/statusFor instead.",
 				pos, enclosing)
 		})
 	}
@@ -143,7 +143,7 @@ func TestHTTPErrorBodiesAreLiteralsOrSanitized(t *testing.T) {
 		}
 		scanHTTPErrorBodies(fset, f, func(pos token.Position, enclosing string) {
 			t.Errorf("%s: %s calls http.Error with a non-literal message — anything composed at "+
-				"runtime can carry a host path (§6.2). Use writeErr, which logs the full "+
+				"runtime can carry a host path (the API error contract). Use writeErr, which logs the full "+
 				"error and sanitizes the body.", pos, enclosing)
 		})
 	}

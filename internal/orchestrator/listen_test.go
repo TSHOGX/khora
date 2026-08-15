@@ -12,7 +12,7 @@ import (
 // The classifier's verdict per spelling. Every row here was checked against GROUND
 // TRUTH before being written down — a listener was opened on the spelling and dialed
 // from this host's routable address — so these expectations are what the kernel does,
-// not what netip is assumed to do. The measured table is in ADR-0007.
+// not what netip is assumed to do. The measured table is in the deployment boundary.
 //
 // The v4-mapped row is the one that earns the parsed-address approach: a string
 // comparison against "127." reports [::ffff:127.0.0.1] as routable, and it binds
@@ -44,7 +44,7 @@ func TestValidateListenAddrClassifiesEverySpellingTheWayTheKernelBindsIt(t *test
 		}
 		if !tc.ok && err == nil {
 			t.Errorf("ValidateListenAddr(%q) accepted a NON-loopback address (%s) — that publishes an "+
-				"unauthenticated control plane able to create root-capable sandboxes (ADR-0007)",
+				"unauthenticated control plane able to create root-capable sandboxes (the deployment boundary)",
 				tc.addr, tc.because)
 		}
 	}
@@ -88,7 +88,7 @@ func TestValidateListenAddrRequiresEveryResolvedAddressToBeLoopback(t *testing.T
 			t.Errorf("ValidateListenAddr(%q → %v) refused it (%s): %v", tc.name, tc.answer, tc.because, err)
 		}
 		if !tc.ok && err == nil {
-			t.Errorf("ValidateListenAddr(%q → %v, err=%v) accepted it — %s (ADR-0007)",
+			t.Errorf("ValidateListenAddr(%q → %v, err=%v) accepted it — %s (the deployment boundary)",
 				tc.name, tc.answer, tc.err, tc.because)
 		}
 	}
@@ -108,7 +108,7 @@ func TestTheRefusalNamesTheConsequenceAndTheWayOut(t *testing.T) {
 			t.Errorf("%q: refusal is not wrapped in ErrListenAddrNotLoopback, so a caller cannot "+
 				"distinguish it: %v", addr, err)
 		}
-		for _, want := range []string{"--insecure-listen", "ADR-0007", "NO authentication"} {
+		for _, want := range []string{"--insecure-listen", "NO authentication", "TLS-terminating"} {
 			if !strings.Contains(err.Error(), want) {
 				t.Errorf("%q: refusal does not mention %q, so it states a verdict without the "+
 					"consequence or the way out: %v", addr, want, err)
@@ -131,8 +131,8 @@ func TestTheAssemblyRefusesAPublishedListenerBeforeMaterializingAnything(t *test
 	})
 	if err == nil {
 		t.Fatal("the assembly accepted a listener on every interface — with no authentication and no " +
-			"TLS in the engine (§1.4), that publishes a control plane able to create root-capable " +
-			"sandboxes (ADR-0007)")
+			"TLS in the engine (the engine non-goals), that publishes a control plane able to create root-capable " +
+			"sandboxes (the deployment boundary)")
 	}
 	if !errors.Is(err, ErrListenAddrNotLoopback) {
 		t.Errorf("New failed for some other reason than the listen-address refusal: %v", err)
@@ -184,7 +184,7 @@ func TestInsecureListenIsTheDeliberateOptOut(t *testing.T) {
 	if err != nil {
 		t.Fatalf("--insecure-listen did not permit a published listener: %v — then the flag is a "+
 			"dead end, and an operator who needs this shape patches the source instead, which takes "+
-			"the decision out of the record entirely (ADR-0007)", err)
+			"the decision out of the record entirely (the deployment boundary)", err)
 	}
 	if eng == nil {
 		t.Fatal("New returned no engine and no error")

@@ -17,10 +17,10 @@ import (
 // the wait status instead of dropping it.
 //
 //	init mode (PID 1) : reaps true global orphans; the status it hands off is the
-//	                    transport child's, for the supervise/restart loop (D5.3).
+//	                    transport child's, for the supervise/restart loop (transport behavior).
 //	transport mode    : reaps ITS OWN SUBTREE's orphans — it declares
 //	                    PR_SET_CHILD_SUBREAPER, so they reparent to it and are
-//	                    reaped by it (§5.E.1 / guest-runtime D4.2) — while the
+//	                    reaped by it (the guest startup topology / the init and sandboxd split) — while the
 //	                    statuses it hands off are the process.Start children's,
 //	                    which proc.run turns into `end` frames.
 //
@@ -46,7 +46,8 @@ func newReapTable() *reapTable {
 // no exported way to do just that half, the state is unexpressible.
 //
 // A prctl failure is logged, not fatal: the subtree's orphans then fall back to PID 1, which
-// is the already-specified lossy case (guest-runtime C2/C3), not a broken sandbox.
+// already owns the process-reaping fallback and may drop an orphan status; the sandbox itself
+// remains healthy.
 func startSubtreeReaper() *reapTable {
 	if err := unix.Prctl(unix.PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0); err != nil {
 		logf("transport: PR_SET_CHILD_SUBREAPER failed (%v); subtree orphans fall back to PID 1", err)
@@ -98,7 +99,7 @@ func (r *reapTable) start(cmd *exec.Cmd) (int, <-chan syscall.WaitStatus, error)
 	return pid, ch, nil
 }
 
-// drain reaps every currently-reapable child (D4.1 waitpid loop) and delivers the status of any
+// drain reaps every currently-reapable child (the transport contract waitpid loop) and delivers the status of any
 // registered pid. An unregistered pid is reaped and dropped; a registered one is handed off over
 // a cap-1 channel sent to only once, so the handoff cannot block.
 //
@@ -123,7 +124,7 @@ func (r *reapTable) drain() {
 }
 
 // exitCode maps a wait status to the conventional exit code (128+signo on
-// signal) — the D4.1 checklist item, used both for PID 1's supervision log and
+// signal) — the transport contract checklist item, used both for PID 1's supervision log and
 // for the `end` frame's exit_code in transport mode.
 func exitCode(ws syscall.WaitStatus) int {
 	if ws.Signaled() {

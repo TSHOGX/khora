@@ -37,6 +37,9 @@ jobs:
           export PATH="${RUNNER_TEMP}:$(go env GOPATH)/bin:$PATH"
           ./scripts/check-generated.sh
 
+      - name: Verify retired references stay absent
+        run: ./scripts/test-check-retired-references.sh
+
       - name: Build all packages
         run: go build ./...
 

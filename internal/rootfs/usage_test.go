@@ -1,5 +1,5 @@
-// Usage is the per-sandbox usage read the §6.1 disk-cap write point checks its strict
-// inequality against (§3.4 / rootfs.ErrCapBelowUsage). Its PLAIN-DIRECTORY arm needs no
+// Usage is the per-sandbox usage read the control-plane API disk-cap write point checks its strict
+// inequality against (resource admission / rootfs.ErrCapBelowUsage). Its PLAIN-DIRECTORY arm needs no
 // root and no btrfs, so it runs in the default unit suite; the subvolume arm and the
 // materialization-side guard are substrate tests (overlayfs_substrate_test.go).
 package rootfs
@@ -43,11 +43,11 @@ func TestUsageEnumeratesUpperAndWorkNotTheUnit(t *testing.T) {
 		}
 	}
 	// The sandbox's own bytes: upper (guest writes) and work (copy-up staging — in the
-	// SAME quota unit by D6.3, so it is this sandbox's usage too).
+	// SAME quota unit by rootfs storage, so it is this sandbox's usage too).
 	plant("upper/data", 8192)
 	plant("work/staging", 4096)
 	// What a live merged mount would expose: the Template stack, which is NOT this
-	// sandbox's usage (it is counted once from TemplatesDir by the §3.4 second term).
+	// sandbox's usage (it is counted once from TemplatesDir by the resource admission second term).
 	plant("merged/usr/bin/huge", 512*1024)
 
 	used, limit, err := p.Usage(context.Background(), id)
@@ -63,7 +63,7 @@ func TestUsageEnumeratesUpperAndWorkNotTheUnit(t *testing.T) {
 		t.Fatalf("used = %d — that is the `merged` subtree counted in. `merged` is the live overlayfs view of lower ∪ upper, so walking the unit charges this sandbox for the whole Template stack and makes the write point refuse safe cap edits; enumerate upper+work BY NAME (see UncappedBytes for the same trap)", used)
 	}
 	// A plain directory has no quota row, and "no cap" is the TRUTH there rather than a
-	// guess — the one case where a 0 limit is not the ambiguous read D7.3 warns about.
+	// guess — the one case where a 0 limit is not the ambiguous read rootfs storage warns about.
 	if limit != 0 {
 		t.Fatalf("limit = %d; want 0 for a plain-directory unit", limit)
 	}
@@ -94,14 +94,14 @@ func TestUsageRejectsUnsafeID(t *testing.T) {
 	}
 }
 
-// TestUncappedBytesRefusesToWalkAUnitWhoseRowIsUnreadable is the §5.B half of the rule
-// the §5.C arm pins in internal/volume. The two terms of §3.4's inequality are one
+// TestUncappedBytesRefusesToWalkAUnitWhoseRowIsUnreadable is the Rootfs subsystem half of the rule
+// the Volume subsystem arm pins in internal/volume. The two terms of resource admission's inequality are one
 // design, so they must fail the same way: this term's shape IS the other's.
 //
 // The defect removed: an unreadable quota row used to fall through to enumerating
 // upper+work. On that path the `limit > 0` skip is unreachable, so a CAPPED unit got
 // enumerated as well — and a capped unit contributes ZERO here by contract, its cap
-// being counted by §3.4's first term. So the same bytes were billed twice, strictly in
+// being counted by resource admission's first term. So the same bytes were billed twice, strictly in
 // the direction that inflates the left side of the admission inequality, and the symptom
 // is a create or resume refused with 507 on a node with room.
 //
@@ -119,7 +119,7 @@ func TestUncappedBytesRefusesToWalkAUnitWhoseRowIsUnreadable(t *testing.T) {
 			return []byte(id + "\n\tSubvolume ID:\t\t256\n"), nil
 		case len(argv) > 2 && argv[1] == "qgroup" && argv[2] == "show":
 			// The substrate's own failure shape: it names an unrelated row, which is why
-			// no caller can serialize against it (volume.md D7.1).
+			// no caller can serialize against it (leaked quota-row reclamation).
 			return nil, fmt.Errorf("%v: exit status 1: ERROR: cannot find the qgroup 0/21680", argv)
 		}
 		return nil, fmt.Errorf("unexpected command %v", argv)
@@ -127,7 +127,7 @@ func TestUncappedBytesRefusesToWalkAUnitWhoseRowIsUnreadable(t *testing.T) {
 
 	total, err := p.UncappedBytes(context.Background())
 	if err == nil {
-		t.Fatalf("UncappedBytes returned (%d, nil) with a unit whose quota row is unreadable — it must return the error. The limit is exactly what could not be read, so enumerating cannot tell a capped unit from an uncapped one, and a capped unit's bytes then land in the second term while its cap is already in the first (§3.4.2 disjointness)", total)
+		t.Fatalf("UncappedBytes returned (%d, nil) with a unit whose quota row is unreadable — it must return the error. The limit is exactly what could not be read, so enumerating cannot tell a capped unit from an uncapped one, and a capped unit's bytes then land in the second term while its cap is already in the first (the node admission budgets disjointness)", total)
 	}
 	if !strings.Contains(err.Error(), id) {
 		t.Errorf("error %q does not name the overlay whose row could not be read", err)

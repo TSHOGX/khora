@@ -13,16 +13,17 @@ import (
 	"github.com/TSHOGX/khora/internal/transport"
 )
 
-// Provider-failure paths across the cold-start / teardown chain (§4.4-A). The
+// Provider-failure paths across the cold-start / teardown chain (atomic transition rollback). The
 // existing tests fail at Mount and Launch; these cover the rest of the call sites,
-// because §4.4-A ("a failed transition returns atomically to its source state") is
+// because atomic transition rollback ("a failed transition returns atomically to its source state") is
 // a claim about EVERY failure point, not just the two that happened to get tests
 // first. The shape asserted each time: the control plane lands in a legal resting
 // state, and nothing persistent is destroyed that should have survived.
 
-// ① CreateOverlay fails — the EARLIEST failure after the record insert. The record
+//	CreateOverlay fails — the EARLIEST failure after the record insert. The record
+//
 // must be deleted (no `failed` state, no orphan `creating` row), and the runtime
-// must never be touched: the chain had not reached ④.
+// must never be touched: the chain had not reached .
 func TestCreateUnwindOnOverlayAllocationFailure(t *testing.T) {
 	ctx := context.Background()
 	rp, rt := &fakeRootfs{failCreateOverlay: true}, &fakeRuntime{}
@@ -33,10 +34,10 @@ func TestCreateUnwindOnOverlayAllocationFailure(t *testing.T) {
 		t.Fatal("Create should have failed at CreateOverlay")
 	}
 	if _, gerr := st.GetSandbox(ctx, sid); !errors.Is(gerr, store.ErrNotFound) {
-		t.Fatalf("record survived a failed overlay allocation: %v; want it deleted (§4.4-A: no `failed` state, no orphan `creating` row)", gerr)
+		t.Fatalf("record survived a failed overlay allocation: %v; want it deleted (atomic transition rollback: no `failed` state, no orphan `creating` row)", gerr)
 	}
 	if len(rt.Calls()) != 0 {
-		t.Fatalf("runtime was called after CreateOverlay failed: %v; want nothing (the chain never reached ④ launch)", rt.Calls())
+		t.Fatalf("runtime was called after CreateOverlay failed: %v; want nothing because the chain never reached launch", rt.Calls())
 	}
 	// And no record of ANY kind is left behind for the reaper to trip over.
 	if recs, _ := st.ListSandboxes(ctx); len(recs) != 0 {
@@ -44,10 +45,10 @@ func TestCreateUnwindOnOverlayAllocationFailure(t *testing.T) {
 	}
 }
 
-// Teardown failure must NOT block or reverse the transition. §4.4 decouples the
+// Teardown failure must NOT block or reverse the transition. the transition contract decouples the
 // state transition from byte reclamation precisely so a failed delete degrades to
 // "retry via the sweep" rather than "the sandbox cannot be destroyed": destroy is
-// inherently idempotent, and the orphan-unit sweep is the retry §4.4 licenses.
+// inherently idempotent, and the orphan-unit sweep is the retry the transition contract licenses.
 //
 // This is the property that keeps a sandbox from becoming permanently
 // undestroyable because its bytes are on a wedged filesystem.
@@ -63,10 +64,10 @@ func TestDestroyCommitsEvenWhenByteReclamationFails(t *testing.T) {
 	}
 	// Every teardown mechanism fails, yet the verb must still succeed.
 	if err := m.Destroy(ctx, sid); err != nil {
-		t.Fatalf("Destroy failed because teardown failed: %v — §4.4 decouples the transition from byte reclamation, so the record must still be deleted and the bytes left to the sweep", err)
+		t.Fatalf("Destroy failed because teardown failed: %v — the transition contract decouples the transition from byte reclamation, so the record must still be deleted and the bytes left to the sweep", err)
 	}
 	if _, gerr := st.GetSandbox(ctx, sid); !errors.Is(gerr, store.ErrNotFound) {
-		t.Fatalf("record survived destroy when teardown failed: %v; want it deleted (the sweep retries the bytes, §4.4-A)", gerr)
+		t.Fatalf("record survived destroy when teardown failed: %v; want it deleted (the sweep retries the bytes, atomic transition rollback)", gerr)
 	}
 	// The "destroyed" event still committed — a subscriber must learn the sandbox
 	// is gone even though its bytes linger.
@@ -75,7 +76,7 @@ func TestDestroyCommitsEvenWhenByteReclamationFails(t *testing.T) {
 	}
 }
 
-// Pause with a failing teardown likewise lands a legal `paused`. §4.2/§4.4: EVERY
+// Pause with a failing teardown likewise lands a legal `paused`. FS-first pause and resume/the transition contract: EVERY
 // pause path ends in a legal `paused` (drain, preemptive freeze, or worst-case
 // kill), so a Stop or Unmount that fails must not leave the record `running` while
 // the placement is half-released.
@@ -89,7 +90,7 @@ func TestPauseLandsPausedEvenWhenPlacementReleaseFails(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 	if err := m.Pause(ctx, sid); err != nil {
-		t.Fatalf("Pause failed because placement release failed: %v — pause must always land a legal `paused` (§4.2 / §4.4)", err)
+		t.Fatalf("Pause failed because placement release failed: %v — pause must always land a legal `paused` (FS-first pause and resume / the transition contract)", err)
 	}
 	rec, _ := st.GetSandbox(ctx, sid)
 	if rec.State != model.Paused {
@@ -102,7 +103,7 @@ func TestPauseLandsPausedEvenWhenPlacementReleaseFails(t *testing.T) {
 	}
 }
 
-// Promote is bytes-first (§5.B / §4.3 existence-is-state): the layer bytes are
+// Promote is bytes-first (the Rootfs subsystem / health and reclamation existence-is-state): the layer bytes are
 // written BEFORE the row is inserted, so a failure at the row insert must leave an
 // orphan the sweep collects — never a `templates` row pointing at bytes that do
 // not exist.
@@ -136,13 +137,13 @@ func TestPromoteRowInsertFailureLeavesNoBrokenReadyRow(t *testing.T) {
 	tmpls, _ := st.ListTemplates(ctx)
 	for _, tm := range tmpls {
 		if !tm.Builtin {
-			t.Fatalf("a non-builtin templates row (%s) exists after the insert failed — a row is a promise the bytes are ready (§4.3 existence-is-state)", tm.ID)
+			t.Fatalf("a non-builtin templates row (%s) exists after the insert failed — a row is a promise the bytes are ready (health and reclamation existence-is-state)", tm.ID)
 		}
 	}
 	// The keep-set is released, so the boot sweep will see the layer as a TRUE
 	// orphan and reclaim it. A stuck keep-set entry would protect the garbage forever.
 	if ids := m.buildingLayerIDs(); len(ids) != 0 {
-		t.Fatalf("buildingLayers still holds %v after a failed promote; the orphan would be protected from the sweep forever (§4.4-A)", ids)
+		t.Fatalf("buildingLayers still holds %v after a failed promote; the orphan would be protected from the sweep forever (atomic transition rollback)", ids)
 	}
 }
 
@@ -173,10 +174,10 @@ func (s *rowInsertFailingStore) CreateTemplate(ctx context.Context, t model.Temp
 	return s.Store.CreateTemplate(ctx, t)
 }
 
-// §4.4-A adopt, the L1-alive-but-not-serving crack. `Adopt` reports the isolation
+// atomic transition rollback adopt, the L1-alive-but-not-serving crack. `Adopt` reports the isolation
 // unit alive, but the L2 Health probe does not answer (a `created`-but-never-
-// listening container). Per §4.3 the takeover judgement is aligned with the cold
-// start's ⑦ gate: L1 alive but L2 not answering is NOT an adoptable survivor — so
+// listening container). Per health and reclamation the takeover judgement is aligned with the cold
+// start's  gate: L1 alive but L2 not answering is NOT an adoptable survivor — so
 // it demotes to `paused`, recoverable by a later resume.
 //
 // The subtle half, and the reason this needs its own test: the demotion must record NO
@@ -210,15 +211,15 @@ func TestAdoptDemotesL1AliveButNotServingWithoutInventingADeathCause(t *testing.
 	}
 	// Demoted, not adopted: an L1-alive unit that does not serve is not adoptable.
 	if rec.State != model.Paused {
-		t.Fatalf("state = %s; want paused — an L1-alive unit that fails the L2 readiness probe is not adoptable (§4.3 / §4.4-A, aligned with the cold-start ⑦ gate)", rec.State)
+		t.Fatalf("state = %s; want paused — an L1-alive unit that fails the L2 readiness probe is not adoptable, matching the cold-start gate", rec.State)
 	}
 	// NO invented cause. This is the assertion the branch exists for.
 	if rec.DeathCause != model.CauseNone {
-		t.Fatalf("death cause = %q for a unit L1 reported ALIVE; want none — nothing died, and stamping a cause is the guessing §2.4 forbids (it also becomes durable evidence a later reader trusts)", rec.DeathCause)
+		t.Fatalf("death cause = %q for a unit L1 reported ALIVE; want none — nothing died, and stamping a cause is the guessing the provider security contract forbids (it also becomes durable evidence a later reader trusts)", rec.DeathCause)
 	}
 	// Still reported as an involuntary pause so a subscriber can tell why.
 	if got := kindsFor(t, st, "run_mute"); len(got) == 0 || got[len(got)-1] != "crash-paused" {
-		t.Fatalf("events = %v; want the last to be `crash-paused` (§4.2 involuntary pause)", got)
+		t.Fatalf("events = %v; want the last to be `crash-paused` (FS-first pause and resume involuntary pause)", got)
 	}
 	// No live handle recorded — a dead endpoint in the live-map would make the
 	// sandbox look addressable while nothing answers.
@@ -227,7 +228,7 @@ func TestAdoptDemotesL1AliveButNotServingWithoutInventingADeathCause(t *testing.
 	}
 }
 
-// The §4.2 drain barrier must be re-opened when a pause FAILS. pauseLocked
+// The FS-first pause and resume drain barrier must be re-opened when a pause FAILS. pauseLocked
 // registers `defer undrain` BEFORE the CAS for this reason: a pause that loses its
 // CAS has not frozen anything, so leaving the sandbox marked draining would make
 // it refuse every mutating fs RPC forever — a permanently read-only sandbox, with
@@ -245,7 +246,7 @@ func TestFailedPauseReopensTheDrainBarrier(t *testing.T) {
 	// The barrier must be open again: a mutating op can enter.
 	release, ok := m.Enter("sbx_wedge", "fs.Write /root/after-failed-pause")
 	if !ok {
-		t.Fatal("the drain barrier stayed CLOSED after a failed pause — the sandbox would refuse every mutating fs RPC forever (§4.2 / D4.4: undrain must run even when the CAS loses)")
+		t.Fatal("the drain barrier stayed CLOSED after a failed pause — the sandbox would refuse every mutating fs RPC forever (FS-first pause and resume / the lifecycle contract: undrain must run even when the CAS loses)")
 	}
 	release()
 }

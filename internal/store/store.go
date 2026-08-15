@@ -1,14 +1,14 @@
-// Package store is the control-plane record seam (§1.1 / §4.4-C). It is a
-// Behavior seam (§1.3): an interface with pluggable implementations. Two live
+// Package store is the control-plane record seam (the engine vocabulary boundary / the transactional outbox). It is a
+// Behavior seam (the extension boundary): an interface with pluggable implementations. Two live
 // side by side behind it — an in-memory map (for fast unit tests) and the
-// embedded single-node backend (SQLite, ADR-0004) — chosen by registration,
+// embedded single-node backend (SQLite, the SQLite store choice) — chosen by registration,
 // not by reshaping callers.
 //
 // The interface itself promises the minimal guarantees the algorithms need
-// (§4.4-C): "lifecycle-state change + outbox append = single atomic commit".
-// The CAS shape below gives the §4.4-B transition lock somewhere to land.
+// (the transactional outbox): "lifecycle-state change + outbox append = single atomic commit".
+// The CAS shape below gives the per-sandbox transition serialization transition lock somewhere to land.
 //
-// NO-CAPABILITY-BRANCH RULE (§4.4-C, and it governs every method here): NEVER
+// NO-CAPABILITY-BRANCH RULE (the transactional outbox, and it governs every method here): NEVER
 // design the API so a backend reports whether it supports transactions and the
 // algorithm branches on it. Each backend must DELIVER the promised atomicity by
 // whatever means it has; a caller never learns which backend it is talking to,
@@ -26,7 +26,7 @@ import (
 )
 
 // ErrConflict is returned by CompareAndSetState when the current state is not
-// the expected source state — the CAS lost (§4.4-B: pause vs resume racing, the
+// the expected source state — the CAS lost (per-sandbox transition serialization: pause vs resume racing, the
 // later verb sees a state it didn't expect and is rejected).
 var ErrConflict = errors.New("store: state precondition failed")
 
@@ -35,35 +35,35 @@ var ErrNotFound = errors.New("store: sandbox not found")
 
 // ErrTemplateNotFound is returned when a Template record does not exist —
 // including the reference-side failure: inserting a sandbox (or child Template)
-// that references a Template no concurrent transaction left in place (§4.3
+// that references a Template no concurrent transaction left in place (health and reclamation
 // reference-reclaim atomicity: DELETE committed first → the referrer hits
 // missing-parent).
 var ErrTemplateNotFound = errors.New("store: template not found")
 
-// ErrInUse is the §4.3 reference-protection verdict: a DeleteTemplate lost to a
+// ErrInUse is the health and reclamation reference-protection verdict: a DeleteTemplate lost to a
 // live referencing row (a sandbox pinning it, or a child Template naming it as
-// parent). It is the store SEAM's contract promise (§4.3 / §1.3), NOT a SQLite
+// parent). It is the store SEAM's contract promise (health and reclamation / the extension boundary), NOT a SQLite
 // feature leaking out: SQLite delivers it via FK RESTRICT, Memory via a Go scan
 // — the two backends run one set of assertions. The API layer maps it to a clean
-// 409 template in use (§6.1), never a raw 500.
+// 409 template in use (the control-plane API), never a raw 500.
 var ErrInUse = errors.New("store: template in use")
 
-// ErrVolumeNotFound is returned when a Volume record does not exist (§5.C). Its
+// ErrVolumeNotFound is returned when a Volume record does not exist (the Volume subsystem). Its
 // OWN sentinel rather than a reuse of ErrNotFound ("sandbox not found"): a 404 whose
-// text names the wrong object sends the caller looking in the wrong place (§6.2).
+// text names the wrong object sends the caller looking in the wrong place (the API error contract).
 var ErrVolumeNotFound = errors.New("store: volume not found")
 
-// The Volume reference verdicts (§6.2's four 409s). FOUR SEPARATE SENTINELS because each
+// The Volume reference verdicts (the API error contract's four 409s). FOUR SEPARATE SENTINELS because each
 // names a DIFFERENT object relationship and the caller's remedy differs; ErrInUse's text says
 // "template in use" verbatim, so reusing it returns a 409 naming the wrong object. A storetest
 // case asserts they stay mutually distinguishable — the degradation is someone later
 // collapsing two that map to the same status code.
 var (
-	// ErrVolumeInUse is verdict ①: deleting a volume that a live mount row holds
+	// ErrVolumeInUse reports deletion of a volume that a live mount row holds
 	// (mounts.volume RESTRICT). The Template-shaped case, on a different object.
 	ErrVolumeInUse = errors.New("store: volume in use by a mount")
 
-	// ErrSandboxHasMounts is verdict ②'s sandbox side: deleting a sandbox that a live
+	// ErrSandboxHasMounts reports deletion of a sandbox that a live
 	// mount row holds (mounts.sandbox RESTRICT).
 	//
 	// A sentinel is required even though the FK-violation predicate is generic
@@ -72,40 +72,40 @@ var (
 	// predicate is reusable; the translation is per-call-site.
 	ErrSandboxHasMounts = errors.New("store: sandbox has live mounts")
 
-	// ErrMountLeaseConflict is verdict ③: an attach lost the exclusive lease. It needs its
+	// ErrMountLeaseConflict reports an attach that lost the exclusive lease. It needs its
 	// OWN predicate as well as its own sentinel — the FK-violation string match correctly
 	// reports FALSE for a uniqueness or predicate failure.
 	//
-	// Unlike ①②④ this is a RETRYABLE state conflict: the caller may succeed once the
+	// This is a RETRYABLE state conflict: the caller may succeed once the
 	// holder releases.
 	ErrMountLeaseConflict = errors.New("store: volume already exclusively mounted")
 
-	// ErrMountBindingInvalid is the §6.2 400 (NOT a 409): a single submitted binding that
+	// ErrMountBindingInvalid is the API error contract 400 (NOT a 409): a single submitted binding that
 	// CONTRADICTS ITSELF — the same destination twice, the same volume twice, or one volume
 	// nested inside another's subtree. 400 because it is decidable without reading any other
-	// row and no retry can make it legal, which is §6.2's 400 criterion.
+	// row and no retry can make it legal, which is the API error contract's 400 criterion.
 	ErrMountBindingInvalid = errors.New("store: mount binding is self-contradictory")
 
-	// ErrVolumeHasDescendants is verdict ②'s volume side: deleting a volume that a live
-	// snapshot or clone names as its parent (volumes.parent RESTRICT) — D3's trap recurring
+	// ErrVolumeHasDescendants reports deletion of a volume that a live
+	// snapshot or clone names as its parent (volumes.parent RESTRICT) — the storage invariant's trap recurring
 	// on the fourth FK path, distinguishable from ErrVolumeInUse because the remedy differs
 	// (delete a descendant vs detach a mount).
 	ErrVolumeHasDescendants = errors.New("store: volume has live snapshots or clones")
 )
 
-// Event is one outbox row: a §4.1 lifecycle transition to publish to the event
+// Event is one outbox row: a lifecycle transition to publish to the event
 // stream (created / paused / resumed / destroyed …). It is appended in the SAME
-// atomic commit as the state change that produced it (§4.4-C) — a committed
+// atomic commit as the state change that produced it (the transactional outbox) — a committed
 // transition can never lack its event, nor an event lack its transition. The
-// transition methods below take an *Event: the §4 mediator constructs it per
-// transition semantics, carrying a transition-unique ID (§4.4-C). A nil Event
+// transition methods below take an *Event: the lifecycle mediator constructs it per
+// transition semantics, carrying a transition-unique ID (the transactional outbox). A nil Event
 // means "this store mutation publishes nothing" (the transient creating-insert
 // and the create-unwind delete are internal steps of a verb, not externally
-// visible §4.1 transitions) — that is a mediator semantic choice, NOT a backend
+// visible the lifecycle state machine transitions) — that is a mediator semantic choice, NOT a backend
 // capability branch.
 type Event struct {
 	// Seq is the outbox's monotonic total order — the CURSOR a subscriber
-	// resumes from (§6.1 GET /v1/events?after=). It is assigned BY THE BACKEND at
+	// resumes from (the control-plane API GET /v1/events?after=). It is assigned BY THE BACKEND at
 	// append; a caller-supplied value is ignored (the mediator does not own this
 	// number, the store does). Zero on an Event being handed TO the store, and
 	// always > 0 on one read back out.
@@ -113,32 +113,32 @@ type Event struct {
 	// OccurredAt cannot serve instead: unix nanos are not a total order (no tie-break at
 	// equal nanos, and NTP can step the clock backwards) — see the outbox schema.
 	Seq int64
-	// ID is the transition-unique key subscribers dedup on (§4.4-C
+	// ID is the transition-unique key subscribers dedup on (the transactional outbox
 	// at-least-once: a redelivered event carries the SAME ID). Backends key the
 	// outbox row uniquely on it.
 	ID string
 	// Sandbox is which sandbox transitioned. Fine as an engine-internal field —
-	// `sandbox` is a core atom, not a banned product concept (§1.1 vocabulary).
+	// `sandbox` is a core atom, not a banned product concept (the engine vocabulary boundary vocabulary).
 	Sandbox model.SandboxID
 	// Kind is the transition name ("created" / "paused" / "resumed" /
 	// "destroyed" / "auto-paused" / "crash-paused" …). The three pause-like Kinds
 	// are distinct on purpose: "paused" = user pause, "auto-paused" = reaper idle
-	// pause, "crash-paused" = INVOLUNTARY demote (§4.1 / §4.2) — which covers two
+	// pause, "crash-paused" = INVOLUNTARY demote (the lifecycle state machine / FS-first pause and resume) — which covers two
 	// paths, not just death: a unit found dead (cause recorded alongside) and the
-	// transport-down restart-budget escalation (reaper-health D4b), where L1 is
+	// transport-down restart-budget escalation (the transport-down restart budget), where L1 is
 	// still ALIVE and so no cause is stamped. Whether a cause is present is what
 	// separates them. All land state=paused, the Kind carries WHY.
 	//
 	// A TYPE rather than a bare string, and both backends assert the same closed set of
-	// six — see model.EventKind. §4.4-C's "the event schema is a subscriber-side concern"
+	// six — see model.EventKind. the transactional outbox's "the event schema is a subscriber-side concern"
 	// is about the WIRE shape and does not license writing a kind the engine never named.
 	Kind model.EventKind
 	// State is the resulting lifecycle-state after the transition.
 	State model.Lifecycle
-	// Cause is WHY, for the Kinds a subscriber cannot otherwise tell apart (§4.4-C). Empty on
+	// Cause is WHY, for the Kinds a subscriber cannot otherwise tell apart (the transactional outbox). Empty on
 	// every Kind with a single route. Today it separates `destroyed`'s two routes:
 	// `requested` (the Destroy verb) from `retention-expired` (the reaper's evict of a paused
-	// sandbox past `retention`). Exactly two, not three — §4.4-A's protect-on-uncertainty
+	// sandbox past `retention`). Exactly two, not three — atomic transition rollback's protect-on-uncertainty
 	// means no health verdict ever destroys. See model.EventCause for why it must ride the
 	// event rather than be read back from the record.
 	Cause model.EventCause
@@ -146,7 +146,7 @@ type Event struct {
 	OccurredAt time.Time
 }
 
-// Binding is the mutable slice of a sandbox's §3.4 Binding — what §6.1 PATCH may
+// Binding is the mutable slice of a sandbox's resource admission Binding — what the control-plane API PATCH may
 // rewrite. Each field is a POINTER so "not given" is distinguishable from "set to
 // zero", which is load-bearing here: on these axes zero is itself a meaningful
 // instruction (`0 = unlimited` for a cap, `retention: 0` = never evict), so a
@@ -154,15 +154,15 @@ type Event struct {
 //
 // Only fields the engine can actually re-materialize appear here. Template and
 // Overlay are NOT Binding-mutable (changing either would make it a different
-// sandbox, §3.3), and State is not here because this is not a transition — it is
-// conditional ON the state (§4.4-B).
+// sandbox, the ID-reference model), and State is not here because this is not a transition — it is
+// conditional ON the state (per-sandbox transition serialization).
 type Binding struct {
 	CPUMillis   *int64
 	MemoryByte  *int64
 	DiskByte    *int64
 	IdleTimeout *time.Duration
 	Retention   *time.Duration
-	// Network is the §5.D declaration, replaced WHOLE (§6.2: PATCH swaps one
+	// Network is the network declaration, replaced WHOLE (the API error contract: PATCH swaps one
 	// complete binding for another; there is no field-level merge and no
 	// "pending/unresolved" value).
 	//
@@ -174,7 +174,7 @@ type Binding struct {
 	// Also the field `POST …/publish` writes through, carrying a declaration the mediator
 	// produced by read-append under the transition lock. The store cannot tell the two write
 	// points apart — both replace the whole value — so the append happens above it, two
-	// concurrent publishes otherwise losing one (§5.D).
+	// concurrent publishes otherwise losing one (the network declaration).
 	Network *model.NetworkDecl
 }
 
@@ -207,13 +207,13 @@ func (b Binding) Apply(cur model.Sandbox) (model.Limits, time.Duration, time.Dur
 	}
 	if b.Network != nil {
 		// WHOLE replacement, and normalized on the way in so the record never holds a
-		// nil array where §6.1 promises `[]`.
+		// nil array where the control-plane API promises `[]`.
 		net = b.Network.Normalize()
 	}
 	return lim, idle, ret, net
 }
 
-// marshalNetwork / unmarshalNetwork are the §5.D declaration's at-rest form.
+// marshalNetwork / unmarshalNetwork are the network declaration's at-rest form.
 //
 // A FAILURE HERE IS RETURNED, NEVER SWALLOWED: zero-valuing a decode error presents the
 // sandbox as `{deny, [], [], []}`, which looks safe and is catastrophic in the one direction
@@ -231,8 +231,8 @@ func unmarshalNetwork(s string) (model.NetworkDecl, error) {
 	if s == "" {
 		// Corruption, not "no declaration": the column is NOT NULL with no default and an
 		// omitted `network` is normalized to an explicit `{deny, [], [], []}` at the write
-		// point (§5.D), so an empty column means the row bypassed that normalization.
-		return model.NetworkDecl{}, errors.New("store: sandbox row carries an empty network declaration, bypassing the §5.D write-point normalization; refusing to read it as deny-everything")
+		// point (the network declaration), so an empty column means the row bypassed that normalization.
+		return model.NetworkDecl{}, errors.New("store: sandbox row carries an empty network declaration, bypassing the network declaration write-point normalization; refusing to read it as deny-everything")
 	}
 	var d model.NetworkDecl
 	if err := json.Unmarshal([]byte(s), &d); err != nil {
@@ -241,10 +241,10 @@ func unmarshalNetwork(s string) (model.NetworkDecl, error) {
 	return d.Normalize(), nil
 }
 
-// Store is the authoritative control-plane record backend (§1.1 / §4.4-C) and a Behavior seam
-// (§1.3). The package doc's no-capability-branch rule applies to every method below.
+// Store is the authoritative control-plane record backend (the engine vocabulary boundary / the transactional outbox) and a Behavior seam
+// (the extension boundary). The package doc's no-capability-branch rule applies to every method below.
 //
-// # The outbox sequence contract (§4.4-C)
+// # The outbox sequence contract (the transactional outbox)
 //
 // Two promises stated HERE rather than left to the backend:
 //
@@ -265,7 +265,7 @@ func unmarshalNetwork(s string) (model.NetworkDecl, error) {
 // every lower one has committed — or it does not satisfy this interface. storetest asserts it.
 type Store interface {
 	// CreateSandbox inserts a new sandbox record in state `creating`, appending
-	// ev in the same commit if non-nil (§4.4-C). Returns ErrConflict on a
+	// ev in the same commit if non-nil (the transactional outbox). Returns ErrConflict on a
 	// duplicate ID.
 	CreateSandbox(ctx context.Context, s model.Sandbox, ev *Event) error
 
@@ -275,16 +275,16 @@ type Store interface {
 	// ListSandboxes returns all sandbox records.
 	ListSandboxes(ctx context.Context) ([]model.Sandbox, error)
 
-	// CompareAndSetState is the conditional write (§4.4-B): set the sandbox's
+	// CompareAndSetState is the conditional write (per-sandbox transition serialization): set the sandbox's
 	// lifecycle-state to `next` only if it is currently `expected`, else return
 	// ErrConflict. ev (if non-nil) is appended to the outbox in the SAME commit
-	// (§4.4-C). This is the mechanism the §4 mediator's transition lock uses for
+	// (the transactional outbox). This is the mechanism the lifecycle mediator's transition lock uses for
 	// CAS precondition checks; serialization happens in the mediator layer, not
-	// by one subsystem calling another (§4: verbs belong to the mediator).
+	// by one subsystem calling another (the lifecycle: verbs belong to the mediator).
 	//
 	// cause (if non-nil) sets death_cause in the SAME commit. This is why the
 	// death cause rides the EXISTING CAS path instead of getting its own write
-	// point: §4.3 requires the crash-paused demotion and the death cause to be
+	// point: health and reclamation requires the crash-paused demotion and the death cause to be
 	// ONE atomic commit, because the signal is volatile — after the demotion
 	// commits, the placement can be torn down at any moment and the evidence is
 	// unrecoverable, so a "write the cause just afterwards" window does not exist.
@@ -293,14 +293,14 @@ type Store interface {
 	// death no longer explains anything).
 	CompareAndSetState(ctx context.Context, id model.SandboxID, expected, next model.Lifecycle, ev *Event, cause *model.DeathCause) error
 
-	// DeleteSandbox removes a sandbox record (terminal `destroyed`, §4.1),
-	// appending ev in the same commit if non-nil (§4.4-C). The outbox row
+	// DeleteSandbox removes a sandbox record (terminal `destroyed`, the lifecycle state machine),
+	// appending ev in the same commit if non-nil (the transactional outbox). The outbox row
 	// survives the record's deletion — it is a separate table/slice.
 	DeleteSandbox(ctx context.Context, id model.SandboxID, ev *Event) error
 
 	// UnpublishedEvents returns at most limit outbox rows not yet marked
 	// published, in Seq order (oldest first). This is the PUBLISHER read side
-	// (§4.4-C) — it is deliberately NOT part of the atomic-commit contract (not in
+	// (the transactional outbox) — it is deliberately NOT part of the atomic-commit contract (not in
 	// the transition commit); the publisher reads async, delivers, then marks.
 	// at-least-once: a crash after deliver but before MarkPublished re-returns the
 	// same rows.
@@ -316,13 +316,13 @@ type Store interface {
 
 	// CountUnpublished reports how many outbox rows are not yet marked published.
 	//
-	// Separate from the drain read per §4.4-C's operability requirement ③ (observability must
+	// Separate from the drain read per the transactional outbox's operability requirement  (observability must
 	// not share a source with the loop being observed), and because a bounded read cannot
 	// answer it: len(UnpublishedEvents(ctx, limit)) saturates at limit, reporting a small
 	// constant at precisely the moment the backlog is large.
 	CountUnpublished(ctx context.Context) (int64, error)
 
-	// Events is the REPLAY read side backing §6.1 GET /v1/events: return at most
+	// Events is the REPLAY read side backing the control-plane API GET /v1/events: return at most
 	// limit events with Seq > after, in Seq order, plus the window bounds
 	// (earliest / latest Seq currently held, both 0 on an empty outbox).
 	//
@@ -344,11 +344,11 @@ type Store interface {
 
 	// TrimOutbox deletes at most limit DELIVERED outbox rows whose delivery is older
 	// than cutoff, oldest first, and returns how many it deleted. It is the mechanism
-	// behind §4.4-C's retention window; the WINDOW'S VALUE belongs to the deployment
+	// behind the transactional outbox's retention window; the WINDOW'S VALUE belongs to the deployment
 	// and 0 (never trim) is the engine's default, so a deployment that sets nothing
 	// never reaches this.
 	//
-	// Four properties, each with a wrong answer that looks reasonable (§4.4-C argues each):
+	// Four properties, each with a wrong answer that looks reasonable (the transactional outbox argues each):
 	//
 	//   - AGE IS MEASURED FROM DELIVERY (published_at), never occurrence. Counterexample: a
 	//     halted stream resumed days later delivers its backlog with fresh delivery times but
@@ -357,45 +357,45 @@ type Store interface {
 	//     the halted head is undelivered, so the predicate already stops below it.
 	//   - THE NEWEST ROW IS NEVER TRIMMED, even when it qualifies: an empty table reads 0/0,
 	//     indistinguishable from "nothing ever happened", so a stale cursor gets a silent
-	//     short page instead of §6.1's 410. One retained row keeps the bounds truthful.
+	//     short page instead of the control-plane API's 410. One retained row keeps the bounds truthful.
 	//   - BOUNDED BY limit, like the drain read: the delete runs on a possibly-serialized write
 	//     path, and an unbounded one holds it while every state transition waits.
 	//
-	// Trimming advances the window's lower bound, which is what makes §6.1's 410 reachable.
+	// Trimming advances the window's lower bound, which is what makes the control-plane API's 410 reachable.
 	TrimOutbox(ctx context.Context, cutoff time.Time, limit int) (int, error)
 
-	// UpdateBinding rewrites a sandbox's Binding fields (§3.4) — the create-time
-	// write point's only sibling, backing §6.1 PATCH. It is CONDITIONAL on the
-	// current lifecycle-state, the same shape as CompareAndSetState (§4.4-B): the
+	// UpdateBinding rewrites a sandbox's Binding fields (resource admission) — the create-time
+	// write point's only sibling, backing the control-plane API PATCH. It is CONDITIONAL on the
+	// current lifecycle-state, the same shape as CompareAndSetState (per-sandbox transition serialization): the
 	// caller declares the state it decided against, and a mismatch is ErrConflict.
 	// That is what keeps a concurrent resume/evict from landing between the
 	// mediator's decision and this write.
 	//
 	// It does NOT change state, and it must NOT touch updated_at: `retention` is
-	// measured from that column (the moment the sandbox entered `paused`, §4.3), so
+	// measured from that column (the moment the sandbox entered `paused`, health and reclamation), so
 	// bumping it here would silently extend an eviction deadline as a side effect of
 	// editing an unrelated cap.
 	//
 	// cause follows CompareAndSetState's convention (nil = leave untouched, non-nil CauseNone
-	// = clear). A raise of the RAM cap passes &CauseNone so the §4.3 resource-terminated
+	// = clear). A raise of the RAM cap passes &CauseNone so the health and reclamation resource-terminated
 	// refusal is lifted in the SAME commit as the cap lifting it; otherwise the documented
 	// remedy deadlocks, the guard reading a death_cause that only a successful resume — which
 	// the guard itself prevents — would clear.
 	UpdateBinding(ctx context.Context, id model.SandboxID, expected model.Lifecycle, b Binding, cause *model.DeathCause) error
 
-	// --- Template CRUD (§4.3 uniform object model) ---------------------------
+	// --- Template CRUD (health and reclamation uniform object model) ---------------------------
 	//
 	// See model.Template for the shape (existence-is-state, derived refcount). These
-	// methods are the store's slice of the §4.3 reference-reclaim atomicity contract —
+	// methods are the store's slice of the health and reclamation reference-reclaim atomicity contract —
 	// the reference-protection promise (a referenced Template cannot be deleted) is
-	// delivered here, identically by both backends (§1.3 seam).
+	// delivered here, identically by both backends (the extension boundary seam).
 
 	// CreateTemplate inserts a Template row. If Parent is non-empty it must
-	// reference an existing Template (§4.3 lineage, references point upward): a
+	// reference an existing Template (health and reclamation lineage, references point upward): a
 	// missing parent → ErrTemplateNotFound (the reference-side of the atomicity
-	// race, §4.3). Returns ErrConflict on a duplicate ID. Bytes-first (§5.B): the
+	// race, health and reclamation). Returns ErrConflict on a duplicate ID. Bytes-first (the Rootfs subsystem): the
 	// caller has already fully materialized the layer bytes before this insert —
-	// existence-is-state has no not-ready escape hatch (§4.3).
+	// existence-is-state has no not-ready escape hatch (health and reclamation).
 	CreateTemplate(ctx context.Context, t model.Template) error
 
 	// GetTemplate reads a Template row; ErrTemplateNotFound if absent.
@@ -404,27 +404,27 @@ type Store interface {
 	// ListTemplates returns all Template rows.
 	ListTemplates(ctx context.Context) ([]model.Template, error)
 
-	// DeleteTemplate removes a Template row iff nothing references it (§4.3 /
-	// §6 DELETE). A live referencing row — a sandbox whose template = id, or a
+	// DeleteTemplate removes a Template row iff nothing references it (health and reclamation /
+	// the external API DELETE). A live referencing row — a sandbox whose template = id, or a
 	// child Template whose parent = id — makes it ErrInUse (RESTRICT). A missing
 	// row → ErrTemplateNotFound. The reclaim of the layer's bytes is DECOUPLED
-	// from this row delete (§4.4 / §5.B orphan sweep) — this only removes the
+	// from this row delete (the transition contract / the Rootfs subsystem orphan sweep) — this only removes the
 	// row; the now-orphaned bytes are reclaimed by the sweep, not here.
 	DeleteTemplate(ctx context.Context, id model.TemplateID) error
 
-	// --- Volume CRUD (§5.C / §4.3 uniform object model) -----------------------
+	// --- Volume CRUD (the Volume subsystem / health and reclamation uniform object model) -----------------------
 	//
 	// See model.Volume for the row's shape and for what is deliberately absent from it
 	// (access mode, lease, owner).
 	//
 	// NONE of these methods take an *Event, and that is a semantic statement rather
-	// than an omission: a Volume is not a sandbox, so its CRUD is not a §4.1
+	// than an omission: a Volume is not a sandbox, so its CRUD is not a lifecycle state machine
 	// lifecycle transition and publishes nothing — the same rule Template CRUD
-	// follows (§4.3 / §6.1 PATCH "does not emit an event").
+	// follows (health and reclamation / the control-plane API PATCH "does not emit an event").
 
 	// CreateVolume inserts a Volume row. Returns ErrConflict on a duplicate ID.
 	//
-	// BYTES-FIRST (§5.C / §4.3): the caller has ALREADY allocated the backend storage and
+	// BYTES-FIRST (the Volume subsystem / health and reclamation): the caller has ALREADY allocated the backend storage and
 	// written its cap before this insert. Existence-is-state offers no not-ready state to park
 	// a half-built volume in, so a crash before this call leaves ORPHAN BYTES for the sweep
 	// rather than a row naming storage that does not exist.
@@ -433,23 +433,23 @@ type Store interface {
 	// GetVolume reads a Volume row; ErrVolumeNotFound if absent.
 	GetVolume(ctx context.Context, id model.VolumeID) (model.Volume, error)
 
-	// ListVolumes returns all Volume rows. The §3.4 admission gate reads this to sum
+	// ListVolumes returns all Volume rows. The resource-admission gate reads this to sum
 	// Σ(volume caps) into the FIRST term of the node inequality — a volume cap is a
 	// declared upper bound like a sandbox cap, so it is a like term rather than a new
 	// one.
 	ListVolumes(ctx context.Context) ([]model.Volume, error)
 
-	// SetVolumeCapacity rewrites one volume's cap — the §6.1 PATCH write point, and
+	// SetVolumeCapacity rewrites one volume's cap — the control-plane API PATCH write point, and
 	// the only sibling of the create-time write.
 	//
 	// NOT CONDITIONAL ON ANY LIFECYCLE STATE, unlike UpdateBinding, for a mechanical reason:
 	// a volume has no placement of its own, so "re-materialize at the next placement" would
 	// mean NEVER for an unmounted volume. The cap lands on the storage directly, leaving no
-	// deferral and so no "pause it first" conflict to express (§5.C / §6.1 PATCH).
+	// deferral and so no "pause it first" conflict to express (the Volume subsystem / the control-plane API PATCH).
 	//
 	// The STRICT-inequality refusal ("lower below current usage") is NOT enforced
 	// here: it needs the backend's usage reading, which the store cannot and must not
-	// obtain (§4: the store holds records, the mediator asks subsystems). The mediator
+	// obtain (the lifecycle: the store holds records, the mediator asks subsystems). The mediator
 	// evaluates it before calling this.
 	//
 	// ErrVolumeNotFound if the row is absent.
@@ -457,26 +457,26 @@ type Store interface {
 
 	// DeleteVolume removes a Volume row. A missing row → ErrVolumeNotFound.
 	//
-	// IDEMPOTENT DELETE MUST NOT SWALLOW THAT (§6.2): an external implementation folded three
+	// IDEMPOTENT DELETE MUST NOT SWALLOW THAT (the API error contract): an external implementation folded three
 	// distinct not-founds into `200 {"deleted": true}`, making a delete a guard REFUSED
 	// indistinguishable from one that succeeded — and the reference-protection refusals landing
 	// on this path are the whole external signal those guards have.
 	//
-	// Byte reclamation is DECOUPLED from this row delete (§4.4 / §5.C orphan sweep).
+	// Byte reclamation is DECOUPLED from this row delete (the transition contract / the Volume subsystem orphan sweep).
 	//
-	// Two distinct RESTRICT verdicts, and they must stay distinguishable (§6.1):
+	// Two distinct RESTRICT verdicts, and they must stay distinguishable (the control-plane API):
 	// ErrVolumeInUse when a live mount row holds it, ErrVolumeHasDescendants when a live
 	// snapshot/clone names it as parent. Both differ again from ErrInUse, whose text
 	// names a Template.
 	DeleteVolume(ctx context.Context, id model.VolumeID) error
 
-	// --- Mount table (§5.C / §4.3) --------------------------------------------
+	// --- Mount table (the Volume subsystem / health and reclamation) --------------------------------------------
 	//
 	// See model.Mount for the row's shape. Mount rows publish NO events: they are not
-	// §4.1 lifecycle transitions (§4.3, the rule Template and Volume CRUD already follow).
+	// the lifecycle state machine lifecycle transitions (health and reclamation, the rule Template and Volume CRUD already follow).
 
 	// CreateMounts inserts a sandbox's COMPLETE binding atomically, enforcing the
-	// exclusive lease — the ONE new store invariant Volume introduces (§5.C).
+	// exclusive lease — the ONE new store invariant Volume introduces (the Volume subsystem).
 	//
 	// THE JUDGMENT AND THE INSERT MUST NOT BE SEPARABLE — a measured TOCTOU: two concurrent
 	// creates mint two fresh SandboxIDs and so hold two DISJOINT transition locks, with nothing
@@ -484,11 +484,11 @@ type Store interface {
 	// 4000 iterations. A node-global invariant cannot be enforced by per-sandbox locks, the same
 	// reason the admission gate needs its own mutex.
 	//
-	// So the BACKEND arbitrates: one statement expressing the whole cross-row predicate —
-	// §4.3's reference-reclaim shape on a second invariant, delivered by SQLite with
+	// So the BACKEND arbitrates: one statement expressing the whole cross-row predicate,
+	// delivered by SQLite with
 	// INSERT…SELECT…WHERE NOT EXISTS in one transaction and by Memory under its existing mutex.
 	//
-	// The INVARIANT (§5.C): a volume has AT MOST ONE `exclusive` mount row, and that row does
+	// A volume has AT MOST ONE `exclusive` mount row, and that row does
 	// not coexist with ANY other row for that volume. Not "at most one rw row", which would
 	// contradict SharedReadWrite's fanout.
 	//
@@ -497,24 +497,24 @@ type Store interface {
 	//
 	// Verdicts: ErrMountLeaseConflict for a contended lease; ErrMountBindingInvalid for a
 	// binding contradicting itself (duplicate destination, duplicate volume, nesting);
-	// ErrNotFound / ErrVolumeNotFound for an absent endpoint (§4.3's reference side). Paths MUST
+	// ErrNotFound / ErrVolumeNotFound for an absent endpoint (health and reclamation's reference side). Paths MUST
 	// arrive normalized — the uniqueness assertions are literal string comparisons, so an
 	// un-normalized path makes them silently not apply.
 	CreateMounts(ctx context.Context, mounts []model.Mount) error
 
 	// ReplaceMounts swaps one sandbox's COMPLETE binding for another — the write point
-	// behind §6.1 `PATCH /v1/sandboxes/{id}/volumes`. An EMPTY `next` legitimately means
-	// "detach everything" (§6.2: PATCH swaps whole bindings, there is no attach-one /
+	// behind the control-plane API `PATCH /v1/sandboxes/{id}/volumes`. An EMPTY `next` legitimately means
+	// "detach everything" (the API error contract: PATCH swaps whole bindings, there is no attach-one /
 	// detach-one operation), so it is not a special case and not a no-op.
 	//
 	// THE REPLACEMENT IS ONE ATOMIC COMMIT, as a contract promise rather than one backend's
 	// detail. Reordering cannot substitute — the delete MUST precede the insert, or a
 	// re-submitted identical binding collides with the rows it is replacing on both the lease
-	// predicate and UNIQUE(sandbox, path). §5.C states the three consequences two independent
+	// predicate and UNIQUE(sandbox, path). the Volume subsystem states the three consequences two independent
 	// commits cannot hold (the original binding survives a refusal; the lease is not
 	// transiently released; ListMountsByVolume never reads zero rows).
 	//
-	// NOT A TRANSACTION ON THE SEAM — §4.4-C's discipline again: the method promises atomicity
+	// NOT A TRANSACTION ON THE SEAM — the transactional outbox's discipline again: the method promises atomicity
 	// and each backend honors it by its own means.
 	//
 	// Verdicts are exactly CreateMounts's, mapping to the same status codes:
@@ -525,13 +525,13 @@ type Store interface {
 
 	// ListMounts returns one sandbox's mount rows, ordered by path. This is what a
 	// resume re-materializes from: the mount relationship is a Binding, so a resume
-	// re-mounts per the CURRENT table rather than restoring frozen bytes (§3.4 / §5.C).
+	// re-mounts per the CURRENT table rather than restoring frozen bytes (resource admission / the Volume subsystem).
 	ListMounts(ctx context.Context, sandbox model.SandboxID) ([]model.Mount, error)
 
 	// ListMountsByVolume returns every mount row referencing one volume, in ANY
 	// sandbox and regardless of that sandbox's state.
 	//
-	// The orphan sweep needs it as a live-mount check INDEPENDENT of any FK (§5.C
+	// The orphan sweep needs it as a live-mount check INDEPENDENT of any FK (the Volume subsystem
 	// safety requirement): skip any volume appearing in ANY mount row, live or not. FK
 	// RESTRICT protects the ROW; this protects the BYTES, which is a different thing
 	// and the one a mis-sweep destroys.
@@ -539,7 +539,7 @@ type Store interface {
 
 	// DeleteMounts removes ALL of one sandbox's mount rows. This is the LEASE RELEASE
 	// POINT: the lease is the row's existence, so the row going away IS the release
-	// (§5.C — there is no lease object to release separately).
+	// (the Volume subsystem — there is no lease object to release separately).
 	//
 	// Idempotent (no rows → nil): destroy, unwind and evict all reach it.
 	//

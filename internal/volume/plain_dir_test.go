@@ -8,7 +8,7 @@ import (
 )
 
 // TestPlainDirContract runs the shared seam contract against the TEST-ONLY
-// plain-directory arm — the seam's falsification instrument (volume.md D2).
+// plain-directory arm — the seam's falsification instrument (the volume backend seam).
 //
 // It needs no substrate and no root, which is the point: the arm exists so the
 // contract has a second implementation to disagree with, and a second

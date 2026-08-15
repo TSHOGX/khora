@@ -37,8 +37,8 @@ func setupEngine(t *testing.T, healthTimeout time.Duration) (*orchestrator.Engin
 }
 
 // upperDir returns the host upper path for a sandbox's Overlay (test-only peek
-// past the §5.B seam, which keeps host paths private, to assert byte
-// reclamation). The upper is PERSISTENT state, not placement state — §4.4-A
+// past the Rootfs subsystem seam, which keeps host paths private, to assert byte
+// reclamation). The upper is PERSISTENT state, not placement state — atomic transition rollback
 // requires placement reclaim to leave it untouched.
 func upperDir(t *testing.T, eng *orchestrator.Engine, base string, id model.SandboxID) string {
 	t.Helper()
@@ -148,7 +148,7 @@ func TestE2EWalkingSkeleton(t *testing.T) {
 		t.Fatalf("endpoint: %v", err)
 	}
 	if epAfter == epBefore {
-		t.Fatalf("resume reused endpoint %s; want NEW IP (§3.3 IP-as-epoch)", epBefore)
+		t.Fatalf("resume reused endpoint %s; want NEW IP (the ID-reference model IP-as-epoch)", epBefore)
 	}
 	t.Logf("✓ resume → new IP (%s → %s), running, same id=%s", epBefore, epAfter, sid)
 
@@ -176,7 +176,7 @@ func TestE2EWalkingSkeleton(t *testing.T) {
 	t.Logf("✓ destroy → record gone, upper reclaimed")
 }
 
-// L4 real runsc: inject a ⑦ cold-start failure (sandboxd exits → Health
+// L4 real runsc: inject a  cold-start failure (sandboxd exits → Health
 // never comes up → timeout). create must reclaim the half-built placement +
 // empty Overlay, delete the record → destroyed, and leave NO orphan netns.
 func TestE2EColdStartUnwindRealRunsc(t *testing.T) {
@@ -193,7 +193,7 @@ func TestE2EColdStartUnwindRealRunsc(t *testing.T) {
 		t.Fatalf("orchestrator.New: %v", err)
 	}
 	// boot seed so the "broken" builtin row exists — the create must fail at
-	// the ⑦ health gate, NOT at the template FK.
+	// the health gate, NOT at the Template foreign key.
 	if err := eng.SeedTemplates(ctx); err != nil {
 		t.Fatalf("seed builtin templates: %v", err)
 	}

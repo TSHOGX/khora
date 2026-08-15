@@ -10,9 +10,9 @@ import (
 	"testing"
 )
 
-// bannedTokens is the §5.A host-primitive list KEPT VERBATIM, plus the four
-// storage-form spellings §5.C adds (volume.md D2). Keeping the inherited list
-// unedited is deliberate: the §5.C seam is under the same rule as §5.A/§5.B, and a
+// bannedTokens is the runtime provider contract host-primitive list KEPT VERBATIM, plus the four
+// storage-form spellings the Volume subsystem adds (the volume backend seam). Keeping the inherited list
+// unedited is deliberate: the Volume subsystem seam is under the same rule as the runtime provider contract/the Rootfs subsystem, and a
 // trimmed copy would quietly narrow it.
 //
 // The four additions each name a MECHANISM a volume backend might be built on —
@@ -26,12 +26,12 @@ import (
 // banned from a parameter must be equally banned from a field, or the cheaper
 // spelling becomes the way in.
 var bannedTokens = []string{
-	// inherited from §5.A, verbatim
+	// inherited from the runtime provider contract, verbatim
 	"cgroup", "memcg", "oom", "netns",
 	"upperdir", "workdir", "hostpath", "abspath",
 	"subvolume", "qgroup", "squota", "errno",
 	"major", "minor", "majmin", "devno",
-	// §5.C additions (volume.md D2)
+	// the Volume subsystem additions (the volume backend seam)
 	"reflink", "fuse", "loopdev", "mountopt",
 }
 
@@ -40,14 +40,14 @@ var bannedTokens = []string{
 // without one is a bare allowlist, and the next leak arrives through the same door
 // claiming the same precedent.
 var fieldExemptions = map[string]string{
-	// The §5.C twin of rootfs.Merged.MergedPath, and the ONLY exemption this seam
-	// has. §5.C's whole job is to yield one host mount point for runsc to bind, so
+	// The Volume subsystem twin of rootfs.Merged.MergedPath, and the ONLY exemption this seam
+	// has. the Volume subsystem's whole job is to yield one host mount point for runsc to bind, so
 	// the handle must carry it; what makes it a handle rather than a leak is that
-	// nothing above §5.C interprets it (only local_runsc consumes it, exactly as with
-	// MergedPath), volumes are addressed by ID everywhere else (§3.1.1 / §6.2), and
+	// nothing above the Volume subsystem interprets it (only local_runsc consumes it, exactly as with
+	// MergedPath), volumes are addressed by ID everywhere else (the ID-addressed Overlay model / the API error contract), and
 	// the strictly-narrower OpenRoot accessor carries NO path at all — so this is the
 	// seam's single, bounded concession rather than its general posture.
-	"Materialized.SourcePath": "§5.C yields one host mount point as an opaque bind source (rootfs.Merged.MergedPath's precedent); consumed only by local_runsc, and OpenRoot deliberately exposes no path at all",
+	"Materialized.SourcePath": "the Volume subsystem yields one host mount point as an opaque bind source (rootfs.Merged.MergedPath's precedent); consumed only by local_runsc, and OpenRoot deliberately exposes no path at all",
 }
 
 // seamIfaces / seamStructs name what the guards scan. Declared here rather than
@@ -59,7 +59,7 @@ var (
 	seamStructs = []string{"Materialized", "Capabilities", "FileInfo"}
 )
 
-// TestSeamCarriesNoHostPrimitives is the §5.C twin of the §5.A/§5.B guard: no host
+// TestSeamCarriesNoHostPrimitives is the Volume subsystem twin of the runtime provider contract/the Rootfs subsystem guard: no host
 // primitive appears in the volume.Backend contract.
 //
 // Two halves, because a host primitive can cross a seam two ways and both cost the
@@ -90,13 +90,13 @@ func TestSeamCarriesNoHostPrimitives(t *testing.T) {
 	}
 }
 
-// TestCapabilitiesMembersAreBool pins the OTHER half of the D2 seam rule, and it
+// TestCapabilitiesMembersAreBool pins the OTHER half of the Volume storage seam rule, and it
 // is not stylistic. A `map[string]string` feature table would carry MECHANISM NAMES
 // ACROSS THE SEAM AS VALUES — and a value is invisible to every guard above, which
 // scans identifiers. So the shape itself has to be constrained: bools only, which
 // can express "can it" and nothing else.
 //
-// It also pins that every member has a CONSUMER (§1.3 forbids speculative
+// It also pins that every member has a CONSUMER (the extension boundary forbids speculative
 // reservation), and that the struct is not empty — an empty Capabilities would pass
 // a members-are-bool check vacuously.
 func TestCapabilitiesMembersAreBool(t *testing.T) {
@@ -272,7 +272,7 @@ func scanSeam(src string) ([]string, error) {
 				got := strings.ToLower(sig.String())
 				for _, b := range bannedTokens {
 					if strings.Contains(got, b) {
-						out = append(out, fmt.Sprintf("%s.%s signature leaks host primitive %q (§5.A ❌ list / volume.md D2): %s",
+						out = append(out, fmt.Sprintf("%s.%s signature leaks host primitive %q (the runtime provider contract list / the volume backend seam): %s",
 							iface, name, b, sig.String()))
 					}
 				}
@@ -316,7 +316,7 @@ func scanSeam(src string) ([]string, error) {
 				got := strings.ToLower(subject)
 				for _, b := range bannedTokens {
 					if strings.Contains(got, b) {
-						out = append(out, fmt.Sprintf("%s.%s leaks host primitive %q across the seam (§5.A ❌ list / volume.md D2): %s",
+						out = append(out, fmt.Sprintf("%s.%s leaks host primitive %q across the seam (the runtime provider contract list / the volume backend seam): %s",
 							ts.Name.Name, fieldName, b, strings.TrimSpace(subject)))
 					}
 				}
@@ -354,7 +354,7 @@ func scanCapabilities(src string) ([]string, error) {
 			for _, n := range fld.Names {
 				fields = append(fields, n.Name)
 				if typ != "bool" {
-					out = append(out, fmt.Sprintf("Capabilities.%s is %s, not bool — a non-bool capability member can smuggle a MECHANISM NAME across the seam as a VALUE, where no identifier-scanning guard can see it (volume.md D2)",
+					out = append(out, fmt.Sprintf("Capabilities.%s is %s, not bool — a non-bool capability member can smuggle a MECHANISM NAME across the seam as a VALUE, where no identifier-scanning guard can see it (the volume backend seam)",
 						n.Name, typ))
 				}
 			}
@@ -364,12 +364,12 @@ func scanCapabilities(src string) ([]string, error) {
 	if len(fields) == 0 {
 		return nil, fmt.Errorf("Capabilities not found or has no members (guard is stale — an empty struct would pass vacuously)")
 	}
-	// Members must have a CONSUMER (§1.3 forbids speculative reservation). This is
+	// Members must have a CONSUMER (the extension boundary forbids speculative reservation). This is
 	// the settled set; adding one means naming its consumer here too.
 	want := map[string]bool{"Snapshot": true, "Clone": true, "Quota": true}
 	for _, fname := range fields {
 		if !want[fname] {
-			out = append(out, fmt.Sprintf("Capabilities has unexpected member %q — every member needs a live consumer (§1.3): Snapshot/Clone gate the §6.1 endpoints, Quota gates §3.4's refuse-rather-than-run-uncapped", fname))
+			out = append(out, fmt.Sprintf("Capabilities has unexpected member %q — every member needs a live consumer (the extension boundary): Snapshot/Clone gate the control-plane API endpoints, Quota gates resource admission's refuse-rather-than-run-uncapped", fname))
 		}
 		delete(want, fname)
 	}

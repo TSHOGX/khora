@@ -55,7 +55,7 @@ func newVolume(t *testing.T, srv *httptest.Server) string {
 }
 
 // TestCreateWithVolumeBinding: `volumes` on create reaches the mount table, with
-// `access` given on the MOUNT rather than on the volume record (§5.C).
+// `access` given on the MOUNT rather than on the volume record (the Volume subsystem).
 func TestCreateWithVolumeBinding(t *testing.T) {
 	srv, mem := bindingFixture(t)
 	vid := newVolume(t, srv)
@@ -98,7 +98,7 @@ func TestCreateBindingValidationIs400(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			resp := doBody(t, http.MethodPost, srv.URL+"/v1/sandboxes", tc.body)
 			if resp.StatusCode != http.StatusBadRequest {
-				t.Errorf("= %d, want 400 (a self-contradictory binding is decidable without reading another row, and no retry makes it legal — §6.2)", resp.StatusCode)
+				t.Errorf("= %d, want 400 (a self-contradictory binding is decidable without reading another row, and no retry makes it legal — the API error contract)", resp.StatusCode)
 			}
 			resp.Body.Close()
 		})
@@ -126,7 +126,7 @@ func TestAttachContendedLeaseIs409(t *testing.T) {
 	resp.Body.Close()
 }
 
-// TestDeleteMountedVolumeIs409: §6.2 verdict ① through the wire.
+// TestDeleteMountedVolumeIs409: the API error contract verdict  through the wire.
 func TestDeleteMountedVolumeIs409(t *testing.T) {
 	srv, _ := bindingFixture(t)
 	vid := newVolume(t, srv)
@@ -141,7 +141,7 @@ func TestDeleteMountedVolumeIs409(t *testing.T) {
 	resp.Body.Close()
 }
 
-// TestPatchRebindsAndSplitsTheEffectTimes is the §6.1 detach shape: the response says
+// TestPatchRebindsAndSplitsTheEffectTimes is the control-plane API detach shape: the response says
 // next-resume for the TOPOLOGY and lease_released for the LEASE, because the two do
 // not happen at the same time and one value cannot say both.
 func TestPatchRebindsAndSplitsTheEffectTimes(t *testing.T) {
@@ -169,10 +169,10 @@ func TestPatchRebindsAndSplitsTheEffectTimes(t *testing.T) {
 	}
 	resp.Body.Close()
 	if pr.AppliesAt != "next-resume" {
-		t.Errorf("applies_at = %q, want next-resume — runsc takes mounts at startup, so topology changes on resume (§5.C)", pr.AppliesAt)
+		t.Errorf("applies_at = %q, want next-resume — runsc takes mounts at startup, so topology changes on resume (the Volume subsystem)", pr.AppliesAt)
 	}
 	if !pr.LeaseReleased {
-		t.Errorf("lease_released = false after detaching an exclusive mount — the lease IS the row, so deleting it releases NOW, which applies_at cannot express (§6.1)")
+		t.Errorf("lease_released = false after detaching an exclusive mount — the lease IS the row, so deleting it releases NOW, which applies_at cannot express (the control-plane API)")
 	}
 	if rows, _ := mem.ListMounts(context.Background(), model.SandboxID(cr.SandboxID)); len(rows) != 0 {
 		t.Errorf("rows survived the detach: %+v", rows)
@@ -240,7 +240,7 @@ func TestPatchRefusedRebindRestoresThePreviousBinding(t *testing.T) {
 //
 // The defect a status-code-only test cannot see: were `handlePatch` to commit the binding and
 // only THEN decode and validate the declaration, `{"memory_byte":N, <invalid network>}` would
-// answer 400 with the memory cap ALREADY COMMITTED. §6.2 requires validation to precede the
+// answer 400 with the memory cap ALREADY COMMITTED. the API error contract requires validation to precede the
 // admission gate so a refusal touches nothing, and the record is the only witness.
 //
 // Every case pairs a LEGAL first field with an ILLEGAL declaration, which is the whole design:
@@ -260,7 +260,7 @@ func TestPatch400ChangesNothing(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	// PAUSED, so a cap edit is legal on its own terms (§3.4 — caps are editable only
+	// PAUSED, so a cap edit is legal on its own terms (resource admission — caps are editable only
 	// from `paused`). Without this the caps write would be refused by the STATE gate and
 	// the test would pass even with the defect present, for the wrong reason.
 	if resp := doBody(t, http.MethodPost, srv.URL+"/v1/sandboxes/"+cr.SandboxID+"/pause", ""); resp.StatusCode != http.StatusOK {
@@ -275,8 +275,8 @@ func TestPatch400ChangesNothing(t *testing.T) {
 	}
 
 	for _, tc := range []struct{ name, body string }{
-		// A cap that WOULD be accepted alone, riding with a declaration that is §6.2's
-		// first 400 class (`network` given, `egress.default` absent).
+		// A cap that WOULD be accepted alone, riding with a declaration that is the API error contract's
+		// ClassDefaultMissing (`network` given, `egress.default` absent).
 		{"cap + declaration missing egress.default",
 			`{"memory_byte":536870912,"network":{"egress":{"allow":[]}}}`},
 		{"cap + declaration with an empty egress.default",
@@ -292,7 +292,7 @@ func TestPatch400ChangesNothing(t *testing.T) {
 			resp := doBody(t, http.MethodPatch, srv.URL+"/v1/sandboxes/"+cr.SandboxID, tc.body)
 			defer resp.Body.Close()
 			if resp.StatusCode != http.StatusBadRequest {
-				t.Fatalf("PATCH = %d, want 400 (the declaration is invalid, §6.2)", resp.StatusCode)
+				t.Fatalf("PATCH = %d, want 400 (the declaration is invalid, the API error contract)", resp.StatusCode)
 			}
 
 			after, err := mem.GetSandbox(context.Background(), model.SandboxID(cr.SandboxID))
@@ -302,7 +302,7 @@ func TestPatch400ChangesNothing(t *testing.T) {
 			if after.Limits.MemoryByte != before.Limits.MemoryByte {
 				t.Errorf("memory_byte = %d after a 400; want %d unchanged — the cap was committed and "+
 					"THEN the declaration was refused, so the caller was told the request changed "+
-					"nothing while the record disagrees (§6.2: validation precedes the write)",
+					"nothing while the record disagrees (the API error contract: validation precedes the write)",
 					after.Limits.MemoryByte, before.Limits.MemoryByte)
 			}
 			if after.Retention != before.Retention {
@@ -355,7 +355,7 @@ func TestPatch409ChangesNothing(t *testing.T) {
 		t.Fatalf("holder create = %d", resp.StatusCode)
 	}
 
-	// PAUSED, so the cap edit is legal on its own terms (§3.4) and the request reaches the
+	// PAUSED, so the cap edit is legal on its own terms (resource admission) and the request reaches the
 	// mount commit rather than being turned away by the state gate.
 	if resp := doBody(t, http.MethodPost, srv.URL+"/v1/sandboxes/"+cr.SandboxID+"/pause", ""); resp.StatusCode != http.StatusOK {
 		t.Fatalf("pause = %d", resp.StatusCode)
@@ -382,7 +382,7 @@ func TestPatch409ChangesNothing(t *testing.T) {
 	if after.Limits.MemoryByte != before.Limits.MemoryByte {
 		t.Errorf("memory_byte = %d after a 409; want %d unchanged — the cap committed and the mount "+
 			"binding was THEN refused by the store, so the caller was told the request failed while "+
-			"the record disagrees (§4.4-B: one PATCH is one lock and one decision)",
+			"the record disagrees (per-sandbox transition serialization: one PATCH is one lock and one decision)",
 			after.Limits.MemoryByte, before.Limits.MemoryByte)
 	}
 	if after.IdleTimeout != before.IdleTimeout {
@@ -432,7 +432,7 @@ func TestBothTTLWritePointsAgree(t *testing.T) {
 
 			if cResp.StatusCode != pResp.StatusCode {
 				t.Errorf("create = %d but PATCH = %d for %s=%q — the same field must not be legal at "+
-					"one write point and a 400 at the other (§3.4.5: create and PATCH are the two "+
+					"one write point and a 400 at the other (Binding effective points: create and PATCH are the two "+
 					"write points for the same Binding)", cResp.StatusCode, pResp.StatusCode, tc.field, tc.value)
 			}
 			if cResp.StatusCode != http.StatusBadRequest {
@@ -459,7 +459,7 @@ func TestBothTTLWritePointsAgree(t *testing.T) {
 // `Retention <= 0` returns early; classification: `IdleTimeout > 0`), so it silently means NEVER
 // EVICT / NEVER IDLE-PAUSE with no error anywhere.
 //
-// `0s` is asserted LEGAL in the same test, being the documented opt-out spelling (§6.1) — a guard
+// `0s` is asserted LEGAL in the same test, being the documented opt-out spelling (the control-plane API) — a guard
 // that also refused zero would break the contract while looking like the same fix.
 func TestCreateRefusesNegativeTTL(t *testing.T) {
 	srv, mem := bindingFixture(t)

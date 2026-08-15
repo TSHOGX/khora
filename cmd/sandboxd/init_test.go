@@ -61,7 +61,7 @@ func pendingWaiters(r *reapTable) int {
 	return len(r.waiters)
 }
 
-// The core of ②: the reaper is the sole waiter and the supervisor still gets the
+// The core of : the reaper is the sole waiter and the supervisor still gets the
 // exit code. A second waiter (cmd.Wait) would race Wait4(-1) and one side would get
 // ECHILD with the status gone.
 func TestReapTableDeliversExitCodeToSupervisor(t *testing.T) {
@@ -76,7 +76,7 @@ func TestReapTableDeliversExitCodeToSupervisor(t *testing.T) {
 	}
 }
 
-// 128+signo propagation (D4.1 checklist) through the same handoff, and proof
+// 128+signo propagation through the same handoff, and proof
 // that start releases the os.Process handle (so no pidfd leaks per restart and
 // no second waiter can exist).
 func TestReapTableSignaledChildIs128PlusSigno(t *testing.T) {

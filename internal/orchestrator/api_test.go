@@ -21,7 +21,7 @@ import (
 )
 
 // apiFixture assembles an Engine over a Memory store with no real providers —
-// the Template GET/DELETE endpoints are pure store operations (§4.3: Template is
+// the Template GET/DELETE endpoints are pure store operations (health and reclamation: Template is
 // not a state-machine object, so DeleteTemplate takes no placement / lock), so
 // the runtime/rootfs seams are never touched by these routes.
 //
@@ -93,7 +93,7 @@ func TestAPIListTemplates(t *testing.T) {
 }
 
 // DELETE /v1/templates/{id}: unreferenced → 204; referenced by a sandbox → 409
-// (§4.3 referenced-means-undeletable); after the sandbox is gone → 204; missing
+// (health and reclamation referenced-means-undeletable); after the sandbox is gone → 204; missing
 // → 404.
 func TestAPIDeleteTemplateReferenceProtection(t *testing.T) {
 	srv, mem := apiFixture(t)
@@ -139,7 +139,7 @@ func TestAPIDeleteTemplateReferenceProtection(t *testing.T) {
 	}
 }
 
-// POST /v1/templates {from_sandbox_id} is the Promote endpoint (§6.1). An empty
+// POST /v1/templates {from_sandbox_id} is the Promote endpoint (the control-plane API). An empty
 // body → 400 (from_sandbox_id required); a promote of an unknown sandbox → 404
 // (ErrNotFound). The full freeze path is exercised on the substrate (needs a
 // real Overlay upper).
@@ -161,7 +161,7 @@ func TestAPIPromoteValidation(t *testing.T) {
 	}
 }
 
-// §6.1 PATCH /v1/sandboxes/{id} — the Binding write point. These cover the WIRE
+// the control-plane API PATCH /v1/sandboxes/{id} — the Binding write point. These cover the WIRE
 // contract (routing, body shape, status codes, applies_at); the semantics live in
 // the mediator's own tests.
 func TestPatchSandboxBinding(t *testing.T) {
@@ -201,7 +201,7 @@ func TestPatchSandboxBinding(t *testing.T) {
 			t.Fatalf("decode %q: %v", body, err)
 		}
 		// Caps materialize at placement, so the API states the deferral rather than
-		// leaving the caller to infer it (§3.4).
+		// leaving the caller to infer it (resource admission).
 		if out.AppliesAt != "next-resume" {
 			t.Fatalf("applies_at = %q; want next-resume", out.AppliesAt)
 		}
@@ -296,7 +296,7 @@ func TestAdmissionVerdictsMapToDistinctStatuses(t *testing.T) {
 	// under test, and both covered in internal/lifecycle's admission tests.
 	t.Run("a full node → 507", func(t *testing.T) {
 		if got := statusCodeFor(lifecycle.ErrInsufficientCapacity); got != http.StatusInsufficientStorage {
-			t.Fatalf("ErrInsufficientCapacity → %d; want 507 — the request is VALID and the node is out of room (§6.2: 507 means capacity; 409 would imply a retryable state conflict, and 400 would blame a request that is fine)", got)
+			t.Fatalf("ErrInsufficientCapacity → %d; want 507 — the request is VALID and the node is out of room (the API error contract: 507 means capacity; 409 would imply a retryable state conflict, and 400 would blame a request that is fine)", got)
 		}
 		// The pair must stay DISTINCT. Both verdicts arise in the same admission gate, so
 		// a refactor that funnels them through one arm is easy to write and silent.
@@ -306,28 +306,28 @@ func TestAdmissionVerdictsMapToDistinctStatuses(t *testing.T) {
 	})
 
 	// The third verdict on the same axis, and the one whose default would be worst: a `0 → N`
-	// disk cap PATCH is unmaterializable (§3.4), so unmapped it falls to the default arm as
+	// disk cap PATCH is unmaterializable (resource admission), so unmapped it falls to the default arm as
 	// 500 — telling the caller to retry something that can never succeed.
 	t.Run("an unmaterializable 0→N disk cap → 400", func(t *testing.T) {
 		if got := statusCodeFor(lifecycle.ErrUncappedDiskNotCappable); got != http.StatusBadRequest {
-			t.Fatalf("ErrUncappedDiskNotCappable → %d; want 400 — the request is well-formed but the promise cannot be materialized (§3.4). NOT 507 (nothing is full) and NOT 409 (no retry or state change makes it legal; the remedy is a new sandbox)", got)
+			t.Fatalf("ErrUncappedDiskNotCappable → %d; want 400 — the request is well-formed but the promise cannot be materialized (resource admission). NOT 507 (nothing is full) and NOT 409 (no retry or state change makes it legal; the remedy is a new sandbox)", got)
 		}
 	})
 
 	// The fourth verdict on this axis, and its SPLIT is the property under test. A disk
 	// cap at or below the Overlay unit's usage wedges the storage unit irreversibly
-	// (§3.4 / rootfs.ErrCapBelowUsage), and the engine refuses it in TWO places that must
+	// (resource admission / rootfs.ErrCapBelowUsage), and the engine refuses it in TWO places that must
 	// not answer the same code: the write point CARRIES `disk_byte` (400 — fix the value
 	// you sent), while resume/adopt do NOT (409 — the remedy is state elsewhere). This is
 	// the same asymmetry the via[] pair above rests on, and asserting both together is
 	// what keeps a later refactor from funnelling them into one arm.
 	t.Run("a disk cap below usage → 400 at the write point, 409 at placement", func(t *testing.T) {
 		if got := statusCodeFor(lifecycle.ErrDiskCapBelowUsage); got != http.StatusBadRequest {
-			t.Fatalf("ErrDiskCapBelowUsage → %d; want 400 — the request is well-formed but cannot be honored (§3.4 strict inequality). NOT 507 (nothing is full) and NOT 409 (no retry makes it legal; the caller must pick a larger size, or 0)", got)
+			t.Fatalf("ErrDiskCapBelowUsage → %d; want 400 — the request is well-formed but cannot be honored (resource admission strict inequality). NOT 507 (nothing is full) and NOT 409 (no retry makes it legal; the caller must pick a larger size, or 0)", got)
 		}
 		wrapped := fmt.Errorf("lifecycle: resume: open overlay: %w", rootfs.ErrCapBelowUsage)
 		if got := statusCodeFor(wrapped); got != http.StatusConflict {
-			t.Fatalf("rootfs.ErrCapBelowUsage → %d; want 409 — the stored cap and the unit's current usage conflict, and the remedy (PATCH disk_byte above usage, or to 0, then resume) changes state elsewhere. NOT 500: nothing failed, and §5.B refused rather than wedging the unit. NOT 400: resume carries no cap to fix", got)
+			t.Fatalf("rootfs.ErrCapBelowUsage → %d; want 409 — the stored cap and the unit's current usage conflict, and the remedy (PATCH disk_byte above usage, or to 0, then resume) changes state elsewhere. NOT 500: nothing failed, and the Rootfs subsystem refused rather than wedging the unit. NOT 400: resume carries no cap to fix", got)
 		}
 		if statusCodeFor(lifecycle.ErrDiskCapBelowUsage) == statusCodeFor(wrapped) {
 			t.Fatal("the write-point and placement-side refusals map to the SAME status — they must not: one names a field the caller sent, the other does not")
@@ -350,12 +350,12 @@ func TestAdmissionVerdictsMapToDistinctStatuses(t *testing.T) {
 		if statusCodeFor(wrapped) == statusCodeFor(network.ErrDeclarationInvalid) {
 			t.Error("the placement-side and write-point via[] refusals map to the same status — " +
 				"their remedies differ (an operator's vs the caller's), which is why the sentinel " +
-				"is separate (§6.2)")
+				"is separate (the API error contract)")
 		}
 	})
 }
 
-// §6.2's general rule: a wrong method on ANY collection/object route is 405, not 404 —
+// the API error contract's general rule: a wrong method on ANY collection/object route is 405, not 404 —
 // the route exists, the method does not apply to it. Asserted across ALL the sandbox
 // sub-routes because the two network ones carried explicit arms while the three others
 // fell into `default` as 404, so the rule held on half the router only.
@@ -385,7 +385,7 @@ func TestAWrongMethodOnEverySandboxSubRouteIs405(t *testing.T) {
 			}
 			resp.Body.Close()
 			if resp.StatusCode != http.StatusMethodNotAllowed {
-				t.Errorf("%s /v1/sandboxes/{id}/%s → %d; want 405 (§6.2: a wrong method on any "+
+				t.Errorf("%s /v1/sandboxes/{id}/%s → %d; want 405 (the API error contract: a wrong method on any "+
 					"collection/object route is 405, never 404 — 404 says the route does not "+
 					"exist, which sends the caller to check their URL)", tc.method, tc.sub,
 					resp.StatusCode)
@@ -394,7 +394,7 @@ func TestAWrongMethodOnEverySandboxSubRouteIs405(t *testing.T) {
 	}
 }
 
-// --- GET /v1/events (§6.1 / §4.4-C event-stream replay, pull only) -----------
+// --- GET /v1/events (the control-plane API / the transactional outbox event-stream replay, pull only) -----------
 
 // seedSandboxEvents commits n lifecycle transitions on one sandbox so the outbox
 // has ordered rows to replay.
@@ -437,7 +437,7 @@ func getEvents(t *testing.T, srv *httptest.Server, query string) eventsResp {
 	return out
 }
 
-// TestAPIEventsCarryCauseOnlyWhereAKindHasTwoRoutes pins the wire shape of §4.4-C's cause:
+// TestAPIEventsCarryCauseOnlyWhereAKindHasTwoRoutes pins the wire shape of the transactional outbox's cause:
 // present on `destroyed` (two routes, and the record is GONE so the payload is the only
 // carrier), absent on a kind whose identity already says why. The omission half is half the
 // contract — `omitempty` is what lets a subscriber read a present cause as a signal.
@@ -722,9 +722,9 @@ func TestAPIEventsReplayIgnoresDeliveryState(t *testing.T) {
 	}
 }
 
-// --- death_cause on the §6.1 read path (§4.3) --------------------------------
+// --- death_cause on the control-plane API read path (health and reclamation) --------------------------------
 
-// The fact the §4.3 recovery decision rests on must be readable WITHOUT first
+// The fact the health and reclamation recovery decision rests on must be readable WITHOUT first
 // attempting the resume that would be refused.
 func TestAPIGetSandboxExposesDeathCause(t *testing.T) {
 	srv, mem := apiFixture(t)
@@ -748,7 +748,7 @@ func TestAPIGetSandboxExposesDeathCause(t *testing.T) {
 		t.Fatalf("healthy sandbox response carries a death_cause key: %s", raw)
 	}
 
-	// crash-paused with a resource-exceeded cause (the §4.3 do-NOT-resume case).
+	// crash-paused with a resource-exceeded cause (the health and reclamation do-NOT-resume case).
 	cause := model.CauseResourceExceeded
 	if err := mem.CompareAndSetState(ctx, "sb", model.Creating, model.Paused, nil, &cause); err != nil {
 		t.Fatalf("demote: %v", err)
@@ -763,7 +763,7 @@ func TestAPIGetSandboxExposesDeathCause(t *testing.T) {
 		t.Fatalf("state = %q; want paused", got.State)
 	}
 	if got.DeathCause != string(model.CauseResourceExceeded) {
-		t.Fatalf("death_cause = %q; want %q — the caller cannot make the §4.3 decision without it",
+		t.Fatalf("death_cause = %q; want %q — the caller cannot make the health and reclamation decision without it",
 			got.DeathCause, model.CauseResourceExceeded)
 	}
 
@@ -792,7 +792,7 @@ func TestAPIGetSandboxExposesDeathCause(t *testing.T) {
 	}
 }
 
-// --- §6.2 on the REST bypass (the other half of the funnel) -------------------
+// --- the API error contract on the REST bypass (the other half of the funnel) -------------------
 
 // placementLeakingClient is a transport.Client whose bypass calls fail the way the REAL inner
 // client fails: transport/client.go returns `hc.Do`'s error verbatim, and that client dials the
@@ -866,7 +866,7 @@ func TestFileBypassErrorsHideThePlacement(t *testing.T) {
 			}
 			for _, leak := range []string{"10.88.0.7", veth, overlay, "/srv"} {
 				if strings.Contains(string(body), leak) {
-					t.Errorf("%s leaks %q — placement and host paths stay inside the engine (§6.2 / D5.1): %s",
+					t.Errorf("%s leaks %q — placement and host paths stay inside the engine (the API error contract / the transport contract): %s",
 						tc.name, leak, strings.TrimSpace(string(body)))
 				}
 			}
@@ -893,9 +893,9 @@ func (u usageRootfs) Usage(context.Context, string) (int64, int64, error) {
 	return u.used, 0, nil
 }
 
-// TestSandboxReadSurfaceReportsUsedByte pins §6.1's `used_byte` on the SANDBOX single read,
+// TestSandboxReadSurfaceReportsUsedByte pins the control-plane API's `used_byte` on the SANDBOX single read,
 // with the three properties that make it usable rather than merely present. It is on the read
-// surface because PATCH disk_byte refuses a cap not STRICTLY greater than usage (§3.4), so a
+// surface because PATCH disk_byte refuses a cap not STRICTLY greater than usage (resource admission), so a
 // caller needs the number — its only other route being that 400's message text.
 func TestSandboxReadSurfaceReportsUsedByte(t *testing.T) {
 	seedOne := func(t *testing.T, rp rootfs.Provider, state model.Lifecycle) (*httptest.Server, string) {
@@ -917,7 +917,7 @@ func TestSandboxReadSurfaceReportsUsedByte(t *testing.T) {
 	t.Run("a readable usage is reported, and a genuine 0 is PRESENT", func(t *testing.T) {
 		// 0 is the COMMON case here, not an edge one: a fresh uncapped sandbox's
 		// upper+work walk is 0. With a value type plus omitempty it would serialize as
-		// absent, which §6.1 defines to mean "unreadable" — so a caller would read "no
+		// absent, which the control-plane API defines to mean "unreadable" — so a caller would read "no
 		// bytes written yet" as "the backend did not answer", or the reverse.
 		srv, id := seedOne(t, usageRootfs{used: 0}, model.Paused)
 		body := readRaw(t, srv, "/v1/sandboxes/"+id)
@@ -929,7 +929,7 @@ func TestSandboxReadSurfaceReportsUsedByte(t *testing.T) {
 	t.Run("present while paused, the only state a disk cap may be edited from", func(t *testing.T) {
 		// Unlike host_endpoint, this key does NOT depend on a live placement: the unit is
 		// readable at rest. Omitting it while paused would omit it from exactly the state
-		// its consumer works in (§3.4: changing a cap on a running sandbox is a 409).
+		// its consumer works in (resource admission: changing a cap on a running sandbox is a 409).
 		srv, id := seedOne(t, usageRootfs{used: 4096}, model.Paused)
 		body := readRaw(t, srv, "/v1/sandboxes/"+id)
 		if !strings.Contains(body, `"used_byte":4096`) {
@@ -947,7 +947,7 @@ func TestSandboxReadSurfaceReportsUsedByte(t *testing.T) {
 		if !strings.Contains(body, `"state":"running"`) {
 			t.Errorf("the response lost its other fields when usage was unreadable: %s", body)
 		}
-		// And the backend's error text must not ride out (§6.2 / edge_test).
+		// And the backend's error text must not ride out (the API error contract / edge_test).
 		if strings.Contains(body, "quota row") {
 			t.Errorf("the degraded response leaks backend error text: %s", body)
 		}
@@ -957,7 +957,7 @@ func TestSandboxReadSurfaceReportsUsedByte(t *testing.T) {
 		srv, _ := seedOne(t, usageRootfs{used: 4096}, model.Paused)
 		body := readRaw(t, srv, "/v1/sandboxes")
 		if strings.Contains(body, `"used_byte"`) {
-			t.Errorf("the list carries used_byte — one backend round trip multiplied by the sandbox count, which is the same reason the volume list omits it (§6.1). Body: %s", body)
+			t.Errorf("the list carries used_byte — one backend round trip multiplied by the sandbox count, which is the same reason the volume list omits it (the control-plane API). Body: %s", body)
 		}
 	})
 }
@@ -978,11 +978,11 @@ func readRaw(t *testing.T, srv *httptest.Server, path string) string {
 	return string(b)
 }
 
-// TestEventsGoneWhenCursorFallsBelowTheWindow exercises §6.1's 410, UNREACHABLE until trimming
+// TestEventsGoneWhenCursorFallsBelowTheWindow exercises the control-plane API's 410, UNREACHABLE until trimming
 // existed: with nothing ever deleted, `earliest` never advances, so "the cursor is below the
 // window" could not be constructed.
 //
-// It protects the promise §4.4-C rests on — "losing one loses an invoice". The tempting
+// It protects the promise the transactional outbox rests on — "losing one loses an invoice". The tempting
 // implementation returns a short page, which lets a subscriber conclude it is caught up while
 // having silently skipped everything trimmed.
 func TestEventsGoneWhenCursorFallsBelowTheWindow(t *testing.T) {
@@ -1033,7 +1033,7 @@ func TestEventsGoneWhenCursorFallsBelowTheWindow(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusGone {
-		t.Fatalf("after=1 against a trimmed window = %d, want 410 — a short page here lets a subscriber conclude it is caught up while silently skipping every trimmed event, which is the one outcome §4.4-C's ordering guarantee exists to prevent. Body: %s", resp.StatusCode, body)
+		t.Fatalf("after=1 against a trimmed window = %d, want 410 — a short page here lets a subscriber conclude it is caught up while silently skipping every trimmed event, which is the one outcome the transactional outbox's ordering guarantee exists to prevent. Body: %s", resp.StatusCode, body)
 	}
 	// And it must carry the window so the caller can restart deliberately.
 	var out eventsResp

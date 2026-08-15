@@ -25,8 +25,8 @@ import (
 // WHAT IT GUARDS: an unreadable row must surface as an ERROR, never as
 // `(walkedBytes, 0, nil)`. That synthesized answer is wrong in both halves — the walk
 // counts file data only while the row also charges metadata extents, so `used` comes
-// back UNDER the substrate's own number and the §6.1 cap write point's strict
-// inequality would admit a cap that wedges the unit irreversibly (volume.md D7.3),
+// back UNDER the substrate's own number and the control-plane API cap write point's strict
+// inequality would admit a cap that wedges the unit irreversibly (volume cap enforcement),
 // while limit 0 is byte-for-byte identical to a deliberately uncapped volume. All
 // three callers already branch on the error (inspect degrades, PATCH fails closed,
 // RepairVolumeCaps draws no conclusion); answering definitely is what made those
@@ -62,7 +62,7 @@ func TestUsageRefusesToInventALimitWhenTheQuotaRowIsUnreadable(t *testing.T) {
 
 	used, limit, err := b.Usage(context.Background(), "vol_q")
 	if err == nil {
-		t.Fatalf("Usage on a quota unit with an UNREADABLE row returned (used=%d, limit=%d, nil) — it must return an error instead of synthesizing a definite answer from a failure (§4.4-A). limit 0 is indistinguishable from a deliberately uncapped volume, and the walked `used` is UNDER the row's own number (which also charges metadata), so the §6.1 strict inequality would admit a cap that wedges the unit (volume.md D7.3)", used, limit)
+		t.Fatalf("Usage on a quota unit with an UNREADABLE row returned (used=%d, limit=%d, nil) — it must return an error instead of synthesizing a definite answer from a failure (atomic transition rollback). limit 0 is indistinguishable from a deliberately uncapped volume, and the walked `used` is UNDER the row's own number (which also charges metadata), so the control-plane API strict inequality would admit a cap that wedges the unit (volume cap enforcement)", used, limit)
 	}
 	// The error has to name the volume, because the operator-facing symptom of this
 	// failure is otherwise a bare btrfs message about an unrelated qgroup id.
@@ -78,8 +78,8 @@ func TestUsageRefusesToInventALimitWhenTheQuotaRowIsUnreadable(t *testing.T) {
 // UncappedBytes used to fall through to a walk when the quota read failed, justified
 // as "omitting real bytes would overcommit, so measuring is conservative". But on that
 // path the `limit > 0` skip is UNREACHABLE, so a CAPPED unit got walked too — and a
-// capped unit's correct contribution to this term is ZERO, because §3.4's cap term
-// already counts it. The fallback therefore billed the same bytes twice (§3.4.2
+// capped unit's correct contribution to this term is ZERO, because resource admission's cap term
+// already counts it. The fallback therefore billed the same bytes twice (the node admission budgets
 // disjointness), at the magnitude of the whole unit, and strictly in ONE direction:
 // the left side of the admission inequality grows, so the symptom is a create or
 // resume refused with 507 on a node that has the room.

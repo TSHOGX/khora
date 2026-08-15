@@ -27,7 +27,7 @@ func (p tokenPair) String() string {
 // itself acts on.
 //
 // Why a token stream rather than "comment-only", and why directives are the
-// exception that keeps it honest: ADR-0005 (Rationale).
+// exception that keeps it honest: the substrate test gate (Rationale).
 //
 // Every failure path returns false: the caller's question is "may the substrate
 // gate be skipped", and the safe answer whenever this cannot be proven is no.
@@ -52,7 +52,7 @@ func sameCode(path string, oldSrc, newSrc []byte) (bool, string) {
 	// A cgo file's preamble comment is compiled as C source, so no comment in it can be
 	// assumed inert. Detected from the token stream rather than by grepping the text, and
 	// deliberately over-broad: a stray "C" literal costs one gate run, a missed cgo
-	// preamble costs the property (ADR-0005).
+	// preamble costs the property (the substrate test gate).
 	if hasCImport(oldTok) || hasCImport(newTok) {
 		return false, `a "C" literal is present: in a cgo file the preamble comment is source`
 	}
@@ -91,7 +91,7 @@ func tokens(path string, src []byte) ([]tokenPair, error) {
 
 // directives returns, IN SOURCE ORDER, the comment lines the toolchain acts on.
 // Detection is liberal on purpose — leading spaces, tabs and block-comment '*' are
-// trimmed first (ADR-0005, fail-closed).
+// trimmed first (the substrate test gate, fail-closed).
 //
 // The ORDER is part of the comparison, and this is the one place where discarding
 // position information would go too far: a directive binds to whatever DECLARATION

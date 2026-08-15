@@ -11,9 +11,9 @@ import (
 )
 
 // Sink is where the publisher delivers outbox events: an in-process, replayable
-// stream (§4.4-C). The engine only promises "events are reliably written to a
+// stream (the transactional outbox). The engine only promises "events are reliably written to a
 // replayable stream" — webhook / metrics / billing subscribers consume it OUTSIDE
-// the engine and the engine neither tracks nor depends on them (§4.1 / §1.3 add
+// the engine and the engine neither tracks nor depends on them (the lifecycle state machine / the extension boundary add
 // a subscriber). Deliver returning an error means "not delivered": the publisher
 // leaves the row unpublished and retries, so a flaky sink cannot drop an event.
 type Sink interface {
@@ -21,7 +21,7 @@ type Sink interface {
 }
 
 // Publisher drains the store outbox to a Sink with at-least-once delivery
-// (§4.4-C). The algorithm is ONE piece of code against the Store interface — it
+// (the transactional outbox). The algorithm is ONE piece of code against the Store interface — it
 // never learns which backend (Memory / SQLite) it runs on.
 //
 // The ordering is the whole correctness argument:
@@ -39,9 +39,9 @@ type Sink interface {
 //
 // One undeliverable event blocks every later one: order carries meaning for the billing
 // subscribers reconciling from this stream, and skip-ahead is survivable only when the sink
-// is idempotent AND versioned by logical time, which ours is not (§4.4-C).
+// is idempotent AND versioned by logical time, which ours is not (the transactional outbox).
 //
-// §4.4-C therefore makes three OPERABILITY properties hard requirements — the stall is the
+// the transactional outbox therefore makes three OPERABILITY properties hard requirements — the stall is the
 // trade, an unbounded unalerted one is a defect — and the mechanisms all land here:
 //
 //  1. A POISON-ENVELOPE EXIT (MaxAttempts + Halted), cleared only by an operator (Resume).
@@ -178,9 +178,9 @@ func (p *Publisher) PublishOnce(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	// The gauge comes from its OWN source, not from len(evs) — §4.4-C ③, argued on
+	// The gauge comes from its OWN source, not from len(evs) — the transactional outbox, argued on
 	// Store.CountUnpublished. A count failure must not fail the pass either: the drain is
-	// the job and the gauge is observation, so §4.4-C calls a stale gauge the better loss.
+	// the job and the gauge is observation, so the transactional outbox calls a stale gauge the better loss.
 	if n, cerr := p.store.CountUnpublished(ctx); cerr == nil {
 		p.backlog.Store(n)
 	}
@@ -233,7 +233,7 @@ func (p *Publisher) PublishOnce(ctx context.Context) (int, error) {
 	}
 	// Deliberately NO `p.backlog.Store(0)` here. Reaching the end of the loop means "this
 	// batch drained", not "the outbox is empty" — the read is bounded at DrainBatch, so a
-	// larger backlog leaves a remainder. Storing 0 is the §4.4-C ③ false zero in its worst
+	// larger backlog leaves a remainder. Storing 0 is the transactional outbox false zero in its worst
 	// form: a monitor reading "caught up" while a backlog grows. The gauge needs no update
 	// on this path — the next pass re-reads it from its own source above.
 	return n, nil
@@ -328,7 +328,7 @@ func (p *Publisher) Resume() {
 	p.clearRetryState()
 }
 
-// Stats is a point-in-time snapshot of publisher health (§4.4-C operability ③).
+// Stats is a point-in-time snapshot of publisher health (the transactional outbox operability ).
 // Everything here is read from atomics, so a caller sampling it NEVER blocks
 // behind the drain goroutine.
 type Stats struct {
@@ -387,7 +387,7 @@ func (p *Publisher) Stats() Stats {
 }
 
 // Run drives PublishOnce on an interval until ctx is cancelled. This is the
-// async publisher loop the mediator wires in (§4.4-C: publish is decoupled from
+// async publisher loop the mediator wires in (the transactional outbox: publish is decoupled from
 // the transition commit — it reads the durable outbox after the fact).
 //
 // It does NOT sample its own health; that is Monitor's job, on its own
@@ -406,7 +406,7 @@ func (p *Publisher) Run(ctx context.Context, interval time.Duration) {
 }
 
 // Monitor samples Stats on its OWN goroutine — never the drain's — and calls report for
-// every sample that describes a problem. That placement IS the mechanism (§4.4-C ③, and
+// every sample that describes a problem. That placement IS the mechanism (the transactional outbox, and
 // the reasoning is on Publisher).
 //
 // stallThreshold is how stale a heartbeat (or how long an in-flight delivery)
@@ -432,18 +432,18 @@ func (p *Publisher) Monitor(ctx context.Context, interval, stallThreshold time.D
 	}
 }
 
-// DedupSink is the reference subscriber-side idempotent consumer (§4.4-C). It
+// DedupSink is the reference subscriber-side idempotent consumer (the transactional outbox). It
 // wraps a real handler and forwards each event AT MOST ONCE by remembering the
 // transition-unique IDs it has already accepted. This is what makes the
 // publisher's at-least-once safe end to end: a redelivered event (crash between
 // Deliver and MarkPublished) is a no-op here, so a billing subscriber never
 // double-counts. It lives in the engine as a REFERENCE — real subscribers live
-// outside the engine and dedup however they like (§1.3 add a subscriber).
+// outside the engine and dedup however they like (the extension boundary add a subscriber).
 //
 // KNOWN LIMITATION, by design: `seen` is in-process, UNBOUNDED, and NON-PERSISTENT, so it
 // will NOT absorb a redelivery that straddles a process restart. Acceptable only because
 // this is a reference. DO NOT add persistence here — that pulls subscriber state into the
-// engine (§1.1 vocabulary boundary).
+// engine (the engine vocabulary boundary).
 type DedupSink struct {
 	mu      sync.Mutex
 	seen    map[string]bool

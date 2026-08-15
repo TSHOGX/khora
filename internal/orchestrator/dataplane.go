@@ -12,30 +12,28 @@ import (
 	v1 "github.com/TSHOGX/khora/pkg/transport/gen/khora/transport/v1"
 )
 
-// The outer-edge data plane (transport D5): the orchestrator mounts the SAME
+// The outer-edge data plane (the outer-edge transport split): the orchestrator mounts the SAME
 // process/fs Connect services the inner sandboxd exposes, and re-proxies each
 // call to the sandbox's current endpoint resolved by sandbox_id via the mediator
-// (placement NEVER leaves the engine, §6.2 / D5.1). One wire — the inner
-// transport.proto is reused verbatim at the outer edge, no translation layer
-// and no REST/NDJSON facade (D5.2 / D5.3).
+// without exposing Placement. The inner transport.proto is reused verbatim at
+// the outer edge, with no translation layer and no REST or NDJSON facade.
 //
-// Addressing: the proto is pid-addressed (no sandbox_id field — D4.6 vocabulary
-// boundary keeps product/placement concepts out of the wire). The outer edge
+// Addressing: the proto is PID-addressed and has no sandbox ID field. The outer edge
 // carries the sandbox_id in a request header; the proxy strips it and resolves
-// the endpoint internally. The mediator owns the "which endpoint" verb (§4);
+// the endpoint internally. The mediator owns the "which endpoint" verb (the lifecycle);
 // the proxy is a client of the resolved transport.Client, never calling another
 // subsystem directly.
 const sandboxIDHeader = "Engine-Sandbox-Id"
 
-// processProxy re-proxies ProcessService to the sandbox's sandboxd (D5).
+// processProxy re-proxies ProcessService to the sandbox's sandboxd.
 type processProxy struct{ e *Engine }
 
-// fsProxy re-proxies FsService to the sandbox's sandboxd (D5).
+// fsProxy re-proxies FsService to the sandbox's sandboxd.
 type fsProxy struct{ e *Engine }
 
 // proxyErr sanitizes an inner transport-client error before it crosses to the external
 // client. The inner client dials the netns veth IP (client.go), so a raw dial/transport
-// error carries that IP:port — returning it verbatim would leak placement (§6.2 / D5.1).
+// error carries that IP:port, so returning it verbatim would leak Placement.
 // The real cause is logged engine-side but never crosses to the wire.
 //
 // The leak is in the MESSAGE, never in the CODE: a Connect code is one of a fixed enum of
@@ -66,7 +64,7 @@ func proxyErr(err error) error {
 }
 
 // clientFor resolves the transport client for the header-named sandbox. The
-// endpoint resolution stays inside the mediator (§6.2: placement never exposed).
+// endpoint resolution stays inside the mediator (the API error contract: placement never exposed).
 func (e *Engine) clientFor(hdrGet func(string) string) (transport.Client, error) {
 	id := model.SandboxID(hdrGet(sandboxIDHeader))
 	if id == "" {
@@ -79,7 +77,7 @@ func (e *Engine) clientFor(hdrGet func(string) string) (transport.Client, error)
 	return cl, nil
 }
 
-// mutatingClientFor is clientFor plus the §4.2 pause drain barrier, for handlers
+// mutatingClientFor is clientFor plus the FS-first pause and resume pause drain barrier, for handlers
 // that WRITE. The release func must be deferred by the caller.
 //
 // Only writes take the barrier. Reads (Read/Stat/List, process.List, Connect)
@@ -91,7 +89,7 @@ func (e *Engine) clientFor(hdrGet func(string) string) (transport.Client, error)
 // mutate guest state, but not through an engine-issued write with a truncate
 // window, and gating a long-lived Start stream on a drain would deadlock the
 // barrier against itself: the stream is in-flight until the process exits, so the
-// drain would wait for work that is waiting for the drain (D4.4).
+// drain would wait for work that is itself waiting for the drain.
 func (e *Engine) mutatingClientFor(hdrGet func(string) string, op string) (transport.Client, func(), error) {
 	id := model.SandboxID(hdrGet(sandboxIDHeader))
 	if id == "" {
@@ -192,13 +190,13 @@ const signalPidErr = "pid must be > 0: SendSignal carries DIRECTED signals only 
 	"(one process, defaulting to its group). pid <= 0 is POSIX fan-out — " +
 	"kill(0)/kill(-1) address a whole group or the whole pid namespace — and " +
 	"container-level fan-out belongs to guest PID 1, not the transport channel " +
-	"(guest-runtime D4.3 / §5.E.1)"
+	"(guest supervision / the guest startup topology)"
 
 // SendSignal proxies a DIRECTED signal. The pid > 0 check here is fail-fast only
-// (one less RPC): the authoritative check is the guest's, because §5.E.1's premise
+// (one less RPC): the authoritative check is the guest's, because the guest startup topology's premise
 // is that the guest can write its own fs and so must validate for itself. pid <= 0
 // is POSIX fan-out, which belongs to guest PID 1 rather than this channel
-// (guest-runtime D4.3).
+// (guest supervision).
 func (p *processProxy) SendSignal(ctx context.Context, req *connect.Request[v1.SendSignalRequest]) (*connect.Response[v1.SendSignalResponse], error) {
 	if req.Msg.Pid <= 0 {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New(signalPidErr))
@@ -270,7 +268,7 @@ func (f *fsProxy) Read(ctx context.Context, req *connect.Request[v1.ReadRequest]
 
 func (f *fsProxy) Write(ctx context.Context, req *connect.Request[v1.WriteRequest]) (*connect.Response[v1.WriteResponse], error) {
 	// Barrier-gated: this is THE call the drain exists for. The guest's write is
-	// truncate-then-write, so a pause landing mid-call empties the file (D4.4).
+	// truncate-then-write, so a pause landing mid-call empties the file (the transport contract).
 	cl, release, err := f.e.mutatingClientFor(req.Header().Get, "fs.Write "+req.Msg.Path)
 	if err != nil {
 		return nil, err
@@ -283,7 +281,7 @@ func (f *fsProxy) Write(ctx context.Context, req *connect.Request[v1.WriteReques
 }
 
 // entryToWire re-encodes a domain EntryInfo for the outer edge. A straight projection: the
-// outer wire is the SAME proto as the inner one (D5.2 one-wire), and this exists only
+// outer wire is the SAME proto as the inner one (the transport contract one-wire), and this exists only
 // because the proxy speaks the domain Client interface in between.
 func entryToWire(e transport.EntryInfo) *v1.EntryInfo {
 	out := &v1.EntryInfo{
@@ -377,7 +375,7 @@ func (f *fsProxy) Move(ctx context.Context, req *connect.Request[v1.MoveRequest]
 
 // forwardEvents pumps the domain output channel to the outer proto server-stream
 // (transparent passthrough: the outer edge sees the exact same frames the inner
-// sandboxd produced — one wire, D5.2).
+// sandboxd produced — one wire, the transport contract).
 func forwardEvents(stream *connect.ServerStream[v1.ProcessEvent], ch <-chan transport.ProcessEvent) error {
 	for ev := range ch {
 		var pe v1.ProcessEvent
@@ -391,7 +389,7 @@ func forwardEvents(stream *connect.ServerStream[v1.ProcessEvent], ch <-chan tran
 		case "keepalive":
 			pe.Kind = &v1.ProcessEvent_Keepalive{Keepalive: &v1.KeepaliveEvent{}}
 		case "error":
-			// The inner stream ended WITHOUT an end frame — typically the D4.3 invariant-1
+			// The inner stream ended WITHOUT an end frame — typically an overflow disconnect
 			// overflow disconnect. Terminate the outer stream with the same error rather than
 			// closing it cleanly, which would tell the external client "the process finished".
 			return proxyErr(ev.Err)

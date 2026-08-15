@@ -13,8 +13,8 @@ import (
 )
 
 // bannedTokens are substrings that betray a host primitive crossing a seam.
-// Deliberately includes the storage/memcg vocabulary as well as cgroup: the §5.B
-// seam takes a plain byte count, and the §4.3 death cause crosses as an abstract
+// Deliberately includes the storage/memcg vocabulary as well as cgroup: the Rootfs subsystem
+// seam takes a plain byte count, and the health and reclamation death cause crosses as an abstract
 // enum (never an errno or a memory.events read), so neither may name a mechanism.
 //
 // One list, shared by BOTH halves of the guard below (signatures and data-type
@@ -22,17 +22,17 @@ import (
 // or the cheaper of the two spellings becomes the way in.
 //
 // The block-device vocabulary is banned for a reason worth stating, because the
-// axis it guards is not built yet. When the disk-IO RATE cap lands (§3.4's other
+// axis it guards is not built yet. When the disk-IO RATE cap lands (resource admission's other
 // rate-axis half), `io.max` will need a WHOLE-DISK MAJ:MIN, and the settled
 // answer is that the provider DERIVES it from its own state dir rather than
 // receiving it (a device number is irreducibly host-local, so a remote provider
-// could not produce one — §5.A). Matching is by name SUBSTRING, and no token
+// could not produce one — the runtime provider contract). Matching is by name SUBSTRING, and no token
 // above would have stopped a field spelled `MajMin` or `MajorNum`: without these
 // four, the decision's half-life is however long until the next person wires
 // that cap through a struct field, which is exactly the cheap-at-the-time leak
 // this test exists to catch. They ban the SPELLINGS of a device number, not
 // every synonym for one — a field named e.g. `DiskDevice` still gets through, so
-// this backstops the §5.A rule rather than replacing the need to know it.
+// this backstops the runtime provider contract rule rather than replacing the need to know it.
 var bannedTokens = []string{
 	"cgroup", "memcg", "oom", "netns",
 	"upperdir", "workdir", "hostpath", "abspath",
@@ -45,33 +45,33 @@ var bannedTokens = []string{
 // point: an exemption without one is a bare allowlist, and the next leak arrives
 // through the same door claiming the same precedent.
 var fieldExemptions = map[string]string{
-	// §5.A explicitly permits an ALREADY-MERGED rootfs handle as a provider input.
+	// the runtime provider contract explicitly permits an ALREADY-MERGED rootfs handle as a provider input.
 	// The provider is told "run this rootfs" and learns nothing about how it was
-	// assembled; what §5.A bans is the Overlay's INTERNAL upper/work paths, which
+	// assembled; what the runtime provider contract bans is the Overlay's INTERNAL upper/work paths, which
 	// would expose the overlayfs mechanism and make the seam unimplementable by a
 	// provider that assembles rootfs some other way. MergedPath is populated and
 	// consumed only by local_runsc and never enters a cross-provider decision
-	// (RootfsSource's own doc comment, and open-decisions §5.A for the remote form).
-	"RootfsSource.MergedPath": "§5.A permits a merged-rootfs handle as provider input; only upper/work are banned",
-	// The §5.B side of that same handoff: Merged is what the Rootfs subsystem hands
+	// (RootfsSource's own doc comment, and a GitHub Issue the runtime provider contract for the remote form).
+	"RootfsSource.MergedPath": "the runtime provider contract permits a merged-rootfs handle as provider input; only upper/work are banned",
+	// The Rootfs subsystem side of that same handoff: Merged is what the Rootfs subsystem hands
 	// across as an opaque RootfsSource. It is the ONE host-shaped name the storage
 	// seam exposes — upper/work deliberately do not appear on Overlay at all (the
-	// provider recomputes them from the ID, §3.1.1: addressed by ID internally too), which is what
+	// provider recomputes them from the ID, the ID-addressed Overlay model: addressed by ID internally too), which is what
 	// keeps this single field a handle rather than a leak of the mechanism.
-	"Merged.MergedPath": "§5.B hands the merged rootfs across as an opaque handle; upper/work stay private",
-	// The §5.C twin of the two above, and exempted for the identical reason: §5.C's
+	"Merged.MergedPath": "the Rootfs subsystem hands the merged rootfs across as an opaque handle; upper/work stay private",
+	// The Volume subsystem twin of the two above, and exempted for the identical reason: the Volume subsystem's
 	// seam yields exactly ONE thing — a host mount point — which this provider then
 	// writes into an OCI bind. It is populated and consumed only by local_runsc, never
-	// interpreted above §5.C, and volumes are addressed by ID everywhere else (§6.2).
+	// interpreted above the Volume subsystem, and volumes are addressed by ID everywhere else (the API error contract).
 	// The exemption is EXPLICIT rather than incidental: without an entry here the field
 	// would pass only because no banned token happens to appear in "SourcePath", which
 	// is a coincidence and not a decision.
-	"MountSource.SourcePath": "§5.C yields one host mount point as an opaque bind source (RootfsSource.MergedPath's precedent); consumed only by local_runsc, and the volume's ID/access mode deliberately do not cross",
+	"MountSource.SourcePath": "the Volume subsystem yields one host mount point as an opaque bind source (RootfsSource.MergedPath's precedent); consumed only by local_runsc, and the volume's ID/access mode deliberately do not cross",
 }
 
 // STRUCTURAL assertion: no host primitive appears in the
-// §5.A / §5.B seam. No cgroup path, no host filesystem path, no memcg concept
-// (§5.A ❌ list / §1.3 seam).
+// the runtime provider contract / the Rootfs subsystem seam. No cgroup path, no host filesystem path, no memcg concept
+// (the runtime provider contract list / the extension boundary seam).
 //
 // Two halves, because a host primitive can cross a seam two ways and both cost
 // the same abstraction:
@@ -91,7 +91,7 @@ var fieldExemptions = map[string]string{
 // else would fail. What that costs is the abstraction: a provider scheduling a
 // remote isolation unit cannot produce a cgroup path or a host path at all, so a
 // single leaked parameter makes the interface unimplementable by anything but a
-// host-local provider — the exact binding §5.A exists to prevent.
+// host-local provider — the exact binding the runtime provider contract exists to prevent.
 //
 // It reads the DECLARED interface types out of the source AST, so it constrains
 // the contract itself rather than any implementation's internals. local_runsc
@@ -136,7 +136,7 @@ func TestSeamCarriesNoHostPrimitives(t *testing.T) {
 				got := strings.ToLower(sig.String())
 				for _, b := range bannedTokens {
 					if strings.Contains(got, b) {
-						t.Errorf("%s.%s signature leaks host primitive %q (§5.A ❌ list): %s",
+						t.Errorf("%s.%s signature leaks host primitive %q (the runtime provider contract list): %s",
 							target.iface, name, b, sig.String())
 					}
 				}
@@ -156,15 +156,15 @@ func TestSeamCarriesNoHostPrimitives(t *testing.T) {
 		file  string
 		types []string
 	}{
-		// §5.A: the contract 3-tuple (rootfs / steering / limits), the spec that
-		// carries them, the §5.C mount sources riding beside it, and the placement
+		// the runtime provider contract: the contract 3-tuple (rootfs / steering / limits), the spec that
+		// carries them, the Volume subsystem mount sources riding beside it, and the placement
 		// handle returned. MountSource is listed because LaunchSpec renders as a bare
 		// identifier in every signature, so a host primitive on it would otherwise be
 		// invisible to both halves of this guard.
 		{"provider.go", []string{
 			"RootfsSource", "SteeringSpec", "ResourceLimits", "LaunchSpec", "MountSource", "Placement",
 		}},
-		// §5.B: the storage seam's two data types.
+		// the Rootfs subsystem: the storage seam's two data types.
 		{"../rootfs/rootfs.go", []string{"Overlay", "Merged"}},
 	} {
 		fset := token.NewFileSet()
@@ -190,7 +190,7 @@ func TestSeamCarriesNoHostPrimitives(t *testing.T) {
 				// Only EXPORTED fields are part of the contract. An unexported field is
 				// provider-private and correct by design: Placement.handle holds
 				// local_runsc's container id + netns name precisely so callers cannot
-				// reach them (they address by SandboxID, §3.3) — flagging it would
+				// reach them (they address by SandboxID, the ID-reference model) — flagging it would
 				// punish the pattern that keeps the seam clean.
 				names := exportedFieldNames(fld)
 				if len(names) == 0 {
@@ -209,7 +209,7 @@ func TestSeamCarriesNoHostPrimitives(t *testing.T) {
 					got := strings.ToLower(subject)
 					for _, b := range bannedTokens {
 						if strings.Contains(got, b) {
-							t.Errorf("%s.%s leaks host primitive %q across the seam (§5.A ❌ list): %s",
+							t.Errorf("%s.%s leaks host primitive %q across the seam (the runtime provider contract list): %s",
 								ts.Name.Name, fieldName, b, strings.TrimSpace(subject))
 						}
 					}
@@ -296,7 +296,7 @@ func typeString(fset *token.FileSet, e ast.Expr) string {
 	}
 }
 
-// The RAM two-values split is a PROVIDER-INTERNAL detail (§5.A / §3.4): the
+// The RAM two-values split is a PROVIDER-INTERNAL detail (the runtime provider contract / resource admission): the
 // interface states only MemoryByte = N. This asserts the overhead constant is not
 // reachable through the contract — ResourceLimits must carry exactly the numeric
 // intent and nothing about how a provider pays for its own substrate.
@@ -327,12 +327,12 @@ func TestResourceLimitsCarriesOnlyPolicy(t *testing.T) {
 		t.Fatal("ResourceLimits not found or has no fields (stale test?)")
 	}
 	// Exactly the two policy numbers. DiskByte must NOT be here: the capacity axis
-	// is an FS quota owned by §5.B/§5.C, and putting it on the runtime provider
-	// would weld two orthogonal axes onto one mechanism (§3.4).
+	// is an FS quota owned by the Rootfs subsystem/the Volume subsystem, and putting it on the runtime provider
+	// would weld two orthogonal axes onto one mechanism (resource admission).
 	want := map[string]bool{"CPUMillis": true, "MemoryByte": true}
 	for _, f := range fields {
 		if !want[f] {
-			t.Errorf("ResourceLimits has unexpected field %q — capacity belongs to the rootfs provider (§3.4) and overhead is provider-internal (§5.A)", f)
+			t.Errorf("ResourceLimits has unexpected field %q — capacity belongs to the rootfs provider (resource admission) and overhead is provider-internal (the runtime provider contract)", f)
 		}
 		delete(want, f)
 	}
@@ -341,7 +341,7 @@ func TestResourceLimitsCarriesOnlyPolicy(t *testing.T) {
 	}
 }
 
-// pinnedFlag is one runsc global flag together with the § guarantee it carries.
+// pinnedFlag is one runsc global flag together with the guarantee it carries.
 // The `why` is the whole point of the table: a future edit that drops a key gets
 // told what it just gave up, rather than seeing a bare string diff.
 type pinnedFlag struct {
@@ -349,27 +349,27 @@ type pinnedFlag struct {
 	why  string
 }
 
-// pinnedRunscFlags is the §5.A pinned global flag set, by value. §5.A: local_runsc
+// pinnedRunscFlags is the runtime provider contract pinned global flag set, by value. the runtime provider contract: local_runsc
 // "pins the entire set of runsc flags it depends on and inherits no defaults" —
 // runsc's defaults drift across versions
-// and §5.B's cross-runsc-version portability may not rest on "the default did not
+// and the Rootfs subsystem's cross-runsc-version portability may not rest on "the default did not
 // change".
 var pinnedRunscFlags = []pinnedFlag{
-	{"--platform=systrap", "§1.1 no-hypervisor. FAILS SILENTLY: systrap is also runsc's current default, so dropping this changes nothing observable TODAY and breaks the moment a runsc version moves the default (e.g. to KVM) — exactly the drift §5.A pins against"},
-	{"--network=sandbox", "userspace netstack. host/hostinet lets the sentry use host sockets directly and violates §2 substrate pillar ① (REJECTED, not an alternative mode); it is also the precondition for §5.D steering (per-sandbox netns) and §5.E transport (netstack-terminated, dialed over the veth IP)"},
-	{"--overlay2=none", "§5.B/§5.C own the persistent layer OUTSIDE runsc; the gofer only proxies host dirs. runsc's own overlay would put guest writes somewhere the engine does not manage, so Promote would freeze an incomplete tree. NO --overlay2 VALUE IS AN ALTERNATIVE: measured, the whole memory/self/dir= family is non-persistent across a container's lifetime, and dir= UNLINKS its filestore at startup — so a clean stop evaporates the data, which is the failure a persistence layer cannot have"},
-	{"--file-access=shared", "the other half of the same guarantee: the gofer proxies the host dir bidirectionally, which is what makes §5.C volume binds and the at-rest upper work at all (rootfs-overlay D0)"},
-	{"--net-raw=false", "§5.D: the guest cannot forge L2 frames. runsc's own default already strips raw/AF_PACKET, so WITHOUT this pin the guarantee is an UNDECLARED default — and §5.D's future interface-keyed predicate floor would face a raw-socket-capable guest with no test firing. Paired with CAP_NET_RAW's absence from oci.go caps"},
-	{"--systemd-cgroup=false", "cgroupfs driver, which the whole §5.A cgroup-ownership split assumes (engine mkdirs the parent, runsc creates the leaf). The systemd driver would place the leaf somewhere else entirely and the post-launch cap assertion would read the wrong path"},
+	{"--platform=systrap", "the engine vocabulary boundary no-hypervisor. FAILS SILENTLY: systrap is also runsc's current default, so dropping this changes nothing observable TODAY and breaks the moment a runsc version moves the default (e.g. to KVM) — exactly the drift the runtime provider contract pins against"},
+	{"--network=sandbox", "userspace netstack. host/hostinet lets the sentry use host sockets directly and violates the security model substrate pillar  (REJECTED, not an alternative mode); it is also the precondition for the network declaration steering (per-sandbox netns) and the transport data plane transport (netstack-terminated, dialed over the veth IP)"},
+	{"--overlay2=none", "the Rootfs subsystem/the Volume subsystem own the persistent layer OUTSIDE runsc; the gofer only proxies host dirs. runsc's own overlay would put guest writes somewhere the engine does not manage, so Promote would freeze an incomplete tree. NO --overlay2 VALUE IS AN ALTERNATIVE: measured, the whole memory/self/dir= family is non-persistent across a container's lifetime, and dir= UNLINKS its filestore at startup — so a clean stop evaporates the data, which is the failure a persistence layer cannot have"},
+	{"--file-access=shared", "the other half of the same guarantee: the gofer proxies the host dir bidirectionally, which is what makes the Volume subsystem volume binds and the at-rest upper work at all (overlayfs constraints)"},
+	{"--net-raw=false", "the network declaration: the guest cannot forge L2 frames. runsc's own default already strips raw/AF_PACKET, so WITHOUT this pin the guarantee is an UNDECLARED default — and the network declaration's future interface-keyed predicate floor would face a raw-socket-capable guest with no test firing. Paired with CAP_NET_RAW's absence from oci.go caps"},
+	{"--systemd-cgroup=false", "cgroupfs driver, which the whole the runtime provider contract cgroup-ownership split assumes (engine mkdirs the parent, runsc creates the leaf). The systemd driver would place the leaf somewhere else entirely and the post-launch cap assertion would read the wrong path"},
 }
 
-// TestRunscGlobalFlagsArePinned asserts the EXACT §5.A pinned flag set, by value.
+// TestRunscGlobalFlagsArePinned asserts the EXACT the runtime provider contract pinned flag set, by value.
 //
 // This is a test rather than a review habit for the same reason the seam guard above
 // is: two of these keys fail SILENTLY (`--platform=systrap` and `--root` — see
 // runscGlobalFlags, and the per-key `why` strings below).
 //
-// Both halves are asserted: every pinned key is PRESENT (with its § guarantee named
+// Both halves are asserted: every pinned key is PRESENT (with its guarantee named
 // in the failure), and no UNKNOWN flag has been added without a recorded reason.
 func TestRunscGlobalFlagsArePinned(t *testing.T) {
 	p := &LocalRunsc{RunscBin: "runsc", RunscRoot: "/var/run/engine-runsc", StateDir: "/var/lib/engine/state"}
@@ -384,7 +384,7 @@ func TestRunscGlobalFlagsArePinned(t *testing.T) {
 	// root), not a constant — and because it carries the heaviest consequence.
 	wantRoot := "--root=" + p.RunscRoot
 	if flags[0] != wantRoot {
-		t.Errorf("first global flag = %q; want %q. §5.A: --root is the single addressing root for all runsc state — a wrong root makes state/list SILENTLY EMPTY, so §4.4-A reverse reconciliation reads every live placement as nonexistent and reclaims live sandboxes",
+		t.Errorf("first global flag = %q; want %q. the runtime provider contract: --root is the single addressing root for all runsc state — a wrong root makes state/list SILENTLY EMPTY, so atomic transition rollback reverse reconciliation reads every live placement as nonexistent and reclaims live sandboxes",
 			flags[0], wantRoot)
 	}
 
@@ -399,8 +399,8 @@ func TestRunscGlobalFlagsArePinned(t *testing.T) {
 	}
 
 	// The reverse direction: an unrecorded flag. Not a style rule — an unpinned key
-	// that someone adds by hand is one nobody has attached a guarantee to, and §5.A's
-	// discipline is per-key ("which keys are load-bearing, and which § guarantee each
+	// that someone adds by hand is one nobody has attached a guarantee to, and the runtime provider contract's
+	// discipline is per-key ("which keys are load-bearing, and which guarantee each
 	// answers to").
 	known := map[string]bool{wantRoot: true}
 	for _, pf := range pinnedRunscFlags {
@@ -408,7 +408,7 @@ func TestRunscGlobalFlagsArePinned(t *testing.T) {
 	}
 	for _, f := range flags {
 		if !known[f] {
-			t.Errorf("runscGlobalFlags carries unrecorded flag %q — §5.A pins each key to ONE stated guarantee; add it to pinnedRunscFlags with the § it serves (or drop it)", f)
+			t.Errorf("runscGlobalFlags carries unrecorded flag %q — each key needs ONE stated guarantee; add it to pinnedRunscFlags with the guarantee it serves (or drop it)", f)
 		}
 	}
 
@@ -426,25 +426,25 @@ func TestRunscGlobalFlagsArePinned(t *testing.T) {
 // the pinned flag above; this asserts the two halves stay consistent.
 //
 // CAP_NET_ADMIN is asserted PRESENT in the same test, because the tempting "tighten the
-// caps" edit is to drop both — and §2.2 is explicit that guest caps are not an isolation
+// caps" edit is to drop both — and the guest identity model is explicit that guest caps are not an isolation
 // pillar, so removing NET_ADMIN buys no isolation and costs legitimate in-guest work.
 func TestGuestCapsDoNotRequestNetRaw(t *testing.T) {
 	var hasAdmin bool
 	for _, c := range caps {
 		if c == "CAP_NET_RAW" {
-			t.Errorf("caps requests CAP_NET_RAW, which the guest provably never gets (measured: CapEff bit clear under --net-raw=false). Requesting an ungrantable cap is a fake invariant — the raw-socket guarantee belongs to the pinned --net-raw=false flag, not to this list (§5.A)")
+			t.Errorf("caps requests CAP_NET_RAW, which the guest provably never gets (measured: CapEff bit clear under --net-raw=false). Requesting an ungrantable cap is a fake invariant — the raw-socket guarantee belongs to the pinned --net-raw=false flag, not to this list (the runtime provider contract)")
 		}
 		if c == "CAP_NET_ADMIN" {
 			hasAdmin = true
 		}
 	}
 	if !hasAdmin {
-		t.Error("caps dropped CAP_NET_ADMIN — §2.2: guest caps are explicitly NOT an isolation pillar (the sentry virtualizes them and is itself unprivileged on the host), so removing it buys no isolation and breaks legitimate in-guest network work")
+		t.Error("caps dropped CAP_NET_ADMIN — the guest identity model: guest caps are explicitly NOT an isolation pillar (the sentry virtualizes them and is itself unprivileged on the host), so removing it buys no isolation and breaks legitimate in-guest network work")
 	}
 }
 
 // A restarted allocator must not re-hand a survivor's IP to a NEW sandbox
-// (§5.A / §4.4-A: a takeover marks a survivor's IP as inUse in the allocator, so the
+// (the runtime provider contract / atomic transition rollback: a takeover marks a survivor's IP as inUse in the allocator, so the
 // allocator after a restart does not hand that IP to a new sandbox).
 //
 // The failure mode is QUIET, which is why this is worth a test: the fresh process
@@ -497,7 +497,7 @@ func TestRestartedAllocatorSkipsAnAdoptedSurvivorsIP(t *testing.T) {
 	rewind(0)
 	_, fresh := p.allocSubnet()
 	if fresh == survivorIP {
-		t.Fatalf("allocSubnet handed a new sandbox %s, which an adopted survivor holds (§4.4-A: a restarted allocator must skip IPs Adopt marked in use)", fresh)
+		t.Fatalf("allocSubnet handed a new sandbox %s, which an adopted survivor holds (atomic transition rollback: a restarted allocator must skip IPs Adopt marked in use)", fresh)
 	}
 
 	// Freeing the survivor (its placement was torn down) returns the IP to
@@ -511,12 +511,12 @@ func TestRestartedAllocatorSkipsAnAdoptedSurvivorsIP(t *testing.T) {
 	}
 }
 
-// Every /30 the allocator hands out must fall inside the CIDR §5.D's L0 floor
-// names as its SIBLING item (§2.3 / network.md D5 ①④).
+// Every /30 the allocator hands out must fall inside the CIDR the network declaration's L0 floor
+// names as its SIBLING item (the data-plane exposure boundary / network substrate measurements).
 //
 // The two facts share one leaf constant precisely so they cannot drift, and this
 // asserts the allocator actually honors it — because the drift is SILENT and its
-// consequence is the invariant §2.4 exists to deliver: a /30 allocated outside the
+// consequence is the invariant the provider security contract exists to deliver: a /30 allocated outside the
 // floor's sibling item is a sandbox address the floor does not cover, i.e. a
 // reachable sibling with every reachability test still passing (point-to-point
 // veth does not isolate — measured, the host routes between two /30s and sandbox
@@ -544,7 +544,7 @@ func TestEveryAllocatedSubnetLiesInsideTheFloorsSiblingCIDR(t *testing.T) {
 			if !ruleset.SandboxCIDR.Contains(a) {
 				t.Fatalf("allocSubnet handed out %s at seq %d, outside the floor's sibling CIDR %s — "+
 					"that address space is NOT covered by the L0 floor, so the sibling would be reachable "+
-					"with every reachability assertion still passing (§2.3 / D5 ①④)", ip, i, ruleset.SandboxCIDR)
+					"with every reachability assertion still passing", ip, i, ruleset.SandboxCIDR)
 			}
 		}
 		// guest = host+1 within the /30 is what Adopt's endpoint rediscovery depends

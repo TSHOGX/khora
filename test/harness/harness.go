@@ -102,7 +102,7 @@ func BuildTemplate(t *testing.T, repoRoot, templatesDir, name, sandboxdBin strin
 }
 
 // BuildBrokenTemplate builds a Template whose /sbin/sandboxd exits immediately
-// (Health never comes up) — used to inject a ⑦ cold-start failure on real runsc
+// (Health never comes up) — used to inject a  cold-start failure on real runsc
 // (L4). The entrypoint is a tiny static binary that just exits 0.
 func BuildBrokenTemplate(t *testing.T, repoRoot, templatesDir, name string) {
 	t.Helper()
@@ -218,9 +218,9 @@ var (
 // The zero value is the common case: one "bare" Template on a t.TempDir() state
 // dir, default timeouts.
 type EngineOpts struct {
-	// HealthTimeout bounds the ⑦ readiness gate. Zero → 30s.
+	// HealthTimeout bounds the cold-start readiness gate. Zero means 30s.
 	HealthTimeout time.Duration
-	// DrainGrace bounds the §4.2 pause drain. Zero → the engine default; NEGATIVE
+	// DrainGrace bounds the FS-first pause and resume pause drain. Zero → the engine default; NEGATIVE
 	// disables the drain, which only the drainrace suite wants.
 	DrainGrace time.Duration
 	// Probes are extra static Go binaries to inject into the Template before
@@ -233,9 +233,9 @@ type EngineOpts struct {
 	TemplateFiles map[string]string
 	// BaseDir overrides where the engine's state lives. Empty → t.TempDir(), which
 	// is tmpfs here; the capacity axis needs real btrfs and passes an explicit
-	// /var/tmp path instead (ADR-0002).
+	// /var/tmp path instead (the root-required deployment).
 	BaseDir string
-	// NodeDiskByte / NodeMemoryByte are the §3.4 admission budgets. Zero →
+	// NodeDiskByte / NodeMemoryByte are the resource-admission budgets. Zero →
 	// unmetered.
 	NodeDiskByte   int64
 	NodeMemoryByte int64
@@ -245,14 +245,14 @@ type EngineOpts struct {
 	// FaultAfterColdStart injects a crash right before the committing CAS.
 	FaultAfterColdStart func(id model.SandboxID)
 	// FaultAfterVolumeBytes injects a crash inside snapshot/clone after the bytes AND
-	// the cap are written but before the `volumes` row is inserted — the §5.C window
-	// (volume.md D7.3).
+	// the cap are written but before the `volumes` row is inserted — the Volume subsystem window
+	// (volume cap enforcement).
 	FaultAfterVolumeBytes func(id model.VolumeID)
 	// SkipReconcile leaves startup reconcile un-run, for a test that wants to
 	// inspect the pre-reconcile store.
 	SkipReconcile bool
 
-	// SecondHopUID is the §2.4 invariant-2 deployment input: the uid of the host-local
+	// SecondHopUID is second-hop floor deployment input: the uid of the host-local
 	// process behind `egress.via[].endpoint`. Unset ⇒ no second-hop table is installed
 	// and `via[]` declarations are refused, so a suite exercising `via[]` MUST set it.
 	//
@@ -271,7 +271,7 @@ type EngineOpts struct {
 // the builtin Template rows, and runs startup reconcile. Returns the engine and
 // the base dir (whose layout tests peek at to assert byte reclamation).
 //
-// Seeding before serving is not optional — the sandboxes.template FK (§4.3) would
+// Seeding before serving is not optional — the sandboxes.template FK (health and reclamation) would
 // reject every create otherwise — and running reconcile matches production boot
 // order, so the happy path is exercised against the same sequence production uses.
 func Engine(t *testing.T, opts EngineOpts) (*orchestrator.Engine, string) {
@@ -329,7 +329,7 @@ func Engine(t *testing.T, opts EngineOpts) (*orchestrator.Engine, string) {
 		t.Fatalf("seed builtin templates: %v", err)
 	}
 	// All three volume-boot entry points run in production's order and position: BEFORE
-	// anything can create a storage unit (§5.C / volume.md D7.1, D7.3, D7). So the
+	// anything can create a storage unit. So the
 	// substrate suites exercise the ordering production boots with rather than a
 	// convenient one — which matters most for the cap repair, whose whole job is to fix
 	// residue a previous run left.
@@ -342,7 +342,7 @@ func Engine(t *testing.T, opts EngineOpts) (*orchestrator.Engine, string) {
 	if err := eng.ReclaimQuotaRows(ctx); err != nil {
 		t.Logf("boot quota-row reclamation (non-fatal, reaper retries): %v", err)
 	}
-	// §2.4 invariant 2's second half, in production's position: installed once, BEFORE
+	// the engine-level second-hop floor, in production's position: installed once, BEFORE
 	// serving and before Reconcile. With no uid supplied it installs nothing and
 	// removes a stale table from a previous run — which is what makes a suite that
 	// does NOT exercise `via[]` still exercise the removal path.
@@ -351,7 +351,7 @@ func Engine(t *testing.T, opts EngineOpts) (*orchestrator.Engine, string) {
 	}
 	if !opts.SkipReconcile {
 		// production parity: reconcile runs at boot. On a fresh store it is a no-op,
-		// which also asserts the §4.4-A path never disturbs a clean start.
+		// which also asserts the atomic transition rollback path never disturbs a clean start.
 		if err := eng.Reconcile(ctx); err != nil {
 			t.Fatalf("startup reconcile: %v", err)
 		}
@@ -363,7 +363,7 @@ func Engine(t *testing.T, opts EngineOpts) (*orchestrator.Engine, string) {
 //
 // EVERY DENY ASSERTION IN THIS SUITE NEEDS IT: "unreachable" alone is not a valid
 // assertion, because a counter reading 0 is indistinguishable from a bypassed rule
-// (§2.4 / network.md D4.1, D5 ⑧). A deny is proved by "unreachable" AND "the counter
+// (the provider security contract). A deny is proved by "unreachable" AND "the counter
 // moved after a deliberate probe".
 //
 // Returns -1 when the counter does not exist, which a caller must treat as a failed
@@ -435,7 +435,7 @@ func DumpRuleSet(sandbox model.SandboxID) string {
 
 // CountRuleSetTables counts engine per-sandbox rule-set tables on this host — the
 // leak assertion for the rule set, shaped exactly like CountEngineNetns. A rule set
-// is crash-surviving host state (§2.4), so it leaks the same way a netns does.
+// is crash-surviving host state (the provider security contract), so it leaks the same way a netns does.
 func CountRuleSetTables(t *testing.T) int {
 	t.Helper()
 	out, err := exec.Command("nft", "list", "tables", "inet").Output()
@@ -502,7 +502,7 @@ func Restart(t *testing.T, base string, opts EngineOpts) *orchestrator.Engine {
 }
 
 // CountEngineNetns counts engine-owned netns on this host (the placement marker
-// local_runsc enumerates, §4.4-A). Tests use it to assert no orphan leaked.
+// local_runsc enumerates, atomic transition rollback). Tests use it to assert no orphan leaked.
 func CountEngineNetns(t *testing.T) int {
 	t.Helper()
 	entries, err := os.ReadDir("/var/run/netns")
@@ -524,7 +524,7 @@ func CountEngineNetns(t *testing.T) int {
 //
 // It exists because t.TempDir() is tmpfs here, so a suite whose subject is quotas, caps
 // or subvolume reclaim would exercise a configuration the engine does not support
-// (ADR-0002) — which is why the skip is a skip and not a silent pass on tmpfs.
+// (the root-required deployment) — which is why the skip is a skip and not a silent pass on tmpfs.
 //
 // teardown runs BEFORE the RemoveAll and may be nil. It is a callback rather than
 // something this helper does itself because os.RemoveAll CANNOT delete a btrfs
@@ -548,7 +548,7 @@ func BtrfsBase(t *testing.T, prefix, why string, teardown func(stateDir string))
 		_ = os.RemoveAll(base)
 	})
 	if !(btrfs.Client{}).Available(context.Background(), base) {
-		t.Skipf("%s is not on btrfs; %s (ADR-0002)", base, why)
+		t.Skipf("%s is not on btrfs; %s (the root-required deployment)", base, why)
 	}
 	return base, stateDir
 }

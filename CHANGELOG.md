@@ -4,10 +4,9 @@
 
 **Through all of `0.0.x`, this project promises nothing about compatibility.**
 
-`CLAUDE.md`'s no-compatibility rule ends with "this rule lifts when we deploy". A tag a
-consumer can pin is closer to that trigger than an internal instance is, so the answer is
-stated here rather than left to inference: **the rule stays in force for the whole of
-`0.0.x`.** Concretely, and for any `0.0.x` → `0.0.y`:
+The project is not yet deployed with a compatibility commitment. A tag that a consumer
+can pin does not change that boundary: **the no-compatibility rule stays in force for the
+whole of `0.0.x`.** Concretely, and for any `0.0.x` to `0.0.y`:
 
 - **No schema migrations.** A breaking store change edits `CREATE TABLE` and deletes the
   old path in place. There is no `ALTER`, and no code that reads an older file.
@@ -17,9 +16,8 @@ stated here rather than left to inference: **the rule stays in force for the who
 - **The REST and Connect surfaces may change shape**, including removals.
 
 A compatibility branch would be a negative asset at this stage: it widens the surface and
-manufactures invariants the code does not actually hold, which is the silent drift the
-spec discipline exists to prevent. **If you pin a `0.0.x` tag, treat an upgrade as a
-redeploy from empty state.**
+manufactures invariants the code does not actually hold. **If you pin a `0.0.x` tag, treat
+an upgrade as a redeploy from empty state.**
 
 What this does *not* mean: the tag is not a moving target. A tag is immutable, and the binaries
 built from it report it via `--version`. Substrate verification is recorded with the reviewing
@@ -36,9 +34,9 @@ statement above governs from here on, `v0.0.1` included.
 ## v0.0.1
 
 First tagged release, and the first release under the name **Khora** — χώρα, the receptacle
-that has no character of its own and takes on the character of what enters it, which is this
-engine's first principle stated in Greek (see `README.md`). Substrate verification for release
-work is recorded with the reviewing PR, not as a generated document in the product tree.
+that has no character of its own and takes on the character of what enters it, which states
+the engine's first principle in Greek. Substrate verification for release work is recorded
+with the reviewing PR, not as a generated document in the product tree.
 
 The project, the Go module (`github.com/TSHOGX/khora`), the CLI binary, the repository and
 the protobuf wire package (`khora.transport.v1`) all carry that one name. It was renamed
@@ -72,7 +70,7 @@ contains.
 
 ### Surfaces
 
-- `orchestrator` — the single engine-host binary, serving the §6.1 REST + Connect API.
+- `orchestrator` — the single engine-host binary, serving the REST + Connect API.
 - `sandboxd` — the in-guest daemon: init mode as PID 1, transport mode as its child.
 - `khora` — the CLI, a peer client of the same API a frontend uses.
 - `gateway` — the outward-facing mTLS boundary. **Not part of the engine**:

@@ -2,7 +2,7 @@
 
 // L2 for the internal/btrfs leaf package against REAL btrfs. Requires root
 // (subvolume + qgroup ioctls). The engine scratch fs is btrfs in squota mode
-// (ADR-0002 / rootfs-overlay D6.2).
+// (the root-required deployment / btrfs quota materialization).
 //
 //	sudo env PATH=$PATH GOTOOLCHAIN=local GOFLAGS=-mod=mod GOSUMDB=off HOME=$HOME \
 //	  go test -tags substrate -v -count=1 ./internal/btrfs/
@@ -32,7 +32,7 @@ func TestMain(m *testing.M) {
 
 // btrfsScratch makes a scratch dir on a real btrfs filesystem. t.TempDir() is
 // NOT usable: TMPDIR is /tmp = tmpfs here, where subvolumes cannot exist. The
-// engine has the same constraint in production (ADR-0002: overlay scratch must be
+// engine has the same constraint in production (the root-required deployment: overlay scratch must be
 // on native btrfs), so testing on tmpfs would test a configuration the engine
 // does not support.
 func btrfsScratch(t *testing.T) string {
@@ -41,7 +41,7 @@ func btrfsScratch(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Cleanup REPORTS its own failures. Reclamation is §4.4-A's own subject here, so
+	// Cleanup REPORTS its own failures. Reclamation is atomic transition rollback's own subject here, so
 	// a scratch dir that silently survives the run is not a cosmetic annoyance: it
 	// is this suite losing the ability to tell "the engine leaks" from "my fixtures
 	// leak" on the dev box. Cleanup runs after the real assertions, so t.Errorf here
@@ -89,7 +89,7 @@ func btrfsScratch(t *testing.T) string {
 	})
 	c := Client{}
 	if !c.Available(context.Background(), dir) {
-		t.Skipf("%s is not on btrfs; the capacity axis needs btrfs (ADR-0002)", dir)
+		t.Skipf("%s is not on btrfs; the capacity axis needs btrfs (the root-required deployment)", dir)
 	}
 	return dir
 }
@@ -107,7 +107,7 @@ func TestSubvolumeLifecycleAndQuota(t *testing.T) {
 		t.Fatal("IsSubvolume=false right after CreateSubvolume")
 	}
 	// idempotent: reclamation and placement paths both retry, so a second create
-	// must be a no-op rather than an error (§4.4-A).
+	// must be a no-op rather than an error (atomic transition rollback).
 	if err := c.CreateSubvolume(ctx, unit); err != nil {
 		t.Fatalf("CreateSubvolume not idempotent: %v", err)
 	}

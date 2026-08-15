@@ -1,6 +1,6 @@
 //go:build substrate
 
-// L2: a FAILED launch leaves no §5.D rule-set table behind, against real nft.
+// L2: a FAILED launch leaves no the network declaration rule-set table behind, against real nft.
 //
 //	sudo env "PATH=$PATH" "HOME=$HOME" go test -tags substrate -count=1 -p 1 \
 //	  ./internal/runtime/ -run TestAFailedLaunchLeavesNoRuleSetTable
@@ -60,7 +60,7 @@ func TestAFailedLaunchLeavesNoRuleSetTable(t *testing.T) {
 	}
 
 	// A minimal but REAL rule set, so there is genuinely a table to leak. Hand-built
-	// rather than taken from network.Generate: §5 subsystems never import each other
+	// rather than taken from network.Generate: subsystems never import each other
 	// (internal/arch enforces it), and the assertion is about the table's existence.
 	spec := LaunchSpec{
 		Sandbox: sid,
@@ -94,7 +94,7 @@ func TestAFailedLaunchLeavesNoRuleSetTable(t *testing.T) {
 	// THE PROPERTY: no table survived.
 	if n := countTables(t); n != before {
 		t.Errorf("a failed launch left the rule-set table behind (tables %d → %d) — a table is "+
-			"crash-surviving host state (§2.4) and its rules are narrowed by `iifname`, so once that "+
+			"crash-surviving host state (the provider security contract) and its rules are narrowed by `iifname`, so once that "+
 			"veth name is recycled by a later sandbox the stale rules apply to IT: a sandbox enforcing "+
 			"a declaration nobody wrote, with no record naming the table\n%s", before, n, dumpTable(t, table))
 	}

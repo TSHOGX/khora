@@ -1,17 +1,17 @@
-// Package transport is subsystem §5.E: the host↔sandbox channel. The engine
+// Package transport is subsystem the transport data plane: the host↔sandbox channel. The engine
 // exposes exactly two stateless RPC services — process and fs — plus a Health
-// probe (§5.E / transport D4). This package is the HOST-SIDE client of those
+// probe (the transport data plane / the wire protocol). This package is the HOST-SIDE client of those
 // services; the in-guest server lives in cmd/sandboxd (transport mode).
 //
-// Carrier: netns-internal TCP, no vsock (§5.E; validated on both substrate arches per
-// ADR-0002). sandboxd listens on a TCP port inside the guest netns; the host dials the
+// Carrier: netns-internal TCP, no vsock (the transport data plane; validated on both substrate arches per
+// the root-required deployment). sandboxd listens on a TCP port inside the guest netns; the host dials the
 // netns veth IP — unary over HTTP, streams over h2c with immediate flush. Framework is
-// Connect-RPC over h2c (transport D4.2). Cold start discovers the current netns IP
-// before dialing (§5.A placement); the carrier encodes no fixed address, so an IP change
-// across resume invalidates the old endpoint and reconnect just re-resolves (§3.3 / §4.3
+// Connect-RPC over h2c (streaming transport). Cold start discovers the current netns IP
+// before dialing (the runtime provider contract placement); the carrier encodes no fixed address, so an IP change
+// across resume invalidates the old endpoint and reconnect just re-resolves (the ID-reference model / health and reclamation
 // IP-as-epoch).
 //
-// Stateless (§5.E): the engine keeps no persistent SoT for connections. "What's
+// Stateless (the transport data plane): the engine keeps no persistent SoT for connections. "What's
 // running now" = a live process.List, never a control-plane registry. Bare pty
 // byte streams are explicitly lossy (shell has no persistent SoT); any
 // "don't drop" guarantee is the upper layer's job (a session adapter, outside the
@@ -20,16 +20,16 @@
 // Surface: the full process data plane — Start / Connect (server-stream) /
 // StreamInput (client-stream) / SendInput / SendSignal / Update / CloseStdin /
 // List; the full fs surface — Read / Write / Stat / ListDir / MakeDir / Remove /
-// Move plus the streaming large-file bypass (OpenRead / WriteStream, D4.4); and
+// Move plus the streaming large-file bypass (OpenRead / WriteStream, transport behavior); and
 // Health. Bounded ring replay on Connect and slow-subscriber non-blocking drop
-// (D4.3's two invariants) live in the guest server (cmd/sandboxd).
+// (transport behavior's two invariants) live in the guest server (cmd/sandboxd).
 package transport
 
 // Wire stubs are generated from proto/khora/transport/v1/transport.proto via
 // buf (schema-first). Regenerate with: cd proto && buf generate.
 // Requires buf + protoc-gen-go + protoc-gen-connect-go on PATH. The generated
 // code lives in pkg/transport/gen/... — OUTSIDE internal/ so a Go consumer can
-// import the protocol (ADR-0008) — and is committed (buf/protoc are not
+// import the protocol (the thin-client contract) — and is committed (buf/protoc are not
 // guaranteed present on every checkout). This Client interface is the host-side
 // DOMAIN seam; the concrete Connect client translates domain↔proto so
 // the mediator never sees generated types.
@@ -41,12 +41,12 @@ import (
 )
 
 // Endpoint is the current transport endpoint (netns veth IP:port), discovered
-// at placement time (§5.A ⑥). Never cached across resume (guest-runtime D5.2
-// point ③).
+// at placement time. It is never cached across resume because a resumed sandbox
+// receives a new placement endpoint.
 type Endpoint string
 
 // ProcessEvent is one item of a process output stream: oneof{start,data,end,
-// keepalive} (transport D4.3) — start(pid) / data(stdout|stderr) /
+// keepalive} (process transport) — start(pid) / data(stdout|stderr) /
 // end(exit_code) / keepalive.
 type ProcessEvent struct {
 	Kind     string // "start" | "data" | "end" | "keepalive" | "error"
@@ -55,15 +55,15 @@ type ProcessEvent struct {
 	Data     []byte // set on data
 	ExitCode int    // set on end
 	// Err is set on Kind == "error": the stream ended WITHOUT an end frame, commonly the
-	// D4.3 invariant-1 overflow disconnect (a subscriber that could not keep up is
+	// overflow disconnect (a subscriber that could not keep up is
 	// dropped, reported as resource_exhausted). Without it a consumer watching only for
 	// "end" cannot tell "the process finished" from "your copy of the output was
 	// dropped", and those call for opposite responses — see drainEvents.
 	Err error
 }
 
-// StartSpec starts a process (§5.E process service). PTY is the Pty!=nil special
-// case (transport D4.3: pty not a separate service). guest-native pid addressing.
+// StartSpec starts a process (the transport data plane process service). PTY is the Pty!=nil special
+// case (process transport: pty not a separate service). guest-native pid addressing.
 type StartSpec struct {
 	Cmd  string
 	Args []string
@@ -74,7 +74,7 @@ type StartSpec struct {
 
 type PtySize struct{ Rows, Cols uint16 }
 
-// EntryType is what a filesystem path IS (§5.E fs / transport D4.4). Mirrors the
+// EntryType is what a filesystem path IS (the transport data plane fs / fs transport). Mirrors the
 // wire enum as a domain type so the Client interface does not leak protobuf.
 type EntryType string
 
@@ -88,8 +88,8 @@ const (
 	EntrySymlink   EntryType = "symlink"
 )
 
-// EntryInfo describes one filesystem entry (§5.E fs / transport D4.4). Carries no
-// owner/group: the engine does not model guest users (§2.2 / §3.2.1).
+// EntryInfo describes one filesystem entry (the transport data plane fs / fs transport). Carries no
+// owner/group: the engine does not model guest users (the guest identity model / the product-neutral sandbox boundary).
 type EntryInfo struct {
 	Name  string // base name
 	Path  string // absolute in the GUEST namespace
@@ -102,20 +102,20 @@ type EntryInfo struct {
 	SymlinkTarget string
 }
 
-// HealthStatus is the domain projection of a successful Health probe (§4.3 L2 +
+// HealthStatus is the domain projection of a successful Health probe (health and reclamation L2 +
 // activity signal). It carries the sandbox-global idle duration the reaper's classifier
 // reads to tell healthy from idle. ONLY VALID WHEN Health RETURNED A NIL ERROR: the
 // classifier must never read Idle from a failed probe, which is the unreadable-idle
-// guard (reaper-health D2).
+// guard (the activity signal).
 type HealthStatus struct {
 	// Idle is how long since the sandbox's last I/O across all processes + ptys
-	// (reaper-health D2). Zero for callers/guests that never did I/O since the
+	// (the activity signal). Zero for callers/guests that never did I/O since the
 	// transport (re)started ("idle since start").
 	Idle time.Duration
 }
 
 // InputWriter is an ordered input stream to one process (stdin / pty-in). It is
-// the domain projection of the StreamInput client-stream (transport D4.3):
+// the domain projection of the StreamInput client-stream (process transport):
 // keystroke ordering is guaranteed by the single stream. Close ends the stream
 // (it does NOT close the process's stdin — use CloseStdin for Ctrl-D).
 type InputWriter interface {
@@ -126,48 +126,48 @@ type InputWriter interface {
 }
 
 // The channel is split by CONCERN into three interfaces, composed into Client, so each
-// consumer depends on what it actually uses. The §4 mediator uses HealthProber and
+// consumer depends on what it actually uses. The lifecycle mediator uses HealthProber and
 // nothing else — typed as the full 18-method Client, every L1 fake would owe 17 methods
 // it never calls, and one added fs RPC would churn every lifecycle test file that has no
 // opinion about fs. The orchestrator's data plane is the real consumer of ProcessClient
 // and FsClient. The concrete client implements all three, so nothing loses capability;
 // only the declared dependencies narrow.
 
-// HealthProber is the readiness/liveness half (§4.3 L2 / transport D4.5). It is
-// the ONLY part of the channel the §4 mediator needs.
+// HealthProber is the readiness/liveness half (health and reclamation L2 / the Health probe). It is
+// the ONLY part of the channel the lifecycle mediator needs.
 type HealthProber interface {
 	// Health is the unary readiness/liveness probe. First success is the resume
-	// readiness gate that flips state to running (guest-runtime D5.2 point ①) — the
+	// readiness gate that flips state to running; the
 	// engine does not trust bare TCP accept. The returned HealthStatus carries the
-	// sandbox-global idle duration (§4.3 activity signal); it is only meaningful
-	// when err == nil. Readiness callers (cold-start ⑦ gate, adopt probe) ignore it
-	// and check err alone; the reaper classifier reads Idle (reaper-health D2).
+	// sandbox-global idle duration (health and reclamation activity signal); it is only meaningful
+	// when err == nil. Readiness callers (cold-start gate, adopt probe) ignore it
+	// and check err alone; the reaper classifier reads Idle (the activity signal).
 	Health(ctx context.Context) (HealthStatus, error)
 }
 
 // ActivityRecorder is the WRITE half of the same one activity signal HealthProber reads
-// (reaper-health D2). Split off rather than folded in because the §4 mediator only ever
+// (the activity signal). Split off rather than folded in because the lifecycle mediator only ever
 // READS the signal: its classifier must never stamp it, or every probed sandbox would
-// look permanently active (reaper-health D3: an observation must never be
-// indistinguishable from the thing observed). The only consumer is §6.1's
+// look permanently active (reaper serialization: an observation must never be
+// indistinguishable from the thing observed). The only consumer is the control-plane API's
 // POST /v1/sandboxes/{id}/activity.
 type ActivityRecorder interface {
 	// RecordActivity stamps the guest's activity clock NOW and reads it back. The
 	// returned HealthStatus.Idle is the reading AFTER the stamp — positive
 	// confirmation the clock moved, not a pre-stamp value.
 	//
-	// It is an in-guest RPC and that is load-bearing (reaper-health D1: the signal
+	// It is an in-guest RPC and that is load-bearing (guest-side activity measurement: the signal
 	// is measured guest-side, never host-side), so it is unavailable in exactly the
 	// cases a Health probe is — a caller cannot use it to keep a sandbox whose L2 is
 	// down looking alive.
 	//
 	// NOT a lease / keepalive / pause-inhibit: it carries no duration and grants no
 	// protected period, so it needs no per-caller state, no overlap arbitration and
-	// no expiry. Those shapes stay rejected (reaper-health D2).
+	// no expiry. Those shapes stay rejected (the activity signal).
 	RecordActivity(ctx context.Context) (HealthStatus, error)
 }
 
-// ProcessClient is the §5.E process primitive (transport D4.3): run, reattach,
+// ProcessClient is the transport data plane process primitive (process transport): run, reattach,
 // input, signal, resize, list. Addressed by guest-native pid throughout.
 type ProcessClient interface {
 	// Start launches a process and returns a channel of output events
@@ -175,8 +175,8 @@ type ProcessClient interface {
 	Start(ctx context.Context, spec StartSpec) (<-chan ProcessEvent, error)
 
 	// Connect reattaches to a running process: the returned stream replays the
-	// bounded output ring buffer first, then joins live (transport D4.3
-	// invariant 2). Many Connect can attach one pid, each an independent copy.
+	// bounded output ring buffer first, then joins live (process transport
+	// bounded replay). Many Connect can attach one pid, each an independent copy.
 	Connect(ctx context.Context, pid int) (<-chan ProcessEvent, error)
 
 	// StreamInput opens an ordered input stream to a process (client-stream).
@@ -188,36 +188,36 @@ type ProcessClient interface {
 	SendInput(ctx context.Context, pid int, data []byte, ptyIn bool) error
 
 	// SendSignal signals a process; defaults to the process group, falling back
-	// to the pid (transport D4.3 / §5.E.1 directed signals belong to transport mode).
+	// to the pid (process transport / the guest startup topology directed signals belong to transport mode).
 	//
 	// DIRECTED only: pid must be > 0, or the guest returns invalid_argument. pid <= 0
 	// is the POSIX fan-out form (a whole group, or the whole pid namespace) and
-	// container-level fan-out belongs to guest PID 1, not this channel (D4.3).
+	// container-level fan-out belongs to guest PID 1, not this channel (transport behavior).
 	SendSignal(ctx context.Context, pid int, signal int) error
 
-	// Update resizes a process's PTY (unary; transport D4.3).
+	// Update resizes a process's PTY (unary; process transport).
 	Update(ctx context.Context, pid int, size PtySize) error
 
 	// CloseStdin closes a process's stdin — under a pty, equivalent to Ctrl-D.
 	CloseStdin(ctx context.Context, pid int) error
 
-	// List enumerates processes live (no registry, §5.E).
+	// List enumerates processes live (no registry, the transport data plane).
 	List(ctx context.Context) ([]int, error)
 }
 
-// FsClient is the §5.E fs primitive (transport D4.4): the unary metadata surface
+// FsClient is the transport data plane fs primitive (fs transport): the unary metadata surface
 // plus the streaming large-file bypass. No watch — consumers poll Stat+Read.
 type FsClient interface {
 	// Read reads sandbox file bytes at an offset; engine keeps no read cursor,
-	// no cross-resume offset continuity (transport D4.4). No watch — consumers
-	// poll Stat+Read (§ render-vs-interact asymmetry, transport D2).
+	// no cross-resume offset continuity (fs transport). No watch — consumers
+	// poll Stat+Read: rendering state is separate from interactive stream state.
 	Read(ctx context.Context, path string, offset, length int64) ([]byte, error)
 
 	// Write writes sandbox file bytes.
 	Write(ctx context.Context, path string, data []byte) error
 
 	// Stat describes one path with LSTAT semantics — a symlink is reported as
-	// itself, with SymlinkTarget set (transport D4.4).
+	// itself, with SymlinkTarget set (fs transport).
 	Stat(ctx context.Context, path string) (EntryInfo, error)
 
 	// ListDir enumerates a directory up to depth levels, FLATTENED (each entry
@@ -240,7 +240,7 @@ type FsClient interface {
 	Move(ctx context.Context, source, destination string) (EntryInfo, error)
 
 	// OpenRead streams a guest file out — the large-file half of the fs surface
-	// (transport D4.4). Unlike Read it never materializes the file in memory at
+	// (fs transport). Unlike Read it never materializes the file in memory at
 	// either end, so it is the path for anything big. The caller MUST Close the
 	// returned reader; the underlying HTTP response body stays open until it does.
 	OpenRead(ctx context.Context, path string) (io.ReadCloser, error)
@@ -254,7 +254,7 @@ type FsClient interface {
 
 // Client is the whole host-side channel to one sandbox's current endpoint —
 // everything the concrete client can do. Stateless: constructed against an
-// endpoint, discarded on resume (the endpoint's netns IP changes, §3.3 / §4.3
+// endpoint, discarded on resume (the endpoint's netns IP changes, the ID-reference model / health and reclamation
 // IP-as-epoch).
 //
 // "Stateless" means THIS VALUE carries no state worth keeping — not that dialing is free

@@ -11,10 +11,10 @@ import (
 	"github.com/TSHOGX/khora/internal/transport"
 )
 
-// §4.4-C at the MEDIATOR layer. The store contract suite (storetest) proves each
+// the transactional outbox at the MEDIATOR layer. The store contract suite (storetest) proves each
 // individual call commits state+event atomically; what it cannot prove is that
 // the mediator asks for the right events in the first place. That is a separate
-// failure mode with the same consequence: §4.4-C exists because billing-style
+// failure mode with the same consequence: the transactional outbox exists because billing-style
 // subscribers keep their ledger from this stream, so a dropped event is a dropped
 // charge — and an event the mediator never constructed is just as missing as one a
 // backend lost, while an extra one double-counts.
@@ -47,7 +47,7 @@ func kindsFor(t *testing.T, st *store.Memory, id model.SandboxID) []string {
 //     precisely to prevent it);
 //   - a transition forgets its event (silent under-billing);
 //   - two events share an ID, which collapses to one after subscriber dedup
-//     (§4.4-C dedups on the transition-unique ID, so a duplicated ID silently
+//     (the transactional outbox dedups on the transition-unique ID, so a duplicated ID silently
 //     DROPS the second transition).
 func TestLifecycleEmitsExactlyOneEventPerTransition(t *testing.T) {
 	ctx := context.Background()
@@ -76,10 +76,10 @@ func TestLifecycleEmitsExactlyOneEventPerTransition(t *testing.T) {
 	want := []string{"created", "paused", "resumed", "destroyed"}
 	got := kindsFor(t, st, sid)
 	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Fatalf("event sequence = %v; want %v (§4.4-C: one event per §4.1 transition, none extra, none missing)", got, want)
+		t.Fatalf("event sequence = %v; want %v (the transactional outbox: one event per the lifecycle state machine transition, none extra, none missing)", got, want)
 	}
 
-	// Distinct transition IDs. Subscribers dedup on this ID (§4.4-C), so two
+	// Distinct transition IDs. Subscribers dedup on this ID (the transactional outbox), so two
 	// transitions sharing one would silently collapse into a single delivery.
 	evs, _ := st.UnpublishedEvents(ctx, allUnpublished)
 	seen := map[string]string{}
@@ -88,18 +88,18 @@ func TestLifecycleEmitsExactlyOneEventPerTransition(t *testing.T) {
 			continue
 		}
 		if prev, dup := seen[e.ID]; dup {
-			t.Fatalf("events %q and %q share transition ID %q — subscriber dedup would DROP the second (§4.4-C)", prev, e.Kind, e.ID)
+			t.Fatalf("events %q and %q share transition ID %q — subscriber dedup would DROP the second (the transactional outbox)", prev, e.Kind, e.ID)
 		}
 		seen[e.ID] = string(e.Kind)
 	}
 
-	// The destroyed event OUTLIVES the deleted record (§4.4-C): the record is gone
+	// The destroyed event OUTLIVES the deleted record (the transactional outbox): the record is gone
 	// but the outbox row must remain for the publisher to drain.
 	if _, err := st.GetSandbox(ctx, sid); err == nil {
 		t.Fatal("record still present after destroy")
 	}
 	if got := kindsFor(t, st, sid); len(got) != 4 {
-		t.Fatalf("after the record was deleted, %d event(s) remain; want all 4 (the outbox row outlives the record, §4.4-C)", len(got))
+		t.Fatalf("after the record was deleted, %d event(s) remain; want all 4 (the outbox row outlives the record, the transactional outbox)", len(got))
 	}
 }
 
@@ -163,7 +163,7 @@ func TestDestroyFromCreatingPublishesNothing(t *testing.T) {
 	}
 }
 
-// UpdateBinding is NOT a §4.1 transition (§3.4 / §6.1 PATCH): the state does not
+// UpdateBinding is NOT a lifecycle state machine transition (resource admission / the control-plane API PATCH): the state does not
 // change, so it must publish nothing. A PATCH that emitted an event would make
 // every cap edit look like a lifecycle transition to a subscriber counting them.
 func TestUpdateBindingPublishesNothing(t *testing.T) {
@@ -186,15 +186,15 @@ func TestUpdateBindingPublishesNothing(t *testing.T) {
 	}
 	after := kindsFor(t, st, sid)
 	if len(after) != len(before) {
-		t.Fatalf("PATCH emitted an event (%v → %v); a Binding rewrite is not a §4.1 transition", before, after)
+		t.Fatalf("PATCH emitted an event (%v → %v); a Binding rewrite is not a lifecycle state machine transition", before, after)
 	}
 }
 
-// Promote is not a §4.1 transition either, but it is not silent: quiescing a
+// Promote is not a lifecycle state machine transition either, but it is not silent: quiescing a
 // `running` source IS a real pause, and it is published as an ordinary "paused"
 // (lifecycle.go's Promote: "from the event stream's view this is an ordinary
 // pause"). So the event count grows by exactly one, and that one says "paused" —
-// not a bespoke "promoted" Kind the §4.1 state machine does not name.
+// not a bespoke "promoted" Kind the lifecycle state machine does not name.
 func TestPromoteFromRunningPublishesOnlyItsQuiescePause(t *testing.T) {
 	ctx := context.Background()
 	rp, rt := &fakeRootfs{}, &fakeRuntime{}

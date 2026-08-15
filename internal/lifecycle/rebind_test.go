@@ -18,7 +18,7 @@ import (
 // `PATCH /v1/sandboxes/{id}` carries when the request names no `volumes`.
 //
 // It goes THROUGH Rebind rather than around it because there is no binding-only write
-// point any more: §4.4-B requires one PATCH to be one acquisition of the transition
+// point any more: per-sandbox transition serialization requires one PATCH to be one acquisition of the transition
 // lock, so the three former entry points (UpdateBinding / SetNetwork / RebindVolumes)
 // were deleted rather than kept as wrappers. This helper is a test-side spelling
 // convenience, not a surviving seam.
@@ -28,7 +28,7 @@ func patchBinding(m *Mediator, ctx context.Context, id model.SandboxID, b store.
 }
 
 // patchMounts drives the same verb with a mounts-only spec. It always passes a
-// non-nil pointer, so a nil slice means DETACH EVERYTHING — which is what §6.2 says
+// non-nil pointer, so a nil slice means DETACH EVERYTHING — which is what the API error contract says
 // `"volumes": []` means, and the distinction the pointer exists to carry.
 func patchMounts(m *Mediator, ctx context.Context, id model.SandboxID, mounts []model.Mount) (bool, error) {
 	return m.Rebind(ctx, id, RebindSpec{Mounts: &mounts})
@@ -81,7 +81,7 @@ func TestRebind4xxCommitsNothing(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m, st, _ := volFixture(t)
-			// PAUSED, so the cap edit below is legal on its own terms (§3.4). Without that
+			// PAUSED, so the cap edit below is legal on its own terms (resource admission). Without that
 			// the caps write would be refused by the STATE gate and the test would pass for
 			// the wrong reason — it would never reach the mount commit at all.
 			seedRec(t, st, "sbx_p", "ov_p", model.Paused)
@@ -139,7 +139,7 @@ func TestRebind4xxCommitsNothing(t *testing.T) {
 			if after.Limits != before.Limits {
 				t.Errorf("limits = %+v after a refused PATCH; want %+v unchanged — the cap committed and "+
 					"the mount binding was THEN refused, so the caller was told the request failed while "+
-					"the record disagrees (§4.4-B: one PATCH is one lock and one decision)",
+					"the record disagrees (per-sandbox transition serialization: one PATCH is one lock and one decision)",
 					after.Limits, before.Limits)
 			}
 			if after.IdleTimeout != before.IdleTimeout {
@@ -225,7 +225,7 @@ func TestRebindStateGateIsTheUnionAndPrecedesEveryWrite(t *testing.T) {
 			mounts := []model.Mount{{Volume: other, Path: "/other", Access: model.Exclusive}}
 			released, err := m.Rebind(ctx, "sbx_run", RebindSpec{Binding: bind, Mounts: &mounts})
 			if !errors.Is(err, store.ErrConflict) {
-				t.Fatalf("Rebind on `running` = %v; want ErrConflict (caps and the declaration are editable only from `paused`, §3.4/§5.D)", err)
+				t.Fatalf("Rebind on `running` = %v; want ErrConflict (caps and the declaration are editable only from `paused`, resource admission/the network declaration)", err)
 			}
 			if released {
 				t.Errorf("a state-refused rebind reported a released lease — nothing was committed, so nothing was released")
@@ -239,8 +239,8 @@ func TestRebindStateGateIsTheUnionAndPrecedesEveryWrite(t *testing.T) {
 			if len(rows) != 1 || rows[0].Volume != vid || rows[0].Path != "/data" {
 				t.Errorf("mount rows = %+v after a state-refused PATCH; want the original exclusive "+
 					"/data mount. The mount binding is legal on `running` on its own, so committing it "+
-					"and THEN refusing a later class is the partial write §6.2 forbids — and it also "+
-					"released an exclusive lease the caller never learned they gave up (§5.C: the "+
+					"and THEN refusing a later class is the partial write the API error contract forbids — and it also "+
+					"released an exclusive lease the caller never learned they gave up (the Volume subsystem: the "+
 					"lease IS the row)", rows)
 			}
 
@@ -268,7 +268,7 @@ func TestRebindStateGateIsTheUnionAndPrecedesEveryWrite(t *testing.T) {
 //
 // This also pins WHERE the validation lives: it is a write-point obligation on the
 // mediator, not an API-layer one, so a caller reaching the mediator directly (the
-// substrate suites do) cannot bypass §6.2's classes.
+// substrate suites do) cannot bypass the API error contract's classes.
 func TestRebindValidatesTheDeclarationBeforeTheStateGate(t *testing.T) {
 	ctx := context.Background()
 	m, st, _ := volFixture(t)
@@ -276,11 +276,11 @@ func TestRebindValidatesTheDeclarationBeforeTheStateGate(t *testing.T) {
 	// is the state that tells the two orderings apart.
 	seedRec(t, st, "sbx_run", "ov_run", model.Running)
 
-	// §6.2's first class: `network` given with no `egress.default`.
+	// ClassDefaultMissing: `network` given with no `egress.default`.
 	bad := model.NetworkDecl{}
 	err := patchBinding(m, ctx, "sbx_run", store.Binding{Network: &bad})
 	if !IsDeclarationInvalid(err) {
-		t.Fatalf("Rebind with an invalid declaration = %v; want a §6.2 declaration refusal (400). A "+
+		t.Fatalf("Rebind with an invalid declaration = %v; want an API error contract declaration refusal (400). A "+
 			"state-gate 409 here would tell the caller to pause first for a request that pausing "+
 			"cannot make legal", err)
 	}
@@ -289,7 +289,7 @@ func TestRebindValidatesTheDeclarationBeforeTheStateGate(t *testing.T) {
 	}
 }
 
-// TestRebindMutualExclusionWithResumeAndEvict is §4.4-B's promise for PATCH, measured
+// TestRebindMutualExclusionWithResumeAndEvict is per-sandbox transition serialization's promise for PATCH, measured
 // rather than assumed: a Rebind never interleaves with a resume or an evict.
 //
 // THE WITNESS IS THE STORE-CALL SEQUENCE, not wall-clock overlap of the mediator calls.
@@ -389,7 +389,7 @@ func TestRebindMutualExclusionWithResumeAndEvict(t *testing.T) {
 
 	spans, transitions, interleaved := spy.replay()
 	if interleaved != 0 {
-		t.Fatalf("%d transition commit(s) landed INSIDE a PATCH's store sequence — §4.4-B requires "+
+		t.Fatalf("%d transition commit(s) landed INSIDE a PATCH's store sequence — per-sandbox transition serialization requires "+
 			"PATCH to hold this sandbox's transition lock for its whole duration, so a resume or an "+
 			"evict cannot interleave with it. This is the defect three separate mediator calls "+
 			"(UpdateBinding / SetNetwork / RebindVolumes) produced: two windows between three lock "+
@@ -412,7 +412,7 @@ func TestRebindMutualExclusionWithResumeAndEvict(t *testing.T) {
 }
 
 // interleaveSpy records a totally-ordered log of the store operations relevant to
-// §4.4-B, tagged with the goroutine that made each one, so the exclusion property can be
+// per-sandbox transition serialization, tagged with the goroutine that made each one, so the exclusion property can be
 // reconstructed after the run (see the test above for why post-hoc beats a live span).
 type interleaveSpy struct {
 	store.Store
@@ -438,7 +438,7 @@ const (
 	patchRead spyKind = iota
 	patchMountWrite
 	patchBindWrite
-	// Any §4.1 lifecycle-state commit by any verb: CompareAndSetState or DeleteSandbox.
+	// Any the lifecycle state machine lifecycle-state commit by any verb: CompareAndSetState or DeleteSandbox.
 	stateCommit
 )
 
@@ -512,7 +512,7 @@ func (s *interleaveSpy) UpdateBinding(ctx context.Context, id model.SandboxID, e
 	return s.Store.UpdateBinding(ctx, id, expected, b, cause)
 }
 
-// CompareAndSetState is every §4.1 transition's commit (resume, pause, auto-pause).
+// CompareAndSetState is every the lifecycle state machine transition's commit (resume, pause, auto-pause).
 func (s *interleaveSpy) CompareAndSetState(ctx context.Context, id model.SandboxID, expected, next model.Lifecycle, ev *store.Event, cause *model.DeathCause) error {
 	s.record(stateCommit)
 	return s.Store.CompareAndSetState(ctx, id, expected, next, ev, cause)
@@ -560,7 +560,7 @@ func goID() uint64 {
 }
 
 // TestRebindReleasedSemanticsUnchanged: `released` still means "a volume held
-// EXCLUSIVELY before this rebind is not held exclusively now", which is the fact §6.1's
+// EXCLUSIVELY before this rebind is not held exclusively now", which is the fact the control-plane API's
 // `lease_released` reports and the one `applies_at` cannot express (the lease IS the row,
 // so a detach releases immediately, while the guest topology waits for the next resume).
 //
@@ -624,7 +624,7 @@ func TestRebindReleasedSemanticsUnchanged(t *testing.T) {
 			}
 			if released != tc.wantReleas {
 				t.Errorf("released = %v; want %v — the flag is what lets a caller waiting to attach "+
-					"the volume elsewhere proceed at once (§6.1), so a false positive sends them into a "+
+					"the volume elsewhere proceed at once (the control-plane API), so a false positive sends them into a "+
 					"409 and a false negative makes them wait for a resume that is not coming",
 					released, tc.wantReleas)
 			}

@@ -10,7 +10,7 @@ import (
 	"github.com/TSHOGX/khora/internal/ruleset"
 )
 
-// This file is the §5.A half of the §5.D split (network.md D1 ② / D6): render the
+// This file is the runtime provider contract half of the network declaration split (the network enforcement locus / network enforcement): render the
 // abstract rule set into nft text and install it, binding the three things only
 // this provider holds — the host-side veth name, the guest IP, and the publish
 // host endpoint. Everything above the seam stays placement-free.
@@ -20,7 +20,7 @@ import (
 // ONE TABLE PER SANDBOX. A table is an atomically-deletable named unit, which
 // lands exactly on the shape `enumeratePlacements` / `teardownPlacement` already
 // have. Base chains on `input` AND `forward`, because a forward-only rule set
-// misses guest→host entirely (measured, network.md D5 ⑧).
+// misses guest→host entirely (measured, network substrate measurements).
 //
 // EVERY PER-SANDBOX BASE CHAIN IS `policy accept`, with the default refusal
 // written as the last NARROWED rule instead. This is not a preference: a chain
@@ -34,13 +34,13 @@ import (
 // is installed once at startup.
 const (
 	// nftTablePrefix names per-sandbox tables. It carries the SandboxID verbatim so
-	// enumeration is reversible, the same convention as the netns name (§4.4-A:
-	// labeling placement with its SandboxID is the §3.3 reverse, and it is what lets
+	// enumeration is reversible, the same convention as the netns name (atomic transition rollback:
+	// labeling placement with its SandboxID is the ID-reference model reverse, and it is what lets
 	// reconciliation both re-adopt a survivor's rules and identify orphan tables).
 	nftTablePrefix = "sbxnet_"
 
-	// SecondHopTable is the ENGINE-LEVEL table pinning the second hop (§2.4
-	// invariant 2 / network.md D5 ㉔). Not per-sandbox: the predicate is the
+	// SecondHopTable is the ENGINE-LEVEL table pinning the second hop, as measured by
+	// the network substrate suite. It is not per-sandbox: the predicate is the
 	// deployment-supplied uid, so one rule set serves every `via[]` in the
 	// deployment and it is installed once when the orchestrator starts.
 	SecondHopTable = "sbxnet_hop2"
@@ -50,7 +50,7 @@ const (
 func nftTableName(sandbox string) string { return nftTablePrefix + sandbox }
 
 // renderCtx is everything the renderer must substitute for a Scope or a Match
-// flag — the placement products §5.D deliberately cannot name.
+// flag — the placement products the network declaration deliberately cannot name.
 type renderCtx struct {
 	table string
 	// vethHost is the host-side veth. The narrowing predicate is `iifname` /
@@ -74,11 +74,11 @@ type renderCtx struct {
 // combination is required rather than tidy: `delete table` on a table that does
 // not exist returns rc=1 AND ABORTS THE WHOLE `-f` FILE, so a bare `table` line
 // first (which creates it if absent) makes the delete always legal. The result is
-// idempotent and atomic — which is precisely what §4.4-A's Adopt needs.
+// idempotent and atomic — which is precisely what atomic transition rollback's Adopt needs.
 //
 // # Why atomic reinstall is the ONLY safe way to re-install
 //
-// Measured on a live flow across a control-plane restart (network.md D5 ㉒):
+// Measured on a live flow across a control-plane restart (network substrate measurements):
 //   - ONE atomic `nft -f` file: the flow SURVIVED 5/5. The conntrack entry's id is
 //     unchanged and the masquerade rule counts ZERO while bytes keep moving — the
 //     flow is running on the transform stored in the existing ct entry, and the nat
@@ -102,7 +102,7 @@ func renderRuleSet(rs ruleset.RuleSet, ctx renderCtx) (string, error) {
 	}
 	var b strings.Builder
 
-	fmt.Fprintf(&b, "# engine per-sandbox rule set (§5.D generated, §5.A rendered)\n")
+	fmt.Fprintf(&b, "# engine per-sandbox rule set (the network declaration generated, the runtime provider contract rendered)\n")
 	// The idempotent atomic three-step (see the doc comment).
 	fmt.Fprintf(&b, "table inet %s\n", ctx.table)
 	fmt.Fprintf(&b, "delete table inet %s\n", ctx.table)
@@ -111,7 +111,7 @@ func renderRuleSet(rs ruleset.RuleSet, ctx renderCtx) (string, error) {
 	// NAMED COUNTERS MUST BE DECLARED BEFORE THE CHAINS REFERENCING THEM in one
 	// `-f` file. Getting this wrong does not fail cleanly: the parse desynchronizes
 	// and the error is reported against a later line, so the failure appears several
-	// chains away from its cause (measured, network.md D5 ㉔).
+	// chains away from its cause (measured, network substrate measurements).
 	for _, c := range rs.Counters {
 		fmt.Fprintf(&b, "  counter %s {}\n", c)
 	}
@@ -168,7 +168,7 @@ func chainSpec(h ruleset.Hook) (nftChain, error) {
 		return nftChain{"c_input", "filter", "input", "filter"}, nil
 	case ruleset.HookForward:
 		// NOT named `fwd`: that is a reserved word in nft 1.1.6, and the collision
-		// desynchronizes the parser so every later chain reports a bogus error (D5 ㉔).
+		// desynchronizes the parser so every later chain reports a bogus error (network enforcement).
 		return nftChain{"c_forward", "filter", "forward", "filter"}, nil
 	case ruleset.HookForwardIngress:
 		// A LATER priority than the floor chain, so EVERY sandbox's floor is evaluated
@@ -241,7 +241,7 @@ func truncateComment(s string) string {
 		return s
 	}
 	cut := nftCommentMax - len(ellipsis)
-	// Do not slice inside a multi-byte rune: the rationales carry § and D-circle
+	// Do not slice inside a multi-byte rune: rationale text may contain Unicode markers
 	// characters, and a half rune would make the comment invalid UTF-8.
 	for cut > 0 && !utf8.RuneStart(s[cut]) {
 		cut--
@@ -264,7 +264,7 @@ func truncateComment(s string) string {
 //     spellings look identical in a listing. Review cannot catch this; only a guard
 //     can — hence renderGuards below.
 //
-// Both mechanisms, down to the bytecode: network.md D5 ⑫.
+// Both mechanisms, down to the bytecode: network substrate measurements.
 func renderScope(r ruleset.Rule, ctx renderCtx) ([]string, error) {
 	switch r.Scope {
 	case ruleset.ScopeGuestIn:
@@ -284,7 +284,7 @@ func renderScope(r ruleset.Rule, ctx renderCtx) ([]string, error) {
 		proto := string(r.Match.Proto)
 		if proto == "" {
 			return nil, fmt.Errorf("runtime: rule %q is scoped to a host endpoint but names no protocol "+
-				"— the protocol is half of a publish's identity (§5.D keys on `{guest_port, proto}`), so "+
+				"— the protocol is half of a publish's identity (the network declaration keys on `{guest_port, proto}`), so "+
 				"there is no endpoint to look up without it", r.Counter)
 		}
 		ep, ok := ctx.publishEndpoints[endpointKeyOf(r)]
@@ -324,7 +324,7 @@ func renderScope(r ruleset.Rule, ctx renderCtx) ([]string, error) {
 }
 
 // publishKey identifies a published endpoint. IT IS THE PAIR, not the guest port
-// alone, because that is what a publish IS at the declaration layer: §5.D's
+// alone, because that is what a publish IS at the declaration layer: the network declaration's
 // idempotency and deduplication are both defined on `{guest_port, proto}`, so
 // `[{8080,tcp},{8080,udp}]` is two legal items and network.AddPublish appends both.
 // Keying the binding on the port alone silently narrows the provider's notion of
@@ -355,7 +355,7 @@ func renderMatch(m ruleset.Match, ctx renderCtx) ([]string, error) {
 	// prefix the guest invented for itself, which the orchestrator could not
 	// enumerate even in principle — so an explicit v6 second arm is redundant
 	// (measured: it counted exactly the packets the family-agnostic rule had already
-	// caught, network.md D5 ⑪).
+	// caught, network substrate measurements).
 	if len(m.CTState) > 0 {
 		cl = append(cl, "ct state "+strings.Join(m.CTState, ","))
 	}
@@ -366,7 +366,7 @@ func renderMatch(m ruleset.Match, ctx renderCtx) ([]string, error) {
 	// tracking registers at a priority EARLIER than address translation, and the
 	// transform only records the reverse direction, never overwriting the original.
 	// That is the same mechanism every general-purpose transparent proxy relies on
-	// (network.md D3.3 / D5 ⑥).
+	// (via intent forms / network enforcement).
 	if m.CTOriginalDest != nil {
 		fam := "ip"
 		if !m.CTOriginalDest.Addr().Is4() {
@@ -426,7 +426,7 @@ func renderMatch(m ruleset.Match, ctx renderCtx) ([]string, error) {
 	}
 
 	// The post-NAT L4 selector. Port implies protocol — nft makes port matching
-	// depend on protocol matching (D3.1) — and ruleset.Validate already refuses a
+	// depend on protocol matching (network enforcement) — and ruleset.Validate already refuses a
 	// port without one.
 	if m.DestPort != 0 {
 		if m.Proto == "" {
@@ -479,7 +479,7 @@ func renderPrefixSet(set []netip.Prefix, wantV4 bool) (string, error) {
 	}
 	// A brace set of prefixes is an interval set. It must NOT contain nested members:
 	// nft either refuses to load ("conflicting intervals") or — with auto-merge —
-	// SILENTLY swallows the subnet (measured, network.md D5 ⑱). ruleset.Validate
+	// SILENTLY swallows the subnet (measured, network substrate measurements). ruleset.Validate
 	// already rejects a nested set upstream; `auto-merge` is deliberately NOT set
 	// here, so the failure direction stays loud.
 	return "{ " + strings.Join(parts, ", ") + " }", nil
@@ -496,7 +496,7 @@ func renderVerdict(r ruleset.Rule, ctx renderCtx) (string, error) {
 		// GUEST-FACING refusals use `reject`, and the per-protocol form matters:
 		// gVisor's netstack honors ICMP errors, so `reject` gives the guest a clean,
 		// immediate connection failure where `drop` gives it a multi-second hang
-		// (network.md D5 ⑨). §2.4's fail-closed has two halves and a pure-`drop` floor
+		// (network substrate measurements). the provider security contract's fail-closed has two halves and a pure-`drop` floor
 		// meets only the security one. Security is identical — neither forwards.
 		//
 		// On UDP the type matters too: `admin-prohibited` is IGNORED by gVisor while
@@ -557,11 +557,11 @@ func joinHostPort(a netip.Addr, port uint16) string {
 // renderGuards is the TEXT half of the render guards (the abstract half is ruleset.Validate),
 // run on the rendered file immediately before install. Each property below is broken by ONE
 // WORD of editing, with no test firing and no visible difference in `nft list` — the same
-// standing the §5.A seam token guard has.
+// standing the runtime provider contract seam token guard has.
 //
 // Four properties. Each one's danger, and the measurement that pins it, is stated
 // where the renderer makes the choice — 1 in the file header, 2 in renderScope, 3 and
-// 4 in the refusals below — and argued in full in network.md D5 ⑫ / ㉔:
+// 4 in the refusals below — and argued in full in network substrate measurements / :
 //
 //  1. NO `policy drop` on a per-sandbox base chain.
 //  2. NO `iif` / `oif` (index), only `iifname` / `oifname` (name).
@@ -571,8 +571,7 @@ func joinHostPort(a netip.Addr, port uint16) string {
 //
 // THE GUARDS ARE SCOPED BY TABLE, not one guard with an exemption: `iifname` cannot
 // narrow anything on the output hook (that traffic arrives on no interface), so a
-// single "every rule carries iifname" guard would reject the very rule §2.4
-// invariant 2 requires.
+// single "every rule carries iifname" guard would reject the second-hop rule.
 func renderGuards(text string, perSandbox bool, endpoints map[publishKey]string) error {
 	for _, line := range strings.Split(text, "\n") {
 		trimmed := strings.TrimSpace(line)
@@ -583,7 +582,7 @@ func renderGuards(text string, perSandbox bool, endpoints map[publishKey]string)
 		// cannot trip the guard — the rules are what is being checked, not the prose.
 		code := stripComment(trimmed)
 
-		// GUARD 1.
+		// Per-sandbox base chains may not use drop policy.
 		if strings.Contains(code, "policy drop") {
 			return fmt.Errorf("runtime: rendered rule set carries `policy drop` (%q). A chain policy "+
 				"CANNOT be narrowed by any input-interface predicate, so in a per-sandbox table it is a "+
@@ -591,13 +590,13 @@ func renderGuards(text string, perSandbox bool, endpoints map[publishKey]string)
 				"rule had matched no packet. Write the default refusal as the last NARROWED rule and "+
 				"keep the chain `policy accept`", code)
 		}
-		// GUARD 2.
+		// Interface matches must bind by name, never by index.
 		if hasIndexInterfacePredicate(code) {
 			return fmt.Errorf("runtime: rendered rule set uses `iif`/`oif` (by INDEX) instead of "+
 				"`iifname`/`oifname` (by NAME) in %q. `iif` freezes an ifindex at load time and "+
 				"silently FAILS OPEN after a same-name veth rebuild — measured, the guest's packet was "+
 				"delivered while the drop counter read 0 — and `nft list` resolves the frozen index "+
-				"back to a name, so a reviewer cannot see the difference (network.md D5 ⑫)", code)
+				"back to a name, so a reviewer cannot see the difference (network substrate measurements)", code)
 		}
 		// GUARDS 3 and 4, on rules only.
 		if !isRuleLine(code) {
@@ -615,8 +614,8 @@ func renderGuards(text string, perSandbox bool, endpoints map[publishKey]string)
 			}
 			if strings.Contains(code, "meta skuid") {
 				return fmt.Errorf("runtime: rendered per-sandbox rule %q is narrowed by uid. That "+
-					"predicate belongs to the ENGINE-LEVEL second-hop table (§2.4 invariant 2 / "+
-					"network.md D5 ㉔) — a uid narrowing is not a per-sandbox narrowing at all", code)
+					"predicate belongs to the ENGINE-LEVEL second-hop table (the second-hop floor / "+
+					"network substrate measurements) — a uid narrowing is not a per-sandbox narrowing at all", code)
 			}
 			continue
 		}
@@ -634,9 +633,9 @@ func renderGuards(text string, perSandbox bool, endpoints map[publishKey]string)
 				return fmt.Errorf("runtime: rendered second-hop rule %q is not the RETURN arm — the "+
 					"only accept this table may carry is `ct state established,related` with no "+
 					"identity predicate. An accept matching `new` admits NEW connections to in-floor "+
-					"addresses, the confused deputy §2.4 invariant 2 refuses (D4.2); one narrowed by "+
+					"addresses, the confused deputy the second-hop floor refuses (network enforcement); one narrowed by "+
 					"`skuid` leaks the packets skuid misses past the floor it sits above (measured "+
-					"asymmetry, network.md D5 ㉔) — a uid narrowing is safe on a DROP only", code)
+					"asymmetry, network substrate measurements) — a uid narrowing is safe on a DROP only", code)
 			}
 			continue
 		}
@@ -648,7 +647,7 @@ func renderGuards(text string, perSandbox bool, endpoints map[publishKey]string)
 			return fmt.Errorf("runtime: rendered second-hop rule %q carries a terminal verdict WITHOUT "+
 				"a `skuid` narrowing. On the output hook that is a HOST-LEVEL egress kill switch — "+
 				"measured, root's own probe failed too — and `iifname` cannot serve as the narrowing "+
-				"here, because this traffic arrives on no interface (network.md D5 ㉔)", code)
+				"here, because this traffic arrives on no interface (network substrate measurements)", code)
 		}
 		// A nat verdict has no business in this table at all: it pins the second hop
 		// under the L0 floor and does nothing else, so a DNAT here would steer
@@ -657,7 +656,7 @@ func renderGuards(text string, perSandbox bool, endpoints map[publishKey]string)
 			strings.Contains(code, "masquerade") {
 			return fmt.Errorf("runtime: rendered second-hop rule %q carries a nat verdict. The "+
 				"engine-level table pins the second hop under the floor and does nothing else "+
-				"(§2.4 invariant 2); a nat verdict there would steer host-originated traffic", code)
+				"(the second-hop floor); a nat verdict there would steer host-originated traffic", code)
 		}
 	}
 	return nil
@@ -665,15 +664,15 @@ func renderGuards(text string, perSandbox bool, endpoints map[publishKey]string)
 
 // hasPerSandboxNarrowing reports whether a per-sandbox rule line carries one of the
 // THREE narrowings renderScope can actually produce for a per-sandbox table. It is
-// guard 3's criterion, and it is written against renderScope's real output rather than
+// the narrowed-verdict criterion, and it is written against renderScope's real output rather than
 // against "some address clause is present".
 //
 // One entry per legal scope, and no fourth:
 //
-//   - `iifname` — ScopeGuestIn. The unforgeable one (D5 ③).
+//   - `iifname` — ScopeGuestIn. The unforgeable one (network enforcement).
 //   - `oifname` — ScopeGuestOut. It cannot be spelled with `iifname` at all: a
 //     publish's companion accept sees the CALLER's interface, and the inbound
-//     default-deny narrows by where the traffic is going (D5 ⑮ / §2.1 ③).
+//     default-deny narrows by where the traffic is going (network enforcement / the isolation model).
 //   - `daddr` AND `dport` TOGETHER — ScopeHostEndpoint, whose whole clause is
 //     `ip daddr <host ip> <proto> dport <host port>`. The host port is allocated per
 //     placement and per publish item, and it is the PORT that makes the pair
@@ -693,7 +692,7 @@ func renderGuards(text string, perSandbox bool, endpoints map[publishKey]string)
 // reason to exist is being the line that still holds when the abstract half is edited
 // wrong, and against that standard keying on a shared text shape was no line at all.
 // The property itself: refuse ANY rule in a per-sandbox table that carries no
-// narrowing, accept and drop alike (§2.4 / network.md D5 ⑩ ㉔).
+// narrowing, accept and drop alike (the provider security contract / network substrate measurements ).
 func hasPerSandboxNarrowing(code string, endpoints map[publishKey]string) bool {
 	if strings.Contains(code, "iifname") || strings.Contains(code, "oifname") {
 		return true
@@ -721,7 +720,7 @@ func hasPerSandboxNarrowing(code string, endpoints map[publishKey]string) bool {
 // `counter <name> {}` (a DECLARATION) and `counter name <x>` (a REFERENCE inside a
 // rule) both start with the same word, and the difference matters: an un-narrowed
 // rule whose only clauses are the counter reference and the verdict —
-// `counter name c drop`, i.e. the worst case guard 3 exists to catch — looks like a
+// `counter name c drop`, i.e. the worst unqualified verdict — looks like a
 // declaration to a naive prefix test and would be skipped. So the two are told
 // apart by the `name` keyword rather than by the leading word.
 func isRuleLine(code string) bool {
@@ -740,7 +739,7 @@ func isRuleLine(code string) bool {
 	// Keying on `counter name ` let the worst case through: `drop` on its own, or
 	// `ip daddr 10.66.0.0/16 drop`, has no counter reference, so guards 3 and 4
 	// skipped it entirely — and an un-narrowed drop in a per-sandbox table is exactly
-	// the host-level kill switch guard 3 exists to catch. The counter requirement is
+	// the host-level kill switch the narrowed-verdict guard exists to catch. The counter requirement is
 	// ruleset.Validate's to enforce; this guard's whole job is to hold when that half
 	// is edited wrong, so it must not depend on that half having held.
 	for _, v := range ruleVerdicts {
@@ -758,7 +757,7 @@ var ruleVerdicts = []string{"accept", "drop", "reject", "dnat ", "snat ", "masqu
 
 // stripComment removes a trailing `comment "…"` so the guards read the RULE and not
 // its rationale. Without this, a comment explaining why `policy drop` is refused
-// would itself trip guard 1 — and the fix must not be to stop explaining.
+// would itself trip the no-drop-policy guard — and the fix must not be to stop explaining.
 func stripComment(code string) string {
 	if i := strings.Index(code, " comment \""); i >= 0 {
 		return code[:i]

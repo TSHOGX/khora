@@ -13,7 +13,7 @@ import (
 )
 
 // TestSnapshotWritesTheCapInTheSameBackendCall is the unit-level guard for the failure
-// volume.md D7.3 calls silent and undetectable afterwards.
+// volume cap enforcement calls silent and undetectable afterwards.
 //
 // The substrate gives a snapshot a BRAND-NEW UNCAPPED quota row, so if the engine
 // recorded size=N and left the cap to a follow-up, a writer could pour far more than N
@@ -40,7 +40,7 @@ func TestSnapshotWritesTheCapInTheSameBackendCall(t *testing.T) {
 			snapCall = c
 		}
 		if strings.HasPrefix(c, "SetCapacity:"+string(snap)) {
-			t.Errorf("the cap was applied by a SEPARATE SetCapacity call (%q) — it must ride the operation that creates the bytes, because a missed cap is silent and undetectable afterwards (volume.md D7.3)", c)
+			t.Errorf("the cap was applied by a SEPARATE SetCapacity call (%q) — it must ride the operation that creates the bytes, because a missed cap is silent and undetectable afterwards (volume cap enforcement)", c)
 		}
 	}
 	if snapCall == "" {
@@ -63,7 +63,7 @@ func TestSnapshotWritesTheCapInTheSameBackendCall(t *testing.T) {
 }
 
 // TestSnapshotChecksCapabilityBeforeMovingBytes: the capability is asked BEFORE an ID is
-// minted and before any bytes move (volume.md D2). A late check leaves residue no sweep
+// minted and before any bytes move (the volume backend seam). A late check leaves residue no sweep
 // can classify, because the mediator allocates the ID.
 func TestSnapshotChecksCapabilityBeforeMovingBytes(t *testing.T) {
 	ctx := context.Background()
@@ -88,7 +88,7 @@ func TestSnapshotChecksCapabilityBeforeMovingBytes(t *testing.T) {
 }
 
 // TestSnapshotIsGatedByAdmission: the new volume's cap is a new promise, so it clears
-// the §3.4 gate — counted by its DECLARED cap even though the real bytes are
+// the resource admission gate — counted by its DECLARED cap even though the real bytes are
 // metadata-level (~16 KiB measured).
 func TestSnapshotIsGatedByAdmission(t *testing.T) {
 	ctx := context.Background()
@@ -105,7 +105,7 @@ func TestSnapshotIsGatedByAdmission(t *testing.T) {
 	}
 	// 60 committed + 60 requested > 100.
 	if _, err := m.SnapshotVolume(ctx, src, 60<<20); !errors.Is(err, ErrInsufficientCapacity) {
-		t.Fatalf("over-budget snapshot = %v; want ErrInsufficientCapacity — a snapshot's cap is a new declared promise (§3.4)", err)
+		t.Fatalf("over-budget snapshot = %v; want ErrInsufficientCapacity — a snapshot's cap is a new declared promise (resource admission)", err)
 	}
 	// And `size` is REQUIRED while disk is metered, exactly as on create — the same rule
 	// at its second endpoint, not a new one.
@@ -136,7 +136,7 @@ func TestSnapshotLineageBlocksSourceDelete(t *testing.T) {
 		t.Fatalf("delete a source with a live snapshot = %v; want ErrVolumeHasDescendants", err)
 	}
 	if errors.Is(err, store.ErrVolumeInUse) {
-		t.Errorf("the lineage verdict is indistinguishable from the mount verdict (§6.1: the remedy differs)")
+		t.Errorf("the lineage verdict is indistinguishable from the mount verdict (the control-plane API: the remedy differs)")
 	}
 	// DESCENDANT FIRST, then the source — the order the FK forces, and the order measured
 	// to leak no quota rows at all.
@@ -148,7 +148,7 @@ func TestSnapshotLineageBlocksSourceDelete(t *testing.T) {
 	}
 }
 
-// TestRepairVolumeCapsReAssertsTheRecord is the §5.C repair-state pass: a volume whose
+// TestRepairVolumeCapsReAssertsTheRecord is the Volume subsystem repair-state pass: a volume whose
 // record declares a cap while its storage carries none is a REPAIR state, not a legal
 // one, and the direction is always RECORD → STORAGE.
 //
@@ -174,13 +174,13 @@ func TestRepairVolumeCapsReAssertsTheRecord(t *testing.T) {
 	got := vb.appliedCaps[string(vid)]
 	vb.mu.Unlock()
 	if got != 32<<20 {
-		t.Fatalf("after the repair pass the storage carries %d, want the RECORD's %d — this is the crash window between a snapshot and its cap write, and it is a repair state rather than a legal one (volume.md D7.3)", got, 32<<20)
+		t.Fatalf("after the repair pass the storage carries %d, want the RECORD's %d — this is the crash window between a snapshot and its cap write, and it is a repair state rather than a legal one (volume cap enforcement)", got, 32<<20)
 	}
 	// The RECORD was not rewritten to match the storage: that direction would ratify the
 	// residue.
 	rec, _ := st.GetVolume(ctx, vid)
 	if rec.CapByte != 32<<20 {
-		t.Errorf("the repair changed the RECORD to %d — the record is the only authority (§3.4), so the storage is what moves", rec.CapByte)
+		t.Errorf("the repair changed the RECORD to %d — the record is the only authority (resource admission), so the storage is what moves", rec.CapByte)
 	}
 
 	// A DELIBERATELY uncapped volume is left alone: "record says 0, storage says 0" is
@@ -204,12 +204,12 @@ func TestRepairVolumeCapsReAssertsTheRecord(t *testing.T) {
 // be WORSE than doing nothing: re-asserting a recorded cap onto a unit that already holds
 // more than that.
 //
-// Such a cap wedges the unit PERMANENTLY (measured, volume.md D7.3), and this pass reaches
-// the same backend call §6.1's write point guards, so without the check a recovery path is
+// Such a cap wedges the unit PERMANENTLY (measured, volume cap enforcement), and this pass reaches
+// the same backend call the control-plane API's write point guards, so without the check a recovery path is
 // the way around ErrVolumeCapBelowUsage. RepairVolumeCaps's own comment has the measurement
 // and why the input state is reachable rather than hypothetical.
 //
-// WHAT IS ASSERTED IS THAT IT SILENTLY PASSES, following D7.2's discipline: the property
+// WHAT IS ASSERTED IS THAT IT SILENTLY PASSES: the property
 // is "SetCapacity is not called", read from the backend's own call log, NOT "the volume
 // still works". A wedge produces no errno on the control-plane side at all, so a liveness
 // assertion would pass on the broken code.
@@ -222,7 +222,7 @@ func TestRepairVolumeCapsNeverImposesACapBelowUsage(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The D7.3 residue: the record promises a cap, the quota row carries none — and while
+	// The residue is a record that promises a cap while the quota row carries none; while
 	// it carried none the writer poured past that cap.
 	vb.mu.Lock()
 	vb.appliedCaps[string(vid)] = 0
@@ -235,11 +235,11 @@ func TestRepairVolumeCapsNeverImposesACapBelowUsage(t *testing.T) {
 	}
 	for _, c := range vb.Calls()[before:] {
 		if strings.HasPrefix(c, "SetCapacity:") {
-			t.Fatalf("the repair pass called %q on a unit holding %d byte(s) — a cap at or below usage wedges the unit IRREVERSIBLY (afterwards even truncate-to-zero and the quota write itself return ENOSPC, so the cap can neither be removed nor raised), and this is the same predicate §6.1's write point refuses with ErrVolumeCapBelowUsage (volume.md D7.3)", c, vb.used)
+			t.Fatalf("the repair pass called %q on a unit holding %d byte(s) — a cap at or below usage wedges the unit IRREVERSIBLY (afterwards even truncate-to-zero and the quota write itself return ENOSPC, so the cap can neither be removed nor raised), and this is the same predicate the control-plane API's write point refuses with ErrVolumeCapBelowUsage (volume cap enforcement)", c, vb.used)
 		}
 	}
 	// The RECORD is untouched either way: skipping is not "adopt the storage's value",
-	// which would ratify the residue (§3.4 — the record is the only authority).
+	// which would ratify the residue (resource admission — the record is the only authority).
 	rec, err := st.GetVolume(ctx, vid)
 	if err != nil {
 		t.Fatal(err)
@@ -256,7 +256,7 @@ func TestRepairVolumeCapsNeverImposesACapBelowUsage(t *testing.T) {
 	}
 	for _, c := range vb.Calls()[before:] {
 		if strings.HasPrefix(c, "SetCapacity:") {
-			t.Fatalf("the repair pass called %q at cap == usage — that cap is accepted and stored but means FULL rather than exactly enough, so the boundary belongs on the skip side (volume.md D7.3)", c)
+			t.Fatalf("the repair pass called %q at cap == usage — that cap is accepted and stored but means FULL rather than exactly enough, so the boundary belongs on the skip side (volume cap enforcement)", c)
 		}
 	}
 
@@ -278,7 +278,7 @@ func TestRepairVolumeCapsNeverImposesACapBelowUsage(t *testing.T) {
 // TestReclaimQuotaRowsWiring: the mediator asks the backend for the ids it recorded at
 // deletion time and hands them back to be reclaimed — never scanning for
 // reclaimable-looking rows, whose failure mode is an uncapped live volume with zero
-// signal (§5.C).
+// signal (the Volume subsystem).
 func TestReclaimQuotaRowsWiring(t *testing.T) {
 	ctx := context.Background()
 	m, _, vb := volFixture(t)
@@ -306,7 +306,7 @@ func TestReclaimQuotaRowsWiring(t *testing.T) {
 		t.Errorf("%d recorded row(s) survived the round: %v", len(left), left)
 	}
 	// A round that finds nothing recorded does NOT call the backend — a backend with no
-	// quota rows costs the sweep nothing (§1.3: no capability branch in the caller).
+	// quota rows costs the sweep nothing (the extension boundary: no capability branch in the caller).
 	before := len(vb.Calls())
 	if err := m.ReclaimQuotaRows(ctx); err != nil {
 		t.Fatal(err)
@@ -363,7 +363,7 @@ func TestSnapshotCrashWindowLeavesReclaimableBytes(t *testing.T) {
 	// survivable: had the cap been left to a follow-up PATCH, the crash would have
 	// skipped it and left a live UNCAPPED volume that nothing could detect afterwards.
 	if capOnStorage != snapCap {
-		t.Fatalf("the crashed snapshot's storage carries cap %d, want %d — the cap must be written by the SAME backend operation that made the bytes (volume.md D7.3)", capOnStorage, snapCap)
+		t.Fatalf("the crashed snapshot's storage carries cap %d, want %d — the cap must be written by the SAME backend operation that made the bytes (volume cap enforcement)", capOnStorage, snapCap)
 	}
 	// ...and NO row was inserted, so those bytes are an orphan the sweep reclaims.
 	if _, err := st.GetVolume(ctx, crashed); err != store.ErrVolumeNotFound {

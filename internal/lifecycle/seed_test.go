@@ -60,7 +60,7 @@ func TestSeedBuiltinTemplatesIdempotent(t *testing.T) {
 }
 
 // The seed makes a create's sandboxes.template FK resolve: before seeding, a
-// create referencing a builtin fails (§4.3 reference-side); after seeding it
+// create referencing a builtin fails (health and reclamation reference-side); after seeding it
 // succeeds. This is exactly why the seed MUST run before serving.
 func TestSeedEnablesCreate(t *testing.T) {
 	ctx := context.Background()

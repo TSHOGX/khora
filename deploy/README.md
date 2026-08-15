@@ -1,13 +1,14 @@
 # Deployment: the outward-facing boundary
 
 The engine's control-plane API has **no authentication and no TLS**, and that is a
-design decision rather than a gap: §1.4 excludes the credential family from the engine
+design decision rather than a gap: the engine boundary excludes the credential family from the engine
 permanently, because every byte the engine can hand a guest is readable by uid 0
 inside it — so the engine cannot be a secrecy boundary for anything. Authentication
 therefore lives in front of it, in a component outside the engine.
 
-This directory holds the configuration for that component. The decision behind it,
-including the options rejected, is [`ADR-0007`](../docs/decisions/ADR-0007-outward-facing-boundary.md).
+This directory holds the configuration for that component. The deployment boundary
+and its requirements are documented in
+[Deployment boundary](../docs/configuration/deployment-boundary.md).
 
 ## The engine enforces its own half
 
@@ -18,8 +19,8 @@ address, a gateway would be a door standing beside an open wall.
 
 ```
 $ orchestrator --addr 0.0.0.0:8080
-orchestrator: the §6.1 listen address is not loopback: "0.0.0.0:8080" is a routable
-address. The §6.1 API has NO authentication and NO TLS …
+orchestrator: the API listen address is not loopback: "0.0.0.0:8080" is a routable
+address. The API has NO authentication and NO TLS …
 ```
 
 Every loopback spelling is accepted (`127.0.0.1`, anything in `127/8`, `::1`, the
@@ -51,8 +52,8 @@ in the config's comments.
 cp deploy/nginx-gateway.conf /etc/nginx/sites-available/khora.conf
 ln -s /etc/nginx/sites-available/khora.conf /etc/nginx/sites-enabled/
 # server.pem/server.key = this gateway's identity
-# client-ca.pem         = the CA that issues CALLER certificates. Scope it to a CA you
-#                         issue from: a public bundle here authenticates the internet.
+# client-ca.pem = the CA that issues CALLER certificates. Scope it to a CA you
+# issue from: a public bundle here authenticates the internet.
 nginx -t && systemctl reload nginx
 ```
 
@@ -66,13 +67,13 @@ looking like a boundary.
 ```sh
 go build ./cmd/gateway
 ./gateway --addr :8443 \
-          --cert server.pem --key server.key \
-          --client-ca client-ca.pem \
-          --upstream http://127.0.0.1:8080
+  --cert server.pem --key server.key \
+  --client-ca client-ca.pem \
+  --upstream http://127.0.0.1:8080
 ```
 
 mTLS rather than bearer tokens: a token would mean this repo ships issuance, storage
-and revocation, and the whole family is what §1.4 excludes. mTLS puts caller identity
+and revocation, and the whole family is what the engine boundary excludes. mTLS puts caller identity
 in the TLS layer, where your existing PKI holds it. The trade is that you issue and
 rotate client certificates — which is the reason the reverse proxy stays the
 recommended path for anyone who already runs an identity provider.
@@ -81,7 +82,7 @@ recommended path for anyone who already runs an identity provider.
 
 **Neither forwards caller identity to the engine.** nginx can pass the verified
 certificate on and this config does not; `cmd/gateway` strips the `X-Forwarded-*`
-headers. The engine has no authorization subject, and §1.1 bars the names such a
+headers. The engine has no authorization subject, and the architecture boundary bars the names such a
 header would need — authentication is complete at the gateway, and that is the entire
 contract between the two processes.
 

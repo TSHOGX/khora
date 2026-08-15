@@ -1,7 +1,7 @@
 // PromoteToTemplate is a plain host-side copy (no mount, no root), so it runs in
 // the default unit suite. It freezes a sandbox's at-rest upper into a new
-// read-only layer dir, EXCLUDING the engine-injected runtime paths (§5.B / §3.1;
-// rootfs-overlay D5).
+// read-only layer dir, EXCLUDING the engine-injected runtime paths (the Rootfs subsystem / the Template and Overlay model;
+// rootfs mount constraints).
 package rootfs
 
 import (
@@ -39,11 +39,11 @@ func writeUpper(t *testing.T, p *HostOverlayFS, id string, files map[string]stri
 	}
 }
 
-// §5.B / §3.1: Promote copies the upper into a new layer dir byte-for-byte, but
-// EXCLUDES the engine-injected runtime debris (rootfs-overlay D5). bytes-first:
+// the Rootfs subsystem / the Template and Overlay model: Promote copies the upper into a new layer dir byte-for-byte, but
+// EXCLUDES the engine-injected runtime debris (rootfs mount constraints). bytes-first:
 // the layer exists on disk after Promote, ready for the row insert.
 //
-// THE LOAD-BEARING HALF IS THE UPLOAD DEBRIS, not the static tmp/ paths. D5 records
+// THE LOAD-BEARING HALF IS THE UPLOAD DEBRIS, not the static tmp/ paths. rootfs storage records
 // why, and it is worth stating here so this test is not read as stronger than it is:
 //
 //   - the two `tmp/.sandboxd-*` portal files CANNOT REACH THE UPPER at all. /tmp is
@@ -104,7 +104,7 @@ func TestPromoteToTemplateExcludesRuntimePaths(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(layer, "tmp/user-scratch")); err != nil {
 		t.Errorf("non-excluded tmp file was dropped: %v", err)
 	}
-	// excluded sandboxd paths must NOT be in the layer (§5.B / D5).
+	// excluded sandboxd paths must NOT be in the layer (the Rootfs subsystem / rootfs storage).
 	if _, err := os.Stat(filepath.Join(layer, "tmp/.sandboxd-transport.pid")); !os.IsNotExist(err) {
 		t.Errorf("sandboxd pidfile leaked into layer: %v", err)
 	}
@@ -161,11 +161,11 @@ func TestPromotedLayerResolvesAsLower(t *testing.T) {
 	}
 }
 
-// PromoteCostBytes is the forecast the §3.4 admission gate runs a Promote against
-// (rootfs-overlay D6.5: a frozen layer is charged to no sandbox cap, so it grows the
+// PromoteCostBytes is the forecast the resource-admission gate runs a Promote against
+// (uncapped rootfs accounting: a frozen layer is charged to no sandbox cap, so it grows the
 // measured term). The property that matters is the DIRECTION of its error: it must
 // never under-report what its own copy will cost, or the gate's bound points the
-// wrong way and the overshoot lands on an unrelated sandbox as ENOSPC (§2.3).
+// wrong way and the overshoot lands on an unrelated sandbox as ENOSPC (the data-plane exposure boundary).
 //
 // The sharp case is a SPARSE file, where allocated blocks read ~0 but the io.Copy
 // freeze pays the full length (PromoteCostBytes). Pinned by comparing the forecast
@@ -282,7 +282,7 @@ func TestPromoteRefusesExistingLayer(t *testing.T) {
 }
 
 // TestPromotePrunesShadowedBytes is the property the per-Promote excluded set exists
-// for (rootfs-overlay D5), and it is NOT "the mount point becomes
+// for (rootfs mount constraints), and it is NOT "the mount point becomes
 // an empty placeholder" — that is the DEFAULT outcome and needs no exclusion at all.
 //
 // What they do instead is prune bytes written into the upper BEFORE a volume was bound
@@ -326,9 +326,9 @@ func TestPromotePrunesShadowedBytes(t *testing.T) {
 	// What happens to the mount DESTINATION DIRECTORY itself.
 	//
 	// SPEC/CODE DIVERGENCE, recorded here deliberately rather than silently reconciled
-	// (CLAUDE.md: a divergence is a signal to STOP, not to fix in passing).
+	// (the documentation: a divergence is a signal to STOP, not to fix in passing).
 	//
-	//	§5.B says the mount point survives in a frozen layer as an EMPTY DIRECTORY
+	//	the Rootfs subsystem says the mount point survives in a frozen layer as an EMPTY DIRECTORY
 	//	PLACEHOLDER ("a mount point in the frozen result is just an empty placeholder
 	//	directory"), by analogy with `tar` of a directory that has something mounted
 	//	on it.
@@ -338,8 +338,8 @@ func TestPromotePrunesShadowedBytes(t *testing.T) {
 	//	directory is created at the destination and the whole subtree, dest included, is
 	//	absent from the layer. Measured: stat(layer/data) → ENOENT.
 	//
-	// Neither side is obviously right (§5.B's placeholder is the default outcome for an
-	// UNSHADOWED dest, which needs no exclusion at all — see D5 — so the two statements
+	// Neither side is obviously right (the Rootfs subsystem's placeholder is the default outcome for an
+	// UNSHADOWED dest, which needs no exclusion at all — see rootfs storage — so the two statements
 	// may simply be about different cases), and this is not the change to settle it in.
 	// Production behavior is therefore LEFT ALONE and the test pins what the code DOES.
 	//
@@ -350,7 +350,7 @@ func TestPromotePrunesShadowedBytes(t *testing.T) {
 	dest := filepath.Join(layer, "data")
 	if _, err := os.Stat(dest); !os.IsNotExist(err) {
 		ents, _ := os.ReadDir(dest)
-		t.Errorf("mount destination %s exists in the layer (stat err = %v, %d entries) — copyTree returns SkipDir BEFORE creating the target dir, so the dest is pruned entirely. If this now behaves like §5.B's empty-placeholder instead, that is the divergence above RESOLVING; settle it in the spec and update this assertion deliberately, do not just relax it",
+		t.Errorf("mount destination %s exists in the layer (stat err = %v, %d entries) — copyTree returns SkipDir BEFORE creating the target dir, so the dest is pruned entirely. If this now behaves like the Rootfs subsystem's empty-placeholder instead, that is the divergence above RESOLVING; settle it in the spec and update this assertion deliberately, do not just relax it",
 			"data", err, len(ents))
 	}
 	// Either way, the property that actually matters holds: no SHADOWED CONTENT reaches
@@ -362,7 +362,7 @@ func TestPromotePrunesShadowedBytes(t *testing.T) {
 }
 
 // TestPromoteCostUsesTheSameExclusions: the forecast must model exactly what the freeze
-// does, which is why both calls take the same set (PromoteCostBytes / D5). Asserts the
+// does, which is why both calls take the same set (PromoteCostBytes / rootfs storage). Asserts the
 // DELTA — that excluding a destination actually moves the forecast — where the tests
 // above assert only the bound.
 func TestPromoteCostUsesTheSameExclusions(t *testing.T) {

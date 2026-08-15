@@ -8,19 +8,19 @@ import (
 	"time"
 )
 
-// initMode is the minimal self-authored PID 1 (§5.E.1 / guest-runtime D4.1).
+// initMode is the minimal self-authored PID 1 (the guest startup topology / guest init semantics).
 // tini source is the correctness checklist; we implement the subset we need:
 //   - reaper: waitpid(-1, WNOHANG) loop draining zombies on SIGCHLD;
 //   - container-level signal fan-out: SIGTERM/SIGINT reach EVERY process in the
 //     guest, not just transport (directed per-process signals belong to
-//     transport mode, D4.3);
+//     transport mode, transport behavior);
 //   - PID 1 has NO default signal handlers — we install the ones we handle;
 //   - exit code 128+signo propagation for the supervised child;
-//   - supervise + in-place restart of the transport child (D5.3): a transport
-//     crash degrades to process-internal-recoverable, NOT substrate death (§4.2).
+//   - supervise + in-place restart of the transport child (transport behavior): a transport
+//     crash degrades to process-internal-recoverable, NOT substrate death (FS-first pause and resume).
 //
 // The transport child is re-exec'd from /proc/self/exe (one binary, two modes,
-// §5.E.1). PR_SET_CHILD_SUBREAPER is set by the child itself (transport.go), so
+// the guest startup topology). PR_SET_CHILD_SUBREAPER is set by the child itself (transport.go), so
 // the child reaps its own process subtree; PID 1 is the global-orphan backstop.
 func initMode() {
 	logf("init(pid %d): starting", os.Getpid())
@@ -38,17 +38,17 @@ func initMode() {
 	// exiting tears down the container). PID 1 must install these explicitly. kill(-1, sig)
 	// signals every process in our pid namespace except PID 1 itself, so template-provided
 	// siblings and transport's whole subtree are covered, not just the child we spawned. It
-	// targets no particular pid/pgid, so it stays on the PID 1 side of D4.3 — directed signals
+	// targets no particular pid/pgid, so it stays on the PID 1 side of transport behavior — directed signals
 	// remain transport's.
 	//
-	// NO GRACE PERIOD, DECIDED rather than pending (guest-runtime D4.3): Exit follows the
+	// NO GRACE PERIOD, DECIDED rather than pending (guest supervision): Exit follows the
 	// broadcast immediately and PID 1 exiting tears down the namespace, so this TERM cannot be
 	// acted on — equivalent to KILL. A sandbox-level grace period is REJECTED because what has
 	// state to flush is the WORKLOAD process, directed signals already exist (SendSignal), and
-	// deciding which guest processes deserve waiting for is product-layer policy §1.3's litmus
+	// deciding which guest processes deserve waiting for is product-layer policy the extension boundary's litmus
 	// keeps outside.
 	//
-	// The engine never sends this: destroy is `runsc kill KILL` + `delete --force` (§5.A).
+	// The engine never sends this: destroy is `runsc kill KILL` + `delete --force` (the runtime provider contract).
 	termCh := make(chan os.Signal, 4)
 	signal.Notify(termCh, syscall.SIGTERM, syscall.SIGINT)
 	go func() {
@@ -61,7 +61,7 @@ func initMode() {
 		os.Exit(0)
 	}()
 
-	// Supervise: (re)start the transport child in place (D5.3).
+	// Supervise: (re)start the transport child in place (transport behavior).
 	for {
 		cmd := exec.Command("/proc/self/exe", "transport")
 		cmd.Stdout = os.Stdout
@@ -74,10 +74,10 @@ func initMode() {
 		}
 		logf("init: transport child pid %d", pid)
 		ws := <-exited
-		logf("init: transport child exited (code %d); restarting in place (D5.3) in 300ms", exitCode(ws))
+		logf("init: transport child exited (code %d); restarting in place (transport behavior) in 300ms", exitCode(ws))
 		time.Sleep(300 * time.Millisecond)
 	}
 }
 
 // The reapTable itself lives in reap.go — transport mode needs the same
-// single-waiter shape for its own subtree (§5.E.1), so it is not PID 1's alone.
+// single-waiter shape for its own subtree (the guest startup topology), so it is not PID 1's alone.

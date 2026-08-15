@@ -4,7 +4,7 @@ package main
 //
 // `follow` is the one command that holds a LOOP, and the loop stays here rather than
 // moving into the client on purpose: cursor advance, page draining, and the poll interval
-// are policy — promises about time — and ADR-0008 keeps those on the caller's side of the
+// are policy — promises about time — and the thin-client contract keeps those on the caller's side of the
 // boundary. What the client contributes is the long poll, which is the engine's own
 // `wait=` parameter, so the waiting happens where the events are.
 

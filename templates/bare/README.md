@@ -18,7 +18,7 @@ So the repository holds what is small, diffable and worth reviewing:
 | File | What it fixes |
 | --- | --- |
 | `BASE` | the base image, **by digest** — so the starting tree is a fixed input |
-| `packages` | the content list, split **correctness** vs **convenience** (§5.B) |
+| `packages` | the content list, split **correctness** vs **convenience** (the rootfs subsystem) |
 | `files/` | config the base does not ship (`nsswitch.conf`) |
 | `build.sh` | definition → rootfs |
 
@@ -55,8 +55,8 @@ than obviously missing:
   `ls`/`install`/`mkdir`, so their absence breaks package installation.
 - **A non-trivial `/etc/passwd`** (from the base). A root-only single line breaks
   `getpwuid` for tools that look themselves up. The guest is still root and the engine
-  models no guest users (§2.2) — this is hygiene *inside* the guest, not an identity
-  model.
+  models no guest users (the guest identity boundary) — this is hygiene *inside* the guest,
+  not an identity model.
 
 **Convenience**, freely re-decidable: `python3` + `pip` + `venv`, `git`,
 `build-essential`, `nodejs` + `npm`, `curl`, and `sudo`. Each is one exec away, so
@@ -64,15 +64,15 @@ shipping them trades cold-start size for convenience and commits to nothing.
 
 **Preinstalled mount points**, which is a measured by-product rather than taste: a bind
 destination already present in the lower does **not** trigger copy-up, while a missing one
-dirties the upper — so this keeps Promoted layers clean and demotes §5.B's exclusion
-entries to a correctness backstop (`rootfs-overlay.md` D5).
+dirties the upper — so this keeps Promoted layers clean and demotes the rootfs subsystem's exclusion
+entries to a correctness backstop.
 
 ## No `/etc/resolv.conf`, deliberately
 
-The Template ships none and **the engine injects none** (§5.B, settled). Both
+The Template ships none and **the engine injects none** (the rootfs subsystem, settled). Both
 alternatives are worse: baking one in pins a build-machine resolver into a portable
 artifact, and engine injection would put a deployment-specific network fact inside the
-engine (§1.1) *and* land in the overlay upper for every Promote to capture.
+engine (the architecture boundary) *and* land in the overlay upper for every Promote to capture.
 
 **So out of the box a sandbox resolves no names, and under `default: deny` that is by
 design.** Resolution needs UDP/53 to reach a resolver; the resolver does not fall back to
@@ -80,17 +80,17 @@ TCP on its own (measured: with only TCP/53 allowed, the allow rule takes 0 packe
 the UDP drop counter climbs), and the engine deliberately does not add that entry for the
 caller — it would have to know what a "resolver" is and hold an address.
 
-A deployment supplies **both** halves: the file (through §5.E's `fs` service after create,
+A deployment supplies **both** halves: the file (through the transport subsystem's `fs` service after create,
 or baked into its own Promoted Template) and the matching `egress.allow[]` entry. Which
 resolver is even declarable is a property of that deployment — a loopback resolver is
 structurally unreachable for a gVisor guest, a link-local one sits in the unliftable
 floor, and the one stably-declarable host-local address is the sandbox's own `/30` gateway
-(`network.md` D5 ⑦).
+(the runtime-provided address on the guest's point-to-point link).
 
 ## Agent stacks layer on this, outside the engine
 
 No engine concept is needed: create a sandbox from `bare`, install with a one-shot exec
-(no init dependency — `guest-runtime.md` D3.1), and **Promote**. The result is an ordinary
+(the guest can start it directly without an init service), and **Promote**. The result is an ordinary
 Template whose lower stack is `[the new layer, …bare's stack]`.
 
 ## Two traps in the builder

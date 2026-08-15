@@ -2,7 +2,7 @@ package main
 
 // The operational probes: /healthz, /readyz, /metrics.
 //
-// THESE ARE NOT §6.1 OPERATIONS, and that is why this file is the one place the CLI
+// THESE ARE NOT the control-plane API OPERATIONS, and that is why this file is the one place the CLI
 // still speaks raw HTTP rather than going through pkg/khora. The three are excluded
 // from the contract document deliberately (openapi.go says so): they are the surface a
 // supervisor, a load balancer, and a scraper use, addressed to the PROCESS rather than
@@ -11,7 +11,7 @@ package main
 // One exception: `readyz` does go through the client, "should I send traffic" being a question an
 // API CONSUMER acts on — the check before the first call. `healthz` ("is the process alive") and
 // `metrics` (a Prometheus scrape) address an audience outside the API entirely, so putting them
-// on a §6.1 client would widen it past what it claims to be.
+// on a control-plane API client would widen it past what it claims to be.
 
 import (
 	"context"

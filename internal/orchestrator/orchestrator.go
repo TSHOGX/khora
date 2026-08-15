@@ -1,10 +1,10 @@
-// Package orchestrator is the single engine-host assembly (§1.1): it wires the
-// persistent store (SQLite, ADR-0004) + the two providers (local_runsc,
-// host_overlayfs) + the §4 lifecycle mediator + the transport dialer, and exposes
-// the minimal §6.1 sandbox-centric API. Deployment target is "single orchestrator
-// binary + one config + local store" with no heavy external dependency (§1.1).
+// Package orchestrator is the single engine-host assembly (the engine vocabulary boundary): it wires the
+// persistent store (SQLite, the SQLite store choice) + the two providers (local_runsc,
+// host_overlayfs) + the lifecycle mediator + the transport dialer, and exposes
+// the minimal the control-plane API sandbox-centric API. Deployment target is "single orchestrator
+// binary + one config + local store" with no heavy external dependency (the engine vocabulary boundary).
 //
-// Swapping store / provider is registering an implementation (§1.3), not editing
+// Swapping store / provider is registering an implementation (the extension boundary), not editing
 // this file — the assembly holds the seams, not concrete assumptions.
 package orchestrator
 
@@ -26,16 +26,16 @@ import (
 	"github.com/TSHOGX/khora/internal/volume"
 )
 
-// Config is the orchestrator's local configuration (§1.1 one config).
+// Config is the orchestrator's local configuration (the engine vocabulary boundary one config).
 type Config struct {
 	// TemplatesDir holds Template directories (static; TemplateID → dir).
 	TemplatesDir string
 	// StateDir is the root for overlay materialization + runsc state/bundles.
 	StateDir string
-	// HealthTimeout bounds the ⑦ readiness gate (guest-runtime D5.1). Zero → the
+	// HealthTimeout bounds the cold-start readiness gate. Zero means the
 	// mediator's default (lifecycle.New), the single defaulting site for this knob.
 	HealthTimeout time.Duration
-	// DrainGrace bounds the §4.2 pause drain barrier (D4.4): how long a voluntary
+	// DrainGrace bounds the FS-first pause and resume pause drain barrier (the lifecycle contract): how long a voluntary
 	// pause waits for in-flight engine-issued fs writes before freezing anyway.
 	// Zero → the mediator's default. Negative disables the drain entirely, which
 	// only a test wants (it restores the truncate window the barrier closes).
@@ -43,35 +43,35 @@ type Config struct {
 	// Sudo prefixes runsc/ip with sudo (dev convenience). Production runs the
 	// orchestrator as root and leaves this false.
 	Sudo bool
-	// StorePath is the SQLite store file (ADR-0004). Empty → an in-memory SQLite
+	// StorePath is the SQLite store file (the SQLite store choice). Empty → an in-memory SQLite
 	// (":memory:") for tests that don't need durability across a New() call.
 	StorePath string
 
 	// DefaultIdleTimeout / DefaultRetention are the engine-wide TTL defaults
-	// (§4.3 / reaper-health D5) applied to a create that omits them. Zero →
+	// (health and reclamation / the health and reaper boundary) applied to a create that omits them. Zero →
 	// the mediator's built-in conservative defaults (lifecycle.New).
 	DefaultIdleTimeout time.Duration
 	DefaultRetention   time.Duration
 
-	// EventRetention is §4.4-C's replayable-window size. Zero = NEVER TRIM, and that
+	// EventRetention is the transactional outbox's replayable-window size. Zero = NEVER TRIM, and that
 	// zero is the shipped behavior rather than a "fill in a default" sentinel — the
 	// opposite of the two TTLs above. See lifecycle.Deps.EventRetention for why the
 	// engine must not invent this number.
 	EventRetention time.Duration
 
 	// SweepInterval / TransportDownBudget are the reaper's tuning knobs
-	// (reaper-health D5). Zero → NewReaper's conservative defaults.
+	// (the health and reaper boundary). Zero → NewReaper's conservative defaults.
 	SweepInterval       time.Duration
 	TransportDownBudget time.Duration
 
-	// VolumesDir holds §5.C volume storage, one unit per volume. Empty →
+	// VolumesDir holds the Volume subsystem volume storage, one unit per volume. Empty →
 	// StateDir/volumes, a SIBLING of the overlay state root rather than nested inside
 	// it: each subsystem's orphan sweep enumerates its own root, so nesting would put
 	// one subsystem's units inside the other's enumeration.
 	VolumesDir string
 
-	// NodeDiskByte / NodeMemoryByte are the §3.4 no-oversubscribe budgets the
-	// admission gate admits against (§1.1 one config). Zero leaves that axis
+	// NodeDiskByte / NodeMemoryByte are the resource admission no-oversubscribe budgets the
+	// admission gate admits against (the engine vocabulary boundary one config). Zero leaves that axis
 	// UNMETERED — deliberately not defaulted: the engine must not invent a capacity
 	// number and start refusing creates on a guess. Operators set them below the
 	// raw device/RAM size, since neither budget models the store, logs, runsc
@@ -79,11 +79,11 @@ type Config struct {
 	NodeDiskByte   int64
 	NodeMemoryByte int64
 
-	// SecondHopUID pins the SECOND hop (§2.4 invariant 2): the uid of the host-local
+	// SecondHopUID pins the SECOND hop (the second-hop floor): the uid of the host-local
 	// process sitting behind `egress.via[].endpoint`, whose own egress must be held
 	// under the same L0 floor BY THE KERNEL rather than by its own discipline.
 	//
-	// A DEPLOYMENT input, never a declaration field (§2.4 / §6.2): the engine still
+	// A DEPLOYMENT input, never a declaration field (the provider security contract / the API error contract): the engine still
 	// does not know or ask what is behind that endpoint — only which local uid's
 	// egress to pin. A pointer because uid 0 is a real uid, and "the operator said
 	// root" must not read as "the operator said nothing".
@@ -93,19 +93,19 @@ type Config struct {
 	// records a declaration whose own invariant the engine cannot deliver, leaving a
 	// confused deputy live while every FIRST-hop assertion still passes (measured: hop
 	// 2 counts zero in `forward`, so the first-hop floor never evaluates it —
-	// network.md D5 ㉔).
+	// network substrate measurements).
 	//
 	// Set to THIS PROCESS'S OWN euid ⇒ New refuses to assemble (see the check there).
 	SecondHopUID *int
 
-	// ListenAddr is the §6.1 API listen address, validated at assembly time against
-	// ADR-0007's loopback requirement. EMPTY = not validated, which is what every
+	// ListenAddr is the control-plane API listen address, validated at assembly time against
+	// the deployment boundary's loopback requirement. EMPTY = not validated, which is what every
 	// in-process caller wants: a test serving through httptest.NewServer never listens on
 	// this address at all, so there is nothing to classify. The refusal lives in the
 	// assembly rather than in cmd/ for the reason SecondHopUID's does (see New).
 	ListenAddr string
 	// InsecureListen is the deployment saying OUT LOUD that ListenAddr may be
-	// routable (ADR-0007). It buys exactly one thing: ValidateListenAddr is not
+	// routable (the deployment boundary). It buys exactly one thing: ValidateListenAddr is not
 	// consulted. The engine gains no authentication either way — this only records
 	// that publishing an unauthenticated control plane was a decision rather than an
 	// omission, which is the whole difference between a boundary and a default.
@@ -116,10 +116,10 @@ type Config struct {
 	// network.Deployment.HostLocal).
 	ResolveHost ResolveHost
 
-	// HostPublishIP is the host address published endpoints bind to (§5.D: the engine
+	// HostPublishIP is the host address published endpoints bind to (the network declaration: the engine
 	// delivers a `host ip:port`, and what sits in front of it is outside the engine).
 	// Empty → loopback, which is the conservative default: publish is an EXPLICIT
-	// inbound exception (§2.1 ③), so external reachability must come from a decision
+	// inbound exception (the isolation model), so external reachability must come from a decision
 	// rather than from omitting a flag.
 	HostPublishIP string
 
@@ -127,8 +127,8 @@ type Config struct {
 	// mediator to simulate a crash mid-transition. nil in production.
 	FaultAfterColdStart func(id model.SandboxID)
 	// FaultAfterVolumeBytes is a TEST-ONLY hook forwarded to the mediator: a crash inside
-	// snapshot/clone after the bytes and cap exist but before the row is inserted (§5.C /
-	// volume.md D7.3). nil in production.
+	// snapshot/clone after the bytes and cap exist but before the row is inserted (the Volume subsystem /
+	// volume cap enforcement). nil in production.
 	FaultAfterVolumeBytes func(id model.VolumeID)
 }
 
@@ -143,7 +143,7 @@ type Engine struct {
 	// the gate before draining, then waits for the active set to empty before Store
 	// closes, including after forcing timed-out connections closed.
 	httpHandlers handlerTracker
-	// Reaper is the §4.3 autonomous control loop (auto-pause / crash-pause / evict +
+	// Reaper is the health and reclamation autonomous control loop (auto-pause / crash-pause / evict +
 	// periodic reconcile). Built here; started by StartLoops AFTER startup Reconcile.
 	Reaper *lifecycle.Reaper
 	// loops is the lifetime of the three background loops (loops.go). The assembly owns it
@@ -224,7 +224,7 @@ func New(cfg Config) (*Engine, error) {
 		return nil, fmt.Errorf("orchestrator: %w", err)
 	}
 
-	// ADR-0007's enforcement half, in the same fail-fast position and for the same reason
+	// the deployment boundary's enforcement half, in the same fail-fast position and for the same reason
 	// as the check above.
 	if cfg.ListenAddr != "" && !cfg.InsecureListen {
 		if err := ValidateListenAddr(cfg.ListenAddr, cfg.ResolveHost); err != nil {
@@ -243,8 +243,8 @@ func New(cfg Config) (*Engine, error) {
 	rt.Sudo = cfg.Sudo
 	rt.HostPublishIP = cfg.HostPublishIP
 
-	// §5.C volume backend. The local arm is the default; registering a different one
-	// is a §1.3 registration, not an edit to the callers above.
+	// the Volume subsystem volume backend. The local arm is the default; registering a different one
+	// is a extension boundary registration, not an edit to the callers above.
 	volumesDir := cfg.VolumesDir
 	if volumesDir == "" {
 		volumesDir = cfg.StateDir + "/volumes"
@@ -254,8 +254,8 @@ func New(cfg Config) (*Engine, error) {
 		return nil, err
 	}
 
-	// persistent store (ADR-0004) — register-an-implementation swap from Memory,
-	// no caller change (§1.3). This durability is what CREATES the §4.4-A
+	// persistent store (the SQLite store choice) — register-an-implementation swap from Memory,
+	// no caller change (the extension boundary). This durability is what CREATES the atomic transition rollback
 	// reconciliation need the mediator's Reconcile answers.
 	storePath := cfg.StorePath
 	if storePath == "" {
@@ -286,7 +286,7 @@ func New(cfg Config) (*Engine, error) {
 		Deployment: dep,
 	})
 
-	// outbox publisher → a log sink (§4.4-C: the engine only guarantees reliable
+	// outbox publisher → a log sink (the transactional outbox: the engine only guarantees reliable
 	// write to a replayable stream; a real subscriber lives outside the engine).
 	// Default retry policy: bounded attempts, capped + jittered backoff (see
 	// store.PublisherConfig).
@@ -301,19 +301,19 @@ func New(cfg Config) (*Engine, error) {
 	return eng, nil
 }
 
-// SeedTemplates runs the boot seed (§4.3 + §4.4-A: ensure a builtin `templates` row per
+// SeedTemplates runs the boot seed (health and reclamation + atomic transition rollback: ensure a builtin `templates` row per
 // static Template directory). Call once at boot BEFORE serving any create —
-// the sandboxes.template FK (§4.3) needs the builtin rows present.
+// the sandboxes.template FK (health and reclamation) needs the builtin rows present.
 func (e *Engine) SeedTemplates(ctx context.Context) error {
 	return e.Mediator.SeedBuiltinTemplates(ctx)
 }
 
-// Reconcile runs the §4.4-A startup crash-reconciliation (orphan reclaim +
+// Reconcile runs the atomic transition rollback startup crash-reconciliation (orphan reclaim +
 // running re-adoption). Call once at boot, before serving the API.
 func (e *Engine) Reconcile(ctx context.Context) error { return e.Mediator.Reconcile(ctx) }
 
 // InstallSecondHopTable installs the ENGINE-LEVEL table pinning the second hop
-// (§2.4 invariant 2's second half). Call once at boot, BEFORE serving.
+// (the engine-level second-hop floor). Call once at boot, BEFORE serving.
 //
 // Before serving is the requirement, and it mirrors why the rules are installed
 // before the isolated unit runs: a `via[]` declaration accepted while that table is
@@ -324,7 +324,7 @@ func (e *Engine) InstallSecondHopTable(ctx context.Context) error {
 	return e.Mediator.InstallSecondHopTable(ctx)
 }
 
-// SweepOrphanOverlays runs the §4.4-A orphan-UNIT sweep (reclaim Overlay storage
+// SweepOrphanOverlays runs the atomic transition rollback orphan-UNIT sweep (reclaim Overlay storage
 // units backing no sandbox row). At boot this is where the accumulated residue of
 // every prior run is collected: the in-flight keep-set is empty, so every unit
 // without a record is a true orphan. Call after Reconcile, which deletes crashed
@@ -333,15 +333,15 @@ func (e *Engine) SweepOrphanOverlays(ctx context.Context) error {
 	return e.Mediator.SweepOrphanOverlays(ctx)
 }
 
-// SweepOrphanLayers runs the §5.B / §4.4-A orphan-layer sweep (reclaim Promote-built layer
+// SweepOrphanLayers runs the Rootfs subsystem / atomic transition rollback orphan-layer sweep (reclaim Promote-built layer
 // bytes with no live templates row). Call once at boot after SeedTemplates so a
 // crashed Promote's staging layer is reclaimed; the reaper repeats it per tick.
 func (e *Engine) SweepOrphanLayers(ctx context.Context) error {
 	return e.Mediator.SweepOrphanLayers(ctx)
 }
 
-// RepairVolumeCaps re-asserts every volume's RECORDED cap onto its storage (§5.C /
-// volume.md D7.3). Call at boot, in the same position as the orphan sweep.
+// RepairVolumeCaps re-asserts every volume's RECORDED cap onto its storage (the Volume subsystem /
+// volume cap enforcement). Call at boot, in the same position as the orphan sweep.
 //
 // It exists because writing a snapshot's cap is necessarily the SECOND substrate call, so
 // a crash in between leaves a registered, live, UNCAPPED volume — and that is invisible
@@ -352,7 +352,7 @@ func (e *Engine) RepairVolumeCaps(ctx context.Context) error {
 	return e.Mediator.RepairVolumeCaps(ctx)
 }
 
-// ReclaimQuotaRows runs the §5.C / volume.md D7 leaked-quota-row reclamation round. The
+// ReclaimQuotaRows runs the Volume subsystem / Volume quota cleanup leaked-quota-row reclamation round. The
 // `parent` FK demotes this from the main path to a backstop (it makes the leak-producing
 // deletion order unreachable through the API), but the residual paths — a crash between
 // two deletes, and the sweep's own per-unit ordering — do not pass through user intent,
@@ -361,7 +361,7 @@ func (e *Engine) ReclaimQuotaRows(ctx context.Context) error {
 	return e.Mediator.ReclaimQuotaRows(ctx)
 }
 
-// SweepOrphanVolumes runs the §5.C / §4.4-A orphan-volume sweep (reclaim volume
+// SweepOrphanVolumes runs the Volume subsystem / atomic transition rollback orphan-volume sweep (reclaim volume
 // storage backing no `volumes` row).
 //
 // ITS POSITION IN THE BOOT SEQUENCE IS LOAD-BEARING, not housekeeping: it must run
@@ -370,7 +370,7 @@ func (e *Engine) ReclaimQuotaRows(ctx context.Context) error {
 // volume, which then meets ENOSPC on a limit nobody set for it (or is silently
 // over-provisioned), and the engine cannot tell the difference from the inside.
 // Leaving it to the periodic tick would leave a window in which exactly that
-// inheritance happens (§5.C / volume.md D7.1).
+// inheritance happens (the Volume subsystem / leaked quota-row reclamation).
 func (e *Engine) SweepOrphanVolumes(ctx context.Context) error {
 	return e.Mediator.SweepOrphanVolumes(ctx)
 }

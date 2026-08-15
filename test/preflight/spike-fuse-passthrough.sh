@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# spike-fuse-passthrough.sh — §5.C Volume remote arm: does a HOST-SIDE FUSE mountpoint
+# spike-fuse-passthrough.sh — the remote Volume backend arm: does a HOST-SIDE FUSE mountpoint
 # survive gofer passthrough into a runsc guest under --file-access=shared? This
 # de-risks the "local=dir / remote=FUSE" seam: a remote Volume backend mounts
 # FUSE on the host (never inside the sandbox — gVisor's in-guest FUSE is the

@@ -15,32 +15,32 @@ import (
 	"github.com/TSHOGX/khora/internal/volume"
 )
 
-// Volume verbs (§5.C), owned by the §4 mediator like every other verb: the
+// Volume verbs (the Volume subsystem), owned by the lifecycle mediator like every other verb: the
 // mediator reads the authoritative store and drives the backend's mechanisms, and
-// the backend never reads the store (§4).
+// the backend never reads the store (the lifecycle).
 //
 // A Volume's whole point is that its lifecycle is DECOUPLED from every sandbox
-// (§5.C) — created before one exists, surviving after the last one is gone,
+// (the Volume subsystem) — created before one exists, surviving after the last one is gone,
 // operable while nothing has it mounted. That is why none of these verbs takes a
 // SandboxID, and why the content path below goes through the backend's own
-// root-confined accessor rather than through §5.E `fs`: `fs` lives inside a guest
+// root-confined accessor rather than through the transport data plane `fs`: `fs` lives inside a guest
 // and is reachable only through a live placement, so an unmounted volume has no
-// route through it at all (volume.md D5.1).
+// route through it at all (volume.md constraints).
 //
 // None of them publishes an event. A volume is not a sandbox, so its CRUD is not a
-// §4.1 lifecycle transition — the same rule Template CRUD follows (§4.3).
+// the lifecycle state machine lifecycle transition — the same rule Template CRUD follows (health and reclamation).
 
-// ErrVolumeCapBelowUsage is the §5.C / §6.1 PATCH refusal: the requested cap is not
+// ErrVolumeCapBelowUsage is the Volume subsystem / the control-plane API PATCH refusal: the requested cap is not
 // STRICTLY greater than the volume's current usage.
 //
-// It is 400 rather than 507 (§6.2): nothing is full and no retry helps — the
+// It is 400 rather than 507 (the API error contract): nothing is full and no retry helps — the
 // request itself is unacceptable. And it is refused even though THE SUBSTRATE WOULD
 // HAPPILY ACCEPT IT, which is the whole reason this check exists in the engine.
-// Measured (volume.md D7.3): a cap below current usage wedges the storage unit
+// Measured (volume cap enforcement): a cap below current usage wedges the storage unit
 // PERMANENTLY — afterwards even `mkdir` and truncating an existing file to zero
 // return ENOSPC, and the quota operation ITSELF returns ENOSPC, so the cap can
 // neither be removed nor raised, not even back above current usage. The only exit
-// is deleting the guest's bytes, and §6 gives the engine no way to do that on the
+// is deleting the guest's bytes, and the external API gives the engine no way to do that on the
 // caller's behalf. So accepting would manufacture a state the control plane cannot
 // leave.
 //
@@ -49,14 +49,14 @@ import (
 // `>=` check would hand the caller a 200 and a volume that can never take another byte.
 var ErrVolumeCapBelowUsage = errors.New("lifecycle: volume cap must be strictly greater than current usage")
 
-// ErrVolumeCapUnsupported is the §6.2 400 for a cap the chosen backend cannot
+// ErrVolumeCapUnsupported is the API error contract 400 for a cap the chosen backend cannot
 // enforce. It wraps the backend's own typed refusal so the boundary does not have to
 // re-derive the verdict, and it exists as a distinct sentinel because "this backend
 // cannot do that" is a different thing from "that number is wrong".
 var ErrVolumeCapUnsupported = errors.New("lifecycle: backend cannot enforce a capacity cap")
 
-// CreateVolume allocates a volume: gate, then BYTES, then the row (§5.C
-// bytes-first / §4.3 existence-is-state).
+// CreateVolume allocates a volume: gate, then BYTES, then the row (the Volume subsystem
+// bytes-first / health and reclamation existence-is-state).
 //
 // The ORDER is forced by existence-is-state: a `volumes` row has no not-ready value, so it may
 // only be inserted once the storage exists, and a crash before the insert leaves orphan BYTES
@@ -65,7 +65,7 @@ var ErrVolumeCapUnsupported = errors.New("lifecycle: backend cannot enforce a ca
 // inserted first — here a healthy in-flight create presents as "bytes, no row" even to a
 // completely fresh keep-set.
 //
-// CAPABILITIES ARE ASKED BEFORE AN ID IS MINTED OR A BYTE MOVES (volume.md D2) — see
+// CAPABILITIES ARE ASKED BEFORE AN ID IS MINTED OR A BYTE MOVES (the volume backend seam) — see
 // deriveVolume for the residue a late check leaves.
 //
 // admitMu spans {gate → allocate → insert}, which is the same
@@ -74,7 +74,7 @@ var ErrVolumeCapUnsupported = errors.New("lifecycle: backend cannot enforce a ca
 // cap), so holding the node-global gate across it does not serialize the node behind
 // a long operation.
 //
-// THAT PREMISE IS THE LOCAL ARM'S (volume.md D8): "bounded metadata work" is true of a btrfs
+// THAT PREMISE IS THE LOCAL ARM'S (volume.md constraints): "bounded metadata work" is true of a btrfs
 // ioctl and false of a network round trip. A remote backend falsifies it here and at
 // SetCapacity / Snapshot / Clone / UncappedBytes, where the same node-global gate is held
 // across a backend call — on a non-CoW object store a snapshot is a full object copy. The fix
@@ -89,14 +89,14 @@ func (m *Mediator) CreateVolume(ctx context.Context, capBytes int64) (model.Volu
 	}
 	// Capability check FIRST — before the ID, before the gate, before any bytes.
 	if capBytes > 0 && !be.Capabilities().Quota {
-		// Refused rather than silently dropped (§3.4).
+		// Refused rather than silently dropped (resource admission).
 		return "", fmt.Errorf("create volume: %w: backend %q reports no capacity-cap capability", ErrVolumeCapUnsupported, be.Name())
 	}
 
 	vid := model.VolumeID("vol_" + randToken())
 	rec := model.Volume{ID: vid, Backend: be.Name(), CapByte: capBytes, CreatedAt: time.Now()}
 
-	// Protect the unit for the whole create window (§4.4-A). Registered BEFORE the
+	// Protect the unit for the whole create window (atomic transition rollback). Registered BEFORE the
 	// gate so there is no instant in which bytes could exist unprotected.
 	m.markBuildingVolume(vid)
 	defer m.unmarkBuildingVolume(vid)
@@ -126,13 +126,13 @@ func (m *Mediator) CreateVolume(ctx context.Context, capBytes int64) (model.Volu
 	return vid, nil
 }
 
-// VolumeInfo is the §6.1 inspect shape: the record plus the backend's own usage
+// VolumeInfo is the control-plane API inspect shape: the record plus the backend's own usage
 // reading.
 //
 // Usage comes from the backend and the cap comes from the RECORD, and they are not
 // interchangeable. The backend's limit read-back is diagnostic only, because the
 // substrate's `none ↔ 0` mapping makes "never capped" and "deliberately uncapped"
-// indistinguishable from storage (volume.md D7.3, and see RepairVolumeCaps). Reporting
+// indistinguishable from storage (volume cap enforcement, and see RepairVolumeCaps). Reporting
 // the record's value keeps inspect honest about what the engine PROMISED, which is also
 // what the admission gate counts.
 type VolumeInfo struct {
@@ -141,7 +141,7 @@ type VolumeInfo struct {
 	// backend could not be read.
 	//
 	// A POINTER, because zero is a legitimate answer for an empty volume and the
-	// §6.1 contract says the key is absent IFF the number is unreadable. A value
+	// the control-plane API contract says the key is absent IFF the number is unreadable. A value
 	// type cannot carry both facts: it would make "empty" and "unreadable" the same
 	// answer, and the caller's use for this number — choosing a new cap STRICTLY
 	// greater than it — needs them apart (an unreadable usage must not look like a
@@ -151,7 +151,7 @@ type VolumeInfo struct {
 }
 
 // GetVolume reads one volume's record and asks its backend for current usage
-// (§6.1 inspect).
+// (the control-plane API inspect).
 func (m *Mediator) GetVolume(ctx context.Context, id model.VolumeID) (VolumeInfo, error) {
 	rec, err := m.deps.Store.GetVolume(ctx, id)
 	if err != nil {
@@ -173,15 +173,15 @@ func (m *Mediator) GetVolume(ctx context.Context, id model.VolumeID) (VolumeInfo
 	return info, nil
 }
 
-// ListVolumes returns every volume record (§6.1 list).
+// ListVolumes returns every volume record (the control-plane API list).
 func (m *Mediator) ListVolumes(ctx context.Context) ([]model.Volume, error) {
 	return m.deps.Store.ListVolumes(ctx)
 }
 
-// SetVolumeCapacity is the §6.1 PATCH write point — the cap's only write point
+// SetVolumeCapacity is the control-plane API PATCH write point — the cap's only write point
 // besides create.
 //
-// Three disciplines, all from §5.C, and none of them optional:
+// Three disciplines, all from the Volume subsystem, and none of them optional:
 //
 //  1. IT WORKS WHETHER OR NOT ANYTHING HAS THE VOLUME MOUNTED, which is the exact
 //     opposite of a sandbox cap (editable only while `paused`). The reason is
@@ -189,7 +189,7 @@ func (m *Mediator) ListVolumes(ctx context.Context) ([]model.Volume, error) {
 //     volume HAS no placement of its own — so "defer to the next placement" would
 //     mean NEVER for an unmounted volume. There is nothing to defer, so there is no
 //     "pause it first" refusal to make.
-//  2. A RAISE RE-CLEARS ADMISSION (§3.4: any write to a cap changes Σ at THIS
+//  2. A RAISE RE-CLEARS ADMISSION (resource admission: any write to a cap changes Σ at THIS
 //     commit, not at some later placement), and may be refused with 507. A lowering
 //     does not need the gate — Σ only shrinks.
 //  3. LOWERING BELOW CURRENT USAGE IS REFUSED, with a STRICT inequality. See
@@ -198,7 +198,7 @@ func (m *Mediator) ListVolumes(ctx context.Context) ([]model.Volume, error) {
 //
 // It is deliberately NOT subject to the write-regime invariant that governs direct
 // content changes: this moves an allocation ceiling, not bytes, so there is nothing
-// for a concurrent writer to tear (§5.C).
+// for a concurrent writer to tear (the Volume subsystem).
 func (m *Mediator) SetVolumeCapacity(ctx context.Context, id model.VolumeID, capBytes int64) error {
 	if capBytes < 0 {
 		return fmt.Errorf("patch volume: cap must be non-negative (0 = uncapped), got %d", capBytes)
@@ -215,21 +215,21 @@ func (m *Mediator) SetVolumeCapacity(ctx context.Context, id model.VolumeID, cap
 		return fmt.Errorf("patch volume: %w: backend %q reports no capacity-cap capability", ErrVolumeCapUnsupported, be.Name())
 	}
 
-	// REMOVING the cap is refused while the disk axis is METERED, and this is §3.4's
+	// REMOVING the cap is refused while the disk axis is METERED, and this is resource admission's
 	// rule rather than a new one (admitVolume's ErrCapRequired): PATCH is the same
 	// promise written at a different time, so accepting 0 here manufactures exactly the
 	// volume create that would have been refused — and it is the only route by which the
-	// btrfs arm's §3.4 second term can become non-zero on a metered node.
+	// btrfs arm's resource admission second term can become non-zero on a metered node.
 	//
 	// "Removing a cap is always safe" was true of the WEDGE (0 only widens what the unit
 	// may hold, so it can never strand bytes above the ceiling) and false of the BUDGET.
 	// Both halves matter, so the wedge check below still skips 0 while this one does not.
 	//
 	// Gated on the axis being metered, not applied unconditionally: on an unmetered node
-	// an uncapped volume is legal by §3.4's own terms, so refusing there would revoke a
+	// an uncapped volume is legal by resource admission's own terms, so refusing there would revoke a
 	// capability the spec grants.
 	if capBytes == 0 && m.deps.NodeCapacity.DiskByte > 0 {
-		return fmt.Errorf("patch volume: %w: this node meters the disk axis, so a volume may not be left uncapped (§3.4, the same reason create refuses one)", ErrCapRequired)
+		return fmt.Errorf("patch volume: %w: this node meters the disk axis, so a volume may not be left uncapped (resource admission, the same reason create refuses one)", ErrCapRequired)
 	}
 
 	// The strict-inequality check, only when a cap is actually being imposed. Removing
@@ -240,10 +240,10 @@ func (m *Mediator) SetVolumeCapacity(ctx context.Context, id model.VolumeID, cap
 			// FAIL CLOSED. Unlike inspect, usage here IS the decision: admitting a cap
 			// without knowing usage risks the irreversible wedge described on
 			// ErrVolumeCapBelowUsage, and that state has no exit through the API at all.
-			return fmt.Errorf("patch volume: cannot read current usage of %s, refusing to set a cap blind (an under-usage cap wedges the volume irreversibly, §5.C): %w", id, err)
+			return fmt.Errorf("patch volume: cannot read current usage of %s, refusing to set a cap blind (an under-usage cap wedges the volume irreversibly, the Volume subsystem): %w", id, err)
 		}
 		if capBytes <= used {
-			return fmt.Errorf("patch volume: %w: requested %d, current usage %d — a cap at or below usage wedges the volume irreversibly (§5.C / volume.md D7.3)",
+			return fmt.Errorf("patch volume: %w: requested %d, current usage %d — a cap at or below usage wedges the volume irreversibly (the Volume subsystem / volume cap enforcement)",
 				ErrVolumeCapBelowUsage, capBytes, used)
 		}
 	}
@@ -264,8 +264,8 @@ func (m *Mediator) SetVolumeCapacity(ctx context.Context, id model.VolumeID, cap
 
 	// Backend first, then the record. If the backend write fails the record is
 	// unchanged and still describes the storage, which keeps the record authoritative
-	// (§3.4). The reverse order would leave a record promising a cap the storage does
-	// not carry — and that divergence is UNDETECTABLE afterwards (volume.md D7.3), so
+	// (resource admission). The reverse order would leave a record promising a cap the storage does
+	// not carry — and that divergence is UNDETECTABLE afterwards (volume cap enforcement), so
 	// it must not be reachable.
 	if err := be.SetCapacity(ctx, string(id), capBytes); err != nil {
 		if errors.Is(err, volume.ErrUnsupported) {
@@ -279,19 +279,19 @@ func (m *Mediator) SetVolumeCapacity(ctx context.Context, id model.VolumeID, cap
 	return nil
 }
 
-// DeleteVolume removes the record, then reclaims the bytes (§5.C / §4.4).
+// DeleteVolume removes the record, then reclaims the bytes (the Volume subsystem / the transition contract).
 //
 // ROW FIRST, and that order is load-bearing. The row delete is where every
-// reference-protection refusal surfaces (§6.2's Volume 409s), so destroying bytes first
+// reference-protection refusal surfaces (the API error contract's Volume 409s), so destroying bytes first
 // would mean a delete the store then REFUSES has already destroyed the data it was
 // refusing to let go — the guard would be worse than absent.
 //
-// A crash between the two leaves orphan bytes, which is exactly the deferral §4.4
+// A crash between the two leaves orphan bytes, which is exactly the deferral the transition contract
 // licenses and the orphan sweep retries. Byte reclamation failing does NOT fail the
 // verb, for the same reason: the record is gone, so the sweep is the retry.
 //
 // NOT idempotent-by-swallowing: an absent volume reports store.ErrVolumeNotFound
-// (§6.2). Folding it into success is how an external implementation made
+// (the API error contract). Folding it into success is how an external implementation made
 // "the guard refused this delete" indistinguishable from "the delete succeeded".
 func (m *Mediator) DeleteVolume(ctx context.Context, id model.VolumeID) error {
 	if err := m.deps.Store.DeleteVolume(ctx, id); err != nil {
@@ -299,28 +299,28 @@ func (m *Mediator) DeleteVolume(ctx context.Context, id model.VolumeID) error {
 	}
 	if be := m.deps.Volume; be != nil {
 		if err := be.DestroyVolume(ctx, string(id)); err != nil {
-			m.deps.Logf("delete volume %s: byte reclamation failed, deferring to the orphan sweep (§4.4): %v", id, err)
+			m.deps.Logf("delete volume %s: byte reclamation failed, deferring to the orphan sweep (the transition contract): %v", id, err)
 		}
 	}
 	return nil
 }
 
-// ImportVolume streams src into the volume at the root-relative path (§6.1
+// ImportVolume streams src into the volume at the root-relative path (the control-plane API
 // POST /v1/volumes/{id}/import).
 //
 // NEEDS NO SANDBOX: this and ExportVolume are how the decoupling in the file header
-// becomes true in SUBSTANCE instead of only in the record layer (§5.C) — seeding a volume
+// becomes true in SUBSTANCE instead of only in the record layer (the Volume subsystem) — seeding a volume
 // before any sandbox exists, and reading one after the last is gone, have no other route.
 //
 // It STREAMS through a fixed buffer rather than materializing the payload, matching
-// the §6.1 requirement that the bytes never sit whole at either end.
+// the control-plane API requirement that the bytes never sit whole at either end.
 //
 // Any existing file at that path is REMOVED first, so an import is a replacement
 // rather than an overwrite-in-place: writing a shorter payload over a longer file
 // would otherwise leave the old tail attached and produce a file that is neither
 // the old nor the new content.
 func (m *Mediator) ImportVolume(ctx context.Context, id model.VolumeID, path string, src io.Reader) (int64, error) {
-	// The write-regime gate (§5.C). On IMPORT and not on EXPORT because the invariant is
+	// The write-regime gate (the Volume subsystem). On IMPORT and not on EXPORT because the invariant is
 	// about TEARING, and a read tears nothing (writeregime.go).
 	//
 	// The marker it publishes is held for the WHOLE stream, not just the decision —
@@ -358,7 +358,7 @@ func (m *Mediator) ImportVolume(ctx context.Context, id model.VolumeID, path str
 			if werr != nil {
 				// A capacity cap surfaces here as ENOSPC and is passed through rather than
 				// reclassified: past the cap a write failing is an EXPECTED data-plane
-				// result (§3.4), and the partial content is what the caller asked to write
+				// result (resource admission), and the partial content is what the caller asked to write
 				// as far as it got.
 				return written, fmt.Errorf("import volume %s: write %s: %w", id, path, werr)
 			}
@@ -372,7 +372,7 @@ func (m *Mediator) ImportVolume(ctx context.Context, id model.VolumeID, path str
 	}
 }
 
-// ExportVolume streams the volume's file at the root-relative path into dst (§6.1
+// ExportVolume streams the volume's file at the root-relative path into dst (the control-plane API
 // GET /v1/volumes/{id}/export). Needs no sandbox, for the same reason ImportVolume
 // does not.
 func (m *Mediator) ExportVolume(ctx context.Context, id model.VolumeID, path string, dst io.Writer) (int64, error) {
@@ -451,9 +451,9 @@ func pathClean(p string) string { return path.Clean("/" + strings.TrimSpace(p)) 
 // RECORD first.
 //
 // The record check is not redundant with the backend's own error: Materialize is
-// create-if-absent by contract (§5.C), and although OpenRoot is not, keeping the
+// create-if-absent by contract (the Volume subsystem), and although OpenRoot is not, keeping the
 // authority check in the mediator is what makes an unknown ID a clean 404 instead
-// of whatever the storage layer happens to say (§4: the store is authoritative, the
+// of whatever the storage layer happens to say (the lifecycle: the store is authoritative, the
 // backend answers about bytes).
 func (m *Mediator) openVolumeRoot(ctx context.Context, id model.VolumeID) (volume.Root, error) {
 	be := m.deps.Volume
@@ -470,18 +470,18 @@ func (m *Mediator) openVolumeRoot(ctx context.Context, id model.VolumeID) (volum
 	return r, nil
 }
 
-// SweepOrphanVolumes reclaims volume storage with no live record (§4.4-A) — the
-// §5.C mirror of SweepOrphanOverlays. The mediator reads the AUTHORITATIVE store
+// SweepOrphanVolumes reclaims volume storage with no live record (atomic transition rollback) — the
+// Volume subsystem mirror of SweepOrphanOverlays. The mediator reads the authoritative store
 // for the live set, snapshots the in-flight keep-set as LATE as possible, and hands
-// both to the backend, which enumerates only its own storage (§4: subsystems never
+// both to the backend, which enumerates only its own storage (the lifecycle: subsystems never
 // read the store).
 //
-// Skip-and-log per §4.4-A: a sweep failure is not fatal and retries next pass.
+// Skip-and-log per atomic transition rollback: a sweep failure is not fatal and retries next pass.
 //
 // ITS POSITION IN THE BOOT SEQUENCE IS LOAD-BEARING, not housekeeping — it must run
 // BEFORE any storage unit is created, because sweeping only on the periodic tick leaves a
-// window in which a new volume inherits a leaked row's id AND ITS CAP (§5.C / volume.md
-// D7.1; ReclaimQuotaRows states the measured consequence).
+// window in which a new Volume inherits a leaked row's ID and cap. ReclaimQuotaRows
+// states the measured consequence.
 func (m *Mediator) SweepOrphanVolumes(ctx context.Context) error {
 	be := m.deps.Volume
 	if be == nil {
@@ -498,7 +498,7 @@ func (m *Mediator) SweepOrphanVolumes(ctx context.Context) error {
 	units, err := be.ListUnitIDs(ctx)
 	if err != nil {
 		// Reclaim NOTHING: an unreadable enumeration is not evidence that anything is an
-		// orphan (§5.C — never conclude "no owner" from a failed read).
+		// orphan (the Volume subsystem — never conclude "no owner" from a failed read).
 		return fmt.Errorf("sweep volumes: enumerate units: %w", err)
 	}
 	if len(units) == 0 {
@@ -536,7 +536,7 @@ func (m *Mediator) SweepOrphanVolumes(ctx context.Context) error {
 		// committed volume can be reclaimed, and no lock is held across a store call.
 		//
 		// EVERY read here fails CLOSED: an error skips the candidate, and is never allowed
-		// to read as "no owner" (§5.C).
+		// to read as "no owner" (the Volume subsystem).
 		if m.isVolumeInFlight(model.VolumeID(id)) {
 			continue
 		}
@@ -548,7 +548,7 @@ func (m *Mediator) SweepOrphanVolumes(ctx context.Context) error {
 			m.deps.Logf("sweep volumes: %s: record unreadable, skipping: %v", id, err)
 			continue
 		}
-		// 3. A LIVE-MOUNT CHECK INDEPENDENT OF ANY FK (§5.C safety requirement): skip any
+		// 3. A LIVE-MOUNT CHECK INDEPENDENT OF ANY FK (the Volume subsystem safety requirement): skip any
 		// unit whose id appears in ANY mount row, live or not.
 		//
 		// It is asked of the CANDIDATE UNIT ID, and that placement is load-bearing.
@@ -563,11 +563,11 @@ func (m *Mediator) SweepOrphanVolumes(ctx context.Context) error {
 		//
 		// FK RESTRICT protects the ROW; this protects the BYTES, and the bytes are what a
 		// mis-sweep destroys — silently, with the guest's writes still returning success
-		// into an unlinked inode (volume.md D7.2: five ways of pulling a live volume, none
+		// into an unlinked inode (volume sweep safety: five ways of pulling a live volume, none
 		// killed the sandbox, three produced no errno at all).
 		if rows, err := m.deps.Store.ListMountsByVolume(ctx, model.VolumeID(id)); err != nil {
 			// SKIP, never "no owner": measured, a bulk read fails wholesale and returns zero
-			// rows under exactly the concurrent churn a sweep runs in (§5.C). Reclaiming on a
+			// rows under exactly the concurrent churn a sweep runs in (the Volume subsystem). Reclaiming on a
 			// failed read would be indistinguishable from reclaiming on an empty table.
 			m.deps.Logf("sweep volumes: %s: mount table unreadable, skipping: %v", id, err)
 			continue
@@ -607,7 +607,7 @@ func (m *Mediator) isVolumeInFlight(id model.VolumeID) bool {
 }
 
 // deleteMountsForCleanup drops a sandbox's mount rows on a cleanup path where the
-// caller cannot fail (reconcile's skip-and-log discipline, §4.4-A).
+// caller cannot fail (reconcile's skip-and-log discipline, atomic transition rollback).
 //
 // It logs rather than returning, because the caller's next step is a record delete
 // whose own error is already logged-and-skipped — but the log is not decoration: if
@@ -670,14 +670,14 @@ func (m *Mediator) materializeMounts(ctx context.Context, id model.SandboxID) ([
 }
 
 // adoptMounts re-recognizes the volume materializations of a sandbox being ADOPTED
-// after a control-plane crash (§4.4-A) — rootfs.AdoptMerged's §5.C counterpart.
+// after a control-plane crash (atomic transition rollback) — rootfs.AdoptMerged's the Volume subsystem counterpart.
 //
 // It uses AdoptMaterialized, NOT Materialize, and the difference is load-bearing.
 // Materialize is create-if-absent, so it would invent an empty unit for a volume whose
 // storage is gone — and then report the sandbox as cleanly adopted while its guest holds a
 // gofer onto the OLD, now-unlinked directory, indistinguishable from a healthy adopt while
 // the guest's writes keep succeeding into bytes no host path can reach (the measured
-// mis-sweep blast radius, volume.md D7.2). Adopt REFUSES an absent unit instead, which
+// mis-sweep blast radius, volume sweep safety). Adopt REFUSES an absent unit instead, which
 // turns that case into "uncertain → protect".
 //
 // A missing volume is therefore an ERROR here, deliberately, even though a fresh cold
@@ -685,7 +685,7 @@ func (m *Mediator) materializeMounts(ctx context.Context, id model.SandboxID) ([
 // new directory, so "recreate it empty" is not a recovery for a live sandbox. Failing
 // the adopt demotes nothing and tears nothing down — the caller keeps the sandbox in the
 // keep-set and retries — whereas a resume later will legitimately create-if-absent and
-// restart the guest clean (§5.C: data lost but recoverable).
+// restart the guest clean (the Volume subsystem: data lost but recoverable).
 func (m *Mediator) adoptMounts(ctx context.Context, id model.SandboxID) ([]*volume.Materialized, error) {
 	rows, err := m.deps.Store.ListMounts(ctx, id)
 	if err != nil {
@@ -715,7 +715,7 @@ func (m *Mediator) adoptMounts(ctx context.Context, id model.SandboxID) ([]*volu
 // releaseMounts ends every materialization in the slice, best-effort.
 //
 // Best-effort is correct rather than lazy: Release PROMISES idempotency and tolerance
-// of an already-gone target (§5.C), so a failure here cannot mean "the bytes are still
+// of an already-gone target (the Volume subsystem), so a failure here cannot mean "the bytes are still
 // live" — the bytes survive Release by definition. It is logged so a FUSE arm's stuck
 // unmount is visible without failing a pause that has already committed.
 func (m *Mediator) releaseMounts(ctx context.Context, mounts []*volume.Materialized) {
@@ -736,10 +736,10 @@ func (m *Mediator) releaseMounts(ctx context.Context, mounts []*volume.Materiali
 // mountDests reads one sandbox's volume mount destinations from the AUTHORITATIVE
 // mount table.
 //
-// It exists so §5.B can be HANDED the set rather than asking for it: the mediator
+// It exists so the Rootfs subsystem can be HANDED the set rather than asking for it: the mediator
 // already holds the mount table and already calls Promote, so threading the
-// destinations through keeps §5.B from ever needing to consult §5.C and no subsystem
-// edge appears (§4 / rootfs-overlay D5).
+// destinations through keeps the Rootfs subsystem from ever needing to consult the Volume subsystem and no subsystem
+// edge appears (the lifecycle / rootfs mount constraints).
 func (m *Mediator) mountDests(ctx context.Context, id model.SandboxID) ([]string, error) {
 	rows, err := m.deps.Store.ListMounts(ctx, id)
 	if err != nil {
@@ -779,16 +779,16 @@ func (m *Mediator) buildingVolumeIDs() []string {
 	return out
 }
 
-// SnapshotVolume / CloneVolume produce a NEW volume from an existing one (§6.1
+// SnapshotVolume / CloneVolume produce a NEW volume from an existing one (the control-plane API
 // POST /v1/volumes/{id}/snapshot and .../clone).
 //
 // They are two entry points over one backend path on the local arm, because that is
 // what the substrate is: the same whole-tree operation, differing in the semantic label
-// (volume.md D6.1a). Keeping them separate is what lets a backend supporting only one
+// (snapshot lineage). Keeping them separate is what lets a backend supporting only one
 // say so through Capabilities.
 //
 // The product is AN ORDINARY WRITABLE VOLUME with a `parent`, not a distinct read-only
-// type (volume.md D6.1a). Same cardinality argument as AccessMode: writability is a
+// type (snapshot lineage). Same cardinality argument as AccessMode: writability is a
 // per-MOUNT verdict, so a per-volume read-only flag could not be honest — and the measured
 // "the writer pays, in both directions" property is only meaningful while a snapshot is
 // writable. Immutability is a shared-ro mount row.
@@ -797,7 +797,7 @@ func (m *Mediator) buildingVolumeIDs() []string {
 // reasons: the substrate has nothing to inherit (a snapshot gets a brand-new UNCAPPED
 // quota row — measured in four shapes and verified by writing 3× the source's cap into
 // one), and on the policy side inheriting would silently DOUBLE the node's declared disk
-// claim at every snapshot, which the caller never asked for. §3.4 counts the DECLARED
+// claim at every snapshot, which the caller never asked for. resource admission counts the DECLARED
 // cap precisely because the real bytes are metadata-level (~16 KiB).
 func (m *Mediator) SnapshotVolume(ctx context.Context, srcID model.VolumeID, capBytes int64) (model.VolumeID, error) {
 	return m.deriveVolume(ctx, srcID, capBytes, false)
@@ -811,7 +811,7 @@ func (m *Mediator) CloneVolume(ctx context.Context, srcID model.VolumeID, capByt
 //
 //	capability → id → keep-set → gate → BYTES+CAP (one backend call) → row
 //
-// CAPABILITY FIRST, before an ID is minted and before a byte moves (volume.md D2). An
+// CAPABILITY FIRST, before an ID is minted and before a byte moves (the volume backend seam). An
 // external implementation maps "unsupported" at its HTTP boundary while the error is
 // born deep inside, so its 400 arrives only after the source has been fetched, flushed
 // and materialized — and combined with mediator-minted IDs, a late check leaves a window
@@ -848,7 +848,7 @@ func (m *Mediator) deriveVolume(ctx context.Context, srcID model.VolumeID, capBy
 	}
 
 	// The source must exist as a RECORD, checked before an ID is minted and before any
-	// bytes move. The record is the authority (§3.4), so a backend that happens to hold
+	// bytes move. The record is the authority (resource admission), so a backend that happens to hold
 	// bytes for a volume with no row is not a valid source — those bytes are an orphan the
 	// sweep is about to reclaim, and deriving from them would produce a child of something
 	// that is being deleted.
@@ -902,7 +902,7 @@ func (m *Mediator) deriveVolume(ctx context.Context, srcID model.VolumeID, capBy
 	return newID, nil
 }
 
-// repairUncappedVolumes is the §5.C / volume.md D7.3 REPAIR-STATE pass: a volume whose
+// repairUncappedVolumes is the Volume subsystem / volume cap enforcement REPAIR-STATE pass: a volume whose
 // RECORD declares a cap while its storage carries none.
 //
 // IT IS A REPAIR STATE, NOT A LEGAL ONE: the crash window deriveVolume describes leaves a
@@ -910,12 +910,12 @@ func (m *Mediator) deriveVolume(ctx context.Context, srcID model.VolumeID, capBy
 // own (the `none ↔ 0` mapping). So the engine must re-assert the record's cap rather than
 // trust what it finds.
 //
-// The direction is always RECORD → STORAGE. The record is the only authority (§3.4), so
+// The direction is always RECORD → STORAGE. The record is the only authority (resource admission), so
 // a disagreement is always resolved by rewriting the storage, never by adopting the
 // storage's value into the record — the latter would silently ratify exactly the crash
 // residue this exists to fix.
 //
-// BUT THE DIRECTION IS NOT A LICENCE TO WRITE ANY CAP: the same predicate the §6.1 write
+// BUT THE DIRECTION IS NOT A LICENCE TO WRITE ANY CAP: the same predicate the control-plane API write
 // point refuses (cap ≤ current usage, ErrVolumeCapBelowUsage) is refused here too — see
 // the branch below.
 //
@@ -953,29 +953,29 @@ func (m *Mediator) RepairVolumeCaps(ctx context.Context) error {
 		// A DISAGREEMENT IS NOT ENOUGH TO ACT ON: the record's cap must also still be
 		// applicable. At or below what the unit already holds, re-asserting it does not
 		// repair the volume, it WEDGES it irreversibly — the measured mechanism is on
-		// ErrVolumeCapBelowUsage (volume.md D7.3).
+		// ErrVolumeCapBelowUsage (volume cap enforcement).
 		//
-		// It is the SAME PREDICATE SetVolumeCapacity refuses at the §6.1 write point, and it
+		// It is the SAME PREDICATE SetVolumeCapacity refuses at the control-plane API write point, and it
 		// has to be checked here too: this path reaches the identical backend call without
 		// passing that guard, so a recovery pass would otherwise be the way around a refusal
 		// that exists precisely because the resulting state has no exit. The window that
-		// produces the input is real — D7.3's load-bearing window leaves "record says cap=N,
+		// produces the input is real — Volume storage's load-bearing window leaves "record says cap=N,
 		// quota row says none", and `none` means UNBOUNDED writes meanwhile, so usage past N
 		// is reachable without anything misbehaving.
 		//
 		// SKIPPING IS THE SAFE DIRECTION AND IMPOSING IS THE IRREVERSIBLE ONE: the skipped
-		// volume is temporarily UNCAPPED, so its bytes leave the §3.4 first term (declared
+		// volume is temporarily UNCAPPED, so its bytes leave the resource admission first term (declared
 		// caps) and are picked up by the SECOND one — the backend measures them through
 		// UncappedBytes — which keeps the node's inequality a true statement about this disk
 		// and errs conservatively. Imposing trades that for a unit no API call can unstick.
 		//
 		// Neither is it a dead end. Usage falling back under the recorded cap (the guest
 		// deletes bytes) makes the NEXT pass repair it with no operator action at all, and
-		// §6.1 PATCH /v1/volumes/{id} with a size STRICTLY above current usage is a legal
+		// the control-plane API PATCH /v1/volumes/{id} with a size STRICTLY above current usage is a legal
 		// raise that re-asserts a cap immediately (it re-clears admission, so it can be
 		// refused with 507, but it is never refused as a wedge).
 		if v.CapByte <= used {
-			m.deps.Logf("repair volume caps: %s: NOT re-asserting the recorded cap %d — the unit holds %d byte(s) and a cap at or below usage wedges it irreversibly (§5.C / volume.md D7.3). It stays UNCAPPED, counted by the §3.4 uncapped term; exits are the guest freeing bytes or PATCH /v1/volumes/%s above %d",
+			m.deps.Logf("repair volume caps: %s: NOT re-asserting the recorded cap %d — the unit holds %d byte(s) and a cap at or below usage wedges it irreversibly (the Volume subsystem / volume cap enforcement). It stays UNCAPPED, counted by the resource admission uncapped term; exits are the guest freeing bytes or PATCH /v1/volumes/%s above %d",
 				v.ID, v.CapByte, used, v.ID, used)
 			continue
 		}
@@ -985,7 +985,7 @@ func (m *Mediator) RepairVolumeCaps(ctx context.Context) error {
 			continue
 		}
 		repaired++
-		m.deps.Logf("repair volume caps: %s carried %d on storage but %d in the record — re-asserted the record's cap (this is the crash window between a snapshot and its cap write, volume.md D7.3)", v.ID, limit, v.CapByte)
+		m.deps.Logf("repair volume caps: %s carried %d on storage but %d in the record — re-asserted the record's cap (this is the crash window between a snapshot and its cap write, volume cap enforcement)", v.ID, limit, v.CapByte)
 	}
 	if repaired > 0 {
 		m.deps.Logf("repair volume caps: re-asserted %d cap(s)", repaired)
@@ -993,7 +993,7 @@ func (m *Mediator) RepairVolumeCaps(ctx context.Context) error {
 	return nil
 }
 
-// ReclaimQuotaRows runs the §5.C / D7 leaked-quota-row reclamation round.
+// ReclaimQuotaRows runs the Volume subsystem / Volume storage leaked-quota-row reclamation round.
 //
 // A leaked row is a CORRECTNESS problem, not untidiness: it does not reserve its own
 // unit id, so a remount can hand that id — along with its CAP — to a brand-new volume,

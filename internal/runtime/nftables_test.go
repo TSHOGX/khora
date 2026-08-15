@@ -43,7 +43,7 @@ func one(r ruleset.Rule) ruleset.RuleSet {
 
 // --- the four render guards, on rendered TEXT ---------------------------------
 
-// GUARD 1: no `policy drop` on a per-sandbox base chain.
+// Per-sandbox base chains must not use `policy drop`.
 //
 // A chain policy CANNOT be narrowed by any input-interface predicate — that is a
 // property of the policy position itself, not of the predicate — so a `policy drop`
@@ -83,13 +83,13 @@ func TestGuardRefusesPolicyDropInAPerSandboxTable(t *testing.T) {
 	}
 }
 
-// GUARD 2: `iifname` / `oifname` (by NAME), never `iif` / `oif` (by INDEX).
+// Interface matches use `iifname` / `oifname` (by NAME), never `iif` / `oif` (by INDEX).
 //
 // This is the single hardest property to catch by review, because BOTH failure
 // modes are invisible: `iif` freezes an ifindex at load time and silently fails OPEN
 // after a same-name veth rebuild (measured — the guest's packet was DELIVERED while
 // the drop counter read 0), and `nft list` resolves that frozen integer back to a
-// name, so the two spellings look IDENTICAL in a listing (network.md D5 ⑫).
+// name, so the two spellings look IDENTICAL in a listing (network substrate measurements).
 func TestGuardRefusesTheByIndexInterfaceSpelling(t *testing.T) {
 	for _, scope := range []ruleset.Scope{ruleset.ScopeGuestIn, ruleset.ScopeGuestOut} {
 		rs := one(ruleset.Rule{
@@ -115,7 +115,7 @@ func TestGuardRefusesTheByIndexInterfaceSpelling(t *testing.T) {
 			t.Errorf("the guard accepted the by-INDEX spelling %q — it freezes an ifindex at load "+
 				"time and fails OPEN after a same-name veth rebuild, with the drop counter reading 0 "+
 				"(indistinguishable from `no traffic yet`), and `nft list` resolves it back to a name "+
-				"so review cannot see it (D5 ⑫)", bad)
+				"so review cannot see it (network enforcement)", bad)
 		}
 	}
 	// …and it must NOT false-positive on the legitimate longer words.
@@ -130,7 +130,7 @@ func TestGuardRefusesTheByIndexInterfaceSpelling(t *testing.T) {
 	}
 }
 
-// GUARD 3: no un-narrowed rule in a per-sandbox table, accept AND drop alike.
+// Per-sandbox verdicts must be narrowed, accept AND drop alike.
 //
 // Every per-sandbox table is a `policy accept` base chain on a SHARED hook, so an
 // un-narrowed accept is a hole in EVERY sandbox's floor (measured: sandbox 2's flow
@@ -146,7 +146,7 @@ func TestGuardRefusesAnUnNarrowedPerSandboxRule(t *testing.T) {
 		// forward arm and the deny-safe tier both render `ip daddr { … }`, so an address
 		// clause is not evidence of a per-sandbox narrowing at all. Without the `iifname`
 		// this drop terminates across chains and takes out every sandbox's traffic to
-		// those prefixes (measured both ways, D5 ⑧ ⑩).
+		// those prefixes (measured both ways, network enforcement ).
 		`ip daddr { 10.66.0.0/16, 192.168.0.0/16 } counter name in_floor drop`,
 		`ip daddr 10.66.0.0/16 counter name c reject`,
 		// Same shape carrying a protocol but still no port: `meta l4proto tcp` narrows to
@@ -168,7 +168,7 @@ func TestGuardRefusesAnUnNarrowedPerSandboxRule(t *testing.T) {
 			t.Errorf("the guard accepted the un-narrowed per-sandbox rule %q — an un-narrowed accept "+
 				"is a hole in EVERY sandbox's floor (measured: another sandbox's flow was let through "+
 				"with both floors counting 0), and an un-narrowed drop terminates across chains "+
-				"(D5 ⑩)", bad)
+				"(network enforcement)", bad)
 		}
 	}
 	// …and the ONE address-shaped narrowing that IS legal must still pass: a publish
@@ -201,25 +201,25 @@ func TestGuardRefusesAnUnNarrowedPerSandboxRule(t *testing.T) {
 	}
 }
 
-// GUARD 4, and the SCOPE SPLIT that makes the four guards coherent.
+// The second-hop table uses its own scope rules.
 //
 // On the engine-level second-hop table the narrowing predicate is `skuid`, because
 // that traffic arrives on NO INTERFACE (measured: a host-local process's egress
 // counts zero in `forward` in all three shapes and is visible only in `output` —
-// network.md D5 ㉔). An un-narrowed drop there is a HOST-LEVEL egress kill switch:
+// network substrate measurements). An un-narrowed drop there is a HOST-LEVEL egress kill switch:
 // measured, root's own probe failed too.
 //
 // So the guards are SCOPED BY TABLE, not one guard with an exemption. The paired
 // assertion below is the one that matters: a legal second-hop rule (skuid-narrowed,
 // carrying NO interface predicate) must NOT be rejected by the per-sandbox guard —
-// otherwise the guard and §2.4 invariant 2 are mutually exclusive and whichever was
+// otherwise the guard and the second-hop floor are mutually exclusive and whichever was
 // written first wins silently.
 func TestTheGuardScopesDoNotCross(t *testing.T) {
 	uid := 4711
 	ctx := renderCtx{table: SecondHopTable, secondHopUID: &uid}
 	rs := one(ruleset.Rule{
 		Hook: ruleset.HookOutputFilter, Scope: ruleset.ScopeSecondHopUID, Verdict: ruleset.Drop,
-		Match: ruleset.Match{DestV4: ruleset.FloorV4}, Counter: "hop2", Why: "§2.4 invariant 2",
+		Match: ruleset.Match{DestV4: ruleset.FloorV4}, Counter: "hop2", Why: "the second-hop floor",
 	})
 	text := mustRender(t, rs, ctx)
 	if !strings.Contains(text, "meta skuid 4711") {
@@ -237,21 +237,21 @@ func TestTheGuardScopesDoNotCross(t *testing.T) {
 	if err := renderGuards(text, true, nil); err == nil {
 		t.Error("the per-sandbox guard ACCEPTED a uid-narrowed rule — the two guards must have " +
 			"disjoint scopes, and this direction is what proves they do: a single " +
-			"`every rule carries iifname` guard would reject the very rule §2.4 invariant 2 requires")
+			"`every rule carries iifname` guard would reject the very rule the second-hop floor requires")
 	}
 
 	// An un-narrowed drop in the second-hop table is refused.
 	if err := renderGuards("table inet t {\n  chain c {\n    ip daddr 10.66.0.0/16 counter name c drop\n  }\n}", false, nil); err == nil {
 		t.Error("the second-hop guard accepted a drop with no `skuid` — on the output hook that is a " +
 			"HOST-LEVEL egress kill switch (measured: root's own probe failed too), and `iifname` " +
-			"cannot be the narrowing there because the traffic arrives on no interface (D5 ㉔)")
+			"cannot be the narrowing there because the traffic arrives on no interface (network enforcement)")
 	}
 	// A uid-narrowed ACCEPT is refused: skuid misses packets, so an accept narrowed
 	// by it leaks them past the floor it sits above (the measured asymmetry).
 	if err := renderGuards("table inet t {\n  chain c {\n    meta skuid 4711 counter name c accept\n  }\n}", false, nil); err == nil {
 		t.Error("the second-hop guard accepted a uid-narrowed ACCEPT — `skuid` does not reliably " +
 			"match every packet of a flow, so the packets it misses fall through to whatever is " +
-			"below (D5 ㉔ asymmetry); a uid narrowing is safe on a DROP only")
+			"below (network enforcement asymmetry); a uid narrowing is safe on a DROP only")
 	}
 	// Rendering a uid-scoped rule with no uid bound must FAIL rather than silently
 	// drop the narrowing — that would produce precisely the host-level kill switch.
@@ -277,7 +277,7 @@ func TestTheGuardScopesDoNotCross(t *testing.T) {
 		{`counter name hop2 masquerade`, "same: no nat verdict belongs in this table"},
 		{`ct state new counter name hop2 accept`,
 			"an accept matching `new` admits NEW connections to in-floor addresses — the " +
-				"confused deputy §2.4 invariant 2 refuses. It passed because the accept arm " +
+				"confused deputy the second-hop floor refuses. It passed because the accept arm " +
 				"enumerated refusals instead of whitelisting the one legal shape"},
 		{`ct state new,established counter name hop2 accept`,
 			"same, spelled as a state list"},
@@ -302,7 +302,7 @@ func TestTheGuardScopesDoNotCross(t *testing.T) {
 // that tripped on the explanation would force the explanations out — which is the
 // wrong direction (the same reason edge_test.go reads the AST rather than grepping).
 func TestGuardsIgnoreTheirOwnRationaleText(t *testing.T) {
-	line := `iifname "vh0" counter name c drop comment "not policy drop, and not iif: see D5 ⑫"`
+	line := `iifname "vh0" counter name c drop comment "not policy drop, and not iif: see network enforcement"`
 	if err := renderGuards("table inet t {\n  chain c {\n    "+line+"\n  }\n}", true, nil); err != nil {
 		t.Errorf("a guard tripped on a rule's own COMMENT: %v — the comments have to be able to name "+
 			"the shapes they avoid, so the guard must read the rule and not the prose", err)
@@ -312,7 +312,7 @@ func TestGuardsIgnoreTheirOwnRationaleText(t *testing.T) {
 		Hook: ruleset.HookInput, Scope: ruleset.ScopeGuestIn, Verdict: ruleset.Reject,
 		Match:   ruleset.Match{CTState: []string{"new"}},
 		Counter: "in_floor",
-		Why:     "L0 floor: NOT policy drop (cross-sandbox kill switch), and iifname not iif (D5 ⑫)",
+		Why:     "L0 floor: NOT policy drop (cross-sandbox kill switch), and iifname not iif (network enforcement)",
 	})
 	if err := renderGuards(mustRender(t, rs, testCtx()), true, nil); err != nil {
 		t.Errorf("a guard tripped on the renderer's own comment: %v", err)
@@ -327,7 +327,7 @@ func TestGuardsIgnoreTheirOwnRationaleText(t *testing.T) {
 // `-f` FILE, so the bare `table` line must come first (it creates it if absent) to
 // make the delete always legal. And named counters MUST be declared before the
 // chains referencing them, or the parse desynchronizes and the error is reported
-// against a LATER line — several chains from its cause (measured, D5 ㉔).
+// against a LATER line — several chains from its cause (measured, network enforcement).
 func TestTheRenderedFileIsAnIdempotentAtomicThreeStep(t *testing.T) {
 	rs := ruleset.RuleSet{
 		Counters: []string{"a", "b"},
@@ -357,15 +357,15 @@ func TestTheRenderedFileIsAnIdempotentAtomicThreeStep(t *testing.T) {
 	if iCounter < 0 || iChain < 0 || iCounter > iChain {
 		t.Errorf("named counters are not declared before the chains referencing them (counter=%d "+
 			"chain=%d) — the parse then desynchronizes and reports the error several chains from "+
-			"its cause (D5 ㉔)", iCounter, iChain)
+			"its cause (network enforcement)", iCounter, iChain)
 	}
 	// `fwd` is a RESERVED WORD in nft 1.1.6, and a chain-name collision presents as
-	// "my rule syntax is wrong" several chains away from the real cause (D5 ㉔).
+	// "my rule syntax is wrong" several chains away from the real cause (network enforcement).
 	for _, line := range strings.Split(text, "\n") {
 		if strings.HasPrefix(strings.TrimSpace(line), "chain fwd") {
 			t.Errorf("a chain is named `fwd`, which is reserved in nft 1.1.6 — the collision "+
 				"desynchronizes the parser so EVERY LATER CHAIN reports a bogus syntax error of its "+
-				"own (D5 ㉔): %q", line)
+				"own (network enforcement): %q", line)
 		}
 	}
 }
@@ -373,7 +373,7 @@ func TestTheRenderedFileIsAnIdempotentAtomicThreeStep(t *testing.T) {
 // The three placement products the renderer binds, and the two that are refused when
 // unbound. Rendering with an unbound product must FAIL rather than emit a rule
 // missing a clause — a floor rule without its interface is the un-narrowed shape
-// guard 3 exists to stop.
+// the narrowed-verdict guard exists to stop.
 func TestRenderingRefusesAnUnboundPlacementProduct(t *testing.T) {
 	cases := map[string]struct {
 		rule ruleset.Rule
@@ -422,7 +422,7 @@ func TestRenderingRefusesAnUnboundPlacementProduct(t *testing.T) {
 // matches IPv6 too — including a global prefix the guest invented for itself, which
 // the orchestrator could not enumerate even in principle — so an explicit
 // `meta nfproto ipv6` second arm is redundant (measured: it counted exactly the
-// packets the family-agnostic rule had already caught, network.md D5 ⑪).
+// packets the family-agnostic rule had already caught, network substrate measurements).
 func TestTheCtStateClauseCarriesNoFamilyQualifier(t *testing.T) {
 	rs := one(ruleset.Rule{
 		Hook: ruleset.HookInput, Scope: ruleset.ScopeGuestIn, Verdict: ruleset.Reject,
@@ -437,7 +437,7 @@ func TestTheCtStateClauseCarriesNoFamilyQualifier(t *testing.T) {
 		if strings.Contains(text, banned) {
 			t.Errorf("the ct-state floor carries %q — it must be family-UNQUALIFIED and carry no "+
 				"address list, or the engine has to know its own bind addresses and the whole "+
-				"`a host address changed, must we re-render` class of question comes back (D5 ⑧ ⑪):\n%s",
+				"`a host address changed, must we re-render` class of question comes back (network enforcement ):\n%s",
 				banned, text)
 		}
 	}
@@ -445,7 +445,7 @@ func TestTheCtStateClauseCarriesNoFamilyQualifier(t *testing.T) {
 
 // `via[]`'s narrow accept must render all three clauses — the pre-NAT tuple, the
 // post-NAT port, and the interface. Each omission has a live measured
-// counter-example (D5 ⑩), so the RENDERED text is checked clause by clause rather
+// counter-example (network enforcement), so the RENDERED text is checked clause by clause rather
 // than trusting the abstract rule.
 func TestTheViaAcceptRendersAllThreeClauses(t *testing.T) {
 	cidr := netip.MustParsePrefix("1.1.1.1/32")
@@ -469,7 +469,7 @@ func TestTheViaAcceptRendersAllThreeClauses(t *testing.T) {
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("the narrow accept is missing %q — all three clauses are load-bearing, each "+
-				"with a measured counter-example (D5 ⑩):\n%s", want, text)
+				"with a measured counter-example (network enforcement):\n%s", want, text)
 		}
 	}
 }
@@ -485,7 +485,7 @@ func TestTheTransparentFormRendersOneFewerClause(t *testing.T) {
 	if strings.Contains(transparent, "ct original ip daddr") {
 		t.Errorf("the transparent form emitted a pre-NAT cidr clause — the declaration authorized "+
 			"ANY destination on that port, so the clause would block exactly the traffic it "+
-			"allowed (D3.3 / D5 ⑩):\n%s", transparent)
+			"allowed (network enforcement):\n%s", transparent)
 	}
 	cidr := netip.MustParsePrefix("1.1.1.1/32")
 	pinned := base
@@ -500,11 +500,11 @@ func TestTheTransparentFormRendersOneFewerClause(t *testing.T) {
 	}
 }
 
-// §5.D's PORT WILDCARD, both directions: a rule carrying no port renders WITHOUT a
+// the network declaration's PORT WILDCARD, both directions: a rule carrying no port renders WITHOUT a
 // `dport` clause (so it really matches every port), and the same rule carrying one
 // renders WITH it (so the wildcard is not the only thing this can produce).
 //
-// Both halves are load-bearing in the same way the `cidr` pair is (D5 ⑩). Emitting a
+// Both halves are load-bearing in the same way the `cidr` pair is (network enforcement). Emitting a
 // `dport` clause for a wildcard tuple would refuse exactly the traffic the declaration
 // authorized — every port of that destination — and the failure would be invisible in
 // `nft list`, because a rule with one extra clause looks like a rule that was meant to
@@ -527,7 +527,7 @@ func TestThePortClauseIsRenderedIffTheDeclarationPinnedOne(t *testing.T) {
 	wildcard := mustRender(t, one(base), testCtx())
 	if strings.Contains(wildcard, "dport") {
 		t.Errorf("a tuple with no port rendered a `dport` clause — an omitted `port` means ANY "+
-			"PORT (§5.D), so the clause would refuse exactly the traffic the declaration "+
+			"PORT (the network declaration), so the clause would refuse exactly the traffic the declaration "+
 			"authorized:\n%s", wildcard)
 	}
 	// The destination is still pinned: "any port" must not leak into "any destination".
@@ -535,10 +535,10 @@ func TestThePortClauseIsRenderedIffTheDeclarationPinnedOne(t *testing.T) {
 		t.Errorf("the wildcard-port rule lost its destination clause:\n%s", wildcard)
 	}
 	// The protocol survives as a narrowing of its own — a wildcard on `port` is not a
-	// wildcard on `proto`, which has none (D3.1).
+	// wildcard on `proto`, which has none (network enforcement).
 	if !strings.Contains(wildcard, "meta l4proto tcp") {
 		t.Errorf("the wildcard-port rule dropped its protocol narrowing — `proto` has no "+
-			"wildcard (D3.1):\n%s", wildcard)
+			"wildcard (network enforcement):\n%s", wildcard)
 	}
 
 	pinned := base
@@ -567,7 +567,7 @@ func TestThePortClauseIsRenderedIffTheDeclarationPinnedOne(t *testing.T) {
 // named no port renders no `ct original proto-dst` clause, while one that named a port
 // renders it.
 //
-// D5 ⑩ calls all three clauses of this accept load-bearing, so the wildcard needs its own
+// network enforcement calls all three clauses of this accept load-bearing, so the wildcard needs its own
 // assertion rather than an inference from the post-NAT case: what that measurement forbids
 // is an accept admitting MORE than the declaration authorized. Dropping the pre-NAT port
 // on a tuple that NAMED one does exactly that (an undeclared original port reaches a
@@ -592,7 +592,7 @@ func TestTheViaAcceptsPreNATPortFollowsTheSameWildcard(t *testing.T) {
 		if !strings.Contains(wildcard, want) {
 			t.Errorf("the wildcard-port via accept is missing %q — dropping the interface makes "+
 				"it a hole in every other sandbox's floor, and dropping the post-NAT port lets it "+
-				"reach a listener the declaration never named (D5 ⑩):\n%s", want, wildcard)
+				"reach a listener the declaration never named (network enforcement):\n%s", want, wildcard)
 		}
 	}
 
@@ -601,14 +601,14 @@ func TestTheViaAcceptsPreNATPortFollowsTheSameWildcard(t *testing.T) {
 	explicit := mustRender(t, one(pinned), testCtx())
 	if !strings.Contains(explicit, "ct original proto-dst 443") {
 		t.Errorf("a via[] tuple that named a port did not render its pre-NAT port clause — "+
-			"without it an UNDECLARED original port reaches a declared listener (D5 ⑩):\n%s",
+			"without it an UNDECLARED original port reaches a declared listener (network enforcement):\n%s",
 			explicit)
 	}
 }
 
 // A brace set renders without `auto-merge`. With it, nft LOADS a set holding nested
 // members but SILENTLY SWALLOWS the subnet — which would merge the floor away
-// (measured, network.md D5 ⑱). The safe failure direction is refusing to load.
+// (measured, network substrate measurements). The safe failure direction is refusing to load.
 func TestAddressSetsAreRenderedWithoutAutoMerge(t *testing.T) {
 	rs := one(ruleset.Rule{
 		Hook: ruleset.HookForward, Scope: ruleset.ScopeGuestIn, Verdict: ruleset.Reject,
@@ -618,7 +618,7 @@ func TestAddressSetsAreRenderedWithoutAutoMerge(t *testing.T) {
 	if strings.Contains(text, "auto-merge") {
 		t.Error("an address set was rendered with `auto-merge` — it makes nft accept a set holding " +
 			"nested members while SILENTLY merging the subnet away, which is how the floor gets " +
-			"merged out of existence without a word (D5 ⑱)")
+			"merged out of existence without a word (network enforcement)")
 	}
 	if !strings.Contains(text, "ip daddr { ") {
 		t.Errorf("the multi-member set did not render as a brace set:\n%s", text)
@@ -638,7 +638,7 @@ func TestAddressSetsAreRenderedWithoutAutoMerge(t *testing.T) {
 // Guest-facing refusals render as `reject`, not `drop`.
 //
 // gVisor's netstack honors ICMP errors, so the two spellings differ by orders of
-// magnitude in what the guest experiences (network.md D5 ⑨). §2.4's fail-closed has
+// magnitude in what the guest experiences (network substrate measurements). the provider security contract's fail-closed has
 // two halves and a pure-`drop` floor meets only the security one, violating the
 // half it wrote down itself: "the guest gets a clean connection failure". Security
 // is identical — neither forwards the packet.
@@ -658,7 +658,7 @@ func TestGuestFacingRefusalsRenderAsReject(t *testing.T) {
 	if strings.Contains(text, "admin-prohibited") {
 		t.Error("the refusal names `admin-prohibited`, which gVisor IGNORES on UDP (measured: the " +
 			"guest still hung ~5 s). Only `port-unreachable` is honored there, and nft's inet " +
-			"default is exactly that (D5 ⑨)")
+			"default is exactly that (network enforcement)")
 	}
 }
 
@@ -703,7 +703,7 @@ func TestLongRationalesAreTruncatedRatherThanBreakingTheLoad(t *testing.T) {
 
 // Table names carry the SandboxID verbatim and are recoverable from it, which is
 // what lets reconciliation identify orphan tables and re-adopt a survivor's rules
-// (§4.4-A labeling / §2.4: the rule set is crash-surviving host state).
+// (atomic transition rollback labeling / the provider security contract: the rule set is crash-surviving host state).
 func TestTableNamesAreReversibleAndTheEngineTableIsNotASandbox(t *testing.T) {
 	const sandbox = "sbx_0011223344556677"
 	table := nftTableName(sandbox)
@@ -716,12 +716,12 @@ func TestTableNamesAreReversibleAndTheEngineTableIsNotASandbox(t *testing.T) {
 			"reconciliation cannot tell which table backs which sandbox", table, got, ok, sandbox)
 	}
 	// The engine-level second-hop table must NEVER be read as a sandbox's table: it
-	// belongs to the process, so treating it as an orphan would tear down §2.4
-	// invariant 2's enforcement on every reconciliation pass.
+	// belongs to the process, so treating it as an orphan would tear down the provider security contract
+	// second-hop floor enforcement on every reconciliation pass.
 	if _, ok := sandboxOfTable(SecondHopTable); ok {
 		t.Errorf("sandboxOfTable(%q) claimed the ENGINE-LEVEL table belongs to a sandbox — "+
 			"reconciliation would then reclaim it as an orphan and silently switch off the second "+
-			"hop's enforcement (§2.4 invariant 2)", SecondHopTable)
+			"hop's enforcement (the second-hop floor)", SecondHopTable)
 	}
 	if !strings.HasPrefix(SecondHopTable, nftTablePrefix) {
 		// It shares the prefix so a stray engine table is still visible to an operator
@@ -789,7 +789,7 @@ func TestPublishPortAllocationDoesNotCollide(t *testing.T) {
 // endpoint of their own.
 //
 // The declaration layer already keys on the pair (network.AddPublish dedupes on it,
-// §5.D defines idempotency on it), so a provider keying on the guest port alone
+// the network declaration defines idempotency on it), so a provider keying on the guest port alone
 // narrows the notion of identity BELOW the declaration's. The failure that produces is
 // not a missing rule but a false accusation: the generator emits all four DNATs, and
 // the BINDING refuses the second item as a duplicate whose deduplication "belongs to
@@ -869,11 +869,11 @@ func TestADuplicatePairIsStillRefused(t *testing.T) {
 }
 
 // WITHIN one placement, an existing publish's endpoint does NOT move when another is
-// hot-added. That is the §3.3 boundary, and both sides of it matter:
+// hot-added. That is the ID-reference model boundary, and both sides of it matter:
 //
 //   - ACROSS placements the endpoint MAY change — it is a placement product, which is
-//     why §6.1 reports it only while a placement exists and §3.3 forbids caching it.
-//   - WITHIN one placement it may not. §5.D endorses hot-adding a publish on a
+//     why the control-plane API reports it only while a placement exists and the ID-reference model forbids caching it.
+//   - WITHIN one placement it may not. the network declaration endorses hot-adding a publish on a
 //     `running` sandbox precisely because it is PURELY ADDITIVE; re-drawing A's
 //     endpoint while adding B is not additive, and nothing in the record changed for A.
 func TestHotAddingAPublishDoesNotMoveTheExistingEndpoints(t *testing.T) {
@@ -899,7 +899,7 @@ func TestHotAddingAPublishDoesNotMoveTheExistingEndpoints(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got := h.publishEndpoints[keyA]; got != epA {
-		t.Errorf("hot-adding a second publish moved the FIRST one's endpoint: %s → %s. §5.D endorses "+
+		t.Errorf("hot-adding a second publish moved the FIRST one's endpoint: %s → %s. the network declaration endorses "+
 			"hot-adding because a publish is purely additive — a caller that just published 9090 would "+
 			"silently lose its 8080 endpoint, which no record change asked for", epA, got)
 	}
@@ -909,12 +909,12 @@ func TestHotAddingAPublishDoesNotMoveTheExistingEndpoints(t *testing.T) {
 
 	// The IDEMPOTENT repeat: the mediator's AddPublish reaches the install path even when
 	// nothing was appended (added=false), so re-binding the same spec must be a no-op.
-	// §6.1 promises a repeated publish returns THE EXISTING one.
+	// the control-plane API promises a repeated publish returns THE EXISTING one.
 	if err := p.bindPublishEndpoints(&h, second); err != nil {
 		t.Fatal(err)
 	}
 	if got := h.publishEndpoints[keyA]; got != epA {
-		t.Errorf("re-binding an unchanged spec moved an endpoint: %s → %s. §6.1 makes a repeated "+
+		t.Errorf("re-binding an unchanged spec moved an endpoint: %s → %s. the control-plane API makes a repeated "+
 			"publish idempotent — returning the EXISTING item — so a second identical POST must not "+
 			"answer with a different host_endpoint", epA, got)
 	}
@@ -938,7 +938,7 @@ func TestHotAddingAPublishDoesNotMoveTheExistingEndpoints(t *testing.T) {
 }
 
 // Adopt recovers the endpoints from the INSTALLED table rather than re-drawing them
-// (§5.A: `Adopt` returns the same endpoint, no new epoch).
+// (the runtime provider contract: `Adopt` returns the same endpoint, no new epoch).
 //
 // This test drives the PARSER against text in the exact shape the renderer produces,
 // which is what makes the recovery reversible-by-construction rather than a general
@@ -985,7 +985,7 @@ func TestPublishEndpointsAreRecoverableFromTheRenderedRules(t *testing.T) {
 		if got[k] != want {
 			t.Errorf("recovering %s from the rendered rules gave %q, want %q. Without this read-back a "+
 				"restarted process re-issues ports in adoption order, so two survivors can come back "+
-				"SWAPPED — a cached endpoint then reaches ANOTHER SANDBOX (§5.A Adopt: same endpoint, "+
+				"SWAPPED — a cached endpoint then reaches ANOTHER SANDBOX (the runtime provider contract Adopt: same endpoint, "+
 				"no new epoch)\n%s", k, got[k], want, text)
 		}
 	}
@@ -995,7 +995,7 @@ func TestPublishEndpointsAreRecoverableFromTheRenderedRules(t *testing.T) {
 }
 
 // The default publish address is LOOPBACK, and that default is a decision: publish
-// is an EXPLICIT inbound exception (§2.1 ③), so binding it to every host interface
+// is an EXPLICIT inbound exception (the isolation model), so binding it to every host interface
 // by default would make "this sandbox is reachable from outside" a consequence of
 // omitting a flag rather than of a decision.
 func TestThePublishAddressDefaultsToLoopback(t *testing.T) {
@@ -1006,7 +1006,7 @@ func TestThePublishAddressDefaultsToLoopback(t *testing.T) {
 	}
 	if got := p.publishIP(); got != "127.0.0.1" {
 		t.Errorf("publishIP() = %q by default, want loopback — external reachability must come from "+
-			"a deployment DECISION, not from omitting a flag (§2.1 ③)", got)
+			"a deployment DECISION, not from omitting a flag (the isolation model)", got)
 	}
 	p.HostPublishIP = "192.168.1.10"
 	if got := p.publishIP(); got != "192.168.1.10" {
@@ -1048,8 +1048,8 @@ func TestThePublishDNATsRenderEndpointNarrowedAndGuestTargeted(t *testing.T) {
 // One clause alone is the hole: a declaration that merely OVERLAPS the sandbox
 // address space (the generator's emission test, since it does not know the gateway
 // address) would reach a gateway it never contained — a HOST address, and with it
-// any host process bound `0.0.0.0:<declared port>`, i.e. §2.4's host-itself floor
-// item lifted by a declaration that never named it (measured exposure: D5 ⑧).
+// any host process bound `0.0.0.0:<declared port>`, i.e. the provider security contract's host-itself floor
+// item lifted by a declaration that never named it (measured exposure: network enforcement).
 func TestTheSelfGatewayAllowRendersTheIntersection(t *testing.T) {
 	// Declared prefix EXCLUDES this context's gateway (10.66.250.1).
 	excluded := netip.MustParsePrefix("10.66.99.0/24")
@@ -1068,7 +1068,7 @@ func TestTheSelfGatewayAllowRendersTheIntersection(t *testing.T) {
 	if !strings.Contains(text, "ip daddr 10.66.99.0/24") {
 		t.Errorf("the DECLARED-prefix clause is missing — with the gateway clause alone this rule "+
 			"reaches 10.66.250.1:8080, an address the declaration does not contain, and with it any "+
-			"host process bound 0.0.0.0:8080 (§2.4 host-itself floor item, D5 ⑧):\n%s", text)
+			"host process bound 0.0.0.0:8080 (the provider security contract host-itself floor item, network enforcement):\n%s", text)
 	}
 	// Two clauses, ANDed by nft — which is what makes the match the intersection
 	// rather than a union. Asserted by count so a future edit that replaces one with
@@ -1098,7 +1098,7 @@ func TestTheSelfGatewayAllowRendersTheIntersection(t *testing.T) {
 // The publish return SNAT rewrites the source to this sandbox's own /30 gateway.
 // Without it a publish works only on a sandbox that happens to carry a default
 // route and TIMES OUT on one that does not — measured `to_guest=2 / from_guest=0`,
-// and adding the SNAT made the same flow connect immediately (network.md D5 ⑬).
+// and adding the SNAT made the same flow connect immediately (network substrate measurements).
 func TestThePublishReturnSNATTargetsTheOwnGateway(t *testing.T) {
 	rs := one(ruleset.Rule{
 		Hook: ruleset.HookPostrouting, Scope: ruleset.ScopeGuestOut, Verdict: ruleset.SNAT,

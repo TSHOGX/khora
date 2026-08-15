@@ -20,7 +20,7 @@ import (
 )
 
 // seedBare inserts the "bare" builtin Template into st so a sandbox create /
-// insert satisfies the §4.3 template FK. Production does this via the boot seed;
+// insert satisfies the health and reclamation template FK. Production does this via the boot seed;
 // the unit tests do it explicitly. Extra ids can be seeded too.
 func seedBare(t *testing.T, st interface {
 	CreateTemplate(context.Context, model.Template) error
@@ -43,7 +43,7 @@ func seedBare(t *testing.T, st interface {
 // tested as pure logic. The real providers are covered by the substrate suites
 // (internal/*/**_substrate_test.go and test/).
 //
-// NB: "L1/L2" elsewhere in this package means the §4.3 PROBE LAYERS (substrate
+// NB: "L1/L2" elsewhere in this package means the health and reclamation PROBE LAYERS (substrate
 // liveness / transport Health), not a test tier — hence the wording here.
 
 type fakeRootfs struct {
@@ -56,25 +56,25 @@ type fakeRootfs struct {
 	failPromote        bool
 	failDestroyOverlay bool
 	failUnmount        bool
-	// maxLowerDepth is the §5.B mount ceiling MaxLowerDepth reports. 0 = no limit,
+	// maxLowerDepth is the Rootfs subsystem mount ceiling MaxLowerDepth reports. 0 = no limit,
 	// the default every test that is not about lineage depth wants;
 	// failMaxLowerDepth makes the query itself fail.
 	maxLowerDepth     int
 	failMaxLowerDepth bool
 	builtins          []string // boot-seed list returned by ListBuiltinTemplates
-	// uncappedBytes is what UncappedBytes reports (the §3.4 admission gate's
+	// uncappedBytes is what UncappedBytes reports (the resource-admission gate's
 	// second term); measureErr makes it fail, so the fail-closed path can be
 	// asserted.
 	uncappedBytes int64
 	measureErr    error
 	// promoteCost is what PromoteCostBytes forecasts a freeze of the source Overlay
-	// would add to the uncapped term (§3.4 Promote admission); promoteCostErr makes
+	// would add to the uncapped term (resource admission Promote admission); promoteCostErr makes
 	// the forecast fail, so that fail-closed path can be asserted too.
 	promoteCost    int64
 	promoteCostErr error
 	// overlayUsed/overlayLimit are what Usage reports for ANY Overlay ID — the
-	// per-sandbox number the §6.1 disk-cap write point checks its strict inequality
-	// against (§3.4 / ErrDiskCapBelowUsage). usageErr makes the read fail, so that
+	// per-sandbox number the control-plane API disk-cap write point checks its strict inequality
+	// against (resource admission / ErrDiskCapBelowUsage). usageErr makes the read fail, so that
 	// write point's fail-closed path can be asserted. Zero used is the common case:
 	// every cap a test writes is then strictly above it.
 	overlayUsed  int64
@@ -82,7 +82,7 @@ type fakeRootfs struct {
 	usageErr     error
 	// promoteGate blocks PromoteToTemplate mid-freeze (bytes-down, row-not-yet
 	// window) until closed; promoteReached (if set) is closed when the freeze is
-	// entered, so a test can synchronize a concurrent sweep against it (§4.4-A).
+	// entered, so a test can synchronize a concurrent sweep against it (atomic transition rollback).
 	promoteGate    chan struct{}
 	promoteReached chan struct{}
 }
@@ -101,7 +101,7 @@ func (f *fakeRootfs) Calls() []string {
 func (f *fakeRootfs) Name() string { return "fake_rootfs" }
 
 // capNote renders the capacity-cap argument into the call log so tests can assert
-// the §3.4 Binding really crossed the seam at each placement, and that
+// the resource admission Binding really crossed the seam at each placement, and that
 // handle-only rebuilds pass CapUnchanged rather than 0 (which would clear a live
 // cap).
 func capNote(capByte int64) string {
@@ -131,7 +131,7 @@ func (f *fakeRootfs) OpenOverlay(_ context.Context, id string, lower []string, c
 	return &rootfs.Overlay{ID: id, Template: tmpl, Lower: append([]string(nil), lower...)}, nil
 }
 
-// Usage backs the §6.1 disk-cap write point's strict inequality (§3.4): the
+// Usage backs the control-plane API disk-cap write point's strict inequality (resource admission): the
 // per-sandbox usage UncappedBytes deliberately cannot report, since a capped unit
 // contributes zero there by contract. Logged so a test can assert both that the
 // write point consulted the provider AND that an unrelated PATCH did NOT.
@@ -145,8 +145,8 @@ func (f *fakeRootfs) Usage(_ context.Context, overlayID string) (int64, int64, e
 	return f.overlayUsed, f.overlayLimit, nil
 }
 
-// UncappedBytes backs the §3.4 admission gate's second term — bytes under no
-// declared cap (rootfs-overlay D6.5: squota does not charge layer bytes to any
+// UncappedBytes backs the resource-admission gate's second term — bytes under no
+// declared cap (uncapped rootfs accounting: squota does not charge layer bytes to any
 // sandbox, so they are accounted separately from the caps).
 func (f *fakeRootfs) UncappedBytes(context.Context) (int64, error) {
 	f.log("UncappedBytes")
@@ -158,7 +158,7 @@ func (f *fakeRootfs) UncappedBytes(context.Context) (int64, error) {
 	return f.uncappedBytes, nil
 }
 
-// PromoteCostBytes backs the Promote admission gate (§3.4 / D6.5): the forecast of
+// PromoteCostBytes backs the Promote admission gate (resource admission / the lifecycle contract): the forecast of
 // what freezing this Overlay would ADD to the uncapped term. Logged so a test can
 // assert the gate really consulted the provider before the freeze.
 func (f *fakeRootfs) PromoteCostBytes(_ context.Context, o *rootfs.Overlay, excludedMounts []string) (int64, error) {
@@ -174,7 +174,7 @@ func (f *fakeRootfs) PromoteCostBytes(_ context.Context, o *rootfs.Overlay, excl
 func (f *fakeRootfs) PromoteToTemplate(ctx context.Context, o *rootfs.Overlay, newID string, excludedMounts []string) error {
 	f.log("PromoteToTemplate:" + o.ID + "->" + newID + ";excluded=" + strings.Join(excludedMounts, "|"))
 	// promoteGate, if non-nil, blocks the freeze (bytes-down window) until a test
-	// signals — used to prove a concurrent sweep respects buildingLayers (§4.4-A).
+	// signals — used to prove a concurrent sweep respects buildingLayers (atomic transition rollback).
 	if f.promoteGate != nil {
 		if f.promoteReached != nil {
 			close(f.promoteReached)
@@ -234,7 +234,7 @@ func (f *fakeRootfs) ListBuiltinTemplates(context.Context) ([]string, error) {
 }
 
 // SweepOrphanOverlays records the (live,building) keep-sets so the mediator's
-// wiring can be asserted as pure logic (§4.4-A unit sweep). Reclaims nothing.
+// wiring can be asserted as pure logic (atomic transition rollback unit sweep). Reclaims nothing.
 func (f *fakeRootfs) SweepOrphanOverlays(_ context.Context, live, building []string) (int, error) {
 	f.log("SweepOrphanOverlays:live=" + strings.Join(append([]string(nil), live...), "|") +
 		";building=" + strings.Join(append([]string(nil), building...), "|"))
@@ -242,7 +242,7 @@ func (f *fakeRootfs) SweepOrphanOverlays(_ context.Context, live, building []str
 }
 
 // SweepOrphanLayers records the (live,building) keep-sets it was called with
-// (§5.B / §4.4-A) so the mediator's sweep wiring can be asserted as pure logic. Reclaims
+// (the Rootfs subsystem / atomic transition rollback) so the mediator's sweep wiring can be asserted as pure logic. Reclaims
 // nothing in the fake (no real layer dirs).
 func (f *fakeRootfs) SweepOrphanLayers(_ context.Context, live, building []string) (int, error) {
 	f.log("SweepOrphanLayers:live=" + strings.Join(append([]string(nil), live...), "|") +
@@ -250,12 +250,12 @@ func (f *fakeRootfs) SweepOrphanLayers(_ context.Context, live, building []strin
 	return 0, nil
 }
 
-// fakeVolume is the §5.C unit fake, the twin of fakeRootfs: it records call order
+// fakeVolume is the Volume subsystem unit fake, the twin of fakeRootfs: it records call order
 // and injects failures so the mediator's volume verbs (gate → bytes → row, and the
 // unwind when the row loses) can be tested as pure logic. The real backends are
 // covered by internal/volume's shared contract suite, on both arms.
 //
-// EVERY mediator Deps in this package must carry one, because the §3.4 disk inequality
+// EVERY mediator Deps in this package must carry one, because the resource admission disk inequality
 // sums BOTH subsystems' uncapped bytes: with the disk axis metered, a nil backend makes
 // the gate blind to every volume's bytes and it fails CLOSED — a configuration
 // production cannot have.
@@ -268,13 +268,13 @@ type fakeVolume struct {
 	// have to opt in; the constructor below flips all three on for the common case.
 	caps volume.Capabilities
 
-	// uncappedBytes is the §5.C half of the §3.4 second term; measureErr makes it
+	// uncappedBytes is the Volume subsystem half of the resource admission second term; measureErr makes it
 	// fail so the gate's fail-closed path can be asserted from this side too.
 	uncappedBytes int64
 	measureErr    error
 
 	// used / usageErr drive Usage, which the cap write point's STRICT-inequality
-	// refusal reads (§5.C / volume.md D7.3). usageErr specifically exercises
+	// refusal reads (the Volume subsystem / volume cap enforcement). usageErr specifically exercises
 	// "refuse to set a cap blind", since an under-usage cap is irreversible.
 	used     int64
 	usageErr error
@@ -295,7 +295,7 @@ type fakeVolume struct {
 	// appliedCaps records the cap each volume was created or derived WITH — i.e. what
 	// actually reached the "storage" — so a test can assert the cap crossed the seam ON
 	// the operation that made the bytes rather than trusting the record. That is the
-	// distinction the whole cap-write invariant turns on (volume.md D7.3).
+	// distinction the whole cap-write invariant turns on (volume cap enforcement).
 	appliedCaps map[string]int64
 	// deletedRows stands in for the substrate's leaked quota rows: a test seeds ids and
 	// asserts the reclamation round consumed them.
@@ -304,7 +304,7 @@ type fakeVolume struct {
 	// roots keeps ONE fakeRoot per volume, so content PERSISTS across separate
 	// OpenRoot calls. Handing out a fresh root each time would make an import
 	// invisible to the following export — and the property being tested (bytes go in
-	// and come back out with no sandbox anywhere, §5.C) is precisely that they
+	// and come back out with no sandbox anywhere, the Volume subsystem) is precisely that they
 	// persist.
 	roots map[string]*fakeRoot
 }
@@ -388,7 +388,7 @@ func (f *fakeVolume) Usage(_ context.Context, id string) (int64, int64, error) {
 func (f *fakeVolume) Materialize(_ context.Context, id string) (*volume.Materialized, error) {
 	f.log("Materialize:" + id)
 	f.mu.Lock()
-	f.units[id] = true // create-if-absent, matching the contract (§5.C)
+	f.units[id] = true // create-if-absent, matching the contract (the Volume subsystem)
 	f.mu.Unlock()
 	return &volume.Materialized{Volume: id, SourcePath: "/fake/volumes/" + id}, nil
 }
@@ -440,7 +440,7 @@ func (f *fakeVolume) DestroyVolume(_ context.Context, id string) error {
 
 // Snapshot / Clone record the cap they were handed, which is the assertion that
 // matters: the cap must be written by THIS call, not by a follow-up the caller might
-// skip — a missed cap is silent and undetectable afterwards (volume.md D7.3).
+// skip — a missed cap is silent and undetectable afterwards (volume cap enforcement).
 func (f *fakeVolume) Snapshot(_ context.Context, srcID, newID string, capBytes int64) error {
 	f.log(fmt.Sprintf("Snapshot:%s->%s:cap=%d", srcID, newID, capBytes))
 	return f.derive(srcID, newID, capBytes, "snapshot")
@@ -482,7 +482,7 @@ func (f *fakeVolume) derive(srcID, newID string, capBytes int64, kind string) er
 	return nil
 }
 
-// ReclaimQuotaRows / DeletedRowIDs back the §5.C leaked-row reclamation round. The fake
+// ReclaimQuotaRows / DeletedRowIDs back the Volume subsystem leaked-row reclamation round. The fake
 // records what it was asked to reclaim so the mediator's wiring is assertable as pure
 // logic; it reclaims everything it is given.
 func (f *fakeVolume) ReclaimQuotaRows(_ context.Context, ids []uint64) (int, error) {
@@ -635,49 +635,49 @@ type fakeRuntime struct {
 	mu         sync.Mutex
 	calls      []string
 	failLaunch bool
-	// launchMounts holds the §5.C mount specs the LAST Launch carried, so a test can
+	// launchMounts holds the Volume subsystem mount specs the LAST Launch carried, so a test can
 	// assert what actually crossed the seam (the bind destination and the read-only
 	// bit) rather than trusting that the mediator assembled it.
 	launchMounts []runtime.MountSource
 	// failStop / failDestroy fail the TEARDOWN half of the seam. The mediator
 	// deliberately ignores these errors (`_ =` at every call site), so the property
 	// they let a test pin is that the control-plane transition still lands correctly
-	// when placement teardown fails (§4.4-A: byte/placement reclamation is decoupled
+	// when placement teardown fails (atomic transition rollback: byte/placement reclamation is decoupled
 	// from the state transition).
 	failStop    bool
 	failDestroy bool
-	// ruleHits / ruleHitsErr back RuleHits (§6.1's per-entry counters). A nil map with a
+	// ruleHits / ruleHitsErr back RuleHits (the control-plane API's per-entry counters). A nil map with a
 	// nil error is a legitimate "no counters", distinct from ruleHitsErr's "unreadable" —
-	// the two must stay separable, since §6.1 omits the key for both but a test asserting
+	// the two must stay separable, since the control-plane API omits the key for both but a test asserting
 	// the omission rule needs to drive each independently.
 	ruleHits    map[string]uint64
 	ruleHitsErr error
 	// launchGate, if non-nil, blocks Launch until closed (to hold the lock).
 	launchGate chan struct{}
 	seq        int
-	// adoptAlive drives fakeRuntime.Adopt per-sandbox (§4.4-A liveness).
+	// adoptAlive drives fakeRuntime.Adopt per-sandbox (atomic transition rollback liveness).
 	adoptAlive map[string]bool
 	// adoptErr drives a per-sandbox Adopt PROBE error (uncertain → mediator
-	// protects the placement, skip-and-log; §4.4-A).
+	// protects the placement, skip-and-log; atomic transition rollback).
 	adoptErr map[string]error
 	// adoptCause drives the per-sandbox DEATH CAUSE Adopt hands out with an
-	// alive=false verdict (§4.3): it is what separates dead-recoverable from
+	// alive=false verdict (health and reclamation): it is what separates dead-recoverable from
 	// resource-terminated. Absent → CauseUnknown, itself a legal verdict.
 	adoptCause map[string]runtime.DeathCause
 	// launchLimits records the ResourceLimits each Launch was called with, so tests
-	// can assert the §3.4 Binding is re-materialized at every placement from the
+	// can assert the resource admission Binding is re-materialized at every placement from the
 	// record rather than read back from a frozen value.
 	launchLimits []runtime.ResourceLimits
-	// launchSteering holds the §5.D steering spec the LAST Launch carried. The
-	// network declaration is a Binding too (§3.4), so the same property applies: it
+	// launchSteering holds the network declaration steering spec the LAST Launch carried. The
+	// network declaration is a Binding too (resource admission), so the same property applies: it
 	// must be re-derived from the current record at every placement, not carried over.
 	launchSteering runtime.SteeringSpec
-	// reinstalled records the specs ReinstallRuleSet received (§4.4-A: adopting a
+	// reinstalled records the specs ReinstallRuleSet received (atomic transition rollback: adopting a
 	// survivor must rebuild its rule set, which is crash-surviving host state).
 	reinstalled []runtime.SteeringSpec
 	// failReinstall fails the adopt-side rule-set install. The mediator must treat
 	// that as UNCERTAINTY and protect the placement rather than demote — tearing down
-	// a provably-live container is irreversible (§4.4-A).
+	// a provably-live container is irreversible (atomic transition rollback).
 	failReinstall bool
 	// secondHopUID records what InstallSecondHop was handed, so a test can assert the
 	// engine-level table is installed once at startup with the deployment's uid.
@@ -716,7 +716,7 @@ func (f *fakeRuntime) Launch(ctx context.Context, spec runtime.LaunchSpec) (*run
 	f.mu.Lock()
 	f.launchLimits = append(f.launchLimits, spec.Limits)
 	f.launchSteering = spec.Steering
-	// The §5.C mount specs from the LAST launch, asserted from LastMounts.
+	// The Volume subsystem mount specs from the LAST launch, asserted from LastMounts.
 	f.launchMounts = append([]runtime.MountSource(nil), spec.Mounts...)
 	f.mu.Unlock()
 	if f.launchGate != nil {
@@ -735,7 +735,7 @@ func (f *fakeRuntime) Launch(ctx context.Context, spec runtime.LaunchSpec) (*run
 	f.mu.Unlock()
 	pl := &runtime.Placement{TransportEndpoint: ep}
 	// Launch binds the publish endpoints too, like the real provider — they are a
-	// PLACEMENT product (§3.3), so they appear with the placement rather than only when
+	// PLACEMENT product (the ID-reference model), so they appear with the placement rather than only when
 	// a later hot-add reinstalls the rule set. Without this the fake reports no endpoint
 	// for a publish that was already in the record at launch, which is the shape a
 	// resume takes.
@@ -757,7 +757,7 @@ func (f *fakeRuntime) Destroy(_ context.Context, _ *runtime.Placement) error {
 	return nil
 }
 
-// Adopt/ReclaimOrphans back the §4.4-A reconciliation path. The fake is driven
+// Adopt/ReclaimOrphans back the atomic transition rollback reconciliation path. The fake is driven
 // by adoptAlive (per-sandbox liveness the test sets up) and records reclaim
 // calls so the reconciliation orchestration can be tested as pure logic.
 func (f *fakeRuntime) Adopt(_ context.Context, sandbox string) (*runtime.Placement, bool, runtime.DeathCause, error) {
@@ -774,7 +774,7 @@ func (f *fakeRuntime) Adopt(_ context.Context, sandbox string) (*runtime.Placeme
 	}
 	if !alive {
 		// dead → hand out the cause with the verdict, the real provider's contract
-		// (§4.3: read it while the placement is still intact, there is no later).
+		// (health and reclamation: read it while the placement is still intact, there is no later).
 		return nil, false, cause, nil
 	}
 	return &runtime.Placement{TransportEndpoint: ep}, true, runtime.CauseUnknown, nil
@@ -784,8 +784,8 @@ func (f *fakeRuntime) ReclaimOrphans(_ context.Context, keep []string) error {
 	return nil
 }
 
-// ReinstallRuleSet / InstallSecondHop are the §5.D enforcement face of the
-// provider seam (§2.4). The fake records the calls and the rule counts, so the
+// ReinstallRuleSet / InstallSecondHop are the network declaration enforcement face of the
+// provider seam (the provider security contract). The fake records the calls and the rule counts, so the
 // mediator's ORCHESTRATION of them can be tested as pure logic — the rendering and
 // the kernel install are local_runsc's business and are covered on the real
 // substrate.
@@ -812,10 +812,10 @@ func (f *fakeRuntime) ReinstallRuleSet(_ context.Context, pl *runtime.Placement,
 // orchestration to be tested: an endpoint is drawn ONCE per `{guest_port, proto}` per
 // placement and REUSED afterwards, and the list comes back in declaration order.
 //
-// Both properties are contract: §6.1 makes a repeated publish idempotent ("return the
+// Both properties are contract: the control-plane API makes a repeated publish idempotent ("return the
 // existing one"), so a fake that re-drew on every reinstall would answer a second
 // identical POST with a different endpoint and let a mediator bug through. The pair is
-// the key because tcp/8080 and udp/8080 are two publishes (§5.D).
+// the key because tcp/8080 and udp/8080 are two publishes (the network declaration).
 func (f *fakeRuntime) bindPublish(pl *runtime.Placement, spec runtime.SteeringSpec) []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -861,7 +861,7 @@ func (f *fakeRuntime) Reinstalled() []runtime.SteeringSpec {
 
 // LastSteering returns the steering spec the most recent Launch received — the
 // mediator's obligation is to derive it from the CURRENT record at every placement
-// (§3.4 Binding), so tests assert on it rather than on the log line.
+// (resource admission Binding), so tests assert on it rather than on the log line.
 func (f *fakeRuntime) LastSteering() runtime.SteeringSpec {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -870,15 +870,15 @@ func (f *fakeRuntime) LastSteering() runtime.SteeringSpec {
 
 // fakeClient satisfies transport.Client; only Health matters for the mediator.
 // idle is the sandbox-global idle duration a successful Health reports back
-// (reaper-health D2 activity signal) — the classifier reads it to tell healthy
+// (the activity signal activity signal) — the classifier reads it to tell healthy
 // from idle. Zero unless a test sets it. idleFn, if set, overrides idle and is
 // called per probe — used to simulate a sandbox that becomes active BETWEEN the
-// sweep classify and the lock-held re-read (the D3 activity-race guard test).
+// sweep classify and the lock-held re-read (the lifecycle contract activity-race guard test).
 type fakeClient struct {
 	healthy   bool
 	idle      time.Duration
 	idleFn    func() time.Duration
-	healthyFn func() bool // if set, overrides healthy per probe (D4b escalation test)
+	healthyFn func() bool // if set, overrides healthy per probe (the lifecycle contract escalation test)
 }
 
 func (c *fakeClient) Health(context.Context) (transport.HealthStatus, error) {
@@ -897,8 +897,8 @@ func (c *fakeClient) Health(context.Context) (transport.HealthStatus, error) {
 }
 
 // RecordActivity is present to satisfy transport.Client. The mediator never calls
-// it — the write half of the activity signal belongs to §6.1's activity endpoint,
-// and the classifier reading it here must never stamp it (reaper-health D3).
+// it — the write half of the activity signal belongs to the control-plane API's activity endpoint,
+// and the classifier reading it here must never stamp it (reaper serialization).
 func (c *fakeClient) RecordActivity(context.Context) (transport.HealthStatus, error) {
 	return transport.HealthStatus{}, nil
 }
@@ -921,7 +921,7 @@ func (c *fakeClient) Read(context.Context, string, int64, int64) ([]byte, error)
 }
 func (c *fakeClient) Write(context.Context, string, []byte) error { return nil }
 
-// The fs metadata surface is inert here: these unit tests exercise the §4 mediator,
+// The fs metadata surface is inert here: these unit tests exercise the lifecycle mediator,
 // which never calls fs — only the reaper's Health probe and the cold-start gate
 // matter. Present to satisfy transport.Client (and so a signature change breaks
 // the build rather than drifting silently).
@@ -947,7 +947,7 @@ func (c *fakeClient) WriteStream(_ context.Context, _ string, src io.Reader) (in
 	return io.Copy(io.Discard, src)
 }
 
-// RuleHits backs §6.1's per-entry hit counters. The fake returns whatever the test
+// RuleHits backs the control-plane API's per-entry hit counters. The fake returns whatever the test
 // planted, and nil means "unreadable" — which is a distinct case from an empty map (see
 // runtime.Provider.RuleHits), so tests can exercise the omission rule.
 func (f *fakeRuntime) RuleHits(context.Context, *runtime.Placement) (map[string]uint64, error) {

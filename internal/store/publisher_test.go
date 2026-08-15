@@ -13,8 +13,8 @@ import (
 	"github.com/TSHOGX/khora/internal/store"
 )
 
-// kindFor is the §4.1 kind matching a transition INTO state. Tests needing only "a
-// valid event" must still name a real kind: both store backends assert §4.1's closed
+// kindFor is the lifecycle state machine kind matching a transition INTO state. Tests needing only "a
+// valid event" must still name a real kind: both store backends assert the lifecycle state machine's closed
 // set, so a placeholder is refused — which is what the closure is for.
 func kindFor(state model.Lifecycle) model.EventKind {
 	if state == model.Running {
@@ -28,7 +28,7 @@ func ev(id, evid string, kind model.EventKind, state model.Lifecycle) *store.Eve
 }
 
 // seedPubTmpl inserts the "bare" Template these publisher tests reference, so
-// the sandbox insert satisfies the §4.3 template FK.
+// the sandbox insert satisfies the health and reclamation template FK.
 func seedPubTmpl(t *testing.T, st store.Store) {
 	t.Helper()
 	if err := st.CreateTemplate(context.Background(), model.Template{ID: "bare", Builtin: true, CreatedAt: time.Now()}); err != nil {
@@ -238,7 +238,7 @@ func seedEvents(t *testing.T, n int) store.Store {
 }
 
 // Head-of-line blocking is KEPT: a failing head must not let later events pass. Note this
-// test asserts the STALL, not its absence (§4.4-C).
+// test asserts the STALL, not its absence (the transactional outbox).
 func TestPublisherHeadOfLineBlocksLaterEvents(t *testing.T) {
 	ctx := context.Background()
 	st := seedEvents(t, 3)
@@ -415,7 +415,7 @@ func TestPublisherBackoffIsBoundedAndJittered(t *testing.T) {
 	}
 }
 
-// Observability must survive the worker WEDGING (§4.4-C ③, argued on store.Publisher): a
+// Observability must survive the worker WEDGING (the transactional outbox, argued on store.Publisher): a
 // sink blocked inside Deliver freezes the drain goroutine, and Stats must keep telling the
 // truth from an independent one.
 func TestPublisherStatsStaySampleableWhileDrainIsWedged(t *testing.T) {
@@ -567,7 +567,7 @@ func (alwaysFailingSink) Deliver(context.Context, store.Event) error {
 	return errors.New("sink is down")
 }
 
-// TestBacklogGaugeReportsTheTotalNotTheDrainBatch is §4.4-C ③ at the publisher: the
+// TestBacklogGaugeReportsTheTotalNotTheDrainBatch is the transactional outbox at the publisher: the
 // gauge must not share a source with the loop it observes, because len(the drain batch)
 // saturates at store.DrainBatch (store.CountUnpublished).
 //
@@ -601,11 +601,11 @@ func TestBacklogGaugeReportsTheTotalNotTheDrainBatch(t *testing.T) {
 	}
 
 	if got := p.Stats().Backlog; got != int64(total) {
-		t.Errorf("Backlog = %d with %d rows unpublished and a drain bound of %d — the gauge is reading the drain batch's length, so it saturates at the bound and a large backlog reports as a small constant (§4.4-C ③: observability must not share a source with the loop being observed)", got, total, store.DrainBatch)
+		t.Errorf("Backlog = %d with %d rows unpublished and a drain bound of %d — the gauge is reading the drain batch's length, so it saturates at the bound and a large backlog reports as a small constant (the transactional outbox: observability must not share a source with the loop being observed)", got, total, store.DrainBatch)
 	}
 }
 
-// TestBacklogGaugeSurvivesASuccessfulPass covers the other arm of §4.4-C ③, which a
+// TestBacklogGaugeSurvivesASuccessfulPass covers the other arm of the transactional outbox, which a
 // failing sink cannot reach: the pass that DELIVERS everything it read.
 //
 // The sibling test above returns at the first delivery failure, before the end of the drain
@@ -655,6 +655,6 @@ func TestBacklogGaugeSurvivesASuccessfulPass(t *testing.T) {
 	// which 0 is the worst case.
 	remaining := int64(total - store.DrainBatch)
 	if got := p.Stats().Backlog; got < remaining {
-		t.Errorf("Backlog = %d after a fully successful pass that left %d rows unpublished — the gauge under-reports. A completed pass does NOT mean the outbox is empty, because the drain read is bounded at %d, so anything below %d (0 most of all) tells a monitor 'caught up' while a backlog persists and grows: §4.4-C ③'s failure in its most dangerous form", got, remaining, store.DrainBatch, remaining)
+		t.Errorf("Backlog = %d after a fully successful pass that left %d rows unpublished — the gauge under-reports. A completed pass does NOT mean the outbox is empty, because the drain read is bounded at %d, so anything below %d (0 most of all) tells a monitor 'caught up' while a backlog persists and grows: the transactional outbox's failure in its most dangerous form", got, remaining, store.DrainBatch, remaining)
 	}
 }

@@ -1,0 +1,2116 @@
+{
+  "components": {
+    "schemas": {
+      "activityResp": {
+        "properties": {
+          "idle_millis": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "createReq": {
+        "properties": {
+          "cpu_millis": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "disk_byte": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "idle_timeout": {
+            "type": "string"
+          },
+          "memory_byte": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "network": {
+            "$ref": "#/components/schemas/networkWire"
+          },
+          "retention": {
+            "type": "string"
+          },
+          "template_id": {
+            "type": "string"
+          },
+          "volumes": {
+            "items": {
+              "$ref": "#/components/schemas/volumeBindingItem"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "createResp": {
+        "properties": {
+          "sandbox_id": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "egressReadWire": {
+        "properties": {
+          "allow": {
+            "items": {
+              "$ref": "#/components/schemas/tupleWire"
+            },
+            "type": "array"
+          },
+          "default": {
+            "type": "string"
+          },
+          "default_hit_packet": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "via": {
+            "items": {
+              "$ref": "#/components/schemas/viaReadWire"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "egressWire": {
+        "properties": {
+          "allow": {
+            "items": {
+              "$ref": "#/components/schemas/tupleWire"
+            },
+            "type": "array"
+          },
+          "default": {
+            "type": "string"
+          },
+          "default_hit_packet": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "via": {
+            "items": {
+              "$ref": "#/components/schemas/viaWire"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "eventItem": {
+        "properties": {
+          "cause": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "occurred_at": {
+            "type": "string"
+          },
+          "sandbox_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "state": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "eventsResp": {
+        "properties": {
+          "earliest": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "events": {
+            "items": {
+              "$ref": "#/components/schemas/eventItem"
+            },
+            "type": "array"
+          },
+          "latest": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "importResp": {
+        "properties": {
+          "bytes_written": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "path": {
+            "type": "string"
+          },
+          "volume_id": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "ingressReadWire": {
+        "properties": {
+          "closed_hit_packet": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "publish": {
+            "items": {
+              "$ref": "#/components/schemas/publishReadWire"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "ingressWire": {
+        "properties": {
+          "closed_hit_packet": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "publish": {
+            "items": {
+              "$ref": "#/components/schemas/publishWire"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "networkReadResp": {
+        "properties": {
+          "egress": {
+            "$ref": "#/components/schemas/egressReadWire"
+          },
+          "ingress": {
+            "$ref": "#/components/schemas/ingressReadWire"
+          },
+          "state": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "networkWire": {
+        "properties": {
+          "egress": {
+            "$ref": "#/components/schemas/egressWire"
+          },
+          "ingress": {
+            "$ref": "#/components/schemas/ingressWire"
+          },
+          "state": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "patchReq": {
+        "properties": {
+          "cpu_millis": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "disk_byte": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "idle_timeout": {
+            "type": "string"
+          },
+          "memory_byte": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "network": {
+            "$ref": "#/components/schemas/networkWire"
+          },
+          "retention": {
+            "type": "string"
+          },
+          "volumes": {
+            "items": {
+              "$ref": "#/components/schemas/volumeBindingItem"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "patchResp": {
+        "properties": {
+          "applies_at": {
+            "type": "string"
+          },
+          "lease_released": {
+            "type": "boolean"
+          },
+          "sandbox_id": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "promoteReq": {
+        "properties": {
+          "from_sandbox_id": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "promoteResp": {
+        "properties": {
+          "template_id": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "publishReadWire": {
+        "properties": {
+          "guest_port": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "host_endpoint": {
+            "type": "string"
+          },
+          "proto": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "publishReq": {
+        "properties": {
+          "guest_port": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "host_endpoint": {
+            "type": "string"
+          },
+          "proto": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "publishResp": {
+        "properties": {
+          "applies_at": {
+            "type": "string"
+          },
+          "guest_port": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "host_endpoint": {
+            "type": "string"
+          },
+          "proto": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "publishWire": {
+        "properties": {
+          "guest_port": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "host_endpoint": {
+            "type": "string"
+          },
+          "proto": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "sandboxResp": {
+        "properties": {
+          "death_cause": {
+            "type": "string"
+          },
+          "sandbox_id": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "used_byte": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "templateResp": {
+        "properties": {
+          "builtin": {
+            "type": "boolean"
+          },
+          "parent": {
+            "type": "string"
+          },
+          "template_id": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "tupleWire": {
+        "properties": {
+          "cidr": {
+            "type": "string"
+          },
+          "hit_packet": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "port": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "proto": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "uploadResp": {
+        "properties": {
+          "bytes_written": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "verbResp": {
+        "properties": {
+          "sandbox_id": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "viaReadWire": {
+        "properties": {
+          "endpoint": {
+            "type": "string"
+          },
+          "match": {
+            "items": {
+              "$ref": "#/components/schemas/tupleWire"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "viaWire": {
+        "properties": {
+          "endpoint": {
+            "type": "string"
+          },
+          "match": {
+            "items": {
+              "$ref": "#/components/schemas/tupleWire"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "volumeBindingItem": {
+        "properties": {
+          "access": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "volume_id": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "volumeCreateReq": {
+        "properties": {
+          "size": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "volumePatchReq": {
+        "properties": {
+          "size": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "volumeResp": {
+        "properties": {
+          "backend": {
+            "type": "string"
+          },
+          "size": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "used_byte": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "volume_id": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "description": "GENERATED from the handlers' own wire types (internal/orchestrator/openapi.go). Do not edit by hand; regenerate with `go generate ./internal/orchestrator`. Maintained API documentation remains authoritative for intent: what an endpoint means and which refusal is which. This document says only what is on the wire.\n\nThe process and fs data plane is NOT here: it is Connect-RPC, and its machine-readable contract is proto/khora/transport/v1/transport.proto.\n\nNo authentication is described because the engine has none: it refuses any listener but loopback unless explicitly overridden, and authentication and TLS belong outside it.",
+    "title": "khora engine control plane",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/v1/events": {
+      "get": {
+        "operationId": "listEvents",
+        "parameters": [
+          {
+            "description": "Cursor: return events with seq \u003e this. 0 or omitted starts at the earliest retained event.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Maximum events in this page.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Go duration (e.g. \"20s\"). If the page would be EMPTY, hold the request open until an event arrives or this elapses. Changes no cursor semantics; a non-empty first read never waits. Clamped to a server-side ceiling.",
+            "in": "query",
+            "name": "wait",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/eventsResp"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "400": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The request cannot be honored as asked: malformed, an unknown JSON field, or a value the engine can never satisfy."
+          },
+          "405": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The route exists, but this method does not apply to it."
+          }
+        },
+        "summary": "Page the transactional outbox in `seq` order. Delivery is at least once; deduplicate by event `id`."
+      }
+    },
+    "/v1/sandboxes": {
+      "get": {
+        "operationId": "listSandboxes",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/sandboxResp"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "405": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The route exists, but this method does not apply to it."
+          }
+        },
+        "summary": "List all sandboxes."
+      },
+      "post": {
+        "operationId": "createSandbox",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/createReq"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/createResp"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "400": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The request cannot be honored as asked: malformed, an unknown JSON field, or a value the engine can never satisfy."
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "No such object. The message names WHICH kind, so a caller does not look in the wrong place."
+          },
+          "405": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The route exists, but this method does not apply to it."
+          },
+          "409": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
+          },
+          "507": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Capacity: nothing is wrong with the request or the sandbox — the node cannot honor another promise."
+          }
+        },
+        "summary": "Create a sandbox. Unknown JSON fields are REFUSED (a misspelled `network` would otherwise silently create a deny sandbox)."
+      }
+    },
+    "/v1/sandboxes/{id}": {
+      "delete": {
+        "operationId": "destroySandbox",
+        "responses": {
+          "204": {
+            "description": "Success, no content."
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "No such object. The message names WHICH kind, so a caller does not look in the wrong place."
+          },
+          "405": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The route exists, but this method does not apply to it."
+          },
+          "409": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
+          }
+        },
+        "summary": "Destroy a sandbox. The record is deleted, so a later GET is 404 and the event is the durable record of the destroy cause."
+      },
+      "get": {
+        "operationId": "getSandbox",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/sandboxResp"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "No such object. The message names WHICH kind, so a caller does not look in the wrong place."
+          },
+          "405": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The route exists, but this method does not apply to it."
+          }
+        },
+        "summary": "Inspect one sandbox without exposing placement details."
+      },
+      "parameters": [
+        {
+          "description": "Engine-minted object ID.",
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "patch": {
+        "operationId": "patchSandbox",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/patchReq"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/patchResp"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "400": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The request cannot be honored as asked: malformed, an unknown JSON field, or a value the engine can never satisfy."
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "No such object. The message names WHICH kind, so a caller does not look in the wrong place."
+          },
+          "405": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The route exists, but this method does not apply to it."
+          },
+          "409": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
+          },
+          "507": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Capacity: nothing is wrong with the request or the sandbox — the node cannot honor another promise."
+          }
+        },
+        "summary": "Rewrite the sandbox's Binding. Every field is optional; an omitted field is left alone, and a whole binding is swapped for a whole binding."
+      }
+    },
+    "/v1/sandboxes/{id}/activity": {
+      "parameters": [
+        {
+          "description": "Engine-minted object ID.",
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "operationId": "recordActivity",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/activityResp"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "No such object. The message names WHICH kind, so a caller does not look in the wrong place."
+          },
+          "405": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The route exists, but this method does not apply to it."
+          },
+          "409": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
+          },
+          "503": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The sandbox's in-guest transport is unreachable, or a pause is draining. The answer may differ later."
+          }
+        },
+        "summary": "Record one activity NOW, stamping the guest's idle clock so the idle sweep sees the sandbox as busy. Carries no duration and grants no protected period — repeat it while the work lasts."
+      }
+    },
+    "/v1/sandboxes/{id}/files": {
+      "get": {
+        "operationId": "downloadFile",
+        "parameters": [
+          {
+            "description": "Absolute path inside the guest.",
+            "in": "query",
+            "name": "path",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "400": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The request cannot be honored as asked: malformed, an unknown JSON field, or a value the engine can never satisfy."
+          },
+          "403": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The guest refused the operation (a permission error inside the sandbox)."
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "No such object. The message names WHICH kind, so a caller does not look in the wrong place."
+          },
+          "405": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The route exists, but this method does not apply to it."
+          },
+          "503": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The sandbox's in-guest transport is unreachable, or a pause is draining. The answer may differ later."
+          }
+        },
+        "summary": "Stream a file out of the sandbox over REST without buffering the whole file. Returns chunked application/octet-stream."
+      },
+      "parameters": [
+        {
+          "description": "Engine-minted object ID.",
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "operationId": "uploadFile",
+        "parameters": [
+          {
+            "description": "Absolute path inside the guest.",
+            "in": "query",
+            "name": "path",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "format": "binary",
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/uploadResp"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "400": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The request cannot be honored as asked: malformed, an unknown JSON field, or a value the engine can never satisfy."
+          },
+          "403": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The guest refused the operation (a permission error inside the sandbox)."
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "No such object. The message names WHICH kind, so a caller does not look in the wrong place."
+          },
+          "405": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The route exists, but this method does not apply to it."
+          },
+          "413": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The body exceeds the engine's per-request limit."
+          },
+          "503": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The sandbox's in-guest transport is unreachable, or a pause is draining. The answer may differ later."
+          },
+          "507": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Capacity: nothing is wrong with the request or the sandbox — the node cannot honor another promise."
+          }
+        },
+        "summary": "Stream a file INTO the sandbox. Body is the raw bytes. Written to a temp file and renamed, so an interrupted upload leaves no partial file."
+      }
+    },
+    "/v1/sandboxes/{id}/network": {
+      "get": {
+        "operationId": "getSandboxNetwork",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/networkReadResp"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "No such object. The message names WHICH kind, so a caller does not look in the wrong place."
+          },
+          "405": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The route exists, but this method does not apply to it."
+          }
+        },
+        "summary": "Read the sandbox's effective network declaration, including per-rule hit counters."
+      },
+      "parameters": [
+        {
+          "description": "Engine-minted object ID.",
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/v1/sandboxes/{id}/pause": {
+      "parameters": [
+        {
+          "description": "Engine-minted object ID.",
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "operationId": "pauseSandbox",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/verbResp"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "No such object. The message names WHICH kind, so a caller does not look in the wrong place."
+          },
+          "405": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The route exists, but this method does not apply to it."
+          },
+          "409": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
+          }
+        },
+        "summary": "Pause a running sandbox: drains in-flight engine writes, then freezes."
+      }
+    },
+    "/v1/sandboxes/{id}/publish": {
+      "parameters": [
+        {
+          "description": "Engine-minted object ID.",
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "operationId": "publishPort",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/publishReq"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/publishResp"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "400": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The request cannot be honored as asked: malformed, an unknown JSON field, or a value the engine can never satisfy."
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "No such object. The message names WHICH kind, so a caller does not look in the wrong place."
+          },
+          "405": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The route exists, but this method does not apply to it."
+          },
+          "409": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
+          }
+        },
+        "summary": "Publish a guest port to the host."
+      }
+    },
+    "/v1/sandboxes/{id}/resume": {
+      "parameters": [
+        {
+          "description": "Engine-minted object ID.",
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "operationId": "resumeSandbox",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/verbResp"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "No such object. The message names WHICH kind, so a caller does not look in the wrong place."
+          },
+          "405": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The route exists, but this method does not apply to it."
+          },
+          "409": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
+          },
+          "507": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Capacity: nothing is wrong with the request or the sandbox — the node cannot honor another promise."
+          }
+        },
+        "summary": "Resume a paused sandbox. The filesystem is exactly as it was; the placement and IP are new."
+      }
+    },
+    "/v1/templates": {
+      "get": {
+        "operationId": "listTemplates",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/templateResp"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "405": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The route exists, but this method does not apply to it."
+          }
+        },
+        "summary": "List all templates."
+      },
+      "post": {
+        "operationId": "promoteTemplate",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/promoteReq"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/promoteResp"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "400": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The request cannot be honored as asked: malformed, an unknown JSON field, or a value the engine can never satisfy."
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "No such object. The message names WHICH kind, so a caller does not look in the wrong place."
+          },
+          "405": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The route exists, but this method does not apply to it."
+          },
+          "409": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
+          }
+        },
+        "summary": "Promote a sandbox to an immutable Template other sandboxes derive from."
+      }
+    },
+    "/v1/templates/{id}": {
+      "delete": {
+        "operationId": "deleteTemplate",
+        "responses": {
+          "204": {
+            "description": "Success, no content."
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "No such object. The message names WHICH kind, so a caller does not look in the wrong place."
+          },
+          "405": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The route exists, but this method does not apply to it."
+          },
+          "409": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
+          }
+        },
+        "summary": "Delete a template. Refused while any sandbox references it."
+      },
+      "parameters": [
+        {
+          "description": "Engine-minted object ID.",
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/v1/volumes": {
+      "get": {
+        "operationId": "listVolumes",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/volumeResp"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "405": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The route exists, but this method does not apply to it."
+          }
+        },
+        "summary": "List all volumes."
+      },
+      "post": {
+        "operationId": "createVolume",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/volumeCreateReq"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/volumeResp"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "400": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The request cannot be honored as asked: malformed, an unknown JSON field, or a value the engine can never satisfy."
+          },
+          "405": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The route exists, but this method does not apply to it."
+          },
+          "409": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
+          },
+          "507": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Capacity: nothing is wrong with the request or the sandbox — the node cannot honor another promise."
+          }
+        },
+        "summary": "Create a Volume whose lifetime is independent of every sandbox."
+      }
+    },
+    "/v1/volumes/{id}": {
+      "delete": {
+        "operationId": "deleteVolume",
+        "responses": {
+          "204": {
+            "description": "Success, no content."
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "No such object. The message names WHICH kind, so a caller does not look in the wrong place."
+          },
+          "405": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The route exists, but this method does not apply to it."
+          },
+          "409": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
+          }
+        },
+        "summary": "Delete a Volume. Refused while mounted."
+      },
+      "get": {
+        "operationId": "getVolume",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/volumeResp"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "No such object. The message names WHICH kind, so a caller does not look in the wrong place."
+          },
+          "405": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The route exists, but this method does not apply to it."
+          }
+        },
+        "summary": "Inspect one volume."
+      },
+      "parameters": [
+        {
+          "description": "Engine-minted object ID.",
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "patch": {
+        "operationId": "patchVolume",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/volumePatchReq"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/volumeResp"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "400": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The request cannot be honored as asked: malformed, an unknown JSON field, or a value the engine can never satisfy."
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "No such object. The message names WHICH kind, so a caller does not look in the wrong place."
+          },
+          "405": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The route exists, but this method does not apply to it."
+          },
+          "409": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
+          },
+          "507": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Capacity: nothing is wrong with the request or the sandbox — the node cannot honor another promise."
+          }
+        },
+        "summary": "Rewrite a volume's cap."
+      }
+    },
+    "/v1/volumes/{id}/clone": {
+      "parameters": [
+        {
+          "description": "Engine-minted object ID.",
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "operationId": "cloneVolume",
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/volumeResp"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "No such object. The message names WHICH kind, so a caller does not look in the wrong place."
+          },
+          "405": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The route exists, but this method does not apply to it."
+          },
+          "409": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
+          },
+          "507": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Capacity: nothing is wrong with the request or the sandbox — the node cannot honor another promise."
+          }
+        },
+        "summary": "Clone a volume into a new, independently writable volume."
+      }
+    },
+    "/v1/volumes/{id}/export": {
+      "get": {
+        "operationId": "exportVolume",
+        "parameters": [
+          {
+            "description": "Path inside the volume.",
+            "in": "query",
+            "name": "path",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "400": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The request cannot be honored as asked: malformed, an unknown JSON field, or a value the engine can never satisfy."
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "No such object. The message names WHICH kind, so a caller does not look in the wrong place."
+          },
+          "405": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The route exists, but this method does not apply to it."
+          },
+          "409": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
+          }
+        },
+        "summary": "Stream bytes OUT of a volume with no sandbox involved. Returns application/octet-stream."
+      },
+      "parameters": [
+        {
+          "description": "Engine-minted object ID.",
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/v1/volumes/{id}/import": {
+      "parameters": [
+        {
+          "description": "Engine-minted object ID.",
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "operationId": "importVolume",
+        "parameters": [
+          {
+            "description": "Path inside the volume.",
+            "in": "query",
+            "name": "path",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "format": "binary",
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/importResp"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "400": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The request cannot be honored as asked: malformed, an unknown JSON field, or a value the engine can never satisfy."
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "No such object. The message names WHICH kind, so a caller does not look in the wrong place."
+          },
+          "405": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The route exists, but this method does not apply to it."
+          },
+          "409": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
+          },
+          "413": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The body exceeds the engine's per-request limit."
+          },
+          "507": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Capacity: nothing is wrong with the request or the sandbox — the node cannot honor another promise."
+          }
+        },
+        "summary": "Stream bytes INTO a volume with no sandbox involved. Body is the raw content."
+      }
+    },
+    "/v1/volumes/{id}/snapshot": {
+      "parameters": [
+        {
+          "description": "Engine-minted object ID.",
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "operationId": "snapshotVolume",
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/volumeResp"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "No such object. The message names WHICH kind, so a caller does not look in the wrong place."
+          },
+          "405": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The route exists, but this method does not apply to it."
+          },
+          "409": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
+          },
+          "507": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Capacity: nothing is wrong with the request or the sandbox — the node cannot honor another promise."
+          }
+        },
+        "summary": "Snapshot a volume into a new volume."
+      }
+    }
+  }
+}

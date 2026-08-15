@@ -1,7 +1,7 @@
-// Command openapigen writes the §6.1 control-plane OpenAPI document (ADR-0008
-// part 1) from the orchestrator's own wire types.
+// Command openapigen writes the control-plane OpenAPI document from the
+// orchestrator's own wire types.
 //
-//	go run ./cmd/openapigen -out docs/spec/openapi.json
+//	go run ./cmd/openapigen -out docs/api/openapi.json
 //
 // A tiny main rather than a Makefile target or a shell script, because the document
 // must be regenerable by someone who has only the Go toolchain — the same reason the
@@ -21,7 +21,7 @@ import (
 )
 
 func main() {
-	out := flag.String("out", "docs/spec/openapi.json",
+	out := flag.String("out", "docs/api/openapi.json",
 		"path to write the document to (relative to the repo root)")
 	flag.Parse()
 

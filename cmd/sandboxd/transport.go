@@ -17,24 +17,24 @@ import (
 	"github.com/TSHOGX/khora/pkg/transport/gen/khora/transport/v1/transportv1connect"
 )
 
-// transportMode is the §5.E process/fs endpoint (the child of PID 1). It becomes
+// transportMode is the transport data plane process/fs endpoint (the child of PID 1). It becomes
 // the reaper of its own process subtree (so its orphans reparent to it, not
-// PID 1, AND are collected by it — guest-runtime D4.2 / §5.E.1), then serves
+// PID 1, AND are collected by it — the init and sandboxd split / the guest startup topology), then serves
 // Connect-RPC over h2c on a fixed TCP port inside the guest netns. It knows
-// NOTHING of agent/turn/session (transport D1) — pure process/fs mechanism.
+// NOTHING of agent/turn/session (the process/fs boundary) — pure process/fs mechanism.
 func transportMode() {
 	exitIfCrashLoopSentinel()
 
 	// Subreaper declaration + the wildcard drain that collects what it attracts, in one call
-	// (guest-runtime D4.2 / §5.E.1 — see startSubtreeReaper). This table is now this process's
+	// (the init and sandboxd split / the guest startup topology — see startSubtreeReaper). This table is now this process's
 	// ONLY waiter, so the processServer carries it to get its children's exit codes.
 	reaper := startSubtreeReaper()
 
-	// One sandbox-global activity clock (reaper-health D2), shared by the process server
+	// One sandbox-global activity clock (the activity signal), shared by the process server
 	// (stamps I/O) and the health server (reports idle). Transient/process-local, reborn on
 	// every transport (re)start: a fresh transport child that has served no I/O is "idle since
 	// (re)start", and the reaper reads guest-observable truth, not a cross-restart memory
-	// (§5.E stateless).
+	// (the transport data plane stateless).
 	activity := newActivityClock()
 
 	mux := http.NewServeMux()
@@ -42,7 +42,7 @@ func transportMode() {
 	mux.Handle(transportv1connect.NewProcessServiceHandler(&processServer{activity: activity, reaper: reaper}))
 	mux.Handle(transportv1connect.NewFsServiceHandler(&fsServer{activity: activity}))
 	// The large-file bypass shares this mux, listener and port — a plain HTTP
-	// route beside the Connect handlers (files.go / transport D4.4).
+	// route beside the Connect handlers (files.go / fs transport).
 	registerFileRoutes(mux)
 
 	// Publish our pid so supervision/tests can target the transport child
@@ -58,7 +58,7 @@ func transportMode() {
 	}
 	logf("transport(pid %d): serving Connect-RPC on %s inside netns", os.Getpid(), addr)
 
-	// h2c so bidi/server-streams work over cleartext HTTP/2 (transport D4.2).
+	// h2c so bidi/server-streams work over cleartext HTTP/2 (streaming transport).
 	srv := &http.Server{Handler: h2c.NewHandler(mux, &http2.Server{})}
 	if err := srv.Serve(ln); err != nil {
 		logf("transport: serve: %v", err)
@@ -75,11 +75,11 @@ func transportMode() {
 // upper-relative forms and MUST be kept in sync with the paths here.
 const transportPidFile = "/tmp/.sandboxd-transport.pid"
 
-// --- Health service (§4.3 L2 / transport D4.5) -------------------------------
+// --- Health service (health and reclamation L2 / the Health probe) -------------------------------
 
 type healthServer struct {
-	// activity is the shared sandbox-global last-I/O clock (reaper-health D2).
-	// Check reports now-lastIO as idle_millis — the §4.3 activity signal riding
+	// activity is the shared sandbox-global last-I/O clock (the activity signal).
+	// Check reports now-lastIO as idle_millis — the health and reclamation activity signal riding
 	// the same probe that answers L2 liveness (one RPC, no second round-trip).
 	activity *activityClock
 }
@@ -91,7 +91,7 @@ func (h *healthServer) Check(_ context.Context, _ *connect.Request[v1.CheckReque
 	}), nil
 }
 
-// RecordActivity stamps the clock Check reports (§4.3 / reaper-health D2) — the write half of
+// RecordActivity stamps the clock Check reports (health and reclamation / the activity signal) — the write half of
 // the same one signal, which is why it shares this service and this clock.
 //
 // The stamp is the ONLY thing that happens: no duration is accepted, nothing is held, nothing
@@ -111,7 +111,7 @@ func (h *healthServer) RecordActivity(_ context.Context, _ *connect.Request[v1.R
 	}), nil
 }
 
-// The fs service (§5.E) lives in fs.go.
+// The fs service (the transport data plane) lives in fs.go.
 
 // signalPidErr is the message both ends use when a caller addresses SendSignal
 // at a non-positive pid. It says WHY rather than just "invalid": the pid is not
@@ -120,9 +120,9 @@ const signalPidErr = "pid must be > 0: SendSignal carries DIRECTED signals only 
 	"(one process, defaulting to its group). pid <= 0 is POSIX fan-out — " +
 	"kill(0)/kill(-1) address a whole group or the whole pid namespace — and " +
 	"container-level fan-out belongs to guest PID 1, not the transport channel " +
-	"(guest-runtime D4.3 / §5.E.1)"
+	"(guest supervision / the guest startup topology)"
 
-// validateSignalPid enforces the D4.3 subsystem split at the transport entry
+// validateSignalPid enforces the transport behavior subsystem split at the transport entry
 // point. Only pid > 0 is a directed target; everything else is fan-out.
 //
 // This is the whole check on purpose — see SendSignal on why registry membership
@@ -135,7 +135,7 @@ func validateSignalPid(pid int) error {
 }
 
 // killProcessGroup signals pgid first (kill(-pgid)), falling back to pid
-// (transport D4.3 / §5.E.1: directed signals belong to transport mode).
+// (process transport / the guest startup topology: directed signals belong to transport mode).
 //
 // It REQUIRES a caller-validated pid > 0 (validateSignalPid); it does not
 // re-check. Both of its arms turn hostile on a non-positive pid — kill(-pid)

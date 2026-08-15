@@ -5,24 +5,24 @@ import (
 	"time"
 )
 
-// activityClock is the sandbox-global "last I/O" timestamp behind the §4.3
-// connection-activity signal (reaper-health D2). ONE per transport process,
+// activityClock is the sandbox-global "last I/O" timestamp behind the health and reclamation
+// connection-activity signal (the activity signal). ONE per transport process,
 // shared by every proc's fan-out and the healthServer. It is stamped on every
 // output frame (proc.broadcast) and every input frame (proc.writeInput) — the
 // two paths ALL process/pty I/O already flows through — and read by
 // Health.Check as now-lastIO.
 //
-// Granularity is sandbox-global, NOT per-pid (reaper-health D2): the reaper's
+// Granularity is sandbox-global, NOT per-pid (the activity signal): the reaper's
 // disposition is per-sandbox (auto-pause the whole sandbox), so a single
 // "most recent I/O across all procs + ptys" is exactly what it needs — the max
 // over every process, expressed as one lock-free atomic write per I/O event
 // (O(1), independent of process count; same constant-cost rule as Health not
-// listing processes, transport D4.5).
+// listing processes, the Health probe).
 //
-// TRANSIENT and process-local (§5.E / reaper-health D2): it lives in the
+// TRANSIENT and process-local (the transport data plane / the activity signal): it lives in the
 // transport process's memory, is not persisted, does not cross resume, and is
 // reborn (reset to "now") if PID1 restarts the transport child — same class as
-// the output ring buffer (D4.3 "no persistent SoT"). It answers only "how long
+// the output ring buffer (transport behavior "no persistent SoT"). It answers only "how long
 // since this guest last did I/O", never "who connected / for how long".
 type activityClock struct {
 	lastIOUnixMilli atomic.Int64
@@ -30,7 +30,7 @@ type activityClock struct {
 
 // newActivityClock seeds lastIO to construction time, so a guest that has done
 // NO I/O since boot reports "idle since boot" rather than a bogus huge duration
-// from a zero timestamp (reaper-health D2).
+// from a zero timestamp (the activity signal).
 func newActivityClock() *activityClock {
 	c := &activityClock{}
 	c.lastIOUnixMilli.Store(time.Now().UnixMilli())
@@ -48,7 +48,7 @@ func (c *activityClock) stamp() {
 
 // idleMillis returns how long since the last stamped I/O (ms), clamped at 0 so
 // clock skew never yields a negative idle. This is the value Health.Check
-// carries back as CheckResponse.idle_millis (reaper-health D2).
+// carries back as CheckResponse.idle_millis (the activity signal).
 func (c *activityClock) idleMillis() int64 {
 	if c == nil {
 		return 0

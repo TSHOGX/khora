@@ -1,7 +1,7 @@
 // fusehello — a minimal read-only FUSE filesystem spoken directly over
 // /dev/fuse using only the Go stdlib (syscall + encoding/binary), so it builds
 // with GO111MODULE=off and no external module. It exists solely for
-// spike-fuse-passthrough.sh (§5.C remote arm):
+// spike-fuse-passthrough.sh (the Volume subsystem remote arm):
 // mount it on the HOST, bind it into a runsc guest, and prove gVisor's gofer
 // proxies a FUSE-backed mountpoint into the sandbox as a normal POSIX dir.
 //
@@ -219,7 +219,7 @@ func attrOut(nodeid uint64) []byte {
 	return out
 }
 
-// fuse_entry_out: nodeid u64, generation u64, entry_valid u64, attr_valid u64,
+// fuse_entry_out: nodeid u64, lookup-version u64, entry_valid u64, attr_valid u64,
 // entry_valid_nsec u32, attr_valid_nsec u32 (=40 hdr), attr(88) = 128
 func entryOut(nodeid uint64) []byte {
 	out := make([]byte, 128)

@@ -57,7 +57,7 @@ func decodeVolume(t *testing.T, resp *http.Response) volumeResp {
 	return v
 }
 
-// TestVolumeCRUDEndpoints walks the §6.1 Volume block: create → list → inspect →
+// TestVolumeCRUDEndpoints walks the control-plane API Volume block: create → list → inspect →
 // patch → delete, plus the not-found shapes.
 func TestVolumeCRUDEndpoints(t *testing.T) {
 	srv, _, _ := volumeFixture(t)
@@ -86,7 +86,7 @@ func TestVolumeCRUDEndpoints(t *testing.T) {
 	if len(list) != 1 || list[0].VolumeID != created.VolumeID {
 		t.Fatalf("list = %+v, want the one created volume", list)
 	}
-	// NOTHING in the response names a host path (§6.2): volumes are ID-addressed, and
+	// NOTHING in the response names a host path (the API error contract): volumes are ID-addressed, and
 	// the backend's storage location must not reach the wire.
 	raw, _ := json.Marshal(list)
 	for _, leak := range []string{"/tmp", "/var", "SourcePath", "source_path"} {
@@ -132,13 +132,13 @@ func TestVolumeCRUDEndpoints(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	// A SECOND delete is 404, NOT 204 (§6.2): idempotent-by-swallowing would make a
+	// A SECOND delete is 404, NOT 204 (the API error contract): idempotent-by-swallowing would make a
 	// delete the store REFUSED indistinguishable from one that succeeded, and the
 	// reference-protection refusals land on this exact path. An external
 	// implementation returns `200 {"deleted": true}` here.
 	resp = do(t, http.MethodDelete, srv.URL+"/v1/volumes/"+created.VolumeID)
 	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("delete of an already-deleted volume = %d, want 404 (§6.2: not folded into success)", resp.StatusCode)
+		t.Errorf("delete of an already-deleted volume = %d, want 404 (the API error contract: not folded into success)", resp.StatusCode)
 	}
 	resp.Body.Close()
 
@@ -156,7 +156,7 @@ func TestVolumeCRUDEndpoints(t *testing.T) {
 	}
 }
 
-// TestVolumeCapRefusalsAre400 pins the two §6.2 400 verdicts, and that neither is
+// TestVolumeCapRefusalsAre400 pins the two the API error contract 400 verdicts, and that neither is
 // reported as something the caller could retry.
 func TestVolumeCapRefusalsAre400(t *testing.T) {
 	t.Run("a backend that cannot enforce a cap refuses with 400", func(t *testing.T) {
@@ -192,7 +192,7 @@ func TestVolumeCapRefusalsAre400(t *testing.T) {
 		resp := doBody(t, http.MethodPost, srv.URL+"/v1/volumes", `{}`)
 		if resp.StatusCode != http.StatusBadRequest {
 			body, _ := io.ReadAll(resp.Body)
-			t.Fatalf("uncapped create on a metered node = %d, want 400 (§6.2 conditionally required per axis): %s", resp.StatusCode, body)
+			t.Fatalf("uncapped create on a metered node = %d, want 400 (the API error contract conditionally required per axis): %s", resp.StatusCode, body)
 		}
 		resp.Body.Close()
 	})
@@ -211,7 +211,7 @@ func TestVolumeCapRefusalsAre400(t *testing.T) {
 // and byte-for-byte back out, on a server that has NEVER had a sandbox.
 //
 // That is what makes "the volume's lifecycle is decoupled from any sandbox" true in
-// substance rather than only in the record layer (§5.C): seeding from scratch and
+// substance rather than only in the record layer (the Volume subsystem): seeding from scratch and
 // reading after the last sandbox is gone have no other route.
 func TestVolumeImportExportRoundTrip(t *testing.T) {
 	srv, mem, _ := volumeFixture(t)
@@ -390,7 +390,7 @@ func TestVolumeImportIsRootConfinedThroughTheEndpoint(t *testing.T) {
 	resp.Body.Close()
 }
 
-// --- §6.2: no host path reaches an ERROR body ---------------------------------
+// --- the API error contract: no host path reaches an ERROR body ---------------------------------
 
 // pathLeakingBackend wraps a real backend and fails the three write entry points with
 // an error carrying the storage unit's ABSOLUTE HOST PATH.
@@ -476,18 +476,18 @@ func leakFixture(t *testing.T) (*httptest.Server, *store.Memory, string) {
 	return srv, mem, dir
 }
 
-// assertNoHostPath is the §6.2 property, asserted on a response BODY: the caller sees
+// assertNoHostPath is the API error contract property, asserted on a response BODY: the caller sees
 // opaque IDs and no host location.
 //
 // It checks the configured dir, then the generic absolute-path prefixes, because a sanitizer
 // tuned to one configured root would pass while leaking every other path the engine composes.
-// Nothing legitimately in an error body starts with a slash: §6.2 addresses objects by opaque
+// Nothing legitimately in an error body starts with a slash: the API error contract addresses objects by opaque
 // ID, and a volume's own content paths are root-RELATIVE.
 func assertNoHostPath(t *testing.T, what string, body []byte, hostDir string) {
 	t.Helper()
 	for _, leak := range append([]string{hostDir}, "/home", "/tmp", "/var", "/srv", "/proc") {
 		if leak != "" && bytes.Contains(body, []byte(leak)) {
-			t.Errorf("%s leaks a host path (%q) into the response body — §6.2 admits opaque IDs only: %s",
+			t.Errorf("%s leaks a host path (%q) into the response body — the API error contract admits opaque IDs only: %s",
 				what, leak, bytes.TrimSpace(body))
 		}
 	}
@@ -499,7 +499,7 @@ func assertNoHostPath(t *testing.T, what string, body []byte, hostDir string) {
 // says which object relationship failed.
 //
 // Both halves are required, and asserting only the first is the trap: flattening every arm to
-// "internal error" satisfies "no host path" perfectly while destroying §6.2's requirement that
+// "internal error" satisfies "no host path" perfectly while destroying the API error contract's requirement that
 // the four Volume 409s stay distinguishable. So each case below names the token that must
 // SURVIVE the redaction.
 func TestErrorBodiesCarryTheVerdictWithoutTheHostPath(t *testing.T) {
@@ -605,7 +605,7 @@ func TestErrorBodiesCarryTheVerdictWithoutTheHostPath(t *testing.T) {
 	})
 }
 
-// TestWriteRegimeBothSidesMapTo409 pins the SYMMETRY of §5.C's write regime at the
+// TestWriteRegimeBothSidesMapTo409 pins the SYMMETRY of the Volume subsystem's write regime at the
 // status-code edge: both directions of the one invariant must reach the caller as the
 // same retryable verdict.
 //
@@ -625,7 +625,7 @@ func TestWriteRegimeBothSidesMapTo409(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := statusCodeFor(tc.err); got != http.StatusConflict {
 				t.Fatalf("statusCodeFor(%v) = %d; want 409 — both sides of the write regime are "+
-					"RETRYABLE state conflicts (§6.2), and 500 would report a correct refusal as an engine fault",
+					"RETRYABLE state conflicts (the API error contract), and 500 would report a correct refusal as an engine fault",
 					tc.err, got)
 			}
 		})
@@ -665,7 +665,7 @@ func TestSanitizerKeepsEverySentinelDistinguishable(t *testing.T) {
 	} {
 		if got := sanitizeErr(sentinel); got != sentinel.Error() {
 			t.Errorf("the sanitizer altered a sentinel's text:\n  before: %s\n  after:  %s\n"+
-				"every §6.2 verdict must survive verbatim — a 409 naming the wrong object sends the caller to the wrong remedy",
+				"every the API error contract verdict must survive verbatim — a 409 naming the wrong object sends the caller to the wrong remedy",
 				sentinel.Error(), got)
 		}
 	}
@@ -763,7 +763,7 @@ func TestSanitizerRedactsPathsAndPlacement(t *testing.T) {
 	}
 }
 
-// §6.2's general rule on the Volume half of the router: a wrong method on any
+// the API error contract's general rule on the Volume half of the router: a wrong method on any
 // collection/object route is 405, not 404. Every one of these fell into
 // handleVolumeSub's `default` arm as a 404 — the same defect the sandbox sub-routes
 // had, surviving one router longer.
@@ -813,7 +813,7 @@ func TestAWrongMethodOnEveryVolumeSubRouteIs405ButAnUnknownSubPathIs404(t *testi
 				if tc.sub != "" {
 					route += "/" + tc.sub
 				}
-				t.Errorf("%s %s → %d; want %d (§6.2: a wrong method on any "+
+				t.Errorf("%s %s → %d; want %d (the API error contract: a wrong method on any "+
 					"collection/object route is 405, never 404 — 404 says the route does not "+
 					"exist, which sends the caller to check their URL; an unknown sub-path is "+
 					"the one case that IS a 404)", tc.method, route, resp.StatusCode, tc.want)
@@ -853,7 +853,7 @@ func (b *usageFailingBackend) Usage(ctx context.Context, id string) (int64, int6
 	return b.Backend.Usage(ctx, id)
 }
 
-// TestVolumeInspectDistinguishesZeroUsageFromUnreadable pins the §6.1 omission rule at
+// TestVolumeInspectDistinguishesZeroUsageFromUnreadable pins the control-plane API omission rule at
 // the WIRE, which is the only place it can be checked: the rule says `used_byte` is
 // absent IFF the number could not be read, so a genuine 0 must be PRESENT.
 //
@@ -882,7 +882,7 @@ func TestVolumeInspectDistinguishesZeroUsageFromUnreadable(t *testing.T) {
 	// A FRESH volume on the plain-directory arm: usage is readable and genuinely 0.
 	body := inspectRaw(t, srv, id)
 	if !strings.Contains(body, `"used_byte":0`) {
-		t.Errorf("a readable usage of 0 is not reported as `\"used_byte\":0` — the key was dropped, so an EMPTY volume is indistinguishable from one whose usage could not be READ, while §6.1's omission rule says absent means unreadable. Body: %s", body)
+		t.Errorf("a readable usage of 0 is not reported as `\"used_byte\":0` — the key was dropped, so an EMPTY volume is indistinguishable from one whose usage could not be READ, while the control-plane API's omission rule says absent means unreadable. Body: %s", body)
 	}
 
 	// Now the same volume with an UNREADABLE backend.
@@ -891,7 +891,7 @@ func TestVolumeInspectDistinguishesZeroUsageFromUnreadable(t *testing.T) {
 	if strings.Contains(body, `"used_byte"`) {
 		t.Errorf("an UNREADABLE usage still emitted a used_byte key — it must be omitted, or the caller reads a failure as \"this volume is empty\" and picks a cap that wedges it. Body: %s", body)
 	}
-	// And the failure must not ride out as error text (§6.2 / edge_test).
+	// And the failure must not ride out as error text (the API error contract / edge_test).
 	for _, leak := range []string{"simulated", "measure usage"} {
 		if strings.Contains(body, leak) {
 			t.Errorf("the degraded response leaks backend error text (%q): %s", leak, body)

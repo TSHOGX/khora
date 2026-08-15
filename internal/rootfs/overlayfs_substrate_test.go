@@ -117,10 +117,10 @@ func TestOverlayCoWAndRemountByteIdentical(t *testing.T) {
 }
 
 // Mount must hand overlayfs an EMPTY workdir on every mount — the kernel rejects or
-// corrupts a reused one (rootfs-overlay D5). Mount satisfies that by EMPTYING the
+// corrupts a reused one (rootfs mount constraints). Mount satisfies that by EMPTYING the
 // directory rather than deleting and recreating it, because on a unit at its capacity cap
 // the `mkdir` needs a metadata extent the quota has no room for while emptying needs none
-// (D6.6). That is a real distinction on the substrate, so the invariant needs a test of its
+// (rootfs storage). That is a real distinction on the substrate, so the invariant needs a test of its
 // own rather than riding on the remount above: an implementation that stopped clearing work
 // altogether would still pass the byte-identity assertions until a leftover made a mount
 // fail.
@@ -167,7 +167,7 @@ func TestMountClearsStaleWorkWithoutRecreatingIt(t *testing.T) {
 	// The mount must SUCCEED — which is the property: a stale work was cleared.
 	m2, err := p.Mount(ctx, o)
 	if err != nil {
-		t.Fatalf("re-Mount with a stale work dir = %v; Mount must clear it (overlayfs rejects a reused workdir, D5)", err)
+		t.Fatalf("re-Mount with a stale work dir = %v; Mount must clear it (overlayfs rejects a reused workdir, rootfs storage)", err)
 	}
 	t.Cleanup(func() { _ = p.Unmount(ctx, m2) })
 	if _, err := os.Stat(filepath.Join(work, "leftover")); !os.IsNotExist(err) {
@@ -175,7 +175,7 @@ func TestMountClearsStaleWorkWithoutRecreatingIt(t *testing.T) {
 	}
 
 	// ...and the directory was EMPTIED, not recreated: same inode. This is the half that
-	// keeps a full unit resumable (D6.6) — a recreate would need a metadata extent the
+	// keeps a full unit resumable (rootfs storage) — a recreate would need a metadata extent the
 	// quota cannot grant, and it is invisible to any assertion about mount success on a
 	// unit that is not full.
 	var after syscall.Stat_t
@@ -183,14 +183,14 @@ func TestMountClearsStaleWorkWithoutRecreatingIt(t *testing.T) {
 		t.Fatalf("stat work after: %v", err)
 	}
 	if after.Ino != before.Ino {
-		t.Fatalf("work dir inode changed %d → %d — it was RECREATED, not emptied. On a unit at its capacity cap the mkdir returns ENOSPC (measured, tens of KiB of headroom), which makes a sandbox that hit the ordinary §3.4 ENOSPC permanently unresumable and breaks §4.2's reversible-gate promise (rootfs-overlay D6.6)", before.Ino, after.Ino)
+		t.Fatalf("work dir inode changed %d → %d — it was RECREATED, not emptied. On a unit at its capacity cap the mkdir returns ENOSPC (measured, tens of KiB of headroom), which makes a sandbox that hit the ordinary resource admission ENOSPC permanently unresumable and breaks FS-first pause and resume's reversible-gate promise (the quota-lowering constraint)", before.Ino, after.Ino)
 	}
 }
 
 // A stack past the options cap is REFUSED with a diagnosable error, not handed to the
 // kernel. This is the one that needs a real mount: the failure being guarded against is
 // that the classic mount path TRUNCATES options past a page instead of rejecting them
-// (rootfs-overlay D5.1 ⑩), so without the check the kernel either mounts a stack missing
+// (rootfs provider portability), so without the check the kernel either mounts a stack missing
 // its tail — silent, and indistinguishable from mass file loss — or fails naming nothing.
 //
 // MaxLowerDepth's number cannot be what this test drives, because a builtin's TemplateID is
@@ -226,7 +226,7 @@ func TestMountRefusesALowerStackOverTheOptionsCap(t *testing.T) {
 	m, err := p.Mount(ctx, o)
 	if err == nil {
 		_ = p.Unmount(ctx, m)
-		t.Fatal("Mount of an over-cap lower stack SUCCEEDED; want a refusal — the kernel truncates the options instead of failing, so this mounts a stack missing its tail (D5.1 ⑩)")
+		t.Fatal("Mount of an over-cap lower stack SUCCEEDED; want a refusal — the kernel truncates the options instead of failing, so this mounts a stack missing its tail (rootfs storage)")
 	}
 	// The error must name the cause, since the whole point is that the kernel's own
 	// failure names nothing.

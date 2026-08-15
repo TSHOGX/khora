@@ -7,7 +7,7 @@ import (
 	"net/http"
 )
 
-// The §6.1 volume verbs. A volume's lifetime is INDEPENDENT of any sandbox's — that is
+// The control-plane API volume verbs. A volume's lifetime is INDEPENDENT of any sandbox's — that is
 // the whole point of the subsystem — so none of these takes a sandbox ID. A volume is
 // attached by naming it in a sandbox's `volumes` binding at create or on a patch.
 

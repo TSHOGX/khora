@@ -11,17 +11,17 @@ import (
 
 	"github.com/TSHOGX/khora/internal/model"
 
-	_ "modernc.org/sqlite" // pure-Go driver, CGO_ENABLED=0 (ADR-0004)
+	_ "modernc.org/sqlite" // pure-Go driver, CGO_ENABLED=0 (the SQLite store choice)
 )
 
-// SQLite is the persistent Store backend (ADR-0004): pure-Go modernc.org/sqlite,
-// CGO_ENABLED=0, single embedded file (§1.1 local store, no external service).
+// SQLite is the persistent Store backend (the SQLite store choice): pure-Go modernc.org/sqlite,
+// CGO_ENABLED=0, single embedded file (the engine vocabulary boundary local store, no external service).
 //
-// It DELIVERS the §4.4-C atomic-commit contract the interface promises — "state
+// It DELIVERS the transactional outbox atomic-commit contract the interface promises — "state
 // change + outbox append" is one BEGIN/COMMIT. This file only implements that
 // promise; the reasoning behind it lives on the Store interface.
 //
-// Multi-key transactions are exactly why SQLite was chosen over bbolt (ADR-0004):
+// Multi-key transactions are exactly why SQLite was chosen over bbolt (the SQLite store choice):
 // the outbox is a first-class table and the state row + event row commit together
 // without contortion.
 type SQLite struct {
@@ -30,15 +30,15 @@ type SQLite struct {
 
 // sqliteSchema is the ONE authoritative schema. There is no migration path: a
 // breaking change edits this constant and the store file is discarded and
-// rebuilt (CLAUDE.md "No compatibility burden"). IF NOT EXISTS makes OpenSQLite
+// rebuilt (the documentation "No compatibility burden"). IF NOT EXISTS makes OpenSQLite
 // idempotent across reopens of a file this same constant created — it is NOT a
 // version-tolerance mechanism, and a file whose columns disagree is a discard,
 // not something to detect or adapt to.
 const sqliteSchema = `
--- templates: first-class immutable object (§3.1 / §4.3). Existence-is-state
+-- templates: first-class immutable object (the Template and Overlay model / health and reclamation). Existence-is-state
 -- (no state column), derived refcount (no count column). parent is a
 -- self-reference expressing lineage; ON DELETE RESTRICT declares "a referenced
--- parent layer cannot be deleted" (§4.3: references point upward). MUST be
+-- parent layer cannot be deleted" (health and reclamation: references point upward). MUST be
 -- created before the sandboxes table so the sandboxes.template FK below resolves.
 CREATE TABLE IF NOT EXISTS templates (
 	id             TEXT PRIMARY KEY,          -- opaque "tmpl_<token>" / builtin = static dir name
@@ -49,46 +49,46 @@ CREATE TABLE IF NOT EXISTS templates (
 CREATE TABLE IF NOT EXISTS sandboxes (
 	id           TEXT PRIMARY KEY,
 	-- template FK RESTRICT: a Template referenced by any sandbox cannot be
-	-- deleted (§4.3). The reference is a persistent row seen by RESTRICT from
+	-- deleted (health and reclamation). The reference is a persistent row seen by RESTRICT from
 	-- creating through destroyed, even for a paused sandbox.
 	template     TEXT NOT NULL REFERENCES templates(id) ON DELETE RESTRICT,
 	overlay      TEXT NOT NULL,
 	state        TEXT NOT NULL,
-	-- TTL Binding, ns (§3.4 / §4.3). 0 = no such deadline. Always written
+	-- TTL Binding, ns (resource admission / health and reclamation). 0 = no such deadline. Always written
 	-- explicitly by CreateSandbox; the DEFAULT states the resting value.
 	idle_timeout INTEGER NOT NULL DEFAULT 0,
 	retention    INTEGER NOT NULL DEFAULT 0,
-	-- resource-limit Binding (§3.4): re-materialized at each placement FROM these
+	-- resource-limit Binding (resource admission): re-materialized at each placement FROM these
 	-- columns, never read back from a frozen placement. 0 = unlimited. Three
 	-- separate columns, never one fungible "size" — the axes and why they are not
 	-- interchangeable are documented on model.Limits.
-	cpu_millis   INTEGER NOT NULL DEFAULT 0, -- §5.A cgroup cpu
-	memory_byte  INTEGER NOT NULL DEFAULT 0, -- §5.A host memcg (SAFETY limit)
-	disk_byte    INTEGER NOT NULL DEFAULT 0, -- §5.B FS quota on Overlay upper+work
-	-- why the unit was last found dead (§4.3). Committed in the SAME transaction
+	cpu_millis   INTEGER NOT NULL DEFAULT 0, -- the runtime provider contract cgroup cpu
+	memory_byte  INTEGER NOT NULL DEFAULT 0, -- the runtime provider contract host memcg (SAFETY limit)
+	disk_byte    INTEGER NOT NULL DEFAULT 0, -- the Rootfs subsystem FS quota on Overlay upper+work
+	-- why the unit was last found dead (health and reclamation). Committed in the SAME transaction
 	-- as the crash-paused CAS (see Store.CompareAndSetState for why that is
 	-- required). '' = never observed dead.
 	death_cause  TEXT NOT NULL DEFAULT '',
-	-- the §5.D reachability declaration (§3.4 Binding), as an OPAQUE JSON document
+	-- the network declaration reachability declaration (resource admission Binding), as an OPAQUE JSON document
 	-- rather than normalized tables — see model.Sandbox.Network for why one column.
 	--
 	-- NOT NULL with no DEFAULT: an omitted network object is normalized to an explicit
-	-- {deny, [], [], []} at the WRITE POINT (§5.D), so a row with no declaration
+	-- {deny, [], [], []} at the WRITE POINT (the network declaration), so a row with no declaration
 	-- cannot be inserted. A schema default would reintroduce exactly the
 	-- "a null cannot be told from a choice" ambiguity that normalization removes.
 	network      TEXT NOT NULL,
 	created_at   INTEGER NOT NULL, -- unix nanos
 	updated_at   INTEGER NOT NULL
 );
--- RETENTION (§4.4-C, and open-decisions §2 for the one part still open):
+-- RETENTION (the transactional outbox, and a GitHub Issue the security model for the one part still open):
 -- TrimOutbox deletes DELIVERED rows older than a configured window, so this table
 -- is bounded when a deployment sets one. The DEFAULT is off, and with it off rows
 -- are marked (published_at set) and never deleted, so at-rest size is unbounded —
 -- a KNOWN LIMITATION of that default. Only the VALUE is deferred, not the
--- mechanism (§4.4-C).
+-- mechanism (the transactional outbox).
 CREATE TABLE IF NOT EXISTS outbox (
-	-- seq is the §4.4-C cursor: the monotonic total order both the publisher and
-	-- the §6.1 GET /v1/events replay page on. It is the PRIMARY KEY (the rowid)
+	-- seq is the transactional outbox cursor: the monotonic total order both the publisher and
+	-- the control-plane API GET /v1/events replay page on. It is the PRIMARY KEY (the rowid)
 	-- and the event ID is a UNIQUE column beside it — the two swapped roles
 	-- deliberately, because SQLite gives an INTEGER PRIMARY KEY the persistent
 	-- monotonic counter that a TEXT key cannot have.
@@ -105,15 +105,15 @@ CREATE TABLE IF NOT EXISTS outbox (
 	-- AUTOINCREMENT keeps the high-water mark in sqlite_sequence, so it survives
 	-- the table being emptied.
 	seq          INTEGER PRIMARY KEY AUTOINCREMENT,
-	id           TEXT NOT NULL UNIQUE,   -- transition-unique event ID (§4.4-C)
+	id           TEXT NOT NULL UNIQUE,   -- transition-unique event ID (the transactional outbox)
 	sandbox      TEXT NOT NULL,
-	-- The CHECK asserts §4.1's CLOSED set of six kinds (model.EventKind states why it is
+	-- The CHECK asserts the lifecycle state machine's CLOSED set of six kinds (model.EventKind states why it is
 	-- enforced rather than documented). Kept in step with model.EventKinds, which the Go
 	-- side enumerates.
 	kind         TEXT NOT NULL CHECK (kind IN
 	                 ('created','paused','auto-paused','crash-paused','resumed','destroyed')),
 	state        TEXT NOT NULL,
-	-- cause: WHY, for the kinds with more than one route to them (§4.4-C, model.EventCause).
+	-- cause: WHY, for the kinds with more than one route to them (the transactional outbox, model.EventCause).
 	-- NULL = this kind has one route, the common case.
 	--
 	-- NULL rather than '' for absent, so the CHECK can assert the closed set without
@@ -127,7 +127,7 @@ CREATE TABLE IF NOT EXISTS outbox (
 );
 CREATE INDEX IF NOT EXISTS outbox_unpublished ON outbox(seq) WHERE published_at IS NULL;
 -- volumes: first-class persistent object with a lifecycle DECOUPLED from every
--- sandbox (§5.C / §4.3). Existence-is-state, derived refcount — the same shape as
+-- sandbox (the Volume subsystem / health and reclamation). Existence-is-state, derived refcount — the same shape as
 -- templates. What is deliberately NOT a column here (access mode, lease/owner, state),
 -- and why each absence is a decision: model.Volume.
 CREATE TABLE IF NOT EXISTS volumes (
@@ -137,12 +137,12 @@ CREATE TABLE IF NOT EXISTS volumes (
 	-- ON DELETE RESTRICT is a CORRECTNESS lever, not tidiness — the measured quota-leak
 	-- argument is on model.Volume.Parent.
 	parent     TEXT REFERENCES volumes(id) ON DELETE RESTRICT,
-	-- per-volume capacity cap, 0 = uncapped (§5.C / §3.4). THIS COLUMN IS THE AUTHORITY;
-	-- a read-back cannot disambiguate it (model.Volume.CapByte / volume.md D7.3).
+	-- per-volume capacity cap, 0 = uncapped (the Volume subsystem / resource admission). THIS COLUMN IS THE AUTHORITY;
+	-- a read-back cannot disambiguate it (model.Volume.CapByte / volume cap enforcement).
 	cap_byte   INTEGER NOT NULL DEFAULT 0,
 	created_at INTEGER NOT NULL             -- unix nanos
 );
--- mounts: the mount table (§5.C), a first-class persistent object and structurally
+-- mounts: the mount table (the Volume subsystem), a first-class persistent object and structurally
 -- the DOUBLING of sandboxes.template — two columns, each ON DELETE RESTRICT, which
 -- together give "a volume with a live mount row cannot be deleted" AND "a sandbox
 -- with a live mount row cannot be deleted" (model.Mount).
@@ -160,10 +160,10 @@ CREATE TABLE IF NOT EXISTS mounts (
 	-- predicate, so a mis-cased 'Exclusive' would make that index simply NOT APPLY and
 	-- let two exclusive rows both insert.
 	access  TEXT NOT NULL CHECK (access IN ('exclusive','shared-ro','shared-rw')),
-	-- Two topology assertions (§5.C), both judged 400 rather than 409 by the API:
+	-- Two topology assertions (the Volume subsystem), both judged 400 rather than 409 by the API:
 	--   (sandbox, path):   two volumes at one destination means the second BIND SHADOWS
 	--                      the first, so one volume is invisible in the guest while
-	--                      still counting in §3.4 and still holding its lease. "An
+	--                      still counting in resource admission and still holding its lease. "An
 	--                      exclusive lease on a volume the guest cannot see" is exactly
 	--                      the silent failure this catches.
 	--   (sandbox, volume): the same volume twice in one sandbox. It has no known
@@ -174,7 +174,7 @@ CREATE TABLE IF NOT EXISTS mounts (
 	UNIQUE (sandbox, path),
 	UNIQUE (sandbox, volume)
 );
--- SCHEMA-LEVEL ASSERTION, NOT THE INVARIANT'S ENFORCEMENT (§5.C). It forbids only
+-- SCHEMA-LEVEL ASSERTION, NOT THE INVARIANT'S ENFORCEMENT (the Volume subsystem). It forbids only
 -- "two exclusive rows" and does NOT forbid an exclusive row coexisting with a shared
 -- one — it covers half the invariant. The other half is delivered by the atomic
 -- INSERT…SELECT…WHERE NOT EXISTS in CreateMounts, which expresses the full predicate.
@@ -196,15 +196,15 @@ CREATE UNIQUE INDEX IF NOT EXISTS mounts_exclusive_lease
 // database/sql hands out a POOL of connections, not one — and two facts make an
 // unbounded pool wrong here:
 //
-//  1. Correctness: every §4.4-C transition is a write. With multiple write
+//  1. Correctness: every the transactional outbox transition is a write. With multiple write
 //     connections, concurrent cross-sandbox transitions contend for SQLite's
 //     single write lock; _txlock=immediate turns that into a fail-fast on the
 //     busy-timeout rather than a mid-transaction deadlock, but it still surfaces
-//     as spurious errors the mediator would have to retry. The §4 mediator
-//     already serializes verbs PER sandbox (§4.4-B transition lock); pinning the
+//     as spurious errors the mediator would have to retry. The lifecycle mediator
+//     already serializes verbs PER sandbox (per-sandbox transition serialization transition lock); pinning the
 //     store to ONE connection makes writes globally serialize at the store too,
 //     so a transition either runs or waits — never fails spuriously. For a
-//     single-node control plane (§1.1) whose writes are infrequent lifecycle
+//     single-node control plane (the engine vocabulary boundary) whose writes are infrequent lifecycle
 //     events, total serialization is the right trade: determinism over
 //     write-concurrency the workload does not need.
 //  2. :memory: coherence: each modernc.org/sqlite connection to ":memory:" gets
@@ -216,20 +216,21 @@ CREATE UNIQUE INDEX IF NOT EXISTS mounts_exclusive_lease
 // file case (crash-safe commits, and a short wait rather than an instant error
 // if an external process ever holds the file lock).
 func OpenSQLite(path string) (*SQLite, error) {
-	// _txlock=immediate: every BEGIN takes its write lock up front (see item 1 above).
+	// _txlock=immediate: every BEGIN takes its write lock up front, preventing a
+	// deferred transaction from failing during a later read-to-write upgrade.
 	//
 	// auto_vacuum=INCREMENTAL is what lets TrimOutbox return space to the FILESYSTEM
 	// rather than only inside the file. IT MUST BE SET BEFORE THE FIRST TABLE EXISTS —
 	// measured: on a database that already has tables the pragma is a silent no-op (it
 	// reports back 0/none) and converting afterwards needs a full VACUUM. Hence the DSN,
 	// applied on every open. Free to add only because there are no live instances to
-	// migrate (CLAUDE.md "No compatibility burden").
+	// migrate (the documentation "No compatibility burden").
 	dsn := path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)&_pragma=auto_vacuum(incremental)&_txlock=immediate"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("store/sqlite: open: %w", err)
 	}
-	// Single connection: deterministic write serialization (§4.4-B/C) + a coherent
+	// Single connection: deterministic write serialization (per-sandbox transition serialization/C) + a coherent
 	// single in-memory database for ":memory:". Safe from self-deadlock because no
 	// code path holds an open *sql.Tx while trying to acquire a second connection —
 	// each Store method takes the connection once and returns it.
@@ -246,7 +247,7 @@ func OpenSQLite(path string) (*SQLite, error) {
 func (s *SQLite) Close() error { return s.db.Close() }
 
 // tx runs fn inside a single transaction, committing on nil error and rolling
-// back otherwise. This is the primitive that delivers §4.4-C: a transition and
+// back otherwise. This is the primitive that delivers the transactional outbox: a transition and
 // its outbox append run inside ONE fn, so a crash between them is impossible —
 // the commit is all-or-nothing.
 func (s *SQLite) tx(ctx context.Context, fn func(*sql.Tx) error) error {
@@ -261,7 +262,7 @@ func (s *SQLite) tx(ctx context.Context, fn func(*sql.Tx) error) error {
 	return t.Commit()
 }
 
-// insertEvent appends one outbox row inside the given tx (§4.4-C: same commit as
+// insertEvent appends one outbox row inside the given tx (the transactional outbox: same commit as
 // the state change). nil = publish nothing.
 func insertEvent(t *sql.Tx, ev *Event) error {
 	if ev == nil {
@@ -301,8 +302,8 @@ func (s *SQLite) CreateSandbox(ctx context.Context, sb model.Sandbox, ev *Event)
 			sb.CreatedAt.UnixNano(), sb.UpdatedAt.UnixNano(),
 		); err != nil {
 			// FK RESTRICT on template: the referenced Template does not exist —
-			// the reference-side of §4.3 atomicity (a concurrent DELETE won, or
-			// boot seed hasn't run). create loses cleanly (§6 create-from-Template).
+			// the reference-side of health and reclamation atomicity (a concurrent DELETE won, or
+			// boot seed hasn't run). create loses cleanly (the external API create-from-Template).
 			if isFKViolation(err) {
 				return ErrTemplateNotFound
 			}
@@ -351,10 +352,10 @@ func (s *SQLite) CompareAndSetState(ctx context.Context, id model.SandboxID, exp
 			return err
 		}
 		if model.Lifecycle(cur) != expected {
-			return ErrConflict // failed CAS → rollback drops any event (§4.4-C atomicity)
+			return ErrConflict // failed CAS → rollback drops any event (the transactional outbox atomicity)
 		}
 		// state + death_cause + outbox row in ONE transaction — the atomicity
-		// Store.CompareAndSetState promises (§4.4-C / §4.3).
+		// Store.CompareAndSetState promises (the transactional outbox / health and reclamation).
 		if cause == nil {
 			if _, err := t.Exec(`UPDATE sandboxes SET state=?, updated_at=? WHERE id=?`,
 				string(next), time.Now().UnixNano(), string(id)); err != nil {
@@ -373,7 +374,7 @@ func (s *SQLite) CompareAndSetState(ctx context.Context, id model.SandboxID, exp
 func (s *SQLite) UpdateBinding(ctx context.Context, id model.SandboxID, expected model.Lifecycle, b Binding, cause *model.DeathCause) error {
 	return s.tx(ctx, func(t *sql.Tx) error {
 		// Read the current record inside the transaction so the state check and the
-		// write cannot straddle a concurrent transition (§4.4-B).
+		// write cannot straddle a concurrent transition (per-sandbox transition serialization).
 		var cur, netJSON string
 		var lim model.Limits
 		var idleNanos, retNanos int64
@@ -404,8 +405,8 @@ func (s *SQLite) UpdateBinding(ctx context.Context, id model.SandboxID, expected
 		if jerr != nil {
 			return jerr
 		}
-		// One statement set, one transaction (§4.4-C): the caps and the death-cause
-		// clear that lifts §4.3's refusal land together or not at all. updated_at is
+		// One statement set, one transaction (the transactional outbox): the caps and the death-cause
+		// clear that lifts health and reclamation's refusal land together or not at all. updated_at is
 		// deliberately absent (see Store.UpdateBinding).
 		if cause == nil {
 			_, err = t.Exec(
@@ -459,7 +460,7 @@ func (s *SQLite) UnpublishedEvents(ctx context.Context, limit int) ([]Event, err
 	//
 	// LIMIT is load-bearing rather than an optimization — on this backend specifically,
 	// because the pool is pinned to ONE connection, so an unbounded scan holds it for
-	// its whole length and every state transition waits behind it (§4.4-C ③).
+	// its whole length and every state transition waits behind it (the transactional outbox).
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT seq, id, sandbox, kind, state, cause, occurred_at FROM outbox WHERE published_at IS NULL ORDER BY seq LIMIT ?`, limit)
 	if err != nil {
@@ -469,7 +470,7 @@ func (s *SQLite) UnpublishedEvents(ctx context.Context, limit int) ([]Event, err
 	return scanEvents(rows)
 }
 
-// TrimOutbox implements Store.TrimOutbox (§4.4-C's retention mechanism). Read that
+// TrimOutbox implements Store.TrimOutbox (the transactional outbox's retention mechanism). Read that
 // contract for why each clause of this predicate is load-bearing.
 func (s *SQLite) TrimOutbox(ctx context.Context, cutoff time.Time, limit int) (int, error) {
 	if limit <= 0 {
@@ -509,7 +510,7 @@ func (s *SQLite) TrimOutbox(ctx context.Context, cutoff time.Time, limit int) (i
 }
 
 // CountUnpublished implements Store.CountUnpublished: the backlog gauge's own source,
-// independent of the drain read (§4.4-C ③).
+// independent of the drain read (the transactional outbox).
 func (s *SQLite) CountUnpublished(ctx context.Context) (int64, error) {
 	var n int64
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE published_at IS NULL`).Scan(&n); err != nil {
@@ -518,7 +519,7 @@ func (s *SQLite) CountUnpublished(ctx context.Context) (int64, error) {
 	return n, nil
 }
 
-// Events implements the §6.1 replay read (Store.Events). Delivery state is not a
+// Events implements the control-plane API replay read (Store.Events). Delivery state is not a
 // predicate here — replay is over the whole retained window.
 func (s *SQLite) Events(ctx context.Context, after int64, limit int) ([]Event, int64, int64, error) {
 	// Window bounds first, from the SAME connection (the pool is pinned to one),
@@ -588,10 +589,10 @@ func (s *SQLite) MarkPublished(ctx context.Context, eventID string) error {
 
 // isFKViolation reports whether err is a SQLite foreign-key constraint failure.
 // modernc.org/sqlite surfaces it in the error text (no typed sentinel exposed);
-// this is the seam's translation point from a raw driver error to the §4.3
+// this is the seam's translation point from a raw driver error to the health and reclamation
 // contract verdict (ErrInUse on RESTRICT-delete, ErrTemplateNotFound on a
 // missing-parent insert). Keeping the string match HERE, not in callers, is what
-// stops the backend detail leaking into correctness (§4.4-C).
+// stops the backend detail leaking into correctness (the transactional outbox).
 //
 // The string match is the STABLE side, not a stopgap — do not "optimize" it into
 // a code comparison. Measured: with extended result codes on (the DSN turns them
@@ -617,7 +618,7 @@ func (s *SQLite) CreateTemplate(ctx context.Context, tm model.Template) error {
 		}
 		// parent is nullable: empty TemplateID → SQL NULL (a base layer). A
 		// non-NULL parent is FK-checked here — a missing parent → the insert hits
-		// the FK and we translate to ErrTemplateNotFound (§4.3 reference-side).
+		// the FK and we translate to ErrTemplateNotFound (health and reclamation reference-side).
 		var parent any
 		if tm.Parent != "" {
 			parent = string(tm.Parent)
@@ -668,7 +669,7 @@ func (s *SQLite) DeleteTemplate(ctx context.Context, id model.TemplateID) error 
 		res, err := t.Exec(`DELETE FROM templates WHERE id=?`, string(id))
 		if err != nil {
 			// FK RESTRICT: a sandbox or child Template still references it →
-			// ErrInUse (§4.3 referenced-means-undeletable / §6 DELETE → 409).
+			// ErrInUse (health and reclamation referenced-means-undeletable / the external API DELETE → 409).
 			if isFKViolation(err) {
 				return ErrInUse
 			}
@@ -685,7 +686,7 @@ func (s *SQLite) DeleteTemplate(ctx context.Context, id model.TemplateID) error 
 	})
 }
 
-// --- Volume CRUD (§5.C) ------------------------------------------------------
+// --- Volume CRUD (the Volume subsystem) ------------------------------------------------------
 
 func (s *SQLite) CreateVolume(ctx context.Context, v model.Volume) error {
 	return s.tx(ctx, func(t *sql.Tx) error {
@@ -697,7 +698,7 @@ func (s *SQLite) CreateVolume(ctx context.Context, v model.Volume) error {
 		}
 		// parent is nullable: an empty VolumeID becomes SQL NULL (not derived). A
 		// non-NULL parent is FK-checked here, and a missing one translates to
-		// ErrVolumeNotFound (§4.3 reference side).
+		// ErrVolumeNotFound (health and reclamation reference side).
 		var parent any
 		if v.Parent != "" {
 			parent = string(v.Parent)
@@ -777,7 +778,7 @@ func (s *SQLite) DeleteVolume(ctx context.Context, id model.VolumeID) error {
 			return err
 		}
 		if n == 0 {
-			// Reported, never folded into success (§6.2): the reference-protection
+			// Reported, never folded into success (the API error contract): the reference-protection
 			// refusals land on this same path, so folding here would make a REFUSED
 			// delete indistinguishable from a successful one.
 			return ErrVolumeNotFound
@@ -786,7 +787,7 @@ func (s *SQLite) DeleteVolume(ctx context.Context, id model.VolumeID) error {
 	})
 }
 
-// --- Mount table (§5.C) ------------------------------------------------------
+// --- Mount table (the Volume subsystem) ------------------------------------------------------
 
 // CreateMounts inserts the whole binding atomically. See Store.CreateMounts for why
 // judgment and insert must be one statement rather than a pre-check plus an insert.
@@ -819,7 +820,7 @@ func (s *SQLite) ReplaceMounts(ctx context.Context, sandbox model.SandboxID, nex
 			return err
 		}
 		// Any verdict here rolls the DELETE back too, so a refused replacement leaves the
-		// OLD binding in place — that is consequence ① and it needs no compensating code.
+		// OLD binding in place — that is consequence  and it needs no compensating code.
 		return insertBinding(t, next)
 	})
 }
@@ -827,7 +828,7 @@ func (s *SQLite) ReplaceMounts(ctx context.Context, sandbox model.SandboxID, nex
 // insertBinding inserts every row of a validated binding inside an EXISTING transaction,
 // enforcing the lease per row. Shared by CreateMounts and ReplaceMounts so the lease
 // predicate has ONE spelling: a second copy is how the two write points would drift apart
-// on the invariant §5.C calls the only new one Volume introduces.
+// on the invariant the Volume subsystem calls the only new one Volume introduces.
 //
 // It assumes the binding was already validated (validateBinding / validateReplacement).
 func insertBinding(t *sql.Tx, mounts []model.Mount) error {
@@ -847,7 +848,7 @@ func insertBinding(t *sql.Tx, mounts []model.Mount) error {
 			string(mt.Sandbox), string(mt.Volume), mt.Path, string(mt.Access),
 		)
 		if err != nil {
-			// A missing sandbox or volume is the REFERENCE side of §4.3 atomicity (a
+			// A missing sandbox or volume is the REFERENCE side of health and reclamation atomicity (a
 			// concurrent delete won). The two are distinguished by which row is absent.
 			if isFKViolation(err) {
 				var exists int
@@ -928,7 +929,7 @@ func scanMounts(rows *sql.Rows) ([]model.Mount, error) {
 //
 // It is a SEPARATE predicate from isFKViolation and must stay one: that match
 // correctly reports false for a uniqueness failure, so no single string match can
-// cover all four §6.2 verdicts. Same reasoning as isFKViolation for why this stays a
+// cover all four the API error contract verdicts. Same reasoning as isFKViolation for why this stays a
 // text match rather than a result-code comparison.
 func isUniqueViolation(err error) bool {
 	if err == nil {
@@ -940,7 +941,7 @@ func isUniqueViolation(err error) bool {
 }
 
 // validateBinding rejects a binding that CONTRADICTS ITSELF, before any row is
-// written (§5.C, judged 400 by §6.2: decidable without reading another row, and no
+// written (the Volume subsystem, judged 400 by the API error contract: decidable without reading another row, and no
 // retry can make it legal).
 //
 // It runs in the STORE rather than only at the API boundary so both backends deliver
@@ -960,7 +961,7 @@ func validateBinding(mounts []model.Mount) error {
 			return fmt.Errorf("%w: path %q is not normalized (absolute, cleaned) — the uniqueness assertions are literal string comparisons, so an un-normalized path makes them silently not apply",
 				ErrMountBindingInvalid, mt.Path)
 		}
-		// The guest root is normalized BUT ILLEGAL (§5.C: absolute, cleaned, not "/"), and
+		// The guest root is normalized BUT ILLEGAL (the Volume subsystem: absolute, cleaned, not "/"), and
 		// this is a SEPARATE check rather than a stricter normalizer because "/" is a FIXED
 		// POINT of path.Clean: "//", "/.", "/data/.." and " / " all normalize TO "/" and are
 		// caught above, so only the bare "/" reaches here. Folding the two would make
@@ -972,7 +973,7 @@ func validateBinding(mounts []model.Mount) error {
 				ErrMountBindingInvalid, mt.Path)
 		}
 		if seenPath[mt.Path] {
-			return fmt.Errorf("%w: destination %q appears twice — the second bind would SHADOW the first, leaving one volume invisible in the guest while it still counts in §3.4 and still holds its lease",
+			return fmt.Errorf("%w: destination %q appears twice — the second bind would SHADOW the first, leaving one volume invisible in the guest while it still counts in resource admission and still holds its lease",
 				ErrMountBindingInvalid, mt.Path)
 		}
 		if seenVol[mt.Volume] {
@@ -981,7 +982,7 @@ func validateBinding(mounts []model.Mount) error {
 		seenPath[mt.Path] = true
 		seenVol[mt.Volume] = true
 	}
-	// Nesting: volumes must not mount inside one another's subtree (§5.C), or the
+	// Nesting: volumes must not mount inside one another's subtree (the Volume subsystem), or the
 	// ownership of the mount-point placeholder in a Promote capture becomes ambiguous.
 	// A prefix scan, because UNIQUE cannot express it.
 	for i, a := range mounts {
@@ -1027,7 +1028,7 @@ func normalizedMountPath(p string) string {
 	return c
 }
 
-// NormalizeMountPath exposes that definition to the mediator (§5.C requires paths to
+// NormalizeMountPath exposes that definition to the mediator (the Volume subsystem requires paths to
 // be normalized BEFORE insert). Exported from the store because the store is where
 // the uniqueness assertions live, so the normalization and the assertions it protects
 // stay in one place.

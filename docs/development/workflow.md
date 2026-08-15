@@ -1,0 +1,48 @@
+# Development workflow
+
+## Start from the engine boundary
+
+khora exposes a decoupled sandbox abstraction. Before adding an engine concept,
+check whether the need can be implemented by registering a provider, adding a store
+relationship, or subscribing to Events. Caller identity, authorization, credentials,
+and higher-level work orchestration stay in an adapter outside this repository.
+
+Mechanisms belong to `runtime`, `rootfs`, `volume`, `network`, or `transport`.
+Lifecycle verbs belong to `internal/lifecycle`. Shared vocabulary and pure criteria
+belong in leaf packages. [Architecture tests](../../internal/arch/coupling_test.go)
+keep the cross-subsystem allowlist empty.
+
+## Use Issues and PRs as records
+
+An Issue records a need, ruling, or known gap. A PR records implementation, review,
+and verification. Use `Refs #N` for progress and `Closes #N` only when the PR fully
+delivers the Issue. Do not create a second open-question register or encode a
+document section address in code.
+
+For inbound asks, record the need and fallback before proposing engine design.
+Keep a granted ask open until its implementing PR merges; close a refusal with its
+reason and a duplicate with the canonical Issue. The repository-wide documentation
+migration is tracked by [Issue #16](https://github.com/TSHOGX/khora/issues/16).
+
+## Make a reviewable change
+
+Keep code, focused tests, public documentation, and generated output in the same PR.
+Use existing package vocabulary and provider seams. New comments should state a
+local obligation, failure mode, or measurement, not cite a Markdown page as the
+reason code is correct.
+
+New structural guards require a committed negative fixture proving the prohibited
+shape is rejected. Register a new build tag only in the architectural tag matrix,
+alone and paired with `substrate` where applicable. Use `internal/waitfor` instead
+of custom polling loops.
+
+Commit messages use Conventional Commits scoped to the engine. `main` changes
+through review; the pre-push hook is only a local safeguard.
+
+## Prepare the PR
+
+Run the deterministic checks and make the substrate decision described in
+[Testing](testing.md) after the last material change. Regenerate and check derived
+files as described in [Generated files](generated-files.md). Fill in the PR template
+with the Issue link, change summary, CI or command results, and exact substrate
+decision evidence.

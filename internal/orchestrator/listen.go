@@ -1,9 +1,9 @@
 package orchestrator
 
-// The outward-facing boundary's enforcement half (ADR-0007): the §6.1 listener is
+// The outward-facing boundary's enforcement half (the deployment boundary): the control-plane API listener is
 // refused anywhere but loopback unless the deployment says otherwise out loud.
 //
-// Authentication and TLS live OUTSIDE the engine (§1.4 / §1.1), so what the engine
+// Authentication and TLS live OUTSIDE the engine (the engine non-goals / the engine vocabulary boundary), so what the engine
 // contributes to its own security posture is not a verifier but this refusal: with the
 // listener pinned to loopback, whatever terminates TLS in front of it is the only
 // outward-facing surface BY CONSTRUCTION. A default is not a boundary — `--addr` has
@@ -18,14 +18,14 @@ import (
 	"strings"
 )
 
-// ErrListenAddrNotLoopback is the STARTUP refusal of a §6.1 listen address that is
+// ErrListenAddrNotLoopback is the STARTUP refusal of a control-plane API listen address that is
 // not loopback, absent an explicit override.
 //
 // Deliberately not a per-request error, for the reason ErrSecondHopUIDIsTheEngineItself
 // gives about its own case: this is a property of the DEPLOYMENT alone. It is
 // decidable with no request in hand, it must be decided before anything is served,
 // and no request ever reaches a state where reporting it would be right.
-var ErrListenAddrNotLoopback = errors.New("orchestrator: the §6.1 listen address is not loopback")
+var ErrListenAddrNotLoopback = errors.New("orchestrator: control-plane listen address is not loopback")
 
 // ResolveHost maps a hostname to its addresses. nil → net.LookupHost.
 //
@@ -35,7 +35,7 @@ var ErrListenAddrNotLoopback = errors.New("orchestrator: the §6.1 listen addres
 type ResolveHost func(host string) ([]string, error)
 
 // ValidateListenAddr decides whether addr may be served without an explicit
-// insecure-mode override (ADR-0007).
+// insecure-mode override (the deployment boundary).
 //
 // It answers on the PARSED address rather than on the string: the forms that need catching
 // are exactly the ones a prefix comparison gets wrong. Measured, against whether a listener
@@ -125,11 +125,11 @@ func ValidateListenAddr(addr string, resolve ResolveHost) error {
 
 // whyLoopback is the tail shared by every refusal above: the operator needs the
 // consequence and the way out, not just the verdict.
-const whyLoopback = "The §6.1 API has NO authentication and NO TLS — by design, since the " +
-	"credential family is permanently excluded from the engine (§1.4) — so publishing this listener " +
+const whyLoopback = "The control-plane API has NO authentication and NO TLS, since the " +
+	"credential family is permanently excluded from the engine, so publishing this listener " +
 	"exposes an unauthenticated control plane that can create root-capable sandboxes to anything that " +
 	"can route to this host. Put a TLS-terminating, authenticating gateway in front of it and leave " +
-	"this listener on loopback (ADR-0007), or pass --insecure-listen if this deployment is reachable " +
+	"this listener on loopback, or pass --insecure-listen if this deployment is reachable " +
 	"only by authorized callers for some reason the engine cannot see."
 
 func plural(n int) string {

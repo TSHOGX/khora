@@ -10,7 +10,7 @@ import (
 )
 
 // These guards are the thing standing between "the substrate ran" and a green `ok` that
-// ran nothing, so they are falsified rather than trusted — the same rule ADR-0006
+// ran nothing, so they are falsified rather than trusted — the same rule the subsystem reachability rule
 // applies to the structural guards. Each case drives the guard with a KNOWN-BAD input
 // through a recorder and asserts it fails, and that its message names the fact a reader
 // needs to fix the box.

@@ -15,7 +15,7 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
 # Each binary declares its own `version` var (there is no shared version package:
-# the gateway imports nothing from internal/, ADR-0007), so the -X target is
+# the gateway imports nothing from internal/, the deployment boundary), so the -X target is
 # main.version in all four.
 LDFLAGS := -buildid= -s -w -X main.version=$(VERSION)
 BUILDFLAGS := -trimpath -ldflags="$(LDFLAGS)"

@@ -9,7 +9,7 @@
 //
 // Same discipline as the mount suite: "the sandbox is still alive" is never the
 // assertion — measured, it is vacuously true under every way of yanking a volume
-// (volume.md D7.2). The assertions here are the ones that would pass SILENTLY.
+// (volume sweep safety). The assertions here are the ones that would pass SILENTLY.
 package test
 
 import (
@@ -33,7 +33,7 @@ import (
 //
 // The second direction is the one that matters most: `paused` is NOT a live writer, and
 // that is an explicitly written PROMISE rather than a detail that could be tightened
-// away for convenience (§5.C / volume.md D5). Refusing on "any row in the mount table"
+// away for convenience (the Volume subsystem / the volume write regime). Refusing on "any row in the mount table"
 // would tear nothing and would delete this capability.
 func TestVolumeRegimeRefusesDirectWriteUnderALiveHolderAndAllowsItWhenPaused(t *testing.T) {
 	ctx := context.Background()
@@ -55,7 +55,7 @@ func TestVolumeRegimeRefusesDirectWriteUnderALiveHolderAndAllowsItWhenPaused(t *
 	// Direction 1: a LIVE rw holder blocks the direct write.
 	_, err = eng.Mediator.ImportVolume(ctx, vid, "from-host", strings.NewReader("HOST-BYTES"))
 	if !errors.Is(err, lifecycle.ErrVolumeLiveWriter) {
-		t.Fatalf("import under a live rw mount = %v; want ErrVolumeLiveWriter (§5.C write regime)", err)
+		t.Fatalf("import under a live rw mount = %v; want ErrVolumeLiveWriter (the Volume subsystem write regime)", err)
 	}
 	// And nothing landed: a refusal that had already written part of the payload would
 	// be the tear the invariant exists to prevent.
@@ -89,7 +89,7 @@ func TestVolumeRegimeRefusesDirectWriteUnderALiveHolderAndAllowsItWhenPaused(t *
 	}
 	const payload = "WRITTEN-WHILE-PAUSED"
 	if _, err := eng.Mediator.ImportVolume(ctx, vid, "from-host", strings.NewReader(payload)); err != nil {
-		t.Fatalf("import while the holder is PAUSED = %v; want success — `paused` is not a live writer, and that is a promise (§5.C)", err)
+		t.Fatalf("import while the holder is PAUSED = %v; want success — `paused` is not a live writer, and that is a promise (the Volume subsystem)", err)
 	}
 
 	// And on resume the guest sees the new bytes, which is the second half of the
@@ -104,13 +104,13 @@ func TestVolumeRegimeRefusesDirectWriteUnderALiveHolderAndAllowsItWhenPaused(t *
 
 // TestVolumeRegimeSeedWithoutASandboxThenMountThenReadAfterDestroy is import → export in full, with a real mount in the middle.
 //
-// This is the SUBSTANCE of "a volume's lifecycle is decoupled from any sandbox" (§5.C):
+// This is the SUBSTANCE of "a volume's lifecycle is decoupled from any sandbox" (the Volume subsystem):
 // an object whose content can only move through a sandbox is independent on paper only.
 func TestVolumeRegimeSeedWithoutASandboxThenMountThenReadAfterDestroy(t *testing.T) {
 	ctx := context.Background()
 	eng, _ := mountEngine(t)
 
-	// ① A node with NO sandbox at all.
+	//  A node with NO sandbox at all.
 	recs, err := eng.Store.ListSandboxes(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -135,7 +135,7 @@ func TestVolumeRegimeSeedWithoutASandboxThenMountThenReadAfterDestroy(t *testing
 		t.Fatalf("zero-sandbox round trip mismatch: %d back, %d written", out.Len(), len(payload))
 	}
 
-	// ② A sandbox mounts it and sees THE SAME bytes. Compared by length and by a
+	//  A sandbox mounts it and sees THE SAME bytes. Compared by length and by a
 	// checksum-ish tail rather than by dumping 200 KiB through the shell: the bare
 	// rootfs has no coreutils, so only dash builtins are available.
 	sid, err := eng.Mediator.Create(ctx, lifecycle.CreateSpec{
@@ -156,7 +156,7 @@ func TestVolumeRegimeSeedWithoutASandboxThenMountThenReadAfterDestroy(t *testing
 		t.Fatalf("guest write: %q", out)
 	}
 
-	// ③ Destroy the sandbox — the LAST one on this node — and read the volume again.
+	//  Destroy the sandbox — the LAST one on this node — and read the volume again.
 	if err := eng.Mediator.Destroy(ctx, sid); err != nil {
 		t.Fatalf("destroy: %v", err)
 	}
@@ -166,7 +166,7 @@ func TestVolumeRegimeSeedWithoutASandboxThenMountThenReadAfterDestroy(t *testing
 	}
 	out.Reset()
 	if _, err := eng.Mediator.ExportVolume(ctx, vid, "payload.bin", &out); err != nil {
-		t.Fatalf("export AFTER the last sandbox is gone: %v — this is the scenario the direct accessor exists for (§5.C)", err)
+		t.Fatalf("export AFTER the last sandbox is gone: %v — this is the scenario the direct accessor exists for (the Volume subsystem)", err)
 	}
 	if !bytes.Equal(out.Bytes(), payload) {
 		t.Errorf("post-destroy export differs: %d bytes back, %d expected", out.Len(), len(payload))
@@ -184,7 +184,7 @@ func TestVolumeRegimeSeedWithoutASandboxThenMountThenReadAfterDestroy(t *testing
 //
 // The content assertion reads the STEADY STATE from the HOST, byte for byte, because of
 // the measured trap the file header names; the cap assertion is the sharper one. Both
-// failure messages below carry their own reason (volume.md D7.2).
+// failure messages below carry their own reason (volume sweep safety).
 func TestVolumeRegimeSweepLeavesALiveGuestUntouched(t *testing.T) {
 	ctx := context.Background()
 	eng, stateDir := mountEngine(t)
@@ -254,7 +254,7 @@ func TestVolumeRegimeSweepLeavesALiveGuestUntouched(t *testing.T) {
 		t.Fatalf("read the cap after the sweep: %v", err)
 	}
 	if limitAfter != limitBefore {
-		t.Fatalf("the sweep changed a LIVE volume's cap: %d → %d — `limit none` is the one operation that breaks an engine promise beyond data integrity, and it has no EBUSY self-protection (volume.md D7.2)", limitBefore, limitAfter)
+		t.Fatalf("the sweep changed a LIVE volume's cap: %d → %d — `limit none` is the one operation that breaks an engine promise beyond data integrity, and it has no EBUSY self-protection (volume sweep safety)", limitBefore, limitAfter)
 	}
 
 	// And the cap is still ENFORCED afterwards: a guest that fills the volume must still
@@ -300,9 +300,9 @@ func TestVolumeRegimePromoteExcludesTheMountPoint(t *testing.T) {
 	layer := filepath.Join(stateDir, "layers", string(tid))
 
 	// The volume's content is NOT in the layer. This is the same thing as `tar` of a
-	// directory with something mounted on it capturing only the empty shell (§5.B).
+	// directory with something mounted on it capturing only the empty shell (the Rootfs subsystem).
 	if _, err := os.Stat(filepath.Join(layer, "workspace", "vol.txt")); !os.IsNotExist(err) {
-		t.Errorf("the volume's content entered the frozen layer (%v) — a Volume lives in its own backend and is outside Promote's capture (§5.B / §5.C)", err)
+		t.Errorf("the volume's content entered the frozen layer (%v) — a Volume lives in its own backend and is outside Promote's capture (the Rootfs subsystem / the Volume subsystem)", err)
 	}
 	// The mount point itself is at most an EMPTY placeholder.
 	if ents, err := os.ReadDir(filepath.Join(layer, "workspace")); err == nil && len(ents) != 0 {
@@ -371,7 +371,7 @@ func TestVolumeRegimeConcurrentImportAndSweep(t *testing.T) {
 			}
 			// The unit survived every sweep, and its content is complete.
 			if _, err := os.Stat(unit); err != nil {
-				t.Fatalf("the volume was reclaimed during an in-flight direct write: %v — the in-flight marker exists precisely to prevent this (§5.C)", err)
+				t.Fatalf("the volume was reclaimed during an in-flight direct write: %v — the in-flight marker exists precisely to prevent this (the Volume subsystem)", err)
 			}
 			var out bytes.Buffer
 			if _, err := eng.Mediator.ExportVolume(ctx, vid, "big.bin", &out); err != nil {

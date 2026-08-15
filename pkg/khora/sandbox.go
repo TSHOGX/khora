@@ -9,10 +9,10 @@ import (
 	"time"
 )
 
-// The §6.1 sandbox verbs.
+// The control-plane API sandbox verbs.
 //
 // There is no WaitUntilRunning, no RetryOnUnavailable, and no CreateAndStart here.
-// Each would be an INVENTED VERB (ADR-0008 rule 2) — a promise about time that the
+// Each would be an invented verb — a promise about time that the
 // engine never made — and inventing one inside the client is worse than leaving it to
 // the caller, because the caller cannot see the polling interval it got.
 //
@@ -21,14 +21,14 @@ import (
 // `started` / `auto-paused` / `died`. The second scales; the first is simpler. That
 // choice is the caller's to make, which is why this package does not make it.
 
-// Duration renders d as the duration string §6.1 accepts ("30m", "24h"). Provided so
+// Duration renders d as the duration string the control-plane API accepts ("30m", "24h"). Provided so
 // a caller does not hand-format one and get the unit wrong.
 func Duration(d time.Duration) string { return durationString(d) }
 
 // Create creates a sandbox and returns its ID.
 //
 // Create returns when the RECORD exists, which is not the same as the sandbox being
-// usable — §4.1 has it pass through `creating`. The engine reports its own progress
+// usable — the lifecycle state machine has it pass through `creating`. The engine reports its own progress
 // through state and events; this method reports what the request returned.
 func (c *Client) Create(ctx context.Context, req CreateRequest) (Sandbox, error) {
 	var out Sandbox
@@ -158,13 +158,13 @@ type EventsOptions struct {
 	// page. Zero returns immediately.
 	//
 	// This is the ONE place this client can save a caller a busy loop without inventing
-	// a verb, because the waiting happens in the ENGINE — Wait maps onto §6.1's own
+	// a verb, because the waiting happens in the ENGINE — Wait maps onto the control-plane API's own
 	// `wait=` parameter. A timeout is a normal, successful, EMPTY page, not an error:
 	// "nothing happened" is an answer.
 	Wait time.Duration
 }
 
-// Events reads a page of the §4.4-C outbox.
+// Events reads a page of the transactional outbox.
 //
 // PULL ONLY, and that is architectural: the engine tracks no subscribers, so nothing
 // here registers anything. Two consequences a caller must handle rather than assume
@@ -176,8 +176,8 @@ type EventsOptions struct {
 //     why that field exists.
 //
 // There is no Subscribe(chan Event) here. A channel implies an ownership and a
-// lifetime this package must not hold (ADR-0008 rule 3: no state that outlives a
-// call), and the loop it would hide — cursor advance, dedup, backoff on 503, restart on
+// lifetime this package must not hold. No client state may outlive a call, and the
+// loop it would hide — cursor advance, dedup, backoff on 503, restart on
 // 410 — is exactly the policy a caller has to be able to see and choose.
 func (c *Client) Events(ctx context.Context, opt EventsOptions) (EventPage, error) {
 	q := url.Values{}
@@ -201,7 +201,7 @@ func (c *Client) Events(ctx context.Context, opt EventsOptions) (EventPage, erro
 
 // Health reports the engine's own readiness, as /readyz answers it.
 //
-// ABOUT THE ENGINE, NOT A SANDBOX. There is no per-sandbox health call in §6.1 on
+// ABOUT THE ENGINE, NOT A SANDBOX. There is no per-sandbox health call in the control-plane API on
 // purpose: a sandbox's condition is its State plus its DeathCause, and a separate
 // "is it healthy" question would invite a caller to build a verdict the engine already
 // published — and to disagree with it.

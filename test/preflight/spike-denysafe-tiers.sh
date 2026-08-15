@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# spike-denysafe-tiers.sh — membership of the §2.4 "deny-safe private" tier, for
-# BOTH address families. No pre-existing D5 fact covers it: they fix the L0
-# floor's members and rule text, and D5 ⑦ notes in passing that this
+# spike-denysafe-tiers.sh — membership of the provider security contract "deny-safe private" tier, for
+# BOTH address families. Existing measurements fix the L0 floor's members and rule
+# text and note that this
 # host's resolver (0.250.250.200) is outside every floor item — but nobody has
 # measured what a *tier* rule above the floor can and cannot see.
 #
@@ -11,7 +11,7 @@
 #     `ip daddr 0.0.0.0/8` rule see it? The resolver lives there, so the answer
 #     decides whether adding 0.0.0.0/8 to the deny-safe tier costs this
 #     deployment its DNS. Also: does a guest dial to 0.0.0.0 itself leave the
-#     netns at all, or is it loopback semantics (like D5 ⑦'s 127.0.0.53)?
+#     netns at all, or is it loopback semantics (like host-local 127.0.0.53)?
 #
 #  Q2 (family smuggling) — can an IPv4-mapped IPv6 destination (::ffff:a.b.c.d)
 #     reach a v4-only matcher, or does it appear on the wire as IPv6 and slip
@@ -20,7 +20,7 @@
 #     Measured with a raw AF_INET6 socket, not Go's net.Dial, because the
 #     library may normalise the family before the kernel ever sees it.
 #
-#  Q3 (v6, host's own address) — §2.4's status note says the host's eth0 IPv6 is
+#  Q3 (v6, host's own address) — the provider security contract's status note says the host's eth0 IPv6 is
 #     reachable from a sandbox with no floor. This host's eth0 also carries a
 #     ULA (fd07:.../64). Is `net.ipv6.conf.all.forwarding=0` what keeps a
 #     sandbox off it, or is that address delivered LOCALLY and therefore
@@ -40,20 +40,19 @@
 #     handshake, so "connected" alone proves nothing.
 #
 #  Q6 (floor vs tier overlap) — the sibling floor CIDR (10.66.0.0/16) is nested
-#     INSIDE the RFC1918 tier (10/8), and §2.4 says the tier is liftable by
+#     INSIDE the RFC1918 tier (10/8), and the provider security contract says the tier is liftable by
 #     declaration while the floor is not. Both orderings are measured, because
-#     the wrong one fails silently (D5 ⑧/⑩: reachable, floor counter 0).
+#     the wrong one fails silently: reachable, with the floor counter still at 0.
 #
-# Discipline (D4.1): a failed `nft -f` reads as "everything is
+# Discipline: a failed `nft -f` reads as "everything is
 # reachable", which is indistinguishable from a missing rule. Every rule set is
 # asserted loaded before it is trusted, and every "blocked" claim is paired with
 # a counter that moved. A drop counter of 0 next to a failed dial is recorded as
 # an INVALID assertion, not a pass.
 #
-# Fixture: plain netns peers, not a runsc guest. Allowed by the same reasoning
-# D5 ⑩⑪⑫ used — what is under measurement is nft/kernel matching semantics and
-# the family of a packet on the wire, and D5 ⑨ already proved gVisor changes
-# none of the conntrack / matching conclusions.
+# Fixture: plain netns peers, not a runsc guest. What is under measurement is
+# nft/kernel matching semantics and the family of a packet on the wire; prior
+# runsc measurements showed that gVisor changes none of these conclusions.
 #
 # Usage: sudo ./spike-denysafe-tiers.sh   (needs root: netns, nft, sysctl)
 set -euo pipefail
@@ -62,7 +61,7 @@ WORK="$(mktemp -d /tmp/spike-ds.XXXXXX)"
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 TABLE="spikeds$$"
 
-# "Sandbox" side: the /30 shape local_runsc uses today (10.66.0.0/16, D5 ④).
+# "Sandbox" side: the /30 shape local_runsc uses today within 10.66.0.0/16.
 SNS="spikeds-s$$"; SVH="sdsh$$"; SVS="sdss$$"
 SHOST_IP="10.66.250.1"; SBX_IP="10.66.250.2"
 SHOST_6="fd66:250::1";  SBX_6="fd66:250::2"
@@ -73,7 +72,7 @@ OHOST_IP="10.77.250.1"; OTH_IP="10.77.250.2"
 OHOST_6="fd66:251::1";  OTH_6="fd66:251::2"
 
 LAN_IP="192.168.139.3"      # another machine on the host's LAN (RFC1918), sshd
-RESOLVER="0.250.250.200"    # this host's resolver — inside 0.0.0.0/8 (D5 ⑦)
+RESOLVER="0.250.250.200"    # this host's resolver — inside 0.0.0.0/8
 HOST_ULA="fd07:b51a:cc66:0:1440:1fff:fe98:707"   # eth0's ULA, local address
 PROBE_PORT=18999
 BANNER="hello-from-probe"
@@ -193,7 +192,7 @@ for spec in "$SNS $SVH $SVS $SHOST_IP $SBX_IP $SHOST_6 $SBX_6" \
   ip netns exec "$ns" ip route add default via "$hip" dev "$vp"
   ip netns exec "$ns" ip -6 route add default via "$h6" dev "$vp"
 done
-# The three host-side mechanisms D5 ⑤ measured as necessary and sufficient for a
+# The three host-side mechanisms required for a
 # sandbox to reach the outside: ip_forward, guest default route (above), SNAT.
 nft -f - <<EOF
 table ip ${TABLE}nat {
@@ -248,7 +247,7 @@ elif [ "${out#*connected}" != "$out" ]; then bad "still reachable despite the dr
 else inv "dial failed but zero8 did not move ($z2 -> $z3)"; fi
 nft delete rule inet "$TABLE" cfwd handle "$(nft -a list chain inet "$TABLE" cfwd | awk '/0.0.0.0\/8.*drop/ {print $NF}')"
 
-echo "-- and 0.0.0.0 itself: does a dial to it leave the netns (cf. D5 ⑦ loopback semantics)?"
+echo "-- and 0.0.0.0 itself: does a dial to it leave the netns, or stay host-local?"
 "$WORK/pubprobe" serve "0.0.0.0:$PROBE_PORT" "$BANNER" >"$WORK/h.log" 2>&1 &
 sleep 0.4
 f0=$(ctr fwd_all)
@@ -258,7 +257,7 @@ if [ "${out#*connected}" = "$out" ] && [ "$f1" = "$f0" ]; then
   ok "dial to 0.0.0.0 never leaves the netns (fwd_all unchanged at $f0) — loopback semantics, like 127.0.0.53"
 else note "0.0.0.0 dial: outcome=$out fwd_all $f0 -> $f1"; fi
 
-echo "-- the functionally decisive arm: UDP/53, which is what DNS actually uses (D5 ⑦)"
+echo "-- the functionally decisive arm: UDP/53, which is what DNS actually uses"
 # TCP/53 to this resolver is flaky from a netns (measured: 1 of 3 attempts
 # completed), so a TCP result alone cannot carry the cost claim. A real query is
 # the falsifiable form.
@@ -266,7 +265,7 @@ cat > "$WORK/dnsq.go" <<'EOF'
 package main
 
 // dnsq <resolver-ip> — one UDP/53 A query for example.com, 3s deadline.
-// A real query, not a TCP dial: DNS is almost entirely UDP (D5 ⑦), so the cost
+// A real query, not a TCP dial: DNS is almost entirely UDP, so the cost
 // of putting 0.0.0.0/8 in the tier is only measurable on this path.
 import (
 	"fmt"
@@ -378,7 +377,7 @@ u1=$(ctr in_ula)
 note "v6dial host ULA -> $out   (in_ula $u0 -> $u1)"
 if [ "${out#*connected}" != "$out" ]; then
   ok "host's own eth0 ULA IS reachable with forwarding=0 — it is LOCAL delivery, the sysctl is not the gate"
-  note "=> it lands in the \`input\` hook (in_ula moved: $u0 -> $u1), i.e. D5 ⑧'s pure ct-state floor covers it"
+  note "=> it lands in the \`input\` hook (in_ula moved: $u0 -> $u1), so the input ct-state floor covers it"
 else
   note "host ULA not reachable ($out); in_ula $u0 -> $u1"
 fi
@@ -443,7 +442,7 @@ if [ "${out#*connected}" != "$out" ]; then
   echo "== Q5  NAT64 64:ff9b::/96 — does a v4-only tier see a v4 destination carried over IPv6?"
   echo "   (measured on this host: a dial into 64:ff9b::/96 completes the handshake — but see the control below,"
   echo "    it completes for a bogus address too, so 'connected' does NOT prove the v4 peer was reached)"
-  # v6 SNAT, the family-analogue of D5 ⑤'s third mechanism: the netns ULA is not
+  # v6 SNAT, the family analogue of the required IPv4 SNAT: the netns ULA is not
   # routable upstream, so without it a failure would mean "no return path",
   # not "policy blocked it" — an invalid assertion either way it came out.
   nft -f - <<EOF
@@ -506,7 +505,7 @@ note "restored net.ipv6.conf.all.forwarding=$(sysctl -n net.ipv6.conf.all.forwar
 # ============================== Q6: floor / tier overlap, and ordering =======
 echo
 echo "== Q6  the sibling floor item (10.66.0.0/16) is NESTED INSIDE the RFC1918 tier (10/8)."
-echo "   §2.4 says the tier is explicitly allowable but the floor is not liftable. Does an"
+echo "   the provider security contract says the tier is explicitly allowable but the floor is not liftable. Does an"
 echo "   explicit RFC1918 allow lift the sibling item? Ordering is the whole answer."
 BNS="spikeds-b$$"; BVH="sdbh$$"; BVB="sdbb$$"
 BHOST_IP="10.66.251.1"; SIB_IP="10.66.251.2"
@@ -523,11 +522,11 @@ sleep 0.5
 note "sibling listener: $(cat "$WORK/sib.log")"
 trap 'ip netns pids '"$BNS"' 2>/dev/null | xargs -r kill 2>/dev/null; ip netns del '"$BNS"' 2>/dev/null; ip link del '"$BVH"' 2>/dev/null; nft delete table ip '"${TABLE}nat"' 2>/dev/null; cleanup' EXIT
 
-# Baseline: no tier, no floor — D5 ① reproduced in one line.
+# Baseline: no tier and no floor.
 s0=$(ctr fwd_all)
 out=$(sdial "$SIB_IP:$PROBE_PORT" 2000)
 note "baseline (no floor, no tier): $out"
-case "$out" in *hello-from-SIBLING*) ok "D5 ① reproduced: sibling reachable with nothing installed" ;;
+case "$out" in *hello-from-SIBLING*) ok "baseline confirmed: sibling reachable with nothing installed" ;;
                                   *) inv "sibling not reachable at baseline ($out) — Q6 ordering test would be meaningless" ;; esac
 
 echo "-- WRONG order: declaration's RFC1918 allow above the sibling floor drop"
@@ -546,7 +545,7 @@ out=$(sdial "$SIB_IP:$PROBE_PORT" 2000)
 w1=$(ctr sib_floor)
 note "allow-above-floor: $out  (sib_floor $w0 -> $w1)"
 if [ "${out#*hello-from-SIBLING}" != "$out" ] && [ "$w1" = "$w0" ]; then
-  ok "an explicit RFC1918 allow placed ABOVE the sibling drop lifts the floor — sibling reached, floor counter stayed $w0 (the silent-failure signature of D5 ⑧/⑩)"
+  ok "an explicit RFC1918 allow placed ABOVE the sibling drop lifts the floor — sibling reached, floor counter stayed $w0 (the silent-failure signature)"
 else inv "wrong-order arm did not behave as predicted: $out, counter $w0 -> $w1"; fi
 
 echo "-- RIGHT order: sibling floor drop above the declaration's RFC1918 allow"
