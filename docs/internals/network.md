@@ -43,8 +43,9 @@ cannot constrain it. Assembly refuses a second-hop UID equal to the engine proce
 rules that would cut off engine-to-guest transport.
 
 The deny-safe tier is settled: `ruleset.TierV4` contains RFC1918's three IPv4
-blocks, and `ruleset.TierV6` derives the corresponding IPv6 members mechanically.
-The ruleset tests pin those members and reject nesting with the unliftable floor.
+blocks, and `ruleset.TierV6` contains `fc00::/7` plus mechanically derived NAT64
+images of those IPv4 blocks. The ruleset tests pin those members and reject
+nesting with the unliftable floor.
 
 ## Atomic reinstall and counters
 

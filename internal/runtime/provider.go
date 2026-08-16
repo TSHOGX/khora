@@ -9,6 +9,7 @@ package runtime
 
 import (
 	"context"
+	"net/netip"
 
 	"github.com/TSHOGX/khora/internal/ruleset"
 )
@@ -190,6 +191,11 @@ type MountSource struct {
 // every resume, old one invalidated (the ID-reference model). The engine addresses the sandbox by
 // SandboxID, never by anything in here.
 type Placement struct {
+	// Address is the guest-visible address assigned to this placement. It is a
+	// portable placement fact, independent of the transport endpoint and rebound
+	// on every resume.
+	Address netip.Addr
+
 	// TransportEndpoint is where the host dials sandboxd (the transport data plane). For
 	// local_runsc it is the current netns veth IP:port, discovered at
 	// (the runtime provider contract placement discovery). IP change across resume is itself the epoch

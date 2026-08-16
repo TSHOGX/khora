@@ -113,6 +113,9 @@ CREATE TABLE IF NOT EXISTS outbox (
 	kind         TEXT NOT NULL CHECK (kind IN
 	                 ('created','paused','auto-paused','crash-paused','resumed','destroyed')),
 	state        TEXT NOT NULL,
+	-- guest-visible address established by this transition. NULL when the
+	-- transition did not establish a placement.
+	placement_address TEXT,
 	-- cause: WHY, for the kinds with more than one route to them (the transactional outbox, model.EventCause).
 	-- NULL = this kind has one route, the common case.
 	--
@@ -272,8 +275,8 @@ func insertEvent(t *sql.Tx, ev *Event) error {
 	// the caller happened to set is ignored rather than trusted — the store owns
 	// this number.
 	_, err := t.Exec(
-		`INSERT INTO outbox(id, sandbox, kind, state, cause, occurred_at, published_at) VALUES(?,?,?,?,?,?,NULL)`,
-		ev.ID, string(ev.Sandbox), ev.Kind, string(ev.State), causeArg(ev.Cause), ev.OccurredAt.UnixNano(),
+		`INSERT INTO outbox(id, sandbox, kind, state, placement_address, cause, occurred_at, published_at) VALUES(?,?,?,?,?,?,?,NULL)`,
+		ev.ID, string(ev.Sandbox), ev.Kind, string(ev.State), optionalString(ev.PlacementAddress), causeArg(ev.Cause), ev.OccurredAt.UnixNano(),
 	)
 	return err
 }
@@ -462,7 +465,7 @@ func (s *SQLite) UnpublishedEvents(ctx context.Context, limit int) ([]Event, err
 	// because the pool is pinned to ONE connection, so an unbounded scan holds it for
 	// its whole length and every state transition waits behind it (the transactional outbox).
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT seq, id, sandbox, kind, state, cause, occurred_at FROM outbox WHERE published_at IS NULL ORDER BY seq LIMIT ?`, limit)
+		`SELECT seq, id, sandbox, kind, state, placement_address, cause, occurred_at FROM outbox WHERE published_at IS NULL ORDER BY seq LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -530,7 +533,7 @@ func (s *SQLite) Events(ctx context.Context, after int64, limit int) ([]Event, i
 		return nil, 0, 0, err
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT seq, id, sandbox, kind, state, cause, occurred_at FROM outbox
+		`SELECT seq, id, sandbox, kind, state, placement_address, cause, occurred_at FROM outbox
 		   WHERE seq > ? ORDER BY seq LIMIT ?`, after, limit)
 	if err != nil {
 		return nil, 0, 0, err
@@ -553,23 +556,32 @@ func causeArg(c model.EventCause) any {
 	return string(c)
 }
 
-// scanEvents drains an outbox row set selecting (seq, id, sandbox, kind, state, cause,
-// occurred_at) in that order. Shared by both read paths so they cannot drift apart in
-// how they materialize an Event.
+func optionalString(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+// scanEvents drains an outbox row set selecting (seq, id, sandbox, kind, state,
+// placement_address, cause, occurred_at) in that order. Shared by both read paths
+// so they cannot drift apart in how they materialize an Event.
 func scanEvents(rows *sql.Rows) ([]Event, error) {
 	out := make([]Event, 0)
 	for rows.Next() {
 		var e Event
 		var sandbox, state string
+		var placementAddress sql.NullString
 		// NULL cause = this kind has one route; it scans back as the zero EventCause,
 		// which is the same "not applicable" the writer passed in.
 		var cause sql.NullString
 		var occ int64
-		if err := rows.Scan(&e.Seq, &e.ID, &sandbox, &e.Kind, &state, &cause, &occ); err != nil {
+		if err := rows.Scan(&e.Seq, &e.ID, &sandbox, &e.Kind, &state, &placementAddress, &cause, &occ); err != nil {
 			return nil, err
 		}
 		e.Sandbox = model.SandboxID(sandbox)
 		e.State = model.Lifecycle(state)
+		e.PlacementAddress = placementAddress.String
 		e.Cause = model.EventCause(cause.String)
 		e.OccurredAt = time.Unix(0, occ)
 		out = append(out, e)

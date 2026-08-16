@@ -257,8 +257,12 @@ func testEventsReplayPaging(t *testing.T, mk Factory) {
 		if state == model.Running {
 			next = model.Paused
 		}
+		event := ev("a", fmt.Sprintf("e%d", i), kindFor(next), next)
+		if i == 0 {
+			event.PlacementAddress = "10.0.0.1"
+		}
 		if err := s.CompareAndSetState(ctx, "a", state, next,
-			ev("a", fmt.Sprintf("e%d", i), kindFor(next), next), nil); err != nil {
+			event, nil); err != nil {
 			t.Fatalf("append %d: %v", i, err)
 		}
 		state = next
@@ -271,6 +275,9 @@ func testEventsReplayPaging(t *testing.T, mk Factory) {
 	}
 	if len(page) != 3 {
 		t.Fatalf("limit=3 returned %d events", len(page))
+	}
+	if page[0].PlacementAddress != "10.0.0.1" {
+		t.Fatalf("first page lost placement address: %+v", page[0])
 	}
 	if earliest <= 0 || latest <= 0 || earliest > latest {
 		t.Fatalf("bounds %d/%d are not a sane window", earliest, latest)
@@ -318,6 +325,9 @@ func testEventsReplayPaging(t *testing.T, mk Factory) {
 	}
 	if len(all) != n {
 		t.Fatalf("replay lost a published event: %d of %d remain", len(all), n)
+	}
+	if all[0].PlacementAddress != "10.0.0.1" {
+		t.Fatalf("replay lost placement address after publish: %+v", all[0])
 	}
 }
 
@@ -842,6 +852,7 @@ func testOutboxAtomic(t *testing.T, mk Factory) {
 	seedTmpl(t, s, "bare")
 	_ = s.CreateSandbox(ctx, mkRec("a"), nil)
 	e := ev("a", "evt_1", "resumed", model.Running)
+	e.PlacementAddress = "10.0.0.7"
 	if err := s.CompareAndSetState(ctx, "a", model.Creating, model.Running, e, nil); err != nil {
 		t.Fatalf("CAS+event: %v", err)
 	}
@@ -857,7 +868,7 @@ func testOutboxAtomic(t *testing.T, mk Factory) {
 	if len(un) != 1 {
 		t.Fatalf("unpublished len=%d; want 1", len(un))
 	}
-	if un[0].ID != "evt_1" || un[0].Kind != "resumed" || un[0].Sandbox != "a" || un[0].State != model.Running {
+	if un[0].ID != "evt_1" || un[0].Kind != "resumed" || un[0].Sandbox != "a" || un[0].State != model.Running || un[0].PlacementAddress != "10.0.0.7" {
 		t.Fatalf("event fields mismatch: %+v", un[0])
 	}
 	// A FAILED CAS must write NOTHING — this is the transactional outbox property in its

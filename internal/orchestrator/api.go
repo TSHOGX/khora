@@ -623,6 +623,9 @@ type eventItem struct {
 	SandboxID string `json:"sandbox_id"`
 	Kind      string `json:"kind"`
 	State     string `json:"state"`
+	// PlacementAddress is the guest-visible address established by created/resumed.
+	// It is historical event data, not a lookup of the sandbox's current placement.
+	PlacementAddress string `json:"placement_address,omitempty"`
 	// Cause is WHY, present only on a Kind reachable by more than one route (the transactional outbox),
 	// omitted otherwise. Today: `destroyed` carries `requested` (the Destroy verb) or
 	// `retention-expired` (the reaper's evict of a paused sandbox past `retention`).
@@ -784,13 +787,14 @@ func (e *Engine) handleEvents(w http.ResponseWriter, r *http.Request) {
 	out := eventsResp{Events: make([]eventItem, 0, len(evs)), Earliest: earliest, Latest: latest}
 	for _, ev := range evs {
 		out.Events = append(out.Events, eventItem{
-			Seq:        ev.Seq,
-			ID:         ev.ID,
-			SandboxID:  string(ev.Sandbox),
-			Kind:       string(ev.Kind),
-			State:      string(ev.State),
-			Cause:      string(ev.Cause),
-			OccurredAt: ev.OccurredAt.UTC().Format(time.RFC3339Nano),
+			Seq:              ev.Seq,
+			ID:               ev.ID,
+			SandboxID:        string(ev.Sandbox),
+			Kind:             string(ev.Kind),
+			State:            string(ev.State),
+			PlacementAddress: ev.PlacementAddress,
+			Cause:            string(ev.Cause),
+			OccurredAt:       ev.OccurredAt.UTC().Format(time.RFC3339Nano),
 		})
 	}
 	writeJSON(w, http.StatusOK, out)

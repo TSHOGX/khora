@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"sync"
 	"testing"
@@ -90,7 +91,7 @@ type barrierFakeRuntime struct{}
 
 func (barrierFakeRuntime) Name() string { return "fake" }
 func (barrierFakeRuntime) Launch(context.Context, runtime.LaunchSpec) (*runtime.Placement, error) {
-	return &runtime.Placement{TransportEndpoint: "10.0.0.1:9000"}, nil
+	return &runtime.Placement{Address: netip.MustParseAddr("10.0.0.1"), TransportEndpoint: "10.0.0.1:9000"}, nil
 }
 func (barrierFakeRuntime) Stop(context.Context, *runtime.Placement) error    { return nil }
 func (barrierFakeRuntime) Destroy(context.Context, *runtime.Placement) error { return nil }

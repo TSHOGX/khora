@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -639,7 +640,8 @@ func (m *Mediator) Create(ctx context.Context, spec CreateSpec) (model.SandboxID
 		}
 		return "", fmt.Errorf("create: overlay: %w", err)
 	}
-	if err := m.coldStart(ctx, rec, ov); err != nil {
+	pl, err := m.coldStart(ctx, rec, ov)
+	if err != nil {
 		// create has no fallback state: reclaim half-built placement + empty
 		// Overlay, then delete the record. The
 		// sandbox was never running, so this unwind-delete publishes nothing.
@@ -656,7 +658,7 @@ func (m *Mediator) Create(ctx context.Context, spec CreateSpec) (model.SandboxID
 
 	// The readiness probe passed: flip creating to running and emit "created" in the
 	// same commit (the transactional outbox).
-	if err := m.deps.Store.CompareAndSetState(ctx, sid, model.Creating, model.Running, newEvent(sid, "created", model.Running), nil); err != nil {
+	if err := m.deps.Store.CompareAndSetState(ctx, sid, model.Creating, model.Running, newPlacementEvent(sid, model.EventCreated, model.Running, pl.Address), nil); err != nil {
 		m.unwind(ctx, sid, ov, true)
 		_ = m.deps.Store.DeleteSandbox(ctx, sid, nil)
 		return "", fmt.Errorf("create: commit running: %w", err)
@@ -802,7 +804,8 @@ func (m *Mediator) resumeLocked(ctx context.Context, rec model.Sandbox) error {
 	if err != nil {
 		return fmt.Errorf("resume: open overlay: %w", err)
 	}
-	if err := m.coldStart(ctx, rec, ov); err != nil {
+	pl, err := m.coldStart(ctx, rec, ov)
+	if err != nil {
 		// resume has a fallback state: reclaim half-built placement, stay paused
 		// (persistent Overlay artifact untouched; atomic transition rollback).
 		m.unwind(ctx, id, ov, false)
@@ -822,7 +825,7 @@ func (m *Mediator) resumeLocked(ctx context.Context, rec model.Sandbox) error {
 	// pinned to a stale cause, and if the workload re-triggers the cap the NEXT
 	// observation writes the real cause in the control plane's plain view.
 	cleared := model.CauseNone
-	if err := m.deps.Store.CompareAndSetState(ctx, id, model.Paused, model.Running, newEvent(id, "resumed", model.Running), &cleared); err != nil {
+	if err := m.deps.Store.CompareAndSetState(ctx, id, model.Paused, model.Running, newPlacementEvent(id, model.EventResumed, model.Running, pl.Address), &cleared); err != nil {
 		m.unwind(ctx, id, ov, false)
 		return fmt.Errorf("resume: commit running: %w", err)
 	}
@@ -1081,9 +1084,10 @@ func (m *Mediator) unmarkBuilding(id model.TemplateID) {
 
 // coldStart runs (mount)(launch)(health) for a given Overlay handle,
 // shared by create and resume (the cold-start sequence). On success the live
-// placement + merged are recorded in the mediator. On any error it returns
-// without recording (the caller unwinds).
-func (m *Mediator) coldStart(ctx context.Context, rec model.Sandbox, ov *rootfs.Overlay) error {
+// placement + merged are recorded in the mediator and the placement is returned
+// so its portable facts can be committed with the transition. On any error it
+// returns nil (the caller unwinds).
+func (m *Mediator) coldStart(ctx context.Context, rec model.Sandbox, ov *rootfs.Overlay) (*runtime.Placement, error) {
 	id, limits := rec.ID, rec.Limits
 	//  the write-regime gate, cold-start side (the Volume subsystem, symmetric with
 	// admitDirectWrite): if a direct content write is streaming into a volume this
@@ -1102,15 +1106,15 @@ func (m *Mediator) coldStart(ctx context.Context, rec model.Sandbox, ov *rootfs.
 	// lock, so the two reads cannot disagree.
 	rows, err := m.deps.Store.ListMounts(ctx, id)
 	if err != nil {
-		return fmt.Errorf("read mount table: %w", err)
+		return nil, fmt.Errorf("read mount table: %w", err)
 	}
 	if err := m.admitColdStartRW(id, rows); err != nil {
-		return err
+		return nil, err
 	}
 	//  mount lower(Template)/upper/work → merged.
 	merged, err := m.deps.Rootfs.Mount(ctx, ov)
 	if err != nil {
-		return fmt.Errorf("mount overlay: %w", err)
+		return nil, fmt.Errorf("mount overlay: %w", err)
 	}
 	// b materialize this sandbox's Volumes from the CURRENT mount table (the Volume subsystem).
 	//
@@ -1121,7 +1125,7 @@ func (m *Mediator) coldStart(ctx context.Context, rec model.Sandbox, ov *rootfs.
 	mounts, specs, err := m.materializeMounts(ctx, id)
 	if err != nil {
 		_ = m.deps.Rootfs.Unmount(ctx, merged)
-		return err
+		return nil, err
 	}
 	// b derive the network declaration rule set from the CURRENT record (resource admission Binding: exactly like
 	// the caps, it is re-derived at every placement rather than read back from a
@@ -1135,7 +1139,7 @@ func (m *Mediator) coldStart(ctx context.Context, rec model.Sandbox, ov *rootfs.
 	if err != nil {
 		m.releaseMounts(ctx, mounts)
 		_ = m.deps.Rootfs.Unmount(ctx, merged)
-		return err
+		return nil, err
 	}
 	//  launch runsc (sandboxd entrypoint),  guest boots,  IP discovered.
 	// limits come from the RECORD, re-materialized at every placement (resource admission Binding,
@@ -1158,7 +1162,15 @@ func (m *Mediator) coldStart(ctx context.Context, rec model.Sandbox, ov *rootfs.
 	if err != nil {
 		m.releaseMounts(ctx, mounts)
 		_ = m.deps.Rootfs.Unmount(ctx, merged)
-		return fmt.Errorf("launch: %w", err)
+		return nil, fmt.Errorf("launch: %w", err)
+	}
+	if pl == nil || !pl.Address.IsValid() {
+		if pl != nil {
+			_ = m.deps.Runtime.Destroy(ctx, pl)
+		}
+		m.releaseMounts(ctx, mounts)
+		_ = m.deps.Rootfs.Unmount(ctx, merged)
+		return nil, fmt.Errorf("launch: provider returned a placement without a valid guest address")
 	}
 	// Record the live placement the MOMENT it physically exists — before the
 	// readiness gate, not after it. A concurrent periodic reconcile that started
@@ -1175,9 +1187,9 @@ func (m *Mediator) coldStart(ctx context.Context, rec model.Sandbox, ov *rootfs.
 		_ = m.deps.Runtime.Destroy(ctx, pl)
 		m.releaseMounts(ctx, mounts)
 		_ = m.deps.Rootfs.Unmount(ctx, merged)
-		return fmt.Errorf("health gate: %w", err)
+		return nil, fmt.Errorf("health gate: %w", err)
 	}
-	return nil
+	return pl, nil
 }
 
 // awaitHealthy polls the transport Health RPC until first success or timeout.
@@ -2070,6 +2082,15 @@ func newEvent(id model.SandboxID, kind model.EventKind, state model.Lifecycle) *
 		State:      state,
 		OccurredAt: time.Now(),
 	}
+}
+
+// newPlacementEvent records the portable address established by a transition.
+// Only transitions that create a new placement use this constructor; pause-like
+// and destroy events intentionally carry no placement address.
+func newPlacementEvent(id model.SandboxID, kind model.EventKind, state model.Lifecycle, address netip.Addr) *store.Event {
+	ev := newEvent(id, kind, state)
+	ev.PlacementAddress = address.String()
+	return ev
 }
 
 // newCausedEvent is newEvent for a Kind reachable by more than one route, where the

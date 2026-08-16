@@ -487,6 +487,67 @@ func TestAPIEventsCarryCauseOnlyWhereAKindHasTwoRoutes(t *testing.T) {
 	}
 }
 
+// TestAPIEventsCarryPlacementAddressOnlyWhenAPlacementIsEstablished pins the
+// historical attribution shape: created/resumed name the guest address assigned
+// at that transition, while pause-like and destroy events omit the key entirely.
+func TestAPIEventsCarryPlacementAddressOnlyWhenAPlacementIsEstablished(t *testing.T) {
+	srv, mem := apiFixture(t)
+	ctx := context.Background()
+	seedTemplate(t, mem, "bare", "", true)
+	now := time.Now()
+	if err := mem.CreateSandbox(ctx, model.Sandbox{
+		ID: "sb", Template: "bare", State: model.Running, CreatedAt: now, UpdatedAt: now,
+	}, &store.Event{
+		ID: "evt_created", Sandbox: "sb", Kind: model.EventCreated, State: model.Running,
+		PlacementAddress: "10.0.0.1", OccurredAt: now,
+	}); err != nil {
+		t.Fatalf("seed created: %v", err)
+	}
+	if err := mem.CompareAndSetState(ctx, "sb", model.Running, model.Paused, &store.Event{
+		ID: "evt_paused", Sandbox: "sb", Kind: model.EventPaused, State: model.Paused, OccurredAt: now.Add(time.Second),
+	}, nil); err != nil {
+		t.Fatalf("seed paused: %v", err)
+	}
+	if err := mem.CompareAndSetState(ctx, "sb", model.Paused, model.Running, &store.Event{
+		ID: "evt_resumed", Sandbox: "sb", Kind: model.EventResumed, State: model.Running,
+		PlacementAddress: "10.0.0.2", OccurredAt: now.Add(2 * time.Second),
+	}, nil); err != nil {
+		t.Fatalf("seed resumed: %v", err)
+	}
+	if err := mem.DeleteSandbox(ctx, "sb", &store.Event{
+		ID: "evt_destroyed", Sandbox: "sb", Kind: model.EventDestroyed, State: model.Destroyed,
+		OccurredAt: now.Add(3 * time.Second),
+	}); err != nil {
+		t.Fatalf("seed destroyed: %v", err)
+	}
+
+	got := getEvents(t, srv, "")
+	if len(got.Events) != 4 {
+		t.Fatalf("got %d events; want 4: %+v", len(got.Events), got.Events)
+	}
+	if got.Events[0].PlacementAddress != "10.0.0.1" || got.Events[2].PlacementAddress != "10.0.0.2" {
+		t.Fatalf("placement addresses = %q/%q; want 10.0.0.1/10.0.0.2", got.Events[0].PlacementAddress, got.Events[2].PlacementAddress)
+	}
+	if got.Events[1].PlacementAddress != "" || got.Events[3].PlacementAddress != "" {
+		t.Fatalf("non-placement transitions carried addresses: paused=%q destroyed=%q", got.Events[1].PlacementAddress, got.Events[3].PlacementAddress)
+	}
+
+	rawResp := do(t, http.MethodGet, srv.URL+"/v1/events")
+	defer rawResp.Body.Close()
+	var raw struct {
+		Events []map[string]json.RawMessage `json:"events"`
+	}
+	if err := json.NewDecoder(rawResp.Body).Decode(&raw); err != nil {
+		t.Fatalf("decode raw events: %v", err)
+	}
+	for i, wantPresent := range []bool{true, false, true, false} {
+		_, present := raw.Events[i]["placement_address"]
+		if present != wantPresent {
+			t.Errorf("event %d (%s) placement_address present=%v; want %v", i, got.Events[i].Kind, present, wantPresent)
+		}
+	}
+}
+
 // TestAPIEventsWaitReturnsWhenAnEventArrives: `wait` collapses a subscriber's detection
 // latency from its poll interval to the event itself. The assertion is that the response
 // arrives WELL BEFORE the requested wait — a handler that ignored the parameter and one

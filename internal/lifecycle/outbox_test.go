@@ -83,14 +83,34 @@ func TestLifecycleEmitsExactlyOneEventPerTransition(t *testing.T) {
 	// transitions sharing one would silently collapse into a single delivery.
 	evs, _ := st.UnpublishedEvents(ctx, allUnpublished)
 	seen := map[string]string{}
+	var sandboxEvents []store.Event
 	for _, e := range evs {
 		if e.Sandbox != sid {
 			continue
 		}
+		sandboxEvents = append(sandboxEvents, e)
 		if prev, dup := seen[e.ID]; dup {
 			t.Fatalf("events %q and %q share transition ID %q — subscriber dedup would DROP the second (the transactional outbox)", prev, e.Kind, e.ID)
 		}
 		seen[e.ID] = string(e.Kind)
+	}
+	if len(sandboxEvents) != 4 {
+		t.Fatalf("sandbox events = %d; want 4", len(sandboxEvents))
+	}
+	if sandboxEvents[0].PlacementAddress == "" {
+		t.Fatal("created event omitted the placement address established by create")
+	}
+	if sandboxEvents[1].PlacementAddress != "" {
+		t.Fatalf("paused event carried placement address %q; the placement was released", sandboxEvents[1].PlacementAddress)
+	}
+	if sandboxEvents[2].PlacementAddress == "" {
+		t.Fatal("resumed event omitted the placement address established by resume")
+	}
+	if sandboxEvents[2].PlacementAddress == sandboxEvents[0].PlacementAddress {
+		t.Fatalf("resume reused create address %q; a new placement must publish its rebound address", sandboxEvents[2].PlacementAddress)
+	}
+	if sandboxEvents[3].PlacementAddress != "" {
+		t.Fatalf("destroyed event carried placement address %q; the placement no longer exists", sandboxEvents[3].PlacementAddress)
 	}
 
 	// The destroyed event OUTLIVES the deleted record (the transactional outbox): the record is gone

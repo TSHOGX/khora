@@ -135,6 +135,10 @@ type Event struct {
 	Kind model.EventKind
 	// State is the resulting lifecycle-state after the transition.
 	State model.Lifecycle
+	// PlacementAddress is the guest-visible address held by the placement
+	// established by this transition. It is present on created/resumed and empty
+	// on transitions that release or do not establish a placement.
+	PlacementAddress string
 	// Cause is WHY, for the Kinds a subscriber cannot otherwise tell apart (the transactional outbox). Empty on
 	// every Kind with a single route. Today it separates `destroyed`'s two routes:
 	// `requested` (the Destroy verb) from `retention-expired` (the reaper's evict of a paused
