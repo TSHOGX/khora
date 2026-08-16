@@ -36,6 +36,13 @@ Only a `destroyed` Event carries `cause`: `requested` or `retention-expired`.
 Sandbox's separate `death_cause`, which may be `gone`, `unknown`, or
 `resource-exceeded`; it is absent when no death was observed.
 
+`created` and `resumed` Events carry `placement_address`: the guest-visible
+address assigned to the Placement established by that transition. It is a
+historical stream fact suitable for attributing an observation made while that
+Placement existed. Other Event kinds omit the key. Addresses may be reused, and
+resume deliberately establishes a new Placement, so a current lookup would not
+be equivalent and could attribute an older observation to the wrong Sandbox.
+
 Delivery is at least once. Deduplicate with Event `id`; advance replay with the
 monotonic `seq`. They are intentionally different fields because a redelivered Event
 keeps its ID while the sequence defines its durable position.
@@ -56,9 +63,7 @@ lost Events, so the gap is explicit.
 The store assigns order and retention; contracts for both memory and SQLite backends
 are in [internal/store/storetest/contract.go](../../internal/store/storetest/contract.go).
 
-The stream does not currently sample per-object usage or emit a Placement address.
-Those requests are tracked in
-[Issue #3](https://github.com/TSHOGX/khora/issues/3) and
-[Issue #4](https://github.com/TSHOGX/khora/issues/4). Replay retention is configured
+The stream does not currently sample per-object usage. That request is tracked in
+[Issue #3](https://github.com/TSHOGX/khora/issues/3). Replay retention is configured
 with `--event-retention`; the default `0s` retains the full outbox. Set a positive
 duration only when the deployment has chosen a replay window.

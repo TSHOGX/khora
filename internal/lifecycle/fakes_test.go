@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net/netip"
 	"sort"
 	"strings"
 	"sync"
@@ -635,6 +636,10 @@ type fakeRuntime struct {
 	mu         sync.Mutex
 	calls      []string
 	failLaunch bool
+	// invalidAddress makes Launch return a physically built placement without the
+	// portable address the seam promises, exercising the mediator's fail-closed
+	// validation before a running transition can be committed.
+	invalidAddress bool
 	// launchMounts holds the Volume subsystem mount specs the LAST Launch carried, so a test can
 	// assert what actually crossed the seam (the bind destination and the read-only
 	// bit) rather than trusting that the mediator assembled it.
@@ -731,9 +736,13 @@ func (f *fakeRuntime) Launch(ctx context.Context, spec runtime.LaunchSpec) (*run
 	}
 	f.mu.Lock()
 	f.seq++
-	ep := fmt.Sprintf("10.0.0.%d:9000", f.seq)
+	addr := fmt.Sprintf("10.0.%d.%d", (f.seq/254)%256, f.seq%254+1)
+	ep := fmt.Sprintf("%s:9000", addr)
 	f.mu.Unlock()
-	pl := &runtime.Placement{TransportEndpoint: ep}
+	pl := &runtime.Placement{Address: netip.MustParseAddr(addr), TransportEndpoint: ep}
+	if f.invalidAddress {
+		pl.Address = netip.Addr{}
+	}
 	// Launch binds the publish endpoints too, like the real provider — they are a
 	// PLACEMENT product (the ID-reference model), so they appear with the placement rather than only when
 	// a later hot-add reinstalls the rule set. Without this the fake reports no endpoint
@@ -767,7 +776,8 @@ func (f *fakeRuntime) Adopt(_ context.Context, sandbox string) (*runtime.Placeme
 	err := f.adoptErr[sandbox]
 	cause := f.adoptCause[sandbox] // zero value = CauseUnknown, a legal verdict
 	f.seq++
-	ep := fmt.Sprintf("10.9.9.%d:9000", f.seq)
+	addr := fmt.Sprintf("10.9.%d.%d", (f.seq/254)%256, f.seq%254+1)
+	ep := fmt.Sprintf("%s:9000", addr)
 	f.mu.Unlock()
 	if err != nil {
 		return nil, false, runtime.CauseUnknown, err
@@ -777,7 +787,7 @@ func (f *fakeRuntime) Adopt(_ context.Context, sandbox string) (*runtime.Placeme
 		// (health and reclamation: read it while the placement is still intact, there is no later).
 		return nil, false, cause, nil
 	}
-	return &runtime.Placement{TransportEndpoint: ep}, true, runtime.CauseUnknown, nil
+	return &runtime.Placement{Address: netip.MustParseAddr(addr), TransportEndpoint: ep}, true, runtime.CauseUnknown, nil
 }
 func (f *fakeRuntime) ReclaimOrphans(_ context.Context, keep []string) error {
 	f.log("ReclaimOrphans:keep=" + strings.Join(append([]string(nil), keep...), "|"))

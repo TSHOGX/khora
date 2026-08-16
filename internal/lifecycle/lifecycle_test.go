@@ -128,6 +128,33 @@ func TestCreateUnwindOnLaunchFailure(t *testing.T) {
 	}
 }
 
+func TestCreateRefusesPlacementWithoutAddress(t *testing.T) {
+	ctx := context.Background()
+	rp, rt := &fakeRootfs{}, &fakeRuntime{invalidAddress: true}
+	m, st := newTestMediator(t, rp, rt, true)
+
+	if _, err := m.Create(ctx, CreateSpec{Template: "bare"}); err == nil {
+		t.Fatal("Create succeeded with a placement that had no guest address")
+	}
+	recs, err := st.ListSandboxes(ctx)
+	if err != nil {
+		t.Fatalf("ListSandboxes: %v", err)
+	}
+	if len(recs) != 0 {
+		t.Fatalf("invalid provider output left %d sandbox record(s): %+v", len(recs), recs)
+	}
+	evs, err := st.UnpublishedEvents(ctx, allUnpublished)
+	if err != nil {
+		t.Fatalf("UnpublishedEvents: %v", err)
+	}
+	if len(evs) != 0 {
+		t.Fatalf("invalid provider output published %d event(s): %+v", len(evs), evs)
+	}
+	if calls := strings.Join(rt.Calls(), ","); !strings.Contains(calls, "Destroy") {
+		t.Fatalf("invalid placement was not destroyed; calls=%v", rt.Calls())
+	}
+}
+
 // create: mount failure is the earliest cold-start failure ( before ), so the
 // runtime is never launched; unwind still destroys the empty Overlay and deletes
 // the record → destroyed, no `failed` state.

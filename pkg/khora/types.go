@@ -146,6 +146,9 @@ type Event struct {
 	SandboxID string       `json:"sandbox_id"`
 	Kind      EventKind    `json:"kind"`
 	State     SandboxState `json:"state"`
+	// PlacementAddress is the guest-visible address established by a created or
+	// resumed event. It is absent on transitions that do not establish a placement.
+	PlacementAddress string `json:"placement_address,omitempty"`
 	// Cause is present on `died` and on a `destroyed` that followed a death — the
 	// reason the isolation unit was found dead. Absent otherwise.
 	Cause      string `json:"cause,omitempty"`

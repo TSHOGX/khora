@@ -341,7 +341,12 @@ func (p *LocalRunsc) Launch(ctx context.Context, spec LaunchSpec) (_ *Placement,
 		}
 	}
 
+	address, parseErr := netip.ParseAddr(guestIP)
+	if parseErr != nil {
+		return nil, fmt.Errorf("runtime: allocated guest address %q: %w", guestIP, parseErr)
+	}
 	pl := &Placement{
+		Address:           address,
 		TransportEndpoint: fmt.Sprintf("%s:%d", guestIP, guestport.Port),
 		PublishEndpoints:  publishEndpointList(&h, spec.Steering),
 	}
@@ -604,7 +609,11 @@ func (p *LocalRunsc) Adopt(ctx context.Context, sandbox string) (*Placement, boo
 	// re-drawn (the runtime provider contract: the same endpoint, no new epoch; see recoverPublishEndpoints).
 	p.recoverPublishEndpoints(ctx, &h)
 
-	pl := &Placement{TransportEndpoint: fmt.Sprintf("%s:%d", ip, guestport.Port)}
+	address, err := netip.ParseAddr(ip)
+	if err != nil {
+		return nil, false, CauseUnknown, fmt.Errorf("runtime: Adopt %s: rediscovered guest address %q is invalid: %w", sandbox, ip, err)
+	}
+	pl := &Placement{Address: address, TransportEndpoint: fmt.Sprintf("%s:%d", ip, guestport.Port)}
 	pl.SetHandle(&h)
 	// alive → the cause is meaningless (nothing died); report Unknown rather than
 	// inventing a value.
