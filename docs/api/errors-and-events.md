@@ -59,6 +59,6 @@ are in [internal/store/storetest/contract.go](../../internal/store/storetest/con
 The stream does not currently sample per-object usage or emit a Placement address.
 Those requests are tracked in
 [Issue #3](https://github.com/TSHOGX/khora/issues/3) and
-[Issue #4](https://github.com/TSHOGX/khora/issues/4). The choice of replay retention
-window remains in [Issue #5](https://github.com/TSHOGX/khora/issues/5); configure the
-current engine value rather than assuming a permanent default.
+[Issue #4](https://github.com/TSHOGX/khora/issues/4). Replay retention is configured
+with `--event-retention`; the default `0s` retains the full outbox. Set a positive
+duration only when the deployment has chosen a replay window.

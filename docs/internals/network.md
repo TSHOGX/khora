@@ -42,8 +42,9 @@ second hop does not traverse the original forward hook, so first-hop rules alone
 cannot constrain it. Assembly refuses a second-hop UID equal to the engine process or
 rules that would cut off engine-to-guest transport.
 
-The remaining question about the deny-safe tier is tracked in
-[Issue #6](https://github.com/TSHOGX/khora/issues/6).
+The deny-safe tier is settled: `ruleset.TierV4` contains RFC1918's three IPv4
+blocks, and `ruleset.TierV6` derives the corresponding IPv6 members mechanically.
+The ruleset tests pin those members and reject nesting with the unliftable floor.
 
 ## Atomic reinstall and counters
 

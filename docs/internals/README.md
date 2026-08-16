@@ -17,6 +17,4 @@ guides, configuration, operations, or API reference instead.
 - [Transport](transport.md): guest protocol, proxy barrier, and fan-out behavior
 
 Open work is not kept as a parallel register here. Link the ruling Issue instead:
-[remote provider input shape](https://github.com/TSHOGX/khora/issues/7),
-[deny-safe network ranges](https://github.com/TSHOGX/khora/issues/6), and
-[event replay retention](https://github.com/TSHOGX/khora/issues/5).
+[remote provider input shape](https://github.com/TSHOGX/khora/issues/7).
