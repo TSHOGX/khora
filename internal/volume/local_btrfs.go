@@ -483,8 +483,9 @@ func (b *LocalBtrfs) DestroyVolume(ctx context.Context, volumeID string) error {
 // CAPPED units too, whose correct contribution here is ZERO — the same bytes
 // billed twice, which the node admission budgets's disjointness rule forbids, at the magnitude of the
 // whole unit and strictly ONE-directional, so it produces wrongful 507s on a live
-// admission path (a GitHub Issue, the resource admission second-term row). Same rule as
-// Backend.Usage and atomic transition rollback; this was the one place that guessed.
+// admission path. The aggregate therefore stays all-or-nothing: refusing admission
+// visibly is safer than silently understating the node total. Same rule as Backend.Usage
+// and atomic transition rollback; this was the one place that guessed.
 //
 // The read itself is retried inside the btrfs client (transient failure under
 // concurrent churn), so an error reaching here means it stayed unreadable.

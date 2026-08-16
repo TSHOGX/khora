@@ -7,7 +7,7 @@ package khora
 // unexported inside `internal/`, so a consumer cannot name them; exporting them would
 // make the engine's internal handler shapes a published API that could then never be
 // refactored. So this package restates them — and a restatement that nothing checks is
-// exactly the "second, drifting account of the same thing" the repo's spec discipline
+// exactly the "second, drifting account of the same thing" this mechanical contract
 // exists to prevent.
 //
 // What it checks against is docs/api/openapi.json, NOT the handler source. That is the

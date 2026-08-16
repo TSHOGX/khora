@@ -17,9 +17,9 @@ import (
 //
 // The four additions each name a MECHANISM a volume backend might be built on —
 // and a mechanism name on the contract surface is what binds the seam to one
-// implementation. `reflink` and the storage-unit words belong to the local arm,
-// `fuse` to the future remote arm, `loopdev` to the strong-isolation fallback, and
-// `mountopt` to "let the caller pass mount flags", which is the most tempting of
+// implementation. `reflink`, `fuse`, `loopdev`, and the storage-unit words name
+// possible backend mechanisms; `mountopt` means "let the caller pass mount flags",
+// which is the most tempting of
 // the four because it looks like configuration rather than a leak.
 //
 // One list, both halves of the guard (signatures and struct fields) — a token

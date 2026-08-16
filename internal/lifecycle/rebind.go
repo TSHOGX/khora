@@ -194,8 +194,8 @@ func (m *Mediator) Rebind(ctx context.Context, id model.SandboxID, spec RebindSp
 	// uncapped forever, on a false explanation.
 	//
 	// Gated on the axis being metered, not unconditional: on an unmetered node an uncapped
-	// sandbox is legal by resource admission's own terms, so refusing there would revoke a capability the
-	// spec grants. Placed BEFORE the admission gate for the same reason as the arm above it.
+	// sandbox is legal by resource admission's own terms, so refusing there would reject a
+	// valid unmetered configuration. Placed BEFORE the admission gate for the same reason as the arm above it.
 	if b.DiskByte != nil && newLimits.DiskByte == 0 && m.deps.NodeCapacity.DiskByte > 0 {
 		return false, fmt.Errorf("rebind: %w: disk — this node meters the disk axis, so sandbox %s may not be left uncapped, and the edit is irreversible because re-capping later is refused (resource admission / ErrUncappedDiskNotCappable)",
 			ErrCapRequired, id)

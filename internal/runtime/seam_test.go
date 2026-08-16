@@ -21,12 +21,9 @@ import (
 // fields) — a token banned from a parameter must be equally banned from a field,
 // or the cheaper of the two spellings becomes the way in.
 //
-// The block-device vocabulary is banned for a reason worth stating, because the
-// axis it guards is not built yet. When the disk-IO RATE cap lands (resource admission's other
-// rate-axis half), `io.max` will need a WHOLE-DISK MAJ:MIN, and the settled
-// answer is that the provider DERIVES it from its own state dir rather than
-// receiving it (a device number is irreducibly host-local, so a remote provider
-// could not produce one — the runtime provider contract). Matching is by name SUBSTRING, and no token
+// The block-device vocabulary is banned because a device number is irreducibly
+// host-local. Any provider mechanism that needs one must derive it from provider-owned
+// state rather than receive it through the seam. Matching is by name SUBSTRING, and no token
 // above would have stopped a field spelled `MajMin` or `MajorNum`: without these
 // four, the decision's half-life is however long until the next person wires
 // that cap through a struct field, which is exactly the cheap-at-the-time leak
@@ -50,8 +47,7 @@ var fieldExemptions = map[string]string{
 	// assembled; what the runtime provider contract bans is the Overlay's INTERNAL upper/work paths, which
 	// would expose the overlayfs mechanism and make the seam unimplementable by a
 	// provider that assembles rootfs some other way. MergedPath is populated and
-	// consumed only by local_runsc and never enters a cross-provider decision
-	// (RootfsSource's own doc comment, and a GitHub Issue the runtime provider contract for the remote form).
+	// consumed only by local_runsc and never enters a cross-provider decision.
 	"RootfsSource.MergedPath": "the runtime provider contract permits a merged-rootfs handle as provider input; only upper/work are banned",
 	// The Rootfs subsystem side of that same handoff: Merged is what the Rootfs subsystem hands
 	// across as an opaque RootfsSource. It is the ONE host-shaped name the storage
@@ -359,7 +355,7 @@ var pinnedRunscFlags = []pinnedFlag{
 	{"--network=sandbox", "userspace netstack. host/hostinet lets the sentry use host sockets directly and violates the security model substrate pillar  (REJECTED, not an alternative mode); it is also the precondition for the network declaration steering (per-sandbox netns) and the transport data plane transport (netstack-terminated, dialed over the veth IP)"},
 	{"--overlay2=none", "the Rootfs subsystem/the Volume subsystem own the persistent layer OUTSIDE runsc; the gofer only proxies host dirs. runsc's own overlay would put guest writes somewhere the engine does not manage, so Promote would freeze an incomplete tree. NO --overlay2 VALUE IS AN ALTERNATIVE: measured, the whole memory/self/dir= family is non-persistent across a container's lifetime, and dir= UNLINKS its filestore at startup — so a clean stop evaporates the data, which is the failure a persistence layer cannot have"},
 	{"--file-access=shared", "the other half of the same guarantee: the gofer proxies the host dir bidirectionally, which is what makes the Volume subsystem volume binds and the at-rest upper work at all (overlayfs constraints)"},
-	{"--net-raw=false", "the network declaration: the guest cannot forge L2 frames. runsc's own default already strips raw/AF_PACKET, so WITHOUT this pin the guarantee is an UNDECLARED default — and the network declaration's future interface-keyed predicate floor would face a raw-socket-capable guest with no test firing. Paired with CAP_NET_RAW's absence from oci.go caps"},
+	{"--net-raw=false", "the network declaration: the guest cannot forge L2 frames. runsc's own default already strips raw/AF_PACKET, so WITHOUT this pin the guarantee is an UNDECLARED default — and the interface-keyed predicate floor would face a raw-socket-capable guest with no test firing. Paired with CAP_NET_RAW's absence from oci.go caps"},
 	{"--systemd-cgroup=false", "cgroupfs driver, which the whole the runtime provider contract cgroup-ownership split assumes (engine mkdirs the parent, runsc creates the leaf). The systemd driver would place the leaf somewhere else entirely and the post-launch cap assertion would read the wrong path"},
 }
 

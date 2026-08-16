@@ -18,7 +18,7 @@
 //	  go test -tags 'substrate quotachurn' -count=1 ./internal/btrfs/
 //
 // It keeps `substrate` as well as its own tag because it borrows btrfsScratch from
-// btrfs_substrate_test.go, which is behind that tag (the documentation: keep both).
+// btrfs_substrate_test.go, which is behind that tag; both registrations are required.
 package btrfs
 
 import (

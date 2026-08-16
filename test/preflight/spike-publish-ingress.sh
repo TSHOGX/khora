@@ -2,15 +2,15 @@
 # spike-publish-ingress.sh — the network declaration ingress (`publish`): measure the INBOUND path,
 # which the existing egress measurements do not cover.
 #
-# It exists to falsify one spec claim and answer two unmeasured shape questions:
+# It exists to falsify one observable-behavior claim and answer two shape questions:
 #
-#  Q1 (spec-changing) — the network declaration promised, at the time this
-#     ran, that a guest service bound to 127.0.0.1 yields "the connection is
+#  Q1 — an earlier network-declaration claim said that a guest service bound to
+#     127.0.0.1 yields "the connection is
 #     refused and the error is attributable, rather than hanging".
 #     "Attributable" requires that this case be DISTINGUISHABLE from "nothing is
 #     listening at all". If gVisor's netstack answers both with an RST, the
 #     caller sees `refused` either way and the promise is unfalsifiable from
-#     outside — the contract then has to be reworded to promise only "refused".
+#     outside — the observable contract must then promise only "refused".
 #     Case B vs case C is that comparison. It is: the measurement below confirmed
 #     the two are indistinguishable, and the network declaration now stops at "refused and fails
 #     fast", stating plainly that it does not promise attributability.

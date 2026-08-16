@@ -6,7 +6,7 @@
 // (uncapped Volume bytes) both need the SAME measurement for the second term of
 // the resource admission node-capacity inequality, and "subsystems never call each other" (the lifecycle)
 // makes a shared leaf the sanctioned answer rather than an import edge or two
-// drifting copies (the documentation: internal/guestport is the precedent).
+// drifting copies; internal/guestport is the same structural precedent.
 //
 // WHY ALLOCATED BLOCKS AND NOT APPARENT SIZE. A sparse file's length is not what
 // it costs: a 512 MiB hole-punched file occupies zero blocks, and charging its

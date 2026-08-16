@@ -17,8 +17,8 @@ import (
 // with no "upper path" and no "lower is a Template" (rootfs seam ownership).
 //
 // The handle shape is provider-specific. MergedPath stays seam-clean because it is populated
-// and consumed only by local_runsc and never enters a cross-provider decision; a remote
-// provider defines its own shape (a GitHub Issue the runtime provider contract).
+// and consumed only by local_runsc and never enters a cross-provider decision. Another
+// provider may define a different private handle without changing the portable policy.
 type RootfsSource struct {
 	// MergedPath is the merged overlay directory to hand to runsc as its root.
 	MergedPath string
