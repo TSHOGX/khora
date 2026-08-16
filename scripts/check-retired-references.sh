@@ -46,6 +46,56 @@ if scan_files all 'docs/spec|docs/decisions'; then
   fail=1
 fi
 
+# Technical sources describe the code they enforce; they must not depend on a
+# Markdown page whose name or contents can change independently. These exact
+# lines use Markdown paths as generator output or test data, not as citations.
+mechanical_markdown_path() {
+  local rel=$1 line=$2
+  case "$rel" in
+    cmd/khora/docs.go)
+      [[ "$line" =~ ^[[:space:]]*const[[:space:]]+cliDocPath[[:space:]]*=[[:space:]]*\"docs/api/cli\.md\"[[:space:]]*$ ]]
+      ;;
+    cmd/orchestrator/docs.go)
+      [[ "$line" =~ ^[[:space:]]*const[[:space:]]+orchestratorDocPath[[:space:]]*=[[:space:]]*\"docs/configuration/orchestrator\.md\"[[:space:]]*$ ]]
+      ;;
+    scripts/generate-docs.sh)
+      [[ "$line" == "go run ./cmd/orchestrator __generate-docs docs/configuration/orchestrator.md" ||
+        "$line" == "go run ./cmd/khora __generate-docs docs/api/cli.md" ]]
+      ;;
+    test/preflight/substrategate/classify_test.go)
+      [[ "$line" =~ ^[[:space:]]*\"docs/operations/startup-shutdown\.md\":[[:space:]]+true,[[:space:]]*$ ]]
+      ;;
+    test/preflight/substrategate/main_test.go)
+      [[ "$line" == $'\twriteTestFile(t, "notes.md", "uncommitted\\n")' ||
+        "$line" == $'\tif got["notes.md"] != "A" {' ||
+        "$line" == $'\t\tt.Errorf("untracked working-tree change status = %q, want A; all changes: %v", got["notes.md"], got)' ]]
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+technical_md=0
+markdown_path='(^|[^[:alnum:]_.-])([[:alnum:]_.-]+/)*[[:alnum:]_.-]+\.md([^[:alnum:]_]|$)'
+while IFS= read -r -d '' file; do
+  [[ "$file" = /* ]] || file="$root/$file"
+  [[ -f "$file" && "$file" != *.md ]] || continue
+  rel=${file#"$root"/}
+  case "$rel" in
+    scripts/check-retired-references.sh|scripts/test-check-retired-references.sh) continue ;;
+  esac
+  while IFS= read -r match; do
+    [[ -n "$match" ]] || continue
+    line=${match#*:}
+    mechanical_markdown_path "$rel" "$line" && continue
+    printf '%s:%s\n' "$file" "$match"
+    technical_md=1
+  done < <(grep -IEn -- "$markdown_path" "$file" || true)
+done < <(maintained_files)
+if [[ "$technical_md" -ne 0 ]]; then
+  echo "technical source references a Markdown document" >&2
+  fail=1
+fi
+
 # Technical sources must state the constraint where it is enforced. They may not
 # point at a section, ADR or retired documentation path that can move independently.
 if scan_files technical \

@@ -4,7 +4,7 @@ import "testing"
 
 func TestInertPath(t *testing.T) {
 	cases := map[string]bool{
-		"docs/operations/README.md":            true,
+		"docs/operations/startup-shutdown.md":  true,
 		".github/workflows/ci.yml":             true,
 		".gitignore":                           true,
 		"scripts/check-no-direct-main.sh":      true,
