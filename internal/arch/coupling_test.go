@@ -22,8 +22,7 @@ import (
 //
 // Pre-listing a package before it exists is what gives the empty allowlist its force
 // at DESIGN time, not just at review time: routing volume content through the transport data plane `fs`
-// was ruled out for the Volume subsystem partly because this guard would have failed on it
-// (volume.md constraints).
+// was ruled out for the Volume subsystem partly because this guard would reject that edge.
 var subsystems = []string{
 	"github.com/TSHOGX/khora/internal/runtime",   // the runtime provider contract
 	"github.com/TSHOGX/khora/internal/rootfs",    // the Rootfs subsystem

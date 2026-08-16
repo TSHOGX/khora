@@ -47,7 +47,17 @@ check_rejected old-page 'See ../concepts/model.md for the object model.'
 check_rejected retired-path-reference 'See docs/spec/resources.md for the rule.'
 check_source_rejected source-section-address 'See §12 for the rule.'
 check_source_rejected source-old-page 'See concepts/model.md for the object model.'
+check_source_rejected source-markdown-reference 'See volume.md.'
 check_source_rejected source-retired-path 'See docs/decisions/network.md for the rule.'
+
+generator="$tmp/generator-prose"
+mkdir -p "$generator/cmd/khora"
+printf '%s\n' 'package main' 'const cliDocPath = "docs/api/cli.md"' \
+  '// See docs/internals/runtime.md for the contract.' > "$generator/cmd/khora/docs.go"
+if "$script_dir/check-retired-references.sh" "$generator" >/dev/null 2>&1; then
+  echo "check-retired-references accepted prose in a mechanically exempt source" >&2
+  exit 1
+fi
 
 ignored="$tmp/ignored-fixture"
 mkdir -p "$ignored/docs" "$ignored/internal"

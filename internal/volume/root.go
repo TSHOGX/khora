@@ -16,8 +16,8 @@ import (
 // localRoot implements Root over a host directory using ONE syscall for the
 // entire security boundary: openat2(dirfd, path, RESOLVE_IN_ROOT).
 //
-// WHY THIS AND NOT chroot / A MOUNT NAMESPACE (volume.md constraints). RESOLVE_IN_ROOT
-// gives path semantics IDENTICAL to chroot's, with no privilege, no mount
+// WHY THIS AND NOT chroot / A MOUNT NAMESPACE. RESOLVE_IN_ROOT gives path semantics
+// IDENTICAL to chroot's, with no privilege, no mount
 // namespace, and no thread pinning. Four properties measured on this substrate's
 // 6.x kernel, read and write side both, and the code below depends on all four:
 // ".." at the root CLAMPS (it resolves to the root itself, it is not an error) · an

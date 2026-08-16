@@ -4,9 +4,9 @@
 // (the network declaration) — connection termination, protocol recognition and content rewriting do
 // not exist here and there is no seam that could carry them.
 //
-// The boundary is not a preference, it is `enforceability locus` (network.md constraints /
-// network enforcement): a control that ONLY the side creating the placement can enforce belongs in
-// the engine; everything else does not. Four things pass that test — installing
+// The boundary is not a preference, it is an enforceability locus: a control that ONLY the side
+// creating the placement can enforce belongs in the engine; everything else does not. Four things
+// pass that test — installing
 // rules atomically with placement, binding the predicate to the input interface,
 // the L0 floor on BOTH hops, and rule ORDER — and they are exactly what this
 // package plus the runtime provider contract deliver. Choosing an upstream by SNI, swapping a credential,

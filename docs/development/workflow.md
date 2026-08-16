@@ -39,6 +39,20 @@ of custom polling loops.
 Commit messages use Conventional Commits scoped to the engine. `main` changes
 through review; the pre-push hook is only a local safeguard.
 
+## Keep evidence dependencies one-way
+
+Documentation describes code; technical sources do not depend on documentation.
+State each code constraint beside the symbol, branch, or test that enforces it so a
+reviewer can verify the claim in the same change. A comment that points to a Markdown
+page becomes stale without making a build or test fail, so maintained non-Markdown
+sources reject such citations.
+
+Literal Markdown paths are allowed only when they are data: a generator names its
+output, a staleness check invokes that generator, or a test classifies a filename.
+Those exceptions do not carry a technical claim. The repository guard and its
+negative fixture are [check-retired-references.sh](../../scripts/check-retired-references.sh)
+and [test-check-retired-references.sh](../../scripts/test-check-retired-references.sh).
+
 ## Prepare the PR
 
 Run the deterministic checks and make the substrate decision described in

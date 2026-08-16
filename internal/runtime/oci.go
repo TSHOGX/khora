@@ -217,8 +217,8 @@ func buildOCISpec(mergedPath, netnsPath, cgroupsPath string, limits ResourceLimi
 	for _, mt := range mounts {
 		// A plain bind, which is exactly the shape measured to work: with
 		// --overlay2=none --file-access=shared, runsc proxies an extra rw host directory
-		// through the gofer into the guest bidirectionally (volume.md constraints — the local
-		// backend's whole foundation), and a host FUSE mount point proxies identically
+		// through the gofer into the guest bidirectionally (the local backend relies on this
+		// bind contract), and a host FUSE mount point proxies identically
 		// (the future remote arm's foundation). Nothing here distinguishes the two.
 		opts := []string{"rbind", "rprivate"}
 		if mt.ReadOnly {
