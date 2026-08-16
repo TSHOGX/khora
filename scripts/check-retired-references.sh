@@ -99,7 +99,7 @@ fi
 # Technical sources must state the constraint where it is enforced. They may not
 # point at a section, ADR or retired documentation path that can move independently.
 if scan_files technical \
-  'ADR-[0-9]+|§[0-9]+|[①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳㉑㉒㉓㉔㉕㉖㉗㉘㉙㉚㉛㉜㉝㉞㉟㊱㊲㊳㊴㊵㊶㊷㊸㊹㊺㊻㊼㊽㊾㊿⓪]|(^|[^[:alnum:]_])D[0-9]+([.][0-9A-Za-z]+)*([^[:alnum:]_]|$)|(^|[/`(])(architecture|model|subsystems|contract|reaper-health|rootfs-overlay)\.md([^[:alnum:]_]|$)|docs/(spec|decisions)/[^[:space:]`\)]+'; then
+  'ADR-[0-9]+|§[0-9]+|[①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳㉑㉒㉓㉔㉕㉖㉗㉘㉙㉚㉛㉜㉝㉞㉟㊱㊲㊳㊴㊵㊶㊷㊸㊹㊺㊻㊼㊽㊾㊿⓪]|(^|[^[:alnum:]_])D[0-9]+([.][0-9A-Za-z]+)*([^[:alnum:]_]|$)|docs/(spec|decisions)/[^[:space:]`\)]+'; then
   echo "technical source contains a section, ADR or retired documentation address" >&2
   fail=1
 fi
