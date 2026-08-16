@@ -262,7 +262,7 @@ type importResp struct {
 // reason the sandbox large-file route is REST rather than RPC (the control-plane API).
 //
 // `path` is relative to the VOLUME ROOT and out-of-root targets are unreachable — the
-// accessor is root-confined by construction (the Volume subsystem / volume.md constraints), so a traversal clamps
+// accessor is root-confined by construction, so a traversal clamps
 // inside the volume rather than being rejected by a check here. Validating the string would
 // have to be right, where the accessor cannot be wrong.
 func (e *Engine) handleImportVolume(w http.ResponseWriter, r *http.Request, id model.VolumeID) {

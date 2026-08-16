@@ -25,7 +25,7 @@ import (
 // SandboxID, and why the content path below goes through the backend's own
 // root-confined accessor rather than through the transport data plane `fs`: `fs` lives inside a guest
 // and is reachable only through a live placement, so an unmounted volume has no
-// route through it at all (volume.md constraints).
+// route through it at all; the backend accessor is the only valid path in that state.
 //
 // None of them publishes an event. A volume is not a sandbox, so its CRUD is not a
 // the lifecycle state machine lifecycle transition — the same rule Template CRUD follows (health and reclamation).
@@ -74,7 +74,7 @@ var ErrVolumeCapUnsupported = errors.New("lifecycle: backend cannot enforce a ca
 // cap), so holding the node-global gate across it does not serialize the node behind
 // a long operation.
 //
-// THAT PREMISE IS THE LOCAL ARM'S (volume.md constraints): "bounded metadata work" is true of a btrfs
+// THAT PREMISE IS SPECIFIC TO THE LOCAL ARM: "bounded metadata work" is true of a btrfs
 // ioctl and false of a network round trip. A remote backend falsifies it here and at
 // SetCapacity / Snapshot / Clone / UncappedBytes, where the same node-global gate is held
 // across a backend call — on a non-CoW object store a snapshot is a full object copy. The fix

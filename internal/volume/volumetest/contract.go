@@ -45,7 +45,7 @@ func RunContract(t *testing.T, mk Factory) {
 	t.Run("ReleaseKeepsBytesAndIsIdempotent", func(t *testing.T) { testReleaseKeepsBytes(t, mk) })
 	t.Run("AdoptRequiresAPresentUnit", func(t *testing.T) { testAdopt(t, mk) })
 
-	// OpenRoot (volume.md constraints): the content accessor, and its root confinement.
+	// OpenRoot: the content accessor, and its required root confinement.
 	t.Run("RootReadWriteRoundTrip", func(t *testing.T) { testRootRoundTrip(t, mk) })
 	t.Run("RootListStatRemoveRename", func(t *testing.T) { testRootTreeOps(t, mk) })
 	t.Run("RootConfinesEscapingPaths", func(t *testing.T) { testRootConfinement(t, mk) })

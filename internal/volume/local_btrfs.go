@@ -14,7 +14,7 @@ import (
 
 // LocalBtrfs is the DEFAULT the Volume subsystem backend arm: one volume = one storage unit on the
 // host, which the gofer proxies into a guest as an ordinary directory so POSIX
-// comes free from the host kernel (the Volume subsystem / volume.md constraints). It carries both a hard
+// semantics come directly from the host kernel. It carries both a hard
 // capacity cap and cheap atomic snapshots because the substrate attaches both to
 // the SAME object — the strongest argument for modelling a volume as one unit.
 //
@@ -415,8 +415,8 @@ func (b *LocalBtrfs) AdoptMaterialized(_ context.Context, volumeID string) (*Mat
 	return &Materialized{Volume: volumeID, SourcePath: unit}, nil
 }
 
-// OpenRoot returns the root-confined accessor over the unit (volume.md constraints). The
-// handle exposes no host path at all, which makes this the one materialization-class
+// OpenRoot returns the root-confined accessor over the unit. The handle exposes no host
+// path at all, which makes this the one materialization-class
 // method needing no exemption in the structural guard.
 func (b *LocalBtrfs) OpenRoot(_ context.Context, volumeID string) (Root, error) {
 	if err := validateID(volumeID); err != nil {

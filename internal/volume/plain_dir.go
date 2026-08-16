@@ -120,7 +120,7 @@ func (p *PlainDir) AdoptMaterialized(_ context.Context, volumeID string) (*Mater
 
 // OpenRoot uses the SAME accessor as the local arm, deliberately: root confinement is
 // required of every arm, so sharing one implementation means the shared contract test
-// exercises the real mechanism on both rather than a copy on one (volume.md constraints).
+// exercises the real root-confinement mechanism on both rather than a copy on one.
 func (p *PlainDir) OpenRoot(_ context.Context, volumeID string) (Root, error) {
 	if err := validateID(volumeID); err != nil {
 		return nil, err

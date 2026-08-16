@@ -83,7 +83,7 @@ type FileInfo struct {
 // Not a replacement for Materialize (that hands runsc a bindable host path; this only moves
 // bytes inside the engine process — two consumers, two methods), and not routed through the transport data plane
 // `fs`: that service is reachable only through a live placement, and the route would create a
-// volume → transport edge internal/arch rejects outright (volume.md constraints).
+// volume → transport edge that the architecture guard rejects outright.
 //
 // Concurrency: safe for concurrent use, each operation resolving its own descriptor.
 type Root interface {
@@ -112,7 +112,7 @@ type Root interface {
 }
 
 // Backend is the Volume subsystem storage seam: one backend per storage form, each yielding the SAME one
-// thing — a host mount point (volume.md constraints/Volume storage). The local arm is a host directory with a cap
+// thing — a host mount point that the runtime provider can bind. The local arm is a host directory with a cap
 // and cheap atomic snapshots; a remote arm (S3 / NFS) would be a host-side FUSE point, and
 // the two are indistinguishable above this seam.
 //
@@ -252,7 +252,7 @@ type Backend interface {
 	DeletedRowIDs(ctx context.Context) []uint64
 
 	// OpenRoot returns the root-confined content accessor for volumeID, usable WHILE UNMOUNTED
-	// (volume.md constraints). This is what makes "the volume's lifecycle is decoupled from any
+	// by design. This is what makes "the volume's lifecycle is decoupled from any
 	// sandbox" true in substance rather than only in the record layer: seeding a volume before
 	// any sandbox exists, and reading one after the last is gone, have no other route.
 	OpenRoot(ctx context.Context, volumeID string) (Root, error)
