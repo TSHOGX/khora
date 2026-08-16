@@ -21,8 +21,7 @@ document section address in code.
 
 For inbound asks, record the need and fallback before proposing engine design.
 Keep a granted ask open until its implementing PR merges; close a refusal with its
-reason and a duplicate with the canonical Issue. The repository-wide documentation
-migration is tracked by [Issue #16](https://github.com/TSHOGX/khora/issues/16).
+reason and a duplicate with the canonical Issue.
 
 ## Make a reviewable change
 

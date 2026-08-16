@@ -634,8 +634,8 @@ func testRootConfinement(t *testing.T, mk Factory) {
 	// escaping write can actually succeed. This matters: without it the write fails
 	// with ENOENT (WriteAt does not create parents) and the test would only prove
 	// "the write was refused" — a much weaker property that a broken accessor
-	// returning an error for everything would also satisfy. The measured spec
-	// property is that ".." CLAMPS at the root and the write LANDS INSIDE, so the
+	// returning an error for everything would also satisfy. The measured
+	// RESOLVE_IN_ROOT property is that ".." CLAMPS at the root and the write LANDS INSIDE, so the
 	// assertion has to be able to observe the landing.
 	if err := r.Mkdir("etc", 0o755); err != nil {
 		t.Fatalf("mkdir etc inside the volume: %v", err)

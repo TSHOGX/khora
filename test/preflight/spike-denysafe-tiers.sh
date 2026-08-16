@@ -5,7 +5,7 @@
 # host's resolver (0.250.250.200) is outside every floor item — but nobody has
 # measured what a *tier* rule above the floor can and cannot see.
 #
-# Four questions, each one a spec input:
+# Four questions, each one an input to the deny-safe-tier decision:
 #
 #  Q1 (v4) — is 0.0.0.0/8 a real destination class on this host, and does an
 #     `ip daddr 0.0.0.0/8` rule see it? The resolver lives there, so the answer

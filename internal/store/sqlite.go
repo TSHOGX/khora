@@ -30,7 +30,7 @@ type SQLite struct {
 
 // sqliteSchema is the ONE authoritative schema. There is no migration path: a
 // breaking change edits this constant and the store file is discarded and
-// rebuilt (the documentation "No compatibility burden"). IF NOT EXISTS makes OpenSQLite
+// rebuilt because the 0.0.x line has no compatibility burden. IF NOT EXISTS makes OpenSQLite
 // idempotent across reopens of a file this same constant created — it is NOT a
 // version-tolerance mechanism, and a file whose columns disagree is a discard,
 // not something to detect or adapt to.
@@ -80,12 +80,12 @@ CREATE TABLE IF NOT EXISTS sandboxes (
 	created_at   INTEGER NOT NULL, -- unix nanos
 	updated_at   INTEGER NOT NULL
 );
--- RETENTION (the transactional outbox, and a GitHub Issue the security model for the one part still open):
+-- RETENTION (the transactional outbox):
 -- TrimOutbox deletes DELIVERED rows older than a configured window, so this table
 -- is bounded when a deployment sets one. The DEFAULT is off, and with it off rows
 -- are marked (published_at set) and never deleted, so at-rest size is unbounded —
--- a KNOWN LIMITATION of that default. Only the VALUE is deferred, not the
--- mechanism (the transactional outbox).
+-- the explicit cost of retaining the full replay history. The mechanism exists;
+-- the deployment chooses the window.
 CREATE TABLE IF NOT EXISTS outbox (
 	-- seq is the transactional outbox cursor: the monotonic total order both the publisher and
 	-- the control-plane API GET /v1/events replay page on. It is the PRIMARY KEY (the rowid)
@@ -223,8 +223,8 @@ func OpenSQLite(path string) (*SQLite, error) {
 	// rather than only inside the file. IT MUST BE SET BEFORE THE FIRST TABLE EXISTS —
 	// measured: on a database that already has tables the pragma is a silent no-op (it
 	// reports back 0/none) and converting afterwards needs a full VACUUM. Hence the DSN,
-	// applied on every open. Free to add only because there are no live instances to
-	// migrate (the documentation "No compatibility burden").
+	// applied on every open. The 0.0.x line permits rebuilding existing state rather
+	// than migrating it.
 	dsn := path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)&_pragma=auto_vacuum(incremental)&_txlock=immediate"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {

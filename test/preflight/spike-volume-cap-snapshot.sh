@@ -480,16 +480,14 @@ echo "=================================================================== Q6"
 echo " Q6. LOWERING a cap BELOW current usage: what can the endpoint promise?"
 echo "=================================================================="
 # WHAT WRONG BEHAVIOUR THIS CATCHES. `PATCH /v1/volumes/{id}` carries only `size`,
-# and resource admission already says any write to a cap column changes Σ AT ONCE ("a raise must
-# re-run admission … while a lowering need not") — i.e. the spec assumes LOWERING is
-# always safe and needs no admission re-check. That assumption is untested against a
+# and resource admission already treated lowering as safe from oversubscription and
+# skipped an admission re-check. That assumption was untested against a
 # volume that has ALREADY written past the new number. Three distinguishable outcomes,
 # and the endpoint's contract differs for each: (i) btrfs REFUSES -> the endpoint gets
 # its 400 from the substrate for free; (ii) btrfs ACCEPTS and existing bytes are safe ->
 # the endpoint can document "existing bytes kept, further growth refused"; (iii) btrfs
 # ACCEPTS and existing data is truncated/lost/corrupted -> a `size` PATCH is a
-# DESTRUCTIVE operation, which is the one outcome nothing in the spec currently allows
-# for.
+# DESTRUCTIVE operation outside the endpoint contract.
 # (iii) is ruled out by MEASUREMENT, not hope, so the readback in (c) rehashes the
 # file rather than trusting a stat().
 #

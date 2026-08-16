@@ -3,8 +3,8 @@
 // It is a leaf with no imports, and that is the point. The port is the transport data plane's own fact, but
 // the runtime provider contract needs it too — the transport data plane assigns endpoint discovery to the runtime provider contract, whose local_runsc composes
 // IP:port into the placement handle. Reading it from internal/transport would make the runtime provider contract
-// import the transport data plane's whole Connect-RPC + protobuf tree for one integer, on an edge pointing
-// opposite to the spec's ownership. Here, both sides depend on a leaf and neither on the
+// import the transport data plane's whole Connect-RPC + protobuf tree for one integer, reversing
+// the mechanism ownership boundary. Here, both sides depend on a leaf and neither on the
 // other. A shared substrate constant, not a seam: nothing is registered or swappable.
 package guestport
 

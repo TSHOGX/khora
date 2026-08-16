@@ -77,8 +77,8 @@ var ErrVolumeCapUnsupported = errors.New("lifecycle: backend cannot enforce a ca
 // THAT PREMISE IS SPECIFIC TO THE LOCAL ARM: "bounded metadata work" is true of a btrfs
 // ioctl and false of a network round trip. A remote backend falsifies it here and at
 // SetCapacity / Snapshot / Clone / UncappedBytes, where the same node-global gate is held
-// across a backend call — on a non-CoW object store a snapshot is a full object copy. The fix
-// when that arm lands is Promote's reservation shape (admission.go).
+// across a backend call. A backend whose operation is not bounded metadata work must use a
+// reservation shape like Promote instead of holding the node-global gate across the call.
 func (m *Mediator) CreateVolume(ctx context.Context, capBytes int64) (model.VolumeID, error) {
 	if capBytes < 0 {
 		return "", fmt.Errorf("create volume: cap must be non-negative (0 = uncapped), got %d", capBytes)
@@ -226,8 +226,8 @@ func (m *Mediator) SetVolumeCapacity(ctx context.Context, id model.VolumeID, cap
 	// Both halves matter, so the wedge check below still skips 0 while this one does not.
 	//
 	// Gated on the axis being metered, not applied unconditionally: on an unmetered node
-	// an uncapped volume is legal by resource admission's own terms, so refusing there would revoke a
-	// capability the spec grants.
+	// an uncapped volume is legal by resource admission's own terms, so refusing there would reject
+	// a valid unmetered configuration.
 	if capBytes == 0 && m.deps.NodeCapacity.DiskByte > 0 {
 		return fmt.Errorf("patch volume: %w: this node meters the disk axis, so a volume may not be left uncapped (resource admission, the same reason create refuses one)", ErrCapRequired)
 	}

@@ -8,10 +8,9 @@ package orchestrator
 // json tag changes the document in the same commit, and openapi_test.go fails if the
 // checked-in file is stale or if a listed operation is not actually routed.
 //
-// Maintained API documentation stays authoritative for intent. It says what an endpoint means, which
-// refusal is which, and why — none of which a schema can carry. When they disagree, the
-// document is wrong by construction (it is derived) unless the divergence is in the handler,
-// which requires deciding whether the implementation or documentation is wrong.
+// The operation table below carries intent that reflection cannot infer: endpoint
+// meaning, refusal classes, and summaries. The generated document combines that table
+// with handler wire shapes, and tests reject drift in either direction.
 //
 // JSON rather than YAML: both are valid OpenAPI and every generator reads JSON, while YAML
 // would add a module dependency to emit a document nothing in the engine consumes.
@@ -63,9 +62,8 @@ type apiOp struct {
 	Req     any
 	Resp    any
 	Status  int
-	// Errors are the status codes the API error contract defines for this operation. Listed rather
-	// than derived: which refusal an endpoint can produce is a design fact stated in
-	// the documentation, and no amount of reflection recovers it from a struct.
+	// Errors are the status codes this operation may produce. They are listed rather
+	// than derived because no amount of reflection recovers a refusal class from a struct.
 	Errors []int
 }
 

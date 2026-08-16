@@ -22,8 +22,8 @@
 #      "re-render and re-apply, don't reason about what's there" Adopt.
 #   C  delete the table, then install (a non-atomic Adopt, or a
 #      ReclaimOrphans/Adopt race: the table is briefly absent).
-#   D  clear conntrack state (`conntrack -F`) — which nothing in the spec asks
-#      for, but which a "clean slate on restart" reflex would reach for.
+#   D  clear conntrack state (`conntrack -F`) — outside the Adopt contract, but
+#      a tempting "clean slate on restart" reflex.
 #
 # Prior egress measurements showed that removing the `established,related` arm breaks even a
 # permitted flow: the reverse direction of an egress flow is carried by ct state

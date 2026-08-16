@@ -15,13 +15,15 @@ clean up a subvolume if cap assignment fails, before a durable object becomes vi
 
 ## Usage reads
 
-`btrfs qgroup show --sync` may transiently omit a newly created row. The client makes
-three bounded reads because measurement found 8 misses in 300 first attempts and no
-miss after the retry window. An unreadable row remains an error after the bound; a
-filesystem walk cannot supply the missing limit.
+`btrfs qgroup show --sync -f` may fail while another subvolume on the same filesystem
+is being deleted. The client retries a nonzero command exit at most three times. A
+successful response with no matching row is a semantic failure and is not retried;
+an unreadable row remains an error rather than being replaced with a filesystem walk
+that cannot recover the missing limit.
 
-The code and real-filesystem test are
-[internal/btrfs/btrfs.go](../../internal/btrfs/btrfs.go) and
+The retry bound and semantic-failure distinction are pinned in
+[internal/btrfs/btrfs_test.go](../../internal/btrfs/btrfs_test.go). Real quota reads
+are exercised by
 [internal/btrfs/btrfs_substrate_test.go](../../internal/btrfs/btrfs_substrate_test.go).
 
 ## Irreversible lowering

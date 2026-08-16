@@ -33,11 +33,9 @@ type Memory struct {
 	// Reference protection on this backend is three explicit Go scans — sandbox side,
 	// volume side, and the lease — where SQLite gets them from constraints.
 	mounts []model.Mount
-	// outbox is append-only, ordered — the publisher reads oldest-first. Like the
-	// SQLite backend, published rows are marked, never removed (same unbounded-
-	// growth known limitation; a GitHub Issue the security model, "The size of the replayable
-	// event-stream window (the transactional outbox)").
-	// Bounded in practice only by process lifetime since Memory is non-durable.
+	// outbox is ordered and the publisher reads oldest-first. Published rows remain
+	// replayable until TrimOutbox removes them. With event retention disabled it grows
+	// for the lifetime of this non-durable store, matching SQLite's configured behavior.
 	outbox []outboxRow
 	// nextSeq is the monotonic sequence counter (Store's sequence contract). It
 	// is assigned under m.mu, in the SAME critical section that makes the row

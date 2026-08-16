@@ -12,8 +12,8 @@ import (
 )
 
 // subsystems are the subsystem boundaries packages. Each owns a mechanism; the lifecycle mediator owns the
-// verbs. the documentation: "subsystems NEVER call each other" — an edge between any two
-// of these is the start of the dependency cycle the ownership rule exists to
+// verbs. An edge between any two is the start of the dependency cycle the
+// ownership rule exists to
 // prevent.
 //
 // Every entry is REQUIRED to exist (TestGuardIsNotStale): "absent packages are
@@ -254,7 +254,7 @@ func TestSubsystemsDoNotReadTheControlPlane(t *testing.T) {
 
 // leaves are the packages that exist SO THAT the empty allowlist above can stay
 // empty: when two subsystems need the same fact, it goes in a leaf they both
-// depend on (the documentation), never behind an exemption.
+// depend on, never behind an exemption.
 //
 // A leaf is only a leaf while it imports NOTHING from the engine. The failure mode
 // is quiet and it defeats the whole construction: the moment `ruleset` imports
@@ -274,8 +274,8 @@ func TestSubsystemsDoNotReadTheControlPlane(t *testing.T) {
 //   - btrfs — the substrate tool, model-ignorant, shared by the Rootfs subsystem (rootfs/overlayfs.go)
 //     and the Volume subsystem (volume/local_btrfs.go).
 //   - allocbytes — shared by the Rootfs subsystem and the Volume subsystem for the same reason.
-//   - pkg/transport/gen/... — the generated wire stubs. Not a leaf by the documentation's
-//     "shared fact" motive; listed because it lives OUTSIDE internal/ (the thin-client contract part
+//   - pkg/transport/gen/... — the generated wire stubs. It is not motivated by a
+//     shared engine fact; it is listed because it lives OUTSIDE internal/ (the thin-client contract part
 //     3, so a Go consumer can import the protocol) and the property that made that
 //     move safe is exactly the one this guard checks: the generated tree imports
 //     nothing from the engine. Left unchecked, a hand-edit adding an engine import
@@ -297,9 +297,9 @@ var leaves = []string{
 	"github.com/TSHOGX/khora/pkg/transport/gen/khora/transport/v1/transportv1connect",
 }
 
-// inertLeaves are the leaves the documentation's second half binds: "a leaf may DECIDE
-// things about values handed to it, and may do NO I/O, execute nothing, and touch
-// no substrate. A leaf that acts is a subsystem wearing a leaf's name."
+// inertLeaves are the leaves that may DECIDE things about values handed to them but
+// may do NO I/O, execute nothing, and touch no substrate. A leaf that acts is a
+// subsystem wearing a leaf's name.
 //
 // This is a SEPARATE guard from the import check above, because that one only looks
 // for `engine/` imports — a leaf that imported `os/exec` and shelled out to `nft`
@@ -307,8 +307,7 @@ var leaves = []string{
 // the back door the empty allowlist exists to keep shut. That is the whole loophole,
 // so it is checked rather than left to the package comment.
 //
-// NOT every leaf: `btrfs` and `allocbytes` are the OTHER kind. the documentation names
-// `btrfs` "a substrate tool, model-ignorant" — acting on the substrate is its
+// NOT every leaf: `btrfs` and `allocbytes` are substrate tools. Acting on the substrate is their
 // purpose, and `allocbytes` walks a tree to count bytes. What makes them safe is not
 // inertness but model-ignorance: neither knows a subsystem boundaries type, so neither can carry a
 // mechanism between two subsystems. The leaves listed here are the ones whose safety
@@ -320,8 +319,8 @@ var inertLeaves = []string{
 	"github.com/TSHOGX/khora/internal/ruleset",
 }
 
-// actsOnTheWorld are stdlib packages a leaf cannot reach without doing the thing
-// the documentation forbids. Process execution and raw syscalls are the mechanism-smuggling
+// actsOnTheWorld are stdlib packages an inert leaf cannot reach without acting on
+// the host. Process execution and raw syscalls are the mechanism-smuggling
 // routes that matter (shelling out to `nft` / `ip`, or an ioctl); the filesystem and
 // network packages are here because "touch no substrate" covers reading it too — a
 // leaf that stats a path has made its answer depend on the host it runs on, so the
@@ -362,7 +361,7 @@ func TestInertLeavesDoNotAct(t *testing.T) {
 				}
 				t.Errorf("leaf %s imports %s (tags=%q) — a leaf may DECIDE things about "+
 					"values handed to it, but may do no I/O, execute nothing, and touch no "+
-					"substrate (the documentation). A leaf that acts is a subsystem wearing a leaf's "+
+					"substrate. A leaf that acts is a subsystem wearing a leaf's "+
 					"name, and it re-couples the two subsystems that share it through a door "+
 					"the import guard above cannot watch", p.ImportPath, imp, tags)
 			}

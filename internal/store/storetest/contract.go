@@ -106,8 +106,8 @@ func RunContract(t *testing.T, mk Factory) {
 	t.Run("MountBindingSelfContradiction", func(t *testing.T) { testMountBindingInvalid(t, mk) })
 	t.Run("MountBindingIsAllOrNothing", func(t *testing.T) { testMountAllOrNothing(t, mk) })
 
-	// ReplaceMounts (the Volume subsystem): the whole-binding swap is ONE atomic commit. Two cases, both
-	// required by the spec bullet.
+	// ReplaceMounts (the Volume subsystem): the whole-binding swap is ONE atomic commit. Two cases
+	// pin refusal atomicity and the no-empty-window guarantee.
 	t.Run("ReplaceMountsKeepsOldBindingOnRefusal", func(t *testing.T) { testReplaceMountsKeepsOldBindingOnRefusal(t, mk) })
 	t.Run("ReplaceMountsNeverExposesZeroRows", func(t *testing.T) { testReplaceMountsNoZeroRowWindow(t, mk) })
 	t.Run("MountReferenceSideMissingEndpoint", func(t *testing.T) { testMountMissingEndpoint(t, mk) })
@@ -1646,9 +1646,9 @@ func testVolumeDurability(t *testing.T, mk Factory) {
 	}
 }
 
-// testReferenceReclaimRace is the DYNAMIC half of health and reclamation (the documentation reference-reclaim
-// atomicity): the static "referenced → cannot delete" judgment is not enough; the spec adds
-// an invariant closing the reclaim-vs-reference TOCTOU window. This races a DeleteTemplate
+// testReferenceReclaimRace is the DYNAMIC half of reference-reclaim atomicity: the
+// static "referenced → cannot delete" judgment is not enough; the store contract closes
+// the reclaim-vs-reference TOCTOU window. This races a DeleteTemplate
 // against several CreateSandbox referrers AND a child CreateTemplate, all referencing the
 // SAME Template, launched simultaneously.
 //

@@ -1,8 +1,8 @@
 // Package ruleset is a LEAF: the two facts the network declaration (Network) and the runtime provider contract (Runtime)
 // must agree on, and nothing else. It imports no engine package, holds no
 // mechanism, and abstracts no behavior — it is `guestport`'s precedent applied a
-// second time (the documentation: when two subsystems need the same fact, put it in a
-// leaf; never excuse a subsystem edge).
+// second time. When two subsystems need the same fact, it belongs in a leaf rather
+// than behind an allowed subsystem edge.
 //
 // The two facts:
 //

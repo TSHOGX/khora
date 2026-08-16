@@ -323,39 +323,22 @@ func TestPromotePrunesShadowedBytes(t *testing.T) {
 			t.Errorf("%s was pruned from the layer: %v — only the LEAF subtree may be excluded; a top-level component would discard real guest data living beside the mount", kept, err)
 		}
 	}
-	// What happens to the mount DESTINATION DIRECTORY itself.
+	// The excluded destination directory is omitted with its subtree. copyTree checks
+	// the exclusion before creating the target, so the frozen layer promises neither a
+	// mount-point placeholder nor any other artifact at that path.
 	//
-	// SPEC/CODE DIVERGENCE, recorded here deliberately rather than silently reconciled
-	// (the documentation: a divergence is a signal to STOP, not to fix in passing).
-	//
-	//	the Rootfs subsystem says the mount point survives in a frozen layer as an EMPTY DIRECTORY
-	//	PLACEHOLDER ("a mount point in the frozen result is just an empty placeholder
-	//	directory"), by analogy with `tar` of a directory that has something mounted
-	//	on it.
-	//
-	//	copyTree ACTUALLY PRUNES IT ENTIRELY. The exclusion check runs BEFORE the
-	//	MkdirAll that would create the target, and returns filepath.SkipDir — so no
-	//	directory is created at the destination and the whole subtree, dest included, is
-	//	absent from the layer. Measured: stat(layer/data) → ENOENT.
-	//
-	// Neither side is obviously right (the Rootfs subsystem's placeholder is the default outcome for an
-	// UNSHADOWED dest, which needs no exclusion at all — see rootfs storage — so the two statements
-	// may simply be about different cases), and this is not the change to settle it in.
-	// Production behavior is therefore LEFT ALONE and the test pins what the code DOES.
-	//
-	// The assertion must distinguish "absent" from "present but empty" EXPLICITLY: a
+	// The assertion distinguishes "absent" from "present but empty" EXPLICITLY: a
 	// `ReadDir(dest); err == nil && len(ents) != 0` shape passes vacuously here, since
 	// the directory is absent and the body never runs — and it would keep passing if
 	// dest were left full of shadowed content, which is the thing being ruled out.
 	dest := filepath.Join(layer, "data")
 	if _, err := os.Stat(dest); !os.IsNotExist(err) {
 		ents, _ := os.ReadDir(dest)
-		t.Errorf("mount destination %s exists in the layer (stat err = %v, %d entries) — copyTree returns SkipDir BEFORE creating the target dir, so the dest is pruned entirely. If this now behaves like the Rootfs subsystem's empty-placeholder instead, that is the divergence above RESOLVING; settle it in the spec and update this assertion deliberately, do not just relax it",
+		t.Errorf("excluded mount destination %s exists in the layer (stat err = %v, %d entries); copyTree must prune the destination before creating it",
 			"data", err, len(ents))
 	}
-	// Either way, the property that actually matters holds: no SHADOWED CONTENT reaches
-	// the layer. Asserted independently of the dest's own existence, so it survives
-	// whichever way the divergence above is settled.
+	// Independently assert the security and accounting property: no SHADOWED CONTENT
+	// reaches the layer.
 	if ents, err := os.ReadDir(dest); err == nil && len(ents) != 0 {
 		t.Errorf("mount destination %s in the layer holds %d entries — bytes shadowed by a mount must never be frozen, whether or not the dest itself remains as a placeholder", dest, len(ents))
 	}

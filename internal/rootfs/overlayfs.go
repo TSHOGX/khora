@@ -399,8 +399,8 @@ func (p *HostOverlayFS) Unmount(_ context.Context, m *Merged) error {
 
 // DestroyOverlay reclaims upper+work bytes (terminal destroy, the lifecycle state machine),
 // synchronously. A failure here is retried by SweepOrphanOverlays, whose
-// predicate is "no live sandbox row" — not refcount GC (the documentation: the Overlay
-// artifact is the degenerate case, referenced by exactly one sandbox row).
+// predicate is "no live sandbox row" — not refcount GC. An Overlay is referenced by
+// exactly one sandbox row, so the keep-set is the complete authority.
 // Separate from placement teardown; the mediator invokes each (the lifecycle subsystems
 // don't call each other).
 // The capacity unit is reclaimed along with the bytes: the subvolume AND its
@@ -600,9 +600,8 @@ func (p *HostOverlayFS) PromoteCostBytes(_ context.Context, o *Overlay, excluded
 // blockBytes sums the ALLOCATED bytes of regular files under root — st_blocks×512,
 // the host filesystem's own statement of what those files cost.
 //
-// Not apparent size (st_size): a sparse file's apparent size overstates its cost
-// without bound (the spec's own example is a 512 MiB sparse file whose real
-// allocation is 0), and in an admission gate overstating means refusing creates
+// Not apparent size (st_size): a sparse file's apparent size can overstate its cost
+// without bound, and in an admission gate overstating means refusing creates
 // that would have fit. Allocated blocks are equal-or-better in every case — exact
 // for ordinary files, correct for holes, and they reflect compression.
 //
@@ -939,8 +938,7 @@ func promoteExclusions(excludedMounts []string) map[string]bool {
 // those extents), but a reflink OUT of one does: deleting the source afterwards
 // leaves a `<squota space holder>` row that never self-cleans, and a leaked row
 // does not reserve its own subvolume id, so a later remount can hand that id and
-// its stale cap to a brand-new unit (see internal/btrfs.DeleteSubvolume and
-// the documentation Volume quota cleanup). Reflink here would need the sweep-side
+// its stale cap to a brand-new unit (see internal/btrfs.DeleteSubvolume). Reflink here would need the sweep-side
 // reclamation path built first.
 func copyTree(src, dst string, excluded map[string]bool) error {
 	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
