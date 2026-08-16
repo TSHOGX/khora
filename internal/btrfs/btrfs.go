@@ -13,7 +13,8 @@
 //
 // MECHANISM CHOICE: squota, not full qgroups (btrfs quota materialization), the decisive reason being
 // that the dev/test substrate CANNOT change mode — BTRFS_IOC_QUOTA_CTL returns EPERM even as
-// root with CAP_SYS_ADMIN, so full qgroups would fork spec from substrate permanently. It also
+// root with CAP_SYS_ADMIN, so full qgroups would make the maintained behavior diverge
+// from the supported substrate. It also
 // fits the shape (one subvolume per workload, no rescan storms).
 //
 // Full qgroups would not have bought the hard ceiling either: copy-up's reflink pushes
@@ -214,8 +215,8 @@ func (c Client) SetQuotaLimit(ctx context.Context, path string, limitByte int64)
 	return nil
 }
 
-// usageReadAttempts bounds the retry in Usage. Three, because three is what the
-// measurement needed and no more (see Usage).
+// usageReadAttempts bounds retries of a failed qgroup-show command. The unit test
+// pins the exact bound and the distinction from a successful response with no row.
 const usageReadAttempts = 3
 
 // Usage reports the bytes charged to the subvolume at path and its current limit
@@ -229,15 +230,11 @@ func (c Client) Usage(ctx context.Context, path string) (used, limit int64, err 
 	//
 	// RETRIED, because `-f` filters AFTER enumerating every row on the filesystem, so a
 	// subvolume deleted concurrently ANYWHERE on that fs fails this read WHOLESALE — the error
-	// even names a row that is not ours. Measured under three-way churn: 10/300 reads failed,
-	// and on failure our own row was printed 0/10 times, so there is nothing to parse around.
-	// The engine's own destroy path generates that churn against an asynchronous cleaner, so no
-	// caller can serialize against it.
-	//
-	// The failure is TRANSIENT: under the same churn, three attempts turned 8 first-attempt
-	// failures into 0 final failures (300 reads). The callers that must FAIL CLOSED on an
-	// unreadable row (the control-plane API cap write points, the Rootfs subsystem's materialization guard on the
-	// create/resume hot path) pay for this read's reliability in refused requests.
+	// can name a row that is not ours. The engine's own destroy path generates that
+	// churn against an asynchronous cleaner, so no caller can serialize against it.
+	// The callers that must FAIL CLOSED on an unreadable row (the control-plane API cap
+	// write points and the Rootfs subsystem's materialization guard) otherwise pay for
+	// a transient command failure in refused requests.
 	//
 	// The error contract is UNCHANGED — "unreadable, draw no conclusion", just rarer. Nothing
 	// retries a SEMANTIC failure (quotas disabled, no such row): those come back from the parse
