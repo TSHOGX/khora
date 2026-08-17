@@ -22,6 +22,42 @@ fault injection. Architectural tests inspect imports under production and tagged
 builds. A structural test must demonstrate both that current code passes and an
 injected prohibited shape fails.
 
+## Test ownership
+
+The suites are separated by what they prove, while tests remain beside the package
+that owns the behavior:
+
+| Layer | Location | Evidence |
+| --- | --- | --- |
+| Structural and unit | Package-local `*_test.go` | Pure behavior, seam shape, dependency direction, and injected failures |
+| Provider contract | `store/storetest`, `volume/volumetest`, and their implementation runners | Every implementation delivers the same seam obligations |
+| Provider substrate | `internal/*_substrate_test.go` | One implementation works against real runsc, overlayfs, btrfs, nftables, and host primitives |
+| System acceptance | `test/*_substrate_test.go` | Lifecycle, API, restart, and data-plane behavior works across assembled subsystems |
+
+A provider test should stop at its seam. A system test should assert behavior that
+requires composition or crosses a public boundary. Keep an invariant in its lowest
+authoritative layer and repeat it end to end only when the integration itself can
+break it.
+
+The following focused commands are useful while diagnosing a change:
+
+```sh
+# Root-free provider contracts, unit tests, and structural checks.
+go test ./internal/store/... ./internal/runtime/... \
+  ./internal/rootfs/... ./internal/volume/...
+
+# Real-substrate provider and substrate-primitive tests.
+sudo -E go test -tags=substrate \
+  ./internal/runtime/... ./internal/rootfs/... \
+  ./internal/volume/... ./internal/btrfs/...
+
+# Cross-subsystem real-substrate acceptance.
+sudo -E go test -tags=substrate ./test/...
+```
+
+Focused commands do not replace `go test ./...` or the complete substrate command
+when preparing a ready-for-review change.
+
 ## Decide on substrate acceptance
 
 Evaluate the complete PR diff plus working tree after the last material change:

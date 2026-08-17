@@ -1,9 +1,39 @@
 # khora
 
+> Khora takes its name from χώρα, the receptacle in Plato's *Timaeus*: it has no
+> character of its own, yet takes on the character of whatever enters it. The
+> engine follows the same principle. khora provides the place; applications
+> decide what that place means.
+
 khora is a self-hosted sandbox engine for Linux. It provides ID-addressed
 sandboxes, processes, filesystems, volumes, immutable Templates, and lifecycle
 events. An application composes those atoms outside the engine; khora does not
 model callers, accounts, work units, or credentials.
+
+khora is under active development. The current release is a local, single-node
+implementation, and the `0.0.x` line does not promise persistent-state
+compatibility or migrations.
+
+## What khora provides
+
+| Capability | Current behavior |
+| --- | --- |
+| Sandbox lifecycle | Create, inspect, list, pause, resume, and destroy ID-addressed Sandboxes |
+| Processes | Start, stream, reconnect, signal, resize a PTY, and close stdin |
+| Filesystems | Read, write, inspect, list, create, move, remove, upload, and download |
+| Templates and Overlays | Derive from immutable Templates and promote a Sandbox filesystem into a new Template |
+| Volumes | Create, mount, inspect, resize, import, export, snapshot, and clone independent storage |
+| Resource control | Enforce CPU, memory, and disk ceilings and optionally admit against node capacity |
+| Networking | Persist deny-by-default egress rules, steer declared traffic, and publish guest ports |
+| Lifecycle automation | Auto-pause idle Sandboxes, reclaim expired state, and reconcile after restart |
+| Events | Commit lifecycle Events with state changes and expose a replayable cursor |
+
+The engine is organized around four mechanism seams: `store.Store`,
+`runtime.Provider`, `rootfs.Provider`, and `volume.Backend`. Lifecycle code composes
+their contracts without depending on their concrete mechanisms. These are in-tree
+extension boundaries today, not a public plugin API. See [Engine
+boundaries](docs/concepts/boundaries.md) for the current implementations and
+[Adding a provider](docs/development/providers.md) for the contribution path.
 
 The current runtime uses gVisor (`runsc`), overlayfs, network namespaces, cgroup
 v2, btrfs `squota`, nftables, and `ip`. The API is intentionally unauthenticated
@@ -37,6 +67,5 @@ file, and pause the sandbox.
 - [Implementation internals](docs/internals/README.md)
 - [Development workflow](docs/development/workflow.md)
 
-The engine is currently single-node. The `0.0.x` line does not promise persistent
-state compatibility or migrations. See [Security](docs/concepts/security.md) for
-the trust boundary and [CHANGELOG.md](CHANGELOG.md) for release notes.
+See [Security](docs/concepts/security.md) for the trust boundary and
+[CHANGELOG.md](CHANGELOG.md) for release notes.

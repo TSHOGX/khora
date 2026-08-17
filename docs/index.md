@@ -42,6 +42,7 @@ built checkout to a running process.
 - [Internals](internals/README.md): implementation constraints, measurements,
   counterexamples, and their code/test anchors
 - [Development workflow](development/workflow.md),
+  [adding a provider](development/providers.md),
   [testing](development/testing.md), and
   [generated files](development/generated-files.md)
 

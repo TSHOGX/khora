@@ -23,14 +23,6 @@ What this does *not* mean: the tag is not a moving target. A tag is immutable, a
 built from it report it via `--version`. Substrate verification is recorded with the reviewing
 PR rather than committed as a document in the product tree.
 
-**`v0.0.1` was re-cut once, deliberately, and that is the only exception.** The first cut
-carried the project's former name; the tag was re-created on the renamed tree, pointing at
-a different commit than it first did. What made it safe is a condition that cannot recur:
-**no consumer had fetched it** — the repository is private, the one dependent was told to
-pin it and had not yet, and there was no released artifact to migrate. Re-cutting a tag
-someone holds would be the moving target this section rules out, so the immutability
-statement above governs from here on, `v0.0.1` included.
-
 ## v0.0.1
 
 First tagged release, and the first release under the name **Khora** — χώρα, the receptacle

@@ -30,6 +30,11 @@ Use existing package vocabulary and provider seams. New comments should state a
 local obligation, failure mode, or measurement, not cite a Markdown page as the
 reason code is correct.
 
+When adding an implementation behind an existing seam, follow
+[Adding a provider](providers.md). The current seams are internal extension
+boundaries; do not describe an implementation as externally selectable until the
+standard assembly can select it.
+
 New structural guards require a committed negative fixture proving the prohibited
 shape is rejected. Register a new build tag only in the architectural tag matrix,
 alone and paired with `substrate` where applicable. Use `internal/waitfor` instead
