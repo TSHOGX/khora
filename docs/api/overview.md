@@ -1,6 +1,6 @@
 # API overview
 
-khora exposes two protocol surfaces on one listener:
+Khora exposes two protocol surfaces on one listener:
 
 - HTTP/JSON for durable resources, lifecycle verbs, events, health, and streaming
   whole-file transfers;

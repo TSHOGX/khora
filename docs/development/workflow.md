@@ -2,7 +2,7 @@
 
 ## Start from the engine boundary
 
-khora exposes a decoupled sandbox abstraction. Before adding an engine concept,
+Khora exposes a decoupled sandbox abstraction. Before adding an engine concept,
 check whether the need can be implemented by registering a provider, adding a store
 relationship, or subscribing to Events. Caller identity, authorization, credentials,
 and higher-level work orchestration stay in an adapter outside this repository.

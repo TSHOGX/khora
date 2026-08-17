@@ -22,7 +22,7 @@ standard binary has no publisher-resume endpoint.
 
 ## Placement or resume fails
 
-Run the substrate preflight checks before assigning the failure to khora. Inspect
+Run the substrate preflight checks before assigning the failure to Khora. Inspect
 `runsc`, cgroup v2 controllers, namespace privileges, veth creation, nftables, and
 the guest transport probe. A disk-cap edit at or below current Overlay usage is an
 invalid request; set it above usage or remove the cap before resuming.

@@ -3,7 +3,7 @@
 Provider work currently happens inside this repository. The four mechanism seams
 and their shipped implementations are listed in [Engine
 boundaries](../concepts/boundaries.md). Their packages and the standard assembly are
-under `internal/`; khora does not yet expose a public provider API or a configuration
+under `internal/`; Khora does not yet expose a public provider API or a configuration
 selector. That future direction is tracked in
 [Issue #25](https://github.com/TSHOGX/khora/issues/25).
 

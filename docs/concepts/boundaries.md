@@ -1,6 +1,6 @@
 # Engine boundaries
 
-khora provides a sandbox abstraction. Its stable vocabulary consists of
+Khora provides a sandbox abstraction. Its stable vocabulary consists of
 ID-addressable engine atoms: Sandbox, process, filesystem, Volume, Template, and
 the bindings and events needed to compose them.
 

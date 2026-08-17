@@ -7,7 +7,7 @@ starts the orchestrator, creates a sandbox, runs one process, and pauses it.
 
 Use a Linux host with root access, `runsc`, overlayfs, network namespaces, cgroup
 v2, a btrfs filesystem mounted with `squota`, `btrfs-progs`, `nft`, and `ip`.
-Keep khora state and overlay scratch data on a native filesystem. The complete
+Keep Khora state and overlay scratch data on a native filesystem. The complete
 requirements and inspection commands are in [Host requirements](configuration/host.md).
 
 ## Build the binaries and Template
@@ -55,7 +55,7 @@ The command prints the opaque sandbox ID. Use it below as `sbx_...`:
 
 ```sh
 ./bin/khora process start --sandbox sbx_... /bin/sh --arg=-c \
-  --arg='printf "hello from khora\n"'
+  --arg='printf "hello from Khora\n"'
 ./bin/khora files upload sbx_... ./README.md /tmp/README.md
 ./bin/khora files download sbx_... /tmp/README.md -
 ./bin/khora sandbox pause sbx_...

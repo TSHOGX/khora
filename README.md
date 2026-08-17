@@ -1,20 +1,20 @@
-# khora
+# Khora
 
 > Khora takes its name from χώρα, the receptacle in Plato's *Timaeus*: it has no
 > character of its own, yet takes on the character of whatever enters it. The
-> engine follows the same principle. khora provides the place; applications
+> engine follows the same principle. Khora provides the place; applications
 > decide what that place means.
 
-khora is a self-hosted sandbox engine for Linux. It provides ID-addressed
+Khora is a self-hosted sandbox engine for Linux. It provides ID-addressed
 sandboxes, processes, filesystems, volumes, immutable Templates, and lifecycle
-events. An application composes those atoms outside the engine; khora does not
+events. An application composes those atoms outside the engine; Khora does not
 model callers, accounts, work units, or credentials.
 
-khora is under active development. The current release is a local, single-node
+Khora is under active development. The current release is a local, single-node
 implementation, and the `0.0.x` line does not promise persistent-state
 compatibility or migrations.
 
-## What khora provides
+## What Khora provides
 
 | Capability | Current behavior |
 | --- | --- |
