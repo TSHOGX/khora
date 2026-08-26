@@ -1,11 +1,11 @@
-# khora documentation
+# Khora documentation
 
 Start with [Getting started](getting-started.md) for the shortest path from a
 built checkout to a running process.
 
 ## Understand the engine
 
-- [Boundaries](concepts/boundaries.md): what belongs in khora and what belongs in
+- [Boundaries](concepts/boundaries.md): what belongs in Khora and what belongs in
   an adapter.
 - [Components](concepts/components.md): orchestrator, sandboxd, gateway, CLI, and
   subsystem relationships.
@@ -42,6 +42,7 @@ built checkout to a running process.
 - [Internals](internals/README.md): implementation constraints, measurements,
   counterexamples, and their code/test anchors
 - [Development workflow](development/workflow.md),
+  [adding a provider](development/providers.md),
   [testing](development/testing.md), and
   [generated files](development/generated-files.md)
 

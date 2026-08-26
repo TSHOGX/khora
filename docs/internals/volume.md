@@ -8,8 +8,9 @@ runtime assembly; it is not a path returned to API callers. Structural tests sca
 method parameters, results, and fields for leaked substrate vocabulary in
 [internal/volume/seam_test.go](../../internal/volume/seam_test.go).
 
-The plain-directory backend supports uncapped development storage. The local btrfs
-backend supports caps and copy-on-write lineage. Both run the shared contract in
+The plain-directory backend is a test-only, capability-negative implementation.
+The local btrfs backend is the standard implementation and supports caps and
+copy-on-write lineage. Both run the shared contract in
 [internal/volume/volumetest/contract.go](../../internal/volume/volumetest/contract.go).
 
 ## Mount and write regime

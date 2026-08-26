@@ -52,7 +52,7 @@ supply `/etc/resolv.conf` and a matching UDP/53 rule when name resolution is nee
 }
 ```
 
-The endpoint process is outside khora. The engine does not start it or provide its
+The endpoint process is outside Khora. The engine does not start it or provide its
 authentication. Placement fails closed if the second-hop restriction cannot be
 installed. UDP is not accepted in `via[]`.
 

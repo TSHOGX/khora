@@ -2,7 +2,7 @@
 
 ## Start from the engine boundary
 
-khora exposes a decoupled sandbox abstraction. Before adding an engine concept,
+Khora exposes a decoupled sandbox abstraction. Before adding an engine concept,
 check whether the need can be implemented by registering a provider, adding a store
 relationship, or subscribing to Events. Caller identity, authorization, credentials,
 and higher-level work orchestration stay in an adapter outside this repository.
@@ -29,6 +29,11 @@ Keep code, focused tests, public documentation, and generated output in the same
 Use existing package vocabulary and provider seams. New comments should state a
 local obligation, failure mode, or measurement, not cite a Markdown page as the
 reason code is correct.
+
+When adding an implementation behind an existing seam, follow
+[Adding a provider](providers.md). The current seams are internal extension
+boundaries; do not describe an implementation as externally selectable until the
+standard assembly can select it.
 
 New structural guards require a committed negative fixture proving the prohibited
 shape is rejected. Register a new build tag only in the architectural tag matrix,

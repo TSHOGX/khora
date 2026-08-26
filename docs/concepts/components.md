@@ -8,7 +8,7 @@ caller
 gateway
   | loopback HTTP + Connect-RPC
 orchestrator
-  | runtime, rootfs, volume, network, store providers
+  | lifecycle over runtime, rootfs, volume, network, and store
 runsc sandbox
   | TCP inside the sandbox network namespace
 sandboxd (PID 1 supervisor + transport service)
@@ -34,7 +34,9 @@ process and filesystem services. Both roles are implemented in
 
 ## Data ownership
 
-The store owns durable control-plane facts. Runtime, rootfs, network, and volume
-providers own substrate artifacts. A Placement is live provider state rather than
-part of Sandbox identity. Startup and periodic reconciliation compare both sides
-through the lifecycle mediator; see [Recovery](../operations/recovery.md).
+The store owns durable control-plane facts. Runtime, rootfs, and volume
+implementations own substrate artifacts. Network derives abstract rules without
+owning host state; the runtime provider installs them with the Placement. A
+Placement is live provider state rather than part of Sandbox identity. Startup and
+periodic reconciliation compare both sides through the lifecycle mediator; see
+[Recovery](../operations/recovery.md).
