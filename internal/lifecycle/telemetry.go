@@ -90,5 +90,21 @@ func (m *Mediator) ProcessSnapshot(ctx context.Context, id model.ProcessID) (mod
 	if err != nil {
 		return model.ProcessSnapshot{}, err
 	}
-	return model.ProcessSnapshot{Process: p.ID, Sandbox: p.Sandbox, PlacementEpoch: p.PlacementEpoch, State: p.State, PID: p.PID, ExitCode: p.ExitCode, At: time.Now()}, nil
+	now := time.Now()
+	return model.ProcessSnapshot{
+		Process:        p.ID,
+		Sandbox:        p.Sandbox,
+		PlacementEpoch: p.PlacementEpoch,
+		State:          p.State,
+		PID:            p.PID,
+		ExitCode:       p.ExitCode,
+		Resources: model.ResourceSnapshot{
+			CPU:    model.UnavailableMeasurement(),
+			Memory: model.UnavailableMeasurement(),
+			Disk:   model.UnavailableMeasurement(),
+			State:  string(p.State),
+			At:     now,
+		},
+		At: now,
+	}, nil
 }

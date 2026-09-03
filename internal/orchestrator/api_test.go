@@ -139,6 +139,38 @@ func TestAPISnapshotAndTelemetryAvailability(t *testing.T) {
 	resp.Body.Close()
 }
 
+func TestAPIProcessSnapshotCarriesExplicitResourceAvailability(t *testing.T) {
+	srv, mem := apiFixture(t)
+	seedTemplate(t, mem, "bare", "", true)
+	now := time.Now()
+	if err := mem.CreateSandbox(context.Background(), model.Sandbox{ID: "sbx_proc_snap", Template: "bare", Overlay: "ov_proc_snap", State: model.Paused, CreatedAt: now, UpdatedAt: now}, nil); err != nil {
+		t.Fatal(err)
+	}
+	started := now.Add(time.Millisecond)
+	if err := mem.CreateProcess(context.Background(), model.Process{
+		ID: "proc_snap", Sandbox: "sbx_proc_snap", PlacementEpoch: model.FirstPlacementEpoch,
+		State: model.ProcessStarting, StartedAt: started,
+		OutputCursor: model.ProcessOutputCursor("proc_snap", model.FirstPlacementEpoch, 0),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	resp := do(t, http.MethodGet, srv.URL+"/v1/processes/proc_snap")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET process snapshot = %d; want 200", resp.StatusCode)
+	}
+	var got model.ProcessSnapshot
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Resources.CPU.Available || got.Resources.Memory.Available || got.Resources.Disk.Available {
+		t.Fatalf("process resource measurements unexpectedly available: %+v", got.Resources)
+	}
+	if got.Resources.State != string(model.ProcessStarting) || got.Resources.At.IsZero() || got.At.IsZero() {
+		t.Fatalf("process resource snapshot missing state/timestamp: %+v", got.Resources)
+	}
+}
+
 // DELETE /v1/templates/{id}: unreferenced → 204; referenced by a sandbox → 409
 // (health and reclamation referenced-means-undeletable); after the sandbox is gone → 204; missing
 // → 404.

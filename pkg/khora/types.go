@@ -279,13 +279,14 @@ type PlacementSnapshot struct {
 	At        string           `json:"at"`
 }
 type ProcessSnapshot struct {
-	ProcessID      string `json:"process_id"`
-	SandboxID      string `json:"sandbox_id"`
-	PlacementEpoch uint64 `json:"placement_epoch"`
-	State          string `json:"state"`
-	PID            int    `json:"pid,omitempty"`
-	ExitCode       *int   `json:"exit_code,omitempty"`
-	At             string `json:"at"`
+	ProcessID      string           `json:"process_id"`
+	SandboxID      string           `json:"sandbox_id"`
+	PlacementEpoch uint64           `json:"placement_epoch"`
+	State          string           `json:"state"`
+	PID            int              `json:"pid,omitempty"`
+	ExitCode       *int             `json:"exit_code,omitempty"`
+	Resources      ResourceSnapshot `json:"resources"`
+	At             string           `json:"at"`
 }
 type Process struct {
 	ProcessID      string  `json:"process_id"`

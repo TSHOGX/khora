@@ -1151,7 +1151,11 @@ type ProcessSnapshot struct {
 	State          ProcessState   `json:"state"`
 	PID            int            `json:"pid,omitempty"`
 	ExitCode       *int           `json:"exit_code,omitempty"`
-	At             time.Time      `json:"at"`
+	// Resources uses explicit availability for every axis. Process-level
+	// accounting is provider-dependent; unavailable CPU/memory/disk readings
+	// remain represented rather than being mistaken for measured zero.
+	Resources ResourceSnapshot `json:"resources"`
+	At        time.Time        `json:"at"`
 }
 
 func (s TelemetrySample) Validate() error {

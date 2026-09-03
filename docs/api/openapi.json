@@ -136,6 +136,9 @@
           "process_id": {
             "type": "string"
           },
+          "resources": {
+            "$ref": "#/components/schemas/ResourceSnapshot"
+          },
           "sandbox_id": {
             "type": "string"
           },
