@@ -119,7 +119,7 @@ type Root interface {
 // A SHAPE RULE RUNS THROUGH THE WHOLE INTERFACE: "allocate", "set the cap" and "place" are
 // THREE actions and must not be compressed into one call (the volume backend seam) — merging them
 // leaves creation, capacity and the admission term all homeless. FALSIFIED WITH A SECOND
-// BACKEND rather than reasoned about: the test-only plain-directory arm runs the same
+// BACKEND rather than reasoned about: the plain-directory arm runs the same
 // contract suite, and a merged shape fails in each of those three places (see PlainDir).
 type Backend interface {
 	// Name identifies the backend for registration and diagnostics.

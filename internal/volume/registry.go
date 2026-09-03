@@ -42,6 +42,9 @@ var (
 	// ErrInvalidProvider is returned for a nil backend, an empty/malformed name,
 	// or a duplicate registration.
 	ErrInvalidProvider = errors.New("volume: invalid provider")
+	// ErrRegistrySealed reports an attempted configuration mutation after the
+	// assembly has been handed to a serving engine.
+	ErrRegistrySealed = errors.New("volume: provider registry is sealed")
 )
 
 // ErrUnknownBackend and ErrBackendUnavailable are aliases that make errors.Is
@@ -75,6 +78,7 @@ type Registry struct {
 	mu          sync.RWMutex
 	backends    map[ProviderName]Backend
 	defaultName ProviderName
+	sealed      bool
 }
 
 // NewRegistry builds a registry from backends.  The first backend is the
@@ -158,6 +162,9 @@ func (r *Registry) registerNamed(name ProviderName, backend Backend) error {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.sealed {
+		return ErrRegistrySealed
+	}
 	if r.backends == nil {
 		r.backends = make(map[ProviderName]Backend)
 	}
@@ -182,11 +189,40 @@ func (r *Registry) SetDefault(name ProviderName) error {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.sealed {
+		return ErrRegistrySealed
+	}
 	if _, ok := r.backends[name]; !ok {
 		return fmt.Errorf("%w: %q", ErrUnknownProvider, name)
 	}
 	r.defaultName = name
 	return nil
+}
+
+// Seal freezes the configured provider set.  Assembly calls this immediately
+// before publishing the registry to lifecycle code; lookups remain concurrent
+// and safe, while later mutation cannot invalidate durable routing decisions.
+func (r *Registry) Seal() error {
+	if r == nil {
+		return fmt.Errorf("%w: nil registry", ErrInvalidProvider)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.backends) == 0 || r.defaultName == "" {
+		return fmt.Errorf("%w: registry is not configured", ErrInvalidProvider)
+	}
+	r.sealed = true
+	return nil
+}
+
+// Sealed reports whether configuration mutation is closed.
+func (r *Registry) Sealed() bool {
+	if r == nil {
+		return false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.sealed
 }
 
 // Lookup resolves a durable provider name.  Unknown names fail closed.

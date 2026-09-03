@@ -283,6 +283,9 @@ func New(cfg Config) (*Engine, error) {
 	if err := registry.Validate(context.Background()); err != nil {
 		return nil, fmt.Errorf("orchestrator: validate volume providers: %w", err)
 	}
+	if err := registry.Seal(); err != nil {
+		return nil, fmt.Errorf("orchestrator: seal volume providers: %w", err)
+	}
 	defaultBackend, err := registry.Default()
 	if err != nil {
 		return nil, fmt.Errorf("orchestrator: select volume provider: %w", err)

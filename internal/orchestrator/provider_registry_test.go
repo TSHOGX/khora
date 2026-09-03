@@ -75,6 +75,18 @@ func TestNewRejectsDurableVolumeWithUnavailableProvider(t *testing.T) {
 	}
 }
 
+func TestVolumeProviderErrorsMapToStableHTTPClasses(t *testing.T) {
+	if got := statusCodeFor(volume.ErrUnknownProvider); got != 503 {
+		t.Fatalf("unknown provider status = %d, want 503", got)
+	}
+	if got := statusCodeFor(volume.ErrProviderUnavailable); got != 503 {
+		t.Fatalf("unavailable provider status = %d, want 503", got)
+	}
+	if got := statusCodeFor(volume.ErrInvalidProvider); got != 400 {
+		t.Fatalf("invalid provider status = %d, want 400", got)
+	}
+}
+
 func TestNewRejectsDurableCapUnsupportedBySelectedProvider(t *testing.T) {
 	base := t.TempDir()
 	storePath := filepath.Join(base, "store.db")

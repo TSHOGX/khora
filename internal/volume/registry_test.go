@@ -105,3 +105,26 @@ func TestAssembleTypedProviderSelection(t *testing.T) {
 		}
 	})
 }
+
+func TestRegistrySealPreventsServingTimeMutation(t *testing.T) {
+	b, err := NewPlainDir(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := NewRegistry(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Validate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Seal(); err != nil {
+		t.Fatal(err)
+	}
+	if !r.Sealed() {
+		t.Fatal("registry did not report sealed")
+	}
+	if err := r.SetDefault(PlainDirProvider); !errors.Is(err, ErrRegistrySealed) {
+		t.Fatalf("SetDefault after Seal = %v; want ErrRegistrySealed", err)
+	}
+}

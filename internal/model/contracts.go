@@ -175,8 +175,12 @@ func (p Process) Validate() error {
 	if p.PlacementEpoch == 0 {
 		return NewContractError(ErrorInvalidArgument, "process placement epoch must be positive")
 	}
-	if p.PID <= 0 {
-		return NewContractError(ErrorInvalidArgument, "process PID locator must be positive")
+	// A PID is only a locator while the process has a live placement.  Paused
+	// and reclaimed records intentionally carry no current locator; retaining a
+	// positive historical PID is also allowed for diagnostics, but it is never
+	// used as process identity.
+	if p.PID < 0 || (p.State == ProcessRunning && p.PID == 0) {
+		return NewContractError(ErrorInvalidArgument, "process PID locator is invalid")
 	}
 	if !p.State.Valid() {
 		return NewContractError(ErrorInvalidArgument, "unknown process state")
@@ -494,6 +498,9 @@ func (o Operation) Validate() error {
 	if o.State == OperationInProgress && o.LeaseUntil.IsZero() {
 		return NewContractError(ErrorInvalidArgument, "in-progress operation requires a lease")
 	}
+	if o.State == OperationInProgress && o.Phase == OperationCommitted {
+		return NewContractError(ErrorInvalidArgument, "in-progress operation cannot be in the committed phase")
+	}
 	if o.State != OperationInProgress && !o.LeaseUntil.IsZero() {
 		return NewContractError(ErrorInvalidArgument, "terminal operation cannot retain a lease")
 	}
@@ -640,11 +647,15 @@ func (o *Operation) Takeover(now time.Time, lease time.Duration) error {
 	if !o.TakeoverAllowed(now) {
 		return NewContractError(ErrorInProgress, "operation is still owned by another attempt")
 	}
+	if o.Phase == OperationCommitted {
+		return NewContractError(ErrorInvalidArgument, "committed operation cannot be taken over")
+	}
 	if o.Attempt == ^uint32(0) {
 		return NewContractError(ErrorInternal, "operation attempt exhausted")
 	}
 	o.Attempt++
-	o.Phase = OperationRecorded
+	// Preserve the side-effect phase so restart reconciliation still knows
+	// whether cleanup is required before retrying.
 	o.UpdatedAt = now
 	o.LeaseUntil = now.Add(lease)
 	return nil
@@ -887,6 +898,15 @@ func (w CursorWindow) Validate() error {
 		}
 		if w.Reset.Cursor.Stream != w.Stream || w.Reset.Cursor.ObjectID != w.ObjectID || w.Reset.Cursor.Epoch != w.Epoch {
 			return NewContractError(ErrorInvalidArgument, "cursor reset does not identify this stream")
+		}
+		if w.Reset.Cursor.Sequence != 0 {
+			return NewContractError(ErrorInvalidArgument, "cursor reset must start at sequence zero")
+		}
+		if w.Reset.Reason == CursorResetPlacement && w.Stream != CursorStreamProcessOutput && w.Stream != CursorStreamWatch {
+			return NewContractError(ErrorInvalidArgument, "placement reset is only valid for placement streams")
+		}
+		if w.Reset.Reason == CursorResetOverflow && w.Stream == CursorStreamLifecycle {
+			return NewContractError(ErrorInvalidArgument, "overflow reset is not valid for the lifecycle stream")
 		}
 		if !w.Reset.Rescan {
 			return NewContractError(ErrorInvalidArgument, "cursor reset must require a rescan")

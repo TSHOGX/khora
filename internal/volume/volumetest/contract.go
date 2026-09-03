@@ -2,7 +2,7 @@
 // assertions EVERY arm must pass (the extension boundary Behavior seam / the volume backend seam).
 //
 // It exists because the seam has exactly one falsification instrument: a second
-// backend. The local storage arm and the test-only plain-directory arm both call
+// backend. The local storage arm and the plain-directory arm both call
 // RunContract, so "both arms run the same assertions" is literally true — and the
 // three-actions shape rule the seam is built on was derived by watching a merged
 // shape fail here in three places rather than by reasoning about it (volume.Backend).
