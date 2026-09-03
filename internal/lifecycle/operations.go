@@ -14,6 +14,7 @@ import (
 	"github.com/TSHOGX/khora/internal/model"
 	"github.com/TSHOGX/khora/internal/rootfs"
 	"github.com/TSHOGX/khora/internal/store"
+	"github.com/TSHOGX/khora/internal/volume"
 )
 
 type operationClaim struct {
@@ -288,6 +289,13 @@ func (m *Mediator) recoverOperation(ctx context.Context, op model.Operation) err
 		backends, err := m.configuredVolumeBackends()
 		if err != nil {
 			return fmt.Errorf("operation %s: resolve volume providers: %w", op.ID, err)
+		}
+		if len(backends) == 0 {
+			// An empty provider set is not evidence that the deterministic unit
+			// is absent. Keep the operation in its cleanup phase so a later boot
+			// with the recorded backend can reclaim the bytes; silently marking
+			// cleanup complete would convert an unavailable provider into a leak.
+			return fmt.Errorf("operation %s: no volume provider available for cleanup: %w", op.ID, volume.ErrProviderUnavailable)
 		}
 		for _, selected := range backends {
 			if err := selected.backend.DestroyVolume(ctx, id); err != nil {
