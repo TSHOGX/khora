@@ -395,10 +395,20 @@ func (c *connectClient) Watch(ctx context.Context, path string, recursive bool, 
 			case v1.EntryType_ENTRY_TYPE_SYMLINK:
 				kind = EntrySymlink
 			}
-			out <- WatchEvent{Path: e.Path, OldPath: e.OldPath, Operation: e.Operation, Type: kind, Size: e.Size, MTime: time.Unix(0, e.MtimeUnixNano), Sequence: e.Sequence, Epoch: e.PlacementEpoch, Overflow: e.Overflow, Reset: e.Reset_, ResetReason: e.ResetReason}
+			event := WatchEvent{Path: e.Path, OldPath: e.OldPath, Operation: e.Operation, Type: kind, Size: e.Size, MTime: time.Unix(0, e.MtimeUnixNano), Sequence: e.Sequence, Epoch: e.PlacementEpoch, Overflow: e.Overflow, Reset: e.Reset_, ResetReason: e.ResetReason}
+			select {
+			case out <- event:
+			case <-ctx.Done():
+				return
+			}
 		}
 		if err := stream.Err(); err != nil {
-			out <- WatchEvent{Operation: "error", ResetReason: err.Error(), Err: err}
+			event := WatchEvent{Operation: "error", ResetReason: err.Error(), Err: err}
+			select {
+			case out <- event:
+			case <-ctx.Done():
+				return
+			}
 		}
 		_ = stream.Close()
 	}()
