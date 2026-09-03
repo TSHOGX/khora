@@ -997,6 +997,14 @@ func (s *processServer) Connect(ctx context.Context, req *connect.Request[v1.Con
 		s.mu.Lock()
 		p, ok = s.byHandle[req.Msg.ProcessHandle]
 		s.mu.Unlock()
+		if ok {
+			p.mu.Lock()
+			ended := p.ended
+			p.mu.Unlock()
+			if !ended && !p.identityValid() {
+				ok = false
+			}
+		}
 		if ok && req.Msg.PlacementEpoch > 0 && p.epoch != req.Msg.PlacementEpoch {
 			return connect.NewError(connect.CodeFailedPrecondition, errString("stale placement epoch"))
 		}
@@ -1028,6 +1036,19 @@ func (s *processServer) resolveProcess(handle string, epoch uint64, pid int) (*p
 	if p == nil {
 		if handle != "" {
 			return nil, connect.NewError(connect.CodeNotFound, errString("no such process handle"))
+		}
+		return nil, errNoSuchPid(pid)
+	}
+	// A PID is only a placement-local locator.  A restored record must carry
+	// the same kernel start-time token as the current /proc entry; otherwise a
+	// recycled number could route input, resize, or signals to an unrelated
+	// process before the periodic restored-state sweep notices it.
+	p.mu.Lock()
+	ended := p.ended
+	p.mu.Unlock()
+	if !ended && !p.identityValid() {
+		if handle != "" {
+			return nil, connect.NewError(connect.CodeNotFound, errString("process handle is no longer live"))
 		}
 		return nil, errNoSuchPid(pid)
 	}
