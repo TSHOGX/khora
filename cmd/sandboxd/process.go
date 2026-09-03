@@ -528,6 +528,15 @@ func (s *processServer) unregisterProcess(pid int, expected *proc) {
 	s.mu.Lock()
 	p := s.procs[pid]
 	if expected != nil && p != expected {
+		// The PID slot was recycled before the old process's drain callback
+		// arrived. Keep the replacement untouched, but complete the old
+		// process's logical lifecycle and retention timer.
+		if !expected.removed.CompareAndSwap(false, true) {
+			s.mu.Unlock()
+			return
+		}
+		s.scheduleRetentionLocked(expected)
+		s.savePersistentLocked()
 		s.mu.Unlock()
 		return
 	}
