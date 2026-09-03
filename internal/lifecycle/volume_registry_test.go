@@ -139,3 +139,41 @@ func TestSweepOrphanVolumesEnumeratesEveryConfiguredBackend(t *testing.T) {
 		t.Fatalf("backend calls: A=%v B=%v; want each orphan destroyed by its enumerating backend", a.Calls(), b.Calls())
 	}
 }
+
+func TestDerivedVolumeKeepsSourceBackend(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	a := &namedFakeVolume{fakeVolume: newFakeVolume(), name: "volume_a"}
+	b := &namedFakeVolume{fakeVolume: newFakeVolume(), name: "volume_b"}
+	r, err := volume.NewRegistryWithDefault(volume.ProviderName(a.name), a, b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := model.Volume{ID: "vol_source_b", Backend: b.name, CreatedAt: time.Now()}
+	if err := b.CreateVolume(ctx, string(src.ID), 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateVolume(ctx, src); err != nil {
+		t.Fatal(err)
+	}
+	m := New(Deps{Store: st, VolumeRegistry: r, Logf: func(string, ...any) {}})
+	child, err := m.CloneVolume(ctx, src.ID, 0)
+	if err != nil {
+		t.Fatalf("clone = %v", err)
+	}
+	rec, err := st.GetVolume(ctx, child)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Backend != b.name {
+		t.Fatalf("derived backend = %q, want %q", rec.Backend, b.name)
+	}
+	if !containsCall(b.Calls(), "Clone:"+string(src.ID)+"->"+string(child)+":cap=0") {
+		t.Fatalf("source backend calls = %v; want clone on B", b.Calls())
+	}
+	for _, call := range a.Calls() {
+		if strings.Contains(call, string(src.ID)) || strings.Contains(call, string(child)) {
+			t.Errorf("default backend handled derived operation: %s", call)
+		}
+	}
+}

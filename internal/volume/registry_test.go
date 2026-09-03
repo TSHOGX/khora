@@ -128,3 +128,10 @@ func TestRegistrySealPreventsServingTimeMutation(t *testing.T) {
 		t.Fatalf("SetDefault after Seal = %v; want ErrRegistrySealed", err)
 	}
 }
+
+func TestRegistryRejectsTypedNilBackend(t *testing.T) {
+	var backend *PlainDir
+	if _, err := NewRegistry(backend); !errors.Is(err, ErrInvalidProvider) {
+		t.Fatalf("typed nil registration = %v; want ErrInvalidProvider", err)
+	}
+}
