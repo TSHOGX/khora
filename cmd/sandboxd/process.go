@@ -1039,6 +1039,9 @@ func (s *processServer) resolveProcess(handle string, epoch uint64, pid int) (*p
 		}
 		return nil, errNoSuchPid(pid)
 	}
+	if epoch > 0 && p.epoch != epoch {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, errString("stale placement epoch"))
+	}
 	// A PID is only a placement-local locator.  A restored record must carry
 	// the same kernel start-time token as the current /proc entry; otherwise a
 	// recycled number could route input, resize, or signals to an unrelated
@@ -1051,9 +1054,6 @@ func (s *processServer) resolveProcess(handle string, epoch uint64, pid int) (*p
 			return nil, connect.NewError(connect.CodeNotFound, errString("process handle is no longer live"))
 		}
 		return nil, errNoSuchPid(pid)
-	}
-	if epoch > 0 && p.epoch != epoch {
-		return nil, connect.NewError(connect.CodeFailedPrecondition, errString("stale placement epoch"))
 	}
 	return p, nil
 }

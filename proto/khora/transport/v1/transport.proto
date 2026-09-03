@@ -140,6 +140,11 @@ message StartRequest {
 	PtySize pty = 6;
 	string idempotency_key = 7;
 	uint64 placement_epoch = 8;
+	// process_handle is an optional caller-supplied opaque handle. The control
+	// plane supplies it before starting a process so the logical Process row can
+	// be durable even when the first output frame is lost. When omitted, the
+	// guest supervisor allocates one.
+	string process_handle = 9;
 }
 
 message PtySize {

@@ -129,6 +129,7 @@ func (c *connectClient) Start(ctx context.Context, spec StartSpec) (<-chan Proce
 	req := &v1.StartRequest{
 		Cmd: spec.Cmd, Args: spec.Args, Env: spec.Env, Cwd: spec.Cwd,
 		IdempotencyKey: spec.IdempotencyKey, PlacementEpoch: spec.PlacementEpoch,
+		ProcessHandle: spec.ProcessHandle,
 	}
 	if spec.Pty != nil {
 		req.Pty = &v1.PtySize{Rows: uint32(spec.Pty.Rows), Cols: uint32(spec.Pty.Cols)}

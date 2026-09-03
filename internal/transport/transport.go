@@ -78,6 +78,9 @@ type StartSpec struct {
 	Pty            *PtySize // non-nil = allocate a PTY
 	IdempotencyKey string
 	PlacementEpoch uint64
+	// ProcessHandle is an optional stable handle allocated by the control plane
+	// before the guest start. Empty lets the guest supervisor allocate one.
+	ProcessHandle string
 }
 
 type PtySize struct{ Rows, Cols uint16 }
