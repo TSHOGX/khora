@@ -159,6 +159,14 @@ func (m *Mediator) ReconcileStateCore(ctx context.Context) error {
 			continue
 		}
 		m.deps.Logf("operation %s: restart takeover, recovery=%s", claimed.ID, claimed.RecoveryAction())
+		if claimed.RecoveryAction() == model.RecoveryCleanup {
+			if err := m.reconcileOperation(ctx, claimed); err != nil {
+				// Leave the phase and lease durable. The next reconciliation pass
+				// can take ownership again and retry cleanup; an uncertain provider
+				// result is never treated as evidence that bytes are absent.
+				m.deps.Logf("operation %s: restart cleanup deferred: %v", claimed.ID, err)
+			}
+		}
 	}
 	return nil
 }

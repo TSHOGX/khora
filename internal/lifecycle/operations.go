@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"sync"
 	"time"
@@ -192,6 +193,40 @@ func (m *Mediator) prepareOperation(ctx context.Context, claim operationClaim) (
 	return claim, nil
 }
 
+// reconcileOperation completes the cleanup half of an expired operation during
+// restart reconciliation. Recovery must not wait for a caller to retry: a
+// materialization window can contain provider bytes with no durable result, and
+// leaving those bytes until a future request would make restart leak-prone.
+// The operation lease still fences the cleanup, and its heartbeat cancellation
+// prevents a losing attempt from continuing when another owner takes over.
+func (m *Mediator) reconcileOperation(ctx context.Context, op model.Operation) error {
+	// A durable object row is the commit boundary. If the process died after
+	// inserting that row but before terminalizing the ledger, replay the result;
+	// never run cleanup against an object that is already externally observable.
+	if result, committed, err := m.committedOperationResult(ctx, op); err != nil {
+		return err
+	} else if committed {
+		// A row can be observed even if a previous attempt had marked the phase
+		// cleaning. The verified row wins over the stale phase; normalize to the
+		// materialized boundary so Succeed can make the terminal result durable.
+		if op.Phase == model.OperationCleaning {
+			op.Phase = model.OperationMaterialized
+		}
+		if err := op.Succeed(result, time.Now()); err != nil {
+			return err
+		}
+		return m.deps.Store.UpdateOperation(ctx, op)
+	}
+	claim := operationClaim{op: &op, cleanup: op.RecoveryAction() == model.RecoveryCleanup}
+	if !claim.cleanup {
+		return nil
+	}
+	opCtx, owned, stop := m.startOperationLease(ctx, claim)
+	defer stop()
+	_, err := m.prepareOperation(opCtx, owned)
+	return err
+}
+
 func (m *Mediator) operationOwned(ctx context.Context, claim operationClaim) error {
 	if claim.op == nil {
 		return nil
@@ -262,13 +297,25 @@ func (m *Mediator) recoverOperation(ctx context.Context, op model.Operation) err
 	case "sandbox.create":
 		id := model.SandboxID(deterministicObjectID("sbx_", op.ID))
 		if rec, err := m.deps.Store.GetSandbox(ctx, id); err == nil {
-			_ = m.deps.Store.DeleteMounts(ctx, id)
-			if m.deps.Rootfs != nil {
-				if ov, oerr := m.deps.Rootfs.OpenOverlay(ctx, string(rec.Overlay), []string{string(rec.Template)}, rootfs.CapUnchanged); oerr == nil {
-					_ = m.deps.Rootfs.DestroyOverlay(ctx, ov)
+			if err := m.deps.Store.DeleteMounts(ctx, id); err != nil && !errors.Is(err, store.ErrNotFound) {
+				return fmt.Errorf("operation %s: delete recovered sandbox mounts: %w", op.ID, err)
+			}
+			if m.deps.Rootfs != nil && rec.Overlay != "" {
+				ov, oerr := m.deps.Rootfs.OpenOverlay(ctx, string(rec.Overlay), []string{string(rec.Template)}, rootfs.CapUnchanged)
+				if oerr != nil && !errors.Is(oerr, os.ErrNotExist) {
+					return fmt.Errorf("operation %s: open recovered sandbox overlay: %w", op.ID, oerr)
+				}
+				if oerr == nil {
+					if err := m.deps.Rootfs.DestroyOverlay(ctx, ov); err != nil && !errors.Is(err, os.ErrNotExist) {
+						return fmt.Errorf("operation %s: destroy recovered sandbox overlay: %w", op.ID, err)
+					}
 				}
 			}
-			_ = m.deps.Store.DeleteSandbox(ctx, id, nil)
+			if err := m.deps.Store.DeleteSandbox(ctx, id, nil); err != nil && !errors.Is(err, store.ErrNotFound) {
+				return fmt.Errorf("operation %s: delete recovered sandbox record: %w", op.ID, err)
+			}
+		} else if !errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("operation %s: inspect recovered sandbox: %w", op.ID, err)
 		}
 	}
 	return nil

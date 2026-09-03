@@ -245,8 +245,88 @@ func TestStateCoreRestartTakeoverPreservesCleanupPhase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Attempt != 2 || got.Phase != model.OperationMaterialized || got.RecoveryAction() != model.RecoveryCleanup {
-		t.Fatalf("takeover = attempt %d phase %s action %s", got.Attempt, got.Phase, got.RecoveryAction())
+	if got.Attempt != 2 || got.Phase != model.OperationRecorded || got.RecoveryAction() != model.RecoveryRetry {
+		t.Fatalf("takeover = attempt %d phase %s action %s; restart cleanup should converge the side-effect window back to recorded", got.Attempt, got.Phase, got.RecoveryAction())
+	}
+}
+
+func TestStateCoreRestartReclaimsMaterializedVolumeWithoutRetry(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	vb := newFakeVolume()
+	m := New(Deps{Store: st, Volume: vb, Logf: func(string, ...any) {}})
+	hash, _ := model.RequestHash(map[string]any{"size": 0})
+	started := time.Now().Add(-time.Minute)
+	op, err := model.BeginOperation("op_reconcile_cleanup", "volume.create", "cleanup-key", hash, started, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	op.Phase = model.OperationMaterialized
+	if err := st.CreateOperation(ctx, op); err != nil {
+		t.Fatal(err)
+	}
+	orphanID := deterministicObjectID("vol_", op.ID)
+	vb.mu.Lock()
+	vb.units[orphanID] = true
+	vb.mu.Unlock()
+	if err := m.ReconcileStateCore(ctx); err != nil {
+		t.Fatal(err)
+	}
+	vb.mu.Lock()
+	stillPresent := vb.units[orphanID]
+	vb.mu.Unlock()
+	if stillPresent {
+		t.Fatalf("materialized volume %s survived restart reconciliation; cleanup must not require a caller retry", orphanID)
+	}
+	if !contains(vb.Calls(), "DestroyVolume:"+orphanID) {
+		t.Fatalf("restart reconciliation did not call backend cleanup for %s: %v", orphanID, vb.Calls())
+	}
+	got, err := st.GetOperation(ctx, op.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Phase != model.OperationRecorded || got.State != model.OperationInProgress {
+		t.Fatalf("operation after cleanup = %+v; want recorded in_progress for a future explicit retry", got)
+	}
+}
+
+func TestStateCoreRestartReplaysCommittedVolumeInsteadOfCleaningIt(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	vb := newFakeVolume()
+	m := New(Deps{Store: st, Volume: vb, Logf: func(string, ...any) {}})
+	hash, _ := model.RequestHash(map[string]any{"size": 0})
+	started := time.Now().Add(-time.Minute)
+	op, err := model.BeginOperation("op_reconcile_committed", "volume.create", "committed-key", hash, started, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	op.Phase = model.OperationMaterialized
+	if err := st.CreateOperation(ctx, op); err != nil {
+		t.Fatal(err)
+	}
+	id := deterministicObjectID("vol_", op.ID)
+	vb.mu.Lock()
+	vb.units[id] = true
+	vb.mu.Unlock()
+	if err := st.CreateVolume(ctx, model.Volume{ID: model.VolumeID(id), Backend: vb.Name(), CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.ReconcileStateCore(ctx); err != nil {
+		t.Fatal(err)
+	}
+	vb.mu.Lock()
+	stillPresent := vb.units[id]
+	vb.mu.Unlock()
+	if !stillPresent {
+		t.Fatalf("committed volume %s was cleaned during restart reconciliation", id)
+	}
+	got, err := st.GetOperation(ctx, op.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != model.OperationSucceeded || got.Result == nil || got.Result.ID != id {
+		t.Fatalf("operation after committed replay = %+v; want succeeded result %s", got, id)
 	}
 }
 
