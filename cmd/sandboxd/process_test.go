@@ -304,6 +304,17 @@ func TestStartSpecHashIncludesPlacementEpoch(t *testing.T) {
 	}
 }
 
+func TestStartSpecHashNormalizesOmittedRepeatedFields(t *testing.T) {
+	// The control-plane edge canonicalizes omitted protobuf repeated fields to
+	// empty arrays before hashing. The guest must do the same after decode so a
+	// retry does not spuriously look like a different request (`null` vs `[]`).
+	nilFields := startSpecHash(&v1.StartRequest{Cmd: "/bin/true", PlacementEpoch: 1})
+	emptyFields := startSpecHash(&v1.StartRequest{Cmd: "/bin/true", Args: []string{}, Env: []string{}, PlacementEpoch: 1})
+	if nilFields != emptyFields {
+		t.Fatalf("omitted repeated fields changed start hash: nil=%s empty=%s", nilFields, emptyFields)
+	}
+}
+
 func TestSuppliedHandleClaimRejectsDifferentRequest(t *testing.T) {
 	s := &processServer{}
 	_, _, owner, err := s.claimStart("", "proc_fixed", "hash-a")

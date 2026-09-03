@@ -685,6 +685,13 @@ func newProcessHandle() string {
 }
 
 func startSpecHash(m *v1.StartRequest) string {
+	// Keep repeated fields in the same canonical representation as the
+	// control-plane fingerprint.  encoding/json distinguishes nil slices
+	// (`null`) from empty slices (`[]`), while protobuf decoding commonly
+	// leaves omitted repeated fields nil.  Normalizing both edges prevents a
+	// retry hash from changing merely because the request crossed the wire.
+	args := append([]string{}, m.Args...)
+	env := append([]string{}, m.Env...)
 	b, _ := json.Marshal(struct {
 		Cmd            string      `json:"cmd"`
 		Args           []string    `json:"args"`
@@ -692,7 +699,7 @@ func startSpecHash(m *v1.StartRequest) string {
 		Cwd            string      `json:"cwd"`
 		Pty            *v1.PtySize `json:"pty,omitempty"`
 		PlacementEpoch uint64      `json:"placement_epoch"`
-	}{m.Cmd, m.Args, m.Env, m.Cwd, m.Pty, m.PlacementEpoch})
+	}{m.Cmd, args, env, m.Cwd, m.Pty, m.PlacementEpoch})
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
 }
