@@ -94,6 +94,23 @@ func TestPlacementAndProcessValidatePortableShapes(t *testing.T) {
 	requireClass(t, proc.Validate(), model.ErrorInvalidArgument)
 }
 
+func TestProcessAllowsHandleFingerprintWithoutSeparateKey(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	proc := model.Process{
+		ID:               "proc_caller",
+		Sandbox:          "sbx_a",
+		PlacementEpoch:   1,
+		PID:              0,
+		State:            model.ProcessStarting,
+		StartedAt:        now,
+		OutputCursor:     model.ProcessOutputCursor("proc_caller", 1, 0),
+		StartRequestHash: model.DigestBytes([]byte("start-request")),
+	}
+	if err := proc.Validate(); err != nil {
+		t.Fatalf("handle-scoped fingerprint without key refused: %v", err)
+	}
+}
+
 func TestProcessExitRetentionAndReclaimBoundary(t *testing.T) {
 	if err := model.DefaultProcessRetention.Validate(); err != nil {
 		t.Fatalf("default process retention invalid: %v", err)
