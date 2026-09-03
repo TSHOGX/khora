@@ -26,7 +26,12 @@ Process start and connect are server streams. Input may be streamed or sent as a
 single request. Filesystem operations are request/response, with bounded message
 sizes; large whole-file traffic uses the HTTP stream routes. The generated protocol
 also includes a separate bounded filesystem Watch stream with change-detection
-semantics, an independent cursor, and explicit overflow/reset notifications.
+semantics, an independent placement-scoped cursor, and explicit overflow/reset
+notifications. The guest retains a bounded journal and snapshot baseline across
+transport-child restarts. A cursor gap is returned as resource-exhausted after
+an overflow/reset marker; callers must perform a full rescan. The orchestrator
+polls the durable placement epoch while forwarding an open stream so a
+pause/resume reset is visible even when no filesystem event arrives.
 
 The client uses I/O readers for streaming rather than collecting full files in
 memory. Compatibility between client calls and server methods is covered by

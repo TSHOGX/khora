@@ -1,0 +1,766 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"sync"
+	"time"
+
+	"connectrpc.com/connect"
+	"google.golang.org/protobuf/proto"
+
+	v1 "github.com/TSHOGX/khora/pkg/transport/gen/khora/transport/v1"
+)
+
+// Filesystem watch is placement-scoped.  A transport child can be restarted
+// without replacing the placement, so the cursor and the last observed
+// snapshots live in a small guest-local journal rather than in one RPC
+// handler.  The source remains change detection (not syscall-complete history),
+// but reconnects can replay the retained, ordered change records.
+const (
+	watchBufferEvents     = 4096
+	watchPollInterval     = 100 * time.Millisecond
+	watchScopeIdle        = 10 * time.Minute
+	watchStateFile        = "/tmp/.sandboxd-watch.json"
+	watchSubscriberWindow = 256
+	// A placement can have many independent path/recursive subscriptions. Keep
+	// their retained baselines bounded too; inactive scopes are evicted below.
+	watchMaxScopes = 64
+)
+
+type watchEventRecord struct {
+	Scope string         `json:"scope"`
+	Event *v1.WatchEvent `json:"event"`
+}
+
+// watchNotice is deliberately separate from WatchEvent.  A terminal reset or
+// overflow must still be delivered when a subscriber queue was already full;
+// keeping it outside the queue prevents a full queue from hiding the recovery
+// instruction.
+type watchNotice struct {
+	Event *v1.WatchEvent
+}
+
+type watchSubscriber struct {
+	scope       string
+	ch          chan watchNotice
+	terminal    *watchNotice
+	terminalErr error
+	mu          sync.Mutex
+}
+
+type watchScope struct {
+	key       string
+	root      string
+	recursive bool
+	previous  map[string]watchEntry
+
+	pollMu  sync.Mutex
+	running bool
+	active  int
+	lastUse time.Time
+	epoch   uint64
+}
+
+// watchHub is the placement-local source and retained cursor.  It owns no
+// provider handle and exposes only guest paths/events to the fs service.
+type watchHub struct {
+	mu sync.Mutex
+
+	path     string
+	capacity int
+	epoch    uint64
+	sequence uint64
+	records  []watchEventRecord
+	// dropped records are tracked per scope.  A global ring can evict records
+	// for another scope without making this scope's cursor appear to have a
+	// gap, so the eviction watermark is scoped as well.
+	dropped map[string]uint64
+	scopes  map[string]*watchScope
+	subs    map[*watchSubscriber]struct{}
+}
+
+type persistedWatchEntry struct {
+	Path   string       `json:"path"`
+	Type   v1.EntryType `json:"type"`
+	Size   int64        `json:"size"`
+	MTime  int64        `json:"mtime"`
+	Mode   uint32       `json:"mode"`
+	Inode  uint64       `json:"inode,omitempty"`
+	Device uint64       `json:"device,omitempty"`
+}
+
+type persistedWatchScope struct {
+	Key       string                         `json:"key"`
+	Root      string                         `json:"root"`
+	Recursive bool                           `json:"recursive"`
+	Epoch     uint64                         `json:"epoch"`
+	Previous  map[string]persistedWatchEntry `json:"previous"`
+}
+
+type persistedWatchState struct {
+	Epoch    uint64                `json:"epoch"`
+	Sequence uint64                `json:"sequence"`
+	Records  []watchEventRecord    `json:"records"`
+	Dropped  map[string]uint64     `json:"dropped,omitempty"`
+	Scopes   []persistedWatchScope `json:"scopes,omitempty"`
+}
+
+func newWatchHub(path string, capacity int) *watchHub {
+	if capacity <= 0 {
+		capacity = watchBufferEvents
+	}
+	h := &watchHub{
+		path: path, capacity: capacity,
+		dropped: make(map[string]uint64),
+		scopes:  make(map[string]*watchScope),
+		subs:    make(map[*watchSubscriber]struct{}),
+	}
+	if path != "" {
+		_ = h.load()
+	}
+	return h
+}
+
+func watchScopeKey(root string, recursive bool) string {
+	root = filepath.Clean(root)
+	if root == "." || root == "" {
+		root = "/"
+	}
+	return fmt.Sprintf("%s\x00%t", root, recursive)
+}
+
+func watchEntryPersisted(e watchEntry) persistedWatchEntry {
+	return persistedWatchEntry{Path: e.path, Type: e.type_, Size: e.size, MTime: e.mtime, Mode: e.mode, Inode: e.ino, Device: e.dev}
+}
+
+func watchEntryRestored(e persistedWatchEntry) watchEntry {
+	return watchEntry{path: e.Path, type_: e.Type, size: e.Size, mtime: e.MTime, mode: e.Mode, ino: e.Inode, dev: e.Device}
+}
+
+func (h *watchHub) load() error {
+	b, err := os.ReadFile(h.path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var state persistedWatchState
+	if err := json.Unmarshal(b, &state); err != nil {
+		return err
+	}
+	if state.Epoch == 0 {
+		return nil
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.epoch, h.sequence = state.Epoch, state.Sequence
+	if state.Dropped != nil {
+		for key, seq := range state.Dropped {
+			h.dropped[key] = seq
+		}
+	}
+	for _, rec := range state.Records {
+		if rec.Event == nil || rec.Scope == "" || rec.Event.Sequence == 0 || rec.Event.PlacementEpoch != h.epoch {
+			continue
+		}
+		h.records = append(h.records, rec)
+		if rec.Event.Sequence > h.sequence {
+			h.sequence = rec.Event.Sequence
+		}
+	}
+	if len(h.records) > h.capacity {
+		evict := h.records[:len(h.records)-h.capacity]
+		h.records = h.records[len(h.records)-h.capacity:]
+		for _, rec := range evict {
+			if rec.Event != nil && rec.Scope != "" && rec.Event.Sequence > h.dropped[rec.Scope] {
+				h.dropped[rec.Scope] = rec.Event.Sequence
+			}
+		}
+	}
+	for _, saved := range state.Scopes {
+		if saved.Key == "" || saved.Epoch != h.epoch {
+			continue
+		}
+		previous := make(map[string]watchEntry, len(saved.Previous))
+		for path, entry := range saved.Previous {
+			previous[path] = watchEntryRestored(entry)
+		}
+		h.scopes[saved.Key] = &watchScope{key: saved.Key, root: saved.Root, recursive: saved.Recursive, previous: previous, epoch: h.epoch, lastUse: time.Now()}
+	}
+	return nil
+}
+
+func (h *watchHub) persistedLocked() persistedWatchState {
+	state := persistedWatchState{Epoch: h.epoch, Sequence: h.sequence, Records: append([]watchEventRecord(nil), h.records...), Dropped: make(map[string]uint64, len(h.dropped)), Scopes: make([]persistedWatchScope, 0, len(h.scopes))}
+	for key, seq := range h.dropped {
+		state.Dropped[key] = seq
+	}
+	for key, scope := range h.scopes {
+		entries := make(map[string]persistedWatchEntry, len(scope.previous))
+		for path, entry := range scope.previous {
+			entries[path] = watchEntryPersisted(entry)
+		}
+		state.Scopes = append(state.Scopes, persistedWatchScope{Key: key, Root: scope.root, Recursive: scope.recursive, Epoch: scope.epoch, Previous: entries})
+	}
+	sort.Slice(state.Scopes, func(i, j int) bool { return state.Scopes[i].Key < state.Scopes[j].Key })
+	return state
+}
+
+// persistLocked writes a complete bounded snapshot through a temporary file,
+// then renames it.  A torn write must never turn a valid cursor into malformed
+// JSON after a transport restart.
+func (h *watchHub) persistLocked() error {
+	if h.path == "" {
+		return nil
+	}
+	b, err := json.Marshal(h.persistedLocked())
+	if err != nil {
+		return err
+	}
+	tmp := h.path + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, h.path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+func watchStaleEpochError() error {
+	return connect.NewError(connect.CodeFailedPrecondition, errors.New("stale placement epoch"))
+}
+
+func watchGapError() error {
+	return connect.NewError(connect.CodeResourceExhausted, errors.New("filesystem watch cursor gap; full rescan required"))
+}
+
+func watchScopeLimitError() error {
+	return connect.NewError(connect.CodeResourceExhausted, errors.New("filesystem watch scope limit reached"))
+}
+
+// setEpoch advances the placement epoch and invalidates all prior watch
+// records.  Existing streams receive one reset marker before they close.
+func (h *watchHub) setEpoch(epoch uint64) error {
+	if epoch == 0 {
+		epoch = 1
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.epoch != 0 && epoch < h.epoch {
+		return watchStaleEpochError()
+	}
+	if h.epoch == epoch {
+		return nil
+	}
+	for sub := range h.subs {
+		h.closeSubscriberLocked(sub, &v1.WatchEvent{Sequence: 0, PlacementEpoch: epoch, Reset_: true, ResetReason: "placement"})
+	}
+	h.epoch = epoch
+	h.sequence = 0
+	h.records = nil
+	h.dropped = make(map[string]uint64)
+	h.scopes = make(map[string]*watchScope)
+	return h.persistLocked()
+}
+
+// ensureEpoch is used by every Watch request.  It is also intentionally
+// exported within package main as ObserveWatchEpoch's implementation hook:
+// callers that learn of a lifecycle epoch change can invalidate live streams
+// even if no new Watch request has arrived yet.
+func (h *watchHub) ensureEpoch(epoch uint64) error {
+	if epoch == 0 {
+		h.mu.Lock()
+		epoch = h.epoch
+		h.mu.Unlock()
+		if epoch == 0 {
+			epoch = 1
+		}
+	}
+	return h.setEpoch(epoch)
+}
+
+func (h *watchHub) validateEpoch(epoch uint64) error {
+	if epoch == 0 {
+		return nil
+	}
+	h.mu.Lock()
+	current := h.epoch
+	h.mu.Unlock()
+	if current != epoch {
+		return watchStaleEpochError()
+	}
+	return nil
+}
+
+func (h *watchHub) scope(root string, recursive bool) (*watchScope, bool, error) {
+	root = filepath.Clean(root)
+	if root == "." || root == "" {
+		root = "/"
+	}
+	key := watchScopeKey(root, recursive)
+	h.mu.Lock()
+	h.pruneScopesLocked()
+	if existing := h.scopes[key]; existing != nil && existing.epoch == h.epoch && existing.previous != nil {
+		existing.lastUse = time.Now()
+		h.mu.Unlock()
+		return existing, false, nil
+	}
+	if len(h.scopes) >= watchMaxScopes {
+		h.mu.Unlock()
+		return nil, false, watchScopeLimitError()
+	}
+	epoch := h.epoch
+	h.mu.Unlock()
+	previous, err := collectWatch(root, recursive)
+	if err != nil {
+		return nil, false, fsErr("watch", root, err)
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if existing := h.scopes[key]; existing != nil && existing.epoch == h.epoch && existing.previous != nil {
+		existing.lastUse = time.Now()
+		return existing, false, nil
+	}
+	h.pruneScopesLocked()
+	if len(h.scopes) >= watchMaxScopes {
+		return nil, false, watchScopeLimitError()
+	}
+	if epoch != h.epoch {
+		// A concurrent epoch advance invalidated the snapshot we just collected.
+		return nil, false, watchStaleEpochError()
+	}
+	scope := &watchScope{key: key, root: root, recursive: recursive, previous: previous, epoch: h.epoch, lastUse: time.Now()}
+	h.scopes[key] = scope
+	if err := h.persistLocked(); err != nil {
+		delete(h.scopes, key)
+		return nil, false, err
+	}
+	return scope, true, nil
+}
+
+func (h *watchHub) pruneScopesLocked() {
+	if len(h.scopes) < watchMaxScopes {
+		return
+	}
+	now := time.Now()
+	for key, scope := range h.scopes {
+		if scope.active == 0 && now.Sub(scope.lastUse) > watchScopeIdle {
+			delete(h.scopes, key)
+		}
+	}
+}
+
+func watchEntryChanged(old, cur watchEntry) bool {
+	return old.size != cur.size || old.mtime != cur.mtime || old.mode != cur.mode || old.type_ != cur.type_ || old.ino != cur.ino || old.dev != cur.dev
+}
+
+func watchEventFromEntry(e watchEntry, op, oldPath string, seq, epoch uint64) *v1.WatchEvent {
+	return &v1.WatchEvent{Path: e.path, OldPath: oldPath, Operation: op, Type: e.type_, Size: e.size, MtimeUnixNano: e.mtime, Sequence: seq, PlacementEpoch: epoch}
+}
+
+type watchChange struct {
+	entry   watchEntry
+	oldPath string
+	op      string
+}
+
+func watchIdentity(e watchEntry) string {
+	if e.ino == 0 && e.dev == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d:%d", e.dev, e.ino)
+}
+
+// pollScope computes one deterministic snapshot delta and appends it to the
+// placement journal.  The poll mutex prevents the background monitor and a
+// reconnect's immediate catch-up from assigning duplicate changes.
+func (h *watchHub) pollScope(scope *watchScope) error {
+	scope.pollMu.Lock()
+	defer scope.pollMu.Unlock()
+	next, err := collectWatch(scope.root, scope.recursive)
+	if err != nil {
+		// A watched root can be removed while its stream is open. Treat that
+		// observation as an empty snapshot so descendants produce explicit
+		// remove events; a transient permission/I/O error remains a real source
+		// failure and is retried by the monitor.
+		if connect.CodeOf(err) == connect.CodeNotFound {
+			next = make(map[string]watchEntry)
+		} else {
+			return err
+		}
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if scope.epoch != h.epoch {
+		return watchStaleEpochError()
+	}
+	oldSequence := h.sequence
+	oldRecords := append([]watchEventRecord(nil), h.records...)
+	oldDropped := make(map[string]uint64, len(h.dropped))
+	for key, seq := range h.dropped {
+		oldDropped[key] = seq
+	}
+	oldPrevious := scope.previous
+	paths := make([]string, 0, len(scope.previous)+len(next))
+	seen := make(map[string]struct{}, len(scope.previous)+len(next))
+	for path := range scope.previous {
+		seen[path] = struct{}{}
+		paths = append(paths, path)
+	}
+	for path := range next {
+		if _, ok := seen[path]; !ok {
+			paths = append(paths, path)
+		}
+	}
+	sort.Strings(paths)
+	changes := make([]watchChange, 0, len(paths))
+	removed := make(map[string]watchEntry)
+	created := make(map[string]watchEntry)
+	for _, path := range paths {
+		old, hadOld := scope.previous[path]
+		cur, hadCur := next[path]
+		if !hadOld && hadCur {
+			created[path] = cur
+			continue
+		}
+		if hadOld && !hadCur {
+			removed[path] = old
+			continue
+		}
+		if hadOld && hadCur && watchEntryChanged(old, cur) {
+			op := "modify"
+			if old.size == cur.size && old.mtime == cur.mtime && old.type_ == cur.type_ && old.ino == cur.ino && old.dev == cur.dev && old.mode != cur.mode {
+				op = "chmod"
+			}
+			changes = append(changes, watchChange{entry: cur, op: op})
+		}
+	}
+	// Pair create/remove entries by stable inode identity. This preserves a
+	// rename's old path without claiming syscall-level completeness; when a
+	// provider cannot expose identity the pair remains create+remove.
+	removedByID := make(map[string][]string)
+	for path, entry := range removed {
+		if id := watchIdentity(entry); id != "" {
+			removedByID[id] = append(removedByID[id], path)
+		}
+	}
+	for id := range removedByID {
+		sort.Strings(removedByID[id])
+	}
+	pairedRemoved := make(map[string]bool)
+	pairedCreated := make(map[string]bool)
+	for path, entry := range created {
+		id := watchIdentity(entry)
+		if id == "" || len(removedByID[id]) == 0 {
+			continue
+		}
+		oldPath := removedByID[id][0]
+		removedByID[id] = removedByID[id][1:]
+		pairedRemoved[oldPath] = true
+		pairedCreated[path] = true
+		changes = append(changes, watchChange{entry: entry, oldPath: oldPath, op: "rename"})
+	}
+	for path, entry := range created {
+		if !pairedCreated[path] {
+			changes = append(changes, watchChange{entry: entry, op: "create"})
+		}
+	}
+	for path, entry := range removed {
+		if !pairedRemoved[path] {
+			changes = append(changes, watchChange{entry: entry, op: "remove"})
+		}
+	}
+	sort.Slice(changes, func(i, j int) bool {
+		if changes[i].entry.path != changes[j].entry.path {
+			return changes[i].entry.path < changes[j].entry.path
+		}
+		return changes[i].op < changes[j].op
+	})
+	newEvents := make([]*v1.WatchEvent, 0, len(changes))
+	for _, change := range changes {
+		h.sequence++
+		event := watchEventFromEntry(change.entry, change.op, change.oldPath, h.sequence, h.epoch)
+		h.records = append(h.records, watchEventRecord{Scope: scope.key, Event: event})
+		for len(h.records) > h.capacity {
+			oldest := h.records[0]
+			h.records = h.records[1:]
+			if oldest.Event != nil && oldest.Scope != "" && oldest.Event.Sequence > h.dropped[oldest.Scope] {
+				h.dropped[oldest.Scope] = oldest.Event.Sequence
+			}
+		}
+		newEvents = append(newEvents, event)
+	}
+	scope.previous = next
+	scope.lastUse = time.Now()
+	if len(newEvents) == 0 {
+		return nil
+	}
+	// Commit the cursor and snapshot before making an event visible. If the
+	// journal write fails, no subscriber is allowed to advance a cursor for a
+	// record that a transport restart could lose; the next poll retries the
+	// atomic journal write.
+	if err := h.persistLocked(); err != nil {
+		h.sequence = oldSequence
+		h.records = oldRecords
+		h.dropped = oldDropped
+		scope.previous = oldPrevious
+		return err
+	}
+	for _, event := range newEvents {
+		h.publishLocked(scope.key, event)
+	}
+	return nil
+}
+
+func (h *watchHub) publishLocked(scope string, event *v1.WatchEvent) {
+	for sub := range h.subs {
+		if sub.scope != scope {
+			continue
+		}
+		select {
+		case sub.ch <- watchNotice{Event: cloneWatchEvent(event)}:
+		default:
+			h.closeSubscriberLocked(sub, &v1.WatchEvent{Sequence: 0, PlacementEpoch: h.epoch, Overflow: true, Reset_: true, ResetReason: "overflow"})
+		}
+	}
+}
+
+// subscribe atomically checks the scope watermark, snapshots replay, and joins
+// the live fan-out. Replay is returned separately so the live queue remains a
+// small, fixed bound even when the retained journal is large.
+func (h *watchHub) subscribe(scope *watchScope, after uint64, initial bool) (*watchSubscriber, []*v1.WatchEvent, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if scope.epoch != h.epoch {
+		return nil, nil, watchStaleEpochError()
+	}
+	sub := &watchSubscriber{scope: scope.key, ch: make(chan watchNotice, watchSubscriberWindow)}
+	replay := make([]*v1.WatchEvent, 0)
+	if initial && after == 0 {
+		replay = append(replay, &v1.WatchEvent{Sequence: 0, PlacementEpoch: h.epoch, Reset_: true, ResetReason: "initial"})
+	}
+	// A cursor below the retained watermark is an explicit gap.  Treating
+	// sequence zero as a special success here would make an old subscriber
+	// silently skip the evicted prefix after a transport restart.
+	if after > h.sequence {
+		sub.mu.Lock()
+		sub.terminal = &watchNotice{Event: &v1.WatchEvent{Sequence: 0, PlacementEpoch: h.epoch, Overflow: true, Reset_: true, ResetReason: "overflow"}}
+		sub.terminalErr = watchGapError()
+		sub.mu.Unlock()
+		replay = append(replay, cloneWatchEvent(sub.terminal.Event))
+		close(sub.ch)
+		return sub, replay, nil
+	}
+	if (initial && after > 0) || (after > 0 && after < h.dropped[scope.key]) {
+		sub.mu.Lock()
+		sub.terminal = &watchNotice{Event: &v1.WatchEvent{Sequence: 0, PlacementEpoch: h.epoch, Overflow: true, Reset_: true, ResetReason: "overflow"}}
+		sub.terminalErr = watchGapError()
+		replay = append(replay, cloneWatchEvent(sub.terminal.Event))
+		sub.mu.Unlock()
+		close(sub.ch)
+		return sub, replay, nil
+	} else {
+		for _, rec := range h.records {
+			if rec.Scope == scope.key && rec.Event != nil && rec.Event.Sequence > after {
+				replay = append(replay, cloneWatchEvent(rec.Event))
+			}
+		}
+	}
+	h.subs[sub] = struct{}{}
+	scope.active++
+	scope.lastUse = time.Now()
+	return sub, replay, nil
+}
+
+func cloneWatchEvent(in *v1.WatchEvent) *v1.WatchEvent {
+	if in == nil {
+		return nil
+	}
+	return proto.Clone(in).(*v1.WatchEvent)
+}
+
+func (h *watchHub) closeSubscriberLocked(sub *watchSubscriber, terminal *v1.WatchEvent) {
+	h.closeSubscriberLockedWithError(sub, terminal, nil)
+}
+
+func (h *watchHub) closeSubscriberLockedWithError(sub *watchSubscriber, terminal *v1.WatchEvent, terminalErr error) {
+	if _, ok := h.subs[sub]; !ok {
+		return
+	}
+	delete(h.subs, sub)
+	sub.mu.Lock()
+	if sub.terminal == nil && terminal != nil {
+		sub.terminal = &watchNotice{Event: terminal}
+		if terminal.Overflow {
+			sub.terminalErr = watchGapError()
+		}
+	}
+	if terminalErr != nil {
+		sub.terminalErr = terminalErr
+	}
+	// Keep only the terminal marker.  The channel is closed while holding the
+	// hub lock, so publish cannot race this drain/close sequence.
+	for len(sub.ch) > 0 {
+		<-sub.ch
+	}
+	if sub.terminal != nil && sub.terminal.Event != nil {
+		// The marker is queued before close so a consumer that only reads the
+		// stream channel cannot miss the recovery instruction.  The fallback in
+		// Watch's closed-channel branch covers an unusual send failure.
+		sub.ch <- *sub.terminal
+	}
+	sub.mu.Unlock()
+	if scope := h.scopes[sub.scope]; scope != nil && scope.active > 0 {
+		scope.active--
+		scope.lastUse = time.Now()
+	}
+	close(sub.ch)
+}
+
+func (h *watchHub) unsubscribe(sub *watchSubscriber) {
+	if sub == nil {
+		return
+	}
+	h.mu.Lock()
+	h.closeSubscriberLocked(sub, nil)
+	h.mu.Unlock()
+}
+
+func (sub *watchSubscriber) terminalEvent() *v1.WatchEvent {
+	sub.mu.Lock()
+	defer sub.mu.Unlock()
+	if sub.terminal == nil {
+		return nil
+	}
+	return cloneWatchEvent(sub.terminal.Event)
+}
+
+func (sub *watchSubscriber) terminalError() error {
+	sub.mu.Lock()
+	defer sub.mu.Unlock()
+	return sub.terminalErr
+}
+
+func (h *watchHub) startMonitor(scope *watchScope) {
+	h.mu.Lock()
+	if scope.running {
+		h.mu.Unlock()
+		return
+	}
+	scope.running = true
+	scope.lastUse = time.Now()
+	h.mu.Unlock()
+	go func() {
+		ticker := time.NewTicker(watchPollInterval)
+		defer ticker.Stop()
+		for range ticker.C {
+			if err := h.pollScope(scope); err != nil {
+				// Epoch changes intentionally terminate the old monitor.  Other
+				// source errors are terminal for this scope. Repeatedly hiding a
+				// permission or I/O failure would leave a caller waiting forever
+				// with no way to distinguish a quiet tree from a dead source.
+				if connect.CodeOf(err) == connect.CodeFailedPrecondition {
+					return
+				}
+				h.mu.Lock()
+				for sub := range h.subs {
+					if sub.scope != scope.key {
+						continue
+					}
+					h.closeSubscriberLockedWithError(sub, nil, err)
+				}
+				h.mu.Unlock()
+				return
+			}
+			h.mu.Lock()
+			if scope.epoch != h.epoch || (scope.active == 0 && time.Since(scope.lastUse) > watchScopeIdle) {
+				scope.running = false
+				h.mu.Unlock()
+				return
+			}
+			h.mu.Unlock()
+		}
+	}()
+}
+
+// ObserveEpoch is the lifecycle hook used by an outer proxy or supervisor
+// that learns about a new placement while a stream is idle.  Existing streams
+// receive the same reset marker as a new Watch request.
+func (h *watchHub) ObserveEpoch(epoch uint64) error {
+	return h.ensureEpoch(epoch)
+}
+
+// Watch is the Connect-facing placement-scoped stream.
+func (s *fsServer) Watch(ctx context.Context, req *connect.Request[v1.WatchRequest], stream *connect.ServerStream[v1.WatchEvent]) error {
+	m := req.Msg
+	root := m.Path
+	if root == "" {
+		root = "/"
+	}
+	if !filepath.IsAbs(root) {
+		return connect.NewError(connect.CodeInvalidArgument, errors.New("watch path must be absolute"))
+	}
+	s.watchMu.Lock()
+	if s.watch == nil {
+		s.watch = newWatchHub(s.watchPath, watchBufferEvents)
+	}
+	hub := s.watch
+	s.watchMu.Unlock()
+	if err := hub.ensureEpoch(m.PlacementEpoch); err != nil {
+		return err
+	}
+	if err := hub.validateEpoch(m.PlacementEpoch); err != nil {
+		return err
+	}
+	scope, initial, err := hub.scope(root, m.Recursive)
+	if err != nil {
+		return err
+	}
+	if !initial {
+		// Catch up changes made while no stream (or transport child) was
+		// present before registering the new subscriber.
+		if err := hub.pollScope(scope); err != nil {
+			return err
+		}
+	}
+	sub, replay, err := hub.subscribe(scope, m.AfterSequence, initial)
+	if err != nil {
+		return err
+	}
+	for _, event := range replay {
+		if err := stream.Send(event); err != nil {
+			hub.unsubscribe(sub)
+			return err
+		}
+	}
+	if err := sub.terminalError(); err != nil {
+		return err
+	}
+	hub.startMonitor(scope)
+	defer hub.unsubscribe(sub)
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case notice, ok := <-sub.ch:
+			if !ok {
+				return sub.terminalError()
+			}
+			if notice.Event == nil {
+				continue
+			}
+			if err := stream.Send(notice.Event); err != nil {
+				return err
+			}
+		}
+	}
+}

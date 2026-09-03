@@ -27,8 +27,14 @@ semantics and reaping are implemented in
 ## Filesystem service
 
 `FsService` supports read, write, stat, directory listing, mkdir, remove, and move.
-Read may include an offset and length. `Watch` is a separate bounded
-change-detection stream with its own cursor and explicit overflow/reset events.
+Read may include an offset and length. `Watch` is a separate placement-scoped,
+recursive-by-request bounded change-detection stream with its own cursor. The
+transport retains a bounded journal across transport-child restarts; reconnects
+replay events after `after_sequence`. Cursors below the retained watermark and
+slow subscribers produce an explicit `overflow=true, reset=true` event with
+sequence zero and a cursor-gap/resource-exhausted result, requiring a full
+rescan. Pause/resume advances the placement epoch, resets sequence to zero, and
+closes old streams after a `placement` reset marker.
 
 Large whole-file transfers use the HTTP streaming routes instead of placing an
 entire file in one RPC message. The Connect client also provides streamed reads and

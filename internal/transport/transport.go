@@ -298,6 +298,11 @@ type WatchEvent struct {
 	Overflow    bool
 	Reset       bool
 	ResetReason string
+	// Err is set only on the synthetic error event emitted when the inner
+	// stream terminates without a normal close.  Keeping the typed error at
+	// the domain seam lets the outer proxy preserve cursor-gap/resource codes
+	// while sanitizing transport diagnostics.
+	Err error
 }
 
 // WatchClient is the placement-scoped change-detection extension. It is kept

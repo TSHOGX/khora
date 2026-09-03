@@ -617,34 +617,92 @@ func (f *fsProxy) Watch(ctx context.Context, req *connect.Request[v1.WatchReques
 	if !ok {
 		return connect.NewError(connect.CodeUnimplemented, errors.New("filesystem watch is unavailable"))
 	}
-	ch, err := watcher.Watch(ctx, req.Msg.Path, req.Msg.Recursive, epoch, req.Msg.AfterSequence)
+	watchCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	ch, err := watcher.Watch(watchCtx, req.Msg.Path, req.Msg.Recursive, epoch, req.Msg.AfterSequence)
 	if err != nil {
 		return proxyErr(err)
 	}
-	for ev := range ch {
-		if ev.Operation == "error" {
-			return connect.NewError(connect.CodeUnavailable, errors.New("filesystem watch unavailable"))
-		}
-		kind := v1.EntryType_ENTRY_TYPE_UNSPECIFIED
-		switch ev.Type {
-		case transport.EntryFile:
-			kind = v1.EntryType_ENTRY_TYPE_FILE
-		case transport.EntryDirectory:
-			kind = v1.EntryType_ENTRY_TYPE_DIRECTORY
-		case transport.EntrySymlink:
-			kind = v1.EntryType_ENTRY_TYPE_SYMLINK
-		}
-		if err := stream.Send(&v1.WatchEvent{Path: ev.Path, OldPath: ev.OldPath, Operation: ev.Operation, Type: kind, Size: ev.Size, MtimeUnixNano: ev.MTime.UnixNano(), Sequence: ev.Sequence, PlacementEpoch: ev.Epoch, Overflow: ev.Overflow, Reset_: ev.Reset, ResetReason: ev.ResetReason}); err != nil {
-			return err
+	// The inner stream can remain connected while the control plane advances the
+	// Placement epoch (for example, during a pause/resume race). A periodic
+	// control-plane check makes the reset observable without waiting for the
+	// transport child to close its socket.
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	lastReset := false
+	for {
+		select {
+		case ev, ok := <-ch:
+			if !ok {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				if lastReset {
+					return nil
+				}
+				if current, err := f.e.Mediator.Placement(ctx, id); err == nil && current.Epoch != model.PlacementEpoch(epoch) {
+					// The old transport disappeared during Pause/Resume. Make the epoch
+					// reset visible before closing so a watcher can rescan on the new
+					// placement rather than interpreting a disconnect as an empty stream.
+					_ = stream.Send(&v1.WatchEvent{PlacementEpoch: uint64(current.Epoch), Reset_: true, ResetReason: "placement"})
+				} else {
+					// A transport-child restart can close the inner stream while
+					// retaining the same Placement epoch. The guest journal remains
+					// resumable, but the caller must reconnect to resume delivery.
+					_ = stream.Send(&v1.WatchEvent{PlacementEpoch: uint64(epoch), Reset_: true, ResetReason: "transport"})
+				}
+				return nil
+			}
+			if ev.Operation == "error" {
+				if ev.Err != nil {
+					// A raw transport termination is the expected shape when the
+					// guest transport child is restarted in place. Preserve the
+					// placement-scoped stream contract by making that reconnect
+					// boundary explicit; typed cursor-gap errors still pass through
+					// as resource-exhausted below.
+					var ce *connect.Error
+					if !errors.As(ev.Err, &ce) || ce.Code() == connect.CodeUnavailable {
+						_ = stream.Send(&v1.WatchEvent{PlacementEpoch: uint64(epoch), Reset_: true, ResetReason: "transport"})
+						return nil
+					}
+					return proxyErr(ev.Err)
+				}
+				return connect.NewError(connect.CodeUnavailable, errors.New("filesystem watch unavailable"))
+			}
+			if ev.Epoch != 0 && ev.Epoch != epoch {
+				lastReset = true
+				_ = stream.Send(&v1.WatchEvent{PlacementEpoch: ev.Epoch, Reset_: true, ResetReason: "placement"})
+				return nil
+			}
+			if current, err := f.e.Mediator.Placement(ctx, id); err == nil && (current.Epoch != model.PlacementEpoch(epoch) || current.State != model.PlacementActive) {
+				lastReset = true
+				_ = stream.Send(&v1.WatchEvent{PlacementEpoch: uint64(current.Epoch), Reset_: true, ResetReason: "placement"})
+				return nil
+			}
+			kind := v1.EntryType_ENTRY_TYPE_UNSPECIFIED
+			switch ev.Type {
+			case transport.EntryFile:
+				kind = v1.EntryType_ENTRY_TYPE_FILE
+			case transport.EntryDirectory:
+				kind = v1.EntryType_ENTRY_TYPE_DIRECTORY
+			case transport.EntrySymlink:
+				kind = v1.EntryType_ENTRY_TYPE_SYMLINK
+			}
+			if err := stream.Send(&v1.WatchEvent{Path: ev.Path, OldPath: ev.OldPath, Operation: ev.Operation, Type: kind, Size: ev.Size, MtimeUnixNano: ev.MTime.UnixNano(), Sequence: ev.Sequence, PlacementEpoch: ev.Epoch, Overflow: ev.Overflow, Reset_: ev.Reset, ResetReason: ev.ResetReason}); err != nil {
+				return err
+			}
+			lastReset = ev.Reset
+		case <-ticker.C:
+			current, err := f.e.Mediator.Placement(ctx, id)
+			if err != nil {
+				continue
+			}
+			if current.Epoch != model.PlacementEpoch(epoch) || current.State != model.PlacementActive {
+				_ = stream.Send(&v1.WatchEvent{PlacementEpoch: uint64(current.Epoch), Reset_: true, ResetReason: "placement"})
+				return nil
+			}
 		}
 	}
-	if current, err := f.e.Mediator.Placement(ctx, id); err == nil && current.Epoch != model.PlacementEpoch(epoch) {
-		// The old transport disappeared during Pause/Resume. Make the epoch
-		// reset visible before closing so a watcher can rescan on the new
-		// placement rather than interpreting a disconnect as an empty stream.
-		_ = stream.Send(&v1.WatchEvent{PlacementEpoch: uint64(current.Epoch), Reset_: true, ResetReason: "placement"})
-	}
-	return nil
 }
 
 // forwardEvents pumps the domain output channel to the outer proto server-stream

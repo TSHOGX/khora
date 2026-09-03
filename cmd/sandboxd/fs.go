@@ -8,9 +8,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"sort"
+	"sync"
 	"syscall"
-	"time"
 
 	"connectrpc.com/connect"
 
@@ -36,10 +35,11 @@ type fsServer struct {
 	// Without it a sandbox being actively written to looks idle for as long as nobody types,
 	// and the auto-pause that follows discards the very work in flight. Stamped in the
 	// handlers rather than by each caller, like proc.broadcast's stamp.
-	activity *activityClock
+	activity  *activityClock
+	watch     *watchHub
+	watchMu   sync.Mutex
+	watchPath string
 }
-
-const watchBufferEvents = 4096
 
 type watchEntry struct {
 	path  string
@@ -47,18 +47,41 @@ type watchEntry struct {
 	size  int64
 	mtime int64
 	mode  uint32
+	ino   uint64
+	dev   uint64
 }
 
 func collectWatch(root string, recursive bool) (map[string]watchEntry, error) {
 	out := make(map[string]watchEntry)
+	// These files are transport-owned journals/pid portals. They are not guest
+	// workload content; observing the journal itself would create a feedback
+	// loop because every persisted watch event changes its mtime. Match exact
+	// paths so a guest file merely sharing the prefix remains observable.
+	internalPaths := map[string]struct{}{
+		"/tmp/.sandboxd-watch.json":     {},
+		"/tmp/.sandboxd-processes.json": {},
+		"/tmp/.sandboxd-transport.pid":  {},
+		"/tmp/.sandboxd-crashloop":      {},
+	}
+	isInternal := func(p string) bool {
+		_, ok := internalPaths[filepath.Clean(p)]
+		return ok
+	}
 	walk := func(p string, fi os.FileInfo) {
+		if isInternal(p) {
+			return
+		}
 		kind := v1.EntryType_ENTRY_TYPE_FILE
 		if fi.Mode()&os.ModeSymlink != 0 {
 			kind = v1.EntryType_ENTRY_TYPE_SYMLINK
 		} else if fi.IsDir() {
 			kind = v1.EntryType_ENTRY_TYPE_DIRECTORY
 		}
-		out[p] = watchEntry{path: p, type_: kind, size: fi.Size(), mtime: fi.ModTime().UnixNano(), mode: uint32(fi.Mode())}
+		var ino, dev uint64
+		if stat, ok := fi.Sys().(*syscall.Stat_t); ok {
+			ino, dev = uint64(stat.Ino), uint64(stat.Dev)
+		}
+		out[p] = watchEntry{path: p, type_: kind, size: fi.Size(), mtime: fi.ModTime().UnixNano(), mode: uint32(fi.Mode()), ino: ino, dev: dev}
 	}
 	if !recursive {
 		ents, err := os.ReadDir(root)
@@ -67,6 +90,9 @@ func collectWatch(root string, recursive bool) (map[string]watchEntry, error) {
 		}
 		for _, ent := range ents {
 			p := filepath.Join(root, ent.Name())
+			if isInternal(p) {
+				continue
+			}
 			fi, err := os.Lstat(p)
 			if err == nil {
 				walk(p, fi)
@@ -81,16 +107,18 @@ func collectWatch(root string, recursive bool) (map[string]watchEntry, error) {
 			}
 			return nil
 		}
+		if isInternal(p) {
+			if info != nil && info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
 		if p != root {
 			walk(p, info)
 		}
 		return nil
 	})
 	return out, err
-}
-
-func watchEventFromEntry(e watchEntry, op string, seq, epoch uint64) *v1.WatchEvent {
-	return &v1.WatchEvent{Path: e.path, Operation: op, Type: e.type_, Size: e.size, MtimeUnixNano: e.mtime, Sequence: seq, PlacementEpoch: epoch}
 }
 
 // stampIO records fs traffic on the shared activity clock (the activity signal). Called by
@@ -261,91 +289,6 @@ func (*fsServer) List(_ context.Context, req *connect.Request[v1.FsServiceListRe
 		return nil, fsErr("list", m.Path, err)
 	}
 	return connect.NewResponse(&v1.FsServiceListResponse{Entries: entries}), nil
-}
-
-// Watch implements bounded polling-based change detection. The guest/provider
-// source is deliberately specified as change detection; an overflow or a
-// caller reconnect is explicit and can be recovered with a full rescan.
-func (s *fsServer) Watch(ctx context.Context, req *connect.Request[v1.WatchRequest], stream *connect.ServerStream[v1.WatchEvent]) error {
-	m := req.Msg
-	root := m.Path
-	if root == "" {
-		root = "/"
-	}
-	epoch := m.PlacementEpoch
-	if epoch == 0 {
-		epoch = 1
-	}
-	previous, err := collectWatch(root, m.Recursive)
-	if err != nil {
-		return fsErr("watch", root, err)
-	}
-	seq := m.AfterSequence
-	// Send an initial reset marker to flush the server-stream headers and make
-	// the starting snapshot explicit. It is not a file change; it tells the
-	// caller that a full rescan establishes the baseline for this cursor.
-	if err := stream.Send(&v1.WatchEvent{PlacementEpoch: epoch, Sequence: seq, Reset_: true, ResetReason: "initial"}); err != nil {
-		return err
-	}
-	ticker := time.NewTicker(250 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-ticker.C:
-			next, err := collectWatch(root, m.Recursive)
-			if err != nil {
-				return fsErr("watch", root, err)
-			}
-			paths := make([]string, 0, len(previous)+len(next))
-			seen := map[string]bool{}
-			for p := range previous {
-				seen[p] = true
-				paths = append(paths, p)
-			}
-			for p := range next {
-				if !seen[p] {
-					paths = append(paths, p)
-				}
-			}
-			sort.Strings(paths)
-			changes := make([]*v1.WatchEvent, 0, len(paths))
-			for _, p := range paths {
-				old, hadOld := previous[p]
-				cur, hadCur := next[p]
-				op := ""
-				if !hadOld && hadCur {
-					op = "create"
-					old = cur
-				}
-				if hadOld && !hadCur {
-					op = "remove"
-					cur = old
-				}
-				if hadOld && hadCur && (old.size != cur.size || old.mtime != cur.mtime || old.mode != cur.mode || old.type_ != cur.type_) {
-					op = "modify"
-				}
-				if op == "" {
-					continue
-				}
-				seq++
-				changes = append(changes, watchEventFromEntry(cur, op, seq, epoch))
-			}
-			if len(changes) > watchBufferEvents {
-				if err := stream.Send(&v1.WatchEvent{Sequence: seq, PlacementEpoch: epoch, Overflow: true, Reset_: true, ResetReason: "overflow"}); err != nil {
-					return err
-				}
-			} else {
-				for _, event := range changes {
-					if err := stream.Send(event); err != nil {
-						return err
-					}
-				}
-			}
-			previous = next
-		}
-	}
 }
 
 // listDir walks up to depth levels below root and returns a FLAT list. Flat

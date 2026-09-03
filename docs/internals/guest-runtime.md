@@ -44,6 +44,26 @@ pipe mode preserves stdout and stderr. Unit coverage is in
 [cmd/sandboxd/process_test.go](../../cmd/sandboxd/process_test.go), with the real
 slow-reader case in `test/slow_subscriber_substrate_test.go`.
 
+## Filesystem watch
+
+The filesystem watch source is conservative change detection: a placement-local
+poller snapshots each requested path (recursively when requested), compares
+metadata and emits an independent sequence. A bounded journal is retained in
+the guest runtime scratch area, so a transport-child restart can replay changes
+after a caller's cursor. The journal is not workload content and is excluded
+from Template promotion.
+
+The journal and each subscriber queue are bounded. If a cursor falls below the
+retained watermark, or a subscriber cannot keep up, the stream emits an
+`overflow`/`reset` marker with sequence zero and returns a resource-exhausted
+cursor-gap error; callers must rescan and reconnect. A placement epoch change
+invalidates the journal and closes existing streams after a `placement` reset.
+The orchestrator checks the durable epoch while an otherwise idle stream is
+open, so pause/resume does not depend on a later filesystem event to make the
+reset visible. Watch semantics deliberately do not claim syscall-complete
+history; provider/source improvements can preserve this cursor and recovery
+contract.
+
 ## Activity signal
 
 Activity is measured inside the guest across all transport connections and returned

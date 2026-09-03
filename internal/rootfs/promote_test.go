@@ -70,6 +70,7 @@ func TestPromoteToTemplateExcludesRuntimePaths(t *testing.T) {
 		// Planted by hand; unreachable on the real substrate (/tmp is tmpfs). Matching
 		// logic only — see the doc comment.
 		"tmp/.sandboxd-transport.pid": "12345",
+		"tmp/.sandboxd-watch.json":    "{}",
 		"tmp/.sandboxd-crashloop":     "x",
 		"tmp/user-scratch":            "keepme", // NOT excluded (only the sandboxd paths are)
 		// Upload debris, excluded BY PREFIX rather than by exact path — two different
@@ -110,6 +111,9 @@ func TestPromoteToTemplateExcludesRuntimePaths(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(layer, "tmp/.sandboxd-crashloop")); !os.IsNotExist(err) {
 		t.Errorf("sandboxd crashloop sentinel leaked into layer: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(layer, "tmp/.sandboxd-watch.json")); !os.IsNotExist(err) {
+		t.Errorf("sandboxd watch journal leaked into layer: %v", err)
 	}
 	// Upload debris is excluded BY PREFIX, wherever it was stranded. Freezing it
 	// would ship one caller's interrupted upload to every sandbox created from this

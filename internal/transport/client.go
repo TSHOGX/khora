@@ -398,7 +398,7 @@ func (c *connectClient) Watch(ctx context.Context, path string, recursive bool, 
 			out <- WatchEvent{Path: e.Path, OldPath: e.OldPath, Operation: e.Operation, Type: kind, Size: e.Size, MTime: time.Unix(0, e.MtimeUnixNano), Sequence: e.Sequence, Epoch: e.PlacementEpoch, Overflow: e.Overflow, Reset: e.Reset_, ResetReason: e.ResetReason}
 		}
 		if err := stream.Err(); err != nil {
-			out <- WatchEvent{Operation: "error", ResetReason: err.Error()}
+			out <- WatchEvent{Operation: "error", ResetReason: err.Error(), Err: err}
 		}
 		_ = stream.Close()
 	}()
