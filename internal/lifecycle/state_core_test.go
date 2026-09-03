@@ -272,3 +272,36 @@ func TestTemplateManifestDigestMismatchRefusesLaunch(t *testing.T) {
 		}
 	}
 }
+
+func TestPromoteRejectsDeclaredDigestMismatchBeforeTemplateCommit(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	seedBare(t, st)
+	digest := model.DigestBytes([]byte("actual"))
+	rp := &digestRootfs{fakeRootfs: &fakeRootfs{}, digest: digest}
+	m := New(Deps{
+		Store: st, Runtime: &fakeRuntime{}, Rootfs: rp, Volume: newFakeVolume(),
+		Dial:          func(transport.Endpoint) transport.Client { return &fakeClient{healthy: true} },
+		HealthTimeout: 500 * time.Millisecond, Logf: func(string, ...any) {},
+	})
+	sid, err := m.Create(ctx, CreateSpec{Template: "bare"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	wanted := model.DigestBytes([]byte("different"))
+	manifest := defaultTemplateManifest()
+	manifest.DigestAlgorithm = model.DigestSHA256
+	manifest.ContentDigest = wanted
+	if _, err := m.PromoteWithManifest(ctx, sid, &manifest); model.ErrorClassOf(err) != model.ErrorConflict {
+		t.Fatalf("promote digest mismatch = %v; want conflict", err)
+	}
+	templates, err := st.ListTemplates(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tm := range templates {
+		if !tm.Builtin {
+			t.Fatalf("mismatched manifest committed template row: %+v", tm)
+		}
+	}
+}

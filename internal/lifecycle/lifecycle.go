@@ -1152,11 +1152,28 @@ func (m *Mediator) promoteWithManifest(ctx context.Context, id model.SandboxID, 
 			return "", fmt.Errorf("promote: manifest: %w", err)
 		}
 	}
-	if checker, ok := m.deps.Rootfs.(rootfs.TemplateDigestProvider); ok {
-		if digest, derr := checker.TemplateDigest(ctx, string(newID)); derr == nil {
-			manifest.DigestAlgorithm = model.DigestSHA256
-			manifest.ContentDigest = digest
+	// The provider is the authority for bytes, so a declared digest must be
+	// checked against the freshly materialized layer before its Template row is
+	// published. Never overwrite a caller declaration or ignore a provider
+	// failure: either behavior would make a manifest appear verified when it was
+	// not. An omitted digest remains optional when the provider has no digest
+	// inspection seam; a supplied digest is fail-closed in that case.
+	checker, hasDigestChecker := m.deps.Rootfs.(rootfs.TemplateDigestProvider)
+	if manifest.ContentDigest != "" && !hasDigestChecker {
+		return "", fmt.Errorf("promote: manifest digest cannot be verified: %w", model.ErrUnavailable)
+	}
+	if hasDigestChecker {
+		digest, derr := checker.TemplateDigest(ctx, string(newID))
+		if derr != nil {
+			return "", fmt.Errorf("promote: compute template digest: %w", derr)
 		}
+		if manifest.ContentDigest != "" && digest != manifest.ContentDigest {
+			return "", model.NewContractError(model.ErrorConflict, "promote: manifest content digest does not match materialized bytes")
+		}
+		// Always persist the provider's canonical digest, including when the
+		// caller omitted one. This makes future launch verification meaningful.
+		manifest.DigestAlgorithm = model.DigestSHA256
+		manifest.ContentDigest = digest
 	}
 	if err := m.deps.Store.CreateTemplate(ctx, model.Template{
 		ID:        newID,
