@@ -84,24 +84,22 @@ message CheckResponse {
 
 // ProcessService is the process primitive: start / connect / input / signal /
 // resize / list. PTY is a field-level special case of Start, not a service.
-// Output is fan-out multi-subscribe: many Connect calls can attach one pid, each
-// receiving an independent copy.
+// Output is fan-out multi-subscribe: many Connect calls can attach one logical
+// process handle, each receiving an independent copy. A guest PID remains a
+// placement-local locator for legacy callers only.
 service ProcessService {
   // Start launches a process and server-streams its output events
-  // (start / data / end / keepalive). Addressed by the returned pid thereafter.
+  // (start / data / end / keepalive). The returned opaque process handle is the
+  // durable identity; the PID in StartEvent is only a locator for this epoch.
   rpc Start(StartRequest) returns (stream ProcessEvent) {}
 
-  // Connect reattaches to an already-RUNNING process, replaying the bounded
-  // output ring buffer first, then joining the live stream. Multiple Connect
-  // calls can attach one pid.
-  //
-  // Only a live pid is addressable: once a process exits, its `end` event goes to
-  // the subscribers attached AT THAT MOMENT and the pid stops resolving —
-  // Connect then returns not-found, and exit status is NOT held for later
-  // collection. That follows from addressing by guest-native pid, which the
-  // kernel recycles: a retained "pid N exited" record would start describing a
-  // different process the moment N is reused. A caller that needs exit status
-  // must be attached when the process ends so the parent can reap the process group.
+  // Connect reattaches to a logical process handle, replaying the bounded output
+  // ring buffer after `after_sequence` and then joining the live stream.
+  // Multiple Connect calls can attach one handle. An exited handle remains
+  // addressable for the configured retention window and replays its retained
+  // tail plus the terminal exit event; the control plane exposes the retained
+  // exit status through its Process snapshot. Requests carrying an old
+  // Placement epoch fail closed.
   rpc Connect(ConnectRequest) returns (stream ProcessEvent) {}
 
   // StreamInput writes stdin (or pty-in) as an ordered client-stream — the

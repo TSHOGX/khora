@@ -266,19 +266,16 @@ func (UnimplementedHealthServiceHandler) RecordActivity(context.Context, *connec
 // ProcessServiceClient is a client for the khora.transport.v1.ProcessService service.
 type ProcessServiceClient interface {
 	// Start launches a process and server-streams its output events
-	// (start / data / end / keepalive). Addressed by the returned pid thereafter.
+	// (start / data / end / keepalive). The returned opaque process handle is the
+	// durable identity; the PID in StartEvent is only a locator for this epoch.
 	Start(context.Context, *connect.Request[v1.StartRequest]) (*connect.ServerStreamForClient[v1.ProcessEvent], error)
-	// Connect reattaches to an already-RUNNING process, replaying the bounded
-	// output ring buffer first, then joining the live stream. Multiple Connect
-	// calls can attach one pid.
-	//
-	// Only a live pid is addressable: once a process exits, its `end` event goes to
-	// the subscribers attached AT THAT MOMENT and the pid stops resolving —
-	// Connect then returns not-found, and exit status is NOT held for later
-	// collection. That follows from addressing by guest-native pid, which the
-	// kernel recycles: a retained "pid N exited" record would start describing a
-	// different process the moment N is reused. A caller that needs exit status
-	// must be attached when the process ends so the parent can reap the process group.
+	// Connect reattaches to a logical process handle, replaying the bounded output
+	// ring buffer after `after_sequence` and then joining the live stream.
+	// Multiple Connect calls can attach one handle. An exited handle remains
+	// addressable for the configured retention window and replays its retained
+	// tail plus the terminal exit event; the control plane exposes the retained
+	// exit status through its Process snapshot. Requests carrying an old
+	// Placement epoch fail closed.
 	Connect(context.Context, *connect.Request[v1.ConnectRequest]) (*connect.ServerStreamForClient[v1.ProcessEvent], error)
 	// StreamInput writes stdin (or pty-in) as an ordered client-stream — the
 	// interactive input path (keystrokes to a pty). Ordering is guaranteed by the
@@ -415,19 +412,16 @@ func (c *processServiceClient) List(ctx context.Context, req *connect.Request[v1
 // ProcessServiceHandler is an implementation of the khora.transport.v1.ProcessService service.
 type ProcessServiceHandler interface {
 	// Start launches a process and server-streams its output events
-	// (start / data / end / keepalive). Addressed by the returned pid thereafter.
+	// (start / data / end / keepalive). The returned opaque process handle is the
+	// durable identity; the PID in StartEvent is only a locator for this epoch.
 	Start(context.Context, *connect.Request[v1.StartRequest], *connect.ServerStream[v1.ProcessEvent]) error
-	// Connect reattaches to an already-RUNNING process, replaying the bounded
-	// output ring buffer first, then joining the live stream. Multiple Connect
-	// calls can attach one pid.
-	//
-	// Only a live pid is addressable: once a process exits, its `end` event goes to
-	// the subscribers attached AT THAT MOMENT and the pid stops resolving —
-	// Connect then returns not-found, and exit status is NOT held for later
-	// collection. That follows from addressing by guest-native pid, which the
-	// kernel recycles: a retained "pid N exited" record would start describing a
-	// different process the moment N is reused. A caller that needs exit status
-	// must be attached when the process ends so the parent can reap the process group.
+	// Connect reattaches to a logical process handle, replaying the bounded output
+	// ring buffer after `after_sequence` and then joining the live stream.
+	// Multiple Connect calls can attach one handle. An exited handle remains
+	// addressable for the configured retention window and replays its retained
+	// tail plus the terminal exit event; the control plane exposes the retained
+	// exit status through its Process snapshot. Requests carrying an old
+	// Placement epoch fail closed.
 	Connect(context.Context, *connect.Request[v1.ConnectRequest], *connect.ServerStream[v1.ProcessEvent]) error
 	// StreamInput writes stdin (or pty-in) as an ordered client-stream — the
 	// interactive input path (keystrokes to a pty). Ordering is guaranteed by the
