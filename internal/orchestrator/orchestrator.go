@@ -176,6 +176,52 @@ type Engine struct {
 	// because stopping them is a MIDDLE step of Shutdown's sequence, and a caller holding
 	// it would have to re-implement that order at the call site.
 	loops loopSet
+	// processStarts serializes the reservation-to-guest-dispatch window for one
+	// logical process identity. A retry must not observe a starting row while a
+	// canceled request is deciding whether to release it.
+	processStartsMu sync.Mutex
+	processStarts   map[string]*processStartFlight
+}
+
+type processStartFlight struct{ done chan struct{} }
+
+// acquireProcessStart serializes the reservation-to-guest-dispatch window for
+// one retry identity. Anonymous starts intentionally skip the gate because no
+// second request can address their reservation until the first response returns.
+func (e *Engine) acquireProcessStart(ctx context.Context, identity string) (func(), error) {
+	if e == nil || identity == "" {
+		return func() {}, nil
+	}
+	for {
+		e.processStartsMu.Lock()
+		if e.processStarts == nil {
+			e.processStarts = make(map[string]*processStartFlight)
+		}
+		if flight := e.processStarts[identity]; flight != nil {
+			done := flight.done
+			e.processStartsMu.Unlock()
+			select {
+			case <-done:
+				continue
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+		flight := &processStartFlight{done: make(chan struct{})}
+		e.processStarts[identity] = flight
+		e.processStartsMu.Unlock()
+		var once sync.Once
+		return func() {
+			once.Do(func() {
+				e.processStartsMu.Lock()
+				if e.processStarts[identity] == flight {
+					delete(e.processStarts, identity)
+					close(flight.done)
+				}
+				e.processStartsMu.Unlock()
+			})
+		}, nil
+	}
 }
 
 type handlerTracker struct {

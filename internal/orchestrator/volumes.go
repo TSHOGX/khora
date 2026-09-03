@@ -1,7 +1,6 @@
 package orchestrator
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -83,7 +82,7 @@ func (e *Engine) registerVolumeRoutes(mux *http.ServeMux) {
 
 func (e *Engine) handleCreateVolume(w http.ResponseWriter, r *http.Request) {
 	var req volumeCreateReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+	if err := strictDecode(r.Body, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
@@ -396,7 +395,7 @@ type volumePatchReq struct {
 // transition.
 func (e *Engine) handlePatchVolume(w http.ResponseWriter, r *http.Request, id model.VolumeID) {
 	var req volumePatchReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+	if err := strictDecode(r.Body, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
@@ -440,7 +439,7 @@ func (e *Engine) handleDeleteVolume(w http.ResponseWriter, r *http.Request, id m
 // mount row.
 func (e *Engine) handleDeriveVolume(w http.ResponseWriter, r *http.Request, id model.VolumeID, isClone bool) {
 	var req volumeCreateReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+	if err := strictDecode(r.Body, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}

@@ -54,9 +54,10 @@ after a caller's cursor. The journal is not workload content and is excluded
 from Template promotion.
 
 The journal and each subscriber queue are bounded. If a cursor falls below the
-retained watermark, or a subscriber cannot keep up, the stream emits an
-`overflow`/`reset` marker with sequence zero and returns a resource-exhausted
-cursor-gap error; callers must rescan and reconnect. A placement epoch change
+retained watermark, or a subscriber cannot keep up (including when the terminal
+exit frame cannot fit), the stream emits an `overflow`/`reset` marker with
+sequence zero and returns a resource-exhausted cursor-gap error; callers must
+rescan and reconnect. A placement epoch change
 invalidates the journal and closes existing streams after a `placement` reset.
 The orchestrator checks the durable epoch while an otherwise idle stream is
 open, so pause/resume does not depend on a later filesystem event to make the

@@ -30,7 +30,7 @@ func TestOperationLeaseRenewsPastOriginalDeadline(t *testing.T) {
 	if err := st.CreateOperation(ctx, op); err != nil {
 		t.Fatal(err)
 	}
-	m := New(Deps{Store: st, Logf: func(string, ...any) {}})
+	m := New(Deps{Store: st, Volume: newFakeVolume(), Logf: func(string, ...any) {}})
 	ownedCtx, claim, stop := m.startOperationLeaseWith(ctx, operationClaim{op: &op}, 60*time.Millisecond, 10*time.Millisecond)
 	defer stop()
 	time.Sleep(110 * time.Millisecond)
@@ -228,7 +228,7 @@ func TestVolumeCreateIdempotencyConvergesAndConflicts(t *testing.T) {
 func TestStateCoreRestartTakeoverPreservesCleanupPhase(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemory()
-	m := New(Deps{Store: st, Logf: func(string, ...any) {}})
+	m := New(Deps{Store: st, Volume: newFakeVolume(), Logf: func(string, ...any) {}})
 	hash, _ := model.RequestHash(map[string]any{"size": 0})
 	op, err := model.BeginOperation("op_stale", "volume.create", "key", hash, time.Now().Add(-time.Minute), time.Second)
 	if err != nil {

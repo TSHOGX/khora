@@ -6,6 +6,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // activityClock is the sandbox-global "last I/O" timestamp behind the health and reclamation
@@ -22,11 +24,10 @@ import (
 // (O(1), independent of process count; same constant-cost rule as Health not
 // listing processes, the Health probe).
 //
-// TRANSIENT and process-local (the transport data plane / the activity signal): it lives in the
-// transport process's memory, is not persisted, does not cross resume, and is
-// reborn (reset to "now") if PID1 restarts the transport child — same class as
-// the output ring buffer (transport behavior "no persistent SoT"). It answers only "how long
-// since this guest last did I/O", never "who connected / for how long".
+// The fast path is process-local, while the optional guest-scratch stamp bridges
+// replaceable transport children. It does not cross a new Placement/resume and
+// answers only "how long since this guest last did I/O", never "who connected /
+// for how long".
 type activityClock struct {
 	lastIOUnixMilli atomic.Int64
 	sharedPath      string
@@ -34,7 +35,7 @@ type activityClock struct {
 	sharedScheduled bool
 }
 
-const activityStateFile = "/tmp/.sandboxd-activity"
+var activityStateFile = "/tmp/.sandboxd-activity"
 
 // newActivityClock seeds lastIO to construction time, so a guest that has done
 // NO I/O since boot reports "idle since boot" rather than a bogus huge duration
@@ -86,7 +87,7 @@ func (c *activityClock) flushShared() {
 		return
 	}
 	now := c.lastIOUnixMilli.Load()
-	_ = os.WriteFile(c.sharedPath, []byte(strconv.FormatInt(now, 10)), 0o600)
+	writeSharedActivity(c.sharedPath, now)
 	c.sharedMu.Lock()
 	if c.lastIOUnixMilli.Load() != now {
 		// A stamp raced the write. Keep the scheduled bit set and arrange one
@@ -96,6 +97,30 @@ func (c *activityClock) flushShared() {
 		c.sharedScheduled = false
 	}
 	c.sharedMu.Unlock()
+}
+
+// writeSharedActivity serializes updates from PID 1 and replaceable transport
+// children. Each writer preserves the greatest observed timestamp, so a late
+// flush from one process cannot move the shared activity clock backwards.
+func writeSharedActivity(path string, now int64) {
+	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return
+	}
+	defer lock.Close()
+	if err := unix.Flock(int(lock.Fd()), unix.LOCK_EX); err != nil {
+		return
+	}
+	defer unix.Flock(int(lock.Fd()), unix.LOCK_UN)
+	if b, err := os.ReadFile(path); err == nil {
+		if current, err := strconv.ParseInt(string(b), 10, 64); err == nil && current > now {
+			now = current
+		}
+	}
+	tmp := path + ".tmp"
+	if os.WriteFile(tmp, []byte(strconv.FormatInt(now, 10)), 0o600) == nil {
+		_ = os.Rename(tmp, path)
+	}
 }
 
 // idleMillis returns how long since the last stamped I/O (ms), clamped at 0 so

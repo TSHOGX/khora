@@ -176,8 +176,11 @@ func (p Process) Validate() error {
 	if p.ID == "" {
 		return NewContractError(ErrorInvalidArgument, "process handle is required")
 	}
-	if (p.StartKey == "") != (p.StartRequestHash == "") {
-		return NewContractError(ErrorInvalidArgument, "process start idempotency metadata must be supplied together")
+	// A request hash is useful with either retry identity: the ordinary
+	// idempotency key or a caller-supplied process handle. The latter is an
+	// explicit stable-start identity even when no separate key is present.
+	if p.StartKey != "" && p.StartRequestHash == "" {
+		return NewContractError(ErrorInvalidArgument, "process start key requires a request hash")
 	}
 	if p.StartRequestHash != "" {
 		if !strings.HasPrefix(p.StartRequestHash, string(DigestSHA256)+":") || len(p.StartRequestHash) != len(string(DigestSHA256))+1+sha256.Size*2 {

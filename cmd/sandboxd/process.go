@@ -726,7 +726,7 @@ func startSpecHash(m *v1.StartRequest) string {
 		PlacementEpoch uint64      `json:"placement_epoch"`
 	}{m.Cmd, args, env, m.Cwd, m.Pty, m.PlacementEpoch})
 	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:])
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 // ringBuffer holds recent output frames up to a byte cap, dropping the oldest
@@ -818,6 +818,9 @@ func (p *proc) finish(exitCode int) {
 		select {
 		case sub.ch <- p.endFrame:
 		default:
+			// The terminal frame carries the only exit code for this live copy.
+			// Do not let a full queue turn a dropped terminal into a clean EOF.
+			sub.overflow.Store(true)
 		}
 		delete(p.subs, sub)
 		close(sub.ch)
@@ -856,7 +859,10 @@ func (p *proc) subscribeFrom(after uint64) (sub *subscriber, snap []frame, ended
 	} else {
 		first = p.ring.droppedBefore
 	}
-	if (after > 0 && first > 0 && after+1 < first) || (after == 0 && first > 1) {
+	// Sequence zero is the initial cursor: it asks for whatever bounded tail
+	// is currently retained, even when older frames have already been evicted.
+	// Only a nonzero cursor can be stale and require an explicit rescan.
+	if after > 0 && first > 0 && after+1 < first {
 		gap = true
 	}
 	if after > 0 {
@@ -870,7 +876,9 @@ func (p *proc) subscribeFrom(after uint64) (sub *subscriber, snap []frame, ended
 	}
 	if p.ended {
 		if after > 0 && p.endFrame.sequence <= after {
-			return nil, snap, true, p.endFrame, gap
+			// The caller has already consumed the terminal frame at this cursor.
+			// Returning it again would violate the strictly-after cursor contract.
+			return nil, snap, true, frame{}, gap
 		}
 		return nil, snap, true, p.endFrame, gap
 	}

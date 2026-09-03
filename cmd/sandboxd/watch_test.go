@@ -319,3 +319,12 @@ func TestWatchHubDetectsRenameAndModeChange(t *testing.T) {
 		t.Fatalf("mode-change records = %+v", h.records)
 	}
 }
+
+func TestWatchHubIgnoresDirectoryMtimeOnlyChanges(t *testing.T) {
+	old := watchEntry{path: "/root", type_: v1.EntryType_ENTRY_TYPE_DIRECTORY, mtime: 1, mode: 0o755, ino: 2, dev: 3}
+	cur := old
+	cur.mtime = 2
+	if watchEntryChanged(old, cur) {
+		t.Fatal("directory mtime-only change should not be reported as a guest change")
+	}
+}

@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -433,9 +434,34 @@ func (e *Engine) handlePublish(w http.ResponseWriter, r *http.Request, id model.
 // which is why the misspelling has to be an error rather than a default.
 func strictDecode(body io.Reader, v any) error {
 	dec := json.NewDecoder(body)
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(v); err != nil && !errors.Is(err, io.EOF) {
+	var raw json.RawMessage
+	if err := dec.Decode(&raw); err != nil {
+		if errors.Is(err, io.EOF) {
+			// An empty body retains the established optional-request behavior.
+			return nil
+		}
 		return fmt.Errorf("request body: %w", err)
+	}
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return errors.New("request body: top-level null is not a request object")
+	}
+	// Decode the captured value with the strict field policy. Keeping this
+	// separate from the outer decoder lets us reject null explicitly while
+	// preserving recursive unknown-field checks.
+	value := json.NewDecoder(bytes.NewReader(raw))
+	value.DisallowUnknownFields()
+	if err := value.Decode(v); err != nil {
+		return fmt.Errorf("request body: %w", err)
+	}
+	// A decoder stops after the first JSON value. Consume one more value so
+	// concatenated documents or trailing garbage cannot be accepted as a valid
+	// request with an ignored suffix.
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return errors.New("request body: multiple JSON values")
+		}
+		return fmt.Errorf("request body: trailing data: %w", err)
 	}
 	return nil
 }

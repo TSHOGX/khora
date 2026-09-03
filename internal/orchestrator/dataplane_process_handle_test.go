@@ -50,3 +50,92 @@ func TestReserveProcessRejectsKeyRetryWithDifferentCallerHandle(t *testing.T) {
 		t.Fatalf("changed handle retry = %v; want idempotency conflict", err)
 	}
 }
+
+func TestProcessStartIdentityGateSerializesRetryWindow(t *testing.T) {
+	e := &Engine{}
+	identity := processStartIdentity("sbx_a", 3, "retry-key", "")
+	release, err := e.acquireProcessStart(context.Background(), identity)
+	if err != nil || release == nil {
+		t.Fatalf("first gate = release=%v err=%v", release != nil, err)
+	}
+	defer release()
+	waitCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		second, err := e.acquireProcessStart(waitCtx, identity)
+		if second != nil {
+			second()
+		}
+		done <- err
+	}()
+	if err := <-done; err == nil {
+		t.Fatal("retry acquired gate before initial dispatch released it")
+	}
+}
+
+func TestCanceledReservationDeletionRequiresAnonymousStart(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		created bool
+		key     string
+		handle  string
+		want    bool
+	}{
+		{name: "anonymous newly-created", created: true, want: true},
+		{name: "keyed retry identity", created: true, key: "retry", want: false},
+		{name: "caller handle identity", created: true, handle: "proc_fixed", want: false},
+		{name: "existing row", created: false, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := canceledReservationMayBeDeleted(tc.created, tc.key, tc.handle); got != tc.want {
+				t.Fatalf("canceledReservationMayBeDeleted(%v,%q,%q) = %v; want %v", tc.created, tc.key, tc.handle, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestProcessStartRequestHashIncludesEpochWithoutKey(t *testing.T) {
+	a := processStartRequestHash(&v1.StartRequest{Cmd: "/bin/true", PlacementEpoch: 1})
+	b := processStartRequestHash(&v1.StartRequest{Cmd: "/bin/true", PlacementEpoch: 2})
+	if a == "" || b == "" || a == b {
+		t.Fatalf("request hashes = %q/%q; want non-empty epoch-specific fingerprints", a, b)
+	}
+}
+
+func TestReserveProcessRetryByReturnedHandleConvergesWithoutKey(t *testing.T) {
+	p, sid := processReservationFixture(t)
+	first := &v1.StartRequest{Cmd: "/bin/sh", Args: []string{"-c", "printf ok"}, PlacementEpoch: 7}
+	reserved, created, err := p.reserveProcess(context.Background(), sid, 7, "", "", processStartRequestHash(first))
+	if err != nil || !created {
+		t.Fatalf("initial reservation = %v, created=%v", err, created)
+	}
+	retry := &v1.StartRequest{Cmd: first.Cmd, Args: append([]string(nil), first.Args...), ProcessHandle: string(reserved.ID), PlacementEpoch: first.PlacementEpoch}
+	got, created, err := p.reserveProcess(context.Background(), sid, 7, "", retry.ProcessHandle, processStartRequestHash(retry))
+	if err != nil || created || got.ID != reserved.ID {
+		t.Fatalf("retry reservation = id=%q created=%v err=%v; want original reservation", got.ID, created, err)
+	}
+	changed := &v1.StartRequest{
+		Cmd:            retry.Cmd,
+		Args:           []string{"-c", "printf changed"},
+		ProcessHandle:  retry.ProcessHandle,
+		PlacementEpoch: retry.PlacementEpoch,
+	}
+	if _, _, err := p.reserveProcess(context.Background(), sid, 7, "", changed.ProcessHandle, processStartRequestHash(changed)); !errors.Is(err, model.ErrIdempotencyConflict) {
+		t.Fatalf("changed command retry = %v; want idempotency conflict", err)
+	}
+}
+
+func TestReserveProcessKeylessHandleRetryUsesCanonicalRepeatedFields(t *testing.T) {
+	p, sid := processReservationFixture(t)
+	first := &v1.StartRequest{Cmd: "/bin/true", PlacementEpoch: 7}
+	reserved, created, err := p.reserveProcess(context.Background(), sid, 7, "", "", processStartRequestHash(first))
+	if err != nil || !created {
+		t.Fatalf("initial reservation = %v, created=%v", err, created)
+	}
+	retry := &v1.StartRequest{Cmd: first.Cmd, Args: []string{}, Env: []string{}, ProcessHandle: string(reserved.ID), PlacementEpoch: 7}
+	got, created, err := p.reserveProcess(context.Background(), sid, 7, "", retry.ProcessHandle, processStartRequestHash(retry))
+	if err != nil || created || got.ID != reserved.ID {
+		t.Fatalf("retry with omitted/empty repeated fields = id=%q created=%v err=%v; want original reservation", got.ID, created, err)
+	}
+}

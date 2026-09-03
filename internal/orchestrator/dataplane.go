@@ -73,6 +73,8 @@ func proxyErr(err error) error {
 		return connect.NewError(connect.CodeNotFound, errors.New("sandbox object not found"))
 	case model.ErrorStaleEpoch:
 		return connect.NewError(connect.CodeFailedPrecondition, errors.New("stale placement epoch"))
+	case model.ErrorIdempotencyConflict:
+		return connect.NewError(connect.CodeAlreadyExists, errors.New("sandbox request idempotency conflict"))
 	case model.ErrorConflict, model.ErrorInProgress, model.ErrorCursorGap:
 		return connect.NewError(connect.CodeFailedPrecondition, errors.New("sandbox request conflicts with current state"))
 	}
@@ -153,12 +155,28 @@ func (p *processProxy) Start(ctx context.Context, req *connect.Request[v1.StartR
 	if err := p.e.validateRequestEpoch(ctx, string(sandboxID), uint64(epoch)); err != nil {
 		return proxyErr(err)
 	}
+	// A reservation with an idempotency key or supplied handle is observable
+	// retry identity. Serialize its reservation-to-dispatch window so a
+	// concurrent retry cannot observe a row while a canceled request removes it.
+	identity := processStartIdentity(sandboxID, epoch, m.IdempotencyKey, m.ProcessHandle)
+	releaseStart, err := p.e.acquireProcessStart(ctx, identity)
+	if err != nil {
+		return err
+	}
+	releasedStart := false
+	release := func() {
+		if !releasedStart && releaseStart != nil {
+			releasedStart = true
+			releaseStart()
+		}
+	}
+	defer release()
 	// Reserve the logical Process row before invoking the guest. The guest
 	// supervisor receives the same opaque handle, so a disconnect before the
 	// first output frame cannot leave a running process without a control-plane
 	// identity.
 	requestHash := processStartRequestHash(m)
-	reserved, created, err := p.reserveProcess(ctx, sandboxID, epoch, m.IdempotencyKey, requestHash)
+	reserved, created, err := p.reserveProcess(ctx, sandboxID, epoch, m.IdempotencyKey, m.ProcessHandle, requestHash)
 	if err != nil {
 		return proxyErr(err)
 	}
@@ -168,6 +186,7 @@ func (p *processProxy) Start(ctx context.Context, req *connect.Request[v1.StartR
 	// still needs to be issued (the supervisor's start-flight CAS arbitrates
 	// concurrent callers).
 	if !created && reserved.State != model.ProcessStarting {
+		release()
 		stable, ok := cl.(transport.StableProcessClient)
 		if !ok {
 			return proxyErr(errors.New("stable process reconnect is unavailable"))
@@ -182,6 +201,16 @@ func (p *processProxy) Start(ctx context.Context, req *connect.Request[v1.StartR
 	if m.Pty != nil {
 		spec.Pty = &transport.PtySize{Rows: uint16(m.Pty.Rows), Cols: uint16(m.Pty.Cols)}
 	}
+	// A cancellation observed before dispatch is unambiguous: no guest request
+	// could have forked, so remove only this attempt's reservation. Once the
+	// transport call begins, cancellation is ambiguous and the reservation is
+	// retained for handle-based recovery.
+	if err := ctx.Err(); err != nil {
+		if canceledReservationMayBeDeleted(created, m.IdempotencyKey, m.ProcessHandle) {
+			deleteProcessReservation(p, reserved.ID)
+		}
+		return err
+	}
 	ch, err := cl.Start(ctx, spec)
 	if err != nil {
 		// A failed RPC before a stream exists did not provide a start frame. A
@@ -189,13 +218,43 @@ func (p *processProxy) Start(ctx context.Context, req *connect.Request[v1.StartR
 		// leave a permanent starting record; an existing row is retained because
 		// the guest may already own the idempotent process.
 		if created && definiteProcessStartFailure(err) {
-			if derr := p.e.Store.DeleteProcess(ctx, reserved.ID); derr != nil && !errors.Is(derr, store.ErrProcessNotFound) {
-				log.Printf("dataplane: remove failed process reservation %s: %v", reserved.ID, derr)
-			}
+			deleteProcessReservation(p, reserved.ID)
 		}
+		// Keep the identity gate held through cleanup. A retry must not observe
+		// the starting row between the guest error and its conditional removal.
+		release()
 		return proxyErr(err)
 	}
+	// The guest has accepted the start and returned a stream. Release before
+	// forwarding so retries can reconnect while this caller drains output.
+	release()
 	return p.forwardProcessEvents(ctx, string(sandboxID), ch, stream, reserved)
+}
+
+func processStartIdentity(sandbox model.SandboxID, epoch model.PlacementEpoch, key, handle string) string {
+	if key == "" && handle == "" {
+		return ""
+	}
+	kind, value := "key", key
+	if key == "" {
+		kind, value = "handle", handle
+	}
+	return fmt.Sprintf("%s\x00%d\x00%s:%s", sandbox, uint64(epoch), kind, value)
+}
+
+func canceledReservationMayBeDeleted(created bool, key, handle string) bool {
+	return created && key == "" && handle == ""
+}
+
+func deleteProcessReservation(p *processProxy, id model.ProcessID) {
+	if p == nil || p.e == nil || p.e.Store == nil {
+		return
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := p.e.Store.DeleteProcess(cleanupCtx, id); err != nil && !errors.Is(err, store.ErrProcessNotFound) {
+		log.Printf("dataplane: remove failed process reservation %s: %v", id, err)
+	}
 }
 
 func definiteProcessStartFailure(err error) bool {
@@ -218,10 +277,34 @@ func definiteProcessStartFailure(err error) bool {
 // initial starting state atomically through the Store seam. Idempotency keys
 // are scoped by Sandbox and Placement epoch; an empty key gets an opaque
 // random handle because there is no retry identity to derive from.
-func (p *processProxy) reserveProcess(ctx context.Context, sandbox model.SandboxID, epoch model.PlacementEpoch, key, requestHash string) (*model.Process, bool, error) {
-	handle := reservedProcessHandle(sandbox, epoch, key)
+func (p *processProxy) reserveProcess(ctx context.Context, sandbox model.SandboxID, epoch model.PlacementEpoch, key, requestedHandle, requestHash string) (*model.Process, bool, error) {
+	handle := requestedHandle
+	if handle == "" {
+		handle = reservedProcessHandle(sandbox, epoch, key)
+	}
+	// Resolve an existing key before deriving/creating the candidate handle.
+	// This catches a retry that supplies a different handle: creating under that
+	// new ID first would otherwise bypass the key's uniqueness constraint.
+	if key != "" {
+		if listed, err := p.e.Store.ListProcesses(ctx, sandbox); err != nil {
+			return nil, false, err
+		} else {
+			for _, existing := range listed {
+				if existing.PlacementEpoch != epoch || existing.StartKey != model.IdempotencyKey(key) {
+					continue
+				}
+				if requestHash != "" && existing.StartRequestHash != requestHash {
+					return nil, false, model.ErrIdempotencyConflict
+				}
+				if requestedHandle != "" && existing.ID != model.ProcessID(requestedHandle) {
+					return nil, false, model.ErrIdempotencyConflict
+				}
+				return &existing, false, nil
+			}
+		}
+	}
 	for attempt := 0; ; attempt++ {
-		if key == "" && attempt > 0 {
+		if key == "" && requestedHandle == "" && attempt > 0 {
 			handle = reservedProcessHandle(sandbox, epoch, "")
 		}
 		now := time.Now()
@@ -232,16 +315,39 @@ func (p *processProxy) reserveProcess(ctx context.Context, sandbox model.Sandbox
 			return nil, false, err
 		}
 		existing, gerr := p.e.Mediator.Process(ctx, candidate.ID)
+		// A retry can carry a caller-supplied handle that differs from the
+		// first request's handle. Resolve the existing logical row by its
+		// scoped idempotency key so the conflict is deterministic rather than
+		// creating a second row under the new handle.
+		if gerr != nil && key != "" {
+			if listed, lerr := p.e.Store.ListProcesses(ctx, sandbox); lerr == nil {
+				for _, candidateProcess := range listed {
+					if candidateProcess.PlacementEpoch == epoch && candidateProcess.StartKey == model.IdempotencyKey(key) {
+						existing, gerr = candidateProcess, nil
+						break
+					}
+				}
+			}
+		}
 		if gerr != nil {
-			if key == "" && attempt < 3 {
+			if key == "" && requestedHandle == "" && attempt < 3 {
 				continue
 			}
 			return nil, false, gerr
 		}
 		if existing.Sandbox != sandbox || existing.PlacementEpoch != epoch {
+			if requestedHandle != "" {
+				// A caller-supplied handle is globally opaque identity. A row
+				// belonging to another sandbox or epoch is a handle collision,
+				// not permission to reinterpret it as a stale placement.
+				return nil, false, model.ErrConflict
+			}
 			return nil, false, model.ErrStaleEpoch
 		}
-		if key != "" && existing.StartRequestHash != requestHash {
+		if requestHash != "" && existing.StartRequestHash != requestHash {
+			return nil, false, model.ErrIdempotencyConflict
+		}
+		if requestedHandle != "" && existing.ID != model.ProcessID(requestedHandle) {
 			return nil, false, model.ErrIdempotencyConflict
 		}
 		return &existing, false, nil
@@ -249,7 +355,7 @@ func (p *processProxy) reserveProcess(ctx context.Context, sandbox model.Sandbox
 }
 
 func processStartRequestHash(m *v1.StartRequest) string {
-	if m == nil || m.IdempotencyKey == "" {
+	if m == nil {
 		return ""
 	}
 	args := append([]string{}, m.Args...)
@@ -723,7 +829,7 @@ func (f *fsProxy) Watch(ctx context.Context, req *connect.Request[v1.WatchReques
 			if err := stream.Send(&v1.WatchEvent{Path: ev.Path, OldPath: ev.OldPath, Operation: ev.Operation, Type: kind, Size: ev.Size, MtimeUnixNano: ev.MTime.UnixNano(), Sequence: ev.Sequence, PlacementEpoch: ev.Epoch, Overflow: ev.Overflow, Reset_: ev.Reset, ResetReason: ev.ResetReason}); err != nil {
 				return err
 			}
-			lastReset = ev.Reset
+			lastReset = ev.Reset && (ev.ResetReason == "placement" || ev.ResetReason == "transport")
 		case <-ticker.C:
 			current, err := f.e.Mediator.Placement(ctx, id)
 			if err != nil {

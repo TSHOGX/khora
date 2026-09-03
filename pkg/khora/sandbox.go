@@ -132,6 +132,9 @@ func (c *Client) PlacementSnapshot(ctx context.Context, sandboxID string) (Place
 	return out, err
 }
 
+// Processes lists the durable logical process records for a Sandbox. The
+// interactive process data plane remains Connect-RPC; this route is the
+// control-plane snapshot/list view.
 func (c *Client) Processes(ctx context.Context, sandboxID string) ([]Process, error) {
 	var out []Process
 	err := c.do(ctx, http.MethodGet, "/v1/sandboxes/"+sandboxID+"/processes", nil, &out)

@@ -442,7 +442,7 @@ func (e *Engine) handleSandboxSub(w http.ResponseWriter, r *http.Request) {
 	// which contradicts the API error contract ("a wrong method on ANY collection/object route → 405")
 	// and was inconsistent with the two arms above for no reason anyone chose: the
 	// route exists, the method does not apply to it.
-	case sub == "files", sub == "pause", sub == "resume", sub == "telemetry", sub == "snapshot", sub == "placement", sub == "processes":
+	case sub == "files", sub == "pause", sub == "resume", sub == "telemetry", sub == "snapshot", sub == "placement":
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	default:
 		// process/fs data plane is Connect-RPC (the outer-edge transport split), not REST here.
@@ -469,6 +469,13 @@ func (e *Engine) handlePlacementSnapshot(w http.ResponseWriter, r *http.Request,
 }
 
 func (e *Engine) handleSandboxProcesses(w http.ResponseWriter, r *http.Request, id model.SandboxID) {
+	// Both Store backends return an empty slice for an unknown scope. Check the
+	// authoritative Sandbox row first so an unknown object is a deterministic
+	// 404 rather than a misleading successful empty collection.
+	if _, err := e.Store.GetSandbox(r.Context(), id); err != nil {
+		statusFor(w, err)
+		return
+	}
 	list, err := e.Store.ListProcesses(r.Context(), id)
 	if err != nil {
 		statusFor(w, err)

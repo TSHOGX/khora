@@ -885,7 +885,7 @@ var promoteExcludedPaths = []string{
 	"tmp/.sandboxd-watch.json",     // placement-scoped watch cursor journal
 	"tmp/.sandboxd-process.sock",   // PID-1 process supervisor endpoint, not workload content
 	"tmp/.sandboxd-activity",       // guest-global activity signal, not workload content
-	"tmp/.sandboxd-watch.json",     // placement-scoped watch cursor journal
+	"tmp/.sandboxd-activity.lock",  // activity clock writer lock, not workload content
 	// Crash-loop sentinel: only a `testguest` build reads it
 	// (cmd/sandboxd/faultinject_testguest.go), but the exclusion is
 	// unconditional — capturing it would mint a Template whose every sandbox is

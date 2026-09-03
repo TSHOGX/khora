@@ -225,7 +225,19 @@ func (h *watchHub) persistLocked() error {
 		return err
 	}
 	tmp := h.path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(b); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
 		return err
 	}
 	if err := os.Rename(tmp, h.path); err != nil {
@@ -360,6 +372,12 @@ func (h *watchHub) pruneScopesLocked() {
 }
 
 func watchEntryChanged(old, cur watchEntry) bool {
+	// Directory mtimes change when children or runtime journals are updated.
+	// Treating an mtime-only directory change as a guest event can make a
+	// watcher rooted at `/` observe its own journal persistence forever.
+	if old.type_ == v1.EntryType_ENTRY_TYPE_DIRECTORY && cur.type_ == v1.EntryType_ENTRY_TYPE_DIRECTORY {
+		return old.mode != cur.mode || old.type_ != cur.type_ || old.ino != cur.ino || old.dev != cur.dev
+	}
 	return old.size != cur.size || old.mtime != cur.mtime || old.mode != cur.mode || old.type_ != cur.type_ || old.ino != cur.ino || old.dev != cur.dev
 }
 
@@ -660,6 +678,13 @@ func (h *watchHub) startMonitor(scope *watchScope) {
 	scope.lastUse = time.Now()
 	h.mu.Unlock()
 	go func() {
+		defer func() {
+			h.mu.Lock()
+			if scope.epoch == h.epoch {
+				scope.running = false
+			}
+			h.mu.Unlock()
+		}()
 		ticker := time.NewTicker(watchPollInterval)
 		defer ticker.Stop()
 		for range ticker.C {
@@ -683,7 +708,6 @@ func (h *watchHub) startMonitor(scope *watchScope) {
 			}
 			h.mu.Lock()
 			if scope.epoch != h.epoch || (scope.active == 0 && time.Since(scope.lastUse) > watchScopeIdle) {
-				scope.running = false
 				h.mu.Unlock()
 				return
 			}
@@ -738,6 +762,16 @@ func (s *fsServer) Watch(ctx context.Context, req *connect.Request[v1.WatchReque
 	}
 	for _, event := range replay {
 		if err := stream.Send(event); err != nil {
+			hub.unsubscribe(sub)
+			return err
+		}
+	}
+	if len(replay) == 0 {
+		// Flush the server-stream headers before waiting for the first change.
+		// Connect's streaming client otherwise cannot return from Watch until a
+		// payload arrives, preventing the caller from performing the write that
+		// would produce that payload.
+		if err := stream.Send(nil); err != nil {
 			hub.unsubscribe(sub)
 			return err
 		}

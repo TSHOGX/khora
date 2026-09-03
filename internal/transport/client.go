@@ -192,12 +192,10 @@ func drainEvents(stream eventStream) <-chan ProcessEvent {
 				out <- ProcessEvent{Kind: "keepalive", Handle: ev.ProcessHandle, Epoch: ev.PlacementEpoch, Sequence: ev.Sequence, Replay: ev.Replay, Gap: ev.Gap, ResetReason: ev.ResetReason}
 			}
 		}
-		// Surface WHY the stream ended: without it, two opposite outcomes collapse into
-		// one silent channel close — a clean end (the process finished; its exit code
-		// already arrived) and a overflow disconnect (this subscriber
-		// could not keep up and its copy was dropped). The guest reports the latter as
-		// resource_exhausted precisely so the consumer can tell them apart, reconnecting
-		// being the right response to one and wrong for the other.
+		// Surface WHY the stream ended: a clean end (the process finished; its exit
+		// code already arrived) and an overflow disconnect (this subscriber could not
+		// keep up and its copy was dropped) require opposite recovery. The guest
+		// reports the latter as resource_exhausted so the consumer can tell them apart.
 		if err := stream.Err(); err != nil {
 			out <- ProcessEvent{Kind: "error", Err: err}
 		}

@@ -240,11 +240,12 @@ type StableProcessInfo struct {
 }
 
 // FsClient is the transport data plane fs primitive (fs transport): the unary metadata surface
-// plus the streaming large-file bypass. No watch — consumers poll Stat+Read.
+// plus the streaming large-file bypass. Filesystem Watch is an optional
+// placement-scoped extension exposed through WatchClient below.
 type FsClient interface {
 	// Read reads sandbox file bytes at an offset; engine keeps no read cursor,
-	// no cross-resume offset continuity (fs transport). No watch — consumers
-	// poll Stat+Read: rendering state is separate from interactive stream state.
+	// no cross-resume offset continuity (fs transport). Watch cursors are a
+	// separate change-detection stream, not a read offset.
 	Read(ctx context.Context, path string, offset, length int64) ([]byte, error)
 
 	// Write writes sandbox file bytes.

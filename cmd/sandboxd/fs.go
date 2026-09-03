@@ -58,10 +58,15 @@ func collectWatch(root string, recursive bool) (map[string]watchEntry, error) {
 	// loop because every persisted watch event changes its mtime. Match exact
 	// paths so a guest file merely sharing the prefix remains observable.
 	internalPaths := map[string]struct{}{
-		"/tmp/.sandboxd-watch.json":     {},
-		"/tmp/.sandboxd-processes.json": {},
-		"/tmp/.sandboxd-transport.pid":  {},
-		"/tmp/.sandboxd-crashloop":      {},
+		"/tmp/.sandboxd-watch.json":         {},
+		"/tmp/.sandboxd-watch.json.tmp":     {},
+		"/tmp/.sandboxd-processes.json":     {},
+		"/tmp/.sandboxd-processes.json.tmp": {},
+		"/tmp/.sandboxd-process.sock":       {},
+		"/tmp/.sandboxd-activity":           {},
+		"/tmp/.sandboxd-activity.lock":      {},
+		"/tmp/.sandboxd-transport.pid":      {},
+		"/tmp/.sandboxd-crashloop":          {},
 	}
 	isInternal := func(p string) bool {
 		_, ok := internalPaths[filepath.Clean(p)]

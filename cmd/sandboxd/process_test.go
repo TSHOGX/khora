@@ -145,13 +145,11 @@ func TestSlowSubscriberDroppedSourceNeverBlocks(t *testing.T) {
 	}
 }
 
-// nonblocking fan-out boundary (lossy-by-design, nonblocking fan-out / transport behavior): a
-// subscriber whose window is exactly full at process exit cannot receive the end
-// frame. Per the best-effort-tail contract that dropped end frame — exit code
-// included — is silently lost for THAT copy; the channel still closes cleanly and
-// finish must NOT block or panic. Making this loss observable would change the
-// best-effort-tail contract; this test pins the current deliberate behavior.
-func TestFinishOnFullWindowIsSilentlyLossy(t *testing.T) {
+// nonblocking fan-out boundary: a subscriber whose window is exactly full at
+// process exit cannot receive the end frame. Mark that copy overflow so the
+// stream reports a recoverable gap rather than a misleading clean EOF; finish
+// itself must remain non-blocking.
+func TestFinishOnFullWindowMarksOverflow(t *testing.T) {
 	p := newProc(1, nil)
 	sub, _, _, _ := p.subscribe()
 	// Fill the window to the brim without draining, staying just under the
@@ -162,12 +160,31 @@ func TestFinishOnFullWindowIsSilentlyLossy(t *testing.T) {
 	if sub.overflow.Load() {
 		t.Fatal("subscriber dropped before finish; window fill overshot the cap")
 	}
-	// Exit with a full window: end frame has nowhere to go and is dropped for this
-	// copy. finish must complete (source never blocks) and the channel must close.
+	// Exit with a full window: end frame has nowhere to go. The copy is marked
+	// overflow, finish completes without waiting, and the channel closes.
 	p.finish(0)
 	got := drain(sub.ch) // must terminate (channel closed by finish)
 	if len(got) != subWindowFrames {
-		t.Fatalf("drained %d frames; want %d data frames (end frame silently lost, by design)", len(got), subWindowFrames)
+		t.Fatalf("drained %d frames; want %d data frames (end frame is replaced by overflow)", len(got), subWindowFrames)
+	}
+	if !sub.overflow.Load() {
+		t.Fatal("full-window subscriber was not marked overflow when terminal frame was dropped")
+	}
+}
+
+func TestSubscribeAfterEndedDoesNotRepeatConsumedEnd(t *testing.T) {
+	p := newProc(1, nil)
+	p.broadcast(frame{kind: 'd', data: []byte("tail")})
+	p.finish(7)
+	_, snap, ended, endF, gap := p.subscribeFrom(p.endFrame.sequence)
+	if gap || !ended {
+		t.Fatalf("consumed terminal cursor = ended=%v gap=%v", ended, gap)
+	}
+	if len(snap) != 0 {
+		t.Fatalf("consumed terminal cursor replayed %d frames", len(snap))
+	}
+	if endF.kind != 0 {
+		t.Fatalf("consumed terminal cursor returned end frame: %+v", endF)
 	}
 }
 
@@ -226,9 +243,29 @@ func TestRingBufferEmptyAfterOversizeFrameStillReportsCursorGap(t *testing.T) {
 	}
 	p := newProc(1, nil)
 	p.ring = r
-	_, _, _, _, gap := p.subscribeFrom(0)
+	// Sequence 2 is the first position that could be replayed. Move the
+	// watermark forward one more frame to model a later eviction, so cursor 1
+	// is genuinely stale while cursor 0 remains the initial-tail request.
+	r.droppedBefore = 3
+	p.ring = r
+	_, _, _, _, gap := p.subscribeFrom(1)
 	if !gap {
-		t.Fatal("empty ring after dropped output did not report a cursor gap")
+		t.Fatal("nonzero stale cursor after dropped output did not report a cursor gap")
+	}
+}
+
+func TestZeroCursorReplaysRetainedTailAfterTrim(t *testing.T) {
+	p := newProc(1, nil)
+	p.ring.cap = 4
+	for i := 0; i < 4; i++ {
+		p.broadcast(frame{kind: 'd', data: []byte("xx")})
+	}
+	_, snap, _, _, gap := p.subscribeFrom(0)
+	if gap {
+		t.Fatal("zero cursor must replay the retained tail, not report a stale-prefix gap")
+	}
+	if len(snap) == 0 {
+		t.Fatal("zero cursor returned no retained frames")
 	}
 }
 
@@ -315,6 +352,9 @@ func TestStartSpecHashIncludesPlacementEpoch(t *testing.T) {
 	b := startSpecHash(&v1.StartRequest{Cmd: "/bin/true", PlacementEpoch: 2})
 	if a == b {
 		t.Fatal("start idempotency hash ignored placement epoch")
+	}
+	if !strings.HasPrefix(a, "sha256:") {
+		t.Fatalf("start idempotency hash = %q; want canonical sha256 prefix", a)
 	}
 }
 

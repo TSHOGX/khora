@@ -1179,6 +1179,9 @@ func (m *Mediator) promoteWithManifest(ctx context.Context, id model.SandboxID, 
 		// caller omitted one. This makes future launch verification meaningful.
 		manifest.DigestAlgorithm = model.DigestSHA256
 		manifest.ContentDigest = digest
+		if err := manifest.Validate(); err != nil {
+			return "", fmt.Errorf("promote: provider returned invalid template digest: %w", err)
+		}
 	}
 	if err := m.deps.Store.CreateTemplate(ctx, model.Template{
 		ID:        newID,
