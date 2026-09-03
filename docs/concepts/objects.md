@@ -44,6 +44,10 @@ meaningful value.
 
 A Placement is the live, replaceable runtime realization of a Sandbox. Pause
 destroys it. Resume produces a new Placement from current durable bindings.
+The durable `(sandbox_id, epoch)` pair identifies one realization: adoption
+keeps the epoch, while resume advances it. Requests carrying an old epoch are
+rejected as stale rather than redirected. The pure contract and reset rules are
+maintained in [Durable contract foundation](../internals/contracts.md).
 
 ## Event
 

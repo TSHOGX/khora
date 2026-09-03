@@ -15,6 +15,8 @@ guides, configuration, operations, or API reference instead.
 - [btrfs](btrfs.md): shared `squota` primitive and quota-row hazards
 - [Network](network.md): rule ordering, fail-closed enforcement, and counters
 - [Transport](transport.md): guest protocol, proxy barrier, and fan-out behavior
+- [Contracts](contracts.md): durable object, epoch, operation, cursor, error,
+  measurement, and decision-gate contracts
 
 Open work is not kept as a parallel register here. Link the ruling Issue instead:
 [remote provider input shape](https://github.com/TSHOGX/khora/issues/7).

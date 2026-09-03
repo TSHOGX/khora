@@ -63,6 +63,13 @@ lost Events, so the gap is explicit.
 The store assigns order and retention; contracts for both memory and SQLite backends
 are in [internal/store/storetest/contract.go](../../internal/store/storetest/contract.go).
 
+Process-output, filesystem-watch, and telemetry cursors are separate from the
+lifecycle cursor. Their placement epoch is part of the cursor, so a pause or
+resume reset is explicit and an old cursor fails closed. The protocol-neutral
+classes, URL-safe cursor encoding, overflow gap, and measured-zero versus
+unavailable rules are maintained in
+[Durable contract foundation](../internals/contracts.md).
+
 The stream does not currently sample per-object usage. That request is tracked in
 [Issue #3](https://github.com/TSHOGX/khora/issues/3). Replay retention is configured
 with `--event-retention`; the default `0s` retains the full outbox. Set a positive
