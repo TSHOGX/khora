@@ -128,6 +128,7 @@ type ProcessID string
 type ProcessState string
 
 const (
+	ProcessStarting  ProcessState = "starting"
 	ProcessRunning   ProcessState = "running"
 	ProcessExited    ProcessState = "exited"
 	ProcessPaused    ProcessState = "paused"
@@ -135,6 +136,7 @@ const (
 )
 
 var processStates = [...]ProcessState{
+	ProcessStarting,
 	ProcessRunning,
 	ProcessExited,
 	ProcessPaused,
@@ -163,11 +165,24 @@ type Process struct {
 	StartedAt      time.Time      `json:"started_at"`
 	ExitedAt       *time.Time     `json:"exited_at,omitempty"`
 	OutputCursor   Cursor         `json:"output_cursor"`
+	// StartKey and StartRequestHash are control-plane idempotency metadata. They
+	// are durable but intentionally omitted from the public Process JSON shape;
+	// callers address a process by ID/handle and never need the request key.
+	StartKey         IdempotencyKey `json:"-"`
+	StartRequestHash string         `json:"-"`
 }
 
 func (p Process) Validate() error {
 	if p.ID == "" {
 		return NewContractError(ErrorInvalidArgument, "process handle is required")
+	}
+	if (p.StartKey == "") != (p.StartRequestHash == "") {
+		return NewContractError(ErrorInvalidArgument, "process start idempotency metadata must be supplied together")
+	}
+	if p.StartRequestHash != "" {
+		if !strings.HasPrefix(p.StartRequestHash, string(DigestSHA256)+":") || len(p.StartRequestHash) != len(string(DigestSHA256))+1+sha256.Size*2 {
+			return NewContractError(ErrorInvalidArgument, "process start request hash is not a sha256 digest")
+		}
 	}
 	if p.Sandbox == "" {
 		return NewContractError(ErrorInvalidArgument, "process sandbox is required")
@@ -179,7 +194,7 @@ func (p Process) Validate() error {
 	// and reclaimed records intentionally carry no current locator; retaining a
 	// positive historical PID is also allowed for diagnostics, but it is never
 	// used as process identity.
-	if p.PID < 0 || (p.State == ProcessRunning && p.PID == 0) {
+	if p.PID < 0 || (p.State == ProcessRunning && p.PID == 0) || (p.State == ProcessStarting && p.PID != 0) {
 		return NewContractError(ErrorInvalidArgument, "process PID locator is invalid")
 	}
 	if !p.State.Valid() {
@@ -194,8 +209,8 @@ func (p Process) Validate() error {
 	if (p.State == ProcessExited || p.State == ProcessReclaimed) && p.ExitedAt == nil {
 		return NewContractError(ErrorInvalidArgument, "terminal process requires an exit time")
 	}
-	if p.State == ProcessRunning && p.ExitedAt != nil {
-		return NewContractError(ErrorInvalidArgument, "running process cannot have an exit time")
+	if (p.State == ProcessStarting || p.State == ProcessRunning) && p.ExitedAt != nil {
+		return NewContractError(ErrorInvalidArgument, "live process cannot have an exit time")
 	}
 	if p.State != ProcessExited && p.ExitCode != nil {
 		return NewContractError(ErrorInvalidArgument, "exit code is only valid for an exited process")

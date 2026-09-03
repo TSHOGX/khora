@@ -81,7 +81,7 @@ func (m *Mediator) pauseProcessRecords(ctx context.Context, id model.SandboxID, 
 		return
 	}
 	for _, p := range procs {
-		if p.State != model.ProcessRunning || p.PlacementEpoch != epoch {
+		if (p.State != model.ProcessRunning && p.State != model.ProcessStarting) || p.PlacementEpoch != epoch {
 			continue
 		}
 		p.State = model.ProcessPaused

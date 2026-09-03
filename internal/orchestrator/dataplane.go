@@ -2,13 +2,18 @@ package orchestrator
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"log"
 	"time"
 
 	"connectrpc.com/connect"
 
 	"github.com/TSHOGX/khora/internal/model"
+	"github.com/TSHOGX/khora/internal/store"
 	"github.com/TSHOGX/khora/internal/transport"
 	v1 "github.com/TSHOGX/khora/pkg/transport/gen/khora/transport/v1"
 )
@@ -135,18 +140,88 @@ func (p *processProxy) Start(ctx context.Context, req *connect.Request[v1.StartR
 		return err
 	}
 	m := req.Msg
-	if err := p.e.validateRequestEpoch(ctx, req.Header().Get(sandboxIDHeader), m.PlacementEpoch); err != nil {
+	sandboxID := model.SandboxID(req.Header().Get(sandboxIDHeader))
+	epoch := model.PlacementEpoch(m.PlacementEpoch)
+	if epoch == 0 {
+		placement, perr := p.e.Mediator.Placement(ctx, sandboxID)
+		if perr != nil {
+			return proxyErr(perr)
+		}
+		epoch = placement.Epoch
+		m.PlacementEpoch = uint64(epoch)
+	}
+	if err := p.e.validateRequestEpoch(ctx, string(sandboxID), uint64(epoch)); err != nil {
 		return proxyErr(err)
 	}
-	spec := transport.StartSpec{Cmd: m.Cmd, Args: m.Args, Env: m.Env, Cwd: m.Cwd, IdempotencyKey: m.IdempotencyKey, PlacementEpoch: m.PlacementEpoch}
+	// Reserve the logical Process row before invoking the guest. The guest
+	// supervisor receives the same opaque handle, so a disconnect before the
+	// first output frame cannot leave a running process without a control-plane
+	// identity.
+	reserved, created, err := p.reserveProcess(ctx, sandboxID, epoch, m.IdempotencyKey)
+	if err != nil {
+		return proxyErr(err)
+	}
+	spec := transport.StartSpec{Cmd: m.Cmd, Args: m.Args, Env: m.Env, Cwd: m.Cwd, IdempotencyKey: m.IdempotencyKey, PlacementEpoch: uint64(epoch), ProcessHandle: string(reserved.ID)}
 	if m.Pty != nil {
 		spec.Pty = &transport.PtySize{Rows: uint16(m.Pty.Rows), Cols: uint16(m.Pty.Cols)}
 	}
 	ch, err := cl.Start(ctx, spec)
 	if err != nil {
+		// A failed RPC before a stream exists did not provide a start frame. A
+		// newly reserved row is removed so a definite admission failure does not
+		// leave a permanent starting record; an existing row is retained because
+		// the guest may already own the idempotent process.
+		if created {
+			if derr := p.e.Store.DeleteProcess(ctx, reserved.ID); derr != nil && !errors.Is(derr, store.ErrProcessNotFound) {
+				log.Printf("dataplane: remove failed process reservation %s: %v", reserved.ID, derr)
+			}
+		}
 		return proxyErr(err)
 	}
-	return p.forwardProcessEvents(ctx, req.Header().Get(sandboxIDHeader), ch, stream)
+	return p.forwardProcessEvents(ctx, string(sandboxID), ch, stream, reserved)
+}
+
+// reserveProcess chooses a stable handle for a Start request and records its
+// initial starting state atomically through the Store seam. Idempotency keys
+// are scoped by Sandbox and Placement epoch; an empty key gets an opaque
+// random handle because there is no retry identity to derive from.
+func (p *processProxy) reserveProcess(ctx context.Context, sandbox model.SandboxID, epoch model.PlacementEpoch, key string) (*model.Process, bool, error) {
+	handle := reservedProcessHandle(sandbox, epoch, key)
+	for attempt := 0; ; attempt++ {
+		if key == "" && attempt > 0 {
+			handle = reservedProcessHandle(sandbox, epoch, "")
+		}
+		now := time.Now()
+		candidate := model.Process{ID: model.ProcessID(handle), Sandbox: sandbox, PlacementEpoch: epoch, State: model.ProcessStarting, StartedAt: now, OutputCursor: model.ProcessOutputCursor(model.ProcessID(handle), epoch, 0)}
+		if err := p.e.Mediator.CreateProcess(ctx, candidate); err == nil {
+			return &candidate, true, nil
+		} else if !errors.Is(err, store.ErrProcessConflict) {
+			return nil, false, err
+		}
+		existing, gerr := p.e.Mediator.Process(ctx, candidate.ID)
+		if gerr != nil {
+			if key == "" && attempt < 3 {
+				continue
+			}
+			return nil, false, gerr
+		}
+		if existing.Sandbox != sandbox || existing.PlacementEpoch != epoch {
+			return nil, false, model.ErrStaleEpoch
+		}
+		return &existing, false, nil
+	}
+}
+
+func reservedProcessHandle(sandbox model.SandboxID, epoch model.PlacementEpoch, key string) string {
+	if key == "" {
+		var b [16]byte
+		if _, err := rand.Read(b[:]); err == nil {
+			return "proc_" + hex.EncodeToString(b[:])
+		}
+		return "proc_unknown"
+	}
+	sum := sha256.Sum256([]byte(string(sandbox) + "\x00" + fmt.Sprint(uint64(epoch)) + "\x00" + key))
+	return "proc_" + hex.EncodeToString(sum[:12])
 }
 
 func (p *processProxy) Connect(ctx context.Context, req *connect.Request[v1.ConnectRequest], stream *connect.ServerStream[v1.ProcessEvent]) error {
@@ -181,7 +256,7 @@ func (p *processProxy) Connect(ctx context.Context, req *connect.Request[v1.Conn
 	if err != nil {
 		return proxyErr(err)
 	}
-	return p.forwardProcessEvents(ctx, req.Header().Get(sandboxIDHeader), ch, stream)
+	return p.forwardProcessEvents(ctx, req.Header().Get(sandboxIDHeader), ch, stream, nil)
 }
 
 func (p *processProxy) StreamInput(ctx context.Context, stream *connect.ClientStream[v1.StreamInputRequest]) (*connect.Response[v1.StreamInputResponse], error) {
@@ -584,8 +659,8 @@ func forwardEvents(stream *connect.ServerStream[v1.ProcessEvent], ch <-chan tran
 	return nil
 }
 
-func (p *processProxy) forwardProcessEvents(ctx context.Context, sandbox string, ch <-chan transport.ProcessEvent, stream *connect.ServerStream[v1.ProcessEvent]) error {
-	var rec *model.Process
+func (p *processProxy) forwardProcessEvents(ctx context.Context, sandbox string, ch <-chan transport.ProcessEvent, stream *connect.ServerStream[v1.ProcessEvent], reserved *model.Process) error {
+	var rec *model.Process = reserved
 	var localSeq uint64
 	var streamEpoch uint64
 	var streamHandle string
@@ -609,12 +684,24 @@ func (p *processProxy) forwardProcessEvents(ctx context.Context, sandbox string,
 			case "start":
 				pid := ev.PID
 				epoch := ev.Epoch
+				if epoch == 0 && rec != nil {
+					epoch = uint64(rec.PlacementEpoch)
+				}
 				now := time.Now()
-				candidate := model.Process{ID: model.ProcessID(ev.Handle), Sandbox: model.SandboxID(sandbox), PlacementEpoch: model.PlacementEpoch(epoch), PID: pid, State: model.ProcessRunning, StartedAt: now, OutputCursor: model.ProcessOutputCursor(model.ProcessID(ev.Handle), model.PlacementEpoch(epoch), localSeq)}
-				if err := p.e.Mediator.CreateProcess(ctx, candidate); err == nil {
-					rec = &candidate
-				} else if existing, gerr := p.e.Mediator.Process(ctx, candidate.ID); gerr == nil {
-					rec = &existing
+				if rec == nil {
+					candidate := model.Process{ID: model.ProcessID(ev.Handle), Sandbox: model.SandboxID(sandbox), PlacementEpoch: model.PlacementEpoch(epoch), PID: pid, State: model.ProcessRunning, StartedAt: now, OutputCursor: model.ProcessOutputCursor(model.ProcessID(ev.Handle), model.PlacementEpoch(epoch), localSeq)}
+					if err := p.e.Mediator.CreateProcess(ctx, candidate); err == nil {
+						rec = &candidate
+					} else if existing, gerr := p.e.Mediator.Process(ctx, candidate.ID); gerr == nil {
+						rec = &existing
+					}
+				} else {
+					rec.PID = pid
+					rec.State = model.ProcessRunning
+					rec.OutputCursor = model.ProcessOutputCursor(rec.ID, rec.PlacementEpoch, localSeq)
+					if err := p.e.Mediator.UpdateProcess(ctx, *rec); err != nil {
+						log.Printf("dataplane: persist process start %s: %v", rec.ID, err)
+					}
 				}
 			case "data":
 				if rec != nil {

@@ -89,6 +89,13 @@ func (m *Memory) CreateProcess(_ context.Context, p model.Process) error {
 	if _, ok := m.processes[p.ID]; ok {
 		return ErrProcessConflict
 	}
+	if p.StartKey != "" {
+		for _, existing := range m.processes {
+			if existing.Sandbox == p.Sandbox && existing.PlacementEpoch == p.PlacementEpoch && existing.StartKey == p.StartKey {
+				return ErrProcessConflict
+			}
+		}
+	}
 	m.processes[p.ID] = p
 	return nil
 }
@@ -132,6 +139,9 @@ func (m *Memory) UpdateProcess(_ context.Context, p model.Process) error {
 		return ErrProcessNotFound
 	}
 	if old.Sandbox != p.Sandbox || old.PlacementEpoch != p.PlacementEpoch || !old.StartedAt.Equal(p.StartedAt) {
+		return ErrProcessConflict
+	}
+	if old.StartKey != p.StartKey || old.StartRequestHash != p.StartRequestHash {
 		return ErrProcessConflict
 	}
 	m.processes[p.ID] = p

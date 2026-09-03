@@ -214,15 +214,18 @@ CREATE TABLE IF NOT EXISTS processes (
 	sandbox         TEXT NOT NULL REFERENCES sandboxes(id) ON DELETE CASCADE,
 	placement_epoch INTEGER NOT NULL CHECK (placement_epoch > 0),
 	pid             INTEGER NOT NULL DEFAULT 0 CHECK (pid >= 0),
-	state           TEXT NOT NULL CHECK (state IN ('running','exited','paused','reclaimed')),
+	state           TEXT NOT NULL CHECK (state IN ('starting','running','exited','paused','reclaimed')),
 	exit_code       INTEGER,
 	started_at      INTEGER NOT NULL,
 	exited_at       INTEGER,
 	output_cursor   TEXT NOT NULL,
+	start_key       TEXT NOT NULL DEFAULT '',
+	start_request_hash TEXT NOT NULL DEFAULT '',
 	CHECK ((state IN ('exited','reclaimed')) = (exited_at IS NOT NULL)),
 	CHECK (state = 'exited' OR exit_code IS NULL)
 );
 CREATE INDEX IF NOT EXISTS processes_sandbox ON processes(sandbox, started_at);
+CREATE UNIQUE INDEX IF NOT EXISTS processes_start_key ON processes(sandbox, placement_epoch, start_key) WHERE start_key <> '';
 
 -- operations: durable idempotency ledger. The unique scope/key pair is the
 -- arbitration point for concurrent retries.

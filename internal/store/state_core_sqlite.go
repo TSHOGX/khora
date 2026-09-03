@@ -153,7 +153,7 @@ func (s *SQLite) CreateProcess(ctx context.Context, p model.Process) error {
 	if p.ExitedAt != nil {
 		exited = stateTime(*p.ExitedAt)
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO processes(id, sandbox, placement_epoch, pid, state, exit_code, started_at, exited_at, output_cursor) VALUES(?,?,?,?,?,?,?,?,?)`, string(p.ID), string(p.Sandbox), int64(p.PlacementEpoch), p.PID, string(p.State), exitCode, stateTime(p.StartedAt), exited, cursor)
+	_, err = s.db.ExecContext(ctx, `INSERT INTO processes(id, sandbox, placement_epoch, pid, state, exit_code, started_at, exited_at, output_cursor, start_key, start_request_hash) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, string(p.ID), string(p.Sandbox), int64(p.PlacementEpoch), p.PID, string(p.State), exitCode, stateTime(p.StartedAt), exited, cursor, string(p.StartKey), p.StartRequestHash)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return ErrProcessConflict
@@ -168,12 +168,12 @@ func (s *SQLite) CreateProcess(ctx context.Context, p model.Process) error {
 
 func scanProcessRow(row rowScanner) (model.Process, error) {
 	var p model.Process
-	var id, sandbox, state, cursorRaw string
+	var id, sandbox, state, cursorRaw, startKey, startHash string
 	var epoch, started int64
 	var pid int
 	var exitCode sql.NullInt64
 	var exited sql.NullInt64
-	if err := row.Scan(&id, &sandbox, &epoch, &pid, &state, &exitCode, &started, &exited, &cursorRaw); err != nil {
+	if err := row.Scan(&id, &sandbox, &epoch, &pid, &state, &exitCode, &started, &exited, &cursorRaw, &startKey, &startHash); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return model.Process{}, ErrProcessNotFound
 		}
@@ -198,15 +198,17 @@ func scanProcessRow(row rowScanner) (model.Process, error) {
 		p.ExitedAt = &t
 	}
 	p.OutputCursor = cursor
+	p.StartKey = model.IdempotencyKey(startKey)
+	p.StartRequestHash = startHash
 	return p, nil
 }
 
 func (s *SQLite) GetProcess(ctx context.Context, id model.ProcessID) (model.Process, error) {
-	return scanProcessRow(s.db.QueryRowContext(ctx, `SELECT id, sandbox, placement_epoch, pid, state, exit_code, started_at, exited_at, output_cursor FROM processes WHERE id=?`, string(id)))
+	return scanProcessRow(s.db.QueryRowContext(ctx, `SELECT id, sandbox, placement_epoch, pid, state, exit_code, started_at, exited_at, output_cursor, start_key, start_request_hash FROM processes WHERE id=?`, string(id)))
 }
 
 func (s *SQLite) ListProcesses(ctx context.Context, sandbox model.SandboxID) ([]model.Process, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, sandbox, placement_epoch, pid, state, exit_code, started_at, exited_at, output_cursor FROM processes WHERE sandbox=? ORDER BY started_at, id`, string(sandbox))
+	rows, err := s.db.QueryContext(ctx, `SELECT id, sandbox, placement_epoch, pid, state, exit_code, started_at, exited_at, output_cursor, start_key, start_request_hash FROM processes WHERE sandbox=? ORDER BY started_at, id`, string(sandbox))
 	if err != nil {
 		return nil, err
 	}
@@ -238,14 +240,14 @@ func (s *SQLite) UpdateProcess(ctx context.Context, p model.Process) error {
 		exited = stateTime(*p.ExitedAt)
 	}
 	return s.tx(ctx, func(t *sql.Tx) error {
-		var sandbox string
+		var sandbox, startKey, startHash string
 		var epoch, started int64
-		if err := t.QueryRow(`SELECT sandbox, placement_epoch, started_at FROM processes WHERE id=?`, string(p.ID)).Scan(&sandbox, &epoch, &started); errors.Is(err, sql.ErrNoRows) {
+		if err := t.QueryRow(`SELECT sandbox, placement_epoch, started_at, start_key, start_request_hash FROM processes WHERE id=?`, string(p.ID)).Scan(&sandbox, &epoch, &started, &startKey, &startHash); errors.Is(err, sql.ErrNoRows) {
 			return ErrProcessNotFound
 		} else if err != nil {
 			return err
 		}
-		if sandbox != string(p.Sandbox) || epoch != int64(p.PlacementEpoch) || started != stateTime(p.StartedAt) {
+		if sandbox != string(p.Sandbox) || epoch != int64(p.PlacementEpoch) || started != stateTime(p.StartedAt) || startKey != string(p.StartKey) || startHash != p.StartRequestHash {
 			return ErrProcessConflict
 		}
 		_, err := t.Exec(`UPDATE processes SET pid=?, state=?, exit_code=?, exited_at=?, output_cursor=? WHERE id=?`, p.PID, string(p.State), exitCode, exited, cursor, string(p.ID))

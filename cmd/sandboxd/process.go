@@ -903,6 +903,9 @@ func (s *processServer) start(ctx context.Context, req *connect.Request[v1.Start
 		}
 		_ = slave.Close() // parent keeps only the master
 		p = newProc(pid, master)
+		if m.ProcessHandle != "" {
+			p.handle = m.ProcessHandle
+		}
 		p.pty = master
 		// closer nil: the master is also the input sink, so finish() closes it.
 		sources = []source{{r: master, name: "pty"}}
@@ -927,6 +930,9 @@ func (s *processServer) start(ctx context.Context, req *connect.Request[v1.Start
 			return connect.NewError(connect.CodeInternal, err)
 		}
 		p = newProc(pid, stdin)
+		if m.ProcessHandle != "" {
+			p.handle = m.ProcessHandle
+		}
 		// These two parent ends are exactly what cmd.Wait() closes; the reaper owns
 		// the wait instead, so each pump closes its own on EOF. stdin's parent end is
 		// closed by finish.
