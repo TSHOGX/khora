@@ -491,6 +491,9 @@ func (m *Mediator) SweepOrphanVolumes(ctx context.Context) error {
 		return fmt.Errorf("sweep volumes: %w", err)
 	}
 	if len(backends) == 0 {
+		if err := m.validateDurableVolumeProviders(ctx); err != nil {
+			return fmt.Errorf("sweep volumes: %w", err)
+		}
 		return nil
 	}
 	// ENUMERATE FIRST, then decide. The order is what closes a MEASURED window: with the
@@ -1034,6 +1037,15 @@ func (m *Mediator) RepairVolumeCaps(ctx context.Context) error {
 func (m *Mediator) ReclaimQuotaRows(ctx context.Context) error {
 	backends, err := m.configuredVolumeBackends()
 	if err != nil {
+		return fmt.Errorf("reclaim quota rows: %w", err)
+	}
+	if len(backends) == 0 {
+		if err := m.validateDurableVolumeProviders(ctx); err != nil {
+			return fmt.Errorf("reclaim quota rows: %w", err)
+		}
+		return nil
+	}
+	if err := m.validateDurableVolumeProviders(ctx); err != nil {
 		return fmt.Errorf("reclaim quota rows: %w", err)
 	}
 	for _, selected := range backends {

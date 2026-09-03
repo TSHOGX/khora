@@ -256,9 +256,10 @@ func New(cfg Config) (*Engine, error) {
 		}
 	}
 
-	// Assemble and validate the configured Volume provider before constructing
-	// the remaining substrate providers. An unknown selection is a startup
-	// error, never an implicit fallback to local_btrfs.
+	// Assemble the configured Volume provider before constructing the remaining
+	// substrate providers. An unknown selection is a startup error, never an
+	// implicit fallback to local_btrfs. Readiness and durable-reference checks
+	// run once below, after the Store is available and before New returns.
 	volumeCfg := volume.ProviderConfig{
 		Provider:   cfg.VolumeProvider,
 		LocalBtrfs: cfg.VolumeLocalBtrfs,

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -26,10 +27,16 @@ const (
 	PlainDirProvider ProviderName = "plain_dir"
 )
 
-// BackendName is retained as a vocabulary alias for code that describes the
-// value as a backend name rather than a provider name.  There is one durable
-// name, not two independent identifiers.
-type BackendName = ProviderName
+// Valid reports whether p can safely be persisted as a provider name.
+func (p ProviderName) Valid() bool { return validProviderName(p) }
+
+// Validate checks the durable-name spelling without requiring a registry.
+func (p ProviderName) Validate() error {
+	if !validProviderName(p) {
+		return fmt.Errorf("%w: provider name %q", ErrInvalidProvider, p)
+	}
+	return nil
+}
 
 var (
 	// ErrUnknownProvider means that durable state or configuration names no
@@ -45,13 +52,6 @@ var (
 	// ErrRegistrySealed reports an attempted configuration mutation after the
 	// assembly has been handed to a serving engine.
 	ErrRegistrySealed = errors.New("volume: provider registry is sealed")
-)
-
-// ErrUnknownBackend and ErrBackendUnavailable are aliases that make errors.Is
-// checks read naturally at call sites that use the Backend vocabulary.
-var (
-	ErrUnknownBackend     = ErrUnknownProvider
-	ErrBackendUnavailable = ErrProviderUnavailable
 )
 
 // ContextValidator is an optional startup check implemented by a backend that
@@ -70,10 +70,10 @@ type Validator interface {
 	Validate() error
 }
 
-// Registry is the immutable-at-use set of configured Volume backends.  Register
-// and SetDefault are available while assembling an engine; callers should
-// finish assembly and run Validate before serving requests.  Lookups are safe
-// for concurrent lifecycle operations.
+// Registry is the configured set of Volume backends. Register and SetDefault
+// are assembly operations; callers should finish assembly and run Validate
+// before serving requests. Lookups are safe for concurrent lifecycle
+// operations.
 type Registry struct {
 	mu          sync.RWMutex
 	backends    map[ProviderName]Backend
@@ -113,7 +113,13 @@ func NewRegistryWithDefault(defaultName ProviderName, backends ...Backend) (*Reg
 // would make a durable record impossible to route deterministically.
 func NewRegistryFromMap(defaultName ProviderName, backends map[ProviderName]Backend) (*Registry, error) {
 	r := &Registry{backends: make(map[ProviderName]Backend, len(backends))}
-	for name, backend := range backends {
+	names := make([]ProviderName, 0, len(backends))
+	for name := range backends {
+		names = append(names, name)
+	}
+	sort.Slice(names, func(i, j int) bool { return names[i] < names[j] })
+	for _, name := range names {
+		backend := backends[name]
 		if err := r.registerNamed(name, backend); err != nil {
 			return nil, err
 		}
@@ -133,7 +139,7 @@ func (r *Registry) Register(backend Backend) error {
 	if r == nil {
 		return fmt.Errorf("%w: nil registry", ErrInvalidProvider)
 	}
-	if backend == nil {
+	if isNilBackend(backend) {
 		return fmt.Errorf("%w: nil backend", ErrInvalidProvider)
 	}
 	return r.registerNamed(ProviderName(backend.Name()), backend)
@@ -150,7 +156,7 @@ func (r *Registry) RegisterNamed(name ProviderName, backend Backend) error {
 }
 
 func (r *Registry) registerNamed(name ProviderName, backend Backend) error {
-	if backend == nil {
+	if isNilBackend(backend) {
 		return fmt.Errorf("%w: provider %q has nil backend", ErrInvalidProvider, name)
 	}
 	if !validProviderName(name) {
@@ -260,6 +266,23 @@ func (r *Registry) Default() (Backend, error) {
 	return backend, nil
 }
 
+// DefaultWithName returns the default provider and its durable name from one
+// registry snapshot, so a concurrent assembly mutation cannot pair a backend
+// with a different name.
+func (r *Registry) DefaultWithName() (ProviderName, Backend, error) {
+	if r == nil {
+		return "", nil, fmt.Errorf("%w: nil registry", ErrUnknownProvider)
+	}
+	r.mu.RLock()
+	name := r.defaultName
+	backend := r.backends[name]
+	r.mu.RUnlock()
+	if name == "" || backend == nil {
+		return "", nil, fmt.Errorf("%w: no default provider configured", ErrUnknownProvider)
+	}
+	return name, backend, nil
+}
+
 // DefaultName returns the durable name selected for new Volumes.
 func (r *Registry) DefaultName() ProviderName {
 	if r == nil {
@@ -332,8 +355,14 @@ func (r *Registry) Validate(ctx context.Context) error {
 	if _, ok := backends[defaultName]; !ok {
 		return fmt.Errorf("%w: default provider %q is not registered", ErrUnknownProvider, defaultName)
 	}
-	for name, backend := range backends {
-		if backend == nil || !validProviderName(name) {
+	names := make([]ProviderName, 0, len(backends))
+	for name := range backends {
+		names = append(names, name)
+	}
+	sort.Slice(names, func(i, j int) bool { return names[i] < names[j] })
+	for _, name := range names {
+		backend := backends[name]
+		if isNilBackend(backend) || !validProviderName(name) {
 			return fmt.Errorf("%w: provider %q", ErrInvalidProvider, name)
 		}
 		if ProviderName(backend.Name()) != name {
@@ -347,7 +376,7 @@ func (r *Registry) Validate(ctx context.Context) error {
 			err = validator.Validate()
 		}
 		if err != nil {
-			return fmt.Errorf("%w: %q: %v", ErrProviderUnavailable, name, err)
+			return fmt.Errorf("%w: %q: %w", ErrProviderUnavailable, name, err)
 		}
 	}
 	return nil
@@ -364,6 +393,19 @@ func validProviderName(name ProviderName) bool {
 		return false
 	}
 	return true
+}
+
+func isNilBackend(backend Backend) bool {
+	if backend == nil {
+		return true
+	}
+	v := reflect.ValueOf(backend)
+	switch v.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Ptr, reflect.Slice:
+		return v.IsNil()
+	default:
+		return false
+	}
 }
 
 // LocalBtrfsConfig contains settings owned by the local Volume provider.  The
@@ -387,9 +429,6 @@ type ProviderConfig struct {
 	LocalBtrfs LocalBtrfsConfig
 	PlainDir   PlainDirConfig
 }
-
-// Selection is a shorter alias for ProviderConfig.
-type Selection = ProviderConfig
 
 // Assemble constructs the built-in registry selected by cfg.  The standard
 // assembly may register additional internal implementations by extending this
@@ -417,9 +456,6 @@ func Assemble(cfg ProviderConfig) (*Registry, error) {
 		return nil, fmt.Errorf("%w: %q", ErrUnknownProvider, name)
 	}
 }
-
-// Build is an alias for Assemble for assembly callers that prefer a verb.
-func Build(cfg ProviderConfig) (*Registry, error) { return Assemble(cfg) }
 
 // compile-time checks keep the registry's built-in selection set honest.
 var _ Backend = (*LocalBtrfs)(nil)

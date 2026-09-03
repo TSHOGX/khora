@@ -21,16 +21,20 @@ type namedVolumeBackend struct {
 // intentionally only a fallback for direct in-process assembly and tests.
 func (m *Mediator) defaultVolumeBackend() (namedVolumeBackend, error) {
 	if m.deps.VolumeRegistry != nil {
-		backend, err := m.deps.VolumeRegistry.Default()
+		name, backend, err := m.deps.VolumeRegistry.DefaultWithName()
 		if err != nil {
 			return namedVolumeBackend{}, fmt.Errorf("no default volume provider: %w", err)
 		}
-		return namedVolumeBackend{name: backend.Name(), backend: backend}, nil
+		return namedVolumeBackend{name: string(name), backend: backend}, nil
 	}
 	if m.deps.Volume == nil {
 		return namedVolumeBackend{}, fmt.Errorf("no volume backend registered")
 	}
-	return namedVolumeBackend{name: m.deps.Volume.Name(), backend: m.deps.Volume}, nil
+	name := volume.ProviderName(m.deps.Volume.Name())
+	if err := name.Validate(); err != nil {
+		return namedVolumeBackend{}, err
+	}
+	return namedVolumeBackend{name: string(name), backend: m.deps.Volume}, nil
 }
 
 // backendForRecord resolves the provider named by a durable Volume row. It
@@ -102,7 +106,11 @@ func (m *Mediator) configuredVolumeBackends() ([]namedVolumeBackend, error) {
 	if m.deps.Volume == nil {
 		return nil, nil
 	}
-	return []namedVolumeBackend{{name: m.deps.Volume.Name(), backend: m.deps.Volume}}, nil
+	name := volume.ProviderName(m.deps.Volume.Name())
+	if err := name.Validate(); err != nil {
+		return nil, err
+	}
+	return []namedVolumeBackend{{name: string(name), backend: m.deps.Volume}}, nil
 }
 
 // validateDurableVolumeProviders checks all persisted Volume references before
@@ -142,6 +150,20 @@ func (m *Mediator) ValidateVolumeProviders(ctx context.Context) error {
 	if m.deps.VolumeRegistry != nil {
 		if err := m.deps.VolumeRegistry.Validate(ctx); err != nil {
 			return err
+		}
+	} else if providers, err := m.configuredVolumeBackends(); err != nil {
+		return err
+	} else {
+		for _, selected := range providers {
+			if validator, ok := selected.backend.(volume.ContextValidator); ok {
+				if err := validator.Validate(ctx); err != nil {
+					return fmt.Errorf("%w: %q: %w", volume.ErrProviderUnavailable, selected.name, err)
+				}
+			} else if validator, ok := selected.backend.(volume.Validator); ok {
+				if err := validator.Validate(); err != nil {
+					return fmt.Errorf("%w: %q: %w", volume.ErrProviderUnavailable, selected.name, err)
+				}
+			}
 		}
 	}
 	return m.validateDurableVolumeProviders(ctx)
