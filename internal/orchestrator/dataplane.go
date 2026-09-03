@@ -157,7 +157,8 @@ func (p *processProxy) Start(ctx context.Context, req *connect.Request[v1.StartR
 	// supervisor receives the same opaque handle, so a disconnect before the
 	// first output frame cannot leave a running process without a control-plane
 	// identity.
-	reserved, created, err := p.reserveProcess(ctx, sandboxID, epoch, m.IdempotencyKey)
+	requestHash := processStartRequestHash(m)
+	reserved, created, err := p.reserveProcess(ctx, sandboxID, epoch, m.IdempotencyKey, requestHash)
 	if err != nil {
 		return proxyErr(err)
 	}
@@ -185,14 +186,14 @@ func (p *processProxy) Start(ctx context.Context, req *connect.Request[v1.StartR
 // initial starting state atomically through the Store seam. Idempotency keys
 // are scoped by Sandbox and Placement epoch; an empty key gets an opaque
 // random handle because there is no retry identity to derive from.
-func (p *processProxy) reserveProcess(ctx context.Context, sandbox model.SandboxID, epoch model.PlacementEpoch, key string) (*model.Process, bool, error) {
+func (p *processProxy) reserveProcess(ctx context.Context, sandbox model.SandboxID, epoch model.PlacementEpoch, key, requestHash string) (*model.Process, bool, error) {
 	handle := reservedProcessHandle(sandbox, epoch, key)
 	for attempt := 0; ; attempt++ {
 		if key == "" && attempt > 0 {
 			handle = reservedProcessHandle(sandbox, epoch, "")
 		}
 		now := time.Now()
-		candidate := model.Process{ID: model.ProcessID(handle), Sandbox: sandbox, PlacementEpoch: epoch, State: model.ProcessStarting, StartedAt: now, OutputCursor: model.ProcessOutputCursor(model.ProcessID(handle), epoch, 0)}
+		candidate := model.Process{ID: model.ProcessID(handle), Sandbox: sandbox, PlacementEpoch: epoch, State: model.ProcessStarting, StartedAt: now, OutputCursor: model.ProcessOutputCursor(model.ProcessID(handle), epoch, 0), StartKey: model.IdempotencyKey(key), StartRequestHash: requestHash}
 		if err := p.e.Mediator.CreateProcess(ctx, candidate); err == nil {
 			return &candidate, true, nil
 		} else if !errors.Is(err, store.ErrProcessConflict) {
@@ -208,8 +209,29 @@ func (p *processProxy) reserveProcess(ctx context.Context, sandbox model.Sandbox
 		if existing.Sandbox != sandbox || existing.PlacementEpoch != epoch {
 			return nil, false, model.ErrStaleEpoch
 		}
+		if key != "" && existing.StartRequestHash != requestHash {
+			return nil, false, model.ErrIdempotencyConflict
+		}
 		return &existing, false, nil
 	}
+}
+
+func processStartRequestHash(m *v1.StartRequest) string {
+	if m == nil || m.IdempotencyKey == "" {
+		return ""
+	}
+	args := append([]string{}, m.Args...)
+	env := append([]string{}, m.Env...)
+	canonical := struct {
+		Cmd            string      `json:"cmd"`
+		Args           []string    `json:"args"`
+		Env            []string    `json:"env"`
+		Cwd            string      `json:"cwd"`
+		Pty            *v1.PtySize `json:"pty,omitempty"`
+		PlacementEpoch uint64      `json:"placement_epoch"`
+	}{m.Cmd, args, env, m.Cwd, m.Pty, m.PlacementEpoch}
+	hash, _ := model.RequestHash(canonical)
+	return hash
 }
 
 func reservedProcessHandle(sandbox model.SandboxID, epoch model.PlacementEpoch, key string) string {
@@ -669,6 +691,9 @@ func (p *processProxy) forwardProcessEvents(ctx context.Context, sandbox string,
 			localSeq = ev.Sequence
 		} else if ev.Kind == "data" || ev.Kind == "end" {
 			localSeq++
+		}
+		if ev.Handle == "" && rec != nil {
+			ev.Handle = string(rec.ID)
 		}
 		if ev.Handle != "" {
 			streamHandle = ev.Handle

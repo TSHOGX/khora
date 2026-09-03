@@ -218,6 +218,20 @@ func TestStableProcessHandleSequenceAndGap(t *testing.T) {
 	}
 }
 
+func TestRingBufferEmptyAfterOversizeFrameStillReportsCursorGap(t *testing.T) {
+	r := ringBuffer{cap: 2}
+	r.append(frame{kind: 'd', data: []byte("oversize"), sequence: 1})
+	if len(r.frames) != 0 || r.droppedBefore != 2 {
+		t.Fatalf("ring after oversize frame = frames=%v droppedBefore=%d", r.frames, r.droppedBefore)
+	}
+	p := newProc(1, nil)
+	p.ring = r
+	_, _, _, _, gap := p.subscribeFrom(0)
+	if !gap {
+		t.Fatal("empty ring after dropped output did not report a cursor gap")
+	}
+}
+
 func TestStableProcessHandleRetainsExitAfterPidUnregister(t *testing.T) {
 	s := &processServer{}
 	p := newProc(19, nil)

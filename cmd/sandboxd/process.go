@@ -52,8 +52,12 @@ type processServer struct {
 	// retention bounds how long an exited logical handle remains addressable.  It
 	// is deliberately owned by the process hub (the durable supervisor), not by
 	// each transport child, so reconnecting a transport cannot reset the clock.
-	retention    time.Duration
-	startFlights map[string]*startFlight
+	retention        time.Duration
+	startFlights     map[string]*startFlight
+	persistMu        sync.Mutex
+	persistScheduled bool
+	persistDirty     bool
+	statePath        string
 	// remote is set only by a transport child.  PID 1 owns the process hub and
 	// the transport role talks to it over the private guest Unix socket.  Keeping
 	// this seam optional preserves the pure in-process hub used by unit tests.
@@ -121,18 +125,19 @@ const processStateFile = "/tmp/.sandboxd-processes.json"
 var processStatePath = processStateFile
 
 type persistedProcess struct {
-	Key       string           `json:"key,omitempty"`
-	SpecHash  string           `json:"spec_hash,omitempty"`
-	Handle    string           `json:"handle"`
-	PID       int              `json:"pid"`
-	Epoch     uint64           `json:"epoch"`
-	State     string           `json:"state"`
-	ExitCode  *int             `json:"exit_code,omitempty"`
-	Sequence  uint64           `json:"sequence"`
-	StartTime uint64           `json:"start_time,omitempty"`
-	Frames    []persistedFrame `json:"frames,omitempty"`
-	EndFrame  *persistedFrame  `json:"end_frame,omitempty"`
-	ExitedAt  int64            `json:"exited_at,omitempty"`
+	Key           string           `json:"key,omitempty"`
+	SpecHash      string           `json:"spec_hash,omitempty"`
+	Handle        string           `json:"handle"`
+	PID           int              `json:"pid"`
+	Epoch         uint64           `json:"epoch"`
+	State         string           `json:"state"`
+	ExitCode      *int             `json:"exit_code,omitempty"`
+	Sequence      uint64           `json:"sequence"`
+	StartTime     uint64           `json:"start_time,omitempty"`
+	Frames        []persistedFrame `json:"frames,omitempty"`
+	DroppedBefore uint64           `json:"dropped_before,omitempty"`
+	EndFrame      *persistedFrame  `json:"end_frame,omitempty"`
+	ExitedAt      int64            `json:"exited_at,omitempty"`
 }
 
 type persistedFrame struct {
@@ -144,7 +149,10 @@ type persistedFrame struct {
 }
 
 func (s *processServer) loadPersistent() {
-	b, err := os.ReadFile(processStatePath)
+	if s.statePath == "" {
+		s.statePath = processStatePath
+	}
+	b, err := os.ReadFile(s.statePath)
 	if err != nil {
 		return
 	}
@@ -166,15 +174,28 @@ func (s *processServer) loadPersistent() {
 	if s.idempotencySpec == nil {
 		s.idempotencySpec = make(map[string]string)
 	}
+	dirty := false
 	for _, saved := range saved {
 		if saved.Handle == "" {
 			continue
+		}
+		// A running row cannot be resumed by a newly booted PID 1: its pipes,
+		// PTY master, and wait-status handoff belonged to the old supervisor.
+		// Convert it to a terminal, fail-closed record rather than exposing an
+		// inert handle that reports closed input and silently loses output.  The
+		// live transport-restart path never reaches this branch because PID 1's
+		// supervisor remains in place.
+		if saved.State != "exited" {
+			saved.State = "exited"
+			code := 255
+			saved.ExitCode = &code
+			dirty = true
 		}
 		exitedAt := time.Time{}
 		if saved.ExitedAt != 0 {
 			exitedAt = time.Unix(0, saved.ExitedAt)
 		}
-		p := &proc{pid: saved.PID, handle: saved.Handle, epoch: saved.Epoch, startTime: saved.StartTime, exitedAt: exitedAt, ring: ringBuffer{cap: ringCapBytes}, subs: make(map[*subscriber]struct{}), sequence: saved.Sequence}
+		p := &proc{pid: saved.PID, handle: saved.Handle, epoch: saved.Epoch, startTime: saved.StartTime, exitedAt: exitedAt, ring: ringBuffer{cap: ringCapBytes, droppedBefore: saved.DroppedBefore}, subs: make(map[*subscriber]struct{}), sequence: saved.Sequence}
 		p.restored = true
 		for _, persisted := range saved.Frames {
 			p.ring.append(frame{kind: byte(firstByte(persisted.Kind, 'd')), stream: persisted.Stream, data: append([]byte(nil), persisted.Data...), exitCode: persisted.ExitCode, sequence: persisted.Sequence})
@@ -202,14 +223,14 @@ func (s *processServer) loadPersistent() {
 			s.idempotency[saved.Key] = p.handle
 			s.idempotencySpec[saved.Key] = saved.SpecHash
 		}
-		if !p.ended && saved.PID > 0 {
-			s.procs[p.pid] = p
-		}
 	}
 	for _, p := range s.byHandle {
 		if p.ended {
 			s.scheduleRetentionLocked(p)
 		}
+	}
+	if dirty {
+		s.savePersistentLocked()
 	}
 }
 
@@ -256,6 +277,17 @@ func (s *processServer) watchRestored() {
 }
 
 func (s *processServer) savePersistentLocked() {
+	s.savePersistentLockedAt(s.persistencePath())
+}
+
+func (s *processServer) persistencePath() string {
+	if s.statePath != "" {
+		return s.statePath
+	}
+	return processStatePath
+}
+
+func (s *processServer) savePersistentLockedAt(path string) {
 	all := make([]persistedProcess, 0, len(s.byHandle))
 	for _, p := range s.byHandle {
 		p.mu.Lock()
@@ -286,16 +318,16 @@ func (s *processServer) savePersistentLocked() {
 		if !p.exitedAt.IsZero() {
 			exitedAt = p.exitedAt.UnixNano()
 		}
-		all = append(all, persistedProcess{Key: key, SpecHash: s.idempotencySpec[key], Handle: p.handle, PID: p.pid, Epoch: p.epoch, State: state, ExitCode: code, Sequence: p.sequence, StartTime: p.startTime, Frames: frames, EndFrame: end, ExitedAt: exitedAt})
+		all = append(all, persistedProcess{Key: key, SpecHash: s.idempotencySpec[key], Handle: p.handle, PID: p.pid, Epoch: p.epoch, State: state, ExitCode: code, Sequence: p.sequence, StartTime: p.startTime, Frames: frames, DroppedBefore: p.ring.droppedBefore, EndFrame: end, ExitedAt: exitedAt})
 		p.mu.Unlock()
 	}
 	b, err := json.Marshal(all)
 	if err != nil {
 		return
 	}
-	tmp := processStatePath + ".tmp"
+	tmp := path + ".tmp"
 	if os.WriteFile(tmp, b, 0o600) == nil {
-		_ = os.Rename(tmp, processStatePath)
+		_ = os.Rename(tmp, path)
 	}
 }
 
@@ -324,7 +356,12 @@ func (s *processServer) register(p *proc) {
 		s.idempotencySpec = make(map[string]string)
 	}
 	p.activity = s.activity // share the sandbox-global I/O clock (the activity signal)
-	p.persist = s.persist
+	if s.statePath == "" {
+		s.statePath = processStatePath
+	}
+	path := s.statePath
+	p.persist = func() { s.persistSoonAt(path) }
+	p.persistNow = func() { s.persistAt(path) }
 	if p.startTime == 0 {
 		p.startTime = procStartTime(p.pid)
 	}
@@ -335,9 +372,52 @@ func (s *processServer) register(p *proc) {
 }
 
 func (s *processServer) persist() {
+	s.persistAt(s.persistencePath())
+}
+
+// persistSoon coalesces high-rate output updates.  Serializing JSON and a
+// tmpfs write on every output frame would make the child reader wait on the
+// persistence path and would turn a slow disk into source backpressure.  A
+// short coalescing window still records the latest bounded ring promptly while
+// keeping fan-out and pipe draining independent of storage latency.
+func (s *processServer) persistSoon() {
+	s.persistSoonAt(s.persistencePath())
+}
+
+func (s *processServer) persistAt(path string) {
 	s.mu.Lock()
-	s.savePersistentLocked()
+	s.savePersistentLockedAt(path)
 	s.mu.Unlock()
+}
+
+func (s *processServer) persistSoonAt(path string) {
+	s.persistMu.Lock()
+	s.persistDirty = true
+	if s.persistScheduled {
+		s.persistMu.Unlock()
+		return
+	}
+	s.persistScheduled = true
+	s.persistMu.Unlock()
+	time.AfterFunc(10*time.Millisecond, func() { s.flushPersist(path) })
+}
+
+func (s *processServer) flushPersist(path string) {
+	for {
+		s.persistMu.Lock()
+		if !s.persistDirty {
+			s.persistScheduled = false
+			s.persistMu.Unlock()
+			return
+		}
+		s.persistDirty = false
+		s.persistMu.Unlock()
+
+		s.persistAt(path)
+		// If output arrived while the snapshot was being written, loop once
+		// more before releasing the scheduled slot.  There is never more than
+		// one writer or one timer for a process hub.
+	}
 }
 
 func (s *processServer) get(pid int) (*proc, bool) {
@@ -354,6 +434,10 @@ func (s *processServer) unregister(pid int) {
 	// Keep the logical handle and exit status for the bounded retention window;
 	// only the placement-local PID map is removed immediately.
 	if p != nil {
+		if !p.removed.CompareAndSwap(false, true) {
+			s.mu.Unlock()
+			return
+		}
 		s.scheduleRetentionLocked(p)
 	}
 	s.savePersistentLocked()
@@ -435,16 +519,18 @@ type proc struct {
 	// tests) — activityClock methods are nil-safe.
 	activity *activityClock
 
-	mu       sync.Mutex
-	ring     ringBuffer
-	subs     map[*subscriber]struct{}
-	stdin    io.WriteCloser
-	pty      *os.File // set only for pty processes
-	ended    bool
-	exitedAt time.Time
-	endFrame frame
-	sequence uint64
-	persist  func()
+	mu         sync.Mutex
+	ring       ringBuffer
+	subs       map[*subscriber]struct{}
+	stdin      io.WriteCloser
+	pty        *os.File // set only for pty processes
+	ended      bool
+	exitedAt   time.Time
+	endFrame   frame
+	sequence   uint64
+	persist    func()
+	persistNow func()
+	removed    atomic.Bool
 }
 
 func newProc(pid int, stdin io.WriteCloser) *proc {
@@ -530,15 +616,19 @@ func startSpecHash(m *v1.StartRequest) string {
 // keep their stream
 // tag so replay preserves stdout/stderr/pty attribution.
 type ringBuffer struct {
-	cap    int
-	bytes  int
-	frames []frame
+	cap           int
+	bytes         int
+	frames        []frame
+	droppedBefore uint64
 }
 
 func (r *ringBuffer) append(f frame) {
 	r.frames = append(r.frames, f)
 	r.bytes += len(f.data)
 	for r.bytes > r.cap && len(r.frames) > 0 {
+		if r.frames[0].sequence+1 > r.droppedBefore {
+			r.droppedBefore = r.frames[0].sequence + 1
+		}
 		r.bytes -= len(r.frames[0].data)
 		r.frames[0] = frame{} // release the byte slice for GC before resliding
 		r.frames = r.frames[1:]
@@ -623,7 +713,9 @@ func (p *proc) finish(exitCode int) {
 		p.pty = nil
 	}
 	p.mu.Unlock()
-	if p.persist != nil {
+	if p.persistNow != nil {
+		p.persistNow()
+	} else if p.persist != nil {
 		p.persist()
 	}
 }
@@ -640,7 +732,13 @@ func (p *proc) subscribeFrom(after uint64) (sub *subscriber, snap []frame, ended
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	snap = p.ring.snapshot()
-	if len(snap) > 0 && ((after > 0 && after+1 < snap[0].sequence) || (after == 0 && snap[0].sequence > 1)) {
+	first := uint64(0)
+	if len(snap) > 0 {
+		first = snap[0].sequence
+	} else {
+		first = p.ring.droppedBefore
+	}
+	if (after > 0 && first > 0 && after+1 < first) || (after == 0 && first > 1) {
 		gap = true
 	}
 	if after > 0 {
@@ -1220,6 +1318,12 @@ func (s *processServer) SendSignal(_ context.Context, req *connect.Request[v1.Se
 		p, err := s.resolveProcess(m.ProcessHandle, m.PlacementEpoch, int(m.Pid))
 		if err != nil {
 			return nil, err
+		}
+		p.mu.Lock()
+		ended := p.ended
+		p.mu.Unlock()
+		if ended {
+			return nil, connect.NewError(connect.CodeFailedPrecondition, errString("process has exited"))
 		}
 		m.Pid = int32(p.pid)
 	}

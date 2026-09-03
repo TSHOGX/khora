@@ -183,6 +183,13 @@ func (p Process) Validate() error {
 		if !strings.HasPrefix(p.StartRequestHash, string(DigestSHA256)+":") || len(p.StartRequestHash) != len(string(DigestSHA256))+1+sha256.Size*2 {
 			return NewContractError(ErrorInvalidArgument, "process start request hash is not a sha256 digest")
 		}
+		digestHex := strings.TrimPrefix(p.StartRequestHash, string(DigestSHA256)+":")
+		if strings.ToLower(digestHex) != digestHex {
+			return NewContractError(ErrorInvalidArgument, "process start request hash must use lowercase hexadecimal")
+		}
+		if _, err := hex.DecodeString(digestHex); err != nil {
+			return NewContractError(ErrorInvalidArgument, "process start request hash is not hexadecimal")
+		}
 	}
 	if p.Sandbox == "" {
 		return NewContractError(ErrorInvalidArgument, "process sandbox is required")

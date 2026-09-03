@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -29,6 +30,8 @@ import (
 type activityClock struct {
 	lastIOUnixMilli atomic.Int64
 	sharedPath      string
+	sharedMu        sync.Mutex
+	sharedScheduled bool
 }
 
 const activityStateFile = "/tmp/.sandboxd-activity"
@@ -66,11 +69,33 @@ func (c *activityClock) stamp() {
 	now := time.Now().UnixMilli()
 	c.lastIOUnixMilli.Store(now)
 	if c.sharedPath != "" {
-		// A partial read is harmless: idleMillis falls back to the local atomic.
-		// The file lives on guest tmpfs and is excluded from Promote, so it is
-		// coordination state rather than workload content.
-		_ = os.WriteFile(c.sharedPath, []byte(strconv.FormatInt(now, 10)), 0o600)
+		// Never put a filesystem write on the output/input hot path.  Coalesce
+		// updates onto a short timer; the local atomic remains authoritative for
+		// this process, while the file bridges a transport-child restart.
+		c.sharedMu.Lock()
+		if !c.sharedScheduled {
+			c.sharedScheduled = true
+			time.AfterFunc(5*time.Millisecond, c.flushShared)
+		}
+		c.sharedMu.Unlock()
 	}
+}
+
+func (c *activityClock) flushShared() {
+	if c == nil || c.sharedPath == "" {
+		return
+	}
+	now := c.lastIOUnixMilli.Load()
+	_ = os.WriteFile(c.sharedPath, []byte(strconv.FormatInt(now, 10)), 0o600)
+	c.sharedMu.Lock()
+	if c.lastIOUnixMilli.Load() != now {
+		// A stamp raced the write. Keep the scheduled bit set and arrange one
+		// more coalesced flush so a burst cannot leave the shared clock stale.
+		time.AfterFunc(5*time.Millisecond, c.flushShared)
+	} else {
+		c.sharedScheduled = false
+	}
+	c.sharedMu.Unlock()
 }
 
 // idleMillis returns how long since the last stamped I/O (ms), clamped at 0 so
