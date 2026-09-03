@@ -455,6 +455,15 @@ func (s *SQLite) UpdateOperation(ctx context.Context, op model.Operation) error 
 		if uint32(attempt) != op.Attempt || state != string(model.OperationInProgress) && state != string(op.State) || stateTime(op.UpdatedAt) < updated || (op.State == model.OperationInProgress && stateTime(op.LeaseUntil) < leaseUntil) {
 			return ErrOperationOwnershipConflict
 		}
+		if state != string(model.OperationInProgress) {
+			current, err := scanOperationRow(t.QueryRow(`SELECT id, scope, idempotency_key, request_hash, state, phase, attempt, result_kind, result_id, error_class, started_at, updated_at, lease_until FROM operations WHERE id=?`, string(op.ID)))
+			if err != nil {
+				return err
+			}
+			if !sameTerminalOperation(current, op) {
+				return ErrOperationOwnershipConflict
+			}
+		}
 		res, err := t.Exec(`UPDATE operations SET state=?, phase=?, attempt=?, result_kind=?, result_id=?, error_class=?, started_at=?, updated_at=?, lease_until=? WHERE id=? AND attempt=?`, string(op.State), string(op.Phase), op.Attempt, kind, resultID, errorClass, stateTime(op.StartedAt), stateTime(op.UpdatedAt), stateTime(op.LeaseUntil), string(op.ID), op.Attempt)
 		if err != nil {
 			return err

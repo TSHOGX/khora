@@ -282,6 +282,9 @@ func (m *Memory) UpdateOperation(_ context.Context, op model.Operation) error {
 	if old.Attempt != op.Attempt || (old.State != model.OperationInProgress && op.State != old.State) {
 		return ErrOperationOwnershipConflict
 	}
+	if old.State != model.OperationInProgress && !sameTerminalOperation(old, op) {
+		return ErrOperationOwnershipConflict
+	}
 	if op.UpdatedAt.Before(old.UpdatedAt) {
 		return ErrOperationOwnershipConflict
 	}
@@ -290,6 +293,16 @@ func (m *Memory) UpdateOperation(_ context.Context, op model.Operation) error {
 	}
 	m.operations[op.ID] = op
 	return nil
+}
+
+func sameTerminalOperation(a, b model.Operation) bool {
+	if a.State != b.State || a.Phase != b.Phase || a.ErrorClass != b.ErrorClass {
+		return false
+	}
+	if a.Result == nil || b.Result == nil {
+		return a.Result == nil && b.Result == nil
+	}
+	return *a.Result == *b.Result
 }
 
 func (m *Memory) DeleteOperation(_ context.Context, id model.OperationID) error {

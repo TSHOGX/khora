@@ -142,6 +142,7 @@ func RunContract(t *testing.T, mk Factory) {
 	t.Run("OperationKeyConcurrentSingleWinner", func(t *testing.T) { testOperationKeyRace(t, mk) })
 	t.Run("OperationTakeoverConcurrentSingleWinner", func(t *testing.T) { testOperationTakeoverRace(t, mk) })
 	t.Run("OperationStaleUpdateRejected", func(t *testing.T) { testOperationStaleUpdate(t, mk) })
+	t.Run("OperationTerminalResultImmutable", func(t *testing.T) { testOperationTerminalImmutable(t, mk) })
 	t.Run("TelemetrySampleLane", func(t *testing.T) { testTelemetryLane(t, mk) })
 }
 
@@ -372,6 +373,36 @@ func testOperationStaleUpdate(t *testing.T, mk Factory) {
 	}
 	if newOp.Attempt != op.Attempt+1 {
 		t.Fatalf("takeover attempt = %d", newOp.Attempt)
+	}
+}
+
+func testOperationTerminalImmutable(t *testing.T, mk Factory) {
+	ctx := context.Background()
+	s, _ := mk(t)
+	hash, _ := model.RequestHash(map[string]any{"request": "terminal"})
+	now := time.Now().UTC()
+	op, err := model.BeginOperation("op_terminal", "volume.create", "terminal-key", hash, now, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateOperation(ctx, op); err != nil {
+		t.Fatal(err)
+	}
+	if err := op.Succeed(model.OperationResult{Kind: model.ObjectVolume, ID: "vol_a"}, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateOperation(ctx, op); err != nil {
+		t.Fatal(err)
+	}
+	mutated := op
+	mutated.Result = &model.OperationResult{Kind: model.ObjectVolume, ID: "vol_b"}
+	mutated.UpdatedAt = now.Add(2 * time.Second)
+	if err := s.UpdateOperation(ctx, mutated); !errors.Is(err, store.ErrOperationOwnershipConflict) {
+		t.Fatalf("terminal result mutation = %v; want ownership conflict", err)
+	}
+	got, err := s.GetOperation(ctx, op.ID)
+	if err != nil || got.Result == nil || got.Result.ID != "vol_a" {
+		t.Fatalf("terminal result after rejected mutation = %+v, %v", got, err)
 	}
 }
 
