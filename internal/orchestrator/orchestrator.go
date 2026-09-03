@@ -26,6 +26,16 @@ import (
 	"github.com/TSHOGX/khora/internal/volume"
 )
 
+// VolumeProvider is the typed orchestrator configuration name for a built-in
+// Volume provider. The alias keeps the durable vocabulary owned by the Volume
+// subsystem while making Config self-documenting to assembly callers.
+type VolumeProvider = volume.ProviderName
+
+const (
+	VolumeProviderLocalBtrfs = volume.LocalBtrfsProvider
+	VolumeProviderPlainDir   = volume.PlainDirProvider
+)
+
 // Config is the orchestrator's local configuration (the engine vocabulary boundary one config).
 type Config struct {
 	// TemplatesDir holds Template directories (static; TemplateID → dir).
@@ -69,6 +79,16 @@ type Config struct {
 	// it: each subsystem's orphan sweep enumerates its own root, so nesting would put
 	// one subsystem's units inside the other's enumeration.
 	VolumesDir string
+
+	// VolumeProvider selects the built-in Volume provider for newly-created
+	// Volumes. Existing records are always routed by their persisted backend name.
+	// Empty selects the standard local_btrfs provider.
+	VolumeProvider volume.ProviderName
+	// VolumeLocalBtrfs and VolumePlainDir carry provider-owned settings. Only the
+	// selected provider's settings are used; unknown selections fail before the
+	// engine starts serving.
+	VolumeLocalBtrfs volume.LocalBtrfsConfig
+	VolumePlainDir   volume.PlainDirConfig
 
 	// NodeDiskByte / NodeMemoryByte are the resource admission no-oversubscribe budgets the
 	// admission gate admits against (the engine vocabulary boundary one config). Zero leaves that axis
@@ -134,9 +154,13 @@ type Config struct {
 
 // Engine is the assembled engine host.
 type Engine struct {
-	Mediator  *lifecycle.Mediator
-	Store     store.Store
-	Publisher *store.Publisher
+	Mediator *lifecycle.Mediator
+	Store    store.Store
+	// VolumeRegistry is the configured internal selection set. It is exposed on
+	// the assembled Engine for startup/reconciliation tests; API callers still
+	// address Volumes by ID and never receive provider handles.
+	VolumeRegistry *volume.Registry
+	Publisher      *store.Publisher
 	// health backs /healthz, /readyz and /metrics (see health.go).
 	health health
 	// httpHandlers gates and tracks handlers entering the engine mux. Shutdown closes
@@ -232,6 +256,38 @@ func New(cfg Config) (*Engine, error) {
 		}
 	}
 
+	// Assemble and validate the configured Volume provider before constructing
+	// the remaining substrate providers. An unknown selection is a startup
+	// error, never an implicit fallback to local_btrfs.
+	volumeCfg := volume.ProviderConfig{
+		Provider:   cfg.VolumeProvider,
+		LocalBtrfs: cfg.VolumeLocalBtrfs,
+		PlainDir:   cfg.VolumePlainDir,
+	}
+	if volumeCfg.LocalBtrfs.VolumesDir == "" {
+		volumeCfg.LocalBtrfs.VolumesDir = cfg.VolumesDir
+		if volumeCfg.LocalBtrfs.VolumesDir == "" {
+			volumeCfg.LocalBtrfs.VolumesDir = cfg.StateDir + "/volumes"
+		}
+	}
+	if volumeCfg.PlainDir.Dir == "" {
+		volumeCfg.PlainDir.Dir = cfg.VolumesDir
+		if volumeCfg.PlainDir.Dir == "" {
+			volumeCfg.PlainDir.Dir = cfg.StateDir + "/volumes"
+		}
+	}
+	registry, err := volume.Assemble(volumeCfg)
+	if err != nil {
+		return nil, fmt.Errorf("orchestrator: %w", err)
+	}
+	if err := registry.Validate(context.Background()); err != nil {
+		return nil, fmt.Errorf("orchestrator: validate volume providers: %w", err)
+	}
+	defaultBackend, err := registry.Default()
+	if err != nil {
+		return nil, fmt.Errorf("orchestrator: select volume provider: %w", err)
+	}
+
 	rp, err := rootfs.NewHostOverlayFS(cfg.StateDir+"/overlays", cfg.TemplatesDir, cfg.StateDir+"/layers")
 	if err != nil {
 		return nil, err
@@ -242,17 +298,6 @@ func New(cfg Config) (*Engine, error) {
 	}
 	rt.Sudo = cfg.Sudo
 	rt.HostPublishIP = cfg.HostPublishIP
-
-	// the Volume subsystem volume backend. The local arm is the default; registering a different one
-	// is a extension boundary registration, not an edit to the callers above.
-	volumesDir := cfg.VolumesDir
-	if volumesDir == "" {
-		volumesDir = cfg.StateDir + "/volumes"
-	}
-	vb, err := volume.NewLocalBtrfs(volumesDir)
-	if err != nil {
-		return nil, err
-	}
 
 	// persistent store (the SQLite store choice) — register-an-implementation swap from Memory,
 	// no caller change (the extension boundary). This durability is what CREATES the atomic transition rollback
@@ -270,7 +315,8 @@ func New(cfg Config) (*Engine, error) {
 		Store:                 st,
 		Runtime:               rt,
 		Rootfs:                rp,
-		Volume:                vb,
+		Volume:                defaultBackend,
+		VolumeRegistry:        registry,
 		Dial:                  transport.Dial,
 		HealthTimeout:         cfg.HealthTimeout,
 		DrainGrace:            cfg.DrainGrace,
@@ -285,6 +331,10 @@ func New(cfg Config) (*Engine, error) {
 		},
 		Deployment: dep,
 	})
+	if err := med.ValidateVolumeProviders(context.Background()); err != nil {
+		_ = st.Close()
+		return nil, fmt.Errorf("orchestrator: validate durable volume providers: %w", err)
+	}
 
 	// outbox publisher → a log sink (the transactional outbox: the engine only guarantees reliable
 	// write to a replayable stream; a real subscriber lives outside the engine).
@@ -296,7 +346,7 @@ func New(cfg Config) (*Engine, error) {
 
 	reaper := lifecycle.NewReaper(med, cfg.SweepInterval, cfg.TransportDownBudget)
 
-	eng := &Engine{Mediator: med, Store: st, Publisher: pub, Reaper: reaper}
+	eng := &Engine{Mediator: med, Store: st, VolumeRegistry: registry, Publisher: pub, Reaper: reaper}
 	eng.health.startedAt = time.Now()
 	return eng, nil
 }
@@ -306,6 +356,16 @@ func New(cfg Config) (*Engine, error) {
 // the sandboxes.template FK (health and reclamation) needs the builtin rows present.
 func (e *Engine) SeedTemplates(ctx context.Context) error {
 	return e.Mediator.SeedBuiltinTemplates(ctx)
+}
+
+// ValidateVolumeProviders rechecks configured providers and durable Volume
+// references. New performs this gate before returning; the method is useful to
+// callers that reopen or replace a durable Store before serving.
+func (e *Engine) ValidateVolumeProviders(ctx context.Context) error {
+	if e == nil || e.Mediator == nil {
+		return fmt.Errorf("orchestrator: no lifecycle mediator")
+	}
+	return e.Mediator.ValidateVolumeProviders(ctx)
 }
 
 // Reconcile runs the atomic transition rollback startup crash-reconciliation (orphan reclaim +

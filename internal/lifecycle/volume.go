@@ -83,10 +83,11 @@ func (m *Mediator) CreateVolume(ctx context.Context, capBytes int64) (model.Volu
 	if capBytes < 0 {
 		return "", fmt.Errorf("create volume: cap must be non-negative (0 = uncapped), got %d", capBytes)
 	}
-	be := m.deps.Volume
-	if be == nil {
-		return "", fmt.Errorf("create volume: no volume backend registered")
+	selected, err := m.defaultVolumeBackend()
+	if err != nil {
+		return "", fmt.Errorf("create volume: %w", err)
 	}
+	be := selected.backend
 	// Capability check FIRST — before the ID, before the gate, before any bytes.
 	if capBytes > 0 && !be.Capabilities().Quota {
 		// Refused rather than silently dropped (resource admission).
@@ -94,7 +95,7 @@ func (m *Mediator) CreateVolume(ctx context.Context, capBytes int64) (model.Volu
 	}
 
 	vid := model.VolumeID("vol_" + randToken())
-	rec := model.Volume{ID: vid, Backend: be.Name(), CapByte: capBytes, CreatedAt: time.Now()}
+	rec := model.Volume{ID: vid, Backend: selected.name, CapByte: capBytes, CreatedAt: time.Now()}
 
 	// Protect the unit for the whole create window (atomic transition rollback). Registered BEFORE the
 	// gate so there is no instant in which bytes could exist unprotected.
@@ -113,7 +114,7 @@ func (m *Mediator) CreateVolume(ctx context.Context, capBytes int64) (model.Volu
 		}
 		return "", fmt.Errorf("create volume: allocate: %w", err)
 	}
-	err := m.deps.Store.CreateVolume(ctx, rec)
+	err = m.deps.Store.CreateVolume(ctx, rec)
 	m.admitMu.Unlock()
 	if err != nil {
 		// The bytes exist and the row does not. Reclaim now rather than leaving it to
@@ -153,29 +154,36 @@ type VolumeInfo struct {
 // GetVolume reads one volume's record and asks its backend for current usage
 // (the control-plane API inspect).
 func (m *Mediator) GetVolume(ctx context.Context, id model.VolumeID) (VolumeInfo, error) {
-	rec, err := m.deps.Store.GetVolume(ctx, id)
+	rec, be, err := m.backendForVolume(ctx, id)
 	if err != nil {
 		return VolumeInfo{}, fmt.Errorf("inspect volume: %w", err)
 	}
 	info := VolumeInfo{Volume: rec}
-	if be := m.deps.Volume; be != nil {
-		used, _, err := be.Usage(ctx, string(id))
-		if err != nil {
-			// Usage is REPORTING, not a decision here, so an unreadable backend degrades
-			// the response rather than failing the read. The strict-inequality check in
-			// SetVolumeCapacity treats the same failure as fatal, because there it IS the
-			// decision.
-			m.deps.Logf("inspect volume %s: usage unavailable: %v", id, err)
-		} else {
-			info.UsedByte = &used
-		}
+	used, _, usageErr := be.Usage(ctx, string(id))
+	if usageErr != nil {
+		// Usage is REPORTING, not a decision here, so an unreadable backend degrades
+		// the response rather than failing the read. The strict-inequality check in
+		// SetVolumeCapacity treats the same failure as fatal, because there it IS the
+		// decision.
+		m.deps.Logf("inspect volume %s: usage unavailable: %v", id, usageErr)
+	} else {
+		info.UsedByte = &used
 	}
 	return info, nil
 }
 
 // ListVolumes returns every volume record (the control-plane API list).
 func (m *Mediator) ListVolumes(ctx context.Context) ([]model.Volume, error) {
-	return m.deps.Store.ListVolumes(ctx)
+	volumes, err := m.deps.Store.ListVolumes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, rec := range volumes {
+		if err := m.validateVolumeRecord(rec); err != nil {
+			return nil, fmt.Errorf("list volumes: %w", err)
+		}
+	}
+	return volumes, nil
 }
 
 // SetVolumeCapacity is the control-plane API PATCH write point — the cap's only write point
@@ -203,11 +211,7 @@ func (m *Mediator) SetVolumeCapacity(ctx context.Context, id model.VolumeID, cap
 	if capBytes < 0 {
 		return fmt.Errorf("patch volume: cap must be non-negative (0 = uncapped), got %d", capBytes)
 	}
-	be := m.deps.Volume
-	if be == nil {
-		return fmt.Errorf("patch volume: no volume backend registered")
-	}
-	rec, err := m.deps.Store.GetVolume(ctx, id)
+	rec, be, err := m.backendForVolume(ctx, id)
 	if err != nil {
 		return fmt.Errorf("patch volume: %w", err)
 	}
@@ -294,13 +298,15 @@ func (m *Mediator) SetVolumeCapacity(ctx context.Context, id model.VolumeID, cap
 // (the API error contract). Folding it into success is how an external implementation made
 // "the guard refused this delete" indistinguishable from "the delete succeeded".
 func (m *Mediator) DeleteVolume(ctx context.Context, id model.VolumeID) error {
+	_, be, err := m.backendForVolume(ctx, id)
+	if err != nil {
+		return fmt.Errorf("delete volume: %w", err)
+	}
 	if err := m.deps.Store.DeleteVolume(ctx, id); err != nil {
 		return fmt.Errorf("delete volume: %w", err)
 	}
-	if be := m.deps.Volume; be != nil {
-		if err := be.DestroyVolume(ctx, string(id)); err != nil {
-			m.deps.Logf("delete volume %s: byte reclamation failed, deferring to the orphan sweep (the transition contract): %v", id, err)
-		}
+	if err := be.DestroyVolume(ctx, string(id)); err != nil {
+		m.deps.Logf("delete volume %s: byte reclamation failed, deferring to the orphan sweep (the transition contract): %v", id, err)
 	}
 	return nil
 }
@@ -456,11 +462,8 @@ func pathClean(p string) string { return path.Clean("/" + strings.TrimSpace(p)) 
 // of whatever the storage layer happens to say (the lifecycle: the store is authoritative, the
 // backend answers about bytes).
 func (m *Mediator) openVolumeRoot(ctx context.Context, id model.VolumeID) (volume.Root, error) {
-	be := m.deps.Volume
-	if be == nil {
-		return nil, fmt.Errorf("volume content: no volume backend registered")
-	}
-	if _, err := m.deps.Store.GetVolume(ctx, id); err != nil {
+	_, be, err := m.backendForVolume(ctx, id)
+	if err != nil {
 		return nil, fmt.Errorf("volume content: %w", err)
 	}
 	r, err := be.OpenRoot(ctx, string(id))
@@ -483,8 +486,11 @@ func (m *Mediator) openVolumeRoot(ctx context.Context, id model.VolumeID) (volum
 // window in which a new Volume inherits a leaked row's ID and cap. ReclaimQuotaRows
 // states the measured consequence.
 func (m *Mediator) SweepOrphanVolumes(ctx context.Context) error {
-	be := m.deps.Volume
-	if be == nil {
+	backends, err := m.configuredVolumeBackends()
+	if err != nil {
+		return fmt.Errorf("sweep volumes: %w", err)
+	}
+	if len(backends) == 0 {
 		return nil
 	}
 	// ENUMERATE FIRST, then decide. The order is what closes a MEASURED window: with the
@@ -495,95 +501,110 @@ func (m *Mediator) SweepOrphanVolumes(ctx context.Context) error {
 	//
 	// Enumerating first means every candidate's bytes already existed before any of the
 	// checks below ran, which is what makes those checks conclusive.
-	units, err := be.ListUnitIDs(ctx)
-	if err != nil {
-		// Reclaim NOTHING: an unreadable enumeration is not evidence that anything is an
-		// orphan (the Volume subsystem — never conclude "no owner" from a failed read).
-		return fmt.Errorf("sweep volumes: enumerate units: %w", err)
+	type enumeration struct {
+		provider string
+		backend  volume.Backend
+		units    []string
 	}
-	if len(units) == 0 {
-		return nil
+	enumerated := make([]enumeration, 0, len(backends))
+	for _, selected := range backends {
+		units, enumErr := selected.backend.ListUnitIDs(ctx)
+		if enumErr != nil {
+			// Reclaim NOTHING: an unreadable enumeration is not evidence that anything is an
+			// orphan (the Volume subsystem — never conclude "no owner" from a failed read).
+			return fmt.Errorf("sweep volumes: enumerate provider %q: %w", selected.name, enumErr)
+		}
+		enumerated = append(enumerated, enumeration{provider: selected.name, backend: selected.backend, units: units})
 	}
 
 	vols, err := m.deps.Store.ListVolumes(ctx)
 	if err != nil {
 		return fmt.Errorf("sweep volumes: list volumes: %w", err)
 	}
-	keep := make(map[string]bool, len(vols))
+	keep := make(map[string]model.Volume, len(vols))
 	for _, v := range vols {
-		keep[string(v.ID)] = true
+		// Validate every durable reference before any bytes are reclaimed. An unknown
+		// name is not evidence that its unit is orphaned; failing closed protects it.
+		if err := m.validateVolumeRecord(v); err != nil {
+			return fmt.Errorf("sweep volumes: %w", err)
+		}
+		keep[string(v.ID)] = v
 	}
 
 	reclaimed := 0
 	var failed []string
-	for _, id := range units {
-		if keep[id] {
-			continue
+	for _, batch := range enumerated {
+		for _, id := range batch.units {
+			if _, ok := keep[id]; ok {
+				continue
+			}
+			// A candidate with no row. Before destroying it, THREE checks, the first two of
+			// which have a load-bearing ORDER:
+			//
+			//  1. the in-flight sets — an in-flight create or a direct write in progress is
+			//     "bytes, no row" by construction, not an orphan;
+			//  2. a FRESH per-candidate store read; and
+			//  3. the FK-independent mount-table read (see below), which needs 2 to have run
+			//     first to be worth anything.
+			//
+			// Check 1 before check 2 is what makes that pair conclusive. The in-flight mark is
+			// dropped only AFTER the row is inserted, so a candidate that is NOT marked here
+			// has necessarily already committed its row — and check 2 then finds it. A
+			// candidate that IS marked is skipped outright. There is no third case, so no
+			// committed volume can be reclaimed, and no lock is held across a store call.
+			//
+			// EVERY read here fails CLOSED: an error skips the candidate, and is never allowed
+			// to read as "no owner" (the Volume subsystem).
+			if m.isVolumeInFlight(model.VolumeID(id)) {
+				continue
+			}
+			if _, err := m.deps.Store.GetVolume(ctx, model.VolumeID(id)); err == nil {
+				// Its row landed after the snapshot above: not an orphan. A row naming
+				// another provider also protects this unit; the owner backend gets to
+				// decide how its own bytes are interpreted.
+				continue
+			} else if !errors.Is(err, store.ErrVolumeNotFound) {
+				// Unreadable → skip. An error is not evidence of absence.
+				m.deps.Logf("sweep volumes: %s (provider %s): record unreadable, skipping: %v", id, batch.provider, err)
+				continue
+			}
+			// 3. A LIVE-MOUNT CHECK INDEPENDENT OF ANY FK (the Volume subsystem safety requirement): skip any
+			// unit whose id appears in ANY mount row, live or not.
+			//
+			// It is asked of the CANDIDATE UNIT ID, and that placement is load-bearing.
+			// Asking it of the volumes that HAVE records instead would be inert — every such
+			// id is already kept by the loop above — and would answer a question no FK leaves
+			// open: `mounts.volume REFERENCES volumes(id) ON DELETE RESTRICT` already makes
+			// "record present" and "mount row present" co-extensive AS LONG AS THE FK HOLDS.
+			// This check does NOT trust that: the candidates reaching this line have a
+			// CONFIRMED ABSENT record, so a mount row found here is exactly the FK-violating
+			// state the requirement names — a row still pointing at bytes nothing else
+			// vouches for.
+			//
+			// FK RESTRICT protects the ROW; this protects the BYTES, and the bytes are what a
+			// mis-sweep destroys — silently, with the guest's writes still returning success
+			// into an unlinked inode (volume sweep safety: five ways of pulling a live volume, none
+			// killed the sandbox, three produced no errno at all).
+			if rows, err := m.deps.Store.ListMountsByVolume(ctx, model.VolumeID(id)); err != nil {
+				// SKIP, never "no owner": measured, a bulk read fails wholesale and returns zero
+				// rows under exactly the concurrent churn a sweep runs in (the Volume subsystem). Reclaiming on a
+				// failed read would be indistinguishable from reclaiming on an empty table.
+				m.deps.Logf("sweep volumes: %s (provider %s): mount table unreadable, skipping: %v", id, batch.provider, err)
+				continue
+			} else if len(rows) > 0 {
+				m.deps.Logf("sweep volumes: %s (provider %s): no record but %d mount row(s) still name it, skipping", id, batch.provider, len(rows))
+				continue
+			}
+			// Genuinely an orphan: bytes exist, no row, no mount row, nothing in flight.
+			if err := batch.backend.DestroyVolume(ctx, id); err != nil {
+				// CONTINUE, do not abort: this is a best-effort reclamation path and one stuck
+				// unit must not leave every other leak in place. The sweep is idempotent, so
+				// whatever failed is retried next pass.
+				failed = append(failed, fmt.Sprintf("%s (%s): %v", id, batch.provider, err))
+				continue
+			}
+			reclaimed++
 		}
-		// A candidate with no row. Before destroying it, THREE checks, the first two of
-		// which have a load-bearing ORDER:
-		//
-		//  1. the in-flight sets — an in-flight create or a direct write in progress is
-		//     "bytes, no row" by construction, not an orphan;
-		//  2. a FRESH per-candidate store read; and
-		//  3. the FK-independent mount-table read (see below), which needs 2 to have run
-		//     first to be worth anything.
-		//
-		// Check 1 before check 2 is what makes that pair conclusive. The in-flight mark is
-		// dropped only AFTER the row is inserted, so a candidate that is NOT marked here
-		// has necessarily already committed its row — and check 2 then finds it. A
-		// candidate that IS marked is skipped outright. There is no third case, so no
-		// committed volume can be reclaimed, and no lock is held across a store call.
-		//
-		// EVERY read here fails CLOSED: an error skips the candidate, and is never allowed
-		// to read as "no owner" (the Volume subsystem).
-		if m.isVolumeInFlight(model.VolumeID(id)) {
-			continue
-		}
-		if _, err := m.deps.Store.GetVolume(ctx, model.VolumeID(id)); err == nil {
-			// Its row landed after the snapshot above: not an orphan.
-			continue
-		} else if !errors.Is(err, store.ErrVolumeNotFound) {
-			// Unreadable → skip. An error is not evidence of absence.
-			m.deps.Logf("sweep volumes: %s: record unreadable, skipping: %v", id, err)
-			continue
-		}
-		// 3. A LIVE-MOUNT CHECK INDEPENDENT OF ANY FK (the Volume subsystem safety requirement): skip any
-		// unit whose id appears in ANY mount row, live or not.
-		//
-		// It is asked of the CANDIDATE UNIT ID, and that placement is load-bearing.
-		// Asking it of the volumes that HAVE records instead would be inert — every such
-		// id is already kept by the loop above — and would answer a question no FK leaves
-		// open: `mounts.volume REFERENCES volumes(id) ON DELETE RESTRICT` already makes
-		// "record present" and "mount row present" co-extensive AS LONG AS THE FK HOLDS.
-		// This check does NOT trust that: the candidates reaching this line have a
-		// CONFIRMED ABSENT record, so a mount row found here is exactly the FK-violating
-		// state the requirement names — a row still pointing at bytes nothing else
-		// vouches for.
-		//
-		// FK RESTRICT protects the ROW; this protects the BYTES, and the bytes are what a
-		// mis-sweep destroys — silently, with the guest's writes still returning success
-		// into an unlinked inode (volume sweep safety: five ways of pulling a live volume, none
-		// killed the sandbox, three produced no errno at all).
-		if rows, err := m.deps.Store.ListMountsByVolume(ctx, model.VolumeID(id)); err != nil {
-			// SKIP, never "no owner": measured, a bulk read fails wholesale and returns zero
-			// rows under exactly the concurrent churn a sweep runs in (the Volume subsystem). Reclaiming on a
-			// failed read would be indistinguishable from reclaiming on an empty table.
-			m.deps.Logf("sweep volumes: %s: mount table unreadable, skipping: %v", id, err)
-			continue
-		} else if len(rows) > 0 {
-			m.deps.Logf("sweep volumes: %s: no record but %d mount row(s) still name it, skipping", id, len(rows))
-			continue
-		}
-		// Genuinely an orphan: bytes exist, no row, no mount row, nothing in flight.
-		if err := be.DestroyVolume(ctx, id); err != nil {
-			// CONTINUE, do not abort: this is a best-effort reclamation path and one stuck
-			// unit must not leave every other leak in place. The sweep is idempotent, so
-			// whatever failed is retried next pass.
-			failed = append(failed, fmt.Sprintf("%s: %v", id, err))
-			continue
-		}
-		reclaimed++
 	}
 	if reclaimed > 0 {
 		m.deps.Logf("sweep volumes: reclaimed %d orphan volume unit(s)", reclaimed)
@@ -632,7 +653,7 @@ func (m *Mediator) deleteMountsForCleanup(ctx context.Context, id model.SandboxI
 // anywhere — on the local arm that is harmless (Release is a no-op), but on the FUSE
 // arm it strands a process, which is exactly the class of leak the handle exists to
 // prevent.
-func (m *Mediator) materializeMounts(ctx context.Context, id model.SandboxID) ([]*volume.Materialized, []runtime.MountSource, error) {
+func (m *Mediator) materializeMounts(ctx context.Context, id model.SandboxID) ([]*materializedVolume, []runtime.MountSource, error) {
 	rows, err := m.deps.Store.ListMounts(ctx, id)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read mount table: %w", err)
@@ -640,23 +661,25 @@ func (m *Mediator) materializeMounts(ctx context.Context, id model.SandboxID) ([
 	if len(rows) == 0 {
 		return nil, nil, nil
 	}
-	be := m.deps.Volume
-	if be == nil {
-		// The record says this sandbox has volumes and there is no backend to produce
-		// them. Refusing beats launching without them: a guest that finds its mount
-		// point empty writes into the Overlay instead, silently, and those bytes then
-		// live somewhere the caller never asked for.
+	if backends, err := m.configuredVolumeBackends(); err != nil {
+		return nil, nil, fmt.Errorf("resolve volume providers for sandbox %s: %w", id, err)
+	} else if len(backends) == 0 {
 		return nil, nil, fmt.Errorf("sandbox %s has %d mount row(s) but no volume backend is registered", id, len(rows))
 	}
-	mounts := make([]*volume.Materialized, 0, len(rows))
+	mounts := make([]*materializedVolume, 0, len(rows))
 	specs := make([]runtime.MountSource, 0, len(rows))
 	for _, mt := range rows {
+		_, be, err := m.backendForVolume(ctx, mt.Volume)
+		if err != nil {
+			m.releaseMounts(ctx, mounts)
+			return nil, nil, fmt.Errorf("materialize volume %s for %s: %w", mt.Volume, id, err)
+		}
 		mz, err := be.Materialize(ctx, string(mt.Volume))
 		if err != nil {
 			m.releaseMounts(ctx, mounts)
 			return nil, nil, fmt.Errorf("materialize volume %s for %s: %w", mt.Volume, id, err)
 		}
-		mounts = append(mounts, mz)
+		mounts = append(mounts, &materializedVolume{backend: be, materialized: mz})
 		specs = append(specs, runtime.MountSource{
 			SourcePath: mz.SourcePath,
 			Dest:       mt.Path,
@@ -686,7 +709,7 @@ func (m *Mediator) materializeMounts(ctx context.Context, id model.SandboxID) ([
 // the adopt demotes nothing and tears nothing down — the caller keeps the sandbox in the
 // keep-set and retries — whereas a resume later will legitimately create-if-absent and
 // restart the guest clean (the Volume subsystem: data lost but recoverable).
-func (m *Mediator) adoptMounts(ctx context.Context, id model.SandboxID) ([]*volume.Materialized, error) {
+func (m *Mediator) adoptMounts(ctx context.Context, id model.SandboxID) ([]*materializedVolume, error) {
 	rows, err := m.deps.Store.ListMounts(ctx, id)
 	if err != nil {
 		return nil, fmt.Errorf("read mount table: %w", err)
@@ -694,12 +717,18 @@ func (m *Mediator) adoptMounts(ctx context.Context, id model.SandboxID) ([]*volu
 	if len(rows) == 0 {
 		return nil, nil
 	}
-	be := m.deps.Volume
-	if be == nil {
+	if backends, err := m.configuredVolumeBackends(); err != nil {
+		return nil, fmt.Errorf("resolve volume providers for sandbox %s: %w", id, err)
+	} else if len(backends) == 0 {
 		return nil, fmt.Errorf("sandbox %s has %d mount row(s) but no volume backend is registered", id, len(rows))
 	}
-	mounts := make([]*volume.Materialized, 0, len(rows))
+	mounts := make([]*materializedVolume, 0, len(rows))
 	for _, mt := range rows {
+		_, be, err := m.backendForVolume(ctx, mt.Volume)
+		if err != nil {
+			m.releaseMounts(ctx, mounts)
+			return nil, fmt.Errorf("volume %s of sandbox %s: %w", mt.Volume, id, err)
+		}
 		mz, err := be.AdoptMaterialized(ctx, string(mt.Volume))
 		if err != nil {
 			// Release what was already re-recognized: a partially rebuilt set is worse than
@@ -707,7 +736,7 @@ func (m *Mediator) adoptMounts(ctx context.Context, id model.SandboxID) ([]*volu
 			m.releaseMounts(ctx, mounts)
 			return nil, fmt.Errorf("volume %s of sandbox %s: %w", mt.Volume, id, err)
 		}
-		mounts = append(mounts, mz)
+		mounts = append(mounts, &materializedVolume{backend: be, materialized: mz})
 	}
 	return mounts, nil
 }
@@ -718,17 +747,14 @@ func (m *Mediator) adoptMounts(ctx context.Context, id model.SandboxID) ([]*volu
 // of an already-gone target (the Volume subsystem), so a failure here cannot mean "the bytes are still
 // live" — the bytes survive Release by definition. It is logged so a FUSE arm's stuck
 // unmount is visible without failing a pause that has already committed.
-func (m *Mediator) releaseMounts(ctx context.Context, mounts []*volume.Materialized) {
-	be := m.deps.Volume
-	if be == nil {
-		return
-	}
-	for _, mz := range mounts {
-		if mz == nil {
+
+func (m *Mediator) releaseMounts(ctx context.Context, mounts []*materializedVolume) {
+	for _, mounted := range mounts {
+		if mounted == nil || mounted.materialized == nil || mounted.backend == nil {
 			continue
 		}
-		if err := be.Release(ctx, mz); err != nil {
-			m.deps.Logf("release volume materialization %s: %v", mz.Volume, err)
+		if err := mounted.backend.Release(ctx, mounted.materialized); err != nil {
+			m.deps.Logf("release volume materialization %s: %v", mounted.materialized.Volume, err)
 		}
 	}
 }
@@ -831,9 +857,9 @@ func (m *Mediator) deriveVolume(ctx context.Context, srcID model.VolumeID, capBy
 	if capBytes < 0 {
 		return "", fmt.Errorf("%s volume: size must be non-negative (0 = uncapped), got %d", kind, capBytes)
 	}
-	be := m.deps.Volume
-	if be == nil {
-		return "", fmt.Errorf("%s volume: no volume backend registered", kind)
+	source, be, err := m.backendForVolume(ctx, srcID)
+	if err != nil {
+		return "", fmt.Errorf("%s volume: source %s: %w", kind, srcID, err)
 	}
 	caps := be.Capabilities()
 	supported := caps.Snapshot
@@ -852,13 +878,9 @@ func (m *Mediator) deriveVolume(ctx context.Context, srcID model.VolumeID, capBy
 	// bytes for a volume with no row is not a valid source — those bytes are an orphan the
 	// sweep is about to reclaim, and deriving from them would produce a child of something
 	// that is being deleted.
-	if _, err := m.deps.Store.GetVolume(ctx, srcID); err != nil {
-		return "", fmt.Errorf("%s volume: %w", kind, err)
-	}
-
 	newID := model.VolumeID("vol_" + randToken())
 	rec := model.Volume{
-		ID: newID, Backend: be.Name(), Parent: srcID, CapByte: capBytes, CreatedAt: time.Now(),
+		ID: newID, Backend: source.Backend, Parent: srcID, CapByte: capBytes, CreatedAt: time.Now(),
 	}
 
 	// Registered BEFORE anything exists, so there is no instant in which bytes could sit
@@ -872,7 +894,6 @@ func (m *Mediator) deriveVolume(ctx context.Context, srcID model.VolumeID, capBy
 		return "", err
 	}
 	// ONE backend call that both copies the bytes and writes the cap.
-	var err error
 	if isClone {
 		err = be.Clone(ctx, string(srcID), string(newID), capBytes)
 	} else {
@@ -927,16 +948,19 @@ func (m *Mediator) deriveVolume(ctx context.Context, srcID model.VolumeID, capBy
 //
 // Runs in the same boot position as the orphan sweep, BEFORE anything creates a unit.
 func (m *Mediator) RepairVolumeCaps(ctx context.Context) error {
-	be := m.deps.Volume
-	if be == nil || !be.Capabilities().Quota {
-		return nil // nothing can be capped, so nothing can be missing a cap
-	}
 	vols, err := m.deps.Store.ListVolumes(ctx)
 	if err != nil {
 		return fmt.Errorf("repair volume caps: list volumes: %w", err)
 	}
 	repaired := 0
 	for _, v := range vols {
+		be, err := m.backendForRecord(v)
+		if err != nil {
+			return fmt.Errorf("repair volume caps: %w", err)
+		}
+		if !be.Capabilities().Quota {
+			continue // this provider cannot carry a cap; its records must be uncapped
+		}
 		if v.CapByte <= 0 {
 			continue // the record says uncapped, so "no cap on storage" is correct
 		}
@@ -1008,23 +1032,25 @@ func (m *Mediator) RepairVolumeCaps(ctx context.Context) error {
 // per-unit ordering. That is exactly why its error handling is "leave it for the next
 // round" rather than "block".
 func (m *Mediator) ReclaimQuotaRows(ctx context.Context) error {
-	be := m.deps.Volume
-	if be == nil {
-		return nil
-	}
-	ids := be.DeletedRowIDs(ctx)
-	if len(ids) == 0 {
-		return nil
-	}
-	n, err := be.ReclaimQuotaRows(ctx, ids)
-	if n > 0 {
-		m.deps.Logf("reclaim quota rows: reclaimed %d leaked row(s)", n)
-	}
+	backends, err := m.configuredVolumeBackends()
 	if err != nil {
-		// Informational, not fatal: every row named in it stays recorded and is retried.
-		// A `<squota space holder>` can legitimately resist reclamation for a live clone's
-		// entire lifetime, so this is normal operation rather than an error path.
-		m.deps.Logf("reclaim quota rows: %v", err)
+		return fmt.Errorf("reclaim quota rows: %w", err)
+	}
+	for _, selected := range backends {
+		ids := selected.backend.DeletedRowIDs(ctx)
+		if len(ids) == 0 {
+			continue
+		}
+		n, reclaimErr := selected.backend.ReclaimQuotaRows(ctx, ids)
+		if n > 0 {
+			m.deps.Logf("reclaim quota rows: provider %s reclaimed %d leaked row(s)", selected.name, n)
+		}
+		if reclaimErr != nil {
+			// Informational, not fatal: every row named in it stays recorded and is retried.
+			// A `<squota space holder>` can legitimately resist reclamation for a live clone's
+			// entire lifetime, so this is normal operation rather than an error path.
+			m.deps.Logf("reclaim quota rows: provider %s: %v", selected.name, reclaimErr)
+		}
 	}
 	return nil
 }

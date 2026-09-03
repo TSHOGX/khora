@@ -3,9 +3,9 @@
 Provider work currently happens inside this repository. The four mechanism seams
 and their shipped implementations are listed in [Engine
 boundaries](../concepts/boundaries.md). Their packages and the standard assembly are
-under `internal/`; Khora does not yet expose a public provider API or a configuration
-selector. That future direction is tracked in
-[Issue #25](https://github.com/TSHOGX/khora/issues/25).
+under `internal/`; Khora does not expose a public provider API. Volume selection is
+an internal, typed assembly choice; third-party providers and dynamic plugins remain
+outside the engine.
 
 ## Choose the owning seam
 
@@ -56,14 +56,30 @@ The test layers and focused commands are documented in [Testing](testing.md).
 
 ## Wire the assembly
 
-The standard constructors are currently selected directly in
-`internal/orchestrator.New`. An in-tree implementation is not shipped merely because
-it satisfies an interface: wire it only when its configuration, startup failures,
-capabilities, reconciliation behavior, and substrate requirements are defined.
+The standard constructors are selected in `internal/orchestrator.New` through the
+typed `volume.ProviderConfig` registry. The shipped choices are `local_btrfs` and
+the uncapped `plain_dir` arm; the latter is intended for development and contract
+tests, while a positive cap is refused by its capability contract. Existing Volume
+rows always route by their persisted `backend` name, not by the current default.
+Unknown or unavailable names fail startup (and operation-level lookups fail closed)
+instead of falling back.
 
-Until Issue #25 establishes configurable selection, adding a deployment choice
-requires an explicit assembly change. Keep provider-specific configuration at that
-assembly boundary; do not put it in Sandbox, Template, Volume, or public API objects.
+The assembly fields are:
+
+| Selection | Provider-owned settings |
+| --- | --- |
+| `VolumeProvider: "local_btrfs"` (default) | `VolumeLocalBtrfs.VolumesDir`, or `VolumesDir`/`StateDir/volumes` when omitted |
+| `VolumeProvider: "plain_dir"` | `VolumePlainDir.Dir` (uncapped; positive caps are rejected) |
+
+The command-line equivalent is `--volume-provider` plus `--volumes-dir`. A provider
+constructor error, a failed readiness check, or a durable row naming a provider not
+present in the registry prevents startup; no row is silently redirected.
+
+Keep provider-specific configuration at that assembly boundary; do not put it in
+Sandbox, Template, Volume, or public API objects. To add an internal choice,
+implement `volume.Backend`, add its typed settings and constructor to
+`volume.ProviderConfig`/`volume.Assemble`, run the shared contract suite, and add
+startup and mixed-provider routing tests before exposing the name in the CLI.
 
 Update the implementation table, host requirements, configuration, operations, and
 test instructions in the same change. Describe unsupported behavior as a limitation,

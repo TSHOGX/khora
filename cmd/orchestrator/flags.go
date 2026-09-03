@@ -13,6 +13,7 @@ type orchestratorFlags struct {
 	stateDir            string
 	storePath           string
 	volumesDir          string
+	volumeProvider      string
 	healthTimeout       time.Duration
 	idleTimeout         time.Duration
 	retention           time.Duration
@@ -36,6 +37,7 @@ func newOrchestratorFlagSet(name string, handling flag.ErrorHandling, values *or
 	fs.StringVar(&values.stateDir, "state", "./scratch/state", "state root for overlays and runsc state and bundles")
 	fs.StringVar(&values.storePath, "store", "./scratch/store.db", "SQLite store file")
 	fs.StringVar(&values.volumesDir, "volumes-dir", "", "Volume storage root; empty uses state/volumes beside the overlay root")
+	fs.StringVar(&values.volumeProvider, "volume-provider", "local_btrfs", "Volume provider for new volumes (local_btrfs or plain_dir)")
 	fs.DurationVar(&values.healthTimeout, "health-timeout", 30*time.Second, "cold-start readiness gate timeout")
 	fs.DurationVar(&values.idleTimeout, "idle-timeout", 30*time.Minute, "default idle TTL before an idle running sandbox is paused")
 	fs.DurationVar(&values.retention, "retention", 24*time.Hour, "default paused retention TTL before irreversible record and Overlay eviction; 0 disables eviction")

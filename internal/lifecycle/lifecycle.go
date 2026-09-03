@@ -109,14 +109,17 @@ type Deps struct {
 	Store   store.Store
 	Runtime runtime.Provider
 	Rootfs  rootfs.Provider
-	// Volume is the Volume subsystem backend (volume.Backend). REQUIRED whenever the disk axis
-	// is metered, and required in practice: the resource admission disk inequality sums BOTH
-	// subsystems' uncapped bytes, so a nil backend would make the gate blind to every
-	// volume's bytes — and a pile of uncapped volumes could then fill the node
-	// without the gate refusing once. admitVolume therefore fails CLOSED on a nil
-	// backend rather than treating it as "no volumes", the same choice the gate makes
-	// for an unmeasurable provider (the data-plane exposure boundary).
+	// Volume is the legacy single Volume subsystem backend (volume.Backend).
+	// VolumeRegistry is the preferred multi-provider seam below. At least one of
+	// these is REQUIRED whenever the disk axis is metered: the resource admission
+	// disk inequality sums both subsystems' uncapped bytes, so a nil provider set
+	// would make the gate blind to every volume's bytes.
 	Volume volume.Backend
+	// VolumeRegistry is the configured set of Volume providers. Existing
+	// records are resolved by their recorded Backend name; new records use the
+	// registry default. Volume remains as a compatibility seam for callers that
+	// assemble one backend directly.
+	VolumeRegistry *volume.Registry
 	// Dial builds a stateless transport client for a discovered endpoint
 	// (the transport data plane: constructed per endpoint, discarded on resume).
 	//
@@ -290,7 +293,14 @@ type liveState struct {
 	// destroy can Release each one. The MOUNT ROWS are not here — those are persistent
 	// control-plane state that survives pause (a resume re-mounts from the CURRENT
 	// table, resource admission); these are the placement-local handles, discarded with the placement.
-	mounts []*volume.Materialized
+	mounts []*materializedVolume
+}
+
+// materializedVolume keeps the provider beside its placement-local handle.
+// A mixed-provider registry cannot release every handle through one default.
+type materializedVolume struct {
+	backend      volume.Backend
+	materialized *volume.Materialized
 }
 
 // TTL defaults (health and reclamation / the health and reaper boundary): conservative, revisable numeric knobs

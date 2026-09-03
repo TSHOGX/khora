@@ -53,6 +53,7 @@ func main() {
 		StateDir:            flags.stateDir,
 		StorePath:           flags.storePath,
 		VolumesDir:          flags.volumesDir,
+		VolumeProvider:      orchestrator.VolumeProvider(flags.volumeProvider),
 		HealthTimeout:       flags.healthTimeout,
 		DefaultIdleTimeout:  flags.idleTimeout,
 		DefaultRetention:    flags.retention,

@@ -30,4 +30,5 @@ Check it for staleness with `./scripts/check-generated.sh`.
 | `--transport-down-budget` | `2m0s` | transport-down restart budget before a cold resume |
 | `--version` | `false` | print the version and exit |
 | `--via-uid` | `-1` | uid of the local second-hop process used by egress.via; unset refuses via declarations and the uid must differ from the orchestrator uid |
+| `--volume-provider` | `local_btrfs` | Volume provider for new volumes (local_btrfs or plain_dir) |
 | `--volumes-dir` | `""` | Volume storage root; empty uses state/volumes beside the overlay root |
