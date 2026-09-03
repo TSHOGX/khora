@@ -225,6 +225,9 @@ func (m *Memory) ListOperations(_ context.Context, state model.OperationState) (
 // that protects the operation row. The attempt is the ownership token: once a
 // contender increments it, every other contender with the old token loses.
 func (m *Memory) TakeoverOperation(_ context.Context, id model.OperationID, expectedAttempt uint32, now time.Time, lease time.Duration) (model.Operation, error) {
+	if expectedAttempt == 0 || now.IsZero() || lease <= 0 {
+		return model.Operation{}, model.ErrInvalidArgument
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	op, ok := m.operations[id]
