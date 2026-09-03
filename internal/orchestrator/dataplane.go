@@ -162,6 +162,22 @@ func (p *processProxy) Start(ctx context.Context, req *connect.Request[v1.StartR
 	if err != nil {
 		return proxyErr(err)
 	}
+	// A retry that finds a materialized logical process must reconnect to that
+	// handle; starting again with the same handle would duplicate the guest
+	// workload. A `starting` reservation is the one case where the guest start
+	// still needs to be issued (the supervisor's start-flight CAS arbitrates
+	// concurrent callers).
+	if !created && reserved.State != model.ProcessStarting {
+		stable, ok := cl.(transport.StableProcessClient)
+		if !ok {
+			return proxyErr(errors.New("stable process reconnect is unavailable"))
+		}
+		ch, err := stable.ConnectHandle(ctx, string(reserved.ID), uint64(reserved.PlacementEpoch), 0)
+		if err != nil {
+			return proxyErr(err)
+		}
+		return p.forwardProcessEvents(ctx, string(sandboxID), ch, stream, reserved)
+	}
 	spec := transport.StartSpec{Cmd: m.Cmd, Args: m.Args, Env: m.Env, Cwd: m.Cwd, IdempotencyKey: m.IdempotencyKey, PlacementEpoch: uint64(epoch), ProcessHandle: string(reserved.ID)}
 	if m.Pty != nil {
 		spec.Pty = &transport.PtySize{Rows: uint16(m.Pty.Rows), Cols: uint16(m.Pty.Cols)}
@@ -172,7 +188,7 @@ func (p *processProxy) Start(ctx context.Context, req *connect.Request[v1.StartR
 		// newly reserved row is removed so a definite admission failure does not
 		// leave a permanent starting record; an existing row is retained because
 		// the guest may already own the idempotent process.
-		if created {
+		if created && definiteProcessStartFailure(err) {
 			if derr := p.e.Store.DeleteProcess(ctx, reserved.ID); derr != nil && !errors.Is(derr, store.ErrProcessNotFound) {
 				log.Printf("dataplane: remove failed process reservation %s: %v", reserved.ID, derr)
 			}
@@ -180,6 +196,22 @@ func (p *processProxy) Start(ctx context.Context, req *connect.Request[v1.StartR
 		return proxyErr(err)
 	}
 	return p.forwardProcessEvents(ctx, string(sandboxID), ch, stream, reserved)
+}
+
+func definiteProcessStartFailure(err error) bool {
+	var ce *connect.Error
+	if !errors.As(err, &ce) {
+		return false
+	}
+	switch ce.Code() {
+	case connect.CodeInvalidArgument, connect.CodeNotFound, connect.CodePermissionDenied:
+		return true
+	default:
+		// Unavailable/internal failures are ambiguous: the supervisor may have
+		// forked the workload before the frontend lost its stream. Retain the
+		// reservation so a retry can reconnect instead of orphaning the handle.
+		return false
+	}
 }
 
 // reserveProcess chooses a stable handle for a Start request and records its
@@ -779,17 +811,22 @@ func (p *processProxy) forwardProcessEvents(ctx context.Context, sandbox string,
 						rec = &existing
 					}
 				} else {
+					if ev.Handle != string(rec.ID) {
+						return fmt.Errorf("process start handle mismatch: got %q, want %q", ev.Handle, rec.ID)
+					}
 					rec.PID = pid
 					rec.State = model.ProcessRunning
 					rec.OutputCursor = model.ProcessOutputCursor(rec.ID, rec.PlacementEpoch, localSeq)
 					if err := p.e.Mediator.UpdateProcess(ctx, *rec); err != nil {
-						log.Printf("dataplane: persist process start %s: %v", rec.ID, err)
+						return fmt.Errorf("persist process start %s: %w", rec.ID, err)
 					}
 				}
 			case "data":
 				if rec != nil {
 					rec.OutputCursor.Sequence = localSeq
-					_ = p.e.Mediator.UpdateProcess(ctx, *rec)
+					if err := p.e.Mediator.UpdateProcess(ctx, *rec); err != nil {
+						return fmt.Errorf("persist process output %s: %w", rec.ID, err)
+					}
 				}
 			case "end":
 				if rec != nil {
@@ -800,7 +837,9 @@ func (p *processProxy) forwardProcessEvents(ctx context.Context, sandbox string,
 					rec.ExitedAt = &now
 					rec.PID = ev.PID
 					rec.OutputCursor.Sequence = localSeq
-					_ = p.e.Mediator.UpdateProcess(ctx, *rec)
+					if err := p.e.Mediator.UpdateProcess(ctx, *rec); err != nil {
+						return fmt.Errorf("persist process exit %s: %w", rec.ID, err)
+					}
 				}
 			}
 		}
