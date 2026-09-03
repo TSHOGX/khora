@@ -384,6 +384,12 @@ func (c *connectClient) Watch(ctx context.Context, path string, recursive bool, 
 	out := make(chan WatchEvent, 16)
 	go func() {
 		defer close(out)
+		// Always close the underlying Connect stream, including the cancellation
+		// path below. Returning directly from a ctx.Done select otherwise skips
+		// the trailing Close call and leaves a canceled HTTP/2 stream attached to
+		// the shared connection pool; after a transport-child restart that stale
+		// stream can make the next Watch request wait until its deadline.
+		defer stream.Close()
 		for stream.Receive() {
 			e := stream.Msg()
 			kind := EntryUnknown
@@ -410,7 +416,6 @@ func (c *connectClient) Watch(ctx context.Context, path string, recursive bool, 
 				return
 			}
 		}
-		_ = stream.Close()
 	}()
 	return out, nil
 }
