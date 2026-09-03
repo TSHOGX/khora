@@ -577,7 +577,16 @@ func (m *Mediator) Create(ctx context.Context, spec CreateSpec) (resultID model.
 	} else if replay != "" {
 		return model.SandboxID(replay), nil
 	}
-	defer func() { m.failOperation(ctx, claim, resultErr) }()
+	storeCtx := ctx
+	opctx, ownedClaim, stopLease := m.startOperationLease(ctx, claim)
+	claim = ownedClaim
+	ctx = opctx
+	defer stopLease()
+	claim, err = m.prepareOperation(ctx, claim)
+	if err != nil {
+		return "", err
+	}
+	defer func() { m.failOperation(storeCtx, claim, resultErr) }()
 
 	sid := model.SandboxID("sbx_" + randToken())
 	oid := model.OverlayID("ov_" + randToken())

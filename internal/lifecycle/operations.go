@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/TSHOGX/khora/internal/model"
@@ -15,8 +16,47 @@ import (
 )
 
 type operationClaim struct {
-	op     *model.Operation
-	replay *model.OperationResult
+	op      *model.Operation
+	replay  *model.OperationResult
+	lease   *operationLease
+	cleanup bool
+}
+
+// operationLease keeps a live attempt's ownership token fresh while an
+// external provider call is in progress. If renewal fails, the derived context
+// is canceled so providers that honor context can stop before another attempt
+// is allowed to take over.
+type operationLease struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+	done   chan struct{}
+	mu     sync.Mutex
+	err    error
+}
+
+func (k *operationLease) setErr(err error) {
+	k.mu.Lock()
+	if k.err == nil {
+		k.err = err
+	}
+	k.mu.Unlock()
+}
+
+func (k *operationLease) Err() error {
+	if k == nil {
+		return nil
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return k.err
+}
+
+func (k *operationLease) stop() {
+	if k == nil {
+		return
+	}
+	k.cancel()
+	<-k.done
 }
 
 func isOperationOwnershipConflict(err error) bool {
@@ -81,25 +121,92 @@ func (m *Mediator) claimOperation(ctx context.Context, scope string, key model.I
 			}
 			return operationClaim{replay: &result}, nil
 		}
-		if existing.RecoveryAction() == model.RecoveryCleanup {
-			if err := m.advanceOperation(ctx, operationClaim{op: &existing}, model.OperationCleaning); err != nil {
-				return operationClaim{}, err
-			}
-			if err := m.recoverOperation(ctx, existing); err != nil {
-				return operationClaim{}, err
-			}
-			// Cleanup completed (or was idempotently absent), so a retry can
-			// begin at the recorded boundary without losing the audit trail of
-			// the prior phase.
-			existing.Phase = model.OperationRecorded
-		}
-		if err := m.deps.Store.UpdateOperation(ctx, existing); err != nil {
-			return operationClaim{}, err
-		}
-		return operationClaim{op: &existing}, nil
+		return operationClaim{op: &existing, cleanup: existing.RecoveryAction() == model.RecoveryCleanup}, nil
 	default:
 		return operationClaim{}, model.ErrInternal
 	}
+}
+
+func (m *Mediator) startOperationLease(parent context.Context, claim operationClaim) (context.Context, operationClaim, func()) {
+	if claim.op == nil {
+		return parent, claim, func() {}
+	}
+	if claim.lease != nil {
+		return claim.lease.ctx, claim, claim.lease.stop
+	}
+	return m.startOperationLeaseWith(parent, claim, model.DefaultOperationLease, model.DefaultOperationLease/3)
+}
+
+// startOperationLeaseWith is split out so the ownership behavior can be tested
+// with a short lease without making production timing a test dependency.
+func (m *Mediator) startOperationLeaseWith(parent context.Context, claim operationClaim, lease, interval time.Duration) (context.Context, operationClaim, func()) {
+	if claim.op == nil || lease <= 0 || interval <= 0 {
+		return parent, claim, func() {}
+	}
+	ctx, cancel := context.WithCancel(parent)
+	k := &operationLease{ctx: ctx, cancel: cancel, done: make(chan struct{})}
+	claim.lease = k
+	go func(id model.OperationID, attempt uint32) {
+		defer close(k.done)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case now := <-ticker.C:
+				renewCtx, renewCancel := context.WithTimeout(parent, interval)
+				err := m.deps.Store.RenewOperation(renewCtx, id, attempt, now, lease)
+				renewCancel()
+				if err != nil {
+					k.setErr(err)
+					cancel()
+					return
+				}
+			}
+		}
+	}(claim.op.ID, claim.op.Attempt)
+	return ctx, claim, k.stop
+}
+
+func (m *Mediator) prepareOperation(ctx context.Context, claim operationClaim) (operationClaim, error) {
+	if claim.op == nil || !claim.cleanup {
+		return claim, nil
+	}
+	if err := m.operationOwned(ctx, claim); err != nil {
+		return operationClaim{}, err
+	}
+	if err := m.advanceOperation(ctx, claim, model.OperationCleaning); err != nil {
+		return operationClaim{}, err
+	}
+	if err := m.recoverOperation(ctx, *claim.op); err != nil {
+		// Leave the durable row in OperationCleaning. A later retry can
+		// safely take over and retry cleanup without another owner doing work.
+		return operationClaim{}, err
+	}
+	claim.op.Phase = model.OperationRecorded
+	if err := m.deps.Store.UpdateOperation(ctx, *claim.op); err != nil {
+		return operationClaim{}, err
+	}
+	claim.cleanup = false
+	return claim, nil
+}
+
+func (m *Mediator) operationOwned(ctx context.Context, claim operationClaim) error {
+	if claim.op == nil {
+		return nil
+	}
+	if err := claim.lease.Err(); err != nil {
+		return model.ErrInProgress
+	}
+	current, err := m.deps.Store.GetOperation(ctx, claim.op.ID)
+	if err != nil {
+		return err
+	}
+	if current.Attempt != claim.op.Attempt || current.State != model.OperationInProgress || !current.LeaseUntil.After(time.Now()) {
+		return model.ErrInProgress
+	}
+	return nil
 }
 
 func (m *Mediator) committedOperationResult(ctx context.Context, op model.Operation) (model.OperationResult, bool, error) {
@@ -171,10 +278,24 @@ func (m *Mediator) advanceOperation(ctx context.Context, claim operationClaim, p
 	if claim.op == nil {
 		return nil
 	}
-	if err := claim.op.Advance(phase, time.Now()); err != nil {
+	if err := m.operationOwned(ctx, claim); err != nil {
 		return err
 	}
-	if err := m.deps.Store.UpdateOperation(ctx, *claim.op); isOperationOwnershipConflict(err) {
+	current, err := m.deps.Store.GetOperation(ctx, claim.op.ID)
+	if err != nil {
+		return err
+	}
+	if current.Attempt != claim.op.Attempt {
+		return model.ErrInProgress
+	}
+	if claim.lease != nil && current.LeaseUntil.After(claim.op.LeaseUntil) {
+		claim.op.LeaseUntil = current.LeaseUntil
+	}
+	if err := current.Advance(phase, time.Now()); err != nil {
+		return err
+	}
+	*claim.op = current
+	if err := m.deps.Store.UpdateOperation(ctx, current); isOperationOwnershipConflict(err) {
 		return model.ErrInProgress
 	} else {
 		return err
@@ -185,10 +306,21 @@ func (m *Mediator) succeedOperation(ctx context.Context, claim operationClaim, r
 	if claim.op == nil {
 		return nil
 	}
-	if err := claim.op.Succeed(result, time.Now()); err != nil {
+	if err := m.operationOwned(ctx, claim); err != nil {
 		return err
 	}
-	if err := m.deps.Store.UpdateOperation(ctx, *claim.op); isOperationOwnershipConflict(err) {
+	current, err := m.deps.Store.GetOperation(ctx, claim.op.ID)
+	if err != nil {
+		return err
+	}
+	if current.Attempt != claim.op.Attempt {
+		return model.ErrInProgress
+	}
+	if err := current.Succeed(result, time.Now()); err != nil {
+		return err
+	}
+	*claim.op = current
+	if err := m.deps.Store.UpdateOperation(ctx, current); isOperationOwnershipConflict(err) {
 		return model.ErrInProgress
 	} else {
 		return err
@@ -196,16 +328,29 @@ func (m *Mediator) succeedOperation(ctx context.Context, claim operationClaim, r
 }
 
 func (m *Mediator) failOperation(ctx context.Context, claim operationClaim, err error) {
-	if claim.op == nil || err == nil || claim.op.State != model.OperationInProgress {
+	if claim.op == nil || err == nil {
+		return
+	}
+	if claim.lease != nil && claim.lease.Err() != nil {
+		return
+	}
+	// Stop renewal before terminalizing, then read the authoritative row. This
+	// avoids writing a stale lease snapshot after a heartbeat raced the failure
+	// path, while retaining the attempt fence.
+	if claim.lease != nil {
+		claim.lease.stop()
+	}
+	current, gerr := m.deps.Store.GetOperation(ctx, claim.op.ID)
+	if gerr != nil || current.Attempt != claim.op.Attempt || current.State != model.OperationInProgress {
 		return
 	}
 	class := operationErrorClass(err)
-	if ferr := claim.op.Fail(class, time.Now()); ferr != nil {
-		m.deps.Logf("operation %s: record failure class: %v", claim.op.ID, ferr)
+	if ferr := current.Fail(class, time.Now()); ferr != nil {
+		m.deps.Logf("operation %s: record failure class: %v", current.ID, ferr)
 		return
 	}
-	if ferr := m.deps.Store.UpdateOperation(ctx, *claim.op); ferr != nil && !isOperationOwnershipConflict(ferr) {
-		m.deps.Logf("operation %s: persist failure class: %v", claim.op.ID, ferr)
+	if ferr := m.deps.Store.UpdateOperation(ctx, current); ferr != nil && !isOperationOwnershipConflict(ferr) {
+		m.deps.Logf("operation %s: persist failure class: %v", current.ID, ferr)
 	}
 }
 

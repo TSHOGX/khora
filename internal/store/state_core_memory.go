@@ -260,6 +260,7 @@ func (m *Memory) RenewOperation(_ context.Context, id model.OperationID, expecte
 	if now.Before(op.UpdatedAt) {
 		return model.ErrInvalidArgument
 	}
+	op.UpdatedAt = now
 	op.LeaseUntil = now.Add(lease)
 	m.operations[id] = op
 	return nil

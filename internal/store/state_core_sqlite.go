@@ -412,9 +412,9 @@ func (s *SQLite) RenewOperation(ctx context.Context, id model.OperationID, expec
 	if expectedAttempt == 0 || now.IsZero() || lease <= 0 {
 		return model.ErrInvalidArgument
 	}
-	res, err := s.db.ExecContext(ctx, `UPDATE operations SET lease_until=?
+	res, err := s.db.ExecContext(ctx, `UPDATE operations SET updated_at=?, lease_until=?
 		WHERE id=? AND state='in_progress' AND attempt=? AND lease_until>?`,
-		stateTime(now.Add(lease)), string(id), expectedAttempt, stateTime(now))
+		stateTime(now), stateTime(now.Add(lease)), string(id), expectedAttempt, stateTime(now))
 	if err != nil {
 		return err
 	}

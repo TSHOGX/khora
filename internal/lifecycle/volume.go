@@ -102,7 +102,16 @@ func (m *Mediator) CreateVolumeWithKey(ctx context.Context, capBytes int64, key 
 	} else if replay != "" {
 		return model.VolumeID(replay), nil
 	}
-	defer func() { m.failOperation(ctx, claim, resultErr) }()
+	storeCtx := ctx
+	opctx, ownedClaim, stopLease := m.startOperationLease(ctx, claim)
+	claim = ownedClaim
+	ctx = opctx
+	defer stopLease()
+	claim, err = m.prepareOperation(ctx, claim)
+	if err != nil {
+		return "", err
+	}
+	defer func() { m.failOperation(storeCtx, claim, resultErr) }()
 	selected, err := m.defaultVolumeBackend()
 	if err != nil {
 		return "", fmt.Errorf("create volume: %w", err)
@@ -1099,7 +1108,16 @@ func (m *Mediator) deriveVolume(ctx context.Context, srcID model.VolumeID, capBy
 	} else if replay != "" {
 		return model.VolumeID(replay), nil
 	}
-	defer func() { m.failOperation(ctx, claim, resultErr) }()
+	storeCtx := ctx
+	opctx, ownedClaim, stopLease := m.startOperationLease(ctx, claim)
+	claim = ownedClaim
+	ctx = opctx
+	defer stopLease()
+	claim, err = m.prepareOperation(ctx, claim)
+	if err != nil {
+		return "", err
+	}
+	defer func() { m.failOperation(storeCtx, claim, resultErr) }()
 	if err := m.advanceOperation(ctx, claim, model.OperationMaterializing); err != nil {
 		return "", err
 	}

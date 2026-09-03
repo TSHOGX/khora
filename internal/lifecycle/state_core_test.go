@@ -12,6 +12,64 @@ import (
 	"github.com/TSHOGX/khora/internal/transport"
 )
 
+type renewalFailureStore struct{ store.Store }
+
+func (s renewalFailureStore) RenewOperation(context.Context, model.OperationID, uint32, time.Time, time.Duration) error {
+	return store.ErrOperationOwnershipConflict
+}
+
+func TestOperationLeaseRenewsPastOriginalDeadline(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	hash, _ := model.RequestHash(map[string]any{"lease": "renew"})
+	now := time.Now().UTC()
+	op, err := model.BeginOperation("op_lease", "volume.create", "lease-key", hash, now, 60*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateOperation(ctx, op); err != nil {
+		t.Fatal(err)
+	}
+	m := New(Deps{Store: st, Logf: func(string, ...any) {}})
+	ownedCtx, claim, stop := m.startOperationLeaseWith(ctx, operationClaim{op: &op}, 60*time.Millisecond, 10*time.Millisecond)
+	defer stop()
+	time.Sleep(110 * time.Millisecond)
+	if err := ownedCtx.Err(); err != nil {
+		t.Fatalf("renewed operation context canceled: %v", err)
+	}
+	got, err := st.GetOperation(ctx, op.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.LeaseUntil.After(now.Add(60*time.Millisecond)) || claim.lease.Err() != nil {
+		t.Fatalf("lease was not renewed: lease_until=%s err=%v", got.LeaseUntil, claim.lease.Err())
+	}
+}
+
+func TestOperationLeaseCancelsOnOwnershipLoss(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	hash, _ := model.RequestHash(map[string]any{"lease": "loss"})
+	op, err := model.BeginOperation("op_lease_loss", "volume.create", "lease-loss-key", hash, time.Now().UTC(), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateOperation(ctx, op); err != nil {
+		t.Fatal(err)
+	}
+	m := New(Deps{Store: renewalFailureStore{Store: st}, Logf: func(string, ...any) {}})
+	ownedCtx, claim, stop := m.startOperationLeaseWith(ctx, operationClaim{op: &op}, time.Minute, 5*time.Millisecond)
+	defer stop()
+	select {
+	case <-ownedCtx.Done():
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("ownership loss did not cancel operation context")
+	}
+	if !errors.Is(claim.lease.Err(), store.ErrOperationOwnershipConflict) {
+		t.Fatalf("lease error = %v; want ownership conflict", claim.lease.Err())
+	}
+}
+
 type digestRootfs struct {
 	*fakeRootfs
 	digest string
