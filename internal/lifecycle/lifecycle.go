@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"log"
 	"net/netip"
+	"strings"
 	"sync"
 	"time"
 
@@ -1167,9 +1168,13 @@ func (m *Mediator) promoteWithManifest(ctx context.Context, id model.SandboxID, 
 		if derr != nil {
 			return "", fmt.Errorf("promote: compute template digest: %w", derr)
 		}
-		if manifest.ContentDigest != "" && digest != manifest.ContentDigest {
+		// Provider implementations may return an equivalent digest with upper
+		// case hexadecimal. Compare the canonical algorithm and digest bytes
+		// case-insensitively, then persist the model's lowercase spelling.
+		if manifest.ContentDigest != "" && !strings.EqualFold(digest, manifest.ContentDigest) {
 			return "", model.NewContractError(model.ErrorConflict, "promote: manifest content digest does not match materialized bytes")
 		}
+		digest = strings.ToLower(digest)
 		// Always persist the provider's canonical digest, including when the
 		// caller omitted one. This makes future launch verification meaningful.
 		manifest.DigestAlgorithm = model.DigestSHA256
