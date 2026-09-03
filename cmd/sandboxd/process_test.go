@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -235,6 +237,56 @@ func TestStableProcessEpochMismatchFailsClosed(t *testing.T) {
 	s.register(p)
 	if _, err := s.resolveProcess(p.handle, p.epoch+1, 0); err == nil {
 		t.Fatal("stale process epoch accepted")
+	}
+}
+
+func TestFinishIsIdempotent(t *testing.T) {
+	p := newProc(1, nil)
+	p.finish(7)
+	seq := p.endFrame.sequence
+	p.finish(9)
+	if p.endFrame.sequence != seq || p.endFrame.exitCode != 7 {
+		t.Fatalf("second finish changed terminal result: %+v", p.endFrame)
+	}
+}
+
+func TestPersistedRingAndExitSurviveReload(t *testing.T) {
+	old := processStatePath
+	t.Cleanup(func() { processStatePath = old })
+	processStatePath = filepath.Join(t.TempDir(), "processes.json")
+	s := &processServer{retention: time.Hour}
+	p := newProc(1, nil)
+	s.register(p)
+	s.mu.Lock()
+	s.idempotency["retry"] = p.handle
+	s.idempotencySpec["retry"] = "hash"
+	s.savePersistentLocked()
+	s.mu.Unlock()
+	p.broadcast(frame{kind: 'd', stream: "stdout", data: []byte("persisted")})
+	p.finish(12)
+	s.unregister(p.pid)
+	if _, err := os.Stat(processStatePath); err != nil {
+		t.Fatalf("state file missing: %v", err)
+	}
+	r := &processServer{retention: time.Hour}
+	r.loadPersistent()
+	r.mu.Lock()
+	got := r.byHandle[p.handle]
+	r.mu.Unlock()
+	if got == nil || !got.ended || got.endFrame.exitCode != 12 {
+		t.Fatalf("reloaded process = %+v", got)
+	}
+	_, snap, ended, end, gap := got.subscribeFrom(0)
+	if gap || !ended || len(snap) != 1 || string(snap[0].data) != "persisted" || end.exitCode != 12 {
+		t.Fatalf("reloaded replay = snap=%+v ended=%v end=%+v gap=%v", snap, ended, end, gap)
+	}
+}
+
+func TestStartSpecHashIncludesPlacementEpoch(t *testing.T) {
+	a := startSpecHash(&v1.StartRequest{Cmd: "/bin/true", PlacementEpoch: 1})
+	b := startSpecHash(&v1.StartRequest{Cmd: "/bin/true", PlacementEpoch: 2})
+	if a == b {
+		t.Fatal("start idempotency hash ignored placement epoch")
 	}
 }
 

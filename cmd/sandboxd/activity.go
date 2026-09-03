@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"strconv"
 	"sync/atomic"
 	"time"
 )
@@ -26,7 +28,10 @@ import (
 // since this guest last did I/O", never "who connected / for how long".
 type activityClock struct {
 	lastIOUnixMilli atomic.Int64
+	sharedPath      string
 }
+
+const activityStateFile = "/tmp/.sandboxd-activity"
 
 // newActivityClock seeds lastIO to construction time, so a guest that has done
 // NO I/O since boot reports "idle since boot" rather than a bogus huge duration
@@ -37,13 +42,35 @@ func newActivityClock() *activityClock {
 	return c
 }
 
+// newSharedActivityClock uses the guest tmpfs as the tiny shared-memory seam
+// between PID 1 and replaceable transport children.  It keeps Health's
+// activity signal continuous when a transport child is restarted while
+// retaining the in-process atomic fast path.
+func newSharedActivityClock() *activityClock {
+	c := newActivityClock()
+	c.sharedPath = activityStateFile
+	if b, err := os.ReadFile(c.sharedPath); err == nil {
+		if v, err := strconv.ParseInt(string(b), 10, 64); err == nil && v > c.lastIOUnixMilli.Load() {
+			c.lastIOUnixMilli.Store(v)
+		}
+	}
+	return c
+}
+
 // stamp records "I/O happened now". Called from proc.broadcast (output) and
 // proc.writeInput (input) — lock-free, off any hot mutex.
 func (c *activityClock) stamp() {
 	if c == nil {
 		return
 	}
-	c.lastIOUnixMilli.Store(time.Now().UnixMilli())
+	now := time.Now().UnixMilli()
+	c.lastIOUnixMilli.Store(now)
+	if c.sharedPath != "" {
+		// A partial read is harmless: idleMillis falls back to the local atomic.
+		// The file lives on guest tmpfs and is excluded from Promote, so it is
+		// coordination state rather than workload content.
+		_ = os.WriteFile(c.sharedPath, []byte(strconv.FormatInt(now, 10)), 0o600)
+	}
 }
 
 // idleMillis returns how long since the last stamped I/O (ms), clamped at 0 so
@@ -53,7 +80,15 @@ func (c *activityClock) idleMillis() int64 {
 	if c == nil {
 		return 0
 	}
-	d := time.Now().UnixMilli() - c.lastIOUnixMilli.Load()
+	last := c.lastIOUnixMilli.Load()
+	if c.sharedPath != "" {
+		if b, err := os.ReadFile(c.sharedPath); err == nil {
+			if v, err := strconv.ParseInt(string(b), 10, 64); err == nil && v > last {
+				last = v
+			}
+		}
+	}
+	d := time.Now().UnixMilli() - last
 	if d < 0 {
 		return 0
 	}

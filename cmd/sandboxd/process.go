@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -28,8 +29,10 @@ import (
 // joining live (bounded replay).
 //
 // procs maps pid→proc: transport-process-local, non-authoritative, dying with the transport
-// process — NOT a control-plane registry (the transport data plane: List scans /proc live). transport behavior places the ring
-// buffer inside "no *persistent* SoT" — transient, per-process, never crossing resume.
+// process — NOT a control-plane registry (the transport data plane: List scans /proc live). The
+// hub is owned by guest PID 1 and is reached by transport children through
+// the private supervisor socket; descriptors and replay state therefore
+// survive a transport-child restart.
 type processServer struct {
 	mu              sync.Mutex
 	procs           map[int]*proc
@@ -45,23 +48,102 @@ type processServer struct {
 	// Start forks children and where their exit statuses come from (see proc.run for why
 	// cmd.Wait() cannot be used). Set by transportMode; a nil here is a programming error.
 	reaper *reapTable
+	// retention bounds how long an exited logical handle remains addressable.  It
+	// is deliberately owned by the process hub (the durable supervisor), not by
+	// each transport child, so reconnecting a transport cannot reset the clock.
+	retention    time.Duration
+	startFlights map[string]*startFlight
+	// remote is set only by a transport child.  PID 1 owns the process hub and
+	// the transport role talks to it over the private guest Unix socket.  Keeping
+	// this seam optional preserves the pure in-process hub used by unit tests.
+	remote *supervisorClient
+}
+
+type startFlight struct {
+	done   chan struct{}
+	handle string
+	err    error
+}
+
+// claimStart serializes first materialization for one idempotency key.  A
+// lookup followed by fork is not enough: two retries arriving together could
+// both pass the lookup and create two logical processes.  The flight remains
+// in memory only while the durable handle is being registered; the resulting
+// handle and request hash are persisted with the process row.
+func (s *processServer) claimStart(key, hash string) (existing *proc, wait <-chan struct{}, owner bool, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.idempotency == nil {
+		s.idempotency = make(map[string]string)
+	}
+	if s.idempotencySpec == nil {
+		s.idempotencySpec = make(map[string]string)
+	}
+	if s.startFlights == nil {
+		s.startFlights = make(map[string]*startFlight)
+	}
+	if prior := s.idempotencySpec[key]; prior != "" && prior != hash {
+		return nil, nil, false, connect.NewError(connect.CodeAlreadyExists, errString("idempotency key was reused with a different process request"))
+	}
+	if handle := s.idempotency[key]; handle != "" {
+		if p := s.byHandle[handle]; p != nil {
+			return p, nil, false, nil
+		}
+	}
+	if flight := s.startFlights[key]; flight != nil {
+		return nil, flight.done, false, nil
+	}
+	s.startFlights[key] = &startFlight{done: make(chan struct{})}
+	return nil, nil, true, nil
+}
+
+func (s *processServer) finishStartFlight(key string, handle string, err error) {
+	if key == "" {
+		return
+	}
+	s.mu.Lock()
+	flight := s.startFlights[key]
+	if flight != nil {
+		flight.handle = handle
+		flight.err = err
+		delete(s.startFlights, key)
+		close(flight.done)
+	}
+	s.mu.Unlock()
 }
 
 const processStateFile = "/tmp/.sandboxd-processes.json"
 
+// processStatePath is a variable rather than a second test-only code path so
+// persistence tests exercise the exact atomic file writer used in the guest.
+// Production never changes it.
+var processStatePath = processStateFile
+
 type persistedProcess struct {
-	Key      string `json:"key,omitempty"`
-	SpecHash string `json:"spec_hash,omitempty"`
-	Handle   string `json:"handle"`
-	PID      int    `json:"pid"`
-	Epoch    uint64 `json:"epoch"`
-	State    string `json:"state"`
-	ExitCode *int   `json:"exit_code,omitempty"`
+	Key       string           `json:"key,omitempty"`
+	SpecHash  string           `json:"spec_hash,omitempty"`
+	Handle    string           `json:"handle"`
+	PID       int              `json:"pid"`
+	Epoch     uint64           `json:"epoch"`
+	State     string           `json:"state"`
+	ExitCode  *int             `json:"exit_code,omitempty"`
+	Sequence  uint64           `json:"sequence"`
+	StartTime uint64           `json:"start_time,omitempty"`
+	Frames    []persistedFrame `json:"frames,omitempty"`
+	EndFrame  *persistedFrame  `json:"end_frame,omitempty"`
+	ExitedAt  int64            `json:"exited_at,omitempty"`
+}
+
+type persistedFrame struct {
+	Kind     string `json:"kind"`
+	Stream   string `json:"stream,omitempty"`
+	Data     []byte `json:"data,omitempty"`
+	ExitCode int    `json:"exit_code,omitempty"`
 	Sequence uint64 `json:"sequence"`
 }
 
 func (s *processServer) loadPersistent() {
-	b, err := os.ReadFile(processStateFile)
+	b, err := os.ReadFile(processStatePath)
 	if err != nil {
 		return
 	}
@@ -87,7 +169,18 @@ func (s *processServer) loadPersistent() {
 		if saved.Handle == "" {
 			continue
 		}
-		p := &proc{pid: saved.PID, handle: saved.Handle, epoch: saved.Epoch, ring: ringBuffer{cap: ringCapBytes}, subs: make(map[*subscriber]struct{}), sequence: saved.Sequence}
+		exitedAt := time.Time{}
+		if saved.ExitedAt != 0 {
+			exitedAt = time.Unix(0, saved.ExitedAt)
+		}
+		p := &proc{pid: saved.PID, handle: saved.Handle, epoch: saved.Epoch, startTime: saved.StartTime, exitedAt: exitedAt, ring: ringBuffer{cap: ringCapBytes}, subs: make(map[*subscriber]struct{}), sequence: saved.Sequence}
+		p.restored = true
+		for _, persisted := range saved.Frames {
+			p.ring.append(frame{kind: byte(firstByte(persisted.Kind, 'd')), stream: persisted.Stream, data: append([]byte(nil), persisted.Data...), exitCode: persisted.ExitCode, sequence: persisted.Sequence})
+		}
+		if saved.EndFrame != nil {
+			p.endFrame = frame{kind: byte(firstByte(saved.EndFrame.Kind, 'e')), stream: saved.EndFrame.Stream, data: append([]byte(nil), saved.EndFrame.Data...), exitCode: saved.EndFrame.ExitCode, sequence: saved.EndFrame.Sequence}
+		}
 		if saved.State == "exited" {
 			p.ended = true
 			code := 0
@@ -105,6 +198,18 @@ func (s *processServer) loadPersistent() {
 			s.procs[p.pid] = p
 		}
 	}
+	for _, p := range s.byHandle {
+		if p.ended {
+			s.scheduleRetentionLocked(p)
+		}
+	}
+}
+
+func firstByte(s string, fallback byte) byte {
+	if s == "" {
+		return fallback
+	}
+	return s[0]
 }
 
 func (s *processServer) watchRestored() {
@@ -118,13 +223,15 @@ func (s *processServer) watchRestored() {
 		}
 		s.mu.Unlock()
 		for _, pid := range pids {
-			if err := syscall.Kill(pid, 0); err == nil {
+			p, ok := s.get(pid)
+			if !ok {
 				continue
 			}
-			if p, ok := s.get(pid); ok {
-				p.finish(255)
-				s.unregister(pid)
+			if p.identityValid() {
+				continue
 			}
+			p.finish(255)
+			s.unregister(pid)
 		}
 	}
 }
@@ -147,16 +254,29 @@ func (s *processServer) savePersistentLocked() {
 				break
 			}
 		}
-		all = append(all, persistedProcess{Key: key, SpecHash: s.idempotencySpec[key], Handle: p.handle, PID: p.pid, Epoch: p.epoch, State: state, ExitCode: code, Sequence: p.sequence})
+		frames := make([]persistedFrame, 0, len(p.ring.frames))
+		for _, f := range p.ring.frames {
+			frames = append(frames, persistedFrame{Kind: string([]byte{f.kind}), Stream: f.stream, Data: append([]byte(nil), f.data...), ExitCode: f.exitCode, Sequence: f.sequence})
+		}
+		var end *persistedFrame
+		if p.endFrame.kind != 0 {
+			v := persistedFrame{Kind: string([]byte{p.endFrame.kind}), Stream: p.endFrame.stream, Data: append([]byte(nil), p.endFrame.data...), ExitCode: p.endFrame.exitCode, Sequence: p.endFrame.sequence}
+			end = &v
+		}
+		var exitedAt int64
+		if !p.exitedAt.IsZero() {
+			exitedAt = p.exitedAt.UnixNano()
+		}
+		all = append(all, persistedProcess{Key: key, SpecHash: s.idempotencySpec[key], Handle: p.handle, PID: p.pid, Epoch: p.epoch, State: state, ExitCode: code, Sequence: p.sequence, StartTime: p.startTime, Frames: frames, EndFrame: end, ExitedAt: exitedAt})
 		p.mu.Unlock()
 	}
 	b, err := json.Marshal(all)
 	if err != nil {
 		return
 	}
-	tmp := processStateFile + ".tmp"
+	tmp := processStatePath + ".tmp"
 	if os.WriteFile(tmp, b, 0o600) == nil {
-		_ = os.Rename(tmp, processStateFile)
+		_ = os.Rename(tmp, processStatePath)
 	}
 }
 
@@ -185,8 +305,18 @@ func (s *processServer) register(p *proc) {
 		s.idempotencySpec = make(map[string]string)
 	}
 	p.activity = s.activity // share the sandbox-global I/O clock (the activity signal)
+	p.persist = s.persist
+	if p.startTime == 0 {
+		p.startTime = procStartTime(p.pid)
+	}
 	s.procs[p.pid] = p
 	s.byHandle[p.handle] = p
+	s.savePersistentLocked()
+	s.mu.Unlock()
+}
+
+func (s *processServer) persist() {
+	s.mu.Lock()
 	s.savePersistentLocked()
 	s.mu.Unlock()
 }
@@ -205,16 +335,47 @@ func (s *processServer) unregister(pid int) {
 	// Keep the logical handle and exit status for the bounded retention window;
 	// only the placement-local PID map is removed immediately.
 	if p != nil {
-		time.AfterFunc(24*time.Hour, func() {
-			s.mu.Lock()
-			if s.byHandle[p.handle] == p {
-				delete(s.byHandle, p.handle)
-			}
-			s.mu.Unlock()
-		})
+		s.scheduleRetentionLocked(p)
 	}
 	s.savePersistentLocked()
 	s.mu.Unlock()
+}
+
+func (s *processServer) scheduleRetentionLocked(p *proc) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	if p.exitedAt.IsZero() {
+		p.exitedAt = time.Now()
+	}
+	deadline := p.exitedAt.Add(s.retentionDuration())
+	p.mu.Unlock()
+	d := time.Until(deadline)
+	if d < 0 {
+		d = 0
+	}
+	time.AfterFunc(d, func() {
+		s.mu.Lock()
+		if s.byHandle[p.handle] == p {
+			delete(s.byHandle, p.handle)
+			for key, handle := range s.idempotency {
+				if handle == p.handle {
+					delete(s.idempotency, key)
+					delete(s.idempotencySpec, key)
+				}
+			}
+			s.savePersistentLocked()
+		}
+		s.mu.Unlock()
+	})
+}
+
+func (s *processServer) retentionDuration() time.Duration {
+	if s.retention > 0 {
+		return s.retention
+	}
+	return 24 * time.Hour
 }
 
 // frame is one broadcast item: a data chunk ('d') or the terminal exit ('e').
@@ -239,9 +400,14 @@ type subscriber struct {
 // processServer doc). Holds the bounded ring, the live subscriber set, and the
 // input handles (stdin pipe; pty master).
 type proc struct {
-	pid    int
-	handle string
-	epoch  uint64
+	pid int
+	// startTime is the kernel start-time tick read from /proc/<pid>/stat at
+	// launch.  A PID alone is reusable; every restored/live lookup compares this
+	// token before treating a locator as the same process.
+	startTime uint64
+	restored  bool
+	handle    string
+	epoch     uint64
 
 	// activity is the shared sandbox-global last-I/O clock (the activity signal),
 	// set by processServer.register. Stamped on every output (broadcast) and
@@ -255,19 +421,67 @@ type proc struct {
 	stdin    io.WriteCloser
 	pty      *os.File // set only for pty processes
 	ended    bool
+	exitedAt time.Time
 	endFrame frame
 	sequence uint64
+	persist  func()
 }
 
 func newProc(pid int, stdin io.WriteCloser) *proc {
 	return &proc{
-		pid:    pid,
-		handle: newProcessHandle(),
-		epoch:  1,
-		ring:   ringBuffer{cap: ringCapBytes},
-		subs:   make(map[*subscriber]struct{}),
-		stdin:  stdin,
+		pid:       pid,
+		startTime: procStartTime(pid),
+		handle:    newProcessHandle(),
+		epoch:     1,
+		ring:      ringBuffer{cap: ringCapBytes},
+		subs:      make(map[*subscriber]struct{}),
+		stdin:     stdin,
 	}
+}
+
+// procStartTime returns field 22 (starttime) from /proc/<pid>/stat.  The comm
+// field may contain spaces and ')' characters, so parsing starts after the last
+// closing parenthesis.  A zero result means the locator cannot be authenticated
+// and is intentionally treated as unavailable by restored-process checks.
+func procStartTime(pid int) uint64 {
+	if pid <= 0 {
+		return 0
+	}
+	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	if err != nil {
+		return 0
+	}
+	i := strings.LastIndexByte(string(b), ')')
+	if i < 0 {
+		return 0
+	}
+	fields := strings.Fields(string(b)[i+1:])
+	// fields[0] is state; field 22 in the full record is index 19 after
+	// the comm field.
+	if len(fields) <= 19 {
+		return 0
+	}
+	v, err := strconv.ParseUint(fields[19], 10, 64)
+	if err != nil {
+		return 0
+	}
+	return v
+}
+
+func (p *proc) identityValid() bool {
+	if p == nil || p.pid <= 0 {
+		return false
+	}
+	if p.startTime == 0 {
+		if p.restored {
+			return false
+		}
+		// Unit-only synthetic procs do not have a kernel locator.  Keep their
+		// in-memory behavior.
+		_, err := os.Stat("/proc/" + strconv.Itoa(p.pid))
+		return err == nil
+	}
+	return procStartTime(p.pid) == p.startTime
 }
 
 func newProcessHandle() string {
@@ -280,12 +494,13 @@ func newProcessHandle() string {
 
 func startSpecHash(m *v1.StartRequest) string {
 	b, _ := json.Marshal(struct {
-		Cmd  string
-		Args []string
-		Env  []string
-		Cwd  string
-		Pty  *v1.PtySize
-	}{m.Cmd, m.Args, m.Env, m.Cwd, m.Pty})
+		Cmd            string
+		Args           []string
+		Env            []string
+		Cwd            string
+		Pty            *v1.PtySize
+		PlacementEpoch uint64
+	}{m.Cmd, m.Args, m.Env, m.Cwd, m.Pty, m.PlacementEpoch})
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
 }
@@ -341,6 +556,9 @@ func (p *proc) broadcast(f frame) {
 		}
 	}
 	p.mu.Unlock()
+	if p.persist != nil {
+		p.persist()
+	}
 }
 
 // finish marks the process ended, delivers the end frame to remaining
@@ -360,7 +578,12 @@ func (p *proc) broadcast(f frame) {
 // guest-side activity clock, never from one subscriber's copy being too slow.
 func (p *proc) finish(exitCode int) {
 	p.mu.Lock()
+	if p.ended {
+		p.mu.Unlock()
+		return
+	}
 	p.ended = true
+	p.exitedAt = time.Now()
 	p.sequence++
 	p.endFrame = frame{kind: 'e', exitCode: exitCode, sequence: p.sequence}
 	for sub := range p.subs {
@@ -380,6 +603,9 @@ func (p *proc) finish(exitCode int) {
 		p.pty = nil
 	}
 	p.mu.Unlock()
+	if p.persist != nil {
+		p.persist()
+	}
 }
 
 // subscribe atomically snapshots the ring and (if the process is still live)
@@ -582,7 +808,7 @@ func (s *processServer) Start(ctx context.Context, req *connect.Request[v1.Start
 	return s.start(ctx, req, stream)
 }
 
-func (s *processServer) start(ctx context.Context, req *connect.Request[v1.StartRequest], stream eventSender) error {
+func (s *processServer) start(ctx context.Context, req *connect.Request[v1.StartRequest], stream eventSender) (retErr error) {
 	m := req.Msg
 	if m.Cmd == "" {
 		return connect.NewError(connect.CodeInvalidArgument, errString("empty cmd"))
@@ -590,20 +816,34 @@ func (s *processServer) start(ctx context.Context, req *connect.Request[v1.Start
 	// A caller key is scoped to this transport endpoint. Repeating it returns
 	// the same logical process stream while the process is still known here;
 	// the control plane persists the durable handle across endpoint changes.
+	flightOwner := false
+	var flightHandle string
 	if m.IdempotencyKey != "" {
 		hash := startSpecHash(m)
-		s.mu.Lock()
-		if handle := s.idempotency[m.IdempotencyKey]; handle != "" {
-			if prior := s.idempotencySpec[m.IdempotencyKey]; prior != "" && prior != hash {
-				s.mu.Unlock()
-				return connect.NewError(connect.CodeAlreadyExists, errString("idempotency key was reused with a different process request"))
+		for {
+			existing, wait, owner, err := s.claimStart(m.IdempotencyKey, hash)
+			if err != nil {
+				return err
 			}
-			if existing := s.byHandle[handle]; existing != nil {
-				s.mu.Unlock()
+			if existing != nil {
 				return serveExistingProcess(ctx, stream, existing)
 			}
+			if owner {
+				flightOwner = true
+				defer func() {
+					if flightOwner {
+						s.finishStartFlight(m.IdempotencyKey, flightHandle, retErr)
+					}
+				}()
+				break
+			}
+			select {
+			case <-wait:
+				continue
+			case <-ctx.Done():
+				return ctx.Err()
+			}
 		}
-		s.mu.Unlock()
 	}
 
 	// Independent context: the process must outlive this Start stream so a later Connect can
@@ -681,12 +921,18 @@ func (s *processServer) start(ctx context.Context, req *connect.Request[v1.Start
 		p.epoch = m.PlacementEpoch
 	}
 	s.register(p)
+	flightHandle = p.handle
 	if m.IdempotencyKey != "" {
 		s.mu.Lock()
 		s.idempotency[m.IdempotencyKey] = p.handle
 		s.idempotencySpec[m.IdempotencyKey] = startSpecHash(m)
 		s.savePersistentLocked()
 		s.mu.Unlock()
+		// The durable handle is now visible.  Release the creation flight before
+		// streaming output so a concurrent retry can attach immediately instead
+		// of waiting for the process to exit.
+		s.finishStartFlight(m.IdempotencyKey, p.handle, nil)
+		flightOwner = false
 	}
 
 	// Subscribe BEFORE the source pumps start so Start sees everything live

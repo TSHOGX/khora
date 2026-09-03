@@ -25,25 +25,22 @@ import (
 func transportMode() {
 	exitIfCrashLoopSentinel()
 
-	// Subreaper declaration + the wildcard drain that collects what it attracts, in one call
-	// (the init and sandboxd split / the guest startup topology — see startSubtreeReaper). This table is now this process's
-	// ONLY waiter, so the processServer carries it to get its children's exit codes.
-	reaper := startSubtreeReaper()
-
-	// One sandbox-global activity clock (the activity signal), shared by the process server
-	// (stamps I/O) and the health server (reports idle). Transient/process-local, reborn on
-	// every transport (re)start: a fresh transport child that has served no I/O is "idle since
-	// (re)start", and the reaper reads guest-observable truth, not a cross-restart memory
-	// (the transport data plane stateless).
-	activity := newActivityClock()
-
-	procSvc := &processServer{activity: activity, reaper: reaper}
-	procSvc.loadPersistent()
-	go procSvc.watchRestored()
+	// The guest supervisor (PID 1) owns workload children and their wait status.
+	// The transport child must not install a second subtree reaper: doing so would
+	// steal children from PID 1 across a transport restart.  Its process service
+	// is a private RPC forwarder to the supervisor's durable hub.
+	// The process hub and health clock are owned by PID 1.  The transport child
+	// forwards both services so a child restart cannot reset activity or process
+	// state.
+	supervisor := newSupervisorClient()
+	procSvc := &processForwarder{c: supervisor}
 	mux := http.NewServeMux()
-	mux.Handle(transportv1connect.NewHealthServiceHandler(&healthServer{activity: activity}))
-	mux.Handle(transportv1connect.NewProcessServiceHandler(procSvc))
-	mux.Handle(transportv1connect.NewFsServiceHandler(&fsServer{activity: activity}))
+	healthPath, healthHandler := transportv1connect.NewHealthServiceHandler(&healthForwarder{c: supervisor})
+	mux.Handle(healthPath, healthHandler)
+	processPath, processHandler := transportv1connect.NewProcessServiceHandler(procSvc)
+	mux.Handle(processPath, processHandler)
+	fsPath, fsHandler := transportv1connect.NewFsServiceHandler(&fsServer{activity: newSharedActivityClock()})
+	mux.Handle(fsPath, fsHandler)
 	// The large-file bypass shares this mux, listener and port — a plain HTTP
 	// route beside the Connect handlers (files.go / fs transport).
 	registerFileRoutes(mux)

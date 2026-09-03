@@ -34,6 +34,23 @@ func initMode() {
 	reaper := newReapTable()
 	reaper.drainOnSIGCHLD()
 
+	// PID 1 is the guest process supervisor.  It owns the process hub and all
+	// workload descriptors; transport children are replaceable RPC frontends.
+	// Starting this listener before the first transport child makes the
+	// transport-restart window a pure endpoint outage, not a process-state loss.
+	processSvc := &processServer{
+		activity:  newSharedActivityClock(),
+		reaper:    reaper,
+		retention: 24 * time.Hour,
+	}
+	processSvc.loadPersistent()
+	go processSvc.watchRestored()
+	if supervisor, err := newSupervisorServer(processSvc); err != nil {
+		logf("init: process supervisor unavailable: %v", err)
+	} else {
+		go supervisor.serve()
+	}
+
 	// Container-level signals → fan out to EVERY other process in the guest, then exit (PID 1
 	// exiting tears down the container). PID 1 must install these explicitly. kill(-1, sig)
 	// signals every process in our pid namespace except PID 1 itself, so template-provided
