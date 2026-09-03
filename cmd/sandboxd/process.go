@@ -52,8 +52,12 @@ type processServer struct {
 	// retention bounds how long an exited logical handle remains addressable.  It
 	// is deliberately owned by the process hub (the durable supervisor), not by
 	// each transport child, so reconnecting a transport cannot reset the clock.
-	retention        time.Duration
-	startFlights     map[string]*startFlight
+	retention    time.Duration
+	startFlights map[string]*startFlight
+	// handleFlights closes the fork-before-register window for a caller-supplied
+	// logical handle. A retry must wait for the original materialization rather
+	// than overwrite byHandle and orphan the first workload.
+	handleFlights    map[string]*startFlight
 	persistMu        sync.Mutex
 	persistScheduled bool
 	persistDirty     bool
@@ -68,6 +72,18 @@ type startFlight struct {
 	done   chan struct{}
 	handle string
 	err    error
+	claims []string
+	hash   string
+}
+
+func startClaimAlias(key, handle string) string {
+	if key != "" {
+		return "key:" + key
+	}
+	if handle != "" {
+		return "handle:" + handle
+	}
+	return ""
 }
 
 // claimStart serializes first materialization for one idempotency key.  A
@@ -75,7 +91,7 @@ type startFlight struct {
 // both pass the lookup and create two logical processes.  The flight remains
 // in memory only while the durable handle is being registered; the resulting
 // handle and request hash are persisted with the process row.
-func (s *processServer) claimStart(key, hash string) (existing *proc, wait <-chan struct{}, owner bool, err error) {
+func (s *processServer) claimStart(key, handle, hash string) (existing *proc, wait <-chan struct{}, owner bool, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.idempotency == nil {
@@ -87,31 +103,96 @@ func (s *processServer) claimStart(key, hash string) (existing *proc, wait <-cha
 	if s.startFlights == nil {
 		s.startFlights = make(map[string]*startFlight)
 	}
+	if s.handleFlights == nil {
+		s.handleFlights = make(map[string]*startFlight)
+	}
 	if prior := s.idempotencySpec[key]; prior != "" && prior != hash {
 		return nil, nil, false, connect.NewError(connect.CodeAlreadyExists, errString("idempotency key was reused with a different process request"))
 	}
-	if handle := s.idempotency[key]; handle != "" {
-		if p := s.byHandle[handle]; p != nil {
+	if mapped := s.idempotency[key]; mapped != "" {
+		if handle != "" && mapped != handle {
+			return nil, nil, false, connect.NewError(connect.CodeAlreadyExists, errString("idempotency key is bound to a different process handle"))
+		}
+		if p := s.byHandle[mapped]; p != nil {
+			if hash != "" && p.specHash != "" && p.specHash != hash {
+				return nil, nil, false, connect.NewError(connect.CodeAlreadyExists, errString("idempotency key was reused with a different process request"))
+			}
 			return p, nil, false, nil
 		}
 	}
-	if flight := s.startFlights[key]; flight != nil {
-		return nil, flight.done, false, nil
+	if handle != "" {
+		if p := s.byHandle[handle]; p != nil {
+			if hash != "" && p.specHash != "" && p.specHash != hash {
+				return nil, nil, false, connect.NewError(connect.CodeAlreadyExists, errString("process handle was reused with a different process request"))
+			}
+			return p, nil, false, nil
+		}
 	}
-	s.startFlights[key] = &startFlight{done: make(chan struct{})}
-	return nil, nil, true, nil
+	aliases := make([]string, 0, 2)
+	if alias := startClaimAlias(key, ""); alias != "" {
+		aliases = append(aliases, alias)
+	}
+	if handle != "" {
+		aliases = append(aliases, startClaimAlias("", handle))
+	}
+	for _, alias := range aliases {
+		if flight := s.startFlights[alias]; flight != nil {
+			if flight.hash != "" && flight.hash != hash {
+				return nil, nil, false, connect.NewError(connect.CodeAlreadyExists, errString("process start was retried with a different request"))
+			}
+			return nil, flight.done, false, nil
+		}
+		if flight := s.handleFlights[alias]; flight != nil {
+			if flight.hash != "" && flight.hash != hash {
+				return nil, nil, false, connect.NewError(connect.CodeAlreadyExists, errString("process start was retried with a different request"))
+			}
+			return nil, flight.done, false, nil
+		}
+	}
+	flight := &startFlight{done: make(chan struct{}), claims: aliases, hash: hash}
+	for _, alias := range aliases {
+		if strings.HasPrefix(alias, "handle:") {
+			s.handleFlights[alias] = flight
+		} else {
+			s.startFlights[alias] = flight
+		}
+	}
+	return nil, flight.done, true, nil
 }
 
 func (s *processServer) finishStartFlight(key string, handle string, err error) {
-	if key == "" {
+	aliases := make([]string, 0, 2)
+	if alias := startClaimAlias(key, ""); alias != "" {
+		aliases = append(aliases, alias)
+	}
+	if handle != "" {
+		aliases = append(aliases, startClaimAlias("", handle))
+	}
+	if len(aliases) == 0 {
 		return
 	}
 	s.mu.Lock()
-	flight := s.startFlights[key]
+	var flight *startFlight
+	for _, alias := range aliases {
+		if f := s.startFlights[alias]; f != nil {
+			flight = f
+			break
+		}
+		if f := s.handleFlights[alias]; f != nil {
+			flight = f
+			break
+		}
+	}
 	if flight != nil {
 		flight.handle = handle
 		flight.err = err
-		delete(s.startFlights, key)
+		for _, alias := range flight.claims {
+			if strings.HasPrefix(alias, "handle:") {
+				delete(s.handleFlights, alias)
+			} else {
+				delete(s.startFlights, alias)
+			}
+		}
 		close(flight.done)
 	}
 	s.mu.Unlock()
@@ -195,7 +276,7 @@ func (s *processServer) loadPersistent() {
 		if saved.ExitedAt != 0 {
 			exitedAt = time.Unix(0, saved.ExitedAt)
 		}
-		p := &proc{pid: saved.PID, handle: saved.Handle, epoch: saved.Epoch, startTime: saved.StartTime, exitedAt: exitedAt, ring: ringBuffer{cap: ringCapBytes, droppedBefore: saved.DroppedBefore}, subs: make(map[*subscriber]struct{}), sequence: saved.Sequence}
+		p := &proc{pid: saved.PID, handle: saved.Handle, specHash: saved.SpecHash, epoch: saved.Epoch, startTime: saved.StartTime, exitedAt: exitedAt, ring: ringBuffer{cap: ringCapBytes, droppedBefore: saved.DroppedBefore}, subs: make(map[*subscriber]struct{}), sequence: saved.Sequence}
 		p.restored = true
 		for _, persisted := range saved.Frames {
 			p.ring.append(frame{kind: byte(firstByte(persisted.Kind, 'd')), stream: persisted.Stream, data: append([]byte(nil), persisted.Data...), exitCode: persisted.ExitCode, sequence: persisted.Sequence})
@@ -318,7 +399,11 @@ func (s *processServer) savePersistentLockedAt(path string) {
 		if !p.exitedAt.IsZero() {
 			exitedAt = p.exitedAt.UnixNano()
 		}
-		all = append(all, persistedProcess{Key: key, SpecHash: s.idempotencySpec[key], Handle: p.handle, PID: p.pid, Epoch: p.epoch, State: state, ExitCode: code, Sequence: p.sequence, StartTime: p.startTime, Frames: frames, DroppedBefore: p.ring.droppedBefore, EndFrame: end, ExitedAt: exitedAt})
+		specHash := p.specHash
+		if specHash == "" {
+			specHash = s.idempotencySpec[key]
+		}
+		all = append(all, persistedProcess{Key: key, SpecHash: specHash, Handle: p.handle, PID: p.pid, Epoch: p.epoch, State: state, ExitCode: code, Sequence: p.sequence, StartTime: p.startTime, Frames: frames, DroppedBefore: p.ring.droppedBefore, EndFrame: end, ExitedAt: exitedAt})
 		p.mu.Unlock()
 	}
 	b, err := json.Marshal(all)
@@ -511,6 +596,7 @@ type proc struct {
 	startTime uint64
 	restored  bool
 	handle    string
+	specHash  string
 	epoch     uint64
 
 	// activity is the shared sandbox-global last-I/O clock (the activity signal),
@@ -600,12 +686,12 @@ func newProcessHandle() string {
 
 func startSpecHash(m *v1.StartRequest) string {
 	b, _ := json.Marshal(struct {
-		Cmd            string
-		Args           []string
-		Env            []string
-		Cwd            string
-		Pty            *v1.PtySize
-		PlacementEpoch uint64
+		Cmd            string      `json:"cmd"`
+		Args           []string    `json:"args"`
+		Env            []string    `json:"env"`
+		Cwd            string      `json:"cwd"`
+		Pty            *v1.PtySize `json:"pty,omitempty"`
+		PlacementEpoch uint64      `json:"placement_epoch"`
 	}{m.Cmd, m.Args, m.Env, m.Cwd, m.Pty, m.PlacementEpoch})
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
@@ -935,11 +1021,14 @@ func (s *processServer) start(ctx context.Context, req *connect.Request[v1.Start
 	// the same logical process stream while the process is still known here;
 	// the control plane persists the durable handle across endpoint changes.
 	flightOwner := false
-	var flightHandle string
-	if m.IdempotencyKey != "" {
+	// Seed the cleanup handle from the caller before any fork can fail.  If
+	// setup (PTY allocation, pipe creation, or exec) fails, both the key and
+	// handle aliases must be released or every retry would remain blocked.
+	flightHandle := m.ProcessHandle
+	if m.IdempotencyKey != "" || m.ProcessHandle != "" {
 		hash := startSpecHash(m)
 		for {
-			existing, wait, owner, err := s.claimStart(m.IdempotencyKey, hash)
+			existing, wait, owner, err := s.claimStart(m.IdempotencyKey, m.ProcessHandle, hash)
 			if err != nil {
 				return err
 			}
@@ -1044,18 +1133,27 @@ func (s *processServer) start(ctx context.Context, req *connect.Request[v1.Start
 	if m.PlacementEpoch > 0 {
 		p.epoch = m.PlacementEpoch
 	}
+	// Keep the canonical request fingerprint on the in-memory hub as soon as
+	// the caller-supplied handle is claimed. This lets a retry validate both
+	// handle identity and request semantics before it can attach or fork.
+	p.specHash = startSpecHash(m)
 	s.register(p)
 	flightHandle = p.handle
 	if m.IdempotencyKey != "" {
 		s.mu.Lock()
 		s.idempotency[m.IdempotencyKey] = p.handle
-		s.idempotencySpec[m.IdempotencyKey] = startSpecHash(m)
+		s.idempotencySpec[m.IdempotencyKey] = p.specHash
 		s.savePersistentLocked()
 		s.mu.Unlock()
 		// The durable handle is now visible.  Release the creation flight before
 		// streaming output so a concurrent retry can attach immediately instead
 		// of waiting for the process to exit.
 		s.finishStartFlight(m.IdempotencyKey, p.handle, nil)
+		flightOwner = false
+	} else if m.ProcessHandle != "" {
+		// A caller-supplied handle without an idempotency key is still protected
+		// by the handle flight. Release it only after the process is registered.
+		s.finishStartFlight("", p.handle, nil)
 		flightOwner = false
 	}
 

@@ -304,6 +304,40 @@ func TestStartSpecHashIncludesPlacementEpoch(t *testing.T) {
 	}
 }
 
+func TestSuppliedHandleClaimRejectsDifferentRequest(t *testing.T) {
+	s := &processServer{}
+	_, _, owner, err := s.claimStart("", "proc_fixed", "hash-a")
+	if err != nil || !owner {
+		t.Fatalf("first claim owner=%v err=%v", owner, err)
+	}
+	if _, _, _, err := s.claimStart("", "proc_fixed", "hash-b"); err == nil {
+		t.Fatal("supplied handle was reused with a different request")
+	}
+	s.finishStartFlight("", "proc_fixed", nil)
+}
+
+func TestSuppliedHandleStartFlightSerializesConcurrentRetries(t *testing.T) {
+	s := &processServer{}
+	_, firstWait, firstOwner, err := s.claimStart("", "proc_fixed", "hash")
+	if err != nil || !firstOwner || firstWait == nil {
+		t.Fatalf("first supplied-handle claim = owner=%v wait=%v err=%v", firstOwner, firstWait, err)
+	}
+	_, secondWait, secondOwner, err := s.claimStart("", "proc_fixed", "hash")
+	if err != nil || secondOwner || secondWait == nil {
+		t.Fatalf("concurrent supplied-handle claim = owner=%v wait=%v err=%v", secondOwner, secondWait, err)
+	}
+	s.finishStartFlight("", "proc_fixed", nil)
+	select {
+	case <-secondWait:
+	case <-time.After(time.Second):
+		t.Fatal("supplied-handle retry was not released after the owner finished")
+	}
+	_, _, owner, err := s.claimStart("", "proc_fixed", "hash")
+	if err != nil || !owner {
+		t.Fatalf("post-flight supplied-handle claim = owner=%v err=%v", owner, err)
+	}
+}
+
 // nonblocking fan-out (source never blocks): a writeInput that blocks in Write (child not
 // draining its input) must NOT hold p.mu, so broadcast/subscribe/finish stay live
 // meanwhile. Holding p.mu across the write deadlocks this test — broadcast waits on
