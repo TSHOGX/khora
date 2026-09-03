@@ -66,6 +66,33 @@ func TestFsErrMapsEveryErrno(t *testing.T) {
 	}
 }
 
+func TestCollectWatchChangeDetection(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a"), []byte("one"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	first, err := collectWatch(dir, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != 1 {
+		t.Fatalf("initial snapshot = %+v", first)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "a"), []byte("two"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "b"), []byte("new"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	second, err := collectWatch(dir, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second[filepath.Join(dir, "a")].size != 3 || second[filepath.Join(dir, "b")].type_ != v1.EntryType_ENTRY_TYPE_FILE {
+		t.Fatalf("updated snapshot = %+v", second)
+	}
+}
+
 // EXDEV gets a bespoke message because "invalid cross-device link" alone sends the
 // reader looking for a bug instead of telling them what to do instead.
 func TestFsErrExdevExplainsTheRemedy(t *testing.T) {

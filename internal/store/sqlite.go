@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path"
@@ -44,6 +45,7 @@ CREATE TABLE IF NOT EXISTS templates (
 	id             TEXT PRIMARY KEY,          -- opaque "tmpl_<token>" / builtin = static dir name
 	parent         TEXT REFERENCES templates(id) ON DELETE RESTRICT, -- lineage; NULL = base layer
 	builtin        INTEGER NOT NULL DEFAULT 0, -- 1 = platform-preseeded (boot seed), 0 = Promote-built
+	manifest       TEXT NOT NULL DEFAULT '{}', -- immutable typed capability manifest JSON
 	created_at     INTEGER NOT NULL            -- unix nanos
 );
 CREATE TABLE IF NOT EXISTS sandboxes (
@@ -116,6 +118,7 @@ CREATE TABLE IF NOT EXISTS outbox (
 	-- guest-visible address established by this transition. NULL when the
 	-- transition did not establish a placement.
 	placement_address TEXT,
+	placement_epoch INTEGER NOT NULL DEFAULT 0,
 	-- cause: WHY, for the kinds with more than one route to them (the transactional outbox, model.EventCause).
 	-- NULL = this kind has one route, the common case.
 	--
@@ -190,6 +193,77 @@ CREATE TABLE IF NOT EXISTS mounts (
 -- second holder to take.
 CREATE UNIQUE INDEX IF NOT EXISTS mounts_exclusive_lease
 	ON mounts(volume) WHERE access = 'exclusive';
+
+-- placements: one current realization per Sandbox.  The epoch changes on
+-- Resume and is preserved on Adopt; placement-local handles never enter this
+-- table.
+CREATE TABLE IF NOT EXISTS placements (
+	sandbox    TEXT PRIMARY KEY REFERENCES sandboxes(id) ON DELETE CASCADE,
+	epoch      INTEGER NOT NULL CHECK (epoch > 0),
+	provider   TEXT NOT NULL,
+	state      TEXT NOT NULL CHECK (state IN ('active','stopping','lost')),
+	created_at INTEGER NOT NULL,
+	updated_at INTEGER NOT NULL,
+	UNIQUE (sandbox, epoch)
+);
+
+-- processes: logical handles outlive a guest PID and retain exit status for
+-- the configured retention window. PID is a placement-local locator only.
+CREATE TABLE IF NOT EXISTS processes (
+	id              TEXT PRIMARY KEY,
+	sandbox         TEXT NOT NULL REFERENCES sandboxes(id) ON DELETE CASCADE,
+	placement_epoch INTEGER NOT NULL CHECK (placement_epoch > 0),
+	pid             INTEGER NOT NULL DEFAULT 0 CHECK (pid >= 0),
+	state           TEXT NOT NULL CHECK (state IN ('running','exited','paused','reclaimed')),
+	exit_code       INTEGER,
+	started_at      INTEGER NOT NULL,
+	exited_at       INTEGER,
+	output_cursor   TEXT NOT NULL,
+	CHECK ((state IN ('exited','reclaimed')) = (exited_at IS NOT NULL)),
+	CHECK (state = 'exited' OR exit_code IS NULL)
+);
+CREATE INDEX IF NOT EXISTS processes_sandbox ON processes(sandbox, started_at);
+
+-- operations: durable idempotency ledger. The unique scope/key pair is the
+-- arbitration point for concurrent retries.
+CREATE TABLE IF NOT EXISTS operations (
+	id              TEXT PRIMARY KEY,
+	scope           TEXT NOT NULL,
+	idempotency_key TEXT NOT NULL,
+	request_hash    TEXT NOT NULL,
+	state           TEXT NOT NULL CHECK (state IN ('in_progress','succeeded','failed')),
+	phase           TEXT NOT NULL CHECK (phase IN ('recorded','materializing','materialized','committed','cleaning')),
+	attempt         INTEGER NOT NULL CHECK (attempt > 0),
+	result_kind     TEXT,
+	result_id       TEXT,
+	error_class     TEXT,
+	started_at      INTEGER NOT NULL,
+	updated_at      INTEGER NOT NULL,
+	lease_until     INTEGER NOT NULL DEFAULT 0,
+	UNIQUE(scope, idempotency_key)
+);
+CREATE INDEX IF NOT EXISTS operations_state ON operations(state, updated_at);
+
+-- telemetry: independent per-Sandbox sample lane. Sequence is scoped to the
+-- Sandbox and never shares lifecycle outbox ordering.
+CREATE TABLE IF NOT EXISTS telemetry (
+	sandbox         TEXT NOT NULL REFERENCES sandboxes(id) ON DELETE CASCADE,
+	sequence        INTEGER NOT NULL,
+	event_id        TEXT NOT NULL,
+	placement_epoch INTEGER NOT NULL DEFAULT 0,
+	process_id      TEXT,
+	state           TEXT NOT NULL,
+	cpu_available   INTEGER NOT NULL,
+	cpu_value      INTEGER NOT NULL,
+	memory_available INTEGER NOT NULL,
+	memory_value   INTEGER NOT NULL,
+	disk_available INTEGER NOT NULL,
+	disk_value     INTEGER NOT NULL,
+	at             INTEGER NOT NULL,
+	PRIMARY KEY (sandbox, sequence),
+	UNIQUE (sandbox, event_id)
+);
+CREATE INDEX IF NOT EXISTS telemetry_at ON telemetry(sandbox, at);
 `
 
 // OpenSQLite opens (creating if absent) the persistent store at path and ensures
@@ -275,8 +349,8 @@ func insertEvent(t *sql.Tx, ev *Event) error {
 	// the caller happened to set is ignored rather than trusted — the store owns
 	// this number.
 	_, err := t.Exec(
-		`INSERT INTO outbox(id, sandbox, kind, state, placement_address, cause, occurred_at, published_at) VALUES(?,?,?,?,?,?,?,NULL)`,
-		ev.ID, string(ev.Sandbox), ev.Kind, string(ev.State), optionalString(ev.PlacementAddress), causeArg(ev.Cause), ev.OccurredAt.UnixNano(),
+		`INSERT INTO outbox(id, sandbox, kind, state, placement_address, placement_epoch, cause, occurred_at, published_at) VALUES(?,?,?,?,?,?,?,?,NULL)`,
+		ev.ID, string(ev.Sandbox), ev.Kind, string(ev.State), optionalString(ev.PlacementAddress), int64(ev.PlacementEpoch), causeArg(ev.Cause), ev.OccurredAt.UnixNano(),
 	)
 	return err
 }
@@ -465,7 +539,7 @@ func (s *SQLite) UnpublishedEvents(ctx context.Context, limit int) ([]Event, err
 	// because the pool is pinned to ONE connection, so an unbounded scan holds it for
 	// its whole length and every state transition waits behind it (the transactional outbox).
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT seq, id, sandbox, kind, state, placement_address, cause, occurred_at FROM outbox WHERE published_at IS NULL ORDER BY seq LIMIT ?`, limit)
+		`SELECT seq, id, sandbox, kind, state, placement_address, placement_epoch, cause, occurred_at FROM outbox WHERE published_at IS NULL ORDER BY seq LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -533,7 +607,7 @@ func (s *SQLite) Events(ctx context.Context, after int64, limit int) ([]Event, i
 		return nil, 0, 0, err
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT seq, id, sandbox, kind, state, placement_address, cause, occurred_at FROM outbox
+		`SELECT seq, id, sandbox, kind, state, placement_address, placement_epoch, cause, occurred_at FROM outbox
 		   WHERE seq > ? ORDER BY seq LIMIT ?`, after, limit)
 	if err != nil {
 		return nil, 0, 0, err
@@ -564,7 +638,7 @@ func optionalString(s string) any {
 }
 
 // scanEvents drains an outbox row set selecting (seq, id, sandbox, kind, state,
-// placement_address, cause, occurred_at) in that order. Shared by both read paths
+// placement_address, placement_epoch, cause, occurred_at) in that order. Shared by both read paths
 // so they cannot drift apart in how they materialize an Event.
 func scanEvents(rows *sql.Rows) ([]Event, error) {
 	out := make([]Event, 0)
@@ -572,16 +646,18 @@ func scanEvents(rows *sql.Rows) ([]Event, error) {
 		var e Event
 		var sandbox, state string
 		var placementAddress sql.NullString
+		var placementEpoch int64
 		// NULL cause = this kind has one route; it scans back as the zero EventCause,
 		// which is the same "not applicable" the writer passed in.
 		var cause sql.NullString
 		var occ int64
-		if err := rows.Scan(&e.Seq, &e.ID, &sandbox, &e.Kind, &state, &placementAddress, &cause, &occ); err != nil {
+		if err := rows.Scan(&e.Seq, &e.ID, &sandbox, &e.Kind, &state, &placementAddress, &placementEpoch, &cause, &occ); err != nil {
 			return nil, err
 		}
 		e.Sandbox = model.SandboxID(sandbox)
 		e.State = model.Lifecycle(state)
 		e.PlacementAddress = placementAddress.String
+		e.PlacementEpoch = model.PlacementEpoch(placementEpoch)
 		e.Cause = model.EventCause(cause.String)
 		e.OccurredAt = time.Unix(0, occ)
 		out = append(out, e)
@@ -639,9 +715,13 @@ func (s *SQLite) CreateTemplate(ctx context.Context, tm model.Template) error {
 		if tm.Builtin {
 			builtin = 1
 		}
+		manifest, err := json.Marshal(tm.Manifest.Normalize())
+		if err != nil {
+			return fmt.Errorf("store: encode template manifest: %w", err)
+		}
 		if _, err := t.Exec(
-			`INSERT INTO templates(id, parent, builtin, created_at) VALUES(?,?,?,?)`,
-			string(tm.ID), parent, builtin, tm.CreatedAt.UnixNano(),
+			`INSERT INTO templates(id, parent, builtin, manifest, created_at) VALUES(?,?,?,?,?)`,
+			string(tm.ID), parent, builtin, string(manifest), tm.CreatedAt.UnixNano(),
 		); err != nil {
 			if isFKViolation(err) {
 				return ErrTemplateNotFound // missing parent layer
@@ -654,13 +734,13 @@ func (s *SQLite) CreateTemplate(ctx context.Context, tm model.Template) error {
 
 func (s *SQLite) GetTemplate(ctx context.Context, id model.TemplateID) (model.Template, error) {
 	return scanTemplate(s.db.QueryRowContext(ctx,
-		`SELECT id, parent, builtin, created_at FROM templates WHERE id=?`,
+		`SELECT id, parent, builtin, manifest, created_at FROM templates WHERE id=?`,
 		string(id)))
 }
 
 func (s *SQLite) ListTemplates(ctx context.Context) ([]model.Template, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, parent, builtin, created_at FROM templates ORDER BY created_at`)
+		`SELECT id, parent, builtin, manifest, created_at FROM templates ORDER BY created_at`)
 	if err != nil {
 		return nil, err
 	}
@@ -994,22 +1074,28 @@ func validateBinding(mounts []model.Mount) error {
 		seenPath[mt.Path] = true
 		seenVol[mt.Volume] = true
 	}
-	// Nesting: volumes must not mount inside one another's subtree (the Volume subsystem), or the
-	// ownership of the mount-point placeholder in a Promote capture becomes ambiguous.
-	// A prefix scan, because UNIQUE cannot express it.
+	// Nested mount destinations are legal.  A read-only parent may not contain a
+	// writable child: the child would be hidden behind a read-only bind on some
+	// runtimes and writable on others, so accepting it would make the contract
+	// provider-dependent.
 	for i, a := range mounts {
 		for j, b := range mounts {
 			if i == j {
 				continue
 			}
 			if strings.HasPrefix(b.Path, a.Path+"/") {
-				return fmt.Errorf("%w: %q is nested inside %q — volumes must not mount within one another's subtree",
-					ErrMountBindingInvalid, b.Path, a.Path)
+				if a.Access == model.SharedReadOnly && !b.Access.ReadOnly() {
+					return fmt.Errorf("%w: writable child %q is inside read-only parent %q", ErrMountBindingInvalid, b.Path, a.Path)
+				}
 			}
 		}
 	}
 	return nil
 }
+
+// ValidateMountBinding exposes the shared structural checks to the lifecycle
+// mount-plan compiler without exposing backend or SQL details.
+func ValidateMountBinding(mounts []model.Mount) error { return validateBinding(mounts) }
 
 // validateReplacement is validateBinding plus the one assertion a replacement adds: every
 // row must name the sandbox being rebound.
@@ -1071,8 +1157,9 @@ func scanTemplate(r rowScanner) (model.Template, error) {
 	var id string
 	var parent sql.NullString
 	var builtin int
+	var manifestJSON string
 	var created int64
-	err := r.Scan(&id, &parent, &builtin, &created)
+	err := r.Scan(&id, &parent, &builtin, &manifestJSON, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return model.Template{}, ErrTemplateNotFound
 	}
@@ -1082,6 +1169,12 @@ func scanTemplate(r rowScanner) (model.Template, error) {
 	tm.ID = model.TemplateID(id)
 	tm.Parent = model.TemplateID(parent.String) // "" when NULL
 	tm.Builtin = builtin != 0
+	if manifestJSON != "" {
+		if err := json.Unmarshal([]byte(manifestJSON), &tm.Manifest); err != nil {
+			return model.Template{}, fmt.Errorf("store: decode template manifest: %w", err)
+		}
+		tm.Manifest = tm.Manifest.Normalize()
+	}
 	tm.CreatedAt = time.Unix(0, created)
 	return tm, nil
 }

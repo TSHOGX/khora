@@ -72,7 +72,8 @@ func TestVolumeOperationsUseTheRecordedBackend(t *testing.T) {
 	for _, call := range a.Calls() {
 		// Match the complete provider call token, not the shared `vol_` prefix:
 		// the default backend legitimately handled the newly-created A volume.
-		if strings.Contains(call, ":"+string(recB.ID)) {
+		parts := strings.SplitN(call, ":", 2)
+		if len(parts) == 2 && (parts[1] == string(recB.ID) || strings.HasPrefix(parts[1], string(recB.ID)+"->")) {
 			t.Errorf("default backend handled operation for recorded B volume: %s", call)
 		}
 	}

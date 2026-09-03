@@ -7,13 +7,19 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
+
+	"github.com/TSHOGX/khora/pkg/khora"
 )
 
 func newVolumeCreateCmd() *cobra.Command {
-	var size int64
+	var (
+		size           int64
+		idempotencyKey string
+	)
 	cmd := &cobra.Command{
 		Use:   "create",
 		Short: "Create a volume",
@@ -25,7 +31,7 @@ patch.
 
 --size 0 means uncapped.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			v, err := api.CreateVolume(context.Background(), size)
+			v, err := api.CreateVolumeWithKey(context.Background(), size, khora.IdempotencyKey(idempotencyKey))
 			if err != nil {
 				return err
 			}
@@ -34,7 +40,97 @@ patch.
 		},
 	}
 	cmd.Flags().Int64Var(&size, "size", 0, "volume size in bytes (0 = uncapped)")
+	cmd.Flags().StringVar(&idempotencyKey, "idempotency-key", "", "retry key for durable create convergence")
 	return cmd
+}
+
+func newVolumeStatCmd() *cobra.Command {
+	return &cobra.Command{Use: "stat <volume-id> <path>", Short: "Stat a path in a volume", Args: cobra.ExactArgs(2), RunE: func(cmd *cobra.Command, args []string) error {
+		fi, err := api.StatVolume(cmd.Context(), args[0], args[1])
+		if err != nil {
+			return err
+		}
+		return printJSON(cmd.OutOrStdout(), fi)
+	}}
+}
+
+func newVolumePathListCmd() *cobra.Command {
+	return &cobra.Command{Use: "list-path <volume-id> [path]", Short: "List a directory in a volume", Args: cobra.RangeArgs(1, 2), RunE: func(cmd *cobra.Command, args []string) error {
+		name := "."
+		if len(args) == 2 {
+			name = args[1]
+		}
+		list, err := api.ListVolume(cmd.Context(), args[0], name)
+		if err != nil {
+			return err
+		}
+		return printJSON(cmd.OutOrStdout(), list)
+	}}
+}
+
+func newVolumeReadCmd() *cobra.Command {
+	var offset, length int64
+	cmd := &cobra.Command{Use: "read <volume-id> <path>", Short: "Read a byte range from a volume", Args: cobra.ExactArgs(2), RunE: func(cmd *cobra.Command, args []string) error {
+		data, err := api.ReadVolume(cmd.Context(), args[0], args[1], offset, length)
+		if err != nil {
+			return err
+		}
+		_, err = cmd.OutOrStdout().Write(data)
+		return err
+	}}
+	cmd.Flags().Int64Var(&offset, "offset", 0, "byte offset")
+	cmd.Flags().Int64Var(&length, "length", 0, "byte length (0 reads to EOF)")
+	return cmd
+}
+
+func newVolumeWriteCmd() *cobra.Command {
+	var offset int64
+	cmd := &cobra.Command{Use: "write <volume-id> <path>", Short: "Write stdin to a volume path", Args: cobra.ExactArgs(2), RunE: func(cmd *cobra.Command, args []string) error {
+		data, err := io.ReadAll(cmd.InOrStdin())
+		if err != nil {
+			return err
+		}
+		out, err := api.WriteVolume(cmd.Context(), args[0], args[1], offset, data)
+		if err != nil {
+			return err
+		}
+		return printJSON(cmd.OutOrStdout(), out)
+	}}
+	cmd.Flags().Int64Var(&offset, "offset", 0, "byte offset")
+	return cmd
+}
+
+func newVolumeMkdirCmd() *cobra.Command {
+	var mode string
+	cmd := &cobra.Command{Use: "mkdir <volume-id> <path>", Short: "Create a directory in a volume", Args: cobra.ExactArgs(2), RunE: func(cmd *cobra.Command, args []string) error {
+		parsed, err := strconv.ParseUint(mode, 8, 32)
+		if err != nil {
+			return fmt.Errorf("mode: %w", err)
+		}
+		fi, err := api.MkdirVolume(cmd.Context(), args[0], args[1], uint32(parsed))
+		if err != nil {
+			return err
+		}
+		return printJSON(cmd.OutOrStdout(), fi)
+	}}
+	cmd.Flags().StringVar(&mode, "mode", "0755", "directory mode in octal")
+	return cmd
+}
+
+func newVolumeMoveCmd() *cobra.Command {
+	return &cobra.Command{Use: "move <volume-id> <source> <destination>", Short: "Move a path inside a volume", Args: cobra.ExactArgs(3), RunE: func(cmd *cobra.Command, args []string) error {
+		fi, err := api.MoveVolume(cmd.Context(), args[0], args[1], args[2])
+		if err != nil {
+			return err
+		}
+		return printJSON(cmd.OutOrStdout(), fi)
+	}}
+}
+
+func newVolumeRemovePathCmd() *cobra.Command {
+	return &cobra.Command{Use: "remove-path <volume-id> <path>", Short: "Remove a path from a volume", Args: cobra.ExactArgs(2), RunE: func(cmd *cobra.Command, args []string) error {
+		return api.RemoveVolumePath(cmd.Context(), args[0], args[1])
+	}}
 }
 
 func newVolumeListCmd() *cobra.Command {

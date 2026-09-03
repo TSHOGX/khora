@@ -3,6 +3,10 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"io"
 	"os"
 	"os/exec"
@@ -27,8 +31,11 @@ import (
 // process — NOT a control-plane registry (the transport data plane: List scans /proc live). transport behavior places the ring
 // buffer inside "no *persistent* SoT" — transient, per-process, never crossing resume.
 type processServer struct {
-	mu    sync.Mutex
-	procs map[int]*proc
+	mu              sync.Mutex
+	procs           map[int]*proc
+	byHandle        map[string]*proc
+	idempotency     map[string]string
+	idempotencySpec map[string]string
 	// activity is the sandbox-global last-I/O clock (health and reclamation activity signal,
 	// the activity signal). Shared with the healthServer so Health.Check reports
 	// idle duration. Every proc created here carries a reference to it and
@@ -38,6 +45,119 @@ type processServer struct {
 	// Start forks children and where their exit statuses come from (see proc.run for why
 	// cmd.Wait() cannot be used). Set by transportMode; a nil here is a programming error.
 	reaper *reapTable
+}
+
+const processStateFile = "/tmp/.sandboxd-processes.json"
+
+type persistedProcess struct {
+	Key      string `json:"key,omitempty"`
+	SpecHash string `json:"spec_hash,omitempty"`
+	Handle   string `json:"handle"`
+	PID      int    `json:"pid"`
+	Epoch    uint64 `json:"epoch"`
+	State    string `json:"state"`
+	ExitCode *int   `json:"exit_code,omitempty"`
+	Sequence uint64 `json:"sequence"`
+}
+
+func (s *processServer) loadPersistent() {
+	b, err := os.ReadFile(processStateFile)
+	if err != nil {
+		return
+	}
+	var saved []persistedProcess
+	if json.Unmarshal(b, &saved) != nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.procs == nil {
+		s.procs = make(map[int]*proc)
+	}
+	if s.byHandle == nil {
+		s.byHandle = make(map[string]*proc)
+	}
+	if s.idempotency == nil {
+		s.idempotency = make(map[string]string)
+	}
+	if s.idempotencySpec == nil {
+		s.idempotencySpec = make(map[string]string)
+	}
+	for _, saved := range saved {
+		if saved.Handle == "" {
+			continue
+		}
+		p := &proc{pid: saved.PID, handle: saved.Handle, epoch: saved.Epoch, ring: ringBuffer{cap: ringCapBytes}, subs: make(map[*subscriber]struct{}), sequence: saved.Sequence}
+		if saved.State == "exited" {
+			p.ended = true
+			code := 0
+			if saved.ExitCode != nil {
+				code = *saved.ExitCode
+			}
+			p.endFrame = frame{kind: 'e', exitCode: code, sequence: saved.Sequence}
+		}
+		s.byHandle[p.handle] = p
+		if saved.Key != "" {
+			s.idempotency[saved.Key] = p.handle
+			s.idempotencySpec[saved.Key] = saved.SpecHash
+		}
+		if !p.ended && saved.PID > 0 {
+			s.procs[p.pid] = p
+		}
+	}
+}
+
+func (s *processServer) watchRestored() {
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	for range ticker.C {
+		s.mu.Lock()
+		pids := make([]int, 0, len(s.procs))
+		for pid := range s.procs {
+			pids = append(pids, pid)
+		}
+		s.mu.Unlock()
+		for _, pid := range pids {
+			if err := syscall.Kill(pid, 0); err == nil {
+				continue
+			}
+			if p, ok := s.get(pid); ok {
+				p.finish(255)
+				s.unregister(pid)
+			}
+		}
+	}
+}
+
+func (s *processServer) savePersistentLocked() {
+	all := make([]persistedProcess, 0, len(s.byHandle))
+	for _, p := range s.byHandle {
+		p.mu.Lock()
+		state := "running"
+		var code *int
+		if p.ended {
+			state = "exited"
+			c := p.endFrame.exitCode
+			code = &c
+		}
+		key := ""
+		for candidate, handle := range s.idempotency {
+			if handle == p.handle {
+				key = candidate
+				break
+			}
+		}
+		all = append(all, persistedProcess{Key: key, SpecHash: s.idempotencySpec[key], Handle: p.handle, PID: p.pid, Epoch: p.epoch, State: state, ExitCode: code, Sequence: p.sequence})
+		p.mu.Unlock()
+	}
+	b, err := json.Marshal(all)
+	if err != nil {
+		return
+	}
+	tmp := processStateFile + ".tmp"
+	if os.WriteFile(tmp, b, 0o600) == nil {
+		_ = os.Rename(tmp, processStateFile)
+	}
 }
 
 // Tuning values. Pure numeric knobs — changing one does NOT change the transport behavior/transport behavior shape, and
@@ -55,8 +175,19 @@ func (s *processServer) register(p *proc) {
 	if s.procs == nil {
 		s.procs = make(map[int]*proc)
 	}
+	if s.byHandle == nil {
+		s.byHandle = make(map[string]*proc)
+	}
+	if s.idempotency == nil {
+		s.idempotency = make(map[string]string)
+	}
+	if s.idempotencySpec == nil {
+		s.idempotencySpec = make(map[string]string)
+	}
 	p.activity = s.activity // share the sandbox-global I/O clock (the activity signal)
 	s.procs[p.pid] = p
+	s.byHandle[p.handle] = p
+	s.savePersistentLocked()
 	s.mu.Unlock()
 }
 
@@ -69,7 +200,20 @@ func (s *processServer) get(pid int) (*proc, bool) {
 
 func (s *processServer) unregister(pid int) {
 	s.mu.Lock()
+	p := s.procs[pid]
 	delete(s.procs, pid)
+	// Keep the logical handle and exit status for the bounded retention window;
+	// only the placement-local PID map is removed immediately.
+	if p != nil {
+		time.AfterFunc(24*time.Hour, func() {
+			s.mu.Lock()
+			if s.byHandle[p.handle] == p {
+				delete(s.byHandle, p.handle)
+			}
+			s.mu.Unlock()
+		})
+	}
+	s.savePersistentLocked()
 	s.mu.Unlock()
 }
 
@@ -79,6 +223,7 @@ type frame struct {
 	stream   string
 	data     []byte
 	exitCode int
+	sequence uint64
 }
 
 // subscriber is one attached output consumer. ch is its bounded send window
@@ -94,7 +239,9 @@ type subscriber struct {
 // processServer doc). Holds the bounded ring, the live subscriber set, and the
 // input handles (stdin pipe; pty master).
 type proc struct {
-	pid int
+	pid    int
+	handle string
+	epoch  uint64
 
 	// activity is the shared sandbox-global last-I/O clock (the activity signal),
 	// set by processServer.register. Stamped on every output (broadcast) and
@@ -109,15 +256,38 @@ type proc struct {
 	pty      *os.File // set only for pty processes
 	ended    bool
 	endFrame frame
+	sequence uint64
 }
 
 func newProc(pid int, stdin io.WriteCloser) *proc {
 	return &proc{
-		pid:   pid,
-		ring:  ringBuffer{cap: ringCapBytes},
-		subs:  make(map[*subscriber]struct{}),
-		stdin: stdin,
+		pid:    pid,
+		handle: newProcessHandle(),
+		epoch:  1,
+		ring:   ringBuffer{cap: ringCapBytes},
+		subs:   make(map[*subscriber]struct{}),
+		stdin:  stdin,
 	}
+}
+
+func newProcessHandle() string {
+	var b [12]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "proc_unknown"
+	}
+	return "proc_" + hex.EncodeToString(b[:])
+}
+
+func startSpecHash(m *v1.StartRequest) string {
+	b, _ := json.Marshal(struct {
+		Cmd  string
+		Args []string
+		Env  []string
+		Cwd  string
+		Pty  *v1.PtySize
+	}{m.Cmd, m.Args, m.Env, m.Cwd, m.Pty})
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
 }
 
 // ringBuffer holds recent output frames up to a byte cap, dropping the oldest
@@ -156,6 +326,8 @@ func (p *proc) broadcast(f frame) {
 		p.activity.stamp()
 	}
 	p.mu.Lock()
+	p.sequence++
+	f.sequence = p.sequence
 	if f.kind == 'd' {
 		p.ring.append(f)
 	}
@@ -189,7 +361,8 @@ func (p *proc) broadcast(f frame) {
 func (p *proc) finish(exitCode int) {
 	p.mu.Lock()
 	p.ended = true
-	p.endFrame = frame{kind: 'e', exitCode: exitCode}
+	p.sequence++
+	p.endFrame = frame{kind: 'e', exitCode: exitCode, sequence: p.sequence}
 	for sub := range p.subs {
 		select {
 		case sub.ch <- p.endFrame:
@@ -213,15 +386,35 @@ func (p *proc) finish(exitCode int) {
 // registers a new subscriber, so no frame is duplicated or missed at the
 // replay→live seam. Returns sub==nil when the process has already ended.
 func (p *proc) subscribe() (sub *subscriber, snap []frame, ended bool, endFrame frame) {
+	sub, snap, ended, endFrame, _ = p.subscribeFrom(0)
+	return
+}
+
+func (p *proc) subscribeFrom(after uint64) (sub *subscriber, snap []frame, ended bool, endFrame frame, gap bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	snap = p.ring.snapshot()
+	if len(snap) > 0 && ((after > 0 && after+1 < snap[0].sequence) || (after == 0 && snap[0].sequence > 1)) {
+		gap = true
+	}
+	if after > 0 {
+		filtered := snap[:0]
+		for _, f := range snap {
+			if f.sequence > after {
+				filtered = append(filtered, f)
+			}
+		}
+		snap = append([]frame(nil), filtered...)
+	}
 	if p.ended {
-		return nil, snap, true, p.endFrame
+		if after > 0 && p.endFrame.sequence <= after {
+			return nil, snap, true, p.endFrame, gap
+		}
+		return nil, snap, true, p.endFrame, gap
 	}
 	sub = &subscriber{ch: make(chan frame, subWindowFrames)}
 	p.subs[sub] = struct{}{}
-	return sub, snap, false, frame{}
+	return sub, snap, false, frame{}, gap
 }
 
 // unsubscribe removes a subscriber (idempotent with the overflow/finish paths).
@@ -394,6 +587,24 @@ func (s *processServer) start(ctx context.Context, req *connect.Request[v1.Start
 	if m.Cmd == "" {
 		return connect.NewError(connect.CodeInvalidArgument, errString("empty cmd"))
 	}
+	// A caller key is scoped to this transport endpoint. Repeating it returns
+	// the same logical process stream while the process is still known here;
+	// the control plane persists the durable handle across endpoint changes.
+	if m.IdempotencyKey != "" {
+		hash := startSpecHash(m)
+		s.mu.Lock()
+		if handle := s.idempotency[m.IdempotencyKey]; handle != "" {
+			if prior := s.idempotencySpec[m.IdempotencyKey]; prior != "" && prior != hash {
+				s.mu.Unlock()
+				return connect.NewError(connect.CodeAlreadyExists, errString("idempotency key was reused with a different process request"))
+			}
+			if existing := s.byHandle[handle]; existing != nil {
+				s.mu.Unlock()
+				return serveExistingProcess(ctx, stream, existing)
+			}
+		}
+		s.mu.Unlock()
+	}
 
 	// Independent context: the process must outlive this Start stream so a later Connect can
 	// reattach (the sandbox process model). Signals/exit end it, not a client disconnect.
@@ -466,11 +677,21 @@ func (s *processServer) start(ctx context.Context, req *connect.Request[v1.Start
 		exited = ch
 	}
 	pid := p.pid
+	if m.PlacementEpoch > 0 {
+		p.epoch = m.PlacementEpoch
+	}
 	s.register(p)
+	if m.IdempotencyKey != "" {
+		s.mu.Lock()
+		s.idempotency[m.IdempotencyKey] = p.handle
+		s.idempotencySpec[m.IdempotencyKey] = startSpecHash(m)
+		s.savePersistentLocked()
+		s.mu.Unlock()
+	}
 
 	// Subscribe BEFORE the source pumps start so Start sees everything live
 	// (ring replay is empty for a fresh Start).
-	sub, snap, ended, endF := p.subscribe()
+	sub, snap, ended, endF, gap := p.subscribeFrom(0)
 
 	// UNCONDITIONALLY before the first Send, because run() is the only thing that drains this
 	// child, closes its pipe parent ends, and calls unregister. Gated behind a successful Send
@@ -486,7 +707,8 @@ func (s *processServer) start(ctx context.Context, req *connect.Request[v1.Start
 	go p.run(exited, sources, func() { s.unregister(pid) })
 
 	if err := stream.Send(&v1.ProcessEvent{
-		Kind: &v1.ProcessEvent_Start{Start: &v1.StartEvent{Pid: int32(pid)}},
+		ProcessHandle: p.handle, PlacementEpoch: p.epoch,
+		Kind: &v1.ProcessEvent_Start{Start: &v1.StartEvent{Pid: int32(pid), ProcessHandle: p.handle, PlacementEpoch: p.epoch}},
 	}); err != nil {
 		if sub != nil {
 			p.unsubscribe(sub)
@@ -497,34 +719,88 @@ func (s *processServer) start(ctx context.Context, req *connect.Request[v1.Start
 	if sub != nil {
 		defer p.unsubscribe(sub)
 	}
-	return serveSubscriber(ctx, stream, sub, snap, ended, endF)
+	return serveSubscriber(ctx, stream, sub, snap, ended, endF, p.handle, p.epoch, gap)
 }
 
 // Connect reattaches to a running process: replay the bounded ring, then live
 // (bounded replay). Independent per-subscriber copy (the sandbox process model fan-out).
 func (s *processServer) Connect(ctx context.Context, req *connect.Request[v1.ConnectRequest], stream *connect.ServerStream[v1.ProcessEvent]) error {
-	p, ok := s.get(int(req.Msg.Pid))
+	var p *proc
+	var ok bool
+	if req.Msg.ProcessHandle != "" {
+		s.mu.Lock()
+		p, ok = s.byHandle[req.Msg.ProcessHandle]
+		s.mu.Unlock()
+		if ok && req.Msg.PlacementEpoch > 0 && p.epoch != req.Msg.PlacementEpoch {
+			return connect.NewError(connect.CodeFailedPrecondition, errString("stale placement epoch"))
+		}
+	} else {
+		p, ok = s.get(int(req.Msg.Pid))
+	}
 	if !ok {
+		if req.Msg.ProcessHandle != "" {
+			return connect.NewError(connect.CodeNotFound, errString("no such process handle"))
+		}
 		return errNoSuchPid(int(req.Msg.Pid))
 	}
-	sub, snap, ended, endF := p.subscribe()
+	sub, snap, ended, endF, gap := p.subscribeFrom(req.Msg.AfterSequence)
 	if sub != nil {
 		defer p.unsubscribe(sub)
 	}
-	return serveSubscriber(ctx, stream, sub, snap, ended, endF)
+	return serveSubscriber(ctx, stream, sub, snap, ended, endF, p.handle, p.epoch, gap)
+}
+
+func (s *processServer) resolveProcess(handle string, epoch uint64, pid int) (*proc, error) {
+	s.mu.Lock()
+	var p *proc
+	if handle != "" {
+		p = s.byHandle[handle]
+	} else {
+		p = s.procs[pid]
+	}
+	s.mu.Unlock()
+	if p == nil {
+		if handle != "" {
+			return nil, connect.NewError(connect.CodeNotFound, errString("no such process handle"))
+		}
+		return nil, errNoSuchPid(pid)
+	}
+	if epoch > 0 && p.epoch != epoch {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, errString("stale placement epoch"))
+	}
+	return p, nil
+}
+
+func serveExistingProcess(ctx context.Context, stream eventSender, p *proc) error {
+	sub, snap, ended, endF, gap := p.subscribeFrom(0)
+	if sub != nil {
+		defer p.unsubscribe(sub)
+	}
+	if err := stream.Send(&v1.ProcessEvent{ProcessHandle: p.handle, PlacementEpoch: p.epoch, Kind: &v1.ProcessEvent_Start{Start: &v1.StartEvent{Pid: int32(p.pid), ProcessHandle: p.handle, PlacementEpoch: p.epoch}}}); err != nil {
+		return err
+	}
+	return serveSubscriber(ctx, stream, sub, snap, ended, endF, p.handle, p.epoch, gap)
 }
 
 // serveSubscriber replays the ring snapshot, then either sends the end frame (if
 // the process already ended) or pumps the live window, emitting keepalives on
 // idle (transport behavior — no idle deadline on the long output stream).
-func serveSubscriber(ctx context.Context, stream eventSender, sub *subscriber, snap []frame, ended bool, endF frame) error {
+func serveSubscriber(ctx context.Context, stream eventSender, sub *subscriber, snap []frame, ended bool, endF frame, handle string, epoch uint64, gap bool) error {
+	if gap {
+		// The caller's cursor fell behind the bounded ring. Make the reset
+		// explicit instead of silently returning a partial replay.
+		if err := stream.Send(&v1.ProcessEvent{ProcessHandle: handle, PlacementEpoch: epoch, Gap: true, ResetReason: "overflow", Kind: &v1.ProcessEvent_Keepalive{Keepalive: &v1.KeepaliveEvent{}}}); err != nil {
+			return err
+		}
+		return connect.NewError(connect.CodeResourceExhausted, errString("process output cursor gap; full rescan required"))
+	}
 	for _, f := range snap {
-		if err := sendFrame(stream, f); err != nil {
+		if err := sendFrame(stream, f, handle, epoch, true); err != nil {
 			return err
 		}
 	}
 	if ended || sub == nil {
-		return sendFrame(stream, endF)
+		return sendFrame(stream, endF, handle, epoch, false)
 	}
 	ka := time.NewTicker(keepaliveInterval)
 	defer ka.Stop()
@@ -537,11 +813,12 @@ func serveSubscriber(ctx context.Context, stream eventSender, sub *subscriber, s
 				}
 				return nil // clean end: end frame delivered, then channel closed
 			}
-			if err := sendFrame(stream, f); err != nil {
+			if err := sendFrame(stream, f, handle, epoch, false); err != nil {
 				return err
 			}
 		case <-ka.C:
 			if err := stream.Send(&v1.ProcessEvent{
+				ProcessHandle: handle, PlacementEpoch: epoch,
 				Kind: &v1.ProcessEvent_Keepalive{Keepalive: &v1.KeepaliveEvent{}},
 			}); err != nil {
 				return err
@@ -552,14 +829,16 @@ func serveSubscriber(ctx context.Context, stream eventSender, sub *subscriber, s
 	}
 }
 
-func sendFrame(stream eventSender, f frame) error {
+func sendFrame(stream eventSender, f frame, handle string, epoch uint64, replay bool) error {
 	switch f.kind {
 	case 'd':
 		return stream.Send(&v1.ProcessEvent{
+			ProcessHandle: handle, PlacementEpoch: epoch, Sequence: f.sequence, Replay: replay,
 			Kind: &v1.ProcessEvent_Data{Data: &v1.DataEvent{Stream: f.stream, Data: f.data}},
 		})
 	case 'e':
 		return stream.Send(&v1.ProcessEvent{
+			ProcessHandle: handle, PlacementEpoch: epoch, Sequence: f.sequence, Replay: replay,
 			Kind: &v1.ProcessEvent_End{End: &v1.EndEvent{ExitCode: int32(f.exitCode)}},
 		})
 	}
@@ -575,9 +854,10 @@ func (s *processServer) StreamInput(_ context.Context, stream *connect.ClientStr
 	for stream.Receive() {
 		m := stream.Msg()
 		if p == nil {
-			var ok bool
-			if p, ok = s.get(int(m.Pid)); !ok {
-				return nil, errNoSuchPid(int(m.Pid))
+			var err error
+			p, err = s.resolveProcess(m.ProcessHandle, m.PlacementEpoch, int(m.Pid))
+			if err != nil {
+				return nil, err
 			}
 		}
 		if err := p.writeInput(m.Data, m.PtyIn); err != nil {
@@ -594,9 +874,9 @@ func (s *processServer) StreamInput(_ context.Context, stream *connect.ClientStr
 // process (nothing to resize).
 func (s *processServer) Update(_ context.Context, req *connect.Request[v1.UpdateRequest]) (*connect.Response[v1.UpdateResponse], error) {
 	m := req.Msg
-	p, ok := s.get(int(m.Pid))
-	if !ok {
-		return nil, errNoSuchPid(int(m.Pid))
+	p, err := s.resolveProcess(m.ProcessHandle, m.PlacementEpoch, int(m.Pid))
+	if err != nil {
+		return nil, err
 	}
 	if m.Pty == nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errString("Update requires pty size"))
@@ -609,9 +889,9 @@ func (s *processServer) Update(_ context.Context, req *connect.Request[v1.Update
 
 // CloseStdin closes stdin (non-pty) or sends EOF (pty, Ctrl-D equivalent).
 func (s *processServer) CloseStdin(_ context.Context, req *connect.Request[v1.CloseStdinRequest]) (*connect.Response[v1.CloseStdinResponse], error) {
-	p, ok := s.get(int(req.Msg.Pid))
-	if !ok {
-		return nil, errNoSuchPid(int(req.Msg.Pid))
+	p, err := s.resolveProcess(req.Msg.ProcessHandle, req.Msg.PlacementEpoch, int(req.Msg.Pid))
+	if err != nil {
+		return nil, err
 	}
 	if err := p.closeStdin(); err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
@@ -621,9 +901,9 @@ func (s *processServer) CloseStdin(_ context.Context, req *connect.Request[v1.Cl
 
 func (s *processServer) SendInput(_ context.Context, req *connect.Request[v1.SendInputRequest]) (*connect.Response[v1.SendInputResponse], error) {
 	m := req.Msg
-	p, ok := s.get(int(m.Pid))
-	if !ok {
-		return nil, errNoSuchPid(int(m.Pid))
+	p, err := s.resolveProcess(m.ProcessHandle, m.PlacementEpoch, int(m.Pid))
+	if err != nil {
+		return nil, err
 	}
 	if err := p.writeInput(m.Data, m.PtyIn); err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
@@ -643,6 +923,13 @@ func (s *processServer) SendInput(_ context.Context, req *connect.Request[v1.Sen
 // fs and must therefore validate for itself; the orchestrator's copy is only fail-fast.
 func (s *processServer) SendSignal(_ context.Context, req *connect.Request[v1.SendSignalRequest]) (*connect.Response[v1.SendSignalResponse], error) {
 	m := req.Msg
+	if m.ProcessHandle != "" {
+		p, err := s.resolveProcess(m.ProcessHandle, m.PlacementEpoch, int(m.Pid))
+		if err != nil {
+			return nil, err
+		}
+		m.Pid = int32(p.pid)
+	}
 	if err := validateSignalPid(int(m.Pid)); err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errString(err.Error()))
 	}
@@ -653,7 +940,7 @@ func (s *processServer) SendSignal(_ context.Context, req *connect.Request[v1.Se
 }
 
 // List scans /proc for live pids (no registry, the transport data plane).
-func (*processServer) List(_ context.Context, _ *connect.Request[v1.ListRequest]) (*connect.Response[v1.ListResponse], error) {
+func (s *processServer) List(_ context.Context, _ *connect.Request[v1.ListRequest]) (*connect.Response[v1.ListResponse], error) {
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
@@ -667,7 +954,21 @@ func (*processServer) List(_ context.Context, _ *connect.Request[v1.ListRequest]
 			pids = append(pids, int32(pid))
 		}
 	}
-	return connect.NewResponse(&v1.ListResponse{Pids: pids}), nil
+	stable := make([]*v1.ProcessInfo, 0)
+	s.mu.Lock()
+	for _, p := range s.procs {
+		p.mu.Lock()
+		info := &v1.ProcessInfo{ProcessHandle: p.handle, Pid: int32(p.pid), State: "running", PlacementEpoch: p.epoch, OutputSequence: p.sequence}
+		if p.ended {
+			info.State = "exited"
+			code := int32(p.endFrame.exitCode)
+			info.ExitCode = &code
+		}
+		p.mu.Unlock()
+		stable = append(stable, info)
+	}
+	s.mu.Unlock()
+	return connect.NewResponse(&v1.ListResponse{Pids: pids, Processes: stable}), nil
 }
 
 type errString string

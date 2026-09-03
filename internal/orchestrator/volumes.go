@@ -3,10 +3,14 @@ package orchestrator
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/TSHOGX/khora/internal/lifecycle"
 	"github.com/TSHOGX/khora/internal/model"
@@ -87,7 +91,7 @@ func (e *Engine) handleCreateVolume(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "size must be non-negative (0 = uncapped)", http.StatusBadRequest)
 		return
 	}
-	id, err := e.Mediator.CreateVolume(r.Context(), req.Size)
+	id, err := e.Mediator.CreateVolumeWithKey(r.Context(), req.Size, model.IdempotencyKey(strings.TrimSpace(r.Header.Get("Idempotency-Key"))))
 	if err != nil {
 		statusFor(w, err)
 		return
@@ -138,15 +142,222 @@ func (e *Engine) handleVolumeSub(w http.ResponseWriter, r *http.Request) {
 		e.handleImportVolume(w, r, id)
 	case sub == "export" && r.Method == http.MethodGet:
 		e.handleExportVolume(w, r, id)
+	case sub == "stat" && r.Method == http.MethodGet:
+		e.handleStatVolume(w, r, id)
+	case sub == "lstat" && r.Method == http.MethodGet:
+		e.handleLstatVolume(w, r, id)
+	case sub == "list" && r.Method == http.MethodGet:
+		e.handleListVolumePath(w, r, id)
+	case sub == "read" && r.Method == http.MethodGet:
+		e.handleReadVolume(w, r, id)
+	case sub == "write" && (r.Method == http.MethodPut || r.Method == http.MethodPost):
+		e.handleWriteVolume(w, r, id)
+	case sub == "mkdir" && (r.Method == http.MethodPost || r.Method == http.MethodPut):
+		e.handleMkdirVolume(w, r, id)
+	case sub == "move" && r.Method == http.MethodPost:
+		e.handleMoveVolume(w, r, id)
+	case sub == "remove" && (r.Method == http.MethodDelete || r.Method == http.MethodPost):
+		e.handleRemoveVolume(w, r, id)
 	// the API error contract's general rule, mirroring handleSandboxSub: a wrong method on a route that
 	// EXISTS is 405. It enumerates the known subs rather than blanketing the default arm —
 	// an unrecognized sub-path is still 404 below, and answering it 405 would assert a
 	// route the engine does not have.
-	case sub == "", sub == "snapshot", sub == "clone", sub == "import", sub == "export":
+	case sub == "", sub == "snapshot", sub == "clone", sub == "import", sub == "export", sub == "stat", sub == "lstat", sub == "list", sub == "read", sub == "write", sub == "mkdir", sub == "move", sub == "remove":
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	default:
 		http.Error(w, "not found", http.StatusNotFound)
 	}
+}
+
+type volumeFileResp struct {
+	Name          string `json:"name"`
+	Size          int64  `json:"size"`
+	Mode          uint32 `json:"mode"`
+	IsDir         bool   `json:"is_dir"`
+	Type          string `json:"type"`
+	SymlinkTarget string `json:"symlink_target,omitempty"`
+	ModTime       string `json:"mod_time"`
+}
+
+func volumeFileResponse(fi volume.FileInfo) volumeFileResp {
+	return volumeFileResp{Name: fi.Name, Size: fi.Size, Mode: uint32(fi.Mode), IsDir: fi.IsDir, Type: string(fi.Type), SymlinkTarget: fi.SymlinkTarget, ModTime: fi.ModTime.UTC().Format(time.RFC3339Nano)}
+}
+
+func volumePathQuery(r *http.Request) (string, error) {
+	name := r.URL.Query().Get("path")
+	if name == "" {
+		return "", errors.New("path is required (relative to the volume root)")
+	}
+	return name, nil
+}
+
+func (e *Engine) handleStatVolume(w http.ResponseWriter, r *http.Request, id model.VolumeID) {
+	name, err := volumePathQuery(r)
+	if err != nil {
+		statusFor(w, err)
+		return
+	}
+	fi, err := e.Mediator.StatVolume(r.Context(), id, name)
+	if err != nil {
+		statusFor(w, err, name)
+		return
+	}
+	writeJSON(w, http.StatusOK, volumeFileResponse(fi))
+}
+
+func (e *Engine) handleLstatVolume(w http.ResponseWriter, r *http.Request, id model.VolumeID) {
+	name, err := volumePathQuery(r)
+	if err != nil {
+		statusFor(w, err)
+		return
+	}
+	fi, err := e.Mediator.LstatVolume(r.Context(), id, name)
+	if err != nil {
+		statusFor(w, err, name)
+		return
+	}
+	writeJSON(w, http.StatusOK, volumeFileResponse(fi))
+}
+
+func (e *Engine) handleListVolumePath(w http.ResponseWriter, r *http.Request, id model.VolumeID) {
+	name := r.URL.Query().Get("path")
+	if name == "" {
+		name = "."
+	}
+	list, err := e.Mediator.ListVolume(r.Context(), id, name)
+	if err != nil {
+		statusFor(w, err, name)
+		return
+	}
+	out := make([]volumeFileResp, 0, len(list))
+	for _, fi := range list {
+		out = append(out, volumeFileResponse(fi))
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func parseIntQuery(r *http.Request, key string, def int64) (int64, error) {
+	raw := r.URL.Query().Get(key)
+	if raw == "" {
+		return def, nil
+	}
+	n, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an integer", key)
+	}
+	return n, nil
+}
+
+func (e *Engine) handleReadVolume(w http.ResponseWriter, r *http.Request, id model.VolumeID) {
+	name, err := volumePathQuery(r)
+	if err != nil {
+		statusFor(w, err)
+		return
+	}
+	offset, err := parseIntQuery(r, "offset", 0)
+	if err != nil {
+		statusFor(w, err)
+		return
+	}
+	length, err := parseIntQuery(r, "length", 0)
+	if err != nil {
+		statusFor(w, err)
+		return
+	}
+	data, err := e.Mediator.ReadVolume(r.Context(), id, name, offset, length)
+	if err != nil {
+		statusFor(w, err, name)
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
+}
+
+func (e *Engine) handleWriteVolume(w http.ResponseWriter, r *http.Request, id model.VolumeID) {
+	name, err := volumePathQuery(r)
+	if err != nil {
+		statusFor(w, err)
+		return
+	}
+	offset, err := parseIntQuery(r, "offset", 0)
+	if err != nil {
+		statusFor(w, err)
+		return
+	}
+	data, err := io.ReadAll(io.LimitReader(r.Body, (64<<20)+1))
+	if err != nil {
+		statusFor(w, err)
+		return
+	}
+	if len(data) > 64<<20 {
+		http.Error(w, "write body exceeds 64 MiB", http.StatusRequestEntityTooLarge)
+		return
+	}
+	n, err := e.Mediator.WriteVolume(r.Context(), id, name, offset, data)
+	if err != nil {
+		statusFor(w, err, name)
+		return
+	}
+	writeJSON(w, http.StatusOK, importResp{VolumeID: string(id), Path: name, BytesWritten: n})
+}
+
+func (e *Engine) handleMkdirVolume(w http.ResponseWriter, r *http.Request, id model.VolumeID) {
+	name, err := volumePathQuery(r)
+	if err != nil {
+		statusFor(w, err)
+		return
+	}
+	perm, err := parseIntQuery(r, "mode", 0o755)
+	if err != nil || perm < 0 {
+		if err == nil {
+			err = errors.New("mode must be non-negative")
+		}
+		statusFor(w, err)
+		return
+	}
+	fi, err := e.Mediator.MkdirVolume(r.Context(), id, name, fs.FileMode(perm))
+	if err != nil {
+		statusFor(w, err, name)
+		return
+	}
+	writeJSON(w, http.StatusCreated, volumeFileResponse(fi))
+}
+
+type volumeMoveReq struct {
+	Source      string `json:"source"`
+	Destination string `json:"destination"`
+}
+
+func (e *Engine) handleMoveVolume(w http.ResponseWriter, r *http.Request, id model.VolumeID) {
+	var req volumeMoveReq
+	if err := strictDecode(r.Body, &req); err != nil {
+		statusFor(w, err)
+		return
+	}
+	if req.Source == "" || req.Destination == "" {
+		statusFor(w, errors.New("source and destination are required"))
+		return
+	}
+	fi, err := e.Mediator.MoveVolume(r.Context(), id, req.Source, req.Destination)
+	if err != nil {
+		statusFor(w, err, req.Source, req.Destination)
+		return
+	}
+	writeJSON(w, http.StatusOK, volumeFileResponse(fi))
+}
+
+func (e *Engine) handleRemoveVolume(w http.ResponseWriter, r *http.Request, id model.VolumeID) {
+	name, err := volumePathQuery(r)
+	if err != nil {
+		statusFor(w, err)
+		return
+	}
+	if err := e.Mediator.RemoveVolumePath(r.Context(), id, name); err != nil {
+		statusFor(w, err, name)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (e *Engine) handleInspectVolume(w http.ResponseWriter, r *http.Request, id model.VolumeID) {
@@ -240,9 +451,9 @@ func (e *Engine) handleDeriveVolume(w http.ResponseWriter, r *http.Request, id m
 	var newID model.VolumeID
 	var err error
 	if isClone {
-		newID, err = e.Mediator.CloneVolume(r.Context(), id, req.Size)
+		newID, err = e.Mediator.CloneVolumeWithKey(r.Context(), id, req.Size, model.IdempotencyKey(strings.TrimSpace(r.Header.Get("Idempotency-Key"))))
 	} else {
-		newID, err = e.Mediator.SnapshotVolume(r.Context(), id, req.Size)
+		newID, err = e.Mediator.SnapshotVolumeWithKey(r.Context(), id, req.Size, model.IdempotencyKey(strings.TrimSpace(r.Header.Get("Idempotency-Key"))))
 	}
 	if err != nil {
 		statusFor(w, err)
@@ -317,6 +528,12 @@ func (e *Engine) handleExportVolume(w http.ResponseWriter, r *http.Request, id m
 // one of them reached statusFor's default and became a 500.
 func volumeStatus(err error) (int, bool) {
 	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return http.StatusNotFound, true
+	case errors.Is(err, fs.ErrPermission):
+		return http.StatusForbidden, true
+	case errors.Is(err, fs.ErrExist):
+		return http.StatusConflict, true
 	case errors.Is(err, volume.ErrInvalidProvider):
 		// Invalid assembly/configuration is a request/configuration error, not
 		// an internal backend failure.

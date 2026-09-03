@@ -559,6 +559,8 @@ func (r *fakeRoot) Stat(name string) (volume.FileInfo, error) {
 	return volume.FileInfo{Name: name, Size: int64(len(b))}, nil
 }
 
+func (r *fakeRoot) Lstat(name string) (volume.FileInfo, error) { return r.Stat(name) }
+
 func (r *fakeRoot) List(string) ([]volume.FileInfo, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

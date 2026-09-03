@@ -191,6 +191,10 @@ func codeIs(err error, code int) bool {
 // 204). Every method in this package funnels through here, so the error shape is
 // uniform by construction rather than by each method remembering.
 func (c *Client) do(ctx context.Context, method, path string, body, out any) error {
+	return c.doWithHeaders(ctx, method, path, body, out, nil)
+}
+
+func (c *Client) doWithHeaders(ctx context.Context, method, path string, body, out any, headers map[string]string) error {
 	var rdr io.Reader
 	if body != nil {
 		buf, err := json.Marshal(body)
@@ -206,6 +210,11 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	for name, value := range headers {
+		if value != "" {
+			req.Header.Set(name, value)
+		}
+	}
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return fmt.Errorf("%s %s: %w", method, path, err)
@@ -219,6 +228,30 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	}
 	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
 		return fmt.Errorf("%s %s: decode response: %w", method, path, err)
+	}
+	return nil
+}
+
+func (c *Client) doRaw(ctx context.Context, method, path string, body io.Reader, out io.Writer) error {
+	req, err := http.NewRequestWithContext(ctx, method, c.endpoint+path, body)
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/octet-stream")
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("%s %s: %w", method, path, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		return errorFrom(resp, method, path)
+	}
+	if out != nil {
+		if _, err := io.Copy(out, resp.Body); err != nil {
+			return fmt.Errorf("%s %s: read response: %w", method, path, err)
+		}
 	}
 	return nil
 }

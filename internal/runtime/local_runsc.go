@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	goruntime "runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -195,6 +196,23 @@ func NewLocalRunsc(runscRoot, stateDir string) (*LocalRunsc, error) {
 }
 
 func (p *LocalRunsc) Name() string { return "local_runsc" }
+
+func (p *LocalRunsc) CheckManifest(_ context.Context, platform string, capabilities []string) error {
+	if platform != "" && platform != goruntime.GOOS+"/"+goruntime.GOARCH {
+		return fmt.Errorf("runtime platform %q is incompatible with %s/%s", platform, goruntime.GOOS, goruntime.GOARCH)
+	}
+	// The shipped runtime can satisfy the engine's portable process, fs, and
+	// network primitives. Unknown capability declarations fail closed rather
+	// than being silently ignored.
+	for _, capability := range capabilities {
+		switch capability {
+		case "", "process", "fs", "network", "volume":
+		default:
+			return fmt.Errorf("runtime capability %q is unavailable", capability)
+		}
+	}
+	return nil
+}
 
 // allocSubnet hands out a fresh /30 (host .1, guest .2) each call — resume gets
 // a NEW IP (the ID-reference model / health and reclamation IP-as-epoch). It skips IPs already held (inUse), so a

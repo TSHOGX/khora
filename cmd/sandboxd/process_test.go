@@ -186,6 +186,58 @@ func TestSubscribeAfterEnded(t *testing.T) {
 	}
 }
 
+func TestStableProcessHandleSequenceAndGap(t *testing.T) {
+	p := newProc(17, nil)
+	if p.handle == "" || p.epoch == 0 {
+		t.Fatalf("new process handle/epoch = %q/%d", p.handle, p.epoch)
+	}
+	for i := 0; i < 20; i++ {
+		p.broadcast(frame{kind: 'd', data: []byte("x")})
+	}
+	_, snap, _, _, gap := p.subscribeFrom(0)
+	if gap {
+		t.Fatal("initial replay reported a gap")
+	}
+	if len(snap) != 20 || snap[0].sequence != 1 || snap[len(snap)-1].sequence != 20 {
+		t.Fatalf("sequences = %+v", snap)
+	}
+	_, _, _, _, gap = p.subscribeFrom(1)
+	if gap {
+		t.Fatal("cursor at retained boundary reported a gap")
+	}
+	// Force the bounded ring to discard old frames.
+	p.ring.cap = 4
+	for i := 0; i < 10; i++ {
+		p.broadcast(frame{kind: 'd', data: []byte("xx")})
+	}
+	_, _, _, _, gap = p.subscribeFrom(1)
+	if !gap {
+		t.Fatal("stale output cursor did not report a gap")
+	}
+}
+
+func TestStableProcessHandleRetainsExitAfterPidUnregister(t *testing.T) {
+	s := &processServer{}
+	p := newProc(19, nil)
+	s.register(p)
+	handle, epoch := p.handle, p.epoch
+	p.finish(23)
+	s.unregister(p.pid)
+	got, err := s.resolveProcess(handle, epoch, 0)
+	if err != nil || got != p || !got.ended || got.endFrame.exitCode != 23 {
+		t.Fatalf("retained handle = %v, %+v", err, got)
+	}
+}
+
+func TestStableProcessEpochMismatchFailsClosed(t *testing.T) {
+	s := &processServer{}
+	p := newProc(21, nil)
+	s.register(p)
+	if _, err := s.resolveProcess(p.handle, p.epoch+1, 0); err == nil {
+		t.Fatal("stale process epoch accepted")
+	}
+}
+
 // nonblocking fan-out (source never blocks): a writeInput that blocks in Write (child not
 // draining its input) must NOT hold p.mu, so broadcast/subscribe/finish stay live
 // meanwhile. Holding p.mu across the write deadlocks this test — broadcast waits on

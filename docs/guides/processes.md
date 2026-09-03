@@ -1,7 +1,8 @@
 # Run and reconnect to processes
 
-Processes belong to a live Placement. Pause ends them; resume starts a fresh
-Placement and does not recreate previous commands.
+Processes have durable opaque handles scoped to a Sandbox. A guest PID is only
+a locator inside one Placement epoch. Pause ends the current locator; the
+logical record retains an exited result for the configured retention window.
 
 ## Start a command
 
@@ -18,20 +19,20 @@ distinct streams. The process service contract is defined in
 
 ## Reconnect and fan out
 
-List live guest PIDs, then connect by PID:
+List live processes, then connect by handle (the PID form remains for legacy
+clients):
 
 ```sh
 ./bin/khora process list --sandbox sbx_...
-./bin/khora process connect --sandbox sbx_... 42
+./bin/khora process connect --sandbox sbx_... proc_...
 ```
 
-`process list` scans the guest's `/proc`; `process connect` can reattach only to a
-still-running process launched through `process start`. Multiple callers may connect
-to that PID. A connection first replays the process's bounded output tail, then
-receives live output; the guest retains at most 64 KiB per process and silently drops
-the oldest bytes. Subscriber backpressure is isolated so one slow reader does not
-block the child or other readers. A subscriber whose 256-frame send window fills is
-dropped with a resource-exhausted stream error. The behavior is covered by
+`process list` scans the guest's `/proc` and includes logical handles. A connection
+first replays the bounded output tail, then receives live output. Every output
+frame carries a sequence and Placement epoch; if the 64 KiB tail cannot cover the
+requested cursor, the stream emits an explicit overflow/reset marker and returns a
+resource-exhausted error so the caller can rescan. Subscriber backpressure is
+isolated so one slow reader does not block the child or other readers. The behavior is covered by
 [cmd/sandboxd/process_test.go](../../cmd/sandboxd/process_test.go) and
 [test/slow_subscriber_substrate_test.go](../../test/slow_subscriber_substrate_test.go).
 
@@ -42,8 +43,9 @@ printf 'status\n' | ./bin/khora process input --sandbox sbx_... 42
 ./bin/khora process signal --sandbox sbx_... --signal 15 42
 ```
 
-Signals address the sandbox process by PID. Closing stdin is available through the
-Connect-RPC `CloseStdin` method. Inspect the generated
+Signals, input, resize, and stdin close accept the opaque handle plus an expected
+Placement epoch; stale epochs fail closed. The PID forms remain supported for
+compatibility. Closing stdin is available through the Connect-RPC `CloseStdin` method. Inspect the generated
 [CLI reference](../api/cli.md) for the exact flags supported by the current binary.
 
 Transport unavailability is distinct from a missing process. A paused Sandbox has

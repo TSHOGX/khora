@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"time"
 
 	"connectrpc.com/connect"
 
@@ -60,6 +61,16 @@ func proxyErr(err error) error {
 		// ce.Code().String() is derived from the enum, not from the inner message.
 		return connect.NewError(ce.Code(), errors.New("sandbox call failed: "+ce.Code().String()))
 	}
+	switch model.ErrorClassOf(err) {
+	case model.ErrorInvalidArgument:
+		return connect.NewError(connect.CodeInvalidArgument, errors.New("invalid sandbox request"))
+	case model.ErrorNotFound:
+		return connect.NewError(connect.CodeNotFound, errors.New("sandbox object not found"))
+	case model.ErrorStaleEpoch:
+		return connect.NewError(connect.CodeFailedPrecondition, errors.New("stale placement epoch"))
+	case model.ErrorConflict, model.ErrorInProgress, model.ErrorCursorGap:
+		return connect.NewError(connect.CodeFailedPrecondition, errors.New("sandbox request conflicts with current state"))
+	}
 	return connect.NewError(connect.CodeUnavailable, errors.New("sandbox transport unavailable"))
 }
 
@@ -109,6 +120,13 @@ func (e *Engine) mutatingClientFor(hdrGet func(string) string, op string) (trans
 	return cl, release, nil
 }
 
+func (e *Engine) validateRequestEpoch(ctx context.Context, sandbox string, epoch uint64) error {
+	if epoch == 0 {
+		return nil
+	}
+	return e.Mediator.ValidatePlacementEpoch(ctx, model.SandboxID(sandbox), model.PlacementEpoch(epoch))
+}
+
 // --- ProcessService proxy ----------------------------------------------------
 
 func (p *processProxy) Start(ctx context.Context, req *connect.Request[v1.StartRequest], stream *connect.ServerStream[v1.ProcessEvent]) error {
@@ -117,7 +135,10 @@ func (p *processProxy) Start(ctx context.Context, req *connect.Request[v1.StartR
 		return err
 	}
 	m := req.Msg
-	spec := transport.StartSpec{Cmd: m.Cmd, Args: m.Args, Env: m.Env, Cwd: m.Cwd}
+	if err := p.e.validateRequestEpoch(ctx, req.Header().Get(sandboxIDHeader), m.PlacementEpoch); err != nil {
+		return proxyErr(err)
+	}
+	spec := transport.StartSpec{Cmd: m.Cmd, Args: m.Args, Env: m.Env, Cwd: m.Cwd, IdempotencyKey: m.IdempotencyKey, PlacementEpoch: m.PlacementEpoch}
 	if m.Pty != nil {
 		spec.Pty = &transport.PtySize{Rows: uint16(m.Pty.Rows), Cols: uint16(m.Pty.Cols)}
 	}
@@ -125,7 +146,7 @@ func (p *processProxy) Start(ctx context.Context, req *connect.Request[v1.StartR
 	if err != nil {
 		return proxyErr(err)
 	}
-	return forwardEvents(stream, ch)
+	return p.forwardProcessEvents(ctx, req.Header().Get(sandboxIDHeader), ch, stream)
 }
 
 func (p *processProxy) Connect(ctx context.Context, req *connect.Request[v1.ConnectRequest], stream *connect.ServerStream[v1.ProcessEvent]) error {
@@ -133,11 +154,34 @@ func (p *processProxy) Connect(ctx context.Context, req *connect.Request[v1.Conn
 	if err != nil {
 		return err
 	}
-	ch, err := cl.Connect(ctx, int(req.Msg.Pid))
+	var ch <-chan transport.ProcessEvent
+	if req.Msg.ProcessHandle != "" {
+		id := model.SandboxID(req.Header().Get(sandboxIDHeader))
+		proc, perr := p.e.Mediator.Process(ctx, model.ProcessID(req.Msg.ProcessHandle))
+		if perr != nil {
+			return proxyErr(perr)
+		}
+		if proc.Sandbox != id {
+			return connect.NewError(connect.CodeNotFound, errors.New("process handle not found"))
+		}
+		if req.Msg.PlacementEpoch > 0 && req.Msg.PlacementEpoch != uint64(proc.PlacementEpoch) {
+			return connect.NewError(connect.CodeFailedPrecondition, errors.New("stale placement epoch"))
+		}
+		if stable, ok := cl.(transport.StableProcessClient); ok {
+			ch, err = stable.ConnectHandle(ctx, req.Msg.ProcessHandle, uint64(proc.PlacementEpoch), req.Msg.AfterSequence)
+		} else {
+			ch, err = cl.Connect(ctx, proc.PID)
+		}
+	} else {
+		if err := p.e.validateRequestEpoch(ctx, req.Header().Get(sandboxIDHeader), req.Msg.PlacementEpoch); err != nil {
+			return proxyErr(err)
+		}
+		ch, err = cl.Connect(ctx, int(req.Msg.Pid))
+	}
 	if err != nil {
 		return proxyErr(err)
 	}
-	return forwardEvents(stream, ch)
+	return p.forwardProcessEvents(ctx, req.Header().Get(sandboxIDHeader), ch, stream)
 }
 
 func (p *processProxy) StreamInput(ctx context.Context, stream *connect.ClientStream[v1.StreamInputRequest]) (*connect.Response[v1.StreamInputResponse], error) {
@@ -149,7 +193,18 @@ func (p *processProxy) StreamInput(ctx context.Context, stream *connect.ClientSt
 	for stream.Receive() {
 		m := stream.Msg()
 		if in == nil {
-			in, err = cl.StreamInput(ctx, int(m.Pid))
+			if err := p.e.validateRequestEpoch(ctx, stream.RequestHeader().Get(sandboxIDHeader), m.PlacementEpoch); err != nil {
+				return nil, proxyErr(err)
+			}
+			if m.ProcessHandle != "" {
+				if stable, ok := cl.(transport.StableProcessClient); ok {
+					in, err = stable.StreamInputHandle(ctx, m.ProcessHandle, m.PlacementEpoch)
+				} else {
+					in, err = cl.StreamInput(ctx, int(m.Pid))
+				}
+			} else {
+				in, err = cl.StreamInput(ctx, int(m.Pid))
+			}
 			if err != nil {
 				return nil, proxyErr(err)
 			}
@@ -175,8 +230,21 @@ func (p *processProxy) SendInput(ctx context.Context, req *connect.Request[v1.Se
 	if err != nil {
 		return nil, err
 	}
-	if err := cl.SendInput(ctx, int(req.Msg.Pid), req.Msg.Data, req.Msg.PtyIn); err != nil {
+	if err := p.e.validateRequestEpoch(ctx, req.Header().Get(sandboxIDHeader), req.Msg.PlacementEpoch); err != nil {
 		return nil, proxyErr(err)
+	}
+	var callErr error
+	if req.Msg.ProcessHandle != "" {
+		if stable, ok := cl.(transport.StableProcessClient); ok {
+			callErr = stable.SendInputHandle(ctx, req.Msg.ProcessHandle, req.Msg.PlacementEpoch, req.Msg.Data, req.Msg.PtyIn)
+		} else {
+			callErr = cl.SendInput(ctx, int(req.Msg.Pid), req.Msg.Data, req.Msg.PtyIn)
+		}
+	} else {
+		callErr = cl.SendInput(ctx, int(req.Msg.Pid), req.Msg.Data, req.Msg.PtyIn)
+	}
+	if callErr != nil {
+		return nil, proxyErr(callErr)
 	}
 	return connect.NewResponse(&v1.SendInputResponse{}), nil
 }
@@ -198,15 +266,28 @@ const signalPidErr = "pid must be > 0: SendSignal carries DIRECTED signals only 
 // is POSIX fan-out, which belongs to guest PID 1 rather than this channel
 // (guest supervision).
 func (p *processProxy) SendSignal(ctx context.Context, req *connect.Request[v1.SendSignalRequest]) (*connect.Response[v1.SendSignalResponse], error) {
-	if req.Msg.Pid <= 0 {
+	if req.Msg.ProcessHandle == "" && req.Msg.Pid <= 0 {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New(signalPidErr))
 	}
 	cl, err := p.e.clientFor(req.Header().Get)
 	if err != nil {
 		return nil, err
 	}
-	if err := cl.SendSignal(ctx, int(req.Msg.Pid), int(req.Msg.Signal)); err != nil {
+	if err := p.e.validateRequestEpoch(ctx, req.Header().Get(sandboxIDHeader), req.Msg.PlacementEpoch); err != nil {
 		return nil, proxyErr(err)
+	}
+	var callErr error
+	if req.Msg.ProcessHandle != "" {
+		if stable, ok := cl.(transport.StableProcessClient); ok {
+			callErr = stable.SendSignalHandle(ctx, req.Msg.ProcessHandle, req.Msg.PlacementEpoch, int(req.Msg.Signal))
+		} else {
+			callErr = cl.SendSignal(ctx, int(req.Msg.Pid), int(req.Msg.Signal))
+		}
+	} else {
+		callErr = cl.SendSignal(ctx, int(req.Msg.Pid), int(req.Msg.Signal))
+	}
+	if callErr != nil {
+		return nil, proxyErr(callErr)
 	}
 	return connect.NewResponse(&v1.SendSignalResponse{}), nil
 }
@@ -216,11 +297,25 @@ func (p *processProxy) Update(ctx context.Context, req *connect.Request[v1.Updat
 	if err != nil {
 		return nil, err
 	}
+	if err := p.e.validateRequestEpoch(ctx, req.Header().Get(sandboxIDHeader), req.Msg.PlacementEpoch); err != nil {
+		return nil, proxyErr(err)
+	}
 	if req.Msg.Pty == nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("Update requires pty size"))
 	}
-	if err := cl.Update(ctx, int(req.Msg.Pid), transport.PtySize{Rows: uint16(req.Msg.Pty.Rows), Cols: uint16(req.Msg.Pty.Cols)}); err != nil {
-		return nil, proxyErr(err)
+	sz := transport.PtySize{Rows: uint16(req.Msg.Pty.Rows), Cols: uint16(req.Msg.Pty.Cols)}
+	var callErr error
+	if req.Msg.ProcessHandle != "" {
+		if stable, ok := cl.(transport.StableProcessClient); ok {
+			callErr = stable.UpdateHandle(ctx, req.Msg.ProcessHandle, req.Msg.PlacementEpoch, sz)
+		} else {
+			callErr = cl.Update(ctx, int(req.Msg.Pid), sz)
+		}
+	} else {
+		callErr = cl.Update(ctx, int(req.Msg.Pid), sz)
+	}
+	if callErr != nil {
+		return nil, proxyErr(callErr)
 	}
 	return connect.NewResponse(&v1.UpdateResponse{}), nil
 }
@@ -230,8 +325,21 @@ func (p *processProxy) CloseStdin(ctx context.Context, req *connect.Request[v1.C
 	if err != nil {
 		return nil, err
 	}
-	if err := cl.CloseStdin(ctx, int(req.Msg.Pid)); err != nil {
+	if err := p.e.validateRequestEpoch(ctx, req.Header().Get(sandboxIDHeader), req.Msg.PlacementEpoch); err != nil {
 		return nil, proxyErr(err)
+	}
+	var callErr error
+	if req.Msg.ProcessHandle != "" {
+		if stable, ok := cl.(transport.StableProcessClient); ok {
+			callErr = stable.CloseStdinHandle(ctx, req.Msg.ProcessHandle, req.Msg.PlacementEpoch)
+		} else {
+			callErr = cl.CloseStdin(ctx, int(req.Msg.Pid))
+		}
+	} else {
+		callErr = cl.CloseStdin(ctx, int(req.Msg.Pid))
+	}
+	if callErr != nil {
+		return nil, proxyErr(callErr)
 	}
 	return connect.NewResponse(&v1.CloseStdinResponse{}), nil
 }
@@ -249,7 +357,23 @@ func (p *processProxy) List(ctx context.Context, req *connect.Request[v1.ListReq
 	for _, p := range pids {
 		out = append(out, int32(p))
 	}
-	return connect.NewResponse(&v1.ListResponse{Pids: out}), nil
+	resp := &v1.ListResponse{Pids: out}
+	if stable, ok := cl.(transport.StableProcessClient); ok {
+		infos, serr := stable.ListStable(ctx)
+		if serr != nil {
+			return nil, proxyErr(serr)
+		}
+		resp.Processes = make([]*v1.ProcessInfo, 0, len(infos))
+		for _, info := range infos {
+			pi := &v1.ProcessInfo{ProcessHandle: info.Handle, Pid: int32(info.PID), State: info.State, PlacementEpoch: info.Epoch, OutputSequence: info.OutputSequence}
+			if info.ExitCode != nil {
+				code := int32(*info.ExitCode)
+				pi.ExitCode = &code
+			}
+			resp.Processes = append(resp.Processes, pi)
+		}
+	}
+	return connect.NewResponse(resp), nil
 }
 
 // --- FsService proxy ---------------------------------------------------------
@@ -373,6 +497,59 @@ func (f *fsProxy) Move(ctx context.Context, req *connect.Request[v1.MoveRequest]
 	return connect.NewResponse(&v1.MoveResponse{Entry: entryToWire(e)}), nil
 }
 
+func (f *fsProxy) Watch(ctx context.Context, req *connect.Request[v1.WatchRequest], stream *connect.ServerStream[v1.WatchEvent]) error {
+	id := model.SandboxID(req.Header().Get(sandboxIDHeader))
+	if id == "" {
+		return connect.NewError(connect.CodeInvalidArgument, errors.New("missing "+sandboxIDHeader+" header"))
+	}
+	pl, perr := f.e.Mediator.Placement(ctx, id)
+	if perr != nil {
+		return proxyErr(perr)
+	}
+	epoch := req.Msg.PlacementEpoch
+	if epoch == 0 {
+		epoch = uint64(pl.Epoch)
+	} else if err := f.e.Mediator.ValidatePlacementEpoch(ctx, id, model.PlacementEpoch(epoch)); err != nil {
+		return proxyErr(err)
+	}
+	cl, err := f.e.clientFor(req.Header().Get)
+	if err != nil {
+		return err
+	}
+	watcher, ok := cl.(transport.WatchClient)
+	if !ok {
+		return connect.NewError(connect.CodeUnimplemented, errors.New("filesystem watch is unavailable"))
+	}
+	ch, err := watcher.Watch(ctx, req.Msg.Path, req.Msg.Recursive, epoch, req.Msg.AfterSequence)
+	if err != nil {
+		return proxyErr(err)
+	}
+	for ev := range ch {
+		if ev.Operation == "error" {
+			return connect.NewError(connect.CodeUnavailable, errors.New("filesystem watch unavailable"))
+		}
+		kind := v1.EntryType_ENTRY_TYPE_UNSPECIFIED
+		switch ev.Type {
+		case transport.EntryFile:
+			kind = v1.EntryType_ENTRY_TYPE_FILE
+		case transport.EntryDirectory:
+			kind = v1.EntryType_ENTRY_TYPE_DIRECTORY
+		case transport.EntrySymlink:
+			kind = v1.EntryType_ENTRY_TYPE_SYMLINK
+		}
+		if err := stream.Send(&v1.WatchEvent{Path: ev.Path, OldPath: ev.OldPath, Operation: ev.Operation, Type: kind, Size: ev.Size, MtimeUnixNano: ev.MTime.UnixNano(), Sequence: ev.Sequence, PlacementEpoch: ev.Epoch, Overflow: ev.Overflow, Reset_: ev.Reset, ResetReason: ev.ResetReason}); err != nil {
+			return err
+		}
+	}
+	if current, err := f.e.Mediator.Placement(ctx, id); err == nil && current.Epoch != model.PlacementEpoch(epoch) {
+		// The old transport disappeared during Pause/Resume. Make the epoch
+		// reset visible before closing so a watcher can rescan on the new
+		// placement rather than interpreting a disconnect as an empty stream.
+		_ = stream.Send(&v1.WatchEvent{PlacementEpoch: uint64(current.Epoch), Reset_: true, ResetReason: "placement"})
+	}
+	return nil
+}
+
 // forwardEvents pumps the domain output channel to the outer proto server-stream
 // (transparent passthrough: the outer edge sees the exact same frames the inner
 // sandboxd produced — one wire, the transport contract).
@@ -381,12 +558,16 @@ func forwardEvents(stream *connect.ServerStream[v1.ProcessEvent], ch <-chan tran
 		var pe v1.ProcessEvent
 		switch ev.Kind {
 		case "start":
-			pe.Kind = &v1.ProcessEvent_Start{Start: &v1.StartEvent{Pid: int32(ev.PID)}}
+			pe.ProcessHandle, pe.PlacementEpoch, pe.Sequence, pe.Replay, pe.Gap, pe.ResetReason = ev.Handle, ev.Epoch, ev.Sequence, ev.Replay, ev.Gap, ev.ResetReason
+			pe.Kind = &v1.ProcessEvent_Start{Start: &v1.StartEvent{Pid: int32(ev.PID), ProcessHandle: ev.Handle, PlacementEpoch: ev.Epoch}}
 		case "data":
+			pe.ProcessHandle, pe.PlacementEpoch, pe.Sequence, pe.Replay, pe.Gap, pe.ResetReason = ev.Handle, ev.Epoch, ev.Sequence, ev.Replay, ev.Gap, ev.ResetReason
 			pe.Kind = &v1.ProcessEvent_Data{Data: &v1.DataEvent{Stream: ev.Stream, Data: ev.Data}}
 		case "end":
+			pe.ProcessHandle, pe.PlacementEpoch, pe.Sequence, pe.Replay, pe.Gap, pe.ResetReason = ev.Handle, ev.Epoch, ev.Sequence, ev.Replay, ev.Gap, ev.ResetReason
 			pe.Kind = &v1.ProcessEvent_End{End: &v1.EndEvent{ExitCode: int32(ev.ExitCode)}}
 		case "keepalive":
+			pe.ProcessHandle, pe.PlacementEpoch, pe.Sequence, pe.Replay, pe.Gap, pe.ResetReason = ev.Handle, ev.Epoch, ev.Sequence, ev.Replay, ev.Gap, ev.ResetReason
 			pe.Kind = &v1.ProcessEvent_Keepalive{Keepalive: &v1.KeepaliveEvent{}}
 		case "error":
 			// The inner stream ended WITHOUT an end frame — typically an overflow disconnect
@@ -401,4 +582,87 @@ func forwardEvents(stream *connect.ServerStream[v1.ProcessEvent], ch <-chan tran
 		}
 	}
 	return nil
+}
+
+func (p *processProxy) forwardProcessEvents(ctx context.Context, sandbox string, ch <-chan transport.ProcessEvent, stream *connect.ServerStream[v1.ProcessEvent]) error {
+	var rec *model.Process
+	var localSeq uint64
+	var streamEpoch uint64
+	var streamHandle string
+	for ev := range ch {
+		if ev.Sequence > localSeq {
+			localSeq = ev.Sequence
+		} else if ev.Kind == "data" || ev.Kind == "end" {
+			localSeq++
+		}
+		if ev.Handle != "" {
+			streamHandle = ev.Handle
+			if streamEpoch == 0 {
+				streamEpoch = ev.Epoch
+			}
+			if ev.Epoch == 0 {
+				if pl, err := p.e.Mediator.Placement(ctx, model.SandboxID(sandbox)); err == nil {
+					ev.Epoch = uint64(pl.Epoch)
+				}
+			}
+			switch ev.Kind {
+			case "start":
+				pid := ev.PID
+				epoch := ev.Epoch
+				now := time.Now()
+				candidate := model.Process{ID: model.ProcessID(ev.Handle), Sandbox: model.SandboxID(sandbox), PlacementEpoch: model.PlacementEpoch(epoch), PID: pid, State: model.ProcessRunning, StartedAt: now, OutputCursor: model.ProcessOutputCursor(model.ProcessID(ev.Handle), model.PlacementEpoch(epoch), localSeq)}
+				if err := p.e.Mediator.CreateProcess(ctx, candidate); err == nil {
+					rec = &candidate
+				} else if existing, gerr := p.e.Mediator.Process(ctx, candidate.ID); gerr == nil {
+					rec = &existing
+				}
+			case "data":
+				if rec != nil {
+					rec.OutputCursor.Sequence = localSeq
+					_ = p.e.Mediator.UpdateProcess(ctx, *rec)
+				}
+			case "end":
+				if rec != nil {
+					code := ev.ExitCode
+					now := time.Now()
+					rec.State = model.ProcessExited
+					rec.ExitCode = &code
+					rec.ExitedAt = &now
+					rec.PID = ev.PID
+					rec.OutputCursor.Sequence = localSeq
+					_ = p.e.Mediator.UpdateProcess(ctx, *rec)
+				}
+			}
+		}
+		// Reuse the ordinary projection after persistence bookkeeping.
+		if err := sendProcessEvent(stream, ev); err != nil {
+			return err
+		}
+	}
+	if streamEpoch > 0 {
+		if current, err := p.e.Mediator.Placement(ctx, model.SandboxID(sandbox)); err == nil && uint64(current.Epoch) != streamEpoch {
+			_ = stream.Send(&v1.ProcessEvent{ProcessHandle: streamHandle, PlacementEpoch: uint64(current.Epoch), Gap: true, ResetReason: "placement", Kind: &v1.ProcessEvent_Keepalive{Keepalive: &v1.KeepaliveEvent{}}})
+		}
+	}
+	return nil
+}
+
+func sendProcessEvent(stream *connect.ServerStream[v1.ProcessEvent], ev transport.ProcessEvent) error {
+	var pe v1.ProcessEvent
+	pe.ProcessHandle, pe.PlacementEpoch, pe.Sequence, pe.Replay, pe.Gap, pe.ResetReason = ev.Handle, ev.Epoch, ev.Sequence, ev.Replay, ev.Gap, ev.ResetReason
+	switch ev.Kind {
+	case "start":
+		pe.Kind = &v1.ProcessEvent_Start{Start: &v1.StartEvent{Pid: int32(ev.PID), ProcessHandle: ev.Handle, PlacementEpoch: ev.Epoch}}
+	case "data":
+		pe.Kind = &v1.ProcessEvent_Data{Data: &v1.DataEvent{Stream: ev.Stream, Data: ev.Data}}
+	case "end":
+		pe.Kind = &v1.ProcessEvent_End{End: &v1.EndEvent{ExitCode: int32(ev.ExitCode)}}
+	case "keepalive":
+		pe.Kind = &v1.ProcessEvent_Keepalive{Keepalive: &v1.KeepaliveEvent{}}
+	case "error":
+		return proxyErr(ev.Err)
+	default:
+		return nil
+	}
+	return stream.Send(&pe)
 }

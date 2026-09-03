@@ -8,13 +8,13 @@
 // List. keepalive is a ProcessEvent variant on long output streams.
 //
 // Fs data plane: Read (offset) / Write / Stat / List (depth) /
-// MakeDir / Remove / Move, all unary and no watch. Large files do NOT grow a
+// MakeDir / Remove / Move, all unary, plus a bounded Watch stream. Large files do NOT grow a
 // chunked RPC — they use the streaming HTTP bypass on the guest's same listener
 // (GET|PUT /files?path=), because what matters is that neither end holds the whole
 // file, not the message size.
 //
-// Product vocabulary does not enter the wire contract: processes are addressed by
-// guest-native pid, with no agent, session, turn, or tag fields.
+// Product vocabulary does not enter the wire contract: logical processes use
+// opaque handles while guest-native PIDs remain placement-local locators.
 syntax = "proto3";
 
 package khora.transport.v1;
@@ -136,8 +136,10 @@ message StartRequest {
   // No run-as field: the engine defaults to guest root and does not model guest
   // users — "run as user X" is a guest-native concern (su/sudo), not an engine
   // primitive. Field 5 is unused.
-  // pty, when set, allocates a PTY of the given size.
-  PtySize pty = 6;
+	// pty, when set, allocates a PTY of the given size.
+	PtySize pty = 6;
+	string idempotency_key = 7;
+	uint64 placement_epoch = 8;
 }
 
 message PtySize {
@@ -154,12 +156,20 @@ message ProcessEvent {
     StartEvent start = 1;
     DataEvent data = 2;
     EndEvent end = 3;
-    KeepaliveEvent keepalive = 4;
-  }
+		KeepaliveEvent keepalive = 4;
+	}
+	string process_handle = 5;
+	uint64 sequence = 6;
+	uint64 placement_epoch = 7;
+	bool replay = 8;
+	bool gap = 9;
+	string reset_reason = 10;
 }
 
 message StartEvent {
-  int32 pid = 1;
+	int32 pid = 1;
+	string process_handle = 2;
+	uint64 placement_epoch = 3;
 }
 
 message DataEvent {
@@ -176,7 +186,10 @@ message EndEvent {
 message KeepaliveEvent {}
 
 message ConnectRequest {
-  int32 pid = 1;
+	int32 pid = 1;
+	string process_handle = 2;
+	uint64 placement_epoch = 3;
+	uint64 after_sequence = 4;
 }
 
 // StreamInputRequest is one frame of the ordered input stream. pid is only read
@@ -186,6 +199,8 @@ message StreamInputRequest {
   bytes data = 2;
   // pty_in selects the pty branch (write to the pty master) vs stdin.
   bool pty_in = 3;
+	string process_handle = 4;
+	uint64 placement_epoch = 5;
 }
 message StreamInputResponse {}
 
@@ -193,18 +208,24 @@ message SendInputRequest {
   int32 pid = 1;
   bytes data = 2;
   // pty_in selects the pty branch (write to the pty master) vs stdin.
-  bool pty_in = 3;
+	bool pty_in = 3;
+	string process_handle = 4;
+	uint64 placement_epoch = 5;
 }
 message SendInputResponse {}
 
 message UpdateRequest {
-  int32 pid = 1;
-  PtySize pty = 2;
+	int32 pid = 1;
+	PtySize pty = 2;
+	string process_handle = 3;
+	uint64 placement_epoch = 4;
 }
 message UpdateResponse {}
 
 message CloseStdinRequest {
-  int32 pid = 1;
+	int32 pid = 1;
+	string process_handle = 2;
+	uint64 placement_epoch = 3;
 }
 message CloseStdinResponse {}
 
@@ -219,20 +240,33 @@ message SendSignalRequest {
   // wire negative as a huge positive pid, trading an explicit 400 for a subtler
   // behavior (a signal delivered to nothing, or to an unrelated recycled pid).
   int32 pid = 1;
-  int32 signal = 2;
+	int32 signal = 2;
+	string process_handle = 3;
+	uint64 placement_epoch = 4;
 }
 message SendSignalResponse {}
 
 message ListRequest {}
 message ListResponse {
-  repeated int32 pids = 1;
+	repeated int32 pids = 1;
+	repeated ProcessInfo processes = 2;
 }
 
-// FsService is the fs primitive: all RPCs are unary and there is no watch.
+message ProcessInfo {
+	string process_handle = 1;
+	int32 pid = 2;
+	string state = 3;
+	optional int32 exit_code = 4;
+	uint64 placement_epoch = 5;
+	uint64 output_sequence = 6;
+}
+
+// FsService is the fs primitive. Unary metadata/content calls are complemented
+// by a bounded placement-scoped Watch stream.
 //
-// No watch, deliberately: a subscription would make the engine hold merge /
-// reconnect state and break transport statelessness, and inotify on a gVisor
-// overlay upperdir is unreliable. Consumers poll Stat+Read instead.
+// Watch uses bounded change-detection semantics; it carries an independent
+// cursor and explicit overflow/reset markers, so consumers can rescan after a
+// gap without relying on syscall-level completeness.
 //
 // Byte-carrying calls are bounded by the RPC message size on purpose; large
 // files use the HTTP multipart bypass rather than growing a chunked RPC.
@@ -270,7 +304,11 @@ service FsService {
   // OVERWRITING an existing destination (rename(2) semantics). Returns the
   // entry at its new path. A cross-device move is rejected explicitly rather
   // than silently copying — see the EXDEV note on the guest implementation.
-  rpc Move(MoveRequest) returns (MoveResponse) {}
+	rpc Move(MoveRequest) returns (MoveResponse) {}
+
+	// Watch is a bounded change-detection stream. Cursors are independent from
+	// lifecycle events and reset when the Placement epoch changes.
+	rpc Watch(WatchRequest) returns (stream WatchEvent) {}
 }
 
 // EntryType is what a path IS. UNSPECIFIED is deliberately the zero value: a
@@ -342,7 +380,28 @@ message MoveRequest {
   string destination = 2;
 }
 message MoveResponse {
-  EntryInfo entry = 1;
+	EntryInfo entry = 1;
+}
+
+message WatchRequest {
+	string path = 1;
+	bool recursive = 2;
+	uint64 placement_epoch = 3;
+	uint64 after_sequence = 4;
+}
+
+message WatchEvent {
+	string path = 1;
+	string old_path = 2;
+	string operation = 3;
+	EntryType type = 4;
+	int64 size = 5;
+	int64 mtime_unix_nano = 6;
+	uint64 sequence = 7;
+	uint64 placement_epoch = 8;
+	bool overflow = 9;
+	bool reset = 10;
+	string reset_reason = 11;
 }
 
 message ReadRequest {

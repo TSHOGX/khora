@@ -28,6 +28,8 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+
+	"github.com/TSHOGX/khora/internal/model"
 )
 
 // openAPIVersion is the document's own version, NOT the engine's. It moves when the
@@ -47,6 +49,7 @@ const openAPIDocPath = "docs/api/openapi.json"
 type apiParam struct {
 	Name string
 	Type string // "string" | "integer" | "boolean"
+	In   string // "query" (default) | "header"
 	Desc string
 }
 
@@ -83,6 +86,7 @@ var apiOps = []apiOp{
 		Method: "POST", Path: "/v1/sandboxes", OpID: "createSandbox",
 		Summary: "Create a sandbox. Unknown JSON fields are REFUSED (a misspelled `network` would otherwise silently create a deny sandbox).",
 		Req:     createReq{}, Resp: createResp{}, Status: 201,
+		Query:  []apiParam{{Name: "Idempotency-Key", Type: "string", In: "header", Desc: "Caller-supplied retry key. Same normalized request replays the original Sandbox; a changed request conflicts."}},
 		Errors: []int{400, 404, 409, 507},
 	},
 	{
@@ -121,6 +125,18 @@ var apiOps = []apiOp{
 		Summary: "Record one activity NOW, stamping the guest's idle clock so the idle sweep sees the sandbox as busy. Carries no duration and grants no protected period — repeat it while the work lasts.",
 		Resp:    activityResp{}, Status: 200, Errors: []int{404, 409, 503},
 	},
+	{
+		Method: "GET", Path: "/v1/sandboxes/{id}/telemetry", OpID: "listTelemetry",
+		Summary: "Read the independent per-Sandbox telemetry sample lane.",
+		Query:   []apiParam{{Name: "after", Type: "integer", Desc: "Telemetry sequence cursor."}, {Name: "limit", Type: "integer", Desc: "Maximum samples."}},
+		Resp: struct {
+			Samples  []model.TelemetrySample `json:"samples"`
+			Earliest uint64                  `json:"earliest"`
+			Latest   uint64                  `json:"latest"`
+		}{}, Status: 200, Errors: []int{400, 404},
+	},
+	{Method: "GET", Path: "/v1/sandboxes/{id}/snapshot", OpID: "getSandboxSnapshot", Summary: "Read the Sandbox resource snapshot with explicit measurement availability.", Resp: model.SandboxSnapshot{}, Status: 200, Errors: []int{404}},
+	{Method: "GET", Path: "/v1/sandboxes/{id}/placement", OpID: "getPlacementSnapshot", Summary: "Read the current Placement epoch and resource snapshot.", Resp: model.PlacementSnapshot{}, Status: 200, Errors: []int{404}},
 	{
 		Method: "GET", Path: "/v1/sandboxes/{id}/network", OpID: "getSandboxNetwork",
 		Summary: "Read the sandbox's effective network declaration, including per-rule hit counters.",
@@ -166,6 +182,13 @@ var apiOps = []apiOp{
 		Summary: "List all templates.",
 		Resp:    []templateResp{}, Status: 200,
 	},
+	{Method: "GET", Path: "/v1/processes/{id}", OpID: "getProcessSnapshot", Summary: "Read a logical Process snapshot and retained exit status.", Resp: model.ProcessSnapshot{}, Status: 200, Errors: []int{404}},
+	{Method: "GET", Path: "/v1/sandboxes/{id}/processes", OpID: "listSandboxProcesses", Summary: "List logical Process records for a Sandbox.", Resp: []model.Process{}, Status: 200, Errors: []int{404}},
+	{
+		Method: "GET", Path: "/v1/templates/{id}", OpID: "getTemplate",
+		Summary: "Inspect an immutable Template and its typed manifest.",
+		Resp:    templateResp{}, Status: 200, Errors: []int{404},
+	},
 	{
 		Method: "DELETE", Path: "/v1/templates/{id}", OpID: "deleteTemplate",
 		Summary: "Delete a template. Refused while any sandbox references it.",
@@ -175,6 +198,7 @@ var apiOps = []apiOp{
 		Method: "POST", Path: "/v1/volumes", OpID: "createVolume",
 		Summary: "Create a Volume whose lifetime is independent of every sandbox.",
 		Req:     volumeCreateReq{}, Resp: volumeResp{}, Status: 201,
+		Query:  []apiParam{{Name: "Idempotency-Key", Type: "string", In: "header", Desc: "Caller-supplied retry key. Same normalized request replays the original Volume; a changed request conflicts."}},
 		Errors: []int{400, 409, 507},
 	},
 	{
@@ -201,11 +225,13 @@ var apiOps = []apiOp{
 	{
 		Method: "POST", Path: "/v1/volumes/{id}/snapshot", OpID: "snapshotVolume",
 		Summary: "Snapshot a volume into a new volume.",
+		Query:   []apiParam{{Name: "Idempotency-Key", Type: "string", In: "header", Desc: "Caller-supplied retry key."}},
 		Resp:    volumeResp{}, Status: 201, Errors: []int{404, 409, 507},
 	},
 	{
 		Method: "POST", Path: "/v1/volumes/{id}/clone", OpID: "cloneVolume",
 		Summary: "Clone a volume into a new, independently writable volume.",
+		Query:   []apiParam{{Name: "Idempotency-Key", Type: "string", In: "header", Desc: "Caller-supplied retry key."}},
 		Resp:    volumeResp{}, Status: 201, Errors: []int{404, 409, 507},
 	},
 	{
@@ -220,6 +246,53 @@ var apiOps = []apiOp{
 		Summary: "Stream bytes OUT of a volume with no sandbox involved. Returns application/octet-stream.",
 		Query:   []apiParam{{Name: "path", Type: "string", Desc: "Path inside the volume."}},
 		Status:  200, Errors: []int{400, 404, 409},
+	},
+	{
+		Method: "GET", Path: "/v1/volumes/{id}/stat", OpID: "statVolumePath",
+		Summary: "Read root-confined LSTAT metadata for a Volume path.",
+		Query:   []apiParam{{Name: "path", Type: "string", Desc: "Path inside the Volume."}},
+		Resp:    volumeFileResp{}, Status: 200, Errors: []int{400, 404, 403},
+	},
+	{
+		Method: "GET", Path: "/v1/volumes/{id}/lstat", OpID: "lstatVolumePath",
+		Summary: "Read root-confined LSTAT metadata without following a symlink.",
+		Query:   []apiParam{{Name: "path", Type: "string", Desc: "Path inside the Volume."}},
+		Resp:    volumeFileResp{}, Status: 200, Errors: []int{400, 404, 403},
+	},
+	{
+		Method: "GET", Path: "/v1/volumes/{id}/list", OpID: "listVolumePath",
+		Summary: "List one root-confined Volume directory.",
+		Query:   []apiParam{{Name: "path", Type: "string", Desc: "Directory path inside the Volume; omitted means the root."}},
+		Resp:    []volumeFileResp{}, Status: 200, Errors: []int{400, 404, 403},
+	},
+	{
+		Method: "GET", Path: "/v1/volumes/{id}/read", OpID: "readVolumePath",
+		Summary: "Read a bounded byte range from a root-confined Volume file.",
+		Query:   []apiParam{{Name: "path", Type: "string", Desc: "File path inside the Volume."}, {Name: "offset", Type: "integer", Desc: "Byte offset."}, {Name: "length", Type: "integer", Desc: "Byte length; omitted or zero reads to EOF."}},
+		Status:  200, Errors: []int{400, 404, 403},
+	},
+	{
+		Method: "PUT", Path: "/v1/volumes/{id}/write", OpID: "writeVolumePath",
+		Summary: "Write raw bytes to a root-confined Volume file.",
+		Query:   []apiParam{{Name: "path", Type: "string", Desc: "File path inside the Volume."}, {Name: "offset", Type: "integer", Desc: "Byte offset."}},
+		Resp:    importResp{}, Status: 200, Errors: []int{400, 404, 409, 403, 507},
+	},
+	{
+		Method: "POST", Path: "/v1/volumes/{id}/mkdir", OpID: "mkdirVolumePath",
+		Summary: "Create one root-confined Volume directory.",
+		Query:   []apiParam{{Name: "path", Type: "string", Desc: "Directory path inside the Volume."}, {Name: "mode", Type: "integer", Desc: "Numeric permission bits; defaults to 0755."}},
+		Resp:    volumeFileResp{}, Status: 201, Errors: []int{400, 404, 409, 403, 507},
+	},
+	{
+		Method: "POST", Path: "/v1/volumes/{id}/move", OpID: "moveVolumePath",
+		Summary: "Rename a root-confined Volume path.",
+		Req:     volumeMoveReq{}, Resp: volumeFileResp{}, Status: 200, Errors: []int{400, 404, 409, 403},
+	},
+	{
+		Method: "DELETE", Path: "/v1/volumes/{id}/remove", OpID: "removeVolumePath",
+		Summary: "Remove a root-confined Volume path.",
+		Query:   []apiParam{{Name: "path", Type: "string", Desc: "Path inside the Volume."}},
+		Status:  204, Errors: []int{400, 404, 409, 403},
 	},
 }
 
@@ -352,8 +425,12 @@ func OpenAPIDoc() ([]byte, error) {
 		if len(op.Query) > 0 {
 			qs := make([]any, 0, len(op.Query))
 			for _, q := range op.Query {
+				where := q.In
+				if where == "" {
+					where = "query"
+				}
 				qs = append(qs, map[string]any{
-					"name": q.Name, "in": "query", "required": false,
+					"name": q.Name, "in": where, "required": false,
 					"description": q.Desc,
 					"schema":      map[string]any{"type": q.Type},
 				})
@@ -369,7 +446,7 @@ func OpenAPIDoc() ([]byte, error) {
 					},
 				},
 			}
-		} else if op.Method == "PUT" && strings.HasSuffix(op.Path, "/files") ||
+		} else if (op.Method == "PUT" && (strings.HasSuffix(op.Path, "/files") || strings.HasSuffix(op.Path, "/write"))) ||
 			op.Method == "POST" && strings.HasSuffix(op.Path, "/import") {
 			// The two streaming inbound routes carry RAW BYTES, not JSON. Stated
 			// explicitly: a consumer that generated a JSON body for these would send a

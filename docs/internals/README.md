@@ -17,6 +17,8 @@ guides, configuration, operations, or API reference instead.
 - [Transport](transport.md): guest protocol, proxy barrier, and fan-out behavior
 - [Contracts](contracts.md): durable object, epoch, operation, cursor, error,
   measurement, and decision-gate contracts
+- [State core](state-core.md): persisted Placement epochs, logical Process
+  records, Operation idempotency, and restart takeover
 
 Open work is not kept as a parallel register here. Link the ruling Issue instead:
 [remote provider input shape](https://github.com/TSHOGX/khora/issues/7).

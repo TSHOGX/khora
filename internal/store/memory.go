@@ -18,8 +18,14 @@ import (
 // transition and its event commit together or not at all — where SQLite uses
 // BEGIN/COMMIT. Every "X equivalent" comment below is one clause of that.
 type Memory struct {
-	mu  sync.Mutex
-	rec map[model.SandboxID]model.Sandbox
+	mu            sync.Mutex
+	rec           map[model.SandboxID]model.Sandbox
+	placements    map[model.SandboxID]model.Placement
+	processes     map[model.ProcessID]model.Process
+	operations    map[model.OperationID]model.Operation
+	operationKeys map[string]model.OperationID
+	telemetry     map[model.SandboxID][]model.TelemetrySample
+	telemetrySeq  map[model.SandboxID]uint64
 	// tmpl holds Template rows (health and reclamation first-class object). The health and reclamation
 	// reference-protection contract arrives here as a Go scan under the one mutex,
 	// where SQLite gets it from FK RESTRICT.
@@ -59,9 +65,15 @@ type outboxRow struct {
 
 func NewMemory() *Memory {
 	return &Memory{
-		rec:  make(map[model.SandboxID]model.Sandbox),
-		tmpl: make(map[model.TemplateID]model.Template),
-		vol:  make(map[model.VolumeID]model.Volume),
+		rec:           make(map[model.SandboxID]model.Sandbox),
+		tmpl:          make(map[model.TemplateID]model.Template),
+		vol:           make(map[model.VolumeID]model.Volume),
+		placements:    make(map[model.SandboxID]model.Placement),
+		processes:     make(map[model.ProcessID]model.Process),
+		operations:    make(map[model.OperationID]model.Operation),
+		operationKeys: make(map[string]model.OperationID),
+		telemetry:     make(map[model.SandboxID][]model.TelemetrySample),
+		telemetrySeq:  make(map[model.SandboxID]uint64),
 	}
 }
 
@@ -126,6 +138,7 @@ func (m *Memory) CreateSandbox(_ context.Context, s model.Sandbox, ev *Event) er
 }
 
 func (m *Memory) CreateTemplate(_ context.Context, t model.Template) error {
+	t.Manifest = t.Manifest.Normalize()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, ok := m.tmpl[t.ID]; ok {
@@ -148,6 +161,7 @@ func (m *Memory) GetTemplate(_ context.Context, id model.TemplateID) (model.Temp
 	if !ok {
 		return model.Template{}, ErrTemplateNotFound
 	}
+	t.Manifest = t.Manifest.Normalize()
 	return t, nil
 }
 
@@ -156,6 +170,7 @@ func (m *Memory) ListTemplates(_ context.Context) ([]model.Template, error) {
 	defer m.mu.Unlock()
 	out := make([]model.Template, 0, len(m.tmpl))
 	for _, t := range m.tmpl {
+		t.Manifest = t.Manifest.Normalize()
 		out = append(out, t)
 	}
 	return out, nil
@@ -524,6 +539,12 @@ func (m *Memory) DeleteSandbox(_ context.Context, id model.SandboxID, ev *Event)
 	for _, mt := range m.mounts {
 		if mt.Sandbox == id {
 			return ErrSandboxHasMounts
+		}
+	}
+	delete(m.placements, id)
+	for processID, p := range m.processes {
+		if p.Sandbox == id {
+			delete(m.processes, processID)
 		}
 	}
 	delete(m.rec, id)

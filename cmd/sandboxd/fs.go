@@ -8,7 +8,9 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"syscall"
+	"time"
 
 	"connectrpc.com/connect"
 
@@ -17,7 +19,7 @@ import (
 
 // --- fs service (the transport data plane fs primitive, fs transport) --------------------------
 //
-// All unary, no watch. Paths are GUEST-ABSOLUTE and NOT confined to a root: the caller is the
+// Unary metadata/content calls plus a bounded Watch stream. Paths are GUEST-ABSOLUTE and NOT confined to a root: the caller is the
 // engine (trusted, the external API assumes an authorized caller) and the guest runs as root by design
 // (the guest identity model), so the isolation boundary is the sandbox itself — sentry, not a path check. A
 // confinement would break the contract where callers legitimately touch /etc, /root and /usr.
@@ -35,6 +37,60 @@ type fsServer struct {
 	// and the auto-pause that follows discards the very work in flight. Stamped in the
 	// handlers rather than by each caller, like proc.broadcast's stamp.
 	activity *activityClock
+}
+
+const watchBufferEvents = 4096
+
+type watchEntry struct {
+	path  string
+	type_ v1.EntryType
+	size  int64
+	mtime int64
+	mode  uint32
+}
+
+func collectWatch(root string, recursive bool) (map[string]watchEntry, error) {
+	out := make(map[string]watchEntry)
+	walk := func(p string, fi os.FileInfo) {
+		kind := v1.EntryType_ENTRY_TYPE_FILE
+		if fi.Mode()&os.ModeSymlink != 0 {
+			kind = v1.EntryType_ENTRY_TYPE_SYMLINK
+		} else if fi.IsDir() {
+			kind = v1.EntryType_ENTRY_TYPE_DIRECTORY
+		}
+		out[p] = watchEntry{path: p, type_: kind, size: fi.Size(), mtime: fi.ModTime().UnixNano(), mode: uint32(fi.Mode())}
+	}
+	if !recursive {
+		ents, err := os.ReadDir(root)
+		if err != nil {
+			return nil, err
+		}
+		for _, ent := range ents {
+			p := filepath.Join(root, ent.Name())
+			fi, err := os.Lstat(p)
+			if err == nil {
+				walk(p, fi)
+			}
+		}
+		return out, nil
+	}
+	err := filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
+		if err != nil {
+			if p == root {
+				return err
+			}
+			return nil
+		}
+		if p != root {
+			walk(p, info)
+		}
+		return nil
+	})
+	return out, err
+}
+
+func watchEventFromEntry(e watchEntry, op string, seq, epoch uint64) *v1.WatchEvent {
+	return &v1.WatchEvent{Path: e.path, Operation: op, Type: e.type_, Size: e.size, MtimeUnixNano: e.mtime, Sequence: seq, PlacementEpoch: epoch}
 }
 
 // stampIO records fs traffic on the shared activity clock (the activity signal). Called by
@@ -205,6 +261,91 @@ func (*fsServer) List(_ context.Context, req *connect.Request[v1.FsServiceListRe
 		return nil, fsErr("list", m.Path, err)
 	}
 	return connect.NewResponse(&v1.FsServiceListResponse{Entries: entries}), nil
+}
+
+// Watch implements bounded polling-based change detection. The guest/provider
+// source is deliberately specified as change detection; an overflow or a
+// caller reconnect is explicit and can be recovered with a full rescan.
+func (s *fsServer) Watch(ctx context.Context, req *connect.Request[v1.WatchRequest], stream *connect.ServerStream[v1.WatchEvent]) error {
+	m := req.Msg
+	root := m.Path
+	if root == "" {
+		root = "/"
+	}
+	epoch := m.PlacementEpoch
+	if epoch == 0 {
+		epoch = 1
+	}
+	previous, err := collectWatch(root, m.Recursive)
+	if err != nil {
+		return fsErr("watch", root, err)
+	}
+	seq := m.AfterSequence
+	// Send an initial reset marker to flush the server-stream headers and make
+	// the starting snapshot explicit. It is not a file change; it tells the
+	// caller that a full rescan establishes the baseline for this cursor.
+	if err := stream.Send(&v1.WatchEvent{PlacementEpoch: epoch, Sequence: seq, Reset_: true, ResetReason: "initial"}); err != nil {
+		return err
+	}
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			next, err := collectWatch(root, m.Recursive)
+			if err != nil {
+				return fsErr("watch", root, err)
+			}
+			paths := make([]string, 0, len(previous)+len(next))
+			seen := map[string]bool{}
+			for p := range previous {
+				seen[p] = true
+				paths = append(paths, p)
+			}
+			for p := range next {
+				if !seen[p] {
+					paths = append(paths, p)
+				}
+			}
+			sort.Strings(paths)
+			changes := make([]*v1.WatchEvent, 0, len(paths))
+			for _, p := range paths {
+				old, hadOld := previous[p]
+				cur, hadCur := next[p]
+				op := ""
+				if !hadOld && hadCur {
+					op = "create"
+					old = cur
+				}
+				if hadOld && !hadCur {
+					op = "remove"
+					cur = old
+				}
+				if hadOld && hadCur && (old.size != cur.size || old.mtime != cur.mtime || old.mode != cur.mode || old.type_ != cur.type_) {
+					op = "modify"
+				}
+				if op == "" {
+					continue
+				}
+				seq++
+				changes = append(changes, watchEventFromEntry(cur, op, seq, epoch))
+			}
+			if len(changes) > watchBufferEvents {
+				if err := stream.Send(&v1.WatchEvent{Sequence: seq, PlacementEpoch: epoch, Overflow: true, Reset_: true, ResetReason: "overflow"}); err != nil {
+					return err
+				}
+			} else {
+				for _, event := range changes {
+					if err := stream.Send(event); err != nil {
+						return err
+					}
+				}
+			}
+			previous = next
+		}
+	}
 }
 
 // listDir walks up to depth levels below root and returns a FLAT list. Flat

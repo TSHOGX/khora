@@ -334,6 +334,8 @@ khora process connect <pid> [flags]
 
 | Option | Default | Description |
 | --- | --- | --- |
+| `--after` | `0` | output sequence cursor |
+| `--epoch` | `0` | expected placement epoch |
 | `-s, --sandbox` | `""` | Sandbox ID (required) |
 
 ## `khora process input`
@@ -387,6 +389,7 @@ khora process start <command> [args...] [flags]
 | `-a, --arg` | `[]` | Additional arguments |
 | `-d, --cwd` | `""` | Working directory |
 | `-e, --env` | `[]` | Environment variables (KEY=VALUE) |
+| `--idempotency-key` | `""` | retry key for logical process start |
 | `--pty-cols` | `0` | PTY columns (requires --pty-rows) |
 | `--pty-rows` | `0` | PTY rows (requires --pty-cols) |
 | `-s, --sandbox` | `""` | Sandbox ID (required) |
@@ -435,6 +438,7 @@ khora sandbox create [flags]
 | `--cpu-millis` | `0` | CPU millicores cap |
 | `--disk-byte` | `0` | disk cap in bytes |
 | `--egress-default` | `""` | egress default policy: allow or deny |
+| `--idempotency-key` | `""` | retry key for durable create convergence |
 | `--idle-timeout` | `""` | idle timeout duration (e.g. 30m) |
 | `--memory-byte` | `0` | memory cap in bytes |
 | `--retention` | `""` | retention duration (e.g. 24h) |
@@ -547,6 +551,14 @@ khora template delete <template-id>
 
 Aliases: `rm`
 
+## `khora template get`
+
+Inspect a template and its immutable manifest
+
+```text
+khora template get <template-id>
+```
+
 ## `khora template list`
 
 List templates
@@ -614,6 +626,7 @@ khora volume create [flags]
 
 | Option | Default | Description |
 | --- | --- | --- |
+| `--idempotency-key` | `""` | retry key for durable create convergence |
 | `--size` | `0` | volume size in bytes (0 = uncapped) |
 
 ## `khora volume delete`
@@ -672,6 +685,34 @@ Aliases: `ls`
 | --- | --- | --- |
 | `--json` | `false` | emit JSON |
 
+## `khora volume list-path`
+
+List a directory in a volume
+
+```text
+khora volume list-path <volume-id> [path]
+```
+
+## `khora volume mkdir`
+
+Create a directory in a volume
+
+```text
+khora volume mkdir <volume-id> <path> [flags]
+```
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `--mode` | `0755` | directory mode in octal |
+
+## `khora volume move`
+
+Move a path inside a volume
+
+```text
+khora volume move <volume-id> <source> <destination>
+```
+
 ## `khora volume patch`
 
 Resize a volume.
@@ -688,6 +729,27 @@ khora volume patch <volume-id> [flags]
 | --- | --- | --- |
 | `--size` | `0` | new volume size in bytes (required) |
 
+## `khora volume read`
+
+Read a byte range from a volume
+
+```text
+khora volume read <volume-id> <path> [flags]
+```
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `--length` | `0` | byte length (0 reads to EOF) |
+| `--offset` | `0` | byte offset |
+
+## `khora volume remove-path`
+
+Remove a path from a volume
+
+```text
+khora volume remove-path <volume-id> <path>
+```
+
 ## `khora volume snapshot`
 
 Derive a new volume from this one's current content
@@ -699,3 +761,23 @@ khora volume snapshot <volume-id> [flags]
 | Option | Default | Description |
 | --- | --- | --- |
 | `--size` | `0` | snapshot size in bytes (0 = uncapped) |
+
+## `khora volume stat`
+
+Stat a path in a volume
+
+```text
+khora volume stat <volume-id> <path>
+```
+
+## `khora volume write`
+
+Write stdin to a volume path
+
+```text
+khora volume write <volume-id> <path> [flags]
+```
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `--offset` | `0` | byte offset |

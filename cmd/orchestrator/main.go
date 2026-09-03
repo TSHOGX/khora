@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/TSHOGX/khora/internal/model"
 	"github.com/TSHOGX/khora/internal/orchestrator"
 )
 
@@ -60,6 +61,7 @@ func main() {
 		EventRetention:      flags.eventRetention,
 		SweepInterval:       flags.reaperInterval,
 		TransportDownBudget: flags.transportDownBudget,
+		ProcessRetention:    model.ProcessRetentionPolicy{ExitedFor: flags.processRetention},
 		NodeDiskByte:        flags.nodeDiskByte,
 		NodeMemoryByte:      flags.nodeMemoryByte,
 		SecondHopUID:        secondHopUID,

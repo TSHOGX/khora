@@ -24,6 +24,11 @@ tested at the API edge in
 [internal/orchestrator/api_test.go](../../internal/orchestrator/api_test.go) and
 [internal/orchestrator/volumes_test.go](../../internal/orchestrator/volumes_test.go).
 
+Idempotency-key reuse with a different normalized request and stale placement
+epochs are both explicit `409` classes. An unexpired operation already in
+progress is also a conflict; after its lease expires restart reconciliation may
+take it over without losing the recorded cleanup phase.
+
 ## Event stream
 
 Every externally visible lifecycle transition writes one durable Event atomically
@@ -36,7 +41,8 @@ Only a `destroyed` Event carries `cause`: `requested` or `retention-expired`.
 Sandbox's separate `death_cause`, which may be `gone`, `unknown`, or
 `resource-exceeded`; it is absent when no death was observed.
 
-`created` and `resumed` Events carry `placement_address`: the guest-visible
+`created` and `resumed` Events carry `placement_address` and
+`placement_epoch`: the guest-visible
 address assigned to the Placement established by that transition. It is a
 historical stream fact suitable for attributing an observation made while that
 Placement existed. Other Event kinds omit the key. Addresses may be reused, and

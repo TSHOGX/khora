@@ -26,13 +26,14 @@ import (
 
 func newSandboxCreateCmd() *cobra.Command {
 	var (
-		templateID    string
-		egressDefault string
-		cpuMillis     int64
-		memoryByte    int64
-		diskByte      int64
-		idleTimeout   string
-		retention     string
+		templateID     string
+		egressDefault  string
+		cpuMillis      int64
+		memoryByte     int64
+		diskByte       int64
+		idleTimeout    string
+		retention      string
+		idempotencyKey string
 	)
 
 	cmd := &cobra.Command{
@@ -56,7 +57,7 @@ func newSandboxCreateCmd() *cobra.Command {
 					Egress: khora.Egress{Default: &egressDefault},
 				}
 			}
-			sb, err := api.Create(context.Background(), req)
+			sb, err := api.CreateWithKey(context.Background(), req, khora.IdempotencyKey(idempotencyKey))
 			if err != nil {
 				return err
 			}
@@ -72,6 +73,7 @@ func newSandboxCreateCmd() *cobra.Command {
 	cmd.Flags().Int64Var(&diskByte, "disk-byte", 0, "disk cap in bytes")
 	cmd.Flags().StringVar(&idleTimeout, "idle-timeout", "", "idle timeout duration (e.g. 30m)")
 	cmd.Flags().StringVar(&retention, "retention", "", "retention duration (e.g. 24h)")
+	cmd.Flags().StringVar(&idempotencyKey, "idempotency-key", "", "retry key for durable create convergence")
 	_ = cmd.MarkFlagRequired("template")
 
 	return cmd

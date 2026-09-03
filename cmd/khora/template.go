@@ -40,6 +40,21 @@ func newTemplateListCmd() *cobra.Command {
 	return cmd
 }
 
+func newTemplateGetCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "get <template-id>",
+		Short: "Inspect a template and its immutable manifest",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			tm, err := api.Template(context.Background(), args[0])
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd.OutOrStdout(), tm)
+		},
+	}
+}
+
 func newTemplatePromoteCmd() *cobra.Command {
 	var fromSandbox string
 

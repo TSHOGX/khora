@@ -47,7 +47,8 @@ type Reaper struct {
 	// transition) — the case a "reset on observed non-down outcome" alone would miss,
 	// letting a stale pre-resume timestamp escalate a fresh transport-down straight
 	// past the budget. Reaper-loop-local (single goroutine drives Sweep), so no lock.
-	downSince map[model.SandboxID]downStreak
+	downSince     map[model.SandboxID]downStreak
+	lastTelemetry map[model.SandboxID]time.Time
 }
 
 // downStreak is one sandbox's continuous transport-down streak (health classification): when it
@@ -56,7 +57,7 @@ type Reaper struct {
 // placement was rebound by a resume) and is restarted, not honored.
 type downStreak struct {
 	since time.Time
-	epoch string // placement transport endpoint at streak start (health and reclamation IP-as-epoch)
+	epoch string // explicit Placement epoch, with endpoint fallback for legacy records
 }
 
 // reaper defaults (the health and reaper boundary numeric knobs; bound no invariant's shape).
@@ -79,6 +80,7 @@ func NewReaper(m *Mediator, interval, transportDownBudget time.Duration) *Reaper
 		interval:            interval,
 		transportDownBudget: transportDownBudget,
 		downSince:           make(map[model.SandboxID]downStreak),
+		lastTelemetry:       make(map[model.SandboxID]time.Time),
 	}
 }
 
@@ -165,6 +167,38 @@ func (r *Reaper) tick(ctx context.Context) {
 	// it sits after the reconcile that may APPEND events rather than before it.
 	if err := r.m.TrimOutbox(ctx); err != nil {
 		r.m.deps.Logf("reaper: outbox trim (retried next tick): %v", err)
+	}
+	r.sampleTelemetry(ctx)
+}
+
+func (r *Reaper) sampleTelemetry(ctx context.Context) {
+	policy := r.m.deps.TelemetryPolicy
+	if policy.Interval <= 0 {
+		return
+	}
+	recs, err := r.m.deps.Store.ListSandboxes(ctx)
+	if err != nil {
+		return
+	}
+	now := time.Now()
+	seen := make(map[model.SandboxID]bool, len(recs))
+	for _, rec := range recs {
+		seen[rec.ID] = true
+		if last := r.lastTelemetry[rec.ID]; !last.IsZero() && now.Sub(last) < policy.Interval {
+			continue
+		}
+		if err := r.m.SampleTelemetry(ctx, rec.ID); err != nil {
+			r.m.deps.Logf("reaper: telemetry sample %s: %v", rec.ID, err)
+		}
+		r.lastTelemetry[rec.ID] = now
+	}
+	for id := range r.lastTelemetry {
+		if !seen[id] {
+			delete(r.lastTelemetry, id)
+		}
+	}
+	if err := r.m.TrimTelemetry(ctx); err != nil {
+		r.m.deps.Logf("reaper: telemetry trim: %v", err)
 	}
 }
 
@@ -312,7 +346,12 @@ func (r *Reaper) handleTransportDownLocked(ctx context.Context, rec model.Sandbo
 	// missing endpoint (no live handle) shouldn't reach here — transport-down means L1
 	// alive + a live-map endpoint that failed L2 — but treat it defensively as a fresh
 	// streak with an empty epoch.
-	epoch, _ := r.m.Endpoint(rec.ID)
+	epoch := ""
+	if pl, err := r.m.Placement(ctx, rec.ID); err == nil {
+		epoch = fmt.Sprintf("%d", pl.Epoch)
+	} else {
+		epoch, _ = r.m.Endpoint(rec.ID)
+	}
 
 	streak, tracked := r.downSince[rec.ID]
 	if !tracked || streak.epoch != epoch {

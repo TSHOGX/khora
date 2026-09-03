@@ -191,6 +191,10 @@ type MountSource struct {
 // every resume, old one invalidated (the ID-reference model). The engine addresses the sandbox by
 // SandboxID, never by anything in here.
 type Placement struct {
+	// Epoch is the durable realization number supplied by the lifecycle
+	// mediator. Providers treat it as opaque correlation data; stale requests
+	// are rejected by the control plane before reaching this seam.
+	Epoch uint64
 	// Address is the guest-visible address assigned to this placement. It is a
 	// portable placement fact, independent of the transport endpoint and rebound
 	// on every resume.
@@ -321,4 +325,11 @@ type Provider interface {
 	// A nil uid means the deployment supplied none: install nothing. A `via[]` declaration is
 	// refused at the write point instead, an unenforceable invariant not being half-honored.
 	InstallSecondHop(ctx context.Context, rs ruleset.RuleSet, uid *int) error
+}
+
+// ManifestChecker is an optional provider capability check. The lifecycle
+// mediator supplies only portable platform/capability declarations; provider
+// details stay behind this seam.
+type ManifestChecker interface {
+	CheckManifest(ctx context.Context, platform string, capabilities []string) error
 }

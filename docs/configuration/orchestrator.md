@@ -19,6 +19,7 @@ Check it for staleness with `./scripts/check-generated.sh`.
 | `--insecure-listen` | `false` | permit a non-loopback -addr even though the API has no authentication or TLS |
 | `--node-disk-byte` | `0` | node disk admission budget in bytes; 0 is unmetered and a positive value requires sandbox disk caps |
 | `--node-memory-byte` | `0` | node memory admission budget in bytes; 0 is unmetered and a positive value requires sandbox memory caps |
+| `--process-retention` | `24h0m0s` | retention for exited logical process handles |
 | `--publish-ip` | `""` | host address for ingress.publish bindings; empty uses 127.0.0.1 |
 | `--reaper-interval` | `30s` | reaper sweep cadence |
 | `--retention` | `24h0m0s` | default paused retention TTL before irreversible record and Overlay eviction; 0 disables eviction |

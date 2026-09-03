@@ -92,6 +92,53 @@ func TestAPIListTemplates(t *testing.T) {
 	}
 }
 
+func TestAPIGetTemplateManifest(t *testing.T) {
+	srv, mem := apiFixture(t)
+	manifest := model.TemplateManifest{SchemaVersion: model.CurrentManifestSchema, Platform: "linux/amd64", Capabilities: []string{"fs"}}
+	if err := mem.CreateTemplate(context.Background(), model.Template{ID: "tmpl_manifest", Builtin: true, Manifest: manifest, CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	resp := do(t, http.MethodGet, srv.URL+"/v1/templates/tmpl_manifest")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET template = %d", resp.StatusCode)
+	}
+	var got templateResp
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Manifest.SchemaVersion != model.CurrentManifestSchema || got.Manifest.Platform != "linux/amd64" {
+		t.Fatalf("manifest = %+v", got.Manifest)
+	}
+}
+
+func TestAPISnapshotAndTelemetryAvailability(t *testing.T) {
+	srv, mem := apiFixture(t)
+	seedTemplate(t, mem, "bare", "", true)
+	// A record-only fixture is enough to verify explicit unavailable values and
+	// cursor/route shapes; no runtime provider is needed.
+	if err := mem.CreateSandbox(context.Background(), model.Sandbox{ID: "sbx_snap", Template: "bare", Overlay: "ov_snap", State: model.Paused, CreatedAt: time.Now(), UpdatedAt: time.Now()}, nil); err != nil {
+		t.Fatal(err)
+	}
+	resp := do(t, http.MethodGet, srv.URL+"/v1/sandboxes/sbx_snap/snapshot")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("snapshot = %d", resp.StatusCode)
+	}
+	var snap model.SandboxSnapshot
+	if err := json.NewDecoder(resp.Body).Decode(&snap); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if snap.Resources.CPU.Available || snap.Resources.Memory.Available {
+		t.Fatalf("unavailable resources became available: %+v", snap.Resources)
+	}
+	resp = do(t, http.MethodGet, srv.URL+"/v1/sandboxes/sbx_snap/telemetry")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("telemetry = %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
 // DELETE /v1/templates/{id}: unreferenced → 204; referenced by a sandbox → 409
 // (health and reclamation referenced-means-undeletable); after the sandbox is gone → 204; missing
 // → 404.

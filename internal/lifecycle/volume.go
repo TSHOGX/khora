@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"path"
 	"strings"
 	"time"
@@ -80,21 +81,46 @@ var ErrVolumeCapUnsupported = errors.New("lifecycle: backend cannot enforce a ca
 // across a backend call. A backend whose operation is not bounded metadata work must use a
 // reservation shape like Promote instead of holding the node-global gate across the call.
 func (m *Mediator) CreateVolume(ctx context.Context, capBytes int64) (model.VolumeID, error) {
+	return m.CreateVolumeWithKey(ctx, capBytes, "")
+}
+
+// CreateVolumeWithKey is CreateVolume with a durable caller-supplied
+// idempotency key. Repeating the same semantic request returns the original
+// Volume; reusing the key with a different cap conflicts deterministically.
+func (m *Mediator) CreateVolumeWithKey(ctx context.Context, capBytes int64, key model.IdempotencyKey) (resultID model.VolumeID, resultErr error) {
 	if capBytes < 0 {
 		return "", fmt.Errorf("create volume: cap must be non-negative (0 = uncapped), got %d", capBytes)
 	}
+	claim, err := m.claimOperation(ctx, "volume.create", key, struct {
+		CapByte int64 `json:"cap_byte"`
+	}{capBytes})
+	if err != nil {
+		return "", err
+	}
+	if replay, err := operationReplayID(claim, model.ObjectVolume); err != nil {
+		return "", err
+	} else if replay != "" {
+		return model.VolumeID(replay), nil
+	}
+	defer func() { m.failOperation(ctx, claim, resultErr) }()
 	selected, err := m.defaultVolumeBackend()
 	if err != nil {
 		return "", fmt.Errorf("create volume: %w", err)
 	}
 	be := selected.backend
-	// Capability check FIRST — before the ID, before the gate, before any bytes.
+	// The idempotency-key verdict precedes capability validation so a reused key
+	// always conflicts deterministically, independent of current provider state.
 	if capBytes > 0 && !be.Capabilities().Quota {
-		// Refused rather than silently dropped (resource admission).
 		return "", fmt.Errorf("create volume: %w: backend %q reports no capacity-cap capability", ErrVolumeCapUnsupported, be.Name())
+	}
+	if err := m.advanceOperation(ctx, claim, model.OperationMaterializing); err != nil {
+		return "", fmt.Errorf("create volume: advance operation: %w", err)
 	}
 
 	vid := model.VolumeID("vol_" + randToken())
+	if claim.op != nil {
+		vid = model.VolumeID(deterministicObjectID("vol_", claim.op.ID))
+	}
 	rec := model.Volume{ID: vid, Backend: selected.name, CapByte: capBytes, CreatedAt: time.Now()}
 
 	// Protect the unit for the whole create window (atomic transition rollback). Registered BEFORE the
@@ -123,6 +149,12 @@ func (m *Mediator) CreateVolume(ctx context.Context, capBytes int64) (model.Volu
 			m.deps.Logf("create volume: unwind %s left bytes behind (the orphan sweep will retry): %v", vid, derr)
 		}
 		return "", fmt.Errorf("create volume: insert record: %w", err)
+	}
+	if err := m.advanceOperation(ctx, claim, model.OperationMaterialized); err != nil {
+		return "", fmt.Errorf("create volume: record materialized operation: %w", err)
+	}
+	if err := m.succeedOperation(ctx, claim, model.OperationResult{Kind: model.ObjectVolume, ID: string(vid)}); err != nil {
+		return "", fmt.Errorf("create volume: commit operation result: %w", err)
 	}
 	return vid, nil
 }
@@ -414,6 +446,164 @@ func (m *Mediator) ExportVolume(ctx context.Context, id model.VolumeID, path str
 	}
 }
 
+// StatVolume exposes root-confined LSTAT metadata without requiring a
+// Sandbox Placement.
+func (m *Mediator) StatVolume(ctx context.Context, id model.VolumeID, name string) (volume.FileInfo, error) {
+	r, err := m.openVolumeRoot(ctx, id)
+	if err != nil {
+		return volume.FileInfo{}, err
+	}
+	defer r.Close()
+	fi, err := r.Stat(name)
+	if err != nil {
+		return volume.FileInfo{}, fmt.Errorf("stat volume %s: %s: %w", id, name, err)
+	}
+	return fi, nil
+}
+
+// LstatVolume reports the final entry itself, including symlink metadata.
+func (m *Mediator) LstatVolume(ctx context.Context, id model.VolumeID, name string) (volume.FileInfo, error) {
+	r, err := m.openVolumeRoot(ctx, id)
+	if err != nil {
+		return volume.FileInfo{}, err
+	}
+	defer r.Close()
+	fi, err := r.Lstat(name)
+	if err != nil {
+		return volume.FileInfo{}, fmt.Errorf("lstat volume %s: %s: %w", id, name, err)
+	}
+	return fi, nil
+}
+
+// ListVolume enumerates one root-relative directory.
+func (m *Mediator) ListVolume(ctx context.Context, id model.VolumeID, name string) ([]volume.FileInfo, error) {
+	r, err := m.openVolumeRoot(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+	list, err := r.List(name)
+	if err != nil {
+		return nil, fmt.Errorf("list volume %s: %s: %w", id, name, err)
+	}
+	return list, nil
+}
+
+// ReadVolume reads a bounded range. A non-positive length reads to EOF, while
+// the endpoint still bounds the allocation by the file's reported size.
+func (m *Mediator) ReadVolume(ctx context.Context, id model.VolumeID, name string, offset, length int64) ([]byte, error) {
+	if offset < 0 {
+		return nil, fmt.Errorf("read volume: offset must be non-negative")
+	}
+	r, err := m.openVolumeRoot(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+	fi, err := r.Stat(name)
+	if err != nil {
+		return nil, fmt.Errorf("read volume %s: %s: %w", id, name, err)
+	}
+	if fi.IsDir {
+		return nil, fmt.Errorf("read volume %s: %s is a directory", id, name)
+	}
+	if offset >= fi.Size {
+		return []byte{}, nil
+	}
+	if length <= 0 || length > fi.Size-offset {
+		length = fi.Size - offset
+	}
+	if length > 64<<20 {
+		return nil, fmt.Errorf("read volume %s: requested range is too large", id)
+	}
+	buf := make([]byte, length)
+	n, err := r.ReadAt(name, buf, offset)
+	if err != nil && err != io.EOF {
+		return nil, fmt.Errorf("read volume %s: %s: %w", id, name, err)
+	}
+	return buf[:n], nil
+}
+
+// WriteVolume writes one range under the same direct-write admission regime as
+// streamed import.
+func (m *Mediator) WriteVolume(ctx context.Context, id model.VolumeID, name string, offset int64, data []byte) (int64, error) {
+	if offset < 0 {
+		return 0, fmt.Errorf("write volume: offset must be non-negative")
+	}
+	release, err := m.admitDirectWrite(ctx, id)
+	if err != nil {
+		return 0, err
+	}
+	defer release()
+	r, err := m.openVolumeRoot(ctx, id)
+	if err != nil {
+		return 0, err
+	}
+	defer r.Close()
+	if err := mkdirChain(r, name); err != nil {
+		return 0, fmt.Errorf("write volume %s: prepare %s: %w", id, name, err)
+	}
+	n, err := r.WriteAt(name, data, offset)
+	if err != nil {
+		return int64(n), fmt.Errorf("write volume %s: %s: %w", id, name, err)
+	}
+	return int64(n), nil
+}
+
+func (m *Mediator) MkdirVolume(ctx context.Context, id model.VolumeID, name string, perm fs.FileMode) (volume.FileInfo, error) {
+	release, err := m.admitDirectWrite(ctx, id)
+	if err != nil {
+		return volume.FileInfo{}, err
+	}
+	defer release()
+	r, err := m.openVolumeRoot(ctx, id)
+	if err != nil {
+		return volume.FileInfo{}, err
+	}
+	defer r.Close()
+	if err := r.Mkdir(name, perm); err != nil {
+		return volume.FileInfo{}, fmt.Errorf("mkdir volume %s: %s: %w", id, name, err)
+	}
+	return r.Stat(name)
+}
+
+func (m *Mediator) MoveVolume(ctx context.Context, id model.VolumeID, oldName, newName string) (volume.FileInfo, error) {
+	release, err := m.admitDirectWrite(ctx, id)
+	if err != nil {
+		return volume.FileInfo{}, err
+	}
+	defer release()
+	r, err := m.openVolumeRoot(ctx, id)
+	if err != nil {
+		return volume.FileInfo{}, err
+	}
+	defer r.Close()
+	if err := mkdirChain(r, newName); err != nil {
+		return volume.FileInfo{}, fmt.Errorf("move volume %s: prepare %s: %w", id, newName, err)
+	}
+	if err := r.Rename(oldName, newName); err != nil {
+		return volume.FileInfo{}, fmt.Errorf("move volume %s: %s to %s: %w", id, oldName, newName, err)
+	}
+	return r.Stat(newName)
+}
+
+func (m *Mediator) RemoveVolumePath(ctx context.Context, id model.VolumeID, name string) error {
+	release, err := m.admitDirectWrite(ctx, id)
+	if err != nil {
+		return err
+	}
+	defer release()
+	r, err := m.openVolumeRoot(ctx, id)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	if err := r.Remove(name); err != nil {
+		return fmt.Errorf("remove volume %s: %s: %w", id, name, err)
+	}
+	return nil
+}
+
 // mkdirChain creates every parent directory of a root-relative file path, tolerating
 // ones that already exist.
 //
@@ -664,6 +854,11 @@ func (m *Mediator) materializeMounts(ctx context.Context, id model.SandboxID) ([
 	if len(rows) == 0 {
 		return nil, nil, nil
 	}
+	plan, err := CompileMountPlan(rows)
+	if err != nil {
+		return nil, nil, err
+	}
+	rows = plan.Rows
 	if backends, err := m.configuredVolumeBackends(); err != nil {
 		return nil, nil, fmt.Errorf("resolve volume providers for sandbox %s: %w", id, err)
 	} else if len(backends) == 0 {
@@ -720,6 +915,11 @@ func (m *Mediator) adoptMounts(ctx context.Context, id model.SandboxID) ([]*mate
 	if len(rows) == 0 {
 		return nil, nil
 	}
+	plan, err := CompileMountPlan(rows)
+	if err != nil {
+		return nil, err
+	}
+	rows = plan.Rows
 	if backends, err := m.configuredVolumeBackends(); err != nil {
 		return nil, fmt.Errorf("resolve volume providers for sandbox %s: %w", id, err)
 	} else if len(backends) == 0 {
@@ -829,11 +1029,19 @@ func (m *Mediator) buildingVolumeIDs() []string {
 // claim at every snapshot, which the caller never asked for. resource admission counts the DECLARED
 // cap precisely because the real bytes are metadata-level (~16 KiB).
 func (m *Mediator) SnapshotVolume(ctx context.Context, srcID model.VolumeID, capBytes int64) (model.VolumeID, error) {
-	return m.deriveVolume(ctx, srcID, capBytes, false)
+	return m.deriveVolume(ctx, srcID, capBytes, false, "")
+}
+
+func (m *Mediator) SnapshotVolumeWithKey(ctx context.Context, srcID model.VolumeID, capBytes int64, key model.IdempotencyKey) (model.VolumeID, error) {
+	return m.deriveVolume(ctx, srcID, capBytes, false, key)
 }
 
 func (m *Mediator) CloneVolume(ctx context.Context, srcID model.VolumeID, capBytes int64) (model.VolumeID, error) {
-	return m.deriveVolume(ctx, srcID, capBytes, true)
+	return m.deriveVolume(ctx, srcID, capBytes, true, "")
+}
+
+func (m *Mediator) CloneVolumeWithKey(ctx context.Context, srcID model.VolumeID, capBytes int64, key model.IdempotencyKey) (model.VolumeID, error) {
+	return m.deriveVolume(ctx, srcID, capBytes, true, key)
 }
 
 // deriveVolume is the shared body. The ORDER of its steps is the whole content:
@@ -852,7 +1060,7 @@ func (m *Mediator) CloneVolume(ctx context.Context, srcID model.VolumeID, capByt
 // UNDETECTABLE AFTERWARDS, because the limit read maps "never capped" and 0 onto each
 // other. The window is covered twice: the in-flight keep-set spans it, and
 // RepairVolumeCaps treats "record exists, quota row uncapped" as a REPAIR state.
-func (m *Mediator) deriveVolume(ctx context.Context, srcID model.VolumeID, capBytes int64, isClone bool) (model.VolumeID, error) {
+func (m *Mediator) deriveVolume(ctx context.Context, srcID model.VolumeID, capBytes int64, isClone bool, key model.IdempotencyKey) (resultID model.VolumeID, resultErr error) {
 	kind := "snapshot"
 	if isClone {
 		kind = "clone"
@@ -875,6 +1083,26 @@ func (m *Mediator) deriveVolume(ctx context.Context, srcID model.VolumeID, capBy
 	if capBytes > 0 && !caps.Quota {
 		return "", fmt.Errorf("%s volume: %w: backend %q cannot enforce a capacity cap", kind, ErrVolumeCapUnsupported, be.Name())
 	}
+	scope := "volume.snapshot"
+	if isClone {
+		scope = "volume.clone"
+	}
+	claim, err := m.claimOperation(ctx, scope, key, struct {
+		Source  string `json:"source"`
+		CapByte int64  `json:"cap_byte"`
+	}{string(srcID), capBytes})
+	if err != nil {
+		return "", err
+	}
+	if replay, err := operationReplayID(claim, model.ObjectVolume); err != nil {
+		return "", err
+	} else if replay != "" {
+		return model.VolumeID(replay), nil
+	}
+	defer func() { m.failOperation(ctx, claim, resultErr) }()
+	if err := m.advanceOperation(ctx, claim, model.OperationMaterializing); err != nil {
+		return "", err
+	}
 
 	// The source must exist as a RECORD, checked before an ID is minted and before any
 	// bytes move. The record is the authority (resource admission), so a backend that happens to hold
@@ -882,6 +1110,9 @@ func (m *Mediator) deriveVolume(ctx context.Context, srcID model.VolumeID, capBy
 	// sweep is about to reclaim, and deriving from them would produce a child of something
 	// that is being deleted.
 	newID := model.VolumeID("vol_" + randToken())
+	if claim.op != nil {
+		newID = model.VolumeID(deterministicObjectID("vol_", claim.op.ID))
+	}
 	rec := model.Volume{
 		ID: newID, Backend: source.Backend, Parent: srcID, CapByte: capBytes, CreatedAt: time.Now(),
 	}
@@ -922,6 +1153,12 @@ func (m *Mediator) deriveVolume(ctx context.Context, srcID model.VolumeID, capBy
 			m.deps.Logf("%s volume: unwind %s left bytes behind (the orphan sweep will retry): %v", kind, newID, derr)
 		}
 		return "", fmt.Errorf("%s volume: insert record: %w", kind, err)
+	}
+	if err := m.advanceOperation(ctx, claim, model.OperationMaterialized); err != nil {
+		return "", err
+	}
+	if err := m.succeedOperation(ctx, claim, model.OperationResult{Kind: model.ObjectVolume, ID: string(newID)}); err != nil {
+		return "", err
 	}
 	return newID, nil
 }

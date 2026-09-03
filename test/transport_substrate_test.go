@@ -111,6 +111,23 @@ func TestTransportStartStreamsStdout(t *testing.T) {
 	}
 }
 
+func TestTransportStableHandleReplay(t *testing.T) {
+	cl, cleanup := launchOne(t)
+	defer cleanup()
+	stable, ok := cl.(transport.StableProcessClient)
+	if !ok { t.Fatal("transport client does not expose stable process contract") }
+	ch, err := stable.StartHandle(context.Background(), transport.StartSpec{Cmd:"/bin/sh", Args:[]string{"-c", "printf stable; sleep 2"}, PlacementEpoch:1})
+	if err != nil { t.Fatal(err) }
+	var handle string; var epoch uint64; var seq uint64
+	for ev := range ch { if ev.Kind == "start" { handle, epoch = ev.Handle, ev.Epoch }; if ev.Kind == "data" { seq = ev.Sequence }; if ev.Kind == "end" { break } }
+	if handle == "" || epoch != 1 || seq == 0 { t.Fatalf("stable start metadata = handle %q epoch %d seq %d", handle, epoch, seq) }
+	replay, err := stable.ConnectHandle(context.Background(), handle, epoch, 0)
+	if err != nil { t.Fatal(err) }
+	seen := false
+	for ev := range replay { if ev.Kind == "data" && strings.Contains(string(ev.Data), "stable") { seen = true }; if ev.Kind == "end" { break } }
+	if !seen { t.Fatal("stable reconnect did not replay output") }
+}
+
 func TestTransportWriteReadRoundTrip(t *testing.T) {
 	cl, cleanup := launchOne(t)
 	defer cleanup()

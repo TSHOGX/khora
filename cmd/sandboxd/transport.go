@@ -37,9 +37,12 @@ func transportMode() {
 	// (the transport data plane stateless).
 	activity := newActivityClock()
 
+	procSvc := &processServer{activity: activity, reaper: reaper}
+	procSvc.loadPersistent()
+	go procSvc.watchRestored()
 	mux := http.NewServeMux()
 	mux.Handle(transportv1connect.NewHealthServiceHandler(&healthServer{activity: activity}))
-	mux.Handle(transportv1connect.NewProcessServiceHandler(&processServer{activity: activity, reaper: reaper}))
+	mux.Handle(transportv1connect.NewProcessServiceHandler(procSvc))
 	mux.Handle(transportv1connect.NewFsServiceHandler(&fsServer{activity: activity}))
 	// The large-file bypass shares this mux, listener and port — a plain HTTP
 	// route beside the Connect handlers (files.go / fs transport).

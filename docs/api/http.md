@@ -22,11 +22,16 @@ distinguishes an omitted member from zero: omitted leaves the Binding unchanged;
 zero removes a cap or disables the relevant TTL. Mounts and network declarations
 are whole replacements.
 
+`POST /v1/sandboxes` and `POST /v1/volumes` accept an `Idempotency-Key`
+header. Repeating a key with the same normalized request returns the original
+object; changing the request under that key returns `409`.
+
 ## Templates and Volumes
 
 | Method and path | Result |
 | --- | --- |
 | `GET /v1/templates` | list immutable Templates |
+| `GET /v1/templates/{id}` | inspect a Template and its typed manifest |
 | `POST /v1/templates` | promote a running or paused Sandbox Overlay |
 | `DELETE /v1/templates/{id}` | delete an unreferenced Template |
 | `POST /v1/volumes` | create a Volume |
@@ -36,6 +41,14 @@ are whole replacements.
 | `POST /v1/volumes/{id}/clone` | create a clone Volume |
 | `POST /v1/volumes/{id}/import?path=...` | stream bytes into a Volume |
 | `GET /v1/volumes/{id}/export?path=...` | stream bytes from a Volume |
+| `GET /v1/volumes/{id}/stat?path=...` | read root-confined metadata |
+| `GET /v1/volumes/{id}/lstat?path=...` | read metadata without following a symlink |
+| `GET /v1/volumes/{id}/list?path=...` | list a root-confined directory |
+| `GET /v1/volumes/{id}/read?path=...&offset=&length=` | read a bounded byte range |
+| `PUT /v1/volumes/{id}/write?path=...&offset=` | write raw bytes at an offset |
+| `POST /v1/volumes/{id}/mkdir?path=&mode=` | create a directory |
+| `POST /v1/volumes/{id}/move` | rename within the Volume |
+| `DELETE /v1/volumes/{id}/remove?path=...` | remove a path idempotently |
 
 Usage fields are absent when the backend cannot read them, not reported as zero.
 Volume size is a capacity cap; a new cap must be strictly greater than current

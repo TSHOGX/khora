@@ -191,8 +191,8 @@ func (p Process) Validate() error {
 	if p.ExitedAt != nil && p.ExitedAt.Before(p.StartedAt) {
 		return NewContractError(ErrorInvalidArgument, "process exit time precedes start time")
 	}
-	if p.State == ProcessExited && p.ExitedAt == nil {
-		return NewContractError(ErrorInvalidArgument, "exited process requires an exit time")
+	if (p.State == ProcessExited || p.State == ProcessReclaimed) && p.ExitedAt == nil {
+		return NewContractError(ErrorInvalidArgument, "terminal process requires an exit time")
 	}
 	if p.State == ProcessRunning && p.ExitedAt != nil {
 		return NewContractError(ErrorInvalidArgument, "running process cannot have an exit time")
@@ -292,7 +292,7 @@ func (m TemplateManifest) Validate() error {
 		return NewContractError(ErrorInvalidArgument, "unsupported Template manifest schema version")
 	}
 	parts := strings.Split(m.Platform, "/")
-	if strings.TrimSpace(m.Platform) != m.Platform || len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+	if strings.TrimSpace(m.Platform) != m.Platform || strings.ToLower(m.Platform) != m.Platform || len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
 		return NewContractError(ErrorInvalidArgument, "Template manifest platform must be os/arch")
 	}
 	if m.Capabilities == nil {
@@ -397,9 +397,21 @@ func (p OperationPhase) Valid() bool {
 type ObjectKind string
 
 const (
-	ObjectSandbox ObjectKind = "sandbox"
-	ObjectVolume  ObjectKind = "volume"
+	ObjectSandbox   ObjectKind = "sandbox"
+	ObjectPlacement ObjectKind = "placement"
+	ObjectProcess   ObjectKind = "process"
+	ObjectTemplate  ObjectKind = "template"
+	ObjectVolume    ObjectKind = "volume"
 )
+
+func (k ObjectKind) Valid() bool {
+	switch k {
+	case ObjectSandbox, ObjectPlacement, ObjectProcess, ObjectTemplate, ObjectVolume:
+		return true
+	default:
+		return false
+	}
+}
 
 // OperationResult is the durable result replayed for an idempotent retry.
 type OperationResult struct {
@@ -408,7 +420,7 @@ type OperationResult struct {
 }
 
 func (r OperationResult) Validate() error {
-	if r.Kind != ObjectSandbox && r.Kind != ObjectVolume {
+	if !r.Kind.Valid() {
 		return NewContractError(ErrorInvalidArgument, "unknown operation result object kind")
 	}
 	if r.ID == "" {
@@ -711,6 +723,36 @@ type Cursor struct {
 	ObjectID string         `json:"object_id,omitempty"`
 	Epoch    PlacementEpoch `json:"epoch,omitempty"`
 	Sequence uint64         `json:"sequence"`
+}
+
+// EventEnvelope is the shared protocol-neutral vocabulary for ordered engine
+// facts. Lifecycle publication and high-rate samples remain separate lanes;
+// sharing this shape does not make them share retention or backpressure.
+type EventEnvelope struct {
+	ID         string         `json:"id"`
+	Stream     CursorStream   `json:"stream"`
+	ObjectKind ObjectKind     `json:"object_kind"`
+	ObjectID   string         `json:"object_id"`
+	Epoch      PlacementEpoch `json:"epoch,omitempty"`
+	Sequence   uint64         `json:"sequence"`
+	OccurredAt time.Time      `json:"occurred_at"`
+}
+
+func (e EventEnvelope) Validate() error {
+	if e.ID == "" || e.ObjectID == "" || e.OccurredAt.IsZero() {
+		return NewContractError(ErrorInvalidArgument, "event envelope identity and timestamp are required")
+	}
+	if !e.ObjectKind.Valid() {
+		return NewContractError(ErrorInvalidArgument, "event envelope object kind is invalid")
+	}
+	c := Cursor{Stream: e.Stream, ObjectID: e.ObjectID, Epoch: e.Epoch, Sequence: e.Sequence}
+	if e.Stream == CursorStreamLifecycle {
+		c.ObjectID = ""
+	}
+	if err := c.Validate(); err != nil {
+		return err
+	}
+	return nil
 }
 
 func LifecycleCursor(sequence uint64) Cursor {
@@ -1043,6 +1085,76 @@ func (p WatchPolicy) Validate() error {
 type TelemetryPolicy struct {
 	Interval  time.Duration `json:"interval"`
 	Retention time.Duration `json:"retention"`
+}
+
+// ResourceSnapshot is a machine-readable point-in-time view. Every numeric
+// axis carries availability explicitly so a real zero is not confused with a
+// failed measurement.
+type ResourceSnapshot struct {
+	CPU    Measurement `json:"cpu"`
+	Memory Measurement `json:"memory"`
+	Disk   Measurement `json:"disk"`
+	State  string      `json:"state"`
+	At     time.Time   `json:"at"`
+}
+
+type TelemetrySample struct {
+	Envelope       EventEnvelope    `json:"envelope"`
+	Sandbox        SandboxID        `json:"sandbox_id"`
+	PlacementEpoch PlacementEpoch   `json:"placement_epoch,omitempty"`
+	Process        ProcessID        `json:"process_id,omitempty"`
+	Snapshot       ResourceSnapshot `json:"snapshot"`
+}
+
+type SandboxSnapshot struct {
+	Sandbox        SandboxID        `json:"sandbox_id"`
+	State          string           `json:"state"`
+	Resources      ResourceSnapshot `json:"resources"`
+	PlacementEpoch PlacementEpoch   `json:"placement_epoch,omitempty"`
+	At             time.Time        `json:"at"`
+}
+
+type PlacementSnapshot struct {
+	Sandbox   SandboxID        `json:"sandbox_id"`
+	Epoch     PlacementEpoch   `json:"epoch"`
+	State     PlacementState   `json:"state"`
+	Resources ResourceSnapshot `json:"resources"`
+	At        time.Time        `json:"at"`
+}
+
+type ProcessSnapshot struct {
+	Process        ProcessID      `json:"process_id"`
+	Sandbox        SandboxID      `json:"sandbox_id"`
+	PlacementEpoch PlacementEpoch `json:"placement_epoch"`
+	State          ProcessState   `json:"state"`
+	PID            int            `json:"pid,omitempty"`
+	ExitCode       *int           `json:"exit_code,omitempty"`
+	At             time.Time      `json:"at"`
+}
+
+func (s TelemetrySample) Validate() error {
+	if err := s.Envelope.Validate(); err != nil {
+		return err
+	}
+	if s.Sandbox == "" {
+		return NewContractError(ErrorInvalidArgument, "telemetry sandbox is required")
+	}
+	if s.Envelope.Stream != CursorStreamTelemetry || s.Envelope.ObjectID != string(s.Sandbox) {
+		return NewContractError(ErrorInvalidArgument, "telemetry envelope does not identify the sandbox")
+	}
+	if err := s.Snapshot.CPU.Validate(); err != nil {
+		return err
+	}
+	if err := s.Snapshot.Memory.Validate(); err != nil {
+		return err
+	}
+	if err := s.Snapshot.Disk.Validate(); err != nil {
+		return err
+	}
+	if s.Snapshot.At.IsZero() {
+		return NewContractError(ErrorInvalidArgument, "telemetry timestamp is required")
+	}
+	return nil
 }
 
 const (

@@ -67,7 +67,9 @@ type Config struct {
 	// zero is the shipped behavior rather than a "fill in a default" sentinel — the
 	// opposite of the two TTLs above. See lifecycle.Deps.EventRetention for why the
 	// engine must not invent this number.
-	EventRetention time.Duration
+	EventRetention   time.Duration
+	TelemetryPolicy  model.TelemetryPolicy
+	ProcessRetention model.ProcessRetentionPolicy
 
 	// SweepInterval / TransportDownBudget are the reaper's tuning knobs
 	// (the health and reaper boundary). Zero → NewReaper's conservative defaults.
@@ -327,6 +329,8 @@ func New(cfg Config) (*Engine, error) {
 		DefaultIdleTimeout:    cfg.DefaultIdleTimeout,
 		DefaultRetention:      cfg.DefaultRetention,
 		EventRetention:        cfg.EventRetention,
+		TelemetryPolicy:       cfg.TelemetryPolicy,
+		ProcessRetention:      cfg.ProcessRetention,
 		FaultAfterColdStart:   cfg.FaultAfterColdStart,
 		FaultAfterVolumeBytes: cfg.FaultAfterVolumeBytes,
 		NodeCapacity: lifecycle.NodeCapacity{

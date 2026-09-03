@@ -61,6 +61,12 @@ type Template struct {
 	// undeletable as a referenced Promoted layer (the external API DELETE).
 	Builtin bool
 
+	// Manifest is the immutable capability declaration for the Template base.
+	// A zero value is retained for builtin rows created by older callers; the
+	// manifest validation/promotion path fills the canonical schema before a
+	// new artifact is exposed.
+	Manifest TemplateManifest
+
 	CreatedAt time.Time
 }
 

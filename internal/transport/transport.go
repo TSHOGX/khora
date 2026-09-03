@@ -49,11 +49,17 @@ type Endpoint string
 // keepalive} (process transport) — start(pid) / data(stdout|stderr) /
 // end(exit_code) / keepalive.
 type ProcessEvent struct {
-	Kind     string // "start" | "data" | "end" | "keepalive" | "error"
-	PID      int    // set on start
-	Stream   string // "stdout" | "stderr" | "pty" — set on data
-	Data     []byte // set on data
-	ExitCode int    // set on end
+	Kind        string // "start" | "data" | "end" | "keepalive" | "error"
+	PID         int    // set on start
+	Handle      string // opaque logical process handle, when the stable contract is used
+	Epoch       uint64 // placement epoch carried by stable process events
+	Sequence    uint64 // output sequence; zero for non-data control frames
+	Replay      bool   // true when the frame came from bounded replay
+	Gap         bool   // true when replay could not cover the requested cursor
+	ResetReason string
+	Stream      string // "stdout" | "stderr" | "pty" — set on data
+	Data        []byte // set on data
+	ExitCode    int    // set on end
 	// Err is set on Kind == "error": the stream ended WITHOUT an end frame, commonly the
 	// overflow disconnect (a subscriber that could not keep up is
 	// dropped, reported as resource_exhausted). Without it a consumer watching only for
@@ -65,11 +71,13 @@ type ProcessEvent struct {
 // StartSpec starts a process (the transport data plane process service). PTY is the Pty!=nil special
 // case (process transport: pty not a separate service). guest-native pid addressing.
 type StartSpec struct {
-	Cmd  string
-	Args []string
-	Env  []string
-	Cwd  string
-	Pty  *PtySize // non-nil = allocate a PTY
+	Cmd            string
+	Args           []string
+	Env            []string
+	Cwd            string
+	Pty            *PtySize // non-nil = allocate a PTY
+	IdempotencyKey string
+	PlacementEpoch uint64
 }
 
 type PtySize struct{ Rows, Cols uint16 }
@@ -205,6 +213,29 @@ type ProcessClient interface {
 	List(ctx context.Context) ([]int, error)
 }
 
+// StableProcessClient is the handle/epoch-aware extension of ProcessClient.
+// It is separate so existing PID-based callers remain source-compatible while
+// new callers can require explicit stale-epoch and replay semantics.
+type StableProcessClient interface {
+	StartHandle(ctx context.Context, spec StartSpec) (<-chan ProcessEvent, error)
+	ConnectHandle(ctx context.Context, handle string, epoch, after uint64) (<-chan ProcessEvent, error)
+	StreamInputHandle(ctx context.Context, handle string, epoch uint64) (InputWriter, error)
+	SendInputHandle(ctx context.Context, handle string, epoch uint64, data []byte, ptyIn bool) error
+	SendSignalHandle(ctx context.Context, handle string, epoch uint64, signal int) error
+	UpdateHandle(ctx context.Context, handle string, epoch uint64, size PtySize) error
+	CloseStdinHandle(ctx context.Context, handle string, epoch uint64) error
+	ListStable(ctx context.Context) ([]StableProcessInfo, error)
+}
+
+type StableProcessInfo struct {
+	Handle         string
+	PID            int
+	State          string
+	ExitCode       *int
+	Epoch          uint64
+	OutputSequence uint64
+}
+
 // FsClient is the transport data plane fs primitive (fs transport): the unary metadata surface
 // plus the streaming large-file bypass. No watch — consumers poll Stat+Read.
 type FsClient interface {
@@ -250,6 +281,27 @@ type FsClient interface {
 	// interrupted transfer cannot leave a partial file where a whole one is
 	// expected — which is why this path, unlike Write, has no truncate window.
 	WriteStream(ctx context.Context, path string, src io.Reader) (int64, error)
+}
+
+type WatchEvent struct {
+	Path        string
+	OldPath     string
+	Operation   string
+	Type        EntryType
+	Size        int64
+	MTime       time.Time
+	Sequence    uint64
+	Epoch       uint64
+	Overflow    bool
+	Reset       bool
+	ResetReason string
+}
+
+// WatchClient is the placement-scoped change-detection extension. It is kept
+// separate from FsClient so existing unary filesystem consumers do not need to
+// implement a stream they do not use.
+type WatchClient interface {
+	Watch(ctx context.Context, path string, recursive bool, epoch, after uint64) (<-chan WatchEvent, error)
 }
 
 // Client is the whole host-side channel to one sandbox's current endpoint —
