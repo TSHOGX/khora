@@ -155,7 +155,7 @@ func (m *Mediator) startOperationLeaseWith(parent context.Context, claim operati
 			case <-ctx.Done():
 				return
 			case now := <-ticker.C:
-				renewCtx, renewCancel := context.WithTimeout(parent, interval)
+				renewCtx, renewCancel := context.WithTimeout(ctx, interval)
 				err := m.deps.Store.RenewOperation(renewCtx, id, attempt, now, lease)
 				renewCancel()
 				if err != nil {
