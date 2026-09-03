@@ -44,9 +44,10 @@ type processServer struct {
 	// idle duration. Every proc created here carries a reference to it and
 	// stamps it on broadcast/writeInput.
 	activity *activityClock
-	// reaper is transport mode's single wildcard waiter (reap.go). REQUIRED — it is where
-	// Start forks children and where their exit statuses come from (see proc.run for why
-	// cmd.Wait() cannot be used). Set by transportMode; a nil here is a programming error.
+	// reaper is the guest supervisor's single wildcard waiter (reap.go). REQUIRED —
+	// it is where Start forks children and where their exit statuses come from
+	// (see proc.run for why cmd.Wait() cannot be used). It is owned by PID 1 and
+	// remains alive while replaceable transport children come and go.
 	reaper *reapTable
 	// retention bounds how long an exited logical handle remains addressable.  It
 	// is deliberately owned by the process hub (the durable supervisor), not by
@@ -188,6 +189,13 @@ func (s *processServer) loadPersistent() {
 				code = *saved.ExitCode
 			}
 			p.endFrame = frame{kind: 'e', exitCode: code, sequence: saved.Sequence}
+		} else if saved.StartTime == 0 {
+			// A pre-supervisor state file cannot authenticate a live PID.  Keep
+			// the durable handle as an exited/reclaimed record rather than risking
+			// delivery to a reused PID.
+			p.ended = true
+			p.exitedAt = time.Now()
+			p.endFrame = frame{kind: 'e', exitCode: 255, sequence: saved.Sequence + 1}
 		}
 		s.byHandle[p.handle] = p
 		if saved.Key != "" {
@@ -225,6 +233,17 @@ func (s *processServer) watchRestored() {
 		for _, pid := range pids {
 			p, ok := s.get(pid)
 			if !ok {
+				continue
+			}
+			// Processes started by this still-live supervisor already have a
+			// registered wait-status handoff and output pumps.  Only metadata
+			// reconstructed from disk needs this fallback liveness probe; probing
+			// active entries races the real reaper and can replace a valid exit
+			// status with the synthetic 255 code.
+			p.mu.Lock()
+			restored := p.restored
+			p.mu.Unlock()
+			if !restored {
 				continue
 			}
 			if p.identityValid() {
@@ -398,7 +417,8 @@ type subscriber struct {
 
 // proc is the per-process fan-out hub (transient, non-authoritative — see
 // processServer doc). Holds the bounded ring, the live subscriber set, and the
-// input handles (stdin pipe; pty master).
+// input handles (stdin pipe; pty master). In production this hub is owned by
+// guest PID 1; transport children only proxy to it.
 type proc struct {
 	pid int
 	// startTime is the kernel start-time tick read from /proc/<pid>/stat at
@@ -754,10 +774,10 @@ type source struct {
 // different process once the number is reused. Callers that must not miss exit status stay
 // attached so the parent can reap the process group.
 //
-// The exit status arrives over `exited` — the reap table's handoff — NOT from cmd.Wait().
-// Transport mode owns Wait4(-1) for its subtree (the guest startup topology) and a wildcard wait cannot exclude a
-// pid, so a per-child cmd.Wait() would race the reaper: whoever lost sees ECHILD and this
-// `end` frame carries a fabricated exit code. Same single-waiter rule as PID 1's (reap.go).
+// The exit status arrives over `exited` — the supervisor reaper's handoff — NOT
+// from cmd.Wait().  PID 1 owns Wait4(-1), so a per-child cmd.Wait() would race
+// the reaper: whoever lost sees ECHILD and this `end` frame carries a fabricated
+// exit code.  Transport children never wait for workload processes.
 func (p *proc) run(exited <-chan syscall.WaitStatus, sources []source, onExit func()) {
 	var wg sync.WaitGroup
 	wg.Add(len(sources))

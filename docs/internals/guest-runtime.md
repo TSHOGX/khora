@@ -27,14 +27,17 @@ was possible. The protocol is tested end to end in
 
 ## Process service
 
-The transport role owns the child registry and event fan-out. A process receives an
-opaque handle and a Placement epoch; the PID remains only a local locator. A process
-may have multiple subscribers. Each connection receives the bounded output tail before
-live events, with monotonically increasing sequence numbers. A cursor gap emits an
-explicit overflow/reset marker and requires a rescan. Subscriber queues remain
-bounded, so a slow reader is detached rather than blocking child output or other
-subscribers. Handle/exit metadata is persisted under the guest runtime scratch area
-so a transport-child restart can re-recognize surviving processes.
+Guest PID 1 owns the child registry, descriptors, and event fan-out. Transport roles
+are replaceable RPC frontends connected to that supervisor over a private Unix socket.
+A process receives an opaque handle and a Placement epoch; the PID remains only a
+local locator. A process may have multiple subscribers. Each connection receives the
+bounded output tail before live events, with monotonically increasing sequence
+numbers. A cursor gap emits an explicit overflow/reset marker and requires a rescan.
+Subscriber queues remain bounded, so a slow reader is detached rather than blocking
+child output or other subscribers. Handle, output-ring, and exit metadata are
+persisted under the guest runtime scratch area, while stdin/PTY descriptors remain
+owned by PID 1; a transport-child restart therefore preserves live output and input
+state instead of reconstructing an inert process record.
 
 PTY and pipe modes are separate paths. PTY merges terminal output and supports resize;
 pipe mode preserves stdout and stderr. Unit coverage is in
