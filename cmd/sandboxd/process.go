@@ -352,7 +352,7 @@ func (s *processServer) watchRestored() {
 				continue
 			}
 			p.finish(255)
-			s.unregister(pid)
+			s.unregisterProcess(pid, p)
 		}
 	}
 }
@@ -512,9 +512,25 @@ func (s *processServer) get(pid int) (*proc, bool) {
 	return p, ok
 }
 
+// unregister removes the process currently occupying pid. It is kept as a
+// compatibility helper for tests and callers that do not retain the proc
+// pointer; lifecycle callbacks should use unregisterProcess so a recycled PID
+// cannot let an older workload delete a newer one.
 func (s *processServer) unregister(pid int) {
+	s.unregisterProcess(pid, nil)
+}
+
+// unregisterProcess removes p only when it is still the process mapped at pid.
+// The kernel may recycle a PID while an old process's final pipe-drain callback
+// is still running; pointer identity fences that callback from deleting the new
+// occupant. The logical handle map is retained for exit replay as before.
+func (s *processServer) unregisterProcess(pid int, expected *proc) {
 	s.mu.Lock()
 	p := s.procs[pid]
+	if expected != nil && p != expected {
+		s.mu.Unlock()
+		return
+	}
 	delete(s.procs, pid)
 	// Keep the logical handle and exit status for the bounded retention window;
 	// only the placement-local PID map is removed immediately.
@@ -1179,7 +1195,7 @@ func (s *processServer) start(ctx context.Context, req *connect.Request[v1.Start
 	// independent context precisely so a process outlives a client disconnect; "kill on
 	// first-frame failure" cannot be a contract, because the same disconnect one frame later
 	// leaves the process alive — dead-vs-alive would depend on invisible timing.
-	go p.run(exited, sources, func() { s.unregister(pid) })
+	go p.run(exited, sources, func() { s.unregisterProcess(pid, p) })
 
 	if err := stream.Send(&v1.ProcessEvent{
 		ProcessHandle: p.handle, PlacementEpoch: p.epoch,

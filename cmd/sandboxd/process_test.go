@@ -254,6 +254,20 @@ func TestStableProcessEpochMismatchFailsClosed(t *testing.T) {
 	}
 }
 
+func TestUnregisterDoesNotRemoveReusedPID(t *testing.T) {
+	s := &processServer{statePath: filepath.Join(t.TempDir(), "processes.json")}
+	old := newProc(23, nil)
+	current := newProc(23, nil)
+	s.register(old)
+	// Model a kernel PID recycle before the old process's final drain callback
+	// runs: the new workload now occupies the same locator.
+	s.register(current)
+	s.unregisterProcess(old.pid, old)
+	if got, ok := s.get(current.pid); !ok || got != current {
+		t.Fatalf("recycled PID entry was removed or replaced: got=%p want=%p", got, current)
+	}
+}
+
 func TestFinishIsIdempotent(t *testing.T) {
 	p := newProc(1, nil)
 	p.finish(7)
