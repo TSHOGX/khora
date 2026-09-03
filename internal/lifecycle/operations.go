@@ -19,6 +19,10 @@ type operationClaim struct {
 	replay *model.OperationResult
 }
 
+func isOperationOwnershipConflict(err error) bool {
+	return errors.Is(err, store.ErrOperationOwnershipConflict)
+}
+
 func (m *Mediator) claimOperation(ctx context.Context, scope string, key model.IdempotencyKey, semantic any) (operationClaim, error) {
 	if key == "" {
 		return operationClaim{}, nil
@@ -54,10 +58,33 @@ func (m *Mediator) claimOperation(ctx context.Context, scope string, key model.I
 		if !existing.TakeoverAllowed(now) {
 			return operationClaim{}, model.ErrInProgress
 		}
-		if err := existing.Takeover(now, model.DefaultOperationLease); err != nil {
+		existing, err = m.deps.Store.TakeoverOperation(ctx, existing.ID, existing.Attempt, now, model.DefaultOperationLease)
+		if isOperationOwnershipConflict(err) {
+			return operationClaim{}, model.ErrInProgress
+		}
+		if err != nil {
 			return operationClaim{}, err
 		}
+		// The object row is the durable commit boundary for volume operations,
+		// and a non-creating sandbox row is likewise enough to replay the
+		// deterministic result. This closes the crash window after object commit
+		// but before the ledger update: never clean up an object that is already
+		// externally observable.
+		if result, committed, err := m.committedOperationResult(ctx, existing); err != nil {
+			return operationClaim{}, err
+		} else if committed {
+			if err := existing.Succeed(result, now); err != nil {
+				return operationClaim{}, err
+			}
+			if err := m.deps.Store.UpdateOperation(ctx, existing); err != nil {
+				return operationClaim{}, err
+			}
+			return operationClaim{replay: &result}, nil
+		}
 		if existing.RecoveryAction() == model.RecoveryCleanup {
+			if err := m.advanceOperation(ctx, operationClaim{op: &existing}, model.OperationCleaning); err != nil {
+				return operationClaim{}, err
+			}
 			if err := m.recoverOperation(ctx, existing); err != nil {
 				return operationClaim{}, err
 			}
@@ -75,13 +102,54 @@ func (m *Mediator) claimOperation(ctx context.Context, scope string, key model.I
 	}
 }
 
+func (m *Mediator) committedOperationResult(ctx context.Context, op model.Operation) (model.OperationResult, bool, error) {
+	switch op.Scope {
+	case "volume.create", "volume.snapshot", "volume.clone":
+		id := model.VolumeID(deterministicObjectID("vol_", op.ID))
+		if _, err := m.deps.Store.GetVolume(ctx, id); err == nil {
+			return model.OperationResult{Kind: model.ObjectVolume, ID: string(id)}, true, nil
+		} else if !errors.Is(err, store.ErrVolumeNotFound) {
+			return model.OperationResult{}, false, err
+		}
+	case "sandbox.create":
+		id := model.SandboxID(deterministicObjectID("sbx_", op.ID))
+		if rec, err := m.deps.Store.GetSandbox(ctx, id); err == nil {
+			if rec.State != model.Creating {
+				return model.OperationResult{Kind: model.ObjectSandbox, ID: string(id)}, true, nil
+			}
+		} else if !errors.Is(err, store.ErrNotFound) {
+			return model.OperationResult{}, false, err
+		}
+	}
+	return model.OperationResult{}, false, nil
+}
+
 func (m *Mediator) recoverOperation(ctx context.Context, op model.Operation) error {
 	switch op.Scope {
-	case "volume.create":
+	case "volume.create", "volume.snapshot", "volume.clone":
 		id := deterministicObjectID("vol_", op.ID)
-		for _, selected := range mustConfiguredBackends(m) {
+		if rec, err := m.deps.Store.GetVolume(ctx, model.VolumeID(id)); err == nil {
+			backend, berr := m.backendForRecord(rec)
+			if berr != nil {
+				return fmt.Errorf("operation %s: resolve volume cleanup provider: %w", op.ID, berr)
+			}
+			if err := m.deps.Store.DeleteVolume(ctx, rec.ID); err != nil {
+				return fmt.Errorf("operation %s: delete recovered volume record: %w", op.ID, err)
+			}
+			if err := backend.DestroyVolume(ctx, id); err != nil {
+				return fmt.Errorf("operation %s: destroy recovered volume bytes: %w", op.ID, err)
+			}
+			return nil
+		} else if !errors.Is(err, store.ErrVolumeNotFound) {
+			return fmt.Errorf("operation %s: inspect recovered volume: %w", op.ID, err)
+		}
+		backends, err := m.configuredVolumeBackends()
+		if err != nil {
+			return fmt.Errorf("operation %s: resolve volume providers: %w", op.ID, err)
+		}
+		for _, selected := range backends {
 			if err := selected.backend.DestroyVolume(ctx, id); err != nil {
-				m.deps.Logf("operation %s: volume cleanup %s via %s: %v", op.ID, id, selected.name, err)
+				return fmt.Errorf("operation %s: volume cleanup %s via %s: %w", op.ID, id, selected.name, err)
 			}
 		}
 	case "sandbox.create":
@@ -99,14 +167,6 @@ func (m *Mediator) recoverOperation(ctx context.Context, op model.Operation) err
 	return nil
 }
 
-func mustConfiguredBackends(m *Mediator) []namedVolumeBackend {
-	backends, err := m.configuredVolumeBackends()
-	if err != nil {
-		return nil
-	}
-	return backends
-}
-
 func (m *Mediator) advanceOperation(ctx context.Context, claim operationClaim, phase model.OperationPhase) error {
 	if claim.op == nil {
 		return nil
@@ -114,7 +174,11 @@ func (m *Mediator) advanceOperation(ctx context.Context, claim operationClaim, p
 	if err := claim.op.Advance(phase, time.Now()); err != nil {
 		return err
 	}
-	return m.deps.Store.UpdateOperation(ctx, *claim.op)
+	if err := m.deps.Store.UpdateOperation(ctx, *claim.op); isOperationOwnershipConflict(err) {
+		return model.ErrInProgress
+	} else {
+		return err
+	}
 }
 
 func (m *Mediator) succeedOperation(ctx context.Context, claim operationClaim, result model.OperationResult) error {
@@ -124,7 +188,11 @@ func (m *Mediator) succeedOperation(ctx context.Context, claim operationClaim, r
 	if err := claim.op.Succeed(result, time.Now()); err != nil {
 		return err
 	}
-	return m.deps.Store.UpdateOperation(ctx, *claim.op)
+	if err := m.deps.Store.UpdateOperation(ctx, *claim.op); isOperationOwnershipConflict(err) {
+		return model.ErrInProgress
+	} else {
+		return err
+	}
 }
 
 func (m *Mediator) failOperation(ctx context.Context, claim operationClaim, err error) {
@@ -136,7 +204,7 @@ func (m *Mediator) failOperation(ctx context.Context, claim operationClaim, err 
 		m.deps.Logf("operation %s: record failure class: %v", claim.op.ID, ferr)
 		return
 	}
-	if ferr := m.deps.Store.UpdateOperation(ctx, *claim.op); ferr != nil {
+	if ferr := m.deps.Store.UpdateOperation(ctx, *claim.op); ferr != nil && !isOperationOwnershipConflict(ferr) {
 		m.deps.Logf("operation %s: persist failure class: %v", claim.op.ID, ferr)
 	}
 }

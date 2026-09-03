@@ -150,15 +150,15 @@ func (m *Mediator) ReconcileStateCore(ctx context.Context) error {
 		if !op.TakeoverAllowed(now) {
 			continue
 		}
-		if err := op.Takeover(now, model.DefaultOperationLease); err != nil {
-			m.deps.Logf("operation %s: takeover skipped: %v", op.ID, err)
+		claimed, err := m.deps.Store.TakeoverOperation(ctx, op.ID, op.Attempt, now, model.DefaultOperationLease)
+		if errors.Is(err, store.ErrOperationOwnershipConflict) {
 			continue
 		}
-		if err := m.deps.Store.UpdateOperation(ctx, op); err != nil {
+		if err != nil {
 			m.deps.Logf("operation %s: takeover persist failed: %v", op.ID, err)
 			continue
 		}
-		m.deps.Logf("operation %s: restart takeover, recovery=%s", op.ID, op.RecoveryAction())
+		m.deps.Logf("operation %s: restart takeover, recovery=%s", claimed.ID, claimed.RecoveryAction())
 	}
 	return nil
 }

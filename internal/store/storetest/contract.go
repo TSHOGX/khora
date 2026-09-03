@@ -140,12 +140,17 @@ func RunContract(t *testing.T, mk Factory) {
 	t.Run("LogicalProcessPersistence", func(t *testing.T) { testProcessCore(t, mk) })
 	t.Run("OperationLedger", func(t *testing.T) { testOperationCore(t, mk) })
 	t.Run("OperationKeyConcurrentSingleWinner", func(t *testing.T) { testOperationKeyRace(t, mk) })
+	t.Run("OperationTakeoverConcurrentSingleWinner", func(t *testing.T) { testOperationTakeoverRace(t, mk) })
+	t.Run("OperationStaleUpdateRejected", func(t *testing.T) { testOperationStaleUpdate(t, mk) })
 	t.Run("TelemetrySampleLane", func(t *testing.T) { testTelemetryLane(t, mk) })
 }
 
 func testTelemetryLane(t *testing.T, mk Factory) {
 	ctx := context.Background()
 	s, _ := mk(t)
+	if err := s.AppendTelemetry(ctx, model.TelemetrySample{Sandbox: "missing", Snapshot: model.ResourceSnapshot{CPU: model.Measured(1), Memory: model.Measured(1), Disk: model.Measured(1), State: "running", At: time.Now()}}); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("telemetry for unknown sandbox = %v; want ErrNotFound", err)
+	}
 	seedTmpl(t, s, "bare")
 	if err := s.CreateSandbox(ctx, mkRec("telemetry"), nil); err != nil {
 		t.Fatal(err)
@@ -303,6 +308,70 @@ func testOperationKeyRace(t *testing.T, mk Factory) {
 	wg.Wait()
 	if wins.Load() != 1 {
 		t.Fatalf("operation key winners = %d, want 1", wins.Load())
+	}
+}
+
+func testOperationTakeoverRace(t *testing.T, mk Factory) {
+	ctx := context.Background()
+	s, _ := mk(t)
+	hash, _ := model.RequestHash(map[string]any{"request": "takeover"})
+	now := time.Now().UTC().Add(-time.Minute)
+	op, err := model.BeginOperation("op_takeover", "volume.create", "takeover-key", hash, now, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateOperation(ctx, op); err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	var wins atomic.Int32
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, err := s.TakeoverOperation(ctx, op.ID, 1, now.Add(2*time.Second), time.Minute)
+			if err == nil {
+				wins.Add(1)
+				return
+			}
+			if !errors.Is(err, store.ErrOperationOwnershipConflict) {
+				t.Errorf("takeover error = %v; want ownership conflict", err)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	if wins.Load() != 1 {
+		t.Fatalf("takeover winners = %d, want 1", wins.Load())
+	}
+	got, err := s.GetOperation(ctx, op.ID)
+	if err != nil || got.Attempt != 2 {
+		t.Fatalf("operation after takeover = %+v, %v", got, err)
+	}
+}
+
+func testOperationStaleUpdate(t *testing.T, mk Factory) {
+	ctx := context.Background()
+	s, _ := mk(t)
+	hash, _ := model.RequestHash(map[string]any{"request": "stale-update"})
+	op, err := model.BeginOperation("op_stale_update", "volume.create", "stale-key", hash, time.Now().UTC(), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateOperation(ctx, op); err != nil {
+		t.Fatal(err)
+	}
+	newOp, err := s.TakeoverOperation(ctx, op.ID, op.Attempt, op.LeaseUntil, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateOperation(ctx, op); !errors.Is(err, store.ErrOperationOwnershipConflict) {
+		t.Fatalf("stale update = %v; want ownership conflict", err)
+	}
+	if newOp.Attempt != op.Attempt+1 {
+		t.Fatalf("takeover attempt = %d", newOp.Attempt)
 	}
 }
 

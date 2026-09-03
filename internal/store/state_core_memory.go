@@ -221,6 +221,50 @@ func (m *Memory) ListOperations(_ context.Context, state model.OperationState) (
 	return out, nil
 }
 
+// TakeoverOperation transfers an expired operation lease under the same mutex
+// that protects the operation row. The attempt is the ownership token: once a
+// contender increments it, every other contender with the old token loses.
+func (m *Memory) TakeoverOperation(_ context.Context, id model.OperationID, expectedAttempt uint32, now time.Time, lease time.Duration) (model.Operation, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	op, ok := m.operations[id]
+	if !ok {
+		return model.Operation{}, ErrOperationNotFound
+	}
+	if op.Attempt != expectedAttempt || !op.TakeoverAllowed(now) {
+		return model.Operation{}, ErrOperationOwnershipConflict
+	}
+	if err := op.Takeover(now, lease); err != nil {
+		return model.Operation{}, err
+	}
+	m.operations[id] = op
+	return op, nil
+}
+
+// RenewOperation extends an operation lease only while the caller still owns
+// the current attempt. An expired owner cannot resurrect a lease after a
+// competing takeover.
+func (m *Memory) RenewOperation(_ context.Context, id model.OperationID, expectedAttempt uint32, now time.Time, lease time.Duration) error {
+	if lease <= 0 || now.IsZero() {
+		return model.ErrInvalidArgument
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	op, ok := m.operations[id]
+	if !ok {
+		return ErrOperationNotFound
+	}
+	if op.State != model.OperationInProgress || op.Attempt != expectedAttempt || op.LeaseUntil.IsZero() || !now.Before(op.LeaseUntil) {
+		return ErrOperationOwnershipConflict
+	}
+	if now.Before(op.UpdatedAt) {
+		return model.ErrInvalidArgument
+	}
+	op.LeaseUntil = now.Add(lease)
+	m.operations[id] = op
+	return nil
+}
+
 func (m *Memory) UpdateOperation(_ context.Context, op model.Operation) error {
 	if err := op.Validate(); err != nil {
 		return err
@@ -233,6 +277,15 @@ func (m *Memory) UpdateOperation(_ context.Context, op model.Operation) error {
 	}
 	if old.Scope != op.Scope || old.IdempotencyKey != op.IdempotencyKey || old.RequestHash != op.RequestHash {
 		return ErrOperationKeyConflict
+	}
+	if old.Attempt != op.Attempt || (old.State != model.OperationInProgress && op.State != old.State) {
+		return ErrOperationOwnershipConflict
+	}
+	if op.UpdatedAt.Before(old.UpdatedAt) {
+		return ErrOperationOwnershipConflict
+	}
+	if op.State == model.OperationInProgress && op.LeaseUntil.Before(old.LeaseUntil) {
+		return ErrOperationOwnershipConflict
 	}
 	m.operations[op.ID] = op
 	return nil
@@ -253,6 +306,9 @@ func (m *Memory) DeleteOperation(_ context.Context, id model.OperationID) error 
 func (m *Memory) AppendTelemetry(_ context.Context, sample model.TelemetrySample) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if _, ok := m.rec[sample.Sandbox]; !ok {
+		return ErrNotFound
+	}
 	rows := m.telemetry[sample.Sandbox]
 	if sample.Snapshot.At.IsZero() {
 		sample.Snapshot.At = time.Now()
@@ -263,14 +319,15 @@ func (m *Memory) AppendTelemetry(_ context.Context, sample model.TelemetrySample
 	if sample.Envelope.OccurredAt.IsZero() {
 		sample.Envelope.OccurredAt = sample.Snapshot.At
 	}
-	m.telemetrySeq[sample.Sandbox]++
-	sample.Envelope.Sequence = m.telemetrySeq[sample.Sandbox]
+	sequence := m.telemetrySeq[sample.Sandbox] + 1
+	sample.Envelope.Sequence = sequence
 	if sample.Envelope.ID == "" {
 		sample.Envelope.ID = fmt.Sprintf("telemetry_%s_%d", sample.Sandbox, sample.Envelope.Sequence)
 	}
 	if err := sample.Validate(); err != nil {
 		return err
 	}
+	m.telemetrySeq[sample.Sandbox] = sequence
 	m.telemetry[sample.Sandbox] = append(rows, sample)
 	return nil
 }

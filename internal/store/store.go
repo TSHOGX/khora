@@ -95,10 +95,14 @@ var (
 	// Durable state-core records.
 	ErrOperationNotFound    = errors.New("store: operation not found")
 	ErrOperationKeyConflict = errors.New("store: operation idempotency key conflict")
-	ErrPlacementNotFound    = errors.New("store: placement not found")
-	ErrProcessNotFound      = errors.New("store: process not found")
-	ErrProcessConflict      = errors.New("store: process already exists")
-	ErrTelemetryNotFound    = errors.New("store: telemetry sample not found")
+	// ErrOperationOwnershipConflict means a conditional lease takeover or
+	// owner-scoped update lost to another attempt. It is deliberately distinct
+	// from key reuse: the idempotency row still belongs to the same request.
+	ErrOperationOwnershipConflict = errors.New("store: operation ownership changed")
+	ErrPlacementNotFound          = errors.New("store: placement not found")
+	ErrProcessNotFound            = errors.New("store: process not found")
+	ErrProcessConflict            = errors.New("store: process already exists")
+	ErrTelemetryNotFound          = errors.New("store: telemetry sample not found")
 )
 
 // Event is one outbox row: a lifecycle transition to publish to the event
@@ -591,6 +595,13 @@ type Store interface {
 	GetOperation(ctx context.Context, id model.OperationID) (model.Operation, error)
 	GetOperationByKey(ctx context.Context, scope string, key model.IdempotencyKey) (model.Operation, error)
 	ListOperations(ctx context.Context, state model.OperationState) ([]model.Operation, error)
+	// TakeoverOperation atomically transfers an expired lease to a new attempt.
+	// expectedAttempt is the attempt observed by the caller; a competing retry
+	// that wins first makes this call fail without changing the row.
+	TakeoverOperation(ctx context.Context, id model.OperationID, expectedAttempt uint32, now time.Time, lease time.Duration) (model.Operation, error)
+	// RenewOperation extends an unexpired lease only for the expected attempt.
+	// A stale owner cannot renew or resurrect an operation after takeover.
+	RenewOperation(ctx context.Context, id model.OperationID, expectedAttempt uint32, now time.Time, lease time.Duration) error
 	UpdateOperation(ctx context.Context, op model.Operation) error
 	DeleteOperation(ctx context.Context, id model.OperationID) error
 

@@ -373,6 +373,61 @@ func (s *SQLite) ListOperations(ctx context.Context, state model.OperationState)
 	return out, rows.Err()
 }
 
+// TakeoverOperation atomically transfers an expired lease. The WHERE clause
+// carries the observed attempt token, so two retries cannot both acquire the
+// same operation after expiry.
+func (s *SQLite) TakeoverOperation(ctx context.Context, id model.OperationID, expectedAttempt uint32, now time.Time, lease time.Duration) (model.Operation, error) {
+	if expectedAttempt == 0 || now.IsZero() || lease <= 0 {
+		return model.Operation{}, model.ErrInvalidArgument
+	}
+	var out model.Operation
+	err := s.tx(ctx, func(t *sql.Tx) error {
+		res, err := t.Exec(`UPDATE operations
+			SET attempt=attempt+1, updated_at=?, lease_until=?
+			WHERE id=? AND state='in_progress' AND attempt=?
+			  AND lease_until>0 AND lease_until<=?`,
+			stateTime(now), stateTime(now.Add(lease)), string(id), expectedAttempt, stateTime(now))
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n != 1 {
+			return ErrOperationOwnershipConflict
+		}
+		out, err = scanOperationRow(t.QueryRow(`SELECT id, scope, idempotency_key, request_hash, state, phase, attempt, result_kind, result_id, error_class, started_at, updated_at, lease_until FROM operations WHERE id=?`, string(id)))
+		return err
+	})
+	if err != nil {
+		return model.Operation{}, err
+	}
+	return out, nil
+}
+
+// RenewOperation extends a live lease only for its current attempt. A caller
+// holding an old attempt token cannot resurrect an operation after takeover.
+func (s *SQLite) RenewOperation(ctx context.Context, id model.OperationID, expectedAttempt uint32, now time.Time, lease time.Duration) error {
+	if expectedAttempt == 0 || now.IsZero() || lease <= 0 {
+		return model.ErrInvalidArgument
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE operations SET lease_until=?
+		WHERE id=? AND state='in_progress' AND attempt=? AND lease_until>?`,
+		stateTime(now.Add(lease)), string(id), expectedAttempt, stateTime(now))
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return ErrOperationOwnershipConflict
+	}
+	return nil
+}
+
 func (s *SQLite) UpdateOperation(ctx context.Context, op model.Operation) error {
 	if err := op.Validate(); err != nil {
 		return err
@@ -386,8 +441,10 @@ func (s *SQLite) UpdateOperation(ctx context.Context, op model.Operation) error 
 		errorClass = string(op.ErrorClass)
 	}
 	return s.tx(ctx, func(t *sql.Tx) error {
-		var scope, key, hash string
-		if err := t.QueryRow(`SELECT scope, idempotency_key, request_hash FROM operations WHERE id=?`, string(op.ID)).Scan(&scope, &key, &hash); errors.Is(err, sql.ErrNoRows) {
+		var scope, key, hash, state string
+		var attempt int64
+		var updated, leaseUntil int64
+		if err := t.QueryRow(`SELECT scope, idempotency_key, request_hash, state, attempt, updated_at, lease_until FROM operations WHERE id=?`, string(op.ID)).Scan(&scope, &key, &hash, &state, &attempt, &updated, &leaseUntil); errors.Is(err, sql.ErrNoRows) {
 			return ErrOperationNotFound
 		} else if err != nil {
 			return err
@@ -395,7 +452,17 @@ func (s *SQLite) UpdateOperation(ctx context.Context, op model.Operation) error 
 		if scope != op.Scope || key != string(op.IdempotencyKey) || hash != op.RequestHash {
 			return ErrOperationKeyConflict
 		}
-		_, err := t.Exec(`UPDATE operations SET state=?, phase=?, attempt=?, result_kind=?, result_id=?, error_class=?, started_at=?, updated_at=?, lease_until=? WHERE id=?`, string(op.State), string(op.Phase), op.Attempt, kind, resultID, errorClass, stateTime(op.StartedAt), stateTime(op.UpdatedAt), stateTime(op.LeaseUntil), string(op.ID))
+		if uint32(attempt) != op.Attempt || state != string(model.OperationInProgress) && state != string(op.State) || stateTime(op.UpdatedAt) < updated || (op.State == model.OperationInProgress && stateTime(op.LeaseUntil) < leaseUntil) {
+			return ErrOperationOwnershipConflict
+		}
+		res, err := t.Exec(`UPDATE operations SET state=?, phase=?, attempt=?, result_kind=?, result_id=?, error_class=?, started_at=?, updated_at=?, lease_until=? WHERE id=? AND attempt=?`, string(op.State), string(op.Phase), op.Attempt, kind, resultID, errorClass, stateTime(op.StartedAt), stateTime(op.UpdatedAt), stateTime(op.LeaseUntil), string(op.ID), op.Attempt)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err == nil && n != 1 {
+			return ErrOperationOwnershipConflict
+		}
 		return err
 	})
 }
@@ -435,6 +502,12 @@ func (s *SQLite) AppendTelemetry(ctx context.Context, sample model.TelemetrySamp
 		sample.Envelope.OccurredAt = sample.Snapshot.At
 	}
 	return s.tx(ctx, func(t *sql.Tx) error {
+		var exists int
+		if err := t.QueryRow(`SELECT 1 FROM sandboxes WHERE id=?`, string(sample.Sandbox)).Scan(&exists); errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		} else if err != nil {
+			return err
+		}
 		var seq int64
 		if err := t.QueryRow(`SELECT COALESCE(MAX(sequence),0)+1 FROM telemetry WHERE sandbox=?`, string(sample.Sandbox)).Scan(&seq); err != nil {
 			return err
@@ -450,6 +523,9 @@ func (s *SQLite) AppendTelemetry(ctx context.Context, sample model.TelemetrySamp
 			return err
 		}
 		_, err := t.Exec(`INSERT INTO telemetry(sandbox,sequence,event_id,placement_epoch,process_id,state,cpu_available,cpu_value,memory_available,memory_value,disk_available,disk_value,at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, string(sample.Sandbox), seq, sample.Envelope.ID, int64(sample.PlacementEpoch), nullableProcess(sample.Process), sample.Snapshot.State, boolInt(sample.Snapshot.CPU.Available), sample.Snapshot.CPU.Value, boolInt(sample.Snapshot.Memory.Available), sample.Snapshot.Memory.Value, boolInt(sample.Snapshot.Disk.Available), sample.Snapshot.Disk.Value, stateTime(sample.Snapshot.At))
+		if isFKViolation(err) {
+			return ErrNotFound
+		}
 		return err
 	})
 }
