@@ -882,6 +882,7 @@ func validateSeg(name, v string) error {
 var promoteExcludedPaths = []string{
 	"tmp/.sandboxd-transport.pid",  // transport child pidfile (the guest startup topology)
 	"tmp/.sandboxd-processes.json", // stable process metadata, not workload content
+	"tmp/.sandboxd-watch.json",     // placement-scoped watch cursor journal
 	"tmp/.sandboxd-process.sock",   // PID-1 process supervisor endpoint, not workload content
 	"tmp/.sandboxd-activity",       // guest-global activity signal, not workload content
 	"tmp/.sandboxd-watch.json",     // placement-scoped watch cursor journal

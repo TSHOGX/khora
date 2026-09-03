@@ -39,7 +39,14 @@ func transportMode() {
 	mux.Handle(healthPath, healthHandler)
 	processPath, processHandler := transportv1connect.NewProcessServiceHandler(procSvc)
 	mux.Handle(processPath, processHandler)
-	fsPath, fsHandler := transportv1connect.NewFsServiceHandler(&fsServer{activity: newSharedActivityClock()})
+	// Filesystem watch state is placement-local, not transport-child-local. The
+	// journal survives this child being replaced and is reset when the caller
+	// presents a new placement epoch.
+	fsPath, fsHandler := transportv1connect.NewFsServiceHandler(&fsServer{
+		activity:  newSharedActivityClock(),
+		watchPath: watchStateFile,
+		watch:     newWatchHub(watchStateFile, watchBufferEvents),
+	})
 	mux.Handle(fsPath, fsHandler)
 	// The large-file bypass shares this mux, listener and port — a plain HTTP
 	// route beside the Connect handlers (files.go / fs transport).
