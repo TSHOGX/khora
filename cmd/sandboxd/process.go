@@ -1151,12 +1151,13 @@ type source struct {
 // INDEPENDENT context (not the Start stream's) so it outlives a Start
 // disconnect — that is what makes Connect reattach possible (the sandbox process model).
 //
-// finish-then-unregister is the exit-status delivery boundary, and it is deliberately sharp:
-// finish broadcasts `end` to whoever is attached now, then the pid stops resolving, so a later
-// Connect gets not-found rather than a retained exit code. Holding the entry would retain
-// state keyed by a guest pid the kernel can recycle, so the record would start describing a
-// different process once the number is reused. Callers that must not miss exit status stay
-// attached so the parent can reap the process group.
+// finish-then-unregister separates the placement-local PID locator from the
+// durable logical handle: finish broadcasts `end` to whoever is attached now,
+// then the PID map is removed while the opaque handle and bounded replay tail
+// remain addressable for the configured retention window. Keeping the handle
+// separate from the PID prevents a recycled number from describing a different
+// process, while still allowing a later Connect by handle to recover the exit
+// result.
 //
 // The exit status arrives over `exited` — the supervisor reaper's handoff — NOT
 // from cmd.Wait().  PID 1 owns Wait4(-1), so a per-child cmd.Wait() would race

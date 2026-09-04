@@ -148,8 +148,8 @@ func (c DeathCause) String() string {
 
 // LaunchSpec is the provider input — the contract's left-hand side:
 //
-//	(rootfs source, reachability requirement, resource ceilings) → (placement handle,
-//	 transport endpoint, stop/start)
+//	(rootfs source, reachability requirement, resource ceilings, process replay policy)
+//	→ (placement handle, transport endpoint, stop/start)
 type LaunchSpec struct {
 	Sandbox  string // opaque sandbox id, for naming/logging only
 	Rootfs   RootfsSource

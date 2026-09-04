@@ -179,10 +179,12 @@ type ActivityRecorder interface {
 }
 
 // ProcessClient is the transport data plane process primitive (process transport): run, reattach,
-// input, signal, resize, list. Addressed by guest-native pid throughout.
+// input, signal, resize, list. The legacy methods address a guest-native PID;
+// StableProcessClient adds opaque logical handles and placement epochs.
 type ProcessClient interface {
 	// Start launches a process and returns a channel of output events
-	// (server-stream). Addressed by the returned pid thereafter.
+	// (server-stream). The returned event includes a PID locator and, when the
+	// stable contract is available, an opaque logical handle for reconnects.
 	Start(ctx context.Context, spec StartSpec) (<-chan ProcessEvent, error)
 
 	// Connect reattaches to a running process: the returned stream replays the
