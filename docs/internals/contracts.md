@@ -100,4 +100,3 @@ Negative fixtures in
 [`internal/model/testdata`](../../internal/model/testdata) keep these rules
 mechanical: stale epochs, idempotency-key reuse, unavailable measurements, and
 an unexpected generated field are all refused by tests.
-
