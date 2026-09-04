@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -197,35 +199,15 @@ func (h *watchHub) load() error {
 	if (state.Sequence == 0) != (len(state.Records) == 0) {
 		return errors.New("watch journal sequence watermark does not match record presence")
 	}
-	lastSequence := uint64(0)
+	if len(state.Scopes) > watchMaxScopes {
+		return errors.New("watch journal contains too many scopes")
+	}
+	type scopeShape struct {
+		root      string
+		recursive bool
+	}
+	scopeShapes := make(map[string]scopeShape, len(state.Scopes))
 	seenScopes := make(map[string]struct{}, len(state.Scopes))
-	for _, rec := range state.Records {
-		if rec.Event == nil || rec.Scope == "" {
-			return errors.New("watch journal contains an incomplete record")
-		}
-		if rec.Event.Sequence == 0 || rec.Event.PlacementEpoch != state.Epoch {
-			return errors.New("watch journal record has an invalid epoch or sequence")
-		}
-		if rec.Event.Sequence <= lastSequence {
-			return errors.New("watch journal record sequence is not strictly increasing")
-		}
-		if rec.Event.Sequence > state.Sequence {
-			return errors.New("watch journal record exceeds its sequence watermark")
-		}
-		lastSequence = rec.Event.Sequence
-	}
-	// The ring may evict older records, but it always retains the newest record;
-	// therefore a non-empty journal must end at the global high-water mark. A
-	// missing newest record would make replay silently skip a change after
-	// restart, so reject that corruption rather than resetting history.
-	if len(state.Records) != 0 && lastSequence != state.Sequence {
-		return errors.New("watch journal sequence watermark does not match its records")
-	}
-	for scope, seq := range state.Dropped {
-		if scope == "" || seq == 0 || seq > state.Sequence {
-			return errors.New("watch journal has an invalid dropped watermark")
-		}
-	}
 	for _, saved := range state.Scopes {
 		if saved.Key == "" || saved.Epoch != state.Epoch || saved.Root == "" {
 			return errors.New("watch journal contains an invalid scope")
@@ -245,11 +227,64 @@ func (h *watchHub) load() error {
 			return errors.New("watch journal contains duplicate scopes")
 		}
 		seenScopes[saved.Key] = struct{}{}
+		// The writer always serializes an initialized baseline map (an empty
+		// baseline is `{}`, not a missing value). A nil map therefore indicates a
+		// truncated or hand-edited journal and cannot safely distinguish "empty"
+		// from "baseline unavailable" during replay.
+		if saved.Previous == nil {
+			return errors.New("watch journal scope snapshot is missing")
+		}
+		shape := scopeShape{root: saved.Root, recursive: saved.Recursive}
+		scopeShapes[saved.Key] = shape
 		for path, entry := range saved.Previous {
-			if path == "" || entry.Path == "" || path != entry.Path {
-				return errors.New("watch journal contains an invalid scope snapshot")
+			if err := validatePersistedWatchEntry(path, entry, shape.root, shape.recursive); err != nil {
+				return err
 			}
 		}
+	}
+	for scope, seq := range state.Dropped {
+		if scope == "" || seq == 0 || seq > state.Sequence {
+			return errors.New("watch journal has an invalid dropped watermark")
+		}
+		if _, ok := scopeShapes[scope]; !ok {
+			if _, _, ok := parseWatchScopeKey(scope); !ok {
+				return errors.New("watch journal dropped watermark names an invalid scope")
+			}
+		}
+	}
+	lastSequence := uint64(0)
+	for _, rec := range state.Records {
+		if rec.Event == nil || rec.Scope == "" {
+			return errors.New("watch journal contains an incomplete record")
+		}
+		if rec.Event.Sequence == 0 || rec.Event.PlacementEpoch != state.Epoch {
+			return errors.New("watch journal record has an invalid epoch or sequence")
+		}
+		if rec.Event.Sequence <= lastSequence {
+			return errors.New("watch journal record sequence is not strictly increasing")
+		}
+		if rec.Event.Sequence > state.Sequence {
+			return errors.New("watch journal record exceeds its sequence watermark")
+		}
+		shape, ok := scopeShapes[rec.Scope]
+		if !ok {
+			var parsed bool
+			shape.root, shape.recursive, parsed = parseWatchScopeKey(rec.Scope)
+			if !parsed {
+				return errors.New("watch journal record names an invalid scope")
+			}
+		}
+		if err := validateWatchJournalEvent(rec.Event, shape.root, shape.recursive); err != nil {
+			return err
+		}
+		lastSequence = rec.Event.Sequence
+	}
+	// The ring may evict older records, but it always retains the newest record;
+	// therefore a non-empty journal must end at the global high-water mark. A
+	// missing newest record would make replay silently skip a change after
+	// restart, so reject that corruption rather than resetting history.
+	if len(state.Records) != 0 && lastSequence != state.Sequence {
+		return errors.New("watch journal sequence watermark does not match its records")
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -277,6 +312,85 @@ func (h *watchHub) load() error {
 			previous[path] = watchEntryRestored(entry)
 		}
 		h.scopes[saved.Key] = &watchScope{key: saved.Key, root: saved.Root, recursive: saved.Recursive, previous: previous, epoch: h.epoch, lastUse: time.Now()}
+	}
+	return nil
+}
+
+// parseWatchScopeKey recovers the structural identity encoded by
+// watchScopeKey. It is intentionally independent of the persisted scope list:
+// old records may outlive an evicted baseline, but their scope key still needs
+// to be syntactically trustworthy before it can be used for replay.
+func parseWatchScopeKey(key string) (root string, recursive bool, ok bool) {
+	root, raw, found := strings.Cut(key, "\x00")
+	if !found || root == "" || (raw != "true" && raw != "false") {
+		return "", false, false
+	}
+	if !filepath.IsAbs(root) || filepath.Clean(root) != root {
+		return "", false, false
+	}
+	recursive, err := strconv.ParseBool(raw)
+	if err != nil {
+		return "", false, false
+	}
+	return root, recursive, true
+}
+
+func watchPathInScope(path, root string, recursive bool) bool {
+	if path == "" || !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return false
+	}
+	// A baseline may include the watched root itself (for example, a provider
+	// that snapshots directory metadata). It is always in scope; current poller
+	// output usually omits it, but persisted validation must not reject this
+	// legitimate representation.
+	if path == root {
+		return true
+	}
+	if root == "/" {
+		// Every absolute non-root path is below `/`.
+	} else if !strings.HasPrefix(path, root+"/") {
+		return false
+	}
+	if !recursive {
+		return filepath.Dir(path) == root
+	}
+	return true
+}
+
+func validWatchEntryType(t v1.EntryType) bool {
+	switch t {
+	case v1.EntryType_ENTRY_TYPE_FILE, v1.EntryType_ENTRY_TYPE_DIRECTORY, v1.EntryType_ENTRY_TYPE_SYMLINK:
+		return true
+	default:
+		return false
+	}
+}
+
+func validatePersistedWatchEntry(path string, entry persistedWatchEntry, root string, recursive bool) error {
+	if path == "" || entry.Path == "" || path != entry.Path || !watchPathInScope(path, root, recursive) {
+		return errors.New("watch journal contains an invalid scope snapshot path")
+	}
+	if !validWatchEntryType(entry.Type) || entry.Size < 0 {
+		return errors.New("watch journal contains an invalid scope snapshot entry")
+	}
+	return nil
+}
+
+func validateWatchJournalEvent(event *v1.WatchEvent, root string, recursive bool) error {
+	if event == nil || event.Sequence == 0 || event.Path == "" || !watchPathInScope(event.Path, root, recursive) || !validWatchEntryType(event.Type) || event.Size < 0 || event.Overflow || event.Reset_ || event.ResetReason != "" {
+		return errors.New("watch journal contains an invalid event")
+	}
+	switch event.Operation {
+	case "create", "modify", "chmod", "remove":
+		if event.OldPath != "" {
+			return errors.New("watch journal contains an invalid event old path")
+		}
+	case "rename":
+		if event.OldPath == "" || event.OldPath == event.Path || !watchPathInScope(event.OldPath, root, recursive) {
+			return errors.New("watch journal contains an invalid rename event")
+		}
+	default:
+		return errors.New("watch journal contains an unknown event operation")
 	}
 	return nil
 }

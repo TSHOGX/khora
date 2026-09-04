@@ -2,12 +2,14 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/proto"
 
 	v1 "github.com/TSHOGX/khora/pkg/transport/gen/khora/transport/v1"
 )
@@ -304,6 +306,132 @@ func TestWatchHubRejectsNonCanonicalPersistedScope(t *testing.T) {
 				t.Fatalf("tampered scope journal scope = %v; want unavailable", err)
 			}
 		})
+	}
+}
+
+func TestWatchHubRejectsMalformedPersistedScopeAndEvents(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "root")
+	validScope := persistedWatchScope{
+		Key:       watchScopeKey(root, true),
+		Root:      root,
+		Recursive: true,
+		Epoch:     1,
+		Previous: map[string]persistedWatchEntry{
+			filepath.Join(root, "file"): {Path: filepath.Join(root, "file"), Type: v1.EntryType_ENTRY_TYPE_FILE},
+		},
+	}
+	validEvent := &v1.WatchEvent{
+		Path: filepath.Join(root, "file"), Operation: "create", Type: v1.EntryType_ENTRY_TYPE_FILE,
+		Sequence: 1, PlacementEpoch: 1,
+	}
+	cases := []struct {
+		name  string
+		state persistedWatchState
+	}{
+		{
+			name: "nil previous snapshot",
+			state: persistedWatchState{Epoch: 1, Scopes: []persistedWatchScope{func() persistedWatchScope {
+				s := validScope
+				s.Previous = nil
+				return s
+			}()}},
+		},
+		{
+			name: "snapshot outside scope",
+			state: persistedWatchState{Epoch: 1, Scopes: []persistedWatchScope{func() persistedWatchScope {
+				s := validScope
+				s.Previous = map[string]persistedWatchEntry{
+					"/outside": {Path: "/outside", Type: v1.EntryType_ENTRY_TYPE_FILE},
+				}
+				return s
+			}()}},
+		},
+		{
+			name: "snapshot has unknown type",
+			state: persistedWatchState{Epoch: 1, Scopes: []persistedWatchScope{func() persistedWatchScope {
+				s := validScope
+				s.Previous = map[string]persistedWatchEntry{
+					filepath.Join(root, "file"): {Path: filepath.Join(root, "file"), Type: v1.EntryType_ENTRY_TYPE_UNSPECIFIED},
+				}
+				return s
+			}()}},
+		},
+		{
+			name: "event has unknown operation",
+			state: persistedWatchState{Epoch: 1, Sequence: 1, Records: []watchEventRecord{{Scope: validScope.Key, Event: func() *v1.WatchEvent {
+				e := proto.Clone(validEvent).(*v1.WatchEvent)
+				e.Operation = "unknown"
+				return e
+			}()}}, Scopes: []persistedWatchScope{validScope}},
+		},
+		{
+			name: "event path outside scope",
+			state: persistedWatchState{Epoch: 1, Sequence: 1, Records: []watchEventRecord{{Scope: validScope.Key, Event: func() *v1.WatchEvent {
+				e := proto.Clone(validEvent).(*v1.WatchEvent)
+				e.Path = "/outside"
+				return e
+			}()}}, Scopes: []persistedWatchScope{validScope}},
+		},
+		{
+			name: "rename missing old path",
+			state: persistedWatchState{Epoch: 1, Sequence: 1, Records: []watchEventRecord{{Scope: validScope.Key, Event: func() *v1.WatchEvent {
+				e := proto.Clone(validEvent).(*v1.WatchEvent)
+				e.Operation = "rename"
+				return e
+			}()}}, Scopes: []persistedWatchScope{validScope}},
+		},
+		{
+			name: "event carries reset marker",
+			state: persistedWatchState{Epoch: 1, Sequence: 1, Records: []watchEventRecord{{Scope: validScope.Key, Event: func() *v1.WatchEvent {
+				e := proto.Clone(validEvent).(*v1.WatchEvent)
+				e.Reset_ = true
+				return e
+			}()}}, Scopes: []persistedWatchScope{validScope}},
+		},
+		{
+			name:  "dropped watermark has invalid scope key",
+			state: persistedWatchState{Epoch: 1, Sequence: 1, Dropped: map[string]uint64{"not-a-scope": 1}, Scopes: []persistedWatchScope{validScope}},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			statePath := filepath.Join(t.TempDir(), "watch.json")
+			raw, err := json.Marshal(tc.state)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(statePath, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			h := newWatchHub(statePath, 8)
+			if err := h.ensureEpoch(1); connect.CodeOf(err) != connect.CodeUnavailable {
+				t.Fatalf("malformed journal ensure epoch = %v; want unavailable", err)
+			}
+		})
+	}
+}
+
+func TestWatchHubRejectsPersistedScopeOverflow(t *testing.T) {
+	base := t.TempDir()
+	scopes := make([]persistedWatchScope, 0, watchMaxScopes+1)
+	for i := 0; i < watchMaxScopes+1; i++ {
+		root := filepath.Join(base, "root", fmt.Sprintf("%d", i))
+		scopes = append(scopes, persistedWatchScope{
+			Key: watchScopeKey(root, true), Root: root, Recursive: true, Epoch: 1,
+			Previous: map[string]persistedWatchEntry{},
+		})
+	}
+	statePath := filepath.Join(t.TempDir(), "watch.json")
+	raw, err := json.Marshal(persistedWatchState{Epoch: 1, Scopes: scopes})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(statePath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h := newWatchHub(statePath, 8)
+	if err := h.ensureEpoch(1); connect.CodeOf(err) != connect.CodeUnavailable {
+		t.Fatalf("overflow journal ensure epoch = %v; want unavailable", err)
 	}
 }
 
