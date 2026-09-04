@@ -250,6 +250,17 @@ func testProcessCore(t *testing.T, mk Factory) {
 	if err != nil || got.State != model.ProcessReclaimed || got.PID != 0 {
 		t.Fatalf("reclaimed process = %+v, %v", got, err)
 	}
+	// Process retention is a durable state-core transition, not a Sandbox
+	// lifecycle transition. The lifecycle outbox intentionally remains the
+	// closed six-kind Sandbox stream, so reclaiming a Process must not append a
+	// synthetic event that would have no valid Sandbox state transition.
+	events, _, _, err := s.Events(ctx, 0, 10)
+	if err != nil {
+		t.Fatalf("events after process reclaim: %v", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("process reclaim appended %d lifecycle event(s): %+v; reclaim is state-only and must not widen the Sandbox outbox", len(events), events)
+	}
 }
 
 func testOperationCore(t *testing.T, mk Factory) {
