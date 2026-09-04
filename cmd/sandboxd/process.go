@@ -335,6 +335,10 @@ func (s *processServer) loadPersistent() {
 			s.loadErr = errors.New("process journal exited row contains an invalid end frame")
 			return
 		}
+		if row.Overflow && row.Sequence != ^uint64(0) {
+			s.loadErr = errors.New("process journal overflow marker does not identify an exhausted sequence")
+			return
+		}
 	}
 	if len(bytes.TrimSpace(b)) == 0 {
 		s.loadErr = errors.New("process journal is empty")

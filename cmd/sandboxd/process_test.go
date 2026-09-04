@@ -386,6 +386,26 @@ func TestProcessOverflowMarkerSurvivesReload(t *testing.T) {
 	}
 }
 
+func TestProcessRejectsNonExhaustedOverflowMarker(t *testing.T) {
+	old := processStatePath
+	t.Cleanup(func() { processStatePath = old })
+	processStatePath = filepath.Join(t.TempDir(), "processes.json")
+	code := 1
+	state := []persistedProcess{{Handle: "proc_bad_overflow", PID: 1, Epoch: 1, State: "exited", ExitCode: &code, Sequence: 1, ExitedAt: 1, Overflow: true, EndFrame: &persistedFrame{Kind: "e", Sequence: 1, ExitCode: code}}}
+	raw, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(processStatePath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := &processServer{}
+	s.loadPersistent()
+	if s.loadErr == nil {
+		t.Fatal("non-exhausted process overflow marker was accepted")
+	}
+}
+
 func TestPersistedRingAndExitSurviveReload(t *testing.T) {
 	old := processStatePath
 	t.Cleanup(func() { processStatePath = old })

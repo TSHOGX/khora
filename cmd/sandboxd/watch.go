@@ -200,6 +200,9 @@ func (h *watchHub) load() error {
 	if state.Epoch == 0 {
 		return errors.New("watch journal epoch is missing or zero")
 	}
+	if state.Overflow && state.Sequence != ^uint64(0) {
+		return errors.New("watch journal overflow marker does not identify an exhausted sequence")
+	}
 	// A placement that exhausted its sequence space may have no retained
 	// records (for example, the first change arrived at MaxUint64). The sticky
 	// overflow bit is then the durable high-water marker; it is the one legal

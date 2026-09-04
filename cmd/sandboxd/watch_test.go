@@ -524,6 +524,21 @@ func TestWatchHubOverflowMarkerSurvivesReloadWithoutRecords(t *testing.T) {
 	}
 }
 
+func TestWatchHubRejectsNonExhaustedOverflowMarker(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "watch.json")
+	raw, err := json.Marshal(persistedWatchState{Epoch: 1, Sequence: 1, Overflow: true, Records: []watchEventRecord{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(statePath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h := newWatchHub(statePath, 4)
+	if err := h.ensureEpoch(1); connect.CodeOf(err) != connect.CodeUnavailable {
+		t.Fatalf("non-exhausted overflow marker = %v; want unavailable", err)
+	}
+}
+
 func TestWatchHubSlowSubscriberGetsBoundedOverflowReset(t *testing.T) {
 	h := newWatchHub("", 512)
 	if err := h.ensureEpoch(1); err != nil {
