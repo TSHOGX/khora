@@ -230,6 +230,17 @@ func (h *watchHub) load() error {
 		if saved.Key == "" || saved.Epoch != state.Epoch || saved.Root == "" {
 			return errors.New("watch journal contains an invalid scope")
 		}
+		// Scope identity is derived from the canonical root and recursive bit at
+		// subscription time. A journal that carries a different spelling or key
+		// would restore a baseline that no future request can address, silently
+		// dropping change detection after restart; reject it instead of treating
+		// the scope as an empty/new baseline.
+		if !filepath.IsAbs(saved.Root) || filepath.Clean(saved.Root) != saved.Root {
+			return errors.New("watch journal contains a non-canonical scope root")
+		}
+		if saved.Key != watchScopeKey(saved.Root, saved.Recursive) {
+			return errors.New("watch journal scope key does not match its root")
+		}
 		if _, ok := seenScopes[saved.Key]; ok {
 			return errors.New("watch journal contains duplicate scopes")
 		}

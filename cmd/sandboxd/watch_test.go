@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -250,6 +251,59 @@ func TestWatchHubUnreadableJournalFailsClosed(t *testing.T) {
 	}
 	if err := h.journalFailure(); err == nil || connect.CodeOf(err) != connect.CodeUnavailable {
 		t.Fatalf("journal failure was not retained as unavailable: %v", err)
+	}
+}
+
+func TestWatchHubRejectsNonCanonicalPersistedScope(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "root")
+	cases := []struct {
+		name   string
+		mutate func(*persistedWatchScope)
+	}{
+		{
+			name: "relative root",
+			mutate: func(scope *persistedWatchScope) {
+				scope.Root = "relative/root"
+				scope.Key = watchScopeKey(scope.Root, scope.Recursive)
+			},
+		},
+		{
+			name: "unclean root",
+			mutate: func(scope *persistedWatchScope) {
+				scope.Root = root + "/."
+				scope.Key = watchScopeKey(scope.Root, scope.Recursive)
+			},
+		},
+		{
+			name: "key mismatch",
+			mutate: func(scope *persistedWatchScope) {
+				scope.Key = "tampered"
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			statePath := filepath.Join(t.TempDir(), "watch.json")
+			scope := persistedWatchScope{Root: root, Recursive: true, Epoch: 1, Previous: map[string]persistedWatchEntry{}}
+			scope.Key = watchScopeKey(scope.Root, scope.Recursive)
+			tc.mutate(&scope)
+			raw, err := json.Marshal(persistedWatchState{
+				Epoch: 1, Sequence: 0, Records: []watchEventRecord{}, Scopes: []persistedWatchScope{scope},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(statePath, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			h := newWatchHub(statePath, 8)
+			if err := h.ensureEpoch(1); connect.CodeOf(err) != connect.CodeUnavailable {
+				t.Fatalf("tampered scope journal ensure epoch = %v; want unavailable", err)
+			}
+			if _, _, err := h.scope(root, true); connect.CodeOf(err) != connect.CodeUnavailable {
+				t.Fatalf("tampered scope journal scope = %v; want unavailable", err)
+			}
+		})
 	}
 }
 
