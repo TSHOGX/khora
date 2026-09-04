@@ -115,6 +115,13 @@ func (m *Mediator) claimOperation(ctx context.Context, scope string, key model.I
 		if result, committed, err := m.committedOperationResult(ctx, existing); err != nil {
 			return operationClaim{}, err
 		} else if committed {
+			// Cleanup may have been recorded before the previous attempt
+			// discovered that the durable object row was already committed. The
+			// verified row is the commit boundary, so normalize that stale phase
+			// before applying the terminal replay result.
+			if existing.Phase == model.OperationCleaning {
+				existing.Phase = model.OperationMaterialized
+			}
 			if err := existing.Succeed(result, now); err != nil {
 				return operationClaim{}, err
 			}

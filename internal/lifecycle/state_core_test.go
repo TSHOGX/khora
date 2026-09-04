@@ -343,6 +343,50 @@ func TestStateCoreRestartReplaysCommittedVolumeInsteadOfCleaningIt(t *testing.T)
 	}
 }
 
+// A retry can observe an operation whose cleanup phase was persisted just
+// before a previous attempt's object row became visible. The row is the
+// durable commit boundary; retry must normalize the stale cleanup phase and
+// replay the object rather than rejecting Succeed from OperationCleaning.
+func TestIdempotentRetryReplaysObjectAfterPersistedCleanupPhase(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	vb := newFakeVolume()
+	m := New(Deps{Store: st, Volume: vb, Logf: func(string, ...any) {}})
+	key := model.IdempotencyKey("cleanup-replay-key")
+	hash, err := model.RequestHash(struct {
+		CapByte int64 `json:"cap_byte"`
+	}{0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	op, err := model.BeginOperation("op_cleanup_replay", "volume.create", key, hash, time.Now().Add(-time.Minute), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	op.Phase = model.OperationCleaning
+	if err := st.CreateOperation(ctx, op); err != nil {
+		t.Fatal(err)
+	}
+	id := deterministicObjectID("vol_", op.ID)
+	if err := st.CreateVolume(ctx, model.Volume{ID: model.VolumeID(id), Backend: vb.Name(), CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := m.CreateVolumeWithKey(ctx, 0, key)
+	if err != nil {
+		t.Fatalf("retry after committed row and persisted cleanup phase = %v; want replay", err)
+	}
+	if got != model.VolumeID(id) {
+		t.Fatalf("replayed volume = %s; want %s", got, id)
+	}
+	recorded, err := st.GetOperation(ctx, op.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recorded.State != model.OperationSucceeded || recorded.Result == nil || recorded.Result.ID != id {
+		t.Fatalf("operation after replay = %+v; want succeeded result %s", recorded, id)
+	}
+}
+
 func TestTemplateManifestDigestMismatchRefusesLaunch(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemory()
