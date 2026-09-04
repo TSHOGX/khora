@@ -351,7 +351,7 @@ func (e *Engine) handleListTemplates(w http.ResponseWriter, r *http.Request) {
 // reflection (openapi.go) and a map is invisible to that.
 type templateResp struct {
 	TemplateID string `json:"template_id"`
-	// Parent is the sandbox this Template was promoted from, "" for a builtin.
+	// Parent is the immediate parent Template in the immutable lineage, "" for a builtin.
 	Parent   string                 `json:"parent"`
 	Builtin  bool                   `json:"builtin"`
 	Manifest model.TemplateManifest `json:"manifest"`

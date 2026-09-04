@@ -136,7 +136,7 @@ type ActivityResult struct {
 // Template is one entry of GET /v1/templates.
 type Template struct {
 	TemplateID string `json:"template_id"`
-	// Parent is the sandbox this Template was promoted from, "" for a builtin.
+	// Parent is the immediate parent Template in the immutable lineage, "" for a builtin.
 	Parent   string           `json:"parent"`
 	Builtin  bool             `json:"builtin"`
 	Manifest TemplateManifest `json:"manifest"`
