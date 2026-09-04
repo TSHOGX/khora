@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -325,9 +326,23 @@ func schemaFor(t reflect.Type, defs map[string]any) map[string]any {
 	case reflect.Bool:
 		return map[string]any{"type": "boolean"}
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		return map[string]any{"type": "integer", "format": "int64", "minimum": int64(-1 << 63), "maximum": int64(1<<63 - 1)}
+		bits := t.Bits()
+		if bits == 0 {
+			bits = strconv.IntSize
+		}
+		minimum := -int64(1 << (bits - 1))
+		maximum := int64((uint64(1) << (bits - 1)) - 1)
+		return map[string]any{"type": "integer", "format": "int64", "minimum": minimum, "maximum": maximum}
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		return map[string]any{"type": "integer", "format": "uint64", "minimum": uint64(0), "maximum": ^uint64(0)}
+		bits := t.Bits()
+		if bits == 0 {
+			bits = strconv.IntSize
+		}
+		max := ^uint64(0)
+		if bits < 64 {
+			max = (uint64(1) << bits) - 1
+		}
+		return map[string]any{"type": "integer", "format": "uint64", "minimum": uint64(0), "maximum": max}
 	case reflect.Float32, reflect.Float64:
 		return map[string]any{"type": "number"}
 	case reflect.Struct:

@@ -263,7 +263,7 @@
           },
           "schema_version": {
             "format": "uint64",
-            "maximum": 18446744073709551615,
+            "maximum": 4294967295,
             "minimum": 0,
             "type": "integer"
           }
@@ -604,7 +604,7 @@
         "properties": {
           "guest_port": {
             "format": "uint64",
-            "maximum": 18446744073709551615,
+            "maximum": 65535,
             "minimum": 0,
             "type": "integer"
           },
@@ -621,7 +621,7 @@
         "properties": {
           "guest_port": {
             "format": "uint64",
-            "maximum": 18446744073709551615,
+            "maximum": 65535,
             "minimum": 0,
             "type": "integer"
           },
@@ -641,7 +641,7 @@
           },
           "guest_port": {
             "format": "uint64",
-            "maximum": 18446744073709551615,
+            "maximum": 65535,
             "minimum": 0,
             "type": "integer"
           },
@@ -658,7 +658,7 @@
         "properties": {
           "guest_port": {
             "format": "uint64",
-            "maximum": 18446744073709551615,
+            "maximum": 65535,
             "minimum": 0,
             "type": "integer"
           },
@@ -730,7 +730,7 @@
           },
           "port": {
             "format": "uint64",
-            "maximum": 18446744073709551615,
+            "maximum": 65535,
             "minimum": 0,
             "type": "integer"
           },
@@ -828,7 +828,7 @@
           },
           "mode": {
             "format": "uint64",
-            "maximum": 18446744073709551615,
+            "maximum": 4294967295,
             "minimum": 0,
             "type": "integer"
           },

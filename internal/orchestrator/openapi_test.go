@@ -165,7 +165,10 @@ func TestOpenAPIIntegerSchemasPreserveSignedness(t *testing.T) {
 		max  any
 	}{
 		{name: "signed", typ: reflect.TypeOf(int64(0)), want: "int64", min: int64(-1 << 63), max: int64(1<<63 - 1)},
+		{name: "signed8", typ: reflect.TypeOf(int8(0)), want: "int64", min: int64(-1 << 7), max: int64(1<<7 - 1)},
 		{name: "unsigned", typ: reflect.TypeOf(uint64(0)), want: "uint64", min: uint64(0), max: ^uint64(0)},
+		{name: "unsigned32", typ: reflect.TypeOf(uint32(0)), want: "uint64", min: uint64(0), max: uint64(1<<32 - 1)},
+		{name: "unsigned8", typ: reflect.TypeOf(uint8(0)), want: "uint64", min: uint64(0), max: uint64(1<<8 - 1)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := schemaFor(tc.typ, defs)
