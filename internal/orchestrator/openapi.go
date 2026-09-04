@@ -175,7 +175,7 @@ var apiOps = []apiOp{
 		Method: "GET", Path: "/v1/events", OpID: "listEvents",
 		Summary: "Page the transactional outbox in `seq` order. Delivery is at least once; deduplicate by event `id`.",
 		Query: []apiParam{
-			{Name: "after", Type: "integer", Desc: "Cursor: return events with seq > this. 0 or omitted starts at the earliest retained event."},
+			{Name: "after", Type: "integer", Format: "int64", Minimum: int64(0), Maximum: int64(1<<63 - 1), Desc: "Cursor: return events with seq > this. 0 or omitted starts at the earliest retained event."},
 			{Name: "limit", Type: "integer", Desc: "Maximum events in this page."},
 			{Name: "wait", Type: "string", Desc: "Go duration (e.g. \"20s\"). If the page would be EMPTY, hold the request open until an event arrives or this elapses. Changes no cursor semantics; a non-empty first read never waits. Clamped to a server-side ceiling."},
 		},

@@ -220,6 +220,47 @@ func TestOpenAPITelemetryAfterParameterPreservesUnsignedRange(t *testing.T) {
 	t.Fatal("telemetry after parameter missing")
 }
 
+func TestOpenAPIEventsAfterParameterPreservesSignedRange(t *testing.T) {
+	raw, err := OpenAPIDoc()
+	if err != nil {
+		t.Fatalf("OpenAPIDoc: %v", err)
+	}
+	var doc struct {
+		Paths map[string]map[string]json.RawMessage `json:"paths"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("parse OpenAPI: %v", err)
+	}
+	var operation struct {
+		Parameters []struct {
+			Name   string `json:"name"`
+			Schema struct {
+				Type    string      `json:"type"`
+				Format  string      `json:"format"`
+				Minimum json.Number `json:"minimum"`
+				Maximum json.Number `json:"maximum"`
+			} `json:"schema"`
+		} `json:"parameters"`
+	}
+	rawOperation, ok := doc.Paths["/v1/events"]["get"]
+	if !ok {
+		t.Fatal("events GET operation missing")
+	}
+	if err := json.Unmarshal(rawOperation, &operation); err != nil {
+		t.Fatalf("parse events operation: %v", err)
+	}
+	for _, parameter := range operation.Parameters {
+		if parameter.Name != "after" {
+			continue
+		}
+		if parameter.Schema.Type != "integer" || parameter.Schema.Format != "int64" || parameter.Schema.Minimum.String() != "0" || parameter.Schema.Maximum.String() != "9223372036854775807" {
+			t.Fatalf("events after schema = type=%q format=%q minimum=%q maximum=%q; want integer/int64/0/9223372036854775807", parameter.Schema.Type, parameter.Schema.Format, parameter.Schema.Minimum, parameter.Schema.Maximum)
+		}
+		return
+	}
+	t.Fatal("events after parameter missing")
+}
+
 func TestOpenAPIOperationsDocumentInternalFailures(t *testing.T) {
 	raw, err := OpenAPIDoc()
 	if err != nil {

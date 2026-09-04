@@ -2,8 +2,10 @@
 
 ## HTTP error classes
 
-Error responses use a plain one-line message. Interpret the status code rather than
-parsing message text:
+Most error responses use a plain one-line message; interpret the status code rather
+than parsing message text. The cursor-expiry responses from the events and telemetry
+list routes are the exception: they return JSON containing `earliest` and `latest`
+recovery bounds.
 
 | Status | Meaning |
 | --- | --- |
@@ -12,7 +14,7 @@ parsing message text:
 | `404` | the addressed engine object does not exist |
 | `405` | the route exists but does not support that method |
 | `409` | current durable or Placement state conflicts with the operation |
-| `410` | an event cursor is older than the retained window |
+| `410` | a lifecycle or telemetry cursor is older than the retained window; the JSON response carries `earliest` and `latest` bounds |
 | `413` | a streamed Sandbox upload exceeds the 8 GiB request limit |
 | `500` | an internal store or provider operation failed |
 | `503` | the instance is draining or a required live endpoint is unavailable |
