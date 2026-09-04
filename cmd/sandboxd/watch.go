@@ -948,6 +948,9 @@ func (h *watchHub) ObserveEpoch(epoch uint64) error {
 
 // Watch is the Connect-facing placement-scoped stream.
 func (s *fsServer) Watch(ctx context.Context, req *connect.Request[v1.WatchRequest], stream *connect.ServerStream[v1.WatchEvent]) error {
+	if req == nil || req.Msg == nil {
+		return connect.NewError(connect.CodeInvalidArgument, errors.New("missing watch request"))
+	}
 	m := req.Msg
 	root := m.Path
 	if root == "" {

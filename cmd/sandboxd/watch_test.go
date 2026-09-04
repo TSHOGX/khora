@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -98,6 +99,14 @@ func TestWatchHubCursorReplayAndOrdering(t *testing.T) {
 	case extra := <-replaySub.ch:
 		t.Fatalf("replay returned duplicate/old event: %+v", extra.Event)
 	case <-time.After(20 * time.Millisecond):
+	}
+}
+
+func TestWatchRejectsNilRequest(t *testing.T) {
+	s := &fsServer{}
+	err := s.Watch(context.Background(), nil, nil)
+	if connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("nil watch request = %v; want invalid_argument", err)
 	}
 }
 
