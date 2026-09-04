@@ -53,6 +53,11 @@ type apiParam struct {
 	Type string // "string" | "integer" | "boolean"
 	In   string // "query" (default) | "header"
 	Desc string
+	// Optional schema constraints keep parameter metadata aligned with the
+	// reflected wire type when a parameter has a narrower or unsigned range.
+	Format  string
+	Minimum any
+	Maximum any
 }
 
 // apiOp is one control-plane operation. Req/Resp hold a zero value of the wire type, not a
@@ -130,7 +135,10 @@ var apiOps = []apiOp{
 	{
 		Method: "GET", Path: "/v1/sandboxes/{id}/telemetry", OpID: "listTelemetry",
 		Summary: "Read the independent per-Sandbox telemetry sample lane.",
-		Query:   []apiParam{{Name: "after", Type: "integer", Desc: "Telemetry sequence cursor."}, {Name: "limit", Type: "integer", Desc: "Maximum samples."}},
+		Query: []apiParam{
+			{Name: "after", Type: "integer", Format: "uint64", Minimum: uint64(0), Maximum: ^uint64(0), Desc: "Telemetry sequence cursor."},
+			{Name: "limit", Type: "integer", Desc: "Maximum samples."},
+		},
 		Resp: struct {
 			Samples  []model.TelemetrySample `json:"samples"`
 			Earliest uint64                  `json:"earliest"`
@@ -457,10 +465,20 @@ func OpenAPIDoc() ([]byte, error) {
 				if where == "" {
 					where = "query"
 				}
+				schema := map[string]any{"type": q.Type}
+				if q.Format != "" {
+					schema["format"] = q.Format
+				}
+				if q.Minimum != nil {
+					schema["minimum"] = q.Minimum
+				}
+				if q.Maximum != nil {
+					schema["maximum"] = q.Maximum
+				}
 				qs = append(qs, map[string]any{
 					"name": q.Name, "in": where, "required": false,
 					"description": q.Desc,
-					"schema":      map[string]any{"type": q.Type},
+					"schema":      schema,
 				})
 			}
 			operation["parameters"] = qs
