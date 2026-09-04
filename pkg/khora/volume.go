@@ -44,7 +44,7 @@ func (c *Client) Volume(ctx context.Context, volumeID string) (Volume, error) {
 
 // ResizeVolume changes a volume's cap.
 //
-// A cap that is not STRICTLY GREATER than current usage is refused (422) rather than
+// A cap that is not STRICTLY GREATER than current usage is refused (400) rather than
 // applied — shrinking below what is stored would make the quota unenforceable rather
 // than free any space. Read Volume().UsedByte first if you need to know the floor.
 func (c *Client) ResizeVolume(ctx context.Context, volumeID string, size int64) (Volume, error) {

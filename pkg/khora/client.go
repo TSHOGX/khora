@@ -147,7 +147,7 @@ func (c *Client) Endpoint() string { return c.endpoint }
 // Error is a non-2xx answer from the engine, carrying the API error contract's status code and body.
 //
 // The code is the useful half and the API error contract gives each one exactly one meaning surface-wide
-// (404 absent, 409 wrong state, 422 unsatisfiable request, 503 a subsystem or the
+// (404 absent, 409 wrong state, 400 invalid or unenforceable request, 503 a subsystem or the
 // guest is unreachable, 507 admission refused). The MESSAGE is deliberately not
 // parsed: the API error contract sanitizes it (host paths and placement are stripped), so it is text for
 // a human, never a value to branch on.

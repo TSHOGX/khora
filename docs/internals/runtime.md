@@ -11,9 +11,9 @@ The interface and local handle are in
 [internal/runtime/provider.go](../../internal/runtime/provider.go). Structural seam
 tests inject plausible host-shaped fields and signatures to prove the guard can fail.
 
-The unresolved remote-provider input shape is tracked in
-[Issue #7](https://github.com/TSHOGX/khora/issues/7); no speculative transport or
-compatibility layer exists in the current seam.
+The shipped assembly is single-node and uses the local runsc provider. The seam
+remains internal; no remote transport or compatibility layer is part of this
+runtime contract.
 
 ## Local runsc Placement
 

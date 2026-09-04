@@ -17,6 +17,12 @@ read-modify-write update.
 | `POST /v1/sandboxes/{id}/resume` | cold-start a new Placement |
 | `POST /v1/sandboxes/{id}/activity` | stamp guest-observed activity |
 | `GET /v1/sandboxes/{id}/telemetry` | page retained Sandbox usage samples by cursor |
+| `GET /v1/sandboxes/{id}/snapshot` | read the Sandbox resource snapshot with availability flags |
+| `GET /v1/sandboxes/{id}/placement` | read the current Placement epoch and resource snapshot |
+| `GET /v1/sandboxes/{id}/processes` | list durable logical Process records for the Sandbox |
+
+`GET /v1/processes/{id}` reads one durable logical Process snapshot, including
+retained exit status and explicit resource-measurement availability.
 
 Create requires `template_id`. Omitted network normalizes to default deny. Patch
 distinguishes an omitted member from zero: omitted leaves the Binding unchanged;
