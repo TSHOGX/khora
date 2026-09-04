@@ -544,6 +544,19 @@ func responsesFor(op apiOp, defs map[string]any) map[string]any {
 		if c == 405 {
 			desc = "The route exists, but this method does not apply to it."
 		}
+		if c == 410 && op.Resp != nil {
+			// Cursor expiry is the one error response that carries structured recovery
+			// state. The events and telemetry handlers return the same bounds-bearing
+			// object as their successful page, so derive this schema from Resp rather
+			// than describing a second, drift-prone error type.
+			out[fmt.Sprint(c)] = map[string]any{
+				"description": desc,
+				"content": map[string]any{
+					"application/json": map[string]any{"schema": schemaFor(reflect.TypeOf(op.Resp), defs)},
+				},
+			}
+			continue
+		}
 		out[fmt.Sprint(c)] = map[string]any{
 			"description": desc,
 			"content": map[string]any{

@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -217,6 +218,61 @@ func TestOpenAPICursorExpiryResponses(t *testing.T) {
 		if _, ok := operation.Responses["410"]; !ok {
 			t.Errorf("%s %s does not document 410 cursor expiry", tc.method, tc.path)
 		}
+	}
+}
+
+func TestOpenAPICursorExpiryResponsesCarryBoundsJSON(t *testing.T) {
+	raw, err := OpenAPIDoc()
+	if err != nil {
+		t.Fatalf("OpenAPIDoc: %v", err)
+	}
+	var doc struct {
+		Paths map[string]map[string]json.RawMessage `json:"paths"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("parse OpenAPI: %v", err)
+	}
+	cases := []struct {
+		path   string
+		method string
+	}{
+		{path: "/v1/events", method: "get"},
+		{path: "/v1/sandboxes/{id}/telemetry", method: "get"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
+			var operation struct {
+				Responses map[string]json.RawMessage `json:"responses"`
+			}
+			if err := json.Unmarshal(doc.Paths[tc.path][tc.method], &operation); err != nil {
+				t.Fatalf("parse operation: %v", err)
+			}
+			contents := func(status string) map[string]any {
+				var response struct {
+					Content map[string]any `json:"content"`
+				}
+				if err := json.Unmarshal(operation.Responses[status], &response); err != nil {
+					t.Fatalf("parse %s response: %v", status, err)
+				}
+				return response.Content
+			}
+			okContent := contents("200")
+			goneContent := contents("410")
+			if _, ok := goneContent["text/plain"]; ok {
+				t.Fatalf("410 advertises text/plain even though the handler returns JSON bounds")
+			}
+			goneJSON, ok := goneContent["application/json"]
+			if !ok {
+				t.Fatalf("410 does not advertise application/json bounds")
+			}
+			okJSON, ok := okContent["application/json"]
+			if !ok {
+				t.Fatalf("200 does not advertise application/json")
+			}
+			if !reflect.DeepEqual(goneJSON, okJSON) {
+				t.Fatalf("410 schema differs from the bounds-bearing page schema:\n410: %#v\n200: %#v", goneJSON, okJSON)
+			}
+		})
 	}
 }
 

@@ -877,9 +877,9 @@
           },
           "410": {
             "content": {
-              "text/plain": {
+              "application/json": {
                 "schema": {
-                  "type": "string"
+                  "$ref": "#/components/schemas/eventsResp"
                 }
               }
             },
@@ -2146,9 +2146,25 @@
           },
           "410": {
             "content": {
-              "text/plain": {
+              "application/json": {
                 "schema": {
-                  "type": "string"
+                  "properties": {
+                    "earliest": {
+                      "format": "int64",
+                      "type": "integer"
+                    },
+                    "latest": {
+                      "format": "int64",
+                      "type": "integer"
+                    },
+                    "samples": {
+                      "items": {
+                        "$ref": "#/components/schemas/TelemetrySample"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "type": "object"
                 }
               }
             },
