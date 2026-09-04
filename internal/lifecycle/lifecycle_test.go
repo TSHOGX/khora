@@ -80,6 +80,27 @@ func TestSandboxCreateRetryReplaysBeforeDeploymentValidation(t *testing.T) {
 	}
 }
 
+func TestSandboxCreateValidationFailureTerminalizesIdempotentOperation(t *testing.T) {
+	ctx := context.Background()
+	rp, rt := &fakeRootfs{}, &fakeRuntime{}
+	m, st := newTestMediator(t, rp, rt, true) // no second-hop uid: via[] is refused
+	decl := viaDecl(t)
+	key := model.IdempotencyKey("sandbox-invalid-deployment")
+	if _, err := m.Create(ctx, CreateSpec{Template: "bare", IdempotencyKey: key, Network: &decl}); err == nil {
+		t.Fatal("invalid deployment declaration unexpectedly succeeded")
+	}
+	op, err := st.GetOperationByKey(ctx, "sandbox.create", key)
+	if err != nil {
+		t.Fatalf("read validation-failed operation: %v", err)
+	}
+	if op.State != model.OperationFailed || op.ErrorClass != model.ErrorInvalidArgument {
+		t.Fatalf("validation-failed operation = state %q class %q; want failed/invalid_argument", op.State, op.ErrorClass)
+	}
+	if _, err := m.Create(ctx, CreateSpec{Template: "bare", IdempotencyKey: key, Network: &decl}); model.ErrorClassOf(err) != model.ErrorInvalidArgument {
+		t.Fatalf("same-key retry after validation failure = %v; want stable invalid_argument", err)
+	}
+}
+
 func TestSandboxCreateRetryIgnoresChangedDefaultsWhenTTLWasOmitted(t *testing.T) {
 	ctx := context.Background()
 	rp, rt := &fakeRootfs{}, &fakeRuntime{}

@@ -566,6 +566,19 @@ func (m *Mediator) Create(ctx context.Context, spec CreateSpec) (resultID model.
 	} else if replay != "" {
 		return model.SandboxID(replay), nil
 	}
+	storeCtx := ctx
+	opctx, ownedClaim, stopLease := m.startOperationLease(ctx, claim)
+	claim = ownedClaim
+	ctx = opctx
+	defer stopLease()
+	// Install failure recording before post-claim validation. A
+	// deployment-dependent refusal is terminal for this exact keyed request;
+	// leaving the ledger in_progress would make retries wait forever.
+	defer func() { m.failOperation(storeCtx, claim, resultErr) }()
+	claim, err = m.prepareOperation(ctx, claim)
+	if err != nil {
+		return "", err
+	}
 	// Validate at the write point, after the idempotency claim/replay check. The
 	// declaration remains fully checked before any admission or provider side
 	// effect, while a retry can replay a committed Sandbox even if deployment
@@ -575,16 +588,6 @@ func (m *Mediator) Create(ctx context.Context, spec CreateSpec) (resultID model.
 	if err := m.ValidateDeclaration(rec.Network, spec.Network != nil); err != nil {
 		return "", err
 	}
-	storeCtx := ctx
-	opctx, ownedClaim, stopLease := m.startOperationLease(ctx, claim)
-	claim = ownedClaim
-	ctx = opctx
-	defer stopLease()
-	claim, err = m.prepareOperation(ctx, claim)
-	if err != nil {
-		return "", err
-	}
-	defer func() { m.failOperation(storeCtx, claim, resultErr) }()
 
 	sid := model.SandboxID("sbx_" + randToken())
 	oid := model.OverlayID("ov_" + randToken())
