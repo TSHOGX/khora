@@ -113,7 +113,7 @@ func (m *Memory) appendEvent(ev *Event) {
 }
 
 func (m *Memory) ensureEventSequence(ev *Event) error {
-	if ev != nil && m.nextSeq == 1<<63-1 {
+	if ev != nil && m.nextSeq >= maxEventSequence {
 		return ErrEventSequenceExhausted
 	}
 	return nil
