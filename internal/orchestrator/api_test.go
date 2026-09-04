@@ -139,6 +139,60 @@ func TestAPISnapshotAndTelemetryAvailability(t *testing.T) {
 	resp.Body.Close()
 }
 
+func TestAPITelemetryCursorBoundaries(t *testing.T) {
+	srv, mem := apiFixture(t)
+	seedTemplate(t, mem, "bare", "", true)
+	ctx := context.Background()
+	if err := mem.CreateSandbox(ctx, model.Sandbox{
+		ID: "sbx_telemetry_cursor", Template: "bare", Overlay: "ov_telemetry_cursor",
+		State: model.Paused, CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	med := lifecycle.New(lifecycle.Deps{Store: mem})
+	for i := 0; i < 3; i++ {
+		if err := med.SampleTelemetry(ctx, "sbx_telemetry_cursor"); err != nil {
+			t.Fatalf("sample %d: %v", i, err)
+		}
+	}
+	// Retain only the newest sample so the lower bound is 3 and both the
+	// expired cursor (1) and exclusive boundary (2) are observable.
+	if n, err := mem.TrimTelemetry(ctx, time.Now().Add(time.Hour), 100); err != nil || n != 2 {
+		t.Fatalf("trim = %d, %v; want two old samples removed", n, err)
+	}
+
+	tests := []struct {
+		name       string
+		after      string
+		wantStatus int
+		wantCount  int
+	}{
+		{name: "expired cursor", after: "1", wantStatus: http.StatusGone, wantCount: 0},
+		{name: "exclusive boundary", after: "2", wantStatus: http.StatusOK, wantCount: 1},
+		{name: "maximum uint64 tail", after: "18446744073709551615", wantStatus: http.StatusOK, wantCount: 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := do(t, http.MethodGet, srv.URL+"/v1/sandboxes/sbx_telemetry_cursor/telemetry?after="+tc.after)
+			defer resp.Body.Close()
+			if resp.StatusCode != tc.wantStatus {
+				t.Fatalf("after=%s = %d; want %d", tc.after, resp.StatusCode, tc.wantStatus)
+			}
+			var page struct {
+				Samples  []model.TelemetrySample `json:"samples"`
+				Earliest uint64                  `json:"earliest"`
+				Latest   uint64                  `json:"latest"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&page); err != nil {
+				t.Fatalf("decode after=%s: %v", tc.after, err)
+			}
+			if len(page.Samples) != tc.wantCount || page.Earliest != 3 || page.Latest != 3 {
+				t.Fatalf("after=%s page=%d bounds=%d/%d; want %d and 3/3", tc.after, len(page.Samples), page.Earliest, page.Latest, tc.wantCount)
+			}
+		})
+	}
+}
+
 func TestAPIMissingPlacementProcessAndTelemetryReturn404(t *testing.T) {
 	srv, mem := apiFixture(t)
 	seedTemplate(t, mem, "bare", "", true)

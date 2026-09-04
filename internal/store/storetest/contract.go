@@ -173,6 +173,10 @@ func testTelemetryLane(t *testing.T, mk Factory) {
 	if err != nil || len(page) != 1 || page[0].Envelope.Sequence != 2 {
 		t.Fatalf("cursor page = %+v err %v", page, err)
 	}
+	page, earliest, latest, err = s.Telemetry(ctx, "telemetry", ^uint64(0), 10)
+	if err != nil || len(page) != 0 || earliest != 1 || latest != 2 {
+		t.Fatalf("maximum cursor page = %+v bounds %d/%d err %v; want an empty tail page with intact bounds", page, earliest, latest, err)
+	}
 	n, err := s.TrimTelemetry(ctx, time.Now().Add(time.Hour), 10)
 	if err != nil || n != 1 {
 		t.Fatalf("trim = %d, %v; newest sample must remain", n, err)

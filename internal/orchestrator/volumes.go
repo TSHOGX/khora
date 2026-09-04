@@ -248,6 +248,26 @@ func parseIntQuery(r *http.Request, key string, def int64) (int64, error) {
 	return n, nil
 }
 
+// parseUintQuery is used for cursor fields whose wire contract is uint64. A
+// signed parser would reject the upper half of the cursor space (and a later
+// cast would turn it negative), so retain the unsigned value through the
+// handler and store seam.
+func parseUintQuery(r *http.Request, key string, def uint64) (uint64, error) {
+	raw := r.URL.Query().Get(key)
+	if raw == "" {
+		return def, nil
+	}
+	n, err := strconv.ParseUint(raw, 10, 64)
+	if err != nil {
+		message := fmt.Sprintf("%s must be an integer", key)
+		if strings.HasPrefix(raw, "-") {
+			message = fmt.Sprintf("%s must be non-negative", key)
+		}
+		return 0, model.NewContractError(model.ErrorInvalidArgument, message)
+	}
+	return n, nil
+}
+
 func (e *Engine) handleReadVolume(w http.ResponseWriter, r *http.Request, id model.VolumeID) {
 	name, err := volumePathQuery(r)
 	if err != nil {

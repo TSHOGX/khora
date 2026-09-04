@@ -503,11 +503,8 @@ func (e *Engine) handleProcessSub(w http.ResponseWriter, r *http.Request) {
 }
 
 func (e *Engine) handleTelemetry(w http.ResponseWriter, r *http.Request, id model.SandboxID) {
-	after, err := parseIntQuery(r, "after", 0)
-	if err != nil || after < 0 {
-		if err == nil {
-			err = model.NewContractError(model.ErrorInvalidArgument, "after must be non-negative")
-		}
+	after, err := parseUintQuery(r, "after", 0)
+	if err != nil {
 		statusFor(w, err)
 		return
 	}
@@ -522,7 +519,7 @@ func (e *Engine) handleTelemetry(w http.ResponseWriter, r *http.Request, id mode
 	if limit > 1000 {
 		limit = 1000
 	}
-	samples, earliest, latest, err := e.Mediator.Telemetry(r.Context(), id, uint64(after), int(limit))
+	samples, earliest, latest, err := e.Mediator.Telemetry(r.Context(), id, after, int(limit))
 	if errors.Is(err, model.ErrCursorExpired) {
 		writeJSON(w, http.StatusGone, struct {
 			Samples  []model.TelemetrySample `json:"samples"`

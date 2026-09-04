@@ -601,6 +601,13 @@ func (s *SQLite) Telemetry(ctx context.Context, sandbox model.SandboxID, after u
 	if !earliest.Valid {
 		return []model.TelemetrySample{}, 0, 0, nil
 	}
+	// SQLite INTEGER is signed int64 while the public cursor is uint64. No
+	// persisted sequence can exceed MaxInt64, so a cursor in the upper half of
+	// uint64 is unambiguously past the tail. Return the empty page without
+	// converting it to a negative SQL parameter.
+	if after > uint64(1<<63-1) {
+		return []model.TelemetrySample{}, uint64(earliest.Int64), uint64(latest.Int64), nil
+	}
 	rows, err := s.db.QueryContext(ctx, `SELECT sandbox,sequence,event_id,placement_epoch,process_id,state,cpu_available,cpu_value,memory_available,memory_value,disk_available,disk_value,at FROM telemetry WHERE sandbox=? AND sequence>? ORDER BY sequence LIMIT ?`, string(sandbox), int64(after), limit)
 	if err != nil {
 		return nil, 0, 0, err
