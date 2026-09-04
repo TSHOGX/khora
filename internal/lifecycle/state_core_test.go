@@ -387,6 +387,45 @@ func TestIdempotentRetryReplaysObjectAfterPersistedCleanupPhase(t *testing.T) {
 	}
 }
 
+func TestDerivedVolumeRetryChecksIdempotencyBeforeSourceResolution(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	vb := newFakeVolume()
+	m := New(Deps{Store: st, Volume: vb, Logf: func(string, ...any) {}})
+	key := model.IdempotencyKey("snapshot-replay-key")
+	semantic := struct {
+		Source  string `json:"source"`
+		CapByte int64  `json:"cap_byte"`
+	}{"vol_source_gone", 0}
+	hash, err := model.RequestHash(semantic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	op, err := model.BeginOperation("op_snapshot_replay", "volume.snapshot", key, hash, time.Now().Add(-time.Minute), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resultID := deterministicObjectID("vol_", op.ID)
+	if err := op.Succeed(model.OperationResult{Kind: model.ObjectVolume, ID: resultID}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateOperation(ctx, op); err != nil {
+		t.Fatal(err)
+	}
+	// The source row is intentionally absent. A succeeded idempotent retry must
+	// replay the durable result before consulting source/backend state.
+	got, err := m.SnapshotVolumeWithKey(ctx, model.VolumeID(semantic.Source), semantic.CapByte, key)
+	if err != nil {
+		t.Fatalf("derived retry with missing source = %v; want replay", err)
+	}
+	if string(got) != resultID {
+		t.Fatalf("derived replay ID = %s; want %s", got, resultID)
+	}
+	if _, err := m.SnapshotVolumeWithKey(ctx, model.VolumeID(semantic.Source), 1, key); model.ErrorClassOf(err) != model.ErrorIdempotencyConflict {
+		t.Fatalf("changed derived retry = %v; want idempotency_conflict before source lookup", err)
+	}
+}
+
 func TestTemplateManifestDigestMismatchRefusesLaunch(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemory()

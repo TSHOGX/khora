@@ -1077,21 +1077,6 @@ func (m *Mediator) deriveVolume(ctx context.Context, srcID model.VolumeID, capBy
 	if capBytes < 0 {
 		return "", fmt.Errorf("%s volume: size must be non-negative (0 = uncapped), got %d", kind, capBytes)
 	}
-	source, be, err := m.backendForVolume(ctx, srcID)
-	if err != nil {
-		return "", fmt.Errorf("%s volume: source %s: %w", kind, srcID, err)
-	}
-	caps := be.Capabilities()
-	supported := caps.Snapshot
-	if isClone {
-		supported = caps.Clone
-	}
-	if !supported {
-		return "", fmt.Errorf("%s volume: %w: backend %q does not support %s", kind, ErrVolumeCapUnsupported, be.Name(), kind)
-	}
-	if capBytes > 0 && !caps.Quota {
-		return "", fmt.Errorf("%s volume: %w: backend %q cannot enforce a capacity cap", kind, ErrVolumeCapUnsupported, be.Name())
-	}
 	scope := "volume.snapshot"
 	if isClone {
 		scope = "volume.clone"
@@ -1118,6 +1103,25 @@ func (m *Mediator) deriveVolume(ctx context.Context, srcID model.VolumeID, capBy
 		return "", err
 	}
 	defer func() { m.failOperation(storeCtx, claim, resultErr) }()
+	// Resolve the source and capability only after claiming the idempotency
+	// record. This makes retries deterministic: a reused key is compared with
+	// its canonical request before current provider/source state can change the
+	// result, and a committed object can always be replayed.
+	source, be, err := m.backendForVolume(ctx, srcID)
+	if err != nil {
+		return "", fmt.Errorf("%s volume: source %s: %w", kind, srcID, err)
+	}
+	caps := be.Capabilities()
+	supported := caps.Snapshot
+	if isClone {
+		supported = caps.Clone
+	}
+	if !supported {
+		return "", fmt.Errorf("%s volume: %w: backend %q does not support %s", kind, ErrVolumeCapUnsupported, be.Name(), kind)
+	}
+	if capBytes > 0 && !caps.Quota {
+		return "", fmt.Errorf("%s volume: %w: backend %q cannot enforce a capacity cap", kind, ErrVolumeCapUnsupported, be.Name())
+	}
 	if err := m.advanceOperation(ctx, claim, model.OperationMaterializing); err != nil {
 		return "", err
 	}
