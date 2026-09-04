@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -166,11 +168,62 @@ func (h *watchHub) load() error {
 		return err
 	}
 	var state persistedWatchState
-	if err := json.Unmarshal(b, &state); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&state); err != nil {
+		return err
+	}
+	var trailing any
+	if err := dec.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return errors.New("watch journal has trailing JSON values")
+		}
 		return err
 	}
 	if state.Epoch == 0 {
-		return nil
+		return errors.New("watch journal epoch is missing or zero")
+	}
+	if (state.Sequence == 0) != (len(state.Records) == 0) {
+		return errors.New("watch journal sequence watermark does not match record presence")
+	}
+	lastSequence := uint64(0)
+	seenScopes := make(map[string]struct{}, len(state.Scopes))
+	for _, rec := range state.Records {
+		if rec.Event == nil || rec.Scope == "" {
+			return errors.New("watch journal contains an incomplete record")
+		}
+		if rec.Event.Sequence == 0 || rec.Event.PlacementEpoch != state.Epoch {
+			return errors.New("watch journal record has an invalid epoch or sequence")
+		}
+		if rec.Event.Sequence <= lastSequence {
+			return errors.New("watch journal record sequence is not strictly increasing")
+		}
+		if rec.Event.Sequence > state.Sequence {
+			return errors.New("watch journal record exceeds its sequence watermark")
+		}
+		lastSequence = rec.Event.Sequence
+	}
+	if len(state.Records) != 0 && lastSequence != state.Sequence {
+		return errors.New("watch journal sequence watermark does not match its records")
+	}
+	for scope, seq := range state.Dropped {
+		if scope == "" || seq == 0 || seq > state.Sequence {
+			return errors.New("watch journal has an invalid dropped watermark")
+		}
+	}
+	for _, saved := range state.Scopes {
+		if saved.Key == "" || saved.Epoch != state.Epoch || saved.Root == "" {
+			return errors.New("watch journal contains an invalid scope")
+		}
+		if _, ok := seenScopes[saved.Key]; ok {
+			return errors.New("watch journal contains duplicate scopes")
+		}
+		seenScopes[saved.Key] = struct{}{}
+		for path, entry := range saved.Previous {
+			if path == "" || entry.Path == "" || path != entry.Path {
+				return errors.New("watch journal contains an invalid scope snapshot")
+			}
+		}
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -181,13 +234,7 @@ func (h *watchHub) load() error {
 		}
 	}
 	for _, rec := range state.Records {
-		if rec.Event == nil || rec.Scope == "" || rec.Event.Sequence == 0 || rec.Event.PlacementEpoch != h.epoch {
-			continue
-		}
 		h.records = append(h.records, rec)
-		if rec.Event.Sequence > h.sequence {
-			h.sequence = rec.Event.Sequence
-		}
 	}
 	if len(h.records) > h.capacity {
 		evict := h.records[:len(h.records)-h.capacity]
@@ -199,9 +246,6 @@ func (h *watchHub) load() error {
 		}
 	}
 	for _, saved := range state.Scopes {
-		if saved.Key == "" || saved.Epoch != h.epoch {
-			continue
-		}
 		previous := make(map[string]watchEntry, len(saved.Previous))
 		for path, entry := range saved.Previous {
 			previous[path] = watchEntryRestored(entry)
