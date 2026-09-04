@@ -199,3 +199,88 @@ func TestNormalizeProcessEventIdentityRejectsNil(t *testing.T) {
 		t.Fatalf("nil event error = %v; want invalid_argument", err)
 	}
 }
+
+type captureProcessEvents struct {
+	events []*v1.ProcessEvent
+}
+
+func (c *captureProcessEvents) Send(ev *v1.ProcessEvent) error {
+	c.events = append(c.events, ev)
+	return nil
+}
+
+func TestForwardProcessEventsPreservesLivePIDWhenEndOmitsPID(t *testing.T) {
+	p, sid := processReservationFixture(t)
+	ctx := context.Background()
+	started := time.Now().Add(-time.Second)
+	proc := model.Process{
+		ID:             "proc_live_end",
+		Sandbox:        sid,
+		PlacementEpoch: 7,
+		PID:            42,
+		State:          model.ProcessRunning,
+		StartedAt:      started,
+		OutputCursor:   model.ProcessOutputCursor("proc_live_end", 7, 0),
+	}
+	if err := p.e.Store.CreateProcess(ctx, proc); err != nil {
+		t.Fatal(err)
+	}
+	sink := &captureProcessEvents{}
+	ch := make(chan transport.ProcessEvent, 1)
+	ch <- transport.ProcessEvent{Kind: "end", Handle: string(proc.ID), Epoch: 7, Sequence: 1, ExitCode: 3}
+	close(ch)
+	if err := p.forwardProcessEvents(ctx, string(sid), ch, sink, &proc); err != nil {
+		t.Fatalf("forward live end: %v", err)
+	}
+	got, err := p.e.Store.GetProcess(ctx, proc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != model.ProcessExited || got.PID != proc.PID || got.ExitCode == nil || *got.ExitCode != 3 || got.OutputCursor.Sequence != 1 {
+		t.Fatalf("live end projection = %+v; want exited, preserved pid=%d, code=3, cursor=1", got, proc.PID)
+	}
+	if len(sink.events) != 1 || sink.events[0].Kind == nil {
+		t.Fatalf("forwarded live end events = %+v", sink.events)
+	}
+}
+
+func TestForwardProcessEventsReplayedEndKeepsTerminalMetadata(t *testing.T) {
+	p, sid := processReservationFixture(t)
+	ctx := context.Background()
+	started := time.Now().Add(-2 * time.Second)
+	exited := started.Add(time.Second)
+	code := 7
+	proc := model.Process{
+		ID:             "proc_replayed_end",
+		Sandbox:        sid,
+		PlacementEpoch: 7,
+		PID:            43,
+		State:          model.ProcessExited,
+		ExitCode:       &code,
+		StartedAt:      started,
+		ExitedAt:       &exited,
+		OutputCursor:   model.ProcessOutputCursor("proc_replayed_end", 7, 2),
+	}
+	if err := p.e.Store.CreateProcess(ctx, proc); err != nil {
+		t.Fatal(err)
+	}
+	sink := &captureProcessEvents{}
+	ch := make(chan transport.ProcessEvent, 1)
+	// End frames carry no PID and the replay's timestamp is not part of the
+	// wire event. The durable row remains authoritative; only the cursor moves.
+	ch <- transport.ProcessEvent{Kind: "end", Handle: string(proc.ID), Epoch: 7, Sequence: 3, Replay: true, ExitCode: code}
+	close(ch)
+	if err := p.forwardProcessEvents(ctx, string(sid), ch, sink, &proc); err != nil {
+		t.Fatalf("forward replayed end: %v", err)
+	}
+	got, err := p.e.Store.GetProcess(ctx, proc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != model.ProcessExited || got.PID != proc.PID || got.ExitCode == nil || *got.ExitCode != code || !got.ExitedAt.Equal(exited) || got.OutputCursor.Sequence != 3 {
+		t.Fatalf("replayed end projection = %+v; want unchanged terminal metadata and cursor=3", got)
+	}
+	if len(sink.events) != 1 || sink.events[0].GetSequence() != 3 {
+		t.Fatalf("forwarded replayed end events = %+v", sink.events)
+	}
+}

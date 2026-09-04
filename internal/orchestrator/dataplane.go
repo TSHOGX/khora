@@ -898,7 +898,14 @@ func forwardEvents(stream *connect.ServerStream[v1.ProcessEvent], ch <-chan tran
 	return nil
 }
 
-func (p *processProxy) forwardProcessEvents(ctx context.Context, sandbox string, ch <-chan transport.ProcessEvent, stream *connect.ServerStream[v1.ProcessEvent], reserved *model.Process) error {
+// processEventSender is the narrow stream operation used by the forwarding
+// projection. Keeping the seam small lets the terminal/replay contract be
+// tested without constructing a live Connect server stream.
+type processEventSender interface {
+	Send(*v1.ProcessEvent) error
+}
+
+func (p *processProxy) forwardProcessEvents(ctx context.Context, sandbox string, ch <-chan transport.ProcessEvent, stream processEventSender, reserved *model.Process) error {
 	var rec *model.Process = reserved
 	var localSeq uint64
 	var streamEpoch uint64
@@ -982,28 +989,25 @@ func (p *processProxy) forwardProcessEvents(ctx context.Context, sandbox string,
 					}
 					rec.PID = pid
 					rec.State = model.ProcessRunning
-					rec.OutputCursor = model.ProcessOutputCursor(rec.ID, rec.PlacementEpoch, localSeq)
+					if localSeq > rec.OutputCursor.Sequence {
+						rec.OutputCursor = model.ProcessOutputCursor(rec.ID, rec.PlacementEpoch, localSeq)
+					}
 					if err := p.e.Mediator.UpdateProcess(ctx, *rec); err != nil {
 						return fmt.Errorf("persist process start %s: %w", rec.ID, err)
 					}
 				}
 			case "data":
 				if rec != nil {
-					rec.OutputCursor.Sequence = localSeq
+					if localSeq > rec.OutputCursor.Sequence {
+						rec.OutputCursor.Sequence = localSeq
+					}
 					if err := p.e.Mediator.UpdateProcess(ctx, *rec); err != nil {
 						return fmt.Errorf("persist process output %s: %w", rec.ID, err)
 					}
 				}
 			case "end":
 				if rec != nil {
-					code := ev.ExitCode
-					now := time.Now()
-					rec.State = model.ProcessExited
-					rec.ExitCode = &code
-					rec.ExitedAt = &now
-					rec.PID = ev.PID
-					rec.OutputCursor.Sequence = localSeq
-					if err := p.e.Mediator.UpdateProcess(ctx, *rec); err != nil {
+					if err := persistProcessEnd(ctx, p, rec, ev, localSeq); err != nil {
 						return fmt.Errorf("persist process exit %s: %w", rec.ID, err)
 					}
 				}
@@ -1020,6 +1024,91 @@ func (p *processProxy) forwardProcessEvents(ctx context.Context, sandbox string,
 		}
 	}
 	return nil
+}
+
+// applyProcessEnd projects an end frame onto the durable logical Process.
+// Replay frames are advisory for terminal metadata: once the control plane has
+// observed an exit, its timestamp, code, and historical PID are immutable. A
+// replayed end therefore only advances the output cursor. Live ends transition
+// starting/running records and preserve the existing PID when the transport
+// omits it (the ordinary End wire variant carries only an exit code).
+func applyProcessEnd(rec *model.Process, ev transport.ProcessEvent, now time.Time) error {
+	if rec == nil {
+		return nil
+	}
+	switch rec.State {
+	case model.ProcessExited:
+		if rec.ExitCode == nil || *rec.ExitCode != ev.ExitCode {
+			return store.ErrProcessConflict
+		}
+		if ev.PID != 0 && rec.PID != 0 && ev.PID != rec.PID {
+			return store.ErrProcessConflict
+		}
+		return nil
+	case model.ProcessPaused, model.ProcessReclaimed:
+		// A stale stream cannot turn a placement-loss or reclaimed record back
+		// into a live/terminal process. The Store remains the final write fence.
+		return store.ErrProcessConflict
+	}
+	code := ev.ExitCode
+	rec.State = model.ProcessExited
+	rec.ExitCode = &code
+	if now.IsZero() {
+		now = time.Now()
+	}
+	rec.ExitedAt = &now
+	if ev.PID != 0 {
+		rec.PID = ev.PID
+	}
+	return nil
+}
+
+// persistProcessEnd writes a terminal frame while tolerating the expected
+// duplicate-end race between independent subscribers. The first subscriber
+// wins the terminal timestamp; a concurrent replay with the same exit result
+// may still advance the cursor, but a different result remains a conflict.
+func persistProcessEnd(ctx context.Context, p *processProxy, rec *model.Process, ev transport.ProcessEvent, sequence uint64) error {
+	if err := applyProcessEnd(rec, ev, time.Now()); err != nil {
+		return err
+	}
+	if sequence > rec.OutputCursor.Sequence {
+		rec.OutputCursor.Sequence = sequence
+	}
+	if err := p.e.Mediator.UpdateProcess(ctx, *rec); err == nil {
+		return nil
+	} else if !errors.Is(err, store.ErrProcessConflict) {
+		return err
+	} else {
+		// A second stream may have committed the same terminal result between
+		// our read and write. Reconcile only that exact identity/result; never
+		// turn a reclaimed or mismatched row into a successful replay.
+		current, readErr := p.e.Mediator.Process(ctx, rec.ID)
+		if readErr != nil || !sameProcessIdentity(*rec, current) || !sameProcessExit(current, ev) {
+			return err
+		}
+		if sequence <= current.OutputCursor.Sequence {
+			*rec = current
+			return nil
+		}
+		current.OutputCursor.Sequence = sequence
+		if updateErr := p.e.Mediator.UpdateProcess(ctx, current); updateErr != nil {
+			return updateErr
+		}
+		*rec = current
+		return nil
+	}
+}
+
+func sameProcessIdentity(a, b model.Process) bool {
+	return a.ID == b.ID && a.Sandbox == b.Sandbox && a.PlacementEpoch == b.PlacementEpoch &&
+		a.StartedAt.Equal(b.StartedAt) && a.StartKey == b.StartKey && a.StartRequestHash == b.StartRequestHash
+}
+
+func sameProcessExit(p model.Process, ev transport.ProcessEvent) bool {
+	if p.State != model.ProcessExited || p.ExitCode == nil || *p.ExitCode != ev.ExitCode {
+		return false
+	}
+	return ev.PID == 0 || p.PID == 0 || p.PID == ev.PID
 }
 
 // normalizeProcessEventIdentity establishes and validates the identity carried
@@ -1049,7 +1138,7 @@ func normalizeProcessEventIdentity(ev *transport.ProcessEvent, expectedHandle st
 	return expectedHandle, expectedEpoch, nil
 }
 
-func sendProcessEvent(stream *connect.ServerStream[v1.ProcessEvent], ev transport.ProcessEvent) error {
+func sendProcessEvent(stream processEventSender, ev transport.ProcessEvent) error {
 	var pe v1.ProcessEvent
 	pe.ProcessHandle, pe.PlacementEpoch, pe.Sequence, pe.Replay, pe.Gap, pe.ResetReason = ev.Handle, ev.Epoch, ev.Sequence, ev.Replay, ev.Gap, ev.ResetReason
 	switch ev.Kind {
