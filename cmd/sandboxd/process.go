@@ -272,6 +272,7 @@ func (s *processServer) loadPersistent() {
 		return
 	}
 	seen := make(map[string]struct{}, len(saved))
+	seenKeys := make(map[string]struct{}, len(saved))
 	for _, row := range saved {
 		if row.Handle == "" {
 			s.loadErr = errors.New("process journal contains an empty handle")
@@ -284,6 +285,53 @@ func (s *processServer) loadPersistent() {
 		seen[row.Handle] = struct{}{}
 		if row.State != "running" && row.State != "exited" {
 			s.loadErr = errors.New("process journal contains an unknown process state")
+			return
+		}
+		if row.PID <= 0 || row.Epoch == 0 {
+			s.loadErr = errors.New("process journal contains an invalid process locator")
+			return
+		}
+		if row.Key != "" {
+			if _, ok := seenKeys[row.Key]; ok {
+				s.loadErr = errors.New("process journal contains duplicate idempotency keys")
+				return
+			}
+			seenKeys[row.Key] = struct{}{}
+			if row.SpecHash == "" {
+				s.loadErr = errors.New("process journal key is missing its request hash")
+				return
+			}
+		}
+		if row.SpecHash != "" && !validProcessSpecHash(row.SpecHash) {
+			s.loadErr = errors.New("process journal contains an invalid request hash")
+			return
+		}
+		// A durable exited row must carry an explicit status. The wire's zero
+		// value is a valid successful exit, so treating a missing JSON pointer as
+		// zero would silently turn an unknown result into success after restart.
+		if row.State == "exited" && (row.ExitCode == nil || row.ExitedAt == 0 || row.Sequence == 0) {
+			s.loadErr = errors.New("process journal exited row is missing terminal metadata")
+			return
+		}
+		if row.State == "running" && (row.ExitCode != nil || row.ExitedAt != 0) {
+			s.loadErr = errors.New("process journal running row has terminal metadata")
+			return
+		}
+		lastFrame := uint64(0)
+		for _, frame := range row.Frames {
+			if frame.Kind != "d" || frame.Sequence == 0 || frame.Sequence <= lastFrame || frame.Sequence > row.Sequence {
+				s.loadErr = errors.New("process journal contains an invalid output frame")
+				return
+			}
+			lastFrame = frame.Sequence
+		}
+		if row.State == "running" {
+			if row.EndFrame != nil {
+				s.loadErr = errors.New("process journal running row contains an end frame")
+				return
+			}
+		} else if row.EndFrame == nil || row.EndFrame.Kind != "e" || row.EndFrame.Sequence != row.Sequence || row.EndFrame.ExitCode != *row.ExitCode {
+			s.loadErr = errors.New("process journal exited row contains an invalid end frame")
 			return
 		}
 	}
@@ -320,6 +368,15 @@ func (s *processServer) loadPersistent() {
 			saved.State = "exited"
 			code := 255
 			saved.ExitCode = &code
+			if saved.ExitedAt == 0 {
+				saved.ExitedAt = time.Now().UnixNano()
+			}
+			if saved.Sequence == ^uint64(0) {
+				s.loadErr = errors.New("process journal sequence is exhausted")
+				return
+			}
+			saved.Sequence++
+			saved.EndFrame = &persistedFrame{Kind: "e", Sequence: saved.Sequence, ExitCode: code}
 			dirty = true
 		}
 		exitedAt := time.Time{}
@@ -363,6 +420,19 @@ func (s *processServer) loadPersistent() {
 	if dirty {
 		s.savePersistentLocked()
 	}
+}
+
+func validProcessSpecHash(hash string) bool {
+	const prefix = "sha256:"
+	if len(hash) != len(prefix)+sha256.Size*2 || !strings.HasPrefix(hash, prefix) {
+		return false
+	}
+	digest := hash[len(prefix):]
+	if strings.ToLower(digest) != digest {
+		return false
+	}
+	_, err := hex.DecodeString(digest)
+	return err == nil
 }
 
 func firstByte(s string, fallback byte) byte {
@@ -505,7 +575,8 @@ func (s *processServer) register(p *proc) {
 	// Unit hubs are ephemeral unless they explicitly select a state path (or a
 	// test swaps the package path). PID 1 calls loadPersistent before serving,
 	// which enables the durable journal and its fail-closed checks.
-	if s.statePath != "" || processStatePath != processStateFile {
+	persistent := s.persistenceEnabled.Load() || s.statePath != "" || processStatePath != processStateFile
+	if persistent {
 		s.persistenceEnabled.Store(true)
 	}
 	s.mu.Lock()
@@ -522,12 +593,14 @@ func (s *processServer) register(p *proc) {
 		s.idempotencySpec = make(map[string]string)
 	}
 	p.activity = s.activity // share the sandbox-global I/O clock (the activity signal)
-	if s.statePath == "" {
+	if persistent && s.statePath == "" {
 		s.statePath = processStatePath
 	}
-	path := s.statePath
-	p.persist = func() { s.persistSoonAt(path) }
-	p.persistNow = func() { s.persistAt(path) }
+	if persistent {
+		path := s.statePath
+		p.persist = func() { s.persistSoonAt(path) }
+		p.persistNow = func() { s.persistAt(path) }
+	}
 	if p.startTime == 0 {
 		p.startTime = procStartTime(p.pid)
 	}

@@ -3,7 +3,9 @@ package orchestrator
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -358,5 +360,77 @@ func TestForwardProcessEventsDoesNotFabricateProgressForStaleSequence(t *testing
 	}
 	if got.OutputCursor.Sequence != 5 {
 		t.Fatalf("stale numbered frame advanced cursor to %d; want 5", got.OutputCursor.Sequence)
+	}
+}
+
+func TestForwardProcessEventsConcurrentDuplicateEndConverges(t *testing.T) {
+	p, sid := processReservationFixture(t)
+	ctx := context.Background()
+	started := time.Now().Add(-time.Second)
+	proc := model.Process{ID: "proc_duplicate_end", Sandbox: sid, PlacementEpoch: 7, PID: 46, State: model.ProcessRunning, StartedAt: started, OutputCursor: model.ProcessOutputCursor("proc_duplicate_end", 7, 0)}
+	if err := p.e.Store.CreateProcess(ctx, proc); err != nil {
+		t.Fatal(err)
+	}
+	a, err := p.e.Store.GetProcess(ctx, proc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := a
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	for _, rec := range []*model.Process{&a, &b} {
+		wg.Add(1)
+		go func(rec *model.Process) {
+			defer wg.Done()
+			<-start
+			ch := make(chan transport.ProcessEvent, 1)
+			ch <- transport.ProcessEvent{Kind: "end", Handle: string(proc.ID), Epoch: 7, Sequence: 1, ExitCode: 0}
+			close(ch)
+			errs <- p.forwardProcessEvents(ctx, string(sid), ch, &captureProcessEvents{}, rec)
+		}(rec)
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("duplicate end forwarding returned error: %v", err)
+		}
+	}
+	got, err := p.e.Store.GetProcess(ctx, proc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != model.ProcessExited || got.ExitCode == nil || *got.ExitCode != 0 || got.PID != proc.PID || got.OutputCursor.Sequence != 1 {
+		t.Fatalf("duplicate end projection = %+v; want one stable exited result", got)
+	}
+}
+
+func TestProcessProjectionErrorSanitizesStoreDiagnostics(t *testing.T) {
+	const hostDetail = "/srv/state/overlays/ov_x/merged"
+	cases := []struct {
+		name string
+		err  error
+		code connect.Code
+		want string
+	}{
+		{name: "generic", err: errors.New("sqlite update " + hostDetail), code: connect.CodeUnavailable, want: "process state persistence unavailable"},
+		{name: "not found", err: fmt.Errorf("lookup %s: %w", hostDetail, store.ErrProcessNotFound), code: connect.CodeNotFound, want: "process handle no longer exists"},
+		{name: "typed invalid", err: model.ErrInvalidArgument, code: connect.CodeInvalidArgument, want: "invalid sandbox request"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := processProjectionError("persist process output", "proc_x", tc.err)
+			if err == nil || connect.CodeOf(err) != tc.code {
+				t.Fatalf("projection error = %v; code=%v, want %v", err, connect.CodeOf(err), tc.code)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("projection error = %v; want %q", err, tc.want)
+			}
+			if strings.Contains(err.Error(), hostDetail) || strings.Contains(err.Error(), "sqlite") {
+				t.Fatalf("projection error leaked store diagnostics: %v", err)
+			}
+		})
 	}
 }

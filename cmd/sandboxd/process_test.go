@@ -341,7 +341,7 @@ func TestPersistedRingAndExitSurviveReload(t *testing.T) {
 	s.register(p)
 	s.mu.Lock()
 	s.idempotency["retry"] = p.handle
-	s.idempotencySpec["retry"] = "hash"
+	s.idempotencySpec["retry"] = startSpecHash(&v1.StartRequest{Cmd: "/bin/true", PlacementEpoch: p.epoch})
 	s.savePersistentLocked()
 	s.mu.Unlock()
 	p.broadcast(frame{kind: 'd', stream: "stdout", data: []byte("persisted")})
@@ -388,6 +388,61 @@ func TestProcessJournalUnreadableFailsClosed(t *testing.T) {
 	s.loadPersistent()
 	if err := s.journalFailure(); err == nil || connect.CodeOf(err) != connect.CodeUnavailable {
 		t.Fatalf("unreadable process journal failure = %v; want unavailable", err)
+	}
+}
+
+func TestProcessJournalMissingExitCodeFailsClosed(t *testing.T) {
+	state := filepath.Join(t.TempDir(), "processes.json")
+	const journal = `[{"handle":"proc_missing_code","pid":17,"epoch":1,"state":"exited","sequence":1,"exited_at":1,"end_frame":{"kind":"e","sequence":1}}]`
+	if err := os.WriteFile(state, []byte(journal), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := &processServer{statePath: state}
+	s.loadPersistent()
+	if err := s.journalFailure(); err == nil || connect.CodeOf(err) != connect.CodeUnavailable {
+		t.Fatalf("missing exit code journal failure = %v; want unavailable", err)
+	}
+	if s.byHandle != nil {
+		t.Fatalf("missing exit code journal populated handles: %+v", s.byHandle)
+	}
+}
+
+func TestProcessJournalExplicitZeroExitCodeReloads(t *testing.T) {
+	state := filepath.Join(t.TempDir(), "processes.json")
+	const journal = `[{"handle":"proc_zero_code","pid":17,"epoch":1,"state":"exited","sequence":1,"exit_code":0,"exited_at":1,"end_frame":{"kind":"e","sequence":1,"exit_code":0}}]`
+	if err := os.WriteFile(state, []byte(journal), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := &processServer{statePath: state}
+	s.loadPersistent()
+	if err := s.journalFailure(); err != nil {
+		t.Fatalf("explicit zero exit code was rejected: %v", err)
+	}
+	s.mu.Lock()
+	p := s.byHandle["proc_zero_code"]
+	s.mu.Unlock()
+	if p == nil || !p.ended || p.endFrame.exitCode != 0 {
+		t.Fatalf("reloaded explicit zero exit = %+v; want ended with code 0", p)
+	}
+}
+
+func TestProcessJournalRejectsInvalidFramesAndIdentity(t *testing.T) {
+	for name, journal := range map[string]string{
+		"zero epoch":         `[{"handle":"proc_bad","pid":17,"epoch":0,"state":"exited","sequence":1,"exit_code":1,"exited_at":1,"end_frame":{"kind":"e","sequence":1,"exit_code":1}}]`,
+		"nonmonotonic frame": `[{"handle":"proc_bad","pid":17,"epoch":1,"state":"exited","sequence":2,"exit_code":1,"exited_at":1,"frames":[{"kind":"d","sequence":2},{"kind":"d","sequence":1}],"end_frame":{"kind":"e","sequence":2,"exit_code":1}}]`,
+		"end mismatch":       `[{"handle":"proc_bad","pid":17,"epoch":1,"state":"exited","sequence":1,"exit_code":1,"exited_at":1,"end_frame":{"kind":"e","sequence":2,"exit_code":1}}]`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			state := filepath.Join(t.TempDir(), "processes.json")
+			if err := os.WriteFile(state, []byte(journal), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			s := &processServer{statePath: state}
+			s.loadPersistent()
+			if err := s.journalFailure(); err == nil || connect.CodeOf(err) != connect.CodeUnavailable {
+				t.Fatalf("invalid journal failure = %v; want unavailable", err)
+			}
+		})
 	}
 }
 

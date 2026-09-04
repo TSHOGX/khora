@@ -1000,7 +1000,7 @@ func (p *processProxy) forwardProcessEvents(ctx context.Context, sandbox string,
 					} else if errors.Is(err, store.ErrProcessConflict) {
 						existing, gerr := p.e.Mediator.Process(ctx, candidate.ID)
 						if gerr != nil {
-							return fmt.Errorf("resolve process start %s after reservation conflict: %w", candidate.ID, gerr)
+							return processProjectionError("resolve process start", candidate.ID, gerr)
 						}
 						if existing.Sandbox != candidate.Sandbox || existing.PlacementEpoch != candidate.PlacementEpoch {
 							return connect.NewError(connect.CodeFailedPrecondition, errors.New("process stream placement mismatch"))
@@ -1011,7 +1011,7 @@ func (p *processProxy) forwardProcessEvents(ctx context.Context, sandbox string,
 					}
 				} else {
 					if ev.Handle != string(rec.ID) {
-						return fmt.Errorf("process start handle mismatch: got %q, want %q", ev.Handle, rec.ID)
+						return connect.NewError(connect.CodeFailedPrecondition, errors.New("process stream handle mismatch"))
 					}
 					rec.PID = pid
 					rec.State = model.ProcessRunning
@@ -1145,10 +1145,26 @@ func sameProcessExit(p model.Process, ev transport.ProcessEvent) bool {
 }
 
 func processProjectionError(op string, id model.ProcessID, err error) error {
+	if err == nil {
+		return nil
+	}
 	if errors.Is(err, store.ErrProcessConflict) {
 		return connect.NewError(connect.CodeFailedPrecondition, errors.New("process state changed; reconnect with the current handle"))
 	}
-	return fmt.Errorf("%s %s: %w", op, id, err)
+	if errors.Is(err, store.ErrProcessNotFound) || errors.Is(err, store.ErrNotFound) {
+		return connect.NewError(connect.CodeNotFound, errors.New("process handle no longer exists"))
+	}
+	if errors.Is(err, context.Canceled) {
+		return context.Canceled
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return connect.NewError(connect.CodeDeadlineExceeded, errors.New("process state persistence timed out"))
+	}
+	if model.ErrorClassOf(err) != model.ErrorInternal {
+		return proxyErr(err)
+	}
+	log.Printf("dataplane: %s %s: process state persistence failed: %v", op, id, err)
+	return connect.NewError(connect.CodeUnavailable, errors.New("process state persistence unavailable"))
 }
 
 // persistProcessProgress advances only the output cursor. A second subscriber
