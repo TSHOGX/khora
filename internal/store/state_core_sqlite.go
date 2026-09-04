@@ -544,8 +544,16 @@ func (s *SQLite) AppendTelemetry(ctx context.Context, sample model.TelemetrySamp
 			return err
 		}
 		var seq int64
-		if err := t.QueryRow(`SELECT COALESCE(MAX(sequence),0)+1 FROM telemetry WHERE sandbox=?`, string(sample.Sandbox)).Scan(&seq); err != nil {
+		var max sql.NullInt64
+		if err := t.QueryRow(`SELECT MAX(sequence) FROM telemetry WHERE sandbox=?`, string(sample.Sandbox)).Scan(&max); err != nil {
 			return err
+		}
+		if max.Valid && max.Int64 >= int64(maxTelemetrySequence) {
+			return ErrTelemetrySequenceExhausted
+		}
+		seq = 1
+		if max.Valid {
+			seq = max.Int64 + 1
 		}
 		sample.Envelope.Stream = model.CursorStreamTelemetry
 		sample.Envelope.ObjectKind = model.ObjectSandbox

@@ -107,6 +107,15 @@ var (
 	ErrProcessNotFound            = errors.New("store: process not found")
 	ErrProcessConflict            = errors.New("store: process already exists")
 	ErrTelemetryNotFound          = errors.New("store: telemetry sample not found")
+	// maxTelemetrySequence is the largest sequence representable by both the
+	// public unsigned cursor and SQLite's signed INTEGER column. Memory uses the
+	// same ceiling so the two Store implementations cannot diverge at restart.
+	maxTelemetrySequence uint64 = uint64(^uint64(0) >> 1)
+	// ErrTelemetrySequenceExhausted is returned before appending a sample when
+	// the per-Sandbox telemetry cursor has reached its representable ceiling.
+	// Reusing or wrapping that cursor would make an exclusive cursor silently
+	// skip (or replay) samples.
+	ErrTelemetrySequenceExhausted = errors.New("store: telemetry sequence exhausted")
 	// ErrEventSequenceExhausted is returned before a lifecycle mutation when the
 	// in-memory outbox has reached the largest signed sequence it can represent.
 	// Reusing or wrapping that cursor would make replay order ambiguous.

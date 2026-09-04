@@ -349,7 +349,11 @@ func (m *Memory) AppendTelemetry(_ context.Context, sample model.TelemetrySample
 	if sample.Envelope.OccurredAt.IsZero() {
 		sample.Envelope.OccurredAt = sample.Snapshot.At
 	}
-	sequence := m.telemetrySeq[sample.Sandbox] + 1
+	previous := m.telemetrySeq[sample.Sandbox]
+	if previous >= maxTelemetrySequence {
+		return ErrTelemetrySequenceExhausted
+	}
+	sequence := previous + 1
 	sample.Envelope.Sequence = sequence
 	if sample.Envelope.ID == "" {
 		sample.Envelope.ID = fmt.Sprintf("telemetry_%s_%d", sample.Sandbox, sample.Envelope.Sequence)
