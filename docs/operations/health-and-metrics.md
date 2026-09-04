@@ -37,7 +37,8 @@ counters. Machine-readable object snapshots are available under the `/v1`
 Sandbox, Placement, and Process snapshot routes. `GET
 `/v1/sandboxes/{id}/telemetry` is a separate cursorable Sandbox usage-sample
 lane with a 10-second default cadence and bounded retention; Placement and
-Process snapshots remain request/response reads. Its unavailable measurements
-are not emitted as zero. If the Sandbox count store read fails, those samples
-are omitted and the process log carries the cause. Names and semantics are defined in
+Process snapshots remain request/response reads, with no generic persisted sample
+lanes for those objects. Unavailable measurements are not emitted as zero. If the
+Sandbox count store read fails, those samples are omitted and the process log carries
+the cause. Names and semantics are defined in
 [internal/orchestrator/health.go](../../internal/orchestrator/health.go).

@@ -42,9 +42,10 @@ failure rollback, and the outbox invariant in
 
 The reaper reads guest-observed activity and runtime health. Idle running
 sandboxes are auto-paused. A missing isolation unit demotes the record to paused
-and records `gone`, `unknown`, or `resource-exceeded`. The engine never
-automatically resumes a dead sandbox. A persisted `resource-exceeded` cause blocks
-resume to avoid a deterministic crash loop.
+and records `gone`, `unknown`, or `resource-exceeded`; the public Sandbox state is
+still `paused`, not a separate `dead` state. The engine never automatically
+resumes after a missing unit. A persisted `resource-exceeded` cause blocks resume
+to avoid a deterministic crash loop.
 
 Paused sandboxes may be destroyed after their retention duration. A zero idle
 timeout disables automatic pause; zero retention disables automatic eviction.

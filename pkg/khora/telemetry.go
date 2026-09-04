@@ -7,6 +7,9 @@ import (
 	"strconv"
 )
 
+// Telemetry reads the retained, cursorable Sandbox usage-sample lane. Placement
+// and Process snapshots are request/response reads; this method does not imply
+// persisted sample histories for those objects.
 func (c *Client) Telemetry(ctx context.Context, sandboxID string, after uint64, limit int) (TelemetryPage, error) {
 	q := url.Values{}
 	if after > 0 {

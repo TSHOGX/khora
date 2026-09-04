@@ -16,6 +16,7 @@ read-modify-write update.
 | `POST /v1/sandboxes/{id}/pause` | quiesce and remove its Placement |
 | `POST /v1/sandboxes/{id}/resume` | cold-start a new Placement |
 | `POST /v1/sandboxes/{id}/activity` | stamp guest-observed activity |
+| `GET /v1/sandboxes/{id}/telemetry` | page retained Sandbox usage samples by cursor |
 
 Create requires `template_id`. Omitted network normalizes to default deny. Patch
 distinguishes an omitted member from zero: omitted leaves the Binding unchanged;
@@ -53,6 +54,10 @@ object; changing the request under that key returns `409`.
 Usage fields are absent when the backend cannot read them, not reported as zero.
 Volume size is a capacity cap; a new cap must be strictly greater than current
 usage. Any Mount binding and any descendant protect a Volume from deletion.
+
+The telemetry route is the only persisted usage-sample lane. Placement and Process
+resource data is available through their snapshot routes and is not retained as a
+generic sample history by the engine.
 
 ## Network and files
 

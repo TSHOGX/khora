@@ -25,6 +25,11 @@ processes at the configured boundary and takes over expired operation leases;
 phase-specific cleanup remains explicit so an uncertain side-effect window is
 never treated as a clean retry.
 
+Resource snapshots are read-time views for Sandbox, Placement, and Process. Only
+Sandbox usage samples are persisted on the independent cursorable telemetry lane;
+Placement and Process do not have generic persisted sample streams. Consumers that
+need a history for those objects must sample their snapshot routes themselves.
+
 The HTTP control plane accepts `Idempotency-Key` on Sandbox and Volume create
 requests. The key is not authentication and carries no product identity; it is
 only a retry correlation value. Placement epoch and state are included on

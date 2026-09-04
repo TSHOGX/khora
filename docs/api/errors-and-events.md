@@ -78,9 +78,12 @@ unavailable rules are maintained in
 
 Sandbox usage samples are available through the separate telemetry lane on
 `GET /v1/sandboxes/{id}/telemetry`; Placement and Process resource snapshots
-are available from their snapshot routes. Lifecycle event publication never
-waits for sampling. The telemetry cursor and retention policy are independent of
-the lifecycle stream. This fulfills the usage-event contract tracked in
-[Issue #3](https://github.com/TSHOGX/khora/issues/3). Lifecycle replay retention
-is configured with `--event-retention`; the default `0s` retains the full outbox.
-Set a positive duration only when the deployment has chosen a replay window.
+are available from their snapshot routes. The Sandbox lane is the bounded,
+cursorable usage-sample implementation for the need tracked in
+[Issue #3](https://github.com/TSHOGX/khora/issues/3). It is deliberately not a
+generic persisted sample stream: Placement and Process snapshots are read-time
+views that consumers may sample themselves. Lifecycle event publication never
+waits for sampling, and the telemetry cursor and retention policy are independent
+of the lifecycle stream. Lifecycle replay retention is configured with
+`--event-retention`; the default `0s` retains the full outbox. Set a positive
+duration only when the deployment has chosen a replay window.
