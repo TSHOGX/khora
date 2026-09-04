@@ -228,21 +228,23 @@ func (s *SQLite) UpdateProcess(ctx context.Context, p model.Process) error {
 	if err := p.Validate(); err != nil {
 		return err
 	}
-	cursor, err := encodeCursor(p.OutputCursor)
+	encodedCursor, err := encodeCursor(p.OutputCursor)
 	if err != nil {
 		return err
 	}
-	var exitCode, exited any
+	var exitArg, exitedArg any
 	if p.ExitCode != nil {
-		exitCode = *p.ExitCode
+		exitArg = *p.ExitCode
 	}
 	if p.ExitedAt != nil {
-		exited = stateTime(*p.ExitedAt)
+		exitedArg = stateTime(*p.ExitedAt)
 	}
 	return s.tx(ctx, func(t *sql.Tx) error {
-		var sandbox, startKey, startHash string
-		var epoch, started int64
-		if err := t.QueryRow(`SELECT sandbox, placement_epoch, started_at, start_key, start_request_hash FROM processes WHERE id=?`, string(p.ID)).Scan(&sandbox, &epoch, &started, &startKey, &startHash); errors.Is(err, sql.ErrNoRows) {
+		var sandbox, startKey, startHash, state, cursorRaw string
+		var epoch, started, pid int64
+		var exited sql.NullInt64
+		var oldExitCode sql.NullInt64
+		if err := t.QueryRow(`SELECT sandbox, placement_epoch, started_at, start_key, start_request_hash, state, pid, exit_code, exited_at, output_cursor FROM processes WHERE id=?`, string(p.ID)).Scan(&sandbox, &epoch, &started, &startKey, &startHash, &state, &pid, &oldExitCode, &exited, &cursorRaw); errors.Is(err, sql.ErrNoRows) {
 			return ErrProcessNotFound
 		} else if err != nil {
 			return err
@@ -250,7 +252,29 @@ func (s *SQLite) UpdateProcess(ctx context.Context, p model.Process) error {
 		if sandbox != string(p.Sandbox) || epoch != int64(p.PlacementEpoch) || started != stateTime(p.StartedAt) || startKey != string(p.StartKey) || startHash != p.StartRequestHash {
 			return ErrProcessConflict
 		}
-		_, err := t.Exec(`UPDATE processes SET pid=?, state=?, exit_code=?, exited_at=?, output_cursor=? WHERE id=?`, p.PID, string(p.State), exitCode, exited, cursor, string(p.ID))
+		old := model.Process{
+			ID: p.ID, Sandbox: model.SandboxID(sandbox), PlacementEpoch: model.PlacementEpoch(epoch),
+			PID: int(pid), State: model.ProcessState(state), StartedAt: readStateTime(started),
+			OutputCursor: model.Cursor{},
+			StartKey:     model.IdempotencyKey(startKey), StartRequestHash: startHash,
+		}
+		if oldExitCode.Valid {
+			v := int(oldExitCode.Int64)
+			old.ExitCode = &v
+		}
+		if exited.Valid {
+			tm := readStateTime(exited.Int64)
+			old.ExitedAt = &tm
+		}
+		oldCursor, err := decodeCursor(cursorRaw)
+		if err != nil {
+			return fmt.Errorf("store: decode process cursor: %w", err)
+		}
+		old.OutputCursor = oldCursor
+		if err := validateProcessUpdate(old, p); err != nil {
+			return err
+		}
+		_, err = t.Exec(`UPDATE processes SET pid=?, state=?, exit_code=?, exited_at=?, output_cursor=? WHERE id=?`, p.PID, string(p.State), exitArg, exitedArg, encodedCursor, string(p.ID))
 		return err
 	})
 }

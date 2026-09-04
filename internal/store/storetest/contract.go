@@ -229,11 +229,32 @@ func testProcessCore(t *testing.T, mk Factory) {
 	if err := s.CreateProcess(ctx, p); err != nil {
 		t.Fatalf("create process: %v", err)
 	}
+	progressed := p
+	progressed.OutputCursor.Sequence = 5
+	if err := s.UpdateProcess(ctx, progressed); err != nil {
+		t.Fatalf("advance process cursor: %v", err)
+	}
+	regressed := progressed
+	regressed.OutputCursor.Sequence = 4
+	if err := s.UpdateProcess(ctx, regressed); !errors.Is(err, store.ErrProcessConflict) {
+		t.Fatalf("regressed process cursor = %v; want ErrProcessConflict", err)
+	}
+	p = progressed
 	exited := now.Add(time.Second)
 	code := 0
 	p.State, p.ExitCode, p.ExitedAt = model.ProcessExited, &code, &exited
 	if err := s.UpdateProcess(ctx, p); err != nil {
 		t.Fatalf("exit process: %v", err)
+	}
+	// Terminal metadata is immutable once the exit has been observed. A replay
+	// may carry a newer output cursor, but it cannot replace the exit code or
+	// timestamp that the durable record already exposed.
+	tampered := p
+	changedCode := 9
+	tampered.ExitCode = &changedCode
+	tampered.ExitedAt = ptrTime(exited.Add(time.Second))
+	if err := s.UpdateProcess(ctx, tampered); !errors.Is(err, store.ErrProcessConflict) {
+		t.Fatalf("tampered terminal update = %v; want ErrProcessConflict", err)
 	}
 	if reopen != nil {
 		s = reopen(t)
@@ -261,7 +282,26 @@ func testProcessCore(t *testing.T, mk Factory) {
 	if len(events) != 0 {
 		t.Fatalf("process reclaim appended %d lifecycle event(s): %+v; reclaim is state-only and must not widen the Sandbox outbox", len(events), events)
 	}
+	// A delayed stream frame must not resurrect a reclaimed handle. The
+	// retention boundary is enforced by the Store write predicate, not only by
+	// the reaper's scan, because forwarding and reconciliation can race.
+	late := got
+	late.State = model.ProcessRunning
+	late.PID = 99
+	late.ExitedAt = nil
+	late.ExitCode = nil
+	late.OutputCursor.Sequence++
+	if err := s.UpdateProcess(ctx, late); !errors.Is(err, store.ErrProcessConflict) {
+		t.Fatalf("late update after reclaim = %v; want ErrProcessConflict", err)
+	}
+	got, err = s.GetProcess(ctx, p.ID)
+	if err != nil || got.State != model.ProcessReclaimed || got.PID != 0 || got.ExitCode != nil {
+		t.Fatalf("reclaimed process changed after rejected late update = %+v, %v", got, err)
+	}
+
 }
+
+func ptrTime(t time.Time) *time.Time { return &t }
 
 func testOperationCore(t *testing.T, mk Factory) {
 	ctx := context.Background()

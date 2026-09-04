@@ -144,6 +144,9 @@ func (m *Memory) UpdateProcess(_ context.Context, p model.Process) error {
 	if old.StartKey != p.StartKey || old.StartRequestHash != p.StartRequestHash {
 		return ErrProcessConflict
 	}
+	if err := validateProcessUpdate(old, p); err != nil {
+		return err
+	}
 	m.processes[p.ID] = p
 	return nil
 }
