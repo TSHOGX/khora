@@ -496,7 +496,10 @@ func semanticSandboxCreate(spec CreateSpec, network model.NetworkDecl) any {
 		if mounts[i].Path != mounts[j].Path {
 			return mounts[i].Path < mounts[j].Path
 		}
-		return mounts[i].Volume < mounts[j].Volume
+		if mounts[i].Volume != mounts[j].Volume {
+			return mounts[i].Volume < mounts[j].Volume
+		}
+		return mounts[i].Access < mounts[j].Access
 	})
 	// Preserve caller intent for optional TTLs rather than hashing the
 	// materialized defaults. A nil field means "use the deployment default";

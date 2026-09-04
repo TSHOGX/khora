@@ -131,6 +131,28 @@ func TestSandboxCreateRetryIgnoresChangedDefaultsWhenTTLWasOmitted(t *testing.T)
 	}
 }
 
+func TestSandboxCreateSemanticHashIsStableForMountPermutations(t *testing.T) {
+	a := CreateSpec{Template: "bare", Volumes: []model.Mount{
+		{Volume: "vol_b", Path: "/z", Access: model.SharedReadOnly},
+		{Volume: "vol_a", Path: "/a", Access: model.SharedReadWrite},
+	}}
+	b := CreateSpec{Template: a.Template, Volumes: []model.Mount{
+		{Volume: "vol_a", Path: "/a/", Access: model.SharedReadWrite},
+		{Volume: "vol_b", Path: "/z", Access: model.SharedReadOnly},
+	}}
+	hashA, err := model.RequestHash(semanticSandboxCreate(a, model.NetworkDecl{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	hashB, err := model.RequestHash(semanticSandboxCreate(b, model.NetworkDecl{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hashA != hashB {
+		t.Fatalf("mount permutation hashes differ: %s vs %s", hashA, hashB)
+	}
+}
+
 // TTL Binding materialization (resource admission / health and reclamation): a create that OMITS idle_timeout /
 // retention stores the engine-wide default; a create that provides them stores
 // the given values verbatim (including an explicit zero). The stored record
