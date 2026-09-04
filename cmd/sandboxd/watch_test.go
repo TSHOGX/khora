@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"connectrpc.com/connect"
+
 	v1 "github.com/TSHOGX/khora/pkg/transport/gen/khora/transport/v1"
 )
 
@@ -214,6 +216,40 @@ func TestWatchHubPersistsCursorAndSnapshotAcrossTransportRestart(t *testing.T) {
 	got := watchReplayEvent(t, replay, 0)
 	if got.Sequence != 1 || got.Path != filepath.Join(root, "persisted") {
 		t.Fatalf("persisted replay = %+v", got)
+	}
+}
+
+func TestWatchHubCorruptJournalFailsClosed(t *testing.T) {
+	state := filepath.Join(t.TempDir(), "watch.json")
+	if err := os.WriteFile(state, []byte(`{"epoch":1,"sequence":`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h := newWatchHub(state, 8)
+	if err := h.ensureEpoch(1); connect.CodeOf(err) != connect.CodeUnavailable {
+		t.Fatalf("corrupt journal ensure epoch = %v; want unavailable", err)
+	}
+	if err := h.ObserveEpoch(2); connect.CodeOf(err) != connect.CodeUnavailable {
+		t.Fatalf("corrupt journal observe epoch = %v; want unavailable", err)
+	}
+	if _, _, err := h.scope(t.TempDir(), true); connect.CodeOf(err) != connect.CodeUnavailable {
+		t.Fatalf("corrupt journal scope = %v; want unavailable", err)
+	}
+}
+
+func TestWatchHubUnreadableJournalFailsClosed(t *testing.T) {
+	// A directory at the journal path produces a deterministic read error on all
+	// supported hosts without relying on process privileges or global filesystem
+	// permissions.
+	state := filepath.Join(t.TempDir(), "watch.json")
+	if err := os.Mkdir(state, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	h := newWatchHub(state, 8)
+	if err := h.ensureEpoch(1); connect.CodeOf(err) != connect.CodeUnavailable {
+		t.Fatalf("unreadable journal ensure epoch = %v; want unavailable", err)
+	}
+	if err := h.journalFailure(); err == nil || connect.CodeOf(err) != connect.CodeUnavailable {
+		t.Fatalf("journal failure was not retained as unavailable: %v", err)
 	}
 }
 

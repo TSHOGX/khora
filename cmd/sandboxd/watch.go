@@ -72,7 +72,11 @@ type watchScope struct {
 type watchHub struct {
 	mu sync.Mutex
 
-	path     string
+	path string
+	// loadErr is immutable after construction. A journal read or decode failure
+	// must not be treated as an empty history: doing so can accept a caller's
+	// old cursor against a reset sequence and silently skip retained changes.
+	loadErr  error
 	capacity int
 	epoch    uint64
 	sequence uint64
@@ -122,9 +126,19 @@ func newWatchHub(path string, capacity int) *watchHub {
 		subs:    make(map[*watchSubscriber]struct{}),
 	}
 	if path != "" {
-		_ = h.load()
+		h.loadErr = h.load()
 	}
 	return h
+}
+
+// journalFailure converts an internal persistence failure into a stable wire
+// error. The journal path is deliberately omitted: it is a guest-private
+// implementation detail and must not cross the transport boundary.
+func (h *watchHub) journalFailure() error {
+	if h == nil || h.loadErr == nil {
+		return nil
+	}
+	return connect.NewError(connect.CodeUnavailable, errors.New("filesystem watch journal unavailable"))
 }
 
 func watchScopeKey(root string, recursive bool) string {
@@ -262,6 +276,9 @@ func watchScopeLimitError() error {
 // setEpoch advances the placement epoch and invalidates all prior watch
 // records.  Existing streams receive one reset marker before they close.
 func (h *watchHub) setEpoch(epoch uint64) error {
+	if err := h.journalFailure(); err != nil {
+		return err
+	}
 	if epoch == 0 {
 		epoch = 1
 	}
@@ -301,6 +318,9 @@ func (h *watchHub) ensureEpoch(epoch uint64) error {
 }
 
 func (h *watchHub) validateEpoch(epoch uint64) error {
+	if err := h.journalFailure(); err != nil {
+		return err
+	}
 	if epoch == 0 {
 		return nil
 	}
@@ -314,6 +334,9 @@ func (h *watchHub) validateEpoch(epoch uint64) error {
 }
 
 func (h *watchHub) scope(root string, recursive bool) (*watchScope, bool, error) {
+	if err := h.journalFailure(); err != nil {
+		return nil, false, err
+	}
 	root = filepath.Clean(root)
 	if root == "." || root == "" {
 		root = "/"
@@ -402,6 +425,9 @@ func watchIdentity(e watchEntry) string {
 // placement journal.  The poll mutex prevents the background monitor and a
 // reconnect's immediate catch-up from assigning duplicate changes.
 func (h *watchHub) pollScope(scope *watchScope) error {
+	if err := h.journalFailure(); err != nil {
+		return err
+	}
 	scope.pollMu.Lock()
 	defer scope.pollMu.Unlock()
 	next, err := collectWatch(scope.root, scope.recursive)
@@ -556,6 +582,9 @@ func (h *watchHub) publishLocked(scope string, event *v1.WatchEvent) {
 // the live fan-out. Replay is returned separately so the live queue remains a
 // small, fixed bound even when the retained journal is large.
 func (h *watchHub) subscribe(scope *watchScope, after uint64, initial bool) (*watchSubscriber, []*v1.WatchEvent, error) {
+	if err := h.journalFailure(); err != nil {
+		return nil, nil, err
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if scope.epoch != h.epoch {
