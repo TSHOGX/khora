@@ -1564,6 +1564,17 @@ func serveSubscriber(ctx context.Context, stream eventSender, sub *subscriber, s
 		case f, ok := <-sub.ch:
 			if !ok {
 				if sub.overflow.Load() {
+					// Make the recovery instruction part of the wire stream before
+					// terminating it. A caller must be able to distinguish a dropped
+					// copy from a clean process exit even when it only observes the
+					// final stream frames; reconnecting with the last cursor would
+					// otherwise silently continue from an uncovered window.
+					if err := stream.Send(&v1.ProcessEvent{
+						ProcessHandle: handle, PlacementEpoch: epoch, Gap: true, ResetReason: "overflow",
+						Kind: &v1.ProcessEvent_Keepalive{Keepalive: &v1.KeepaliveEvent{}},
+					}); err != nil {
+						return err
+					}
 					return connect.NewError(connect.CodeResourceExhausted, errString("subscriber send window overflow — dropped"))
 				}
 				return nil // clean end: end frame delivered, then channel closed

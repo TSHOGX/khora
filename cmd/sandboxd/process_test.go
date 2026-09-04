@@ -358,6 +358,27 @@ func TestProcessSequenceOverflowFailsClosedWithoutWrapping(t *testing.T) {
 	}
 }
 
+func TestServeSubscriberEmitsOverflowResetBeforeResourceExhausted(t *testing.T) {
+	sub := &subscriber{ch: make(chan frame)}
+	sub.overflow.Store(true)
+	close(sub.ch)
+	sink := &failingSender{}
+	err := serveSubscriber(context.Background(), sink, sub, nil, false, frame{}, "proc_overflow", 7, false)
+	if connect.CodeOf(err) != connect.CodeResourceExhausted {
+		t.Fatalf("serveSubscriber overflow error = %v; want resource_exhausted", err)
+	}
+	if len(sink.sent) != 1 {
+		t.Fatalf("overflow stream sent %d frames; want one reset marker", len(sink.sent))
+	}
+	marker := sink.sent[0]
+	if !marker.Gap || marker.ResetReason != "overflow" || marker.ProcessHandle != "proc_overflow" || marker.PlacementEpoch != 7 {
+		t.Fatalf("overflow reset marker = %+v; want gap/overflow handle+epoch", marker)
+	}
+	if _, ok := marker.Kind.(*v1.ProcessEvent_Keepalive); !ok {
+		t.Fatalf("overflow reset marker kind = %T; want keepalive", marker.Kind)
+	}
+}
+
 func TestProcessFinishAtMaximumSequenceDoesNotWrap(t *testing.T) {
 	p := newProc(1, nil)
 	p.sequence = ^uint64(0)
