@@ -78,11 +78,16 @@ type watchHub struct {
 	// loadErr is immutable after construction. A journal read or decode failure
 	// must not be treated as an empty history: doing so can accept a caller's
 	// old cursor against a reset sequence and silently skip retained changes.
-	loadErr  error
-	capacity int
-	epoch    uint64
-	sequence uint64
-	records  []watchEventRecord
+	loadErr error
+	// journalErr records a persistence failure after construction. Once a write
+	// cannot be durably committed, continuing to serve the in-memory cursor could
+	// acknowledge events that disappear on restart; fail closed until a fresh
+	// placement/transport restart can reload a valid journal.
+	journalErr error
+	capacity   int
+	epoch      uint64
+	sequence   uint64
+	records    []watchEventRecord
 	// dropped records are tracked per scope.  A global ring can evict records
 	// for another scope without making this scope's cursor appear to have a
 	// gap, so the eviction watermark is scoped as well.
@@ -137,7 +142,13 @@ func newWatchHub(path string, capacity int) *watchHub {
 // error. The journal path is deliberately omitted: it is a guest-private
 // implementation detail and must not cross the transport boundary.
 func (h *watchHub) journalFailure() error {
-	if h == nil || h.loadErr == nil {
+	if h == nil {
+		return nil
+	}
+	h.mu.Lock()
+	failed := h.loadErr != nil || h.journalErr != nil
+	h.mu.Unlock()
+	if !failed {
 		return nil
 	}
 	return connect.NewError(connect.CodeUnavailable, errors.New("filesystem watch journal unavailable"))
@@ -203,6 +214,10 @@ func (h *watchHub) load() error {
 		}
 		lastSequence = rec.Event.Sequence
 	}
+	// The ring may evict older records, but it always retains the newest record;
+	// therefore a non-empty journal must end at the global high-water mark. A
+	// missing newest record would make replay silently skip a change after
+	// restart, so reject that corruption rather than resetting history.
 	if len(state.Records) != 0 && lastSequence != state.Sequence {
 		return errors.New("watch journal sequence watermark does not match its records")
 	}
@@ -280,29 +295,39 @@ func (h *watchHub) persistLocked() error {
 	}
 	b, err := json.Marshal(h.persistedLocked())
 	if err != nil {
-		return err
+		h.journalErr = err
+		return watchJournalUnavailableError()
 	}
 	tmp := h.path + ".tmp"
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
-		return err
+		h.journalErr = err
+		return watchJournalUnavailableError()
 	}
 	if _, err := f.Write(b); err != nil {
 		_ = f.Close()
-		return err
+		h.journalErr = err
+		return watchJournalUnavailableError()
 	}
 	if err := f.Sync(); err != nil {
 		_ = f.Close()
-		return err
+		h.journalErr = err
+		return watchJournalUnavailableError()
 	}
 	if err := f.Close(); err != nil {
-		return err
+		h.journalErr = err
+		return watchJournalUnavailableError()
 	}
 	if err := os.Rename(tmp, h.path); err != nil {
 		_ = os.Remove(tmp)
-		return err
+		h.journalErr = err
+		return watchJournalUnavailableError()
 	}
 	return nil
+}
+
+func watchJournalUnavailableError() error {
+	return connect.NewError(connect.CodeUnavailable, errors.New("filesystem watch journal unavailable"))
 }
 
 func watchStaleEpochError() error {

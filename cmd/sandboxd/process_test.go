@@ -364,6 +364,33 @@ func TestPersistedRingAndExitSurviveReload(t *testing.T) {
 	}
 }
 
+func TestProcessJournalCorruptionFailsClosed(t *testing.T) {
+	state := filepath.Join(t.TempDir(), "processes.json")
+	if err := os.WriteFile(state, []byte(`[{"handle":"proc_a"}] trailing`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := &processServer{statePath: state}
+	s.loadPersistent()
+	if err := s.journalFailure(); err == nil || connect.CodeOf(err) != connect.CodeUnavailable {
+		t.Fatalf("corrupt process journal failure = %v; want unavailable", err)
+	}
+	if s.byHandle != nil {
+		t.Fatalf("corrupt process journal populated handles: %+v", s.byHandle)
+	}
+}
+
+func TestProcessJournalUnreadableFailsClosed(t *testing.T) {
+	state := filepath.Join(t.TempDir(), "processes.json")
+	if err := os.Mkdir(state, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	s := &processServer{statePath: state}
+	s.loadPersistent()
+	if err := s.journalFailure(); err == nil || connect.CodeOf(err) != connect.CodeUnavailable {
+		t.Fatalf("unreadable process journal failure = %v; want unavailable", err)
+	}
+}
+
 func TestStartSpecHashIncludesPlacementEpoch(t *testing.T) {
 	a := startSpecHash(&v1.StartRequest{Cmd: "/bin/true", PlacementEpoch: 1})
 	b := startSpecHash(&v1.StartRequest{Cmd: "/bin/true", PlacementEpoch: 2})

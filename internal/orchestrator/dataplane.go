@@ -820,7 +820,12 @@ func (f *fsProxy) Watch(ctx context.Context, req *connect.Request[v1.WatchReques
 					// boundary explicit; typed cursor-gap errors still pass through
 					// as resource-exhausted below.
 					var ce *connect.Error
-					if !errors.As(ev.Err, &ce) || ce.Code() == connect.CodeUnavailable {
+					// Only an unclassified/non-wire Unavailable means the inner
+					// transport endpoint disappeared and is safe to represent as a
+					// reconnect reset. A wire-sent Unavailable is an actual guest
+					// verdict (for example, a corrupt watch journal) and must remain
+					// an error rather than being mislabeled as a recoverable restart.
+					if !errors.As(ev.Err, &ce) || (ce.Code() == connect.CodeUnavailable && !connect.IsWireError(ev.Err)) {
 						_ = stream.Send(&v1.WatchEvent{PlacementEpoch: uint64(epoch), Reset_: true, ResetReason: "transport"})
 						return nil
 					}
@@ -955,7 +960,10 @@ func (p *processProxy) forwardProcessEvents(ctx context.Context, sandbox string,
 		}
 		if ev.Sequence > localSeq {
 			localSeq = ev.Sequence
-		} else if ev.Kind == "data" || ev.Kind == "end" {
+		} else if ev.Sequence == 0 && (ev.Kind == "data" || ev.Kind == "end") {
+			// Legacy transports may omit sequence numbers. Only that explicit
+			// absence gets a synthetic local increment; a duplicate or stale
+			// numbered frame must never manufacture cursor progress.
 			localSeq++
 		}
 		if ev.Handle != "" {
@@ -965,6 +973,24 @@ func (p *processProxy) forwardProcessEvents(ctx context.Context, sandbox string,
 				epoch := ev.Epoch
 				if epoch == 0 && rec != nil {
 					epoch = uint64(rec.PlacementEpoch)
+				}
+				// A stable Connect to an exited handle replays the guest's
+				// synthetic start marker before its retained output and terminal
+				// frame. The durable terminal row is authoritative; projecting
+				// that marker as running would attempt to resurrect it and is
+				// correctly rejected by the Store fence. Advance only a newer
+				// cursor while preserving terminal metadata.
+				if rec != nil && rec.State == model.ProcessExited {
+					if localSeq > rec.OutputCursor.Sequence {
+						rec.OutputCursor.Sequence = localSeq
+						if err := p.e.Mediator.UpdateProcess(ctx, *rec); err != nil {
+							return processProjectionError("persist process replay start", rec.ID, err)
+						}
+					}
+					break
+				}
+				if rec != nil && (rec.State == model.ProcessPaused || rec.State == model.ProcessReclaimed) {
+					return processProjectionError("persist process replay start", rec.ID, store.ErrProcessConflict)
 				}
 				now := time.Now()
 				if rec == nil {
@@ -981,7 +1007,7 @@ func (p *processProxy) forwardProcessEvents(ctx context.Context, sandbox string,
 						}
 						rec = &existing
 					} else {
-						return fmt.Errorf("persist process start %s: %w", candidate.ID, err)
+						return processProjectionError("persist process start", candidate.ID, err)
 					}
 				} else {
 					if ev.Handle != string(rec.ID) {
@@ -993,22 +1019,21 @@ func (p *processProxy) forwardProcessEvents(ctx context.Context, sandbox string,
 						rec.OutputCursor = model.ProcessOutputCursor(rec.ID, rec.PlacementEpoch, localSeq)
 					}
 					if err := p.e.Mediator.UpdateProcess(ctx, *rec); err != nil {
-						return fmt.Errorf("persist process start %s: %w", rec.ID, err)
+						return processProjectionError("persist process start", rec.ID, err)
 					}
 				}
 			case "data":
 				if rec != nil {
 					if localSeq > rec.OutputCursor.Sequence {
-						rec.OutputCursor.Sequence = localSeq
-					}
-					if err := p.e.Mediator.UpdateProcess(ctx, *rec); err != nil {
-						return fmt.Errorf("persist process output %s: %w", rec.ID, err)
+						if err := persistProcessProgress(ctx, p, rec, localSeq); err != nil {
+							return processProjectionError("persist process output", rec.ID, err)
+						}
 					}
 				}
 			case "end":
 				if rec != nil {
 					if err := persistProcessEnd(ctx, p, rec, ev, localSeq); err != nil {
-						return fmt.Errorf("persist process exit %s: %w", rec.ID, err)
+						return processProjectionError("persist process exit", rec.ID, err)
 					}
 				}
 			}
@@ -1038,7 +1063,12 @@ func applyProcessEnd(rec *model.Process, ev transport.ProcessEvent, now time.Tim
 	}
 	switch rec.State {
 	case model.ProcessExited:
-		if rec.ExitCode == nil || *rec.ExitCode != ev.ExitCode {
+		// A durable exit may intentionally have an unknown code. The wire End
+		// field is an int32 (whose zero is indistinguishable from an omitted
+		// value to older transports), so never turn that unknown into a claimed
+		// success merely because a replay carries 0. If a code was recorded,
+		// conflicting replay data is rejected.
+		if rec.ExitCode != nil && *rec.ExitCode != ev.ExitCode {
 			return store.ErrProcessConflict
 		}
 		if ev.PID != 0 && rec.PID != 0 && ev.PID != rec.PID {
@@ -1105,10 +1135,54 @@ func sameProcessIdentity(a, b model.Process) bool {
 }
 
 func sameProcessExit(p model.Process, ev transport.ProcessEvent) bool {
-	if p.State != model.ProcessExited || p.ExitCode == nil || *p.ExitCode != ev.ExitCode {
+	if p.State != model.ProcessExited {
+		return false
+	}
+	if p.ExitCode != nil && *p.ExitCode != ev.ExitCode {
 		return false
 	}
 	return ev.PID == 0 || p.PID == 0 || p.PID == ev.PID
+}
+
+func processProjectionError(op string, id model.ProcessID, err error) error {
+	if errors.Is(err, store.ErrProcessConflict) {
+		return connect.NewError(connect.CodeFailedPrecondition, errors.New("process state changed; reconnect with the current handle"))
+	}
+	return fmt.Errorf("%s %s: %w", op, id, err)
+}
+
+// persistProcessProgress advances only the output cursor. A second subscriber
+// can legitimately hold a stale Running copy after another subscriber commits
+// the terminal Exited state; reconcile that race against the durable row rather
+// than terminating the otherwise valid fan-out stream. Reclaimed or mismatched
+// rows remain a hard fence.
+func persistProcessProgress(ctx context.Context, p *processProxy, rec *model.Process, sequence uint64) error {
+	if rec == nil || sequence <= rec.OutputCursor.Sequence {
+		return nil
+	}
+	rec.OutputCursor.Sequence = sequence
+	if err := p.e.Mediator.UpdateProcess(ctx, *rec); err == nil {
+		return nil
+	} else if !errors.Is(err, store.ErrProcessConflict) {
+		return err
+	}
+	current, readErr := p.e.Mediator.Process(ctx, rec.ID)
+	if readErr != nil || !sameProcessIdentity(*rec, current) {
+		return store.ErrProcessConflict
+	}
+	switch current.State {
+	case model.ProcessExited:
+		if current.OutputCursor.Sequence < sequence {
+			current.OutputCursor.Sequence = sequence
+			if err := p.e.Mediator.UpdateProcess(ctx, current); err != nil && !errors.Is(err, store.ErrProcessConflict) {
+				return err
+			}
+		}
+		*rec = current
+		return nil
+	default:
+		return store.ErrProcessConflict
+	}
 }
 
 // normalizeProcessEventIdentity establishes and validates the identity carried

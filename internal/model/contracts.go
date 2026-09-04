@@ -226,6 +226,9 @@ func (p Process) Validate() error {
 	if p.State != ProcessExited && p.ExitCode != nil {
 		return NewContractError(ErrorInvalidArgument, "exit code is only valid for an exited process")
 	}
+	if p.State == ProcessReclaimed && (p.PID != 0 || p.ExitCode != nil) {
+		return NewContractError(ErrorInvalidArgument, "reclaimed process cannot retain a PID or exit code")
+	}
 	if p.OutputCursor.Stream != CursorStreamProcessOutput {
 		return NewContractError(ErrorInvalidArgument, "process output cursor has the wrong stream")
 	}
@@ -248,10 +251,7 @@ type ProcessRetentionPolicy struct {
 	ExitedFor time.Duration `json:"exited_for"`
 }
 
-const (
-	DefaultProcessExitRetention time.Duration = 24 * time.Hour
-	ProcessReclaimedEvent                     = "process-reclaimed"
-)
+const DefaultProcessExitRetention time.Duration = 24 * time.Hour
 
 var DefaultProcessRetention = ProcessRetentionPolicy{ExitedFor: DefaultProcessExitRetention}
 

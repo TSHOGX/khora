@@ -15,10 +15,13 @@ admission, or destroy the Sandbox.
 
 ## Failed transitions
 
-Lifecycle operations return to their source state when construction fails. Cleanup
-uses the artifacts accumulated so far; it does not rely on a second compensating
-transaction. Startup sweeps reclaim provider artifacts that no durable record owns,
-including interrupted create and promote work.
+Preflight lifecycle refusals return to their source state before materialization.
+Promotion digest verification is a deliberate post-materialization check: when it
+fails, a running source remains paused, no Template row is published, and startup or
+periodic sweeps reclaim the unowned layer. Cleanup uses the artifacts accumulated so
+far; it does not rely on a second compensating transaction. Startup sweeps reclaim
+provider artifacts that no durable record owns, including interrupted create and
+promote work.
 
 The failure paths and orphan rules are exercised by
 [internal/lifecycle/failpath_test.go](../../internal/lifecycle/failpath_test.go),

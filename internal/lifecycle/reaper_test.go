@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -523,5 +524,19 @@ func TestReaperTelemetrySchedulingIsBoundedAndNonBlocking(t *testing.T) {
 	case <-done:
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("telemetry scheduling blocked while sampler queue was full")
+	}
+}
+
+func TestReaperRejectsPartialTelemetryPolicyFailClosed(t *testing.T) {
+	logs := make([]string, 0)
+	m := New(Deps{
+		Store:           store.NewMemory(),
+		TelemetryPolicy: model.TelemetryPolicy{Interval: time.Second},
+		Logf:            func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) },
+	})
+	r := NewReaper(m, time.Hour, time.Hour)
+	r.sampleTelemetry(context.Background())
+	if len(logs) == 0 || !strings.Contains(logs[len(logs)-1], "telemetry policy") {
+		t.Fatalf("partial telemetry policy was not rejected/logged: %v", logs)
 	}
 }

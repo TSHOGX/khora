@@ -22,10 +22,13 @@ The first cold realization uses epoch `1`.  `Resume` increments the epoch and
 `stale_epoch` class; it is never silently redirected to the current
 Placement.  Epoch wraparound is refused.
 
-An exited Process remains addressable for 24 hours by default.  At the inclusive
-deadline cleanup emits `process-reclaimed`; destroying the parent Sandbox
-reclaims all remaining Process records immediately.  The exit status is part of
-the logical Process record, not inferred from a later PID lookup.
+An exited Process remains addressable for 24 hours by default. At the inclusive
+deadline cleanup changes the durable Process state to `reclaimed` and clears its
+PID locator and exit code. This is not a Sandbox lifecycle event: the existing
+outbox remains the closed six-kind Sandbox transition stream. Destroying the
+parent Sandbox removes all remaining Process records immediately. The exit
+status is part of the logical Process record until its retention deadline, not
+inferred from a later PID lookup.
 
 ## Operation ledger
 
@@ -72,9 +75,9 @@ without making completeness claims the substrate has not measured:
 
 | Gate | Contract decision | Evidence anchor |
 | --- | --- | --- |
-| Process retention | 24-hour exited-handle window; reclaim event at expiry; Sandbox destroy is an immediate reclaim boundary | `TestProcessExitRetentionAndReclaimBoundary` |
+| Process retention | 24-hour exited-handle window; durable `reclaimed` state at expiry; Sandbox destroy removes remaining records | `TestProcessExitRetentionAndReclaimBoundary`; Store contract `ProcessCore` |
 | Filesystem watch | change-detection semantics, recursive by default, 4096-event bound, explicit overflow gap and full rescan, reset on epoch change | `TestDecisionGatePolicies`; `WatchPolicy.Validate` |
-| Telemetry | 10-second Sandbox usage-sample interval, 24-hour retention, per-object timestamp and independent cursor lane; Placement and Process expose snapshots; lifecycle publication does not wait on samples | `TestDecisionGatePolicies`; `TelemetryPolicy.Validate` |
+| Telemetry | 10-second Sandbox usage-sample interval, 24-hour retention, per-Sandbox timestamp and independent cursor lane; Placement and Process expose snapshots without persisted sample lanes; lifecycle publication does not wait on samples | `TestDecisionGatePolicies`; `TelemetryPolicy.Validate` |
 | Template manifest | schema version 1, optional SHA-256 digest, `os/arch` platform, sorted unique capabilities, provenance, and SBOM reference | `TestTemplateManifestNormalizationValidationAndDigest` |
 | Operation recovery | 30-second lease, takeover only after expiry, and phase-based cleanup classification | `TestOperationHashKeyReuseAndRestartTakeover` |
 

@@ -284,3 +284,79 @@ func TestForwardProcessEventsReplayedEndKeepsTerminalMetadata(t *testing.T) {
 		t.Fatalf("forwarded replayed end events = %+v", sink.events)
 	}
 }
+
+func TestForwardProcessEventsReplayedStartDataEndKeepsExitedHandle(t *testing.T) {
+	p, sid := processReservationFixture(t)
+	ctx := context.Background()
+	started := time.Now().Add(-3 * time.Second)
+	exited := started.Add(time.Second)
+	code := 0
+	proc := model.Process{
+		ID:             "proc_replayed_sequence",
+		Sandbox:        sid,
+		PlacementEpoch: 7,
+		PID:            44,
+		State:          model.ProcessExited,
+		ExitCode:       &code,
+		StartedAt:      started,
+		ExitedAt:       &exited,
+		OutputCursor:   model.ProcessOutputCursor("proc_replayed_sequence", 7, 1),
+	}
+	if err := p.e.Store.CreateProcess(ctx, proc); err != nil {
+		t.Fatal(err)
+	}
+	sink := &captureProcessEvents{}
+	ch := make(chan transport.ProcessEvent, 3)
+	// The supervisor emits a synthetic start marker before replaying retained
+	// output and the terminal frame. None of these frames may resurrect or
+	// rewrite a durable Exited row.
+	ch <- transport.ProcessEvent{Kind: "start", Handle: string(proc.ID), Epoch: 7, Sequence: 0, PID: proc.PID, Replay: true}
+	ch <- transport.ProcessEvent{Kind: "data", Handle: string(proc.ID), Epoch: 7, Sequence: 2, Replay: true, Stream: "stdout", Data: []byte("retained")}
+	ch <- transport.ProcessEvent{Kind: "end", Handle: string(proc.ID), Epoch: 7, Sequence: 3, Replay: true, ExitCode: code}
+	close(ch)
+	if err := p.forwardProcessEvents(ctx, string(sid), ch, sink, &proc); err != nil {
+		t.Fatalf("forward complete replay: %v", err)
+	}
+	got, err := p.e.Store.GetProcess(ctx, proc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != model.ProcessExited || got.PID != proc.PID || got.ExitCode == nil || *got.ExitCode != code || !got.ExitedAt.Equal(exited) || got.OutputCursor.Sequence != 3 {
+		t.Fatalf("complete replay projection = %+v; want terminal metadata preserved and cursor=3", got)
+	}
+	if len(sink.events) != 3 {
+		t.Fatalf("forwarded complete replay events = %d; want 3", len(sink.events))
+	}
+}
+
+func TestForwardProcessEventsDoesNotFabricateProgressForStaleSequence(t *testing.T) {
+	p, sid := processReservationFixture(t)
+	ctx := context.Background()
+	started := time.Now().Add(-time.Second)
+	proc := model.Process{
+		ID:             "proc_stale_sequence",
+		Sandbox:        sid,
+		PlacementEpoch: 7,
+		PID:            45,
+		State:          model.ProcessRunning,
+		StartedAt:      started,
+		OutputCursor:   model.ProcessOutputCursor("proc_stale_sequence", 7, 5),
+	}
+	if err := p.e.Store.CreateProcess(ctx, proc); err != nil {
+		t.Fatal(err)
+	}
+	sink := &captureProcessEvents{}
+	ch := make(chan transport.ProcessEvent, 1)
+	ch <- transport.ProcessEvent{Kind: "data", Handle: string(proc.ID), Epoch: 7, Sequence: 2, Replay: true, Stream: "stdout", Data: []byte("old")}
+	close(ch)
+	if err := p.forwardProcessEvents(ctx, string(sid), ch, sink, &proc); err != nil {
+		t.Fatalf("forward stale sequence: %v", err)
+	}
+	got, err := p.e.Store.GetProcess(ctx, proc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.OutputCursor.Sequence != 5 {
+		t.Fatalf("stale numbered frame advanced cursor to %d; want 5", got.OutputCursor.Sequence)
+	}
+}

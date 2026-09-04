@@ -18,7 +18,8 @@ import (
 //
 // A caller who wants to wait has two honest options and should pick deliberately:
 // poll Get until the state satisfies them, or subscribe to Events and react to
-// `started` / `auto-paused` / `died`. The second scales; the first is simpler. That
+// the closed lifecycle kinds (`created`, `paused`, `auto-paused`, `crash-paused`,
+// `resumed`, and `destroyed`). The second scales; the first is simpler. That
 // choice is the caller's to make, which is why this package does not make it.
 
 // Duration renders d as the duration string the control-plane API accepts ("30m", "24h"). Provided so

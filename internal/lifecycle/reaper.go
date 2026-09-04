@@ -95,7 +95,15 @@ func NewReaper(m *Mediator, interval, transportDownBudget time.Duration) *Reaper
 // loop). The orchestrator starts it after startup reconcile, in its own
 // goroutine.
 func (r *Reaper) Run(ctx context.Context) {
-	go r.runTelemetry(ctx)
+	// Keep the sampling worker inside Reaper.Run's lifetime. The orchestrator
+	// waits for Reaper.Run before closing the Store; letting this worker escape
+	// would permit a late provider/store call after that close.
+	telemetryDone := make(chan struct{})
+	go func() {
+		defer close(telemetryDone)
+		r.runTelemetry(ctx)
+	}()
+	defer func() { <-telemetryDone }()
 	t := time.NewTicker(r.interval)
 	defer t.Stop()
 	for {
@@ -212,11 +220,13 @@ func (r *Reaper) scheduleTelemetry(ctx context.Context) {
 
 func (r *Reaper) sampleTelemetry(ctx context.Context) {
 	policy := r.m.deps.TelemetryPolicy
-	if policy.Interval <= 0 {
+	if err := policy.Validate(); err != nil {
+		r.m.deps.Logf("reaper: telemetry policy: %v", err)
 		return
 	}
 	recs, err := r.m.deps.Store.ListSandboxes(ctx)
 	if err != nil {
+		r.m.deps.Logf("reaper: telemetry list sandboxes: %v", err)
 		return
 	}
 	now := time.Now()
@@ -228,6 +238,10 @@ func (r *Reaper) sampleTelemetry(ctx context.Context) {
 		}
 		if err := r.m.SampleTelemetry(ctx, rec.ID); err != nil {
 			r.m.deps.Logf("reaper: telemetry sample %s: %v", rec.ID, err)
+			// A failed read must not advance the per-Sandbox cadence marker;
+			// otherwise one transient provider/store failure suppresses retries
+			// for the whole interval and creates a silent sampling hole.
+			continue
 		}
 		r.lastTelemetry[rec.ID] = now
 	}

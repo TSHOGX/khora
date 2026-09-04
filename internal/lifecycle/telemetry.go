@@ -51,6 +51,9 @@ func (m *Mediator) Telemetry(ctx context.Context, id model.SandboxID, after uint
 
 func (m *Mediator) TrimTelemetry(ctx context.Context) error {
 	policy := m.deps.TelemetryPolicy
+	if err := policy.Validate(); err != nil {
+		return fmt.Errorf("telemetry policy: %w", err)
+	}
 	if policy.Retention <= 0 {
 		return nil
 	}

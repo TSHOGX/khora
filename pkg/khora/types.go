@@ -22,7 +22,7 @@ package khora
 //   - A duration crosses the wire as a Go duration STRING ("30m", "24h"), so the unit
 //     is explicit. Use Duration() to build one.
 
-// SandboxState is one of the lifecycle state machine's five spellings. A string, not an enum: the engine is
+// SandboxState is one of the lifecycle state machine's four spellings. A string, not an enum: the engine is
 // authoritative for the set, and a Go constant that fell behind it would be worse than
 // no constant. Compare against the exported values below.
 type SandboxState = string
@@ -34,11 +34,10 @@ type IdempotencyKey string
 // The lifecycle state machine states. Present as constants because a caller branching on state is the
 // common case and a typo'd literal is silent.
 const (
-	StateCreating SandboxState = "creating"
-	StateRunning  SandboxState = "running"
-	StatePausing  SandboxState = "pausing"
-	StatePaused   SandboxState = "paused"
-	StateDead     SandboxState = "dead"
+	StateCreating  SandboxState = "creating"
+	StateRunning   SandboxState = "running"
+	StatePaused    SandboxState = "paused"
+	StateDestroyed SandboxState = "destroyed"
 )
 
 // EventKind is one of the lifecycle state machine's SIX kinds. The set is CLOSED (the lifecycle state machine, and a SQLite CHECK
@@ -47,12 +46,12 @@ const (
 type EventKind = string
 
 const (
-	KindCreated    EventKind = "created"
-	KindStarted    EventKind = "started"
-	KindAutoPaused EventKind = "auto-paused"
-	KindResumed    EventKind = "resumed"
-	KindDied       EventKind = "died"
-	KindDestroyed  EventKind = "destroyed"
+	KindCreated     EventKind = "created"
+	KindPaused      EventKind = "paused"
+	KindAutoPaused  EventKind = "auto-paused"
+	KindCrashPaused EventKind = "crash-paused"
+	KindResumed     EventKind = "resumed"
+	KindDestroyed   EventKind = "destroyed"
 )
 
 // CreateRequest is POST /v1/sandboxes.
@@ -173,8 +172,8 @@ type Event struct {
 	// resumed event. It is absent on transitions that do not establish a placement.
 	PlacementAddress string `json:"placement_address,omitempty"`
 	PlacementEpoch   uint64 `json:"placement_epoch,omitempty"`
-	// Cause is present on `died` and on a `destroyed` that followed a death — the
-	// reason the isolation unit was found dead. Absent otherwise.
+	// Cause is present only on `destroyed` events, distinguishing an explicit
+	// destroy from retention expiry. Crash causes remain on the Sandbox record.
 	Cause      string `json:"cause,omitempty"`
 	OccurredAt string `json:"occurred_at"`
 }

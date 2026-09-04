@@ -375,6 +375,17 @@ func TestPromoteRejectsDeclaredDigestMismatchBeforeTemplateCommit(t *testing.T) 
 	if _, err := m.PromoteWithManifest(ctx, sid, &manifest); model.ErrorClassOf(err) != model.ErrorConflict {
 		t.Fatalf("promote digest mismatch = %v; want conflict", err)
 	}
+	// Digest verification is against the newly materialized layer, so this
+	// refusal is intentionally post-quiesce. The source is left at rest and the
+	// unclaimed layer is recovered by the orphan-layer sweep; no template row is
+	// exposed.
+	rec, err := st.GetSandbox(ctx, sid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.State != model.Paused {
+		t.Fatalf("source state after post-materialization digest refusal = %s; want paused", rec.State)
+	}
 	templates, err := st.ListTemplates(ctx)
 	if err != nil {
 		t.Fatal(err)

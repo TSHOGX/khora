@@ -139,10 +139,21 @@ func TestProcessExitRetentionAndReclaimBoundary(t *testing.T) {
 	if !proc.Reclaimable(deadline, model.DefaultProcessRetention) {
 		t.Fatal("process was not reclaimable at the inclusive retention boundary")
 	}
-	if model.ProcessReclaimedEvent != "process-reclaimed" {
-		t.Fatalf("reclaim event = %q, want process-reclaimed", model.ProcessReclaimedEvent)
-	}
 }
+
+func TestReclaimedProcessClearsLocatorAndExitCode(t *testing.T) {
+	now := time.Now()
+	code := 1
+	bad := model.Process{
+		ID: "proc_reclaimed", Sandbox: "sbx_reclaimed", PlacementEpoch: 1,
+		PID: 7, State: model.ProcessReclaimed, ExitCode: &code,
+		StartedAt: now, ExitedAt: ptrTime(now),
+		OutputCursor: model.ProcessOutputCursor("proc_reclaimed", 1, 0),
+	}
+	requireClass(t, bad.Validate(), model.ErrorInvalidArgument)
+}
+
+func ptrTime(t time.Time) *time.Time { return &t }
 
 func TestTemplateManifestNormalizationValidationAndDigest(t *testing.T) {
 	content := []byte("immutable template bytes")

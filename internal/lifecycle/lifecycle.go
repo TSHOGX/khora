@@ -339,7 +339,7 @@ func New(deps Deps) *Mediator {
 	if deps.DrainGrace == 0 {
 		deps.DrainGrace = defaultDrainGrace
 	}
-	if deps.TelemetryPolicy.Interval == 0 {
+	if deps.TelemetryPolicy.Interval == 0 && deps.TelemetryPolicy.Retention == 0 {
 		deps.TelemetryPolicy = model.DefaultTelemetryPolicy
 	}
 	if deps.ProcessRetention.ExitedFor == 0 {
@@ -1027,13 +1027,13 @@ func (m *Mediator) destroyLocked(ctx context.Context, rec model.Sandbox, cause m
 // ErrInsufficientCapacity (507), the harm being an UNRELATED sandbox meeting ENOSPC nowhere
 // near its own cap. Gated through admitUncappedGrowth, never `admit` (admission.go).
 //
-// The gate runs BEFORE the quiesce, paying in forecast accuracy rather than in the state
-// machine: gating after it buys an exact count at the price of A REFUSAL THAT MUTATED STATE —
-// a running sandbox left `paused`, with a `paused` event published, because the node was full.
-// The source is therefore still live when measured, so the number is an upper bound bounded by
-// that sandbox's own headroom.
-//
-// A refused Promote leaves the sandbox in its ENTRY state, no layer bytes, no `templates` row.
+// The admission and lineage gates run BEFORE the quiesce, paying in forecast accuracy rather
+// than mutating a source for a refusal those gates can decide up front. Digest verification is
+// different: the provider can authenticate only the newly materialized layer, so a declared
+// digest mismatch is discovered after quiesce and byte copy. That post-materialization refusal
+// leaves a running source paused and leaves an unclaimed layer for the orphan sweep; it never
+// inserts a Template row. Callers must distinguish these bounded cleanup outcomes from a
+// preflight refusal.
 func (m *Mediator) Promote(ctx context.Context, id model.SandboxID) (model.TemplateID, error) {
 	return m.promoteWithManifest(ctx, id, nil)
 }

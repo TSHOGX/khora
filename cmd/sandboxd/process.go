@@ -2,11 +2,13 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -57,11 +59,17 @@ type processServer struct {
 	// handleFlights closes the fork-before-register window for a caller-supplied
 	// logical handle. A retry must wait for the original materialization rather
 	// than overwrite byHandle and orphan the first workload.
-	handleFlights    map[string]*startFlight
-	persistMu        sync.Mutex
-	persistScheduled bool
-	persistDirty     bool
-	statePath        string
+	handleFlights      map[string]*startFlight
+	persistMu          sync.Mutex
+	persistScheduled   bool
+	persistDirty       bool
+	statePath          string
+	persistenceEnabled atomic.Bool
+	// Journal errors are sticky for this supervisor lifetime. Treating a
+	// missing/corrupt process journal as an empty registry could let a keyed
+	// retry fork a duplicate workload or route a handle to the wrong process.
+	loadErr    error
+	journalErr error
 	// remote is set only by a transport child.  PID 1 owns the process hub and
 	// the transport role talks to it over the private guest Unix socket.  Keeping
 	// this seam optional preserves the pure in-process hub used by unit tests.
@@ -92,6 +100,9 @@ func startClaimAlias(key, handle string) string {
 // in memory only while the durable handle is being registered; the resulting
 // handle and request hash are persisted with the process row.
 func (s *processServer) claimStart(key, handle, hash string) (existing *proc, wait <-chan struct{}, owner bool, err error) {
+	if err := s.journalFailure(); err != nil {
+		return nil, nil, false, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.idempotency == nil {
@@ -230,15 +241,54 @@ type persistedFrame struct {
 }
 
 func (s *processServer) loadPersistent() {
+	s.persistenceEnabled.Store(true)
 	if s.statePath == "" {
 		s.statePath = processStatePath
 	}
 	b, err := os.ReadFile(s.statePath)
 	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			s.loadErr = err
+		}
 		return
 	}
 	var saved []persistedProcess
-	if json.Unmarshal(b, &saved) != nil {
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&saved); err != nil {
+		s.loadErr = err
+		return
+	}
+	var trailing any
+	if err := dec.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			err = errors.New("process journal has trailing JSON values")
+		}
+		s.loadErr = err
+		return
+	}
+	if saved == nil && len(bytes.TrimSpace(b)) != 0 {
+		s.loadErr = errors.New("process journal must contain an array")
+		return
+	}
+	seen := make(map[string]struct{}, len(saved))
+	for _, row := range saved {
+		if row.Handle == "" {
+			s.loadErr = errors.New("process journal contains an empty handle")
+			return
+		}
+		if _, ok := seen[row.Handle]; ok {
+			s.loadErr = errors.New("process journal contains duplicate handles")
+			return
+		}
+		seen[row.Handle] = struct{}{}
+		if row.State != "running" && row.State != "exited" {
+			s.loadErr = errors.New("process journal contains an unknown process state")
+			return
+		}
+	}
+	if len(bytes.TrimSpace(b)) == 0 {
+		s.loadErr = errors.New("process journal is empty")
 		return
 	}
 	s.mu.Lock()
@@ -358,6 +408,9 @@ func (s *processServer) watchRestored() {
 }
 
 func (s *processServer) savePersistentLocked() {
+	if !s.persistenceEnabled.Load() {
+		return
+	}
 	s.savePersistentLockedAt(s.persistencePath())
 }
 
@@ -408,12 +461,34 @@ func (s *processServer) savePersistentLockedAt(path string) {
 	}
 	b, err := json.Marshal(all)
 	if err != nil {
+		s.journalErr = err
 		return
 	}
 	tmp := path + ".tmp"
-	if os.WriteFile(tmp, b, 0o600) == nil {
-		_ = os.Rename(tmp, path)
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		s.journalErr = err
+		return
 	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		s.journalErr = err
+	}
+}
+
+// journalFailure converts process-journal persistence failures into a stable
+// transport error. The journal path is guest-private and must not cross the
+// transport boundary.
+func (s *processServer) journalFailure() error {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	failed := s.loadErr != nil || s.journalErr != nil
+	s.mu.Unlock()
+	if failed {
+		return connect.NewError(connect.CodeUnavailable, errors.New("process journal unavailable"))
+	}
+	return nil
 }
 
 // Tuning values. Pure numeric knobs — changing one does NOT change the transport behavior/transport behavior shape, and
@@ -427,6 +502,12 @@ const (
 )
 
 func (s *processServer) register(p *proc) {
+	// Unit hubs are ephemeral unless they explicitly select a state path (or a
+	// test swaps the package path). PID 1 calls loadPersistent before serving,
+	// which enables the durable journal and its fail-closed checks.
+	if s.statePath != "" || processStatePath != processStateFile {
+		s.persistenceEnabled.Store(true)
+	}
 	s.mu.Lock()
 	if s.procs == nil {
 		s.procs = make(map[int]*proc)
@@ -470,6 +551,9 @@ func (s *processServer) persistSoon() {
 }
 
 func (s *processServer) persistAt(path string) {
+	if !s.persistenceEnabled.Load() {
+		return
+	}
 	s.mu.Lock()
 	s.savePersistentLockedAt(path)
 	s.mu.Unlock()
@@ -1056,6 +1140,12 @@ func (s *processServer) Start(ctx context.Context, req *connect.Request[v1.Start
 }
 
 func (s *processServer) start(ctx context.Context, req *connect.Request[v1.StartRequest], stream eventSender) (retErr error) {
+	if err := s.journalFailure(); err != nil {
+		return err
+	}
+	if req == nil || req.Msg == nil {
+		return connect.NewError(connect.CodeInvalidArgument, errString("missing start request"))
+	}
 	m := req.Msg
 	if m.Cmd == "" {
 		return connect.NewError(connect.CodeInvalidArgument, errString("empty cmd"))
@@ -1236,6 +1326,12 @@ func (s *processServer) start(ctx context.Context, req *connect.Request[v1.Start
 // Connect reattaches to a running process: replay the bounded ring, then live
 // (bounded replay). Independent per-subscriber copy (the sandbox process model fan-out).
 func (s *processServer) Connect(ctx context.Context, req *connect.Request[v1.ConnectRequest], stream *connect.ServerStream[v1.ProcessEvent]) error {
+	if err := s.journalFailure(); err != nil {
+		return err
+	}
+	if req == nil || req.Msg == nil {
+		return connect.NewError(connect.CodeInvalidArgument, errString("missing connect request"))
+	}
 	var p *proc
 	var ok bool
 	if req.Msg.ProcessHandle != "" {
@@ -1270,6 +1366,9 @@ func (s *processServer) Connect(ctx context.Context, req *connect.Request[v1.Con
 }
 
 func (s *processServer) resolveProcess(handle string, epoch uint64, pid int) (*proc, error) {
+	if err := s.journalFailure(); err != nil {
+		return nil, err
+	}
 	s.mu.Lock()
 	var p *proc
 	if handle != "" {
@@ -1382,6 +1481,9 @@ func sendFrame(stream eventSender, f frame, handle string, epoch uint64, replay 
 // single stream's (process transport). engine does NOT arbitrate multiple writers
 // (transport behavior: bytes interleave, Unix semantics — that is the product layer's call).
 func (s *processServer) StreamInput(_ context.Context, stream *connect.ClientStream[v1.StreamInputRequest]) (*connect.Response[v1.StreamInputResponse], error) {
+	if err := s.journalFailure(); err != nil {
+		return nil, err
+	}
 	var p *proc
 	for stream.Receive() {
 		m := stream.Msg()
@@ -1405,6 +1507,12 @@ func (s *processServer) StreamInput(_ context.Context, stream *connect.ClientStr
 // Update resizes a process's PTY (process transport). No-op-erroring on a non-pty
 // process (nothing to resize).
 func (s *processServer) Update(_ context.Context, req *connect.Request[v1.UpdateRequest]) (*connect.Response[v1.UpdateResponse], error) {
+	if err := s.journalFailure(); err != nil {
+		return nil, err
+	}
+	if req == nil || req.Msg == nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errString("missing update request"))
+	}
 	m := req.Msg
 	p, err := s.resolveProcess(m.ProcessHandle, m.PlacementEpoch, int(m.Pid))
 	if err != nil {
@@ -1421,6 +1529,12 @@ func (s *processServer) Update(_ context.Context, req *connect.Request[v1.Update
 
 // CloseStdin closes stdin (non-pty) or sends EOF (pty, Ctrl-D equivalent).
 func (s *processServer) CloseStdin(_ context.Context, req *connect.Request[v1.CloseStdinRequest]) (*connect.Response[v1.CloseStdinResponse], error) {
+	if err := s.journalFailure(); err != nil {
+		return nil, err
+	}
+	if req == nil || req.Msg == nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errString("missing close-stdin request"))
+	}
 	p, err := s.resolveProcess(req.Msg.ProcessHandle, req.Msg.PlacementEpoch, int(req.Msg.Pid))
 	if err != nil {
 		return nil, err
@@ -1432,6 +1546,12 @@ func (s *processServer) CloseStdin(_ context.Context, req *connect.Request[v1.Cl
 }
 
 func (s *processServer) SendInput(_ context.Context, req *connect.Request[v1.SendInputRequest]) (*connect.Response[v1.SendInputResponse], error) {
+	if err := s.journalFailure(); err != nil {
+		return nil, err
+	}
+	if req == nil || req.Msg == nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errString("missing send-input request"))
+	}
 	m := req.Msg
 	p, err := s.resolveProcess(m.ProcessHandle, m.PlacementEpoch, int(m.Pid))
 	if err != nil {
@@ -1454,6 +1574,12 @@ func (s *processServer) SendInput(_ context.Context, req *connect.Request[v1.Sen
 // The check is HERE (guest side) because the guest startup topology's premise is that the guest can write its own
 // fs and must therefore validate for itself; the orchestrator's copy is only fail-fast.
 func (s *processServer) SendSignal(_ context.Context, req *connect.Request[v1.SendSignalRequest]) (*connect.Response[v1.SendSignalResponse], error) {
+	if err := s.journalFailure(); err != nil {
+		return nil, err
+	}
+	if req == nil || req.Msg == nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errString("missing send-signal request"))
+	}
 	m := req.Msg
 	if m.ProcessHandle != "" {
 		p, err := s.resolveProcess(m.ProcessHandle, m.PlacementEpoch, int(m.Pid))
@@ -1479,6 +1605,9 @@ func (s *processServer) SendSignal(_ context.Context, req *connect.Request[v1.Se
 
 // List scans /proc for live pids (no registry, the transport data plane).
 func (s *processServer) List(_ context.Context, _ *connect.Request[v1.ListRequest]) (*connect.Response[v1.ListResponse], error) {
+	if err := s.journalFailure(); err != nil {
+		return nil, err
+	}
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
