@@ -324,9 +324,10 @@ func schemaFor(t reflect.Type, defs map[string]any) map[string]any {
 		return map[string]any{"type": "string"}
 	case reflect.Bool:
 		return map[string]any{"type": "boolean"}
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
-		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		return map[string]any{"type": "integer", "format": "int64"}
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return map[string]any{"type": "integer", "format": "int64", "minimum": int64(-1 << 63), "maximum": int64(1<<63 - 1)}
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return map[string]any{"type": "integer", "format": "uint64", "minimum": uint64(0), "maximum": ^uint64(0)}
 	case reflect.Float32, reflect.Float64:
 		return map[string]any{"type": "number"}
 	case reflect.Struct:

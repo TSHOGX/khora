@@ -4,14 +4,18 @@
       "Cursor": {
         "properties": {
           "epoch": {
-            "format": "int64",
+            "format": "uint64",
+            "maximum": 18446744073709551615,
+            "minimum": 0,
             "type": "integer"
           },
           "object_id": {
             "type": "string"
           },
           "sequence": {
-            "format": "int64",
+            "format": "uint64",
+            "maximum": 18446744073709551615,
+            "minimum": 0,
             "type": "integer"
           },
           "stream": {
@@ -23,7 +27,9 @@
       "EventEnvelope": {
         "properties": {
           "epoch": {
-            "format": "int64",
+            "format": "uint64",
+            "maximum": 18446744073709551615,
+            "minimum": 0,
             "type": "integer"
           },
           "id": {
@@ -39,7 +45,9 @@
             "$ref": "#/components/schemas/Time"
           },
           "sequence": {
-            "format": "int64",
+            "format": "uint64",
+            "maximum": 18446744073709551615,
+            "minimum": 0,
             "type": "integer"
           },
           "stream": {
@@ -55,6 +63,8 @@
           },
           "value": {
             "format": "int64",
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
             "type": "integer"
           }
         },
@@ -66,7 +76,9 @@
             "$ref": "#/components/schemas/Time"
           },
           "epoch": {
-            "format": "int64",
+            "format": "uint64",
+            "maximum": 18446744073709551615,
+            "minimum": 0,
             "type": "integer"
           },
           "resources": {
@@ -85,6 +97,8 @@
         "properties": {
           "exit_code": {
             "format": "int64",
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
             "type": "integer"
           },
           "exited_at": {
@@ -95,10 +109,14 @@
           },
           "pid": {
             "format": "int64",
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
             "type": "integer"
           },
           "placement_epoch": {
-            "format": "int64",
+            "format": "uint64",
+            "maximum": 18446744073709551615,
+            "minimum": 0,
             "type": "integer"
           },
           "process_id": {
@@ -123,14 +141,20 @@
           },
           "exit_code": {
             "format": "int64",
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
             "type": "integer"
           },
           "pid": {
             "format": "int64",
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
             "type": "integer"
           },
           "placement_epoch": {
-            "format": "int64",
+            "format": "uint64",
+            "maximum": 18446744073709551615,
+            "minimum": 0,
             "type": "integer"
           },
           "process_id": {
@@ -174,7 +198,9 @@
             "$ref": "#/components/schemas/Time"
           },
           "placement_epoch": {
-            "format": "int64",
+            "format": "uint64",
+            "maximum": 18446744073709551615,
+            "minimum": 0,
             "type": "integer"
           },
           "resources": {
@@ -195,7 +221,9 @@
             "$ref": "#/components/schemas/EventEnvelope"
           },
           "placement_epoch": {
-            "format": "int64",
+            "format": "uint64",
+            "maximum": 18446744073709551615,
+            "minimum": 0,
             "type": "integer"
           },
           "process_id": {
@@ -234,7 +262,9 @@
             "type": "string"
           },
           "schema_version": {
-            "format": "int64",
+            "format": "uint64",
+            "maximum": 18446744073709551615,
+            "minimum": 0,
             "type": "integer"
           }
         },
@@ -248,6 +278,8 @@
         "properties": {
           "idle_millis": {
             "format": "int64",
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
             "type": "integer"
           }
         },
@@ -257,10 +289,14 @@
         "properties": {
           "cpu_millis": {
             "format": "int64",
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
             "type": "integer"
           },
           "disk_byte": {
             "format": "int64",
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
             "type": "integer"
           },
           "idle_timeout": {
@@ -268,6 +304,8 @@
           },
           "memory_byte": {
             "format": "int64",
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
             "type": "integer"
           },
           "network": {
@@ -308,7 +346,9 @@
             "type": "string"
           },
           "default_hit_packet": {
-            "format": "int64",
+            "format": "uint64",
+            "maximum": 18446744073709551615,
+            "minimum": 0,
             "type": "integer"
           },
           "via": {
@@ -332,7 +372,9 @@
             "type": "string"
           },
           "default_hit_packet": {
-            "format": "int64",
+            "format": "uint64",
+            "maximum": 18446744073709551615,
+            "minimum": 0,
             "type": "integer"
           },
           "via": {
@@ -362,7 +404,9 @@
             "type": "string"
           },
           "placement_epoch": {
-            "format": "int64",
+            "format": "uint64",
+            "maximum": 18446744073709551615,
+            "minimum": 0,
             "type": "integer"
           },
           "sandbox_id": {
@@ -370,6 +414,8 @@
           },
           "seq": {
             "format": "int64",
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
             "type": "integer"
           },
           "state": {
@@ -382,6 +428,8 @@
         "properties": {
           "earliest": {
             "format": "int64",
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
             "type": "integer"
           },
           "events": {
@@ -392,6 +440,8 @@
           },
           "latest": {
             "format": "int64",
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
             "type": "integer"
           }
         },
@@ -401,6 +451,8 @@
         "properties": {
           "bytes_written": {
             "format": "int64",
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
             "type": "integer"
           },
           "path": {
@@ -415,7 +467,9 @@
       "ingressReadWire": {
         "properties": {
           "closed_hit_packet": {
-            "format": "int64",
+            "format": "uint64",
+            "maximum": 18446744073709551615,
+            "minimum": 0,
             "type": "integer"
           },
           "publish": {
@@ -430,7 +484,9 @@
       "ingressWire": {
         "properties": {
           "closed_hit_packet": {
-            "format": "int64",
+            "format": "uint64",
+            "maximum": 18446744073709551615,
+            "minimum": 0,
             "type": "integer"
           },
           "publish": {
@@ -474,10 +530,14 @@
         "properties": {
           "cpu_millis": {
             "format": "int64",
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
             "type": "integer"
           },
           "disk_byte": {
             "format": "int64",
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
             "type": "integer"
           },
           "idle_timeout": {
@@ -485,6 +545,8 @@
           },
           "memory_byte": {
             "format": "int64",
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
             "type": "integer"
           },
           "network": {
@@ -541,7 +603,9 @@
       "publishReadWire": {
         "properties": {
           "guest_port": {
-            "format": "int64",
+            "format": "uint64",
+            "maximum": 18446744073709551615,
+            "minimum": 0,
             "type": "integer"
           },
           "host_endpoint": {
@@ -556,7 +620,9 @@
       "publishReq": {
         "properties": {
           "guest_port": {
-            "format": "int64",
+            "format": "uint64",
+            "maximum": 18446744073709551615,
+            "minimum": 0,
             "type": "integer"
           },
           "host_endpoint": {
@@ -574,7 +640,9 @@
             "type": "string"
           },
           "guest_port": {
-            "format": "int64",
+            "format": "uint64",
+            "maximum": 18446744073709551615,
+            "minimum": 0,
             "type": "integer"
           },
           "host_endpoint": {
@@ -589,7 +657,9 @@
       "publishWire": {
         "properties": {
           "guest_port": {
-            "format": "int64",
+            "format": "uint64",
+            "maximum": 18446744073709551615,
+            "minimum": 0,
             "type": "integer"
           },
           "host_endpoint": {
@@ -607,7 +677,9 @@
             "type": "string"
           },
           "placement_epoch": {
-            "format": "int64",
+            "format": "uint64",
+            "maximum": 18446744073709551615,
+            "minimum": 0,
             "type": "integer"
           },
           "placement_state": {
@@ -621,6 +693,8 @@
           },
           "used_byte": {
             "format": "int64",
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
             "type": "integer"
           }
         },
@@ -649,11 +723,15 @@
             "type": "string"
           },
           "hit_packet": {
-            "format": "int64",
+            "format": "uint64",
+            "maximum": 18446744073709551615,
+            "minimum": 0,
             "type": "integer"
           },
           "port": {
-            "format": "int64",
+            "format": "uint64",
+            "maximum": 18446744073709551615,
+            "minimum": 0,
             "type": "integer"
           },
           "proto": {
@@ -666,6 +744,8 @@
         "properties": {
           "bytes_written": {
             "format": "int64",
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
             "type": "integer"
           },
           "path": {
@@ -731,6 +811,8 @@
         "properties": {
           "size": {
             "format": "int64",
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
             "type": "integer"
           }
         },
@@ -745,7 +827,9 @@
             "type": "string"
           },
           "mode": {
-            "format": "int64",
+            "format": "uint64",
+            "maximum": 18446744073709551615,
+            "minimum": 0,
             "type": "integer"
           },
           "name": {
@@ -753,6 +837,8 @@
           },
           "size": {
             "format": "int64",
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
             "type": "integer"
           },
           "symlink_target": {
@@ -779,6 +865,8 @@
         "properties": {
           "size": {
             "format": "int64",
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
             "type": "integer"
           }
         },
@@ -791,10 +879,14 @@
           },
           "size": {
             "format": "int64",
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
             "type": "integer"
           },
           "used_byte": {
             "format": "int64",
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
             "type": "integer"
           },
           "volume_id": {
@@ -2094,11 +2186,15 @@
                 "schema": {
                   "properties": {
                     "earliest": {
-                      "format": "int64",
+                      "format": "uint64",
+                      "maximum": 18446744073709551615,
+                      "minimum": 0,
                       "type": "integer"
                     },
                     "latest": {
-                      "format": "int64",
+                      "format": "uint64",
+                      "maximum": 18446744073709551615,
+                      "minimum": 0,
                       "type": "integer"
                     },
                     "samples": {
@@ -2150,11 +2246,15 @@
                 "schema": {
                   "properties": {
                     "earliest": {
-                      "format": "int64",
+                      "format": "uint64",
+                      "maximum": 18446744073709551615,
+                      "minimum": 0,
                       "type": "integer"
                     },
                     "latest": {
-                      "format": "int64",
+                      "format": "uint64",
+                      "maximum": 18446744073709551615,
+                      "minimum": 0,
                       "type": "integer"
                     },
                     "samples": {

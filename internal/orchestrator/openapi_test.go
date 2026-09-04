@@ -155,6 +155,27 @@ func TestOpenAPITimeSchemaMatchesJSONEncoding(t *testing.T) {
 	}
 }
 
+func TestOpenAPIIntegerSchemasPreserveSignedness(t *testing.T) {
+	defs := map[string]any{}
+	for _, tc := range []struct {
+		name string
+		typ  reflect.Type
+		want string
+		min  any
+		max  any
+	}{
+		{name: "signed", typ: reflect.TypeOf(int64(0)), want: "int64", min: int64(-1 << 63), max: int64(1<<63 - 1)},
+		{name: "unsigned", typ: reflect.TypeOf(uint64(0)), want: "uint64", min: uint64(0), max: ^uint64(0)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := schemaFor(tc.typ, defs)
+			if got["format"] != tc.want || got["minimum"] != tc.min || got["maximum"] != tc.max {
+				t.Fatalf("schema = %#v; want format=%q bounds=%v..%v", got, tc.want, tc.min, tc.max)
+			}
+		})
+	}
+}
+
 func TestOpenAPIOperationsDocumentInternalFailures(t *testing.T) {
 	raw, err := OpenAPIDoc()
 	if err != nil {
