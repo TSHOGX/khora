@@ -330,12 +330,31 @@ func testOperationCore(t *testing.T, mk Factory) {
 	if err := s.UpdateOperation(ctx, op); err != nil {
 		t.Fatalf("commit operation: %v", err)
 	}
+	// Failure classes are part of the durable replay contract, not diagnostic
+	// text. In particular capacity must survive a backend round trip so an
+	// idempotent retry still reaches the 507 edge rather than being relabeled
+	// unavailable or internal after restart.
+	failHash, _ := model.RequestHash(map[string]any{"capacity": true})
+	failed, err := model.BeginOperation("op_capacity", "volume.create", "capacity-key", failHash, now, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := failed.Fail(model.ErrorCapacity, now.Add(2*time.Second)); err != nil {
+		t.Fatalf("record capacity failure: %v", err)
+	}
+	if err := s.CreateOperation(ctx, failed); err != nil {
+		t.Fatalf("create failed capacity operation: %v", err)
+	}
 	if reopen != nil {
 		s = reopen(t)
 	}
 	got, err := s.GetOperationByKey(ctx, "volume.create", "key_a")
 	if err != nil || got.Result == nil || got.Result.ID != "vol_a" || got.State != model.OperationSucceeded {
 		t.Fatalf("operation replay = %+v, %v", got, err)
+	}
+	failed, err = s.GetOperationByKey(ctx, "volume.create", "capacity-key")
+	if err != nil || failed.State != model.OperationFailed || failed.ErrorClass != model.ErrorCapacity {
+		t.Fatalf("failed operation replay = %+v, %v; want failed/capacity", failed, err)
 	}
 }
 

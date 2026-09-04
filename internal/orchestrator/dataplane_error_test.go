@@ -154,6 +154,16 @@ func TestProxiedUnaryPreservesTheInnerCode(t *testing.T) {
 	}
 }
 
+func TestProxyErrMapsCapacityClassToResourceExhausted(t *testing.T) {
+	err := proxyErr(model.ErrCapacity)
+	if got := connect.CodeOf(err); got != connect.CodeResourceExhausted {
+		t.Fatalf("proxyErr(%v) code = %v; want resource_exhausted", model.ErrCapacity, got)
+	}
+	if strings.Contains(err.Error(), model.ErrCapacity.Error()) {
+		t.Fatalf("proxyErr leaked the inner capacity message: %v", err)
+	}
+}
+
 // A failure that never reached sandboxd has no classification to preserve — this is
 // the case that genuinely IS a transient transport outage, and the only one for which
 // `unavailable` is the honest answer.

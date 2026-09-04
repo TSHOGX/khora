@@ -71,6 +71,9 @@ func TestMalformedTelemetryQueryIsBadRequest(t *testing.T) {
 }
 
 func TestVolumeCapacityErrorsMapToInsufficientStorage(t *testing.T) {
+	if got := statusCodeFor(model.ErrCapacity); got != http.StatusInsufficientStorage {
+		t.Fatalf("statusCodeFor(%v) = %d; want 507", model.ErrCapacity, got)
+	}
 	for _, err := range []error{syscall.ENOSPC, syscall.EDQUOT} {
 		if got := statusCodeFor(err); got != http.StatusInsufficientStorage {
 			t.Fatalf("statusCodeFor(%v) = %d; want 507", err, got)
