@@ -89,7 +89,10 @@ type watchHub struct {
 	capacity   int
 	epoch      uint64
 	sequence   uint64
-	records    []watchEventRecord
+	// overflow is sticky for this placement. Sequence exhaustion is an explicit
+	// cursor gap; it must never wrap and silently reuse an old position.
+	overflow bool
+	records  []watchEventRecord
 	// dropped records are tracked per scope.  A global ring can evict records
 	// for another scope without making this scope's cursor appear to have a
 	// gap, so the eviction watermark is scoped as well.
@@ -119,6 +122,7 @@ type persistedWatchScope struct {
 type persistedWatchState struct {
 	Epoch    uint64                `json:"epoch"`
 	Sequence uint64                `json:"sequence"`
+	Overflow bool                  `json:"overflow,omitempty"`
 	Records  []watchEventRecord    `json:"records"`
 	Dropped  map[string]uint64     `json:"dropped,omitempty"`
 	Scopes   []persistedWatchScope `json:"scopes,omitempty"`
@@ -196,7 +200,11 @@ func (h *watchHub) load() error {
 	if state.Epoch == 0 {
 		return errors.New("watch journal epoch is missing or zero")
 	}
-	if (state.Sequence == 0) != (len(state.Records) == 0) {
+	// A placement that exhausted its sequence space may have no retained
+	// records (for example, the first change arrived at MaxUint64). The sticky
+	// overflow bit is then the durable high-water marker; it is the one legal
+	// exception to the usual sequence/record-presence pairing.
+	if !state.Overflow && (state.Sequence == 0) != (len(state.Records) == 0) {
 		return errors.New("watch journal sequence watermark does not match record presence")
 	}
 	if len(state.Scopes) > watchMaxScopes {
@@ -288,7 +296,7 @@ func (h *watchHub) load() error {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.epoch, h.sequence = state.Epoch, state.Sequence
+	h.epoch, h.sequence, h.overflow = state.Epoch, state.Sequence, state.Overflow
 	if state.Dropped != nil {
 		for key, seq := range state.Dropped {
 			h.dropped[key] = seq
@@ -396,7 +404,7 @@ func validateWatchJournalEvent(event *v1.WatchEvent, root string, recursive bool
 }
 
 func (h *watchHub) persistedLocked() persistedWatchState {
-	state := persistedWatchState{Epoch: h.epoch, Sequence: h.sequence, Records: append([]watchEventRecord(nil), h.records...), Dropped: make(map[string]uint64, len(h.dropped)), Scopes: make([]persistedWatchScope, 0, len(h.scopes))}
+	state := persistedWatchState{Epoch: h.epoch, Sequence: h.sequence, Overflow: h.overflow, Records: append([]watchEventRecord(nil), h.records...), Dropped: make(map[string]uint64, len(h.dropped)), Scopes: make([]persistedWatchScope, 0, len(h.scopes))}
 	for key, seq := range h.dropped {
 		state.Dropped[key] = seq
 	}
@@ -470,18 +478,21 @@ func watchScopeLimitError() error {
 // setEpoch advances the placement epoch and invalidates all prior watch
 // records.  Existing streams receive one reset marker before they close.
 func (h *watchHub) setEpoch(epoch uint64) error {
-	if err := h.journalFailure(); err != nil {
-		return err
-	}
 	if epoch == 0 {
 		epoch = 1
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if h.loadErr != nil || h.journalErr != nil {
+		return watchJournalUnavailableError()
+	}
 	if h.epoch != 0 && epoch < h.epoch {
 		return watchStaleEpochError()
 	}
 	if h.epoch == epoch {
+		if h.overflow {
+			return watchGapError()
+		}
 		return nil
 	}
 	for sub := range h.subs {
@@ -489,6 +500,7 @@ func (h *watchHub) setEpoch(epoch uint64) error {
 	}
 	h.epoch = epoch
 	h.sequence = 0
+	h.overflow = false
 	h.records = nil
 	h.dropped = make(map[string]uint64)
 	h.scopes = make(map[string]*watchScope)
@@ -530,6 +542,12 @@ func (h *watchHub) validateEpoch(epoch uint64) error {
 func (h *watchHub) scope(root string, recursive bool) (*watchScope, bool, error) {
 	if err := h.journalFailure(); err != nil {
 		return nil, false, err
+	}
+	h.mu.Lock()
+	overflow := h.overflow
+	h.mu.Unlock()
+	if overflow {
+		return nil, false, watchGapError()
 	}
 	root = filepath.Clean(root)
 	if root == "." || root == "" {
@@ -638,6 +656,9 @@ func (h *watchHub) pollScope(scope *watchScope) error {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if h.overflow {
+		return watchGapError()
+	}
 	if scope.epoch != h.epoch {
 		return watchStaleEpochError()
 	}
@@ -725,6 +746,18 @@ func (h *watchHub) pollScope(scope *watchScope) error {
 	})
 	newEvents := make([]*v1.WatchEvent, 0, len(changes))
 	for _, change := range changes {
+		if h.sequence == ^uint64(0) {
+			h.overflow = true
+			h.sequence = oldSequence
+			h.records = oldRecords
+			h.dropped = oldDropped
+			scope.previous = oldPrevious
+			for sub := range h.subs {
+				h.closeSubscriberLocked(sub, &v1.WatchEvent{Sequence: 0, PlacementEpoch: h.epoch, Overflow: true, Reset_: true, ResetReason: "overflow"})
+			}
+			_ = h.persistLocked()
+			return watchGapError()
+		}
 		h.sequence++
 		event := watchEventFromEntry(change.entry, change.op, change.oldPath, h.sequence, h.epoch)
 		h.records = append(h.records, watchEventRecord{Scope: scope.key, Event: event})
@@ -781,6 +814,9 @@ func (h *watchHub) subscribe(scope *watchScope, after uint64, initial bool) (*wa
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if h.overflow {
+		return nil, nil, watchGapError()
+	}
 	if scope.epoch != h.epoch {
 		return nil, nil, watchStaleEpochError()
 	}

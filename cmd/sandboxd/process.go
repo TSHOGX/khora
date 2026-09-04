@@ -230,6 +230,7 @@ type persistedProcess struct {
 	DroppedBefore uint64           `json:"dropped_before,omitempty"`
 	EndFrame      *persistedFrame  `json:"end_frame,omitempty"`
 	ExitedAt      int64            `json:"exited_at,omitempty"`
+	Overflow      bool             `json:"overflow,omitempty"`
 }
 
 type persistedFrame struct {
@@ -371,11 +372,11 @@ func (s *processServer) loadPersistent() {
 			if saved.ExitedAt == 0 {
 				saved.ExitedAt = time.Now().UnixNano()
 			}
-			if saved.Sequence == ^uint64(0) {
-				s.loadErr = errors.New("process journal sequence is exhausted")
-				return
+			if saved.Sequence < ^uint64(0) {
+				saved.Sequence++
+			} else {
+				saved.Overflow = true
 			}
-			saved.Sequence++
 			saved.EndFrame = &persistedFrame{Kind: "e", Sequence: saved.Sequence, ExitCode: code}
 			dirty = true
 		}
@@ -383,7 +384,7 @@ func (s *processServer) loadPersistent() {
 		if saved.ExitedAt != 0 {
 			exitedAt = time.Unix(0, saved.ExitedAt)
 		}
-		p := &proc{pid: saved.PID, handle: saved.Handle, specHash: saved.SpecHash, epoch: saved.Epoch, startTime: saved.StartTime, exitedAt: exitedAt, ring: ringBuffer{cap: ringCapBytes, droppedBefore: saved.DroppedBefore}, subs: make(map[*subscriber]struct{}), sequence: saved.Sequence}
+		p := &proc{pid: saved.PID, handle: saved.Handle, specHash: saved.SpecHash, epoch: saved.Epoch, startTime: saved.StartTime, exitedAt: exitedAt, ring: ringBuffer{cap: ringCapBytes, droppedBefore: saved.DroppedBefore}, subs: make(map[*subscriber]struct{}), sequence: saved.Sequence, overflow: saved.Overflow}
 		p.restored = true
 		for _, persisted := range saved.Frames {
 			p.ring.append(frame{kind: byte(firstByte(persisted.Kind, 'd')), stream: persisted.Stream, data: append([]byte(nil), persisted.Data...), exitCode: persisted.ExitCode, sequence: persisted.Sequence})
@@ -404,7 +405,13 @@ func (s *processServer) loadPersistent() {
 			// delivery to a reused PID.
 			p.ended = true
 			p.exitedAt = time.Now()
-			p.endFrame = frame{kind: 'e', exitCode: 255, sequence: saved.Sequence + 1}
+			endSequence := saved.Sequence
+			if endSequence < ^uint64(0) {
+				endSequence++
+			} else {
+				p.overflow = true
+			}
+			p.endFrame = frame{kind: 'e', exitCode: 255, sequence: endSequence}
 		}
 		s.byHandle[p.handle] = p
 		if saved.Key != "" {
@@ -526,7 +533,7 @@ func (s *processServer) savePersistentLockedAt(path string) {
 		if specHash == "" {
 			specHash = s.idempotencySpec[key]
 		}
-		all = append(all, persistedProcess{Key: key, SpecHash: specHash, Handle: p.handle, PID: p.pid, Epoch: p.epoch, State: state, ExitCode: code, Sequence: p.sequence, StartTime: p.startTime, Frames: frames, DroppedBefore: p.ring.droppedBefore, EndFrame: end, ExitedAt: exitedAt})
+		all = append(all, persistedProcess{Key: key, SpecHash: specHash, Handle: p.handle, PID: p.pid, Epoch: p.epoch, State: state, ExitCode: code, Sequence: p.sequence, StartTime: p.startTime, Frames: frames, DroppedBefore: p.ring.droppedBefore, EndFrame: end, ExitedAt: exitedAt, Overflow: p.overflow})
 		p.mu.Unlock()
 	}
 	b, err := json.Marshal(all)
@@ -787,15 +794,18 @@ type proc struct {
 	// tests) — activityClock methods are nil-safe.
 	activity *activityClock
 
-	mu         sync.Mutex
-	ring       ringBuffer
-	subs       map[*subscriber]struct{}
-	stdin      io.WriteCloser
-	pty        *os.File // set only for pty processes
-	ended      bool
-	exitedAt   time.Time
-	endFrame   frame
-	sequence   uint64
+	mu       sync.Mutex
+	ring     ringBuffer
+	subs     map[*subscriber]struct{}
+	stdin    io.WriteCloser
+	pty      *os.File // set only for pty processes
+	ended    bool
+	exitedAt time.Time
+	endFrame frame
+	sequence uint64
+	// overflow is sticky for this logical process. Sequence exhaustion is a
+	// cursor gap, not permission to wrap to zero; reconnects must rescan.
+	overflow   bool
 	persist    func()
 	persistNow func()
 	removed    atomic.Bool
@@ -901,12 +911,31 @@ func (r *ringBuffer) append(f frame) {
 	r.frames = append(r.frames, f)
 	r.bytes += len(f.data)
 	for r.bytes > r.cap && len(r.frames) > 0 {
-		if r.frames[0].sequence+1 > r.droppedBefore {
-			r.droppedBefore = r.frames[0].sequence + 1
+		next := r.frames[0].sequence
+		if next < ^uint64(0) {
+			next++
+		}
+		if next > r.droppedBefore {
+			r.droppedBefore = next
 		}
 		r.bytes -= len(r.frames[0].data)
 		r.frames[0] = frame{} // release the byte slice for GC before resliding
 		r.frames = r.frames[1:]
+	}
+}
+
+// markOverflowLocked closes every live copy with the existing overflow
+// semantics. It is called with p.mu held; no sequence value is allocated for
+// the marker, so a maxed counter can never wrap.
+func (p *proc) markOverflowLocked() {
+	if p.overflow {
+		return
+	}
+	p.overflow = true
+	for sub := range p.subs {
+		sub.overflow.Store(true)
+		delete(p.subs, sub)
+		close(sub.ch)
 	}
 }
 
@@ -926,6 +955,14 @@ func (p *proc) broadcast(f frame) {
 		p.activity.stamp()
 	}
 	p.mu.Lock()
+	if p.overflow || p.sequence == ^uint64(0) {
+		p.markOverflowLocked()
+		p.mu.Unlock()
+		if p.persist != nil {
+			p.persist()
+		}
+		return
+	}
 	p.sequence++
 	f.sequence = p.sequence
 	if f.kind == 'd' {
@@ -969,7 +1006,13 @@ func (p *proc) finish(exitCode int) {
 	}
 	p.ended = true
 	p.exitedAt = time.Now()
-	p.sequence++
+	if p.sequence < ^uint64(0) {
+		p.sequence++
+	} else {
+		// There is no representable sequence after MaxUint64. Preserve the
+		// terminal metadata without wrapping and expose a cursor gap.
+		p.markOverflowLocked()
+	}
 	p.endFrame = frame{kind: 'e', exitCode: exitCode, sequence: p.sequence}
 	for sub := range p.subs {
 		select {
@@ -1010,6 +1053,9 @@ func (p *proc) subscribeFrom(after uint64) (sub *subscriber, snap []frame, ended
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	snap = p.ring.snapshot()
+	if p.overflow {
+		gap = true
+	}
 	first := uint64(0)
 	if len(snap) > 0 {
 		first = snap[0].sequence

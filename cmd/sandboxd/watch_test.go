@@ -465,6 +465,65 @@ func TestWatchHubUnknownInitialCursorRequiresRescan(t *testing.T) {
 	}
 }
 
+func TestWatchHubSequenceOverflowFailsClosedWithoutWrapping(t *testing.T) {
+	root := t.TempDir()
+	h := newWatchHub("", 4)
+	if err := h.ensureEpoch(1); err != nil {
+		t.Fatal(err)
+	}
+	scope, initial, err := h.scope(root, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sub, _, err := h.subscribe(scope, 0, initial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.sequence = ^uint64(0)
+	writeWatchFile(t, root, "overflow")
+	if err := h.pollScope(scope); connect.CodeOf(err) != connect.CodeResourceExhausted {
+		t.Fatalf("watch sequence exhaustion = %v; want resource_exhausted cursor gap", err)
+	}
+	if h.sequence != ^uint64(0) || !h.overflow {
+		t.Fatalf("watch sequence overflow changed state: sequence=%d overflow=%v", h.sequence, h.overflow)
+	}
+	got := watchNoticeEvent(t, sub)
+	if !got.Overflow || !got.Reset_ || got.ResetReason != "overflow" || got.Sequence != 0 {
+		t.Fatalf("watch overflow marker = %+v", got)
+	}
+	select {
+	case _, ok := <-sub.ch:
+		if ok {
+			t.Fatal("watch overflow subscriber remained open")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("watch overflow subscriber did not close")
+	}
+	if _, _, err := h.scope(root, true); connect.CodeOf(err) != connect.CodeResourceExhausted {
+		t.Fatalf("new watch scope after sequence exhaustion = %v; want cursor gap", err)
+	}
+}
+
+func TestWatchHubOverflowMarkerSurvivesReloadWithoutRecords(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "watch.json")
+	h := newWatchHub(statePath, 4)
+	if err := h.ensureEpoch(1); err != nil {
+		t.Fatal(err)
+	}
+	h.mu.Lock()
+	h.sequence = ^uint64(0)
+	h.overflow = true
+	if err := h.persistLocked(); err != nil {
+		h.mu.Unlock()
+		t.Fatal(err)
+	}
+	h.mu.Unlock()
+	restarted := newWatchHub(statePath, 4)
+	if err := restarted.ensureEpoch(1); connect.CodeOf(err) != connect.CodeResourceExhausted {
+		t.Fatalf("reloaded overflow marker = %v; want resource_exhausted", err)
+	}
+}
+
 func TestWatchHubSlowSubscriberGetsBoundedOverflowReset(t *testing.T) {
 	h := newWatchHub("", 512)
 	if err := h.ensureEpoch(1); err != nil {

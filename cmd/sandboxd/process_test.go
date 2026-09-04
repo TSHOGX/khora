@@ -333,6 +333,59 @@ func TestFinishIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestProcessSequenceOverflowFailsClosedWithoutWrapping(t *testing.T) {
+	p := newProc(1, nil)
+	p.sequence = ^uint64(0)
+	sub, _, _, _, _ := p.subscribeFrom(0)
+	p.broadcast(frame{kind: 'd', data: []byte("must not wrap")})
+	if p.sequence != ^uint64(0) || !p.overflow {
+		t.Fatalf("sequence overflow changed state: sequence=%d overflow=%v", p.sequence, p.overflow)
+	}
+	if !sub.overflow.Load() {
+		t.Fatal("sequence exhaustion did not mark the subscriber as overflowed")
+	}
+	select {
+	case _, ok := <-sub.ch:
+		if ok {
+			t.Fatal("overflowed subscriber remained open")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("overflowed subscriber did not close")
+	}
+	_, _, _, _, gap := p.subscribeFrom(0)
+	if !gap {
+		t.Fatal("reconnect after sequence exhaustion did not report a cursor gap")
+	}
+}
+
+func TestProcessFinishAtMaximumSequenceDoesNotWrap(t *testing.T) {
+	p := newProc(1, nil)
+	p.sequence = ^uint64(0)
+	p.finish(7)
+	if !p.ended || p.sequence != ^uint64(0) || p.endFrame.sequence != ^uint64(0) || !p.overflow {
+		t.Fatalf("finish at maximum sequence wrapped or lost overflow marker: ended=%v sequence=%d end=%d overflow=%v", p.ended, p.sequence, p.endFrame.sequence, p.overflow)
+	}
+}
+
+func TestProcessOverflowMarkerSurvivesReload(t *testing.T) {
+	old := processStatePath
+	t.Cleanup(func() { processStatePath = old })
+	processStatePath = filepath.Join(t.TempDir(), "processes.json")
+	s := &processServer{retention: time.Hour}
+	p := newProc(1, nil)
+	p.sequence = ^uint64(0)
+	s.register(p)
+	p.broadcast(frame{kind: 'd', data: []byte("overflow")})
+	r := &processServer{retention: time.Hour}
+	r.loadPersistent()
+	r.mu.Lock()
+	got := r.byHandle[p.handle]
+	r.mu.Unlock()
+	if got == nil || !got.overflow || got.sequence != ^uint64(0) {
+		t.Fatalf("reloaded overflow process = %+v; want sticky overflow at MaxUint64", got)
+	}
+}
+
 func TestPersistedRingAndExitSurviveReload(t *testing.T) {
 	old := processStatePath
 	t.Cleanup(func() { processStatePath = old })
