@@ -549,18 +549,6 @@ func (m *Mediator) Create(ctx context.Context, spec CreateSpec) (resultID model.
 	if spec.Network != nil {
 		rec.Network = spec.Network.Normalize()
 	}
-	// the API error contract's declaration refusals, applied AT THE WRITE POINT rather than only at the
-	// API layer: a validation that lives in one caller is a validation the next caller
-	// does not have. Not hypothetical — a substrate test driving the mediator directly
-	// successfully created a sandbox whose `via[].endpoint` was inside the L0 floor
-	// (the API error contract ClassViaEndpointInFloor), and then measured the resulting permanent fail-closure.
-	//
-	// BEFORE the admission gate below, which the API error contract requires: an invalid declaration is
-	// refused before any byte is touched or any budget recorded, so 400 and 507 can
-	// never both be true for one request.
-	if err := m.ValidateDeclaration(rec.Network, spec.Network != nil); err != nil {
-		return "", err
-	}
 	if spec.IdleTimeout != nil {
 		rec.IdleTimeout = *spec.IdleTimeout
 	}
@@ -577,6 +565,15 @@ func (m *Mediator) Create(ctx context.Context, spec CreateSpec) (resultID model.
 		return "", err
 	} else if replay != "" {
 		return model.SandboxID(replay), nil
+	}
+	// Validate at the write point, after the idempotency claim/replay check. The
+	// declaration remains fully checked before any admission or provider side
+	// effect, while a retry can replay a committed Sandbox even if deployment
+	// configuration (for example, the second-hop uid) changed since the first
+	// attempt. A changed request therefore reaches SameRequest first and gets a
+	// deterministic idempotency conflict rather than a state-dependent refusal.
+	if err := m.ValidateDeclaration(rec.Network, spec.Network != nil); err != nil {
+		return "", err
 	}
 	storeCtx := ctx
 	opctx, ownedClaim, stopLease := m.startOperationLease(ctx, claim)

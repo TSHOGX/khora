@@ -222,19 +222,15 @@ func (e *Engine) handleCreate(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	// The declaration is parsed and VALIDATED before the create verb runs, so the API error contract's
-	// "validation precedes the admission gate" holds: an invalid declaration is
-	// refused before any byte is touched or any budget recorded, and 400 and 507 are
-	// therefore never both true.
+	// Decode the declaration before the create verb. Pure shape/value validation is
+	// repeated by the mediator at its write point; deployment-dependent validation
+	// stays there so an idempotent retry can be claimed/replayed before a changed
+	// orchestrator configuration is consulted.
 	var decl *model.NetworkDecl
 	if req.Network != nil {
 		got, derr := req.Network.decode()
 		if derr != nil {
 			statusFor(w, derr)
-			return
-		}
-		if verr := e.Mediator.ValidateDeclaration(got, true); verr != nil {
-			statusFor(w, verr)
 			return
 		}
 		decl = &got

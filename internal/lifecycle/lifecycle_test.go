@@ -50,6 +50,36 @@ func TestCreateHappyPath(t *testing.T) {
 	}
 }
 
+func TestSandboxCreateRetryReplaysBeforeDeploymentValidation(t *testing.T) {
+	ctx := context.Background()
+	rp, rt := &fakeRootfs{}, &fakeRuntime{}
+	uid := 4711
+	m, st := newTestMediator(t, rp, rt, true)
+	m.deps.Deployment.SecondHopUID = &uid
+	decl := viaDecl(t)
+	key := model.IdempotencyKey("sandbox-deployment-replay")
+	first, err := m.Create(ctx, CreateSpec{Template: "bare", IdempotencyKey: key, Network: &decl})
+	if err != nil {
+		t.Fatalf("initial keyed create = %v", err)
+	}
+	// Simulate a restart under a deployment that no longer supplies the
+	// second-hop uid. The durable object is still valid and must be replayable.
+	m.deps.Deployment.SecondHopUID = nil
+	replayed, err := m.Create(ctx, CreateSpec{Template: "bare", IdempotencyKey: key, Network: &decl})
+	if err != nil || replayed != first {
+		t.Fatalf("same-key create after deployment change = %s, %v; want replay of %s", replayed, err, first)
+	}
+	// A changed request must conflict before the now-invalid deployment
+	// declaration is evaluated.
+	changed := CreateSpec{Template: "bare", IdempotencyKey: key, Network: &decl, Limits: model.Limits{MemoryByte: 1}}
+	if _, err := m.Create(ctx, changed); model.ErrorClassOf(err) != model.ErrorIdempotencyConflict {
+		t.Fatalf("changed keyed create after deployment change = %v; want idempotency_conflict", err)
+	}
+	if rec, err := st.GetSandbox(ctx, first); err != nil || rec.State != model.Running {
+		t.Fatalf("replayed sandbox record = %+v, %v; want original running record", rec, err)
+	}
+}
+
 // TTL Binding materialization (resource admission / health and reclamation): a create that OMITS idle_timeout /
 // retention stores the engine-wide default; a create that provides them stores
 // the given values verbatim (including an explicit zero). The stored record
