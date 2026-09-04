@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -409,11 +410,22 @@ func TestProcessJournalMissingExitCodeFailsClosed(t *testing.T) {
 
 func TestProcessJournalExplicitZeroExitCodeReloads(t *testing.T) {
 	state := filepath.Join(t.TempDir(), "processes.json")
-	const journal = `[{"handle":"proc_zero_code","pid":17,"epoch":1,"state":"exited","sequence":1,"exit_code":0,"exited_at":1,"end_frame":{"kind":"e","sequence":1,"exit_code":0}}]`
-	if err := os.WriteFile(state, []byte(journal), 0o600); err != nil {
+	exitedAt := time.Now().Add(-time.Second).UnixNano()
+	journal, err := json.Marshal([]persistedProcess{{
+		Handle: "proc_zero_code", PID: 17, Epoch: 1, State: "exited", Sequence: 1,
+		ExitCode: ptrInt(0), ExitedAt: exitedAt,
+		EndFrame: &persistedFrame{Kind: "e", Sequence: 1, ExitCode: 0},
+	}})
+	if err != nil {
 		t.Fatal(err)
 	}
-	s := &processServer{statePath: state}
+	if err := os.WriteFile(state, journal, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Keep the fixture well inside the retention window. A hard-coded Unix-epoch
+	// timestamp would schedule immediate reclamation during loadPersistent and
+	// race the assertion below.
+	s := &processServer{statePath: state, retention: time.Hour}
 	s.loadPersistent()
 	if err := s.journalFailure(); err != nil {
 		t.Fatalf("explicit zero exit code was rejected: %v", err)
@@ -425,6 +437,8 @@ func TestProcessJournalExplicitZeroExitCodeReloads(t *testing.T) {
 		t.Fatalf("reloaded explicit zero exit = %+v; want ended with code 0", p)
 	}
 }
+
+func ptrInt(v int) *int { return &v }
 
 func TestProcessJournalRejectsInvalidFramesAndIdentity(t *testing.T) {
 	for name, journal := range map[string]string{
