@@ -342,7 +342,7 @@ func New(deps Deps) *Mediator {
 	if deps.TelemetryPolicy.Interval == 0 && deps.TelemetryPolicy.Retention == 0 {
 		deps.TelemetryPolicy = model.DefaultTelemetryPolicy
 	}
-	if deps.ProcessRetention.ExitedFor == 0 {
+	if deps.ProcessRetention.ExitedFor <= 0 {
 		deps.ProcessRetention = model.DefaultProcessRetention
 	}
 	// A NEGATIVE grace means "no drain at all" and survives defaulting — only a
@@ -1287,10 +1287,11 @@ func (m *Mediator) coldStart(ctx context.Context, rec model.Sandbox, ov *rootfs.
 	// netns/veth and starting the isolated unit — the atomicity the provider security contract requires, and
 	// the only hook point that exists for it (the network enforcement locus).
 	pl, err := m.deps.Runtime.Launch(ctx, runtime.LaunchSpec{
-		Sandbox:  string(id),
-		Rootfs:   runtime.RootfsSource{MergedPath: merged.MergedPath},
-		Mounts:   specs,
-		Steering: steering,
+		Sandbox:          string(id),
+		Rootfs:           runtime.RootfsSource{MergedPath: merged.MergedPath},
+		Mounts:           specs,
+		Steering:         steering,
+		ProcessRetention: m.deps.ProcessRetention.ExitedFor,
 		Limits: runtime.ResourceLimits{
 			CPUMillis:  limits.CPUMillis,
 			MemoryByte: limits.MemoryByte,

@@ -30,6 +30,12 @@ parent Sandbox removes all remaining Process records immediately. The exit
 status is part of the logical Process record until its retention deadline, not
 inferred from a later PID lookup.
 
+The process-retention setting is a launch-time deployment policy. Each new
+Placement receives the selected value in its guest PID-1 configuration, while
+the control-plane Store uses the current deployment value for reclamation.
+Operators changing the setting must create new Placements (pause/resume) before
+expecting an existing guest supervisor to use the new window.
+
 ## Operation ledger
 
 Sandbox and Volume creation records an `Operation` in the `recorded` phase
@@ -75,7 +81,7 @@ without making completeness claims the substrate has not measured:
 
 | Gate | Contract decision | Evidence anchor |
 | --- | --- | --- |
-| Process retention | 24-hour exited-handle window; durable `reclaimed` state at expiry; Sandbox destroy removes remaining records | `TestProcessExitRetentionAndReclaimBoundary`; Store contract `ProcessCore` |
+| Process retention | 24-hour exited-handle window by default; launch-time policy is shared by guest replay and Store reclamation; durable `reclaimed` state at expiry; Sandbox destroy removes remaining records | `TestProcessExitRetentionAndReclaimBoundary`; `TestColdStartCarriesProcessRetentionToRuntime`; Store contract `ProcessCore` |
 | Filesystem watch | change-detection semantics, recursive by default, 4096-event bound, explicit overflow gap and full rescan, reset on epoch change | `TestDecisionGatePolicies`; `WatchPolicy.Validate` |
 | Telemetry | 10-second Sandbox usage-sample interval, 24-hour retention, per-Sandbox timestamp and independent cursor lane; Placement and Process expose snapshots without persisted sample lanes; lifecycle publication does not wait on samples | `TestDecisionGatePolicies`; `TelemetryPolicy.Validate` |
 | Template manifest | schema version 1, optional SHA-256 digest, `os/arch` platform, sorted unique capabilities, provenance, and SBOM reference | `TestTemplateManifestNormalizationValidationAndDigest` |

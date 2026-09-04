@@ -1,12 +1,47 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
+
+	"github.com/TSHOGX/khora/internal/guestport"
 )
+
+const defaultProcessRetention = 24 * time.Hour
+
+// processRetentionFromEnv reads the launch-time policy supplied by the runtime
+// provider. An omitted value is the compatibility/default-provider case; an
+// explicitly malformed or non-positive value is rejected so a control-plane
+// policy cannot silently diverge from the guest replay window.
+func processRetentionFromEnv(environ []string) (time.Duration, error) {
+	value, present := "", false
+	for _, entry := range environ {
+		key, val, ok := strings.Cut(entry, "=")
+		if ok && key == guestport.ProcessRetentionEnv {
+			value, present = val, true
+		}
+	}
+	if !present {
+		return defaultProcessRetention, nil
+	}
+	if value == "" {
+		return 0, fmt.Errorf("%s: value must be positive nanoseconds", guestport.ProcessRetentionEnv)
+	}
+	ns, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || ns <= 0 {
+		if err == nil {
+			err = fmt.Errorf("value must be positive")
+		}
+		return 0, fmt.Errorf("%s: %w", guestport.ProcessRetentionEnv, err)
+	}
+	return time.Duration(ns), nil
+}
 
 // initMode is the minimal self-authored PID 1 (the guest startup topology / guest init semantics).
 // tini source is the correctness checklist; we implement the subset we need:
@@ -38,10 +73,15 @@ func initMode() {
 	// workload descriptors; transport children are replaceable RPC frontends.
 	// Starting this listener before the first transport child makes the
 	// transport-restart window a pure endpoint outage, not a process-state loss.
+	retention, err := processRetentionFromEnv(os.Environ())
+	if err != nil {
+		logf("init: invalid process retention: %v", err)
+		os.Exit(2)
+	}
 	processSvc := &processServer{
 		activity:  newSharedActivityClock(),
 		reaper:    reaper,
-		retention: 24 * time.Hour,
+		retention: retention,
 	}
 	processSvc.loadPersistent()
 	go processSvc.watchRestored()

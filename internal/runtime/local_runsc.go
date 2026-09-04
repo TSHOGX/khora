@@ -274,6 +274,9 @@ func (p *LocalRunsc) Launch(ctx context.Context, spec LaunchSpec) (_ *Placement,
 	if spec.Sandbox == "" {
 		return nil, fmt.Errorf("runtime: LaunchSpec.Sandbox empty (needed for placement naming, atomic transition rollback)")
 	}
+	if spec.ProcessRetention < 0 {
+		return nil, fmt.Errorf("runtime: process retention must not be negative")
+	}
 	hostIP, guestIP := p.allocSubnet()
 	h := namesFor(spec.Sandbox)
 	h.guestIP = guestIP
@@ -340,6 +343,9 @@ func (p *LocalRunsc) Launch(ctx context.Context, spec LaunchSpec) (_ *Placement,
 		cgPath = cgroupRelPath(h.cid)
 	}
 	oci := buildOCISpec(spec.Rootfs.MergedPath, netnsPath, cgPath, spec.Limits, memOverheadBytes, spec.Mounts)
+	if oci.Process.Env, err = processEnvironment(spec.ProcessRetention); err != nil {
+		return nil, err
+	}
 	b, _ := json.MarshalIndent(oci, "", "  ")
 	if err = os.WriteFile(filepath.Join(h.bundleDir, "config.json"), b, 0o644); err != nil {
 		return nil, fmt.Errorf("runtime: write config.json: %w", err)

@@ -39,6 +39,12 @@ persisted under the guest runtime scratch area, while stdin/PTY descriptors rema
 owned by PID 1; a transport-child restart therefore preserves live output and input
 state instead of reconstructing an inert process record.
 
+The orchestrator's `--process-retention` value is carried into each Placement's
+OCI entrypoint environment and parsed by PID 1. This keeps guest handle expiry
+aligned with the control-plane Store's reclamation pass; direct runtime launches
+that omit the value use the 24-hour default. Malformed or non-positive launch
+values fail closed before the supervisor starts.
+
 PTY and pipe modes are separate paths. PTY merges terminal output and supports resize;
 pipe mode preserves stdout and stderr. Unit coverage is in
 [cmd/sandboxd/process_test.go](../../cmd/sandboxd/process_test.go), with the real

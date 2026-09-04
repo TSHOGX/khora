@@ -117,6 +117,19 @@ func TestCreatePauseResumeAdvancesPlacementEpoch(t *testing.T) {
 	}
 }
 
+func TestColdStartCarriesProcessRetentionToRuntime(t *testing.T) {
+	ctx := context.Background()
+	m, _, _, rt := mountFixture(t)
+	want := 37 * time.Minute
+	m.deps.ProcessRetention = model.ProcessRetentionPolicy{ExitedFor: want}
+	if _, err := m.Create(ctx, CreateSpec{Template: "bare"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if len(rt.launchProcessRetention) != 1 || rt.launchProcessRetention[0] != want {
+		t.Fatalf("runtime process retention = %v; want [%s]", rt.launchProcessRetention, want)
+	}
+}
+
 func TestAdoptPreservesPlacementEpoch(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemory()

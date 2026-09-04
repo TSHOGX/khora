@@ -675,6 +675,10 @@ type fakeRuntime struct {
 	// can assert the resource admission Binding is re-materialized at every placement from the
 	// record rather than read back from a frozen value.
 	launchLimits []runtime.ResourceLimits
+	// launchProcessRetention records the replay window handed to the runtime
+	// provider. It must match the lifecycle Store policy so guest PID 1 and the
+	// control plane reclaim the same logical handle at the same boundary.
+	launchProcessRetention []time.Duration
 	// launchSteering holds the network declaration steering spec the LAST Launch carried. The
 	// network declaration is a Binding too (resource admission), so the same property applies: it
 	// must be re-derived from the current record at every placement, not carried over.
@@ -722,6 +726,7 @@ func (f *fakeRuntime) Launch(ctx context.Context, spec runtime.LaunchSpec) (*run
 	f.log("Launch:" + spec.Sandbox)
 	f.mu.Lock()
 	f.launchLimits = append(f.launchLimits, spec.Limits)
+	f.launchProcessRetention = append(f.launchProcessRetention, spec.ProcessRetention)
 	f.launchSteering = spec.Steering
 	// The Volume subsystem mount specs from the LAST launch, asserted from LastMounts.
 	f.launchMounts = append([]runtime.MountSource(nil), spec.Mounts...)

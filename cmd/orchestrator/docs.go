@@ -47,6 +47,8 @@ func renderOrchestratorDoc() []byte {
 	fmt.Fprintln(&out)
 	fmt.Fprintln(&out, "Check it for staleness with `./scripts/check-generated.sh`.")
 	fmt.Fprintln(&out)
+	fmt.Fprintln(&out, "`--process-retention` is a launch-time policy: the selected value is applied to the control-plane Store and passed to the guest PID-1 supervisor whenever a new Placement is launched. Keep it stable while existing Placements are adopted; changing it takes effect for a Sandbox after a new Placement is created by pause/resume (the Store uses the current configured value).")
+	fmt.Fprintln(&out)
 	fmt.Fprintln(&out, "| Flag | Default | Description |")
 	fmt.Fprintln(&out, "| --- | --- | --- |")
 	fs.VisitAll(func(f *flag.Flag) {

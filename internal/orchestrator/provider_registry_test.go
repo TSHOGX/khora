@@ -50,6 +50,18 @@ func TestNewRejectsInvalidTelemetryPolicy(t *testing.T) {
 	}
 }
 
+func TestNewRejectsInvalidProcessRetention(t *testing.T) {
+	base := t.TempDir()
+	_, err := New(Config{
+		TemplatesDir:     filepath.Join(base, "templates"),
+		StateDir:         filepath.Join(base, "state"),
+		ProcessRetention: model.ProcessRetentionPolicy{ExitedFor: -time.Second},
+	})
+	if err == nil || !strings.Contains(err.Error(), "process retention") {
+		t.Fatalf("New with invalid process retention = %v; want fail-closed policy validation", err)
+	}
+}
+
 func TestNewRejectsUnknownVolumeProviderBeforeServing(t *testing.T) {
 	base := t.TempDir()
 	_, err := New(Config{

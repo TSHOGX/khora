@@ -312,6 +312,12 @@ func New(cfg Config) (*Engine, error) {
 	if cfg.TemplatesDir == "" || cfg.StateDir == "" {
 		return nil, fmt.Errorf("orchestrator: TemplatesDir and StateDir are required")
 	}
+	processRetention := cfg.ProcessRetention
+	if processRetention.ExitedFor == 0 {
+		processRetention = model.DefaultProcessRetention
+	} else if err := processRetention.Validate(); err != nil {
+		return nil, fmt.Errorf("orchestrator: process retention: %w", err)
+	}
 	telemetryPolicy := cfg.TelemetryPolicy
 	if telemetryPolicy.Interval == 0 && telemetryPolicy.Retention == 0 {
 		telemetryPolicy = model.DefaultTelemetryPolicy
@@ -414,7 +420,7 @@ func New(cfg Config) (*Engine, error) {
 		DefaultRetention:      cfg.DefaultRetention,
 		EventRetention:        cfg.EventRetention,
 		TelemetryPolicy:       telemetryPolicy,
-		ProcessRetention:      cfg.ProcessRetention,
+		ProcessRetention:      processRetention,
 		FaultAfterColdStart:   cfg.FaultAfterColdStart,
 		FaultAfterVolumeBytes: cfg.FaultAfterVolumeBytes,
 		NodeCapacity: lifecycle.NodeCapacity{
