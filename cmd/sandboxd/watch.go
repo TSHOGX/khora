@@ -751,7 +751,11 @@ func (h *watchHub) pollScope(scope *watchScope) error {
 	for _, change := range changes {
 		if h.sequence == ^uint64(0) {
 			h.overflow = true
-			h.sequence = oldSequence
+			// Keep the exhausted high-water marker at MaxUint64 even though
+			// this poll's partially assigned changes are rolled back. The marker
+			// must survive reload and distinguish a permanent cursor gap from a
+			// torn journal whose last retained record simply lags the watermark.
+			h.sequence = ^uint64(0)
 			h.records = oldRecords
 			h.dropped = oldDropped
 			scope.previous = oldPrevious
