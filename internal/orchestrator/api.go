@@ -506,7 +506,7 @@ func (e *Engine) handleTelemetry(w http.ResponseWriter, r *http.Request, id mode
 	after, err := parseIntQuery(r, "after", 0)
 	if err != nil || after < 0 {
 		if err == nil {
-			err = errors.New("after must be non-negative")
+			err = model.NewContractError(model.ErrorInvalidArgument, "after must be non-negative")
 		}
 		statusFor(w, err)
 		return
@@ -514,7 +514,7 @@ func (e *Engine) handleTelemetry(w http.ResponseWriter, r *http.Request, id mode
 	limit, err := parseIntQuery(r, "limit", 100)
 	if err != nil || limit <= 0 {
 		if err == nil {
-			err = errors.New("limit must be positive")
+			err = model.NewContractError(model.ErrorInvalidArgument, "limit must be positive")
 		}
 		statusFor(w, err)
 		return

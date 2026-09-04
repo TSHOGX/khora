@@ -185,7 +185,7 @@ func volumeFileResponse(fi volume.FileInfo) volumeFileResp {
 func volumePathQuery(r *http.Request) (string, error) {
 	name := r.URL.Query().Get("path")
 	if name == "" {
-		return "", errors.New("path is required (relative to the volume root)")
+		return "", model.NewContractError(model.ErrorInvalidArgument, "path is required (relative to the volume root)")
 	}
 	return name, nil
 }
@@ -242,7 +242,7 @@ func parseIntQuery(r *http.Request, key string, def int64) (int64, error) {
 	}
 	n, err := strconv.ParseInt(raw, 10, 64)
 	if err != nil {
-		return 0, fmt.Errorf("%s must be an integer", key)
+		return 0, model.NewContractError(model.ErrorInvalidArgument, fmt.Sprintf("%s must be an integer", key))
 	}
 	return n, nil
 }
@@ -256,6 +256,10 @@ func (e *Engine) handleReadVolume(w http.ResponseWriter, r *http.Request, id mod
 	offset, err := parseIntQuery(r, "offset", 0)
 	if err != nil {
 		statusFor(w, err)
+		return
+	}
+	if offset < 0 {
+		statusFor(w, model.NewContractError(model.ErrorInvalidArgument, "offset must be non-negative"))
 		return
 	}
 	length, err := parseIntQuery(r, "length", 0)
@@ -284,6 +288,10 @@ func (e *Engine) handleWriteVolume(w http.ResponseWriter, r *http.Request, id mo
 		statusFor(w, err)
 		return
 	}
+	if offset < 0 {
+		statusFor(w, model.NewContractError(model.ErrorInvalidArgument, "offset must be non-negative"))
+		return
+	}
 	data, err := io.ReadAll(io.LimitReader(r.Body, (64<<20)+1))
 	if err != nil {
 		statusFor(w, err)
@@ -310,7 +318,7 @@ func (e *Engine) handleMkdirVolume(w http.ResponseWriter, r *http.Request, id mo
 	perm, err := parseIntQuery(r, "mode", 0o755)
 	if err != nil || perm < 0 {
 		if err == nil {
-			err = errors.New("mode must be non-negative")
+			err = model.NewContractError(model.ErrorInvalidArgument, "mode must be non-negative")
 		}
 		statusFor(w, err)
 		return
@@ -331,11 +339,11 @@ type volumeMoveReq struct {
 func (e *Engine) handleMoveVolume(w http.ResponseWriter, r *http.Request, id model.VolumeID) {
 	var req volumeMoveReq
 	if err := strictDecode(r.Body, &req); err != nil {
-		statusFor(w, err)
+		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
 	if req.Source == "" || req.Destination == "" {
-		statusFor(w, errors.New("source and destination are required"))
+		statusFor(w, model.NewContractError(model.ErrorInvalidArgument, "source and destination are required"))
 		return
 	}
 	fi, err := e.Mediator.MoveVolume(r.Context(), id, req.Source, req.Destination)
