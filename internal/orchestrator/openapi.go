@@ -28,6 +28,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/TSHOGX/khora/internal/model"
 )
@@ -329,6 +330,15 @@ func schemaFor(t reflect.Type, defs map[string]any) map[string]any {
 	case reflect.Float32, reflect.Float64:
 		return map[string]any{"type": "number"}
 	case reflect.Struct:
+		// time.Time implements encoding/json.Marshaler and crosses the HTTP
+		// boundary as an RFC3339 string, not as its internal struct fields. Keep
+		// a named component so all timestamp fields share the same wire schema.
+		if t == reflect.TypeOf(time.Time{}) {
+			if _, seen := defs["Time"]; !seen {
+				defs["Time"] = map[string]any{"type": "string", "format": "date-time"}
+			}
+			return map[string]any{"$ref": "#/components/schemas/Time"}
+		}
 		name := t.Name()
 		if name == "" {
 			// Anonymous struct: inline it. Nothing in the control-plane API uses one, but a future

@@ -241,8 +241,8 @@
         "type": "object"
       },
       "Time": {
-        "properties": {},
-        "type": "object"
+        "format": "date-time",
+        "type": "string"
       },
       "activityResp": {
         "properties": {

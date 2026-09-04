@@ -129,6 +129,31 @@ func TestOpenAPIDocIsWellFormedEnoughToGenerateFrom(t *testing.T) {
 	}
 }
 
+func TestOpenAPITimeSchemaMatchesJSONEncoding(t *testing.T) {
+	raw, err := OpenAPIDoc()
+	if err != nil {
+		t.Fatalf("OpenAPIDoc: %v", err)
+	}
+	var doc struct {
+		Components struct {
+			Schemas map[string]struct {
+				Type   string `json:"type"`
+				Format string `json:"format"`
+			} `json:"schemas"`
+		} `json:"components"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("parse OpenAPI: %v", err)
+	}
+	tm, ok := doc.Components.Schemas["Time"]
+	if !ok {
+		t.Fatal("OpenAPI has no Time schema")
+	}
+	if tm.Type != "string" || tm.Format != "date-time" {
+		t.Fatalf("Time schema = type %q format %q; want string/date-time (time.Time marshals as RFC3339 JSON)", tm.Type, tm.Format)
+	}
+}
+
 // TestEveryDocumentedOperationIsRouted drives each listed operation against a real
 // server and asserts the router RECOGNIZES it: not 404, and not 405.
 //
