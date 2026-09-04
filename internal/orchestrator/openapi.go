@@ -401,6 +401,7 @@ var errorDescriptions = map[int]string{
 	404: "No such object. The message names WHICH kind, so a caller does not look in the wrong place.",
 	409: "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying.",
 	413: "The body exceeds the engine's per-request limit.",
+	500: "The engine could not complete the operation because of an internal store or provider failure.",
 	503: "The sandbox's in-guest transport is unreachable, or a pause is draining. The answer may differ later.",
 	507: "Capacity: nothing is wrong with the request or the sandbox — the node cannot honor another promise.",
 }
@@ -527,6 +528,11 @@ func responsesFor(op apiOp, defs map[string]any) map[string]any {
 	out[fmt.Sprint(op.Status)] = success
 
 	codes := append([]int{}, op.Errors...)
+	// Every routed operation can surface an internal store/provider failure. The
+	// generic 500 response is part of the HTTP contract even when an operation's
+	// expected refusals are narrower; omitting it makes a generated client reject
+	// a real error response as undocumented.
+	codes = append(codes, 500)
 	// 405 is on EVERY route in the table by the API error contract's general rule ("a wrong method on
 	// any collection/object route → 405"), so it is added here rather than repeated
 	// on 26 entries — repetition being how one of them would come to be missing.

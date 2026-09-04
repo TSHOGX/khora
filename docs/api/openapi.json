@@ -874,6 +874,16 @@
               }
             },
             "description": "The route exists, but this method does not apply to it."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
           }
         },
         "summary": "Page the transactional outbox in `seq` order. Delivery is at least once; deduplicate by event `id`."
@@ -912,6 +922,16 @@
               }
             },
             "description": "The route exists, but this method does not apply to it."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
           }
         },
         "summary": "Read a logical Process snapshot and retained exit status."
@@ -954,6 +974,16 @@
               }
             },
             "description": "The route exists, but this method does not apply to it."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
           }
         },
         "summary": "List all sandboxes."
@@ -1032,6 +1062,16 @@
             },
             "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
           },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
+          },
           "507": {
             "content": {
               "text/plain": {
@@ -1082,6 +1122,16 @@
               }
             },
             "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
           }
         },
         "summary": "Destroy a sandbox. The record is deleted, so a later GET is 404 and the event is the durable record of the destroy cause."
@@ -1118,6 +1168,16 @@
               }
             },
             "description": "The route exists, but this method does not apply to it."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
           }
         },
         "summary": "Inspect one sandbox without exposing placement details."
@@ -1196,6 +1256,16 @@
             },
             "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
           },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
+          },
           "507": {
             "content": {
               "text/plain": {
@@ -1264,6 +1334,16 @@
               }
             },
             "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
           },
           "503": {
             "content": {
@@ -1344,6 +1424,16 @@
               }
             },
             "description": "The route exists, but this method does not apply to it."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
           },
           "503": {
             "content": {
@@ -1454,6 +1544,16 @@
             },
             "description": "The body exceeds the engine's per-request limit."
           },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
+          },
           "503": {
             "content": {
               "text/plain": {
@@ -1511,6 +1611,16 @@
               }
             },
             "description": "The route exists, but this method does not apply to it."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
           }
         },
         "summary": "Read the sandbox's effective network declaration, including per-rule hit counters."
@@ -1581,6 +1691,16 @@
               }
             },
             "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
           }
         },
         "summary": "Pause a running sandbox: drains in-flight engine writes, then freezes."
@@ -1619,6 +1739,16 @@
               }
             },
             "description": "The route exists, but this method does not apply to it."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
           }
         },
         "summary": "Read the current Placement epoch and resource snapshot."
@@ -1671,6 +1801,16 @@
               }
             },
             "description": "The route exists, but this method does not apply to it."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
           }
         },
         "summary": "List logical Process records for a Sandbox."
@@ -1761,6 +1901,16 @@
               }
             },
             "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
           }
         },
         "summary": "Publish a guest port to the host."
@@ -1821,6 +1971,16 @@
             },
             "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
           },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
+          },
           "507": {
             "content": {
               "text/plain": {
@@ -1868,6 +2028,16 @@
               }
             },
             "description": "The route exists, but this method does not apply to it."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
           }
         },
         "summary": "Read the Sandbox resource snapshot with explicit measurement availability."
@@ -1963,6 +2133,16 @@
               }
             },
             "description": "The route exists, but this method does not apply to it."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
           }
         },
         "summary": "Read the independent per-Sandbox telemetry sample lane."
@@ -2005,6 +2185,16 @@
               }
             },
             "description": "The route exists, but this method does not apply to it."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
           }
         },
         "summary": "List all templates."
@@ -2071,6 +2261,16 @@
               }
             },
             "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
           }
         },
         "summary": "Promote a sandbox to an immutable Template other sandboxes derive from."
@@ -2112,6 +2312,16 @@
               }
             },
             "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
           }
         },
         "summary": "Delete a template. Refused while any sandbox references it."
@@ -2148,6 +2358,16 @@
               }
             },
             "description": "The route exists, but this method does not apply to it."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
           }
         },
         "summary": "Inspect an immutable Template and its typed manifest."
@@ -2190,6 +2410,16 @@
               }
             },
             "description": "The route exists, but this method does not apply to it."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
           }
         },
         "summary": "List all volumes."
@@ -2258,6 +2488,16 @@
             },
             "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
           },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
+          },
           "507": {
             "content": {
               "text/plain": {
@@ -2308,6 +2548,16 @@
               }
             },
             "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
           }
         },
         "summary": "Delete a Volume. Refused while mounted."
@@ -2344,6 +2594,16 @@
               }
             },
             "description": "The route exists, but this method does not apply to it."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
           }
         },
         "summary": "Inspect one volume."
@@ -2421,6 +2681,16 @@
               }
             },
             "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
           },
           "507": {
             "content": {
@@ -2502,6 +2772,16 @@
             },
             "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
           },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
+          },
           "507": {
             "content": {
               "text/plain": {
@@ -2581,6 +2861,16 @@
               }
             },
             "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
           }
         },
         "summary": "Stream bytes OUT of a volume with no sandbox involved. Returns application/octet-stream."
@@ -2694,6 +2984,16 @@
             },
             "description": "The body exceeds the engine's per-request limit."
           },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
+          },
           "507": {
             "content": {
               "text/plain": {
@@ -2775,6 +3075,16 @@
               }
             },
             "description": "The route exists, but this method does not apply to it."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
           }
         },
         "summary": "List one root-confined Volume directory."
@@ -2855,6 +3165,16 @@
               }
             },
             "description": "The route exists, but this method does not apply to it."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
           }
         },
         "summary": "Read root-confined LSTAT metadata without following a symlink."
@@ -2966,6 +3286,16 @@
             },
             "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
           },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
+          },
           "507": {
             "content": {
               "text/plain": {
@@ -3064,6 +3394,16 @@
               }
             },
             "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
           }
         },
         "summary": "Rename a root-confined Volume path."
@@ -3152,6 +3492,16 @@
               }
             },
             "description": "The route exists, but this method does not apply to it."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
           }
         },
         "summary": "Read a bounded byte range from a root-confined Volume file."
@@ -3235,6 +3585,16 @@
               }
             },
             "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
           }
         },
         "summary": "Remove a root-confined Volume path."
@@ -3317,6 +3677,16 @@
             },
             "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
           },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
+          },
           "507": {
             "content": {
               "text/plain": {
@@ -3395,6 +3765,16 @@
               }
             },
             "description": "The route exists, but this method does not apply to it."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
           }
         },
         "summary": "Read root-confined LSTAT metadata for a Volume path."
@@ -3516,6 +3896,16 @@
               }
             },
             "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
           },
           "507": {
             "content": {

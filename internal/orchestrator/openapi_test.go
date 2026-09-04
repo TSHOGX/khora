@@ -154,6 +154,37 @@ func TestOpenAPITimeSchemaMatchesJSONEncoding(t *testing.T) {
 	}
 }
 
+func TestOpenAPIOperationsDocumentInternalFailures(t *testing.T) {
+	raw, err := OpenAPIDoc()
+	if err != nil {
+		t.Fatalf("OpenAPIDoc: %v", err)
+	}
+	var doc struct {
+		Paths map[string]map[string]json.RawMessage `json:"paths"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("parse OpenAPI: %v", err)
+	}
+	for path, methods := range doc.Paths {
+		for method, rawOperation := range methods {
+			switch method {
+			case "get", "put", "post", "patch", "delete", "head", "options", "trace":
+			default:
+				continue
+			}
+			var operation struct {
+				Responses map[string]json.RawMessage `json:"responses"`
+			}
+			if err := json.Unmarshal(rawOperation, &operation); err != nil {
+				t.Fatalf("parse %s %s operation: %v", method, path, err)
+			}
+			if _, ok := operation.Responses["500"]; !ok {
+				t.Errorf("%s %s does not document the generic 500 internal-failure response", method, path)
+			}
+		}
+	}
+}
+
 // TestEveryDocumentedOperationIsRouted drives each listed operation against a real
 // server and asserts the router RECOGNIZES it: not 404, and not 405.
 //
