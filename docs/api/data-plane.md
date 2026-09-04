@@ -19,7 +19,10 @@ PTY dimensions must be supplied together. Multiple subscribers can observe one
 process. A connection replays the bounded per-process output tail before live
 events; this is not an unbounded log. Every frame carries a sequence and Placement
 epoch; an uncovered cursor is an explicit overflow/reset result. Output fan-out is
-concurrent and bounded, and a slow subscriber is detached instead of blocking the process. Process
+concurrent and bounded, and a slow subscriber is detached instead of blocking the process. The
+detached stream receives a sequence-zero `gap=true, reset_reason=overflow` keepalive
+before it terminates with `resource_exhausted`, so the caller can rescan or reconnect
+without mistaking the drop for a clean process exit. Process
 semantics and reaping are implemented in
 [cmd/sandboxd/process.go](../../cmd/sandboxd/process.go) and
 [cmd/sandboxd/reap.go](../../cmd/sandboxd/reap.go).
