@@ -49,6 +49,12 @@ type Reaper struct {
 	// past the budget. Reaper-loop-local (single goroutine drives Sweep), so no lock.
 	downSince     map[model.SandboxID]downStreak
 	lastTelemetry map[model.SandboxID]time.Time
+	// telemetryQueue is a one-slot handoff from the maintenance tick to the
+	// sampler. Sampling may perform provider and Store I/O; keeping it off the
+	// reaper goroutine means a slow metrics backend cannot delay lifecycle
+	// reconciliation. The single slot bounds work and drops a tick while a
+	// previous sample pass is still running.
+	telemetryQueue chan context.Context
 }
 
 // downStreak is one sandbox's continuous transport-down streak (health classification): when it
@@ -81,6 +87,7 @@ func NewReaper(m *Mediator, interval, transportDownBudget time.Duration) *Reaper
 		transportDownBudget: transportDownBudget,
 		downSince:           make(map[model.SandboxID]downStreak),
 		lastTelemetry:       make(map[model.SandboxID]time.Time),
+		telemetryQueue:      make(chan context.Context, 1),
 	}
 }
 
@@ -88,6 +95,7 @@ func NewReaper(m *Mediator, interval, transportDownBudget time.Duration) *Reaper
 // loop). The orchestrator starts it after startup reconcile, in its own
 // goroutine.
 func (r *Reaper) Run(ctx context.Context) {
+	go r.runTelemetry(ctx)
 	t := time.NewTicker(r.interval)
 	defer t.Stop()
 	for {
@@ -96,6 +104,23 @@ func (r *Reaper) Run(ctx context.Context) {
 			return
 		case <-t.C:
 			r.tick(ctx)
+		}
+	}
+}
+
+// runTelemetry drains the bounded sampling handoff. It is owned by Run so the
+// worker's lifetime follows the reaper context and no goroutine survives a
+// normal shutdown.
+func (r *Reaper) runTelemetry(ctx context.Context) {
+	if r.telemetryQueue == nil {
+		return
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case sampleCtx := <-r.telemetryQueue:
+			r.sampleTelemetry(sampleCtx)
 		}
 	}
 }
@@ -168,7 +193,21 @@ func (r *Reaper) tick(ctx context.Context) {
 	if err := r.m.TrimOutbox(ctx); err != nil {
 		r.m.deps.Logf("reaper: outbox trim (retried next tick): %v", err)
 	}
-	r.sampleTelemetry(ctx)
+	r.scheduleTelemetry(ctx)
+}
+
+// scheduleTelemetry is deliberately non-blocking. A full queue means the
+// previous pass is still doing best-effort sampling; dropping this tick keeps
+// lifecycle reconciliation bounded and the next tick can try again.
+func (r *Reaper) scheduleTelemetry(ctx context.Context) {
+	if r.telemetryQueue == nil {
+		return
+	}
+	select {
+	case r.telemetryQueue <- ctx:
+	default:
+		r.m.deps.Logf("reaper: telemetry sample skipped (sampler busy)")
+	}
 }
 
 func (r *Reaper) sampleTelemetry(ctx context.Context) {

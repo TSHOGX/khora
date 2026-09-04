@@ -74,7 +74,7 @@ without making completeness claims the substrate has not measured:
 | --- | --- | --- |
 | Process retention | 24-hour exited-handle window; reclaim event at expiry; Sandbox destroy is an immediate reclaim boundary | `TestProcessExitRetentionAndReclaimBoundary` |
 | Filesystem watch | change-detection semantics, recursive by default, 4096-event bound, explicit overflow gap and full rescan, reset on epoch change | `TestDecisionGatePolicies`; `WatchPolicy.Validate` |
-| Telemetry | 10-second sample interval, 24-hour retention, per-object timestamp and independent cursor lane; lifecycle publication does not wait on samples | `TestDecisionGatePolicies`; `TelemetryPolicy.Validate` |
+| Telemetry | 10-second Sandbox usage-sample interval, 24-hour retention, per-object timestamp and independent cursor lane; Placement and Process expose snapshots; lifecycle publication does not wait on samples | `TestDecisionGatePolicies`; `TelemetryPolicy.Validate` |
 | Template manifest | schema version 1, optional SHA-256 digest, `os/arch` platform, sorted unique capabilities, provenance, and SBOM reference | `TestTemplateManifestNormalizationValidationAndDigest` |
 | Operation recovery | 30-second lease, takeover only after expiry, and phase-based cleanup classification | `TestOperationHashKeyReuseAndRestartTakeover` |
 

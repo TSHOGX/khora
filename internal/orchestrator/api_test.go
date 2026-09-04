@@ -44,7 +44,7 @@ func seedTemplate(t *testing.T, mem *store.Memory, id, parent string, builtin bo
 	t.Helper()
 	if err := mem.CreateTemplate(context.Background(), model.Template{
 		ID: model.TemplateID(id), Parent: model.TemplateID(parent),
-		Builtin: builtin, CreatedAt: time.Now(),
+		Builtin: builtin, Manifest: model.DefaultTemplateManifest(), CreatedAt: time.Now(),
 	}); err != nil {
 		t.Fatalf("seed template %q: %v", id, err)
 	}
@@ -972,7 +972,7 @@ func TestFileBypassErrorsHideThePlacement(t *testing.T) {
 	// own client, and the leaking one IS the input under test.
 	mem := store.NewMemory()
 	if err := mem.CreateTemplate(context.Background(), model.Template{
-		ID: "bare", Builtin: true, CreatedAt: time.Now(),
+		ID: "bare", Builtin: true, Manifest: model.DefaultTemplateManifest(), CreatedAt: time.Now(),
 	}); err != nil {
 		t.Fatal(err)
 	}

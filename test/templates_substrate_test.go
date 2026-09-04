@@ -163,7 +163,7 @@ func TestTemplateOrphanLayerSweep(t *testing.T) {
 		}
 	}
 	// give the "live" layer a real templates row (Promote-built, non-builtin).
-	if err := eng.Store.CreateTemplate(ctx, model.Template{ID: "tmpl_live", Parent: "bare", CreatedAt: time.Now()}); err != nil {
+	if err := eng.Store.CreateTemplate(ctx, model.Template{ID: "tmpl_live", Parent: "bare", Manifest: model.DefaultTemplateManifest(), CreatedAt: time.Now()}); err != nil {
 		t.Fatalf("seed live layer row: %v", err)
 	}
 

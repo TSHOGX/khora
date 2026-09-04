@@ -839,7 +839,7 @@ func testConcurrentCAS(t *testing.T, mk Factory) {
 func seedTmpl(t *testing.T, s store.Store, id string) {
 	t.Helper()
 	if err := s.CreateTemplate(context.Background(), model.Template{
-		ID: model.TemplateID(id), Builtin: true, CreatedAt: time.Now(),
+		ID: model.TemplateID(id), Builtin: true, Manifest: model.DefaultTemplateManifest(), CreatedAt: time.Now(),
 	}); err != nil {
 		t.Fatalf("seed template %q: %v", id, err)
 	}
@@ -1672,6 +1672,9 @@ func testDurability(t *testing.T, mk Factory) {
 func testTemplateCRUD(t *testing.T, mk Factory) {
 	ctx := context.Background()
 	s, _ := mk(t)
+	if err := s.CreateTemplate(ctx, model.Template{ID: "tmpl_zero", Builtin: true, CreatedAt: time.Now()}); model.ErrorClassOf(err) != model.ErrorInvalidArgument {
+		t.Fatalf("zero manifest template = %v; want invalid_argument (durable rows must carry an explicit validated manifest)", err)
+	}
 	tm := model.Template{
 		ID: "tmpl_base", Builtin: true,
 		Manifest:  model.TemplateManifest{SchemaVersion: model.CurrentManifestSchema, Platform: "linux/amd64", Capabilities: []string{"z", "a"}}.Normalize(),
@@ -1748,15 +1751,15 @@ func testTemplateLineage(t *testing.T, mk Factory) {
 	ctx := context.Background()
 	s, _ := mk(t)
 	now := time.Now()
-	if err := s.CreateTemplate(ctx, model.Template{ID: "t1", Builtin: true, CreatedAt: now}); err != nil {
+	if err := s.CreateTemplate(ctx, model.Template{ID: "t1", Builtin: true, Manifest: model.DefaultTemplateManifest(), CreatedAt: now}); err != nil {
 		t.Fatalf("create t1: %v", err)
 	}
 	// child with a missing parent → ErrTemplateNotFound (reference-side).
-	if err := s.CreateTemplate(ctx, model.Template{ID: "t2", Parent: "ghost", CreatedAt: now}); err != store.ErrTemplateNotFound {
+	if err := s.CreateTemplate(ctx, model.Template{ID: "t2", Parent: "ghost", Manifest: model.DefaultTemplateManifest(), CreatedAt: now}); err != store.ErrTemplateNotFound {
 		t.Fatalf("child of missing parent = %v; want ErrTemplateNotFound", err)
 	}
 	// valid child.
-	if err := s.CreateTemplate(ctx, model.Template{ID: "t2", Parent: "t1", CreatedAt: now}); err != nil {
+	if err := s.CreateTemplate(ctx, model.Template{ID: "t2", Parent: "t1", Manifest: model.DefaultTemplateManifest(), CreatedAt: now}); err != nil {
 		t.Fatalf("create t2(parent=t1): %v", err)
 	}
 	// parent referenced by child → ErrInUse.
@@ -1794,8 +1797,8 @@ func testTemplateDurability(t *testing.T, mk Factory) {
 	if reopen == nil {
 		t.Skip("backend is not durable across reopen")
 	}
-	_ = s.CreateTemplate(ctx, model.Template{ID: "t1", Builtin: true, CreatedAt: time.Now()})
-	_ = s.CreateTemplate(ctx, model.Template{ID: "t2", Parent: "t1", CreatedAt: time.Now()})
+	_ = s.CreateTemplate(ctx, model.Template{ID: "t1", Builtin: true, Manifest: model.DefaultTemplateManifest(), CreatedAt: time.Now()})
+	_ = s.CreateTemplate(ctx, model.Template{ID: "t2", Parent: "t1", Manifest: model.DefaultTemplateManifest(), CreatedAt: time.Now()})
 	s2 := reopen(t)
 	got, err := s2.GetTemplate(ctx, "t2")
 	if err != nil {
@@ -1969,7 +1972,7 @@ func testReferenceReclaimRace(t *testing.T, mk Factory) {
 	for i := 0; i < trials; i++ {
 		tmplID := model.TemplateID(fmt.Sprintf("race_tmpl_%d", i))
 		childID := model.TemplateID(fmt.Sprintf("race_child_%d", i))
-		if err := s.CreateTemplate(ctx, model.Template{ID: tmplID, Builtin: true, CreatedAt: time.Now()}); err != nil {
+		if err := s.CreateTemplate(ctx, model.Template{ID: tmplID, Builtin: true, Manifest: model.DefaultTemplateManifest(), CreatedAt: time.Now()}); err != nil {
 			t.Fatalf("trial %d: seed template: %v", i, err)
 		}
 
@@ -1994,7 +1997,7 @@ func testReferenceReclaimRace(t *testing.T, mk Factory) {
 		launch(func() { delErr = s.DeleteTemplate(ctx, tmplID) })
 		// a child Template referencing tmpl as parent (lineage reference-side)
 		launch(func() {
-			childErr = s.CreateTemplate(ctx, model.Template{ID: childID, Parent: tmplID, CreatedAt: time.Now()})
+			childErr = s.CreateTemplate(ctx, model.Template{ID: childID, Parent: tmplID, Manifest: model.DefaultTemplateManifest(), CreatedAt: time.Now()})
 		})
 		// sandbox referrers
 		for j := 0; j < refs; j++ {
@@ -2364,7 +2367,7 @@ func seedSbx(t *testing.T, s store.Store, id string) {
 	// Tolerates being called for several sandboxes in one subtest, unlike seedTmpl
 	// (which fatals on a duplicate — correct for its own callers, which seed once).
 	if err := s.CreateTemplate(context.Background(), model.Template{
-		ID: "bare", Builtin: true, CreatedAt: time.Now(),
+		ID: "bare", Builtin: true, Manifest: model.DefaultTemplateManifest(), CreatedAt: time.Now(),
 	}); err != nil && err != store.ErrConflict {
 		t.Fatalf("seed template: %v", err)
 	}

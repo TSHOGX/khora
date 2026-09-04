@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -31,6 +32,21 @@ func TestNewSelectsTypedVolumeProvider(t *testing.T) {
 		if err := closer.Close(); err != nil {
 			t.Fatalf("close store: %v", err)
 		}
+	}
+}
+
+func TestNewRejectsInvalidTelemetryPolicy(t *testing.T) {
+	base := t.TempDir()
+	_, err := New(Config{
+		TemplatesDir: filepath.Join(base, "templates"),
+		StateDir:     filepath.Join(base, "state"),
+		TelemetryPolicy: model.TelemetryPolicy{
+			Interval:  10 * time.Second,
+			Retention: time.Second,
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "telemetry policy") {
+		t.Fatalf("New with invalid telemetry policy = %v; want fail-closed policy validation", err)
 	}
 }
 

@@ -32,7 +32,7 @@ func seedBare(t *testing.T, st interface {
 	}
 	for _, id := range ids {
 		if err := st.CreateTemplate(context.Background(), model.Template{
-			ID: model.TemplateID(id), Builtin: true, CreatedAt: time.Now(),
+			ID: model.TemplateID(id), Builtin: true, Manifest: model.DefaultTemplateManifest(), CreatedAt: time.Now(),
 		}); err != nil {
 			t.Fatalf("seed template %q: %v", id, err)
 		}

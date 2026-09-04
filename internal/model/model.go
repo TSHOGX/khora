@@ -62,9 +62,9 @@ type Template struct {
 	Builtin bool
 
 	// Manifest is the immutable capability declaration for the Template base.
-	// A zero value is retained for builtin rows created by older callers; the
-	// manifest validation/promotion path fills the canonical schema before a
-	// new artifact is exposed.
+	// Store implementations validate it before the row becomes visible. The
+	// canonical empty declaration is DefaultTemplateManifest; a zero value is
+	// not a compatibility encoding and is refused at the durable seam.
 	Manifest TemplateManifest
 
 	CreatedAt time.Time

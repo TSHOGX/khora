@@ -506,3 +506,22 @@ func TestReaperTickRunsEveryMaintenanceRound(t *testing.T) {
 		}
 	}
 }
+
+func TestReaperTelemetrySchedulingIsBoundedAndNonBlocking(t *testing.T) {
+	// The sampler performs provider and Store I/O on its own goroutine. A full
+	// one-slot handoff must make the maintenance tick drop the sample rather
+	// than wait behind a wedged backend.
+	m := New(Deps{Store: store.NewMemory(), Logf: func(string, ...any) {}})
+	r := &Reaper{m: m, telemetryQueue: make(chan context.Context, 1)}
+	r.telemetryQueue <- context.Background()
+	done := make(chan struct{})
+	go func() {
+		r.scheduleTelemetry(context.Background())
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("telemetry scheduling blocked while sampler queue was full")
+	}
+}

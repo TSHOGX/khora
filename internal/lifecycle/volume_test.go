@@ -665,7 +665,7 @@ func TestSweepOrphanVolumesKeepsAUnitHeldOnlyByAMountRow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.CreateTemplate(ctx, model.Template{ID: "bare", Builtin: true, CreatedAt: time.Now()}); err != nil {
+	if err := st.CreateTemplate(ctx, model.Template{ID: "bare", Builtin: true, Manifest: model.DefaultTemplateManifest(), CreatedAt: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.CreateSandbox(ctx, model.Sandbox{

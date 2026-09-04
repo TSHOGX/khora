@@ -25,7 +25,7 @@ func seedRec(t *testing.T, st store.Store, id, ov string, state model.Lifecycle)
 	ctx := context.Background()
 	now := time.Now()
 	// health and reclamation template FK: ensure "bare" exists first (idempotent across records).
-	_ = st.CreateTemplate(ctx, model.Template{ID: "bare", Builtin: true, CreatedAt: now})
+	_ = st.CreateTemplate(ctx, model.Template{ID: "bare", Builtin: true, Manifest: model.DefaultTemplateManifest(), CreatedAt: now})
 	if err := st.CreateSandbox(ctx, model.Sandbox{
 		ID: model.SandboxID(id), Template: "bare", Overlay: model.OverlayID(ov),
 		State: model.Creating, CreatedAt: now, UpdatedAt: now,

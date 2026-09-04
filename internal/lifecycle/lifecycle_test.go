@@ -293,7 +293,7 @@ func seedPaused(t *testing.T, st *store.Memory, sid, oid, tmpl string) {
 	now := time.Now()
 	// health and reclamation template FK: ensure the referenced Template row exists first. Idempotent
 	// across repeat calls with the same tmpl (ErrConflict is fine → ignore).
-	_ = st.CreateTemplate(ctx, model.Template{ID: model.TemplateID(tmpl), Builtin: true, CreatedAt: now})
+	_ = st.CreateTemplate(ctx, model.Template{ID: model.TemplateID(tmpl), Builtin: true, Manifest: model.DefaultTemplateManifest(), CreatedAt: now})
 	if err := st.CreateSandbox(ctx, model.Sandbox{
 		ID: model.SandboxID(sid), Template: model.TemplateID(tmpl),
 		Overlay: model.OverlayID(oid), State: model.Creating,

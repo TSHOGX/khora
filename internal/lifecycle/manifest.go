@@ -3,18 +3,13 @@ package lifecycle
 import (
 	"context"
 	"fmt"
-	goruntime "runtime"
 	"strings"
 
 	"github.com/TSHOGX/khora/internal/model"
 )
 
 func defaultTemplateManifest() model.TemplateManifest {
-	return model.TemplateManifest{
-		SchemaVersion: model.CurrentManifestSchema,
-		Platform:      goruntime.GOOS + "/" + goruntime.GOARCH,
-		Capabilities:  []string{},
-	}.Normalize()
+	return model.DefaultTemplateManifest()
 }
 
 func validateTemplateForLaunch(ctx context.Context, rec model.Sandbox, st interface {
@@ -28,11 +23,7 @@ func validateTemplateForLaunch(ctx context.Context, rec model.Sandbox, st interf
 	if err != nil {
 		return err
 	}
-	manifest := tm.Manifest
-	if manifest.SchemaVersion == 0 {
-		manifest = defaultTemplateManifest()
-	}
-	manifest = manifest.Normalize()
+	manifest := tm.Manifest.Normalize()
 	if err := manifest.Validate(); err != nil {
 		return err
 	}

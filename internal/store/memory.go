@@ -138,6 +138,9 @@ func (m *Memory) CreateSandbox(_ context.Context, s model.Sandbox, ev *Event) er
 }
 
 func (m *Memory) CreateTemplate(_ context.Context, t model.Template) error {
+	if err := t.Validate(); err != nil {
+		return err
+	}
 	t.Manifest = t.Manifest.Normalize()
 	m.mu.Lock()
 	defer m.mu.Unlock()

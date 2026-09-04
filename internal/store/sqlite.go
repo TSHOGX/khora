@@ -700,6 +700,9 @@ func isFKViolation(err error) bool {
 }
 
 func (s *SQLite) CreateTemplate(ctx context.Context, tm model.Template) error {
+	if err := tm.Validate(); err != nil {
+		return err
+	}
 	return s.tx(ctx, func(t *sql.Tx) error {
 		var exists int
 		if err := t.QueryRow(`SELECT 1 FROM templates WHERE id=?`, string(tm.ID)).Scan(&exists); err == nil {
@@ -1172,11 +1175,15 @@ func scanTemplate(r rowScanner) (model.Template, error) {
 	tm.ID = model.TemplateID(id)
 	tm.Parent = model.TemplateID(parent.String) // "" when NULL
 	tm.Builtin = builtin != 0
-	if manifestJSON != "" {
-		if err := json.Unmarshal([]byte(manifestJSON), &tm.Manifest); err != nil {
-			return model.Template{}, fmt.Errorf("store: decode template manifest: %w", err)
-		}
-		tm.Manifest = tm.Manifest.Normalize()
+	if manifestJSON == "" {
+		return model.Template{}, fmt.Errorf("store: template manifest is missing")
+	}
+	if err := json.Unmarshal([]byte(manifestJSON), &tm.Manifest); err != nil {
+		return model.Template{}, fmt.Errorf("store: decode template manifest: %w", err)
+	}
+	tm.Manifest = tm.Manifest.Normalize()
+	if err := tm.Validate(); err != nil {
+		return model.Template{}, fmt.Errorf("store: invalid template manifest: %w", err)
 	}
 	tm.CreatedAt = time.Unix(0, created)
 	return tm, nil

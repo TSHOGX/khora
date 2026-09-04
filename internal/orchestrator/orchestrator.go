@@ -312,6 +312,12 @@ func New(cfg Config) (*Engine, error) {
 	if cfg.TemplatesDir == "" || cfg.StateDir == "" {
 		return nil, fmt.Errorf("orchestrator: TemplatesDir and StateDir are required")
 	}
+	telemetryPolicy := cfg.TelemetryPolicy
+	if telemetryPolicy.Interval == 0 && telemetryPolicy.Retention == 0 {
+		telemetryPolicy = model.DefaultTelemetryPolicy
+	} else if err := telemetryPolicy.Validate(); err != nil {
+		return nil, fmt.Errorf("orchestrator: telemetry policy: %w", err)
+	}
 
 	dep := network.Deployment{SecondHopUID: cfg.SecondHopUID}
 	// FAIL FAST, BEFORE ANY SUBSTRATE STATE EXISTS. A second-hop uid equal to this
@@ -407,7 +413,7 @@ func New(cfg Config) (*Engine, error) {
 		DefaultIdleTimeout:    cfg.DefaultIdleTimeout,
 		DefaultRetention:      cfg.DefaultRetention,
 		EventRetention:        cfg.EventRetention,
-		TelemetryPolicy:       cfg.TelemetryPolicy,
+		TelemetryPolicy:       telemetryPolicy,
 		ProcessRetention:      cfg.ProcessRetention,
 		FaultAfterColdStart:   cfg.FaultAfterColdStart,
 		FaultAfterVolumeBytes: cfg.FaultAfterVolumeBytes,

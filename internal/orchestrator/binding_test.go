@@ -24,7 +24,7 @@ func bindingFixture(t *testing.T) (*httptest.Server, *store.Memory) {
 	t.Helper()
 	mem := store.NewMemory()
 	if err := mem.CreateTemplate(context.Background(), model.Template{
-		ID: "bare", Builtin: true, CreatedAt: time.Now(),
+		ID: "bare", Builtin: true, Manifest: model.DefaultTemplateManifest(), CreatedAt: time.Now(),
 	}); err != nil {
 		t.Fatalf("seed template: %v", err)
 	}

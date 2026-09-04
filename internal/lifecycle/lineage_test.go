@@ -28,9 +28,9 @@ func seedLineage(t *testing.T, st *store.Memory) {
 	ctx := context.Background()
 	now := time.Now()
 	for _, tm := range []model.Template{
-		{ID: "base", Builtin: true, CreatedAt: now},
-		{ID: "mid", Parent: "base", CreatedAt: now},
-		{ID: "leaf", Parent: "mid", CreatedAt: now},
+		{ID: "base", Builtin: true, Manifest: model.DefaultTemplateManifest(), CreatedAt: now},
+		{ID: "mid", Parent: "base", Manifest: model.DefaultTemplateManifest(), CreatedAt: now},
+		{ID: "leaf", Parent: "mid", Manifest: model.DefaultTemplateManifest(), CreatedAt: now},
 	} {
 		if err := st.CreateTemplate(ctx, tm); err != nil {
 			t.Fatalf("seed template %s: %v", tm.ID, err)

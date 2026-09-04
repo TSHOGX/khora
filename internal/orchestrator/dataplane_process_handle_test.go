@@ -21,7 +21,7 @@ func processReservationFixture(t *testing.T) (*processProxy, model.SandboxID) {
 	ctx := context.Background()
 	st := store.NewMemory()
 	now := time.Now()
-	if err := st.CreateTemplate(ctx, model.Template{ID: "bare", Builtin: true, CreatedAt: now}); err != nil {
+	if err := st.CreateTemplate(ctx, model.Template{ID: "bare", Builtin: true, Manifest: model.DefaultTemplateManifest(), CreatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
 	sid := model.SandboxID("sbx_process_reservation")

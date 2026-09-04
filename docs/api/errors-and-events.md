@@ -76,10 +76,11 @@ classes, URL-safe cursor encoding, overflow gap, and measured-zero versus
 unavailable rules are maintained in
 [Durable contract foundation](../internals/contracts.md).
 
-Per-object usage samples are available through the separate telemetry lane on
-`GET /v1/sandboxes/{id}/telemetry`; lifecycle event publication never waits for
-sampling. The telemetry cursor and retention policy are independent of the
-lifecycle stream. This fulfills the usage-event contract tracked in
+Sandbox usage samples are available through the separate telemetry lane on
+`GET /v1/sandboxes/{id}/telemetry`; Placement and Process resource snapshots
+are available from their snapshot routes. Lifecycle event publication never
+waits for sampling. The telemetry cursor and retention policy are independent of
+the lifecycle stream. This fulfills the usage-event contract tracked in
 [Issue #3](https://github.com/TSHOGX/khora/issues/3). Lifecycle replay retention
 is configured with `--event-retention`; the default `0s` retains the full outbox.
 Set a positive duration only when the deployment has chosen a replay window.

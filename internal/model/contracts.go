@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	goruntime "runtime"
 	"sort"
 	"strings"
 	"time"
@@ -292,6 +293,31 @@ type TemplateManifest struct {
 	Capabilities    []string              `json:"capabilities"`
 	Provenance      string                `json:"provenance,omitempty"`
 	SBOMReference   string                `json:"sbom_reference,omitempty"`
+}
+
+// Validate checks the immutable Template shape before it reaches a Store.
+// Parent lineage checks remain the Store's reference constraint.
+func (t Template) Validate() error {
+	if t.ID == "" {
+		return NewContractError(ErrorInvalidArgument, "Template ID is required")
+	}
+	if err := t.Manifest.Normalize().Validate(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// DefaultTemplateManifest is the canonical manifest for a built-in Template
+// whose provider has no additional declarations. It is an explicit constructor
+// rather than a zero-value fallback: persisted Template rows must always carry
+// a validated schema, and callers choose this value when they mean the empty
+// capability declaration.
+func DefaultTemplateManifest() TemplateManifest {
+	return TemplateManifest{
+		SchemaVersion: CurrentManifestSchema,
+		Platform:      goruntime.GOOS + "/" + goruntime.GOARCH,
+		Capabilities:  []string{},
+	}.Normalize()
 }
 
 func (m TemplateManifest) Normalize() TemplateManifest {

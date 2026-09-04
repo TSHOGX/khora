@@ -35,8 +35,9 @@ Both endpoints return JSON with `status`, optional `detail`, and `uptime`, and s
 It does not duplicate per-Sandbox storage usage or placement-local network packet
 counters. Machine-readable object snapshots are available under the `/v1`
 Sandbox, Placement, and Process snapshot routes. `GET
-/v1/sandboxes/{id}/telemetry` is a separate cursorable sample lane with a
-10-second default cadence and bounded retention; its unavailable measurements
+`/v1/sandboxes/{id}/telemetry` is a separate cursorable Sandbox usage-sample
+lane with a 10-second default cadence and bounded retention; Placement and
+Process snapshots remain request/response reads. Its unavailable measurements
 are not emitted as zero. If the Sandbox count store read fails, those samples
 are omitted and the process log carries the cause. Names and semantics are defined in
 [internal/orchestrator/health.go](../../internal/orchestrator/health.go).
