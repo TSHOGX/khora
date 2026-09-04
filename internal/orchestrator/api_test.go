@@ -139,6 +139,38 @@ func TestAPISnapshotAndTelemetryAvailability(t *testing.T) {
 	resp.Body.Close()
 }
 
+func TestAPIMissingPlacementProcessAndTelemetryReturn404(t *testing.T) {
+	srv, mem := apiFixture(t)
+	seedTemplate(t, mem, "bare", "", true)
+	now := time.Now()
+	if err := mem.CreateSandbox(context.Background(), model.Sandbox{
+		ID: "sbx_no_placement", Template: "bare", Overlay: "ov_no_placement", State: model.Paused,
+		CreatedAt: now, UpdatedAt: now,
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name string
+		path string
+	}{
+		{name: "existing sandbox without placement", path: "/v1/sandboxes/sbx_no_placement/placement"},
+		{name: "unknown sandbox placement", path: "/v1/sandboxes/ghost/placement"},
+		{name: "unknown sandbox telemetry", path: "/v1/sandboxes/ghost/telemetry"},
+		{name: "unknown sandbox processes", path: "/v1/sandboxes/ghost/processes"},
+		{name: "unknown process", path: "/v1/processes/ghost"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := do(t, http.MethodGet, srv.URL+tc.path)
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusNotFound {
+				t.Fatalf("GET %s = %d; want 404", tc.path, resp.StatusCode)
+			}
+		})
+	}
+}
+
 func TestAPIProcessSnapshotCarriesExplicitResourceAvailability(t *testing.T) {
 	srv, mem := apiFixture(t)
 	seedTemplate(t, mem, "bare", "", true)

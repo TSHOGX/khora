@@ -1302,7 +1302,8 @@ func statusCodeFor(err error) int {
 		// the cap or destroying the sandbox — 409, never a raw 500.
 		return http.StatusConflict
 	case errors.Is(err, store.ErrNotFound), errors.Is(err, store.ErrTemplateNotFound),
-		errors.Is(err, store.ErrVolumeNotFound):
+		errors.Is(err, store.ErrVolumeNotFound), errors.Is(err, store.ErrPlacementNotFound),
+		errors.Is(err, store.ErrProcessNotFound):
 		// Volume not-found has its own sentinel so the 404 names the right object; a
 		// 404 mentioning the wrong one sends the caller looking in the wrong place.
 		// Note it is NOT folded into success on delete (the API error contract): the reference-protection
