@@ -756,6 +756,9 @@ func (f *fsProxy) Move(ctx context.Context, req *connect.Request[v1.MoveRequest]
 }
 
 func (f *fsProxy) Watch(ctx context.Context, req *connect.Request[v1.WatchRequest], stream *connect.ServerStream[v1.WatchEvent]) error {
+	if req == nil || req.Msg == nil {
+		return connect.NewError(connect.CodeInvalidArgument, errors.New("missing watch request"))
+	}
 	id := model.SandboxID(req.Header().Get(sandboxIDHeader))
 	if id == "" {
 		return connect.NewError(connect.CodeInvalidArgument, errors.New("missing "+sandboxIDHeader+" header"))
