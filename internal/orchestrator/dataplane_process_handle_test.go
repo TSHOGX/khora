@@ -78,6 +78,26 @@ func TestProcessStartIdentityGateSerializesRetryWindow(t *testing.T) {
 	}
 }
 
+func TestProcessStartGateCoversKeyAndHandleAliases(t *testing.T) {
+	e := &Engine{}
+	keyIdentity := processStartIdentity("sbx_a", 3, "retry-key", "proc_fixed")
+	handleIdentity := processStartHandleIdentity("sbx_a", 3, "proc_fixed")
+	release, err := e.acquireProcessStart(context.Background(), keyIdentity, handleIdentity)
+	if err != nil || release == nil {
+		t.Fatalf("first gate = release=%v err=%v", release != nil, err)
+	}
+	defer release()
+	waitCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	second, err := e.acquireProcessStart(waitCtx, handleIdentity)
+	if second != nil || err == nil {
+		if second != nil {
+			second()
+		}
+		t.Fatalf("handle alias bypassed key+handle gate: release=%v err=%v", second != nil, err)
+	}
+}
+
 func TestCanceledReservationDeletionRequiresAnonymousStart(t *testing.T) {
 	for _, tc := range []struct {
 		name    string

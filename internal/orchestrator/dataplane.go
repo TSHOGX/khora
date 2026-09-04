@@ -159,7 +159,8 @@ func (p *processProxy) Start(ctx context.Context, req *connect.Request[v1.StartR
 	// retry identity. Serialize its reservation-to-dispatch window so a
 	// concurrent retry cannot observe a row while a canceled request removes it.
 	identity := processStartIdentity(sandboxID, epoch, m.IdempotencyKey, m.ProcessHandle)
-	releaseStart, err := p.e.acquireProcessStart(ctx, identity)
+	handleIdentity := processStartHandleIdentity(sandboxID, epoch, m.ProcessHandle)
+	releaseStart, err := p.e.acquireProcessStart(ctx, identity, handleIdentity)
 	if err != nil {
 		return err
 	}
@@ -240,6 +241,13 @@ func processStartIdentity(sandbox model.SandboxID, epoch model.PlacementEpoch, k
 		kind, value = "handle", handle
 	}
 	return fmt.Sprintf("%s\x00%d\x00%s:%s", sandbox, uint64(epoch), kind, value)
+}
+
+func processStartHandleIdentity(sandbox model.SandboxID, epoch model.PlacementEpoch, handle string) string {
+	if handle == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s\x00%d\x00handle:%s", sandbox, uint64(epoch), handle)
 }
 
 func canceledReservationMayBeDeleted(created bool, key, handle string) bool {

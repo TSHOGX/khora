@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"slices"
 	"sync"
 	"time"
 
@@ -183,41 +184,72 @@ type Engine struct {
 	processStarts   map[string]*processStartFlight
 }
 
-type processStartFlight struct{ done chan struct{} }
+type processStartFlight struct {
+	done  chan struct{}
+	locks []string
+}
 
-// acquireProcessStart serializes the reservation-to-guest-dispatch window for
-// one retry identity. Anonymous starts intentionally skip the gate because no
-// second request can address their reservation until the first response returns.
-func (e *Engine) acquireProcessStart(ctx context.Context, identity string) (func(), error) {
-	if e == nil || identity == "" {
+// acquireProcessStart acquires all aliases for one Start request atomically.
+// A supplied handle and an idempotency key are both identities for the same
+// reservation; locking only one lets cross-alias retries race reservation
+// cleanup. Alias ordering is deterministic so concurrent requests cannot
+// deadlock while waiting on overlapping identities.
+func (e *Engine) acquireProcessStart(ctx context.Context, identities ...string) (func(), error) {
+	if e == nil {
 		return func() {}, nil
 	}
+	locks := make([]string, 0, len(identities))
+	seen := make(map[string]struct{}, len(identities))
+	for _, identity := range identities {
+		if identity == "" {
+			continue
+		}
+		if _, ok := seen[identity]; ok {
+			continue
+		}
+		seen[identity] = struct{}{}
+		locks = append(locks, identity)
+	}
+	if len(locks) == 0 {
+		return func() {}, nil
+	}
+	slices.Sort(locks)
 	for {
 		e.processStartsMu.Lock()
 		if e.processStarts == nil {
 			e.processStarts = make(map[string]*processStartFlight)
 		}
-		if flight := e.processStarts[identity]; flight != nil {
-			done := flight.done
+		var wait <-chan struct{}
+		for _, identity := range locks {
+			if flight := e.processStarts[identity]; flight != nil {
+				wait = flight.done
+				break
+			}
+		}
+		if wait != nil {
 			e.processStartsMu.Unlock()
 			select {
-			case <-done:
+			case <-wait:
 				continue
 			case <-ctx.Done():
 				return nil, ctx.Err()
 			}
 		}
-		flight := &processStartFlight{done: make(chan struct{})}
-		e.processStarts[identity] = flight
+		flight := &processStartFlight{done: make(chan struct{}), locks: locks}
+		for _, identity := range locks {
+			e.processStarts[identity] = flight
+		}
 		e.processStartsMu.Unlock()
 		var once sync.Once
 		return func() {
 			once.Do(func() {
 				e.processStartsMu.Lock()
-				if e.processStarts[identity] == flight {
-					delete(e.processStarts, identity)
-					close(flight.done)
+				for _, identity := range flight.locks {
+					if e.processStarts[identity] == flight {
+						delete(e.processStarts, identity)
+					}
 				}
+				close(flight.done)
 				e.processStartsMu.Unlock()
 			})
 		}, nil

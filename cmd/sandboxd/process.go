@@ -861,8 +861,11 @@ func (p *proc) subscribeFrom(after uint64) (sub *subscriber, snap []frame, ended
 	}
 	// Sequence zero is the initial cursor: it asks for whatever bounded tail
 	// is currently retained, even when older frames have already been evicted.
-	// Only a nonzero cursor can be stale and require an explicit rescan.
-	if after > 0 && first > 0 && after+1 < first {
+	// A nonzero cursor is invalid both when it is behind the retained prefix and
+	// when it points into the future. Returning an empty live stream for a future
+	// cursor would suppress output (and, for an already-ended process, its end
+	// frame) until a caller happened to rescan by hand.
+	if after > 0 && (after > p.sequence || (first > 0 && after < first-1)) {
 		gap = true
 	}
 	if after > 0 {

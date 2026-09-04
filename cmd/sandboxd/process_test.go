@@ -269,6 +269,23 @@ func TestZeroCursorReplaysRetainedTailAfterTrim(t *testing.T) {
 	}
 }
 
+func TestFutureProcessCursorReportsGap(t *testing.T) {
+	p := newProc(1, nil)
+	p.broadcast(frame{kind: 'd', data: []byte("x")})
+	future := p.sequence + 1
+	_, _, _, _, gap := p.subscribeFrom(future)
+	if !gap {
+		t.Fatalf("future cursor %d was accepted at sequence %d", future, p.sequence)
+	}
+
+	p.finish(0)
+	future = p.sequence + 1
+	_, _, ended, _, gap := p.subscribeFrom(future)
+	if !ended || !gap {
+		t.Fatalf("future cursor after exit = ended=%v gap=%v; want ended=true,gap=true", ended, gap)
+	}
+}
+
 func TestStableProcessHandleRetainsExitAfterPidUnregister(t *testing.T) {
 	s := &processServer{}
 	p := newProc(19, nil)
