@@ -37,6 +37,15 @@ func watchReplayEvent(t *testing.T, replay []*v1.WatchEvent, index int) *v1.Watc
 	return replay[index]
 }
 
+type watchMarkerSender struct {
+	events []*v1.WatchEvent
+}
+
+func (s *watchMarkerSender) Send(event *v1.WatchEvent) error {
+	s.events = append(s.events, event)
+	return nil
+}
+
 func writeWatchFile(t *testing.T, root, name string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(root, name), []byte(name), 0o644); err != nil {
@@ -521,6 +530,39 @@ func TestWatchHubOverflowMarkerSurvivesReloadWithoutRecords(t *testing.T) {
 	restarted := newWatchHub(statePath, 4)
 	if err := restarted.ensureEpoch(1); connect.CodeOf(err) != connect.CodeResourceExhausted {
 		t.Fatalf("reloaded overflow marker = %v; want resource_exhausted", err)
+	}
+}
+
+func TestStickyWatchOverflowSendsMarkerBeforeError(t *testing.T) {
+	h := newWatchHub("", 4)
+	if err := h.ensureEpoch(7); err != nil {
+		t.Fatal(err)
+	}
+	h.mu.Lock()
+	h.overflow = true
+	h.mu.Unlock()
+	sender := &watchMarkerSender{}
+	err := sendStickyWatchOverflow(sender, h, watchGapError())
+	if connect.CodeOf(err) != connect.CodeResourceExhausted {
+		t.Fatalf("sticky overflow error = %v; want resource_exhausted", err)
+	}
+	if len(sender.events) != 1 || !sender.events[0].Overflow || !sender.events[0].Reset_ || sender.events[0].ResetReason != "overflow" || sender.events[0].Sequence != 0 || sender.events[0].PlacementEpoch != 7 {
+		t.Fatalf("sticky overflow marker = %+v; want one sequence-zero overflow/reset marker at epoch 7", sender.events)
+	}
+}
+
+func TestStickyWatchOverflowDoesNotMarkScopeLimit(t *testing.T) {
+	h := newWatchHub("", 4)
+	if err := h.ensureEpoch(1); err != nil {
+		t.Fatal(err)
+	}
+	sender := &watchMarkerSender{}
+	err := sendStickyWatchOverflow(sender, h, watchScopeLimitError())
+	if connect.CodeOf(err) != connect.CodeResourceExhausted {
+		t.Fatalf("scope limit error = %v; want resource_exhausted", err)
+	}
+	if len(sender.events) != 0 {
+		t.Fatalf("scope limit unexpectedly emitted overflow marker: %+v", sender.events)
 	}
 }
 

@@ -474,6 +474,34 @@ func watchGapError() error {
 	return connect.NewError(connect.CodeResourceExhausted, errors.New("filesystem watch cursor gap; full rescan required"))
 }
 
+func watchOverflowMarker(epoch uint64) *v1.WatchEvent {
+	return &v1.WatchEvent{Sequence: 0, PlacementEpoch: epoch, Overflow: true, Reset_: true, ResetReason: "overflow"}
+}
+
+// watchEventSender is the small stream seam needed when a sticky journal
+// overflow is discovered before a subscriber exists. Sending the marker first
+// keeps the recovery instruction on the wire even though the request then
+// terminates with resource_exhausted.
+type watchEventSender interface {
+	Send(*v1.WatchEvent) error
+}
+
+func sendStickyWatchOverflow(stream watchEventSender, hub *watchHub, err error) error {
+	if stream == nil || hub == nil || connect.CodeOf(err) != connect.CodeResourceExhausted {
+		return err
+	}
+	hub.mu.Lock()
+	overflow, epoch := hub.overflow, hub.epoch
+	hub.mu.Unlock()
+	if !overflow {
+		return err
+	}
+	if sendErr := stream.Send(watchOverflowMarker(epoch)); sendErr != nil {
+		return sendErr
+	}
+	return err
+}
+
 func watchScopeLimitError() error {
 	return connect.NewError(connect.CodeResourceExhausted, errors.New("filesystem watch scope limit reached"))
 }
@@ -760,7 +788,7 @@ func (h *watchHub) pollScope(scope *watchScope) error {
 			h.dropped = oldDropped
 			scope.previous = oldPrevious
 			for sub := range h.subs {
-				h.closeSubscriberLocked(sub, &v1.WatchEvent{Sequence: 0, PlacementEpoch: h.epoch, Overflow: true, Reset_: true, ResetReason: "overflow"})
+				h.closeSubscriberLocked(sub, watchOverflowMarker(h.epoch))
 			}
 			_ = h.persistLocked()
 			return watchGapError()
@@ -807,7 +835,7 @@ func (h *watchHub) publishLocked(scope string, event *v1.WatchEvent) {
 		select {
 		case sub.ch <- watchNotice{Event: cloneWatchEvent(event)}:
 		default:
-			h.closeSubscriberLocked(sub, &v1.WatchEvent{Sequence: 0, PlacementEpoch: h.epoch, Overflow: true, Reset_: true, ResetReason: "overflow"})
+			h.closeSubscriberLocked(sub, watchOverflowMarker(h.epoch))
 		}
 	}
 }
@@ -837,7 +865,7 @@ func (h *watchHub) subscribe(scope *watchScope, after uint64, initial bool) (*wa
 	// silently skip the evicted prefix after a transport restart.
 	if after > h.sequence {
 		sub.mu.Lock()
-		sub.terminal = &watchNotice{Event: &v1.WatchEvent{Sequence: 0, PlacementEpoch: h.epoch, Overflow: true, Reset_: true, ResetReason: "overflow"}}
+		sub.terminal = &watchNotice{Event: watchOverflowMarker(h.epoch)}
 		sub.terminalErr = watchGapError()
 		sub.mu.Unlock()
 		replay = append(replay, cloneWatchEvent(sub.terminal.Event))
@@ -846,7 +874,7 @@ func (h *watchHub) subscribe(scope *watchScope, after uint64, initial bool) (*wa
 	}
 	if (initial && after > 0) || (after > 0 && after < h.dropped[scope.key]) {
 		sub.mu.Lock()
-		sub.terminal = &watchNotice{Event: &v1.WatchEvent{Sequence: 0, PlacementEpoch: h.epoch, Overflow: true, Reset_: true, ResetReason: "overflow"}}
+		sub.terminal = &watchNotice{Event: watchOverflowMarker(h.epoch)}
 		sub.terminalErr = watchGapError()
 		replay = append(replay, cloneWatchEvent(sub.terminal.Event))
 		sub.mu.Unlock()
@@ -1009,25 +1037,25 @@ func (s *fsServer) Watch(ctx context.Context, req *connect.Request[v1.WatchReque
 	hub := s.watch
 	s.watchMu.Unlock()
 	if err := hub.ensureEpoch(m.PlacementEpoch); err != nil {
-		return err
+		return sendStickyWatchOverflow(stream, hub, err)
 	}
 	if err := hub.validateEpoch(m.PlacementEpoch); err != nil {
-		return err
+		return sendStickyWatchOverflow(stream, hub, err)
 	}
 	scope, initial, err := hub.scope(root, m.Recursive)
 	if err != nil {
-		return err
+		return sendStickyWatchOverflow(stream, hub, err)
 	}
 	if !initial {
 		// Catch up changes made while no stream (or transport child) was
 		// present before registering the new subscriber.
 		if err := hub.pollScope(scope); err != nil {
-			return err
+			return sendStickyWatchOverflow(stream, hub, err)
 		}
 	}
 	sub, replay, err := hub.subscribe(scope, m.AfterSequence, initial)
 	if err != nil {
-		return err
+		return sendStickyWatchOverflow(stream, hub, err)
 	}
 	for _, event := range replay {
 		if err := stream.Send(event); err != nil {
