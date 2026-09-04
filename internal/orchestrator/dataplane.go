@@ -139,6 +139,9 @@ func (e *Engine) validateRequestEpoch(ctx context.Context, sandbox string, epoch
 // --- ProcessService proxy ----------------------------------------------------
 
 func (p *processProxy) Start(ctx context.Context, req *connect.Request[v1.StartRequest], stream *connect.ServerStream[v1.ProcessEvent]) error {
+	if req == nil || req.Msg == nil {
+		return connect.NewError(connect.CodeInvalidArgument, errors.New("missing start request"))
+	}
 	cl, err := p.e.clientFor(req.Header().Get)
 	if err != nil {
 		return err
@@ -403,6 +406,9 @@ func reservedProcessHandle(sandbox model.SandboxID, epoch model.PlacementEpoch, 
 }
 
 func (p *processProxy) Connect(ctx context.Context, req *connect.Request[v1.ConnectRequest], stream *connect.ServerStream[v1.ProcessEvent]) error {
+	if req == nil || req.Msg == nil {
+		return connect.NewError(connect.CodeInvalidArgument, errors.New("missing connect request"))
+	}
 	cl, err := p.e.clientFor(req.Header().Get)
 	if err != nil {
 		return err
@@ -443,6 +449,9 @@ func (p *processProxy) Connect(ctx context.Context, req *connect.Request[v1.Conn
 }
 
 func (p *processProxy) StreamInput(ctx context.Context, stream *connect.ClientStream[v1.StreamInputRequest]) (*connect.Response[v1.StreamInputResponse], error) {
+	if stream == nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("missing stream input request"))
+	}
 	cl, err := p.e.clientFor(stream.RequestHeader().Get)
 	if err != nil {
 		return nil, err
@@ -484,6 +493,9 @@ func (p *processProxy) StreamInput(ctx context.Context, stream *connect.ClientSt
 }
 
 func (p *processProxy) SendInput(ctx context.Context, req *connect.Request[v1.SendInputRequest]) (*connect.Response[v1.SendInputResponse], error) {
+	if req == nil || req.Msg == nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("missing send input request"))
+	}
 	cl, err := p.e.clientFor(req.Header().Get)
 	if err != nil {
 		return nil, err
@@ -524,6 +536,9 @@ const signalPidErr = "pid must be > 0: SendSignal carries DIRECTED signals only 
 // is POSIX fan-out, which belongs to guest PID 1 rather than this channel
 // (guest supervision).
 func (p *processProxy) SendSignal(ctx context.Context, req *connect.Request[v1.SendSignalRequest]) (*connect.Response[v1.SendSignalResponse], error) {
+	if req == nil || req.Msg == nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("missing send signal request"))
+	}
 	if req.Msg.ProcessHandle == "" && req.Msg.Pid <= 0 {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New(signalPidErr))
 	}
@@ -551,6 +566,9 @@ func (p *processProxy) SendSignal(ctx context.Context, req *connect.Request[v1.S
 }
 
 func (p *processProxy) Update(ctx context.Context, req *connect.Request[v1.UpdateRequest]) (*connect.Response[v1.UpdateResponse], error) {
+	if req == nil || req.Msg == nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("missing update request"))
+	}
 	cl, err := p.e.clientFor(req.Header().Get)
 	if err != nil {
 		return nil, err
@@ -579,6 +597,9 @@ func (p *processProxy) Update(ctx context.Context, req *connect.Request[v1.Updat
 }
 
 func (p *processProxy) CloseStdin(ctx context.Context, req *connect.Request[v1.CloseStdinRequest]) (*connect.Response[v1.CloseStdinResponse], error) {
+	if req == nil || req.Msg == nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("missing close stdin request"))
+	}
 	cl, err := p.e.clientFor(req.Header().Get)
 	if err != nil {
 		return nil, err
@@ -603,6 +624,9 @@ func (p *processProxy) CloseStdin(ctx context.Context, req *connect.Request[v1.C
 }
 
 func (p *processProxy) List(ctx context.Context, req *connect.Request[v1.ListRequest]) (*connect.Response[v1.ListResponse], error) {
+	if req == nil || req.Msg == nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("missing list request"))
+	}
 	cl, err := p.e.clientFor(req.Header().Get)
 	if err != nil {
 		return nil, err
@@ -637,6 +661,9 @@ func (p *processProxy) List(ctx context.Context, req *connect.Request[v1.ListReq
 // --- FsService proxy ---------------------------------------------------------
 
 func (f *fsProxy) Read(ctx context.Context, req *connect.Request[v1.ReadRequest]) (*connect.Response[v1.ReadResponse], error) {
+	if req == nil || req.Msg == nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("missing read request"))
+	}
 	cl, err := f.e.clientFor(req.Header().Get)
 	if err != nil {
 		return nil, err
@@ -649,6 +676,9 @@ func (f *fsProxy) Read(ctx context.Context, req *connect.Request[v1.ReadRequest]
 }
 
 func (f *fsProxy) Write(ctx context.Context, req *connect.Request[v1.WriteRequest]) (*connect.Response[v1.WriteResponse], error) {
+	if req == nil || req.Msg == nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("missing write request"))
+	}
 	// Barrier-gated: this is THE call the drain exists for. The guest's write is
 	// truncate-then-write, so a pause landing mid-call empties the file (the transport contract).
 	cl, release, err := f.e.mutatingClientFor(req.Header().Get, "fs.Write "+req.Msg.Path)
@@ -690,6 +720,9 @@ func entryToWire(e transport.EntryInfo) *v1.EntryInfo {
 }
 
 func (f *fsProxy) Stat(ctx context.Context, req *connect.Request[v1.StatRequest]) (*connect.Response[v1.StatResponse], error) {
+	if req == nil || req.Msg == nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("missing stat request"))
+	}
 	cl, err := f.e.clientFor(req.Header().Get)
 	if err != nil {
 		return nil, err
@@ -702,6 +735,9 @@ func (f *fsProxy) Stat(ctx context.Context, req *connect.Request[v1.StatRequest]
 }
 
 func (f *fsProxy) List(ctx context.Context, req *connect.Request[v1.FsServiceListRequest]) (*connect.Response[v1.FsServiceListResponse], error) {
+	if req == nil || req.Msg == nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("missing list request"))
+	}
 	cl, err := f.e.clientFor(req.Header().Get)
 	if err != nil {
 		return nil, err
@@ -718,6 +754,9 @@ func (f *fsProxy) List(ctx context.Context, req *connect.Request[v1.FsServiceLis
 }
 
 func (f *fsProxy) MakeDir(ctx context.Context, req *connect.Request[v1.MakeDirRequest]) (*connect.Response[v1.MakeDirResponse], error) {
+	if req == nil || req.Msg == nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("missing make dir request"))
+	}
 	cl, release, err := f.e.mutatingClientFor(req.Header().Get, "fs.MakeDir "+req.Msg.Path)
 	if err != nil {
 		return nil, err
@@ -731,6 +770,9 @@ func (f *fsProxy) MakeDir(ctx context.Context, req *connect.Request[v1.MakeDirRe
 }
 
 func (f *fsProxy) Remove(ctx context.Context, req *connect.Request[v1.RemoveRequest]) (*connect.Response[v1.RemoveResponse], error) {
+	if req == nil || req.Msg == nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("missing remove request"))
+	}
 	cl, release, err := f.e.mutatingClientFor(req.Header().Get, "fs.Remove "+req.Msg.Path)
 	if err != nil {
 		return nil, err
@@ -743,6 +785,9 @@ func (f *fsProxy) Remove(ctx context.Context, req *connect.Request[v1.RemoveRequ
 }
 
 func (f *fsProxy) Move(ctx context.Context, req *connect.Request[v1.MoveRequest]) (*connect.Response[v1.MoveResponse], error) {
+	if req == nil || req.Msg == nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("missing move request"))
+	}
 	cl, release, err := f.e.mutatingClientFor(req.Header().Get, "fs.Move "+req.Msg.Source)
 	if err != nil {
 		return nil, err
