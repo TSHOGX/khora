@@ -20,5 +20,8 @@ guides, configuration, operations, or API reference instead.
 - [State core](state-core.md): persisted Placement epochs, logical Process
   records, Operation idempotency, and restart takeover
 
-Open work is not kept as a parallel register here. Link the ruling Issue instead:
+The remote-provider input-shape question is closed for the current single-node
+direction; provider seams remain internal and built-in Volume selection is
+tracked separately. Keep the ruling decision linked rather than duplicating a
+work register:
 [remote provider input shape](https://github.com/TSHOGX/khora/issues/7).
