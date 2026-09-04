@@ -874,6 +874,26 @@ func TestAPIEventsEmptyOutbox(t *testing.T) {
 	}
 }
 
+// MaxInt64 is a valid tail cursor.  Adding one before comparing it with the
+// retained lower bound wraps signed arithmetic and incorrectly returns 410.
+func TestAPIEventsMaximumCursorIsNotExpired(t *testing.T) {
+	srv, mem := apiFixture(t)
+	seedSandboxEvents(t, mem, 2)
+	resp := do(t, http.MethodGet, srv.URL+"/v1/events?after=9223372036854775807")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("maximum event cursor = %d (%s); want empty tail page, not cursor expiry", resp.StatusCode, body)
+	}
+	var page eventsResp
+	if err := json.NewDecoder(resp.Body).Decode(&page); err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Events) != 0 || page.Earliest == 0 || page.Latest == 0 {
+		t.Fatalf("maximum event cursor page=%d bounds=%d/%d; want empty page with retained bounds", len(page.Events), page.Earliest, page.Latest)
+	}
+}
+
 // Replay is over the retained window, NOT over delivery state: an event already
 // drained by the in-process publisher must still be replayable, because whether
 // the local sink has seen it is not a fact an external subscriber depends on.

@@ -894,7 +894,11 @@ func (e *Engine) handleEvents(w http.ResponseWriter, r *http.Request) {
 	// and nothing else; refusing it would tell a caught-up subscriber it lost data, and the
 	// remedy this response documents ("restart from `earliest`") would then skip the event
 	// AT `earliest` — manufacturing the gap this refusal exists to prevent.
-	if after > 0 && earliest > 0 && after+1 < earliest {
+	// Compare without computing after+1: after is an int64 cursor and may be
+	// MaxInt64.  Wrapping that addition would turn a valid tail read into a
+	// false 410.  Because after is exclusive, expiry is exactly after <
+	// earliest-1 when earliest is at least two.
+	if after > 0 && earliest > 1 && after < earliest-1 {
 		writeJSON(w, http.StatusGone, eventsResp{
 			Events:   []eventItem{},
 			Earliest: earliest,

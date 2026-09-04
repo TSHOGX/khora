@@ -43,7 +43,11 @@ func (m *Mediator) Telemetry(ctx context.Context, id model.SandboxID, after uint
 	if err != nil {
 		return nil, 0, 0, err
 	}
-	if after > 0 && earliest > 0 && after+1 < earliest {
+	// Compare without computing after+1: a caller may legally send the maximum
+	// uint64 cursor, and wrapping it would incorrectly classify a current tail
+	// read as expired.  The exclusive cursor boundary is equivalent to
+	// after < earliest-1 when earliest is at least two.
+	if after > 0 && earliest > 1 && after < earliest-1 {
 		return nil, earliest, latest, model.ErrCursorExpired
 	}
 	return samples, earliest, latest, nil
