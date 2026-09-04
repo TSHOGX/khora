@@ -524,6 +524,35 @@ func TestWatchHubOverflowMarkerSurvivesReloadWithoutRecords(t *testing.T) {
 	}
 }
 
+func TestWatchHubOverflowMarkerWithRetainedRecordsSurvivesReload(t *testing.T) {
+	root := t.TempDir()
+	statePath := filepath.Join(t.TempDir(), "watch.json")
+	h := newWatchHub(statePath, 4)
+	if err := h.ensureEpoch(1); err != nil {
+		t.Fatal(err)
+	}
+	scope, _, err := h.scope(root, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeWatchFile(t, root, "retained")
+	if err := h.pollScope(scope); err != nil {
+		t.Fatal(err)
+	}
+	h.mu.Lock()
+	h.sequence = ^uint64(0)
+	h.overflow = true
+	if err := h.persistLocked(); err != nil {
+		h.mu.Unlock()
+		t.Fatal(err)
+	}
+	h.mu.Unlock()
+	restarted := newWatchHub(statePath, 4)
+	if err := restarted.ensureEpoch(1); connect.CodeOf(err) != connect.CodeResourceExhausted {
+		t.Fatalf("reloaded overflow marker with retained records = %v; want resource_exhausted", err)
+	}
+}
+
 func TestWatchHubRejectsNonExhaustedOverflowMarker(t *testing.T) {
 	statePath := filepath.Join(t.TempDir(), "watch.json")
 	raw, err := json.Marshal(persistedWatchState{Epoch: 1, Sequence: 1, Overflow: true, Records: []watchEventRecord{}})

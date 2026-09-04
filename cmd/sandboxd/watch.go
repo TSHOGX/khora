@@ -294,7 +294,7 @@ func (h *watchHub) load() error {
 	// therefore a non-empty journal must end at the global high-water mark. A
 	// missing newest record would make replay silently skip a change after
 	// restart, so reject that corruption rather than resetting history.
-	if len(state.Records) != 0 && lastSequence != state.Sequence {
+	if len(state.Records) != 0 && !state.Overflow && lastSequence != state.Sequence {
 		return errors.New("watch journal sequence watermark does not match its records")
 	}
 	h.mu.Lock()
