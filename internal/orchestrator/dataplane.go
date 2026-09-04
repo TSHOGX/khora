@@ -159,7 +159,15 @@ func (p *processProxy) Start(ctx context.Context, req *connect.Request[v1.StartR
 	// retry identity. Serialize its reservation-to-dispatch window so a
 	// concurrent retry cannot observe a row while a canceled request removes it.
 	identity := processStartIdentity(sandboxID, epoch, m.IdempotencyKey, m.ProcessHandle)
-	handleIdentity := processStartHandleIdentity(sandboxID, epoch, m.ProcessHandle)
+	// A keyed start has a deterministic reserved handle even when the caller
+	// omits one. Lock that derived handle as well, so a retry that learned the
+	// handle from the durable Process list cannot race cancellation/cleanup via
+	// a different alias.
+	reservedHandle := m.ProcessHandle
+	if reservedHandle == "" && m.IdempotencyKey != "" {
+		reservedHandle = reservedProcessHandle(sandboxID, epoch, m.IdempotencyKey)
+	}
+	handleIdentity := processStartHandleIdentity(sandboxID, epoch, reservedHandle)
 	releaseStart, err := p.e.acquireProcessStart(ctx, identity, handleIdentity)
 	if err != nil {
 		return err
@@ -956,8 +964,17 @@ func (p *processProxy) forwardProcessEvents(ctx context.Context, sandbox string,
 					candidate := model.Process{ID: model.ProcessID(ev.Handle), Sandbox: model.SandboxID(sandbox), PlacementEpoch: model.PlacementEpoch(epoch), PID: pid, State: model.ProcessRunning, StartedAt: now, OutputCursor: model.ProcessOutputCursor(model.ProcessID(ev.Handle), model.PlacementEpoch(epoch), localSeq)}
 					if err := p.e.Mediator.CreateProcess(ctx, candidate); err == nil {
 						rec = &candidate
-					} else if existing, gerr := p.e.Mediator.Process(ctx, candidate.ID); gerr == nil {
+					} else if errors.Is(err, store.ErrProcessConflict) {
+						existing, gerr := p.e.Mediator.Process(ctx, candidate.ID)
+						if gerr != nil {
+							return fmt.Errorf("resolve process start %s after reservation conflict: %w", candidate.ID, gerr)
+						}
+						if existing.Sandbox != candidate.Sandbox || existing.PlacementEpoch != candidate.PlacementEpoch {
+							return connect.NewError(connect.CodeFailedPrecondition, errors.New("process stream placement mismatch"))
+						}
 						rec = &existing
+					} else {
+						return fmt.Errorf("persist process start %s: %w", candidate.ID, err)
 					}
 				} else {
 					if ev.Handle != string(rec.ID) {
