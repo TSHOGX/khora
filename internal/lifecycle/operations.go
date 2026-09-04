@@ -487,7 +487,7 @@ type semanticMount struct {
 	Access string `json:"access"`
 }
 
-func semanticSandboxCreate(spec CreateSpec, idle, retention time.Duration, network model.NetworkDecl) any {
+func semanticSandboxCreate(spec CreateSpec, network model.NetworkDecl) any {
 	mounts := make([]semanticMount, 0, len(spec.Volumes))
 	for _, mt := range spec.Volumes {
 		mounts = append(mounts, semanticMount{Volume: string(mt.Volume), Path: store.NormalizeMountPath(mt.Path), Access: string(mt.Access)})
@@ -498,14 +498,28 @@ func semanticSandboxCreate(spec CreateSpec, idle, retention time.Duration, netwo
 		}
 		return mounts[i].Volume < mounts[j].Volume
 	})
+	// Preserve caller intent for optional TTLs rather than hashing the
+	// materialized defaults. A nil field means "use the deployment default";
+	// hashing its current value would make a same-key retry conflict after a
+	// restart that changed that default. Explicit zero remains distinct from
+	// omission, because zero deliberately disables the deadline.
+	var idleNanos, retentionNanos *int64
+	if spec.IdleTimeout != nil {
+		v := int64(*spec.IdleTimeout)
+		idleNanos = &v
+	}
+	if spec.Retention != nil {
+		v := int64(*spec.Retention)
+		retentionNanos = &v
+	}
 	return struct {
 		Template       string            `json:"template"`
-		IdleNanos      int64             `json:"idle_nanos"`
-		RetentionNanos int64             `json:"retention_nanos"`
+		IdleNanos      *int64            `json:"idle_nanos,omitempty"`
+		RetentionNanos *int64            `json:"retention_nanos,omitempty"`
 		Limits         model.Limits      `json:"limits"`
 		Volumes        []semanticMount   `json:"volumes"`
 		Network        model.NetworkDecl `json:"network"`
-	}{string(spec.Template), int64(idle), int64(retention), spec.Limits, mounts, network.Normalize()}
+	}{string(spec.Template), idleNanos, retentionNanos, spec.Limits, mounts, network.Normalize()}
 }
 
 func operationReplayID(claim operationClaim, kind model.ObjectKind) (string, error) {

@@ -80,6 +80,36 @@ func TestSandboxCreateRetryReplaysBeforeDeploymentValidation(t *testing.T) {
 	}
 }
 
+func TestSandboxCreateRetryIgnoresChangedDefaultsWhenTTLWasOmitted(t *testing.T) {
+	ctx := context.Background()
+	rp, rt := &fakeRootfs{}, &fakeRuntime{}
+	m, st := newTestMediator(t, rp, rt, true)
+	key := model.IdempotencyKey("sandbox-default-replay")
+	first, err := m.Create(ctx, CreateSpec{Template: "bare", IdempotencyKey: key})
+	if err != nil {
+		t.Fatalf("initial keyed create = %v", err)
+	}
+	firstRec, err := st.GetSandbox(ctx, first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A restart may choose different defaults, but an omitted TTL means the
+	// caller requested the deployment default, not the old materialized value.
+	m.deps.DefaultIdleTimeout = 2 * time.Hour
+	m.deps.DefaultRetention = 3 * time.Hour
+	replayed, err := m.Create(ctx, CreateSpec{Template: "bare", IdempotencyKey: key})
+	if err != nil || replayed != first {
+		t.Fatalf("same-key create after default change = %s, %v; want replay of %s", replayed, err, first)
+	}
+	got, err := st.GetSandbox(ctx, first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.IdleTimeout != firstRec.IdleTimeout || got.Retention != firstRec.Retention {
+		t.Fatalf("replayed sandbox binding changed: before=%s/%s after=%s/%s", firstRec.IdleTimeout, firstRec.Retention, got.IdleTimeout, got.Retention)
+	}
+}
+
 // TTL Binding materialization (resource admission / health and reclamation): a create that OMITS idle_timeout /
 // retention stores the engine-wide default; a create that provides them stores
 // the given values verbatim (including an explicit zero). The stored record

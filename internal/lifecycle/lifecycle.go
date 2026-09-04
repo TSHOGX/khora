@@ -557,7 +557,7 @@ func (m *Mediator) Create(ctx context.Context, spec CreateSpec) (resultID model.
 	}
 
 	claim, err := m.claimOperation(ctx, "sandbox.create", spec.IdempotencyKey,
-		semanticSandboxCreate(spec, rec.IdleTimeout, rec.Retention, rec.Network))
+		semanticSandboxCreate(spec, rec.Network))
 	if err != nil {
 		return "", err
 	}
