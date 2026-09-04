@@ -1244,6 +1244,7 @@ const (
 	ErrorConflict            ErrorClass = "conflict"
 	ErrorIdempotencyConflict ErrorClass = "idempotency_conflict"
 	ErrorStaleEpoch          ErrorClass = "stale_epoch"
+	ErrorCapacity            ErrorClass = "capacity"
 	ErrorUnavailable         ErrorClass = "unavailable"
 	ErrorCursorExpired       ErrorClass = "cursor_expired"
 	ErrorCursorGap           ErrorClass = "cursor_gap"
@@ -1258,6 +1259,7 @@ var errorClasses = [...]ErrorClass{
 	ErrorConflict,
 	ErrorIdempotencyConflict,
 	ErrorStaleEpoch,
+	ErrorCapacity,
 	ErrorUnavailable,
 	ErrorCursorExpired,
 	ErrorCursorGap,
@@ -1321,6 +1323,7 @@ var (
 	ErrConflict            = NewContractError(ErrorConflict, "conflict")
 	ErrIdempotencyConflict = NewContractError(ErrorIdempotencyConflict, "idempotency key conflict")
 	ErrStaleEpoch          = NewContractError(ErrorStaleEpoch, "stale placement epoch")
+	ErrCapacity            = NewContractError(ErrorCapacity, "insufficient capacity")
 	ErrUnavailable         = NewContractError(ErrorUnavailable, "unavailable")
 	ErrCursorExpired       = NewContractError(ErrorCursorExpired, "cursor expired")
 	ErrCursorGap           = NewContractError(ErrorCursorGap, "cursor gap")

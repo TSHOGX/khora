@@ -69,6 +69,8 @@ func proxyErr(err error) error {
 	switch model.ErrorClassOf(err) {
 	case model.ErrorInvalidArgument:
 		return connect.NewError(connect.CodeInvalidArgument, errors.New("invalid sandbox request"))
+	case model.ErrorCapacity:
+		return connect.NewError(connect.CodeResourceExhausted, errors.New("sandbox capacity exhausted"))
 	case model.ErrorNotFound:
 		return connect.NewError(connect.CodeNotFound, errors.New("sandbox object not found"))
 	case model.ErrorStaleEpoch:

@@ -1238,6 +1238,11 @@ func statusCodeFor(err error) int {
 		return http.StatusConflict
 	case errors.Is(err, model.ErrCursorExpired):
 		return http.StatusGone
+	case errors.Is(err, model.ErrCapacity):
+		// A valid request exceeded the node's declared budget. Keep this
+		// distinct from unavailable: the operation can be retried only after
+		// capacity is released, and idempotent replays must retain 507.
+		return http.StatusInsufficientStorage
 	case errors.Is(err, model.ErrUnavailable):
 		return http.StatusServiceUnavailable
 	}

@@ -97,8 +97,9 @@ changing cursor, epoch, overflow, or rescan semantics.
 `ErrorClass` is protocol-neutral.  HTTP and Connect edges map classes to their
 own status/code values; callers do not parse diagnostic text.  The foundation
 distinguishes invalid input, ordinary state conflict, idempotency conflict,
-stale epoch, unavailable endpoint, unsupported capability, expired cursor,
-cursor gap, in-progress operation, not found, and internal failure.
+stale epoch, capacity exhaustion, unavailable endpoint, unsupported capability,
+expired cursor, cursor gap, in-progress operation, not found, and internal
+failure.
 
 `Measurement` always carries an explicit `available` bit.  `{available:true,
 value:0}` is a measured zero; `{available:false,value:0}` is unavailable.  An

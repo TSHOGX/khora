@@ -6,12 +6,15 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"sort"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/TSHOGX/khora/internal/model"
+	"github.com/TSHOGX/khora/internal/network"
 	"github.com/TSHOGX/khora/internal/rootfs"
 	"github.com/TSHOGX/khora/internal/store"
 	"github.com/TSHOGX/khora/internal/volume"
@@ -421,11 +424,52 @@ func operationErrorClass(err error) model.ErrorClass {
 		return class
 	}
 	switch {
-	case errors.Is(err, store.ErrNotFound), errors.Is(err, store.ErrTemplateNotFound), errors.Is(err, store.ErrVolumeNotFound):
+	// Quota exhaustion is a durable capacity verdict.  In particular, an
+	// idempotent retry of a failed create must remain 507 rather than becoming
+	// an unrelated 503. Providers may surface either the admission sentinel or
+	// the POSIX errno, including through contextual wrappers.
+	case errors.Is(err, ErrInsufficientCapacity), errors.Is(err, syscall.ENOSPC), errors.Is(err, syscall.EDQUOT):
+		return model.ErrorCapacity
+
+	// Deterministic request/configuration refusals cannot be repaired by
+	// repeating the same request. Keep capability failures in the unsupported
+	// class so protocol edges can preserve that distinction.
+	case errors.Is(err, ErrCapRequired),
+		errors.Is(err, ErrUncappedDiskNotCappable),
+		errors.Is(err, ErrDiskCapBelowUsage),
+		errors.Is(err, ErrVolumeCapBelowUsage),
+		errors.Is(err, store.ErrMountBindingInvalid),
+		errors.Is(err, network.ErrDeclarationInvalid),
+		errors.Is(err, network.ErrSecondHopUIDIsTheEngineItself),
+		errors.Is(err, volume.ErrInvalidProvider),
+		errors.Is(err, fs.ErrInvalid),
+		errors.Is(err, syscall.EINVAL):
+		return model.ErrorInvalidArgument
+	case errors.Is(err, ErrVolumeCapUnsupported), errors.Is(err, volume.ErrUnsupported), errors.Is(err, ErrLineageTooDeep):
+		return model.ErrorUnsupported
+
+	// Missing durable objects remain not-found across retries and restarts.
+	case errors.Is(err, store.ErrNotFound), errors.Is(err, store.ErrTemplateNotFound),
+		errors.Is(err, store.ErrVolumeNotFound), errors.Is(err, store.ErrPlacementNotFound),
+		errors.Is(err, store.ErrProcessNotFound), errors.Is(err, store.ErrOperationNotFound),
+		errors.Is(err, fs.ErrNotExist):
 		return model.ErrorNotFound
-	case errors.Is(err, store.ErrConflict), errors.Is(err, store.ErrMountLeaseConflict), errors.Is(err, store.ErrVolumeInUse):
+
+	// State/reference conflicts are distinct from provider availability: a
+	// caller may retry after the conflicting state changes, but the object is
+	// present and the operation itself was understood.
+	case errors.Is(err, store.ErrConflict), errors.Is(err, store.ErrMountLeaseConflict),
+		errors.Is(err, store.ErrVolumeInUse), errors.Is(err, store.ErrVolumeHasDescendants),
+		errors.Is(err, store.ErrSandboxHasMounts), errors.Is(err, store.ErrInUse),
+		errors.Is(err, store.ErrProcessConflict), errors.Is(err, store.ErrOperationKeyConflict),
+		errors.Is(err, store.ErrOperationOwnershipConflict), errors.Is(err, rootfs.ErrCapBelowUsage),
+		errors.Is(err, ErrResourceTerminated), errors.Is(err, ErrVolumeLiveWriter),
+		errors.Is(err, ErrVolumeDirectWriteInFlight), errors.Is(err, network.ErrViaUnenforceableAtPlacement):
 		return model.ErrorConflict
-	case errors.Is(err, ErrInsufficientCapacity), errors.Is(err, ErrCapRequired):
+
+	// A durable provider reference that cannot currently be resolved is an
+	// availability fault. The row exists; assembly can be repaired and retried.
+	case errors.Is(err, volume.ErrProviderUnavailable), errors.Is(err, volume.ErrUnknownProvider):
 		return model.ErrorUnavailable
 	default:
 		return model.ErrorInternal
