@@ -134,7 +134,7 @@ var apiOps = []apiOp{
 			Samples  []model.TelemetrySample `json:"samples"`
 			Earliest uint64                  `json:"earliest"`
 			Latest   uint64                  `json:"latest"`
-		}{}, Status: 200, Errors: []int{400, 404},
+		}{}, Status: 200, Errors: []int{400, 404, 410},
 	},
 	{Method: "GET", Path: "/v1/sandboxes/{id}/snapshot", OpID: "getSandboxSnapshot", Summary: "Read the Sandbox resource snapshot with explicit measurement availability.", Resp: model.SandboxSnapshot{}, Status: 200, Errors: []int{404}},
 	{Method: "GET", Path: "/v1/sandboxes/{id}/placement", OpID: "getPlacementSnapshot", Summary: "Read the current Placement epoch and resource snapshot.", Resp: model.PlacementSnapshot{}, Status: 200, Errors: []int{404}},
@@ -170,7 +170,7 @@ var apiOps = []apiOp{
 			{Name: "limit", Type: "integer", Desc: "Maximum events in this page."},
 			{Name: "wait", Type: "string", Desc: "Go duration (e.g. \"20s\"). If the page would be EMPTY, hold the request open until an event arrives or this elapses. Changes no cursor semantics; a non-empty first read never waits. Clamped to a server-side ceiling."},
 		},
-		Resp: eventsResp{}, Status: 200, Errors: []int{400},
+		Resp: eventsResp{}, Status: 200, Errors: []int{400, 410},
 	},
 	{
 		Method: "POST", Path: "/v1/templates", OpID: "promoteTemplate",
@@ -401,6 +401,7 @@ var errorDescriptions = map[int]string{
 	404: "No such object. The message names WHICH kind, so a caller does not look in the wrong place.",
 	409: "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying.",
 	413: "The body exceeds the engine's per-request limit.",
+	410: "The cursor is older than the retained window; resynchronize from the reported bounds.",
 	500: "The engine could not complete the operation because of an internal store or provider failure.",
 	503: "The sandbox's in-guest transport is unreachable, or a pause is draining. The answer may differ later.",
 	507: "Capacity: nothing is wrong with the request or the sandbox — the node cannot honor another promise.",

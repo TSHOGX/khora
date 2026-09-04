@@ -875,6 +875,16 @@
             },
             "description": "The route exists, but this method does not apply to it."
           },
+          "410": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The cursor is older than the retained window; resynchronize from the reported bounds."
+          },
           "500": {
             "content": {
               "text/plain": {
@@ -2133,6 +2143,16 @@
               }
             },
             "description": "The route exists, but this method does not apply to it."
+          },
+          "410": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The cursor is older than the retained window; resynchronize from the reported bounds."
           },
           "500": {
             "content": {

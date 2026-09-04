@@ -185,6 +185,41 @@ func TestOpenAPIOperationsDocumentInternalFailures(t *testing.T) {
 	}
 }
 
+func TestOpenAPICursorExpiryResponses(t *testing.T) {
+	raw, err := OpenAPIDoc()
+	if err != nil {
+		t.Fatalf("OpenAPIDoc: %v", err)
+	}
+	var doc struct {
+		Paths map[string]map[string]json.RawMessage `json:"paths"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("parse OpenAPI: %v", err)
+	}
+	cases := []struct {
+		path   string
+		method string
+	}{
+		{path: "/v1/events", method: "get"},
+		{path: "/v1/sandboxes/{id}/telemetry", method: "get"},
+	}
+	for _, tc := range cases {
+		var operation struct {
+			Responses map[string]json.RawMessage `json:"responses"`
+		}
+		rawOperation, ok := doc.Paths[tc.path][tc.method]
+		if !ok {
+			t.Fatalf("OpenAPI operation %s %s is missing", tc.method, tc.path)
+		}
+		if err := json.Unmarshal(rawOperation, &operation); err != nil {
+			t.Fatalf("parse %s %s operation: %v", tc.method, tc.path, err)
+		}
+		if _, ok := operation.Responses["410"]; !ok {
+			t.Errorf("%s %s does not document 410 cursor expiry", tc.method, tc.path)
+		}
+	}
+}
+
 // TestEveryDocumentedOperationIsRouted drives each listed operation against a real
 // server and asserts the router RECOGNIZES it: not 404, and not 405.
 //
