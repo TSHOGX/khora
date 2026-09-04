@@ -2,7 +2,9 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
+	"syscall"
 	"testing"
 	"time"
 
@@ -65,5 +67,54 @@ func TestMalformedTelemetryQueryIsBadRequest(t *testing.T) {
 				t.Fatalf("GET telemetry%s = %d; want 400", query, resp.StatusCode)
 			}
 		})
+	}
+}
+
+func TestVolumeCapacityErrorsMapToInsufficientStorage(t *testing.T) {
+	for _, err := range []error{syscall.ENOSPC, syscall.EDQUOT} {
+		if got := statusCodeFor(err); got != http.StatusInsufficientStorage {
+			t.Fatalf("statusCodeFor(%v) = %d; want 507", err, got)
+		}
+	}
+}
+
+func TestVolumeContentOpenAPIErrorsMatchRuntime(t *testing.T) {
+	raw, err := OpenAPIDoc()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Paths map[string]map[string]json.RawMessage `json:"paths"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		path   string
+		method string
+		want   []string
+		absent []string
+	}{
+		{path: "/v1/volumes/{id}/import", method: "post", want: []string{"403", "503", "507"}, absent: []string{"413"}},
+		{path: "/v1/volumes/{id}/export", method: "get", want: []string{"403", "503"}, absent: []string{"409"}},
+		{path: "/v1/volumes/{id}/write", method: "put", want: []string{"413", "507"}},
+	}
+	for _, tc := range cases {
+		var operation struct {
+			Responses map[string]json.RawMessage `json:"responses"`
+		}
+		if err := json.Unmarshal(doc.Paths[tc.path][tc.method], &operation); err != nil {
+			t.Fatal(err)
+		}
+		for _, code := range tc.want {
+			if _, ok := operation.Responses[code]; !ok {
+				t.Errorf("%s %s missing response %s", tc.method, tc.path, code)
+			}
+		}
+		for _, code := range tc.absent {
+			if _, ok := operation.Responses[code]; ok {
+				t.Errorf("%s %s advertises unreachable response %s", tc.method, tc.path, code)
+			}
+		}
 	}
 }

@@ -2852,6 +2852,16 @@
             },
             "description": "The request cannot be honored as asked: malformed, an unknown JSON field, or a value the engine can never satisfy."
           },
+          "403": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The guest refused the operation (a permission error inside the sandbox)."
+          },
           "404": {
             "content": {
               "text/plain": {
@@ -2872,16 +2882,6 @@
             },
             "description": "The route exists, but this method does not apply to it."
           },
-          "409": {
-            "content": {
-              "text/plain": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            },
-            "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
-          },
           "500": {
             "content": {
               "text/plain": {
@@ -2891,6 +2891,16 @@
               }
             },
             "description": "The engine could not complete the operation because of an internal store or provider failure."
+          },
+          "503": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The sandbox's in-guest transport is unreachable, or a pause is draining. The answer may differ later."
           }
         },
         "summary": "Stream bytes OUT of a volume with no sandbox involved. Returns application/octet-stream."
@@ -2964,6 +2974,16 @@
             },
             "description": "The request cannot be honored as asked: malformed, an unknown JSON field, or a value the engine can never satisfy."
           },
+          "403": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The guest refused the operation (a permission error inside the sandbox)."
+          },
           "404": {
             "content": {
               "text/plain": {
@@ -2994,16 +3014,6 @@
             },
             "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
           },
-          "413": {
-            "content": {
-              "text/plain": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            },
-            "description": "The body exceeds the engine's per-request limit."
-          },
           "500": {
             "content": {
               "text/plain": {
@@ -3013,6 +3023,16 @@
               }
             },
             "description": "The engine could not complete the operation because of an internal store or provider failure."
+          },
+          "503": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The sandbox's in-guest transport is unreachable, or a pause is draining. The answer may differ later."
           },
           "507": {
             "content": {
@@ -3916,6 +3936,16 @@
               }
             },
             "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
+          },
+          "413": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The body exceeds the engine's per-request limit."
           },
           "500": {
             "content": {

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/TSHOGX/khora/internal/lifecycle"
@@ -541,6 +542,10 @@ func volumeStatus(err error) (int, bool) {
 		return http.StatusForbidden, true
 	case errors.Is(err, fs.ErrExist):
 		return http.StatusConflict, true
+	case errors.Is(err, syscall.ENOSPC), errors.Is(err, syscall.EDQUOT):
+		// A volume write reached the backend's enforced capacity ceiling. This
+		// is a valid request with no remaining storage, not an internal failure.
+		return http.StatusInsufficientStorage, true
 	case errors.Is(err, volume.ErrInvalidProvider):
 		// Invalid assembly/configuration is a request/configuration error, not
 		// an internal backend failure.

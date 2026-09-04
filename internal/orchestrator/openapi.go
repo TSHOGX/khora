@@ -240,13 +240,13 @@ var apiOps = []apiOp{
 		Summary: "Stream bytes INTO a volume with no sandbox involved. Body is the raw content.",
 		Query:   []apiParam{{Name: "path", Type: "string", Desc: "Path inside the volume."}},
 		Resp:    importResp{}, Status: 200,
-		Errors: []int{400, 404, 409, 413, 507},
+		Errors: []int{400, 403, 404, 409, 503, 507},
 	},
 	{
 		Method: "GET", Path: "/v1/volumes/{id}/export", OpID: "exportVolume",
 		Summary: "Stream bytes OUT of a volume with no sandbox involved. Returns application/octet-stream.",
 		Query:   []apiParam{{Name: "path", Type: "string", Desc: "Path inside the volume."}},
-		Status:  200, Errors: []int{400, 404, 409},
+		Status:  200, Errors: []int{400, 403, 404, 503},
 	},
 	{
 		Method: "GET", Path: "/v1/volumes/{id}/stat", OpID: "statVolumePath",
@@ -276,7 +276,7 @@ var apiOps = []apiOp{
 		Method: "PUT", Path: "/v1/volumes/{id}/write", OpID: "writeVolumePath",
 		Summary: "Write raw bytes to a root-confined Volume file.",
 		Query:   []apiParam{{Name: "path", Type: "string", Desc: "File path inside the Volume."}, {Name: "offset", Type: "integer", Desc: "Byte offset."}},
-		Resp:    importResp{}, Status: 200, Errors: []int{400, 404, 409, 403, 507},
+		Resp:    importResp{}, Status: 200, Errors: []int{400, 403, 404, 409, 413, 507},
 	},
 	{
 		Method: "POST", Path: "/v1/volumes/{id}/mkdir", OpID: "mkdirVolumePath",
