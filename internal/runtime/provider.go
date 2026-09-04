@@ -10,6 +10,7 @@ package runtime
 import (
 	"context"
 	"net/netip"
+	"time"
 
 	"github.com/TSHOGX/khora/internal/ruleset"
 )
@@ -154,6 +155,13 @@ type LaunchSpec struct {
 	Rootfs   RootfsSource
 	Steering SteeringSpec
 	Limits   ResourceLimits
+	// ProcessRetention is the bounded addressability window for exited logical
+	// process handles. The provider passes this portable policy to the guest
+	// PID-1 supervisor so its replay registry and the control-plane Store share
+	// one retention boundary. Zero leaves the guest's documented default in
+	// effect for direct provider callers; lifecycle always supplies a positive
+	// value after applying its default.
+	ProcessRetention time.Duration
 	// Mounts are the Volume subsystem Volume mount points to bind into the guest, PEER to Rootfs rather
 	// than nested inside it: the rootfs is ONE assembled composition, these are N
 	// self-sufficient host mount points from a different subsystem (the subsystem boundaries preamble). Each is an
