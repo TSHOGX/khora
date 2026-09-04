@@ -348,6 +348,17 @@ func insertEvent(t *sql.Tx, ev *Event) error {
 	if ev == nil {
 		return nil
 	}
+	// AUTOINCREMENT refuses to advance past MaxInt64, but its driver error is a
+	// generic SQLITE_FULL. Preflight the sequence row so both Store backends
+	// expose the same typed exhaustion verdict and the surrounding transaction
+	// rolls back the state mutation atomically.
+	var highWater sql.NullInt64
+	if err := t.QueryRow(`SELECT seq FROM sqlite_sequence WHERE name='outbox'`).Scan(&highWater); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if highWater.Valid && highWater.Int64 >= maxEventSequence {
+		return ErrEventSequenceExhausted
+	}
 	// seq is omitted: the backend assigns it (Store's sequence contract). Any Seq
 	// the caller happened to set is ignored rather than trusted — the store owns
 	// this number.

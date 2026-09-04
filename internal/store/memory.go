@@ -112,6 +112,13 @@ func (m *Memory) appendEvent(ev *Event) {
 	m.outbox = append(m.outbox, row)
 }
 
+func (m *Memory) ensureEventSequence(ev *Event) error {
+	if ev != nil && m.nextSeq == 1<<63-1 {
+		return ErrEventSequenceExhausted
+	}
+	return nil
+}
+
 func (m *Memory) CreateSandbox(_ context.Context, s model.Sandbox, ev *Event) error {
 	if err := checkEventKind(ev); err != nil {
 		return err
@@ -126,6 +133,9 @@ func (m *Memory) CreateSandbox(_ context.Context, s model.Sandbox, ev *Event) er
 	// single-writer serialization SQLite gets (health and reclamation).
 	if _, ok := m.tmpl[s.Template]; !ok {
 		return ErrTemplateNotFound
+	}
+	if err := m.ensureEventSequence(ev); err != nil {
+		return err
 	}
 	// Normalize the network declaration on the way in, so this backend holds what SQLite
 	// holds (it gets the same from marshalNetwork): the control-plane API requires the three arrays to read
@@ -468,6 +478,9 @@ func (m *Memory) CompareAndSetState(_ context.Context, id model.SandboxID, expec
 	if s.State != expected {
 		return ErrConflict
 	}
+	if err := m.ensureEventSequence(ev); err != nil {
+		return err
+	}
 	s.State = next
 	// death cause under the SAME lock as the state change (health and reclamation / the transactional outbox, and
 	// Store.CompareAndSetState for why no later window exists). nil = leave untouched.
@@ -549,6 +562,9 @@ func (m *Memory) DeleteSandbox(_ context.Context, id model.SandboxID, ev *Event)
 		if mt.Sandbox == id {
 			return ErrSandboxHasMounts
 		}
+	}
+	if err := m.ensureEventSequence(ev); err != nil {
+		return err
 	}
 	delete(m.placements, id)
 	for processID, p := range m.processes {

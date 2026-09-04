@@ -59,6 +59,10 @@ var ErrVolumeNotFound = errors.New("store: volume not found")
 // case asserts they stay mutually distinguishable — the degradation is someone later
 // collapsing two that map to the same status code.
 var (
+	// maxEventSequence is the largest cursor value both the Memory int64
+	// counter and SQLite INTEGER primary key can represent.
+	maxEventSequence int64 = 1<<63 - 1
+
 	// ErrVolumeInUse reports deletion of a volume that a live mount row holds
 	// (mounts.volume RESTRICT). The Template-shaped case, on a different object.
 	ErrVolumeInUse = errors.New("store: volume in use by a mount")
@@ -103,6 +107,10 @@ var (
 	ErrProcessNotFound            = errors.New("store: process not found")
 	ErrProcessConflict            = errors.New("store: process already exists")
 	ErrTelemetryNotFound          = errors.New("store: telemetry sample not found")
+	// ErrEventSequenceExhausted is returned before a lifecycle mutation when the
+	// in-memory outbox has reached the largest signed sequence it can represent.
+	// Reusing or wrapping that cursor would make replay order ambiguous.
+	ErrEventSequenceExhausted = errors.New("store: event sequence exhausted")
 )
 
 // Event is one outbox row: a lifecycle transition to publish to the event
