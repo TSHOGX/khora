@@ -390,6 +390,7 @@ func (p *processProxy) Connect(ctx context.Context, req *connect.Request[v1.Conn
 		return err
 	}
 	var ch <-chan transport.ProcessEvent
+	var durableProc *model.Process
 	if req.Msg.ProcessHandle != "" {
 		id := model.SandboxID(req.Header().Get(sandboxIDHeader))
 		proc, perr := p.e.Mediator.Process(ctx, model.ProcessID(req.Msg.ProcessHandle))
@@ -399,6 +400,7 @@ func (p *processProxy) Connect(ctx context.Context, req *connect.Request[v1.Conn
 		if proc.Sandbox != id {
 			return connect.NewError(connect.CodeNotFound, errors.New("process handle not found"))
 		}
+		durableProc = &proc
 		if req.Msg.PlacementEpoch > 0 && req.Msg.PlacementEpoch != uint64(proc.PlacementEpoch) {
 			return connect.NewError(connect.CodeFailedPrecondition, errors.New("stale placement epoch"))
 		}
@@ -416,7 +418,10 @@ func (p *processProxy) Connect(ctx context.Context, req *connect.Request[v1.Conn
 	if err != nil {
 		return proxyErr(err)
 	}
-	return p.forwardProcessEvents(ctx, req.Header().Get(sandboxIDHeader), ch, stream, nil)
+	// The durable row is the expected stream identity. Passing it through lets
+	// forwarding validate every replay/live frame, not only a Start frame, and
+	// persist terminal/output updates against the requested logical handle.
+	return p.forwardProcessEvents(ctx, req.Header().Get(sandboxIDHeader), ch, stream, durableProc)
 }
 
 func (p *processProxy) StreamInput(ctx context.Context, stream *connect.ClientStream[v1.StreamInputRequest]) (*connect.Response[v1.StreamInputResponse], error) {
@@ -882,25 +887,55 @@ func (p *processProxy) forwardProcessEvents(ctx context.Context, sandbox string,
 	var localSeq uint64
 	var streamEpoch uint64
 	var streamHandle string
+	if rec != nil {
+		streamHandle = string(rec.ID)
+		streamEpoch = uint64(rec.PlacementEpoch)
+	}
+	lookupDone := rec != nil
 	for ev := range ch {
+		if ev.Kind != "error" {
+			// Bind every frame to the same logical process and placement. Older
+			// transports may omit the envelope fields on data/end frames, so fill
+			// omissions from the identity established by Start or the first frame.
+			var err error
+			streamHandle, streamEpoch, err = normalizeProcessEventIdentity(&ev, streamHandle, streamEpoch)
+			if err != nil {
+				return err
+			}
+			if streamEpoch == 0 && streamHandle != "" {
+				// A legacy guest may carry the stable handle but omit the epoch on
+				// its first frame. Resolve the current placement once before any
+				// durable Process update; subsequent frames are then fenced by the
+				// established epoch.
+				placement, placementErr := p.e.Mediator.Placement(ctx, model.SandboxID(sandbox))
+				if placementErr != nil {
+					return proxyErr(placementErr)
+				}
+				streamEpoch = uint64(placement.Epoch)
+				ev.Epoch = streamEpoch
+			}
+			// A PID-based Connect has no reserved row in this proxy call, but a
+			// stable handle in its first frame should still update the durable row
+			// when one exists. Resolve it once; absence is valid for legacy guests.
+			if !lookupDone && streamHandle != "" {
+				lookupDone = true
+				if existing, lookupErr := p.e.Mediator.Process(ctx, model.ProcessID(streamHandle)); lookupErr == nil {
+					if existing.Sandbox != model.SandboxID(sandbox) {
+						return connect.NewError(connect.CodeNotFound, errors.New("process handle not found"))
+					}
+					if streamEpoch != 0 && existing.PlacementEpoch != model.PlacementEpoch(streamEpoch) {
+						return connect.NewError(connect.CodeFailedPrecondition, errors.New("stale placement epoch"))
+					}
+					rec = &existing
+				}
+			}
+		}
 		if ev.Sequence > localSeq {
 			localSeq = ev.Sequence
 		} else if ev.Kind == "data" || ev.Kind == "end" {
 			localSeq++
 		}
-		if ev.Handle == "" && rec != nil {
-			ev.Handle = string(rec.ID)
-		}
 		if ev.Handle != "" {
-			streamHandle = ev.Handle
-			if streamEpoch == 0 {
-				streamEpoch = ev.Epoch
-			}
-			if ev.Epoch == 0 {
-				if pl, err := p.e.Mediator.Placement(ctx, model.SandboxID(sandbox)); err == nil {
-					ev.Epoch = uint64(pl.Epoch)
-				}
-			}
 			switch ev.Kind {
 			case "start":
 				pid := ev.PID
@@ -960,6 +995,33 @@ func (p *processProxy) forwardProcessEvents(ctx context.Context, sandbox string,
 		}
 	}
 	return nil
+}
+
+// normalizeProcessEventIdentity establishes and validates the identity carried
+// by a process stream. Handle and epoch are envelope fields, so every data/end
+// frame must agree with the stream's first identity; empty legacy fields are
+// filled from the established values before persistence or forwarding.
+func normalizeProcessEventIdentity(ev *transport.ProcessEvent, expectedHandle string, expectedEpoch uint64) (string, uint64, error) {
+	if ev == nil {
+		return expectedHandle, expectedEpoch, connect.NewError(connect.CodeInvalidArgument, errors.New("nil process stream event"))
+	}
+	if ev.Handle == "" {
+		ev.Handle = expectedHandle
+	} else if expectedHandle != "" && ev.Handle != expectedHandle {
+		return expectedHandle, expectedEpoch, connect.NewError(connect.CodeFailedPrecondition, errors.New("process stream handle mismatch"))
+	}
+	if ev.Handle != "" {
+		expectedHandle = ev.Handle
+	}
+	if ev.Epoch == 0 {
+		ev.Epoch = expectedEpoch
+	} else if expectedEpoch != 0 && ev.Epoch != expectedEpoch {
+		return expectedHandle, expectedEpoch, connect.NewError(connect.CodeFailedPrecondition, errors.New("process stream placement epoch mismatch"))
+	}
+	if ev.Epoch != 0 {
+		expectedEpoch = ev.Epoch
+	}
+	return expectedHandle, expectedEpoch, nil
 }
 
 func sendProcessEvent(stream *connect.ServerStream[v1.ProcessEvent], ev transport.ProcessEvent) error {

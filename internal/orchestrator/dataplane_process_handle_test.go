@@ -3,12 +3,16 @@ package orchestrator
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
+
+	"connectrpc.com/connect"
 
 	"github.com/TSHOGX/khora/internal/lifecycle"
 	"github.com/TSHOGX/khora/internal/model"
 	"github.com/TSHOGX/khora/internal/store"
+	"github.com/TSHOGX/khora/internal/transport"
 	v1 "github.com/TSHOGX/khora/pkg/transport/gen/khora/transport/v1"
 )
 
@@ -137,5 +141,41 @@ func TestReserveProcessKeylessHandleRetryUsesCanonicalRepeatedFields(t *testing.
 	got, created, err := p.reserveProcess(context.Background(), sid, 7, "", retry.ProcessHandle, processStartRequestHash(retry))
 	if err != nil || created || got.ID != reserved.ID {
 		t.Fatalf("retry with omitted/empty repeated fields = id=%q created=%v err=%v; want original reservation", got.ID, created, err)
+	}
+}
+
+func TestNormalizeProcessEventIdentityFillsLegacyFields(t *testing.T) {
+	ev := &transport.ProcessEvent{Kind: "data", Sequence: 2}
+	handle, epoch, err := normalizeProcessEventIdentity(ev, "proc_a", 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if handle != "proc_a" || epoch != 7 || ev.Handle != "proc_a" || ev.Epoch != 7 {
+		t.Fatalf("normalized legacy event = handle=%q epoch=%d event=%+v", handle, epoch, ev)
+	}
+}
+
+func TestNormalizeProcessEventIdentityRejectsMismatches(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		ev   transport.ProcessEvent
+		want string
+	}{
+		{name: "handle", ev: transport.ProcessEvent{Kind: "data", Handle: "proc_b", Epoch: 7}, want: "process stream handle mismatch"},
+		{name: "epoch", ev: transport.ProcessEvent{Kind: "data", Handle: "proc_a", Epoch: 8}, want: "process stream placement epoch mismatch"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, err := normalizeProcessEventIdentity(&tc.ev, "proc_a", 7)
+			if err == nil || !strings.Contains(err.Error(), tc.want) || connect.CodeOf(err) != connect.CodeFailedPrecondition {
+				t.Fatalf("error = %v; want failed_precondition %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeProcessEventIdentityRejectsNil(t *testing.T) {
+	_, _, err := normalizeProcessEventIdentity(nil, "", 0)
+	if err == nil || connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("nil event error = %v; want invalid_argument", err)
 	}
 }
