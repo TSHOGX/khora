@@ -165,6 +165,9 @@ func (m *Memory) GetTemplate(_ context.Context, id model.TemplateID) (model.Temp
 		return model.Template{}, ErrTemplateNotFound
 	}
 	t.Manifest = t.Manifest.Normalize()
+	if err := t.Validate(); err != nil {
+		return model.Template{}, err
+	}
 	return t, nil
 }
 
@@ -174,6 +177,9 @@ func (m *Memory) ListTemplates(_ context.Context) ([]model.Template, error) {
 	out := make([]model.Template, 0, len(m.tmpl))
 	for _, t := range m.tmpl {
 		t.Manifest = t.Manifest.Normalize()
+		if err := t.Validate(); err != nil {
+			return nil, err
+		}
 		out = append(out, t)
 	}
 	return out, nil

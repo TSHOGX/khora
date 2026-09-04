@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS templates (
 	id             TEXT PRIMARY KEY,          -- opaque "tmpl_<token>" / builtin = static dir name
 	parent         TEXT REFERENCES templates(id) ON DELETE RESTRICT, -- lineage; NULL = base layer
 	builtin        INTEGER NOT NULL DEFAULT 0, -- 1 = platform-preseeded (boot seed), 0 = Promote-built
-	manifest       TEXT NOT NULL DEFAULT '{}', -- immutable typed capability manifest JSON
+	manifest       TEXT NOT NULL, -- immutable typed capability manifest JSON
 	created_at     INTEGER NOT NULL            -- unix nanos
 );
 CREATE TABLE IF NOT EXISTS sandboxes (
