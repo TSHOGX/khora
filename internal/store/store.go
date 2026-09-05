@@ -59,6 +59,10 @@ var ErrVolumeNotFound = errors.New("store: volume not found")
 // case asserts they stay mutually distinguishable — the degradation is someone later
 // collapsing two that map to the same status code.
 var (
+	// maxEventSequence is the largest cursor value both the Memory int64
+	// counter and SQLite INTEGER primary key can represent.
+	maxEventSequence int64 = 1<<63 - 1
+
 	// ErrVolumeInUse reports deletion of a volume that a live mount row holds
 	// (mounts.volume RESTRICT). The Template-shaped case, on a different object.
 	ErrVolumeInUse = errors.New("store: volume in use by a mount")
@@ -91,6 +95,31 @@ var (
 	// on the fourth FK path, distinguishable from ErrVolumeInUse because the remedy differs
 	// (delete a descendant vs detach a mount).
 	ErrVolumeHasDescendants = errors.New("store: volume has live snapshots or clones")
+
+	// Durable state-core records.
+	ErrOperationNotFound    = errors.New("store: operation not found")
+	ErrOperationKeyConflict = errors.New("store: operation idempotency key conflict")
+	// ErrOperationOwnershipConflict means a conditional lease takeover or
+	// owner-scoped update lost to another attempt. It is deliberately distinct
+	// from key reuse: the idempotency row still belongs to the same request.
+	ErrOperationOwnershipConflict = errors.New("store: operation ownership changed")
+	ErrPlacementNotFound          = errors.New("store: placement not found")
+	ErrProcessNotFound            = errors.New("store: process not found")
+	ErrProcessConflict            = errors.New("store: process already exists")
+	ErrTelemetryNotFound          = errors.New("store: telemetry sample not found")
+	// maxTelemetrySequence is the largest sequence representable by both the
+	// public unsigned cursor and SQLite's signed INTEGER column. Memory uses the
+	// same ceiling so the two Store implementations cannot diverge at restart.
+	maxTelemetrySequence uint64 = uint64(^uint64(0) >> 1)
+	// ErrTelemetrySequenceExhausted is returned before appending a sample when
+	// the per-Sandbox telemetry cursor has reached its representable ceiling.
+	// Reusing or wrapping that cursor would make an exclusive cursor silently
+	// skip (or replay) samples.
+	ErrTelemetrySequenceExhausted = errors.New("store: telemetry sequence exhausted")
+	// ErrEventSequenceExhausted is returned before a lifecycle mutation when the
+	// in-memory outbox has reached the largest signed sequence it can represent.
+	// Reusing or wrapping that cursor would make replay order ambiguous.
+	ErrEventSequenceExhausted = errors.New("store: event sequence exhausted")
 )
 
 // Event is one outbox row: a lifecycle transition to publish to the event
@@ -139,6 +168,9 @@ type Event struct {
 	// established by this transition. It is present on created/resumed and empty
 	// on transitions that release or do not establish a placement.
 	PlacementAddress string
+	// PlacementEpoch identifies the realization established by created/resumed
+	// events. It is zero on transitions that do not establish a placement.
+	PlacementEpoch model.PlacementEpoch
 	// Cause is WHY, for the Kinds a subscriber cannot otherwise tell apart (the transactional outbox). Empty on
 	// every Kind with a single route. Today it separates `destroyed`'s two routes:
 	// `requested` (the Destroy verb) from `retention-expired` (the reaper's evict of a paused
@@ -559,4 +591,38 @@ type Store interface {
 	// SQLite has NOT rolled back: on the pinned single connection the transaction stays open and
 	// subsequent pooled queries run INSIDE it, seeing uncommitted state no other handle can see.
 	DeleteMounts(ctx context.Context, sandbox model.SandboxID) error
+
+	// Durable state-core records. Placement is the replaceable realization of a
+	// Sandbox, Process is a logical handle whose PID is only a locator, and
+	// Operation is the idempotency ledger written before external effects.
+	CreatePlacement(ctx context.Context, p model.Placement) error
+	GetPlacement(ctx context.Context, sandbox model.SandboxID) (model.Placement, error)
+	ListPlacements(ctx context.Context) ([]model.Placement, error)
+	UpdatePlacement(ctx context.Context, p model.Placement) error
+	DeletePlacement(ctx context.Context, sandbox model.SandboxID) error
+
+	CreateProcess(ctx context.Context, p model.Process) error
+	GetProcess(ctx context.Context, id model.ProcessID) (model.Process, error)
+	ListProcesses(ctx context.Context, sandbox model.SandboxID) ([]model.Process, error)
+	UpdateProcess(ctx context.Context, p model.Process) error
+	DeleteProcess(ctx context.Context, id model.ProcessID) error
+	ReclaimProcesses(ctx context.Context, before time.Time) (int, error)
+
+	CreateOperation(ctx context.Context, op model.Operation) error
+	GetOperation(ctx context.Context, id model.OperationID) (model.Operation, error)
+	GetOperationByKey(ctx context.Context, scope string, key model.IdempotencyKey) (model.Operation, error)
+	ListOperations(ctx context.Context, state model.OperationState) ([]model.Operation, error)
+	// TakeoverOperation atomically transfers an expired lease to a new attempt.
+	// expectedAttempt is the attempt observed by the caller; a competing retry
+	// that wins first makes this call fail without changing the row.
+	TakeoverOperation(ctx context.Context, id model.OperationID, expectedAttempt uint32, now time.Time, lease time.Duration) (model.Operation, error)
+	// RenewOperation extends an unexpired lease only for the expected attempt.
+	// A stale owner cannot renew or resurrect an operation after takeover.
+	RenewOperation(ctx context.Context, id model.OperationID, expectedAttempt uint32, now time.Time, lease time.Duration) error
+	UpdateOperation(ctx context.Context, op model.Operation) error
+	DeleteOperation(ctx context.Context, id model.OperationID) error
+
+	AppendTelemetry(ctx context.Context, sample model.TelemetrySample) error
+	Telemetry(ctx context.Context, sandbox model.SandboxID, after uint64, limit int) ([]model.TelemetrySample, uint64, uint64, error)
+	TrimTelemetry(ctx context.Context, before time.Time, limit int) (int, error)
 }

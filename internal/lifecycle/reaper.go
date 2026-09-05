@@ -47,7 +47,14 @@ type Reaper struct {
 	// transition) — the case a "reset on observed non-down outcome" alone would miss,
 	// letting a stale pre-resume timestamp escalate a fresh transport-down straight
 	// past the budget. Reaper-loop-local (single goroutine drives Sweep), so no lock.
-	downSince map[model.SandboxID]downStreak
+	downSince     map[model.SandboxID]downStreak
+	lastTelemetry map[model.SandboxID]time.Time
+	// telemetryQueue is a one-slot handoff from the maintenance tick to the
+	// sampler. Sampling may perform provider and Store I/O; keeping it off the
+	// reaper goroutine means a slow metrics backend cannot delay lifecycle
+	// reconciliation. The single slot bounds work and drops a tick while a
+	// previous sample pass is still running.
+	telemetryQueue chan context.Context
 }
 
 // downStreak is one sandbox's continuous transport-down streak (health classification): when it
@@ -56,7 +63,7 @@ type Reaper struct {
 // placement was rebound by a resume) and is restarted, not honored.
 type downStreak struct {
 	since time.Time
-	epoch string // placement transport endpoint at streak start (health and reclamation IP-as-epoch)
+	epoch string // explicit Placement epoch, with endpoint fallback for legacy records
 }
 
 // reaper defaults (the health and reaper boundary numeric knobs; bound no invariant's shape).
@@ -79,6 +86,8 @@ func NewReaper(m *Mediator, interval, transportDownBudget time.Duration) *Reaper
 		interval:            interval,
 		transportDownBudget: transportDownBudget,
 		downSince:           make(map[model.SandboxID]downStreak),
+		lastTelemetry:       make(map[model.SandboxID]time.Time),
+		telemetryQueue:      make(chan context.Context, 1),
 	}
 }
 
@@ -86,6 +95,15 @@ func NewReaper(m *Mediator, interval, transportDownBudget time.Duration) *Reaper
 // loop). The orchestrator starts it after startup reconcile, in its own
 // goroutine.
 func (r *Reaper) Run(ctx context.Context) {
+	// Keep the sampling worker inside Reaper.Run's lifetime. The orchestrator
+	// waits for Reaper.Run before closing the Store; letting this worker escape
+	// would permit a late provider/store call after that close.
+	telemetryDone := make(chan struct{})
+	go func() {
+		defer close(telemetryDone)
+		r.runTelemetry(ctx)
+	}()
+	defer func() { <-telemetryDone }()
 	t := time.NewTicker(r.interval)
 	defer t.Stop()
 	for {
@@ -94,6 +112,23 @@ func (r *Reaper) Run(ctx context.Context) {
 			return
 		case <-t.C:
 			r.tick(ctx)
+		}
+	}
+}
+
+// runTelemetry drains the bounded sampling handoff. It is owned by Run so the
+// worker's lifetime follows the reaper context and no goroutine survives a
+// normal shutdown.
+func (r *Reaper) runTelemetry(ctx context.Context) {
+	if r.telemetryQueue == nil {
+		return
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case sampleCtx := <-r.telemetryQueue:
+			r.sampleTelemetry(sampleCtx)
 		}
 	}
 }
@@ -165,6 +200,58 @@ func (r *Reaper) tick(ctx context.Context) {
 	// it sits after the reconcile that may APPEND events rather than before it.
 	if err := r.m.TrimOutbox(ctx); err != nil {
 		r.m.deps.Logf("reaper: outbox trim (retried next tick): %v", err)
+	}
+	r.scheduleTelemetry(ctx)
+}
+
+// scheduleTelemetry is deliberately non-blocking. A full queue means the
+// previous pass is still doing best-effort sampling; dropping this tick keeps
+// lifecycle reconciliation bounded and the next tick can try again.
+func (r *Reaper) scheduleTelemetry(ctx context.Context) {
+	if r.telemetryQueue == nil {
+		return
+	}
+	select {
+	case r.telemetryQueue <- ctx:
+	default:
+		r.m.deps.Logf("reaper: telemetry sample skipped (sampler busy)")
+	}
+}
+
+func (r *Reaper) sampleTelemetry(ctx context.Context) {
+	policy := r.m.deps.TelemetryPolicy
+	if err := policy.Validate(); err != nil {
+		r.m.deps.Logf("reaper: telemetry policy: %v", err)
+		return
+	}
+	recs, err := r.m.deps.Store.ListSandboxes(ctx)
+	if err != nil {
+		r.m.deps.Logf("reaper: telemetry list sandboxes: %v", err)
+		return
+	}
+	now := time.Now()
+	seen := make(map[model.SandboxID]bool, len(recs))
+	for _, rec := range recs {
+		seen[rec.ID] = true
+		if last := r.lastTelemetry[rec.ID]; !last.IsZero() && now.Sub(last) < policy.Interval {
+			continue
+		}
+		if err := r.m.SampleTelemetry(ctx, rec.ID); err != nil {
+			r.m.deps.Logf("reaper: telemetry sample %s: %v", rec.ID, err)
+			// A failed read must not advance the per-Sandbox cadence marker;
+			// otherwise one transient provider/store failure suppresses retries
+			// for the whole interval and creates a silent sampling hole.
+			continue
+		}
+		r.lastTelemetry[rec.ID] = now
+	}
+	for id := range r.lastTelemetry {
+		if !seen[id] {
+			delete(r.lastTelemetry, id)
+		}
+	}
+	if err := r.m.TrimTelemetry(ctx); err != nil {
+		r.m.deps.Logf("reaper: telemetry trim: %v", err)
 	}
 }
 
@@ -312,7 +399,12 @@ func (r *Reaper) handleTransportDownLocked(ctx context.Context, rec model.Sandbo
 	// missing endpoint (no live handle) shouldn't reach here — transport-down means L1
 	// alive + a live-map endpoint that failed L2 — but treat it defensively as a fresh
 	// streak with an empty epoch.
-	epoch, _ := r.m.Endpoint(rec.ID)
+	epoch := ""
+	if pl, err := r.m.Placement(ctx, rec.ID); err == nil {
+		epoch = fmt.Sprintf("%d", pl.Epoch)
+	} else {
+		epoch, _ = r.m.Endpoint(rec.ID)
+	}
 
 	streak, tracked := r.downSince[rec.ID]
 	if !tracked || streak.epoch != epoch {

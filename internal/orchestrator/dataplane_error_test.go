@@ -81,7 +81,7 @@ func codedFixture(t *testing.T, cl transport.Client) (*httptest.Server, model.Sa
 	t.Helper()
 	mem := store.NewMemory()
 	if err := mem.CreateTemplate(context.Background(), model.Template{
-		ID: "bare", Builtin: true, CreatedAt: time.Now(),
+		ID: "bare", Builtin: true, Manifest: model.DefaultTemplateManifest(), CreatedAt: time.Now(),
 	}); err != nil {
 		t.Fatalf("seed template: %v", err)
 	}
@@ -151,6 +151,16 @@ func TestProxiedUnaryPreservesTheInnerCode(t *testing.T) {
 			}
 			assertNoLeak(t, err)
 		})
+	}
+}
+
+func TestProxyErrMapsCapacityClassToResourceExhausted(t *testing.T) {
+	err := proxyErr(model.ErrCapacity)
+	if got := connect.CodeOf(err); got != connect.CodeResourceExhausted {
+		t.Fatalf("proxyErr(%v) code = %v; want resource_exhausted", model.ErrCapacity, got)
+	}
+	if strings.Contains(err.Error(), model.ErrCapacity.Error()) {
+		t.Fatalf("proxyErr leaked the inner capacity message: %v", err)
 	}
 }
 

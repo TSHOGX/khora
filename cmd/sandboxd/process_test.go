@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -143,13 +146,11 @@ func TestSlowSubscriberDroppedSourceNeverBlocks(t *testing.T) {
 	}
 }
 
-// nonblocking fan-out boundary (lossy-by-design, nonblocking fan-out / transport behavior): a
-// subscriber whose window is exactly full at process exit cannot receive the end
-// frame. Per the best-effort-tail contract that dropped end frame — exit code
-// included — is silently lost for THAT copy; the channel still closes cleanly and
-// finish must NOT block or panic. Making this loss observable would change the
-// best-effort-tail contract; this test pins the current deliberate behavior.
-func TestFinishOnFullWindowIsSilentlyLossy(t *testing.T) {
+// nonblocking fan-out boundary: a subscriber whose window is exactly full at
+// process exit cannot receive the end frame. Mark that copy overflow so the
+// stream reports a recoverable gap rather than a misleading clean EOF; finish
+// itself must remain non-blocking.
+func TestFinishOnFullWindowMarksOverflow(t *testing.T) {
 	p := newProc(1, nil)
 	sub, _, _, _ := p.subscribe()
 	// Fill the window to the brim without draining, staying just under the
@@ -160,12 +161,31 @@ func TestFinishOnFullWindowIsSilentlyLossy(t *testing.T) {
 	if sub.overflow.Load() {
 		t.Fatal("subscriber dropped before finish; window fill overshot the cap")
 	}
-	// Exit with a full window: end frame has nowhere to go and is dropped for this
-	// copy. finish must complete (source never blocks) and the channel must close.
+	// Exit with a full window: end frame has nowhere to go. The copy is marked
+	// overflow, finish completes without waiting, and the channel closes.
 	p.finish(0)
 	got := drain(sub.ch) // must terminate (channel closed by finish)
 	if len(got) != subWindowFrames {
-		t.Fatalf("drained %d frames; want %d data frames (end frame silently lost, by design)", len(got), subWindowFrames)
+		t.Fatalf("drained %d frames; want %d data frames (end frame is replaced by overflow)", len(got), subWindowFrames)
+	}
+	if !sub.overflow.Load() {
+		t.Fatal("full-window subscriber was not marked overflow when terminal frame was dropped")
+	}
+}
+
+func TestSubscribeAfterEndedDoesNotRepeatConsumedEnd(t *testing.T) {
+	p := newProc(1, nil)
+	p.broadcast(frame{kind: 'd', data: []byte("tail")})
+	p.finish(7)
+	_, snap, ended, endF, gap := p.subscribeFrom(p.endFrame.sequence)
+	if gap || !ended {
+		t.Fatalf("consumed terminal cursor = ended=%v gap=%v", ended, gap)
+	}
+	if len(snap) != 0 {
+		t.Fatalf("consumed terminal cursor replayed %d frames", len(snap))
+	}
+	if endF.kind != 0 {
+		t.Fatalf("consumed terminal cursor returned end frame: %+v", endF)
 	}
 }
 
@@ -183,6 +203,410 @@ func TestSubscribeAfterEnded(t *testing.T) {
 	}
 	if endF.kind != 'e' || endF.exitCode != 7 {
 		t.Fatalf("end frame = %v; want end exit=7", endF)
+	}
+}
+
+func TestStableProcessHandleSequenceAndGap(t *testing.T) {
+	p := newProc(17, nil)
+	if p.handle == "" || p.epoch == 0 {
+		t.Fatalf("new process handle/epoch = %q/%d", p.handle, p.epoch)
+	}
+	for i := 0; i < 20; i++ {
+		p.broadcast(frame{kind: 'd', data: []byte("x")})
+	}
+	_, snap, _, _, gap := p.subscribeFrom(0)
+	if gap {
+		t.Fatal("initial replay reported a gap")
+	}
+	if len(snap) != 20 || snap[0].sequence != 1 || snap[len(snap)-1].sequence != 20 {
+		t.Fatalf("sequences = %+v", snap)
+	}
+	_, _, _, _, gap = p.subscribeFrom(1)
+	if gap {
+		t.Fatal("cursor at retained boundary reported a gap")
+	}
+	// Force the bounded ring to discard old frames.
+	p.ring.cap = 4
+	for i := 0; i < 10; i++ {
+		p.broadcast(frame{kind: 'd', data: []byte("xx")})
+	}
+	_, _, _, _, gap = p.subscribeFrom(1)
+	if !gap {
+		t.Fatal("stale output cursor did not report a gap")
+	}
+}
+
+func TestRingBufferEmptyAfterOversizeFrameStillReportsCursorGap(t *testing.T) {
+	r := ringBuffer{cap: 2}
+	r.append(frame{kind: 'd', data: []byte("oversize"), sequence: 1})
+	if len(r.frames) != 0 || r.droppedBefore != 2 {
+		t.Fatalf("ring after oversize frame = frames=%v droppedBefore=%d", r.frames, r.droppedBefore)
+	}
+	p := newProc(1, nil)
+	p.ring = r
+	// Sequence 2 is the first position that could be replayed. Move the
+	// watermark forward one more frame to model a later eviction, so cursor 1
+	// is genuinely stale while cursor 0 remains the initial-tail request.
+	r.droppedBefore = 3
+	p.ring = r
+	_, _, _, _, gap := p.subscribeFrom(1)
+	if !gap {
+		t.Fatal("nonzero stale cursor after dropped output did not report a cursor gap")
+	}
+}
+
+func TestZeroCursorReplaysRetainedTailAfterTrim(t *testing.T) {
+	p := newProc(1, nil)
+	p.ring.cap = 4
+	for i := 0; i < 4; i++ {
+		p.broadcast(frame{kind: 'd', data: []byte("xx")})
+	}
+	_, snap, _, _, gap := p.subscribeFrom(0)
+	if gap {
+		t.Fatal("zero cursor must replay the retained tail, not report a stale-prefix gap")
+	}
+	if len(snap) == 0 {
+		t.Fatal("zero cursor returned no retained frames")
+	}
+}
+
+func TestFutureProcessCursorReportsGap(t *testing.T) {
+	p := newProc(1, nil)
+	p.broadcast(frame{kind: 'd', data: []byte("x")})
+	future := p.sequence + 1
+	_, _, _, _, gap := p.subscribeFrom(future)
+	if !gap {
+		t.Fatalf("future cursor %d was accepted at sequence %d", future, p.sequence)
+	}
+
+	p.finish(0)
+	future = p.sequence + 1
+	_, _, ended, _, gap := p.subscribeFrom(future)
+	if !ended || !gap {
+		t.Fatalf("future cursor after exit = ended=%v gap=%v; want ended=true,gap=true", ended, gap)
+	}
+}
+
+func TestStableProcessHandleRetainsExitAfterPidUnregister(t *testing.T) {
+	s := &processServer{}
+	p := newProc(19, nil)
+	s.register(p)
+	handle, epoch := p.handle, p.epoch
+	p.finish(23)
+	s.unregister(p.pid)
+	got, err := s.resolveProcess(handle, epoch, 0)
+	if err != nil || got != p || !got.ended || got.endFrame.exitCode != 23 {
+		t.Fatalf("retained handle = %v, %+v", err, got)
+	}
+}
+
+func TestStableProcessEpochMismatchFailsClosed(t *testing.T) {
+	s := &processServer{}
+	p := newProc(21, nil)
+	s.register(p)
+	if _, err := s.resolveProcess(p.handle, p.epoch+1, 0); err == nil {
+		t.Fatal("stale process epoch accepted")
+	}
+}
+
+func TestUnregisterDoesNotRemoveReusedPID(t *testing.T) {
+	s := &processServer{statePath: filepath.Join(t.TempDir(), "processes.json")}
+	old := newProc(23, nil)
+	current := newProc(23, nil)
+	s.register(old)
+	// Model a kernel PID recycle before the old process's final drain callback
+	// runs: the new workload now occupies the same locator.
+	s.register(current)
+	s.unregisterProcess(old.pid, old)
+	if got, ok := s.get(current.pid); !ok || got != current {
+		t.Fatalf("recycled PID entry was removed or replaced: got=%p want=%p", got, current)
+	}
+}
+
+func TestFinishIsIdempotent(t *testing.T) {
+	p := newProc(1, nil)
+	p.finish(7)
+	seq := p.endFrame.sequence
+	p.finish(9)
+	if p.endFrame.sequence != seq || p.endFrame.exitCode != 7 {
+		t.Fatalf("second finish changed terminal result: %+v", p.endFrame)
+	}
+}
+
+func TestProcessSequenceOverflowFailsClosedWithoutWrapping(t *testing.T) {
+	p := newProc(1, nil)
+	p.sequence = ^uint64(0)
+	sub, _, _, _, _ := p.subscribeFrom(0)
+	p.broadcast(frame{kind: 'd', data: []byte("must not wrap")})
+	if p.sequence != ^uint64(0) || !p.overflow {
+		t.Fatalf("sequence overflow changed state: sequence=%d overflow=%v", p.sequence, p.overflow)
+	}
+	if !sub.overflow.Load() {
+		t.Fatal("sequence exhaustion did not mark the subscriber as overflowed")
+	}
+	select {
+	case _, ok := <-sub.ch:
+		if ok {
+			t.Fatal("overflowed subscriber remained open")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("overflowed subscriber did not close")
+	}
+	_, _, _, _, gap := p.subscribeFrom(0)
+	if !gap {
+		t.Fatal("reconnect after sequence exhaustion did not report a cursor gap")
+	}
+}
+
+func TestServeSubscriberEmitsOverflowResetBeforeResourceExhausted(t *testing.T) {
+	sub := &subscriber{ch: make(chan frame)}
+	sub.overflow.Store(true)
+	close(sub.ch)
+	sink := &failingSender{}
+	err := serveSubscriber(context.Background(), sink, sub, nil, false, frame{}, "proc_overflow", 7, false)
+	if connect.CodeOf(err) != connect.CodeResourceExhausted {
+		t.Fatalf("serveSubscriber overflow error = %v; want resource_exhausted", err)
+	}
+	if len(sink.sent) != 1 {
+		t.Fatalf("overflow stream sent %d frames; want one reset marker", len(sink.sent))
+	}
+	marker := sink.sent[0]
+	if !marker.Gap || marker.ResetReason != "overflow" || marker.ProcessHandle != "proc_overflow" || marker.PlacementEpoch != 7 {
+		t.Fatalf("overflow reset marker = %+v; want gap/overflow handle+epoch", marker)
+	}
+	if _, ok := marker.Kind.(*v1.ProcessEvent_Keepalive); !ok {
+		t.Fatalf("overflow reset marker kind = %T; want keepalive", marker.Kind)
+	}
+}
+
+func TestProcessFinishAtMaximumSequenceDoesNotWrap(t *testing.T) {
+	p := newProc(1, nil)
+	p.sequence = ^uint64(0)
+	p.finish(7)
+	if !p.ended || p.sequence != ^uint64(0) || p.endFrame.sequence != ^uint64(0) || !p.overflow {
+		t.Fatalf("finish at maximum sequence wrapped or lost overflow marker: ended=%v sequence=%d end=%d overflow=%v", p.ended, p.sequence, p.endFrame.sequence, p.overflow)
+	}
+}
+
+func TestProcessOverflowMarkerSurvivesReload(t *testing.T) {
+	old := processStatePath
+	t.Cleanup(func() { processStatePath = old })
+	processStatePath = filepath.Join(t.TempDir(), "processes.json")
+	s := &processServer{retention: time.Hour}
+	p := newProc(1, nil)
+	p.sequence = ^uint64(0)
+	s.register(p)
+	p.broadcast(frame{kind: 'd', data: []byte("overflow")})
+	r := &processServer{retention: time.Hour}
+	r.loadPersistent()
+	r.mu.Lock()
+	got := r.byHandle[p.handle]
+	r.mu.Unlock()
+	if got == nil || !got.overflow || got.sequence != ^uint64(0) {
+		t.Fatalf("reloaded overflow process = %+v; want sticky overflow at MaxUint64", got)
+	}
+}
+
+func TestProcessRejectsNonExhaustedOverflowMarker(t *testing.T) {
+	old := processStatePath
+	t.Cleanup(func() { processStatePath = old })
+	processStatePath = filepath.Join(t.TempDir(), "processes.json")
+	code := 1
+	state := []persistedProcess{{Handle: "proc_bad_overflow", PID: 1, Epoch: 1, State: "exited", ExitCode: &code, Sequence: 1, ExitedAt: 1, Overflow: true, EndFrame: &persistedFrame{Kind: "e", Sequence: 1, ExitCode: code}}}
+	raw, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(processStatePath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := &processServer{}
+	s.loadPersistent()
+	if s.loadErr == nil {
+		t.Fatal("non-exhausted process overflow marker was accepted")
+	}
+}
+
+func TestPersistedRingAndExitSurviveReload(t *testing.T) {
+	old := processStatePath
+	t.Cleanup(func() { processStatePath = old })
+	processStatePath = filepath.Join(t.TempDir(), "processes.json")
+	s := &processServer{retention: time.Hour}
+	p := newProc(1, nil)
+	s.register(p)
+	s.mu.Lock()
+	s.idempotency["retry"] = p.handle
+	s.idempotencySpec["retry"] = startSpecHash(&v1.StartRequest{Cmd: "/bin/true", PlacementEpoch: p.epoch})
+	s.savePersistentLocked()
+	s.mu.Unlock()
+	p.broadcast(frame{kind: 'd', stream: "stdout", data: []byte("persisted")})
+	p.finish(12)
+	s.unregister(p.pid)
+	if _, err := os.Stat(processStatePath); err != nil {
+		t.Fatalf("state file missing: %v", err)
+	}
+	r := &processServer{retention: time.Hour}
+	r.loadPersistent()
+	r.mu.Lock()
+	got := r.byHandle[p.handle]
+	r.mu.Unlock()
+	if got == nil || !got.ended || got.endFrame.exitCode != 12 {
+		t.Fatalf("reloaded process = %+v", got)
+	}
+	_, snap, ended, end, gap := got.subscribeFrom(0)
+	if gap || !ended || len(snap) != 1 || string(snap[0].data) != "persisted" || end.exitCode != 12 {
+		t.Fatalf("reloaded replay = snap=%+v ended=%v end=%+v gap=%v", snap, ended, end, gap)
+	}
+}
+
+func TestProcessJournalCorruptionFailsClosed(t *testing.T) {
+	state := filepath.Join(t.TempDir(), "processes.json")
+	if err := os.WriteFile(state, []byte(`[{"handle":"proc_a"}] trailing`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := &processServer{statePath: state}
+	s.loadPersistent()
+	if err := s.journalFailure(); err == nil || connect.CodeOf(err) != connect.CodeUnavailable {
+		t.Fatalf("corrupt process journal failure = %v; want unavailable", err)
+	}
+	if s.byHandle != nil {
+		t.Fatalf("corrupt process journal populated handles: %+v", s.byHandle)
+	}
+}
+
+func TestProcessJournalUnreadableFailsClosed(t *testing.T) {
+	state := filepath.Join(t.TempDir(), "processes.json")
+	if err := os.Mkdir(state, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	s := &processServer{statePath: state}
+	s.loadPersistent()
+	if err := s.journalFailure(); err == nil || connect.CodeOf(err) != connect.CodeUnavailable {
+		t.Fatalf("unreadable process journal failure = %v; want unavailable", err)
+	}
+}
+
+func TestProcessJournalMissingExitCodeFailsClosed(t *testing.T) {
+	state := filepath.Join(t.TempDir(), "processes.json")
+	const journal = `[{"handle":"proc_missing_code","pid":17,"epoch":1,"state":"exited","sequence":1,"exited_at":1,"end_frame":{"kind":"e","sequence":1}}]`
+	if err := os.WriteFile(state, []byte(journal), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := &processServer{statePath: state}
+	s.loadPersistent()
+	if err := s.journalFailure(); err == nil || connect.CodeOf(err) != connect.CodeUnavailable {
+		t.Fatalf("missing exit code journal failure = %v; want unavailable", err)
+	}
+	if s.byHandle != nil {
+		t.Fatalf("missing exit code journal populated handles: %+v", s.byHandle)
+	}
+}
+
+func TestProcessJournalExplicitZeroExitCodeReloads(t *testing.T) {
+	state := filepath.Join(t.TempDir(), "processes.json")
+	exitedAt := time.Now().Add(-time.Second).UnixNano()
+	journal, err := json.Marshal([]persistedProcess{{
+		Handle: "proc_zero_code", PID: 17, Epoch: 1, State: "exited", Sequence: 1,
+		ExitCode: ptrInt(0), ExitedAt: exitedAt,
+		EndFrame: &persistedFrame{Kind: "e", Sequence: 1, ExitCode: 0},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(state, journal, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Keep the fixture well inside the retention window. A hard-coded Unix-epoch
+	// timestamp would schedule immediate reclamation during loadPersistent and
+	// race the assertion below.
+	s := &processServer{statePath: state, retention: time.Hour}
+	s.loadPersistent()
+	if err := s.journalFailure(); err != nil {
+		t.Fatalf("explicit zero exit code was rejected: %v", err)
+	}
+	s.mu.Lock()
+	p := s.byHandle["proc_zero_code"]
+	s.mu.Unlock()
+	if p == nil || !p.ended || p.endFrame.exitCode != 0 {
+		t.Fatalf("reloaded explicit zero exit = %+v; want ended with code 0", p)
+	}
+}
+
+func ptrInt(v int) *int { return &v }
+
+func TestProcessJournalRejectsInvalidFramesAndIdentity(t *testing.T) {
+	for name, journal := range map[string]string{
+		"zero epoch":         `[{"handle":"proc_bad","pid":17,"epoch":0,"state":"exited","sequence":1,"exit_code":1,"exited_at":1,"end_frame":{"kind":"e","sequence":1,"exit_code":1}}]`,
+		"nonmonotonic frame": `[{"handle":"proc_bad","pid":17,"epoch":1,"state":"exited","sequence":2,"exit_code":1,"exited_at":1,"frames":[{"kind":"d","sequence":2},{"kind":"d","sequence":1}],"end_frame":{"kind":"e","sequence":2,"exit_code":1}}]`,
+		"end mismatch":       `[{"handle":"proc_bad","pid":17,"epoch":1,"state":"exited","sequence":1,"exit_code":1,"exited_at":1,"end_frame":{"kind":"e","sequence":2,"exit_code":1}}]`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			state := filepath.Join(t.TempDir(), "processes.json")
+			if err := os.WriteFile(state, []byte(journal), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			s := &processServer{statePath: state}
+			s.loadPersistent()
+			if err := s.journalFailure(); err == nil || connect.CodeOf(err) != connect.CodeUnavailable {
+				t.Fatalf("invalid journal failure = %v; want unavailable", err)
+			}
+		})
+	}
+}
+
+func TestStartSpecHashIncludesPlacementEpoch(t *testing.T) {
+	a := startSpecHash(&v1.StartRequest{Cmd: "/bin/true", PlacementEpoch: 1})
+	b := startSpecHash(&v1.StartRequest{Cmd: "/bin/true", PlacementEpoch: 2})
+	if a == b {
+		t.Fatal("start idempotency hash ignored placement epoch")
+	}
+	if !strings.HasPrefix(a, "sha256:") {
+		t.Fatalf("start idempotency hash = %q; want canonical sha256 prefix", a)
+	}
+}
+
+func TestStartSpecHashNormalizesOmittedRepeatedFields(t *testing.T) {
+	// The control-plane edge canonicalizes omitted protobuf repeated fields to
+	// empty arrays before hashing. The guest must do the same after decode so a
+	// retry does not spuriously look like a different request (`null` vs `[]`).
+	nilFields := startSpecHash(&v1.StartRequest{Cmd: "/bin/true", PlacementEpoch: 1})
+	emptyFields := startSpecHash(&v1.StartRequest{Cmd: "/bin/true", Args: []string{}, Env: []string{}, PlacementEpoch: 1})
+	if nilFields != emptyFields {
+		t.Fatalf("omitted repeated fields changed start hash: nil=%s empty=%s", nilFields, emptyFields)
+	}
+}
+
+func TestSuppliedHandleClaimRejectsDifferentRequest(t *testing.T) {
+	s := &processServer{}
+	_, _, owner, err := s.claimStart("", "proc_fixed", "hash-a")
+	if err != nil || !owner {
+		t.Fatalf("first claim owner=%v err=%v", owner, err)
+	}
+	if _, _, _, err := s.claimStart("", "proc_fixed", "hash-b"); err == nil {
+		t.Fatal("supplied handle was reused with a different request")
+	}
+	s.finishStartFlight("", "proc_fixed", nil)
+}
+
+func TestSuppliedHandleStartFlightSerializesConcurrentRetries(t *testing.T) {
+	s := &processServer{}
+	_, firstWait, firstOwner, err := s.claimStart("", "proc_fixed", "hash")
+	if err != nil || !firstOwner || firstWait == nil {
+		t.Fatalf("first supplied-handle claim = owner=%v wait=%v err=%v", firstOwner, firstWait, err)
+	}
+	_, secondWait, secondOwner, err := s.claimStart("", "proc_fixed", "hash")
+	if err != nil || secondOwner || secondWait == nil {
+		t.Fatalf("concurrent supplied-handle claim = owner=%v wait=%v err=%v", secondOwner, secondWait, err)
+	}
+	s.finishStartFlight("", "proc_fixed", nil)
+	select {
+	case <-secondWait:
+	case <-time.After(time.Second):
+		t.Fatal("supplied-handle retry was not released after the owner finished")
+	}
+	_, _, owner, err := s.claimStart("", "proc_fixed", "hash")
+	if err != nil || !owner {
+		t.Fatalf("post-flight supplied-handle claim = owner=%v err=%v", owner, err)
 	}
 }
 

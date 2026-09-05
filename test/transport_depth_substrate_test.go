@@ -35,7 +35,7 @@ type collected struct {
 	gotEnd    bool
 	keepalive bool
 	// streamErr is why the stream ended without an end frame, when that happens
-	// (overflow disconnect vs a frame lost for no stated reason).
+	// (typically an explicit overflow disconnect).
 	streamErr error
 }
 
@@ -54,8 +54,8 @@ func collectUntilEnd(ch <-chan transport.ProcessEvent) collected {
 			c.exit = ev.ExitCode
 			c.gotEnd = true
 		case "error":
-			// Why the stream ended without an end frame (overflow disconnect vs a
-			// silently lost frame). Kept so assertions can tell them apart.
+			// Why the stream ended without an end frame. Kept so assertions can
+			// distinguish an explicit overflow disconnect from a clean end.
 			c.streamErr = ev.Err
 		}
 	}
@@ -255,7 +255,7 @@ func TestTransportMultiConnectionFanOut(t *testing.T) {
 				ca.streamErr)
 		}
 		t.Fatal("subscriber a never saw end, and the stream reported no reason — " +
-			"the end frame was lost without an overflow disconnect")
+			"the terminal outcome was not explicit")
 	}
 	// a should have seen the full tail of lines (it attached slightly late but
 	// the ring replays recent lines; at minimum the later lines are present).

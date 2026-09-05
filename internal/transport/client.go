@@ -128,6 +128,8 @@ func (c *connectClient) RecordActivity(ctx context.Context) (HealthStatus, error
 func (c *connectClient) Start(ctx context.Context, spec StartSpec) (<-chan ProcessEvent, error) {
 	req := &v1.StartRequest{
 		Cmd: spec.Cmd, Args: spec.Args, Env: spec.Env, Cwd: spec.Cwd,
+		IdempotencyKey: spec.IdempotencyKey, PlacementEpoch: spec.PlacementEpoch,
+		ProcessHandle: spec.ProcessHandle,
 	}
 	if spec.Pty != nil {
 		req.Pty = &v1.PtySize{Rows: uint32(spec.Pty.Rows), Cols: uint32(spec.Pty.Cols)}
@@ -139,8 +141,20 @@ func (c *connectClient) Start(ctx context.Context, spec StartSpec) (<-chan Proce
 	return drainEvents(stream), nil
 }
 
+func (c *connectClient) StartHandle(ctx context.Context, spec StartSpec) (<-chan ProcessEvent, error) {
+	return c.Start(ctx, spec)
+}
+
 func (c *connectClient) Connect(ctx context.Context, pid int) (<-chan ProcessEvent, error) {
 	stream, err := c.process.Connect(ctx, connect.NewRequest(&v1.ConnectRequest{Pid: int32(pid)}))
+	if err != nil {
+		return nil, err
+	}
+	return drainEvents(stream), nil
+}
+
+func (c *connectClient) ConnectHandle(ctx context.Context, handle string, epoch, after uint64) (<-chan ProcessEvent, error) {
+	stream, err := c.process.Connect(ctx, connect.NewRequest(&v1.ConnectRequest{ProcessHandle: handle, PlacementEpoch: epoch, AfterSequence: after}))
 	if err != nil {
 		return nil, err
 	}
@@ -169,21 +183,19 @@ func drainEvents(stream eventStream) <-chan ProcessEvent {
 			ev := stream.Msg()
 			switch k := ev.Kind.(type) {
 			case *v1.ProcessEvent_Start:
-				out <- ProcessEvent{Kind: "start", PID: int(k.Start.Pid)}
+				out <- ProcessEvent{Kind: "start", PID: int(k.Start.Pid), Handle: k.Start.ProcessHandle, Epoch: k.Start.PlacementEpoch, Sequence: ev.Sequence, Replay: ev.Replay, Gap: ev.Gap, ResetReason: ev.ResetReason}
 			case *v1.ProcessEvent_Data:
-				out <- ProcessEvent{Kind: "data", Stream: k.Data.Stream, Data: k.Data.Data}
+				out <- ProcessEvent{Kind: "data", Stream: k.Data.Stream, Data: k.Data.Data, Handle: ev.ProcessHandle, Epoch: ev.PlacementEpoch, Sequence: ev.Sequence, Replay: ev.Replay, Gap: ev.Gap, ResetReason: ev.ResetReason}
 			case *v1.ProcessEvent_End:
-				out <- ProcessEvent{Kind: "end", ExitCode: int(k.End.ExitCode)}
+				out <- ProcessEvent{Kind: "end", ExitCode: int(k.End.ExitCode), Handle: ev.ProcessHandle, Epoch: ev.PlacementEpoch, Sequence: ev.Sequence, Replay: ev.Replay, Gap: ev.Gap, ResetReason: ev.ResetReason}
 			case *v1.ProcessEvent_Keepalive:
-				out <- ProcessEvent{Kind: "keepalive"}
+				out <- ProcessEvent{Kind: "keepalive", Handle: ev.ProcessHandle, Epoch: ev.PlacementEpoch, Sequence: ev.Sequence, Replay: ev.Replay, Gap: ev.Gap, ResetReason: ev.ResetReason}
 			}
 		}
-		// Surface WHY the stream ended: without it, two opposite outcomes collapse into
-		// one silent channel close — a clean end (the process finished; its exit code
-		// already arrived) and a overflow disconnect (this subscriber
-		// could not keep up and its copy was dropped). The guest reports the latter as
-		// resource_exhausted precisely so the consumer can tell them apart, reconnecting
-		// being the right response to one and wrong for the other.
+		// Surface WHY the stream ended: a clean end (the process finished; its exit
+		// code already arrived) and an overflow disconnect (this subscriber could not
+		// keep up and its copy was dropped) require opposite recovery. The guest
+		// reports the latter as resource_exhausted so the consumer can tell them apart.
 		if err := stream.Err(); err != nil {
 			out <- ProcessEvent{Kind: "error", Err: err}
 		}
@@ -196,10 +208,53 @@ func drainEvents(stream eventStream) <-chan ProcessEvent {
 type streamInputWriter struct {
 	stream *connect.ClientStreamForClient[v1.StreamInputRequest, v1.StreamInputResponse]
 	pid    int
+	handle string
+	epoch  uint64
 }
 
 func (w *streamInputWriter) Send(data []byte, ptyIn bool) error {
-	return w.stream.Send(&v1.StreamInputRequest{Pid: int32(w.pid), Data: data, PtyIn: ptyIn})
+	return w.stream.Send(&v1.StreamInputRequest{Pid: int32(w.pid), ProcessHandle: w.handle, PlacementEpoch: w.epoch, Data: data, PtyIn: ptyIn})
+}
+
+func (c *connectClient) StreamInputHandle(ctx context.Context, handle string, epoch uint64) (InputWriter, error) {
+	return &streamInputWriter{stream: c.process.StreamInput(ctx), handle: handle, epoch: epoch}, nil
+}
+
+func (c *connectClient) SendInputHandle(ctx context.Context, handle string, epoch uint64, data []byte, ptyIn bool) error {
+	_, err := c.process.SendInput(ctx, connect.NewRequest(&v1.SendInputRequest{ProcessHandle: handle, PlacementEpoch: epoch, Data: data, PtyIn: ptyIn}))
+	return err
+}
+
+func (c *connectClient) SendSignalHandle(ctx context.Context, handle string, epoch uint64, signal int) error {
+	_, err := c.process.SendSignal(ctx, connect.NewRequest(&v1.SendSignalRequest{ProcessHandle: handle, PlacementEpoch: epoch, Signal: int32(signal)}))
+	return err
+}
+
+func (c *connectClient) UpdateHandle(ctx context.Context, handle string, epoch uint64, size PtySize) error {
+	_, err := c.process.Update(ctx, connect.NewRequest(&v1.UpdateRequest{ProcessHandle: handle, PlacementEpoch: epoch, Pty: &v1.PtySize{Rows: uint32(size.Rows), Cols: uint32(size.Cols)}}))
+	return err
+}
+
+func (c *connectClient) CloseStdinHandle(ctx context.Context, handle string, epoch uint64) error {
+	_, err := c.process.CloseStdin(ctx, connect.NewRequest(&v1.CloseStdinRequest{ProcessHandle: handle, PlacementEpoch: epoch}))
+	return err
+}
+
+func (c *connectClient) ListStable(ctx context.Context) ([]StableProcessInfo, error) {
+	resp, err := c.process.List(ctx, connect.NewRequest(&v1.ListRequest{}))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]StableProcessInfo, 0, len(resp.Msg.Processes))
+	for _, p := range resp.Msg.Processes {
+		info := StableProcessInfo{Handle: p.ProcessHandle, PID: int(p.Pid), State: p.State, Epoch: p.PlacementEpoch, OutputSequence: p.OutputSequence}
+		if p.ExitCode != nil {
+			code := int(*p.ExitCode)
+			info.ExitCode = &code
+		}
+		out = append(out, info)
+	}
+	return out, nil
 }
 
 func (w *streamInputWriter) Close() error {
@@ -316,6 +371,50 @@ func (c *connectClient) ListDir(ctx context.Context, path string, depth uint32) 
 	for _, e := range resp.Msg.Entries {
 		out = append(out, entryFromWire(e))
 	}
+	return out, nil
+}
+
+func (c *connectClient) Watch(ctx context.Context, path string, recursive bool, epoch, after uint64) (<-chan WatchEvent, error) {
+	stream, err := c.fs.Watch(ctx, connect.NewRequest(&v1.WatchRequest{Path: path, Recursive: recursive, PlacementEpoch: epoch, AfterSequence: after}))
+	if err != nil {
+		return nil, err
+	}
+	out := make(chan WatchEvent, 16)
+	go func() {
+		defer close(out)
+		// Always close the underlying Connect stream, including the cancellation
+		// path below. Returning directly from a ctx.Done select otherwise skips
+		// the trailing Close call and leaves a canceled HTTP/2 stream attached to
+		// the shared connection pool; after a transport-child restart that stale
+		// stream can make the next Watch request wait until its deadline.
+		defer stream.Close()
+		for stream.Receive() {
+			e := stream.Msg()
+			kind := EntryUnknown
+			switch e.Type {
+			case v1.EntryType_ENTRY_TYPE_FILE:
+				kind = EntryFile
+			case v1.EntryType_ENTRY_TYPE_DIRECTORY:
+				kind = EntryDirectory
+			case v1.EntryType_ENTRY_TYPE_SYMLINK:
+				kind = EntrySymlink
+			}
+			event := WatchEvent{Path: e.Path, OldPath: e.OldPath, Operation: e.Operation, Type: kind, Size: e.Size, MTime: time.Unix(0, e.MtimeUnixNano), Sequence: e.Sequence, Epoch: e.PlacementEpoch, Overflow: e.Overflow, Reset: e.Reset_, ResetReason: e.ResetReason}
+			select {
+			case out <- event:
+			case <-ctx.Done():
+				return
+			}
+		}
+		if err := stream.Err(); err != nil {
+			event := WatchEvent{Operation: "error", ResetReason: err.Error(), Err: err}
+			select {
+			case out <- event:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 	return out, nil
 }
 

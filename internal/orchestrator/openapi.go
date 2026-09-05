@@ -27,7 +27,11 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
+
+	"github.com/TSHOGX/khora/internal/model"
 )
 
 // openAPIVersion is the document's own version, NOT the engine's. It moves when the
@@ -47,7 +51,13 @@ const openAPIDocPath = "docs/api/openapi.json"
 type apiParam struct {
 	Name string
 	Type string // "string" | "integer" | "boolean"
+	In   string // "query" (default) | "header"
 	Desc string
+	// Optional schema constraints keep parameter metadata aligned with the
+	// reflected wire type when a parameter has a narrower or unsigned range.
+	Format  string
+	Minimum any
+	Maximum any
 }
 
 // apiOp is one control-plane operation. Req/Resp hold a zero value of the wire type, not a
@@ -83,6 +93,7 @@ var apiOps = []apiOp{
 		Method: "POST", Path: "/v1/sandboxes", OpID: "createSandbox",
 		Summary: "Create a sandbox. Unknown JSON fields are REFUSED (a misspelled `network` would otherwise silently create a deny sandbox).",
 		Req:     createReq{}, Resp: createResp{}, Status: 201,
+		Query:  []apiParam{{Name: "Idempotency-Key", Type: "string", In: "header", Desc: "Caller-supplied retry key. Same normalized request replays the original Sandbox; a changed request conflicts."}},
 		Errors: []int{400, 404, 409, 507},
 	},
 	{
@@ -122,6 +133,21 @@ var apiOps = []apiOp{
 		Resp:    activityResp{}, Status: 200, Errors: []int{404, 409, 503},
 	},
 	{
+		Method: "GET", Path: "/v1/sandboxes/{id}/telemetry", OpID: "listTelemetry",
+		Summary: "Read the independent per-Sandbox telemetry sample lane.",
+		Query: []apiParam{
+			{Name: "after", Type: "integer", Format: "uint64", Minimum: uint64(0), Maximum: ^uint64(0), Desc: "Telemetry sequence cursor."},
+			{Name: "limit", Type: "integer", Desc: "Maximum samples."},
+		},
+		Resp: struct {
+			Samples  []model.TelemetrySample `json:"samples"`
+			Earliest uint64                  `json:"earliest"`
+			Latest   uint64                  `json:"latest"`
+		}{}, Status: 200, Errors: []int{400, 404, 410},
+	},
+	{Method: "GET", Path: "/v1/sandboxes/{id}/snapshot", OpID: "getSandboxSnapshot", Summary: "Read the Sandbox resource snapshot with explicit measurement availability.", Resp: model.SandboxSnapshot{}, Status: 200, Errors: []int{404}},
+	{Method: "GET", Path: "/v1/sandboxes/{id}/placement", OpID: "getPlacementSnapshot", Summary: "Read the current Placement epoch and resource snapshot.", Resp: model.PlacementSnapshot{}, Status: 200, Errors: []int{404}},
+	{
 		Method: "GET", Path: "/v1/sandboxes/{id}/network", OpID: "getSandboxNetwork",
 		Summary: "Read the sandbox's effective network declaration, including per-rule hit counters.",
 		Resp:    networkReadResp{}, Status: 200, Errors: []int{404},
@@ -149,11 +175,11 @@ var apiOps = []apiOp{
 		Method: "GET", Path: "/v1/events", OpID: "listEvents",
 		Summary: "Page the transactional outbox in `seq` order. Delivery is at least once; deduplicate by event `id`.",
 		Query: []apiParam{
-			{Name: "after", Type: "integer", Desc: "Cursor: return events with seq > this. 0 or omitted starts at the earliest retained event."},
+			{Name: "after", Type: "integer", Format: "int64", Minimum: int64(0), Maximum: int64(1<<63 - 1), Desc: "Cursor: return events with seq > this. 0 or omitted starts at the earliest retained event."},
 			{Name: "limit", Type: "integer", Desc: "Maximum events in this page."},
 			{Name: "wait", Type: "string", Desc: "Go duration (e.g. \"20s\"). If the page would be EMPTY, hold the request open until an event arrives or this elapses. Changes no cursor semantics; a non-empty first read never waits. Clamped to a server-side ceiling."},
 		},
-		Resp: eventsResp{}, Status: 200, Errors: []int{400},
+		Resp: eventsResp{}, Status: 200, Errors: []int{400, 410},
 	},
 	{
 		Method: "POST", Path: "/v1/templates", OpID: "promoteTemplate",
@@ -166,6 +192,13 @@ var apiOps = []apiOp{
 		Summary: "List all templates.",
 		Resp:    []templateResp{}, Status: 200,
 	},
+	{Method: "GET", Path: "/v1/processes/{id}", OpID: "getProcessSnapshot", Summary: "Read a logical Process snapshot and retained exit status.", Resp: model.ProcessSnapshot{}, Status: 200, Errors: []int{404}},
+	{Method: "GET", Path: "/v1/sandboxes/{id}/processes", OpID: "listSandboxProcesses", Summary: "List logical Process records for a Sandbox.", Resp: []model.Process{}, Status: 200, Errors: []int{404}},
+	{
+		Method: "GET", Path: "/v1/templates/{id}", OpID: "getTemplate",
+		Summary: "Inspect an immutable Template and its typed manifest.",
+		Resp:    templateResp{}, Status: 200, Errors: []int{404},
+	},
 	{
 		Method: "DELETE", Path: "/v1/templates/{id}", OpID: "deleteTemplate",
 		Summary: "Delete a template. Refused while any sandbox references it.",
@@ -175,6 +208,7 @@ var apiOps = []apiOp{
 		Method: "POST", Path: "/v1/volumes", OpID: "createVolume",
 		Summary: "Create a Volume whose lifetime is independent of every sandbox.",
 		Req:     volumeCreateReq{}, Resp: volumeResp{}, Status: 201,
+		Query:  []apiParam{{Name: "Idempotency-Key", Type: "string", In: "header", Desc: "Caller-supplied retry key. Same normalized request replays the original Volume; a changed request conflicts."}},
 		Errors: []int{400, 409, 507},
 	},
 	{
@@ -201,11 +235,13 @@ var apiOps = []apiOp{
 	{
 		Method: "POST", Path: "/v1/volumes/{id}/snapshot", OpID: "snapshotVolume",
 		Summary: "Snapshot a volume into a new volume.",
+		Query:   []apiParam{{Name: "Idempotency-Key", Type: "string", In: "header", Desc: "Caller-supplied retry key."}},
 		Resp:    volumeResp{}, Status: 201, Errors: []int{404, 409, 507},
 	},
 	{
 		Method: "POST", Path: "/v1/volumes/{id}/clone", OpID: "cloneVolume",
 		Summary: "Clone a volume into a new, independently writable volume.",
+		Query:   []apiParam{{Name: "Idempotency-Key", Type: "string", In: "header", Desc: "Caller-supplied retry key."}},
 		Resp:    volumeResp{}, Status: 201, Errors: []int{404, 409, 507},
 	},
 	{
@@ -213,13 +249,60 @@ var apiOps = []apiOp{
 		Summary: "Stream bytes INTO a volume with no sandbox involved. Body is the raw content.",
 		Query:   []apiParam{{Name: "path", Type: "string", Desc: "Path inside the volume."}},
 		Resp:    importResp{}, Status: 200,
-		Errors: []int{400, 404, 409, 413, 507},
+		Errors: []int{400, 403, 404, 409, 503, 507},
 	},
 	{
 		Method: "GET", Path: "/v1/volumes/{id}/export", OpID: "exportVolume",
 		Summary: "Stream bytes OUT of a volume with no sandbox involved. Returns application/octet-stream.",
 		Query:   []apiParam{{Name: "path", Type: "string", Desc: "Path inside the volume."}},
-		Status:  200, Errors: []int{400, 404, 409},
+		Status:  200, Errors: []int{400, 403, 404, 503},
+	},
+	{
+		Method: "GET", Path: "/v1/volumes/{id}/stat", OpID: "statVolumePath",
+		Summary: "Read root-confined LSTAT metadata for a Volume path.",
+		Query:   []apiParam{{Name: "path", Type: "string", Desc: "Path inside the Volume."}},
+		Resp:    volumeFileResp{}, Status: 200, Errors: []int{400, 404, 403},
+	},
+	{
+		Method: "GET", Path: "/v1/volumes/{id}/lstat", OpID: "lstatVolumePath",
+		Summary: "Read root-confined LSTAT metadata without following a symlink.",
+		Query:   []apiParam{{Name: "path", Type: "string", Desc: "Path inside the Volume."}},
+		Resp:    volumeFileResp{}, Status: 200, Errors: []int{400, 404, 403},
+	},
+	{
+		Method: "GET", Path: "/v1/volumes/{id}/list", OpID: "listVolumePath",
+		Summary: "List one root-confined Volume directory.",
+		Query:   []apiParam{{Name: "path", Type: "string", Desc: "Directory path inside the Volume; omitted means the root."}},
+		Resp:    []volumeFileResp{}, Status: 200, Errors: []int{400, 404, 403},
+	},
+	{
+		Method: "GET", Path: "/v1/volumes/{id}/read", OpID: "readVolumePath",
+		Summary: "Read a bounded byte range from a root-confined Volume file.",
+		Query:   []apiParam{{Name: "path", Type: "string", Desc: "File path inside the Volume."}, {Name: "offset", Type: "integer", Desc: "Byte offset."}, {Name: "length", Type: "integer", Desc: "Byte length; omitted or zero reads to EOF."}},
+		Status:  200, Errors: []int{400, 404, 403},
+	},
+	{
+		Method: "PUT", Path: "/v1/volumes/{id}/write", OpID: "writeVolumePath",
+		Summary: "Write raw bytes to a root-confined Volume file.",
+		Query:   []apiParam{{Name: "path", Type: "string", Desc: "File path inside the Volume."}, {Name: "offset", Type: "integer", Desc: "Byte offset."}},
+		Resp:    importResp{}, Status: 200, Errors: []int{400, 403, 404, 409, 413, 507},
+	},
+	{
+		Method: "POST", Path: "/v1/volumes/{id}/mkdir", OpID: "mkdirVolumePath",
+		Summary: "Create one root-confined Volume directory.",
+		Query:   []apiParam{{Name: "path", Type: "string", Desc: "Directory path inside the Volume."}, {Name: "mode", Type: "integer", Desc: "Numeric permission bits; defaults to 0755."}},
+		Resp:    volumeFileResp{}, Status: 201, Errors: []int{400, 404, 409, 403, 507},
+	},
+	{
+		Method: "POST", Path: "/v1/volumes/{id}/move", OpID: "moveVolumePath",
+		Summary: "Rename a root-confined Volume path.",
+		Req:     volumeMoveReq{}, Resp: volumeFileResp{}, Status: 200, Errors: []int{400, 404, 409, 403},
+	},
+	{
+		Method: "DELETE", Path: "/v1/volumes/{id}/remove", OpID: "removeVolumePath",
+		Summary: "Remove a root-confined Volume path.",
+		Query:   []apiParam{{Name: "path", Type: "string", Desc: "Path inside the Volume."}},
+		Status:  204, Errors: []int{400, 404, 409, 403},
 	},
 }
 
@@ -250,12 +333,36 @@ func schemaFor(t reflect.Type, defs map[string]any) map[string]any {
 		return map[string]any{"type": "string"}
 	case reflect.Bool:
 		return map[string]any{"type": "boolean"}
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
-		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		return map[string]any{"type": "integer", "format": "int64"}
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		bits := t.Bits()
+		if bits == 0 {
+			bits = strconv.IntSize
+		}
+		minimum := -int64(1 << (bits - 1))
+		maximum := int64((uint64(1) << (bits - 1)) - 1)
+		return map[string]any{"type": "integer", "format": "int64", "minimum": minimum, "maximum": maximum}
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		bits := t.Bits()
+		if bits == 0 {
+			bits = strconv.IntSize
+		}
+		max := ^uint64(0)
+		if bits < 64 {
+			max = (uint64(1) << bits) - 1
+		}
+		return map[string]any{"type": "integer", "format": "uint64", "minimum": uint64(0), "maximum": max}
 	case reflect.Float32, reflect.Float64:
 		return map[string]any{"type": "number"}
 	case reflect.Struct:
+		// time.Time implements encoding/json.Marshaler and crosses the HTTP
+		// boundary as an RFC3339 string, not as its internal struct fields. Keep
+		// a named component so all timestamp fields share the same wire schema.
+		if t == reflect.TypeOf(time.Time{}) {
+			if _, seen := defs["Time"]; !seen {
+				defs["Time"] = map[string]any{"type": "string", "format": "date-time"}
+			}
+			return map[string]any{"$ref": "#/components/schemas/Time"}
+		}
 		name := t.Name()
 		if name == "" {
 			// Anonymous struct: inline it. Nothing in the control-plane API uses one, but a future
@@ -318,6 +425,8 @@ var errorDescriptions = map[int]string{
 	404: "No such object. The message names WHICH kind, so a caller does not look in the wrong place.",
 	409: "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying.",
 	413: "The body exceeds the engine's per-request limit.",
+	410: "The cursor is older than the retained window; resynchronize from the reported bounds.",
+	500: "The engine could not complete the operation because of an internal store or provider failure.",
 	503: "The sandbox's in-guest transport is unreachable, or a pause is draining. The answer may differ later.",
 	507: "Capacity: nothing is wrong with the request or the sandbox — the node cannot honor another promise.",
 }
@@ -352,10 +461,24 @@ func OpenAPIDoc() ([]byte, error) {
 		if len(op.Query) > 0 {
 			qs := make([]any, 0, len(op.Query))
 			for _, q := range op.Query {
+				where := q.In
+				if where == "" {
+					where = "query"
+				}
+				schema := map[string]any{"type": q.Type}
+				if q.Format != "" {
+					schema["format"] = q.Format
+				}
+				if q.Minimum != nil {
+					schema["minimum"] = q.Minimum
+				}
+				if q.Maximum != nil {
+					schema["maximum"] = q.Maximum
+				}
 				qs = append(qs, map[string]any{
-					"name": q.Name, "in": "query", "required": false,
+					"name": q.Name, "in": where, "required": false,
 					"description": q.Desc,
-					"schema":      map[string]any{"type": q.Type},
+					"schema":      schema,
 				})
 			}
 			operation["parameters"] = qs
@@ -369,7 +492,7 @@ func OpenAPIDoc() ([]byte, error) {
 					},
 				},
 			}
-		} else if op.Method == "PUT" && strings.HasSuffix(op.Path, "/files") ||
+		} else if (op.Method == "PUT" && (strings.HasSuffix(op.Path, "/files") || strings.HasSuffix(op.Path, "/write"))) ||
 			op.Method == "POST" && strings.HasSuffix(op.Path, "/import") {
 			// The two streaming inbound routes carry RAW BYTES, not JSON. Stated
 			// explicitly: a consumer that generated a JSON body for these would send a
@@ -440,6 +563,11 @@ func responsesFor(op apiOp, defs map[string]any) map[string]any {
 	out[fmt.Sprint(op.Status)] = success
 
 	codes := append([]int{}, op.Errors...)
+	// Every routed operation can surface an internal store/provider failure. The
+	// generic 500 response is part of the HTTP contract even when an operation's
+	// expected refusals are narrower; omitting it makes a generated client reject
+	// a real error response as undocumented.
+	codes = append(codes, 500)
 	// 405 is on EVERY route in the table by the API error contract's general rule ("a wrong method on
 	// any collection/object route → 405"), so it is added here rather than repeated
 	// on 26 entries — repetition being how one of them would come to be missing.
@@ -449,6 +577,19 @@ func responsesFor(op apiOp, defs map[string]any) map[string]any {
 		desc := errorDescriptions[c]
 		if c == 405 {
 			desc = "The route exists, but this method does not apply to it."
+		}
+		if c == 410 && op.Resp != nil {
+			// Cursor expiry is the one error response that carries structured recovery
+			// state. The events and telemetry handlers return the same bounds-bearing
+			// object as their successful page, so derive this schema from Resp rather
+			// than describing a second, drift-prone error type.
+			out[fmt.Sprint(c)] = map[string]any{
+				"description": desc,
+				"content": map[string]any{
+					"application/json": map[string]any{"schema": schemaFor(reflect.TypeOf(op.Resp), defs)},
+				},
+			}
+			continue
 		}
 		out[fmt.Sprint(c)] = map[string]any{
 			"description": desc,

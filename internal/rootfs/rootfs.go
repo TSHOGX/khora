@@ -249,3 +249,10 @@ type Provider interface {
 	// never candidates.
 	SweepOrphanLayers(ctx context.Context, live, building []string) (int, error)
 }
+
+// TemplateDigestProvider is an optional inspection seam used by lifecycle
+// manifest validation. It returns the canonical content digest for a template
+// without exposing the provider's storage path.
+type TemplateDigestProvider interface {
+	TemplateDigest(ctx context.Context, templateID string) (string, error)
+}

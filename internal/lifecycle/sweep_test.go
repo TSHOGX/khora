@@ -27,10 +27,10 @@ func TestMediatorSweepPassesLiveAndBuilding(t *testing.T) {
 	})
 
 	// a builtin (should NOT appear in live) + a Promote-built layer (should).
-	if err := st.CreateTemplate(ctx, model.Template{ID: "bare", Builtin: true, CreatedAt: time.Now()}); err != nil {
+	if err := st.CreateTemplate(ctx, model.Template{ID: "bare", Builtin: true, Manifest: model.DefaultTemplateManifest(), CreatedAt: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.CreateTemplate(ctx, model.Template{ID: "tmpl_promoted", Parent: "bare", CreatedAt: time.Now()}); err != nil {
+	if err := st.CreateTemplate(ctx, model.Template{ID: "tmpl_promoted", Parent: "bare", Manifest: model.DefaultTemplateManifest(), CreatedAt: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
 	// pretend a Promote is in flight.

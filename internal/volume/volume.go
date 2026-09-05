@@ -67,12 +67,27 @@ type Materialized struct {
 // os-independent. It carries no host path: a Root addresses everything relative to the
 // volume root, so an absolute name would be both useless and a leak.
 type FileInfo struct {
-	Name    string // base name within the listed/stat'ed directory
-	Size    int64  // apparent size in bytes (0 for directories)
-	Mode    fs.FileMode
-	IsDir   bool
-	ModTime time.Time
+	Name  string // base name within the listed/stat'ed directory
+	Size  int64  // apparent size in bytes (0 for directories)
+	Mode  fs.FileMode
+	IsDir bool
+	// Type preserves the entry kind under LSTAT; a symlink is never silently
+	// presented as its target.
+	Type EntryType
+	// SymlinkTarget is populated only for symlink entries.
+	SymlinkTarget string
+	ModTime       time.Time
 }
+
+type EntryType string
+
+const (
+	EntryUnknown   EntryType = "unknown"
+	EntryFile      EntryType = "file"
+	EntryDirectory EntryType = "directory"
+	EntrySymlink   EntryType = "symlink"
+	EntryOther     EntryType = "other"
+)
 
 // Root is the root-confined content accessor used while a Volume is unmounted.
 // Every path is relative to the volume root and out-of-root targets are unreachable
@@ -89,6 +104,9 @@ type FileInfo struct {
 type Root interface {
 	// Stat reports metadata for one path ("." = the volume root itself).
 	Stat(name string) (FileInfo, error)
+	// Lstat reports the final directory entry itself, preserving symlink type
+	// and target rather than following it.
+	Lstat(name string) (FileInfo, error)
 	// List enumerates one directory's entries (non-recursive).
 	List(name string) ([]FileInfo, error)
 	// ReadAt reads len(p) bytes from name starting at off, with io.Reader's
@@ -119,7 +137,7 @@ type Root interface {
 // A SHAPE RULE RUNS THROUGH THE WHOLE INTERFACE: "allocate", "set the cap" and "place" are
 // THREE actions and must not be compressed into one call (the volume backend seam) — merging them
 // leaves creation, capacity and the admission term all homeless. FALSIFIED WITH A SECOND
-// BACKEND rather than reasoned about: the test-only plain-directory arm runs the same
+// BACKEND rather than reasoned about: the plain-directory arm runs the same
 // contract suite, and a merged shape fails in each of those three places (see PlainDir).
 type Backend interface {
 	// Name identifies the backend for registration and diagnostics.

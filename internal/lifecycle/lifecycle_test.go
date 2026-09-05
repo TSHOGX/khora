@@ -50,6 +50,109 @@ func TestCreateHappyPath(t *testing.T) {
 	}
 }
 
+func TestSandboxCreateRetryReplaysBeforeDeploymentValidation(t *testing.T) {
+	ctx := context.Background()
+	rp, rt := &fakeRootfs{}, &fakeRuntime{}
+	uid := 4711
+	m, st := newTestMediator(t, rp, rt, true)
+	m.deps.Deployment.SecondHopUID = &uid
+	decl := viaDecl(t)
+	key := model.IdempotencyKey("sandbox-deployment-replay")
+	first, err := m.Create(ctx, CreateSpec{Template: "bare", IdempotencyKey: key, Network: &decl})
+	if err != nil {
+		t.Fatalf("initial keyed create = %v", err)
+	}
+	// Simulate a restart under a deployment that no longer supplies the
+	// second-hop uid. The durable object is still valid and must be replayable.
+	m.deps.Deployment.SecondHopUID = nil
+	replayed, err := m.Create(ctx, CreateSpec{Template: "bare", IdempotencyKey: key, Network: &decl})
+	if err != nil || replayed != first {
+		t.Fatalf("same-key create after deployment change = %s, %v; want replay of %s", replayed, err, first)
+	}
+	// A changed request must conflict before the now-invalid deployment
+	// declaration is evaluated.
+	changed := CreateSpec{Template: "bare", IdempotencyKey: key, Network: &decl, Limits: model.Limits{MemoryByte: 1}}
+	if _, err := m.Create(ctx, changed); model.ErrorClassOf(err) != model.ErrorIdempotencyConflict {
+		t.Fatalf("changed keyed create after deployment change = %v; want idempotency_conflict", err)
+	}
+	if rec, err := st.GetSandbox(ctx, first); err != nil || rec.State != model.Running {
+		t.Fatalf("replayed sandbox record = %+v, %v; want original running record", rec, err)
+	}
+}
+
+func TestSandboxCreateValidationFailureTerminalizesIdempotentOperation(t *testing.T) {
+	ctx := context.Background()
+	rp, rt := &fakeRootfs{}, &fakeRuntime{}
+	m, st := newTestMediator(t, rp, rt, true) // no second-hop uid: via[] is refused
+	decl := viaDecl(t)
+	key := model.IdempotencyKey("sandbox-invalid-deployment")
+	if _, err := m.Create(ctx, CreateSpec{Template: "bare", IdempotencyKey: key, Network: &decl}); err == nil {
+		t.Fatal("invalid deployment declaration unexpectedly succeeded")
+	}
+	op, err := st.GetOperationByKey(ctx, "sandbox.create", key)
+	if err != nil {
+		t.Fatalf("read validation-failed operation: %v", err)
+	}
+	if op.State != model.OperationFailed || op.ErrorClass != model.ErrorInvalidArgument {
+		t.Fatalf("validation-failed operation = state %q class %q; want failed/invalid_argument", op.State, op.ErrorClass)
+	}
+	if _, err := m.Create(ctx, CreateSpec{Template: "bare", IdempotencyKey: key, Network: &decl}); model.ErrorClassOf(err) != model.ErrorInvalidArgument {
+		t.Fatalf("same-key retry after validation failure = %v; want stable invalid_argument", err)
+	}
+}
+
+func TestSandboxCreateRetryIgnoresChangedDefaultsWhenTTLWasOmitted(t *testing.T) {
+	ctx := context.Background()
+	rp, rt := &fakeRootfs{}, &fakeRuntime{}
+	m, st := newTestMediator(t, rp, rt, true)
+	key := model.IdempotencyKey("sandbox-default-replay")
+	first, err := m.Create(ctx, CreateSpec{Template: "bare", IdempotencyKey: key})
+	if err != nil {
+		t.Fatalf("initial keyed create = %v", err)
+	}
+	firstRec, err := st.GetSandbox(ctx, first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A restart may choose different defaults, but an omitted TTL means the
+	// caller requested the deployment default, not the old materialized value.
+	m.deps.DefaultIdleTimeout = 2 * time.Hour
+	m.deps.DefaultRetention = 3 * time.Hour
+	replayed, err := m.Create(ctx, CreateSpec{Template: "bare", IdempotencyKey: key})
+	if err != nil || replayed != first {
+		t.Fatalf("same-key create after default change = %s, %v; want replay of %s", replayed, err, first)
+	}
+	got, err := st.GetSandbox(ctx, first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.IdleTimeout != firstRec.IdleTimeout || got.Retention != firstRec.Retention {
+		t.Fatalf("replayed sandbox binding changed: before=%s/%s after=%s/%s", firstRec.IdleTimeout, firstRec.Retention, got.IdleTimeout, got.Retention)
+	}
+}
+
+func TestSandboxCreateSemanticHashIsStableForMountPermutations(t *testing.T) {
+	a := CreateSpec{Template: "bare", Volumes: []model.Mount{
+		{Volume: "vol_b", Path: "/z", Access: model.SharedReadOnly},
+		{Volume: "vol_a", Path: "/a", Access: model.SharedReadWrite},
+	}}
+	b := CreateSpec{Template: a.Template, Volumes: []model.Mount{
+		{Volume: "vol_a", Path: "/a/", Access: model.SharedReadWrite},
+		{Volume: "vol_b", Path: "/z", Access: model.SharedReadOnly},
+	}}
+	hashA, err := model.RequestHash(semanticSandboxCreate(a, model.NetworkDecl{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	hashB, err := model.RequestHash(semanticSandboxCreate(b, model.NetworkDecl{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hashA != hashB {
+		t.Fatalf("mount permutation hashes differ: %s vs %s", hashA, hashB)
+	}
+}
+
 // TTL Binding materialization (resource admission / health and reclamation): a create that OMITS idle_timeout /
 // retention stores the engine-wide default; a create that provides them stores
 // the given values verbatim (including an explicit zero). The stored record
@@ -293,7 +396,7 @@ func seedPaused(t *testing.T, st *store.Memory, sid, oid, tmpl string) {
 	now := time.Now()
 	// health and reclamation template FK: ensure the referenced Template row exists first. Idempotent
 	// across repeat calls with the same tmpl (ErrConflict is fine → ignore).
-	_ = st.CreateTemplate(ctx, model.Template{ID: model.TemplateID(tmpl), Builtin: true, CreatedAt: now})
+	_ = st.CreateTemplate(ctx, model.Template{ID: model.TemplateID(tmpl), Builtin: true, Manifest: model.DefaultTemplateManifest(), CreatedAt: now})
 	if err := st.CreateSandbox(ctx, model.Sandbox{
 		ID: model.SandboxID(sid), Template: model.TemplateID(tmpl),
 		Overlay: model.OverlayID(oid), State: model.Creating,

@@ -104,6 +104,7 @@ func RunContract(t *testing.T, mk Factory) {
 	t.Run("ExclusiveLeaseInvariant", func(t *testing.T) { testExclusiveLease(t, mk) })
 	t.Run("ExclusiveDoesNotCoexistWithShared", func(t *testing.T) { testExclusiveVsShared(t, mk) })
 	t.Run("MountBindingSelfContradiction", func(t *testing.T) { testMountBindingInvalid(t, mk) })
+	t.Run("NestedMountPlanBinding", func(t *testing.T) { testNestedMountBinding(t, mk) })
 	t.Run("MountBindingIsAllOrNothing", func(t *testing.T) { testMountAllOrNothing(t, mk) })
 
 	// ReplaceMounts (the Volume subsystem): the whole-binding swap is ONE atomic commit. Two cases
@@ -132,6 +133,351 @@ func RunContract(t *testing.T, mk Factory) {
 	t.Run("SequenceSurvivesReopen", func(t *testing.T) { testSequenceSurvivesReopen(t, mk) })
 	t.Run("EventsReplayPaging", func(t *testing.T) { testEventsReplayPaging(t, mk) })
 	t.Run("SequenceNoVisibilityGap", func(t *testing.T) { testSequenceNoVisibilityGap(t, mk) })
+
+	// Durable state core: both backends must agree on epoch replacement,
+	// logical process retention, and idempotency-key arbitration.
+	t.Run("PlacementEpochPersistence", func(t *testing.T) { testPlacementCore(t, mk) })
+	t.Run("LogicalProcessPersistence", func(t *testing.T) { testProcessCore(t, mk) })
+	t.Run("OperationLedger", func(t *testing.T) { testOperationCore(t, mk) })
+	t.Run("OperationKeyConcurrentSingleWinner", func(t *testing.T) { testOperationKeyRace(t, mk) })
+	t.Run("OperationTakeoverConcurrentSingleWinner", func(t *testing.T) { testOperationTakeoverRace(t, mk) })
+	t.Run("OperationStaleUpdateRejected", func(t *testing.T) { testOperationStaleUpdate(t, mk) })
+	t.Run("OperationTerminalResultImmutable", func(t *testing.T) { testOperationTerminalImmutable(t, mk) })
+	t.Run("TelemetrySampleLane", func(t *testing.T) { testTelemetryLane(t, mk) })
+}
+
+func testTelemetryLane(t *testing.T, mk Factory) {
+	ctx := context.Background()
+	s, _ := mk(t)
+	if err := s.AppendTelemetry(ctx, model.TelemetrySample{Sandbox: "missing", Snapshot: model.ResourceSnapshot{CPU: model.Measured(1), Memory: model.Measured(1), Disk: model.Measured(1), State: "running", At: time.Now()}}); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("telemetry for unknown sandbox = %v; want ErrNotFound", err)
+	}
+	seedTmpl(t, s, "bare")
+	if err := s.CreateSandbox(ctx, mkRec("telemetry"), nil); err != nil {
+		t.Fatal(err)
+	}
+	for i, value := range []int64{0, 5} {
+		sample := model.TelemetrySample{Sandbox: "telemetry", Snapshot: model.ResourceSnapshot{CPU: model.Measured(value), Memory: model.UnavailableMeasurement(), Disk: model.Measured(int64(i)), State: "running", At: time.Now().Add(time.Duration(i) * time.Second)}}
+		if err := s.AppendTelemetry(ctx, sample); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+	}
+	page, earliest, latest, err := s.Telemetry(ctx, "telemetry", 0, 10)
+	if err != nil || len(page) != 2 || earliest != 1 || latest != 2 {
+		t.Fatalf("telemetry page = %+v bounds %d/%d err %v", page, earliest, latest, err)
+	}
+	if !page[0].Snapshot.CPU.Available || page[0].Snapshot.CPU.Value != 0 || page[0].Snapshot.Memory.Available {
+		t.Fatalf("availability flags collapsed: %+v", page[0].Snapshot)
+	}
+	page, _, _, err = s.Telemetry(ctx, "telemetry", 1, 10)
+	if err != nil || len(page) != 1 || page[0].Envelope.Sequence != 2 {
+		t.Fatalf("cursor page = %+v err %v", page, err)
+	}
+	page, earliest, latest, err = s.Telemetry(ctx, "telemetry", ^uint64(0), 10)
+	if err != nil || len(page) != 0 || earliest != 1 || latest != 2 {
+		t.Fatalf("maximum cursor page = %+v bounds %d/%d err %v; want an empty tail page with intact bounds", page, earliest, latest, err)
+	}
+	n, err := s.TrimTelemetry(ctx, time.Now().Add(time.Hour), 10)
+	if err != nil || n != 1 {
+		t.Fatalf("trim = %d, %v; newest sample must remain", n, err)
+	}
+	if err := s.AppendTelemetry(ctx, model.TelemetrySample{Sandbox: "telemetry", Snapshot: model.ResourceSnapshot{CPU: model.Measured(1), Memory: model.Measured(1), Disk: model.Measured(1), State: "running", At: time.Now()}}); err != nil {
+		t.Fatal(err)
+	}
+	page, _, latest, err = s.Telemetry(ctx, "telemetry", 0, 10)
+	if err != nil || latest != 3 || len(page) != 2 {
+		t.Fatalf("post-trim sequence = %+v bounds latest=%d err=%v; sequence must not be reused", page, latest, err)
+	}
+}
+
+func testPlacementCore(t *testing.T, mk Factory) {
+	ctx := context.Background()
+	s, reopen := mk(t)
+	seedTmpl(t, s, "bare")
+	if err := s.CreateSandbox(ctx, mkRec("p"), nil); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	p := model.Placement{Sandbox: "p", Epoch: 1, Provider: "local_runsc", State: model.PlacementActive, CreatedAt: now, UpdatedAt: now}
+	if err := s.CreatePlacement(ctx, p); err != nil {
+		t.Fatalf("create placement: %v", err)
+	}
+	if err := s.CreatePlacement(ctx, p); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("duplicate placement = %v; want ErrConflict", err)
+	}
+	p.Epoch = 2
+	p.UpdatedAt = now.Add(time.Second)
+	if err := s.UpdatePlacement(ctx, p); err != nil {
+		t.Fatalf("update placement: %v", err)
+	}
+	if got, err := s.GetPlacement(ctx, "p"); err != nil || got.Epoch != 2 {
+		t.Fatalf("get placement = %+v, %v", got, err)
+	}
+	if reopen != nil {
+		s = reopen(t)
+		if got, err := s.GetPlacement(ctx, "p"); err != nil || got.Epoch != 2 {
+			t.Fatalf("placement after reopen = %+v, %v", got, err)
+		}
+	}
+}
+
+func testProcessCore(t *testing.T, mk Factory) {
+	ctx := context.Background()
+	s, reopen := mk(t)
+	seedTmpl(t, s, "bare")
+	if err := s.CreateSandbox(ctx, mkRec("proc-sbx"), nil); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	p := model.Process{ID: "proc_a", Sandbox: "proc-sbx", PlacementEpoch: 1, PID: 7, State: model.ProcessRunning, StartedAt: now, OutputCursor: model.ProcessOutputCursor("proc_a", 1, 0)}
+	if err := s.CreateProcess(ctx, p); err != nil {
+		t.Fatalf("create process: %v", err)
+	}
+	progressed := p
+	progressed.OutputCursor.Sequence = 5
+	if err := s.UpdateProcess(ctx, progressed); err != nil {
+		t.Fatalf("advance process cursor: %v", err)
+	}
+	regressed := progressed
+	regressed.OutputCursor.Sequence = 4
+	if err := s.UpdateProcess(ctx, regressed); !errors.Is(err, store.ErrProcessConflict) {
+		t.Fatalf("regressed process cursor = %v; want ErrProcessConflict", err)
+	}
+	p = progressed
+	exited := now.Add(time.Second)
+	code := 0
+	p.State, p.ExitCode, p.ExitedAt = model.ProcessExited, &code, &exited
+	if err := s.UpdateProcess(ctx, p); err != nil {
+		t.Fatalf("exit process: %v", err)
+	}
+	// Terminal metadata is immutable once the exit has been observed. A replay
+	// may carry a newer output cursor, but it cannot replace the exit code or
+	// timestamp that the durable record already exposed.
+	tampered := p
+	changedCode := 9
+	tampered.ExitCode = &changedCode
+	tampered.ExitedAt = ptrTime(exited.Add(time.Second))
+	if err := s.UpdateProcess(ctx, tampered); !errors.Is(err, store.ErrProcessConflict) {
+		t.Fatalf("tampered terminal update = %v; want ErrProcessConflict", err)
+	}
+	if reopen != nil {
+		s = reopen(t)
+	}
+	got, err := s.GetProcess(ctx, p.ID)
+	if err != nil || got.ExitCode == nil || *got.ExitCode != 0 || got.State != model.ProcessExited {
+		t.Fatalf("retained process = %+v, %v", got, err)
+	}
+	n, err := s.ReclaimProcesses(ctx, exited)
+	if err != nil || n != 1 {
+		t.Fatalf("reclaim = %d, %v", n, err)
+	}
+	got, err = s.GetProcess(ctx, p.ID)
+	if err != nil || got.State != model.ProcessReclaimed || got.PID != 0 {
+		t.Fatalf("reclaimed process = %+v, %v", got, err)
+	}
+	// Process retention is a durable state-core transition, not a Sandbox
+	// lifecycle transition. The lifecycle outbox intentionally remains the
+	// closed six-kind Sandbox stream, so reclaiming a Process must not append a
+	// synthetic event that would have no valid Sandbox state transition.
+	events, _, _, err := s.Events(ctx, 0, 10)
+	if err != nil {
+		t.Fatalf("events after process reclaim: %v", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("process reclaim appended %d lifecycle event(s): %+v; reclaim is state-only and must not widen the Sandbox outbox", len(events), events)
+	}
+	// A delayed stream frame must not resurrect a reclaimed handle. The
+	// retention boundary is enforced by the Store write predicate, not only by
+	// the reaper's scan, because forwarding and reconciliation can race.
+	late := got
+	late.State = model.ProcessRunning
+	late.PID = 99
+	late.ExitedAt = nil
+	late.ExitCode = nil
+	late.OutputCursor.Sequence++
+	if err := s.UpdateProcess(ctx, late); !errors.Is(err, store.ErrProcessConflict) {
+		t.Fatalf("late update after reclaim = %v; want ErrProcessConflict", err)
+	}
+	got, err = s.GetProcess(ctx, p.ID)
+	if err != nil || got.State != model.ProcessReclaimed || got.PID != 0 || got.ExitCode != nil {
+		t.Fatalf("reclaimed process changed after rejected late update = %+v, %v", got, err)
+	}
+
+}
+
+func ptrTime(t time.Time) *time.Time { return &t }
+
+func testOperationCore(t *testing.T, mk Factory) {
+	ctx := context.Background()
+	s, reopen := mk(t)
+	now := time.Now().UTC()
+	hash, _ := model.RequestHash(map[string]any{"size": 0})
+	op, err := model.BeginOperation("op_a", "volume.create", "key_a", hash, now, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateOperation(ctx, op); err != nil {
+		t.Fatalf("create operation: %v", err)
+	}
+	other := op
+	other.ID = "op_b"
+	if err := s.CreateOperation(ctx, other); !errors.Is(err, store.ErrOperationKeyConflict) {
+		t.Fatalf("key reuse = %v; want ErrOperationKeyConflict", err)
+	}
+	if err := op.Succeed(model.OperationResult{Kind: model.ObjectVolume, ID: "vol_a"}, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateOperation(ctx, op); err != nil {
+		t.Fatalf("commit operation: %v", err)
+	}
+	// Failure classes are part of the durable replay contract, not diagnostic
+	// text. In particular capacity must survive a backend round trip so an
+	// idempotent retry still reaches the 507 edge rather than being relabeled
+	// unavailable or internal after restart.
+	failHash, _ := model.RequestHash(map[string]any{"capacity": true})
+	failed, err := model.BeginOperation("op_capacity", "volume.create", "capacity-key", failHash, now, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := failed.Fail(model.ErrorCapacity, now.Add(2*time.Second)); err != nil {
+		t.Fatalf("record capacity failure: %v", err)
+	}
+	if err := s.CreateOperation(ctx, failed); err != nil {
+		t.Fatalf("create failed capacity operation: %v", err)
+	}
+	if reopen != nil {
+		s = reopen(t)
+	}
+	got, err := s.GetOperationByKey(ctx, "volume.create", "key_a")
+	if err != nil || got.Result == nil || got.Result.ID != "vol_a" || got.State != model.OperationSucceeded {
+		t.Fatalf("operation replay = %+v, %v", got, err)
+	}
+	failed, err = s.GetOperationByKey(ctx, "volume.create", "capacity-key")
+	if err != nil || failed.State != model.OperationFailed || failed.ErrorClass != model.ErrorCapacity {
+		t.Fatalf("failed operation replay = %+v, %v; want failed/capacity", failed, err)
+	}
+}
+
+func testOperationKeyRace(t *testing.T, mk Factory) {
+	ctx := context.Background()
+	s, _ := mk(t)
+	hash, _ := model.RequestHash(map[string]any{"template_id": "bare"})
+	start := make(chan struct{})
+	var wins atomic.Int32
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			op, _ := model.BeginOperation(model.OperationID(fmt.Sprintf("op_%d", i)), "sandbox.create", "same", hash, time.Now().UTC(), time.Minute)
+			err := s.CreateOperation(ctx, op)
+			if err == nil {
+				wins.Add(1)
+			} else if !errors.Is(err, store.ErrOperationKeyConflict) {
+				t.Errorf("contender %d = %v", i, err)
+			}
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	if wins.Load() != 1 {
+		t.Fatalf("operation key winners = %d, want 1", wins.Load())
+	}
+}
+
+func testOperationTakeoverRace(t *testing.T, mk Factory) {
+	ctx := context.Background()
+	s, _ := mk(t)
+	hash, _ := model.RequestHash(map[string]any{"request": "takeover"})
+	now := time.Now().UTC().Add(-time.Minute)
+	op, err := model.BeginOperation("op_takeover", "volume.create", "takeover-key", hash, now, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateOperation(ctx, op); err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	var wins atomic.Int32
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, err := s.TakeoverOperation(ctx, op.ID, 1, now.Add(2*time.Second), time.Minute)
+			if err == nil {
+				wins.Add(1)
+				return
+			}
+			if !errors.Is(err, store.ErrOperationOwnershipConflict) {
+				t.Errorf("takeover error = %v; want ownership conflict", err)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	if wins.Load() != 1 {
+		t.Fatalf("takeover winners = %d, want 1", wins.Load())
+	}
+	got, err := s.GetOperation(ctx, op.ID)
+	if err != nil || got.Attempt != 2 {
+		t.Fatalf("operation after takeover = %+v, %v", got, err)
+	}
+}
+
+func testOperationStaleUpdate(t *testing.T, mk Factory) {
+	ctx := context.Background()
+	s, _ := mk(t)
+	hash, _ := model.RequestHash(map[string]any{"request": "stale-update"})
+	op, err := model.BeginOperation("op_stale_update", "volume.create", "stale-key", hash, time.Now().UTC(), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateOperation(ctx, op); err != nil {
+		t.Fatal(err)
+	}
+	newOp, err := s.TakeoverOperation(ctx, op.ID, op.Attempt, op.LeaseUntil, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateOperation(ctx, op); !errors.Is(err, store.ErrOperationOwnershipConflict) {
+		t.Fatalf("stale update = %v; want ownership conflict", err)
+	}
+	if newOp.Attempt != op.Attempt+1 {
+		t.Fatalf("takeover attempt = %d", newOp.Attempt)
+	}
+}
+
+func testOperationTerminalImmutable(t *testing.T, mk Factory) {
+	ctx := context.Background()
+	s, _ := mk(t)
+	hash, _ := model.RequestHash(map[string]any{"request": "terminal"})
+	now := time.Now().UTC()
+	op, err := model.BeginOperation("op_terminal", "volume.create", "terminal-key", hash, now, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateOperation(ctx, op); err != nil {
+		t.Fatal(err)
+	}
+	if err := op.Succeed(model.OperationResult{Kind: model.ObjectVolume, ID: "vol_a"}, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateOperation(ctx, op); err != nil {
+		t.Fatal(err)
+	}
+	mutated := op
+	mutated.Result = &model.OperationResult{Kind: model.ObjectVolume, ID: "vol_b"}
+	mutated.UpdatedAt = now.Add(2 * time.Second)
+	if err := s.UpdateOperation(ctx, mutated); !errors.Is(err, store.ErrOperationOwnershipConflict) {
+		t.Fatalf("terminal result mutation = %v; want ownership conflict", err)
+	}
+	got, err := s.GetOperation(ctx, op.ID)
+	if err != nil || got.Result == nil || got.Result.ID != "vol_a" {
+		t.Fatalf("terminal result after rejected mutation = %+v, %v", got, err)
+	}
 }
 
 // testSequenceTotalOrder: every appended event gets a unique, strictly
@@ -556,7 +902,7 @@ func testConcurrentCAS(t *testing.T, mk Factory) {
 func seedTmpl(t *testing.T, s store.Store, id string) {
 	t.Helper()
 	if err := s.CreateTemplate(context.Background(), model.Template{
-		ID: model.TemplateID(id), Builtin: true, CreatedAt: time.Now(),
+		ID: model.TemplateID(id), Builtin: true, Manifest: model.DefaultTemplateManifest(), CreatedAt: time.Now(),
 	}); err != nil {
 		t.Fatalf("seed template %q: %v", id, err)
 	}
@@ -1389,8 +1735,12 @@ func testDurability(t *testing.T, mk Factory) {
 func testTemplateCRUD(t *testing.T, mk Factory) {
 	ctx := context.Background()
 	s, _ := mk(t)
+	if err := s.CreateTemplate(ctx, model.Template{ID: "tmpl_zero", Builtin: true, CreatedAt: time.Now()}); model.ErrorClassOf(err) != model.ErrorInvalidArgument {
+		t.Fatalf("zero manifest template = %v; want invalid_argument (durable rows must carry an explicit validated manifest)", err)
+	}
 	tm := model.Template{
 		ID: "tmpl_base", Builtin: true,
+		Manifest:  model.TemplateManifest{SchemaVersion: model.CurrentManifestSchema, Platform: "linux/amd64", Capabilities: []string{"z", "a"}}.Normalize(),
 		CreatedAt: time.Now(),
 	}
 	if err := s.CreateTemplate(ctx, tm); err != nil {
@@ -1402,6 +1752,9 @@ func testTemplateCRUD(t *testing.T, mk Factory) {
 	}
 	if got.ID != "tmpl_base" || got.Parent != "" || !got.Builtin {
 		t.Fatalf("template round-trip mismatch: %+v", got)
+	}
+	if len(got.Manifest.Capabilities) != 2 || got.Manifest.Capabilities[0] != "a" || got.Manifest.SchemaVersion != model.CurrentManifestSchema {
+		t.Fatalf("template manifest round-trip mismatch: %+v", got.Manifest)
 	}
 	// duplicate → ErrConflict.
 	if err := s.CreateTemplate(ctx, tm); err != store.ErrConflict {
@@ -1461,15 +1814,15 @@ func testTemplateLineage(t *testing.T, mk Factory) {
 	ctx := context.Background()
 	s, _ := mk(t)
 	now := time.Now()
-	if err := s.CreateTemplate(ctx, model.Template{ID: "t1", Builtin: true, CreatedAt: now}); err != nil {
+	if err := s.CreateTemplate(ctx, model.Template{ID: "t1", Builtin: true, Manifest: model.DefaultTemplateManifest(), CreatedAt: now}); err != nil {
 		t.Fatalf("create t1: %v", err)
 	}
 	// child with a missing parent → ErrTemplateNotFound (reference-side).
-	if err := s.CreateTemplate(ctx, model.Template{ID: "t2", Parent: "ghost", CreatedAt: now}); err != store.ErrTemplateNotFound {
+	if err := s.CreateTemplate(ctx, model.Template{ID: "t2", Parent: "ghost", Manifest: model.DefaultTemplateManifest(), CreatedAt: now}); err != store.ErrTemplateNotFound {
 		t.Fatalf("child of missing parent = %v; want ErrTemplateNotFound", err)
 	}
 	// valid child.
-	if err := s.CreateTemplate(ctx, model.Template{ID: "t2", Parent: "t1", CreatedAt: now}); err != nil {
+	if err := s.CreateTemplate(ctx, model.Template{ID: "t2", Parent: "t1", Manifest: model.DefaultTemplateManifest(), CreatedAt: now}); err != nil {
 		t.Fatalf("create t2(parent=t1): %v", err)
 	}
 	// parent referenced by child → ErrInUse.
@@ -1507,8 +1860,8 @@ func testTemplateDurability(t *testing.T, mk Factory) {
 	if reopen == nil {
 		t.Skip("backend is not durable across reopen")
 	}
-	_ = s.CreateTemplate(ctx, model.Template{ID: "t1", Builtin: true, CreatedAt: time.Now()})
-	_ = s.CreateTemplate(ctx, model.Template{ID: "t2", Parent: "t1", CreatedAt: time.Now()})
+	_ = s.CreateTemplate(ctx, model.Template{ID: "t1", Builtin: true, Manifest: model.DefaultTemplateManifest(), CreatedAt: time.Now()})
+	_ = s.CreateTemplate(ctx, model.Template{ID: "t2", Parent: "t1", Manifest: model.DefaultTemplateManifest(), CreatedAt: time.Now()})
 	s2 := reopen(t)
 	got, err := s2.GetTemplate(ctx, "t2")
 	if err != nil {
@@ -1682,7 +2035,7 @@ func testReferenceReclaimRace(t *testing.T, mk Factory) {
 	for i := 0; i < trials; i++ {
 		tmplID := model.TemplateID(fmt.Sprintf("race_tmpl_%d", i))
 		childID := model.TemplateID(fmt.Sprintf("race_child_%d", i))
-		if err := s.CreateTemplate(ctx, model.Template{ID: tmplID, Builtin: true, CreatedAt: time.Now()}); err != nil {
+		if err := s.CreateTemplate(ctx, model.Template{ID: tmplID, Builtin: true, Manifest: model.DefaultTemplateManifest(), CreatedAt: time.Now()}); err != nil {
 			t.Fatalf("trial %d: seed template: %v", i, err)
 		}
 
@@ -1707,7 +2060,7 @@ func testReferenceReclaimRace(t *testing.T, mk Factory) {
 		launch(func() { delErr = s.DeleteTemplate(ctx, tmplID) })
 		// a child Template referencing tmpl as parent (lineage reference-side)
 		launch(func() {
-			childErr = s.CreateTemplate(ctx, model.Template{ID: childID, Parent: tmplID, CreatedAt: time.Now()})
+			childErr = s.CreateTemplate(ctx, model.Template{ID: childID, Parent: tmplID, Manifest: model.DefaultTemplateManifest(), CreatedAt: time.Now()})
 		})
 		// sandbox referrers
 		for j := 0; j < refs; j++ {
@@ -2077,7 +2430,7 @@ func seedSbx(t *testing.T, s store.Store, id string) {
 	// Tolerates being called for several sandboxes in one subtest, unlike seedTmpl
 	// (which fatals on a duplicate — correct for its own callers, which seed once).
 	if err := s.CreateTemplate(context.Background(), model.Template{
-		ID: "bare", Builtin: true, CreatedAt: time.Now(),
+		ID: "bare", Builtin: true, Manifest: model.DefaultTemplateManifest(), CreatedAt: time.Now(),
 	}); err != nil && err != store.ErrConflict {
 		t.Fatalf("seed template: %v", err)
 	}
@@ -2327,13 +2680,6 @@ func testMountBindingInvalid(t *testing.T, mk Factory) {
 		},
 		why: "the rule stays single instead of forking by access mode",
 	}, {
-		name: "one volume nested inside another",
-		binding: []model.Mount{
-			mount("sbx_a", "vol_1", "/data", model.SharedReadWrite),
-			mount("sbx_a", "vol_2", "/data/sub", model.SharedReadWrite),
-		},
-		why: "UNIQUE(sandbox,path) CANNOT catch this — /data and /data/sub are different strings, so nesting needs a prefix scan",
-	}, {
 		name: "un-normalized path",
 		binding: []model.Mount{
 			mount("sbx_a", "vol_1", "/data/", model.SharedReadWrite),
@@ -2401,6 +2747,36 @@ func testMountBindingInvalid(t *testing.T, mk Factory) {
 		if rows, _ := s.ListMounts(ctx, "sbx_a"); len(rows) != 0 {
 			t.Fatalf("a mount at the guest root (from %q) was INSERTED: %+v", spelling, rows)
 		}
+	}
+}
+
+func testNestedMountBinding(t *testing.T, mk Factory) {
+	ctx := context.Background()
+	s, _ := mk(t)
+	seedSbx(t, s, "sbx_nested")
+	seedVol(t, s, "vol_parent")
+	seedVol(t, s, "vol_child")
+	next := []model.Mount{
+		mount("sbx_nested", "vol_parent", "/data", model.SharedReadWrite),
+		mount("sbx_nested", "vol_child", "/data/sub", model.SharedReadOnly),
+	}
+	if err := s.CreateMounts(ctx, next); err != nil {
+		t.Fatalf("nested binding refused: %v", err)
+	}
+	rows, err := s.ListMounts(ctx, "sbx_nested")
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("nested rows = %+v, %v; want parent and child", rows, err)
+	}
+	// A writable child inside a read-only parent is unsafe and remains a
+	// deterministic 400.
+	if err := s.DeleteMounts(ctx, "sbx_nested"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateMounts(ctx, []model.Mount{
+		mount("sbx_nested", "vol_parent", "/data", model.SharedReadOnly),
+		mount("sbx_nested", "vol_child", "/data/sub", model.SharedReadWrite),
+	}); !errors.Is(err, store.ErrMountBindingInvalid) {
+		t.Fatalf("writable child under read-only parent = %v; want ErrMountBindingInvalid", err)
 	}
 }
 

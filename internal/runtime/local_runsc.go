@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	goruntime "runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -196,6 +197,23 @@ func NewLocalRunsc(runscRoot, stateDir string) (*LocalRunsc, error) {
 
 func (p *LocalRunsc) Name() string { return "local_runsc" }
 
+func (p *LocalRunsc) CheckManifest(_ context.Context, platform string, capabilities []string) error {
+	if platform != "" && platform != goruntime.GOOS+"/"+goruntime.GOARCH {
+		return fmt.Errorf("runtime platform %q is incompatible with %s/%s", platform, goruntime.GOOS, goruntime.GOARCH)
+	}
+	// The shipped runtime can satisfy the engine's portable process, fs, and
+	// network primitives. Unknown capability declarations fail closed rather
+	// than being silently ignored.
+	for _, capability := range capabilities {
+		switch capability {
+		case "", "process", "fs", "network", "volume":
+		default:
+			return fmt.Errorf("runtime capability %q is unavailable", capability)
+		}
+	}
+	return nil
+}
+
 // allocSubnet hands out a fresh /30 (host .1, guest .2) each call — resume gets
 // a NEW IP (the ID-reference model / health and reclamation IP-as-epoch). It skips IPs already held (inUse), so a
 // freshly-restarted process cannot hand a new sandbox an IP a survivor adopted
@@ -255,6 +273,9 @@ func (p *LocalRunsc) Launch(ctx context.Context, spec LaunchSpec) (_ *Placement,
 	}
 	if spec.Sandbox == "" {
 		return nil, fmt.Errorf("runtime: LaunchSpec.Sandbox empty (needed for placement naming, atomic transition rollback)")
+	}
+	if spec.ProcessRetention < 0 {
+		return nil, fmt.Errorf("runtime: process retention must not be negative")
 	}
 	hostIP, guestIP := p.allocSubnet()
 	h := namesFor(spec.Sandbox)
@@ -322,6 +343,9 @@ func (p *LocalRunsc) Launch(ctx context.Context, spec LaunchSpec) (_ *Placement,
 		cgPath = cgroupRelPath(h.cid)
 	}
 	oci := buildOCISpec(spec.Rootfs.MergedPath, netnsPath, cgPath, spec.Limits, memOverheadBytes, spec.Mounts)
+	if oci.Process.Env, err = processEnvironment(spec.ProcessRetention); err != nil {
+		return nil, err
+	}
 	b, _ := json.MarshalIndent(oci, "", "  ")
 	if err = os.WriteFile(filepath.Join(h.bundleDir, "config.json"), b, 0o644); err != nil {
 		return nil, fmt.Errorf("runtime: write config.json: %w", err)

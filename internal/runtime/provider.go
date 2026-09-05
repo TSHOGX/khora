@@ -10,6 +10,7 @@ package runtime
 import (
 	"context"
 	"net/netip"
+	"time"
 
 	"github.com/TSHOGX/khora/internal/ruleset"
 )
@@ -147,13 +148,20 @@ func (c DeathCause) String() string {
 
 // LaunchSpec is the provider input — the contract's left-hand side:
 //
-//	(rootfs source, reachability requirement, resource ceilings) → (placement handle,
-//	 transport endpoint, stop/start)
+//	(rootfs source, reachability requirement, resource ceilings, process replay policy)
+//	→ (placement handle, transport endpoint, stop/start)
 type LaunchSpec struct {
 	Sandbox  string // opaque sandbox id, for naming/logging only
 	Rootfs   RootfsSource
 	Steering SteeringSpec
 	Limits   ResourceLimits
+	// ProcessRetention is the bounded addressability window for exited logical
+	// process handles. The provider passes this portable policy to the guest
+	// PID-1 supervisor so its replay registry and the control-plane Store share
+	// one retention boundary. Zero leaves the guest's documented default in
+	// effect for direct provider callers; lifecycle always supplies a positive
+	// value after applying its default.
+	ProcessRetention time.Duration
 	// Mounts are the Volume subsystem Volume mount points to bind into the guest, PEER to Rootfs rather
 	// than nested inside it: the rootfs is ONE assembled composition, these are N
 	// self-sufficient host mount points from a different subsystem (the subsystem boundaries preamble). Each is an
@@ -191,6 +199,10 @@ type MountSource struct {
 // every resume, old one invalidated (the ID-reference model). The engine addresses the sandbox by
 // SandboxID, never by anything in here.
 type Placement struct {
+	// Epoch is the durable realization number supplied by the lifecycle
+	// mediator. Providers treat it as opaque correlation data; stale requests
+	// are rejected by the control plane before reaching this seam.
+	Epoch uint64
 	// Address is the guest-visible address assigned to this placement. It is a
 	// portable placement fact, independent of the transport endpoint and rebound
 	// on every resume.
@@ -321,4 +333,11 @@ type Provider interface {
 	// A nil uid means the deployment supplied none: install nothing. A `via[]` declaration is
 	// refused at the write point instead, an unenforceable invariant not being half-honored.
 	InstallSecondHop(ctx context.Context, rs ruleset.RuleSet, uid *int) error
+}
+
+// ManifestChecker is an optional provider capability check. The lifecycle
+// mediator supplies only portable platform/capability declarations; provider
+// details stay behind this seam.
+type ManifestChecker interface {
+	CheckManifest(ctx context.Context, platform string, capabilities []string) error
 }

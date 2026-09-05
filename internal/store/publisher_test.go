@@ -31,7 +31,7 @@ func ev(id, evid string, kind model.EventKind, state model.Lifecycle) *store.Eve
 // the sandbox insert satisfies the health and reclamation template FK.
 func seedPubTmpl(t *testing.T, st store.Store) {
 	t.Helper()
-	if err := st.CreateTemplate(context.Background(), model.Template{ID: "bare", Builtin: true, CreatedAt: time.Now()}); err != nil {
+	if err := st.CreateTemplate(context.Background(), model.Template{ID: "bare", Builtin: true, Manifest: model.DefaultTemplateManifest(), CreatedAt: time.Now()}); err != nil {
 		t.Fatalf("seed template: %v", err)
 	}
 }
@@ -128,7 +128,7 @@ func TestPublisherAtLeastOnceDedupOnRestart(t *testing.T) {
 	}
 
 	// two committed transitions with durable outbox rows.
-	if err := st.CreateTemplate(ctx, model.Template{ID: "bare", Builtin: true, CreatedAt: time.Now()}); err != nil {
+	if err := st.CreateTemplate(ctx, model.Template{ID: "bare", Builtin: true, Manifest: model.DefaultTemplateManifest(), CreatedAt: time.Now()}); err != nil {
 		t.Fatalf("seed template: %v", err)
 	}
 	_ = st.CreateSandbox(ctx, model.Sandbox{ID: "a", Template: "bare", State: model.Creating}, nil)

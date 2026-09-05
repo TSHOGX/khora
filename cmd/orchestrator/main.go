@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/TSHOGX/khora/internal/model"
 	"github.com/TSHOGX/khora/internal/orchestrator"
 )
 
@@ -53,12 +54,14 @@ func main() {
 		StateDir:            flags.stateDir,
 		StorePath:           flags.storePath,
 		VolumesDir:          flags.volumesDir,
+		VolumeProvider:      orchestrator.VolumeProvider(flags.volumeProvider),
 		HealthTimeout:       flags.healthTimeout,
 		DefaultIdleTimeout:  flags.idleTimeout,
 		DefaultRetention:    flags.retention,
 		EventRetention:      flags.eventRetention,
 		SweepInterval:       flags.reaperInterval,
 		TransportDownBudget: flags.transportDownBudget,
+		ProcessRetention:    model.ProcessRetentionPolicy{ExitedFor: flags.processRetention},
 		NodeDiskByte:        flags.nodeDiskByte,
 		NodeMemoryByte:      flags.nodeMemoryByte,
 		SecondHopUID:        secondHopUID,

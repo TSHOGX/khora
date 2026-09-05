@@ -10,6 +10,8 @@ The orchestrator reads configuration from command-line flags. This page is gener
 
 Check it for staleness with `./scripts/check-generated.sh`.
 
+`--process-retention` is a launch-time policy: the selected value is applied to the control-plane Store and passed to the guest PID-1 supervisor whenever a new Placement is launched. Keep it stable while existing Placements are adopted; changing it takes effect for a Sandbox after a new Placement is created by pause/resume (the Store uses the current configured value).
+
 | Flag | Default | Description |
 | --- | --- | --- |
 | `--addr` | `127.0.0.1:8080` | control-plane listen address; must be loopback unless -insecure-listen |
@@ -19,6 +21,7 @@ Check it for staleness with `./scripts/check-generated.sh`.
 | `--insecure-listen` | `false` | permit a non-loopback -addr even though the API has no authentication or TLS |
 | `--node-disk-byte` | `0` | node disk admission budget in bytes; 0 is unmetered and a positive value requires sandbox disk caps |
 | `--node-memory-byte` | `0` | node memory admission budget in bytes; 0 is unmetered and a positive value requires sandbox memory caps |
+| `--process-retention` | `24h0m0s` | retention for exited logical process handles (applied to Store and guest PID 1) |
 | `--publish-ip` | `""` | host address for ingress.publish bindings; empty uses 127.0.0.1 |
 | `--reaper-interval` | `30s` | reaper sweep cadence |
 | `--retention` | `24h0m0s` | default paused retention TTL before irreversible record and Overlay eviction; 0 disables eviction |
@@ -30,4 +33,5 @@ Check it for staleness with `./scripts/check-generated.sh`.
 | `--transport-down-budget` | `2m0s` | transport-down restart budget before a cold resume |
 | `--version` | `false` | print the version and exit |
 | `--via-uid` | `-1` | uid of the local second-hop process used by egress.via; unset refuses via declarations and the uid must differ from the orchestrator uid |
+| `--volume-provider` | `local_btrfs` | Volume provider for new volumes (local_btrfs or plain_dir) |
 | `--volumes-dir` | `""` | Volume storage root; empty uses state/volumes beside the overlay root |

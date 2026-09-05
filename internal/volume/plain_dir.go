@@ -9,10 +9,10 @@ import (
 	"github.com/TSHOGX/khora/internal/allocbytes"
 )
 
-// PlainDir is the seam's SECOND ARM, and it is TEST-ONLY: nothing in the
-// production assembly registers it (internal/orchestrator builds LocalBtrfs). It
-// is here rather than in a _test.go file because it must live beside the arm it
-// falsifies and share its accessor implementation, and because the contract suite
+// PlainDir is the seam's SECOND ARM. It is an uncapped directory provider,
+// suitable for development and contract tests; production deployments that
+// need capacity enforcement should select LocalBtrfs. It lives beside the arm
+// it falsifies and shares its accessor implementation, while the contract suite
 // that drives it lives in a sibling package.
 //
 // IT IS NOT FILLER — IT IS THE ONLY FALSIFICATION INSTRUMENT THIS SEAM HAS
@@ -30,7 +30,7 @@ type PlainDir struct {
 	Dir string
 }
 
-// NewPlainDir constructs the test-only arm over dir.
+// NewPlainDir constructs the uncapped directory arm over dir.
 func NewPlainDir(dir string) (*PlainDir, error) {
 	if dir == "" {
 		return nil, fmt.Errorf("volume: PlainDir.Dir is required")
@@ -42,6 +42,21 @@ func NewPlainDir(dir string) (*PlainDir, error) {
 }
 
 func (p *PlainDir) Name() string { return "plain_dir" }
+
+// Validate is the registry startup readiness check for the directory arm.
+func (p *PlainDir) Validate(context.Context) error {
+	if p == nil || p.Dir == "" {
+		return fmt.Errorf("Dir is required")
+	}
+	fi, err := os.Stat(p.Dir)
+	if err != nil {
+		return fmt.Errorf("volume root: %w", err)
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("volume root is not a directory")
+	}
+	return nil
+}
 
 // Capabilities: none of the three. A plain directory can neither snapshot nor
 // enforce a byte ceiling, and saying so honestly is this arm's job — the Volume subsystem requires

@@ -31,7 +31,10 @@ immutable Template layer. A running source is quiesced through the normal pause 
 and remains paused. Admission and lower-depth refusals occur before that state change.
 Mounted Volume paths, sandboxd runtime files, and interrupted upload temporary files
 are excluded. Bytes are materialized before the Template row is inserted, because
-Template existence is its ready state.
+Template existence is its ready state. When a caller supplies a content digest, the
+provider verifies it against the newly materialized layer; a mismatch is necessarily
+detected after quiesce/copy, so the source remains paused and the unclaimed layer is
+left for the orphan sweep. No Template row is published for that refusal.
 
 The provider forecasts uncapped growth before copying so lifecycle admission can
 reserve disk without holding a node-wide lock across the copy. Promotion cleanup and

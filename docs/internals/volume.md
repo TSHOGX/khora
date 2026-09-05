@@ -8,7 +8,9 @@ runtime assembly; it is not a path returned to API callers. Structural tests sca
 method parameters, results, and fields for leaked substrate vocabulary in
 [internal/volume/seam_test.go](../../internal/volume/seam_test.go).
 
-The plain-directory backend is a test-only, capability-negative implementation.
+The plain-directory backend is the capability-negative implementation used for
+development and contract tests. It can also be selected explicitly at assembly,
+but it never enforces a positive capacity cap.
 The local btrfs backend is the standard implementation and supports caps and
 copy-on-write lineage. Both run the shared contract in
 [internal/volume/volumetest/contract.go](../../internal/volume/volumetest/contract.go).
@@ -31,10 +33,16 @@ the live derivation case is in
 
 ## Direct access
 
-Import/export open a root-confined accessor without starting a Sandbox. Paths are
-relative to the Volume root; traversal is resolved inside that root. The interface in
-[internal/volume/root.go](../../internal/volume/root.go) exposes file operations,
-not an unrestricted host path.
+Import/export and the stat/list/read/write/mkdir/move/remove routes open a
+root-confined accessor without starting a Sandbox. Paths are relative to the
+Volume root; traversal is resolved inside that root. `Lstat` preserves explicit
+symlink metadata. The interface in [internal/volume/root.go](../../internal/volume/root.go)
+exposes file operations, not an unrestricted host path.
+
+Nested Mount destinations are compiled parent-before-child. A writable child
+inside a read-only parent is rejected because runtimes disagree on whether the
+child can override the parent's bind flags; read-only enforcement otherwise
+travels with the child Mount entry.
 
 ## Capacity and lineage
 

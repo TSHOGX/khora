@@ -53,6 +53,24 @@ func NewLocalBtrfs(volumesDir string) (*LocalBtrfs, error) {
 
 func (b *LocalBtrfs) Name() string { return "local_btrfs" }
 
+// Validate is the startup readiness check used by the provider registry.  The
+// directory itself is the only invariant required for uncapped operation; a
+// quota-capable substrate is checked at the individual capability write point
+// so an uncapped deployment remains usable on a non-btrfs filesystem.
+func (b *LocalBtrfs) Validate(context.Context) error {
+	if b == nil || b.VolumesDir == "" {
+		return fmt.Errorf("VolumesDir is required")
+	}
+	fi, err := os.Stat(b.VolumesDir)
+	if err != nil {
+		return fmt.Errorf("volume root: %w", err)
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("volume root is not a directory")
+	}
+	return nil
+}
+
 // Capabilities: this arm supports all three. Snapshot and Clone are one substrate
 // path (they differ in the semantic label, not the mechanism — snapshot lineage),
 // and Quota is what lets resource admission refuse a cap it cannot enforce instead of running

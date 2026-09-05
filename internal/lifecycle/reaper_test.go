@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -504,5 +505,38 @@ func TestReaperTickRunsEveryMaintenanceRound(t *testing.T) {
 		if !strings.Contains(strings.TrimPrefix(got, before), call) {
 			t.Errorf("one tick never called %s (%s) — a periodic maintenance round is missing, and every round here is best-effort skip-and-log, so its absence raises NOTHING at runtime. Calls during the tick: %s", call, why, strings.TrimPrefix(got, before))
 		}
+	}
+}
+
+func TestReaperTelemetrySchedulingIsBoundedAndNonBlocking(t *testing.T) {
+	// The sampler performs provider and Store I/O on its own goroutine. A full
+	// one-slot handoff must make the maintenance tick drop the sample rather
+	// than wait behind a wedged backend.
+	m := New(Deps{Store: store.NewMemory(), Logf: func(string, ...any) {}})
+	r := &Reaper{m: m, telemetryQueue: make(chan context.Context, 1)}
+	r.telemetryQueue <- context.Background()
+	done := make(chan struct{})
+	go func() {
+		r.scheduleTelemetry(context.Background())
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("telemetry scheduling blocked while sampler queue was full")
+	}
+}
+
+func TestReaperRejectsPartialTelemetryPolicyFailClosed(t *testing.T) {
+	logs := make([]string, 0)
+	m := New(Deps{
+		Store:           store.NewMemory(),
+		TelemetryPolicy: model.TelemetryPolicy{Interval: time.Second},
+		Logf:            func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) },
+	})
+	r := NewReaper(m, time.Hour, time.Hour)
+	r.sampleTelemetry(context.Background())
+	if len(logs) == 0 || !strings.Contains(logs[len(logs)-1], "telemetry policy") {
+		t.Fatalf("partial telemetry policy was not rejected/logged: %v", logs)
 	}
 }

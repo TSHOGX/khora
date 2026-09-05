@@ -3,8 +3,10 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -22,7 +24,7 @@ func bindingFixture(t *testing.T) (*httptest.Server, *store.Memory) {
 	t.Helper()
 	mem := store.NewMemory()
 	if err := mem.CreateTemplate(context.Background(), model.Template{
-		ID: "bare", Builtin: true, CreatedAt: time.Now(),
+		ID: "bare", Builtin: true, Manifest: model.DefaultTemplateManifest(), CreatedAt: time.Now(),
 	}); err != nil {
 		t.Fatalf("seed template: %v", err)
 	}
@@ -80,6 +82,37 @@ func TestCreateWithVolumeBinding(t *testing.T) {
 	}
 }
 
+func TestSandboxCreateIdempotencyHeaderAtHTTPBoundary(t *testing.T) {
+	srv, mem := bindingFixture(t)
+	post := func(body string) (int, string) {
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/sandboxes", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Idempotency-Key", "sandbox-http-key")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out createResp
+		if resp.StatusCode/100 == 2 {
+			_ = json.NewDecoder(resp.Body).Decode(&out)
+		}
+		resp.Body.Close()
+		return resp.StatusCode, out.SandboxID
+	}
+	firstCode, first := post(`{"template_id":"bare"}`)
+	secondCode, second := post(`{"template_id":"bare","network":{"egress":{"default":"deny"}}}`)
+	if firstCode != http.StatusCreated || secondCode != http.StatusCreated || first != second {
+		t.Fatalf("idempotent HTTP create = %d/%s and %d/%s", firstCode, first, secondCode, second)
+	}
+	if recs, _ := mem.ListSandboxes(context.Background()); len(recs) != 1 {
+		t.Fatalf("HTTP retry created %d sandboxes", len(recs))
+	}
+	code, _ := post(`{"template_id":"bare","memory_byte":1}`)
+	if code != http.StatusConflict {
+		t.Fatalf("changed HTTP request status = %d, want 409", code)
+	}
+}
+
 // TestCreateBindingValidationIs400: a malformed or self-contradictory binding is 400,
 // and the refusal leaves no sandbox behind.
 func TestCreateBindingValidationIs400(t *testing.T) {
@@ -93,7 +126,6 @@ func TestCreateBindingValidationIs400(t *testing.T) {
 		{"missing path", `{"template_id":"bare","volumes":[{"volume_id":"` + vid + `","access":"shared-rw"}]}`},
 		{"missing volume_id", `{"template_id":"bare","volumes":[{"path":"/data","access":"shared-rw"}]}`},
 		{"duplicate destination", `{"template_id":"bare","volumes":[{"volume_id":"` + vid + `","path":"/d","access":"shared-rw"},{"volume_id":"` + vid2 + `","path":"/d","access":"shared-rw"}]}`},
-		{"nested destinations", `{"template_id":"bare","volumes":[{"volume_id":"` + vid + `","path":"/d","access":"shared-rw"},{"volume_id":"` + vid2 + `","path":"/d/sub","access":"shared-rw"}]}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			resp := doBody(t, http.MethodPost, srv.URL+"/v1/sandboxes", tc.body)
@@ -107,6 +139,17 @@ func TestCreateBindingValidationIs400(t *testing.T) {
 	if len(recs) != 0 {
 		t.Errorf("rejected bindings left %d sandbox record(s) behind", len(recs))
 	}
+
+	// Nested destinations are now a supported mount tree. The compiler orders
+	// the parent before the child and preserves both bindings.
+	nested := `{"template_id":"bare","volumes":[{"volume_id":"` + vid + `","path":"/d","access":"shared-rw"},{"volume_id":"` + vid2 + `","path":"/d/sub","access":"shared-rw"}]}`
+	resp := doBody(t, http.MethodPost, srv.URL+"/v1/sandboxes", nested)
+	if resp.StatusCode != http.StatusCreated {
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("nested binding = %d: %s; want supported mount tree", resp.StatusCode, b)
+	}
+	resp.Body.Close()
 }
 
 // TestAttachContendedLeaseIs409: attaching a volume already held exclusively is 409 —

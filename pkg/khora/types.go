@@ -22,19 +22,22 @@ package khora
 //   - A duration crosses the wire as a Go duration STRING ("30m", "24h"), so the unit
 //     is explicit. Use Duration() to build one.
 
-// SandboxState is one of the lifecycle state machine's five spellings. A string, not an enum: the engine is
+// SandboxState is one of the lifecycle state machine's four spellings. A string, not an enum: the engine is
 // authoritative for the set, and a Go constant that fell behind it would be worse than
 // no constant. Compare against the exported values below.
 type SandboxState = string
 
+// IdempotencyKey is supplied on create requests. The engine persists it with
+// a semantic request hash so retries converge across orchestrator restarts.
+type IdempotencyKey string
+
 // The lifecycle state machine states. Present as constants because a caller branching on state is the
 // common case and a typo'd literal is silent.
 const (
-	StateCreating SandboxState = "creating"
-	StateRunning  SandboxState = "running"
-	StatePausing  SandboxState = "pausing"
-	StatePaused   SandboxState = "paused"
-	StateDead     SandboxState = "dead"
+	StateCreating  SandboxState = "creating"
+	StateRunning   SandboxState = "running"
+	StatePaused    SandboxState = "paused"
+	StateDestroyed SandboxState = "destroyed"
 )
 
 // EventKind is one of the lifecycle state machine's SIX kinds. The set is CLOSED (the lifecycle state machine, and a SQLite CHECK
@@ -43,12 +46,12 @@ const (
 type EventKind = string
 
 const (
-	KindCreated    EventKind = "created"
-	KindStarted    EventKind = "started"
-	KindAutoPaused EventKind = "auto-paused"
-	KindResumed    EventKind = "resumed"
-	KindDied       EventKind = "died"
-	KindDestroyed  EventKind = "destroyed"
+	KindCreated     EventKind = "created"
+	KindPaused      EventKind = "paused"
+	KindAutoPaused  EventKind = "auto-paused"
+	KindCrashPaused EventKind = "crash-paused"
+	KindResumed     EventKind = "resumed"
+	KindDestroyed   EventKind = "destroyed"
 )
 
 // CreateRequest is POST /v1/sandboxes.
@@ -84,8 +87,10 @@ type VolumeBinding struct {
 // that finds several `paused` in a list need not fan out one GET per ID to learn which
 // are resumable.
 type Sandbox struct {
-	SandboxID string       `json:"sandbox_id"`
-	State     SandboxState `json:"state"`
+	SandboxID      string       `json:"sandbox_id"`
+	State          SandboxState `json:"state"`
+	PlacementEpoch uint64       `json:"placement_epoch,omitempty"`
+	PlacementState string       `json:"placement_state,omitempty"`
 	// DeathCause is why the isolation unit was last found dead. Absent = never observed
 	// dead, which is why it is "" rather than a "healthy" spelling.
 	DeathCause string `json:"death_cause,omitempty"`
@@ -131,9 +136,26 @@ type ActivityResult struct {
 // Template is one entry of GET /v1/templates.
 type Template struct {
 	TemplateID string `json:"template_id"`
-	// Parent is the sandbox this Template was promoted from, "" for a builtin.
-	Parent  string `json:"parent"`
-	Builtin bool   `json:"builtin"`
+	// Parent is the immediate parent Template in the immutable lineage, "" for a builtin.
+	Parent   string           `json:"parent"`
+	Builtin  bool             `json:"builtin"`
+	Manifest TemplateManifest `json:"manifest"`
+}
+
+// TemplateManifest is the immutable declaration attached to a Template.
+type TemplateManifest struct {
+	SchemaVersion   uint32   `json:"schema_version"`
+	DigestAlgorithm string   `json:"digest_algorithm,omitempty"`
+	ContentDigest   string   `json:"content_digest,omitempty"`
+	Platform        string   `json:"platform"`
+	Capabilities    []string `json:"capabilities"`
+	Provenance      string   `json:"provenance,omitempty"`
+	SBOMReference   string   `json:"sbom_reference,omitempty"`
+}
+
+type PromoteRequest struct {
+	FromSandboxID string            `json:"from_sandbox_id"`
+	Manifest      *TemplateManifest `json:"manifest,omitempty"`
 }
 
 // Event is one the transactional outbox entry.
@@ -149,8 +171,9 @@ type Event struct {
 	// PlacementAddress is the guest-visible address established by a created or
 	// resumed event. It is absent on transitions that do not establish a placement.
 	PlacementAddress string `json:"placement_address,omitempty"`
-	// Cause is present on `died` and on a `destroyed` that followed a death — the
-	// reason the isolation unit was found dead. Absent otherwise.
+	PlacementEpoch   uint64 `json:"placement_epoch,omitempty"`
+	// Cause is present only on `destroyed` events, distinguishing an explicit
+	// destroy from retention expiry. Crash causes remain on the Sandbox record.
 	Cause      string `json:"cause,omitempty"`
 	OccurredAt string `json:"occurred_at"`
 }
@@ -190,4 +213,94 @@ type VolumeWriteResult struct {
 	VolumeID     string `json:"volume_id"`
 	Path         string `json:"path"`
 	BytesWritten int64  `json:"bytes_written"`
+}
+
+// VolumeFileInfo is root-confined metadata returned by Volume content calls.
+type VolumeFileInfo struct {
+	Name          string `json:"name"`
+	Size          int64  `json:"size"`
+	Mode          uint32 `json:"mode"`
+	IsDir         bool   `json:"is_dir"`
+	Type          string `json:"type"`
+	SymlinkTarget string `json:"symlink_target,omitempty"`
+	ModTime       string `json:"mod_time"`
+}
+
+type Measurement struct {
+	Available bool  `json:"available"`
+	Value     int64 `json:"value"`
+}
+
+type ResourceSnapshot struct {
+	CPU    Measurement `json:"cpu"`
+	Memory Measurement `json:"memory"`
+	Disk   Measurement `json:"disk"`
+	State  string      `json:"state"`
+	At     string      `json:"at"`
+}
+
+type EventEnvelope struct {
+	ID         string `json:"id"`
+	Stream     string `json:"stream"`
+	ObjectKind string `json:"object_kind"`
+	ObjectID   string `json:"object_id"`
+	Epoch      uint64 `json:"epoch,omitempty"`
+	Sequence   uint64 `json:"sequence"`
+	OccurredAt string `json:"occurred_at"`
+}
+
+type TelemetrySample struct {
+	Envelope       EventEnvelope    `json:"envelope"`
+	SandboxID      string           `json:"sandbox_id"`
+	PlacementEpoch uint64           `json:"placement_epoch,omitempty"`
+	ProcessID      string           `json:"process_id,omitempty"`
+	Snapshot       ResourceSnapshot `json:"snapshot"`
+}
+
+type TelemetryPage struct {
+	Samples  []TelemetrySample `json:"samples"`
+	Earliest uint64            `json:"earliest"`
+	Latest   uint64            `json:"latest"`
+}
+
+type SandboxSnapshot struct {
+	SandboxID      string           `json:"sandbox_id"`
+	State          string           `json:"state"`
+	Resources      ResourceSnapshot `json:"resources"`
+	PlacementEpoch uint64           `json:"placement_epoch,omitempty"`
+	At             string           `json:"at"`
+}
+type PlacementSnapshot struct {
+	SandboxID string           `json:"sandbox_id"`
+	Epoch     uint64           `json:"epoch"`
+	State     string           `json:"state"`
+	Resources ResourceSnapshot `json:"resources"`
+	At        string           `json:"at"`
+}
+type ProcessSnapshot struct {
+	ProcessID      string           `json:"process_id"`
+	SandboxID      string           `json:"sandbox_id"`
+	PlacementEpoch uint64           `json:"placement_epoch"`
+	State          string           `json:"state"`
+	PID            int              `json:"pid,omitempty"`
+	ExitCode       *int             `json:"exit_code,omitempty"`
+	Resources      ResourceSnapshot `json:"resources"`
+	At             string           `json:"at"`
+}
+type Process struct {
+	ProcessID      string  `json:"process_id"`
+	SandboxID      string  `json:"sandbox_id"`
+	PlacementEpoch uint64  `json:"placement_epoch"`
+	PID            int     `json:"pid"`
+	State          string  `json:"state"`
+	ExitCode       *int    `json:"exit_code,omitempty"`
+	StartedAt      string  `json:"started_at"`
+	ExitedAt       *string `json:"exited_at,omitempty"`
+	OutputCursor   Cursor  `json:"output_cursor"`
+}
+type Cursor struct {
+	Stream   string `json:"stream"`
+	ObjectID string `json:"object_id,omitempty"`
+	Epoch    uint64 `json:"epoch,omitempty"`
+	Sequence uint64 `json:"sequence"`
 }

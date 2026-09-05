@@ -44,7 +44,7 @@ func seedTemplate(t *testing.T, mem *store.Memory, id, parent string, builtin bo
 	t.Helper()
 	if err := mem.CreateTemplate(context.Background(), model.Template{
 		ID: model.TemplateID(id), Parent: model.TemplateID(parent),
-		Builtin: builtin, CreatedAt: time.Now(),
+		Builtin: builtin, Manifest: model.DefaultTemplateManifest(), CreatedAt: time.Now(),
 	}); err != nil {
 		t.Fatalf("seed template %q: %v", id, err)
 	}
@@ -89,6 +89,171 @@ func TestAPIListTemplates(t *testing.T) {
 	}
 	if len(got) != 2 {
 		t.Fatalf("listed %d templates; want 2", len(got))
+	}
+}
+
+func TestAPIGetTemplateManifest(t *testing.T) {
+	srv, mem := apiFixture(t)
+	manifest := model.TemplateManifest{SchemaVersion: model.CurrentManifestSchema, Platform: "linux/amd64", Capabilities: []string{"fs"}}
+	if err := mem.CreateTemplate(context.Background(), model.Template{ID: "tmpl_manifest", Builtin: true, Manifest: manifest, CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	resp := do(t, http.MethodGet, srv.URL+"/v1/templates/tmpl_manifest")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET template = %d", resp.StatusCode)
+	}
+	var got templateResp
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Manifest.SchemaVersion != model.CurrentManifestSchema || got.Manifest.Platform != "linux/amd64" {
+		t.Fatalf("manifest = %+v", got.Manifest)
+	}
+}
+
+func TestAPISnapshotAndTelemetryAvailability(t *testing.T) {
+	srv, mem := apiFixture(t)
+	seedTemplate(t, mem, "bare", "", true)
+	// A record-only fixture is enough to verify explicit unavailable values and
+	// cursor/route shapes; no runtime provider is needed.
+	if err := mem.CreateSandbox(context.Background(), model.Sandbox{ID: "sbx_snap", Template: "bare", Overlay: "ov_snap", State: model.Paused, CreatedAt: time.Now(), UpdatedAt: time.Now()}, nil); err != nil {
+		t.Fatal(err)
+	}
+	resp := do(t, http.MethodGet, srv.URL+"/v1/sandboxes/sbx_snap/snapshot")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("snapshot = %d", resp.StatusCode)
+	}
+	var snap model.SandboxSnapshot
+	if err := json.NewDecoder(resp.Body).Decode(&snap); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if snap.Resources.CPU.Available || snap.Resources.Memory.Available {
+		t.Fatalf("unavailable resources became available: %+v", snap.Resources)
+	}
+	resp = do(t, http.MethodGet, srv.URL+"/v1/sandboxes/sbx_snap/telemetry")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("telemetry = %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestAPITelemetryCursorBoundaries(t *testing.T) {
+	srv, mem := apiFixture(t)
+	seedTemplate(t, mem, "bare", "", true)
+	ctx := context.Background()
+	if err := mem.CreateSandbox(ctx, model.Sandbox{
+		ID: "sbx_telemetry_cursor", Template: "bare", Overlay: "ov_telemetry_cursor",
+		State: model.Paused, CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	med := lifecycle.New(lifecycle.Deps{Store: mem})
+	for i := 0; i < 3; i++ {
+		if err := med.SampleTelemetry(ctx, "sbx_telemetry_cursor"); err != nil {
+			t.Fatalf("sample %d: %v", i, err)
+		}
+	}
+	// Retain only the newest sample so the lower bound is 3 and both the
+	// expired cursor (1) and exclusive boundary (2) are observable.
+	if n, err := mem.TrimTelemetry(ctx, time.Now().Add(time.Hour), 100); err != nil || n != 2 {
+		t.Fatalf("trim = %d, %v; want two old samples removed", n, err)
+	}
+
+	tests := []struct {
+		name       string
+		after      string
+		wantStatus int
+		wantCount  int
+	}{
+		{name: "expired cursor", after: "1", wantStatus: http.StatusGone, wantCount: 0},
+		{name: "exclusive boundary", after: "2", wantStatus: http.StatusOK, wantCount: 1},
+		{name: "maximum uint64 tail", after: "18446744073709551615", wantStatus: http.StatusOK, wantCount: 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := do(t, http.MethodGet, srv.URL+"/v1/sandboxes/sbx_telemetry_cursor/telemetry?after="+tc.after)
+			defer resp.Body.Close()
+			if resp.StatusCode != tc.wantStatus {
+				t.Fatalf("after=%s = %d; want %d", tc.after, resp.StatusCode, tc.wantStatus)
+			}
+			var page struct {
+				Samples  []model.TelemetrySample `json:"samples"`
+				Earliest uint64                  `json:"earliest"`
+				Latest   uint64                  `json:"latest"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&page); err != nil {
+				t.Fatalf("decode after=%s: %v", tc.after, err)
+			}
+			if len(page.Samples) != tc.wantCount || page.Earliest != 3 || page.Latest != 3 {
+				t.Fatalf("after=%s page=%d bounds=%d/%d; want %d and 3/3", tc.after, len(page.Samples), page.Earliest, page.Latest, tc.wantCount)
+			}
+		})
+	}
+}
+
+func TestAPIMissingPlacementProcessAndTelemetryReturn404(t *testing.T) {
+	srv, mem := apiFixture(t)
+	seedTemplate(t, mem, "bare", "", true)
+	now := time.Now()
+	if err := mem.CreateSandbox(context.Background(), model.Sandbox{
+		ID: "sbx_no_placement", Template: "bare", Overlay: "ov_no_placement", State: model.Paused,
+		CreatedAt: now, UpdatedAt: now,
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name string
+		path string
+	}{
+		{name: "existing sandbox without placement", path: "/v1/sandboxes/sbx_no_placement/placement"},
+		{name: "unknown sandbox placement", path: "/v1/sandboxes/ghost/placement"},
+		{name: "unknown sandbox telemetry", path: "/v1/sandboxes/ghost/telemetry"},
+		{name: "unknown sandbox processes", path: "/v1/sandboxes/ghost/processes"},
+		{name: "unknown process", path: "/v1/processes/ghost"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := do(t, http.MethodGet, srv.URL+tc.path)
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusNotFound {
+				t.Fatalf("GET %s = %d; want 404", tc.path, resp.StatusCode)
+			}
+		})
+	}
+}
+
+func TestAPIProcessSnapshotCarriesExplicitResourceAvailability(t *testing.T) {
+	srv, mem := apiFixture(t)
+	seedTemplate(t, mem, "bare", "", true)
+	now := time.Now()
+	if err := mem.CreateSandbox(context.Background(), model.Sandbox{ID: "sbx_proc_snap", Template: "bare", Overlay: "ov_proc_snap", State: model.Paused, CreatedAt: now, UpdatedAt: now}, nil); err != nil {
+		t.Fatal(err)
+	}
+	started := now.Add(time.Millisecond)
+	if err := mem.CreateProcess(context.Background(), model.Process{
+		ID: "proc_snap", Sandbox: "sbx_proc_snap", PlacementEpoch: model.FirstPlacementEpoch,
+		State: model.ProcessStarting, StartedAt: started,
+		OutputCursor: model.ProcessOutputCursor("proc_snap", model.FirstPlacementEpoch, 0),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	resp := do(t, http.MethodGet, srv.URL+"/v1/processes/proc_snap")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET process snapshot = %d; want 200", resp.StatusCode)
+	}
+	var got model.ProcessSnapshot
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Resources.CPU.Available || got.Resources.Memory.Available || got.Resources.Disk.Available {
+		t.Fatalf("process resource measurements unexpectedly available: %+v", got.Resources)
+	}
+	if got.Resources.State != string(model.ProcessStarting) || got.Resources.At.IsZero() || got.At.IsZero() {
+		t.Fatalf("process resource snapshot missing state/timestamp: %+v", got.Resources)
 	}
 }
 
@@ -763,6 +928,26 @@ func TestAPIEventsEmptyOutbox(t *testing.T) {
 	}
 }
 
+// MaxInt64 is a valid tail cursor.  Adding one before comparing it with the
+// retained lower bound wraps signed arithmetic and incorrectly returns 410.
+func TestAPIEventsMaximumCursorIsNotExpired(t *testing.T) {
+	srv, mem := apiFixture(t)
+	seedSandboxEvents(t, mem, 2)
+	resp := do(t, http.MethodGet, srv.URL+"/v1/events?after=9223372036854775807")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("maximum event cursor = %d (%s); want empty tail page, not cursor expiry", resp.StatusCode, body)
+	}
+	var page eventsResp
+	if err := json.NewDecoder(resp.Body).Decode(&page); err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Events) != 0 || page.Earliest == 0 || page.Latest == 0 {
+		t.Fatalf("maximum event cursor page=%d bounds=%d/%d; want empty page with retained bounds", len(page.Events), page.Earliest, page.Latest)
+	}
+}
+
 // Replay is over the retained window, NOT over delivery state: an event already
 // drained by the in-process publisher must still be replayable, because whether
 // the local sink has seen it is not a fact an external subscriber depends on.
@@ -893,7 +1078,7 @@ func TestFileBypassErrorsHideThePlacement(t *testing.T) {
 	// own client, and the leaking one IS the input under test.
 	mem := store.NewMemory()
 	if err := mem.CreateTemplate(context.Background(), model.Template{
-		ID: "bare", Builtin: true, CreatedAt: time.Now(),
+		ID: "bare", Builtin: true, Manifest: model.DefaultTemplateManifest(), CreatedAt: time.Now(),
 	}); err != nil {
 		t.Fatal(err)
 	}

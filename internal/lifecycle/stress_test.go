@@ -58,7 +58,7 @@ func seedPausedStore(t *testing.T, st store.Store, sid, oid, tmpl string) {
 	ctx := context.Background()
 	now := time.Now()
 	// health and reclamation template FK: ensure the referenced Template exists (idempotent).
-	_ = st.CreateTemplate(ctx, model.Template{ID: model.TemplateID(tmpl), Builtin: true, CreatedAt: now})
+	_ = st.CreateTemplate(ctx, model.Template{ID: model.TemplateID(tmpl), Builtin: true, Manifest: model.DefaultTemplateManifest(), CreatedAt: now})
 	if err := st.CreateSandbox(ctx, model.Sandbox{
 		ID: model.SandboxID(sid), Template: model.TemplateID(tmpl),
 		Overlay: model.OverlayID(oid), State: model.Creating,
@@ -204,7 +204,7 @@ func seedRunningStore(t *testing.T, m *Mediator, st store.Store, sid, oid, tmpl 
 	ctx := context.Background()
 	now := time.Now()
 	// health and reclamation template FK: ensure the referenced Template exists (idempotent).
-	_ = st.CreateTemplate(ctx, model.Template{ID: model.TemplateID(tmpl), Builtin: true, CreatedAt: now})
+	_ = st.CreateTemplate(ctx, model.Template{ID: model.TemplateID(tmpl), Builtin: true, Manifest: model.DefaultTemplateManifest(), CreatedAt: now})
 	if err := st.CreateSandbox(ctx, model.Sandbox{
 		ID: model.SandboxID(sid), Template: model.TemplateID(tmpl),
 		Overlay: model.OverlayID(oid), State: model.Creating,

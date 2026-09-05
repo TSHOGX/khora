@@ -49,19 +49,13 @@ and the exported data that crosses them.
 | `store.Store` | Durable control-plane facts and the Event outbox | SQLite | Memory, for tests | Both run `storetest` |
 | `runtime.Provider` | Live Placement, resource, and network enforcement | `LocalRunsc` | None | Structural, unit, and runsc substrate tests |
 | `rootfs.Provider` | Template and Overlay materialization | `HostOverlayFS` | None | Structural, unit, and overlayfs substrate tests |
-| `volume.Backend` | Independent Volume storage and derivation | `LocalBtrfs` | `PlainDir`, for tests | Both run `volumetest`; the btrfs arm runs on the substrate |
+| `volume.Backend` | Independent Volume storage and derivation | Typed selection: `LocalBtrfs` (default) or `PlainDir` | Additional in-tree implementations | Each registered arm runs `volumetest`; the btrfs arm runs on the substrate |
 
-The standard orchestrator constructs these implementations directly in
-[internal/orchestrator/orchestrator.go](../../internal/orchestrator/orchestrator.go).
-The interfaces and assembly are under `internal/`, so a different implementation
-currently requires an in-tree code change. There is no runtime provider registry,
-configuration selector, stable third-party Go contract, remote provider, or
-cross-host migration.
-
-Configurable selection and public provider contracts are tracked in
-[Issue #25](https://github.com/TSHOGX/khora/issues/25). The input shape of a future
-remote runtime provider is a separate question tracked in
-[Issue #7](https://github.com/TSHOGX/khora/issues/7).
+The standard orchestrator selects Volume implementations through the typed
+registry in `internal/volume` and validates the configured set plus every durable
+Volume reference before serving. Store, runtime, and rootfs remain fixed in the
+standard assembly. The interfaces and registry are internal; there is no stable
+third-party Go contract, dynamic plugin, remote provider, or cross-host migration.
 
 ## Other boundaries
 

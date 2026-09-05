@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -153,6 +154,127 @@ func TestVolumeCRUDEndpoints(t *testing.T) {
 			t.Errorf("%s %s = %d, want 404", tc.method, tc.path, resp.StatusCode)
 		}
 		resp.Body.Close()
+	}
+}
+
+func TestVolumeCreateIdempotencyHeader(t *testing.T) {
+	srv, mem, _ := volumeFixture(t)
+	post := func(body string) (*http.Response, volumeResp) {
+		req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/volumes", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Idempotency-Key", "volume-create-key")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out volumeResp
+		if resp.StatusCode/100 == 2 {
+			if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+				t.Fatal(err)
+			}
+		}
+		resp.Body.Close()
+		return resp, out
+	}
+	firstResp, first := post(`{"size":0}`)
+	secondResp, second := post(`{}`)
+	if firstResp.StatusCode != http.StatusCreated || secondResp.StatusCode != http.StatusCreated || first.VolumeID != second.VolumeID {
+		t.Fatalf("idempotent responses = %d/%s and %d/%s", firstResp.StatusCode, first.VolumeID, secondResp.StatusCode, second.VolumeID)
+	}
+	vols, _ := mem.ListVolumes(context.Background())
+	if len(vols) != 1 {
+		t.Fatalf("idempotent API retry created %d volumes", len(vols))
+	}
+	conflict, _ := post(`{"size":1}`)
+	if conflict.StatusCode != http.StatusConflict {
+		t.Fatalf("reused key with different request = %d, want 409", conflict.StatusCode)
+	}
+}
+
+func TestVolumeRootContentSurface(t *testing.T) {
+	srv, _, vb := volumeFixture(t)
+	resp := doBody(t, http.MethodPost, srv.URL+"/v1/volumes", `{}`)
+	v := decodeVolume(t, resp)
+	base := srv.URL + "/v1/volumes/" + v.VolumeID
+
+	// mkdir, write, stat, list, ranged read, move, remove.
+	resp = do(t, http.MethodPost, base+"/mkdir?path=dir")
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("mkdir = %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+	req, _ := http.NewRequest(http.MethodPut, base+"/write?path=dir%2Ffile", strings.NewReader("abcdef"))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("write = %d: %s", resp.StatusCode, b)
+	}
+	resp.Body.Close()
+	resp = do(t, http.MethodGet, base+"/stat?path=dir%2Ffile")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("stat = %d", resp.StatusCode)
+	}
+	var info volumeFileResp
+	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if info.Size != 6 || info.IsDir {
+		t.Fatalf("stat = %+v", info)
+	}
+	resp = do(t, http.MethodGet, base+"/list?path=dir")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("list = %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+	resp = do(t, http.MethodGet, base+"/read?path=dir%2Ffile&offset=2&length=3")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("read = %d", resp.StatusCode)
+	}
+	data, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(data) != "cde" {
+		t.Fatalf("range read = %q", data)
+	}
+	moveBody := `{"source":"dir/file","destination":"dir/renamed"}`
+	resp = doBody(t, http.MethodPost, base+"/move", moveBody)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("move = %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+	resp = do(t, http.MethodDelete, base+"/remove?path=dir%2Frenamed")
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("remove = %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+	resp = do(t, http.MethodGet, base+"/stat?path=dir%2Frenamed")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("stat removed = %d, want 404", resp.StatusCode)
+	}
+	resp.Body.Close()
+	// Plant a symlink through the provider's test-only directory handle and
+	// verify the explicit LSTAT shape on the API edge.
+	if err := os.Symlink("dir", filepath.Join(vb.Dir, v.VolumeID, "link")); err != nil {
+		t.Fatal(err)
+	}
+	resp = do(t, http.MethodGet, base+"/lstat?path=link")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("lstat = %d", resp.StatusCode)
+	}
+	var link volumeFileResp
+	if err := json.NewDecoder(resp.Body).Decode(&link); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if link.Type != string(volume.EntrySymlink) || link.SymlinkTarget != "dir" {
+		t.Fatalf("lstat symlink = %+v", link)
 	}
 }
 
@@ -432,6 +554,10 @@ type pathLeakingRoot struct {
 
 func (r *pathLeakingRoot) Stat(name string) (volume.FileInfo, error) {
 	return volume.FileInfo{}, fmt.Errorf("btrfs: stat %s: %w", r.unit+"/"+name, errInjectedSubstrate)
+}
+
+func (r *pathLeakingRoot) Lstat(name string) (volume.FileInfo, error) {
+	return r.Stat(name)
 }
 
 func (r *pathLeakingRoot) Mkdir(name string, _ os.FileMode) error {

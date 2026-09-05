@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -126,6 +127,258 @@ func TestOpenAPIDocIsWellFormedEnoughToGenerateFrom(t *testing.T) {
 		if _, ok := doc.Comps.Schemas[name]; !ok {
 			t.Errorf("schema %q missing — the document should describe it by reflection", name)
 		}
+	}
+}
+
+func TestOpenAPITimeSchemaMatchesJSONEncoding(t *testing.T) {
+	raw, err := OpenAPIDoc()
+	if err != nil {
+		t.Fatalf("OpenAPIDoc: %v", err)
+	}
+	var doc struct {
+		Components struct {
+			Schemas map[string]struct {
+				Type   string `json:"type"`
+				Format string `json:"format"`
+			} `json:"schemas"`
+		} `json:"components"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("parse OpenAPI: %v", err)
+	}
+	tm, ok := doc.Components.Schemas["Time"]
+	if !ok {
+		t.Fatal("OpenAPI has no Time schema")
+	}
+	if tm.Type != "string" || tm.Format != "date-time" {
+		t.Fatalf("Time schema = type %q format %q; want string/date-time (time.Time marshals as RFC3339 JSON)", tm.Type, tm.Format)
+	}
+}
+
+func TestOpenAPIIntegerSchemasPreserveSignedness(t *testing.T) {
+	defs := map[string]any{}
+	for _, tc := range []struct {
+		name string
+		typ  reflect.Type
+		want string
+		min  any
+		max  any
+	}{
+		{name: "signed", typ: reflect.TypeOf(int64(0)), want: "int64", min: int64(-1 << 63), max: int64(1<<63 - 1)},
+		{name: "signed8", typ: reflect.TypeOf(int8(0)), want: "int64", min: int64(-1 << 7), max: int64(1<<7 - 1)},
+		{name: "unsigned", typ: reflect.TypeOf(uint64(0)), want: "uint64", min: uint64(0), max: ^uint64(0)},
+		{name: "unsigned32", typ: reflect.TypeOf(uint32(0)), want: "uint64", min: uint64(0), max: uint64(1<<32 - 1)},
+		{name: "unsigned8", typ: reflect.TypeOf(uint8(0)), want: "uint64", min: uint64(0), max: uint64(1<<8 - 1)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := schemaFor(tc.typ, defs)
+			if got["format"] != tc.want || got["minimum"] != tc.min || got["maximum"] != tc.max {
+				t.Fatalf("schema = %#v; want format=%q bounds=%v..%v", got, tc.want, tc.min, tc.max)
+			}
+		})
+	}
+}
+
+func TestOpenAPITelemetryAfterParameterPreservesUnsignedRange(t *testing.T) {
+	raw, err := OpenAPIDoc()
+	if err != nil {
+		t.Fatalf("OpenAPIDoc: %v", err)
+	}
+	var doc struct {
+		Paths map[string]map[string]json.RawMessage `json:"paths"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("parse OpenAPI: %v", err)
+	}
+	var operation struct {
+		Parameters []struct {
+			Name   string `json:"name"`
+			Schema struct {
+				Type    string      `json:"type"`
+				Format  string      `json:"format"`
+				Minimum json.Number `json:"minimum"`
+				Maximum json.Number `json:"maximum"`
+			} `json:"schema"`
+		} `json:"parameters"`
+	}
+	rawOperation, ok := doc.Paths["/v1/sandboxes/{id}/telemetry"]["get"]
+	if !ok {
+		t.Fatal("telemetry GET operation missing")
+	}
+	if err := json.Unmarshal(rawOperation, &operation); err != nil {
+		t.Fatalf("parse telemetry operation: %v", err)
+	}
+	for _, parameter := range operation.Parameters {
+		if parameter.Name != "after" {
+			continue
+		}
+		if parameter.Schema.Type != "integer" || parameter.Schema.Format != "uint64" || parameter.Schema.Minimum.String() != "0" || parameter.Schema.Maximum.String() != "18446744073709551615" {
+			t.Fatalf("telemetry after schema = type=%q format=%q minimum=%q maximum=%q; want integer/uint64/0/18446744073709551615", parameter.Schema.Type, parameter.Schema.Format, parameter.Schema.Minimum, parameter.Schema.Maximum)
+		}
+		return
+	}
+	t.Fatal("telemetry after parameter missing")
+}
+
+func TestOpenAPIEventsAfterParameterPreservesSignedRange(t *testing.T) {
+	raw, err := OpenAPIDoc()
+	if err != nil {
+		t.Fatalf("OpenAPIDoc: %v", err)
+	}
+	var doc struct {
+		Paths map[string]map[string]json.RawMessage `json:"paths"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("parse OpenAPI: %v", err)
+	}
+	var operation struct {
+		Parameters []struct {
+			Name   string `json:"name"`
+			Schema struct {
+				Type    string      `json:"type"`
+				Format  string      `json:"format"`
+				Minimum json.Number `json:"minimum"`
+				Maximum json.Number `json:"maximum"`
+			} `json:"schema"`
+		} `json:"parameters"`
+	}
+	rawOperation, ok := doc.Paths["/v1/events"]["get"]
+	if !ok {
+		t.Fatal("events GET operation missing")
+	}
+	if err := json.Unmarshal(rawOperation, &operation); err != nil {
+		t.Fatalf("parse events operation: %v", err)
+	}
+	for _, parameter := range operation.Parameters {
+		if parameter.Name != "after" {
+			continue
+		}
+		if parameter.Schema.Type != "integer" || parameter.Schema.Format != "int64" || parameter.Schema.Minimum.String() != "0" || parameter.Schema.Maximum.String() != "9223372036854775807" {
+			t.Fatalf("events after schema = type=%q format=%q minimum=%q maximum=%q; want integer/int64/0/9223372036854775807", parameter.Schema.Type, parameter.Schema.Format, parameter.Schema.Minimum, parameter.Schema.Maximum)
+		}
+		return
+	}
+	t.Fatal("events after parameter missing")
+}
+
+func TestOpenAPIOperationsDocumentInternalFailures(t *testing.T) {
+	raw, err := OpenAPIDoc()
+	if err != nil {
+		t.Fatalf("OpenAPIDoc: %v", err)
+	}
+	var doc struct {
+		Paths map[string]map[string]json.RawMessage `json:"paths"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("parse OpenAPI: %v", err)
+	}
+	for path, methods := range doc.Paths {
+		for method, rawOperation := range methods {
+			switch method {
+			case "get", "put", "post", "patch", "delete", "head", "options", "trace":
+			default:
+				continue
+			}
+			var operation struct {
+				Responses map[string]json.RawMessage `json:"responses"`
+			}
+			if err := json.Unmarshal(rawOperation, &operation); err != nil {
+				t.Fatalf("parse %s %s operation: %v", method, path, err)
+			}
+			if _, ok := operation.Responses["500"]; !ok {
+				t.Errorf("%s %s does not document the generic 500 internal-failure response", method, path)
+			}
+		}
+	}
+}
+
+func TestOpenAPICursorExpiryResponses(t *testing.T) {
+	raw, err := OpenAPIDoc()
+	if err != nil {
+		t.Fatalf("OpenAPIDoc: %v", err)
+	}
+	var doc struct {
+		Paths map[string]map[string]json.RawMessage `json:"paths"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("parse OpenAPI: %v", err)
+	}
+	cases := []struct {
+		path   string
+		method string
+	}{
+		{path: "/v1/events", method: "get"},
+		{path: "/v1/sandboxes/{id}/telemetry", method: "get"},
+	}
+	for _, tc := range cases {
+		var operation struct {
+			Responses map[string]json.RawMessage `json:"responses"`
+		}
+		rawOperation, ok := doc.Paths[tc.path][tc.method]
+		if !ok {
+			t.Fatalf("OpenAPI operation %s %s is missing", tc.method, tc.path)
+		}
+		if err := json.Unmarshal(rawOperation, &operation); err != nil {
+			t.Fatalf("parse %s %s operation: %v", tc.method, tc.path, err)
+		}
+		if _, ok := operation.Responses["410"]; !ok {
+			t.Errorf("%s %s does not document 410 cursor expiry", tc.method, tc.path)
+		}
+	}
+}
+
+func TestOpenAPICursorExpiryResponsesCarryBoundsJSON(t *testing.T) {
+	raw, err := OpenAPIDoc()
+	if err != nil {
+		t.Fatalf("OpenAPIDoc: %v", err)
+	}
+	var doc struct {
+		Paths map[string]map[string]json.RawMessage `json:"paths"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("parse OpenAPI: %v", err)
+	}
+	cases := []struct {
+		path   string
+		method string
+	}{
+		{path: "/v1/events", method: "get"},
+		{path: "/v1/sandboxes/{id}/telemetry", method: "get"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
+			var operation struct {
+				Responses map[string]json.RawMessage `json:"responses"`
+			}
+			if err := json.Unmarshal(doc.Paths[tc.path][tc.method], &operation); err != nil {
+				t.Fatalf("parse operation: %v", err)
+			}
+			contents := func(status string) map[string]any {
+				var response struct {
+					Content map[string]any `json:"content"`
+				}
+				if err := json.Unmarshal(operation.Responses[status], &response); err != nil {
+					t.Fatalf("parse %s response: %v", status, err)
+				}
+				return response.Content
+			}
+			okContent := contents("200")
+			goneContent := contents("410")
+			if _, ok := goneContent["text/plain"]; ok {
+				t.Fatalf("410 advertises text/plain even though the handler returns JSON bounds")
+			}
+			goneJSON, ok := goneContent["application/json"]
+			if !ok {
+				t.Fatalf("410 does not advertise application/json bounds")
+			}
+			okJSON, ok := okContent["application/json"]
+			if !ok {
+				t.Fatalf("200 does not advertise application/json")
+			}
+			if !reflect.DeepEqual(goneJSON, okJSON) {
+				t.Fatalf("410 schema differs from the bounds-bearing page schema:\n410: %#v\n200: %#v", goneJSON, okJSON)
+			}
+		})
 	}
 }
 

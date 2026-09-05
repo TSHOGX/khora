@@ -16,17 +16,29 @@ read-modify-write update.
 | `POST /v1/sandboxes/{id}/pause` | quiesce and remove its Placement |
 | `POST /v1/sandboxes/{id}/resume` | cold-start a new Placement |
 | `POST /v1/sandboxes/{id}/activity` | stamp guest-observed activity |
+| `GET /v1/sandboxes/{id}/telemetry` | page retained Sandbox usage samples by cursor |
+| `GET /v1/sandboxes/{id}/snapshot` | read the Sandbox resource snapshot with availability flags |
+| `GET /v1/sandboxes/{id}/placement` | read the current Placement epoch and resource snapshot |
+| `GET /v1/sandboxes/{id}/processes` | list durable logical Process records for the Sandbox |
+
+`GET /v1/processes/{id}` reads one durable logical Process snapshot, including
+retained exit status and explicit resource-measurement availability.
 
 Create requires `template_id`. Omitted network normalizes to default deny. Patch
 distinguishes an omitted member from zero: omitted leaves the Binding unchanged;
 zero removes a cap or disables the relevant TTL. Mounts and network declarations
 are whole replacements.
 
+`POST /v1/sandboxes` and `POST /v1/volumes` accept an `Idempotency-Key`
+header. Repeating a key with the same normalized request returns the original
+object; changing the request under that key returns `409`.
+
 ## Templates and Volumes
 
 | Method and path | Result |
 | --- | --- |
 | `GET /v1/templates` | list immutable Templates |
+| `GET /v1/templates/{id}` | inspect a Template and its typed manifest |
 | `POST /v1/templates` | promote a running or paused Sandbox Overlay |
 | `DELETE /v1/templates/{id}` | delete an unreferenced Template |
 | `POST /v1/volumes` | create a Volume |
@@ -36,10 +48,22 @@ are whole replacements.
 | `POST /v1/volumes/{id}/clone` | create a clone Volume |
 | `POST /v1/volumes/{id}/import?path=...` | stream bytes into a Volume |
 | `GET /v1/volumes/{id}/export?path=...` | stream bytes from a Volume |
+| `GET /v1/volumes/{id}/stat?path=...` | read root-confined metadata |
+| `GET /v1/volumes/{id}/lstat?path=...` | read metadata without following a symlink |
+| `GET /v1/volumes/{id}/list?path=...` | list a root-confined directory |
+| `GET /v1/volumes/{id}/read?path=...&offset=&length=` | read a bounded byte range |
+| `PUT /v1/volumes/{id}/write?path=...&offset=` | write raw bytes at an offset |
+| `POST /v1/volumes/{id}/mkdir?path=&mode=` | create a directory |
+| `POST /v1/volumes/{id}/move` | rename within the Volume |
+| `DELETE /v1/volumes/{id}/remove?path=...` | remove a path idempotently |
 
 Usage fields are absent when the backend cannot read them, not reported as zero.
 Volume size is a capacity cap; a new cap must be strictly greater than current
 usage. Any Mount binding and any descendant protect a Volume from deletion.
+
+The telemetry route is the only persisted usage-sample lane. Placement and Process
+resource data is available through their snapshot routes and is not retained as a
+generic sample history by the engine.
 
 ## Network and files
 

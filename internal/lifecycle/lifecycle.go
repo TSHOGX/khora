@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"log"
 	"net/netip"
+	"strings"
 	"sync"
 	"time"
 
@@ -109,14 +110,17 @@ type Deps struct {
 	Store   store.Store
 	Runtime runtime.Provider
 	Rootfs  rootfs.Provider
-	// Volume is the Volume subsystem backend (volume.Backend). REQUIRED whenever the disk axis
-	// is metered, and required in practice: the resource admission disk inequality sums BOTH
-	// subsystems' uncapped bytes, so a nil backend would make the gate blind to every
-	// volume's bytes — and a pile of uncapped volumes could then fill the node
-	// without the gate refusing once. admitVolume therefore fails CLOSED on a nil
-	// backend rather than treating it as "no volumes", the same choice the gate makes
-	// for an unmeasurable provider (the data-plane exposure boundary).
+	// Volume is the legacy single Volume subsystem backend (volume.Backend).
+	// VolumeRegistry is the preferred multi-provider seam below. At least one of
+	// these is REQUIRED whenever the disk axis is metered: the resource admission
+	// disk inequality sums both subsystems' uncapped bytes, so a nil provider set
+	// would make the gate blind to every volume's bytes.
 	Volume volume.Backend
+	// VolumeRegistry is the configured set of Volume providers. Existing
+	// records are resolved by their recorded Backend name; new records use the
+	// registry default. Volume remains as a compatibility seam for callers that
+	// assemble one backend directly.
+	VolumeRegistry *volume.Registry
 	// Dial builds a stateless transport client for a discovered endpoint
 	// (the transport data plane: constructed per endpoint, discarded on resume).
 	//
@@ -174,7 +178,9 @@ type Deps struct {
 	// know. The cost of 0 is that the outbox grows without bound at rest (the transactional outbox's
 	// known limitation); the cost of a wrong non-zero default is deletion of
 	// billing-relevant history on a number nobody chose.
-	EventRetention time.Duration
+	EventRetention   time.Duration
+	TelemetryPolicy  model.TelemetryPolicy
+	ProcessRetention model.ProcessRetentionPolicy
 
 	// Logf reports per-item reconciliation outcomes that are skipped rather than
 	// fatal (atomic transition rollback startup reconcile is skip-and-log: one un-adoptable sandbox
@@ -290,7 +296,14 @@ type liveState struct {
 	// destroy can Release each one. The MOUNT ROWS are not here — those are persistent
 	// control-plane state that survives pause (a resume re-mounts from the CURRENT
 	// table, resource admission); these are the placement-local handles, discarded with the placement.
-	mounts []*volume.Materialized
+	mounts []*materializedVolume
+}
+
+// materializedVolume keeps the provider beside its placement-local handle.
+// A mixed-provider registry cannot release every handle through one default.
+type materializedVolume struct {
+	backend      volume.Backend
+	materialized *volume.Materialized
 }
 
 // TTL defaults (health and reclamation / the health and reaper boundary): conservative, revisable numeric knobs
@@ -325,6 +338,12 @@ func New(deps Deps) *Mediator {
 	}
 	if deps.DrainGrace == 0 {
 		deps.DrainGrace = defaultDrainGrace
+	}
+	if deps.TelemetryPolicy.Interval == 0 && deps.TelemetryPolicy.Retention == 0 {
+		deps.TelemetryPolicy = model.DefaultTelemetryPolicy
+	}
+	if deps.ProcessRetention.ExitedFor <= 0 {
+		deps.ProcessRetention = model.DefaultProcessRetention
 	}
 	// A NEGATIVE grace means "no drain at all" and survives defaulting — only a
 	// test wants it (to restore the truncate window and prove the barrier closes a
@@ -451,6 +470,9 @@ func (m *Mediator) tryLock(id model.SandboxID) (*transitionLock, bool) {
 // CreateSpec is the create verb input (the control-plane API POST /v1/sandboxes).
 type CreateSpec struct {
 	Template model.TemplateID
+	// IdempotencyKey, when supplied, makes retries converge on one durable
+	// Operation and one Sandbox ID.
+	IdempotencyKey model.IdempotencyKey
 
 	// Network is the network declaration reachability declaration (the control-plane API `network?`). nil = the whole
 	// object was OMITTED, which is legal and normalizes to an explicit
@@ -499,18 +521,11 @@ type CreateSpec struct {
 // create prefix: build empty Overlay, then ). The transition lock is held
 // for the whole chain (per-sandbox transition serialization); on failure the half-built placement + empty
 // Overlay are reclaimed and the record deleted → destroyed (the subsystem boundaries create exit).
-func (m *Mediator) Create(ctx context.Context, spec CreateSpec) (model.SandboxID, error) {
-	sid := model.SandboxID("sbx_" + randToken())
-	oid := model.OverlayID("ov_" + randToken())
-
-	l := m.lock(sid)
-	l.Lock()
-	defer l.Unlock()
-
+func (m *Mediator) Create(ctx context.Context, spec CreateSpec) (resultID model.SandboxID, resultErr error) {
 	now := time.Now()
 	rec := model.Sandbox{
-		ID: sid, Template: spec.Template, Overlay: oid,
-		State: model.Creating,
+		Template: spec.Template,
+		State:    model.Creating,
 		// Materialize the TTL Binding once, at create (resource admission: Binding is stable
 		// across resume; the stored value is the concrete duration the reaper
 		// reads). Omitted inputs resolve to the engine-wide default here.
@@ -534,23 +549,59 @@ func (m *Mediator) Create(ctx context.Context, spec CreateSpec) (model.SandboxID
 	if spec.Network != nil {
 		rec.Network = spec.Network.Normalize()
 	}
-	// the API error contract's declaration refusals, applied AT THE WRITE POINT rather than only at the
-	// API layer: a validation that lives in one caller is a validation the next caller
-	// does not have. Not hypothetical — a substrate test driving the mediator directly
-	// successfully created a sandbox whose `via[].endpoint` was inside the L0 floor
-	// (the API error contract ClassViaEndpointInFloor), and then measured the resulting permanent fail-closure.
-	//
-	// BEFORE the admission gate below, which the API error contract requires: an invalid declaration is
-	// refused before any byte is touched or any budget recorded, so 400 and 507 can
-	// never both be true for one request.
-	if err := m.ValidateDeclaration(rec.Network, spec.Network != nil); err != nil {
-		return "", err
-	}
 	if spec.IdleTimeout != nil {
 		rec.IdleTimeout = *spec.IdleTimeout
 	}
 	if spec.Retention != nil {
 		rec.Retention = *spec.Retention
+	}
+
+	claim, err := m.claimOperation(ctx, "sandbox.create", spec.IdempotencyKey,
+		semanticSandboxCreate(spec, rec.Network))
+	if err != nil {
+		return "", err
+	}
+	if replay, err := operationReplayID(claim, model.ObjectSandbox); err != nil {
+		return "", err
+	} else if replay != "" {
+		return model.SandboxID(replay), nil
+	}
+	storeCtx := ctx
+	opctx, ownedClaim, stopLease := m.startOperationLease(ctx, claim)
+	claim = ownedClaim
+	ctx = opctx
+	defer stopLease()
+	// Install failure recording before post-claim validation. A
+	// deployment-dependent refusal is terminal for this exact keyed request;
+	// leaving the ledger in_progress would make retries wait forever.
+	defer func() { m.failOperation(storeCtx, claim, resultErr) }()
+	claim, err = m.prepareOperation(ctx, claim)
+	if err != nil {
+		return "", err
+	}
+	// Validate at the write point, after the idempotency claim/replay check. The
+	// declaration remains fully checked before any admission or provider side
+	// effect, while a retry can replay a committed Sandbox even if deployment
+	// configuration (for example, the second-hop uid) changed since the first
+	// attempt. A changed request therefore reaches SameRequest first and gets a
+	// deterministic idempotency conflict rather than a state-dependent refusal.
+	if err := m.ValidateDeclaration(rec.Network, spec.Network != nil); err != nil {
+		return "", err
+	}
+
+	sid := model.SandboxID("sbx_" + randToken())
+	oid := model.OverlayID("ov_" + randToken())
+	if claim.op != nil {
+		sid = model.SandboxID(deterministicObjectID("sbx_", claim.op.ID))
+		oid = model.OverlayID(deterministicObjectID("ov_", claim.op.ID))
+	}
+	rec.ID, rec.Overlay = sid, oid
+
+	l := m.lock(sid)
+	l.Lock()
+	defer l.Unlock()
+	if err := m.advanceOperation(ctx, claim, model.OperationMaterializing); err != nil {
+		return "", fmt.Errorf("create: advance operation: %w", err)
 	}
 
 	// Admission gate (resource admission / uncapped rootfs accounting node-level no-oversubscribe): the
@@ -640,7 +691,13 @@ func (m *Mediator) Create(ctx context.Context, spec CreateSpec) (model.SandboxID
 		}
 		return "", fmt.Errorf("create: overlay: %w", err)
 	}
-	pl, err := m.coldStart(ctx, rec, ov)
+	epoch, err := m.nextPlacementEpoch(ctx, sid)
+	if err != nil {
+		m.unwind(ctx, sid, ov, true)
+		_ = m.deps.Store.DeleteSandbox(ctx, sid, nil)
+		return "", fmt.Errorf("create: allocate placement epoch: %w", err)
+	}
+	pl, err := m.coldStart(ctx, rec, ov, epoch)
 	if err != nil {
 		// create has no fallback state: reclaim half-built placement + empty
 		// Overlay, then delete the record. The
@@ -648,6 +705,11 @@ func (m *Mediator) Create(ctx context.Context, spec CreateSpec) (model.SandboxID
 		m.unwind(ctx, sid, ov, true)
 		_ = m.deps.Store.DeleteSandbox(ctx, sid, nil)
 		return "", fmt.Errorf("create: cold start: %w", err)
+	}
+	if err := m.advanceOperation(ctx, claim, model.OperationMaterialized); err != nil {
+		m.unwind(ctx, sid, ov, true)
+		_ = m.deps.Store.DeleteSandbox(ctx, sid, nil)
+		return "", fmt.Errorf("create: record materialized operation: %w", err)
 	}
 
 	// fault injection: simulate a crash after the placement is fully built but
@@ -658,10 +720,13 @@ func (m *Mediator) Create(ctx context.Context, spec CreateSpec) (model.SandboxID
 
 	// The readiness probe passed: flip creating to running and emit "created" in the
 	// same commit (the transactional outbox).
-	if err := m.deps.Store.CompareAndSetState(ctx, sid, model.Creating, model.Running, newPlacementEvent(sid, model.EventCreated, model.Running, pl.Address), nil); err != nil {
+	if err := m.deps.Store.CompareAndSetState(ctx, sid, model.Creating, model.Running, newPlacementEvent(sid, model.EventCreated, model.Running, pl.Address, epoch), nil); err != nil {
 		m.unwind(ctx, sid, ov, true)
 		_ = m.deps.Store.DeleteSandbox(ctx, sid, nil)
 		return "", fmt.Errorf("create: commit running: %w", err)
+	}
+	if err := m.succeedOperation(ctx, claim, model.OperationResult{Kind: model.ObjectSandbox, ID: string(sid)}); err != nil {
+		return "", fmt.Errorf("create: commit operation result: %w", err)
 	}
 	return sid, nil
 }
@@ -711,6 +776,10 @@ func (m *Mediator) pauseLocked(ctx context.Context, id model.SandboxID, kind mod
 	if err := m.deps.Store.CompareAndSetState(ctx, id, model.Running, model.Paused, newEvent(id, kind, model.Paused), cause); err != nil {
 		return err
 	}
+	// The placement is no longer current once the state commit lands. Keep its
+	// epoch as a durable tombstone so a later Resume can advance it and stale
+	// requests cannot target the old realization.
+	m.markPlacementLost(ctx, id)
 	ls := m.take(id)
 	if ls != nil {
 		if ls.placement != nil {
@@ -804,7 +873,11 @@ func (m *Mediator) resumeLocked(ctx context.Context, rec model.Sandbox) error {
 	if err != nil {
 		return fmt.Errorf("resume: open overlay: %w", err)
 	}
-	pl, err := m.coldStart(ctx, rec, ov)
+	epoch, err := m.nextPlacementEpoch(ctx, id)
+	if err != nil {
+		return fmt.Errorf("resume: allocate placement epoch: %w", err)
+	}
+	pl, err := m.coldStart(ctx, rec, ov, epoch)
 	if err != nil {
 		// resume has a fallback state: reclaim half-built placement, stay paused
 		// (persistent Overlay artifact untouched; atomic transition rollback).
@@ -825,7 +898,7 @@ func (m *Mediator) resumeLocked(ctx context.Context, rec model.Sandbox) error {
 	// pinned to a stale cause, and if the workload re-triggers the cap the NEXT
 	// observation writes the real cause in the control plane's plain view.
 	cleared := model.CauseNone
-	if err := m.deps.Store.CompareAndSetState(ctx, id, model.Paused, model.Running, newPlacementEvent(id, model.EventResumed, model.Running, pl.Address), &cleared); err != nil {
+	if err := m.deps.Store.CompareAndSetState(ctx, id, model.Paused, model.Running, newPlacementEvent(id, model.EventResumed, model.Running, pl.Address, epoch), &cleared); err != nil {
 		m.unwind(ctx, id, ov, false)
 		return fmt.Errorf("resume: commit running: %w", err)
 	}
@@ -954,14 +1027,22 @@ func (m *Mediator) destroyLocked(ctx context.Context, rec model.Sandbox, cause m
 // ErrInsufficientCapacity (507), the harm being an UNRELATED sandbox meeting ENOSPC nowhere
 // near its own cap. Gated through admitUncappedGrowth, never `admit` (admission.go).
 //
-// The gate runs BEFORE the quiesce, paying in forecast accuracy rather than in the state
-// machine: gating after it buys an exact count at the price of A REFUSAL THAT MUTATED STATE —
-// a running sandbox left `paused`, with a `paused` event published, because the node was full.
-// The source is therefore still live when measured, so the number is an upper bound bounded by
-// that sandbox's own headroom.
-//
-// A refused Promote leaves the sandbox in its ENTRY state, no layer bytes, no `templates` row.
+// The admission and lineage gates run BEFORE the quiesce, paying in forecast accuracy rather
+// than mutating a source for a refusal those gates can decide up front. Digest verification is
+// different: the provider can authenticate only the newly materialized layer, so a declared
+// digest mismatch is discovered after quiesce and byte copy. That post-materialization refusal
+// leaves a running source paused and leaves an unclaimed layer for the orphan sweep; it never
+// inserts a Template row. Callers must distinguish these bounded cleanup outcomes from a
+// preflight refusal.
 func (m *Mediator) Promote(ctx context.Context, id model.SandboxID) (model.TemplateID, error) {
+	return m.promoteWithManifest(ctx, id, nil)
+}
+
+func (m *Mediator) PromoteWithManifest(ctx context.Context, id model.SandboxID, manifest *model.TemplateManifest) (model.TemplateID, error) {
+	return m.promoteWithManifest(ctx, id, manifest)
+}
+
+func (m *Mediator) promoteWithManifest(ctx context.Context, id model.SandboxID, requested *model.TemplateManifest) (model.TemplateID, error) {
 	l := m.lock(id)
 	l.Lock()
 	defer l.Unlock()
@@ -974,6 +1055,13 @@ func (m *Mediator) Promote(ctx context.Context, id model.SandboxID) (model.Templ
 	// anything.
 	if rec.State != model.Running && rec.State != model.Paused {
 		return "", fmt.Errorf("promote: %w (state=%s, want running or paused)", store.ErrConflict, rec.State)
+	}
+	if requested != nil {
+		requestedCopy := requested.Normalize()
+		if err := requestedCopy.Validate(); err != nil {
+			return "", fmt.Errorf("promote: manifest: %w", err)
+		}
+		requested = &requestedCopy
 	}
 
 	// Depth gate, BEFORE the quiesce and before any bytes — for the same reason the
@@ -1058,10 +1146,48 @@ func (m *Mediator) Promote(ctx context.Context, id model.SandboxID) (model.Templ
 	// bytes are down → NOW insert the templates row (parent = source's Template,
 	// builtin=0). If this fails, the layer bytes are an orphan the sweep reclaims
 	// (bytes-first: no broken ready row).
+	manifest := defaultTemplateManifest()
+	if requested != nil {
+		manifest = requested.Normalize()
+		if err := manifest.Validate(); err != nil {
+			return "", fmt.Errorf("promote: manifest: %w", err)
+		}
+	}
+	// The provider is the authority for bytes, so a declared digest must be
+	// checked against the freshly materialized layer before its Template row is
+	// published. Never overwrite a caller declaration or ignore a provider
+	// failure: either behavior would make a manifest appear verified when it was
+	// not. An omitted digest remains optional when the provider has no digest
+	// inspection seam; a supplied digest is fail-closed in that case.
+	checker, hasDigestChecker := m.deps.Rootfs.(rootfs.TemplateDigestProvider)
+	if manifest.ContentDigest != "" && !hasDigestChecker {
+		return "", fmt.Errorf("promote: manifest digest cannot be verified: %w", model.ErrUnavailable)
+	}
+	if hasDigestChecker {
+		digest, derr := checker.TemplateDigest(ctx, string(newID))
+		if derr != nil {
+			return "", fmt.Errorf("promote: compute template digest: %w", derr)
+		}
+		// Provider implementations may return an equivalent digest with upper
+		// case hexadecimal. Compare the canonical algorithm and digest bytes
+		// case-insensitively, then persist the model's lowercase spelling.
+		if manifest.ContentDigest != "" && !strings.EqualFold(digest, manifest.ContentDigest) {
+			return "", model.NewContractError(model.ErrorConflict, "promote: manifest content digest does not match materialized bytes")
+		}
+		digest = strings.ToLower(digest)
+		// Always persist the provider's canonical digest, including when the
+		// caller omitted one. This makes future launch verification meaningful.
+		manifest.DigestAlgorithm = model.DigestSHA256
+		manifest.ContentDigest = digest
+		if err := manifest.Validate(); err != nil {
+			return "", fmt.Errorf("promote: provider returned invalid template digest: %w", err)
+		}
+	}
 	if err := m.deps.Store.CreateTemplate(ctx, model.Template{
 		ID:        newID,
 		Parent:    rec.Template,
 		Builtin:   false,
+		Manifest:  manifest,
 		CreatedAt: time.Now(),
 	}); err != nil {
 		return "", fmt.Errorf("promote: insert template row: %w", err)
@@ -1087,8 +1213,19 @@ func (m *Mediator) unmarkBuilding(id model.TemplateID) {
 // placement + merged are recorded in the mediator and the placement is returned
 // so its portable facts can be committed with the transition. On any error it
 // returns nil (the caller unwinds).
-func (m *Mediator) coldStart(ctx context.Context, rec model.Sandbox, ov *rootfs.Overlay) (*runtime.Placement, error) {
+func (m *Mediator) coldStart(ctx context.Context, rec model.Sandbox, ov *rootfs.Overlay, epoch model.PlacementEpoch) (*runtime.Placement, error) {
 	id, limits := rec.ID, rec.Limits
+	var checker runtime.ManifestChecker
+	if candidate, ok := m.deps.Runtime.(runtime.ManifestChecker); ok {
+		checker = candidate
+	}
+	var digestChecker rootfs.TemplateDigestProvider
+	if candidate, ok := m.deps.Rootfs.(rootfs.TemplateDigestProvider); ok {
+		digestChecker = candidate
+	}
+	if err := validateTemplateForLaunch(ctx, rec, m.deps.Store, checker, digestChecker); err != nil {
+		return nil, fmt.Errorf("template compatibility: %w", err)
+	}
 	//  the write-regime gate, cold-start side (the Volume subsystem, symmetric with
 	// admitDirectWrite): if a direct content write is streaming into a volume this
 	// placement would mount READ-WRITE, refuse. Gating only the direct-write side
@@ -1150,10 +1287,11 @@ func (m *Mediator) coldStart(ctx context.Context, rec model.Sandbox, ov *rootfs.
 	// netns/veth and starting the isolated unit — the atomicity the provider security contract requires, and
 	// the only hook point that exists for it (the network enforcement locus).
 	pl, err := m.deps.Runtime.Launch(ctx, runtime.LaunchSpec{
-		Sandbox:  string(id),
-		Rootfs:   runtime.RootfsSource{MergedPath: merged.MergedPath},
-		Mounts:   specs,
-		Steering: steering,
+		Sandbox:          string(id),
+		Rootfs:           runtime.RootfsSource{MergedPath: merged.MergedPath},
+		Mounts:           specs,
+		Steering:         steering,
+		ProcessRetention: m.deps.ProcessRetention.ExitedFor,
 		Limits: runtime.ResourceLimits{
 			CPUMillis:  limits.CPUMillis,
 			MemoryByte: limits.MemoryByte,
@@ -1172,6 +1310,7 @@ func (m *Mediator) coldStart(ctx context.Context, rec model.Sandbox, ov *rootfs.
 		_ = m.deps.Rootfs.Unmount(ctx, merged)
 		return nil, fmt.Errorf("launch: provider returned a placement without a valid guest address")
 	}
+	pl.Epoch = uint64(epoch)
 	// Record the live placement the MOMENT it physically exists — before the
 	// readiness gate, not after it. A concurrent periodic reconcile that started
 	// after our create/resume was snapshotted would otherwise see this freshly
@@ -1188,6 +1327,16 @@ func (m *Mediator) coldStart(ctx context.Context, rec model.Sandbox, ov *rootfs.
 		m.releaseMounts(ctx, mounts)
 		_ = m.deps.Rootfs.Unmount(ctx, merged)
 		return nil, fmt.Errorf("health gate: %w", err)
+	}
+	// Persist the realization only after readiness.  A crash before the
+	// lifecycle CAS leaves an explicit active Placement that reconciliation can
+	// classify against the source Sandbox state rather than losing the epoch.
+	if err := m.persistPlacement(ctx, id, epoch, model.PlacementActive); err != nil {
+		m.take(id)
+		_ = m.deps.Runtime.Destroy(ctx, pl)
+		m.releaseMounts(ctx, mounts)
+		_ = m.deps.Rootfs.Unmount(ctx, merged)
+		return nil, fmt.Errorf("persist placement: %w", err)
 	}
 	return pl, nil
 }
@@ -1247,6 +1396,9 @@ func (m *Mediator) unwind(ctx context.Context, id model.SandboxID, ov *rootfs.Ov
 			_ = m.deps.Rootfs.Unmount(ctx, ls.merged)
 		}
 	}
+	if !isCreate {
+		m.markPlacementLost(ctx, id)
+	}
 	if isCreate {
 		// Reported, not discarded: if this fails the caller's DeleteSandbox is about to
 		// fail too, and the log is the only place that will say why the record survived.
@@ -1282,6 +1434,7 @@ func (m *Mediator) SeedBuiltinTemplates(ctx context.Context) error {
 		err := m.deps.Store.CreateTemplate(ctx, model.Template{
 			ID:        model.TemplateID(id),
 			Builtin:   true,
+			Manifest:  defaultTemplateManifest(),
 			CreatedAt: now,
 		})
 		if err != nil && err != store.ErrConflict {
@@ -1535,6 +1688,9 @@ func (m *Mediator) ReconcilePeriodic(ctx context.Context) error {
 }
 
 func (m *Mediator) reconcile(ctx context.Context, periodic bool) error {
+	if err := m.ReconcileStateCore(ctx); err != nil {
+		return fmt.Errorf("reconcile: %w", err)
+	}
 	recs, err := m.deps.Store.ListSandboxes(ctx)
 	if err != nil {
 		return fmt.Errorf("reconcile: list records: %w", err)
@@ -1632,6 +1788,7 @@ func (m *Mediator) reconcileRecord(ctx context.Context, rec model.Sandbox, keep 
 		// → unmount its lingering Overlay mount, but KEEP the upper (resumable,
 		// FS-first pause and resume). The netns/container fall to ReclaimOrphans.
 		m.reclaimOrphanOverlay(ctx, rec, false)
+		m.markPlacementLost(ctx, rec.ID)
 	case model.Running:
 		adopted, err := m.adoptOrDemote(ctx, rec)
 		m.reconcileRunningOutcome(ctx, rec, adopted, err, keep)
@@ -1658,6 +1815,7 @@ func (m *Mediator) reconcileRecordLocked(ctx context.Context, rec model.Sandbox,
 		// sandbox has no merged mount, so this is a best-effort no-op; a lingering
 		// mount from a crashed mid-resume is unmounted, upper KEPT (FS-first pause and resume).
 		m.reclaimOrphanOverlay(ctx, rec, false)
+		m.markPlacementLost(ctx, rec.ID)
 	case model.Running:
 		if m.hasLive(rec.ID) {
 			*keep = append(*keep, string(rec.ID)) // live handle we built → not an orphan
@@ -1808,9 +1966,13 @@ func (m *Mediator) adoptOrDemoteLocked(ctx context.Context, rec model.Sandbox) (
 			dc := deathCauseOf(cause)
 			causePtr = &dc
 		}
-		if err := m.deps.Store.CompareAndSetState(ctx, rec.ID, model.Running, model.Paused, newEvent(rec.ID, "crash-paused", model.Paused), causePtr); err != nil && err != store.ErrConflict {
+		if err := m.deps.Store.CompareAndSetState(ctx, rec.ID, model.Running, model.Paused, newEvent(rec.ID, "crash-paused", model.Paused), causePtr); err != nil {
+			if err == store.ErrConflict {
+				return false, nil
+			}
 			return false, fmt.Errorf("demote to paused: %w", err) // uncertain → protect
 		}
+		m.markPlacementLost(ctx, rec.ID)
 		return false, nil
 	}
 
@@ -1840,13 +2002,17 @@ func (m *Mediator) adoptOrDemoteLocked(ctx context.Context, rec model.Sandbox) (
 		m.deps.Logf("reconcile: demoting live sandbox %s to paused — it is alive and serving, but "+
 			"this deployment cannot enforce its recorded declaration: %v", rec.ID, verr)
 		if err := m.deps.Store.CompareAndSetState(ctx, rec.ID, model.Running, model.Paused,
-			newEvent(rec.ID, "crash-paused", model.Paused), nil); err != nil && err != store.ErrConflict {
+			newEvent(rec.ID, "crash-paused", model.Paused), nil); err != nil {
+			if err == store.ErrConflict {
+				return false, nil
+			}
 			// The CAS failed, so the record still says `running` — return an error so the
 			// caller PROTECTS the placement and this decision is retaken next pass. Reclaiming
 			// on a failed demotion would tear down a live container whose record still claims
 			// it, the one outcome worse than leaving it up for one more pass.
 			return false, fmt.Errorf("demote unenforceable via[] sandbox to paused: %w", err)
 		}
+		m.markPlacementLost(ctx, rec.ID)
 		// adopted=false, err=nil: the caller reclaims the placement as an orphan, which
 		// is what actually removes the deputy's reachability — the netns and the rule set
 		// go with it.
@@ -1905,6 +2071,16 @@ func (m *Mediator) adoptOrDemoteLocked(ctx context.Context, rec model.Sandbox) (
 		// outcome — a pause would then silently skip a Release it owed.
 		return false, fmt.Errorf("adopt volume materializations: %w", err)
 	}
+	epoch, err := m.currentPlacementEpoch(ctx, rec.ID)
+	if err != nil {
+		m.releaseMounts(ctx, mounts)
+		return false, fmt.Errorf("adopt placement epoch: %w", err)
+	}
+	if err := m.persistPlacement(ctx, rec.ID, epoch, model.PlacementActive); err != nil {
+		m.releaseMounts(ctx, mounts)
+		return false, fmt.Errorf("persist adopted placement: %w", err)
+	}
+	pl.Epoch = uint64(epoch)
 	m.put(rec.ID, &liveState{placement: pl, merged: merged, mounts: mounts})
 	return true, nil
 }
@@ -1970,7 +2146,8 @@ func (m *Mediator) Get(ctx context.Context, id model.SandboxID) (model.Sandbox, 
 // SandboxInfo is the control-plane API single-read shape: the record plus the one fact that does
 // not live in it.
 type SandboxInfo struct {
-	Sandbox model.Sandbox
+	Sandbox   model.Sandbox
+	Placement *model.Placement
 	// UsedByte is what the Overlay storage unit consumes as the rootfs provider's own
 	// backend reports it (upper + work), or NIL when that could not be read.
 	//
@@ -1995,6 +2172,11 @@ func (m *Mediator) Inspect(ctx context.Context, id model.SandboxID) (SandboxInfo
 		return SandboxInfo{}, err
 	}
 	info := SandboxInfo{Sandbox: rec}
+	if placement, perr := m.deps.Store.GetPlacement(ctx, id); perr == nil {
+		info.Placement = &placement
+	} else if !errors.Is(perr, store.ErrPlacementNotFound) {
+		return SandboxInfo{}, perr
+	}
 	if rp := m.deps.Rootfs; rp != nil && rec.Overlay != "" {
 		used, _, err := rp.Usage(ctx, string(rec.Overlay))
 		if err != nil {
@@ -2043,6 +2225,11 @@ func (m *Mediator) ListTemplates(ctx context.Context) ([]model.Template, error) 
 	return m.deps.Store.ListTemplates(ctx)
 }
 
+// GetTemplate returns one immutable Template and its manifest.
+func (m *Mediator) GetTemplate(ctx context.Context, id model.TemplateID) (model.Template, error) {
+	return m.deps.Store.GetTemplate(ctx, id)
+}
+
 // DeleteTemplate removes a Template row iff nothing references it (the control-plane API DELETE
 // /v1/templates/{id}). The store's reference protection (health and reclamation) surfaces as
 // store.ErrInUse — a referenced Template (by a sandbox, or a child layer via
@@ -2087,9 +2274,10 @@ func newEvent(id model.SandboxID, kind model.EventKind, state model.Lifecycle) *
 // newPlacementEvent records the portable address established by a transition.
 // Only transitions that create a new placement use this constructor; pause-like
 // and destroy events intentionally carry no placement address.
-func newPlacementEvent(id model.SandboxID, kind model.EventKind, state model.Lifecycle, address netip.Addr) *store.Event {
+func newPlacementEvent(id model.SandboxID, kind model.EventKind, state model.Lifecycle, address netip.Addr, epoch model.PlacementEpoch) *store.Event {
 	ev := newEvent(id, kind, state)
 	ev.PlacementAddress = address.String()
+	ev.PlacementEpoch = epoch
 	return ev
 }
 

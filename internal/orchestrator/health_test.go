@@ -98,7 +98,7 @@ func haltPublisher(t *testing.T, eng *Engine) {
 
 	// A halt needs an undelivered row to halt ON: a real transition through the
 	// store's own commit path, which is what puts an event in the outbox (the transactional outbox).
-	if err := eng.Store.CreateTemplate(ctx, model.Template{ID: "bare", Builtin: true}); err != nil {
+	if err := eng.Store.CreateTemplate(ctx, model.Template{ID: "bare", Builtin: true, Manifest: model.DefaultTemplateManifest()}); err != nil {
 		t.Fatalf("seed template: %v", err)
 	}
 	if err := eng.Store.CreateSandbox(ctx, model.Sandbox{ID: "a", Template: "bare", State: model.Creating},

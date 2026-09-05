@@ -2,6 +2,8 @@ package rootfs
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -198,6 +200,54 @@ func (p *HostOverlayFS) layerPath(id string) (string, error) {
 		return tp, nil
 	}
 	return "", fmt.Errorf("rootfs: layer %q not found under layers or templates", id)
+}
+
+// TemplateDigest computes a stable digest over one immutable lower tree. The
+// digest includes relative names, modes, symlink targets, and file bytes; host
+// paths remain private to this provider.
+func (p *HostOverlayFS) TemplateDigest(_ context.Context, templateID string) (string, error) {
+	root, err := p.layerPath(templateID)
+	if err != nil {
+		return "", err
+	}
+	h := sha256.New()
+	err = filepath.Walk(root, func(name string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if name == root {
+			return nil
+		}
+		rel, err := filepath.Rel(root, name)
+		if err != nil {
+			return err
+		}
+		_, _ = fmt.Fprintf(h, "%s\x00%o\x00%d\x00", filepath.ToSlash(rel), info.Mode(), info.Size())
+		if info.Mode()&os.ModeSymlink != 0 {
+			target, err := os.Readlink(name)
+			if err != nil {
+				return err
+			}
+			_, _ = io.WriteString(h, target)
+			return nil
+		}
+		if info.Mode().IsRegular() {
+			f, err := os.Open(name)
+			if err != nil {
+				return err
+			}
+			_, err = io.Copy(h, f)
+			_ = f.Close()
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return "sha256:" + hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func dirExists(path string) bool {
@@ -830,7 +880,12 @@ func validateSeg(name, v string) error {
 // (separate binaries). It is the STATIC half of the exclusion set; a Promote's
 // volume mount destinations are merged in per-call by promoteExclusions.
 var promoteExcludedPaths = []string{
-	"tmp/.sandboxd-transport.pid", // transport child pidfile (the guest startup topology)
+	"tmp/.sandboxd-transport.pid",  // transport child pidfile (the guest startup topology)
+	"tmp/.sandboxd-processes.json", // stable process metadata, not workload content
+	"tmp/.sandboxd-watch.json",     // placement-scoped watch cursor journal
+	"tmp/.sandboxd-process.sock",   // PID-1 process supervisor endpoint, not workload content
+	"tmp/.sandboxd-activity",       // guest-global activity signal, not workload content
+	"tmp/.sandboxd-activity.lock",  // activity clock writer lock, not workload content
 	// Crash-loop sentinel: only a `testguest` build reads it
 	// (cmd/sandboxd/faultinject_testguest.go), but the exclusion is
 	// unconditional — capturing it would mint a Template whose every sandbox is

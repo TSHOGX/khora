@@ -18,7 +18,8 @@ import (
 //
 // A caller who wants to wait has two honest options and should pick deliberately:
 // poll Get until the state satisfies them, or subscribe to Events and react to
-// `started` / `auto-paused` / `died`. The second scales; the first is simpler. That
+// the closed lifecycle kinds (`created`, `paused`, `auto-paused`, `crash-paused`,
+// `resumed`, and `destroyed`). The second scales; the first is simpler. That
 // choice is the caller's to make, which is why this package does not make it.
 
 // Duration renders d as the duration string the control-plane API accepts ("30m", "24h"). Provided so
@@ -31,8 +32,14 @@ func Duration(d time.Duration) string { return durationString(d) }
 // usable — the lifecycle state machine has it pass through `creating`. The engine reports its own progress
 // through state and events; this method reports what the request returned.
 func (c *Client) Create(ctx context.Context, req CreateRequest) (Sandbox, error) {
+	return c.CreateWithKey(ctx, req, "")
+}
+
+// CreateWithKey creates a sandbox with a durable idempotency key.
+func (c *Client) CreateWithKey(ctx context.Context, req CreateRequest, key IdempotencyKey) (Sandbox, error) {
 	var out Sandbox
-	err := c.do(ctx, http.MethodPost, "/v1/sandboxes", req, &out)
+	err := c.doWithHeaders(ctx, http.MethodPost, "/v1/sandboxes", req, &out,
+		map[string]string{"Idempotency-Key": string(key)})
 	return out, err
 }
 
@@ -114,10 +121,44 @@ func (c *Client) RecordActivity(ctx context.Context, sandboxID string) (Activity
 	return out, err
 }
 
+func (c *Client) SandboxSnapshot(ctx context.Context, sandboxID string) (SandboxSnapshot, error) {
+	var out SandboxSnapshot
+	err := c.do(ctx, http.MethodGet, "/v1/sandboxes/"+sandboxID+"/snapshot", nil, &out)
+	return out, err
+}
+
+func (c *Client) PlacementSnapshot(ctx context.Context, sandboxID string) (PlacementSnapshot, error) {
+	var out PlacementSnapshot
+	err := c.do(ctx, http.MethodGet, "/v1/sandboxes/"+sandboxID+"/placement", nil, &out)
+	return out, err
+}
+
+// Processes lists the durable logical process records for a Sandbox. The
+// interactive process data plane remains Connect-RPC; this route is the
+// control-plane snapshot/list view.
+func (c *Client) Processes(ctx context.Context, sandboxID string) ([]Process, error) {
+	var out []Process
+	err := c.do(ctx, http.MethodGet, "/v1/sandboxes/"+sandboxID+"/processes", nil, &out)
+	return out, err
+}
+
+func (c *Client) ProcessSnapshot(ctx context.Context, processID string) (ProcessSnapshot, error) {
+	var out ProcessSnapshot
+	err := c.do(ctx, http.MethodGet, "/v1/processes/"+processID, nil, &out)
+	return out, err
+}
+
 // Templates lists the templates a sandbox can be created from.
 func (c *Client) Templates(ctx context.Context) ([]Template, error) {
 	var out []Template
 	err := c.do(ctx, http.MethodGet, "/v1/templates", nil, &out)
+	return out, err
+}
+
+// Template reads one immutable Template including its manifest.
+func (c *Client) Template(ctx context.Context, templateID string) (Template, error) {
+	var out Template
+	err := c.do(ctx, http.MethodGet, "/v1/templates/"+templateID, nil, &out)
 	return out, err
 }
 
@@ -128,9 +169,10 @@ func (c *Client) Templates(ctx context.Context) ([]Template, error) {
 // one rather than taking one. A caller-chosen name would be a second namespace for the
 // engine to police, and the engine's IDs are the only names it guarantees.
 func (c *Client) Promote(ctx context.Context, fromSandboxID string) (string, error) {
-	req := struct {
-		FromSandboxID string `json:"from_sandbox_id"`
-	}{FromSandboxID: fromSandboxID}
+	return c.PromoteWithManifest(ctx, PromoteRequest{FromSandboxID: fromSandboxID})
+}
+
+func (c *Client) PromoteWithManifest(ctx context.Context, req PromoteRequest) (string, error) {
 	var out struct {
 		TemplateID string `json:"template_id"`
 	}

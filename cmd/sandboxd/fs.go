@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sync"
 	"syscall"
 
 	"connectrpc.com/connect"
@@ -17,7 +18,7 @@ import (
 
 // --- fs service (the transport data plane fs primitive, fs transport) --------------------------
 //
-// All unary, no watch. Paths are GUEST-ABSOLUTE and NOT confined to a root: the caller is the
+// Unary metadata/content calls plus a bounded Watch stream. Paths are GUEST-ABSOLUTE and NOT confined to a root: the caller is the
 // engine (trusted, the external API assumes an authorized caller) and the guest runs as root by design
 // (the guest identity model), so the isolation boundary is the sandbox itself — sentry, not a path check. A
 // confinement would break the contract where callers legitimately touch /etc, /root and /usr.
@@ -34,7 +35,95 @@ type fsServer struct {
 	// Without it a sandbox being actively written to looks idle for as long as nobody types,
 	// and the auto-pause that follows discards the very work in flight. Stamped in the
 	// handlers rather than by each caller, like proc.broadcast's stamp.
-	activity *activityClock
+	activity  *activityClock
+	watch     *watchHub
+	watchMu   sync.Mutex
+	watchPath string
+}
+
+type watchEntry struct {
+	path  string
+	type_ v1.EntryType
+	size  int64
+	mtime int64
+	mode  uint32
+	ino   uint64
+	dev   uint64
+}
+
+func collectWatch(root string, recursive bool) (map[string]watchEntry, error) {
+	out := make(map[string]watchEntry)
+	// These files are transport-owned journals/pid portals. They are not guest
+	// workload content; observing the journal itself would create a feedback
+	// loop because every persisted watch event changes its mtime. Match exact
+	// paths so a guest file merely sharing the prefix remains observable.
+	internalPaths := map[string]struct{}{
+		"/tmp/.sandboxd-watch.json":         {},
+		"/tmp/.sandboxd-watch.json.tmp":     {},
+		"/tmp/.sandboxd-processes.json":     {},
+		"/tmp/.sandboxd-processes.json.tmp": {},
+		"/tmp/.sandboxd-process.sock":       {},
+		"/tmp/.sandboxd-activity":           {},
+		"/tmp/.sandboxd-activity.lock":      {},
+		"/tmp/.sandboxd-transport.pid":      {},
+		"/tmp/.sandboxd-crashloop":          {},
+	}
+	isInternal := func(p string) bool {
+		_, ok := internalPaths[filepath.Clean(p)]
+		return ok
+	}
+	walk := func(p string, fi os.FileInfo) {
+		if isInternal(p) {
+			return
+		}
+		kind := v1.EntryType_ENTRY_TYPE_FILE
+		if fi.Mode()&os.ModeSymlink != 0 {
+			kind = v1.EntryType_ENTRY_TYPE_SYMLINK
+		} else if fi.IsDir() {
+			kind = v1.EntryType_ENTRY_TYPE_DIRECTORY
+		}
+		var ino, dev uint64
+		if stat, ok := fi.Sys().(*syscall.Stat_t); ok {
+			ino, dev = uint64(stat.Ino), uint64(stat.Dev)
+		}
+		out[p] = watchEntry{path: p, type_: kind, size: fi.Size(), mtime: fi.ModTime().UnixNano(), mode: uint32(fi.Mode()), ino: ino, dev: dev}
+	}
+	if !recursive {
+		ents, err := os.ReadDir(root)
+		if err != nil {
+			return nil, err
+		}
+		for _, ent := range ents {
+			p := filepath.Join(root, ent.Name())
+			if isInternal(p) {
+				continue
+			}
+			fi, err := os.Lstat(p)
+			if err == nil {
+				walk(p, fi)
+			}
+		}
+		return out, nil
+	}
+	err := filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
+		if err != nil {
+			if p == root {
+				return err
+			}
+			return nil
+		}
+		if isInternal(p) {
+			if info != nil && info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if p != root {
+			walk(p, info)
+		}
+		return nil
+	})
+	return out, err
 }
 
 // stampIO records fs traffic on the shared activity clock (the activity signal). Called by

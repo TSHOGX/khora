@@ -179,6 +179,11 @@ func (m *Mediator) committedDisk(ctx context.Context, excludeSandbox model.Sandb
 	if err != nil {
 		return 0, fmt.Errorf("admission: list volumes: %w", err)
 	}
+	for _, v := range vols {
+		if err := m.validateVolumeRecord(v); err != nil {
+			return 0, fmt.Errorf("admission: validate volume provider: %w", err)
+		}
+	}
 	return sandboxDisk + sumVolumeCaps(vols, excludeVolume), nil
 }
 
@@ -195,15 +200,23 @@ func (m *Mediator) uncappedBytes(ctx context.Context) (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("cannot measure uncapped rootfs bytes: %w", err)
 	}
-	if m.deps.Volume == nil {
+	backends, err := m.configuredVolumeBackends()
+	if err != nil {
+		return 0, fmt.Errorf("cannot resolve volume providers: %w", err)
+	}
+	if len(backends) == 0 {
 		// Not "no volumes" — unknown. With the disk axis metered, a nil backend means
 		// every volume's bytes are invisible to this term, which is precisely the
 		// silent-overcommit shape the term exists to prevent.
 		return 0, fmt.Errorf("no volume backend registered, so the Volume subsystem's share of the uncapped term cannot be measured (resource admission)")
 	}
-	volBytes, err := m.deps.Volume.UncappedBytes(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("cannot measure uncapped volume bytes: %w", err)
+	var volBytes int64
+	for _, selected := range backends {
+		bytes, err := selected.backend.UncappedBytes(ctx)
+		if err != nil {
+			return 0, fmt.Errorf("cannot measure uncapped volume bytes from provider %q: %w", selected.name, err)
+		}
+		volBytes += bytes
 	}
 	return total + volBytes, nil
 }

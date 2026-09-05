@@ -142,6 +142,13 @@ file operations, volumes, templates, network configuration, and event streaming.
 		newVolumeCloneCmd(),
 		newVolumeImportCmd(),
 		newVolumeExportCmd(),
+		newVolumeStatCmd(),
+		newVolumePathListCmd(),
+		newVolumeReadCmd(),
+		newVolumeWriteCmd(),
+		newVolumeMkdirCmd(),
+		newVolumeMoveCmd(),
+		newVolumeRemovePathCmd(),
 	)
 
 	// Template commands
@@ -152,6 +159,7 @@ file operations, volumes, templates, network configuration, and event streaming.
 	}
 	templateCmd.AddCommand(
 		newTemplateListCmd(),
+		newTemplateGetCmd(),
 		newTemplatePromoteCmd(),
 		newTemplateDeleteCmd(),
 	)

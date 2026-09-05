@@ -1,10 +1,14 @@
 package main
 
 import (
+	"fmt"
 	"os/exec"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/TSHOGX/khora/internal/guestport"
 )
 
 // These tests exercise the PID-1 reap/handoff seam as a
@@ -17,6 +21,44 @@ import (
 // namespace, so kill(-1) there would signal the whole machine).
 
 const handoffTimeout = 10 * time.Second
+
+func TestProcessRetentionFromEnv(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		env  []string
+		want time.Duration
+		err  bool
+	}{
+		{name: "default", env: nil, want: defaultProcessRetention},
+		{name: "configured", env: []string{guestport.ProcessRetentionEnv + "=37"}, want: 37},
+		{name: "malformed", env: []string{guestport.ProcessRetentionEnv + "=later"}, err: true},
+		{name: "zero", env: []string{guestport.ProcessRetentionEnv + "=0"}, err: true},
+		{name: "negative", env: []string{guestport.ProcessRetentionEnv + "=-1"}, err: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := processRetentionFromEnv(tc.env)
+			if tc.err {
+				if err == nil || !strings.Contains(err.Error(), guestport.ProcessRetentionEnv) {
+					t.Fatalf("processRetentionFromEnv(%v) error = %v; want sanitized key error", tc.env, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("processRetentionFromEnv(%v): %v", tc.env, err)
+			}
+			if got != tc.want {
+				t.Fatalf("processRetentionFromEnv(%v) = %s; want %s", tc.env, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestProcessRetentionFromEnvRejectsOverflow(t *testing.T) {
+	_, err := processRetentionFromEnv([]string{fmt.Sprintf("%s=9223372036854775808", guestport.ProcessRetentionEnv)})
+	if err == nil {
+		t.Fatal("processRetentionFromEnv accepted an overflowing duration")
+	}
+}
 
 func recvStatus(t *testing.T, ch <-chan syscall.WaitStatus) syscall.WaitStatus {
 	t.Helper()

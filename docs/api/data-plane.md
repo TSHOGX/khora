@@ -9,16 +9,20 @@ The data plane is defined by
 `ProcessService` supports:
 
 - `Start`: start a command and stream output and exit events;
-- `Connect`: replay a tracked PID's bounded output tail, then subscribe to live events;
+- `Connect`: replay a logical handle's bounded output tail, then subscribe to live events;
 - `StreamInput`, `SendInput`, and `CloseStdin`: deliver stdin;
 - `SendSignal`: signal a sandbox process;
 - `Update`: change PTY size;
-- `List`: list live PIDs.
+- `List`: list live PIDs together with logical handles and states.
 
 PTY dimensions must be supplied together. Multiple subscribers can observe one
 process. A connection replays the bounded per-process output tail before live
-events; this is not an unbounded or durable log. Output fan-out is concurrent and
-bounded, and a slow subscriber is detached instead of blocking the process. Process
+events; this is not an unbounded log. Every frame carries a sequence and Placement
+epoch; an uncovered cursor is an explicit overflow/reset result. Output fan-out is
+concurrent and bounded, and a slow subscriber is detached instead of blocking the process. The
+detached stream receives a sequence-zero `gap=true, reset_reason=overflow` keepalive
+before it terminates with `resource_exhausted`, so the caller can rescan or reconnect
+without mistaking the drop for a clean process exit. Process
 semantics and reaping are implemented in
 [cmd/sandboxd/process.go](../../cmd/sandboxd/process.go) and
 [cmd/sandboxd/reap.go](../../cmd/sandboxd/reap.go).
@@ -26,7 +30,14 @@ semantics and reaping are implemented in
 ## Filesystem service
 
 `FsService` supports read, write, stat, directory listing, mkdir, remove, and move.
-Read may include an offset and length. The service has no watch primitive.
+Read may include an offset and length. `Watch` is a separate placement-scoped,
+recursive-by-request bounded change-detection stream with its own cursor. The
+transport retains a bounded journal across transport-child restarts; reconnects
+replay events after `after_sequence`. Cursors below the retained watermark and
+slow subscribers produce an explicit `overflow=true, reset=true` event with
+sequence zero and a cursor-gap/resource-exhausted result, requiring a full
+rescan. Pause/resume advances the placement epoch, resets sequence to zero, and
+closes old streams after a `placement` reset marker.
 
 Large whole-file transfers use the HTTP streaming routes instead of placing an
 entire file in one RPC message. The Connect client also provides streamed reads and

@@ -163,17 +163,54 @@ func (r *localRoot) Stat(name string) (FileInfo, error) {
 	return infoFromStat(path.Base(cleanRel(name)), &st), nil
 }
 
+// Lstat reports the final entry without following a symlink. The parent is
+// resolved under the root and fstatat operates on one basename, preserving the
+// same confinement boundary as every mutating operation.
+func (r *localRoot) Lstat(name string) (FileInfo, error) {
+	pfd, base, err := r.parentFD(name)
+	if err != nil {
+		if cleanRel(name) == "." {
+			return r.Stat(name)
+		}
+		return FileInfo{}, err
+	}
+	defer unix.Close(pfd)
+	var st unix.Stat_t
+	if err := unix.Fstatat(pfd, base, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return FileInfo{}, &fs.PathError{Op: "lstat", Path: name, Err: err}
+	}
+	fi := infoFromStat(base, &st)
+	if fi.Type == EntrySymlink {
+		buf := make([]byte, 4096)
+		if n, err := unix.Readlinkat(pfd, base, buf); err == nil {
+			fi.SymlinkTarget = string(buf[:n])
+		}
+	}
+	return fi, nil
+}
+
 func infoFromStat(name string, st *unix.Stat_t) FileInfo {
 	mode := fs.FileMode(st.Mode & 0o7777)
-	isDir := st.Mode&unix.S_IFMT == unix.S_IFDIR
+	kind := st.Mode & unix.S_IFMT
+	isDir := kind == unix.S_IFDIR
 	if isDir {
 		mode |= fs.ModeDir
+	}
+	typ := EntryOther
+	switch kind {
+	case unix.S_IFREG:
+		typ = EntryFile
+	case unix.S_IFDIR:
+		typ = EntryDirectory
+	case unix.S_IFLNK:
+		typ = EntrySymlink
 	}
 	return FileInfo{
 		Name:    name,
 		Size:    st.Size,
 		Mode:    mode,
 		IsDir:   isDir,
+		Type:    typ,
 		ModTime: time.Unix(st.Mtim.Sec, st.Mtim.Nsec),
 	}
 }
@@ -207,7 +244,14 @@ func (r *localRoot) List(name string) ([]FileInfo, error) {
 			}
 			return nil, &fs.PathError{Op: "fstatat", Path: path.Join(name, base), Err: err}
 		}
-		out = append(out, infoFromStat(base, &st))
+		fi := infoFromStat(base, &st)
+		if fi.Type == EntrySymlink {
+			buf := make([]byte, 4096)
+			if n, err := unix.Readlinkat(fd, base, buf); err == nil {
+				fi.SymlinkTarget = string(buf[:n])
+			}
+		}
+		out = append(out, fi)
 	}
 	return out, nil
 }
@@ -299,6 +343,21 @@ func (r *localRoot) Rename(oldName, newName string) error {
 	defer unix.Close(nfd)
 	if err := unix.Renameat(ofd, obase, nfd, nbase); err != nil {
 		return &fs.PathError{Op: "renameat", Path: oldName + " -> " + newName, Err: err}
+	}
+	return nil
+}
+
+// Symlink creates a link for root-level contract fixtures. It is intentionally
+// not part of Root's production content surface; callers use Write/Mkdir and
+// Lstat, while tests need one way to plant an explicit link.
+func (r *localRoot) Symlink(target, name string) error {
+	pfd, base, err := r.parentFD(name)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(pfd)
+	if err := unix.Symlinkat(target, pfd, base); err != nil {
+		return &fs.PathError{Op: "symlinkat", Path: name, Err: err}
 	}
 	return nil
 }

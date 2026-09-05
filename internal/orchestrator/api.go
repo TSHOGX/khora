@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"regexp"
@@ -62,6 +61,7 @@ func (e *Engine) HTTPHandler() http.Handler {
 
 	// /v1/sandboxes/{id}[/pause|/resume]  (data-plane verbs are Connect, above)
 	mux.HandleFunc("/v1/sandboxes/", e.handleSandboxSub)
+	mux.HandleFunc("/v1/processes/", e.handleProcessSub)
 
 	// GET /v1/events?after=&limit= — the transactional outbox event-stream replay (pull only).
 	mux.HandleFunc("/v1/events", func(w http.ResponseWriter, r *http.Request) {
@@ -222,10 +222,10 @@ func (e *Engine) handleCreate(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	// The declaration is parsed and VALIDATED before the create verb runs, so the API error contract's
-	// "validation precedes the admission gate" holds: an invalid declaration is
-	// refused before any byte is touched or any budget recorded, and 400 and 507 are
-	// therefore never both true.
+	// Decode the declaration before the create verb. Pure shape/value validation is
+	// repeated by the mediator at its write point; deployment-dependent validation
+	// stays there so an idempotent retry can be claimed/replayed before a changed
+	// orchestrator configuration is consulted.
 	var decl *model.NetworkDecl
 	if req.Network != nil {
 		got, derr := req.Network.decode()
@@ -233,16 +233,13 @@ func (e *Engine) handleCreate(w http.ResponseWriter, r *http.Request) {
 			statusFor(w, derr)
 			return
 		}
-		if verr := e.Mediator.ValidateDeclaration(got, true); verr != nil {
-			statusFor(w, verr)
-			return
-		}
 		decl = &got
 	}
 	spec := lifecycle.CreateSpec{
-		Template: model.TemplateID(req.TemplateID),
-		Volumes:  binding,
-		Network:  decl,
+		Template:       model.TemplateID(req.TemplateID),
+		IdempotencyKey: model.IdempotencyKey(strings.TrimSpace(r.Header.Get("Idempotency-Key"))),
+		Volumes:        binding,
+		Network:        decl,
 		Limits: model.Limits{
 			CPUMillis:  req.CPUMillis,
 			MemoryByte: req.MemoryByte,
@@ -285,17 +282,23 @@ func (e *Engine) handleList(w http.ResponseWriter, r *http.Request) {
 	// sandboxResp for why List carries it rather than forcing a GET per ID.
 	out := make([]sandboxResp, 0, len(list))
 	for _, s := range list {
-		out = append(out, sandboxResp{
+		resp := sandboxResp{
 			SandboxID:  string(s.ID),
 			State:      string(s.State),
 			DeathCause: string(s.DeathCause),
-		})
+		}
+		if placement, err := e.Store.GetPlacement(r.Context(), s.ID); err == nil {
+			resp.PlacementEpoch = uint64(placement.Epoch)
+			resp.PlacementState = string(placement.State)
+		}
+		out = append(out, resp)
 	}
 	writeJSON(w, http.StatusOK, out)
 }
 
 type promoteReq struct {
-	FromSandboxID string `json:"from_sandbox_id"`
+	FromSandboxID string                  `json:"from_sandbox_id"`
+	Manifest      *model.TemplateManifest `json:"manifest,omitempty"`
 }
 type promoteResp struct {
 	TemplateID string `json:"template_id"`
@@ -305,7 +308,7 @@ type promoteResp struct {
 // Promote): freeze the sandbox's current Overlay into a new Template (the Template and Overlay model).
 func (e *Engine) handlePromote(w http.ResponseWriter, r *http.Request) {
 	var req promoteReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+	if err := strictDecode(r.Body, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
@@ -313,7 +316,7 @@ func (e *Engine) handlePromote(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "from_sandbox_id is required", http.StatusBadRequest)
 		return
 	}
-	tid, err := e.Mediator.Promote(r.Context(), model.SandboxID(req.FromSandboxID))
+	tid, err := e.Mediator.PromoteWithManifest(r.Context(), model.SandboxID(req.FromSandboxID), req.Manifest)
 	if err != nil {
 		statusFor(w, err)
 		return
@@ -333,6 +336,7 @@ func (e *Engine) handleListTemplates(w http.ResponseWriter, r *http.Request) {
 			TemplateID: string(t.ID),
 			Parent:     string(t.Parent),
 			Builtin:    t.Builtin,
+			Manifest:   t.Manifest,
 		})
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -343,9 +347,10 @@ func (e *Engine) handleListTemplates(w http.ResponseWriter, r *http.Request) {
 // reflection (openapi.go) and a map is invisible to that.
 type templateResp struct {
 	TemplateID string `json:"template_id"`
-	// Parent is the sandbox this Template was promoted from, "" for a builtin.
-	Parent  string `json:"parent"`
-	Builtin bool   `json:"builtin"`
+	// Parent is the immediate parent Template in the immutable lineage, "" for a builtin.
+	Parent   string                 `json:"parent"`
+	Builtin  bool                   `json:"builtin"`
+	Manifest model.TemplateManifest `json:"manifest"`
 }
 
 func (e *Engine) handleTemplateSub(w http.ResponseWriter, r *http.Request) {
@@ -355,15 +360,23 @@ func (e *Engine) handleTemplateSub(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing template id", http.StatusBadRequest)
 		return
 	}
-	if r.Method != http.MethodDelete {
+	switch r.Method {
+	case http.MethodGet:
+		tm, err := e.Mediator.GetTemplate(r.Context(), id)
+		if err != nil {
+			statusFor(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, templateResp{TemplateID: string(tm.ID), Parent: string(tm.Parent), Builtin: tm.Builtin, Manifest: tm.Manifest})
+	case http.MethodDelete:
+		if err := e.Mediator.DeleteTemplate(r.Context(), id); err != nil {
+			statusFor(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
 	}
-	if err := e.Mediator.DeleteTemplate(r.Context(), id); err != nil {
-		statusFor(w, err)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
 }
 
 func (e *Engine) handleSandboxSub(w http.ResponseWriter, r *http.Request) {
@@ -411,18 +424,115 @@ func (e *Engine) handleSandboxSub(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	case sub == "activity" && r.Method == http.MethodPost:
 		e.handleActivity(w, r, id)
+	case sub == "telemetry" && r.Method == http.MethodGet:
+		e.handleTelemetry(w, r, id)
+	case sub == "snapshot" && r.Method == http.MethodGet:
+		e.handleSandboxSnapshot(w, r, id)
+	case sub == "placement" && r.Method == http.MethodGet:
+		e.handlePlacementSnapshot(w, r, id)
+	case sub == "processes" && r.Method == http.MethodGet:
+		e.handleSandboxProcesses(w, r, id)
 	case sub == "activity":
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	// The same the API error contract general rule for the older routes. They landed in `default` as 404,
 	// which contradicts the API error contract ("a wrong method on ANY collection/object route → 405")
 	// and was inconsistent with the two arms above for no reason anyone chose: the
 	// route exists, the method does not apply to it.
-	case sub == "files", sub == "pause", sub == "resume":
+	case sub == "files", sub == "pause", sub == "resume", sub == "telemetry", sub == "snapshot", sub == "placement":
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	default:
 		// process/fs data plane is Connect-RPC (the outer-edge transport split), not REST here.
 		http.Error(w, "not found", http.StatusNotFound)
 	}
+}
+
+func (e *Engine) handleSandboxSnapshot(w http.ResponseWriter, r *http.Request, id model.SandboxID) {
+	s, err := e.Mediator.SandboxSnapshot(r.Context(), id)
+	if err != nil {
+		statusFor(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, s)
+}
+
+func (e *Engine) handlePlacementSnapshot(w http.ResponseWriter, r *http.Request, id model.SandboxID) {
+	s, err := e.Mediator.PlacementSnapshot(r.Context(), id)
+	if err != nil {
+		statusFor(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, s)
+}
+
+func (e *Engine) handleSandboxProcesses(w http.ResponseWriter, r *http.Request, id model.SandboxID) {
+	// Both Store backends return an empty slice for an unknown scope. Check the
+	// authoritative Sandbox row first so an unknown object is a deterministic
+	// 404 rather than a misleading successful empty collection.
+	if _, err := e.Store.GetSandbox(r.Context(), id); err != nil {
+		statusFor(w, err)
+		return
+	}
+	list, err := e.Store.ListProcesses(r.Context(), id)
+	if err != nil {
+		statusFor(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, list)
+}
+
+func (e *Engine) handleProcessSub(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	id := model.ProcessID(strings.TrimPrefix(r.URL.Path, "/v1/processes/"))
+	if id == "" {
+		http.Error(w, "missing process id", http.StatusBadRequest)
+		return
+	}
+	s, err := e.Mediator.ProcessSnapshot(r.Context(), id)
+	if err != nil {
+		statusFor(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, s)
+}
+
+func (e *Engine) handleTelemetry(w http.ResponseWriter, r *http.Request, id model.SandboxID) {
+	after, err := parseUintQuery(r, "after", 0)
+	if err != nil {
+		statusFor(w, err)
+		return
+	}
+	limit, err := parseIntQuery(r, "limit", 100)
+	if err != nil || limit <= 0 {
+		if err == nil {
+			err = model.NewContractError(model.ErrorInvalidArgument, "limit must be positive")
+		}
+		statusFor(w, err)
+		return
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	samples, earliest, latest, err := e.Mediator.Telemetry(r.Context(), id, after, int(limit))
+	if errors.Is(err, model.ErrCursorExpired) {
+		writeJSON(w, http.StatusGone, struct {
+			Samples  []model.TelemetrySample `json:"samples"`
+			Earliest uint64                  `json:"earliest"`
+			Latest   uint64                  `json:"latest"`
+		}{[]model.TelemetrySample{}, earliest, latest})
+		return
+	}
+	if err != nil {
+		statusFor(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, struct {
+		Samples  []model.TelemetrySample `json:"samples"`
+		Earliest uint64                  `json:"earliest"`
+		Latest   uint64                  `json:"latest"`
+	}{samples, earliest, latest})
 }
 
 // patchReq is the control-plane API PATCH body — rewrite a sandbox's Binding (resource admission). Every
@@ -626,6 +736,7 @@ type eventItem struct {
 	// PlacementAddress is the guest-visible address established by created/resumed.
 	// It is historical event data, not a lookup of the sandbox's current placement.
 	PlacementAddress string `json:"placement_address,omitempty"`
+	PlacementEpoch   uint64 `json:"placement_epoch,omitempty"`
 	// Cause is WHY, present only on a Kind reachable by more than one route (the transactional outbox),
 	// omitted otherwise. Today: `destroyed` carries `requested` (the Destroy verb) or
 	// `retention-expired` (the reaper's evict of a paused sandbox past `retention`).
@@ -776,7 +887,11 @@ func (e *Engine) handleEvents(w http.ResponseWriter, r *http.Request) {
 	// and nothing else; refusing it would tell a caught-up subscriber it lost data, and the
 	// remedy this response documents ("restart from `earliest`") would then skip the event
 	// AT `earliest` — manufacturing the gap this refusal exists to prevent.
-	if after > 0 && earliest > 0 && after+1 < earliest {
+	// Compare without computing after+1: after is an int64 cursor and may be
+	// MaxInt64.  Wrapping that addition would turn a valid tail read into a
+	// false 410.  Because after is exclusive, expiry is exactly after <
+	// earliest-1 when earliest is at least two.
+	if after > 0 && earliest > 1 && after < earliest-1 {
 		writeJSON(w, http.StatusGone, eventsResp{
 			Events:   []eventItem{},
 			Earliest: earliest,
@@ -793,6 +908,7 @@ func (e *Engine) handleEvents(w http.ResponseWriter, r *http.Request) {
 			Kind:             string(ev.Kind),
 			State:            string(ev.State),
 			PlacementAddress: ev.PlacementAddress,
+			PlacementEpoch:   uint64(ev.PlacementEpoch),
 			Cause:            string(ev.Cause),
 			OccurredAt:       ev.OccurredAt.UTC().Format(time.RFC3339Nano),
 		})
@@ -822,8 +938,10 @@ func (e *Engine) handleEvents(w http.ResponseWriter, r *http.Request) {
 //   - List gets it too: without it a caller seeing several `paused` sandboxes must fan out one
 //     GET per ID to learn which are resumable, turning one list into N+1 requests.
 type sandboxResp struct {
-	SandboxID string `json:"sandbox_id"`
-	State     string `json:"state"`
+	SandboxID      string `json:"sandbox_id"`
+	State          string `json:"state"`
+	PlacementEpoch uint64 `json:"placement_epoch,omitempty"`
+	PlacementState string `json:"placement_state,omitempty"`
 	// DeathCause is why the isolation unit was last found dead (health and reclamation). Absent =
 	// never observed dead. See the type doc for why absent rather than "".
 	DeathCause string `json:"death_cause,omitempty"`
@@ -850,12 +968,17 @@ func (e *Engine) handleGet(w http.ResponseWriter, r *http.Request, id model.Sand
 		statusFor(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, sandboxResp{
+	resp := sandboxResp{
 		SandboxID:  string(info.Sandbox.ID),
 		State:      string(info.Sandbox.State),
 		DeathCause: string(info.Sandbox.DeathCause),
 		UsedByte:   info.UsedByte,
-	})
+	}
+	if info.Placement != nil {
+		resp.PlacementEpoch = uint64(info.Placement.Epoch)
+		resp.PlacementState = string(info.Placement.State)
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (e *Engine) doVerb(w http.ResponseWriter, r *http.Request, id model.SandboxID, verb func(context.Context, model.SandboxID) error) {
@@ -1099,6 +1222,26 @@ func trimPunct(f string) (lead, tok, trail string) {
 // statusCodeFor is the API error contract verdict → status mapping, and NOTHING ELSE: it writes
 // no response, so it cannot smuggle a body past the funnel.
 func statusCodeFor(err error) int {
+	// Protocol-neutral state-core classes are handled before subsystem-specific
+	// sentinels so every HTTP edge shares the same idempotency/epoch semantics.
+	switch {
+	case errors.Is(err, model.ErrInvalidArgument), errors.Is(err, model.ErrUnsupported):
+		return http.StatusBadRequest
+	case errors.Is(err, model.ErrNotFound):
+		return http.StatusNotFound
+	case errors.Is(err, model.ErrIdempotencyConflict), errors.Is(err, model.ErrStaleEpoch),
+		errors.Is(err, model.ErrConflict), errors.Is(err, model.ErrInProgress), errors.Is(err, model.ErrCursorGap):
+		return http.StatusConflict
+	case errors.Is(err, model.ErrCursorExpired):
+		return http.StatusGone
+	case errors.Is(err, model.ErrCapacity):
+		// A valid request exceeded the node's declared budget. Keep this
+		// distinct from unavailable: the operation can be retried only after
+		// capacity is released, and idempotent replays must retain 507.
+		return http.StatusInsufficientStorage
+	case errors.Is(err, model.ErrUnavailable):
+		return http.StatusServiceUnavailable
+	}
 	// The Volume subsystem verdicts first: they are 400s that would otherwise be caught by
 	// a broader arm below and reported as something the caller could retry.
 	if code, ok := volumeStatus(err); ok {
@@ -1161,7 +1304,8 @@ func statusCodeFor(err error) int {
 		// the cap or destroying the sandbox — 409, never a raw 500.
 		return http.StatusConflict
 	case errors.Is(err, store.ErrNotFound), errors.Is(err, store.ErrTemplateNotFound),
-		errors.Is(err, store.ErrVolumeNotFound):
+		errors.Is(err, store.ErrVolumeNotFound), errors.Is(err, store.ErrPlacementNotFound),
+		errors.Is(err, store.ErrProcessNotFound):
 		// Volume not-found has its own sentinel so the 404 names the right object; a
 		// 404 mentioning the wrong one sends the caller looking in the wrong place.
 		// Note it is NOT folded into success on delete (the API error contract): the reference-protection

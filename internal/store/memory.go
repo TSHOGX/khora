@@ -18,8 +18,14 @@ import (
 // transition and its event commit together or not at all — where SQLite uses
 // BEGIN/COMMIT. Every "X equivalent" comment below is one clause of that.
 type Memory struct {
-	mu  sync.Mutex
-	rec map[model.SandboxID]model.Sandbox
+	mu            sync.Mutex
+	rec           map[model.SandboxID]model.Sandbox
+	placements    map[model.SandboxID]model.Placement
+	processes     map[model.ProcessID]model.Process
+	operations    map[model.OperationID]model.Operation
+	operationKeys map[string]model.OperationID
+	telemetry     map[model.SandboxID][]model.TelemetrySample
+	telemetrySeq  map[model.SandboxID]uint64
 	// tmpl holds Template rows (health and reclamation first-class object). The health and reclamation
 	// reference-protection contract arrives here as a Go scan under the one mutex,
 	// where SQLite gets it from FK RESTRICT.
@@ -59,9 +65,15 @@ type outboxRow struct {
 
 func NewMemory() *Memory {
 	return &Memory{
-		rec:  make(map[model.SandboxID]model.Sandbox),
-		tmpl: make(map[model.TemplateID]model.Template),
-		vol:  make(map[model.VolumeID]model.Volume),
+		rec:           make(map[model.SandboxID]model.Sandbox),
+		tmpl:          make(map[model.TemplateID]model.Template),
+		vol:           make(map[model.VolumeID]model.Volume),
+		placements:    make(map[model.SandboxID]model.Placement),
+		processes:     make(map[model.ProcessID]model.Process),
+		operations:    make(map[model.OperationID]model.Operation),
+		operationKeys: make(map[string]model.OperationID),
+		telemetry:     make(map[model.SandboxID][]model.TelemetrySample),
+		telemetrySeq:  make(map[model.SandboxID]uint64),
 	}
 }
 
@@ -100,6 +112,13 @@ func (m *Memory) appendEvent(ev *Event) {
 	m.outbox = append(m.outbox, row)
 }
 
+func (m *Memory) ensureEventSequence(ev *Event) error {
+	if ev != nil && m.nextSeq >= maxEventSequence {
+		return ErrEventSequenceExhausted
+	}
+	return nil
+}
+
 func (m *Memory) CreateSandbox(_ context.Context, s model.Sandbox, ev *Event) error {
 	if err := checkEventKind(ev); err != nil {
 		return err
@@ -115,6 +134,9 @@ func (m *Memory) CreateSandbox(_ context.Context, s model.Sandbox, ev *Event) er
 	if _, ok := m.tmpl[s.Template]; !ok {
 		return ErrTemplateNotFound
 	}
+	if err := m.ensureEventSequence(ev); err != nil {
+		return err
+	}
 	// Normalize the network declaration on the way in, so this backend holds what SQLite
 	// holds (it gets the same from marshalNetwork): the control-plane API requires the three arrays to read
 	// back as `[]` rather than null. Without it the two backends would disagree on the
@@ -126,6 +148,10 @@ func (m *Memory) CreateSandbox(_ context.Context, s model.Sandbox, ev *Event) er
 }
 
 func (m *Memory) CreateTemplate(_ context.Context, t model.Template) error {
+	if err := t.Validate(); err != nil {
+		return err
+	}
+	t.Manifest = t.Manifest.Normalize()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, ok := m.tmpl[t.ID]; ok {
@@ -148,6 +174,10 @@ func (m *Memory) GetTemplate(_ context.Context, id model.TemplateID) (model.Temp
 	if !ok {
 		return model.Template{}, ErrTemplateNotFound
 	}
+	t.Manifest = t.Manifest.Normalize()
+	if err := t.Validate(); err != nil {
+		return model.Template{}, err
+	}
 	return t, nil
 }
 
@@ -156,6 +186,10 @@ func (m *Memory) ListTemplates(_ context.Context) ([]model.Template, error) {
 	defer m.mu.Unlock()
 	out := make([]model.Template, 0, len(m.tmpl))
 	for _, t := range m.tmpl {
+		t.Manifest = t.Manifest.Normalize()
+		if err := t.Validate(); err != nil {
+			return nil, err
+		}
 		out = append(out, t)
 	}
 	return out, nil
@@ -444,6 +478,9 @@ func (m *Memory) CompareAndSetState(_ context.Context, id model.SandboxID, expec
 	if s.State != expected {
 		return ErrConflict
 	}
+	if err := m.ensureEventSequence(ev); err != nil {
+		return err
+	}
 	s.State = next
 	// death cause under the SAME lock as the state change (health and reclamation / the transactional outbox, and
 	// Store.CompareAndSetState for why no later window exists). nil = leave untouched.
@@ -524,6 +561,15 @@ func (m *Memory) DeleteSandbox(_ context.Context, id model.SandboxID, ev *Event)
 	for _, mt := range m.mounts {
 		if mt.Sandbox == id {
 			return ErrSandboxHasMounts
+		}
+	}
+	if err := m.ensureEventSequence(ev); err != nil {
+		return err
+	}
+	delete(m.placements, id)
+	for processID, p := range m.processes {
+		if p.Sandbox == id {
+			delete(m.processes, processID)
 		}
 	}
 	delete(m.rec, id)

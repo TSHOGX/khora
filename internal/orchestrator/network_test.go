@@ -252,6 +252,25 @@ func TestStrictDecodeRefusesAMisspelledDeclarationKey(t *testing.T) {
 	}
 }
 
+func TestStrictDecodeRejectsTrailingJSON(t *testing.T) {
+	for _, raw := range []string{
+		`{"template_id":"bare"} {"template_id":"other"}`,
+		`{"template_id":"bare"} garbage`,
+	} {
+		var req createReq
+		if err := strictDecode(strings.NewReader(raw), &req); err == nil {
+			t.Fatalf("strictDecode accepted trailing data %q", raw)
+		}
+	}
+}
+
+func TestStrictDecodeRejectsTopLevelNull(t *testing.T) {
+	var req createReq
+	if err := strictDecode(strings.NewReader("null"), &req); err == nil {
+		t.Fatal("strictDecode accepted top-level null as a zero-valued request")
+	}
+}
+
 // `network` omitted from create is LEGAL and normalizes to an explicit
 // `{deny, [], [], []}`; `network` GIVEN but missing `egress.default` is the API error contract's first
 // 400 class. BOTH DIRECTIONS, because they share one code path and whichever is

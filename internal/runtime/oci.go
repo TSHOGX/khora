@@ -1,5 +1,13 @@
 package runtime
 
+import (
+	"fmt"
+	"strconv"
+	"time"
+
+	"github.com/TSHOGX/khora/internal/guestport"
+)
+
 // Minimal OCI runtime-spec (config.json) builder. We emit only the fields runsc
 // needs, not the full runtime-spec — pulling the whole
 // opencontainers/runtime-spec module in for a handful of fields would be weight
@@ -265,4 +273,21 @@ func buildOCISpec(mergedPath, netnsPath, cgroupsPath string, limits ResourceLimi
 			Resources:   res,
 		},
 	}
+}
+
+// processEnvironment renders the small launch-time environment shared with
+// sandboxd PID 1. The retention policy is portable duration data, not a host
+// path or descriptor, so it can cross the runtime seam as an environment value.
+// Zero intentionally omits the key: direct provider callers then get the
+// guest's documented 24-hour default, while lifecycle callers pass their
+// normalized positive policy explicitly.
+func processEnvironment(retention time.Duration) ([]string, error) {
+	if retention < 0 {
+		return nil, fmt.Errorf("runtime: process retention must not be negative")
+	}
+	env := []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "HOME=/root"}
+	if retention > 0 {
+		env = append(env, guestport.ProcessRetentionEnv+"="+strconv.FormatInt(int64(retention), 10))
+	}
+	return env, nil
 }

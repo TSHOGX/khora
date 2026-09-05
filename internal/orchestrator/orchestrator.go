@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"slices"
 	"sync"
 	"time"
 
@@ -24,6 +25,16 @@ import (
 	"github.com/TSHOGX/khora/internal/store"
 	"github.com/TSHOGX/khora/internal/transport"
 	"github.com/TSHOGX/khora/internal/volume"
+)
+
+// VolumeProvider is the typed orchestrator configuration name for a built-in
+// Volume provider. The alias keeps the durable vocabulary owned by the Volume
+// subsystem while making Config self-documenting to assembly callers.
+type VolumeProvider = volume.ProviderName
+
+const (
+	VolumeProviderLocalBtrfs = volume.LocalBtrfsProvider
+	VolumeProviderPlainDir   = volume.PlainDirProvider
 )
 
 // Config is the orchestrator's local configuration (the engine vocabulary boundary one config).
@@ -57,7 +68,9 @@ type Config struct {
 	// zero is the shipped behavior rather than a "fill in a default" sentinel — the
 	// opposite of the two TTLs above. See lifecycle.Deps.EventRetention for why the
 	// engine must not invent this number.
-	EventRetention time.Duration
+	EventRetention   time.Duration
+	TelemetryPolicy  model.TelemetryPolicy
+	ProcessRetention model.ProcessRetentionPolicy
 
 	// SweepInterval / TransportDownBudget are the reaper's tuning knobs
 	// (the health and reaper boundary). Zero → NewReaper's conservative defaults.
@@ -69,6 +82,16 @@ type Config struct {
 	// it: each subsystem's orphan sweep enumerates its own root, so nesting would put
 	// one subsystem's units inside the other's enumeration.
 	VolumesDir string
+
+	// VolumeProvider selects the built-in Volume provider for newly-created
+	// Volumes. Existing records are always routed by their persisted backend name.
+	// Empty selects the standard local_btrfs provider.
+	VolumeProvider volume.ProviderName
+	// VolumeLocalBtrfs and VolumePlainDir carry provider-owned settings. Only the
+	// selected provider's settings are used; unknown selections fail before the
+	// engine starts serving.
+	VolumeLocalBtrfs volume.LocalBtrfsConfig
+	VolumePlainDir   volume.PlainDirConfig
 
 	// NodeDiskByte / NodeMemoryByte are the resource admission no-oversubscribe budgets the
 	// admission gate admits against (the engine vocabulary boundary one config). Zero leaves that axis
@@ -134,9 +157,13 @@ type Config struct {
 
 // Engine is the assembled engine host.
 type Engine struct {
-	Mediator  *lifecycle.Mediator
-	Store     store.Store
-	Publisher *store.Publisher
+	Mediator *lifecycle.Mediator
+	Store    store.Store
+	// VolumeRegistry is the configured internal selection set. It is exposed on
+	// the assembled Engine for startup/reconciliation tests; API callers still
+	// address Volumes by ID and never receive provider handles.
+	VolumeRegistry *volume.Registry
+	Publisher      *store.Publisher
 	// health backs /healthz, /readyz and /metrics (see health.go).
 	health health
 	// httpHandlers gates and tracks handlers entering the engine mux. Shutdown closes
@@ -150,6 +177,83 @@ type Engine struct {
 	// because stopping them is a MIDDLE step of Shutdown's sequence, and a caller holding
 	// it would have to re-implement that order at the call site.
 	loops loopSet
+	// processStarts serializes the reservation-to-guest-dispatch window for one
+	// logical process identity. A retry must not observe a starting row while a
+	// canceled request is deciding whether to release it.
+	processStartsMu sync.Mutex
+	processStarts   map[string]*processStartFlight
+}
+
+type processStartFlight struct {
+	done  chan struct{}
+	locks []string
+}
+
+// acquireProcessStart acquires all aliases for one Start request atomically.
+// A supplied handle and an idempotency key are both identities for the same
+// reservation; locking only one lets cross-alias retries race reservation
+// cleanup. Alias ordering is deterministic so concurrent requests cannot
+// deadlock while waiting on overlapping identities.
+func (e *Engine) acquireProcessStart(ctx context.Context, identities ...string) (func(), error) {
+	if e == nil {
+		return func() {}, nil
+	}
+	locks := make([]string, 0, len(identities))
+	seen := make(map[string]struct{}, len(identities))
+	for _, identity := range identities {
+		if identity == "" {
+			continue
+		}
+		if _, ok := seen[identity]; ok {
+			continue
+		}
+		seen[identity] = struct{}{}
+		locks = append(locks, identity)
+	}
+	if len(locks) == 0 {
+		return func() {}, nil
+	}
+	slices.Sort(locks)
+	for {
+		e.processStartsMu.Lock()
+		if e.processStarts == nil {
+			e.processStarts = make(map[string]*processStartFlight)
+		}
+		var wait <-chan struct{}
+		for _, identity := range locks {
+			if flight := e.processStarts[identity]; flight != nil {
+				wait = flight.done
+				break
+			}
+		}
+		if wait != nil {
+			e.processStartsMu.Unlock()
+			select {
+			case <-wait:
+				continue
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+		flight := &processStartFlight{done: make(chan struct{}), locks: locks}
+		for _, identity := range locks {
+			e.processStarts[identity] = flight
+		}
+		e.processStartsMu.Unlock()
+		var once sync.Once
+		return func() {
+			once.Do(func() {
+				e.processStartsMu.Lock()
+				for _, identity := range flight.locks {
+					if e.processStarts[identity] == flight {
+						delete(e.processStarts, identity)
+					}
+				}
+				close(flight.done)
+				e.processStartsMu.Unlock()
+			})
+		}, nil
+	}
 }
 
 type handlerTracker struct {
@@ -208,6 +312,18 @@ func New(cfg Config) (*Engine, error) {
 	if cfg.TemplatesDir == "" || cfg.StateDir == "" {
 		return nil, fmt.Errorf("orchestrator: TemplatesDir and StateDir are required")
 	}
+	processRetention := cfg.ProcessRetention
+	if processRetention.ExitedFor == 0 {
+		processRetention = model.DefaultProcessRetention
+	} else if err := processRetention.Validate(); err != nil {
+		return nil, fmt.Errorf("orchestrator: process retention: %w", err)
+	}
+	telemetryPolicy := cfg.TelemetryPolicy
+	if telemetryPolicy.Interval == 0 && telemetryPolicy.Retention == 0 {
+		telemetryPolicy = model.DefaultTelemetryPolicy
+	} else if err := telemetryPolicy.Validate(); err != nil {
+		return nil, fmt.Errorf("orchestrator: telemetry policy: %w", err)
+	}
 
 	dep := network.Deployment{SecondHopUID: cfg.SecondHopUID}
 	// FAIL FAST, BEFORE ANY SUBSTRATE STATE EXISTS. A second-hop uid equal to this
@@ -232,6 +348,42 @@ func New(cfg Config) (*Engine, error) {
 		}
 	}
 
+	// Assemble the configured Volume provider before constructing the remaining
+	// substrate providers. An unknown selection is a startup error, never an
+	// implicit fallback to local_btrfs. Readiness and durable-reference checks
+	// run once below, after the Store is available and before New returns.
+	volumeCfg := volume.ProviderConfig{
+		Provider:   cfg.VolumeProvider,
+		LocalBtrfs: cfg.VolumeLocalBtrfs,
+		PlainDir:   cfg.VolumePlainDir,
+	}
+	if volumeCfg.LocalBtrfs.VolumesDir == "" {
+		volumeCfg.LocalBtrfs.VolumesDir = cfg.VolumesDir
+		if volumeCfg.LocalBtrfs.VolumesDir == "" {
+			volumeCfg.LocalBtrfs.VolumesDir = cfg.StateDir + "/volumes"
+		}
+	}
+	if volumeCfg.PlainDir.Dir == "" {
+		volumeCfg.PlainDir.Dir = cfg.VolumesDir
+		if volumeCfg.PlainDir.Dir == "" {
+			volumeCfg.PlainDir.Dir = cfg.StateDir + "/volumes"
+		}
+	}
+	registry, err := volume.Assemble(volumeCfg)
+	if err != nil {
+		return nil, fmt.Errorf("orchestrator: %w", err)
+	}
+	if err := registry.Validate(context.Background()); err != nil {
+		return nil, fmt.Errorf("orchestrator: validate volume providers: %w", err)
+	}
+	if err := registry.Seal(); err != nil {
+		return nil, fmt.Errorf("orchestrator: seal volume providers: %w", err)
+	}
+	defaultBackend, err := registry.Default()
+	if err != nil {
+		return nil, fmt.Errorf("orchestrator: select volume provider: %w", err)
+	}
+
 	rp, err := rootfs.NewHostOverlayFS(cfg.StateDir+"/overlays", cfg.TemplatesDir, cfg.StateDir+"/layers")
 	if err != nil {
 		return nil, err
@@ -242,17 +394,6 @@ func New(cfg Config) (*Engine, error) {
 	}
 	rt.Sudo = cfg.Sudo
 	rt.HostPublishIP = cfg.HostPublishIP
-
-	// the Volume subsystem volume backend. The local arm is the default; registering a different one
-	// is a extension boundary registration, not an edit to the callers above.
-	volumesDir := cfg.VolumesDir
-	if volumesDir == "" {
-		volumesDir = cfg.StateDir + "/volumes"
-	}
-	vb, err := volume.NewLocalBtrfs(volumesDir)
-	if err != nil {
-		return nil, err
-	}
 
 	// persistent store (the SQLite store choice) — register-an-implementation swap from Memory,
 	// no caller change (the extension boundary). This durability is what CREATES the atomic transition rollback
@@ -270,13 +411,16 @@ func New(cfg Config) (*Engine, error) {
 		Store:                 st,
 		Runtime:               rt,
 		Rootfs:                rp,
-		Volume:                vb,
+		Volume:                defaultBackend,
+		VolumeRegistry:        registry,
 		Dial:                  transport.Dial,
 		HealthTimeout:         cfg.HealthTimeout,
 		DrainGrace:            cfg.DrainGrace,
 		DefaultIdleTimeout:    cfg.DefaultIdleTimeout,
 		DefaultRetention:      cfg.DefaultRetention,
 		EventRetention:        cfg.EventRetention,
+		TelemetryPolicy:       telemetryPolicy,
+		ProcessRetention:      processRetention,
 		FaultAfterColdStart:   cfg.FaultAfterColdStart,
 		FaultAfterVolumeBytes: cfg.FaultAfterVolumeBytes,
 		NodeCapacity: lifecycle.NodeCapacity{
@@ -285,6 +429,10 @@ func New(cfg Config) (*Engine, error) {
 		},
 		Deployment: dep,
 	})
+	if err := med.ValidateVolumeProviders(context.Background()); err != nil {
+		_ = st.Close()
+		return nil, fmt.Errorf("orchestrator: validate durable volume providers: %w", err)
+	}
 
 	// outbox publisher → a log sink (the transactional outbox: the engine only guarantees reliable
 	// write to a replayable stream; a real subscriber lives outside the engine).
@@ -296,7 +444,7 @@ func New(cfg Config) (*Engine, error) {
 
 	reaper := lifecycle.NewReaper(med, cfg.SweepInterval, cfg.TransportDownBudget)
 
-	eng := &Engine{Mediator: med, Store: st, Publisher: pub, Reaper: reaper}
+	eng := &Engine{Mediator: med, Store: st, VolumeRegistry: registry, Publisher: pub, Reaper: reaper}
 	eng.health.startedAt = time.Now()
 	return eng, nil
 }
@@ -306,6 +454,16 @@ func New(cfg Config) (*Engine, error) {
 // the sandboxes.template FK (health and reclamation) needs the builtin rows present.
 func (e *Engine) SeedTemplates(ctx context.Context) error {
 	return e.Mediator.SeedBuiltinTemplates(ctx)
+}
+
+// ValidateVolumeProviders rechecks configured providers and durable Volume
+// references. New performs this gate before returning; the method is useful to
+// callers that reopen or replace a durable Store before serving.
+func (e *Engine) ValidateVolumeProviders(ctx context.Context) error {
+	if e == nil || e.Mediator == nil {
+		return fmt.Errorf("orchestrator: no lifecycle mediator")
+	}
+	return e.Mediator.ValidateVolumeProviders(ctx)
 }
 
 // Reconcile runs the atomic transition rollback startup crash-reconciliation (orphan reclaim +

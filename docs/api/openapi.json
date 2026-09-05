@@ -1,10 +1,285 @@
 {
   "components": {
     "schemas": {
+      "Cursor": {
+        "properties": {
+          "epoch": {
+            "format": "uint64",
+            "maximum": 18446744073709551615,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "object_id": {
+            "type": "string"
+          },
+          "sequence": {
+            "format": "uint64",
+            "maximum": 18446744073709551615,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "stream": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "EventEnvelope": {
+        "properties": {
+          "epoch": {
+            "format": "uint64",
+            "maximum": 18446744073709551615,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "id": {
+            "type": "string"
+          },
+          "object_id": {
+            "type": "string"
+          },
+          "object_kind": {
+            "type": "string"
+          },
+          "occurred_at": {
+            "$ref": "#/components/schemas/Time"
+          },
+          "sequence": {
+            "format": "uint64",
+            "maximum": 18446744073709551615,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "stream": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "Measurement": {
+        "properties": {
+          "available": {
+            "type": "boolean"
+          },
+          "value": {
+            "format": "int64",
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "PlacementSnapshot": {
+        "properties": {
+          "at": {
+            "$ref": "#/components/schemas/Time"
+          },
+          "epoch": {
+            "format": "uint64",
+            "maximum": 18446744073709551615,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "resources": {
+            "$ref": "#/components/schemas/ResourceSnapshot"
+          },
+          "sandbox_id": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "Process": {
+        "properties": {
+          "exit_code": {
+            "format": "int64",
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
+            "type": "integer"
+          },
+          "exited_at": {
+            "$ref": "#/components/schemas/Time"
+          },
+          "output_cursor": {
+            "$ref": "#/components/schemas/Cursor"
+          },
+          "pid": {
+            "format": "int64",
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
+            "type": "integer"
+          },
+          "placement_epoch": {
+            "format": "uint64",
+            "maximum": 18446744073709551615,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "process_id": {
+            "type": "string"
+          },
+          "sandbox_id": {
+            "type": "string"
+          },
+          "started_at": {
+            "$ref": "#/components/schemas/Time"
+          },
+          "state": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "ProcessSnapshot": {
+        "properties": {
+          "at": {
+            "$ref": "#/components/schemas/Time"
+          },
+          "exit_code": {
+            "format": "int64",
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
+            "type": "integer"
+          },
+          "pid": {
+            "format": "int64",
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
+            "type": "integer"
+          },
+          "placement_epoch": {
+            "format": "uint64",
+            "maximum": 18446744073709551615,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "process_id": {
+            "type": "string"
+          },
+          "resources": {
+            "$ref": "#/components/schemas/ResourceSnapshot"
+          },
+          "sandbox_id": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "ResourceSnapshot": {
+        "properties": {
+          "at": {
+            "$ref": "#/components/schemas/Time"
+          },
+          "cpu": {
+            "$ref": "#/components/schemas/Measurement"
+          },
+          "disk": {
+            "$ref": "#/components/schemas/Measurement"
+          },
+          "memory": {
+            "$ref": "#/components/schemas/Measurement"
+          },
+          "state": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "SandboxSnapshot": {
+        "properties": {
+          "at": {
+            "$ref": "#/components/schemas/Time"
+          },
+          "placement_epoch": {
+            "format": "uint64",
+            "maximum": 18446744073709551615,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "resources": {
+            "$ref": "#/components/schemas/ResourceSnapshot"
+          },
+          "sandbox_id": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "TelemetrySample": {
+        "properties": {
+          "envelope": {
+            "$ref": "#/components/schemas/EventEnvelope"
+          },
+          "placement_epoch": {
+            "format": "uint64",
+            "maximum": 18446744073709551615,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "process_id": {
+            "type": "string"
+          },
+          "sandbox_id": {
+            "type": "string"
+          },
+          "snapshot": {
+            "$ref": "#/components/schemas/ResourceSnapshot"
+          }
+        },
+        "type": "object"
+      },
+      "TemplateManifest": {
+        "properties": {
+          "capabilities": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "content_digest": {
+            "type": "string"
+          },
+          "digest_algorithm": {
+            "type": "string"
+          },
+          "platform": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "string"
+          },
+          "sbom_reference": {
+            "type": "string"
+          },
+          "schema_version": {
+            "format": "uint64",
+            "maximum": 4294967295,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "Time": {
+        "format": "date-time",
+        "type": "string"
+      },
       "activityResp": {
         "properties": {
           "idle_millis": {
             "format": "int64",
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
             "type": "integer"
           }
         },
@@ -14,10 +289,14 @@
         "properties": {
           "cpu_millis": {
             "format": "int64",
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
             "type": "integer"
           },
           "disk_byte": {
             "format": "int64",
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
             "type": "integer"
           },
           "idle_timeout": {
@@ -25,6 +304,8 @@
           },
           "memory_byte": {
             "format": "int64",
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
             "type": "integer"
           },
           "network": {
@@ -65,7 +346,9 @@
             "type": "string"
           },
           "default_hit_packet": {
-            "format": "int64",
+            "format": "uint64",
+            "maximum": 18446744073709551615,
+            "minimum": 0,
             "type": "integer"
           },
           "via": {
@@ -89,7 +372,9 @@
             "type": "string"
           },
           "default_hit_packet": {
-            "format": "int64",
+            "format": "uint64",
+            "maximum": 18446744073709551615,
+            "minimum": 0,
             "type": "integer"
           },
           "via": {
@@ -118,11 +403,19 @@
           "placement_address": {
             "type": "string"
           },
+          "placement_epoch": {
+            "format": "uint64",
+            "maximum": 18446744073709551615,
+            "minimum": 0,
+            "type": "integer"
+          },
           "sandbox_id": {
             "type": "string"
           },
           "seq": {
             "format": "int64",
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
             "type": "integer"
           },
           "state": {
@@ -135,6 +428,8 @@
         "properties": {
           "earliest": {
             "format": "int64",
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
             "type": "integer"
           },
           "events": {
@@ -145,6 +440,8 @@
           },
           "latest": {
             "format": "int64",
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
             "type": "integer"
           }
         },
@@ -154,6 +451,8 @@
         "properties": {
           "bytes_written": {
             "format": "int64",
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
             "type": "integer"
           },
           "path": {
@@ -168,7 +467,9 @@
       "ingressReadWire": {
         "properties": {
           "closed_hit_packet": {
-            "format": "int64",
+            "format": "uint64",
+            "maximum": 18446744073709551615,
+            "minimum": 0,
             "type": "integer"
           },
           "publish": {
@@ -183,7 +484,9 @@
       "ingressWire": {
         "properties": {
           "closed_hit_packet": {
-            "format": "int64",
+            "format": "uint64",
+            "maximum": 18446744073709551615,
+            "minimum": 0,
             "type": "integer"
           },
           "publish": {
@@ -227,10 +530,14 @@
         "properties": {
           "cpu_millis": {
             "format": "int64",
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
             "type": "integer"
           },
           "disk_byte": {
             "format": "int64",
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
             "type": "integer"
           },
           "idle_timeout": {
@@ -238,6 +545,8 @@
           },
           "memory_byte": {
             "format": "int64",
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
             "type": "integer"
           },
           "network": {
@@ -276,6 +585,9 @@
         "properties": {
           "from_sandbox_id": {
             "type": "string"
+          },
+          "manifest": {
+            "$ref": "#/components/schemas/TemplateManifest"
           }
         },
         "type": "object"
@@ -291,7 +603,9 @@
       "publishReadWire": {
         "properties": {
           "guest_port": {
-            "format": "int64",
+            "format": "uint64",
+            "maximum": 65535,
+            "minimum": 0,
             "type": "integer"
           },
           "host_endpoint": {
@@ -306,7 +620,9 @@
       "publishReq": {
         "properties": {
           "guest_port": {
-            "format": "int64",
+            "format": "uint64",
+            "maximum": 65535,
+            "minimum": 0,
             "type": "integer"
           },
           "host_endpoint": {
@@ -324,7 +640,9 @@
             "type": "string"
           },
           "guest_port": {
-            "format": "int64",
+            "format": "uint64",
+            "maximum": 65535,
+            "minimum": 0,
             "type": "integer"
           },
           "host_endpoint": {
@@ -339,7 +657,9 @@
       "publishWire": {
         "properties": {
           "guest_port": {
-            "format": "int64",
+            "format": "uint64",
+            "maximum": 65535,
+            "minimum": 0,
             "type": "integer"
           },
           "host_endpoint": {
@@ -356,6 +676,15 @@
           "death_cause": {
             "type": "string"
           },
+          "placement_epoch": {
+            "format": "uint64",
+            "maximum": 18446744073709551615,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "placement_state": {
+            "type": "string"
+          },
           "sandbox_id": {
             "type": "string"
           },
@@ -364,6 +693,8 @@
           },
           "used_byte": {
             "format": "int64",
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
             "type": "integer"
           }
         },
@@ -373,6 +704,9 @@
         "properties": {
           "builtin": {
             "type": "boolean"
+          },
+          "manifest": {
+            "$ref": "#/components/schemas/TemplateManifest"
           },
           "parent": {
             "type": "string"
@@ -389,11 +723,15 @@
             "type": "string"
           },
           "hit_packet": {
-            "format": "int64",
+            "format": "uint64",
+            "maximum": 18446744073709551615,
+            "minimum": 0,
             "type": "integer"
           },
           "port": {
-            "format": "int64",
+            "format": "uint64",
+            "maximum": 65535,
+            "minimum": 0,
             "type": "integer"
           },
           "proto": {
@@ -406,6 +744,8 @@
         "properties": {
           "bytes_written": {
             "format": "int64",
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
             "type": "integer"
           },
           "path": {
@@ -471,7 +811,52 @@
         "properties": {
           "size": {
             "format": "int64",
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
             "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "volumeFileResp": {
+        "properties": {
+          "is_dir": {
+            "type": "boolean"
+          },
+          "mod_time": {
+            "type": "string"
+          },
+          "mode": {
+            "format": "uint64",
+            "maximum": 4294967295,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "size": {
+            "format": "int64",
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
+            "type": "integer"
+          },
+          "symlink_target": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "volumeMoveReq": {
+        "properties": {
+          "destination": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
           }
         },
         "type": "object"
@@ -480,6 +865,8 @@
         "properties": {
           "size": {
             "format": "int64",
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
             "type": "integer"
           }
         },
@@ -492,10 +879,14 @@
           },
           "size": {
             "format": "int64",
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
             "type": "integer"
           },
           "used_byte": {
             "format": "int64",
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
             "type": "integer"
           },
           "volume_id": {
@@ -523,6 +914,9 @@
             "name": "after",
             "required": false,
             "schema": {
+              "format": "int64",
+              "maximum": 9223372036854775807,
+              "minimum": 0,
               "type": "integer"
             }
           },
@@ -575,10 +969,89 @@
               }
             },
             "description": "The route exists, but this method does not apply to it."
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/eventsResp"
+                }
+              }
+            },
+            "description": "The cursor is older than the retained window; resynchronize from the reported bounds."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
           }
         },
         "summary": "Page the transactional outbox in `seq` order. Delivery is at least once; deduplicate by event `id`."
       }
+    },
+    "/v1/processes/{id}": {
+      "get": {
+        "operationId": "getProcessSnapshot",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProcessSnapshot"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "No such object. The message names WHICH kind, so a caller does not look in the wrong place."
+          },
+          "405": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The route exists, but this method does not apply to it."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
+          }
+        },
+        "summary": "Read a logical Process snapshot and retained exit status."
+      },
+      "parameters": [
+        {
+          "description": "Engine-minted object ID.",
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
     },
     "/v1/sandboxes": {
       "get": {
@@ -606,12 +1079,33 @@
               }
             },
             "description": "The route exists, but this method does not apply to it."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
           }
         },
         "summary": "List all sandboxes."
       },
       "post": {
         "operationId": "createSandbox",
+        "parameters": [
+          {
+            "description": "Caller-supplied retry key. Same normalized request replays the original Sandbox; a changed request conflicts.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -673,6 +1167,16 @@
             },
             "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
           },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
+          },
           "507": {
             "content": {
               "text/plain": {
@@ -723,6 +1227,16 @@
               }
             },
             "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
           }
         },
         "summary": "Destroy a sandbox. The record is deleted, so a later GET is 404 and the event is the durable record of the destroy cause."
@@ -759,6 +1273,16 @@
               }
             },
             "description": "The route exists, but this method does not apply to it."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
           }
         },
         "summary": "Inspect one sandbox without exposing placement details."
@@ -837,6 +1361,16 @@
             },
             "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
           },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
+          },
           "507": {
             "content": {
               "text/plain": {
@@ -905,6 +1439,16 @@
               }
             },
             "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
           },
           "503": {
             "content": {
@@ -985,6 +1529,16 @@
               }
             },
             "description": "The route exists, but this method does not apply to it."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
           },
           "503": {
             "content": {
@@ -1095,6 +1649,16 @@
             },
             "description": "The body exceeds the engine's per-request limit."
           },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
+          },
           "503": {
             "content": {
               "text/plain": {
@@ -1152,6 +1716,16 @@
               }
             },
             "description": "The route exists, but this method does not apply to it."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
           }
         },
         "summary": "Read the sandbox's effective network declaration, including per-rule hit counters."
@@ -1222,10 +1796,141 @@
               }
             },
             "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
           }
         },
         "summary": "Pause a running sandbox: drains in-flight engine writes, then freezes."
       }
+    },
+    "/v1/sandboxes/{id}/placement": {
+      "get": {
+        "operationId": "getPlacementSnapshot",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlacementSnapshot"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "No such object. The message names WHICH kind, so a caller does not look in the wrong place."
+          },
+          "405": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The route exists, but this method does not apply to it."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
+          }
+        },
+        "summary": "Read the current Placement epoch and resource snapshot."
+      },
+      "parameters": [
+        {
+          "description": "Engine-minted object ID.",
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/v1/sandboxes/{id}/processes": {
+      "get": {
+        "operationId": "listSandboxProcesses",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Process"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "No such object. The message names WHICH kind, so a caller does not look in the wrong place."
+          },
+          "405": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The route exists, but this method does not apply to it."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
+          }
+        },
+        "summary": "List logical Process records for a Sandbox."
+      },
+      "parameters": [
+        {
+          "description": "Engine-minted object ID.",
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
     },
     "/v1/sandboxes/{id}/publish": {
       "parameters": [
@@ -1301,6 +2006,16 @@
               }
             },
             "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
           }
         },
         "summary": "Publish a guest port to the host."
@@ -1361,6 +2076,16 @@
             },
             "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
           },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
+          },
           "507": {
             "content": {
               "text/plain": {
@@ -1374,6 +2099,207 @@
         },
         "summary": "Resume a paused sandbox. The filesystem is exactly as it was; the placement and IP are new."
       }
+    },
+    "/v1/sandboxes/{id}/snapshot": {
+      "get": {
+        "operationId": "getSandboxSnapshot",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SandboxSnapshot"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "No such object. The message names WHICH kind, so a caller does not look in the wrong place."
+          },
+          "405": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The route exists, but this method does not apply to it."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
+          }
+        },
+        "summary": "Read the Sandbox resource snapshot with explicit measurement availability."
+      },
+      "parameters": [
+        {
+          "description": "Engine-minted object ID.",
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/v1/sandboxes/{id}/telemetry": {
+      "get": {
+        "operationId": "listTelemetry",
+        "parameters": [
+          {
+            "description": "Telemetry sequence cursor.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "format": "uint64",
+              "maximum": 18446744073709551615,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Maximum samples.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "earliest": {
+                      "format": "uint64",
+                      "maximum": 18446744073709551615,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "latest": {
+                      "format": "uint64",
+                      "maximum": 18446744073709551615,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "samples": {
+                      "items": {
+                        "$ref": "#/components/schemas/TelemetrySample"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "400": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The request cannot be honored as asked: malformed, an unknown JSON field, or a value the engine can never satisfy."
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "No such object. The message names WHICH kind, so a caller does not look in the wrong place."
+          },
+          "405": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The route exists, but this method does not apply to it."
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "earliest": {
+                      "format": "uint64",
+                      "maximum": 18446744073709551615,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "latest": {
+                      "format": "uint64",
+                      "maximum": 18446744073709551615,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "samples": {
+                      "items": {
+                        "$ref": "#/components/schemas/TelemetrySample"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The cursor is older than the retained window; resynchronize from the reported bounds."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
+          }
+        },
+        "summary": "Read the independent per-Sandbox telemetry sample lane."
+      },
+      "parameters": [
+        {
+          "description": "Engine-minted object ID.",
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
     },
     "/v1/templates": {
       "get": {
@@ -1401,6 +2327,16 @@
               }
             },
             "description": "The route exists, but this method does not apply to it."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
           }
         },
         "summary": "List all templates."
@@ -1467,6 +2403,16 @@
               }
             },
             "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
           }
         },
         "summary": "Promote a sandbox to an immutable Template other sandboxes derive from."
@@ -1508,9 +2454,65 @@
               }
             },
             "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
           }
         },
         "summary": "Delete a template. Refused while any sandbox references it."
+      },
+      "get": {
+        "operationId": "getTemplate",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/templateResp"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "No such object. The message names WHICH kind, so a caller does not look in the wrong place."
+          },
+          "405": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The route exists, but this method does not apply to it."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
+          }
+        },
+        "summary": "Inspect an immutable Template and its typed manifest."
       },
       "parameters": [
         {
@@ -1550,12 +2552,33 @@
               }
             },
             "description": "The route exists, but this method does not apply to it."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
           }
         },
         "summary": "List all volumes."
       },
       "post": {
         "operationId": "createVolume",
+        "parameters": [
+          {
+            "description": "Caller-supplied retry key. Same normalized request replays the original Volume; a changed request conflicts.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -1607,6 +2630,16 @@
             },
             "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
           },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
+          },
           "507": {
             "content": {
               "text/plain": {
@@ -1657,6 +2690,16 @@
               }
             },
             "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
           }
         },
         "summary": "Delete a Volume. Refused while mounted."
@@ -1693,6 +2736,16 @@
               }
             },
             "description": "The route exists, but this method does not apply to it."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
           }
         },
         "summary": "Inspect one volume."
@@ -1771,6 +2824,16 @@
             },
             "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
           },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
+          },
           "507": {
             "content": {
               "text/plain": {
@@ -1799,6 +2862,17 @@
       ],
       "post": {
         "operationId": "cloneVolume",
+        "parameters": [
+          {
+            "description": "Caller-supplied retry key.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "201": {
             "content": {
@@ -1839,6 +2913,16 @@
               }
             },
             "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
           },
           "507": {
             "content": {
@@ -1890,6 +2974,16 @@
             },
             "description": "The request cannot be honored as asked: malformed, an unknown JSON field, or a value the engine can never satisfy."
           },
+          "403": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The guest refused the operation (a permission error inside the sandbox)."
+          },
           "404": {
             "content": {
               "text/plain": {
@@ -1910,7 +3004,7 @@
             },
             "description": "The route exists, but this method does not apply to it."
           },
-          "409": {
+          "500": {
             "content": {
               "text/plain": {
                 "schema": {
@@ -1918,7 +3012,17 @@
                 }
               }
             },
-            "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
+          },
+          "503": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The sandbox's in-guest transport is unreachable, or a pause is draining. The answer may differ later."
           }
         },
         "summary": "Stream bytes OUT of a volume with no sandbox involved. Returns application/octet-stream."
@@ -1992,6 +3096,16 @@
             },
             "description": "The request cannot be honored as asked: malformed, an unknown JSON field, or a value the engine can never satisfy."
           },
+          "403": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The guest refused the operation (a permission error inside the sandbox)."
+          },
           "404": {
             "content": {
               "text/plain": {
@@ -2022,7 +3136,7 @@
             },
             "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
           },
-          "413": {
+          "500": {
             "content": {
               "text/plain": {
                 "schema": {
@@ -2030,7 +3144,17 @@
                 }
               }
             },
-            "description": "The body exceeds the engine's per-request limit."
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
+          },
+          "503": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The sandbox's in-guest transport is unreachable, or a pause is draining. The answer may differ later."
           },
           "507": {
             "content": {
@@ -2046,6 +3170,609 @@
         "summary": "Stream bytes INTO a volume with no sandbox involved. Body is the raw content."
       }
     },
+    "/v1/volumes/{id}/list": {
+      "get": {
+        "operationId": "listVolumePath",
+        "parameters": [
+          {
+            "description": "Directory path inside the Volume; omitted means the root.",
+            "in": "query",
+            "name": "path",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/volumeFileResp"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "400": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The request cannot be honored as asked: malformed, an unknown JSON field, or a value the engine can never satisfy."
+          },
+          "403": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The guest refused the operation (a permission error inside the sandbox)."
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "No such object. The message names WHICH kind, so a caller does not look in the wrong place."
+          },
+          "405": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The route exists, but this method does not apply to it."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
+          }
+        },
+        "summary": "List one root-confined Volume directory."
+      },
+      "parameters": [
+        {
+          "description": "Engine-minted object ID.",
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/v1/volumes/{id}/lstat": {
+      "get": {
+        "operationId": "lstatVolumePath",
+        "parameters": [
+          {
+            "description": "Path inside the Volume.",
+            "in": "query",
+            "name": "path",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/volumeFileResp"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "400": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The request cannot be honored as asked: malformed, an unknown JSON field, or a value the engine can never satisfy."
+          },
+          "403": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The guest refused the operation (a permission error inside the sandbox)."
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "No such object. The message names WHICH kind, so a caller does not look in the wrong place."
+          },
+          "405": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The route exists, but this method does not apply to it."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
+          }
+        },
+        "summary": "Read root-confined LSTAT metadata without following a symlink."
+      },
+      "parameters": [
+        {
+          "description": "Engine-minted object ID.",
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/v1/volumes/{id}/mkdir": {
+      "parameters": [
+        {
+          "description": "Engine-minted object ID.",
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "operationId": "mkdirVolumePath",
+        "parameters": [
+          {
+            "description": "Directory path inside the Volume.",
+            "in": "query",
+            "name": "path",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Numeric permission bits; defaults to 0755.",
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/volumeFileResp"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "400": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The request cannot be honored as asked: malformed, an unknown JSON field, or a value the engine can never satisfy."
+          },
+          "403": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The guest refused the operation (a permission error inside the sandbox)."
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "No such object. The message names WHICH kind, so a caller does not look in the wrong place."
+          },
+          "405": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The route exists, but this method does not apply to it."
+          },
+          "409": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
+          },
+          "507": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Capacity: nothing is wrong with the request or the sandbox — the node cannot honor another promise."
+          }
+        },
+        "summary": "Create one root-confined Volume directory."
+      }
+    },
+    "/v1/volumes/{id}/move": {
+      "parameters": [
+        {
+          "description": "Engine-minted object ID.",
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "post": {
+        "operationId": "moveVolumePath",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/volumeMoveReq"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/volumeFileResp"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "400": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The request cannot be honored as asked: malformed, an unknown JSON field, or a value the engine can never satisfy."
+          },
+          "403": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The guest refused the operation (a permission error inside the sandbox)."
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "No such object. The message names WHICH kind, so a caller does not look in the wrong place."
+          },
+          "405": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The route exists, but this method does not apply to it."
+          },
+          "409": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
+          }
+        },
+        "summary": "Rename a root-confined Volume path."
+      }
+    },
+    "/v1/volumes/{id}/read": {
+      "get": {
+        "operationId": "readVolumePath",
+        "parameters": [
+          {
+            "description": "File path inside the Volume.",
+            "in": "query",
+            "name": "path",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Byte offset.",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Byte length; omitted or zero reads to EOF.",
+            "in": "query",
+            "name": "length",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "400": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The request cannot be honored as asked: malformed, an unknown JSON field, or a value the engine can never satisfy."
+          },
+          "403": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The guest refused the operation (a permission error inside the sandbox)."
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "No such object. The message names WHICH kind, so a caller does not look in the wrong place."
+          },
+          "405": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The route exists, but this method does not apply to it."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
+          }
+        },
+        "summary": "Read a bounded byte range from a root-confined Volume file."
+      },
+      "parameters": [
+        {
+          "description": "Engine-minted object ID.",
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/v1/volumes/{id}/remove": {
+      "delete": {
+        "operationId": "removeVolumePath",
+        "parameters": [
+          {
+            "description": "Path inside the Volume.",
+            "in": "query",
+            "name": "path",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Success, no content."
+          },
+          "400": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The request cannot be honored as asked: malformed, an unknown JSON field, or a value the engine can never satisfy."
+          },
+          "403": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The guest refused the operation (a permission error inside the sandbox)."
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "No such object. The message names WHICH kind, so a caller does not look in the wrong place."
+          },
+          "405": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The route exists, but this method does not apply to it."
+          },
+          "409": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
+          }
+        },
+        "summary": "Remove a root-confined Volume path."
+      },
+      "parameters": [
+        {
+          "description": "Engine-minted object ID.",
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
     "/v1/volumes/{id}/snapshot": {
       "parameters": [
         {
@@ -2060,6 +3787,17 @@
       ],
       "post": {
         "operationId": "snapshotVolume",
+        "parameters": [
+          {
+            "description": "Caller-supplied retry key.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "201": {
             "content": {
@@ -2101,6 +3839,16 @@
             },
             "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
           },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
+          },
           "507": {
             "content": {
               "text/plain": {
@@ -2113,6 +3861,236 @@
           }
         },
         "summary": "Snapshot a volume into a new volume."
+      }
+    },
+    "/v1/volumes/{id}/stat": {
+      "get": {
+        "operationId": "statVolumePath",
+        "parameters": [
+          {
+            "description": "Path inside the Volume.",
+            "in": "query",
+            "name": "path",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/volumeFileResp"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "400": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The request cannot be honored as asked: malformed, an unknown JSON field, or a value the engine can never satisfy."
+          },
+          "403": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The guest refused the operation (a permission error inside the sandbox)."
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "No such object. The message names WHICH kind, so a caller does not look in the wrong place."
+          },
+          "405": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The route exists, but this method does not apply to it."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
+          }
+        },
+        "summary": "Read root-confined LSTAT metadata for a Volume path."
+      },
+      "parameters": [
+        {
+          "description": "Engine-minted object ID.",
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "/v1/volumes/{id}/write": {
+      "parameters": [
+        {
+          "description": "Engine-minted object ID.",
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "put": {
+        "operationId": "writeVolumePath",
+        "parameters": [
+          {
+            "description": "File path inside the Volume.",
+            "in": "query",
+            "name": "path",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Byte offset.",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "format": "binary",
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/importResp"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "400": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The request cannot be honored as asked: malformed, an unknown JSON field, or a value the engine can never satisfy."
+          },
+          "403": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The guest refused the operation (a permission error inside the sandbox)."
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "No such object. The message names WHICH kind, so a caller does not look in the wrong place."
+          },
+          "405": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The route exists, but this method does not apply to it."
+          },
+          "409": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
+          },
+          "413": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The body exceeds the engine's per-request limit."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
+          },
+          "507": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Capacity: nothing is wrong with the request or the sandbox — the node cannot honor another promise."
+          }
+        },
+        "summary": "Write raw bytes to a root-confined Volume file."
       }
     }
   }

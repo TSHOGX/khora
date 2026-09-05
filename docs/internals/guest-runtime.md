@@ -27,16 +27,49 @@ was possible. The protocol is tested end to end in
 
 ## Process service
 
-The transport role owns the child registry and event fan-out. A process may have
-multiple subscribers. Each connection receives the bounded output tail before live
-events. Each subscriber also has a bounded queue; a slow subscriber is detached
-rather than blocking child output or other subscribers. Exit state remains available
-for reconnect semantics, but emitted bytes are not a durable replay log.
+Guest PID 1 owns the child registry, descriptors, and event fan-out. Transport roles
+are replaceable RPC frontends connected to that supervisor over a private Unix socket.
+A process receives an opaque handle and a Placement epoch; the PID remains only a
+local locator. A process may have multiple subscribers. Each connection receives the
+bounded output tail before live events, with monotonically increasing sequence
+numbers. A cursor gap emits an explicit overflow/reset marker and requires a rescan.
+Subscriber queues remain bounded, so a slow reader is detached rather than blocking
+child output or other subscribers. Handle, output-ring, and exit metadata are
+persisted under the guest runtime scratch area, while stdin/PTY descriptors remain
+owned by PID 1; a transport-child restart therefore preserves live output and input
+state instead of reconstructing an inert process record.
+
+The orchestrator's `--process-retention` value is carried into each Placement's
+OCI entrypoint environment and parsed by PID 1. This keeps guest handle expiry
+aligned with the control-plane Store's reclamation pass; direct runtime launches
+that omit the value use the 24-hour default. Malformed or non-positive launch
+values fail closed before the supervisor starts.
 
 PTY and pipe modes are separate paths. PTY merges terminal output and supports resize;
 pipe mode preserves stdout and stderr. Unit coverage is in
 [cmd/sandboxd/process_test.go](../../cmd/sandboxd/process_test.go), with the real
 slow-reader case in `test/slow_subscriber_substrate_test.go`.
+
+## Filesystem watch
+
+The filesystem watch source is conservative change detection: a placement-local
+poller snapshots each requested path (recursively when requested), compares
+metadata and emits an independent sequence. A bounded journal is retained in
+the guest runtime scratch area, so a transport-child restart can replay changes
+after a caller's cursor. The journal is not workload content and is excluded
+from Template promotion.
+
+The journal and each subscriber queue are bounded. If a cursor falls below the
+retained watermark, or a subscriber cannot keep up (including when the terminal
+exit frame cannot fit), the stream emits an `overflow`/`reset` marker with
+sequence zero and returns a resource-exhausted cursor-gap error; callers must
+rescan and reconnect. A placement epoch change
+invalidates the journal and closes existing streams after a `placement` reset.
+The orchestrator checks the durable epoch while an otherwise idle stream is
+open, so pause/resume does not depend on a later filesystem event to make the
+reset visible. Watch semantics deliberately do not claim syscall-complete
+history; provider/source improvements can preserve this cursor and recovery
+contract.
 
 ## Activity signal
 

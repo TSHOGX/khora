@@ -2,7 +2,7 @@
 // assertions EVERY arm must pass (the extension boundary Behavior seam / the volume backend seam).
 //
 // It exists because the seam has exactly one falsification instrument: a second
-// backend. The local storage arm and the test-only plain-directory arm both call
+// backend. The local storage arm and the plain-directory arm both call
 // RunContract, so "both arms run the same assertions" is literally true — and the
 // three-actions shape rule the seam is built on was derived by watching a merged
 // shape fail here in three places rather than by reasoning about it (volume.Backend).
@@ -48,6 +48,7 @@ func RunContract(t *testing.T, mk Factory) {
 	// OpenRoot: the content accessor, and its required root confinement.
 	t.Run("RootReadWriteRoundTrip", func(t *testing.T) { testRootRoundTrip(t, mk) })
 	t.Run("RootListStatRemoveRename", func(t *testing.T) { testRootTreeOps(t, mk) })
+	t.Run("RootLstatPreservesSymlink", func(t *testing.T) { testRootLstat(t, mk) })
 	t.Run("RootConfinesEscapingPaths", func(t *testing.T) { testRootConfinement(t, mk) })
 	t.Run("RootConfinesEscapingSymlinks", func(t *testing.T) { testRootSymlinkConfinement(t, mk) })
 
@@ -63,6 +64,36 @@ func RunContract(t *testing.T, mk Factory) {
 	// afterwards.
 	t.Run("SnapshotAndCloneOrTypedRefusal", func(t *testing.T) { testSnapshotClone(t, mk) })
 	t.Run("SnapshotCapIsWrittenNotInherited", func(t *testing.T) { testSnapshotCap(t, mk) })
+}
+
+func testRootLstat(t *testing.T, mk Factory) {
+	b := mk(t)
+	if err := b.CreateVolume(ctx(), "vol_lstat", 0); err != nil {
+		t.Fatal(err)
+	}
+	r, err := b.OpenRoot(ctx(), "vol_lstat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	if _, err := r.WriteAt("target", []byte("ok"), 0); err != nil {
+		t.Fatal(err)
+	}
+	// The local accessor is the only arm with a real symlink operation; use the
+	// optional host helper when the root exposes it, otherwise the test remains
+	// valid for remote arms that report no symlink metadata.
+	if lr, ok := r.(interface{ Symlink(string, string) error }); ok {
+		if err := lr.Symlink("target", "link"); err != nil {
+			t.Fatal(err)
+		}
+		fi, err := r.Lstat("link")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fi.Type != volume.EntrySymlink || fi.SymlinkTarget != "target" {
+			t.Fatalf("lstat = %+v", fi)
+		}
+	}
 }
 
 // testSnapshotClone: either the backend supports them and produces an ORDINARY

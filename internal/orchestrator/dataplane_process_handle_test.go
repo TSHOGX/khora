@@ -1,0 +1,436 @@
+package orchestrator
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"connectrpc.com/connect"
+
+	"github.com/TSHOGX/khora/internal/lifecycle"
+	"github.com/TSHOGX/khora/internal/model"
+	"github.com/TSHOGX/khora/internal/store"
+	"github.com/TSHOGX/khora/internal/transport"
+	v1 "github.com/TSHOGX/khora/pkg/transport/gen/khora/transport/v1"
+)
+
+func processReservationFixture(t *testing.T) (*processProxy, model.SandboxID) {
+	t.Helper()
+	ctx := context.Background()
+	st := store.NewMemory()
+	now := time.Now()
+	if err := st.CreateTemplate(ctx, model.Template{ID: "bare", Builtin: true, Manifest: model.DefaultTemplateManifest(), CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	sid := model.SandboxID("sbx_process_reservation")
+	if err := st.CreateSandbox(ctx, model.Sandbox{ID: sid, Template: "bare", Overlay: "ov_process_reservation", State: model.Paused, CreatedAt: now, UpdatedAt: now}, nil); err != nil {
+		t.Fatal(err)
+	}
+	return &processProxy{e: &Engine{Mediator: lifecycle.New(lifecycle.Deps{Store: st}), Store: st}}, sid
+}
+
+func TestReserveProcessHonorsCallerSuppliedHandle(t *testing.T) {
+	p, sid := processReservationFixture(t)
+	req := &v1.StartRequest{Cmd: "/bin/sh", ProcessHandle: "proc_caller", PlacementEpoch: 7}
+	got, created, err := p.reserveProcess(context.Background(), sid, 7, "", req.ProcessHandle, processStartRequestHash(req))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !created || got.ID != model.ProcessID(req.ProcessHandle) {
+		t.Fatalf("reservation = id=%q created=%v; want caller handle %q", got.ID, created, req.ProcessHandle)
+	}
+}
+
+func TestReserveProcessRejectsKeyRetryWithDifferentCallerHandle(t *testing.T) {
+	p, sid := processReservationFixture(t)
+	first := &v1.StartRequest{Cmd: "/bin/sh", ProcessHandle: "proc_first", IdempotencyKey: "start-key", PlacementEpoch: 7}
+	if _, _, err := p.reserveProcess(context.Background(), sid, 7, first.IdempotencyKey, first.ProcessHandle, processStartRequestHash(first)); err != nil {
+		t.Fatal(err)
+	}
+	second := &v1.StartRequest{Cmd: "/bin/sh", ProcessHandle: "proc_second", IdempotencyKey: first.IdempotencyKey, PlacementEpoch: 7}
+	if _, _, err := p.reserveProcess(context.Background(), sid, 7, second.IdempotencyKey, second.ProcessHandle, processStartRequestHash(second)); !errors.Is(err, model.ErrIdempotencyConflict) {
+		t.Fatalf("changed handle retry = %v; want idempotency conflict", err)
+	}
+}
+
+func TestProcessStartIdentityGateSerializesRetryWindow(t *testing.T) {
+	e := &Engine{}
+	identity := processStartIdentity("sbx_a", 3, "retry-key", "")
+	release, err := e.acquireProcessStart(context.Background(), identity)
+	if err != nil || release == nil {
+		t.Fatalf("first gate = release=%v err=%v", release != nil, err)
+	}
+	defer release()
+	waitCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		second, err := e.acquireProcessStart(waitCtx, identity)
+		if second != nil {
+			second()
+		}
+		done <- err
+	}()
+	if err := <-done; err == nil {
+		t.Fatal("retry acquired gate before initial dispatch released it")
+	}
+}
+
+func TestProcessStartGateCoversKeyAndHandleAliases(t *testing.T) {
+	e := &Engine{}
+	keyIdentity := processStartIdentity("sbx_a", 3, "retry-key", "proc_fixed")
+	handleIdentity := processStartHandleIdentity("sbx_a", 3, "proc_fixed")
+	release, err := e.acquireProcessStart(context.Background(), keyIdentity, handleIdentity)
+	if err != nil || release == nil {
+		t.Fatalf("first gate = release=%v err=%v", release != nil, err)
+	}
+	defer release()
+	waitCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	second, err := e.acquireProcessStart(waitCtx, handleIdentity)
+	if second != nil || err == nil {
+		if second != nil {
+			second()
+		}
+		t.Fatalf("handle alias bypassed key+handle gate: release=%v err=%v", second != nil, err)
+	}
+}
+
+func TestCanceledReservationDeletionRequiresAnonymousStart(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		created bool
+		key     string
+		handle  string
+		want    bool
+	}{
+		{name: "anonymous newly-created", created: true, want: true},
+		{name: "keyed retry identity", created: true, key: "retry", want: false},
+		{name: "caller handle identity", created: true, handle: "proc_fixed", want: false},
+		{name: "existing row", created: false, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := canceledReservationMayBeDeleted(tc.created, tc.key, tc.handle); got != tc.want {
+				t.Fatalf("canceledReservationMayBeDeleted(%v,%q,%q) = %v; want %v", tc.created, tc.key, tc.handle, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestProcessStartRequestHashIncludesEpochWithoutKey(t *testing.T) {
+	a := processStartRequestHash(&v1.StartRequest{Cmd: "/bin/true", PlacementEpoch: 1})
+	b := processStartRequestHash(&v1.StartRequest{Cmd: "/bin/true", PlacementEpoch: 2})
+	if a == "" || b == "" || a == b {
+		t.Fatalf("request hashes = %q/%q; want non-empty epoch-specific fingerprints", a, b)
+	}
+}
+
+func TestReserveProcessRetryByReturnedHandleConvergesWithoutKey(t *testing.T) {
+	p, sid := processReservationFixture(t)
+	first := &v1.StartRequest{Cmd: "/bin/sh", Args: []string{"-c", "printf ok"}, PlacementEpoch: 7}
+	reserved, created, err := p.reserveProcess(context.Background(), sid, 7, "", "", processStartRequestHash(first))
+	if err != nil || !created {
+		t.Fatalf("initial reservation = %v, created=%v", err, created)
+	}
+	retry := &v1.StartRequest{Cmd: first.Cmd, Args: append([]string(nil), first.Args...), ProcessHandle: string(reserved.ID), PlacementEpoch: first.PlacementEpoch}
+	got, created, err := p.reserveProcess(context.Background(), sid, 7, "", retry.ProcessHandle, processStartRequestHash(retry))
+	if err != nil || created || got.ID != reserved.ID {
+		t.Fatalf("retry reservation = id=%q created=%v err=%v; want original reservation", got.ID, created, err)
+	}
+	changed := &v1.StartRequest{
+		Cmd:            retry.Cmd,
+		Args:           []string{"-c", "printf changed"},
+		ProcessHandle:  retry.ProcessHandle,
+		PlacementEpoch: retry.PlacementEpoch,
+	}
+	if _, _, err := p.reserveProcess(context.Background(), sid, 7, "", changed.ProcessHandle, processStartRequestHash(changed)); !errors.Is(err, model.ErrIdempotencyConflict) {
+		t.Fatalf("changed command retry = %v; want idempotency conflict", err)
+	}
+}
+
+func TestReserveProcessKeylessHandleRetryUsesCanonicalRepeatedFields(t *testing.T) {
+	p, sid := processReservationFixture(t)
+	first := &v1.StartRequest{Cmd: "/bin/true", PlacementEpoch: 7}
+	reserved, created, err := p.reserveProcess(context.Background(), sid, 7, "", "", processStartRequestHash(first))
+	if err != nil || !created {
+		t.Fatalf("initial reservation = %v, created=%v", err, created)
+	}
+	retry := &v1.StartRequest{Cmd: first.Cmd, Args: []string{}, Env: []string{}, ProcessHandle: string(reserved.ID), PlacementEpoch: 7}
+	got, created, err := p.reserveProcess(context.Background(), sid, 7, "", retry.ProcessHandle, processStartRequestHash(retry))
+	if err != nil || created || got.ID != reserved.ID {
+		t.Fatalf("retry with omitted/empty repeated fields = id=%q created=%v err=%v; want original reservation", got.ID, created, err)
+	}
+}
+
+func TestNormalizeProcessEventIdentityFillsLegacyFields(t *testing.T) {
+	ev := &transport.ProcessEvent{Kind: "data", Sequence: 2}
+	handle, epoch, err := normalizeProcessEventIdentity(ev, "proc_a", 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if handle != "proc_a" || epoch != 7 || ev.Handle != "proc_a" || ev.Epoch != 7 {
+		t.Fatalf("normalized legacy event = handle=%q epoch=%d event=%+v", handle, epoch, ev)
+	}
+}
+
+func TestNormalizeProcessEventIdentityRejectsMismatches(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		ev   transport.ProcessEvent
+		want string
+	}{
+		{name: "handle", ev: transport.ProcessEvent{Kind: "data", Handle: "proc_b", Epoch: 7}, want: "process stream handle mismatch"},
+		{name: "epoch", ev: transport.ProcessEvent{Kind: "data", Handle: "proc_a", Epoch: 8}, want: "process stream placement epoch mismatch"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, err := normalizeProcessEventIdentity(&tc.ev, "proc_a", 7)
+			if err == nil || !strings.Contains(err.Error(), tc.want) || connect.CodeOf(err) != connect.CodeFailedPrecondition {
+				t.Fatalf("error = %v; want failed_precondition %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeProcessEventIdentityRejectsNil(t *testing.T) {
+	_, _, err := normalizeProcessEventIdentity(nil, "", 0)
+	if err == nil || connect.CodeOf(err) != connect.CodeInvalidArgument {
+		t.Fatalf("nil event error = %v; want invalid_argument", err)
+	}
+}
+
+type captureProcessEvents struct {
+	events []*v1.ProcessEvent
+}
+
+func (c *captureProcessEvents) Send(ev *v1.ProcessEvent) error {
+	c.events = append(c.events, ev)
+	return nil
+}
+
+func TestForwardProcessEventsPreservesLivePIDWhenEndOmitsPID(t *testing.T) {
+	p, sid := processReservationFixture(t)
+	ctx := context.Background()
+	started := time.Now().Add(-time.Second)
+	proc := model.Process{
+		ID:             "proc_live_end",
+		Sandbox:        sid,
+		PlacementEpoch: 7,
+		PID:            42,
+		State:          model.ProcessRunning,
+		StartedAt:      started,
+		OutputCursor:   model.ProcessOutputCursor("proc_live_end", 7, 0),
+	}
+	if err := p.e.Store.CreateProcess(ctx, proc); err != nil {
+		t.Fatal(err)
+	}
+	sink := &captureProcessEvents{}
+	ch := make(chan transport.ProcessEvent, 1)
+	ch <- transport.ProcessEvent{Kind: "end", Handle: string(proc.ID), Epoch: 7, Sequence: 1, ExitCode: 3}
+	close(ch)
+	if err := p.forwardProcessEvents(ctx, string(sid), ch, sink, &proc); err != nil {
+		t.Fatalf("forward live end: %v", err)
+	}
+	got, err := p.e.Store.GetProcess(ctx, proc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != model.ProcessExited || got.PID != proc.PID || got.ExitCode == nil || *got.ExitCode != 3 || got.OutputCursor.Sequence != 1 {
+		t.Fatalf("live end projection = %+v; want exited, preserved pid=%d, code=3, cursor=1", got, proc.PID)
+	}
+	if len(sink.events) != 1 || sink.events[0].Kind == nil {
+		t.Fatalf("forwarded live end events = %+v", sink.events)
+	}
+}
+
+func TestForwardProcessEventsReplayedEndKeepsTerminalMetadata(t *testing.T) {
+	p, sid := processReservationFixture(t)
+	ctx := context.Background()
+	started := time.Now().Add(-2 * time.Second)
+	exited := started.Add(time.Second)
+	code := 7
+	proc := model.Process{
+		ID:             "proc_replayed_end",
+		Sandbox:        sid,
+		PlacementEpoch: 7,
+		PID:            43,
+		State:          model.ProcessExited,
+		ExitCode:       &code,
+		StartedAt:      started,
+		ExitedAt:       &exited,
+		OutputCursor:   model.ProcessOutputCursor("proc_replayed_end", 7, 2),
+	}
+	if err := p.e.Store.CreateProcess(ctx, proc); err != nil {
+		t.Fatal(err)
+	}
+	sink := &captureProcessEvents{}
+	ch := make(chan transport.ProcessEvent, 1)
+	// End frames carry no PID and the replay's timestamp is not part of the
+	// wire event. The durable row remains authoritative; only the cursor moves.
+	ch <- transport.ProcessEvent{Kind: "end", Handle: string(proc.ID), Epoch: 7, Sequence: 3, Replay: true, ExitCode: code}
+	close(ch)
+	if err := p.forwardProcessEvents(ctx, string(sid), ch, sink, &proc); err != nil {
+		t.Fatalf("forward replayed end: %v", err)
+	}
+	got, err := p.e.Store.GetProcess(ctx, proc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != model.ProcessExited || got.PID != proc.PID || got.ExitCode == nil || *got.ExitCode != code || !got.ExitedAt.Equal(exited) || got.OutputCursor.Sequence != 3 {
+		t.Fatalf("replayed end projection = %+v; want unchanged terminal metadata and cursor=3", got)
+	}
+	if len(sink.events) != 1 || sink.events[0].GetSequence() != 3 {
+		t.Fatalf("forwarded replayed end events = %+v", sink.events)
+	}
+}
+
+func TestForwardProcessEventsReplayedStartDataEndKeepsExitedHandle(t *testing.T) {
+	p, sid := processReservationFixture(t)
+	ctx := context.Background()
+	started := time.Now().Add(-3 * time.Second)
+	exited := started.Add(time.Second)
+	code := 0
+	proc := model.Process{
+		ID:             "proc_replayed_sequence",
+		Sandbox:        sid,
+		PlacementEpoch: 7,
+		PID:            44,
+		State:          model.ProcessExited,
+		ExitCode:       &code,
+		StartedAt:      started,
+		ExitedAt:       &exited,
+		OutputCursor:   model.ProcessOutputCursor("proc_replayed_sequence", 7, 1),
+	}
+	if err := p.e.Store.CreateProcess(ctx, proc); err != nil {
+		t.Fatal(err)
+	}
+	sink := &captureProcessEvents{}
+	ch := make(chan transport.ProcessEvent, 3)
+	// The supervisor emits a synthetic start marker before replaying retained
+	// output and the terminal frame. None of these frames may resurrect or
+	// rewrite a durable Exited row.
+	ch <- transport.ProcessEvent{Kind: "start", Handle: string(proc.ID), Epoch: 7, Sequence: 0, PID: proc.PID, Replay: true}
+	ch <- transport.ProcessEvent{Kind: "data", Handle: string(proc.ID), Epoch: 7, Sequence: 2, Replay: true, Stream: "stdout", Data: []byte("retained")}
+	ch <- transport.ProcessEvent{Kind: "end", Handle: string(proc.ID), Epoch: 7, Sequence: 3, Replay: true, ExitCode: code}
+	close(ch)
+	if err := p.forwardProcessEvents(ctx, string(sid), ch, sink, &proc); err != nil {
+		t.Fatalf("forward complete replay: %v", err)
+	}
+	got, err := p.e.Store.GetProcess(ctx, proc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != model.ProcessExited || got.PID != proc.PID || got.ExitCode == nil || *got.ExitCode != code || !got.ExitedAt.Equal(exited) || got.OutputCursor.Sequence != 3 {
+		t.Fatalf("complete replay projection = %+v; want terminal metadata preserved and cursor=3", got)
+	}
+	if len(sink.events) != 3 {
+		t.Fatalf("forwarded complete replay events = %d; want 3", len(sink.events))
+	}
+}
+
+func TestForwardProcessEventsDoesNotFabricateProgressForStaleSequence(t *testing.T) {
+	p, sid := processReservationFixture(t)
+	ctx := context.Background()
+	started := time.Now().Add(-time.Second)
+	proc := model.Process{
+		ID:             "proc_stale_sequence",
+		Sandbox:        sid,
+		PlacementEpoch: 7,
+		PID:            45,
+		State:          model.ProcessRunning,
+		StartedAt:      started,
+		OutputCursor:   model.ProcessOutputCursor("proc_stale_sequence", 7, 5),
+	}
+	if err := p.e.Store.CreateProcess(ctx, proc); err != nil {
+		t.Fatal(err)
+	}
+	sink := &captureProcessEvents{}
+	ch := make(chan transport.ProcessEvent, 1)
+	ch <- transport.ProcessEvent{Kind: "data", Handle: string(proc.ID), Epoch: 7, Sequence: 2, Replay: true, Stream: "stdout", Data: []byte("old")}
+	close(ch)
+	if err := p.forwardProcessEvents(ctx, string(sid), ch, sink, &proc); err != nil {
+		t.Fatalf("forward stale sequence: %v", err)
+	}
+	got, err := p.e.Store.GetProcess(ctx, proc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.OutputCursor.Sequence != 5 {
+		t.Fatalf("stale numbered frame advanced cursor to %d; want 5", got.OutputCursor.Sequence)
+	}
+}
+
+func TestForwardProcessEventsConcurrentDuplicateEndConverges(t *testing.T) {
+	p, sid := processReservationFixture(t)
+	ctx := context.Background()
+	started := time.Now().Add(-time.Second)
+	proc := model.Process{ID: "proc_duplicate_end", Sandbox: sid, PlacementEpoch: 7, PID: 46, State: model.ProcessRunning, StartedAt: started, OutputCursor: model.ProcessOutputCursor("proc_duplicate_end", 7, 0)}
+	if err := p.e.Store.CreateProcess(ctx, proc); err != nil {
+		t.Fatal(err)
+	}
+	a, err := p.e.Store.GetProcess(ctx, proc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := a
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	for _, rec := range []*model.Process{&a, &b} {
+		wg.Add(1)
+		go func(rec *model.Process) {
+			defer wg.Done()
+			<-start
+			ch := make(chan transport.ProcessEvent, 1)
+			ch <- transport.ProcessEvent{Kind: "end", Handle: string(proc.ID), Epoch: 7, Sequence: 1, ExitCode: 0}
+			close(ch)
+			errs <- p.forwardProcessEvents(ctx, string(sid), ch, &captureProcessEvents{}, rec)
+		}(rec)
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("duplicate end forwarding returned error: %v", err)
+		}
+	}
+	got, err := p.e.Store.GetProcess(ctx, proc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != model.ProcessExited || got.ExitCode == nil || *got.ExitCode != 0 || got.PID != proc.PID || got.OutputCursor.Sequence != 1 {
+		t.Fatalf("duplicate end projection = %+v; want one stable exited result", got)
+	}
+}
+
+func TestProcessProjectionErrorSanitizesStoreDiagnostics(t *testing.T) {
+	const hostDetail = "/srv/state/overlays/ov_x/merged"
+	cases := []struct {
+		name string
+		err  error
+		code connect.Code
+		want string
+	}{
+		{name: "generic", err: errors.New("sqlite update " + hostDetail), code: connect.CodeUnavailable, want: "process state persistence unavailable"},
+		{name: "not found", err: fmt.Errorf("lookup %s: %w", hostDetail, store.ErrProcessNotFound), code: connect.CodeNotFound, want: "process handle no longer exists"},
+		{name: "typed invalid", err: model.ErrInvalidArgument, code: connect.CodeInvalidArgument, want: "invalid sandbox request"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := processProjectionError("persist process output", "proc_x", tc.err)
+			if err == nil || connect.CodeOf(err) != tc.code {
+				t.Fatalf("projection error = %v; code=%v, want %v", err, connect.CodeOf(err), tc.code)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("projection error = %v; want %q", err, tc.want)
+			}
+			if strings.Contains(err.Error(), hostDetail) || strings.Contains(err.Error(), "sqlite") {
+				t.Fatalf("projection error leaked store diagnostics: %v", err)
+			}
+		})
+	}
+}

@@ -13,12 +13,14 @@ type orchestratorFlags struct {
 	stateDir            string
 	storePath           string
 	volumesDir          string
+	volumeProvider      string
 	healthTimeout       time.Duration
 	idleTimeout         time.Duration
 	retention           time.Duration
 	reaperInterval      time.Duration
 	eventRetention      time.Duration
 	transportDownBudget time.Duration
+	processRetention    time.Duration
 	nodeDiskByte        int64
 	nodeMemoryByte      int64
 	sudo                bool
@@ -36,12 +38,14 @@ func newOrchestratorFlagSet(name string, handling flag.ErrorHandling, values *or
 	fs.StringVar(&values.stateDir, "state", "./scratch/state", "state root for overlays and runsc state and bundles")
 	fs.StringVar(&values.storePath, "store", "./scratch/store.db", "SQLite store file")
 	fs.StringVar(&values.volumesDir, "volumes-dir", "", "Volume storage root; empty uses state/volumes beside the overlay root")
+	fs.StringVar(&values.volumeProvider, "volume-provider", "local_btrfs", "Volume provider for new volumes (local_btrfs or plain_dir)")
 	fs.DurationVar(&values.healthTimeout, "health-timeout", 30*time.Second, "cold-start readiness gate timeout")
 	fs.DurationVar(&values.idleTimeout, "idle-timeout", 30*time.Minute, "default idle TTL before an idle running sandbox is paused")
 	fs.DurationVar(&values.retention, "retention", 24*time.Hour, "default paused retention TTL before irreversible record and Overlay eviction; 0 disables eviction")
 	fs.DurationVar(&values.reaperInterval, "reaper-interval", 30*time.Second, "reaper sweep cadence")
 	fs.DurationVar(&values.eventRetention, "event-retention", 0, "delivered-event retention window; 0 retains the full outbox")
 	fs.DurationVar(&values.transportDownBudget, "transport-down-budget", 2*time.Minute, "transport-down restart budget before a cold resume")
+	fs.DurationVar(&values.processRetention, "process-retention", 24*time.Hour, "retention for exited logical process handles (applied to Store and guest PID 1)")
 	fs.Int64Var(&values.nodeDiskByte, "node-disk-byte", 0, "node disk admission budget in bytes; 0 is unmetered and a positive value requires sandbox disk caps")
 	fs.Int64Var(&values.nodeMemoryByte, "node-memory-byte", 0, "node memory admission budget in bytes; 0 is unmetered and a positive value requires sandbox memory caps")
 	fs.BoolVar(&values.sudo, "sudo", false, "prefix runsc and ip with sudo for development")

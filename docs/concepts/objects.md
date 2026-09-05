@@ -13,7 +13,8 @@ stable while its Placement, IP address, cgroup, and processes may change.
 
 A Template is an immutable, read-only base. A promoted Template may name a parent,
 forming an overlayfs lower stack. A Template exists only after its bytes have been
-materialized; live references prevent deletion.
+materialized; live references prevent deletion. Its typed manifest records schema,
+platform, digest and capability declarations and is immutable with the bytes.
 
 An Overlay is the sandbox's writable filesystem delta. It is an independent,
 ID-addressed artifact, not a host path and not part of the Template. Pause preserves
@@ -44,6 +45,21 @@ meaningful value.
 
 A Placement is the live, replaceable runtime realization of a Sandbox. Pause
 destroys it. Resume produces a new Placement from current durable bindings.
+The durable `(sandbox_id, epoch)` pair identifies one realization: adoption
+keeps the epoch, while resume advances it. Requests carrying an old epoch are
+rejected as stale rather than redirected. The pure contract and reset rules are
+maintained in [Durable contract foundation](../internals/contracts.md).
+
+## Process and Operation
+
+A Process is addressed by an opaque handle. The guest PID is only a locator
+inside one Placement epoch; retained exit state belongs to the Process record.
+Pause removes the current locator, and Sandbox deletion reclaims its remaining
+Process records.
+
+An Operation records one caller-supplied idempotency key and normalized request
+hash before external effects. Its phase makes crash recovery deterministic, and
+its terminal result is replayed rather than materialized again.
 
 ## Event
 

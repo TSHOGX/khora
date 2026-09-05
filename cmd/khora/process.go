@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"strconv"
+	"strings"
 
 	"connectrpc.com/connect"
 	"github.com/spf13/cobra"
@@ -27,12 +28,13 @@ func processRequest[T any](sandboxID string, msg *T) *connect.Request[T] {
 
 func newProcessStartCmd() *cobra.Command {
 	var (
-		sandboxID string
-		args      []string
-		env       []string
-		cwd       string
-		ptyRows   uint32
-		ptyCols   uint32
+		sandboxID      string
+		args           []string
+		env            []string
+		cwd            string
+		ptyRows        uint32
+		ptyCols        uint32
+		idempotencyKey string
 	)
 	cmd := &cobra.Command{
 		Use:   "start <command> [args...]",
@@ -43,10 +45,11 @@ func newProcessStartCmd() *cobra.Command {
 			client := processClient()
 
 			req := &transportv1.StartRequest{
-				Cmd:  cmdArgs[0],
-				Args: append(args, cmdArgs[1:]...),
-				Env:  env,
-				Cwd:  cwd,
+				Cmd:            cmdArgs[0],
+				Args:           append(args, cmdArgs[1:]...),
+				Env:            env,
+				Cwd:            cwd,
+				IdempotencyKey: idempotencyKey,
 			}
 
 			if ptyRows > 0 && ptyCols > 0 {
@@ -67,7 +70,11 @@ func newProcessStartCmd() *cobra.Command {
 				switch e := event.Kind.(type) {
 				case *transportv1.ProcessEvent_Start:
 					pid = e.Start.Pid
-					fmt.Fprintf(os.Stderr, "Started process %d\n", pid)
+					if e.Start.ProcessHandle != "" {
+						fmt.Fprintf(os.Stderr, "Started process %s (pid %d)\n", e.Start.ProcessHandle, pid)
+					} else {
+						fmt.Fprintf(os.Stderr, "Started process %d\n", pid)
+					}
 				case *transportv1.ProcessEvent_Data:
 					switch e.Data.Stream {
 					case "stdout", "pty":
@@ -102,6 +109,7 @@ func newProcessStartCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&cwd, "cwd", "d", "", "Working directory")
 	cmd.Flags().Uint32Var(&ptyRows, "pty-rows", 0, "PTY rows (requires --pty-cols)")
 	cmd.Flags().Uint32Var(&ptyCols, "pty-cols", 0, "PTY columns (requires --pty-rows)")
+	cmd.Flags().StringVar(&idempotencyKey, "idempotency-key", "", "retry key for logical process start")
 	cmd.MarkFlagRequired("sandbox")
 
 	return cmd
@@ -189,6 +197,7 @@ func newProcessSignalCmd() *cobra.Command {
 
 func newProcessConnectCmd() *cobra.Command {
 	var sandboxID string
+	var epoch, after uint64
 	cmd := &cobra.Command{
 		Use:   "connect <pid>",
 		Short: "Connect to a running process",
@@ -196,15 +205,17 @@ func newProcessConnectCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 
-			pid64, err := strconv.ParseInt(args[0], 10, 32)
-			if err != nil {
-				return fmt.Errorf("invalid pid: %w", err)
-			}
-			pid := int32(pid64)
-
 			client := processClient()
-
-			req := &transportv1.ConnectRequest{Pid: pid}
+			req := &transportv1.ConnectRequest{PlacementEpoch: epoch, AfterSequence: after}
+			if strings.HasPrefix(args[0], "proc_") {
+				req.ProcessHandle = args[0]
+			} else {
+				pid64, err := strconv.ParseInt(args[0], 10, 32)
+				if err != nil {
+					return fmt.Errorf("invalid pid: %w", err)
+				}
+				req.Pid = int32(pid64)
+			}
 			stream, err := client.Connect(ctx, processRequest(sandboxID, req))
 			if err != nil {
 				return fmt.Errorf("connect: %w", err)
@@ -238,6 +249,8 @@ func newProcessConnectCmd() *cobra.Command {
 	}
 
 	cmd.Flags().StringVarP(&sandboxID, "sandbox", "s", "", "Sandbox ID (required)")
+	cmd.Flags().Uint64Var(&epoch, "epoch", 0, "expected placement epoch")
+	cmd.Flags().Uint64Var(&after, "after", 0, "output sequence cursor")
 	cmd.MarkFlagRequired("sandbox")
 
 	return cmd
