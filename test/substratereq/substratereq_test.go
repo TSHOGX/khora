@@ -84,6 +84,16 @@ func TestBtrfsFailsOnAMissingPathRatherThanPassing(t *testing.T) {
 	}
 }
 
+func TestSquotaRejectsDisabledAndUnreadableState(t *testing.T) {
+	for _, probeErr := range []error{nil, fmt.Errorf("permission denied")} {
+		r := &rec{TB: t}
+		Squota(r, "/var/tmp", false, probeErr)
+		if !r.failed || !strings.Contains(r.msg, "usable squota") {
+			t.Fatalf("quota requirement accepted unknown or disabled state: %s", r.msg)
+		}
+	}
+}
+
 func TestBinReportsEveryMissingNameAtOnce(t *testing.T) {
 	r := &rec{TB: t}
 	Bin(r, "definitely-not-a-real-binary-a", "sh", "definitely-not-a-real-binary-b")

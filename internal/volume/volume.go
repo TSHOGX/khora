@@ -23,6 +23,9 @@ import (
 // Typed because the API error contract maps it to a 400, which no retry or state change makes legal.
 var ErrUnsupported = errors.New("volume: operation not supported by this backend")
 
+// ErrUsageUnavailable means the backend cannot provide allocation measurements.
+var ErrUsageUnavailable = errors.New("volume: usage measurement unavailable")
+
 // Capabilities is the PER-BACKEND capability query (the volume backend seam) — a property of the
 // implementation, never of one unit.
 //
@@ -32,8 +35,6 @@ var ErrUnsupported = errors.New("volume: operation not supported by this backend
 //
 // Members need a CONSUMER (the extension boundary forbids speculative reservation): Snapshot/Clone gate the
 // the control-plane API endpoints, Quota gates "a cap that cannot be enforced is refused" (resource admission).
-var ErrUsageUnavailable = errors.New("volume: usage measurement unavailable")
-
 type Capabilities struct {
 	// Usage reports reliable per-unit and aggregate allocation measurements.
 	Usage bool
