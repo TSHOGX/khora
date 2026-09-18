@@ -48,7 +48,7 @@ func TestUsageRefusesToInventALimitWhenTheQuotaRowIsUnreadable(t *testing.T) {
 	if _, err := os.Create(filepath.Join(unit, "blob")); err != nil {
 		t.Fatal(err)
 	}
-	b.Btrfs = btrfs.Client{Run: func(_ context.Context, argv []string) ([]byte, error) {
+	b.Btrfs = btrfs.Client{ProbeQuota: func(context.Context, string) (btrfs.QuotaMode, error) { return btrfs.QuotaSimple, nil }, Run: func(_ context.Context, argv []string) ([]byte, error) {
 		switch {
 		case len(argv) > 2 && argv[1] == "subvolume" && argv[2] == "show":
 			return []byte("vol_q\n\tSubvolume ID:\t\t256\n"), nil
@@ -102,7 +102,7 @@ func TestUncappedBytesRefusesToWalkAUnitWhoseRowIsUnreadable(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(unit, "blob"), make([]byte, 1<<20), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	b.Btrfs = btrfs.Client{Run: func(_ context.Context, argv []string) ([]byte, error) {
+	b.Btrfs = btrfs.Client{ProbeQuota: func(context.Context, string) (btrfs.QuotaMode, error) { return btrfs.QuotaSimple, nil }, Run: func(_ context.Context, argv []string) ([]byte, error) {
 		switch {
 		case len(argv) > 2 && argv[1] == "subvolume" && argv[2] == "show":
 			return []byte("vol_capped\n\tSubvolume ID:\t\t256\n"), nil
@@ -141,7 +141,7 @@ func TestUsageStillWalksAPlainDirectoryUnit(t *testing.T) {
 	}
 	// Every btrfs call fails: a plain directory on a non-btrfs filesystem is exactly
 	// the shape the uncapped arm runs in.
-	b.Btrfs = btrfs.Client{Run: func(_ context.Context, argv []string) ([]byte, error) {
+	b.Btrfs = btrfs.Client{ProbeQuota: func(context.Context, string) (btrfs.QuotaMode, error) { return btrfs.QuotaSimple, nil }, Run: func(_ context.Context, argv []string) ([]byte, error) {
 		return nil, fmt.Errorf("not btrfs: %v", argv)
 	}}
 

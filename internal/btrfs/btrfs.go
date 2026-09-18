@@ -51,6 +51,8 @@ type Runner func(ctx context.Context, argv []string) ([]byte, error)
 // Client is a handle for running btrfs operations. The zero value works and
 // executes commands directly.
 type Client struct {
+	// ProbeQuota injects the read-only kernel capability probe for tests.
+	ProbeQuota func(context.Context, string) (QuotaMode, error)
 	// Bin is the btrfs binary (default "btrfs" on PATH).
 	Bin string
 	// Run, if non-nil, executes commands (e.g. wrapping them in sudo).
@@ -434,11 +436,8 @@ func (c Client) mountPoint(ctx context.Context, path string) (string, error) {
 	return mnt, nil
 }
 
-// Available reports whether path is on a btrfs filesystem with quotas usable.
-// Callers use it to decide whether a capacity cap can be honored at all, so they
-// can REFUSE a cap they cannot enforce rather than silently running uncapped.
+// Available reports whether the supported simple-quota mode is usable.
 func (c Client) Available(ctx context.Context, path string) bool {
-	cmd := exec.CommandContext(ctx, "findmnt", "-T", path, "-no", "FSTYPE")
-	out, err := cmd.Output()
-	return err == nil && strings.TrimSpace(string(out)) == "btrfs"
+	mode, err := c.QuotaStatus(ctx, path)
+	return err == nil && mode == QuotaSimple
 }

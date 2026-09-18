@@ -11,6 +11,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"golang.org/x/sys/unix"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -310,6 +311,7 @@ func Engine(t *testing.T, opts EngineOpts) (*orchestrator.Engine, string) {
 	}
 
 	eng, err := orchestrator.New(orchestrator.Config{
+		VolumeProvider:        fixtureVolumeProvider(t, base),
 		TemplatesDir:          tmpl,
 		StateDir:              filepath.Join(base, "state"),
 		StorePath:             storePath,
@@ -477,6 +479,7 @@ func Restart(t *testing.T, base string, opts EngineOpts) *orchestrator.Engine {
 		healthTimeout = 30 * time.Second
 	}
 	eng, err := orchestrator.New(orchestrator.Config{
+		VolumeProvider: fixtureVolumeProvider(t, base),
 		TemplatesDir:   filepath.Join(base, "templates"),
 		StateDir:       filepath.Join(base, "state"),
 		StorePath:      storePath,
@@ -499,6 +502,19 @@ func Restart(t *testing.T, base string, opts EngineOpts) *orchestrator.Engine {
 		}
 	}
 	return eng
+}
+
+// Fixtures on tmpfs exercise ordinary directories; quota fixtures use native btrfs.
+func fixtureVolumeProvider(t *testing.T, base string) orchestrator.VolumeProvider {
+	t.Helper()
+	var st unix.Statfs_t
+	if err := unix.Statfs(base, &st); err != nil {
+		t.Fatal(err)
+	}
+	if st.Type == 0x9123683e {
+		return orchestrator.VolumeProviderLocalBtrfs
+	}
+	return orchestrator.VolumeProviderPlainDir
 }
 
 // CountEngineNetns counts engine-owned netns on this host (the placement marker

@@ -38,8 +38,9 @@ func TestNewSelectsTypedVolumeProvider(t *testing.T) {
 func TestNewRejectsInvalidTelemetryPolicy(t *testing.T) {
 	base := t.TempDir()
 	_, err := New(Config{
-		TemplatesDir: filepath.Join(base, "templates"),
-		StateDir:     filepath.Join(base, "state"),
+		VolumeProvider: VolumeProviderPlainDir,
+		TemplatesDir:   filepath.Join(base, "templates"),
+		StateDir:       filepath.Join(base, "state"),
 		TelemetryPolicy: model.TelemetryPolicy{
 			Interval:  10 * time.Second,
 			Retention: time.Second,
@@ -53,6 +54,7 @@ func TestNewRejectsInvalidTelemetryPolicy(t *testing.T) {
 func TestNewRejectsInvalidProcessRetention(t *testing.T) {
 	base := t.TempDir()
 	_, err := New(Config{
+		VolumeProvider:   VolumeProviderPlainDir,
 		TemplatesDir:     filepath.Join(base, "templates"),
 		StateDir:         filepath.Join(base, "state"),
 		ProcessRetention: model.ProcessRetentionPolicy{ExitedFor: -time.Second},
@@ -95,7 +97,7 @@ func TestNewRejectsDurableVolumeWithUnavailableProvider(t *testing.T) {
 		TemplatesDir:   filepath.Join(base, "templates"),
 		StateDir:       filepath.Join(base, "state"),
 		StorePath:      storePath,
-		VolumeProvider: VolumeProviderLocalBtrfs,
+		VolumeProvider: VolumeProviderPlainDir,
 		VolumesDir:     filepath.Join(base, "volumes"),
 	})
 	if !errors.Is(err, volume.ErrUnknownProvider) {

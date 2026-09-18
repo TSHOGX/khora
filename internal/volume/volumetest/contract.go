@@ -799,6 +799,20 @@ func testRootSymlinkConfinement(t *testing.T, mk Factory) {
 // nothing else can see them (Backend.UncappedBytes).
 func testUncappedBytesGrows(t *testing.T, mk Factory) {
 	b := mk(t)
+	if !b.Capabilities().Usage {
+		if err := b.CreateVolume(ctx(), "vol_unmeasured", 0); err != nil {
+			t.Fatal(err)
+		}
+		_, _, err := b.Usage(ctx(), "vol_unmeasured")
+		if !errors.Is(err, volume.ErrUsageUnavailable) {
+			t.Fatalf("usage: %v", err)
+		}
+		_, err = b.UncappedBytes(ctx())
+		if !errors.Is(err, volume.ErrUsageUnavailable) {
+			t.Fatalf("aggregate: %v", err)
+		}
+		return
+	}
 	before, err := b.UncappedBytes(ctx())
 	if err != nil {
 		t.Fatalf("uncapped bytes (empty): %v", err)
@@ -881,8 +895,10 @@ func testSweep(t *testing.T, mk Factory) {
 			t.Errorf("a destroyed unit is still enumerated: %v", ids)
 		}
 	}
-	if _, err := b.OpenRoot(ctx(), "vol_a"); err != nil {
+	if root, err := b.OpenRoot(ctx(), "vol_a"); err != nil {
 		t.Errorf("the surviving volume was damaged: %v", err)
+	} else {
+		root.Close()
 	}
 }
 
@@ -919,6 +935,20 @@ func testSweepBuilding(t *testing.T, mk Factory) {
 // evaluated against it (the Volume subsystem / volume cap enforcement).
 func testUsage(t *testing.T, mk Factory) {
 	b := mk(t)
+	if !b.Capabilities().Usage {
+		if err := b.CreateVolume(ctx(), "vol_unmeasured", 0); err != nil {
+			t.Fatal(err)
+		}
+		_, _, err := b.Usage(ctx(), "vol_unmeasured")
+		if !errors.Is(err, volume.ErrUsageUnavailable) {
+			t.Fatalf("usage: %v", err)
+		}
+		_, err = b.UncappedBytes(ctx())
+		if !errors.Is(err, volume.ErrUsageUnavailable) {
+			t.Fatalf("aggregate: %v", err)
+		}
+		return
+	}
 	if err := b.CreateVolume(ctx(), "vol_us", 0); err != nil {
 		t.Fatalf("create: %v", err)
 	}

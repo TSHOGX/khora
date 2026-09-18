@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/TSHOGX/khora/internal/model"
+	"github.com/TSHOGX/khora/internal/rootfs"
 	"github.com/TSHOGX/khora/internal/volume"
 )
 
@@ -166,5 +167,33 @@ func (m *Mediator) ValidateVolumeProviders(ctx context.Context) error {
 			}
 		}
 	}
+	if m.deps.NodeCapacity.DiskByte > 0 {
+		providers, err := m.configuredVolumeBackends()
+		if err != nil {
+			return err
+		}
+		for _, p := range providers {
+			if !p.backend.Capabilities().Usage {
+				return fmt.Errorf("volume provider %s cannot measure usage for node disk admission: %w", p.name, volume.ErrUsageUnavailable)
+			}
+		}
+	}
 	return m.validateDurableVolumeProviders(ctx)
+}
+
+// ValidateRootfsCapacity checks durable requirements without exposing host storage.
+func (m *Mediator) ValidateRootfsCapacity(ctx context.Context) error {
+	validator, ok := m.deps.Rootfs.(rootfs.CapacityValidator)
+	if !ok {
+		return nil
+	}
+	records, err := m.deps.Store.ListSandboxes(ctx)
+	if err != nil {
+		return err
+	}
+	required := m.deps.NodeCapacity.DiskByte > 0
+	for _, rec := range records {
+		required = required || rec.Limits.DiskByte > 0
+	}
+	return validator.ValidateCapacity(ctx, required)
 }

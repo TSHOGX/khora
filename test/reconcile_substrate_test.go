@@ -60,7 +60,8 @@ func newReconcileFixture(t *testing.T) reconcileFixture {
 func (f reconcileFixture) engine(t *testing.T, fault func(model.SandboxID)) *orchestrator.Engine {
 	t.Helper()
 	eng, err := orchestrator.New(orchestrator.Config{
-		TemplatesDir: f.tmpl, StateDir: f.stateDir, StorePath: f.storePath,
+		VolumeProvider: orchestrator.VolumeProviderPlainDir,
+		TemplatesDir:   f.tmpl, StateDir: f.stateDir, StorePath: f.storePath,
 		HealthTimeout:       30 * time.Second,
 		FaultAfterColdStart: fault,
 	})

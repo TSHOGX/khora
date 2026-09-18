@@ -32,7 +32,11 @@ var ErrUnsupported = errors.New("volume: operation not supported by this backend
 //
 // Members need a CONSUMER (the extension boundary forbids speculative reservation): Snapshot/Clone gate the
 // the control-plane API endpoints, Quota gates "a cap that cannot be enforced is refused" (resource admission).
+var ErrUsageUnavailable = errors.New("volume: usage measurement unavailable")
+
 type Capabilities struct {
+	// Usage reports reliable per-unit and aggregate allocation measurements.
+	Usage bool
 	// Snapshot reports whether the backend can take a point-in-time copy of a
 	// volume's bytes (the Volume subsystem: local = an atomic whole-tree snapshot of the unit).
 	Snapshot bool
@@ -172,7 +176,8 @@ type Backend interface {
 	// 0 removes the cap. ErrUnsupported for a non-zero cap without Quota capability.
 	SetCapacity(ctx context.Context, volumeID string, capBytes int64) error
 
-	// Usage reports the backend's own statement of one volume's usage and the cap on its
+	// Usage returns ErrUsageUnavailable when Capabilities.Usage is false.
+	// Otherwise it reports the backend's own statement of one volume's usage and the cap on its
 	// storage. The cap write point forces it (the Volume subsystem): a PATCH refuses on a STRICT inequality
 	// against current usage. inspect reports usage through the same call.
 	//
@@ -280,7 +285,8 @@ type Backend interface {
 	// must never fail because someone else already cleaned up.
 	DestroyVolume(ctx context.Context, volumeID string) error
 
-	// UncappedBytes reports the bytes this backend holds THAT NO DECLARED CAP COVERS — the Volume subsystem
+	// UncappedBytes returns ErrUsageUnavailable when Capabilities.Usage is false.
+	// Otherwise it reports the bytes this backend holds THAT NO DECLARED CAP COVERS — the Volume subsystem
 	// half of the resource admission inequality's second term, the same shape as rootfs.Provider's. No third
 	// term: volume caps and sandbox caps are like terms on the same left-hand side. Without it,
 	// uncapped volumes are invisible to the admission gate and a node can be filled by a pile

@@ -434,6 +434,11 @@ func New(cfg Config) (*Engine, error) {
 		return nil, fmt.Errorf("orchestrator: validate durable volume providers: %w", err)
 	}
 
+	if err := med.ValidateRootfsCapacity(context.Background()); err != nil {
+		_ = st.Close()
+		return nil, fmt.Errorf("orchestrator: validate rootfs capacity: %w", err)
+	}
+
 	// outbox publisher → a log sink (the transactional outbox: the engine only guarantees reliable
 	// write to a replayable stream; a real subscriber lives outside the engine).
 	// Default retry policy: bounded attempts, capped + jittered backoff (see

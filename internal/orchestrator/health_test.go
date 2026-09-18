@@ -22,9 +22,10 @@ func healthEngine(t *testing.T) *Engine {
 	t.Helper()
 	base := t.TempDir()
 	eng, err := New(Config{
-		TemplatesDir: filepath.Join(base, "templates"),
-		StateDir:     filepath.Join(base, "state"),
-		StorePath:    ":memory:",
+		VolumeProvider: VolumeProviderPlainDir,
+		TemplatesDir:   filepath.Join(base, "templates"),
+		StateDir:       filepath.Join(base, "state"),
+		StorePath:      ":memory:",
 	})
 	if err != nil {
 		t.Fatalf("assemble: %v", err)
@@ -163,9 +164,10 @@ func TestDrainingIsReportedOnBothEndpoints(t *testing.T) {
 func TestAnEngineThatHasNotBootedIsNotReady(t *testing.T) {
 	base := t.TempDir()
 	eng, err := New(Config{
-		TemplatesDir: filepath.Join(base, "templates"),
-		StateDir:     filepath.Join(base, "state"),
-		StorePath:    ":memory:",
+		VolumeProvider: VolumeProviderPlainDir,
+		TemplatesDir:   filepath.Join(base, "templates"),
+		StateDir:       filepath.Join(base, "state"),
+		StorePath:      ":memory:",
 	})
 	if err != nil {
 		t.Fatal(err)

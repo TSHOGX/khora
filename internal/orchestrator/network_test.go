@@ -31,10 +31,11 @@ func TestTheAssemblyRefusesItsOwnUIDAsTheSecondHopUID(t *testing.T) {
 	base := t.TempDir()
 	euid := os.Geteuid()
 	_, err := New(Config{
-		TemplatesDir: filepath.Join(base, "templates"),
-		StateDir:     filepath.Join(base, "state"),
-		StorePath:    ":memory:",
-		SecondHopUID: &euid,
+		VolumeProvider: VolumeProviderPlainDir,
+		TemplatesDir:   filepath.Join(base, "templates"),
+		StateDir:       filepath.Join(base, "state"),
+		StorePath:      ":memory:",
+		SecondHopUID:   &euid,
 	})
 	if err == nil {
 		t.Fatal("the assembly accepted its own euid as the second-hop uid — that installs an " +
@@ -61,10 +62,11 @@ func TestTheAssemblyRefusesItsOwnUIDAsTheSecondHopUID(t *testing.T) {
 	// specific to the self-uid rather than to the presence of a second-hop uid.
 	other := euid + 4711
 	eng, cerr := New(Config{
-		TemplatesDir: filepath.Join(base, "templates"),
-		StateDir:     filepath.Join(base, "state"),
-		StorePath:    ":memory:",
-		SecondHopUID: &other,
+		VolumeProvider: VolumeProviderPlainDir,
+		TemplatesDir:   filepath.Join(base, "templates"),
+		StateDir:       filepath.Join(base, "state"),
+		StorePath:      ":memory:",
+		SecondHopUID:   &other,
 	})
 	if cerr != nil {
 		t.Fatalf("a uid the engine does not run as was refused: %v — the check must reject the ENGINE'S "+
