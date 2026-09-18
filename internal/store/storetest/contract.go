@@ -31,6 +31,30 @@ type Factory func(t *testing.T) (s store.Store, reopen func(t *testing.T) store.
 
 // RunContract runs the full shared suite against the backend built by mk.
 func RunContract(t *testing.T, mk Factory) {
+	t.Run("Identity", func(t *testing.T) {
+		s, reopen := mk(t)
+		id, err := s.Identity(context.Background())
+		if err != nil || id == "" {
+			t.Fatalf("identity: %q, %v", id, err)
+		}
+		other, _ := mk(t)
+		otherID, err := other.Identity(context.Background())
+		if err != nil || otherID == id {
+			t.Fatalf("independent identity: %q, %v", otherID, err)
+		}
+		if reopen != nil {
+			s = reopen(t)
+		}
+		got, err := s.Identity(context.Background())
+		if err != nil || got != id {
+			t.Fatalf("identity changed: %q, %v", got, err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if _, err := s.Identity(ctx); !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancelled identity: %v", err)
+		}
+	})
 	t.Run("CreateGetConflict", func(t *testing.T) { testCreateGetConflict(t, mk) })
 	t.Run("CASPreconditions", func(t *testing.T) { testCASPreconditions(t, mk) })
 	t.Run("DeleteIdempotentShape", func(t *testing.T) { testDelete(t, mk) })

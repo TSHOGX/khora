@@ -53,6 +53,7 @@ func main() {
 		TemplatesDir:        flags.templatesDir,
 		StateDir:            flags.stateDir,
 		StorePath:           flags.storePath,
+		Version:             version,
 		VolumesDir:          flags.volumesDir,
 		VolumeProvider:      orchestrator.VolumeProvider(flags.volumeProvider),
 		HealthTimeout:       flags.healthTimeout,

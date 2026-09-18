@@ -386,6 +386,17 @@
         },
         "type": "object"
       },
+      "engineInfo": {
+        "properties": {
+          "store_id": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "eventItem": {
         "properties": {
           "cause": {
@@ -992,6 +1003,44 @@
           }
         },
         "summary": "Page the transactional outbox in `seq` order. Delivery is at least once; deduplicate by event `id`."
+      }
+    },
+    "/v1/info": {
+      "get": {
+        "operationId": "getInfo",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/engineInfo"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "405": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The route exists, but this method does not apply to it."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
+          }
+        },
+        "summary": "Read the durable Store identity and running build version."
       }
     },
     "/v1/processes/{id}": {
