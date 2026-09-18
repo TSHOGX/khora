@@ -341,8 +341,12 @@ func (b *LocalBtrfs) Reclaim(ctx context.Context) (int, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
-	if _, err := b.checkQuota(ctx); err != nil {
+	mode, err := b.checkQuota(ctx)
+	if err != nil {
 		return 0, err
+	}
+	if mode == btrfs.QuotaDisabled {
+		return 0, nil
 	}
 	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
 	mnt, err := b.Btrfs.MountPoint(ctx, b.VolumesDir)

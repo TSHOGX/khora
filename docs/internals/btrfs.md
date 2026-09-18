@@ -1,7 +1,7 @@
 # btrfs quota internals
 
-Rootfs and Volume use the leaf package `internal/btrfs` for the same storage
-primitive: a subvolume carrying a simple-quota limit. The leaf performs filesystem
+Rootfs and Volume use the shared substrate helper `internal/btrfs` for the same storage
+primitive: a subvolume carrying a simple-quota limit. The helper performs filesystem
 operations and parses btrfs output; it owns no lifecycle or store policy.
 
 ## Why `squota` is a correctness constraint
@@ -24,8 +24,8 @@ writes only when quotas are confirmed disabled; with quotas enabled it clears
 any existing limit. Command failures never substitute an ordinary directory for
 a requested subvolume.
 
-Quota creation and cap assignment are separate btrfs operations. Providers therefore
-clean up a subvolume if cap assignment fails, before a durable object becomes visible.
+Quota creation and cap assignment are separate btrfs operations. If cap assignment
+fails, no durable object is published; orphan cleanup retries any remaining bytes.
 
 ## Usage reads
 

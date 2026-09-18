@@ -46,7 +46,8 @@ func TestReclaimDeadlineKeepsOtherBackendsAndLaterTicksAlive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := New(Deps{Store: store.NewMemory(), Rootfs: &fakeRootfs{}, Runtime: &fakeRuntime{}, VolumeRegistry: registry, QuotaReclaimTimeout: 10 * time.Millisecond, Logf: func(string, ...any) {}})
+	st := &reclaimTrimStore{Store: store.NewMemory()}
+	m := New(Deps{Store: st, EventRetention: time.Second, Rootfs: &fakeRootfs{}, Runtime: &fakeRuntime{}, VolumeRegistry: registry, QuotaReclaimTimeout: 10 * time.Millisecond, Logf: func(string, ...any) {}})
 	if err := m.ReclaimVolumeStorage(context.Background()); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("reclaim: %v", err)
 	}
@@ -60,6 +61,9 @@ func TestReclaimDeadlineKeepsOtherBackendsAndLaterTicksAlive(t *testing.T) {
 	stats := r.Stats()
 	if stats.TicksCompleted != 2 || stats.QuotaTimeouts != 2 || stats.LastCompleted.IsZero() {
 		t.Fatalf("stats: %+v", stats)
+	}
+	if st.completed != 2 {
+		t.Fatalf("later trim calls=%d", st.completed)
 	}
 	if len(r.telemetryQueue) != 1 {
 		t.Fatal("timeout prevented telemetry scheduling")
@@ -126,5 +130,38 @@ func TestReclaimDoesNotReadStore(t *testing.T) {
 	}
 	if b.pendingCount() != 0 {
 		t.Fatal("residue was not reclaimed")
+	}
+}
+
+type reclaimTrimStore struct {
+	store.Store
+	completed int
+}
+
+func (s *reclaimTrimStore) TrimOutbox(ctx context.Context, _ time.Time, _ int) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	s.completed++
+	return 0, nil
+}
+
+func TestReaperCountsErrorsSeparatelyFromProgress(t *testing.T) {
+	for _, tc := range []struct {
+		err                error
+		timeouts, failures uint64
+	}{
+		{errors.New("backend failed"), 0, 1},
+		{reclaimErrors(context.DeadlineExceeded, errors.New("another backend failed")), 1, 0},
+	} {
+		b := newFakeVolume()
+		b.reclaimErr = tc.err
+		m := New(Deps{Store: store.NewMemory(), Volume: b, Rootfs: &fakeRootfs{}, Runtime: &fakeRuntime{}, Logf: func(string, ...any) {}})
+		r := NewReaper(m, time.Second, time.Second)
+		r.tick(context.Background())
+		stats := r.Stats()
+		if stats.TicksCompleted != 1 || stats.QuotaTimeouts != tc.timeouts || stats.QuotaErrors != tc.failures {
+			t.Fatalf("stats: %+v", stats)
+		}
 	}
 }
