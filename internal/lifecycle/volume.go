@@ -1313,7 +1313,7 @@ func (m *Mediator) ReclaimQuotaRows(ctx context.Context) error {
 	}
 	for _, selected := range backends {
 		if err := ctx.Err(); err != nil {
-			return errors.Join(append(failures, err)...)
+			return reclaimErrors(append(failures, err)...)
 		}
 		passCtx, cancel := context.WithTimeout(ctx, m.deps.QuotaReclaimTimeout)
 		ids := selected.backend.DeletedRowIDs(passCtx)
@@ -1325,7 +1325,7 @@ func (m *Mediator) ReclaimQuotaRows(ctx context.Context) error {
 			continue
 		}
 		n, reclaimErr := selected.backend.ReclaimQuotaRows(passCtx, ids)
-		reclaimErr = errors.Join(reclaimErr, passCtx.Err())
+		reclaimErr = reclaimErrors(reclaimErr, passCtx.Err())
 		cancel()
 		if n > 0 {
 			m.deps.Logf("reclaim quota rows: provider %s reclaimed %d leaked row(s)", selected.name, n)
@@ -1334,5 +1334,21 @@ func (m *Mediator) ReclaimQuotaRows(ctx context.Context) error {
 			failures = append(failures, fmt.Errorf("provider %s: %w", selected.name, reclaimErr))
 		}
 	}
-	return errors.Join(failures...)
+	return reclaimErrors(failures...)
+}
+
+// Keep operator diagnostics on one line while preserving every failure class.
+func reclaimErrors(failures ...error) error {
+	var combined error
+	for _, err := range failures {
+		if err == nil || errors.Is(combined, err) {
+			continue
+		}
+		if combined == nil {
+			combined = err
+		} else {
+			combined = fmt.Errorf("%w; %w", combined, err)
+		}
+	}
+	return combined
 }

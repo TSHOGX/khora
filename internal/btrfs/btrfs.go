@@ -69,14 +69,24 @@ func (c Client) run(ctx context.Context, args ...string) ([]byte, error) {
 	argv := append([]string{c.bin()}, args...)
 	if c.Run != nil {
 		out, err := c.Run(ctx, argv)
-		return out, errors.Join(err, ctx.Err())
+		return out, commandError(err, ctx.Err())
 	}
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return nil, fmt.Errorf("%v: %w: %s", argv, errors.Join(err, ctx.Err()), strings.TrimSpace(string(out)))
+		return nil, fmt.Errorf("%v: %w: %s", argv, commandError(err, ctx.Err()), strings.Join(strings.Fields(string(out)), " "))
 	}
 	return out, nil
+}
+
+func commandError(err, cause error) error {
+	if err == nil {
+		return cause
+	}
+	if cause == nil || errors.Is(err, cause) {
+		return err
+	}
+	return fmt.Errorf("%w: %w", err, cause)
 }
 
 // IsSubvolume reports whether path is a btrfs subvolume. Used to keep

@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -10,6 +11,14 @@ import (
 	"github.com/TSHOGX/khora/internal/volume"
 	"github.com/TSHOGX/khora/internal/waitfor"
 )
+
+func TestReclamationErrorsKeepClassesWithoutNewlines(t *testing.T) {
+	other := errors.New("backend failed")
+	err := reclaimErrors(context.DeadlineExceeded, other)
+	if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, other) || strings.Contains(err.Error(), "\n") {
+		t.Fatalf("aggregation: %v", err)
+	}
+}
 
 type blockingReclaimVolume struct {
 	*namedFakeVolume
