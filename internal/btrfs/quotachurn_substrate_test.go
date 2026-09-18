@@ -23,11 +23,13 @@ package btrfs
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Quota rows must not ACCUMULATE across sandbox churn — one leaked row per
@@ -44,7 +46,8 @@ import (
 // system. So this drives several full cycles and asserts the filesystem's qgroup
 // count returns to where it started.
 func TestQuotaRowsDoNotAccumulateAcrossChurn(t *testing.T) {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 	c := Client{}
 	root := btrfsScratch(t)
 	mnt, err := c.mountPoint(ctx, root)
@@ -52,7 +55,10 @@ func TestQuotaRowsDoNotAccumulateAcrossChurn(t *testing.T) {
 		t.Fatalf("mountPoint: %v", err)
 	}
 	countRows := func() int {
-		out, _ := exec.Command("btrfs", "qgroup", "show", "-re", "--raw", "--sync", mnt).CombinedOutput()
+		out, err := exec.CommandContext(ctx, "btrfs", "qgroup", "show", "-re", "--raw", "--sync", mnt).CombinedOutput()
+		if err != nil {
+			t.Fatalf("read quota rows: %v: %s", err, out)
+		}
 		n := 0
 		for _, line := range strings.Split(string(out), "\n") {
 			if strings.HasPrefix(strings.TrimSpace(line), "0/") {
@@ -92,10 +98,19 @@ func TestQuotaRowsDoNotAccumulateAcrossChurn(t *testing.T) {
 		}
 	}
 	// let the asynchronous squota reclamation settle before counting.
-	_, _ = exec.Command("btrfs", "subvolume", "sync", mnt).CombinedOutput()
+	if _, err := c.run(ctx, "filesystem", "sync", mnt); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"subvolume", "sync", mnt}
+	for id := range ids {
+		args = append(args, fmt.Sprint(id))
+	}
+	if _, err := c.run(ctx, args...); err != nil {
+		t.Fatal(err)
+	}
 	after := countRows()
 	if after > before {
-		out, _ := exec.Command("btrfs", "qgroup", "show", "-re", "--raw", "--sync", mnt).CombinedOutput()
+		out, _ := exec.CommandContext(ctx, "btrfs", "qgroup", "show", "-re", "--raw", "--sync", mnt).CombinedOutput()
 		t.Fatalf("qgroup rows grew from %d to %d across %d cycles (quota residue accumulates):\n%s",
 			before, after, cycles, out)
 	}
