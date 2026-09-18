@@ -3,12 +3,42 @@ package store
 import (
 	"context"
 	"database/sql"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
 
 	"github.com/TSHOGX/khora/internal/model"
 )
+
+func TestSQLiteIdentityChangesWhenRebuiltAtSamePath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "store.db")
+	read := func() model.StoreID {
+		t.Helper()
+		s, err := OpenSQLite(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id, err := s.Identity(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	first := read()
+	if reopened := read(); reopened != first {
+		t.Fatal("reopen changed identity")
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if rebuilt := read(); rebuilt == first {
+		t.Fatal("rebuilt Store reused identity")
+	}
+}
 
 func TestSQLiteIdentityConcurrentInitialization(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "store.db")
