@@ -6,6 +6,7 @@ import (
 )
 
 type orchestratorFlags struct {
+	quotaReclaimTimeout time.Duration
 	showVersion         bool
 	addr                string
 	insecureListen      bool
@@ -42,6 +43,7 @@ func newOrchestratorFlagSet(name string, handling flag.ErrorHandling, values *or
 	fs.DurationVar(&values.healthTimeout, "health-timeout", 30*time.Second, "cold-start readiness gate timeout")
 	fs.DurationVar(&values.idleTimeout, "idle-timeout", 30*time.Minute, "default idle TTL before an idle running sandbox is paused")
 	fs.DurationVar(&values.retention, "retention", 24*time.Hour, "default paused retention TTL before irreversible record and Overlay eviction; 0 disables eviction")
+	fs.DurationVar(&values.quotaReclaimTimeout, "quota-reclaim-timeout", 5*time.Second, "maximum duration of one backend quota reclamation pass; must be positive")
 	fs.DurationVar(&values.reaperInterval, "reaper-interval", 30*time.Second, "reaper sweep cadence")
 	fs.DurationVar(&values.eventRetention, "event-retention", 0, "delivered-event retention window; 0 retains the full outbox")
 	fs.DurationVar(&values.transportDownBudget, "transport-down-budget", 2*time.Minute, "transport-down restart budget before a cold resume")

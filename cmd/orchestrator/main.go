@@ -39,6 +39,9 @@ func main() {
 		return
 	}
 
+	if flags.quotaReclaimTimeout <= 0 {
+		log.Fatal("orchestrator: quota-reclaim-timeout must be positive")
+	}
 	// -1 is the unset sentinel because uid 0 is a real uid, and "the operator said root"
 	// must behave oppositely from "the operator said nothing". Root is refused in
 	// orchestrator.New rather than here, so the substrate harness cannot bypass the check.
@@ -48,6 +51,7 @@ func main() {
 	}
 
 	eng, err := orchestrator.New(orchestrator.Config{
+		QuotaReclaimTimeout: flags.quotaReclaimTimeout,
 		ListenAddr:          flags.addr,
 		InsecureListen:      flags.insecureListen,
 		TemplatesDir:        flags.templatesDir,

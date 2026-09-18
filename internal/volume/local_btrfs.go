@@ -291,22 +291,8 @@ func (b *LocalBtrfs) snapshotPath(ctx context.Context, srcID, newID string, capB
 	return nil
 }
 
-// ReclaimQuotaRows implements the Volume subsystem / Volume storage recovery procedure for rows an earlier
-// delete leaked. See Backend.ReclaimQuotaRows for why it is a correctness path.
-//
-// The procedure, in the measured order:
-//
-//  1. ONE sync per ROUND (not per unit): `filesystem sync` then `subvolume sync`. That
-//     order is a measured finding — `subvolume sync` alone sleeps until the next
-//     periodic commit, so its cost is load-dependent rather than fixed (runs at 7-16 s
-//     and 19.1 s), while forcing the commit first returns in tens of ms (14-29 ms,
-//     53 ms). The ~3 orders of magnitude is the point, not any one interval.
-//  2. For each recorded id, READ THE LABEL and act on it: `<stale>` → destroy; absent →
-//     done; `<under deletion>` → retry after a settle; `<squota space holder>` → LEAVE
-//     for a later round (a live clone can hold one legitimately for its whole lifetime);
-//     read failed → UNKNOWN, draw no conclusion.
-//  3. A BOUNDED number of rounds (3), then leave the row and warn. NEVER spin on EBUSY
-//     — that bound is normal operation, not an error path.
+// ReclaimQuotaRows retries recorded deletions within the caller's deadline.
+// Live sharers and pending deletions remain recorded for a later pass.
 func (b *LocalBtrfs) ReclaimQuotaRows(ctx context.Context, ids []uint64) (int, error) {
 	if len(ids) == 0 {
 		return 0, nil
@@ -323,13 +309,16 @@ func (b *LocalBtrfs) ReclaimQuotaRows(ctx context.Context, ids []uint64) (int, e
 	const maxRounds = 3
 	for round := 0; round < maxRounds && len(pending) > 0; round++ {
 		// One sync per ROUND.
-		if err := b.Btrfs.Sync(ctx, mnt); err != nil {
+		if err := b.Btrfs.Sync(ctx, mnt, pending); err != nil {
 			// A failed sync means the labels may be stale, so this round would be reading
 			// unreliable state. Stop rather than act on it; the next sweep retries.
 			return reclaimed, fmt.Errorf("volume: reclaim quota rows: settle: %w", err)
 		}
 		var next []uint64
 		for _, id := range pending {
+			if err := ctx.Err(); err != nil {
+				return reclaimed, err
+			}
 			switch state := b.Btrfs.QuotaRowByID(ctx, id, mnt); state {
 			case btrfs.RowAbsent:
 				b.forgetDeletedRow(id) // reclaimed by the substrate itself; nothing to do
@@ -338,6 +327,7 @@ func (b *LocalBtrfs) ReclaimQuotaRows(ctx context.Context, ids []uint64) (int, e
 					// It said stale and still refused: keep it for a later round rather than
 					// treating it as fatal.
 					next = append(next, id)
+					stuck = append(stuck, fmt.Sprintf("0/%d: delete: %v", id, err))
 					continue
 				}
 				reclaimed++
@@ -348,7 +338,7 @@ func (b *LocalBtrfs) ReclaimQuotaRows(ctx context.Context, ids []uint64) (int, e
 				// A LIVE SHARER still references its extents. This is legitimate and can last
 				// as long as that sharer does, so it is NOT retried within this call — it stays
 				// recorded for a future sweep.
-				stuck = append(stuck, fmt.Sprintf("0/%d: space holder (a live sharer still references its extents)", id))
+				// The next pass retries after the live sharer disappears.
 			case btrfs.RowUnknown:
 				// The read failed WHOLESALE, which happens under exactly the churn a sweep runs
 				// in. Draw NO conclusion: keep it recorded and try again next sweep.
@@ -359,17 +349,16 @@ func (b *LocalBtrfs) ReclaimQuotaRows(ctx context.Context, ids []uint64) (int, e
 				// is the one operation that breaks an engine promise beyond data integrity and
 				// has no EBUSY self-protection.
 				b.forgetDeletedRow(id)
-				stuck = append(stuck, fmt.Sprintf("0/%d: now belongs to a LIVE unit, left untouched", id))
+				// Never modify a live unit.
 			}
 		}
 		pending = next
 	}
-	for _, id := range pending {
-		stuck = append(stuck, fmt.Sprintf("0/%d: still not reclaimable after %d rounds", id, maxRounds))
+	if err := ctx.Err(); err != nil {
+		return reclaimed, err
 	}
 	if len(stuck) > 0 {
-		// Returned as information, not as a failure of the sweep: every entry here is a
-		// row that stays recorded and is retried later.
+		// Failed operations remain recorded for a later pass.
 		return reclaimed, fmt.Errorf("volume: quota rows left for a later round: %s", strings.Join(stuck, "; "))
 	}
 	return reclaimed, nil

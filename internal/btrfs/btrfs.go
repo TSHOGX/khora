@@ -35,6 +35,7 @@ package btrfs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -67,12 +68,13 @@ func (c Client) bin() string {
 func (c Client) run(ctx context.Context, args ...string) ([]byte, error) {
 	argv := append([]string{c.bin()}, args...)
 	if c.Run != nil {
-		return c.Run(ctx, argv)
+		out, err := c.Run(ctx, argv)
+		return out, errors.Join(err, ctx.Err())
 	}
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return nil, fmt.Errorf("%v: %w: %s", argv, err, strings.TrimSpace(string(out)))
+		return nil, fmt.Errorf("%v: %w: %s", argv, errors.Join(err, ctx.Err()), strings.TrimSpace(string(out)))
 	}
 	return out, nil
 }
@@ -383,26 +385,21 @@ func (c Client) MountPoint(ctx context.Context, path string) (string, error) {
 	return c.mountPoint(ctx, path)
 }
 
-// Sync forces a commit and then waits for pending subvolume deletions to settle.
-//
-// THE ORDER IS THE WHOLE POINT, and it is a measured finding rather than a style
-// choice: `subvolume sync` ALONE sleeps until the next periodic commit, so its cost
-// tracks the commit interval and the load rather than being a fixed property (runs
-// have landed at 7-16 s and at 19.1 s), while preceding it with `filesystem sync`
-// forces that commit so the pair returns in TENS OF MILLISECONDS (14-29 ms, 53 ms).
-// The load-bearing fact is that ~3 orders of magnitude, not any one interval: same
-// effect, bounded instead of "wait for a commit".
-//
-// Called ONCE PER SWEEP ROUND rather than once per unit, which is the other half of
-// keeping it bounded.
-func (c Client) Sync(ctx context.Context, mountPoint string) error {
+// Sync commits changes and waits only for the recorded subvolume deletions.
+// All commands share the caller's deadline; an empty set must never wait globally.
+func (c Client) Sync(ctx context.Context, mountPoint string, ids []uint64) error {
+	if len(ids) == 0 {
+		return nil
+	}
 	if _, err := c.run(ctx, "filesystem", "sync", mountPoint); err != nil {
-		return fmt.Errorf("btrfs: filesystem sync %s: %w", mountPoint, err)
+		return err
 	}
-	if _, err := c.run(ctx, "subvolume", "sync", mountPoint); err != nil {
-		return fmt.Errorf("btrfs: subvolume sync %s: %w", mountPoint, err)
+	args := []string{"subvolume", "sync", mountPoint}
+	for _, id := range ids {
+		args = append(args, strconv.FormatUint(id, 10))
 	}
-	return nil
+	_, err := c.run(ctx, args...)
+	return err
 }
 
 // subvolumeID reads the numeric subvolume id, which names its qgroup (0/<id>).

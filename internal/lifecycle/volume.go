@@ -1307,21 +1307,32 @@ func (m *Mediator) ReclaimQuotaRows(ctx context.Context) error {
 	if err := m.validateDurableVolumeProviders(ctx); err != nil {
 		return fmt.Errorf("reclaim quota rows: %w", err)
 	}
+	var failures []error
+	if m.deps.QuotaReclaimTimeout <= 0 {
+		return fmt.Errorf("quota reclaim timeout must be positive")
+	}
 	for _, selected := range backends {
-		ids := selected.backend.DeletedRowIDs(ctx)
+		if err := ctx.Err(); err != nil {
+			return errors.Join(append(failures, err)...)
+		}
+		passCtx, cancel := context.WithTimeout(ctx, m.deps.QuotaReclaimTimeout)
+		ids := selected.backend.DeletedRowIDs(passCtx)
 		if len(ids) == 0 {
+			if err := passCtx.Err(); err != nil {
+				failures = append(failures, err)
+			}
+			cancel()
 			continue
 		}
-		n, reclaimErr := selected.backend.ReclaimQuotaRows(ctx, ids)
+		n, reclaimErr := selected.backend.ReclaimQuotaRows(passCtx, ids)
+		reclaimErr = errors.Join(reclaimErr, passCtx.Err())
+		cancel()
 		if n > 0 {
 			m.deps.Logf("reclaim quota rows: provider %s reclaimed %d leaked row(s)", selected.name, n)
 		}
 		if reclaimErr != nil {
-			// Informational, not fatal: every row named in it stays recorded and is retried.
-			// A `<squota space holder>` can legitimately resist reclamation for a live clone's
-			// entire lifetime, so this is normal operation rather than an error path.
-			m.deps.Logf("reclaim quota rows: provider %s: %v", selected.name, reclaimErr)
+			failures = append(failures, fmt.Errorf("provider %s: %w", selected.name, reclaimErr))
 		}
 	}
-	return nil
+	return errors.Join(failures...)
 }

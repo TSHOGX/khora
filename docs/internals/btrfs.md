@@ -44,3 +44,9 @@ Volume lineage prevents the source-before-descendant deletion order. The backend
 also records deleted subvolume IDs and retries only rows whose label says they are
 reclaimable; busy holders remain for a later periodic pass. Churn behavior is tested
 by [internal/btrfs/quotachurn_substrate_test.go](../../internal/btrfs/quotachurn_substrate_test.go).
+
+Reclamation commits the filesystem and waits only for recorded deleted subvolume
+IDs, under one caller deadline shared by all rounds. An empty set performs no
+sync. A live sharer or pending deletion stays recorded for a later pass; unreadable
+state and command timeouts are errors. The deadline bounds cooperative command
+execution, not arbitrary uninterruptible kernel I/O.

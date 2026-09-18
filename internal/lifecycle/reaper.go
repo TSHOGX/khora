@@ -2,7 +2,9 @@ package lifecycle
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/TSHOGX/khora/internal/model"
@@ -22,7 +24,9 @@ import (
 // Reaper owns only the loop cadence and the transport-down restart budget
 // tracker (health classification), which must persist across ticks.
 type Reaper struct {
-	m *Mediator
+	statsMu sync.Mutex
+	stats   ReaperStats
+	m       *Mediator
 
 	// interval is the sweep cadence (the health and reaper boundary numeric knob): trades
 	// detection latency against sweep overhead. Coarse enough that a single
@@ -142,6 +146,15 @@ func (r *Reaper) runTelemetry(ctx context.Context) {
 // sweep is idempotent either way. Reconcile failure is logged, not fatal — the
 // sweep still runs, and reconcile retries next tick (atomic transition rollback skip-and-log).
 func (r *Reaper) tick(ctx context.Context) {
+	defer func() {
+		if ctx.Err() != nil {
+			return
+		}
+		r.statsMu.Lock()
+		r.stats.TicksCompleted++
+		r.stats.LastCompleted = time.Now()
+		r.statsMu.Unlock()
+	}()
 	if err := r.m.ReconcilePeriodic(ctx); err != nil {
 		r.m.deps.Logf("reaper: periodic reconcile (retried next tick): %v", err)
 	}
@@ -174,6 +187,15 @@ func (r *Reaper) tick(ctx context.Context) {
 	// leaked rows, each of which can hand its cap to an unrelated new volume after a
 	// remount, until the next restart.
 	if err := r.m.ReclaimQuotaRows(ctx); err != nil {
+		if ctx.Err() == nil {
+			r.statsMu.Lock()
+			if errors.Is(err, context.DeadlineExceeded) {
+				r.stats.QuotaTimeouts++
+			} else {
+				r.stats.QuotaErrors++
+			}
+			r.statsMu.Unlock()
+		}
 		r.m.deps.Logf("reaper: quota-row reclamation (retried next tick): %v", err)
 	}
 	// the Volume subsystem / volume cap enforcement CAP REPAIR, periodic for the same reason the sweeps above
@@ -477,4 +499,18 @@ func (r *Reaper) sweepPaused(ctx context.Context, rec model.Sandbox) {
 	if err := r.m.destroyLocked(ctx, cur, model.CauseRetentionExpired); err != nil {
 		r.m.deps.Logf("reaper: evict %s (retried next tick): %v", cur.ID, err)
 	}
+}
+
+// ReaperStats separates loop progress from successful reclamation.
+type ReaperStats struct {
+	TicksCompleted uint64
+	LastCompleted  time.Time
+	QuotaTimeouts  uint64
+	QuotaErrors    uint64
+}
+
+func (r *Reaper) Stats() ReaperStats {
+	r.statsMu.Lock()
+	defer r.statsMu.Unlock()
+	return r.stats
 }

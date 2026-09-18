@@ -23,6 +23,7 @@ Check it for staleness with `./scripts/check-generated.sh`.
 | `--node-memory-byte` | `0` | node memory admission budget in bytes; 0 is unmetered and a positive value requires sandbox memory caps |
 | `--process-retention` | `24h0m0s` | retention for exited logical process handles (applied to Store and guest PID 1) |
 | `--publish-ip` | `""` | host address for ingress.publish bindings; empty uses 127.0.0.1 |
+| `--quota-reclaim-timeout` | `5s` | maximum duration of one backend quota reclamation pass; must be positive |
 | `--reaper-interval` | `30s` | reaper sweep cadence |
 | `--retention` | `24h0m0s` | default paused retention TTL before irreversible record and Overlay eviction; 0 disables eviction |
 | `--shutdown-timeout` | `30s` | maximum SIGTERM drain for in-flight requests; set it above the longest unary request |

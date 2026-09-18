@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/TSHOGX/khora/test/substratereq"
 )
@@ -204,5 +205,30 @@ func TestCreateSubvolumeRefusesPlainDirectory(t *testing.T) {
 	}
 	if err := c.CreateSubvolume(ctx, p); err == nil {
 		t.Fatal("CreateSubvolume accepted a pre-existing plain directory — a cap set on it would enforce nothing")
+	}
+}
+
+func TestRecordedDeletionSync(t *testing.T) {
+	c := Client{}
+	root := btrfsScratch(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	unit := filepath.Join(root, "sync-unit")
+	if err := c.CreateSubvolume(ctx, unit); err != nil {
+		t.Fatal(err)
+	}
+	id, err := c.SubvolumeID(ctx, unit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mount, err := c.MountPoint(ctx, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.DeleteSubvolume(ctx, unit); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Sync(ctx, mount, []uint64{id}); err != nil {
+		t.Fatal(err)
 	}
 }

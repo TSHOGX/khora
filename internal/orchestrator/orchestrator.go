@@ -39,6 +39,8 @@ const (
 
 // Config is the orchestrator's local configuration (the engine vocabulary boundary one config).
 type Config struct {
+	// QuotaReclaimTimeout bounds each backend pass; zero selects five seconds.
+	QuotaReclaimTimeout time.Duration
 	// TemplatesDir holds Template directories (static; TemplateID → dir).
 	TemplatesDir string
 	// StateDir is the root for overlay materialization + runsc state/bundles.
@@ -309,6 +311,9 @@ func (t *handlerTracker) wait(ctx context.Context) error {
 // startup reconciliation — call Reconcile explicitly after New (so tests can
 // inspect the pre-reconcile store), then HTTPHandler to serve.
 func New(cfg Config) (*Engine, error) {
+	if cfg.QuotaReclaimTimeout < 0 {
+		return nil, fmt.Errorf("quota reclaim timeout must be positive")
+	}
 	if cfg.TemplatesDir == "" || cfg.StateDir == "" {
 		return nil, fmt.Errorf("orchestrator: TemplatesDir and StateDir are required")
 	}
@@ -408,6 +413,7 @@ func New(cfg Config) (*Engine, error) {
 	}
 
 	med := lifecycle.New(lifecycle.Deps{
+		QuotaReclaimTimeout:   cfg.QuotaReclaimTimeout,
 		Store:                 st,
 		Runtime:               rt,
 		Rootfs:                rp,

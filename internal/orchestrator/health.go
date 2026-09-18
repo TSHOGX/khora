@@ -230,8 +230,23 @@ func (e *Engine) metricsHandler(w http.ResponseWriter, r *http.Request) {
 		"Seconds the current Deliver call has been running (0 = none in flight). Separates a blocked sink from a wedged drain loop.",
 		"gauge", s.InFlightFor.Seconds())
 
+	// Loop progress is independent of whether a reclamation attempt succeeded.
+	if e.Reaper != nil {
+		stats := e.Reaper.Stats()
+		var completed int64
+		if !stats.LastCompleted.IsZero() {
+			completed = stats.LastCompleted.Unix()
+		}
+		metric("khora_reaper_ticks_completed_total", "Completed maintenance ticks, including recoverable failures.", "counter", stats.TicksCompleted)
+		metric("khora_reaper_last_completed_timestamp_seconds", "Unix time of the last completed tick; zero before the first completion.", "gauge", completed)
+		metric("khora_reaper_quota_reclaim_failures_total", "Ticks with failed quota reclamation; timeout takes precedence over other failures.", "counter", stats.QuotaTimeouts, `reason="timeout"`)
+		fmt.Fprintf(&b, "khora_reaper_quota_reclaim_failures_total{reason=\"error\"} %d\n", stats.QuotaErrors)
+	}
+	// Optional counts must not hide the in-memory loop signals behind Store I/O.
+	countsCtx, cancel := context.WithTimeout(r.Context(), time.Second)
+	defer cancel()
 	// --- sandbox counts by lifecycle state ---
-	if list, err := e.Mediator.List(r.Context()); err == nil {
+	if list, err := e.Mediator.List(countsCtx); err == nil {
 		counts := map[model.Lifecycle]int{}
 		for _, sb := range list {
 			counts[sb.State]++

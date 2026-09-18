@@ -107,9 +107,11 @@ func deathCauseOf(c runtime.DeathCause) model.DeathCause {
 // concrete implementations — swapping local_runsc / SQLite is registering an
 // implementation (the extension boundary), not editing this file.
 type Deps struct {
-	Store   store.Store
-	Runtime runtime.Provider
-	Rootfs  rootfs.Provider
+	// QuotaReclaimTimeout bounds one backend reclamation pass; zero selects five seconds.
+	QuotaReclaimTimeout time.Duration
+	Store               store.Store
+	Runtime             runtime.Provider
+	Rootfs              rootfs.Provider
 	// Volume is the legacy single Volume subsystem backend (volume.Backend).
 	// VolumeRegistry is the preferred multi-provider seam below. At least one of
 	// these is REQUIRED whenever the disk axis is metered: the resource admission
@@ -324,6 +326,9 @@ const (
 )
 
 func New(deps Deps) *Mediator {
+	if deps.QuotaReclaimTimeout == 0 {
+		deps.QuotaReclaimTimeout = 5 * time.Second
+	}
 	if deps.HealthTimeout == 0 {
 		deps.HealthTimeout = 30 * time.Second
 	}
