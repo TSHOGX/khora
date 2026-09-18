@@ -41,7 +41,8 @@ func RunContract(t *testing.T, mk Factory) {
 	// Materialize / Release / Adopt (the Volume subsystem): create-if-absent, concurrent, and a
 	// Release that keeps the bytes.
 	t.Run("MaterializeIsCreateIfAbsent", func(t *testing.T) { testMaterializeCreateIfAbsent(t, mk) })
-	t.Run("MaterializeIsConcurrent", func(t *testing.T) { testMaterializeConcurrent(t, mk) })
+	t.Run("MaterializeIsConcurrent", func(t *testing.T) { testMaterializeConcurrent(t, mk, true) })
+	t.Run("MissingMaterializeIsConcurrent", func(t *testing.T) { testMaterializeConcurrent(t, mk, false) })
 	t.Run("ReleaseKeepsBytesAndIsIdempotent", func(t *testing.T) { testReleaseKeepsBytes(t, mk) })
 	t.Run("AdoptRequiresAPresentUnit", func(t *testing.T) { testAdopt(t, mk) })
 
@@ -393,16 +394,20 @@ func testMaterializeCreateIfAbsent(t *testing.T, mk Factory) {
 // number of times. The whole shared-fanout design rests on this (measured: two
 // sandboxes rw-binding one source both succeed and the second is genuinely
 // writable) — without it the AccessMode enum collapses to Exclusive alone.
-func testMaterializeConcurrent(t *testing.T, mk Factory) {
+func testMaterializeConcurrent(t *testing.T, mk Factory, present bool) {
 	b := mk(t)
-	if err := b.CreateVolume(ctx(), "vol_p", 0); err != nil {
-		t.Fatalf("create: %v", err)
+	if present {
+		if err := b.CreateVolume(ctx(), "vol_p", 0); err != nil {
+			t.Fatalf("create: %v", err)
+		}
 	}
 	const n = 8
 	errs := make(chan error, n)
 	paths := make(chan string, n)
+	start := make(chan struct{})
 	for i := 0; i < n; i++ {
 		go func() {
+			<-start
 			m, err := b.Materialize(ctx(), "vol_p")
 			if err != nil {
 				errs <- err
@@ -412,6 +417,7 @@ func testMaterializeConcurrent(t *testing.T, mk Factory) {
 			paths <- m.SourcePath
 		}()
 	}
+	close(start)
 	for i := 0; i < n; i++ {
 		if err := <-errs; err != nil {
 			t.Fatalf("concurrent Materialize: %v", err)
@@ -799,6 +805,20 @@ func testRootSymlinkConfinement(t *testing.T, mk Factory) {
 // nothing else can see them (Backend.UncappedBytes).
 func testUncappedBytesGrows(t *testing.T, mk Factory) {
 	b := mk(t)
+	if !b.Capabilities().Usage {
+		if err := b.CreateVolume(ctx(), "vol_unmeasured", 0); err != nil {
+			t.Fatal(err)
+		}
+		_, _, err := b.Usage(ctx(), "vol_unmeasured")
+		if !errors.Is(err, volume.ErrUsageUnavailable) {
+			t.Fatalf("usage: %v", err)
+		}
+		_, err = b.UncappedBytes(ctx())
+		if !errors.Is(err, volume.ErrUsageUnavailable) {
+			t.Fatalf("aggregate: %v", err)
+		}
+		return
+	}
 	before, err := b.UncappedBytes(ctx())
 	if err != nil {
 		t.Fatalf("uncapped bytes (empty): %v", err)
@@ -881,8 +901,10 @@ func testSweep(t *testing.T, mk Factory) {
 			t.Errorf("a destroyed unit is still enumerated: %v", ids)
 		}
 	}
-	if _, err := b.OpenRoot(ctx(), "vol_a"); err != nil {
+	if root, err := b.OpenRoot(ctx(), "vol_a"); err != nil {
 		t.Errorf("the surviving volume was damaged: %v", err)
+	} else {
+		root.Close()
 	}
 }
 
@@ -919,6 +941,20 @@ func testSweepBuilding(t *testing.T, mk Factory) {
 // evaluated against it (the Volume subsystem / volume cap enforcement).
 func testUsage(t *testing.T, mk Factory) {
 	b := mk(t)
+	if !b.Capabilities().Usage {
+		if err := b.CreateVolume(ctx(), "vol_unmeasured", 0); err != nil {
+			t.Fatal(err)
+		}
+		_, _, err := b.Usage(ctx(), "vol_unmeasured")
+		if !errors.Is(err, volume.ErrUsageUnavailable) {
+			t.Fatalf("usage: %v", err)
+		}
+		_, err = b.UncappedBytes(ctx())
+		if !errors.Is(err, volume.ErrUsageUnavailable) {
+			t.Fatalf("aggregate: %v", err)
+		}
+		return
+	}
 	if err := b.CreateVolume(ctx(), "vol_us", 0); err != nil {
 		t.Fatalf("create: %v", err)
 	}

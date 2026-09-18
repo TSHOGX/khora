@@ -19,11 +19,14 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/TSHOGX/khora/internal/btrfs"
 	"github.com/TSHOGX/khora/internal/model"
 	"github.com/TSHOGX/khora/internal/orchestrator"
 	"github.com/TSHOGX/khora/internal/rootfs"
 	"github.com/TSHOGX/khora/internal/runtime"
+	"github.com/TSHOGX/khora/test/substratereq"
 )
 
 // RepoRoot resolves the engine repo root from this file's location.
@@ -310,6 +313,7 @@ func Engine(t *testing.T, opts EngineOpts) (*orchestrator.Engine, string) {
 	}
 
 	eng, err := orchestrator.New(orchestrator.Config{
+		VolumeProvider:        fixtureVolumeProvider(t, base),
 		TemplatesDir:          tmpl,
 		StateDir:              filepath.Join(base, "state"),
 		StorePath:             storePath,
@@ -477,6 +481,7 @@ func Restart(t *testing.T, base string, opts EngineOpts) *orchestrator.Engine {
 		healthTimeout = 30 * time.Second
 	}
 	eng, err := orchestrator.New(orchestrator.Config{
+		VolumeProvider: fixtureVolumeProvider(t, base),
 		TemplatesDir:   filepath.Join(base, "templates"),
 		StateDir:       filepath.Join(base, "state"),
 		StorePath:      storePath,
@@ -501,6 +506,19 @@ func Restart(t *testing.T, base string, opts EngineOpts) *orchestrator.Engine {
 	return eng
 }
 
+// Fixtures on tmpfs exercise ordinary directories; quota fixtures use native btrfs.
+func fixtureVolumeProvider(t *testing.T, base string) orchestrator.VolumeProvider {
+	t.Helper()
+	var st unix.Statfs_t
+	if err := unix.Statfs(base, &st); err != nil {
+		t.Fatal(err)
+	}
+	if st.Type == 0x9123683e {
+		return orchestrator.VolumeProviderLocalBtrfs
+	}
+	return orchestrator.VolumeProviderPlainDir
+}
+
 // CountEngineNetns counts engine-owned netns on this host (the placement marker
 // local_runsc enumerates, atomic transition rollback). Tests use it to assert no orphan leaked.
 func CountEngineNetns(t *testing.T) int {
@@ -518,13 +536,13 @@ func CountEngineNetns(t *testing.T) int {
 	return n
 }
 
-// BtrfsBase creates a state base on REAL btrfs under /var/tmp, skips the test when that
-// path is not btrfs, and registers teardown followed by removal. Returns the base and
+// BtrfsBase creates a state base on usable squota under /var/tmp, fails when the
+// prerequisite is absent, and registers teardown followed by removal. Returns the base and
 // its state dir.
 //
 // It exists because t.TempDir() is tmpfs here, so a suite whose subject is quotas, caps
 // or subvolume reclaim would exercise a configuration the engine does not support
-// (the root-required deployment) — which is why the skip is a skip and not a silent pass on tmpfs.
+// (the root-required deployment).
 //
 // teardown runs BEFORE the RemoveAll and may be nil. It is a callback rather than
 // something this helper does itself because os.RemoveAll CANNOT delete a btrfs
@@ -537,7 +555,7 @@ func BtrfsBase(t *testing.T, prefix, why string, teardown func(stateDir string))
 		t.Fatal(err)
 	}
 	stateDir = filepath.Join(base, "state")
-	// Registered BEFORE the btrfs check, so a SKIP removes the dir too. /var/tmp on this
+	// Registered before the prerequisite check so a failure removes the dir too. /var/tmp on this
 	// machine already carries one leaked fixture dir from an earlier run, and a scratch
 	// dir that silently survives costs the next run the ability to tell "the engine
 	// leaks" from "my fixtures leak".
@@ -547,9 +565,8 @@ func BtrfsBase(t *testing.T, prefix, why string, teardown func(stateDir string))
 		}
 		_ = os.RemoveAll(base)
 	})
-	if !(btrfs.Client{}).Available(context.Background(), base) {
-		t.Skipf("%s is not on btrfs; %s (the root-required deployment)", base, why)
-	}
+	mode, probeErr := (btrfs.Client{}).QuotaStatus(context.Background(), base)
+	substratereq.Squota(t, base, mode == btrfs.QuotaSimple, probeErr)
 	return base, stateDir
 }
 

@@ -71,6 +71,9 @@ func TestLocalBtrfsContract(t *testing.T) {
 		if err != nil {
 			t.Fatalf("new local arm: %v", err)
 		}
+		if err := b.Validate(context.Background()); err != nil {
+			t.Fatal(err)
+		}
 		if !b.Capabilities().Quota {
 			t.Fatalf("the local arm reports no Quota capability — the scratch dir is not on a quota-capable fs, so this run would silently exercise the uncapped branch")
 		}

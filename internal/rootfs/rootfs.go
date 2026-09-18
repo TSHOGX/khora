@@ -256,3 +256,8 @@ type Provider interface {
 type TemplateDigestProvider interface {
 	TemplateDigest(ctx context.Context, templateID string) (string, error)
 }
+
+// CapacityValidator validates configured and durable disk requirements before serving.
+type CapacityValidator interface {
+	ValidateCapacity(context.Context, bool) error
+}

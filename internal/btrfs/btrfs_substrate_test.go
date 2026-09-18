@@ -88,9 +88,8 @@ func btrfsScratch(t *testing.T) string {
 		}
 	})
 	c := Client{}
-	if !c.Available(context.Background(), dir) {
-		t.Skipf("%s is not on btrfs; the capacity axis needs btrfs (the root-required deployment)", dir)
-	}
+	mode, err := c.QuotaStatus(context.Background(), dir)
+	substratereq.Squota(t, dir, mode == QuotaSimple, err)
 	return dir
 }
 

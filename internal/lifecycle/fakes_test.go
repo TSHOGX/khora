@@ -312,7 +312,7 @@ type fakeVolume struct {
 
 func newFakeVolume() *fakeVolume {
 	return &fakeVolume{
-		caps:        volume.Capabilities{Snapshot: true, Clone: true, Quota: true},
+		caps:        volume.Capabilities{Snapshot: true, Clone: true, Quota: true, Usage: true},
 		units:       map[string]bool{},
 		roots:       map[string]*fakeRoot{},
 		appliedCaps: map[string]int64{},

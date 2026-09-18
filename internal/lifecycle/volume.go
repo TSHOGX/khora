@@ -1202,11 +1202,8 @@ func (m *Mediator) deriveVolume(ctx context.Context, srcID model.VolumeID, capBy
 // point refuses (cap ≤ current usage, ErrVolumeCapBelowUsage) is refused here too — see
 // the branch below.
 //
-// It is also the reason this pass BACKSTOPS LocalBtrfs.Materialize's fallback: that
-// fallback recreates a mis-swept unit as a PLAIN DIRECTORY, which carries no cap, and
-// nothing else re-asserts one. The dependency is worth naming because the guard below
-// preserves it exactly where it matters — a freshly recreated unit is EMPTY, so its usage
-// is 0 and any positive recorded cap is strictly above it.
+// A recreated storage unit must receive its recorded cap before it is relied on
+// for admission. Unreadable usage cannot justify applying that cap blindly.
 //
 // Runs in the same boot position as the orphan sweep, BEFORE anything creates a unit.
 func (m *Mediator) RepairVolumeCaps(ctx context.Context) error {

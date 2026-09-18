@@ -78,6 +78,16 @@ func Btrfs(t testing.TB, dir string) {
 	}
 }
 
+// Squota distinguishes filesystem presence from the quota mode required by a test.
+// The caller supplies its kernel probe result to avoid a dependency on the provider.
+func Squota(t testing.TB, dir string, usable bool, err error) {
+	t.Helper()
+	Btrfs(t, dir)
+	if err != nil || !usable {
+		t.Fatalf("substrate test needs usable squota at %s: usable=%t error=%v", dir, usable, err)
+	}
+}
+
 // Bin fails unless every named executable is on PATH, reporting ALL the missing ones
 // rather than the first: a fresh box is usually missing several, and one name per run
 // turns provisioning into a guessing loop.

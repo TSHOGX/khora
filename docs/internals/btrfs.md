@@ -7,8 +7,22 @@ operations and parses btrfs output; it owns no lifecycle or store policy.
 ## Why `squota` is a correctness constraint
 
 Simple quotas charge newly owned extents without the full recursive relationship
-tracking cost of classic qgroups. The state root must be mounted with `squota`; a
-capped unit on an unsupported filesystem is refused instead of running uncapped.
+tracking cost of classic qgroups. Capacity enforcement requires usable `squota`;
+a capped unit on an unsupported filesystem is refused instead of running uncapped.
+The kernel quota status item, not the filesystem type alone, determines the mode.
+
+`local_btrfs` accepts btrfs with quotas disabled for uncapped Volumes, including
+native snapshots and clones. It reports usage as unavailable in this mode and
+cannot be combined with a node disk admission budget. Ordinary directories use
+`plain_dir`. Classic quotas, inconsistent accounting and unknown probe results
+are refused. The engine never enables quotas on the host.
+
+Providers retain the validated mode and recheck it at quota read/write points.
+A mode change returns unavailable until configuration is restored or the engine
+restarts and validates its durable requirements. A zero requested cap skips quota
+writes only when quotas are confirmed disabled; with quotas enabled it clears
+any existing limit. Command failures never substitute an ordinary directory for
+a requested subvolume.
 
 Quota creation and cap assignment are separate btrfs operations. Providers therefore
 clean up a subvolume if cap assignment fails, before a durable object becomes visible.

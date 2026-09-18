@@ -84,3 +84,12 @@ startup and mixed-provider routing tests before exposing the name in the CLI.
 Update the implementation table, host requirements, configuration, operations, and
 test instructions in the same change. Describe unsupported behavior as a limitation,
 not as a future implementation that already exists.
+
+## Quota and measurement capabilities
+
+`Capabilities.Usage` states whether per-unit and aggregate allocation measurements
+are available. `plain_dir` measures allocated file blocks. `local_btrfs` uses
+usable `squota` for quota enforcement and measurement. With quotas confirmed off,
+it still supports native subvolumes, snapshots and clones, but reports neither
+Quota nor Usage. A configured node disk budget requires measurement from every
+registered Volume backend. Unknown quota state is an error, not an uncapped mode.

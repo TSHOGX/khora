@@ -113,7 +113,7 @@ func TestUncappedBytesRefusesToWalkAUnitWhoseRowIsUnreadable(t *testing.T) {
 	// Real bytes in upper, so a fallback walk would return something substantial.
 	writeUpper(t, p, id, map[string]string{"payload": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"})
 
-	p.Btrfs = btrfs.Client{Run: func(_ context.Context, argv []string) ([]byte, error) {
+	p.Btrfs = btrfs.Client{ProbeQuota: func(context.Context, string) (btrfs.QuotaMode, error) { return btrfs.QuotaSimple, nil }, Run: func(_ context.Context, argv []string) ([]byte, error) {
 		switch {
 		case len(argv) > 2 && argv[1] == "subvolume" && argv[2] == "show":
 			return []byte(id + "\n\tSubvolume ID:\t\t256\n"), nil

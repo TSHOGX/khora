@@ -124,10 +124,11 @@ func TestTheRefusalNamesTheConsequenceAndTheWayOut(t *testing.T) {
 func TestTheAssemblyRefusesAPublishedListenerBeforeMaterializingAnything(t *testing.T) {
 	base := t.TempDir()
 	_, err := New(Config{
-		TemplatesDir: filepath.Join(base, "templates"),
-		StateDir:     filepath.Join(base, "state"),
-		StorePath:    ":memory:",
-		ListenAddr:   "0.0.0.0:8080",
+		VolumeProvider: VolumeProviderPlainDir,
+		TemplatesDir:   filepath.Join(base, "templates"),
+		StateDir:       filepath.Join(base, "state"),
+		StorePath:      ":memory:",
+		ListenAddr:     "0.0.0.0:8080",
 	})
 	if err == nil {
 		t.Fatal("the assembly accepted a listener on every interface — with no authentication and no " +
@@ -150,10 +151,11 @@ func TestTheAssemblyRefusesAPublishedListenerBeforeMaterializingAnything(t *test
 func TestTheAssemblyAcceptsALoopbackListener(t *testing.T) {
 	base := t.TempDir()
 	eng, err := New(Config{
-		TemplatesDir: filepath.Join(base, "templates"),
-		StateDir:     filepath.Join(base, "state"),
-		StorePath:    ":memory:",
-		ListenAddr:   "127.0.0.1:8080",
+		VolumeProvider: VolumeProviderPlainDir,
+		TemplatesDir:   filepath.Join(base, "templates"),
+		StateDir:       filepath.Join(base, "state"),
+		StorePath:      ":memory:",
+		ListenAddr:     "127.0.0.1:8080",
 	})
 	if err != nil {
 		t.Fatalf("a loopback listener was refused: %v — the check must reject a PUBLISHED listener, "+
@@ -175,6 +177,7 @@ func TestTheAssemblyAcceptsALoopbackListener(t *testing.T) {
 func TestInsecureListenIsTheDeliberateOptOut(t *testing.T) {
 	base := t.TempDir()
 	eng, err := New(Config{
+		VolumeProvider: VolumeProviderPlainDir,
 		TemplatesDir:   filepath.Join(base, "templates"),
 		StateDir:       filepath.Join(base, "state"),
 		StorePath:      ":memory:",
@@ -195,6 +198,7 @@ func TestInsecureListenIsTheDeliberateOptOut(t *testing.T) {
 	// general "skip the startup checks" switch.
 	euid := os.Geteuid()
 	if _, err := New(Config{
+		VolumeProvider: VolumeProviderPlainDir,
 		TemplatesDir:   filepath.Join(base, "templates2"),
 		StateDir:       filepath.Join(base, "state2"),
 		StorePath:      ":memory:",
@@ -215,9 +219,10 @@ func TestInsecureListenIsTheDeliberateOptOut(t *testing.T) {
 func TestAnAbsentListenAddrIsNotClassified(t *testing.T) {
 	base := t.TempDir()
 	eng, err := New(Config{
-		TemplatesDir: filepath.Join(base, "templates"),
-		StateDir:     filepath.Join(base, "state"),
-		StorePath:    ":memory:",
+		VolumeProvider: VolumeProviderPlainDir,
+		TemplatesDir:   filepath.Join(base, "templates"),
+		StateDir:       filepath.Join(base, "state"),
+		StorePath:      ":memory:",
 	})
 	if err != nil {
 		t.Fatalf("New refused a Config with no ListenAddr: %v — an in-process Engine serves through "+
