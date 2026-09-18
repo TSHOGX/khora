@@ -13,7 +13,7 @@ layer to compose. A need that can be implemented by registering an implementatio
 table or adding a subscriber should use that seam; otherwise prove why it belongs here.
 
 Every claim has a mechanical link to what makes it true: tests link behavior to code, generated
-files link output to a canonical source, PRs link changes to Issues, and Issues record known gaps.
+files link output to a canonical source.
 Do not use prose, checkboxes or duplicated metadata as a substitute for evidence.
 
 ## Architecture
@@ -55,12 +55,12 @@ are checked for staleness.
 
 New Go code must not cite section numbers, Markdown paths or ADR IDs. State the constraint at the
 code site that makes the choice, once. If it cannot fit there, put the fact in maintained internals
-documentation or an Issue. Comments carry obligations and measurements, not arguments for a rule.
+documentation. Comments carry obligations and measurements, not arguments for a rule.
 Operator-facing flags, errors and logs are one line; error strings do not cite documents.
 
-## Verification and collaboration
+## Verification
 
-Every ready-for-review PR reports the applicable results:
+Validate changes with the applicable checks:
 
 ```text
 go build ./...
@@ -72,32 +72,19 @@ go test ./...
 CI owns these cheap, repeatable checks plus architectural/build-tag and generated-output checks.
 `scripts/check-generated.sh` is the canonical local generated-output check; CI installs its
 pinned generator versions before invoking it.
-The substrate acceptance suite is run by the developer before the PR is marked ready, on a host
+Run the substrate acceptance suite for changes that affect substrate behavior, on a host
 with Linux, runsc, overlayfs, netns, cgroup v2, btrfs `squota`, `nft` and `ip`; native filesystem
-storage is required. Record in the PR the command, host profile, result and any skip reason after
-the last material change. Do not commit substrate logs or make CI claim a local run.
+storage is required. Report the command, host profile, result and any skip reason after the
+last material change. Do not commit substrate logs or make CI claim a local run.
 
-Run `go run ./test/preflight/substrategate --base origin/main` to decide whether the substrate
-run is required for the complete PR diff. Draft work may be incomplete or failing; build, vet and
-unit tests are not skipped when a PR is ready for review. Use `internal/waitfor` for polling, and test
-concurrency and failure invariants at risky seams. A new structural guard needs a committed
-negative test or fixture; register every build tag in `internal/arch`'s matrix alone and, where
+Run `go run ./test/preflight/substrategate --base <ref>` to classify the complete change
+since its comparison base, including the working tree. Without `--base`, it compares against HEAD.
+Build, vet and unit tests validate the code independently of the substrate decision.
+Use `internal/waitfor` for polling, and test concurrency and failure invariants at risky seams.
+A new structural guard needs a committed negative test or fixture; register every build tag in `internal/arch`'s matrix alone and, where
 applicable, paired with `substrate`. Diagnose a suspected substrate failure through the harness
 before assigning it to the engine.
 
-Consumers file needs as Issues labelled `ask:inbound`; an ask states a need and fallback, not an
-engine design. The Issue is the ruling record and the PR is the implementation record:
-
-- `ask:granted`: keep open until the implementing PR merges; use `Refs #N` for progress and
-  `Closes #N` for complete delivery.
-- `ask:refused`: close with the reason and resulting fallback.
-- `ask:duplicate`: close with the canonical Issue number and applicable leaning.
-
-Do not maintain an open-question mirror, section map or `Hangs on:` field; do not edit a consumer
-repository or enumerate consumers in this tree. An Issue may affect scheduling, but it does not
-override the engine boundary or impose an implementation order.
-
 The `0.0.x` line has no compatibility burden. Persistent state may be rebuilt; do not add schema
-migrations, compatibility shims, version negotiation or backward-compatibility branches. Use
-Conventional Commits scoped to the engine, keep repository artifacts in English, and do not create
-`docs/plans/`. `main` moves through a reviewable PR; the pre-push hook is only a local safeguard.
+migrations, compatibility shims, version negotiation or backward-compatibility branches. Keep
+repository artifacts in English, and do not create `docs/plans/`.

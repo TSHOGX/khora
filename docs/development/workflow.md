@@ -12,20 +12,9 @@ Lifecycle verbs belong to `internal/lifecycle`. Shared vocabulary and pure crite
 belong in leaf packages. [Architecture tests](../../internal/arch/coupling_test.go)
 keep the cross-subsystem allowlist empty.
 
-## Use Issues and PRs as records
+## Develop a change
 
-An Issue records a need, ruling, or known gap. A PR records implementation, review,
-and verification. Use `Refs #N` for progress and `Closes #N` only when the PR fully
-delivers the Issue. Do not create a second open-question register or encode a
-document section address in code.
-
-For inbound asks, record the need and fallback before proposing engine design.
-Keep a granted ask open until its implementing PR merges; close a refusal with its
-reason and a duplicate with the canonical Issue.
-
-## Make a reviewable change
-
-Keep code, focused tests, public documentation, and generated output in the same PR.
+Keep code, focused tests, public documentation, and generated output consistent.
 Use existing package vocabulary and provider seams. New comments should state a
 local obligation, failure mode, or measurement, not cite a Markdown page as the
 reason code is correct.
@@ -39,9 +28,6 @@ New structural guards require a committed negative fixture proving the prohibite
 shape is rejected. Register a new build tag only in the architectural tag matrix,
 alone and paired with `substrate` where applicable. Use `internal/waitfor` instead
 of custom polling loops.
-
-Commit messages use Conventional Commits scoped to the engine. `main` changes
-through review; the pre-push hook is only a local safeguard.
 
 ## Keep evidence dependencies one-way
 
@@ -57,10 +43,8 @@ Those exceptions do not carry a technical claim. The repository guard and its
 negative fixture are [check-retired-references.sh](../../scripts/check-retired-references.sh)
 and [test-check-retired-references.sh](../../scripts/test-check-retired-references.sh).
 
-## Prepare the PR
+## Verify the change
 
 Run the deterministic checks and make the substrate decision described in
 [Testing](testing.md) after the last material change. Regenerate and check derived
-files as described in [Generated files](generated-files.md). Fill in the PR template
-with the Issue link, change summary, CI or command results, and exact substrate
-decision evidence.
+files as described in [Generated files](generated-files.md).

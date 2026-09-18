@@ -2,7 +2,7 @@
 
 ## Deterministic checks
 
-A ready-for-review change reports these results:
+Validate code changes with:
 
 ```sh
 go build ./...
@@ -56,15 +56,19 @@ sudo -E go test -tags=substrate ./test/...
 ```
 
 Focused commands do not replace `go test ./...` or the complete substrate command
-when preparing a ready-for-review change.
+when validating the complete change.
 
 ## Decide on substrate acceptance
 
-Evaluate the complete PR diff plus working tree after the last material change:
+Evaluate the complete change plus working tree after the last material change:
 
 ```sh
 go run ./test/preflight/substrategate --base origin/main
 ```
+
+Use the ref preceding your changes as `--base`; `origin/main` above is an example.
+The tool compares from the merge base with that ref and includes local changes.
+Omit `--base` to compare only the working tree against HEAD.
 
 Exit `0` means the real-substrate suite is not required. Exit `1` means it is
 required. Exit `2` means the tool could not decide and must also be treated as
@@ -86,10 +90,9 @@ run them when the corresponding mechanism changes. The centralized preconditions
 are in [test/substratereq](../../test/substratereq), and individual tests skip only
 through that profile.
 
-Record `passed`, `failed`, or `not required` in the PR with the exact command, host
-profile, result, and every skip reason. Re-run the decision after a later material
-change. Do not commit a substrate transcript, and do not present hosted CI as a
-local substrate result.
+Report the exact command, host profile, result, and every skip reason with the
+verification outcome. Re-run the decision after a later material change. Do not
+commit a substrate transcript, and do not present hosted CI as a local substrate result.
 
 When a substrate test fails, reproduce it through the harness and inspect its
 captured namespace, rule, cgroup, and filesystem evidence before assigning the

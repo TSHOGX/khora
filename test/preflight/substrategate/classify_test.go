@@ -7,8 +7,6 @@ func TestInertPath(t *testing.T) {
 		"docs/operations/startup-shutdown.md":  true,
 		".github/workflows/ci.yml":             true,
 		".gitignore":                           true,
-		"scripts/check-no-direct-main.sh":      true,
-		"scripts/install-hooks.sh":             true,
 		"scripts/check-generated.sh":           true,
 		"internal/arch/coupling_test.go":       true,
 		"test/preflight/substrategate/main.go": true,

@@ -8,7 +8,7 @@
 // Usage:
 //
 //	go run ./test/preflight/substrategate                    # working tree against HEAD
-//	go run ./test/preflight/substrategate --base origin/main # complete PR plus working tree
+//	go run ./test/preflight/substrategate --base origin/main # changes since the merge base, plus working tree
 //
 // Exit codes: 0 = the gate is not required by this diff · 1 = the gate is required
 // · 2 = this tool could not decide, so the gate is required. Both non-zero codes
@@ -75,7 +75,7 @@ func main() {
 
 	what := "the working tree against HEAD"
 	if base != "" {
-		what = "the complete PR diff from " + base + " plus the working tree"
+		what = "the complete diff from the merge base with " + base + " plus the working tree"
 	}
 	fmt.Printf("substrategate: %d changed file(s), %s\n", len(changes), what)
 	fmt.Printf("  inert repository files: %d\n", inert)
@@ -109,7 +109,7 @@ func inertPath(path string) bool {
 	if strings.HasPrefix(path, "test/preflight/substrategate/") {
 		return true
 	}
-	// scripts/ is reserved for repository checks and local collaboration helpers.
+	// scripts/ is reserved for repository checks and generators.
 	// Runtime fixtures and Template build inputs live under test/ and templates/.
 	return strings.HasPrefix(path, "scripts/")
 }

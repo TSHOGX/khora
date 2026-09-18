@@ -20,15 +20,13 @@ manufactures invariants the code does not actually hold. **If you pin a `0.0.x` 
 an upgrade as a redeploy from empty state.**
 
 What this does *not* mean: the tag is not a moving target. A tag is immutable, and the binaries
-built from it report it via `--version`. Substrate verification is recorded with the reviewing
-PR rather than committed as a document in the product tree.
+built from it report it via `--version`.
 
 ## v0.0.1
 
 First tagged release, and the first release under the name **Khora** — χώρα, the receptacle
 that has no character of its own and takes on the character of what enters it, which states
-the engine's first principle in Greek. Substrate verification for release work is recorded
-with the reviewing PR, not as a generated document in the product tree.
+the engine's first principle in Greek.
 
 The project, the Go module (`github.com/TSHOGX/khora`), the CLI binary, the repository and
 the protobuf wire package (`khora.transport.v1`) all carry that one name. It was renamed
