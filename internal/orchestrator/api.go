@@ -38,6 +38,7 @@ import (
 // /v1/... .
 func (e *Engine) HTTPHandler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/info", e.handleInfo)
 
 	// --- data plane: Connect-RPC re-proxy (the outer-edge transport split) ---
 	mux.Handle(transportv1connect.NewProcessServiceHandler(&processProxy{e: e}))

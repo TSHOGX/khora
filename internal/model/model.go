@@ -10,6 +10,9 @@ import (
 	"time"
 )
 
+// StoreID identifies one durable collection of engine records.
+type StoreID string
+
 // SandboxID is the stable, opaque identity of a persistent sandbox (the ID-reference model).
 // It does NOT encode placement: after resume the IP / container / cgroup / node
 // may all change, but the SandboxID is unchanged — same Overlay artifact, same

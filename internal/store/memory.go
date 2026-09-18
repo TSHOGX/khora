@@ -18,6 +18,7 @@ import (
 // transition and its event commit together or not at all — where SQLite uses
 // BEGIN/COMMIT. Every "X equivalent" comment below is one clause of that.
 type Memory struct {
+	identity      model.StoreID
 	mu            sync.Mutex
 	rec           map[model.SandboxID]model.Sandbox
 	placements    map[model.SandboxID]model.Placement
@@ -65,6 +66,7 @@ type outboxRow struct {
 
 func NewMemory() *Memory {
 	return &Memory{
+		identity:      newStoreID(),
 		rec:           make(map[model.SandboxID]model.Sandbox),
 		tmpl:          make(map[model.TemplateID]model.Template),
 		vol:           make(map[model.VolumeID]model.Volume),
@@ -684,4 +686,16 @@ func (m *Memory) MarkPublished(_ context.Context, eventID string) error {
 		}
 	}
 	return nil // unknown ID → no-op (idempotent)
+}
+
+func (m *Memory) Identity(ctx context.Context) (model.StoreID, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !validStoreID(m.identity) {
+		return "", fmt.Errorf("store: invalid identity")
+	}
+	return m.identity, nil
 }
