@@ -516,13 +516,13 @@ func (e *Engine) RepairVolumeCaps(ctx context.Context) error {
 	return e.Mediator.RepairVolumeCaps(ctx)
 }
 
-// ReclaimQuotaRows runs the Volume subsystem / Volume quota cleanup leaked-quota-row reclamation round. The
+// ReclaimVolumeStorage runs the Volume subsystem / Volume quota cleanup leaked-quota-row reclamation round. The
 // `parent` FK demotes this from the main path to a backstop (it makes the leak-producing
 // deletion order unreachable through the API), but the residual paths — a crash between
 // two deletes, and the sweep's own per-unit ordering — do not pass through user intent,
 // so the round must exist and must be correct.
-func (e *Engine) ReclaimQuotaRows(ctx context.Context) error {
-	return e.Mediator.ReclaimQuotaRows(ctx)
+func (e *Engine) ReclaimVolumeStorage(ctx context.Context) error {
+	return e.Mediator.ReclaimVolumeStorage(ctx)
 }
 
 // SweepOrphanVolumes runs the Volume subsystem / atomic transition rollback orphan-volume sweep (reclaim volume

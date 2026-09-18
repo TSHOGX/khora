@@ -63,5 +63,8 @@ Readiness and liveness keep their existing meanings.
 Quota reclamation has a five-second budget per backend, controlled by
 `--quota-reclaim-timeout`. Startup logs failures and continues the remaining boot
 steps; periodic ticks retry retained work. A timeout does not cancel later
-maintenance. Optional sandbox counts on `/metrics` have a one-second Store-read
+maintenance. Each pass handles currently reclaimable residue without waiting for
+subvolume deletion; pending deletions and live sharers may require later ticks.
+The budget covers provider cleanup and cooperative I/O, not all startup work or
+uninterruptible kernel I/O. Optional sandbox counts on `/metrics` have a one-second Store-read
 budget so a slow count does not hide the process metrics.

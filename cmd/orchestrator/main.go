@@ -89,22 +89,7 @@ func main() {
 		log.Fatalf("orchestrator: seed builtin templates: %v", err)
 	}
 
-	// Run before any create: a leaked quota row does not reserve its unit id, so a
-	// restart can hand that id, along with its cap, to a brand-new volume.
-	if err := eng.SweepOrphanVolumes(context.Background()); err != nil {
-		log.Printf("orchestrator: boot orphan-volume sweep (retried by reaper): %v", err)
-	}
-
-	// A crash between a snapshot's two substrate calls leaves a live uncapped volume
-	// that no later read can distinguish from a deliberately uncapped one.
-	if err := eng.RepairVolumeCaps(context.Background()); err != nil {
-		log.Printf("orchestrator: boot volume-cap repair (retried by reaper): %v", err)
-	}
-
-	// Reclaim quota rows so a later volume cannot inherit a leaked id and cap.
-	if err := eng.ReclaimQuotaRows(context.Background()); err != nil {
-		log.Printf("orchestrator: boot quota-row reclamation (retried by reaper): %v", err)
-	}
+	bootVolumeStorage(context.Background(), eng)
 
 	// The engine-level table pins the second hop. A live `via[]` declaration without it
 	// is an unpinned confused deputy, so failure is fatal. With no --via-uid this removes
@@ -186,4 +171,25 @@ func main() {
 	// ListenAndServe returned ErrServerClosed: the signal goroutine owns the exit.
 	// Block so the process does not race past it.
 	select {}
+}
+
+// Storage recovery failures are retried by the reaper after serving starts.
+func bootVolumeStorage(ctx context.Context, eng *orchestrator.Engine) {
+	// Run before any create: a leaked quota row does not reserve its unit id, so a
+	// restart can hand that id, along with its cap, to a brand-new volume.
+	if err := eng.SweepOrphanVolumes(ctx); err != nil {
+		log.Printf("orchestrator: boot orphan-volume sweep (retried by reaper): %v", err)
+	}
+
+	// A crash between a snapshot's two substrate calls leaves a live uncapped volume
+	// that no later read can distinguish from a deliberately uncapped one.
+	if err := eng.RepairVolumeCaps(ctx); err != nil {
+		log.Printf("orchestrator: boot volume-cap repair (retried by reaper): %v", err)
+	}
+
+	// Reclaim quota rows so a later volume cannot inherit a leaked id and cap.
+	if err := eng.ReclaimVolumeStorage(ctx); err != nil {
+		log.Printf("orchestrator: boot quota-row reclamation (retried by reaper): %v", err)
+	}
+
 }

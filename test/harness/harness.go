@@ -339,7 +339,7 @@ func Engine(t *testing.T, opts EngineOpts) (*orchestrator.Engine, string) {
 	if err := eng.RepairVolumeCaps(ctx); err != nil {
 		t.Logf("boot volume-cap repair (non-fatal, reaper retries): %v", err)
 	}
-	if err := eng.ReclaimQuotaRows(ctx); err != nil {
+	if err := eng.ReclaimVolumeStorage(ctx); err != nil {
 		t.Logf("boot quota-row reclamation (non-fatal, reaper retries): %v", err)
 	}
 	// the engine-level second-hop floor, in production's position: installed once, BEFORE

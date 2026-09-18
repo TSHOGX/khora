@@ -12,7 +12,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -27,55 +26,6 @@ import (
 	"github.com/TSHOGX/khora/internal/waitfor"
 	"github.com/TSHOGX/khora/test/harness"
 )
-
-// runCmd runs a host command and returns its combined output. Local to this file: the
-// only thing it is used for is counting quota rows, which has no engine API by design
-// (the engine locates rows by id, never by scanning — the Volume subsystem).
-func runCmd(name string, args ...string) (string, error) {
-	out, err := exec.Command(name, args...).CombinedOutput()
-	return string(out), err
-}
-
-// qgroupRowCount counts quota rows on the filesystem holding path — the number a leak
-// moves. Used as a BASELINE COMPARISON rather than an absolute: this engine is not the
-// only owner of the quota namespace on this box (measured, the dev filesystem carries
-// external rows), so only the delta is meaningful.
-func qgroupRowCount(t *testing.T, path string) int {
-	t.Helper()
-	bc := btrfs.Client{}
-	mnt, err := bc.MountPoint(context.Background(), path)
-	if err != nil {
-		t.Fatalf("resolve mount point: %v", err)
-	}
-	// RETRIED, because `--sync` fails while a quota rescan is running and this suite's own
-	// churn is what starts one: creating and deleting storage units in a loop leaves the
-	// qgroup tree inconsistent, the kernel rescans, and `qgroup show --sync` exits 1 until
-	// it finishes. Observed on this box (8799 rows on the dev filesystem, most of them
-	// external and stale) as a one-off failure of the source-delete arm that passed on the
-	// very next run.
-	//
-	// A t.Fatalf on the first error made a substrate hiccup indistinguishable from a quota
-	// leak — the harness impersonating an engine defect, which is the one test bug this
-	// suite cannot afford. The retry does not weaken the assertion: the caller compares two
-	// counts, so a reading that never arrives fails below on its own.
-	var out string
-	var lastErr error
-	ok := waitfor.Until(20*time.Second, 500*time.Millisecond, func() bool {
-		out, lastErr = runCmd("btrfs", "qgroup", "show", "-re", "--raw", "--sync", mnt)
-		return lastErr == nil
-	})
-	if !ok {
-		t.Fatalf("qgroup show never succeeded within 20s (a rescan that never settles is a real "+
-			"substrate problem, not a hiccup): %v", lastErr)
-	}
-	n := 0
-	for _, line := range strings.Split(out, "\n") {
-		if strings.HasPrefix(strings.TrimSpace(line), "0/") {
-			n++
-		}
-	}
-	return n
-}
 
 // TestVolumeSnapshotOfALiveWrittenVolume pins the live case: snapshotting a volume that
 // a guest is actively writing must not disturb the writer, and the captured content must
@@ -255,8 +205,8 @@ func TestVolumeSnapshotCapIsEnforcedOnTheNewVolume(t *testing.T) {
 }
 
 // TestVolumeSnapshotSourceDeleteIsRefusedAndLeaksNoQuotaRow pins the lineage refusal: deleting
-// a source with a live descendant is a 409, AND the filesystem's quota-row count returns
-// to baseline once things are deleted in the order the FK forces.
+// a source with a live descendant is a 409, and its recorded quota rows disappear
+// once things are deleted in the order the reference constraint requires.
 //
 // That is the point of the FK (snapshot lineage): a leak needs "delete the source while a
 // live sharer references its extents", and RESTRICT makes that order UNREACHABLE through
@@ -264,8 +214,6 @@ func TestVolumeSnapshotCapIsEnforcedOnTheNewVolume(t *testing.T) {
 func TestVolumeSnapshotSourceDeleteIsRefusedAndLeaksNoQuotaRow(t *testing.T) {
 	ctx := context.Background()
 	eng, stateDir := mountEngine(t)
-
-	baseline := qgroupRowCount(t, stateDir)
 
 	src, err := eng.Mediator.CreateVolume(ctx, 32<<20)
 	if err != nil {
@@ -280,6 +228,20 @@ func TestVolumeSnapshotSourceDeleteIsRefusedAndLeaksNoQuotaRow(t *testing.T) {
 	snap, err := eng.Mediator.SnapshotVolume(ctx, src, 32<<20)
 	if err != nil {
 		t.Fatalf("snapshot: %v", err)
+	}
+
+	bc := btrfs.Client{}
+	mnt, err := bc.MountPoint(ctx, stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []uint64
+	for _, vid := range []model.VolumeID{src, snap} {
+		id, err := bc.SubvolumeID(ctx, filepath.Join(stateDir, "volumes", string(vid)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
 	}
 
 	// THE REFUSAL. Without it, this is exactly the deletion order that leaks.
@@ -305,24 +267,24 @@ func TestVolumeSnapshotSourceDeleteIsRefusedAndLeaksNoQuotaRow(t *testing.T) {
 	if err := eng.Mediator.DeleteVolume(ctx, src); err != nil {
 		t.Fatalf("delete the source after its descendant: %v", err)
 	}
-	// Give the substrate its bounded settle, then check the row count is back.
-	if err := eng.ReclaimQuotaRows(ctx); err != nil {
-		t.Fatalf("reclaim: %v", err)
-	}
-	after := qgroupRowCount(t, stateDir)
-	if after > baseline {
-		// Retry once through another reclamation round: the transition to reclaimable is
-		// condition-triggered, so one round may legitimately be too early.
-		if err := eng.ReclaimQuotaRows(ctx); err != nil {
-			t.Fatalf("second reclaim: %v", err)
+	// Only this fixture's rows determine whether its cleanup converged.
+	settleCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	waitfor.Must(t, "fixture quota rows to disappear", 10*time.Second, 50*time.Millisecond, func() bool {
+		if err := eng.ReclaimVolumeStorage(settleCtx); err != nil {
+			return false
 		}
-		after = qgroupRowCount(t, stateDir)
-	}
-	if after > baseline {
-		t.Errorf("quota rows went from %d to %d — deleting sharers BEFORE the source is measured to leak NOTHING, so a residue here means the order was not the one taken", baseline, after)
-	} else {
-		t.Logf("quota rows returned to baseline (%d → %d) after descendant-then-source deletion", baseline, after)
-	}
+		rows, err := bc.QuotaRows(settleCtx, mnt, ids)
+		if err != nil {
+			return false
+		}
+		for _, id := range ids {
+			if rows[id] != btrfs.RowAbsent {
+				return false
+			}
+		}
+		return true
+	})
 }
 
 // TestVolumeSnapshotCrashBetweenBytesAndRowIsRepaired pins the crash window: a crash in the

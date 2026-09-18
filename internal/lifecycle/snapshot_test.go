@@ -275,44 +275,18 @@ func TestRepairVolumeCapsNeverImposesACapBelowUsage(t *testing.T) {
 	}
 }
 
-// TestReclaimQuotaRowsWiring: the mediator asks the backend for the ids it recorded at
-// deletion time and hands them back to be reclaimed — never scanning for
-// reclaimable-looking rows, whose failure mode is an uncapped live volume with zero
-// signal (the Volume subsystem).
-func TestReclaimQuotaRowsWiring(t *testing.T) {
-	ctx := context.Background()
+func TestReclaimVolumeStorageWiring(t *testing.T) {
 	m, _, vb := volFixture(t)
-	vb.mu.Lock()
-	vb.deletedRows[101] = true
-	vb.deletedRows[102] = true
-	vb.mu.Unlock()
-
-	if err := m.ReclaimQuotaRows(ctx); err != nil {
-		t.Fatalf("reclaim: %v", err)
-	}
-	var sawReclaim bool
-	for _, c := range vb.Calls() {
-		if strings.HasPrefix(c, "ReclaimQuotaRows:") {
-			sawReclaim = true
-			if !strings.Contains(c, "n=2") {
-				t.Errorf("the reclamation round was handed %q; want the 2 recorded ids", c)
-			}
-		}
-	}
-	if !sawReclaim {
-		t.Fatalf("the backend reclamation was never called: %v", vb.Calls())
-	}
-	if left := vb.DeletedRowIDs(ctx); len(left) != 0 {
-		t.Errorf("%d recorded row(s) survived the round: %v", len(left), left)
-	}
-	// A round that finds nothing recorded does NOT call the backend — a backend with no
-	// quota rows costs the sweep nothing (the extension boundary: no capability branch in the caller).
-	before := len(vb.Calls())
-	if err := m.ReclaimQuotaRows(ctx); err != nil {
+	vb.pendingCleanup = 2
+	if err := m.ReclaimVolumeStorage(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if got := vb.Calls(); len(got) != before {
-		t.Errorf("an empty reclamation round still called the backend: %v", got[before:])
+	if vb.pendingCount() != 0 {
+		t.Fatal("backend cleanup was not run")
+	}
+	// Empty passes are harmless; work selection belongs to the backend.
+	if err := m.ReclaimVolumeStorage(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 }
 

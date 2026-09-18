@@ -186,7 +186,7 @@ func (r *Reaper) tick(ctx context.Context) {
 	// that succeeds — so the round must be POLLED. Doing it at boot alone would hold
 	// leaked rows, each of which can hand its cap to an unrelated new volume after a
 	// remount, until the next restart.
-	if err := r.m.ReclaimQuotaRows(ctx); err != nil {
+	if err := r.m.ReclaimVolumeStorage(ctx); err != nil {
 		if ctx.Err() == nil {
 			r.statsMu.Lock()
 			if errors.Is(err, context.DeadlineExceeded) {

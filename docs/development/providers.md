@@ -84,3 +84,11 @@ startup and mixed-provider routing tests before exposing the name in the CLI.
 Update the implementation table, host requirements, configuration, operations, and
 test instructions in the same change. Describe unsupported behavior as a limitation,
 not as a future implementation that already exists.
+
+## Deferred storage cleanup
+
+`volume.Backend.Reclaim(ctx)` processes the backend's own recorded residue and
+returns a diagnostic count plus any error, including partial failure. Empty work
+is a no-op. Pending work and substrate identifiers remain inside the provider;
+lifecycle supplies each pass with a deadline and continues other maintenance after
+failure. Implementations must honor cancellation and retain unconfirmed work.

@@ -2,9 +2,11 @@ package volume
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 
@@ -37,7 +39,9 @@ type LocalBtrfs struct {
 	// deletedRows are quota-row ids recorded AT DELETE TIME, whose rows a deletion may
 	// have leaked (the Volume subsystem / Volume quota cleanup). Recorded there because that is the last moment
 	// the id is obtainable — see recordDeletedRow.
-	deletedRows map[uint64]bool
+	deletedRows  map[uint64]uint64
+	nextDeletion uint64
+	reclaimGate  chan struct{}
 }
 
 // NewLocalBtrfs constructs the local arm, ensuring VolumesDir exists.
@@ -291,115 +295,106 @@ func (b *LocalBtrfs) snapshotPath(ctx context.Context, srcID, newID string, capB
 	return nil
 }
 
-// ReclaimQuotaRows retries recorded deletions within the caller's deadline.
-// Live sharers and pending deletions remain recorded for a later pass.
-func (b *LocalBtrfs) ReclaimQuotaRows(ctx context.Context, ids []uint64) (int, error) {
+// Reclaim processes currently reclaimable residue without waiting for deletion.
+// The gate bounds concurrent passes; the collection lock never spans I/O.
+func (b *LocalBtrfs) Reclaim(ctx context.Context) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	b.mu.Lock()
+	if b.reclaimGate == nil {
+		b.reclaimGate = make(chan struct{}, 1)
+	}
+	gate := b.reclaimGate
+	b.mu.Unlock()
+	select {
+	case gate <- struct{}{}:
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	}
+	defer func() { <-gate }()
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	b.mu.Lock()
+	pending := make(map[uint64]uint64, len(b.deletedRows))
+	ids := make([]uint64, 0, len(b.deletedRows))
+	for id, serial := range b.deletedRows {
+		pending[id] = serial
+		ids = append(ids, id)
+	}
+	b.mu.Unlock()
 	if len(ids) == 0 {
 		return 0, nil
 	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
 	mnt, err := b.Btrfs.MountPoint(ctx, b.VolumesDir)
 	if err != nil {
-		// No filesystem to address: nothing to reclaim, and guessing would be worse.
-		return 0, fmt.Errorf("volume: reclaim quota rows: %w", err)
+		return 0, fmt.Errorf("volume: reclaim: %w", err)
 	}
-
-	pending := append([]uint64(nil), ids...)
-	reclaimed := 0
-	var stuck []string
-	const maxRounds = 3
-	for round := 0; round < maxRounds && len(pending) > 0; round++ {
-		// One sync per ROUND.
-		if err := b.Btrfs.Sync(ctx, mnt, pending); err != nil {
-			// A failed sync means the labels may be stale, so this round would be reading
-			// unreliable state. Stop rather than act on it; the next sweep retries.
-			return reclaimed, fmt.Errorf("volume: reclaim quota rows: settle: %w", err)
+	rows, err := b.Btrfs.QuotaRows(ctx, mnt, ids)
+	if err != nil {
+		return 0, fmt.Errorf("volume: reclaim read: %w", err)
+	}
+	completed := 0
+	var failures error
+	addFailure := func(err error) {
+		if failures == nil {
+			failures = err
+		} else {
+			failures = fmt.Errorf("%w; %w", failures, err)
 		}
-		var next []uint64
-		for _, id := range pending {
-			if err := ctx.Err(); err != nil {
-				return reclaimed, err
-			}
-			switch state := b.Btrfs.QuotaRowByID(ctx, id, mnt); state {
-			case btrfs.RowAbsent:
-				b.forgetDeletedRow(id) // reclaimed by the substrate itself; nothing to do
-			case btrfs.RowStale:
-				if err := b.Btrfs.DestroyQuotaRow(ctx, id, mnt); err != nil {
-					// It said stale and still refused: keep it for a later round rather than
-					// treating it as fatal.
-					next = append(next, id)
-					stuck = append(stuck, fmt.Sprintf("0/%d: delete: %v", id, err))
-					continue
-				}
-				reclaimed++
-				b.forgetDeletedRow(id)
-			case btrfs.RowUnderDeletion:
-				next = append(next, id) // transient: another settle should clear it
-			case btrfs.RowSpaceHolder:
-				// A LIVE SHARER still references its extents. This is legitimate and can last
-				// as long as that sharer does, so it is NOT retried within this call — it stays
-				// recorded for a future sweep.
-				// The next pass retries after the live sharer disappears.
-			case btrfs.RowUnknown:
-				// The read failed WHOLESALE, which happens under exactly the churn a sweep runs
-				// in. Draw NO conclusion: keep it recorded and try again next sweep.
-				stuck = append(stuck, fmt.Sprintf("0/%d: row state unreadable", id))
-			case btrfs.RowLive:
-				// The id belongs to a LIVE unit — either it was reused after our delete, or the
-				// recorded id is wrong. Either way: never touch it. Clearing a live unit's limit
-				// is the one operation that breaks an engine promise beyond data integrity and
-				// has no EBUSY self-protection.
-				b.forgetDeletedRow(id)
-				// Never modify a live unit.
-			}
+	}
+	for _, id := range ids {
+		if err := ctx.Err(); err != nil {
+			addFailure(err)
+			break
 		}
-		pending = next
+		switch rows[id] {
+		case btrfs.RowAbsent, btrfs.RowLive:
+			if b.forgetDeletedRow(id, pending[id]) {
+				completed++
+			}
+		case btrfs.RowStale:
+			if err := b.Btrfs.DestroyQuotaRow(ctx, id, mnt); err != nil {
+				addFailure(fmt.Errorf("volume: reclaim row %d: %w", id, err))
+				continue
+			}
+			if b.forgetDeletedRow(id, pending[id]) {
+				completed++
+			}
+		case btrfs.RowUnderDeletion, btrfs.RowSpaceHolder:
+			// The next pass observes whether the substrate or a live sharer released it.
+		default:
+			addFailure(fmt.Errorf("volume: reclaim row %d: state unavailable", id))
+		}
 	}
-	if err := ctx.Err(); err != nil {
-		return reclaimed, err
+	if err := ctx.Err(); err != nil && !errors.Is(failures, err) {
+		addFailure(err)
 	}
-	if len(stuck) > 0 {
-		// Failed operations remain recorded for a later pass.
-		return reclaimed, fmt.Errorf("volume: quota rows left for a later round: %s", strings.Join(stuck, "; "))
-	}
-	return reclaimed, nil
+	return completed, failures
 }
 
-// DeletedRowIDs returns the ids recorded at deletion time and not yet reclaimed.
-func (b *LocalBtrfs) DeletedRowIDs(context.Context) []uint64 {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	out := make([]uint64, 0, len(b.deletedRows))
-	for id := range b.deletedRows {
-		out = append(out, id)
-	}
-	return out
-}
-
-// recordDeletedRow / forgetDeletedRow track ids whose row a delete may have leaked.
-//
-// RECORDED AT DELETE TIME, because that is the last moment the id is obtainable: after
-// the delete the path is unresolvable, and the id is the only handle on a row the
-// delete may have left behind. the Volume subsystem requires locating rows this way rather than by
-// scanning, because a scan that misidentifies a row yields an uncapped live volume with
-// zero signal.
-//
-// In-memory, so a crash loses the knowledge that we were watching a row — never the ROW
-// ITSELF, which stays on the filesystem, and the ids only ever drive an idempotent
-// reclaim. Persisting the list would mean a new store table whose only consumer is a
-// substrate-specific cleanup, which the extension boundary argues against.
+// Each deletion attempt has its own record so an older pass cannot retire new work.
+// The records are process-local; restart does not discover previously lost records.
 func (b *LocalBtrfs) recordDeletedRow(id uint64) {
 	b.mu.Lock()
+	defer b.mu.Unlock()
 	if b.deletedRows == nil {
-		b.deletedRows = map[uint64]bool{}
+		b.deletedRows = map[uint64]uint64{}
 	}
-	b.deletedRows[id] = true
-	b.mu.Unlock()
+	b.nextDeletion++
+	b.deletedRows[id] = b.nextDeletion
 }
 
-func (b *LocalBtrfs) forgetDeletedRow(id uint64) {
+func (b *LocalBtrfs) forgetDeletedRow(id, serial uint64) bool {
 	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.deletedRows[id] != serial {
+		return false
+	}
 	delete(b.deletedRows, id)
-	b.mu.Unlock()
+	return true
 }
 
 // Release ends one materialization. A NO-OP on this arm, and that is a correct
@@ -463,7 +458,7 @@ func (b *LocalBtrfs) DestroyVolume(ctx context.Context, volumeID string) error {
 	// located by the id recorded at deletion, never by scanning). A failure to read it
 	// is not fatal to the delete; it only means the reclaim path cannot watch this row.
 	if id, idErr := b.Btrfs.SubvolumeID(ctx, unit); idErr == nil {
-		b.recordDeletedRow(id)
+		defer b.recordDeletedRow(id)
 	}
 	if err := b.Btrfs.DeleteSubvolume(ctx, unit); err != nil {
 		return fmt.Errorf("volume: destroy %s: %w", volumeID, err)

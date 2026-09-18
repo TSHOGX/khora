@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -228,7 +229,25 @@ func TestRecordedDeletionSync(t *testing.T) {
 	if err := c.DeleteSubvolume(ctx, unit); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Sync(ctx, mount, []uint64{id}); err != nil {
+	if err := syncDeletedForTest(ctx, c, mount, []uint64{id}); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// Fixture cleanup waits only for its own deleted units and always has a budget.
+func syncDeletedForTest(ctx context.Context, c Client, mount string, ids []uint64) error {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if len(ids) == 0 {
+		return nil
+	}
+	if _, err := c.run(ctx, "filesystem", "sync", mount); err != nil {
+		return err
+	}
+	args := []string{"subvolume", "sync", mount}
+	for _, id := range ids {
+		args = append(args, strconv.FormatUint(id, 10))
+	}
+	_, err := c.run(ctx, args...)
+	return err
 }

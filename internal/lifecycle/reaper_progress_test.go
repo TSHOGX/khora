@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/TSHOGX/khora/internal/model"
 	"github.com/TSHOGX/khora/internal/store"
 	"github.com/TSHOGX/khora/internal/volume"
 	"github.com/TSHOGX/khora/internal/waitfor"
@@ -25,7 +26,7 @@ type blockingReclaimVolume struct {
 	entered chan struct{}
 }
 
-func (b *blockingReclaimVolume) ReclaimQuotaRows(ctx context.Context, _ []uint64) (int, error) {
+func (b *blockingReclaimVolume) Reclaim(ctx context.Context) (int, error) {
 	if b.entered != nil {
 		select {
 		case b.entered <- struct{}{}:
@@ -38,18 +39,18 @@ func (b *blockingReclaimVolume) ReclaimQuotaRows(ctx context.Context, _ []uint64
 
 func TestReclaimDeadlineKeepsOtherBackendsAndLaterTicksAlive(t *testing.T) {
 	stuck := &blockingReclaimVolume{namedFakeVolume: &namedFakeVolume{newFakeVolume(), "a"}}
-	stuck.deletedRows[42] = true
+	stuck.pendingCleanup = 1
 	healthy := &namedFakeVolume{newFakeVolume(), "b"}
-	healthy.deletedRows[43] = true
+	healthy.pendingCleanup = 1
 	registry, err := volume.NewRegistryWithDefault("a", stuck, healthy)
 	if err != nil {
 		t.Fatal(err)
 	}
 	m := New(Deps{Store: store.NewMemory(), Rootfs: &fakeRootfs{}, Runtime: &fakeRuntime{}, VolumeRegistry: registry, QuotaReclaimTimeout: 10 * time.Millisecond, Logf: func(string, ...any) {}})
-	if err := m.ReclaimQuotaRows(context.Background()); !errors.Is(err, context.DeadlineExceeded) {
+	if err := m.ReclaimVolumeStorage(context.Background()); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("reclaim: %v", err)
 	}
-	if len(healthy.DeletedRowIDs(context.Background())) != 0 || len(stuck.DeletedRowIDs(context.Background())) != 1 {
+	if healthy.pendingCount() != 0 || stuck.pendingCount() != 1 {
 		t.Fatal("deadline lost pending work or blocked another backend")
 	}
 	r := NewReaper(m, time.Second, time.Second)
@@ -73,7 +74,7 @@ func TestReclaimDeadlineKeepsOtherBackendsAndLaterTicksAlive(t *testing.T) {
 
 func TestReaperProgressStopsWhileTickIsBlocked(t *testing.T) {
 	stuck := &blockingReclaimVolume{namedFakeVolume: &namedFakeVolume{newFakeVolume(), "a"}, entered: make(chan struct{}, 1)}
-	stuck.deletedRows[42] = true
+	stuck.pendingCleanup = 1
 	m := New(Deps{Store: store.NewMemory(), Rootfs: &fakeRootfs{}, Runtime: &fakeRuntime{}, Volume: stuck, QuotaReclaimTimeout: time.Hour, Logf: func(string, ...any) {}})
 	r := NewReaper(m, time.Millisecond, time.Second)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -108,4 +109,22 @@ func TestEmptyReaperReportsProgress(t *testing.T) {
 	waitfor.Must(t, "empty reaper progress", time.Second, time.Millisecond, func() bool { return r.Stats().TicksCompleted > 1 })
 	cancel()
 	<-done
+}
+
+type unreadableReclaimStore struct{ store.Store }
+
+func (unreadableReclaimStore) ListVolumes(context.Context) ([]model.Volume, error) {
+	return nil, errors.New("store should not be read for backend residue")
+}
+
+func TestReclaimDoesNotReadStore(t *testing.T) {
+	b := newFakeVolume()
+	b.pendingCleanup = 1
+	m := New(Deps{Store: unreadableReclaimStore{store.NewMemory()}, Volume: b})
+	if err := m.ReclaimVolumeStorage(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if b.pendingCount() != 0 {
+		t.Fatal("residue was not reclaimed")
+	}
 }

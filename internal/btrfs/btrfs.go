@@ -280,7 +280,7 @@ func (c Client) Usage(ctx context.Context, path string) (used, limit int64, err 
 }
 
 // QuotaRowState is what a quota row's LABEL says about it, which is the only
-// available predicate for whether the row can be reclaimed (see QuotaRowByID).
+// available predicate for whether the row can be reclaimed (see QuotaRows).
 type QuotaRowState string
 
 const (
@@ -310,55 +310,62 @@ const (
 	RowUnknown QuotaRowState = "unknown"
 )
 
-// QuotaRowByID reports the state of the quota row for subvolume id, by READING ITS
-// LABEL.
-//
-// BY ID, RECORDED AT DELETE TIME — never by scanning rows for something that looks
-// reclaimable. The failure mode of scanning is an uncapped LIVE volume plus zero
-// signal: a scan that misidentifies a row and clears its limit produces exactly that,
-// and nothing downstream can detect it (the Volume subsystem requires locating rows by the id recorded
-// at deletion for this reason).
-//
-// The state comes from the label because that is the only predicate the substrate
-// offers, and it CANNOT false-positive on a running unit: a live unit's label is its
-// PATH, while every reclaimable state is a `<...>` marker.
-//
-// A FAILED READ RETURNS RowUnknown, never RowAbsent. See RowUnknown.
-func (c Client) QuotaRowByID(ctx context.Context, id uint64, mountPoint string) QuotaRowState {
-	// -re --raw --sync, matching Usage: --sync so the answer reflects writes a
-	// background transaction has not committed yet.
+// QuotaRows reads one consistent command result, restricted to recorded IDs.
+// A failed or malformed read never implies that a row is absent.
+func (c Client) QuotaRows(ctx context.Context, mountPoint string, ids []uint64) (map[uint64]QuotaRowState, error) {
+	rows := make(map[uint64]QuotaRowState, len(ids))
+	for _, id := range ids {
+		rows[id] = RowAbsent
+	}
+	if len(ids) == 0 {
+		return rows, nil
+	}
 	out, err := c.run(ctx, "qgroup", "show", "-re", "--raw", "--sync", mountPoint)
 	if err != nil {
-		// The read failed WHOLESALE, which happens under exactly the concurrent churn a
-		// sweep runs in. Report it as unknown so the caller skips rather than concludes.
-		return RowUnknown
+		return nil, err
 	}
-	want := "0/" + strconv.FormatUint(id, 10)
+	header := false
 	for _, line := range strings.Split(string(out), "\n") {
 		f := strings.Fields(line)
-		if len(f) < 1 || f[0] != want {
+		if len(f) == 0 {
 			continue
 		}
-		// qgroupid referenced exclusive max_referenced max_exclusive [path/label...]
+		if strings.EqualFold(f[0], "qgroupid") {
+			header = true
+			continue
+		}
+		if !strings.HasPrefix(f[0], "0/") {
+			continue
+		}
+		id, err := strconv.ParseUint(strings.TrimPrefix(f[0], "0/"), 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("btrfs: invalid quota row identifier")
+		}
+		if _, tracked := rows[id]; !tracked {
+			continue
+		}
+		rows[id] = RowUnknown
 		if len(f) < 6 {
-			// A row with no label column at all: present, but nothing says it is
-			// reclaimable, so it is treated as live (the conservative direction).
-			return RowLive
+			continue
 		}
 		label := strings.Join(f[5:], " ")
-		switch {
-		case strings.Contains(label, "<stale>"):
-			return RowStale
-		case strings.Contains(label, "<under deletion>"):
-			return RowUnderDeletion
-		case strings.Contains(label, "squota space holder"):
-			return RowSpaceHolder
+		switch label {
+		case "<stale>":
+			rows[id] = RowStale
+		case "<under deletion>":
+			rows[id] = RowUnderDeletion
+		case "<squota space holder>":
+			rows[id] = RowSpaceHolder
 		default:
-			// A path, i.e. a LIVE unit. Never destroy, never clear.
-			return RowLive
+			if !strings.HasPrefix(label, "<") {
+				rows[id] = RowLive
+			}
 		}
 	}
-	return RowAbsent
+	if !header {
+		return nil, fmt.Errorf("btrfs: quota listing has no header")
+	}
+	return rows, nil
 }
 
 // DestroyQuotaRow destroys the quota row for subvolume id.
@@ -393,23 +400,6 @@ func (c Client) SubvolumeID(ctx context.Context, path string) (uint64, error) {
 // Also captured before a delete, for the same reason.
 func (c Client) MountPoint(ctx context.Context, path string) (string, error) {
 	return c.mountPoint(ctx, path)
-}
-
-// Sync commits changes and waits only for the recorded subvolume deletions.
-// All commands share the caller's deadline; an empty set must never wait globally.
-func (c Client) Sync(ctx context.Context, mountPoint string, ids []uint64) error {
-	if len(ids) == 0 {
-		return nil
-	}
-	if _, err := c.run(ctx, "filesystem", "sync", mountPoint); err != nil {
-		return err
-	}
-	args := []string{"subvolume", "sync", mountPoint}
-	for _, id := range ids {
-		args = append(args, strconv.FormatUint(id, 10))
-	}
-	_, err := c.run(ctx, args...)
-	return err
 }
 
 // subvolumeID reads the numeric subvolume id, which names its qgroup (0/<id>).

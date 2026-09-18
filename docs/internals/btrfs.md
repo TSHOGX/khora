@@ -45,8 +45,15 @@ also records deleted subvolume IDs and retries only rows whose label says they a
 reclaimable; busy holders remain for a later periodic pass. Churn behavior is tested
 by [internal/btrfs/quotachurn_substrate_test.go](../../internal/btrfs/quotachurn_substrate_test.go).
 
-Reclamation commits the filesystem and waits only for recorded deleted subvolume
-IDs, under one caller deadline shared by all rounds. An empty set performs no
-sync. A live sharer or pending deletion stays recorded for a later pass; unreadable
-state and command timeouts are errors. The deadline bounds cooperative command
-execution, not arbitrary uninterruptible kernel I/O.
+Each reclamation pass reads the quota listing once and considers only IDs recorded
+by this provider. It clears absent or live records, destroys stale rows, and leaves
+pending deletions and live sharers for a later pass. It never waits for subvolume
+deletion. An empty set performs no substrate I/O. Reads and cleanup share the
+caller's deadline; that bounds cooperative execution, not uninterruptible kernel I/O.
+
+Deletion attempts record their captured IDs after returning, including failures.
+A per-record sequence prevents an older cleanup snapshot from discarding newer
+work. These records stay in provider memory: a process crash loses the pending set.
+Startup can record surviving orphan units as it deletes them, but does not rediscover
+quota rows whose units were already removed before the crash. No whole-filesystem
+scan or Store metadata is used to infer authority over those rows.
