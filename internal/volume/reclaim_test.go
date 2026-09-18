@@ -1,17 +1,37 @@
+//go:build substrate
+
 package volume
 
 import (
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/TSHOGX/khora/internal/btrfs"
+	"github.com/TSHOGX/khora/test/substratereq"
 )
 
+func reclaimScratch(t *testing.T) string {
+	t.Helper()
+	substratereq.Root(t)
+	dir, err := os.MkdirTemp("/var/tmp", "khora-reclaim-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Remove(dir); err != nil {
+			t.Error(err)
+		}
+	})
+	substratereq.Btrfs(t, dir)
+	return dir
+}
+
 func TestReclaimTimeoutRetainsRecordedRows(t *testing.T) {
-	b := &LocalBtrfs{VolumesDir: t.TempDir(), deletedRows: map[uint64]bool{42: true}}
+	b := &LocalBtrfs{VolumesDir: reclaimScratch(t), deletedRows: map[uint64]bool{42: true}}
 	b.Btrfs = btrfs.Client{Run: func(ctx context.Context, args []string) ([]byte, error) {
 		if args[1] == "subvolume" && args[2] == "sync" {
 			<-ctx.Done()
@@ -31,7 +51,7 @@ func TestReclaimTimeoutRetainsRecordedRows(t *testing.T) {
 
 func TestReclaimHolderIsPendingAndUnreadableIsFailure(t *testing.T) {
 	for _, unreadable := range []bool{false, true} {
-		b := &LocalBtrfs{VolumesDir: t.TempDir(), deletedRows: map[uint64]bool{42: true}}
+		b := &LocalBtrfs{VolumesDir: reclaimScratch(t), deletedRows: map[uint64]bool{42: true}}
 		b.Btrfs = btrfs.Client{Run: func(_ context.Context, args []string) ([]byte, error) {
 			if args[1] == "qgroup" && args[2] == "show" {
 				if unreadable {
