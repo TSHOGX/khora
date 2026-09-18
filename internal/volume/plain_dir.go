@@ -61,7 +61,7 @@ func (p *PlainDir) Validate(context.Context) error {
 // Capabilities: none of the three. A plain directory can neither snapshot nor
 // enforce a byte ceiling, and saying so honestly is this arm's job — the Volume subsystem requires
 // an unsupported call to be a clean 400 rather than a silent no-op.
-func (p *PlainDir) Capabilities() Capabilities { return Capabilities{} }
+func (p *PlainDir) Capabilities() Capabilities { return Capabilities{Usage: true} }
 
 func (p *PlainDir) unitPath(volumeID string) string { return filepath.Join(p.Dir, volumeID) }
 

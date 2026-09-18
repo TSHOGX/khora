@@ -34,14 +34,14 @@ type LocalBtrfs struct {
 	// (the shared btrfs mechanism), not a shared interface.
 	Btrfs btrfs.Client
 
-	// mu guards deletedRows.
+	// mu guards capability state, pending cleanup records and gate initialization.
 	mu sync.Mutex
-	// deletedRows are quota-row ids recorded AT DELETE TIME, whose rows a deletion may
-	// have leaked (the Volume subsystem / Volume quota cleanup). Recorded there because that is the last moment
-	// the id is obtainable — see recordDeletedRow.
+	// IDs are captured before deletion and registered when the attempt returns.
 	deletedRows  map[uint64]uint64
 	nextDeletion uint64
 	reclaimGate  chan struct{}
+	quotaMode    btrfs.QuotaMode
+	validated    bool
 }
 
 // NewLocalBtrfs constructs the local arm, ensuring VolumesDir exists.
@@ -57,30 +57,44 @@ func NewLocalBtrfs(volumesDir string) (*LocalBtrfs, error) {
 
 func (b *LocalBtrfs) Name() string { return "local_btrfs" }
 
-// Validate is the startup readiness check used by the provider registry.  The
-// directory itself is the only invariant required for uncapped operation; a
-// quota-capable substrate is checked at the individual capability write point
-// so an uncapped deployment remains usable on a non-btrfs filesystem.
-func (b *LocalBtrfs) Validate(context.Context) error {
+// Validate fixes the capability snapshot for this provider lifetime.
+func (b *LocalBtrfs) Validate(ctx context.Context) error {
 	if b == nil || b.VolumesDir == "" {
-		return fmt.Errorf("VolumesDir is required")
+		return fmt.Errorf("volume root is required")
 	}
 	fi, err := os.Stat(b.VolumesDir)
 	if err != nil {
-		return fmt.Errorf("volume root: %w", err)
+		return err
 	}
 	if !fi.IsDir() {
 		return fmt.Errorf("volume root is not a directory")
 	}
-	return nil
+	_, err = b.checkQuota(ctx)
+	return err
 }
 
-// Capabilities: this arm supports all three. Snapshot and Clone are one substrate
-// path (they differ in the semantic label, not the mechanism — snapshot lineage),
-// and Quota is what lets resource admission refuse a cap it cannot enforce instead of running
-// uncapped.
+func (b *LocalBtrfs) checkQuota(ctx context.Context) (btrfs.QuotaMode, error) {
+	mode, err := b.Btrfs.QuotaStatus(ctx, b.VolumesDir)
+	if err != nil {
+		return btrfs.QuotaUnknown, fmt.Errorf("volume: quota state: %w: %w", ErrProviderUnavailable, err)
+	}
+	if mode != btrfs.QuotaSimple && mode != btrfs.QuotaDisabled {
+		return mode, fmt.Errorf("volume: requires btrfs with quotas disabled or usable squota: %w", ErrProviderUnavailable)
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.validated && b.quotaMode != mode {
+		return mode, fmt.Errorf("volume: quota mode changed; restore configuration or restart: %w", ErrProviderUnavailable)
+	}
+	b.quotaMode = mode
+	b.validated = true
+	return mode, nil
+}
+
 func (b *LocalBtrfs) Capabilities() Capabilities {
-	return Capabilities{Snapshot: true, Clone: true, Quota: true}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return Capabilities{Snapshot: b.validated, Clone: b.validated, Quota: b.validated && b.quotaMode == btrfs.QuotaSimple, Usage: b.validated && b.quotaMode == btrfs.QuotaSimple}
 }
 
 // unitPath is the storage unit for one volume. Derived from the ID, so enumeration
@@ -112,7 +126,11 @@ func (b *LocalBtrfs) CreateVolume(ctx context.Context, volumeID string, capBytes
 		return err
 	}
 	unit := b.unitPath(volumeID)
-	if capBytes > 0 && !b.Btrfs.Available(ctx, b.VolumesDir) {
+	mode, err := b.checkQuota(ctx)
+	if err != nil {
+		return err
+	}
+	if capBytes > 0 && mode != btrfs.QuotaSimple {
 		// Refusing beats running uncapped (resource admission): a silently dropped cap leaves every
 		// the data-plane exposure boundary blast-radius assertion trusting a limit that is not there.
 		return fmt.Errorf("volume: %s requests a %d-byte cap but VolumesDir is not on a quota-capable filesystem — refusing to run uncapped (resource admission): %w",
@@ -141,8 +159,18 @@ func (b *LocalBtrfs) SetCapacity(ctx context.Context, volumeID string, capBytes 
 
 func (b *LocalBtrfs) applyCap(ctx context.Context, volumeID string, capBytes int64) error {
 	unit := b.unitPath(volumeID)
+	mode, err := b.checkQuota(ctx)
+	if err != nil {
+		return err
+	}
 	if capBytes < 0 {
 		return fmt.Errorf("volume: negative cap %d for %s", capBytes, volumeID)
+	}
+	if mode == btrfs.QuotaDisabled {
+		if capBytes == 0 {
+			return nil
+		}
+		return ErrUnsupported
 	}
 	if capBytes > 0 && !b.Btrfs.IsSubvolume(ctx, unit) {
 		return fmt.Errorf("volume: unit for %s cannot carry an enforceable %d-byte cap: %w", volumeID, capBytes, ErrUnsupported)
@@ -180,6 +208,13 @@ func (b *LocalBtrfs) applyCap(ctx context.Context, volumeID string, capBytes int
 // The walk stays for a PLAIN-DIRECTORY unit, which has no row to read and for which
 // "no cap" is the truth rather than a guess.
 func (b *LocalBtrfs) Usage(ctx context.Context, volumeID string) (int64, int64, error) {
+	mode, err := b.checkQuota(ctx)
+	if err != nil {
+		return 0, 0, err
+	}
+	if mode == btrfs.QuotaDisabled {
+		return 0, 0, ErrUsageUnavailable
+	}
 	if err := validateID(volumeID); err != nil {
 		return 0, 0, err
 	}
@@ -198,43 +233,18 @@ func (b *LocalBtrfs) Usage(ctx context.Context, volumeID string) (int64, int64, 
 	return used, 0, nil
 }
 
-// Materialize prepares the host mount point. CREATE-IF-ABSENT by contract
-// (the Volume subsystem): runsc hard-fails on a missing bind source, so an open-only version would
-// make a mis-swept sandbox permanently unresumable, whereas recreating the unit
-// empty restarts cleanly (data lost, but recoverable). Safe to call concurrently
-// for the same volume — CreateSubvolume is idempotent, which is what the whole
-// shared-fanout design rests on.
-//
-// It does NOT re-apply a cap: the cap's authority is the volume record and its
-// write points are create and PATCH, both of which reach the backend directly. A
-// volume has no placement of its own, so there is no "re-materialize at next
-// placement" moment to hang it on (the Volume subsystem — the mechanical reason volume caps are
-// editable while unmounted, unlike sandbox caps).
-//
-// THAT LEAVES ONE GAP THE MEDIATOR CLOSES, named here because the dependency is
-// otherwise invisible from this side. The fallback below yields a PLAIN DIRECTORY
-// whenever CreateSubvolume fails on an absent path (VolumesDir not on a
-// quota-capable filesystem, or a substrate refusal), and a plain directory cannot
-// carry a cap at all — so a volume whose RECORD declares one is re-materialized
-// UNCAPPED, undetectably (Backend.Usage / volume cap enforcement). Nothing on this path
-// re-asserts it; Mediator.RepairVolumeCaps is what does, and it can, because a
-// freshly recreated unit is EMPTY — the recorded cap is strictly above its usage,
-// which is the condition that pass requires before writing one. (For a volume whose
-// record says uncapped the fallback is simply correct: a plain directory is exactly
-// what "no cap" looks like on this arm.)
+// Materialize creates a missing subvolume without changing its declared cap.
+// A substrate failure must never substitute an ordinary directory.
 func (b *LocalBtrfs) Materialize(ctx context.Context, volumeID string) (*Materialized, error) {
 	if err := validateID(volumeID); err != nil {
 		return nil, err
 	}
+	if _, err := b.checkQuota(ctx); err != nil {
+		return nil, err
+	}
 	unit := b.unitPath(volumeID)
 	if err := b.Btrfs.CreateSubvolume(ctx, unit); err != nil {
-		// A plain directory already sitting there (an uncapped unit) is fine and
-		// CreateSubvolume reports it as an error, so fall back to ensuring the dir.
-		if _, statErr := os.Stat(unit); statErr != nil {
-			if mkErr := os.MkdirAll(unit, 0o755); mkErr != nil {
-				return nil, fmt.Errorf("volume: materialize %s: %w", volumeID, err)
-			}
-		}
+		return nil, fmt.Errorf("volume: materialize %s: %w", volumeID, err)
 	}
 	return &Materialized{Volume: volumeID, SourcePath: unit}, nil
 }
@@ -266,7 +276,11 @@ func (b *LocalBtrfs) snapshotPath(ctx context.Context, srcID, newID string, capB
 	if err := validateID(newID); err != nil {
 		return err
 	}
-	if capBytes > 0 && !b.Btrfs.Available(ctx, b.VolumesDir) {
+	mode, err := b.checkQuota(ctx)
+	if err != nil {
+		return err
+	}
+	if capBytes > 0 && mode != btrfs.QuotaSimple {
 		return fmt.Errorf("volume: %s of %s requests a %d-byte cap but VolumesDir is not on a quota-capable filesystem: %w", kind, srcID, capBytes, ErrUnsupported)
 	}
 	src := b.unitPath(srcID)
@@ -326,6 +340,9 @@ func (b *LocalBtrfs) Reclaim(ctx context.Context) (int, error) {
 	b.mu.Unlock()
 	if len(ids) == 0 {
 		return 0, nil
+	}
+	if _, err := b.checkQuota(ctx); err != nil {
+		return 0, err
 	}
 	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
 	mnt, err := b.Btrfs.MountPoint(ctx, b.VolumesDir)
@@ -434,6 +451,10 @@ func (b *LocalBtrfs) OpenRoot(_ context.Context, volumeID string) (Root, error) 
 // while its children are ordinary directories inside it. For an uncapped
 // (plain-directory) volume the single RemoveAll is the whole reclamation.
 func (b *LocalBtrfs) DestroyVolume(ctx context.Context, volumeID string) error {
+	mode, err := b.checkQuota(ctx)
+	if err != nil {
+		return err
+	}
 	if err := validateID(volumeID); err != nil {
 		return err
 	}
@@ -457,7 +478,7 @@ func (b *LocalBtrfs) DestroyVolume(ctx context.Context, volumeID string) error {
 	// and this id is the only handle on a row the delete may leak (the Volume subsystem — rows are
 	// located by the id recorded at deletion, never by scanning). A failure to read it
 	// is not fatal to the delete; it only means the reclaim path cannot watch this row.
-	if id, idErr := b.Btrfs.SubvolumeID(ctx, unit); idErr == nil {
+	if id, idErr := b.Btrfs.SubvolumeID(ctx, unit); idErr == nil && mode == btrfs.QuotaSimple {
 		defer b.recordDeletedRow(id)
 	}
 	if err := b.Btrfs.DeleteSubvolume(ctx, unit); err != nil {
@@ -492,6 +513,13 @@ func (b *LocalBtrfs) DestroyVolume(ctx context.Context, volumeID string) error {
 // The read itself is retried inside the btrfs client (transient failure under
 // concurrent churn), so an error reaching here means it stayed unreadable.
 func (b *LocalBtrfs) UncappedBytes(ctx context.Context) (int64, error) {
+	mode, err := b.checkQuota(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if mode == btrfs.QuotaDisabled {
+		return 0, ErrUsageUnavailable
+	}
 	ents, err := os.ReadDir(b.VolumesDir)
 	if err != nil {
 		if os.IsNotExist(err) {

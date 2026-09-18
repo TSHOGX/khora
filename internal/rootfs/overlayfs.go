@@ -9,10 +9,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/TSHOGX/khora/internal/allocbytes"
 	"github.com/TSHOGX/khora/internal/btrfs"
+	"github.com/TSHOGX/khora/internal/model"
 
 	"github.com/TSHOGX/khora/internal/guestport"
 )
@@ -41,6 +43,9 @@ import (
 // cap. Measured with both in the one subvolume: work/upper are invisible in the
 // merged view and all copy-up traffic is charged.
 type HostOverlayFS struct {
+	quotaMu        sync.Mutex
+	quotaMode      btrfs.QuotaMode
+	quotaValidated bool
 	// StateDir holds per-Overlay materialization: StateDir/<id>/{upper,work,merged}.
 	StateDir string
 	// TemplatesDir resolves a BUILTIN TemplateID to its read-only lower dir:
@@ -90,6 +95,11 @@ func (p *HostOverlayFS) applyCap(ctx context.Context, id string, capByte int64) 
 		return nil // handle-only rebuild: touch no quota (see OpenOverlay)
 	}
 	unit := p.unitPath(id)
+	if capByte > 0 {
+		if err := p.ValidateCapacity(ctx, true); err != nil {
+			return err
+		}
+	}
 	if capByte <= 0 {
 		// Uncapped by intent. If the unit is a subvolume (a cap was set before and
 		// has since been cleared) drop the limit, so the record stays authoritative.
@@ -99,6 +109,13 @@ func (p *HostOverlayFS) applyCap(ctx context.Context, id string, capByte int64) 
 		// returns ENOSPC — measured — but that wedge predates this call and the error is
 		// reported rather than hidden.)
 		if p.Btrfs.IsSubvolume(ctx, unit) {
+			mode, err := p.checkQuota(ctx)
+			if err != nil {
+				return err
+			}
+			if mode == btrfs.QuotaDisabled {
+				return nil
+			}
 			if err := p.Btrfs.SetQuotaLimit(ctx, unit, 0); err != nil {
 				return fmt.Errorf("rootfs: clear capacity cap on %s: %w", id, err)
 			}
@@ -148,6 +165,9 @@ func (p *HostOverlayFS) Usage(ctx context.Context, overlayID string) (int64, int
 	}
 	unit := p.unitPath(overlayID)
 	if p.Btrfs.IsSubvolume(ctx, unit) {
+		if err := p.ValidateCapacity(ctx, true); err != nil {
+			return 0, 0, err
+		}
 		used, limit, err := p.Btrfs.Usage(ctx, unit)
 		if err != nil {
 			return 0, 0, fmt.Errorf("rootfs: read the quota row of overlay %s: %w", overlayID, err)
@@ -332,8 +352,8 @@ func (p *HostOverlayFS) CreateOverlay(ctx context.Context, overlayID string, low
 		}
 	}
 	if capByte > 0 {
-		if !p.Btrfs.Available(ctx, p.StateDir) {
-			return nil, fmt.Errorf("rootfs: overlay %s requests a %d-byte capacity cap but StateDir is not on btrfs — refusing to run uncapped (resource admission)", overlayID, capByte)
+		if err := p.ValidateCapacity(ctx, true); err != nil {
+			return nil, err
 		}
 		if err := p.Btrfs.CreateSubvolume(ctx, p.unitPath(overlayID)); err != nil {
 			return nil, fmt.Errorf("rootfs: create capacity unit: %w", err)
@@ -549,6 +569,9 @@ func (p *HostOverlayFS) UncappedBytes(ctx context.Context) (int64, error) {
 		}
 		unit := p.unitPath(e.Name())
 		if p.Btrfs.IsSubvolume(ctx, unit) {
+			if err := p.ValidateCapacity(ctx, true); err != nil {
+				return 0, err
+			}
 			used, limit, err := p.Btrfs.Usage(ctx, unit)
 			if err != nil {
 				// Unreadable qgroup is an ERROR, not "assume uncapped". Enumerating here
@@ -1056,4 +1079,34 @@ func copyFile(src, dst string, perm os.FileMode) error {
 		return err
 	}
 	return out.Close()
+}
+
+// ValidateCapacity verifies the deployment can honor durable disk limits.
+func (p *HostOverlayFS) ValidateCapacity(ctx context.Context, required bool) error {
+	mode, err := p.checkQuota(ctx)
+	if err != nil {
+		return err
+	}
+	if required && mode != btrfs.QuotaSimple {
+		return fmt.Errorf("rootfs: btrfs with usable squota required for disk limits: %w", model.ErrUnsupported)
+	}
+	return nil
+}
+
+func (p *HostOverlayFS) checkQuota(ctx context.Context) (btrfs.QuotaMode, error) {
+	mode, err := p.Btrfs.QuotaStatus(ctx, p.StateDir)
+	if err != nil {
+		return btrfs.QuotaUnknown, fmt.Errorf("rootfs: quota state: %w: %w", model.ErrUnavailable, err)
+	}
+	if mode == btrfs.QuotaUnknown || mode == btrfs.QuotaUnsupported {
+		return mode, fmt.Errorf("rootfs: unsupported quota state: %w", model.ErrUnavailable)
+	}
+	p.quotaMu.Lock()
+	defer p.quotaMu.Unlock()
+	if p.quotaValidated && p.quotaMode != mode {
+		return mode, fmt.Errorf("rootfs: quota mode changed; restore configuration or restart: %w", model.ErrUnavailable)
+	}
+	p.quotaValidated = true
+	p.quotaMode = mode
+	return mode, nil
 }

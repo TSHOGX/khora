@@ -205,6 +205,7 @@ func TestEveryContractOperationHasAClientMethod(t *testing.T) {
 	doc := loadContract(t)
 
 	method := map[string]string{
+		"getInfo":              "Info",
 		"createSandbox":        "Create",
 		"listSandboxes":        "List",
 		"getSandbox":           "Get",

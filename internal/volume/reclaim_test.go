@@ -30,7 +30,7 @@ func reclaimBackend(t *testing.T, run btrfs.Runner, ids ...uint64) *LocalBtrfs {
 	if err != nil {
 		t.Fatal(err)
 	}
-	b.Btrfs.Run = run
+	b.Btrfs = btrfs.Client{Run: run, ProbeQuota: func(context.Context, string) (btrfs.QuotaMode, error) { return btrfs.QuotaSimple, nil }}
 	for _, id := range ids {
 		b.recordDeletedRow(id)
 	}

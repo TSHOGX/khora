@@ -4,6 +4,12 @@ All resource routes are under `/v1`. JSON requests reject unknown fields, except
 that read-only network members emitted by the engine may be echoed during a
 read-modify-write update.
 
+## Engine information
+
+`GET /v1/info` returns the durable `store_id` and binary `version`. Responses use
+`Cache-Control: no-store`. See [identity semantics](overview.md#engine-identity)
+for restart, rebuild and backup boundaries.
+
 ## Sandboxes
 
 | Method and path | Result |

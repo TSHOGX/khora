@@ -300,6 +300,8 @@ func unmarshalNetwork(s string) (model.NetworkDecl, error) {
 // (Postgres with BIGSERIAL) MUST add a watermark gate — a sequence becomes visible only once
 // every lower one has committed — or it does not satisfy this interface. storetest asserts it.
 type Store interface {
+	// Identity is stable for the lifetime of the stored records.
+	Identity(context.Context) (model.StoreID, error)
 	// CreateSandbox inserts a new sandbox record in state `creating`, appending
 	// ev in the same commit if non-nil (the transactional outbox). Returns ErrConflict on a
 	// duplicate ID.

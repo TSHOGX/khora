@@ -186,7 +186,8 @@ func TestE2EColdStartUnwindRealRunsc(t *testing.T) {
 	tmpl := filepath.Join(base, "templates")
 	harness.BuildBrokenTemplate(t, repo, tmpl, "broken")
 	eng, err := orchestrator.New(orchestrator.Config{
-		TemplatesDir: tmpl, StateDir: filepath.Join(base, "state"),
+		VolumeProvider: orchestrator.VolumeProviderPlainDir,
+		TemplatesDir:   tmpl, StateDir: filepath.Join(base, "state"),
 		HealthTimeout: 4 * time.Second, // fast fail
 	})
 	if err != nil {

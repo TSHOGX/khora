@@ -140,6 +140,7 @@ type Capabilities struct {
 	Snapshot bool
 	Clone    bool
 	Quota    bool
+ Usage bool
 }
 
 type Materialized struct {
@@ -385,7 +386,7 @@ func scanCapabilities(src string) ([]string, error) {
 	}
 	// Members must have a CONSUMER (the extension boundary forbids speculative reservation). This is
 	// the settled set; adding one means naming its consumer here too.
-	want := map[string]bool{"Snapshot": true, "Clone": true, "Quota": true}
+	want := map[string]bool{"Snapshot": true, "Clone": true, "Usage": true, "Quota": true}
 	for _, fname := range fields {
 		if !want[fname] {
 			out = append(out, fmt.Sprintf("Capabilities has unexpected member %q — every member needs a live consumer (the extension boundary): Snapshot/Clone gate the control-plane API endpoints, Quota gates resource admission's refuse-rather-than-run-uncapped", fname))

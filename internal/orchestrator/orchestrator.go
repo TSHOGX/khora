@@ -59,6 +59,8 @@ type Config struct {
 	// StorePath is the SQLite store file (the SQLite store choice). Empty → an in-memory SQLite
 	// (":memory:") for tests that don't need durability across a New() call.
 	StorePath string
+	// Version is supplied by the binary build; empty reports dev.
+	Version string
 
 	// DefaultIdleTimeout / DefaultRetention are the engine-wide TTL defaults
 	// (health and reclamation / the health and reaper boundary) applied to a create that omits them. Zero →
@@ -159,6 +161,7 @@ type Config struct {
 
 // Engine is the assembled engine host.
 type Engine struct {
+	version  string
 	Mediator *lifecycle.Mediator
 	Store    store.Store
 	// VolumeRegistry is the configured internal selection set. It is exposed on
@@ -440,6 +443,11 @@ func New(cfg Config) (*Engine, error) {
 		return nil, fmt.Errorf("orchestrator: validate durable volume providers: %w", err)
 	}
 
+	if err := med.ValidateRootfsCapacity(context.Background()); err != nil {
+		_ = st.Close()
+		return nil, fmt.Errorf("orchestrator: validate rootfs capacity: %w", err)
+	}
+
 	// outbox publisher → a log sink (the transactional outbox: the engine only guarantees reliable
 	// write to a replayable stream; a real subscriber lives outside the engine).
 	// Default retry policy: bounded attempts, capped + jittered backoff (see
@@ -450,7 +458,10 @@ func New(cfg Config) (*Engine, error) {
 
 	reaper := lifecycle.NewReaper(med, cfg.SweepInterval, cfg.TransportDownBudget)
 
-	eng := &Engine{Mediator: med, Store: st, VolumeRegistry: registry, Publisher: pub, Reaper: reaper}
+	eng := &Engine{version: cfg.Version, Mediator: med, Store: st, VolumeRegistry: registry, Publisher: pub, Reaper: reaper}
+	if eng.version == "" {
+		eng.version = "dev"
+	}
 	eng.health.startedAt = time.Now()
 	return eng, nil
 }
