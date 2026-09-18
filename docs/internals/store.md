@@ -46,3 +46,12 @@ path.
 Delivery is at least once because a sink may accept an Event before marking it
 published fails. Consumers deduplicate by Event ID. Failure and concurrency tests
 are in [internal/store/publisher_test.go](../../internal/store/publisher_test.go).
+
+## Durable identity
+
+The Store contract exposes `Identity(ctx)`. SQLite initializes the singleton
+identity atomically with a new empty database; Memory assigns one per instance.
+Opening existing state without its identity, or with an invalid identity, fails
+instead of assigning a replacement. The `0.0.x` policy requires rebuilding old
+state rather than migrating it. The identity lives in the same database as the
+objects; a separate directory marker is not an authority.

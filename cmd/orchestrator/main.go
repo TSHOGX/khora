@@ -48,6 +48,7 @@ func main() {
 	}
 
 	eng, err := orchestrator.New(orchestrator.Config{
+		Version:             version,
 		ListenAddr:          flags.addr,
 		InsecureListen:      flags.insecureListen,
 		TemplatesDir:        flags.templatesDir,

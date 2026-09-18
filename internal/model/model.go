@@ -14,6 +14,9 @@ import (
 // It does NOT encode placement: after resume the IP / container / cgroup / node
 // may all change, but the SandboxID is unchanged — same Overlay artifact, same
 // sandbox (the ID-reference model's iron rule).
+// StoreID identifies one durable collection of engine records.
+type StoreID string
+
 type SandboxID string
 
 // TemplateID is the opaque identity of an immutable read-only base (the Template and Overlay model).

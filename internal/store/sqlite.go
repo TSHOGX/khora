@@ -36,6 +36,7 @@ type SQLite struct {
 // version-tolerance mechanism, and a file whose columns disagree is a discard,
 // not something to detect or adapt to.
 const sqliteSchema = `
+CREATE TABLE IF NOT EXISTS store_identity (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), id TEXT NOT NULL);
 -- templates: first-class immutable object (the Template and Overlay model / health and reclamation). Existence-is-state
 -- (no state column), derived refcount (no count column). parent is a
 -- self-reference expressing lineage; ON DELETE RESTRICT declares "a referenced
@@ -316,9 +317,9 @@ func OpenSQLite(path string) (*SQLite, error) {
 	// each Store method takes the connection once and returns it.
 	db.SetMaxOpenConns(1)
 	db.SetConnMaxLifetime(0) // never expire the pinned connection (keeps :memory: alive)
-	if _, err := db.ExecContext(context.Background(), sqliteSchema); err != nil {
+	if err := initializeStore(db); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("store/sqlite: schema: %w", err)
+		return nil, fmt.Errorf("store/sqlite: initialize: %w", err)
 	}
 	return &SQLite{db: db}, nil
 }

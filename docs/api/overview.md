@@ -29,3 +29,18 @@ streaming file access, error classification, and a Connect transport client.
 The listener has no authentication or TLS. It defaults to loopback and refuses a
 routable address unless explicitly overridden. Put the configured gateway in front
 for remote use; see [Deployment boundary](../configuration/deployment-boundary.md).
+
+## Engine identity
+
+`GET /v1/info` returns `store_id` and `version` with `Cache-Control: no-store`.
+The Go SDK exposes the same response through `Client.Info(ctx)` without caching.
+`store_id` identifies the durable collection of engine records: a restart over
+the same Store preserves it; a new Store receives a new opaque ID. `version`
+identifies the running binary and is `dev` when no build version was supplied.
+
+Adapters can associate object references and event cursors with this identity.
+Invalidation and recovery policy remains outside the engine. Copying or restoring
+the entire Store preserves its identity, so this endpoint does not detect backup
+rollback, partial data loss, or cloned deployments. It is not an atomic request
+target guard and does not prevent orphan cleanup. No schema compatibility or
+version negotiation is implied.

@@ -39,6 +39,8 @@ const (
 
 // Config is the orchestrator's local configuration (the engine vocabulary boundary one config).
 type Config struct {
+	// Version is supplied by the binary build; empty reports dev.
+	Version string
 	// TemplatesDir holds Template directories (static; TemplateID → dir).
 	TemplatesDir string
 	// StateDir is the root for overlay materialization + runsc state/bundles.
@@ -157,6 +159,7 @@ type Config struct {
 
 // Engine is the assembled engine host.
 type Engine struct {
+	version  string
 	Mediator *lifecycle.Mediator
 	Store    store.Store
 	// VolumeRegistry is the configured internal selection set. It is exposed on
@@ -444,7 +447,10 @@ func New(cfg Config) (*Engine, error) {
 
 	reaper := lifecycle.NewReaper(med, cfg.SweepInterval, cfg.TransportDownBudget)
 
-	eng := &Engine{Mediator: med, Store: st, VolumeRegistry: registry, Publisher: pub, Reaper: reaper}
+	eng := &Engine{version: cfg.Version, Mediator: med, Store: st, VolumeRegistry: registry, Publisher: pub, Reaper: reaper}
+	if eng.version == "" {
+		eng.version = "dev"
+	}
 	eng.health.startedAt = time.Now()
 	return eng, nil
 }
