@@ -48,12 +48,12 @@ func main() {
 	}
 
 	eng, err := orchestrator.New(orchestrator.Config{
-		Version:             version,
 		ListenAddr:          flags.addr,
 		InsecureListen:      flags.insecureListen,
 		TemplatesDir:        flags.templatesDir,
 		StateDir:            flags.stateDir,
 		StorePath:           flags.storePath,
+		Version:             version,
 		VolumesDir:          flags.volumesDir,
 		VolumeProvider:      orchestrator.VolumeProvider(flags.volumeProvider),
 		HealthTimeout:       flags.healthTimeout,

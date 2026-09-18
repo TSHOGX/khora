@@ -39,8 +39,6 @@ const (
 
 // Config is the orchestrator's local configuration (the engine vocabulary boundary one config).
 type Config struct {
-	// Version is supplied by the binary build; empty reports dev.
-	Version string
 	// TemplatesDir holds Template directories (static; TemplateID → dir).
 	TemplatesDir string
 	// StateDir is the root for overlay materialization + runsc state/bundles.
@@ -59,6 +57,8 @@ type Config struct {
 	// StorePath is the SQLite store file (the SQLite store choice). Empty → an in-memory SQLite
 	// (":memory:") for tests that don't need durability across a New() call.
 	StorePath string
+	// Version is supplied by the binary build; empty reports dev.
+	Version string
 
 	// DefaultIdleTimeout / DefaultRetention are the engine-wide TTL defaults
 	// (health and reclamation / the health and reaper boundary) applied to a create that omits them. Zero →
