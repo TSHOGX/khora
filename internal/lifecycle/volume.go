@@ -682,7 +682,7 @@ func (m *Mediator) openVolumeRoot(ctx context.Context, id model.VolumeID) (volum
 //
 // ITS POSITION IN THE BOOT SEQUENCE IS LOAD-BEARING, not housekeeping — it must run
 // BEFORE any storage unit is created, because sweeping only on the periodic tick leaves a
-// window in which a new Volume inherits a leaked row's ID and cap. ReclaimQuotaRows
+// window in which a new Volume inherits a leaked row's ID and cap. ReclaimVolumeStorage
 // states the measured consequence.
 func (m *Mediator) SweepOrphanVolumes(ctx context.Context) error {
 	backends, err := m.configuredVolumeBackends()
@@ -1276,49 +1276,47 @@ func (m *Mediator) RepairVolumeCaps(ctx context.Context) error {
 	return nil
 }
 
-// ReclaimQuotaRows runs the Volume subsystem / Volume storage leaked-quota-row reclamation round.
-//
-// A leaked row is a CORRECTNESS problem, not untidiness: it does not reserve its own
-// unit id, so a remount can hand that id — along with its CAP — to a brand-new volume,
-// which then hits ENOSPC on a limit nobody set for it (measured: a never-capped unit hit
-// ENOSPC at 3.3 MB) or is silently over-provisioned, with the engine unable to tell from
-// the inside.
-//
-// The `parent` FK demotes this from the MAIN path to a BACKSTOP: leaking requires
-// deleting a source while a live sharer remains, and RESTRICT makes that unreachable
-// through the API (→ 409). What is left are paths that do not pass through user intent —
-// a crash between deleting a sharer and deleting the source, and the sweep's own
-// per-unit ordering. That is exactly why its error handling is "leave it for the next
-// round" rather than "block".
-func (m *Mediator) ReclaimQuotaRows(ctx context.Context) error {
+// ReclaimVolumeStorage gives each configured backend an independent cleanup budget.
+// Backend residue is independent of Store records; orphan selection happens earlier.
+func (m *Mediator) ReclaimVolumeStorage(ctx context.Context) error {
 	backends, err := m.configuredVolumeBackends()
 	if err != nil {
-		return fmt.Errorf("reclaim quota rows: %w", err)
+		return fmt.Errorf("reclaim volume storage: %w", err)
 	}
-	if len(backends) == 0 {
-		if err := m.validateDurableVolumeProviders(ctx); err != nil {
-			return fmt.Errorf("reclaim quota rows: %w", err)
-		}
-		return nil
+	if m.deps.QuotaReclaimTimeout <= 0 {
+		return fmt.Errorf("quota reclaim timeout must be positive")
 	}
-	if err := m.validateDurableVolumeProviders(ctx); err != nil {
-		return fmt.Errorf("reclaim quota rows: %w", err)
-	}
+	var failures []error
 	for _, selected := range backends {
-		ids := selected.backend.DeletedRowIDs(ctx)
-		if len(ids) == 0 {
-			continue
+		if err := ctx.Err(); err != nil {
+			return reclaimErrors(append(failures, err)...)
 		}
-		n, reclaimErr := selected.backend.ReclaimQuotaRows(ctx, ids)
+		passCtx, cancel := context.WithTimeout(ctx, m.deps.QuotaReclaimTimeout)
+		n, reclaimErr := selected.backend.Reclaim(passCtx)
+		reclaimErr = reclaimErrors(reclaimErr, passCtx.Err())
+		cancel()
 		if n > 0 {
-			m.deps.Logf("reclaim quota rows: provider %s reclaimed %d leaked row(s)", selected.name, n)
+			m.deps.Logf("reclaim volume storage: provider %s completed %d cleanup item(s)", selected.name, n)
 		}
 		if reclaimErr != nil {
-			// Informational, not fatal: every row named in it stays recorded and is retried.
-			// A `<squota space holder>` can legitimately resist reclamation for a live clone's
-			// entire lifetime, so this is normal operation rather than an error path.
-			m.deps.Logf("reclaim quota rows: provider %s: %v", selected.name, reclaimErr)
+			failures = append(failures, fmt.Errorf("provider %s: %w", selected.name, reclaimErr))
 		}
 	}
-	return nil
+	return reclaimErrors(failures...)
+}
+
+// Keep operator diagnostics on one line while preserving every failure class.
+func reclaimErrors(failures ...error) error {
+	var combined error
+	for _, err := range failures {
+		if err == nil || errors.Is(combined, err) {
+			continue
+		}
+		if combined == nil {
+			combined = err
+		} else {
+			combined = fmt.Errorf("%w; %w", combined, err)
+		}
+	}
+	return combined
 }

@@ -431,3 +431,20 @@ func (s *closeTrackingStore) Close() error {
 	}
 	return nil
 }
+
+func TestMetricsIncludesReaperBeforeFirstTick(t *testing.T) {
+	eng := healthEngine(t)
+	defer eng.Shutdown(context.Background(), nil)
+	rr := httptest.NewRecorder()
+	eng.HTTPHandler().ServeHTTP(rr, httptest.NewRequest("GET", "/metrics", nil))
+	for _, sample := range []string{
+		"khora_reaper_ticks_completed_total 0",
+		"khora_reaper_last_completed_timestamp_seconds 0",
+		`khora_reaper_quota_reclaim_failures_total{reason="timeout"} 0`,
+		`khora_reaper_quota_reclaim_failures_total{reason="error"} 0`,
+	} {
+		if !strings.Contains(rr.Body.String(), sample) {
+			t.Errorf("missing %s", sample)
+		}
+	}
+}

@@ -42,3 +42,29 @@ lanes for those objects. Unavailable measurements are not emitted as zero. If th
 Sandbox count store read fails, those samples are omitted and the process log carries
 the cause. Names and semantics are defined in
 [internal/orchestrator/health.go](../../internal/orchestrator/health.go).
+
+## Reaper progress
+
+`khora_reaper_ticks_completed_total` increases after a full maintenance tick
+returns, even if quota reclamation failed. The last completion is exported as
+`khora_reaper_last_completed_timestamp_seconds`; zero means no tick has completed.
+A cancelled tick does not count. Empty systems still complete ticks.
+`khora_reaper_quota_reclaim_failures_total{reason="timeout"|"error"}` counts ticks
+with failed reclamation. A tick with both timeout and other errors counts as a
+timeout. Completion is a progress signal, not a claim that all maintenance succeeded.
+
+For the default 30-second cadence and one backend, an example Prometheus alert is
+`(time() - khora_reaper_last_completed_timestamp_seconds > 120) and on(instance, job)
+(khora_uptime_seconds > 120)`, held for another minute. Adjust the threshold for
+the configured cadence, backend count, reclamation budget and scrape interval.
+Monitor scrape failures separately; absence of a sample is not a healthy loop.
+Readiness and liveness keep their existing meanings.
+
+Quota reclamation has a five-second budget per backend, controlled by
+`--quota-reclaim-timeout`. Startup logs failures and continues the remaining boot
+steps; periodic ticks retry retained work. A timeout does not cancel later
+maintenance. Each pass handles currently reclaimable residue without waiting for
+subvolume deletion; pending deletions and live sharers may require later ticks.
+The budget covers provider cleanup and cooperative I/O, not all startup work or
+uninterruptible kernel I/O. Optional sandbox counts on `/metrics` have a one-second Store-read
+budget so a slow count does not hide the process metrics.

@@ -1,7 +1,7 @@
 # btrfs quota internals
 
-Rootfs and Volume use the leaf package `internal/btrfs` for the same storage
-primitive: a subvolume carrying a simple-quota limit. The leaf performs filesystem
+Rootfs and Volume use the shared substrate helper `internal/btrfs` for the same storage
+primitive: a subvolume carrying a simple-quota limit. The helper performs filesystem
 operations and parses btrfs output; it owns no lifecycle or store policy.
 
 ## Why `squota` is a correctness constraint
@@ -24,8 +24,8 @@ writes only when quotas are confirmed disabled; with quotas enabled it clears
 any existing limit. Command failures never substitute an ordinary directory for
 a requested subvolume.
 
-Quota creation and cap assignment are separate btrfs operations. Providers therefore
-clean up a subvolume if cap assignment fails, before a durable object becomes visible.
+Quota creation and cap assignment are separate btrfs operations. If cap assignment
+fails, no durable object is published; orphan cleanup retries any remaining bytes.
 
 ## Usage reads
 
@@ -58,3 +58,16 @@ Volume lineage prevents the source-before-descendant deletion order. The backend
 also records deleted subvolume IDs and retries only rows whose label says they are
 reclaimable; busy holders remain for a later periodic pass. Churn behavior is tested
 by [internal/btrfs/quotachurn_substrate_test.go](../../internal/btrfs/quotachurn_substrate_test.go).
+
+Each reclamation pass reads the quota listing once and considers only IDs recorded
+by this provider. It clears absent or live records, destroys stale rows, and leaves
+pending deletions and live sharers for a later pass. It never waits for subvolume
+deletion. An empty set performs no substrate I/O. Reads and cleanup share the
+caller's deadline; that bounds cooperative execution, not uninterruptible kernel I/O.
+
+Deletion attempts record their captured IDs after returning, including failures.
+A per-record sequence prevents an older cleanup snapshot from discarding newer
+work. These records stay in provider memory: a process crash loses the pending set.
+Startup can record surviving orphan units as it deletes them, but does not rediscover
+quota rows whose units were already removed before the crash. No whole-filesystem
+scan or Store metadata is used to infer authority over those rows.

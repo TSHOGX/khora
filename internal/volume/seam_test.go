@@ -33,6 +33,7 @@ var bannedTokens = []string{
 	"major", "minor", "majmin", "devno",
 	// the Volume subsystem additions (the volume backend seam)
 	"reflink", "fuse", "loopdev", "mountopt",
+	"uint64", "deletedrow", "quotarow",
 }
 
 // fieldExemptions are the exported seam fields permitted to carry a host-shaped
@@ -209,6 +210,24 @@ type Backend interface {
 		new:    "\tQuota    bool\n\tFeatures map[string]string",
 		scan:   scanCapabilities,
 		wantIn: "not bool",
+	}, {
+		name:   "raw cleanup IDs as parameters",
+		old:    "Name() string",
+		new:    "Name() string\n Reclaim(context.Context, []uint64) (int, error)",
+		scan:   scanSeam,
+		wantIn: "uint64",
+	}, {
+		name:   "raw cleanup IDs as results",
+		old:    "Name() string",
+		new:    "Name() string\n DeletedRowIDs(context.Context) []uint64",
+		scan:   scanSeam,
+		wantIn: "uint64",
+	}, {
+		name:   "raw cleanup IDs in handles",
+		old:    "Volume     string",
+		new:    "Volume     string\n Pending []uint64",
+		scan:   scanSeam,
+		wantIn: "uint64",
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
 			injected := strings.Replace(clean, tc.old, tc.new, 1)

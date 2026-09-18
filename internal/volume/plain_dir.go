@@ -157,16 +157,8 @@ func (p *PlainDir) Clone(_ context.Context, srcID, newID string, _ int64) error 
 	return fmt.Errorf("volume: plain_dir cannot clone %s → %s: %w", srcID, newID, ErrUnsupported)
 }
 
-// ReclaimQuotaRows / DeletedRowIDs: nothing to reclaim. A plain directory has no quota
-// rows, so there is no residue and this arm costs the sweep nothing.
-//
-// It returns (0, nil) rather than ErrUnsupported deliberately: the sweep must not have
-// to ASK a backend whether it has rows and branch on the answer (the transactional outbox's
-// no-capability-branch rule). An empty list and a zero count say the same thing without
-// putting a branch in the caller.
-func (p *PlainDir) ReclaimQuotaRows(context.Context, []uint64) (int, error) { return 0, nil }
-
-func (p *PlainDir) DeletedRowIDs(context.Context) []uint64 { return nil }
+// Reclaim has no deferred storage work on the directory backend.
+func (p *PlainDir) Reclaim(context.Context) (int, error) { return 0, nil }
 
 func (p *PlainDir) DestroyVolume(_ context.Context, volumeID string) error {
 	if err := validateID(volumeID); err != nil {

@@ -489,7 +489,7 @@ func TestReaperTickRunsEveryMaintenanceRound(t *testing.T) {
 		t.Fatalf("seed volume: %v", err)
 	}
 	vol.mu.Lock()
-	vol.deletedRows[4242] = true        // a leaked quota row for the reclamation round
+	vol.pendingCleanup = 1              // a leaked quota row for the reclamation round
 	delete(vol.appliedCaps, string(id)) // storage "forgets" the cap → the health classification repair state
 	vol.mu.Unlock()
 
@@ -498,9 +498,9 @@ func TestReaperTickRunsEveryMaintenanceRound(t *testing.T) {
 	got := strings.Join(vol.Calls(), ",")
 
 	for call, why := range map[string]string{
-		"ListUnitIDs":      "the Volume subsystem orphan-volume sweep",
-		"ReclaimQuotaRows": "the Volume subsystem/health classification leaked quota-row reclamation",
-		"SetCapacity":      "the Volume subsystem/health classification volume-cap repair",
+		"ListUnitIDs": "the Volume subsystem orphan-volume sweep",
+		"Reclaim":     "the Volume subsystem/health classification leaked quota-row reclamation",
+		"SetCapacity": "the Volume subsystem/health classification volume-cap repair",
 	} {
 		if !strings.Contains(strings.TrimPrefix(got, before), call) {
 			t.Errorf("one tick never called %s (%s) — a periodic maintenance round is missing, and every round here is best-effort skip-and-log, so its absence raises NOTHING at runtime. Calls during the tick: %s", call, why, strings.TrimPrefix(got, before))

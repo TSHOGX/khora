@@ -250,30 +250,11 @@ type Backend interface {
 	Snapshot(ctx context.Context, srcID, newID string, capBytes int64) error
 	Clone(ctx context.Context, srcID, newID string, capBytes int64) error
 
-	// ReclaimQuotaRows reclaims quota rows LEAKED by earlier deletions (Volume quota cleanup).
-	//
-	// A CORRECTNESS PATH, NOT TIDINESS: a leaked row does not reserve its own unit id, so a
-	// remount can hand that id — along with its cap — to a brand-new unit, which then hits
-	// ENOSPC on a limit nobody set for it (measured: a unit that never had a limit hit ENOSPC
-	// at 3.3 MB) or is silently over-provisioned. Undetectable from the inside: the limit reads
-	// back looking exactly like the unit's own.
-	//
-	// The predicate is the row's LABEL, polled: the transition is CONDITION-triggered, so the
-	// first attempt succeeds once the sharer is gone and sleeping-and-hoping is the wrong shape.
-	//
-	// ids are those recorded AT DELETION TIME. Never scan for reclaimable-looking rows (the Volume subsystem) —
-	// a scan that misidentifies one produces an uncapped live volume with zero signal.
-	//
-	// Rows not yet reclaimable are LEFT for a later round: a `<squota space holder>` can
-	// legitimately resist destruction for a live clone's whole lifetime, so it is not an error
-	// path and must not spin on EBUSY.
-	ReclaimQuotaRows(ctx context.Context, ids []uint64) (int, error)
-
-	// DeletedRowIDs reports the quota-row ids recorded at deletion time and not yet reclaimed —
-	// ReclaimQuotaRows' input. On the backend because it is substrate-specific residue rather
-	// than engine state: a backend with no quota rows returns nothing and the path costs it
-	// nothing, with no capability branch in the caller (the extension boundary).
-	DeletedRowIDs(ctx context.Context) []uint64
+	// Reclaim completes currently reclaimable backend residue within ctx's budget.
+	// Pending work stays internal and is retried on the next pass. A partial success
+	// returns its completed cleanup-item count alongside any failure. Empty work is
+	// a no-op. The count is diagnostic, not a count of deleted Volumes.
+	Reclaim(ctx context.Context) (int, error)
 
 	// OpenRoot returns the root-confined content accessor for volumeID, usable WHILE UNMOUNTED
 	// by design. This is what makes "the volume's lifecycle is decoupled from any

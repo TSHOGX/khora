@@ -297,10 +297,8 @@ type fakeVolume struct {
 	// actually reached the "storage" — so a test can assert the cap crossed the seam ON
 	// the operation that made the bytes rather than trusting the record. That is the
 	// distinction the whole cap-write invariant turns on (volume cap enforcement).
-	appliedCaps map[string]int64
-	// deletedRows stands in for the substrate's leaked quota rows: a test seeds ids and
-	// asserts the reclamation round consumed them.
-	deletedRows map[uint64]bool
+	appliedCaps    map[string]int64
+	pendingCleanup int
 
 	// roots keeps ONE fakeRoot per volume, so content PERSISTS across separate
 	// OpenRoot calls. Handing out a fresh root each time would make an import
@@ -316,7 +314,6 @@ func newFakeVolume() *fakeVolume {
 		units:       map[string]bool{},
 		roots:       map[string]*fakeRoot{},
 		appliedCaps: map[string]int64{},
-		deletedRows: map[uint64]bool{},
 	}
 }
 
@@ -483,31 +480,25 @@ func (f *fakeVolume) derive(srcID, newID string, capBytes int64, kind string) er
 	return nil
 }
 
-// ReclaimQuotaRows / DeletedRowIDs back the Volume subsystem leaked-row reclamation round. The fake
-// records what it was asked to reclaim so the mediator's wiring is assertable as pure
-// logic; it reclaims everything it is given.
-func (f *fakeVolume) ReclaimQuotaRows(_ context.Context, ids []uint64) (int, error) {
+func (f *fakeVolume) Reclaim(ctx context.Context) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.calls = append(f.calls, fmt.Sprintf("ReclaimQuotaRows:n=%d", len(ids)))
-	n := 0
-	for _, id := range ids {
-		if f.deletedRows[id] {
-			delete(f.deletedRows, id)
-			n++
-		}
+	f.calls = append(f.calls, "Reclaim")
+	if f.reclaimErr != nil {
+		return 0, f.reclaimErr
 	}
-	return n, f.reclaimErr
+	n := f.pendingCleanup
+	f.pendingCleanup = 0
+	return n, nil
 }
 
-func (f *fakeVolume) DeletedRowIDs(context.Context) []uint64 {
+func (f *fakeVolume) pendingCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	out := make([]uint64, 0, len(f.deletedRows))
-	for id := range f.deletedRows {
-		out = append(out, id)
-	}
-	return out
+	return f.pendingCleanup
 }
 
 func (f *fakeVolume) UncappedBytes(context.Context) (int64, error) {

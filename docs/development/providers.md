@@ -93,3 +93,11 @@ usable `squota` for quota enforcement and measurement. With quotas confirmed off
 it still supports native subvolumes, snapshots and clones, but reports neither
 Quota nor Usage. A configured node disk budget requires measurement from every
 registered Volume backend. Unknown quota state is an error, not an uncapped mode.
+
+## Deferred storage cleanup
+
+`volume.Backend.Reclaim(ctx)` processes the backend's own recorded residue and
+returns a diagnostic count plus any error, including partial failure. Empty work
+is a no-op. Pending work and substrate identifiers remain inside the provider;
+lifecycle supplies each pass with a deadline and continues other maintenance after
+failure. Implementations must honor cancellation and retain unconfirmed work.

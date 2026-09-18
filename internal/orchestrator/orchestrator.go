@@ -39,6 +39,8 @@ const (
 
 // Config is the orchestrator's local configuration (the engine vocabulary boundary one config).
 type Config struct {
+	// QuotaReclaimTimeout bounds each backend pass; zero selects five seconds.
+	QuotaReclaimTimeout time.Duration
 	// TemplatesDir holds Template directories (static; TemplateID → dir).
 	TemplatesDir string
 	// StateDir is the root for overlay materialization + runsc state/bundles.
@@ -312,6 +314,9 @@ func (t *handlerTracker) wait(ctx context.Context) error {
 // startup reconciliation — call Reconcile explicitly after New (so tests can
 // inspect the pre-reconcile store), then HTTPHandler to serve.
 func New(cfg Config) (*Engine, error) {
+	if cfg.QuotaReclaimTimeout < 0 {
+		return nil, fmt.Errorf("quota reclaim timeout must be positive")
+	}
 	if cfg.TemplatesDir == "" || cfg.StateDir == "" {
 		return nil, fmt.Errorf("orchestrator: TemplatesDir and StateDir are required")
 	}
@@ -411,6 +416,7 @@ func New(cfg Config) (*Engine, error) {
 	}
 
 	med := lifecycle.New(lifecycle.Deps{
+		QuotaReclaimTimeout:   cfg.QuotaReclaimTimeout,
 		Store:                 st,
 		Runtime:               rt,
 		Rootfs:                rp,
@@ -521,13 +527,13 @@ func (e *Engine) RepairVolumeCaps(ctx context.Context) error {
 	return e.Mediator.RepairVolumeCaps(ctx)
 }
 
-// ReclaimQuotaRows runs the Volume subsystem / Volume quota cleanup leaked-quota-row reclamation round. The
+// ReclaimVolumeStorage runs the Volume subsystem / Volume quota cleanup leaked-quota-row reclamation round. The
 // `parent` FK demotes this from the main path to a backstop (it makes the leak-producing
 // deletion order unreachable through the API), but the residual paths — a crash between
 // two deletes, and the sweep's own per-unit ordering — do not pass through user intent,
 // so the round must exist and must be correct.
-func (e *Engine) ReclaimQuotaRows(ctx context.Context) error {
-	return e.Mediator.ReclaimQuotaRows(ctx)
+func (e *Engine) ReclaimVolumeStorage(ctx context.Context) error {
+	return e.Mediator.ReclaimVolumeStorage(ctx)
 }
 
 // SweepOrphanVolumes runs the Volume subsystem / atomic transition rollback orphan-volume sweep (reclaim volume
