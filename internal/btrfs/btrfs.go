@@ -99,8 +99,11 @@ func (c Client) IsSubvolume(ctx context.Context, path string) bool {
 // accounting and cheap atomic snapshots attach to — one choice serving the Rootfs subsystem's cap
 // today and the Volume subsystem's snapshot/clone later (btrfs quota materialization).
 func (c Client) CreateSubvolume(ctx context.Context, path string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if c.IsSubvolume(ctx, path) {
-		return nil
+		return ctx.Err()
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("btrfs: parent dir for %s: %w", path, err)
@@ -109,12 +112,28 @@ func (c Client) CreateSubvolume(ctx context.Context, path string) error {
 	// it rather than silently proceeding with an uncapped plain dir, which would
 	// look like a working cap while enforcing nothing.
 	if fi, err := os.Stat(path); err == nil && fi.IsDir() {
+		// Another creator may have completed after the initial probe.
+		if c.IsSubvolume(ctx, path) {
+			return ctx.Err()
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		return fmt.Errorf("btrfs: %s exists as a plain directory, not a subvolume", path)
 	}
 	if _, err := c.run(ctx, "subvolume", "create", path); err != nil {
+		if cause := ctx.Err(); cause != nil {
+			return fmt.Errorf("btrfs: create subvolume: %w: %w", err, cause)
+		}
+		if c.IsSubvolume(ctx, path) {
+			return ctx.Err()
+		}
+		if cause := ctx.Err(); cause != nil {
+			return fmt.Errorf("btrfs: confirm subvolume: %w: %w", err, cause)
+		}
 		return fmt.Errorf("btrfs: create subvolume %s: %w", path, err)
 	}
-	return nil
+	return ctx.Err()
 }
 
 // DeleteSubvolume removes the subvolume at path and, where the filesystem needs

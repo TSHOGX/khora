@@ -556,6 +556,11 @@ func (e *Engine) handleExportVolume(w http.ResponseWriter, r *http.Request, id m
 // one of them reached statusFor's default and became a 500.
 func volumeStatus(err error) (int, bool) {
 	switch {
+	case errors.Is(err, volume.ErrUnknownProvider), errors.Is(err, volume.ErrProviderUnavailable):
+		// A durable row whose provider is not available cannot be safely
+		// redirected.  Surface that as unavailable so a caller/operator can
+		// repair assembly and retry.
+		return http.StatusServiceUnavailable, true
 	case errors.Is(err, fs.ErrNotExist):
 		return http.StatusNotFound, true
 	case errors.Is(err, fs.ErrPermission):
@@ -570,11 +575,6 @@ func volumeStatus(err error) (int, bool) {
 		// Invalid assembly/configuration is a request/configuration error, not
 		// an internal backend failure.
 		return http.StatusBadRequest, true
-	case errors.Is(err, volume.ErrUnknownProvider), errors.Is(err, volume.ErrProviderUnavailable):
-		// A durable row whose provider is not available cannot be safely
-		// redirected.  Surface that as unavailable so a caller/operator can
-		// repair assembly and retry.
-		return http.StatusServiceUnavailable, true
 	case errors.Is(err, store.ErrVolumeHasDescendants):
 		// The FOURTH FK path: a live snapshot or clone names this volume as its parent.
 		// 409, and DISTINCT from ErrVolumeInUse because the remedy differs — delete the

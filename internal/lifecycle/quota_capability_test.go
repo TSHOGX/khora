@@ -32,3 +32,42 @@ func TestDurableCapRequiresCurrentCapability(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+type capacityRootfs struct {
+	*fakeRootfs
+	required bool
+}
+
+func (p *capacityRootfs) ValidateCapacity(_ context.Context, required bool) error {
+	p.required = required
+	if required {
+		return model.ErrUnsupported
+	}
+	return nil
+}
+
+type capacityRecords struct {
+	store.Store
+	records []model.Sandbox
+}
+
+func (s capacityRecords) ListSandboxes(context.Context) ([]model.Sandbox, error) {
+	return s.records, nil
+}
+
+func TestRootfsCapacityIncludesDurableSandboxLimits(t *testing.T) {
+	for _, tc := range []struct {
+		disk, node int64
+		required   bool
+	}{
+		{0, 0, false}, {1024, 0, true}, {0, 1024, true},
+	} {
+		root := &capacityRootfs{fakeRootfs: &fakeRootfs{}}
+		st := capacityRecords{Store: store.NewMemory(), records: []model.Sandbox{{Limits: model.Limits{DiskByte: tc.disk}}}}
+		m := New(Deps{Store: st, Rootfs: root, NodeCapacity: NodeCapacity{DiskByte: tc.node}})
+		err := m.ValidateRootfsCapacity(context.Background())
+		if root.required != tc.required || errors.Is(err, model.ErrUnsupported) != tc.required {
+			t.Fatalf("%+v: required=%v err=%v", tc, root.required, err)
+		}
+	}
+}
