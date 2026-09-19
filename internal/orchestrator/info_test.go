@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/TSHOGX/khora/internal/lifecycle"
 	"github.com/TSHOGX/khora/internal/model"
 	"github.com/TSHOGX/khora/internal/store"
 	"github.com/TSHOGX/khora/pkg/khora"
@@ -95,7 +96,22 @@ func TestInfoMatchesStoreAndBuild(t *testing.T) {
 		t.Fatal("cacheable identity")
 	}
 	var body map[string]any
-	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil || len(body) != 2 {
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil || len(body) != 3 {
 		t.Fatalf("body: %s", rr.Body.String())
+	}
+}
+
+func TestInfoReportsManualColdRecovery(t *testing.T) {
+	st := store.NewMemory()
+	eng := &Engine{Store: st, Mediator: lifecycle.New(lifecycle.Deps{Store: st, ManualColdRecovery: true})}
+	server := httptest.NewServer(eng.HTTPHandler())
+	defer server.Close()
+	client, err := khora.New(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := client.Info(context.Background())
+	if err != nil || !info.ManualColdRecovery {
+		t.Fatalf("cold recovery policy missing: %+v %v", info, err)
 	}
 }

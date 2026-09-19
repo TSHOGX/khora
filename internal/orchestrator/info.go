@@ -6,8 +6,9 @@ import (
 )
 
 type engineInfo struct {
-	StoreID model.StoreID `json:"store_id"`
-	Version string        `json:"version"`
+	StoreID            model.StoreID `json:"store_id"`
+	Version            string        `json:"version"`
+	ManualColdRecovery bool          `json:"manual_cold_recovery"`
 }
 
 func (e *Engine) handleInfo(w http.ResponseWriter, r *http.Request) {
@@ -25,5 +26,9 @@ func (e *Engine) handleInfo(w http.ResponseWriter, r *http.Request) {
 	if version == "" {
 		version = "dev"
 	}
-	writeJSON(w, http.StatusOK, engineInfo{StoreID: id, Version: version})
+	manual := false
+	if e.Mediator != nil {
+		manual = e.Mediator.ManualColdRecovery()
+	}
+	writeJSON(w, http.StatusOK, engineInfo{StoreID: id, Version: version, ManualColdRecovery: manual})
 }

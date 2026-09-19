@@ -21,6 +21,7 @@ type orchestratorFlags struct {
 	reaperInterval      time.Duration
 	eventRetention      time.Duration
 	transportDownBudget time.Duration
+	manualColdRecovery  bool
 	processRetention    time.Duration
 	nodeDiskByte        int64
 	nodeMemoryByte      int64
@@ -46,7 +47,8 @@ func newOrchestratorFlagSet(name string, handling flag.ErrorHandling, values *or
 	fs.DurationVar(&values.quotaReclaimTimeout, "quota-reclaim-timeout", 5*time.Second, "maximum duration of one backend quota reclamation pass; must be positive")
 	fs.DurationVar(&values.reaperInterval, "reaper-interval", 30*time.Second, "reaper sweep cadence")
 	fs.DurationVar(&values.eventRetention, "event-retention", 0, "delivered-event retention window; 0 retains the full outbox")
-	fs.DurationVar(&values.transportDownBudget, "transport-down-budget", 2*time.Minute, "transport-down restart budget before a cold resume")
+	fs.BoolVar(&values.manualColdRecovery, "manual-cold-recovery", false, "require explicit resume after transport-down crash pause")
+	fs.DurationVar(&values.transportDownBudget, "transport-down-budget", 2*time.Minute, "transport-down budget before crash pause and optional cold resume")
 	fs.DurationVar(&values.processRetention, "process-retention", 24*time.Hour, "retention for exited logical process handles (applied to Store and guest PID 1)")
 	fs.Int64Var(&values.nodeDiskByte, "node-disk-byte", 0, "node disk admission budget in bytes; 0 is unmetered and a positive value requires sandbox disk caps")
 	fs.Int64Var(&values.nodeMemoryByte, "node-memory-byte", 0, "node memory admission budget in bytes; 0 is unmetered and a positive value requires sandbox memory caps")

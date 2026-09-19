@@ -525,3 +525,57 @@ func eventKindsFor(t *testing.T, eng *orchestrator.Engine, sid model.SandboxID) 
 	}
 	return out
 }
+
+func TestReaperManualColdRecoveryRealRunsc(t *testing.T) {
+	ctx := context.Background()
+	eng, _ := harness.Engine(t, harness.EngineOpts{HealthTimeout: 20 * time.Second, ManualColdRecovery: true})
+	m := eng.Mediator
+	sid, err := m.Create(ctx, lifecycle.CreateSpec{Template: "bare", IdleTimeout: dur(time.Hour), Retention: dur(0)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = m.Destroy(ctx, sid) })
+	before, err := m.Placement(ctx, sid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := m.Client(sid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Write(ctx, "/tmp/.sandboxd-crashloop", []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	killTransportChild(t, client)
+	reaper := lifecycle.NewReaper(m, time.Hour, 2*time.Second)
+	paused := waitfor.Until(20*time.Second, 500*time.Millisecond, func() bool {
+		reaper.Sweep(ctx)
+		state, _ := m.State(ctx, sid)
+		return state == model.Paused
+	})
+	if !paused {
+		t.Fatal("transport-down placement did not crash-pause")
+	}
+	for i := 0; i < 3; i++ {
+		reaper.Sweep(ctx)
+	}
+	state, err := m.State(ctx, sid)
+	if err != nil || state != model.Paused {
+		t.Fatalf("replacement started without explicit resume: %s %v", state, err)
+	}
+	for _, kind := range eventKindsFor(t, eng, sid) {
+		if kind == "resumed" {
+			t.Fatal("manual recovery emitted autonomous resume")
+		}
+	}
+	if _, err := m.Endpoint(sid); err == nil {
+		t.Fatal("paused sandbox still exposes a transport endpoint")
+	}
+	if err := m.Resume(ctx, sid); err != nil {
+		t.Fatal(err)
+	}
+	after, err := m.Placement(ctx, sid)
+	if err != nil || after.Epoch <= before.Epoch {
+		t.Fatalf("explicit resume did not advance placement: %+v %v", after, err)
+	}
+}

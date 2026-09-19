@@ -388,6 +388,9 @@
       },
       "engineInfo": {
         "properties": {
+          "manual_cold_recovery": {
+            "type": "boolean"
+          },
           "store_id": {
             "type": "string"
           },
@@ -1040,7 +1043,7 @@
             "description": "The engine could not complete the operation because of an internal store or provider failure."
           }
         },
-        "summary": "Read the durable Store identity and running build version."
+        "summary": "Read the durable Store identity, running build and cold recovery policy."
       }
     },
     "/v1/processes/{id}": {

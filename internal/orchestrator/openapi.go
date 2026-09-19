@@ -89,7 +89,7 @@ type apiOp struct {
 // the operational surface, not the control-plane API. A consumer builds against the API; an operator
 // scrapes those.
 var apiOps = []apiOp{
-	{Method: "GET", Path: "/v1/info", OpID: "getInfo", Summary: "Read the durable Store identity and running build version.", Resp: engineInfo{}, Status: 200, Errors: []int{500}},
+	{Method: "GET", Path: "/v1/info", OpID: "getInfo", Summary: "Read the durable Store identity, running build and cold recovery policy.", Resp: engineInfo{}, Status: 200, Errors: []int{500}},
 	{
 		Method: "POST", Path: "/v1/sandboxes", OpID: "createSandbox",
 		Summary: "Create a sandbox. Unknown JSON fields are REFUSED (a misspelled `network` would otherwise silently create a deny sandbox).",

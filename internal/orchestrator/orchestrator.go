@@ -80,6 +80,8 @@ type Config struct {
 	// (the health and reaper boundary). Zero → NewReaper's conservative defaults.
 	SweepInterval       time.Duration
 	TransportDownBudget time.Duration
+	// ManualColdRecovery leaves transport-down replacements to an explicit Resume.
+	ManualColdRecovery bool
 
 	// VolumesDir holds the Volume subsystem volume storage, one unit per volume. Empty →
 	// StateDir/volumes, a SIBLING of the overlay state root rather than nested inside
@@ -417,6 +419,7 @@ func New(cfg Config) (*Engine, error) {
 
 	med := lifecycle.New(lifecycle.Deps{
 		QuotaReclaimTimeout:   cfg.QuotaReclaimTimeout,
+		ManualColdRecovery:    cfg.ManualColdRecovery,
 		Store:                 st,
 		Runtime:               rt,
 		Rootfs:                rp,

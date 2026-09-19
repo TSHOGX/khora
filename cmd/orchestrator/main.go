@@ -66,6 +66,7 @@ func main() {
 		EventRetention:      flags.eventRetention,
 		SweepInterval:       flags.reaperInterval,
 		TransportDownBudget: flags.transportDownBudget,
+		ManualColdRecovery:  flags.manualColdRecovery,
 		ProcessRetention:    model.ProcessRetentionPolicy{ExitedFor: flags.processRetention},
 		NodeDiskByte:        flags.nodeDiskByte,
 		NodeMemoryByte:      flags.nodeMemoryByte,

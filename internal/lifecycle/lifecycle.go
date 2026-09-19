@@ -107,6 +107,9 @@ func deathCauseOf(c runtime.DeathCause) model.DeathCause {
 // concrete implementations — swapping local_runsc / SQLite is registering an
 // implementation (the extension boundary), not editing this file.
 type Deps struct {
+	// ManualColdRecovery requires an explicit Resume after transport-down
+	// crash-pause. Same-placement transport repair remains automatic.
+	ManualColdRecovery bool
 	// QuotaReclaimTimeout bounds one backend reclamation pass; zero selects five seconds.
 	QuotaReclaimTimeout time.Duration
 	Store               store.Store

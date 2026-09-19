@@ -439,8 +439,8 @@ func (r *Reaper) handleTransportDownLocked(ctx context.Context, rec model.Sandbo
 		return // still within budget on the same epoch — keep waiting
 	}
 	// past the restart budget on ONE continuous epoch → escalate (health classification): crash-pause,
-	// then resume.
-	r.m.deps.Logf("reaper: %s transport-down past budget (%s) → escalate to resume (health classification)", rec.ID, r.transportDownBudget)
+	// then resume unless manual cold recovery requires an explicit caller.
+	r.m.deps.Logf("reaper: %s transport-down past budget (%s) → crash-pause", rec.ID, r.transportDownBudget)
 	delete(r.downSince, rec.ID)
 	// nil cause: escalation is not a death observation — L1 is ALIVE here (that is
 	// what transport-down means), so there is nothing dead to explain and stamping
@@ -449,6 +449,10 @@ func (r *Reaper) handleTransportDownLocked(ctx context.Context, rec model.Sandbo
 		if err != store.ErrConflict {
 			r.m.deps.Logf("reaper: escalate crash-pause %s (retried next tick): %v", rec.ID, err)
 		}
+		return
+	}
+	if r.m.deps.ManualColdRecovery {
+		r.m.deps.Logf("reaper: %s crash-paused; explicit resume required", rec.ID)
 		return
 	}
 	// now paused → resume (cold-start, new epoch). Re-read for a fresh record.
@@ -514,3 +518,6 @@ func (r *Reaper) Stats() ReaperStats {
 	defer r.statsMu.Unlock()
 	return r.stats
 }
+
+// ManualColdRecovery reports the configured authority for replacement placements.
+func (m *Mediator) ManualColdRecovery() bool { return m.deps.ManualColdRecovery }

@@ -540,3 +540,47 @@ func TestReaperRejectsPartialTelemetryPolicyFailClosed(t *testing.T) {
 		t.Fatalf("partial telemetry policy was not rejected/logged: %v", logs)
 	}
 }
+
+func TestReaperManualColdRecoveryRequiresExplicitResume(t *testing.T) {
+	e := newReaperEnv(t, time.Hour)
+	e.m.deps.ManualColdRecovery = true
+	e.seedRunning(t, "manual", 10*time.Second, 0)
+	e.cl.healthy = false
+	e.rt.adoptAlive = map[string]bool{"manual": true}
+	e.r.Sweep(context.Background())
+	e.r.downSince["manual"] = downStreak{since: time.Now().Add(-2 * time.Hour), epoch: "10.0.0.1:9000"}
+	e.r.Sweep(context.Background())
+	if got := e.state(t, "manual"); got != model.Paused {
+		t.Fatalf("manual recovery started replacement: %s", got)
+	}
+	events, err := e.st.UnpublishedEvents(context.Background(), allUnpublished)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sawPause := false
+	for _, event := range events {
+		if event.Sandbox != "manual" {
+			continue
+		}
+		if event.Kind == model.EventResumed {
+			t.Fatal("autonomous replacement emitted resumed")
+		}
+		if event.Kind == model.EventCrashPaused {
+			sawPause = true
+		}
+	}
+	if !sawPause {
+		t.Fatal("missing crash-pause observation")
+	}
+	e.cl.healthy = true
+	e.r.Sweep(context.Background())
+	if got := e.state(t, "manual"); got != model.Paused {
+		t.Fatalf("later sweep started replacement: %s", got)
+	}
+	if err := e.m.Resume(context.Background(), "manual"); err != nil {
+		t.Fatal(err)
+	}
+	if got := e.state(t, "manual"); got != model.Running {
+		t.Fatalf("explicit resume failed: %s", got)
+	}
+}

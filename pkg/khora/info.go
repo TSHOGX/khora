@@ -9,6 +9,8 @@ import (
 type Info struct {
 	StoreID string `json:"store_id"`
 	Version string `json:"version"`
+	// ManualColdRecovery means replacement placements require an explicit Resume.
+	ManualColdRecovery bool `json:"manual_cold_recovery"`
 }
 
 func (c *Client) Info(ctx context.Context) (Info, error) {

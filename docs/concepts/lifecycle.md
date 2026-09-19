@@ -51,3 +51,17 @@ Paused sandboxes may be destroyed after their retention duration. A zero idle
 timeout disables automatic pause; zero retention disables automatic eviction.
 The classifier and concurrent sweep behavior are tested in
 [internal/lifecycle/reaper_test.go](../../internal/lifecycle/reaper_test.go).
+
+## Manual cold recovery
+
+`--manual-cold-recovery` leaves a sandbox paused after its transport-down budget
+expires. The reaper still detects the failure and crash-pauses the placement;
+starting a replacement requires an explicit Resume. Same-placement transport
+child repair remains automatic. With the flag unset, transport-down escalation
+continues to crash-pause and cold-resume automatically.
+
+The active setting is reported as `manual_cold_recovery` by `GET /v1/info` and the
+Go client's `Info` method. A caller that must change external routing or revoke
+external authority before a replacement starts can require this setting before
+admitting work. Keep it pinned across engine restarts. Ordinary idle timeouts
+and paused retention remain independently configured.

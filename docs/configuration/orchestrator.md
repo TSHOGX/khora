@@ -19,6 +19,7 @@ Check it for staleness with `./scripts/check-generated.sh`.
 | `--health-timeout` | `30s` | cold-start readiness gate timeout |
 | `--idle-timeout` | `30m0s` | default idle TTL before an idle running sandbox is paused |
 | `--insecure-listen` | `false` | permit a non-loopback -addr even though the API has no authentication or TLS |
+| `--manual-cold-recovery` | `false` | require explicit resume after transport-down crash pause |
 | `--node-disk-byte` | `0` | node disk admission budget in bytes; 0 is unmetered and a positive value requires sandbox disk caps |
 | `--node-memory-byte` | `0` | node memory admission budget in bytes; 0 is unmetered and a positive value requires sandbox memory caps |
 | `--process-retention` | `24h0m0s` | retention for exited logical process handles (applied to Store and guest PID 1) |
@@ -31,7 +32,7 @@ Check it for staleness with `./scripts/check-generated.sh`.
 | `--store` | `./scratch/store.db` | SQLite store file |
 | `--sudo` | `false` | prefix runsc and ip with sudo for development |
 | `--templates` | `/var/lib/khora/templates` | built Template root, with one TemplateID subdirectory per builtin |
-| `--transport-down-budget` | `2m0s` | transport-down restart budget before a cold resume |
+| `--transport-down-budget` | `2m0s` | transport-down budget before crash pause and optional cold resume |
 | `--version` | `false` | print the version and exit |
 | `--via-uid` | `-1` | uid of the local second-hop process used by egress.via; unset refuses via declarations and the uid must differ from the orchestrator uid |
 | `--volume-provider` | `local_btrfs` | Volume provider for new volumes (local_btrfs or plain_dir) |

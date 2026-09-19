@@ -221,6 +221,7 @@ var (
 // The zero value is the common case: one "bare" Template on a t.TempDir() state
 // dir, default timeouts.
 type EngineOpts struct {
+	ManualColdRecovery bool
 	// HealthTimeout bounds the cold-start readiness gate. Zero means 30s.
 	HealthTimeout time.Duration
 	// DrainGrace bounds the FS-first pause and resume pause drain. Zero → the engine default; NEGATIVE
@@ -313,6 +314,7 @@ func Engine(t *testing.T, opts EngineOpts) (*orchestrator.Engine, string) {
 	}
 
 	eng, err := orchestrator.New(orchestrator.Config{
+		ManualColdRecovery:    opts.ManualColdRecovery,
 		VolumeProvider:        fixtureVolumeProvider(t, base),
 		TemplatesDir:          tmpl,
 		StateDir:              filepath.Join(base, "state"),
@@ -481,16 +483,17 @@ func Restart(t *testing.T, base string, opts EngineOpts) *orchestrator.Engine {
 		healthTimeout = 30 * time.Second
 	}
 	eng, err := orchestrator.New(orchestrator.Config{
-		VolumeProvider: fixtureVolumeProvider(t, base),
-		TemplatesDir:   filepath.Join(base, "templates"),
-		StateDir:       filepath.Join(base, "state"),
-		StorePath:      storePath,
-		HealthTimeout:  healthTimeout,
-		DrainGrace:     opts.DrainGrace,
-		NodeDiskByte:   opts.NodeDiskByte,
-		NodeMemoryByte: opts.NodeMemoryByte,
-		SecondHopUID:   opts.SecondHopUID,
-		HostPublishIP:  opts.HostPublishIP,
+		ManualColdRecovery: opts.ManualColdRecovery,
+		VolumeProvider:     fixtureVolumeProvider(t, base),
+		TemplatesDir:       filepath.Join(base, "templates"),
+		StateDir:           filepath.Join(base, "state"),
+		StorePath:          storePath,
+		HealthTimeout:      healthTimeout,
+		DrainGrace:         opts.DrainGrace,
+		NodeDiskByte:       opts.NodeDiskByte,
+		NodeMemoryByte:     opts.NodeMemoryByte,
+		SecondHopUID:       opts.SecondHopUID,
+		HostPublishIP:      opts.HostPublishIP,
 	})
 	if err != nil {
 		t.Fatalf("restart: orchestrator.New: %v", err)
