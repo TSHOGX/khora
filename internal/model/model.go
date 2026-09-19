@@ -598,6 +598,8 @@ const (
 // and mutable independently of the identity record. The network declaration
 // (the network declaration) IS carried, as a Binding — see the Network field below.
 type Sandbox struct {
+	// Revision advances on lifecycle and binding changes, including value reversals.
+	Revision uint64
 	ID       SandboxID
 	Template TemplateID
 	Overlay  OverlayID // the writable delta this sandbox owns (the ID-addressed Overlay model)

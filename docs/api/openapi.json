@@ -690,6 +690,9 @@
           "death_cause": {
             "type": "string"
           },
+          "mutation_revision": {
+            "type": "string"
+          },
           "placement_epoch": {
             "format": "uint64",
             "maximum": 18446744073709551615,
@@ -1246,9 +1249,30 @@
     "/v1/sandboxes/{id}": {
       "delete": {
         "operationId": "destroySandbox",
+        "parameters": [
+          {
+            "description": "Quoted mutation_revision from Get. A stale validator returns 412 before mutation; preserve the same validator on retries.",
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "204": {
             "description": "Success, no content."
+          },
+          "400": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The request cannot be honored as asked: malformed, an unknown JSON field, or a value the engine can never satisfy."
           },
           "404": {
             "content": {
@@ -1279,6 +1303,16 @@
               }
             },
             "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
+          },
+          "412": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": ""
           },
           "500": {
             "content": {
@@ -1352,6 +1386,17 @@
       ],
       "patch": {
         "operationId": "patchSandbox",
+        "parameters": [
+          {
+            "description": "Quoted mutation_revision from Get. A stale validator returns 412 before mutation; preserve the same validator on retries.",
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -1412,6 +1457,16 @@
               }
             },
             "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
+          },
+          "412": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": ""
           },
           "500": {
             "content": {
@@ -1808,6 +1863,17 @@
       ],
       "post": {
         "operationId": "pauseSandbox",
+        "parameters": [
+          {
+            "description": "Quoted mutation_revision from Get. A stale validator returns 412 before mutation; preserve the same validator on retries.",
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -1818,6 +1884,16 @@
               }
             },
             "description": "Success."
+          },
+          "400": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The request cannot be honored as asked: malformed, an unknown JSON field, or a value the engine can never satisfy."
           },
           "404": {
             "content": {
@@ -1848,6 +1924,16 @@
               }
             },
             "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
+          },
+          "412": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": ""
           },
           "500": {
             "content": {
@@ -2087,6 +2173,17 @@
       ],
       "post": {
         "operationId": "resumeSandbox",
+        "parameters": [
+          {
+            "description": "Quoted mutation_revision from Get. A stale validator returns 412 before mutation; preserve the same validator on retries.",
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -2097,6 +2194,16 @@
               }
             },
             "description": "Success."
+          },
+          "400": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The request cannot be honored as asked: malformed, an unknown JSON field, or a value the engine can never satisfy."
           },
           "404": {
             "content": {
@@ -2127,6 +2234,16 @@
               }
             },
             "description": "State conflict: legal request, wrong state. Resolvable by acting elsewhere (resume it, raise a cap, release a reference) and retrying."
+          },
+          "412": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": ""
           },
           "500": {
             "content": {

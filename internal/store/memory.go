@@ -144,6 +144,7 @@ func (m *Memory) CreateSandbox(_ context.Context, s model.Sandbox, ev *Event) er
 	// back as `[]` rather than null. Without it the two backends would disagree on the
 	// READ SHAPE of every declaration, and storetest would be pinning one's accident.
 	s.Network = s.Network.Normalize()
+	s.Revision = 1
 	m.rec[s.ID] = s
 	m.appendEvent(ev) // same commit as the insert (the transactional outbox)
 	return nil
@@ -315,6 +316,20 @@ func (m *Memory) CreateMounts(_ context.Context, mounts []model.Mount) error {
 	}
 	// ALL-OR-NOTHING: nothing was appended to m.mounts until every row cleared, so a
 	// binding that lost anywhere above added no rows at all.
+	seen := map[model.SandboxID]bool{}
+	for _, mount := range accepted {
+		if !seen[mount.Sandbox] {
+			seen[mount.Sandbox] = true
+			if m.rec[mount.Sandbox].Revision >= uint64(1<<63-1) {
+				return fmt.Errorf("sandbox revision exhausted")
+			}
+		}
+	}
+	for id := range seen {
+		record := m.rec[id]
+		record.Revision++
+		m.rec[id] = record
+	}
 	m.mounts = append(m.mounts, accepted...)
 	return nil
 }
@@ -344,6 +359,13 @@ func (m *Memory) ReplaceMounts(_ context.Context, sandbox model.SandboxID, next 
 		// m.mounts is untouched, so a refused replacement leaves the OLD binding intact
 		// (consequence ) — the same all-or-nothing SQLite gets from rolling back.
 		return err
+	}
+	if record, exists := m.rec[sandbox]; exists {
+		if record.Revision >= uint64(1<<63-1) {
+			return fmt.Errorf("sandbox revision exhausted")
+		}
+		record.Revision++
+		m.rec[sandbox] = record
 	}
 	m.mounts = append(kept, accepted...)
 	return nil
@@ -430,6 +452,20 @@ func (m *Memory) ListMountsByVolume(_ context.Context, volume model.VolumeID) ([
 func (m *Memory) DeleteMounts(_ context.Context, sandbox model.SandboxID) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	count := 0
+	for _, mount := range m.mounts {
+		if mount.Sandbox == sandbox {
+			count++
+		}
+	}
+	if count != 0 {
+		record := m.rec[sandbox]
+		if record.Revision >= uint64(1<<63-1) {
+			return fmt.Errorf("sandbox revision exhausted")
+		}
+		record.Revision++
+		m.rec[sandbox] = record
+	}
 	kept := m.mounts[:0]
 	for _, mt := range m.mounts {
 		if mt.Sandbox != sandbox {
@@ -483,6 +519,10 @@ func (m *Memory) CompareAndSetState(_ context.Context, id model.SandboxID, expec
 	if err := m.ensureEventSequence(ev); err != nil {
 		return err
 	}
+	if s.Revision >= uint64(1<<63-1) {
+		return fmt.Errorf("sandbox revision exhausted")
+	}
+	s.Revision++
 	s.State = next
 	// death cause under the SAME lock as the state change (health and reclamation / the transactional outbox, and
 	// Store.CompareAndSetState for why no later window exists). nil = leave untouched.
@@ -508,6 +548,10 @@ func (m *Memory) UpdateBinding(_ context.Context, id model.SandboxID, expected m
 	if s.State != expected {
 		return ErrConflict
 	}
+	if s.Revision >= uint64(1<<63-1) {
+		return fmt.Errorf("sandbox revision exhausted")
+	}
+	s.Revision++
 	s.Limits, s.IdleTimeout, s.Retention, s.Network = b.Apply(s)
 	// Same lock as the field writes (the transactional outbox): a raise that lifts the health and reclamation refusal
 	// must not be observable without the cap that justifies it.

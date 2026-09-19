@@ -402,9 +402,9 @@ func (e *Engine) handleSandboxSub(w http.ResponseWriter, r *http.Request) {
 	case sub == "" && r.Method == http.MethodDelete:
 		e.handleDestroy(w, r, id)
 	case sub == "pause" && r.Method == http.MethodPost:
-		e.doVerb(w, r, id, e.Mediator.Pause)
+		e.doVerb(w, r, id, e.Mediator.PauseIfMatch)
 	case sub == "resume" && r.Method == http.MethodPost:
-		e.doVerb(w, r, id, e.Mediator.Resume)
+		e.doVerb(w, r, id, e.Mediator.ResumeIfMatch)
 	// The large-file bypass (the transport data plane fs / fs transport). REST rather than
 	// Connect-RPC because its whole purpose is to STREAM bytes: a file must not
 	// become one protobuf message, nor sit in memory at either end.
@@ -651,9 +651,15 @@ func (e *Engine) handlePatch(w http.ResponseWriter, r *http.Request, id model.Sa
 	// disagreed. Rebind evaluates every gate under one lock and orders the
 	// store-arbitrated mount commit first, so every 4xx from here really did change
 	// nothing.
+	expected, err := mutationPrecondition(r)
+	if err != nil {
+		statusFor(w, err)
+		return
+	}
 	released, err := e.Mediator.Rebind(r.Context(), id, lifecycle.RebindSpec{
-		Binding: b,
-		Mounts:  mounts,
+		ExpectedMutationRevision: expected,
+		Binding:                  b,
+		Mounts:                   mounts,
 	})
 	if err != nil {
 		statusFor(w, err)
@@ -934,10 +940,11 @@ func (e *Engine) handleEvents(w http.ResponseWriter, r *http.Request) {
 //   - List gets it too: without it a caller seeing several `paused` sandboxes must fan out one
 //     GET per ID to learn which are resumable, turning one list into N+1 requests.
 type sandboxResp struct {
-	SandboxID      string `json:"sandbox_id"`
-	State          string `json:"state"`
-	PlacementEpoch uint64 `json:"placement_epoch,omitempty"`
-	PlacementState string `json:"placement_state,omitempty"`
+	MutationRevision string `json:"mutation_revision,omitempty"`
+	SandboxID        string `json:"sandbox_id"`
+	State            string `json:"state"`
+	PlacementEpoch   uint64 `json:"placement_epoch,omitempty"`
+	PlacementState   string `json:"placement_state,omitempty"`
 	// DeathCause is why the isolation unit was last found dead (health and reclamation). Absent =
 	// never observed dead. See the type doc for why absent rather than "".
 	DeathCause string `json:"death_cause,omitempty"`
@@ -965,10 +972,11 @@ func (e *Engine) handleGet(w http.ResponseWriter, r *http.Request, id model.Sand
 		return
 	}
 	resp := sandboxResp{
-		SandboxID:  string(info.Sandbox.ID),
-		State:      string(info.Sandbox.State),
-		DeathCause: string(info.Sandbox.DeathCause),
-		UsedByte:   info.UsedByte,
+		SandboxID:        string(info.Sandbox.ID),
+		MutationRevision: info.MutationRevision,
+		State:            string(info.Sandbox.State),
+		DeathCause:       string(info.Sandbox.DeathCause),
+		UsedByte:         info.UsedByte,
 	}
 	if info.Placement != nil {
 		resp.PlacementEpoch = uint64(info.Placement.Epoch)
@@ -977,8 +985,13 @@ func (e *Engine) handleGet(w http.ResponseWriter, r *http.Request, id model.Sand
 	writeJSON(w, http.StatusOK, resp)
 }
 
-func (e *Engine) doVerb(w http.ResponseWriter, r *http.Request, id model.SandboxID, verb func(context.Context, model.SandboxID) error) {
-	if err := verb(r.Context(), id); err != nil {
+func (e *Engine) doVerb(w http.ResponseWriter, r *http.Request, id model.SandboxID, verb func(context.Context, model.SandboxID, string) error) {
+	expected, err := mutationPrecondition(r)
+	if err != nil {
+		statusFor(w, err)
+		return
+	}
+	if err := verb(r.Context(), id, expected); err != nil {
 		statusFor(w, err)
 		return
 	}
@@ -1055,7 +1068,12 @@ func (e *Engine) handleActivity(w http.ResponseWriter, r *http.Request, id model
 }
 
 func (e *Engine) handleDestroy(w http.ResponseWriter, r *http.Request, id model.SandboxID) {
-	if err := e.Mediator.Destroy(r.Context(), id); err != nil {
+	expected, err := mutationPrecondition(r)
+	if err != nil {
+		statusFor(w, err)
+		return
+	}
+	if err := e.Mediator.DestroyIfMatch(r.Context(), id, expected); err != nil {
 		statusFor(w, err)
 		return
 	}
@@ -1218,6 +1236,9 @@ func trimPunct(f string) (lead, tok, trail string) {
 // statusCodeFor is the API error contract verdict → status mapping, and NOTHING ELSE: it writes
 // no response, so it cannot smuggle a body past the funnel.
 func statusCodeFor(err error) int {
+	if errors.Is(err, lifecycle.ErrPreconditionFailed) {
+		return http.StatusPreconditionFailed
+	}
 	// Protocol-neutral state-core classes are handled before subsystem-specific
 	// sentinels so every HTTP edge shares the same idempotency/epoch semantics.
 	switch {

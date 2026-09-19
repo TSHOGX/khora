@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS templates (
 	created_at     INTEGER NOT NULL            -- unix nanos
 );
 CREATE TABLE IF NOT EXISTS sandboxes (
+ revision INTEGER NOT NULL DEFAULT 1 CHECK(revision > 0 AND typeof(revision)='integer'),
 	id           TEXT PRIMARY KEY,
 	-- template FK RESTRICT: a Template referenced by any sandbox cannot be
 	-- deleted (health and reclamation). The reference is a persistent row seen by RESTRICT from
@@ -408,7 +409,7 @@ func (s *SQLite) CreateSandbox(ctx context.Context, sb model.Sandbox, ev *Event)
 func (s *SQLite) GetSandbox(ctx context.Context, id model.SandboxID) (model.Sandbox, error) {
 	return scanSandbox(s.db.QueryRowContext(ctx,
 		`SELECT id, template, overlay, state, idle_timeout, retention,
-		   cpu_millis, memory_byte, disk_byte, death_cause, network, created_at, updated_at
+		   cpu_millis, memory_byte, disk_byte, death_cause, network, created_at, updated_at, revision
 		 FROM sandboxes WHERE id=?`,
 		string(id)))
 }
@@ -416,7 +417,7 @@ func (s *SQLite) GetSandbox(ctx context.Context, id model.SandboxID) (model.Sand
 func (s *SQLite) ListSandboxes(ctx context.Context) ([]model.Sandbox, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, template, overlay, state, idle_timeout, retention,
-		   cpu_millis, memory_byte, disk_byte, death_cause, network, created_at, updated_at
+		   cpu_millis, memory_byte, disk_byte, death_cause, network, created_at, updated_at, revision
 		 FROM sandboxes ORDER BY created_at`)
 	if err != nil {
 		return nil, err
@@ -449,12 +450,12 @@ func (s *SQLite) CompareAndSetState(ctx context.Context, id model.SandboxID, exp
 		// state + death_cause + outbox row in ONE transaction — the atomicity
 		// Store.CompareAndSetState promises (the transactional outbox / health and reclamation).
 		if cause == nil {
-			if _, err := t.Exec(`UPDATE sandboxes SET state=?, updated_at=? WHERE id=?`,
+			if _, err := t.Exec(`UPDATE sandboxes SET revision=revision+1, state=?, updated_at=? WHERE id=?`,
 				string(next), time.Now().UnixNano(), string(id)); err != nil {
 				return err
 			}
 		} else {
-			if _, err := t.Exec(`UPDATE sandboxes SET state=?, death_cause=?, updated_at=? WHERE id=?`,
+			if _, err := t.Exec(`UPDATE sandboxes SET revision=revision+1, state=?, death_cause=?, updated_at=? WHERE id=?`,
 				string(next), string(*cause), time.Now().UnixNano(), string(id)); err != nil {
 				return err
 			}
@@ -502,13 +503,13 @@ func (s *SQLite) UpdateBinding(ctx context.Context, id model.SandboxID, expected
 		// deliberately absent (see Store.UpdateBinding).
 		if cause == nil {
 			_, err = t.Exec(
-				`UPDATE sandboxes SET cpu_millis=?, memory_byte=?, disk_byte=?, idle_timeout=?, retention=?, network=?
+				`UPDATE sandboxes SET revision=revision+1, cpu_millis=?, memory_byte=?, disk_byte=?, idle_timeout=?, retention=?, network=?
 				   WHERE id=?`,
 				newLim.CPUMillis, newLim.MemoryByte, newLim.DiskByte,
 				int64(newIdle), int64(newRet), nextNetJSON, string(id))
 		} else {
 			_, err = t.Exec(
-				`UPDATE sandboxes SET cpu_millis=?, memory_byte=?, disk_byte=?, idle_timeout=?, retention=?, network=?, death_cause=?
+				`UPDATE sandboxes SET revision=revision+1, cpu_millis=?, memory_byte=?, disk_byte=?, idle_timeout=?, retention=?, network=?, death_cause=?
 				   WHERE id=?`,
 				newLim.CPUMillis, newLim.MemoryByte, newLim.DiskByte,
 				int64(newIdle), int64(newRet), nextNetJSON, string(*cause), string(id))
@@ -909,7 +910,19 @@ func (s *SQLite) CreateMounts(ctx context.Context, mounts []model.Mount) error {
 		return err
 	}
 	return s.tx(ctx, func(t *sql.Tx) error {
-		return insertBinding(t, mounts)
+		if err := insertBinding(t, mounts); err != nil {
+			return err
+		}
+		seen := map[model.SandboxID]bool{}
+		for _, mount := range mounts {
+			if !seen[mount.Sandbox] {
+				seen[mount.Sandbox] = true
+				if _, err := t.Exec(`UPDATE sandboxes SET revision=revision+1 WHERE id=?`, string(mount.Sandbox)); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
 	})
 }
 
@@ -931,7 +944,11 @@ func (s *SQLite) ReplaceMounts(ctx context.Context, sandbox model.SandboxID, nex
 		}
 		// Any verdict here rolls the DELETE back too, so a refused replacement leaves the
 		// OLD binding in place — that is consequence  and it needs no compensating code.
-		return insertBinding(t, next)
+		if err := insertBinding(t, next); err != nil {
+			return err
+		}
+		_, err := t.Exec(`UPDATE sandboxes SET revision=revision+1 WHERE id=?`, string(sandbox))
+		return err
 	})
 }
 
@@ -1014,8 +1031,21 @@ func (s *SQLite) ListMountsByVolume(ctx context.Context, volume model.VolumeID) 
 }
 
 func (s *SQLite) DeleteMounts(ctx context.Context, sandbox model.SandboxID) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM mounts WHERE sandbox=?`, string(sandbox))
-	return err // idempotent: zero rows is success
+	return s.tx(ctx, func(tx *sql.Tx) error {
+		result, err := tx.Exec(`DELETE FROM mounts WHERE sandbox=?`, string(sandbox))
+		if err != nil {
+			return err
+		}
+		count, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if count == 0 {
+			return nil
+		}
+		_, err = tx.Exec(`UPDATE sandboxes SET revision=revision+1 WHERE id=?`, string(sandbox))
+		return err
+	})
 }
 
 func scanMounts(rows *sql.Rows) ([]model.Mount, error) {
@@ -1211,7 +1241,7 @@ func scanSandbox(r rowScanner) (model.Sandbox, error) {
 	var id, tmpl, ov, state, deathCause, netJSON string
 	var idleTimeout, retention, cpuMillis, memoryByte, diskByte, created, updated int64
 	err := r.Scan(&id, &tmpl, &ov, &state, &idleTimeout, &retention,
-		&cpuMillis, &memoryByte, &diskByte, &deathCause, &netJSON, &created, &updated)
+		&cpuMillis, &memoryByte, &diskByte, &deathCause, &netJSON, &created, &updated, &sb.Revision)
 	if errors.Is(err, sql.ErrNoRows) {
 		return model.Sandbox{}, ErrNotFound
 	}

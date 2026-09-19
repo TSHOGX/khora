@@ -31,6 +31,7 @@ type Factory func(t *testing.T) (s store.Store, reopen func(t *testing.T) store.
 
 // RunContract runs the full shared suite against the backend built by mk.
 func RunContract(t *testing.T, mk Factory) {
+	t.Run("SandboxMutationRevision", func(t *testing.T) { testSandboxMutationRevision(t, mk) })
 	t.Run("Identity", func(t *testing.T) {
 		s, reopen := mk(t)
 		id, err := s.Identity(context.Background())
@@ -3341,3 +3342,61 @@ func testVolumeLineage(t *testing.T, mk Factory) {
 // requires a positive one (a zero-means-everything reading is how the unbounded scan it
 // replaced would return). Far above what any contract case writes.
 const allUnpublished = 1000
+
+func testSandboxMutationRevision(t *testing.T, mk Factory) {
+	ctx := context.Background()
+	s, reopen := mk(t)
+	seedTmpl(t, s, "bare")
+	if err := s.CreateSandbox(ctx, mkRec("revision"), nil); err != nil {
+		t.Fatal(err)
+	}
+	previous, err := s.GetSandbox(ctx, "revision")
+	if err != nil || previous.Revision != 1 {
+		t.Fatalf("initial revision: %+v %v", previous, err)
+	}
+	check := func() {
+		t.Helper()
+		next, err := s.GetSandbox(ctx, "revision")
+		if err != nil || next.Revision <= previous.Revision {
+			t.Fatalf("mutation reused revision: %d -> %d (%v)", previous.Revision, next.Revision, err)
+		}
+		previous = next
+	}
+	if err := s.CompareAndSetState(ctx, "revision", model.Creating, model.Paused, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	check()
+	for _, duration := range []time.Duration{time.Hour, 12 * time.Hour} {
+		if err := s.UpdateBinding(ctx, "revision", model.Paused, store.Binding{Retention: &duration}, nil); err != nil {
+			t.Fatal(err)
+		}
+		check()
+	}
+	if err := s.CreateVolume(ctx, model.Volume{ID: "revision-volume", Backend: "fake", CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	mounts := []model.Mount{{Sandbox: "revision", Volume: "revision-volume", Path: "/data", Access: model.Exclusive}}
+	if err := s.CreateMounts(ctx, mounts); err != nil {
+		t.Fatal(err)
+	}
+	check()
+	if err := s.ReplaceMounts(ctx, "revision", nil); err != nil {
+		t.Fatal(err)
+	}
+	check()
+	if err := s.ReplaceMounts(ctx, "revision", mounts); err != nil {
+		t.Fatal(err)
+	}
+	check()
+	if err := s.DeleteMounts(ctx, "revision"); err != nil {
+		t.Fatal(err)
+	}
+	check()
+	if reopen != nil {
+		s = reopen(t)
+		current, err := s.GetSandbox(ctx, "revision")
+		if err != nil || current.Revision != previous.Revision {
+			t.Fatalf("revision changed across reopen: %+v %v", current, err)
+		}
+	}
+}

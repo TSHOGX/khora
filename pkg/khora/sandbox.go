@@ -53,7 +53,8 @@ func (c *Client) Get(ctx context.Context, sandboxID string) (Sandbox, error) {
 // List lists sandboxes. The entries carry the identical shape Get returns, so a caller
 // filtering on state or death cause needs no follow-up request per ID.
 //
-// Note the one deliberate omission: UsedByte is absent on list entries. Reading it
+// UsedByte and MutationRevision are absent on list entries. Read Get for a
+// conditional mutation revision. Reading UsedByte
 // costs one storage-backend round trip per sandbox, so the engine does not pay it N
 // times for a list — call Get for the sandbox whose usage you need.
 func (c *Client) List(ctx context.Context) ([]Sandbox, error) {

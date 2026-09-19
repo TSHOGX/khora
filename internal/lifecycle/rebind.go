@@ -32,6 +32,7 @@ import (
 // value — a caller cannot express "half a PATCH" and therefore cannot be served half
 // of one.
 type RebindSpec struct {
+	ExpectedMutationRevision string
 	// Binding carries caps, TTLs and the network declaration. Each field is a pointer, so
 	// "not given" is distinguishable from "set to zero" (store.Binding says why that
 	// distinction is load-bearing on every axis, the declaration included).
@@ -101,6 +102,9 @@ func (m *Mediator) Rebind(ctx context.Context, id model.SandboxID, spec RebindSp
 	l := m.lock(id)
 	l.Lock()
 	defer l.Unlock()
+	if err := m.checkMutationRevisionLocked(ctx, id, spec.ExpectedMutationRevision); err != nil {
+		return false, err
+	}
 
 	if spec.isEmpty() {
 		return false, nil // nothing asked for → no write (idempotent)

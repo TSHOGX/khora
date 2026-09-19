@@ -87,10 +87,13 @@ type VolumeBinding struct {
 // that finds several `paused` in a list need not fan out one GET per ID to learn which
 // are resumable.
 type Sandbox struct {
-	SandboxID      string       `json:"sandbox_id"`
-	State          SandboxState `json:"state"`
-	PlacementEpoch uint64       `json:"placement_epoch,omitempty"`
-	PlacementState string       `json:"placement_state,omitempty"`
+	// MutationRevision is an opaque validator returned by Get for conditional
+	// lifecycle writes. It is absent from List; inspect before mutating.
+	MutationRevision string       `json:"mutation_revision,omitempty"`
+	SandboxID        string       `json:"sandbox_id"`
+	State            SandboxState `json:"state"`
+	PlacementEpoch   uint64       `json:"placement_epoch,omitempty"`
+	PlacementState   string       `json:"placement_state,omitempty"`
 	// DeathCause is why the isolation unit was last found dead. Absent = never observed
 	// dead, which is why it is "" rather than a "healthy" spelling.
 	DeathCause string `json:"death_cause,omitempty"`

@@ -99,3 +99,25 @@ Volume binding patches require a paused Sandbox and a `lost` Placement. A
 error while cleanup is retried, and Resume, direct writable Volume access and
 binding reassignment remain refused. After successful teardown, the placement
 record retains its epoch with `state: lost` for reconciliation.
+
+## Conditional lifecycle writes
+
+Single-Sandbox GET returns `mutation_revision`, an opaque revision covering the
+Store identity, Sandbox identity, persistent binding revision, lifecycle state,
+and Placement epoch/state. List omits this field; inspect the object before a
+conditional write. Pause, Resume, Destroy and PATCH accept it as one quoted
+`If-Match` header. Wildcards, weak validators and multiple values are refused.
+The precondition is checked while holding the same transition lock as the write.
+A stale revision returns HTTP 412 before any side effect.
+
+Retry an ambiguous request with its original revision. A lost successful response
+usually makes that retry return 412; inspect and reconcile the original intent.
+Do not refresh the revision automatically and resend an old destructive request.
+Destroy with a precondition returns 404 once its object is absent. Unconditional
+operator verbs remain available when the header is omitted.
+
+The Go client exposes `PauseIfMatch`, `ResumeIfMatch`, `DestroyIfMatch`,
+`PatchIfMatch`, and `IsPreconditionFailed`. These methods require the nonempty
+revision returned by Get. Binding changes increment the durable revision even
+when a subsequent change restores the same values, preventing stale requests
+from becoming valid again.

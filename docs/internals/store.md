@@ -55,3 +55,10 @@ Opening existing state without its identity, or with an invalid identity, fails
 instead of assigning a replacement. The `0.0.x` policy requires rebuilding old
 state rather than migrating it. The identity lives in the same database as the
 objects; a separate directory marker is not an authority.
+
+Sandbox records carry a durable positive mutation revision. Lifecycle changes,
+resource/network binding writes and mount-binding changes advance it in the
+same transaction as the corresponding mutation. Memory and SQLite share the
+`SandboxMutationRevision` contract test; SQLite reopen preserves it. The integer
+cannot wrap or silently become a floating-point value. The revision does not
+replace Placement epochs, and binding edits do not reset retention timestamps.

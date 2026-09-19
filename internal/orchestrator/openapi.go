@@ -109,24 +109,28 @@ var apiOps = []apiOp{
 	},
 	{
 		Method: "PATCH", Path: "/v1/sandboxes/{id}", OpID: "patchSandbox",
+		Query:   []apiParam{{Name: "If-Match", Type: "string", In: "header", Desc: "Quoted mutation_revision from Get. A stale validator returns 412 before mutation; preserve the same validator on retries."}},
 		Summary: "Rewrite the sandbox's Binding. Every field is optional; an omitted field is left alone, and a whole binding is swapped for a whole binding.",
 		Req:     patchReq{}, Resp: patchResp{}, Status: 200,
-		Errors: []int{400, 404, 409, 507},
+		Errors: []int{400, 404, 409, 507, 412},
 	},
 	{
 		Method: "DELETE", Path: "/v1/sandboxes/{id}", OpID: "destroySandbox",
+		Query:   []apiParam{{Name: "If-Match", Type: "string", In: "header", Desc: "Quoted mutation_revision from Get. A stale validator returns 412 before mutation; preserve the same validator on retries."}},
 		Summary: "Destroy a sandbox. The record is deleted, so a later GET is 404 and the event is the durable record of the destroy cause.",
-		Status:  204, Errors: []int{404, 409},
+		Status:  204, Errors: []int{400, 404, 409, 412},
 	},
 	{
 		Method: "POST", Path: "/v1/sandboxes/{id}/pause", OpID: "pauseSandbox",
+		Query:   []apiParam{{Name: "If-Match", Type: "string", In: "header", Desc: "Quoted mutation_revision from Get. A stale validator returns 412 before mutation; preserve the same validator on retries."}},
 		Summary: "Pause a running sandbox: drains in-flight engine writes, then freezes.",
-		Resp:    verbResp{}, Status: 200, Errors: []int{404, 409},
+		Resp:    verbResp{}, Status: 200, Errors: []int{400, 404, 409, 412},
 	},
 	{
 		Method: "POST", Path: "/v1/sandboxes/{id}/resume", OpID: "resumeSandbox",
+		Query:   []apiParam{{Name: "If-Match", Type: "string", In: "header", Desc: "Quoted mutation_revision from Get. A stale validator returns 412 before mutation; preserve the same validator on retries."}},
 		Summary: "Resume a paused sandbox. The filesystem is exactly as it was; the placement and IP are new.",
-		Resp:    verbResp{}, Status: 200, Errors: []int{404, 409, 507},
+		Resp:    verbResp{}, Status: 200, Errors: []int{400, 404, 409, 507, 412},
 	},
 	{
 		Method: "POST", Path: "/v1/sandboxes/{id}/activity", OpID: "recordActivity",

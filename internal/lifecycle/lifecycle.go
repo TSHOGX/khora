@@ -754,9 +754,16 @@ func (m *Mediator) Create(ctx context.Context, spec CreateSpec) (resultID model.
 // RAM/CPU and the placement — a paused sandbox occupies storage only (FS-first pause and resume).
 // CAS-guarded: requires `running`. See pauseLocked for the ordering.
 func (m *Mediator) Pause(ctx context.Context, id model.SandboxID) error {
+	return m.PauseIfMatch(ctx, id, "")
+}
+
+func (m *Mediator) PauseIfMatch(ctx context.Context, id model.SandboxID, expected string) error {
 	l := m.lock(id)
 	l.Lock()
 	defer l.Unlock()
+	if err := m.checkMutationRevisionLocked(ctx, id, expected); err != nil {
+		return err
+	}
 	// A user pause is not a death: no cause to record (nil leaves the column
 	// untouched).
 	if err := m.pauseLocked(ctx, id, "paused", nil); err != nil {
@@ -803,9 +810,16 @@ func (m *Mediator) pauseLocked(ctx context.Context, id model.SandboxID, kind mod
 // held for the whole chain; the flip to `running` happens only after readiness.
 // On failure, unwind the half-built Placement and stay `paused`.
 func (m *Mediator) Resume(ctx context.Context, id model.SandboxID) error {
+	return m.ResumeIfMatch(ctx, id, "")
+}
+
+func (m *Mediator) ResumeIfMatch(ctx context.Context, id model.SandboxID, expected string) error {
 	l := m.lock(id)
 	l.Lock()
 	defer l.Unlock()
+	if err := m.checkMutationRevisionLocked(ctx, id, expected); err != nil {
+		return err
+	}
 
 	rec, err := m.deps.Store.GetSandbox(ctx, id)
 	if err != nil {
@@ -917,9 +931,16 @@ func (m *Mediator) resumeLocked(ctx context.Context, rec model.Sandbox) error {
 // resume holds for its whole chain, so destroy CANNOT delete an Overlay
 // mid-cold-start (per-sandbox transition serialization: closes the destroy-vs-resume data race).
 func (m *Mediator) Destroy(ctx context.Context, id model.SandboxID) error {
+	return m.DestroyIfMatch(ctx, id, "")
+}
+
+func (m *Mediator) DestroyIfMatch(ctx context.Context, id model.SandboxID, expected string) error {
 	l := m.lock(id)
 	l.Lock()
 	defer l.Unlock()
+	if err := m.checkMutationRevisionLocked(ctx, id, expected); err != nil {
+		return err
+	}
 
 	rec, err := m.deps.Store.GetSandbox(ctx, id)
 	if err != nil {
@@ -2135,8 +2156,9 @@ func (m *Mediator) Get(ctx context.Context, id model.SandboxID) (model.Sandbox, 
 // SandboxInfo is the control-plane API single-read shape: the record plus the one fact that does
 // not live in it.
 type SandboxInfo struct {
-	Sandbox   model.Sandbox
-	Placement *model.Placement
+	MutationRevision string
+	Sandbox          model.Sandbox
+	Placement        *model.Placement
 	// UsedByte is what the Overlay storage unit consumes as the rootfs provider's own
 	// backend reports it (upper + work), or NIL when that could not be read.
 	//
@@ -2166,6 +2188,11 @@ func (m *Mediator) Inspect(ctx context.Context, id model.SandboxID) (SandboxInfo
 	} else if !errors.Is(perr, store.ErrPlacementNotFound) {
 		return SandboxInfo{}, perr
 	}
+	identity, err := m.deps.Store.Identity(ctx)
+	if err != nil {
+		return SandboxInfo{}, err
+	}
+	info.MutationRevision = mutationRevision(identity, info.Sandbox, info.Placement)
 	if rp := m.deps.Rootfs; rp != nil && rec.Overlay != "" {
 		used, _, err := rp.Usage(ctx, string(rec.Overlay))
 		if err != nil {
