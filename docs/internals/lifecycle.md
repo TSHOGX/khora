@@ -61,3 +61,17 @@ lock and revalidate before auto-pause or crash-pause. This protect-on-uncertaint
 behavior and restart budget are in
 [internal/lifecycle/classify_test.go](../../internal/lifecycle/classify_test.go) and
 [internal/lifecycle/reaper_test.go](../../internal/lifecycle/reaper_test.go).
+
+## Writer termination fence
+
+`termination.go` retains a durable `stopping` Placement and its live handles until
+runtime teardown and mount release succeed. Direct Volume mutation checks both
+durable placement state and the in-flight writer reservation. Cold start records
+its placement before launch, and failed readiness keeps cleanup authority until
+unwind succeeds. Restart reconciliation reclaims an addressed placement before
+releasing its bindings. Mount edits require a terminated paused placement.
+
+`termination_test.go` exercises blocked Stop, failed teardown, lost live-map state,
+restart, direct mutation, resume and exclusive-lease preservation. The runtime
+substrate test injects kill/delete failures while the guest remains reachable,
+then verifies successful retry and idempotent release.

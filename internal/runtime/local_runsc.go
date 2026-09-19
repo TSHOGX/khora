@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
 	"net/netip"
@@ -17,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/TSHOGX/khora/internal/guestport"
 	"github.com/TSHOGX/khora/internal/ruleset"
@@ -267,7 +269,7 @@ func (p *LocalRunsc) markInUse(guestIP string) {
 // Returns the placement with TransportEndpoint = guest veth IP:port. On any
 // error it unwinds whatever it half-built (atomic transition rollback: failure recycles the
 // half-built placement; the caller's persistent state is untouched).
-func (p *LocalRunsc) Launch(ctx context.Context, spec LaunchSpec) (_ *Placement, err error) {
+func (p *LocalRunsc) Launch(ctx context.Context, spec LaunchSpec) (result *Placement, err error) {
 	if spec.Rootfs.MergedPath == "" {
 		return nil, fmt.Errorf("runtime: LaunchSpec.Rootfs.MergedPath empty")
 	}
@@ -285,7 +287,13 @@ func (p *LocalRunsc) Launch(ctx context.Context, spec LaunchSpec) (_ *Placement,
 	// unwind half-built placement on any failure path.
 	defer func() {
 		if err != nil {
-			p.teardownPlacement(&h)
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if cleanupErr := p.teardownPlacement(cleanupCtx, &h); cleanupErr != nil {
+				result = &Placement{Address: netip.MustParseAddr(guestIP)}
+				result.SetHandle(&h)
+				err = errors.Join(err, fmt.Errorf("launch cleanup unresolved: %w", cleanupErr))
+			}
 		}
 	}()
 
@@ -567,23 +575,27 @@ func publishEndpointList(h *placementHandle, spec SteeringSpec) []string {
 // pause: a paused sandbox "occupies only disk" — no netns/veth held). Resume builds
 // a fresh placement with a new IP (the ID-reference model), so nothing here must survive.
 func (p *LocalRunsc) Stop(ctx context.Context, pl *Placement) error {
+	if pl == nil {
+		return fmt.Errorf("runtime: placement handle required for verified teardown")
+	}
 	h, ok := pl.Handle().(*placementHandle)
 	if !ok || h == nil {
-		return nil
+		return fmt.Errorf("runtime: placement handle required for verified teardown")
 	}
-	p.teardownPlacement(h)
-	return nil
+	return p.teardownPlacement(ctx, h)
 }
 
 // Destroy tears down placement-local resources (netns/IP/cgroup) — same reclaim
 // as Stop, idempotent.
 func (p *LocalRunsc) Destroy(ctx context.Context, pl *Placement) error {
+	if pl == nil {
+		return fmt.Errorf("runtime: placement handle required for verified teardown")
+	}
 	h, ok := pl.Handle().(*placementHandle)
 	if !ok || h == nil {
-		return nil
+		return fmt.Errorf("runtime: placement handle required for verified teardown")
 	}
-	p.teardownPlacement(h)
-	return nil
+	return p.teardownPlacement(ctx, h)
 }
 
 // Adopt re-recognizes a surviving sandbox's placement after a control-plane
@@ -696,7 +708,9 @@ func (p *LocalRunsc) ReclaimOrphans(ctx context.Context, keep []string) error {
 		if ip, e := p.rediscoverGuestIP(&h); e == nil {
 			h.guestIP = ip
 		}
-		p.teardownPlacement(&h)
+		if err := p.teardownPlacement(ctx, &h); err != nil {
+			return fmt.Errorf("reclaim placement %s: %w", sandbox, err)
+		}
 	}
 	return nil
 }
@@ -782,16 +796,51 @@ func (p *LocalRunsc) enumeratePlacements() ([]string, error) {
 func (p *LocalRunsc) containerRunning(ctx context.Context, cid string) (bool, error) {
 	out, err := p.runscOut(ctx, "state", cid)
 	if err != nil {
-		// unknown container id → not alive (already gone). Not an error we surface.
-		return false, nil
+		absent, inspectErr := p.containerAbsent(ctx, cid)
+		if inspectErr != nil {
+			return false, errors.Join(err, inspectErr)
+		}
+		if absent {
+			return false, nil
+		}
+		return false, fmt.Errorf("container state unavailable: %w", err)
 	}
-	var st struct {
+	var state struct {
 		Status string `json:"status"`
 	}
-	if e := json.Unmarshal(out, &st); e != nil {
-		return false, nil
+	if err := json.Unmarshal(out, &state); err != nil {
+		return false, fmt.Errorf("decode container state: %w", err)
 	}
-	return st.Status == "running" || st.Status == "created", nil
+	switch state.Status {
+	case "running", "created":
+		return true, nil
+	case "stopped":
+		return false, nil
+	default:
+		return false, fmt.Errorf("unknown container state %q", state.Status)
+	}
+}
+
+func (p *LocalRunsc) containerAbsent(ctx context.Context, cid string) (bool, error) {
+	out, err := p.runscOut(ctx, "list", "--format=json")
+	if err != nil {
+		return false, fmt.Errorf("inspect container inventory: %w", err)
+	}
+	var containers []struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(out, &containers); err != nil {
+		return false, fmt.Errorf("decode container inventory: %w", err)
+	}
+	for _, container := range containers {
+		if container.ID == "" {
+			return false, fmt.Errorf("container inventory has missing identity")
+		}
+		if container.ID == cid {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // inetRe recovers a host veth's /30 address, anchored on the SHARED sandbox /16
@@ -838,52 +887,90 @@ func decLastOctet(ip string) string {
 	return ip[:i+1] + strconv.Itoa(n-1)
 }
 
-// teardownPlacement is the idempotent reclaim primitive (atomic transition rollback): reverse
-// dependency order runsc → overlay(mediator owns) → veth → netns. Every step is
-// best-effort so a partially-built placement (Launch failure) cleans fully.
-func (p *LocalRunsc) teardownPlacement(h *placementHandle) {
+// teardownPlacement proves container removal before releasing mounts or network
+// identities. Failed inspection is uncertainty; allocation is retained for retry.
+func (p *LocalRunsc) teardownPlacement(ctx context.Context, h *placementHandle) error {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
 	if h == nil {
-		return
+		return nil
 	}
-	// runsc kill+delete. NOTE this is also the moment the death-cause signal is
-	// DESTROYED: delete removes the memcg leaf runsc owns, taking
-	// memory.events/oom_group_kill with it (health and reclamation). Anything that needs the cause
-	// must have read it before reaching here — which is why Adopt reads it on the
-	// !alive branch rather than leaving it to the caller.
-	_ = p.runsc(context.Background(), "kill", h.cid, "KILL")
-	_ = p.runsc(context.Background(), "delete", "--force", h.cid)
-	// Reclaim the cgroup leaf. Normally a no-op (runsc removes a leaf it OWNS on
-	// delete); it matters where runsc never got that far — a launch that failed
-	// before/during `run`, or a leaf that became foreign — whose orphan leaf would
-	// otherwise linger as a stale placement resource (atomic transition rollback). rmdir of a live/absent
-	// cgroup fails harmlessly, so this stays best-effort like every step here.
-	if h.cgroupLeaf != "" {
-		_ = os.Remove(h.cgroupLeaf)
-	} else {
-		_ = os.Remove(cgroupLeafPath(h.cid))
+	absent, err := p.containerAbsent(ctx, h.cid)
+	if err != nil {
+		return err
 	}
-	// The network declaration rule set, BEFORE the veth: dropping the table first means a
-	// half-torn-down placement never has rules pointing at a veth name a later sandbox
-	// could recreate.
-	//
-	// (`destroy` rather than `delete`, for the reason in deleteRuleSet.)
-	p.deleteRuleSet(h.nftTable)
-	// Strict reverse-dependency order (atomic transition rollback: build was netns → veth → runsc, so
-	// teardown is runsc → veth → netns). Deleting the HOST veth cascades its guest
-	// peer (a veth pair dies with either end), leaving an empty netns to drop last.
+	if !absent {
+		_ = p.runsc(ctx, "kill", h.cid, "KILL")
+		if err := p.runsc(ctx, "delete", "--force", h.cid); err != nil {
+			return fmt.Errorf("container teardown remains unresolved: %w", err)
+		}
+		absent, err = p.containerAbsent(ctx, h.cid)
+		if err != nil {
+			return err
+		}
+		if !absent {
+			return fmt.Errorf("container remains after teardown")
+		}
+	}
+	leaf := h.cgroupLeaf
+	if leaf == "" {
+		leaf = cgroupLeafPath(h.cid)
+	}
+	if data, err := os.ReadFile(filepath.Join(leaf, "cgroup.events")); err == nil {
+		if strings.Contains(string(data), "populated 1") {
+			return fmt.Errorf("placement cgroup remains populated")
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("inspect placement cgroup: %w", err)
+	}
+	if err := os.Remove(leaf); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove placement cgroup: %w", err)
+	}
+	if h.nftTable != "" {
+		if err := p.run(ctx, []string{"nft", "destroy", "table", "inet", h.nftTable}); err != nil {
+			return fmt.Errorf("remove placement rules: %w", err)
+		}
+	}
 	if h.vethHost != "" {
-		_ = p.ipCmd("link", "del", h.vethHost)
+		if _, err := os.Lstat(filepath.Join("/sys/class/net", h.vethHost)); err == nil {
+			if err := p.run(ctx, []string{"ip", "link", "del", h.vethHost}); err != nil {
+				return fmt.Errorf("remove placement interface: %w", err)
+			}
+		} else if !os.IsNotExist(err) {
+			return err
+		}
 	}
 	if h.netns != "" {
-		_ = p.ipCmd("netns", "del", h.netns)
+		if _, err := os.Lstat(filepath.Join("/var/run/netns", h.netns)); err == nil {
+			if err := p.run(ctx, []string{"ip", "netns", "del", h.netns}); err != nil {
+				return fmt.Errorf("remove placement namespace: %w", err)
+			}
+		} else if !os.IsNotExist(err) {
+			return err
+		}
 	}
 	if h.bundleDir != "" {
-		_ = os.RemoveAll(h.bundleDir)
+		if err := os.RemoveAll(h.bundleDir); err != nil {
+			return err
+		}
 	}
 	p.freeIP(h.guestIP)
 	for _, port := range h.publishHostPorts {
 		p.freePublishPort(port)
 	}
+	return nil
+}
+
+// Reclaim releases one addressed placement even when no live transport can be
+// adopted. Names are derived entirely inside the provider from the sandbox ID.
+func (p *LocalRunsc) Reclaim(ctx context.Context, sandbox string) error {
+	h := namesFor(sandbox)
+	h.bundleDir = filepath.Join(p.StateDir, h.cid)
+	h.cgroupLeaf = cgroupLeafPath(h.cid)
+	if address, err := p.rediscoverGuestIP(&h); err == nil {
+		h.guestIP = address
+	}
+	return p.teardownPlacement(ctx, &h)
 }
 
 // ensureCgroupParent creates the engine-owned parent layer and delegates the

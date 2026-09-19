@@ -9,6 +9,7 @@ package runtime
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -294,4 +295,48 @@ func pollHealth(t *testing.T, url string, d time.Duration) bool {
 		resp.Body.Close()
 		return string(b) == "OK\n"
 	})
+}
+
+func TestFailedTeardownPreservesLivePlacementAndCanRetry(t *testing.T) {
+	mustRoot(t)
+	ctx := context.Background()
+	base := t.TempDir()
+	template := filepath.Join(base, "template")
+	buildFixtureRootfs(t, template)
+	provider, err := NewLocalRunsc(filepath.Join(base, "runsc"), filepath.Join(base, "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	placement, err := provider.Launch(ctx, LaunchSpec{Sandbox: "sbx_teardownfailure", Rootfs: RootfsSource{MergedPath: template}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { provider.RunscBin = "runsc"; _ = provider.Destroy(ctx, placement) })
+	url := "http://" + placement.TransportEndpoint + "/health"
+	if !pollHealth(t, url, 15*time.Second) {
+		t.Fatal("guest did not become healthy")
+	}
+	runsc, err := exec.LookPath("runsc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapper := filepath.Join(base, "reject-delete")
+	script := fmt.Sprintf("#!/bin/sh\ncase \" $* \" in *' kill '*|*' delete '*) exit 1;; esac\nexec %q \"$@\"\n", runsc)
+	if err := os.WriteFile(wrapper, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	provider.RunscBin = wrapper
+	if err := provider.Stop(ctx, placement); err == nil {
+		t.Fatal("failed kill/delete was reported as termination")
+	}
+	if !pollHealth(t, url, time.Second) {
+		t.Fatal("fault fixture did not retain its live writer")
+	}
+	provider.RunscBin = runsc
+	if err := provider.Stop(ctx, placement); err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.Destroy(ctx, placement); err != nil {
+		t.Fatalf("verified retry not idempotent: %v", err)
+	}
 }

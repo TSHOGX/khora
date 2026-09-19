@@ -607,7 +607,7 @@ func TestRebindReleasedSemanticsUnchanged(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m, st, _ := volFixture(t)
-			seedRec(t, st, "sbx_rel", "ov_rel", model.Running)
+			seedRec(t, st, "sbx_rel", "ov_rel", model.Paused)
 			vid, err := m.CreateVolume(ctx, 0)
 			if err != nil {
 				t.Fatal(err)

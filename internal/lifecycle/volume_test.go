@@ -798,7 +798,7 @@ func TestRebindIsOneStoreCommit(t *testing.T) {
 	spy := &twoCallDetectingStore{Store: st}
 	m.deps.Store = spy
 
-	seedRec(t, st, "sbx_r", "ov_r", model.Running)
+	seedRec(t, st, "sbx_r", "ov_r", model.Paused)
 	seedRec(t, st, "sbx_other", "ov_o", model.Running)
 	keep, err := m.CreateVolume(ctx, 0)
 	if err != nil {

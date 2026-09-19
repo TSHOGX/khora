@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/TSHOGX/khora/internal/model"
+	"github.com/TSHOGX/khora/internal/store"
 )
 
 // The write-regime invariant (the Volume subsystem, cross-cutting): a Volume has TWO write paths —
@@ -28,21 +29,11 @@ import (
 // capability, which the volume write regime calls the third kind of wrong (trading a settled
 // ability for implementation convenience).
 //
-// THE PREDICATE READS THE LIVE-MAP, NOT `sandboxes.state`, and that column is
-// measurably unfaithful in BOTH directions:
+// The durable Placement state fences writers across restarts. The live map
+// additionally reserves writes before cold start, and remains populated until
+// teardown completes. Neither a paused Sandbox nor a missing in-memory handle
+// alone proves that direct writes are safe.
 //
-//   - a cold start records the live placement BEFORE the health gate and before the
-//     CAS to `running`, so the record says `creating`/`paused` while the gofer is
-//     already alive — a window as long as HealthTimeout;
-//   - pause CASes to `paused` FIRST and stops the container afterwards, so the record
-//     says `paused` while the container is still running.
-//
-// No lock and no SQL statement can fix that, because THE FACT BEING TESTED DOES NOT
-// LIVE IN THE STORE. The live-map, by contrast, IS a faithful gofer predicate: a
-// placement is put into it at the moment it physically exists (coldStart, before the
-// readiness gate) precisely so a concurrent reconcile does not mistake it for an
-// orphan.
-
 // THE INVARIANT IS SYMMETRIC, AND BOTH SIDES ARE GATED (the Volume subsystem): the hazard above does
 // not care who arrived first, so while a direct mutating operation is in flight, a cold
 // start that would give that volume an rw mount is refused too (admitColdStartRW below).
@@ -102,8 +93,27 @@ func (m *Mediator) admitDirectWrite(ctx context.Context, id model.VolumeID) (fun
 		return nil, fmt.Errorf("direct write: read mount table: %w", err)
 	}
 
+	for _, mount := range rows {
+		if mount.Access.ReadOnly() {
+			continue
+		}
+		placement, err := m.deps.Store.GetPlacement(ctx, mount.Sandbox)
+		if err != nil && !errors.Is(err, store.ErrPlacementNotFound) {
+			return nil, err
+		}
+		if err == nil && placement.State != model.PlacementLost {
+			return nil, fmt.Errorf("%w: sandbox %s placement is not terminated", ErrVolumeLiveWriter, mount.Sandbox)
+		}
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	for sandbox, live := range m.live {
+		for _, volume := range live.writers {
+			if volume == id {
+				return nil, fmt.Errorf("%w: sandbox %s reserves writable volume %s", ErrVolumeLiveWriter, sandbox, id)
+			}
+		}
+	}
 	for _, mt := range rows {
 		if mt.Access.ReadOnly() {
 			// A live READ-ONLY reader is not a writer, so it cannot tear anything, and
@@ -117,7 +127,7 @@ func (m *Mediator) admitDirectWrite(ctx context.Context, id model.VolumeID) (fun
 			continue
 		}
 		ls := m.live[mt.Sandbox]
-		if ls != nil && ls.placement != nil {
+		if ls != nil {
 			return nil, fmt.Errorf("direct write to %s: %w: sandbox %s holds it read-write at %s and its container is live — pause that sandbox and retry (a `paused` sandbox is NOT a live writer, the Volume subsystem)",
 				id, ErrVolumeLiveWriter, mt.Sandbox, mt.Path)
 		}
@@ -163,6 +173,13 @@ func (m *Mediator) admitColdStartRW(id model.SandboxID, rows []model.Mount) erro
 				ErrVolumeDirectWriteInFlight, id, mt.Volume, mt.Path)
 		}
 	}
+	reservation := &liveState{}
+	for _, mount := range rows {
+		if !mount.Access.ReadOnly() {
+			reservation.writers = append(reservation.writers, mount.Volume)
+		}
+	}
+	m.live[id] = reservation
 	return nil
 }
 

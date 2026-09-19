@@ -21,7 +21,15 @@ rollback paths are in
 Pause reaches a guest quiescent point, drains data-plane work, destroys the live
 Placement, and preserves the Sandbox record, Overlay, and Mount binding. It is
 filesystem-first persistence: process memory, PIDs, open sockets, and the Placement
-IP are not saved.
+IP are not saved. The durable Placement remains `stopping` until teardown and
+mount release succeed. A teardown error preserves that fence and returns an
+error; `state: paused` alone does not prove quiescence. Retry Pause or allow
+reconciliation to finish cleanup. `placement_state: lost` records verified
+termination, after which Resume and direct Volume writes can proceed.
+
+Destroy retains its record and Mount leases on unresolved placement teardown.
+It removes them only after the previous writer is confirmed absent. Failed
+runtime inspection remains unknown and cannot authorize cleanup or reuse.
 
 Resume rechecks admission, resolves current bindings, materializes rootfs and
 Volumes, derives network rules, starts a new runtime unit, and probes `sandboxd`

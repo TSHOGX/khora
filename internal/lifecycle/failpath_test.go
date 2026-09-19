@@ -45,61 +45,76 @@ func TestCreateUnwindOnOverlayAllocationFailure(t *testing.T) {
 	}
 }
 
-// Teardown failure must NOT block or reverse the transition. the transition contract decouples the
-// state transition from byte reclamation precisely so a failed delete degrades to
-// "retry via the sweep" rather than "the sandbox cannot be destroyed": destroy is
-// inherently idempotent, and the orphan-unit sweep is the retry the transition contract licenses.
-//
-// This is the property that keeps a sandbox from becoming permanently
-// undestroyable because its bytes are on a wedged filesystem.
-func TestDestroyCommitsEvenWhenByteReclamationFails(t *testing.T) {
+func TestDestroyRetainsRecordUntilPlacementReleaseSucceeds(t *testing.T) {
 	ctx := context.Background()
-	rp := &fakeRootfs{failDestroyOverlay: true, failUnmount: true}
+	rp := &fakeRootfs{failUnmount: true}
 	rt := &fakeRuntime{failDestroy: true}
 	m, st := newTestMediator(t, rp, rt, true)
-
 	sid, err := m.Create(ctx, CreateSpec{Template: "bare"})
 	if err != nil {
-		t.Fatalf("Create: %v", err)
+		t.Fatal(err)
 	}
-	// Every teardown mechanism fails, yet the verb must still succeed.
+	if err := m.Destroy(ctx, sid); err == nil {
+		t.Fatal("destroy hid teardown failure")
+	}
+	if _, err := st.GetSandbox(ctx, sid); err != nil {
+		t.Fatalf("cleanup authority was deleted: %v", err)
+	}
+	placement, err := st.GetPlacement(ctx, sid)
+	if err != nil || placement.State != model.PlacementStopping {
+		t.Fatalf("missing teardown fence: %+v %v", placement, err)
+	}
+	if _, err := m.Endpoint(sid); err == nil {
+		t.Fatal("stopping placement remains addressable")
+	}
+	for _, kind := range kindsFor(t, st, sid) {
+		if kind == "destroyed" {
+			t.Fatal("published terminal cleanup before teardown")
+		}
+	}
+	rt.failDestroy = false
+	rp.failUnmount = false
 	if err := m.Destroy(ctx, sid); err != nil {
-		t.Fatalf("Destroy failed because teardown failed: %v — the transition contract decouples the transition from byte reclamation, so the record must still be deleted and the bytes left to the sweep", err)
+		t.Fatal(err)
 	}
-	if _, gerr := st.GetSandbox(ctx, sid); !errors.Is(gerr, store.ErrNotFound) {
-		t.Fatalf("record survived destroy when teardown failed: %v; want it deleted (the sweep retries the bytes, atomic transition rollback)", gerr)
-	}
-	// The "destroyed" event still committed — a subscriber must learn the sandbox
-	// is gone even though its bytes linger.
-	if got := kindsFor(t, st, sid); len(got) == 0 || got[len(got)-1] != "destroyed" {
-		t.Fatalf("events = %v; want the last to be `destroyed` (the transition committed regardless of byte reclamation)", got)
+	if _, err := st.GetSandbox(ctx, sid); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("retry failed to complete cleanup: %v", err)
 	}
 }
 
-// Pause with a failing teardown likewise lands a legal `paused`. FS-first pause and resume/the transition contract: EVERY
-// pause path ends in a legal `paused` (drain, preemptive freeze, or worst-case
-// kill), so a Stop or Unmount that fails must not leave the record `running` while
-// the placement is half-released.
-func TestPauseLandsPausedEvenWhenPlacementReleaseFails(t *testing.T) {
+func TestPauseRetainsWriterFenceWhenPlacementReleaseFails(t *testing.T) {
 	ctx := context.Background()
-	rp, rt := &fakeRootfs{failUnmount: true}, &fakeRuntime{failStop: true}
+	rp := &fakeRootfs{failUnmount: true}
+	rt := &fakeRuntime{failStop: true}
 	m, st := newTestMediator(t, rp, rt, true)
-
 	sid, err := m.Create(ctx, CreateSpec{Template: "bare"})
 	if err != nil {
-		t.Fatalf("Create: %v", err)
+		t.Fatal(err)
 	}
-	if err := m.Pause(ctx, sid); err != nil {
-		t.Fatalf("Pause failed because placement release failed: %v — pause must always land a legal `paused` (FS-first pause and resume / the transition contract)", err)
+	if err := m.Pause(ctx, sid); err == nil {
+		t.Fatal("pause hid stop failure")
 	}
-	rec, _ := st.GetSandbox(ctx, sid)
-	if rec.State != model.Paused {
-		t.Fatalf("state = %s after a pause whose teardown failed; want paused", rec.State)
+	rec, err := st.GetSandbox(ctx, sid)
+	if err != nil || rec.State != model.Paused {
+		t.Fatalf("desired pause lost: %+v %v", rec, err)
 	}
-	// The live handle is dropped either way: keeping it would leave the mediator
-	// believing it can still reach a sandbox it has released.
+	placement, err := st.GetPlacement(ctx, sid)
+	if err != nil || placement.State != model.PlacementStopping {
+		t.Fatalf("missing writer fence: %+v %v", placement, err)
+	}
 	if _, err := m.Endpoint(sid); err == nil {
-		t.Fatal("live placement handle survived pause; a paused sandbox must have no endpoint")
+		t.Fatal("stopping placement remains addressable")
+	}
+	if err := m.Resume(ctx, sid); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("resume crossed unresolved teardown: %v", err)
+	}
+	rt.failStop = false
+	rp.failUnmount = false
+	if err := m.Pause(ctx, sid); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Resume(ctx, sid); err != nil {
+		t.Fatal(err)
 	}
 }
 

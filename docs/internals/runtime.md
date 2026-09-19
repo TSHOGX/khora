@@ -42,3 +42,14 @@ drop affects traffic owned by other tables.
 negative fixtures for all three shapes, and
 [test/network_substrate_test.go](../../test/network_substrate_test.go) carries the
 corresponding cross-Sandbox counterexamples.
+
+## Verified release
+
+The local provider checks the runsc inventory after forced deletion and refuses
+success if the container remains or inventory cannot be decoded. It then checks
+the cgroup, removes placement networking and namespace resources, and releases
+address reservations only after those operations succeed. A failed launch returns
+its opaque placement handle when cleanup remains unresolved. `Reclaim` performs
+the same verification by sandbox identity after a restart, without requiring a
+live transport endpoint. Failed `runsc state` is treated as absence only when a
+successful inventory proves that the addressed container is missing.

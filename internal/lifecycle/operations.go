@@ -314,7 +314,13 @@ func (m *Mediator) recoverOperation(ctx context.Context, op model.Operation) err
 		}
 	case "sandbox.create":
 		id := model.SandboxID(deterministicObjectID("sbx_", op.ID))
+		lock := m.lock(id)
+		lock.Lock()
+		defer lock.Unlock()
 		if rec, err := m.deps.Store.GetSandbox(ctx, id); err == nil {
+			if err := m.releasePlacementLocked(ctx, id, false); err != nil {
+				return err
+			}
 			if err := m.deps.Store.DeleteMounts(ctx, id); err != nil && !errors.Is(err, store.ErrNotFound) {
 				return fmt.Errorf("operation %s: delete recovered sandbox mounts: %w", op.ID, err)
 			}

@@ -295,6 +295,8 @@ type Mediator struct {
 // placement-local resources (the ID-reference model): the runtime placement + the mounted merged
 // overlay. Discarded on pause, rebuilt on resume.
 type liveState struct {
+	writers   []model.VolumeID
+	stopping  bool
 	placement *runtime.Placement
 	merged    *rootfs.Merged
 	// mounts are the Volume subsystem materializations this placement is using, held so pause and
@@ -307,6 +309,7 @@ type liveState struct {
 // materializedVolume keeps the provider beside its placement-local handle.
 // A mixed-provider registry cannot release every handle through one default.
 type materializedVolume struct {
+	readOnly     bool
 	backend      volume.Backend
 	materialized *volume.Materialized
 }
@@ -701,7 +704,9 @@ func (m *Mediator) Create(ctx context.Context, spec CreateSpec) (resultID model.
 	}
 	epoch, err := m.nextPlacementEpoch(ctx, sid)
 	if err != nil {
-		m.unwind(ctx, sid, ov, true)
+		if cleanupErr := m.unwind(ctx, sid, ov, true); cleanupErr != nil {
+			return "", errors.Join(err, cleanupErr)
+		}
 		_ = m.deps.Store.DeleteSandbox(ctx, sid, nil)
 		return "", fmt.Errorf("create: allocate placement epoch: %w", err)
 	}
@@ -710,12 +715,16 @@ func (m *Mediator) Create(ctx context.Context, spec CreateSpec) (resultID model.
 		// create has no fallback state: reclaim half-built placement + empty
 		// Overlay, then delete the record. The
 		// sandbox was never running, so this unwind-delete publishes nothing.
-		m.unwind(ctx, sid, ov, true)
+		if cleanupErr := m.unwind(ctx, sid, ov, true); cleanupErr != nil {
+			return "", errors.Join(err, cleanupErr)
+		}
 		_ = m.deps.Store.DeleteSandbox(ctx, sid, nil)
 		return "", fmt.Errorf("create: cold start: %w", err)
 	}
 	if err := m.advanceOperation(ctx, claim, model.OperationMaterialized); err != nil {
-		m.unwind(ctx, sid, ov, true)
+		if cleanupErr := m.unwind(ctx, sid, ov, true); cleanupErr != nil {
+			return "", errors.Join(err, cleanupErr)
+		}
 		_ = m.deps.Store.DeleteSandbox(ctx, sid, nil)
 		return "", fmt.Errorf("create: record materialized operation: %w", err)
 	}
@@ -729,7 +738,9 @@ func (m *Mediator) Create(ctx context.Context, spec CreateSpec) (resultID model.
 	// The readiness probe passed: flip creating to running and emit "created" in the
 	// same commit (the transactional outbox).
 	if err := m.deps.Store.CompareAndSetState(ctx, sid, model.Creating, model.Running, newPlacementEvent(sid, model.EventCreated, model.Running, pl.Address, epoch), nil); err != nil {
-		m.unwind(ctx, sid, ov, true)
+		if cleanupErr := m.unwind(ctx, sid, ov, true); cleanupErr != nil {
+			return "", errors.Join(err, cleanupErr)
+		}
 		_ = m.deps.Store.DeleteSandbox(ctx, sid, nil)
 		return "", fmt.Errorf("create: commit running: %w", err)
 	}
@@ -754,55 +765,36 @@ func (m *Mediator) Pause(ctx context.Context, id model.SandboxID) error {
 	return nil
 }
 
-// pauseLocked commits a running→paused transition with the given event Kind and releases the
-// sandbox's placement. CALLER MUST HOLD the transition lock (per-sandbox transition serialization). Shared by the user Pause
-// verb ("paused") and the reaper's auto-pause / crash-pause: identical transition + placement
-// release, the Kind carrying WHY (the lifecycle state machine). Pause always lands a legal `paused` (the transition contract: no middle
-// dirty state), so the CAS comes first and placement-local resources are released after — the
-// Overlay is already on the backend and captured NOTHING (FS-first pause and resume). Stop is best-effort and
-// idempotent, so it also fits a crash-pause whose container is already dead, reclaiming the
-// lingering netns.
-//
-// cause carries the health and reclamation death cause for the INVOLUNTARY variants, committed in the SAME store
-// call as the demotion CAS (health and reclamation / the transactional outbox). nil for the voluntary ones, which are not deaths
-// and must leave any previously recorded cause alone.
+// pauseLocked commits the desired paused state and retains a stopping
+// placement until verified teardown completes. Caller holds the transition
+// lock. A paused record alone never proves the previous writer is absent.
 func (m *Mediator) pauseLocked(ctx context.Context, id model.SandboxID, kind model.EventKind, cause *model.DeathCause) error {
-	// Drain engine-issued mutating fs RPCs before freezing, for the VOLUNTARY variants only
-	// (FS-first pause and resume / the lifecycle contract). Both crash-pause paths skip it because both have L2 down, so no mutating
-	// fs RPC can still complete: draining a dead unit only delays recording a death already
-	// observed, and draining the lifecycle contract transport-down escalation (L1 alive, transport wedged)
-	// stalls the sweep on RPCs that cannot finish — the wedge the escalation exists to break.
-	//
-	// Before the CAS, not after: once the record says `paused`, a still-running
-	// write would be landing bytes into a sandbox the control plane already
-	// considers frozen. undrain unconditionally, or a failed CAS below would leave
-	// the sandbox refusing writes forever.
+	rec, err := m.deps.Store.GetSandbox(ctx, id)
+	if err != nil {
+		return err
+	}
+	if rec.State != model.Running && rec.State != model.Paused {
+		return store.ErrConflict
+	}
+	if rec.State == model.Paused {
+		placement, err := m.deps.Store.GetPlacement(ctx, id)
+		if errors.Is(err, store.ErrPlacementNotFound) || err == nil && placement.State == model.PlacementLost {
+			return store.ErrConflict
+		}
+		if err != nil {
+			return err
+		}
+	}
 	if kind != "crash-paused" {
 		m.drainForPause(id)
 		defer m.barrier.undrain(id)
 	}
-	if err := m.deps.Store.CompareAndSetState(ctx, id, model.Running, model.Paused, newEvent(id, kind, model.Paused), cause); err != nil {
-		return err
-	}
-	// The placement is no longer current once the state commit lands. Keep its
-	// epoch as a durable tombstone so a later Resume can advance it and stale
-	// requests cannot target the old realization.
-	m.markPlacementLost(ctx, id)
-	ls := m.take(id)
-	if ls != nil {
-		if ls.placement != nil {
-			_ = m.deps.Runtime.Stop(ctx, ls.placement)
-		}
-		// Release each volume materialization, and note what is NOT done here: THE MOUNT
-		// ROWS STAY, so the exclusive lease is NOT released by a pause (the Volume subsystem — the lease
-		// is the row's existence), symmetric to the Overlay's zero-capture. The resume
-		// re-materializes from the table.
-		m.releaseMounts(ctx, ls.mounts)
-		if ls.merged != nil {
-			_ = m.deps.Rootfs.Unmount(ctx, ls.merged)
+	if rec.State == model.Running {
+		if err := m.deps.Store.CompareAndSetState(ctx, id, model.Running, model.Paused, newEvent(id, kind, model.Paused), cause); err != nil {
+			return err
 		}
 	}
-	return nil
+	return m.releasePlacementLocked(ctx, id, true)
 }
 
 // Resume = cold-start a NEW container on the same Overlay artifact, new netns
@@ -836,6 +828,9 @@ func (m *Mediator) Resume(ctx context.Context, id model.SandboxID) error {
 // the half-built Placement and leaves the record `paused`.
 func (m *Mediator) resumeLocked(ctx context.Context, rec model.Sandbox) error {
 	id := rec.ID
+	if err := m.requireTerminated(ctx, id); err != nil {
+		return err
+	}
 	// health and reclamation resource-terminated: this sandbox was terminated for exceeding its RAM
 	// safety limit, and that disposition is the OPPOSITE of dead-recoverable's —
 	// resuming re-runs the same workload into the same cap, i.e. a crash loop. It
@@ -889,7 +884,9 @@ func (m *Mediator) resumeLocked(ctx context.Context, rec model.Sandbox) error {
 	if err != nil {
 		// resume has a fallback state: reclaim half-built placement, stay paused
 		// (persistent Overlay artifact untouched; atomic transition rollback).
-		m.unwind(ctx, id, ov, false)
+		if cleanupErr := m.unwind(ctx, id, ov, false); cleanupErr != nil {
+			return errors.Join(err, cleanupErr)
+		}
 		return fmt.Errorf("resume: cold start: %w", err)
 	}
 
@@ -907,7 +904,9 @@ func (m *Mediator) resumeLocked(ctx context.Context, rec model.Sandbox) error {
 	// observation writes the real cause in the control plane's plain view.
 	cleared := model.CauseNone
 	if err := m.deps.Store.CompareAndSetState(ctx, id, model.Paused, model.Running, newPlacementEvent(id, model.EventResumed, model.Running, pl.Address, epoch), &cleared); err != nil {
-		m.unwind(ctx, id, ov, false)
+		if cleanupErr := m.unwind(ctx, id, ov, false); cleanupErr != nil {
+			return errors.Join(err, cleanupErr)
+		}
 		return fmt.Errorf("resume: commit running: %w", err)
 	}
 	return nil
@@ -954,16 +953,8 @@ func (m *Mediator) Destroy(ctx context.Context, id model.SandboxID) error {
 // it must not emit `destroyed` — see the Kind selection below.
 func (m *Mediator) destroyLocked(ctx context.Context, rec model.Sandbox, cause model.EventCause) error {
 	id := rec.ID
-	// tear down any live placement + mount (running case).
-	ls := m.take(id)
-	if ls != nil {
-		if ls.placement != nil {
-			_ = m.deps.Runtime.Destroy(ctx, ls.placement)
-		}
-		m.releaseMounts(ctx, ls.mounts)
-		if ls.merged != nil {
-			_ = m.deps.Rootfs.Unmount(ctx, ls.merged)
-		}
+	if err := m.releasePlacementLocked(ctx, id, false); err != nil {
+		return err
 	}
 	// Delete the mount rows BEFORE the sandbox record, and the order is REQUIRED, not
 	// stylistic (measured): mounts.sandbox RESTRICT fires IMMEDIATELY, so leaving the
@@ -1256,6 +1247,9 @@ func (m *Mediator) coldStart(ctx context.Context, rec model.Sandbox, ov *rootfs.
 	if err := m.admitColdStartRW(id, rows); err != nil {
 		return nil, err
 	}
+	if err := m.persistPlacement(ctx, id, epoch, model.PlacementStopping); err != nil {
+		return nil, err
+	}
 	//  mount lower(Template)/upper/work → merged.
 	merged, err := m.deps.Rootfs.Mount(ctx, ov)
 	if err != nil {
@@ -1305,45 +1299,20 @@ func (m *Mediator) coldStart(ctx context.Context, rec model.Sandbox, ov *rootfs.
 			MemoryByte: limits.MemoryByte,
 		},
 	})
+	if pl != nil {
+		pl.Epoch = uint64(epoch)
+	}
+	m.put(id, &liveState{placement: pl, merged: merged, mounts: mounts})
 	if err != nil {
-		m.releaseMounts(ctx, mounts)
-		_ = m.deps.Rootfs.Unmount(ctx, merged)
 		return nil, fmt.Errorf("launch: %w", err)
 	}
 	if pl == nil || !pl.Address.IsValid() {
-		if pl != nil {
-			_ = m.deps.Runtime.Destroy(ctx, pl)
-		}
-		m.releaseMounts(ctx, mounts)
-		_ = m.deps.Rootfs.Unmount(ctx, merged)
 		return nil, fmt.Errorf("launch: provider returned a placement without a valid guest address")
 	}
-	pl.Epoch = uint64(epoch)
-	// Record the live placement the MOMENT it physically exists — before the
-	// readiness gate, not after it. A concurrent periodic reconcile that started
-	// after our create/resume was snapshotted would otherwise see this freshly
-	// launched netns/container as an orphan (not in `recs`, not yet in the
-	// live-map) and reclaim it during the awaitHealthy window. Seeding it here
-	// puts it in liveIDs() so the periodic keep-set protects it (atomic transition rollback). The
-	// transition lock is held for the whole chain, so this is not visible to a
-	// user verb. On a health-gate failure we take() it back out and tear down.
-	m.put(id, &liveState{placement: pl, merged: merged, mounts: mounts})
-	// Poll the Health RPC to first success. Bare TCP acceptance is not readiness.
 	if err := m.awaitHealthy(ctx, pl); err != nil {
-		m.take(id) // un-record before teardown so a racing reconcile sees no live handle
-		_ = m.deps.Runtime.Destroy(ctx, pl)
-		m.releaseMounts(ctx, mounts)
-		_ = m.deps.Rootfs.Unmount(ctx, merged)
 		return nil, fmt.Errorf("health gate: %w", err)
 	}
-	// Persist the realization only after readiness.  A crash before the
-	// lifecycle CAS leaves an explicit active Placement that reconciliation can
-	// classify against the source Sandbox state rather than losing the epoch.
 	if err := m.persistPlacement(ctx, id, epoch, model.PlacementActive); err != nil {
-		m.take(id)
-		_ = m.deps.Runtime.Destroy(ctx, pl)
-		m.releaseMounts(ctx, mounts)
-		_ = m.deps.Rootfs.Unmount(ctx, merged)
 		return nil, fmt.Errorf("persist placement: %w", err)
 	}
 	return pl, nil
@@ -1394,29 +1363,21 @@ func (m *Mediator) awaitHealthy(ctx context.Context, pl *runtime.Placement) erro
 // control-plane state that the next resume re-materializes from. Deleting it would
 // silently detach volumes from a sandbox that is merely paused — and release its
 // exclusive leases, letting another sandbox take a volume this one still expects.
-func (m *Mediator) unwind(ctx context.Context, id model.SandboxID, ov *rootfs.Overlay, isCreate bool) {
-	if ls := m.take(id); ls != nil {
-		if ls.placement != nil {
-			_ = m.deps.Runtime.Destroy(ctx, ls.placement)
-		}
-		m.releaseMounts(ctx, ls.mounts)
-		if ls.merged != nil {
-			_ = m.deps.Rootfs.Unmount(ctx, ls.merged)
-		}
-	}
-	if !isCreate {
-		m.markPlacementLost(ctx, id)
+func (m *Mediator) unwind(ctx context.Context, id model.SandboxID, ov *rootfs.Overlay, isCreate bool) error {
+	if err := m.releasePlacementLocked(ctx, id, false); err != nil {
+		return err
 	}
 	if isCreate {
-		// Reported, not discarded: if this fails the caller's DeleteSandbox is about to
-		// fail too, and the log is the only place that will say why the record survived.
 		if err := m.deps.Store.DeleteMounts(ctx, id); err != nil {
-			m.deps.Logf("unwind %s: delete mount rows FAILED (%v) — the record delete will now be blocked by mounts.sandbox RESTRICT, leaving an undeletable zombie record", id, err)
+			return err
+		}
+		if ov != nil {
+			if err := m.deps.Rootfs.DestroyOverlay(ctx, ov); err != nil {
+				return err
+			}
 		}
 	}
-	if isCreate && ov != nil {
-		_ = m.deps.Rootfs.DestroyOverlay(ctx, ov)
-	}
+	return nil
 }
 
 // SeedBuiltinTemplates is the boot seed: an idempotent reconcile that ensures
@@ -1776,6 +1737,14 @@ func (m *Mediator) reconcile(ctx context.Context, periodic bool) error {
 // reconcileRecord handles one record at STARTUP (no lock held, live-map empty).
 // running → adoptOrDemote takes its own transition lock (per-sandbox transition serialization).
 func (m *Mediator) reconcileRecord(ctx context.Context, rec model.Sandbox, keep *[]string) {
+	if rec.State == model.Creating || rec.State == model.Paused {
+		if err := m.releasePlacementLocked(ctx, rec.ID, false); err != nil {
+			m.deps.Logf("reconcile: placement teardown %s remains unresolved: %v", rec.ID, err)
+			*keep = append(*keep, string(rec.ID))
+			return
+		}
+	}
+
 	switch rec.State {
 	case model.Creating:
 		// crashed mid-create: never reached a resting state → delete record. Its
@@ -1808,6 +1777,14 @@ func (m *Mediator) reconcileRecord(ctx context.Context, rec model.Sandbox, keep 
 // driving this sandbox right now). It also preserves live handles that were not
 // present in the record snapshot.
 func (m *Mediator) reconcileRecordLocked(ctx context.Context, rec model.Sandbox, keep *[]string) {
+	if rec.State == model.Creating || rec.State == model.Paused {
+		if err := m.releasePlacementLocked(ctx, rec.ID, false); err != nil {
+			m.deps.Logf("reconcile: placement teardown %s remains unresolved: %v", rec.ID, err)
+			*keep = append(*keep, string(rec.ID))
+			return
+		}
+	}
+
 	switch rec.State {
 	case model.Creating:
 		// Lock held + still `creating` means the create is NOT in flight (it would
@@ -1980,7 +1957,9 @@ func (m *Mediator) adoptOrDemoteLocked(ctx context.Context, rec model.Sandbox) (
 			}
 			return false, fmt.Errorf("demote to paused: %w", err) // uncertain → protect
 		}
-		m.markPlacementLost(ctx, rec.ID)
+		if err := m.releasePlacementLocked(ctx, rec.ID, false); err != nil {
+			return false, err
+		}
 		return false, nil
 	}
 
@@ -2020,7 +1999,9 @@ func (m *Mediator) adoptOrDemoteLocked(ctx context.Context, rec model.Sandbox) (
 			// it, the one outcome worse than leaving it up for one more pass.
 			return false, fmt.Errorf("demote unenforceable via[] sandbox to paused: %w", err)
 		}
-		m.markPlacementLost(ctx, rec.ID)
+		if err := m.releasePlacementLocked(ctx, rec.ID, false); err != nil {
+			return false, err
+		}
 		// adopted=false, err=nil: the caller reclaims the placement as an orphan, which
 		// is what actually removes the deputy's reachability — the netns and the rule set
 		// go with it.
@@ -2127,7 +2108,7 @@ func (m *Mediator) Endpoint(id model.SandboxID) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	ls := m.live[id]
-	if ls == nil || ls.placement == nil {
+	if ls == nil || ls.placement == nil || ls.stopping {
 		return "", fmt.Errorf("sandbox %s has no live placement (not running)", id)
 	}
 	return ls.placement.TransportEndpoint, nil
@@ -2253,6 +2234,15 @@ func (m *Mediator) DeleteTemplate(ctx context.Context, id model.TemplateID) erro
 // put/take manage the in-memory liveState map.
 func (m *Mediator) put(id model.SandboxID, ls *liveState) {
 	m.mu.Lock()
+	if previous := m.live[id]; previous != nil {
+		ls.writers = append(ls.writers, previous.writers...)
+	}
+	for _, mount := range ls.mounts {
+		if mount != nil && mount.materialized != nil && !mount.readOnly {
+			ls.writers = append(ls.writers, model.VolumeID(mount.materialized.Volume))
+		}
+	}
+
 	m.live[id] = ls
 	m.mu.Unlock()
 }

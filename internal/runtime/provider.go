@@ -244,17 +244,25 @@ type Provider interface {
 	// Launch materializes placement and cold-starts the isolated unit with
 	// sandboxd (init mode) as entrypoint. It returns the placement handle,
 	// including the transport endpoint once the netns IP is discovered.
+	// A failure with a non-nil placement means cleanup is unresolved; the
+	// caller must retain its storage bindings and retry Destroy.
 	Launch(ctx context.Context, spec LaunchSpec) (*Placement, error)
 
 	// Stop cleanly stops the isolated unit, releasing RAM/CPU (FS-first pause and resume pause: the
 	// Overlay is already on the backend, so stop is all pause needs to do).
 	// The Overlay artifact is untouched.
+	// Success proves the isolation unit and its writers are absent. Errors
+	// retain cleanup authority and must block writable resource reuse.
 	Stop(ctx context.Context, p *Placement) error
 
 	// Destroy tears down placement-local resources (netns/IP/cgroup). It does
 	// NOT delete the Overlay artifact — that is the Rootfs subsystem's job,
 	// invoked separately by the mediator (the lifecycle subsystems don't call each other).
 	Destroy(ctx context.Context, p *Placement) error
+
+	// Reclaim proves removal of one addressed placement after a restart or
+	// failed launch, without requiring a functioning transport for adoption.
+	Reclaim(ctx context.Context, sandboxID string) error
 
 	// Adopt re-recognizes a SURVIVING sandbox's placement after a control-plane crash
 	// (atomic transition rollback's other half / startup reconciliation). Given the SandboxID it rebuilds the

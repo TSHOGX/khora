@@ -72,11 +72,9 @@ func (s RebindSpec) isEmpty() bool { return s.Binding.IsEmpty() && s.Mounts == n
 //     isolation unit.)
 //   - TTLs are consumed by the reaper, which re-reads the record every sweep with no
 //     placement involved → editable from either state, effective immediately.
-//   - THE MOUNT BINDING splits: the guest topology changes at the next resume (runsc
-//     takes mounts from the OCI spec at startup and does not hot-plug), while a detach
-//     releases the exclusive lease IMMEDIATELY, because the lease IS the row (the Volume subsystem).
-//     Both states are legal; the two effect times are why `released` is returned
-//     separately from the caller's `applies_at`.
+//   - VOLUME MOUNTS require a paused sandbox whose previous Placement is lost.
+//     Detaching a running mount would release its exclusive lease while its
+//     old guest still writes through the original topology.
 //
 // The whole union is evaluated BEFORE any write. Checking one field group just
 // before its write could let a later refusal arrive after an earlier write committed.
@@ -134,6 +132,14 @@ func (m *Mediator) Rebind(ctx context.Context, id model.SandboxID, spec RebindSp
 		return false, fmt.Errorf("rebind: %w", err)
 	}
 
+	if spec.Mounts != nil && rec.State != model.Paused {
+		return false, fmt.Errorf("%w: volume binding changes require a terminated paused placement", store.ErrConflict)
+	}
+	if rec.State == model.Paused {
+		if err := m.requireTerminated(ctx, id); err != nil {
+			return false, err
+		}
+	}
 	capsGiven := b.CPUMillis != nil || b.MemoryByte != nil || b.DiskByte != nil
 	switch rec.State {
 	case model.Paused:
@@ -144,7 +150,7 @@ func (m *Mediator) Rebind(ctx context.Context, id model.SandboxID, spec RebindSp
 		// effect live; a cap has nothing of the kind), and the API error contract asks a refusal to say what
 		// the caller should do instead.
 		if capsGiven {
-			return false, fmt.Errorf("rebind: %w: resource caps are editable only from `paused` (they re-materialize at the next placement, resource admission) — pause first, then PATCH, then resume; TTL and `volumes` are editable while running",
+			return false, fmt.Errorf("rebind: %w: resource caps are editable only from `paused` (they re-materialize at the next placement, resource admission) — pause first, then PATCH, then resume; TTLs are editable while running",
 				store.ErrConflict)
 		}
 		if b.Network != nil {

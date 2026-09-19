@@ -93,3 +93,9 @@ point. Sandbox file routes require a live Placement.
 
 For exact request and response schemas, status codes, and required fields, use the
 generated [OpenAPI document](openapi.json).
+
+Volume binding patches require a paused Sandbox and a `lost` Placement. A
+`stopping` Placement is unresolved teardown: Pause and Destroy may return an
+error while cleanup is retried, and Resume, direct writable Volume access and
+binding reassignment remain refused. After successful teardown, the placement
+record retains its epoch with `state: lost` for reconciliation.

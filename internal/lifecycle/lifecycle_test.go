@@ -274,7 +274,7 @@ func TestCreateUnwindOnMountFailure(t *testing.T) {
 		t.Fatalf("record should be deleted, got %v", err)
 	}
 	// mount failed before , so the runtime was never launched.
-	if len(rt.Calls()) != 0 {
+	if strings.Contains(strings.Join(rt.Calls(), ","), "Launch") {
 		t.Errorf("runtime should not be launched when mount fails; calls=%v", rt.Calls())
 	}
 	// the empty overlay is still reclaimed on unwind; nothing to unmount.

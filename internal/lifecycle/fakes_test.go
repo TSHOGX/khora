@@ -967,3 +967,11 @@ func (f *fakeRuntime) RuleHits(context.Context, *runtime.Placement) (map[string]
 	}
 	return f.ruleHits, nil
 }
+
+func (f *fakeRuntime) Reclaim(_ context.Context, sandbox string) error {
+	f.log("Reclaim:" + sandbox)
+	if f.failDestroy {
+		return fmt.Errorf("injected Reclaim failure")
+	}
+	return nil
+}

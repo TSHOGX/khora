@@ -578,14 +578,9 @@ type patchResp struct {
 	// infer it: "now" for TTL fields (the reaper re-reads the record every sweep) vs
 	// "next-resume" for resource caps (the providers materialize them at placement, resource admission).
 	AppliesAt string `json:"applies_at"`
-	// LeaseReleased reports that a detach took effect IMMEDIATELY, which `applies_at`
-	// alone cannot express (the control-plane API).
-	//
-	// A mount change SPLITS INTO TWO EFFECT TIMES: the guest TOPOLOGY changes at
-	// next-resume (runsc takes mounts at startup and does not hot-plug), while a DETACH
-	// RELEASES THE EXCLUSIVE LEASE AT ONCE — the lease is the row's existence, so deleting
-	// the row releases it now. A caller waiting to attach that volume elsewhere can
-	// proceed immediately even though the detaching sandbox still shows the old topology.
+	// LeaseReleased reports a detached exclusive lease. Mount changes require
+	// a paused sandbox whose previous placement has completed teardown, so the
+	// lease cannot be reassigned while the old guest still writes through it.
 	LeaseReleased bool `json:"lease_released,omitempty"`
 }
 

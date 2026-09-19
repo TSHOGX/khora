@@ -422,3 +422,5 @@ func TestWritesAcceptedAgainAfterPauseSettles(t *testing.T) {
 		t.Fatalf("fs.Write refused after the pause settled: %v — the barrier was left closed, so the sandbox is permanently read-only (FS-first pause and resume: undrain must always run)", err)
 	}
 }
+
+func (barrierFakeRuntime) Reclaim(context.Context, string) error { return nil }

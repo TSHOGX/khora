@@ -200,6 +200,16 @@ func TestPatchRebindsAndSplitsTheEffectTimes(t *testing.T) {
 	_ = json.NewDecoder(resp.Body).Decode(&cr)
 	resp.Body.Close()
 
+	rejected := doBody(t, http.MethodPatch, srv.URL+"/v1/sandboxes/"+cr.SandboxID, `{"volumes":[]}`)
+	if rejected.StatusCode != http.StatusConflict {
+		t.Fatalf("live detach = %d, want 409", rejected.StatusCode)
+	}
+	rejected.Body.Close()
+	paused := do(t, http.MethodPost, srv.URL+"/v1/sandboxes/"+cr.SandboxID+"/pause")
+	if paused.StatusCode != http.StatusOK {
+		t.Fatalf("pause = %d", paused.StatusCode)
+	}
+	paused.Body.Close()
 	// Detach everything: an EMPTY array is a legitimate request, distinguishable from
 	// omitting the field.
 	resp = doBody(t, http.MethodPatch, srv.URL+"/v1/sandboxes/"+cr.SandboxID, `{"volumes":[]}`)

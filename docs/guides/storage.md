@@ -51,10 +51,11 @@ curl -sS -X POST http://127.0.0.1:8080/v1/sandboxes \
 ```
 
 On patch, `volumes` replaces the complete Mount binding. Omit the member to leave
-Mounts unchanged; send an empty array to detach all Volumes. Detaching releases an
-exclusive lease immediately, while the guest topology changes at the next
-placement. The patch is accepted for a running or paused Sandbox. Pause first when
-the old live topology must be gone before the binding or lease changes.
+Mounts unchanged; send an empty array to detach all Volumes. Mount edits require
+a paused Sandbox with verified termination of its previous Placement. Detaching
+then releases its exclusive lease; the next placement uses the new topology.
+A running or stopping Placement refuses binding edits, so another sandbox cannot
+acquire a volume while the previous guest still holds a writable mount.
 
 ## Snapshot, clone, and delete
 

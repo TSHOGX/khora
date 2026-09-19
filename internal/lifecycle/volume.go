@@ -886,7 +886,7 @@ func (m *Mediator) materializeMounts(ctx context.Context, id model.SandboxID) ([
 			m.releaseMounts(ctx, mounts)
 			return nil, nil, fmt.Errorf("materialize volume %s for %s: %w", mt.Volume, id, err)
 		}
-		mounts = append(mounts, &materializedVolume{backend: be, materialized: mz})
+		mounts = append(mounts, &materializedVolume{backend: be, materialized: mz, readOnly: mt.Access.ReadOnly()})
 		specs = append(specs, runtime.MountSource{
 			SourcePath: mz.SourcePath,
 			Dest:       mt.Path,
@@ -948,7 +948,7 @@ func (m *Mediator) adoptMounts(ctx context.Context, id model.SandboxID) ([]*mate
 			m.releaseMounts(ctx, mounts)
 			return nil, fmt.Errorf("volume %s of sandbox %s: %w", mt.Volume, id, err)
 		}
-		mounts = append(mounts, &materializedVolume{backend: be, materialized: mz})
+		mounts = append(mounts, &materializedVolume{backend: be, materialized: mz, readOnly: mt.Access.ReadOnly()})
 	}
 	return mounts, nil
 }

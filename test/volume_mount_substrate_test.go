@@ -252,7 +252,7 @@ func TestVolumeMountTopologyPersistsAcrossPause(t *testing.T) {
 
 // TestVolumeMountDetachReleasesTheLeaseBeforeTheTopologyChanges pins that THE TWO EFFECT TIMES ARE NOT SYNCHRONIZED — that is a design fact,
 // not a detail to fold into one value (the control-plane API).
-func TestVolumeMountDetachReleasesTheLeaseBeforeTheTopologyChanges(t *testing.T) {
+func TestVolumeMountDetachRequiresTerminatedWriter(t *testing.T) {
 	ctx := context.Background()
 	eng, _ := mountEngine(t)
 
@@ -276,6 +276,12 @@ func TestVolumeMountDetachReleasesTheLeaseBeforeTheTopologyChanges(t *testing.T)
 	// The one PATCH verb, with a mounts-only spec: a non-nil pointer to a nil slice is
 	// "detach everything" (the API error contract), which is what this step asks for.
 	var detachAll []model.Mount
+	if _, err := eng.Mediator.Rebind(ctx, holder, lifecycle.RebindSpec{Mounts: &detachAll}); err == nil {
+		t.Fatal("live detach released exclusive writer lease")
+	}
+	if err := eng.Mediator.Pause(ctx, holder); err != nil {
+		t.Fatal(err)
+	}
 	released, err := eng.Mediator.Rebind(ctx, holder, lifecycle.RebindSpec{Mounts: &detachAll})
 	if err != nil {
 		t.Fatalf("detach: %v", err)
@@ -285,7 +291,7 @@ func TestVolumeMountDetachReleasesTheLeaseBeforeTheTopologyChanges(t *testing.T)
 	}
 
 	// THE LEASE IS FREE NOW: another sandbox takes it exclusively while the original
-	// holder is still running with the volume in its guest.
+	// holder has already stopped its writer.
 	taker, err := eng.Mediator.Create(ctx, lifecycle.CreateSpec{
 		Template: "bare",
 		Volumes:  []model.Mount{{Volume: vid, Path: "/data", Access: model.Exclusive}},
@@ -295,15 +301,7 @@ func TestVolumeMountDetachReleasesTheLeaseBeforeTheTopologyChanges(t *testing.T)
 	}
 	t.Cleanup(func() { _ = eng.Mediator.Destroy(ctx, taker) })
 
-	// AND THE TOPOLOGY HAS NOT CHANGED YET: the original holder still has the volume in
-	// its guest, because runsc took its mounts at startup and does not hot-unplug.
-	if out := guestSh(t, eng, holder, "read L < /data/f; echo GOT:$L"); !strings.Contains(out, "GOT:MINE") {
-		t.Errorf("the detached sandbox lost its mount before resuming: %q — the topology change lands at next-resume, which is why one applies_at value cannot describe a detach", out)
-	}
-	// After a pause/resume cycle it is gone.
-	if err := eng.Mediator.Pause(ctx, holder); err != nil {
-		t.Fatalf("pause: %v", err)
-	}
+	// The old stopped holder resumes with the detached topology.
 	if err := eng.Mediator.Resume(ctx, holder); err != nil {
 		t.Fatalf("resume: %v", err)
 	}
