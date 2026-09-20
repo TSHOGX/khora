@@ -150,6 +150,7 @@ var apiOps = []apiOp{
 			Latest   uint64                  `json:"latest"`
 		}{}, Status: 200, Errors: []int{400, 404, 410},
 	},
+	{Method: "GET", Path: "/v1/sandboxes/{id}/binding", OpID: "getSandboxBinding", Summary: "Read the current resource, network and volume binding with its conditional mutation validator.", Resp: bindingReadResp{}, Status: 200, Errors: []int{404}},
 	{Method: "GET", Path: "/v1/sandboxes/{id}/snapshot", OpID: "getSandboxSnapshot", Summary: "Read the Sandbox resource snapshot with explicit measurement availability.", Resp: model.SandboxSnapshot{}, Status: 200, Errors: []int{404}},
 	{Method: "GET", Path: "/v1/sandboxes/{id}/placement", OpID: "getPlacementSnapshot", Summary: "Read the current Placement epoch and resource snapshot.", Resp: model.PlacementSnapshot{}, Status: 200, Errors: []int{404}},
 	{

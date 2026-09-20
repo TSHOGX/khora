@@ -285,6 +285,65 @@
         },
         "type": "object"
       },
+      "bindingReadResp": {
+        "properties": {
+          "cpu_millis": {
+            "format": "int64",
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
+            "type": "integer"
+          },
+          "disk_byte": {
+            "format": "int64",
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
+            "type": "integer"
+          },
+          "idle_timeout": {
+            "type": "string"
+          },
+          "memory_byte": {
+            "format": "int64",
+            "maximum": 9223372036854775807,
+            "minimum": -9223372036854775808,
+            "type": "integer"
+          },
+          "mutation_revision": {
+            "type": "string"
+          },
+          "network": {
+            "$ref": "#/components/schemas/networkReadResp"
+          },
+          "placement_epoch": {
+            "format": "uint64",
+            "maximum": 18446744073709551615,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "placement_state": {
+            "type": "string"
+          },
+          "retention": {
+            "type": "string"
+          },
+          "sandbox_id": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "template_id": {
+            "type": "string"
+          },
+          "volumes": {
+            "items": {
+              "$ref": "#/components/schemas/volumeBindingItem"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
       "createReq": {
         "properties": {
           "cpu_millis": {
@@ -1570,6 +1629,65 @@
         },
         "summary": "Record one activity NOW, stamping the guest's idle clock so the idle sweep sees the sandbox as busy. Carries no duration and grants no protected period — repeat it while the work lasts."
       }
+    },
+    "/v1/sandboxes/{id}/binding": {
+      "get": {
+        "operationId": "getSandboxBinding",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/bindingReadResp"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "404": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "No such object. The message names WHICH kind, so a caller does not look in the wrong place."
+          },
+          "405": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The route exists, but this method does not apply to it."
+          },
+          "500": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The engine could not complete the operation because of an internal store or provider failure."
+          }
+        },
+        "summary": "Read the current resource, network and volume binding with its conditional mutation validator."
+      },
+      "parameters": [
+        {
+          "description": "Engine-minted object ID.",
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
     },
     "/v1/sandboxes/{id}/files": {
       "get": {

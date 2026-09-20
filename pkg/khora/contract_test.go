@@ -126,6 +126,7 @@ func TestClientTypesMatchThePublishedContract(t *testing.T) {
 	}{
 		{schema: "createReq", typ: CreateRequest{}},
 		{schema: "sandboxResp", typ: Sandbox{}},
+		{schema: "bindingReadResp", typ: SandboxBinding{}},
 		{schema: "patchReq", typ: PatchRequest{}},
 		{schema: "verbResp", typ: VerbResult{}},
 		{schema: "activityResp", typ: ActivityResult{}},
@@ -209,6 +210,7 @@ func TestEveryContractOperationHasAClientMethod(t *testing.T) {
 		"createSandbox":        "Create",
 		"listSandboxes":        "List",
 		"getSandbox":           "Get",
+		"getSandboxBinding":    "Binding",
 		"patchSandbox":         "Patch",
 		"destroySandbox":       "Destroy",
 		"pauseSandbox":         "Pause",

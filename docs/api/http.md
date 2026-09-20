@@ -121,3 +121,18 @@ The Go client exposes `PauseIfMatch`, `ResumeIfMatch`, `DestroyIfMatch`,
 revision returned by Get. Binding changes increment the durable revision even
 when a subsequent change restores the same values, preventing stale requests
 from becoming valid again.
+
+## Configuration observation
+
+`GET /v1/sandboxes/{id}/binding` returns the portable configured resource limits,
+Template ID, idle/retention durations, network declaration and complete Volume
+binding array together with lifecycle state, Placement epoch/state and
+`mutation_revision`. The read holds the Sandbox transition lock, so the
+configuration and validator describe the same serialized observation. It does
+not query provider usage or expose Overlay paths, mount source paths, network
+namespace names or runtime endpoints. Responses use `Cache-Control: no-store`.
+
+The Volume array is present even when empty, allowing a caller to confirm a
+completed detach after an ambiguous PATCH response. Compare the actual complete
+declaration to the original intent; a changed validator alone does not prove
+which configuration was applied. The Go client exposes this read as `Binding`.

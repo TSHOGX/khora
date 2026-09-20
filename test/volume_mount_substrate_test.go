@@ -17,6 +17,8 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"github.com/TSHOGX/khora/pkg/khora"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -272,6 +274,20 @@ func TestVolumeMountDetachRequiresTerminatedWriter(t *testing.T) {
 		t.Fatalf("holder write: %q", out)
 	}
 
+	server := httptest.NewServer(eng.HTTPHandler())
+	defer server.Close()
+	client, err := khora.New(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := client.Binding(ctx, string(holder))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(before.Volumes) != 1 || before.Volumes[0].VolumeID != string(vid) || before.Volumes[0].Access != "exclusive" {
+		t.Fatalf("live binding observation: %+v", before)
+	}
+
 	// Detach by rebinding to an empty binding.
 	// The one PATCH verb, with a mounts-only spec: a non-nil pointer to a nil slice is
 	// "detach everything" (the API error contract), which is what this step asks for.
@@ -288,6 +304,14 @@ func TestVolumeMountDetachRequiresTerminatedWriter(t *testing.T) {
 	}
 	if !released {
 		t.Errorf("the detach did not report releasing the exclusive lease")
+	}
+
+	detached, err := client.Binding(ctx, string(holder))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detached.State != "paused" || detached.PlacementState != "lost" || detached.PlacementEpoch != before.PlacementEpoch || len(detached.Volumes) != 0 || detached.MutationRevision == before.MutationRevision {
+		t.Fatalf("detached binding observation: %+v", detached)
 	}
 
 	// THE LEASE IS FREE NOW: another sandbox takes it exclusively while the original

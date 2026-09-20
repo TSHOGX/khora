@@ -415,6 +415,10 @@ func (e *Engine) handleSandboxSub(w http.ResponseWriter, r *http.Request) {
 	// the control-plane API's Network block. `network` is GET-only and a wrong method there is a 405
 	// by the API error contract general rule, NOT a 404 landing in the default arm below: the
 	// collection exists, the method does not apply to it.
+	case sub == "binding" && r.Method == http.MethodGet:
+		e.handleBindingGet(w, r, id)
+	case sub == "binding":
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	case sub == "network" && r.Method == http.MethodGet:
 		e.handleNetworkGet(w, r, id)
 	case sub == "network":
