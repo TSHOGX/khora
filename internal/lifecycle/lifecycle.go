@@ -164,16 +164,15 @@ type Deps struct {
 	Deployment network.Deployment
 
 	// DefaultIdleTimeout / DefaultRetention are the engine-wide TTL defaults
-	// (health and reclamation / the engine vocabulary boundary single-binary config) applied when a CreateSpec omits them.
-	// Zero here falls back to the package defaults (defaultIdleTimeout /
-	// defaultRetention) so a caller that leaves Deps unset still gets a sane,
-	// non-zero TTL rather than a sandbox that auto-pauses instantly.
-	DefaultIdleTimeout time.Duration
-	DefaultRetention   time.Duration
+	// applied when a CreateSpec omits them. A nil pointer selects the built-in
+	// default (defaultIdleTimeout / defaultRetention). A non-nil pointer is
+	// stored verbatim, including zero, which means the sandbox has no deadline.
+	DefaultIdleTimeout *time.Duration
+	DefaultRetention   *time.Duration
 
 	// EventRetention is the transactional outbox's replayable-window size: a DELIVERED outbox row older
-	// than this is trimmed. 0 = NEVER TRIM, and unlike the two TTLs above that zero is
-	// NOT replaced with a package default — it is the shipped behavior.
+	// than this is trimmed. 0 = NEVER TRIM. Zero is the shipped value, not a request
+	// for a built-in window.
 	//
 	// Not defaulted, for the same reason NodeCapacity is not: the correct value is "the
 	// reconnect duration promised to external subscribers", which the engine cannot
@@ -308,11 +307,9 @@ type materializedVolume struct {
 	materialized *volume.Materialized
 }
 
-// TTL defaults (health and reclamation / the health and reaper boundary): conservative, revisable numeric knobs
-// noted at their config site. They bound no invariant's shape — only how long
-// an idle `running` / a `paused` sandbox lingers before the reaper acts. A
-// create that omits them, and a Deps that leaves the Default* fields zero, both
-// resolve to these.
+// TTL defaults: how long an idle running sandbox or a paused sandbox lingers
+// before the reaper acts. A create that omits them, and a Deps that leaves the
+// Default* pointers nil, both resolve to these. A pointer to zero does not.
 const (
 	defaultIdleTimeout = 30 * time.Minute // running idle → auto-pause
 	defaultRetention   = 24 * time.Hour   // paused → evict
@@ -325,18 +322,21 @@ const (
 	defaultDrainGrace = 5 * time.Second
 )
 
+// configuredDuration returns fallback when the caller omitted the setting.
+// A non-nil pointer, including zero, is an explicit value.
+func configuredDuration(d *time.Duration, fallback time.Duration) time.Duration {
+	if d == nil {
+		return fallback
+	}
+	return *d
+}
+
 func New(deps Deps) *Mediator {
 	if deps.QuotaReclaimTimeout == 0 {
 		deps.QuotaReclaimTimeout = 5 * time.Second
 	}
 	if deps.HealthTimeout == 0 {
 		deps.HealthTimeout = 30 * time.Second
-	}
-	if deps.DefaultIdleTimeout == 0 {
-		deps.DefaultIdleTimeout = defaultIdleTimeout
-	}
-	if deps.DefaultRetention == 0 {
-		deps.DefaultRetention = defaultRetention
 	}
 	if deps.Logf == nil {
 		deps.Logf = log.Printf
@@ -534,8 +534,8 @@ func (m *Mediator) Create(ctx context.Context, spec CreateSpec) (resultID model.
 		// Materialize the TTL Binding once, at create (resource admission: Binding is stable
 		// across resume; the stored value is the concrete duration the reaper
 		// reads). Omitted inputs resolve to the engine-wide default here.
-		IdleTimeout: m.deps.DefaultIdleTimeout,
-		Retention:   m.deps.DefaultRetention,
+		IdleTimeout: configuredDuration(m.deps.DefaultIdleTimeout, defaultIdleTimeout),
+		Retention:   configuredDuration(m.deps.DefaultRetention, defaultRetention),
 		// Resource limits are materialized into the record the same way and for the
 		// same reason (resource admission Binding): every placement re-reads them from here, so
 		// the stored value is the single authority for all three axes. Omitted =

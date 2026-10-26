@@ -63,15 +63,15 @@ type Config struct {
 	Version string
 
 	// DefaultIdleTimeout / DefaultRetention are the engine-wide TTL defaults
-	// (health and reclamation / the health and reaper boundary) applied to a create that omits them. Zero →
-	// the mediator's built-in conservative defaults (lifecycle.New).
-	DefaultIdleTimeout time.Duration
-	DefaultRetention   time.Duration
+	// applied to a create that omits them. Nil selects the built-in defaults.
+	// A pointer to zero stores no deadline: the sandbox is not auto-paused and
+	// a paused sandbox is not evicted.
+	DefaultIdleTimeout *time.Duration
+	DefaultRetention   *time.Duration
 
-	// EventRetention is the transactional outbox's replayable-window size. Zero = NEVER TRIM, and that
-	// zero is the shipped behavior rather than a "fill in a default" sentinel — the
-	// opposite of the two TTLs above. See lifecycle.Deps.EventRetention for why the
-	// engine must not invent this number.
+	// EventRetention is the transactional outbox's replayable-window size. Zero = NEVER TRIM.
+	// This field is not a pointer: zero is the shipped value, and the engine does not
+	// substitute a built-in window. See lifecycle.Deps.EventRetention.
 	EventRetention   time.Duration
 	TelemetryPolicy  model.TelemetryPolicy
 	ProcessRetention model.ProcessRetentionPolicy

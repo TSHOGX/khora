@@ -116,8 +116,10 @@ func TestSandboxCreateRetryIgnoresChangedDefaultsWhenTTLWasOmitted(t *testing.T)
 	}
 	// A restart may choose different defaults, but an omitted TTL means the
 	// caller requested the deployment default, not the old materialized value.
-	m.deps.DefaultIdleTimeout = 2 * time.Hour
-	m.deps.DefaultRetention = 3 * time.Hour
+	changedIdle := 2 * time.Hour
+	changedRetention := 3 * time.Hour
+	m.deps.DefaultIdleTimeout = &changedIdle
+	m.deps.DefaultRetention = &changedRetention
 	replayed, err := m.Create(ctx, CreateSpec{Template: "bare", IdempotencyKey: key})
 	if err != nil || replayed != first {
 		t.Fatalf("same-key create after default change = %s, %v; want replay of %s", replayed, err, first)
@@ -161,13 +163,15 @@ func TestCreateMaterializesTTLBinding(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemory()
 	seedBare(t, st) // health and reclamation template FK
+	idleDefault := 15 * time.Minute
+	retentionDefault := 6 * time.Hour
 	m := New(Deps{
 		Store: st, Runtime: &fakeRuntime{}, Rootfs: &fakeRootfs{},
 		Volume:             newFakeVolume(),
 		Dial:               func(transport.Endpoint) transport.Client { return &fakeClient{healthy: true} },
 		HealthTimeout:      500 * time.Millisecond,
-		DefaultIdleTimeout: 15 * time.Minute,
-		DefaultRetention:   6 * time.Hour,
+		DefaultIdleTimeout: &idleDefault,
+		DefaultRetention:   &retentionDefault,
 	})
 
 	// omitted → engine default materialized.
@@ -204,6 +208,52 @@ func TestCreateMaterializesTTLBinding(t *testing.T) {
 	}
 	if rec3.Retention != 6*time.Hour {
 		t.Fatalf("omitted retention not defaulted alongside explicit-zero idle: %s; want 6h", rec3.Retention)
+	}
+}
+
+// An omitted engine-wide TTL uses the built-in default. An explicit zero is the
+// opt-out the reaper honors, not another way to ask for that default.
+func TestEngineWideZeroTTLDisablesDeadline(t *testing.T) {
+	ctx := context.Background()
+	newMed := func(idle, retention *time.Duration) (*Mediator, *store.Memory) {
+		st := store.NewMemory()
+		seedBare(t, st)
+		m := New(Deps{
+			Store: st, Runtime: &fakeRuntime{}, Rootfs: &fakeRootfs{},
+			Volume:             newFakeVolume(),
+			Dial:               func(transport.Endpoint) transport.Client { return &fakeClient{healthy: true} },
+			HealthTimeout:      500 * time.Millisecond,
+			DefaultIdleTimeout: idle,
+			DefaultRetention:   retention,
+		})
+		return m, st
+	}
+
+	m, st := newMed(nil, nil)
+	sid, err := m.Create(ctx, CreateSpec{Template: "bare"})
+	if err != nil {
+		t.Fatalf("Create with built-in defaults: %v", err)
+	}
+	rec, err := st.GetSandbox(ctx, sid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.IdleTimeout != defaultIdleTimeout || rec.Retention != defaultRetention {
+		t.Fatalf("omitted engine TTL = %s/%s; want %s/%s", rec.IdleTimeout, rec.Retention, defaultIdleTimeout, defaultRetention)
+	}
+
+	zero := time.Duration(0)
+	m, st = newMed(&zero, &zero)
+	sid, err = m.Create(ctx, CreateSpec{Template: "bare"})
+	if err != nil {
+		t.Fatalf("Create with explicit zero engine TTL: %v", err)
+	}
+	rec, err = st.GetSandbox(ctx, sid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.IdleTimeout != 0 || rec.Retention != 0 {
+		t.Fatalf("explicit zero engine TTL stored as %s/%s; want 0/0", rec.IdleTimeout, rec.Retention)
 	}
 }
 
