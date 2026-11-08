@@ -120,7 +120,8 @@ type Root interface {
 	// stream, never a whole file buffered at either end).
 	ReadAt(name string, p []byte, off int64) (int, error)
 	// WriteAt writes p to name at off, creating the file (and NOT its parents) if
-	// absent. The streaming half of import.
+	// absent. A nil error means every byte of p was written; a zero-length p
+	// still creates the file. The streaming half of import.
 	WriteAt(name string, p []byte, off int64) (int, error)
 	// Mkdir creates one directory. Parents must exist.
 	Mkdir(name string, perm fs.FileMode) error
