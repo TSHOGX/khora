@@ -262,16 +262,9 @@ func (r *localRoot) ReadAt(name string, p []byte, off int64) (int, error) {
 		return 0, err
 	}
 	defer unix.Close(fd)
-	n, err := unix.Pread(fd, p, off)
-	if err != nil {
-		return 0, &fs.PathError{Op: "pread", Path: name, Err: err}
-	}
-	if n < len(p) {
-		// io.Reader convention: a short read at end of file reports io.EOF, so a
-		// streaming export can terminate on it rather than needing the file size.
-		return n, io.EOF
-	}
-	return n, nil
+	return completeAt(p, off, true, "pread", name, func(b []byte, o int64) (int, error) {
+		return unix.Pread(fd, b, o)
+	})
 }
 
 func (r *localRoot) WriteAt(name string, p []byte, off int64) (int, error) {
@@ -280,14 +273,41 @@ func (r *localRoot) WriteAt(name string, p []byte, off int64) (int, error) {
 		return 0, err
 	}
 	defer unix.Close(fd)
-	n, err := unix.Pwrite(fd, p, off)
-	if err != nil {
-		// Deliberately NOT wrapped away: a capacity cap surfaces here as ENOSPC and
-		// the caller must be able to see it (resource admission: past the cap a write gets a plain
-		// ENOSPC, and that is an expected data-plane result, not an engine failure).
-		return n, &fs.PathError{Op: "pwrite", Path: name, Err: err}
+	// A capacity cap surfaces here as ENOSPC and the caller must be able to see
+	// it: past the cap a write failing is an expected data-plane result.
+	return completeAt(p, off, false, "pwrite", name, func(b []byte, o int64) (int, error) {
+		return unix.Pwrite(fd, b, o)
+	})
+}
+
+// completeAt finishes one positional transfer. A short count is not end of
+// file: pread and pwrite may return early after a signal once some bytes have
+// moved, and treating that count as EOF truncates an export or drops the rest
+// of an import buffer. zeroIsEOF reports io.EOF only when a read returns no
+// bytes before the buffer is full. A nil error means len(p) bytes were
+// transferred. EINTR is retried; every other error is returned with the bytes
+// already moved.
+func completeAt(p []byte, off int64, zeroIsEOF bool, op, name string, transfer func([]byte, int64) (int, error)) (int, error) {
+	done := 0
+	for done < len(p) {
+		n, err := transfer(p[done:], off+int64(done))
+		if n > 0 {
+			done += n
+		}
+		if err != nil {
+			if errors.Is(err, unix.EINTR) {
+				continue
+			}
+			return done, &fs.PathError{Op: op, Path: name, Err: err}
+		}
+		if n == 0 {
+			if zeroIsEOF {
+				return done, io.EOF
+			}
+			return done, &fs.PathError{Op: op, Path: name, Err: io.ErrShortWrite}
+		}
 	}
-	return n, nil
+	return done, nil
 }
 
 func (r *localRoot) Mkdir(name string, perm fs.FileMode) error {

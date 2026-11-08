@@ -535,6 +535,9 @@ type fakeRoot struct {
 	mu    sync.Mutex
 	files map[string][]byte
 	dirs  map[string]bool
+	// shortWrite, when positive and smaller than the next write, returns that
+	// many bytes with a nil error once. Import must resume the remainder.
+	shortWrite int
 }
 
 func (r *fakeRoot) Stat(name string) (volume.FileInfo, error) {
@@ -582,15 +585,23 @@ func (r *fakeRoot) ReadAt(name string, p []byte, off int64) (int, error) {
 func (r *fakeRoot) WriteAt(name string, p []byte, off int64) (int, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	write := p
+	if r.shortWrite > 0 && r.shortWrite < len(p) {
+		write = p[:r.shortWrite]
+		r.shortWrite = 0
+	}
 	b := r.files[name]
-	if need := int(off) + len(p); need > len(b) {
+	if need := int(off) + len(write); need > len(b) {
 		grown := make([]byte, need)
 		copy(grown, b)
 		b = grown
 	}
-	copy(b[off:], p)
+	if b == nil {
+		b = []byte{}
+	}
+	copy(b[off:], write)
 	r.files[name] = b
-	return len(p), nil
+	return len(write), nil
 }
 
 func (r *fakeRoot) Mkdir(name string, _ fs.FileMode) error {

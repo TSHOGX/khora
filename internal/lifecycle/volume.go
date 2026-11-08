@@ -362,10 +362,11 @@ func (m *Mediator) DeleteVolume(ctx context.Context, id model.VolumeID) error {
 // It STREAMS through a fixed buffer rather than materializing the payload, matching
 // the control-plane API requirement that the bytes never sit whole at either end.
 //
-// Any existing file at that path is REMOVED first, so an import is a replacement
-// rather than an overwrite-in-place: writing a shorter payload over a longer file
-// would otherwise leave the old tail attached and produce a file that is neither
-// the old nor the new content.
+// An import replaces the file. The previous bytes are removed only once the
+// source has produced a byte, or when the source is empty so the result is a
+// zero-length file. Clearing before that read deletes the only copy when the
+// source fails with no bytes. The clear still happens before the first write:
+// a shorter payload must not keep the previous tail.
 func (m *Mediator) ImportVolume(ctx context.Context, id model.VolumeID, path string, src io.Reader) (int64, error) {
 	// The write-regime gate (the Volume subsystem). On IMPORT and not on EXPORT because the invariant is
 	// about TEARING, and a read tears nothing (writeregime.go).
@@ -392,25 +393,56 @@ func (m *Mediator) ImportVolume(ctx context.Context, id model.VolumeID, path str
 	if err := mkdirChain(r, path); err != nil {
 		return 0, fmt.Errorf("import volume %s: prepare %s: %w", id, path, err)
 	}
-	if err := r.Remove(path); err != nil {
-		return 0, fmt.Errorf("import volume %s: clear %s: %w", id, path, err)
-	}
 	buf := make([]byte, 256<<10)
 	var written int64
+	cleared := false
+	clear := func() error {
+		if cleared {
+			return nil
+		}
+		if err := r.Remove(path); err != nil {
+			return fmt.Errorf("import volume %s: clear %s: %w", id, path, err)
+		}
+		cleared = true
+		return nil
+	}
 	for {
 		n, rerr := src.Read(buf)
 		if n > 0 {
-			w, werr := r.WriteAt(path, buf[:n], written)
-			written += int64(w)
-			if werr != nil {
-				// A capacity cap surfaces here as ENOSPC and is passed through rather than
-				// reclassified: past the cap a write failing is an EXPECTED data-plane
-				// result (resource admission), and the partial content is what the caller asked to write
-				// as far as it got.
-				return written, fmt.Errorf("import volume %s: write %s: %w", id, path, werr)
+			if err := clear(); err != nil {
+				return written, err
+			}
+			// A short write is not success. Resume the remainder of this chunk
+			// before honoring EOF, or the unread tail of the buffer is dropped
+			// while the import still reports the bytes it did write.
+			chunk := buf[:n]
+			for len(chunk) > 0 {
+				w, werr := r.WriteAt(path, chunk, written)
+				if w > 0 {
+					written += int64(w)
+					chunk = chunk[w:]
+				}
+				if werr != nil {
+					// A capacity cap surfaces here as ENOSPC and is passed through rather than
+					// reclassified: past the cap a write failing is an EXPECTED data-plane
+					// result (resource admission), and the partial content is what the caller asked to write
+					// as far as it got.
+					return written, fmt.Errorf("import volume %s: write %s: %w", id, path, werr)
+				}
+				if w == 0 {
+					return written, fmt.Errorf("import volume %s: write %s: short write", id, path)
+				}
 			}
 		}
 		if rerr == io.EOF {
+			if !cleared {
+				if err := clear(); err != nil {
+					return 0, err
+				}
+				if _, werr := r.WriteAt(path, nil, 0); werr != nil {
+					return 0, fmt.Errorf("import volume %s: write %s: %w", id, path, werr)
+				}
+			}
 			return written, nil
 		}
 		if rerr != nil {

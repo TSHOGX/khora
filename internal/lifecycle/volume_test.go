@@ -516,6 +516,67 @@ func TestImportExportNeedsNoSandbox(t *testing.T) {
 	}
 }
 
+type failBeforeByte struct{}
+
+func (failBeforeByte) Read([]byte) (int, error) {
+	return 0, errors.New("source unavailable")
+}
+
+// TestImportKeepsBytesUntilReplacementExists: an empty import is a zero-length
+// file, a source error before any byte leaves the previous file in place, and
+// a short write is resumed instead of reporting success with a truncated body.
+func TestImportKeepsBytesUntilReplacementExists(t *testing.T) {
+	ctx := context.Background()
+	m, _, vb := volFixture(t)
+	id, err := m.CreateVolume(ctx, 0)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	n, err := m.ImportVolume(ctx, id, "data/f", bytes.NewReader(nil))
+	if err != nil || n != 0 {
+		t.Fatalf("empty import = %d, %v; want a zero-length file", n, err)
+	}
+	fi, err := m.StatVolume(ctx, id, "data/f")
+	if err != nil {
+		t.Fatalf("stat empty import: %v", err)
+	}
+	if fi.IsDir || fi.Size != 0 {
+		t.Fatalf("empty import stat = dir %v size %d; want a zero-length file", fi.IsDir, fi.Size)
+	}
+	var out bytes.Buffer
+	if _, err := m.ExportVolume(ctx, id, "data/f", &out); err != nil || out.Len() != 0 {
+		t.Fatalf("export empty import = %q, %v", out.Bytes(), err)
+	}
+
+	if _, err := m.ImportVolume(ctx, id, "data/f", strings.NewReader("keep-me")); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if _, err := m.ImportVolume(ctx, id, "data/f", failBeforeByte{}); err == nil {
+		t.Fatal("import of a failing source succeeded")
+	}
+	out.Reset()
+	if _, err := m.ExportVolume(ctx, id, "data/f", &out); err != nil {
+		t.Fatalf("export after failed import: %v", err)
+	}
+	if out.String() != "keep-me" {
+		t.Fatalf("failed import left %q; want the previous file kept", out.String())
+	}
+
+	root := vb.roots[string(id)]
+	root.shortWrite = 1
+	if _, err := m.ImportVolume(ctx, id, "data/f", strings.NewReader("hello")); err != nil {
+		t.Fatalf("short write import: %v", err)
+	}
+	out.Reset()
+	if _, err := m.ExportVolume(ctx, id, "data/f", &out); err != nil {
+		t.Fatalf("export after short write: %v", err)
+	}
+	if out.String() != "hello" {
+		t.Fatalf("short write import left %q; want the full replacement", out.String())
+	}
+}
+
 // TestSweepOrphanVolumesDecidesInTheMediator: the backend ENUMERATES and the mediator
 // DECIDES, and the decision is made AFTER enumeration.
 //
