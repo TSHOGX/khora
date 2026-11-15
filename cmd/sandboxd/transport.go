@@ -144,19 +144,33 @@ func validateSignalPid(pid int) error {
 // killProcessGroup signals pgid first (kill(-pgid)), falling back to pid
 // (process transport / the guest startup topology: directed signals belong to transport mode).
 //
-// It REQUIRES a caller-validated pid > 0 (validateSignalPid); it does not
-// re-check. Both of its arms turn hostile on a non-positive pid — kill(-pid)
-// becomes the kill(-1) namespace broadcast at pid=1, and the fallback becomes a
-// directed kill(1) at pid=-1, which lands on PID 1's own TERM handler and tears
-// down the namespace.
+// It REQUIRES a caller-validated pid > 0 (validateSignalPid). A non-positive
+// pid is still hostile here: kill(-pid) at pid=-1 is a directed kill(1), and
+// kill(0) signals the caller's own group.
 //
-// The pid=1 arm is the worse of the two BECAUSE it looks survivable: Linux's
-// kill(-1) excludes PID 1 and the caller itself, so measured, the sandbox stays up
-// while every worker inside it dies. A caller sees a live sandbox with its work
-// gone, rather than a sandbox that died and can be recreated.
+// PID 1 is a directed target, but it is not a process group kill(-pgid) can
+// name. The kernel reserves the pid argument -1 for "every process the caller
+// may signal", excluding the caller. This function runs as guest PID 1, so
+// kill(-1) would leave the sandbox up and kill every workload in it. Signal
+// PID 1 itself instead.
 func killProcessGroup(pid, sig int) error {
-	if err := syscall.Kill(-pid, syscall.Signal(sig)); err == nil {
-		return nil
+	sigval := syscall.Signal(sig)
+	var err error
+	for _, target := range signalTargets(pid) {
+		err = syscall.Kill(target, sigval)
+		if err == nil {
+			return nil
+		}
 	}
-	return syscall.Kill(pid, syscall.Signal(sig))
+	return err
+}
+
+// signalTargets is the kill(2) pid sequence for one directed signal.
+// PID 1 is only the positive pid: -1 is the namespace broadcast, not pgid 1.
+// Every other pid tries its process group first, then the pid itself.
+func signalTargets(pid int) []int {
+	if pid == 1 {
+		return []int{1}
+	}
+	return []int{-pid, pid}
 }

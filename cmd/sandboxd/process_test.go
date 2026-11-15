@@ -673,6 +673,22 @@ func TestValidateSignalPid(t *testing.T) {
 	}
 }
 
+// PID 1 is a directed target, but kill(-1) is not "process group 1". The kernel
+// treats -1 as a namespace broadcast. From guest PID 1 that kills every workload
+// and leaves the sandbox running. The group-then-pid sequence stays for every
+// other pid.
+func TestSignalTargetsDoNotBroadcastPID1(t *testing.T) {
+	if got := signalTargets(1); len(got) != 1 || got[0] != 1 {
+		t.Fatalf("signalTargets(1) = %v; want [1]", got)
+	}
+	for _, pid := range []int{2, 42, 12345} {
+		got := signalTargets(pid)
+		if len(got) != 2 || got[0] != -pid || got[1] != pid {
+			t.Fatalf("signalTargets(%d) = %v; want [%d %d]", pid, got, -pid, pid)
+		}
+	}
+}
+
 // failingSender fails the Nth Send (1 = the very first, the StartEvent). It is the
 // injectable half of the eventSender seam: connect's *ServerStream has no exported
 // constructor, so without it the Start first-frame failure arm is unreachable from
