@@ -17,7 +17,7 @@ Check it for staleness with `./scripts/check-generated.sh`.
 | `--addr` | `127.0.0.1:8080` | control-plane listen address; must be loopback unless -insecure-listen |
 | `--event-retention` | `0s` | delivered-event retention window; 0 retains the full outbox |
 | `--health-timeout` | `30s` | cold-start readiness gate timeout |
-| `--idle-timeout` | `30m0s` | default idle TTL before an idle running sandbox is paused |
+| `--idle-timeout` | `30m0s` | default idle TTL before an idle running sandbox is paused; 0 disables auto-pause |
 | `--insecure-listen` | `false` | permit a non-loopback -addr even though the API has no authentication or TLS |
 | `--node-disk-byte` | `0` | node disk admission budget in bytes; 0 is unmetered and a positive value requires sandbox disk caps |
 | `--node-memory-byte` | `0` | node memory admission budget in bytes; 0 is unmetered and a positive value requires sandbox memory caps |

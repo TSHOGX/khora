@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -27,6 +28,24 @@ func (b *delayedBootReclaim) Reclaim(ctx context.Context) (int, error) {
 		return 0, ctx.Err()
 	}
 	return 1, nil
+}
+
+func TestZeroTTLFlagsStayDisabled(t *testing.T) {
+	var values orchestratorFlags
+	fs := newOrchestratorFlagSet("orchestrator", flag.ContinueOnError, &values)
+	if err := fs.Parse([]string{"--idle-timeout", "0s", "--retention", "0s"}); err != nil {
+		t.Fatal(err)
+	}
+	if values.idleTimeout != 0 || values.retention != 0 {
+		t.Fatalf("parsed idle=%s retention=%s; want 0s/0s", values.idleTimeout, values.retention)
+	}
+	cfg := orchestrator.Config{
+		DefaultIdleTimeout: &values.idleTimeout,
+		DefaultRetention:   &values.retention,
+	}
+	if cfg.DefaultIdleTimeout == nil || *cfg.DefaultIdleTimeout != 0 || cfg.DefaultRetention == nil || *cfg.DefaultRetention != 0 {
+		t.Fatal("explicit zero flag values were dropped before assembly")
+	}
 }
 
 func TestBootReclaimTimeoutStillServesAndRetries(t *testing.T) {

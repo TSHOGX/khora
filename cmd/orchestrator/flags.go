@@ -41,7 +41,7 @@ func newOrchestratorFlagSet(name string, handling flag.ErrorHandling, values *or
 	fs.StringVar(&values.volumesDir, "volumes-dir", "", "Volume storage root; empty uses state/volumes beside the overlay root")
 	fs.StringVar(&values.volumeProvider, "volume-provider", "local_btrfs", "Volume provider for new volumes (local_btrfs or plain_dir)")
 	fs.DurationVar(&values.healthTimeout, "health-timeout", 30*time.Second, "cold-start readiness gate timeout")
-	fs.DurationVar(&values.idleTimeout, "idle-timeout", 30*time.Minute, "default idle TTL before an idle running sandbox is paused")
+	fs.DurationVar(&values.idleTimeout, "idle-timeout", 30*time.Minute, "default idle TTL before an idle running sandbox is paused; 0 disables auto-pause")
 	fs.DurationVar(&values.retention, "retention", 24*time.Hour, "default paused retention TTL before irreversible record and Overlay eviction; 0 disables eviction")
 	fs.DurationVar(&values.quotaReclaimTimeout, "quota-reclaim-timeout", 5*time.Second, "maximum duration of one backend quota reclamation pass; must be positive")
 	fs.DurationVar(&values.reaperInterval, "reaper-interval", 30*time.Second, "reaper sweep cadence")
