@@ -731,6 +731,9 @@ func (m *Mediator) Create(ctx context.Context, spec CreateSpec) (resultID model.
 		return "", fmt.Errorf("create: commit running: %w", err)
 	}
 	if err := m.succeedOperation(ctx, claim, model.OperationResult{Kind: model.ObjectSandbox, ID: string(sid)}); err != nil {
+		if _, committed := m.recordCommittedResult(ctx, claim); committed {
+			return sid, nil
+		}
 		return "", fmt.Errorf("create: commit operation result: %w", err)
 	}
 	return sid, nil

@@ -163,6 +163,9 @@ func (m *Mediator) CreateVolumeWithKey(ctx context.Context, capBytes int64, key 
 		return "", fmt.Errorf("create volume: record materialized operation: %w", err)
 	}
 	if err := m.succeedOperation(ctx, claim, model.OperationResult{Kind: model.ObjectVolume, ID: string(vid)}); err != nil {
+		if _, committed := m.recordCommittedResult(ctx, claim); committed {
+			return vid, nil
+		}
 		return "", fmt.Errorf("create volume: commit operation result: %w", err)
 	}
 	return vid, nil
@@ -1180,6 +1183,9 @@ func (m *Mediator) deriveVolume(ctx context.Context, srcID model.VolumeID, capBy
 		return "", err
 	}
 	if err := m.succeedOperation(ctx, claim, model.OperationResult{Kind: model.ObjectVolume, ID: string(newID)}); err != nil {
+		if _, committed := m.recordCommittedResult(ctx, claim); committed {
+			return newID, nil
+		}
 		return "", err
 	}
 	return newID, nil

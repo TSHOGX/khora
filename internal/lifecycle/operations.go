@@ -392,6 +392,42 @@ func (m *Mediator) succeedOperation(ctx context.Context, claim operationClaim, r
 	}
 }
 
+// recordCommittedResult persists the replay result when the durable object
+// already exists. The object row is the commit boundary: a later ledger write
+// failure must not turn that key into a terminal failure, or a retry would
+// refuse the object that is already running or readable.
+func (m *Mediator) recordCommittedResult(ctx context.Context, claim operationClaim) (model.OperationResult, bool) {
+	if claim.op == nil {
+		return model.OperationResult{}, false
+	}
+	result, committed, err := m.committedOperationResult(ctx, *claim.op)
+	if err != nil || !committed {
+		return model.OperationResult{}, false
+	}
+	current, err := m.deps.Store.GetOperation(ctx, claim.op.ID)
+	if err != nil {
+		return result, true
+	}
+	if current.State == model.OperationSucceeded && current.Result != nil {
+		return *current.Result, true
+	}
+	if current.Attempt != claim.op.Attempt || current.State != model.OperationInProgress {
+		return result, true
+	}
+	if current.Phase == model.OperationCleaning {
+		current.Phase = model.OperationMaterialized
+	}
+	if err := current.Succeed(result, time.Now()); err != nil {
+		return result, true
+	}
+	if err := m.deps.Store.UpdateOperation(ctx, current); err != nil && !isOperationOwnershipConflict(err) {
+		m.deps.Logf("operation %s: persist committed result: %v", current.ID, err)
+		return result, true
+	}
+	*claim.op = current
+	return result, true
+}
+
 func (m *Mediator) failOperation(ctx context.Context, claim operationClaim, err error) {
 	if claim.op == nil || err == nil {
 		return
@@ -404,6 +440,9 @@ func (m *Mediator) failOperation(ctx context.Context, claim operationClaim, err 
 	// path, while retaining the attempt fence.
 	if claim.lease != nil {
 		claim.lease.stop()
+	}
+	if _, committed := m.recordCommittedResult(ctx, claim); committed {
+		return
 	}
 	current, gerr := m.deps.Store.GetOperation(ctx, claim.op.ID)
 	if gerr != nil || current.Attempt != claim.op.Attempt || current.State != model.OperationInProgress {
