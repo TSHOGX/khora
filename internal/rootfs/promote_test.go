@@ -141,7 +141,7 @@ func TestPromoteToTemplateExcludesRuntimePaths(t *testing.T) {
 		}
 	}
 	// no leftover staging dir.
-	if _, err := os.Stat(layer + ".staging"); !os.IsNotExist(err) {
+	if _, err := os.Stat(layer + promoteStagingSuffix); !os.IsNotExist(err) {
 		t.Errorf("staging dir not cleaned up: %v", err)
 	}
 }

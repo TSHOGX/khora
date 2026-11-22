@@ -97,6 +97,49 @@ func TestSweepOrphanLayers(t *testing.T) {
 	}
 }
 
+// Promote copies into <id>.staging and only then renames onto <id>. The reaper
+// calls this sweep on its own cadence, so a copy that outlasts one tick is the
+// common case for a large upper. The keep-set names the final id; deleting the
+// staging directory mid-copy drops files the walk has already finished, and the
+// rename publishes the remainder.
+func TestSweepKeepsInFlightPromoteStaging(t *testing.T) {
+	ctx := context.Background()
+	base := t.TempDir()
+	p, err := NewHostOverlayFS(filepath.Join(base, "state"), filepath.Join(base, "tmpl"), filepath.Join(base, "layers"))
+	if err != nil {
+		t.Fatalf("NewHostOverlayFS: %v", err)
+	}
+
+	inFlight := mkLayer(t, p.LayersDir, "tmpl_building"+promoteStagingSuffix)
+	orphanStaging := mkLayer(t, p.LayersDir, "tmpl_orphan"+promoteStagingSuffix)
+	liveDir := mkLayer(t, p.LayersDir, "tmpl_live")
+	debris := mkLayer(t, p.LayersDir, "tmpl_live"+promoteStagingSuffix)
+
+	n, err := p.SweepOrphanLayers(ctx, []string{"tmpl_live"}, []string{"tmpl_building"})
+	if err != nil {
+		t.Fatalf("SweepOrphanLayers: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("reclaimed %d; want 2 (orphan staging and leftover sibling of a published layer)", n)
+	}
+	if !exists(t, inFlight) {
+		t.Fatal("in-flight Promote staging directory was reclaimed")
+	}
+	marker, err := os.ReadFile(filepath.Join(inFlight, "etc", "marker"))
+	if err != nil || string(marker) != "tmpl_building"+promoteStagingSuffix {
+		t.Fatalf("in-flight staging marker = %q, %v", marker, err)
+	}
+	if exists(t, orphanStaging) {
+		t.Error("crashed Promote staging directory survived (no keep entry → must be reclaimed)")
+	}
+	if !exists(t, liveDir) {
+		t.Error("published layer was reclaimed")
+	}
+	if exists(t, debris) {
+		t.Error("staging sibling of an already-published layer survived")
+	}
+}
+
 // At boot the building keep-set is empty, so a crashed-Promote staging layer
 // (bytes on disk, no row) is a TRUE orphan and is reclaimed (the Rootfs subsystem / atomic transition rollback).
 func TestSweepReclaimsCrashedPromoteStagingAtBoot(t *testing.T) {
