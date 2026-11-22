@@ -787,13 +787,19 @@ func (p *HostOverlayFS) SweepOrphanOverlays(ctx context.Context, live, building 
 	return reclaimed, nil
 }
 
+// promoteStagingSuffix is the sibling directory PromoteToTemplate copies into
+// before renaming onto the final template id. The sweep keep-set is keyed by
+// that final id, so the in-flight directory name has to be recognized separately.
+const promoteStagingSuffix = ".staging"
+
 // SweepOrphanLayers reclaims Promote-built layer dirs under LayersDir with no
 // live `templates` row (the Rootfs subsystem / atomic transition rollback). It reuses the atomic transition rollback reverse-reconcile shape: the
 // authoritative set (`live` + `building`) is passed in, the provider diffs it
 // against what is on disk and deletes the difference. `building` protects an
 // in-flight Promote whose bytes are down but whose row is not yet inserted
 // (bytes-first, the Rootfs subsystem) — without it a concurrent sweep would tear the layer out
-// from under the Promote. A missing LayersDir → nothing to sweep.
+// from under the Promote. The in-flight bytes live in id+promoteStagingSuffix
+// until the rename, and that name is protected too. A missing LayersDir → nothing to sweep.
 func (p *HostOverlayFS) SweepOrphanLayers(_ context.Context, live, building []string) (int, error) {
 	keep := make(map[string]bool, len(live)+len(building))
 	for _, id := range live {
@@ -811,7 +817,7 @@ func (p *HostOverlayFS) SweepOrphanLayers(_ context.Context, live, building []st
 	}
 	reclaimed := 0
 	for _, e := range entries {
-		if !e.IsDir() || keep[e.Name()] {
+		if !e.IsDir() || p.layerSweepKeeps(e.Name(), keep) {
 			continue
 		}
 		// orphan: a layer dir with no live row and not being built → reclaim its
@@ -824,6 +830,32 @@ func (p *HostOverlayFS) SweepOrphanLayers(_ context.Context, live, building []st
 		reclaimed++
 	}
 	return reclaimed, nil
+}
+
+// layerSweepKeeps reports whether one LayersDir entry must survive this pass.
+//
+// Promote copies into id+promoteStagingSuffix and renames onto id. The keep-set
+// names id, so matching only that name deletes the staging directory while the
+// copy is still walking it. Files the walk has already finished are gone; the
+// rename then publishes whatever is left and the templates row records that
+// partial tree.
+//
+// A staging sibling of a directory that already occupies the final name is not
+// the in-flight copy: Promote refuses to start when that directory exists, and
+// the rename removes the staging name. A crashed copy has no keep entry, so its
+// staging directory is reclaimed as well.
+func (p *HostOverlayFS) layerSweepKeeps(name string, keep map[string]bool) bool {
+	if keep[name] {
+		return true
+	}
+	if !strings.HasSuffix(name, promoteStagingSuffix) {
+		return false
+	}
+	id := strings.TrimSuffix(name, promoteStagingSuffix)
+	if id == "" || !keep[id] {
+		return false
+	}
+	return !dirExists(filepath.Join(p.LayersDir, id))
 }
 
 // emptyDir removes everything INSIDE dir, keeping dir itself. See Mount for why the
@@ -960,7 +992,7 @@ func (p *HostOverlayFS) PromoteToTemplate(_ context.Context, o *Overlay, newTemp
 	// stage under a sibling temp dir on the SAME FS (LayersDir) so the final
 	// rename is atomic. A crash before the rename leaves the staging dir; it is
 	// NOT at the final ID, so no row will ever reference it → sweep reclaims it.
-	staging := dst + ".staging"
+	staging := dst + promoteStagingSuffix
 	_ = os.RemoveAll(staging)
 	if err := copyTree(upper, staging, promoteExclusions(excludedMounts)); err != nil {
 		_ = os.RemoveAll(staging)
